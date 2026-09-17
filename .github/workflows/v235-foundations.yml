@@ -1,0 +1,20 @@
+name: v2.35 foundations
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Strict deterministic contract suite
+        run: ./scripts/run_v235_foundation_tests.sh
+      - name: Sanitized deterministic contract suite
+        run: ./scripts/run_v235_foundation_tests.sh --sanitize

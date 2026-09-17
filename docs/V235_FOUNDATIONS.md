@@ -9,7 +9,7 @@ are in `include/dve/rigid_body_adapter.hpp`.
 | Area | Implemented contract | Deterministic evidence |
 |---|---|---|
 | Navigation agents | Path following, waypoint advancement, revision replanning, stuck detection, off-mesh state | Agent reaches a target on a two-polygon mesh |
-| Dynamic navigation | Dirty tile tracking from voxel bounds, bounded source replacement, transactional rebuild | A dirty rebuild advances the revision and preserves a valid path |
+| Dynamic navigation | Dirty tile tracking, bounded source classification, unchanged-polygon reuse, transactional publication, and deterministic border stitching | Destruction disconnects one tile; restoration reuses outer polygons and restores a complete path |
 | Packaging | Stable path ordering, manifest, FNV-1a content hashes, editor stripping, unchanged-entry reuse, mount/read integrity checks | Package build, mount, lookup, and payload verification |
 | Profiler | Thread-safe CPU scopes, counters, memory categories, per-frame model, JSON | Scope and counter capture |
 | Asset dependencies | Validation, rename fix-up, dependency-first closure, deterministic reimport, source fingerprints | Transitive order and rename tests |
@@ -23,9 +23,10 @@ are in `include/dve/rigid_body_adapter.hpp`.
 
 ## Claim boundaries
 
-- `DynamicNavigationWorld` tracks bounded dirty tiles and replaces bounded source geometry,
-  but its current transaction rebuilds the compact navigation mesh. Incremental tile baking,
-  border stitching, and concurrent publication remain production work.
+- `DynamicNavigationWorld` rebuilds polygon payloads only for dirty tiles, reuses polygons from
+  untouched tiles, and restitches shared-edge portals deterministically. Portal stitching and
+  validation currently scan the published polygon set; background tile baking, lock-free
+  publication, and persistent per-tile caches remain production work.
 - `ReferenceRigidBodyWorld` is a deterministic contract implementation, not a production
   contact solver. Native Jolt/Box3D adapters still need the new query and explicit angular-load
   hooks wired to their SDK-specific collectors.

@@ -1,6 +1,6 @@
 {
   "format": "dve-source-release-v1",
-  "version": "2.35.0",
+  "version": "2.35.1",
   "profile": "source-only",
   "entryPoints": {
     "library": "include/dve/v235_foundations.hpp",

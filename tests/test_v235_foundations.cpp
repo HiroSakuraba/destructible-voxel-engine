@@ -27,6 +27,22 @@ std::vector<dve::NavigationTriangle> plane() {
     return {a,b};
 }
 
+std::vector<dve::NavigationTriangle> tiled_corridor(float middleHeight = 0.0F) {
+    std::vector<dve::NavigationTriangle> triangles;
+    for (int tile=0; tile<3; ++tile) {
+        const float x0=static_cast<float>(tile*2),x1=x0+2.0F;
+        const float height=tile==1?middleHeight:0.0F;
+        dve::NavigationTriangle a;
+        a.vertices={dve::Float3{x0,height,0},dve::Float3{x0,height,2},dve::Float3{x1,height,0}};
+        a.area=1U;a.flags=0xFFFFU;a.sourceId=static_cast<std::uint64_t>(tile*2+1);
+        dve::NavigationTriangle b;
+        b.vertices={dve::Float3{x1,height,0},dve::Float3{x0,height,2},dve::Float3{x1,height,2}};
+        b.area=1U;b.flags=0xFFFFU;b.sourceId=static_cast<std::uint64_t>(tile*2+2);
+        triangles.push_back(a);triangles.push_back(b);
+    }
+    return triangles;
+}
+
 void test_navigation() {
     dve::DynamicNavigationWorld world;
     std::string error;
@@ -47,6 +63,68 @@ void test_navigation() {
     check(world.revision()==2U, "navigation rebuild advances revision");
     const auto path=dve::find_navigation_path(world.mesh(),{0.2F,0,0.2F},{3.5F,0,3.5F});
     check(static_cast<bool>(path), "path continuity survives transactional rebuild");
+}
+
+void test_incremental_navigation_tiles() {
+    dve::NavigationBuildSettings settings;
+    settings.tileSizeMeters=2.0F;settings.agentRadiusMeters=0.1F;settings.maximumPolygons=6U;
+    dve::DynamicNavigationWorld world(settings);std::string error;
+    const auto original=tiled_corridor();
+    check(world.set_source_geometry(original,{},&error),"incremental navigation initial build");
+    const auto initialPath=dve::find_navigation_path(world.mesh(),{0.2F,0,1},{5.8F,0,1});
+    check(initialPath&&!initialPath.partial,"initial tiled corridor is connected");
+
+    const dve::NavigationBounds middle{{2.01F,-1.0F,0.01F},{3.99F,1.0F,1.99F}};
+    check(world.replace_region(middle,{},&error),"destroy middle navigation region");
+    check(world.rebuild_dirty(&error),"incremental destruction rebuild");
+    const auto broken=dve::find_navigation_path(world.mesh(),{0.2F,0,1},{5.8F,0,1});
+    check(!broken||broken.partial,"destroyed tile prevents a complete path");
+    check(world.telemetry().lastRebuiltTileCount==1U,"only one dirty tile rebuilt");
+    check(world.telemetry().lastReusedPolygonCount==4U,"unchanged tile polygons reused");
+    check(world.telemetry().lastRebuiltPolygonCount==0U,"destroyed tile publishes no polygons");
+
+    const auto raised=tiled_corridor(0.2F);
+    const std::span<const dve::NavigationTriangle> replacement(raised.data()+2,2U);
+    check(world.replace_region(middle,replacement,&error),"restore middle navigation region");
+    check(world.rebuild_dirty(&error),"incremental restoration rebuild");
+    const auto restored=dve::find_navigation_path(world.mesh(),{0.2F,0,1},{5.8F,0,1});
+    check(restored&&!restored.partial,"border stitching restores cross-tile path continuity");
+    check(world.telemetry().lastRebuiltTileCount==1U&&
+          world.telemetry().lastReusedPolygonCount==4U&&
+          world.telemetry().lastRebuiltPolygonCount==2U,
+          "incremental rebuild telemetry separates reused and rebuilt polygons");
+    check(world.telemetry().lastCandidateTriangleCount<original.size(),
+          "incremental rebuild classifies a bounded source subset");
+    for (std::uint64_t sourceId : {1U,2U,5U,6U}) {
+        const auto before=std::find_if(original.begin(),original.end(),[&](const auto& triangle){
+            return triangle.sourceId==sourceId;
+        });
+        const auto after=std::find_if(world.mesh().polygons.begin(),world.mesh().polygons.end(),
+            [&](const auto& polygon){return polygon.sourceId==sourceId;});
+        const bool sameGeometry=before!=original.end()&&after!=world.mesh().polygons.end()&&
+            std::equal(before->vertices.begin(),before->vertices.end(),after->vertices.begin(),
+                [](dve::Float3 a,dve::Float3 b){
+                    return a.x==b.x&&a.y==b.y&&a.z==b.z;
+                });
+        check(sameGeometry,
+              "unchanged navigation polygon geometry survives tile replacement");
+    }
+    const auto stableHash=world.mesh().contentHash;
+    world.mark_dirty(middle);
+    check(world.rebuild_dirty(&error),"repeat dirty-tile rebuild");
+    check(world.mesh().contentHash==stableHash,
+          "unchanged incremental tile rebuild is deterministic");
+
+    std::vector<dve::NavigationTriangle> excessive(7U,replacement.front());
+    for(std::size_t index=0;index<excessive.size();++index)excessive[index].sourceId=100U+index;
+    const auto stableRevision=world.revision();
+    check(world.replace_region(middle,excessive,&error),"stage excessive tile replacement");
+    check(!world.rebuild_dirty(&error),"polygon-limit failure rejects tile rebuild");
+    check(world.revision()==stableRevision&&world.mesh().contentHash==stableHash&&
+          world.dirty_tiles().size()==1U,
+          "failed tile rebuild preserves live mesh and retry state");
+    check(world.replace_region(middle,replacement,&error)&&world.rebuild_dirty(&error),
+          "valid replacement recovers a rejected tile transaction");
 }
 
 void test_package_and_dependencies(const std::filesystem::path& root) {
@@ -155,7 +233,7 @@ void test_network_editor_plugins() {
 int main() {
     const auto root=std::filesystem::temp_directory_path()/"dve_v235_foundation_tests";
     std::error_code ec;std::filesystem::remove_all(root,ec);std::filesystem::create_directories(root,ec);
-    test_navigation();test_package_and_dependencies(root);test_profiler_input_and_save(root);test_animation_physics_ai();test_network_editor_plugins();
+    test_navigation();test_incremental_navigation_tiles();test_package_and_dependencies(root);test_profiler_input_and_save(root);test_animation_physics_ai();test_network_editor_plugins();
     std::filesystem::remove_all(root,ec);
     if(failures){std::cerr<<failures<<" v2.35 foundation checks failed\n";return 1;}
     std::cout<<"v2.35 foundations: all deterministic checks passed\n";return 0;

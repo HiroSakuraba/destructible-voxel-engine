@@ -1,3 +1,16 @@
+# v2.35.1 — Incremental Destruction-Aware Navigation
+
+- Replaced whole-source dynamic navigation rebuilding with bounded dirty-tile source
+  classification and polygon replacement.
+- Reuses untouched navigation polygons and deterministically restitches shared-edge portals
+  across rebuilt and retained tile borders.
+- Preserves transactional publication: failed tile builds leave the live mesh and dirty set
+  available for retry.
+- Adds telemetry for rebuilt tiles, candidate source triangles, reused polygons, and rebuilt
+  polygons.
+- Adds deterministic destruction, disconnection, restoration, cross-tile continuity, geometry
+  preservation, and repeat-build hashing checks.
+
 # v2.35 — Runtime and Tooling Foundations
 
 - Added deterministic navigation agents and destructible-voxel dirty navigation tracking.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(destructible_voxel_engine_core VERSION 2.35.0 LANGUAGES CXX)
+project(destructible_voxel_engine_core VERSION 2.35.1 LANGUAGES CXX)
 
 option(DVE_BUILD_TESTS "Build the headless correctness tests" ON)
 option(DVE_BUILD_BENCHMARK "Build the headless benchmark" ON)

@@ -109,6 +109,10 @@ struct DynamicNavigationTelemetry {
     std::uint64_t rejectedRebuilds{};
     std::size_t dirtyTileCount{};
     std::size_t polygonCount{};
+    std::size_t lastRebuiltTileCount{};
+    std::size_t lastCandidateTriangleCount{};
+    std::size_t lastReusedPolygonCount{};
+    std::size_t lastRebuiltPolygonCount{};
 };
 
 class DynamicNavigationWorld {

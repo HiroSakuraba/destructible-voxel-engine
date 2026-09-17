@@ -64,7 +64,7 @@ jobs:
           - backend: Jolt 5.6
             target: dve_jolt_upstream_tests
             test: dve_jolt_upstream_tests
-            options: -DDVE_ENABLE_JOLT=ON -DDVE_FETCH_JOLT=ON -DDVE_ENABLE_JOLT_DEBUG_DRAW=OFF
+            options: -DDVE_ENABLE_JOLT=ON -DDVE_FETCH_JOLT=ON -DDVE_ENABLE_JOLT_DEBUG_DRAW=OFF -DDVE_ENABLE_SOFT_BODIES=ON
           - backend: Box3D 0.1
             target: dve_box3d_upstream_tests
             test: dve_box3d_upstream_tests

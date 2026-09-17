@@ -58,6 +58,7 @@
 #include <mutex>
 #include <new>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <string_view>
 #include <utility>
@@ -139,6 +140,22 @@ private:
 
 [[nodiscard]] bool finite_float3(Float3 value) noexcept {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+[[nodiscard]] bool query_allows(
+    RigidBodyHandle handle,
+    bool isStatic,
+    const RigidBodyQueryFilter& filter) noexcept {
+    if ((isStatic && !filter.includeStatic) || (!isStatic && !filter.includeDynamic)) return false;
+    return std::find(filter.ignoredBodies.begin(), filter.ignoredBodies.end(), handle) ==
+        filter.ignoredBodies.end();
+}
+
+void sort_query_hits(std::vector<RigidBodyQueryHit>& hits) {
+    std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.fraction, a.distance, a.body, a.subShape) <
+            std::tie(b.fraction, b.distance, b.body, b.subShape);
+    });
 }
 
 namespace Layers {
@@ -1638,6 +1655,134 @@ void JoltRigidBodyWorld::optimize_broad_phase() {
     impl_->system.OptimizeBroadPhase();
 }
 
+std::vector<RigidBodyQueryHit> JoltRigidBodyWorld::ray_cast_all(
+    Float3 origin,
+    Float3 direction,
+    float maximumDistance,
+    const RigidBodyQueryFilter& filter) const {
+    std::vector<RigidBodyQueryHit> hits;
+    if (!finite_float3(origin) || !finite_float3(direction) ||
+        !std::isfinite(maximumDistance) || !(maximumDistance > 0.0F) ||
+        !(length_squared(direction) > 1.0e-12F) ||
+        (!filter.includeStatic && !filter.includeDynamic)) return hits;
+    impl_->rayQueries.fetch_add(1U, std::memory_order_relaxed);
+
+    const Float3 translation = multiply(normalize(direction), maximumDistance);
+    JPH::RayCastSettings settings;
+    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+    JPH::AllHitCollisionCollector<JPH::CastRayCollector> collector;
+    impl_->system.GetNarrowPhaseQuery().CastRay(
+        JPH::RRayCast(to_jolt_position(origin), to_jolt_vec3(translation)), settings, collector);
+    hits.reserve(collector.mHits.size());
+    for (const JPH::RayCastResult& hit : collector.mHits) {
+        const RigidBodyHandle handle = impl_->handle_from_body_id(hit.mBodyID);
+        if (handle == kInvalidRigidBodyHandle ||
+            !query_allows(handle, impl_->slots[handle].isStatic, filter)) continue;
+        JPH::BodyLockRead lock(impl_->system.GetBodyLockInterface(), hit.mBodyID);
+        if (!lock.Succeeded()) continue;
+        const JPH::RVec3 point =
+            to_jolt_position(origin) + hit.mFraction * to_jolt_vec3(translation);
+        hits.push_back({
+            handle,
+            from_jolt(point),
+            from_jolt(lock.GetBody().GetWorldSpaceSurfaceNormal(hit.mSubShapeID2, point)),
+            hit.mFraction,
+            hit.mFraction * maximumDistance,
+            impl_->slots[handle].contactMaterial,
+            hit.mSubShapeID2.GetValue(),
+        });
+    }
+    sort_query_hits(hits);
+    return hits;
+}
+
+std::vector<RigidBodyQueryHit> JoltRigidBodyWorld::overlap_aabb(
+    RigidBodyWorldBounds bounds,
+    const RigidBodyQueryFilter& filter) const {
+    std::vector<RigidBodyQueryHit> hits;
+    if (!finite_float3(bounds.minimum) || !finite_float3(bounds.maximum) ||
+        bounds.minimum.x > bounds.maximum.x || bounds.minimum.y > bounds.maximum.y ||
+        bounds.minimum.z > bounds.maximum.z ||
+        (!filter.includeStatic && !filter.includeDynamic)) return hits;
+    impl_->overlapQueries.fetch_add(1U, std::memory_order_relaxed);
+
+    JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> collector;
+    impl_->system.GetBroadPhaseQuery().CollideAABox(
+        JPH::AABox(to_jolt_vec3(bounds.minimum), to_jolt_vec3(bounds.maximum)), collector);
+    hits.reserve(collector.mHits.size());
+    std::vector<std::uint8_t> seen(impl_->slots.size(), 0U);
+    for (const JPH::BodyID bodyId : collector.mHits) {
+        const RigidBodyHandle handle = impl_->handle_from_body_id(bodyId);
+        if (handle == kInvalidRigidBodyHandle ||
+            !query_allows(handle, impl_->slots[handle].isStatic, filter)) continue;
+        if (seen[handle] != 0U) continue;
+        seen[handle] = 1U;
+        hits.push_back({
+            handle,
+            impl_->slots[handle].currentTransform.position,
+            {},
+            0.0F,
+            0.0F,
+            impl_->slots[handle].contactMaterial,
+            0U,
+        });
+    }
+    sort_query_hits(hits);
+    return hits;
+}
+
+std::vector<RigidBodyQueryHit> JoltRigidBodyWorld::cast_sphere_all(
+    Float3 origin,
+    float radius,
+    Float3 direction,
+    float maximumDistance,
+    const RigidBodyQueryFilter& filter) const {
+    std::vector<RigidBodyQueryHit> hits;
+    if (!finite_float3(origin) || !finite_float3(direction) || !std::isfinite(radius) ||
+        radius < 0.0F || !std::isfinite(maximumDistance) || !(maximumDistance > 0.0F) ||
+        !(length_squared(direction) > 1.0e-12F) ||
+        (!filter.includeStatic && !filter.includeDynamic)) return hits;
+    impl_->shapeCasts.fetch_add(1U, std::memory_order_relaxed);
+    if (radius == 0.0F) {
+        hits = ray_cast_all(origin, direction, maximumDistance, filter);
+        impl_->rayQueries.fetch_sub(1U, std::memory_order_relaxed);
+        return hits;
+    }
+
+    const Float3 translation = multiply(normalize(direction), maximumDistance);
+    JPH::SphereShape sphere(radius);
+    const JPH::RShapeCast cast(
+        &sphere,
+        JPH::Vec3::sOne(),
+        JPH::RMat44::sTranslation(to_jolt_position(origin)),
+        to_jolt_vec3(translation));
+    JPH::ShapeCastSettings settings;
+    settings.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+    settings.mReturnDeepestPoint = true;
+    JPH::AllHitCollisionCollector<JPH::CastShapeCollector> collector;
+    impl_->system.GetNarrowPhaseQuery().CastShape(
+        cast, settings, JPH::RVec3::sZero(), collector);
+    hits.reserve(collector.mHits.size());
+    for (const JPH::ShapeCastResult& hit : collector.mHits) {
+        const RigidBodyHandle handle = impl_->handle_from_body_id(hit.mBodyID2);
+        if (handle == kInvalidRigidBodyHandle ||
+            !query_allows(handle, impl_->slots[handle].isStatic, filter)) continue;
+        JPH::Vec3 normal = -hit.mPenetrationAxis;
+        if (normal.LengthSq() > 1.0e-12F) normal = normal.Normalized();
+        hits.push_back({
+            handle,
+            from_jolt(hit.mContactPointOn2),
+            from_jolt(normal),
+            hit.mFraction,
+            hit.mFraction * maximumDistance,
+            impl_->slots[handle].contactMaterial,
+            hit.mSubShapeID2.GetValue(),
+        });
+    }
+    sort_query_hits(hits);
+    return hits;
+}
+
 std::optional<JoltRayHit> JoltRigidBodyWorld::ray_cast_closest(
     Float3 origin,
     Float3 translation,
@@ -2166,6 +2311,26 @@ bool JoltRigidBodyWorld::apply_force_at_point(
     }
     impl_->system.GetBodyInterface().AddForce(
         impl_->slots[handle].bodyId, to_jolt_vec3(force), to_jolt_position(worldPoint));
+    return true;
+}
+
+bool JoltRigidBodyWorld::apply_angular_impulse(
+    RigidBodyHandle handle,
+    Float3 worldAngularImpulse) {
+    if (!impl_->valid(handle) || impl_->slots[handle].isStatic ||
+        !finite_float3(worldAngularImpulse)) return false;
+    impl_->system.GetBodyInterface().AddAngularImpulse(
+        impl_->slots[handle].bodyId, to_jolt_vec3(worldAngularImpulse));
+    return true;
+}
+
+bool JoltRigidBodyWorld::apply_torque(
+    RigidBodyHandle handle,
+    Float3 worldTorque) {
+    if (!impl_->valid(handle) || impl_->slots[handle].isStatic ||
+        !finite_float3(worldTorque)) return false;
+    impl_->system.GetBodyInterface().AddTorque(
+        impl_->slots[handle].bodyId, to_jolt_vec3(worldTorque));
     return true;
 }
 

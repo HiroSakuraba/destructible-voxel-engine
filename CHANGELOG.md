@@ -1,3 +1,14 @@
+# v2.35.2 — Native Physics Query and Angular-Load Adapters
+
+- Wired the solver-neutral angular impulse and torque operations to native Jolt 5.6 and Box3D
+  0.1 body APIs, with consistent rejection of invalid, static, and non-finite requests.
+- Added native ray, AABB overlap, and sphere cast-all implementations with normalized
+  directions, maximum-distance reporting, ignored-body and static/dynamic filters, material and
+  sub-shape metadata, and deterministic result ordering.
+- Added native runtime contract tests for multi-hit ordering, filter behavior, material
+  propagation, sphere casts, overlaps, angular response, and static-body rejection.
+- Added pinned Jolt and Box3D adapter jobs to continuous integration.
+
 # v2.35.1 — Incremental Destruction-Aware Navigation
 
 - Replaced whole-source dynamic navigation rebuilding with bounded dirty-tile source

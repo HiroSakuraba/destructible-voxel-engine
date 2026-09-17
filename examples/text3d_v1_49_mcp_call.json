@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "id": 41,
+  "method": "tools/call",
+  "params": {
+    "name": "dve.project.cook_text3d",
+    "arguments": {
+      "font_path": "assets/fonts/ProjectFont.ttf",
+      "text": "DVE 3D",
+      "output_path": "assets/text/dve_logo.dtext",
+      "preview_path": "artifacts/text/dve_logo.ppm",
+      "size_meters": 0.8,
+      "depth_meters": 0.18,
+      "bands": 8
+    }
+  }
+}

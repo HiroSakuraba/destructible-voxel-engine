@@ -1,0 +1,6 @@
+DVE_SPRITE 4
+asset "Sun Pilot v2.22" "v222_sun_pilot_index.png" 32 16 16 0 0 "v222_sun_pilot.dvepalette" 0 2 1
+frame "frame_0" 0 0 16 16 16 16 0 0 8 0 0.600000024 ""
+frame "sun_pilot_blink" 16 0 16 16 16 16 0 0 8 0 0.100000001 ""
+clip "idle" 1 1 2 0 0 0 0 0 1
+hash 9815827276125478867

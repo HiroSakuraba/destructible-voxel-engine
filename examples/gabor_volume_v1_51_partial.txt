@@ -1,0 +1,9 @@
+# Import one PLY level and produce a deterministic preview
+./dve_cook_gabor \
+  --input artifacts/gabor_volume_v1_51_partial/sample_gabor_cloud.ply \
+  --output artifacts/gabor_volume_v1_51_partial/sample_gabor_cloud.dgabor \
+  --preview artifacts/gabor_volume_v1_51_partial/sample_gabor_cloud.ppm \
+  --density 1.35 \
+  --preview-width 128 \
+  --preview-height 96 \
+  --preview-steps 32

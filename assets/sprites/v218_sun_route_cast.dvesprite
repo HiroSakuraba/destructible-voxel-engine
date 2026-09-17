@@ -1,0 +1,44 @@
+DVE_SPRITE 4
+asset "Sun Route Cast" "assets/sprites/v218_sun_route_cast_index.png" 256 16 16 0 0 "assets/sprites/v218_sun_route_palette.dvepalette" 0 16 9
+frame "player_idle" 0 0 16 16 16 16 0 0 8 0 0.100000001 ""
+frame "player_run_a" 16 0 16 16 16 16 0 0 8 0 0.0900000036 "footstep"
+frame "player_run_b" 32 0 16 16 16 16 0 0 8 0 0.0900000036 "footstep"
+frame "player_jump" 48 0 16 16 16 16 0 0 8 0 0.119999997 ""
+frame "enemy_walk_a" 64 0 16 16 16 16 0 0 8 0 0.129999995 ""
+frame "enemy_walk_b" 80 0 16 16 16 16 0 0 8 0 0.129999995 ""
+frame "projectile" 96 0 16 16 16 16 0 0 8 0 0.0500000007 ""
+frame "token_a" 112 0 16 16 16 16 0 0 8 0 0.0799999982 ""
+frame "token_b" 128 0 16 16 16 16 0 0 8 0 0.0799999982 ""
+frame "token_c" 144 0 16 16 16 16 0 0 8 0 0.0799999982 ""
+frame "token_d" 160 0 16 16 16 16 0 0 8 0 0.0799999982 ""
+frame "checkpoint_off" 176 0 16 16 16 16 0 0 8 0 0.200000003 ""
+frame "checkpoint_on" 192 0 16 16 16 16 0 0 8 0 0.119999997 "checkpoint_pulse"
+frame "hazard_a" 208 0 16 16 16 16 0 0 8 0 0.140000001 ""
+frame "hazard_b" 224 0 16 16 16 16 0 0 8 0 0.140000001 ""
+frame "effect_marker" 240 0 16 16 16 16 0 0 8 0 0.0799999982 ""
+clip "player_idle" 1 1 1 1 1 0 0 0
+combat 0 0 "player_body" 1 0 0 8 10 15 0.5 0 0 0 0 0 0 0 0 7783534123930561539
+socket "weapon" 0 7 8 0 1 1 0 18405930655450800662
+clip "player_run" 1 1 2 1 2 0 2 1 2
+combat 0 1 "player_body" 1 0 0 8 10 15 0.5 0 0 0 0 0 0 0 0 2678221774162730477
+socket "weapon" 0 7 8 0 1 1 1 7704520327021116340
+socket "weapon" 1 8 7 -5 1 1 1 9936835733988705749
+root 0 1 0 0 4906471337690189710
+root 1 1 0 0 7138786744657779119
+clip "player_jump" 1 1 1 2 1 0 0 3
+combat 0 0 "player_body" 1 0 0 8 10 14 0.5 0 0 0 0 0 0 0 0 10629702750162746269
+combat 0 0 "projectile_spawn" 6 0 9 8 4 4 0.5 0 0 0 0 0 0 0 0 8397387343195156860
+socket "weapon" 0 8 8 -12 1 1 0 15656001303021132132
+clip "enemy_walk" 1 1 2 2 0 0 0 4 5
+combat 0 1 "enemy_body" 1 0 0 8 12 14 0.5 0 0 0 0 0 0 0 0 15337369250593416408
+combat 0 1 "enemy_touch" 0 0 0 8 13 14 0.5 0 2 1 70 38 2 0 0 17569684657561005817
+clip "projectile" 1 1 1 1 1 0 0 6
+combat 0 0 "projectile_hit" 0 0 0 7 10 5 0.5 0 3 1 120 20 0 0 0 8276137854629058853
+socket "trail" 0 -5 7 0 1 1 0 13302436407487444716
+clip "token_spin" 1 1 4 0 0 1 0 7 8 9 10
+property "collectible" 0 0 0 1 0 0 0 0 "" 6187354289098260964
+clip "checkpoint_off" 1 1 1 0 0 0 0 11
+clip "checkpoint_on" 1 1 1 0 0 0 0 12
+clip "hazard" 1 1 2 1 0 0 0 13 14
+combat 0 1 "hazard" 6 0 0 4 16 8 0.5 0 0 0 0 0 0 0 0 2828469425386961828
+hash 14637352160056247036

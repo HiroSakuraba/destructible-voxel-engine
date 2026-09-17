@@ -1,0 +1,78 @@
+dvechip 1
+name coin
+sample_rate 48000
+channels 1
+ticks_per_row 1
+ticks_per_second 120
+master_gain 0.800000
+loop 0
+instruments 1
+instrument
+name sfx
+wave pulse
+noise long
+duty 0.250000
+band_limited 1
+gain 1.000000
+pan 0.000000
+transpose 0
+fine_tune 0.000000
+pitch_slide 0
+vibrato 0.000000 0.000000
+filter 20000.000000 0.000000
+crush 10 1
+vol_loop 0
+vol 1.000000 0.950000 0.850000 0.720000 0.580000 0.420000 0.280000 0.160000 0.080000 0.000000
+vol_release
+pitch_loop 0
+pitch 0.000000 0.000000 7.000000 7.000000 12.000000 12.000000 19.000000 19.000000
+duty_loop 0
+duty_env
+arp_loop 0
+arp
+wavetable
+patterns 1
+pattern 42
+row 61:1:15:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 0:0:255:0:0
+row 255:0:255:0:0
+order 0

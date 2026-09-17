@@ -1,0 +1,6 @@
+# DVE v1.27 sample-map cooker recipe
+name=Eightfold Production Multisample
+author=DVE
+zone=multisample_low.dvesample|0|71|1|127|48|0|0.72|0|attack|forward|6000|42000|1024|0|0|resident|16384|8
+zone=multisample_high.dvesample|72|127|1|127|72|0|0.72|0|attack|forward|6000|42000|1024|1|0|hybrid|16384|8
+zone=multisample_release.dvesample|0|127|1|127|60|0|0.28|0|release|one_shot|0|0|0|2|0|resident|12000|4

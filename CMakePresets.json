@@ -1,0 +1,527 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "DVE_ENABLE_JOLT": "OFF",
+        "DVE_BUILD_PLATFORM": "ON",
+        "DVE_BUILD_RHI": "ON",
+        "DVE_GEOMETRY_MODE": "HYBRID",
+        "DVE_ENABLE_BOX2D": "OFF",
+        "DVE_ENABLE_BOX3D": "OFF"
+      }
+    },
+    {
+      "name": "linux-gcc-release",
+      "inherits": "base",
+      "displayName": "Linux GCC Release",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "linux-gcc-jolt-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + Jolt 5.6.0",
+      "cacheVariables": {
+        "DVE_ENABLE_JOLT": "ON",
+        "DVE_FETCH_JOLT": "ON",
+        "DVE_ENABLE_JOLT_DEBUG_DRAW": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-lua-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + Lua 5.4 gameplay scripting",
+      "cacheVariables": {
+        "DVE_ENABLE_LUA": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-audio-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + SDL3 + RtMidi",
+      "cacheVariables": {
+        "DVE_FETCH_SDL3": "ON",
+        "DVE_FETCH_RTMIDI": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-native-audio-release",
+      "inherits": "linux-gcc-audio-release",
+      "displayName": "Linux GCC Native Audio + Jolt 5.6.0",
+      "cacheVariables": {
+        "DVE_ENABLE_JOLT": "ON",
+        "DVE_FETCH_JOLT": "ON",
+        "DVE_ENABLE_STEAM_AUDIO": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-sdl3-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + pinned SDL3 source",
+      "cacheVariables": {
+        "DVE_FETCH_SDL3": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-box2d-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + Box2D 3.1.1",
+      "cacheVariables": {
+        "DVE_ENABLE_BOX2D": "ON",
+        "DVE_FETCH_BOX2D": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-box3d-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + Box3D 0.1.0",
+      "cacheVariables": {
+        "DVE_ENABLE_BOX3D": "ON",
+        "DVE_FETCH_BOX3D": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-box-physics-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + Box2D 3.1.1 + Box3D 0.1.0",
+      "cacheVariables": {
+        "DVE_ENABLE_BOX2D": "ON",
+        "DVE_FETCH_BOX2D": "ON",
+        "DVE_ENABLE_BOX3D": "ON",
+        "DVE_FETCH_BOX3D": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-jolt-box-physics-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + Jolt 5.6.0 + Box2D + Box3D",
+      "cacheVariables": {
+        "DVE_ENABLE_JOLT": "ON",
+        "DVE_FETCH_JOLT": "ON",
+        "DVE_ENABLE_BOX2D": "ON",
+        "DVE_FETCH_BOX2D": "ON",
+        "DVE_ENABLE_BOX3D": "ON",
+        "DVE_FETCH_BOX3D": "ON",
+        "DVE_ENABLE_JOLT_DEBUG_DRAW": "ON"
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "inherits": "base",
+      "displayName": "Linux Clang Debug + Sanitizers",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "DVE_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "inherits": "base",
+      "displayName": "Windows MSVC Release",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Release"
+      }
+    },
+    {
+      "name": "windows-msvc-jolt-release",
+      "inherits": "windows-msvc-release",
+      "displayName": "Windows MSVC Release + Jolt 5.6.0",
+      "cacheVariables": {
+        "DVE_ENABLE_JOLT": "ON",
+        "DVE_FETCH_JOLT": "ON",
+        "DVE_ENABLE_JOLT_DEBUG_DRAW": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-audio-release",
+      "inherits": "windows-msvc-release",
+      "displayName": "Windows MSVC Release + SDL3 + RtMidi",
+      "cacheVariables": {
+        "DVE_FETCH_SDL3": "ON",
+        "DVE_FETCH_RTMIDI": "ON"
+      }
+    },
+    {
+      "name": "macos-clang-arm64-release",
+      "inherits": "base",
+      "displayName": "macOS Apple Silicon Release",
+      "generator": "Xcode",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_CONFIGURATION_TYPES": "Release",
+        "DVE_BUILD_LEGACY_X11_HOST": "OFF"
+      }
+    },
+    {
+      "name": "macos-clang-arm64-jolt-release",
+      "inherits": "macos-clang-arm64-release",
+      "displayName": "macOS Apple Silicon Release + Jolt 5.6.0",
+      "cacheVariables": {
+        "DVE_ENABLE_JOLT": "ON",
+        "DVE_FETCH_JOLT": "ON",
+        "DVE_ENABLE_JOLT_DEBUG_DRAW": "ON"
+      }
+    },
+    {
+      "name": "macos-clang-arm64-audio-release",
+      "inherits": "macos-clang-arm64-release",
+      "displayName": "macOS Apple Silicon Release + SDL3 + RtMidi",
+      "cacheVariables": {
+        "DVE_FETCH_SDL3": "ON",
+        "DVE_FETCH_RTMIDI": "ON"
+      }
+    },
+    {
+      "name": "headless-ci",
+      "inherits": "base",
+      "displayName": "Dependency-minimal headless CI",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DVE_BUILD_NATIVE_EDITOR": "OFF",
+        "DVE_BUILD_LEGACY_X11_HOST": "OFF",
+        "DVE_BUILD_EDITOR": "OFF",
+        "DVE_BUILD_ASSET_COOKER": "OFF",
+        "DVE_BUILD_BENCHMARK": "OFF",
+        "DVE_BUILD_ASSET_PIPELINE_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "linux-gcc-voxel-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release \u2014 voxel-only profile",
+      "cacheVariables": {
+        "DVE_GEOMETRY_MODE": "VOXEL"
+      }
+    },
+    {
+      "name": "linux-gcc-polygon-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release \u2014 polygon-only profile",
+      "cacheVariables": {
+        "DVE_GEOMETRY_MODE": "POLYGON"
+      }
+    },
+    {
+      "name": "linux-gcc-hybrid-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release \u2014 hybrid voxel + polygon profile",
+      "cacheVariables": {
+        "DVE_GEOMETRY_MODE": "HYBRID"
+      }
+    },
+    {
+      "name": "headless-voxel-ci",
+      "inherits": "headless-ci",
+      "displayName": "Dependency-minimal voxel-only CI",
+      "cacheVariables": {
+        "DVE_GEOMETRY_MODE": "VOXEL"
+      }
+    },
+    {
+      "name": "headless-polygon-ci",
+      "inherits": "headless-ci",
+      "displayName": "Dependency-minimal polygon-only CI",
+      "cacheVariables": {
+        "DVE_GEOMETRY_MODE": "POLYGON"
+      }
+    },
+    {
+      "name": "headless-hybrid-ci",
+      "inherits": "headless-ci",
+      "displayName": "Dependency-minimal hybrid CI",
+      "cacheVariables": {
+        "DVE_GEOMETRY_MODE": "HYBRID"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "linux-gcc-release",
+      "configurePreset": "linux-gcc-release"
+    },
+    {
+      "name": "linux-gcc-native-audio-release",
+      "configurePreset": "linux-gcc-native-audio-release"
+    },
+    {
+      "name": "linux-gcc-sdl3-release",
+      "configurePreset": "linux-gcc-sdl3-release"
+    },
+    {
+      "name": "linux-gcc-box2d-release",
+      "configurePreset": "linux-gcc-box2d-release"
+    },
+    {
+      "name": "linux-gcc-box3d-release",
+      "configurePreset": "linux-gcc-box3d-release"
+    },
+    {
+      "name": "linux-gcc-box-physics-release",
+      "configurePreset": "linux-gcc-box-physics-release"
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang-debug"
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "macos-clang-arm64-release",
+      "configurePreset": "macos-clang-arm64-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "headless-ci",
+      "configurePreset": "headless-ci"
+    },
+    {
+      "name": "linux-gcc-audio-release",
+      "configurePreset": "linux-gcc-audio-release"
+    },
+    {
+      "name": "windows-msvc-audio-release",
+      "configurePreset": "windows-msvc-audio-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "macos-clang-arm64-audio-release",
+      "configurePreset": "macos-clang-arm64-audio-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "linux-gcc-lua-release",
+      "configurePreset": "linux-gcc-lua-release"
+    },
+    {
+      "name": "linux-gcc-voxel-release",
+      "configurePreset": "linux-gcc-voxel-release"
+    },
+    {
+      "name": "linux-gcc-polygon-release",
+      "configurePreset": "linux-gcc-polygon-release"
+    },
+    {
+      "name": "linux-gcc-hybrid-release",
+      "configurePreset": "linux-gcc-hybrid-release"
+    },
+    {
+      "name": "headless-voxel-ci",
+      "configurePreset": "headless-voxel-ci"
+    },
+    {
+      "name": "headless-polygon-ci",
+      "configurePreset": "headless-polygon-ci"
+    },
+    {
+      "name": "headless-hybrid-ci",
+      "configurePreset": "headless-hybrid-ci"
+    },
+    {
+      "name": "linux-gcc-jolt-release",
+      "configurePreset": "linux-gcc-jolt-release"
+    },
+    {
+      "name": "linux-gcc-jolt-box-physics-release",
+      "configurePreset": "linux-gcc-jolt-box-physics-release"
+    },
+    {
+      "name": "windows-msvc-jolt-release",
+      "configurePreset": "windows-msvc-jolt-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "macos-clang-arm64-jolt-release",
+      "configurePreset": "macos-clang-arm64-jolt-release",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-gcc-release",
+      "configurePreset": "linux-gcc-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-sdl3-release",
+      "configurePreset": "linux-gcc-sdl3-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-clang-arm64-release",
+      "configurePreset": "macos-clang-arm64-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "headless-ci",
+      "configurePreset": "headless-ci",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-audio-release",
+      "configurePreset": "linux-gcc-audio-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-audio-release",
+      "configurePreset": "windows-msvc-audio-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-clang-arm64-audio-release",
+      "configurePreset": "macos-clang-arm64-audio-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-lua-release",
+      "configurePreset": "linux-gcc-lua-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-voxel-release",
+      "configurePreset": "linux-gcc-voxel-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-polygon-release",
+      "configurePreset": "linux-gcc-polygon-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-hybrid-release",
+      "configurePreset": "linux-gcc-hybrid-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "headless-voxel-ci",
+      "configurePreset": "headless-voxel-ci",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "headless-polygon-ci",
+      "configurePreset": "headless-polygon-ci",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "headless-hybrid-ci",
+      "configurePreset": "headless-hybrid-ci",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-jolt-release",
+      "configurePreset": "linux-gcc-jolt-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-jolt-box-physics-release",
+      "configurePreset": "linux-gcc-jolt-box-physics-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-jolt-release",
+      "configurePreset": "windows-msvc-jolt-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-clang-arm64-jolt-release",
+      "configurePreset": "macos-clang-arm64-jolt-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

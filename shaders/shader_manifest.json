@@ -1,0 +1,2453 @@
+{
+  "schema": 1,
+  "canonical_language": "HLSL",
+  "shader_model_floor": "6.0",
+  "shaders": [
+    {
+      "name": "bloom_blur",
+      "source": "bloom_blur.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "BlurConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b3"
+        },
+        {
+          "name": "gBlurInput",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t14"
+        },
+        {
+          "name": "gBlurOutput",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u7"
+        }
+      ]
+    },
+    {
+      "name": "bloom_threshold",
+      "source": "bloom_threshold.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gHdrColor",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t13"
+        },
+        {
+          "name": "gBloomBuffer",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u6"
+        }
+      ]
+    },
+    {
+      "name": "brick_face_extract",
+      "source": "brick_face_extract.hlsl",
+      "stage": "compute",
+      "entry": "CSMain",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "gOccupancy32",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gHalo32",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterialPayloads",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gDispatch",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gFaces",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "gFaceCounts",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        }
+      ]
+    },
+    {
+      "name": "brick_palette_resolve",
+      "source": "brick_palette_resolve.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "gBrickPaletteRecords",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBrickPaletteRemapGlobalMaterialIds",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gBrickPaletteSlots",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gBrickPaletteSamples",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gBrickPaletteBakedSamples",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "gBrickPaletteSingleMaterialIds",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gBrickPaletteMaterials",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gBrickPaletteResolveRequests",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gBrickPaletteResolveOutputs",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u8"
+        }
+      ]
+    },
+    {
+      "name": "cascaded_shadow_resolve",
+      "source": "cascaded_shadow_resolve.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "CascadedShadowConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b9"
+        },
+        {
+          "name": "gCascadedShadowSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s2"
+        },
+        {
+          "name": "gCascadedShadowStaticDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t22"
+        },
+        {
+          "name": "gCascadedShadowDynamicDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t25"
+        },
+        {
+          "name": "gCascadedShadowCoordinates",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t23"
+        },
+        {
+          "name": "gCascadedShadowViewDepth",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t24"
+        },
+        {
+          "name": "gCascadedShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u18"
+        }
+      ]
+    },
+    {
+      "name": "cinematic_dof",
+      "source": "cinematic_dof.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "CinematicDofConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gCameraPackets",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gInputColor",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gLinearDepth",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gOutputColor",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "cinematic_post",
+      "source": "cinematic_post.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "CinematicPostConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gColorLutSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gCameraPackets",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gInputColor",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMotionPixels",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gColorLut",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gOutputColor",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "composite_translucent",
+      "source": "composite_translucent.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "CompositeConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "gLayerRadiance",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t11"
+        },
+        {
+          "name": "gLayerCount",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t12"
+        },
+        {
+          "name": "gFinalColor",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u5"
+        }
+      ]
+    },
+    {
+      "name": "environment_ibl_reference",
+      "source": "environment_ibl_reference.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "IblReferenceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "gEnvironmentSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s1"
+        },
+        {
+          "name": "gDiffuseIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t18"
+        },
+        {
+          "name": "gSpecularPrefilter",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t19"
+        },
+        {
+          "name": "gEnvironmentBrdfLut",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gIblInput",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t21"
+        },
+        {
+          "name": "gIblOutput",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u17"
+        }
+      ]
+    },
+    {
+      "name": "environment_skybox",
+      "source": "environment_skybox.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "EnvironmentSkyboxConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "gEnvironmentSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s1"
+        },
+        {
+          "name": "gSkyEnvironment",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t18"
+        },
+        {
+          "name": "gSkyRayDirections",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t21"
+        },
+        {
+          "name": "gSkyRadiance",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u17"
+        }
+      ]
+    },
+    {
+      "name": "fluoddity_clear_accumulation",
+      "source": "fluoddity_clear_accumulation.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "FluoddityConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gAccumulation",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        }
+      ]
+    },
+    {
+      "name": "fluoddity_resolve_diffuse",
+      "source": "fluoddity_resolve_diffuse.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        4,
+        4,
+        4
+      ],
+      "bindings": [
+        {
+          "name": "FluoddityConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gAccumulation",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        },
+        {
+          "name": "gTrailRead",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u3"
+        },
+        {
+          "name": "gTrailWrite",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u4"
+        }
+      ]
+    },
+    {
+      "name": "fluoddity_sense_move_deposit",
+      "source": "fluoddity_sense_move_deposit.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "FluoddityConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gParticles",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        },
+        {
+          "name": "gAccumulation",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        },
+        {
+          "name": "gTrailRead",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u3"
+        }
+      ]
+    },
+    {
+      "name": "gabor_build_tiles",
+      "source": "gabor_build_tiles.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "GaborFrameConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b4"
+        },
+        {
+          "name": "gGaborPrimitives",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gGaborTileCounts",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u10"
+        },
+        {
+          "name": "gGaborTileIndices",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u11"
+        },
+        {
+          "name": "gGaborOverflowCounter",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u12"
+        }
+      ]
+    },
+    {
+      "name": "gabor_composite",
+      "source": "gabor_composite.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "GaborCompositeConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b4"
+        },
+        {
+          "name": "gSceneHdr",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gGaborResolved",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t21"
+        },
+        {
+          "name": "gCompositedHdr",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u10"
+        }
+      ]
+    },
+    {
+      "name": "gabor_temporal_resolve",
+      "source": "gabor_temporal_resolve.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "GaborTemporalConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b4"
+        },
+        {
+          "name": "gGaborCurrent",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gGaborHistory",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t21"
+        },
+        {
+          "name": "gGaborCurrentDepth",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t22"
+        },
+        {
+          "name": "gGaborHistoryDepth",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t23"
+        },
+        {
+          "name": "gGaborResolved",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u10"
+        }
+      ]
+    },
+    {
+      "name": "gabor_volume_integrate",
+      "source": "gabor_volume_integrate.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "GaborVolumeConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b4"
+        },
+        {
+          "name": "gGaborPrimitives",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gGaborTileCounts",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t21"
+        },
+        {
+          "name": "gGaborTileIndices",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t22"
+        },
+        {
+          "name": "gSceneDepth",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t23"
+        },
+        {
+          "name": "gGaborColorTransmittance",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u10"
+        }
+      ]
+    },
+    {
+      "name": "gabor_volume_shadows",
+      "source": "gabor_volume_shadows.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "GaborShadowConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b4"
+        },
+        {
+          "name": "gGaborPrimitives",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gShadowRayOrigins",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t21"
+        },
+        {
+          "name": "gGaborShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u10"
+        }
+      ]
+    },
+    {
+      "name": "generate_ao_rays",
+      "source": "generate_ao_rays.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "AoGenerationConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gPrimaryResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gPrimaryRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t8"
+        },
+        {
+          "name": "gAoRays",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        }
+      ]
+    },
+    {
+      "name": "generate_gi_rays",
+      "source": "generate_gi_rays.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "GiGenerationConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gPrimaryResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gPrimaryRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t8"
+        },
+        {
+          "name": "gGiRays",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        }
+      ]
+    },
+    {
+      "name": "generate_gi_sun_rays",
+      "source": "generate_gi_sun_rays.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "GiSunGenerationConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gGiResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gGiRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiSunRays",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u4"
+        }
+      ]
+    },
+    {
+      "name": "generate_shadow_rays",
+      "source": "generate_shadow_rays.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "ShadowGenerationConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gPrimaryResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gPrimaryRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t8"
+        },
+        {
+          "name": "gShadowRays",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        }
+      ]
+    },
+    {
+      "name": "grid_fluid_advect_scalar",
+      "source": "grid_fluid_advect_scalar.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        4,
+        4,
+        4
+      ],
+      "bindings": [
+        {
+          "name": "GridFluidConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b5"
+        },
+        {
+          "name": "gGridFluidU",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t30"
+        },
+        {
+          "name": "gGridFluidV",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t31"
+        },
+        {
+          "name": "gGridFluidW",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t32"
+        },
+        {
+          "name": "gGridFluidScalarRead",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t33"
+        },
+        {
+          "name": "gGridFluidCellTypes",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t34"
+        },
+        {
+          "name": "gGridFluidScalarWrite",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u20"
+        }
+      ]
+    },
+    {
+      "name": "grid_fluid_advect_velocity",
+      "source": "grid_fluid_advect_velocity.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        4,
+        4,
+        4
+      ],
+      "bindings": [
+        {
+          "name": "GridFluidConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b5"
+        },
+        {
+          "name": "gGridFluidU",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t30"
+        },
+        {
+          "name": "gGridFluidV",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t31"
+        },
+        {
+          "name": "gGridFluidW",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t32"
+        },
+        {
+          "name": "gGridFluidVelocityRead",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t33"
+        },
+        {
+          "name": "gGridFluidVelocityWrite",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u20"
+        }
+      ]
+    },
+    {
+      "name": "grid_fluid_apply_forces",
+      "source": "grid_fluid_apply_forces.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        4,
+        4,
+        4
+      ],
+      "bindings": [
+        {
+          "name": "GridFluidConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b5"
+        },
+        {
+          "name": "gGridFluidDensity",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t30"
+        },
+        {
+          "name": "gGridFluidTemperature",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t31"
+        },
+        {
+          "name": "gGridFluidCellTypes",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t32"
+        },
+        {
+          "name": "gGridFluidVelocityComponent",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u20"
+        }
+      ]
+    },
+    {
+      "name": "grid_fluid_combustion",
+      "source": "grid_fluid_combustion.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        4,
+        4,
+        4
+      ],
+      "bindings": [
+        {
+          "name": "GridFluidConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b5"
+        },
+        {
+          "name": "gGridFluidCellTypes",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t30"
+        },
+        {
+          "name": "gGridFluidDensity",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u20"
+        },
+        {
+          "name": "gGridFluidTemperature",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u21"
+        },
+        {
+          "name": "gGridFluidFuelField",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u22"
+        },
+        {
+          "name": "gGridFluidFlame",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u23"
+        }
+      ]
+    },
+    {
+      "name": "grid_fluid_divergence",
+      "source": "grid_fluid_divergence.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        4,
+        4,
+        4
+      ],
+      "bindings": [
+        {
+          "name": "GridFluidConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b5"
+        },
+        {
+          "name": "gGridFluidU",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t30"
+        },
+        {
+          "name": "gGridFluidV",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t31"
+        },
+        {
+          "name": "gGridFluidW",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t32"
+        },
+        {
+          "name": "gGridFluidCellTypes",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t33"
+        },
+        {
+          "name": "gGridFluidDivergence",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u20"
+        }
+      ]
+    },
+    {
+      "name": "grid_fluid_pressure_jacobi",
+      "source": "grid_fluid_pressure_jacobi.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        4,
+        4,
+        4
+      ],
+      "bindings": [
+        {
+          "name": "GridFluidConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b5"
+        },
+        {
+          "name": "gGridFluidPressureRead",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t30"
+        },
+        {
+          "name": "gGridFluidDivergence",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t31"
+        },
+        {
+          "name": "gGridFluidCellTypes",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t32"
+        },
+        {
+          "name": "gGridFluidPressureWrite",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u20"
+        }
+      ]
+    },
+    {
+      "name": "grid_fluid_project_velocity",
+      "source": "grid_fluid_project_velocity.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        4,
+        4,
+        4
+      ],
+      "bindings": [
+        {
+          "name": "GridFluidConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b5"
+        },
+        {
+          "name": "gGridFluidPressure",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t30"
+        },
+        {
+          "name": "gGridFluidCellTypes",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t31"
+        },
+        {
+          "name": "gGridFluidVelocityComponent",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u20"
+        }
+      ]
+    },
+    {
+      "name": "live_csm_caster_ps",
+      "source": "live_csm_caster_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "LiveObjectConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b9"
+        },
+        {
+          "name": "gShadowBaseSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s3"
+        },
+        {
+          "name": "gShadowOpacitySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s4"
+        },
+        {
+          "name": "gShadowBaseColor",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t23"
+        },
+        {
+          "name": "gShadowOpacity",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t24"
+        }
+      ]
+    },
+    {
+      "name": "live_csm_caster_vs",
+      "source": "live_csm_caster_vs.hlsl",
+      "stage": "vertex",
+      "entry": "main",
+      "profile": "vs_6_0",
+      "bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "LiveObjectConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b9"
+        },
+        {
+          "name": "LiveCascadeConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b10"
+        }
+      ]
+    },
+    {
+      "name": "live_environment_skybox_ps",
+      "source": "live_environment_skybox_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "gEnvironmentSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s1"
+        },
+        {
+          "name": "gSkyEnvironment",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t18"
+        }
+      ]
+    },
+    {
+      "name": "live_environment_skybox_vs",
+      "source": "live_environment_skybox_vs.hlsl",
+      "stage": "vertex",
+      "entry": "main",
+      "profile": "vs_6_0",
+      "bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        }
+      ]
+    },
+    {
+      "name": "live_ibl_material_ps",
+      "source": "live_ibl_material_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "LiveObjectConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b9"
+        },
+        {
+          "name": "gEnvironmentSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s1"
+        },
+        {
+          "name": "gCascadedShadowSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s2"
+        },
+        {
+          "name": "gDiffuseIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t18"
+        },
+        {
+          "name": "gSpecularPrefilter",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t19"
+        },
+        {
+          "name": "gEnvironmentBrdfLut",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gCascadedStaticShadowDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t22"
+        },
+        {
+          "name": "gCascadedDynamicShadowDepth",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t25"
+        },
+        {
+          "name": "gLiveMaterialRecords",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t26"
+        },
+        {
+          "name": "gLiveMaterialMappings",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t27"
+        },
+        {
+          "name": "gLiveBaseColorTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t28"
+        },
+        {
+          "name": "gLiveMetallicRoughnessTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t29"
+        },
+        {
+          "name": "gLiveNormalTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t30"
+        },
+        {
+          "name": "gLiveEmissiveTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t31"
+        },
+        {
+          "name": "gLiveOpacityTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t32"
+        }
+      ]
+    },
+    {
+      "name": "live_ibl_material_vs",
+      "source": "live_ibl_material_vs.hlsl",
+      "stage": "vertex",
+      "entry": "main",
+      "profile": "vs_6_0",
+      "bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "LiveObjectConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b9"
+        }
+      ]
+    },
+    {
+      "name": "material_mapping_reference",
+      "source": "material_mapping_reference.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        1,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "MaterialMappingReferenceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "gMaterialMappingReferenceOutput",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u12"
+        }
+      ]
+    },
+    {
+      "name": "primary_brickmap_trace",
+      "source": "primary_brickmap_trace.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gResults",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "resolve_ao",
+      "source": "resolve_ao.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "AoResolveConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gAoResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gAmbientOcclusion",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        }
+      ]
+    },
+    {
+      "name": "resolve_gi",
+      "source": "resolve_gi.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "GiResolveConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gMaterialTable",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "gGiResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gGiRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gGiSunResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t9"
+        },
+        {
+          "name": "gIndirectDiffuse",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u3"
+        }
+      ]
+    },
+    {
+      "name": "resolve_shadows",
+      "source": "resolve_shadows.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "ShadowResolveConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gShadowResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        }
+      ]
+    },
+    {
+      "name": "shade_primary",
+      "source": "shade_primary.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "MaterialParameterCollectionConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b4"
+        },
+        {
+          "name": "EnvironmentLightingConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "gEnvironmentSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s1"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gPrimaryResults",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gPrimaryRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t8"
+        },
+        {
+          "name": "gAmbientOcclusion",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t9"
+        },
+        {
+          "name": "gShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t10"
+        },
+        {
+          "name": "gIndirectDiffuse",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t11"
+        },
+        {
+          "name": "gDiffuseIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t18"
+        },
+        {
+          "name": "gSpecularPrefilter",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t19"
+        },
+        {
+          "name": "gEnvironmentBrdfLut",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gRadiance",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u4"
+        }
+      ]
+    },
+    {
+      "name": "slug_text_pixel",
+      "source": "slug_text_pixel.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "gSlugCurveTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gSlugBandTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t21"
+        }
+      ]
+    },
+    {
+      "name": "slug_text_vertex",
+      "source": "slug_text_vertex.hlsl",
+      "stage": "vertex",
+      "entry": "main",
+      "profile": "vs_6_0",
+      "bindings": [
+        {
+          "name": "SlugTextConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b4"
+        }
+      ]
+    },
+    {
+      "name": "spatial_lighting_denoise",
+      "source": "spatial_lighting_denoise.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "LightingDenoiseConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "gTemporalIndirectDiffuse",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gTemporalAmbientOcclusion",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gTemporalShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gDenoiseDepthMeters",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gDenoiseNormals",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "gFilteredIndirectDiffuse",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "gFilteredAmbientOcclusion",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        },
+        {
+          "name": "gFilteredShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        }
+      ]
+    },
+    {
+      "name": "sprite_2d_indexed_pixel",
+      "source": "sprite_2d_indexed_pixel.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "gSpriteSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gSpriteIndexTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gSpritePalette",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        }
+      ]
+    },
+    {
+      "name": "sprite_2d_pixel",
+      "source": "sprite_2d_pixel.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "gSpriteSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gSpriteTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        }
+      ]
+    },
+    {
+      "name": "sprite_2d_vertex",
+      "source": "sprite_2d_vertex.hlsl",
+      "stage": "vertex",
+      "entry": "main",
+      "profile": "vs_6_0",
+      "bindings": []
+    },
+    {
+      "name": "temporal_lighting_accumulate",
+      "source": "temporal_lighting_accumulate.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "LightingTemporalConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "gCurrentIndirectDiffuse",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gCurrentAmbientOcclusion",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gCurrentShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gHistoryIndirectDiffuse",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gHistoryAmbientOcclusion",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
+          "name": "gHistoryShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
+        },
+        {
+          "name": "gCurrentDepthMeters",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t6"
+        },
+        {
+          "name": "gHistoryDepthMeters",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gCurrentNormals",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t8"
+        },
+        {
+          "name": "gHistoryNormals",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t9"
+        },
+        {
+          "name": "gMotionPixels",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t10"
+        },
+        {
+          "name": "gLightingHistoryLength",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t11"
+        },
+        {
+          "name": "gAccumulatedIndirectDiffuse",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        },
+        {
+          "name": "gAccumulatedAmbientOcclusion",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        },
+        {
+          "name": "gAccumulatedShadowVisibility",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u2"
+        },
+        {
+          "name": "gUpdatedLightingHistoryLength",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u3"
+        }
+      ]
+    },
+    {
+      "name": "texture_preview",
+      "source": "texture_preview.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TexturePreviewConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "gPreviewSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s0"
+        },
+        {
+          "name": "gPreviewTexture",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gPreviewOutput",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
+    },
+    {
+      "name": "tonemap",
+      "source": "tonemap.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "RenderEnvironmentConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        },
+        {
+          "name": "gHdrColor",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t13"
+        },
+        {
+          "name": "gBloomBuffer",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t15"
+        },
+        {
+          "name": "gDisplayColor",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u8"
+        }
+      ]
+    },
+    {
+      "name": "trace_translucent",
+      "source": "trace_translucent.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "TraceConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0"
+        },
+        {
+          "name": "ContinuationConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b1"
+        },
+        {
+          "name": "gBrickIndex",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gBricks",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gMaterials",
+          "kind": "byte_address_buffer",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gContinuationRays",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t7"
+        },
+        {
+          "name": "gContinuationResults",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u3"
+        }
+      ]
+    }
+  ]
+}

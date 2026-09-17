@@ -1,0 +1,10 @@
+{
+  "sample_rate": 48000,
+  "collapse_generation": 501,
+  "published_acoustic_generation": 501,
+  "event_actions": 2,
+  "acoustic_requests": 2,
+  "closed": {"gain": 0.181822, "low_pass_hz": 11490.3, "reverb_send": 0.3},
+  "open": {"gain": 0.344828, "low_pass_hz": 20000, "reverb_send": 0.12},
+  "transition_seconds": 0.18
+}

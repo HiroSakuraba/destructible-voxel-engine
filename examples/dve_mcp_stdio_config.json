@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dve": {
+      "command": "/absolute/path/to/dve_mcp_server",
+      "args": [
+        "--project-root",
+        "/absolute/path/to/your/dve/project"
+      ]
+    }
+  }
+}

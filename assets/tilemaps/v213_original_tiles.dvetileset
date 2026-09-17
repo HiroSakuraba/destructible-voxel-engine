@@ -1,0 +1,29 @@
+dvetileset 1
+name v213_original_tiles
+texture tilemaps/v213_original_tiles.png
+texture_size 130 34
+tile_size 16 16
+grid 1 0
+columns 8
+tiles 16
+tile 0 1 0.000000 0.000000 0.000000 0 0 1 0 ground stone - ground_isolated
+tile 1 1 0.000000 0.000000 0.000000 0 1 1 0 ground stone - ground_left
+tile 2 1 0.000000 0.000000 0.000000 0 2 1 0 ground stone - ground_right
+tile 3 1 0.000000 0.000000 0.000000 0 3 1 0 ground stone - ground_middle
+tile 4 0 12.000000 0.000000 0.000000 0 4 1 0 - - spike_contact spikes
+tile 5 0 0.000000 0.000000 0.000000 1 5 1 0 - - - ladder
+tile 6 1 0.000000 36.000000 0.000000 0 6 1 0 - metal - conveyor
+tile 8 0 0.000000 0.000000 0.000000 0 8 3 6 - - - water
+tile 9 0 0.000000 0.000000 0.000000 0 9 1 0 - - - water_frame_b
+tile 10 0 0.000000 0.000000 0.000000 0 10 1 0 - - - water_frame_c
+tile 10 0 0.000000 0.000000 0.000000 0 10 1 0 - - checkpoint checkpoint
+tile 11 2 0.000000 0.000000 0.000000 0 11 1 0 - wood - one_way
+tile 12 3 0.000000 0.000000 0.000000 0 12 1 0 - stone - slope_up_right
+tile 13 4 0.000000 0.000000 0.000000 0 13 1 0 - stone - slope_up_left
+tile 14 0 0.000000 0.000000 0.000000 0 14 1 0 - - - collectible
+tile 15 0 0.000000 0.000000 0.000000 0 15 1 0 - - - background
+rules 4
+rule 10 0 15 1 ground
+rule 10 2 8 2 ground
+rule 10 8 2 3 ground
+rule 20 10 0 4 ground

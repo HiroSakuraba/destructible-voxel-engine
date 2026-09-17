@@ -16,7 +16,7 @@ are in `include/dve/rigid_body_adapter.hpp`.
 | Input | Prioritized contexts, chords, five trigger kinds, conflict detection, rebind persistence | Press and double-tap recognition plus round trip |
 | Save games | Versioned sections, migrations, atomic publish, backup rotation, hashes, recovery | Corrupted primary recovers the previous slot |
 | Animation | Humanoid maps, CPU retargeting, morph targets, CCD IK | Rig validation, retarget, and morph checks |
-| Physics | Point loads, torque, angular impulse, ray/AABB/sphere query-all, ignore filters, stable ordering, material metadata | Reference-world load and query contracts |
+| Physics | Point loads, torque, angular impulse, ray/AABB/sphere query-all, ignore/static/dynamic filters, stable ordering, material metadata | Reference, Jolt 5.6, and Box3D 0.1 runtime contracts |
 | AI | Typed blackboard, behavior tree, perception query, arrive steering | Deterministic sequence and perception order |
 | Networking | Snapshot interpolation, bounded rollback input/state history, spatial relevancy | Interpolation, eviction, and relevancy tests |
 | Editor/plugins | Undo/redo operations and owner-scoped extension registry | Execute/undo/redo and unload tests |
@@ -28,8 +28,9 @@ are in `include/dve/rigid_body_adapter.hpp`.
   validation currently scan the published polygon set; background tile baking, lock-free
   publication, and persistent per-tile caches remain production work.
 - `ReferenceRigidBodyWorld` is a deterministic contract implementation, not a production
-  contact solver. Native Jolt/Box3D adapters still need the new query and explicit angular-load
-  hooks wired to their SDK-specific collectors.
+  contact solver. Jolt and Box3D now implement the neutral angular-load and query-all contracts
+  through their native APIs, including filters, material metadata, and deterministic result
+  ordering. Cross-platform solver certification and performance tuning remain production work.
 - Networking provides rollback storage, interpolation, and relevancy primitives. A complete
   transport, authoritative replication protocol, serializer, prediction driver, and security
   policy are outside this foundation.

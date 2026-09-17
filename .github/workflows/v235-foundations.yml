@@ -53,3 +53,52 @@ jobs:
         run: ./scripts/run_v235_foundation_tests.sh
       - name: Sanitized deterministic contract suite
         run: ./scripts/run_v235_foundation_tests.sh --sanitize
+
+  native-physics-adapters:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: Jolt 5.6
+            target: dve_jolt_upstream_tests
+            test: dve_jolt_upstream_tests
+            options: -DDVE_ENABLE_JOLT=ON -DDVE_FETCH_JOLT=ON -DDVE_ENABLE_JOLT_DEBUG_DRAW=OFF
+          - backend: Box3D 0.1
+            target: dve_box3d_upstream_tests
+            test: dve_box3d_upstream_tests
+            options: -DDVE_ENABLE_BOX3D=ON -DDVE_FETCH_BOX3D=ON
+    name: native physics / ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure native adapter
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DDVE_BUILD_BENCHMARK=OFF
+          -DDVE_BUILD_ASSET_COOKER=OFF
+          -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF
+          -DDVE_BUILD_EDITOR=OFF
+          -DDVE_BUILD_NATIVE_EDITOR=OFF
+          -DDVE_BUILD_PLATFORM=OFF
+          -DDVE_BUILD_RHI=OFF
+          -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF
+          -DDVE_BUILD_AUDIO_SYNTH=OFF
+          -DDVE_BUILD_LEGACY_X11_HOST=OFF
+          -DDVE_ENABLE_SDL3_HOST=OFF
+          -DDVE_ENABLE_VULKAN_BUFFER_BACKEND=OFF
+          -DDVE_ENABLE_FLUODDITY=OFF
+          -DDVE_ENABLE_SOFT_BODIES=OFF
+          -DDVE_ENABLE_CPU_HAIR=OFF
+          -DDVE_ENABLE_VFX_PARTICLES=OFF
+          -DDVE_ENABLE_PBF_LIQUID=OFF
+          -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+          -DDVE_ENABLE_BSPLINE_CLOTH=OFF
+          -DDVE_ENABLE_GRID_FLUIDS=OFF
+          -DDVE_ENABLE_FLIP_LIQUIDS=OFF
+          ${{ matrix.options }}
+      - name: Build native adapter contract
+        run: cmake --build build --target ${{ matrix.target }} --parallel 2
+      - name: Run native adapter contract
+        run: ctest --test-dir build --output-on-failure -R '^${{ matrix.test }}$'

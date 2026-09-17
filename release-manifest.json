@@ -1,12 +1,16 @@
 {
   "format": "dve-source-release-v1",
-  "version": "2.35.1",
+  "version": "2.35.2",
   "profile": "source-only",
   "entryPoints": {
     "library": "include/dve/v235_foundations.hpp",
     "implementation": "src/v235_foundations.cpp",
     "packager": "apps/dve_pack.cpp",
-    "focusedTests": "tests/test_v235_foundations.cpp"
+    "focusedTests": "tests/test_v235_foundations.cpp",
+    "nativePhysicsTests": [
+      "tests/test_physics_jolt_upstream.cpp",
+      "tests/test_physics_box3d_upstream.cpp"
+    ]
   },
   "excludedHistoricalPayload": [
     "artifacts/",

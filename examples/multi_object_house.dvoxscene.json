@@ -1,0 +1,10 @@
+{
+  "format": "DVOXSCENE",
+  "version": 1,
+  "name": "MultiObjectHouse",
+  "objects": [
+    {"index":0,"id":1001,"name":"Foundation","nodePath":"/Foundation","file":"multi_object_house_Foundation_3e9.dvox","parent":null,"anchored":true,"structural":true,"generateCollision":true,"worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]},
+    {"index":1,"id":1002,"name":"UpperBlock","nodePath":"/Foundation/UpperBlock","file":"multi_object_house_UpperBlock_3ea.dvox","parent":0,"anchored":false,"structural":true,"generateCollision":true,"worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,2,0,1]},
+    {"index":2,"id":1003,"name":"Furniture","nodePath":"/Foundation/UpperBlock/Furniture","file":"multi_object_house_Furniture_3eb.dvox","parent":1,"anchored":false,"structural":false,"generateCollision":true,"worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,3,2,0,1]}
+  ]
+}

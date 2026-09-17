@@ -1,0 +1,15 @@
+{
+  "model": "gpt-5.6",
+  "input": "Inspect the DVE project and summarize the open scene. Ask before changing anything.",
+  "tools": [
+    {
+      "type": "mcp",
+      "server_label": "dve",
+      "server_url": "https://your-authenticated-mcp-endpoint.example/mcp",
+      "headers": {
+        "Authorization": "Bearer replace-with-a-separate-mcp-token"
+      },
+      "require_approval": "always"
+    }
+  ]
+}

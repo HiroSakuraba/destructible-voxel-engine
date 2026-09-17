@@ -1,65 +1,82 @@
-# Destructible Voxel Engine v2.34
+# Destructible Voxel Engine v2.35
 
-A destructible voxel game engine with a multi-backend rigid-body physics system,
-in-editor audio synthesizer, and sprite/menu tooling.
+A C++23 game-engine codebase centered on destructible voxels, hybrid voxel/polygon scenes,
+multi-backend physics, simulation, animation, audio, rendering, networking, and editor tools.
 
-## Physics backends
+Version 2.35 adds deterministic runtime and tooling foundations for navigation agents,
+packaging, profiling, asset dependencies, input, save games, animation, physics queries,
+artificial intelligence, networking, editor operations, and plugins.
 
-Three physics engines behind one solver-neutral `IRigidBodyWorld` contract:
+## Quick validation
 
-| Backend | Role | Version |
-|---|---|---|
-| **Jolt** | Primary 3D rigid-body solver (automatic first choice) | 5.6.1 |
-| **Box3D** | Optional secondary 3D solver | 0.1.0 |
-| **Box2D** | 2D sprite / tile physics | 3.2.0 |
+The focused suite has no third-party runtime dependency beyond a C++23 compiler:
 
-Backend selection is explicit and never silently falls back: `Automatic` prefers
-Jolt, then Box3D, then the engine's deterministic reference solver. The engine
-also ships its own deformation and fluid solvers alongside the rigid-body backends.
-
-## What's in this repo
-
-- `engine/` — full engine source (C++23, CMake). Includes the Jolt/Box2D
-  compatibility fixes and the Box3D 0.1 backend adapter.
-- `thirdparty/` — physics library sources at the exact pinned versions
-  (Jolt 5.6.1, Box2D 3.2.0, Box3D @ `23861418`).
-- `deps/` — prebuilt static libraries (Linux x86-64, Release) with headers and
-  CMake package configs, so you can build without compiling the physics SDKs.
-- `docs/` — build notes (`PHYSICS_SETUP.md`) and test logs.
-
-The v2.34 complete bundle (this repo as a zip) is attached to the
-[v2.34 release](../../releases).
-
-## Quick build (Linux)
-
-```bash
-cmake -S engine -B build \
-  -DDVE_ENABLE_JOLT=ON -DDVE_ENABLE_BOX2D=ON -DDVE_ENABLE_BOX3D=ON \
-  -DCMAKE_PREFIX_PATH=$PWD/deps
-cmake --build build -j$(nproc)
-ctest --test-dir build
+```sh
+./scripts/run_v235_foundation_tests.sh
+./scripts/run_v235_foundation_tests.sh --sanitize
 ```
 
-To rebuild the physics libraries from source instead of using `deps/`, point
-`DVE_JOLT_SOURCE_DIR` / `DVE_BOX2D_SOURCE_DIR` / `DVE_BOX3D_SOURCE_DIR` at
-`thirdparty/<lib>`, or use `DVE_FETCH_JOLT=ON` / `DVE_FETCH_BOX3D=ON` to fetch
-the pinned upstream commits automatically.
+For a CMake build:
 
-System packages needed for the full build: a C++23 compiler, CMake 3.22+,
-`libjpeg-dev`, `libpng-dev`, `libsndfile-dev`, FFmpeg dev libraries.
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
 
-## Test status
+CMake 3.24 or newer is required. Optional native backends and desktop integrations are
+controlled by the `DVE_ENABLE_*` and `DVE_BUILD_*` options in `CMakeLists.txt`.
 
-Full suite: **135 / 138 tests pass**, including all Jolt, Box2D and Box3D
-physics tests, the menu command-center tests, and the audio/editor synthesizer
-tests. The 3 remaining failures are pre-existing and unrelated to the physics
-work: one reference-solver assertion bug and two UDP networking tests that
-cannot run in sandboxed environments. See `docs/test-logs/`.
+## v2.35 foundations
 
-## Notes
+| Area | Included |
+|---|---|
+| Navigation | Agent path following, waypoint advancement, replanning, stuck detection, off-mesh state, and voxel-edit dirty-region tracking |
+| Packaging | Deterministic `.dvepak` archives, manifests, hashes, editor-only stripping, incremental reuse, mounting, and integrity checks |
+| Tooling | CPU profiler scopes, timelines, counters, memory categories, asset dependency graph, source monitoring, and reimport ordering |
+| Gameplay | Prioritized input contexts, composite bindings, gestures, remapping, versioned atomic saves, migrations, and recovery |
+| Animation | Humanoid mapping, CPU retargeting, morph targets, and CCD inverse kinematics |
+| Physics | Point forces, torque, angular impulses, deterministic ray/AABB/sphere query-all contracts, filters, ordering, and material metadata |
+| AI and networking | Blackboard, behavior tree, perception, steering, interpolation, rollback history, and replication relevancy |
+| Editor and plugins | Undoable operations and owner-scoped registration for panels, commands, importers, components, inspectors, and scripting bindings |
 
-- Verified on Linux (x86-64). Windows/macOS builds are plausible — the CMake
-  files carry MSVC/Apple handling and all three physics SDKs support those
-  platforms — but have not been run yet.
-- Box3D is an early-stage (0.1.x) engine; it stays opt-in while Jolt remains
-  the default production choice.
+The rigid-body abstraction supports Jolt as the primary production 3D route, Box3D as an
+optional experimental 3D route, Box2D for 2D physics, and the deterministic reference world
+for contract tests. Native backends are opt-in and are not fetched unless explicitly requested.
+
+## Packaging
+
+Build a deterministic package from selected project-relative files:
+
+```sh
+dve_pack <project-root> <output.dvepak> <file> [file ...]
+```
+
+Or scan the project root while applying the default editor-only exclusions:
+
+```sh
+dve_pack <project-root> <output.dvepak> --all
+```
+
+## Repository layout
+
+- `include/dve/` — public engine interfaces
+- `src/` — engine implementations
+- `apps/` — command-line tools, demos, and editor entry points
+- `tests/` — deterministic and integration tests
+- `assets/`, `examples/`, `shaders/` — source-controlled runtime content
+- `third_party/` — bundled notices, ABI shims, and reference material
+- `scripts/`, `tools/` — validation and release utilities
+- `docs/V235_FOUNDATIONS.md` — implemented boundaries and remaining production work
+
+## Release integrity and scope
+
+`SOURCE_MANIFEST.sha256` records the source-release file hashes. `release-manifest.json`
+describes the source-only profile and the historical payload intentionally excluded from this
+repository.
+
+The v2.35 APIs are tested foundations, not a claim that every production integration is
+complete. In particular, stitched partial navigation rebuilding, native Jolt/Box3D query
+collectors, the complete network transport/replication driver, and ABI-stable dynamic plugin
+loading remain follow-up work. See [the v2.35 foundation notes](docs/V235_FOUNDATIONS.md) and
+[the changelog](CHANGELOG.md) for details.

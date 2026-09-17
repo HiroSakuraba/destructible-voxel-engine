@@ -1,0 +1,12 @@
+build/
+build-*/
+out/
+.cache/
+.idea/
+.vscode/
+*.dvepak
+*.dvesave
+*.tmp
+*.bak
+*.log
+compile_commands.json

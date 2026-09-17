@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "splitByNode": true,
+  "defaults": {
+    "mode": "solid",
+    "voxelSizeMeters": 0.5,
+    "maximumPaletteMaterials": 32
+  },
+  "nodes": {
+    "Furniture": {
+      "voxelSizeMeters": 0.25,
+      "structural": false
+    }
+  }
+}

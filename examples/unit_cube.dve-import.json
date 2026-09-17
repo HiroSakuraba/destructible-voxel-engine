@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "defaults": {
+    "mode": "solid",
+    "voxelSizeMeters": 0.5,
+    "supersampleFactor": 1,
+    "downsampleCoverageThreshold": 0.125,
+    "objectId": 1001,
+    "maximumWorkingVoxels": 1000000,
+    "preserveThinSurface": true
+  }
+}

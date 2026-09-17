@@ -1,0 +1,12 @@
+{
+  "name": "dve.project.cook_gabor",
+  "arguments": {
+    "source_path": "assets/volumes/cloud_pyramid",
+    "output_path": "assets/volumes/cloud.dgabor",
+    "preview_path": "artifacts/cloud_preview.ppm",
+    "density_normalization": 2.0,
+    "position_scale": 1.0,
+    "opacity_scale": 1.0,
+    "maximum_primitives": 250000
+  }
+}

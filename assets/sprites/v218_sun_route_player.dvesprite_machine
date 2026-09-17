@@ -1,0 +1,21 @@
+DVE_SPRITE_MACHINE 3
+name "Sun Route Player"
+sprite_hash 14637352160056247036
+initial "Idle"
+parameters 2
+parameter "moving" 0 0 0 0
+parameter "airborne" 0 0 0 0
+states 3
+state "Idle" "player_idle" 1 80 120
+state "Run" "player_run" 1 340 120
+state "Jump" "player_jump" 1 210 300
+transitions 4
+transition "Idle" "Run" 10 0 1 0 1 1 0.0799999982 0 3 1 2 2 2 1
+condition "moving" 0 0 1 0 0
+transition "Run" "Idle" 10 0 1 0 1 1 0.0799999982 0 3 1 2 2 2 1
+condition "moving" 1 0 0 0 0
+transition "*" "Jump" 100 0 1 0 1 1 0.0799999982 0 3 1 2 2 2 1
+condition "airborne" 0 0 1 0 0
+transition "Jump" "Idle" 90 0 1 0 1 1 0.0799999982 0 3 1 2 2 2 1
+condition "airborne" 1 0 0 0 0
+hash 3910589518364971078

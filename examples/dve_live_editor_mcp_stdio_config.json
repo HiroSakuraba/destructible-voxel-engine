@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "dve-live-editor": {
+      "command": "/absolute/path/to/dve_live_editor_mcp_proxy",
+      "args": [
+        "--project-root",
+        "/absolute/path/to/your/dve/project"
+      ]
+    }
+  }
+}

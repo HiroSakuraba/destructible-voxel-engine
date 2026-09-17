@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "defaults": {
+    "mode": "surface",
+    "voxelSizeMeters": 1.0,
+    "maximumPaletteMaterials": 16
+  }
+}

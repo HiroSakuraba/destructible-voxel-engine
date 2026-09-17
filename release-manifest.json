@@ -1,0 +1,18 @@
+{
+  "format": "dve-source-release-v1",
+  "version": "2.35.0",
+  "profile": "source-only",
+  "entryPoints": {
+    "library": "include/dve/v235_foundations.hpp",
+    "implementation": "src/v235_foundations.cpp",
+    "packager": "apps/dve_pack.cpp",
+    "focusedTests": "tests/test_v235_foundations.cpp"
+  },
+  "excludedHistoricalPayload": [
+    "artifacts/",
+    "preserved_v2_33_files/",
+    "reference/",
+    "snapshot archives and generated binaries"
+  ],
+  "verification": "scripts/run_v235_foundation_tests.sh"
+}

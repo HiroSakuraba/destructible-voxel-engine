@@ -1,0 +1,55 @@
+name: v2.35 foundations
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repository-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure source-only repository
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DDVE_BUILD_BENCHMARK=OFF
+          -DDVE_BUILD_ASSET_COOKER=OFF
+          -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF
+          -DDVE_BUILD_EDITOR=OFF
+          -DDVE_BUILD_NATIVE_EDITOR=OFF
+          -DDVE_BUILD_PLATFORM=OFF
+          -DDVE_BUILD_RHI=OFF
+          -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF
+          -DDVE_BUILD_AUDIO_SYNTH=OFF
+          -DDVE_BUILD_LEGACY_X11_HOST=OFF
+          -DDVE_ENABLE_SDL3_HOST=OFF
+          -DDVE_ENABLE_VULKAN_BUFFER_BACKEND=OFF
+          -DDVE_ENABLE_FLUODDITY=OFF
+          -DDVE_ENABLE_SOFT_BODIES=OFF
+          -DDVE_ENABLE_CPU_HAIR=OFF
+          -DDVE_ENABLE_VFX_PARTICLES=OFF
+          -DDVE_ENABLE_PBF_LIQUID=OFF
+          -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+          -DDVE_ENABLE_BSPLINE_CLOTH=OFF
+          -DDVE_ENABLE_GRID_FLUIDS=OFF
+          -DDVE_ENABLE_FLIP_LIQUIDS=OFF
+      - name: Build core and v2.35 contract target
+        run: cmake --build build --target dve_v235_foundations_tests --parallel 2
+      - name: Run v2.35 CTest target
+        run: ctest --test-dir build --output-on-failure -R '^dve_v235_foundations_tests$'
+
+  focused-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Strict deterministic contract suite
+        run: ./scripts/run_v235_foundation_tests.sh
+      - name: Sanitized deterministic contract suite
+        run: ./scripts/run_v235_foundation_tests.sh --sanitize

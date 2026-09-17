@@ -91,6 +91,117 @@ bool overlaps(const NavigationBounds& a,const NavigationBounds& b) noexcept {
            a.minimum.z<=b.maximum.z&&a.maximum.z>=b.minimum.z;
 }
 
+struct NavigationStitchPoint {
+    std::int64_t x{};
+    std::int64_t z{};
+    auto operator<=>(const NavigationStitchPoint&) const = default;
+};
+
+struct NavigationStitchEdge {
+    NavigationStitchPoint a{};
+    NavigationStitchPoint b{};
+    auto operator<=>(const NavigationStitchEdge&) const = default;
+};
+
+struct NavigationStitchReference {
+    NavigationPolygonId polygon{};
+    Float3 a{};
+    Float3 b{};
+};
+
+NavigationStitchPoint quantize_navigation_point(Float3 point,float tolerance) noexcept {
+    const double inverse=1.0/static_cast<double>(tolerance);
+    return {static_cast<std::int64_t>(std::llround(static_cast<double>(point.x)*inverse)),
+            static_cast<std::int64_t>(std::llround(static_cast<double>(point.z)*inverse))};
+}
+
+NavigationStitchEdge navigation_stitch_edge(Float3 a,Float3 b,float tolerance) noexcept {
+    auto first=quantize_navigation_point(a,tolerance);
+    auto second=quantize_navigation_point(b,tolerance);
+    if(second<first)std::swap(first,second);
+    return {first,second};
+}
+
+bool stitch_navigation_tiles(NavigationMesh& mesh,std::string* error) {
+    if(mesh.polygons.size()>mesh.settings.maximumPolygons)
+        return fail(error,"incremental navigation mesh exceeds maximumPolygons");
+    std::map<NavigationStitchEdge,std::vector<NavigationStitchReference>> edges;
+    for(NavigationPolygonId polygon=0U;polygon<mesh.polygons.size();++polygon){
+        auto& item=mesh.polygons[polygon];
+        item.portals.clear();
+        for(std::size_t edge=0U;edge<3U;++edge){
+            const Float3 a=item.vertices[edge];
+            const Float3 b=item.vertices[(edge+1U)%3U];
+            edges[navigation_stitch_edge(a,b,mesh.settings.edgeMatchToleranceMeters)].push_back({polygon,a,b});
+        }
+    }
+    for(const auto& [key,references]:edges){
+        (void)key;
+        for(std::size_t first=0U;first<references.size();++first){
+            for(std::size_t second=first+1U;second<references.size();++second){
+                const auto& a=references[first];
+                const auto& b=references[second];
+                if(a.polygon==b.polygon)continue;
+                const float samePair=std::abs(a.a.x-b.a.x)+std::abs(a.a.z-b.a.z)+
+                    std::abs(a.b.x-b.b.x)+std::abs(a.b.z-b.b.z);
+                const float reversePair=std::abs(a.a.x-b.b.x)+std::abs(a.a.z-b.b.z)+
+                    std::abs(a.b.x-b.a.x)+std::abs(a.b.z-b.a.z);
+                const Float3 b0=samePair<=reversePair?b.a:b.b;
+                const Float3 b1=samePair<=reversePair?b.b:b.a;
+                if(std::abs(a.a.y-b0.y)>mesh.settings.maximumStepHeightMeters+
+                       mesh.settings.edgeMatchToleranceMeters||
+                   std::abs(a.b.y-b1.y)>mesh.settings.maximumStepHeightMeters+
+                       mesh.settings.edgeMatchToleranceMeters)continue;
+                Float3 p0{0.5F*(a.a.x+b0.x),std::max(a.a.y,b0.y),0.5F*(a.a.z+b0.z)};
+                Float3 p1{0.5F*(a.b.x+b1.x),std::max(a.b.y,b1.y),0.5F*(a.b.z+b1.z)};
+                const float width=length(sub(p1,p0));
+                if(width<=2.0F*mesh.settings.agentRadiusMeters+
+                        mesh.settings.edgeMatchToleranceMeters)continue;
+                const Float3 direction=mul(sub(p1,p0),1.0F/width);
+                p0=add(p0,mul(direction,mesh.settings.agentRadiusMeters));
+                p1=sub(p1,mul(direction,mesh.settings.agentRadiusMeters));
+                const auto connect=[&](NavigationPolygonId from,NavigationPolygonId to){
+                    const Float3 travel=sub(mesh.polygons[to].center,mesh.polygons[from].center);
+                    const float side0=travel.x*(p0.z-mesh.polygons[from].center.z)-
+                        travel.z*(p0.x-mesh.polygons[from].center.x);
+                    const float side1=travel.x*(p1.z-mesh.polygons[from].center.z)-
+                        travel.z*(p1.x-mesh.polygons[from].center.x);
+                    NavigationPortal portal;portal.neighbour=to;
+                    if(side0>=side1){portal.left=p0;portal.right=p1;}
+                    else{portal.left=p1;portal.right=p0;}
+                    auto& portals=mesh.polygons[from].portals;
+                    if(std::none_of(portals.begin(),portals.end(),[&](const auto& current){
+                        return current.neighbour==to;
+                    }))portals.push_back(portal);
+                };
+                connect(a.polygon,b.polygon);
+                connect(b.polygon,a.polygon);
+            }
+        }
+    }
+    for(auto& polygon:mesh.polygons){
+        std::sort(polygon.portals.begin(),polygon.portals.end(),[](const auto& a,const auto& b){
+            return a.neighbour<b.neighbour;
+        });
+    }
+    mesh.bounds={};
+    if(!mesh.polygons.empty()){
+        mesh.bounds=mesh.polygons.front().bounds;
+        for(const auto& polygon:mesh.polygons){
+            mesh.bounds.minimum={std::min(mesh.bounds.minimum.x,polygon.bounds.minimum.x),
+                std::min(mesh.bounds.minimum.y,polygon.bounds.minimum.y),
+                std::min(mesh.bounds.minimum.z,polygon.bounds.minimum.z)};
+            mesh.bounds.maximum={std::max(mesh.bounds.maximum.x,polygon.bounds.maximum.x),
+                std::max(mesh.bounds.maximum.y,polygon.bounds.maximum.y),
+                std::max(mesh.bounds.maximum.z,polygon.bounds.maximum.z)};
+        }
+    }
+    mesh.contentHash=navigation_mesh_content_hash(mesh);
+    std::string validation;
+    if(!mesh.validate(&validation))return fail(error,"incremental navigation validation failed: "+validation);
+    return true;
+}
+
 Quaternion quaternion_multiply(Quaternion a,Quaternion b) noexcept {
     return {a.w*b.x+a.x*b.w+a.y*b.z-a.z*b.y,
             a.w*b.y-a.x*b.z+a.y*b.w+a.z*b.x,
@@ -221,7 +332,12 @@ bool DynamicNavigationWorld::set_source_geometry(std::vector<NavigationTriangle>
     auto result=build_navigation_mesh(triangles,settings_,links);
     if(!result.success())return fail(error,result.diagnostics.empty()?"navigation build failed":result.diagnostics.back().message);
     source_=std::move(triangles);links_=std::move(links);mesh_=std::move(result.mesh);dirty_.clear();
-    ++telemetry_.revision;++telemetry_.rebuilds;telemetry_.polygonCount=mesh_.polygons.size();return true;
+    std::set<NavigationDirtyTile> builtTiles;
+    for(const auto& polygon:mesh_.polygons)builtTiles.insert({polygon.tileX,polygon.tileZ});
+    ++telemetry_.revision;++telemetry_.rebuilds;telemetry_.polygonCount=mesh_.polygons.size();
+    telemetry_.dirtyTileCount=0U;telemetry_.lastRebuiltTileCount=builtTiles.size();
+    telemetry_.lastCandidateTriangleCount=source_.size();telemetry_.lastReusedPolygonCount=0U;
+    telemetry_.lastRebuiltPolygonCount=mesh_.polygons.size();return true;
 }
 
 void DynamicNavigationWorld::mark_dirty(const NavigationBounds& bounds){
@@ -230,8 +346,14 @@ void DynamicNavigationWorld::mark_dirty(const NavigationBounds& bounds){
     const auto maxX=static_cast<std::int32_t>(std::floor(bounds.maximum.x/settings_.tileSizeMeters));
     const auto minZ=static_cast<std::int32_t>(std::floor(bounds.minimum.z/settings_.tileSizeMeters));
     const auto maxZ=static_cast<std::int32_t>(std::floor(bounds.maximum.z/settings_.tileSizeMeters));
-    if(static_cast<std::int64_t>(maxX-minX+1)*static_cast<std::int64_t>(maxZ-minZ+1)>1'000'000LL)return;
-    for(std::int32_t z=minZ;z<=maxZ;++z)for(std::int32_t x=minX;x<=maxX;++x)dirty_.insert({x,z});
+    const std::int64_t width=static_cast<std::int64_t>(maxX)-static_cast<std::int64_t>(minX)+1LL;
+    const std::int64_t depth=static_cast<std::int64_t>(maxZ)-static_cast<std::int64_t>(minZ)+1LL;
+    if(width<=0LL||depth<=0LL||width>1'000'000LL||depth>1'000'000LL||
+       width*depth>1'000'000LL)return;
+    for(std::int32_t z=minZ;;++z){
+        for(std::int32_t x=minX;;++x){dirty_.insert({x,z});if(x==maxX)break;}
+        if(z==maxZ)break;
+    }
     ++telemetry_.editsObserved;telemetry_.dirtyTileCount=dirty_.size();
 }
 
@@ -251,10 +373,65 @@ bool DynamicNavigationWorld::replace_region(const NavigationBounds& bounds,
 
 bool DynamicNavigationWorld::rebuild_dirty(std::string* error){
     if(dirty_.empty())return true;
-    auto result=build_navigation_mesh(source_,settings_,links_);
-    if(!result.success()){++telemetry_.rejectedRebuilds;return fail(error,result.diagnostics.empty()?"dynamic navigation rebuild failed":result.diagnostics.back().message);}
-    mesh_=std::move(result.mesh);dirty_.clear();++telemetry_.revision;++telemetry_.rebuilds;
-    telemetry_.dirtyTileCount=0U;telemetry_.polygonCount=mesh_.polygons.size();return true;
+    std::vector<NavigationTriangle> candidates;
+    candidates.reserve(source_.size());
+    for(const auto& triangle:source_){
+        const auto bounds=triangle_bounds(triangle);
+        const auto minX=static_cast<std::int32_t>(std::floor(bounds.minimum.x/settings_.tileSizeMeters));
+        const auto maxX=static_cast<std::int32_t>(std::floor(bounds.maximum.x/settings_.tileSizeMeters));
+        const auto minZ=static_cast<std::int32_t>(std::floor(bounds.minimum.z/settings_.tileSizeMeters));
+        const auto maxZ=static_cast<std::int32_t>(std::floor(bounds.maximum.z/settings_.tileSizeMeters));
+        const std::int64_t tileWidth=static_cast<std::int64_t>(maxX)-
+            static_cast<std::int64_t>(minX)+1LL;
+        const std::int64_t tileDepth=static_cast<std::int64_t>(maxZ)-
+            static_cast<std::int64_t>(minZ)+1LL;
+        const bool wideRange=tileWidth>4096LL||tileDepth>4096LL;
+        const std::int64_t tileCount=wideRange?4097LL:tileWidth*tileDepth;
+        bool touchesDirty=false;
+        if(tileCount<=4096){
+            for(std::int32_t z=minZ;!touchesDirty;){
+                for(std::int32_t x=minX;;++x){
+                    if(dirty_.contains({x,z})){touchesDirty=true;break;}
+                    if(x==maxX)break;
+                }
+                if(z==maxZ)break;
+                ++z;
+            }
+        }else{
+            touchesDirty=std::any_of(dirty_.begin(),dirty_.end(),[&](const auto& tile){
+                return tile.x>=minX&&tile.x<=maxX&&tile.z>=minZ&&tile.z<=maxZ;
+            });
+        }
+        if(touchesDirty)candidates.push_back(triangle);
+    }
+    auto local=build_navigation_mesh(candidates,settings_);
+    if(!local.success()){
+        ++telemetry_.rejectedRebuilds;
+        return fail(error,local.diagnostics.empty()?"dynamic navigation tile rebuild failed":
+            local.diagnostics.back().message);
+    }
+    NavigationMesh replacement;replacement.settings=settings_;replacement.offMeshLinks=links_;
+    replacement.polygons.reserve(mesh_.polygons.size()+local.mesh.polygons.size());
+    std::size_t reused=0U;
+    for(auto polygon:mesh_.polygons){
+        if(dirty_.contains({polygon.tileX,polygon.tileZ}))continue;
+        polygon.portals.clear();replacement.polygons.push_back(std::move(polygon));++reused;
+    }
+    std::size_t rebuilt=0U;
+    for(auto polygon:local.mesh.polygons){
+        if(!dirty_.contains({polygon.tileX,polygon.tileZ}))continue;
+        polygon.portals.clear();replacement.polygons.push_back(std::move(polygon));++rebuilt;
+    }
+    if(!stitch_navigation_tiles(replacement,error)){
+        ++telemetry_.rejectedRebuilds;return false;
+    }
+    const std::size_t rebuiltTiles=dirty_.size();
+    mesh_=std::move(replacement);dirty_.clear();++telemetry_.revision;++telemetry_.rebuilds;
+    telemetry_.dirtyTileCount=0U;telemetry_.polygonCount=mesh_.polygons.size();
+    telemetry_.lastRebuiltTileCount=rebuiltTiles;
+    telemetry_.lastCandidateTriangleCount=candidates.size();
+    telemetry_.lastReusedPolygonCount=reused;
+    telemetry_.lastRebuiltPolygonCount=rebuilt;return true;
 }
 
 std::vector<NavigationDirtyTile> DynamicNavigationWorld::dirty_tiles() const{return {dirty_.begin(),dirty_.end()};}

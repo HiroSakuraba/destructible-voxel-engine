@@ -31,7 +31,7 @@ controlled by the `DVE_ENABLE_*` and `DVE_BUILD_*` options in `CMakeLists.txt`.
 
 | Area | Included |
 |---|---|
-| Navigation | Agent path following, waypoint advancement, replanning, stuck detection, off-mesh state, and voxel-edit dirty-region tracking |
+| Navigation | Agent path following, replanning, stuck detection, off-mesh state, bounded dirty-tile rebuilding, polygon reuse, and deterministic border stitching |
 | Packaging | Deterministic `.dvepak` archives, manifests, hashes, editor-only stripping, incremental reuse, mounting, and integrity checks |
 | Tooling | CPU profiler scopes, timelines, counters, memory categories, asset dependency graph, source monitoring, and reimport ordering |
 | Gameplay | Prioritized input contexts, composite bindings, gestures, remapping, versioned atomic saves, migrations, and recovery |
@@ -76,7 +76,7 @@ describes the source-only profile and the historical payload intentionally exclu
 repository.
 
 The v2.35 APIs are tested foundations, not a claim that every production integration is
-complete. In particular, stitched partial navigation rebuilding, native Jolt/Box3D query
+complete. In particular, asynchronous navigation baking/publication, native Jolt/Box3D query
 collectors, the complete network transport/replication driver, and ABI-stable dynamic plugin
 loading remain follow-up work. See [the v2.35 foundation notes](docs/V235_FOUNDATIONS.md) and
 [the changelog](CHANGELOG.md) for details.

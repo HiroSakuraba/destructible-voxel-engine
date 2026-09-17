@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   expand-source:
-    if: ${{ hashFiles('bootstrap/source.tar.gz.part-00') != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -20,6 +20,7 @@ jobs:
           echo "ebffdaa0d7ab4780d976c18ffc0ca3194cf03fc48b0f91d6ec3a3d3e14f26b64  /tmp/dve-v2.35-source.tar.gz" | sha256sum -c -
           mkdir -p /tmp/dve-v2.35-source
           tar -xzf /tmp/dve-v2.35-source.tar.gz -C /tmp/dve-v2.35-source
+          rm -rf /tmp/dve-v2.35-source/destructible-voxel-engine-v2.35/.github
           cp -a /tmp/dve-v2.35-source/destructible-voxel-engine-v2.35/. .
           rm -rf bootstrap
       - name: Publish browsable source

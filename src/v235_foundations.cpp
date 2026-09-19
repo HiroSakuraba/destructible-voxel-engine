@@ -553,17 +553,377 @@ const AssetDependencyNode* AssetDependencyGraph::find(std::string_view id)const 
 
 std::vector<SourceFingerprint> SourceMonitor::poll(std::span<const std::filesystem::path> files,bool hashContents){std::vector<SourceFingerprint> changed;for(const auto& path:files){std::error_code ec;if(!std::filesystem::is_regular_file(path,ec))continue;SourceFingerprint current;current.path=path;current.size=std::filesystem::file_size(path,ec);if(ec)continue;current.modifiedTicks=std::filesystem::last_write_time(path,ec).time_since_epoch().count();if(ec)continue;if(hashContents){auto bytes=read_file_bytes(path,nullptr);if(!bytes)continue;current.contentHash=fnv_bytes(*bytes);}const auto it=known_.find(path);if(it==known_.end()||it->second.size!=current.size||it->second.modifiedTicks!=current.modifiedTicks||it->second.contentHash!=current.contentHash)changed.push_back(current);known_[path]=current;}std::sort(changed.begin(),changed.end(),[](const auto& a,const auto& b){return a.path.generic_string()<b.path.generic_string();});return changed;}
 
-bool InputActionSystem::set_context(InputContext context,std::string* error){if(context.name.empty())return fail(error,"input context name is empty");for(const auto& binding:context.bindings)if(binding.action.empty()||binding.primary.empty()||!std::isfinite(binding.scale)||!std::isfinite(binding.holdSeconds)||!std::isfinite(binding.doubleTapSeconds))return fail(error,"input binding is invalid");contexts_[context.name]=std::move(context);return true;}
-bool InputActionSystem::remove_context(std::string_view name){return contexts_.erase(std::string(name))!=0U;}
-void InputActionSystem::begin_frame(float deltaSeconds){if(!std::isfinite(deltaSeconds)||deltaSeconds<0.0F)deltaSeconds=0.0F;actions_.clear();for(auto& [name,state]:history_){state.previous=state.current;state.current=controls_[name];if(state.current>0.5F)state.heldSeconds+=deltaSeconds;else{if(state.previous>0.5F){state.sinceRelease=0.0F;state.releasedHeldSeconds=state.heldSeconds;}else state.sinceRelease+=deltaSeconds;state.heldSeconds=0.0F;}}for(const auto& [name,value]:controls_)if(!history_.contains(name)){auto& h=history_[name];h.current=value;h.previous=0.0F;h.heldSeconds=value>0.5F?deltaSeconds:0.0F;}
-    std::vector<const InputContext*> ordered;for(const auto& [name,context]:contexts_)if(context.enabled)ordered.push_back(&context);std::sort(ordered.begin(),ordered.end(),[](auto* a,auto* b){return a->priority!=b->priority?a->priority>b->priority:a->name<b->name;});std::set<std::string> consumed;
-    for(const auto* context:ordered)for(const auto& binding:context->bindings){if(consumed.contains(binding.primary))continue;const auto& h=history_[binding.primary];const bool chord=std::all_of(binding.chord.begin(),binding.chord.end(),[&](const auto& key){return history_[key].current>0.5F;});if(!chord)continue;const bool down=h.current>0.5F,pressed=down&&h.previous<=0.5F,released=!down&&h.previous>0.5F;bool fire=false,held=false;switch(binding.trigger){case InputTrigger::Press:fire=pressed;break;case InputTrigger::Release:fire=released;break;case InputTrigger::Hold:fire=held=down&&h.heldSeconds>=binding.holdSeconds;break;case InputTrigger::Tap:fire=released&&h.releasedHeldSeconds<=binding.holdSeconds;break;case InputTrigger::DoubleTap:fire=pressed&&h.sinceRelease<=binding.doubleTapSeconds;break;}if(fire||down){auto& action=actions_[binding.action];action.value+=h.current*binding.scale;action.pressed|=fire&&(binding.trigger==InputTrigger::Press||binding.trigger==InputTrigger::DoubleTap||binding.trigger==InputTrigger::Tap);action.released|=fire&&binding.trigger==InputTrigger::Release;action.held|=held;if(context->consume)consumed.insert(binding.primary);}}
+namespace {
+
+std::vector<std::string> input_activation_controls(const InputBinding& binding) {
+    std::vector<std::string> controls;
+    if (!binding.primary.empty()) controls.push_back(binding.primary);
+    for (const auto& part : binding.composite) controls.push_back(part.control);
+    std::sort(controls.begin(), controls.end());
+    controls.erase(std::unique(controls.begin(), controls.end()), controls.end());
+    return controls;
 }
-const InputActionState* InputActionSystem::action(std::string_view name)const noexcept{const auto it=actions_.find(name);return it==actions_.end()?nullptr:&it->second;}
-std::vector<std::string> InputActionSystem::conflicts(const InputBinding& candidate)const{std::vector<std::string> out;for(const auto& [name,context]:contexts_)for(const auto& binding:context.bindings)if(binding.primary==candidate.primary&&binding.chord==candidate.chord)out.push_back(name+":"+binding.action);return out;}
-bool InputActionSystem::rebind(std::string_view contextName,std::string_view actionName,InputBinding replacement,bool allowConflict,std::string* error){auto it=contexts_.find(contextName);if(it==contexts_.end())return fail(error,"input context was not found");if(!allowConflict&&!conflicts(replacement).empty())return fail(error,"input binding conflicts with an existing binding");for(auto& binding:it->second.bindings)if(binding.action==actionName){replacement.action=std::string(actionName);binding=std::move(replacement);return true;}return fail(error,"input action was not found");}
-bool InputActionSystem::save_bindings(const std::filesystem::path& path,std::string* error)const{std::ofstream out(path,std::ios::trunc);if(!out)return fail(error,"could not save input bindings");for(const auto& [name,context]:contexts_)for(const auto& binding:context.bindings){auto valid=[](std::string_view s){return s.find_first_of("\t\r\n")==std::string_view::npos;};if(!valid(name)||!valid(binding.action)||!valid(binding.primary))return fail(error,"input binding contains an unsupported control character");out<<name<<'\t'<<context.priority<<'\t'<<context.enabled<<'\t'<<context.consume<<'\t'<<binding.action<<'\t'<<binding.primary<<'\t'<<static_cast<int>(binding.trigger)<<'\t'<<binding.holdSeconds<<'\t'<<binding.doubleTapSeconds<<'\t'<<binding.scale<<'\t';for(std::size_t i=0;i<binding.chord.size();++i){if(i)out<<',';out<<binding.chord[i];}out<<'\n';}return static_cast<bool>(out)||fail(error,"could not finalize input bindings");}
-bool InputActionSystem::load_bindings(const std::filesystem::path& path,std::string* error){std::ifstream in(path);if(!in)return fail(error,"could not load input bindings");std::map<std::string,InputContext,std::less<>> loaded;std::string line;while(std::getline(in,line)){std::vector<std::string> fields;std::size_t start=0;for(;;){const auto tab=line.find('\t',start);fields.push_back(line.substr(start,tab-start));if(tab==std::string::npos)break;start=tab+1;}if(fields.size()!=11U)return fail(error,"malformed input binding file");try{auto& context=loaded[fields[0]];context.name=fields[0];context.priority=std::stoi(fields[1]);context.enabled=std::stoi(fields[2])!=0;context.consume=std::stoi(fields[3])!=0;InputBinding binding;binding.action=fields[4];binding.primary=fields[5];binding.trigger=static_cast<InputTrigger>(std::stoi(fields[6]));binding.holdSeconds=std::stof(fields[7]);binding.doubleTapSeconds=std::stof(fields[8]);binding.scale=std::stof(fields[9]);std::size_t pos=0;while(pos<fields[10].size()){const auto comma=fields[10].find(',',pos);binding.chord.push_back(fields[10].substr(pos,comma-pos));if(comma==std::string::npos)break;pos=comma+1;}context.bindings.push_back(std::move(binding));}catch(...){return fail(error,"malformed numeric input binding field");}}contexts_=std::move(loaded);return true;}
+
+bool normalize_input_binding(InputBinding& binding, std::string* error) {
+    const bool usesPrimary = !binding.primary.empty();
+    const bool usesComposite = !binding.composite.empty();
+    if (binding.action.empty() || usesPrimary == usesComposite)
+        return fail(error, "input binding must have an action and exactly one primary or composite source");
+    if (!std::isfinite(binding.scale) || std::abs(binding.scale) <= kEpsilon ||
+        !std::isfinite(binding.holdSeconds) || binding.holdSeconds < 0.0F ||
+        !std::isfinite(binding.doubleTapSeconds) || binding.doubleTapSeconds < 0.0F ||
+        !std::isfinite(binding.actuationThreshold) || binding.actuationThreshold <= 0.0F)
+        return fail(error, "input binding timing, scale, or actuation threshold is invalid");
+    if (static_cast<unsigned>(binding.trigger) > static_cast<unsigned>(InputTrigger::DoubleTap))
+        return fail(error, "input binding trigger is invalid");
+    if (usesComposite) {
+        if (binding.composite.size() < 2U)
+            return fail(error, "input composite requires at least two parts");
+        std::sort(binding.composite.begin(), binding.composite.end(), [](const auto& a, const auto& b) {
+            return a.control < b.control;
+        });
+        for (std::size_t index = 0; index < binding.composite.size(); ++index) {
+            const auto& part = binding.composite[index];
+            if (part.control.empty() || !std::isfinite(part.scale) || std::abs(part.scale) <= kEpsilon)
+                return fail(error, "input composite part is invalid");
+            if (index != 0U && binding.composite[index - 1U].control == part.control)
+                return fail(error, "input composite contains a duplicate control");
+        }
+    }
+    std::sort(binding.chord.begin(), binding.chord.end());
+    if (std::any_of(binding.chord.begin(), binding.chord.end(), [](const auto& control) { return control.empty(); }) ||
+        std::adjacent_find(binding.chord.begin(), binding.chord.end()) != binding.chord.end())
+        return fail(error, "input chord contains an empty or duplicate control");
+    const auto activation = input_activation_controls(binding);
+    for (const auto& modifier : binding.chord)
+        if (std::binary_search(activation.begin(), activation.end(), modifier))
+            return fail(error, "input chord cannot also be an activation control");
+    return true;
+}
+
+bool input_bindings_overlap(const InputBinding& first, const InputBinding& second) {
+    if (first.chord != second.chord) return false;
+    const auto firstControls = input_activation_controls(first);
+    const auto secondControls = input_activation_controls(second);
+    std::vector<std::string> intersection;
+    std::set_intersection(firstControls.begin(), firstControls.end(), secondControls.begin(),
+                          secondControls.end(), std::back_inserter(intersection));
+    return !intersection.empty();
+}
+
+std::string input_history_key(std::string_view context, std::size_t bindingIndex) {
+    return std::string(context) + '\x1f' + std::to_string(bindingIndex);
+}
+
+float input_control_value(const std::map<std::string, float, std::less<>>& controls,
+                          std::string_view control) {
+    const auto found = controls.find(control);
+    return found == controls.end() ? 0.0F : found->second;
+}
+
+std::vector<std::string> split_input_fields(const std::string& line, char separator) {
+    std::vector<std::string> fields;
+    std::size_t start = 0U;
+    for (;;) {
+        const auto end = line.find(separator, start);
+        fields.push_back(line.substr(start, end - start));
+        if (end == std::string::npos) break;
+        start = end + 1U;
+    }
+    return fields;
+}
+
+template <class Number, class Parser>
+bool parse_input_number(std::string_view text, Number& output, Parser parser) {
+    try {
+        std::size_t consumed{};
+        const std::string owned(text);
+        output = parser(owned, &consumed);
+        return consumed == owned.size();
+    } catch (...) {
+        return false;
+    }
+}
+
+} // namespace
+
+bool InputActionSystem::set_context(InputContext context, std::string* error) {
+    if (context.name.empty()) return fail(error, "input context name is empty");
+    for (auto& binding : context.bindings)
+        if (!normalize_input_binding(binding, error)) return false;
+    const std::string contextName = context.name;
+    const std::string historyPrefix = contextName + '\x1f';
+    for (auto it = bindingHistory_.begin(); it != bindingHistory_.end();)
+        if (it->first.starts_with(historyPrefix)) it = bindingHistory_.erase(it); else ++it;
+    contexts_[contextName] = std::move(context);
+    return true;
+}
+
+bool InputActionSystem::remove_context(std::string_view name) {
+    const std::string historyPrefix = std::string(name) + '\x1f';
+    for (auto it = bindingHistory_.begin(); it != bindingHistory_.end();)
+        if (it->first.starts_with(historyPrefix)) it = bindingHistory_.erase(it); else ++it;
+    return contexts_.erase(std::string(name)) != 0U;
+}
+
+void InputActionSystem::set_control(std::string control, float value) {
+    if (control.empty()) return;
+    controls_[std::move(control)] = std::isfinite(value) ? value : 0.0F;
+}
+
+void InputActionSystem::begin_frame(float deltaSeconds) {
+    if (!std::isfinite(deltaSeconds) || deltaSeconds < 0.0F) deltaSeconds = 0.0F;
+    actions_.clear();
+    std::vector<const InputContext*> ordered;
+    for (const auto& [name, context] : contexts_) {
+        if (context.enabled) ordered.push_back(&context);
+        else for (std::size_t bindingIndex = 0; bindingIndex < context.bindings.size(); ++bindingIndex)
+            bindingHistory_.erase(input_history_key(name, bindingIndex));
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto* a, const auto* b) {
+        return a->priority != b->priority ? a->priority > b->priority : a->name < b->name;
+    });
+    std::set<std::string> consumed;
+    for (const auto* context : ordered) {
+        for (std::size_t bindingIndex = 0; bindingIndex < context->bindings.size(); ++bindingIndex) {
+            const auto& binding = context->bindings[bindingIndex];
+            const auto activationControls = input_activation_controls(binding);
+            const bool suppressed = std::any_of(activationControls.begin(), activationControls.end(),
+                [&](const auto& control) { return consumed.contains(control); });
+            auto& history = bindingHistory_[input_history_key(context->name, bindingIndex)];
+            if (suppressed) {
+                history = {};
+                continue;
+            }
+            const bool chordActive = std::all_of(binding.chord.begin(), binding.chord.end(),
+                [&](const auto& control) { return std::abs(input_control_value(controls_, control)) >= 0.5F; });
+            float value{};
+            if (chordActive) {
+                if (binding.composite.empty()) value = input_control_value(controls_, binding.primary);
+                else for (const auto& part : binding.composite)
+                    value += input_control_value(controls_, part.control) * part.scale;
+                value *= binding.scale;
+            }
+            history.previousDown = history.currentDown;
+            history.currentDown = std::abs(value) >= binding.actuationThreshold;
+            const bool pressed = history.currentDown && !history.previousDown;
+            const bool released = !history.currentDown && history.previousDown;
+            if (history.currentDown) history.heldSeconds += deltaSeconds;
+            else {
+                if (released) {
+                    history.sinceRelease = 0.0F;
+                    history.releasedHeldSeconds = history.heldSeconds;
+                } else history.sinceRelease += deltaSeconds;
+                history.heldSeconds = 0.0F;
+            }
+            bool fire{};
+            bool held{};
+            switch (binding.trigger) {
+                case InputTrigger::Press: fire = pressed; break;
+                case InputTrigger::Release: fire = released; break;
+                case InputTrigger::Hold:
+                    held = history.currentDown && history.heldSeconds >= binding.holdSeconds;
+                    fire = held;
+                    break;
+                case InputTrigger::Tap:
+                    fire = released && history.releasedHeldSeconds <= binding.holdSeconds;
+                    break;
+                case InputTrigger::DoubleTap:
+                    fire = pressed && history.sinceRelease <= binding.doubleTapSeconds;
+                    break;
+            }
+            if (std::abs(value) > kEpsilon || fire || held) {
+                auto& action = actions_[binding.action];
+                action.value += value;
+                action.pressed |= fire && (binding.trigger == InputTrigger::Press ||
+                    binding.trigger == InputTrigger::Tap || binding.trigger == InputTrigger::DoubleTap);
+                action.released |= fire && binding.trigger == InputTrigger::Release;
+                action.held |= held;
+            }
+            if (context->consume && (history.currentDown || fire))
+                consumed.insert(activationControls.begin(), activationControls.end());
+        }
+    }
+}
+
+const InputActionState* InputActionSystem::action(std::string_view name) const noexcept {
+    const auto it = actions_.find(name);
+    return it == actions_.end() ? nullptr : &it->second;
+}
+
+std::vector<std::string> InputActionSystem::conflicts(const InputBinding& candidateValue) const {
+    InputBinding candidate = candidateValue;
+    if (!normalize_input_binding(candidate, nullptr)) return {};
+    std::vector<std::string> out;
+    for (const auto& [name, context] : contexts_)
+        for (const auto& binding : context.bindings)
+            if (input_bindings_overlap(binding, candidate)) out.push_back(name + ":" + binding.action);
+    return out;
+}
+
+bool InputActionSystem::rebind(std::string_view contextName, std::string_view actionName,
+                               InputBinding replacement, bool allowConflict, std::string* error) {
+    auto context = contexts_.find(contextName);
+    if (context == contexts_.end()) return fail(error, "input context was not found");
+    auto target = std::find_if(context->second.bindings.begin(), context->second.bindings.end(),
+        [&](const auto& binding) { return binding.action == actionName; });
+    if (target == context->second.bindings.end()) return fail(error, "input action was not found");
+    replacement.action = std::string(actionName);
+    if (!normalize_input_binding(replacement, error)) return false;
+    if (!allowConflict) {
+        for (const auto& [name, existingContext] : contexts_)
+            for (const auto& binding : existingContext.bindings) {
+                if (&binding == &*target) continue;
+                if (input_bindings_overlap(binding, replacement))
+                    return fail(error, "input binding conflicts with " + name + ":" + binding.action);
+            }
+    }
+    *target = std::move(replacement);
+    bindingHistory_.erase(input_history_key(contextName,
+        static_cast<std::size_t>(std::distance(context->second.bindings.begin(), target))));
+    return true;
+}
+
+bool InputActionSystem::save_bindings(const std::filesystem::path& path, std::string* error) const {
+    const auto validCommon = [](std::string_view text) {
+        return !text.empty() && text.find_first_of("\t\r\n") == std::string_view::npos;
+    };
+    for (const auto& [name, context] : contexts_) for (const auto& binding : context.bindings) {
+        if (!validCommon(name) || !validCommon(binding.action) ||
+            (!binding.primary.empty() && !validCommon(binding.primary)))
+            return fail(error, "input binding contains an unsupported control character");
+        for (const auto& control : binding.chord)
+            if (!validCommon(control) || control.find(',') != std::string::npos)
+                return fail(error, "input chord contains an unsupported separator");
+        for (const auto& part : binding.composite)
+            if (!validCommon(part.control) || part.control.find_first_of(";=") != std::string::npos)
+                return fail(error, "input composite contains an unsupported separator");
+    }
+    auto temporary = path;
+    temporary += ".tmp";
+    std::ofstream out(temporary, std::ios::trunc);
+    if (!out) return fail(error, "could not save input bindings");
+    out << "DVE_INPUT_BINDINGS\t2\n" << std::setprecision(std::numeric_limits<float>::max_digits10);
+    for (const auto& [name, context] : contexts_) for (const auto& binding : context.bindings) {
+        out << name << '\t' << context.priority << '\t' << context.enabled << '\t' << context.consume
+            << '\t' << binding.action << '\t' << binding.primary << '\t' << static_cast<int>(binding.trigger)
+            << '\t' << binding.holdSeconds << '\t' << binding.doubleTapSeconds << '\t' << binding.scale << '\t';
+        for (std::size_t index = 0; index < binding.chord.size(); ++index) {
+            if (index != 0U) out << ',';
+            out << binding.chord[index];
+        }
+        out << '\t' << binding.actuationThreshold << '\t';
+        for (std::size_t index = 0; index < binding.composite.size(); ++index) {
+            const auto& part = binding.composite[index];
+            if (index != 0U) out << ';';
+            out << part.control << '=' << part.scale;
+        }
+        out << '\n';
+    }
+    out.close();
+    if (!out) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        return fail(error, "could not finalize input bindings");
+    }
+    std::error_code ec;
+    std::filesystem::rename(temporary, path, ec);
+    if (!ec) return true;
+    auto backup = path;
+    backup += ".bak";
+    ec.clear();
+    std::filesystem::remove(backup, ec);
+    ec.clear();
+    if (std::filesystem::exists(path)) std::filesystem::rename(path, backup, ec);
+    if (!ec) std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::error_code restoreError;
+        if (!std::filesystem::exists(path) && std::filesystem::exists(backup))
+            std::filesystem::rename(backup, path, restoreError);
+        std::filesystem::remove(temporary, restoreError);
+        return fail(error, "could not publish input bindings: " + ec.message());
+    }
+    std::filesystem::remove(backup, ec);
+    return true;
+}
+
+bool InputActionSystem::load_bindings(const std::filesystem::path& path, std::string* error) {
+    std::ifstream in(path);
+    if (!in) return fail(error, "could not load input bindings");
+    std::map<std::string, InputContext, std::less<>> loaded;
+    std::string line;
+    bool firstLine = true;
+    int formatVersion = 1;
+    while (std::getline(in, line)) {
+        if (firstLine && line.starts_with("DVE_INPUT_BINDINGS\t")) {
+            firstLine = false;
+            if (line != "DVE_INPUT_BINDINGS\t2") return fail(error, "unsupported input binding version");
+            formatVersion = 2;
+            continue;
+        }
+        firstLine = false;
+        if (line.empty()) continue;
+        const auto fields = split_input_fields(line, '\t');
+        const std::size_t expectedFields = formatVersion == 2 ? 13U : 11U;
+        if (fields.size() != expectedFields)
+            return fail(error, "malformed input binding file");
+        int priority{}, enabled{}, consume{}, trigger{};
+        float hold{}, doubleTap{}, scale{}, threshold{0.5F};
+        const auto parseInt = [](const std::string& value, std::size_t* consumed) { return std::stoi(value, consumed); };
+        const auto parseFloat = [](const std::string& value, std::size_t* consumed) { return std::stof(value, consumed); };
+        if (!parse_input_number(fields[1], priority, parseInt) ||
+            !parse_input_number(fields[2], enabled, parseInt) ||
+            !parse_input_number(fields[3], consume, parseInt) ||
+            !parse_input_number(fields[6], trigger, parseInt) ||
+            !parse_input_number(fields[7], hold, parseFloat) ||
+            !parse_input_number(fields[8], doubleTap, parseFloat) ||
+            !parse_input_number(fields[9], scale, parseFloat) ||
+            (fields.size() == 13U && !parse_input_number(fields[11], threshold, parseFloat)) ||
+            (enabled != 0 && enabled != 1) || (consume != 0 && consume != 1))
+            return fail(error, "malformed numeric input binding field");
+        InputBinding binding;
+        binding.action = fields[4];
+        binding.primary = fields[5];
+        binding.trigger = static_cast<InputTrigger>(trigger);
+        binding.holdSeconds = hold;
+        binding.doubleTapSeconds = doubleTap;
+        binding.scale = scale;
+        binding.actuationThreshold = threshold;
+        if (!fields[10].empty()) binding.chord = split_input_fields(fields[10], ',');
+        if (fields.size() == 13U && !fields[12].empty()) {
+            for (const auto& encoded : split_input_fields(fields[12], ';')) {
+                const auto equals = encoded.rfind('=');
+                if (equals == std::string::npos) return fail(error, "malformed input composite part");
+                InputCompositePart part;
+                part.control = encoded.substr(0U, equals);
+                if (!parse_input_number(std::string_view(encoded).substr(equals + 1U), part.scale, parseFloat))
+                    return fail(error, "malformed input composite scale");
+                binding.composite.push_back(std::move(part));
+            }
+        }
+        auto [contextIt, inserted] = loaded.try_emplace(fields[0]);
+        auto& context = contextIt->second;
+        if (inserted) {
+            context.name = fields[0];
+            context.priority = priority;
+            context.enabled = enabled != 0;
+            context.consume = consume != 0;
+        } else if (context.priority != priority || context.enabled != (enabled != 0) ||
+                   context.consume != (consume != 0)) {
+            return fail(error, "input context records disagree");
+        }
+        context.bindings.push_back(std::move(binding));
+    }
+    for (auto& [name, context] : loaded) {
+        (void)name;
+        for (auto& binding : context.bindings)
+            if (!normalize_input_binding(binding, error)) return false;
+    }
+    contexts_ = std::move(loaded);
+    bindingHistory_.clear();
+    actions_.clear();
+    return true;
+}
 
 bool SaveGameStore::register_migration(std::uint32_t fromVersion,SaveMigration migration,std::string* error){if(fromVersion>=currentVersion_||!migration||migrations_.contains(fromVersion))return fail(error,"save migration registration is invalid");migrations_[fromVersion]=std::move(migration);return true;}
 bool SaveGameStore::write_atomic(const std::filesystem::path& slot,SaveGameDocument document,std::string* error)const{document.schemaVersion=currentVersion_;std::filesystem::create_directories(slot.parent_path());auto temp=slot;temp+=".tmp";std::ofstream out(temp,std::ios::binary|std::ios::trunc);if(!out)return fail(error,"could not create save file");out.write(kSaveMagic.data(),kSaveMagic.size());const std::uint32_t count=static_cast<std::uint32_t>(document.sections.size());std::uint64_t hash=1469598103934665603ULL;for(const auto& [name,bytes]:document.sections){fnv_mix(hash,name);const auto sectionHash=fnv_bytes(bytes);for(unsigned shift=0;shift<64;shift+=8){hash^=static_cast<std::uint8_t>(sectionHash>>shift);hash*=1099511628211ULL;}}if(!write_value(out,document.schemaVersion)||!write_value(out,document.sequence)||!write_value(out,count)||!write_value(out,hash))return fail(error,"could not write save header");for(const auto& [name,bytes]:document.sections){const auto length=static_cast<std::uint32_t>(name.size());const auto size=static_cast<std::uint64_t>(bytes.size());const auto sectionHash=fnv_bytes(bytes);if(!write_value(out,length)||!write_value(out,size)||!write_value(out,sectionHash))return fail(error,"could not write save directory");out.write(name.data(),length);if(!bytes.empty())out.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));if(!out)return fail(error,"could not write save payload");}out.close();if(!out)return fail(error,"could not finalize save");std::error_code ec;auto backup=slot;backup+=".bak";if(std::filesystem::exists(slot)){std::filesystem::remove(backup,ec);ec.clear();std::filesystem::rename(slot,backup,ec);if(ec)return fail(error,"could not rotate save backup");}std::filesystem::rename(temp,slot,ec);if(ec)return fail(error,"could not publish save: "+ec.message());return true;}

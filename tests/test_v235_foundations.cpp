@@ -165,11 +165,55 @@ void test_profiler_input_and_save(const std::filesystem::path& root) {
     dve::InputActionSystem input;dve::InputContext gameplay;gameplay.name="gameplay";gameplay.priority=10;
     gameplay.bindings.push_back({"jump","Space",{},dve::InputTrigger::Press});
     gameplay.bindings.push_back({"dash","D",{},dve::InputTrigger::DoubleTap,0.35F,0.30F});
+    dve::InputBinding horizontal;
+    horizontal.action="move_horizontal";horizontal.primary="";horizontal.actuationThreshold=0.25F;
+    horizontal.composite={{"Left",-1.0F},{"Right",1.0F}};
+    gameplay.bindings.push_back(horizontal);
+    gameplay.bindings.push_back({"look","LookAxis",{},dve::InputTrigger::Press,0.35F,0.25F,1.0F,0.5F});
     std::string error;check(input.set_context(gameplay,&error),"input context registration");
     input.set_control("Space",1);input.begin_frame(0.016F);check(input.action("jump")&&input.action("jump")->pressed,"input press action");
     input.set_control("D",1);input.begin_frame(0.016F);input.set_control("D",0);input.begin_frame(0.05F);input.set_control("D",1);input.begin_frame(0.05F);
     check(input.action("dash")&&input.action("dash")->pressed,"double-tap recognition");
-    check(input.save_bindings(root/"bindings.tsv",&error),"binding persistence write");dve::InputActionSystem loaded;check(loaded.load_bindings(root/"bindings.tsv",&error),"binding persistence read");
+    input.set_control("Left",1);input.begin_frame(0.016F);
+    check(input.action("move_horizontal")&&std::abs(input.action("move_horizontal")->value+1.0F)<1e-6F&&
+        input.action("move_horizontal")->pressed,"weighted composite produces a signed action");
+    input.set_control("Right",1);input.begin_frame(0.016F);
+    check(!input.action("move_horizontal"),"opposed composite controls cancel deterministically");
+    input.set_control("Left",0);input.begin_frame(0.016F);
+    check(input.action("move_horizontal")&&std::abs(input.action("move_horizontal")->value-1.0F)<1e-6F&&
+        input.action("move_horizontal")->pressed,"composite re-actuates after crossing zero");
+    input.set_control("LookAxis",0.25F);input.begin_frame(0.016F);
+    check(input.action("look")&&std::abs(input.action("look")->value-0.25F)<1e-6F&&
+        !input.action("look")->pressed,"analog values remain visible below their trigger threshold");
+
+    dve::InputBinding sameJump{"", "Space"};
+    check(input.rebind("gameplay","jump",sameJump,false,&error),"rebinding ignores the binding being replaced");
+    dve::InputBinding conflictingJump{"", "D"};
+    check(!input.rebind("gameplay","jump",conflictingJump,false,&error)&&
+        error.find("gameplay:dash")!=std::string::npos,"rebinding reports the deterministic conflict owner");
+    const auto conflicts=input.conflicts(dve::InputBinding{"candidate","Left"});
+    check(std::find(conflicts.begin(),conflicts.end(),"gameplay:move_horizontal")!=conflicts.end(),
+        "single controls conflict with composite parts");
+
+    dve::InputContext menu;menu.name="menu";menu.priority=20;menu.consume=true;
+    menu.bindings.push_back({"menu_right","Right"});check(input.set_context(menu,&error),"higher priority input context registration");
+    input.set_control("Right",0);input.begin_frame(0.016F);input.set_control("Right",1);input.begin_frame(0.016F);
+    check(input.action("menu_right")&&input.action("menu_right")->pressed&&!input.action("move_horizontal"),
+        "higher priority context consumes a composite part");
+
+    check(input.save_bindings(root/"bindings.tsv",&error),"binding persistence write");
+    dve::InputActionSystem loaded;check(loaded.load_bindings(root/"bindings.tsv",&error),"versioned binding persistence read");
+    loaded.set_control("Left",1);loaded.begin_frame(0.016F);
+    check(loaded.action("move_horizontal")&&std::abs(loaded.action("move_horizontal")->value+1.0F)<1e-6F,
+        "composite binding persistence round trip");
+    {std::ofstream corrupt(root/"bad-bindings.tsv");corrupt<<"DVE_INPUT_BINDINGS\t99\n";}
+    check(!loaded.load_bindings(root/"bad-bindings.tsv",&error),"unsupported binding persistence version is rejected");
+    loaded.set_control("Left",0);loaded.begin_frame(0.016F);loaded.set_control("Left",1);loaded.begin_frame(0.016F);
+    check(loaded.action("move_horizontal")!=nullptr,"failed binding load is transactional");
+    {std::ofstream legacy(root/"legacy-bindings.tsv");legacy<<"legacy\t1\t1\t1\tconfirm\tEnter\t0\t0.35\t0.25\t1\t\n";}
+    dve::InputActionSystem legacy;check(legacy.load_bindings(root/"legacy-bindings.tsv",&error),"legacy binding persistence remains readable");
+    legacy.set_control("Enter",1);legacy.begin_frame(0.016F);
+    check(legacy.action("confirm")&&legacy.action("confirm")->pressed,"legacy binding executes after migration load");
 
     dve::SaveGameStore store(2U);check(store.register_migration(1U,[](dve::SaveGameDocument& doc,std::string*){doc.sections["migrated"]={std::byte{1}};++doc.schemaVersion;return true;},&error),"save migration registration");
     dve::SaveGameDocument first;first.sequence=1;first.sections["world"]={std::byte{1},std::byte{2}};

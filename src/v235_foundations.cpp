@@ -697,15 +697,15 @@ void InputActionSystem::begin_frame(float deltaSeconds) {
             }
             const bool chordActive = std::all_of(binding.chord.begin(), binding.chord.end(),
                 [&](const auto& control) { return std::abs(input_control_value(controls_, control)) >= 0.5F; });
-            float value{};
+            float sourceValue{};
             if (chordActive) {
-                if (binding.composite.empty()) value = input_control_value(controls_, binding.primary);
+                if (binding.composite.empty()) sourceValue = input_control_value(controls_, binding.primary);
                 else for (const auto& part : binding.composite)
-                    value += input_control_value(controls_, part.control) * part.scale;
-                value *= binding.scale;
+                    sourceValue += input_control_value(controls_, part.control) * part.scale;
             }
+            const float value = sourceValue * binding.scale;
             history.previousDown = history.currentDown;
-            history.currentDown = std::abs(value) >= binding.actuationThreshold;
+            history.currentDown = std::abs(sourceValue) >= binding.actuationThreshold;
             const bool pressed = history.currentDown && !history.previousDown;
             const bool released = !history.currentDown && history.previousDown;
             if (history.currentDown) history.heldSeconds += deltaSeconds;
@@ -753,6 +753,7 @@ const InputActionState* InputActionSystem::action(std::string_view name) const n
 
 std::vector<std::string> InputActionSystem::conflicts(const InputBinding& candidateValue) const {
     InputBinding candidate = candidateValue;
+    if (candidate.action.empty()) candidate.action = "conflict-candidate";
     if (!normalize_input_binding(candidate, nullptr)) return {};
     std::vector<std::string> out;
     for (const auto& [name, context] : contexts_)
@@ -855,6 +856,7 @@ bool InputActionSystem::load_bindings(const std::filesystem::path& path, std::st
     bool firstLine = true;
     int formatVersion = 1;
     while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (firstLine && line.starts_with("DVE_INPUT_BINDINGS\t")) {
             firstLine = false;
             if (line != "DVE_INPUT_BINDINGS\t2") return fail(error, "unsupported input binding version");

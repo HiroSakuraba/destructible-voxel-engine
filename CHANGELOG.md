@@ -9,7 +9,8 @@
   transactional loading, strict validation, and backward-compatible loading of the original
   unversioned format.
 - Added focused coverage for composite actuation, cancellation, priority consumption, analog
-  thresholds, conflict detection, round trips, corrupt-version rejection, and legacy loading.
+  thresholds independent of output scaling, action-less conflict previews, round trips,
+  corrupt-version rejection, legacy loading, and cross-platform CRLF loading.
 
 # v2.35.1 — Incremental Destruction-Aware Navigation
 

@@ -185,13 +185,20 @@ void test_profiler_input_and_save(const std::filesystem::path& root) {
     input.set_control("LookAxis",0.25F);input.begin_frame(0.016F);
     check(input.action("look")&&std::abs(input.action("look")->value-0.25F)<1e-6F&&
         !input.action("look")->pressed,"analog values remain visible below their trigger threshold");
+    dve::InputContext scaled;scaled.name="scaled";scaled.priority=30;scaled.consume=false;
+    scaled.bindings.push_back({"scaled_press","ScaledButton",{},dve::InputTrigger::Press,0.35F,0.25F,0.25F});
+    check(input.set_context(scaled,&error),"scaled input context registration");
+    input.set_control("ScaledButton",1);input.begin_frame(0.016F);
+    check(input.action("scaled_press")&&input.action("scaled_press")->pressed&&
+        std::abs(input.action("scaled_press")->value-0.25F)<1e-6F,
+        "output scale does not alter actuation threshold");
 
     dve::InputBinding sameJump{"", "Space"};
     check(input.rebind("gameplay","jump",sameJump,false,&error),"rebinding ignores the binding being replaced");
     dve::InputBinding conflictingJump{"", "D"};
     check(!input.rebind("gameplay","jump",conflictingJump,false,&error)&&
         error.find("gameplay:dash")!=std::string::npos,"rebinding reports the deterministic conflict owner");
-    const auto conflicts=input.conflicts(dve::InputBinding{"candidate","Left"});
+    const auto conflicts=input.conflicts(dve::InputBinding{"","Left"});
     check(std::find(conflicts.begin(),conflicts.end(),"gameplay:move_horizontal")!=conflicts.end(),
         "single controls conflict with composite parts");
 
@@ -214,6 +221,9 @@ void test_profiler_input_and_save(const std::filesystem::path& root) {
     dve::InputActionSystem legacy;check(legacy.load_bindings(root/"legacy-bindings.tsv",&error),"legacy binding persistence remains readable");
     legacy.set_control("Enter",1);legacy.begin_frame(0.016F);
     check(legacy.action("confirm")&&legacy.action("confirm")->pressed,"legacy binding executes after migration load");
+    {std::ofstream windows(root/"windows-bindings.tsv",std::ios::binary);windows<<"DVE_INPUT_BINDINGS\t2\r\nwindows\t1\t1\t1\tconfirm\tEnter\t0\t0.35\t0.25\t1\t\t0.5\t\r\n";}
+    dve::InputActionSystem windows;check(windows.load_bindings(root/"windows-bindings.tsv",&error),
+        "CRLF binding persistence remains cross-platform readable");
 
     dve::SaveGameStore store(2U);check(store.register_migration(1U,[](dve::SaveGameDocument& doc,std::string*){doc.sections["migrated"]={std::byte{1}};++doc.schemaVersion;return true;},&error),"save migration registration");
     dve::SaveGameDocument first;first.sequence=1;first.sections["world"]={std::byte{1},std::byte{2}};

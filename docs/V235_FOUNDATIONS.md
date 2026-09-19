@@ -13,7 +13,7 @@ are in `include/dve/rigid_body_adapter.hpp`.
 | Packaging | Stable path ordering, manifest, FNV-1a content hashes, editor stripping, unchanged-entry reuse, mount/read integrity checks | Package build, mount, lookup, and payload verification |
 | Profiler | Thread-safe CPU scopes, counters, memory categories, per-frame model, JSON | Scope and counter capture |
 | Asset dependencies | Validation, rename fix-up, dependency-first closure, deterministic reimport, source fingerprints | Transitive order and rename tests |
-| Input | Prioritized contexts, chords, five trigger kinds, conflict detection, rebind persistence | Press and double-tap recognition plus round trip |
+| Input | Prioritized contexts, weighted composites, analog thresholds, chords, five trigger kinds, overlap conflict detection, versioned rebind persistence | Composite cancellation/actuation, priority consumption, press/double-tap recognition, v2 round trip, and legacy load |
 | Save games | Versioned sections, migrations, atomic publish, backup rotation, hashes, recovery | Corrupted primary recovers the previous slot |
 | Animation | Humanoid maps, CPU retargeting, morph targets, CCD IK | Rig validation, retarget, and morph checks |
 | Physics | Point loads, torque, angular impulse, ray/AABB/sphere query-all, ignore filters, stable ordering, material metadata | Reference-world load and query contracts |
@@ -39,6 +39,8 @@ are in `include/dve/rigid_body_adapter.hpp`.
   loading, dependency resolution, sandboxing, signing, and hot reload remain future work.
 - Archive hashes detect accidental corruption; packages are not cryptographically signed or
   encrypted.
+- Input composites currently produce scalar actions. Native 2D/3D vector composites, device
+  hot-plug routing, glyph selection, and platform input-device adapters remain integration work.
 
 ## Focused validation
 

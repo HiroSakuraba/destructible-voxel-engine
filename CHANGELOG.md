@@ -1,3 +1,17 @@
+# v2.35.3 — Composite Input and Rebinding Reliability
+
+- Added deterministic weighted 1D composite bindings for digital and analog controls, including
+  signed values, cancellation, configurable actuation thresholds, and per-binding gesture state.
+- Made context consumption composite-aware and conflict detection operate on overlapping control
+  footprints instead of exact primary-control matches.
+- Fixed self-conflicts during rebinding and added deterministic conflict-owner diagnostics.
+- Added version-2 remapping persistence with temporary-file publication, recoverable replacement,
+  transactional loading, strict validation, and backward-compatible loading of the original
+  unversioned format.
+- Added focused coverage for composite actuation, cancellation, priority consumption, analog
+  thresholds independent of output scaling, action-less conflict previews, round trips,
+  corrupt-version rejection, legacy loading, and cross-platform CRLF loading.
+
 # v2.35.1 — Incremental Destruction-Aware Navigation
 
 - Replaced whole-source dynamic navigation rebuilding with bounded dirty-tile source

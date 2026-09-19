@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -286,7 +287,26 @@ private:
 
 enum class InputTrigger : std::uint8_t { Press, Release, Hold, Tap, DoubleTap };
 
+struct InputCompositePart {
+    std::string control;
+    float scale{1.0F};
+};
+
 struct InputBinding {
+    InputBinding() = default;
+    InputBinding(std::string actionValue, std::string primaryValue,
+                 std::vector<std::string> chordValue = {},
+                 InputTrigger triggerValue = InputTrigger::Press,
+                 float holdSecondsValue = 0.35F,
+                 float doubleTapSecondsValue = 0.25F,
+                 float scaleValue = 1.0F,
+                 float actuationThresholdValue = 0.5F,
+                 std::vector<InputCompositePart> compositeValue = {})
+        : action(std::move(actionValue)), primary(std::move(primaryValue)),
+          chord(std::move(chordValue)), trigger(triggerValue), holdSeconds(holdSecondsValue),
+          doubleTapSeconds(doubleTapSecondsValue), scale(scaleValue),
+          actuationThreshold(actuationThresholdValue), composite(std::move(compositeValue)) {}
+
     std::string action;
     std::string primary;
     std::vector<std::string> chord;
@@ -294,6 +314,10 @@ struct InputBinding {
     float holdSeconds{0.35F};
     float doubleTapSeconds{0.25F};
     float scale{1.0F};
+    float actuationThreshold{0.5F};
+    // When populated, the weighted parts replace primary. This supports deterministic
+    // digital or analog 1D composites such as A/D, S/W, or two controller triggers.
+    std::vector<InputCompositePart> composite;
 };
 
 struct InputContext {
@@ -315,7 +339,7 @@ class InputActionSystem {
 public:
     [[nodiscard]] bool set_context(InputContext context, std::string* error = nullptr);
     [[nodiscard]] bool remove_context(std::string_view name);
-    void set_control(std::string control, float value) { controls_[std::move(control)] = value; }
+    void set_control(std::string control, float value);
     void begin_frame(float deltaSeconds);
     [[nodiscard]] const InputActionState* action(std::string_view name) const noexcept;
     [[nodiscard]] std::vector<std::string> conflicts(const InputBinding& candidate) const;
@@ -325,16 +349,16 @@ public:
     [[nodiscard]] bool save_bindings(const std::filesystem::path& path, std::string* error = nullptr) const;
     [[nodiscard]] bool load_bindings(const std::filesystem::path& path, std::string* error = nullptr);
 private:
-    struct ControlHistory {
-        float previous{};
-        float current{};
+    struct BindingHistory {
+        bool previousDown{};
+        bool currentDown{};
         float heldSeconds{};
         float releasedHeldSeconds{};
         float sinceRelease{1000.0F};
     };
     std::map<std::string, InputContext, std::less<>> contexts_;
     std::map<std::string, float, std::less<>> controls_;
-    std::map<std::string, ControlHistory, std::less<>> history_;
+    std::map<std::string, BindingHistory, std::less<>> bindingHistory_;
     std::map<std::string, InputActionState, std::less<>> actions_;
 };
 

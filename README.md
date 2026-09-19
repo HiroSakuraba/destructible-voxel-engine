@@ -1,4 +1,4 @@
-# Destructible Voxel Engine v2.35
+# Destructible Voxel Engine v2.35.3
 
 A C++23 game-engine codebase centered on destructible voxels, hybrid voxel/polygon scenes,
 multi-backend physics, simulation, animation, audio, rendering, networking, and editor tools.
@@ -34,7 +34,7 @@ controlled by the `DVE_ENABLE_*` and `DVE_BUILD_*` options in `CMakeLists.txt`.
 | Navigation | Agent path following, replanning, stuck detection, off-mesh state, bounded dirty-tile rebuilding, polygon reuse, and deterministic border stitching |
 | Packaging | Deterministic `.dvepak` archives, manifests, hashes, editor-only stripping, incremental reuse, mounting, and integrity checks |
 | Tooling | CPU profiler scopes, timelines, counters, memory categories, asset dependency graph, source monitoring, and reimport ordering |
-| Gameplay | Prioritized input contexts, composite bindings, gestures, remapping, versioned atomic saves, migrations, and recovery |
+| Gameplay | Prioritized input contexts, weighted composite bindings, analog actuation thresholds, gestures, conflict-safe remapping, versioned persistence, atomic saves, migrations, and recovery |
 | Animation | Humanoid mapping, CPU retargeting, morph targets, and CCD inverse kinematics |
 | Physics | Point forces, torque, angular impulses, deterministic ray/AABB/sphere query-all contracts, filters, ordering, and material metadata |
 | AI and networking | Blackboard, behavior tree, perception, steering, interpolation, rollback history, and replication relevancy |

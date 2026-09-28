@@ -121,7 +121,8 @@ enum class GrainWindow : std::uint8_t { Hann, Triangle, Tukey };
 enum class ModulationSource : std::uint8_t {
     Off, Lfo1, Lfo2, AmpEnvelope, FilterEnvelope, Velocity, KeyTrack,
     ModWheel, Aftertouch, Random, Macro1, Macro2, Macro3, Macro4,
-    Timbre, NotePitchBend, ReleaseVelocity
+    Timbre, NotePitchBend, ReleaseVelocity,
+    Spring, Pendulum, Orbiter, Lorenz  // Phase 1: physics modulation
 };
 
 enum class ModulationDestination : std::uint8_t {

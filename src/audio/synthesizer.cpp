@@ -1,6 +1,7 @@
 #include "dve/audio/synthesizer.hpp"
 #include "dve/audio/audio_asset.hpp"
 #include "dve/audio/wavetable.hpp"
+#include "dve/audio/physics_modulation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1459,15 +1460,16 @@ std::optional<LfoWaveform> parse_lfo_waveform(std::string_view value) noexcept {
     return std::nullopt;
 }
 std::string_view modulation_source_token(ModulationSource source) noexcept {
-    static constexpr std::array<std::string_view, 17> names{
+    static constexpr std::array<std::string_view, 21> names{
         "none","lfo1","lfo2","amp_env","filter_env","velocity","keytrack",
         "modwheel","aftertouch","random","macro1","macro2","macro3","macro4",
-        "timbre","note_bend","release_vel"};
+        "timbre","note_bend","release_vel",
+        "spring","pendulum","orbiter","lorenz"};
     const auto index = static_cast<std::size_t>(source);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationSource> parse_modulation_source(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationSource::ReleaseVelocity); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationSource::Lorenz); ++i)
         if (modulation_source_token(static_cast<ModulationSource>(i)) == value) return static_cast<ModulationSource>(i);
     return std::nullopt;
 }
@@ -1836,6 +1838,8 @@ struct Synthesizer::Impl {
     RealtimePreset parameters{};
     // Phase 1: high-quality wavetable bank (cooked on preset load).
     CookedWavetable hqWavetable{};
+    // Phase 1: physics modulation bank (global).
+    PhysicsModulationBank physicsBank{};
     // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
     // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
     // currents advance toward targets once per render block in
@@ -2298,6 +2302,8 @@ struct Synthesizer::Impl {
         target.start(channel, note, static_cast<float>(velocity) / 127.0F, ++ageCounter, renderFrame,
                      parameters, restart);
         if (restart) assign_sample_zones(target);
+        // Phase 1: excite physics modulators on note-on.
+        physicsBank.note_on(static_cast<float>(velocity) / 127.0F);
         if (emitOutput) emit_note(true, channel, note, velocity, renderFrame);
     }
 
@@ -2975,6 +2981,10 @@ struct Synthesizer::Impl {
             case ModulationSource::NotePitchBend:
                 return clampf(v.pitchBendSemitones / std::max(1.0F, parameters.pitchBendRangeSemitones), -1.0F, 1.0F);
             case ModulationSource::ReleaseVelocity: return v.releaseVelocity;
+            case ModulationSource::Spring: return physicsBank.spring.position;
+            case ModulationSource::Pendulum: return std::sin(physicsBank.pendulum.angle);
+            case ModulationSource::Orbiter: return std::clamp(physicsBank.orbiter.x * 0.5F, -1.0F, 1.0F);
+            case ModulationSource::Lorenz: return std::clamp(physicsBank.lorenz.x / 20.0F, -1.0F, 1.0F);
         }
         return 0.0F;
     }
@@ -4483,7 +4493,7 @@ bool SynthPreset::validate(std::string* error) const {
     for (const auto& slot : modulation) {
         if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.bias, -1.0F, 1.0F) ||
             !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
-            static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::ReleaseVelocity) ||
+            static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::Lorenz) ||
             static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::WavetablePosition))
             return fail("invalid modulation matrix slot");
     }
@@ -5700,6 +5710,8 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     RealtimePreset latest{};
     while (impl_->presetIn.pop(latest)) impl_->adopt_preset(latest);
     impl_->advance_parameter_smoothing(frameCount);
+    // Phase 1: step physics modulation bank.
+    impl_->physicsBank.step(static_cast<float>(frameCount) / impl_->sampleRate);
     if (impl_->transportRestartRequested.exchange(false, std::memory_order_acq_rel)) {
         impl_->clear_arp_held(true);
         impl_->renderFrame = impl_->transportRestartFrame.load(std::memory_order_relaxed);

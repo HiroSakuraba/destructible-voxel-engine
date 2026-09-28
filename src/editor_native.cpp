@@ -1,5 +1,6 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_prefab.hpp"
+#include "dve/print_export.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1329,6 +1330,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
     for (std::string_view id : {"edit.cut", "edit.copy", "edit.delete", "edit.duplicate", "edit.group"})
         enabled(id, hasSelection, "Select one or more scene objects first.");
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
+    enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
     enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
     enabled("edit.paste", !clipboard_.empty(), "Copy or cut an object before pasting.");
     enabled("asset.open", assetBrowserState_.selectedId.has_value(), "Select an asset in the Assets panel first.");
@@ -4420,6 +4422,41 @@ camera_menu_dispatch_complete:
         const auto result = workspace_.document().save_transactional(workspace_.document().path());
         set_status(result.success ? "Scene saved" : result.error, !result.success);
         return result.success;
+    }
+    if (actionId == "file.export_print_stl") {
+#ifdef DVE_HAVE_MANIFOLD
+        if (workspace_.selection_count() != 1U) {
+            set_status("Select exactly one voxel object to export for printing", true);
+            return false;
+        }
+        const EditorObjectId id = *workspace_.selected_objects().begin();
+        EditorObject* object = workspace_.document().find_object(id);
+        if (object == nullptr || object->voxels == nullptr) {
+            set_status("Selected object has no voxel data to export", true);
+            return false;
+        }
+        PrintExportOptions options;
+        options.voxelSizeMeters = static_cast<double>(object->voxelSizeMeters);
+        std::filesystem::path dir = project_root() / "exports";
+        std::error_code dirError;
+        std::filesystem::create_directories(dir, dirError);
+        std::string name = object->name.empty() ? "model" : object->name;
+        for (char& c : name) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') c = '_';
+        }
+        const std::filesystem::path path = dir / (name + ".stl");
+        const PrintExportResult result = export_print_stl(*object->voxels, path, options);
+        if (!result.success) {
+            set_status(std::string("Print export failed: ") + result.error, true);
+            return false;
+        }
+        set_status("Exported " + std::to_string(result.triangleCount) + " triangles to " + path.string(),
+                   false, 8.0F);
+        return true;
+#else
+        set_status("Print export was not built into this editor (manifold3d missing)", true);
+        return false;
+#endif
     }
     if (actionId == "file.new_project") {
         if (workspace_.document().dirty() && workspace_.preferences().confirmDestructiveActions) {

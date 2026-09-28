@@ -156,6 +156,25 @@ struct RealtimeSampleBank {
     std::array<float, kSynthSampleMaxFrames> samples{};
 };
 
+// Phase 0: per-parameter smoothing. When a preset is adopted, smoothable
+// parameters don't jump to their new values instantly (which causes clicks);
+// instead they glide from current toward target with a one-pole lowpass.
+// Cutoff uses log-domain smoothing (perceptually uniform); others are linear.
+struct SmoothedFloat {
+    float current{};
+    float target{};
+    // Advances current toward target. coeff is the one-pole coefficient
+    // (0 = frozen, 1 = instant). Returns the new current value.
+    float advance(float coeff) noexcept {
+        current += (target - current) * coeff;
+        // Snap when close enough to avoid denormal crawl.
+        if (std::fabs(target - current) < 1e-6F) current = target;
+        return current;
+    }
+    void set_target(float v) noexcept { target = v; }
+    void snap(float v) noexcept { current = target = v; }
+};
+
 struct RealtimePreset {
     std::array<OscillatorParameters, kSynthOscillatorCount> oscillators{};
     AdsrParameters ampEnvelope{};
@@ -567,6 +586,7 @@ struct Voice {
     float pressure{};
     float timbre{};
     float pitchBendSemitones{};
+    float releaseVelocity{};
     std::uint64_t age{};
     std::uint64_t startFrame{};
     Envelope amp;
@@ -1437,14 +1457,15 @@ std::optional<LfoWaveform> parse_lfo_waveform(std::string_view value) noexcept {
     return std::nullopt;
 }
 std::string_view modulation_source_token(ModulationSource source) noexcept {
-    static constexpr std::array<std::string_view, 14> names{
+    static constexpr std::array<std::string_view, 17> names{
         "none","lfo1","lfo2","amp_env","filter_env","velocity","keytrack",
-        "modwheel","aftertouch","random","macro1","macro2","macro3","macro4"};
+        "modwheel","aftertouch","random","macro1","macro2","macro3","macro4",
+        "timbre","note_bend","release_vel"};
     const auto index = static_cast<std::size_t>(source);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationSource> parse_modulation_source(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationSource::Macro4); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationSource::ReleaseVelocity); ++i)
         if (modulation_source_token(static_cast<ModulationSource>(i)) == value) return static_cast<ModulationSource>(i);
     return std::nullopt;
 }
@@ -1810,6 +1831,23 @@ struct Synthesizer::Impl {
     float sampleRate{};
     std::atomic<std::uint64_t>& currentFrame;
     RealtimePreset parameters{};
+    // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
+    // currents advance toward targets once per render block in
+    // advance_parameter_smoothing(). The DSP reads the smoothed currents,
+    // not parameters.X directly, for these fields.
+    SmoothedFloat smoothedFilterCutoffLog{};  // log2(cutoffHz)
+    SmoothedFloat smoothedFilterResonance{};
+    SmoothedFloat smoothedMasterGain{};
+    std::array<SmoothedFloat, kSynthOscillatorCount> smoothedOscGain{};
+    SmoothedFloat smoothedDelayTime{};
+    SmoothedFloat smoothedEqLowDb{};
+    SmoothedFloat smoothedEqMidDb{};
+    SmoothedFloat smoothedEqHighDb{};
+    SmoothedFloat smoothedDistortionDrive{};
+    SmoothedFloat smoothedDelayFeedback{};
+    SmoothedFloat smoothedFlangerFeedback{};
+    SmoothedFloat smoothedCompThresholdDb{};
+    bool parameterSmoothingInitialized{};
     BoundedQueue<MidiMessage, kMidiQueueCapacity> midiIn;
     BoundedQueue<MidiMessage, kMidiOutQueueCapacity> midiOut;
     BoundedQueue<RealtimePreset, kPresetQueueCapacity> presetIn;
@@ -1828,6 +1866,19 @@ struct Synthesizer::Impl {
     std::atomic<std::uint64_t> samplePageUnderruns{};
     std::atomic<std::uint32_t> activeGrainTelemetry{};
     std::atomic<std::uint32_t> maximumActiveGrains{};
+    // Synth-wide profiler counters (see SynthProfiler). Updated on the render thread with
+    // relaxed ordering; read via Synthesizer::profiler().
+    std::atomic<std::uint64_t> profilerRenderCalls{};
+    std::atomic<std::uint64_t> profilerSamplesRendered{};
+    std::atomic<std::uint64_t> profilerVoicesStarted{};
+    std::atomic<std::uint64_t> profilerVoicesStolen{};
+    std::atomic<std::uint64_t> profilerVoicesRetired{};
+    std::atomic<std::uint64_t> profilerOscillatorVoiceFrames{};
+    std::atomic<std::uint64_t> profilerFilterFrames{};
+    std::atomic<std::uint64_t> profilerFxFrames{};
+    std::atomic<std::uint64_t> profilerArpSteps{};
+    std::atomic<std::uint32_t> profilerActiveVoices{};
+    std::atomic<std::uint32_t> profilerMaximumActiveVoices{};
     std::uint32_t activeGrains{};
     std::array<Voice, kSynthVoiceCount> voice{};
     std::array<VoiceTelemetry, kSynthVoiceCount> telemetry{};
@@ -1928,6 +1979,7 @@ struct Synthesizer::Impl {
         for (Voice& candidate : voice)
             if (candidate.active && candidate.channel == channel && candidate.note == note) return candidate;
         for (Voice& candidate : voice) if (!candidate.active) return candidate;
+        profilerVoicesStolen.fetch_add(1U, std::memory_order_relaxed);
         auto released = std::min_element(voice.begin(), voice.end(), [](const Voice& a, const Voice& b) {
             const bool ar = a.amp.stage == VoiceStage::Release;
             const bool br = b.amp.stage == VoiceStage::Release;
@@ -2233,6 +2285,7 @@ struct Synthesizer::Impl {
     void direct_note_on(std::uint8_t channel, std::uint8_t note, std::uint8_t velocity,
                         bool retrigger, bool emitOutput) noexcept {
         Voice& target = allocate_voice(channel, note);
+        profilerVoicesStarted.fetch_add(1U, std::memory_order_relaxed);
         const bool sameNote = target.active && target.channel == channel && target.note == note;
         const bool restart = retrigger || !sameNote;
         if (restart) retire_voice_grains(target);
@@ -2242,10 +2295,12 @@ struct Synthesizer::Impl {
         if (emitOutput) emit_note(true, channel, note, velocity, renderFrame);
     }
 
-    void direct_note_off(std::uint8_t channel, std::uint8_t note, bool emitOutput) noexcept {
+    void direct_note_off(std::uint8_t channel, std::uint8_t note, bool emitOutput,
+                         float releaseVelocity = 0.5F) noexcept {
         for (Voice& candidate : voice) {
             if (!candidate.active || candidate.channel != channel || candidate.note != note) continue;
             candidate.keyHeld = false;
+            candidate.releaseVelocity = clampf(releaseVelocity, 0.0F, 1.0F);
             if (sustain[channel]) candidate.sustained = true;
             else {
                 activate_release_samples(candidate);
@@ -2472,6 +2527,7 @@ struct Synthesizer::Impl {
             arpPatternCount = 0U;
             return;
         }
+        profilerArpSteps.fetch_add(1U, std::memory_order_relaxed);
 
         const std::uint8_t configuredStepCount = static_cast<std::uint8_t>(
             std::clamp<unsigned>(parameters.arpeggiator.stepCount, 1U, static_cast<unsigned>(kArpeggiatorStepCount)));
@@ -2633,6 +2689,50 @@ struct Synthesizer::Impl {
         gameClockTempo.store(parameters.arpeggiator.externalTempoBpm, std::memory_order_relaxed);
         arpRandomState = parameters.arpeggiator.randomSeed == 0U ? 0x51A3D8E7U : parameters.arpeggiator.randomSeed;
         if (wasArpeggiating && !parameters.arpeggiator.enabled) clear_arp_held(true);
+        // Phase 0: retarget smoothed parameters. On the very first adoption,
+        // snap currents to targets so there's no glide from zero.
+        auto retarget = [&](SmoothedFloat& s, float v) {
+            if (!parameterSmoothingInitialized) s.snap(v);
+            else s.set_target(v);
+        };
+        retarget(smoothedFilterCutoffLog, std::log2(std::max(parameters.filter.cutoffHertz, 1.0F)));
+        retarget(smoothedFilterResonance, parameters.filter.resonance);
+        retarget(smoothedMasterGain, parameters.masterGain);
+        for (std::size_t i = 0; i < kSynthOscillatorCount; ++i)
+            retarget(smoothedOscGain[i], parameters.oscillators[i].gain);
+        retarget(smoothedDelayTime, parameters.delay.timeSeconds);
+        retarget(smoothedEqLowDb, parameters.eq.lowGainDb);
+        retarget(smoothedEqMidDb, parameters.eq.midGainDb);
+        retarget(smoothedEqHighDb, parameters.eq.highGainDb);
+        retarget(smoothedDistortionDrive, parameters.distortion.drive);
+        retarget(smoothedDelayFeedback, parameters.delay.feedback);
+        retarget(smoothedFlangerFeedback, parameters.flanger.feedback);
+        retarget(smoothedCompThresholdDb, parameters.compressor.thresholdDb);
+        parameterSmoothingInitialized = true;
+    }
+
+    // Advances all smoothed parameters one step. Call once per render() call
+    // with the frame count — the one-pole coefficient is computed for the
+    // actual time elapsed. Smoothing time is ~12 ms (fast enough to feel
+    // responsive, slow enough to kill clicks).
+    void advance_parameter_smoothing(std::size_t frameCount) noexcept {
+        if (!parameterSmoothingInitialized || frameCount == 0) return;
+        // One-pole coefficient for ~12 ms time constant.
+        // coeff = 1 - exp(-elapsed / timeConstant)
+        const float elapsed = static_cast<float>(frameCount) / sampleRate;
+        const float coeff = 1.0F - std::exp(-elapsed / 0.012F);
+        smoothedFilterCutoffLog.advance(coeff);
+        smoothedFilterResonance.advance(coeff);
+        smoothedMasterGain.advance(coeff);
+        for (auto& s : smoothedOscGain) s.advance(coeff);
+        smoothedDelayTime.advance(coeff);
+        smoothedEqLowDb.advance(coeff);
+        smoothedEqMidDb.advance(coeff);
+        smoothedEqHighDb.advance(coeff);
+        smoothedDistortionDrive.advance(coeff);
+        smoothedDelayFeedback.advance(coeff);
+        smoothedFlangerFeedback.advance(coeff);
+        smoothedCompThresholdDb.advance(coeff);
     }
 
     void handle_midi(const MidiMessage& message) noexcept {
@@ -2662,9 +2762,10 @@ struct Synthesizer::Impl {
             return;
         }
         if (message.is_note_off()) {
+            const float releaseVel = message.data2 > 0 ? static_cast<float>(message.data2) / 127.0F : 0.5F;
             if (parameters.arpeggiator.enabled) arp_note_off(channel, message.data1);
             else if (parameters.chord.enabled) chord_note_off(channel, message.data1);
-            else direct_note_off(channel, message.data1, false);
+            else direct_note_off(channel, message.data1, false, releaseVel);
             return;
         }
         switch (message.type) {
@@ -2830,13 +2931,18 @@ struct Synthesizer::Impl {
             case ModulationSource::Macro2: return macroValues[1];
             case ModulationSource::Macro3: return macroValues[2];
             case ModulationSource::Macro4: return macroValues[3];
+            case ModulationSource::Timbre: return clampf(v.timbre, -1.0F, 1.0F);
+            case ModulationSource::NotePitchBend:
+                return clampf(v.pitchBendSemitones / std::max(1.0F, parameters.pitchBendRangeSemitones), -1.0F, 1.0F);
+            case ModulationSource::ReleaseVelocity: return v.releaseVelocity;
         }
         return 0.0F;
     }
 
     static bool native_bipolar(ModulationSource source) noexcept {
         return source == ModulationSource::Lfo1 || source == ModulationSource::Lfo2 ||
-               source == ModulationSource::KeyTrack || source == ModulationSource::Random;
+               source == ModulationSource::KeyTrack || source == ModulationSource::Random ||
+               source == ModulationSource::Timbre || source == ModulationSource::NotePitchBend;
     }
 
     ModulationValues evaluate_modulation(Voice& v, float amp, float filterEnv,
@@ -2859,7 +2965,7 @@ struct Synthesizer::Impl {
             } else {
                 v.modulationSmoothing[originalIndex] = source;
             }
-            const float amount = source * clampf(slot.amount, -1.0F, 1.0F);
+            const float amount = source * clampf(slot.amount, -1.0F, 1.0F) + clampf(slot.bias, -1.0F, 1.0F);
             modulationScratch[originalIndex] = amount;
             const auto destination = static_cast<unsigned>(slot.destination);
             if (slot.destination == ModulationDestination::GlobalPitch) values.globalPitch += amount * 24.0F;
@@ -3222,7 +3328,12 @@ struct Synthesizer::Impl {
         if (!v.active) return {};
         const float amp = v.amp.advance(parameters.ampEnvelope, sampleRate);
         const float filterEnv = v.filterEnvelope.advance(parameters.filter.envelope, sampleRate);
-        if (!v.amp.active()) { retire_voice_grains(v); v.kill(); return {}; }
+        if (!v.amp.active()) {
+            retire_voice_grains(v);
+            v.kill();
+            profilerVoicesRetired.fetch_add(1U, std::memory_order_relaxed);
+            return {};
+        }
 
         std::array<float, kSynthLfoCount> lfoValues{};
         for (std::size_t i = 0; i < lfoValues.size(); ++i) lfoValues[i] = advance_lfo(v, i);
@@ -3245,7 +3356,8 @@ struct Synthesizer::Impl {
         std::array<bool, kSynthOscillatorCount> currentWrapped{};
         for (std::size_t i = 0; i < parameters.oscillators.size(); ++i) {
             const OscillatorParameters& osc = parameters.oscillators[i];
-            if (!osc.enabled || osc.gain <= 0.0F) continue;
+            const float smoothedGain = smoothedOscGain[i].current;
+            if (!osc.enabled || smoothedGain <= 0.0F) continue;
 
             const auto source_sample = [&](std::int8_t source) noexcept {
                 if (source < 0 || source >= static_cast<std::int8_t>(kSynthOscillatorCount) ||
@@ -3382,7 +3494,7 @@ struct Synthesizer::Impl {
             }
 
             const float gainMod = clampf(1.0F + mod.gain[i], 0.0F, 3.0F);
-            const float oscillatorGain = osc.gain * gainMod;
+            const float oscillatorGain = smoothedOscGain[i].current * gainMod;
             sample *= oscillatorGain; stereoLeft *= oscillatorGain; stereoRight *= oscillatorGain;
             currentSamples[i] = clampf(sample, -8.0F, 8.0F);
             const float basePan = clampf(osc.pan + mod.voicePan, -1.0F, 1.0F);
@@ -3431,10 +3543,10 @@ struct Synthesizer::Impl {
             const float timbreValue = mpe_master(v.channel) ? v.timbre : controller[74];
             const float cutoffCc = timbreValue > 0.0F ? std::exp2((timbreValue - 0.5F) * 8.0F) : 1.0F;
             const float keyTrackOctaves = (static_cast<float>(v.note) - 60.0F) / 12.0F * parameters.filter.keyTrack;
-            const float cutoff = parameters.filter.cutoffHertz * cutoffCc *
+            const float cutoff = std::exp2(smoothedFilterCutoffLog.current) * cutoffCc *
                                  std::exp2(parameters.filter.envelopeAmountOctaves * filterEnv +
                                            keyTrackOctaves + mod.filterCutoff);
-            const float resonance = clampf(parameters.filter.resonance + controller[71] * 0.5F +
+            const float resonance = clampf(smoothedFilterResonance.current + controller[71] * 0.5F +
                                            mod.filterResonance, 0.0F, 1.0F);
             FilterParameters modulatedFilter = parameters.filter;
             modulatedFilter.drive = clampf(parameters.filter.drive + mod.filterDrive, 0.1F, 24.0F);
@@ -3447,8 +3559,9 @@ struct Synthesizer::Impl {
     void effects(float& left, float& right) noexcept {
         if (parameters.distortion.enabled) {
             const float mix = clampf(parameters.distortion.mix, 0.0F, 1.0F);
+            const float smoothedDrive = smoothedDistortionDrive.current;
             if (parameters.distortion.mode == DistortionMode::Fuzz) {
-                const float gain = parameters.distortion.drive * 4.0F;
+                const float gain = smoothedDrive * 4.0F;
                 const float clippedL = clampf(left * gain, -0.85F, 1.0F);
                 const float clippedR = clampf(right * gain, -0.85F, 1.0F);
                 const float tone = 1.0F - std::exp(-kTwoPi * 6500.0F / sampleRate);
@@ -3457,8 +3570,8 @@ struct Synthesizer::Impl {
                 left += (fuzzToneL * 0.9F - left) * mix;
                 right += (fuzzToneR * 0.9F - right) * mix;
             } else {
-                const float wetL = fast_tanh(left * parameters.distortion.drive);
-                const float wetR = fast_tanh(right * parameters.distortion.drive);
+                const float wetL = fast_tanh(left * smoothedDrive);
+                const float wetR = fast_tanh(right * smoothedDrive);
                 left += (wetL - left) * mix; right += (wetR - right) * mix;
             }
         }
@@ -3482,10 +3595,10 @@ struct Synthesizer::Impl {
             const float lowL = eqLowL; const float lowR = eqLowR;
             const float highL = left - eqHighL; const float highR = right - eqHighR;
             const float midL = left - lowL - highL; const float midR = right - lowR - highR;
-            left = lowL * db_to_gain(parameters.eq.lowGainDb) + midL * db_to_gain(parameters.eq.midGainDb) +
-                   highL * db_to_gain(parameters.eq.highGainDb);
-            right = lowR * db_to_gain(parameters.eq.lowGainDb) + midR * db_to_gain(parameters.eq.midGainDb) +
-                    highR * db_to_gain(parameters.eq.highGainDb);
+            left = lowL * db_to_gain(smoothedEqLowDb.current) + midL * db_to_gain(smoothedEqMidDb.current) +
+                   highL * db_to_gain(smoothedEqHighDb.current);
+            right = lowR * db_to_gain(smoothedEqLowDb.current) + midR * db_to_gain(smoothedEqMidDb.current) +
+                    highR * db_to_gain(smoothedEqHighDb.current);
         }
         if (parameters.chorus.enabled) {
             chorusPhase = wrap_phase(chorusPhase + parameters.chorus.rateHertz / sampleRate);
@@ -3503,7 +3616,7 @@ struct Synthesizer::Impl {
             const float depth = clampf(parameters.flanger.depthMilliseconds, 0.0F, 10.0F) * sampleRate / 1000.0F;
             const float delayL_ = base + depth * (0.5F + 0.5F * fast_sin_phase(flangerPhase));
             const float delayR_ = base + depth * (0.5F + 0.5F * fast_sin_phase(flangerPhase + 0.5F));
-            const float feedback = clampf(parameters.flanger.feedback, -0.92F, 0.92F);
+            const float feedback = clampf(smoothedFlangerFeedback.current, -0.92F, 0.92F);
             const float inL = left + flangerFeedbackL * feedback;
             const float inR = right + flangerFeedbackR * feedback;
             const float wetL = flangerL.read_fractional(delayL_);
@@ -3552,10 +3665,10 @@ struct Synthesizer::Impl {
             left += (wetL - left) * mix; right += (wetR - right) * mix;
         }
         if (parameters.delay.enabled) {
-            const float delaySamples = clampf(parameters.delay.timeSeconds, 0.01F, 1.95F) * sampleRate;
+            const float delaySamples = clampf(smoothedDelayTime.current, 0.01F, 1.95F) * sampleRate;
             const float delayedL = delayL.read_fractional(delaySamples);
             const float delayedR = delayR.read_fractional(delaySamples);
-            const float feedback = clampf(parameters.delay.feedback, 0.0F, 0.94F);
+            const float feedback = clampf(smoothedDelayFeedback.current, 0.0F, 0.94F);
             delayL.push(left + (parameters.delay.pingPong ? delayedR : delayedL) * feedback);
             delayR.push(right + (parameters.delay.pingPong ? delayedL : delayedR) * feedback);
             const float mix = clampf(parameters.delay.mix, 0.0F, 1.0F);
@@ -3576,9 +3689,10 @@ struct Synthesizer::Impl {
                 : release * compressorEnvelope + (1.0F - release) * detector;
             const float envelopeDb = 20.0F * std::log10(std::max(compressorEnvelope, 1.0e-9F));
             float reductionDb = 0.0F;
-            if (envelopeDb > parameters.compressor.thresholdDb)
-                reductionDb = (parameters.compressor.thresholdDb +
-                               (envelopeDb - parameters.compressor.thresholdDb) / std::max(1.0F, parameters.compressor.ratio)) - envelopeDb;
+            const float smoothedThreshold = smoothedCompThresholdDb.current;
+            if (envelopeDb > smoothedThreshold)
+                reductionDb = (smoothedThreshold +
+                               (envelopeDb - smoothedThreshold) / std::max(1.0F, parameters.compressor.ratio)) - envelopeDb;
             const float gain = db_to_gain(reductionDb + parameters.compressor.makeupDb);
             left *= gain; right *= gain;
         }
@@ -3610,6 +3724,10 @@ struct Synthesizer::Impl {
             if (source.active) ++count;
         }
         activeVoiceCount.store(count, std::memory_order_relaxed);
+        profilerActiveVoices.store(count, std::memory_order_relaxed);
+        std::uint32_t peak = profilerMaximumActiveVoices.load(std::memory_order_relaxed);
+        while (count > peak &&
+               !profilerMaximumActiveVoices.compare_exchange_weak(peak, count, std::memory_order_relaxed)) {}
         heldArpNoteCount.store(static_cast<std::uint32_t>(active_held_count()), std::memory_order_relaxed);
         for (std::size_t i = 0; i < modulationTelemetry.size(); ++i)
             modulationTelemetry[i].store(modulationScratch[i], std::memory_order_relaxed);
@@ -4316,8 +4434,9 @@ bool SynthPreset::validate(std::string* error) const {
             !in_range(lfo.beatsPerCycle, 0.03125F, 32.0F)) return fail("invalid LFO parameters");
     }
     for (const auto& slot : modulation) {
-        if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
-            static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::Macro4) ||
+        if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.bias, -1.0F, 1.0F) ||
+            !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
+            static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::ReleaseVelocity) ||
             static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::Osc8Gain))
             return fail("invalid modulation matrix slot");
     }
@@ -4630,6 +4749,7 @@ std::string SynthPreset::serialize() const {
             << prefix << "source=" << modulation_source_token(slot.source) << '\n'
             << prefix << "destination=" << modulation_destination_token(slot.destination) << '\n'
             << prefix << "amount=" << slot.amount << '\n'
+            << prefix << "bias=" << slot.bias << '\n'
             << prefix << "curve=" << modulation_curve_token(slot.curve) << '\n'
             << prefix << "polarity=" << static_cast<unsigned>(slot.polarity) << '\n'
             << prefix << "smoothingMs=" << slot.smoothingMilliseconds << '\n';
@@ -5034,6 +5154,7 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (field == "source") { const auto source = parse_modulation_source(value); parsed = source.has_value(); if (source) slot.source = *source; }
             else if (field == "destination") { const auto destination = parse_modulation_destination(value); parsed = destination.has_value(); if (destination) slot.destination = *destination; }
             else if (field == "amount") parsed = readFloat(slot.amount);
+            else if (field == "bias") parsed = readFloat(slot.bias);
             else if (field == "curve") { const auto curve = parse_modulation_curve(value); parsed = curve.has_value(); if (curve) slot.curve = *curve; }
             else if (field == "polarity") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && v<=1U; if(parsed) slot.polarity=static_cast<ModulationPolarity>(v); }
             else if (field == "smoothingMs") parsed = readFloat(slot.smoothingMilliseconds);
@@ -5453,6 +5574,36 @@ void Synthesizer::reset_granular_profiler() noexcept {
     impl_->sampleStreamCache.reset_metrics();
 }
 
+SynthProfiler Synthesizer::profiler() const noexcept {
+    return {impl_->profilerRenderCalls.load(std::memory_order_relaxed),
+            impl_->profilerSamplesRendered.load(std::memory_order_relaxed),
+            impl_->profilerVoicesStarted.load(std::memory_order_relaxed),
+            impl_->profilerVoicesStolen.load(std::memory_order_relaxed),
+            impl_->profilerVoicesRetired.load(std::memory_order_relaxed),
+            impl_->profilerOscillatorVoiceFrames.load(std::memory_order_relaxed),
+            impl_->profilerFilterFrames.load(std::memory_order_relaxed),
+            impl_->profilerFxFrames.load(std::memory_order_relaxed),
+            impl_->profilerArpSteps.load(std::memory_order_relaxed),
+            impl_->droppedMidi.load(std::memory_order_relaxed),
+            impl_->profilerActiveVoices.load(std::memory_order_relaxed),
+            impl_->profilerMaximumActiveVoices.load(std::memory_order_relaxed)};
+}
+
+void Synthesizer::reset_profiler() noexcept {
+    impl_->profilerRenderCalls.store(0U, std::memory_order_relaxed);
+    impl_->profilerSamplesRendered.store(0U, std::memory_order_relaxed);
+    impl_->profilerVoicesStarted.store(0U, std::memory_order_relaxed);
+    impl_->profilerVoicesStolen.store(0U, std::memory_order_relaxed);
+    impl_->profilerVoicesRetired.store(0U, std::memory_order_relaxed);
+    impl_->profilerOscillatorVoiceFrames.store(0U, std::memory_order_relaxed);
+    impl_->profilerFilterFrames.store(0U, std::memory_order_relaxed);
+    impl_->profilerFxFrames.store(0U, std::memory_order_relaxed);
+    impl_->profilerArpSteps.store(0U, std::memory_order_relaxed);
+    impl_->profilerActiveVoices.store(0U, std::memory_order_relaxed);
+    impl_->profilerMaximumActiveVoices.store(impl_->profilerActiveVoices.load(std::memory_order_relaxed),
+                                            std::memory_order_relaxed);
+}
+
 void Synthesizer::all_notes_off(bool immediate) noexcept {
     for (std::uint8_t channel = 0; channel < 16U; ++channel)
         (void)post_midi(MidiMessage::control_change(channel, immediate ? 120U : 123U, 0, current_frame()));
@@ -5501,6 +5652,7 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     impl_->adopt_pending_sample_map();
     RealtimePreset latest{};
     while (impl_->presetIn.pop(latest)) impl_->adopt_preset(latest);
+    impl_->advance_parameter_smoothing(frameCount);
     if (impl_->transportRestartRequested.exchange(false, std::memory_order_acq_rel)) {
         impl_->clear_arp_held(true);
         impl_->renderFrame = impl_->transportRestartFrame.load(std::memory_order_relaxed);
@@ -5529,6 +5681,17 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     const std::uint64_t blockStart = currentFrame_.load(std::memory_order_relaxed);
     std::size_t eventIndex = 0;
     float peakLeft = 0.0F; float peakRight = 0.0F; double squareLeft = 0.0; double squareRight = 0.0;
+    // Profiler stage activity, accumulated locally and published once per render call to keep
+    // atomics out of the per-frame hot loop.
+    std::uint64_t blockOscillatorVoiceFrames = 0;
+    std::uint64_t blockFilterFrames = 0;
+    std::uint64_t blockFxFrames = 0;
+    const bool filterEnabled = impl_->parameters.filter.enabled;
+    const bool anyFxEnabled = impl_->parameters.distortion.enabled || impl_->parameters.bitcrusher.enabled ||
+        impl_->parameters.harmonizer.enabled || impl_->parameters.eq.enabled || impl_->parameters.chorus.enabled ||
+        impl_->parameters.flanger.enabled || impl_->parameters.ensemble.enabled || impl_->parameters.phaser.enabled ||
+        impl_->parameters.delay.enabled || impl_->parameters.reverb.enabled ||
+        impl_->parameters.compressor.enabled || impl_->parameters.limiter.enabled;
     for (std::size_t frame = 0; frame < frameCount; ++frame) {
         const std::uint64_t absoluteFrame = blockStart + frame;
         impl_->renderFrame = absoluteFrame;
@@ -5537,19 +5700,25 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
         impl_->process_scheduled_events();
         impl_->advance_arpeggiator();
         float left = 0.0F; float right = 0.0F;
+        std::uint32_t frameActiveVoices = 0;
         for (Voice& voice : impl_->voice) {
+            if (voice.active) ++frameActiveVoices;
             const auto [voiceLeft, voiceRight] = impl_->render_voice(voice);
             left += voiceLeft; right += voiceRight;
         }
+        blockOscillatorVoiceFrames += frameActiveVoices;
+        if (filterEnabled && frameActiveVoices > 0U) ++blockFilterFrames;
+        if (anyFxEnabled) ++blockFxFrames;
         const float channelVolume = impl_->controller[7] > 0.0F ? impl_->controller[7] : 1.0F;
         const float panController = impl_->controller[10];
+        const float smoothedMaster = impl_->smoothedMasterGain.current;
         if (panController <= 0.0F) {
-            left *= impl_->parameters.masterGain * channelVolume * impl_->parameters.masterPanLeft;
-            right *= impl_->parameters.masterGain * channelVolume * impl_->parameters.masterPanRight;
+            left *= smoothedMaster * channelVolume * impl_->parameters.masterPanLeft;
+            right *= smoothedMaster * channelVolume * impl_->parameters.masterPanRight;
         } else {
             const float masterPan = clampf(impl_->parameters.masterPan + panController * 2.0F - 1.0F, -1.0F, 1.0F);
-            left *= impl_->parameters.masterGain * channelVolume * std::sqrt(0.5F * (1.0F - masterPan));
-            right *= impl_->parameters.masterGain * channelVolume * std::sqrt(0.5F * (1.0F + masterPan));
+            left *= smoothedMaster * channelVolume * std::sqrt(0.5F * (1.0F - masterPan));
+            right *= smoothedMaster * channelVolume * std::sqrt(0.5F * (1.0F + masterPan));
         }
         impl_->effects(left, right);
         if (!finite(left)) left = 0.0F;
@@ -5570,6 +5739,11 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     impl_->rmsL.store(static_cast<float>(std::sqrt(squareLeft / static_cast<double>(frameCount))), std::memory_order_relaxed);
     impl_->rmsR.store(static_cast<float>(std::sqrt(squareRight / static_cast<double>(frameCount))), std::memory_order_relaxed);
     impl_->renderedFrames.fetch_add(frameCount, std::memory_order_relaxed);
+    impl_->profilerRenderCalls.fetch_add(1U, std::memory_order_relaxed);
+    impl_->profilerSamplesRendered.fetch_add(frameCount, std::memory_order_relaxed);
+    impl_->profilerOscillatorVoiceFrames.fetch_add(blockOscillatorVoiceFrames, std::memory_order_relaxed);
+    impl_->profilerFilterFrames.fetch_add(blockFilterFrames, std::memory_order_relaxed);
+    impl_->profilerFxFrames.fetch_add(blockFxFrames, std::memory_order_relaxed);
     impl_->publish_telemetry();
 }
 

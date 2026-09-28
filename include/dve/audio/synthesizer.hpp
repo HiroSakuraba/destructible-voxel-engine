@@ -13,6 +13,7 @@
 
 #include "dve/audio/midi.hpp"
 #include "dve/audio/sample_map.hpp"
+#include "dve/audio/synth_profiler.hpp"
 
 namespace dve::audio {
 
@@ -119,7 +120,8 @@ enum class GrainWindow : std::uint8_t { Hann, Triangle, Tukey };
 
 enum class ModulationSource : std::uint8_t {
     Off, Lfo1, Lfo2, AmpEnvelope, FilterEnvelope, Velocity, KeyTrack,
-    ModWheel, Aftertouch, Random, Macro1, Macro2, Macro3, Macro4
+    ModWheel, Aftertouch, Random, Macro1, Macro2, Macro3, Macro4,
+    Timbre, NotePitchBend, ReleaseVelocity
 };
 
 enum class ModulationDestination : std::uint8_t {
@@ -283,6 +285,7 @@ struct ModulationSlot {
     ModulationSource source{ModulationSource::Off};
     ModulationDestination destination{ModulationDestination::Off};
     float amount{};
+    float bias{};  // Phase 0: constant offset added to the routed value (-1..1)
     ModulationCurve curve{ModulationCurve::Linear};
     ModulationPolarity polarity{ModulationPolarity::Bipolar};
     float smoothingMilliseconds{8.0F};
@@ -579,6 +582,8 @@ public:
                                                   std::span<const float> monoFrames) noexcept;
     [[nodiscard]] SynthGranularProfiler granular_profiler() const noexcept;
     void reset_granular_profiler() noexcept;
+    [[nodiscard]] SynthProfiler profiler() const noexcept;
+    void reset_profiler() noexcept;
     void all_notes_off(bool immediate = false) noexcept;
 
     // Post from game/editor/MIDI threads. sampleFrame==0 means the next render quantum.

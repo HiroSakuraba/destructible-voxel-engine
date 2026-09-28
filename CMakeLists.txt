@@ -280,6 +280,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/sample_map.cpp
         src/audio/sample_map_recipe.cpp
         src/audio/synthesizer.cpp
+        src/audio/sequencer.cpp
         src/audio/synth_patch.cpp
         src/audio/sequencer.cpp
         src/audio/patch_genetics.cpp

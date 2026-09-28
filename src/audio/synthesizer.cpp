@@ -5083,6 +5083,92 @@ SynthPreset make_noise_sweep_fx() {
     preset.delay.enabled = true;
     return preset;
 }
+
+// Phase 2: sampler showcase. The factory preset bakes a small seamlessly
+// loopable vocal-ish tone into the preset sample bank (12000 frames = exactly
+// 110 cycles at 440 Hz, so the loop seam is click-free) and plays it back
+// through the Sampler generator with pitch tracking. If the bank were ever
+// empty the sampler would simply stay silent, but the baked sample keeps the
+// factory preset self-contained and audible.
+SynthPreset make_sampled_loop_vox() {
+    auto preset = base_preset("Sampled Loop Vox");
+    enable_osc(preset, 0, OscillatorWaveform::Sampler, 0.0F, 0.0F, 0.90F);
+    constexpr std::uint32_t kFrames = 12000U;  // 110 cycles at 440 Hz / 48 kHz: seamless loop
+    constexpr float kRate = 48000.0F;
+    constexpr float kFrequency = 440.0F;
+    constexpr float kHarmonics[8] = {1.0F, 0.55F, 0.38F, 0.26F, 0.18F, 0.12F, 0.08F, 0.05F};
+    float peak = 0.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        float sample = 0.0F;
+        const float phase = 2.0F * 3.14159265358979F * kFrequency * static_cast<float>(i) / kRate;
+        for (int harmonic = 0; harmonic < 8; ++harmonic)
+            sample += kHarmonics[harmonic] * std::sin(phase * static_cast<float>(harmonic + 1));
+        peak = std::max(peak, std::abs(sample));
+        preset.sampleBank.samples[i] = sample;
+    }
+    const float normalize = peak > 0.0F ? 0.75F / peak : 1.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) preset.sampleBank.samples[i] *= normalize;
+    preset.sampleBank.name = "Loop Vox Ah";
+    preset.sampleBank.enabled = true;
+    preset.sampleBank.sampleRate = 48000U;
+    preset.sampleBank.rootNote = 69;  // recorded at A440: MIDI 69 plays at concert pitch
+    preset.sampleBank.frameCount = kFrames;
+    preset.sampler.enabled = true;
+    preset.sampler.playbackMode = SamplerPlaybackMode::Loop;
+    preset.sampler.direction = SamplerDirection::Forward;
+    preset.sampler.loopStartSeconds = 0.0F;
+    preset.sampler.loopEndSeconds = static_cast<float>(kFrames) / kRate;
+    preset.sampler.loopCrossfadeSeconds = 0.004F;
+    preset.sampler.pitchTracking = true;
+    preset.sampler.gain = 0.8F;
+    preset.ampEnvelope = {0.008F, 0.30F, 0.70F, 0.35F, EnvelopeCurve::Exponential};
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.15F;
+    return preset;
+}
+
+// Phase 2: modal resonator showcase. A bank of damped modes struck by an
+// impulse at note-on, following the played note (baseFrequency 0): a mallet
+// with gently inharmonic upper partials.
+SynthPreset make_modal_marimba() {
+    auto preset = base_preset("Modal Marimba");
+    enable_osc(preset, 0, OscillatorWaveform::ModalResonator, 0.0F, 0.0F, 0.85F);
+    auto& mr = preset.oscillators[0].modalResonator;
+    mr.excitation = ExcitationSource::Impulse;
+    mr.modeCount = 8;
+    mr.baseFrequency = 0.0F;  // follow the played note
+    mr.damping = 1.1F;
+    mr.inharmonicity = 0.03F;
+    mr.brightness = 0.55F;
+    mr.excitationLevel = 1.0F;
+    constexpr float kRatios[8] = {1.0F, 2.01F, 2.98F, 4.16F, 5.43F, 6.79F, 8.21F, 9.65F};
+    constexpr float kGains[8] = {1.0F, 0.55F, 0.38F, 0.24F, 0.15F, 0.10F, 0.06F, 0.04F};
+    constexpr float kDecays[8] = {2.2F, 1.6F, 1.2F, 0.9F, 0.7F, 0.5F, 0.4F, 0.3F};
+    for (int i = 0; i < 8; ++i) mr.modes[i] = ModalResonatorMode{kRatios[i], kDecays[i], kGains[i]};
+    preset.ampEnvelope = {0.002F, 1.60F, 0.00F, 1.80F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.55F;
+    preset.reverb.mix = 0.22F;
+    return preset;
+}
+
+// Phase 2: diffusion delay showcase. A clean saw lead whose repeats smear
+// through the diffusion allpass stages into a reverb-ish wash.
+SynthPreset make_cloud_delay() {
+    auto preset = base_preset("Cloud Delay");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, 0.0F, 0.45F);
+    preset.ampEnvelope = {0.010F, 0.25F, 0.60F, 0.45F, EnvelopeCurve::Exponential};
+    lowpass(preset, 5200.0F, 0.12F, 0.5F, 0.02F, 0.30F, 0.50F, 0.30F);
+    preset.diffusionDelay.enabled = true;
+    preset.diffusionDelay.timeSeconds = 0.45F;
+    preset.diffusionDelay.feedback = 0.55F;
+    preset.diffusionDelay.mix = 0.38F;
+    preset.diffusionDelay.diffusion = 0.85F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.70F;
+    preset.reverb.mix = 0.15F;
+    return preset;
+}
 } // namespace
 
 std::vector<SynthPreset> SynthPreset::builtin_presets() {
@@ -5098,6 +5184,9 @@ std::vector<SynthPreset> SynthPreset::builtin_presets() {
         make_reese_bass(),
         make_e_keys(),
         make_noise_sweep_fx(),
+        make_sampled_loop_vox(),
+        make_modal_marimba(),
+        make_cloud_delay(),
     };
 }
 

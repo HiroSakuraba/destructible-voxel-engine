@@ -60,6 +60,17 @@ int main() {
         click(controller, panel.parameterUpButtons[23]);
         require(controller.synthesizer().preset().filter.envelope.releaseSeconds > beforeRelease,
                 "filter release control did not update preset");
+        // Phase 2: Comb/Formant topologies are reachable; comb params are adjustable.
+        for (int i = 0; i < 6; ++i) {
+            if (controller.synthesizer().preset().filter.topology == dve::audio::FilterTopology::Comb) break;
+            click(controller, panel.parameterUpButtons[0]);
+        }
+        require(controller.synthesizer().preset().filter.topology == dve::audio::FilterTopology::Comb,
+                "filter topology cycle never reached Comb");
+        const float beforeCombDamping = controller.synthesizer().preset().filter.comb.damping;
+        click(controller, panel.parameterUpButtons[24]);
+        require(controller.synthesizer().preset().filter.comb.damping > beforeCombDamping,
+                "comb damping control did not update preset");
 
         click(controller, panel.tabButtons[0]);
         const float beforeFmAmount = controller.synthesizer().preset().oscillators[0].frequencyModAmount;
@@ -106,6 +117,32 @@ int main() {
         require(controller.synthesizer().preset().oscillators[0].grainDensityHertz > beforeGrainDensity,
                 "granular density control did not update preset");
 
+        // Phase 2: Sampler and ModalResonator waveforms are reachable through the wave cycle.
+        for (int i = 0; i < 16; ++i) {
+            if (controller.synthesizer().preset().oscillators[0].waveform ==
+                dve::audio::OscillatorWaveform::Sampler) break;
+            click(controller, panel.oscillatorWaveButtons[0]);
+        }
+        require(controller.synthesizer().preset().oscillators[0].waveform ==
+                dve::audio::OscillatorWaveform::Sampler,
+                "waveform cycle never reached Sampler");
+        const float beforeSamplerGain = controller.synthesizer().preset().sampler.gain;
+        click(controller, panel.oscillatorAdvancedUpButtons[4]);
+        require(controller.synthesizer().preset().sampler.gain > beforeSamplerGain,
+                "sampler gain control did not update preset");
+
+        auto modalPreset = controller.synthesizer().preset();
+        modalPreset.oscillators[0].waveform = dve::audio::OscillatorWaveform::ModalResonator;
+        controller.synthesizer().set_preset(modalPreset);
+        const auto beforeExcitation = controller.synthesizer().preset().oscillators[0].modalResonator.excitation;
+        click(controller, panel.oscillatorAdvancedUpButtons[0]);
+        require(controller.synthesizer().preset().oscillators[0].modalResonator.excitation != beforeExcitation,
+                "modal excitation control did not update preset");
+        const float beforeDamping = controller.synthesizer().preset().oscillators[0].modalResonator.damping;
+        click(controller, panel.oscillatorAdvancedUpButtons[2]);
+        require(controller.synthesizer().preset().oscillators[0].modalResonator.damping > beforeDamping,
+                "modal damping control did not update preset");
+
         click(controller, panel.tabButtons[2]);
         require(controller.synth_panel().page() == SynthPanelPage::Modulation,
                 "modulation page did not open");
@@ -119,6 +156,19 @@ int main() {
         click(controller, panel.parameterToggleButtons[23]);
         require(controller.synthesizer().preset().modulation[0].enabled,
                 "modulation route enable control did not update preset");
+        // Phase 2: destination cycle reaches SamplerStartPosition; bias row adjusts.
+        for (int i = 0; i < 42; ++i) {
+            if (controller.synthesizer().preset().modulation[0].destination ==
+                dve::audio::ModulationDestination::SamplerStartPosition) break;
+            click(controller, panel.parameterUpButtons[20]);
+        }
+        require(controller.synthesizer().preset().modulation[0].destination ==
+                dve::audio::ModulationDestination::SamplerStartPosition,
+                "modulation destination cycle never reached SamplerStartPosition");
+        const float beforeBias = controller.synthesizer().preset().modulation[0].bias;
+        click(controller, panel.parameterUpButtons[24]);
+        require(controller.synthesizer().preset().modulation[0].bias > beforeBias,
+                "modulation bias control did not update preset");
         const float beforeMacro = controller.synthesizer().preset().macros.values[0];
         click(controller, panel.macroUpButtons[0]);
         require(controller.synthesizer().preset().macros.values[0] > beforeMacro,
@@ -196,6 +246,44 @@ int main() {
         click(controller, panel.effectParamToggleButtons[2]);
         require(controller.synthesizer().preset().distortion.mode != beforeMode,
                 "distortion mode toggle did not update preset");
+
+        // Phase 2: distortion mode cycles through all four modes.
+        const auto modeStart = controller.synthesizer().preset().distortion.mode;
+        click(controller, panel.effectParamToggleButtons[2]);
+        const auto modeNext = controller.synthesizer().preset().distortion.mode;
+        require(modeNext != modeStart, "distortion mode toggle did not advance");
+        click(controller, panel.effectParamToggleButtons[2]);
+        click(controller, panel.effectParamToggleButtons[2]);
+        require(controller.synthesizer().preset().distortion.mode != modeNext,
+                "distortion mode toggle did not reach a third mode");
+        click(controller, panel.effectParamToggleButtons[2]);
+        require(controller.synthesizer().preset().distortion.mode == modeStart,
+                "distortion mode toggle did not wrap after four modes");
+
+        // Phase 2: delay tempo sync toggle + sync beats.
+        click(controller, panel.effectRows[8]); // Delay
+        require(controller.synth_panel().selected_effect() == 8U, "effect row did not select delay");
+        const bool beforeTempoSync = controller.synthesizer().preset().delay.tempoSync;
+        click(controller, panel.effectParamToggleButtons[4]);
+        require(controller.synthesizer().preset().delay.tempoSync != beforeTempoSync,
+                "delay tempo sync toggle did not update preset");
+        const float beforeSyncBeats = controller.synthesizer().preset().delay.syncBeats;
+        click(controller, panel.effectParamUpButtons[5]);
+        require(controller.synthesizer().preset().delay.syncBeats > beforeSyncBeats,
+                "delay sync beats control did not update preset");
+
+        // Phase 2: diffusion delay row, enable toggle, and parameters.
+        click(controller, panel.effectRows[12]); // Diffusion
+        require(controller.synth_panel().selected_effect() == 12U, "effect row did not select diffusion");
+        const bool beforeDiffusion = controller.synthesizer().preset().diffusionDelay.enabled;
+        click(controller, panel.effectToggleButtons[12]);
+        require(controller.synthesizer().preset().diffusionDelay.enabled != beforeDiffusion,
+                "diffusion enable control did not update preset");
+        const float beforeDiffusionTime = controller.synthesizer().preset().diffusionDelay.timeSeconds;
+        click(controller, panel.effectParamUpButtons[0]);
+        require(controller.synthesizer().preset().diffusionDelay.timeSeconds > beforeDiffusionTime,
+                "diffusion time control did not update preset");
+        require(controller.synthesizer().preset().validate(), "preset invalid after Phase 2 FX edits");
 
         click(controller, panel.effectRows[10]); // Compressor: 5 params
         const float beforeThreshold = controller.synthesizer().preset().compressor.thresholdDb;

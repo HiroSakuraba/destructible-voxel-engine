@@ -74,9 +74,9 @@ struct SynthPanelLayout {
     std::array<UiRect, kSynthArpStepPropertyCount> arpeggiatorStepUpButtons{};
     std::array<UiRect, kSynthArpStepPropertyCount> arpeggiatorStepToggleButtons{};
 
-    std::array<UiRect, 12> effectRows{};
-    std::array<UiRect, 12> effectToggleButtons{};
-    static constexpr std::size_t kSynthEffectParamCount = 5;
+    std::array<UiRect, 13> effectRows{};
+    std::array<UiRect, 13> effectToggleButtons{};
+    static constexpr std::size_t kSynthEffectParamCount = 6;
     std::array<UiRect, kSynthEffectParamCount> effectParamRows{};
     std::array<UiRect, kSynthEffectParamCount> effectParamDownButtons{};
     std::array<UiRect, kSynthEffectParamCount> effectParamUpButtons{};

@@ -174,8 +174,8 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
     }
 
     for (std::size_t i = 0; i < layout_.effectRows.size(); ++i) {
-        const int column = static_cast<int>(i / 6U);
-        const int row = static_cast<int>(i % 6U);
+        const int column = static_cast<int>(i / 7U);
+        const int row = static_cast<int>(i % 7U);
         const int columnWidth = (contentWidth - 10) / 2;
         const int x = left + column * (columnWidth + 10);
         const int y = top + row * 45;
@@ -183,7 +183,7 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
         layout_.effectToggleButtons[i] = {x + columnWidth - 70, y + 7, 60, 24};
     }
     {
-        const int paramTop = top + 6 * 45 + 12;
+        const int paramTop = top + 7 * 45 + 12;
         const int paramColumnWidth = (contentWidth - 10) / 2;
         for (std::size_t i = 0; i < layout_.effectParamRows.size(); ++i) {
             const int x = left;
@@ -235,7 +235,7 @@ void EditorSynthPanel::cycle_waveform(std::size_t oscillator, int direction,
                                       audio::Synthesizer& synth) noexcept {
     auto preset = synth.preset();
     preset.oscillators[oscillator].waveform = cycle_enum(
-        preset.oscillators[oscillator].waveform, 13U, direction);
+        preset.oscillators[oscillator].waveform, 16U, direction);
     synth.set_preset(preset);
 }
 
@@ -254,6 +254,7 @@ void EditorSynthPanel::toggle_effect(std::size_t index, audio::Synthesizer& synt
         case 9: preset.reverb.enabled = !preset.reverb.enabled; break;
         case 10: preset.compressor.enabled = !preset.compressor.enabled; break;
         case 11: preset.limiter.enabled = !preset.limiter.enabled; break;
+        case 12: preset.diffusionDelay.enabled = !preset.diffusionDelay.enabled; break;
         default: return;
     }
     synth.set_preset(preset);
@@ -331,6 +332,7 @@ void EditorSynthPanel::adjust_effect_param(std::size_t paramIndex, int direction
                 case 0: preset.delay.timeSeconds = stepped(preset.delay.timeSeconds, 0.01F, 0.01F, 1.95F, direction); break;
                 case 1: preset.delay.feedback = stepped(preset.delay.feedback, 0.02F, 0.0F, 0.94F, direction); break;
                 case 2: preset.delay.mix = stepped(preset.delay.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                case 5: preset.delay.syncBeats = stepped(preset.delay.syncBeats, 0.25F, 0.03125F, 32.0F, direction); break;
                 default: return;
             }
             break;
@@ -360,6 +362,15 @@ void EditorSynthPanel::adjust_effect_param(std::size_t paramIndex, int direction
                 default: return;
             }
             break;
+        case 12: // Diffusion delay (Phase 2)
+            switch (paramIndex) {
+                case 0: preset.diffusionDelay.timeSeconds = stepped(preset.diffusionDelay.timeSeconds, 0.01F, 0.01F, 1.95F, direction); break;
+                case 1: preset.diffusionDelay.feedback = stepped(preset.diffusionDelay.feedback, 0.02F, 0.0F, 0.94F, direction); break;
+                case 2: preset.diffusionDelay.mix = stepped(preset.diffusionDelay.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                case 3: preset.diffusionDelay.diffusion = stepped(preset.diffusionDelay.diffusion, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
         default: return;
     }
     synth.set_preset(preset);
@@ -368,9 +379,9 @@ void EditorSynthPanel::adjust_effect_param(std::size_t paramIndex, int direction
 void EditorSynthPanel::toggle_effect_param(std::size_t paramIndex, audio::Synthesizer& synth) noexcept {
     auto preset = synth.preset();
     switch (selectedEffect_) {
-        case 0: // Distortion: mode Classic/Fuzz
-            if (paramIndex == 2) preset.distortion.mode = preset.distortion.mode == audio::DistortionMode::Classic ?
-                audio::DistortionMode::Fuzz : audio::DistortionMode::Classic;
+        case 0: // Distortion: cycle Classic/Fuzz/SoftClip/Foldback (Phase 2 adds the last two)
+            if (paramIndex == 2) preset.distortion.mode = static_cast<audio::DistortionMode>(
+                (static_cast<unsigned>(preset.distortion.mode) + 1U) % 4U);
             else return;
             break;
         case 6: // Ensemble: mode I/II/Both
@@ -378,8 +389,9 @@ void EditorSynthPanel::toggle_effect_param(std::size_t paramIndex, audio::Synthe
                 (static_cast<unsigned>(preset.ensemble.mode) + 1U) % 3U);
             else return;
             break;
-        case 8: // Delay: ping-pong
+        case 8: // Delay: ping-pong and tempo sync
             if (paramIndex == 3) preset.delay.pingPong = !preset.delay.pingPong;
+            else if (paramIndex == 4) preset.delay.tempoSync = !preset.delay.tempoSync;
             else return;
             break;
         default: return;
@@ -403,6 +415,38 @@ void EditorSynthPanel::adjust_oscillator_advanced(std::size_t index, int directi
             case 7: oscillator.sampleVelocityToGain = stepped(oscillator.sampleVelocityToGain, 0.05F, 0.0F, 1.0F, direction); break;
             case 8: oscillator.sampleOneShot = !oscillator.sampleOneShot; break;
             case 9: preset.sampleBank.rootNote = static_cast<std::uint8_t>(std::clamp<int>(static_cast<int>(preset.sampleBank.rootNote) + direction, 0, 127)); break;
+            default: return;
+        }
+    } else if (oscillator.waveform == audio::OscillatorWaveform::Sampler) {
+        // Phase 2: dedicated sampler generator reads the preset sample bank.
+        auto& sampler = preset.sampler;
+        switch (index) {
+            case 0: sampler.playbackMode = cycle_enum(sampler.playbackMode, 2U, direction); break;
+            case 1: sampler.direction = cycle_enum(sampler.direction, 2U, direction); break;
+            case 2: sampler.pitchTracking = !sampler.pitchTracking; break;
+            case 3: sampler.startOffsetSeconds = stepped(sampler.startOffsetSeconds, 0.01F, 0.0F, 3600.0F, direction); break;
+            case 4: sampler.gain = stepped(sampler.gain, 0.05F, 0.0F, 2.0F, direction); break;
+            case 5: sampler.loopStartSeconds = stepped(sampler.loopStartSeconds, 0.01F, 0.0F, 3600.0F, direction); break;
+            case 6: sampler.loopEndSeconds = stepped(sampler.loopEndSeconds, 0.01F, 0.0F, 3600.0F, direction); break;
+            case 7: sampler.loopCrossfadeSeconds = stepped(sampler.loopCrossfadeSeconds, 0.001F, 0.0F, 60.0F, direction); break;
+            case 8: sampler.enabled = !sampler.enabled; break;
+            case 9: preset.sampleBank.rootNote = static_cast<std::uint8_t>(std::clamp<int>(static_cast<int>(preset.sampleBank.rootNote) + direction, 0, 127)); break;
+            default: return;
+        }
+    } else if (oscillator.waveform == audio::OscillatorWaveform::ModalResonator) {
+        // Phase 2: modal resonator bank key parameters.
+        auto& modal = oscillator.modalResonator;
+        switch (index) {
+            case 0: modal.excitation = cycle_enum(modal.excitation, 4U, direction); break;
+            case 1: modal.baseFrequency = stepped(modal.baseFrequency, 10.0F, 0.0F, 20000.0F, direction); break;
+            case 2: modal.damping = stepped(modal.damping, 0.05F, 0.01F, 8.0F, direction); break;
+            case 3: modal.inharmonicity = stepped(modal.inharmonicity, 0.02F, 0.0F, 1.0F, direction); break;
+            case 4: modal.brightness = stepped(modal.brightness, 0.05F, 0.0F, 1.0F, direction); break;
+            case 5: modal.excitationLevel = stepped(modal.excitationLevel, 0.05F, 0.0F, 4.0F, direction); break;
+            case 6: modal.noiseBurstMilliseconds = stepped(modal.noiseBurstMilliseconds, 5.0F, 1.0F, 2000.0F, direction); break;
+            case 7: modal.transientMilliseconds = stepped(modal.transientMilliseconds, 5.0F, 1.0F, 2000.0F, direction); break;
+            case 8: modal.modeCount = static_cast<std::uint8_t>(std::clamp<int>(static_cast<int>(modal.modeCount) + direction, 1, 32)); break;
+            case 9: modal.modes[0].frequencyRatio = stepped(modal.modes[0].frequencyRatio, 0.01F, 0.25F, 4.0F, direction); break;
             default: return;
         }
     } else if (oscillator.waveform == audio::OscillatorWaveform::Granular) {
@@ -457,7 +501,7 @@ void EditorSynthPanel::adjust_parameter(std::size_t index, int direction,
     auto preset = synth.preset();
     if (page_ == SynthPanelPage::FilterEnvelope) {
         switch (index) {
-            case 0: preset.filter.topology = cycle_enum(preset.filter.topology, 4U, direction); break;
+            case 0: preset.filter.topology = cycle_enum(preset.filter.topology, 6U, direction); break;
             case 1: preset.filter.mode = cycle_enum(preset.filter.mode, 4U, direction); break;
             case 2: preset.filter.cutoffHertz = std::clamp(preset.filter.cutoffHertz * (direction > 0 ? 1.18F : 1.0F / 1.18F), 18.0F, 22000.0F); break;
             case 3: preset.filter.resonance = stepped(preset.filter.resonance, 0.05F, 0.0F, 1.0F, direction); break;
@@ -481,6 +525,10 @@ void EditorSynthPanel::adjust_parameter(std::size_t index, int direction,
             case 21: preset.filter.envelope.decaySeconds = stepped(preset.filter.envelope.decaySeconds, 0.02F, 0.0F, 60.0F, direction); break;
             case 22: preset.filter.envelope.sustainLevel = stepped(preset.filter.envelope.sustainLevel, 0.05F, 0.0F, 1.0F, direction); break;
             case 23: preset.filter.envelope.releaseSeconds = stepped(preset.filter.envelope.releaseSeconds, 0.02F, 0.0F, 60.0F, direction); break;
+            case 24: preset.filter.comb.damping = stepped(preset.filter.comb.damping, 0.05F, 0.0F, 1.0F, direction); break;
+            case 25: preset.filter.comb.mix = stepped(preset.filter.comb.mix, 0.05F, 0.0F, 1.0F, direction); break;
+            case 26: preset.filter.comb.feedbackScale = stepped(preset.filter.comb.feedbackScale, 0.05F, 0.25F, 2.0F, direction); break;
+            case 27: preset.filter.formant.dryMix = stepped(preset.filter.formant.dryMix, 0.05F, 0.0F, 1.0F, direction); break;
             default: break;
         }
     } else if (page_ == SynthPanelPage::Modulation) {
@@ -507,10 +555,12 @@ void EditorSynthPanel::adjust_parameter(std::size_t index, int direction,
                          static_cast<int>(audio::kSynthModulationSlotCount)) %
                         static_cast<int>(audio::kSynthModulationSlotCount));
                     break;
-                case 19: slot.source = cycle_enum(slot.source, 14U, direction); break;
-                case 20: slot.destination = cycle_enum(slot.destination, 39U, direction); break;
+                case 19: slot.source = cycle_enum(slot.source, 21U, direction); break;
+                case 20: slot.destination = cycle_enum(slot.destination, 42U, direction); break;
                 case 21: slot.amount = stepped(slot.amount, 0.05F, -1.0F, 1.0F, direction); break;
                 case 22: slot.curve = cycle_enum(slot.curve, 3U, direction); break;
+                case 23: slot.smoothingMilliseconds = stepped(slot.smoothingMilliseconds, 1.0F, 0.0F, 200.0F, direction); break;
+                case 24: slot.bias = stepped(slot.bias, 0.05F, -1.0F, 1.0F, direction); break;
                 default: break;
             }
         }

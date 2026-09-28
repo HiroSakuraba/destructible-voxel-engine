@@ -909,6 +909,25 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                       compact(osc.sampleLoopEnd), osc.sampleLoop ? "On" : "Off", osc.sampleReverse ? "On" : "Off",
                       osc.sampleKeyTrack ? "On" : "Off", compact(osc.sampleVelocityToGain),
                       osc.sampleOneShot ? "On" : "Off", std::to_string(preset.sampleBank.rootNote)};
+        } else if (osc.waveform == audio::OscillatorWaveform::Sampler) {
+            labels = {"Playback mode", "Direction", "Pitch tracking", "Start offset s", "Gain",
+                      "Loop start s", "Loop end s", "Loop xfade s", "Sampler enabled", "Root MIDI note"};
+            values = {std::string(audio::sampler_playback_mode_name(preset.sampler.playbackMode)),
+                      std::string(audio::sampler_direction_name(preset.sampler.direction)),
+                      preset.sampler.pitchTracking ? "On" : "Off", compact(preset.sampler.startOffsetSeconds),
+                      compact(preset.sampler.gain), compact(preset.sampler.loopStartSeconds),
+                      compact(preset.sampler.loopEndSeconds), compact(preset.sampler.loopCrossfadeSeconds),
+                      preset.sampler.enabled ? "On" : "Off", std::to_string(preset.sampleBank.rootNote)};
+        } else if (osc.waveform == audio::OscillatorWaveform::ModalResonator) {
+            const auto& modal = osc.modalResonator;
+            labels = {"Excitation", "Base freq Hz", "Damping", "Inharmonicity", "Brightness",
+                      "Excitation level", "Noise burst ms", "Transient ms", "Mode count", "Fundamental ratio"};
+            values = {std::string(audio::modal_excitation_source_name(modal.excitation)),
+                      modal.baseFrequency <= 0.0F ? "Note" : compact(modal.baseFrequency, 0),
+                      compact(modal.damping), compact(modal.inharmonicity), compact(modal.brightness),
+                      compact(modal.excitationLevel), compact(modal.noiseBurstMilliseconds),
+                      compact(modal.transientMilliseconds), std::to_string(modal.modeCount),
+                      compact(modal.modes[0].frequencyRatio)};
         } else if (osc.waveform == audio::OscillatorWaveform::Granular) {
             labels = {"Grain position", "Grain size ms", "Density Hz", "Spray", "Pitch semitones",
                       "Stereo spread", "Freeze", "Window", "Reverse", "Key tracking"};
@@ -982,7 +1001,8 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             "Filter model", "Filter output", "Cutoff Hz", "Resonance", "Drive", "Envelope depth",
             "Ladder bass comp", "SEM morph", "Oversampling", "MS-20 high-pass", "Self oscillation", "Key tracking",
             "Amp delay", "Amp attack", "Amp hold", "Amp decay", "Amp sustain", "Amp release",
-            "Filter delay", "Filter attack", "Filter hold", "Filter decay", "Filter sustain", "Filter release"};
+            "Filter delay", "Filter attack", "Filter hold", "Filter decay", "Filter sustain", "Filter release",
+            "Comb damping", "Comb mix", "Comb feedback", "Formant dry mix"};
         std::array<std::string, kSynthParameterRowCount> values{
             std::string(audio::filter_topology_name(preset.filter.topology)), std::string(audio::filter_mode_name(preset.filter.mode)),
             compact(preset.filter.cutoffHertz,0), compact(preset.filter.resonance), compact(preset.filter.drive),
@@ -993,7 +1013,9 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             compact(preset.ampEnvelope.sustainLevel), compact(preset.ampEnvelope.releaseSeconds,3),
             compact(preset.filter.envelope.delaySeconds,3), compact(preset.filter.envelope.attackSeconds,3),
             compact(preset.filter.envelope.holdSeconds,3), compact(preset.filter.envelope.decaySeconds,3),
-            compact(preset.filter.envelope.sustainLevel), compact(preset.filter.envelope.releaseSeconds,3)};
+            compact(preset.filter.envelope.sustainLevel), compact(preset.filter.envelope.releaseSeconds,3),
+            compact(preset.filter.comb.damping), compact(preset.filter.comb.mix),
+            compact(preset.filter.comb.feedbackScale), compact(preset.filter.formant.dryMix)};
         std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
         toggles[0] = true; active[0] = preset.filter.enabled; values[0] = preset.filter.enabled ? values[0] : "Filter off";
         toggles[1] = true; active[1] = preset.filter.alternateRevision; values[1] = preset.filter.alternateRevision ? "Revision B" : "Revision A";
@@ -1006,7 +1028,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             "LFO 1 key sync", "LFO 1 tempo sync", "LFO 1 beats/cycle",
             "LFO 2", "LFO 2 wave", "LFO 2 rate", "LFO 2 depth", "LFO 2 phase", "LFO 2 fade",
             "LFO 2 key sync", "LFO 2 tempo sync", "LFO 2 beats/cycle",
-            "Modulation slot", "Source", "Destination", "Amount", "Curve", "Route enabled"};
+            "Modulation slot", "Source", "Destination", "Amount", "Curve", "Route enabled", "Bias"};
         const auto modulationInfo = controller.synthesizer().modulation_activity()[controller.synth_panel().selected_modulation_slot()];
         std::array<std::string, kSynthParameterRowCount> values{
             bool_text(lfo1.enabled), std::string(audio::lfo_waveform_name(lfo1.waveform)), compact(lfo1.rateHertz), compact(lfo1.depth),
@@ -1016,7 +1038,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             std::to_string(controller.synth_panel().selected_modulation_slot() + 1U),
             std::string(audio::modulation_source_name(slot.source)), std::string(audio::modulation_destination_name(slot.destination)),
             compact(slot.amount) + " | live " + compact(modulationInfo.currentValue),
-            std::string(curve_text(slot.curve)), bool_text(slot.enabled)};
+            std::string(curve_text(slot.curve)), bool_text(slot.enabled), compact(slot.bias)};
         std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
         for (std::size_t i : {0U,6U,7U,9U,15U,16U,23U}) toggles[i] = true;
         active[0]=lfo1.enabled; active[6]=lfo1.keySync; active[7]=lfo1.tempoSync;
@@ -1130,14 +1152,15 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             }
         }
     } else if (page == SynthPanelPage::Effects) {
-        static constexpr std::array<std::string_view, 12> effectNames{
+        static constexpr std::array<std::string_view, 13> effectNames{
             "Distortion", "Bitcrusher", "Harmonizer", "3-band EQ", "Chorus", "Flanger",
-            "Ensemble", "Phaser", "Delay", "Reverb", "Compressor", "Limiter"};
-        const std::array<bool, 12> effects{
+            "Ensemble", "Phaser", "Delay", "Reverb", "Compressor", "Limiter", "Diffusion"};
+        const std::array<bool, 13> effects{
             preset.distortion.enabled, preset.bitcrusher.enabled, preset.harmonizer.enabled,
             preset.eq.enabled, preset.chorus.enabled, preset.flanger.enabled,
             preset.ensemble.enabled, preset.phaser.enabled, preset.delay.enabled,
-            preset.reverb.enabled, preset.compressor.enabled, preset.limiter.enabled};
+            preset.reverb.enabled, preset.compressor.enabled, preset.limiter.enabled,
+            preset.diffusionDelay.enabled};
         const std::size_t selectedEffect = controller.synth_panel().selected_effect();
         for (std::size_t i = 0; i < layout.effectRows.size(); ++i) {
             painter.fill(layout.effectRows[i], panel); painter.outline(layout.effectRows[i], border);
@@ -1153,11 +1176,21 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             std::vector<std::tuple<std::string, std::string, bool>> rows;
             const auto f2 = [&](float v, int d) { return compact(v, d); };
             switch (effect) {
-                case 0:
+                case 0: {
+                    auto distortion_mode_text = [](audio::DistortionMode mode) -> std::string_view {
+                        switch (mode) {
+                            case audio::DistortionMode::Classic: return "Classic";
+                            case audio::DistortionMode::Fuzz: return "Fuzz";
+                            case audio::DistortionMode::SoftClip: return "Soft Clip";
+                            case audio::DistortionMode::Foldback: return "Foldback";
+                        }
+                        return "Classic";
+                    };
                     rows.emplace_back("Drive", f2(preset.distortion.drive, 1), false);
                     rows.emplace_back("Mix", f2(preset.distortion.mix, 2), false);
-                    rows.emplace_back("Mode", preset.distortion.mode == audio::DistortionMode::Fuzz ? "Fuzz" : "Classic", true);
+                    rows.emplace_back("Mode", distortion_mode_text(preset.distortion.mode), true);
                     break;
+                }
                 case 1:
                     rows.emplace_back("Bits", std::to_string(preset.bitcrusher.bits), false);
                     rows.emplace_back("Downsample", std::to_string(preset.bitcrusher.downsample), false);
@@ -1202,6 +1235,8 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                     rows.emplace_back("Feedback", f2(preset.delay.feedback, 2), false);
                     rows.emplace_back("Mix", f2(preset.delay.mix, 2), false);
                     rows.emplace_back("Ping-pong", preset.delay.pingPong ? "On" : "Off", true);
+                    rows.emplace_back("Tempo sync", preset.delay.tempoSync ? "On" : "Off", true);
+                    rows.emplace_back("Sync beats", f2(preset.delay.syncBeats, 2), false);
                     break;
                 case 9:
                     rows.emplace_back("Room size", f2(preset.reverb.roomSize, 2), false);
@@ -1219,6 +1254,12 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                 case 11:
                     rows.emplace_back("Ceiling dB", f2(preset.limiter.ceilingDb, 1), false);
                     rows.emplace_back("Release ms", f2(preset.limiter.releaseMilliseconds, 0), false);
+                    break;
+                case 12:
+                    rows.emplace_back("Time s", f2(preset.diffusionDelay.timeSeconds, 2), false);
+                    rows.emplace_back("Feedback", f2(preset.diffusionDelay.feedback, 2), false);
+                    rows.emplace_back("Mix", f2(preset.diffusionDelay.mix, 2), false);
+                    rows.emplace_back("Diffusion", f2(preset.diffusionDelay.diffusion, 2), false);
                     break;
                 default: break;
             }

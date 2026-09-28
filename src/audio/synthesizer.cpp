@@ -1,5 +1,6 @@
 #include "dve/audio/synthesizer.hpp"
 #include "dve/audio/audio_asset.hpp"
+#include "dve/audio/wavetable.hpp"
 
 #include <algorithm>
 #include <array>
@@ -610,6 +611,7 @@ struct Voice {
     std::array<float, kSynthModulationSlotCount> modulationSmoothing{};
     std::array<bool, kSynthOscillatorCount> oscillatorWrapped{};
     std::array<float, kSynthLfoCount> lfoPhases{};
+    std::array<WavetableOscState, kSynthOscillatorCount> wavetableState{};
     std::array<float, kSynthLfoCount> lfoRandomValues{};
     std::array<float, kSynthLfoCount> lfoPreviousRandomValues{};
     std::array<std::uint32_t, kSynthLfoCount> lfoNoiseState{};
@@ -1470,17 +1472,18 @@ std::optional<ModulationSource> parse_modulation_source(std::string_view value) 
     return std::nullopt;
 }
 std::string_view modulation_destination_token(ModulationDestination destination) noexcept {
-    static constexpr std::array<std::string_view, 39> names{
+    static constexpr std::array<std::string_view, 40> names{
         "none","global_pitch","filter_cutoff","filter_resonance","filter_drive","voice_gain","voice_pan",
         "osc1_pitch","osc2_pitch","osc3_pitch","osc4_pitch","osc5_pitch","osc6_pitch","osc7_pitch","osc8_pitch",
         "osc1_shape","osc2_shape","osc3_shape","osc4_shape","osc5_shape","osc6_shape","osc7_shape","osc8_shape",
         "osc1_pw","osc2_pw","osc3_pw","osc4_pw","osc5_pw","osc6_pw","osc7_pw","osc8_pw",
-        "osc1_gain","osc2_gain","osc3_gain","osc4_gain","osc5_gain","osc6_gain","osc7_gain","osc8_gain"};
+        "osc1_gain","osc2_gain","osc3_gain","osc4_gain","osc5_gain","osc6_gain","osc7_gain","osc8_gain",
+        "wavetable_pos"};
     const auto index = static_cast<std::size_t>(destination);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationDestination> parse_modulation_destination(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::Osc8Gain); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::WavetablePosition); ++i)
         if (modulation_destination_token(static_cast<ModulationDestination>(i)) == value) return static_cast<ModulationDestination>(i);
     return std::nullopt;
 }
@@ -1831,6 +1834,9 @@ struct Synthesizer::Impl {
     float sampleRate{};
     std::atomic<std::uint64_t>& currentFrame;
     RealtimePreset parameters{};
+    // Phase 1: high-quality wavetable bank (cooked on preset load).
+    CookedWavetable hqWavetable{};
+    // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
     // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
     // currents advance toward targets once per render block in
     // advance_parameter_smoothing(). The DSP reads the smoothed currents,
@@ -2685,6 +2691,39 @@ struct Synthesizer::Impl {
     void adopt_preset(const RealtimePreset& next) noexcept {
         const bool wasArpeggiating = parameters.arpeggiator.enabled;
         parameters = next;
+        // Phase 1: cook the preset wavetable into the HQ engine (64 frames).
+        // Interpolates the preset's mip-0 frames up to kHQWavetableFrames.
+        if (parameters.wavetable.enabled && parameters.wavetable.frameCount > 0U) {
+            std::vector<std::vector<float>> frames;
+            frames.reserve(kHQWavetableFrames);
+            const std::size_t srcFrames = std::min<std::size_t>(parameters.wavetable.frameCount, kWavetableFrameCount);
+            const float* mip0 = parameters.wavetable.samples.data(); // mip 0 is first
+            for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
+                const float srcPos = static_cast<float>(f) / static_cast<float>(kHQWavetableFrames - 1) *
+                                     static_cast<float>(srcFrames - 1);
+                const std::size_t f0 = static_cast<std::size_t>(srcPos);
+                const std::size_t f1 = std::min(f0 + 1, srcFrames - 1);
+                const float frac = srcPos - static_cast<float>(f0);
+                std::vector<float> frame(kHQWavetableSamples);
+                for (std::size_t i = 0; i < kHQWavetableSamples; ++i) {
+                    // Resample from 128 to 512 samples.
+                    const float srcSamplePos = static_cast<float>(i) / static_cast<float>(kHQWavetableSamples - 1) *
+                                               static_cast<float>(kWavetableSampleCount - 1);
+                    const std::size_t s0 = static_cast<std::size_t>(srcSamplePos);
+                    const std::size_t s1 = std::min(s0 + 1, kWavetableSampleCount - 1);
+                    const float sFrac = srcSamplePos - static_cast<float>(s0);
+                    const float a0 = mip0[f0 * kWavetableSampleCount + s0];
+                    const float a1 = mip0[f0 * kWavetableSampleCount + s1];
+                    const float b0 = mip0[f1 * kWavetableSampleCount + s0];
+                    const float b1 = mip0[f1 * kWavetableSampleCount + s1];
+                    const float a = a0 + (a1 - a0) * sFrac;
+                    const float b = b0 + (b1 - b0) * sFrac;
+                    frame[i] = a + (b - a) * frac;
+                }
+                frames.push_back(std::move(frame));
+            }
+            hqWavetable = cook_wavetable("Preset", frames);
+        }
         macroValues = parameters.macroValues;
         gameClockTempo.store(parameters.arpeggiator.externalTempoBpm, std::memory_order_relaxed);
         arpRandomState = parameters.arpeggiator.randomSeed == 0U ? 0x51A3D8E7U : parameters.arpeggiator.randomSeed;
@@ -2896,6 +2935,7 @@ struct Synthesizer::Impl {
         float filterDrive{};
         float voiceGain{};
         float voicePan{};
+        float wavetablePosition{};  // Phase 1: added
         std::array<float, kSynthOscillatorCount> pitch{};
         std::array<float, kSynthOscillatorCount> shape{};
         std::array<float, kSynthOscillatorCount> pulseWidth{};
@@ -2974,6 +3014,7 @@ struct Synthesizer::Impl {
             else if (slot.destination == ModulationDestination::FilterDrive) values.filterDrive += amount * 8.0F;
             else if (slot.destination == ModulationDestination::VoiceGain) values.voiceGain += amount;
             else if (slot.destination == ModulationDestination::VoicePan) values.voicePan += amount;
+            else if (slot.destination == ModulationDestination::WavetablePosition) values.wavetablePosition += amount;
             else if (destination >= static_cast<unsigned>(ModulationDestination::Osc1Pitch) &&
                      destination <= static_cast<unsigned>(ModulationDestination::Osc8Pitch))
                 values.pitch[destination - static_cast<unsigned>(ModulationDestination::Osc1Pitch)] += amount * 24.0F;
@@ -2996,6 +3037,12 @@ struct Synthesizer::Impl {
     }
 
     float wavetable_sample(float phase, float position, float increment) const noexcept {
+        // Phase 1: use the HQ wavetable engine if cooked, else fall back to legacy.
+        if (hqWavetable.valid()) {
+            const float frequency = increment * sampleRate;
+            const std::size_t mip = wavetable_mip_for_frequency(frequency, sampleRate);
+            return sample_wavetable(hqWavetable, phase, position, mip);
+        }
         if (!parameters.wavetable.enabled || parameters.wavetable.frameCount == 0U) return fast_sin_phase(phase);
         const std::size_t frameCount = std::clamp<std::size_t>(parameters.wavetable.frameCount, 1U, kWavetableFrameCount);
         const float framePosition = clampf(position, 0.0F, 1.0F) * static_cast<float>(frameCount - 1U);
@@ -3415,7 +3462,7 @@ struct Synthesizer::Impl {
                 float total = 0.0F;
                 for (unsigned q = 0; q < qualityFactor; ++q) {
                     total += osc.waveform == OscillatorWaveform::Wavetable
-                        ? wavetable_sample(phase, clampf(osc.wavetablePosition + shape, 0.0F, 1.0F), subIncrement)
+                        ? wavetable_sample(phase, clampf(osc.wavetablePosition + shape + mod.wavetablePosition, 0.0F, 1.0F), subIncrement)
                         : oscillator_sample(osc.waveform, phase, subIncrement, pulseWidth, shape, auxiliary, noise);
                     const float next = phase + subIncrement;
                     if (primary && next >= 1.0F) currentWrapped[i] = true;
@@ -4437,7 +4484,7 @@ bool SynthPreset::validate(std::string* error) const {
         if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.bias, -1.0F, 1.0F) ||
             !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
             static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::ReleaseVelocity) ||
-            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::Osc8Gain))
+            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::WavetablePosition))
             return fail("invalid modulation matrix slot");
     }
     for (float value : macros.values) if (!in_range(value, 0.0F, 1.0F)) return fail("invalid macro value");

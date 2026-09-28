@@ -107,15 +107,15 @@ int main(int argc, char** argv) {
     preset.lfos[0] = {true, LfoWaveform::Triangle, 4.6F, 1.0F, 0.0F, 0.08F, true, false, 1.0F};
     preset.lfos[1] = {true, LfoWaveform::SmoothRandom, 0.42F, 1.0F, 0.37F, 0.0F, true, true, 4.0F};
     preset.modulation[0] = {true, ModulationSource::Lfo1, ModulationDestination::Osc3PulseWidth,
-                            0.82F, ModulationCurve::Linear, ModulationPolarity::Bipolar, 10.0F};
+                            0.82F, 0.0F, ModulationCurve::Linear, ModulationPolarity::Bipolar, 10.0F};
     preset.modulation[1] = {true, ModulationSource::Lfo2, ModulationDestination::FilterCutoff,
-                            0.45F, ModulationCurve::Cubic};
+                            0.45F, 0.0F, ModulationCurve::Cubic};
     preset.modulation[2] = {true, ModulationSource::FilterEnvelope, ModulationDestination::Osc1Shape,
-                            0.52F, ModulationCurve::Quadratic};
+                            0.52F, 0.0F, ModulationCurve::Quadratic};
     preset.modulation[3] = {true, ModulationSource::Macro1, ModulationDestination::FilterDrive,
-                            0.38F, ModulationCurve::Linear};
+                            0.38F, 0.0F, ModulationCurve::Linear};
     preset.modulation[4] = {true, ModulationSource::Velocity, ModulationDestination::VoiceGain,
-                            0.22F, ModulationCurve::Linear};
+                            0.22F, 0.0F, ModulationCurve::Linear};
     preset.macros.names[0] = "Motion";
     preset.macros.values[0] = 0.58F;
     preset.midiLearn[0] = {true, 74U, 0U, 0.0F, 1.0F, false};

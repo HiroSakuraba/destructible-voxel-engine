@@ -130,7 +130,8 @@ enum class ModulationDestination : std::uint8_t {
     Osc1Shape, Osc2Shape, Osc3Shape, Osc4Shape, Osc5Shape, Osc6Shape, Osc7Shape, Osc8Shape,
     Osc1PulseWidth, Osc2PulseWidth, Osc3PulseWidth, Osc4PulseWidth,
     Osc5PulseWidth, Osc6PulseWidth, Osc7PulseWidth, Osc8PulseWidth,
-    Osc1Gain, Osc2Gain, Osc3Gain, Osc4Gain, Osc5Gain, Osc6Gain, Osc7Gain, Osc8Gain
+    Osc1Gain, Osc2Gain, Osc3Gain, Osc4Gain, Osc5Gain, Osc6Gain, Osc7Gain, Osc8Gain,
+    WavetablePosition
 };
 
 enum class ChordType : std::uint8_t {

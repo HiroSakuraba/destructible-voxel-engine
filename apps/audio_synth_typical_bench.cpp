@@ -65,10 +65,10 @@ Result run(std::size_t blockFrames, double seconds) {
     preset.wavetable.enabled = true;
     preset.lfos[0] = {true, dve::audio::LfoWaveform::Triangle, 2.1F, 0.75F, 0.0F, 0.04F, true, false, 1.0F};
     preset.modulation[0] = {true, dve::audio::ModulationSource::Lfo1,
-        dve::audio::ModulationDestination::Osc2PulseWidth, 0.65F,
+        dve::audio::ModulationDestination::Osc2PulseWidth, 0.65F, 0.0F,
         dve::audio::ModulationCurve::Linear};
     preset.modulation[1] = {true, dve::audio::ModulationSource::Velocity,
-        dve::audio::ModulationDestination::FilterCutoff, 0.25F,
+        dve::audio::ModulationDestination::FilterCutoff, 0.25F, 0.0F,
         dve::audio::ModulationCurve::Quadratic};
     preset.filter.topology = dve::audio::FilterTopology::MoogLadder;
     preset.filter.cutoffHertz = 2400.0F;

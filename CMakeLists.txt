@@ -282,6 +282,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/synthesizer.cpp
         src/audio/synth_patch.cpp
         src/audio/sequencer.cpp
+        src/audio/patch_genetics.cpp
         src/audio/wavetable.cpp
         src/audio/wavetable_builder.cpp
         src/audio/physics_modulation.cpp
@@ -1733,6 +1734,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_synth_morph_tests tests/test_audio_synth_morph.cpp)
         target_link_libraries(dve_audio_synth_morph_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_morph_tests COMMAND dve_audio_synth_morph_tests)
+        add_executable(dve_audio_synth_genetics_tests tests/test_audio_synth_genetics.cpp)
+        target_link_libraries(dve_audio_synth_genetics_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_genetics_tests COMMAND dve_audio_synth_genetics_tests)
         add_executable(dve_audio_synth_sampler_tests tests/test_audio_synth_sampler.cpp)
         target_link_libraries(dve_audio_synth_sampler_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_sampler_tests COMMAND dve_audio_synth_sampler_tests)

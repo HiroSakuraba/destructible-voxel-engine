@@ -112,8 +112,8 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
 
     constexpr int parameterRowHeight = 29;
     for (std::size_t i = 0; i < layout_.parameterRows.size(); ++i) {
-        const int column = static_cast<int>(i / 8U);
-        const int row = static_cast<int>(i % 8U);
+        const int column = static_cast<int>(i / 10U);
+        const int row = static_cast<int>(i % 10U);
         const int columnWidth = (contentWidth - 20) / 3;
         const int x = left + column * (columnWidth + 10);
         const int y = top + row * parameterRowHeight;
@@ -182,6 +182,18 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
         layout_.effectRows[i] = {x, y, columnWidth, 38};
         layout_.effectToggleButtons[i] = {x + columnWidth - 70, y + 7, 60, 24};
     }
+    {
+        const int paramTop = top + 6 * 45 + 12;
+        const int paramColumnWidth = (contentWidth - 10) / 2;
+        for (std::size_t i = 0; i < layout_.effectParamRows.size(); ++i) {
+            const int x = left;
+            const int y = paramTop + static_cast<int>(i) * 32;
+            layout_.effectParamRows[i] = {x, y, paramColumnWidth, 29};
+            layout_.effectParamDownButtons[i] = {x + paramColumnWidth - 116, y + 2, 27, 22};
+            layout_.effectParamUpButtons[i] = {x + paramColumnWidth - 31, y + 2, 27, 22};
+            layout_.effectParamToggleButtons[i] = {x + paramColumnWidth - 82, y + 2, 78, 22};
+        }
+    }
 
     layout_.presetScanButton = {left, top, 118, 26};
     layout_.presetPreviousButton = {left + 128, top, 36, 26};
@@ -242,6 +254,134 @@ void EditorSynthPanel::toggle_effect(std::size_t index, audio::Synthesizer& synt
         case 9: preset.reverb.enabled = !preset.reverb.enabled; break;
         case 10: preset.compressor.enabled = !preset.compressor.enabled; break;
         case 11: preset.limiter.enabled = !preset.limiter.enabled; break;
+        default: return;
+    }
+    synth.set_preset(preset);
+}
+
+void EditorSynthPanel::adjust_effect_param(std::size_t paramIndex, int direction,
+                                           audio::Synthesizer& synth) noexcept {
+    auto preset = synth.preset();
+    switch (selectedEffect_) {
+        case 0: // Distortion
+            switch (paramIndex) {
+                case 0: preset.distortion.drive = stepped(preset.distortion.drive, 0.2F, 0.05F, 32.0F, direction); break;
+                case 1: preset.distortion.mix = stepped(preset.distortion.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 1: // Bitcrusher
+            switch (paramIndex) {
+                case 0: preset.bitcrusher.bits = static_cast<std::uint8_t>(std::clamp<int>(preset.bitcrusher.bits + direction, 1, 16)); break;
+                case 1: preset.bitcrusher.downsample = static_cast<std::uint8_t>(std::clamp<int>(preset.bitcrusher.downsample + direction, 1, 64)); break;
+                case 2: preset.bitcrusher.mix = stepped(preset.bitcrusher.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 2: // Harmonizer
+            switch (paramIndex) {
+                case 0: preset.harmonizer.subLevel = stepped(preset.harmonizer.subLevel, 0.05F, 0.0F, 1.0F, direction); break;
+                case 1: preset.harmonizer.upLevel = stepped(preset.harmonizer.upLevel, 0.05F, 0.0F, 1.0F, direction); break;
+                case 2: preset.harmonizer.mix = stepped(preset.harmonizer.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 3: // EQ
+            switch (paramIndex) {
+                case 0: preset.eq.lowGainDb = stepped(preset.eq.lowGainDb, 0.5F, -24.0F, 24.0F, direction); break;
+                case 1: preset.eq.midGainDb = stepped(preset.eq.midGainDb, 0.5F, -24.0F, 24.0F, direction); break;
+                case 2: preset.eq.highGainDb = stepped(preset.eq.highGainDb, 0.5F, -24.0F, 24.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 4: // Chorus
+            switch (paramIndex) {
+                case 0: preset.chorus.rateHertz = stepped(preset.chorus.rateHertz, 0.05F, 0.01F, 20.0F, direction); break;
+                case 1: preset.chorus.depthMilliseconds = stepped(preset.chorus.depthMilliseconds, 0.5F, 0.0F, 30.0F, direction); break;
+                case 2: preset.chorus.mix = stepped(preset.chorus.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 5: // Flanger
+            switch (paramIndex) {
+                case 0: preset.flanger.rateHertz = stepped(preset.flanger.rateHertz, 0.05F, 0.01F, 20.0F, direction); break;
+                case 1: preset.flanger.depthMilliseconds = stepped(preset.flanger.depthMilliseconds, 0.25F, 0.0F, 10.0F, direction); break;
+                case 2: preset.flanger.feedback = stepped(preset.flanger.feedback, 0.05F, -0.92F, 0.92F, direction); break;
+                case 3: preset.flanger.mix = stepped(preset.flanger.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 6: // Ensemble
+            switch (paramIndex) {
+                case 1: preset.ensemble.mix = stepped(preset.ensemble.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 7: // Phaser
+            switch (paramIndex) {
+                case 0: preset.phaser.rateHertz = stepped(preset.phaser.rateHertz, 0.05F, 0.01F, 20.0F, direction); break;
+                case 1: preset.phaser.depth = stepped(preset.phaser.depth, 0.05F, 0.0F, 1.0F, direction); break;
+                case 2: preset.phaser.feedback = stepped(preset.phaser.feedback, 0.05F, -0.95F, 0.95F, direction); break;
+                case 3: preset.phaser.mix = stepped(preset.phaser.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 8: // Delay
+            switch (paramIndex) {
+                case 0: preset.delay.timeSeconds = stepped(preset.delay.timeSeconds, 0.01F, 0.01F, 1.95F, direction); break;
+                case 1: preset.delay.feedback = stepped(preset.delay.feedback, 0.02F, 0.0F, 0.94F, direction); break;
+                case 2: preset.delay.mix = stepped(preset.delay.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 9: // Reverb
+            switch (paramIndex) {
+                case 0: preset.reverb.roomSize = stepped(preset.reverb.roomSize, 0.05F, 0.0F, 1.0F, direction); break;
+                case 1: preset.reverb.damping = stepped(preset.reverb.damping, 0.02F, 0.0F, 0.98F, direction); break;
+                case 2: preset.reverb.width = stepped(preset.reverb.width, 0.05F, 0.0F, 1.0F, direction); break;
+                case 3: preset.reverb.mix = stepped(preset.reverb.mix, 0.05F, 0.0F, 1.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 10: // Compressor
+            switch (paramIndex) {
+                case 0: preset.compressor.thresholdDb = stepped(preset.compressor.thresholdDb, 1.0F, -60.0F, 0.0F, direction); break;
+                case 1: preset.compressor.ratio = stepped(preset.compressor.ratio, 0.5F, 1.0F, 30.0F, direction); break;
+                case 2: preset.compressor.attackMilliseconds = stepped(preset.compressor.attackMilliseconds, 1.0F, 0.05F, 500.0F, direction); break;
+                case 3: preset.compressor.releaseMilliseconds = stepped(preset.compressor.releaseMilliseconds, 10.0F, 1.0F, 5000.0F, direction); break;
+                case 4: preset.compressor.makeupDb = stepped(preset.compressor.makeupDb, 0.5F, -24.0F, 24.0F, direction); break;
+                default: return;
+            }
+            break;
+        case 11: // Limiter
+            switch (paramIndex) {
+                case 0: preset.limiter.ceilingDb = stepped(preset.limiter.ceilingDb, 0.5F, -24.0F, 0.0F, direction); break;
+                case 1: preset.limiter.releaseMilliseconds = stepped(preset.limiter.releaseMilliseconds, 10.0F, 1.0F, 5000.0F, direction); break;
+                default: return;
+            }
+            break;
+        default: return;
+    }
+    synth.set_preset(preset);
+}
+
+void EditorSynthPanel::toggle_effect_param(std::size_t paramIndex, audio::Synthesizer& synth) noexcept {
+    auto preset = synth.preset();
+    switch (selectedEffect_) {
+        case 0: // Distortion: mode Classic/Fuzz
+            if (paramIndex == 2) preset.distortion.mode = preset.distortion.mode == audio::DistortionMode::Classic ?
+                audio::DistortionMode::Fuzz : audio::DistortionMode::Classic;
+            else return;
+            break;
+        case 6: // Ensemble: mode I/II/Both
+            if (paramIndex == 0) preset.ensemble.mode = static_cast<audio::EnsembleMode>(
+                (static_cast<unsigned>(preset.ensemble.mode) + 1U) % 3U);
+            else return;
+            break;
+        case 8: // Delay: ping-pong
+            if (paramIndex == 3) preset.delay.pingPong = !preset.delay.pingPong;
+            else return;
+            break;
         default: return;
     }
     synth.set_preset(preset);
@@ -400,6 +540,8 @@ void EditorSynthPanel::adjust_parameter(std::size_t index, int direction,
             case 25: preset.arpeggiator.humanizeVelocity = stepped(preset.arpeggiator.humanizeVelocity, 0.05F, 0.0F, 1.0F, direction); break;
             case 26: preset.arpeggiator.scale = cycle_enum(preset.arpeggiator.scale, 7U, direction); break;
             case 27: preset.arpeggiator.scaleRoot = static_cast<std::uint8_t>((static_cast<int>(preset.arpeggiator.scaleRoot) + direction + 12) % 12); break;
+            case 28: preset.arpeggiator.phraseVelocityStart = stepped(preset.arpeggiator.phraseVelocityStart, 0.05F, 0.0F, 2.0F, direction); break;
+            case 29: preset.arpeggiator.phraseVelocityEnd = stepped(preset.arpeggiator.phraseVelocityEnd, 0.05F, 0.0F, 2.0F, direction); break;
             default: break;
         }
     } else if (page_ == SynthPanelPage::Expression) {
@@ -642,6 +784,15 @@ bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noe
     } else if (page_ == SynthPanelPage::Effects) {
         for (std::size_t i = 0; i < layout_.effectToggleButtons.size(); ++i)
             if (contains(layout_.effectToggleButtons[i], x, y)) { toggle_effect(i, synth); return true; }
+        for (std::size_t i = 0; i < layout_.effectRows.size(); ++i)
+            if (contains(layout_.effectRows[i], x, y)) { selectedEffect_ = i; return true; }
+        for (std::size_t i = 0; i < layout_.effectParamRows.size(); ++i) {
+            if (!contains(layout_.effectParamRows[i], x, y)) continue;
+            if (contains(layout_.effectParamDownButtons[i], x, y)) adjust_effect_param(i, -1, synth);
+            else if (contains(layout_.effectParamUpButtons[i], x, y)) adjust_effect_param(i, 1, synth);
+            else if (contains(layout_.effectParamToggleButtons[i], x, y)) toggle_effect_param(i, synth);
+            return true;
+        }
     } else if (page_ == SynthPanelPage::Presets) {
         if (contains(layout_.presetScanButton, x, y)) { (void)refresh_preset_library(); return true; }
         if (contains(layout_.presetPreviousButton, x, y)) {

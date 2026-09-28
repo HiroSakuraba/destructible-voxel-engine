@@ -207,6 +207,76 @@ void test_humanize() {
     std::cout << "humanize: OK\n";
 }
 
+void test_phrase_velocity_shaping() {
+    using namespace dve::audio;
+    Synthesizer synth(48000);
+    auto preset = focused_preset();
+    preset.arpeggiator.enabled = true;
+    preset.arpeggiator.mode = ArpeggiatorMode::Up;
+    preset.arpeggiator.division = ArpeggiatorDivision::Sixteenth;
+    preset.arpeggiator.tempoBpm = 120.0F;
+    preset.arpeggiator.gate = 0.5F;
+    preset.arpeggiator.swing = 0.0F;
+    preset.arpeggiator.octaveRange = 1;
+    preset.arpeggiator.stepCount = 4;
+    preset.arpeggiator.phraseVelocityStart = 0.25F;
+    preset.arpeggiator.phraseVelocityEnd = 1.0F;
+    for (std::size_t i = 0; i < 4; ++i) preset.arpeggiator.steps[i] = {};
+    preset.arpeggiator.sendMidiOutput = true;
+    require(preset.validate(), "validate failed on phrase velocity fields");
+    synth.set_preset(preset);
+    require(synth.note_on(60, 1.0F), "held-note input failed");
+    std::vector<float> audio(120000U * 2U);
+    synth.render(audio);
+    auto noteOns = collect_note_ons(synth);
+    require(noteOns.size() >= 5U, "phrase-velocity arp produced too few notes");
+    // Fade 0.25 -> 1.0: v0 = 127*0.25 = 31, v3 = 127.
+    require(noteOns[0].data2 == 31, "phrase start velocity was not 31");
+    require(noteOns[3].data2 == 127, "phrase end velocity was not 127");
+    require(noteOns[0].data2 < noteOns[1].data2 &&
+            noteOns[1].data2 < noteOns[2].data2 &&
+            noteOns[2].data2 < noteOns[3].data2,
+            "phrase velocities did not rise across the 4 steps");
+    // Phrase restarts on step 4 (second loop).
+    require(noteOns[4].data2 == 31, "phrase did not restart on step 4");
+    const float ratio = static_cast<float>(noteOns[0].data2) / static_cast<float>(noteOns[3].data2);
+    require(std::fabs(ratio - 0.25F) < 0.05F, "phrase start/end ratio was not ~0.25");
+    std::cout << "phrase velocity shaping: OK\n";
+}
+
+void test_arp_strum() {
+    using namespace dve::audio;
+    Synthesizer synth(48000);
+    auto preset = focused_preset();
+    preset.arpeggiator.enabled = true;
+    preset.arpeggiator.mode = ArpeggiatorMode::Chord;
+    preset.arpeggiator.division = ArpeggiatorDivision::Quarter;
+    preset.arpeggiator.tempoBpm = 120.0F;
+    preset.arpeggiator.gate = 0.9F;
+    preset.arpeggiator.swing = 0.0F;
+    preset.arpeggiator.octaveRange = 1;
+    preset.arpeggiator.stepCount = 1;
+    preset.arpeggiator.steps[0] = {};
+    preset.chord.enabled = true;
+    preset.chord.strumMilliseconds = 50.0F; // 50 ms = 2400 frames @ 48 kHz
+    preset.arpeggiator.sendMidiOutput = true;
+    require(preset.validate(), "validate failed on arp strum setup");
+    synth.set_preset(preset);
+    require(synth.note_on(60, 0.8F), "held-note input failed");
+    std::vector<float> audio(120000U * 2U);
+    synth.render(audio);
+    auto noteOns = collect_note_ons(synth);
+    require(noteOns.size() >= 3U, "arp strum produced too few notes");
+    // All 3 chord tones sound, spaced exactly 2400 frames apart.
+    std::set<int> notes;
+    for (const auto& on : noteOns) notes.insert(on.data1);
+    require(notes.size() >= 3U, "arp strum did not sound all 3 chord tones");
+    const auto gap1 = noteOns[1].sampleFrame - noteOns[0].sampleFrame;
+    const auto gap2 = noteOns[2].sampleFrame - noteOns[1].sampleFrame;
+    require(gap1 == 2400U && gap2 == 2400U, "arp strum gaps were not exactly 2400 frames");
+    std::cout << "arp strum: OK\n";
+}
+
 void test_arp_serialize_roundtrip() {
     using namespace dve::audio;
     Synthesizer synth(48000);
@@ -219,6 +289,8 @@ void test_arp_serialize_roundtrip() {
     preset.arpeggiator.steps[3].condition = ArpeggiatorCondition::AB;
     preset.arpeggiator.steps[3].conditionA = 3;
     preset.arpeggiator.steps[3].conditionB = 4;
+    preset.arpeggiator.phraseVelocityStart = 0.3F;
+    preset.arpeggiator.phraseVelocityEnd = 1.5F;
     require(preset.validate(), "validate failed on new arp fields");
     const auto text = preset.serialize();
     const auto parsed = dve::audio::SynthPreset::parse(text);
@@ -231,6 +303,8 @@ void test_arp_serialize_roundtrip() {
     require(a.division == ArpeggiatorDivision::DottedQuarter, "dotted division round-trip failed");
     require(a.steps[3].condition == ArpeggiatorCondition::AB, "AB condition round-trip failed");
     require(a.steps[3].conditionA == 3U && a.steps[3].conditionB == 4U, "A:B params round-trip failed");
+    require(std::fabs(a.phraseVelocityStart - 0.3F) < 1e-4F, "phraseVelStart round-trip failed");
+    require(std::fabs(a.phraseVelocityEnd - 1.5F) < 1e-4F, "phraseVelEnd round-trip failed");
     std::cout << "arp serialize round-trip: OK\n";
 }
 
@@ -242,6 +316,8 @@ int main() {
         test_arp_scale_lock();
         test_ab_condition();
         test_humanize();
+        test_phrase_velocity_shaping();
+        test_arp_strum();
         test_arp_serialize_roundtrip();
         std::cout << "ALL ARP TESTS PASSED\n";
         return 0;

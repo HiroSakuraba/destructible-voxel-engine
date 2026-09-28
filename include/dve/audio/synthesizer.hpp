@@ -441,6 +441,8 @@ struct ArpeggiatorParameters {
     float humanizeVelocity{};
     ChordScale scale{ChordScale::Chromatic};
     std::uint8_t scaleRoot{};
+    float phraseVelocityStart{1.0F};
+    float phraseVelocityEnd{1.0F};
     std::array<ArpeggiatorStep, kArpeggiatorStepCount> steps{};
 };
 

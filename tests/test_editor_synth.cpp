@@ -178,6 +178,32 @@ int main() {
         require(controller.synthesizer().preset().distortion.enabled != beforeEffect,
                 "effects page control did not update preset");
 
+        // FX parameter editor: select an effect row, adjust its parameters.
+        click(controller, panel.effectRows[5]); // Flanger
+        require(controller.synth_panel().selected_effect() == 5U, "effect row did not select the effect");
+        const float beforeFlangerRate = controller.synthesizer().preset().flanger.rateHertz;
+        click(controller, panel.effectParamUpButtons[0]);
+        require(controller.synthesizer().preset().flanger.rateHertz > beforeFlangerRate,
+                "flanger rate control did not update preset");
+        const float beforeFlangerMix = controller.synthesizer().preset().flanger.mix;
+        click(controller, panel.effectParamDownButtons[3]);
+        require(controller.synthesizer().preset().flanger.mix < beforeFlangerMix,
+                "flanger mix control did not update preset");
+
+        click(controller, panel.effectRows[0]); // Distortion: toggle param (Classic/Fuzz)
+        require(controller.synth_panel().selected_effect() == 0U, "effect row did not select distortion");
+        const auto beforeMode = controller.synthesizer().preset().distortion.mode;
+        click(controller, panel.effectParamToggleButtons[2]);
+        require(controller.synthesizer().preset().distortion.mode != beforeMode,
+                "distortion mode toggle did not update preset");
+
+        click(controller, panel.effectRows[10]); // Compressor: 5 params
+        const float beforeThreshold = controller.synthesizer().preset().compressor.thresholdDb;
+        click(controller, panel.effectParamUpButtons[0]);
+        require(controller.synthesizer().preset().compressor.thresholdDb > beforeThreshold,
+                "compressor threshold control did not update preset");
+        require(controller.synthesizer().preset().validate(), "preset invalid after FX parameter edits");
+
         click(controller, panel.tabButtons[6]);
         require(controller.synth_panel().page() == SynthPanelPage::Expression,
                 "expression page did not open");

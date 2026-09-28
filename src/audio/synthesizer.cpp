@@ -1858,6 +1858,7 @@ struct Synthesizer::Impl {
     std::uint64_t arpOrderCounter{};
     std::uint64_t nextArpFrame{std::numeric_limits<std::uint64_t>::max()};
     std::uint64_t arpGateOffFrame{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t arpStrumMaxDelay{};
     std::uint32_t arpProgress{};
     std::uint32_t arpStepCounter{};
     std::uint32_t arpRandomState{0x51A3D8E7U};
@@ -1870,6 +1871,7 @@ struct Synthesizer::Impl {
     std::array<std::uint8_t, kSynthVoiceCount> arpPatternNotes{};
     std::array<std::uint8_t, kSynthVoiceCount> arpPatternChannels{};
     std::array<std::uint8_t, kSynthVoiceCount> arpPatternVelocities{};
+    std::array<std::uint64_t, kSynthVoiceCount> arpPatternDelays{};
     std::uint8_t arpPatternCount{};
 
     struct ScheduledVoiceEvent {
@@ -2274,10 +2276,15 @@ struct Synthesizer::Impl {
     }
 
     void release_arp_notes() noexcept {
-        for (std::size_t i = 0; i < arpActiveCount; ++i)
+        for (std::size_t i = 0; i < arpActiveCount; ++i) {
+            for (ScheduledVoiceEvent& event : scheduledEvents)
+                if (event.active && event.noteOn && event.channel == arpActiveChannels[i] &&
+                    event.note == arpActiveNotes[i]) event.active = false;
             direct_note_off(arpActiveChannels[i], arpActiveNotes[i], true);
+        }
         arpActiveCount = 0;
         arpGateOffFrame = std::numeric_limits<std::uint64_t>::max();
+        arpStrumMaxDelay = 0;
     }
 
     void clear_arp_held(bool releaseCurrent) noexcept {
@@ -2292,6 +2299,7 @@ struct Synthesizer::Impl {
         nextRatchetFrame = std::numeric_limits<std::uint64_t>::max();
         arpStepEndFrame = std::numeric_limits<std::uint64_t>::max();
         arpStepTie = false;
+        arpStrumMaxDelay = 0;
     }
 
     std::size_t physical_held_count() const noexcept {
@@ -2423,13 +2431,22 @@ struct Synthesizer::Impl {
         const bool carry = allowCarry && active_pattern_matches();
         if (!carry) {
             release_arp_notes();
+            std::uint64_t maxDelay = 0;
             for (std::size_t i = 0; i < arpPatternCount && arpActiveCount < kSynthVoiceCount; ++i) {
-                direct_note_on(arpPatternChannels[i], arpPatternNotes[i], arpPatternVelocities[i],
-                               parameters.arpeggiator.retriggerEnvelopes, true);
+                const std::uint64_t delay = arpPatternDelays[i];
+                maxDelay = std::max(maxDelay, delay);
+                if (delay == 0) {
+                    direct_note_on(arpPatternChannels[i], arpPatternNotes[i], arpPatternVelocities[i],
+                                   parameters.arpeggiator.retriggerEnvelopes, true);
+                } else {
+                    (void)schedule_voice_event(true, arpPatternChannels[i], arpPatternNotes[i],
+                                               arpPatternVelocities[i], renderFrame + delay, true);
+                }
                 arpActiveNotes[arpActiveCount] = arpPatternNotes[i];
                 arpActiveChannels[arpActiveCount] = arpPatternChannels[i];
                 ++arpActiveCount;
             }
+            arpStrumMaxDelay = maxDelay;
         }
         const std::uint8_t configuredStepCount = static_cast<std::uint8_t>(
             std::clamp<unsigned>(parameters.arpeggiator.stepCount, 1U, static_cast<unsigned>(kArpeggiatorStepCount)));
@@ -2438,7 +2455,7 @@ struct Synthesizer::Impl {
         const float gate = clampf(parameters.arpeggiator.gate * step.gateScale, 0.02F, 1.0F);
         const std::uint64_t segmentEnd = std::min(arpStepEndFrame, renderFrame + arpRatchetDuration);
         arpGateOffFrame = step.tie && arpRatchetCount == 1U ? arpStepEndFrame :
-            renderFrame + std::max<std::uint64_t>(1U,
+            renderFrame + arpStrumMaxDelay + std::max<std::uint64_t>(1U,
                 static_cast<std::uint64_t>(static_cast<double>(arpRatchetDuration) * gate));
         arpGateOffFrame = std::min(arpGateOffFrame, segmentEnd);
     }
@@ -2555,6 +2572,11 @@ struct Synthesizer::Impl {
         const float velocityScale = clampf(step.velocityScale * (step.accent ? 1.22F : 1.0F), 0.0F, 2.0F);
         const float humanVel = clampf(parameters.arpeggiator.humanizeVelocity, 0.0F, 1.0F);
         const float velJitter = humanVel > 0.0F ? 1.0F + (random_unit() * 2.0F - 1.0F) * humanVel * 0.3F : 1.0F;
+        const float phrasePos = configuredStepCount > 1U ?
+            static_cast<float>(stepIndex) / static_cast<float>(configuredStepCount - 1U) : 0.0F;
+        const float phraseVel = clampf(parameters.arpeggiator.phraseVelocityStart +
+            (parameters.arpeggiator.phraseVelocityEnd - parameters.arpeggiator.phraseVelocityStart) * phrasePos,
+            0.0F, 2.0F);
         for (std::size_t rootIndex = 0; rootIndex < rootCount && arpPatternCount < kSynthVoiceCount; ++rootIndex) {
             const HeldNote& root = roots[rootIndex];
             const int transposed = static_cast<int>(root.note) + static_cast<int>(step.transpose) +
@@ -2562,20 +2584,24 @@ struct Synthesizer::Impl {
             const std::uint8_t baseNote = static_cast<std::uint8_t>(quantize_note_to_scale(
                 transposed, parameters.arpeggiator.scale, parameters.arpeggiator.scaleRoot));
             const std::uint8_t velocity = static_cast<std::uint8_t>(clampf(
-                static_cast<float>(root.velocity) * velocityScale * velJitter, 1.0F, 127.0F));
+                static_cast<float>(root.velocity) * velocityScale * phraseVel * velJitter, 1.0F, 127.0F));
             if (parameters.chord.enabled) {
                 const ChordVoicing voicing = make_chord_voicing(baseNote, parameters.chord);
+                const std::uint64_t strumFrames = static_cast<std::uint64_t>(std::llround(
+                    clampf(parameters.chord.strumMilliseconds, 0.0F, 250.0F) * 0.001F * sampleRate));
                 for (std::size_t i = 0; i < voicing.count && arpPatternCount < kSynthVoiceCount; ++i) {
                     arpPatternNotes[arpPatternCount] = voicing.notes[i];
                     arpPatternChannels[arpPatternCount] = root.channel;
                     arpPatternVelocities[arpPatternCount] = static_cast<std::uint8_t>(clampf(
                         static_cast<float>(velocity) * parameters.chord.velocityScale, 1.0F, 127.0F));
+                    arpPatternDelays[arpPatternCount] = strumFrames * i;
                     ++arpPatternCount;
                 }
             } else {
                 arpPatternNotes[arpPatternCount] = baseNote;
                 arpPatternChannels[arpPatternCount] = root.channel;
                 arpPatternVelocities[arpPatternCount] = velocity;
+                arpPatternDelays[arpPatternCount] = 0;
                 ++arpPatternCount;
             }
         }
@@ -4342,7 +4368,9 @@ bool SynthPreset::validate(std::string* error) const {
         arpeggiator.stepCount > kArpeggiatorStepCount ||
         !in_range(arpeggiator.externalTempoBpm, 20.0F, 400.0F) ||
         !in_range(arpeggiator.humanizeTiming, 0.0F, 1.0F) ||
-        !in_range(arpeggiator.humanizeVelocity, 0.0F, 1.0F))
+        !in_range(arpeggiator.humanizeVelocity, 0.0F, 1.0F) ||
+        !in_range(arpeggiator.phraseVelocityStart, 0.0F, 2.0F) ||
+        !in_range(arpeggiator.phraseVelocityEnd, 0.0F, 2.0F))
         return fail("invalid arpeggiator parameters");
     for (const auto& step : arpeggiator.steps) {
         if (step.transpose < -48 || step.transpose > 48 || step.octaveOffset < -4 || step.octaveOffset > 4 ||
@@ -4474,6 +4502,8 @@ std::string SynthPreset::serialize() const {
         << "\narp.externalTempo=" << arpeggiator.externalTempoBpm
         << "\narp.humanizeTiming=" << arpeggiator.humanizeTiming
         << "\narp.humanizeVelocity=" << arpeggiator.humanizeVelocity
+        << "\narp.phraseVelStart=" << arpeggiator.phraseVelocityStart
+        << "\narp.phraseVelEnd=" << arpeggiator.phraseVelocityEnd
         << "\narp.scale=" << chord_scale_token(arpeggiator.scale)
         << "\narp.scaleRoot=" << static_cast<unsigned>(arpeggiator.scaleRoot) << '\n';
     for (std::size_t i = 0; i < chord.customIntervals.size(); ++i)
@@ -4799,6 +4829,8 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "arp.externalTempo") parsed = readFloat(result.arpeggiator.externalTempoBpm);
         else if (key == "arp.humanizeTiming") parsed = readFloat(result.arpeggiator.humanizeTiming);
         else if (key == "arp.humanizeVelocity") parsed = readFloat(result.arpeggiator.humanizeVelocity);
+        else if (key == "arp.phraseVelStart") parsed = readFloat(result.arpeggiator.phraseVelocityStart);
+        else if (key == "arp.phraseVelEnd") parsed = readFloat(result.arpeggiator.phraseVelocityEnd);
         else if (key == "arp.scale") { const auto scale = parse_chord_scale(value); parsed = scale.has_value(); if (scale) result.arpeggiator.scale = *scale; }
         else if (key == "arp.scaleRoot") parsed = readUInt(result.arpeggiator.scaleRoot, 127U);
         else if (key == "wavetable.name") result.wavetable.name = value;

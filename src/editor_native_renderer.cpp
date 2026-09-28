@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <tuple>
+#include <vector>
 
 namespace dve::editor {
 EditorColor rgb(unsigned r, unsigned g, unsigned b) noexcept {
@@ -1042,7 +1044,8 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             "Chord inversion", "Chord spread", "Chord scale", "Scale root", "Strum ms", "Chord velocity",
             "Arpeggiator", "Arp direction", "Beat division", "Internal BPM", "Clock source", "External BPM",
             "Gate length", "Swing", "Octave range", "Step count", "Latch", "Retrigger envelopes",
-            "Humanize timing", "Humanize velocity", "Arp scale", "Arp scale root"};
+            "Humanize timing", "Humanize velocity", "Arp scale", "Arp scale root",
+            "Phrase vel start", "Phrase vel end"};
         static constexpr std::array<std::string_view, 12> pitchNames{
             "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
         std::array<std::string, kSynthParameterRowCount> values{
@@ -1059,7 +1062,8 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             std::to_string(preset.arpeggiator.stepCount), bool_text(preset.arpeggiator.latch),
             bool_text(preset.arpeggiator.retriggerEnvelopes), compact(preset.arpeggiator.humanizeTiming),
             compact(preset.arpeggiator.humanizeVelocity), std::string(scale_text(preset.arpeggiator.scale)),
-            std::string(pitchNames[preset.arpeggiator.scaleRoot % 12U])};
+            std::string(pitchNames[preset.arpeggiator.scaleRoot % 12U]),
+            compact(preset.arpeggiator.phraseVelocityStart), compact(preset.arpeggiator.phraseVelocityEnd)};
         std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
         for (std::size_t i : {4U,12U,22U,23U}) toggles[i] = true;
         active[4]=preset.chord.enabled; active[12]=preset.arpeggiator.enabled;
@@ -1134,10 +1138,105 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             preset.eq.enabled, preset.chorus.enabled, preset.flanger.enabled,
             preset.ensemble.enabled, preset.phaser.enabled, preset.delay.enabled,
             preset.reverb.enabled, preset.compressor.enabled, preset.limiter.enabled};
+        const std::size_t selectedEffect = controller.synth_panel().selected_effect();
         for (std::size_t i = 0; i < layout.effectRows.size(); ++i) {
             painter.fill(layout.effectRows[i], panel); painter.outline(layout.effectRows[i], border);
+            if (i == selectedEffect) painter.outline(layout.effectRows[i], accent);
             painter.text(layout.effectRows[i].x + 10, layout.effectRows[i].y + 24, effectNames[i], text);
             button(layout.effectToggleButtons[i], effects[i] ? "ON" : "OFF", effects[i]);
+        }
+        // Parameter editor for the selected effect.
+        const auto paramTitle = std::string(effectNames[selectedEffect]) + " parameters";
+        painter.text(layout.effectParamRows[0].x + 7, layout.effectParamRows[0].y - 12, paramTitle, text);
+        auto effect_params = [&](std::size_t effect) -> std::vector<std::tuple<std::string, std::string, bool>> {
+            // Returns (label, value, isToggle) for each parameter row.
+            std::vector<std::tuple<std::string, std::string, bool>> rows;
+            const auto f2 = [&](float v, int d) { return compact(v, d); };
+            switch (effect) {
+                case 0:
+                    rows.emplace_back("Drive", f2(preset.distortion.drive, 1), false);
+                    rows.emplace_back("Mix", f2(preset.distortion.mix, 2), false);
+                    rows.emplace_back("Mode", preset.distortion.mode == audio::DistortionMode::Fuzz ? "Fuzz" : "Classic", true);
+                    break;
+                case 1:
+                    rows.emplace_back("Bits", std::to_string(preset.bitcrusher.bits), false);
+                    rows.emplace_back("Downsample", std::to_string(preset.bitcrusher.downsample), false);
+                    rows.emplace_back("Mix", f2(preset.bitcrusher.mix, 2), false);
+                    break;
+                case 2:
+                    rows.emplace_back("Sub level", f2(preset.harmonizer.subLevel, 2), false);
+                    rows.emplace_back("Up level", f2(preset.harmonizer.upLevel, 2), false);
+                    rows.emplace_back("Mix", f2(preset.harmonizer.mix, 2), false);
+                    break;
+                case 3:
+                    rows.emplace_back("Low dB", f2(preset.eq.lowGainDb, 1), false);
+                    rows.emplace_back("Mid dB", f2(preset.eq.midGainDb, 1), false);
+                    rows.emplace_back("High dB", f2(preset.eq.highGainDb, 1), false);
+                    break;
+                case 4:
+                    rows.emplace_back("Rate Hz", f2(preset.chorus.rateHertz, 2), false);
+                    rows.emplace_back("Depth ms", f2(preset.chorus.depthMilliseconds, 1), false);
+                    rows.emplace_back("Mix", f2(preset.chorus.mix, 2), false);
+                    break;
+                case 5:
+                    rows.emplace_back("Rate Hz", f2(preset.flanger.rateHertz, 2), false);
+                    rows.emplace_back("Depth ms", f2(preset.flanger.depthMilliseconds, 1), false);
+                    rows.emplace_back("Feedback", f2(preset.flanger.feedback, 2), false);
+                    rows.emplace_back("Mix", f2(preset.flanger.mix, 2), false);
+                    break;
+                case 6: {
+                    const char* modeName = preset.ensemble.mode == audio::EnsembleMode::I ? "I" :
+                        preset.ensemble.mode == audio::EnsembleMode::II ? "II" : "I+II";
+                    rows.emplace_back("Mode", modeName, true);
+                    rows.emplace_back("Mix", f2(preset.ensemble.mix, 2), false);
+                    break;
+                }
+                case 7:
+                    rows.emplace_back("Rate Hz", f2(preset.phaser.rateHertz, 2), false);
+                    rows.emplace_back("Depth", f2(preset.phaser.depth, 2), false);
+                    rows.emplace_back("Feedback", f2(preset.phaser.feedback, 2), false);
+                    rows.emplace_back("Mix", f2(preset.phaser.mix, 2), false);
+                    break;
+                case 8:
+                    rows.emplace_back("Time s", f2(preset.delay.timeSeconds, 2), false);
+                    rows.emplace_back("Feedback", f2(preset.delay.feedback, 2), false);
+                    rows.emplace_back("Mix", f2(preset.delay.mix, 2), false);
+                    rows.emplace_back("Ping-pong", preset.delay.pingPong ? "On" : "Off", true);
+                    break;
+                case 9:
+                    rows.emplace_back("Room size", f2(preset.reverb.roomSize, 2), false);
+                    rows.emplace_back("Damping", f2(preset.reverb.damping, 2), false);
+                    rows.emplace_back("Width", f2(preset.reverb.width, 2), false);
+                    rows.emplace_back("Mix", f2(preset.reverb.mix, 2), false);
+                    break;
+                case 10:
+                    rows.emplace_back("Threshold dB", f2(preset.compressor.thresholdDb, 1), false);
+                    rows.emplace_back("Ratio", f2(preset.compressor.ratio, 1), false);
+                    rows.emplace_back("Attack ms", f2(preset.compressor.attackMilliseconds, 1), false);
+                    rows.emplace_back("Release ms", f2(preset.compressor.releaseMilliseconds, 0), false);
+                    rows.emplace_back("Makeup dB", f2(preset.compressor.makeupDb, 1), false);
+                    break;
+                case 11:
+                    rows.emplace_back("Ceiling dB", f2(preset.limiter.ceilingDb, 1), false);
+                    rows.emplace_back("Release ms", f2(preset.limiter.releaseMilliseconds, 0), false);
+                    break;
+                default: break;
+            }
+            return rows;
+        };
+        const auto params = effect_params(selectedEffect);
+        for (std::size_t i = 0; i < layout.effectParamRows.size(); ++i) {
+            if (i >= params.size()) break;
+            const auto& [label, value, isToggle] = params[i];
+            painter.fill(layout.effectParamRows[i], panel); painter.outline(layout.effectParamRows[i], border);
+            painter.text(layout.effectParamRows[i].x + 7, layout.effectParamRows[i].y + 18, label, text);
+            if (isToggle) button(layout.effectParamToggleButtons[i], value, true);
+            else {
+                button(layout.effectParamDownButtons[i], "-");
+                painter.text(layout.effectParamDownButtons[i].x + 32,
+                             layout.effectParamDownButtons[i].y + 16, value, text);
+                button(layout.effectParamUpButtons[i], "+");
+            }
         }
     } else if (page == SynthPanelPage::Expression) {
         auto mpe_text = [](audio::MpeZoneMode value) -> std::string_view {

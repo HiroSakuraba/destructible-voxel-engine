@@ -23,7 +23,7 @@ enum class SynthPanelPage : std::uint8_t {
     Expression,
 };
 inline constexpr std::size_t kSynthPanelPageCount = 7;
-inline constexpr std::size_t kSynthParameterRowCount = 28;
+inline constexpr std::size_t kSynthParameterRowCount = 30;
 inline constexpr std::size_t kSynthOscillatorAdvancedPropertyCount = 10;
 inline constexpr std::size_t kSynthArpStepPropertyCount = 18;
 inline constexpr std::size_t kSynthPresetVisibleEntryCount = 8;
@@ -76,6 +76,11 @@ struct SynthPanelLayout {
 
     std::array<UiRect, 12> effectRows{};
     std::array<UiRect, 12> effectToggleButtons{};
+    static constexpr std::size_t kSynthEffectParamCount = 5;
+    std::array<UiRect, kSynthEffectParamCount> effectParamRows{};
+    std::array<UiRect, kSynthEffectParamCount> effectParamDownButtons{};
+    std::array<UiRect, kSynthEffectParamCount> effectParamUpButtons{};
+    std::array<UiRect, kSynthEffectParamCount> effectParamToggleButtons{};
 
     UiRect presetScanButton{};
     UiRect presetPreviousButton{};
@@ -99,6 +104,7 @@ public:
     [[nodiscard]] int octave() const noexcept { return octave_; }
     [[nodiscard]] std::size_t selected_oscillator() const noexcept { return selectedOscillator_; }
     [[nodiscard]] std::size_t selected_arpeggiator_step() const noexcept { return selectedArpeggiatorStep_; }
+    [[nodiscard]] std::size_t selected_effect() const noexcept { return selectedEffect_; }
     [[nodiscard]] std::size_t selected_modulation_slot() const noexcept { return selectedModulationSlot_; }
     [[nodiscard]] std::size_t selected_preset_entry() const noexcept { return selectedPresetEntry_; }
     [[nodiscard]] std::size_t selected_midi_learn_mapping() const noexcept { return selectedMidiLearnMapping_; }
@@ -123,6 +129,8 @@ private:
     void release_panel_notes(audio::Synthesizer& synth) noexcept;
     void cycle_waveform(std::size_t oscillator, int direction, audio::Synthesizer& synth) noexcept;
     void toggle_effect(std::size_t index, audio::Synthesizer& synth) noexcept;
+    void adjust_effect_param(std::size_t paramIndex, int direction, audio::Synthesizer& synth) noexcept;
+    void toggle_effect_param(std::size_t paramIndex, audio::Synthesizer& synth) noexcept;
     void adjust_parameter(std::size_t index, int direction, audio::Synthesizer& synth) noexcept;
     void toggle_parameter(std::size_t index, audio::Synthesizer& synth) noexcept;
     void adjust_oscillator_advanced(std::size_t index, int direction, audio::Synthesizer& synth) noexcept;
@@ -139,6 +147,7 @@ private:
     int octave_{4};
     std::size_t selectedOscillator_{};
     std::size_t selectedArpeggiatorStep_{};
+    std::size_t selectedEffect_{};
     std::size_t selectedModulationSlot_{};
     std::size_t selectedPresetEntry_{};
     std::size_t selectedMidiLearnMapping_{};

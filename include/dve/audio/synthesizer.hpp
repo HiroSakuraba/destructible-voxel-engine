@@ -556,7 +556,16 @@ struct ArpeggiatorParameters {
     std::array<ArpeggiatorStep, kArpeggiatorStepCount> steps{};
 };
 
-enum class DistortionMode : std::uint8_t { Classic = 0, Fuzz = 1 };
+enum class DistortionMode : std::uint8_t {
+    Classic = 0,   // tanh soft clip (the original drive curve)
+    Fuzz = 1,      // asymmetric hard clip + tone filter
+    // Phase 2: gentler rational soft clipper x/(1+|x|) — rounder knee and a
+    // darker harmonic series than tanh at the same drive.
+    SoftClip = 2,
+    // Phase 2: triangle wavefolder — overdriven peaks fold back instead of
+    // clipping, for hollow/metallic timbres.
+    Foldback = 3
+};
 struct DistortionParameters { bool enabled{}; float drive{1.8F}; float mix{0.15F}; DistortionMode mode{DistortionMode::Classic}; };
 struct BitcrusherParameters { bool enabled{}; std::uint8_t bits{12}; std::uint8_t downsample{4}; float mix{0.5F}; };
 struct OctaveHarmonizerParameters { bool enabled{}; float subLevel{0.5F}; float upLevel{0.35F}; float mix{0.5F}; };
@@ -566,7 +575,34 @@ struct FlangerParameters { bool enabled{}; float rateHertz{0.25F}; float depthMi
 enum class EnsembleMode : std::uint8_t { I = 0, II = 1, Both = 2 };
 struct EnsembleParameters { bool enabled{}; EnsembleMode mode{EnsembleMode::I}; float mix{0.4F}; };
 struct PhaserParameters { bool enabled{}; float rateHertz{0.18F}; float depth{0.65F}; float feedback{0.25F}; float mix{0.12F}; };
-struct DelayParameters { bool enabled{true}; float timeSeconds{0.31F}; float feedback{0.28F}; float mix{0.12F}; bool pingPong{true}; };
+struct DelayParameters {
+    bool enabled{true};
+    float timeSeconds{0.31F};
+    float feedback{0.28F};
+    float mix{0.12F};
+    bool pingPong{true};
+    // Phase 2: tempo sync. When true, the effective delay time is
+    // syncBeats * 60 / effectiveTempoBpm, where the tempo is resolved the
+    // same way LFO tempo sync resolves it (arpeggiator.clockSource:
+    // Internal -> arpeggiator.tempoBpm, GameClock -> set_game_clock_tempo()
+    // value, MidiClock -> incoming MIDI clock tempo), clamped to the delay
+    // line's 0.01..1.95 s range. timeSeconds applies when tempoSync is false.
+    // syncBeats is beats per repeat: 1 = quarter note, 0.5 = eighth note,
+    // 1.5 = dotted quarter, 0.75 = dotted eighth, etc.
+    bool tempoSync{};
+    float syncBeats{1.0F};
+};
+struct DiffusionDelayParameters {
+    bool enabled{};
+    float timeSeconds{0.31F};
+    float feedback{0.35F};
+    float mix{0.18F};
+    // Diffusion amount 0..1. 0 gives distinct repeats (plain-echo-like);
+    // higher values smear every repeat through cascaded allpass stages for a
+    // reverb-ish wash. Note the diffusion stages sit in the wet path, so they
+    // add ~60 ms of group delay on top of timeSeconds.
+    float diffusion{0.65F};
+};
 struct ReverbParameters { bool enabled{true}; float roomSize{0.62F}; float damping{0.42F}; float width{0.85F}; float mix{0.18F}; };
 struct CompressorParameters { bool enabled{true}; float thresholdDb{-12.0F}; float ratio{3.0F}; float attackMilliseconds{8.0F}; float releaseMilliseconds{90.0F}; float makeupDb{1.5F}; };
 struct LimiterParameters { bool enabled{true}; float ceilingDb{-0.4F}; float releaseMilliseconds{45.0F}; };
@@ -602,6 +638,7 @@ struct SynthPreset {
     EnsembleParameters ensemble{};
     PhaserParameters phaser{};
     DelayParameters delay{};
+    DiffusionDelayParameters diffusionDelay{};
     ReverbParameters reverb{};
     CompressorParameters compressor{};
     LimiterParameters limiter{};

@@ -85,6 +85,21 @@ float fast_tanh(float value) noexcept {
     return value * (27.0F + squared) / (27.0F + 9.0F * squared);
 }
 
+// Phase 2: rational soft clipper for DistortionMode::SoftClip. Unity gain at
+// zero, asymptotically +/-1, with a rounder knee (and darker harmonic series
+// at equal drive) than tanh.
+float soft_clip(float value) noexcept {
+    return value / (1.0F + std::fabs(value));
+}
+
+// Phase 2: triangle wavefolder for DistortionMode::Foldback. Maps any input
+// into [-1, 1] by folding overdriven peaks back instead of clipping them.
+float wavefold(float value) noexcept {
+    float folded = std::fmod(value + 1.0F, 4.0F);
+    if (folded < 0.0F) folded += 4.0F;
+    return folded < 2.0F ? folded - 1.0F : 3.0F - folded;
+}
+
 template <class T, std::size_t Capacity>
 class BoundedQueue {
     static_assert(std::is_trivially_copyable_v<T>);
@@ -210,6 +225,7 @@ struct RealtimePreset {
     EnsembleParameters ensemble{};
     PhaserParameters phaser{};
     DelayParameters delay{};
+    DiffusionDelayParameters diffusionDelay{};
     ReverbParameters reverb{};
     CompressorParameters compressor{};
     LimiterParameters limiter{};
@@ -311,6 +327,7 @@ RealtimePreset realtime_preset(const SynthPreset& source) noexcept {
     result.ensemble = source.ensemble;
     result.phaser = source.phaser;
     result.delay = source.delay;
+    result.diffusionDelay = source.diffusionDelay;
     result.reverb = source.reverb;
     result.compressor = source.compressor;
     result.limiter = source.limiter;
@@ -833,6 +850,21 @@ struct DelayLine {
     }
     void push(float value) noexcept { data[write] = value; write = (write + 1U) % data.size(); }
 };
+
+// Phase 2: size in samples for one diffusion-delay allpass stage.
+std::size_t diffusion_stage_size(float milliseconds, std::uint32_t sampleRate) noexcept {
+    return std::max<std::size_t>(2U, static_cast<std::size_t>(
+        static_cast<double>(milliseconds) * 0.001 * static_cast<double>(sampleRate)));
+}
+
+// Phase 2: single true-allpass diffusion stage (H(z) = (z^-M - g)/(1 - g*z^-M),
+// unity magnitude for |g| < 1). The DelayLine holds w[n] = x[n] + g*y[n].
+float allpass_diffuse(DelayLine& line, float input, float coefficient) noexcept {
+    const float delayed = line.read_fractional(static_cast<float>(line.data.size() - 1U));
+    const float output = delayed - coefficient * input;
+    line.push(input + coefficient * output);
+    return output;
+}
 
 struct AllpassStage {
     float x1{};
@@ -2249,6 +2281,12 @@ struct Synthesizer::Impl {
           flangerL(static_cast<std::size_t>(rate / 40U + 32U)), flangerR(static_cast<std::size_t>(rate / 40U + 32U)),
           ensembleBufL(static_cast<std::size_t>(rate / 25U + 32U)), ensembleBufR(static_cast<std::size_t>(rate / 25U + 32U)),
           delayL(static_cast<std::size_t>(rate * 2U + 2U)), delayR(static_cast<std::size_t>(rate * 2U + 2U)),
+          diffDelayL(static_cast<std::size_t>(rate * 2U + 2U)), diffDelayR(static_cast<std::size_t>(rate * 2U + 2U)),
+          // Phase 2: diffusion allpass stage times (ms), decorrelated per channel.
+          diffApL{DelayLine(diffusion_stage_size(5.9F, rate)), DelayLine(diffusion_stage_size(11.3F, rate)),
+                  DelayLine(diffusion_stage_size(17.7F, rate)), DelayLine(diffusion_stage_size(23.1F, rate))},
+          diffApR{DelayLine(diffusion_stage_size(6.7F, rate)), DelayLine(diffusion_stage_size(12.9F, rate)),
+                  DelayLine(diffusion_stage_size(18.3F, rate)), DelayLine(diffusion_stage_size(25.7F, rate))},
           reverb(rate) {}
 
     float sampleRate{};
@@ -2271,6 +2309,8 @@ struct Synthesizer::Impl {
     SmoothedFloat smoothedMasterGain{};
     std::array<SmoothedFloat, kSynthOscillatorCount> smoothedOscGain{};
     SmoothedFloat smoothedDelayTime{};
+    SmoothedFloat smoothedDiffDelayTime{};
+    SmoothedFloat smoothedDiffDelayFeedback{};
     SmoothedFloat smoothedEqLowDb{};
     SmoothedFloat smoothedEqMidDb{};
     SmoothedFloat smoothedEqHighDb{};
@@ -2390,6 +2430,12 @@ struct Synthesizer::Impl {
     float phaserFeedbackR{};
     DelayLine delayL;
     DelayLine delayR;
+    // Phase 2: diffusion delay — recirculating delay line plus per-channel
+    // cascaded allpass diffusion stages.
+    DelayLine diffDelayL;
+    DelayLine diffDelayR;
+    std::array<DelayLine, 4> diffApL;
+    std::array<DelayLine, 4> diffApR;
     ReverbState reverb;
     float eqLowL{}; float eqLowR{}; float eqHighL{}; float eqHighR{};
     float compressorEnvelope{};
@@ -3166,12 +3212,17 @@ struct Synthesizer::Impl {
         retarget(smoothedMasterGain, parameters.masterGain);
         for (std::size_t i = 0; i < kSynthOscillatorCount; ++i)
             retarget(smoothedOscGain[i], parameters.oscillators[i].gain);
-        retarget(smoothedDelayTime, parameters.delay.timeSeconds);
+        // Phase 2: tempo-synced delay resolves through effective_delay_time_seconds()
+        // (manual timeSeconds when tempoSync is off), so the first adoption snaps
+        // to the synced time and later render blocks track live tempo changes.
+        retarget(smoothedDelayTime, effective_delay_time_seconds());
+        retarget(smoothedDiffDelayTime, parameters.diffusionDelay.timeSeconds);
         retarget(smoothedEqLowDb, parameters.eq.lowGainDb);
         retarget(smoothedEqMidDb, parameters.eq.midGainDb);
         retarget(smoothedEqHighDb, parameters.eq.highGainDb);
         retarget(smoothedDistortionDrive, parameters.distortion.drive);
         retarget(smoothedDelayFeedback, parameters.delay.feedback);
+        retarget(smoothedDiffDelayFeedback, parameters.diffusionDelay.feedback);
         retarget(smoothedFlangerFeedback, parameters.flanger.feedback);
         retarget(smoothedCompThresholdDb, parameters.compressor.thresholdDb);
         parameterSmoothingInitialized = true;
@@ -3192,6 +3243,8 @@ struct Synthesizer::Impl {
         smoothedMasterGain.advance(coeff);
         for (auto& s : smoothedOscGain) s.advance(coeff);
         smoothedDelayTime.advance(coeff);
+        smoothedDiffDelayTime.advance(coeff);
+        smoothedDiffDelayFeedback.advance(coeff);
         smoothedEqLowDb.advance(coeff);
         smoothedEqMidDb.advance(coeff);
         smoothedEqHighDb.advance(coeff);
@@ -3313,6 +3366,26 @@ struct Synthesizer::Impl {
             case ArpeggiatorClockSource::MidiClock: return midiClockTempo;
         }
         return parameters.arpeggiator.tempoBpm;
+    }
+
+    // Phase 2: resolves the delay time honoring tempo sync, clamped to the
+    // delay line's range. Manual timeSeconds when tempoSync is off; otherwise
+    // syncBeats * 60 / effectiveTempoBpm using the same tempo source the LFO
+    // tempo sync uses (see effective_arpeggiator_tempo above).
+    float effective_delay_time_seconds() const noexcept {
+        if (!parameters.delay.tempoSync) return parameters.delay.timeSeconds;
+        const float tempo = clampf(effective_arpeggiator_tempo(), 20.0F, 400.0F);
+        const float beats = clampf(parameters.delay.syncBeats, 0.03125F, 32.0F);
+        return clampf(beats * 60.0F / tempo, 0.01F, 1.95F);
+    }
+
+    // Phase 2: keep a tempo-synced delay glued to the live tempo. The game
+    // clock / MIDI clock can move at any time without a preset adoption, so
+    // retarget the (already smoothed) delay time once per render block; the
+    // ~12 ms one-pole smoother absorbs tempo glides without zipper noise.
+    void track_tempo_synced_delay() noexcept {
+        if (parameters.delay.tempoSync)
+            smoothedDelayTime.set_target(effective_delay_time_seconds());
     }
 
     float advance_lfo(Voice& v, std::size_t index) noexcept {
@@ -4213,6 +4286,14 @@ struct Synthesizer::Impl {
                 fuzzToneR += tone * (clippedR - fuzzToneR);
                 left += (fuzzToneL * 0.9F - left) * mix;
                 right += (fuzzToneR * 0.9F - right) * mix;
+            } else if (parameters.distortion.mode == DistortionMode::SoftClip) {
+                const float wetL = soft_clip(left * smoothedDrive);
+                const float wetR = soft_clip(right * smoothedDrive);
+                left += (wetL - left) * mix; right += (wetR - right) * mix;
+            } else if (parameters.distortion.mode == DistortionMode::Foldback) {
+                const float wetL = wavefold(left * smoothedDrive);
+                const float wetR = wavefold(right * smoothedDrive);
+                left += (wetL - left) * mix; right += (wetR - right) * mix;
             } else {
                 const float wetL = fast_tanh(left * smoothedDrive);
                 const float wetR = fast_tanh(right * smoothedDrive);
@@ -4318,6 +4399,24 @@ struct Synthesizer::Impl {
             const float mix = clampf(parameters.delay.mix, 0.0F, 1.0F);
             left += (delayedL - left) * mix; right += (delayedR - right) * mix;
         } else { delayL.push(left); delayR.push(right); }
+        // Phase 2: diffusion delay. A recirculating delay whose wet path runs
+        // through cascaded allpass stages; the recirculated signal is already
+        // diffused, so repeats smear into a reverb-ish wash instead of staying
+        // distinct. Allpass stages are unity-magnitude (|g| < 1), so the loop
+        // is stable for feedback < 1.
+        if (parameters.diffusionDelay.enabled) {
+            const float delaySamples = clampf(smoothedDiffDelayTime.current, 0.01F, 1.95F) * sampleRate;
+            const float apCoeff = clampf(parameters.diffusionDelay.diffusion, 0.0F, 1.0F) * 0.7F;
+            float wetL = diffDelayL.read_fractional(delaySamples);
+            float wetR = diffDelayR.read_fractional(delaySamples);
+            for (auto& stage : diffApL) wetL = allpass_diffuse(stage, wetL, apCoeff);
+            for (auto& stage : diffApR) wetR = allpass_diffuse(stage, wetR, apCoeff);
+            const float feedback = clampf(smoothedDiffDelayFeedback.current, 0.0F, 0.94F);
+            diffDelayL.push(left + wetL * feedback);
+            diffDelayR.push(right + wetR * feedback);
+            const float mix = clampf(parameters.diffusionDelay.mix, 0.0F, 1.0F);
+            left += (wetL - left) * mix; right += (wetR - right) * mix;
+        } else { diffDelayL.push(left); diffDelayR.push(right); }
         if (parameters.reverb.enabled) {
             float wetL = 0.0F; float wetR = 0.0F;
             reverb.process(left, right, parameters.reverb, wetL, wetR);
@@ -5177,7 +5276,7 @@ bool SynthPreset::validate(std::string* error) const {
             return fail("invalid arpeggiator step");
     }
     if (!in_range(distortion.drive, 0.05F, 32.0F) || !in_range(distortion.mix, 0.0F, 1.0F) ||
-        static_cast<unsigned>(distortion.mode) > 1U)
+        static_cast<unsigned>(distortion.mode) > 3U)
         return fail("invalid distortion parameters");
     if (!in_range(bitcrusher.mix, 0.0F, 1.0F) || bitcrusher.bits < 1U || bitcrusher.bits > 16U ||
         bitcrusher.downsample < 1U || bitcrusher.downsample > 64U)
@@ -5200,8 +5299,11 @@ bool SynthPreset::validate(std::string* error) const {
         !in_range(phaser.feedback, -0.95F, 0.95F) || !in_range(phaser.mix, 0.0F, 1.0F))
         return fail("invalid phaser parameters");
     if (!in_range(delay.timeSeconds, 0.01F, 1.95F) || !in_range(delay.feedback, 0.0F, 0.94F) ||
-        !in_range(delay.mix, 0.0F, 1.0F))
+        !in_range(delay.mix, 0.0F, 1.0F) || !in_range(delay.syncBeats, 0.03125F, 32.0F))
         return fail("invalid delay parameters");
+    if (!in_range(diffusionDelay.timeSeconds, 0.01F, 1.95F) || !in_range(diffusionDelay.feedback, 0.0F, 0.94F) ||
+        !in_range(diffusionDelay.mix, 0.0F, 1.0F) || !in_range(diffusionDelay.diffusion, 0.0F, 1.0F))
+        return fail("invalid diffusion delay parameters");
     if (!in_range(reverb.roomSize, 0.0F, 1.0F) || !in_range(reverb.damping, 0.0F, 0.98F) ||
         !in_range(reverb.width, 0.0F, 1.0F) || !in_range(reverb.mix, 0.0F, 1.0F))
         return fail("invalid reverb parameters");
@@ -5525,7 +5627,13 @@ std::string SynthPreset::serialize() const {
         << "\nphaser.mix=" << phaser.mix << '\n'
         << "delay.enabled=" << delay.enabled << "\ndelay.time=" << delay.timeSeconds
         << "\ndelay.feedback=" << delay.feedback << "\ndelay.mix=" << delay.mix
-        << "\ndelay.pingPong=" << delay.pingPong << '\n'
+        << "\ndelay.pingPong=" << delay.pingPong
+        << "\ndelay.tempoSync=" << delay.tempoSync << "\ndelay.syncBeats=" << delay.syncBeats << '\n'
+        << "diffusionDelay.enabled=" << diffusionDelay.enabled
+        << "\ndiffusionDelay.time=" << diffusionDelay.timeSeconds
+        << "\ndiffusionDelay.feedback=" << diffusionDelay.feedback
+        << "\ndiffusionDelay.mix=" << diffusionDelay.mix
+        << "\ndiffusionDelay.diffusion=" << diffusionDelay.diffusion << '\n'
         << "reverb.enabled=" << reverb.enabled << "\nreverb.room=" << reverb.roomSize
         << "\nreverb.damping=" << reverb.damping << "\nreverb.width=" << reverb.width
         << "\nreverb.mix=" << reverb.mix << '\n'
@@ -5970,7 +6078,7 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             if (key == "distortion.enabled") parsed = readBool(result.distortion.enabled);
             else if (key == "distortion.drive") parsed = readFloat(result.distortion.drive);
             else if (key == "distortion.mix") parsed = readFloat(result.distortion.mix);
-            else if (key == "distortion.mode") parsed = readUInt(result.distortion.mode, 1U);
+            else if (key == "distortion.mode") parsed = readUInt(result.distortion.mode, 3U);
             else if (key == "bitcrusher.enabled") parsed = readBool(result.bitcrusher.enabled);
             else if (key == "bitcrusher.bits") parsed = readUInt(result.bitcrusher.bits, 16U);
             else if (key == "bitcrusher.downsample") parsed = readUInt(result.bitcrusher.downsample, 64U);
@@ -6005,6 +6113,13 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (key == "delay.feedback") parsed = readFloat(result.delay.feedback);
             else if (key == "delay.mix") parsed = readFloat(result.delay.mix);
             else if (key == "delay.pingPong") parsed = readBool(result.delay.pingPong);
+            else if (key == "delay.tempoSync") parsed = readBool(result.delay.tempoSync);
+            else if (key == "delay.syncBeats") parsed = readFloat(result.delay.syncBeats);
+            else if (key == "diffusionDelay.enabled") parsed = readBool(result.diffusionDelay.enabled);
+            else if (key == "diffusionDelay.time") parsed = readFloat(result.diffusionDelay.timeSeconds);
+            else if (key == "diffusionDelay.feedback") parsed = readFloat(result.diffusionDelay.feedback);
+            else if (key == "diffusionDelay.mix") parsed = readFloat(result.diffusionDelay.mix);
+            else if (key == "diffusionDelay.diffusion") parsed = readFloat(result.diffusionDelay.diffusion);
             else if (key == "reverb.enabled") parsed = readBool(result.reverb.enabled);
             else if (key == "reverb.room") parsed = readFloat(result.reverb.roomSize);
             else if (key == "reverb.damping") parsed = readFloat(result.reverb.damping);
@@ -6212,6 +6327,13 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
     result.delay.timeSeconds=std::exp(std::log(std::max(0.001F,a.delay.timeSeconds)) +
         (std::log(std::max(0.001F,b.delay.timeSeconds)) - std::log(std::max(0.001F,a.delay.timeSeconds))) * t);
     result.delay.feedback=lerp(a.delay.feedback,b.delay.feedback); result.delay.mix=lerp(a.delay.mix,b.delay.mix);
+    result.delay.syncBeats=lerp(a.delay.syncBeats,b.delay.syncBeats);
+    // Phase 2: diffusion delay morphs like the plain delay (log-domain time).
+    result.diffusionDelay.timeSeconds=std::exp(std::log(std::max(0.001F,a.diffusionDelay.timeSeconds)) +
+        (std::log(std::max(0.001F,b.diffusionDelay.timeSeconds)) - std::log(std::max(0.001F,a.diffusionDelay.timeSeconds))) * t);
+    result.diffusionDelay.feedback=lerp(a.diffusionDelay.feedback,b.diffusionDelay.feedback);
+    result.diffusionDelay.mix=lerp(a.diffusionDelay.mix,b.diffusionDelay.mix);
+    result.diffusionDelay.diffusion=lerp(a.diffusionDelay.diffusion,b.diffusionDelay.diffusion);
     result.reverb.roomSize=lerp(a.reverb.roomSize,b.reverb.roomSize); result.reverb.damping=lerp(a.reverb.damping,b.reverb.damping); result.reverb.width=lerp(a.reverb.width,b.reverb.width); result.reverb.mix=lerp(a.reverb.mix,b.reverb.mix);
     result.wavetable.enabled = a.wavetable.enabled || b.wavetable.enabled;
     result.wavetable.frameCount = std::max(a.wavetable.frameCount,b.wavetable.frameCount);
@@ -6470,6 +6592,7 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     RealtimePreset latest{};
     while (impl_->presetIn.pop(latest)) impl_->adopt_preset(latest);
     impl_->advance_parameter_smoothing(frameCount);
+    impl_->track_tempo_synced_delay();
     // Phase 1: step physics modulation bank.
     impl_->physicsBank.step(static_cast<float>(frameCount) / impl_->sampleRate);
     if (impl_->transportRestartRequested.exchange(false, std::memory_order_acq_rel)) {
@@ -6509,7 +6632,7 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     const bool anyFxEnabled = impl_->parameters.distortion.enabled || impl_->parameters.bitcrusher.enabled ||
         impl_->parameters.harmonizer.enabled || impl_->parameters.eq.enabled || impl_->parameters.chorus.enabled ||
         impl_->parameters.flanger.enabled || impl_->parameters.ensemble.enabled || impl_->parameters.phaser.enabled ||
-        impl_->parameters.delay.enabled || impl_->parameters.reverb.enabled ||
+        impl_->parameters.delay.enabled || impl_->parameters.diffusionDelay.enabled || impl_->parameters.reverb.enabled ||
         impl_->parameters.compressor.enabled || impl_->parameters.limiter.enabled;
     for (std::size_t frame = 0; frame < frameCount; ++frame) {
         const std::uint64_t absoluteFrame = blockStart + frame;

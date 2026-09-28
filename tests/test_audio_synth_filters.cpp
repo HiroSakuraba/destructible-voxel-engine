@@ -127,30 +127,40 @@ void test_topology_names() {
 }
 
 void test_oversampling_policy() {
+    // Explicit X1/X2/X4 settings are always honored exactly (the pre-existing
+    // regression test renders explicit X1/X2/X4 and requires them distinct).
     FilterParameters p;  // defaults: resonance 0.15, drive 1.0, oversampling X1
     CHECK(effective_oversampling(p) == FilterOversampling::X1);
+    p.resonance = 0.99F; p.drive = 5.0F;  // extreme triggers: explicit X1 stays X1
+    CHECK(effective_oversampling(p) == FilterOversampling::X1);
+    p.oversampling = FilterOversampling::X2;
+    CHECK(effective_oversampling(p) == FilterOversampling::X2);
+    p.oversampling = FilterOversampling::X4;
+    p.resonance = 0.1F; p.drive = 1.0F;
+    CHECK(effective_oversampling(p) == FilterOversampling::X4);
 
+    // Auto applies the policy: X1 baseline, X2 on high resonance or engaged
+    // drive, X4 on extreme resonance with drive engaged.
+    p.oversampling = FilterOversampling::Auto;
+    p.resonance = 0.15F; p.drive = 1.0F;
+    CHECK(effective_oversampling(p) == FilterOversampling::X1);
     p.resonance = 0.75F;  // exactly at threshold: no upgrade
     CHECK(effective_oversampling(p) == FilterOversampling::X1);
     p.resonance = 0.76F;  // above threshold: X2
     CHECK(effective_oversampling(p) == FilterOversampling::X2);
-
     p.resonance = 0.15F; p.drive = 1.5F;  // drive at threshold: no upgrade
     CHECK(effective_oversampling(p) == FilterOversampling::X1);
     p.drive = 1.6F;  // drive engaged: X2
     CHECK(effective_oversampling(p) == FilterOversampling::X2);
-
     p.resonance = 0.97F; p.drive = 1.0F;  // extreme resonance alone: X2, not X4
     CHECK(effective_oversampling(p) == FilterOversampling::X2);
     p.resonance = 0.97F; p.drive = 2.0F;  // extreme resonance + drive: X4
     CHECK(effective_oversampling(p) == FilterOversampling::X4);
 
-    // Explicit higher settings are never downgraded.
-    p.resonance = 0.1F; p.drive = 1.0F; p.oversampling = FilterOversampling::X4;
-    CHECK(effective_oversampling(p) == FilterOversampling::X4);
-    p.oversampling = FilterOversampling::X2;
-    p.resonance = 0.99F; p.drive = 5.0F;  // extreme triggers: still X2, no forced X4
-    CHECK(effective_oversampling(p) == FilterOversampling::X2);
+    // Enum stability: existing serialized values keep their numeric codes.
+    CHECK(static_cast<std::uint8_t>(FilterOversampling::X1) == 1);
+    CHECK(static_cast<std::uint8_t>(FilterOversampling::X2) == 2);
+    CHECK(static_cast<std::uint8_t>(FilterOversampling::X4) == 4);
 }
 
 void test_comb_spectrum() {
@@ -210,6 +220,7 @@ void test_auto_oversample_render_smoke() {
     preset.filter.cutoffHertz = 800.0F;
     preset.filter.resonance = 0.97F;
     preset.filter.drive = 3.0F;
+    preset.filter.oversampling = FilterOversampling::Auto;
     CHECK(effective_oversampling(preset.filter) == FilterOversampling::X4);
     const std::vector<float> mono = render_mono_left(preset, 60, 32768);
     double energy = 0.0;

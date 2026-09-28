@@ -786,6 +786,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
         return source < 0 ? std::string("Off") : "Osc " + std::to_string(static_cast<int>(source) + 1);
     };
     auto filter_oversampling_text = [](audio::FilterOversampling value) {
+        if (value == audio::FilterOversampling::Auto) return std::string("Auto");
         return std::to_string(static_cast<unsigned>(value)) + "x";
     };
     auto fm_mode_text = [](audio::FrequencyModulationMode value) -> std::string_view {

@@ -33,7 +33,8 @@ std::int8_t cycle_oscillator_source(std::int8_t source, int direction) noexcept 
 }
 audio::FilterOversampling cycle_oversampling(audio::FilterOversampling value, int direction) noexcept {
     static constexpr std::array values{
-        audio::FilterOversampling::X1, audio::FilterOversampling::X2, audio::FilterOversampling::X4};
+        audio::FilterOversampling::X1, audio::FilterOversampling::X2, audio::FilterOversampling::X4,
+        audio::FilterOversampling::Auto};
     std::size_t index = 0;
     for (std::size_t i = 0; i < values.size(); ++i) if (values[i] == value) index = i;
     int next = static_cast<int>(index) + direction;

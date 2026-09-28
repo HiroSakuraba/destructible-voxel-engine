@@ -166,7 +166,7 @@ enum class ArpeggiatorDivision : std::uint8_t {
 enum class LfoWaveform : std::uint8_t { Sine, Triangle, Saw, Square, SampleAndHold, SmoothRandom };
 enum class ModulationCurve : std::uint8_t { Linear, Quadratic, Cubic };
 enum class FrequencyModulationMode : std::uint8_t { Off, Linear, Exponential };
-enum class FilterOversampling : std::uint8_t { X1 = 1, X2 = 2, X4 = 4 };
+enum class FilterOversampling : std::uint8_t { X1 = 1, X2 = 2, X4 = 4, Auto = 0 };
 enum class OscillatorQuality : std::uint8_t { Normal, High, Offline };
 enum class FilterQuality : std::uint8_t { Eco, Standard, High, Offline };
 enum class ModulationPolarity : std::uint8_t { Bipolar, Unipolar };
@@ -779,13 +779,14 @@ private:
 [[nodiscard]] std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept;
 [[nodiscard]] std::string_view modal_excitation_source_name(ExcitationSource source) noexcept;
 [[nodiscard]] std::string_view filter_topology_name(FilterTopology topology) noexcept;
-// Phase 2: auto oversampling policy for the voice filter. Upgrades the explicit
-// FilterParameters::oversampling setting to X2 when resonance exceeds
-// kAutoOversampleResonanceThreshold or drive is engaged
-// (drive > kAutoOversampleDriveThreshold), and to X4 when resonance exceeds
-// kAutoOversampleExtremeResonanceThreshold with drive engaged. Never downgrades
-// an explicit X2/X4 setting; X1 presets without a trigger condition are
-// unaffected.
+// Phase 2: auto oversampling policy for the voice filter. When
+// FilterParameters::oversampling is Auto, the effective rate is X1 by default,
+// upgraded to X2 when resonance exceeds kAutoOversampleResonanceThreshold or
+// drive is engaged (drive > kAutoOversampleDriveThreshold), and to X4 when
+// resonance exceeds kAutoOversampleExtremeResonanceThreshold with drive
+// engaged. An explicit X1/X2/X4 setting is always honored exactly (so existing
+// presets and the oversampling regression test are unaffected); Auto presets
+// without a trigger condition render bit-identical to X1.
 [[nodiscard]] FilterOversampling effective_oversampling(const FilterParameters& params) noexcept;
 [[nodiscard]] std::string_view filter_mode_name(FilterMode mode) noexcept;
 [[nodiscard]] std::string_view arpeggiator_mode_name(ArpeggiatorMode mode) noexcept;

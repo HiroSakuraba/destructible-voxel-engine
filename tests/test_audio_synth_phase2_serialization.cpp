@@ -241,15 +241,15 @@ int main() {
         CHECK(!bad.has_value());
     }
 
-    // Oversampling values 1/2/4 parse; 3 and 8 are rejected.
+    // Oversampling values 0 (Auto) / 1 / 2 / 4 parse; 3 and 8 are rejected.
     {
         std::string error;
-        for (const char* value : {"1", "2", "4"}) {
+        for (const char* value : {"0", "1", "2", "4"}) {
             const auto parsed = SynthPreset::parse(
                 std::string("DVE_SYNTH_PRESET=5\nname=OS\nfilter.oversampling=") + value + "\n", &error);
             CHECK(parsed.has_value());
         }
-        for (const char* value : {"0", "3", "8"}) {
+        for (const char* value : {"3", "8"}) {
             const auto parsed = SynthPreset::parse(
                 std::string("DVE_SYNTH_PRESET=5\nname=OS\nfilter.oversampling=") + value + "\n", &error);
             CHECK(!parsed.has_value());

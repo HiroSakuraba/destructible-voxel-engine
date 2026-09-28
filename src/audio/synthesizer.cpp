@@ -649,8 +649,8 @@ struct AnalogFilter {
 
     float process(float input, float cutoff, float resonance, const FilterParameters& parameters,
                   float sampleRate, FilterQuality quality = FilterQuality::Standard) noexcept {
-        // Phase 2: auto oversampling policy upgrades X1 under high resonance /
-        // engaged drive (never downgrades an explicit higher setting).
+        // Phase 2: Auto oversampling resolves via effective_oversampling();
+        // explicit X1/X2/X4 settings are honored exactly.
         const unsigned configured = static_cast<unsigned>(effective_oversampling(parameters));
         unsigned oversampling = configured == 2U || configured == 4U ? configured : 1U;
         if (quality == FilterQuality::Eco) oversampling = 1U;
@@ -2079,12 +2079,12 @@ std::string_view filter_mode_name(FilterMode mode) noexcept {
     return "Low-pass";
 }
 
-// Phase 2: auto oversampling policy. Upgrades an explicit X1 setting under high
-// resonance / engaged drive (where nonlinear stages alias most); explicit
-// X2/X4 settings are never downgraded, and X1 presets without a trigger keep
-// their exact old behavior.
+// Phase 2: auto oversampling policy. Applies only when oversampling is Auto:
+// X1 by default, upgraded under high resonance / engaged drive (where
+// nonlinear stages alias most). An explicit X1/X2/X4 setting is always honored
+// exactly, so existing presets keep their exact old behavior.
 FilterOversampling effective_oversampling(const FilterParameters& params) noexcept {
-    if (params.oversampling != FilterOversampling::X1) return params.oversampling;
+    if (params.oversampling != FilterOversampling::Auto) return params.oversampling;
     const bool driveEngaged = params.drive > kAutoOversampleDriveThreshold;
     if (params.resonance > kAutoOversampleExtremeResonanceThreshold && driveEngaged)
         return FilterOversampling::X4;
@@ -5271,7 +5271,7 @@ bool SynthPreset::validate(std::string* error) const {
         !in_range(filter.morph, 0.0F, 1.0F) || !in_range(filter.ms20HighPassCutoffHertz, 12.0F, 18000.0F) ||
         !in_range(filter.selfOscillation, 0.5F, 1.35F) ||
         (filter.oversampling != FilterOversampling::X1 && filter.oversampling != FilterOversampling::X2 &&
-         filter.oversampling != FilterOversampling::X4) ||
+         filter.oversampling != FilterOversampling::X4 && filter.oversampling != FilterOversampling::Auto) ||
         !in_range(filter.comb.damping, 0.0F, 1.0F) || !in_range(filter.comb.mix, 0.0F, 1.0F) ||
         !in_range(filter.comb.feedbackScale, 0.0F, 1.5F) || !in_range(filter.formant.dryMix, 0.0F, 1.0F))
         return fail("invalid filter parameters");
@@ -5828,7 +5828,7 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "filter.env.curve") parsed = readCurve(result.filter.envelope.curve);
         else if (key == "filter.env.delay") parsed = readFloat(result.filter.envelope.delaySeconds);
         else if (key == "filter.env.hold") parsed = readFloat(result.filter.envelope.holdSeconds);
-        else if (key == "filter.oversampling") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && (v==1U||v==2U||v==4U); if(parsed) result.filter.oversampling=static_cast<FilterOversampling>(v); }
+        else if (key == "filter.oversampling") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && (v==0U||v==1U||v==2U||v==4U); if(parsed) result.filter.oversampling=static_cast<FilterOversampling>(v); }
         else if (key == "filter.ms20HighPass") parsed = readFloat(result.filter.ms20HighPassCutoffHertz);
         else if (key == "filter.selfOscillation") parsed = readFloat(result.filter.selfOscillation);
         else if (key == "filter.comb.damping") parsed = readFloat(result.filter.comb.damping);

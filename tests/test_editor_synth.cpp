@@ -145,17 +145,17 @@ int main() {
                 "arpeggiator step selector did not update selection");
         const auto beforeStep = controller.synthesizer().preset().arpeggiator.steps[5];
         click(controller, panel.arpeggiatorStepUpButtons[1]);
-        click(controller, panel.arpeggiatorStepUpButtons[2]);
-        click(controller, panel.arpeggiatorStepToggleButtons[3]);
-        click(controller, panel.arpeggiatorStepToggleButtons[4]);
-        click(controller, panel.arpeggiatorStepUpButtons[5]);
-        click(controller, panel.arpeggiatorStepDownButtons[6]);
+        click(controller, panel.arpeggiatorStepUpButtons[4]);
+        click(controller, panel.arpeggiatorStepToggleButtons[5]);
+        click(controller, panel.arpeggiatorStepToggleButtons[6]);
         click(controller, panel.arpeggiatorStepUpButtons[7]);
         click(controller, panel.arpeggiatorStepDownButtons[8]);
-        click(controller, panel.arpeggiatorStepDownButtons[9]);
-        click(controller, panel.arpeggiatorStepUpButtons[10]);
-        click(controller, panel.arpeggiatorStepToggleButtons[11]);
-        click(controller, panel.arpeggiatorStepUpButtons[14]);
+        click(controller, panel.arpeggiatorStepUpButtons[9]);
+        click(controller, panel.arpeggiatorStepDownButtons[10]);
+        click(controller, panel.arpeggiatorStepDownButtons[11]);
+        click(controller, panel.arpeggiatorStepUpButtons[12]);
+        click(controller, panel.arpeggiatorStepToggleButtons[13]);
+        click(controller, panel.arpeggiatorStepUpButtons[16]);
         click(controller, panel.arpeggiatorStepToggleButtons[0]);
         const auto afterStep = controller.synthesizer().preset().arpeggiator.steps[5];
         require(afterStep.condition != beforeStep.condition &&

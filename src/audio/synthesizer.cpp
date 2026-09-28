@@ -180,8 +180,12 @@ struct RealtimePreset {
     OscillatorQuality oscillatorQuality{OscillatorQuality::Normal};
     FilterQuality filterQuality{FilterQuality::Standard};
     DistortionParameters distortion{};
+    BitcrusherParameters bitcrusher{};
+    OctaveHarmonizerParameters harmonizer{};
     EqParameters eq{};
     ChorusParameters chorus{};
+    FlangerParameters flanger{};
+    EnsembleParameters ensemble{};
     PhaserParameters phaser{};
     DelayParameters delay{};
     ReverbParameters reverb{};
@@ -276,8 +280,12 @@ RealtimePreset realtime_preset(const SynthPreset& source) noexcept {
         }
     }
     result.distortion = source.distortion;
+    result.bitcrusher = source.bitcrusher;
+    result.harmonizer = source.harmonizer;
     result.eq = source.eq;
     result.chorus = source.chorus;
+    result.flanger = source.flanger;
+    result.ensemble = source.ensemble;
     result.phaser = source.phaser;
     result.delay = source.delay;
     result.reverb = source.reverb;
@@ -564,6 +572,7 @@ struct Voice {
     Envelope amp;
     Envelope filterEnvelope;
     std::array<float, kSynthOscillatorCount> phases{};
+    std::array<float, 2> harmonizerPhases{};
     std::array<std::array<float, 4>, kSynthOscillatorCount> auxiliaryPhases{};
     std::array<std::uint32_t, kSynthOscillatorCount> noiseState{};
     std::array<float, kSynthOscillatorCount> previousOscillatorSamples{};
@@ -603,6 +612,7 @@ struct Voice {
         releaseSamplePositions.fill(0.0F);
         sampleFinished.fill(false);
         releaseSampleActive.fill(false);
+        harmonizerPhases.fill(0.0F);
         for (std::size_t i = 0; i < phases.size(); ++i) {
             if (preset.oscillators[i].keySync || retrigger) {
                 phases[i] = wrap_phase(preset.oscillators[i].phaseOffset);
@@ -1338,6 +1348,9 @@ std::string_view arpeggiator_division_token(ArpeggiatorDivision division) noexce
         case ArpeggiatorDivision::Sixteenth: return "1/16";
         case ArpeggiatorDivision::SixteenthTriplet: return "1/16T";
         case ArpeggiatorDivision::ThirtySecond: return "1/32";
+        case ArpeggiatorDivision::DottedEighth: return "1/8D";
+        case ArpeggiatorDivision::DottedQuarter: return "1/4D";
+        case ArpeggiatorDivision::SixtyFourth: return "1/64";
     }
     return "1/16";
 }
@@ -1348,6 +1361,9 @@ std::optional<ArpeggiatorDivision> parse_arpeggiator_division(std::string_view v
     if (value == "1/16") return ArpeggiatorDivision::Sixteenth;
     if (value == "1/16T") return ArpeggiatorDivision::SixteenthTriplet;
     if (value == "1/32") return ArpeggiatorDivision::ThirtySecond;
+    if (value == "1/8D") return ArpeggiatorDivision::DottedEighth;
+    if (value == "1/4D") return ArpeggiatorDivision::DottedQuarter;
+    if (value == "1/64") return ArpeggiatorDivision::SixtyFourth;
     return std::nullopt;
 }
 std::string_view chord_type_token(ChordType type) noexcept {
@@ -1594,6 +1610,9 @@ float arpeggiator_step_beats(ArpeggiatorDivision division) noexcept {
         case ArpeggiatorDivision::Sixteenth: return 0.25F;
         case ArpeggiatorDivision::SixteenthTriplet: return 1.0F / 6.0F;
         case ArpeggiatorDivision::ThirtySecond: return 0.125F;
+        case ArpeggiatorDivision::DottedEighth: return 0.75F;
+        case ArpeggiatorDivision::DottedQuarter: return 1.5F;
+        case ArpeggiatorDivision::SixtyFourth: return 0.0625F;
     }
     return 0.25F;
 }
@@ -1783,6 +1802,8 @@ struct Synthesizer::Impl {
     explicit Impl(std::uint32_t rate, std::atomic<std::uint64_t>& frameCounter)
         : sampleRate(static_cast<float>(rate)), currentFrame(frameCounter),
           chorusL(static_cast<std::size_t>(rate / 10U + 32U)), chorusR(static_cast<std::size_t>(rate / 10U + 32U)),
+          flangerL(static_cast<std::size_t>(rate / 40U + 32U)), flangerR(static_cast<std::size_t>(rate / 40U + 32U)),
+          ensembleBufL(static_cast<std::size_t>(rate / 25U + 32U)), ensembleBufR(static_cast<std::size_t>(rate / 25U + 32U)),
           delayL(static_cast<std::size_t>(rate * 2U + 2U)), delayR(static_cast<std::size_t>(rate * 2U + 2U)),
           reverb(rate) {}
 
@@ -1865,6 +1886,19 @@ struct Synthesizer::Impl {
     DelayLine chorusL;
     DelayLine chorusR;
     float chorusPhase{};
+    DelayLine flangerL;
+    DelayLine flangerR;
+    float flangerPhase{};
+    float flangerFeedbackL{};
+    float flangerFeedbackR{};
+    DelayLine ensembleBufL;
+    DelayLine ensembleBufR;
+    float ensemblePhase{};
+    float fuzzToneL{};
+    float fuzzToneR{};
+    float crusherHoldL{};
+    float crusherHoldR{};
+    std::uint32_t crusherCount{};
     std::array<AllpassStage, 4> phaserL{};
     std::array<AllpassStage, 4> phaserR{};
     float phaserPhase{};
@@ -2431,6 +2465,13 @@ struct Synthesizer::Impl {
         const std::uint64_t duration = arpeggiator_duration_frames(arpStepCounter);
         ++arpStepCounter;
         nextArpFrame = renderFrame + duration;
+        const float humanTiming = clampf(parameters.arpeggiator.humanizeTiming, 0.0F, 1.0F);
+        if (humanTiming > 0.0F) {
+            const float jitterMs = (random_unit() * 2.0F - 1.0F) * humanTiming * 12.0F;
+            const std::int64_t jitterFrames = static_cast<std::int64_t>(jitterMs * 0.001F * sampleRate);
+            const std::int64_t jittered = static_cast<std::int64_t>(nextArpFrame) + jitterFrames;
+            nextArpFrame = static_cast<std::uint64_t>(std::max<std::int64_t>(0, jittered));
+        }
         arpStepEndFrame = nextArpFrame;
         arpPatternCount = 0U;
         arpRatchetIndex = 0U;
@@ -2457,6 +2498,13 @@ struct Synthesizer::Impl {
             case ArpeggiatorCondition::Every4: conditionPass = sequencePosition % 4U == 0U; break;
             case ArpeggiatorCondition::FirstOf4: conditionPass = sequencePosition % 4U == 0U; break;
             case ArpeggiatorCondition::Fill: conditionPass = arpeggiatorFill.load(std::memory_order_relaxed); break;
+            case ArpeggiatorCondition::AB: {
+                const std::uint32_t a = std::clamp<std::uint32_t>(step.conditionA, 1U, 8U);
+                const std::uint32_t b = std::clamp<std::uint32_t>(step.conditionB, 1U, 8U);
+                const std::uint32_t loopPass = sequencePosition / configuredStepCount;
+                conditionPass = (loopPass % b) == (a - 1U);
+                break;
+            }
         }
         if (!step.enabled || !conditionPass || random_unit() > clampf(step.probability, 0.0F, 1.0F)) {
             release_arp_notes();
@@ -2505,13 +2553,16 @@ struct Synthesizer::Impl {
         ++arpProgress;
 
         const float velocityScale = clampf(step.velocityScale * (step.accent ? 1.22F : 1.0F), 0.0F, 2.0F);
+        const float humanVel = clampf(parameters.arpeggiator.humanizeVelocity, 0.0F, 1.0F);
+        const float velJitter = humanVel > 0.0F ? 1.0F + (random_unit() * 2.0F - 1.0F) * humanVel * 0.3F : 1.0F;
         for (std::size_t rootIndex = 0; rootIndex < rootCount && arpPatternCount < kSynthVoiceCount; ++rootIndex) {
             const HeldNote& root = roots[rootIndex];
             const int transposed = static_cast<int>(root.note) + static_cast<int>(step.transpose) +
                                    static_cast<int>(step.octaveOffset) * 12;
-            const std::uint8_t baseNote = static_cast<std::uint8_t>(std::clamp(transposed, 0, 127));
+            const std::uint8_t baseNote = static_cast<std::uint8_t>(quantize_note_to_scale(
+                transposed, parameters.arpeggiator.scale, parameters.arpeggiator.scaleRoot));
             const std::uint8_t velocity = static_cast<std::uint8_t>(clampf(
-                static_cast<float>(root.velocity) * velocityScale, 1.0F, 127.0F));
+                static_cast<float>(root.velocity) * velocityScale * velJitter, 1.0F, 127.0F));
             if (parameters.chord.enabled) {
                 const ChordVoicing voicing = make_chord_voicing(baseNote, parameters.chord);
                 for (std::size_t i = 0; i < voicing.count && arpPatternCount < kSynthVoiceCount; ++i) {
@@ -3328,6 +3379,24 @@ struct Synthesizer::Impl {
         v.previousOscillatorSamples = currentSamples;
         v.oscillatorWrapped = currentWrapped;
 
+        if (parameters.harmonizer.enabled) {
+            const float subLevel = clampf(parameters.harmonizer.subLevel, 0.0F, 1.0F);
+            const float upLevel = clampf(parameters.harmonizer.upLevel, 0.0F, 1.0F);
+            const float harmMix = clampf(parameters.harmonizer.mix, 0.0F, 1.0F);
+            if ((subLevel > 0.0F || upLevel > 0.0F) && harmMix > 0.0F) {
+                const float harmSemitones = parameters.tuning.transposeSemitones +
+                    parameters.tuning.fineCents * 0.01F + bendSemitones + legacyModulation + mod.globalPitch;
+                const float baseFreq = tuned_frequency(v.note, harmSemitones);
+                v.harmonizerPhases[0] = wrap_phase(v.harmonizerPhases[0] + (baseFreq * 0.5F) / sampleRate);
+                v.harmonizerPhases[1] = wrap_phase(v.harmonizerPhases[1] + (baseFreq * 2.0F) / sampleRate);
+                const float harmSample = (fast_sin_phase(v.harmonizerPhases[0]) * subLevel +
+                                          fast_sin_phase(v.harmonizerPhases[1]) * upLevel) *
+                                         harmMix * 0.5F;
+                left += harmSample;
+                right += harmSample;
+            }
+        }
+
         const float pressureGain = 0.85F + 0.15F * std::max(v.pressure, channelPressure[v.channel]);
         const float gain = amp * v.velocity * pressureGain * clampf(1.0F + mod.voiceGain, 0.0F, 3.0F);
         left *= gain;
@@ -3351,10 +3420,33 @@ struct Synthesizer::Impl {
 
     void effects(float& left, float& right) noexcept {
         if (parameters.distortion.enabled) {
-            const float wetL = fast_tanh(left * parameters.distortion.drive);
-            const float wetR = fast_tanh(right * parameters.distortion.drive);
             const float mix = clampf(parameters.distortion.mix, 0.0F, 1.0F);
-            left += (wetL - left) * mix; right += (wetR - right) * mix;
+            if (parameters.distortion.mode == DistortionMode::Fuzz) {
+                const float gain = parameters.distortion.drive * 4.0F;
+                const float clippedL = clampf(left * gain, -0.85F, 1.0F);
+                const float clippedR = clampf(right * gain, -0.85F, 1.0F);
+                const float tone = 1.0F - std::exp(-kTwoPi * 6500.0F / sampleRate);
+                fuzzToneL += tone * (clippedL - fuzzToneL);
+                fuzzToneR += tone * (clippedR - fuzzToneR);
+                left += (fuzzToneL * 0.9F - left) * mix;
+                right += (fuzzToneR * 0.9F - right) * mix;
+            } else {
+                const float wetL = fast_tanh(left * parameters.distortion.drive);
+                const float wetR = fast_tanh(right * parameters.distortion.drive);
+                left += (wetL - left) * mix; right += (wetR - right) * mix;
+            }
+        }
+        if (parameters.bitcrusher.enabled) {
+            const unsigned bits = std::min(16U, std::max(1U, static_cast<unsigned>(parameters.bitcrusher.bits)));
+            const unsigned downsample = std::min(64U, std::max(1U, static_cast<unsigned>(parameters.bitcrusher.downsample)));
+            const float steps = static_cast<float>(1U << (bits - 1U));
+            if (++crusherCount >= downsample) {
+                crusherCount = 0;
+                crusherHoldL = std::floor(clampf(left, -1.0F, 1.0F) * steps + 0.5F) / steps;
+                crusherHoldR = std::floor(clampf(right, -1.0F, 1.0F) * steps + 0.5F) / steps;
+            }
+            const float mix = clampf(parameters.bitcrusher.mix, 0.0F, 1.0F);
+            left += (crusherHoldL - left) * mix; right += (crusherHoldR - right) * mix;
         }
         if (parameters.eq.enabled) {
             const float lowCoefficient = 1.0F - std::exp(-kTwoPi * 220.0F / sampleRate);
@@ -3379,6 +3471,48 @@ struct Synthesizer::Impl {
             const float mix = clampf(parameters.chorus.mix + controller[93] * 0.25F, 0.0F, 1.0F);
             left += (wetL - left) * mix; right += (wetR - right) * mix;
         } else { chorusL.push(left); chorusR.push(right); }
+        if (parameters.flanger.enabled) {
+            flangerPhase = wrap_phase(flangerPhase + parameters.flanger.rateHertz / sampleRate);
+            const float base = 1.0F * sampleRate / 1000.0F;
+            const float depth = clampf(parameters.flanger.depthMilliseconds, 0.0F, 10.0F) * sampleRate / 1000.0F;
+            const float delayL_ = base + depth * (0.5F + 0.5F * fast_sin_phase(flangerPhase));
+            const float delayR_ = base + depth * (0.5F + 0.5F * fast_sin_phase(flangerPhase + 0.5F));
+            const float feedback = clampf(parameters.flanger.feedback, -0.92F, 0.92F);
+            const float inL = left + flangerFeedbackL * feedback;
+            const float inR = right + flangerFeedbackR * feedback;
+            const float wetL = flangerL.read_fractional(delayL_);
+            const float wetR = flangerR.read_fractional(delayR_);
+            flangerFeedbackL = wetL; flangerFeedbackR = wetR;
+            flangerL.push(inL); flangerR.push(inR);
+            const float mix = clampf(parameters.flanger.mix, 0.0F, 1.0F);
+            left += (wetL - left) * mix; right += (wetR - right) * mix;
+        } else { flangerL.push(left); flangerR.push(right); flangerFeedbackL = 0.0F; flangerFeedbackR = 0.0F; }
+        if (parameters.ensemble.enabled) {
+            const bool both = parameters.ensemble.mode == EnsembleMode::Both;
+            const bool modeII = parameters.ensemble.mode == EnsembleMode::II;
+            const float rate = modeII ? 0.75F : 0.45F;
+            ensemblePhase = wrap_phase(ensemblePhase + rate / sampleRate);
+            const float base = 6.0F * sampleRate / 1000.0F;
+            const float depth = (modeII ? 2.8F : 1.8F) * sampleRate / 1000.0F;
+            const float depthII = 2.8F * sampleRate / 1000.0F;
+            float wetL = 0.0F, wetR = 0.0F;
+            for (int tap = 0; tap < 3; ++tap) {
+                const float offset = static_cast<float>(tap) / 3.0F;
+                const float mod = 0.5F + 0.5F * fast_sin_phase(ensemblePhase + offset);
+                wetL += ensembleBufL.read_fractional(base + depth * mod);
+                wetR += ensembleBufR.read_fractional(base + depth * mod);
+                if (both) {
+                    const float mod2 = 0.5F + 0.5F * fast_sin_phase(ensemblePhase * 1.65F + offset + 0.13F);
+                    wetL += ensembleBufL.read_fractional(base + depthII * mod2);
+                    wetR += ensembleBufR.read_fractional(base + depthII * mod2);
+                }
+            }
+            const float taps = both ? 6.0F : 3.0F;
+            wetL /= taps; wetR /= taps;
+            ensembleBufL.push(left); ensembleBufR.push(right);
+            const float mix = clampf(parameters.ensemble.mix, 0.0F, 1.0F);
+            left += (wetL - left) * mix; right += (wetR - right) * mix;
+        } else { ensembleBufL.push(left); ensembleBufR.push(right); }
         if (parameters.phaser.enabled) {
             phaserPhase = wrap_phase(phaserPhase + parameters.phaser.rateHertz / sampleRate);
             const float lfo = 0.5F + 0.5F * fast_sin_phase(phaserPhase);
@@ -4206,24 +4340,39 @@ bool SynthPreset::validate(std::string* error) const {
         !in_range(arpeggiator.swing, 0.0F, 0.75F) || arpeggiator.octaveRange < 1U ||
         arpeggiator.octaveRange > 4U || arpeggiator.stepCount < 1U ||
         arpeggiator.stepCount > kArpeggiatorStepCount ||
-        !in_range(arpeggiator.externalTempoBpm, 20.0F, 400.0F))
+        !in_range(arpeggiator.externalTempoBpm, 20.0F, 400.0F) ||
+        !in_range(arpeggiator.humanizeTiming, 0.0F, 1.0F) ||
+        !in_range(arpeggiator.humanizeVelocity, 0.0F, 1.0F))
         return fail("invalid arpeggiator parameters");
     for (const auto& step : arpeggiator.steps) {
         if (step.transpose < -48 || step.transpose > 48 || step.octaveOffset < -4 || step.octaveOffset > 4 ||
             !in_range(step.velocityScale, 0.0F, 2.0F) || !in_range(step.gateScale, 0.1F, 2.0F) ||
             !in_range(step.probability, 0.0F, 1.0F) || step.ratchets < 1U || step.ratchets > 8U ||
+            step.conditionA < 1U || step.conditionA > 8U || step.conditionB < 1U || step.conditionB > 8U ||
             !in_range(step.macro1, -1.0F, 1.0F) || !in_range(step.macro2, -1.0F, 1.0F) ||
             !in_range(step.macro3, -1.0F, 1.0F) || !in_range(step.macro4, -1.0F, 1.0F))
             return fail("invalid arpeggiator step");
     }
-    if (!in_range(distortion.drive, 0.05F, 32.0F) || !in_range(distortion.mix, 0.0F, 1.0F))
+    if (!in_range(distortion.drive, 0.05F, 32.0F) || !in_range(distortion.mix, 0.0F, 1.0F) ||
+        static_cast<unsigned>(distortion.mode) > 1U)
         return fail("invalid distortion parameters");
+    if (!in_range(bitcrusher.mix, 0.0F, 1.0F) || bitcrusher.bits < 1U || bitcrusher.bits > 16U ||
+        bitcrusher.downsample < 1U || bitcrusher.downsample > 64U)
+        return fail("invalid bitcrusher parameters");
+    if (!in_range(harmonizer.subLevel, 0.0F, 1.0F) || !in_range(harmonizer.upLevel, 0.0F, 1.0F) ||
+        !in_range(harmonizer.mix, 0.0F, 1.0F))
+        return fail("invalid octave harmonizer parameters");
     if (!in_range(eq.lowGainDb, -24.0F, 24.0F) || !in_range(eq.midGainDb, -24.0F, 24.0F) ||
         !in_range(eq.highGainDb, -24.0F, 24.0F))
         return fail("invalid equalizer parameters");
     if (!in_range(chorus.rateHertz, 0.01F, 20.0F) || !in_range(chorus.depthMilliseconds, 0.0F, 30.0F) ||
         !in_range(chorus.mix, 0.0F, 1.0F))
         return fail("invalid chorus parameters");
+    if (!in_range(flanger.rateHertz, 0.01F, 20.0F) || !in_range(flanger.depthMilliseconds, 0.0F, 10.0F) ||
+        !in_range(flanger.feedback, -0.92F, 0.92F) || !in_range(flanger.mix, 0.0F, 1.0F))
+        return fail("invalid flanger parameters");
+    if (static_cast<unsigned>(ensemble.mode) > 2U || !in_range(ensemble.mix, 0.0F, 1.0F))
+        return fail("invalid ensemble parameters");
     if (!in_range(phaser.rateHertz, 0.01F, 20.0F) || !in_range(phaser.depth, 0.0F, 1.0F) ||
         !in_range(phaser.feedback, -0.95F, 0.95F) || !in_range(phaser.mix, 0.0F, 1.0F))
         return fail("invalid phaser parameters");
@@ -4322,7 +4471,11 @@ std::string SynthPreset::serialize() const {
         << "\narp.stepCount=" << static_cast<unsigned>(arpeggiator.stepCount)
         << "\narp.seed=" << arpeggiator.randomSeed
         << "\narp.clock=" << arp_clock_token(arpeggiator.clockSource)
-        << "\narp.externalTempo=" << arpeggiator.externalTempoBpm << '\n';
+        << "\narp.externalTempo=" << arpeggiator.externalTempoBpm
+        << "\narp.humanizeTiming=" << arpeggiator.humanizeTiming
+        << "\narp.humanizeVelocity=" << arpeggiator.humanizeVelocity
+        << "\narp.scale=" << chord_scale_token(arpeggiator.scale)
+        << "\narp.scaleRoot=" << static_cast<unsigned>(arpeggiator.scaleRoot) << '\n';
     for (std::size_t i = 0; i < chord.customIntervals.size(); ++i)
         out << "chord.interval" << i << '=' << static_cast<int>(chord.customIntervals[i]) << '\n';
     for (std::size_t slot = 0; slot < chordMemory.size(); ++slot) {
@@ -4410,6 +4563,8 @@ std::string SynthPreset::serialize() const {
         const std::string prefix = "arp.step" + std::to_string(i) + ".";
         out << prefix << "enabled=" << step.enabled << '\n'
             << prefix << "condition=" << static_cast<unsigned>(step.condition) << '\n'
+            << prefix << "conditionA=" << static_cast<unsigned>(step.conditionA) << '\n'
+            << prefix << "conditionB=" << static_cast<unsigned>(step.conditionB) << '\n'
             << prefix << "automation=" << static_cast<unsigned>(step.automationCurve) << '\n'
             << prefix << "accent=" << step.accent << '\n'
             << prefix << "slide=" << step.slide << '\n'
@@ -4489,11 +4644,22 @@ std::string SynthPreset::serialize() const {
         out << '\n';
     }
     out << "distortion.enabled=" << distortion.enabled << "\ndistortion.drive=" << distortion.drive
-        << "\ndistortion.mix=" << distortion.mix << '\n'
+        << "\ndistortion.mix=" << distortion.mix
+        << "\ndistortion.mode=" << static_cast<unsigned>(distortion.mode) << '\n'
+        << "bitcrusher.enabled=" << bitcrusher.enabled << "\nbitcrusher.bits=" << static_cast<unsigned>(bitcrusher.bits)
+        << "\nbitcrusher.downsample=" << static_cast<unsigned>(bitcrusher.downsample)
+        << "\nbitcrusher.mix=" << bitcrusher.mix << '\n'
+        << "harmonizer.enabled=" << harmonizer.enabled << "\nharmonizer.subLevel=" << harmonizer.subLevel
+        << "\nharmonizer.upLevel=" << harmonizer.upLevel << "\nharmonizer.mix=" << harmonizer.mix << '\n'
         << "eq.enabled=" << eq.enabled << "\neq.lowDb=" << eq.lowGainDb
         << "\neq.midDb=" << eq.midGainDb << "\neq.highDb=" << eq.highGainDb << '\n'
         << "chorus.enabled=" << chorus.enabled << "\nchorus.rate=" << chorus.rateHertz
         << "\nchorus.depthMs=" << chorus.depthMilliseconds << "\nchorus.mix=" << chorus.mix << '\n'
+        << "flanger.enabled=" << flanger.enabled << "\nflanger.rate=" << flanger.rateHertz
+        << "\nflanger.depthMs=" << flanger.depthMilliseconds << "\nflanger.feedback=" << flanger.feedback
+        << "\nflanger.mix=" << flanger.mix << '\n'
+        << "ensemble.enabled=" << ensemble.enabled << "\nensemble.mode=" << static_cast<unsigned>(ensemble.mode)
+        << "\nensemble.mix=" << ensemble.mix << '\n'
         << "phaser.enabled=" << phaser.enabled << "\nphaser.rate=" << phaser.rateHertz
         << "\nphaser.depth=" << phaser.depth << "\nphaser.feedback=" << phaser.feedback
         << "\nphaser.mix=" << phaser.mix << '\n'
@@ -4631,6 +4797,10 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "arp.seed") parsed = parse_number<std::uint32_t>(value, result.arpeggiator.randomSeed);
         else if (key == "arp.clock") { const auto clock = parse_arp_clock(value); parsed = clock.has_value(); if (clock) result.arpeggiator.clockSource = *clock; }
         else if (key == "arp.externalTempo") parsed = readFloat(result.arpeggiator.externalTempoBpm);
+        else if (key == "arp.humanizeTiming") parsed = readFloat(result.arpeggiator.humanizeTiming);
+        else if (key == "arp.humanizeVelocity") parsed = readFloat(result.arpeggiator.humanizeVelocity);
+        else if (key == "arp.scale") { const auto scale = parse_chord_scale(value); parsed = scale.has_value(); if (scale) result.arpeggiator.scale = *scale; }
+        else if (key == "arp.scaleRoot") parsed = readUInt(result.arpeggiator.scaleRoot, 127U);
         else if (key == "wavetable.name") result.wavetable.name = value;
         else if (key == "wavetable.enabled") parsed = readBool(result.wavetable.enabled);
         else if (key == "wavetable.frameCount") parsed = readUInt(result.wavetable.frameCount, static_cast<unsigned>(kWavetableFrameCount));
@@ -4782,7 +4952,9 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             const std::string_view field = std::string_view(key).substr(dot + 1U);
             recognized = true;
             if (field == "enabled") parsed = readBool(step.enabled);
-            else if (field == "condition") { unsigned v = 0; parsed = parse_number<unsigned>(value, v) && v <= 5U; if (parsed) step.condition = static_cast<ArpeggiatorCondition>(v); }
+            else if (field == "condition") { unsigned v = 0; parsed = parse_number<unsigned>(value, v) && v <= 6U; if (parsed) step.condition = static_cast<ArpeggiatorCondition>(v); }
+            else if (field == "conditionA") { unsigned v = 1; parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 8U; if (parsed) step.conditionA = static_cast<std::uint8_t>(v); }
+            else if (field == "conditionB") { unsigned v = 2; parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 8U; if (parsed) step.conditionB = static_cast<std::uint8_t>(v); }
             else if (field == "automation") { unsigned v = 0; parsed = parse_number<unsigned>(value, v) && v <= 2U; if (parsed) step.automationCurve = static_cast<StepAutomationCurve>(v); }
             else if (field == "accent") parsed = readBool(step.accent);
             else if (field == "slide") parsed = readBool(step.slide);
@@ -4885,6 +5057,15 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             if (key == "distortion.enabled") parsed = readBool(result.distortion.enabled);
             else if (key == "distortion.drive") parsed = readFloat(result.distortion.drive);
             else if (key == "distortion.mix") parsed = readFloat(result.distortion.mix);
+            else if (key == "distortion.mode") parsed = readUInt(result.distortion.mode, 1U);
+            else if (key == "bitcrusher.enabled") parsed = readBool(result.bitcrusher.enabled);
+            else if (key == "bitcrusher.bits") parsed = readUInt(result.bitcrusher.bits, 16U);
+            else if (key == "bitcrusher.downsample") parsed = readUInt(result.bitcrusher.downsample, 64U);
+            else if (key == "bitcrusher.mix") parsed = readFloat(result.bitcrusher.mix);
+            else if (key == "harmonizer.enabled") parsed = readBool(result.harmonizer.enabled);
+            else if (key == "harmonizer.subLevel") parsed = readFloat(result.harmonizer.subLevel);
+            else if (key == "harmonizer.upLevel") parsed = readFloat(result.harmonizer.upLevel);
+            else if (key == "harmonizer.mix") parsed = readFloat(result.harmonizer.mix);
             else if (key == "eq.enabled") parsed = readBool(result.eq.enabled);
             else if (key == "eq.lowDb") parsed = readFloat(result.eq.lowGainDb);
             else if (key == "eq.midDb") parsed = readFloat(result.eq.midGainDb);
@@ -4893,6 +5074,14 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (key == "chorus.rate") parsed = readFloat(result.chorus.rateHertz);
             else if (key == "chorus.depthMs") parsed = readFloat(result.chorus.depthMilliseconds);
             else if (key == "chorus.mix") parsed = readFloat(result.chorus.mix);
+            else if (key == "flanger.enabled") parsed = readBool(result.flanger.enabled);
+            else if (key == "flanger.rate") parsed = readFloat(result.flanger.rateHertz);
+            else if (key == "flanger.depthMs") parsed = readFloat(result.flanger.depthMilliseconds);
+            else if (key == "flanger.feedback") parsed = readFloat(result.flanger.feedback);
+            else if (key == "flanger.mix") parsed = readFloat(result.flanger.mix);
+            else if (key == "ensemble.enabled") parsed = readBool(result.ensemble.enabled);
+            else if (key == "ensemble.mode") parsed = readUInt(result.ensemble.mode, 2U);
+            else if (key == "ensemble.mix") parsed = readFloat(result.ensemble.mix);
             else if (key == "phaser.enabled") parsed = readBool(result.phaser.enabled);
             else if (key == "phaser.rate") parsed = readFloat(result.phaser.rateHertz);
             else if (key == "phaser.depth") parsed = readFloat(result.phaser.depth);

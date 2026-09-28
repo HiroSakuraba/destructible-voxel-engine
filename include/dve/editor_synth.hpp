@@ -23,9 +23,9 @@ enum class SynthPanelPage : std::uint8_t {
     Expression,
 };
 inline constexpr std::size_t kSynthPanelPageCount = 7;
-inline constexpr std::size_t kSynthParameterRowCount = 24;
+inline constexpr std::size_t kSynthParameterRowCount = 28;
 inline constexpr std::size_t kSynthOscillatorAdvancedPropertyCount = 10;
-inline constexpr std::size_t kSynthArpStepPropertyCount = 16;
+inline constexpr std::size_t kSynthArpStepPropertyCount = 18;
 inline constexpr std::size_t kSynthPresetVisibleEntryCount = 8;
 
 struct SynthPanelLayout {
@@ -74,8 +74,8 @@ struct SynthPanelLayout {
     std::array<UiRect, kSynthArpStepPropertyCount> arpeggiatorStepUpButtons{};
     std::array<UiRect, kSynthArpStepPropertyCount> arpeggiatorStepToggleButtons{};
 
-    std::array<UiRect, 8> effectRows{};
-    std::array<UiRect, 8> effectToggleButtons{};
+    std::array<UiRect, 12> effectRows{};
+    std::array<UiRect, 12> effectToggleButtons{};
 
     UiRect presetScanButton{};
     UiRect presetPreviousButton{};

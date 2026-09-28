@@ -97,6 +97,9 @@ enum class ArpeggiatorDivision : std::uint8_t {
     Sixteenth,
     SixteenthTriplet,
     ThirtySecond,
+    DottedEighth,
+    DottedQuarter,
+    SixtyFourth,
 };
 
 
@@ -108,7 +111,7 @@ enum class OscillatorQuality : std::uint8_t { Normal, High, Offline };
 enum class FilterQuality : std::uint8_t { Eco, Standard, High, Offline };
 enum class ModulationPolarity : std::uint8_t { Bipolar, Unipolar };
 enum class MpeZoneMode : std::uint8_t { Off, Lower, Upper, Dual };
-enum class ArpeggiatorCondition : std::uint8_t { Unconditional, Every2, Every3, Every4, FirstOf4, Fill };
+enum class ArpeggiatorCondition : std::uint8_t { Unconditional, Every2, Every3, Every4, FirstOf4, Fill, AB };
 enum class StepAutomationCurve : std::uint8_t { Step, Linear, Smooth };
 enum class ArpeggiatorClockSource : std::uint8_t { Internal, GameClock, MidiClock };
 enum class ChordScale : std::uint8_t { Chromatic, Major, NaturalMinor, HarmonicMinor, Dorian, Mixolydian, Pentatonic };
@@ -401,6 +404,8 @@ struct ChordParameters {
 struct ArpeggiatorStep {
     bool enabled{true};
     ArpeggiatorCondition condition{ArpeggiatorCondition::Unconditional};
+    std::uint8_t conditionA{1};
+    std::uint8_t conditionB{2};
     StepAutomationCurve automationCurve{StepAutomationCurve::Step};
     bool accent{};
     bool slide{};
@@ -432,12 +437,22 @@ struct ArpeggiatorParameters {
     std::uint32_t randomSeed{0x51A3D8E7U};
     ArpeggiatorClockSource clockSource{ArpeggiatorClockSource::Internal};
     float externalTempoBpm{120.0F};
+    float humanizeTiming{};
+    float humanizeVelocity{};
+    ChordScale scale{ChordScale::Chromatic};
+    std::uint8_t scaleRoot{};
     std::array<ArpeggiatorStep, kArpeggiatorStepCount> steps{};
 };
 
-struct DistortionParameters { bool enabled{}; float drive{1.8F}; float mix{0.15F}; };
+enum class DistortionMode : std::uint8_t { Classic = 0, Fuzz = 1 };
+struct DistortionParameters { bool enabled{}; float drive{1.8F}; float mix{0.15F}; DistortionMode mode{DistortionMode::Classic}; };
+struct BitcrusherParameters { bool enabled{}; std::uint8_t bits{12}; std::uint8_t downsample{4}; float mix{0.5F}; };
+struct OctaveHarmonizerParameters { bool enabled{}; float subLevel{0.5F}; float upLevel{0.35F}; float mix{0.5F}; };
 struct EqParameters { bool enabled{true}; float lowGainDb{}; float midGainDb{}; float highGainDb{}; };
 struct ChorusParameters { bool enabled{true}; float rateHertz{0.32F}; float depthMilliseconds{4.0F}; float mix{0.16F}; };
+struct FlangerParameters { bool enabled{}; float rateHertz{0.25F}; float depthMilliseconds{2.5F}; float feedback{0.45F}; float mix{0.35F}; };
+enum class EnsembleMode : std::uint8_t { I = 0, II = 1, Both = 2 };
+struct EnsembleParameters { bool enabled{}; EnsembleMode mode{EnsembleMode::I}; float mix{0.4F}; };
 struct PhaserParameters { bool enabled{}; float rateHertz{0.18F}; float depth{0.65F}; float feedback{0.25F}; float mix{0.12F}; };
 struct DelayParameters { bool enabled{true}; float timeSeconds{0.31F}; float feedback{0.28F}; float mix{0.12F}; bool pingPong{true}; };
 struct ReverbParameters { bool enabled{true}; float roomSize{0.62F}; float damping{0.42F}; float width{0.85F}; float mix{0.18F}; };
@@ -466,8 +481,12 @@ struct SynthPreset {
     FilterQuality filterQuality{FilterQuality::Standard};
     SynthPresetMetadata metadata{};
     DistortionParameters distortion{};
+    BitcrusherParameters bitcrusher{};
+    OctaveHarmonizerParameters harmonizer{};
     EqParameters eq{};
     ChorusParameters chorus{};
+    FlangerParameters flanger{};
+    EnsembleParameters ensemble{};
     PhaserParameters phaser{};
     DelayParameters delay{};
     ReverbParameters reverb{};

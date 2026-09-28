@@ -162,8 +162,8 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
         layout_.arpeggiatorStepButtons[i] = {x, arpStepTop, std::max(22, right - x - 3), 23};
     }
     for (std::size_t i = 0; i < layout_.arpeggiatorStepRows.size(); ++i) {
-        const int column = static_cast<int>(i / 4U);
-        const int row = static_cast<int>(i % 4U);
+        const int column = static_cast<int>(i / 5U);
+        const int row = static_cast<int>(i % 5U);
         const int columnWidth = (contentWidth - 30) / 4;
         const int x = left + column * (columnWidth + 10);
         const int y = arpStepTop + 32 + row * parameterRowHeight;
@@ -174,8 +174,8 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
     }
 
     for (std::size_t i = 0; i < layout_.effectRows.size(); ++i) {
-        const int column = static_cast<int>(i / 4U);
-        const int row = static_cast<int>(i % 4U);
+        const int column = static_cast<int>(i / 6U);
+        const int row = static_cast<int>(i % 6U);
         const int columnWidth = (contentWidth - 10) / 2;
         const int x = left + column * (columnWidth + 10);
         const int y = top + row * 45;
@@ -231,13 +231,17 @@ void EditorSynthPanel::toggle_effect(std::size_t index, audio::Synthesizer& synt
     auto preset = synth.preset();
     switch (index) {
         case 0: preset.distortion.enabled = !preset.distortion.enabled; break;
-        case 1: preset.eq.enabled = !preset.eq.enabled; break;
-        case 2: preset.chorus.enabled = !preset.chorus.enabled; break;
-        case 3: preset.phaser.enabled = !preset.phaser.enabled; break;
-        case 4: preset.delay.enabled = !preset.delay.enabled; break;
-        case 5: preset.reverb.enabled = !preset.reverb.enabled; break;
-        case 6: preset.compressor.enabled = !preset.compressor.enabled; break;
-        case 7: preset.limiter.enabled = !preset.limiter.enabled; break;
+        case 1: preset.bitcrusher.enabled = !preset.bitcrusher.enabled; break;
+        case 2: preset.harmonizer.enabled = !preset.harmonizer.enabled; break;
+        case 3: preset.eq.enabled = !preset.eq.enabled; break;
+        case 4: preset.chorus.enabled = !preset.chorus.enabled; break;
+        case 5: preset.flanger.enabled = !preset.flanger.enabled; break;
+        case 6: preset.ensemble.enabled = !preset.ensemble.enabled; break;
+        case 7: preset.phaser.enabled = !preset.phaser.enabled; break;
+        case 8: preset.delay.enabled = !preset.delay.enabled; break;
+        case 9: preset.reverb.enabled = !preset.reverb.enabled; break;
+        case 10: preset.compressor.enabled = !preset.compressor.enabled; break;
+        case 11: preset.limiter.enabled = !preset.limiter.enabled; break;
         default: return;
     }
     synth.set_preset(preset);
@@ -384,7 +388,7 @@ void EditorSynthPanel::adjust_parameter(std::size_t index, int direction,
             case 10: preset.chord.strumMilliseconds = stepped(preset.chord.strumMilliseconds, 2.0F, 0.0F, 250.0F, direction); break;
             case 11: preset.chord.velocityScale = stepped(preset.chord.velocityScale, 0.05F, 0.0F, 2.0F, direction); break;
             case 13: preset.arpeggiator.mode = cycle_enum(preset.arpeggiator.mode, 7U, direction); break;
-            case 14: preset.arpeggiator.division = cycle_enum(preset.arpeggiator.division, 6U, direction); break;
+            case 14: preset.arpeggiator.division = cycle_enum(preset.arpeggiator.division, 9U, direction); break;
             case 15: preset.arpeggiator.tempoBpm = stepped(preset.arpeggiator.tempoBpm, 1.0F, 20.0F, 400.0F, direction); break;
             case 16: preset.arpeggiator.clockSource = cycle_enum(preset.arpeggiator.clockSource, 3U, direction); break;
             case 17: preset.arpeggiator.externalTempoBpm = stepped(preset.arpeggiator.externalTempoBpm, 1.0F, 20.0F, 400.0F, direction); break;
@@ -392,6 +396,10 @@ void EditorSynthPanel::adjust_parameter(std::size_t index, int direction,
             case 19: preset.arpeggiator.swing = stepped(preset.arpeggiator.swing, 0.025F, 0.0F, 0.75F, direction); break;
             case 20: preset.arpeggiator.octaveRange = static_cast<std::uint8_t>(std::clamp<int>(preset.arpeggiator.octaveRange + direction, 1, 4)); break;
             case 21: preset.arpeggiator.stepCount = static_cast<std::uint8_t>(std::clamp<int>(preset.arpeggiator.stepCount + direction, 1, 16)); break;
+            case 24: preset.arpeggiator.humanizeTiming = stepped(preset.arpeggiator.humanizeTiming, 0.05F, 0.0F, 1.0F, direction); break;
+            case 25: preset.arpeggiator.humanizeVelocity = stepped(preset.arpeggiator.humanizeVelocity, 0.05F, 0.0F, 1.0F, direction); break;
+            case 26: preset.arpeggiator.scale = cycle_enum(preset.arpeggiator.scale, 7U, direction); break;
+            case 27: preset.arpeggiator.scaleRoot = static_cast<std::uint8_t>((static_cast<int>(preset.arpeggiator.scaleRoot) + direction + 12) % 12); break;
             default: break;
         }
     } else if (page_ == SynthPanelPage::Expression) {
@@ -483,18 +491,20 @@ void EditorSynthPanel::adjust_arpeggiator_step_parameter(std::size_t index, int 
     auto preset = synth.preset();
     auto& step = preset.arpeggiator.steps[selectedArpeggiatorStep_];
     switch (index) {
-        case 1: step.condition = cycle_enum(step.condition, 6U, direction); break;
-        case 2: step.automationCurve = cycle_enum(step.automationCurve, 3U, direction); break;
-        case 5: step.transpose = static_cast<std::int8_t>(std::clamp<int>(step.transpose + direction, -48, 48)); break;
-        case 6: step.octaveOffset = static_cast<std::int8_t>(std::clamp<int>(step.octaveOffset + direction, -4, 4)); break;
-        case 7: step.velocityScale = stepped(step.velocityScale, 0.05F, 0.0F, 2.0F, direction); break;
-        case 8: step.gateScale = stepped(step.gateScale, 0.05F, 0.1F, 2.0F, direction); break;
-        case 9: step.probability = stepped(step.probability, 0.05F, 0.0F, 1.0F, direction); break;
-        case 10: step.ratchets = static_cast<std::uint8_t>(std::clamp<int>(step.ratchets + direction, 1, 8)); break;
-        case 12: step.macro1 = stepped(step.macro1, 0.05F, -1.0F, 1.0F, direction); break;
-        case 13: step.macro2 = stepped(step.macro2, 0.05F, -1.0F, 1.0F, direction); break;
-        case 14: step.macro3 = stepped(step.macro3, 0.05F, -1.0F, 1.0F, direction); break;
-        case 15: step.macro4 = stepped(step.macro4, 0.05F, -1.0F, 1.0F, direction); break;
+        case 1: step.condition = cycle_enum(step.condition, 7U, direction); break;
+        case 2: step.conditionA = static_cast<std::uint8_t>(std::clamp<int>(step.conditionA + direction, 1, 8)); break;
+        case 3: step.conditionB = static_cast<std::uint8_t>(std::clamp<int>(step.conditionB + direction, 1, 8)); break;
+        case 4: step.automationCurve = cycle_enum(step.automationCurve, 3U, direction); break;
+        case 7: step.transpose = static_cast<std::int8_t>(std::clamp<int>(step.transpose + direction, -48, 48)); break;
+        case 8: step.octaveOffset = static_cast<std::int8_t>(std::clamp<int>(step.octaveOffset + direction, -4, 4)); break;
+        case 9: step.velocityScale = stepped(step.velocityScale, 0.05F, 0.0F, 2.0F, direction); break;
+        case 10: step.gateScale = stepped(step.gateScale, 0.05F, 0.1F, 2.0F, direction); break;
+        case 11: step.probability = stepped(step.probability, 0.05F, 0.0F, 1.0F, direction); break;
+        case 12: step.ratchets = static_cast<std::uint8_t>(std::clamp<int>(step.ratchets + direction, 1, 8)); break;
+        case 14: step.macro1 = stepped(step.macro1, 0.05F, -1.0F, 1.0F, direction); break;
+        case 15: step.macro2 = stepped(step.macro2, 0.05F, -1.0F, 1.0F, direction); break;
+        case 16: step.macro3 = stepped(step.macro3, 0.05F, -1.0F, 1.0F, direction); break;
+        case 17: step.macro4 = stepped(step.macro4, 0.05F, -1.0F, 1.0F, direction); break;
         default: break;
     }
     synth.set_preset(preset);
@@ -505,9 +515,9 @@ void EditorSynthPanel::toggle_arpeggiator_step_parameter(std::size_t index,
     auto preset = synth.preset();
     auto& step = preset.arpeggiator.steps[selectedArpeggiatorStep_];
     if (index == 0U) step.enabled = !step.enabled;
-    else if (index == 3U) step.accent = !step.accent;
-    else if (index == 4U) step.slide = !step.slide;
-    else if (index == 11U) step.tie = !step.tie;
+    else if (index == 5U) step.accent = !step.accent;
+    else if (index == 6U) step.slide = !step.slide;
+    else if (index == 13U) step.tie = !step.tie;
     else return;
     synth.set_preset(preset);
 }

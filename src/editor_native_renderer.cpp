@@ -1041,7 +1041,8 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             "Reference tuning", "Global transpose", "Fine tune cents", "Analog drift", "Chord engine", "Chord type",
             "Chord inversion", "Chord spread", "Chord scale", "Scale root", "Strum ms", "Chord velocity",
             "Arpeggiator", "Arp direction", "Beat division", "Internal BPM", "Clock source", "External BPM",
-            "Gate length", "Swing", "Octave range", "Step count", "Latch", "Retrigger envelopes"};
+            "Gate length", "Swing", "Octave range", "Step count", "Latch", "Retrigger envelopes",
+            "Humanize timing", "Humanize velocity", "Arp scale", "Arp scale root"};
         static constexpr std::array<std::string_view, 12> pitchNames{
             "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
         std::array<std::string, kSynthParameterRowCount> values{
@@ -1056,7 +1057,9 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             std::string(clock_text(preset.arpeggiator.clockSource)), compact(preset.arpeggiator.externalTempoBpm,0),
             compact(preset.arpeggiator.gate), compact(preset.arpeggiator.swing), std::to_string(preset.arpeggiator.octaveRange),
             std::to_string(preset.arpeggiator.stepCount), bool_text(preset.arpeggiator.latch),
-            bool_text(preset.arpeggiator.retriggerEnvelopes)};
+            bool_text(preset.arpeggiator.retriggerEnvelopes), compact(preset.arpeggiator.humanizeTiming),
+            compact(preset.arpeggiator.humanizeVelocity), std::string(scale_text(preset.arpeggiator.scale)),
+            std::string(pitchNames[preset.arpeggiator.scaleRoot % 12U])};
         std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
         for (std::size_t i : {4U,12U,22U,23U}) toggles[i] = true;
         active[4]=preset.chord.enabled; active[12]=preset.arpeggiator.enabled;
@@ -1083,6 +1086,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                 case audio::ArpeggiatorCondition::Every4: return "Every 4";
                 case audio::ArpeggiatorCondition::FirstOf4: return "First / 4";
                 case audio::ArpeggiatorCondition::Fill: return "Fill";
+                case audio::ArpeggiatorCondition::AB: return "A:B";
             }
             return "Always";
         };
@@ -1095,10 +1099,12 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             return "Step";
         };
         const std::array<std::string, kSynthArpStepPropertyCount> stepLabels{
-            "Enabled", "Condition", "Automation", "Accent", "Slide", "Transpose", "Octave", "Velocity",
+            "Enabled", "Condition", "Cond A", "Cond B", "Automation", "Accent", "Slide", "Transpose", "Octave", "Velocity",
             "Gate", "Probability", "Ratchets", "Tie", "Macro 1", "Macro 2", "Macro 3", "Macro 4"};
         const std::array<std::string, kSynthArpStepPropertyCount> stepValues{
-            bool_text(step.enabled), std::string(condition_text(step.condition)), std::string(automation_text(step.automationCurve)),
+            bool_text(step.enabled), std::string(condition_text(step.condition)),
+            std::to_string(step.conditionA), std::to_string(step.conditionB),
+            std::string(automation_text(step.automationCurve)),
             bool_text(step.accent), bool_text(step.slide), std::to_string(static_cast<int>(step.transpose)),
             std::to_string(static_cast<int>(step.octaveOffset)), compact(step.velocityScale), compact(step.gateScale),
             compact(step.probability), std::to_string(step.ratchets), bool_text(step.tie),
@@ -1108,8 +1114,8 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             painter.fill(layout.arpeggiatorStepRows[i], panel); painter.outline(layout.arpeggiatorStepRows[i], border);
             painter.text(layout.arpeggiatorStepRows[i].x + 7, layout.arpeggiatorStepRows[i].y + 18,
                          stepLabels[i], text);
-            if (i == 0U || i == 3U || i == 4U || i == 11U) {
-                const bool enabled = i == 0U ? step.enabled : (i == 3U ? step.accent : (i == 4U ? step.slide : step.tie));
+            if (i == 0U || i == 5U || i == 6U || i == 13U) {
+                const bool enabled = i == 0U ? step.enabled : (i == 5U ? step.accent : (i == 6U ? step.slide : step.tie));
                 button(layout.arpeggiatorStepToggleButtons[i], stepValues[i], enabled);
             }
             else {
@@ -1120,11 +1126,14 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             }
         }
     } else if (page == SynthPanelPage::Effects) {
-        static constexpr std::array<std::string_view, 8> effectNames{
-            "Distortion", "3-band EQ", "Chorus", "Phaser", "Delay", "Reverb", "Compressor", "Limiter"};
-        const std::array<bool, 8> effects{
-            preset.distortion.enabled, preset.eq.enabled, preset.chorus.enabled, preset.phaser.enabled,
-            preset.delay.enabled, preset.reverb.enabled, preset.compressor.enabled, preset.limiter.enabled};
+        static constexpr std::array<std::string_view, 12> effectNames{
+            "Distortion", "Bitcrusher", "Harmonizer", "3-band EQ", "Chorus", "Flanger",
+            "Ensemble", "Phaser", "Delay", "Reverb", "Compressor", "Limiter"};
+        const std::array<bool, 12> effects{
+            preset.distortion.enabled, preset.bitcrusher.enabled, preset.harmonizer.enabled,
+            preset.eq.enabled, preset.chorus.enabled, preset.flanger.enabled,
+            preset.ensemble.enabled, preset.phaser.enabled, preset.delay.enabled,
+            preset.reverb.enabled, preset.compressor.enabled, preset.limiter.enabled};
         for (std::size_t i = 0; i < layout.effectRows.size(); ++i) {
             painter.fill(layout.effectRows[i], panel); painter.outline(layout.effectRows[i], border);
             painter.text(layout.effectRows[i].x + 10, layout.effectRows[i].y + 24, effectNames[i], text);

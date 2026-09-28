@@ -175,7 +175,7 @@ enum class ModulationCurve : std::uint8_t { Linear, Quadratic, Cubic };
 enum class FrequencyModulationMode : std::uint8_t { Off, Linear, Exponential };
 enum class FilterOversampling : std::uint8_t { X1 = 1, X2 = 2, X4 = 4, Auto = 0 };
 enum class OscillatorQuality : std::uint8_t { Normal, High, Offline };
-enum class FilterQuality : std::uint8_t { Eco, Standard, High, Offline };
+// FilterQuality lives in dve/audio/granular.hpp (shared with the granular engine).
 enum class ModulationPolarity : std::uint8_t { Bipolar, Unipolar };
 enum class MpeZoneMode : std::uint8_t { Off, Lower, Upper, Dual };
 enum class ArpeggiatorCondition : std::uint8_t { Unconditional, Every2, Every3, Every4, FirstOf4, Fill, AB };

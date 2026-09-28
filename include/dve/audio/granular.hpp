@@ -27,6 +27,13 @@
 
 namespace dve::audio {
 
+// CPU quality tiers shared by the generator stages (moved here from
+// synthesizer.hpp so the decoupled granular engine can use the same type):
+// Eco throttles cost (fewer grains, cheapest windows), Standard is the
+// realtime default, High permits the most expensive realtime path, and
+// Offline is for non-realtime renders.
+enum class FilterQuality : std::uint8_t { Eco, Standard, High, Offline };
+
 // Per-grain amplitude window. Hann and Triangle are the core shapes;
 // ExponentialDecay and PlanckTaper use standard textbook windows here and are
 // owned (tuning/verification) by the wave-2 envelope-shape work.
@@ -59,6 +66,15 @@ struct GranularParameters {
     float freezePosition01{0.5F};
     float smear01{0.0F};
     float width01{0.5F};
+    // Worker 3: CPU quality tier for the grain cloud. Follows the same
+    // FilterQuality convention as the preset-level filterQuality. Flows from
+    // the preset automatically (GranularParameters is copied whole into the
+    // active preset). Eco throttles admission to kEcoMaxActiveGrains grains,
+    // forces the cheapest envelope (Triangle), and skips the per-grain filter
+    // when its drive is neutral; Standard/High/Offline admit the full pool
+    // (High and Offline additionally document the 4000 Hz density ceiling as
+    // permitted — Offline is intended for render, not realtime).
+    FilterQuality granularQuality{FilterQuality::Standard};
 };
 
 // Non-owning view of the grain source (built from the resident
@@ -84,6 +100,12 @@ struct Grain {
     float filterValue{0.0F};   // reserved: wave-2 per-grain filter drive
     std::uint32_t seed{0U};    // xorshift state captured at spawn (debugging)
     float ageFrames{0.0F};     // output samples elapsed since spawn
+    // Worker 3: true stereo grain placement. Independent L/R source-read
+    // offsets in frames, derived from the grain's seed at spawn and scaled by
+    // width01 (see spawn_grain). Both are exactly 0 at width01 == 0, so the
+    // two channels read bit-identical source positions (mono-compatible).
+    float sourceOffsetL{0.0F};
+    float sourceOffsetR{0.0F};
 };
 
 // Counters accumulated on the audio thread. The owner drains them (draining
@@ -92,13 +114,26 @@ struct GranularCounters {
     std::uint64_t requestedGrains{};  // spawn attempts
     std::uint64_t admittedGrains{};   // grains actually started (incl. steals)
     std::uint64_t grainSteals{};      // spawn attempts that stole a live grain
-    std::uint64_t grainMisses{};      // spawn attempts with no usable source
+    // Spawn attempts with no usable source, plus Eco-quality admission
+    // refusals (a spawn refused because kEcoMaxActiveGrains grains are
+    // already live). Shared by design so quality throttling is visible in the
+    // synth-level profiler without extra plumbing.
+    std::uint64_t grainMisses{};
 };
 
 // Fixed-pool granular cloud: one instance per synth voice.
 class GranularEngine {
 public:
     static constexpr std::size_t kMaxGrains = 64;
+    // Worker 3: Eco quality admits at most this many concurrent grains; extra
+    // spawn attempts are refused (counted in GranularCounters::grainMisses).
+    static constexpr std::size_t kEcoMaxActiveGrains = 16;
+    // Worker 3: maximum L/R source-offset magnitude at width01 == 1, in
+    // seconds of source audio. 1 ms keeps the antisymmetric pair's mono
+    // collapse within a few percent on tonal material (the mono error is
+    // second order in the offset) while still fully decorrelating L/R at
+    // high widths (the L/R difference is first order in the offset).
+    static constexpr float kMaxStereoOffsetSeconds = 0.001F;
 
     GranularEngine() noexcept = default;
     GranularEngine(const GranularEngine&) = default;
@@ -119,7 +154,9 @@ public:
     // Renders one stereo sample. Spawns grains at control rate from
     // params.densityHz; grain parameters are sampled at spawn time. Active
     // grains are cubic-interpolated from the source and accumulated with
-    // equal-power panning.
+    // equal-power panning. Each grain additionally carries independent L/R
+    // source-read offsets scaled by params.width01 (both exactly 0 at
+    // width01 == 0, so the channels read bit-identical positions).
     //
     // positionMod01 is the GranularPosition modulation value: added to
     // params.position01 and clamped to 0..1 before mapping over the bank.

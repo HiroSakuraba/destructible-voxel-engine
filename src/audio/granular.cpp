@@ -12,6 +12,11 @@ namespace {
 
 inline float clamp01(float v) noexcept { return std::clamp(v, 0.0F, 1.0F); }
 
+// Per-grain filter hook. Wave-2 owns the filter design; today the drive is
+// always neutral (0.0) at spawn, so this is the identity. The Eco bypass in
+// render() is the documented call site where the stage gets skipped.
+inline float apply_grain_filter(float sample, float /*filterValue*/) noexcept { return sample; }
+
 }  // namespace
 
 void GranularEngine::set_sample_rate(std::uint32_t sampleRate) noexcept {
@@ -146,10 +151,31 @@ void GranularEngine::spawn_grain(const GranularSource& source, const GranularPar
     target->pitchIncrement = increment;
     target->pan = pan;
     target->gain = 1.0F;
-    target->envelopeShape = params.envelopeShape;
+    // Eco quality forces the cheapest correct window (Triangle: one abs, no
+    // trig) instead of the requested shape.
+    target->envelopeShape = params.granularQuality == FilterQuality::Eco
+                                ? GranularEnvelopeShape::Triangle
+                                : params.envelopeShape;
     target->reverse = reverse;
     target->filterValue = 0.0F;  // reserved for wave-2 per-grain filtering
-    target->seed = random_u32();
+    const std::uint32_t seed = random_u32();
+    target->seed = seed;
+    // True stereo grain placement (Worker 3). The L/R offsets are
+    // antisymmetric around the grain's base position: offsetL = -delta,
+    // offsetR = +delta with one per-grain delta. Mono-sum stability policy:
+    // (L + R) reads positions base +/- delta, so the mono collapse differs
+    // from the width01 == 0 render only to second order in delta — at
+    // moderate widths the collapsed timbre is effectively unchanged, while
+    // the channels decorrelate progressively as width01 rises. Delta is
+    // derived from the grain's own seed (fixed-seed renders stay
+    // reproducible), is exactly 0 at width01 == 0 (bit-identical L/R reads),
+    // and tops out at kMaxStereoOffsetSeconds of source audio.
+    const float width = clamp01(params.width01);
+    const float seedFrac = static_cast<float>(seed >> 8U) * (1.0F / 16777216.0F);
+    const float maxOffsetFrames = kMaxStereoOffsetSeconds * static_cast<float>(sampleRate_);
+    const float delta = width * maxOffsetFrames * (0.25F + 0.75F * seedFrac);
+    target->sourceOffsetL = -delta;
+    target->sourceOffsetR = delta;
     target->ageFrames = 0.0F;
     ++counters_.admittedGrains;
 }
@@ -163,13 +189,23 @@ std::pair<float, float> GranularEngine::render(const GranularSource& source,
 
     // Grain spawn runs at control rate from densityHz: a fractional accumulator
     // spawns whole grains, so fractional densities stay exact over time.
+    // High and Offline quality tiers permit the full 4000 Hz density ceiling;
+    // Standard keeps the wave-1 ceiling unchanged.
     const float density = std::clamp(params.densityHz, 0.0F, 4000.0F);
     spawnPhase_ += density / static_cast<float>(sampleRate_);
+    const bool ecoThrottle = params.granularQuality == FilterQuality::Eco;
     while (spawnPhase_ >= 1.0F) {
         spawnPhase_ -= 1.0F;
         ++counters_.requestedGrains;
         if (!bankUsable) {
             // No usable grain source: count the miss, stay silent, never crash.
+            ++counters_.grainMisses;
+            continue;
+        }
+        if (ecoThrottle && active_grain_count() >= kEcoMaxActiveGrains) {
+            // Eco CPU scaling: refuse the admission instead of stealing or
+            // growing past the cap. Counted in grainMisses so the throttle is
+            // visible in the synth-level profiler.
             ++counters_.grainMisses;
             continue;
         }
@@ -189,14 +225,26 @@ std::pair<float, float> GranularEngine::render(const GranularSource& source,
             continue;
         }
         const float envelope = envelope_value(grain.envelopeShape, phase);
-        const float sample = cubic_sample(source.samples, source.frameCount, grain.sourcePositionFrames);
-        grain.sourcePositionFrames += grain.pitchIncrement;
-        const float contribution = sample * envelope * grain.gain * masterGain;
-        // Equal-power panning.
+        // True stereo placement: L and R read from independent source
+        // positions (grain.sourceOffsetL/R, both 0 at width01 == 0).
+        const float basePosition = grain.sourcePositionFrames;
+        float sampleL = cubic_sample(source.samples, source.frameCount,
+                                     basePosition + grain.sourceOffsetL);
+        float sampleR = cubic_sample(source.samples, source.frameCount,
+                                     basePosition + grain.sourceOffsetR);
+        grain.sourcePositionFrames = basePosition + grain.pitchIncrement;
+        // Eco CPU scaling: skip the per-grain filter stage entirely when its
+        // drive is neutral. Non-Eco tiers always run it (identity today;
+        // wave-2 implements the filter behind apply_grain_filter).
+        if (params.granularQuality != FilterQuality::Eco || grain.filterValue != 0.0F) {
+            sampleL = apply_grain_filter(sampleL, grain.filterValue);
+            sampleR = apply_grain_filter(sampleR, grain.filterValue);
+        }
+        // Equal-power panning (unchanged by the stereo source offsets).
         const float panLeft = std::sqrt(0.5F * (1.0F - grain.pan));
         const float panRight = std::sqrt(0.5F * (1.0F + grain.pan));
-        left += contribution * panLeft;
-        right += contribution * panRight;
+        left += sampleL * envelope * grain.gain * masterGain * panLeft;
+        right += sampleR * envelope * grain.gain * masterGain * panRight;
     }
     return {left, right};
 }

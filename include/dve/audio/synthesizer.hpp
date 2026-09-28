@@ -479,6 +479,10 @@ struct SynthPreset {
     bool midiThru{};
 
     static SynthPreset make_default();
+    // Factory bank of musically voiced presets. Every pitched preset is voiced
+    // so the played MIDI note is the perceived fundamental (no sub-oscillator
+    // stack drowning the fundamental an octave down).
+    static std::vector<SynthPreset> builtin_presets();
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
     [[nodiscard]] std::string serialize() const;
     static std::optional<SynthPreset> parse(std::string_view text, std::string* error = nullptr);

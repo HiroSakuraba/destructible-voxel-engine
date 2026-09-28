@@ -3902,6 +3902,184 @@ SynthPreset SynthPreset::make_default() {
     return result;
 }
 
+namespace {
+// Clean starting point for factory presets: every voice element silenced, pitch
+// reference exact, limiter on. Each preset below voices the played MIDI note as
+// the perceived fundamental.
+SynthPreset base_preset(const char* name) {
+    SynthPreset preset;
+    preset.name = name;
+    for (auto& osc : preset.oscillators) osc.enabled = false;
+    preset.ampEnvelope = {0.005F, 0.10F, 0.80F, 0.20F, EnvelopeCurve::Exponential};
+    preset.filter.enabled = false;
+    preset.tuning.analogDriftCents = 0.0F;
+    preset.distortion.enabled = false;
+    preset.eq.enabled = false;
+    preset.chorus.enabled = false;
+    preset.phaser.enabled = false;
+    preset.delay.enabled = false;
+    preset.reverb.enabled = false;
+    preset.compressor.enabled = false;
+    preset.limiter.enabled = true;
+    preset.masterGain = 0.70F;
+    preset.masterPan = 0.0F;
+    return preset;
+}
+
+void enable_osc(SynthPreset& preset, std::size_t index, OscillatorWaveform wave,
+                float semitones, float cents, float gain) {
+    auto& osc = preset.oscillators[index];
+    osc.enabled = true;
+    osc.waveform = wave;
+    osc.semitones = semitones;
+    osc.cents = cents;
+    osc.gain = gain;
+}
+
+void lowpass(SynthPreset& preset, float cutoffHertz, float resonance, float envOctaves,
+             float envAttack, float envDecay, float envSustain, float envRelease) {
+    preset.filter.enabled = true;
+    preset.filter.topology = FilterTopology::MoogLadder;
+    preset.filter.mode = FilterMode::LowPass;
+    preset.filter.cutoffHertz = cutoffHertz;
+    preset.filter.resonance = resonance;
+    preset.filter.envelopeAmountOctaves = envOctaves;
+    preset.filter.envelope = {envAttack, envDecay, envSustain, envRelease, EnvelopeCurve::Exponential};
+}
+
+SynthPreset make_clean_saw_lead() {
+    auto preset = base_preset("Clean Saw Lead");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.005F, 0.10F, 0.90F, 0.15F, EnvelopeCurve::Exponential};
+    lowpass(preset, 8000.0F, 0.10F, 0.5F, 0.01F, 0.20F, 0.50F, 0.20F);
+    preset.chorus.enabled = true;
+    preset.chorus.rateHertz = 0.35F;
+    preset.chorus.depthMilliseconds = 3.5F;
+    preset.chorus.mix = 0.18F;
+    return preset;
+}
+
+SynthPreset make_deep_sub_bass() {
+    auto preset = base_preset("Deep Sub Bass");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, 0.0F, 0.0F, 0.55F);
+    enable_osc(preset, 1, OscillatorWaveform::Triangle, -12.0F, 0.0F, 0.22F);
+    preset.ampEnvelope = {0.008F, 0.05F, 1.00F, 0.12F, EnvelopeCurve::Exponential};
+    lowpass(preset, 1200.0F, 0.10F, 0.0F, 0.01F, 0.20F, 0.50F, 0.20F);
+    return preset;
+}
+
+SynthPreset make_pluck() {
+    auto preset = base_preset("Pluck");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, 0.0F, 0.45F);
+    preset.ampEnvelope = {0.002F, 0.30F, 0.05F, 0.12F, EnvelopeCurve::Exponential};
+    lowpass(preset, 900.0F, 0.25F, 5.0F, 0.002F, 0.28F, 0.0F, 0.10F);
+    return preset;
+}
+
+SynthPreset make_warm_pad() {
+    auto preset = base_preset("Warm Pad");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, -6.0F, 0.28F);
+    enable_osc(preset, 1, OscillatorWaveform::Saw, 0.0F, 6.0F, 0.28F);
+    preset.ampEnvelope = {0.90F, 0.50F, 0.85F, 1.20F, EnvelopeCurve::Exponential};
+    lowpass(preset, 2200.0F, 0.10F, 0.5F, 0.40F, 0.60F, 0.60F, 0.80F);
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.22F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.70F;
+    preset.reverb.mix = 0.25F;
+    return preset;
+}
+
+SynthPreset make_chiptune_square() {
+    auto preset = base_preset("Chiptune Square");
+    enable_osc(preset, 0, OscillatorWaveform::Pulse, 0.0F, 0.0F, 0.40F);
+    auto& osc = preset.oscillators[0];
+    osc.pulseWidth = 0.50F;
+    osc.pwmDepth = 0.25F;
+    osc.pwmRateHertz = 0.35F;
+    preset.ampEnvelope = {0.003F, 0.08F, 0.70F, 0.08F, EnvelopeCurve::Exponential};
+    lowpass(preset, 12000.0F, 0.05F, 0.0F, 0.01F, 0.20F, 0.50F, 0.20F);
+    return preset;
+}
+
+SynthPreset make_organ() {
+    auto preset = base_preset("Organ");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, 0.0F, 0.0F, 0.38F);
+    enable_osc(preset, 1, OscillatorWaveform::Sine, 12.0F, 0.0F, 0.22F);
+    enable_osc(preset, 2, OscillatorWaveform::Sine, 19.0F, 0.0F, 0.12F);
+    enable_osc(preset, 3, OscillatorWaveform::Sine, 24.0F, 0.0F, 0.16F);
+    preset.ampEnvelope = {0.010F, 0.05F, 1.00F, 0.08F, EnvelopeCurve::Exponential};
+    return preset;
+}
+
+SynthPreset make_brass_stab() {
+    auto preset = base_preset("Brass Stab");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, 0.0F, 0.32F);
+    enable_osc(preset, 1, OscillatorWaveform::Saw, 0.0F, 4.0F, 0.32F);
+    preset.ampEnvelope = {0.060F, 0.15F, 0.75F, 0.20F, EnvelopeCurve::Exponential};
+    lowpass(preset, 1500.0F, 0.15F, 3.0F, 0.04F, 0.20F, 0.60F, 0.25F);
+    return preset;
+}
+
+SynthPreset make_glass_bell() {
+    auto preset = base_preset("Glass Bell");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, 0.0F, 0.0F, 0.50F);
+    enable_osc(preset, 1, OscillatorWaveform::Sine, 12.0F, 0.0F, 0.18F);
+    enable_osc(preset, 2, OscillatorWaveform::Sine, 17.54F, 0.0F, 0.12F); // 2.76x inharmonic partial
+    enable_osc(preset, 3, OscillatorWaveform::Sine, 24.0F, 0.0F, 0.08F);
+    preset.ampEnvelope = {0.002F, 1.80F, 0.00F, 2.50F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.80F;
+    preset.reverb.mix = 0.30F;
+    return preset;
+}
+
+SynthPreset make_reese_bass() {
+    auto preset = base_preset("Reese Bass");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, -8.0F, 0.34F);
+    enable_osc(preset, 1, OscillatorWaveform::Saw, 0.0F, 8.0F, 0.34F);
+    enable_osc(preset, 2, OscillatorWaveform::Sine, -12.0F, 0.0F, 0.12F);
+    preset.ampEnvelope = {0.010F, 0.10F, 0.90F, 0.15F, EnvelopeCurve::Exponential};
+    lowpass(preset, 850.0F, 0.20F, 1.0F, 0.02F, 0.25F, 0.60F, 0.25F);
+    return preset;
+}
+
+SynthPreset make_e_keys() {
+    auto preset = base_preset("E-Keys");
+    enable_osc(preset, 0, OscillatorWaveform::Triangle, 0.0F, 0.0F, 0.40F);
+    enable_osc(preset, 1, OscillatorWaveform::Sine, 12.0F, 0.0F, 0.18F);
+    preset.ampEnvelope = {0.004F, 0.50F, 0.35F, 0.40F, EnvelopeCurve::Exponential};
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.20F;
+    return preset;
+}
+
+SynthPreset make_noise_sweep_fx() {
+    auto preset = base_preset("Noise Sweep FX");
+    enable_osc(preset, 0, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.050F, 0.50F, 0.00F, 0.40F, EnvelopeCurve::Exponential};
+    lowpass(preset, 500.0F, 0.30F, 6.0F, 0.40F, 0.60F, 0.00F, 0.30F);
+    preset.delay.enabled = true;
+    return preset;
+}
+} // namespace
+
+std::vector<SynthPreset> SynthPreset::builtin_presets() {
+    return {
+        make_clean_saw_lead(),
+        make_deep_sub_bass(),
+        make_pluck(),
+        make_warm_pad(),
+        make_chiptune_square(),
+        make_organ(),
+        make_brass_stab(),
+        make_glass_bell(),
+        make_reese_bass(),
+        make_e_keys(),
+        make_noise_sweep_fx(),
+    };
+}
+
 bool SynthPreset::validate(std::string* error) const {
     auto fail = [&](std::string message) { if (error) *error = std::move(message); return false; };
     auto in_range = [](float value, float low, float high) {

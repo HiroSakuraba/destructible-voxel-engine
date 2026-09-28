@@ -3501,9 +3501,34 @@ struct Synthesizer::Impl {
                 stereoLeft = sample * (0.70710678F + width * 0.25F);
                 stereoRight = sample * (0.70710678F - width * 0.25F);
             } else {
-                sample = renderPhase(v.phases[i], increment, true, v.auxiliaryPhases[i], v.noiseState[i]);
-                stereoLeft = sample * 0.70710678F;
-                stereoRight = sample * 0.70710678F;
+                const float divergence = clampf(osc.stereoDivergence, 0.0F, 1.0F);
+                if (divergence > 0.001F) {
+                    // Phase 1: true stereo divergence — render L/R with slight
+                    // detune and phase offset for width without chorus.
+                    const float detuneCents = divergence * 8.0F; // up to 8 cents
+                    const float phaseOffset = divergence * 0.02F; // up to 2% phase
+                    const float incL = increment * std::exp2(detuneCents / 1200.0F);
+                    const float incR = increment * std::exp2(-detuneCents / 1200.0F);
+                    float phaseL = v.phases[i];
+                    float phaseR = wrap_phase(v.phases[i] + phaseOffset);
+                    auto auxL = v.auxiliaryPhases[i];
+                    auto auxR = v.auxiliaryPhases[i];
+                    std::uint32_t noiseL = v.noiseState[i];
+                    std::uint32_t noiseR = v.noiseState[i] ^ 0x9E3779B9U;
+                    const float sampleL = renderPhase(phaseL, incL, true, auxL, noiseL);
+                    const float sampleR = renderPhase(phaseR, incR, true, auxR, noiseR);
+                    // Advance the main phase by the average.
+                    v.phases[i] = wrap_phase(v.phases[i] + increment);
+                    v.auxiliaryPhases[i] = auxL;
+                    v.noiseState[i] = noiseL;
+                    sample = (sampleL + sampleR) * 0.5F;
+                    stereoLeft = sampleL * 0.70710678F;
+                    stereoRight = sampleR * 0.70710678F;
+                } else {
+                    sample = renderPhase(v.phases[i], increment, true, v.auxiliaryPhases[i], v.noiseState[i]);
+                    stereoLeft = sample * 0.70710678F;
+                    stereoRight = sample * 0.70710678F;
+                }
             }
             std::uint8_t unisonVoices = parameters.unison.enabled
                 ? std::clamp<std::uint8_t>(parameters.unison.voices, 1U, static_cast<std::uint8_t>(kSynthUnisonMax)) : 1U;
@@ -4434,6 +4459,7 @@ bool SynthPreset::validate(std::string* error) const {
             !in_range(osc.frequencyModAmount, -4.0F, 4.0F) || !in_range(osc.ringModDepth, 0.0F, 1.0F) ||
             !in_range(osc.subOscillatorLevel, 0.0F, 1.0F) || osc.subOscillatorOctaves < 1U ||
             osc.subOscillatorOctaves > 3U || !in_range(osc.wavetablePosition, 0.0F, 1.0F) ||
+            !in_range(osc.stereoDivergence, 0.0F, 1.0F) ||
             !in_range(osc.sampleStart, 0.0F, 1.0F) || !in_range(osc.sampleEnd, 0.0F, 1.0F) ||
             osc.sampleEnd <= osc.sampleStart || !in_range(osc.sampleLoopStart, 0.0F, 1.0F) ||
             !in_range(osc.sampleLoopEnd, 0.0F, 1.0F) || osc.sampleLoopEnd <= osc.sampleLoopStart ||
@@ -4713,6 +4739,7 @@ std::string SynthPreset::serialize() const {
             << prefix << "subLevel=" << osc.subOscillatorLevel << '\n'
             << prefix << "subOctaves=" << static_cast<unsigned>(osc.subOscillatorOctaves) << '\n'
             << prefix << "wavetablePosition=" << osc.wavetablePosition << '\n'
+            << prefix << "stereoDivergence=" << osc.stereoDivergence << '\n'
             << prefix << "sampleStart=" << osc.sampleStart << '\n'
             << prefix << "sampleEnd=" << osc.sampleEnd << '\n'
             << prefix << "sampleLoopStart=" << osc.sampleLoopStart << '\n'
@@ -5100,6 +5127,7 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (field == "subLevel") parsed = readFloat(osc.subOscillatorLevel);
             else if (field == "subOctaves") parsed = readUInt(osc.subOscillatorOctaves, 3U);
             else if (field == "wavetablePosition") parsed = readFloat(osc.wavetablePosition);
+            else if (field == "stereoDivergence") parsed = readFloat(osc.stereoDivergence);
             else if (field == "sampleStart") parsed = readFloat(osc.sampleStart);
             else if (field == "sampleEnd") parsed = readFloat(osc.sampleEnd);
             else if (field == "sampleLoopStart") parsed = readFloat(osc.sampleLoopStart);
@@ -5454,6 +5482,7 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
         r.phaseOffset=lerp(x.phaseOffset,y.phaseOffset); r.frequencyModAmount=lerp(x.frequencyModAmount,y.frequencyModAmount);
         r.ringModDepth=lerp(x.ringModDepth,y.ringModDepth); r.subOscillatorLevel=lerp(x.subOscillatorLevel,y.subOscillatorLevel);
         r.wavetablePosition=lerp(x.wavetablePosition,y.wavetablePosition);
+        r.stereoDivergence=lerp(x.stereoDivergence,y.stereoDivergence);
     }
     auto morphEnvelope = [&](AdsrParameters& r, const AdsrParameters& x, const AdsrParameters& y) {
         r.attackSeconds=lerp(x.attackSeconds,y.attackSeconds); r.decaySeconds=lerp(x.decaySeconds,y.decaySeconds);

@@ -186,6 +186,7 @@ struct OscillatorParameters {
     float subOscillatorLevel{};
     std::uint8_t subOscillatorOctaves{1};
     float wavetablePosition{};
+    float stereoDivergence{};  // Phase 1: 0=mono, 1=full L/R divergence (detune + phase)
 
     // Resident sample/granular source controls. Positions are normalized to the shared
     // preset sample bank. Asset loading and resampling occur on the control thread.

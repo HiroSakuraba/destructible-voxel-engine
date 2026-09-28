@@ -128,8 +128,8 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
 
     const int oscillatorAdvancedTop = top + static_cast<int>(audio::kSynthOscillatorCount) * oscillatorRowHeight + 7;
     for (std::size_t i = 0; i < layout_.oscillatorAdvancedRows.size(); ++i) {
-        const int column = static_cast<int>(i / 5U);
-        const int row = static_cast<int>(i % 5U);
+        const int column = static_cast<int>(i / 6U);
+        const int row = static_cast<int>(i % 6U);
         const int columnWidth = (contentWidth - 10) / 2;
         const int x = left + column * (columnWidth + 10);
         const int y = oscillatorAdvancedTop + row * parameterRowHeight;
@@ -137,7 +137,7 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
         layout_.oscillatorAdvancedDownButtons[i] = {x + columnWidth - 116, y + 2, 27, 22};
         layout_.oscillatorAdvancedUpButtons[i] = {x + columnWidth - 31, y + 2, 27, 22};
     }
-    layout_.wavetableCanvas = {left, oscillatorAdvancedTop + 5 * parameterRowHeight + 6, contentWidth, 76};
+    layout_.wavetableCanvas = {left, oscillatorAdvancedTop + 6 * parameterRowHeight + 6, contentWidth, 76};
     const int wtButtonWidth = std::max(44, (contentWidth - 330) / static_cast<int>(audio::kWavetableFrameCount));
     for (std::size_t i = 0; i < layout_.wavetableFrameButtons.size(); ++i)
         layout_.wavetableFrameButtons[i] = {left + static_cast<int>(i) * wtButtonWidth,
@@ -453,17 +453,21 @@ void EditorSynthPanel::adjust_oscillator_advanced(std::size_t index, int directi
             default: return;
         }
     } else if (oscillator.waveform == audio::OscillatorWaveform::Granular) {
+        // Phase 4: dedicated granular generator reads preset-level GranularParameters.
+        auto& granular = preset.granular;
         switch (index) {
-            case 0: oscillator.grainPosition = stepped(oscillator.grainPosition, 0.025F, 0.0F, 1.0F, direction); break;
-            case 1: oscillator.grainSizeMilliseconds = stepped(oscillator.grainSizeMilliseconds, 5.0F, 5.0F, 500.0F, direction); break;
-            case 2: oscillator.grainDensityHertz = stepped(oscillator.grainDensityHertz, 1.0F, 0.5F, 120.0F, direction); break;
-            case 3: oscillator.grainSpray = stepped(oscillator.grainSpray, 0.025F, 0.0F, 1.0F, direction); break;
-            case 4: oscillator.grainPitchSemitones = stepped(oscillator.grainPitchSemitones, 1.0F, -48.0F, 48.0F, direction); break;
-            case 5: oscillator.grainStereoSpread = stepped(oscillator.grainStereoSpread, 0.05F, 0.0F, 1.0F, direction); break;
-            case 6: oscillator.grainFreeze = !oscillator.grainFreeze; break;
-            case 7: oscillator.grainWindow = cycle_enum(oscillator.grainWindow, 3U, direction); break;
-            case 8: oscillator.sampleReverse = !oscillator.sampleReverse; break;
-            case 9: oscillator.sampleKeyTrack = !oscillator.sampleKeyTrack; break;
+            case 0: granular.enabled = !granular.enabled; break;
+            case 1: granular.densityHz = stepped(granular.densityHz, 1.0F, 0.5F, 4000.0F, direction); break;
+            case 2: granular.durationMs = stepped(granular.durationMs, 10.0F, 10.0F, 2000.0F, direction); break;
+            case 3: granular.position01 = stepped(granular.position01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 4: granular.positionJitter01 = stepped(granular.positionJitter01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 5: granular.envelopeShape = cycle_enum(granular.envelopeShape, 4U, direction); break;
+            case 6: granular.cloud01 = stepped(granular.cloud01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 7: granular.scatter01 = stepped(granular.scatter01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 8: granular.dust01 = stepped(granular.dust01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 9: granular.freeze01 = stepped(granular.freeze01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 10: granular.smear01 = stepped(granular.smear01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 11: granular.width01 = stepped(granular.width01, 0.05F, 0.0F, 1.0F, direction); break;
             default: return;
         }
     } else {

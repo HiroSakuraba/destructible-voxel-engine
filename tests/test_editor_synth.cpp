@@ -112,9 +112,12 @@ int main() {
         auto granularPreset = controller.synthesizer().preset();
         granularPreset.oscillators[0].waveform = dve::audio::OscillatorWaveform::Granular;
         controller.synthesizer().set_preset(granularPreset);
-        const float beforeGrainDensity = controller.synthesizer().preset().oscillators[0].grainDensityHertz;
-        click(controller, panel.oscillatorAdvancedUpButtons[2]);
-        require(controller.synthesizer().preset().oscillators[0].grainDensityHertz > beforeGrainDensity,
+        // Phase 4: the Granular waveform drives the preset-level granular
+        // generator; the advanced section edits GranularParameters (row 1 =
+        // density).
+        const float beforeGrainDensity = controller.synthesizer().preset().granular.densityHz;
+        click(controller, panel.oscillatorAdvancedUpButtons[1]);
+        require(controller.synthesizer().preset().granular.densityHz > beforeGrainDensity,
                 "granular density control did not update preset");
 
         // Phase 2: Sampler and ModalResonator waveforms are reachable through the wave cycle.

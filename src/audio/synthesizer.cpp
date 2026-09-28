@@ -5109,6 +5109,63 @@ SynthPreset make_generative_attractor_pad() {
     preset.morphAmount = 0.30F;
     return preset;
 }
+
+// Phase 4: granular showcase. Bakes a small seamlessly loopable tone into the
+// preset sample bank (the same technique as "Sampled Loop Vox": 12000 frames
+// is exactly 110 cycles at 440 Hz, so the loop seam is click-free) and plays
+// it through the dedicated granular generator as a drifting cloud: slow
+// overlapping Hann grains, wide random pan, a few reversed grains, and a
+// lush reverb tail. Because the bank tone sits at concert A440, the preset
+// test's pitch check (MIDI 69) still hears the played note as fundamental.
+SynthPreset make_granular_cloud_drift() {
+    auto preset = base_preset("Granular Cloud Drift");
+    enable_osc(preset, 0, OscillatorWaveform::Granular, 0.0F, 0.0F, 0.90F);
+    constexpr std::uint32_t kFrames = 12000U;  // 110 cycles at 440 Hz / 48 kHz: seamless loop
+    constexpr float kRate = 48000.0F;
+    constexpr float kFrequency = 440.0F;
+    constexpr float kHarmonics[8] = {1.0F, 0.55F, 0.38F, 0.26F, 0.18F, 0.12F, 0.08F, 0.05F};
+    float peak = 0.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        float sample = 0.0F;
+        const float phase = 2.0F * 3.14159265358979F * kFrequency * static_cast<float>(i) / kRate;
+        for (int harmonic = 0; harmonic < 8; ++harmonic)
+            sample += kHarmonics[harmonic] * std::sin(phase * static_cast<float>(harmonic + 1));
+        peak = std::max(peak, std::abs(sample));
+        preset.sampleBank.samples[i] = sample;
+    }
+    const float normalize = peak > 0.0F ? 0.75F / peak : 1.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) preset.sampleBank.samples[i] *= normalize;
+    preset.sampleBank.name = "Cloud Drift Tone";
+    preset.sampleBank.enabled = true;
+    preset.sampleBank.sampleRate = 48000U;
+    preset.sampleBank.rootNote = 69;  // recorded at A440: grains play at concert pitch
+    preset.sampleBank.frameCount = kFrames;
+
+    auto& g = preset.granular;
+    g.enabled = true;
+    g.densityHz = 32.0F;              // overlapping cloud
+    g.durationMs = 240.0F;            // long, slowly evolving grains
+    g.pitchSemitones = 0.0F;
+    g.position01 = 0.40F;
+    g.positionJitter01 = 0.25F;        // spray around the read position
+    g.panScatter01 = 0.90F;           // wide stereo drift
+    g.gain = 0.70F;
+    g.reverseProbability01 = 0.08F;    // occasional reversed grains
+    g.envelopeShape = GranularEnvelopeShape::Hann;
+    g.cloud01 = 0.70F;
+    g.scatter01 = 0.20F;
+    g.dust01 = 0.05F;
+    g.freeze01 = 0.0F;
+    g.freezePosition01 = 0.5F;
+    g.smear01 = 0.30F;
+    g.width01 = 0.90F;
+
+    preset.ampEnvelope = {0.08F, 0.50F, 0.80F, 0.80F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.65F;
+    preset.reverb.mix = 0.28F;
+    return preset;
+}
 } // namespace
 
 std::vector<SynthPreset> SynthPreset::builtin_presets() {
@@ -5128,6 +5185,7 @@ std::vector<SynthPreset> SynthPreset::builtin_presets() {
         make_modal_marimba(),
         make_cloud_delay(),
         make_generative_attractor_pad(),
+        make_granular_cloud_drift(),
     };
 }
 

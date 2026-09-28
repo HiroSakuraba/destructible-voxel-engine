@@ -162,6 +162,27 @@ SynthPatchProgram compile_patch(const SynthPreset& preset) {
     w.entry(SynthPatchParam::FxLimiterCeiling, preset.limiter.ceilingDb); bump();
     w.entry(SynthPatchParam::FxLimiterRelease, preset.limiter.releaseMilliseconds); bump();
 
+    // Granular generator (Phase 4)
+    const auto& granular = preset.granular;
+    w.entry(SynthPatchParam::GranularEnabled, granular.enabled); bump();
+    w.entry(SynthPatchParam::GranularDensityHz, granular.densityHz); bump();
+    w.entry(SynthPatchParam::GranularDurationMs, granular.durationMs); bump();
+    w.entry(SynthPatchParam::GranularPitchSemitones, granular.pitchSemitones); bump();
+    w.entry(SynthPatchParam::GranularPosition, granular.position01); bump();
+    w.entry(SynthPatchParam::GranularPositionJitter, granular.positionJitter01); bump();
+    w.entry(SynthPatchParam::GranularPanScatter, granular.panScatter01); bump();
+    w.entry(SynthPatchParam::GranularGain, granular.gain); bump();
+    w.entry(SynthPatchParam::GranularReverseProbability, granular.reverseProbability01); bump();
+    w.entry(SynthPatchParam::GranularEnvelopeShape,
+             static_cast<std::uint32_t>(granular.envelopeShape)); bump();
+    w.entry(SynthPatchParam::GranularCloud, granular.cloud01); bump();
+    w.entry(SynthPatchParam::GranularScatter, granular.scatter01); bump();
+    w.entry(SynthPatchParam::GranularDust, granular.dust01); bump();
+    w.entry(SynthPatchParam::GranularFreeze, granular.freeze01); bump();
+    w.entry(SynthPatchParam::GranularFreezePosition, granular.freezePosition01); bump();
+    w.entry(SynthPatchParam::GranularSmear, granular.smear01); bump();
+    w.entry(SynthPatchParam::GranularWidth, granular.width01); bump();
+
     // Patch entry count
     w.bytes[countPos] = static_cast<std::uint8_t>(count);
     w.bytes[countPos + 1] = static_cast<std::uint8_t>(count >> 8);
@@ -301,6 +322,30 @@ std::optional<SynthPreset> load_patch_program(const std::uint8_t* data, std::siz
             case SynthPatchParam::FxLimiterOn: if (type == 2) readB(preset.limiter.enabled); else r.ok = false; break;
             case SynthPatchParam::FxLimiterCeiling: if (type == 0) readF(preset.limiter.ceilingDb); else r.ok = false; break;
             case SynthPatchParam::FxLimiterRelease: if (type == 0) readF(preset.limiter.releaseMilliseconds); else r.ok = false; break;
+            case SynthPatchParam::GranularEnabled: if (type == 2) readB(preset.granular.enabled); else r.ok = false; break;
+            case SynthPatchParam::GranularDensityHz: if (type == 0) readF(preset.granular.densityHz); else r.ok = false; break;
+            case SynthPatchParam::GranularDurationMs: if (type == 0) readF(preset.granular.durationMs); else r.ok = false; break;
+            case SynthPatchParam::GranularPitchSemitones: if (type == 0) readF(preset.granular.pitchSemitones); else r.ok = false; break;
+            case SynthPatchParam::GranularPosition: if (type == 0) readF(preset.granular.position01); else r.ok = false; break;
+            case SynthPatchParam::GranularPositionJitter: if (type == 0) readF(preset.granular.positionJitter01); else r.ok = false; break;
+            case SynthPatchParam::GranularPanScatter: if (type == 0) readF(preset.granular.panScatter01); else r.ok = false; break;
+            case SynthPatchParam::GranularGain: if (type == 0) readF(preset.granular.gain); else r.ok = false; break;
+            case SynthPatchParam::GranularReverseProbability: if (type == 0) readF(preset.granular.reverseProbability01); else r.ok = false; break;
+            case SynthPatchParam::GranularEnvelopeShape: {
+                if (type != 1) { r.ok = false; break; }
+                const std::uint32_t v = r.u32();
+                // Clamp so a corrupt/out-of-range value can't form an invalid enum.
+                preset.granular.envelopeShape =
+                    static_cast<GranularEnvelopeShape>(v <= 3U ? v : 3U);
+                break;
+            }
+            case SynthPatchParam::GranularCloud: if (type == 0) readF(preset.granular.cloud01); else r.ok = false; break;
+            case SynthPatchParam::GranularScatter: if (type == 0) readF(preset.granular.scatter01); else r.ok = false; break;
+            case SynthPatchParam::GranularDust: if (type == 0) readF(preset.granular.dust01); else r.ok = false; break;
+            case SynthPatchParam::GranularFreeze: if (type == 0) readF(preset.granular.freeze01); else r.ok = false; break;
+            case SynthPatchParam::GranularFreezePosition: if (type == 0) readF(preset.granular.freezePosition01); else r.ok = false; break;
+            case SynthPatchParam::GranularSmear: if (type == 0) readF(preset.granular.smear01); else r.ok = false; break;
+            case SynthPatchParam::GranularWidth: if (type == 0) readF(preset.granular.width01); else r.ok = false; break;
             default:
                 // Unknown parameter ID: skip it so newer patches load on older builds.
                 if (type == 0) r.f32();

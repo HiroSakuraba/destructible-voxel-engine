@@ -43,6 +43,7 @@ inline constexpr std::uint32_t kSynthPatchMagic = 0x50535644U; // "DVSP" little-
 //   0x0500-0x05FF  effects
 //   0x0600-0x06FF  MPE / microtuning / unison / quality
 //   0x0700-0x07FF  metadata
+//   0x0800-0x08FF  granular generator (Phase 4)
 enum class SynthPatchParam : std::uint16_t {
     // Master / tuning
     Name = 0x0001,
@@ -153,6 +154,27 @@ enum class SynthPatchParam : std::uint16_t {
     FxLimiterOn = 0x0531,
     FxLimiterCeiling = 0x0532,
     FxLimiterRelease = 0x0533,
+    // Granular generator (Phase 4). Appended at the enum end so older builds
+    // skip these IDs gracefully (the loader's default case skips unknown IDs).
+    GranularEnabled = 0x0800,
+    GranularDensityHz = 0x0801,
+    GranularDurationMs = 0x0802,
+    GranularPitchSemitones = 0x0803,
+    GranularPosition = 0x0804,
+    GranularPositionJitter = 0x0805,
+    GranularPanScatter = 0x0806,
+    GranularGain = 0x0807,
+    GranularReverseProbability = 0x0808,
+    GranularEnvelopeShape = 0x0809,
+    GranularCloud = 0x080A,
+    GranularScatter = 0x080B,
+    GranularDust = 0x080C,
+    GranularFreeze = 0x080D,
+    GranularFreezePosition = 0x080E,
+    GranularSmear = 0x080F,
+    GranularWidth = 0x0810,
+    // Worker 3 (stereo-quality topic) may append a GranularQuality key after
+    // GranularWidth when that field lands in GranularParameters.
 };
 
 struct SynthPatchProgram {

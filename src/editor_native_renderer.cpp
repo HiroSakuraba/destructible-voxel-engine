@@ -930,15 +930,27 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                       compact(modal.transientMilliseconds), std::to_string(modal.modeCount),
                       compact(modal.modes[0].frequencyRatio)};
         } else if (osc.waveform == audio::OscillatorWaveform::Granular) {
-            labels = {"Grain position", "Grain size ms", "Density Hz", "Spray", "Pitch semitones",
-                      "Stereo spread", "Freeze", "Window", "Reverse", "Key tracking"};
-            const std::array<std::string_view, 3> windows{"Hann", "Triangle", "Tukey"};
-            values = {compact(osc.grainPosition), compact(osc.grainSizeMilliseconds), compact(osc.grainDensityHertz),
-                      compact(osc.grainSpray), compact(osc.grainPitchSemitones), compact(osc.grainStereoSpread),
-                      osc.grainFreeze ? "On" : "Off", std::string(windows[static_cast<std::size_t>(osc.grainWindow)]),
-                      osc.sampleReverse ? "On" : "Off", osc.sampleKeyTrack ? "On" : "Off"};
+            // Phase 4: dedicated granular generator (preset-level GranularParameters).
+            const auto& granular = preset.granular;
+            labels = {"Granular", "Density Hz", "Duration ms", "Position", "Position jitter",
+                      "Envelope", "Cloud", "Scatter", "Dust", "Freeze", "Smear", "Width"};
+            static constexpr std::array<std::string_view, 4> envelopes{
+                "Hann", "Triangle", "Exponential", "Planck"};
+            values = {granular.enabled ? "On" : "Off", compact(granular.densityHz, 1),
+                      compact(granular.durationMs, 0), compact(granular.position01),
+                      compact(granular.positionJitter01),
+                      std::string(envelopes[static_cast<std::size_t>(granular.envelopeShape)]),
+                      compact(granular.cloud01), compact(granular.scatter01),
+                      compact(granular.dust01), compact(granular.freeze01),
+                      compact(granular.smear01), compact(granular.width01)};
         }
-        for (std::size_t i = 0; i < layout.oscillatorAdvancedRows.size(); ++i) {
+        // Other waveforms only define the original 10 advanced rows; the two
+        // extra rows are the Phase 4 granular section.
+        const std::size_t advancedRowCount =
+            osc.waveform == audio::OscillatorWaveform::Granular
+                ? kSynthOscillatorAdvancedPropertyCount
+                : 10U;
+        for (std::size_t i = 0; i < advancedRowCount; ++i) {
             painter.fill(layout.oscillatorAdvancedRows[i], panel); painter.outline(layout.oscillatorAdvancedRows[i], border);
             painter.text(layout.oscillatorAdvancedRows[i].x + 7, layout.oscillatorAdvancedRows[i].y + 18, labels[i], text);
             button(layout.oscillatorAdvancedDownButtons[i], "-");

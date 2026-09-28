@@ -580,6 +580,25 @@ struct PhysicalModelState {
     float jetDelay{};           // for air-jet (flute) edge tone
 };
 
+// Phase 2: modal resonator voice state (SYN-011b). One per oscillator.
+struct ModalResonatorState {
+    struct Mode {
+        float decayCoeff{0.999F};  // per-sample envelope multiplier: exp(-1/(tau*sr))
+        float y1{};
+        float y2{};
+        float gain{1.0F};          // per-mode gain including the brightness tilt
+    };
+    std::array<Mode, kModalResonatorMaxModes> modes{};
+    std::uint8_t activeModes{};
+    bool initialized{};
+    std::uint32_t noiseState{0x5BD1E995U};
+    float exciterPhase{};                 // Oscillator excitation: internal saw phase
+    std::uint32_t exciteSamplesRemaining{};   // NoiseBurst window (and SampleTransient fallback)
+    std::uint32_t transientFramesRemaining{}; // SampleTransient window, in bank frames
+    float transientPosition{};            // fractional read position in the sample bank
+    float transientStep{1.0F};            // bank sample rate / voice sample rate
+};
+
 struct Voice {
     bool active{};
     bool keyHeld{};
@@ -622,6 +641,7 @@ struct Voice {
     std::array<float, kSynthLfoCount> lfoPreviousRandomValues{};
     std::array<std::uint32_t, kSynthLfoCount> lfoNoiseState{};
     std::array<PhysicalModelState, kSynthOscillatorCount> physicalModels{};
+    std::array<ModalResonatorState, kSynthOscillatorCount> modalResonators{};  // Phase 2
     float noteRandom{};
     AnalogFilter filterL;
     AnalogFilter filterR;
@@ -664,6 +684,7 @@ struct Voice {
             previousOscillatorSamples[i] = 0.0F;
             oscillatorWrapped[i] = false;
             physicalModels[i].initialized = false;
+            modalResonators[i].initialized = false;  // Phase 2: re-excite at note-on
         }
         for (std::size_t i = 0; i < kSynthLfoCount; ++i) {
             if (preset.lfos[i].keySync || retrigger) lfoPhases[i] = wrap_phase(preset.lfos[i].phase);
@@ -823,6 +844,7 @@ float oscillator_sample(OscillatorWaveform waveform, float phase, float incremen
         case OscillatorWaveform::Granular:
         case OscillatorWaveform::PhysicalModel:
         case OscillatorWaveform::Sampler:
+        case OscillatorWaveform::ModalResonator:
             return 0.0F;
     }
     return 0.0F;
@@ -1184,6 +1206,166 @@ float process(PhysicalModelState& state, const OscillatorParameters& osc, float 
 
 } // namespace physical
 
+// ---------------------------------------------------------------------------
+// Modal resonator core (Phase 2, SYN-011b) — allocation-free, realtime safe.
+//
+// Each mode is a damped 2-pole resonator (Smith's formulation):
+//   y[n] = 2*R*cos(w)*y[n-1] - R^2*y[n-2] + x[n]*g_in
+// with R = exp(-1/(tau*sr)), so the mode envelope decays as e^(-t/tau).
+// Output is the gain-weighted sum of the modes; even modes pan left, odd right.
+//
+// Excitation design decisions (documented per the build spec):
+// - Impulse: one-shot initial displacement of every mode at note-on (classic
+//   modal synthesis). Modes ring freely afterwards.
+// - NoiseBurst: white noise injected through the mode inputs for
+//   noiseBurstMilliseconds at note-on, then free decay.
+// - Oscillator: a DEDICATED internal exciter (sawtooth at the voice's base
+//   frequency plus a touch of noise) drives the bank continuously while the key
+//   is held — like a bowed string driving a resonant body. This is used instead
+//   of the voice's own osc 1 to avoid feedback when osc 1 is itself the
+//   resonator, and to keep the routing explicit.
+// - SampleTransient: the first transientMilliseconds of the preset's resident
+//   sample bank (the same bank the Sample waveform uses), resampled from the
+//   bank rate to the voice rate, injected once at note-on. If the bank is
+//   disabled or empty, the documented fallback is a noise burst of the same
+//   length so the voice still sounds.
+// ---------------------------------------------------------------------------
+namespace modal_resonator {
+
+// Piano-style inharmonicity: ratio' = ratio * sqrt(1 + B*(ratio^2 - 1)).
+// ratio == 1 is untouched for any B; higher partials stretch upward.
+inline float stretch_ratio(float ratio, float inharmonicity) noexcept {
+    const float r = std::max(ratio, 0.01F);
+    const float b = std::clamp(inharmonicity, 0.0F, 1.0F);
+    return r * std::sqrt(1.0F + b * (r * r - 1.0F));
+}
+
+// Brightness gain tilt: g(m) = gain_m * (m+1)^(2*(brightness - 0.5)).
+// brightness == 0.5 is flat; 0 darkens as 1/(m+1); 1 brightens as (m+1).
+inline float tilt_gain(float gain, std::size_t modeIndex, float brightness) noexcept {
+    const float tilt = 2.0F * (std::clamp(brightness, 0.0F, 1.0F) - 0.5F);
+    return gain * std::pow(static_cast<float>(modeIndex + 1U), tilt);
+}
+
+inline float excitation_energy(const ModalResonatorParameters& params, float velocity) noexcept {
+    return (0.35F + 0.65F * std::clamp(velocity, 0.0F, 1.0F)) *
+           std::clamp(params.excitationLevel, 0.0F, 4.0F);
+}
+
+inline float base_frequency(const ModalResonatorParameters& params, float frequencyHz,
+                            float sampleRate) noexcept {
+    // MIDI pitch is authoritative when baseFrequency is 0.
+    if (params.baseFrequency > 0.0F)
+        return std::clamp(params.baseFrequency, 20.0F, sampleRate * 0.45F);
+    return std::clamp(frequencyHz, 20.0F, sampleRate * 0.45F);
+}
+
+inline float white_noise(std::uint32_t& noiseState) noexcept {
+    noiseState ^= noiseState << 13U;
+    noiseState ^= noiseState >> 17U;
+    noiseState ^= noiseState << 5U;
+    return static_cast<float>(static_cast<std::int32_t>(noiseState)) /
+           static_cast<float>(std::numeric_limits<std::int32_t>::max());
+}
+
+void initialize(ModalResonatorState& state, const ModalResonatorParameters& params,
+                float frequencyHz, float velocity, const RealtimeSampleBank& bank,
+                float sampleRate) noexcept {
+    state = ModalResonatorState{};
+    state.initialized = true;
+    state.noiseState = 0x5BD1E995U ^ static_cast<std::uint32_t>(frequencyHz * 1000.0F);
+    if (state.noiseState == 0U) state.noiseState = 0x5BD1E995U;
+    const float sr = std::max(sampleRate, 8000.0F);
+    const float base = base_frequency(params, frequencyHz, sr);
+    const float energy = excitation_energy(params, velocity);
+    const float damping = std::clamp(params.damping, 0.01F, 8.0F);
+    // Defensive clamp: the bank never exceeds kModalResonatorMaxModes entries.
+    const std::uint8_t activeModes =
+        std::clamp(params.modeCount, std::uint8_t{1}, std::uint8_t{kModalResonatorMaxModes});
+    state.activeModes = activeModes;
+    for (std::uint8_t m = 0; m < activeModes; ++m) {
+        auto& mode = state.modes[m];
+        const auto& mp = params.modes[m];
+        const float ratio = stretch_ratio(mp.frequencyRatio, params.inharmonicity);
+        const float rawFrequency = base * ratio;
+        const float decaySeconds = std::clamp(mp.decaySeconds, 0.005F, 60.0F) * damping;
+        mode.decayCoeff = std::exp(-1.0F / (std::max(decaySeconds, 0.001F) * sr));
+        mode.gain = rawFrequency >= sr * 0.45F
+            ? 0.0F
+            : tilt_gain(std::max(mp.gain, 0.0F), m, params.brightness);
+        mode.y1 = 0.0F;
+        mode.y2 = 0.0F;
+        if (params.excitation == ExcitationSource::Impulse)
+            mode.y1 = energy * mode.gain * 0.5F;
+    }
+    if (params.excitation == ExcitationSource::NoiseBurst) {
+        const float ms = std::clamp(params.noiseBurstMilliseconds, 1.0F, 2000.0F);
+        state.exciteSamplesRemaining = static_cast<std::uint32_t>(ms * 0.001F * sr);
+    } else if (params.excitation == ExcitationSource::SampleTransient) {
+        const bool haveSample = bank.enabled && bank.frameCount > 1U;
+        const float ms = std::clamp(params.transientMilliseconds, 1.0F, 2000.0F);
+        if (haveSample) {
+            const std::uint32_t bankFrames = static_cast<std::uint32_t>(
+                ms * 0.001F * static_cast<float>(std::max(bank.sampleRate, 1U)));
+            state.transientFramesRemaining = std::min(bankFrames, bank.frameCount);
+            state.transientPosition = 0.0F;
+            state.transientStep = static_cast<float>(std::max(bank.sampleRate, 1U)) / sr;
+        } else {
+            state.exciteSamplesRemaining = static_cast<std::uint32_t>(ms * 0.001F * sr);
+        }
+    }
+}
+
+std::pair<float, float> process(ModalResonatorState& state, const ModalResonatorParameters& params,
+                                float frequencyHz, float velocity, bool keyHeld,
+                                const RealtimeSampleBank& bank, float sampleRate) noexcept {
+    if (!state.initialized) initialize(state, params, frequencyHz, velocity, bank, sampleRate);
+    const float sr = std::max(sampleRate, 8000.0F);
+    const float base = base_frequency(params, frequencyHz, sr);
+    const float energy = excitation_energy(params, velocity);
+
+    // Excitation signal injected through every mode input this sample.
+    float exciter = 0.0F;
+    if (state.exciteSamplesRemaining > 0U) {
+        exciter = white_noise(state.noiseState) * energy * 0.5F;
+        --state.exciteSamplesRemaining;
+    } else if (state.transientFramesRemaining > 0U && bank.enabled && bank.frameCount > 1U) {
+        const std::uint32_t i0 = std::min(static_cast<std::uint32_t>(state.transientPosition),
+                                          bank.frameCount - 1U);
+        const std::uint32_t i1 = std::min(i0 + 1U, bank.frameCount - 1U);
+        const float frac = state.transientPosition - std::floor(state.transientPosition);
+        exciter = (bank.samples[i0] + (bank.samples[i1] - bank.samples[i0]) * frac) * energy;
+        state.transientPosition += state.transientStep;
+        --state.transientFramesRemaining;
+    } else if (params.excitation == ExcitationSource::Oscillator && keyHeld) {
+        const float increment = base / sr;
+        state.exciterPhase = wrap_phase(state.exciterPhase + increment);
+        const float saw = bandlimited_saw(state.exciterPhase, increment);
+        exciter = (saw * 0.7F + white_noise(state.noiseState) * 0.15F) * energy * 0.35F;
+    }
+
+    float left = 0.0F;
+    float right = 0.0F;
+    for (std::uint8_t m = 0; m < state.activeModes; ++m) {
+        auto& mode = state.modes[m];
+        if (mode.gain <= 0.0F) continue;
+        // Recompute per sample so pitch bend and MPE glide the whole bank.
+        const float ratio = stretch_ratio(params.modes[m].frequencyRatio, params.inharmonicity);
+        const float freq = std::min(base * ratio, sr * 0.45F);
+        const float w = kTwoPi * freq / sr;
+        const float r = mode.decayCoeff;
+        const float cosw = std::cos(w);
+        const float y = 2.0F * r * cosw * mode.y1 - r * r * mode.y2 + exciter * mode.gain;
+        mode.y2 = mode.y1;
+        mode.y1 = y;
+        if ((m & 1U) == 0U) left += y * mode.gain;
+        else right += y * mode.gain;
+    }
+    return {std::tanh(left * 0.9F), std::tanh(right * 0.9F)};
+}
+
+} // namespace modal_resonator
+
 bool finite(float value) noexcept { return std::isfinite(value); }
 
 bool validate_adsr(const AdsrParameters& p) noexcept {
@@ -1228,6 +1410,7 @@ std::string waveform_name(OscillatorWaveform waveform) {
         case OscillatorWaveform::Granular: return "granular";
         case OscillatorWaveform::PhysicalModel: return "physicalmodel";
         case OscillatorWaveform::Sampler: return "sampler";
+        case OscillatorWaveform::ModalResonator: return "modalresonator";
     }
     return "saw";
 }
@@ -1247,6 +1430,7 @@ std::optional<OscillatorWaveform> parse_waveform(std::string_view value) {
     if (value == "granular") return OscillatorWaveform::Granular;
     if (value == "physicalmodel") return OscillatorWaveform::PhysicalModel;
     if (value == "sampler") return OscillatorWaveform::Sampler;
+    if (value == "modalresonator") return OscillatorWaveform::ModalResonator;
     return std::nullopt;
 }
 
@@ -1300,6 +1484,24 @@ std::optional<PhysicalExcitation> parse_physical_excitation(std::string_view val
     if (value == "strike") return PhysicalExcitation::Strike;
     if (value == "bow") return PhysicalExcitation::Bow;
     if (value == "blow") return PhysicalExcitation::Blow;
+    return std::nullopt;
+}
+
+// Phase 2: modal resonator excitation source tokens.
+std::string_view modal_excitation_token(ExcitationSource e) noexcept {
+    switch (e) {
+        case ExcitationSource::Impulse: return "impulse";
+        case ExcitationSource::NoiseBurst: return "noiseburst";
+        case ExcitationSource::Oscillator: return "oscillator";
+        case ExcitationSource::SampleTransient: return "sampletransient";
+    }
+    return "impulse";
+}
+std::optional<ExcitationSource> parse_modal_excitation(std::string_view value) noexcept {
+    if (value == "impulse") return ExcitationSource::Impulse;
+    if (value == "noiseburst") return ExcitationSource::NoiseBurst;
+    if (value == "oscillator") return ExcitationSource::Oscillator;
+    if (value == "sampletransient") return ExcitationSource::SampleTransient;
     return std::nullopt;
 }
 
@@ -1656,6 +1858,26 @@ float arpeggiator_step_beats(ArpeggiatorDivision division) noexcept {
 
 } // namespace
 
+ModalResonatorParameters ModalResonatorParameters::make_default() {
+    ModalResonatorParameters params;
+    params.modeCount = 12;
+    params.baseFrequency = 0.0F;   // follow the played note
+    params.damping = 1.0F;
+    params.inharmonicity = 0.0F;
+    params.brightness = 0.5F;      // flat tilt
+    params.excitation = ExcitationSource::Impulse;
+    params.excitationLevel = 1.0F;
+    params.noiseBurstMilliseconds = 40.0F;
+    params.transientMilliseconds = 60.0F;
+    for (std::size_t m = 0; m < params.modes.size(); ++m) {
+        auto& mode = params.modes[m];
+        mode.frequencyRatio = static_cast<float>(m + 1U);              // harmonic series
+        mode.decaySeconds = 2.5F / (1.0F + 0.35F * static_cast<float>(m));
+        mode.gain = 1.0F / (1.0F + 0.5F * static_cast<float>(m));      // gentle high rolloff
+    }
+    return params;
+}
+
 std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept {
     switch (waveform) {
         case OscillatorWaveform::Sine: return "Sine";
@@ -1673,8 +1895,18 @@ std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept 
         case OscillatorWaveform::Granular: return "Granular";
         case OscillatorWaveform::PhysicalModel: return "Physical Model";
         case OscillatorWaveform::Sampler: return "Sampler";
+        case OscillatorWaveform::ModalResonator: return "Modal Resonator";
     }
     return "Saw";
+}
+std::string_view modal_excitation_source_name(ExcitationSource source) noexcept {
+    switch (source) {
+        case ExcitationSource::Impulse: return "Impulse";
+        case ExcitationSource::NoiseBurst: return "Noise Burst";
+        case ExcitationSource::Oscillator: return "Oscillator";
+        case ExcitationSource::SampleTransient: return "Sample Transient";
+    }
+    return "Impulse";
 }
 std::string_view filter_topology_name(FilterTopology topology) noexcept {
     switch (topology) {
@@ -3683,6 +3915,14 @@ struct Synthesizer::Impl {
                 const float width = 0.18F + 0.22F * std::abs(osc.physicalPickupPosition - 0.5F);
                 stereoLeft = sample * (0.70710678F + width * 0.25F);
                 stereoRight = sample * (0.70710678F - width * 0.25F);
+            } else if (osc.waveform == OscillatorWaveform::ModalResonator) {
+                // Phase 2: modal resonator bank (even modes left, odd modes right).
+                const auto resonatorStereo = modal_resonator::process(
+                    v.modalResonators[i], osc.modalResonator, frequency, v.velocity, v.keyHeld,
+                    parameters.sampleBank, sampleRate);
+                stereoLeft = resonatorStereo.first * 0.70710678F;
+                stereoRight = resonatorStereo.second * 0.70710678F;
+                sample = (resonatorStereo.first + resonatorStereo.second) * 0.5F;
             } else {
                 const float divergence = clampf(osc.stereoDivergence, 0.0F, 1.0F);
                 if (divergence > 0.001F) {
@@ -3717,7 +3957,8 @@ struct Synthesizer::Impl {
                 ? std::clamp<std::uint8_t>(parameters.unison.voices, 1U, static_cast<std::uint8_t>(kSynthUnisonMax)) : 1U;
             if (osc.waveform == OscillatorWaveform::Noise || osc.waveform == OscillatorWaveform::SuperSaw ||
                 osc.waveform == OscillatorWaveform::Sample || osc.waveform == OscillatorWaveform::Granular ||
-                osc.waveform == OscillatorWaveform::PhysicalModel || osc.waveform == OscillatorWaveform::Sampler)
+                osc.waveform == OscillatorWaveform::PhysicalModel || osc.waveform == OscillatorWaveform::Sampler ||
+                osc.waveform == OscillatorWaveform::ModalResonator)
                 unisonVoices = 1U;
             for (std::uint8_t copy = 1U; copy < unisonVoices; ++copy) {
                 const float centered = static_cast<float>(copy) - 0.5F * static_cast<float>(unisonVoices - 1U);
@@ -3742,7 +3983,8 @@ struct Synthesizer::Impl {
             if (osc.subOscillatorLevel > 0.0F && osc.waveform != OscillatorWaveform::Sample &&
                 osc.waveform != OscillatorWaveform::Granular &&
                 osc.waveform != OscillatorWaveform::PhysicalModel &&
-                osc.waveform != OscillatorWaveform::Sampler) {
+                osc.waveform != OscillatorWaveform::Sampler &&
+                osc.waveform != OscillatorWaveform::ModalResonator) {
                 const unsigned octaves = std::clamp<unsigned>(osc.subOscillatorOctaves, 1U, 3U);
                 const float subIncrement = increment / static_cast<float>(1U << octaves);
                 const float sub = bandlimited_pulse(v.subPhases[i], subIncrement, 0.5F) *
@@ -3769,7 +4011,8 @@ struct Synthesizer::Impl {
             const bool intrinsicStereo = osc.waveform == OscillatorWaveform::Sample ||
                                          osc.waveform == OscillatorWaveform::Granular ||
                                          osc.waveform == OscillatorWaveform::PhysicalModel ||
-                                         osc.waveform == OscillatorWaveform::Sampler;
+                                         osc.waveform == OscillatorWaveform::Sampler ||
+                                         osc.waveform == OscillatorWaveform::ModalResonator;
             if (intrinsicStereo) {
                 left += stereoLeft * panLeft * 1.41421356F;
                 right += stereoRight * panRight * 1.41421356F;
@@ -4681,8 +4924,24 @@ bool SynthPreset::validate(std::string* error) const {
             !in_range(osc.physicalThroatQ, 0.5F, 8.0F) ||
             !in_range(osc.physicalBoreTaper, 0.0F, 1.0F) ||
             !in_range(osc.physicalPressureToBreath, 0.0F, 1.5F) ||
-            !in_range(osc.physicalVelocityToEmbouchure, 0.0F, 1.0F))
+            !in_range(osc.physicalVelocityToEmbouchure, 0.0F, 1.0F) ||
+            // Phase 2: modal resonator
+            osc.modalResonator.modeCount < 1U || osc.modalResonator.modeCount > kModalResonatorMaxModes ||
+            !in_range(osc.modalResonator.baseFrequency, 0.0F, 20000.0F) ||
+            !in_range(osc.modalResonator.damping, 0.01F, 8.0F) ||
+            !in_range(osc.modalResonator.inharmonicity, 0.0F, 1.0F) ||
+            !in_range(osc.modalResonator.brightness, 0.0F, 1.0F) ||
+            !in_range(osc.modalResonator.excitationLevel, 0.0F, 4.0F) ||
+            !in_range(osc.modalResonator.noiseBurstMilliseconds, 1.0F, 2000.0F) ||
+            !in_range(osc.modalResonator.transientMilliseconds, 1.0F, 2000.0F))
             return fail("invalid oscillator parameters");
+        for (std::size_t m = 0; m < osc.modalResonator.modes.size(); ++m) {
+            const auto& resonatorMode = osc.modalResonator.modes[m];
+            if (!in_range(resonatorMode.frequencyRatio, 0.01F, 64.0F) ||
+                !in_range(resonatorMode.decaySeconds, 0.005F, 60.0F) ||
+                !in_range(resonatorMode.gain, 0.0F, 4.0F))
+                return fail("invalid oscillator parameters");
+        }
     }
     if (!in_range(filter.cutoffHertz, 18.0F, 24000.0F) || !in_range(filter.resonance, 0.0F, 1.0F) ||
         !in_range(filter.envelopeAmountOctaves, -12.0F, 12.0F) || !in_range(filter.keyTrack, -2.0F, 2.0F) ||
@@ -4983,7 +5242,21 @@ std::string SynthPreset::serialize() const {
             << prefix << "physicalThroatQ=" << osc.physicalThroatQ << '\n'
             << prefix << "physicalBoreTaper=" << osc.physicalBoreTaper << '\n'
             << prefix << "physicalPressureToBreath=" << osc.physicalPressureToBreath << '\n'
-            << prefix << "physicalVelocityToEmbouchure=" << osc.physicalVelocityToEmbouchure << '\n';
+            << prefix << "physicalVelocityToEmbouchure=" << osc.physicalVelocityToEmbouchure << '\n'
+            << prefix << "modalExcitation=" << modal_excitation_token(osc.modalResonator.excitation) << '\n'
+            << prefix << "modalModeCount=" << static_cast<unsigned>(osc.modalResonator.modeCount) << '\n'
+            << prefix << "modalBaseFrequency=" << osc.modalResonator.baseFrequency << '\n'
+            << prefix << "modalDamping=" << osc.modalResonator.damping << '\n'
+            << prefix << "modalInharmonicity=" << osc.modalResonator.inharmonicity << '\n'
+            << prefix << "modalBrightness=" << osc.modalResonator.brightness << '\n'
+            << prefix << "modalExcitationLevel=" << osc.modalResonator.excitationLevel << '\n'
+            << prefix << "modalNoiseBurstMs=" << osc.modalResonator.noiseBurstMilliseconds << '\n'
+            << prefix << "modalTransientMs=" << osc.modalResonator.transientMilliseconds << '\n';
+        for (std::size_t m = 0; m < osc.modalResonator.modes.size(); ++m) {
+            const auto& resonatorMode = osc.modalResonator.modes[m];
+            out << prefix << "modalMode" << m << '=' << resonatorMode.frequencyRatio << ','
+                << resonatorMode.decaySeconds << ',' << resonatorMode.gain << '\n';
+        }
     }
     for (std::size_t i = 0; i < arpeggiator.steps.size(); ++i) {
         const auto& step = arpeggiator.steps[i];
@@ -5395,6 +5668,31 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (field == "physicalBoreTaper") parsed = readFloat(osc.physicalBoreTaper);
             else if (field == "physicalPressureToBreath") parsed = readFloat(osc.physicalPressureToBreath);
             else if (field == "physicalVelocityToEmbouchure") parsed = readFloat(osc.physicalVelocityToEmbouchure);
+            else if (field == "modalExcitation") { const auto v = parse_modal_excitation(value); parsed = v.has_value(); if (v) osc.modalResonator.excitation = *v; }
+            else if (field == "modalModeCount") { unsigned v = 0; parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 32U; if (parsed) osc.modalResonator.modeCount = static_cast<std::uint8_t>(v); }
+            else if (field == "modalBaseFrequency") parsed = readFloat(osc.modalResonator.baseFrequency);
+            else if (field == "modalDamping") parsed = readFloat(osc.modalResonator.damping);
+            else if (field == "modalInharmonicity") parsed = readFloat(osc.modalResonator.inharmonicity);
+            else if (field == "modalBrightness") parsed = readFloat(osc.modalResonator.brightness);
+            else if (field == "modalExcitationLevel") parsed = readFloat(osc.modalResonator.excitationLevel);
+            else if (field == "modalNoiseBurstMs") parsed = readFloat(osc.modalResonator.noiseBurstMilliseconds);
+            else if (field == "modalTransientMs") parsed = readFloat(osc.modalResonator.transientMilliseconds);
+            else if (field.starts_with("modalMode")) {
+                // "modalModeCount" is matched above; this branch handles "modalMode<m>=ratio,decay,gain".
+                std::size_t m = 0;
+                recognized = parse_number<std::size_t>(field.substr(9U), m) && m < kModalResonatorMaxModes;
+                if (recognized) {
+                    const std::size_t c1 = value.find(',');
+                    const std::size_t c2 = c1 == std::string_view::npos ? c1 : value.find(',', c1 + 1U);
+                    float ratio = 0.0F; float decay = 0.0F; float gain = 0.0F;
+                    parsed = c1 != std::string_view::npos && c2 != std::string_view::npos &&
+                             c2 + 1U < value.size() &&
+                             parse_number<float>(value.substr(0, c1), ratio) &&
+                             parse_number<float>(value.substr(c1 + 1U, c2 - c1 - 1U), decay) &&
+                             parse_number<float>(value.substr(c2 + 1U), gain);
+                    if (parsed) osc.modalResonator.modes[m] = ModalResonatorMode{ratio, decay, gain};
+                }
+            }
             else recognized = false;
         }
         if (!recognized && key.starts_with("arp.step")) {

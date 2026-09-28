@@ -35,6 +35,7 @@ inline constexpr std::size_t kSynthSampleMaxFrames = 16384;
 inline constexpr std::size_t kSynthGrainsPerOscillator = 8;
 inline constexpr std::size_t kPhysicalModelMaxDelay = 4096;
 inline constexpr std::size_t kPhysicalModelMaxModes = 16;
+inline constexpr std::size_t kModalResonatorMaxModes = 32;
 inline constexpr std::uint32_t kDefaultSynthSampleRate = 48000;
 
 enum class OscillatorWaveform : std::uint8_t {
@@ -53,6 +54,7 @@ enum class OscillatorWaveform : std::uint8_t {
     Granular,
     PhysicalModel,
     Sampler,  // Phase 2: dedicated sampler generator (preset-level SamplerParameters)
+    ModalResonator,  // Phase 2: bank of damped modal resonators (SYN-011b)
 };
 
 // Phase 2: sampler playback mode and direction.
@@ -88,6 +90,48 @@ enum class PhysicalDriver : std::uint8_t {
     Reed,       // clarinet, sax, oboe (single/double reed)
     Lip,        // trumpet, trombone, horn (lip reed)
     Jet,        // flute, recorder, organ flue
+};
+
+// Phase 2: what strikes the modal resonator bank at note-on.
+enum class ExcitationSource : std::uint8_t {
+    Impulse,        // one-shot displacement of every mode (classic modal synthesis)
+    NoiseBurst,     // short burst of white noise injected through the mode inputs
+    Oscillator,     // dedicated internal sawtooth exciter, continuous while the key is held
+    SampleTransient,// attack portion of the preset's resident sample bank (falls back to noise)
+};
+
+struct ModalResonatorMode {
+    float frequencyRatio{1.0F};  // partial ratio relative to the base frequency
+    float decaySeconds{1.0F};     // per-mode decay time constant (envelope ~ e^(-t/decay))
+    float gain{1.0F};             // per-mode gain before the brightness tilt
+};
+
+// Phase 2: modal resonator voice generator parameters (SYN-011b). Each mode is a
+// damped 2-pole resonator; the output is the gain-weighted sum of the modes.
+//
+// Formulas (all defined here so UI and DSP agree):
+//   stretched ratio: ratio' = ratio * sqrt(1 + inharmonicity * (ratio*ratio - 1))
+//     inharmonicity is clamped to [0, 1]; ratio == 1 is untouched for any value.
+//   effective decay: tau_m = clamp(mode.decaySeconds, 0.005, 60) * clamp(damping, 0.01, 8)
+//     damping == 1 leaves decay times unchanged; < 1 shortens, > 1 lengthens.
+//     A mode's envelope decays as e^(-t/tau_m); its -60 dB time is tau_m * ln(1000).
+//   brightness tilt: gain_m = mode.gain * (m+1)^(2*(brightness - 0.5)), m = 0-based index
+//     brightness is clamped to [0, 1]; 0.5 is flat, 0 darkens, 1 brightens.
+//   baseFrequency == 0 means "follow the played note" (MIDI pitch is authoritative);
+//     otherwise the bank is fixed at baseFrequency Hz.
+struct ModalResonatorParameters {
+    std::uint8_t modeCount{8};
+    std::array<ModalResonatorMode, kModalResonatorMaxModes> modes{};
+    float baseFrequency{};       // Hz; 0 = follow the played note
+    float damping{1.0F};         // multiplier applied to every mode's decay time
+    float inharmonicity{};       // partial stretch; 0 = harmonic
+    float brightness{0.5F};      // gain tilt across mode index; 0.5 = flat
+    ExcitationSource excitation{ExcitationSource::Impulse};
+    float excitationLevel{1.0F}; // overall excitation energy
+    float noiseBurstMilliseconds{40.0F};  // NoiseBurst window length
+    float transientMilliseconds{60.0F};   // SampleTransient window length
+
+    static ModalResonatorParameters make_default();
 };
 
 enum class FilterMode : std::uint8_t { LowPass, BandPass, HighPass, Notch };
@@ -250,6 +294,9 @@ struct OscillatorParameters {
     float physicalBoreTaper{0.0F};          // 0=cylindrical, 1=conical (sax-like)
     float physicalPressureToBreath{0.90F};  // aftertouch/pressure -> continuous breath
     float physicalVelocityToEmbouchure{0.35F};
+
+    // Phase 2: modal resonator (waveform == ModalResonator)
+    ModalResonatorParameters modalResonator = ModalResonatorParameters::make_default();
 };
 
 struct FilterParameters {
@@ -660,6 +707,7 @@ private:
 };
 
 [[nodiscard]] std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept;
+[[nodiscard]] std::string_view modal_excitation_source_name(ExcitationSource source) noexcept;
 [[nodiscard]] std::string_view filter_topology_name(FilterTopology topology) noexcept;
 [[nodiscard]] std::string_view filter_mode_name(FilterMode mode) noexcept;
 [[nodiscard]] std::string_view arpeggiator_mode_name(ArpeggiatorMode mode) noexcept;

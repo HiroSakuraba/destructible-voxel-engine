@@ -286,6 +286,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/patch_genetics.cpp
         src/audio/attractor.cpp
         src/audio/generative_conductor.cpp
+        src/audio/granular.cpp  # Phase 4: granular generator core (SYN-014)
         src/audio/wavetable.cpp
         src/audio/wavetable_builder.cpp
         src/audio/physics_modulation.cpp
@@ -1752,6 +1753,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_synth_sampler_tests tests/test_audio_synth_sampler.cpp)
         target_link_libraries(dve_audio_synth_sampler_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_sampler_tests COMMAND dve_audio_synth_sampler_tests)
+        add_executable(dve_audio_synth_granular_tests tests/test_audio_synth_granular.cpp)
+        target_link_libraries(dve_audio_synth_granular_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_granular_tests COMMAND dve_audio_synth_granular_tests)
         add_executable(dve_audio_synth_resonator_tests tests/test_audio_synth_resonator.cpp)
         target_link_libraries(dve_audio_synth_resonator_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_resonator_tests COMMAND dve_audio_synth_resonator_tests)

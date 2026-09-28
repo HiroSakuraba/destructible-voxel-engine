@@ -298,23 +298,40 @@ void test_granular_features_and_budget() {
     grain.grainPitchQuantizeSemitones = 7.0F;
     grain.grainDensityVelocity = 0.5F;
     grain.grainDensityTimbre = 0.25F;
+    // Phase 4: the dedicated granular engine (SYN-014) reads the resident
+    // sample bank with preset-level GranularParameters. Stress the fixed
+    // per-voice grain pool (64) so steals are exercised.
+    preset.sampleBank.enabled = true;
+    preset.sampleBank.sampleRate = 48000U;
+    preset.sampleBank.rootNote = 60;
+    preset.sampleBank.frameCount = 2048U;
+    for (std::uint32_t i = 0; i < 2048U; ++i) {
+        const float phase = static_cast<float>(i) / 48000.0F;
+        preset.sampleBank.samples[i] =
+            0.75F * std::sin(2.0F * 3.1415926535F * 220.0F * phase);
+    }
+    preset.granular.enabled = true;
+    preset.granular.densityHz = 600.0F;
+    preset.granular.durationMs = 400.0F;
+    preset.granular.gain = 0.9F;
+    preset.granular.positionJitter01 = 0.2F;
     synth.set_preset(preset);
-    std::string error;
-    require(synth.set_sample_map(resident_round_robin_map(), &error), error.c_str());
     for (std::uint8_t note = 48U; note < 64U; ++note)
         require(synth.note_on(note, 0.9F), "granular stress note-on failed");
-    std::vector<float> audio(8192U * 2U);
+    std::vector<float> audio(16384U * 2U);
     synth.render(audio);
     const auto profiler = synth.granular_profiler();
     require(rms(audio) > 0.005, "production granular path rendered silence");
     require(profiler.requestedGrains > 0U && profiler.admittedGrains > 0U,
             "granular profiler did not count requested/admitted grains");
-    require(profiler.grainMisses > 0U,
-            "voice-level grain budget did not shed background grains under overload");
-    require(profiler.maximumActiveGrains <= 96U,
-            "granular overload exceeded the 16-voice quality-shedding budget");
+    require(profiler.grainSteals > 0U,
+            "fixed grain pool did not steal grains under overload");
+    require(profiler.maximumActiveGrains > 0U &&
+                profiler.maximumActiveGrains <= 16U * 64U,
+            "granular overload exceeded the per-voice pool budget");
 
     const auto path = std::filesystem::temp_directory_path() / "v127_granular_fields.dvesynth";
+    std::string error;
     require(preset.save(path, &error), error.c_str());
     const auto loaded = SynthPreset::load(path, &error);
     require(loaded.has_value(), error.c_str());

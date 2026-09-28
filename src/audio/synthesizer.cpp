@@ -212,6 +212,7 @@ struct RealtimePreset {
     RealtimeWavetable wavetable{};
     RealtimeSampleBank sampleBank{};
     SamplerParameters sampler{};  // Phase 2: sampler generator parameters
+    GranularParameters granular{};  // Phase 4: granular generator parameters (SYN-014)
     MpeParameters mpe{};
     RealtimeMicrotuning microtuning{};
     UnisonParameters unison{};
@@ -291,6 +292,7 @@ RealtimePreset realtime_preset(const SynthPreset& source) noexcept {
     result.sampleBank.frameCount = source.sampleBank.frameCount;
     std::copy_n(source.sampleBank.samples.begin(), source.sampleBank.frameCount, result.sampleBank.samples.begin());
     result.sampler = source.sampler;  // Phase 2: SamplerParameters is trivially copyable
+    result.granular = source.granular;  // Phase 4: GranularParameters is trivially copyable
     result.wavetable.enabled = source.wavetable.enabled;
     result.wavetable.frameCount = source.wavetable.frameCount;
     const std::size_t baseStride = kWavetableFrameCount * kWavetableSampleCount;
@@ -669,17 +671,6 @@ struct AnalogFilter {
     }
 };
 
-struct GrainState {
-    bool active{};
-    float position{};
-    float increment{1.0F};
-    float age{};
-    float duration{1.0F};
-    float pan{};
-    float panEnd{};
-    std::uint8_t zoneIndex{kInvalidSampleZone};
-};
-
 struct PhysicalModelState {
     std::array<float, kPhysicalModelMaxDelay> delay{};
     std::size_t writeIndex{};
@@ -762,8 +753,7 @@ struct Voice {
     std::array<bool, kSynthOscillatorCount> releaseSampleActive{};
     std::uint8_t sampleAttackZone{kInvalidSampleZone};
     std::uint8_t sampleReleaseZone{kInvalidSampleZone};
-    std::array<float, kSynthOscillatorCount> grainCountdown{};
-    std::array<std::array<GrainState, kSynthGrainsPerOscillator>, kSynthOscillatorCount> grains{};
+    GranularEngine granularEngine{};  // Phase 4: dedicated granular generator (one pool per voice)
     std::array<std::array<float, kSynthUnisonMax - 1U>, kSynthOscillatorCount> unisonPhases{};
     std::array<float, kSynthModulationSlotCount> modulationSmoothing{};
     std::array<bool, kSynthOscillatorCount> oscillatorWrapped{};
@@ -802,8 +792,6 @@ struct Voice {
                 samplerPrimed[i] = false;   // Phase 2: sampler start applied lazily at first render
                 samplerFinished[i] = false;
                 samplerPositions[i] = 0.0F;
-                grainCountdown[i] = 0.0F;
-                for (auto& grain : grains[i]) grain = {};
                 for (std::size_t j = 0; j < auxiliaryPhases[i].size(); ++j)
                     auxiliaryPhases[i][j] = wrap_phase(preset.oscillators[i].phaseOffset + 0.173F * static_cast<float>(j + 1U));
                 for (std::size_t j = 0; j < unisonPhases[i].size(); ++j)
@@ -818,6 +806,11 @@ struct Voice {
             physicalModels[i].initialized = false;
             modalResonators[i].initialized = false;  // Phase 2: re-excite at note-on
         }
+        // Phase 4: fresh granular cloud per note, deterministically seeded from
+        // note/age so identical notes render identical grain sequences.
+        granularEngine.reset();
+        granularEngine.set_seed(0x51ED27B9U ^ (static_cast<std::uint32_t>(newNote) << 16U) ^
+                                static_cast<std::uint32_t>(newAge));
         for (std::size_t i = 0; i < kSynthLfoCount; ++i) {
             if (preset.lfos[i].keySync || retrigger) lfoPhases[i] = wrap_phase(preset.lfos[i].phase);
             lfoNoiseState[i] = 0xA511E9B3U ^ (static_cast<std::uint32_t>(newNote) << 8U) ^
@@ -833,7 +826,7 @@ struct Voice {
         modulationSmoothing.fill(0.0F);
     }
     void release() noexcept { keyHeld = false; sustained = false; amp.note_off(); filterEnvelope.note_off(); }
-    void kill() noexcept { active = false; keyHeld = false; sustained = false; amp.kill(); filterEnvelope.kill(); }
+    void kill() noexcept { active = false; keyHeld = false; sustained = false; amp.kill(); filterEnvelope.kill(); granularEngine.kill_grains(); }
 };
 
 struct DelayLine {
@@ -1839,18 +1832,18 @@ std::optional<ModulationSource> parse_modulation_source(std::string_view value) 
     return std::nullopt;
 }
 std::string_view modulation_destination_token(ModulationDestination destination) noexcept {
-    static constexpr std::array<std::string_view, 42> names{
+    static constexpr std::array<std::string_view, 43> names{
         "none","global_pitch","filter_cutoff","filter_resonance","filter_drive","voice_gain","voice_pan",
         "osc1_pitch","osc2_pitch","osc3_pitch","osc4_pitch","osc5_pitch","osc6_pitch","osc7_pitch","osc8_pitch",
         "osc1_shape","osc2_shape","osc3_shape","osc4_shape","osc5_shape","osc6_shape","osc7_shape","osc8_shape",
         "osc1_pw","osc2_pw","osc3_pw","osc4_pw","osc5_pw","osc6_pw","osc7_pw","osc8_pw",
         "osc1_gain","osc2_gain","osc3_gain","osc4_gain","osc5_gain","osc6_gain","osc7_gain","osc8_gain",
-        "wavetable_pos","morph_amount","sampler_start_pos"};
+        "wavetable_pos","morph_amount","sampler_start_pos","granular_pos"};
     const auto index = static_cast<std::size_t>(destination);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationDestination> parse_modulation_destination(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::SamplerStartPosition); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::GranularPosition); ++i)
         if (modulation_destination_token(static_cast<ModulationDestination>(i)) == value) return static_cast<ModulationDestination>(i);
     return std::nullopt;
 }
@@ -2362,7 +2355,6 @@ struct Synthesizer::Impl {
     std::atomic<std::uint64_t> profilerArpSteps{};
     std::atomic<std::uint32_t> profilerActiveVoices{};
     std::atomic<std::uint32_t> profilerMaximumActiveVoices{};
-    std::uint32_t activeGrains{};
     std::array<Voice, kSynthVoiceCount> voice{};
     std::array<VoiceTelemetry, kSynthVoiceCount> telemetry{};
     std::array<float, 16> pitchBend{};
@@ -2479,17 +2471,6 @@ struct Synthesizer::Impl {
         return *released;
     }
 
-    void retire_voice_grains(Voice& target) noexcept {
-        for (auto& oscillatorGrains : target.grains) {
-            for (GrainState& grain : oscillatorGrains) {
-                if (!grain.active) continue;
-                grain.active = false;
-                if (activeGrains > 0U) --activeGrains;
-            }
-        }
-        activeGrainTelemetry.store(activeGrains, std::memory_order_relaxed);
-    }
-
     void stage_sample_map(SynthSampleMap map) {
         std::lock_guard lock(sampleMapPublishMutex);
         const std::uint64_t generation = controlSampleMapGeneration.fetch_add(1U, std::memory_order_acq_rel) + 1U;
@@ -2508,7 +2489,6 @@ struct Synthesizer::Impl {
         const int pending = pendingSampleMapIndex.exchange(-1, std::memory_order_acq_rel);
         if (pending < 0) return;
         for (Voice& candidate : voice) {
-            retire_voice_grains(candidate);
             candidate.kill();
         }
         activeSampleMapIndex.store(pending, std::memory_order_release);
@@ -2743,24 +2723,18 @@ struct Synthesizer::Impl {
                 sample * gain * std::sqrt(0.5F * (1.0F + pan))};
     }
 
-    [[nodiscard]] bool admit_grain(const Voice& target) noexcept {
-        std::uint32_t activeVoices = 0U;
-        for (const Voice& candidate : voice) if (candidate.active) ++activeVoices;
-        const std::uint32_t globalBudget = activeVoices > 12U ? 96U : (activeVoices > 8U ? 128U : 192U);
-        std::uint32_t voiceGrains = 0U;
-        for (const auto& oscillatorGrains : target.grains)
-            for (const GrainState& grain : oscillatorGrains) if (grain.active) ++voiceGrains;
-        std::uint32_t quota = std::max(2U, globalBudget / std::max(1U, activeVoices));
-        if (target.amp.stage == VoiceStage::Attack || target.amp.stage == VoiceStage::Delay) quota += 2U;
-        return activeGrains < globalBudget && voiceGrains < quota;
-    }
-
-    void note_grain_admitted() noexcept {
-        ++activeGrains;
-        activeGrainTelemetry.store(activeGrains, std::memory_order_relaxed);
-        std::uint32_t observed = maximumActiveGrains.load(std::memory_order_relaxed);
-        while (activeGrains > observed &&
-               !maximumActiveGrains.compare_exchange_weak(observed, activeGrains, std::memory_order_relaxed)) {}
+    // Phase 4: forwards one voice's drained granular counters into the
+    // synth-level profiler atomics (Synthesizer::granular_profiler()).
+    void forward_granular_counters(GranularEngine& engine) noexcept {
+        const GranularCounters drained = engine.drain_counters();
+        if (drained.requestedGrains != 0U)
+            requestedGrains.fetch_add(drained.requestedGrains, std::memory_order_relaxed);
+        if (drained.admittedGrains != 0U)
+            admittedGrains.fetch_add(drained.admittedGrains, std::memory_order_relaxed);
+        if (drained.grainSteals != 0U)
+            grainSteals.fetch_add(drained.grainSteals, std::memory_order_relaxed);
+        if (drained.grainMisses != 0U)
+            grainMisses.fetch_add(drained.grainMisses, std::memory_order_relaxed);
     }
 
     void emit_note(bool on, std::uint8_t channel, std::uint8_t note, std::uint8_t velocity,
@@ -2777,7 +2751,6 @@ struct Synthesizer::Impl {
         profilerVoicesStarted.fetch_add(1U, std::memory_order_relaxed);
         const bool sameNote = target.active && target.channel == channel && target.note == note;
         const bool restart = retrigger || !sameNote;
-        if (restart) retire_voice_grains(target);
         target.start(channel, note, static_cast<float>(velocity) / 127.0F, ++ageCounter, renderFrame,
                      parameters, restart);
         if (restart) assign_sample_zones(target);
@@ -3361,7 +3334,7 @@ struct Synthesizer::Impl {
                     for (ChordTrigger& trigger : chordTriggers) trigger = {};
                     for (Voice& candidate : voice) {
                         if (candidate.channel != channel) continue;
-                        if (message.data1 == 120U) { retire_voice_grains(candidate); candidate.kill(); }
+                        if (message.data1 == 120U) { candidate.kill(); }
                         else { activate_release_samples(candidate); candidate.release(); }
                     }
                 }
@@ -3472,6 +3445,7 @@ struct Synthesizer::Impl {
         float wavetablePosition{};  // Phase 1: added
         float morphAmount{};        // Phase 1: added
         float samplerStartPosition{};  // Phase 2: added (normalized, scaled by sample duration at use)
+        float granularPosition{};  // Phase 4: added (grain source position offset, 0..1 over the bank)
         std::array<float, kSynthOscillatorCount> pitch{};
         std::array<float, kSynthOscillatorCount> shape{};
         std::array<float, kSynthOscillatorCount> pulseWidth{};
@@ -3562,6 +3536,7 @@ struct Synthesizer::Impl {
             else if (slot.destination == ModulationDestination::WavetablePosition) values.wavetablePosition += amount;
             else if (slot.destination == ModulationDestination::MorphAmount) values.morphAmount += amount;
             else if (slot.destination == ModulationDestination::SamplerStartPosition) values.samplerStartPosition += amount;
+            else if (slot.destination == ModulationDestination::GranularPosition) values.granularPosition += amount;
             else if (destination >= static_cast<unsigned>(ModulationDestination::Osc1Pitch) &&
                      destination <= static_cast<unsigned>(ModulationDestination::Osc8Pitch))
                 values.pitch[destination - static_cast<unsigned>(ModulationDestination::Osc1Pitch)] += amount * 24.0F;
@@ -3820,185 +3795,6 @@ struct Synthesizer::Impl {
         return {mono, mono};
     }
 
-    static float grain_window(GrainWindow window, float phase) noexcept {
-        phase = clampf(phase, 0.0F, 1.0F);
-        switch (window) {
-            case GrainWindow::Hann: return 0.5F - 0.5F * fast_sin_phase(phase - 0.25F);
-            case GrainWindow::Triangle: return 1.0F - std::abs(phase * 2.0F - 1.0F);
-            case GrainWindow::Tukey: {
-                constexpr float edge = 0.25F;
-                if (phase < edge) return 0.5F - 0.5F * fast_sin_phase(phase / (edge * 2.0F) - 0.25F);
-                if (phase > 1.0F - edge) return 0.5F - 0.5F * fast_sin_phase((1.0F - phase) / (edge * 2.0F) - 0.25F);
-                return 1.0F;
-            }
-        }
-        return 1.0F;
-    }
-
-    std::pair<float, float> render_granular_oscillator(Voice& v, std::size_t oscillatorIndex,
-                                                        const OscillatorParameters& osc,
-                                                        float frequency) noexcept {
-        const SynthSampleMap* map = active_sample_map();
-        const bool mapped = map != nullptr && v.sampleAttackZone != kInvalidSampleZone;
-        if (!mapped && (!parameters.sampleBank.enabled || parameters.sampleBank.frameCount < 2U)) return {};
-
-        auto random01 = [&]() noexcept {
-            std::uint32_t& state = v.noiseState[oscillatorIndex];
-            state ^= state << 13U; state ^= state >> 17U; state ^= state << 5U;
-            return static_cast<float>(state & 0x00FFFFFFU) / static_cast<float>(0x01000000U);
-        };
-        float& countdown = v.grainCountdown[oscillatorIndex];
-        countdown -= 1.0F;
-        if (countdown <= 0.0F) {
-            requestedGrains.fetch_add(1U, std::memory_order_relaxed);
-            const float velocityMod = 1.0F + clampf(osc.grainDensityVelocity, -1.0F, 1.0F) *
-                (v.velocity * 2.0F - 1.0F);
-            const float timbreMod = 1.0F + clampf(osc.grainDensityTimbre, -1.0F, 1.0F) *
-                (v.timbre * 2.0F - 1.0F);
-            const float density = clampf(osc.grainDensityHertz * velocityMod * timbreMod, 0.5F, 240.0F);
-            countdown += sampleRate / density;
-
-            if (!admit_grain(v)) {
-                grainMisses.fetch_add(1U, std::memory_order_relaxed);
-            } else {
-                GrainState* target = nullptr;
-                for (auto& grain : v.grains[oscillatorIndex]) {
-                    if (!grain.active) { target = &grain; break; }
-                }
-                bool stole = false;
-                if (target == nullptr) {
-                    target = &*std::max_element(v.grains[oscillatorIndex].begin(),
-                        v.grains[oscillatorIndex].end(), [](const GrainState& a, const GrainState& b) {
-                            return a.age / std::max(a.duration, 1.0F) < b.age / std::max(b.duration, 1.0F);
-                        });
-                    stole = true;
-                    grainSteals.fetch_add(1U, std::memory_order_relaxed);
-                }
-
-                float pitch = clampf(osc.grainPitchSemitones, -48.0F, 48.0F) +
-                    (random01() * 2.0F - 1.0F) * clampf(osc.grainPitchRandomSemitones, 0.0F, 48.0F);
-                const float quantize = clampf(osc.grainPitchQuantizeSemitones, 0.0F, 24.0F);
-                if (quantize >= 0.01F) pitch = std::round(pitch / quantize) * quantize;
-
-                target->active = true;
-                target->zoneIndex = mapped ? v.sampleAttackZone : kInvalidSampleZone;
-                if (mapped) {
-                    const SampleMapZone& zone = map->zones[v.sampleAttackZone];
-                    const SampleMapSource& source = map->sources[zone.sourceIndex];
-                    const auto [start, end] = sample_zone_bounds(zone, osc);
-                    const float span = std::max(1.0F, end - start);
-                    const float endPosition = last_sample_position(start, end);
-                    const float center = osc.grainFreeze
-                        ? start + clampf(osc.grainPosition, 0.0F, 1.0F) * (endPosition - start)
-                        : clampf(v.sampleMapPositions[oscillatorIndex], start, endPosition);
-                    const float spray = (random01() * 2.0F - 1.0F) *
-                                        clampf(osc.grainSpray, 0.0F, 1.0F) * span;
-                    target->position = clampf(center + spray, start, endPosition);
-                    target->increment = sample_map_pitch_ratio(zone, osc, frequency) *
-                        std::exp2(pitch / 12.0F) * static_cast<float>(source.sampleRate) / sampleRate;
-                    bool reverse = osc.sampleReverse != zone.reverse;
-                    if (random01() < clampf(osc.grainReverseProbability, 0.0F, 1.0F)) reverse = !reverse;
-                    if (reverse) target->increment = -target->increment;
-                    if (!osc.grainFreeze) {
-                        v.sampleMapPositions[oscillatorIndex] +=
-                            sample_map_pitch_ratio(zone, osc, frequency) * 0.25F;
-                        if (v.sampleMapPositions[oscillatorIndex] >= end)
-                            v.sampleMapPositions[oscillatorIndex] = start;
-                    }
-                } else {
-                    const float center = osc.grainFreeze ? osc.grainPosition :
-                        wrap_phase(v.samplePositions[oscillatorIndex] + osc.grainPosition);
-                    const float spray = (random01() * 2.0F - 1.0F) * clampf(osc.grainSpray, 0.0F, 1.0F);
-                    target->position = clampf(center + spray, 0.0F, 1.0F);
-                    target->increment = sample_pitch_ratio(osc, frequency) * std::exp2(pitch / 12.0F) *
-                        static_cast<float>(parameters.sampleBank.sampleRate) / sampleRate /
-                        static_cast<float>(parameters.sampleBank.frameCount - 1U);
-                    bool reverse = osc.sampleReverse;
-                    if (random01() < clampf(osc.grainReverseProbability, 0.0F, 1.0F)) reverse = !reverse;
-                    if (reverse) target->increment = -target->increment;
-                }
-                target->age = 0.0F;
-                target->duration = clampf(osc.grainSizeMilliseconds, 5.0F, 500.0F) * 0.001F * sampleRate;
-                target->pan = (random01() * 2.0F - 1.0F) * clampf(osc.grainStereoSpread, 0.0F, 1.0F);
-                target->panEnd = clampf(target->pan + (random01() * 2.0F - 1.0F) *
-                    clampf(osc.grainStereoMotion, 0.0F, 1.0F), -1.0F, 1.0F);
-                admittedGrains.fetch_add(1U, std::memory_order_relaxed);
-                if (!stole) note_grain_admitted();
-            }
-        }
-        if (!mapped && !osc.grainFreeze) {
-            v.samplePositions[oscillatorIndex] = wrap_phase(v.samplePositions[oscillatorIndex] +
-                sample_pitch_ratio(osc, frequency) / sampleRate * 0.25F);
-        }
-
-        float left = 0.0F;
-        float right = 0.0F;
-        unsigned active = 0U;
-        for (auto& grain : v.grains[oscillatorIndex]) {
-            if (!grain.active) continue;
-            const float phase = grain.age / std::max(grain.duration, 1.0F);
-            bool expired = phase >= 1.0F;
-            float sample{};
-            bool available = false;
-            float zoneGain = 1.0F;
-            float zonePan = 0.0F;
-            if (!expired && grain.zoneIndex != kInvalidSampleZone && map != nullptr) {
-                const SampleMapZone& zone = map->zones[grain.zoneIndex];
-                const auto [start, end] = sample_zone_bounds(zone, osc);
-                expired = grain.position < start || grain.position >= end;
-                if (!expired) {
-                    available = sample_source_linear(*map, zone.sourceIndex, grain.position, sample);
-                    zoneGain = zone.gain;
-                    zonePan = zone.pan;
-                }
-            } else if (!expired) {
-                expired = grain.position < 0.0F || grain.position > 1.0F;
-                if (!expired) {
-                    sample = resident_sample(grain.position);
-                    available = true;
-                }
-            }
-            if (expired || !available) {
-                grain.active = false;
-                if (activeGrains > 0U) --activeGrains;
-                activeGrainTelemetry.store(activeGrains, std::memory_order_relaxed);
-                if (!expired) grainMisses.fetch_add(1U, std::memory_order_relaxed);
-                continue;
-            }
-            float window = grain_window(osc.grainWindow, phase);
-            const float curvature = clampf(osc.grainEnvelopeCurve, 0.25F, 4.0F);
-            if (curvature < 1.0F) {
-                const float opened = std::sqrt(std::max(window, 0.0F));
-                window += (opened - window) * (1.0F - curvature);
-            } else if (curvature <= 2.0F) {
-                const float squared = window * window;
-                window += (squared - window) * (curvature - 1.0F);
-            } else {
-                const float squared = window * window;
-                const float fourth = squared * squared;
-                window = squared + (fourth - squared) * ((curvature - 2.0F) * 0.5F);
-            }
-            const float panPhase = 0.5F - 0.5F * fast_sin_phase(phase * 0.5F + 0.25F);
-            const float pan = clampf(zonePan + grain.pan + (grain.panEnd - grain.pan) * panPhase, -1.0F, 1.0F);
-            const float value = sample * window * zoneGain;
-            left += value * std::sqrt(0.5F * (1.0F - pan));
-            right += value * std::sqrt(0.5F * (1.0F + pan));
-            grain.position += grain.increment;
-            grain.age += 1.0F;
-            ++active;
-        }
-        if (active > 1U) {
-            const float normalization = 1.0F / std::sqrt(static_cast<float>(active));
-            left *= normalization;
-            right *= normalization;
-        }
-        const float velocity = (1.0F - osc.sampleVelocityToGain) + osc.sampleVelocityToGain * v.velocity;
-        left *= velocity;
-        right *= velocity;
-        const auto release = render_release_sample(v, oscillatorIndex, osc, frequency);
-        return {left + release.first, right + release.second};
-    }
-
     bool lower_zone_enabled() const noexcept {
         return parameters.mpe.zoneMode == MpeZoneMode::Lower || parameters.mpe.zoneMode == MpeZoneMode::Dual;
     }
@@ -4041,7 +3837,6 @@ struct Synthesizer::Impl {
         const float amp = v.amp.advance(parameters.ampEnvelope, sampleRate);
         const float filterEnv = v.filterEnvelope.advance(parameters.filter.envelope, sampleRate);
         if (!v.amp.active()) {
-            retire_voice_grains(v);
             v.kill();
             profilerVoicesRetired.fetch_add(1U, std::memory_order_relaxed);
             return {};
@@ -4151,9 +3946,21 @@ struct Synthesizer::Impl {
                 stereoRight = samplerOut.second;
                 sample = (stereoLeft + stereoRight) * 0.70710678F;
             } else if (osc.waveform == OscillatorWaveform::Granular) {
-                const auto granular = render_granular_oscillator(v, i, osc, frequency);
-                stereoLeft = granular.first;
-                stereoRight = granular.second;
+                // Phase 4: dedicated granular generator (SYN-014). Preset-level
+                // parameters; the grain source is the resident sample bank.
+                // An empty/disabled bank renders silence (counted as grain
+                // misses inside the engine, never a crash).
+                auto& engine = v.granularEngine;
+                engine.set_sample_rate(sampleRate);
+                const RealtimeSampleBank& bank = parameters.sampleBank;
+                const GranularSource source{bank.samples.data(),
+                                            bank.enabled ? bank.frameCount : 0U,
+                                            bank.sampleRate};
+                const auto granularOut =
+                    engine.render(source, parameters.granular, mod.granularPosition);
+                forward_granular_counters(engine);
+                stereoLeft = granularOut.first;
+                stereoRight = granularOut.second;
                 sample = (stereoLeft + stereoRight) * 0.70710678F;
             } else if (osc.waveform == OscillatorWaveform::PhysicalModel) {
                 sample = physical::process(v.physicalModels[i], osc, frequency, v.velocity,
@@ -5427,7 +5234,7 @@ bool SynthPreset::validate(std::string* error) const {
         if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.bias, -1.0F, 1.0F) ||
             !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
             static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::SeqPan) ||
-            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::SamplerStartPosition))
+            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::GranularPosition))
             return fail("invalid modulation matrix slot");
     }
     for (float value : macros.values) if (!in_range(value, 0.0F, 1.0F)) return fail("invalid macro value");
@@ -6962,7 +6769,8 @@ void Synthesizer::reset_granular_profiler() noexcept {
     impl_->grainSteals.store(0U, std::memory_order_relaxed);
     impl_->grainMisses.store(0U, std::memory_order_relaxed);
     impl_->samplePageUnderruns.store(0U, std::memory_order_relaxed);
-    impl_->maximumActiveGrains.store(impl_->activeGrains, std::memory_order_relaxed);
+    impl_->maximumActiveGrains.store(impl_->activeGrainTelemetry.load(std::memory_order_relaxed),
+                                    std::memory_order_relaxed);
     impl_->sampleStreamCache.reset_metrics();
 }
 
@@ -7130,6 +6938,16 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
         output[frame * 2U + 1U] = right;
         peakLeft = std::max(peakLeft, std::abs(left)); peakRight = std::max(peakRight, std::abs(right));
         squareLeft += static_cast<double>(left) * left; squareRight += static_cast<double>(right) * right;
+    }
+    // Phase 4: publish granular engine activity once per block (spawn/steal/
+    // miss counters are forwarded per spawn event in the voice path above).
+    std::uint32_t blockActiveGrains = 0U;
+    for (const Voice& blockVoice : impl_->voice) blockActiveGrains += blockVoice.granularEngine.active_grain_count();
+    impl_->activeGrainTelemetry.store(blockActiveGrains, std::memory_order_relaxed);
+    std::uint32_t observedGrainMax = impl_->maximumActiveGrains.load(std::memory_order_relaxed);
+    while (blockActiveGrains > observedGrainMax &&
+           !impl_->maximumActiveGrains.compare_exchange_weak(observedGrainMax, blockActiveGrains,
+                                                             std::memory_order_relaxed)) {
     }
     currentFrame_.store(blockStart + frameCount, std::memory_order_relaxed);
     // Preserve events beyond this render quantum by requeuing them. This is bounded and does

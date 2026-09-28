@@ -15,6 +15,7 @@
 #include "dve/audio/sample_map.hpp"
 #include "dve/audio/sequencer.hpp"
 #include "dve/audio/attractor.hpp"
+#include "dve/audio/granular.hpp"
 #include "dve/audio/synth_profiler.hpp"
 
 namespace dve::audio {
@@ -199,7 +200,8 @@ enum class ModulationDestination : std::uint8_t {
     Osc5PulseWidth, Osc6PulseWidth, Osc7PulseWidth, Osc8PulseWidth,
     Osc1Gain, Osc2Gain, Osc3Gain, Osc4Gain, Osc5Gain, Osc6Gain, Osc7Gain, Osc8Gain,
     WavetablePosition, MorphAmount,  // Phase 1: added
-    SamplerStartPosition  // Phase 2: added (sampler start offset, seconds)
+    SamplerStartPosition,  // Phase 2: added (sampler start offset, seconds)
+    GranularPosition  // Phase 4: added (grain source position, 0..1 over the sample bank)
 };
 
 enum class ChordType : std::uint8_t {
@@ -651,6 +653,7 @@ struct SynthPreset {
     WavetableBank wavetable{};
     SynthSampleBank sampleBank{};
     SamplerParameters sampler{};  // Phase 2: dedicated sampler generator
+    GranularParameters granular{};  // Phase 4: dedicated granular generator (SYN-014)
     MpeParameters mpe{};
     MicrotuningTable microtuning{};
     UnisonParameters unison{};

@@ -53,6 +53,8 @@ set(DVE_JOLT_SOURCE_DIR "" CACHE PATH "Path to a JoltPhysics 5.5.x-5.6.x source 
 set(JOLT_INCLUDE_DIR "" CACHE PATH "Legacy: Jolt checkout root containing Jolt/Jolt.h")
 set(JOLT_LIBRARY "" CACHE FILEPATH "Legacy: built libJolt.a or Jolt.lib")
 set(DVE_JOLT_LEGACY_VERSION "" CACHE STRING "Required version for legacy Jolt include/library pairs (supported: 5.5.x-5.6.x)")
+option(DVE_ENABLE_PRINT_EXPORT "Build the manifold-based watertight print export (STL)" ON)
+set(DVE_MANIFOLD_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/manifold" CACHE PATH "Path to a manifold3d v3.5.x source checkout")
 
 # Geometry product profile. HYBRID is the general-purpose build: destructible voxel objects and
 # ordinary indexed polygon meshes coexist and share materials, transforms, scripting, physics,
@@ -826,6 +828,11 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_v235_foundations_tests tests/test_v235_foundations.cpp)
     target_link_libraries(dve_v235_foundations_tests PRIVATE dve::core)
     add_test(NAME dve_v235_foundations_tests COMMAND dve_v235_foundations_tests)
+    if(TARGET manifold)
+        add_executable(dve_print_export_tests tests/test_print_export.cpp)
+        target_link_libraries(dve_print_export_tests PRIVATE dve::core manifold)
+        add_test(NAME dve_print_export_tests COMMAND dve_print_export_tests)
+    endif()
 
     enable_testing()
     add_executable(dve_camera_system_tests tests/test_camera_system.cpp)
@@ -1417,6 +1424,25 @@ if(DVE_ENABLE_JOLT)
             target_link_libraries(dve_editor_jolt_simulation_smoke PRIVATE dve::editor)
             add_test(NAME dve_editor_jolt_simulation_smoke COMMAND dve_editor_jolt_simulation_smoke)
         endif()
+    endif()
+endif()
+
+# Optional manifold-based watertight print export. Vendored manifold3d lives in
+# third_party/manifold; point DVE_MANIFOLD_SOURCE_DIR elsewhere to use another checkout.
+if(DVE_ENABLE_PRINT_EXPORT)
+    if(NOT EXISTS "${DVE_MANIFOLD_SOURCE_DIR}/CMakeLists.txt")
+        message(WARNING "DVE_ENABLE_PRINT_EXPORT=ON but no manifold3d sources at ${DVE_MANIFOLD_SOURCE_DIR}; print export disabled")
+        set(DVE_ENABLE_PRINT_EXPORT OFF)
+    else()
+        set(MANIFOLD_TEST OFF CACHE BOOL "" FORCE)
+        set(MANIFOLD_PAR OFF CACHE BOOL "" FORCE)
+        set(MANIFOLD_CROSS_SECTION OFF CACHE BOOL "" FORCE)
+        set(MANIFOLD_CBIND OFF CACHE BOOL "" FORCE)
+        set(MANIFOLD_PYBIND OFF CACHE BOOL "" FORCE)
+        add_subdirectory("${DVE_MANIFOLD_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/manifold-build" EXCLUDE_FROM_ALL)
+        target_sources(dve_core PRIVATE src/print_export.cpp)
+        target_link_libraries(dve_core PRIVATE manifold)
+        target_compile_definitions(dve_core PUBLIC DVE_HAVE_MANIFOLD=1)
     endif()
 endif()
 

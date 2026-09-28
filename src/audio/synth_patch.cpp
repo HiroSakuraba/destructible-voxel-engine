@@ -182,6 +182,8 @@ SynthPatchProgram compile_patch(const SynthPreset& preset) {
     w.entry(SynthPatchParam::GranularFreezePosition, granular.freezePosition01); bump();
     w.entry(SynthPatchParam::GranularSmear, granular.smear01); bump();
     w.entry(SynthPatchParam::GranularWidth, granular.width01); bump();
+    w.entry(SynthPatchParam::GranularQuality,
+             static_cast<std::uint32_t>(granular.granularQuality)); bump();
 
     // Patch entry count
     w.bytes[countPos] = static_cast<std::uint8_t>(count);
@@ -346,6 +348,14 @@ std::optional<SynthPreset> load_patch_program(const std::uint8_t* data, std::siz
             case SynthPatchParam::GranularFreezePosition: if (type == 0) readF(preset.granular.freezePosition01); else r.ok = false; break;
             case SynthPatchParam::GranularSmear: if (type == 0) readF(preset.granular.smear01); else r.ok = false; break;
             case SynthPatchParam::GranularWidth: if (type == 0) readF(preset.granular.width01); else r.ok = false; break;
+            case SynthPatchParam::GranularQuality: {
+                if (type != 1) { r.ok = false; break; }
+                const std::uint32_t v = r.u32();
+                // Clamp so a corrupt/out-of-range value can't form an invalid enum.
+                preset.granular.granularQuality =
+                    static_cast<FilterQuality>(v <= 3U ? v : 3U);
+                break;
+            }
             default:
                 // Unknown parameter ID: skip it so newer patches load on older builds.
                 if (type == 0) r.f32();

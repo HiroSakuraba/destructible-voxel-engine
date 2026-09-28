@@ -39,6 +39,7 @@ static SynthPreset make_granular_probe() {
     g.freezePosition01 = 0.0625F;
     g.smear01 = 0.6875F;
     g.width01 = 0.9375F;
+    g.granularQuality = FilterQuality::Eco;
     std::string error;
     if (!preset.validate(&error)) {
         std::printf("probe preset invalid: %s\n", error.c_str());
@@ -66,6 +67,7 @@ static void check_granular_exact(const GranularParameters& a, const GranularPara
     CHECK(a.freezePosition01 == b.freezePosition01);
     CHECK(a.smear01 == b.smear01);
     CHECK(a.width01 == b.width01);
+    CHECK(a.granularQuality == b.granularQuality);
 }
 
 static std::uint32_t crc32_local(const std::uint8_t* data, std::size_t size) noexcept {
@@ -103,7 +105,7 @@ static std::vector<std::uint8_t> strip_granular_entries(const std::vector<std::u
         const std::uint8_t type = p[2];
         const std::size_t size = entry_size(p, type);
         if (size == 0 || p + size > end) { ++g_failures; return {}; }
-        const bool isGranular = id >= 0x0800U && id <= 0x0810U;
+        const bool isGranular = id >= 0x0800U && id <= 0x0811U; // granular block incl. GranularQuality
         if (!isGranular) {
             out.insert(out.end(), p, p + size);
             ++kept;

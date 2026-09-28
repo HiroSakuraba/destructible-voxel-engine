@@ -930,10 +930,24 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                       compact(modal.transientMilliseconds), std::to_string(modal.modeCount),
                       compact(modal.modes[0].frequencyRatio)};
         } else if (osc.waveform == audio::OscillatorWaveform::Granular) {
+            // Phase 4: granular quality tier (also used by the preset-level
+            // filterQuality row below; declared here so the granular values
+            // list above can use it).
+            auto granular_quality_text = [](audio::FilterQuality value) -> std::string_view {
+                switch (value) {
+                    case audio::FilterQuality::Eco: return "Eco";
+                    case audio::FilterQuality::Standard: return "Standard";
+                    case audio::FilterQuality::High: return "High";
+                    case audio::FilterQuality::Offline: return "Offline";
+                }
+                return "Standard";
+            };
             // Phase 4: dedicated granular generator (preset-level GranularParameters).
             const auto& granular = preset.granular;
             labels = {"Granular", "Density Hz", "Duration ms", "Position", "Position jitter",
-                      "Envelope", "Cloud", "Scatter", "Dust", "Freeze", "Smear", "Width"};
+                      "Envelope", "Cloud", "Scatter", "Dust", "Freeze", "Smear", "Width",
+                      "Pitch semitones", "Gain", "Pan scatter", "Reverse prob",
+                      "Freeze position", "Quality"};
             static constexpr std::array<std::string_view, 4> envelopes{
                 "Hann", "Triangle", "Exponential", "Planck"};
             values = {granular.enabled ? "On" : "Off", compact(granular.densityHz, 1),
@@ -942,9 +956,13 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                       std::string(envelopes[static_cast<std::size_t>(granular.envelopeShape)]),
                       compact(granular.cloud01), compact(granular.scatter01),
                       compact(granular.dust01), compact(granular.freeze01),
-                      compact(granular.smear01), compact(granular.width01)};
+                      compact(granular.smear01), compact(granular.width01),
+                      compact(granular.pitchSemitones, 0), compact(granular.gain),
+                      compact(granular.panScatter01), compact(granular.reverseProbability01),
+                      compact(granular.freezePosition01),
+                      std::string(granular_quality_text(granular.granularQuality))};
         }
-        // Other waveforms only define the original 10 advanced rows; the two
+        // Other waveforms only define the original 10 advanced rows; the eight
         // extra rows are the Phase 4 granular section.
         const std::size_t advancedRowCount =
             osc.waveform == audio::OscillatorWaveform::Granular

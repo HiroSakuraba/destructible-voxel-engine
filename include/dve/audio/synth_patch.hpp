@@ -173,8 +173,7 @@ enum class SynthPatchParam : std::uint16_t {
     GranularFreezePosition = 0x080E,
     GranularSmear = 0x080F,
     GranularWidth = 0x0810,
-    // Worker 3 (stereo-quality topic) may append a GranularQuality key after
-    // GranularWidth when that field lands in GranularParameters.
+    GranularQuality = 0x0811,
 };
 
 struct SynthPatchProgram {

@@ -468,6 +468,12 @@ void EditorSynthPanel::adjust_oscillator_advanced(std::size_t index, int directi
             case 9: granular.freeze01 = stepped(granular.freeze01, 0.05F, 0.0F, 1.0F, direction); break;
             case 10: granular.smear01 = stepped(granular.smear01, 0.05F, 0.0F, 1.0F, direction); break;
             case 11: granular.width01 = stepped(granular.width01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 12: granular.pitchSemitones = stepped(granular.pitchSemitones, 1.0F, -48.0F, 48.0F, direction); break;
+            case 13: granular.gain = stepped(granular.gain, 0.05F, 0.0F, 2.0F, direction); break;
+            case 14: granular.panScatter01 = stepped(granular.panScatter01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 15: granular.reverseProbability01 = stepped(granular.reverseProbability01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 16: granular.freezePosition01 = stepped(granular.freezePosition01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 17: granular.granularQuality = cycle_enum(granular.granularQuality, 4U, direction); break;
             default: return;
         }
     } else {

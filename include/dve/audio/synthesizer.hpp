@@ -52,7 +52,12 @@ enum class OscillatorWaveform : std::uint8_t {
     Sample,
     Granular,
     PhysicalModel,
+    Sampler,  // Phase 2: dedicated sampler generator (preset-level SamplerParameters)
 };
+
+// Phase 2: sampler playback mode and direction.
+enum class SamplerPlaybackMode : std::uint8_t { OneShot, Loop };
+enum class SamplerDirection : std::uint8_t { Forward, Reverse };
 
 enum class PhysicalModelType : std::uint8_t {
     WaveguideString,
@@ -132,7 +137,8 @@ enum class ModulationDestination : std::uint8_t {
     Osc1PulseWidth, Osc2PulseWidth, Osc3PulseWidth, Osc4PulseWidth,
     Osc5PulseWidth, Osc6PulseWidth, Osc7PulseWidth, Osc8PulseWidth,
     Osc1Gain, Osc2Gain, Osc3Gain, Osc4Gain, Osc5Gain, Osc6Gain, Osc7Gain, Osc8Gain,
-    WavetablePosition, MorphAmount  // Phase 1: added
+    WavetablePosition, MorphAmount,  // Phase 1: added
+    SamplerStartPosition  // Phase 2: added (sampler start offset, seconds)
 };
 
 enum class ChordType : std::uint8_t {
@@ -306,6 +312,24 @@ struct SynthSampleBank {
     std::uint64_t contentHash{};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
+};
+
+// Phase 2: sampler voice generator. Playback reads from the shared preset
+// sample bank (SynthSampleBank) — the same resident buffer the Sample
+// oscillator uses. Asset loading and resampling occur on the control thread;
+// the render path only reads the cooked bank. loopStart/loopEnd are in
+// seconds and clamped to the sample duration at render time.
+struct SamplerParameters {
+    bool enabled{true};
+    std::uint8_t sampleIndex{};  // Selects within the shared preset sample bank (single sample today).
+    SamplerPlaybackMode playbackMode{SamplerPlaybackMode::OneShot};
+    SamplerDirection direction{SamplerDirection::Forward};
+    float loopStartSeconds{};
+    float loopEndSeconds{1.0F};
+    float loopCrossfadeSeconds{0.005F};
+    bool pitchTracking{true};
+    float startOffsetSeconds{};
+    float gain{0.8F};
 };
 
 struct MpeParameters {
@@ -482,6 +506,7 @@ struct SynthPreset {
     std::array<MidiLearnMapping, kSynthMidiLearnCount> midiLearn{};
     WavetableBank wavetable{};
     SynthSampleBank sampleBank{};
+    SamplerParameters sampler{};  // Phase 2: dedicated sampler generator
     MpeParameters mpe{};
     MicrotuningTable microtuning{};
     UnisonParameters unison{};
@@ -644,6 +669,8 @@ private:
 [[nodiscard]] std::string_view lfo_waveform_name(LfoWaveform waveform) noexcept;
 [[nodiscard]] std::string_view modulation_source_name(ModulationSource source) noexcept;
 [[nodiscard]] std::string_view modulation_destination_name(ModulationDestination destination) noexcept;
+[[nodiscard]] std::string_view sampler_playback_mode_name(SamplerPlaybackMode mode) noexcept;
+[[nodiscard]] std::string_view sampler_direction_name(SamplerDirection direction) noexcept;
 
 [[nodiscard]] std::optional<MicrotuningTable> import_scala_tuning(
     const std::filesystem::path& scalaPath,

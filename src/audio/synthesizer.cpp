@@ -195,6 +195,7 @@ struct RealtimePreset {
     std::array<MidiLearnMapping, kSynthMidiLearnCount> midiLearn{};
     RealtimeWavetable wavetable{};
     RealtimeSampleBank sampleBank{};
+    SamplerParameters sampler{};  // Phase 2: sampler generator parameters
     MpeParameters mpe{};
     RealtimeMicrotuning microtuning{};
     UnisonParameters unison{};
@@ -272,6 +273,7 @@ RealtimePreset realtime_preset(const SynthPreset& source) noexcept {
     result.sampleBank.rootNote = source.sampleBank.rootNote;
     result.sampleBank.frameCount = source.sampleBank.frameCount;
     std::copy_n(source.sampleBank.samples.begin(), source.sampleBank.frameCount, result.sampleBank.samples.begin());
+    result.sampler = source.sampler;  // Phase 2: SamplerParameters is trivially copyable
     result.wavetable.enabled = source.wavetable.enabled;
     result.wavetable.frameCount = source.wavetable.frameCount;
     const std::size_t baseStride = kWavetableFrameCount * kWavetableSampleCount;
@@ -602,6 +604,9 @@ struct Voice {
     std::array<float, kSynthOscillatorCount> samplePositions{};
     std::array<float, kSynthOscillatorCount> sampleMapPositions{};
     std::array<float, kSynthOscillatorCount> releaseSamplePositions{};
+    std::array<float, kSynthOscillatorCount> samplerPositions{};  // Phase 2: frame position
+    std::array<bool, kSynthOscillatorCount> samplerPrimed{};      // Phase 2: start offset applied
+    std::array<bool, kSynthOscillatorCount> samplerFinished{};    // Phase 2: one-shot reached end
     std::array<bool, kSynthOscillatorCount> sampleFinished{};
     std::array<bool, kSynthOscillatorCount> releaseSampleActive{};
     std::uint8_t sampleAttackZone{kInvalidSampleZone};
@@ -642,6 +647,9 @@ struct Voice {
                 subPhases[i] = wrap_phase(preset.oscillators[i].phaseOffset * 0.5F);
                 samplePositions[i] = preset.oscillators[i].sampleReverse
                     ? preset.oscillators[i].sampleEnd : preset.oscillators[i].sampleStart;
+                samplerPrimed[i] = false;   // Phase 2: sampler start applied lazily at first render
+                samplerFinished[i] = false;
+                samplerPositions[i] = 0.0F;
                 grainCountdown[i] = 0.0F;
                 for (auto& grain : grains[i]) grain = {};
                 for (std::size_t j = 0; j < auxiliaryPhases[i].size(); ++j)
@@ -814,6 +822,7 @@ float oscillator_sample(OscillatorWaveform waveform, float phase, float incremen
         case OscillatorWaveform::Sample:
         case OscillatorWaveform::Granular:
         case OscillatorWaveform::PhysicalModel:
+        case OscillatorWaveform::Sampler:
             return 0.0F;
     }
     return 0.0F;
@@ -1218,6 +1227,7 @@ std::string waveform_name(OscillatorWaveform waveform) {
         case OscillatorWaveform::Sample: return "sample";
         case OscillatorWaveform::Granular: return "granular";
         case OscillatorWaveform::PhysicalModel: return "physicalmodel";
+        case OscillatorWaveform::Sampler: return "sampler";
     }
     return "saw";
 }
@@ -1236,6 +1246,7 @@ std::optional<OscillatorWaveform> parse_waveform(std::string_view value) {
     if (value == "sample") return OscillatorWaveform::Sample;
     if (value == "granular") return OscillatorWaveform::Granular;
     if (value == "physicalmodel") return OscillatorWaveform::PhysicalModel;
+    if (value == "sampler") return OscillatorWaveform::Sampler;
     return std::nullopt;
 }
 
@@ -1474,18 +1485,18 @@ std::optional<ModulationSource> parse_modulation_source(std::string_view value) 
     return std::nullopt;
 }
 std::string_view modulation_destination_token(ModulationDestination destination) noexcept {
-    static constexpr std::array<std::string_view, 41> names{
+    static constexpr std::array<std::string_view, 42> names{
         "none","global_pitch","filter_cutoff","filter_resonance","filter_drive","voice_gain","voice_pan",
         "osc1_pitch","osc2_pitch","osc3_pitch","osc4_pitch","osc5_pitch","osc6_pitch","osc7_pitch","osc8_pitch",
         "osc1_shape","osc2_shape","osc3_shape","osc4_shape","osc5_shape","osc6_shape","osc7_shape","osc8_shape",
         "osc1_pw","osc2_pw","osc3_pw","osc4_pw","osc5_pw","osc6_pw","osc7_pw","osc8_pw",
         "osc1_gain","osc2_gain","osc3_gain","osc4_gain","osc5_gain","osc6_gain","osc7_gain","osc8_gain",
-        "wavetable_pos","morph_amount"};
+        "wavetable_pos","morph_amount","sampler_start_pos"};
     const auto index = static_cast<std::size_t>(destination);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationDestination> parse_modulation_destination(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::MorphAmount); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::SamplerStartPosition); ++i)
         if (modulation_destination_token(static_cast<ModulationDestination>(i)) == value) return static_cast<ModulationDestination>(i);
     return std::nullopt;
 }
@@ -1661,6 +1672,7 @@ std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept 
         case OscillatorWaveform::Sample: return "Sample";
         case OscillatorWaveform::Granular: return "Granular";
         case OscillatorWaveform::PhysicalModel: return "Physical Model";
+        case OscillatorWaveform::Sampler: return "Sampler";
     }
     return "Saw";
 }
@@ -1791,6 +1803,46 @@ std::string_view lfo_waveform_name(LfoWaveform waveform) noexcept {
 }
 std::string_view modulation_source_name(ModulationSource source) noexcept { return modulation_source_token(source); }
 std::string_view modulation_destination_name(ModulationDestination destination) noexcept { return modulation_destination_token(destination); }
+
+// Phase 2: sampler name strings.
+std::string_view sampler_playback_mode_name(SamplerPlaybackMode mode) noexcept {
+    switch (mode) {
+        case SamplerPlaybackMode::OneShot: return "One-Shot";
+        case SamplerPlaybackMode::Loop: return "Loop";
+    }
+    return "One-Shot";
+}
+std::string_view sampler_direction_name(SamplerDirection direction) noexcept {
+    switch (direction) {
+        case SamplerDirection::Forward: return "Forward";
+        case SamplerDirection::Reverse: return "Reverse";
+    }
+    return "Forward";
+}
+std::string_view sampler_playback_mode_token(SamplerPlaybackMode mode) noexcept {
+    switch (mode) {
+        case SamplerPlaybackMode::OneShot: return "oneshot";
+        case SamplerPlaybackMode::Loop: return "loop";
+    }
+    return "oneshot";
+}
+std::string_view sampler_direction_token(SamplerDirection direction) noexcept {
+    switch (direction) {
+        case SamplerDirection::Forward: return "forward";
+        case SamplerDirection::Reverse: return "reverse";
+    }
+    return "forward";
+}
+std::optional<SamplerPlaybackMode> parse_sampler_playback_mode(std::string_view value) noexcept {
+    if (value == "oneshot") return SamplerPlaybackMode::OneShot;
+    if (value == "loop") return SamplerPlaybackMode::Loop;
+    return std::nullopt;
+}
+std::optional<SamplerDirection> parse_sampler_direction(std::string_view value) noexcept {
+    if (value == "forward") return SamplerDirection::Forward;
+    if (value == "reverse") return SamplerDirection::Reverse;
+    return std::nullopt;
+}
 
 
 struct Synthesizer::Impl {
@@ -2946,6 +2998,7 @@ struct Synthesizer::Impl {
         float voicePan{};
         float wavetablePosition{};  // Phase 1: added
         float morphAmount{};        // Phase 1: added
+        float samplerStartPosition{};  // Phase 2: added (normalized, scaled by sample duration at use)
         std::array<float, kSynthOscillatorCount> pitch{};
         std::array<float, kSynthOscillatorCount> shape{};
         std::array<float, kSynthOscillatorCount> pulseWidth{};
@@ -3030,6 +3083,7 @@ struct Synthesizer::Impl {
             else if (slot.destination == ModulationDestination::VoicePan) values.voicePan += amount;
             else if (slot.destination == ModulationDestination::WavetablePosition) values.wavetablePosition += amount;
             else if (slot.destination == ModulationDestination::MorphAmount) values.morphAmount += amount;
+            else if (slot.destination == ModulationDestination::SamplerStartPosition) values.samplerStartPosition += amount;
             else if (destination >= static_cast<unsigned>(ModulationDestination::Osc1Pitch) &&
                      destination <= static_cast<unsigned>(ModulationDestination::Osc8Pitch))
                 values.pitch[destination - static_cast<unsigned>(ModulationDestination::Osc1Pitch)] += amount * 24.0F;
@@ -3167,6 +3221,124 @@ struct Synthesizer::Impl {
         }
         const float gain = (1.0F - osc.sampleVelocityToGain) + osc.sampleVelocityToGain * v.velocity;
         const float mono = output * gain * 0.70710678F;
+        return {mono, mono};
+    }
+
+    // Phase 2: cubic (Catmull-Rom) interpolation over the shared preset sample
+    // bank. Position is in frames; out-of-range positions are clamped.
+    float sampler_cubic_sample(const RealtimeSampleBank& bank, float position) const noexcept {
+        const float frames = static_cast<float>(bank.frameCount);
+        const float bounded = clampf(position, 0.0F, frames - 1.0F);
+        const std::int32_t center = static_cast<std::int32_t>(bounded);
+        const float fraction = bounded - static_cast<float>(center);
+        const std::uint32_t last = bank.frameCount - 1U;
+        const std::uint32_t i0 = static_cast<std::uint32_t>(std::max<std::int32_t>(center - 1, 0));
+        const std::uint32_t i1 = static_cast<std::uint32_t>(center);
+        const std::uint32_t i2 = std::min(i1 + 1U, last);
+        const std::uint32_t i3 = std::min(i1 + 2U, last);
+        const float p0 = bank.samples[i0];
+        const float p1 = bank.samples[i1];
+        const float p2 = bank.samples[i2];
+        const float p3 = bank.samples[i3];
+        const float f2 = fraction * fraction;
+        const float f3 = f2 * fraction;
+        return 0.5F * (2.0F * p1 + (p2 - p0) * fraction +
+                       (2.0F * p0 - 5.0F * p1 + 4.0F * p2 - p3) * f2 +
+                       (3.0F * (p1 - p2) + p3 - p0) * f3);
+    }
+
+    // Phase 2: dedicated sampler generator. Reads the shared preset sample
+    // bank (resident, cooked on the control thread). One-shot releases the
+    // voice at the sample end; loop mode wraps inside [loopStart, loopEnd)
+    // with an equal-power crossfade. Reverse plays backwards; the start
+    // offset is measured back from the region end in reverse so the default
+    // (offset 0) begins at the end of the sample.
+    std::pair<float, float> render_sampler(Voice& v, std::size_t oscillatorIndex,
+                                           float frequency, const ModulationValues& mod) noexcept {
+        const RealtimeSampleBank& bank = parameters.sampleBank;
+        const SamplerParameters& sampler = parameters.sampler;
+        if (!sampler.enabled || !bank.enabled || bank.frameCount < 2U) return {};
+        if (v.samplerFinished[oscillatorIndex]) return {};
+        const float frameCount = static_cast<float>(bank.frameCount);
+        const float bankRate = static_cast<float>(bank.sampleRate);
+        const float durationSeconds = frameCount / bankRate;
+        const bool reverse = sampler.direction == SamplerDirection::Reverse;
+        const bool loop = sampler.playbackMode == SamplerPlaybackMode::Loop;
+
+        float loopStart = clampf(sampler.loopStartSeconds * bankRate, 0.0F, frameCount);
+        float loopEnd = clampf(sampler.loopEndSeconds * bankRate, 0.0F, frameCount);
+        // Loop mode with a degenerate (empty or out-of-range) loop falls back to
+        // the full sample so the voice keeps sounding instead of pinning a
+        // single clamped frame.
+        if (loop && loopEnd - loopStart < 1.0F) {
+            loopStart = 0.0F;
+            loopEnd = frameCount;
+        }
+        if (loopEnd < loopStart + 1.0F) loopEnd = std::min(loopStart + 1.0F, frameCount);
+        if (loopStart > loopEnd - 1.0F) loopStart = std::max(loopEnd - 1.0F, 0.0F);
+        const float loopLength = loopEnd - loopStart;
+        const bool loopValid = loop && loopLength >= 1.0F;
+        const float crossfade = clampf(sampler.loopCrossfadeSeconds * bankRate, 0.0F, loopLength * 0.5F);
+        const float regionStart = loopValid ? loopStart : 0.0F;
+        const float regionEnd = loopValid ? loopEnd : frameCount;
+        const float regionLength = regionEnd - regionStart;
+
+        float& position = v.samplerPositions[oscillatorIndex];
+        if (!v.samplerPrimed[oscillatorIndex]) {
+            const float startSeconds = clampf(
+                sampler.startOffsetSeconds + mod.samplerStartPosition * durationSeconds,
+                0.0F, durationSeconds);
+            if (!reverse) {
+                position = clampf(startSeconds * bankRate, regionStart, regionEnd - 1.0F);
+            } else {
+                const float offsetFrames = clampf(startSeconds * bankRate, 0.0F, regionLength - 1.0F);
+                position = regionEnd - 1.0F - offsetFrames;
+            }
+            v.samplerPrimed[oscillatorIndex] = true;
+        }
+
+        float ratio = 1.0F;
+        if (sampler.pitchTracking) {
+            const float root = tuned_frequency(bank.rootNote, 0.0F);
+            ratio = root > 0.0001F ? frequency / root : 1.0F;
+        }
+        const float step = ratio * bankRate / sampleRate;
+
+        float output = sampler_cubic_sample(bank, position);
+        if (loopValid && crossfade > 0.0F) {
+            float phase = -1.0F;
+            float alternatePosition = 0.0F;
+            if (!reverse && position >= loopEnd - crossfade && position < loopEnd) {
+                phase = (position - (loopEnd - crossfade)) / crossfade;
+                alternatePosition = loopStart + (position - (loopEnd - crossfade));
+            } else if (reverse && position >= loopStart && position < loopStart + crossfade) {
+                phase = (loopStart + crossfade - position) / crossfade;
+                alternatePosition = loopEnd - (loopStart + crossfade - position);
+                alternatePosition = std::min(alternatePosition, loopEnd - 1.0e-4F);
+            }
+            if (phase >= 0.0F) {
+                const float alternate = sampler_cubic_sample(bank, alternatePosition);
+                const float primaryGain = fast_sin_phase(0.25F - phase * 0.25F);
+                const float alternateGain = fast_sin_phase(phase * 0.25F);
+                output = output * primaryGain + alternate * alternateGain;
+            }
+        }
+
+        position += reverse ? -step : step;
+        if (loopValid) {
+            if (!reverse && position >= loopEnd) {
+                position = loopStart + std::fmod(position - loopEnd, loopLength);
+            } else if (reverse && position < loopStart) {
+                position = std::min(loopEnd - std::fmod(loopStart - position, loopLength),
+                                    loopEnd - 1.0e-4F);
+            }
+        } else if ((!reverse && position >= frameCount) || (reverse && position < 0.0F)) {
+            v.samplerFinished[oscillatorIndex] = true;
+            v.release();
+            position = reverse ? 0.0F : frameCount - 1.0F;
+        }
+
+        const float mono = output * sampler.gain * 0.70710678F;
         return {mono, mono};
     }
 
@@ -3494,6 +3666,12 @@ struct Synthesizer::Impl {
                 stereoLeft = sampled.first;
                 stereoRight = sampled.second;
                 sample = (stereoLeft + stereoRight) * 0.70710678F;
+            } else if (osc.waveform == OscillatorWaveform::Sampler) {
+                // Phase 2: dedicated sampler generator (preset-level parameters).
+                const auto samplerOut = render_sampler(v, i, frequency, mod);
+                stereoLeft = samplerOut.first;
+                stereoRight = samplerOut.second;
+                sample = (stereoLeft + stereoRight) * 0.70710678F;
             } else if (osc.waveform == OscillatorWaveform::Granular) {
                 const auto granular = render_granular_oscillator(v, i, osc, frequency);
                 stereoLeft = granular.first;
@@ -3539,7 +3717,7 @@ struct Synthesizer::Impl {
                 ? std::clamp<std::uint8_t>(parameters.unison.voices, 1U, static_cast<std::uint8_t>(kSynthUnisonMax)) : 1U;
             if (osc.waveform == OscillatorWaveform::Noise || osc.waveform == OscillatorWaveform::SuperSaw ||
                 osc.waveform == OscillatorWaveform::Sample || osc.waveform == OscillatorWaveform::Granular ||
-                osc.waveform == OscillatorWaveform::PhysicalModel)
+                osc.waveform == OscillatorWaveform::PhysicalModel || osc.waveform == OscillatorWaveform::Sampler)
                 unisonVoices = 1U;
             for (std::uint8_t copy = 1U; copy < unisonVoices; ++copy) {
                 const float centered = static_cast<float>(copy) - 0.5F * static_cast<float>(unisonVoices - 1U);
@@ -3563,7 +3741,8 @@ struct Synthesizer::Impl {
 
             if (osc.subOscillatorLevel > 0.0F && osc.waveform != OscillatorWaveform::Sample &&
                 osc.waveform != OscillatorWaveform::Granular &&
-                osc.waveform != OscillatorWaveform::PhysicalModel) {
+                osc.waveform != OscillatorWaveform::PhysicalModel &&
+                osc.waveform != OscillatorWaveform::Sampler) {
                 const unsigned octaves = std::clamp<unsigned>(osc.subOscillatorOctaves, 1U, 3U);
                 const float subIncrement = increment / static_cast<float>(1U << octaves);
                 const float sub = bandlimited_pulse(v.subPhases[i], subIncrement, 0.5F) *
@@ -3589,7 +3768,8 @@ struct Synthesizer::Impl {
             const float panRight = std::sqrt(0.5F * (1.0F + basePan));
             const bool intrinsicStereo = osc.waveform == OscillatorWaveform::Sample ||
                                          osc.waveform == OscillatorWaveform::Granular ||
-                                         osc.waveform == OscillatorWaveform::PhysicalModel;
+                                         osc.waveform == OscillatorWaveform::PhysicalModel ||
+                                         osc.waveform == OscillatorWaveform::Sampler;
             if (intrinsicStereo) {
                 left += stereoLeft * panLeft * 1.41421356F;
                 right += stereoRight * panRight * 1.41421356F;
@@ -4525,7 +4705,7 @@ bool SynthPreset::validate(std::string* error) const {
         if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.bias, -1.0F, 1.0F) ||
             !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
             static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::Lorenz) ||
-            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::MorphAmount))
+            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::SamplerStartPosition))
             return fail("invalid modulation matrix slot");
     }
     for (float value : macros.values) if (!in_range(value, 0.0F, 1.0F)) return fail("invalid macro value");
@@ -4539,6 +4719,14 @@ bool SynthPreset::validate(std::string* error) const {
     if (!wavetable.validate(&wavetableError)) return fail(wavetableError);
     std::string sampleError;
     if (!sampleBank.validate(&sampleError)) return fail(sampleError);
+    // Phase 2: sampler generator parameters.
+    if (sampler.sampleIndex != 0U) return fail("invalid sampler sample index");
+    if (!in_range(sampler.loopStartSeconds, 0.0F, 3600.0F) ||
+        !in_range(sampler.loopEndSeconds, 0.0F, 3600.0F) ||
+        !in_range(sampler.loopCrossfadeSeconds, 0.0F, 60.0F) ||
+        !in_range(sampler.startOffsetSeconds, 0.0F, 3600.0F) ||
+        !in_range(sampler.gain, 0.0F, 2.0F))
+        return fail("invalid sampler parameters");
     std::string tuningError;
     if (!microtuning.validate(&tuningError)) return fail(tuningError);
     if (mpe.lowerMasterChannel > 15U || mpe.upperMasterChannel > 15U ||
@@ -4883,6 +5071,17 @@ std::string SynthPreset::serialize() const {
         }
         out << '\n';
     }
+    // Phase 2: sampler generator parameters.
+    out << "sampler.enabled=" << sampler.enabled << '\n'
+        << "sampler.sampleIndex=" << static_cast<unsigned>(sampler.sampleIndex) << '\n'
+        << "sampler.mode=" << sampler_playback_mode_token(sampler.playbackMode) << '\n'
+        << "sampler.direction=" << sampler_direction_token(sampler.direction) << '\n'
+        << "sampler.loopStart=" << sampler.loopStartSeconds << '\n'
+        << "sampler.loopEnd=" << sampler.loopEndSeconds << '\n'
+        << "sampler.loopCrossfade=" << sampler.loopCrossfadeSeconds << '\n'
+        << "sampler.pitchTracking=" << sampler.pitchTracking << '\n'
+        << "sampler.startOffset=" << sampler.startOffsetSeconds << '\n'
+        << "sampler.gain=" << sampler.gain << '\n';
     out << "distortion.enabled=" << distortion.enabled << "\ndistortion.drive=" << distortion.drive
         << "\ndistortion.mix=" << distortion.mix
         << "\ndistortion.mode=" << static_cast<unsigned>(distortion.mode) << '\n'
@@ -5071,6 +5270,16 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             }
             parsed = parsed && index == result.sampleBank.frameCount;
         }
+        else if (key == "sampler.enabled") parsed = readBool(result.sampler.enabled);
+        else if (key == "sampler.sampleIndex") parsed = readUInt(result.sampler.sampleIndex, 0U);
+        else if (key == "sampler.mode") { const auto mode = parse_sampler_playback_mode(value); parsed = mode.has_value(); if (mode) result.sampler.playbackMode = *mode; }
+        else if (key == "sampler.direction") { const auto direction = parse_sampler_direction(value); parsed = direction.has_value(); if (direction) result.sampler.direction = *direction; }
+        else if (key == "sampler.loopStart") parsed = readFloat(result.sampler.loopStartSeconds);
+        else if (key == "sampler.loopEnd") parsed = readFloat(result.sampler.loopEndSeconds);
+        else if (key == "sampler.loopCrossfade") parsed = readFloat(result.sampler.loopCrossfadeSeconds);
+        else if (key == "sampler.pitchTracking") parsed = readBool(result.sampler.pitchTracking);
+        else if (key == "sampler.startOffset") parsed = readFloat(result.sampler.startOffsetSeconds);
+        else if (key == "sampler.gain") parsed = readFloat(result.sampler.gain);
         else recognized = false;
 
         if (!recognized && key.starts_with("micro.offset")) {

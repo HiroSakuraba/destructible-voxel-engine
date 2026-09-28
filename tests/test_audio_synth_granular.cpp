@@ -92,9 +92,10 @@ int main() {
         CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::Triangle, 0.0F), 0.0F));
         CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::Triangle, 0.5F), 1.0F));
         CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::Triangle, 1.0F), 0.0F));
-        CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::ExponentialDecay, 0.0F), 1.0F));
-        const float decayMid = GranularEngine::envelope_value(GranularEnvelopeShape::ExponentialDecay, 0.5F);
-        CHECK(decayMid > 0.0F && decayMid < 1.0F);
+        CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::ExponentialDecay, 0.0F), 0.0F));
+        // Tuned gamma window: peak 1 at 10% of the grain, smooth tail to ~1.2e-3.
+        CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::ExponentialDecay, 0.1F), 1.0F, 1.0e-5F));
+        CHECK(GranularEngine::envelope_value(GranularEnvelopeShape::ExponentialDecay, 1.0F) < 5.0e-3F);
         CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::PlanckTaper, 0.0F), 0.0F, 1.0e-3F));
         CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::PlanckTaper, 0.5F), 1.0F));
         CHECK(near(GranularEngine::envelope_value(GranularEnvelopeShape::PlanckTaper, 1.0F), 0.0F, 1.0e-3F));
@@ -169,6 +170,7 @@ int main() {
         GranularParameters params;
         params.densityHz = 4000.0F;  // engine clamps density; spin until spawned
         params.durationMs = 10.0F;                     // 480 frames
+        params.cloud01 = 0.0F;                         // no cloud duration stretch
         params.position01 = 0.0F;
         params.positionJitter01 = 0.0F;
         params.panScatter01 = 0.0F;

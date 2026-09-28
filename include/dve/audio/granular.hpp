@@ -15,7 +15,10 @@
 //     An empty/disabled bank renders silence and counts a grain miss.
 //   - Core parameters are implemented here. The six macro fields
 //     (cloud01/scatter01/dust01/freeze01/freezePosition01/smear01/width01) are
-//     stored so presets and UI can carry them; their *behavior* is wave-2's.
+//     resolved by apply_granular_macros() into GranularEffectiveParams at
+//     render time; the per-grain random draws (smear pitch/duration, dust
+//     envelope override) come from the engine's seeded RNG so fixed-seed
+//     renders stay deterministic.
 //   - Profiler counters are accumulated locally and drained by the owner so the
 //     voice can forward them into Synthesizer::granular_profiler().
 #pragma once
@@ -34,9 +37,14 @@ namespace dve::audio {
 // Offline is for non-realtime renders.
 enum class FilterQuality : std::uint8_t { Eco, Standard, High, Offline };
 
-// Per-grain amplitude window. Hann and Triangle are the core shapes;
-// ExponentialDecay and PlanckTaper use standard textbook windows here and are
-// owned (tuning/verification) by the wave-2 envelope-shape work.
+// Per-grain amplitude window. All four shapes are normalized to peak 1 with
+// endpoints at ~0 (no clicks when a grain expires):
+//   - Hann / Triangle: classic symmetric windows, peak at phase 0.5.
+//   - ExponentialDecay: fast attack / smooth tail (gamma window x*k*e*e^(-k*x)
+//     with k=10: peak 1 at phase 0.1, tail ~1.2e-3 at phase 1). Musically a
+//     percussive grain; the dust macro biases per-grain shapes toward it.
+//   - PlanckTaper: flat-top window with a 10% Planck taper on each end —
+//     near-rectangular grains without edge clicks.
 enum class GranularEnvelopeShape : std::uint8_t {
     Hann,
     Triangle,
@@ -57,16 +65,17 @@ struct GranularParameters {
     float gain{0.8F};                  // overall generator gain
     float reverseProbability01{0.0F};  // chance a grain plays backwards, 0..1
     GranularEnvelopeShape envelopeShape{GranularEnvelopeShape::Hann};
-    // Wave-2 macro controls: stored here so the header interface is stable;
-    // behavior is implemented by wave-2 workers.
-    float cloud01{0.5F};
-    float scatter01{0.0F};
-    float dust01{0.0F};
-    float freeze01{0.0F};
+    // Six musical macro controls, resolved by apply_granular_macros() into a
+    // GranularEffectiveParams before spawning. The base fields above stay
+    // intact; the macros are a pure layer on top.
+    float cloud01{0.5F};        // density x(0.25 + 3c), duration x(1 + 0.5c)
+    float scatter01{0.0F};      // position jitter += scatter x 0.5
+    float dust01{0.0F};         // duration x(1 - 0.9d), gain x(1 + 0.5d), transient-envelope bias
+    float freeze01{0.0F};       // position lerp toward freezePosition01, jitter x(1 - freeze)
     float freezePosition01{0.5F};
-    float smear01{0.0F};
-    float width01{0.5F};
-    // Worker 3: CPU quality tier for the grain cloud. Follows the same
+    float smear01{0.0F};        // per-grain pitch +/-(12 x smear) st, duration x(1 +/- 0.75 x smear)
+    float width01{0.5F};        // pan scatter x(0.2 + 1.6 x width); scales L/R source decorrelation
+    // CPU quality tier for the grain cloud. Follows the same
     // FilterQuality convention as the preset-level filterQuality. Flows from
     // the preset automatically (GranularParameters is copied whole into the
     // active preset). Eco throttles admission to kEcoMaxActiveGrains grains,
@@ -76,6 +85,40 @@ struct GranularParameters {
     // permitted — Offline is intended for render, not realtime).
     FilterQuality granularQuality{FilterQuality::Standard};
 };
+
+// Macro-resolved spawn parameters: the output of apply_granular_macros().
+// The engine spawns grains from these; the per-grain random draws inside
+// (smear pitch/duration, dust envelope override) use the engine's seeded RNG
+// so fixed-seed renders stay deterministic.
+struct GranularEffectiveParams {
+    float densityHz{20.0F};
+    float durationMs{120.0F};
+    float pitchSemitones{0.0F};
+    float position01{0.0F};             // freeze lerp applied; positionMod01 folded in
+    float positionJitter01{0.1F};       // scatter added, freeze scaled
+    float panScatter01{0.3F};           // width scaled
+    float gain{0.8F};                   // dust compensation applied
+    float reverseProbability01{0.0F};
+    GranularEnvelopeShape envelopeShape{GranularEnvelopeShape::Hann};
+    // Per-grain random ranges drawn at spawn from the engine's RNG (only when
+    // the corresponding macro is active, so neutral macros leave the random
+    // stream bit-identical to the macro-free path for the same seed):
+    float smearPitchSemitones{0.0F};    // uniform offset in +/- this (semitones)
+    float smearDurationSpread01{0.0F};  // uniform duration multiplier in 1 +/- this
+    float dustTransientOverride01{0.0F};  // probability a grain's envelope becomes ExponentialDecay
+    // Passthroughs (not macro-modified): quality tier drives Eco throttling
+    // and envelope forcing in spawn; width01 scales the per-grain L/R source
+    // decorrelation offsets.
+    FilterQuality granularQuality{FilterQuality::Standard};
+    float width01{0.5F};
+};
+
+// Pure function: resolves the six macro knobs on top of the base parameters.
+// positionMod01 (GranularPosition modulation) is folded into position01 before
+// the freeze lerp. Additive macros (scatter/dust/freeze/smear) are no-ops at 0;
+// width is the identity at 0.5 and cloud maps density x1.0 at 0.25.
+GranularEffectiveParams apply_granular_macros(const GranularParameters& params,
+                                              float positionMod01) noexcept;
 
 // Non-owning view of the grain source (built from the resident
 // RealtimeSampleBank by the caller; kept decoupled so the engine and its
@@ -151,15 +194,15 @@ public:
     // random stream (voice kill / all-sound-off path).
     void kill_grains() noexcept;
 
-    // Renders one stereo sample. Spawns grains at control rate from
-    // params.densityHz; grain parameters are sampled at spawn time. Active
-    // grains are cubic-interpolated from the source and accumulated with
-    // equal-power panning. Each grain additionally carries independent L/R
-    // source-read offsets scaled by params.width01 (both exactly 0 at
-    // width01 == 0, so the channels read bit-identical positions).
+    // Renders one stereo sample. Spawns grains at control rate from the
+    // macro-resolved effective density; grain parameters are sampled at spawn
+    // time. Active grains are cubic-interpolated from the source and
+    // accumulated with equal-power panning. Each grain additionally carries
+    // independent L/R source-read offsets scaled by width01 (both exactly 0
+    // at width01 == 0, so the channels read bit-identical positions).
     //
-    // positionMod01 is the GranularPosition modulation value: added to
-    // params.position01 and clamped to 0..1 before mapping over the bank.
+    // positionMod01 is the GranularPosition modulation value: folded into the
+    // macro-resolved position (before the freeze lerp) and clamped to 0..1.
     //
     // When params.enabled is false, or the source is missing/empty, the output
     // is silence; each spawn attempt against a missing/empty source counts one
@@ -187,8 +230,7 @@ public:
 private:
     std::uint32_t random_u32() noexcept;
     float random01() noexcept;
-    void spawn_grain(const GranularSource& source, const GranularParameters& params,
-                     float positionMod01) noexcept;
+    void spawn_grain(const GranularSource& source, const GranularEffectiveParams& effective) noexcept;
 
     std::array<Grain, kMaxGrains> grains_{};
     GranularCounters counters_{};

@@ -13,6 +13,7 @@
 
 #include "dve/audio/midi.hpp"
 #include "dve/audio/sample_map.hpp"
+#include "dve/audio/sequencer.hpp"
 #include "dve/audio/synth_profiler.hpp"
 
 namespace dve::audio {
@@ -181,7 +182,8 @@ enum class ModulationSource : std::uint8_t {
     Off, Lfo1, Lfo2, AmpEnvelope, FilterEnvelope, Velocity, KeyTrack,
     ModWheel, Aftertouch, Random, Macro1, Macro2, Macro3, Macro4,
     Timbre, NotePitchBend, ReleaseVelocity,
-    Spring, Pendulum, Orbiter, Lorenz  // Phase 1: physics modulation
+    Spring, Pendulum, Orbiter, Lorenz,  // Phase 1: physics modulation
+    SeqTimbre, SeqMorph, SeqPan  // Phase 3: generative sequencer lane currents (appended)
 };
 
 enum class ModulationDestination : std::uint8_t {
@@ -763,6 +765,11 @@ public:
     void clear_morph_preset_b();
     [[nodiscard]] bool has_morph_preset_b() const noexcept { return hasMorphPresetB_; }
     void set_morph_amount(float amount);
+
+    // Phase 3: generative step sequencer (SYN-012). Configure lanes via the
+    // returned object; it advances once per render() block when enabled.
+    [[nodiscard]] Sequencer& sequencer() noexcept;
+    [[nodiscard]] const Sequencer& sequencer() const noexcept;
 
     bool poll_midi_output(MidiMessage& message) noexcept;
 

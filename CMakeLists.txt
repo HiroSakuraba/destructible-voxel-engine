@@ -281,6 +281,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/sample_map_recipe.cpp
         src/audio/synthesizer.cpp
         src/audio/synth_patch.cpp
+        src/audio/sequencer.cpp
         src/audio/wavetable.cpp
         src/audio/wavetable_builder.cpp
         src/audio/physics_modulation.cpp
@@ -1747,6 +1748,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_synth_phase2_serialization_tests tests/test_audio_synth_phase2_serialization.cpp)
         target_link_libraries(dve_audio_synth_phase2_serialization_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_phase2_serialization_tests COMMAND dve_audio_synth_phase2_serialization_tests)
+        add_executable(dve_audio_synth_sequencer_tests tests/test_audio_synth_sequencer.cpp)
+        target_link_libraries(dve_audio_synth_sequencer_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_sequencer_tests COMMAND dve_audio_synth_sequencer_tests)
         add_executable(dve_physical_model_tests tests/test_physical_model.cpp)
         target_link_libraries(dve_physical_model_tests PRIVATE dve::audio_synth)
         target_compile_definitions(dve_physical_model_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

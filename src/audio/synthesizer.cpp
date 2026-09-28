@@ -1823,16 +1823,17 @@ std::optional<LfoWaveform> parse_lfo_waveform(std::string_view value) noexcept {
     return std::nullopt;
 }
 std::string_view modulation_source_token(ModulationSource source) noexcept {
-    static constexpr std::array<std::string_view, 21> names{
+    static constexpr std::array<std::string_view, 24> names{
         "none","lfo1","lfo2","amp_env","filter_env","velocity","keytrack",
         "modwheel","aftertouch","random","macro1","macro2","macro3","macro4",
         "timbre","note_bend","release_vel",
-        "spring","pendulum","orbiter","lorenz"};
+        "spring","pendulum","orbiter","lorenz",
+        "seq_timbre","seq_morph","seq_pan"};
     const auto index = static_cast<std::size_t>(source);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationSource> parse_modulation_source(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationSource::Lorenz); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationSource::SeqPan); ++i)
         if (modulation_source_token(static_cast<ModulationSource>(i)) == value) return static_cast<ModulationSource>(i);
     return std::nullopt;
 }
@@ -2296,6 +2297,9 @@ struct Synthesizer::Impl {
     CookedWavetable hqWavetable{};
     // Phase 1: physics modulation bank (global).
     PhysicsModulationBank physicsBank{};
+    // Phase 3: generative step sequencer (SYN-012). Driven once per render
+    // block by advance_sequencer(); disabled by default.
+    Sequencer sequencer{};
     // Phase 1: morph B preset (set via API, not serialized).
     SynthPreset morphPresetB{};
     bool hasMorphPresetB{false};
@@ -3388,6 +3392,28 @@ struct Synthesizer::Impl {
             smoothedDelayTime.set_target(effective_delay_time_seconds());
     }
 
+    // Phase 3: advance the generative sequencer once per render block. The
+    // step clock is a 16th note resolved from the same tempo source the LFO
+    // tempo sync uses (effective_arpeggiator_tempo()). Note events are
+    // scheduled sample-accurately via schedule_voice_event() so onsets land
+    // inside the current block; process_scheduled_events() (called per frame
+    // below) fires them through direct_note_on/off like the arpeggiator.
+    void advance_sequencer(std::size_t frameCount) noexcept {
+        if (!sequencer.enabled()) return;
+        const float tempo = clampf(effective_arpeggiator_tempo(), 20.0F, 400.0F);
+        const std::uint64_t blockStart = currentFrame.load(std::memory_order_relaxed);
+        const std::uint8_t channel = sequencer.channel();
+        sequencer.process(static_cast<std::uint32_t>(frameCount), sampleRate, tempo,
+                          [&](const Sequencer::Event& event) {
+                              const std::uint64_t at = blockStart +
+                                  static_cast<std::uint64_t>(event.frameOffset);
+                              const std::uint8_t velocity = static_cast<std::uint8_t>(
+                                  clampf(event.velocity, 0.0F, 1.0F) * 127.0F);
+                              (void)schedule_voice_event(event.noteOn, channel, event.note,
+                                                         velocity, at, true);
+                          });
+    }
+
     float advance_lfo(Voice& v, std::size_t index) noexcept {
         const LfoParameters& lfo = parameters.lfos[index];
         if (!lfo.enabled || lfo.depth <= 0.0F) return 0.0F;
@@ -3481,6 +3507,10 @@ struct Synthesizer::Impl {
             case ModulationSource::Pendulum: return std::sin(physicsBank.pendulum.angle);
             case ModulationSource::Orbiter: return std::clamp(physicsBank.orbiter.x * 0.5F, -1.0F, 1.0F);
             case ModulationSource::Lorenz: return std::clamp(physicsBank.lorenz.x / 20.0F, -1.0F, 1.0F);
+            // Phase 3: generative sequencer lane currents.
+            case ModulationSource::SeqTimbre: return clampf(sequencer.timbre_value(), -1.0F, 1.0F);
+            case ModulationSource::SeqMorph: return clampf(sequencer.morph_value(), 0.0F, 1.0F);
+            case ModulationSource::SeqPan: return clampf(sequencer.pan_value(), -1.0F, 1.0F);
         }
         return 0.0F;
     }
@@ -3488,7 +3518,8 @@ struct Synthesizer::Impl {
     static bool native_bipolar(ModulationSource source) noexcept {
         return source == ModulationSource::Lfo1 || source == ModulationSource::Lfo2 ||
                source == ModulationSource::KeyTrack || source == ModulationSource::Random ||
-               source == ModulationSource::Timbre || source == ModulationSource::NotePitchBend;
+               source == ModulationSource::Timbre || source == ModulationSource::NotePitchBend ||
+               source == ModulationSource::SeqTimbre || source == ModulationSource::SeqPan;
     }
 
     ModulationValues evaluate_modulation(Voice& v, float amp, float filterEnv,
@@ -5292,7 +5323,7 @@ bool SynthPreset::validate(std::string* error) const {
     for (const auto& slot : modulation) {
         if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.bias, -1.0F, 1.0F) ||
             !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
-            static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::Lorenz) ||
+            static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::SeqPan) ||
             static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::SamplerStartPosition))
             return fail("invalid modulation matrix slot");
     }
@@ -6557,6 +6588,10 @@ void Synthesizer::set_morph_amount(float amount) {
     set_preset(preset_);
 }
 
+// Phase 3: generative sequencer accessors.
+Sequencer& Synthesizer::sequencer() noexcept { return impl_->sequencer; }
+const Sequencer& Synthesizer::sequencer() const noexcept { return impl_->sequencer; }
+
 bool Synthesizer::set_sample_map(const SynthSampleMap& sampleMap, std::string* error) {
     if (!sampleMap.validate(error)) return false;
     SynthSampleMap cooked = sampleMap;
@@ -6682,14 +6717,18 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     while (impl_->presetIn.pop(latest)) impl_->adopt_preset(latest);
     impl_->advance_parameter_smoothing(frameCount);
     impl_->track_tempo_synced_delay();
-    // Phase 1: step physics modulation bank.
+    // Phase 3: step physics modulation bank.
     impl_->physicsBank.step(static_cast<float>(frameCount) / impl_->sampleRate);
+    // Phase 3: advance the generative sequencer once per block (no-op unless enabled).
+    impl_->advance_sequencer(frameCount);
     if (impl_->transportRestartRequested.exchange(false, std::memory_order_acq_rel)) {
         impl_->clear_arp_held(true);
         impl_->renderFrame = impl_->transportRestartFrame.load(std::memory_order_relaxed);
         impl_->arpStepCounter = 0U;
         impl_->arpProgress = 0U;
         impl_->activeArpStep.store(0U, std::memory_order_relaxed);
+        // Phase 3: restart the sequencer with the transport.
+        impl_->sequencer.start();
     }
 
     std::array<MidiMessage, 256> pending{};

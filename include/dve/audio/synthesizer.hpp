@@ -38,6 +38,14 @@ inline constexpr std::size_t kPhysicalModelMaxModes = 16;
 inline constexpr std::size_t kModalResonatorMaxModes = 32;
 inline constexpr std::uint32_t kDefaultSynthSampleRate = 48000;
 
+// Phase 2: auto oversampling policy thresholds (see effective_oversampling).
+// Resonance above this upgrades an explicit X1 setting to X2.
+inline constexpr float kAutoOversampleResonanceThreshold = 0.75F;
+// Drive above this counts as "drive engaged" and upgrades X1 to X2.
+inline constexpr float kAutoOversampleDriveThreshold = 1.5F;
+// Resonance above this, combined with engaged drive, upgrades X1 to X4.
+inline constexpr float kAutoOversampleExtremeResonanceThreshold = 0.95F;
+
 enum class OscillatorWaveform : std::uint8_t {
     Sine,
     Saw,
@@ -135,7 +143,9 @@ struct ModalResonatorParameters {
 };
 
 enum class FilterMode : std::uint8_t { LowPass, BandPass, HighPass, Notch };
-enum class FilterTopology : std::uint8_t { CleanStateVariable, MoogLadder, KorgMs20, OberheimSem };
+// Phase 2: Comb and Formant appended at the end; existing values are never
+// renumbered so serialized presets keep their meaning.
+enum class FilterTopology : std::uint8_t { CleanStateVariable, MoogLadder, KorgMs20, OberheimSem, Comb, Formant };
 enum class EnvelopeCurve : std::uint8_t { Linear, Exponential };
 enum class VoiceStage : std::uint8_t { Idle, Delay, Attack, Hold, Decay, Sustain, Release };
 
@@ -299,6 +309,27 @@ struct OscillatorParameters {
     ModalResonatorParameters modalResonator = ModalResonatorParameters::make_default();
 };
 
+// Phase 2: parameters for the Comb filter topology. The comb spacing is set by
+// the voice cutoff (comb frequency = cutoff Hz); resonance drives the feedback
+// amount. Trivially copyable so RealtimePreset stays trivially copyable.
+struct CombParameters {
+    float damping{0.25F};       // 0..1: lowpass damping inside the feedback loop (higher = darker)
+    float mix{1.0F};            // 0..1: dry/wet mix (1 = fully resonant comb)
+    float feedbackScale{1.0F};  // 0..1.5: scales the resonance -> feedback mapping
+};
+
+// Phase 2: parameters for the Formant filter topology. A bank of parallel
+// resonant bandpass biquads tuned to an open "ah" vowel (F1..F4 after
+// Klatt/Stevens vocal-tract data); the voice cutoff sweeps the whole bank
+// multiplicatively (cutoff 1000 Hz = authored frequencies), resonance sets
+// the band Q. Trivially copyable so RealtimePreset stays trivially copyable.
+struct FormantParameters {
+    static constexpr std::size_t kBandCount{4};
+    std::array<float, kBandCount> frequencyHertz{730.0F, 1090.0F, 2440.0F, 3500.0F};
+    std::array<float, kBandCount> gains{1.0F, 0.75F, 0.45F, 0.30F};
+    float dryMix{0.25F};        // 0..1: direct signal blended under the formant bank
+};
+
 struct FilterParameters {
     bool enabled{true};
     FilterTopology topology{FilterTopology::MoogLadder};
@@ -315,6 +346,8 @@ struct FilterParameters {
     FilterOversampling oversampling{FilterOversampling::X1};
     float ms20HighPassCutoffHertz{35.0F};
     float selfOscillation{0.85F};
+    CombParameters comb{};
+    FormantParameters formant{};
 };
 
 struct TuningParameters {
@@ -709,6 +742,14 @@ private:
 [[nodiscard]] std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept;
 [[nodiscard]] std::string_view modal_excitation_source_name(ExcitationSource source) noexcept;
 [[nodiscard]] std::string_view filter_topology_name(FilterTopology topology) noexcept;
+// Phase 2: auto oversampling policy for the voice filter. Upgrades the explicit
+// FilterParameters::oversampling setting to X2 when resonance exceeds
+// kAutoOversampleResonanceThreshold or drive is engaged
+// (drive > kAutoOversampleDriveThreshold), and to X4 when resonance exceeds
+// kAutoOversampleExtremeResonanceThreshold with drive engaged. Never downgrades
+// an explicit X2/X4 setting; X1 presets without a trigger condition are
+// unaffected.
+[[nodiscard]] FilterOversampling effective_oversampling(const FilterParameters& params) noexcept;
 [[nodiscard]] std::string_view filter_mode_name(FilterMode mode) noexcept;
 [[nodiscard]] std::string_view arpeggiator_mode_name(ArpeggiatorMode mode) noexcept;
 [[nodiscard]] std::string_view arpeggiator_division_name(ArpeggiatorDivision division) noexcept;

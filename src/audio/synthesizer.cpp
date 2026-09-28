@@ -479,16 +479,105 @@ struct Ms20Filter {
     }
 };
 
+// Phase 2: lowest comb frequency the voice comb filter supports; sizes the delay line.
+inline constexpr float kCombFilterMinFrequencyHz = 20.0F;
+
+// Phase 2: one RBJ constant-0dB-peak-gain bandpass biquad (direct form I),
+// the building block of the voice Formant topology. Promoted from the
+// physical-model "throat" biquad into a first-class voice filter path.
+struct FormantBiquad {
+    float x1{};
+    float x2{};
+    float y1{};
+    float y2{};
+
+    void reset() noexcept { x1 = 0.0F; x2 = 0.0F; y1 = 0.0F; y2 = 0.0F; }
+
+    float process(float input, float frequencyHz, float q, float sampleRate) noexcept {
+        const float w = kTwoPi * clampf(frequencyHz, 10.0F, sampleRate * 0.45F) / sampleRate;
+        const float alpha = std::sin(w) / (2.0F * q);
+        const float b0 = alpha;
+        const float b2 = -alpha;  // b1 is 0 for the bandpass form
+        const float a0 = 1.0F + alpha;
+        const float a1 = -2.0F * std::cos(w);
+        const float a2 = 1.0F - alpha;
+        const float y = (b0 / a0) * input + (b2 / a0) * x2 - (a1 / a0) * y1 - (a2 / a0) * y2;
+        x2 = x1; x1 = input; y2 = y1; y1 = y;
+        return y;
+    }
+};
+
+// Phase 2: parallel formant bank for the voice Formant topology.
+struct VoiceFormantFilter {
+    std::array<FormantBiquad, FormantParameters::kBandCount> bands{};
+
+    void reset() noexcept { for (auto& band : bands) band.reset(); }
+
+    float process(float input, float freqScale, float q, const FormantParameters& params,
+                  float sampleRate) noexcept {
+        float sum = 0.0F;
+        for (std::size_t i = 0; i < bands.size(); ++i)
+            sum += params.gains[i] * bands[i].process(input, params.frequencyHertz[i] * freqScale,
+                                                      q, sampleRate);
+        return sum + clampf(params.dryMix, 0.0F, 1.0F) * input;
+    }
+};
+
+// Phase 2: feedback comb with fractional delay and lowpass damping in the
+// feedback loop, for the voice Comb topology. Promoted from the reverb
+// CombFilter into a first-class voice filter path; the delay line is sized
+// lazily so voices that never select Comb pay no memory cost.
+struct VoiceCombFilter {
+    std::vector<float> line;
+    std::size_t writeIndex{};
+    float dampingStore{};
+
+    void reset() noexcept {
+        std::fill(line.begin(), line.end(), 0.0F);
+        writeIndex = 0;
+        dampingStore = 0.0F;
+    }
+
+    void ensure_capacity(float oversampledRate) {
+        const std::size_t needed =
+            static_cast<std::size_t>(oversampledRate / kCombFilterMinFrequencyHz) + 8U;
+        if (line.size() < needed) {
+            line.assign(needed, 0.0F);
+            writeIndex = 0;
+            dampingStore = 0.0F;
+        }
+    }
+
+    float process(float input, float delaySamples, float feedback, float damping) noexcept {
+        const float size = static_cast<float>(line.size());
+        float position = static_cast<float>(writeIndex) - delaySamples;
+        while (position < 0.0F) position += size;
+        while (position >= size) position -= size;
+        const std::size_t i0 = static_cast<std::size_t>(position) % line.size();
+        const std::size_t i1 = (i0 + 1U) % line.size();
+        const float fraction = position - std::floor(position);
+        const float delayed = line[i0] + (line[i1] - line[i0]) * fraction;
+        dampingStore = delayed * (1.0F - damping) + dampingStore * damping;
+        line[writeIndex] = input + dampingStore * feedback;
+        writeIndex = (writeIndex + 1U) % line.size();
+        return delayed;
+    }
+};
+
 struct AnalogFilter {
     StateVariableFilter stateVariable;
     MoogLadderFilter ladder;
     Ms20Filter ms20;
+    VoiceFormantFilter formant;  // Phase 2
+    VoiceCombFilter comb;        // Phase 2
     float previousInput{};
 
     void reset() noexcept {
         stateVariable.reset();
         ladder.reset();
         ms20.reset();
+        formant.reset();
+        comb.reset();
         previousInput = 0.0F;
     }
 
@@ -514,13 +603,38 @@ struct AnalogFilter {
                     ? outputs.low + (outputs.notch - outputs.low) * (morph * 2.0F)
                     : outputs.notch + (outputs.high - outputs.notch) * ((morph - 0.5F) * 2.0F);
             }
+            case FilterTopology::Comb: {
+                // Comb spacing follows the cutoff (comb frequency = cutoff Hz);
+                // resonance drives feedback. FilterMode is intentionally ignored:
+                // the dry/wet balance is CombParameters::mix.
+                const float combFrequency = clampf(cutoff, kCombFilterMinFrequencyHz, sampleRate * 0.45F);
+                comb.ensure_capacity(sampleRate);
+                const float delaySamples = sampleRate / combFrequency;
+                const float feedback = clampf(resonance * parameters.selfOscillation *
+                                              parameters.comb.feedbackScale, 0.0F, 0.97F);
+                const float wet = comb.process(fast_tanh(input * parameters.drive), delaySamples,
+                                               feedback, clampf(parameters.comb.damping, 0.0F, 1.0F));
+                const float mix = clampf(parameters.comb.mix, 0.0F, 1.0F);
+                return input * (1.0F - mix) + wet * mix;
+            }
+            case FilterTopology::Formant: {
+                // Cutoff sweeps the whole vowel bank multiplicatively:
+                // 1000 Hz leaves the authored formant frequencies untouched.
+                // FilterMode is intentionally ignored: the vowel shape is the sound.
+                const float freqScale = clampf(cutoff / 1000.0F, 0.25F, 4.0F);
+                const float q = 0.7F + clampf(resonance, 0.0F, 1.0F) * 8.0F;
+                return formant.process(fast_tanh(input * parameters.drive), freqScale, q,
+                                       parameters.formant, sampleRate);
+            }
         }
         return input;
     }
 
     float process(float input, float cutoff, float resonance, const FilterParameters& parameters,
                   float sampleRate, FilterQuality quality = FilterQuality::Standard) noexcept {
-        const unsigned configured = static_cast<unsigned>(parameters.oversampling);
+        // Phase 2: auto oversampling policy upgrades X1 under high resonance /
+        // engaged drive (never downgrades an explicit higher setting).
+        const unsigned configured = static_cast<unsigned>(effective_oversampling(parameters));
         unsigned oversampling = configured == 2U || configured == 4U ? configured : 1U;
         if (quality == FilterQuality::Eco) oversampling = 1U;
         else if (quality == FilterQuality::High) oversampling = std::max(oversampling, 2U);
@@ -1544,6 +1658,8 @@ std::string_view filter_topology_token(FilterTopology topology) noexcept {
         case FilterTopology::MoogLadder: return "moog_ladder";
         case FilterTopology::KorgMs20: return "korg_ms20";
         case FilterTopology::OberheimSem: return "oberheim_sem";
+        case FilterTopology::Comb: return "comb";
+        case FilterTopology::Formant: return "formant";
     }
     return "clean";
 }
@@ -1552,6 +1668,8 @@ std::optional<FilterTopology> parse_filter_topology(std::string_view value) noex
     if (value == "moog_ladder") return FilterTopology::MoogLadder;
     if (value == "korg_ms20") return FilterTopology::KorgMs20;
     if (value == "oberheim_sem") return FilterTopology::OberheimSem;
+    if (value == "comb") return FilterTopology::Comb;
+    if (value == "formant") return FilterTopology::Formant;
     return std::nullopt;
 }
 std::string_view arpeggiator_mode_token(ArpeggiatorMode mode) noexcept {
@@ -1914,6 +2032,8 @@ std::string_view filter_topology_name(FilterTopology topology) noexcept {
         case FilterTopology::MoogLadder: return "Moog Ladder";
         case FilterTopology::KorgMs20: return "Korg MS-20";
         case FilterTopology::OberheimSem: return "Oberheim SEM";
+        case FilterTopology::Comb: return "Comb";
+        case FilterTopology::Formant: return "Formant";
     }
     return "Clean SVF";
 }
@@ -1925,6 +2045,20 @@ std::string_view filter_mode_name(FilterMode mode) noexcept {
         case FilterMode::Notch: return "Notch";
     }
     return "Low-pass";
+}
+
+// Phase 2: auto oversampling policy. Upgrades an explicit X1 setting under high
+// resonance / engaged drive (where nonlinear stages alias most); explicit
+// X2/X4 settings are never downgraded, and X1 presets without a trigger keep
+// their exact old behavior.
+FilterOversampling effective_oversampling(const FilterParameters& params) noexcept {
+    if (params.oversampling != FilterOversampling::X1) return params.oversampling;
+    const bool driveEngaged = params.drive > kAutoOversampleDriveThreshold;
+    if (params.resonance > kAutoOversampleExtremeResonanceThreshold && driveEngaged)
+        return FilterOversampling::X4;
+    if (params.resonance > kAutoOversampleResonanceThreshold || driveEngaged)
+        return FilterOversampling::X2;
+    return FilterOversampling::X1;
 }
 std::string_view arpeggiator_mode_name(ArpeggiatorMode mode) noexcept {
     switch (mode) {
@@ -4949,8 +5083,15 @@ bool SynthPreset::validate(std::string* error) const {
         !in_range(filter.morph, 0.0F, 1.0F) || !in_range(filter.ms20HighPassCutoffHertz, 12.0F, 18000.0F) ||
         !in_range(filter.selfOscillation, 0.5F, 1.35F) ||
         (filter.oversampling != FilterOversampling::X1 && filter.oversampling != FilterOversampling::X2 &&
-         filter.oversampling != FilterOversampling::X4))
+         filter.oversampling != FilterOversampling::X4) ||
+        !in_range(filter.comb.damping, 0.0F, 1.0F) || !in_range(filter.comb.mix, 0.0F, 1.0F) ||
+        !in_range(filter.comb.feedbackScale, 0.0F, 1.5F) || !in_range(filter.formant.dryMix, 0.0F, 1.0F))
         return fail("invalid filter parameters");
+    for (std::size_t i = 0; i < FormantParameters::kBandCount; ++i) {
+        if (!in_range(filter.formant.frequencyHertz[i], 50.0F, 12000.0F) ||
+            !in_range(filter.formant.gains[i], 0.0F, 2.0F))
+            return fail("invalid formant parameters");
+    }
     if (!in_range(tuning.referenceHertz, 400.0F, 480.0F) ||
         !in_range(tuning.transposeSemitones, -48.0F, 48.0F) || !in_range(tuning.fineCents, -100.0F, 100.0F) ||
         !in_range(tuning.analogDriftCents, 0.0F, 30.0F))
@@ -5132,8 +5273,15 @@ std::string SynthPreset::serialize() const {
         << "\nfilter.env.hold=" << filter.envelope.holdSeconds
         << "\nfilter.oversampling=" << static_cast<unsigned>(filter.oversampling)
         << "\nfilter.ms20HighPass=" << filter.ms20HighPassCutoffHertz
-        << "\nfilter.selfOscillation=" << filter.selfOscillation << '\n'
-        << "chord.enabled=" << chord.enabled << "\nchord.type=" << chord_type_token(chord.type)
+        << "\nfilter.selfOscillation=" << filter.selfOscillation
+        << "\nfilter.comb.damping=" << filter.comb.damping
+        << "\nfilter.comb.mix=" << filter.comb.mix
+        << "\nfilter.comb.feedbackScale=" << filter.comb.feedbackScale
+        << "\nfilter.formant.dryMix=" << filter.formant.dryMix << '\n';
+    for (std::size_t i = 0; i < FormantParameters::kBandCount; ++i)
+        out << "filter.formant.freq" << i << "=" << filter.formant.frequencyHertz[i] << '\n'
+            << "filter.formant.gain" << i << "=" << filter.formant.gains[i] << '\n';
+    out << "chord.enabled=" << chord.enabled << "\nchord.type=" << chord_type_token(chord.type)
         << "\nchord.noteCount=" << static_cast<unsigned>(chord.noteCount)
         << "\nchord.inversion=" << static_cast<int>(chord.inversion)
         << "\nchord.spread=" << static_cast<unsigned>(chord.spreadOctaves)
@@ -5486,6 +5634,18 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "filter.oversampling") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && (v==1U||v==2U||v==4U); if(parsed) result.filter.oversampling=static_cast<FilterOversampling>(v); }
         else if (key == "filter.ms20HighPass") parsed = readFloat(result.filter.ms20HighPassCutoffHertz);
         else if (key == "filter.selfOscillation") parsed = readFloat(result.filter.selfOscillation);
+        else if (key == "filter.comb.damping") parsed = readFloat(result.filter.comb.damping);
+        else if (key == "filter.comb.mix") parsed = readFloat(result.filter.comb.mix);
+        else if (key == "filter.comb.feedbackScale") parsed = readFloat(result.filter.comb.feedbackScale);
+        else if (key == "filter.formant.dryMix") parsed = readFloat(result.filter.formant.dryMix);
+        else if (key == "filter.formant.freq0") parsed = readFloat(result.filter.formant.frequencyHertz[0]);
+        else if (key == "filter.formant.freq1") parsed = readFloat(result.filter.formant.frequencyHertz[1]);
+        else if (key == "filter.formant.freq2") parsed = readFloat(result.filter.formant.frequencyHertz[2]);
+        else if (key == "filter.formant.freq3") parsed = readFloat(result.filter.formant.frequencyHertz[3]);
+        else if (key == "filter.formant.gain0") parsed = readFloat(result.filter.formant.gains[0]);
+        else if (key == "filter.formant.gain1") parsed = readFloat(result.filter.formant.gains[1]);
+        else if (key == "filter.formant.gain2") parsed = readFloat(result.filter.formant.gains[2]);
+        else if (key == "filter.formant.gain3") parsed = readFloat(result.filter.formant.gains[3]);
         else if (key == "chord.enabled") parsed = readBool(result.chord.enabled);
         else if (key == "chord.type") { const auto type = parse_chord_type(value); parsed = type.has_value(); if (type) result.chord.type = *type; }
         else if (key == "chord.noteCount") parsed = readUInt(result.chord.noteCount, static_cast<unsigned>(kChordIntervalCount));
@@ -6021,6 +6181,15 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
     result.filter.bassCompensation=lerp(a.filter.bassCompensation,b.filter.bassCompensation); result.filter.morph=lerp(a.filter.morph,b.filter.morph);
     result.filter.ms20HighPassCutoffHertz=lerp(a.filter.ms20HighPassCutoffHertz,b.filter.ms20HighPassCutoffHertz);
     result.filter.selfOscillation=lerp(a.filter.selfOscillation,b.filter.selfOscillation);
+    // Phase 2: morph the new comb/formant parameters too.
+    result.filter.comb.damping=lerp(a.filter.comb.damping,b.filter.comb.damping);
+    result.filter.comb.mix=lerp(a.filter.comb.mix,b.filter.comb.mix);
+    result.filter.comb.feedbackScale=lerp(a.filter.comb.feedbackScale,b.filter.comb.feedbackScale);
+    result.filter.formant.dryMix=lerp(a.filter.formant.dryMix,b.filter.formant.dryMix);
+    for (std::size_t i=0;i<FormantParameters::kBandCount;++i) {
+        result.filter.formant.frequencyHertz[i]=lerp(a.filter.formant.frequencyHertz[i],b.filter.formant.frequencyHertz[i]);
+        result.filter.formant.gains[i]=lerp(a.filter.formant.gains[i],b.filter.formant.gains[i]);
+    }
     result.tuning.referenceHertz=lerp(a.tuning.referenceHertz,b.tuning.referenceHertz); result.tuning.transposeSemitones=lerp(a.tuning.transposeSemitones,b.tuning.transposeSemitones);
     result.tuning.fineCents=lerp(a.tuning.fineCents,b.tuning.fineCents); result.tuning.analogDriftCents=lerp(a.tuning.analogDriftCents,b.tuning.analogDriftCents);
     for (std::size_t i=0;i<kSynthLfoCount;++i) {

@@ -132,7 +132,7 @@ enum class ModulationDestination : std::uint8_t {
     Osc1PulseWidth, Osc2PulseWidth, Osc3PulseWidth, Osc4PulseWidth,
     Osc5PulseWidth, Osc6PulseWidth, Osc7PulseWidth, Osc8PulseWidth,
     Osc1Gain, Osc2Gain, Osc3Gain, Osc4Gain, Osc5Gain, Osc6Gain, Osc7Gain, Osc8Gain,
-    WavetablePosition
+    WavetablePosition, MorphAmount  // Phase 1: added
 };
 
 enum class ChordType : std::uint8_t {
@@ -504,7 +504,13 @@ struct SynthPreset {
     float masterPan{};
     float pitchBendRangeSemitones{2.0F};
     bool midiThru{};
-
+    // Phase 1: A/B patch morphing. When enabled, the preset is interpolated
+    // with morphPresetB by morphAmount (0=A, 1=B). morphAmount is realtime
+    // controllable and a modulation destination.
+    bool morphEnabled{false};
+    float morphAmount{0.0F};
+    // Note: morphPresetB is stored separately (not in serialized text) to
+    // keep patch files small. Set via Synthesizer::set_morph_preset_b().
     static SynthPreset make_default();
     // Factory bank of musically voiced presets. Every pitched preset is voiced
     // so the played MIDI note is the perceived fundamental (no sub-oscillator
@@ -611,6 +617,11 @@ public:
     [[nodiscard]] std::array<SynthVoiceInfo, kSynthVoiceCount> voices() const noexcept;
     [[nodiscard]] SynthMeters meters() const noexcept;
     [[nodiscard]] std::array<SynthModulationInfo, kSynthModulationSlotCount> modulation_activity() const noexcept;
+    void set_morph_preset_b(const SynthPreset& presetB);
+    void clear_morph_preset_b();
+    [[nodiscard]] bool has_morph_preset_b() const noexcept { return hasMorphPresetB_; }
+    void set_morph_amount(float amount);
+
     bool poll_midi_output(MidiMessage& message) noexcept;
 
 private:
@@ -618,6 +629,8 @@ private:
     Impl* impl_{};
     std::uint32_t sampleRate_{};
     SynthPreset preset_{};
+    SynthPreset morphPresetB_{};
+    bool hasMorphPresetB_{false};
     std::atomic<std::uint64_t> currentFrame_{};
 };
 

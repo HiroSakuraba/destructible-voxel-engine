@@ -1474,18 +1474,18 @@ std::optional<ModulationSource> parse_modulation_source(std::string_view value) 
     return std::nullopt;
 }
 std::string_view modulation_destination_token(ModulationDestination destination) noexcept {
-    static constexpr std::array<std::string_view, 40> names{
+    static constexpr std::array<std::string_view, 41> names{
         "none","global_pitch","filter_cutoff","filter_resonance","filter_drive","voice_gain","voice_pan",
         "osc1_pitch","osc2_pitch","osc3_pitch","osc4_pitch","osc5_pitch","osc6_pitch","osc7_pitch","osc8_pitch",
         "osc1_shape","osc2_shape","osc3_shape","osc4_shape","osc5_shape","osc6_shape","osc7_shape","osc8_shape",
         "osc1_pw","osc2_pw","osc3_pw","osc4_pw","osc5_pw","osc6_pw","osc7_pw","osc8_pw",
         "osc1_gain","osc2_gain","osc3_gain","osc4_gain","osc5_gain","osc6_gain","osc7_gain","osc8_gain",
-        "wavetable_pos"};
+        "wavetable_pos","morph_amount"};
     const auto index = static_cast<std::size_t>(destination);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationDestination> parse_modulation_destination(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::WavetablePosition); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::MorphAmount); ++i)
         if (modulation_destination_token(static_cast<ModulationDestination>(i)) == value) return static_cast<ModulationDestination>(i);
     return std::nullopt;
 }
@@ -1840,6 +1840,9 @@ struct Synthesizer::Impl {
     CookedWavetable hqWavetable{};
     // Phase 1: physics modulation bank (global).
     PhysicsModulationBank physicsBank{};
+    // Phase 1: morph B preset (set via API, not serialized).
+    SynthPreset morphPresetB{};
+    bool hasMorphPresetB{false};
     // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
     // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
     // currents advance toward targets once per render block in
@@ -2942,6 +2945,7 @@ struct Synthesizer::Impl {
         float voiceGain{};
         float voicePan{};
         float wavetablePosition{};  // Phase 1: added
+        float morphAmount{};        // Phase 1: added
         std::array<float, kSynthOscillatorCount> pitch{};
         std::array<float, kSynthOscillatorCount> shape{};
         std::array<float, kSynthOscillatorCount> pulseWidth{};
@@ -3025,6 +3029,7 @@ struct Synthesizer::Impl {
             else if (slot.destination == ModulationDestination::VoiceGain) values.voiceGain += amount;
             else if (slot.destination == ModulationDestination::VoicePan) values.voicePan += amount;
             else if (slot.destination == ModulationDestination::WavetablePosition) values.wavetablePosition += amount;
+            else if (slot.destination == ModulationDestination::MorphAmount) values.morphAmount += amount;
             else if (destination >= static_cast<unsigned>(ModulationDestination::Osc1Pitch) &&
                      destination <= static_cast<unsigned>(ModulationDestination::Osc8Pitch))
                 values.pitch[destination - static_cast<unsigned>(ModulationDestination::Osc1Pitch)] += amount * 24.0F;
@@ -4520,7 +4525,7 @@ bool SynthPreset::validate(std::string* error) const {
         if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.bias, -1.0F, 1.0F) ||
             !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
             static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::Lorenz) ||
-            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::WavetablePosition))
+            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::MorphAmount))
             return fail("invalid modulation matrix slot");
     }
     for (float value : macros.values) if (!in_range(value, 0.0F, 1.0F)) return fail("invalid macro value");
@@ -4621,7 +4626,7 @@ bool SynthPreset::validate(std::string* error) const {
         !in_range(limiter.releaseMilliseconds, 1.0F, 5000.0F))
         return fail("invalid limiter parameters");
     if (!in_range(masterGain, 0.0F, 2.0F) || !in_range(masterPan, -1.0F, 1.0F) ||
-        !in_range(pitchBendRangeSemitones, 0.0F, 48.0F))
+        !in_range(pitchBendRangeSemitones, 0.0F, 48.0F) || !in_range(morphAmount, 0.0F, 1.0F))
         return fail("invalid master parameters");
     return true;
 }
@@ -4631,6 +4636,7 @@ std::string SynthPreset::serialize() const {
     out << "DVE_SYNTH_PRESET=5\nname=" << name << '\n'
         << "master.gain=" << masterGain << "\nmaster.pan=" << masterPan
         << "\nmaster.bend=" << pitchBendRangeSemitones << "\nmaster.midiThru=" << midiThru << '\n'
+        << "master.morphEnabled=" << morphEnabled << "\nmaster.morphAmount=" << morphAmount << '\n'
         << "tuning.reference=" << tuning.referenceHertz << "\ntuning.transpose=" << tuning.transposeSemitones
         << "\ntuning.fineCents=" << tuning.fineCents << "\ntuning.driftCents=" << tuning.analogDriftCents << '\n'
         << "quality.oscillator=" << static_cast<unsigned>(oscillatorQuality)
@@ -4947,6 +4953,8 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "master.pan") parsed = readFloat(result.masterPan);
         else if (key == "master.bend") parsed = readFloat(result.pitchBendRangeSemitones);
         else if (key == "master.midiThru") parsed = readBool(result.midiThru);
+        else if (key == "master.morphEnabled") parsed = readBool(result.morphEnabled);
+        else if (key == "master.morphAmount") parsed = readFloat(result.morphAmount);
         else if (key == "tuning.reference") parsed = readFloat(result.tuning.referenceHertz);
         else if (key == "tuning.transpose") parsed = readFloat(result.tuning.transposeSemitones);
         else if (key == "tuning.fineCents") parsed = readFloat(result.tuning.fineCents);
@@ -5485,9 +5493,18 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
         r.stereoDivergence=lerp(x.stereoDivergence,y.stereoDivergence);
     }
     auto morphEnvelope = [&](AdsrParameters& r, const AdsrParameters& x, const AdsrParameters& y) {
-        r.attackSeconds=lerp(x.attackSeconds,y.attackSeconds); r.decaySeconds=lerp(x.decaySeconds,y.decaySeconds);
-        r.sustainLevel=lerp(x.sustainLevel,y.sustainLevel); r.releaseSeconds=lerp(x.releaseSeconds,y.releaseSeconds);
-        r.delaySeconds=lerp(x.delaySeconds,y.delaySeconds); r.holdSeconds=lerp(x.holdSeconds,y.holdSeconds);
+        // Phase 1: time parameters morph in log domain (perceptually uniform).
+        auto logLerp = [t](float a, float b) {
+            const float la = std::log(std::max(0.001F, a));
+            const float lb = std::log(std::max(0.001F, b));
+            return std::exp(la + (lb - la) * t);
+        };
+        r.attackSeconds=logLerp(x.attackSeconds,y.attackSeconds);
+        r.decaySeconds=logLerp(x.decaySeconds,y.decaySeconds);
+        r.sustainLevel=lerp(x.sustainLevel,y.sustainLevel);
+        r.releaseSeconds=logLerp(x.releaseSeconds,y.releaseSeconds);
+        r.delaySeconds=logLerp(x.delaySeconds,y.delaySeconds);
+        r.holdSeconds=logLerp(x.holdSeconds,y.holdSeconds);
     };
     morphEnvelope(result.ampEnvelope,a.ampEnvelope,b.ampEnvelope);
     morphEnvelope(result.filter.envelope,a.filter.envelope,b.filter.envelope);
@@ -5499,7 +5516,16 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
     result.filter.selfOscillation=lerp(a.filter.selfOscillation,b.filter.selfOscillation);
     result.tuning.referenceHertz=lerp(a.tuning.referenceHertz,b.tuning.referenceHertz); result.tuning.transposeSemitones=lerp(a.tuning.transposeSemitones,b.tuning.transposeSemitones);
     result.tuning.fineCents=lerp(a.tuning.fineCents,b.tuning.fineCents); result.tuning.analogDriftCents=lerp(a.tuning.analogDriftCents,b.tuning.analogDriftCents);
-    for (std::size_t i=0;i<kSynthLfoCount;++i) { result.lfos[i].rateHertz=lerp(a.lfos[i].rateHertz,b.lfos[i].rateHertz); result.lfos[i].depth=lerp(a.lfos[i].depth,b.lfos[i].depth); result.lfos[i].phase=lerp(a.lfos[i].phase,b.lfos[i].phase); result.lfos[i].fadeInSeconds=lerp(a.lfos[i].fadeInSeconds,b.lfos[i].fadeInSeconds); result.lfos[i].beatsPerCycle=lerp(a.lfos[i].beatsPerCycle,b.lfos[i].beatsPerCycle); }
+    for (std::size_t i=0;i<kSynthLfoCount;++i) {
+        // Phase 1: LFO rate morphs in log domain.
+        const float rateA = std::max(0.01F, a.lfos[i].rateHertz);
+        const float rateB = std::max(0.01F, b.lfos[i].rateHertz);
+        result.lfos[i].rateHertz=std::exp(std::log(rateA) + (std::log(rateB) - std::log(rateA)) * t);
+        result.lfos[i].depth=lerp(a.lfos[i].depth,b.lfos[i].depth);
+        result.lfos[i].phase=lerp(a.lfos[i].phase,b.lfos[i].phase);
+        result.lfos[i].fadeInSeconds=lerp(a.lfos[i].fadeInSeconds,b.lfos[i].fadeInSeconds);
+        result.lfos[i].beatsPerCycle=lerp(a.lfos[i].beatsPerCycle,b.lfos[i].beatsPerCycle);
+    }
     for (std::size_t i=0;i<kSynthModulationSlotCount;++i) result.modulation[i].amount=lerp(a.modulation[i].amount,b.modulation[i].amount);
     for (std::size_t i=0;i<kSynthMacroCount;++i) result.macros.values[i]=lerp(a.macros.values[i],b.macros.values[i]);
     result.masterGain=lerp(a.masterGain,b.masterGain); result.masterPan=lerp(a.masterPan,b.masterPan); result.pitchBendRangeSemitones=lerp(a.pitchBendRangeSemitones,b.pitchBendRangeSemitones);
@@ -5507,7 +5533,9 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
     result.eq.lowGainDb=lerp(a.eq.lowGainDb,b.eq.lowGainDb); result.eq.midGainDb=lerp(a.eq.midGainDb,b.eq.midGainDb); result.eq.highGainDb=lerp(a.eq.highGainDb,b.eq.highGainDb);
     result.chorus.rateHertz=lerp(a.chorus.rateHertz,b.chorus.rateHertz); result.chorus.depthMilliseconds=lerp(a.chorus.depthMilliseconds,b.chorus.depthMilliseconds); result.chorus.mix=lerp(a.chorus.mix,b.chorus.mix);
     result.phaser.rateHertz=lerp(a.phaser.rateHertz,b.phaser.rateHertz); result.phaser.depth=lerp(a.phaser.depth,b.phaser.depth); result.phaser.feedback=lerp(a.phaser.feedback,b.phaser.feedback); result.phaser.mix=lerp(a.phaser.mix,b.phaser.mix);
-    result.delay.timeSeconds=lerp(a.delay.timeSeconds,b.delay.timeSeconds); result.delay.feedback=lerp(a.delay.feedback,b.delay.feedback); result.delay.mix=lerp(a.delay.mix,b.delay.mix);
+    result.delay.timeSeconds=std::exp(std::log(std::max(0.001F,a.delay.timeSeconds)) +
+        (std::log(std::max(0.001F,b.delay.timeSeconds)) - std::log(std::max(0.001F,a.delay.timeSeconds))) * t);
+    result.delay.feedback=lerp(a.delay.feedback,b.delay.feedback); result.delay.mix=lerp(a.delay.mix,b.delay.mix);
     result.reverb.roomSize=lerp(a.reverb.roomSize,b.reverb.roomSize); result.reverb.damping=lerp(a.reverb.damping,b.reverb.damping); result.reverb.width=lerp(a.reverb.width,b.reverb.width); result.reverb.mix=lerp(a.reverb.mix,b.reverb.mix);
     result.wavetable.enabled = a.wavetable.enabled || b.wavetable.enabled;
     result.wavetable.frameCount = std::max(a.wavetable.frameCount,b.wavetable.frameCount);
@@ -5608,11 +5636,38 @@ void Synthesizer::set_preset(const SynthPreset& preset) {
     std::string error;
     if (!preset.validate(&error)) return;
     preset_ = preset;
-    const RealtimePreset realtime = realtime_preset(preset_);
+    // Phase 1: apply A/B morph if enabled.
+    SynthPreset effective = preset_;
+    if (preset_.morphEnabled && hasMorphPresetB_) {
+        effective = morph_synth_presets(preset_, morphPresetB_, preset_.morphAmount);
+        // Preserve morph state in the effective preset.
+        effective.morphEnabled = true;
+        effective.morphAmount = preset_.morphAmount;
+    }
+    const RealtimePreset realtime = realtime_preset(effective);
     while (!impl_->presetIn.push(realtime)) {
         RealtimePreset discarded{};
         if (!impl_->presetIn.pop(discarded)) break;
     }
+}
+
+void Synthesizer::set_morph_preset_b(const SynthPreset& presetB) {
+    std::string error;
+    if (!presetB.validate(&error)) return;
+    morphPresetB_ = presetB;
+    hasMorphPresetB_ = true;
+    // Re-apply current preset to pick up the B state.
+    set_preset(preset_);
+}
+
+void Synthesizer::clear_morph_preset_b() {
+    hasMorphPresetB_ = false;
+    set_preset(preset_);
+}
+
+void Synthesizer::set_morph_amount(float amount) {
+    preset_.morphAmount = std::clamp(amount, 0.0F, 1.0F);
+    set_preset(preset_);
 }
 
 bool Synthesizer::set_sample_map(const SynthSampleMap& sampleMap, std::string* error) {

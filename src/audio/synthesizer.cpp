@@ -2,6 +2,7 @@
 #include "dve/audio/audio_asset.hpp"
 #include "dve/audio/wavetable.hpp"
 #include "dve/audio/physics_modulation.hpp"
+#include "dve/audio/generative_conductor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2300,6 +2301,13 @@ struct Synthesizer::Impl {
     // Phase 3: generative step sequencer (SYN-012). Driven once per render
     // block by advance_sequencer(); disabled by default.
     Sequencer sequencer{};
+    // Phase 3: generative conductor (attractor -> live synth mapping). Driven
+    // once per render block; a no-op unless enabled.
+    GenerativeConductor conductor{};
+    // Phase 3: conductor-driven filter cutoff multiplier (1.0 = no change).
+    // Written by the conductor on the render thread, read by the voice DSP
+    // on the same thread.
+    float conductorCutoffMultiplier{1.0F};
     // Phase 1: morph B preset (set via API, not serialized).
     SynthPreset morphPresetB{};
     bool hasMorphPresetB{false};
@@ -4291,7 +4299,10 @@ struct Synthesizer::Impl {
             const float timbreValue = mpe_master(v.channel) ? v.timbre : controller[74];
             const float cutoffCc = timbreValue > 0.0F ? std::exp2((timbreValue - 0.5F) * 8.0F) : 1.0F;
             const float keyTrackOctaves = (static_cast<float>(v.note) - 60.0F) / 12.0F * parameters.filter.keyTrack;
+            // Phase 3: the generative conductor scales the base cutoff with
+            // brightness (1.0 when the conductor is disabled: no-op).
             const float cutoff = std::exp2(smoothedFilterCutoffLog.current) * cutoffCc *
+                                 conductorCutoffMultiplier *
                                  std::exp2(parameters.filter.envelopeAmountOctaves * filterEnv +
                                            keyTrackOctaves + mod.filterCutoff);
             const float resonance = clampf(smoothedFilterResonance.current + controller[71] * 0.5F +
@@ -4951,6 +4962,12 @@ SynthPreset SynthPreset::make_default() {
     }
     result.arpeggiator.stepCount = 8;
     for (auto& step : result.arpeggiator.steps) step = {};
+    // Phase 3: sequencer steps default to the musical lane defaults so an
+    // old preset string (no seq.* keys) loads with a sensible program.
+    for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+        const SequencerLane lane = static_cast<SequencerLane>(li);
+        for (auto& step : result.sequencer.lanes[li].steps) step = default_sequencer_step(lane);
+    }
     return result;
 }
 
@@ -5200,6 +5217,91 @@ SynthPreset make_cloud_delay() {
     preset.reverb.mix = 0.15F;
     return preset;
 }
+
+// Phase 3 showcase: a warm pad whose generative sequencer (A minor pentatonic,
+// uneven lane lengths for phasing polyrhythms) is steered live by the
+// attractor conductor over a ~2.7-minute arc. Oscillators stay at unison pitch
+// with no sub-oscillator stack so the played note remains the fundamental.
+SynthPreset make_generative_attractor_pad() {
+    auto preset = base_preset("Generative Attractor Pad");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, -6.0F, 0.26F);
+    enable_osc(preset, 1, OscillatorWaveform::Saw, 0.0F, 6.0F, 0.26F);
+    enable_osc(preset, 2, OscillatorWaveform::Triangle, 12.0F, 0.0F, 0.10F);
+    preset.ampEnvelope = {0.90F, 0.50F, 0.85F, 1.20F, EnvelopeCurve::Exponential};
+    lowpass(preset, 2200.0F, 0.10F, 0.5F, 0.40F, 0.60F, 0.60F, 0.80F);
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.22F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.70F;
+    preset.reverb.mix = 0.25F;
+
+    // Generative sequencer: uneven lane lengths (7/5/11/8/13/9/3) phase
+    // against each other; A minor pentatonic around the played note.
+    auto& seq = preset.sequencer;
+    seq.enabled = true;
+    seq.channel = 0;
+    seq.scale = SequencerScale::PentatonicMinor;
+    seq.rootNote = 69;  // A4: the preset test holds note 69, so the sequence reinforces it
+    seq.octaveRange = 2;
+    seq.randomSeed = 0xA771AC70U;
+    const std::uint8_t lengths[kSequencerLaneCount] = {7, 5, 11, 8, 13, 9, 3};
+    const float mutations[kSequencerLaneCount] = {0.30F, 0.20F, 0.15F, 0.25F, 0.20F, 0.35F, 0.15F};
+    for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+        auto& lane = seq.lanes[li];
+        lane.stepCount = lengths[li];
+        lane.direction = SequencerDirection::Forward;
+        lane.mutationAmount = mutations[li];
+        lane.patternCycles = 4;
+        // Start from the musical lane defaults so only authored steps
+        // appear in the serialized preset text.
+        const SequencerLane which = static_cast<SequencerLane>(li);
+        for (auto& step : lane.steps) step = default_sequencer_step(which);
+    }
+    // Pitch: A minor pentatonic climb, capped at +10 semitones so sequence
+    // notes stay clear of the octave-above test band.
+    const float pitchSteps[7] = {0.0F, 3.0F, 5.0F, 7.0F, 10.0F, 7.0F, 5.0F};
+    for (std::size_t i = 0; i < 7; ++i)
+        seq.lanes[0].steps[i].value = pitchSteps[i];
+    const float velocitySteps[5] = {0.90F, 0.70F, 0.95F, 0.60F, 0.85F};
+    for (std::size_t i = 0; i < 5; ++i)
+        seq.lanes[1].steps[i].value = velocitySteps[i];
+    const float gateSteps[11] = {0.80F, 0.80F, 0.50F, 0.80F, 0.80F, 0.60F,
+                                 0.80F, 0.80F, 0.50F, 0.80F, 0.80F};
+    for (std::size_t i = 0; i < 11; ++i)
+        seq.lanes[2].steps[i].value = gateSteps[i];
+    const float timbreSteps[8] = {0.30F, 0.40F, 0.50F, 0.60F, 0.50F, 0.40F, 0.35F, 0.45F};
+    for (std::size_t i = 0; i < 8; ++i)
+        seq.lanes[3].steps[i].value = timbreSteps[i];
+    for (std::size_t i = 0; i < 12; ++i)
+        seq.lanes[4].steps[i].value = 1.0F;
+    seq.lanes[4].steps[12].value = 0.60F;
+    const float morphSteps[9] = {0.20F, 0.30F, 0.40F, 0.50F, 0.60F, 0.50F, 0.40F, 0.30F, 0.25F};
+    for (std::size_t i = 0; i < 9; ++i)
+        seq.lanes[5].steps[i].value = morphSteps[i];
+    const float panSteps[3] = {-0.40F, 0.40F, 0.00F};
+    for (std::size_t i = 0; i < 3; ++i)
+        seq.lanes[6].steps[i].value = panSteps[i];
+
+    // Genetics: moderate default mutation intensity, nothing locked.
+    preset.genetics.mutationIntensity = 0.30F;
+    preset.genetics.mutationSeed = 0xC0FFEE42ULL;
+    preset.genetics.lockedGroups = 0;
+
+    // Attractor: ~2.7-minute arc at 100 BPM (68 bars of 4/4).
+    preset.attractor.enabled = true;
+    preset.attractor.config.bpm = 100.0;
+    preset.attractor.config.barsHome = 16.0;
+    preset.attractor.config.barsRise = 16.0;
+    preset.attractor.config.barsTension = 12.0;
+    preset.attractor.config.barsPeak = 8.0;
+    preset.attractor.config.barsFall = 16.0;
+    preset.attractor.config.seed = 0x5EED1234ULL;
+
+    // The conductor's morph wander steers this preset's live evolution.
+    preset.morphEnabled = true;
+    preset.morphAmount = 0.30F;
+    return preset;
+}
 } // namespace
 
 std::vector<SynthPreset> SynthPreset::builtin_presets() {
@@ -5218,6 +5320,7 @@ std::vector<SynthPreset> SynthPreset::builtin_presets() {
         make_sampled_loop_vox(),
         make_modal_marimba(),
         make_cloud_delay(),
+        make_generative_attractor_pad(),
     };
 }
 
@@ -5438,6 +5541,53 @@ bool SynthPreset::validate(std::string* error) const {
     if (!in_range(masterGain, 0.0F, 2.0F) || !in_range(masterPan, -1.0F, 1.0F) ||
         !in_range(pitchBendRangeSemitones, 0.0F, 48.0F) || !in_range(morphAmount, 0.0F, 1.0F))
         return fail("invalid master parameters");
+    // Phase 3: generative sequencer / genetics / attractor ranges.
+    {
+        if (sequencer.channel > 15U || sequencer.rootNote > 127U || sequencer.octaveRange > 8U ||
+            static_cast<unsigned>(sequencer.scale) > 5U)
+            return fail("invalid sequencer globals");
+        for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+            const auto& lane = sequencer.lanes[li];
+            const SequencerLane which = static_cast<SequencerLane>(li);
+            if (lane.stepCount < 1U || lane.stepCount > kSequencerMaxSteps ||
+                static_cast<unsigned>(lane.direction) > 3U ||
+                !in_range(lane.mutationAmount, 0.0F, 1.0F))
+                return fail("invalid sequencer lane header");
+            float valueLo = -1.0F, valueHi = 1.0F;
+            switch (which) {
+                case SequencerLane::Pitch: valueLo = -48.0F; valueHi = 48.0F; break;
+                case SequencerLane::Velocity:
+                case SequencerLane::Gate:
+                case SequencerLane::Probability:
+                case SequencerLane::Morph: valueLo = 0.0F; valueHi = 1.0F; break;
+                case SequencerLane::Timbre:
+                case SequencerLane::Pan: valueLo = -1.0F; valueHi = 1.0F; break;
+                case SequencerLane::Count: break;
+            }
+            for (const auto& step : lane.steps) {
+                if (!in_range(step.value, valueLo, valueHi) ||
+                    !in_range(step.probability, 0.0F, 1.0F) ||
+                    step.ratchets < 1U || step.ratchets > 8U ||
+                    !in_range(step.microtiming, -1.0F, 1.0F) ||
+                    !in_range(step.accent, 0.0F, 4.0F) ||
+                    static_cast<unsigned>(step.condition) > 3U ||
+                    step.conditionN < 1U || step.conditionN > 64U)
+                    return fail("invalid sequencer step");
+            }
+        }
+        if (!in_range(genetics.mutationIntensity, 0.0F, 1.0F))
+            return fail("invalid genetics settings");
+        const auto& attractorConfig = attractor.config;
+        const auto finiteDouble = [](double v) { return std::isfinite(v); };
+        if (!finiteDouble(attractorConfig.bpm) || attractorConfig.bpm < 20.0 ||
+            attractorConfig.bpm > 400.0 || !finiteDouble(attractorConfig.barsHome) ||
+            attractorConfig.barsHome < 0.0 || !finiteDouble(attractorConfig.barsRise) ||
+            attractorConfig.barsRise < 0.0 || !finiteDouble(attractorConfig.barsTension) ||
+            attractorConfig.barsTension < 0.0 || !finiteDouble(attractorConfig.barsPeak) ||
+            attractorConfig.barsPeak < 0.0 || !finiteDouble(attractorConfig.barsFall) ||
+            attractorConfig.barsFall < 0.0)
+            return fail("invalid attractor config");
+    }
     return true;
 }
 
@@ -5762,6 +5912,56 @@ std::string SynthPreset::serialize() const {
         << "\ncompressor.releaseMs=" << compressor.releaseMilliseconds << "\ncompressor.makeupDb=" << compressor.makeupDb << '\n'
         << "limiter.enabled=" << limiter.enabled << "\nlimiter.ceilingDb=" << limiter.ceilingDb
         << "\nlimiter.releaseMs=" << limiter.releaseMilliseconds << '\n';
+    // Phase 3: generative sequencer / genetics / attractor state. Floats use
+    // 9 significant digits so they parse back bit-exactly; steps equal to the
+    // musical lane default are omitted (parse() fills them back in).
+    {
+        auto precise = [](float value) {
+            std::ostringstream ss;
+            ss << std::setprecision(9) << value;
+            return ss.str();
+        };
+        out << "seq.enabled=" << sequencer.enabled << "\nseq.channel="
+            << static_cast<unsigned>(sequencer.channel)
+            << "\nseq.scale=" << static_cast<unsigned>(sequencer.scale)
+            << "\nseq.root=" << static_cast<unsigned>(sequencer.rootNote)
+            << "\nseq.octaves=" << static_cast<unsigned>(sequencer.octaveRange)
+            << "\nseq.seed=" << sequencer.randomSeed << '\n';
+        for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+            const auto& lane = sequencer.lanes[li];
+            const std::string prefix = "seq.lane" + std::to_string(li) + ".";
+            out << prefix << "steps=" << static_cast<unsigned>(lane.stepCount) << '\n'
+                << prefix << "direction=" << static_cast<unsigned>(lane.direction) << '\n'
+                << prefix << "mutation=" << precise(lane.mutationAmount) << '\n'
+                << prefix << "cycles=" << static_cast<unsigned>(lane.patternCycles) << '\n';
+            const SequencerLane which = static_cast<SequencerLane>(li);
+            for (std::size_t si = 0; si < lane.steps.size(); ++si) {
+                const SequencerStep& step = lane.steps[si];
+                if (step == default_sequencer_step(which)) continue;
+                const std::string sprefix = prefix + "step" + std::to_string(si) + ".";
+                out << sprefix << "value=" << precise(step.value) << '\n'
+                    << sprefix << "probability=" << precise(step.probability) << '\n'
+                    << sprefix << "ratchets=" << static_cast<unsigned>(step.ratchets) << '\n'
+                    << sprefix << "microtiming=" << precise(step.microtiming) << '\n'
+                    << sprefix << "glide=" << step.glide << '\n'
+                    << sprefix << "accent=" << precise(step.accent) << '\n'
+                    << sprefix << "skip=" << step.skip << '\n'
+                    << sprefix << "condition=" << static_cast<unsigned>(step.condition) << '\n'
+                    << sprefix << "conditionN=" << static_cast<unsigned>(step.conditionN) << '\n';
+            }
+        }
+        out << "gen.mutationIntensity=" << precise(genetics.mutationIntensity)
+            << "\ngen.mutationSeed=" << genetics.mutationSeed
+            << "\ngen.lockedGroups=" << static_cast<unsigned>(genetics.lockedGroups) << '\n'
+            << "attr.enabled=" << attractor.enabled
+            << "\nattr.bpm=" << std::setprecision(9) << attractor.config.bpm << '\n'
+            << "attr.barsHome=" << attractor.config.barsHome
+            << "\nattr.barsRise=" << attractor.config.barsRise
+            << "\nattr.barsTension=" << attractor.config.barsTension
+            << "\nattr.barsPeak=" << attractor.config.barsPeak
+            << "\nattr.barsFall=" << attractor.config.barsFall
+            << "\nattr.seed=" << attractor.config.seed << '\n';
+    }
     return out.str();
 }
 
@@ -6256,6 +6456,110 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (key == "limiter.releaseMs") parsed = readFloat(result.limiter.releaseMilliseconds);
             else recognized = false;
         }
+        // Phase 3: generative sequencer / genetics / attractor state. All
+        // keys are optional: old preset strings simply keep make_default()
+        // values for anything absent.
+        if (!recognized && key.starts_with("seq.")) {
+            recognized = true;
+            const std::string_view rest = std::string_view(key).substr(4U);
+            if (rest == "enabled") parsed = readBool(result.sequencer.enabled);
+            else if (rest == "channel") parsed = readUInt(result.sequencer.channel, 15U);
+            else if (rest == "scale") {
+                unsigned v = 0U;
+                parsed = parse_number<unsigned>(value, v) && v <= 5U;
+                if (parsed) result.sequencer.scale = static_cast<SequencerScale>(v);
+            }
+            else if (rest == "root") parsed = readUInt(result.sequencer.rootNote, 127U);
+            else if (rest == "octaves") parsed = readUInt(result.sequencer.octaveRange, 8U);
+            else if (rest == "seed") parsed = parse_number<std::uint32_t>(value, result.sequencer.randomSeed);
+            else if (rest.starts_with("lane")) {
+                const std::string_view afterLane = rest.substr(4U);
+                const auto dot = afterLane.find('.');
+                std::size_t li = 0U;
+                if (dot == std::string_view::npos ||
+                    !parse_number<std::size_t>(afterLane.substr(0, dot), li) ||
+                    li >= kSequencerLaneCount) {
+                    parsed = false;
+                } else {
+                    auto& lane = result.sequencer.lanes[li];
+                    const std::string_view field = afterLane.substr(dot + 1U);
+                    if (field == "steps") {
+                        unsigned v = 0U;
+                        parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 64U;
+                        if (parsed) lane.stepCount = static_cast<std::uint8_t>(v);
+                    }
+                    else if (field == "direction") {
+                        unsigned v = 0U;
+                        parsed = parse_number<unsigned>(value, v) && v <= 3U;
+                        if (parsed) lane.direction = static_cast<SequencerDirection>(v);
+                    }
+                    else if (field == "mutation") parsed = readFloat(lane.mutationAmount);
+                    else if (field == "cycles") parsed = readUInt(lane.patternCycles, 255U);
+                    else if (field.starts_with("step")) {
+                        const std::string_view afterStep = field.substr(4U);
+                        const auto dot2 = afterStep.find('.');
+                        std::size_t si = 0U;
+                        if (dot2 == std::string_view::npos ||
+                            !parse_number<std::size_t>(afterStep.substr(0, dot2), si) ||
+                            si >= kSequencerMaxSteps) {
+                            parsed = false;
+                        } else {
+                            auto& step = lane.steps[si];
+                            const std::string_view sub = afterStep.substr(dot2 + 1U);
+                            if (sub == "value") parsed = readFloat(step.value);
+                            else if (sub == "probability") parsed = readFloat(step.probability);
+                            else if (sub == "ratchets") {
+                                unsigned v = 0U;
+                                parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 8U;
+                                if (parsed) step.ratchets = static_cast<std::uint8_t>(v);
+                            }
+                            else if (sub == "microtiming") parsed = readFloat(step.microtiming);
+                            else if (sub == "glide") parsed = readBool(step.glide);
+                            else if (sub == "accent") parsed = readFloat(step.accent);
+                            else if (sub == "skip") parsed = readBool(step.skip);
+                            else if (sub == "condition") {
+                                unsigned v = 0U;
+                                parsed = parse_number<unsigned>(value, v) && v <= 3U;
+                                if (parsed)
+                                    step.condition = static_cast<SequencerStepCondition>(v);
+                            }
+                            else if (sub == "conditionN") {
+                                unsigned v = 0U;
+                                parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 64U;
+                                if (parsed) step.conditionN = static_cast<std::uint8_t>(v);
+                            }
+                            else recognized = false;
+                        }
+                    }
+                    else recognized = false;
+                }
+            }
+            else recognized = false;
+        }
+        if (!recognized && key.starts_with("gen.")) {
+            recognized = true;
+            const std::string_view rest = std::string_view(key).substr(4U);
+            if (rest == "mutationIntensity") parsed = readFloat(result.genetics.mutationIntensity);
+            else if (rest == "mutationSeed")
+                parsed = parse_number<std::uint64_t>(value, result.genetics.mutationSeed);
+            else if (rest == "lockedGroups") parsed = readUInt(result.genetics.lockedGroups, 255U);
+            else recognized = false;
+        }
+        if (!recognized && key.starts_with("attr.")) {
+            recognized = true;
+            const std::string_view rest = std::string_view(key).substr(5U);
+            auto readDouble = [&](double& target) { return parse_number<double>(value, target); };
+            if (rest == "enabled") parsed = readBool(result.attractor.enabled);
+            else if (rest == "bpm") parsed = readDouble(result.attractor.config.bpm);
+            else if (rest == "barsHome") parsed = readDouble(result.attractor.config.barsHome);
+            else if (rest == "barsRise") parsed = readDouble(result.attractor.config.barsRise);
+            else if (rest == "barsTension") parsed = readDouble(result.attractor.config.barsTension);
+            else if (rest == "barsPeak") parsed = readDouble(result.attractor.config.barsPeak);
+            else if (rest == "barsFall") parsed = readDouble(result.attractor.config.barsFall);
+            else if (rest == "seed")
+                parsed = parse_number<std::uint64_t>(value, result.attractor.config.seed);
+            else recognized = false;
+        }
         if (recognized && !parsed) return fail("invalid value for " + key);
     }
     if (version != 1 && version != 2 && version != 3 && version != 4 && version != 5) return fail("missing or unsupported synth preset version");
@@ -6553,7 +6857,16 @@ Synthesizer::~Synthesizer() { delete impl_; }
 void Synthesizer::set_preset(const SynthPreset& preset) {
     std::string error;
     if (!preset.validate(&error)) return;
+    // Phase 3: the preset owns the sequencer's authored config. Apply it to
+    // the live sequencer only when it actually changed, so per-block
+    // set_preset() calls (e.g. the conductor's morph walk) never disturb a
+    // running sequence or reseed its RNG.
+    const bool sequencerChanged = !(preset.sequencer == preset_.sequencer);
     preset_ = preset;
+    if (sequencerChanged) impl_->sequencer.apply_config(preset.sequencer);
+    // Phase 3: install the preset's attractor settings (resets the phase
+    // machine only when they actually changed).
+    impl_->conductor.configure(preset.attractor.enabled, preset.attractor.config);
     // Phase 1: apply A/B morph if enabled.
     SynthPreset effective = preset_;
     if (preset_.morphEnabled && hasMorphPresetB_) {
@@ -6591,6 +6904,22 @@ void Synthesizer::set_morph_amount(float amount) {
 // Phase 3: generative sequencer accessors.
 Sequencer& Synthesizer::sequencer() noexcept { return impl_->sequencer; }
 const Sequencer& Synthesizer::sequencer() const noexcept { return impl_->sequencer; }
+
+// Phase 3: generative conductor accessors.
+GenerativeConductor& Synthesizer::generative_conductor() noexcept { return impl_->conductor; }
+const GenerativeConductor& Synthesizer::generative_conductor() const noexcept {
+    return impl_->conductor;
+}
+void Synthesizer::set_generative_conductor_enabled(bool enabled) noexcept {
+    impl_->conductor.set_enabled(enabled);
+}
+bool Synthesizer::generative_conductor_enabled() const noexcept {
+    return impl_->conductor.enabled();
+}
+void Synthesizer::set_conductor_cutoff_multiplier(float multiplier) noexcept {
+    impl_->conductorCutoffMultiplier =
+        std::clamp(multiplier, 0.125F, 8.0F);  // +/-3 octaves, never zero/negative
+}
 
 bool Synthesizer::set_sample_map(const SynthSampleMap& sampleMap, std::string* error) {
     if (!sampleMap.validate(error)) return false;
@@ -6719,6 +7048,10 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     impl_->track_tempo_synced_delay();
     // Phase 3: step physics modulation bank.
     impl_->physicsBank.step(static_cast<float>(frameCount) / impl_->sampleRate);
+    // Phase 3: generative conductor maps attractor state onto the live synth
+    // (no-op unless enabled). Runs before the sequencer so the sequencer
+    // advances with this block's mapped scale/density/mutation.
+    impl_->conductor.process(*this, static_cast<double>(frameCount) / impl_->sampleRate);
     // Phase 3: advance the generative sequencer once per block (no-op unless enabled).
     impl_->advance_sequencer(frameCount);
     if (impl_->transportRestartRequested.exchange(false, std::memory_order_acq_rel)) {

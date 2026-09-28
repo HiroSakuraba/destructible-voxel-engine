@@ -21,8 +21,9 @@ enum class SynthPanelPage : std::uint8_t {
     Effects,
     Presets,
     Expression,
+    Generative,
 };
-inline constexpr std::size_t kSynthPanelPageCount = 7;
+inline constexpr std::size_t kSynthPanelPageCount = 8;
 inline constexpr std::size_t kSynthParameterRowCount = 30;
 inline constexpr std::size_t kSynthOscillatorAdvancedPropertyCount = 10;
 inline constexpr std::size_t kSynthArpStepPropertyCount = 18;
@@ -107,6 +108,7 @@ public:
     [[nodiscard]] std::size_t selected_effect() const noexcept { return selectedEffect_; }
     [[nodiscard]] std::size_t selected_modulation_slot() const noexcept { return selectedModulationSlot_; }
     [[nodiscard]] std::size_t selected_preset_entry() const noexcept { return selectedPresetEntry_; }
+    [[nodiscard]] std::size_t selected_sequencer_lane() const noexcept { return selectedSequencerLane_; }
     [[nodiscard]] std::size_t selected_midi_learn_mapping() const noexcept { return selectedMidiLearnMapping_; }
     [[nodiscard]] std::size_t selected_wavetable_frame() const noexcept { return selectedWavetableFrame_; }
     [[nodiscard]] float preset_morph_amount() const noexcept { return presetMorphAmount_; }
@@ -150,6 +152,7 @@ private:
     std::size_t selectedEffect_{};
     std::size_t selectedModulationSlot_{};
     std::size_t selectedPresetEntry_{};
+    std::size_t selectedSequencerLane_{};
     std::size_t selectedMidiLearnMapping_{};
     std::size_t selectedWavetableFrame_{};
     bool wavetableDrawing_{};

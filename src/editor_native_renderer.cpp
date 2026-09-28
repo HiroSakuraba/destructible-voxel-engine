@@ -859,7 +859,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                  "Oct " + std::to_string(controller.synth_panel().octave()), text);
     button(layout.octaveUpButton, "+"); button(layout.midiThruButton, "MIDI THRU", preset.midiThru);
     static constexpr std::array<std::string_view, kSynthPanelPageCount> pageNames{
-        "OSC", "FILTER / ENV", "MOD MATRIX", "PERFORM", "EFFECTS", "PRESETS", "EXPRESSION"};
+        "OSC", "FILTER / ENV", "MOD MATRIX", "PERFORM", "EFFECTS", "PRESETS", "EXPRESSION", "GENERATIVE"};
     for (std::size_t i = 0; i < layout.tabButtons.size(); ++i)
         button(layout.tabButtons[i], pageNames[i], static_cast<std::size_t>(controller.synth_panel().page()) == i);
 
@@ -1334,6 +1334,53 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
         active[8]=preset.mpe.masterSustainToMembers; active[9]=preset.microtuning.enabled;
         active[12]=preset.unison.enabled; active[17]=preset.unison.preserveLevel;
         active[23]=preset.metadata.favorite;
+        draw_parameter_rows(labels, values, toggles, active);
+    } else if (page == SynthPanelPage::Generative) {
+        // Phase 3: generative sequencer / patch genetics / attractor conductor.
+        static constexpr std::array<std::string_view, 7> laneNames{
+            "Pitch", "Velocity", "Gate", "Timbre", "Probability", "Morph", "Pan"};
+        static constexpr std::array<std::string_view, 6> seqScaleNames{
+            "Chromatic", "Major", "Minor", "Pent major", "Pent minor", "Dorian"};
+        static constexpr std::array<std::string_view, 4> directionNames{
+            "Forward", "Reverse", "Ping-pong", "Random"};
+        static constexpr std::array<std::string_view, 8> geneNames{
+            "Oscillators", "Spectral", "Filters", "Envelopes", "Modulation", "Stereo", "Sequencer", "FX"};
+        static constexpr std::array<std::string_view, 12> pitchNames{
+            "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+        const auto& seq = preset.sequencer;
+        const std::size_t selectedLane = controller.synth_panel().selected_sequencer_lane();
+        std::array<std::string, kSynthParameterRowCount> labels{
+            "Sequencer",
+            "Pitch steps", "Velocity steps", "Gate steps", "Timbre steps",
+            "Probability steps", "Morph steps", "Pan steps",
+            "Edit lane", "Lane direction", "Scale", "Scale root", "Octave range", "Seq seed",
+            "Mutation intensity", "Mutation seed", "Mutate now", "Breed A x B",
+            "Lock oscillators", "Lock spectral", "Lock filters", "Lock envelopes",
+            "Lock modulation", "Lock stereo", "Lock sequencer", "Lock FX",
+            "Attractor", "Attractor BPM", "", ""};
+        std::array<std::string, kSynthParameterRowCount> values{
+            bool_text(seq.enabled),
+            std::to_string(seq.lanes[0].stepCount), std::to_string(seq.lanes[1].stepCount),
+            std::to_string(seq.lanes[2].stepCount), std::to_string(seq.lanes[3].stepCount),
+            std::to_string(seq.lanes[4].stepCount), std::to_string(seq.lanes[5].stepCount),
+            std::to_string(seq.lanes[6].stepCount),
+            std::string(laneNames[selectedLane]),
+            std::string(directionNames[static_cast<std::size_t>(seq.lanes[selectedLane].direction)]),
+            std::string(seqScaleNames[static_cast<std::size_t>(seq.scale)]),
+            std::string(pitchNames[seq.rootNote % 12U]) + std::to_string(static_cast<int>(seq.rootNote / 12U) - 1),
+            std::to_string(seq.octaveRange), std::to_string(seq.randomSeed),
+            compact(preset.genetics.mutationIntensity), std::to_string(preset.genetics.mutationSeed),
+            "Go", "Go", "", "", "", "", "", "", "", "",
+            bool_text(preset.attractor.enabled), compact(static_cast<float>(preset.attractor.config.bpm), 0),
+            "", ""};
+        for (std::size_t g = 0; g < 8U; ++g)
+            values[18U + g] = (preset.genetics.lockedGroups & (1U << g)) != 0U ? "Locked" : "Free";
+        std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
+        for (std::size_t i : {0U,16U,17U,18U,19U,20U,21U,22U,23U,24U,25U,26U}) toggles[i] = true;
+        active[0] = seq.enabled;
+        for (std::size_t g = 0; g < 8U; ++g)
+            active[18U + g] = (preset.genetics.lockedGroups & (1U << g)) != 0U;
+        active[26] = preset.attractor.enabled;
         draw_parameter_rows(labels, values, toggles, active);
     } else {
         button(layout.presetScanButton, "Scan library");

@@ -14,9 +14,14 @@
 #include "dve/audio/midi.hpp"
 #include "dve/audio/sample_map.hpp"
 #include "dve/audio/sequencer.hpp"
+#include "dve/audio/attractor.hpp"
 #include "dve/audio/synth_profiler.hpp"
 
 namespace dve::audio {
+
+// Forward declaration (full definition in dve/audio/generative_conductor.hpp;
+// the .cpp includes it, so the header stays light).
+class GenerativeConductor;
 
 inline constexpr std::size_t kSynthOscillatorCount = 8;
 inline constexpr std::size_t kSynthVoiceCount = 16;
@@ -609,6 +614,27 @@ struct ReverbParameters { bool enabled{true}; float roomSize{0.62F}; float dampi
 struct CompressorParameters { bool enabled{true}; float thresholdDb{-12.0F}; float ratio{3.0F}; float attackMilliseconds{8.0F}; float releaseMilliseconds{90.0F}; float makeupDb{1.5F}; };
 struct LimiterParameters { bool enabled{true}; float ceilingDb{-0.4F}; float releaseMilliseconds{45.0F}; };
 
+// Phase 3 (SYN-013): patch-genetics authoring state, serialized with the
+// preset. Drives the editor's Mutate/Breed controls; mutate_preset() takes
+// these as explicit arguments, so the struct is a convenience carrier.
+struct SynthGeneticsSettings {
+    float mutationIntensity{0.25F};   // 0..1 editor mutate intensity
+    std::uint64_t mutationSeed{0x12345678ULL};
+    std::uint8_t lockedGroups{0};    // bitmask over GeneGroup (gene_group_bit)
+
+    bool operator==(const SynthGeneticsSettings&) const = default;
+};
+
+// Phase 3: attractor/conductor authoring state, serialized with the preset.
+// When enabled, Synthesizer::render() runs the GenerativeConductor, which
+// advances the AttractorSequencer and maps its state onto the live synth.
+struct SynthAttractorSettings {
+    bool enabled{false};
+    AttractorConfig config{};
+
+    bool operator==(const SynthAttractorSettings&) const = default;
+};
+
 struct SynthPreset {
     std::string name{"DVE Eightfold Hybrid"};
     std::array<OscillatorParameters, kSynthOscillatorCount> oscillators{};
@@ -655,6 +681,13 @@ struct SynthPreset {
     float morphAmount{0.0F};
     // Note: morphPresetB is stored separately (not in serialized text) to
     // keep patch files small. Set via Synthesizer::set_morph_preset_b().
+    // Phase 3: generative sequencer patch state (serializable authoring
+    // config; applied to the live Sequencer by Synthesizer::set_preset).
+    SequencerConfig sequencer{};
+    // Phase 3: patch genetics authoring state (editor mutate/breed controls).
+    SynthGeneticsSettings genetics{};
+    // Phase 3: attractor/conductor authoring state.
+    SynthAttractorSettings attractor{};
     static SynthPreset make_default();
     // Factory bank of musically voiced presets. Every pitched preset is voiced
     // so the played MIDI note is the perceived fundamental (no sub-oscillator
@@ -770,6 +803,20 @@ public:
     // returned object; it advances once per render() block when enabled.
     [[nodiscard]] Sequencer& sequencer() noexcept;
     [[nodiscard]] const Sequencer& sequencer() const noexcept;
+
+    // Phase 3: generative conductor (attractor -> live synth mapping).
+    // Disabled by default; enabling is a no-op unless the loaded preset
+    // carries attractor settings. When enabled, each render() block advances
+    // the attractor and maps its state onto the sequencer (scale/root,
+    // probability-lane scaling, mutation amount), the morph amount (smooth
+    // seeded random walk) and the filter cutoff (brightness multiplier).
+    [[nodiscard]] GenerativeConductor& generative_conductor() noexcept;
+    [[nodiscard]] const GenerativeConductor& generative_conductor() const noexcept;
+    void set_generative_conductor_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool generative_conductor_enabled() const noexcept;
+    // Conductor-driven filter cutoff multiplier around the base cutoff
+    // (1.0 = no change). Written by the conductor from the render thread.
+    void set_conductor_cutoff_multiplier(float multiplier) noexcept;
 
     bool poll_midi_output(MidiMessage& message) noexcept;
 

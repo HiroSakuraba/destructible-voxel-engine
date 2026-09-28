@@ -79,6 +79,8 @@ struct AttractorConfig {
     double barsPeak = 2.0;
     double barsFall = 4.0;
     std::uint64_t seed = 0x1234ABCDEULL;
+
+    bool operator==(const AttractorConfig&) const = default;
 };
 
 class AttractorSequencer {

@@ -284,6 +284,8 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/synth_patch.cpp
         src/audio/sequencer.cpp
         src/audio/patch_genetics.cpp
+        src/audio/attractor.cpp
+        src/audio/generative_conductor.cpp
         src/audio/wavetable.cpp
         src/audio/wavetable_builder.cpp
         src/audio/physics_modulation.cpp
@@ -1738,6 +1740,15 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_synth_genetics_tests tests/test_audio_synth_genetics.cpp)
         target_link_libraries(dve_audio_synth_genetics_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_genetics_tests COMMAND dve_audio_synth_genetics_tests)
+        add_executable(dve_audio_synth_phase3_serialization_tests tests/test_audio_synth_phase3_serialization.cpp)
+        target_link_libraries(dve_audio_synth_phase3_serialization_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_phase3_serialization_tests COMMAND dve_audio_synth_phase3_serialization_tests)
+        add_executable(dve_audio_synth_phase3_integration_tests tests/test_audio_synth_phase3_integration.cpp)
+        target_link_libraries(dve_audio_synth_phase3_integration_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_phase3_integration_tests COMMAND dve_audio_synth_phase3_integration_tests)
+        add_executable(dve_audio_synth_attractor_tests tests/test_audio_synth_attractor.cpp)
+        target_link_libraries(dve_audio_synth_attractor_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_attractor_tests COMMAND dve_audio_synth_attractor_tests)
         add_executable(dve_audio_synth_sampler_tests tests/test_audio_synth_sampler.cpp)
         target_link_libraries(dve_audio_synth_sampler_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_sampler_tests COMMAND dve_audio_synth_sampler_tests)

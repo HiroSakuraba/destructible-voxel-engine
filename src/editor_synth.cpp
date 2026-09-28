@@ -7,6 +7,8 @@
 #include <string>
 #include <utility>
 
+#include "dve/audio/patch_genetics.hpp"
+
 namespace dve::editor {
 namespace {
 bool contains(UiRect rect, int x, int y) noexcept { return rect.contains(x, y); }
@@ -625,6 +627,52 @@ void EditorSynthPanel::adjust_parameter(std::size_t index, int direction,
                 stepped(preset.modulation[selectedModulationSlot_].smoothingMilliseconds, 1.0F, 0.0F, 500.0F, direction); break;
             default: break;
         }
+    } else if (page_ == SynthPanelPage::Generative) {
+        auto& seq = preset.sequencer;
+        switch (index) {
+            case 1: case 2: case 3: case 4: case 5: case 6: case 7: {
+                auto& lane = seq.lanes[static_cast<std::size_t>(index - 1)];
+                lane.stepCount = static_cast<std::uint8_t>(
+                    std::clamp<int>(lane.stepCount + direction, 2, 64));
+                break;
+            }
+            case 8:
+                selectedSequencerLane_ = static_cast<std::size_t>(
+                    (static_cast<int>(selectedSequencerLane_) + direction +
+                     static_cast<int>(audio::kSequencerLaneCount)) %
+                    static_cast<int>(audio::kSequencerLaneCount));
+                break;
+            case 9:
+                seq.lanes[selectedSequencerLane_].direction =
+                    cycle_enum(seq.lanes[selectedSequencerLane_].direction, 4U, direction);
+                break;
+            case 10: seq.scale = cycle_enum(seq.scale, 6U, direction); break;
+            case 11:
+                seq.rootNote = static_cast<std::uint8_t>(
+                    std::clamp<int>(seq.rootNote + direction, 0, 127));
+                break;
+            case 12:
+                seq.octaveRange = static_cast<std::uint8_t>(
+                    std::clamp<int>(seq.octaveRange + direction, 0, 8));
+                break;
+            case 13:
+                seq.randomSeed = static_cast<std::uint32_t>(
+                    static_cast<std::int64_t>(seq.randomSeed) + direction);
+                break;
+            case 14:
+                preset.genetics.mutationIntensity =
+                    stepped(preset.genetics.mutationIntensity, 0.05F, 0.0F, 1.0F, direction);
+                break;
+            case 15:
+                preset.genetics.mutationSeed = static_cast<std::uint64_t>(
+                    static_cast<std::int64_t>(preset.genetics.mutationSeed) + direction);
+                break;
+            case 27:
+                preset.attractor.config.bpm =
+                    stepped(static_cast<float>(preset.attractor.config.bpm), 1.0F, 20.0F, 400.0F, direction);
+                break;
+            default: break;
+        }
     } else if (page_ == SynthPanelPage::Presets) {
         auto& mapping = preset.midiLearn[selectedMidiLearnMapping_];
         switch (index) {
@@ -671,6 +719,27 @@ void EditorSynthPanel::toggle_parameter(std::size_t index, audio::Synthesizer& s
         else if (index == 12U) preset.unison.enabled = !preset.unison.enabled;
         else if (index == 17U) preset.unison.preserveLevel = !preset.unison.preserveLevel;
         else if (index == 23U) preset.metadata.favorite = !preset.metadata.favorite;
+    } else if (page_ == SynthPanelPage::Generative) {
+        if (index == 0U) {
+            preset.sequencer.enabled = !preset.sequencer.enabled;
+        } else if (index == 16U) {
+            // Mutate: evolve the current patch with its own genetics settings.
+            preset = audio::mutate_preset(preset, preset.genetics.mutationIntensity,
+                                          preset.genetics.mutationSeed,
+                                          preset.genetics.lockedGroups);
+            presetStatus_ = "Mutated preset";
+        } else if (index == 17U) {
+            // Breed: child of the current patch (A) and the captured morph-B
+            // preset (B); falls back to a self-cross when B was never captured.
+            const audio::SynthPreset& parentB = compareB_ ? *compareB_ : preset;
+            preset = audio::breed_presets(preset, parentB, 0U, preset.genetics.mutationSeed);
+            presetStatus_ = compareB_ ? "Bred with captured B" : "Bred with self (no B captured)";
+        } else if (index >= 18U && index <= 25U) {
+            preset.genetics.lockedGroups ^= audio::gene_group_bit(
+                static_cast<audio::GeneGroup>(index - 18U));
+        } else if (index == 26U) {
+            preset.attractor.enabled = !preset.attractor.enabled;
+        }
     } else if (page_ == SynthPanelPage::Presets) {
         auto& mapping = preset.midiLearn[selectedMidiLearnMapping_];
         if (index == 1U) mapping.enabled = !mapping.enabled;
@@ -941,7 +1010,7 @@ bool EditorSynthPanel::key_down(std::string_view key, audio::Synthesizer& synth)
     if (normalized == "escape") { set_open(false, synth); return true; }
     if (normalized == "left") { octave_ = std::max(0, octave_ - 1); return true; }
     if (normalized == "right") { octave_ = std::min(8, octave_ + 1); return true; }
-    static constexpr std::array<std::string_view, kSynthPanelPageCount> pageKeys{"1","3","4","5","6","7","8"};
+    static constexpr std::array<std::string_view, kSynthPanelPageCount> pageKeys{"1","3","4","5","6","7","8","9"};
     for (std::size_t i = 0; i < pageKeys.size(); ++i) {
         if (normalized == pageKeys[i] || normalized == "f" + std::to_string(i + 1U)) {
             page_ = static_cast<SynthPanelPage>(i);

@@ -98,10 +98,18 @@ constexpr float lane_mutation_span(SequencerLane lane) noexcept {
 
 }  // namespace
 
+// The step a fresh lane starts with (musical defaults); serialization treats
+// this as the baseline and omits equal steps from preset text.
+SequencerStep default_sequencer_step(SequencerLane lane) noexcept {
+    SequencerStep step;
+    step.value = default_step_value(lane);
+    return step;
+}
+
 Sequencer::Sequencer() {
     for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
         const SequencerLane which = static_cast<SequencerLane>(li);
-        for (SequencerStep& step : lanes_[li].steps) step.value = default_step_value(which);
+        for (SequencerStep& step : lanes_[li].steps) step = default_sequencer_step(which);
     }
 }
 Sequencer::~Sequencer() = default;
@@ -303,8 +311,9 @@ void Sequencer::fire_step(std::uint32_t frameOffset, double stepFrames,
         const float probLane = clamp01(lanes_[static_cast<std::size_t>(SequencerLane::Probability)]
                                            .steps[lanes_[static_cast<std::size_t>(SequencerLane::Probability)]
                                                       .position]
-                                           .value);
-        const float gate = clamp01(pitchStep.probability) * probLane;
+                                           .value) *
+                               probabilityScale_;
+        const float gate = clamp01(pitchStep.probability) * clamp01(probLane);
         if (random_unit() > gate) fire = false;
     }
     if (fire) {
@@ -389,6 +398,53 @@ void Sequencer::fire_step(std::uint32_t frameOffset, double stepFrames,
         advance_lane(which);
         if (laneConfig.cycle != cycleBefore) mutate_lane(which);
     }
+}
+
+void Sequencer::set_mutation_amount(float amount) noexcept {
+    const float clamped = clamp01(amount);
+    for (SequencerLaneConfig& laneConfig : lanes_) laneConfig.mutationAmount = clamped;
+}
+
+void Sequencer::apply_config(const SequencerConfig& config) noexcept {
+    enabled_ = config.enabled;
+    channel_ = config.channel;
+    scale_ = config.scale;
+    rootNote_ = config.rootNote;
+    octaveRange_ = config.octaveRange;
+    for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+        const SequencerLaneSnapshot& snapshot = config.lanes[li];
+        SequencerLaneConfig& laneConfig = lanes_[li];
+        laneConfig.steps = snapshot.steps;
+        laneConfig.stepCount =
+            static_cast<std::uint8_t>(std::clamp<int>(snapshot.stepCount, 1, 64));
+        if (laneConfig.position >= laneConfig.stepCount) laneConfig.position = 0;
+        laneConfig.direction = snapshot.direction;
+        laneConfig.mutationAmount = clamp01(snapshot.mutationAmount);
+        laneConfig.patternCycles = snapshot.patternCycles;
+    }
+    set_random_seed(config.randomSeed);
+}
+
+SequencerConfig Sequencer::export_config() const noexcept {
+    SequencerConfig config;
+    config.enabled = enabled_;
+    config.channel = channel_;
+    config.scale = scale_;
+    config.rootNote = rootNote_;
+    config.octaveRange = octaveRange_;
+    // randomSeed is write-only on the live object (the stream state is not
+    // reversible), so export reports 0; callers that need the authored seed
+    // keep it in the config they applied.
+    for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+        const SequencerLaneConfig& laneConfig = lanes_[li];
+        SequencerLaneSnapshot& snapshot = config.lanes[li];
+        snapshot.steps = laneConfig.steps;
+        snapshot.stepCount = laneConfig.stepCount;
+        snapshot.direction = laneConfig.direction;
+        snapshot.mutationAmount = laneConfig.mutationAmount;
+        snapshot.patternCycles = laneConfig.patternCycles;
+    }
+    return config;
 }
 
 void Sequencer::process(std::uint32_t frameCount, float sampleRate, float tempoBpm,

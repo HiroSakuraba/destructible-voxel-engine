@@ -23,8 +23,8 @@
 
 namespace dve::audio {
 
-// Gene groups for patch mutation and breeding. Sequencer's mutation body
-// lands later; the label exists now so the bitmask layout stays stable.
+// Gene groups for patch mutation and breeding. The Sequencer group mutates
+// the sequencer's authored config (step values, lane lengths, directions).
 enum class GeneGroup : std::uint8_t {
     Oscillators,    // waveform, tuning, gain, shape
     SpectralShape,  // wavetable position, sampler and modal-resonator parameters
@@ -32,7 +32,7 @@ enum class GeneGroup : std::uint8_t {
     Envelopes,      // attack/decay/sustain/release (+ delay/hold)
     Modulation,     // slot amounts/sources, LFO rate/depth, macros
     Stereo,         // divergence, pan, width
-    Sequencer,      // (reserved: arpeggiator is not mutated yet)
+    Sequencer,      // sequencer authored config (step values, lengths, directions)
     Effects,        // FX mix parameters
 };
 

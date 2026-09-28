@@ -245,6 +245,68 @@ void mutateStereo(GeneRng& rng, float intensity, SynthPreset& result) {
     if (rng.chance(disc * 0.5F)) unison.enabled = !unison.enabled;
 }
 
+// Phase 3: mutates the sequencer's authored config (SequencerConfig), never
+// the live Sequencer. Draw order is fixed so identical seeds reproduce
+// identical output; every change stays inside SynthPreset::validate() ranges.
+void mutateSequencerGroup(GeneRng& rng, float intensity, SynthPreset& result) {
+    const float cont = continuousChance(intensity);
+    const float disc = discreteChance(intensity);
+    auto& config = result.sequencer;
+    for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+        const SequencerLane lane = static_cast<SequencerLane>(li);
+        auto& snapshot = config.lanes[li];
+        // Lane length wanders by a step (clamped to the valid 2..64 range).
+        if (rng.chance(0.35F * intensity)) {
+            const int delta = rng.chance(0.5F) ? 1 : -1;
+            snapshot.stepCount =
+                static_cast<std::uint8_t>(std::clamp<int>(snapshot.stepCount + delta, 2, 64));
+        }
+        // Direction flips are rare and only at high intensity.
+        if (intensity > 0.6F && rng.chance((intensity - 0.6F) * 0.6F))
+            snapshot.direction = static_cast<SequencerDirection>(rng.intRange(0, 3));
+        // Per-lane mutation amount drifts.
+        if (rng.chance(cont))
+            snapshot.mutationAmount = std::clamp(
+                snapshot.mutationAmount + rng.symmetric() * 0.25F * intensity, 0.0F, 1.0F);
+        // Step-value drift within the lane's musical range. Pitch moves in
+        // semitone steps (occasionally fifths/octaves), like oscillator tuning.
+        float lo = 0.0F, hi = 1.0F, span = 0.3F;
+        switch (lane) {
+            case SequencerLane::Pitch: lo = -48.0F; hi = 48.0F; span = 4.0F; break;
+            case SequencerLane::Timbre:
+            case SequencerLane::Pan: lo = -1.0F; hi = 1.0F; span = 0.5F; break;
+            default: break;
+        }
+        for (auto& step : snapshot.steps) {
+            if (lane == SequencerLane::Pitch && rng.chance(cont)) {
+                int semis = 0;
+                if (rng.chance(0.12F))
+                    semis = (rng.chance(0.5F) ? 7 : 12) * (rng.chance(0.5F) ? 1 : -1);
+                else
+                    semis = (1 + static_cast<int>(rng.uniform01() * 3.0F * intensity)) *
+                            (rng.chance(0.5F) ? 1 : -1);
+                step.value = std::clamp(std::round(step.value + static_cast<float>(semis)), lo, hi);
+            } else if (rng.chance(cont)) {
+                step.value = driftLinear(rng, step.value, span, lo, hi, intensity);
+            }
+            if (rng.chance(cont * 0.5F))
+                step.probability = driftLinear(rng, step.probability, 0.3F, 0.0F, 1.0F, intensity);
+            if (rng.chance(disc * 0.5F))
+                step.ratchets = static_cast<std::uint8_t>(
+                    std::clamp<int>(step.ratchets + (rng.chance(0.5F) ? 1 : -1), 1, 8));
+            if (rng.chance(cont * 0.5F))
+                step.microtiming = driftLinear(rng, step.microtiming, 0.2F, -1.0F, 1.0F, intensity);
+            if (rng.chance(cont * 0.5F))
+                step.accent = std::clamp(step.accent * std::exp2(rng.symmetric() * intensity),
+                                         0.1F, 2.0F);
+            if (rng.chance(disc * 0.4F)) step.skip = !step.skip;
+            if (rng.chance(disc * 0.4F)) step.glide = !step.glide;
+            if (rng.chance(disc * 0.4F))
+                step.condition = static_cast<SequencerStepCondition>(rng.intRange(0, 3));
+        }
+    }
+}
+
 void mutateEffects(GeneRng& rng, float intensity, SynthPreset& result) {
     const float cont = continuousChance(intensity);
     const float disc = discreteChance(intensity);
@@ -391,6 +453,7 @@ void copyStereoGroup(SynthPreset& dst, const SynthPreset& src) {
 
 void copySequencerGroup(SynthPreset& dst, const SynthPreset& src) {
     dst.arpeggiator = src.arpeggiator;
+    dst.sequencer = src.sequencer;
 }
 
 void copyEffectsGroup(SynthPreset& dst, const SynthPreset& src) {
@@ -426,7 +489,7 @@ SynthPreset mutate_preset(const SynthPreset& p, float intensity, std::uint64_t s
     }
     if (!groupLocked(lockedGroups, GeneGroup::Modulation)) mutateModulation(rng, t, result);
     if (!groupLocked(lockedGroups, GeneGroup::Stereo)) mutateStereo(rng, t, result);
-    // Sequencer: label exists for API stability; mutation body lands later.
+    if (!groupLocked(lockedGroups, GeneGroup::Sequencer)) mutateSequencerGroup(rng, t, result);
     if (!groupLocked(lockedGroups, GeneGroup::Effects)) mutateEffects(rng, t, result);
     return result;
 }

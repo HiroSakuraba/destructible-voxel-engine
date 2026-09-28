@@ -74,6 +74,42 @@ struct SequencerStep {
     bool skip{false};              // step never triggers a note
     SequencerStepCondition condition{SequencerStepCondition::EveryCycle};
     std::uint8_t conditionN{2};    // cycle divisor for EveryNth
+
+    bool operator==(const SequencerStep&) const = default;
+};
+
+// The step a fresh lane starts with: musical defaults (full probability,
+// near-full velocity, slightly detached gate, centered timbre/morph/pan) so
+// an enabled-but-unprogrammed sequencer plays sensibly. Serialization treats
+// this as the baseline: steps equal to it are omitted from preset text.
+[[nodiscard]] SequencerStep default_sequencer_step(SequencerLane lane) noexcept;
+
+// Serializable per-lane authoring state (no live playback state). This is
+// what presets store, what the patch genetics mutate, and what apply_config()
+// installs on the live Sequencer.
+struct SequencerLaneSnapshot {
+    std::array<SequencerStep, kSequencerMaxSteps> steps{};
+    std::uint8_t stepCount{16};                    // 1..64
+    SequencerDirection direction{SequencerDirection::Forward};
+    float mutationAmount{0.0F};                    // 0..1 seeded per-cycle drift
+    std::uint8_t patternCycles{4};                 // cycle count for LastCycleOnly
+
+    bool operator==(const SequencerLaneSnapshot&) const = default;
+};
+
+// Serializable sequencer authoring state: everything needed to rebuild the
+// sequencer's musical program without any live playback state (positions,
+// cycles, RNG stream, published lane currents).
+struct SequencerConfig {
+    bool enabled{false};
+    std::uint8_t channel{0};
+    SequencerScale scale{SequencerScale::Chromatic};
+    std::uint8_t rootNote{60};
+    std::uint8_t octaveRange{2};                   // 0 = no wrap
+    std::uint32_t randomSeed{0};
+    std::array<SequencerLaneSnapshot, kSequencerLaneCount> lanes{};
+
+    bool operator==(const SequencerConfig&) const = default;
 };
 
 // Per-lane configuration plus live playback state.
@@ -139,6 +175,23 @@ public:
     }
     void set_lane_step_count(SequencerLane which, std::uint8_t count) noexcept;
     void set_lane_step(SequencerLane which, std::uint8_t index, const SequencerStep& step) noexcept;
+    // Sets every lane's per-cycle mutation amount (0..1, clamped).
+    void set_mutation_amount(float amount) noexcept;
+    // Runtime multiplier applied to the probability lane's trigger gate
+    // (1.0 = authored values used as-is). Used by the generative conductor to
+    // map attractor rhythm density without rewriting authored steps.
+    void set_probability_scale(float scale) noexcept { probabilityScale_ = scale; }
+    [[nodiscard]] float probability_scale() const noexcept { return probabilityScale_; }
+
+    // --- patch state ---
+    // Installs authored state from a serializable config. Live playback state
+    // (lane positions, cycle counters, RNG stream phase, published currents)
+    // is left untouched so applying a preset never restarts a running
+    // sequence. The random seed is (re)applied, so callers should only invoke
+    // this when the config actually changed (Synthesizer::set_preset does).
+    void apply_config(const SequencerConfig& config) noexcept;
+    // Captures the authored state as a serializable config.
+    [[nodiscard]] SequencerConfig export_config() const noexcept;
 
     // --- clock ---
     // Advances the sequencer by frameCount samples at the given tempo.
@@ -192,6 +245,7 @@ private:
     float timbreValue_{0.0F};
     float morphValue_{0.0F};
     float panValue_{0.0F};
+    float probabilityScale_{1.0F};
     // Pending legato note: its note-off is deferred to the next trigger.
     bool seqNoteActive_{false};
     bool seqNoteGlide_{false};

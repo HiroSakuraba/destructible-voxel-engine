@@ -468,6 +468,13 @@ public:
     [[nodiscard]] float ui_zoom_window_limit() const noexcept { return uiZoomWindowLimit_; }
     bool set_ui_zoom(float requested);
     bool step_ui_zoom(int direction);
+    // On-screen piano size for the synth and chiptune editors (User-scope setting
+    // `editor.keyboard_keys`: 25, 37, 49, 61, 76 or 88 keys). Saved like UI zoom.
+    [[nodiscard]] int keyboard_key_count() const noexcept;
+    bool set_keyboard_key_count(int keys);
+    // Last pointer position seen by pointer_move (logical px), for hover tooltips.
+    [[nodiscard]] int hover_x() const noexcept { return hoverX_; }
+    [[nodiscard]] int hover_y() const noexcept { return hoverY_; }
     [[nodiscard]] bool create_text3d(std::filesystem::path fontPath, std::string text = "3D Text",
                                      Text3DCookOptions options = {});
     [[nodiscard]] bool create_gabor_volume(std::filesystem::path sourcePath = {});
@@ -622,6 +629,8 @@ private:
     EditorStatusMessage status_{"Ready", false, 0.0F};
 
     PointerButton dragButton_{PointerButton::NoButton};
+    int hoverX_{-100000};
+    int hoverY_{-100000};
     int lastPointerX_{};
     int lastPointerY_{};
     int pointerDownX_{};

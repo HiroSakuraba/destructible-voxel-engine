@@ -403,6 +403,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"view.advanced_menus","View","Show Advanced Menu Commands",""},
         {"view.ui_zoom_in","View","Zoom UI In","Ctrl+="}, {"view.ui_zoom_out","View","Zoom UI Out","Ctrl+-"},
         {"view.ui_zoom_reset","View","Reset UI Zoom (100%)","Ctrl+0"},
+        {"view.keyboard_keys_25","View","Piano: 25 Keys",""}, {"view.keyboard_keys_37","View","Piano: 37 Keys",""},
+        {"view.keyboard_keys_49","View","Piano: 49 Keys",""}, {"view.keyboard_keys_61","View","Piano: 61 Keys",""},
+        {"view.keyboard_keys_76","View","Piano: 76 Keys",""}, {"view.keyboard_keys_88","View","Piano: 88 Keys",""},
         {"camera.mode_free","Camera","Free Fly",""}, {"camera.mode_orbit","Camera","Orbit",""},
         {"camera.mode_follow","Camera","Follow",""}, {"camera.mode_third_person","Camera","Third Person",""},
         {"camera.mode_first_person","Camera","First Person",""}, {"camera.mode_cinematic","Camera","Cinematic",""},
@@ -535,6 +538,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("view.ui_zoom_in", "Interface", 91);
     configure("view.ui_zoom_out", "Interface", 92);
     configure("view.ui_zoom_reset", "Interface", 93);
+    for (std::string_view id : {"view.keyboard_keys_25","view.keyboard_keys_37","view.keyboard_keys_49",
+                                "view.keyboard_keys_61","view.keyboard_keys_76","view.keyboard_keys_88"})
+        configure(id, "Piano Keyboard", 95, true, "view.keyboard_keys");
     configure("view.top", "Projection", 20, true, "view.projection");
     configure("view.front", "Projection", 21, true, "view.projection");
     configure("view.side", "Projection", 22, true, "view.projection");

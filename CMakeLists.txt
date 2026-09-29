@@ -749,6 +749,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_ai_tools.cpp
         src/editor_settings.cpp
         src/editor_ui_zoom.cpp
+        src/editor_piano_keyboard.cpp
         src/editor_shortcuts.cpp
         src/editor_camera_sequencer.cpp
         src/editor_cinematic_camera.cpp
@@ -2222,6 +2223,12 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_ui_zoom_tests tests/test_editor_ui_zoom.cpp)
         target_link_libraries(dve_editor_ui_zoom_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_ui_zoom_tests COMMAND dve_editor_ui_zoom_tests)
+        add_executable(dve_editor_piano_keyboard_tests tests/test_editor_piano_keyboard.cpp)
+        target_link_libraries(dve_editor_piano_keyboard_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_piano_keyboard_tests COMMAND dve_editor_piano_keyboard_tests)
+        add_executable(dve_editor_text_fit_tests tests/test_editor_text_fit.cpp)
+        target_link_libraries(dve_editor_text_fit_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_text_fit_tests COMMAND dve_editor_text_fit_tests)
         add_executable(dve_editor_camera_sequencer_tests tests/test_editor_camera_sequencer.cpp)
         target_link_libraries(dve_editor_camera_sequencer_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_camera_sequencer_tests COMMAND dve_editor_camera_sequencer_tests)

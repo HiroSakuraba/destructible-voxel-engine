@@ -235,6 +235,13 @@ public:
         }
         XDrawString(display_, target_, gc_, px(x), px(y), value.data(), static_cast<int>(value.size()));
     }
+    // The core-font fallback draws Latin-1 bytes, so it cannot show U+2026.
+    [[nodiscard]] std::string_view ellipsis() const override {
+#if DVE_HAVE_XFT
+        if (xftFont_ != nullptr) return "\u2026";
+#endif
+        return "...";
+    }
     // Reported in logical pixels so layout code that measures text keeps working unchanged.
     [[nodiscard]] int text_width(std::string_view value) const override {
 #if DVE_HAVE_XFT
@@ -359,6 +366,8 @@ int main(int argc, char** argv) {
     bool liveMcpReadOnly = false;
     std::string synthPage;
     std::vector<std::string> dispatchActions;
+    std::vector<std::string> startupKeys;
+    std::optional<std::pair<int, int>> startupHover;
     std::optional<float> cliZoom;
     int initialWidth = 1280;
     int initialHeight = 800;
@@ -379,6 +388,15 @@ int main(int argc, char** argv) {
         // with --screenshot to capture a specific menu/tool/panel state without needing real
         // input) rather than for end users.
         else if (argument == "--dispatch" && index + 1 < argc) dispatchActions.push_back(argv[++index]);
+        // Headless verification helpers: press keys (e.g. synth computer-keyboard notes)
+        // and move the pointer to logical X,Y (hover tooltips) after the first layout.
+        else if (argument == "--key-down" && index + 1 < argc) startupKeys.push_back(argv[++index]);
+        else if (argument == "--hover" && index + 1 < argc) {
+            const std::string point = argv[++index];
+            const auto comma = point.find(',');
+            if (comma != std::string::npos)
+                startupHover = std::pair{std::atoi(point.substr(0, comma).c_str()), std::atoi(point.substr(comma + 1).c_str())};
+        }
         else if (argument == "--ui-zoom" && index + 1 < argc) cliZoom = std::strtof(argv[++index], nullptr);
         else if (argument == "--window-size" && index + 1 < argc) {
             const std::string size = argv[++index];
@@ -453,6 +471,8 @@ int main(int argc, char** argv) {
         };
         const auto logical = [&](int physical) { return ui_zoom_to_logical(physical, zoom); };
         sync_zoom(initialWidth, initialHeight);
+        for (const std::string& key : startupKeys) controller.key_down(key, false, false, false);
+        if (startupHover) controller.pointer_move(startupHover->first, startupHover->second);
         if (!accessibilityDump.empty()) {
             std::string accessibilityError;
             if (!save_accessibility_tree_json(accessibilityDump, build_editor_accessibility_tree(controller),

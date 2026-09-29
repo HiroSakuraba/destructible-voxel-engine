@@ -44,6 +44,8 @@ public:
     void line(int x1, int y1, int x2, int y2, EditorColor color, int width = 1) const override;
     void text(int x, int y, std::string_view value, EditorColor color) const override;
     [[nodiscard]] int text_width(std::string_view value) const override;
+    // SDL debug text is ASCII only; SDL_ttf draws U+2026.
+    [[nodiscard]] std::string_view ellipsis() const override;
 
 private:
     struct Impl;

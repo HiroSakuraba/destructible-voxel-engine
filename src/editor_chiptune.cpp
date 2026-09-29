@@ -148,9 +148,21 @@ void EditorChiptunePanel::resize(int width, int height, float uiScale) noexcept 
     layout_.applySfxButton = {x + 25, sfxY + 45, 145, 30};
     layout_.auditionSfxButton = {x + 180, sfxY + 45, 145, 30};
     const int pianoY = bodyY + bodyH - 115;
-    const int pianoW = std::max(20, (panelWidth - 50) / 24);
-    for (std::size_t i = 0; i < layout_.pianoKeys.size(); ++i)
-        layout_.pianoKeys[i] = {x + 25 + static_cast<int>(i) * pianoW, pianoY, pianoW - 1, 92};
+    layout_.pianoArea = {x + 25, pianoY, panelWidth - 50, 92};
+    keyboard_.set_octave(session_.octave());
+    keyboard_.layout(layout_.pianoArea);
+}
+
+void EditorChiptunePanel::set_keyboard_key_count(int count) noexcept {
+    keyboard_.set_key_count(count);
+    keyboard_.set_octave(session_.octave());
+    keyboard_.layout(layout_.pianoArea);
+}
+
+bool EditorChiptunePanel::pointer_wheel(float steps, int x, int y) noexcept {
+    if (!open_ || !layout_.panel.contains(x, y)) return false;
+    if (page_ == ChiptunePanelPage::Sfx && layout_.pianoArea.contains(x, y)) (void)keyboard_.wheel(steps);
+    return true;
 }
 
 bool EditorChiptunePanel::pointer_down(int x, int y, audio::AudioMixer& mixer) noexcept {
@@ -246,8 +258,10 @@ bool EditorChiptunePanel::pointer_down(int x, int y, audio::AudioMixer& mixer) n
         if (adjust(layout_.sfxPanDownButton, layout_.sfxPanUpButton, [&](int d){ request.pan += 0.1F * static_cast<float>(d); session_.set_sfx_request(request); })) return true;
         if (layout_.applySfxButton.contains(x, y)) { set_status(session_.apply_sfx_request(&error) ? "SFX preset applied to document" : error); return true; }
         if (layout_.auditionSfxButton.contains(x, y)) { session_.set_song_bus(audio::AudioBusId::Effects); play_song(mixer); return true; }
-        for (std::size_t i = 0; i < layout_.pianoKeys.size(); ++i) if (layout_.pianoKeys[i].contains(x, y)) {
-            request.baseMidi = (session_.octave() + 1) * 12 + static_cast<int>(i);
+        keyboard_.set_octave(session_.octave());
+        if (keyboard_.pointer_down(x, y)) return true;
+        if (const auto note = keyboard_.note_at(x, y)) {
+            request.baseMidi = *note;
             session_.set_sfx_request(request);
             if (session_.apply_sfx_request(&error)) {
                 session_.set_song_bus(audio::AudioBusId::Effects);
@@ -262,13 +276,15 @@ bool EditorChiptunePanel::pointer_down(int x, int y, audio::AudioMixer& mixer) n
 
 bool EditorChiptunePanel::pointer_move(int x, int y) noexcept {
     if (!open_) return false;
+    if (keyboard_.dragging()) { (void)keyboard_.pointer_drag(x); return true; }
     if (envelopeDrawing_) { draw_envelope(x, y); return true; }
     if (wavetableDrawing_) { draw_wavetable(x, y); return true; }
     return layout_.panel.contains(x, y);
 }
 
 bool EditorChiptunePanel::pointer_up(int, int) noexcept {
-    const bool handled = envelopeDrawing_ || wavetableDrawing_;
+    const bool handled = envelopeDrawing_ || wavetableDrawing_ || keyboard_.dragging();
+    keyboard_.pointer_up();
     envelopeDrawing_ = false; wavetableDrawing_ = false;
     return handled;
 }
@@ -313,8 +329,12 @@ bool EditorChiptunePanel::key_down(std::string_view key, bool control, bool shif
     if (normalized == "down") { ++cursor.row; move_cursor(cursor); return true; }
     if (normalized == "pageup") { if (cursor.order > 0U) --cursor.order; cursor.row = 0U; move_cursor(cursor); return true; }
     if (normalized == "pagedown") { ++cursor.order; cursor.row = 0U; move_cursor(cursor); return true; }
-    if (normalized == "[") { session_.set_octave(session_.octave() - 1); return true; }
-    if (normalized == "]") { session_.set_octave(session_.octave() + 1); return true; }
+    if (normalized == "[" || normalized == "]") {
+        session_.set_octave(session_.octave() + (normalized == "[" ? -1 : 1));
+        keyboard_.set_octave(session_.octave());
+        keyboard_.ensure_visible(keyboard_.computer_key_base());
+        return true;
+    }
     if (normalized == "f1") { page_ = ChiptunePanelPage::Pattern; return true; }
     if (normalized == "f2") { page_ = ChiptunePanelPage::Instrument; return true; }
     if (normalized == "f3") { page_ = ChiptunePanelPage::Sfx; return true; }

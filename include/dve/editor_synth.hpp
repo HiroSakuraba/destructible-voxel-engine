@@ -11,6 +11,7 @@
 
 #include "dve/audio/patch_search_browser.hpp"
 #include "dve/audio/synthesizer.hpp"
+#include "dve/editor_piano_keyboard.hpp"
 #include "dve/editor_viewport.hpp"
 
 namespace dve::editor {
@@ -99,7 +100,17 @@ struct SynthPanelLayout {
     UiRect presetMorphUpButton{};
     std::array<UiRect, kSynthPresetVisibleEntryCount> presetEntryButtons{};
 
-    std::array<UiRect, 24> pianoKeys{};
+    // On-screen piano (see PianoKeyboard for the key rects) and its key-count button.
+    UiRect pianoArea{};
+    UiRect keyboardKeysButton{};
+
+    // Grid pages (Filter/Env, Mod Matrix, Perform, Expression, Generative)
+    // scroll vertically when their rows do not fit above the voice meter.
+    // Rows that are scrolled out of view get empty rects. The track is empty
+    // when the page fits.
+    UiRect gridViewport{};
+    UiRect gridScrollTrack{};
+    UiRect gridScrollThumb{};
 
     // Voice count + peak meters drawn just above the piano.
 
@@ -112,7 +123,21 @@ public:
     void set_open(bool open, audio::Synthesizer& synth) noexcept;
     void toggle(audio::Synthesizer& synth) noexcept { set_open(!open_, synth); }
     [[nodiscard]] const SynthPanelLayout& layout() const noexcept { return layout_; }
-    [[nodiscard]] int octave() const noexcept { return octave_; }
+    [[nodiscard]] int octave() const noexcept { return keyboard_.octave(); }
+    [[nodiscard]] const PianoKeyboard& keyboard() const noexcept { return keyboard_; }
+    // Applies a key count (snapped to 25/37/49/61/76/88) and re-lays out the piano.
+    void set_keyboard_key_count(int count) noexcept;
+    // Set when the user clicked the key-count button; the controller persists it.
+    [[nodiscard]] std::optional<int> take_requested_key_count() noexcept {
+        auto request = requestedKeyCount_; requestedKeyCount_.reset(); return request;
+    }
+    // Scrolls the piano so a played note is on screen.
+    void follow_note(int midi) noexcept { keyboard_.ensure_visible(midi); }
+    // Grid-page vertical scroll, in lines (grid rows / strips).
+    [[nodiscard]] int grid_scroll() const noexcept { return gridScroll_; }
+    [[nodiscard]] int grid_max_scroll() const noexcept { return gridMaxScroll_; }
+    bool scroll_grid(int lines) noexcept;
+    void set_page(SynthPanelPage page) noexcept;
     [[nodiscard]] std::size_t selected_oscillator() const noexcept { return selectedOscillator_; }
     [[nodiscard]] std::size_t selected_arpeggiator_step() const noexcept { return selectedArpeggiatorStep_; }
     [[nodiscard]] std::size_t selected_effect() const noexcept { return selectedEffect_; }
@@ -146,11 +171,16 @@ public:
     bool pointer_down(int x, int y, audio::Synthesizer& synth) noexcept;
     bool pointer_move(int x, int y, audio::Synthesizer& synth) noexcept;
     bool pointer_up(int x, int y, audio::Synthesizer& synth) noexcept;
+    // Mouse wheel: scrolls the piano or the grid page under the pointer.
+    bool pointer_wheel(float steps, int x, int y) noexcept;
     bool key_down(std::string_view key, audio::Synthesizer& synth) noexcept;
     bool key_up(std::string_view key, audio::Synthesizer& synth) noexcept;
 
 private:
-    static int keyboard_note(std::string_view key, int octave) noexcept;
+    // Computer-keyboard note for key ("z" = computer_key_base()), or -1.
+    static int keyboard_note(std::string_view key, int base) noexcept;
+    static int keyboard_key_index(std::string_view key) noexcept;
+    bool grid_scrollbar_press(int x, int y) noexcept;
     void release_panel_notes(audio::Synthesizer& synth) noexcept;
     void cycle_waveform(std::size_t oscillator, int direction, audio::Synthesizer& synth) noexcept;
     void toggle_effect(std::size_t index, audio::Synthesizer& synth) noexcept;
@@ -169,7 +199,10 @@ private:
 
     SynthPanelLayout layout_{};
     bool open_{};
-    int octave_{4};
+    PianoKeyboard keyboard_{};
+    std::optional<int> requestedKeyCount_{};
+    int gridScroll_{0};
+    int gridMaxScroll_{0};
     std::size_t selectedOscillator_{};
     std::size_t selectedArpeggiatorStep_{};
     std::size_t selectedEffect_{};
@@ -188,6 +221,8 @@ private:
     SynthPanelPage page_{SynthPanelPage::Oscillators};
     int pointerNote_{-1};
     std::array<bool, 128> keyboardNotes_{};
+    std::array<int, 20> computerKeyNotes_{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                                          -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
     std::filesystem::path presetDirectory_{"assets/audio/presets"};
     audio::SynthPresetLibrary presetLibrary_{};

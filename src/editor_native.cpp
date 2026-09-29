@@ -892,6 +892,38 @@ bool NativeEditorController::set_ui_zoom(float requested) {
     return true;
 }
 
+int NativeEditorController::keyboard_key_count() const noexcept {
+    const SettingValue value = workspace_.settings().value(kKeyboardKeysSettingId);
+    if (const auto* text = std::get_if<std::string>(&value)) {
+        int keys = kPianoDefaultKeyCount;
+        const auto [end, ec] = std::from_chars(text->data(), text->data() + text->size(), keys);
+        (void)end;
+        if (ec == std::errc{}) return snap_piano_key_count(keys);
+    }
+    return kPianoDefaultKeyCount;
+}
+
+bool NativeEditorController::set_keyboard_key_count(int keys) {
+    const int snapped = snap_piano_key_count(keys);
+    std::string error;
+    (void)workspace_.settings().clear(SettingScope::Session, kKeyboardKeysSettingId);
+    if (!workspace_.settings().set(SettingScope::User, kKeyboardKeysSettingId, std::to_string(snapped), &error)) {
+        set_status(error, true);
+        return false;
+    }
+    synthPanel_.set_keyboard_key_count(keyboard_key_count());
+    chiptunePanel_.set_keyboard_key_count(keyboard_key_count());
+    refresh_menu_state();
+    std::string message = "Piano keyboard: " + std::to_string(keyboard_key_count()) + " keys";
+    if (keyboard_key_count() != snapped) message += " (Project settings override the User value)";
+    if (!save_user_settings(&error)) {
+        set_status(message + "; save failed: " + error, true);
+        return false;
+    }
+    set_status(std::move(message));
+    return true;
+}
+
 bool NativeEditorController::step_ui_zoom(int direction) {
     return set_ui_zoom(dve::editor::step_ui_zoom(ui_zoom(), direction));
 }
@@ -1091,8 +1123,10 @@ NativeSettingsModalLayout NativeEditorController::settings_modal_layout() const 
     NativeSettingsModalLayout result;
     const float scale = kLogicalLayoutScale;
     const int margin = std::max(20, static_cast<int>(28.0F * scale));
-    result.panel.width = std::min(1120, std::max(700, width_ - margin * 2));
-    result.panel.height = std::min(780, std::max(500, height_ - margin * 2));
+    // Preferred minimum 700x500, but never larger than the (logical) window: at the
+    // 640x480 minimum layout the modal used to hang off the left and bottom edges.
+    result.panel.width = std::clamp(width_ - margin * 2, std::min(700, width_ - 8), 1120);
+    result.panel.height = std::clamp(height_ - margin * 2, std::min(500, height_ - 8), 780);
     result.panel.x = (width_ - result.panel.width) / 2;
     result.panel.y = (height_ - result.panel.height) / 2;
     const int header = std::max(82, static_cast<int>(88.0F * scale));
@@ -1105,10 +1139,12 @@ NativeSettingsModalLayout NativeEditorController::settings_modal_layout() const 
     for (std::size_t index = 0; index < result.scopeTabs.size(); ++index)
         result.scopeTabs[index] = {result.panel.x + 16 + static_cast<int>(index) * (tabWidth + 6),
                                    result.panel.y + 10, tabWidth, 28};
-    result.searchBox = {result.panel.x + categoryWidth + 24, result.panel.y + 44,
-                        std::max(180, result.panel.width - categoryWidth - 318), 30};
     result.advancedToggle = {result.panel.x + result.panel.width - 144, result.panel.y + 44, 124, 30};
     result.changedToggle = {result.advancedToggle.x - 124 - 8, result.panel.y + 44, 124, 30};
+    result.searchBox = {result.panel.x + categoryWidth + 24, result.panel.y + 44,
+                        std::max(180, result.panel.width - categoryWidth - 318), 30};
+    // Keep the search box clear of the Changed toggle on narrow windows.
+    result.searchBox.width = std::max(96, std::min(result.searchBox.width, result.changedToggle.x - 8 - result.searchBox.x));
 
     const int bodyY = result.panel.y + header;
     const int detailY = result.panel.y + result.panel.height - footer - detailHeight;
@@ -1373,6 +1409,8 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
         if (const auto* item = std::get_if<std::string>(&value)) return *item;
         return fallback;
     };
+    synthPanel_.set_keyboard_key_count(keyboard_key_count());
+    chiptunePanel_.set_keyboard_key_count(keyboard_key_count());
     viewportSettings_.showGrid = readBool("viewport.grid", viewportSettings_.showGrid);
     viewportSettings_.showAnchors = readBool("viewport.anchors", viewportSettings_.showAnchors);
     viewportSettings_.showCollision = readBool("viewport.collision", viewportSettings_.showCollision);
@@ -1419,6 +1457,8 @@ void NativeEditorController::refresh_menu_state() noexcept {
     auto enabled = [&](std::string_view id, bool value, std::string reason) {
         (void)workspace_.menus().set_enabled(id, value, value ? std::string{} : std::move(reason));
     };
+    for (const int keys : kPianoKeyboardSizes)
+        checked("view.keyboard_keys_" + std::to_string(keys), keyboard_key_count() == keys);
     const bool hasSelection = workspace_.selection_count() > 0U;
     const bool singleSelection = workspace_.selection_count() == 1U;
     const bool playActive = playSession_.active();
@@ -2562,6 +2602,8 @@ void NativeEditorController::update_hover(int x, int y) {
 }
 
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
+    hoverX_ = x;
+    hoverY_ = y;
     if (commandPaletteOpen_) {
         const NativeCommandPaletteLayout palette = command_palette_layout();
         const auto results = command_palette_results(64);
@@ -3023,7 +3065,10 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     if (button == PointerButton::Primary && chiptunePanel_.open() && chiptunePanel_.pointer_down(x, y, audioMixer_)) return;
     if (button == PointerButton::Primary && audioEventPanel_.open() && audioEventPanel_.pointer_down(x, y, audioMixer_)) return;
     if (button == PointerButton::Primary && audioPanel_.open() && audioPanel_.pointer_down(x, y, audioMixer_)) return;
-    if (button == PointerButton::Primary && synthPanel_.open() && synthPanel_.pointer_down(x, y, audioMixer_.synthesizer())) return;
+    if (button == PointerButton::Primary && synthPanel_.open() && synthPanel_.pointer_down(x, y, audioMixer_.synthesizer())) {
+        if (const auto keys = synthPanel_.take_requested_key_count()) (void)set_keyboard_key_count(*keys);
+        return;
+    }
     if (contextMenu_.open) {
         if (button == PointerButton::Primary) {
             for (std::size_t i = 0; i < contextMenu_.itemRects.size(); ++i) {
@@ -3513,6 +3558,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 }
 
 void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint32_t modifiers) {
+    hoverX_ = x;
+    hoverY_ = y;
     if (commandPaletteOpen_) {
         const auto results = command_palette_results(64);
         if (!results.empty() && steps != 0.0F) {
@@ -3556,6 +3603,8 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
         (void)controlRigPanel_.pointer_wheel(steps, x, y, modifiers);
         return;
     }
+    if (chiptunePanel_.open() && chiptunePanel_.pointer_wheel(steps, x, y)) return;
+    if (synthPanel_.open() && synthPanel_.pointer_wheel(steps, x, y)) return;
     if (shortcutPanel_.open) {
         if (shortcutPanel_.capturing) {
             ShortcutGesture gesture = wheel_shortcut(steps > 0.0F, (modifiers & 2U) != 0U,
@@ -3914,6 +3963,15 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "view.ui_zoom_in") return step_ui_zoom(1);
     if (actionId == "view.ui_zoom_out") return step_ui_zoom(-1);
     if (actionId == "view.ui_zoom_reset") return step_ui_zoom(0);
+    if (actionId.starts_with("view.keyboard_keys_")) {
+        int keys = 0;
+        const std::string_view digits = actionId.substr(std::string_view("view.keyboard_keys_").size());
+        const auto [end, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), keys);
+        (void)end;
+        if (ec != std::errc{} || std::find(kPianoKeyboardSizes.begin(), kPianoKeyboardSizes.end(), keys) ==
+                                     kPianoKeyboardSizes.end()) return false;
+        return set_keyboard_key_count(keys);
+    }
     if (actionId == "view.zoom_in" || actionId == "view.zoom_out") {
         remember_camera_position();
         const SettingValue zoomValue = workspace_.settings().value("camera.zoom_sensitivity");

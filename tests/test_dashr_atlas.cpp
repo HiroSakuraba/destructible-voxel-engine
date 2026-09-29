@@ -1,7 +1,9 @@
 #include "dve/render/dashr_atlas.hpp"
 #include "dve/rhi/null_device.hpp"
 
+#include <cmath>
 #include <iostream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -12,6 +14,10 @@ using namespace dve::render;
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+bool close(float a, float b, float tolerance = 1.0e-4F) {
+    return std::abs(a - b) <= tolerance;
 }
 
 CookedPolygonAsset make_triangle() {
@@ -41,12 +47,54 @@ DashrAtlasShaderBytecode bytecode() {
     return {{std::byte{1}}, {std::byte{2}}, {std::byte{3}}};
 }
 
+void test_scaled_surface_differentials_and_deformation_ratio() {
+    auto asset = make_triangle();
+    std::string error;
+    DashrSurfaceMeshBuildStats restStats;
+    const auto rest = build_dashr_surface_vertices(asset, {}, &restStats, &error);
+    require(rest.has_value(), error.c_str());
+    require(rest->size() == 3U, "DASHR surface stream vertex count is wrong");
+    require(close((*rest)[0].dPduX, 1.25F), "DASHR lost U differential scale");
+    require(close((*rest)[0].dPdvY, 1.25F), "DASHR lost V differential scale");
+    require(close((*rest)[0].distortionU, 1.0F) &&
+            close((*rest)[0].distortionV, 1.0F),
+            "rest surface should have unit deformation ratios");
+
+    std::vector<Float3> stretched;
+    stretched.reserve(asset.vertices.size());
+    for (const auto& vertex : asset.vertices)
+        stretched.push_back({vertex.position.x * 2.0F, vertex.position.y, vertex.position.z});
+
+    DashrSurfaceMeshBuildStats stretchedStats;
+    const auto deformed = build_dashr_surface_vertices(
+        asset, stretched, &stretchedStats, &error);
+    require(deformed.has_value(), error.c_str());
+    require(close((*deformed)[0].dPduX, 2.5F), "deformed U differential is wrong");
+    require(close((*deformed)[0].dPdvY, 1.25F), "unchanged V differential drifted");
+    require(close((*deformed)[0].distortionU, 2.0F, 1.0e-3F),
+            "DASHR did not measure two-times U stretch");
+    require(close((*deformed)[0].distortionV, 1.0F, 1.0e-3F),
+            "DASHR V stretch ratio should remain one");
+
+    rhi::NullDevice device;
+    DashrSurfaceMeshMirror mirror(device);
+    require(mirror.upload(asset, {}, nullptr, &error), error.c_str());
+    const auto firstCapacity = mirror.stats().vertexCapacityBytes;
+    require(mirror.upload(asset, stretched, nullptr, &error), error.c_str());
+    require(mirror.stats().vertexCapacityBytes == firstCapacity,
+            "deformed DASHR update unnecessarily reallocated its vertex buffer");
+    require(mirror.stats().publications == 2U,
+            "DASHR deformation stream publication count is wrong");
+}
+
 void test_resource_creation_and_updates() {
     rhi::NullDevice device;
     std::string error;
     auto asset = make_triangle();
-    MeshRhiMirror mirror(device);
-    require(mirror.upload(asset, &error), error.c_str());
+    DashrSurfaceMeshMirror mirror(device);
+    DashrSurfaceMeshBuildStats buildStats;
+    require(mirror.upload(asset, {}, &buildStats, &error), error.c_str());
+    require(buildStats.degenerateUvTriangles == 0U, "valid UV triangle was marked degenerate");
 
     DashrAtlasResources resources;
     require(create_dashr_atlas_resources(device, bytecode(), 64U, resources, &error),
@@ -99,6 +147,7 @@ void test_creation_limits() {
 
 int main() {
     try {
+        test_scaled_surface_differentials_and_deformation_ratio();
         test_resource_creation_and_updates();
         test_creation_limits();
         std::cout << "dve_dashr_atlas_tests: PASS\n";

@@ -109,7 +109,17 @@ enum class ShaderStage : std::uint8_t { NoStage = 0, Compute = 1U << 0U, Vertex 
     return (value & stage) != ShaderStage::NoStage;
 }
 enum class BindingType : std::uint8_t {
-    UniformBuffer, StorageBufferReadOnly, StorageBufferReadWrite, SampledTexture, StorageTexture
+    UniformBuffer,
+    StorageBufferReadOnly,
+    StorageBufferReadWrite,
+    // Backward-compatible combined image+sampler descriptor.
+    SampledTexture,
+    // Explicit Vulkan-style sampled image and sampler descriptors. New shader
+    // paths should prefer these when HLSL declares Texture* and SamplerState
+    // separately in descriptor spaces.
+    SampledImage,
+    Sampler,
+    StorageTexture,
 };
 
 template <class Tag>

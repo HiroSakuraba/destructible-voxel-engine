@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -120,6 +121,17 @@ public:
     [[nodiscard]] PatchSearchBrowserPanel& search_panel() noexcept { return searchPanel_; }
     [[nodiscard]] const PatchSearchBrowserPanel& search_panel() const noexcept { return searchPanel_; }
     [[nodiscard]] SynthPanelPage page() const noexcept { return page_; }
+    // Wavetable drawing is coalesced: strokes edit a local draft and publish it
+    // to the synth at most once per kWavetableDrawPublishInterval (plus always
+    // on pointer-up / flush), instead of a set_preset (and cook) per mouse move.
+    static constexpr std::chrono::milliseconds kWavetableDrawPublishInterval{33};
+    [[nodiscard]] std::uint64_t wavetable_draw_publish_count() const noexcept { return wavetableDrawPublishes_; }
+    [[nodiscard]] bool wavetable_draw_pending() const noexcept { return wavetableDraftDirty_; }
+    // Publishes a pending wavetable draft now.
+    void flush_wavetable_draft(audio::Synthesizer& synth) noexcept;
+    // Per-UI-update trailing edge: publishes a pending draft once the throttle
+    // interval has elapsed (so a paused-but-held stroke still becomes audible).
+    void flush_wavetable_draft_if_due(audio::Synthesizer& synth) noexcept;
 
     void set_preset_directory(std::filesystem::path directory) noexcept;
     bool refresh_preset_library() noexcept;
@@ -163,6 +175,10 @@ private:
     bool wavetableDrawing_{};
     int wavetableLastSample_{-1};
     float wavetableLastValue_{};
+    std::optional<audio::SynthPreset> wavetableDraft_{};
+    bool wavetableDraftDirty_{};
+    std::chrono::steady_clock::time_point wavetableLastPublish_{};
+    std::uint64_t wavetableDrawPublishes_{};
     SynthPanelPage page_{SynthPanelPage::Oscillators};
     int pointerNote_{-1};
     std::array<bool, 128> keyboardNotes_{};

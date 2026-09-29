@@ -1861,6 +1861,7 @@ void NativeEditorController::recompute_layout() {
 }
 
 void NativeEditorController::update(float elapsedSeconds) {
+    synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
     spriteAuthoringPanel_.update(elapsedSeconds);
     controlRigPanel_.update(elapsedSeconds);
     if (tileWorldEditorOpen_) ++tileWorldEditorTicks_;

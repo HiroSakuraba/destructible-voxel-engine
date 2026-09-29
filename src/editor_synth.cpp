@@ -861,7 +861,8 @@ void EditorSynthPanel::apply_preset_morph(audio::Synthesizer& synth) noexcept {
 
 void EditorSynthPanel::draw_wavetable_point(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!layout_.wavetableCanvas.contains(x, y)) return;
-    auto preset = synth.preset();
+    if (!wavetableDraft_) wavetableDraft_ = synth.preset();
+    auto& preset = *wavetableDraft_;
     preset.wavetable.enabled = true;
     preset.wavetable.frameCount = std::max<std::uint8_t>(preset.wavetable.frameCount,
         static_cast<std::uint8_t>(selectedWavetableFrame_ + 1U));
@@ -886,7 +887,24 @@ void EditorSynthPanel::draw_wavetable_point(int x, int y, audio::Synthesizer& sy
     } else samples[base + static_cast<std::size_t>(sample)] = value;
     wavetableLastSample_ = sample;
     wavetableLastValue_ = value;
-    synth.set_preset(preset);
+    wavetableDraftDirty_ = true;
+    const auto now = std::chrono::steady_clock::now();
+    if (wavetableDrawPublishes_ == 0U || now - wavetableLastPublish_ >= kWavetableDrawPublishInterval)
+        flush_wavetable_draft(synth);
+}
+
+void EditorSynthPanel::flush_wavetable_draft_if_due(audio::Synthesizer& synth) noexcept {
+    if (wavetableDraftDirty_ &&
+        std::chrono::steady_clock::now() - wavetableLastPublish_ >= kWavetableDrawPublishInterval)
+        flush_wavetable_draft(synth);
+}
+
+void EditorSynthPanel::flush_wavetable_draft(audio::Synthesizer& synth) noexcept {
+    if (!wavetableDraftDirty_ || !wavetableDraft_) return;
+    synth.set_preset(*wavetableDraft_);
+    wavetableDraftDirty_ = false;
+    wavetableLastPublish_ = std::chrono::steady_clock::now();
+    ++wavetableDrawPublishes_;
 }
 
 bool EditorSynthPanel::pointer_move(int x, int y, audio::Synthesizer& synth) noexcept {
@@ -921,7 +939,7 @@ bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noe
         const auto waveform = synth.preset().oscillators[selectedOscillator_].waveform;
         if (waveform == audio::OscillatorWaveform::Wavetable) {
             if (layout_.wavetableCanvas.contains(x, y)) {
-                wavetableDrawing_ = true; wavetableLastSample_ = -1;
+                wavetableDrawing_ = true; wavetableLastSample_ = -1; wavetableDraft_.reset();
                 draw_wavetable_point(x, y, synth); return true;
             }
             for (std::size_t i = 0; i < layout_.wavetableFrameButtons.size(); ++i)
@@ -1040,7 +1058,11 @@ bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noe
 bool EditorSynthPanel::pointer_up(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!open_) return false;
     if (searchPanel_.open() && searchPanel_.pointer_up(x, y, synth)) return true;
-    if (wavetableDrawing_) { wavetableDrawing_ = false; wavetableLastSample_ = -1; return true; }
+    if (wavetableDrawing_) {
+        flush_wavetable_draft(synth);  // the final stroke state always lands
+        wavetableDrawing_ = false; wavetableLastSample_ = -1; wavetableDraft_.reset();
+        return true;
+    }
     if (pointerNote_ < 0) return false;
     (void)synth.note_off(static_cast<std::uint8_t>(pointerNote_));
     pointerNote_ = -1;

@@ -322,6 +322,22 @@ bool create_dashr_shell_renderer(
         if(!r.pbrPipeline)return fail(local);
     }
 
+    if(!bytecode.shadowFragment.empty()) {
+        rhi::GraphicsPipelineDesc shadow=pipeline;
+        shadow.debugName="DASHR displaced shadow caster";
+        shadow.fragmentBytecode=bytecode.shadowFragment;
+        shadow.bindGroupLayouts={r.constantsLayout,r.surfaceLayout};
+        shadow.colorFormat.reset();
+        shadow.colorFormats.clear();
+        shadow.depthFormat=rhi::TextureFormat::D32Float;
+        shadow.depthTest=true;
+        shadow.depthWrite=true;
+        shadow.depthCompare=rhi::CompareOp::LessEqual;
+        shadow.cullMode=rhi::CullMode::Disabled;
+        r.shadowPipeline=device.create_graphics_pipeline(shadow,&local);
+        if(!r.shadowPipeline)return fail(local);
+    }
+
     if(out.valid()) {
         std::string ignored;(void)destroy_dashr_shell_renderer(device,out,&ignored);
     }
@@ -342,6 +358,7 @@ bool destroy_dashr_shell_renderer(
     }
     r.retiredBindGroups.clear();
     auto destroy=[&](bool result){if(!result){ok=false;if(error&&error->empty())*error=local;}local.clear();};
+    if(r.shadowPipeline)destroy(device.destroy_graphics_pipeline(r.shadowPipeline,&local));
     if(r.pbrPipeline)destroy(device.destroy_graphics_pipeline(r.pbrPipeline,&local));
     if(r.pipeline)destroy(device.destroy_graphics_pipeline(r.pipeline,&local));
     if(r.shadowLayout)destroy(device.destroy_bind_group_layout(r.shadowLayout,&local));
@@ -572,6 +589,165 @@ bool record_dashr_shell_frame(
     // Null RHI and already-completed Vulkan work can retire immediately; otherwise
     // the batch remains owned by the renderer until a later frame or destruction.
     if(!reap_completed_bind_groups(device,renderer,error)) return false;
+    return true;
+}
+
+
+bool record_dashr_shadow_frame(
+    rhi::IDevice& device,
+    DashrShellRendererResources& renderer,
+    const DashrShadowFrameDesc& frame,
+    DashrShadowFrameStats& stats,
+    rhi::FenceHandle* fence,
+    std::string* error) {
+    stats={};
+    if(!reap_completed_bind_groups(device,renderer,error)) return false;
+    if(!renderer.valid()||!renderer.shadowPipeline||!frame.depthTarget||
+       frame.viewport.width<=0.0F||frame.viewport.height<=0.0F||
+       frame.scissor.width==0U||frame.scissor.height==0U||
+       !std::isfinite(frame.clearDepth)||frame.clearDepth<0.0F||frame.clearDepth>1.0F) {
+        set_error(error,"DASHR shadow frame is invalid");
+        return false;
+    }
+    const std::size_t required=frame.draws.size()*renderer.constantStride;
+    if(required>renderer.constantCapacity) {
+        set_error(error,"DASHR shadow constant capacity exceeded");
+        return false;
+    }
+
+    std::vector<rhi::BindGroupHandle> transient;
+    transient.reserve(frame.draws.size()*2U);
+    auto cleanup=[&](){(void)destroy_bind_groups(device,transient,nullptr);};
+    auto fail=[&](){cleanup();return false;};
+
+    struct PreparedShadow {
+        const DashrShadowDraw* draw{};
+        DashrShellSubmeshRange range{};
+        rhi::BindGroupHandle constantsGroup{};
+        rhi::BindGroupHandle surfaceGroup{};
+    };
+    std::vector<PreparedShadow> prepared;
+    prepared.reserve(frame.draws.size());
+
+    std::size_t constantOffset=0U;
+    for(const DashrShadowDraw& draw:frame.draws) {
+        if(!draw.shell||!draw.atlas||!draw.atlas->valid()||!draw.atlas->published||
+           !draw.heightView||!draw.heightSampler||
+           draw.shellSubmeshIndex>=draw.shell->submeshes().size()) {
+            set_error(error,"DASHR shadow draw is incomplete");
+            return fail();
+        }
+        std::string settingsError;
+        if(!validate_dashr_surface_settings(draw.settings,&settingsError)) {
+            set_error(error,settingsError);
+            return fail();
+        }
+        const float rayLengthSquared=
+            draw.lightRayDirectionObject.x*draw.lightRayDirectionObject.x+
+            draw.lightRayDirectionObject.y*draw.lightRayDirectionObject.y+
+            draw.lightRayDirectionObject.z*draw.lightRayDirectionObject.z;
+        if(!std::isfinite(rayLengthSquared)||rayLengthSquared<=kShellEpsilon*kShellEpsilon) {
+            set_error(error,"DASHR shadow ray direction is invalid");
+            return fail();
+        }
+        const auto range=draw.shell->submeshes()[draw.shellSubmeshIndex];
+        if(range.indexCount==0U) continue;
+
+        GpuDashrShellConstants constants;
+        constants.objectToClip=draw.objectToLightClip;
+        constants.cameraObjectAndHeightScale={0,0,0,draw.settings.heightScale};
+        constants.heightAndStep={
+            draw.settings.heightReferencePlane,draw.settings.heightOffset,
+            draw.settings.envelopePadding,draw.settings.stepSize};
+        constants.distortion={
+            draw.settings.stepScale,draw.settings.compressionThreshold,
+            draw.settings.stretchThreshold,draw.settings.stretchDamping};
+        constants.minimumStepAndReserved={
+            draw.settings.minimumStepFactor,
+            draw.lightRayDirectionObject.x,
+            draw.lightRayDirectionObject.y,
+            draw.lightRayDirectionObject.z};
+        constants.heightUvScaleOffset={
+            draw.heightUvScale.x,draw.heightUvScale.y,
+            draw.heightUvOffset.x,draw.heightUvOffset.y};
+        constants.heightUvRotation={draw.heightUvRotationRadians,0,0,0};
+        constants.limits={
+            draw.settings.maximumSteps,draw.settings.refinementSteps,
+            draw.settings.maximumTeleports,0U};
+        if(!device.write_buffer(renderer.constants,constantOffset,
+                                std::as_bytes(std::span(&constants,1U)),error))
+            return fail();
+
+        rhi::BindGroupDesc constantsGroup;
+        constantsGroup.layout=renderer.constantsLayout;
+        constantsGroup.debugName="DASHR shadow constant range";
+        constantsGroup.entries={{
+            0U,renderer.constants,{},constantOffset,sizeof(constants),{}}};
+        const auto cg=device.create_bind_group(constantsGroup,error);
+        if(!cg)return fail();
+        transient.push_back(cg);
+
+        rhi::BindGroupDesc surfaceGroup;
+        surfaceGroup.layout=renderer.surfaceLayout;
+        surfaceGroup.debugName="DASHR shadow surface resources";
+        for(std::uint32_t binding=0U;binding<4U;++binding)
+            surfaceGroup.entries.push_back(
+                {binding,{},draw.atlas->filledViews[binding],0U,0U,{}});
+        surfaceGroup.entries.push_back({4U,{},draw.atlas->seamView,0U,0U,{}});
+        surfaceGroup.entries.push_back({5U,{},draw.heightView,0U,0U,{}});
+        surfaceGroup.entries.push_back(
+            {6U,{},{},0U,0U,draw.atlas->linearClampSampler});
+        surfaceGroup.entries.push_back(
+            {7U,{},{},0U,0U,draw.atlas->pointClampSampler});
+        surfaceGroup.entries.push_back({8U,{},{},0U,0U,draw.heightSampler});
+        const auto sg=device.create_bind_group(surfaceGroup,error);
+        if(!sg)return fail();
+        transient.push_back(sg);
+
+        prepared.push_back({&draw,range,cg,sg});
+        constantOffset+=renderer.constantStride;
+        stats.transientBindGroups+=2U;
+    }
+
+    if(prepared.empty()){cleanup();return true;}
+
+    auto commands=device.begin_commands(
+        rhi::QueueKind::Graphics,"DASHR displaced shadow frame",error);
+    if(!commands)return fail();
+    rhi::RenderPassDesc pass;
+    pass.debugName="DASHR displaced shadow depth";
+    pass.depth=rhi::RenderPassDepthAttachment{
+        frame.depthTarget,frame.clearDepth,frame.clearDepth};
+    if(!device.begin_render_pass(commands,pass,error)||
+       !device.bind_graphics_pipeline(commands,renderer.shadowPipeline,error)||
+       !device.set_viewport(commands,frame.viewport,error)||
+       !device.set_scissor(commands,frame.scissor,error))
+        return fail();
+
+    for(const PreparedShadow& item:prepared) {
+        if(!device.bind_graphics_bind_group(
+                commands,0U,item.constantsGroup,error)||
+           !device.bind_graphics_bind_group(
+                commands,1U,item.surfaceGroup,error)||
+           !device.bind_vertex_buffer(
+                commands,0U,item.draw->shell->vertex_buffer(),0U,
+                static_cast<std::uint32_t>(sizeof(GpuDashrShellVertex)),error)||
+           !device.bind_index_buffer(
+                commands,item.draw->shell->index_buffer(),0U,
+                rhi::IndexFormat::Uint32,error)||
+           !device.draw_indexed(
+                commands,item.range.indexCount,1U,item.range.firstIndex,0,0U,error))
+            return fail();
+        ++stats.draws;
+        stats.shellTriangles+=item.range.indexCount/3U;
+    }
+    if(!device.end_render_pass(commands,error))return fail();
+    const auto submitted=device.submit(commands,error);
+    if(!submitted)return fail();
+    if(fence)*fence=submitted;
+    renderer.retiredBindGroups.push_back(
+        DashrShellRetiredBindGroups{submitted,std::move(transient)});
+    if(!reap_completed_bind_groups(device,renderer,error))return false;
     return true;
 }
 

@@ -780,8 +780,11 @@ public:
     // (Copies are cheap here; the audio thread never touches this.)
     [[nodiscard]] SynthPreset preset() const;
     // UI thread only: validates, stores, and publishes the preset to the
-    // render thread through a lock-free queue. Never call from the audio
-    // thread (it copies strings and may block on the preset mutex).
+    // render thread through a lock-free latest-wins mailbox (the newest
+    // preset always wins; superseded ones are coalesced, never the newest).
+    // Any changed HQ wavetable is cooked here, on the caller's thread, and
+    // handed to the render thread atomically. Never call from the audio
+    // thread (it copies strings, cooks, and may block on the preset mutex).
     void set_preset(const SynthPreset& preset);
     [[nodiscard]] bool set_sample_map(const SynthSampleMap& sampleMap,
                                       std::string* error = nullptr);
@@ -791,9 +794,13 @@ public:
                                                   std::uint32_t firstFrame,
                                                   std::span<const float> monoFrames) noexcept;
     [[nodiscard]] SynthGranularProfiler granular_profiler() const noexcept;
-    // Test introspection: how many times the render thread cooked the HQ
-    // wavetable (should stay flat across morph walks / repeated set_preset).
+    // Test introspection: how many times the HQ wavetable was cooked (on the
+    // set_preset caller's thread; should stay flat across morph walks /
+    // repeated set_preset, and never advance inside render()).
     [[nodiscard]] std::uint64_t wavetable_cook_count() const noexcept;
+    // Test introspection: presets superseded by a newer set_preset before the
+    // render thread picked them up.
+    [[nodiscard]] std::uint64_t coalesced_preset_count() const noexcept;
     void reset_granular_profiler() noexcept;
     [[nodiscard]] SynthProfiler profiler() const noexcept;
     void reset_profiler() noexcept;

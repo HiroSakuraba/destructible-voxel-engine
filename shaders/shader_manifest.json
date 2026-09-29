@@ -386,6 +386,84 @@
       ]
     },
     {
+      "name": "dashr_atlas_ps",
+      "source": "dashr_atlas_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": []
+    },
+    {
+      "name": "dashr_atlas_vs",
+      "source": "dashr_atlas_vs.hlsl",
+      "stage": "vertex",
+      "entry": "main",
+      "profile": "vs_6_0",
+      "bindings": []
+    },
+    {
+      "name": "dashr_edge_fill",
+      "source": "dashr_edge_fill.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        8,
+        8,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "gDashrRaw0",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gDashrRaw1",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t1"
+        },
+        {
+          "name": "gDashrRaw2",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t2"
+        },
+        {
+          "name": "gDashrRaw3",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t3"
+        },
+        {
+          "name": "gDashrFilled0",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u4"
+        },
+        {
+          "name": "gDashrFilled1",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u5"
+        },
+        {
+          "name": "gDashrFilled2",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u6"
+        },
+        {
+          "name": "gDashrFilled3",
+          "kind": "storage_texture",
+          "access": "read_write",
+          "register": "u7"
+        }
+      ]
+    },
+    {
       "name": "environment_ibl_reference",
       "source": "environment_ibl_reference.hlsl",
       "stage": "compute",

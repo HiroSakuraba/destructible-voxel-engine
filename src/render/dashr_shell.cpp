@@ -223,6 +223,42 @@ bool create_dashr_shell_renderer(
     r.surfaceLayout=device.create_bind_group_layout(surfaceLayout,&local);
     if(!r.surfaceLayout)return fail(local);
 
+    rhi::BindGroupLayoutDesc materialLayout;
+    materialLayout.debugName="DASHR explicit material resources";
+    materialLayout.bindings={
+        {0U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Fragment},
+        {1U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Fragment},
+    };
+    for(std::uint32_t binding=2U;binding<7U;++binding)
+        materialLayout.bindings.push_back(
+            {binding,rhi::BindingType::SampledImage,rhi::ShaderStage::Fragment});
+    for(std::uint32_t binding=7U;binding<12U;++binding)
+        materialLayout.bindings.push_back(
+            {binding,rhi::BindingType::Sampler,rhi::ShaderStage::Fragment});
+    r.materialLayout=device.create_bind_group_layout(materialLayout,&local);
+    if(!r.materialLayout)return fail(local);
+
+    rhi::BindGroupLayoutDesc environmentLayout;
+    environmentLayout.debugName="DASHR explicit environment resources";
+    environmentLayout.bindings={
+        {0U,rhi::BindingType::SampledImage,rhi::ShaderStage::Fragment},
+        {1U,rhi::BindingType::SampledImage,rhi::ShaderStage::Fragment},
+        {2U,rhi::BindingType::SampledImage,rhi::ShaderStage::Fragment},
+        {3U,rhi::BindingType::Sampler,rhi::ShaderStage::Fragment},
+    };
+    r.environmentLayout=device.create_bind_group_layout(environmentLayout,&local);
+    if(!r.environmentLayout)return fail(local);
+
+    rhi::BindGroupLayoutDesc shadowLayout;
+    shadowLayout.debugName="DASHR explicit shadow resources";
+    shadowLayout.bindings={
+        {0U,rhi::BindingType::SampledImage,rhi::ShaderStage::Fragment},
+        {1U,rhi::BindingType::SampledImage,rhi::ShaderStage::Fragment},
+        {2U,rhi::BindingType::Sampler,rhi::ShaderStage::Fragment},
+    };
+    r.shadowLayout=device.create_bind_group_layout(shadowLayout,&local);
+    if(!r.shadowLayout)return fail(local);
+
     rhi::GraphicsPipelineDesc pipeline;
     pipeline.debugName="DASHR live conservative shell";
     pipeline.vertexBytecode=bytecode.vertex;
@@ -244,6 +280,16 @@ bool create_dashr_shell_renderer(
     r.pipeline=device.create_graphics_pipeline(pipeline,&local);
     if(!r.pipeline)return fail(local);
 
+    if(!bytecode.pbrFragment.empty()) {
+        rhi::GraphicsPipelineDesc pbr=pipeline;
+        pbr.debugName="DASHR live PBR shell";
+        pbr.fragmentBytecode=bytecode.pbrFragment;
+        pbr.bindGroupLayouts={
+            r.constantsLayout,r.surfaceLayout,r.materialLayout,r.environmentLayout,r.shadowLayout};
+        r.pbrPipeline=device.create_graphics_pipeline(pbr,&local);
+        if(!r.pbrPipeline)return fail(local);
+    }
+
     if(out.valid()) {
         std::string ignored;(void)destroy_dashr_shell_renderer(device,out,&ignored);
     }
@@ -255,7 +301,11 @@ bool destroy_dashr_shell_renderer(
     rhi::IDevice& device,DashrShellRendererResources& r,std::string* error) {
     bool ok=true;std::string local;
     auto destroy=[&](bool result){if(!result){ok=false;if(error&&error->empty())*error=local;}local.clear();};
+    if(r.pbrPipeline)destroy(device.destroy_graphics_pipeline(r.pbrPipeline,&local));
     if(r.pipeline)destroy(device.destroy_graphics_pipeline(r.pipeline,&local));
+    if(r.shadowLayout)destroy(device.destroy_bind_group_layout(r.shadowLayout,&local));
+    if(r.environmentLayout)destroy(device.destroy_bind_group_layout(r.environmentLayout,&local));
+    if(r.materialLayout)destroy(device.destroy_bind_group_layout(r.materialLayout,&local));
     if(r.surfaceLayout)destroy(device.destroy_bind_group_layout(r.surfaceLayout,&local));
     if(r.constantsLayout)destroy(device.destroy_bind_group_layout(r.constantsLayout,&local));
     if(r.constants)destroy(device.destroy_buffer(r.constants,&local));
@@ -277,7 +327,7 @@ bool record_dashr_shell_frame(
     }
 
     std::vector<rhi::BindGroupHandle> transient;
-    transient.reserve(frame.draws.size()*2U);
+    transient.reserve(frame.draws.size()*5U);
     auto cleanup=[&](){
         for(auto it=transient.rbegin();it!=transient.rend();++it)
             if(*it)(void)device.destroy_bind_group(*it,nullptr);
@@ -290,6 +340,10 @@ bool record_dashr_shell_frame(
         DashrShellSubmeshRange range{};
         rhi::BindGroupHandle constantsGroup{};
         rhi::BindGroupHandle surfaceGroup{};
+        rhi::BindGroupHandle materialGroup{};
+        rhi::BindGroupHandle environmentGroup{};
+        rhi::BindGroupHandle shadowGroup{};
+        bool pbr{};
     };
     std::vector<Prepared> prepared;
     prepared.reserve(frame.draws.size());
@@ -297,9 +351,21 @@ bool record_dashr_shell_frame(
     std::size_t constantOffset=0U;
     for(const DashrShellDraw& draw:frame.draws) {
         if(!draw.shell||!draw.atlas||!draw.atlas->valid()||!draw.atlas->published||
-           !draw.heightView||!draw.heightSampler||
            draw.shellSubmeshIndex>=draw.shell->submeshes().size()) {
             set_error(error,"DASHR shell draw is incomplete");return fail();
+        }
+        if(draw.usePbr && (!renderer.pbr_valid()||!draw.material||!draw.lighting||
+                           !draw.lighting->valid()||!draw.shadows||!draw.shadows->valid())) {
+            set_error(error,"DASHR PBR draw is missing material, lighting, shadow, or pipeline resources");
+            return fail();
+        }
+        const auto heightChannel=static_cast<std::uint32_t>(MainMaterialTextureChannel::Height);
+        const rhi::TextureViewHandle heightView=draw.heightView?draw.heightView:
+            (draw.material?draw.material->textureViews[heightChannel]:rhi::TextureViewHandle{});
+        const rhi::SamplerHandle heightSampler=draw.heightSampler?draw.heightSampler:
+            (draw.material?draw.material->samplers[heightChannel]:rhi::SamplerHandle{});
+        if(!heightView||!heightSampler) {
+            set_error(error,"DASHR shell draw has no height image or sampler");return fail();
         }
         std::string settingsError;
         if(!validate_dashr_surface_settings(draw.settings,&settingsError)) {
@@ -310,17 +376,24 @@ bool record_dashr_shell_frame(
 
         GpuDashrShellConstants constants;
         constants.objectToClip=draw.objectToClip;
-        constants.cameraAndHeightScale={
+        constants.objectToWorld=draw.objectToWorld;
+        constants.cameraObjectAndHeightScale={
             draw.cameraObjectPosition.x,draw.cameraObjectPosition.y,draw.cameraObjectPosition.z,
             draw.settings.heightScale};
+        constants.cameraWorldAndDebug={
+            draw.cameraWorldPosition.x,draw.cameraWorldPosition.y,draw.cameraWorldPosition.z,
+            static_cast<float>(draw.debugMode)};
+        constants.environmentParameters=draw.environmentParameters;
         constants.heightAndStep={
             draw.settings.heightReferencePlane,draw.settings.heightOffset,
             draw.settings.envelopePadding,draw.settings.stepSize};
         constants.distortion={
             draw.settings.stepScale,draw.settings.compressionThreshold,
             draw.settings.stretchThreshold,draw.settings.stretchDamping};
-        constants.minimumStepAndDebug={
-            draw.settings.minimumStepFactor,static_cast<float>(draw.debugMode),0,0};
+        constants.minimumStepAndReserved={draw.settings.minimumStepFactor,0,0,0};
+        constants.heightUvScaleOffset={
+            draw.heightUvScale.x,draw.heightUvScale.y,draw.heightUvOffset.x,draw.heightUvOffset.y};
+        constants.heightUvRotation={draw.heightUvRotationRadians,0,0,0};
         constants.limits={
             draw.settings.maximumSteps,draw.settings.refinementSteps,
             draw.settings.maximumTeleports,0U};
@@ -342,18 +415,76 @@ bool record_dashr_shell_frame(
             surfaceGroup.entries.push_back(
                 {binding,{},draw.atlas->filledViews[binding],0U,0U,{}});
         surfaceGroup.entries.push_back({4U,{},draw.atlas->seamView,0U,0U,{}});
-        surfaceGroup.entries.push_back({5U,{},draw.heightView,0U,0U,{}});
+        surfaceGroup.entries.push_back({5U,{},heightView,0U,0U,{}});
         surfaceGroup.entries.push_back({6U,{},{},0U,0U,draw.atlas->linearClampSampler});
         surfaceGroup.entries.push_back({7U,{},{},0U,0U,draw.atlas->pointClampSampler});
-        surfaceGroup.entries.push_back({8U,{},{},0U,0U,draw.heightSampler});
+        surfaceGroup.entries.push_back({8U,{},{},0U,0U,heightSampler});
         const auto sg=device.create_bind_group(surfaceGroup,error);
         if(!sg)return fail();
         transient.push_back(sg);
 
-        prepared.push_back({&draw,range,cg,sg});
+        rhi::BindGroupHandle mg{},eg{},shg{};
+        if(draw.usePbr) {
+            const auto& descriptor=*draw.material;
+            rhi::BindGroupDesc materialGroup;
+            materialGroup.layout=renderer.materialLayout;
+            materialGroup.debugName="DASHR explicit material group";
+            materialGroup.entries={
+                {0U,descriptor.materialRecordBuffer,{},descriptor.materialRecordOffset,
+                 sizeof(GpuMaterialRecord),{}},
+                {1U,descriptor.mappingRecordBuffer,{},descriptor.mappingRecordOffset,
+                 sizeof(GpuPolygonMaterialMappingRecord),{}},
+            };
+            constexpr std::array<MainMaterialTextureChannel,5> channels{
+                MainMaterialTextureChannel::BaseColor,
+                MainMaterialTextureChannel::MetallicRoughness,
+                MainMaterialTextureChannel::Normal,
+                MainMaterialTextureChannel::Emissive,
+                MainMaterialTextureChannel::Opacity};
+            for(std::uint32_t index=0U;index<channels.size();++index) {
+                const auto channel=static_cast<std::uint32_t>(channels[index]);
+                materialGroup.entries.push_back(
+                    {2U+index,{},descriptor.textureViews[channel],0U,0U,{}});
+            }
+            for(std::uint32_t index=0U;index<channels.size();++index) {
+                const auto channel=static_cast<std::uint32_t>(channels[index]);
+                materialGroup.entries.push_back(
+                    {7U+index,{},{},0U,0U,descriptor.samplers[channel]});
+            }
+            mg=device.create_bind_group(materialGroup,error);
+            if(!mg)return fail();
+            transient.push_back(mg);
+
+            rhi::BindGroupDesc environmentGroup;
+            environmentGroup.layout=renderer.environmentLayout;
+            environmentGroup.debugName="DASHR explicit environment group";
+            environmentGroup.entries={
+                {0U,{},draw.lighting->diffuseIrradianceView,0U,0U,{}},
+                {1U,{},draw.lighting->specularPrefilterView,0U,0U,{}},
+                {2U,{},draw.lighting->brdfLutView,0U,0U,{}},
+                {3U,{},{},0U,0U,draw.lighting->sampler},
+            };
+            eg=device.create_bind_group(environmentGroup,error);
+            if(!eg)return fail();
+            transient.push_back(eg);
+
+            rhi::BindGroupDesc shadowGroup;
+            shadowGroup.layout=renderer.shadowLayout;
+            shadowGroup.debugName="DASHR explicit shadow group";
+            shadowGroup.entries={
+                {0U,{},draw.shadows->depthAtlasView,0U,0U,{}},
+                {1U,{},draw.shadows->dynamicDepthAtlasView,0U,0U,{}},
+                {2U,{},{},0U,0U,draw.shadows->comparisonSampler},
+            };
+            shg=device.create_bind_group(shadowGroup,error);
+            if(!shg)return fail();
+            transient.push_back(shg);
+        }
+
+        prepared.push_back({&draw,range,cg,sg,mg,eg,shg,draw.usePbr});
         constantOffset+=renderer.constantStride;
         ++stats.constantRanges;
-        stats.transientBindGroups+=2U;
+        stats.transientBindGroups+=draw.usePbr?5U:2U;
     }
 
     if(prepared.empty()) {cleanup();return true;}
@@ -365,22 +496,31 @@ bool record_dashr_shell_frame(
     pass.colors={{frame.colorTarget,false,0,0,0,0}};
     pass.depth=rhi::RenderPassDepthAttachment{frame.depthTarget,false,1.0F};
     if(!device.begin_render_pass(commands,pass,error)||
-       !device.bind_graphics_pipeline(commands,renderer.pipeline,error)||
        !device.set_viewport(commands,{0,0,static_cast<float>(frame.width),
                                      static_cast<float>(frame.height),0,1},error)||
        !device.set_scissor(commands,{0,0,frame.width,frame.height},error))
         return fail();
 
     for(const Prepared& item:prepared) {
-        if(!device.bind_graphics_bind_group(commands,0U,item.constantsGroup,error)||
-           !device.bind_graphics_bind_group(commands,1U,item.surfaceGroup,error)||
-           !device.bind_vertex_buffer(commands,0U,item.draw->shell->vertex_buffer(),0U,
+        const auto pipeline=item.pbr?renderer.pbrPipeline:renderer.pipeline;
+        if(!device.bind_graphics_pipeline(commands,pipeline,error)||
+           !device.bind_graphics_bind_group(commands,0U,item.constantsGroup,error)||
+           !device.bind_graphics_bind_group(commands,1U,item.surfaceGroup,error))
+            return fail();
+        if(item.pbr) {
+            if(!device.bind_graphics_bind_group(commands,2U,item.materialGroup,error)||
+               !device.bind_graphics_bind_group(commands,3U,item.environmentGroup,error)||
+               !device.bind_graphics_bind_group(commands,4U,item.shadowGroup,error))
+                return fail();
+        }
+        if(!device.bind_vertex_buffer(commands,0U,item.draw->shell->vertex_buffer(),0U,
                                       static_cast<std::uint32_t>(sizeof(GpuDashrShellVertex)),error)||
            !device.bind_index_buffer(commands,item.draw->shell->index_buffer(),0U,
                                      rhi::IndexFormat::Uint32,error)||
            !device.draw_indexed(commands,item.range.indexCount,1U,item.range.firstIndex,0,0U,error))
             return fail();
         ++stats.draws;
+        if(item.pbr)++stats.pbrDraws;else ++stats.diagnosticDraws;
         stats.shellTriangles+=item.range.indexCount/3U;
     }
     if(!device.end_render_pass(commands,error))return fail();

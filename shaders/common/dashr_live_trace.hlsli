@@ -21,7 +21,7 @@ cbuffer DashrShellConstants : register(b0, space0) {
     float4 gEnvironmentParameters;
     float4 gHeightAndStep;
     float4 gDistortion;
-    float4 gMinimumStepAndReserved;
+    float4 gMinimumStepAndShadowRay;
     float4 gHeightUvScaleOffset;
     float4 gHeightUvRotation;
     uint4 gLimits;
@@ -97,7 +97,7 @@ DashrTraceEvaluation DashrEvaluateTracePoint(
     result.surfacePosition = DashrObjectToSurface(
         surfaceSample, result.objectPosition,
         gDistortion.y, gDistortion.z, gDistortion.w,
-        gMinimumStepAndReserved.x, result.stepFactor);
+        gMinimumStepAndShadowRay.x, result.stepFactor);
     if (any(result.surfacePosition.xy < float2(0.0F,0.0F)) ||
         any(result.surfacePosition.xy > float2(1.0F,1.0F))) return result;
     result.sampledHeight = DashrSampleHeight(result.surfacePosition.xy);
@@ -109,12 +109,12 @@ DashrTraceEvaluation DashrEvaluateTracePoint(
     return result;
 }
 
-DashrTraceHit DashrTraceSurface(float3 startObject, float2 initialUv) {
+DashrTraceHit DashrTraceSurfaceAlong(
+    float3 startObject, float2 initialUv, float3 directionObject) {
     DashrTraceHit output = (DashrTraceHit)0;
-    const float3 rayVector = startObject - gCameraObjectAndHeightScale.xyz;
-    const float rayLengthSquared = dot(rayVector, rayVector);
-    if (rayLengthSquared <= 1.0e-12F) return output;
-    const float3 directionObject = rayVector * rsqrt(rayLengthSquared);
+    const float directionLengthSquared = dot(directionObject, directionObject);
+    if (directionLengthSquared <= 1.0e-12F) return output;
+    directionObject *= rsqrt(directionLengthSquared);
 
     const float mapped0 = DashrMapHeight(
         0.0F, gCameraObjectAndHeightScale.w, gHeightAndStep.x, gHeightAndStep.y);
@@ -157,7 +157,7 @@ DashrTraceHit DashrTraceSurface(float3 startObject, float2 initialUv) {
 
         if (current.stepFactor < 1.0F && nextStep > 0.0F) {
             distance = previousDistance +
-                nextStep * clamp(current.stepFactor, gMinimumStepAndReserved.x, 1.0F);
+                nextStep * clamp(current.stepFactor, gMinimumStepAndShadowRay.x, 1.0F);
             current = DashrEvaluateTracePoint(
                 startObject, directionObject, distance, seedUv);
             if (!current.valid) return output;
@@ -209,6 +209,11 @@ DashrTraceHit DashrTraceSurface(float3 startObject, float2 initialUv) {
                    max(1.0F, -current.delta * gDistortion.x);
     }
     return output;
+}
+
+DashrTraceHit DashrTraceSurface(float3 startObject, float2 initialUv) {
+    const float3 rayVector = startObject - gCameraObjectAndHeightScale.xyz;
+    return DashrTraceSurfaceAlong(startObject, initialUv, rayVector);
 }
 
 float DashrDepthFromObjectPosition(float3 objectPosition) {

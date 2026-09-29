@@ -238,7 +238,7 @@ void EditorSynthPanel::cycle_waveform(std::size_t oscillator, int direction,
                                       audio::Synthesizer& synth) noexcept {
     auto preset = synth.preset();
     preset.oscillators[oscillator].waveform = cycle_enum(
-        preset.oscillators[oscillator].waveform, 16U, direction);
+        preset.oscillators[oscillator].waveform, 17U, direction);  // Phase 5: +Spectral
     synth.set_preset(preset);
 }
 
@@ -474,6 +474,29 @@ void EditorSynthPanel::adjust_oscillator_advanced(std::size_t index, int directi
             case 15: granular.reverseProbability01 = stepped(granular.reverseProbability01, 0.05F, 0.0F, 1.0F, direction); break;
             case 16: granular.freezePosition01 = stepped(granular.freezePosition01, 0.025F, 0.0F, 1.0F, direction); break;
             case 17: granular.granularQuality = cycle_enum(granular.granularQuality, 4U, direction); break;
+            default: return;
+        }
+    } else if (oscillator.waveform == audio::OscillatorWaveform::Spectral) {
+        // Phase 5: spectral/resynthesis oscillator reads preset-level
+        // SpectralParameters (the spectral.hpp contract, unified at merge).
+        // 14 rows — fits the 18-row advanced budget, so
+        // kSynthOscillatorAdvancedPropertyCount is unchanged (no ABI break).
+        auto& spectral = preset.spectral;
+        switch (index) {
+            case 0: spectral.enabled = !spectral.enabled; break;
+            case 1: spectral.gain = stepped(spectral.gain, 0.05F, 0.0F, 2.0F, direction); break;
+            case 2: spectral.timeStretch = stepped(spectral.timeStretch, 0.05F, 0.0625F, 16.0F, direction); break;
+            case 3: spectral.freeze01 = stepped(spectral.freeze01, 0.05F, 0.0F, 1.0F, direction); break;
+            case 4: spectral.formantShiftSemitones = stepped(spectral.formantShiftSemitones, 1.0F, -48.0F, 48.0F, direction); break;
+            case 5: spectral.harmonicStretch = stepped(spectral.harmonicStretch, 0.05F, 0.25F, 4.0F, direction); break;
+            case 6: spectral.spectralTiltDbPerOct = stepped(spectral.spectralTiltDbPerOct, 0.5F, -24.0F, 24.0F, direction); break;
+            case 7: spectral.partialThreshold01 = stepped(spectral.partialThreshold01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 8: spectral.spectralBlur01 = stepped(spectral.spectralBlur01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 9: spectral.frequencyQuantize01 = stepped(spectral.frequencyQuantize01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 10: spectral.inharmonicity01 = stepped(spectral.inharmonicity01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 11: spectral.phaseRandom01 = stepped(spectral.phaseRandom01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 12: spectral.stereoSpread01 = stepped(spectral.stereoSpread01, 0.025F, 0.0F, 1.0F, direction); break;
+            case 13: spectral.spectralQuality = cycle_enum(spectral.spectralQuality, 4U, direction); break;
             default: return;
         }
     } else {

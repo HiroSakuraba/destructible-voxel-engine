@@ -16,6 +16,7 @@
 #include "dve/audio/sequencer.hpp"
 #include "dve/audio/attractor.hpp"
 #include "dve/audio/granular.hpp"
+#include "dve/audio/spectral.hpp"  // Phase 5: spectral resynthesis oscillator (SYN-015)
 #include "dve/audio/synth_profiler.hpp"
 
 namespace dve::audio {
@@ -70,6 +71,7 @@ enum class OscillatorWaveform : std::uint8_t {
     PhysicalModel,
     Sampler,  // Phase 2: dedicated sampler generator (preset-level SamplerParameters)
     ModalResonator,  // Phase 2: bank of damped modal resonators (SYN-011b)
+    Spectral,  // Phase 5: spectral resynthesis oscillator (SYN-015; appended, never renumbered)
 };
 
 // Phase 2: sampler playback mode and direction.
@@ -637,6 +639,12 @@ struct SynthAttractorSettings {
     bool operator==(const SynthAttractorSettings&) const = default;
 };
 
+// Phase 5: SpectralParameters is the canonical preset-level spectral/
+// resynthesis parameter block defined in dve/audio/spectral.hpp (the
+// oscillator-native contract: the realtime engine reads these field names).
+// The earlier duplicate definition here was removed at the Phase 5 merge;
+// SynthPreset::spectral and RealtimePreset::spectral use that single type.
+
 struct SynthPreset {
     std::string name{"DVE Eightfold Hybrid"};
     std::array<OscillatorParameters, kSynthOscillatorCount> oscillators{};
@@ -654,6 +662,12 @@ struct SynthPreset {
     SynthSampleBank sampleBank{};
     SamplerParameters sampler{};  // Phase 2: dedicated sampler generator
     GranularParameters granular{};  // Phase 4: dedicated granular generator (SYN-014)
+    SpectralParameters spectral{};  // Phase 5: spectral/resynthesis oscillator (SYN-015)
+    // Phase 5: non-owning view of the cooked spectral asset the Spectral
+    // waveform resynthesizes. nullptr = silence. Lifetime is owned by the
+    // caller (preset/serialization layer, wave-2 workers); the voice never
+    // owns or frees it.
+    const SpectralAssetView* spectralAsset{nullptr};
     MpeParameters mpe{};
     MicrotuningTable microtuning{};
     UnisonParameters unison{};

@@ -26,6 +26,7 @@ enum class SynthPanelPage : std::uint8_t {
 inline constexpr std::size_t kSynthPanelPageCount = 8;
 inline constexpr std::size_t kSynthParameterRowCount = 30;
 inline constexpr std::size_t kSynthOscillatorAdvancedPropertyCount = 18;
+inline constexpr std::size_t kSynthSpectralAdvancedRowCount = 14;  // Phase 5: spectral section rows
 inline constexpr std::size_t kSynthArpStepPropertyCount = 18;
 inline constexpr std::size_t kSynthPresetVisibleEntryCount = 8;
 

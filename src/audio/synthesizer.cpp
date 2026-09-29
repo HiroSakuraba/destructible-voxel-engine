@@ -213,6 +213,8 @@ struct RealtimePreset {
     RealtimeSampleBank sampleBank{};
     SamplerParameters sampler{};  // Phase 2: sampler generator parameters
     GranularParameters granular{};  // Phase 4: granular generator parameters (SYN-014)
+    SpectralParameters spectral{};  // Phase 5: spectral resynthesis parameters (SYN-015)
+    const SpectralAssetView* spectralAsset{nullptr};  // Phase 5: non-owning cooked asset view
     MpeParameters mpe{};
     RealtimeMicrotuning microtuning{};
     UnisonParameters unison{};
@@ -293,6 +295,8 @@ RealtimePreset realtime_preset(const SynthPreset& source) noexcept {
     std::copy_n(source.sampleBank.samples.begin(), source.sampleBank.frameCount, result.sampleBank.samples.begin());
     result.sampler = source.sampler;  // Phase 2: SamplerParameters is trivially copyable
     result.granular = source.granular;  // Phase 4: GranularParameters is trivially copyable
+    result.spectral = source.spectral;  // Phase 5: SpectralParameters is trivially copyable
+    result.spectralAsset = source.spectralAsset;  // Phase 5: non-owning view, copied as a pointer>>>>>>> phase5-serial
     result.wavetable.enabled = source.wavetable.enabled;
     result.wavetable.frameCount = source.wavetable.frameCount;
     const std::size_t baseStride = kWavetableFrameCount * kWavetableSampleCount;
@@ -754,6 +758,7 @@ struct Voice {
     std::uint8_t sampleAttackZone{kInvalidSampleZone};
     std::uint8_t sampleReleaseZone{kInvalidSampleZone};
     GranularEngine granularEngine{};  // Phase 4: dedicated granular generator (one pool per voice)
+    SpectralOscillator spectralOscillator{};  // Phase 5: spectral resynthesis (one engine per voice)
     std::array<std::array<float, kSynthUnisonMax - 1U>, kSynthOscillatorCount> unisonPhases{};
     std::array<float, kSynthModulationSlotCount> modulationSmoothing{};
     std::array<bool, kSynthOscillatorCount> oscillatorWrapped{};
@@ -811,6 +816,11 @@ struct Voice {
         granularEngine.reset();
         granularEngine.set_seed(0x51ED27B9U ^ (static_cast<std::uint32_t>(newNote) << 16U) ^
                                 static_cast<std::uint32_t>(newAge));
+        // Phase 5: fresh spectral engine per note, deterministically seeded
+        // from note/age so identical notes render identical output.
+        spectralOscillator.reset();
+        spectralOscillator.set_seed(0x5EC1A1U ^ (static_cast<std::uint32_t>(newNote) << 16U) ^
+                                    static_cast<std::uint32_t>(newAge));
         for (std::size_t i = 0; i < kSynthLfoCount; ++i) {
             if (preset.lfos[i].keySync || retrigger) lfoPhases[i] = wrap_phase(preset.lfos[i].phase);
             lfoNoiseState[i] = 0xA511E9B3U ^ (static_cast<std::uint32_t>(newNote) << 8U) ^
@@ -826,7 +836,7 @@ struct Voice {
         modulationSmoothing.fill(0.0F);
     }
     void release() noexcept { keyHeld = false; sustained = false; amp.note_off(); filterEnvelope.note_off(); }
-    void kill() noexcept { active = false; keyHeld = false; sustained = false; amp.kill(); filterEnvelope.kill(); granularEngine.kill_grains(); }
+    void kill() noexcept { active = false; keyHeld = false; sustained = false; amp.kill(); filterEnvelope.kill(); granularEngine.kill_grains(); spectralOscillator.kill(); }
 };
 
 struct DelayLine {
@@ -985,6 +995,7 @@ float oscillator_sample(OscillatorWaveform waveform, float phase, float incremen
         case OscillatorWaveform::PhysicalModel:
         case OscillatorWaveform::Sampler:
         case OscillatorWaveform::ModalResonator:
+        case OscillatorWaveform::Spectral:  // Phase 5: rendered via SpectralOscillator, not the phase path
             return 0.0F;
     }
     return 0.0F;
@@ -1551,6 +1562,7 @@ std::string waveform_name(OscillatorWaveform waveform) {
         case OscillatorWaveform::PhysicalModel: return "physicalmodel";
         case OscillatorWaveform::Sampler: return "sampler";
         case OscillatorWaveform::ModalResonator: return "modalresonator";
+        case OscillatorWaveform::Spectral: return "spectral";
     }
     return "saw";
 }
@@ -1571,6 +1583,7 @@ std::optional<OscillatorWaveform> parse_waveform(std::string_view value) {
     if (value == "physicalmodel") return OscillatorWaveform::PhysicalModel;
     if (value == "sampler") return OscillatorWaveform::Sampler;
     if (value == "modalresonator") return OscillatorWaveform::ModalResonator;
+    if (value == "spectral") return OscillatorWaveform::Spectral;
     return std::nullopt;
 }
 
@@ -2041,6 +2054,7 @@ std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept 
         case OscillatorWaveform::PhysicalModel: return "Physical Model";
         case OscillatorWaveform::Sampler: return "Sampler";
         case OscillatorWaveform::ModalResonator: return "Modal Resonator";
+        case OscillatorWaveform::Spectral: return "Spectral";
     }
     return "Saw";
 }
@@ -3962,6 +3976,21 @@ struct Synthesizer::Impl {
                 stereoLeft = granularOut.first;
                 stereoRight = granularOut.second;
                 sample = (stereoLeft + stereoRight) * 0.70710678F;
+            } else if (osc.waveform == OscillatorWaveform::Spectral) {
+                // Phase 5: spectral resynthesis oscillator (SYN-015).
+                // Preset-level parameters; the asset is a non-owning view of
+                // the cooked spectral asset (Worker C/D own its lifetime). A
+                // null/missing asset renders silence (counted inside the
+                // engine, never a crash).
+                auto& spec = v.spectralOscillator;
+                spec.set_sample_rate(sampleRate);
+                const SpectralAssetView asset =
+                    parameters.spectralAsset != nullptr ? *parameters.spectralAsset
+                                                        : SpectralAssetView{};
+                const auto spectralOut = spec.render(asset, parameters.spectral, frequency);
+                stereoLeft = spectralOut.first;
+                stereoRight = spectralOut.second;
+                sample = (stereoLeft + stereoRight) * 0.70710678F;
             } else if (osc.waveform == OscillatorWaveform::PhysicalModel) {
                 sample = physical::process(v.physicalModels[i], osc, frequency, v.velocity,
                                            v.pressure, v.timbre, sampleRate);
@@ -4011,7 +4040,7 @@ struct Synthesizer::Impl {
             if (osc.waveform == OscillatorWaveform::Noise || osc.waveform == OscillatorWaveform::SuperSaw ||
                 osc.waveform == OscillatorWaveform::Sample || osc.waveform == OscillatorWaveform::Granular ||
                 osc.waveform == OscillatorWaveform::PhysicalModel || osc.waveform == OscillatorWaveform::Sampler ||
-                osc.waveform == OscillatorWaveform::ModalResonator)
+                osc.waveform == OscillatorWaveform::ModalResonator || osc.waveform == OscillatorWaveform::Spectral)
                 unisonVoices = 1U;
             for (std::uint8_t copy = 1U; copy < unisonVoices; ++copy) {
                 const float centered = static_cast<float>(copy) - 0.5F * static_cast<float>(unisonVoices - 1U);
@@ -4037,7 +4066,8 @@ struct Synthesizer::Impl {
                 osc.waveform != OscillatorWaveform::Granular &&
                 osc.waveform != OscillatorWaveform::PhysicalModel &&
                 osc.waveform != OscillatorWaveform::Sampler &&
-                osc.waveform != OscillatorWaveform::ModalResonator) {
+                osc.waveform != OscillatorWaveform::ModalResonator &&
+                osc.waveform != OscillatorWaveform::Spectral) {
                 const unsigned octaves = std::clamp<unsigned>(osc.subOscillatorOctaves, 1U, 3U);
                 const float subIncrement = increment / static_cast<float>(1U << octaves);
                 const float sub = bandlimited_pulse(v.subPhases[i], subIncrement, 0.5F) *
@@ -4065,7 +4095,8 @@ struct Synthesizer::Impl {
                                          osc.waveform == OscillatorWaveform::Granular ||
                                          osc.waveform == OscillatorWaveform::PhysicalModel ||
                                          osc.waveform == OscillatorWaveform::Sampler ||
-                                         osc.waveform == OscillatorWaveform::ModalResonator;
+                                         osc.waveform == OscillatorWaveform::ModalResonator ||
+                                         osc.waveform == OscillatorWaveform::Spectral;
             if (intrinsicStereo) {
                 left += stereoLeft * panLeft * 1.41421356F;
                 right += stereoRight * panRight * 1.41421356F;
@@ -5166,6 +5197,69 @@ SynthPreset make_granular_cloud_drift() {
     preset.reverb.mix = 0.28F;
     return preset;
 }
+
+// Phase 5: spectral showcase. Bakes a glass-like harmonic tone into the
+// preset sample bank (the same seamless-loop technique as "Sampled Loop Vox":
+// 12000 frames is exactly 110 cycles at 440 Hz, so the loop seam is
+// click-free) and voices it through the Sampler so the preset renders audibly
+// today; the spectral block is armed with a musical resynthesis setting for
+// that bank tone — gentle downward tilt for a glassy shimmer, a light blur,
+// and a touch of inharmonicity. The spectral oscillator engine (worker B)
+// will read preset.spectral from RealtimePreset when it lands. Because the
+// bank tone sits at concert A440 with a dominant fundamental, the preset
+// test's pitch check (MIDI 69) still hears the played note as fundamental.
+SynthPreset make_spectral_glass_resynthesis() {
+    auto preset = base_preset("Spectral Glass Resynthesis");
+    enable_osc(preset, 0, OscillatorWaveform::Sampler, 0.0F, 0.0F, 0.90F);
+    constexpr std::uint32_t kFrames = 12000U;  // 110 cycles at 440 Hz / 48 kHz: seamless loop
+    constexpr float kRate = 48000.0F;
+    constexpr float kFrequency = 440.0F;
+    constexpr float kHarmonics[8] = {1.0F, 0.45F, 0.30F, 0.20F, 0.14F, 0.10F, 0.07F, 0.05F};
+    float peak = 0.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        float sample = 0.0F;
+        const float phase = 2.0F * 3.14159265358979F * kFrequency * static_cast<float>(i) / kRate;
+        for (int harmonic = 0; harmonic < 8; ++harmonic)
+            sample += kHarmonics[harmonic] * std::sin(phase * static_cast<float>(harmonic + 1));
+        peak = std::max(peak, std::abs(sample));
+        preset.sampleBank.samples[i] = sample;
+    }
+    const float normalize = peak > 0.0F ? 0.75F / peak : 1.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) preset.sampleBank.samples[i] *= normalize;
+    preset.sampleBank.name = "Glass Source A440";
+    preset.sampleBank.enabled = true;
+    preset.sampleBank.sampleRate = 48000U;
+    preset.sampleBank.rootNote = 69;  // recorded at A440: MIDI 69 plays at concert pitch
+    preset.sampleBank.frameCount = kFrames;
+    preset.sampler.enabled = true;
+    preset.sampler.playbackMode = SamplerPlaybackMode::Loop;
+    preset.sampler.direction = SamplerDirection::Forward;
+    preset.sampler.loopStartSeconds = 0.0F;
+    preset.sampler.loopEndSeconds = static_cast<float>(kFrames) / kRate;
+    preset.sampler.loopCrossfadeSeconds = 0.004F;
+    preset.sampler.pitchTracking = true;
+    preset.sampler.gain = 0.8F;
+
+    auto& s = preset.spectral;
+    s.enabled = true;
+    s.gain = 0.8F;
+    s.freeze01 = 0.0F;            // live resynthesis; freeze holds the spectrum
+    s.timeStretch = 1.0F;         // natural speed
+    s.formantShiftSemitones = 0.0F;
+    s.harmonicStretch = 1.0F;
+    s.spectralTiltDbPerOct = -3.0F;  // gentle downward tilt: glassy shimmer
+    s.partialThreshold01 = 0.15F;    // drop the quietest partials
+    s.spectralBlur01 = 0.12F;        // light spectral blur
+    s.frequencyQuantize01 = 0.0F;  // no frequency quantization
+    s.inharmonicity01 = 0.03F;      // a breath of bell-like stretch
+    s.spectralQuality = FilterQuality::Standard;
+
+    preset.ampEnvelope = {0.03F, 0.40F, 0.75F, 0.90F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.70F;
+    preset.reverb.mix = 0.30F;
+    return preset;
+}
 } // namespace
 
 std::vector<SynthPreset> SynthPreset::builtin_presets() {
@@ -5186,6 +5280,7 @@ std::vector<SynthPreset> SynthPreset::builtin_presets() {
         make_cloud_delay(),
         make_generative_attractor_pad(),
         make_granular_cloud_drift(),
+        make_spectral_glass_resynthesis(),
     };
 }
 

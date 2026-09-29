@@ -895,6 +895,17 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             button(layout.oscillatorPwmUpButtons[i], "+");
         }
         const auto& osc = preset.oscillators[controller.synth_panel().selected_oscillator()];
+        // Phase 4/5: quality-tier text shared by the granular and spectral
+        // advanced sections.
+        auto quality_tier_text = [](audio::FilterQuality value) -> std::string_view {
+            switch (value) {
+                case audio::FilterQuality::Eco: return "Eco";
+                case audio::FilterQuality::Standard: return "Standard";
+                case audio::FilterQuality::High: return "High";
+                case audio::FilterQuality::Offline: return "Offline";
+            }
+            return "Standard";
+        };
         std::array<std::string, kSynthOscillatorAdvancedPropertyCount> labels{
             "PWM rate", "Shape / table", "Hard-sync source", "FM source", "FM mode",
             "FM amount", "Ring source", "Ring depth", "Sub level", "Sub octaves"};
@@ -930,18 +941,6 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                       compact(modal.transientMilliseconds), std::to_string(modal.modeCount),
                       compact(modal.modes[0].frequencyRatio)};
         } else if (osc.waveform == audio::OscillatorWaveform::Granular) {
-            // Phase 4: granular quality tier (also used by the preset-level
-            // filterQuality row below; declared here so the granular values
-            // list above can use it).
-            auto granular_quality_text = [](audio::FilterQuality value) -> std::string_view {
-                switch (value) {
-                    case audio::FilterQuality::Eco: return "Eco";
-                    case audio::FilterQuality::Standard: return "Standard";
-                    case audio::FilterQuality::High: return "High";
-                    case audio::FilterQuality::Offline: return "Offline";
-                }
-                return "Standard";
-            };
             // Phase 4: dedicated granular generator (preset-level GranularParameters).
             const auto& granular = preset.granular;
             labels = {"Granular", "Density Hz", "Duration ms", "Position", "Position jitter",
@@ -960,14 +959,35 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                       compact(granular.pitchSemitones, 0), compact(granular.gain),
                       compact(granular.panScatter01), compact(granular.reverseProbability01),
                       compact(granular.freezePosition01),
-                      std::string(granular_quality_text(granular.granularQuality))};
+                      std::string(quality_tier_text(granular.granularQuality))};
+        } else if (osc.waveform == audio::OscillatorWaveform::Spectral) {
+            // Phase 5: spectral/resynthesis oscillator (preset-level
+            // SpectralParameters, spectral.hpp contract). 14 rows of the
+            // 18-row advanced budget.
+            const auto& spectral = preset.spectral;
+            labels = {"Spectral", "Gain", "Stretch", "Freeze", "Formant st",
+                      "Harmonic stretch", "Tilt dB/oct", "Threshold", "Blur",
+                      "Quantize", "Inharmonicity", "Phase rnd", "Stereo spread",
+                      "Quality"};
+            values = {spectral.enabled ? "On" : "Off", compact(spectral.gain),
+                      compact(spectral.timeStretch, 2), compact(spectral.freeze01),
+                      compact(spectral.formantShiftSemitones, 1), compact(spectral.harmonicStretch, 2),
+                      compact(spectral.spectralTiltDbPerOct, 1), compact(spectral.partialThreshold01),
+                      compact(spectral.spectralBlur01), compact(spectral.frequencyQuantize01),
+                      compact(spectral.inharmonicity01), compact(spectral.phaseRandom01),
+                      compact(spectral.stereoSpread01),
+                      std::string(quality_tier_text(spectral.spectralQuality))};
         }
-        // Other waveforms only define the original 10 advanced rows; the eight
-        // extra rows are the Phase 4 granular section.
+        // Other waveforms only define the original 10 advanced rows; the
+        // extra rows are the Phase 4 granular section (18 rows) and the
+        // Phase 5 spectral section (14 of the same 18-row budget, so no ABI
+        // break).
         const std::size_t advancedRowCount =
             osc.waveform == audio::OscillatorWaveform::Granular
                 ? kSynthOscillatorAdvancedPropertyCount
-                : 10U;
+                : (osc.waveform == audio::OscillatorWaveform::Spectral
+                       ? kSynthSpectralAdvancedRowCount
+                       : 10U);
         for (std::size_t i = 0; i < advancedRowCount; ++i) {
             painter.fill(layout.oscillatorAdvancedRows[i], panel); painter.outline(layout.oscillatorAdvancedRows[i], border);
             painter.text(layout.oscillatorAdvancedRows[i].x + 7, layout.oscillatorAdvancedRows[i].y + 18, labels[i], text);

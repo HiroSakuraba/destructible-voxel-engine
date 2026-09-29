@@ -44,6 +44,7 @@ inline constexpr std::uint32_t kSynthPatchMagic = 0x50535644U; // "DVSP" little-
 //   0x0600-0x06FF  MPE / microtuning / unison / quality
 //   0x0700-0x07FF  metadata
 //   0x0800-0x08FF  granular generator (Phase 4)
+//   0x0900-0x09FF  spectral/resynthesis oscillator (Phase 5)
 enum class SynthPatchParam : std::uint16_t {
     // Master / tuning
     Name = 0x0001,
@@ -174,6 +175,27 @@ enum class SynthPatchParam : std::uint16_t {
     GranularSmear = 0x080F,
     GranularWidth = 0x0810,
     GranularQuality = 0x0811,
+    // Spectral/resynthesis oscillator (Phase 5). Appended at the enum end so
+    // older builds skip these IDs gracefully (the loader's default case skips
+    // unknown IDs). At the Phase 5 merge the parameter block was unified on
+    // the oscillator-native SpectralParameters (spectral.hpp); 0x0901 and
+    // 0x090B are reserved (never reused) and skipped by the loader.
+    SpectralEnabled = 0x0900,
+    SpectralAsset = 0x0901,        // reserved: asset selection is via the spectralAsset view pointer
+    SpectralFreeze = 0x0902,      // freeze01, float 0..1
+    SpectralStretch = 0x0903,    // timeStretch
+    SpectralFormant = 0x0904,     // formantShiftSemitones
+    SpectralHarmonicStretch = 0x0905,
+    SpectralTilt = 0x0906,        // spectralTiltDbPerOct
+    SpectralThreshold = 0x0907,  // partialThreshold01
+    SpectralBlur = 0x0908,        // spectralBlur01
+    SpectralQuantize = 0x0909,   // frequencyQuantize01, 0..1
+    SpectralInharmonicity = 0x090A,  // inharmonicity01
+    SpectralSeed = 0x090B,        // reserved: voice seeds per note via set_seed()
+    SpectralQuality = 0x090C,
+    SpectralGain = 0x090D,
+    SpectralStereoSpread = 0x090E,  // stereoSpread01
+    SpectralPhaseRandom = 0x090F,   // phaseRandom01
 };
 
 struct SynthPatchProgram {

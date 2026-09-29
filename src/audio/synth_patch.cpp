@@ -185,6 +185,26 @@ SynthPatchProgram compile_patch(const SynthPreset& preset) {
     w.entry(SynthPatchParam::GranularQuality,
              static_cast<std::uint32_t>(granular.granularQuality)); bump();
 
+    // Spectral/resynthesis oscillator (Phase 5). Unified on the
+    // oscillator-native SpectralParameters (spectral.hpp) at the Phase 5
+    // merge; 0x0901/0x090B are reserved and not written.
+    const auto& spectral = preset.spectral;
+    w.entry(SynthPatchParam::SpectralEnabled, spectral.enabled); bump();
+    w.entry(SynthPatchParam::SpectralGain, spectral.gain); bump();
+    w.entry(SynthPatchParam::SpectralFreeze, spectral.freeze01); bump();
+    w.entry(SynthPatchParam::SpectralStretch, spectral.timeStretch); bump();
+    w.entry(SynthPatchParam::SpectralFormant, spectral.formantShiftSemitones); bump();
+    w.entry(SynthPatchParam::SpectralHarmonicStretch, spectral.harmonicStretch); bump();
+    w.entry(SynthPatchParam::SpectralTilt, spectral.spectralTiltDbPerOct); bump();
+    w.entry(SynthPatchParam::SpectralThreshold, spectral.partialThreshold01); bump();
+    w.entry(SynthPatchParam::SpectralBlur, spectral.spectralBlur01); bump();
+    w.entry(SynthPatchParam::SpectralQuantize, spectral.frequencyQuantize01); bump();
+    w.entry(SynthPatchParam::SpectralInharmonicity, spectral.inharmonicity01); bump();
+    w.entry(SynthPatchParam::SpectralPhaseRandom, spectral.phaseRandom01); bump();
+    w.entry(SynthPatchParam::SpectralStereoSpread, spectral.stereoSpread01); bump();
+    w.entry(SynthPatchParam::SpectralQuality,
+             static_cast<std::uint32_t>(spectral.spectralQuality)); bump();
+
     // Patch entry count
     w.bytes[countPos] = static_cast<std::uint8_t>(count);
     w.bytes[countPos + 1] = static_cast<std::uint8_t>(count >> 8);
@@ -353,6 +373,34 @@ std::optional<SynthPreset> load_patch_program(const std::uint8_t* data, std::siz
                 const std::uint32_t v = r.u32();
                 // Clamp so a corrupt/out-of-range value can't form an invalid enum.
                 preset.granular.granularQuality =
+                    static_cast<FilterQuality>(v <= 3U ? v : 3U);
+                break;
+            }
+            case SynthPatchParam::SpectralEnabled: if (type == 2) readB(preset.spectral.enabled); else r.ok = false; break;
+            case SynthPatchParam::SpectralAsset: if (type == 1) { (void)r.u32(); } else r.ok = false; break;  // reserved
+            case SynthPatchParam::SpectralGain: if (type == 0) readF(preset.spectral.gain); else r.ok = false; break;
+            case SynthPatchParam::SpectralFreeze:
+                // Merged format is float 0..1; accept the pre-merge bool too.
+                if (type == 0) readF(preset.spectral.freeze01);
+                else if (type == 2) { bool b = false; readB(b); preset.spectral.freeze01 = b ? 1.0F : 0.0F; }
+                else r.ok = false;
+                break;
+            case SynthPatchParam::SpectralStretch: if (type == 0) readF(preset.spectral.timeStretch); else r.ok = false; break;
+            case SynthPatchParam::SpectralFormant: if (type == 0) readF(preset.spectral.formantShiftSemitones); else r.ok = false; break;
+            case SynthPatchParam::SpectralHarmonicStretch: if (type == 0) readF(preset.spectral.harmonicStretch); else r.ok = false; break;
+            case SynthPatchParam::SpectralTilt: if (type == 0) readF(preset.spectral.spectralTiltDbPerOct); else r.ok = false; break;
+            case SynthPatchParam::SpectralThreshold: if (type == 0) readF(preset.spectral.partialThreshold01); else r.ok = false; break;
+            case SynthPatchParam::SpectralBlur: if (type == 0) readF(preset.spectral.spectralBlur01); else r.ok = false; break;
+            case SynthPatchParam::SpectralQuantize: if (type == 0) readF(preset.spectral.frequencyQuantize01); else r.ok = false; break;
+            case SynthPatchParam::SpectralInharmonicity: if (type == 0) readF(preset.spectral.inharmonicity01); else r.ok = false; break;
+            case SynthPatchParam::SpectralPhaseRandom: if (type == 0) readF(preset.spectral.phaseRandom01); else r.ok = false; break;
+            case SynthPatchParam::SpectralStereoSpread: if (type == 0) readF(preset.spectral.stereoSpread01); else r.ok = false; break;
+            case SynthPatchParam::SpectralSeed: if (type == 1) { (void)r.u32(); } else r.ok = false; break;  // reserved
+            case SynthPatchParam::SpectralQuality: {
+                if (type != 1) { r.ok = false; break; }
+                const std::uint32_t v = r.u32();
+                // Clamp so a corrupt/out-of-range value can't form an invalid enum.
+                preset.spectral.spectralQuality =
                     static_cast<FilterQuality>(v <= 3U ? v : 3U);
                 break;
             }

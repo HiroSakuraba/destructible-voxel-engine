@@ -146,6 +146,20 @@ int main() {
         require(controller.synthesizer().preset().oscillators[0].modalResonator.damping > beforeDamping,
                 "modal damping control did not update preset");
 
+        auto spectralPreset = controller.synthesizer().preset();
+        spectralPreset.oscillators[0].waveform = dve::audio::OscillatorWaveform::Spectral;
+        controller.synthesizer().set_preset(spectralPreset);
+        // Phase 5: the Spectral waveform drives the preset-level spectral/
+        // resynthesis parameters (row 2 = stretch, row 3 = freeze amount).
+        const float beforeStretch = controller.synthesizer().preset().spectral.timeStretch;
+        click(controller, panel.oscillatorAdvancedUpButtons[2]);
+        require(controller.synthesizer().preset().spectral.timeStretch > beforeStretch,
+                "spectral stretch control did not update preset");
+        const float beforeFreeze = controller.synthesizer().preset().spectral.freeze01;
+        click(controller, panel.oscillatorAdvancedUpButtons[3]);
+        require(controller.synthesizer().preset().spectral.freeze01 != beforeFreeze,
+                "spectral freeze control did not update preset");
+
         click(controller, panel.tabButtons[2]);
         require(controller.synth_panel().page() == SynthPanelPage::Modulation,
                 "modulation page did not open");

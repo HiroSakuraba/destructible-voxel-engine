@@ -101,6 +101,7 @@ jobs:
       - name: Validate DASHR shader inventory and contracts
         run: ./scripts/validate_shaders.sh
       - name: Package DASHR work
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dve-dashr-surface-port-v1

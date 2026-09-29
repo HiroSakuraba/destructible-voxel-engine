@@ -290,6 +290,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/spectral_analyzer.cpp  # Phase 5: offline spectral analyzer (SYN-015)
         src/audio/spectral.cpp  # Phase 5: spectral resynthesis oscillator (SYN-015)
         src/audio/spectral_profiler.cpp  # Phase 5: spectral CPU budgeting (SYN-015)
+        src/audio/audio_features.cpp  # Phase 6: audio-to-synth feature extractor (SYN-016)
         src/audio/wavetable.cpp
         src/audio/wavetable_builder.cpp
         src/audio/physics_modulation.cpp
@@ -1783,6 +1784,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_synth_spectral_integration_tests tests/test_audio_synth_spectral_integration.cpp)
         target_link_libraries(dve_audio_synth_spectral_integration_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_spectral_integration_tests COMMAND dve_audio_synth_spectral_integration_tests)
+        add_executable(dve_audio_synth_features_tests tests/test_audio_synth_features.cpp)
+        target_link_libraries(dve_audio_synth_features_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_features_tests COMMAND dve_audio_synth_features_tests)
         add_executable(dve_audio_critique_fixes_tests tests/test_audio_critique_fixes.cpp)
         target_link_libraries(dve_audio_critique_fixes_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_critique_fixes_tests COMMAND dve_audio_critique_fixes_tests)

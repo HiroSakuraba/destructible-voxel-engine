@@ -100,3 +100,48 @@ jobs:
             -R "^(dve_rhi_mrt_tests|dve_dashr_surface_tests|dve_dashr_seam_map_tests|dve_dashr_atlas_tests|dve_dashr_shell_tests)$"
       - name: Validate DASHR shader inventory and contracts
         run: ./scripts/validate_shaders.sh
+      - name: Package DASHR work
+        uses: actions/upload-artifact@v4
+        with:
+          name: dve-dashr-surface-port-v1
+          if-no-files-found: error
+          compression-level: 9
+          path: |
+            .github/workflows/v235-foundations.yml
+            CHANGELOG.md
+            CMakeLists.txt
+            docs/DASHR_PORT.md
+            include/dve/dashr_seam_map.hpp
+            include/dve/dashr_surface.hpp
+            include/dve/render/dashr_atlas.hpp
+            include/dve/render/dashr_shell.hpp
+            include/dve/render/main_material_table.hpp
+            include/dve/rhi/device.hpp
+            include/dve/rhi/null_device.hpp
+            shaders/common/dashr_live_trace.hlsli
+            shaders/common/dashr_surface.hlsli
+            shaders/dashr_atlas_ps.hlsl
+            shaders/dashr_atlas_vs.hlsl
+            shaders/dashr_edge_fill.hlsl
+            shaders/dashr_shell_pbr_ps.hlsl
+            shaders/dashr_shell_ps.hlsl
+            shaders/dashr_shell_shadow_ps.hlsl
+            shaders/dashr_shell_vs.hlsl
+            shaders/material_mapping_reference.hlsl
+            shaders/shader_manifest.json
+            src/dashr_seam_map.cpp
+            src/dashr_surface.cpp
+            src/render/dashr_atlas.cpp
+            src/render/dashr_shell.cpp
+            src/render/main_material_table.cpp
+            src/rhi/null_device.cpp
+            src/rhi/vulkan_device.cpp
+            src/rhi/vulkan_loader_api.hpp
+            tests/test_dashr_atlas.cpp
+            tests/test_dashr_seam_map.cpp
+            tests/test_dashr_shell.cpp
+            tests/test_dashr_surface.cpp
+            tests/test_main_material_table.cpp
+            tests/test_rhi_mrt.cpp
+            third_party/DASHR-LICENSE.txt
+            third_party/DASHR-NOTICE.md

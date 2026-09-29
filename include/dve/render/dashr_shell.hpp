@@ -115,7 +115,7 @@ struct alignas(16) GpuDashrShellConstants {
     std::array<float, 4> heightUvRotation{};
     std::array<std::uint32_t, 4> limits{192U,4U,8U,0U};
 };
-static_assert(sizeof(GpuDashrShellConstants) == 304U);
+static_assert(sizeof(GpuDashrShellConstants) == 272U);
 
 struct DashrShellRendererResources {
     rhi::BufferHandle constants;

@@ -284,6 +284,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/synth_patch.cpp
         src/audio/sequencer.cpp
         src/audio/patch_genetics.cpp
+        src/audio/patch_search.cpp  # Phase 6: evolutionary patch search (SYN-016)
         src/audio/attractor.cpp
         src/audio/generative_conductor.cpp
         src/audio/granular.cpp  # Phase 4: granular generator core (SYN-014)
@@ -1749,6 +1750,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_synth_genetics_tests tests/test_audio_synth_genetics.cpp)
         target_link_libraries(dve_audio_synth_genetics_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_genetics_tests COMMAND dve_audio_synth_genetics_tests)
+        add_executable(dve_audio_synth_patch_search_tests tests/test_patch_search.cpp)
+        target_link_libraries(dve_audio_synth_patch_search_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_patch_search_tests COMMAND dve_audio_synth_patch_search_tests)
         add_executable(dve_audio_synth_phase3_serialization_tests tests/test_audio_synth_phase3_serialization.cpp)
         target_link_libraries(dve_audio_synth_phase3_serialization_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_phase3_serialization_tests COMMAND dve_audio_synth_phase3_serialization_tests)

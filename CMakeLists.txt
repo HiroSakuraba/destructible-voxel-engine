@@ -293,6 +293,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/spectral_profiler.cpp  # Phase 5: spectral CPU budgeting (SYN-015)
         src/audio/audio_features.cpp  # Phase 6: audio-to-synth feature extractor (SYN-016)
         src/audio/patch_evaluator.cpp  # Phase 6: offline render evaluator (SYN-016)
+        src/audio/patch_search_browser.cpp  # Phase 6: candidate browser (SYN-016)
         src/audio/wavetable.cpp
         src/audio/wavetable_builder.cpp
         src/audio/physics_modulation.cpp
@@ -1798,6 +1799,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_critique_fixes_tests tests/test_audio_critique_fixes.cpp)
         target_link_libraries(dve_audio_critique_fixes_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_critique_fixes_tests COMMAND dve_audio_critique_fixes_tests)
+        add_executable(dve_audio_patch_search_browser_tests tests/test_patch_search_browser.cpp)
+        target_link_libraries(dve_audio_patch_search_browser_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_patch_search_browser_tests COMMAND dve_audio_patch_search_browser_tests)
         add_executable(dve_audio_synth_resonator_tests tests/test_audio_synth_resonator.cpp)
         target_link_libraries(dve_audio_synth_resonator_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_resonator_tests COMMAND dve_audio_synth_resonator_tests)

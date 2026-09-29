@@ -96,8 +96,13 @@ int main() {
         }
         std::cout << "names+validate: " << presets.size() << " presets OK\n";
 
-        // "Noise Sweep FX" is the only deliberately non-pitched preset.
-        const std::set<std::string> nonPitched{"Noise Sweep FX"};
+        // Deliberately non-pitched presets skip the fundamental-dominance
+        // check. "Noise Sweep FX" is broadband noise; the four drum presets
+        // are tuned percussion — rendered at MIDI 69 (A4) they voice drum
+        // frequencies (kick ~110 Hz, snare ~190 Hz body, hats broadband
+        // noise), so the 440 Hz check does not apply to them.
+        const std::set<std::string> nonPitched{"Noise Sweep FX", "Punch Kick",
+                                               "Crack Snare", "Closed Hat", "Open Hat"};
         for (const auto& preset : presets) {
             const auto audio = render_preset(preset, 69);
             float peak = 0.0F;

@@ -5448,6 +5448,125 @@ SynthPreset make_spectral_glass_resynthesis() {
     preset.reverb.mix = 0.30F;
     return preset;
 }
+
+// Release bank: tuned-percussion kick. Sine body two octaves below the played
+// note with a filter-envelope pitch drop (+12 st at the hit, decaying to
+// concert pitch), plus a noise click that only survives while the filter
+// envelope holds the lowpass open.
+SynthPreset make_punch_kick() {
+    auto preset = base_preset("Punch Kick");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, -24.0F, 0.0F, 0.90F);
+    enable_osc(preset, 1, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.45F);
+    preset.ampEnvelope = {0.002F, 0.30F, 0.00F, 0.12F, EnvelopeCurve::Exponential};
+    // The filter doubles as the click shaper: wide open at the attack so the
+    // noise transient cracks through, then closing to leave the sine body.
+    lowpass(preset, 900.0F, 0.10F, 4.0F, 0.002F, 0.055F, 0.00F, 0.10F);
+    auto& slot = preset.modulation[0];
+    slot.enabled = true;
+    slot.source = ModulationSource::FilterEnvelope;
+    slot.destination = ModulationDestination::Osc1Pitch;
+    slot.amount = 0.5F;  // +12 semitones at the envelope peak, decaying to 0
+    slot.polarity = ModulationPolarity::Unipolar;
+    slot.smoothingMilliseconds = 2.0F;
+    return preset;
+}
+
+// Release bank: tuned-percussion snare. Triangle body (~190 Hz at A4) under
+// a broadband noise crack, both decaying together like a real drum.
+SynthPreset make_crack_snare() {
+    auto preset = base_preset("Crack Snare");
+    enable_osc(preset, 0, OscillatorWaveform::Triangle, -14.5F, 0.0F, 0.55F);
+    enable_osc(preset, 1, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.42F);
+    preset.ampEnvelope = {0.001F, 0.16F, 0.00F, 0.06F, EnvelopeCurve::Exponential};
+    lowpass(preset, 6500.0F, 0.05F, 1.5F, 0.001F, 0.09F, 0.00F, 0.05F);
+    return preset;
+}
+
+// Release bank: closed hi-hat. Highpassed noise with a ~60 ms decay.
+SynthPreset make_closed_hat() {
+    auto preset = base_preset("Closed Hat");
+    enable_osc(preset, 0, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.001F, 0.055F, 0.00F, 0.030F, EnvelopeCurve::Exponential};
+    preset.filter.enabled = true;
+    preset.filter.topology = FilterTopology::CleanStateVariable;
+    preset.filter.mode = FilterMode::HighPass;
+    preset.filter.cutoffHertz = 7000.0F;
+    preset.filter.resonance = 0.10F;
+    preset.filter.envelopeAmountOctaves = 0.0F;
+    return preset;
+}
+
+// Release bank: open hi-hat. Same family as Closed Hat, ~400 ms decay.
+SynthPreset make_open_hat() {
+    auto preset = base_preset("Open Hat");
+    enable_osc(preset, 0, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.001F, 0.38F, 0.00F, 0.20F, EnvelopeCurve::Exponential};
+    preset.filter.enabled = true;
+    preset.filter.topology = FilterTopology::CleanStateVariable;
+    preset.filter.mode = FilterMode::HighPass;
+    preset.filter.cutoffHertz = 6200.0F;
+    preset.filter.resonance = 0.10F;
+    preset.filter.envelopeAmountOctaves = 0.0F;
+    return preset;
+}
+
+// Release bank texture: the HQ wavetable oscillator with its read position
+// wandered by the Lorenz attractor and the filter cutoff breathed by the
+// spring. Both physics sources are excited by note-on velocity inside the
+// engine; the preset only routes them. The frames stay harmonic, so the
+// played note remains the perceived fundamental while the timbre drifts.
+SynthPreset make_lorenz_wavetable_drift() {
+    auto preset = base_preset("Lorenz Wavetable Drift");
+    enable_osc(preset, 0, OscillatorWaveform::Wavetable, 0.0F, 0.0F, 0.85F);
+    preset.oscillators[0].shape = 0.5F;  // start mid-table; Lorenz sweeps the rest
+    preset.ampEnvelope = {0.60F, 0.40F, 0.85F, 1.50F, EnvelopeCurve::Exponential};
+    lowpass(preset, 3200.0F, 0.12F, 0.0F, 0.40F, 0.60F, 0.60F, 0.80F);
+    auto& slot0 = preset.modulation[0];
+    slot0.enabled = true;
+    slot0.source = ModulationSource::Lorenz;
+    slot0.destination = ModulationDestination::WavetablePosition;
+    slot0.amount = 0.65F;
+    slot0.polarity = ModulationPolarity::Unipolar;  // Lorenz is natively bipolar; pass through
+    slot0.smoothingMilliseconds = 40.0F;
+    auto& slot1 = preset.modulation[1];
+    slot1.enabled = true;
+    slot1.source = ModulationSource::Spring;
+    slot1.destination = ModulationDestination::FilterCutoff;
+    slot1.amount = 0.35F;
+    slot1.polarity = ModulationPolarity::Unipolar;  // spring position is natively bipolar
+    slot1.smoothingMilliseconds = 60.0F;
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.20F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.75F;
+    preset.reverb.mix = 0.30F;
+    return preset;
+}
+
+// Release bank texture: bowed modal resonator. The continuous sawtooth
+// exciter acts as the bow while the key is held; low damping lets the
+// inharmonic glass partials ring against the fundamental.
+SynthPreset make_bowed_glass() {
+    auto preset = base_preset("Bowed Glass");
+    enable_osc(preset, 0, OscillatorWaveform::ModalResonator, 0.0F, 0.0F, 0.80F);
+    auto& mr = preset.oscillators[0].modalResonator;
+    mr.excitation = ExcitationSource::Oscillator;
+    mr.modeCount = 8;
+    mr.baseFrequency = 0.0F;  // follow the played note
+    mr.damping = 0.35F;
+    mr.inharmonicity = 0.08F;
+    mr.brightness = 0.60F;
+    mr.excitationLevel = 0.80F;
+    constexpr float kRatios[8] = {1.00F, 2.76F, 5.40F, 3.98F, 8.93F, 7.21F, 11.34F, 6.12F};
+    constexpr float kGains[8] = {1.00F, 0.32F, 0.20F, 0.26F, 0.13F, 0.16F, 0.09F, 0.18F};
+    constexpr float kDecays[8] = {3.20F, 2.60F, 2.10F, 2.40F, 1.80F, 2.00F, 1.60F, 2.20F};
+    for (int i = 0; i < 8; ++i) mr.modes[i] = ModalResonatorMode{kRatios[i], kDecays[i], kGains[i]};
+    preset.ampEnvelope = {0.40F, 0.30F, 0.85F, 1.20F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.80F;
+    preset.reverb.mix = 0.32F;
+    return preset;
+}
 } // namespace
 
 std::vector<SynthPreset> SynthPreset::builtin_presets() {
@@ -5469,6 +5588,12 @@ std::vector<SynthPreset> SynthPreset::builtin_presets() {
         make_generative_attractor_pad(),
         make_granular_cloud_drift(),
         make_spectral_glass_resynthesis(),
+        make_punch_kick(),
+        make_crack_snare(),
+        make_closed_hat(),
+        make_open_hat(),
+        make_lorenz_wavetable_drift(),
+        make_bowed_glass(),
     };
 }
 

@@ -2286,6 +2286,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     target_link_libraries(dve_material_mapping_tests PRIVATE dve::core)
     add_test(NAME dve_material_mapping_tests COMMAND dve_material_mapping_tests)
 
+    add_executable(dve_rhi_mrt_tests tests/test_rhi_mrt.cpp)
+    target_link_libraries(dve_rhi_mrt_tests PRIVATE dve::rhi)
+    add_test(NAME dve_rhi_mrt_tests COMMAND dve_rhi_mrt_tests)
+
     add_executable(dve_dashr_surface_tests tests/test_dashr_surface.cpp)
     target_link_libraries(dve_dashr_surface_tests PRIVATE dve::core)
     add_test(NAME dve_dashr_surface_tests COMMAND dve_dashr_surface_tests)

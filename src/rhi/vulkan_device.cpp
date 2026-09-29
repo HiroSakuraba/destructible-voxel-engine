@@ -290,6 +290,8 @@ vk::DescriptorType vulkan_descriptor_type(BindingType type) noexcept {
     case BindingType::StorageBufferReadOnly:
     case BindingType::StorageBufferReadWrite: return vk::DescriptorTypeStorageBuffer;
     case BindingType::SampledTexture: return vk::DescriptorTypeCombinedImageSampler;
+    case BindingType::SampledImage: return vk::DescriptorTypeSampledImage;
+    case BindingType::Sampler: return vk::DescriptorTypeSampler;
     case BindingType::StorageTexture: return vk::DescriptorTypeStorageImage;
     }
     return vk::DescriptorTypeStorageBuffer;
@@ -1817,14 +1819,29 @@ BindGroupHandle VulkanDevice::create_bind_group(const BindGroupDesc& desc, std::
             imageInfos.push_back({0U, view->view, vk::ImageLayoutGeneral});
             writes.push_back({vk::StructureTypeWriteDescriptorSet, nullptr, 0U, entry.binding, 0U,
                               1U, descriptorType, &imageInfos.back(), nullptr, nullptr});
-        } else if (bindingIt->type == BindingType::SampledTexture) {
+        } else if (bindingIt->type == BindingType::SampledTexture ||
+                   bindingIt->type == BindingType::SampledImage) {
             auto* view = impl_->texture_view(entry.textureView, error); if (!view) return {};
             const auto* resource = impl_->texture(view->desc.texture, error); if (!resource) return {};
-            const auto* sampler = impl_->sampler(entry.sampler, error); if (!sampler) return {};
             if (entry.buffer || !has_usage(resource->desc.usage, TextureUsage::Sampled)) {
-                set_error(error, "Vulkan sampled-texture binding is invalid"); return {};
+                set_error(error, "Vulkan sampled texture/image binding is invalid"); return {};
             }
-            imageInfos.push_back({sampler->sampler, view->view, vk::ImageLayoutShaderReadOnlyOptimal});
+            vk::Sampler nativeSampler{};
+            if (bindingIt->type == BindingType::SampledTexture) {
+                const auto* sampler = impl_->sampler(entry.sampler, error); if (!sampler) return {};
+                nativeSampler = sampler->sampler;
+            } else if (entry.sampler) {
+                set_error(error, "Vulkan sampled-image binding cannot include a sampler"); return {};
+            }
+            imageInfos.push_back({nativeSampler, view->view, vk::ImageLayoutShaderReadOnlyOptimal});
+            writes.push_back({vk::StructureTypeWriteDescriptorSet, nullptr, 0U, entry.binding, 0U,
+                              1U, descriptorType, &imageInfos.back(), nullptr, nullptr});
+        } else if (bindingIt->type == BindingType::Sampler) {
+            const auto* sampler = impl_->sampler(entry.sampler, error); if (!sampler) return {};
+            if (entry.buffer || entry.textureView) {
+                set_error(error, "Vulkan sampler binding supplied a buffer or texture view"); return {};
+            }
+            imageInfos.push_back({sampler->sampler, 0U, vk::ImageLayoutUndefined});
             writes.push_back({vk::StructureTypeWriteDescriptorSet, nullptr, 0U, entry.binding, 0U,
                               1U, descriptorType, &imageInfos.back(), nullptr, nullptr});
         } else {

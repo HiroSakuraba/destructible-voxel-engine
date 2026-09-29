@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -774,7 +776,12 @@ public:
 
     [[nodiscard]] std::uint32_t sample_rate() const noexcept { return sampleRate_; }
     [[nodiscard]] std::uint64_t current_frame() const noexcept { return currentFrame_.load(std::memory_order_relaxed); }
-    [[nodiscard]] const SynthPreset& preset() const noexcept { return preset_; }
+    // UI thread: returns a copy of the authored preset under the preset lock.
+    // (Copies are cheap here; the audio thread never touches this.)
+    [[nodiscard]] SynthPreset preset() const;
+    // UI thread only: validates, stores, and publishes the preset to the
+    // render thread through a lock-free queue. Never call from the audio
+    // thread (it copies strings and may block on the preset mutex).
     void set_preset(const SynthPreset& preset);
     [[nodiscard]] bool set_sample_map(const SynthSampleMap& sampleMap,
                                       std::string* error = nullptr);
@@ -784,6 +791,9 @@ public:
                                                   std::uint32_t firstFrame,
                                                   std::span<const float> monoFrames) noexcept;
     [[nodiscard]] SynthGranularProfiler granular_profiler() const noexcept;
+    // Test introspection: how many times the render thread cooked the HQ
+    // wavetable (should stay flat across morph walks / repeated set_preset).
+    [[nodiscard]] std::uint64_t wavetable_cook_count() const noexcept;
     void reset_granular_profiler() noexcept;
     [[nodiscard]] SynthProfiler profiler() const noexcept;
     void reset_profiler() noexcept;
@@ -813,8 +823,28 @@ public:
     [[nodiscard]] std::array<SynthModulationInfo, kSynthModulationSlotCount> modulation_activity() const noexcept;
     void set_morph_preset_b(const SynthPreset& presetB);
     void clear_morph_preset_b();
-    [[nodiscard]] bool has_morph_preset_b() const noexcept { return hasMorphPresetB_; }
+    [[nodiscard]] bool has_morph_preset_b() const;
+    // UI thread only: sets the authored morph amount and re-publishes the
+    // preset. The audio-thread morph walk uses request_morph_amount() instead.
     void set_morph_amount(float amount);
+    // Realtime-safe: publishes a morph-amount request from the audio thread
+    // (generative conductor walk). The render thread applies it to the cached
+    // numeric presets — no string copies, no allocation, no locks.
+    void request_morph_amount(float amount) noexcept;
+    [[nodiscard]] bool morph_enabled_rt() const noexcept {
+        return rtMorphEnabled_.load(std::memory_order_relaxed);
+    }
+    // Lock-free handoff for the conductor's attractor config, published by
+    // set_preset() (UI thread) and drained by GenerativeConductor::process()
+    // (audio/test thread). Lets the conductor use the preset's config even
+    // when render() hasn't run yet to apply the queued PresetUpdate; the
+    // render-thread path in adopt_preset() is unchanged. Returns null when
+    // no new config was published since the last call.
+    struct PendingConductorConfig {
+        bool enabled = false;
+        AttractorConfig config{};
+    };
+    [[nodiscard]] std::shared_ptr<const PendingConductorConfig> take_pending_conductor_config() noexcept;
 
     // Phase 3: generative step sequencer (SYN-012). Configure lanes via the
     // returned object; it advances once per render() block when enabled.
@@ -844,7 +874,20 @@ private:
     SynthPreset preset_{};
     SynthPreset morphPresetB_{};
     bool hasMorphPresetB_{false};
+    // Guards preset_, morphPresetB_, hasMorphPresetB_ against the audio
+    // thread's realtime morph requests. Only the UI thread takes this lock;
+    // the render path uses the lock-free presetIn queue and the atomics below.
+    mutable std::mutex presetMutex_;
+    // Audio-thread morph walk target, published by request_morph_amount().
+    std::atomic<float> rtMorphAmount_{0.0F};
+    // Mirrors (preset_.morphEnabled && hasMorphPresetB_) for the audio thread.
+    std::atomic<bool> rtMorphEnabled_{false};
     std::atomic<std::uint64_t> currentFrame_{};
+    // Pending conductor attractor config, published by set_preset() and
+    // drained by GenerativeConductor::process(). Single-producer (UI thread)
+    // / single-consumer (audio thread); the shared_ptr handoff keeps the
+    // audio thread lock-free and race-free.
+    std::atomic<std::shared_ptr<const PendingConductorConfig>> pendingConductorConfig_{nullptr};
 };
 
 [[nodiscard]] std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept;

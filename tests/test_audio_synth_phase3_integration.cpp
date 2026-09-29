@@ -87,10 +87,12 @@ void test_conductor_morph_walk_bounds() {
     auto preset = showcase_preset();
     synth.set_preset(preset);
     auto& conductor = synth.generative_conductor();
-    conductor.set_enabled(true);  // configure() already ran via set_preset
+    conductor.set_enabled(true);  // configure() applied via set_preset on render
     // 200 blocks of wander: morphAmount must stay inside the state's region.
+    // The walk publishes through request_morph_amount() (lock-free); the
+    // walk state itself is introspected here.
     for (int i = 0; i < 200; ++i) conductor.process(synth, 0.01);
-    const float walked = synth.preset().morphAmount;
+    const float walked = conductor.morph_walk_value();
     require(walked >= 0.0F && walked <= 0.25F, "morph walk escaped its region");
     std::cout << "conductor morph walk bounds: OK (landed at " << walked << ")\n";
 }

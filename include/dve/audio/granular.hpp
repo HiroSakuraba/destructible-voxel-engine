@@ -127,6 +127,11 @@ struct GranularSource {
     const float* samples{};      // mono source frames; nullptr = no source
     std::uint32_t frameCount{};  // < 2 renders silence (counts a grain miss)
     std::uint32_t sampleRate{};  // source sample rate, for pitch-increment math
+    // MIDI note the source was recorded at (middle C = 60 by default, matching
+    // RealtimeSampleBank::rootNote). Grain pitch tracks the played note
+    // relative to this reference: playing rootNote renders the source at its
+    // recorded pitch; each octave up doubles the grain playback rate.
+    std::uint8_t rootNote{60};
 };
 
 // One live grain. Source position is in source frames; pitchIncrement is
@@ -164,7 +169,7 @@ struct GranularCounters {
     std::uint64_t grainMisses{};
 };
 
-// Fixed-pool granular cloud: one instance per synth voice.
+// Fixed-pool granular cloud: one instance per voice oscillator.
 class GranularEngine {
 public:
     static constexpr std::size_t kMaxGrains = 64;
@@ -207,9 +212,19 @@ public:
     // When params.enabled is false, or the source is missing/empty, the output
     // is silence; each spawn attempt against a missing/empty source counts one
     // grainMiss instead of crashing.
+    //
+    // The 3-argument form renders with the source's reference pitch (ratio
+    // exactly 1.0); the 4-argument form tracks the played note: each grain's
+    // playback rate is scaled by frequencyHertz / referenceFrequency, where
+    // referenceFrequency = 440 * 2^((source.rootNote - 69)/12). A non-finite
+    // or non-positive frequencyHertz falls back to the reference (ratio 1.0).
     std::pair<float, float> render(const GranularSource& source,
                                    const GranularParameters& params,
                                    float positionMod01) noexcept;
+    std::pair<float, float> render(const GranularSource& source,
+                                   const GranularParameters& params,
+                                   float positionMod01,
+                                   float frequencyHertz) noexcept;
 
     [[nodiscard]] std::uint32_t active_grain_count() const noexcept;
     [[nodiscard]] const GranularCounters& counters() const noexcept { return counters_; }
@@ -230,7 +245,8 @@ public:
 private:
     std::uint32_t random_u32() noexcept;
     float random01() noexcept;
-    void spawn_grain(const GranularSource& source, const GranularEffectiveParams& effective) noexcept;
+    void spawn_grain(const GranularSource& source, const GranularEffectiveParams& effective,
+                     float noteRatio) noexcept;
 
     std::array<Grain, kMaxGrains> grains_{};
     GranularCounters counters_{};

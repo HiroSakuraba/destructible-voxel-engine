@@ -224,6 +224,15 @@ std::unique_ptr<VoxelObject> clone_game_voxels(const VoxelObject* source) {
 
 constexpr std::size_t kMaxFragmentsPerDamageCall = 32U;
 
+// Safety cap for GameWorld::damage_sphere. build_damage_batches walks the sphere's voxel
+// span (O(radiusVoxels^2) z/y rows) even where no voxels exist, so an unbounded finite
+// radius (e.g. 1e30f from a script) quantizes to ~INT32_MAX subvoxel units and the batch
+// loop never finishes in practice (~1e14 row iterations). 1000 m is far beyond any
+// gameplay-scale explosion, and at any sane voxel size it keeps the quantized radius
+// (radius / voxelSizeMeters * kDamageSubvoxelScale) and its square inside int32/int64
+// range, so the int64 row arithmetic in build_damage_batches cannot overflow either.
+constexpr float kMaxDamageSphereRadiusMeters = 1000.0F;
+
 } // namespace
 
 GameObjectDesc::GameObjectDesc(const GameObjectDesc& other)
@@ -1307,6 +1316,9 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
     if (it == objects_.end() || !it->second.voxels) return std::nullopt;
     Object& object = it->second;
     if (!(radius > 0.0F) || !std::isfinite(radius)) return std::nullopt;
+    // Clamp after the NaN/non-positive guard: a huge finite radius would otherwise make
+    // build_damage_batches walk ~INT32_MAX subvoxel units per axis and never return.
+    radius = std::min(radius, kMaxDamageSphereRadiusMeters);
 
     const RigidTransform current = resolve_transform(object);
     const Float3 localMeters = inverse_transform_point(current, worldCenter);

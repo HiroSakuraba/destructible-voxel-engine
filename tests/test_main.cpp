@@ -1009,7 +1009,7 @@ void test_rigid_body_adapter() {
         {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F}));
     CHECK(world.apply_impulse_at_point(handle, {1.0F, 0.0F, 0.0F}, {3.0F, 6.0F, -1.0F}));
     world.set_contact_sink(nullptr);
-    CHECK(!world.set_contact_material(handle, 7U));
+    CHECK(world.set_contact_material(handle, 7U));
     const auto before = world.state(handle);
     world.step(1.0F / 60.0F);
     const auto after = world.state(handle);

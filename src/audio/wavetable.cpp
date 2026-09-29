@@ -109,6 +109,47 @@ CookedWavetable cook_wavetable(const std::string& name,
     return table;
 }
 
+void cook_wavetable_inplace(CookedWavetable& table, const std::string& name,
+                            const float* flatFrames, std::size_t nFrames,
+                            std::vector<std::complex<float>>& spectrum,
+                            std::vector<float>& filtered,
+                            std::vector<float>& frameBuf) {
+    table.name = name;
+    const std::size_t n = kHQWavetableSamples;
+    const std::size_t needed = kHQWavetableMips * kHQWavetableFrames * n;
+    if (table.samples.size() < needed) table.samples.resize(needed, 0.0F);
+    if (spectrum.size() < n) spectrum.resize(n);
+    if (filtered.size() < n) filtered.resize(n, 0.0F);
+    if (frameBuf.size() < n) frameBuf.resize(n, 0.0F);
+    table.contentHash = 0;  // caller tracks content identity (see adopt_preset)
+    nFrames = std::min(nFrames, kHQWavetableFrames);
+    if (nFrames == 0) return;
+
+    for (std::size_t mip = 0; mip < kHQWavetableMips; ++mip) {
+        // Each mip halves the allowed harmonic content.
+        const std::size_t maxHarmonic = n / 2 / (1U << mip);
+        for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
+            // Get source frame (wrap/clamp).
+            const std::size_t srcFrame = std::min(f, nFrames - 1);
+            const float* src = flatFrames + srcFrame * n;
+            std::copy(src, src + n, frameBuf.begin());
+
+            float* dst = table.samples.data() + (mip * kHQWavetableFrames + f) * n;
+            if (mip == 0) {
+                // Full bandwidth: copy directly.
+                std::copy(frameBuf.begin(), frameBuf.end(), dst);
+            } else {
+                // Band-limit via DFT: zero harmonics above maxHarmonic.
+                forward_dft(frameBuf.data(), spectrum.data(), n);
+                for (std::size_t k = maxHarmonic + 1; k < n - maxHarmonic; ++k)
+                    spectrum[k] = std::complex<float>(0, 0);
+                inverse_dft(spectrum.data(), filtered.data(), n);
+                std::copy(filtered.begin(), filtered.end(), dst);
+            }
+        }
+    }
+}
+
 std::size_t wavetable_mip_for_frequency(float frequencyHertz, float sampleRate) noexcept {
     if (frequencyHertz <= 0.0F || sampleRate <= 0.0F) return 0;
     // Highest harmonic in mip 0 is ~256 (n/2). We want the highest harmonic

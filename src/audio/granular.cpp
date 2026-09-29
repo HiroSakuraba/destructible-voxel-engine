@@ -93,6 +93,10 @@ float GranularEngine::envelope_value(GranularEnvelopeShape shape, float phase01)
 float GranularEngine::cubic_sample(const float* source, std::uint32_t frameCount,
                                    float position) noexcept {
     if (source == nullptr || frameCount == 0U) return 0.0F;
+    // NaN hardening: a non-finite read position renders silence instead of
+    // indexing out of bounds (NaN would survive std::clamp and poison the
+    // cast below).
+    if (!std::isfinite(position)) return 0.0F;
     const float frames = static_cast<float>(frameCount);
     const float bounded = std::clamp(position, 0.0F, frames - 1.0F);
     const std::int32_t center = static_cast<std::int32_t>(bounded);
@@ -116,49 +120,67 @@ float GranularEngine::cubic_sample(const float* source, std::uint32_t frameCount
 
 GranularEffectiveParams apply_granular_macros(const GranularParameters& params,
                                               float positionMod01) noexcept {
-    const float cloud = clamp01(params.cloud01);
-    const float scatter = clamp01(params.scatter01);
-    const float dust = clamp01(params.dust01);
-    const float freeze = clamp01(params.freeze01);
-    const float smear = clamp01(params.smear01);
-    const float width = clamp01(params.width01);
+    // NaN hardening: non-finite inputs fall back to neutral defaults so they
+    // can never poison the grain pool. validate() still rejects such presets
+    // at the API boundary; this is the last line of defense for values that
+    // reach the engine directly (e.g. NaN modulation).
+    const auto finiteOr = [](float v, float fallback) noexcept {
+        return std::isfinite(v) ? v : fallback;
+    };
+    const float cloud = clamp01(finiteOr(params.cloud01, 0.5F));
+    const float scatter = clamp01(finiteOr(params.scatter01, 0.0F));
+    const float dust = clamp01(finiteOr(params.dust01, 0.0F));
+    const float freeze = clamp01(finiteOr(params.freeze01, 0.0F));
+    const float smear = clamp01(finiteOr(params.smear01, 0.0F));
+    const float width = clamp01(finiteOr(params.width01, 0.5F));
+    const float densityIn = finiteOr(params.densityHz, 20.0F);
+    const float durationIn = finiteOr(params.durationMs, 120.0F);
+    const float pitchIn = finiteOr(params.pitchSemitones, 0.0F);
+    const float positionIn = finiteOr(params.position01, 0.0F);
+    const float jitterIn = finiteOr(params.positionJitter01, 0.1F);
+    const float panScatterIn = finiteOr(params.panScatter01, 0.3F);
+    const float gainIn = finiteOr(params.gain, 0.8F);
+    const float reverseIn = finiteOr(params.reverseProbability01, 0.0F);
+    const float freezePositionIn = finiteOr(params.freezePosition01, 0.5F);
+    const float positionMod = finiteOr(positionMod01, 0.0F);
 
     GranularEffectiveParams eff;
     // Cloud: sparse <-> dense. density x(0.25 + 3c); duration stretches
     // slightly with cloud so denser clouds overlap more.
-    eff.densityHz = std::clamp(params.densityHz * (0.25F + 3.0F * cloud), 0.0F, 4000.0F);
+    eff.densityHz = std::clamp(densityIn * (0.25F + 3.0F * cloud), 0.0F, 4000.0F);
     // Dust: transient emphasis. Duration collapses toward 5 ms, gain is nudged
     // up so the shorter grains stay audible, and per-grain envelopes bias
     // toward the fast-attack ExponentialDecay shape.
-    float durationMs = params.durationMs * (1.0F - 0.9F * dust);
+    float durationMs = durationIn * (1.0F - 0.9F * dust);
     durationMs = std::max(durationMs, 5.0F);
     durationMs *= 1.0F + 0.5F * cloud;
     eff.durationMs = durationMs;
-    eff.gain = params.gain * (1.0F + 0.5F * dust);
+    eff.gain = gainIn * (1.0F + 0.5F * dust);
     eff.dustTransientOverride01 = dust;
     // Freeze: position converges on the freeze point; jitter dies out with it.
-    const float basePosition = clamp01(params.position01 + positionMod01);
-    eff.position01 = basePosition * (1.0F - freeze) + clamp01(params.freezePosition01) * freeze;
+    const float basePosition = clamp01(positionIn + positionMod);
+    eff.position01 = basePosition * (1.0F - freeze) + clamp01(freezePositionIn) * freeze;
     eff.positionJitter01 =
-        clamp01(clamp01(params.positionJitter01 + scatter * 0.5F) * (1.0F - freeze));
+        clamp01(clamp01(jitterIn + scatter * 0.5F) * (1.0F - freeze));
     // Smear: per-grain random pitch (+/-(12 x smear) semitones) and duration
     // (1 +/-(0.75 x smear)) dispersion, drawn from the engine RNG at spawn.
     eff.smearPitchSemitones = smear * 12.0F;
     eff.smearDurationSpread01 = smear * 0.75F;
     // Width: widens the pan distribution and scales the per-grain L/R source
     // decorrelation offsets (true stereo placement; mono-compatible at 0).
-    eff.panScatter01 = clamp01(params.panScatter01 * (0.2F + 1.6F * width));
+    eff.panScatter01 = clamp01(panScatterIn * (0.2F + 1.6F * width));
     eff.width01 = width;
     // Passthrough core fields.
-    eff.pitchSemitones = params.pitchSemitones;
-    eff.reverseProbability01 = clamp01(params.reverseProbability01);
+    eff.pitchSemitones = pitchIn;
+    eff.reverseProbability01 = clamp01(reverseIn);
     eff.envelopeShape = params.envelopeShape;
     eff.granularQuality = params.granularQuality;
     return eff;
 }
 
 void GranularEngine::spawn_grain(const GranularSource& source,
-                                 const GranularEffectiveParams& eff) noexcept {
+                                 const GranularEffectiveParams& eff,
+                                 float noteRatio) noexcept {
     // Find a free slot; when the pool is full steal the oldest grain (nearest
     // completion), which is the least audible disruption.
     Grain* target = nullptr;
@@ -188,7 +210,12 @@ void GranularEngine::spawn_grain(const GranularSource& source,
     const float ratio = semitones_to_ratio(eff.pitchSemitones + smearPitch);
     const float sourceRate = source.sampleRate == 0U ? static_cast<float>(sampleRate_)
                                                      : static_cast<float>(source.sampleRate);
-    float increment = ratio * sourceRate / static_cast<float>(sampleRate_);
+    // Note tracking (fix: grain pitch follows the played note). Guarded to a
+    // finite positive ratio so a hostile frequencyHertz can never poison the
+    // grain pool with NaN/inf increments.
+    const float safeNoteRatio =
+        (std::isfinite(noteRatio) && noteRatio > 0.0F) ? noteRatio : 1.0F;
+    float increment = ratio * sourceRate / static_cast<float>(sampleRate_) * safeNoteRatio;
     const bool reverse = random01() < eff.reverseProbability01;
     if (reverse) increment = -increment;
     // Smear duration dispersion: per-grain random multiplier around the
@@ -252,7 +279,25 @@ void GranularEngine::spawn_grain(const GranularSource& source,
 std::pair<float, float> GranularEngine::render(const GranularSource& source,
                                               const GranularParameters& params,
                                               float positionMod01) noexcept {
+    // Reference pitch of the source: ratio exactly 1.0, so this form renders
+    // bit-identically to the pre-note-tracking engine.
+    const float reference = 440.0F * std::exp2((static_cast<float>(source.rootNote) - 69.0F) / 12.0F);
+    return render(source, params, positionMod01, reference);
+}
+
+std::pair<float, float> GranularEngine::render(const GranularSource& source,
+                                              const GranularParameters& params,
+                                              float positionMod01,
+                                              float frequencyHertz) noexcept {
     if (!params.enabled) return {0.0F, 0.0F};
+    // Note tracking: scale grain playback by the played note relative to the
+    // source's recorded root note. Non-finite/non-positive input falls back
+    // to the reference pitch (ratio 1.0) rather than poisoning the pool.
+    const float reference = 440.0F * std::exp2((static_cast<float>(source.rootNote) - 69.0F) / 12.0F);
+    float noteRatio = 1.0F;
+    if (std::isfinite(frequencyHertz) && frequencyHertz > 0.0F && std::isfinite(reference) &&
+        reference > 0.0F)
+        noteRatio = frequencyHertz / reference;
     const bool bankUsable =
         source.samples != nullptr && source.frameCount >= 2U;
 
@@ -282,7 +327,7 @@ std::pair<float, float> GranularEngine::render(const GranularSource& source,
             ++counters_.grainMisses;
             continue;
         }
-        spawn_grain(source, eff);
+        spawn_grain(source, eff, noteRatio);
     }
     if (!bankUsable) return {0.0F, 0.0F};
 

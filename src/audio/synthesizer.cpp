@@ -197,8 +197,7 @@ struct RealtimePreset {
     std::array<OscillatorParameters, kSynthOscillatorCount> oscillators{};
     AdsrParameters ampEnvelope{};
     FilterParameters filter{};
-    TuningParameters tuning{};
-    ChordParameters chord{};
+    TuningParameters tuning{};    ChordParameters chord{};
     ArpeggiatorParameters arpeggiator{};
     std::array<LfoParameters, kSynthLfoCount> lfos{};
     std::array<ModulationSlot, kSynthModulationSlotCount> modulation{};
@@ -241,6 +240,41 @@ struct RealtimePreset {
     bool midiThru{};
 };
 static_assert(std::is_trivially_copyable_v<RealtimePreset>);
+
+// Lock-free preset handoff from the UI thread to the render thread. Carries
+// everything the audio thread needs to adopt a preset: the unmorphed numeric
+// base (morph source A), the morph target B, and the sequencer/conductor
+// configs that used to be applied from the UI thread (a data race while the
+// audio thread was inside advance_sequencer()/conductor.process()).
+// Trivially copyable so the MPMC queue moves it without allocation.
+struct PresetUpdate {
+    RealtimePreset base{};      // unmorphed base preset (morph source A)
+    RealtimePreset morphB{};    // morph target B (valid when hasMorphB)
+    bool hasMorphB{false};
+    bool morphEnabled{false};
+    float morphAmount{0.0F};    // UI-authored morph amount
+    SequencerConfig sequencer{};
+    bool sequencerChanged{false};
+    AttractorConfig attractor{};
+    bool attractorEnabled{false};
+};
+static_assert(std::is_trivially_copyable_v<PresetUpdate>);
+
+// FNV-1a hash over the wavetable mip-0 content that adopt_preset() cooks into
+// the HQ table. Lets the render thread skip the re-cook (and its
+// allocations) when the wavetable data hasn't actually changed.
+std::uint64_t wavetable_content_hash(const RealtimeWavetable& wt) noexcept {
+    std::uint64_t h = 1469598103934665603ULL;
+    h ^= wt.enabled ? 1ULL : 0ULL; h *= 1099511628211ULL;
+    h ^= wt.frameCount; h *= 1099511628211ULL;
+    const std::size_t n = std::min<std::size_t>(wt.frameCount, kWavetableFrameCount) *
+                          kWavetableSampleCount;
+    for (std::size_t i = 0; i < n; ++i) {
+        h ^= static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(wt.samples[i]));
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
 
 ChordParameters resolved_chord_parameters(const SynthPreset& source) noexcept {
     ChordParameters result = source.chord;
@@ -757,7 +791,7 @@ struct Voice {
     std::array<bool, kSynthOscillatorCount> releaseSampleActive{};
     std::uint8_t sampleAttackZone{kInvalidSampleZone};
     std::uint8_t sampleReleaseZone{kInvalidSampleZone};
-    GranularEngine granularEngine{};  // Phase 4: dedicated granular generator (one pool per voice)
+    std::array<GranularEngine, kSynthOscillatorCount> granularEngines{};  // Phase 4: one grain pool per oscillator (critique fix)
     SpectralOscillator spectralOscillator{};  // Phase 5: spectral resynthesis (one engine per voice)
     std::array<std::array<float, kSynthUnisonMax - 1U>, kSynthOscillatorCount> unisonPhases{};
     std::array<float, kSynthModulationSlotCount> modulationSmoothing{};
@@ -812,10 +846,16 @@ struct Voice {
             modalResonators[i].initialized = false;  // Phase 2: re-excite at note-on
         }
         // Phase 4: fresh granular cloud per note, deterministically seeded from
-        // note/age so identical notes render identical grain sequences.
-        granularEngine.reset();
-        granularEngine.set_seed(0x51ED27B9U ^ (static_cast<std::uint32_t>(newNote) << 16U) ^
-                                static_cast<std::uint32_t>(newAge));
+        // note/age so identical notes render identical grain sequences. One
+        // pool per oscillator: oscillator 0 keeps the exact legacy seed so
+        // single-oscillator determinism tests stay bit-identical; the others
+        // fold the oscillator index into the hash for independent clouds.
+        for (std::size_t i = 0; i < kSynthOscillatorCount; ++i) {
+            granularEngines[i].reset();
+            granularEngines[i].set_seed(0x51ED27B9U ^ (static_cast<std::uint32_t>(newNote) << 16U) ^
+                                        static_cast<std::uint32_t>(i * 0x85EBCA6BU) ^
+                                        static_cast<std::uint32_t>(newAge));
+        }
         // Phase 5: fresh spectral engine per note, deterministically seeded
         // from note/age so identical notes render identical output.
         spectralOscillator.reset();
@@ -836,7 +876,8 @@ struct Voice {
         modulationSmoothing.fill(0.0F);
     }
     void release() noexcept { keyHeld = false; sustained = false; amp.note_off(); filterEnvelope.note_off(); }
-    void kill() noexcept { active = false; keyHeld = false; sustained = false; amp.kill(); filterEnvelope.kill(); granularEngine.kill_grains(); spectralOscillator.kill(); }
+    void kill() noexcept { active = false; keyHeld = false; sustained = false; amp.kill(); filterEnvelope.kill();
+        for (auto& engine : granularEngines) engine.kill_grains(); spectralOscillator.kill(); }
 };
 
 struct DelayLine {
@@ -2016,6 +2057,12 @@ float arpeggiator_step_beats(ArpeggiatorDivision division) noexcept {
 
 } // namespace
 
+// Realtime-safe counterpart of morph_synth_presets(): interpolates two
+// realtime presets without allocation (used by the audio thread's morph walk).
+// Declared here in dve::audio scope to match the definition below.
+[[nodiscard]] RealtimePreset morph_realtime_presets(const RealtimePreset& a, const RealtimePreset& b,
+                                                    float amount) noexcept;
+
 ModalResonatorParameters ModalResonatorParameters::make_default() {
     ModalResonatorParameters params;
     params.modeCount = 12;
@@ -2315,9 +2362,20 @@ struct Synthesizer::Impl {
     // Written by the conductor on the render thread, read by the voice DSP
     // on the same thread.
     float conductorCutoffMultiplier{1.0F};
-    // Phase 1: morph B preset (set via API, not serialized).
-    SynthPreset morphPresetB{};
-    bool hasMorphPresetB{false};
+    // Phase 1: morph A/B numeric presets, cached on the render thread so the
+    // conductor's per-block morph walk never copies strings. Populated by
+    // adopt_preset(); applied by apply_morph_amount().
+    RealtimePreset morphBaseA_{};
+    RealtimePreset morphBaseB_{};
+    bool morphHasB_{false};
+    float appliedMorphAmount_{-1.0F};  // amount baked into parameters (-1 = none)
+    // Phase 1: wavetable cook gating (fix: no per-block re-cook/allocation).
+    std::uint64_t cookedWavetableHash_{0};
+    std::atomic<std::uint64_t> wavetableCookCount_{0};
+    std::vector<float> wavetableCookScratch_;              // flat 64x512 resample target
+    std::vector<std::complex<float>> wavetableCookSpectrum_;  // persistent DFT scratch
+    std::vector<float> wavetableCookFiltered_;             // persistent DFT scratch
+    std::vector<float> wavetableCookFrame_;                // persistent frame scratch
     // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
     // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
     // currents advance toward targets once per render block in
@@ -2340,7 +2398,8 @@ struct Synthesizer::Impl {
     bool parameterSmoothingInitialized{};
     BoundedQueue<MidiMessage, kMidiQueueCapacity> midiIn;
     BoundedQueue<MidiMessage, kMidiOutQueueCapacity> midiOut;
-    BoundedQueue<RealtimePreset, kPresetQueueCapacity> presetIn;
+    BoundedQueue<PresetUpdate, kPresetQueueCapacity> presetIn;
+    std::atomic<std::uint64_t> droppedPresets{0};  // presetIn overflow (UI thread only)
     std::mutex sampleMapPublishMutex;
     std::array<SynthSampleMap, 3> sampleMaps{};
     std::atomic<int> activeSampleMapIndex{0};
@@ -3160,42 +3219,77 @@ struct Synthesizer::Impl {
         if (arpActiveCount > 0U && renderFrame >= arpGateOffFrame && !arpStepTie) release_arp_notes();
     }
 
-    void adopt_preset(const RealtimePreset& next) noexcept {
-        const bool wasArpeggiating = parameters.arpeggiator.enabled;
-        parameters = next;
+    // Applies a morph amount to the live parameters by interpolating the
+    // cached numeric A/B presets. Realtime-safe: no strings, no allocation.
+    // Skipped (cheaply) when morphing is off or the amount hasn't changed.
+    void apply_morph_amount(float amount, bool morphEnabled) noexcept {
+        if (!morphEnabled || !morphHasB_) return;
+        const float clamped = clampf(amount, 0.0F, 1.0F);
+        if (clamped == appliedMorphAmount_) return;
+        parameters = morph_realtime_presets(morphBaseA_, morphBaseB_, clamped);
+        appliedMorphAmount_ = clamped;
+        // The morphed wavetable content snaps at t >= 0.5 (see
+        // morph_realtime_presets); re-cook only if the content actually changed.
+        cook_wavetable_if_changed();
+    }
+
+    // Cooks parameters.wavetable into the HQ engine only when its content
+    // changed since the last cook. The resample target and DFT scratch are
+    // persistent members, so repeat cooks perform no allocation.
+    void cook_wavetable_if_changed() noexcept {
+        if (!parameters.wavetable.enabled || parameters.wavetable.frameCount == 0U) return;
+        const std::uint64_t hash = wavetable_content_hash(parameters.wavetable);
+        if (hash == cookedWavetableHash_) return;
         // Phase 1: cook the preset wavetable into the HQ engine (64 frames).
         // Interpolates the preset's mip-0 frames up to kHQWavetableFrames.
-        if (parameters.wavetable.enabled && parameters.wavetable.frameCount > 0U) {
-            std::vector<std::vector<float>> frames;
-            frames.reserve(kHQWavetableFrames);
-            const std::size_t srcFrames = std::min<std::size_t>(parameters.wavetable.frameCount, kWavetableFrameCount);
-            const float* mip0 = parameters.wavetable.samples.data(); // mip 0 is first
-            for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
-                const float srcPos = static_cast<float>(f) / static_cast<float>(kHQWavetableFrames - 1) *
-                                     static_cast<float>(srcFrames - 1);
-                const std::size_t f0 = static_cast<std::size_t>(srcPos);
-                const std::size_t f1 = std::min(f0 + 1, srcFrames - 1);
-                const float frac = srcPos - static_cast<float>(f0);
-                std::vector<float> frame(kHQWavetableSamples);
-                for (std::size_t i = 0; i < kHQWavetableSamples; ++i) {
-                    // Resample from 128 to 512 samples.
-                    const float srcSamplePos = static_cast<float>(i) / static_cast<float>(kHQWavetableSamples - 1) *
-                                               static_cast<float>(kWavetableSampleCount - 1);
-                    const std::size_t s0 = static_cast<std::size_t>(srcSamplePos);
-                    const std::size_t s1 = std::min(s0 + 1, kWavetableSampleCount - 1);
-                    const float sFrac = srcSamplePos - static_cast<float>(s0);
-                    const float a0 = mip0[f0 * kWavetableSampleCount + s0];
-                    const float a1 = mip0[f0 * kWavetableSampleCount + s1];
-                    const float b0 = mip0[f1 * kWavetableSampleCount + s0];
-                    const float b1 = mip0[f1 * kWavetableSampleCount + s1];
-                    const float a = a0 + (a1 - a0) * sFrac;
-                    const float b = b0 + (b1 - b0) * sFrac;
-                    frame[i] = a + (b - a) * frac;
-                }
-                frames.push_back(std::move(frame));
+        wavetableCookScratch_.resize(kHQWavetableFrames * kHQWavetableSamples);
+        const std::size_t srcFrames = std::min<std::size_t>(parameters.wavetable.frameCount, kWavetableFrameCount);
+        const float* mip0 = parameters.wavetable.samples.data(); // mip 0 is first
+        for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
+            const float srcPos = static_cast<float>(f) / static_cast<float>(kHQWavetableFrames - 1) *
+                                 static_cast<float>(srcFrames - 1);
+            const std::size_t f0 = static_cast<std::size_t>(srcPos);
+            const std::size_t f1 = std::min(f0 + 1, srcFrames - 1);
+            const float frac = srcPos - static_cast<float>(f0);
+            float* frame = wavetableCookScratch_.data() + f * kHQWavetableSamples;
+            for (std::size_t i = 0; i < kHQWavetableSamples; ++i) {
+                // Resample from 128 to 512 samples.
+                const float srcSamplePos = static_cast<float>(i) / static_cast<float>(kHQWavetableSamples - 1) *
+                                           static_cast<float>(kWavetableSampleCount - 1);
+                const std::size_t s0 = static_cast<std::size_t>(srcSamplePos);
+                const std::size_t s1 = std::min(s0 + 1, kWavetableSampleCount - 1);
+                const float sFrac = srcSamplePos - static_cast<float>(s0);
+                const float a0 = mip0[f0 * kWavetableSampleCount + s0];
+                const float a1 = mip0[f0 * kWavetableSampleCount + s1];
+                const float b0 = mip0[f1 * kWavetableSampleCount + s0];
+                const float b1 = mip0[f1 * kWavetableSampleCount + s1];
+                const float a = a0 + (a1 - a0) * sFrac;
+                const float b = b0 + (b1 - b0) * sFrac;
+                frame[i] = a + (b - a) * frac;
             }
-            hqWavetable = cook_wavetable("Preset", frames);
         }
+        cook_wavetable_inplace(hqWavetable, "Preset", wavetableCookScratch_.data(),
+                               kHQWavetableFrames, wavetableCookSpectrum_,
+                               wavetableCookFiltered_, wavetableCookFrame_);
+        cookedWavetableHash_ = hash;
+        wavetableCookCount_.fetch_add(1U, std::memory_order_relaxed);
+    }
+
+    void adopt_preset(const PresetUpdate& update, float morphAmount, bool morphEnabled) noexcept {
+        const bool wasArpeggiating = parameters.arpeggiator.enabled;
+        // Cache the morph endpoints for the render thread's per-block walk.
+        morphBaseA_ = update.base;
+        morphBaseB_ = update.morphB;
+        morphHasB_ = update.hasMorphB;
+        // Sequencer/conductor configs were applied from the UI thread (data
+        // race vs advance_sequencer()/conductor.process()); they are now
+        // applied here on the render thread.
+        if (update.sequencerChanged) sequencer.apply_config(update.sequencer);
+        conductor.configure(update.attractorEnabled, update.attractor);
+        parameters = update.base;
+        appliedMorphAmount_ = -1.0F;  // force re-application below
+        cook_wavetable_if_changed();
+        apply_morph_amount(morphAmount, morphEnabled);
         macroValues = parameters.macroValues;
         gameClockTempo.store(parameters.arpeggiator.externalTempoBpm, std::memory_order_relaxed);
         arpRandomState = parameters.arpeggiator.randomSeed == 0U ? 0x51A3D8E7U : parameters.arpeggiator.randomSeed;
@@ -3963,15 +4057,19 @@ struct Synthesizer::Impl {
                 // Phase 4: dedicated granular generator (SYN-014). Preset-level
                 // parameters; the grain source is the resident sample bank.
                 // An empty/disabled bank renders silence (counted as grain
-                // misses inside the engine, never a crash).
-                auto& engine = v.granularEngine;
+                // misses inside the engine, never a crash). Each oscillator
+                // owns its grain pool, and grain pitch tracks the voice's
+                // played frequency (bend/tuning/semitones already folded in)
+                // relative to the bank's recorded root note.
+                auto& engine = v.granularEngines[i];
                 engine.set_sample_rate(sampleRate);
                 const RealtimeSampleBank& bank = parameters.sampleBank;
                 const GranularSource source{bank.samples.data(),
                                             bank.enabled ? bank.frameCount : 0U,
-                                            bank.sampleRate};
+                                            bank.sampleRate,
+                                            bank.rootNote};
                 const auto granularOut =
-                    engine.render(source, parameters.granular, mod.granularPosition);
+                    engine.render(source, parameters.granular, mod.granularPosition, frequency);
                 forward_granular_counters(engine);
                 stereoLeft = granularOut.first;
                 stereoRight = granularOut.second;
@@ -4405,7 +4503,12 @@ bool SynthSampleBank::validate(std::string* error) const {
     if (name.empty() || name.size() > 128U) return fail("sample bank name must contain 1 to 128 characters");
     if (sampleRate < 8000U || sampleRate > 192000U || rootNote > 127U || frameCount > kSynthSampleMaxFrames)
         return fail("sample bank metadata is out of range");
-    if (enabled && frameCount < 2U) return fail("enabled sample bank requires at least two frames");
+    // An enabled bank with zero frames carries no sample data (e.g. after a
+    // binary patch round-trip, which stores the enabled flag but not the
+    // audio); every render path already treats frameCount < 2 as silence, so
+    // it validates. A single frame is degenerate (nothing to interpolate
+    // from) and is still rejected.
+    if (enabled && frameCount == 1U) return fail("enabled sample bank requires at least two frames");
     for (std::size_t i = 0; i < frameCount; ++i)
         if (!finite(samples[i]) || std::abs(samples[i]) > 4.0F) return fail("sample bank contains invalid samples");
     return true;
@@ -5359,6 +5462,26 @@ bool SynthPreset::validate(std::string* error) const {
                 return fail("invalid oscillator parameters");
         }
     }
+    // Phase 4: granular generator parameters (NaN/inf rejected by in_range's
+    // finite() check, same convention as every other section).
+    {
+        const auto& g = granular;
+        if (!in_range(g.densityHz, 0.0F, 4000.0F) || !in_range(g.durationMs, 1.0F, 10000.0F) ||
+            !in_range(g.pitchSemitones, -96.0F, 96.0F) || !in_range(g.position01, 0.0F, 1.0F) ||
+            !in_range(g.positionJitter01, 0.0F, 1.0F) || !in_range(g.panScatter01, 0.0F, 1.0F) ||
+            !in_range(g.gain, 0.0F, 4.0F) || !in_range(g.reverseProbability01, 0.0F, 1.0F) ||
+            !in_range(g.cloud01, 0.0F, 1.0F) || !in_range(g.scatter01, 0.0F, 1.0F) ||
+            !in_range(g.dust01, 0.0F, 1.0F) || !in_range(g.freeze01, 0.0F, 1.0F) ||
+            !in_range(g.freezePosition01, 0.0F, 1.0F) || !in_range(g.smear01, 0.0F, 1.0F) ||
+            !in_range(g.width01, 0.0F, 1.0F) ||
+            (g.envelopeShape != GranularEnvelopeShape::Hann &&
+             g.envelopeShape != GranularEnvelopeShape::Triangle &&
+             g.envelopeShape != GranularEnvelopeShape::ExponentialDecay &&
+             g.envelopeShape != GranularEnvelopeShape::PlanckTaper) ||
+            (g.granularQuality != FilterQuality::Eco && g.granularQuality != FilterQuality::Standard &&
+             g.granularQuality != FilterQuality::High && g.granularQuality != FilterQuality::Offline))
+            return fail("invalid granular parameters");
+    }
     if (!in_range(filter.cutoffHertz, 18.0F, 24000.0F) || !in_range(filter.resonance, 0.0F, 1.0F) ||
         !in_range(filter.envelopeAmountOctaves, -12.0F, 12.0F) || !in_range(filter.keyTrack, -2.0F, 2.0F) ||
         !in_range(filter.drive, 0.05F, 24.0F) || !in_range(filter.bassCompensation, 0.0F, 1.0F) ||
@@ -5738,6 +5861,27 @@ std::string SynthPreset::serialize() const {
                 << resonatorMode.decaySeconds << ',' << resonatorMode.gain << '\n';
         }
     }
+    // Phase 4: granular generator (mirrors binary patch IDs 0x0800-0x0811).
+    // Old files without these keys keep make_default() values (parse() starts
+    // from the default preset and only overwrites recognized keys).
+    out << "granular.enabled=" << granular.enabled << '\n'
+        << "granular.densityHz=" << granular.densityHz << '\n'
+        << "granular.durationMs=" << granular.durationMs << '\n'
+        << "granular.pitchSemitones=" << granular.pitchSemitones << '\n'
+        << "granular.position=" << granular.position01 << '\n'
+        << "granular.positionJitter=" << granular.positionJitter01 << '\n'
+        << "granular.panScatter=" << granular.panScatter01 << '\n'
+        << "granular.gain=" << granular.gain << '\n'
+        << "granular.reverseProbability=" << granular.reverseProbability01 << '\n'
+        << "granular.envelopeShape=" << static_cast<unsigned>(granular.envelopeShape) << '\n'
+        << "granular.cloud=" << granular.cloud01 << '\n'
+        << "granular.scatter=" << granular.scatter01 << '\n'
+        << "granular.dust=" << granular.dust01 << '\n'
+        << "granular.freeze=" << granular.freeze01 << '\n'
+        << "granular.freezePosition=" << granular.freezePosition01 << '\n'
+        << "granular.smear=" << granular.smear01 << '\n'
+        << "granular.width=" << granular.width01 << '\n'
+        << "granular.quality=" << static_cast<unsigned>(granular.granularQuality) << '\n';
     for (std::size_t i = 0; i < arpeggiator.steps.size(); ++i) {
         const auto& step = arpeggiator.steps[i];
         const std::string prefix = "arp.step" + std::to_string(i) + ".";
@@ -6243,6 +6387,33 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             }
             else recognized = false;
         }
+        if (!recognized && key.starts_with("granular.")) {
+            // Phase 4: granular generator keys (mirrors binary IDs 0x0800-0x0811).
+            // Old files without these keys keep the make_default() values that
+            // parse() starts from.
+            const std::string_view field = std::string_view(key).substr(9U);
+            auto& g = result.granular;
+            recognized = true;
+            if (field == "enabled") parsed = readBool(g.enabled);
+            else if (field == "densityHz") parsed = readFloat(g.densityHz);
+            else if (field == "durationMs") parsed = readFloat(g.durationMs);
+            else if (field == "pitchSemitones") parsed = readFloat(g.pitchSemitones);
+            else if (field == "position") parsed = readFloat(g.position01);
+            else if (field == "positionJitter") parsed = readFloat(g.positionJitter01);
+            else if (field == "panScatter") parsed = readFloat(g.panScatter01);
+            else if (field == "gain") parsed = readFloat(g.gain);
+            else if (field == "reverseProbability") parsed = readFloat(g.reverseProbability01);
+            else if (field == "envelopeShape") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && v<=3U; if(parsed) g.envelopeShape=static_cast<GranularEnvelopeShape>(v); }
+            else if (field == "cloud") parsed = readFloat(g.cloud01);
+            else if (field == "scatter") parsed = readFloat(g.scatter01);
+            else if (field == "dust") parsed = readFloat(g.dust01);
+            else if (field == "freeze") parsed = readFloat(g.freeze01);
+            else if (field == "freezePosition") parsed = readFloat(g.freezePosition01);
+            else if (field == "smear") parsed = readFloat(g.smear01);
+            else if (field == "width") parsed = readFloat(g.width01);
+            else if (field == "quality") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && v<=3U; if(parsed) g.granularQuality=static_cast<FilterQuality>(v); }
+            else recognized = false;
+        }
         if (!recognized && key.starts_with("arp.step")) {
             const auto dot = key.find('.', 8U);
             std::size_t index = 0;
@@ -6726,6 +6897,131 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
     return result;
 }
 
+// Realtime-safe counterpart of morph_synth_presets(): interpolates two
+// numeric RealtimePresets without touching strings or allocating, so the
+// audio thread can apply the conductor's morph walk every block. Mirrors the
+// UI-thread morph's field selection exactly, with one deliberate deviation:
+// wavetable *content* snaps at t >= 0.5 instead of lerping, because lerped
+// content would force a full HQ wavetable re-cook on every morph block.
+// Wavetable *position* (the musically primary morph dimension) still
+// interpolates smoothly via oscillators[].wavetablePosition.
+RealtimePreset morph_realtime_presets(const RealtimePreset& a, const RealtimePreset& b,
+                                      float amount) noexcept {
+    const float t = clampf(amount, 0.0F, 1.0F);
+    const bool chooseB = t >= 0.5F;
+    auto lerp = [t](float x, float y) { return x + (y - x) * t; };
+    auto logLerp = [t](float x, float y) {
+        const float lx = std::log(std::max(0.001F, x));
+        const float ly = std::log(std::max(0.001F, y));
+        return std::exp(lx + (ly - lx) * t);
+    };
+    RealtimePreset result = chooseB ? b : a;
+    for (std::size_t i = 0; i < result.oscillators.size(); ++i) {
+        auto& r = result.oscillators[i]; const auto& x = a.oscillators[i]; const auto& y = b.oscillators[i];
+        r.gain=lerp(x.gain,y.gain); r.pan=lerp(x.pan,y.pan); r.semitones=lerp(x.semitones,y.semitones);
+        r.cents=lerp(x.cents,y.cents); r.pulseWidth=lerp(x.pulseWidth,y.pulseWidth); r.pwmDepth=lerp(x.pwmDepth,y.pwmDepth);
+        r.pwmRateHertz=lerp(x.pwmRateHertz,y.pwmRateHertz); r.shape=lerp(x.shape,y.shape);
+        r.phaseOffset=lerp(x.phaseOffset,y.phaseOffset); r.frequencyModAmount=lerp(x.frequencyModAmount,y.frequencyModAmount);
+        r.ringModDepth=lerp(x.ringModDepth,y.ringModDepth); r.subOscillatorLevel=lerp(x.subOscillatorLevel,y.subOscillatorLevel);
+        r.wavetablePosition=lerp(x.wavetablePosition,y.wavetablePosition);
+        r.stereoDivergence=lerp(x.stereoDivergence,y.stereoDivergence);
+    }
+    auto morphEnvelope = [&](AdsrParameters& r, const AdsrParameters& x, const AdsrParameters& y) {
+        r.attackSeconds=logLerp(x.attackSeconds,y.attackSeconds);
+        r.decaySeconds=logLerp(x.decaySeconds,y.decaySeconds);
+        r.sustainLevel=lerp(x.sustainLevel,y.sustainLevel);
+        r.releaseSeconds=logLerp(x.releaseSeconds,y.releaseSeconds);
+        r.delaySeconds=logLerp(x.delaySeconds,y.delaySeconds);
+        r.holdSeconds=logLerp(x.holdSeconds,y.holdSeconds);
+    };
+    morphEnvelope(result.ampEnvelope,a.ampEnvelope,b.ampEnvelope);
+    morphEnvelope(result.filter.envelope,a.filter.envelope,b.filter.envelope);
+    result.filter.cutoffHertz=logLerp(a.filter.cutoffHertz,b.filter.cutoffHertz);
+    result.filter.resonance=lerp(a.filter.resonance,b.filter.resonance);
+    result.filter.envelopeAmountOctaves=lerp(a.filter.envelopeAmountOctaves,b.filter.envelopeAmountOctaves);
+    result.filter.keyTrack=lerp(a.filter.keyTrack,b.filter.keyTrack);
+    result.filter.drive=lerp(a.filter.drive,b.filter.drive);
+    result.filter.bassCompensation=lerp(a.filter.bassCompensation,b.filter.bassCompensation);
+    result.filter.morph=lerp(a.filter.morph,b.filter.morph);
+    result.filter.ms20HighPassCutoffHertz=lerp(a.filter.ms20HighPassCutoffHertz,b.filter.ms20HighPassCutoffHertz);
+    result.filter.selfOscillation=lerp(a.filter.selfOscillation,b.filter.selfOscillation);
+    result.filter.comb.damping=lerp(a.filter.comb.damping,b.filter.comb.damping);
+    result.filter.comb.mix=lerp(a.filter.comb.mix,b.filter.comb.mix);
+    result.filter.comb.feedbackScale=lerp(a.filter.comb.feedbackScale,b.filter.comb.feedbackScale);
+    result.filter.formant.dryMix=lerp(a.filter.formant.dryMix,b.filter.formant.dryMix);
+    for (std::size_t i=0;i<FormantParameters::kBandCount;++i) {
+        result.filter.formant.frequencyHertz[i]=lerp(a.filter.formant.frequencyHertz[i],b.filter.formant.frequencyHertz[i]);
+        result.filter.formant.gains[i]=lerp(a.filter.formant.gains[i],b.filter.formant.gains[i]);
+    }
+    result.tuning.referenceHertz=lerp(a.tuning.referenceHertz,b.tuning.referenceHertz);
+    result.tuning.transposeSemitones=lerp(a.tuning.transposeSemitones,b.tuning.transposeSemitones);
+    result.tuning.fineCents=lerp(a.tuning.fineCents,b.tuning.fineCents);
+    result.tuning.analogDriftCents=lerp(a.tuning.analogDriftCents,b.tuning.analogDriftCents);
+    for (std::size_t i=0;i<kSynthLfoCount;++i) {
+        const float rateA = std::max(0.01F, a.lfos[i].rateHertz);
+        const float rateB = std::max(0.01F, b.lfos[i].rateHertz);
+        result.lfos[i].rateHertz=std::exp(std::log(rateA) + (std::log(rateB) - std::log(rateA)) * t);
+        result.lfos[i].depth=lerp(a.lfos[i].depth,b.lfos[i].depth);
+        result.lfos[i].phase=lerp(a.lfos[i].phase,b.lfos[i].phase);
+        result.lfos[i].fadeInSeconds=lerp(a.lfos[i].fadeInSeconds,b.lfos[i].fadeInSeconds);
+        result.lfos[i].beatsPerCycle=lerp(a.lfos[i].beatsPerCycle,b.lfos[i].beatsPerCycle);
+    }
+    for (std::size_t i=0;i<kSynthModulationSlotCount;++i) result.modulation[i].amount=lerp(a.modulation[i].amount,b.modulation[i].amount);
+    for (std::size_t i=0;i<kSynthMacroCount;++i) result.macroValues[i]=lerp(a.macroValues[i],b.macroValues[i]);
+    result.masterGain=lerp(a.masterGain,b.masterGain);
+    result.masterPan=lerp(a.masterPan,b.masterPan);
+    result.pitchBendRangeSemitones=lerp(a.pitchBendRangeSemitones,b.pitchBendRangeSemitones);
+    result.distortion.drive=lerp(a.distortion.drive,b.distortion.drive);
+    result.distortion.mix=lerp(a.distortion.mix,b.distortion.mix);
+    result.eq.lowGainDb=lerp(a.eq.lowGainDb,b.eq.lowGainDb);
+    result.eq.midGainDb=lerp(a.eq.midGainDb,b.eq.midGainDb);
+    result.eq.highGainDb=lerp(a.eq.highGainDb,b.eq.highGainDb);
+    result.chorus.rateHertz=lerp(a.chorus.rateHertz,b.chorus.rateHertz);
+    result.chorus.depthMilliseconds=lerp(a.chorus.depthMilliseconds,b.chorus.depthMilliseconds);
+    result.chorus.mix=lerp(a.chorus.mix,b.chorus.mix);
+    result.phaser.rateHertz=lerp(a.phaser.rateHertz,b.phaser.rateHertz);
+    result.phaser.depth=lerp(a.phaser.depth,b.phaser.depth);
+    result.phaser.feedback=lerp(a.phaser.feedback,b.phaser.feedback);
+    result.phaser.mix=lerp(a.phaser.mix,b.phaser.mix);
+    result.delay.timeSeconds=logLerp(a.delay.timeSeconds,b.delay.timeSeconds);
+    result.delay.feedback=lerp(a.delay.feedback,b.delay.feedback);
+    result.delay.mix=lerp(a.delay.mix,b.delay.mix);
+    result.delay.syncBeats=lerp(a.delay.syncBeats,b.delay.syncBeats);
+    result.diffusionDelay.timeSeconds=logLerp(a.diffusionDelay.timeSeconds,b.diffusionDelay.timeSeconds);
+    result.diffusionDelay.feedback=lerp(a.diffusionDelay.feedback,b.diffusionDelay.feedback);
+    result.diffusionDelay.mix=lerp(a.diffusionDelay.mix,b.diffusionDelay.mix);
+    result.diffusionDelay.diffusion=lerp(a.diffusionDelay.diffusion,b.diffusionDelay.diffusion);
+    result.reverb.roomSize=lerp(a.reverb.roomSize,b.reverb.roomSize);
+    result.reverb.damping=lerp(a.reverb.damping,b.reverb.damping);
+    result.reverb.width=lerp(a.reverb.width,b.reverb.width);
+    result.reverb.mix=lerp(a.reverb.mix,b.reverb.mix);
+    // Wavetable content snaps at the midpoint (see note above); the enable
+    // flag ORs and the frame count takes the max, as in the UI morph.
+    result.wavetable.enabled = a.wavetable.enabled || b.wavetable.enabled;
+    result.wavetable.frameCount = std::max(a.wavetable.frameCount,b.wavetable.frameCount);
+    result.wavetable.samples = chooseB ? b.wavetable.samples : a.wavetable.samples;
+    // Re-derive the fields realtime_preset() computes from the morphed values.
+    for (std::size_t i = 0; i < result.oscillators.size(); ++i) {
+        const float pan = clampf(result.oscillators[i].pan, -1.0F, 1.0F);
+        result.oscillatorPanLeft[i] = std::sqrt(0.5F * (1.0F - pan));
+        result.oscillatorPanRight[i] = std::sqrt(0.5F * (1.0F + pan));
+    }
+    const float masterPan = clampf(result.masterPan, -1.0F, 1.0F);
+    result.masterPanLeft = std::sqrt(0.5F * (1.0F - masterPan));
+    result.masterPanRight = std::sqrt(0.5F * (1.0F + masterPan));
+    result.activeModulationCount = 0;
+    for (std::size_t slotIndex = 0; slotIndex < result.modulation.size(); ++slotIndex) {
+        const ModulationSlot& slot = result.modulation[slotIndex];
+        if (slot.enabled && slot.source != ModulationSource::Off &&
+            slot.destination != ModulationDestination::Off) {
+            result.activeModulation[result.activeModulationCount] = slot;
+            result.activeModulationIndices[result.activeModulationCount] = static_cast<std::uint8_t>(slotIndex);
+            ++result.activeModulationCount;
+        }
+    }
+    return result;
+}
+
 namespace {
 void write_be16(std::ostream& out, std::uint16_t value) { out.put(static_cast<char>((value>>8U)&0xFFU)); out.put(static_cast<char>(value&0xFFU)); }
 void write_be32(std::ostream& out, std::uint32_t value) { out.put(static_cast<char>((value>>24U)&0xFFU)); out.put(static_cast<char>((value>>16U)&0xFFU)); out.put(static_cast<char>((value>>8U)&0xFFU)); out.put(static_cast<char>(value&0xFFU)); }
@@ -6809,56 +7105,120 @@ std::vector<std::size_t> SynthPresetLibrary::find_by_tag(std::string_view tag) c
 Synthesizer::Synthesizer(std::uint32_t sampleRate)
     : sampleRate_(std::clamp<std::uint32_t>(sampleRate, 8000U, 192000U)), preset_(SynthPreset::make_default()) {
     impl_ = new Impl(sampleRate_, currentFrame_);
-    impl_->adopt_preset(realtime_preset(preset_));
+    // Pre-size the wavetable cook scratch on the constructing thread so the
+    // first render-thread cook (inside adopt_preset) performs no allocation.
+    impl_->wavetableCookScratch_.resize(kHQWavetableFrames * kHQWavetableSamples);
+    impl_->wavetableCookSpectrum_.resize(kHQWavetableSamples);
+    impl_->wavetableCookFiltered_.resize(kHQWavetableSamples);
+    impl_->wavetableCookFrame_.resize(kHQWavetableSamples);
+    PresetUpdate initial{};
+    initial.base = realtime_preset(preset_);
+    initial.sequencer = preset_.sequencer;
+    initial.sequencerChanged = true;
+    initial.attractor = preset_.attractor.config;
+    initial.attractorEnabled = preset_.attractor.enabled;
+    impl_->adopt_preset(initial, 0.0F, false);
     impl_->limiterEnvelope = 1.0F;
 }
 Synthesizer::~Synthesizer() { delete impl_; }
 
+SynthPreset Synthesizer::preset() const {
+    std::lock_guard<std::mutex> lock(presetMutex_);
+    return preset_;
+}
+
+void Synthesizer::request_morph_amount(float amount) noexcept {
+    rtMorphAmount_.store(clampf(amount, 0.0F, 1.0F), std::memory_order_relaxed);
+}
+
+std::shared_ptr<const Synthesizer::PendingConductorConfig>
+Synthesizer::take_pending_conductor_config() noexcept {
+    return pendingConductorConfig_.exchange(nullptr, std::memory_order_acq_rel);
+}
+
 void Synthesizer::set_preset(const SynthPreset& preset) {
     std::string error;
     if (!preset.validate(&error)) return;
-    // Phase 3: the preset owns the sequencer's authored config. Apply it to
-    // the live sequencer only when it actually changed, so per-block
-    // set_preset() calls (e.g. the conductor's morph walk) never disturb a
-    // running sequence or reseed its RNG.
-    const bool sequencerChanged = !(preset.sequencer == preset_.sequencer);
-    preset_ = preset;
-    if (sequencerChanged) impl_->sequencer.apply_config(preset.sequencer);
-    // Phase 3: install the preset's attractor settings (resets the phase
-    // machine only when they actually changed).
-    impl_->conductor.configure(preset.attractor.enabled, preset.attractor.config);
-    // Phase 1: apply A/B morph if enabled.
-    SynthPreset effective = preset_;
-    if (preset_.morphEnabled && hasMorphPresetB_) {
-        effective = morph_synth_presets(preset_, morphPresetB_, preset_.morphAmount);
-        // Preserve morph state in the effective preset.
-        effective.morphEnabled = true;
-        effective.morphAmount = preset_.morphAmount;
+    PresetUpdate update{};
+    std::shared_ptr<PendingConductorConfig> pendingConductor;
+    {
+        std::lock_guard<std::mutex> lock(presetMutex_);
+        // Phase 3: the preset owns the sequencer's authored config. The live
+        // sequencer used to be reconfigured here on the UI thread while the
+        // audio thread could be inside advance_sequencer(); the config is now
+        // carried in the update and applied on the render thread inside
+        // adopt_preset() (only when it actually changed, so reseeds are
+        // avoided for identical configs).
+        const bool sequencerChanged = !(preset.sequencer == preset_.sequencer);
+        preset_ = preset;
+        update.base = realtime_preset(preset_);
+        update.hasMorphB = hasMorphPresetB_;
+        if (hasMorphPresetB_) update.morphB = realtime_preset(morphPresetB_);
+        update.morphEnabled = preset_.morphEnabled;
+        update.morphAmount = preset_.morphAmount;
+        update.sequencer = preset_.sequencer;
+        update.sequencerChanged = sequencerChanged;
+        // Phase 3: the preset's attractor settings used to be installed here
+        // too (same race vs conductor.process()); now applied on the render
+        // thread. configure() still only resets the phase machine when the
+        // flag or config actually changed.
+        update.attractor = preset_.attractor.config;
+        update.attractorEnabled = preset_.attractor.enabled;
+        rtMorphEnabled_.store(preset_.morphEnabled, std::memory_order_relaxed);
+        rtMorphAmount_.store(clampf(preset_.morphAmount, 0.0F, 1.0F), std::memory_order_relaxed);
+        // Publish the attractor config for the conductor as well, so
+        // GenerativeConductor::process() uses the preset's config even when
+        // render() hasn't run yet to drain the PresetUpdate queue (e.g. a test
+        // driving the conductor directly). Lock-free single-producer handoff;
+        // the audio thread picks it up in process(). The queued update above
+        // still applies it on the render thread via adopt_preset().
+        pendingConductor = std::make_shared<PendingConductorConfig>();
+        pendingConductor->enabled = preset_.attractor.enabled;
+        pendingConductor->config = preset_.attractor.config;
     }
-    const RealtimePreset realtime = realtime_preset(effective);
-    while (!impl_->presetIn.push(realtime)) {
-        RealtimePreset discarded{};
-        if (!impl_->presetIn.pop(discarded)) break;
-    }
+    pendingConductorConfig_.store(std::move(pendingConductor), std::memory_order_release);
+    if (!impl_->presetIn.push(update)) impl_->droppedPresets.fetch_add(1U, std::memory_order_relaxed);
 }
 
 void Synthesizer::set_morph_preset_b(const SynthPreset& presetB) {
     std::string error;
     if (!presetB.validate(&error)) return;
-    morphPresetB_ = presetB;
-    hasMorphPresetB_ = true;
-    // Re-apply current preset to pick up the B state.
-    set_preset(preset_);
+    SynthPreset current;
+    {
+        std::lock_guard<std::mutex> lock(presetMutex_);
+        morphPresetB_ = presetB;
+        hasMorphPresetB_ = true;
+        current = preset_;
+    }
+    // Re-publish the current preset so the render thread caches the new B
+    // endpoint. (Separate lock scope above: set_preset() takes the mutex.)
+    set_preset(current);
 }
 
 void Synthesizer::clear_morph_preset_b() {
-    hasMorphPresetB_ = false;
-    set_preset(preset_);
+    SynthPreset current;
+    {
+        std::lock_guard<std::mutex> lock(presetMutex_);
+        hasMorphPresetB_ = false;
+        current = preset_;
+    }
+    set_preset(current);
+}
+
+bool Synthesizer::has_morph_preset_b() const {
+    std::lock_guard<std::mutex> lock(presetMutex_);
+    return hasMorphPresetB_;
 }
 
 void Synthesizer::set_morph_amount(float amount) {
-    preset_.morphAmount = std::clamp(amount, 0.0F, 1.0F);
-    set_preset(preset_);
+    SynthPreset current;
+    {
+        std::lock_guard<std::mutex> lock(presetMutex_);
+        preset_.morphAmount = clampf(amount, 0.0F, 1.0F);
+        rtMorphAmount_.store(preset_.morphAmount, std::memory_order_relaxed);
+        current = preset_;
+    }
+    set_preset(current);
 }
 
 // Phase 3: generative sequencer accessors.
@@ -6914,6 +7274,10 @@ SynthGranularProfiler Synthesizer::granular_profiler() const noexcept {
             impl_->activeGrainTelemetry.load(std::memory_order_relaxed),
             impl_->maximumActiveGrains.load(std::memory_order_relaxed),
             impl_->sampleStreamCache.metrics()};
+}
+
+std::uint64_t Synthesizer::wavetable_cook_count() const noexcept {
+    return impl_->wavetableCookCount_.load(std::memory_order_relaxed);
 }
 
 void Synthesizer::reset_granular_profiler() noexcept {
@@ -7003,16 +7367,25 @@ void Synthesizer::render(std::span<float> interleavedStereo) noexcept {
 void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     if (output == nullptr || frameCount == 0) return;
     impl_->adopt_pending_sample_map();
-    RealtimePreset latest{};
-    while (impl_->presetIn.pop(latest)) impl_->adopt_preset(latest);
+    // Snapshot the audio-thread morph request (the conductor walk below also
+    // writes these atomics; the drain sees a consistent snapshot).
+    const bool morphRequested = rtMorphEnabled_.load(std::memory_order_relaxed);
+    const float morphRequestedAmount = rtMorphAmount_.load(std::memory_order_relaxed);
+    PresetUpdate latest{};
+    while (impl_->presetIn.pop(latest))
+        impl_->adopt_preset(latest, morphRequestedAmount, morphRequested);
     impl_->advance_parameter_smoothing(frameCount);
     impl_->track_tempo_synced_delay();
     // Phase 3: step physics modulation bank.
     impl_->physicsBank.step(static_cast<float>(frameCount) / impl_->sampleRate);
     // Phase 3: generative conductor maps attractor state onto the live synth
     // (no-op unless enabled). Runs before the sequencer so the sequencer
-    // advances with this block's mapped scale/density/mutation.
+    // advances with this block's mapped scale/density/mutation. The morph
+    // walk publishes through request_morph_amount() (lock-free); the result
+    // is applied to the cached numeric presets just below.
     impl_->conductor.process(*this, static_cast<double>(frameCount) / impl_->sampleRate);
+    impl_->apply_morph_amount(rtMorphAmount_.load(std::memory_order_relaxed),
+                              rtMorphEnabled_.load(std::memory_order_relaxed));
     // Phase 3: advance the generative sequencer once per block (no-op unless enabled).
     impl_->advance_sequencer(frameCount);
     if (impl_->transportRestartRequested.exchange(false, std::memory_order_acq_rel)) {
@@ -7095,7 +7468,9 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     // Phase 4: publish granular engine activity once per block (spawn/steal/
     // miss counters are forwarded per spawn event in the voice path above).
     std::uint32_t blockActiveGrains = 0U;
-    for (const Voice& blockVoice : impl_->voice) blockActiveGrains += blockVoice.granularEngine.active_grain_count();
+    for (const Voice& blockVoice : impl_->voice)
+        for (const auto& engine : blockVoice.granularEngines)
+            blockActiveGrains += engine.active_grain_count();
     impl_->activeGrainTelemetry.store(blockActiveGrains, std::memory_order_relaxed);
     std::uint32_t observedGrainMax = impl_->maximumActiveGrains.load(std::memory_order_relaxed);
     while (blockActiveGrains > observedGrainMax &&

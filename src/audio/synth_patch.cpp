@@ -89,6 +89,32 @@ SynthPatchProgram compile_patch(const SynthPreset& preset) {
     w.entry(SynthPatchParam::FilterKeyTrack, preset.filter.keyTrack); bump();
     w.entry(SynthPatchParam::FilterDrive, preset.filter.drive); bump();
 
+    // Oscillators: waveform + enabled per oscillator (Phase 4 critique fix).
+    // kSynthOscillatorCount is 8; the IDs are the explicit per-index members
+    // above (0x0100-0x010F).
+    static constexpr SynthPatchParam kOscWaveformIds[kSynthOscillatorCount] = {
+        SynthPatchParam::Oscillator0Waveform, SynthPatchParam::Oscillator1Waveform,
+        SynthPatchParam::Oscillator2Waveform, SynthPatchParam::Oscillator3Waveform,
+        SynthPatchParam::Oscillator4Waveform, SynthPatchParam::Oscillator5Waveform,
+        SynthPatchParam::Oscillator6Waveform, SynthPatchParam::Oscillator7Waveform,
+    };
+    static constexpr SynthPatchParam kOscEnabledIds[kSynthOscillatorCount] = {
+        SynthPatchParam::Oscillator0Enabled, SynthPatchParam::Oscillator1Enabled,
+        SynthPatchParam::Oscillator2Enabled, SynthPatchParam::Oscillator3Enabled,
+        SynthPatchParam::Oscillator4Enabled, SynthPatchParam::Oscillator5Enabled,
+        SynthPatchParam::Oscillator6Enabled, SynthPatchParam::Oscillator7Enabled,
+    };
+    static_assert(kSynthOscillatorCount == 8, "oscillator patch IDs assume 8 oscillators");
+    for (std::size_t i = 0; i < kSynthOscillatorCount; ++i) {
+        w.entry(kOscWaveformIds[i],
+                static_cast<std::uint32_t>(preset.oscillators[i].waveform)); bump();
+        w.entry(kOscEnabledIds[i], preset.oscillators[i].enabled); bump();
+    }
+    w.entry(SynthPatchParam::SampleBankEnabled, preset.sampleBank.enabled); bump();
+    w.entry(SynthPatchParam::SampleBankRootNote,
+            static_cast<std::uint32_t>(preset.sampleBank.rootNote)); bump();
+    w.entry(SynthPatchParam::SampleBankSampleRate, preset.sampleBank.sampleRate); bump();
+
     w.entry(SynthPatchParam::ChordEnabled, preset.chord.enabled); bump();
     w.entry(SynthPatchParam::ChordStrumMs, preset.chord.strumMilliseconds); bump();
     w.entry(SynthPatchParam::ChordVelocityScale, preset.chord.velocityScale); bump();
@@ -250,6 +276,23 @@ std::optional<SynthPreset> load_patch_program(const std::uint8_t* data, std::siz
     for (std::uint32_t i = 0; i < entryCount && r.ok; ++i) {
         const auto id = static_cast<SynthPatchParam>(r.u16());
         const std::uint8_t type = r.u8();
+        const std::uint16_t rawId = static_cast<std::uint16_t>(id);
+        // Oscillator waveform (0x0100-0x0107) and enabled (0x0108-0x010F):
+        // indexed range, handled here so the switch below stays readable.
+        if (rawId >= 0x0100U && rawId <= 0x010FU) {
+            const std::size_t oscIndex = static_cast<std::size_t>(rawId - 0x0100U) & 0x07U;
+            if (rawId < 0x0108U && type == 1) {
+                const std::uint32_t v = r.u32();
+                // Clamp so a corrupt/out-of-range value can't form an invalid enum.
+                preset.oscillators[oscIndex].waveform =
+                    static_cast<OscillatorWaveform>(v <= 15U ? v : 0U);
+            } else if (rawId >= 0x0108U && type == 2) {
+                readB(preset.oscillators[oscIndex].enabled);
+            } else {
+                r.ok = false;
+            }
+            continue;
+        }
         switch (id) {
             case SynthPatchParam::Name:
                 if (type == 3) { const std::uint16_t len = r.u16(); preset.name.assign(reinterpret_cast<const char*>(r.p), r.ok && r.n >= len ? len : 0); if (r.ok && r.n >= len) { r.p += len; r.n -= len; } }
@@ -404,6 +447,9 @@ std::optional<SynthPreset> load_patch_program(const std::uint8_t* data, std::siz
                     static_cast<FilterQuality>(v <= 3U ? v : 3U);
                 break;
             }
+            case SynthPatchParam::SampleBankEnabled: if (type == 2) readB(preset.sampleBank.enabled); else r.ok = false; break;
+            case SynthPatchParam::SampleBankRootNote: if (type == 1) readU(preset.sampleBank.rootNote); else r.ok = false; break;
+            case SynthPatchParam::SampleBankSampleRate: if (type == 1) readU(preset.sampleBank.sampleRate); else r.ok = false; break;
             default:
                 // Unknown parameter ID: skip it so newer patches load on older builds.
                 if (type == 0) r.f32();

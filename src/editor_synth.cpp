@@ -130,7 +130,7 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
     for (std::size_t i = 0; i < layout_.oscillatorAdvancedRows.size(); ++i) {
         const int column = static_cast<int>(i / 6U);
         const int row = static_cast<int>(i % 6U);
-        const int columnWidth = (contentWidth - 10) / 2;
+        const int columnWidth = (contentWidth - 20) / 3; // 3 columns x 6 rows = 18 rows
         const int x = left + column * (columnWidth + 10);
         const int y = oscillatorAdvancedTop + row * parameterRowHeight;
         layout_.oscillatorAdvancedRows[i] = {x, y, columnWidth, parameterRowHeight - 3};

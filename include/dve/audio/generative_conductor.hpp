@@ -8,7 +8,7 @@
 //   scale            -> sequencer quantizer scale + root note (octave kept)
 //   rhythmDensity01  -> probability-lane trigger-gate multiplier
 //   mutationIntensity01 -> sequencer per-cycle mutation amount (all lanes)
-//   morphMin/Max     -> smooth seeded random walk driving set_morph_amount()
+//   morphMin/Max     -> smooth seeded random walk driving request_morph_amount()
 //   brightness01     -> filter cutoff multiplier around the base cutoff
 //
 // The morph walk only runs when the preset has morphing enabled; otherwise

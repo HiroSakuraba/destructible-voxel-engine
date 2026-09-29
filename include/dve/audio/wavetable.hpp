@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -32,6 +33,18 @@ struct CookedWavetable {
 // Computes mip levels by progressive lowpass filtering.
 [[nodiscard]] CookedWavetable cook_wavetable(const std::string& name,
                                             const std::vector<std::vector<float>>& frames);
+
+// Realtime-friendly cook: writes into an existing table, reusing its sample
+// storage and the caller-owned DFT scratch buffers (spectrum must hold at
+// least kHQWavetableSamples/2+1 complex values; filtered/frameBuf at least
+// kHQWavetableSamples floats). Resizes only when a buffer is undersized, so
+// repeat cooks with pre-sized buffers perform no allocation. flatFrames is a
+// flat [nFrames x kHQWavetableSamples] array (nFrames <= kHQWavetableFrames).
+void cook_wavetable_inplace(CookedWavetable& table, const std::string& name,
+                            const float* flatFrames, std::size_t nFrames,
+                            std::vector<std::complex<float>>& spectrum,
+                            std::vector<float>& filtered,
+                            std::vector<float>& frameBuf);
 
 // Factory wavetables.
 [[nodiscard]] CookedWavetable make_basic_morph_table();

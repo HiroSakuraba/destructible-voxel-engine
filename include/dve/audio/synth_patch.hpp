@@ -196,6 +196,29 @@ enum class SynthPatchParam : std::uint16_t {
     SpectralGain = 0x090D,
     SpectralStereoSpread = 0x090E,  // stereoSpread01
     SpectralPhaseRandom = 0x090F,   // phaseRandom01
+    // Oscillator waveform + enabled, per oscillator (Phase 4 critique fix:
+    // these used to be silently dropped). Values live in the reserved
+    // 0x0100-0x01FF oscillator range; older builds skip unknown IDs
+    // gracefully (the loader's default case skips them).
+    Oscillator0Waveform = 0x0100,
+    Oscillator1Waveform = 0x0101,
+    Oscillator2Waveform = 0x0102,
+    Oscillator3Waveform = 0x0103,
+    Oscillator4Waveform = 0x0104,
+    Oscillator5Waveform = 0x0105,
+    Oscillator6Waveform = 0x0106,
+    Oscillator7Waveform = 0x0107,
+    Oscillator0Enabled = 0x0108,
+    Oscillator1Enabled = 0x0109,
+    Oscillator2Enabled = 0x010A,
+    Oscillator3Enabled = 0x010B,
+    Oscillator4Enabled = 0x010C,
+    Oscillator5Enabled = 0x010D,
+    Oscillator6Enabled = 0x010E,
+    Oscillator7Enabled = 0x010F,
+    SampleBankEnabled = 0x0110,
+    SampleBankRootNote = 0x0111,
+    SampleBankSampleRate = 0x0112,
 };
 
 struct SynthPatchProgram {

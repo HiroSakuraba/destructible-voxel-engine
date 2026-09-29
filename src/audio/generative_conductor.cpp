@@ -68,6 +68,12 @@ float GenerativeConductor::walk_step(std::uint64_t& rngState, float current, flo
 
 void GenerativeConductor::process(Synthesizer& synth, double blockSeconds) {
     if (!enabled_) return;
+    // Pick up the preset's attractor config published by set_preset(), so the
+    // walk uses the right region even when render() hasn't run yet to apply
+    // the queued PresetUpdate (e.g. a direct process() caller). configure()
+    // is a no-op when nothing changed, so this never restarts the arc twice.
+    if (auto pending = synth.take_pending_conductor_config())
+        configure(pending->enabled, pending->config);
     const AttractorState state =
         blockSeconds > 0.0 ? attractor_.advance(blockSeconds) : attractor_.current();
 
@@ -87,12 +93,14 @@ void GenerativeConductor::process(Synthesizer& synth, double blockSeconds) {
     synth.set_conductor_cutoff_multiplier(std::exp2(-1.0F + 2.0F * brightness));
     // Morph wanders inside the state's morph region (seeded smooth walk).
     // Gated on morphEnabled so a non-morphing preset doesn't churn the
-    // preset queue pointlessly.
-    if (synth.preset().morphEnabled) {
+    // preset queue pointlessly. Lock-free: publishes through the synth's
+    // realtime morph request; the render thread applies it to its cached
+    // numeric presets without copying strings or allocating.
+    if (synth.morph_enabled_rt()) {
         const float lo = std::min(state.morphMin, state.morphMax);
         const float hi = std::max(state.morphMin, state.morphMax);
         morphWalk_ = walk_step(walkRng_, morphWalk_, lo, hi);
-        synth.set_morph_amount(morphWalk_);
+        synth.request_morph_amount(morphWalk_);
     }
 }
 

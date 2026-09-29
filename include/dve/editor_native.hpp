@@ -237,6 +237,9 @@ struct NativeEditorLayout {
     UiRect hierarchyFilterBox{};
     std::vector<UiRect> inspectorToggles;
     std::vector<UiRect> inspectorFields; // [0]=Position line, [1]=Rotation line
+    // Inspector detail text at or below this y is not drawn (the flag toggles sit
+    // there when the inspector is too short for both); always <= inspector bottom.
+    int inspectorContentClipY{};
     std::vector<UiRect> bottomTabs;      // parallel to BottomPanelTab enumerators, in order
     UiRect assetSearchBox{};
     UiRect assetRefreshButton{};

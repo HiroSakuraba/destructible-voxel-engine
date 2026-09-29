@@ -27,6 +27,8 @@ enum class SynthPanelPage : std::uint8_t {
 };
 inline constexpr std::size_t kSynthPanelPageCount = 8;
 inline constexpr std::size_t kSynthParameterRowCount = 30;
+// Smallest parameter-grid row pitch (row rect = pitch - 3, buttons = pitch - 5).
+inline constexpr int kMinSynthGridRowHeight = 24;
 inline constexpr std::size_t kSynthOscillatorAdvancedPropertyCount = 18;
 inline constexpr std::size_t kSynthSpectralAdvancedRowCount = 14;  // Phase 5: spectral section rows
 inline constexpr std::size_t kSynthArpStepPropertyCount = 18;
@@ -98,6 +100,10 @@ struct SynthPanelLayout {
     std::array<UiRect, kSynthPresetVisibleEntryCount> presetEntryButtons{};
 
     std::array<UiRect, 24> pianoKeys{};
+
+    // Voice count + peak meters drawn just above the piano.
+
+    UiRect meterArea{};
 };
 
 class EditorSynthPanel {

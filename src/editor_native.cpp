@@ -1812,13 +1812,47 @@ void NativeEditorController::recompute_layout() {
                                                    inspectorWidth - 24, 18});
             }
         }
-        const float inspectorContentBottom = selectedObject && selectedObject->text3d ? 426.0F :
-                                             selectedObject && selectedObject->gaborVolume ? 360.0F : 390.0F;
-        int toggleY = contentY + static_cast<int>(inspectorContentBottom * scale);
-        for (int index = 0; index < 5; ++index) {
-            layout_.inspectorToggles.push_back({layout_.inspector.x + 12, toggleY, inspectorWidth - 24, rowHeight});
-            toggleY += rowHeight + 4;
+        // Last fixed detail line: baseline 377 (voxel/text3d) or 311 (Gabor) + descent/gap.
+        const int contentBottom = contentY + static_cast<int>(
+            (selectedObject && selectedObject->gaborVolume ? 326.0F : 390.0F) * scale);
+        const int inspectorBottom = layout_.inspector.y + layout_.inspector.height - 6;
+        // The toggles used to start at a fixed offset and simply continue downward, so at
+        // 1280x719 (inspector ends at y=547) they spilled ~50 px into the bottom dock and
+        // stole its clicks. Pick the first arrangement that fits below the details; if
+        // none does, pin the block to the inspector bottom and clip the detail text above.
+        struct ToggleArrangement { int columns; int rowHeight; int gap; };
+        const std::array<ToggleArrangement, 4> arrangements{{
+            {1, rowHeight, 4}, {1, 20, 2}, {2, rowHeight, 4}, {2, 20, 2}}};
+        constexpr int kToggleCount = 5;
+        ToggleArrangement chosen = arrangements.back();
+        bool fits = false;
+        const auto block_height = [&](const ToggleArrangement& a) {
+            const int rows = (kToggleCount + a.columns - 1) / a.columns;
+            return rows * a.rowHeight + (rows - 1) * a.gap;
+        };
+        for (const ToggleArrangement& a : arrangements) {
+            if (contentBottom + block_height(a) <= inspectorBottom) { chosen = a; fits = true; break; }
         }
+        const int blockHeight = block_height(chosen);
+        // Never cover the name / ID / Position / Rotation lines (they end near +124).
+        const int blockTop = fits ? contentBottom : std::max(contentY + 124, inspectorBottom - blockHeight);
+        const int columnGap = 8;
+        const int columnWidth = (inspectorWidth - 24 - (chosen.columns - 1) * columnGap) / chosen.columns;
+        for (int index = 0; index < kToggleCount; ++index) {
+            const int row = index / chosen.columns;
+            const int column = index % chosen.columns;
+            const UiRect toggle{layout_.inspector.x + 12 + column * (columnWidth + columnGap),
+                                blockTop + row * (chosen.rowHeight + chosen.gap), columnWidth, chosen.rowHeight};
+            if (toggle.y + toggle.height > inspectorBottom) break;  // never spill into the dock
+            layout_.inspectorToggles.push_back(toggle);
+        }
+        layout_.inspectorContentClipY = blockTop - 2;  // == contentBottom - 2 when it fits
+        for (std::size_t field = 2; field < layout_.inspectorFields.size(); ++field) {
+            UiRect& rect = layout_.inspectorFields[field];
+            if (rect.y + rect.height > layout_.inspectorContentClipY) rect = {};  // hidden -> not clickable
+        }
+    } else {
+        layout_.inspectorContentClipY = layout_.inspector.y + layout_.inspector.height;
     }
 
     layout_.bottomTabs.clear();

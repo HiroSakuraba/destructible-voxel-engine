@@ -102,66 +102,103 @@ cannot allow an individual material to create unbounded fragment work.
 No Dear ImGui demo code, STB integration, Poly Haven assets, DirectX 11 setup, or upstream
 matrix helper is copied into DVE.
 
-## Next renderer-facing stage
+## Renderer infrastructure now implemented
 
-The mathematical core is not yet the complete live feature. The next port stage should add
-four GPU resources/passes.
+The port now includes the renderer-side data path that the live shell will consume.
 
-### 1. UV-space deformation atlas
+### Multi-render-target RHI
 
-For each DASHR-enabled deforming mesh, rasterize the current skinned surface in UV space.
-The atlas stores:
+DVE's graphics-pipeline contract now supports an ordered set of up to four color targets while
+retaining the old single-`colorFormat` API for existing callers. Null RHI validates target-count,
+dimension, and pipeline/pass compatibility. Vulkan creates matching attachment descriptions,
+framebuffers, blend states, and clear values.
 
-- inverse surface basis row 0,
-- inverse surface basis row 1,
-- inverse surface basis row 2,
-- deformed object-space anchor,
-- U/V distortion ratios.
+This was necessary because one DASHR deformation update should rasterize the mesh once and emit
+all four surface-field records, rather than repeating the geometry pass four times.
 
-A practical DVE format is four RGBA16F render targets initially. We can reduce bandwidth
-later after profiling.
+### Scaled deformation stream
 
-The vertex stage must use the same deformed/skinned position and differential basis as the
-normal polygon pass. The atlas is generated after pose/morph evaluation and before the
-material pass that consumes it.
+`GpuDashrSurfaceVertex` is intentionally separate from `GpuPolygonVertex`. DVE's ordinary
+lighting tangent is normalized; DASHR requires the actual scaled derivatives `dP/du` and
+`dP/dv`.
 
-### 2. Edge fill
+`build_dashr_surface_vertices` reconstructs those derivatives from triangle geometry and UV0,
+area-weights them at shared vertices, and measures current stretch/compression against the rest
+surface. `DashrSurfaceMeshMirror` keeps the resulting GPU stream in reusable buffers. Passing a
+CPU-deformed object-space position for every vertex already gives skeletal/morph systems a correct
+reference update route without reallocating the stream every frame.
 
-UV islands leave uncovered texels around their borders. Add a small deterministic edge-fill
-pass so filtered atlas reads near a seam still resolve to a nearby valid surface sample.
+For a rest surface, the U/V deformation ratios are one. If a pose stretches the object twofold
+along the rest U differential, the U ratio is approximately two. Negative or near-zero values
+remain visible to the tracer as compression/inversion evidence.
 
-DVE should keep the fill radius explicit and bounded. It should never silently bridge large
-unrelated UV gaps.
+### Four-target UV deformation atlas
 
-### 3. Seam teleport map
+`DashrAtlasResources` owns four RGBA16F raw atlas targets and four edge-filled targets.
+`record_dashr_atlas_update` rasterizes the scaled deformation stream directly in UV space and
+stores:
 
-Cook a static map containing:
+- target 0: inverse surface basis row 0 + U distortion,
+- target 1: inverse surface basis row 1 + V distortion,
+- target 2: inverse surface basis row 2 + validity,
+- target 3: deformed object-space anchor + validity.
 
-- a filtered signed distance or validity measure near a seam,
-- a point-sampled destination UV on the adjacent island.
+The targets end each update in `ShaderRead` state for the future shell/material pass.
 
-The ray marcher samples the distance continuously. Only after it enters the teleport region
-does it point-sample the destination coordinate. Keeping those two semantics separate avoids
-interpolating discontinuous destinations.
+### Bounded edge fill
 
-### 4. Live shell material pass
+`dashr_edge_fill.hlsl` performs a deterministic two-pixel nearest-valid dilation around UV
+islands. The radius is deliberately small: this pass repairs interpolation support at an island
+edge; it must not invent a bridge across unrelated islands.
 
-A DASHR-enabled polygon draw uses conservatively extruded shell geometry. The fragment
-shader:
+### Automatic seam teleport map
 
-1. starts from the interpolated surface coordinate,
-2. marches the camera ray in object space,
-3. samples the deformation atlas using the previous surface coordinate as the next lookup
-   seed,
-4. applies distortion damping when necessary,
-5. teleports at UV seams,
-6. compares against the material height texture,
-7. refines the hit,
-8. discards escaped fragments without writing depth, and
-9. shades the recovered surface point using DVE's existing PBR material path.
+`cook_dashr_seam_map` groups triangle edges by quantized object-space endpoints. When exactly
+two geometric copies represent the same manifold edge but their UV endpoints differ, it emits a
+bidirectional teleport band. Open boundaries are ignored and non-manifold coincident groups are
+skipped conservatively.
 
-The result must write the correct displaced depth. Shadows should use the same surface-hit
-contract rather than the current flat shell depth.
+Each seam texel stores the destination UV, a filterable positive seam-region value, and validity.
+The destination is inset into the paired triangle rather than placed exactly on its boundary.
+The runtime tracer also has a destination-band cooldown: after teleporting it will not immediately
+teleport back until it has left the target seam region. This closes a subtle A-to-B-to-A loop that
+bilinear filtering can otherwise create.
+
+The atlas resource binds the same seam map with both a linear and a point sampler. The region may
+be filtered; the discontinuous destination UV must be point sampled.
+
+## Remaining renderer-facing stage
+
+The remaining major rendering milestone is the live shell/material path.
+
+A DASHR-enabled polygon draw should use conservatively extruded shell geometry. Its fragment
+shader will:
+
+1. start from the interpolated surface coordinate,
+2. march the camera ray in object space,
+3. sample the edge-filled deformation atlas using the previous surface coordinate as the next
+   lookup seed,
+4. apply distortion damping when necessary,
+5. teleport at cooked UV seams,
+6. compare against the material height texture,
+7. refine the first crossing,
+8. discard escaped fragments without writing depth,
+9. write depth from the recovered displaced object-space position, and
+10. pass the recovered UV/normal into DVE's PBR material evaluation.
+
+The shadow caster must consume the same surface-hit contract so visual depth and shadow depth do
+not disagree.
+
+### Current integration blocker
+
+The existing live environment shaders predate production descriptor-set execution and use legacy
+global HLSL register ranges while the RHI records several bind groups. The Null-RHI tests validate
+orchestration, not actual shader descriptor execution. Before presenting DASHR as a Vulkan-live
+material, the shell shader should use an explicit descriptor-set contract (or the live environment
+binding scheme should be made explicit for all of its existing resources).
+
+That is an integration issue, not a DASHR-math issue. The deformation atlas, seam map, trace oracle,
+and bounded work contracts are now independent of it.
 
 ## Integration boundary
 

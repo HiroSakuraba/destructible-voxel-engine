@@ -117,6 +117,11 @@ struct alignas(16) GpuDashrShellConstants {
 };
 static_assert(sizeof(GpuDashrShellConstants) == 272U);
 
+struct DashrShellRetiredBindGroups {
+    rhi::FenceHandle fence{};
+    std::vector<rhi::BindGroupHandle> groups;
+};
+
 struct DashrShellRendererResources {
     rhi::BufferHandle constants;
     rhi::BindGroupLayoutHandle constantsLayout;
@@ -128,6 +133,7 @@ struct DashrShellRendererResources {
     rhi::GraphicsPipelineHandle pbrPipeline;
     std::size_t constantCapacity{};
     std::size_t constantStride{};
+    std::vector<DashrShellRetiredBindGroups> retiredBindGroups;
 
     [[nodiscard]] bool valid() const noexcept {
         return constants && constantsLayout && surfaceLayout && pipeline &&

@@ -157,20 +157,24 @@ DashrShellPixelOutput main(DashrShellPixelInput input) {
                 !teleportedThisStep && gLimits.y > 0U) {
                 TraceEvaluation low = previous;
                 TraceEvaluation high = current;
+                float lowDistance = previousDistance;
+                float highDistance = distance;
                 [loop]
                 for (uint refine = 0U; refine < 16U; ++refine) {
                     if (refine >= min(gLimits.y, 16U)) break;
-                    const float middleDistance = (low.objectPosition.x == low.objectPosition.x)
-                        ? (previousDistance + distance) * 0.5F : distance;
-                    const float2 middleSeed = (low.surfacePosition.xy + high.surfacePosition.xy) * 0.5F;
+                    const float middleDistance = (lowDistance + highDistance) * 0.5F;
+                    const float2 middleSeed =
+                        (low.surfacePosition.xy + high.surfacePosition.xy) * 0.5F;
                     TraceEvaluation middle = EvaluateTracePoint(
                         input.objectPosition, directionObject, middleDistance, middleSeed);
                     if (!middle.valid) break;
-                    if (middle.delta >= 0.0F) high = middle;
-                    else low = middle;
-                    // Preserve the actual interval for subsequent refinement.
-                    if (middle.delta >= 0.0F) distance = middleDistance;
-                    else previousDistance = middleDistance;
+                    if (middle.delta >= 0.0F) {
+                        high = middle;
+                        highDistance = middleDistance;
+                    } else {
+                        low = middle;
+                        lowDistance = middleDistance;
+                    }
                 }
                 finalHit = high;
             }

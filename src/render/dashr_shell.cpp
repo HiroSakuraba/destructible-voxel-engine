@@ -15,25 +15,25 @@ void set_error(std::string* error, std::string message) {
     if (error) *error = std::move(message);
 }
 
-Float3 sub(Float3 a, Float3 b) noexcept {
+Float3 shell_sub(Float3 a, Float3 b) noexcept {
     return {a.x-b.x,a.y-b.y,a.z-b.z};
 }
-Float3 add(Float3 a, Float3 b) noexcept {
+Float3 shell_add(Float3 a, Float3 b) noexcept {
     return {a.x+b.x,a.y+b.y,a.z+b.z};
 }
-Float3 mul(Float3 a, float s) noexcept {
+Float3 shell_mul(Float3 a, float s) noexcept {
     return {a.x*s,a.y*s,a.z*s};
 }
-float dot(Float3 a, Float3 b) noexcept {
+float shell_dot(Float3 a, Float3 b) noexcept {
     return a.x*b.x+a.y*b.y+a.z*b.z;
 }
-Float3 cross(Float3 a, Float3 b) noexcept {
+Float3 shell_cross(Float3 a, Float3 b) noexcept {
     return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
 }
-Float3 normalize(Float3 value) noexcept {
-    const float squared=dot(value,value);
+Float3 shell_normalize(Float3 value) noexcept {
+    const float squared=shell_dot(value,value);
     if (!(squared>kShellEpsilon*kShellEpsilon) || !std::isfinite(squared)) return {};
-    return mul(value,1.0F/std::sqrt(squared));
+    return shell_mul(value,1.0F/std::sqrt(squared));
 }
 
 std::size_t grown_capacity(std::size_t current, std::size_t required) noexcept {
@@ -89,8 +89,8 @@ std::optional<DashrShellMesh> build_dashr_shell_mesh(
             const std::uint32_t i1=asset.indices[index+1U];
             const std::uint32_t i2=asset.indices[index+2U];
             const Float3 p0=position(i0),p1=position(i1),p2=position(i2);
-            const Float3 n=normalize(cross(sub(p1,p0),sub(p2,p0)));
-            if(dot(n,n)<=kShellEpsilon) {
+            const Float3 n=shell_normalize(shell_cross(shell_sub(p1,p0),shell_sub(p2,p0)));
+            if(shell_dot(n,n)<=kShellEpsilon) {
                 ++result.stats.degenerateTrianglesSkipped;
                 continue;
             }
@@ -102,12 +102,12 @@ std::optional<DashrShellMesh> build_dashr_shell_mesh(
             const auto emit=[&](Float3 p,Float2 uv) {
                 result.vertices.push_back({p.x,p.y,p.z,uv.x,uv.y});
             };
-            emit(add(p0,mul(n,maximumExtrusion)),uv0);
-            emit(add(p1,mul(n,maximumExtrusion)),uv1);
-            emit(add(p2,mul(n,maximumExtrusion)),uv2);
-            emit(add(p0,mul(n,minimumExtrusion)),uv0);
-            emit(add(p1,mul(n,minimumExtrusion)),uv1);
-            emit(add(p2,mul(n,minimumExtrusion)),uv2);
+            emit(shell_add(p0,shell_mul(n,maximumExtrusion)),uv0);
+            emit(shell_add(p1,shell_mul(n,maximumExtrusion)),uv1);
+            emit(shell_add(p2,shell_mul(n,maximumExtrusion)),uv2);
+            emit(shell_add(p0,shell_mul(n,minimumExtrusion)),uv0);
+            emit(shell_add(p1,shell_mul(n,minimumExtrusion)),uv1);
+            emit(shell_add(p2,shell_mul(n,minimumExtrusion)),uv2);
 
             const std::uint32_t local[]{
                 0,1,2, 5,4,3,

@@ -1,5 +1,7 @@
 #include "dve/editor_document.hpp"
 
+#include <unordered_map>
+
 #include <algorithm>
 #include <charconv>
 #include <fstream>
@@ -203,6 +205,34 @@ std::vector<EditorObjectId> EditorDocument::root_objects() const {
 std::vector<EditorObjectId> EditorDocument::children_of(EditorObjectId parent) const {
     std::vector<EditorObjectId> result;
     for (const auto& [id, object] : objects_) if (object.parent == parent) result.push_back(id);
+    return result;
+}
+
+std::vector<EditorObjectId> EditorDocument::hierarchy_preorder() const {
+    // objects_ is id-ordered, so bucketing children in iteration order keeps siblings
+    // in id order, matching children_of(). Parents that do not exist are skipped just
+    // like the recursive walk (such children are unreachable from any root).
+    std::unordered_map<EditorObjectId, std::vector<EditorObjectId>> children;
+    children.reserve(objects_.size());
+    std::vector<EditorObjectId> roots;
+    for (const auto& [id, object] : objects_) {
+        if (object.parent) children[*object.parent].push_back(id);
+        else roots.push_back(id);
+    }
+    std::vector<EditorObjectId> result;
+    result.reserve(objects_.size());
+    std::vector<EditorObjectId> stack;
+    for (auto root = roots.rbegin(); root != roots.rend(); ++root) stack.push_back(*root);
+    while (!stack.empty()) {
+        const EditorObjectId id = stack.back();
+        stack.pop_back();
+        result.push_back(id);
+        // Guard against malformed cycles (validate() rejects them, but never loop forever).
+        if (result.size() > objects_.size()) break;
+        const auto it = children.find(id);
+        if (it == children.end()) continue;
+        for (auto child = it->second.rbegin(); child != it->second.rend(); ++child) stack.push_back(*child);
+    }
     return result;
 }
 

@@ -4,6 +4,7 @@
 #include "dve/print_export.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -5733,13 +5734,42 @@ CommandResult NativeEditorController::set_component_property_text_on_primary(
     return result;
 }
 
-EditorSelectionDiagnostics NativeEditorController::selection_diagnostics() const {
-    return analyze_editor_selection(workspace_.document(), materials_, workspace_.selected_objects());
+std::uint64_t NativeEditorController::material_density_fingerprint() const noexcept {
+    // Diagnostics read material densities; the library is small (tens of entries).
+    std::uint64_t h = 1469598103934665603ULL;
+    for (MaterialId id = 1; id != 0 && id <= materials_.next_available_id(); ++id) {
+        const EditorMaterialEntry* entry = materials_.find(id);
+        const std::uint64_t bits = entry == nullptr ? 0xFFFFFFFFULL
+            : std::bit_cast<std::uint32_t>(entry->definition.densityKilogramsPerCubicMeter);
+        h ^= (static_cast<std::uint64_t>(id) << 32U) ^ bits;
+        h *= 1099511628211ULL;
+    }
+    return h;
 }
 
-std::vector<EditorVoxelDrawItem> NativeEditorController::draw_items() const {
-    return build_voxel_draw_list(workspace_.document(), materials_, camera_, layout_.viewport,
-                                 viewportSettings_, workspace_.selected_objects());
+const EditorSelectionDiagnostics& NativeEditorController::selection_diagnostics() const {
+    const std::uint64_t key = editor_scene_render_fingerprint(workspace_.document()) * 31U ^
+                              editor_selection_fingerprint(workspace_.selected_objects()) * 17U ^
+                              material_density_fingerprint();
+    if (!selectionDiagnosticsValid_ || key != selectionDiagnosticsKey_) {
+        selectionDiagnostics_ = analyze_editor_selection(workspace_.document(), materials_, workspace_.selected_objects());
+        selectionDiagnosticsKey_ = key;
+        selectionDiagnosticsValid_ = true;
+        ++selectionDiagnosticsRebuilds_;
+    }
+    return selectionDiagnostics_;
+}
+
+const std::vector<EditorVoxelDrawItem>& NativeEditorController::draw_items() const {
+    return drawListCache_.get(workspace_.document(), materials_, camera_, layout_.viewport, viewportSettings_,
+                              workspace_.selected_objects(), editor_scene_render_fingerprint(workspace_.document()));
+}
+
+const std::vector<EditorVoxelDrawItem>& NativeEditorController::camera_preview_draw_items(
+    const EditorCamera& previewCamera, UiRect previewRect, const EditorViewportSettings& previewSettings) const {
+    return previewDrawListCache_.get(workspace_.document(), materials_, previewCamera, previewRect, previewSettings,
+                                     workspace_.selected_objects(),
+                                     editor_scene_render_fingerprint(workspace_.document()));
 }
 
 std::vector<EditorText3DDrawItem> NativeEditorController::text3d_draw_items() const {
@@ -5753,12 +5783,7 @@ std::vector<EditorGaborVolumeDrawItem> NativeEditorController::gabor_volume_draw
 }
 
 std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
-    std::vector<EditorObjectId> result;
-    const auto append = [&](const auto& self, EditorObjectId id, std::vector<EditorObjectId>& output) -> void {
-        output.push_back(id);
-        for (EditorObjectId child : workspace_.document().children_of(id)) self(self, child, output);
-    };
-    for (EditorObjectId root : workspace_.document().root_objects()) append(append, root, result);
+    std::vector<EditorObjectId> result = workspace_.document().hierarchy_preorder();  // O(n)
     if (hierarchyFilter_.empty()) return result;
     const std::string needle = lowercase(hierarchyFilter_);
     std::erase_if(result, [&](EditorObjectId id) {

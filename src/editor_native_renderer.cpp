@@ -2718,7 +2718,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
     }
 
-    const auto drawItems = controller.draw_items();
+    const auto& drawItems = controller.draw_items();
     for (const EditorVoxelDrawItem& item : drawItems) {
         const Float4 base = editor_material_display_color(controller.materials(), item.material);
         float shade = std::clamp(1.1F - item.depth * 0.018F, 0.42F, 1.0F);
@@ -3067,9 +3067,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             apply_camera_pose(previewCamera, rig->authoredPose);
             EditorViewportSettings previewSettings = controller.viewport_settings();
             previewSettings.maximumDrawVoxels = std::min<std::size_t>(previewSettings.maximumDrawVoxels, 25000U);
-            const auto previewItems = build_voxel_draw_list(controller.workspace().document(), controller.materials(),
-                                                            previewCamera, preview, previewSettings,
-                                                            controller.workspace().selected_objects());
+            const auto& previewItems = controller.camera_preview_draw_items(previewCamera, preview, previewSettings);
             for (const EditorVoxelDrawItem& item : previewItems) {
                 const Float4 base = editor_material_display_color(controller.materials(), item.material);
                 const float shade = std::clamp(1.08F - item.depth * 0.018F, 0.42F, 1.0F);
@@ -3300,7 +3298,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     painter.text(layout.inspector.x + 12, layout.inspector.y + 135,
                                  "Selection " + std::to_string(controller.workspace().selection_count()) +
                                  "   Axes " + (controller.transform_space() == EditorTransformSpace::World ? "World" : "Local"), text);
-                    const EditorSelectionDiagnostics diagnostics = controller.selection_diagnostics();
+                    const EditorSelectionDiagnostics& diagnostics = controller.selection_diagnostics();
                     painter.text(layout.inspector.x + 12, layout.inspector.y + 157,
                                  "Mass " + std::to_string(diagnostics.massKilograms).substr(0,8) + " kg", muted);
                     painter.text(layout.inspector.x + 12, layout.inspector.y + 179,
@@ -3411,7 +3409,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
         case BottomPanelTab::Profiler: {
             painter.text(layout.bottomPanel.x + 14, bottomY,
-                         "Draw items: " + std::to_string(controller.draw_items().size()) +
+                         "Draw items: " + std::to_string(controller.draw_item_count()) +
                          "   UI zoom: " + format_ui_zoom_percent(controller.effective_ui_zoom()), muted);
             break;
         }

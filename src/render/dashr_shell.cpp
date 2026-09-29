@@ -42,6 +42,38 @@ std::size_t grown_capacity(std::size_t current, std::size_t required) noexcept {
     return result;
 }
 
+bool destroy_bind_groups(rhi::IDevice& device,
+                         std::vector<rhi::BindGroupHandle>& groups,
+                         std::string* error) {
+    bool ok=true;
+    std::string local;
+    for(auto it=groups.rbegin();it!=groups.rend();++it) {
+        if(*it && !device.destroy_bind_group(*it,&local)) {
+            ok=false;
+            if(error&&error->empty())*error=local;
+            local.clear();
+        }
+    }
+    groups.clear();
+    return ok;
+}
+
+bool reap_completed_bind_groups(rhi::IDevice& device,
+                                DashrShellRendererResources& resources,
+                                std::string* error) {
+    bool ok=true;
+    for(auto it=resources.retiredBindGroups.begin();
+        it!=resources.retiredBindGroups.end();) {
+        if(!it->fence || device.fence_complete(it->fence)) {
+            if(!destroy_bind_groups(device,it->groups,error)) ok=false;
+            it=resources.retiredBindGroups.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return ok;
+}
+
 } // namespace
 
 std::optional<DashrShellMesh> build_dashr_shell_mesh(
@@ -300,6 +332,15 @@ bool create_dashr_shell_renderer(
 bool destroy_dashr_shell_renderer(
     rhi::IDevice& device,DashrShellRendererResources& r,std::string* error) {
     bool ok=true;std::string local;
+    for(auto& batch:r.retiredBindGroups) {
+        if(batch.fence&&!device.fence_complete(batch.fence)) {
+            if(!device.wait(batch.fence,&local)) {
+                ok=false;if(error&&error->empty())*error=local;local.clear();
+            }
+        }
+        if(!destroy_bind_groups(device,batch.groups,error)) ok=false;
+    }
+    r.retiredBindGroups.clear();
     auto destroy=[&](bool result){if(!result){ok=false;if(error&&error->empty())*error=local;}local.clear();};
     if(r.pbrPipeline)destroy(device.destroy_graphics_pipeline(r.pbrPipeline,&local));
     if(r.pipeline)destroy(device.destroy_graphics_pipeline(r.pipeline,&local));
@@ -317,6 +358,7 @@ bool record_dashr_shell_frame(
     const DashrShellFrameDesc& frame,DashrShellFrameStats& stats,
     rhi::FenceHandle* fence,std::string* error) {
     stats={};
+    if(!reap_completed_bind_groups(device,renderer,error)) return false;
     if(!renderer.valid()||!frame.colorTarget||!frame.depthTarget||
        frame.width==0U||frame.height==0U) {
         set_error(error,"DASHR shell frame is invalid");return false;
@@ -329,9 +371,7 @@ bool record_dashr_shell_frame(
     std::vector<rhi::BindGroupHandle> transient;
     transient.reserve(frame.draws.size()*5U);
     auto cleanup=[&](){
-        for(auto it=transient.rbegin();it!=transient.rend();++it)
-            if(*it)(void)device.destroy_bind_group(*it,nullptr);
-        transient.clear();
+        (void)destroy_bind_groups(device,transient,nullptr);
     };
     auto fail=[&](){cleanup();return false;};
 
@@ -526,8 +566,12 @@ bool record_dashr_shell_frame(
     if(!device.end_render_pass(commands,error))return fail();
     const auto submitted=device.submit(commands,error);
     if(!submitted)return fail();
-    cleanup();
     if(fence)*fence=submitted;
+    renderer.retiredBindGroups.push_back(
+        DashrShellRetiredBindGroups{submitted,std::move(transient)});
+    // Null RHI and already-completed Vulkan work can retire immediately; otherwise
+    // the batch remains owned by the renderer until a later frame or destruction.
+    if(!reap_completed_bind_groups(device,renderer,error)) return false;
     return true;
 }
 

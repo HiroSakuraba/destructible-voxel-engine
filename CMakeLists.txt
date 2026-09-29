@@ -128,6 +128,7 @@ add_library(dve_core
     src/game_ui_localization.cpp
     src/material_parameter_collection.cpp
     src/material_mapping.cpp
+    src/dashr_surface.cpp
     src/material_layers.cpp
     src/material_decal.cpp
     src/material_displacement.cpp
@@ -2284,6 +2285,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_material_mapping_tests tests/test_material_mapping.cpp)
     target_link_libraries(dve_material_mapping_tests PRIVATE dve::core)
     add_test(NAME dve_material_mapping_tests COMMAND dve_material_mapping_tests)
+
+    add_executable(dve_dashr_surface_tests tests/test_dashr_surface.cpp)
+    target_link_libraries(dve_dashr_surface_tests PRIVATE dve::core)
+    add_test(NAME dve_dashr_surface_tests COMMAND dve_dashr_surface_tests)
 
     add_executable(dve_material_layers_tests tests/test_material_layers.cpp)
     target_link_libraries(dve_material_layers_tests PRIVATE dve::core)

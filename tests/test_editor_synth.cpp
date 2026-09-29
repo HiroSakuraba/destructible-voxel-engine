@@ -353,8 +353,34 @@ int main() {
         require(controller.synthesizer().preset().midiLearn[0].enabled,
                 "MIDI learn mapping control did not update preset");
 
+        // Phase 6: patch-search browser panel wiring.
+        require(!controller.synth_panel().search_panel().open(), "search panel should start closed");
+        click(controller, panel.searchButton);
+        require(controller.synth_panel().search_panel().open(), "search button did not open the search panel");
+        {
+            const auto& searchLayout = controller.synth_panel().search_panel().layout();
+            require(searchLayout.panel.width > 0 && searchLayout.panel.height > 0,
+                    "search panel was not laid out on open");
+            // Clicking the search panel's own close button closes it (overlay consumes the click).
+            click(controller, searchLayout.closeButton);
+            require(!controller.synth_panel().search_panel().open(),
+                    "search panel close button did not close the panel");
+        }
+        click(controller, panel.searchButton);
+        require(controller.synth_panel().search_panel().open(), "search button did not reopen the search panel");
+        // Audition with no candidates must not crash or change the preset.
+        {
+            const auto beforePreset = controller.synthesizer().preset();
+            const auto& searchLayout = controller.synth_panel().search_panel().layout();
+            click(controller, searchLayout.auditionButton);
+            require(controller.synth_panel().search_panel().open(), "audition with no candidates closed the panel");
+            (void)beforePreset;
+        }
+
         require(controller.dispatch_action("window.toggle_synth"), "synth close action failed");
         require(!controller.synth_panel().open(), "synth panel did not close");
+        require(!controller.synth_panel().search_panel().open(),
+                "search panel stayed open after the synth panel closed");
         std::cout << "dve_editor_synth_tests: PASS\n";
         return 0;
     } catch (const std::exception& exception) {

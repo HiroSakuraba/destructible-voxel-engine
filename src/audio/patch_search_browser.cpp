@@ -412,8 +412,7 @@ bool PatchSearchBrowserPanel::pointer_down(int px, int py, audio::Synthesizer& s
                 const std::size_t index =
                     selected_ < session_.candidates.size() ? selected_ : session_.candidates.size() - 1;
                 if (auditionHook_) auditionHook_(synth, session_.candidates[index].preset);
-                status_ = "Auditioning: " + session_.candidates[index].label +
-                          " (PHASE6 STUB: live preset; evaluator wires in at merge)";
+                status_ = "Auditioning: " + session_.candidates[index].label;
             } else {
                 status_ = "No candidates to audition";
             }

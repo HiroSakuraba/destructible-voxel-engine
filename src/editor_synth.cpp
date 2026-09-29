@@ -48,6 +48,7 @@ audio::FilterOversampling cycle_oversampling(audio::FilterOversampling value, in
 void EditorSynthPanel::set_open(bool openValue, audio::Synthesizer& synth) noexcept {
     if (open_ && !openValue) release_panel_notes(synth);
     open_ = openValue;
+    if (!openValue) searchPanel_.set_open(false);
 }
 
 void EditorSynthPanel::set_preset_directory(std::filesystem::path directory) noexcept {
@@ -77,6 +78,7 @@ bool EditorSynthPanel::refresh_preset_library() noexcept {
 }
 
 void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
+    lastWidth_ = width; lastHeight_ = height; lastUiScale_ = uiScale;
     const int panelWidth = std::min(width - 24, std::max(940, static_cast<int>(1240.0F * uiScale)));
     const int panelHeight = std::min(height - 44, std::max(640, static_cast<int>(790.0F * uiScale)));
     layout_.panel = {(width - panelWidth) / 2, std::max(22, (height - panelHeight) / 2), panelWidth, panelHeight};
@@ -87,6 +89,14 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
     layout_.octaveDownButton = {layout_.panel.x + 116, layout_.panel.y + 43, 30, 24};
     layout_.octaveUpButton = {layout_.panel.x + 184, layout_.panel.y + 43, 30, 24};
     layout_.midiThruButton = {layout_.panel.x + 228, layout_.panel.y + 43, 106, 24};
+    layout_.searchButton = {layout_.panel.x + panelWidth - 266, layout_.panel.y + 5, 104, 24};
+    if (searchPanel_.open()) {
+        const int searchWidth = std::min(layout_.panel.width - 80, 560);
+        const int searchHeight = std::min(layout_.panel.height - 120, 430);
+        searchPanel_.resize(layout_.panel.x + (layout_.panel.width - searchWidth) / 2,
+                            layout_.panel.y + (layout_.panel.height - searchHeight) / 2,
+                            searchWidth, searchHeight);
+    }
 
     const int tabsLeft = layout_.panel.x + 344;
     const int tabWidth = std::max(80, (panelWidth - 356) / static_cast<int>(kSynthPanelPageCount));
@@ -888,6 +898,14 @@ bool EditorSynthPanel::pointer_move(int x, int y, audio::Synthesizer& synth) noe
 bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!open_ || !contains(layout_.panel, x, y)) return false;
     if (contains(layout_.closeButton, x, y)) { set_open(false, synth); return true; }
+    // Phase 6: the search browser is an overlay — it gets first refusal.
+    if (searchPanel_.open() && searchPanel_.pointer_down(x, y, synth)) return true;
+    if (contains(layout_.searchButton, x, y)) {
+        searchPanel_.toggle();
+        // Re-run layout so the overlay gets positioned on open.
+        resize(lastWidth_, lastHeight_, lastUiScale_);
+        return true;
+    }
     if (contains(layout_.panicButton, x, y)) { synth.all_notes_off(true); release_panel_notes(synth); return true; }
     if (contains(layout_.resetButton, x, y)) { synth.set_preset(audio::SynthPreset::make_default()); return true; }
     if (contains(layout_.octaveDownButton, x, y)) { octave_ = std::max(0, octave_ - 1); return true; }
@@ -1019,8 +1037,9 @@ bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noe
     return true;
 }
 
-bool EditorSynthPanel::pointer_up(int, int, audio::Synthesizer& synth) noexcept {
+bool EditorSynthPanel::pointer_up(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!open_) return false;
+    if (searchPanel_.open() && searchPanel_.pointer_up(x, y, synth)) return true;
     if (wavetableDrawing_) { wavetableDrawing_ = false; wavetableLastSample_ = -1; return true; }
     if (pointerNote_ < 0) return false;
     (void)synth.note_off(static_cast<std::uint8_t>(pointerNote_));

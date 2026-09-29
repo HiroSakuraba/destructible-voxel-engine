@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -854,6 +855,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
     painter.text(layout.closeButton.x + 7, layout.closeButton.y + 17, "X", text);
     painter.fill(layout.panicButton, rgb(104,48,42)); painter.outline(layout.panicButton, border);
     painter.text(layout.panicButton.x + 8, layout.panicButton.y + 17, "ALL NOTES OFF", text);
+    button(layout.searchButton, "SEARCH", controller.synth_panel().search_panel().open());
     button(layout.resetButton, "Reset preset"); button(layout.octaveDownButton, "-");
     painter.text(layout.octaveDownButton.x + 38, layout.octaveDownButton.y + 17,
                  "Oct " + std::to_string(controller.synth_panel().octave()), text);
@@ -1494,6 +1496,37 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
     }
     painter.text(layout.panel.x + 12, layout.panel.y + layout.panel.height - 9,
                  "Keys Z-M/Q-W | arrows octave | 1/3/4/5/6/7 pages | Ctrl+4 toggles", muted);
+
+    // Phase 6: patch-search browser overlay.
+    {
+        const auto& searchPanel = controller.synth_panel().search_panel();
+        if (searchPanel.open()) {
+            const auto& sl = searchPanel.layout();
+            const auto& session = searchPanel.session();
+            painter.fill(sl.panel, rgb(10, 14, 22)); painter.outline(sl.panel, accent);
+            painter.fill(sl.titleBar, rgb(27, 44, 67));
+            painter.text(sl.titleBar.x + 12, sl.titleBar.y + 23, "Patch Search - audio-to-synth", text);
+            button(sl.closeButton, "X");
+            painter.fill(sl.targetNameField, panel2); painter.outline(sl.targetNameField, border);
+            painter.text(sl.targetNameField.x + 7, sl.targetNameField.y + 18,
+                         session.targetName.empty() ? "(no target)" : session.targetName, text);
+            const std::size_t first = searchPanel.visible_first();
+            for (std::size_t r = 0; r < searchPanel.visible_count(); ++r) {
+                const auto& cand = session.candidates[first + r];
+                const bool selected = (first + r) == searchPanel.selected_candidate();
+                painter.fill(sl.candidateRows[r], selected ? rgb(39, 58, 82) : panel);
+                painter.outline(sl.candidateRows[r], selected ? accent : border);
+                char dist[32];
+                std::snprintf(dist, sizeof(dist), "%.4f", cand.distance);
+                painter.text(sl.candidateRows[r].x + 7, sl.candidateRows[r].y + 18,
+                             cand.label + "  (" + dist + ")", selected ? rgb(255, 255, 255) : text);
+            }
+            button(sl.pagePrevButton, "<"); button(sl.pageNextButton, ">");
+            painter.text(sl.pageLabel.x + 4, sl.pageLabel.y + 17, searchPanel.page_text(), muted);
+            button(sl.auditionButton, "AUDITION"); button(sl.promoteButton, "PROMOTE");
+            painter.text(sl.statusField.x + 7, sl.statusField.y + 18, std::string(searchPanel.status()), muted);
+        }
+    }
 }
 
 

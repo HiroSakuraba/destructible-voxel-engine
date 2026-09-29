@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 
+#include "dve/audio/patch_search_browser.hpp"
 #include "dve/audio/synthesizer.hpp"
 #include "dve/editor_viewport.hpp"
 
@@ -39,6 +40,7 @@ struct SynthPanelLayout {
     UiRect octaveDownButton{};
     UiRect octaveUpButton{};
     UiRect midiThruButton{};
+    UiRect searchButton{};  // Phase 6: toggles the patch-search browser panel
     std::array<UiRect, kSynthPanelPageCount> tabButtons{};
 
     std::array<UiRect, audio::kSynthOscillatorCount> oscillatorRows{};
@@ -115,6 +117,8 @@ public:
     [[nodiscard]] float preset_morph_amount() const noexcept { return presetMorphAmount_; }
     [[nodiscard]] std::string_view preset_status() const noexcept { return presetStatus_; }
     [[nodiscard]] const audio::SynthPresetLibrary& preset_library() const noexcept { return presetLibrary_; }
+    [[nodiscard]] PatchSearchBrowserPanel& search_panel() noexcept { return searchPanel_; }
+    [[nodiscard]] const PatchSearchBrowserPanel& search_panel() const noexcept { return searchPanel_; }
     [[nodiscard]] SynthPanelPage page() const noexcept { return page_; }
 
     void set_preset_directory(std::filesystem::path directory) noexcept;
@@ -169,6 +173,10 @@ private:
     std::optional<audio::SynthPreset> compareA_{};
     std::optional<audio::SynthPreset> compareB_{};
     float presetMorphAmount_{0.5F};
+    PatchSearchBrowserPanel searchPanel_;  // Phase 6: candidate browser overlay
+    int lastWidth_{1280};
+    int lastHeight_{800};
+    float lastUiScale_{1.0F};
 };
 
 } // namespace dve::editor

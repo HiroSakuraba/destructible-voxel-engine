@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "dve/audio/audio_features.hpp"
+#include "dve/audio/patch_search.hpp"
 #include "dve/audio/synthesizer.hpp"
 #include "dve/editor_viewport.hpp"
 
@@ -89,17 +90,35 @@ void sort_candidates(SearchSession& session);
 // Sorts best-first, then keeps only the first n (no-op when n >= size).
 void keep_top_n(SearchSession& session, std::size_t n);
 
-// ---------------------------------------------------------------------------
-// PHASE6 STUB — merge coordinator replaces with Worker B's offline render
-// evaluator (preset -> rendered AudioFeatureVector -> feature_distance()).
-//
-// Session/browser logic never depends on this function's internals: the
-// Search panel only routes through its audition hook, which defaults to this
-// stub. The stub makes the candidate the live preset so it can be played and
-// heard immediately; Worker B's evaluator will render it offline instead.
-// ---------------------------------------------------------------------------
+// Bridge from the evolutionary search (Worker C) to the browser: converts
+// ranked search results into labeled browser candidates, preserving order.
+// `ranked` is expected best-first, as evolutionary_patch_search() returns.
+[[nodiscard]] inline std::vector<BrowserCandidate> browser_candidates_from_ranked(
+    const std::vector<RankedPatch>& ranked, const std::string& labelPrefix = "candidate") {
+    std::vector<BrowserCandidate> out;
+    out.reserve(ranked.size());
+    for (std::size_t i = 0; i < ranked.size(); ++i) {
+        BrowserCandidate c;
+        c.preset = ranked[i].preset;
+        c.distance = ranked[i].distance;
+        c.label = labelPrefix + " " + std::to_string(i + 1);
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+// Default audition hook: makes the candidate the live preset so it can be
+// played and heard immediately through the normal synth path. A different
+// audition behavior (e.g. offline-render-then-play via the patch evaluator)
+// can be injected with PatchSearchBrowserPanel::set_audition_hook; session
+// and browser logic never depend on this function's internals.
+inline void audition_preset_live(Synthesizer& synth, const SynthPreset& preset) {
+    synth.set_preset(preset);
+}
+
+// Back-compat alias for the Phase 6 working name.
 inline void stub_audition_preset(Synthesizer& synth, const SynthPreset& preset) {
-    synth.set_preset(preset);  // PHASE6 STUB: live audition; replaced at merge
+    audition_preset_live(synth, preset);
 }
 
 }  // namespace dve::audio
@@ -111,7 +130,7 @@ namespace dve::editor {
 // layout, open/resize/pointer_down, button-driven, no text entry widgets):
 // target-name display field, candidate list showing label + distance,
 // Audition button (routes through the audition hook, defaulting to
-// audio::stub_audition_preset — marked PHASE6 STUB), Promote button
+// audio::audition_preset_live), Promote button
 // (audio::promote_candidate -> saved as .dvesynth and made the live preset).
 class PatchSearchBrowserPanel {
 public:
@@ -140,7 +159,7 @@ public:
     void set_target_name(std::string name);
 
     // Audition hook: invoked as hook(synth, selectedPreset) when the Audition
-    // button is clicked. Defaults to audio::stub_audition_preset.
+    // button is clicked. Defaults to audio::audition_preset_live.
     void set_audition_hook(std::function<void(audio::Synthesizer&, const audio::SynthPreset&)> hook) {
         auditionHook_ = std::move(hook);
     }
@@ -149,6 +168,16 @@ public:
     [[nodiscard]] std::string_view status() const noexcept { return status_; }
     [[nodiscard]] std::size_t selected_candidate() const noexcept { return selected_; }
     [[nodiscard]] const Layout& layout() const noexcept { return layout_; }
+    // Visible slice of candidates for the current page (for renderers).
+    [[nodiscard]] std::size_t visible_first() const noexcept { return page_first(); }
+    [[nodiscard]] std::size_t visible_count() const noexcept {
+        const std::size_t n = session_.candidates.size();
+        const std::size_t first = page_first();
+        return first >= n ? 0 : std::min(kVisibleCandidates, n - first);
+    }
+    [[nodiscard]] std::string page_text() const {
+        return std::to_string(page_ + 1) + "/" + std::to_string(page_count());
+    }
 
     // Positions the panel at (x, y) with the given size; recomputes rows.
     void resize(int x, int y, int width, int height) noexcept;
@@ -167,7 +196,7 @@ private:
     std::size_t selected_{0};
     std::size_t page_{0};
     std::function<void(audio::Synthesizer&, const audio::SynthPreset&)> auditionHook_{
-        audio::stub_audition_preset};
+        audio::audition_preset_live};
     std::filesystem::path promoteDirectory_{"assets/audio/presets/search"};
     std::string status_{"No search session loaded"};
 };

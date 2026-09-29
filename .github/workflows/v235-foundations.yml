@@ -94,8 +94,8 @@ jobs:
           dve_dashr_atlas_tests
           dve_rhi_vulkan
       - name: Run DASHR and MRT contracts
-        run: >-
-          ctest --test-dir build-dashr --output-on-failure
-          -R '^(dve_rhi_mrt_tests|dve_dashr_surface_tests|dve_dashr_seam_map_tests|dve_dashr_atlas_tests)
+        run: |
+          ctest --test-dir build-dashr --output-on-failure \
+            -R "^(dve_rhi_mrt_tests|dve_dashr_surface_tests|dve_dashr_seam_map_tests|dve_dashr_atlas_tests)$"
       - name: Validate DASHR shader inventory and contracts
         run: ./scripts/validate_shaders.sh

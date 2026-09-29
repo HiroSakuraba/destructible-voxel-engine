@@ -75,6 +75,8 @@ jobs:
             include/dve/dashr_surface.hpp
             include/dve/render/dashr_atlas.hpp
             include/dve/render/dashr_shell.hpp
+            include/dve/render/dashr_live_instance.hpp
+            include/dve/render/live_environment_renderer.hpp
             include/dve/render/main_material_table.hpp
             include/dve/rhi/device.hpp
             include/dve/rhi/null_device.hpp
@@ -93,6 +95,8 @@ jobs:
             src/dashr_surface.cpp
             src/render/dashr_atlas.cpp
             src/render/dashr_shell.cpp
+            src/render/dashr_live_instance.cpp
+            src/render/live_environment_renderer.cpp
             src/render/main_material_table.cpp
             src/rhi/null_device.cpp
             src/rhi/vulkan_device.cpp
@@ -100,6 +104,8 @@ jobs:
             tests/test_dashr_atlas.cpp
             tests/test_dashr_seam_map.cpp
             tests/test_dashr_shell.cpp
+            tests/test_dashr_live_instance.cpp
+            tests/test_dashr_live_renderer.cpp
             tests/test_dashr_surface.cpp
             tests/test_main_material_table.cpp
             tests/test_rhi_mrt.cpp
@@ -139,10 +145,12 @@ jobs:
           dve_dashr_seam_map_tests
           dve_dashr_atlas_tests
           dve_dashr_shell_tests
+          dve_dashr_live_instance_tests
+          dve_dashr_live_renderer_tests
           dve_rhi_vulkan
       - name: Run DASHR and MRT contracts
         run: |
           ctest --test-dir build-dashr --output-on-failure \
-            -R "^(dve_rhi_mrt_tests|dve_dashr_surface_tests|dve_dashr_seam_map_tests|dve_dashr_atlas_tests|dve_dashr_shell_tests)$"
+            -R "^(dve_rhi_mrt_tests|dve_dashr_surface_tests|dve_dashr_seam_map_tests|dve_dashr_atlas_tests|dve_dashr_shell_tests|dve_dashr_live_instance_tests|dve_dashr_live_renderer_tests)$"
       - name: Validate DASHR shader inventory and contracts
         run: ./scripts/validate_shaders.sh

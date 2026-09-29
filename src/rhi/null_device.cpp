@@ -84,6 +84,12 @@ std::optional<std::size_t> texture_subresource_offset(const TextureDesc& desc,
     if (offset > std::numeric_limits<std::size_t>::max()) return std::nullopt;
     return static_cast<std::size_t>(offset);
 }
+std::vector<TextureFormat> resolved_color_formats(const GraphicsPipelineDesc& desc) {
+    if (!desc.colorFormats.empty()) return desc.colorFormats;
+    if (desc.colorFormat) return {*desc.colorFormat};
+    return {};
+}
+
 }
 
 TextureFormatCapabilities NullDevice::texture_format_capabilities(TextureFormat format) const noexcept {
@@ -542,10 +548,14 @@ GraphicsPipelineHandle NullDevice::create_graphics_pipeline(const GraphicsPipeli
     if (!ready(error)) return {};
     if (!validate_vertex_input_layout(desc, error)) return {};
     const bool hasFragment = !desc.fragmentBytecode.empty() || !desc.fragmentEntryPoint.empty();
+    const auto colorFormats = resolved_color_formats(desc);
+    const bool invalidColor = colorFormats.size() > 4U ||
+        std::any_of(colorFormats.begin(), colorFormats.end(),
+                    [](TextureFormat format) { return format == TextureFormat::D32Float; });
     if (desc.vertexEntryPoint.empty() || desc.vertexBytecode.empty() ||
         (hasFragment && (desc.fragmentEntryPoint.empty() || desc.fragmentBytecode.empty())) ||
-        (!desc.colorFormat && !desc.depthFormat) || (desc.colorFormat && !hasFragment) ||
-        (desc.colorFormat && *desc.colorFormat == TextureFormat::D32Float) ||
+        (colorFormats.empty() && !desc.depthFormat) || (!colorFormats.empty() && !hasFragment) ||
+        invalidColor ||
         (desc.depthFormat && *desc.depthFormat != TextureFormat::D32Float)) {
         set_error(error, "graphics pipeline requires valid attachment formats and shader stages");
         return {};
@@ -575,8 +585,9 @@ CommandListHandle NullDevice::begin_commands(QueueKind queue, std::string_view d
     slot.renderPassOpen = false; slot.graphicsPipeline = {}; slot.vertexBuffer = {};
     slot.vertexOffset = 0U; slot.vertexStride = 0U; slot.indexBuffer = {}; slot.indexOffset = 0U;
     slot.indexFormat = IndexFormat::Uint32; slot.viewport = {}; slot.scissor = {};
-    slot.viewportSet = false; slot.scissorSet = false; slot.computeBindGroups.clear();
-    slot.graphicsBindGroups.clear();
+    slot.viewportSet = false; slot.scissorSet = false; slot.activeColorFormats.clear();
+    slot.activeDepthFormat.reset(); slot.activeDepthTexture = {};
+    slot.computeBindGroups.clear(); slot.graphicsBindGroups.clear();
     return {index, slot.generation};
 }
 bool NullDevice::copy_buffer(CommandListHandle commands, BufferHandle source, std::size_t sourceOffset,
@@ -634,6 +645,8 @@ bool NullDevice::begin_render_pass(CommandListHandle commands, const RenderPassD
         set_error(error, "render pass requires at least one attachment and at most four color attachments"); return false;
     }
     std::uint32_t width = 0U, height = 0U;
+    std::vector<TextureFormat> colorFormats;
+    colorFormats.reserve(desc.colors.size());
     for (const auto& attachment : desc.colors) {
         const auto* target = texture(attachment.texture, error); if (!target) return false;
         if (!has_usage(target->desc.usage, TextureUsage::RenderTarget)) {
@@ -646,6 +659,7 @@ bool NullDevice::begin_render_pass(CommandListHandle commands, const RenderPassD
         else if (width != target->desc.width || height != target->desc.height) {
             set_error(error, "render-pass attachment dimensions differ"); return false;
         }
+        colorFormats.push_back(target->desc.format);
     }
     if (desc.depth) {
         const auto* depth = texture(desc.depth->texture, error); if (!depth) return false;
@@ -664,7 +678,10 @@ bool NullDevice::begin_render_pass(CommandListHandle commands, const RenderPassD
     }
     list->renderPassOpen = true; list->graphicsPipeline = {}; list->vertexBuffer = {};
     list->indexBuffer = {}; list->viewportSet = false; list->scissorSet = false;
+    list->activeColorFormats = std::move(colorFormats);
     list->activeDepthTexture = desc.depth ? desc.depth->texture : TextureHandle{};
+    list->activeDepthFormat = desc.depth ? std::optional<TextureFormat>{TextureFormat::D32Float}
+                                         : std::nullopt;
     list->activePassWidth = width; list->activePassHeight = height;
     list->commands.emplace_back(BeginRenderPassCommand{desc});
     return true;
@@ -674,15 +691,23 @@ bool NullDevice::end_render_pass(CommandListHandle commands, std::string* error)
     auto* list = command_list(commands, error); if (!list) return false;
     if (!list->renderPassOpen) { set_error(error, "no render pass is open"); return false; }
     list->renderPassOpen = false;
-    list->activeDepthTexture = {}; list->activePassWidth = 0U; list->activePassHeight = 0U;
+    list->activeDepthTexture = {}; list->activeColorFormats.clear(); list->activeDepthFormat.reset();
+    list->activePassWidth = 0U; list->activePassHeight = 0U;
     list->commands.emplace_back(EndRenderPassCommand{});
     return true;
 }
 
 bool NullDevice::bind_graphics_pipeline(CommandListHandle commands, GraphicsPipelineHandle handle,
                                         std::string* error) {
-    auto* list = command_list(commands, error); if (!list || !graphics_pipeline(handle, error)) return false;
-    if (!list->renderPassOpen) { set_error(error, "graphics pipeline must be bound inside a render pass"); return false; }
+    auto* list = command_list(commands, error);
+    const auto* pipelineSlot = graphics_pipeline(handle, error);
+    if (!list || !pipelineSlot) return false;
+    if (!list->renderPassOpen ||
+        resolved_color_formats(pipelineSlot->desc) != list->activeColorFormats ||
+        pipelineSlot->desc.depthFormat != list->activeDepthFormat) {
+        set_error(error, "graphics pipeline is incompatible with the active render pass");
+        return false;
+    }
     list->graphicsPipeline = handle; return true;
 }
 

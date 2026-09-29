@@ -111,6 +111,109 @@ void test_explicit_image_sampler_bindings(){
             "sampler binding accepted a texture view");
 }
 
+dve::render::EnvironmentLightingGpuResources make_lighting(
+    dve::rhi::NullDevice& device,
+    std::string& error)
+{
+    dve::render::EnvironmentLightingGpuResources lighting;
+
+    dve::rhi::TextureDesc cube;
+    cube.dimension=dve::rhi::TextureDimension::TextureCube;
+    cube.format=dve::rhi::TextureFormat::RGBA16Float;
+    cube.width=4U;cube.height=4U;cube.arrayLayers=6U;
+    cube.usage=dve::rhi::TextureUsage::Sampled;
+    cube.initialState=dve::rhi::ResourceState::ShaderRead;
+
+    lighting.diffuseIrradiance=device.create_texture(cube,&error);
+    lighting.specularPrefilter=device.create_texture(cube,&error);
+    require(lighting.diffuseIrradiance&&lighting.specularPrefilter,error.c_str());
+
+    dve::rhi::TextureViewDesc cubeView;
+    cubeView.layerCount=6U;
+    cubeView.dimension=dve::rhi::TextureViewDimension::TextureCube;
+    cubeView.texture=lighting.diffuseIrradiance;
+    lighting.diffuseIrradianceView=device.create_texture_view(cubeView,&error);
+    cubeView.texture=lighting.specularPrefilter;
+    lighting.specularPrefilterView=device.create_texture_view(cubeView,&error);
+
+    dve::rhi::TextureDesc lut;
+    lut.format=dve::rhi::TextureFormat::RGBA16Float;
+    lut.width=4U;lut.height=4U;
+    lut.usage=dve::rhi::TextureUsage::Sampled;
+    lut.initialState=dve::rhi::ResourceState::ShaderRead;
+    lighting.brdfLut=device.create_texture(lut,&error);
+    require(lighting.brdfLut,error.c_str());
+    dve::rhi::TextureViewDesc lutView;
+    lutView.texture=lighting.brdfLut;
+    lighting.brdfLutView=device.create_texture_view(lutView,&error);
+
+    dve::rhi::SamplerDesc sampler;
+    sampler.addressU=sampler.addressV=sampler.addressW=dve::rhi::AddressMode::ClampToEdge;
+    lighting.sampler=device.create_sampler(sampler,&error);
+
+    dve::rhi::BindGroupLayoutDesc layout;
+    layout.bindings={
+        {0U,dve::rhi::BindingType::SampledTexture,dve::rhi::ShaderStage::Fragment},
+        {1U,dve::rhi::BindingType::SampledTexture,dve::rhi::ShaderStage::Fragment},
+        {2U,dve::rhi::BindingType::SampledTexture,dve::rhi::ShaderStage::Fragment},
+    };
+    lighting.bindGroupLayout=device.create_bind_group_layout(layout,&error);
+    dve::rhi::BindGroupDesc group;
+    group.layout=lighting.bindGroupLayout;
+    group.entries={
+        {0U,{},lighting.diffuseIrradianceView,0U,0U,lighting.sampler},
+        {1U,{},lighting.specularPrefilterView,0U,0U,lighting.sampler},
+        {2U,{},lighting.brdfLutView,0U,0U,lighting.sampler},
+    };
+    lighting.bindGroup=device.create_bind_group(group,&error);
+    lighting.specularMipLevels=1U;
+    require(lighting.valid(),error.c_str());
+    return lighting;
+}
+
+dve::render::CascadedShadowAtlasResources make_shadows(
+    dve::rhi::NullDevice& device,
+    std::string& error)
+{
+    dve::render::CascadedShadowAtlasResources shadows;
+    dve::rhi::TextureDesc depth;
+    depth.format=dve::rhi::TextureFormat::D32Float;
+    depth.width=16U;depth.height=16U;
+    depth.usage=dve::rhi::TextureUsage::Sampled|dve::rhi::TextureUsage::DepthStencil;
+    depth.initialState=dve::rhi::ResourceState::ShaderRead;
+
+    shadows.depthAtlas=device.create_texture(depth,&error);
+    shadows.dynamicDepthAtlas=device.create_texture(depth,&error);
+    dve::rhi::TextureViewDesc view;
+    view.texture=shadows.depthAtlas;
+    shadows.depthAtlasView=device.create_texture_view(view,&error);
+    view.texture=shadows.dynamicDepthAtlas;
+    shadows.dynamicDepthAtlasView=device.create_texture_view(view,&error);
+
+    dve::rhi::SamplerDesc comparison;
+    comparison.comparison=true;
+    comparison.addressU=comparison.addressV=comparison.addressW=
+        dve::rhi::AddressMode::ClampToEdge;
+    shadows.comparisonSampler=device.create_sampler(comparison,&error);
+
+    dve::rhi::BindGroupLayoutDesc layout;
+    layout.bindings={
+        {0U,dve::rhi::BindingType::SampledTexture,dve::rhi::ShaderStage::Fragment},
+        {1U,dve::rhi::BindingType::SampledTexture,dve::rhi::ShaderStage::Fragment},
+    };
+    shadows.bindGroupLayout=device.create_bind_group_layout(layout,&error);
+    dve::rhi::BindGroupDesc group;
+    group.layout=shadows.bindGroupLayout;
+    group.entries={
+        {0U,{},shadows.depthAtlasView,0U,0U,shadows.comparisonSampler},
+        {1U,{},shadows.dynamicDepthAtlasView,0U,0U,shadows.comparisonSampler},
+    };
+    shadows.bindGroup=device.create_bind_group(group,&error);
+    shadows.width=16U;shadows.height=16U;
+    require(shadows.valid(),error.c_str());
+    return shadows;
+}
+
 void test_shell_render_contract(){
     rhi::NullDevice device;
     std::string error;
@@ -205,6 +308,100 @@ void test_shell_render_contract(){
     require(destroy_dashr_atlas_resources(device,atlas,&error),error.c_str());
 }
 
+void test_shell_pbr_descriptor_contract(){
+    rhi::NullDevice device;
+    std::string error;
+    auto asset=make_triangle();
+
+    // Add a real height texture so the descriptor table exposes the same
+    // resolved image/sampler that DASHR uses for tracing.
+    asset.images.push_back({"height","image/raw",1U,1U,{128U,128U,128U,255U}});
+    asset.samplers.push_back({});
+    asset.textures.push_back({"height",0U,0U});
+    asset.materialBindings[0].height.texture=0U;
+    asset.contentHash=polygon_asset_content_hash(asset);
+
+    auto lighting=make_lighting(device,error);
+    auto shadows=make_shadows(device,error);
+
+    MainMaterialDescriptorTable materials(device);
+    require(materials.initialize(
+        shadows.depthAtlasView,shadows.dynamicDepthAtlasView,
+        shadows.comparisonSampler,&error),error.c_str());
+    require(materials.ensure_material(asset,0U,&error),error.c_str());
+    const auto* descriptor=materials.find(asset.contentHash,0U);
+    require(descriptor!=nullptr,"PBR material descriptor missing");
+
+    DashrSurfaceMeshMirror surfaceMirror(device);
+    require(surfaceMirror.upload(asset,{},nullptr,&error),error.c_str());
+    DashrAtlasResources atlas;
+    DashrAtlasShaderBytecode atlasBytecode{
+        {std::byte{1}},{std::byte{2}},{std::byte{3}}};
+    require(create_dashr_atlas_resources(device,atlasBytecode,64U,atlas,&error),error.c_str());
+    DashrAtlasUpdateStats atlasStats;
+    require(record_dashr_atlas_update(
+        device,atlas,surfaceMirror,asset,atlasStats,nullptr,&error),error.c_str());
+
+    DashrSurfaceSettings settings;
+    settings.heightScale=0.08F;
+    settings.envelopePadding=0.02F;
+    const auto shell=build_dashr_shell_mesh(asset,settings,{},&error);
+    require(shell.has_value(),error.c_str());
+    DashrShellMeshMirror shellMirror(device);
+    require(shellMirror.upload(*shell,&error),error.c_str());
+
+    DashrShellRendererResources renderer;
+    DashrShellShaderBytecode bytecode{
+        {std::byte{4}},{std::byte{5}},{std::byte{6}}};
+    require(create_dashr_shell_renderer(
+        device,bytecode,rhi::TextureFormat::RGBA8Unorm,4096U,renderer,&error),
+        error.c_str());
+    require(renderer.pbr_valid(),"PBR shell pipeline was not published");
+
+    rhi::TextureDesc color;
+    color.width=64U;color.height=64U;color.format=rhi::TextureFormat::RGBA8Unorm;
+    color.usage=rhi::TextureUsage::RenderTarget;
+    color.initialState=rhi::ResourceState::RenderTarget;
+    const auto colorTarget=device.create_texture(color,&error);
+    rhi::TextureDesc depth=color;
+    depth.format=rhi::TextureFormat::D32Float;
+    depth.usage=rhi::TextureUsage::DepthStencil;
+    depth.initialState=rhi::ResourceState::DepthWrite;
+    const auto depthTarget=device.create_texture(depth,&error);
+    require(colorTarget&&depthTarget,error.c_str());
+
+    DashrShellDraw draw;
+    draw.shell=&shellMirror;
+    draw.atlas=&atlas;
+    draw.shellSubmeshIndex=0U;
+    draw.cameraObjectPosition={0.25F,0.25F,2.0F};
+    draw.cameraWorldPosition={0.25F,0.25F,2.0F};
+    draw.environmentParameters={0.0F,0.0F,0.0F,0.0F};
+    draw.heightUvScale={1.0F,1.0F};
+    draw.settings=settings;
+    draw.usePbr=true;
+    draw.material=descriptor;
+    draw.lighting=&lighting;
+    draw.shadows=&shadows;
+
+    DashrShellFrameDesc frame;
+    frame.colorTarget=colorTarget;frame.depthTarget=depthTarget;
+    frame.width=64U;frame.height=64U;frame.draws=std::span(&draw,1U);
+    DashrShellFrameStats stats;
+    require(record_dashr_shell_frame(
+        device,renderer,frame,stats,nullptr,&error),error.c_str());
+    require(stats.draws==1U&&stats.pbrDraws==1U&&stats.diagnosticDraws==0U,
+            "PBR shell draw counters are wrong");
+    require(stats.transientBindGroups==5U,
+            "PBR shell did not bind all five explicit descriptor sets");
+
+    require(destroy_dashr_shell_renderer(device,renderer,&error),error.c_str());
+    require(destroy_dashr_atlas_resources(device,atlas,&error),error.c_str());
+    materials.clear();
+    require(destroy_cascaded_shadow_atlas(device,shadows,&error),error.c_str());
+    require(destroy_environment_lighting(device,lighting,&error),error.c_str());
+}
+
 }
 
 int main(){
@@ -212,6 +409,7 @@ int main(){
         test_shell_geometry();
         test_explicit_image_sampler_bindings();
         test_shell_render_contract();
+        test_shell_pbr_descriptor_contract();
         std::cout<<"dve_dashr_shell_tests: PASS\n";
         return 0;
     }catch(const std::exception&e){

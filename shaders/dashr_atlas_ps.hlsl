@@ -5,6 +5,7 @@ struct DashrAtlasPixelInput {
     float3 row2 : TEXCOORD2;
     float3 objectAnchor : TEXCOORD3;
     float2 uv : TEXCOORD4;
+    float2 distortion : TEXCOORD5;
 };
 
 struct DashrAtlasPixelOutput {
@@ -16,19 +17,8 @@ struct DashrAtlasPixelOutput {
 
 DashrAtlasPixelOutput main(DashrAtlasPixelInput input) {
     DashrAtlasPixelOutput output;
-
-    // Because the mesh is rasterized in UV space, screen derivatives of UV and
-    // objectAnchor directly estimate the local deformation Jacobian. Dividing
-    // by the corresponding UV derivative normalizes an undeformed mapping to 1.
-    const float du = ddx(input.uv.x);
-    const float dv = ddy(input.uv.y);
-    const float distortionU = abs(du) > 1.0e-8F
-        ? dot(input.row0, ddx(input.objectAnchor)) / du : 1.0F;
-    const float distortionV = abs(dv) > 1.0e-8F
-        ? dot(input.row1, ddy(input.objectAnchor)) / dv : 1.0F;
-
-    output.row0AndDistortionU = float4(input.row0, distortionU);
-    output.row1AndDistortionV = float4(input.row1, distortionV);
+    output.row0AndDistortionU = float4(input.row0, input.distortion.x);
+    output.row1AndDistortionV = float4(input.row1, input.distortion.y);
     output.row2AndValidity = float4(input.row2, 1.0F);
     output.objectAnchorAndValidity = float4(input.objectAnchor, 1.0F);
     return output;

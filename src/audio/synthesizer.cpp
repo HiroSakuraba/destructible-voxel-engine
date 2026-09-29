@@ -4949,7 +4949,10 @@ SynthPreset SynthPreset::make_default() {
         OscillatorWaveform::Triangle, OscillatorWaveform::Organ, OscillatorWaveform::Noise, OscillatorWaveform::FoldedSine};
     const std::array<float, kSynthOscillatorCount> semitones{0.0F, 0.0F, -12.0F, -24.0F, 12.0F, 7.0F, 0.0F, 19.0F};
     const std::array<float, kSynthOscillatorCount> cents{-7.0F, 7.0F, 0.0F, 0.0F, 0.0F, -4.0F, 0.0F, 3.0F};
-    const std::array<float, kSynthOscillatorCount> gains{0.20F,0.18F,0.14F,0.08F,0.07F,0.06F,0.018F,0.04F};
+    // Sub-oscillator gains are kept ~15 dB below the fundamental so the
+    // stack voices the played MIDI note as the perceived fundamental
+    // (previously the -12/-24 subs dominated and A4 voiced ~110 Hz).
+    const std::array<float, kSynthOscillatorCount> gains{0.20F,0.18F,0.02F,0.01F,0.07F,0.06F,0.018F,0.04F};
     for (std::size_t i = 0; i < result.oscillators.size(); ++i) {
         auto& osc = result.oscillators[i];
         osc.waveform = waves[i]; osc.semitones = semitones[i]; osc.cents = cents[i]; osc.gain = gains[i];

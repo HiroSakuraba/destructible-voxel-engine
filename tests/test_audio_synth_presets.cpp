@@ -128,6 +128,18 @@ int main() {
             require(parsed.has_value(), "parse of serialized preset failed");
             require(parsed->name == preset.name, "round-trip changed preset name");
         }
+        // The default preset must obey the same pitch rule: the octave-flat
+        // voicing bug was found in make_default(), so it is checked directly.
+        {
+            const auto defAudio = render_preset(SynthPreset::make_default(), 69);
+            for (float s : defAudio) require(std::isfinite(s), "default preset non-finite");
+            const double eSub = band_energy_fft(defAudio, 180.0, 260.0, 48000.0);
+            const double eFund = band_energy_fft(defAudio, 400.0, 480.0, 48000.0);
+            const double eOct = band_energy_fft(defAudio, 840.0, 920.0, 48000.0);
+            require(eFund > 1.5 * eSub && eFund > eOct,
+                    "fundamental region not dominant in default preset");
+            std::cout << "default preset: fundamental dominant OK\n";
+        }
         std::cout << "preset render/pitch/round-trip: ALL PASS\n";
         return 0;
     } catch (const std::exception& e) {

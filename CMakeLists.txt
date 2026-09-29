@@ -291,6 +291,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/spectral.cpp  # Phase 5: spectral resynthesis oscillator (SYN-015)
         src/audio/spectral_profiler.cpp  # Phase 5: spectral CPU budgeting (SYN-015)
         src/audio/audio_features.cpp  # Phase 6: audio-to-synth feature extractor (SYN-016)
+        src/audio/patch_evaluator.cpp  # Phase 6: offline render evaluator (SYN-016)
         src/audio/wavetable.cpp
         src/audio/wavetable_builder.cpp
         src/audio/physics_modulation.cpp
@@ -1706,6 +1707,9 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_audio_synth_tests PRIVATE dve::audio_synth)
         target_compile_definitions(dve_audio_synth_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME dve_audio_synth_tests COMMAND dve_audio_synth_tests)
+        add_executable(dve_patch_evaluator_tests tests/test_patch_evaluator.cpp)
+        target_link_libraries(dve_patch_evaluator_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_patch_evaluator_tests COMMAND dve_patch_evaluator_tests)
         add_executable(dve_audio_synth_preset_tests tests/test_audio_synth_presets.cpp)
         target_link_libraries(dve_audio_synth_preset_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_preset_tests COMMAND dve_audio_synth_preset_tests)

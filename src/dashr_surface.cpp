@@ -239,7 +239,7 @@ float dashr_map_height(
     const DashrSurfaceSettings& settings) noexcept {
     const float height = finite(normalizedHeight) ? saturate(normalizedHeight)
                                                   : settings.heightReferencePlane;
-    return settings.heightReferencePlane +
+    return 0.5F +
            (height - settings.heightReferencePlane) * settings.heightScale +
            settings.heightOffset;
 }

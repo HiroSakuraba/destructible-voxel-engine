@@ -257,6 +257,7 @@ inline constexpr ShaderStageFlagBits ShaderStageVertexBit = 0x00000001U;
 inline constexpr ShaderStageFlagBits ShaderStageFragmentBit = 0x00000010U;
 inline constexpr ShaderStageFlagBits ShaderStageComputeBit = 0x00000020U;
 inline constexpr ComponentSwizzle ComponentSwizzleIdentity = 0;
+inline constexpr DescriptorType DescriptorTypeSampler = 0;
 inline constexpr DescriptorType DescriptorTypeCombinedImageSampler = 1;
 inline constexpr DescriptorType DescriptorTypeSampledImage = 2;
 inline constexpr DescriptorType DescriptorTypeStorageImage = 3;

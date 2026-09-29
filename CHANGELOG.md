@@ -1,3 +1,25 @@
+# Unreleased — DASHR Surface-Space Heightfield Port
+
+- Added a native C++23 DASHR surface-space reference layer for animated/skinned heightfield rendering,
+  including non-orthonormal object-to-surface frames, distortion-aware step damping, bounded object-space
+  ray marching, hit refinement, seam teleports, and destination-band anti-ping-pong behavior.
+- Added an atlas-specific scaled `dP/du` / `dP/dv` vertex stream with reusable GPU buffers and a
+  CPU-deformed update path; deformation ratios are measured against the rest surface instead of using
+  normalized lighting tangents.
+- Extended the RHI with backward-compatible four-target MRT pipelines/passes in Null RHI and Vulkan,
+  with ordered format compatibility, matching Vulkan render passes/framebuffers/blend attachments, and
+  focused MRT contract coverage.
+- Added a four-RGBA16F UV deformation-atlas pass, bounded two-pixel edge-fill compute pass, consumer
+  bindings, texture-state transitions, update telemetry, and deterministic atlas resource tests.
+- Added automatic seam-map cooking from duplicated manifold geometric edges with bidirectional,
+  inward-inset teleport destinations; open boundaries are ignored and non-manifold edge groups are
+  skipped conservatively.
+- Added matching HLSL surface-space/atlas math, shader inventory validation, RHI/Vulkan CI coverage,
+  deterministic surface/atlas/seam tests, and MIT-0 DASHR provenance without vendoring the upstream
+  DirectX demo framework or asset corpus.
+- The remaining major integration is the live extruded shell/material pass with authoritative
+  displaced depth, PBR shading at the recovered surface point, and matching shadow-caster tracing.
+
 # v2.35.3 — Composite Input and Rebinding Reliability
 
 - Added deterministic weighted 1D composite bindings for digital and analog controls, including

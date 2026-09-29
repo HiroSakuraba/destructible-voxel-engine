@@ -128,6 +128,8 @@ add_library(dve_core
     src/game_ui_localization.cpp
     src/material_parameter_collection.cpp
     src/material_mapping.cpp
+    src/dashr_surface.cpp
+    src/dashr_seam_map.cpp
     src/material_layers.cpp
     src/material_decal.cpp
     src/material_displacement.cpp
@@ -627,6 +629,8 @@ if(DVE_BUILD_RHI)
         src/render/brick_palette_gpu_resolve.cpp
         src/render/brickmap_rhi_mirror.cpp
         src/render/mesh_rhi_mirror.cpp
+        src/render/dashr_atlas.cpp
+        src/render/dashr_shell.cpp
         src/render/mesh_heap.cpp
         src/render/polygon_renderer.cpp
         src/render/sprite_renderer.cpp
@@ -2307,6 +2311,18 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     target_link_libraries(dve_material_mapping_tests PRIVATE dve::core)
     add_test(NAME dve_material_mapping_tests COMMAND dve_material_mapping_tests)
 
+    add_executable(dve_rhi_mrt_tests tests/test_rhi_mrt.cpp)
+    target_link_libraries(dve_rhi_mrt_tests PRIVATE dve::rhi)
+    add_test(NAME dve_rhi_mrt_tests COMMAND dve_rhi_mrt_tests)
+
+    add_executable(dve_dashr_surface_tests tests/test_dashr_surface.cpp)
+    target_link_libraries(dve_dashr_surface_tests PRIVATE dve::core)
+    add_test(NAME dve_dashr_surface_tests COMMAND dve_dashr_surface_tests)
+
+    add_executable(dve_dashr_seam_map_tests tests/test_dashr_seam_map.cpp)
+    target_link_libraries(dve_dashr_seam_map_tests PRIVATE dve::core)
+    add_test(NAME dve_dashr_seam_map_tests COMMAND dve_dashr_seam_map_tests)
+
     add_executable(dve_material_layers_tests tests/test_material_layers.cpp)
     target_link_libraries(dve_material_layers_tests PRIVATE dve::core)
     add_test(NAME dve_material_layers_tests COMMAND dve_material_layers_tests)
@@ -2380,6 +2396,14 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_live_environment_renderer_tests tests/test_live_environment_renderer.cpp)
     target_link_libraries(dve_live_environment_renderer_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_live_environment_renderer_tests COMMAND dve_live_environment_renderer_tests)
+
+    add_executable(dve_dashr_atlas_tests tests/test_dashr_atlas.cpp)
+    target_link_libraries(dve_dashr_atlas_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_dashr_atlas_tests COMMAND dve_dashr_atlas_tests)
+
+    add_executable(dve_dashr_shell_tests tests/test_dashr_shell.cpp)
+    target_link_libraries(dve_dashr_shell_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_dashr_shell_tests COMMAND dve_dashr_shell_tests)
     add_executable(dve_shadow_material_table_tests tests/test_shadow_material_table.cpp)
     target_link_libraries(dve_shadow_material_table_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_shadow_material_table_tests COMMAND dve_shadow_material_table_tests)

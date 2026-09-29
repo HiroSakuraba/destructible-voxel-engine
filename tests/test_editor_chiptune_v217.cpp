@@ -106,7 +106,9 @@ int main() {
         require(session.sfx_request().preset == dve::audio::ChipSfxPreset::Explosion,
                 "SFX preset selection did not update");
         const int expectedPianoMidi = (session.octave() + 1) * 12 + 5;
-        controller.pointer_down(PointerButton::Primary, layout.pianoKeys[5].x + 3, layout.pianoKeys[5].y + 3);
+        const auto pianoKey = controller.chiptune_panel().keyboard().key_rect(expectedPianoMidi);
+        require(pianoKey.has_value(), "SFX piano does not show the current octave");
+        controller.pointer_down(PointerButton::Primary, pianoKey->x + 3, pianoKey->y + pianoKey->height - 6);
         require(session.sfx_request().baseMidi == expectedPianoMidi,
                 "on-screen piano did not enter the SFX base note");
         controller.pointer_down(PointerButton::Primary, layout.applySfxButton.x + 3, layout.applySfxButton.y + 3);

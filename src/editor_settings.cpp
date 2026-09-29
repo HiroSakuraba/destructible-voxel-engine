@@ -479,6 +479,7 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
     const std::vector<SettingChoice> onOffQuality{{"low","Low"},{"medium","Medium"},{"high","High"},{"ultra","Ultra"}};
     add_all(result, {
         float_setting("editor.ui_scale","General","Interface","UI Zoom",1.0,1.0,2.0,0.25,"Zoom editor text and controls, 100-200% in 25% steps (Ctrl+= / Ctrl+- / Ctrl+0). Capped so the layout stays at least 640x480."),
+        enum_setting("editor.keyboard_keys","General","Interface","Keyboard Keys","25",{{"25","25 keys (2 octaves)"},{"37","37 keys (3 octaves)"},{"49","49 keys (4 octaves)"},{"61","61 keys (5 octaves)"},{"76","76 keys"},{"88","88 keys (A0-C8)"}},"On-screen piano size in the synth and chiptune editors. Narrow windows scroll the keys."),
         enum_setting("editor.theme","General","Interface","Theme","dark",{{"dark","Dark"},{"light","Light"},{"system","System"}},"Editor appearance."),
         integer_setting("editor.autosave_minutes","General","Files","Autosave Interval",5,1,120,1,"Minutes between recovery saves."),
         boolean_setting("editor.confirm_destructive","General","Safety","Confirm Destructive Actions",true,"Ask before replacing dirty scenes or quitting."),

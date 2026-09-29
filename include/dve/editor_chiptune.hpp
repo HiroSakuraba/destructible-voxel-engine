@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "dve/audio/chiptune_authoring.hpp"
+#include "dve/editor_piano_keyboard.hpp"
 #include "dve/editor_viewport.hpp"
 
 namespace dve::editor {
@@ -71,7 +72,8 @@ struct ChiptunePanelLayout {
     UiRect sfxPanUpButton{};
     UiRect applySfxButton{};
     UiRect auditionSfxButton{};
-    std::array<UiRect, 24> pianoKeys{};
+    // SFX-page piano; the key rects come from EditorChiptunePanel::keyboard().
+    UiRect pianoArea{};
 };
 
 class EditorChiptunePanel {
@@ -89,6 +91,14 @@ public:
     [[nodiscard]] const std::filesystem::path& document_path() const noexcept { return documentPath_; }
     [[nodiscard]] std::uint32_t first_visible_row() const noexcept { return firstVisibleRow_; }
     [[nodiscard]] std::uint32_t first_visible_order() const noexcept { return firstVisibleOrder_; }
+
+    // The piano follows the tracker octave ("[" / "]"), clamped to the key range.
+    [[nodiscard]] const PianoKeyboard& keyboard() const noexcept {
+        keyboard_.set_octave(session_.octave());
+        return keyboard_;
+    }
+    void set_keyboard_key_count(int count) noexcept;
+    bool pointer_wheel(float steps, int x, int y) noexcept;
 
     void set_document_path(std::filesystem::path path) noexcept;
     void resize(int width, int height, float uiScale = 1.0F) noexcept;
@@ -123,6 +133,7 @@ private:
     std::uint32_t firstVisibleOrder_{};
     bool envelopeDrawing_{};
     bool wavetableDrawing_{};
+    mutable PianoKeyboard keyboard_{};
 };
 
 [[nodiscard]] std::string chip_note_display(std::uint8_t note);

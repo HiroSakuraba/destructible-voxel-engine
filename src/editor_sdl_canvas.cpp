@@ -271,6 +271,13 @@ void SdlEditorCanvas::text(int x, int y, std::string_view value, EditorColor col
     if (magnification != 1) (void)SDL_SetRenderScale(impl_->renderer, 1.0F, 1.0F);
 }
 
+std::string_view SdlEditorCanvas::ellipsis() const {
+#if DVE_HAVE_SDL_TTF
+    if (impl_ && impl_->font != nullptr) return "\u2026";
+#endif
+    return "...";
+}
+
 int SdlEditorCanvas::text_width(std::string_view value) const {
     // Reported in logical pixels so layout code that measures text keeps working unchanged.
     const float scale = impl_ ? impl_->scale : 1.0F;

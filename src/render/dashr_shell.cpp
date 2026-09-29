@@ -605,7 +605,7 @@ bool record_dashr_shadow_frame(
     if(!renderer.valid()||!renderer.shadowPipeline||!frame.depthTarget||
        frame.viewport.width<=0.0F||frame.viewport.height<=0.0F||
        frame.scissor.width==0U||frame.scissor.height==0U||
-       !std::isfinite(frame.clearDepth)||frame.clearDepth<0.0F||frame.clearDepth>1.0F) {
+       !std::isfinite(frame.clearDepthValue)||frame.clearDepthValue<0.0F||frame.clearDepthValue>1.0F) {
         set_error(error,"DASHR shadow frame is invalid");
         return false;
     }
@@ -717,7 +717,7 @@ bool record_dashr_shadow_frame(
     rhi::RenderPassDesc pass;
     pass.debugName="DASHR displaced shadow depth";
     pass.depth=rhi::RenderPassDepthAttachment{
-        frame.depthTarget,frame.clearDepth,frame.clearDepth};
+        frame.depthTarget,frame.clearDepthTarget,frame.clearDepthValue};
     if(!device.begin_render_pass(commands,pass,error)||
        !device.bind_graphics_pipeline(commands,renderer.shadowPipeline,error)||
        !device.set_viewport(commands,frame.viewport,error)||

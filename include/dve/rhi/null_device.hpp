@@ -187,6 +187,8 @@ private:
         std::string debugName; std::vector<RecordedCommand> commands; std::uint32_t debugDepth{};
         bool renderPassOpen{};
         TextureHandle activeDepthTexture{};
+        std::vector<TextureFormat> activeColorFormats;
+        std::optional<TextureFormat> activeDepthFormat{};
         std::uint32_t activePassWidth{};
         std::uint32_t activePassHeight{};
         GraphicsPipelineHandle graphicsPipeline{};

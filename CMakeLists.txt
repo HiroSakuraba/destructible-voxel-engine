@@ -749,6 +749,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_ai_tools.cpp
         src/editor_settings.cpp
         src/editor_ui_zoom.cpp
+        src/editor_piano_keyboard.cpp
         src/editor_shortcuts.cpp
         src/editor_camera_sequencer.cpp
         src/editor_cinematic_camera.cpp

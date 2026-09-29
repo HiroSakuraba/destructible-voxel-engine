@@ -1,9 +1,14 @@
 cbuffer DashrShellConstants : register(b0, space0) {
     float4x4 gObjectToClip;
-    float4 gCameraAndHeightScale;
+    float4x4 gObjectToWorld;
+    float4 gCameraObjectAndHeightScale;
+    float4 gCameraWorldAndDebug;
+    float4 gEnvironmentParameters;
     float4 gHeightAndStep;
     float4 gDistortion;
-    float4 gMinimumStepAndDebug;
+    float4 gMinimumStepAndReserved;
+    float4 gHeightUvScaleOffset;
+    float4 gHeightUvRotation;
     uint4 gLimits;
 };
 

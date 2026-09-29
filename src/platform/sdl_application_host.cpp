@@ -319,6 +319,10 @@ bool SdlApplicationHost::poll_event(PlatformEvent& output) {
                 converted.type = EventType::PointerWheel;
                 converted.wheelX = event.wheel.x;
                 converted.wheelY = event.wheel.y;
+                // Pointer position at the time of the wheel event, so wheel hit-testing
+                // (menus, lists, panels) lands on the widget under the cursor.
+                converted.x = static_cast<int>(std::lround(event.wheel.mouse_x));
+                converted.y = static_cast<int>(std::lround(event.wheel.mouse_y));
                 converted.modifiers = modifiers_from_sdl(SDL_GetModState());
                 break;
             case SDL_EVENT_GAMEPAD_ADDED: {

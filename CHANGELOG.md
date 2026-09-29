@@ -1,3 +1,15 @@
+# Unreleased — DASHR Surface-Space Heightfield Port Foundation
+
+- Added a native C++23 DASHR surface-space reference layer for animated/skinned heightfield rendering,
+  including general non-orthonormal object-to-surface frames, distortion-aware step damping,
+  seam-teleport semantics, bounded ray marching, and hit refinement.
+- Added matching HLSL surface-space math and connected it to the shader validation closure without
+  importing the upstream DirectX demo framework or third-party assets.
+- Added deterministic tests for basis inversion, identity/distorted parameterizations, ray hits,
+  shell escape, UV-seam teleport, validation, and degenerate frames.
+- Added MIT-0 provenance plus an implementation note describing the next UV-atlas, edge-fill,
+  seam-map, live depth, and shadow integration stages.
+
 # v2.35.3 — Composite Input and Rebinding Reliability
 
 - Added deterministic weighted 1D composite bindings for digital and analog controls, including

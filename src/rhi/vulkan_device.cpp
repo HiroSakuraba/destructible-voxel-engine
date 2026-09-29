@@ -2677,10 +2677,11 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
                     clearValues[clearCount].depthStencil.stencil = 0U;
                     ++clearCount;
                 }
+                const vk::Rect2D renderArea{
+                    vk::Offset2D{0, 0}, vk::Extent2D{width, height}};
                 const vk::RenderPassBeginInfo passBegin{
-                    vk::StructureTypeRenderPassBeginInfo, nullptr, 0U, pass.renderPass,
-                    pass.framebuffer, {{0, 0}, {width, height}},
-                    clearCount, clearValues.data()};
+                    vk::StructureTypeRenderPassBeginInfo, nullptr, pass.renderPass,
+                    pass.framebuffer, renderArea, clearCount, clearValues.data()};
                 impl_->fn.cmdBeginRenderPass(native, &passBegin, vk::SubpassContentsInline);
                 nativePasses.push_back(std::move(pass));
                 nativePassOpen = true;

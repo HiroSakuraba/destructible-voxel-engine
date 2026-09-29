@@ -716,6 +716,75 @@
       ]
     },
     {
+      "name": "dashr_shell_shadow_ps",
+      "source": "dashr_shell_shadow_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "bindings": [
+        {
+          "name": "DashrShellConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b0, space0"
+        },
+        {
+          "name": "gDashrAtlas0",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t0, space1"
+        },
+        {
+          "name": "gDashrAtlas1",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t1, space1"
+        },
+        {
+          "name": "gDashrAtlas2",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t2, space1"
+        },
+        {
+          "name": "gDashrAtlas3",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t3, space1"
+        },
+        {
+          "name": "gDashrSeamMap",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t4, space1"
+        },
+        {
+          "name": "gDashrHeight",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t5, space1"
+        },
+        {
+          "name": "gDashrLinearClamp",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6, space1"
+        },
+        {
+          "name": "gDashrPointClamp",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7, space1"
+        },
+        {
+          "name": "gDashrHeightSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8, space1"
+        }
+      ]
+    },
+    {
       "name": "dashr_shell_vs",
       "source": "dashr_shell_vs.hlsl",
       "stage": "vertex",

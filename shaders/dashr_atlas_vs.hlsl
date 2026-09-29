@@ -1,8 +1,9 @@
 struct DashrAtlasVertexInput {
     float3 position : POSITION;
-    float3 normal : NORMAL;
-    float4 tangent : TANGENT;
-    float2 uv : TEXCOORD0;
+    float3 dPdu : TEXCOORD0;
+    float3 dPdv : TEXCOORD1;
+    float2 uv : TEXCOORD2;
+    float2 distortion : TEXCOORD3;
 };
 
 struct DashrAtlasVertexOutput {
@@ -12,39 +13,45 @@ struct DashrAtlasVertexOutput {
     float3 row2 : TEXCOORD2;
     float3 objectAnchor : TEXCOORD3;
     float2 uv : TEXCOORD4;
+    float2 distortion : TEXCOORD5;
 };
 
-float3x3 Inverse3x3(float3 a, float3 b, float3 c) {
-    const float3 crossBC = cross(b, c);
-    const float determinant = dot(a, crossBC);
+void InverseSurfaceBasis(float3 dPdu, float3 dPdv,
+                         out float3 row0, out float3 row1, out float3 row2) {
+    float3 normal = cross(dPdu, dPdv);
+    const float normalLengthSquared = dot(normal, normal);
+    if (normalLengthSquared <= 1.0e-12F) {
+        dPdu = float3(1.0F, 0.0F, 0.0F);
+        dPdv = float3(0.0F, 1.0F, 0.0F);
+        normal = float3(0.0F, 0.0F, 1.0F);
+    } else {
+        normal *= rsqrt(normalLengthSquared);
+    }
+
+    // objectFromSurface columns are the scaled UV derivatives plus a unit
+    // height normal. The reciprocal rows below preserve UV scale instead of
+    // treating the lighting tangent as one object-space unit per UV unit.
+    const float determinant = dot(dPdu, cross(dPdv, normal));
     if (abs(determinant) <= 1.0e-8F) {
-        return float3x3(1,0,0, 0,1,0, 0,0,1);
+        row0 = float3(1.0F, 0.0F, 0.0F);
+        row1 = float3(0.0F, 1.0F, 0.0F);
+        row2 = float3(0.0F, 0.0F, 1.0F);
+        return;
     }
     const float inverseDeterminant = rcp(determinant);
-    // Columns of objectFromSurface are tangent, bitangent, normal.
-    // Rows of the inverse are the reciprocal basis.
-    return float3x3(
-        crossBC * inverseDeterminant,
-        cross(c, a) * inverseDeterminant,
-        cross(a, b) * inverseDeterminant);
+    row0 = cross(dPdv, normal) * inverseDeterminant;
+    row1 = cross(normal, dPdu) * inverseDeterminant;
+    row2 = cross(dPdu, dPdv) * inverseDeterminant;
 }
 
 DashrAtlasVertexOutput main(DashrAtlasVertexInput input) {
     DashrAtlasVertexOutput output;
-    const float3 normal = normalize(input.normal);
-    const float3 tangent = normalize(input.tangent.xyz);
-    const float3 bitangent = normalize(cross(normal, tangent)) *
-                             (input.tangent.w < 0.0F ? -1.0F : 1.0F);
-    const float3x3 surfaceFromObject = Inverse3x3(tangent, bitangent, normal);
-
-    output.row0 = surfaceFromObject[0];
-    output.row1 = surfaceFromObject[1];
-    output.row2 = surfaceFromObject[2];
+    InverseSurfaceBasis(input.dPdu, input.dPdv, output.row0, output.row1, output.row2);
     output.objectAnchor = input.position;
     output.uv = input.uv;
+    output.distortion = input.distortion;
 
-    // UV atlas coordinates become raster coordinates. Flip Y to match the
-    // texture convention used by DVE's Vulkan path.
+    // Rasterize directly in the surface parameterization.
     output.position = float4(input.uv.x * 2.0F - 1.0F,
                              1.0F - input.uv.y * 2.0F,
                              0.0F, 1.0F);

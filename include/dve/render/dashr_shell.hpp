@@ -95,6 +95,7 @@ struct DashrShellShaderBytecode {
     // Optional production material fragment. The diagnostic fragment remains
     // useful for UV/step/seam visualization even when PBR is available.
     std::vector<std::byte> pbrFragment;
+    std::vector<std::byte> shadowFragment;
     [[nodiscard]] bool valid() const noexcept {
         return !vertex.empty() && !fragment.empty();
     }
@@ -131,6 +132,7 @@ struct DashrShellRendererResources {
     rhi::BindGroupLayoutHandle shadowLayout;
     rhi::GraphicsPipelineHandle pipeline;
     rhi::GraphicsPipelineHandle pbrPipeline;
+    rhi::GraphicsPipelineHandle shadowPipeline;
     std::size_t constantCapacity{};
     std::size_t constantStride{};
     std::vector<DashrShellRetiredBindGroups> retiredBindGroups;
@@ -207,6 +209,44 @@ struct DashrShellFrameStats {
     DashrShellRendererResources& renderer,
     const DashrShellFrameDesc& frame,
     DashrShellFrameStats& stats,
+    rhi::FenceHandle* fence = nullptr,
+    std::string* error = nullptr);
+
+struct DashrShadowDraw {
+    const DashrShellMeshMirror* shell{};
+    const DashrAtlasResources* atlas{};
+    rhi::TextureViewHandle heightView{};
+    rhi::SamplerHandle heightSampler{};
+    std::uint32_t shellSubmeshIndex{};
+    std::array<float, 16> objectToLightClip{
+        1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    Float3 lightRayDirectionObject{0.0F,0.0F,-1.0F};
+    Float2 heightUvScale{1.0F,1.0F};
+    Float2 heightUvOffset{};
+    float heightUvRotationRadians{};
+    DashrSurfaceSettings settings{};
+};
+
+struct DashrShadowFrameDesc {
+    rhi::TextureHandle depthTarget{};
+    rhi::Viewport viewport{};
+    rhi::ScissorRect scissor{};
+    bool clearDepth{};
+    float clearDepth{1.0F};
+    std::span<const DashrShadowDraw> draws;
+};
+
+struct DashrShadowFrameStats {
+    std::uint64_t draws{};
+    std::uint64_t shellTriangles{};
+    std::uint64_t transientBindGroups{};
+};
+
+[[nodiscard]] bool record_dashr_shadow_frame(
+    rhi::IDevice& device,
+    DashrShellRendererResources& renderer,
+    const DashrShadowFrameDesc& frame,
+    DashrShadowFrameStats& stats,
     rhi::FenceHandle* fence = nullptr,
     std::string* error = nullptr);
 

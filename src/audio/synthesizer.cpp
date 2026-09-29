@@ -1,4 +1,5 @@
 #include "dve/audio/synthesizer.hpp"
+
 #include "dve/audio/audio_asset.hpp"
 #include "dve/audio/wavetable.hpp"
 #include "dve/audio/physics_modulation.hpp"
@@ -22,8 +23,30 @@
 #include <type_traits>
 #include <utility>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
+
 namespace dve::audio {
 namespace {
+
+// Real-time denormal guard: sustained voices at low levels (decaying
+// envelopes, reverb/filter tails) generate denormal floats, and a single
+// denormal operand can stall the FPU for microseconds — the classic cause
+// of rare multi-millisecond spikes in an otherwise steady render. Enabling
+// flush-to-zero + denormals-are-zero for the render call removes the stall;
+// affected values are < 1.2e-38 (-758 dB), far below audibility and the
+// 1e-6 A/B tolerance. MXCSR is per-thread; the previous mode is restored
+// on exit so non-audio threads are untouched.
+struct DenormalGuard {
+#if defined(__x86_64__) || defined(_M_X64)
+    unsigned saved_;
+    DenormalGuard() noexcept : saved_(_mm_getcsr()) { _mm_setcsr(saved_ | 0x8040u); }
+    ~DenormalGuard() { _mm_setcsr(saved_); }
+#else
+    DenormalGuard() noexcept = default;
+#endif
+};
 
 constexpr float kPi = std::numbers::pi_v<float>;
 constexpr float kTwoPi = 2.0F * kPi;
@@ -780,6 +803,22 @@ struct Voice {
     std::array<std::array<float, 4>, kSynthOscillatorCount> auxiliaryPhases{};
     std::array<std::uint32_t, kSynthOscillatorCount> noiseState{};
     std::array<float, kSynthOscillatorCount> previousOscillatorSamples{};
+    // Perf: cached stereo-divergence detune ratios. divergence is a preset
+    // parameter, so the exp2() pair is recomputed only when it changes
+    // (per-voice cache also covers morph-driven changes).
+    std::array<float, kSynthOscillatorCount> divergenceRatioL{};
+    std::array<float, kSynthOscillatorCount> divergenceRatioR{};
+    std::array<float, kSynthOscillatorCount> divergencePhaseOffset{};
+    std::array<float, kSynthOscillatorCount> divergenceCached{};
+    // Perf: cached base frequency. tuned_frequency()'s exp2 argument is split
+    // into a per-block-constant base (everything but slow analog drift) and a
+    // tiny drift term applied via 2nd-order Taylor (|err| < 1e-12 relative).
+    // Key: (note, referenceHertz, baseSemitones). Falls back to the direct
+    // path when microtuning or exponential FM is active.
+    std::array<float, kSynthOscillatorCount> freqCache{};
+    std::array<float, kSynthOscillatorCount> freqCacheSemitones{};
+    std::uint8_t freqCacheNote{0xFF};
+    float freqCacheRefHertz{0.0F};
     std::array<float, kSynthOscillatorCount> subPhases{};
     std::array<float, kSynthOscillatorCount> samplePositions{};
     std::array<float, kSynthOscillatorCount> sampleMapPositions{};
@@ -3949,7 +3988,6 @@ struct Synthesizer::Impl {
             profilerVoicesRetired.fetch_add(1U, std::memory_order_relaxed);
             return {};
         }
-
         std::array<float, kSynthLfoCount> lfoValues{};
         for (std::size_t i = 0; i < lfoValues.size(); ++i) lfoValues[i] = advance_lfo(v, i);
         const ModulationValues mod = evaluate_modulation(v, amp, filterEnv, lfoValues);
@@ -3991,19 +4029,55 @@ struct Synthesizer::Impl {
             const std::uint32_t hash = static_cast<std::uint32_t>(v.age) * 0x9E3779B9U ^
                                        static_cast<std::uint32_t>(i + 1U) * 0x85EBCA6BU;
             const float staticDrift = (static_cast<float>(hash & 0xFFFFU) / 32767.5F - 1.0F) * 0.65F;
-            const float driftCents = parameters.tuning.analogDriftCents * (staticDrift + slowDrift);
-            const float additionalSemitones = parameters.tuning.transposeSemitones +
-                         (parameters.tuning.fineCents + driftCents) * 0.01F + osc.semitones +
+            // Perf: split semitones into a cacheable base (constant while pitch
+            // bend / modulation are idle) and the tiny slow-drift term.
+            const float baseSemitones = parameters.tuning.transposeSemitones +
+                         parameters.tuning.fineCents * 0.01F +
+                         parameters.tuning.analogDriftCents * staticDrift * 0.01F + osc.semitones +
                          osc.cents * 0.01F + bendSemitones + legacyModulation + mod.globalPitch + mod.pitch[i];
+            const float driftSemitones = parameters.tuning.analogDriftCents * slowDrift * 0.01F;
+            const float additionalSemitones = baseSemitones + driftSemitones;
             float note = static_cast<float>(v.note) + additionalSemitones;
             const float fmSource = source_sample(osc.frequencyModSource);
             if (osc.frequencyModMode == FrequencyModulationMode::Exponential)
                 note += fmSource * clampf(osc.frequencyModAmount, -4.0F, 4.0F) * 24.0F;
-            float frequency = tuned_frequency(v.note, note - static_cast<float>(v.note));
-            if (osc.frequencyModMode == FrequencyModulationMode::Linear)
-                frequency += fmSource * frequency * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
-            frequency = clampf(frequency, 0.1F, sampleRate * 0.45F);
-            const float increment = frequency / sampleRate;
+            float increment;
+            const bool useFreqCache = !parameters.microtuning.enabled &&
+                                      osc.frequencyModMode != FrequencyModulationMode::Exponential;
+            if (useFreqCache) {
+                if (v.freqCacheNote != v.note ||
+                    v.freqCacheRefHertz != parameters.tuning.referenceHertz ||
+                    v.freqCacheSemitones[i] != baseSemitones) {
+                    // Cache the clamped increment: saves a division per sample.
+                    const float clamped = clampf(tuned_frequency(v.note, baseSemitones),
+                                                 0.1F, sampleRate * 0.45F);
+                    v.freqCache[i] = clamped / sampleRate;
+                    v.freqCacheSemitones[i] = baseSemitones;
+                    v.freqCacheNote = v.note;
+                    v.freqCacheRefHertz = parameters.tuning.referenceHertz;
+                }
+                increment = v.freqCache[i];
+                // exp2(d/12) ~= 1 + y + y^2/2 with y = d*ln2/12; |d| <= 0.0035
+                // semitones here, so the truncation error is < 1e-12 relative.
+                // (x*1.0 is bit-identical, so skipping when y==0 is safe.)
+                const float y = driftSemitones * 0.057762265F;
+                if (y != 0.0F) increment *= 1.0F + y + y * y * 0.5F;
+                if (osc.frequencyModMode == FrequencyModulationMode::Linear) {
+                    increment *= 1.0F + fmSource * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
+                    // Re-clamp: FM can push a clamped base out of range (rare).
+                    increment = clampf(increment, 0.1F / sampleRate, 0.45F);
+                }
+            } else {
+                float frequency0 = tuned_frequency(v.note, note - static_cast<float>(v.note));
+                if (osc.frequencyModMode == FrequencyModulationMode::Linear)
+                    frequency0 += fmSource * frequency0 * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
+                frequency0 = clampf(frequency0, 0.1F, sampleRate * 0.45F);
+                increment = frequency0 / sampleRate;
+            }
+            // Reconstruct for the Sample/Sampler/Granular/Spectral/Physical
+            // branches below (one multiply; the common analog waveforms use
+            // `increment` directly).
+            const float frequency = increment * sampleRate;
 
             float pulseWidth = osc.pulseWidth + mod.pulseWidth[i];
             if (osc.pwmDepth > 0.0F && (osc.waveform == OscillatorWaveform::Pulse || osc.waveform == OscillatorWaveform::Square)) {
@@ -4108,12 +4182,20 @@ struct Synthesizer::Impl {
                 if (divergence > 0.001F) {
                     // Phase 1: true stereo divergence — render L/R with slight
                     // detune and phase offset for width without chorus.
-                    const float detuneCents = divergence * 8.0F; // up to 8 cents
-                    const float phaseOffset = divergence * 0.02F; // up to 2% phase
-                    const float incL = increment * std::exp2(detuneCents / 1200.0F);
-                    const float incR = increment * std::exp2(-detuneCents / 1200.0F);
+                    // Perf: the detune ratios depend only on the (preset-level)
+                    // divergence, so cache them per voice/osc and recompute
+                    // only on change; per sample this is then 2 multiplies.
+                    if (v.divergenceCached[i] != divergence) {
+                        v.divergenceCached[i] = divergence;
+                        const float detuneCents = divergence * 8.0F; // up to 8 cents
+                        v.divergenceRatioL[i] = std::exp2(detuneCents / 1200.0F);
+                        v.divergenceRatioR[i] = std::exp2(-detuneCents / 1200.0F);
+                        v.divergencePhaseOffset[i] = divergence * 0.02F; // up to 2% phase
+                    }
+                    const float incL = increment * v.divergenceRatioL[i];
+                    const float incR = increment * v.divergenceRatioR[i];
                     float phaseL = v.phases[i];
-                    float phaseR = wrap_phase(v.phases[i] + phaseOffset);
+                    float phaseR = wrap_phase(v.phases[i] + v.divergencePhaseOffset[i]);
                     auto auxL = v.auxiliaryPhases[i];
                     auto auxR = v.auxiliaryPhases[i];
                     std::uint32_t noiseL = v.noiseState[i];
@@ -7366,6 +7448,7 @@ void Synthesizer::render(std::span<float> interleavedStereo) noexcept {
 }
 void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     if (output == nullptr || frameCount == 0) return;
+    const DenormalGuard denormalGuard{};
     impl_->adopt_pending_sample_map();
     // Snapshot the audio-thread morph request (the conductor walk below also
     // writes these atomics; the drain sees a consistent snapshot).

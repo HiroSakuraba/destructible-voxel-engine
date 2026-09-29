@@ -117,6 +117,34 @@ void test_seam_teleport() {
     require(result.surfacePosition.x<0.5F, "trace did not remain on destination UV island");
 }
 
+void test_teleport_destination_band_does_not_ping_pong() {
+    DashrSurfaceSettings settings;
+    settings.heightScale=0.2F;
+    settings.envelopePadding=0.25F;
+    settings.stepSize=0.01F;
+    settings.maximumSteps=128U;
+    settings.maximumTeleports=2U;
+
+    const DashrSurfaceSampleFunction field=[](Float2 uv)->std::optional<DashrSurfaceSample>{
+        return plane_sample(uv, uv.x < 0.5F ? 0.5F : 0.0F);
+    };
+    const DashrHeightSampleFunction flat=[](Float2){return 0.5F;};
+    // Both sides deliberately report a positive seam region. Without the
+    // destination-band cooldown this alternates forever until TeleportLimit.
+    const DashrTeleportSampleFunction sticky=[](Float2 uv)
+        ->std::optional<DashrTeleportSample> {
+        return uv.x > 0.5F
+            ? DashrTeleportSample{{uv.x-0.5F,uv.y},1.0F,true}
+            : DashrTeleportSample{{uv.x+0.5F,uv.y},1.0F,true};
+    };
+
+    const auto result=trace_dashr_heightfield(
+        {0.8F,0.5F,0.10F},{0.0F,0.0F,-1.0F},{0.8F,0.5F},
+        settings,field,flat,sticky);
+    require(result.hit(), "destination seam band caused teleport ping-pong");
+    require(result.teleports==1U, "destination seam band retriggered teleport");
+}
+
 void test_validation_and_degenerate_basis() {
     DashrSurfaceSettings settings;
     std::string error;
@@ -137,6 +165,7 @@ int main() {
         test_distortion_damping();
         test_flat_trace_hit_and_escape();
         test_seam_teleport();
+        test_teleport_destination_band_does_not_ping_pong();
         test_validation_and_degenerate_basis();
         std::cout << "dve_dashr_surface_tests: PASS\n";
         return 0;

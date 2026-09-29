@@ -4,6 +4,8 @@
 #include <charconv>
 #include <cctype>
 #include <cmath>
+#include <fstream>
+#include <iterator>
 #include <iomanip>
 #include <set>
 #include <sstream>
@@ -428,6 +430,38 @@ bool EditorSettingsRegistry::parse_scope(SettingScope scope, std::string_view te
     return true;
 }
 
+bool EditorSettingsRegistry::save_scope_file(SettingScope scope, const std::filesystem::path& path,
+                                             std::string* error) const {
+    auto fail = [&](std::string message) { if (error) *error = std::move(message); return false; };
+    std::error_code ec;
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) return fail("could not create settings directory");
+    const std::filesystem::path temporary = path.string() + ".tmp";
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out) return fail("could not open temporary settings file");
+        out << serialize_scope(scope);
+        if (!out) return fail("could not write settings file");
+    }
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+        ec.clear();
+        std::filesystem::rename(temporary, path, ec);
+    }
+    if (ec) return fail("could not replace settings file");
+    return true;
+}
+
+bool EditorSettingsRegistry::load_scope_file(SettingScope scope, const std::filesystem::path& path,
+                                             std::string* error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { if (error) *error = "could not open settings file"; return false; }
+    const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    return parse_scope(scope, text, error);
+}
+
 std::string EditorSettingsRegistry::serialize_profile(std::string_view profileName,SettingScope scope) const {
     std::ostringstream out;out<<"DVE_SETTINGS_PROFILE 1 "<<std::quoted(std::string(profileName))<<' '<<setting_scope_name(scope)<<'\n';
     const auto& values=layer(scope);out<<"count "<<values.size()<<'\n';
@@ -444,7 +478,7 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
     EditorSettingsRegistry result;
     const std::vector<SettingChoice> onOffQuality{{"low","Low"},{"medium","Medium"},{"high","High"},{"ultra","Ultra"}};
     add_all(result, {
-        float_setting("editor.ui_scale","General","Interface","UI Scale",1.0,0.75,3.0,0.05,"Scale editor text and controls."),
+        float_setting("editor.ui_scale","General","Interface","UI Zoom",1.0,1.0,2.0,0.25,"Zoom editor text and controls, 100-200% in 25% steps (Ctrl+= / Ctrl+- / Ctrl+0). Capped so the layout stays at least 640x480."),
         enum_setting("editor.theme","General","Interface","Theme","dark",{{"dark","Dark"},{"light","Light"},{"system","System"}},"Editor appearance."),
         integer_setting("editor.autosave_minutes","General","Files","Autosave Interval",5,1,120,1,"Minutes between recovery saves."),
         boolean_setting("editor.confirm_destructive","General","Safety","Confirm Destructive Actions",true,"Ask before replacing dirty scenes or quitting."),

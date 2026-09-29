@@ -147,6 +147,10 @@ bool SDL_RenderFillRect(SDL_Renderer* renderer, const SDL_FRect*) { return rende
 bool SDL_RenderRect(SDL_Renderer* renderer, const SDL_FRect*) { return renderer != nullptr; }
 bool SDL_RenderLine(SDL_Renderer* renderer, float, float, float, float) { return renderer != nullptr; }
 bool SDL_RenderDebugText(SDL_Renderer* renderer, float, float, const char*) { return renderer != nullptr; }
+bool SDL_SetRenderScale(SDL_Renderer* renderer, float scaleX, float scaleY) { return renderer != nullptr && scaleX > 0.0F && scaleY > 0.0F; }
+SDL_Surface* SDL_RenderReadPixels(SDL_Renderer* renderer, const SDL_Rect*) { if (!renderer) return nullptr; return new SDL_Surface{1, 1}; }
+bool SDL_SaveBMP(SDL_Surface* surface, const char* file) { return surface != nullptr && file != nullptr; }
+void SDL_DestroySurface(SDL_Surface* surface) { delete surface; }
 
 SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID device, const SDL_AudioSpec* spec,
                                            SDL_AudioStreamCallback callback, void* userdata) {

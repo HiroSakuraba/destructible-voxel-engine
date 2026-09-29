@@ -1,4 +1,5 @@
 #include "dve/editor_native_renderer.hpp"
+#include "dve/editor_ui_zoom.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2645,7 +2646,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     painter.outline(layout.inspector, border);
     painter.outline(layout.bottomPanel, border);
 
-    const int desiredMenuWidth = std::max(70, static_cast<int>(78.0F * controller.workspace().preferences().uiScale));
+    const int desiredMenuWidth = 78;
     const int menuWidth = std::max(1, std::min(desiredMenuWidth, width / static_cast<int>(kMenuBarNames.size())));
     static constexpr std::array<std::string_view, 8> kCompactMenuNames{
         "File","Edit","New","View","Tools","Build","Win","Help"};
@@ -3411,7 +3412,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         case BottomPanelTab::Profiler: {
             painter.text(layout.bottomPanel.x + 14, bottomY,
                          "Draw items: " + std::to_string(controller.draw_items().size()) +
-                         "   UI scale: " + std::to_string(controller.workspace().preferences().uiScale).substr(0,4), muted);
+                         "   UI zoom: " + format_ui_zoom_percent(controller.effective_ui_zoom()), muted);
             break;
         }
         case BottomPanelTab::Assistant: {
@@ -3522,7 +3523,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const EditorStatusMessage& status = controller.status();
     painter.text(10, layout.statusBar.y + layout.statusBar.height - 6, status.text,
                  status.error ? rgb(255,105,105) : text);
-    const std::string scale = "UI " + std::to_string(controller.workspace().preferences().uiScale).substr(0,3) + "x" +
+    const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
                                "  Snap " + std::to_string(controller.workspace().preferences().translateSnapMeters).substr(0,5) + "m";
     painter.text(width - painter.text_width(scale) - 12, layout.statusBar.y + layout.statusBar.height - 6, scale, muted);
 
@@ -3575,7 +3576,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
 
     if (controller.context_menu().open) {
         const ContextMenuState& menu = controller.context_menu();
-        const int itemHeight = std::max(22, static_cast<int>(24.0F * controller.workspace().preferences().uiScale));
+        const int itemHeight = 24;
         const UiRect popup{menu.x, menu.y, 190, itemHeight * static_cast<int>(menu.items.size())};
         painter.fill(popup, panel2);
         painter.outline(popup, border);
@@ -3666,6 +3667,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             bool inherited = false;
             (void)controller.workspace().settings().value(definition.id, &source, &inherited);
             std::string valueText = setting_value_to_string(displayed);
+            if (definition.id == kUiZoomSettingId)
+                if (const auto* zoom = std::get_if<double>(&displayed))
+                {
+                    const float shown = snap_ui_zoom(static_cast<float>(*zoom));
+                    valueText = format_ui_zoom_percent(shown);
+                    if (shown > controller.ui_zoom_window_limit() + 1.0e-3F)
+                        valueText += "  (window fits " + format_ui_zoom_percent(controller.ui_zoom_window_limit()) + ")";
+                    valueText += "  Ctrl+= / Ctrl+- / Ctrl+0";
+                }
             if (controller.settings_panel().valueEditing &&
                 controller.settings_panel().valueEditId == definition.id)
                 valueText = controller.settings_panel().valueEditBuffer + "_";
@@ -3704,6 +3714,9 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             std::string details = "Default: " + setting_value_to_string(definition.defaultValue);
             if (definition.minimum) details += "  Min: " + std::to_string(*definition.minimum);
             if (definition.maximum) details += "  Max: " + std::to_string(*definition.maximum);
+            if (definition.id == kUiZoomSettingId)
+                details = "Default: 100%  Min: 100%  Max: 200%  Step: 25%  Current window allows up to " +
+                          format_ui_zoom_percent(controller.ui_zoom_window_limit());
             painter.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 68, details, muted);
             const SettingAvailability availability = controller.workspace().settings().availability(
                 definition.id, controller.settings_capabilities());

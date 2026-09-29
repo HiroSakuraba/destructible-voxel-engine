@@ -127,6 +127,7 @@ struct SDL_MouseButtonEvent {
 struct SDL_MouseWheelEvent {
     Uint32 type{}; Uint32 reserved{}; Uint64 timestamp{}; SDL_WindowID windowID{};
     float x{}; float y{};
+    float mouse_x{}; float mouse_y{};
 };
 struct SDL_WindowEvent {
     Uint32 type{}; Uint32 reserved{}; Uint64 timestamp{}; SDL_WindowID windowID{};
@@ -207,6 +208,12 @@ bool SDL_RenderFillRect(SDL_Renderer* renderer, const SDL_FRect* rect);
 bool SDL_RenderRect(SDL_Renderer* renderer, const SDL_FRect* rect);
 bool SDL_RenderLine(SDL_Renderer* renderer, float x1, float y1, float x2, float y2);
 bool SDL_RenderDebugText(SDL_Renderer* renderer, float x, float y, const char* str);
+bool SDL_SetRenderScale(SDL_Renderer* renderer, float scaleX, float scaleY);
+struct SDL_Rect { int x{}; int y{}; int w{}; int h{}; };
+struct SDL_Surface { int w{}; int h{}; };
+SDL_Surface* SDL_RenderReadPixels(SDL_Renderer* renderer, const SDL_Rect* rect);
+bool SDL_SaveBMP(SDL_Surface* surface, const char* file);
+void SDL_DestroySurface(SDL_Surface* surface);
 
 struct SDL_AudioStream;
 using SDL_AudioDeviceID = Uint32;

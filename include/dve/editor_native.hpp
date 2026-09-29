@@ -451,6 +451,20 @@ public:
     void open_shortcut_editor();
     void configure_ai_assistant(std::filesystem::path projectRoot = {});
     void configure_menu_state(std::filesystem::path path);
+    // User-scope settings persistence (e.g. <project>/.dve/user/editor_settings.txt). Loads the
+    // file if present; afterwards Settings > Apply and UI-zoom hotkeys save the User layer.
+    void configure_user_settings(std::filesystem::path path);
+    [[nodiscard]] const std::filesystem::path& user_settings_path() const noexcept { return userSettingsPath_; }
+    bool save_user_settings(std::string* error = nullptr) const;
+    // UI zoom (see dve/editor_ui_zoom.hpp). ui_zoom() is the requested, step-snapped value from
+    // the `editor.ui_scale` setting; effective_ui_zoom() additionally honours the window cap the
+    // host reported via set_ui_zoom_window_limit(). Hosts render with effective_ui_zoom().
+    [[nodiscard]] float ui_zoom() const noexcept;
+    [[nodiscard]] float effective_ui_zoom() const noexcept;
+    void set_ui_zoom_window_limit(float maximumZoom) noexcept;
+    [[nodiscard]] float ui_zoom_window_limit() const noexcept { return uiZoomWindowLimit_; }
+    bool set_ui_zoom(float requested);
+    bool step_ui_zoom(int direction);
     [[nodiscard]] bool create_text3d(std::filesystem::path fontPath, std::string text = "3D Text",
                                      Text3DCookOptions options = {});
     [[nodiscard]] bool create_gabor_volume(std::filesystem::path sourcePath = {});
@@ -574,6 +588,8 @@ private:
     std::set<std::string, std::less<>> favoriteCommandIds_;
     bool showAdvancedMenus_{};
     std::filesystem::path menuStatePath_;
+    std::filesystem::path userSettingsPath_;
+    float uiZoomWindowLimit_{2.0F};
     bool quitRequested_{};
     PendingDestructiveAction pendingDestructiveAction_{PendingDestructiveAction::Inactive};
     EditorStatusMessage status_{"Ready", false, 0.0F};

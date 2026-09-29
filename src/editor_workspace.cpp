@@ -1,4 +1,5 @@
 #include "dve/editor_workspace.hpp"
+#include "dve/editor_ui_zoom.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -35,7 +36,7 @@ std::map<std::string, std::string, std::less<>> parse_lines(std::string_view tex
 
 bool EditorPreferences::validate(std::string* error) const {
     auto fail = [&](std::string message) { if (error) *error = std::move(message); return false; };
-    if (!std::isfinite(uiScale) || uiScale < 0.75F || uiScale > 3.0F) return fail("UI scale must be between 0.75 and 3.0");
+    if (!std::isfinite(uiScale) || uiScale < kUiZoomMin || uiScale > kUiZoomMax) return fail("UI zoom must be between 1.0 and 2.0");
     if (!std::isfinite(cameraSpeed) || cameraSpeed <= 0.0F || cameraSpeed > 1000.0F) return fail("camera speed is invalid");
     if (!std::isfinite(mouseSensitivity) || mouseSensitivity <= 0.0F || mouseSensitivity > 20.0F) return fail("mouse sensitivity is invalid");
     if (autosaveMinutes == 0 || autosaveMinutes > 120) return fail("autosave interval must be 1 to 120 minutes");
@@ -89,6 +90,8 @@ std::optional<EditorPreferences> EditorPreferences::parse(std::string_view text,
         !readBool("highContrast", result.highContrast) || !readBool("reducedMotion", result.reducedMotion) ||
         !readBool("colorBlindSafeDiagnostics", result.colorBlindSafeDiagnostics) ||
         !readBool("confirmDestructiveActions", result.confirmDestructiveActions)) return fail("invalid preferences value");
+    // Files written before UI zoom used a free 0.75-3.0 scale; snap instead of rejecting them.
+    result.uiScale = snap_ui_zoom(result.uiScale);
     std::string validation;
     if (!result.validate(&validation)) return fail(validation);
     return result;
@@ -398,6 +401,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"camera.compare_graded","Camera","Compare Graded / Ungraded",""},
         {"camera.reset_preview","Camera","Reset Camera Preview Overrides",""},
         {"view.advanced_menus","View","Show Advanced Menu Commands",""},
+        {"view.ui_zoom_in","View","Zoom UI In","Ctrl+="}, {"view.ui_zoom_out","View","Zoom UI Out","Ctrl+-"},
+        {"view.ui_zoom_reset","View","Reset UI Zoom (100%)","Ctrl+0"},
         {"camera.mode_free","Camera","Free Fly",""}, {"camera.mode_orbit","Camera","Orbit",""},
         {"camera.mode_follow","Camera","Follow",""}, {"camera.mode_third_person","Camera","Third Person",""},
         {"camera.mode_first_person","Camera","First Person",""}, {"camera.mode_cinematic","Camera","Cinematic",""},
@@ -527,6 +532,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (std::string_view id : {"view.grid","view.collision","view.anchors","view.bounds","view.xray","view.statistics","view.safe_frames"})
         configure(id, "Overlays", 50, true);
     configure("view.advanced_menus", "Interface", 90, true);
+    configure("view.ui_zoom_in", "Interface", 91);
+    configure("view.ui_zoom_out", "Interface", 92);
+    configure("view.ui_zoom_reset", "Interface", 93);
     configure("view.top", "Projection", 20, true, "view.projection");
     configure("view.front", "Projection", 21, true, "view.projection");
     configure("view.side", "Projection", 22, true, "view.projection");
@@ -721,7 +729,7 @@ void EditorWorkspace::synchronize_preferences_from_settings() noexcept {
         if (const auto* boolean = std::get_if<bool>(&value)) return *boolean;
         return fallback;
     };
-    preferences_.uiScale = readFloat("editor.ui_scale", preferences_.uiScale);
+    preferences_.uiScale = snap_ui_zoom(readFloat(kUiZoomSettingId, preferences_.uiScale));
     preferences_.cameraSpeed = readFloat("camera.fly_speed", preferences_.cameraSpeed);
     preferences_.mouseSensitivity = readFloat("camera.mouse_sensitivity", preferences_.mouseSensitivity);
     preferences_.autosaveMinutes = readInteger("editor.autosave_minutes", preferences_.autosaveMinutes);

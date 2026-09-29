@@ -30,13 +30,14 @@ struct CookedWavetable {
 };
 
 // Builds a CookedWavetable from raw frames (each frame = kHQWavetableSamples).
-// Computes mip levels by progressive lowpass filtering.
+// Computes mip levels by brick-wall band-limiting with a radix-2 FFT
+// (one forward + one inverse per mip per frame; ~ms, not seconds).
 [[nodiscard]] CookedWavetable cook_wavetable(const std::string& name,
                                             const std::vector<std::vector<float>>& frames);
 
 // Realtime-friendly cook: writes into an existing table, reusing its sample
-// storage and the caller-owned DFT scratch buffers (spectrum must hold at
-// least kHQWavetableSamples/2+1 complex values; filtered/frameBuf at least
+// storage and the caller-owned FFT scratch buffers (spectrum is sized to
+// 2*kHQWavetableSamples complex values; filtered/frameBuf to
 // kHQWavetableSamples floats). Resizes only when a buffer is undersized, so
 // repeat cooks with pre-sized buffers perform no allocation. flatFrames is a
 // flat [nFrames x kHQWavetableSamples] array (nFrames <= kHQWavetableFrames).

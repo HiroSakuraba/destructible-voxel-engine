@@ -164,9 +164,11 @@ float sample_wavetable(const CookedWavetable& table, float phase, float position
                        std::size_t mip) noexcept {
     if (!table.valid()) return 0.0F;
 
-    // Wrap phase and position.
+    // Wrap phase (cyclic); clamp position to [0, 1] (first..last frame).
+    // Wrapping position would turn exactly 1.0 into frame 0 while 0.999 reads
+    // the last frame — an audible click on LFO->position sweeps and a wrong
+    // frame for a static 1.0. This matches the legacy fallback path.
     phase -= std::floor(phase);
-    position -= std::floor(position);
     position = std::clamp(position, 0.0F, 1.0F);
 
     // Frame interpolation (cubic across 4 frames).

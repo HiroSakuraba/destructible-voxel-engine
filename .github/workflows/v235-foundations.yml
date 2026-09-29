@@ -53,3 +53,47 @@ jobs:
         run: ./scripts/run_v235_foundation_tests.sh
       - name: Sanitized deterministic contract suite
         run: ./scripts/run_v235_foundation_tests.sh --sanitize
+
+  dashr-render-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure DASHR render contracts
+        run: >-
+          cmake -S . -B build-dashr -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DDVE_BUILD_TESTS=ON
+          -DDVE_BUILD_BENCHMARK=OFF
+          -DDVE_BUILD_ASSET_COOKER=OFF
+          -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF
+          -DDVE_BUILD_EDITOR=OFF
+          -DDVE_BUILD_NATIVE_EDITOR=OFF
+          -DDVE_BUILD_PLATFORM=OFF
+          -DDVE_BUILD_RHI=ON
+          -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF
+          -DDVE_BUILD_AUDIO_SYNTH=OFF
+          -DDVE_BUILD_LEGACY_X11_HOST=OFF
+          -DDVE_ENABLE_SDL3_HOST=OFF
+          -DDVE_ENABLE_VULKAN_BUFFER_BACKEND=ON
+          -DDVE_ENABLE_FLUODDITY=OFF
+          -DDVE_ENABLE_SOFT_BODIES=OFF
+          -DDVE_ENABLE_CPU_HAIR=OFF
+          -DDVE_ENABLE_VFX_PARTICLES=OFF
+          -DDVE_ENABLE_PBF_LIQUID=OFF
+          -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF
+          -DDVE_ENABLE_BSPLINE_CLOTH=OFF
+          -DDVE_ENABLE_GRID_FLUIDS=OFF
+          -DDVE_ENABLE_FLIP_LIQUIDS=OFF
+      - name: Build DASHR and MRT contracts
+        run: >-
+          cmake --build build-dashr --parallel 2 --target
+          dve_rhi_mrt_tests
+          dve_dashr_surface_tests
+          dve_dashr_seam_map_tests
+          dve_dashr_atlas_tests
+          dve_rhi_vulkan
+      - name: Run DASHR and MRT contracts
+        run: >-
+          ctest --test-dir build-dashr --output-on-failure
+          -R '^(dve_rhi_mrt_tests|dve_dashr_surface_tests|dve_dashr_seam_map_tests|dve_dashr_atlas_tests)$'

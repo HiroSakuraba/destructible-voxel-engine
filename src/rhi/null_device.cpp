@@ -495,25 +495,35 @@ BindGroupHandle NullDevice::create_bind_group(const BindGroupDesc& desc, std::st
             break;
         }
         case BindingType::SampledTexture:
+        case BindingType::SampledImage:
         case BindingType::StorageTexture: {
             auto* view = texture_view(entry.textureView, error); if (!view) return {};
             if (entry.buffer) { set_error(error, "texture binding also supplied a buffer"); return {}; }
             const auto* resource = texture(view->desc.texture, error); if (!resource) return {};
-            const TextureUsage required = bindingIt->type == BindingType::SampledTexture
-                                              ? TextureUsage::Sampled : TextureUsage::Storage;
+            const bool storage = bindingIt->type == BindingType::StorageTexture;
+            const TextureUsage required = storage ? TextureUsage::Storage : TextureUsage::Sampled;
             if (!has_usage(resource->desc.usage, required)) {
-                set_error(error, bindingIt->type == BindingType::SampledTexture
-                                     ? "sampled binding requires Sampled texture usage"
-                                     : "storage binding requires Storage texture usage");
+                set_error(error, storage
+                    ? "storage binding requires Storage texture usage"
+                    : "sampled binding requires Sampled texture usage");
                 return {};
             }
             if (bindingIt->type == BindingType::SampledTexture) {
                 if (!sampler(entry.sampler, error)) return {};
             } else if (entry.sampler) {
-                set_error(error, "storage texture binding cannot include a sampler"); return {};
+                set_error(error, bindingIt->type == BindingType::SampledImage
+                    ? "sampled-image binding cannot include a sampler"
+                    : "storage texture binding cannot include a sampler");
+                return {};
             }
             break;
         }
+        case BindingType::Sampler:
+            if (entry.buffer || entry.textureView || !sampler(entry.sampler, error)) {
+                set_error(error, "sampler binding must contain only a sampler");
+                return {};
+            }
+            break;
         }
     }
     const auto index = allocate_slot(bindGroups_); auto& slot = bindGroups_[index];

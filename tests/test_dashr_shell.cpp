@@ -255,7 +255,8 @@ void test_shell_render_contract(){
     require(heightSampler,error.c_str());
 
     DashrShellRendererResources renderer;
-    DashrShellShaderBytecode shellBytecode{{std::byte{4}},{std::byte{5}}};
+    DashrShellShaderBytecode shellBytecode{
+        {std::byte{4}},{std::byte{5}},{},{std::byte{6}}};
     require(create_dashr_shell_renderer(
         device,shellBytecode,rhi::TextureFormat::RGBA8Unorm,4096U,renderer,&error),
         error.c_str());
@@ -303,6 +304,42 @@ void test_shell_render_contract(){
             "shell frame did not execute one load-preserving pass");
     require(after.indexedDrawsExecuted==before.indexedDrawsExecuted+1U,
             "shell frame did not execute its indexed prism draw");
+
+    rhi::TextureDesc shadowDepthDesc=depth;
+    shadowDepthDesc.width=48U;
+    shadowDepthDesc.height=48U;
+    shadowDepthDesc.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::CopySource;
+    shadowDepthDesc.initialState=rhi::ResourceState::DepthWrite;
+    const auto shadowDepth=device.create_texture(shadowDepthDesc,&error);
+    require(shadowDepth,error.c_str());
+
+    DashrShadowDraw shadowDraw;
+    shadowDraw.shell=&shellMirror;
+    shadowDraw.atlas=&atlas;
+    shadowDraw.heightView=heightView;
+    shadowDraw.heightSampler=heightSampler;
+    shadowDraw.shellSubmeshIndex=0U;
+    shadowDraw.lightRayDirectionObject={0.0F,0.0F,-1.0F};
+    shadowDraw.settings=settings;
+
+    DashrShadowFrameDesc shadowFrame;
+    shadowFrame.depthTarget=shadowDepth;
+    shadowFrame.viewport={0,0,48,48,0,1};
+    shadowFrame.scissor={0,0,48,48};
+    shadowFrame.clearDepthTarget=true;
+    shadowFrame.clearDepthValue=1.0F;
+    shadowFrame.draws=std::span(&shadowDraw,1U);
+
+    DashrShadowFrameStats shadowStats;
+    rhi::FenceHandle shadowFence;
+    require(record_dashr_shadow_frame(
+        device,renderer,shadowFrame,shadowStats,&shadowFence,&error),error.c_str());
+    require(shadowFence&&device.fence_complete(shadowFence),
+            "DASHR shadow frame fence did not complete");
+    require(shadowStats.draws==1U&&shadowStats.shellTriangles==8U,
+            "DASHR shadow parity draw statistics are wrong");
+    require(shadowStats.transientBindGroups==2U,
+            "DASHR shadow path did not bind constants and surface resources");
 
     require(destroy_dashr_shell_renderer(device,renderer,&error),error.c_str());
     require(destroy_dashr_atlas_resources(device,atlas,&error),error.c_str());

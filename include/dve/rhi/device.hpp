@@ -350,7 +350,11 @@ struct GraphicsPipelineDesc {
     std::optional<VertexBufferLayoutDesc> vertexBuffer;
     std::vector<VertexAttributeDesc> vertexAttributes;
     PrimitiveTopology topology{PrimitiveTopology::TriangleList};
+    // Legacy single-render-target format. Existing callers can keep using this field.
+    // When colorFormats is non-empty it takes precedence and describes the complete
+    // ordered MRT attachment set.
     std::optional<TextureFormat> colorFormat{TextureFormat::RGBA8Unorm};
+    std::vector<TextureFormat> colorFormats;
     std::optional<TextureFormat> depthFormat{TextureFormat::D32Float};
     CullMode cullMode{CullMode::BackFaces};
     FrontFace frontFace{FrontFace::CounterClockwise};

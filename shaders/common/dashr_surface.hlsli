@@ -69,7 +69,7 @@ float DashrMapHeight(float normalizedHeight,
                      float heightScale,
                      float heightReferencePlane,
                      float heightOffset) {
-    return heightReferencePlane +
+    return 0.5F +
            (saturate(normalizedHeight) - heightReferencePlane) * heightScale +
            heightOffset;
 }

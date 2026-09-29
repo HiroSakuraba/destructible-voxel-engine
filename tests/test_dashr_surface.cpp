@@ -145,6 +145,17 @@ void test_teleport_destination_band_does_not_ping_pong() {
     require(result.teleports==1U, "destination seam band retriggered teleport");
 }
 
+void test_height_reference_maps_to_mesh_midplane() {
+    DashrSurfaceSettings settings;
+    settings.heightReferencePlane = 0.25F;
+    settings.heightScale = 0.4F;
+    settings.heightOffset = 0.03F;
+    require(close(dashr_map_height(0.25F, settings), 0.53F),
+            "authored height reference did not map to mesh midplane");
+    require(close(dashr_map_height(0.75F, settings), 0.73F),
+            "DASHR height scale around reference plane is wrong");
+}
+
 void test_validation_and_degenerate_basis() {
     DashrSurfaceSettings settings;
     std::string error;
@@ -166,6 +177,7 @@ int main() {
         test_flat_trace_hit_and_escape();
         test_seam_teleport();
         test_teleport_destination_band_does_not_ping_pong();
+        test_height_reference_maps_to_mesh_midplane();
         test_validation_and_degenerate_basis();
         std::cout << "dve_dashr_surface_tests: PASS\n";
         return 0;

@@ -1942,6 +1942,9 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_physics_critique_fixes_tests tests/test_physics_critique_fixes.cpp)
     target_link_libraries(dve_physics_critique_fixes_tests PRIVATE dve::core)
     add_test(NAME dve_physics_critique_fixes_tests COMMAND dve_physics_critique_fixes_tests)
+    add_executable(dve_damage_clip_tests tests/test_damage_clip.cpp)
+    target_link_libraries(dve_damage_clip_tests PRIVATE dve::core)
+    add_test(NAME dve_damage_clip_tests COMMAND dve_damage_clip_tests)
 
     add_executable(dve_v234_physics_neutral_hooks_tests
         tests/test_physics_neutral_hooks_v234.cpp)

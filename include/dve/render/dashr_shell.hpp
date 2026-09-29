@@ -176,6 +176,8 @@ struct DashrShellFrameDesc {
 
 struct DashrShellFrameStats {
     std::uint64_t draws{};
+    std::uint64_t pbrDraws{};
+    std::uint64_t diagnosticDraws{};
     std::uint64_t shellTriangles{};
     std::uint64_t transientBindGroups{};
     std::uint64_t constantRanges{};

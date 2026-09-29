@@ -277,6 +277,11 @@ DashrTraceResult trace_dashr_heightfield(
     TracePoint previous{};
     bool havePreviousOutside = false;
     bool teleportedThisStep = false;
+    // A destination texel can intentionally be inset only a few pixels from the
+    // paired edge. Filtering may therefore still report a positive seam region
+    // after teleporting. Keep traversing that destination island until the ray
+    // has actually exited its seam band instead of bouncing A<->B.
+    bool teleportCooldown = false;
 
     for (std::uint32_t iteration = 0U; iteration < settings.maximumSteps; ++iteration) {
         teleportedThisStep = false;
@@ -288,7 +293,9 @@ DashrTraceResult trace_dashr_heightfield(
                 result.status = DashrTraceStatus::InvalidField;
                 return result;
             }
-            if (teleport->signedDistance > 0.0F) {
+            if (teleportCooldown) {
+                if (teleport->signedDistance <= 0.0F) teleportCooldown = false;
+            } else if (teleport->signedDistance > 0.0F) {
                 if (result.teleports >= settings.maximumTeleports) {
                     result.status = DashrTraceStatus::TeleportLimit;
                     return result;
@@ -296,6 +303,7 @@ DashrTraceResult trace_dashr_heightfield(
                 seedUv = teleport->destinationUv;
                 ++result.teleports;
                 teleportedThisStep = true;
+                teleportCooldown = true;
             }
         }
 

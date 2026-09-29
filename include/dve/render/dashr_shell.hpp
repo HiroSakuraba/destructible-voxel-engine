@@ -12,6 +12,9 @@
 #include "dve/dashr_surface.hpp"
 #include "dve/polygon_asset.hpp"
 #include "dve/render/dashr_atlas.hpp"
+#include "dve/render/cascaded_shadow_atlas.hpp"
+#include "dve/render/environment_lighting_gpu.hpp"
+#include "dve/render/main_material_table.hpp"
 #include "dve/rhi/device.hpp"
 
 namespace dve::render {
@@ -89,6 +92,9 @@ private:
 struct DashrShellShaderBytecode {
     std::vector<std::byte> vertex;
     std::vector<std::byte> fragment;
+    // Optional production material fragment. The diagnostic fragment remains
+    // useful for UV/step/seam visualization even when PBR is available.
+    std::vector<std::byte> pbrFragment;
     [[nodiscard]] bool valid() const noexcept {
         return !vertex.empty() && !fragment.empty();
     }
@@ -97,19 +103,29 @@ struct DashrShellShaderBytecode {
 struct alignas(16) GpuDashrShellConstants {
     std::array<float, 16> objectToClip{
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    std::array<float, 4> cameraAndHeightScale{0,0,0,0.04F};
+    std::array<float, 16> objectToWorld{
+        1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    std::array<float, 4> cameraObjectAndHeightScale{0,0,0,0.04F};
+    std::array<float, 4> cameraWorldAndDebug{0,0,0,0};
+    std::array<float, 4> environmentParameters{0,0,0,0};
     std::array<float, 4> heightAndStep{0.5F,0.0F,0.02F,0.005F};
     std::array<float, 4> distortion{16.0F,0.05F,1.5F,1.0F};
-    std::array<float, 4> minimumStepAndDebug{0.01F,0,0,0};
+    std::array<float, 4> minimumStepAndReserved{0.01F,0,0,0};
+    std::array<float, 4> heightUvScaleOffset{1,1,0,0};
+    std::array<float, 4> heightUvRotation{};
     std::array<std::uint32_t, 4> limits{192U,4U,8U,0U};
 };
-static_assert(sizeof(GpuDashrShellConstants) == 160U);
+static_assert(sizeof(GpuDashrShellConstants) == 304U);
 
 struct DashrShellRendererResources {
     rhi::BufferHandle constants;
     rhi::BindGroupLayoutHandle constantsLayout;
     rhi::BindGroupLayoutHandle surfaceLayout;
+    rhi::BindGroupLayoutHandle materialLayout;
+    rhi::BindGroupLayoutHandle environmentLayout;
+    rhi::BindGroupLayoutHandle shadowLayout;
     rhi::GraphicsPipelineHandle pipeline;
+    rhi::GraphicsPipelineHandle pbrPipeline;
     std::size_t constantCapacity{};
     std::size_t constantStride{};
 
@@ -117,6 +133,9 @@ struct DashrShellRendererResources {
         return constants && constantsLayout && surfaceLayout && pipeline &&
                constantCapacity >= sizeof(GpuDashrShellConstants) &&
                constantStride >= sizeof(GpuDashrShellConstants);
+    }
+    [[nodiscard]] bool pbr_valid() const noexcept {
+        return valid() && materialLayout && environmentLayout && shadowLayout && pbrPipeline;
     }
 };
 
@@ -128,9 +147,23 @@ struct DashrShellDraw {
     std::uint32_t shellSubmeshIndex{};
     std::array<float, 16> objectToClip{
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    std::array<float, 16> objectToWorld{
+        1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     Float3 cameraObjectPosition{};
+    Float3 cameraWorldPosition{};
+    std::array<float, 4> environmentParameters{};
+    Float2 heightUvScale{1.0F,1.0F};
+    Float2 heightUvOffset{};
+    float heightUvRotationRadians{};
     DashrSurfaceSettings settings{};
     std::uint32_t debugMode{};
+
+    // Optional production shading inputs. When usePbr is false the diagnostic
+    // shell shader is used and these can be null.
+    bool usePbr{};
+    const MainMaterialDescriptor* material{};
+    const EnvironmentLightingGpuResources* lighting{};
+    const CascadedShadowAtlasResources* shadows{};
 };
 
 struct DashrShellFrameDesc {

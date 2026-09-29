@@ -231,8 +231,8 @@ struct DashrShadowFrameDesc {
     rhi::TextureHandle depthTarget{};
     rhi::Viewport viewport{};
     rhi::ScissorRect scissor{};
-    bool clearDepth{};
-    float clearDepth{1.0F};
+    bool clearDepthTarget{};
+    float clearDepthValue{1.0F};
     std::span<const DashrShadowDraw> draws;
 };
 

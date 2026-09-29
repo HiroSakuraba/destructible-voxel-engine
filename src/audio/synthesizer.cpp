@@ -15,6 +15,7 @@
 #include <complex>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <numbers>
 #include <iomanip>
@@ -51,7 +52,6 @@ struct DenormalGuard {
 constexpr float kPi = std::numbers::pi_v<float>;
 constexpr float kTwoPi = 2.0F * kPi;
 constexpr std::size_t kMidiQueueCapacity = 2048;
-constexpr std::size_t kPresetQueueCapacity = 8;
 constexpr std::size_t kMidiOutQueueCapacity = 2048;
 
 float clampf(float value, float low, float high) noexcept { return std::clamp(value, low, high); }
@@ -176,6 +176,36 @@ private:
     alignas(64) std::atomic<std::size_t> dequeue_{};
 };
 
+// Latest-wins single-producer/single-consumer mailbox (triple buffer). The
+// producer overwrites whatever the consumer has not taken yet, so the newest
+// value always arrives and a burst can never be dropped. Wait-free on both
+// sides and allocation-free; producers must be serialized externally.
+template <class T>
+class LatestMailbox {
+    static_assert(std::is_trivially_copyable_v<T>);
+    static constexpr std::uint32_t kIndexMask = 3U;
+    static constexpr std::uint32_t kFresh = 4U;
+public:
+    T& producer_slot() noexcept { return slots_[back_]; }
+    // Publishes producer_slot(); returns true if it replaced an unconsumed value.
+    bool publish() noexcept {
+        const std::uint32_t previous = middle_.exchange(back_ | kFresh, std::memory_order_acq_rel);
+        back_ = previous & kIndexMask;
+        return (previous & kFresh) != 0U;
+    }
+    // Consumer: returns the newest published value, or nullptr if nothing new.
+    const T* take() noexcept {
+        if ((middle_.load(std::memory_order_relaxed) & kFresh) == 0U) return nullptr;
+        front_ = middle_.exchange(front_, std::memory_order_acq_rel) & kIndexMask;
+        return &slots_[front_];
+    }
+private:
+    std::array<T, 3> slots_{};
+    std::uint32_t back_{0};                 // producer-owned
+    std::uint32_t front_{2};                // consumer-owned
+    std::atomic<std::uint32_t> middle_{1};  // shared: index | kFresh
+};
+
 struct RealtimeMicrotuning {
     bool enabled{};
     std::uint8_t referenceNote{69};
@@ -297,6 +327,51 @@ std::uint64_t wavetable_content_hash(const RealtimeWavetable& wt) noexcept {
         h *= 1099511628211ULL;
     }
     return h;
+}
+
+// Immutable set of cooked HQ wavetables published by the UI thread (cooked
+// there, never on the audio thread) and swapped in by render(): the base
+// preset's table (A) and, while an A/B morph is set up, the target's table (B).
+// The render thread only reads through raw pointers; whole sets are retired
+// back to the UI thread for destruction, so no deallocation happens in render().
+struct CookedWavetableSet {
+    std::shared_ptr<const CookedWavetable> a;
+    std::shared_ptr<const CookedWavetable> b;
+    std::uint64_t hashA{0};
+    std::uint64_t hashB{0};
+};
+
+bool wavetable_cookable(const RealtimeWavetable& wt) noexcept {
+    return wt.enabled && wt.frameCount != 0U;
+}
+
+// Resamples the preset's mip-0 frames (<= 8 x 128) to the HQ grid (64 x 512).
+void resample_preset_wavetable(const RealtimeWavetable& wt, std::vector<float>& flat) {
+    flat.resize(kHQWavetableFrames * kHQWavetableSamples);
+    const std::size_t srcFrames = std::min<std::size_t>(wt.frameCount, kWavetableFrameCount);
+    const float* mip0 = wt.samples.data(); // mip 0 is first
+    for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
+        const float srcPos = static_cast<float>(f) / static_cast<float>(kHQWavetableFrames - 1) *
+                             static_cast<float>(srcFrames - 1);
+        const std::size_t f0 = static_cast<std::size_t>(srcPos);
+        const std::size_t f1 = std::min(f0 + 1, srcFrames - 1);
+        const float frac = srcPos - static_cast<float>(f0);
+        float* frame = flat.data() + f * kHQWavetableSamples;
+        for (std::size_t i = 0; i < kHQWavetableSamples; ++i) {
+            const float srcSamplePos = static_cast<float>(i) / static_cast<float>(kHQWavetableSamples - 1) *
+                                       static_cast<float>(kWavetableSampleCount - 1);
+            const std::size_t s0 = static_cast<std::size_t>(srcSamplePos);
+            const std::size_t s1 = std::min(s0 + 1, kWavetableSampleCount - 1);
+            const float sFrac = srcSamplePos - static_cast<float>(s0);
+            const float a0 = mip0[f0 * kWavetableSampleCount + s0];
+            const float a1 = mip0[f0 * kWavetableSampleCount + s1];
+            const float b0 = mip0[f1 * kWavetableSampleCount + s0];
+            const float b1 = mip0[f1 * kWavetableSampleCount + s1];
+            const float a = a0 + (a1 - a0) * sFrac;
+            const float b = b0 + (b1 - b0) * sFrac;
+            frame[i] = a + (b - a) * frac;
+        }
+    }
 }
 
 ChordParameters resolved_chord_parameters(const SynthPreset& source) noexcept {
@@ -2387,8 +2462,15 @@ struct Synthesizer::Impl {
     float sampleRate{};
     std::atomic<std::uint64_t>& currentFrame;
     RealtimePreset parameters{};
-    // Phase 1: high-quality wavetable bank (cooked on preset load).
-    CookedWavetable hqWavetable{};
+    // Phase 1: high-quality wavetable bank. Cooked on the UI thread (FFT) and
+    // published as a CookedWavetableSet; hqWavetable_ points into the active
+    // set (or at the zero table until the first cookable preset arrives).
+    CookedWavetable hqEmptyWavetable_{};
+    const CookedWavetable* hqWavetable_{&hqEmptyWavetable_};
+    CookedWavetableSet* activeWavetables_{nullptr};                      // render thread
+    std::atomic<CookedWavetableSet*> pendingWavetables_{nullptr};        // UI -> render
+    std::atomic<CookedWavetableSet*> retiredWavetables_{nullptr};        // render -> UI
+    SequencerConfig presetSequencerConfig_{};                            // render thread
     // Phase 1: physics modulation bank (global).
     PhysicsModulationBank physicsBank{};
     // Phase 3: generative step sequencer (SYN-012). Driven once per render
@@ -2408,8 +2490,19 @@ struct Synthesizer::Impl {
     RealtimePreset morphBaseB_{};
     bool morphHasB_{false};
     float appliedMorphAmount_{-1.0F};  // amount baked into parameters (-1 = none)
-    // Phase 1: wavetable cook gating (fix: no per-block re-cook/allocation).
-    std::uint64_t cookedWavetableHash_{0};
+    // Phase 1: wavetable cook gating + cache (UI thread, wavetableCookMutex_).
+    struct WavetableCookCacheEntry {
+        std::uint64_t hash{0};
+        std::shared_ptr<const CookedWavetable> table;
+        std::uint64_t lastUse{0};
+    };
+    std::mutex wavetableCookMutex_;
+    std::array<WavetableCookCacheEntry, 3> wavetableCookCache_{};
+    std::uint64_t wavetableCookClock_{0};
+    std::shared_ptr<const CookedWavetable> publishedA_;
+    std::uint64_t publishedHashA_{0};
+    std::uint64_t publishedHashB_{0};
+    bool publishedValid_{false};
     std::atomic<std::uint64_t> wavetableCookCount_{0};
     std::vector<float> wavetableCookScratch_;              // flat 64x512 resample target
     std::vector<std::complex<float>> wavetableCookSpectrum_;  // persistent DFT scratch
@@ -2437,8 +2530,10 @@ struct Synthesizer::Impl {
     bool parameterSmoothingInitialized{};
     BoundedQueue<MidiMessage, kMidiQueueCapacity> midiIn;
     BoundedQueue<MidiMessage, kMidiOutQueueCapacity> midiOut;
-    BoundedQueue<PresetUpdate, kPresetQueueCapacity> presetIn;
-    std::atomic<std::uint64_t> droppedPresets{0};  // presetIn overflow (UI thread only)
+    // Latest-wins preset handoff (was an 8-deep queue that dropped the NEWEST
+    // update on overflow, so a burst of edits could leave a stale preset live).
+    LatestMailbox<PresetUpdate> presetIn;
+    std::atomic<std::uint64_t> coalescedPresets{0};  // updates superseded before render() took them (UI thread)
     std::mutex sampleMapPublishMutex;
     std::array<SynthSampleMap, 3> sampleMaps{};
     std::atomic<int> activeSampleMapIndex{0};
@@ -3268,50 +3363,80 @@ struct Synthesizer::Impl {
         parameters = morph_realtime_presets(morphBaseA_, morphBaseB_, clamped);
         appliedMorphAmount_ = clamped;
         // The morphed wavetable content snaps at t >= 0.5 (see
-        // morph_realtime_presets); re-cook only if the content actually changed.
-        cook_wavetable_if_changed();
+        // morph_realtime_presets); both A and B were pre-cooked off-thread.
+        select_cooked_wavetable();
     }
 
-    // Cooks parameters.wavetable into the HQ engine only when its content
-    // changed since the last cook. The resample target and DFT scratch are
-    // persistent members, so repeat cooks perform no allocation.
-    void cook_wavetable_if_changed() noexcept {
-        if (!parameters.wavetable.enabled || parameters.wavetable.frameCount == 0U) return;
+    // Points the oscillators at the cooked table matching parameters.wavetable
+    // (A, or B once an A/B morph has snapped to the target). Cheap: one FNV
+    // hash of <= 1024 floats, no cooking and no allocation on this thread. If
+    // neither matches (content not cooked yet, or wavetable disabled) the
+    // current table stays, which matches the old "cook only when enabled" rule.
+    void select_cooked_wavetable() noexcept {
+        if (activeWavetables_ == nullptr) return;
         const std::uint64_t hash = wavetable_content_hash(parameters.wavetable);
-        if (hash == cookedWavetableHash_) return;
-        // Phase 1: cook the preset wavetable into the HQ engine (64 frames).
-        // Interpolates the preset's mip-0 frames up to kHQWavetableFrames.
-        wavetableCookScratch_.resize(kHQWavetableFrames * kHQWavetableSamples);
-        const std::size_t srcFrames = std::min<std::size_t>(parameters.wavetable.frameCount, kWavetableFrameCount);
-        const float* mip0 = parameters.wavetable.samples.data(); // mip 0 is first
-        for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
-            const float srcPos = static_cast<float>(f) / static_cast<float>(kHQWavetableFrames - 1) *
-                                 static_cast<float>(srcFrames - 1);
-            const std::size_t f0 = static_cast<std::size_t>(srcPos);
-            const std::size_t f1 = std::min(f0 + 1, srcFrames - 1);
-            const float frac = srcPos - static_cast<float>(f0);
-            float* frame = wavetableCookScratch_.data() + f * kHQWavetableSamples;
-            for (std::size_t i = 0; i < kHQWavetableSamples; ++i) {
-                // Resample from 128 to 512 samples.
-                const float srcSamplePos = static_cast<float>(i) / static_cast<float>(kHQWavetableSamples - 1) *
-                                           static_cast<float>(kWavetableSampleCount - 1);
-                const std::size_t s0 = static_cast<std::size_t>(srcSamplePos);
-                const std::size_t s1 = std::min(s0 + 1, kWavetableSampleCount - 1);
-                const float sFrac = srcSamplePos - static_cast<float>(s0);
-                const float a0 = mip0[f0 * kWavetableSampleCount + s0];
-                const float a1 = mip0[f0 * kWavetableSampleCount + s1];
-                const float b0 = mip0[f1 * kWavetableSampleCount + s0];
-                const float b1 = mip0[f1 * kWavetableSampleCount + s1];
-                const float a = a0 + (a1 - a0) * sFrac;
-                const float b = b0 + (b1 - b0) * sFrac;
-                frame[i] = a + (b - a) * frac;
-            }
-        }
-        cook_wavetable_inplace(hqWavetable, "Preset", wavetableCookScratch_.data(),
-                               kHQWavetableFrames, wavetableCookSpectrum_,
-                               wavetableCookFiltered_, wavetableCookFrame_);
-        cookedWavetableHash_ = hash;
+        if (activeWavetables_->a && hash == activeWavetables_->hashA) hqWavetable_ = activeWavetables_->a.get();
+        else if (activeWavetables_->b && hash == activeWavetables_->hashB) hqWavetable_ = activeWavetables_->b.get();
+    }
+
+    // Render thread: swap in the newest cooked set published by the UI thread.
+    // The previous set is handed back through retiredWavetables_ (freed on the
+    // UI thread); a new set is only taken once that slot has been reclaimed.
+    void adopt_pending_wavetables() noexcept {
+        if (retiredWavetables_.load(std::memory_order_acquire) != nullptr) return;
+        CookedWavetableSet* next = pendingWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        if (next == nullptr) return;
+        CookedWavetableSet* previous = activeWavetables_;
+        activeWavetables_ = next;
+        select_cooked_wavetable();
+        if (previous != nullptr) retiredWavetables_.store(previous, std::memory_order_release);
+    }
+
+    // UI thread (serialized by wavetableCookMutex_): cooked table for this
+    // content, from a small hash-keyed cache or freshly cooked with the FFT.
+    std::shared_ptr<const CookedWavetable> cooked_wavetable_for(const RealtimeWavetable& wt, std::uint64_t hash) {
+        ++wavetableCookClock_;
+        for (auto& entry : wavetableCookCache_)
+            if (entry.table && entry.hash == hash) { entry.lastUse = wavetableCookClock_; return entry.table; }
+        resample_preset_wavetable(wt, wavetableCookScratch_);
+        auto table = std::make_shared<CookedWavetable>();
+        cook_wavetable_inplace(*table, "Preset", wavetableCookScratch_.data(), kHQWavetableFrames,
+                               wavetableCookSpectrum_, wavetableCookFiltered_, wavetableCookFrame_);
+        table->contentHash = hash;
         wavetableCookCount_.fetch_add(1U, std::memory_order_relaxed);
+        auto* slot = &wavetableCookCache_[0];
+        for (auto& entry : wavetableCookCache_) if (!entry.table || entry.lastUse < slot->lastUse) slot = &entry;
+        *slot = {hash, table, wavetableCookClock_};
+        return table;
+    }
+
+    // UI thread: cook (if needed) and publish the tables for a preset update.
+    // Returns quickly when the content is unchanged (hash compare only).
+    void publish_wavetables(const RealtimeWavetable& base, const RealtimeWavetable* morphB) {
+        std::lock_guard<std::mutex> lock(wavetableCookMutex_);
+        delete retiredWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        const bool cookA = wavetable_cookable(base);
+        const bool cookB = morphB != nullptr && wavetable_cookable(*morphB);
+        const std::uint64_t hashA = cookA ? wavetable_content_hash(base) : publishedHashA_;
+        const std::uint64_t hashB = cookB ? wavetable_content_hash(*morphB) : 0U;
+        if (publishedValid_ && hashA == publishedHashA_ && hashB == publishedHashB_) return;
+        auto* set = new CookedWavetableSet{};
+        if (cookA) { set->a = cooked_wavetable_for(base, hashA); set->hashA = hashA; }
+        else if (publishedA_) { set->a = publishedA_; set->hashA = publishedHashA_; }
+        if (cookB) { set->b = hashB == hashA ? set->a : cooked_wavetable_for(*morphB, hashB); set->hashB = hashB; }
+        publishedA_ = set->a;
+        publishedHashA_ = set->hashA;
+        publishedHashB_ = set->hashB;
+        publishedValid_ = true;
+        delete pendingWavetables_.exchange(set, std::memory_order_acq_rel);  // unconsumed older set
+    }
+
+    void release_wavetables() noexcept {
+        delete pendingWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        delete retiredWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        delete activeWavetables_;
+        activeWavetables_ = nullptr;
+        hqWavetable_ = &hqEmptyWavetable_;
     }
 
     void adopt_preset(const PresetUpdate& update, float morphAmount, bool morphEnabled) noexcept {
@@ -3323,11 +3448,17 @@ struct Synthesizer::Impl {
         // Sequencer/conductor configs were applied from the UI thread (data
         // race vs advance_sequencer()/conductor.process()); they are now
         // applied here on the render thread.
-        if (update.sequencerChanged) sequencer.apply_config(update.sequencer);
+        // Compare against the last preset-applied config rather than trusting
+        // the producer's flag alone: the latest-wins mailbox may coalesce an
+        // update that carried the change with a later one that did not.
+        if (update.sequencerChanged || !(update.sequencer == presetSequencerConfig_)) {
+            sequencer.apply_config(update.sequencer);
+            presetSequencerConfig_ = update.sequencer;
+        }
         conductor.configure(update.attractorEnabled, update.attractor);
         parameters = update.base;
         appliedMorphAmount_ = -1.0F;  // force re-application below
-        cook_wavetable_if_changed();
+        select_cooked_wavetable();
         apply_morph_amount(morphAmount, morphEnabled);
         macroValues = parameters.macroValues;
         gameClockTempo.store(parameters.arpeggiator.externalTempoBpm, std::memory_order_relaxed);
@@ -3707,10 +3838,10 @@ struct Synthesizer::Impl {
 
     float wavetable_sample(float phase, float position, float increment) const noexcept {
         // Phase 1: use the HQ wavetable engine if cooked, else fall back to legacy.
-        if (hqWavetable.valid()) {
+        if (hqWavetable_ != nullptr && hqWavetable_->valid()) {
             const float frequency = increment * sampleRate;
             const std::size_t mip = wavetable_mip_for_frequency(frequency, sampleRate);
-            return sample_wavetable(hqWavetable, phase, position, mip);
+            return sample_wavetable(*hqWavetable_, phase, position, mip);
         }
         if (!parameters.wavetable.enabled || parameters.wavetable.frameCount == 0U) return fast_sin_phase(phase);
         const std::size_t frameCount = std::clamp<std::size_t>(parameters.wavetable.frameCount, 1U, kWavetableFrameCount);
@@ -7315,10 +7446,9 @@ std::vector<std::size_t> SynthPresetLibrary::find_by_tag(std::string_view tag) c
 Synthesizer::Synthesizer(std::uint32_t sampleRate)
     : sampleRate_(std::clamp<std::uint32_t>(sampleRate, 8000U, 192000U)), preset_(SynthPreset::make_default()) {
     impl_ = new Impl(sampleRate_, currentFrame_);
-    // Pre-size the wavetable cook scratch on the constructing thread so the
-    // first render-thread cook (inside adopt_preset) performs no allocation.
+    // Wavetables are cooked on the preset-setting thread; pre-size its scratch.
     impl_->wavetableCookScratch_.resize(kHQWavetableFrames * kHQWavetableSamples);
-    impl_->wavetableCookSpectrum_.resize(kHQWavetableSamples);
+    impl_->wavetableCookSpectrum_.resize(2U * kHQWavetableSamples);
     impl_->wavetableCookFiltered_.resize(kHQWavetableSamples);
     impl_->wavetableCookFrame_.resize(kHQWavetableSamples);
     PresetUpdate initial{};
@@ -7327,10 +7457,15 @@ Synthesizer::Synthesizer(std::uint32_t sampleRate)
     initial.sequencerChanged = true;
     initial.attractor = preset_.attractor.config;
     initial.attractorEnabled = preset_.attractor.enabled;
+    impl_->publish_wavetables(initial.base.wavetable, nullptr);
+    impl_->adopt_pending_wavetables();
     impl_->adopt_preset(initial, 0.0F, false);
     impl_->limiterEnvelope = 1.0F;
 }
-Synthesizer::~Synthesizer() { delete impl_; }
+Synthesizer::~Synthesizer() {
+    impl_->release_wavetables();
+    delete impl_;
+}
 
 SynthPreset Synthesizer::preset() const {
     std::lock_guard<std::mutex> lock(presetMutex_);
@@ -7349,10 +7484,13 @@ Synthesizer::take_pending_conductor_config() noexcept {
 void Synthesizer::set_preset(const SynthPreset& preset) {
     std::string error;
     if (!preset.validate(&error)) return;
-    PresetUpdate update{};
     std::shared_ptr<PendingConductorConfig> pendingConductor;
     {
         std::lock_guard<std::mutex> lock(presetMutex_);
+        // Built straight into the mailbox's producer slot (serialized by
+        // presetMutex_); published below once the wavetables are ready.
+        PresetUpdate& update = impl_->presetIn.producer_slot();
+        update = PresetUpdate{};
         // Phase 3: the preset owns the sequencer's authored config. The live
         // sequencer used to be reconfigured here on the UI thread while the
         // audio thread could be inside advance_sequencer(); the config is now
@@ -7385,9 +7523,12 @@ void Synthesizer::set_preset(const SynthPreset& preset) {
         pendingConductor = std::make_shared<PendingConductorConfig>();
         pendingConductor->enabled = preset_.attractor.enabled;
         pendingConductor->config = preset_.attractor.config;
+        // Cook changed wavetables here, on the calling (UI) thread, and publish
+        // them before the preset so render() never cooks. No-op when unchanged.
+        impl_->publish_wavetables(update.base.wavetable, update.hasMorphB ? &update.morphB.wavetable : nullptr);
+        if (impl_->presetIn.publish()) impl_->coalescedPresets.fetch_add(1, std::memory_order_relaxed);
     }
     pendingConductorConfig_.store(std::move(pendingConductor), std::memory_order_release);
-    if (!impl_->presetIn.push(update)) impl_->droppedPresets.fetch_add(1U, std::memory_order_relaxed);
 }
 
 void Synthesizer::set_morph_preset_b(const SynthPreset& presetB) {
@@ -7490,6 +7631,10 @@ std::uint64_t Synthesizer::wavetable_cook_count() const noexcept {
     return impl_->wavetableCookCount_.load(std::memory_order_relaxed);
 }
 
+std::uint64_t Synthesizer::coalesced_preset_count() const noexcept {
+    return impl_->coalescedPresets.load(std::memory_order_relaxed);
+}
+
 void Synthesizer::reset_granular_profiler() noexcept {
     impl_->requestedGrains.store(0U, std::memory_order_relaxed);
     impl_->admittedGrains.store(0U, std::memory_order_relaxed);
@@ -7582,9 +7727,9 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     // writes these atomics; the drain sees a consistent snapshot).
     const bool morphRequested = rtMorphEnabled_.load(std::memory_order_relaxed);
     const float morphRequestedAmount = rtMorphAmount_.load(std::memory_order_relaxed);
-    PresetUpdate latest{};
-    while (impl_->presetIn.pop(latest))
-        impl_->adopt_preset(latest, morphRequestedAmount, morphRequested);
+    impl_->adopt_pending_wavetables();
+    if (const PresetUpdate* latest = impl_->presetIn.take())
+        impl_->adopt_preset(*latest, morphRequestedAmount, morphRequested);
     impl_->advance_parameter_smoothing(frameCount);
     impl_->track_tempo_synced_delay();
     // Phase 3: step physics modulation bank.

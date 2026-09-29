@@ -131,6 +131,10 @@ public:
     [[nodiscard]] const EditorObject* find_object(EditorObjectId id) const noexcept;
     [[nodiscard]] std::vector<EditorObjectId> root_objects() const;
     [[nodiscard]] std::vector<EditorObjectId> children_of(EditorObjectId parent) const;
+    // Depth-first pre-order of the whole hierarchy (roots and siblings in id order),
+    // built in one pass. Equivalent to recursing root_objects()/children_of(), which
+    // is O(n^2) because every children_of() call scans all objects.
+    [[nodiscard]] std::vector<EditorObjectId> hierarchy_preorder() const;
     [[nodiscard]] const std::map<EditorObjectId, EditorObject>& objects() const noexcept { return objects_; }
 
     void mark_dirty() noexcept { dirty_ = true; }

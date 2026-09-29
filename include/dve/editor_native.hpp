@@ -237,6 +237,9 @@ struct NativeEditorLayout {
     UiRect hierarchyFilterBox{};
     std::vector<UiRect> inspectorToggles;
     std::vector<UiRect> inspectorFields; // [0]=Position line, [1]=Rotation line
+    // Inspector detail text at or below this y is not drawn (the flag toggles sit
+    // there when the inspector is too short for both); always <= inspector bottom.
+    int inspectorContentClipY{};
     std::vector<UiRect> bottomTabs;      // parallel to BottomPanelTab enumerators, in order
     UiRect assetSearchBox{};
     UiRect assetRefreshButton{};
@@ -494,9 +497,25 @@ public:
     [[nodiscard]] CommandResult reorder_component_on_primary(ComponentId componentId, std::size_t newIndex);
     [[nodiscard]] CommandResult set_component_property_text_on_primary(
         ComponentId componentId, std::string property, std::string_view text);
-    [[nodiscard]] EditorSelectionDiagnostics selection_diagnostics() const;
+    // Cached: recomputed only when the selection or the scene fingerprint changes.
+    [[nodiscard]] const EditorSelectionDiagnostics& selection_diagnostics() const;
 
-    [[nodiscard]] std::vector<EditorVoxelDrawItem> draw_items() const;
+    // Cached voxel draw list (projection + depth sort); rebuilt only when the scene,
+    // camera, viewport, draw cap, or selection change.
+    [[nodiscard]] const std::vector<EditorVoxelDrawItem>& draw_items() const;
+    [[nodiscard]] std::size_t draw_item_count() const { return draw_items().size(); }
+    // Cached draw list for the selected camera rig's picture-in-picture preview.
+    [[nodiscard]] const std::vector<EditorVoxelDrawItem>& camera_preview_draw_items(
+        const EditorCamera& previewCamera, UiRect previewRect,
+        const EditorViewportSettings& previewSettings) const;
+    struct RenderCacheStats {
+        std::uint64_t drawListRebuilds{};
+        std::uint64_t previewDrawListRebuilds{};
+        std::uint64_t selectionDiagnosticsRebuilds{};
+    };
+    [[nodiscard]] RenderCacheStats render_cache_stats() const noexcept {
+        return {drawListCache_.rebuild_count(), previewDrawListCache_.rebuild_count(), selectionDiagnosticsRebuilds_};
+    }
     [[nodiscard]] std::vector<EditorText3DDrawItem> text3d_draw_items() const;
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
@@ -570,6 +589,14 @@ private:
     EditorCinematicCameraPanel cinematicCameraPanel_{};
     std::optional<ShortcutContext> shortcutContextOverride_{};
     EditorViewportSettings viewportSettings_;
+    // Per-frame render caches (logically const: pure memoization of derived data).
+    mutable EditorVoxelDrawListCache drawListCache_{};
+    mutable EditorVoxelDrawListCache previewDrawListCache_{};
+    mutable EditorSelectionDiagnostics selectionDiagnostics_{};
+    mutable std::uint64_t selectionDiagnosticsKey_{};
+    mutable bool selectionDiagnosticsValid_{};
+    mutable std::uint64_t selectionDiagnosticsRebuilds_{};
+    [[nodiscard]] std::uint64_t material_density_fingerprint() const noexcept;
     NativeEditorLayout layout_;
     int width_{1280};
     int height_{800};

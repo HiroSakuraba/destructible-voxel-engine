@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -91,6 +92,30 @@ int main() {
                               panel.wavetableCanvas.y + panel.wavetableCanvas.height - 5);
         require(std::abs(controller.synthesizer().preset().wavetable.samples[64] - beforeDraw) > 0.05F,
                 "freehand wavetable canvas did not update the selected frame");
+        {
+            // A fast 200-move stroke must not cook/publish per move; the final
+            // stroke state must land on pointer-up.
+            const auto publishesBefore = controller.synth_panel().wavetable_draw_publish_count();
+            const auto cooksBefore = controller.synthesizer().wavetable_cook_count();
+            const int cx = panel.wavetableCanvas.x, cy = panel.wavetableCanvas.y;
+            const int cw = panel.wavetableCanvas.width, ch = panel.wavetableCanvas.height;
+            controller.pointer_down(PointerButton::Primary, cx + 2, cy + ch / 2);
+            for (int i = 0; i < 200; ++i)
+                controller.pointer_move(cx + 2 + (cw - 4) * i / 199, cy + 3 + (i % 2) * (ch - 6));
+            const int endX = cx + cw - 3, endY = cy + 3;
+            controller.pointer_up(PointerButton::Primary, endX, endY);
+            const auto publishes = controller.synth_panel().wavetable_draw_publish_count() - publishesBefore;
+            const auto cooks = controller.synthesizer().wavetable_cook_count() - cooksBefore;
+            std::printf("wavetable stroke: 201 draw events -> %llu publishes, %llu cooks\n",
+                        static_cast<unsigned long long>(publishes), static_cast<unsigned long long>(cooks));
+            require(publishes >= 1U && publishes < 50U, "wavetable drawing was not coalesced");
+            require(cooks <= publishes, "wavetable drawing cooked more than it published");
+            require(!controller.synth_panel().wavetable_draw_pending(), "wavetable draft not flushed on pointer-up");
+            const auto& samples = controller.synthesizer().preset().wavetable.samples;
+            const std::size_t frame = controller.synth_panel().selected_wavetable_frame();
+            require(samples[frame * dve::audio::kWavetableSampleCount + dve::audio::kWavetableSampleCount - 2U] > 0.5F,
+                    "final wavetable stroke point was not applied");
+        }
         click(controller, panel.wavetableFrameButtons[3]);
         require(controller.synth_panel().selected_wavetable_frame() == 3U,
                 "wavetable frame selector did not update selection");

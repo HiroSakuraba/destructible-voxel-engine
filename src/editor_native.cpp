@@ -4,6 +4,7 @@
 #include "dve/print_export.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -1811,13 +1812,47 @@ void NativeEditorController::recompute_layout() {
                                                    inspectorWidth - 24, 18});
             }
         }
-        const float inspectorContentBottom = selectedObject && selectedObject->text3d ? 426.0F :
-                                             selectedObject && selectedObject->gaborVolume ? 360.0F : 390.0F;
-        int toggleY = contentY + static_cast<int>(inspectorContentBottom * scale);
-        for (int index = 0; index < 5; ++index) {
-            layout_.inspectorToggles.push_back({layout_.inspector.x + 12, toggleY, inspectorWidth - 24, rowHeight});
-            toggleY += rowHeight + 4;
+        // Last fixed detail line: baseline 377 (voxel/text3d) or 311 (Gabor) + descent/gap.
+        const int contentBottom = contentY + static_cast<int>(
+            (selectedObject && selectedObject->gaborVolume ? 326.0F : 390.0F) * scale);
+        const int inspectorBottom = layout_.inspector.y + layout_.inspector.height - 6;
+        // The toggles used to start at a fixed offset and simply continue downward, so at
+        // 1280x719 (inspector ends at y=547) they spilled ~50 px into the bottom dock and
+        // stole its clicks. Pick the first arrangement that fits below the details; if
+        // none does, pin the block to the inspector bottom and clip the detail text above.
+        struct ToggleArrangement { int columns; int rowHeight; int gap; };
+        const std::array<ToggleArrangement, 4> arrangements{{
+            {1, rowHeight, 4}, {1, 20, 2}, {2, rowHeight, 4}, {2, 20, 2}}};
+        constexpr int kToggleCount = 5;
+        ToggleArrangement chosen = arrangements.back();
+        bool fits = false;
+        const auto block_height = [&](const ToggleArrangement& a) {
+            const int rows = (kToggleCount + a.columns - 1) / a.columns;
+            return rows * a.rowHeight + (rows - 1) * a.gap;
+        };
+        for (const ToggleArrangement& a : arrangements) {
+            if (contentBottom + block_height(a) <= inspectorBottom) { chosen = a; fits = true; break; }
         }
+        const int blockHeight = block_height(chosen);
+        // Never cover the name / ID / Position / Rotation lines (they end near +124).
+        const int blockTop = fits ? contentBottom : std::max(contentY + 124, inspectorBottom - blockHeight);
+        const int columnGap = 8;
+        const int columnWidth = (inspectorWidth - 24 - (chosen.columns - 1) * columnGap) / chosen.columns;
+        for (int index = 0; index < kToggleCount; ++index) {
+            const int row = index / chosen.columns;
+            const int column = index % chosen.columns;
+            const UiRect toggle{layout_.inspector.x + 12 + column * (columnWidth + columnGap),
+                                blockTop + row * (chosen.rowHeight + chosen.gap), columnWidth, chosen.rowHeight};
+            if (toggle.y + toggle.height > inspectorBottom) break;  // never spill into the dock
+            layout_.inspectorToggles.push_back(toggle);
+        }
+        layout_.inspectorContentClipY = blockTop - 2;  // == contentBottom - 2 when it fits
+        for (std::size_t field = 2; field < layout_.inspectorFields.size(); ++field) {
+            UiRect& rect = layout_.inspectorFields[field];
+            if (rect.y + rect.height > layout_.inspectorContentClipY) rect = {};  // hidden -> not clickable
+        }
+    } else {
+        layout_.inspectorContentClipY = layout_.inspector.y + layout_.inspector.height;
     }
 
     layout_.bottomTabs.clear();
@@ -1861,6 +1896,7 @@ void NativeEditorController::recompute_layout() {
 }
 
 void NativeEditorController::update(float elapsedSeconds) {
+    synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
     spriteAuthoringPanel_.update(elapsedSeconds);
     controlRigPanel_.update(elapsedSeconds);
     if (tileWorldEditorOpen_) ++tileWorldEditorTicks_;
@@ -5732,13 +5768,42 @@ CommandResult NativeEditorController::set_component_property_text_on_primary(
     return result;
 }
 
-EditorSelectionDiagnostics NativeEditorController::selection_diagnostics() const {
-    return analyze_editor_selection(workspace_.document(), materials_, workspace_.selected_objects());
+std::uint64_t NativeEditorController::material_density_fingerprint() const noexcept {
+    // Diagnostics read material densities; the library is small (tens of entries).
+    std::uint64_t h = 1469598103934665603ULL;
+    for (MaterialId id = 1; id != 0 && id <= materials_.next_available_id(); ++id) {
+        const EditorMaterialEntry* entry = materials_.find(id);
+        const std::uint64_t bits = entry == nullptr ? 0xFFFFFFFFULL
+            : std::bit_cast<std::uint32_t>(entry->definition.densityKilogramsPerCubicMeter);
+        h ^= (static_cast<std::uint64_t>(id) << 32U) ^ bits;
+        h *= 1099511628211ULL;
+    }
+    return h;
 }
 
-std::vector<EditorVoxelDrawItem> NativeEditorController::draw_items() const {
-    return build_voxel_draw_list(workspace_.document(), materials_, camera_, layout_.viewport,
-                                 viewportSettings_, workspace_.selected_objects());
+const EditorSelectionDiagnostics& NativeEditorController::selection_diagnostics() const {
+    const std::uint64_t key = editor_scene_render_fingerprint(workspace_.document()) * 31U ^
+                              editor_selection_fingerprint(workspace_.selected_objects()) * 17U ^
+                              material_density_fingerprint();
+    if (!selectionDiagnosticsValid_ || key != selectionDiagnosticsKey_) {
+        selectionDiagnostics_ = analyze_editor_selection(workspace_.document(), materials_, workspace_.selected_objects());
+        selectionDiagnosticsKey_ = key;
+        selectionDiagnosticsValid_ = true;
+        ++selectionDiagnosticsRebuilds_;
+    }
+    return selectionDiagnostics_;
+}
+
+const std::vector<EditorVoxelDrawItem>& NativeEditorController::draw_items() const {
+    return drawListCache_.get(workspace_.document(), materials_, camera_, layout_.viewport, viewportSettings_,
+                              workspace_.selected_objects(), editor_scene_render_fingerprint(workspace_.document()));
+}
+
+const std::vector<EditorVoxelDrawItem>& NativeEditorController::camera_preview_draw_items(
+    const EditorCamera& previewCamera, UiRect previewRect, const EditorViewportSettings& previewSettings) const {
+    return previewDrawListCache_.get(workspace_.document(), materials_, previewCamera, previewRect, previewSettings,
+                                     workspace_.selected_objects(),
+                                     editor_scene_render_fingerprint(workspace_.document()));
 }
 
 std::vector<EditorText3DDrawItem> NativeEditorController::text3d_draw_items() const {
@@ -5752,12 +5817,7 @@ std::vector<EditorGaborVolumeDrawItem> NativeEditorController::gabor_volume_draw
 }
 
 std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
-    std::vector<EditorObjectId> result;
-    const auto append = [&](const auto& self, EditorObjectId id, std::vector<EditorObjectId>& output) -> void {
-        output.push_back(id);
-        for (EditorObjectId child : workspace_.document().children_of(id)) self(self, child, output);
-    };
-    for (EditorObjectId root : workspace_.document().root_objects()) append(append, root, result);
+    std::vector<EditorObjectId> result = workspace_.document().hierarchy_preorder();  // O(n)
     if (hierarchyFilter_.empty()) return result;
     const std::string needle = lowercase(hierarchyFilter_);
     std::erase_if(result, [&](EditorObjectId id) {

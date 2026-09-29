@@ -124,17 +124,36 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
     }
 
     constexpr int parameterRowHeight = 29;
+    // The 3x10 parameter grid shares the page with a strip below it (Mod Matrix macros,
+    // Performance arp steps). That strip used to sit at row 8 (top + 8*29 + 14), on top of
+    // grid rows 8-9, and the grid is hit-tested first, so macro clicks edited parameters.
+    // Size the grid so grid + strip fit above the piano, and put the strip after row 9.
+    // Content must end above the voice meter (text top ~panel bottom - 162), not just the
+    // piano. The Performance page is the tallest: grid + arp step buttons + 5 step rows.
+    layout_.meterArea = {left, layout_.panel.y + panelHeight - 164, contentWidth, 44};
+    const int contentLimit = layout_.meterArea.y - 4;
+    constexpr int kGridRows = 10;
+    constexpr int kStripGap = 6;
+    constexpr int kArpStepButtonsPitch = 29;
+    constexpr int kArpStepRowCount = 5;
+    const int gridRowHeight = std::clamp(
+        (contentLimit - top - kStripGap - kArpStepButtonsPitch) / (kGridRows + kArpStepRowCount),
+        kMinSynthGridRowHeight, parameterRowHeight);
+    const int gridButtonHeight = std::min(22, gridRowHeight - 5);
+    const int gridButtonInset = std::max(1, (gridRowHeight - 3 - gridButtonHeight) / 2);
     for (std::size_t i = 0; i < layout_.parameterRows.size(); ++i) {
         const int column = static_cast<int>(i / 10U);
         const int row = static_cast<int>(i % 10U);
         const int columnWidth = (contentWidth - 20) / 3;
         const int x = left + column * (columnWidth + 10);
-        const int y = top + row * parameterRowHeight;
-        layout_.parameterRows[i] = {x, y, columnWidth, parameterRowHeight - 3};
-        layout_.parameterDownButtons[i] = {x + columnWidth - 116, y + 2, 27, 22};
-        layout_.parameterUpButtons[i] = {x + columnWidth - 31, y + 2, 27, 22};
-        layout_.parameterToggleButtons[i] = {x + columnWidth - 82, y + 2, 78, 22};
+        const int y = top + row * gridRowHeight;
+        const int by = y + gridButtonInset;
+        layout_.parameterRows[i] = {x, y, columnWidth, gridRowHeight - 3};
+        layout_.parameterDownButtons[i] = {x + columnWidth - 116, by, 27, gridButtonHeight};
+        layout_.parameterUpButtons[i] = {x + columnWidth - 31, by, 27, gridButtonHeight};
+        layout_.parameterToggleButtons[i] = {x + columnWidth - 82, by, 78, gridButtonHeight};
     }
+    const int gridBottom = top + kGridRows * gridRowHeight;  // one past the last row's gap
 
     const int oscillatorAdvancedTop = top + static_cast<int>(audio::kSynthOscillatorCount) * oscillatorRowHeight + 7;
     for (std::size_t i = 0; i < layout_.oscillatorAdvancedRows.size(); ++i) {
@@ -158,7 +177,7 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
     layout_.wavetableRemoveDcButton = {toolsX + 102, layout_.wavetableCanvas.y + layout_.wavetableCanvas.height + 5, 82, 23};
     layout_.wavetableAlignButton = {toolsX + 190, layout_.wavetableCanvas.y + layout_.wavetableCanvas.height + 5, 82, 23};
 
-    const int macroTop = top + 8 * parameterRowHeight + 14;
+    const int macroTop = gridBottom + kStripGap;
     const int macroWidth = (contentWidth - 30) / 4;
     for (std::size_t i = 0; i < layout_.macroRows.size(); ++i) {
         const int x = left + static_cast<int>(i) * (macroWidth + 10);
@@ -167,7 +186,7 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
         layout_.macroUpButtons[i] = {x + macroWidth - 30, macroTop + 3, 26, 22};
     }
 
-    const int arpStepTop = top + 8 * parameterRowHeight + 16;
+    const int arpStepTop = gridBottom + kStripGap;
     const int arpStepWidth = std::max(34, contentWidth / static_cast<int>(audio::kArpeggiatorStepCount));
     for (std::size_t i = 0; i < layout_.arpeggiatorStepButtons.size(); ++i) {
         const int x = left + static_cast<int>(i) * arpStepWidth;
@@ -179,11 +198,12 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
         const int row = static_cast<int>(i % 5U);
         const int columnWidth = (contentWidth - 30) / 4;
         const int x = left + column * (columnWidth + 10);
-        const int y = arpStepTop + 32 + row * parameterRowHeight;
-        layout_.arpeggiatorStepRows[i] = {x, y, columnWidth, parameterRowHeight - 3};
-        layout_.arpeggiatorStepDownButtons[i] = {x + columnWidth - 116, y + 2, 27, 22};
-        layout_.arpeggiatorStepUpButtons[i] = {x + columnWidth - 31, y + 2, 27, 22};
-        layout_.arpeggiatorStepToggleButtons[i] = {x + columnWidth - 82, y + 2, 78, 22};
+        const int y = arpStepTop + kArpStepButtonsPitch + row * gridRowHeight;
+        const int by = y + gridButtonInset;
+        layout_.arpeggiatorStepRows[i] = {x, y, columnWidth, gridRowHeight - 3};
+        layout_.arpeggiatorStepDownButtons[i] = {x + columnWidth - 116, by, 27, gridButtonHeight};
+        layout_.arpeggiatorStepUpButtons[i] = {x + columnWidth - 31, by, 27, gridButtonHeight};
+        layout_.arpeggiatorStepToggleButtons[i] = {x + columnWidth - 82, by, 78, gridButtonHeight};
     }
 
     for (std::size_t i = 0; i < layout_.effectRows.size(); ++i) {
@@ -861,7 +881,8 @@ void EditorSynthPanel::apply_preset_morph(audio::Synthesizer& synth) noexcept {
 
 void EditorSynthPanel::draw_wavetable_point(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!layout_.wavetableCanvas.contains(x, y)) return;
-    auto preset = synth.preset();
+    if (!wavetableDraft_) wavetableDraft_ = synth.preset();
+    auto& preset = *wavetableDraft_;
     preset.wavetable.enabled = true;
     preset.wavetable.frameCount = std::max<std::uint8_t>(preset.wavetable.frameCount,
         static_cast<std::uint8_t>(selectedWavetableFrame_ + 1U));
@@ -886,7 +907,24 @@ void EditorSynthPanel::draw_wavetable_point(int x, int y, audio::Synthesizer& sy
     } else samples[base + static_cast<std::size_t>(sample)] = value;
     wavetableLastSample_ = sample;
     wavetableLastValue_ = value;
-    synth.set_preset(preset);
+    wavetableDraftDirty_ = true;
+    const auto now = std::chrono::steady_clock::now();
+    if (wavetableDrawPublishes_ == 0U || now - wavetableLastPublish_ >= kWavetableDrawPublishInterval)
+        flush_wavetable_draft(synth);
+}
+
+void EditorSynthPanel::flush_wavetable_draft_if_due(audio::Synthesizer& synth) noexcept {
+    if (wavetableDraftDirty_ &&
+        std::chrono::steady_clock::now() - wavetableLastPublish_ >= kWavetableDrawPublishInterval)
+        flush_wavetable_draft(synth);
+}
+
+void EditorSynthPanel::flush_wavetable_draft(audio::Synthesizer& synth) noexcept {
+    if (!wavetableDraftDirty_ || !wavetableDraft_) return;
+    synth.set_preset(*wavetableDraft_);
+    wavetableDraftDirty_ = false;
+    wavetableLastPublish_ = std::chrono::steady_clock::now();
+    ++wavetableDrawPublishes_;
 }
 
 bool EditorSynthPanel::pointer_move(int x, int y, audio::Synthesizer& synth) noexcept {
@@ -921,7 +959,7 @@ bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noe
         const auto waveform = synth.preset().oscillators[selectedOscillator_].waveform;
         if (waveform == audio::OscillatorWaveform::Wavetable) {
             if (layout_.wavetableCanvas.contains(x, y)) {
-                wavetableDrawing_ = true; wavetableLastSample_ = -1;
+                wavetableDrawing_ = true; wavetableLastSample_ = -1; wavetableDraft_.reset();
                 draw_wavetable_point(x, y, synth); return true;
             }
             for (std::size_t i = 0; i < layout_.wavetableFrameButtons.size(); ++i)
@@ -1040,7 +1078,11 @@ bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noe
 bool EditorSynthPanel::pointer_up(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!open_) return false;
     if (searchPanel_.open() && searchPanel_.pointer_up(x, y, synth)) return true;
-    if (wavetableDrawing_) { wavetableDrawing_ = false; wavetableLastSample_ = -1; return true; }
+    if (wavetableDrawing_) {
+        flush_wavetable_draft(synth);  // the final stroke state always lands
+        wavetableDrawing_ = false; wavetableLastSample_ = -1; wavetableDraft_.reset();
+        return true;
+    }
     if (pointerNote_ < 0) return false;
     (void)synth.note_off(static_cast<std::uint8_t>(pointerNote_));
     pointerNote_ = -1;

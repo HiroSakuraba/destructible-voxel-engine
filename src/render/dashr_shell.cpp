@@ -673,7 +673,7 @@ bool record_dashr_shadow_frame(
         constants.heightUvRotation={draw.heightUvRotationRadians,0,0,0};
         constants.limits={
             draw.settings.maximumSteps,draw.settings.refinementSteps,
-            draw.settings.maximumTeleports,0U};
+            draw.settings.maximumTeleports,1U};
         if(!device.write_buffer(renderer.constants,constantOffset,
                                 std::as_bytes(std::span(&constants,1U)),error))
             return fail();

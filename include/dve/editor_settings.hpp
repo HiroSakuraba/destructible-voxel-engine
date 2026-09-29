@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <set>
@@ -106,6 +107,12 @@ public:
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
 
     [[nodiscard]] std::string serialize_scope(SettingScope scope) const;
+    // Atomic (write temp + rename) file persistence of one layer, e.g. User settings in
+    // <project>/.dve/user/editor_settings.txt. load_scope_file leaves the layer untouched on failure.
+    [[nodiscard]] bool save_scope_file(SettingScope scope, const std::filesystem::path& path,
+                                       std::string* error = nullptr) const;
+    [[nodiscard]] bool load_scope_file(SettingScope scope, const std::filesystem::path& path,
+                                       std::string* error = nullptr);
     [[nodiscard]] bool parse_scope(SettingScope scope, std::string_view text,
                                    std::string* error = nullptr);
     [[nodiscard]] std::string serialize_profile(std::string_view profileName, SettingScope scope) const;

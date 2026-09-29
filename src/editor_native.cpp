@@ -1,5 +1,6 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_prefab.hpp"
+#include "dve/editor_ui_zoom.hpp"
 #include "dve/print_export.hpp"
 
 #include <algorithm>
@@ -15,6 +16,11 @@
 
 namespace dve::editor {
 namespace {
+
+// The controller always lays out and hit-tests in logical pixels at 1x. UI zoom
+// (`editor.ui_scale`) is applied uniformly by the host (logical -> physical mapping plus
+// a font rasterized at the zoomed size), so layout code must not multiply by it again.
+constexpr float kLogicalLayoutScale = 1.0F;
 
 float point_line_distance(float px, float py, float ax, float ay, float bx, float by) noexcept {
     const float dx = bx - ax;
@@ -773,7 +779,7 @@ std::vector<CommandPaletteResult> NativeEditorController::command_palette_result
 
 NativeCommandPaletteLayout NativeEditorController::command_palette_layout() const {
     NativeCommandPaletteLayout result;
-    const float scale = std::clamp(workspace_.preferences().uiScale, 0.75F, 2.0F);
+    const float scale = kLogicalLayoutScale;
     const int margin = std::max(20, static_cast<int>(30.0F * scale));
     result.panel.width = std::min(820, std::max(560, width_ - margin * 2));
     result.panel.height = std::min(560, std::max(360, height_ - margin * 2));
@@ -829,6 +835,64 @@ void NativeEditorController::configure_menu_state(std::filesystem::path path) {
         } else if (!error.empty()) workspace_.log().add(EditorLogLevel::Warning, "Menu state load: " + error);
     }
     refresh_menu_state();
+}
+
+void NativeEditorController::configure_user_settings(std::filesystem::path path) {
+    userSettingsPath_ = std::move(path);
+    if (userSettingsPath_.empty() || !std::filesystem::exists(userSettingsPath_)) return;
+    std::string error;
+    if (!workspace_.settings().load_scope_file(SettingScope::User, userSettingsPath_, &error)) {
+        workspace_.log().add(EditorLogLevel::Warning, "User settings load: " + error);
+        return;
+    }
+    apply_settings_to_runtime();
+    synchronize_menu_shortcuts();
+    recompute_layout();
+}
+
+bool NativeEditorController::save_user_settings(std::string* error) const {
+    if (userSettingsPath_.empty()) return true;
+    return workspace_.settings().save_scope_file(SettingScope::User, userSettingsPath_, error);
+}
+
+float NativeEditorController::ui_zoom() const noexcept {
+    return snap_ui_zoom(workspace_.preferences().uiScale);
+}
+
+float NativeEditorController::effective_ui_zoom() const noexcept {
+    return std::min(ui_zoom(), std::max(kUiZoomMin, uiZoomWindowLimit_));
+}
+
+void NativeEditorController::set_ui_zoom_window_limit(float maximumZoom) noexcept {
+    uiZoomWindowLimit_ = std::isfinite(maximumZoom) ? std::clamp(maximumZoom, kUiZoomMin, kUiZoomMax) : kUiZoomMax;
+}
+
+bool NativeEditorController::set_ui_zoom(float requested) {
+    const float zoom = snap_ui_zoom(requested);
+    std::string error;
+    // UI zoom is a per-user accessibility preference: hotkeys write the User layer and drop any
+    // transient Session override so the settings row, hotkeys and hosts all read one value.
+    (void)workspace_.settings().clear(SettingScope::Session, kUiZoomSettingId);
+    if (!workspace_.settings().set(SettingScope::User, kUiZoomSettingId, static_cast<double>(zoom), &error)) {
+        set_status(error, true);
+        return false;
+    }
+    workspace_.synchronize_preferences_from_settings();
+    std::string message = "UI zoom " + format_ui_zoom_percent(ui_zoom());
+    if (workspace_.settings().has_override(SettingScope::Project, kUiZoomSettingId))
+        message += " (Project settings override the User value)";
+    else if (effective_ui_zoom() + 1.0e-3F < ui_zoom())
+        message += " (window too small; showing " + format_ui_zoom_percent(effective_ui_zoom()) + ")";
+    if (!save_user_settings(&error)) {
+        set_status(message + "; save failed: " + error, true);
+        return false;
+    }
+    set_status(std::move(message));
+    return true;
+}
+
+bool NativeEditorController::step_ui_zoom(int direction) {
+    return set_ui_zoom(dve::editor::step_ui_zoom(ui_zoom(), direction));
 }
 
 void NativeEditorController::record_command_use(std::string_view actionId) {
@@ -1024,7 +1088,7 @@ std::vector<const SettingDefinition*> NativeEditorController::settings_rows() co
 
 NativeSettingsModalLayout NativeEditorController::settings_modal_layout() const {
     NativeSettingsModalLayout result;
-    const float scale = std::clamp(workspace_.preferences().uiScale, 0.75F, 2.0F);
+    const float scale = kLogicalLayoutScale;
     const int margin = std::max(20, static_cast<int>(28.0F * scale));
     result.panel.width = std::min(1120, std::max(700, width_ - margin * 2));
     result.panel.height = std::min(780, std::max(500, height_ - margin * 2));
@@ -1090,7 +1154,7 @@ std::vector<ShortcutSearchResult> NativeEditorController::shortcut_rows() const 
 
 NativeShortcutModalLayout NativeEditorController::shortcut_modal_layout() const {
     NativeShortcutModalLayout result;
-    const float scale = std::clamp(workspace_.preferences().uiScale, 0.75F, 2.0F);
+    const float scale = kLogicalLayoutScale;
     const int margin = std::max(20, static_cast<int>(28.0F * scale));
     result.panel.width = std::min(1120, std::max(720, width_ - margin * 2));
     result.panel.height = std::min(760, std::max(480, height_ - margin * 2));
@@ -1212,12 +1276,44 @@ void NativeEditorController::close_settings(bool applyChanges) {
     if (!settingsPanel_.open) return;
     if (applyChanges) {
         std::string error;
+        // UI zoom is a per-user accessibility preference shared with the hotkeys: whichever
+        // scope tab the row was edited on, the value is written to (and saved in) the User layer.
+        std::optional<SettingValue> stagedZoom;
+        bool resetZoom = false;
+        if (const auto it = settingsPanel_.stagedValues.find(kUiZoomSettingId); it != settingsPanel_.stagedValues.end()) {
+            stagedZoom = it->second;
+            settingsPanel_.stagedValues.erase(it);
+        }
+        if (const auto it = settingsPanel_.stagedClears.find(kUiZoomSettingId); it != settingsPanel_.stagedClears.end()) {
+            resetZoom = true;
+            settingsPanel_.stagedClears.erase(it);
+        }
+        if (stagedZoom || resetZoom) {
+            (void)workspace_.settings().clear(SettingScope::Session, kUiZoomSettingId);
+            (void)workspace_.settings().clear(SettingScope::Project, kUiZoomSettingId);
+            if (stagedZoom) {
+                if (const auto* zoom = std::get_if<double>(&*stagedZoom))
+                    (void)workspace_.settings().set(SettingScope::User, kUiZoomSettingId,
+                                                    static_cast<double>(snap_ui_zoom(static_cast<float>(*zoom))));
+            }
+            else (void)workspace_.settings().clear(SettingScope::User, kUiZoomSettingId);
+        }
         if (!settingsPanel_.apply(workspace_.settings(), &error)) {
             set_status(error, true);
             return;
         }
+        // Settings typed as free numbers (e.g. 1.1) are stored snapped so the row shows what is used.
+        SettingScope zoomSource = SettingScope::User;
+        bool zoomInherited = false;
+        const SettingValue zoomValue = workspace_.settings().value(kUiZoomSettingId, &zoomSource, &zoomInherited);
+        if (const auto* zoom = std::get_if<double>(&zoomValue); zoom && !zoomInherited) {
+            const double snapped = static_cast<double>(snap_ui_zoom(static_cast<float>(*zoom)));
+            if (snapped != *zoom) (void)workspace_.settings().set(zoomSource, kUiZoomSettingId, snapped);
+        }
         apply_settings_to_runtime();
-        set_status("Settings applied");
+        if (!save_user_settings(&error)) {
+            set_status("Settings applied; User settings save failed: " + error, true);
+        } else set_status("Settings applied");
     } else {
         settingsPanel_.discard();
         set_status("Settings changes discarded");
@@ -1646,7 +1742,7 @@ void NativeEditorController::resize(int width, int height) {
 }
 
 void NativeEditorController::recompute_layout() {
-    const float scale = std::clamp(workspace_.preferences().uiScale, 0.75F, 3.0F);
+    const float scale = kLogicalLayoutScale;
     const int menuHeight = static_cast<int>(28.0F * scale);
     const int toolbarHeight = static_cast<int>(40.0F * scale);
     const int statusHeight = static_cast<int>(22.0F * scale);
@@ -1924,7 +2020,7 @@ void NativeEditorController::cancel_pending_destructive_action() {
 }
 
 std::optional<std::string> NativeEditorController::menu_name_at(int x) const {
-    const int desiredWidth = std::max(70, static_cast<int>(78.0F * workspace_.preferences().uiScale));
+    const int desiredWidth = static_cast<int>(78.0F * kLogicalLayoutScale);
     const int itemWidth = std::max(1, std::min(desiredWidth, width_ / static_cast<int>(kMenuBarNames.size())));
     const int index = x / itemWidth;
     if (index < 0 || index >= static_cast<int>(kMenuBarNames.size())) return std::nullopt;
@@ -1936,7 +2032,7 @@ NativeMenuPopupLayout NativeEditorController::menu_popup_layout() const {
     if (!openMenu_) return result;
     const auto actions = menu_actions(*openMenu_);
     if (actions.empty()) return result;
-    const int itemHeight = std::max(22, static_cast<int>(24.0F * workspace_.preferences().uiScale));
+    const int itemHeight = static_cast<int>(24.0F * kLogicalLayoutScale);
     int menuIndex = 0;
     for (std::size_t candidate = 0; candidate < kMenuBarNames.size(); ++candidate) {
         if (kMenuBarNames[candidate] == *openMenu_) {
@@ -1944,9 +2040,9 @@ NativeMenuPopupLayout NativeEditorController::menu_popup_layout() const {
             break;
         }
     }
-    const int desiredWidth = std::max(70, static_cast<int>(78.0F * workspace_.preferences().uiScale));
+    const int desiredWidth = static_cast<int>(78.0F * kLogicalLayoutScale);
     const int menuWidth = std::max(1, std::min(desiredWidth, width_ / static_cast<int>(kMenuBarNames.size())));
-    const int popupWidth = std::clamp(static_cast<int>(300.0F * workspace_.preferences().uiScale), 240, 420);
+    const int popupWidth = std::clamp(static_cast<int>(300.0F * kLogicalLayoutScale), 240, 420);
     const int popupX = std::clamp(menuIndex * menuWidth, 0, std::max(0, width_ - popupWidth));
     const int availableHeight = std::max(itemHeight, height_ - layout_.menuBar.height - layout_.statusBar.height - 4);
     const std::size_t visibleCount = std::max<std::size_t>(
@@ -2365,7 +2461,7 @@ void NativeEditorController::open_context_menu(int x, int y, std::optional<Edito
     // Right-click on an unselected object selects it first, so Duplicate/Delete/Frame act on
     // the object under the cursor rather than whatever was selected before the right-click.
     if (target && !workspace_.is_selected(*target)) workspace_.select_object(*target);
-    const int itemHeight = std::max(22, static_cast<int>(24.0F * workspace_.preferences().uiScale));
+    const int itemHeight = static_cast<int>(24.0F * kLogicalLayoutScale);
     constexpr int popupWidth = 190;
     const int popupHeight = itemHeight * static_cast<int>(contextMenu_.items.size());
     contextMenu_.x = std::clamp(x, 0, std::max(0, width_ - popupWidth));
@@ -3619,7 +3715,7 @@ std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
 
 int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
     int result = 0;
-    float best = 10.0F * workspace_.preferences().uiScale;
+    float best = 10.0F * kLogicalLayoutScale;
     for (const GizmoScreenAxis& axis : gizmo_axes()) {
         if (!axis.start.visible || !axis.end.visible) continue;
         const float distance = point_line_distance(static_cast<float>(x), static_cast<float>(y),
@@ -3779,6 +3875,9 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "camera.fly_right") return flyStep({1.0F,0.0F,0.0F});
     if (actionId == "camera.fly_down") return flyStep({0.0F,-1.0F,0.0F});
     if (actionId == "camera.fly_up") return flyStep({0.0F,1.0F,0.0F});
+    if (actionId == "view.ui_zoom_in") return step_ui_zoom(1);
+    if (actionId == "view.ui_zoom_out") return step_ui_zoom(-1);
+    if (actionId == "view.ui_zoom_reset") return step_ui_zoom(0);
     if (actionId == "view.zoom_in" || actionId == "view.zoom_out") {
         remember_camera_position();
         const SettingValue zoomValue = workspace_.settings().value("camera.zoom_sensitivity");
@@ -5047,6 +5146,13 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         if (normalized == "return" || normalized == "enter") confirm_pending_destructive_action();
         else if (normalized == "escape") cancel_pending_destructive_action();
         return;
+    }
+    // UI zoom hotkeys work in every panel (accessibility), except while a shortcut is being captured.
+    if (!shortcutPanel_.capturing && !(settingsPanel_.open && settingsPanel_.valueEditing)) {
+        if (const auto direction = ui_zoom_hotkey_direction(normalized, control, alt)) {
+            (void)step_ui_zoom(*direction);
+            return;
+        }
     }
     if (settingsPanel_.open) { handle_settings_key(normalized, control, shift, alt); return; }
     if (shortcutPanel_.open) { handle_shortcut_editor_key(normalized, control, shift, alt); return; }

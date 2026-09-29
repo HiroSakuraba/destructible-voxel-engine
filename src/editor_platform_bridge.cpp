@@ -1,4 +1,5 @@
 #include "dve/editor_platform_bridge.hpp"
+#include "dve/editor_ui_zoom.hpp"
 
 namespace dve::editor {
 namespace {
@@ -28,13 +29,16 @@ void EditorPlatformBridge::handle_event(const platform::PlatformEvent& event) {
     const bool control = platform::has_modifier(event.modifiers, platform::Modifier::Control);
     const bool shift = platform::has_modifier(event.modifiers, platform::Modifier::Shift);
     const bool alt = platform::has_modifier(event.modifiers, platform::Modifier::Alt);
+    const int x = ui_zoom_to_logical(event.x, zoom_);
+    const int y = ui_zoom_to_logical(event.y, zoom_);
 
     switch (event.type) {
         case platform::EventType::QuitRequested:
             controller_.request_quit();
             break;
         case platform::EventType::WindowResized:
-            controller_.resize(event.width, event.height);
+            controller_.set_ui_zoom_window_limit(max_ui_zoom_for_window(event.width, event.height));
+            controller_.resize(ui_zoom_logical_extent(event.width, zoom_), ui_zoom_logical_extent(event.height, zoom_));
             break;
         case platform::EventType::KeyDown:
             controller_.key_down(event.key, control, shift, alt);
@@ -46,18 +50,18 @@ void EditorPlatformBridge::handle_event(const platform::PlatformEvent& event) {
             controller_.text_input(event.text);
             break;
         case platform::EventType::PointerMove:
-            controller_.pointer_move(event.x, event.y, pointer_modifiers(event.modifiers));
+            controller_.pointer_move(x, y, pointer_modifiers(event.modifiers));
             break;
         case platform::EventType::PointerButtonDown:
-            controller_.pointer_down(to_editor_button(event.button), event.x, event.y,
+            controller_.pointer_down(to_editor_button(event.button), x, y,
                                      pointer_modifiers(event.modifiers));
             break;
         case platform::EventType::PointerButtonUp:
-            controller_.pointer_up(to_editor_button(event.button), event.x, event.y,
+            controller_.pointer_up(to_editor_button(event.button), x, y,
                                    pointer_modifiers(event.modifiers));
             break;
         case platform::EventType::PointerWheel:
-            controller_.pointer_wheel(event.wheelY, event.x, event.y, pointer_modifiers(event.modifiers));
+            controller_.pointer_wheel(event.wheelY, x, y, pointer_modifiers(event.modifiers));
             break;
         case platform::EventType::NoEvent:
         case platform::EventType::WindowFocusGained:

@@ -37,6 +37,8 @@ struct MainMaterialDescriptor {
     std::size_t materialRecordOffset{};
     std::size_t mappingRecordOffset{};
     std::uint32_t texturePresenceMask{};
+    std::array<rhi::TextureViewHandle, kMainMaterialTextureChannelCount> textureViews{};
+    std::array<rhi::SamplerHandle, kMainMaterialTextureChannelCount> samplers{};
     std::uint64_t assetContentHash{};
     std::uint32_t materialIndex{};
 };

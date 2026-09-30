@@ -19,6 +19,8 @@ include(CMakePackageConfigHelpers)
 option(DVE_INSTALL "Generate install() rules and the exported dve CMake package" ON)
 option(DVE_INSTALL_BUNDLE_RUNTIME_DEPENDENCIES
     "Install the non-system shared libraries of installed executables into lib/dve (Linux)" ON)
+option(DVE_INSTALL_BUNDLE_JACK
+    "Bundle libjack (and the Berkeley DB libdb it needs on JACK1) into lib/dve. Off: libjack must match the user's JACK server, and libdb's Sleepycat license reaches the software using it (see THIRD_PARTY_NOTICES)" OFF)
 option(DVE_INSTALL_SAMPLE_MAPS
     "Install assets/audio/sample_maps with the editor assets (off until their provenance is documented, decision D8)" OFF)
 if(NOT DVE_INSTALL)
@@ -28,6 +30,9 @@ endif()
 set(DVE_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/dve")
 set(DVE_INSTALL_BUNDLEDIR "${CMAKE_INSTALL_LIBDIR}/dve")
 set(DVE_INSTALL_THIRD_PARTY_LIBDIR "${CMAKE_INSTALL_LIBDIR}/dve/third_party")
+set(DVE_NOTICES_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/doc/dve")
+set(DVE_SOURCE_TREE_DIR "${PROJECT_SOURCE_DIR}")
+include(DveGamePackage)
 
 # ----------------------------------------------------------------------------------------------
 # Executables: RPATH and bundled runtime dependencies (§4.2)
@@ -52,6 +57,10 @@ set(DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES
     "^libbrotli" "^libbz2\\.so" "^libpng16\\.so"
     # Windows system DLLs, for when the Windows install rules are exercised.
     "^api-ms-" "^ext-ms-" "^(kernel|user|gdi|shell|ole|oleaut|advapi|comdlg|ws2_|winmm|imm|version|setupapi|dwmapi|uxtheme|dinput|dxgi|d3d|opengl|hid|cfgmgr)[0-9]*\\.dll$")
+if(NOT DVE_INSTALL_BUNDLE_JACK)
+    # Left to the system (libjack0 or libjack-jackd2-0); see the option above.
+    list(APPEND DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES "^libjack\\.so" "^libjackserver\\.so" "^libdb-[0-9]")
+endif()
 set(DVE_RUNTIME_DEPENDENCY_POST_EXCLUDES ".*[/\\\\][Ss]ystem32[/\\\\].*")
 
 set(DVE_INSTALLED_EXECUTABLES "")
@@ -65,7 +74,13 @@ function(dve_install_program target component)
         # DT_RPATH (not DT_RUNPATH): the loader applies it to every library in the process, so
         # a bundled library's own dependencies (e.g. libsndfile -> libFLAC) also resolve from
         # lib/dve without patchelf. DT_RUNPATH would only cover the executable's direct needs.
-        set_target_properties(${target} PROPERTIES INSTALL_RPATH "$ORIGIN/../${DVE_INSTALL_BUNDLEDIR}")
+        # The Runtime program also looks in $ORIGIN/lib/dve: that is the layout of a shipped
+        # game folder (dve_package_game: <Game>/<Game> + <Game>/lib/dve/*.so).
+        set(_dve_rpath "$ORIGIN/../${DVE_INSTALL_BUNDLEDIR}")
+        if(component STREQUAL "Runtime")
+            list(APPEND _dve_rpath "$ORIGIN/${DVE_INSTALL_BUNDLEDIR}")
+        endif()
+        set_target_properties(${target} PROPERTIES INSTALL_RPATH "${_dve_rpath}")
         target_link_options(${target} PRIVATE "LINKER:--disable-new-dtags")
     endif()
     set(_dve_depset "")
@@ -82,6 +97,7 @@ function(dve_install_program target component)
     endif()
     set_property(GLOBAL APPEND PROPERTY DVE_INSTALLED_EXECUTABLES ${target})
     set_property(GLOBAL APPEND PROPERTY DVE_INSTALL_PROGRAM_COMPONENTS ${component})
+    set_property(GLOBAL APPEND PROPERTY DVE_INSTALL_PROGRAMS_${component} ${target})
 endfunction()
 
 # Runtime: the game player (never links dve_editor, see dve_player_no_editor_link).
@@ -102,13 +118,19 @@ if(TARGET dve_desktop_editor OR TARGET dve_native_editor_x11)
         ${_dve_asset_excludes})
 endif()
 
-# Tools. dve_export_scene and dve_package_game arrive in Phase 4.
+# Tools: the cookers, dve_pack, dve_export_scene (editor scene -> DVOXSCENE) and the
+# dve_package_game script (shippable game folder, Phase 4).
 foreach(_dve_tool
-        dve_pack dve_cook_model dve_cook_mesh dve_cook_text3d dve_cook_gabor dve_cook_fluoddity
+        dve_pack dve_export_scene dve_cook_model dve_cook_mesh dve_cook_text3d dve_cook_gabor dve_cook_fluoddity
         dve_cook_hair dve_cook_audio dve_cook_chiptune dve_cook_sample_map dve_cook_heightmap
         dve_cook_sprite dve_asset_index dve_prefab_tool)
     dve_install_program(${_dve_tool} Tools)
 endforeach()
+
+if(TARGET dve_pack)
+    install(PROGRAMS "${PROJECT_SOURCE_DIR}/scripts/dve_package_game.py"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}" RENAME dve_package_game COMPONENT Tools)
+endif()
 
 get_property(_dve_depset_components GLOBAL PROPERTY DVE_RUNTIME_DEPENDENCY_SETS)
 list(REMOVE_DUPLICATES _dve_depset_components)
@@ -385,6 +407,7 @@ if(DVE_INSTALL_DEVELOPMENT)
         VERSION "${PROJECT_VERSION}"
         COMPATIBILITY SameMinorVersion)
     install(FILES "${PROJECT_BINARY_DIR}/dveConfig.cmake" "${PROJECT_BINARY_DIR}/dveConfigVersion.cmake"
+            "${CMAKE_CURRENT_LIST_DIR}/DveGamePackage.cmake"
         DESTINATION "${DVE_INSTALL_CMAKEDIR}"
         COMPONENT Development)
 endif()
@@ -412,4 +435,5 @@ if(DVE_INSTALL_DEVELOPMENT)
 endif()
 message(STATUS "dve install components: ${DVE_INSTALLED_COMPONENTS}")
 
+include(DveNotices)
 include(DveInstallTests)

@@ -1,9 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -185,6 +187,10 @@ struct PolygonAssetReadResult {
     std::string* error = nullptr);
 [[nodiscard]] PolygonAssetReadResult read_dmesh(
     const std::filesystem::path& path,
+    std::uint64_t maximumBytes = std::numeric_limits<std::uint64_t>::max());
+// In-memory variant (complete file image); the path overload delegates to the same decoder.
+[[nodiscard]] PolygonAssetReadResult read_dmesh(
+    std::span<const std::byte> bytes,
     std::uint64_t maximumBytes = std::numeric_limits<std::uint64_t>::max());
 
 } // namespace dve

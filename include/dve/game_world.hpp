@@ -1,10 +1,12 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
 #include <set>
+#include <span>
 #include <memory>
 #include <optional>
 #include <string>
@@ -13,6 +15,7 @@
 #include <vector>
 #include <utility>
 
+#include "dve/asset_cooker.hpp"
 #include "dve/component.hpp"
 #include "dve/damage.hpp"
 #include "dve/editor_materials.hpp"
@@ -161,6 +164,24 @@ struct GameDamageEvent {
     std::vector<GameObjectId> newFragmentIds;
 };
 
+// Read-only view of one GameWorld object for a renderer (see GameWorld::render_objects()).
+// Pointers/spans reference GameWorld-owned storage and stay valid only until the next
+// mutating GameWorld call (tick, spawn, destroy, damage, ...); copy what must outlive that.
+struct GameRenderObject {
+    GameObjectId id{kInvalidGameObjectId};
+    const std::string* name{};
+    GameGeometryKind kind{GameGeometryKind::Marker};
+    const VoxelObject* voxels{};                      // Voxel objects only
+    const CookedPolygonAsset* polygon{};              // Polygon objects only
+    // Cooked material table for assets spawned from .dvox (spawn_asset & friends). Empty for
+    // create_object()/spawn_box objects; renderers should fall back to a default palette.
+    std::span<const VoxelMaterialDefinition> materials;
+    RigidTransform transform{};                       // current world transform (object origin)
+    float voxelSizeMeters{};
+    bool enabled{true};
+    bool dynamic{};
+};
+
 // The tick loop and live, script-facing object model this engine did not previously have:
 // RuntimeSceneObject is read-only streaming/rendering linkage, EditorJoltSimulation is scoped
 // to the editor's Simulate/Play preview. GameWorld is the production runtime counterpart,
@@ -181,6 +202,21 @@ public:
     // `name` defaults to the file's stem if empty.
     [[nodiscard]] GameObjectId spawn_asset(
         const std::filesystem::path& path, std::string name, const RigidTransform& transform,
+        bool dynamic, bool structural = true, std::string* error = nullptr);
+    // In-memory variant of spawn_asset() for content read from a ContentSource/.dvepak.
+    // `extension` selects the decoder (".dvox" or ".dmesh"); `name` defaults to "asset".
+    // Validation and the resulting object are identical to spawning the same file by path.
+    [[nodiscard]] GameObjectId spawn_asset_from_bytes(
+        std::span<const std::byte> bytes, std::string_view extension, std::string name,
+        const RigidTransform& transform, bool dynamic, bool structural = true,
+        std::string* error = nullptr);
+    // Spawns an already-decoded cooked voxel asset (what spawn_asset does after read_dvox).
+    // Lets loaders validate every asset up front before creating any object.
+    [[nodiscard]] GameObjectId spawn_cooked_asset(
+        CookedVoxelAsset asset, std::string name, const RigidTransform& transform,
+        bool dynamic, bool structural = true, std::string* error = nullptr);
+    [[nodiscard]] GameObjectId spawn_cooked_polygon_asset(
+        CookedPolygonAsset asset, std::string name, const RigidTransform& transform,
         bool dynamic, bool structural = true, std::string* error = nullptr);
     // Explicit polygon path. The generic spawn_asset() dispatches .dvox and .dmesh by extension.
     [[nodiscard]] GameObjectId spawn_polygon_asset(
@@ -239,6 +275,10 @@ public:
     // cached, so it is always current even if called mid-tick.
     [[nodiscard]] std::optional<RigidTransform> transform(GameObjectId id) const;
     [[nodiscard]] std::optional<Float3> position(GameObjectId id) const;
+    // Every live object (markers included, so callers can filter), sorted by id, with its
+    // current world transform and read-only geometry/material views. This is the renderer's
+    // only window into GameWorld; it never mutates state. See GameRenderObject for lifetime.
+    [[nodiscard]] std::vector<GameRenderObject> render_objects() const;
     // Markers (no body) and dynamic bodies can be moved; static voxel bodies cannot (their
     // Jolt collision is baked in at creation) and this returns false for them.
     bool set_position(GameObjectId id, Float3 worldPosition);

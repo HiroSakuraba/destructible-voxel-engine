@@ -17,6 +17,7 @@
 #include <future>
 #include <limits>
 #include <map>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -33,6 +34,17 @@ struct RuntimeSceneParserAccess {
     [[nodiscard]] static RuntimeScene parse_manifest(
         const std::filesystem::path& manifestPath,
         const RuntimeSceneLoadOptions& options);
+    // Shared JSON/structure validation for the path-based and in-memory parsers. `onObject`
+    // runs for each object right after its ID/index uniqueness checks (the position where the
+    // path parser has always resolved the asset file), so error precedence is unchanged.
+    using ObjectHook = std::function<void(RuntimeSceneObject&, const std::string& file)>;
+    static void parse_manifest_text(
+        std::string_view text,
+        const RuntimeSceneLoadOptions& options,
+        const std::filesystem::path& manifestForErrors,
+        const ObjectHook& onObject,
+        std::string& name,
+        std::vector<RuntimeSceneObject>& objects);
 };
 
 namespace {
@@ -529,7 +541,37 @@ RuntimeScene RuntimeSceneParserAccess::parse_manifest(
     const std::filesystem::path packageRoot = std::filesystem::weakly_canonical(canonicalManifest.parent_path(), ec);
     if (ec) fail(RuntimeSceneErrorCode::Io, "unable to canonicalize scene package root", canonicalManifest);
 
-    const JsonValue root = JsonParser(read_text_file_limited(canonicalManifest, options.maximumManifestBytes)).parse();
+    const std::string text = read_text_file_limited(canonicalManifest, options.maximumManifestBytes);
+    RuntimeScene scene;
+    scene.manifestPath_ = canonicalManifest;
+    scene.packageRoot_ = packageRoot;
+    scene.options_ = options;
+    std::set<std::filesystem::path> assetPaths;
+    parse_manifest_text(
+        text, options, canonicalManifest,
+        [&](RuntimeSceneObject& object, const std::string& file) {
+            object.resolvedAssetPath_ = resolve_contained_asset(packageRoot, file, object.metadata_.id,
+                                                                options.maximumDvoxBytesPerObject);
+            if (!assetPaths.insert(object.resolvedAssetPath_).second) {
+                fail(RuntimeSceneErrorCode::DuplicateAssetPath,
+                     "multiple manifest objects reference the same canonical DVOX file", object.resolvedAssetPath_, object.metadata_.id);
+            }
+        },
+        scene.name_, scene.objects_);
+    return scene;
+}
+
+void RuntimeSceneParserAccess::parse_manifest_text(
+    std::string_view text,
+    const RuntimeSceneLoadOptions& options,
+    const std::filesystem::path& canonicalManifest,
+    const ObjectHook& onObject,
+    std::string& sceneName,
+    std::vector<RuntimeSceneObject>& sceneObjects) {
+    if (static_cast<std::uint64_t>(text.size()) > options.maximumManifestBytes) {
+        fail(RuntimeSceneErrorCode::LimitExceeded, "manifest exceeds configured size limit", canonicalManifest);
+    }
+    const JsonValue root = JsonParser(text).parse();
     static constexpr std::array rootFields{"format"sv, "version"sv, "name"sv, "objects"sv};
     reject_unknown_fields(root, rootFields, "manifest root");
     const std::string format = require_string(require_field(root, "format", "manifest root"), "manifest.format", 32U);
@@ -543,15 +585,11 @@ RuntimeScene RuntimeSceneParserAccess::parse_manifest(
         fail(RuntimeSceneErrorCode::LimitExceeded, "manifest object count exceeds configured limit", canonicalManifest);
     }
 
-    RuntimeScene scene;
-    scene.name_ = name;
-    scene.manifestPath_ = canonicalManifest;
-    scene.packageRoot_ = packageRoot;
-    scene.options_ = options;
-    scene.objects_.reserve(objectArray.array().size());
+    sceneName = name;
+    sceneObjects.clear();
+    sceneObjects.reserve(objectArray.array().size());
     std::set<std::uint64_t> ids;
     std::set<std::size_t> indices;
-    std::set<std::filesystem::path> assetPaths;
     static constexpr std::array objectFields{
         "index"sv, "id"sv, "name"sv, "nodePath"sv, "file"sv, "parent"sv,
         "anchored"sv, "structural"sv, "generateCollision"sv, "worldMatrix"sv};
@@ -579,34 +617,71 @@ RuntimeScene RuntimeSceneParserAccess::parse_manifest(
         if (!indices.insert(object.metadata_.index).second) {
             fail(RuntimeSceneErrorCode::DuplicateObjectIndex, "manifest contains duplicate object index", {}, object.metadata_.id);
         }
-        object.resolvedAssetPath_ = resolve_contained_asset(packageRoot, file, object.metadata_.id,
-                                                            options.maximumDvoxBytesPerObject);
-        if (!assetPaths.insert(object.resolvedAssetPath_).second) {
-            fail(RuntimeSceneErrorCode::DuplicateAssetPath,
-                 "multiple manifest objects reference the same canonical DVOX file", object.resolvedAssetPath_, object.metadata_.id);
-        }
-        scene.objects_.push_back(std::move(object));
+        onObject(object, file);
+        sceneObjects.push_back(std::move(object));
     }
 
-    std::sort(scene.objects_.begin(), scene.objects_.end(), [](const RuntimeSceneObject& a, const RuntimeSceneObject& b) {
+    std::sort(sceneObjects.begin(), sceneObjects.end(), [](const RuntimeSceneObject& a, const RuntimeSceneObject& b) {
         return a.metadata().index < b.metadata().index;
     });
-    for (std::size_t i = 0; i < scene.objects_.size(); ++i) {
-        if (scene.objects_[i].metadata_.index != i) {
+    for (std::size_t i = 0; i < sceneObjects.size(); ++i) {
+        if (sceneObjects[i].metadata_.index != i) {
             fail(RuntimeSceneErrorCode::DuplicateObjectIndex,
-                 "manifest object indices must form the contiguous range [0, objectCount)", {}, scene.objects_[i].metadata_.id);
+                 "manifest object indices must form the contiguous range [0, objectCount)", {}, sceneObjects[i].metadata_.id);
         }
     }
-    for (RuntimeSceneObject& object : scene.objects_) {
+    for (RuntimeSceneObject& object : sceneObjects) {
         if (!object.metadata_.parentIndex) continue;
         const std::size_t parent = *object.metadata_.parentIndex;
-        if (parent >= scene.objects_.size() || parent == object.metadata_.index) {
+        if (parent >= sceneObjects.size() || parent == object.metadata_.index) {
             fail(RuntimeSceneErrorCode::InvalidParent, "object parent index is invalid", {}, object.metadata_.id);
         }
-        object.metadata_.parentId = scene.objects_[parent].metadata_.id;
+        object.metadata_.parentId = sceneObjects[parent].metadata_.id;
     }
-    validate_hierarchy(scene.objects_);
-    return scene;
+    validate_hierarchy(sceneObjects);
+}
+
+std::optional<DvoxSceneManifest> parse_dvoxscene_manifest(
+    std::string_view text,
+    const RuntimeSceneLoadOptions& options,
+    RuntimeSceneError* error) {
+    try {
+        std::set<std::filesystem::path> assetPaths;
+        std::string name;
+        std::vector<RuntimeSceneObject> objects;
+        RuntimeSceneParserAccess::parse_manifest_text(
+            text, options, {},
+            [&](RuntimeSceneObject& object, const std::string& file) {
+                // Lexical equivalent of resolve_contained_asset(): same codes and messages,
+                // without touching the filesystem. Existence and size are checked by whoever
+                // reads the bytes (e.g. the ContentSource-based GameWorld scene loader).
+                const std::filesystem::path relative = std::filesystem::path(file).lexically_normal();
+                if (relative.empty() || relative.is_absolute() || relative.has_root_name() ||
+                    path_has_parent_reference(relative) || file.find('\\') != std::string::npos) {
+                    fail(RuntimeSceneErrorCode::PathEscape, "object asset path is not a contained relative path",
+                         relative, object.metadata().id);
+                }
+                if (relative.extension() != ".dvox") {
+                    fail(RuntimeSceneErrorCode::InvalidManifest, "object asset file must use the .dvox extension",
+                         relative, object.metadata().id);
+                }
+                if (!assetPaths.insert(relative).second) {
+                    fail(RuntimeSceneErrorCode::DuplicateAssetPath,
+                         "multiple manifest objects reference the same canonical DVOX file", relative, object.metadata().id);
+                }
+            },
+            name, objects);
+        DvoxSceneManifest manifest;
+        manifest.name = std::move(name);
+        manifest.objects.reserve(objects.size());
+        for (const RuntimeSceneObject& object : objects) manifest.objects.push_back(object.metadata());
+        return manifest;
+    } catch (const SceneException& exception) {
+        if (error) *error = exception.error;
+    } catch (const std::exception& exception) {
+        if (error) *error = {RuntimeSceneErrorCode::InvalidManifest, exception.what(), {}, std::nullopt};
+    }
+    return std::nullopt;
 }
 
 namespace {
@@ -1275,6 +1350,57 @@ private:
 
 } // namespace
 
+namespace {
+
+// Per-object asset checks shared by RuntimeSceneWorld and validate_dvoxscene_asset().
+void validate_scene_asset(
+    const RuntimeSceneObjectMetadata& metadata,
+    const CookedVoxelAsset& asset,
+    const RuntimeSceneLoadOptions& options,
+    const std::filesystem::path& path) {
+    if (asset.object.id() != metadata.id) {
+        fail(RuntimeSceneErrorCode::ObjectIdMismatch,
+             "DVOX object ID does not match the scene manifest",
+             path, metadata.id);
+    }
+    for (const VoxelMaterialDefinition& material : asset.materials) {
+        if (!validate_material(material)) {
+            fail(RuntimeSceneErrorCode::InvalidMaterialTable,
+                 "DVOX material table contains non-finite or invalid values",
+                 path, metadata.id);
+        }
+    }
+    if (!validate_material_references(asset)) {
+        fail(RuntimeSceneErrorCode::InvalidMaterialReference,
+             "DVOX voxels reference a material outside the material table",
+             path, metadata.id);
+    }
+    const float voxelSize = asset.voxelSizeMeters;
+    if (options.expectedVoxelSizeMeters > 0.0F &&
+        std::abs(voxelSize - options.expectedVoxelSizeMeters) > options.voxelSizeTolerance) {
+        fail(RuntimeSceneErrorCode::VoxelSizeMismatch,
+             "DVOX voxel size violates the external scene policy",
+             path, metadata.id);
+    }
+}
+
+} // namespace
+
+RuntimeSceneError validate_dvoxscene_asset(
+    const RuntimeSceneObjectMetadata& metadata,
+    const CookedVoxelAsset& asset,
+    const RuntimeSceneLoadOptions& options,
+    const std::filesystem::path& pathForErrors) {
+    try {
+        validate_scene_asset(metadata, asset, options, pathForErrors);
+        return {};
+    } catch (const SceneException& exception) {
+        return exception.error;
+    } catch (const std::exception& exception) {
+        return {RuntimeSceneErrorCode::DvoxReadFailed, exception.what(), pathForErrors, metadata.id};
+    }
+}
+
 bool RuntimeSceneWorld::load_object_asset(
     RuntimeSceneObject& object,
     const RuntimeSceneLoadOptions& options,
@@ -1298,30 +1424,7 @@ bool RuntimeSceneWorld::load_object_asset(
             fail(RuntimeSceneErrorCode::DvoxReadFailed,
                  "DVOX load failed: " + read.error, object.resolvedAssetPath_, object.metadata_.id);
         }
-        if (read.asset.object.id() != object.metadata_.id) {
-            fail(RuntimeSceneErrorCode::ObjectIdMismatch,
-                 "DVOX object ID does not match the scene manifest",
-                 object.resolvedAssetPath_, object.metadata_.id);
-        }
-        for (const VoxelMaterialDefinition& material : read.asset.materials) {
-            if (!validate_material(material)) {
-                fail(RuntimeSceneErrorCode::InvalidMaterialTable,
-                     "DVOX material table contains non-finite or invalid values",
-                     object.resolvedAssetPath_, object.metadata_.id);
-            }
-        }
-        if (!validate_material_references(read.asset)) {
-            fail(RuntimeSceneErrorCode::InvalidMaterialReference,
-                 "DVOX voxels reference a material outside the material table",
-                 object.resolvedAssetPath_, object.metadata_.id);
-        }
-        const float voxelSize = read.asset.voxelSizeMeters;
-        if (options.expectedVoxelSizeMeters > 0.0F &&
-            std::abs(voxelSize - options.expectedVoxelSizeMeters) > options.voxelSizeTolerance) {
-            fail(RuntimeSceneErrorCode::VoxelSizeMismatch,
-                 "DVOX voxel size violates the external scene policy",
-                 object.resolvedAssetPath_, object.metadata_.id);
-        }
+        validate_scene_asset(object.metadata_, read.asset, options, object.resolvedAssetPath_);
         object.asset_.emplace(std::move(read.asset));
         return true;
     } catch (const SceneException& exception) {

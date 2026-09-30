@@ -436,6 +436,19 @@ bool DynamicNavigationWorld::rebuild_dirty(std::string* error){
 
 std::vector<NavigationDirtyTile> DynamicNavigationWorld::dirty_tiles() const{return {dirty_.begin(),dirty_.end()};}
 
+bool dvepak_path_is_editor_only(std::string_view normalized,const DvePakBuildOptions& options) noexcept{
+    if(!options.stripEditorOnly)return false;
+    if(std::any_of(options.editorOnlyPrefixes.begin(),options.editorOnlyPrefixes.end(),[&](const auto& p){return path_has_prefix(normalized,p);}))return true;
+    // Every directory component (never the final file name) is checked against the names.
+    std::size_t start=0U;
+    for(std::size_t slash=normalized.find('/');slash!=std::string_view::npos;slash=normalized.find('/',start)){
+        const std::string_view component=normalized.substr(start,slash-start);
+        if(std::find(options.editorOnlyDirectoryNames.begin(),options.editorOnlyDirectoryNames.end(),component)!=options.editorOnlyDirectoryNames.end())return true;
+        start=slash+1U;
+    }
+    return false;
+}
+
 bool build_dvepak(const std::filesystem::path& root,std::span<const std::filesystem::path> inputs,
     const std::filesystem::path& output,const DvePakBuildOptions& options,DvePakManifest* manifest,std::string* error){
     struct Pending{std::string path;std::vector<std::byte> bytes;std::uint64_t hash{};};std::vector<Pending> pending;
@@ -444,7 +457,7 @@ bool build_dvepak(const std::filesystem::path& root,std::span<const std::filesys
         auto relative=std::filesystem::relative(absolute,root,ec);if(ec)return fail(error,"package input is outside root: "+absolute.string());
         const auto normalized=normalize_package_path(relative);
         if(normalized.empty()||path_has_prefix(normalized,"../")||normalized=="..")return fail(error,"unsafe package path: "+normalized);
-        if(options.stripEditorOnly&&std::any_of(options.editorOnlyPrefixes.begin(),options.editorOnlyPrefixes.end(),[&](const auto& p){return path_has_prefix(normalized,p);}))continue;
+        if(dvepak_path_is_editor_only(normalized,options))continue;
         auto bytes=read_file_bytes(absolute,error);if(!bytes)return false;pending.push_back({normalized,std::move(*bytes),0U});pending.back().hash=fnv_bytes(pending.back().bytes);
     }
     std::sort(pending.begin(),pending.end(),[](const auto& a,const auto& b){return a.path<b.path;});
@@ -489,7 +502,11 @@ std::optional<DvePakManifest> inspect_dvepak(const std::filesystem::path& packag
 }
 
 bool DvePakMount::mount(const std::filesystem::path& package,std::string* error){auto parsed=inspect_dvepak(package,error);if(!parsed)return false;package_=package;manifest_=std::move(*parsed);return true;}
-bool DvePakMount::contains(std::string_view path) const noexcept {return std::any_of(manifest_.entries.begin(),manifest_.entries.end(),[&](const auto& e){return e.path==path;});}
+const DvePakEntry* DvePakMount::find(std::string_view path) const noexcept{
+    const auto it=std::lower_bound(manifest_.entries.begin(),manifest_.entries.end(),path,[](const auto& e,std::string_view p){return e.path<p;});
+    return it==manifest_.entries.end()||it->path!=path?nullptr:&*it;
+}
+bool DvePakMount::contains(std::string_view path) const noexcept {return find(path)!=nullptr;}
 std::optional<std::vector<std::byte>> DvePakMount::read(std::string_view path,std::string* error) const{
     const auto it=std::lower_bound(manifest_.entries.begin(),manifest_.entries.end(),path,[](const auto& e,std::string_view p){return e.path<p;});
     if(it==manifest_.entries.end()||it->path!=path)return fail(error,"package entry not found"),std::nullopt;

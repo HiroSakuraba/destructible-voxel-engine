@@ -1,10 +1,11 @@
-# Packaging and runtime content (Phases 1–3)
+# Packaging and runtime content (Phases 1–4)
 
 This is the runtime half of shipping a game: reading content from a `.dvepak` or a loose
 project folder and booting a `GameWorld` from it without the editor (Phase 1), and the
 `dve_player` executable that runs it (Phase 2, [below](#the-player-dve_player)), and installing
-and packaging the engine (Phase 3, [below](#installing-and-packaging-phase-3)). The
-`dve_package_game` step that produces a shippable game folder is Phase 4.
+and packaging the engine (Phase 3, [below](#installing-and-packaging-phase-3)), and turning a
+game project into a shippable folder with its third-party notices (Phase 4,
+[below](#shipping-a-game-phase-4)).
 
 ## Content sources (`dve/content_source.hpp`, `dve_core`)
 
@@ -23,8 +24,9 @@ or `IntegrityFailure`.
 
 ## Scenes (`dve/game_scene_loader.hpp`)
 
-The shipped scene format is DVOXSCENE JSON plus `.dvox` (decision D2). Editor scenes will
-need an offline export step (Phase 4), so the runtime never links `dve_editor`.
+The shipped scene format is DVOXSCENE JSON plus `.dvox` (decision D2). Editor scenes are
+converted offline by `dve_export_scene` ([Phase 4](#editor-scenes-dve_export_scene)), so the
+runtime never links `dve_editor`.
 
 ```cpp
 auto content = dve::open_content_source("game.dvepak");
@@ -209,12 +211,13 @@ cd out/build/linux-gcc-release && cpack -G "TGZ;DEB"                         # p
 | `RuntimeDeps` | `lib/dve/*.so*`: the player's non-system shared libraries | `dve-runtime` (archives only) |
 | `Editor` | `bin/dve_desktop_editor`, `bin/dve_native_editor_x11`, `share/dve/assets/` | `dve-editor` |
 | `EditorDeps` | `lib/dve/*.so*` for the editor | `dve-editor` (archives only) |
-| `Tools` | `bin/dve_pack`, `bin/dve_cook_*`, `bin/dve_asset_index`, `bin/dve_prefab_tool` | `dve-tools` |
+| `Tools` | `bin/dve_pack`, `bin/dve_export_scene`, `bin/dve_package_game`, `bin/dve_cook_*`, `bin/dve_asset_index`, `bin/dve_prefab_tool` | `dve-tools` |
 | `ToolsDeps` | `lib/dve/*.so*` for the tools | `dve-tools` (archives only) |
 | `Development` | `include/dve/**` (with the generated `version.hpp`, `build_config.hpp`), `lib/libdve_*.a`, `lib/dve/third_party/*.a`, `lib/cmake/dve/` | `dve-dev` |
 
 Only executables that exist in the build are installed; for example, a build without SDL3 has no
-`Runtime` or `Editor` component. `dve_export_scene` and `dve_package_game` come in Phase 4.
+`Runtime` or `Editor` component. Every component also installs its
+`share/doc/dve/THIRD_PARTY_NOTICES-<component>.txt` (Phase 4).
 
 - **Sample maps (D8).** `assets/audio/sample_maps` is never installed, because its provenance is
   undocumented. `-DDVE_INSTALL_SAMPLE_MAPS=ON` adds it to the `Editor` component only; the
@@ -229,7 +232,8 @@ Only executables that exist in the build are installed; for example, a build wit
 
 ### RPATH and bundled libraries (Linux)
 
-Installed executables get `INSTALL_RPATH $ORIGIN/../lib/dve`. They are linked with
+Installed executables get `INSTALL_RPATH $ORIGIN/../lib/dve`; `dve_player` also gets
+`$ORIGIN/lib/dve`, the layout of a shipped game folder (Phase 4). They are linked with
 `--disable-new-dtags`, so this is a `DT_RPATH` rather than a `DT_RUNPATH`: the loader applies it to
 every library in the process, so the dependencies of a bundled library (for example
 `libsndfile` → `libFLAC`) also resolve from `lib/dve`, without `patchelf`. (A `DT_RUNPATH` only
@@ -245,7 +249,11 @@ dependencies are not walked):
 - the X11/XCB/Wayland/GL/EGL/Vulkan/DRM stacks;
 - the audio servers (ALSA, PulseAudio, PipeWire, sndio);
 - dbus/udev/systemd, zlib, glib, libffi/expat/pcre2 and similar;
-- the font stack (freetype, harfbuzz, fontconfig, libpng16, brotli, bz2).
+- the font stack (freetype, harfbuzz, fontconfig, libpng16, brotli, bz2);
+- `libjack` and Berkeley DB `libdb` (Phase 4; `DVE_INSTALL_BUNDLE_JACK=OFF` by default). libjack
+  must match the JACK server on the machine, and libdb's Sleepycat license reaches the software
+  that uses it (see [licenses](#third-party-licenses-and-what-to-review)). They are only reachable
+  through RtMidi, so this affects the editor.
 
 What gets bundled depends on the preset. With `linux-gcc-release`, the Debian `libSDL3.so.0`
 itself links X11, Wayland, PulseAudio, PipeWire and sndio directly, so a TGZ built from it needs
@@ -268,8 +276,8 @@ On Windows, `CPACK_GENERATOR` is `ZIP;NSIS` and the executables' `$<TARGET_RUNTI
 copied next to them. This is configured but **untested** (no Windows runner yet).
 
 **No license (D1).** There is no engine `LICENSE`, so no `CPACK_RESOURCE_FILE_LICENSE` is set,
-and `cpack` prints a warning for every generator: these packages are for internal use only. The
-third-party notices (`THIRD_PARTY_NOTICES.txt`) come with Phase 4.
+and `cpack` prints a warning for every generator: these packages are for internal use only. Each
+package carries its component's `THIRD_PARTY_NOTICES-<component>.txt` (Phase 4).
 
 ### The `dve` CMake package
 
@@ -345,3 +353,166 @@ not covered by a preset.
 | `dve_install_tree_test` | Installs every component into `install_tests/prefix` in the build folder and checks the expected files and that no sample maps were installed. It also checks the executables: `readelf -d` shows the `$ORIGIN` RPATH, and `ldd` finds every non-system library inside the prefix (none are "not found"). It then runs the installed `dve_player --pak <sample> --frames 30 --hash` from another directory with `LD_LIBRARY_PATH` unset: same hash as the build-tree player, and a golden hash when one is known. Finally it repacks the sample with the installed `dve_pack` and runs the installed editor's `--smoke`. |
 | `dve_package_consumer_test` | Configures, builds and runs `tests/package_consumer` against that prefix with `find_package(dve X.Y)` (10 headless frames of the sample pak). It checks that `X.Y.Z` is accepted and `X.(Y±1)` is rejected (SameMinorVersion). |
 | `dve_cpack_test` (label `slow`) | `cpack -G "TGZ;DEB"`, then checks each archive's listing and each `.deb`'s `dpkg-deb -c` / `-f` (package name, version, `Depends`, no `lib/dve` in the DEBs, no sample maps). It writes a size summary to `install_tests/cpack/summary.txt`. |
+
+## Shipping a game (Phase 4)
+
+Phase 4 turns a game project (a folder with `game.dvegame`) into a folder or `.tar.gz` that a
+player can unpack and run: no editor, no engine install, nothing on `LD_LIBRARY_PATH`.
+
+```
+<Game>/
+  <Game>                     dve_player, renamed and stripped (RPATH $ORIGIN/lib/dve)
+  game.dvepak                cooked content: game.dvegame, scenes, .dvox, scripts, audio
+  lib/dve/*.so*              only the bundled libraries this executable needs
+  THIRD_PARTY_NOTICES.txt    the Runtime notices (checked to cover every lib/dve file)
+  LICENSE*/COPYING*          copied from the project folder, if it has any
+  build-info.json            engine version/git describe, game name/version, file list
+```
+
+`dve_player` with no `--pak`/`--project` looks for `game.dvepak` next to its executable, so
+running `./<Game>` from any directory starts the game.
+
+### Editor scenes: `dve_export_scene`
+
+```
+dve_export_scene <scene.dvescene> <out.dvoxscene.json> [--materials f.dvematerials]
+                 [--objects-dir d] [--name n] [--strict] [--quiet]
+```
+
+A Tools executable (it links `dve_editor`; the player does not). It writes a DVOXSCENE v1
+manifest and one `.dvox` per object in `<stem>.objects/`.
+
+| Editor | DVOXSCENE |
+|---|---|
+| object id, name | `id`, `name` (objects in id order) |
+| world transform | rigid column-major `transform` (the editor's world matrix) |
+| voxels | `<stem>.objects/<id>.dvox` |
+| `anchored` / `structural` / `collisionEnabled` | `anchored` / `structural` / `generateCollision` |
+| parent | parent index (hierarchy metadata) |
+| material ids | material table from the `EditorMaterialLibrary` (default or `--materials`), so colours and densities match the editor; unknown ids get a neutral material and a warning |
+
+Not exported, each with a warning: hidden and empty objects, `text3d`, Gabor volumes and `.dmesh`
+objects (skipped); components, tags, groups and layers (dropped); prefab links (flattened to their
+current voxels); attachments (kept only as hierarchy metadata, so the player does not move
+children with their parents). `--strict` makes any warning an error, and then no manifest is
+written. Re-exporting is byte-identical and removes stale `.dvox` files.
+
+### `dve_package_game` / `dve_add_game_package()`
+
+```
+dve_package_game --project <dir> --output <dir> [--name N] [--tgz] [--verify]
+                 [--runtime-prefix <install prefix> | --build-dir <build dir>]
+                 [--materials f] [--strict-export] [--include-sample-maps] [--no-strip] [--keep-work]
+```
+
+Installed as `bin/dve_package_game` (Tools component; the source is `scripts/dve_package_game.py`,
+Python 3). With `--runtime-prefix` (the default is the prefix it is installed in) it uses that
+install's `dve_player`, `lib/dve`, `dve_pack`, `dve_export_scene` and notices; with `--build-dir`
+it installs the Runtime component of a build tree into a temporary prefix first. Steps:
+
+1. Validate `game.dvegame` (name, version, entry scene).
+2. Stage the project, excluding `*.autosave`, `.git`, the top-level `editor/`, `docs/`, `tests/`
+   and `artifacts/` folders, `project.dveproject`, backup `*.objects.rN/` folders, and
+   `audio/sample_maps` (unless `--include-sample-maps`, decision D8).
+3. Export every `.dvescene` that has no cooked `<stem>.dvoxscene.json` with `dve_export_scene`.
+4. `dve_pack --all` the staged folder into `game.dvepak`.
+5. Copy the player as `<Game>` (stripped unless `--no-strip`) and the part of `lib/dve` that
+   its `DT_NEEDED` closure uses.
+6. Copy the Runtime notices as `THIRD_PARTY_NOTICES.txt` and fail if a shipped `.so` is not
+   covered by it.
+7. Write `build-info.json`; with `--tgz`, write a reproducible
+   `<Game>-<version>-linux-x86_64.tar.gz` next to the folder (sorted entries, `SOURCE_DATE_EPOCH`
+   or 0 as mtime, root owner).
+8. With `--verify`, run the packaged executable headless for 2 frames with `LD_*` removed from
+   the environment.
+
+It refuses to replace a non-empty output folder that it did not create.
+
+From CMake, both in the engine tree and through the installed package:
+
+```cmake
+find_package(dve 2.35 REQUIRED)
+dve_add_game_package(my_game_package
+    PROJECT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/game
+    OUTPUT_DIR ${CMAKE_BINARY_DIR}/ship/MyGame
+    [NAME MyGame] [TGZ] [VERIFY] [ALL] [RUNTIME_PREFIX <prefix>] [MATERIALS <file>]
+    [EXTRA_ARGS ...])
+```
+
+In the engine tree, `cmake --build <build> --target dve_sample_game_package` packages
+`tests/data/player_sample` into `<build>/game_packages/Player_Sample`.
+
+Which libraries end up in `lib/dve` depends on the preset (see
+[RPATH and bundled libraries](#rpath-and-bundled-libraries-linux)). With `linux-gcc-release` the
+sample game folder is about 12.7 MiB (6.6 MiB as `.tar.gz`): a 3.9 MB executable, a 27 KB pak,
+~310 KB of notices, and libSDL3, libsndfile and its codecs (FLAC, vorbis, vorbisenc, ogg, opus,
+mpg123, mp3lame). Debian's libopus alone is 3.5 MB.
+
+### Third-party notices
+
+- `third_party/notices/manifest.json` lists every third-party component the engine can link or
+  bundle, how to recognise it (sonames, CMake targets, static archives, source paths) and where
+  its license text comes from (the Debian `/usr/share/doc/<pkg>/copyright` of the installed
+  package, a file in the repository, the fetched source's `LICENSE` next to the target's
+  `SOURCE_DIR`, or `DVE_STEAM_AUDIO_ROOT`). Each entry has `copyleft` and `review` notes.
+- `cmake/DveNotices.cmake` writes, per component, the executables, their link closure (targets
+  and library files) and the system-exclude patterns to `notices/inputs/<Component>.json`. The
+  `dve_third_party_notices` target (in `ALL`) runs `tools/generate_third_party_notices.py` to write
+  `notices/THIRD_PARTY_NOTICES-<component>.txt`, which is installed to `share/doc/dve`.
+- The generator follows the same rules as `install(RUNTIME_DEPENDENCY_SET)`: it walks `readelf`
+  `DT_NEEDED` recursively, prunes the system-exclude patterns, and resolves the rest with `ldd`.
+  Imported targets count through their files; in-tree third-party targets (e.g. fetched Jolt,
+  manifold) and absolute static archives must match a manifest entry.
+- Each notices file starts with the engine's **no-license statement (D1)**, then a summary with
+  COPYLEFT/REVIEW flags, the corresponding-source section for copyleft libraries (Debian source
+  package and version), the full license texts, an appendix with the referenced
+  `/usr/share/common-licenses` files, the system libraries it relies on but does not ship, and an
+  UNRESOLVED list that must be empty.
+- `--check` fails on anything unmatched or without a license text; `--verify-dir DIR --notices F`
+  fails if a `.so` in `DIR` is not listed in `F`. `dve_package_game` and the install-tree test
+  use the latter.
+
+### Third-party licenses and what to review
+
+Found on this box (Debian packages) and in the fetched sources. **This is not legal advice**;
+the flagged items need a decision before a public release.
+
+| Library | License | Shipped in | Note |
+|---|---|---|---|
+| SDL3, SDL3_ttf | Zlib (+ permissive sub-licenses) | Runtime (dynamic with `linux-gcc-release`), editor | The fetched SDL `LICENSE.txt` omits the sub-licenses listed in Debian's copyright. |
+| libsndfile | **LGPL-2.1+** | Runtime, editor, tools | Shipping requires the corresponding source or a written offer, and the right to relink (satisfied by shipping it as a separate `.so`). |
+| libmpg123 | **LGPL-2.1** | via libsndfile | Same as libsndfile. |
+| libmp3lame | **LGPL-2+** | via libsndfile | Same; Debian also marks `libmp3lame/fft.c` as GPL-1+, which is unclear — **review**. |
+| libFLAC | BSD-3 (the `flac` tools are GPL) | via libsndfile | |
+| libvorbis, libogg, libopus | BSD-3 | via libsndfile | |
+| Lua 5.4 | MIT | Lua presets | |
+| RtMidi | MIT-style | editor | |
+| libjack (JACK1 0.126) | **LGPL-2.1+** (rest of JACK GPL-2+) | not bundled by default | Needs Berkeley DB. `DVE_INSTALL_BUNDLE_JACK=ON` bundles it. |
+| Berkeley DB 5.3 (`libdb-5.3`) | **Sleepycat** | not bundled by default | Clause 3 requires offering the source of the DB *and of the software that uses it*: effectively strong copyleft. The Phase 3 editor TGZ bundled it; it is excluded now. |
+| libjpeg-turbo | IJG / BSD-3 / Zlib | static in tools/editor | |
+| libpng | libpng-2.0 | system library, not shipped | |
+| Jolt Physics, Box2D | MIT | static | |
+| Box3D | taken from the fetched `LICENSE` | static, only if enabled | **Review**: not built in the verified presets, so its license was not checked. |
+| manifold | Apache-2.0 | static | No `NOTICE` file. |
+| Steam Audio | Apache-2.0 (Valve, 2024) | only with `DVE_STEAM_AUDIO_ROOT` | **Review**: not present on this box; the text comes from the SDK folder, which may carry more third-party notices. |
+| DASHR, BS-Cloth, Fluoddity3D, Gabor fields, Mantaflow, YASPS, Slug adaptations | MIT-0, Apache-2.0, MIT, MIT, Apache-2.0, MIT, MIT/Apache (credit required) | compiled into `dve_core` | Listed for every component, conservatively. |
+
+The engine itself has **no license (D1)**: the notices, CPack and `dve_package_game` say so,
+and nothing adds one. A shipped game can carry its own `LICENSE` in the project folder.
+
+### Tests
+
+| Test | What it checks |
+|---|---|
+| `dve_editor_scene_export_tests` | Exporter mapping, warnings, `--strict`, byte-identical re-export, stale file removal and bad output names. |
+| `dve_third_party_notices_self_test` | The generator's matching and parsing on synthetic inputs. |
+| `dve_third_party_notices_check_<Component>` | `--check` on the real inputs: every linked or bundled third-party library has an entry and a license text. |
+| `dve_package_game_test` | Packages `player_sample` with `--tgz --verify`, extracts the archive to a temporary folder, and runs `./Player_Sample --frames 30 --hash` from another directory with no `LD_LIBRARY_PATH`: the pak is found next to the executable, 4 objects load, and the hash equals the build-tree player's and the golden hash. Then it packages a copy of `examples/editor_demo_project` (only an editor scene) and checks the export and the `.autosave` exclusion. Both check RPATH, `ldd`, the notices coverage and that no editor-only files or sample maps are shipped. |
+| `dve_install_tree_test`, `dve_package_consumer_test` | Also check the installed notices, and build a game package through the installed `dve_add_game_package()`. |
+
+### Not done yet
+
+- CI jobs for packaging (needs a workflow change); Windows ZIP/NSIS game packages.
+- D1 (engine license) and a legal review of the flagged libraries, including how to provide the
+  LGPL corresponding source (a pointer to snapshot.debian.org may not be enough).
+- Exporter gaps: `text3d`, Gabor volumes, `.dmesh`, components and attachments.

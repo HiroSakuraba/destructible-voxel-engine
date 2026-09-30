@@ -1,9 +1,10 @@
-# Packaging and runtime content (Phases 1–2)
+# Packaging and runtime content (Phases 1–3)
 
 This is the runtime half of shipping a game: reading content from a `.dvepak` or a loose
 project folder and booting a `GameWorld` from it without the editor (Phase 1), and the
-`dve_player` executable that runs it (Phase 2, [below](#the-player-dve_player)). Install/CPack
-and the `dve_package_game` step are later phases.
+`dve_player` executable that runs it (Phase 2, [below](#the-player-dve_player)), and installing
+and packaging the engine (Phase 3, [below](#installing-and-packaging-phase-3)). The
+`dve_package_game` step that produces a shippable game folder is Phase 4.
 
 ## Content sources (`dve/content_source.hpp`, `dve_core`)
 
@@ -186,3 +187,161 @@ prints the hash to add.
   `dve_player_runtime_tests` (in-process: bindings, clock, boot, loose == pak, bad content) and
   `dve_player_{smoke, loose_matches_pak, missing_pak, corrupt_pak, no_content, default_pak,
   no_audio, input}` (CLI).
+
+## Installing and packaging (Phase 3)
+
+`cmake/DveInstall.cmake` (install rules, exported package, bundling), `cmake/DveCPack.cmake`
+(CPack) and `cmake/DveVersion.cmake` (the version) are included from the top-level
+`CMakeLists.txt`. Turn it all off with `-DDVE_INSTALL=OFF`.
+
+```sh
+cmake --preset linux-gcc-release && cmake --build --preset linux-gcc-release
+cmake --install out/build/linux-gcc-release --prefix /opt/dve               # everything
+cmake --install out/build/linux-gcc-release --prefix /opt/dve --component Runtime
+cd out/build/linux-gcc-release && cpack -G "TGZ;DEB"                         # packages
+```
+
+### Components and packages (D7)
+
+| Component | Contents | Package |
+|---|---|---|
+| `Runtime` | `bin/dve_player` | `dve-runtime` |
+| `RuntimeDeps` | `lib/dve/*.so*`: the player's non-system shared libraries | `dve-runtime` (archives only) |
+| `Editor` | `bin/dve_desktop_editor`, `bin/dve_native_editor_x11`, `share/dve/assets/` | `dve-editor` |
+| `EditorDeps` | `lib/dve/*.so*` for the editor | `dve-editor` (archives only) |
+| `Tools` | `bin/dve_pack`, `bin/dve_cook_*`, `bin/dve_asset_index`, `bin/dve_prefab_tool` | `dve-tools` |
+| `ToolsDeps` | `lib/dve/*.so*` for the tools | `dve-tools` (archives only) |
+| `Development` | `include/dve/**` (with the generated `version.hpp`, `build_config.hpp`), `lib/libdve_*.a`, `lib/dve/third_party/*.a`, `lib/cmake/dve/` | `dve-dev` |
+
+Only executables that exist in the build are installed; for example, a build without SDL3 has no
+`Runtime` or `Editor` component. `dve_export_scene` and `dve_package_game` come in Phase 4.
+
+- **Sample maps (D8).** `assets/audio/sample_maps` is never installed, because its provenance is
+  undocumented. `-DDVE_INSTALL_SAMPLE_MAPS=ON` adds it to the `Editor` component only; the
+  `Runtime` component never contains assets. The install-tree and cpack tests fail if a sample
+  map ends up in any package.
+- **Versioning.** `project(... VERSION x.y.z)` is the only place the version is written.
+  `cmake/DveVersion.cmake` generates `dve/version.hpp` (`DVE_VERSION_MAJOR/MINOR/PATCH/STRING`,
+  `DVE_VERSION_NUMBER`, `DVE_GIT_DESCRIBE` from `git describe --always --dirty` at configure
+  time, and `dve::kVersionString`). `dve_player --version`, `dveConfigVersion.cmake` and the
+  CPack metadata all use it. `dve_version_consistency` fails if `release-manifest.json` or the
+  README title drift from it.
+
+### RPATH and bundled libraries (Linux)
+
+Installed executables get `INSTALL_RPATH $ORIGIN/../lib/dve`. They are linked with
+`--disable-new-dtags`, so this is a `DT_RPATH` rather than a `DT_RUNPATH`: the loader applies it to
+every library in the process, so the dependencies of a bundled library (for example
+`libsndfile` → `libFLAC`) also resolve from `lib/dve`, without `patchelf`. (A `DT_RUNPATH` only
+covers the executable's own direct dependencies.) The trade-off is that `LD_LIBRARY_PATH`
+cannot override the bundled copies.
+
+`install(TARGETS ... RUNTIME_DEPENDENCY_SET)` + `install(RUNTIME_DEPENDENCY_SET)` copy every
+shared library an installed executable needs into `lib/dve`, except the libraries every
+desktop provides and that must match the running system. Those are the
+`DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES` name patterns (matched before resolution, so their own
+dependencies are not walked):
+- glibc and the C++ runtime (`libc`, `libm`, `libstdc++`, `libgcc_s`, `ld-linux`, …);
+- the X11/XCB/Wayland/GL/EGL/Vulkan/DRM stacks;
+- the audio servers (ALSA, PulseAudio, PipeWire, sndio);
+- dbus/udev/systemd, zlib, glib, libffi/expat/pcre2 and similar;
+- the font stack (freetype, harfbuzz, fontconfig, libpng16, brotli, bz2).
+
+What gets bundled depends on the preset. With `linux-gcc-release`, the Debian `libSDL3.so.0`
+itself links X11, Wayland, PulseAudio, PipeWire and sndio directly, so a TGZ built from it needs
+those on the target machine. The portable choice for games is `linux-gcc-player-release`
+(static SDL 3.4.12, decision D3), which only bundles Lua, RtMidi and libsndfile with its codecs.
+
+### DEB packages
+
+The `.deb` files install into `/usr` and do **not** contain `lib/dve`: the `*Deps` components
+are dropped for the DEB generator (`DveCPackProjectConfig.cmake`), and the packages depend on the
+distribution's libraries instead. `Depends` is computed by `dpkg-shlibdeps`
+(`CPACK_DEBIAN_PACKAGE_SHLIBDEPS`) when `dpkg-dev` is installed. Without it, a hand-written list
+is used (`libc6, libstdc++6, libgcc-s1`, plus `libsdl3-0` / `liblua5.4-0` when they are
+linked dynamically), and configure says so. `dve-dev` holds static archives, which shlibdeps
+cannot scan, so its `Depends` lists the `-dev` packages that own the libraries and CMake
+packages the exported targets reference (found with `dpkg -S` at configure time, e.g.
+`libsdl3-dev, librtmidi-dev, libsndfile1-dev`).
+
+On Windows, `CPACK_GENERATOR` is `ZIP;NSIS` and the executables' `$<TARGET_RUNTIME_DLLS>` are
+copied next to them. This is configured but **untested** (no Windows runner yet).
+
+**No license (D1).** There is no engine `LICENSE`, so no `CPACK_RESOURCE_FILE_LICENSE` is set,
+and `cpack` prints a warning for every generator: these packages are for internal use only. The
+third-party notices (`THIRD_PARTY_NOTICES.txt`) come with Phase 4.
+
+### The `dve` CMake package
+
+```cmake
+find_package(dve 2.35 REQUIRED COMPONENTS player_runtime)   # SameMinorVersion: 2.35.x only
+add_executable(my_game main.cpp)
+target_link_libraries(my_game PRIVATE dve::player_runtime)
+```
+
+- **Targets:** `dve::core`, `dve::platform`, `dve::rhi`, `dve::render_bridge`,
+  `dve::audio_synth`, `dve::player_runtime`, and, in SDL3 builds, `dve::platform_sdl3` and
+  `dve::audio_sdl3`. `COMPONENTS` are these names without the namespace. The editor and asset
+  pipeline libraries are not exported.
+- **Variables:**
+  - `dve_VERSION`, `dve_VERSION_GIT_DESCRIBE`;
+  - `dve_HAVE_LUA`, `dve_HAVE_JOLT`, `dve_GEOMETRY_MODE`;
+  - `dve_SDL3_BUNDLED` (SDL was fetched and is exported with the package);
+  - `dve_BUILD_CONFIG_DEFINES`;
+  - `dve_CXX_COMPILER_ID` and `dve_CXX_COMPILER_VERSION`. Use the same compiler, because the
+    static libraries use C++23.
+- `tests/package_consumer/` is a 60-line example game, and `dve_package_consumer_test` builds it
+  against an install prefix.
+
+#### Option-dependent defines and dependencies (the fragile part)
+
+**Public compile definitions.** `dve_core` has PUBLIC compile definitions that change public
+headers and class layouts:
+- `DVE_ENABLE_DEFORMABLE_RUNTIME` and `DVE_ENABLE_CPU_HAIR` add `GameWorld` members;
+- `DVE_ENABLE_FLIP_LIQUIDS`;
+- `DVE_GEOMETRY_MODE_*`;
+- `DVE_HAVE_LUA`, `DVE_HAVE_JOLT`, `DVE_HAVE_MANIFOLD`, …
+
+A consumer compiled with a different set would violate the ODR, and it would only show up at run
+time. How this is handled:
+- The definitions are part of `dve::core`'s exported `INTERFACE_COMPILE_DEFINITIONS`, so anything
+  that links the imported targets gets exactly the set the libraries were built with.
+- `dve/build_config.hpp` (generated) records the set and `#error`s if the including translation
+  unit disagrees in either direction. The consumer test includes it and also checks
+  `PlayerApp::scripting_compiled_in()` against it. Code that bypasses the imported targets (for
+  example, hand-written `-I`/`-l` flags) should include it first.
+- Jolt's own PUBLIC compile options (`-mavx2`, `-mfma`, … and its `JPH_*` definitions) travel with
+  `dve::third_party_Jolt` for the same reason.
+
+**Dependencies.** `DveInstall.cmake` walks the link interface of the exported targets. For
+static libraries this includes their PRIVATE dependencies as `$<LINK_ONLY:...>`. Each dependency
+is handled as follows:
+
+| Dependency kind | Examples | Handling |
+|---|---|---|
+| Built in this tree | vendored `manifold`; fetched Jolt (`DVE_FETCH_JOLT`), SDL3-static + `SDL3_Headers` (`DVE_FETCH_SDL3`), RtMidi, Box2D/Box3D | Exported with our targets as `dve::third_party_<name>`, archives in `lib/dve/third_party`. So a fetch build yields a self-contained package. |
+| Installed package (namespaced import) | `SDL3::SDL3`, `Jolt::Jolt`, `RtMidi::rtmidi`, `Threads::Threads` | `find_dependency(<Pkg>)` in `dveConfig.cmake`, with the build-time `<Pkg>_DIR` as a hint. |
+| Local import helper | `PkgConfig::DVE_LUA`, the Lua ABI fallback `dve_lua54_runtime`, `dve_rtmidi_imported`, legacy Jolt/Box pairs | Recreated under the same name from the recorded library files. A file missing on the consumer machine is looked up with `find_library()`, else `find_package(dve)` fails with a message naming it. No include directories are recreated, because no public DVE header includes a third-party header (the install-tree test enforces this). |
+| Plain library file | `libsndfile.so` | Kept as the absolute path. `dve-dev` depends on the owning `-dev` package. |
+
+The package is relocatable: the install-tree test fails if any `lib/cmake/dve` file mentions the
+source or build tree. If a dependency cannot be exported (for example, a third-party target built
+here as a shared library), configure prints a warning and skips the `Development` component
+instead of failing the build.
+
+Paths exercised by the tests:
+- system SDL3 + manifold (`linux-gcc-release`);
+- `PkgConfig::DVE_LUA` + system RtMidi (`linux-gcc-lua-release`);
+- fetched static SDL3 + fetched Jolt (`linux-gcc-player-release`).
+
+The fetched-RtMidi, Box2D/Box3D and legacy include/library paths follow the same rules but are
+not covered by a preset.
+
+### Tests
+
+| Test | What it checks |
+|---|---|
+| `dve_version_consistency` | `release-manifest.json`, the README title and the generated `version.hpp` match `project(VERSION)`. |
+| `dve_install_tree_test` | Installs every component into `install_tests/prefix` in the build folder and checks the expected files and that no sample maps were installed. It also checks the executables: `readelf -d` shows the `$ORIGIN` RPATH, and `ldd` finds every non-system library inside the prefix (none are "not found"). It then runs the installed `dve_player --pak <sample> --frames 30 --hash` from another directory with `LD_LIBRARY_PATH` unset: same hash as the build-tree player, and a golden hash when one is known. Finally it repacks the sample with the installed `dve_pack` and runs the installed editor's `--smoke`. |
+| `dve_package_consumer_test` | Configures, builds and runs `tests/package_consumer` against that prefix with `find_package(dve X.Y)` (10 headless frames of the sample pak). It checks that `X.Y.Z` is accepted and `X.(Y±1)` is rejected (SameMinorVersion). |
+| `dve_cpack_test` (label `slow`) | `cpack -G "TGZ;DEB"`, then checks each archive's listing and each `.deb`'s `dpkg-deb -c` / `-f` (package name, version, `Depends`, no `lib/dve` in the DEBs, no sample maps). It writes a size summary to `install_tests/cpack/summary.txt`. |

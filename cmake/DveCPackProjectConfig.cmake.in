@@ -1,0 +1,14 @@
+# Loaded by cpack once per generator (CPACK_PROJECT_CONFIG_FILE). Generated from
+# cmake/DveCPackProjectConfig.cmake.in.
+if(CPACK_GENERATOR STREQUAL "DEB")
+    # Distribution packages depend on the system's libraries instead of bundling them.
+    list(REMOVE_ITEM CPACK_COMPONENTS_ALL RuntimeDeps EditorDeps ToolsDeps)
+    set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
+    set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
+    set(CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY OFF)
+endif()
+if(NOT DEFINED ENV{DVE_CPACK_QUIET_LICENSE})
+    message(WARNING
+        "dve has no LICENSE yet (decision D1): no license file is packaged and these "
+        "${CPACK_GENERATOR} packages are for internal use only.")
+endif()

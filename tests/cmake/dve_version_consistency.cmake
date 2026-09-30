@@ -1,0 +1,35 @@
+# The project version in CMakeLists.txt is the single source of truth (cmake/DveVersion.cmake).
+# Fail when release-manifest.json, the README title or the generated dve/version.hpp drift.
+cmake_minimum_required(VERSION 3.24)
+foreach(required VERSION SOURCE_DIR VERSION_HEADER)
+    if(NOT ${required})
+        message(FATAL_ERROR "${required} is required")
+    endif()
+endforeach()
+set(problems "")
+
+file(READ "${SOURCE_DIR}/release-manifest.json" manifest)
+string(JSON manifest_version ERROR_VARIABLE json_error GET "${manifest}" version)
+if(json_error)
+    list(APPEND problems "release-manifest.json: ${json_error}")
+elseif(NOT manifest_version STREQUAL VERSION)
+    list(APPEND problems "release-manifest.json version is ${manifest_version}, project() says ${VERSION}")
+endif()
+
+file(STRINGS "${SOURCE_DIR}/README.md" readme_title LIMIT_COUNT 1)
+if(NOT readme_title MATCHES "v([0-9]+\\.[0-9]+\\.[0-9]+)")
+    list(APPEND problems "README.md title has no vX.Y.Z version: ${readme_title}")
+elseif(NOT CMAKE_MATCH_1 STREQUAL VERSION)
+    list(APPEND problems "README.md title says v${CMAKE_MATCH_1}, project() says ${VERSION}")
+endif()
+
+file(READ "${VERSION_HEADER}" header)
+if(NOT header MATCHES "#define DVE_VERSION_STRING \"${VERSION}\"")
+    list(APPEND problems "${VERSION_HEADER} does not define DVE_VERSION_STRING \"${VERSION}\"")
+endif()
+
+if(problems)
+    list(JOIN problems "\n  " text)
+    message(FATAL_ERROR "version drift:\n  ${text}")
+endif()
+message(STATUS "dve_version_consistency: PASS (${VERSION})")

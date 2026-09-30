@@ -59,7 +59,8 @@ jobs:
           echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.cache/ccache" >> "$GITHUB_ENV"
       - name: Restore ccache and fetched content
-        uses: actions/cache@v4
+        id: cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             .cache/ccache
@@ -79,6 +80,14 @@ jobs:
           ccache --zero-stats
           cmake --build out/build/${{ matrix.preset }} --parallel 4
           ccache --show-stats
+      - name: Save ccache and fetched content (also when tests fail)
+        if: always() && steps.cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/ccache
+            .cache/fetchcontent/${{ matrix.preset }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: CTest (full suite, nothing excluded)
         run: >-
           xvfb-run -a ctest --test-dir out/build/${{ matrix.preset }}
@@ -174,17 +183,41 @@ jobs:
         continue-on-error: true
         shell: bash
         run: cmake --preset windows-msvc-release 2>&1 | tee configure-plain.log
-      - name: Install libpng/libjpeg-turbo with the runner's vcpkg (classic mode)
-        if: steps.plain.outcome == 'failure'
+      - name: Detect the installed Visual Studio generator
+        # The preset hard-codes "Visual Studio 17 2022"; windows-latest may ship a newer VS.
         shell: bash
         run: |
-          "$VCPKG_INSTALLATION_ROOT/vcpkg" install libpng:x64-windows libjpeg-turbo:x64-windows
-      - name: Configure windows-msvc-release with the vcpkg toolchain
-        if: steps.plain.outcome == 'failure'
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          "$vswhere" -latest -products '*' -format text | grep -E 'displayName|installationVersion|catalog_productLineVersion' || true
+          line=$("$vswhere" -latest -products '*' -property catalog_productLineVersion | tr -d '\r')
+          major=$("$vswhere" -latest -products '*' -property installationVersion | cut -d. -f1)
+          echo "DVE_VS_GENERATOR=Visual Studio $major $line" >> "$GITHUB_ENV"
+          cmake --version
+          echo "using generator: Visual Studio $major $line"
+      - name: Configure with the installed generator, no package manager
+        id: nodeps
+        continue-on-error: true
         shell: bash
         run: |
           rm -rf out/build/windows-msvc-release
-          cmake --preset windows-msvc-release \
+          cmake -S . -B out/build/windows-msvc-release -G "$DVE_VS_GENERATOR" -A x64 \
+            -DCMAKE_CONFIGURATION_TYPES=Release -DDVE_ENABLE_JOLT=OFF -DDVE_BUILD_PLATFORM=ON \
+            -DDVE_BUILD_RHI=ON -DDVE_GEOMETRY_MODE=HYBRID -DDVE_ENABLE_BOX2D=OFF -DDVE_ENABLE_BOX3D=OFF \
+            2>&1 | tee configure-nodeps.log
+          exit ${PIPESTATUS[0]}
+      - name: Install libpng/libjpeg-turbo with the runner's vcpkg (classic mode)
+        if: steps.nodeps.outcome == 'failure'
+        shell: bash
+        run: |
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install libpng:x64-windows libjpeg-turbo:x64-windows
+      - name: Configure with the installed generator and the vcpkg toolchain
+        if: steps.nodeps.outcome == 'failure'
+        shell: bash
+        run: |
+          rm -rf out/build/windows-msvc-release
+          cmake -S . -B out/build/windows-msvc-release -G "$DVE_VS_GENERATOR" -A x64 \
+            -DCMAKE_CONFIGURATION_TYPES=Release -DDVE_ENABLE_JOLT=OFF -DDVE_BUILD_PLATFORM=ON \
+            -DDVE_BUILD_RHI=ON -DDVE_GEOMETRY_MODE=HYBRID -DDVE_ENABLE_BOX2D=OFF -DDVE_ENABLE_BOX3D=OFF \
             "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
             2>&1 | tee configure-vcpkg.log
           exit ${PIPESTATUS[0]}
@@ -199,7 +232,7 @@ jobs:
           exit $status
       - name: CTest (Release)
         shell: bash
-        run: ctest --test-dir out/build/windows-msvc-release -C Release --output-on-failure -j4
+        run: ctest --test-dir out/build/windows-msvc-release -C Release --output-on-failure -j4 --timeout 900
       - name: Upload Windows logs
         if: always()
         uses: actions/upload-artifact@v4

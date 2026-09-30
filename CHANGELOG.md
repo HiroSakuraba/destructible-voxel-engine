@@ -1,3 +1,37 @@
+# Unreleased — Packaging Phase 4: shippable game folders and third-party notices
+
+- Added `dve_export_scene` (Tools): converts an editor `.dvescene` offline into DVOXSCENE v1 JSON
+  plus one `.dvox` per object, so `dve_player` never links `dve_editor`. Ids, world transforms,
+  anchored/structural/collision flags, parents and the editor's material table are kept.
+  Hidden/empty objects, `text3d`, Gabor volumes and `.dmesh` objects are skipped, and components,
+  tags and layers are dropped, each with a warning (`--strict` makes them errors). Re-export is
+  byte-identical.
+- Added `dve_package_game` (`scripts/dve_package_game.py`, installed as `bin/dve_package_game`)
+  and the CMake function `dve_add_game_package()` (in-tree and in the installed `dve` package).
+  They validate `game.dvegame`, stage the project without `.autosave`, editor-only folders and
+  sample maps, export editor scenes, `dve_pack` everything into `game.dvepak`, and stage the
+  installed Runtime component into `<Game>/` (renamed, stripped player; only the needed
+  `lib/dve` libraries; `THIRD_PARTY_NOTICES.txt`; `build-info.json`), optionally as a
+  reproducible `.tar.gz`, and optionally run it headless (`--verify`).
+- `dve_player` gets the extra RPATH `$ORIGIN/lib/dve` for the game-folder layout.
+- Added the third-party notices: `third_party/notices/manifest.json`,
+  `tools/generate_third_party_notices.py` and `cmake/DveNotices.cmake`. The build writes
+  `THIRD_PARTY_NOTICES-{runtime,editor,tools,dev}.txt` from the actual link closure and bundled
+  libraries, with license texts from the installed Debian packages, the repository or the fetched
+  sources, and flags copyleft libraries. Each component installs its file to `share/doc/dve`.
+  The notices state that the engine has no license (D1).
+- `libjack` and Berkeley DB (`libdb`) are no longer bundled (`DVE_INSTALL_BUNDLE_JACK`, default
+  OFF). The Phase 3 editor TGZ shipped `libdb-5.3`, whose Sleepycat license requires offering the
+  source of software that uses it.
+- New tests: `dve_editor_scene_export_tests`, `dve_third_party_notices_self_test`,
+  `dve_third_party_notices_check_<Component>` and `dve_package_game_test` (packages the sample game,
+  extracts the `.tar.gz` to a temporary folder and runs it with `--frames --hash` and no
+  `LD_LIBRARY_PATH`). `dve_install_tree_test` and `dve_package_consumer_test` also check the notices
+  and `dve_add_game_package()` through the installed package.
+- Documentation: `docs/PACKAGING.md` → "Shipping a game (Phase 4)", including the license findings
+  that need review (LGPL libsndfile/mpg123/lame shipped with games, lame's GPL-marked `fft.c`,
+  Box3D, Steam Audio).
+
 # Unreleased — Packaging Phase 3: install, exported package and CPack
 
 - Added install rules (`cmake/DveInstall.cmake`) with the components `Runtime` (`dve_player`),

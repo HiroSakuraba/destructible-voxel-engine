@@ -793,6 +793,7 @@ if(DVE_BUILD_EDITOR)
     endif()
     add_library(dve_editor
         src/editor_document.cpp
+        src/editor_scene_export.cpp
         src/editor_scene_composition.cpp
         src/editor_component_inspector.cpp
         src/editor_control_rig.cpp
@@ -851,6 +852,9 @@ if(DVE_BUILD_EDITOR)
     target_link_libraries(dve_asset_index PRIVATE dve::editor)
     add_executable(dve_prefab_tool apps/dve_prefab_tool.cpp)
     target_link_libraries(dve_prefab_tool PRIVATE dve::editor)
+    # Offline editor-scene -> DVOXSCENE + .dvox exporter (packaging Phase 4, decision D2).
+    add_executable(dve_export_scene apps/dve_export_scene.cpp)
+    target_link_libraries(dve_export_scene PRIVATE dve::editor)
     add_executable(dve_camera_settings_v135_demo apps/camera_settings_v135_demo.cpp)
     target_link_libraries(dve_camera_settings_v135_demo PRIVATE dve::editor)
     add_executable(dve_camera_runtime_v136_demo apps/camera_runtime_v136_demo.cpp)
@@ -2335,6 +2339,12 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_game_manifest_tests tests/test_game_manifest.cpp)
     target_link_libraries(dve_game_manifest_tests PRIVATE dve::core)
     add_test(NAME dve_game_manifest_tests COMMAND dve_game_manifest_tests)
+    if(TARGET dve_editor)
+        add_executable(dve_editor_scene_export_tests tests/test_editor_scene_export.cpp)
+        target_link_libraries(dve_editor_scene_export_tests PRIVATE dve::editor)
+        target_compile_definitions(dve_editor_scene_export_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME dve_editor_scene_export_tests COMMAND dve_editor_scene_export_tests)
+    endif()
     add_executable(dve_game_scene_loader_tests tests/test_game_scene_loader.cpp)
     target_link_libraries(dve_game_scene_loader_tests PRIVATE dve::core)
     target_compile_definitions(dve_game_scene_loader_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

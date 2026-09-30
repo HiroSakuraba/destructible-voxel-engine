@@ -9,3 +9,13 @@ message(STATUS "consumer: dve ${dve_VERSION} (${dve_VERSION_GIT_DESCRIBE}) at ${
 
 add_executable(tiny_game main.cpp)
 target_link_libraries(tiny_game PRIVATE dve::player_runtime)
+
+# Phase 4: dve_add_game_package() from the installed package (Runtime + Tools next to it).
+set(DVE_CONSUMER_GAME_PROJECT "" CACHE PATH "Game project to package with dve_add_game_package()")
+if(DVE_CONSUMER_GAME_PROJECT)
+    dve_add_game_package(consumer_game_package
+        PROJECT_DIR "${DVE_CONSUMER_GAME_PROJECT}"
+        OUTPUT_DIR "${CMAKE_BINARY_DIR}/ConsumerGame"
+        NAME ConsumerGame
+        VERIFY)
+endif()

@@ -6,9 +6,17 @@
 #
 # Imported targets: dve::core, dve::platform, dve::rhi, dve::render_bridge, dve::audio_synth,
 # dve::player_runtime and, when DVE was built with SDL3, dve::platform_sdl3 / dve::audio_sdl3.
+# dve_add_game_package(<target> PROJECT_DIR ... OUTPUT_DIR ...) builds a shippable game folder
+# from the installed Runtime and Tools components (see DveGamePackage.cmake).
 # The build's feature definitions (DVE_HAVE_LUA, DVE_HAVE_JOLT, DVE_GEOMETRY_MODE_*, ...) come
 # with dve::core; include <dve/build_config.hpp> to have the compiler verify them.
 @PACKAGE_INIT@
+
+# Where this package lives (for dve_add_game_package() and the installed tools).
+set(dve_INSTALL_PREFIX "${PACKAGE_PREFIX_DIR}")
+set(dve_INSTALL_BINDIR "@CMAKE_INSTALL_BINDIR@")
+set(dve_THIRD_PARTY_NOTICES "${PACKAGE_PREFIX_DIR}/@DVE_NOTICES_INSTALL_DIR@/THIRD_PARTY_NOTICES-runtime.txt")
+include("${CMAKE_CURRENT_LIST_DIR}/DveGamePackage.cmake")
 
 include(CMakeFindDependencyMacro)
 

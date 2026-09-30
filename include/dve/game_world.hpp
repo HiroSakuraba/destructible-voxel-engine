@@ -329,6 +329,11 @@ public:
     [[nodiscard]] GameObjectId spawn_cooked_polygon_asset(
         CookedPolygonAsset asset, std::string name, const RigidTransform& transform,
         bool dynamic, bool structural = true, std::string* error = nullptr);
+    // Visual-only polygon object (DVOXSCENE generateCollision=false for a .dmesh): rendered,
+    // movable like a marker, no physics body, ignored by raycasts/overlaps/capsule queries.
+    [[nodiscard]] GameObjectId spawn_visual_polygon_asset(
+        CookedPolygonAsset asset, std::string name, const RigidTransform& transform,
+        std::string* error = nullptr);
     // Explicit polygon path. The generic spawn_asset() dispatches .dvox and .dmesh by extension.
     [[nodiscard]] GameObjectId spawn_polygon_asset(
         const std::filesystem::path& path, std::string name, const RigidTransform& transform,
@@ -590,6 +595,14 @@ private:
     [[nodiscard]] RigidTransform resolve_transform(const Object& object) const;
     [[nodiscard]] bool synchronize_attached_body(Object& object);
     void synchronize_attached_bodies();
+    // Rigid velocity field of an object (v(p) = linear + angular x (p - origin)), following
+    // attachments up to the first free body. Zero for markers, static and visual-only objects.
+    struct MotionField { Float3 linear{}; Float3 angular{}; Float3 origin{}; };
+    [[nodiscard]] MotionField motion_field(const Object& object, std::size_t depth = 0U) const;
+    // Keeps physics collision disabled between every attached child body and its parent body
+    // (IRigidBodyWorld::set_pair_collision_enabled), so an attachment that touches or overlaps
+    // its parent does not push it around.
+    void update_attachment_collision_filters();
     [[nodiscard]] GameObjectId allocate_id() noexcept { return nextId_++; }
     [[nodiscard]] GameObjectId create_object_internal(GameObjectDesc desc, std::optional<GameObjectId> forcedId,
                                                       bool dispatchSpawn, std::string* error);
@@ -610,6 +623,7 @@ private:
     std::vector<GameObjectId> fragment_after_damage(GameObjectId id, Object& object);
 
     std::unique_ptr<IRigidBodyWorld> physics_;
+    std::set<std::pair<RigidBodyHandle, RigidBodyHandle>> attachmentCollisionFilters_;
     std::unique_ptr<camera::GameCameraRuntime> cameras_;
     std::unique_ptr<GameplayRuntime> gameplay_;
     std::unique_ptr<SkeletalAnimationRuntime> animation_;

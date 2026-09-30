@@ -181,6 +181,10 @@ std::optional<DeformableRayHit> ray_sphere_deformable(
         static_cast<MaterialId>(std::min<std::uint32_t>(hit->materialIndex, 255U))};
 }
 
+[[nodiscard]] Float3 attachment_cross(Float3 a, Float3 b) noexcept {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
 RigidTransform compose_game_attachment(
     const RigidTransform& parentWorld, const GameObjectAttachment& attachment) noexcept {
     RigidTransform result = attachment.localTransform;
@@ -662,6 +666,29 @@ std::optional<bool> GameWorld::has_collision(GameObjectId id) const noexcept {
     return !it->second.visualOnly;
 }
 
+GameObjectId GameWorld::spawn_visual_polygon_asset(
+    CookedPolygonAsset asset, std::string name, const RigidTransform& transform, std::string* error) {
+    if (!geometry_kind_supported(GeometryKind::Polygon)) {
+        if (error) *error = "this build profile does not enable polygon gameplay objects";
+        return kInvalidGameObjectId;
+    }
+    Object object;
+    object.name = name.empty() ? std::string("asset") : std::move(name);
+    object.authoredTransform = transform;
+    object.dynamic = false;
+    object.structural = false;
+    object.visualOnly = true;
+    object.polygon = std::make_unique<CookedPolygonAsset>(std::move(asset));
+    object.polygonBvh = std::make_unique<PolygonBvh>();
+    if (!object.polygonBvh->build(*object.polygon, error)) return kInvalidGameObjectId;
+    const GameObjectId id = allocate_id();
+    object.id = id;
+    synchronize_membership_component(object);
+    objects_.emplace(id, std::move(object));
+    dispatch_lifecycle({GameLifecycleEventKind::Spawn, id});
+    return id;
+}
+
 GameObjectId GameWorld::spawn_polygon_asset(
     const std::filesystem::path& path, std::string name, const RigidTransform& transform,
     bool dynamic, bool structural, std::string* error) {
@@ -973,7 +1000,9 @@ bool GameWorld::attach_object(
         ? game_attachment_local_from_world(parentWorld, childWorld, inheritPosition, inheritRotation)
         : childIt->second.authoredTransform;
     childIt->second.attachment = std::move(attachment);
-    return synchronize_attached_body(childIt->second);
+    const bool synchronized = synchronize_attached_body(childIt->second);
+    update_attachment_collision_filters();
+    return synchronized;
 }
 
 bool GameWorld::detach_object(GameObjectId childId, bool preserveWorldTransform, std::string* error) {
@@ -983,7 +1012,9 @@ bool GameWorld::detach_object(GameObjectId childId, bool preserveWorldTransform,
     const RigidTransform world = resolve_transform(it->second);
     it->second.attachment.reset();
     if (preserveWorldTransform) it->second.authoredTransform = world;
-    return synchronize_attached_body(it->second);
+    const bool synchronized = synchronize_attached_body(it->second);
+    update_attachment_collision_filters();
+    return synchronized;
 }
 
 std::optional<GameObjectId> GameWorld::parent_of(GameObjectId child) const noexcept {
@@ -1137,6 +1168,32 @@ RigidTransform GameWorld::resolve_transform(const Object& object) const {
     return compose_game_attachment(*frame, *object.attachment);
 }
 
+GameWorld::MotionField GameWorld::motion_field(const Object& object, std::size_t depth) const {
+    MotionField field;
+    if (object.attachment) {
+        const auto parentIt = objects_.find(object.attachment->parent);
+        if (parentIt == objects_.end() || depth > objects_.size()) return field;
+        const MotionField parent = motion_field(parentIt->second, depth + 1U);
+        const RigidTransform parentWorld = resolve_transform(parentIt->second);
+        const RigidTransform world = resolve_transform(object);
+        field.origin = world.position;
+        if (object.attachment->inheritRotation) field.angular = parent.angular;
+        if (object.attachment->inheritPosition) {
+            // position = parent.position + R_parent * local (inheritRotation) or + local.
+            const Float3 point = object.attachment->inheritRotation ? world.position : parentWorld.position;
+            field.linear = add(parent.linear, attachment_cross(parent.angular, subtract(point, parent.origin)));
+        }
+        return field;
+    }
+    if (!object.hasBody || !object.dynamic) return field;
+    if (const auto state = physics_->state(object.bodyHandle)) {
+        field.linear = state->linearVelocity;
+        field.angular = state->angularVelocity;
+        field.origin = state->currentTransform.position;
+    }
+    return field;
+}
+
 bool GameWorld::synchronize_attached_body(Object& object) {
     if (!object.hasBody || !object.dynamic) return true;
     const RigidTransform world = resolve_transform(object);
@@ -1144,12 +1201,39 @@ bool GameWorld::synchronize_attached_body(Object& object) {
     state.currentTransform = make_rigid_transform(
         add(world.position, rotate(world.rotation, object.localCenterOfMassMeters)), world.rotation);
     state.previousTransform = state.currentTransform;
-    if (const auto existing = physics_->state(object.bodyHandle)) {
-        state.linearVelocity = existing->linearVelocity;
-        state.angularVelocity = existing->angularVelocity;
-        state.sleeping = existing->sleeping;
-    }
+    // An attached body is driven by its parent: give it the parent's rigid velocity at its
+    // centre of mass instead of keeping its own. Keeping its own velocity let gravity build
+    // up without bound between the per-tick teleports (the body then swept ever further
+    // through the scene during each step before being snapped back), and made scripts read a
+    // meaningless falling velocity for an object that visibly rides its parent.
+    const MotionField field = motion_field(object);
+    state.linearVelocity = add(field.linear,
+                               attachment_cross(field.angular, subtract(state.currentTransform.position, field.origin)));
+    state.angularVelocity = field.angular;
+    if (const auto existing = physics_->state(object.bodyHandle)) state.sleeping = existing->sleeping;
     return physics_->set_state(object.bodyHandle, state);
+}
+
+void GameWorld::update_attachment_collision_filters() {
+    std::set<std::pair<RigidBodyHandle, RigidBodyHandle>> wanted;
+    for (const auto& [id, object] : objects_) {
+        (void)id;
+        if (!object.attachment || !object.hasBody) continue;
+        const auto parent = objects_.find(object.attachment->parent);
+        if (parent == objects_.end() || !parent->second.hasBody) continue;
+        const RigidBodyHandle a = std::min(object.bodyHandle, parent->second.bodyHandle);
+        const RigidBodyHandle b = std::max(object.bodyHandle, parent->second.bodyHandle);
+        if (a != b) wanted.emplace(a, b);
+    }
+    if (wanted == attachmentCollisionFilters_) return;
+    for (const auto& pair : attachmentCollisionFilters_) {
+        if (!wanted.contains(pair)) (void)physics_->set_pair_collision_enabled(pair.first, pair.second, true);
+    }
+    for (const auto& pair : wanted) {
+        if (!attachmentCollisionFilters_.contains(pair))
+            (void)physics_->set_pair_collision_enabled(pair.first, pair.second, false);
+    }
+    attachmentCollisionFilters_ = std::move(wanted);
 }
 
 void GameWorld::synchronize_attached_bodies() {
@@ -2027,6 +2111,9 @@ void GameWorld::tick(float fixedDeltaSeconds) {
     std::erase_if(timers_, [](const Timer& timer) { return timer.cancelled; });
     for (const auto& callback : due) callback();
 
+    // Bodies can be replaced between ticks (damage, brick edits, fragments), so re-assert the
+    // parent/child contact filters before stepping; this is a no-op when nothing changed.
+    update_attachment_collision_filters();
     physics_->step(fixedDeltaSeconds);
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
     lastDeformableTelemetry_ = deformables_->tick(fixedDeltaSeconds);

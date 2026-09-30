@@ -2,8 +2,8 @@
 
 The desktop editor (`dve_desktop_editor`, SDL) and the native X11 editor
 (`dve_native_editor_x11`) share one MIDI setup (`include/dve/editor_midi.hpp`). A
-`MidiInputSession` opens one input port for the synthesizer, and a worker thread re-checks the
-port list about every 1.5 s:
+`MidiInputSession` opens one input port for the synthesizer (and a `MidiOutputSession` one
+output port for its MIDI out), and a worker thread re-checks the port list about every 1.5 s:
 
 - **Choose the port** in **Settings > Audio > MIDI > MIDI Input** (left/right or click
   cycles through the list), or with the **MIDI IN** button in the synth header (next to
@@ -28,8 +28,15 @@ port list about every 1.5 s:
     - *Always play* (the default) lets channel 10 through whatever the channel filter is.
     - *Ignore* drops channel 10, even in Omni.
     - *Follow channel filter* treats channel 10 like any other channel.
-- **Synth MIDI out.** MIDI thru and arpeggiator output still go to the first MIDI output
-  port (on Linux that is usually *Midi Through*).
+- **Synth MIDI out.** MIDI thru and arpeggiator output go to the port chosen in
+  **Settings > Audio > MIDI > MIDI Output** (a `MidiOutputSession`, same picker as the input):
+  - **Auto** (the default) keeps the previous behaviour: the first output port (on Linux
+    that is usually *Midi Through*, which other programs can listen to).
+  - **None**: MIDI output is off.
+  - **Any listed port**, for example a hardware synth. It is saved by name like the input,
+    reconnects when the device is plugged back in, and the details line shows its status.
+    Switching ports (or None) first sends sustain-off, all-notes-off and pitch-bend-center
+    on all 16 channels of the old port.
 
 If RtMidi is missing, or the operating system has no MIDI service (for example, no
 `/dev/snd/seq`), the editors still start. The status then reads `MIDI unavailable`, and the

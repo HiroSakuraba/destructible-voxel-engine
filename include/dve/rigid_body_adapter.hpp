@@ -217,6 +217,11 @@ public:
         Float3 origin, float radius, Float3 direction, float maximumDistance,
         const RigidBodyQueryFilter& filter = {}) const;
     // A null sink disconnects the consumer. The sink must remain alive while registered.
+    // Enables or disables contacts between two specific bodies (used for attachments, whose
+    // child body is driven by its parent and must not collide with it). Returns false if the
+    // backend cannot filter pairs; the reference solver has no body-body contacts at all and
+    // returns true. Destroying either body forgets the pair.
+    virtual bool set_pair_collision_enabled(RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept;
     virtual void set_contact_sink(IPhysicsContactSink* sink) noexcept;
     virtual bool set_contact_material(RigidBodyHandle handle, std::uint16_t material) noexcept;
     // Backends that do not implement constraints return the invalid handle. This keeps existing
@@ -259,6 +264,9 @@ public:
     [[nodiscard]] std::vector<RigidBodyQueryHit> cast_sphere_all(
         Float3 origin, float radius, Float3 direction, float maximumDistance,
         const RigidBodyQueryFilter& filter = {}) const override;
+    // The reference solver integrates bodies without body-body contacts, so every pair is
+    // already non-colliding; this only checks that both handles are live.
+    bool set_pair_collision_enabled(RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept override;
     bool set_contact_material(RigidBodyHandle handle, std::uint16_t material) noexcept override;
     [[nodiscard]] RigidBodyConstraintHandle create_constraint(
         const RigidBodyConstraintDesc& desc) override;

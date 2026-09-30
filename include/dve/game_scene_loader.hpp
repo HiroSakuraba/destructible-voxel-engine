@@ -13,9 +13,19 @@
 //   - generateCollision=false => a visual-only voxel object (GameWorld::spawn_visual_asset):
 //     rendered with its voxels and materials, but with no physics body and ignored by
 //     collision queries. (Phase 1 spawned these as markers.)
+//   - extensions (see RuntimeSceneObjectMetadata / kDvoxSceneExtensionVersion):
+//       geometry "polygon" => the file is a .dmesh, decoded with read_dmesh and spawned with
+//         GameWorld::spawn_cooked_polygon_asset (or spawn_visual_polygon_asset when
+//         generateCollision=false);
+//       components => added to the object in order with their ids (GameWorld::add_component;
+//         a dve.membership component also sets tags, groups and layer);
+//       attachment => always a GameWorld attachment (socket and inherit flags preserved).
 //   - `parent` is scene hierarchy metadata (as in RuntimeSceneWorld) and is reported in the
-//     result; with attachChildrenToParents it becomes a GameWorld attachment (child forced
-//     dynamic, world transform preserved), mirroring EditorPlaySession's attachment pass.
+//     result. An object with an attachment extension is always attached; with
+//     attachChildrenToParents every other parented object is attached too, except an anchored
+//     child of a static collision parent (a static body can never move, so attaching would
+//     only turn the child into a dynamic body). Attached children are forced dynamic and keep
+//     their world transform, mirroring EditorPlaySession's attachment pass.
 // Loading is all-or-nothing: every asset is read and validated before the first object is
 // created, and objects created before a later spawn/attach failure are destroyed again.
 
@@ -50,6 +60,8 @@ struct GameSceneLoadedObject {
     bool anchored{};
     bool collision{true};                          // false => spawned visual-only
     bool attached{};
+    RuntimeSceneGeometry geometry{RuntimeSceneGeometry::Voxel};
+    std::size_t componentCount{};
 };
 
 struct GameSceneLoadResult {

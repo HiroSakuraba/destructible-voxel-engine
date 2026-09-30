@@ -1,6 +1,6 @@
 // dve_player_runtime: frame images, input bindings, the fixed-step clock, and PlayerApp +
 // the CPU renderer booting the sample game (tests/data/player_sample) headlessly from a
-// loose folder and from a .dvepak. Also a helper mode used by the CLI tests:
+// loose folder and from a .dvepak; polygon (.dmesh) objects are drawn by the CPU renderer. Also a helper mode used by the CLI tests:
 //   dve_player_runtime_tests --corrupt-entry <in.dvepak> <out.dvepak> <entry-path>
 #include "dve/player/frame_image.hpp"
 #include "dve/player/player_app.hpp"
@@ -8,6 +8,8 @@
 #include "dve/player/player_renderer.hpp"
 #include "dve/geometry_build.hpp"
 #include "dve/v235_foundations.hpp"
+
+#include "support/export_scene_fixtures.hpp"
 
 #include <chrono>
 #include <algorithm>
@@ -379,6 +381,47 @@ void test_scripts_disabled_and_polygon_seam() {
     CHECK(renderer->last_stats().voxelInstances == 5U);
 }
 
+// Polygon objects must reach the framebuffer. The renderer rescales them to voxel units and
+// used to keep the source content hash, so validation culled every polygon instance.
+void test_cpu_renderer_draws_polygons() {
+    std::string error;
+    PlayerBootOptions options;
+    options.enableScripts = false;
+    auto app = PlayerApp::boot(LooseContentSource::open(kSample, &error), options, &error);
+    CHECK(app != nullptr);
+    if (!app) return;
+    auto renderer = make_cpu_player_renderer(nullptr);
+    CHECK(renderer->resize(96, 54, &error));
+    std::vector<GameRenderObject> objects;
+    CHECK(renderer->render(app->render_view(objects, 96.0F / 54.0F), &error));
+    const Rgba8Image* before = renderer->readback();
+    CHECK(before != nullptr);
+    if (!before) return;
+    const std::vector<std::uint8_t> baseline = before->pixels;
+    CHECK(renderer->last_stats().polygonInstances == 0U);
+
+    RigidTransform at;
+    at.position = {0.0F, 1.2F, 0.0F}; // the sample camera looks at (0, 0.9, 0)
+    const auto crate = app->world().spawn_visual_polygon_asset(
+        test_fixtures::make_box_polygon({0.4F, 0.4F, 0.4F}, {0.9F, 0.1F, 0.1F, 1.0F}, 91U), "crate", at, &error);
+    CHECK(crate != kInvalidGameObjectId);
+    objects.clear();
+    CHECK(renderer->render(app->render_view(objects, 96.0F / 54.0F), &error));
+    CHECK(renderer->last_stats().polygonInstances == 1U);
+    const Rgba8Image* after = renderer->readback();
+    CHECK(after != nullptr && after->pixels.size() == baseline.size());
+    if (!after || after->pixels.size() != baseline.size()) return;
+    std::size_t reddish = 0;
+    for (std::size_t i = 0; i + 3U < baseline.size(); i += 4U) {
+        const bool changed = after->pixels[i] != baseline[i] || after->pixels[i + 1U] != baseline[i + 1U] ||
+                             after->pixels[i + 2U] != baseline[i + 2U];
+        if (changed && after->pixels[i] > after->pixels[i + 1U] + 40U && after->pixels[i] > after->pixels[i + 2U] + 40U) {
+            ++reddish;
+        }
+    }
+    CHECK(reddish > 50U); // the red box covers a visible patch of the 96x54 frame
+}
+
 // --- Save games ------------------------------------------------------------------------------
 
 struct SaveRig {
@@ -614,6 +657,7 @@ int main(int argc, char** argv) {
     test_fixed_step_clock();
     test_sample_boot_loose_and_pak();
     test_scripts_disabled_and_polygon_seam();
+    test_cpu_renderer_draws_polygons();
     test_save_directories();
     test_save_load();
     if (failures == 0) std::cout << "dve_player_runtime_tests: PASS\n";

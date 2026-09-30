@@ -1,6 +1,7 @@
 // Editor MIDI setup: the `midi.*` settings (port picker by name with live status, channel filter,
 // channel 10 pads), User-scope persistence and reload, the synth header MIDI input button, status
-// labels on unplug / replug, the shared start helper without a native backend, the chiptune
+// labels on unplug / replug, the MIDI output port picker (Auto, None, saved by name, hotplug,
+// synth MIDI out reaching the chosen port), the shared start helper without a native backend, the chiptune
 // "Keys N" button, and the Settings title no longer sitting under the scope tabs.
 #include "dve/editor_midi.hpp"
 #include "dve/editor_native.hpp"
@@ -160,6 +161,118 @@ void test_reload(const std::filesystem::path& settingsFile) {
     check(filter.channel == 2U && filter.drums == audio::MidiDrumChannelMode::Ignore, "channel filter not restored");
 }
 
+std::vector<std::string> output_choice_values(const NativeEditorController& controller) {
+    std::vector<std::string> values;
+    const auto it = controller.settings_panel().dynamicChoices.find(kMidiOutputPortSettingId);
+    if (it != controller.settings_panel().dynamicChoices.end())
+        for (const SettingChoice& choice : it->second) values.push_back(choice.value);
+    return values;
+}
+std::string output_choice_label(const NativeEditorController& controller, const std::string& value) {
+    const auto it = controller.settings_panel().dynamicChoices.find(kMidiOutputPortSettingId);
+    if (it == controller.settings_panel().dynamicChoices.end()) return {};
+    for (const SettingChoice& choice : it->second) if (choice.value == value) return choice.label;
+    return {};
+}
+
+const std::string kJdxi = "Roland JD-Xi:JD-Xi MIDI 1 20:0";
+const std::string kJdxiReplugged = "Roland JD-Xi:JD-Xi MIDI 1 36:0";
+const std::string kJdxiSaved = "Roland JD-Xi:JD-Xi MIDI 1";
+
+void test_output_picker(const std::filesystem::path& settingsFile) {
+    NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
+    controller.configure_user_settings(settingsFile);
+    check(controller.midi_output_port().empty(), "default MIDI output is not Auto");
+    auto owned = std::make_unique<audio::FakeMidiPortBackend>(std::vector<std::string>{}, std::vector<std::string>{kThrough, kJdxi});
+    audio::FakeMidiPortBackend* backend = owned.get();
+    controller.attach_midi_output(std::move(owned), {std::chrono::milliseconds(10), false});
+    const auto poll_output = [&] {
+        controller.midi_output_session()->poll_now();
+        controller.refresh_midi_status();
+    };
+    poll_output();
+    // Auto keeps the previous behaviour: the first output port.
+    check(controller.midi_output_status().state == audio::MidiConnectionState::Connected &&
+          backend->open_output_port_name() == kThrough, "Auto output did not open the first port");
+    check(controller.midi_output_summary() == "Midi Through: connected", "output summary: " + controller.midi_output_summary());
+    const std::vector<std::string> expected{"", "none", "Midi Through:Midi Through Port-0", kJdxiSaved};
+    check(output_choice_values(controller) == expected, "output picker choices wrong");
+    check(output_choice_label(controller, "") == "Auto: Midi Through (connected)", "output Auto label: " + output_choice_label(controller, ""));
+    check(output_choice_label(controller, "none") == "None (MIDI output off)", "output None label");
+    // The input picker is untouched by the output list.
+    const auto inputValues = choice_values(controller);
+    check(std::find(inputValues.begin(), inputValues.end(), kJdxiSaved) == inputValues.end(),
+          "input picker picked up output ports");
+
+    // update() drains the synth MIDI out into the connected session; sends reach the port.
+    controller.update(0.0F);
+    backend->clear_sent();
+    check(controller.midi_output_session()->send(audio::MidiMessage::note_on(0, 61, 100)), "session send failed");
+    auto sent = backend->sent_messages();
+    check(sent.size() == 1U && sent[0].first == kThrough && sent[0].second.data1 == 61U, "message not delivered");
+
+    // Settings > Audio > MIDI Output: left/right cycles the live list; Apply saves by name.
+    controller.open_settings(SettingScope::User, "Audio");
+    const auto rows = controller.settings_rows();
+    const auto row = std::find_if(rows.begin(), rows.end(), [](const SettingDefinition* d) { return d->id == kMidiOutputPortSettingId; });
+    check(row != rows.end(), "MIDI Output row missing from Settings > Audio");
+    if (row != rows.end()) {
+        check(controller.settings_panel().has_choices(**row), "MIDI Output row is not a picker");
+        controller.settings_panel().selectedRow = static_cast<std::size_t>(row - rows.begin());
+        controller.key_down("right", false, false, false); // Auto -> None
+        controller.key_down("right", false, false, false); // None -> Midi Through
+        controller.key_down("right", false, false, false); // -> JD-Xi
+        const auto staged = controller.settings_panel().stagedValues.find(kMidiOutputPortSettingId);
+        check(staged != controller.settings_panel().stagedValues.end() &&
+              std::get<std::string>(staged->second) == kJdxiSaved, "right arrow did not stage the JD-Xi");
+    }
+    controller.close_settings(true);
+    check(controller.midi_output_port() == kJdxiSaved, "Apply did not store the output port by name");
+    check(file_text(settingsFile).find("\"midi.output_port\" string \"" + kJdxiSaved + "\"") != std::string::npos,
+          "output port not saved to the User settings file");
+    backend->clear_sent();
+    poll_output();
+    check(backend->open_output_port_name() == kJdxi, "applied output port not opened");
+    std::size_t released = 0;
+    for (const auto& [port, message] : backend->sent_messages())
+        if (port == kThrough && message.type == audio::MidiMessageType::ControlChange && message.data1 == 123U) ++released;
+    check(released == 16U, "switching ports did not release notes on the old port");
+    check(output_choice_label(controller, kJdxiSaved) == kJdxiSaved + " (connected)", "connected label: " +
+          output_choice_label(controller, kJdxiSaved));
+
+    // Unplug / replug with a new ALSA id: picker keeps the saved port, reconnects by name.
+    backend->unplug_output(kJdxi);
+    poll_output();
+    check(controller.midi_output_summary() == "Roland JD-Xi: disconnected", "output summary after unplug: " + controller.midi_output_summary());
+    check(output_choice_label(controller, kJdxiSaved) == kJdxiSaved + " (disconnected)", "picker lost the unplugged output");
+    backend->plug_output(kJdxiReplugged);
+    poll_output();
+    check(backend->open_output_port_name() == kJdxiReplugged, "saved output did not reconnect after replug");
+
+    // cycle_midi_output_port walks Auto -> None -> ports like the input one.
+    check(controller.cycle_midi_output_port(1) && controller.midi_output_port().empty(),
+          "cycle from the JD-Xi did not wrap to Auto: " + controller.midi_output_port());
+    check(controller.cycle_midi_output_port(1) && controller.midi_output_port() == "none",
+          "cycle from Auto did not step to None: " + controller.midi_output_port());
+    poll_output();
+    check(controller.midi_output_status().state == audio::MidiConnectionState::Disabled && !backend->output_open(),
+          "None did not close the output");
+    check(controller.set_midi_output_port(kJdxiSaved), "restore saved output");
+}
+
+void test_output_reload(const std::filesystem::path& settingsFile) {
+    NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
+    controller.configure_user_settings(settingsFile);
+    check(controller.midi_output_port() == kJdxiSaved, "saved output port not loaded from User settings");
+    auto owned = std::make_unique<audio::FakeMidiPortBackend>(std::vector<std::string>{},
+                                                              std::vector<std::string>{kThrough, kJdxiReplugged});
+    audio::FakeMidiPortBackend* backend = owned.get();
+    controller.attach_midi_output(std::move(owned), {std::chrono::milliseconds(10), false});
+    controller.midi_output_session()->poll_now();
+    controller.refresh_midi_status();
+    check(backend->open_output_port_name() == kJdxiReplugged, "startup did not open the saved output port");
+}
+
 void test_without_native_backend() {
     NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
     controller.attach_midi_input(nullptr);
@@ -167,6 +280,10 @@ void test_without_native_backend() {
     check(controller.midi_input_status().state == audio::MidiConnectionState::Unavailable, "null backend not Unavailable");
     check(controller.synth_panel().midi_input_label() == "MIDI IN: n/a", "label without backend");
     check(choice_values(controller).size() == 2U, "picker without backend should offer Auto and None");
+    controller.attach_midi_output(nullptr);
+    controller.refresh_midi_status();
+    check(controller.midi_output_status().state == audio::MidiConnectionState::Unavailable, "null output not Unavailable");
+    check(output_choice_values(controller).size() == 2U, "output picker without backend should offer Auto and None");
     // The shared host helper works whether or not RtMidi was compiled in.
     const EditorMidiStartResult start = start_editor_midi(controller);
     check(start.backendName == (start.nativeBackend ? std::string("RtMidi") : std::string("none")), "start helper backend name");
@@ -217,6 +334,8 @@ int main() {
     const std::filesystem::path settingsFile = dir / "editor_settings.txt";
     test_picker_persistence_and_header(settingsFile);
     test_reload(settingsFile);
+    test_output_picker(settingsFile);
+    test_output_reload(settingsFile);
     test_without_native_backend();
     test_chiptune_keys_button(settingsFile);
     test_settings_title();

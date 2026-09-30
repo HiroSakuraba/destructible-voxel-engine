@@ -2,16 +2,19 @@
 //
 //   dve_export_scene <scene.dvescene> <out.dvoxscene.json>
 //                    [--materials <library.dvematerials>] [--objects-dir <dir>]
-//                    [--name <scene name>] [--strict] [--quiet]
+//                    [--name <scene name>] [--project-root <dir>] [--gabor-opacity <0..1>]
+//                    [--strict] [--quiet]
 //
 // Loads a DVE_EDITOR_SCENE document with the editor library and writes the shipped runtime
 // format (DVOXSCENE v1 JSON + one .dvox per object), so dve_player never links dve_editor.
-// Warnings list what DVOXSCENE v1 cannot represent (see dve/editor_scene_export.hpp);
-// --strict turns them into errors. Exit codes: 0 ok, 1 export failed, 2 usage error.
+// .dmesh objects are copied, 3D text and Gabor volumes are baked to voxels, components and
+// attachments go into the per-object extensions block (see dve/editor_scene_export.hpp).
+// Warnings list what the runtime format cannot represent; --strict turns them into errors. Exit codes: 0 ok, 1 export failed, 2 usage error.
 #include "dve/editor_document.hpp"
 #include "dve/editor_materials.hpp"
 #include "dve/editor_scene_export.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -23,7 +26,7 @@ int usage(const char* message = nullptr) {
     if (message) std::cerr << "dve_export_scene: " << message << '\n';
     std::cerr << "usage: dve_export_scene <scene.dvescene> <out.dvoxscene.json> "
                  "[--materials <file.dvematerials>] [--objects-dir <dir>] [--name <name>] "
-                 "[--strict] [--quiet]\n";
+                 "[--project-root <dir>] [--gabor-opacity <0..1>] [--strict] [--quiet]\n";
     return 2;
 }
 
@@ -57,6 +60,18 @@ int main(int argc, char** argv) {
             const char* v = value(arg);
             if (!v) return usage("--name needs a value");
             options.sceneName = v;
+        } else if (arg == "--project-root") {
+            const char* v = value(arg);
+            if (!v) return usage("--project-root needs a folder");
+            options.projectRoot = v;
+        } else if (arg == "--gabor-opacity") {
+            const char* v = value(arg);
+            if (!v) return usage("--gabor-opacity needs a value");
+            char* end = nullptr;
+            const float threshold = std::strtof(v, &end);
+            if (end == v || *end != '\0' || !(threshold > 0.0F && threshold < 1.0F))
+                return usage("--gabor-opacity must be a number in (0, 1)");
+            options.gaborOpacityThreshold = threshold;
         } else if (arg == "--strict") {
             options.strict = true;
         } else if (arg == "--quiet") {
@@ -94,6 +109,9 @@ int main(int argc, char** argv) {
         dve::editor::export_editor_scene(*document, materials, output, options);
     for (const std::string& warning : result.warnings) {
         std::cerr << "dve_export_scene: warning: " << warning << '\n';
+    }
+    if (!quiet) {
+        for (const std::string& line : result.notes) std::cout << "dve_export_scene: note: " << line << '\n';
     }
     if (!result.success) {
         std::cerr << "dve_export_scene: export failed: " << result.error << '\n';

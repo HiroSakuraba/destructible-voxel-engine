@@ -1,4 +1,5 @@
 #include "dve/editor_native_renderer.hpp"
+#include "dve/editor_midi.hpp"
 #include "dve/editor_ui_zoom.hpp"
 
 #include <algorithm>
@@ -1688,8 +1689,6 @@ void render_synth_panel(const IEditorCanvas& outerPainter, NativeEditorControlle
             "Chromatic", "Major", "Minor", "Pent major", "Pent minor", "Dorian"};
         static constexpr std::array<std::string_view, 4> directionNames{
             "Forward", "Reverse", "Ping-pong", "Random"};
-        static constexpr std::array<std::string_view, 8> geneNames{
-            "Oscillators", "Spectral", "Filters", "Envelopes", "Modulation", "Stereo", "Sequencer", "FX"};
         static constexpr std::array<std::string_view, 12> pitchNames{
             "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
         const auto& seq = preset.sequencer;
@@ -4123,6 +4122,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             if (!availability.available)
                 settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 88,
                              availability.explanation, rgb(255,190,80));
+            else if (definition.id == dve::editor::kMidiOutputPortSettingId)
+                settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 88,
+                             "Status: " + controller.midi_output_summary(),
+                             controller.midi_output_status().state == audio::MidiConnectionState::Connected
+                                 ? rgb(120,220,150) : rgb(255,190,80));
             else if (definition.id.starts_with("midi."))
                 settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 88,
                              "Status: " + controller.midi_input_summary(),

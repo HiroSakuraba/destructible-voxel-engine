@@ -111,6 +111,7 @@ add_library(dve_core
     src/brick_palette.cpp
     src/brick_palette_asset_cooker.cpp
     src/render/brick_palette_shading.cpp
+    src/render/radiance_cascades_2d.cpp
     src/voxel_material_switcher.cpp
     src/sprite_palette.cpp
     src/sprite_authoring.cpp
@@ -230,6 +231,9 @@ add_executable(dve_material_system_demo apps/material_system_demo.cpp)
 target_link_libraries(dve_material_system_demo PRIVATE dve::core)
 add_executable(dve_pack apps/dve_pack.cpp)
 target_link_libraries(dve_pack PRIVATE dve::core)
+# Radiance Cascades Phase 1: CPU 2D reference bench (PNG shots + timing/error tables).
+add_executable(dve_rc2d_bench apps/rc2d_bench.cpp)
+target_link_libraries(dve_rc2d_bench PRIVATE dve::core)
 add_executable(dve_material_audit apps/material_audit_v174.cpp)
 target_link_libraries(dve_material_audit PRIVATE dve::core)
 add_executable(dve_generate_sprite_assets_v218 apps/generate_sprite_assets_v218.cpp)
@@ -880,6 +884,10 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_v235_foundations_tests tests/test_v235_foundations.cpp)
     target_link_libraries(dve_v235_foundations_tests PRIVATE dve::core)
     add_test(NAME dve_v235_foundations_tests COMMAND dve_v235_foundations_tests)
+    add_executable(dve_rc2d_tests tests/test_radiance_cascades_2d.cpp)
+    target_link_libraries(dve_rc2d_tests PRIVATE dve::core)
+    add_test(NAME dve_rc2d_tests COMMAND dve_rc2d_tests)
+    set_tests_properties(dve_rc2d_tests PROPERTIES PROCESSORS 2)
     if(TARGET manifold)
         add_executable(dve_print_export_tests tests/test_print_export.cpp)
         target_link_libraries(dve_print_export_tests PRIVATE dve::core manifold)

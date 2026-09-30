@@ -5,6 +5,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <unordered_set>
 
 namespace dve {
@@ -696,9 +697,65 @@ std::optional<Float4> MaterialLibrary::runtime_vector(MaterialId materialId, std
 }
 
 bool MaterialLibrary::clear_runtime_overrides(MaterialId materialId) {
-    const bool changed = runtimeScalars_.erase(materialId) > 0 || runtimeVectors_.erase(materialId) > 0;
+    // Both maps must be cleared: `a || b` used to skip the vector erase whenever a scalar
+    // override existed.
+    const bool scalars = runtimeScalars_.erase(materialId) > 0;
+    const bool vectors = runtimeVectors_.erase(materialId) > 0;
+    const bool changed = scalars || vectors;
     if (changed) (void)resolve_all(nullptr);
     return changed;
+}
+
+std::vector<MaterialRuntimeOverrideState> MaterialLibrary::capture_runtime_overrides() const {
+    std::map<MaterialId, MaterialRuntimeOverrideState> byId;
+    for (const auto& [id, values] : runtimeScalars_)
+        for (const auto& [name, value] : values) byId[id].scalars.emplace_back(name, value);
+    for (const auto& [id, values] : runtimeVectors_)
+        for (const auto& [name, value] : values) byId[id].vectors.emplace_back(name, value);
+    for (const auto& [id, values] : runtimeLayerWeights_)
+        for (const auto& [layer, value] : values) byId[id].layerWeights.emplace_back(static_cast<std::uint32_t>(layer), value);
+    std::vector<MaterialRuntimeOverrideState> result;
+    for (auto& [id, state] : byId) {
+        if (state.scalars.empty() && state.vectors.empty() && state.layerWeights.empty()) continue;
+        state.materialId = id;
+        std::sort(state.scalars.begin(), state.scalars.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::sort(state.vectors.begin(), state.vectors.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::sort(state.layerWeights.begin(), state.layerWeights.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        result.push_back(std::move(state));
+    }
+    return result;
+}
+
+std::size_t MaterialLibrary::restore_runtime_overrides(
+    const std::vector<MaterialRuntimeOverrideState>& overrides, std::vector<std::string>* warnings) {
+    const bool hadOverrides = !runtimeScalars_.empty() || !runtimeVectors_.empty() || !runtimeLayerWeights_.empty();
+    runtimeScalars_.clear();
+    runtimeVectors_.clear();
+    runtimeLayerWeights_.clear();
+    if (hadOverrides) (void)resolve_all(nullptr);
+    std::size_t applied = 0U;
+    for (const MaterialRuntimeOverrideState& state : overrides) {
+        const auto warn = [&](std::string_view what, const std::string& error) {
+            if (warnings)
+                warnings->push_back("material " + std::to_string(state.materialId) + " " + std::string(what) + ": " + error);
+        };
+        for (const auto& [name, value] : state.scalars) {
+            std::string error;
+            if (set_runtime_scalar(state.materialId, name, value, &error)) ++applied;
+            else warn(name, error);
+        }
+        for (const auto& [name, value] : state.vectors) {
+            std::string error;
+            if (set_runtime_vector(state.materialId, name, value, &error)) ++applied;
+            else warn(name, error);
+        }
+        for (const auto& [layer, value] : state.layerWeights) {
+            std::string error;
+            if (set_runtime_layer_weight(state.materialId, layer, value, &error)) ++applied;
+            else warn("layer " + std::to_string(layer), error);
+        }
+    }
+    return applied;
 }
 
 bool MaterialLibrary::set_runtime_layer_weight(MaterialId materialId, std::size_t layerIndex, float weight, std::string* error) {

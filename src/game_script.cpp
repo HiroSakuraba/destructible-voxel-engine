@@ -13,7 +13,10 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <optional>
+#include <memory>
 #include <set>
 #include <cstdio>
 #include <fstream>
@@ -53,6 +56,15 @@ struct GameScriptHost::Impl {
     // for world.save_game / load_game / save_exists.
     std::map<std::string, int, std::less<>> saveRefs;
     std::map<std::string, int, std::less<>> loadRefs;
+    // Named timers (world.timer_handler / schedule_*_named): the handler is looked up by name
+    // when the timer fires, and the payload is plain data, so both survive a save/load.
+    struct NamedTimer {
+        std::string handler;
+        int dataRef{LUA_NOREF};
+        bool repeating{};
+    };
+    std::map<std::string, int, std::less<>> timerHandlers;
+    std::map<std::uint64_t, NamedTimer> namedTimers;
     GameScriptHost::SaveRequestHandler saveRequests;
 };
 
@@ -659,9 +671,79 @@ int l_schedule_repeating(lua_State* L) {
     return 1;
 }
 
+void release_named_timer(lua_State* L, GameScriptHost::Impl* impl, std::uint64_t id) {
+    const auto it = impl->namedTimers.find(id);
+    if (it == impl->namedTimers.end()) return;
+    if (it->second.dataRef != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, it->second.dataRef);
+    impl->namedTimers.erase(it);
+}
+
+// The callback a named timer runs: resolves handler and payload by timer id at fire time, so
+// a timer restored from a save (bound again by load_state) behaves like the original.
+std::function<void()> named_timer_callback(lua_State* L, GameScriptHost::Impl* impl, std::uint64_t id) {
+    return [L, impl, id]() {
+        const auto it = impl->namedTimers.find(id);
+        if (it == impl->namedTimers.end()) return;
+        const auto handler = impl->timerHandlers.find(it->second.handler);
+        const bool repeating = it->second.repeating;
+        if (handler != impl->timerHandlers.end()) {
+            lua_rawgeti(L, LUA_REGISTRYINDEX, handler->second);
+            if (it->second.dataRef != LUA_NOREF) lua_rawgeti(L, LUA_REGISTRYINDEX, it->second.dataRef);
+            else lua_pushnil(L);
+            lua_pushinteger(L, static_cast<lua_Integer>(id));
+            if (lua_pcall(L, 2, 0, 0) != LUA_OK) report_callback_error(L, "named timer");
+        } else if (impl->logSink) {
+            impl->logSink(true, "named timer handler '" + it->second.handler + "' is not registered");
+        }
+        if (!repeating) release_named_timer(L, impl, id);
+    };
+}
+
+int l_timer_handler(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    lua_pushvalue(L, 2);
+    const int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    GameScriptHost::Impl* impl = impl_from_state(L);
+    if (const auto it = impl->timerHandlers.find(std::string_view(name)); it != impl->timerHandlers.end()) {
+        luaL_unref(L, LUA_REGISTRYINDEX, it->second);
+        it->second = ref;
+    } else {
+        impl->timerHandlers.emplace(name, ref);
+    }
+    return 0;
+}
+
+int schedule_named(lua_State* L, bool repeating) {
+    const float seconds = static_cast<float>(luaL_checknumber(L, 1));
+    const char* name = luaL_checkstring(L, 2);
+    GameScriptHost::Impl* impl = impl_from_state(L);
+    if (!impl->timerHandlers.contains(std::string_view(name)))
+        return luaL_error(L, "no world.timer_handler('%s', fn) is registered", name);
+    int dataRef = LUA_NOREF;
+    if (!lua_isnoneornil(L, 3)) {
+        lua_pushvalue(L, 3);
+        dataRef = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    GameWorld& world = *impl->world;
+    // The id is known only after scheduling, so the callback reads it from a shared cell.
+    auto cell = std::make_shared<std::uint64_t>(0U);
+    auto callback = [L, impl, cell]() { named_timer_callback(L, impl, *cell)(); };
+    const GameWorld::TimerId id = repeating ? world.schedule_repeating(seconds, callback)
+                                            : world.schedule_once(seconds, callback);
+    *cell = id;
+    impl->namedTimers[id] = {name, dataRef, repeating};
+    lua_pushinteger(L, static_cast<lua_Integer>(id));
+    return 1;
+}
+
+int l_schedule_once_named(lua_State* L) { return schedule_named(L, false); }
+int l_schedule_repeating_named(lua_State* L) { return schedule_named(L, true); }
+
 int l_cancel_timer(lua_State* L) {
     const auto id = static_cast<GameWorld::TimerId>(luaL_checkinteger(L, 1));
     lua_pushboolean(L, world_from_state(L).cancel_timer(id));
+    release_named_timer(L, impl_from_state(L), id);
     return 1;
 }
 
@@ -1650,7 +1732,7 @@ int l_camera_load_runtime_state(lua_State* L) {
 // --- Save games: world.on_save / on_load, save_game / load_game -----------------------------
 
 constexpr std::uint32_t kScriptStateMagic = 0x534C5644U;   // "DVLS"
-constexpr std::uint32_t kScriptStateVersion = 1U;
+constexpr std::uint32_t kScriptStateVersion = 2U;   // 2 adds environment, HUD, material overrides, named timers
 constexpr int kScriptStateMaximumDepth = 32;
 constexpr std::uint32_t kScriptStateMaximumEntries = 1U << 20U;
 constexpr std::size_t kScriptStateMaximumBytes = 16U * 1024U * 1024U;
@@ -1893,11 +1975,72 @@ bool read_script_value(lua_State* L, ScriptStateReader& r, int depth, bool asKey
     }
 }
 
+struct ScriptStateNamedTimer {
+    std::uint64_t id{};
+    std::string handler;
+    bool repeating{};
+    std::size_t dataOffset{};
+};
+
 struct ScriptStateContents {
+    std::uint32_t version{};
     std::vector<std::pair<std::string, double>> globals;
     std::vector<std::pair<std::string, Float4>> vectors;
     std::vector<std::pair<std::string, std::size_t>> tables;   // key -> offset of the value
+    // Version 2:
+    std::optional<RenderEnvironment> environment;
+    std::string hudPrompt;
+    std::vector<ui::ToolWheelEntry> hudTools;
+    std::uint64_t hudSelected{};
+    std::vector<MaterialRuntimeOverrideState> materials;
+    std::vector<ScriptStateNamedTimer> namedTimers;
 };
+
+constexpr std::uint32_t kEnvironmentFloatCount = 30U;
+
+void write_environment(ScriptStateWriter& w, const RenderEnvironment& e) {
+    const float floats[kEnvironmentFloatCount] = {
+        e.sunDirection.x, e.sunDirection.y, e.sunDirection.z, e.sunIntensity, e.sunColor.x, e.sunColor.y, e.sunColor.z,
+        e.subsurfaceMaxDistanceMeters, e.skyColor.x, e.skyColor.y, e.skyColor.z, e.exposure, e.groundColor.x,
+        e.groundColor.y, e.groundColor.z, e.globalTint.x, e.globalTint.y, e.globalTint.z, e.bloomThreshold,
+        e.bloomIntensity, e.bloomRadius, e.globalIlluminationIntensity, e.globalIlluminationMaxDistanceMeters,
+        e.shadowStrength, e.shadowSoftnessRadians, e.shadowMaxDistanceMeters, e.contactShadowDistanceMeters,
+        e.shadowBiasMeters, 0.0F, 0.0F};
+    for (const float value : floats) w.u32(std::bit_cast<std::uint32_t>(value));
+    w.u32(static_cast<std::uint32_t>(e.tonemapOperator));
+    w.u32(static_cast<std::uint32_t>(e.globalIlluminationMode));
+    w.u32(e.globalIlluminationSamples);
+    w.u32(static_cast<std::uint32_t>(e.shadowMode));
+    w.u32(e.shadowSamples);
+}
+
+bool read_environment(ScriptStateReader& r, RenderEnvironment& e) {
+    std::uint32_t raw[kEnvironmentFloatCount]{};
+    for (std::uint32_t& value : raw) if (!r.u32(value)) return false;
+    float f[kEnvironmentFloatCount]{};
+    for (std::uint32_t i = 0; i < kEnvironmentFloatCount; ++i) f[i] = std::bit_cast<float>(raw[i]);
+    std::size_t i = 0;
+    e.sunDirection = {f[i], f[i + 1], f[i + 2]}; i += 3;
+    e.sunIntensity = f[i++];
+    e.sunColor = {f[i], f[i + 1], f[i + 2]}; i += 3;
+    e.subsurfaceMaxDistanceMeters = f[i++];
+    e.skyColor = {f[i], f[i + 1], f[i + 2]}; i += 3;
+    e.exposure = f[i++];
+    e.groundColor = {f[i], f[i + 1], f[i + 2]}; i += 3;
+    e.globalTint = {f[i], f[i + 1], f[i + 2]}; i += 3;
+    e.bloomThreshold = f[i++]; e.bloomIntensity = f[i++]; e.bloomRadius = f[i++];
+    e.globalIlluminationIntensity = f[i++]; e.globalIlluminationMaxDistanceMeters = f[i++];
+    e.shadowStrength = f[i++]; e.shadowSoftnessRadians = f[i++]; e.shadowMaxDistanceMeters = f[i++];
+    e.contactShadowDistanceMeters = f[i++]; e.shadowBiasMeters = f[i++];
+    std::uint32_t tonemap{}, gi{}, shadow{};
+    if (!(r.u32(tonemap) && r.u32(gi) && r.u32(e.globalIlluminationSamples) && r.u32(shadow) && r.u32(e.shadowSamples)))
+        return false;
+    if (tonemap > 2U || gi > 3U || shadow > 4U) return r.bad("script state has an invalid environment mode");
+    e.tonemapOperator = static_cast<TonemapOperator>(tonemap);
+    e.globalIlluminationMode = static_cast<GlobalIlluminationMode>(gi);
+    e.shadowMode = static_cast<ShadowMode>(shadow);
+    return true;
+}
 
 bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& contents, std::string* error) {
     ScriptStateReader r{bytes, 0U, {}};
@@ -1908,7 +2051,8 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
     std::uint32_t magic{}, version{}, count{};
     if (!r.u32(magic) || !r.u32(version)) return failWith();
     if (magic != kScriptStateMagic) return r.bad("not a DVE script state blob"), failWith();
-    if (version != kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
+    if (version != 1U && version != kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
+    contents.version = version;
     if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid global count"), failWith();
     for (std::uint32_t i = 0; i < count; ++i) {
         std::string key;
@@ -1931,6 +2075,58 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
         const std::size_t offset = r.offset;
         if (!read_script_value(nullptr, r, 0, false)) return failWith();
         contents.tables.emplace_back(std::move(key), offset);
+    }
+    if (version >= 2U) {
+        RenderEnvironment environment;
+        if (!read_environment(r, environment)) return failWith();
+        contents.environment = environment;
+        if (!r.text(contents.hudPrompt) || !r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid HUD state"), failWith();
+        for (std::uint32_t i = 0; i < count; ++i) {
+            ui::ToolWheelEntry tool;
+            std::uint8_t enabled{};
+            if (!r.text(tool.id) || !r.text(tool.label) || !r.u8(enabled) || enabled > 1U) return r.bad("invalid HUD tool"), failWith();
+            tool.enabled = enabled != 0U;
+            contents.hudTools.push_back(std::move(tool));
+        }
+        if (!r.u64(contents.hudSelected)) return failWith();
+        if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid material override count"), failWith();
+        for (std::uint32_t i = 0; i < count; ++i) {
+            MaterialRuntimeOverrideState material;
+            std::uint32_t id{}, entries{};
+            if (!r.u32(id) || id > 255U || !r.u32(entries) || entries > kScriptStateMaximumEntries) return r.bad("invalid material override"), failWith();
+            material.materialId = static_cast<MaterialId>(id);
+            for (std::uint32_t j = 0; j < entries; ++j) {
+                std::string name;
+                std::uint32_t raw{};
+                if (!r.text(name) || !r.u32(raw)) return failWith();
+                material.scalars.emplace_back(std::move(name), std::bit_cast<float>(raw));
+            }
+            if (!r.u32(entries) || entries > kScriptStateMaximumEntries) return r.bad("invalid material override"), failWith();
+            for (std::uint32_t j = 0; j < entries; ++j) {
+                std::string name;
+                std::uint32_t raw[4]{};
+                if (!r.text(name) || !r.u32(raw[0]) || !r.u32(raw[1]) || !r.u32(raw[2]) || !r.u32(raw[3])) return failWith();
+                material.vectors.emplace_back(std::move(name), Float4{std::bit_cast<float>(raw[0]), std::bit_cast<float>(raw[1]),
+                                                                      std::bit_cast<float>(raw[2]), std::bit_cast<float>(raw[3])});
+            }
+            if (!r.u32(entries) || entries > kScriptStateMaximumEntries) return r.bad("invalid material override"), failWith();
+            for (std::uint32_t j = 0; j < entries; ++j) {
+                std::uint32_t layer{}, raw{};
+                if (!r.u32(layer) || !r.u32(raw)) return failWith();
+                material.layerWeights.emplace_back(layer, std::bit_cast<float>(raw));
+            }
+            contents.materials.push_back(std::move(material));
+        }
+        if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid named timer count"), failWith();
+        for (std::uint32_t i = 0; i < count; ++i) {
+            ScriptStateNamedTimer timer;
+            std::uint8_t repeating{};
+            if (!r.u64(timer.id) || !r.text(timer.handler) || !r.u8(repeating) || repeating > 1U) return r.bad("invalid named timer"), failWith();
+            timer.repeating = repeating != 0U;
+            timer.dataOffset = r.offset;
+            if (!read_script_value(nullptr, r, 0, false)) return failWith();
+            contents.namedTimers.push_back(std::move(timer));
+        }
     }
     if (r.offset != bytes.size()) return r.bad("script state has trailing bytes"), failWith();
     return true;
@@ -2047,6 +2243,9 @@ constexpr luaL_Reg kWorldFunctions[] = {
     {"schedule_once", l_schedule_once},
     {"schedule_repeating", l_schedule_repeating},
     {"cancel_timer", l_cancel_timer},
+    {"timer_handler", l_timer_handler},
+    {"schedule_once_named", l_schedule_once_named},
+    {"schedule_repeating_named", l_schedule_repeating_named},
     {"on_tick", l_on_tick},
     {"on_damage", l_on_damage},
     {"on_destroyed", l_on_destroyed},
@@ -2343,6 +2542,50 @@ std::optional<std::vector<std::byte>> GameScriptHost::save_state(std::string* er
             return std::nullopt;
         }
     }
+    write_environment(w, impl_->environment);
+    w.bytes(impl_->hud.interaction_prompt().data(), impl_->hud.interaction_prompt().size());
+    w.u32(static_cast<std::uint32_t>(impl_->hud.tools().size()));
+    for (const ui::ToolWheelEntry& tool : impl_->hud.tools()) {
+        w.bytes(tool.id.data(), tool.id.size());
+        w.bytes(tool.label.data(), tool.label.size());
+        w.u8(tool.enabled ? 1U : 0U);
+    }
+    w.u64(static_cast<std::uint64_t>(impl_->hud.selected_index()));
+    const auto materials = impl_->materials.capture_runtime_overrides();
+    w.u32(static_cast<std::uint32_t>(materials.size()));
+    for (const MaterialRuntimeOverrideState& material : materials) {
+        w.u32(material.materialId);
+        w.u32(static_cast<std::uint32_t>(material.scalars.size()));
+        for (const auto& [name, value] : material.scalars) { w.bytes(name.data(), name.size()); w.u32(std::bit_cast<std::uint32_t>(value)); }
+        w.u32(static_cast<std::uint32_t>(material.vectors.size()));
+        for (const auto& [name, value] : material.vectors) {
+            w.bytes(name.data(), name.size());
+            w.u32(std::bit_cast<std::uint32_t>(value.x)); w.u32(std::bit_cast<std::uint32_t>(value.y));
+            w.u32(std::bit_cast<std::uint32_t>(value.z)); w.u32(std::bit_cast<std::uint32_t>(value.w));
+        }
+        w.u32(static_cast<std::uint32_t>(material.layerWeights.size()));
+        for (const auto& [layer, value] : material.layerWeights) { w.u32(layer); w.u32(std::bit_cast<std::uint32_t>(value)); }
+    }
+    // Named timers still scheduled in the world (a fired one-shot has already been released).
+    std::vector<std::pair<std::uint64_t, const Impl::NamedTimer*>> named;
+    for (const auto& [id, timer] : impl_->namedTimers)
+        if (impl_->world->has_timer(id)) named.emplace_back(id, &timer);
+    w.u32(static_cast<std::uint32_t>(named.size()));
+    for (const auto& [id, timer] : named) {
+        w.u64(id);
+        w.bytes(timer->handler.data(), timer->handler.size());
+        w.u8(timer->repeating ? 1U : 0U);
+        if (timer->dataRef != LUA_NOREF) lua_rawgeti(L, LUA_REGISTRYINDEX, timer->dataRef);
+        else lua_pushnil(L);
+        std::vector<const void*> active;
+        const bool ok = write_script_value(L, lua_gettop(L), w, 0, active,
+                                           "data of named timer '" + timer->handler + "'");
+        lua_settop(L, top);
+        if (!ok) {
+            if (error) *error = w.error;
+            return std::nullopt;
+        }
+    }
     if (w.over_limit()) {
         if (error) *error = w.error;
         return std::nullopt;
@@ -2358,6 +2601,43 @@ bool GameScriptHost::load_state(std::span<const std::byte> bytes, std::string* e
     for (const auto& [key, value] : contents.vectors) restore_script_vector(impl, key, value);
     lua_State* L = impl->L;
     const int top = lua_gettop(L);
+    if (contents.version >= 2U) {
+        const auto warn = [&](const std::string& message) { if (impl->logSink) impl->logSink(true, message); };
+        if (contents.environment) {
+            std::string environmentError;
+            if (contents.environment->validate(&environmentError)) impl->environment = *contents.environment;
+            else warn("saved render environment is invalid, keeping the boot environment: " + environmentError);
+        }
+        impl->hud.restore(contents.hudPrompt, contents.hudTools, static_cast<std::size_t>(contents.hudSelected));
+        std::vector<std::string> materialWarnings;
+        (void)impl->materials.restore_runtime_overrides(contents.materials, &materialWarnings);
+        for (const std::string& message : materialWarnings) warn("saved " + message);
+        // Named timers: replace the boot's bookkeeping with the saved one, then re-attach the
+        // timers GameWorld kept unbound (a boot-scheduled timer with the same id is already
+        // bound to the same id-based callback).
+        for (auto& [id, timer] : impl->namedTimers)
+            if (timer.dataRef != LUA_NOREF) luaL_unref(L, LUA_REGISTRYINDEX, timer.dataRef);
+        impl->namedTimers.clear();
+        const std::vector<GameWorld::TimerId> unbound = impl->world->unbound_timer_ids();
+        const std::set<GameWorld::TimerId> unboundSet(unbound.begin(), unbound.end());
+        for (const ScriptStateNamedTimer& saved : contents.namedTimers) {
+            if (!impl->timerHandlers.contains(saved.handler)) {
+                warn("save has a named timer for '" + saved.handler + "' but no world.timer_handler('" + saved.handler + "') is registered");
+                continue;
+            }
+            ScriptStateReader reader{bytes, saved.dataOffset, {}};
+            if (!read_script_value(L, reader, 0, false)) {   // validated above; defensive
+                lua_settop(L, top);
+                if (error) *error = reader.error;
+                return false;
+            }
+            int dataRef = LUA_NOREF;
+            if (lua_isnil(L, -1)) lua_pop(L, 1);
+            else dataRef = luaL_ref(L, LUA_REGISTRYINDEX);
+            impl->namedTimers[saved.id] = {saved.handler, dataRef, saved.repeating};
+            if (unboundSet.contains(saved.id)) (void)impl->world->bind_restored_timer(saved.id, named_timer_callback(L, impl, saved.id));
+        }
+    }
     for (const auto& [key, offset] : contents.tables) {
         const auto handler = impl->loadRefs.find(key);
         if (handler == impl->loadRefs.end()) {

@@ -4,7 +4,8 @@
 // dve/v235_foundations.hpp), which provides the header, per-section and document hashes,
 // size limits, migrations, atomic publish and the `.bak` rotation. See docs/SAVE_GAMES.md.
 //
-// Schema version 1 sections (all little endian, all bounds-checked on read):
+// Schema version 2 (v1 saves are migrated on read: v2 only adds optional sections).
+// Sections (all little endian, all bounds-checked on read):
 //   dve.meta     engine/game identity, scene, tick count, GameWorld::state_hash()
 //   dve.world    ids, names, tags, components, flags, transforms, attachments, sources,
 //                mass/material tables, timers, pools
@@ -12,6 +13,11 @@
 //                otherwise every brick (each brick raw or run-length encoded)
 //   dve.physics  per body: previous/current transform, velocities, sleeping, local COM
 //   dve.script   opaque bytes from the script host (GameScriptHost::save_state)
+//   dve.gameplay   v2: characters, players/possession, triggers, recordings, playbacks
+//   dve.cameras    v2: GameCameraRuntime::serialize_state() text
+//   dve.animation  v2: skeletal playback + poses, controller state machines, control rigs
+//   dve.ragdolls   v2: ragdoll states and physically active ragdoll bodies
+//   dve.hair       v2: CPU hair simulation state (DVE_ENABLE_CPU_HAIR builds)
 //   <game>       any extra section a game adds (names must not start with "dve.")
 //
 // Loading resolves every source asset through a GameSaveSourceReader (normally the game's
@@ -28,12 +34,20 @@
 #include <string_view>
 #include <vector>
 
+#include "dve/animation.hpp"
+#include "dve/animation_controller.hpp"
+#include "dve/control_rig.hpp"
 #include "dve/game_world.hpp"
+#include "dve/gameplay_runtime.hpp"
+#include "dve/ragdoll_runtime.hpp"
 #include "dve/v235_foundations.hpp"
+#if defined(DVE_ENABLE_CPU_HAIR)
+#include "dve/cpu_hair_runtime.hpp"
+#endif
 
 namespace dve {
 
-inline constexpr std::uint32_t kGameSaveSchemaVersion = 1U;
+inline constexpr std::uint32_t kGameSaveSchemaVersion = 2U;
 inline constexpr std::string_view kGameSaveExtension = ".dvesave";
 
 struct GameSaveLimits {
@@ -49,6 +63,8 @@ struct GameSaveLimits {
     std::uint32_t maximumPools{4096U};
     std::uint64_t maximumScriptStateBytes{16ULL * 1024ULL * 1024ULL};
     std::uint32_t maximumGameSections{32U};
+    std::uint32_t maximumRuntimeEntries{1U << 20U};    // characters, bones, replay frames, ...
+    std::uint32_t maximumHairPoints{1U << 24U};
     std::uint64_t maximumSourceAssetBytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
 };
 
@@ -62,9 +78,46 @@ struct GameSaveMetadata {
     std::map<std::string, std::string> info;   // free-form (slot label, play time, ...)
 };
 
+// GameWorld sub-runtimes (v2). An empty optional means "not captured" (v1 saves, or a
+// caller that saved only the world); restore then leaves that runtime as the boot left it.
+struct GameSaveRuntimeState {
+    std::optional<GameplaySaveState> gameplay;
+    std::optional<std::string> cameras;
+    std::optional<SkeletalAnimationSaveState> animation;
+    std::optional<AnimationControllerSaveState> animationControllers;
+    std::optional<ControlRigSaveState> controlRigs;
+    std::optional<RagdollSaveState> ragdolls;
+#if defined(DVE_ENABLE_CPU_HAIR)
+    std::optional<CpuHairSaveState> hair;
+#endif
+};
+
+struct GameSaveRuntimeReport {
+    bool gameplayRestored{};
+    bool camerasRestored{};
+    std::size_t animationsRestored{};
+    std::size_t controllersRestored{};
+    std::size_t controlRigsRestored{};
+    std::size_t ragdollsRestored{};
+    std::size_t hairRestored{};
+    // Entries that could not be matched to what the fresh boot bound (a patched game, an
+    // object bound at runtime instead of at boot, ...). The rest of the load still applies.
+    std::vector<std::string> warnings;
+};
+
+[[nodiscard]] GameSaveRuntimeState capture_game_runtime_state(const GameWorld& world);
+// Applies `state` to a world that was just restored with GameWorld::restore_save_state.
+// Order: gameplay, animation, controllers, control rigs, ragdolls, hair, cameras. Never
+// fails the load: mismatches become warnings. Returns false only if `state.gameplay` is
+// present but invalid for this world (error set), since characters are core game state.
+[[nodiscard]] bool restore_game_runtime_state(
+    GameWorld& world, const GameSaveRuntimeState& state, GameSaveRuntimeReport* report = nullptr,
+    std::string* error = nullptr);
+
 struct GameSaveData {
     GameSaveMetadata metadata;
     GameWorldSaveState world;
+    GameSaveRuntimeState runtimes;
     std::optional<std::vector<std::byte>> scriptState;
     std::map<std::string, std::vector<std::byte>, std::less<>> gameSections;
 };
@@ -95,7 +148,8 @@ public:
     [[nodiscard]] const GameSaveLimits& limits() const noexcept { return limits_; }
     [[nodiscard]] const SaveGameStore& store() const noexcept { return store_; }
     // Games (and tests) register document migrations for older schema versions here; every
-    // read and decode runs them before interpreting the sections.
+    // read and decode runs them before interpreting the sections. The codec registers the
+    // engine's own v1 -> v2 step itself.
     [[nodiscard]] bool register_migration(
         std::uint32_t fromVersion, SaveGameMigration migration, std::string* error = nullptr);
 

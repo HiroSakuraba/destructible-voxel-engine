@@ -2,6 +2,8 @@
 -- `require` resolves through the game content (scripts/spinner.lua inside the .dvepak).
 -- B blasts the tower (its top breaks off as a falling fragment); 1 / 2 save / load the
 -- "slot1" save game from Lua; F5 / F9 quicksave / quickload (handled by the player).
+-- Each blast schedules a named "aftershock" timer half a second later; named timers carry
+-- plain data, so a save made in between still fires it after loading.
 local spinner = require("spinner")
 
 local id = world.find_by_name("Spinner")
@@ -23,6 +25,13 @@ local function pressed(action)
   return edge
 end
 
+-- Named timer handler: registered at load time, so a restored timer finds it by name.
+world.timer_handler("aftershock", function(data)
+  world.set_global("aftershocks", data.blast)
+  world.set_environment_scalar("Exposure", 1.0 + 0.25 * data.blast)
+  world.log("aftershock " .. data.blast)
+end)
+
 local function blast_tower()
   if tower == nil then return end
   -- Cut a slab through the tower at 1.6 m so everything above it breaks off and falls.
@@ -33,6 +42,7 @@ local function blast_tower()
   end
   blasts = blasts + 1
   world.log("blast " .. blasts)
+  world.schedule_once_named(0.5, "aftershock", { blast = blasts })
 end
 
 world.on_tick(function(dt)

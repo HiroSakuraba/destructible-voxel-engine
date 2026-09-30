@@ -134,4 +134,26 @@ std::vector<CpuHairOwnerId> CpuHairRuntime::owners() const {
     return ownerIds_;
 }
 
+CpuHairSaveState CpuHairRuntime::capture_save_state() const {
+    CpuHairSaveState state;
+    for (const auto& [owner, id] : records_) {
+        if (auto dynamic = world_.capture_dynamic_state(id)) state.owners.push_back({owner, std::move(*dynamic)});
+    }
+    return state;
+}
+
+std::size_t CpuHairRuntime::restore_save_state(const CpuHairSaveState& state, std::vector<std::string>* warnings) {
+    std::size_t restored = 0U;
+    for (const CpuHairOwnerSaveState& saved : state.owners) {
+        const CpuHairId id = id_for(saved.owner);
+        std::string error = "no hair is bound after boot";
+        if (id != kInvalidCpuHairId && world_.restore_dynamic_state(id, saved.state, &error)) {
+            ++restored;
+            continue;
+        }
+        if (warnings) warnings->push_back("hair " + std::to_string(saved.owner) + ": " + error);
+    }
+    return restored;
+}
+
 } // namespace dve

@@ -248,11 +248,7 @@ jobs:
           if-no-files-found: ignore
 
   source-manifest:
-    # Informational until SOURCE_MANIFEST.sha256 is refreshed on main (it is currently stale by
-    # hundreds of entries). To make it blocking, regenerate the manifest and delete
-    # continue-on-error below.
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

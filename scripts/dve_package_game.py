@@ -5,6 +5,7 @@
                      (--runtime-prefix <dve install prefix> | --build-dir <dve build folder>)
                      [--name <Game>] [--tgz] [--verify] [--materials <lib.dvematerials>]
                      [--dve-pack <exe>] [--dve-export-scene <exe>] [--notices <file>]
+                     [--engine-license <file>]
                      [--strict-export] [--include-sample-maps] [--keep-work]
 
 Steps
@@ -20,8 +21,9 @@ Steps
      shared libraries it needs from <prefix>/lib/dve go to <output>/lib/dve (the player's RPATH
      includes $ORIGIN/lib/dve, so nothing is needed on LD_LIBRARY_PATH).
   5. Copy THIRD_PARTY_NOTICES (the Runtime component's, share/doc/dve/THIRD_PARTY_NOTICES-
-     runtime.txt) and check it lists every shipped shared library; copy the project's own
-     LICENSE*/COPYING* files if it has any.
+     runtime.txt) and check it lists every shipped shared library; copy the engine's MIT license
+     (share/doc/dve-runtime/LICENSE) to <output>/DVE-LICENSE.txt next to it; copy the project's
+     own LICENSE*/COPYING* files if it has any.
   6. Write build-info.json (engine version, game name/version, pak hash, files, options).
   7. --tgz: also write <Game>-<version>-linux-x86_64.tar.gz next to <output> (reproducible:
      sorted, root-owned, mtime $SOURCE_DATE_EPOCH or 0). The executable is stripped unless
@@ -54,6 +56,7 @@ EDITOR_ONLY_FILES = {"project.dveproject"}
 REVISION_DIR = re.compile(r"\.objects\.r[0-9]+$")
 NAME_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 BUNDLED_MARK = "Bundled file: "
+ENGINE_LICENSE_NAME = "DVE-LICENSE.txt"
 
 
 class PackageError(Exception):
@@ -348,6 +351,12 @@ def package(args) -> int:
         runtime = stage_runtime(prefix, output, game_name, not args.no_strip)
         notices = Path(args.notices) if args.notices else prefix / "share" / "doc" / "dve" / "THIRD_PARTY_NOTICES-runtime.txt"
         flagged = copy_notices(notices, output, runtime["libraries"])
+        engine_license = (Path(args.engine_license) if args.engine_license
+                          else prefix / "share" / "doc" / "dve-runtime" / "LICENSE")
+        if not engine_license.is_file():
+            raise PackageError(f"{engine_license} not found (the engine's MIT license; install the Runtime "
+                               f"component or pass --engine-license)")
+        shutil.copy2(engine_license, output / ENGINE_LICENSE_NAME)
         licenses = []
         for pattern in ("LICENSE*", "COPYING*"):
             for path in sorted(project.glob(pattern)):
@@ -355,8 +364,8 @@ def package(args) -> int:
                     shutil.copy2(path, output / path.name)
                     licenses.append(path.name)
         if not licenses:
-            log("warning: the game project has no LICENSE file; the engine has none either (decision D1) - "
-                "this folder is for internal use only")
+            log(f"note: the game project has no LICENSE file; only the engine's MIT license "
+                f"({ENGINE_LICENSE_NAME}) and THIRD_PARTY_NOTICES.txt are included")
 
         version = player_version(output / game_name)
         info = {
@@ -368,6 +377,7 @@ def package(args) -> int:
             "bundledLibraries": runtime["libraries"],
             "exportedScenes": staged["exported"], "precookedScenes": staged["precooked"],
             "excludedEditorOnly": staged["skipped"],
+            "engineLicense": {"file": ENGINE_LICENSE_NAME, "license": "MIT"},
             "licenses": licenses, "noticesReview": flagged,
             "options": {"includeSampleMaps": args.include_sample_maps, "strictExport": args.strict_export},
         }
@@ -405,6 +415,7 @@ def main() -> int:
     parser.add_argument("--dve-export-scene")
     parser.add_argument("--materials")
     parser.add_argument("--notices")
+    parser.add_argument("--engine-license", help="the engine's LICENSE (default: <prefix>/share/doc/dve-runtime/LICENSE)")
     parser.add_argument("--strict-export", action="store_true")
     parser.add_argument("--include-sample-maps", action="store_true")
     parser.add_argument("--tgz", action="store_true")

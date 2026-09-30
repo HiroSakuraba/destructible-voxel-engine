@@ -73,6 +73,16 @@ dve_pack <project-root> <output.dvepak> --all
 - `docs/MIDI_SETUP.md` — MIDI keyboards in the editors: RtMidi on Linux/Windows/macOS, port
   picker, hotplug, channel filter, and Akai MPK mini tips
 
+## License
+
+The Destructible Voxel Engine is licensed under the [MIT License](LICENSE),
+Copyright (c) 2026 Benjamin Schulz.
+
+Third-party libraries and the adapted research code under `third_party/` keep their own
+licenses (see the notices in that folder and `third_party/notices/manifest.json`). Every
+package and packaged game carries the engine's `LICENSE` and a generated
+`THIRD_PARTY_NOTICES` file; see [docs/PACKAGING.md](docs/PACKAGING.md#third-party-licenses-and-what-to-review).
+
 ## Release integrity and scope
 
 `SOURCE_MANIFEST.sha256` records the source-release file hashes. `release-manifest.json`

@@ -5,7 +5,9 @@
 # sources compiled into them. tools/generate_third_party_notices.py turns that plus
 # third_party/notices/manifest.json into notices/THIRD_PARTY_NOTICES-<component>.txt (build
 # target dve_third_party_notices, part of ALL), which is installed to share/doc/dve with the
-# component. The dve_third_party_notices_check test fails when anything shipped is not covered.
+# component. Each file starts with the engine's own license (MIT, the root LICENSE, named by the
+# manifest's "engine" entry). The dve_third_party_notices_check test fails when anything shipped
+# is not covered.
 include_guard(GLOBAL)
 find_program(DVE_PYTHON3_EXECUTABLE python3)
 set(DVE_NOTICES_MANIFEST "${PROJECT_SOURCE_DIR}/third_party/notices/manifest.json")
@@ -180,7 +182,8 @@ foreach(_dve_component Runtime Editor Tools Development)
     add_custom_command(OUTPUT "${_dve_output}"
         COMMAND "${DVE_PYTHON3_EXECUTABLE}" "${DVE_NOTICES_GENERATOR}"
             --manifest "${DVE_NOTICES_MANIFEST}" --inputs "${_dve_inputs}" --output "${_dve_output}"
-        DEPENDS "${DVE_NOTICES_MANIFEST}" "${DVE_NOTICES_GENERATOR}" "${_dve_inputs}" ${_dve_component_programs}
+        DEPENDS "${DVE_NOTICES_MANIFEST}" "${DVE_NOTICES_GENERATOR}" "${_dve_inputs}" "${PROJECT_SOURCE_DIR}/LICENSE"
+            ${_dve_component_programs}
         COMMENT "Generating THIRD_PARTY_NOTICES-${_dve_lower}.txt"
         VERBATIM)
     install(FILES "${_dve_output}" DESTINATION "${DVE_NOTICES_INSTALL_DIR}" COMPONENT ${_dve_component})

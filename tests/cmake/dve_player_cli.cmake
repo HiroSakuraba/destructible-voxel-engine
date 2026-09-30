@@ -8,7 +8,7 @@
 #   HELPER       dve_player_runtime_tests (used to corrupt a pak entry)
 #   LUA          ON when the build has Lua (the sample script moves the spinner)
 # Modes: smoke, loose_matches_pak, missing_pak, corrupt_pak, no_content, default_pak,
-#        no_audio, input
+#        no_audio, input, save_load
 cmake_minimum_required(VERSION 3.24)
 foreach(required PLAYER MODE WORK_DIR)
     if(NOT ${required})
@@ -37,10 +37,11 @@ function(expect_match text pattern what)
 endfunction()
 
 function(hash_of text out)
-    if(NOT text MATCHES "framebuffer_fnv=([0-9a-f]+)")
+    # Line-anchored: saves also print saved_/loaded_/resumed_framebuffer_fnv lines.
+    if(NOT text MATCHES "(^|\n)framebuffer_fnv=([0-9a-f]+)")
         message(FATAL_ERROR "no framebuffer_fnv in:\n${text}")
     endif()
-    set(${out} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+    set(${out} "${CMAKE_MATCH_2}" PARENT_SCOPE)
 endfunction()
 
 set(ENV_ARGS SDL_VIDEO_DRIVER=offscreen SDL_AUDIO_DRIVER=dummy)
@@ -169,6 +170,85 @@ elseif(MODE STREQUAL "no_audio")
         message(FATAL_ERROR "--no-audio run failed (${result}):\n${output}\n${errors}")
     endif()
     expect_match("${output}" "audio=none \\(disabled\\)" "audio disabled")
+elseif(MODE STREQUAL "save_load")
+    # Process A plays 40 frames (B blasts the tower at frame 2 when Lua is on, D moves the
+    # spinner, F5 quicksaves at frame 30, 1 saves slot1 from Lua at frame 34) into the XDG
+    # data dir. Process B resumes the quicksave with --load, renders the loaded state before
+    # ticking (must equal the frame A rendered right after saving), then plays the remaining
+    # 9 frames (must equal A's last frame). Then corrupt / truncated / foreign saves must fail
+    # cleanly with the content-error exit code.
+    set(save_args --headless --pak "${PAK}" --fixed-dt 0.016666668 --render-size 480x270 --threads 4 --hash)
+    set(ENV_ARGS SDL_VIDEO_DRIVER=offscreen SDL_AUDIO_DRIVER=dummy "XDG_DATA_HOME=${WORK_DIR}/xdg")
+    set(save_dir "${WORK_DIR}/xdg/dve/player-sample/saves")
+    run_player(result first errors ${save_args} --frames 40
+        --hold b@2-3 --hold d@5-15 --hold f5@30-31 --hold 1@34-35)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "saving run failed (${result}):\n${first}\n${errors}")
+    endif()
+    expect_match("${first}" "saved=[^\n]*quicksave\\.dvesave" "a quicksave")
+    if(NOT EXISTS "${save_dir}/quicksave.dvesave")
+        message(FATAL_ERROR "quicksave not written under XDG_DATA_HOME (${save_dir}):\n${first}")
+    endif()
+    expect_match("${first}" "save_dir=${save_dir}" "the XDG save directory")
+    string(REGEX MATCH "saved_framebuffer_fnv=([0-9a-f]+)" _ "${first}")
+    set(saved_hash "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "saved_bytes=([0-9]+)" _ "${first}")
+    set(saved_bytes "${CMAKE_MATCH_1}")
+    string(REGEX MATCH "saved_tick=([0-9]+)" _ "${first}")
+    set(saved_tick "${CMAKE_MATCH_1}")
+    hash_of("${first}" final_a)
+    if(LUA)
+        expect_match("${first}" "objects=5" "the blasted tower's fragment")
+        expect_match("${first}" "saved=[^\n]*slot1\\.dvesave" "a Lua world.save_game slot")
+    endif()
+
+    run_player(result second errors ${save_args} --frames 9 --load quicksave)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "loading run failed (${result}):\n${second}\n${errors}")
+    endif()
+    string(REGEX MATCH "resumed_framebuffer_fnv=([0-9a-f]+)" _ "${second}")
+    set(resumed_hash "${CMAKE_MATCH_1}")
+    expect_match("${second}" "resumed_tick=${saved_tick}" "the saved tick count")
+    if(NOT resumed_hash STREQUAL saved_hash)
+        message(FATAL_ERROR "loaded frame ${resumed_hash} != frame after saving ${saved_hash}\nA:\n${first}\nB:\n${second}")
+    endif()
+    hash_of("${second}" final_b)
+    if(NOT final_a STREQUAL final_b)
+        message(FATAL_ERROR "continuation diverged: saving run ended at ${final_a}, loaded run at ${final_b}")
+    endif()
+    expect_match("${second}" "ticks=40" "40 ticks after resuming at ${saved_tick}")
+    message(STATUS "quicksave ${saved_bytes} bytes at tick ${saved_tick}; frame ${saved_hash}; final ${final_a}")
+
+    # A save file path works as well as a slot name.
+    if(LUA)
+        run_player(result third errors ${save_args} --frames 1 --load "${save_dir}/slot1.dvesave")
+        if(NOT result EQUAL 0)
+            message(FATAL_ERROR "loading slot1 by path failed (${result}):\n${third}\n${errors}")
+        endif()
+        expect_match("${third}" "resumed_tick=35" "slot1's tick")
+    endif()
+
+    # Broken saves: truncated, garbage, missing, and a quicksave of a different game.
+    math(EXPR half "${saved_bytes} / 2")
+    execute_process(COMMAND "${HELPER}" --truncate-file "${save_dir}/quicksave.dvesave" "${WORK_DIR}/truncated.dvesave" ${half}
+        RESULT_VARIABLE truncated)
+    if(NOT truncated EQUAL 0)
+        message(FATAL_ERROR "could not truncate the save")
+    endif()
+    file(WRITE "${WORK_DIR}/garbage.dvesave" "DVESAVE1 but not really a save game\n")
+    foreach(bad truncated.dvesave garbage.dvesave missing.dvesave)
+        run_player(result output errors ${save_args} --frames 1 --load "${WORK_DIR}/${bad}")
+        if(NOT result EQUAL 3)
+            message(FATAL_ERROR "--load ${bad} should exit 3, got ${result}:\n${output}\n${errors}")
+        endif()
+        expect_match("${errors}" "failed to start game: load '" "a load error for ${bad}")
+        string(REGEX MATCH "failed to start game: [^\n]*" reason "${errors}")
+        message(STATUS "${bad}: ${reason}")
+    endforeach()
+    run_player(result output errors ${save_args} --frames 1 --load "bad slot")
+    if(NOT result EQUAL 3)
+        message(FATAL_ERROR "--load with an invalid slot name should exit 3, got ${result}")
+    endif()
 elseif(MODE STREQUAL "input")
     # bind.move_x=key:d/+1 held for 30 of 60 frames moves the spinner +x via the Lua script.
     run_player(result idle errors --headless --pak "${PAK}" --frames 60 --render-size 64x36)

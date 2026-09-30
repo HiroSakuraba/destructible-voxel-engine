@@ -7,11 +7,17 @@
 #include "dve/camera_runtime.hpp"
 #include "dve/camera_sequence.hpp"
 #include "dve/content_source.hpp"
+#include "dve/game_save.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstring>
+#include <map>
+#include <set>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -43,6 +49,11 @@ struct GameScriptHost::Impl {
     RenderEnvironment environment;
     LogSink logSink;
     const ContentSource* content{nullptr};
+    // world.on_save / world.on_load handlers by key (registry refs), and the host's handler
+    // for world.save_game / load_game / save_exists.
+    std::map<std::string, int, std::less<>> saveRefs;
+    std::map<std::string, int, std::less<>> loadRefs;
+    GameScriptHost::SaveRequestHandler saveRequests;
 };
 
 namespace {
@@ -597,10 +608,20 @@ int l_spawn_asset(lua_State* L) {
             id = world_from_state(L).spawn_asset_from_bytes(
                 *bytes, asPath.extension().string(), asPath.stem().string(),
                 make_rigid_transform(position, {}), dynamic, structural, &error);
+            // Lets a save game store this object's voxels as a delta against the asset.
+            if (id != kInvalidGameObjectId)
+                (void)world_from_state(L).set_object_source(id, GameObjectSource{path, game_save_content_hash(*bytes), false});
         }
     } else {
         id = world_from_state(L).spawn_asset(
             path, "", make_rigid_transform(position, {}), dynamic, structural, &error);
+        if (id != kInvalidGameObjectId) {
+            std::ifstream file(path, std::ios::binary);
+            const std::string data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            if (file.good() || file.eof())
+                (void)world_from_state(L).set_object_source(
+                    id, GameObjectSource{path, game_save_content_hash(std::as_bytes(std::span(data.data(), data.size()))), false});
+        }
     }
     if (id == kInvalidGameObjectId) {
         lua_pushnil(L);
@@ -1625,6 +1646,357 @@ int l_camera_load_runtime_state(lua_State* L) {
     lua_pushboolean(L, 1); return 1;
 }
 
+
+// --- Save games: world.on_save / on_load, save_game / load_game -----------------------------
+
+constexpr std::uint32_t kScriptStateMagic = 0x534C5644U;   // "DVLS"
+constexpr std::uint32_t kScriptStateVersion = 1U;
+constexpr int kScriptStateMaximumDepth = 32;
+constexpr std::uint32_t kScriptStateMaximumEntries = 1U << 20U;
+constexpr std::size_t kScriptStateMaximumBytes = 16U * 1024U * 1024U;
+
+enum : std::uint8_t {
+    kLuaNil = 0, kLuaFalse = 1, kLuaTrue = 2, kLuaInteger = 3, kLuaFloat = 4, kLuaString = 5, kLuaTable = 6
+};
+
+struct ScriptStateWriter {
+    std::vector<std::byte> out;
+    std::string error;
+    void u8(std::uint8_t v) { out.push_back(static_cast<std::byte>(v)); }
+    void u32(std::uint32_t v) { for (unsigned s = 0; s < 32U; s += 8U) u8(static_cast<std::uint8_t>(v >> s)); }
+    void u64(std::uint64_t v) { for (unsigned s = 0; s < 64U; s += 8U) u8(static_cast<std::uint8_t>(v >> s)); }
+    void bytes(const char* data, std::size_t size) {
+        u32(static_cast<std::uint32_t>(size));
+        const auto* begin = reinterpret_cast<const std::byte*>(data);
+        out.insert(out.end(), begin, begin + size);
+    }
+    bool over_limit() {
+        if (out.size() <= kScriptStateMaximumBytes) return false;
+        if (error.empty()) error = "script state is over the " + std::to_string(kScriptStateMaximumBytes) + "-byte limit";
+        return true;
+    }
+};
+
+struct ScriptKey {
+    int order{};              // 0 boolean, 1 number, 2 string
+    bool boolean{};
+    bool integer{};
+    lua_Integer integerValue{};
+    lua_Number numberValue{};
+    std::string text;
+};
+
+bool script_key_less(const ScriptKey& a, const ScriptKey& b) {
+    if (a.order != b.order) return a.order < b.order;
+    if (a.order == 0) return a.boolean < b.boolean;
+    if (a.order == 2) return a.text < b.text;
+    const long double left = a.integer ? static_cast<long double>(a.integerValue) : static_cast<long double>(a.numberValue);
+    const long double right = b.integer ? static_cast<long double>(b.integerValue) : static_cast<long double>(b.numberValue);
+    if (left != right) return left < right;
+    return a.integer && !b.integer;
+}
+
+std::string script_key_text(const ScriptKey& key) {
+    if (key.order == 0) return key.boolean ? "[true]" : "[false]";
+    if (key.order == 2) return "." + key.text;
+    return "[" + (key.integer ? std::to_string(key.integerValue) : std::to_string(key.numberValue)) + "]";
+}
+
+void push_script_key(lua_State* L, const ScriptKey& key) {
+    if (key.order == 0) lua_pushboolean(L, key.boolean ? 1 : 0);
+    else if (key.order == 2) lua_pushlstring(L, key.text.data(), key.text.size());
+    else if (key.integer) lua_pushinteger(L, key.integerValue);
+    else lua_pushnumber(L, key.numberValue);
+}
+
+// Writes the value at absolute stack index `index`. Only raw access (no metamethods), so
+// saving never runs script code.
+bool write_script_value(lua_State* L, int index, ScriptStateWriter& w, int depth, std::vector<const void*>& active,
+                        const std::string& where) {
+    if (w.over_limit()) return false;
+    switch (lua_type(L, index)) {
+    case LUA_TNIL: w.u8(kLuaNil); return true;
+    case LUA_TBOOLEAN: w.u8(lua_toboolean(L, index) ? kLuaTrue : kLuaFalse); return true;
+    case LUA_TNUMBER:
+        if (lua_isinteger(L, index)) {
+            w.u8(kLuaInteger);
+            w.u64(static_cast<std::uint64_t>(lua_tointeger(L, index)));
+        } else {
+            w.u8(kLuaFloat);
+            w.u64(std::bit_cast<std::uint64_t>(static_cast<double>(lua_tonumber(L, index))));
+        }
+        return true;
+    case LUA_TSTRING: {
+        std::size_t size = 0U;
+        const char* text = lua_tolstring(L, index, &size);
+        w.u8(kLuaString);
+        w.bytes(text, size);
+        return !w.over_limit();
+    }
+    case LUA_TTABLE: break;
+    default:
+        w.error = where + ": cannot save a " + std::string(lua_typename(L, lua_type(L, index)));
+        return false;
+    }
+    if (depth >= kScriptStateMaximumDepth) {
+        w.error = where + ": tables are nested deeper than " + std::to_string(kScriptStateMaximumDepth) + " levels";
+        return false;
+    }
+    const void* self = lua_topointer(L, index);
+    if (std::find(active.begin(), active.end(), self) != active.end()) {
+        w.error = where + ": the table contains itself (cycle)";
+        return false;
+    }
+    if (!lua_checkstack(L, 8)) {
+        w.error = where + ": Lua stack exhausted";
+        return false;
+    }
+    std::vector<ScriptKey> keys;
+    lua_pushnil(L);
+    while (lua_next(L, index) != 0) {
+        ScriptKey key;
+        const int type = lua_type(L, -2);
+        if (type == LUA_TBOOLEAN) {
+            key.order = 0;
+            key.boolean = lua_toboolean(L, -2) != 0;
+        } else if (type == LUA_TNUMBER) {
+            key.order = 1;
+            key.integer = lua_isinteger(L, -2) != 0;
+            if (key.integer) key.integerValue = lua_tointeger(L, -2);
+            else key.numberValue = lua_tonumber(L, -2);
+        } else if (type == LUA_TSTRING) {
+            key.order = 2;
+            std::size_t size = 0U;
+            const char* text = lua_tolstring(L, -2, &size);   // a string key: no in-place conversion
+            key.text.assign(text, size);
+        } else {
+            lua_pop(L, 2);
+            w.error = where + ": cannot save a table key of type " + std::string(lua_typename(L, type));
+            return false;
+        }
+        lua_pop(L, 1);
+        keys.push_back(std::move(key));
+        if (keys.size() > kScriptStateMaximumEntries) {
+            lua_pop(L, 1);
+            w.error = where + ": table has too many entries";
+            return false;
+        }
+    }
+    std::sort(keys.begin(), keys.end(), script_key_less);
+    active.push_back(self);
+    w.u8(kLuaTable);
+    w.u32(static_cast<std::uint32_t>(keys.size()));
+    for (const ScriptKey& key : keys) {
+        push_script_key(L, key);
+        if (!write_script_value(L, lua_gettop(L), w, depth + 1, active, where)) {   // keys are scalars
+            lua_pop(L, 1);
+            return false;
+        }
+        lua_rawget(L, index);
+        const bool ok = write_script_value(L, lua_gettop(L), w, depth + 1, active, where + script_key_text(key));
+        lua_pop(L, 1);
+        if (!ok) return false;
+    }
+    active.pop_back();
+    return !w.over_limit();
+}
+
+struct ScriptStateReader {
+    std::span<const std::byte> bytes;
+    std::size_t offset{};
+    std::string error;
+    bool need(std::size_t size) {
+        if (bytes.size() - offset < size) {
+            if (error.empty()) error = "script state is truncated";
+            return false;
+        }
+        return true;
+    }
+    bool u8(std::uint8_t& v) { if (!need(1U)) return false; v = std::to_integer<std::uint8_t>(bytes[offset++]); return true; }
+    bool u32(std::uint32_t& v) {
+        if (!need(4U)) return false;
+        v = 0U;
+        for (unsigned i = 0; i < 4U; ++i) v |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[offset + i])) << (8U * i);
+        offset += 4U;
+        return true;
+    }
+    bool u64(std::uint64_t& v) {
+        if (!need(8U)) return false;
+        v = 0U;
+        for (unsigned i = 0; i < 8U; ++i) v |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes[offset + i])) << (8U * i);
+        offset += 8U;
+        return true;
+    }
+    bool text(std::string& value) {
+        std::uint32_t size{};
+        if (!u32(size) || !need(size)) return false;
+        value.assign(reinterpret_cast<const char*>(bytes.data() + offset), size);
+        offset += size;
+        return true;
+    }
+    bool bad(std::string message) { if (error.empty()) error = std::move(message); return false; }
+};
+
+// Reads one value. With L == nullptr it only validates; otherwise it pushes exactly one value
+// (and leaves the stack as it was on failure, which the caller enforces with lua_settop).
+bool read_script_value(lua_State* L, ScriptStateReader& r, int depth, bool asKey) {
+    std::uint8_t tag{};
+    if (!r.u8(tag)) return false;
+    switch (tag) {
+    case kLuaNil:
+        if (asKey) return r.bad("script state has a nil table key");
+        if (L) lua_pushnil(L);
+        return true;
+    case kLuaFalse: case kLuaTrue:
+        if (L) lua_pushboolean(L, tag == kLuaTrue ? 1 : 0);
+        return true;
+    case kLuaInteger: {
+        std::uint64_t raw{};
+        if (!r.u64(raw)) return false;
+        if (L) lua_pushinteger(L, static_cast<lua_Integer>(std::bit_cast<std::int64_t>(raw)));
+        return true;
+    }
+    case kLuaFloat: {
+        std::uint64_t raw{};
+        if (!r.u64(raw)) return false;
+        const double value = std::bit_cast<double>(raw);
+        if (asKey && std::isnan(value)) return r.bad("script state has a NaN table key");
+        if (L) lua_pushnumber(L, static_cast<lua_Number>(value));
+        return true;
+    }
+    case kLuaString: {
+        std::uint32_t size{};
+        if (!r.u32(size) || !r.need(size)) return false;
+        if (L) lua_pushlstring(L, reinterpret_cast<const char*>(r.bytes.data() + r.offset), size);
+        r.offset += size;
+        return true;
+    }
+    case kLuaTable: {
+        if (asKey) return r.bad("script state has a table as a table key");
+        if (depth >= kScriptStateMaximumDepth) return r.bad("script state tables are nested too deeply");
+        std::uint32_t count{};
+        if (!r.u32(count)) return false;
+        if (count > kScriptStateMaximumEntries || count > (r.bytes.size() - r.offset) / 2U)
+            return r.bad("script state table count is invalid");
+        if (L) {
+            if (!lua_checkstack(L, 8)) return r.bad("Lua stack exhausted");
+            lua_createtable(L, 0, static_cast<int>(std::min<std::uint32_t>(count, 1024U)));
+        }
+        for (std::uint32_t i = 0; i < count; ++i) {
+            if (!read_script_value(L, r, depth + 1, true) || !read_script_value(L, r, depth + 1, false)) return false;
+            if (L) lua_rawset(L, -3);
+        }
+        return true;
+    }
+    default:
+        return r.bad("script state has an unknown value tag " + std::to_string(tag));
+    }
+}
+
+struct ScriptStateContents {
+    std::vector<std::pair<std::string, double>> globals;
+    std::vector<std::pair<std::string, Float4>> vectors;
+    std::vector<std::pair<std::string, std::size_t>> tables;   // key -> offset of the value
+};
+
+bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& contents, std::string* error) {
+    ScriptStateReader r{bytes, 0U, {}};
+    const auto failWith = [&]() {
+        if (error) *error = r.error.empty() ? std::string("script state is malformed") : r.error;
+        return false;
+    };
+    std::uint32_t magic{}, version{}, count{};
+    if (!r.u32(magic) || !r.u32(version)) return failWith();
+    if (magic != kScriptStateMagic) return r.bad("not a DVE script state blob"), failWith();
+    if (version != kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
+    if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid global count"), failWith();
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::string key;
+        std::uint64_t raw{};
+        if (!r.text(key) || !r.u64(raw)) return failWith();
+        contents.globals.emplace_back(std::move(key), std::bit_cast<double>(raw));
+    }
+    if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid vector global count"), failWith();
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::string key;
+        std::uint32_t raw[4]{};
+        if (!r.text(key) || !r.u32(raw[0]) || !r.u32(raw[1]) || !r.u32(raw[2]) || !r.u32(raw[3])) return failWith();
+        contents.vectors.emplace_back(std::move(key), Float4{std::bit_cast<float>(raw[0]), std::bit_cast<float>(raw[1]),
+                                                             std::bit_cast<float>(raw[2]), std::bit_cast<float>(raw[3])});
+    }
+    if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid handler count"), failWith();
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::string key;
+        if (!r.text(key)) return failWith();
+        const std::size_t offset = r.offset;
+        if (!read_script_value(nullptr, r, 0, false)) return failWith();
+        contents.tables.emplace_back(std::move(key), offset);
+    }
+    if (r.offset != bytes.size()) return r.bad("script state has trailing bytes"), failWith();
+    return true;
+}
+
+// Applies a world.set_global value the way l_set_global does (MPC mirror included).
+void restore_script_global(GameScriptHost::Impl* impl, const std::string& key, double value) {
+    const bool feedsMaterials = impl->materials.parameter_collection().scalar_slot(key).has_value() ||
+                                impl->materials.uses_global_scalar(key);
+    if (feedsMaterials) (void)impl->materials.set_global_scalar(key, static_cast<float>(value), nullptr);
+    impl->globals[key] = value;
+}
+
+void restore_script_vector(GameScriptHost::Impl* impl, const std::string& key, Float4 value) {
+    (void)impl->materials.set_global_vector(key, value, nullptr);
+    impl->globalVectors[key] = value;
+}
+
+int register_save_handler(lua_State* L, bool save) {
+    const bool keyed = lua_type(L, 1) == LUA_TSTRING;
+    const int functionIndex = keyed ? 2 : 1;
+    luaL_checktype(L, functionIndex, LUA_TFUNCTION);
+    const char* key = keyed ? lua_tostring(L, 1) : "main";
+    lua_pushvalue(L, functionIndex);
+    const int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    GameScriptHost::Impl* impl = impl_from_state(L);
+    auto& refs = save ? impl->saveRefs : impl->loadRefs;
+    if (const auto it = refs.find(std::string_view(key)); it != refs.end()) {
+        luaL_unref(L, LUA_REGISTRYINDEX, it->second);
+        it->second = ref;
+    } else {
+        refs.emplace(key, ref);
+    }
+    return 0;
+}
+
+int l_on_save(lua_State* L) { return register_save_handler(L, true); }
+int l_on_load(lua_State* L) { return register_save_handler(L, false); }
+
+int script_save_request(lua_State* L, ScriptSaveRequest kind) {
+    const char* slotText = luaL_optstring(L, 1, "quicksave");
+    GameScriptHost::Impl* impl = impl_from_state(L);
+    bool ok = false;
+    std::string message;
+    {
+        const std::string slot(slotText);
+        if (impl->saveRequests) ok = impl->saveRequests(kind, slot, &message);
+        else message = "saving is not available in this host";
+    }
+    if (kind == ScriptSaveRequest::Exists) {
+        lua_pushboolean(L, ok ? 1 : 0);
+        return 1;
+    }
+    if (ok) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushnil(L);
+    lua_pushlstring(L, message.data(), message.size());
+    return 2;
+}
+
+int l_save_game(lua_State* L) { return script_save_request(L, ScriptSaveRequest::Save); }
+int l_load_game(lua_State* L) { return script_save_request(L, ScriptSaveRequest::Load); }
+int l_save_exists(lua_State* L) { return script_save_request(L, ScriptSaveRequest::Exists); }
+
 constexpr luaL_Reg kWorldFunctions[] = {
     {"find_by_name", l_find_by_name},
     {"find_by_tag", l_find_by_tag},
@@ -1720,6 +2092,11 @@ constexpr luaL_Reg kWorldFunctions[] = {
     {"set_action_pressed", l_set_action_pressed},
     {"get_axis", l_get_axis},
     {"set_axis", l_set_axis},
+    {"on_save", l_on_save},
+    {"on_load", l_on_load},
+    {"save_game", l_save_game},
+    {"load_game", l_load_game},
+    {"save_exists", l_save_exists},
     {nullptr, nullptr},
 };
 
@@ -1925,6 +2302,84 @@ std::optional<Float4> GameScriptHost::global_vector(const std::string& key) cons
     if (it == impl_->globalVectors.end()) return std::nullopt;
     return it->second;
 }
+
+
+std::optional<std::vector<std::byte>> GameScriptHost::save_state(std::string* error) const {
+    lua_State* L = impl_->L;
+    const int top = lua_gettop(L);
+    ScriptStateWriter w;
+    w.u32(kScriptStateMagic);
+    w.u32(kScriptStateVersion);
+    std::vector<std::pair<std::string, double>> globals(impl_->globals.begin(), impl_->globals.end());
+    std::sort(globals.begin(), globals.end());
+    w.u32(static_cast<std::uint32_t>(globals.size()));
+    for (const auto& [key, value] : globals) {
+        w.bytes(key.data(), key.size());
+        w.u64(std::bit_cast<std::uint64_t>(value));
+    }
+    std::vector<std::pair<std::string, Float4>> vectors(impl_->globalVectors.begin(), impl_->globalVectors.end());
+    std::sort(vectors.begin(), vectors.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    w.u32(static_cast<std::uint32_t>(vectors.size()));
+    for (const auto& [key, value] : vectors) {
+        w.bytes(key.data(), key.size());
+        w.u32(std::bit_cast<std::uint32_t>(value.x)); w.u32(std::bit_cast<std::uint32_t>(value.y));
+        w.u32(std::bit_cast<std::uint32_t>(value.z)); w.u32(std::bit_cast<std::uint32_t>(value.w));
+    }
+    w.u32(static_cast<std::uint32_t>(impl_->saveRefs.size()));
+    for (const auto& [key, ref] : impl_->saveRefs) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+        if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+            const char* message = lua_tostring(L, -1);
+            if (error) *error = "on_save('" + key + "') raised: " + (message ? message : "unknown Lua error");
+            lua_settop(L, top);
+            return std::nullopt;
+        }
+        w.bytes(key.data(), key.size());
+        std::vector<const void*> active;
+        const bool ok = write_script_value(L, lua_gettop(L), w, 0, active, "on_save('" + key + "') result");
+        lua_settop(L, top);
+        if (!ok) {
+            if (error) *error = w.error;
+            return std::nullopt;
+        }
+    }
+    if (w.over_limit()) {
+        if (error) *error = w.error;
+        return std::nullopt;
+    }
+    return std::move(w.out);
+}
+
+bool GameScriptHost::load_state(std::span<const std::byte> bytes, std::string* error) {
+    ScriptStateContents contents;
+    if (!parse_script_state(bytes, contents, error)) return false;
+    Impl* impl = impl_.get();
+    for (const auto& [key, value] : contents.globals) restore_script_global(impl, key, value);
+    for (const auto& [key, value] : contents.vectors) restore_script_vector(impl, key, value);
+    lua_State* L = impl->L;
+    const int top = lua_gettop(L);
+    for (const auto& [key, offset] : contents.tables) {
+        const auto handler = impl->loadRefs.find(key);
+        if (handler == impl->loadRefs.end()) {
+            if (impl->logSink) impl->logSink(true, "save has state for '" + key + "' but no world.on_load('" + key + "') handler");
+            continue;
+        }
+        lua_rawgeti(L, LUA_REGISTRYINDEX, handler->second);
+        ScriptStateReader reader{bytes, offset, {}};
+        if (!read_script_value(L, reader, 0, false)) {   // validated above; defensive
+            lua_settop(L, top);
+            if (error) *error = reader.error;
+            return false;
+        }
+        if (lua_pcall(L, 1, 0, 0) != LUA_OK) report_callback_error(L, "on_load");
+        lua_settop(L, top);
+    }
+    return true;
+}
+
+std::size_t GameScriptHost::save_handler_count() const noexcept { return impl_->saveRefs.size(); }
+std::size_t GameScriptHost::load_handler_count() const noexcept { return impl_->loadRefs.size(); }
+void GameScriptHost::set_save_request_handler(SaveRequestHandler handler) { impl_->saveRequests = std::move(handler); }
 
 const ui::GameHudModel& GameScriptHost::hud_model() const { return impl_->hud; }
 const MaterialLibrary& GameScriptHost::material_library() const { return impl_->materials; }

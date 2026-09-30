@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <array>
 #include <map>
 #include <set>
 #include <span>
@@ -162,6 +163,93 @@ struct GameDamageEvent {
     // object from the rest (see GameWorld::damage_sphere). Empty if nothing detached, which
     // is the common case for most single hits.
     std::vector<GameObjectId> newFragmentIds;
+};
+
+// Where an object's geometry came from. Player saves (dve/game_save.hpp) store a voxel
+// object's destruction as a brick delta against this asset instead of every voxel, and
+// re-read polygon geometry from it. The scene loader and the Lua host's world.spawn_asset set
+// it; fragments split off by damage inherit their parent's source with `derived` set (their
+// voxels are a subset of the source, so saves store them in full but take the material table
+// from the source).
+struct GameObjectSource {
+    std::string path;               // content path (or filesystem path) of the .dvox / .dmesh
+    std::uint64_t contentHash{};    // FNV-1a 64 of the file bytes
+    bool derived{};
+    bool operator==(const GameObjectSource&) const = default;
+};
+
+// Plain-data snapshot of a GameWorld for save games (GameWorld::capture_save_state /
+// restore_save_state). Encoding, deltas and versioning live in dve/game_save.hpp; this is
+// only the in-memory state, complete enough to rebuild every object bit for bit.
+struct GameWorldBrickState {
+    BrickKey key{};
+    std::uint32_t generation{};
+    std::array<MaterialId, kBrickVoxelCount> materials{};
+};
+
+struct GameWorldObjectState {
+    GameObjectId id{kInvalidGameObjectId};
+    std::string name;
+    std::vector<std::string> tags;
+    std::vector<std::string> groups;
+    std::uint32_t layer{};
+    std::vector<Component> components;
+    bool enabled{true};
+    std::optional<GameObjectAttachment> attachment;
+    RigidTransform authoredTransform{};
+    float voxelSizeMeters{0.1F};
+    GameGeometryKind kind{GameGeometryKind::Marker};   // Marker, Voxel or Polygon
+    bool dynamic{};
+    bool structural{true};
+    bool visualOnly{};
+    std::optional<GameObjectSource> source;
+    // Voxel objects: every brick header in storage order (empty bricks included, since the
+    // engine never erases them), the VoxelObject id and the render/mass tables.
+    std::uint64_t voxelObjectId{};
+    std::vector<GameWorldBrickState> bricks;
+    std::vector<VoxelMaterialDefinition> materials;
+    std::array<std::uint16_t, 256> densityUnits{};
+    double densityQuantumKilogramsPerCubicMeter{1.0};
+    // Polygon objects: capture leaves this empty (saves re-read `source`); restore needs it.
+    std::shared_ptr<const CookedPolygonAsset> polygon;
+    // Physics body (static or dynamic) as the backend reports it.
+    bool hasBody{};
+    RigidBodyState body{};
+    Float3 localCenterOfMassMeters{};
+    std::optional<GameObjectPoolId> pool;
+};
+
+struct GameWorldTimerState {
+    std::uint64_t id{};
+    float fireAtSeconds{};
+    float intervalSeconds{};   // 0 = one-shot
+};
+
+struct GameWorldPoolState {
+    GameObjectPoolId id{kInvalidGameObjectPoolId};
+    std::string name;
+    std::uint64_t capacity{};
+    std::vector<GameObjectId> freeIds;
+};
+
+struct GameWorldSaveState {
+    GameObjectId nextObjectId{1};
+    GameObjectPoolId nextPoolId{1};
+    std::uint64_t nextTimerId{1};
+    float elapsedSeconds{};
+    std::vector<GameWorldObjectState> objects;   // sorted by id
+    std::vector<GameWorldTimerState> timers;     // live timers, in scheduling order
+    std::vector<GameWorldPoolState> pools;       // sorted by id
+};
+
+struct GameWorldRestoreReport {
+    std::size_t objectsRestored{};
+    std::size_t objectsRemoved{};     // live objects that were not in the save
+    std::size_t timersRestored{};
+    std::size_t timersCancelled{};    // live timers that were not in the save (already fired)
+    std::size_t timersDropped{};      // saved timers whose callback no longer exists
+    std::size_t poolsRestored{};
+    std::size_t poolsDropped{};       // saved pools that were not registered again
 };
 
 // Read-only view of one GameWorld object for a renderer (see GameWorld::render_objects()).
@@ -418,6 +506,28 @@ public:
                                                  std::string* error = nullptr);
     [[nodiscard]] bool release_to_pool(GameObjectId id, std::string* error = nullptr);
     [[nodiscard]] std::size_t pool_available(GameObjectPoolId poolId) const noexcept;
+
+    // --- Save games (see dve/game_save.hpp for the file format) ---------------------------
+    bool set_object_source(GameObjectId id, GameObjectSource source);
+    [[nodiscard]] const GameObjectSource* object_source(GameObjectId id) const noexcept;
+    // Everything needed to rebuild the objects, bodies, timers and pools. Polygon geometry is
+    // referenced through GameObjectSource, not copied. Sub-runtimes (characters, triggers,
+    // cameras, animation, ragdolls, deformables, hair, UI) are not part of the snapshot.
+    [[nodiscard]] GameWorldSaveState capture_save_state() const;
+    // Replaces the world's objects with `state` (validated first; nothing changes if
+    // validation fails). Objects are matched by id: live objects missing from the save are
+    // destroyed, the others are rebuilt in place, so sub-runtime bindings keyed by id (made by
+    // the startup script of a freshly booted world) survive. Timers are matched by id: the
+    // callbacks of a fresh boot are kept with the saved schedule; saved timers whose callback
+    // no longer exists are dropped (see the report). No lifecycle/destroy events fire. If a
+    // physics backend rejects a body after validation, this returns false and the world is
+    // incomplete; callers restoring into a fresh world should then discard it.
+    [[nodiscard]] bool restore_save_state(
+        const GameWorldSaveState& state, GameWorldRestoreReport* report = nullptr,
+        std::string* error = nullptr);
+    // FNV-1a over the saved state (ids, flags, transforms, bodies, voxels, tables, timers):
+    // equal hashes mean capture_save_state() would produce the same snapshot.
+    [[nodiscard]] std::uint64_t state_hash() const;
 
     // Advances timers, steps physics by fixedDeltaSeconds, then fires tick listeners. Damage/
     // destroy listeners fire synchronously from damage_sphere()/destroy_object(), not from

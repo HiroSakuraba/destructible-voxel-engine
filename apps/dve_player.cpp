@@ -57,6 +57,9 @@ window / rendering
   --no-audio                do not open an audio device
   --no-script               do not run the Lua startup script
   --physics auto|reference|jolt
+save games (quicksave / quickload: F5 / F9 unless game.dvegame binds them)
+  --load <slot|file.dvesave> resume a save (a slot name is looked up in the save dir)
+  --save-dir <dir>          save slots here (default $XDG_DATA_HOME/dve/<game>/saves)
 deterministic runs (tests)
   --frames N                run exactly N fixed steps (one render each), then exit
   --fixed-dt s              fixed step in seconds (default 1/60)
@@ -105,6 +108,8 @@ struct Options {
     std::uint32_t referenceFactor{4};
     std::optional<std::filesystem::path> screenshot;
     std::optional<std::filesystem::path> windowScreenshot;
+    std::optional<std::string> load;
+    std::optional<std::filesystem::path> saveDirectory;
 };
 
 bool parse_size(const std::string& text, std::uint32_t& width, std::uint32_t& height) {
@@ -210,6 +215,12 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             hold.to = std::strtoull(v->substr(dash + 1).c_str(), nullptr, 10);
             if (hold.to <= hold.from) return bad("--hold range must be from < to");
             options.holds.push_back(std::move(hold));
+        } else if (argument == "--load") {
+            if (!(v = value()) || v->empty()) return bad("--load needs a save slot or .dvesave file");
+            options.load = *v;
+        } else if (argument == "--save-dir") {
+            if (!(v = value()) || v->empty()) return bad("--save-dir needs a folder");
+            options.saveDirectory = *v;
         } else if (argument == "--hash") {
             options.hash = true;
         } else if (argument == "--expect-hash") {
@@ -433,6 +444,8 @@ int run(int argc, char** argv) {
     bootOptions.enableScripts = !options.noScript;
     bootOptions.physicsBackend = options.physics;
     bootOptions.log = log;
+    bootOptions.saveDirectory = options.saveDirectory;
+    bootOptions.loadSave = options.load;
     std::unique_ptr<PlayerApp> app = PlayerApp::boot(std::move(content), bootOptions, &error);
     if (!app) {
         std::cerr << "dve_player: failed to start game: " << error << '\n';
@@ -549,6 +562,39 @@ int run(int argc, char** argv) {
         }
     };
 
+    // --- Save games ---------------------------------------------------------------------------
+    // Machine-readable lines for the tests: the frame rendered right after a save shows exactly
+    // the saved state, and so does the first frame after a load.
+    const auto frame_hash = [&]() -> std::string {
+        const Rgba8Image* image = renderer->readback();
+        return image ? format_image_hash(hash_image(*image)) : std::string("none");
+    };
+    const auto report_save_events = [&]() {
+        for (const PlayerSaveEvent& event : app->save_events()) {
+            if (!event.ok) {
+                std::cout << (event.load ? "load_error=" : "save_error=") << event.message << '\n';
+                continue;
+            }
+            const char* kind = event.load ? "loaded" : "saved";
+            std::cout << kind << '=' << event.path.string() << '\n'
+                      << kind << "_bytes=" << event.fileBytes << '\n'
+                      << kind << "_tick=" << app->tick_count() << '\n'
+                      << kind << "_framebuffer_fnv=" << frame_hash() << '\n';
+        }
+    };
+    std::cout << "save_dir=" << app->save_directory().string() << '\n';
+    if (options.load) {
+        // Show the loaded state before the first step, so it can be compared with the frame the
+        // saving run rendered right after its save.
+        if (!render_frame(false)) {
+            std::cerr << "dve_player: render failed: " << error << '\n';
+            return kExitRuntimeError;
+        }
+        std::cout << "resumed=" << *options.load << '\n'
+                  << "resumed_tick=" << app->tick_count() << '\n'
+                  << "resumed_framebuffer_fnv=" << frame_hash() << '\n';
+    }
+
     // --- Loop -------------------------------------------------------------------------------
     if (deterministic) {
         // Exactly N fixed steps at fixedDt, one render per step, no wall clock involved.
@@ -569,6 +615,7 @@ int run(int argc, char** argv) {
                 std::cerr << "dve_player: render failed: " << error << '\n';
                 return kExitRuntimeError;
             }
+            report_save_events();
             if (app->quit_requested()) break;
         }
     } else {
@@ -583,7 +630,11 @@ int run(int argc, char** argv) {
             const double elapsed = std::chrono::duration<double>(now - previous).count();
             previous = now;
             const std::uint32_t steps = clock.advance(elapsed);
-            for (std::uint32_t step = 0; step < steps; ++step) app->tick(clock.fixedDeltaSeconds);
+            for (std::uint32_t step = 0; step < steps; ++step) {
+                app->tick(clock.fixedDeltaSeconds);
+                for (const PlayerSaveEvent& event : app->save_events())
+                    if (!event.ok) log(std::string(event.load ? "load failed: " : "save failed: ") + event.message);
+            }
             if (!render_frame(false)) {
                 std::cerr << "dve_player: render failed: " << error << '\n';
                 return kExitRuntimeError;

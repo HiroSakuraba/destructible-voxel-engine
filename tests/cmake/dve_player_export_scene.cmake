@@ -8,7 +8,9 @@
 #   LUA        ON when the build has Lua
 # Checks: the export has no warnings (--strict) and bakes text and the Gabor volume; the player
 # loads all five objects with the two attachments; attached objects keep their offsets while
-# the cart falls; scripts see the exported component and tag; the frame hash is stable.
+# the cart falls; scripts see the exported component and tag; the frame hash is stable; a
+# quicksave of the exported scene (polygon, baked voxels, attachments, components) loads back
+# to the same frame and continues to the same final frame and object positions.
 cmake_minimum_required(VERSION 3.24)
 foreach(required GENERATOR EXPORTER PLAYER GAME_FILES WORK_DIR)
     if(NOT ${required})
@@ -49,8 +51,9 @@ expect_match("${manifest}" "\"type\":\"game.cart\"" "the cart component")
 expect_match("${manifest}" "\"socket\":\"bed\"" "the crate attachment socket")
 file(COPY "${GAME_FILES}/game.dvegame" "${GAME_FILES}/scripts" DESTINATION "${WORK_DIR}/game")
 
-set(args --project "${WORK_DIR}/game" --headless --frames 30 --fixed-dt 0.016666668
-    --render-size 480x270 --threads 4 --hash)
+set(common_args --project "${WORK_DIR}/game" --headless --fixed-dt 0.016666668
+    --render-size 480x270 --threads 4 --hash --save-dir "${WORK_DIR}/saves")
+set(args ${common_args} --frames 30 --hold f5@15-16)
 if(EXPECT)
     list(APPEND args --expect-hash "${EXPECT}")
 endif()
@@ -120,3 +123,36 @@ to_mm(cloud_y_mm "${Cloud_y}")
 if(cloud_y_mm LESS 1398 OR cloud_y_mm GREATER 1402)
     message(FATAL_ERROR "the visual-only Cloud moved (y=${Cloud_y})\n${output}")
 endif()
+
+# Save games: the quicksave taken at frame 15 resumes to the same frame, and the continuation
+# ends on the same frame and object positions as the saving run.
+expect_match("${output}" "saved=[^\n]*quicksave\\.dvesave" "a quicksave of the exported scene")
+string(REGEX MATCH "saved_framebuffer_fnv=([0-9a-f]+)" _ "${output}")
+set(saved_hash "${CMAKE_MATCH_1}")
+string(REGEX MATCH "saved_tick=([0-9]+)" _ "${output}")
+set(saved_tick "${CMAKE_MATCH_1}")
+string(REGEX MATCH "(^|\n)framebuffer_fnv=([0-9a-f]+)" _ "${output}")
+set(final_a "${CMAKE_MATCH_2}")
+math(EXPR remaining "30 - ${saved_tick}")
+run("dve_player --load" ${CMAKE_COMMAND} -E env SDL_VIDEO_DRIVER=offscreen SDL_AUDIO_DRIVER=dummy "${PLAYER}"
+    ${common_args} --frames ${remaining} --load quicksave)
+set(resumed "${run_output}")
+expect_match("${resumed}" "resumed_tick=${saved_tick}\n" "the saved tick count")
+expect_match("${resumed}" "\\(5 objects, 2 attached\\)" "the scene rebuilt with both attachments")
+string(REGEX MATCH "resumed_framebuffer_fnv=([0-9a-f]+)" _ "${resumed}")
+if(NOT CMAKE_MATCH_1 STREQUAL saved_hash)
+    message(FATAL_ERROR "loaded frame ${CMAKE_MATCH_1} != frame after saving ${saved_hash}\n${output}\n${resumed}")
+endif()
+string(REGEX MATCH "(^|\n)framebuffer_fnv=([0-9a-f]+)" _ "${resumed}")
+if(NOT CMAKE_MATCH_2 STREQUAL final_a)
+    message(FATAL_ERROR "continuation diverged: saving run ended at ${final_a}, loaded run at ${CMAKE_MATCH_2}")
+endif()
+expect_match("${resumed}" "ticks=30\n" "30 ticks after resuming at ${saved_tick}")
+foreach(name Cart Crate Title Cloud)
+    string(REGEX MATCH "object\\.${name}=[-0-9.,]+" a "${output}")
+    string(REGEX MATCH "object\\.${name}=[-0-9.,]+" b "${resumed}")
+    if(NOT a STREQUAL b)
+        message(FATAL_ERROR "after loading, ${b} != ${a}")
+    endif()
+endforeach()
+message(STATUS "export scene quicksave at tick ${saved_tick}: frame ${saved_hash}; final ${final_a}")

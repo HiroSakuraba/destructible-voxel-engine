@@ -14,4 +14,14 @@ function M.update(state, dt, move_x, lift)
   world.set_global("spinner_x", state.x)
 end
 
+-- Plain data for world.on_save (the object id is stable across a save and load).
+function M.save(state)
+  return { x = state.x, y = state.y, z = state.z, base_y = state.base_y, angle = state.angle }
+end
+
+function M.load(state, saved)
+  if saved == nil then return end
+  for key, value in pairs(saved) do state[key] = value end
+end
+
 return M

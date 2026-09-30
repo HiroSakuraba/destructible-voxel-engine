@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "dve/audio/midi_input_session.hpp"
 #include "dve/audio/mixer.hpp"
 #include "dve/editor_asset_browser.hpp"
 #include "dve/ai/live_editor_mcp.hpp"
@@ -210,6 +211,7 @@ struct NativeMenuPopupLayout {
 
 struct NativeSettingsModalLayout {
     UiRect panel{};
+    UiRect title{};  // "Settings and Preferences", left of the scope tabs
     UiRect searchBox{};
     std::array<UiRect, 3> scopeTabs{};
     UiRect advancedToggle{};
@@ -472,6 +474,22 @@ public:
     // `editor.keyboard_keys`: 25, 37, 49, 61, 76 or 88 keys). Saved like UI zoom.
     [[nodiscard]] int keyboard_key_count() const noexcept;
     bool set_keyboard_key_count(int keys);
+    // MIDI input (see dve/editor_midi.hpp; hosts call start_editor_midi()). The session polls
+    // ports on its own thread; update() picks up status changes without blocking.
+    void attach_midi_input(std::unique_ptr<audio::IMidiBackend> backend,
+                           audio::MidiInputSession::Options options = {});
+    // Synth MIDI out (poll_midi_output) is sent on this backend from update(); UI thread only.
+    void attach_midi_output(std::unique_ptr<audio::IMidiBackend> backend);
+    [[nodiscard]] audio::MidiInputSession* midi_input_session() noexcept { return midiInput_.get(); }
+    [[nodiscard]] const audio::MidiInputStatus& midi_input_status() const noexcept { return midiStatus_; }
+    [[nodiscard]] std::string midi_input_summary() const { return midiStatus_.summary(); }
+    // Requested port ("" = Auto, "none" = off, otherwise a port name) saved in User settings.
+    [[nodiscard]] std::string midi_input_port() const;
+    bool set_midi_input_port(std::string name);
+    // Steps through Auto, None and the present ports (synth header button).
+    bool cycle_midi_input_port(int direction);
+    // Pulls the latest session status into the settings choices / synth header (update() does it).
+    void refresh_midi_status();
     // Last pointer position seen by pointer_move (logical px), for hover tooltips.
     [[nodiscard]] int hover_x() const noexcept { return hoverX_; }
     [[nodiscard]] int hover_y() const noexcept { return hoverY_; }
@@ -702,6 +720,12 @@ private:
     std::unique_ptr<ai::DveAiBridge> aiBridge_;
     std::unique_ptr<ai::LiveEditorMcpHost> liveMcpHost_;
     EditorTaskManager aiTasks_{1, 8};
+    // Declared last so they are destroyed first: the session's callbacks post into the synth.
+    std::unique_ptr<audio::IMidiBackend> midiOutput_;
+    std::unique_ptr<audio::MidiInputSession> midiInput_;
+    audio::MidiInputStatus midiStatus_{};
+    std::uint64_t midiStatusGeneration_{~std::uint64_t{0}};
+    std::string midiChoicesPort_{"\x01"};
 };
 
 [[nodiscard]] EditorDocument make_new_project_document();

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "dve/audio/midi.hpp"
+#include "dve/editor_midi.hpp"
 #include "dve/audio/sdl_synth_audio_device.hpp"
 #include "dve/editor_accessibility.hpp"
 #include "dve/editor_native.hpp"
@@ -134,18 +135,10 @@ int main(int argc, char** argv) {
         dve::audio::SdlSynthAudioDevice audioDevice(controller.audio_mixer(), &error);
         if (!audioDevice.valid()) throw std::runtime_error("synth audio device: " + error);
 
-        std::string midiStatus = "virtual-only";
-        auto midiBackend = dve::audio::make_native_midi_backend(&error);
-        if (midiBackend) {
-            const auto inputs = midiBackend->input_ports();
-            const auto outputs = midiBackend->output_ports();
-            if (!inputs.empty()) {
-                (void)midiBackend->open_input(inputs.front().index,
-                    [&](const dve::audio::MidiMessage& message) { (void)controller.synthesizer().post_midi(message); }, &error);
-            }
-            if (!outputs.empty()) (void)midiBackend->open_output(outputs.front().index, &error);
-            midiStatus = std::string(midiBackend->backend_name());
-        }
+        // MIDI: shared with the X11 editor (dve/editor_midi.hpp). The input port comes from the
+        // `midi.input_port` setting (Auto skips Midi Through); hotplug runs on a worker thread.
+        const EditorMidiStartResult midiStart = start_editor_midi(controller);
+        const std::string midiStatus = midiStart.backendName;
 
         if (!accessibilityDump.empty()) {
             if (!save_accessibility_tree_json(accessibilityDump, build_editor_accessibility_tree(controller), &error))
@@ -157,10 +150,6 @@ int main(int argc, char** argv) {
         while (!controller.quit_requested()) {
             PlatformEvent event;
             while (host.poll_event(event)) bridge.handle_event(event);
-            if (midiBackend && midiBackend->output_open()) {
-                dve::audio::MidiMessage message;
-                while (controller.synthesizer().poll_midi_output(message)) (void)midiBackend->send(message);
-            }
 
             const double now = host.monotonic_seconds();
             controller.update(static_cast<float>(now - previous));
@@ -197,6 +186,7 @@ int main(int argc, char** argv) {
                       << "draw_items=" << controller.draw_items().size() << '\n'
                       << "audio=" << audioDevice.backend_name() << '\n'
                       << "midi=" << midiStatus << '\n'
+                      << "midi_input=" << controller.midi_input_summary() << '\n'
                       << "ui_zoom=" << format_ui_zoom_percent(controller.effective_ui_zoom()) << '\n'
                       << "text=" << canvas.text_backend() << '\n'
                       << "synth_frames=" << controller.synthesizer().meters().renderedFrames << '\n';

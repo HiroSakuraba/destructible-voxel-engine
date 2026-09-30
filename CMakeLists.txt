@@ -279,6 +279,7 @@ endif()
 if(DVE_BUILD_AUDIO_SYNTH)
     add_library(dve_audio_synth
         src/audio/midi.cpp
+        src/audio/midi_input_session.cpp
         src/audio/sample_map.cpp
         src/audio/sample_map_recipe.cpp
         src/audio/synthesizer.cpp
@@ -750,6 +751,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_settings.cpp
         src/editor_ui_zoom.cpp
         src/editor_piano_keyboard.cpp
+        src/editor_midi.cpp
         src/editor_shortcuts.cpp
         src/editor_camera_sequencer.cpp
         src/editor_cinematic_camera.cpp
@@ -1798,6 +1800,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_synth_release_acceptance_tests tests/test_synth_release_acceptance.cpp)
         target_link_libraries(dve_synth_release_acceptance_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_synth_release_acceptance_tests COMMAND dve_synth_release_acceptance_tests)
+        add_executable(dve_midi_input_session_tests tests/test_midi_input_session.cpp)
+        target_link_libraries(dve_midi_input_session_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_midi_input_session_tests COMMAND dve_midi_input_session_tests)
         add_executable(dve_audio_synth_phase3_serialization_tests tests/test_audio_synth_phase3_serialization.cpp)
         target_link_libraries(dve_audio_synth_phase3_serialization_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_phase3_serialization_tests COMMAND dve_audio_synth_phase3_serialization_tests)
@@ -2229,6 +2234,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_text_fit_tests tests/test_editor_text_fit.cpp)
         target_link_libraries(dve_editor_text_fit_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_text_fit_tests COMMAND dve_editor_text_fit_tests)
+        add_executable(dve_editor_midi_tests tests/test_editor_midi.cpp)
+        target_link_libraries(dve_editor_midi_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_midi_tests COMMAND dve_editor_midi_tests)
         add_executable(dve_editor_camera_sequencer_tests tests/test_editor_camera_sequencer.cpp)
         target_link_libraries(dve_editor_camera_sequencer_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_camera_sequencer_tests COMMAND dve_editor_camera_sequencer_tests)

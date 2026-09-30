@@ -83,6 +83,15 @@ int main() {
         wavetablePreset.oscillators[0].waveform = dve::audio::OscillatorWaveform::Wavetable;
         wavetablePreset.wavetable.enabled = true;
         controller.synthesizer().set_preset(wavetablePreset);
+        // The wavetable section sits below the advanced rows; at 1280x800 the Oscillators page
+        // scrolls to it (it used to be drawn over the voice meter and piano).
+        controller.update(0.0F);
+        require(controller.synth_panel().wavetable_section_visible(), "wavetable section not shown for a wavetable oscillator");
+        while (controller.synth_panel().layout().wavetableNormalizeButton.width == 0 &&
+               controller.synth_panel().scroll_grid(1)) {}
+        panel = controller.synth_panel().layout();
+        require(panel.wavetableCanvas.width > 0 && panel.wavetableFrameButtons[3].width > 0,
+                "wavetable canvas could not be scrolled into view");
         const float beforeDraw = controller.synthesizer().preset().wavetable.samples[64];
         controller.pointer_down(PointerButton::Primary, panel.wavetableCanvas.x + panel.wavetableCanvas.width / 2,
                                 panel.wavetableCanvas.y + 4);
@@ -119,6 +128,8 @@ int main() {
         click(controller, panel.wavetableFrameButtons[3]);
         require(controller.synth_panel().selected_wavetable_frame() == 3U,
                 "wavetable frame selector did not update selection");
+        (void)controller.synth_panel().scroll_grid(-100);
+        panel = controller.synth_panel().layout();
 
         auto samplePreset = controller.synthesizer().preset();
         samplePreset.oscillators[0].waveform = dve::audio::OscillatorWaveform::Sample;
@@ -265,6 +276,7 @@ int main() {
 
         click(controller, panel.tabButtons[4]);
         require(controller.synth_panel().page() == SynthPanelPage::Effects, "effects page did not open");
+        panel = controller.synth_panel().layout();  // each page lays out its own rows
         const bool beforeEffect = controller.synthesizer().preset().distortion.enabled;
         click(controller, panel.effectToggleButtons[0]);
         require(controller.synthesizer().preset().distortion.enabled != beforeEffect,
@@ -367,6 +379,7 @@ int main() {
         controller.synth_panel().set_preset_directory(presetRoot);
         click(controller, panel.tabButtons[5]);
         require(controller.synth_panel().page() == SynthPanelPage::Presets, "presets page did not open");
+        panel = controller.synth_panel().layout();  // each page lays out its own rows
         click(controller, panel.presetScanButton);
         require(controller.synth_panel().preset_library().entries().size() == 1U,
                 "preset browser did not index the test preset");

@@ -87,6 +87,16 @@ SettingDefinition integer_setting(std::string id, std::string category, std::str
             {}, {}, policy, capability, advanced, {}};
 }
 
+SettingDefinition string_setting(std::string id, std::string category, std::string section,
+                                 std::string label, std::string defaultValue, std::string description,
+                                 std::uint32_t capability = SettingCapabilityNone,
+                                 bool advanced = false,
+                                 SettingApplyPolicy policy = SettingApplyPolicy::Live) {
+    return {std::move(id), std::move(category), std::move(section), std::move(label),
+            std::move(description), SettingType::String, std::move(defaultValue), {}, {}, {},
+            {}, {}, policy, capability, advanced, {}};
+}
+
 SettingDefinition enum_setting(std::string id, std::string category, std::string section,
                                std::string label, std::string defaultValue,
                                std::vector<SettingChoice> choices, std::string description,
@@ -622,6 +632,11 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         enum_setting("audio.spatializer","Audio","Spatial","Spatializer","native",{{"native","DVE Native"},{"steam_audio","Steam Audio"},{"none","None"}},"Spatial audio backend.",SettingCapabilityAudio),
         boolean_setting("audio.hrtf","Audio","Spatial","HRTF",true,"Use binaural head-related transfer functions.",SettingCapabilityAudio),
         enum_setting("audio.granular_quality","Audio","Synthesis","Granular Quality","high",onOffQuality,"Maximum grain admission and interpolation quality.",SettingCapabilityAudio),
+        // MIDI input (see dve/editor_midi.hpp). The port is stored by name so the choice survives
+        // replugging and port renumbering; "" = Auto (first non-Through port), "none" = off.
+        string_setting("midi.input_port","Audio","MIDI","MIDI Input","","MIDI input port for the synthesizer. Auto picks the first hardware port (skipping Midi Through and virtual ports); the choice is saved by name and reconnects when the device is plugged back in. Left/right cycles the ports.",SettingCapabilityAudio),
+        enum_setting("midi.input_channel","Audio","MIDI","MIDI Channel","omni",{{"omni","Omni (all channels)"},{"1","Channel 1"},{"2","Channel 2"},{"3","Channel 3"},{"4","Channel 4"},{"5","Channel 5"},{"6","Channel 6"},{"7","Channel 7"},{"8","Channel 8"},{"9","Channel 9"},{"10","Channel 10"},{"11","Channel 11"},{"12","Channel 12"},{"13","Channel 13"},{"14","Channel 14"},{"15","Channel 15"},{"16","Channel 16"}},"Only play the synth from this MIDI channel, or Omni for every channel.",SettingCapabilityAudio),
+        enum_setting("midi.drum_channel","Audio","MIDI","Channel 10 (Drum Pads)","play",{{"play","Always play"},{"ignore","Ignore"},{"follow","Follow channel filter"}},"Channel 10 carries drum pads on most controllers (e.g. Akai MPK mini pads). Always play lets the pads through whatever the channel filter is; Ignore drops them.",SettingCapabilityAudio),
         integer_setting("audio.stream_preload_ms","Audio","Streaming","Stream Preload",250,0,10000,10,"Audio stream look-ahead in milliseconds.",SettingCapabilityAudio),
         boolean_setting("audio.loudness_normalization","Audio","Output","Loudness Normalization",false,"Apply project loudness targets during export.",SettingCapabilityAudio),
 
@@ -749,6 +764,22 @@ void EditorSettingsPanelState::discard() noexcept {
     stagedClears.clear();
     dirty = false;
 }
+bool EditorSettingsPanelState::has_choices(const SettingDefinition& definition) const {
+    if (definition.type == SettingType::Boolean || definition.type == SettingType::Enum) return true;
+    const auto dynamic = dynamicChoices.find(definition.id);
+    return definition.type == SettingType::String && dynamic != dynamicChoices.end() && !dynamic->second.empty();
+}
+std::string EditorSettingsPanelState::value_label(const SettingDefinition& definition, const SettingValue& value) const {
+    if (const auto* text = std::get_if<std::string>(&value)) {
+        if (const auto dynamic = dynamicChoices.find(definition.id); dynamic != dynamicChoices.end())
+            for (const SettingChoice& choice : dynamic->second)
+                if (choice.value == *text) return choice.label;
+        // Enum settings show their readable label ("Omni (all channels)") rather than the key.
+        for (const SettingChoice& choice : definition.choices)
+            if (choice.value == *text && !choice.label.empty()) return choice.label;
+    }
+    return setting_value_to_string(value);
+}
 SettingValue EditorSettingsPanelState::displayed_value(const EditorSettingsRegistry& registry, std::string_view id) const {
     if (const auto it = stagedValues.find(std::string(id)); it != stagedValues.end()) return it->second;
     if (stagedClears.contains(std::string(id))) return registry.inherited_value(id, scope);
@@ -775,6 +806,19 @@ bool EditorSettingsPanelState::cycle(const EditorSettingsRegistry& registry, std
     }
     SettingValue current = displayed_value(registry, id);
     if (definition->type == SettingType::Boolean) return stage(registry, id, !std::get<bool>(current), error);
+    if (definition->type == SettingType::String) {
+        if (const auto dynamic = dynamicChoices.find(id); dynamic != dynamicChoices.end() && !dynamic->second.empty()) {
+            const auto& choices = dynamic->second;
+            const std::string* selected = std::get_if<std::string>(&current);
+            auto it = std::find_if(choices.begin(), choices.end(), [&](const SettingChoice& choice) {
+                return selected != nullptr && choice.value == *selected;
+            });
+            const std::ptrdiff_t count = static_cast<std::ptrdiff_t>(choices.size());
+            std::ptrdiff_t index = it == choices.end() ? (direction >= 0 ? -1 : 0) : std::distance(choices.begin(), it);
+            index = (index + (direction >= 0 ? 1 : -1) + count) % count;
+            return stage(registry, id, choices[static_cast<std::size_t>(index)].value, error);
+        }
+    }
     if (definition->type == SettingType::Enum) {
         const std::string& selected = std::get<std::string>(current);
         auto it = std::find_if(definition->choices.begin(), definition->choices.end(), [&](const SettingChoice& choice) { return choice.value == selected; });

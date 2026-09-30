@@ -1,4 +1,5 @@
 #include "dve/editor_native.hpp"
+#include "dve/editor_midi.hpp"
 #include "dve/editor_prefab.hpp"
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/print_export.hpp"
@@ -1136,8 +1137,14 @@ NativeSettingsModalLayout NativeEditorController::settings_modal_layout() const 
     const int rowHeight = std::max(27, static_cast<int>(30.0F * scale));
 
     const int tabWidth = std::max(76, static_cast<int>(86.0F * scale));
+    // The title gets its own cell on the top row; the scope tabs follow it (they used to be
+    // drawn over the title). On very narrow modals the title shrinks (elided, tooltip on hover).
+    const int tabsWidth = static_cast<int>(result.scopeTabs.size()) * (tabWidth + 6);
+    const int titleWidth = std::clamp(result.panel.width - 32 - tabsWidth - 12, 60, 200);
+    result.title = {result.panel.x + 16, result.panel.y + 10, titleWidth, 28};
+    const int tabsLeft = result.title.x + result.title.width + 12;
     for (std::size_t index = 0; index < result.scopeTabs.size(); ++index)
-        result.scopeTabs[index] = {result.panel.x + 16 + static_cast<int>(index) * (tabWidth + 6),
+        result.scopeTabs[index] = {tabsLeft + static_cast<int>(index) * (tabWidth + 6),
                                    result.panel.y + 10, tabWidth, 28};
     result.advancedToggle = {result.panel.x + result.panel.width - 144, result.panel.y + 44, 124, 30};
     result.changedToggle = {result.advancedToggle.x - 124 - 8, result.panel.y + 44, 124, 30};
@@ -1411,6 +1418,11 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
     };
     synthPanel_.set_keyboard_key_count(keyboard_key_count());
     chiptunePanel_.set_keyboard_key_count(keyboard_key_count());
+    if (midiInput_) {
+        midiInput_->set_channel_filter(midi_channel_filter_from_settings(workspace_.settings()));
+        midiInput_->set_requested_port(midi_input_port());
+    }
+    try { refresh_midi_status(); } catch (...) {}
     viewportSettings_.showGrid = readBool("viewport.grid", viewportSettings_.showGrid);
     viewportSettings_.showAnchors = readBool("viewport.anchors", viewportSettings_.showAnchors);
     viewportSettings_.showCollision = readBool("viewport.collision", viewportSettings_.showCollision);
@@ -1620,7 +1632,7 @@ void NativeEditorController::handle_settings_key(std::string_view normalized, bo
         const SettingDefinition* definition = selectedDefinition();
         if (!definition) { close_settings(true); return; }
         std::string error;
-        if (definition->type == SettingType::Boolean || definition->type == SettingType::Enum) {
+        if (settingsPanel_.has_choices(*definition)) {
             if (!settingsPanel_.cycle(workspace_.settings(), definition->id, 1, &error))
                 settingsPanel_.status = error;
         } else if (!settingsPanel_.begin_value_edit(workspace_.settings(), definition->id, &error)) {
@@ -1937,6 +1949,12 @@ void NativeEditorController::recompute_layout() {
 
 void NativeEditorController::update(float elapsedSeconds) {
     synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
+    synthPanel_.sync_wavetable_section(audioMixer_.synthesizer());
+    refresh_midi_status();
+    if (midiOutput_ && midiOutput_->output_open()) {
+        audio::MidiMessage message;
+        while (audioMixer_.synthesizer().poll_midi_output(message)) (void)midiOutput_->send(message);
+    }
     spriteAuthoringPanel_.update(elapsedSeconds);
     controlRigPanel_.update(elapsedSeconds);
     if (tileWorldEditorOpen_) ++tileWorldEditorTicks_;
@@ -2899,7 +2917,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 settingsLayout.settingRows[visible].width * 2 / 3;
             if (alreadySelected || valueColumn) {
                 std::string error;
-                if (definition.type == SettingType::Boolean || definition.type == SettingType::Enum) {
+                if (settingsPanel_.has_choices(definition)) {
                     if (!settingsPanel_.cycle(workspace_.settings(), definition.id, 1, &error))
                         settingsPanel_.status = error;
                 } else if (!settingsPanel_.begin_value_edit(workspace_.settings(), definition.id, &error)) {
@@ -3062,11 +3080,15 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         (void)controlRigPanel_.pointer_down(static_cast<int>(button), x, y, modifiers);
         return;
     }
-    if (button == PointerButton::Primary && chiptunePanel_.open() && chiptunePanel_.pointer_down(x, y, audioMixer_)) return;
+    if (button == PointerButton::Primary && chiptunePanel_.open() && chiptunePanel_.pointer_down(x, y, audioMixer_)) {
+        if (const auto keys = chiptunePanel_.take_requested_key_count()) (void)set_keyboard_key_count(*keys);
+        return;
+    }
     if (button == PointerButton::Primary && audioEventPanel_.open() && audioEventPanel_.pointer_down(x, y, audioMixer_)) return;
     if (button == PointerButton::Primary && audioPanel_.open() && audioPanel_.pointer_down(x, y, audioMixer_)) return;
     if (button == PointerButton::Primary && synthPanel_.open() && synthPanel_.pointer_down(x, y, audioMixer_.synthesizer())) {
         if (const auto keys = synthPanel_.take_requested_key_count()) (void)set_keyboard_key_count(*keys);
+        if (const auto step = synthPanel_.take_midi_port_cycle_request()) (void)cycle_midi_input_port(*step);
         return;
     }
     if (contextMenu_.open) {

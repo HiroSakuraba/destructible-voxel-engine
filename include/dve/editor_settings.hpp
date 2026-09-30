@@ -155,6 +155,15 @@ struct EditorSettingsPanelState {
     std::string status;
     std::map<std::string, SettingValue, std::less<>> stagedValues;
     std::set<std::string, std::less<>> stagedClears;
+    // Choices supplied at runtime for String settings whose options depend on the machine
+    // (e.g. `midi.input_port` lists the MIDI ports that are present). Such settings cycle through
+    // these choices with left/right/Enter/click instead of opening a text edit, and the row shows
+    // the choice label. The stored value may still be something that is not listed right now
+    // (an unplugged device), so the registry keeps validating them as plain strings.
+    std::map<std::string, std::vector<SettingChoice>, std::less<>> dynamicChoices;
+
+    [[nodiscard]] bool has_choices(const SettingDefinition& definition) const;
+    [[nodiscard]] std::string value_label(const SettingDefinition& definition, const SettingValue& value) const;
 
     void open_for(SettingScope newScope, std::string category = {});
     void close() noexcept;

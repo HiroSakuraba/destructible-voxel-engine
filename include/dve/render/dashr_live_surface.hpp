@@ -11,6 +11,30 @@
 
 namespace dve::render {
 
+enum class DashrEligibilityCode : std::uint8_t {
+    Supported,
+    InvalidAsset,
+    InvalidSubmesh,
+    MissingHeightTexture,
+    UnsupportedUvMode,
+    DegenerateUvTriangle,
+    UnsupportedBlendMode,
+    InvalidAtlasResolution,
+    InvalidTraceSettings,
+};
+
+struct DashrEligibilityResult {
+    DashrEligibilityCode code{DashrEligibilityCode::Supported};
+    std::string message;
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return code == DashrEligibilityCode::Supported;
+    }
+};
+
+[[nodiscard]] DashrEligibilityResult validate_dashr_submesh(
+    const CookedPolygonAsset& asset, std::uint32_t submeshIndex,
+    const DashrSurfaceSettings& settings, std::uint32_t atlasResolution);
+
 struct DashrPoseInput {
     std::span<const Float3> objectSpacePositions{};
     std::uint64_t revision{};
@@ -38,6 +62,7 @@ public:
         return publishedRevision_;
     }
     [[nodiscard]] std::uint64_t asset_content_hash() const noexcept { return assetContentHash_; }
+    [[nodiscard]] std::uint32_t atlas_resolution() const noexcept { return atlas_.resolution; }
     [[nodiscard]] const DashrAtlasResources& atlas() const noexcept { return atlas_; }
     [[nodiscard]] const DashrShellMeshMirror& shell() const noexcept { return shell_; }
     [[nodiscard]] const DashrSurfaceMeshMirror& surface() const noexcept { return surface_; }

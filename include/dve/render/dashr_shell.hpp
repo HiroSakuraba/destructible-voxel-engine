@@ -147,6 +147,12 @@ struct DashrShellRendererResources {
     }
 };
 
+// Reclaim completed transient descriptor groups before a scene renderer reuses
+// the shared constant buffer. The caller must wait for outstanding work first.
+[[nodiscard]] bool reclaim_dashr_shell_bind_groups(
+    rhi::IDevice& device, DashrShellRendererResources& renderer,
+    std::string* error = nullptr);
+
 struct DashrShellDraw {
     const DashrShellMeshMirror* shell{};
     const DashrAtlasResources* atlas{};

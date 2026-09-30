@@ -76,6 +76,12 @@ bool reap_completed_bind_groups(rhi::IDevice& device,
 
 } // namespace
 
+bool reclaim_dashr_shell_bind_groups(rhi::IDevice& device,
+                                     DashrShellRendererResources& renderer,
+                                     std::string* error) {
+    return reap_completed_bind_groups(device, renderer, error);
+}
+
 std::optional<DashrShellMesh> build_dashr_shell_mesh(
     const CookedPolygonAsset& asset,
     const DashrSurfaceSettings& settings,

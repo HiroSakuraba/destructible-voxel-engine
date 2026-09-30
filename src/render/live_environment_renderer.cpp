@@ -405,8 +405,10 @@ bool record_live_environment_frame(rhi::IDevice& device,
     };
     auto fail = [&]() { cleanup_groups(); return false; };
 
-    if (frame.dashrRenderer && !frame.dashrRenderer->retiredBindGroups.empty())
+    if (frame.dashrRenderer && !frame.dashrRenderer->retiredBindGroups.empty()) {
         device.wait_idle();
+        if (!reclaim_dashr_shell_bind_groups(device,*frame.dashrRenderer,error)) return fail();
+    }
 
     for (const auto& draw : frame.polygonDraws) {
         if (!draw.mirror || !draw.asset || draw.instanceCount == 0U ||
@@ -444,12 +446,11 @@ bool record_live_environment_frame(rhi::IDevice& device,
                                          draw.dashrSubmeshIndices.end(), submeshIndex) !=
                                draw.dashrSubmeshIndices.end();
             if (dashr) {
-                const auto& material = draw.asset->materials[submesh.materialIndex];
-                const auto& binding = draw.asset->materialBindings[submesh.materialIndex];
-                if (material.blendMode != MaterialBlendMode::Opaque ||
-                    binding.mapping.mappingMode != MaterialMappingMode::UV0 ||
-                    !binding.height.texture || binding.height.texcoord != 0U) {
-                    set_error(error, "DASHR camera path requires opaque UV0 material with a height texture");
+                const auto eligibility = validate_dashr_submesh(
+                    *draw.asset,submeshIndex,draw.dashr->settings(),
+                    draw.dashr->atlas_resolution());
+                if (!eligibility) {
+                    set_error(error,eligibility.message);
                     return fail();
                 }
             }

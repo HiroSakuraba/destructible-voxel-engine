@@ -61,11 +61,38 @@ void test_independent_pose_publication() {
     require(first.published_revision() == 1U,
             "rejected pose changed the published revision");
 }
+
+void test_submesh_eligibility() {
+    auto asset = triangle();
+    const DashrSurfaceSettings settings{};
+    require(validate_dashr_submesh(asset,0U,settings,64U).code ==
+                DashrEligibilityCode::MissingHeightTexture,
+            "missing height texture was accepted");
+    asset.materialBindings[0].height.texture = 0U;
+    asset.images.push_back({"height","image/raw",1U,1U,{128U,128U,128U,255U}});
+    asset.samplers.push_back({});
+    asset.textures.push_back({"height",0U,0U});
+    asset.contentHash = polygon_asset_content_hash(asset);
+    require(static_cast<bool>(validate_dashr_submesh(asset,0U,settings,64U)),
+            "valid opaque UV0 submesh was rejected");
+    require(validate_dashr_submesh(asset,1U,settings,64U).code ==
+                DashrEligibilityCode::InvalidSubmesh,
+            "invalid submesh index was accepted");
+    require(validate_dashr_submesh(asset,0U,settings,16U).code ==
+                DashrEligibilityCode::InvalidAtlasResolution,
+            "undersized atlas was accepted");
+    asset.vertices[2].texcoord = asset.vertices[1].texcoord;
+    asset.contentHash = polygon_asset_content_hash(asset);
+    require(validate_dashr_submesh(asset,0U,settings,64U).code ==
+                DashrEligibilityCode::DegenerateUvTriangle,
+            "degenerate UV triangle was accepted");
+}
 }
 
 int main() {
     try {
         test_independent_pose_publication();
+        test_submesh_eligibility();
         std::cout << "dve_dashr_live_surface_tests: PASS\n";
         return 0;
     } catch (const std::exception& e) {

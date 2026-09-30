@@ -499,13 +499,17 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
         }
         objects.boolean(object.pool.has_value());
         if (object.pool) objects.u64(*object.pool);
-        std::uint32_t densityEntries = 0U;
-        for (const std::uint16_t units : object.densityUnits) densityEntries += units != 0U ? 1U : 0U;
-        objects.u32(densityEntries);
-        for (std::size_t material = 0; material < object.densityUnits.size(); ++material) {
-            if (object.densityUnits[material] == 0U) continue;
-            objects.u8(static_cast<std::uint8_t>(material));
-            objects.u16(object.densityUnits[material]);
+        // Density table (256 x u16): run-length encoded as u32 runs x {u8 length-1, u16 units}.
+        {
+            std::vector<std::pair<std::uint8_t, std::uint16_t>> runs;
+            for (std::size_t i = 0; i < object.densityUnits.size();) {
+                std::size_t j = i + 1U;
+                while (j < object.densityUnits.size() && object.densityUnits[j] == object.densityUnits[i]) ++j;
+                runs.emplace_back(static_cast<std::uint8_t>(j - i - 1U), object.densityUnits[i]);
+                i = j;
+            }
+            objects.u32(static_cast<std::uint32_t>(runs.size()));
+            for (const auto& [length, units] : runs) { objects.u8(length); objects.u16(units); }
         }
         objects.f64(object.densityQuantumKilogramsPerCubicMeter);
 
@@ -712,12 +716,19 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
                 if (!r.u64(pool)) return corrupt(r);
                 object.pool = pool;
             }
-            if (!r.count(densityEntries, 256U, "density entry")) return corrupt(r);
-            for (std::uint32_t i = 0; i < densityEntries; ++i) {
-                std::uint8_t material{};
-                std::uint16_t units{};
-                if (!(r.u8(material) && r.u16(units))) return corrupt(r);
-                object.densityUnits[material] = units;
+            if (!r.count(densityEntries, 256U, "density run")) return corrupt(r);
+            {
+                std::size_t filled = 0U;
+                for (std::uint32_t i = 0; i < densityEntries; ++i) {
+                    std::uint8_t length{};
+                    std::uint16_t units{};
+                    if (!(r.u8(length) && r.u16(units))) return corrupt(r);
+                    const std::size_t count = static_cast<std::size_t>(length) + 1U;
+                    if (filled + count > object.densityUnits.size()) { r.bad("density runs overflow the table"); return corrupt(r); }
+                    std::fill_n(object.densityUnits.begin() + static_cast<std::ptrdiff_t>(filled), count, units);
+                    filled += count;
+                }
+                if (filled != object.densityUnits.size()) { r.bad("density runs do not cover the table"); return corrupt(r); }
             }
             if (!(r.f64(object.densityQuantumKilogramsPerCubicMeter) && r.u8(materialsMode))) return corrupt(r);
             if (materialsMode == kMaterialsFromSource) {

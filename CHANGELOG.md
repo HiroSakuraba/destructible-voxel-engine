@@ -12,6 +12,26 @@
   8 ms spike on every 700th block and a uniform 2× slowdown both fail).
   `DVE_SYNTH_STRICT_REALTIME=1` keeps the old single-pass wall-clock gate for quiet hardware.
 
+# Unreleased — MIT license
+
+- The engine is now licensed under the MIT License (decision D1): added the root `LICENSE`
+  (`Copyright (c) 2026 Benjamin Schulz`) and a License section in the README. The statements
+  below that the engine has no license (Phases 3 and 4) are superseded.
+- `third_party/notices/manifest.json` has an `engine` entry, and every generated
+  `THIRD_PARTY_NOTICES-<component>.txt` now starts with the engine's MIT license and its full text
+  instead of the no-license statement. `--check` fails if the root `LICENSE` is missing.
+- Packaging: `cmake/DveLicense.cmake` installs `LICENSE` and a Debian (DEP-5) `copyright` file to
+  `share/doc/dve-<group>/` in every package (`dve-runtime`, `dve-editor`, `dve-tools`, `dve-dev`;
+  `/usr/share/doc/dve-<group>/copyright` in the `.deb`), `CPACK_RESOURCE_FILE_LICENSE` is set,
+  and cpack no longer warns about a missing license. `dve_package_game` copies the engine license
+  into every game folder as `DVE-LICENSE.txt` (next to `THIRD_PARTY_NOTICES.txt`, new option
+  `--engine-license`) and records it in `build-info.json`.
+- `dve_cpack_test`, `dve_install_tree_test`, `dve_package_game_test` and
+  `dve_third_party_notices_self_test` check the license files and the MIT notice header.
+- Third-party files are not relicensed. The adapted code (DASHR MIT-0, BS-Cloth Apache-2.0,
+  Fluoddity3D MIT, Gabor Fields MIT, Mantaflow Apache-2.0, YASPS MIT, Slug MIT OR Apache-2.0) is
+  compatible with distributing the engine under MIT as long as its notices are kept.
+
 # Unreleased — Packaging Phase 4: shippable game folders and third-party notices
 
 - Added `dve_export_scene` (Tools): converts an editor `.dvescene` offline into DVOXSCENE v1 JSON

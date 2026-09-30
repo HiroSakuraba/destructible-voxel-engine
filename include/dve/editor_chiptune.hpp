@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -74,6 +75,7 @@ struct ChiptunePanelLayout {
     UiRect auditionSfxButton{};
     // SFX-page piano; the key rects come from EditorChiptunePanel::keyboard().
     UiRect pianoArea{};
+    UiRect keyboardKeysButton{};  // "Keys N >": cycles 25/37/49/61/76/88 (persisted by the controller)
 };
 
 class EditorChiptunePanel {
@@ -98,6 +100,10 @@ public:
         return keyboard_;
     }
     void set_keyboard_key_count(int count) noexcept;
+    // Set when the user clicked the key-count button; the controller persists it.
+    [[nodiscard]] std::optional<int> take_requested_key_count() noexcept {
+        auto request = requestedKeyCount_; requestedKeyCount_.reset(); return request;
+    }
     bool pointer_wheel(float steps, int x, int y) noexcept;
 
     void set_document_path(std::filesystem::path path) noexcept;
@@ -134,6 +140,7 @@ private:
     bool envelopeDrawing_{};
     bool wavetableDrawing_{};
     mutable PianoKeyboard keyboard_{};
+    std::optional<int> requestedKeyCount_{};
 };
 
 [[nodiscard]] std::string chip_note_display(std::uint8_t note);

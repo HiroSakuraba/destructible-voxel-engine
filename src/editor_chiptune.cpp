@@ -147,6 +147,8 @@ void EditorChiptunePanel::resize(int width, int height, float uiScale) noexcept 
     layout_.sfxPanDownButton = {x + 580, sfxY, 30, 25}; layout_.sfxPanUpButton = {x + 700, sfxY, 30, 25};
     layout_.applySfxButton = {x + 25, sfxY + 45, 145, 30};
     layout_.auditionSfxButton = {x + 180, sfxY + 45, 145, 30};
+    // Piano size (same User setting as the synth piano); right-aligned on the apply row.
+    layout_.keyboardKeysButton = {std::max(x + 335, x + panelWidth - 25 - 104), sfxY + 45, 104, 30};
     const int pianoY = bodyY + bodyH - 115;
     layout_.pianoArea = {x + 25, pianoY, panelWidth - 50, 92};
     keyboard_.set_octave(session_.octave());
@@ -258,6 +260,16 @@ bool EditorChiptunePanel::pointer_down(int x, int y, audio::AudioMixer& mixer) n
         if (adjust(layout_.sfxPanDownButton, layout_.sfxPanUpButton, [&](int d){ request.pan += 0.1F * static_cast<float>(d); session_.set_sfx_request(request); })) return true;
         if (layout_.applySfxButton.contains(x, y)) { set_status(session_.apply_sfx_request(&error) ? "SFX preset applied to document" : error); return true; }
         if (layout_.auditionSfxButton.contains(x, y)) { session_.set_song_bus(audio::AudioBusId::Effects); play_song(mixer); return true; }
+        if (layout_.keyboardKeysButton.contains(x, y)) {
+            // Cycle 25 -> 37 -> ... -> 88 -> 25; the controller persists the choice.
+            std::size_t next = 0;
+            for (std::size_t i = 0; i < kPianoKeyboardSizes.size(); ++i)
+                if (kPianoKeyboardSizes[i] == keyboard_.key_count()) next = (i + 1U) % kPianoKeyboardSizes.size();
+            set_keyboard_key_count(kPianoKeyboardSizes[next]);
+            requestedKeyCount_ = keyboard_.key_count();
+            set_status("Piano keyboard: " + std::to_string(keyboard_.key_count()) + " keys");
+            return true;
+        }
         keyboard_.set_octave(session_.octave());
         if (keyboard_.pointer_down(x, y)) return true;
         if (const auto note = keyboard_.note_at(x, y)) {

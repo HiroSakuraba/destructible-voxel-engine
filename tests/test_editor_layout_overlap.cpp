@@ -2,6 +2,8 @@
 //   * the synth grid pages (Mod Matrix macro strip vs grid rows 8-9, the
 //     Performance arp steps + step rows, which scroll above the voice meter
 //     down to the 640x480 minimum logical layout), and
+//   * the Oscillators / Effects / Presets pages, which compact their columns below ~920 px
+//     and scroll above the voice meter down to 640x480 (plus the header MIDI input button),
 //   * the inspector flag toggles vs the bottom dock,
 // at 1280x719 and other common windows for every UI zoom 100-200 %.
 #include "dve/editor_native.hpp"
@@ -225,6 +227,206 @@ void test_synth_grid_and_strips(const Case& c) {
     }
 }
 
+// Oscillators, Effects and Presets: every visible element inside the page viewport and the
+// panel, above the voice meter, clear of the scrollbar, no overlaps, buttons inside their rows,
+// and every element reachable at some scroll position.
+struct PageElement { std::string name; UiRect rect; bool container; };
+std::vector<PageElement> page_elements(const SynthPanelLayout& panel, SynthPanelPage page) {
+    std::vector<PageElement> result;
+    auto add = [&](std::string name, const UiRect& rect, bool container = true) {
+        result.push_back({std::move(name), rect, container});
+    };
+    if (page == SynthPanelPage::Oscillators) {
+        if (panel.oscillatorCompact) add("oscillator header", panel.oscillatorHeader);
+        for (std::size_t i = 0; i < panel.oscillatorRows.size(); ++i) {
+            const std::string n = "osc " + std::to_string(i + 1U);
+            add(n + " row", panel.oscillatorRows[i]);
+            add(n + " enable", panel.oscillatorEnableButtons[i], false);
+            add(n + " wave", panel.oscillatorWaveButtons[i], false);
+            add(n + " gain -", panel.oscillatorGainDownButtons[i], false); add(n + " gain +", panel.oscillatorGainUpButtons[i], false);
+            add(n + " semi -", panel.oscillatorTuneDownButtons[i], false); add(n + " semi +", panel.oscillatorTuneUpButtons[i], false);
+            add(n + " cents -", panel.oscillatorFineDownButtons[i], false); add(n + " cents +", panel.oscillatorFineUpButtons[i], false);
+            add(n + " pwm -", panel.oscillatorPwmDownButtons[i], false); add(n + " pwm +", panel.oscillatorPwmUpButtons[i], false);
+        }
+        for (std::size_t i = 0; i < panel.oscillatorAdvancedRows.size(); ++i) {
+            add("advanced row " + std::to_string(i), panel.oscillatorAdvancedRows[i]);
+            add("advanced - " + std::to_string(i), panel.oscillatorAdvancedDownButtons[i], false);
+            add("advanced + " + std::to_string(i), panel.oscillatorAdvancedUpButtons[i], false);
+        }
+        add("wavetable canvas", panel.wavetableCanvas);
+        for (std::size_t i = 0; i < panel.wavetableFrameButtons.size(); ++i)
+            add("wavetable frame " + std::to_string(i), panel.wavetableFrameButtons[i]);
+        add("normalize", panel.wavetableNormalizeButton); add("remove dc", panel.wavetableRemoveDcButton);
+        add("align", panel.wavetableAlignButton);
+    } else if (page == SynthPanelPage::Effects) {
+        for (std::size_t i = 0; i < panel.effectRows.size(); ++i) {
+            add("effect " + std::to_string(i), panel.effectRows[i]);
+            add("effect toggle " + std::to_string(i), panel.effectToggleButtons[i], false);
+        }
+        add("effect parameter title", panel.effectParamTitle);
+        for (std::size_t i = 0; i < panel.effectParamRows.size(); ++i) {
+            add("effect param " + std::to_string(i), panel.effectParamRows[i]);
+            add("effect param - " + std::to_string(i), panel.effectParamDownButtons[i], false);
+            add("effect param + " + std::to_string(i), panel.effectParamUpButtons[i], false);
+            add("effect param toggle " + std::to_string(i), panel.effectParamToggleButtons[i], false);
+        }
+    } else {
+        add("scan", panel.presetScanButton); add("previous", panel.presetPreviousButton);
+        add("next", panel.presetNextButton); add("load", panel.presetLoadButton);
+        add("capture A", panel.presetCaptureAButton); add("capture B", panel.presetCaptureBButton);
+        add("morph -", panel.presetMorphDownButton); add("morph +", panel.presetMorphUpButton);
+        for (std::size_t i = 0; i < 7U; ++i) {
+            add("learn row " + std::to_string(i), panel.parameterRows[i]);
+            add("learn - " + std::to_string(i), panel.parameterDownButtons[i], false);
+            add("learn + " + std::to_string(i), panel.parameterUpButtons[i], false);
+            add("learn toggle " + std::to_string(i), panel.parameterToggleButtons[i], false);
+        }
+        for (std::size_t i = 0; i < panel.presetEntryButtons.size(); ++i)
+            add("preset entry " + std::to_string(i), panel.presetEntryButtons[i]);
+        add("preset status", panel.presetStatusRow);
+    }
+    return result;
+}
+
+void check_scrolling_page_position(const SynthPanelLayout& panel, SynthPanelPage page, const std::string& tag,
+                                   std::vector<std::string>& seen) {
+    const auto elements = page_elements(panel, page);
+    check(visible(panel.gridViewport), tag + "page without a viewport");
+    std::vector<const PageElement*> containers;
+    for (const PageElement& e : elements) {
+        if (!visible(e.rect)) continue;
+        seen.push_back(e.name);
+        check(inside(e.rect, panel.gridViewport), tag + e.name + rect_text(e.rect) + " outside the page viewport " +
+              rect_text(panel.gridViewport));
+        check(inside(e.rect, panel.panel), tag + e.name + rect_text(e.rect) + " outside the panel");
+        check(e.rect.y + e.rect.height <= panel.meterArea.y, tag + e.name + rect_text(e.rect) + " runs into the voice meter");
+        check(!intersects(e.rect, panel.pianoArea), tag + e.name + " overlaps the piano");
+        if (visible(panel.gridScrollTrack)) check(!intersects(e.rect, panel.gridScrollTrack), tag + e.name + " under the scrollbar");
+        if (e.container) containers.push_back(&e);
+    }
+    for (std::size_t a = 0; a < containers.size(); ++a)
+        for (std::size_t b = a + 1; b < containers.size(); ++b)
+            check(!intersects(containers[a]->rect, containers[b]->rect),
+                  tag + containers[a]->name + rect_text(containers[a]->rect) + " overlaps " + containers[b]->name +
+                  rect_text(containers[b]->rect));
+    // Buttons sit inside their row and do not overlap each other.
+    auto row_buttons = [&](const UiRect& row, std::vector<std::pair<std::string, UiRect>> buttons) {
+        if (!visible(row)) {
+            for (const auto& [name, rect] : buttons) check(!visible(rect), tag + "hidden row keeps " + name);
+            return;
+        }
+        for (const auto& [name, rect] : buttons) check(inside(rect, row), tag + name + rect_text(rect) + " outside its row " + rect_text(row));
+        for (std::size_t a = 0; a < buttons.size(); ++a)
+            for (std::size_t b = a + 1; b < buttons.size(); ++b)
+                check(!intersects(buttons[a].second, buttons[b].second), tag + buttons[a].first + " overlaps " + buttons[b].first);
+    };
+    if (page == SynthPanelPage::Oscillators) {
+        for (std::size_t i = 0; i < panel.oscillatorRows.size(); ++i) {
+            row_buttons(panel.oscillatorRows[i], {{"enable", panel.oscillatorEnableButtons[i]}, {"wave", panel.oscillatorWaveButtons[i]},
+                {"gain -", panel.oscillatorGainDownButtons[i]}, {"gain +", panel.oscillatorGainUpButtons[i]},
+                {"semi -", panel.oscillatorTuneDownButtons[i]}, {"semi +", panel.oscillatorTuneUpButtons[i]},
+                {"cents -", panel.oscillatorFineDownButtons[i]}, {"cents +", panel.oscillatorFineUpButtons[i]},
+                {"pwm -", panel.oscillatorPwmDownButtons[i]}, {"pwm +", panel.oscillatorPwmUpButtons[i]}});
+            if (!visible(panel.oscillatorRows[i])) continue;
+            // Each value slot between "-" and "+" leaves room for a short value ("-12", "0.25").
+            for (auto [down, up] : {std::pair{panel.oscillatorGainDownButtons[i], panel.oscillatorGainUpButtons[i]},
+                                    std::pair{panel.oscillatorTuneDownButtons[i], panel.oscillatorTuneUpButtons[i]},
+                                    std::pair{panel.oscillatorFineDownButtons[i], panel.oscillatorFineUpButtons[i]},
+                                    std::pair{panel.oscillatorPwmDownButtons[i], panel.oscillatorPwmUpButtons[i]}})
+                check(up.x - (down.x + down.width) >= 36, tag + "oscillator value slot narrower than 36 px");
+        }
+        for (std::size_t i = 0; i < panel.oscillatorAdvancedRows.size(); ++i)
+            row_buttons(panel.oscillatorAdvancedRows[i], {{"advanced -", panel.oscillatorAdvancedDownButtons[i]},
+                                                          {"advanced +", panel.oscillatorAdvancedUpButtons[i]}});
+    } else if (page == SynthPanelPage::Effects) {
+        for (std::size_t i = 0; i < panel.effectRows.size(); ++i)
+            row_buttons(panel.effectRows[i], {{"effect toggle", panel.effectToggleButtons[i]}});
+        for (std::size_t i = 0; i < panel.effectParamRows.size(); ++i) {
+            row_buttons(panel.effectParamRows[i], {{"param -", panel.effectParamDownButtons[i]}, {"param +", panel.effectParamUpButtons[i]}});
+            row_buttons(panel.effectParamRows[i], {{"param toggle", panel.effectParamToggleButtons[i]}});
+        }
+    } else {
+        for (std::size_t i = 0; i < 7U; ++i) {
+            row_buttons(panel.parameterRows[i], {{"learn -", panel.parameterDownButtons[i]}, {"learn +", panel.parameterUpButtons[i]}});
+            row_buttons(panel.parameterRows[i], {{"learn toggle", panel.parameterToggleButtons[i]}});
+        }
+    }
+}
+
+void test_synth_scrolling_pages(const Case& c) {
+    const std::string tag = case_tag(c);
+    NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
+    controller.resize(c.logicalWidth, c.logicalHeight);
+    if (!controller.synth_panel().open()) (void)controller.dispatch_action("window.toggle_synth");
+    EditorSynthPanel& synth = controller.synth_panel();
+    {
+        // Header: the MIDI input button stays on the panel and clear of the other header widgets.
+        const SynthPanelLayout& panel = synth.layout();
+        check(visible(panel.midiInputButton) && inside(panel.midiInputButton, panel.panel), tag + "MIDI input button off the panel");
+        for (const UiRect& other : {panel.midiThruButton, panel.resetButton, panel.octaveUpButton, panel.searchButton,
+                                    panel.panicButton, panel.closeButton})
+            check(!intersects(panel.midiInputButton, other), tag + "MIDI input button overlaps a header button");
+        for (const UiRect& tab : panel.tabButtons) check(!intersects(panel.midiInputButton, tab), tag + "MIDI input button overlaps a tab");
+    }
+    for (SynthPanelPage page : {SynthPanelPage::Oscillators, SynthPanelPage::Effects, SynthPanelPage::Presets}) {
+        const std::string pageTag = tag + (page == SynthPanelPage::Oscillators ? "Oscillators: "
+                                          : page == SynthPanelPage::Effects ? "Effects: " : "Presets: ");
+        click(controller, synth.layout().tabButtons[static_cast<std::size_t>(page)]);
+        check(synth.page() == page, pageTag + "tab did not open the page");
+        // Without a wavetable oscillator the wavetable section does not add to the scroll range;
+        // then the page fits a 1280x800 logical window.
+        controller.update(0.0F);
+        if (c.logicalHeight >= 800 && c.logicalWidth >= 1280)
+            check(synth.grid_max_scroll() == 0, pageTag + "scrolls although the page fits (max scroll " +
+                  std::to_string(synth.grid_max_scroll()) + ")");
+        if (page == SynthPanelPage::Oscillators) {
+            auto preset = controller.synthesizer().preset();
+            preset.oscillators[0].waveform = audio::OscillatorWaveform::Wavetable;
+            preset.wavetable.enabled = true;
+            controller.synthesizer().set_preset(preset);
+            controller.update(0.0F);
+            check(synth.wavetable_section_visible(), pageTag + "wavetable section not counted for a wavetable oscillator");
+        }
+        std::vector<std::string> seen;
+        (void)synth.scroll_grid(-1000);
+        int positions = 0;
+        do {
+            check_scrolling_page_position(synth.layout(), page, pageTag + "scroll " + std::to_string(synth.grid_scroll()) + ": ", seen);
+            ++positions;
+        } while (synth.scroll_grid(1) && positions < 64);
+        check(synth.grid_scroll() == synth.grid_max_scroll(), pageTag + "could not scroll to the end");
+        if (synth.grid_max_scroll() > 0) check(visible(synth.layout().gridScrollTrack), pageTag + "scrolls without a scrollbar");
+        for (const PageElement& e : page_elements(synth.layout(), page)) {
+            if (page == SynthPanelPage::Oscillators && !synth.layout().oscillatorCompact && e.name == "oscillator header") continue;
+            check(std::find(seen.begin(), seen.end(), e.name) != seen.end(), pageTag + e.name + " is never visible");
+        }
+        // Hit-testing follows the scrolled rects: the last visible row's controls respond.
+        if (page == SynthPanelPage::Oscillators) {
+            // Frame buttons act on the selected (wavetable) oscillator 1, so click them first.
+            (void)synth.scroll_grid(-1000);
+            while (!visible(synth.layout().wavetableFrameButtons[5]) && synth.scroll_grid(1)) {}
+            click(controller, synth.layout().wavetableFrameButtons[5]);
+            check(synth.selected_wavetable_frame() == 5U, pageTag + "wavetable frame 6 click missed");
+            (void)synth.scroll_grid(-1000);
+            while (!visible(synth.layout().oscillatorPwmUpButtons[7]) && synth.scroll_grid(1)) {}
+            const float before = controller.synthesizer().preset().oscillators[7].pwmDepth;
+            click(controller, synth.layout().oscillatorPwmUpButtons[7]);
+            check(controller.synthesizer().preset().oscillators[7].pwmDepth > before, pageTag + "osc 8 PWM + click missed");
+        } else if (page == SynthPanelPage::Presets) {
+            (void)synth.scroll_grid(-1000);
+            while (!visible(synth.layout().parameterToggleButtons[6]) && synth.scroll_grid(1)) {}
+            const bool before = controller.synthesizer().preset().midiLearn[0].inverted;
+            click(controller, synth.layout().parameterToggleButtons[6]);
+            check(controller.synthesizer().preset().midiLearn[0].inverted != before, pageTag + "learn 'Inverted' click missed");
+        } else {
+            (void)synth.scroll_grid(-1000);
+            while (!visible(synth.layout().effectRows[12]) && synth.scroll_grid(1)) {}
+            click(controller, synth.layout().effectRows[12]);
+            check(synth.selected_effect() == 12U, pageTag + "Diffusion effect row click missed");
+        }
+    }
+}
+
 void test_inspector_toggles(const Case& c) {
     const std::string tag = std::to_string(c.windowWidth) + "x" + std::to_string(c.windowHeight) + "@" +
                             std::to_string(static_cast<int>(c.zoom * 100)) + "% ";
@@ -267,6 +469,7 @@ void test_inspector_toggles(const Case& c) {
 int main() {
     for (const Case& c : cases()) {
         test_synth_grid_and_strips(c);
+        test_synth_scrolling_pages(c);
         test_inspector_toggles(c);
     }
     if (g_failures == 0) std::printf("editor layout overlap tests passed (%zu window/zoom cases)\n", cases().size());

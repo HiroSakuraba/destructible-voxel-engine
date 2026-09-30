@@ -44,6 +44,7 @@ struct SynthPanelLayout {
     UiRect octaveDownButton{};
     UiRect octaveUpButton{};
     UiRect midiThruButton{};
+    UiRect midiInputButton{};  // MIDI input port + status; click cycles Auto / None / ports
     UiRect searchButton{};  // Phase 6: toggles the patch-search browser panel
     std::array<UiRect, kSynthPanelPageCount> tabButtons{};
 
@@ -66,6 +67,10 @@ struct SynthPanelLayout {
     UiRect wavetableNormalizeButton{};
     UiRect wavetableRemoveDcButton{};
     UiRect wavetableAlignButton{};
+    // Narrow panels (< ~920 px): oscillator rows use compact columns and the Gain / Semi /
+    // Cents / PWM labels move to this header line above the rows.
+    bool oscillatorCompact{};
+    UiRect oscillatorHeader{};
 
     std::array<UiRect, kSynthParameterRowCount> parameterRows{};
     std::array<UiRect, kSynthParameterRowCount> parameterDownButtons{};
@@ -85,6 +90,7 @@ struct SynthPanelLayout {
     std::array<UiRect, 13> effectRows{};
     std::array<UiRect, 13> effectToggleButtons{};
     static constexpr std::size_t kSynthEffectParamCount = 6;
+    UiRect effectParamTitle{};  // "<Effect> parameters"
     std::array<UiRect, kSynthEffectParamCount> effectParamRows{};
     std::array<UiRect, kSynthEffectParamCount> effectParamDownButtons{};
     std::array<UiRect, kSynthEffectParamCount> effectParamUpButtons{};
@@ -99,13 +105,14 @@ struct SynthPanelLayout {
     UiRect presetMorphDownButton{};
     UiRect presetMorphUpButton{};
     std::array<UiRect, kSynthPresetVisibleEntryCount> presetEntryButtons{};
+    UiRect presetStatusRow{};
 
     // On-screen piano (see PianoKeyboard for the key rects) and its key-count button.
     UiRect pianoArea{};
     UiRect keyboardKeysButton{};
 
-    // Grid pages (Filter/Env, Mod Matrix, Perform, Expression, Generative)
-    // scroll vertically when their rows do not fit above the voice meter.
+    // Every page (grid pages Filter/Env, Mod Matrix, Perform, Expression, Generative, and
+    // Oscillators, Effects, Presets) scrolls vertically when their rows do not fit above the voice meter.
     // Rows that are scrolled out of view get empty rects. The track is empty
     // when the page fits.
     UiRect gridViewport{};
@@ -131,6 +138,15 @@ public:
     [[nodiscard]] std::optional<int> take_requested_key_count() noexcept {
         auto request = requestedKeyCount_; requestedKeyCount_.reset(); return request;
     }
+    // MIDI input button (header): the controller sets the label; clicks request the next port.
+    void set_midi_input_label(std::string label, bool connected) {
+        midiInputLabel_ = std::move(label); midiInputConnected_ = connected;
+    }
+    [[nodiscard]] const std::string& midi_input_label() const noexcept { return midiInputLabel_; }
+    [[nodiscard]] bool midi_input_connected() const noexcept { return midiInputConnected_; }
+    [[nodiscard]] std::optional<int> take_midi_port_cycle_request() noexcept {
+        auto request = midiPortCycleRequest_; midiPortCycleRequest_.reset(); return request;
+    }
     // Scrolls the piano so a played note is on screen.
     void follow_note(int midi) noexcept { keyboard_.ensure_visible(midi); }
     // Grid-page vertical scroll, in lines (grid rows / strips).
@@ -138,6 +154,10 @@ public:
     [[nodiscard]] int grid_max_scroll() const noexcept { return gridMaxScroll_; }
     bool scroll_grid(int lines) noexcept;
     void set_page(SynthPanelPage page) noexcept;
+    // Oscillators page: the wavetable / sample section (canvas, frames, tools) only adds to the
+    // scroll range while the selected oscillator shows it. Called by the controller each update.
+    void sync_wavetable_section(const audio::Synthesizer& synth);
+    [[nodiscard]] bool wavetable_section_visible() const noexcept { return wavetableSectionVisible_; }
     [[nodiscard]] std::size_t selected_oscillator() const noexcept { return selectedOscillator_; }
     [[nodiscard]] std::size_t selected_arpeggiator_step() const noexcept { return selectedArpeggiatorStep_; }
     [[nodiscard]] std::size_t selected_effect() const noexcept { return selectedEffect_; }
@@ -181,6 +201,7 @@ private:
     static int keyboard_note(std::string_view key, int base) noexcept;
     static int keyboard_key_index(std::string_view key) noexcept;
     bool grid_scrollbar_press(int x, int y) noexcept;
+    void layout_scrolling_pages(int left, int top, int contentWidth, int contentLimit, int requestedScroll) noexcept;
     void release_panel_notes(audio::Synthesizer& synth) noexcept;
     void cycle_waveform(std::size_t oscillator, int direction, audio::Synthesizer& synth) noexcept;
     void toggle_effect(std::size_t index, audio::Synthesizer& synth) noexcept;
@@ -201,7 +222,11 @@ private:
     bool open_{};
     PianoKeyboard keyboard_{};
     std::optional<int> requestedKeyCount_{};
+    std::optional<int> midiPortCycleRequest_{};
+    std::string midiInputLabel_{"MIDI IN: n/a"};
+    bool midiInputConnected_{};
     int gridScroll_{0};
+    bool wavetableSectionVisible_{};
     int gridMaxScroll_{0};
     std::size_t selectedOscillator_{};
     std::size_t selectedArpeggiatorStep_{};

@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "dve/editor_accessibility.hpp"
+#include "dve/editor_midi.hpp"
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_ui_zoom.hpp"
@@ -369,6 +370,9 @@ int main(int argc, char** argv) {
     std::vector<std::string> startupKeys;
     std::optional<std::pair<int, int>> startupHover;
     std::optional<float> cliZoom;
+    bool noMidi = false;
+    std::optional<std::string> fakeMidiPorts;
+    std::string settingsCategory;
     int initialWidth = 1280;
     int initialHeight = 800;
     for (int index = 1; index < argc; ++index) {
@@ -397,6 +401,11 @@ int main(int argc, char** argv) {
             if (comma != std::string::npos)
                 startupHover = std::pair{std::atoi(point.substr(0, comma).c_str()), std::atoi(point.substr(comma + 1).c_str())};
         }
+        else if (argument == "--no-midi") noMidi = true;
+        // Headless verification: open User settings on this category (e.g. Audio).
+        else if (argument == "--settings-category" && index + 1 < argc) settingsCategory = argv[++index];
+        // Comma-separated input port names for a fake MIDI backend (screenshots without hardware).
+        else if (argument == "--midi-fake-ports" && index + 1 < argc) fakeMidiPorts = argv[++index];
         else if (argument == "--ui-zoom" && index + 1 < argc) cliZoom = std::strtof(argv[++index], nullptr);
         else if (argument == "--window-size" && index + 1 < argc) {
             const std::string size = argv[++index];
@@ -427,6 +436,26 @@ int main(int argc, char** argv) {
                                                         static_cast<double>(snap_ui_zoom(*cliZoom)));
             controller.workspace().synchronize_preferences_from_settings();
         }
+        // MIDI input/output, shared with the SDL desktop editor (dve/editor_midi.hpp).
+        std::string midiBackendName = "off";
+        if (fakeMidiPorts) {
+            std::vector<std::string> ports;
+            std::string_view rest = *fakeMidiPorts;
+            while (!rest.empty()) {
+                const std::size_t comma = rest.find(',');
+                const std::string_view item = rest.substr(0, comma);
+                if (!item.empty()) ports.emplace_back(item);
+                if (comma == std::string_view::npos) break;
+                rest.remove_prefix(comma + 1U);
+            }
+            controller.attach_midi_input(std::make_unique<audio::FakeMidiPortBackend>(std::move(ports)),
+                                         {std::chrono::milliseconds(1500), false});
+            if (auto* session = controller.midi_input_session()) session->poll_now();
+            controller.refresh_midi_status();
+            midiBackendName = "fake";
+        } else if (!noMidi) {
+            midiBackendName = start_editor_midi(controller).backendName;
+        }
         controller.configure_ai_assistant(projectRoot);
         if (liveMcp) {
             ai::LiveEditorMcpHostOptions liveOptions;
@@ -447,6 +476,7 @@ int main(int argc, char** argv) {
             controller.synthesizer().set_preset(*preset);
         }
         for (const std::string& action : dispatchActions) (void)controller.dispatch_action(action);
+        if (!settingsCategory.empty()) controller.open_settings(SettingScope::User, settingsCategory);
         if (!synthPage.empty() && controller.synth_panel().open()) {
             const std::string key = synthPage == "oscillators" ? "1" : synthPage == "filter" ? "3" :
                                     synthPage == "modulation" ? "4" : synthPage == "performance" ? "5" :
@@ -633,7 +663,9 @@ int main(int argc, char** argv) {
         if (smoke) {
             std::cout << "dve_native_editor_x11: PASS\n"
                       << "objects=" << controller.workspace().document().objects().size() << '\n'
-                      << "draw_items=" << controller.draw_items().size() << '\n';
+                      << "draw_items=" << controller.draw_items().size() << '\n'
+                      << "midi=" << midiBackendName << '\n'
+                      << "midi_input=" << controller.midi_input_summary() << '\n';
         }
         return 0;
     } catch (const std::exception& exception) {

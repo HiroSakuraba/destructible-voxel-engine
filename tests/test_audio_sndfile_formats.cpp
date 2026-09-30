@@ -1,7 +1,7 @@
 // libsndfile format coverage and the "no MP3 in the runtime" guarantee (DVE_FETCH_SNDFILE).
 //
-// Decodes the committed fixtures in tests/data/audio_formats (0.5 s, 440 Hz, -6 dBFS mono tone
-// encoded by FFmpeg as FLAC, Ogg Vorbis, Ogg Opus and MP3) plus a WAV written here, through
+// Decodes the committed fixtures in tests/data/audio_formats (0.5 s, 440 Hz, amplitude 0.5 mono
+// tone encoded by FFmpeg as FLAC, Ogg Vorbis, Ogg Opus and MP3) plus a WAV written here, through
 // libsndfile directly and through import_audio_file(). With DVE's own libsndfile build the test
 // also requires that MP3 is NOT handled by libsndfile and that neither libmpg123 nor libmp3lame is
 // loaded into the process: MP3 is not needed at run time (authoring-time MP3 import goes through
@@ -66,19 +66,22 @@ std::size_t rising_crossings(const dve::audio::DecodedAudioAsset& asset) {
 }
 
 void check_tone(const std::string& label, const std::optional<dve::audio::DecodedAudioAsset>& decoded,
-                const std::string& error, bool lossless) {
+                const std::string& error, bool lossless, bool anyChannels = false) {
     check(decoded.has_value(), label + ": decode failed: " + error);
     if (!decoded) return;
     const auto& meta = decoded->metadata;
     check(meta.sampleRate == kRate, label + ": sample rate " + std::to_string(meta.sampleRate));
-    check(meta.channels == 1U, label + ": channels " + std::to_string(meta.channels));
+    check(anyChannels || meta.channels == 1U, label + ": channels " + std::to_string(meta.channels));
     // Lossy codecs may pad by up to a frame or so; Opus/Vorbis decoders trim pre-skip.
     const auto frames = static_cast<double>(meta.frameCount);
     check(std::abs(frames - static_cast<double>(kFrames)) <= (lossless ? 0.0 : 2048.0),
           label + ": frame count " + std::to_string(meta.frameCount));
-    check(meta.peakLinear > 0.4F && meta.peakLinear < 0.62F, label + ": peak " + std::to_string(meta.peakLinear));
-    const double expectedRms = kAmplitude / std::sqrt(2.0);
-    check(std::abs(meta.rmsLinear - expectedRms) < 0.05, label + ": rms " + std::to_string(meta.rmsLinear));
+    // anyChannels: the FFmpeg path upmixes mono to stereo (-3 dB), so only the pitch is checked.
+    if (!anyChannels) {
+        check(meta.peakLinear > 0.4F && meta.peakLinear < 0.62F, label + ": peak " + std::to_string(meta.peakLinear));
+        const double expectedRms = kAmplitude / std::sqrt(2.0);
+        check(std::abs(meta.rmsLinear - expectedRms) < 0.05, label + ": rms " + std::to_string(meta.rmsLinear));
+    }
     const std::size_t crossings = rising_crossings(*decoded);
     check(crossings >= 215U && crossings <= 225U, label + ": " + std::to_string(crossings) + " rising zero crossings (440 Hz tone expected ~220)");
     if (lossless) {
@@ -171,7 +174,8 @@ int main(int argc, char** argv) {
     // otherwise fails cleanly with a reason.
     auto mp3General = import_audio_file(mp3, {}, &error);
     if (caps.ffmpeg) {
-        check_tone("mp3 (import_audio_file via FFmpeg)", mp3General, error, false);
+        // The FFmpeg CLI path decodes to the engine's stereo layout.
+        check_tone("mp3 (import_audio_file via FFmpeg)", mp3General, error, false, true);
     } else if (provider == "fetched") {
         check(!mp3General && error.find("no audio decoder") != std::string::npos,
               "MP3 import without FFmpeg must fail with a reason: " + error);

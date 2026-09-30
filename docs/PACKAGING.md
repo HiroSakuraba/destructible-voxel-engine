@@ -446,7 +446,10 @@ Which libraries end up in `lib/dve` depends on the preset (see
 [RPATH and bundled libraries](#rpath-and-bundled-libraries-linux)). With `linux-gcc-release` the
 sample game folder is about 12.7 MiB (6.6 MiB as `.tar.gz`): a 3.9 MB executable, a 27 KB pak,
 ~310 KB of notices, and libSDL3, libsndfile and its codecs (FLAC, vorbis, vorbisenc, ogg, opus,
-mpg123, mp3lame). Debian's libopus alone is 3.5 MB.
+mpg123, mp3lame). Debian's libopus alone is 3.5 MB. With `linux-gcc-lua-release` it is 13.1 MiB
+(adds liblua5.4). With `linux-gcc-player-release` (static SDL 3.4.12 and Lua 5.4 bundled) it is
+16.1 MiB (8.2 MiB as `.tar.gz`): the executable grows to 10 MB, but libSDL3 and its X11/Wayland/
+PulseAudio dependencies are no longer needed from the system.
 
 ### Third-party notices
 

@@ -1497,6 +1497,10 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
     // tick), which is physically reasonable.
     std::optional<RigidBodyState> parentState;
     if (object.hasBody && object.dynamic) parentState = physics_->state(object.bodyHandle);
+    // Fragments and the rebuilt primary body are built at authoredTransform, which is only the
+    // spawn pose for a dynamic object: re-base it on where the object is now, or every split
+    // would teleport the pieces back to the spawn point.
+    if (object.hasBody && object.dynamic) object.authoredTransform = resolve_transform(object);
 
     for (std::size_t componentIndex = 0; componentIndex < snapshot.components.size(); ++componentIndex) {
         if (componentIndex == primaryIndex) continue;

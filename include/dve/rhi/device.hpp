@@ -109,7 +109,17 @@ enum class ShaderStage : std::uint8_t { NoStage = 0, Compute = 1U << 0U, Vertex 
     return (value & stage) != ShaderStage::NoStage;
 }
 enum class BindingType : std::uint8_t {
-    UniformBuffer, StorageBufferReadOnly, StorageBufferReadWrite, SampledTexture, StorageTexture
+    UniformBuffer,
+    StorageBufferReadOnly,
+    StorageBufferReadWrite,
+    // Backward-compatible combined image+sampler descriptor.
+    SampledTexture,
+    // Explicit Vulkan-style sampled image and sampler descriptors. New shader
+    // paths should prefer these when HLSL declares Texture* and SamplerState
+    // separately in descriptor spaces.
+    SampledImage,
+    Sampler,
+    StorageTexture,
 };
 
 template <class Tag>
@@ -350,7 +360,11 @@ struct GraphicsPipelineDesc {
     std::optional<VertexBufferLayoutDesc> vertexBuffer;
     std::vector<VertexAttributeDesc> vertexAttributes;
     PrimitiveTopology topology{PrimitiveTopology::TriangleList};
+    // Legacy single-render-target format. Existing callers can keep using this field.
+    // When colorFormats is non-empty it takes precedence and describes the complete
+    // ordered MRT attachment set.
     std::optional<TextureFormat> colorFormat{TextureFormat::RGBA8Unorm};
+    std::vector<TextureFormat> colorFormats;
     std::optional<TextureFormat> depthFormat{TextureFormat::D32Float};
     CullMode cullMode{CullMode::BackFaces};
     FrontFace frontFace{FrontFace::CounterClockwise};

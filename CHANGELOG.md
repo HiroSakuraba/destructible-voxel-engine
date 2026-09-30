@@ -6,9 +6,9 @@
   `FakeMidiPortBackend` has output ports; `--midi-fake-ports` also fakes outputs.
 - The chiptune tracker toolbar wraps instead of running off the panel below ~940 px.
 - Removed the unused `geneNames` table (compiler warning).
-- `scripts/update_source_manifest.sh --check`; `SOURCE_MANIFEST.sha256` regenerated. Every later
-  change makes it stale again; CI's `source-manifest` job reports that but is still
-  non-blocking (`continue-on-error`).
+- `scripts/update_source_manifest.sh --check`; `SOURCE_MANIFEST.sha256` regenerated. CI's
+  `source-manifest` job is now blocking: a PR that changes tracked files must also run
+  `sh scripts/update_source_manifest.sh` and commit the result.
 
 # Unreleased — dve_export_scene gaps and player attachments
 

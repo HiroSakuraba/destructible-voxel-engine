@@ -511,7 +511,7 @@ void test_failures_are_clean() {
         CHECK(!result && result.error.code == dve::RuntimeSceneErrorCode::ObjectIdMismatch);
         CHECK(world->object_count() == 0U); // validated before the first spawn
     }
-    // 4. generateCollision=false objects become markers (EditorPlaySession's choice).
+    // 4. generateCollision=false objects become visual-only voxel objects: rendered, no body.
     {
         std::string text = read_string(kExamples / kHouseFiles[0]);
         replace_once(text, "\"structural\":false,\"generateCollision\":true", "\"structural\":false,\"generateCollision\":false");
@@ -522,8 +522,28 @@ void test_failures_are_clean() {
         CHECK(result);
         if (result) {
             CHECK(!result.objects[2].collision);
-            CHECK(world->geometry_kind(result.objects[2].gameObjectId) == dve::GameGeometryKind::Marker);
+            const auto visualId = result.objects[2].gameObjectId;
+            CHECK(world->geometry_kind(visualId) == dve::GameGeometryKind::Voxel);
+            CHECK(world->has_collision(visualId) == false);
+            CHECK(world->has_collision(result.objects[0].gameObjectId) == true);
             CHECK(world->object_count() == 3U);
+            bool rendered = false;
+            for (const dve::GameRenderObject& object : world->render_objects()) {
+                if (object.id != visualId) continue;
+                rendered = object.voxels != nullptr && !object.collision && !object.materials.empty();
+            }
+            CHECK(rendered);
+            // Queries ignore it; it can be moved like a marker.
+            const auto position = world->position(visualId);
+            CHECK(position.has_value());
+            if (position) {
+                const dve::Float3 above{position->x + 0.05F, position->y + 5.0F, position->z + 0.05F};
+                const auto hit = world->raycast(above, {0.0F, -1.0F, 0.0F}, 4.9F);
+                CHECK(!hit || hit->objectId != visualId);
+                CHECK(world->set_position(visualId, {position->x, position->y + 1.0F, position->z}));
+            }
+            world->tick(1.0F / 60.0F);
+            CHECK(world->has_object(visualId));
         }
     }
     std::error_code ec;

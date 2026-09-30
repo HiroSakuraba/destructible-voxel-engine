@@ -1,3 +1,36 @@
+# Unreleased — Packaging Phase 2: dve_player
+
+- Added the `dve_player` executable (SDL3, never links `dve_editor`). It runs a `.dvepak`, a
+  loose project folder or a pak next to the executable, reads `game.dvegame` and boots the entry
+  scene with `load_scene_into_game_world`. It has a fixed-timestep loop, the manifest camera,
+  `bind.*` input bindings (keys, gamepad buttons/axes, mouse), and clear exit codes for missing
+  or corrupt content. See docs/PACKAGING.md.
+- Added the `dve::player::IPlayerRenderer` seam and a CPU implementation over the reference
+  voxel/polygon renderers. It renders at 480×270 by default, upscales through an SDL streaming
+  texture, and has `--quality fast|balanced|reference`.
+- `ReferenceVoxelRenderer` is multithreaded by rows (`threadCount`, identical output for any
+  count), and its primary rays use the scene tracer's bounded, bit-identical DDA. The sample
+  scene went from ~21 s to ~0.1 s per 480×270 frame at the same image hash. `render_hybrid_reference`
+  gained a thread-count argument. Added `resolve_polygon_render_rgba8`.
+- Added visual-only voxel objects to `GameWorld` (`spawn_visual_asset`, `has_collision`,
+  `GameRenderObject::collision`): no body, and skipped by queries and damage. Scene objects
+  with `generateCollision=false` now use them and render (they were markers before).
+- Lua: `GameScriptHost::set_content_source` / `run_content_file`. `require` and the
+  `startupScript` load through the `ContentSource` (pak or loose), as do `world.spawn_asset` and
+  `camera_load_sequence`.
+- SDL host: audio is initialised as a separate, non-fatal subsystem (`audio_subsystem_initialized`,
+  `audio_init_error`). `WindowDesc` gained `fullscreen` and `initializeAudio`. The desktop
+  editor's `--smoke` mode no longer fails without an audio device
+  (`dve_desktop_editor_smoke_noaudio`).
+- Added the deterministic `--frames N --fixed-dt --hash` mode with golden per-compiler hashes, a
+  reference-image tolerance fallback, and PNG/PPM/BMP screenshots.
+- Added the `linux-gcc-player-release` preset (static SDL 3.4.12, Lua, Jolt 5.6.0, static libs).
+  Added `DVE_BUILD_PLAYER` and `DVE_SDL3_PREFER_FETCH`. The fetched SDL builds without XTest when
+  its header is missing and skips a system SDL3_ttf.
+- Added the sample game `tests/data/player_sample` and the tests `dve_player_runtime_tests`,
+  `dve_player_sample_assets_up_to_date`, `dve_player_{smoke, loose_matches_pak, missing_pak,
+  corrupt_pak, no_content, default_pak, no_audio, input}` and `dve_player_no_editor_link`.
+
 # Unreleased — Packaging Phase 1: ContentSource and Pak-Backed Scene Loading
 
 - Added `ContentSource` (`dve/content_source.hpp`) with `LooseContentSource` (confined project

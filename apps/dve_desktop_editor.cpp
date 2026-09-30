@@ -132,8 +132,18 @@ int main(int argc, char** argv) {
         };
         sync_zoom(host.window_metrics());
 
-        dve::audio::SdlSynthAudioDevice audioDevice(controller.audio_mixer(), &error);
-        if (!audioDevice.valid()) throw std::runtime_error("synth audio device: " + error);
+        // Audio is optional: machines without an audio device (CI, containers, remote
+        // desktops) still get a working editor, just silent. The synth keeps rendering into
+        // the mixer so meters and offline features behave the same.
+        std::string audioError;
+        dve::audio::SdlSynthAudioDevice audioDevice(controller.audio_mixer(), &audioError);
+        const std::string audioStatus = audioDevice.valid()
+            ? std::string(audioDevice.backend_name())
+            : std::string("unavailable (") + (audioError.empty() ? "no audio device" : audioError) + ")";
+        if (!audioDevice.valid()) {
+            std::cerr << "dve_desktop_editor: audio unavailable, continuing without sound: "
+                      << (audioError.empty() ? "no audio device" : audioError) << '\n';
+        }
 
         // MIDI: shared with the X11 editor (dve/editor_midi.hpp). The input port comes from the
         // `midi.input_port` setting (Auto skips Midi Through); hotplug runs on a worker thread.
@@ -184,7 +194,7 @@ int main(int argc, char** argv) {
                       << "backend=" << host_backend_name(host.backend()) << '\n'
                       << "objects=" << controller.workspace().document().objects().size() << '\n'
                       << "draw_items=" << controller.draw_items().size() << '\n'
-                      << "audio=" << audioDevice.backend_name() << '\n'
+                      << "audio=" << audioStatus << '\n'
                       << "midi=" << midiStatus << '\n'
                       << "midi_input=" << controller.midi_input_summary() << '\n'
                       << "ui_zoom=" << format_ui_zoom_percent(controller.effective_ui_zoom()) << '\n'

@@ -134,6 +134,15 @@ public:
     PolygonRenderTarget& output,
     std::string* error = nullptr);
 
+// Tonemaps the HDR color (ACES filmic on exposure-scaled linear RGB, then sRGB encode) into
+// tightly packed RGBA8 (alpha = 255), row-major top-down. This is the single HDR -> display
+// conversion shared by write_polygon_render_ppm and the player's CPU presenter.
+[[nodiscard]] bool resolve_polygon_render_rgba8(
+    const PolygonRenderTarget& target,
+    float exposure,
+    std::vector<std::uint8_t>& rgba,
+    std::string* error = nullptr);
+
 [[nodiscard]] bool write_polygon_render_ppm(
     const std::filesystem::path& path,
     const PolygonRenderTarget& target,

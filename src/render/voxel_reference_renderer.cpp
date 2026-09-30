@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <functional>
 #include <thread>
 #include <vector>
 
@@ -343,43 +344,76 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
 
     const CameraBasis basis = make_basis(camera, target);
     const float maximumDistance = camera.farPlane * 1.5F;
-    for (const VoxelReferenceInstance& instance : instances) {
-        ++stats.submittedInstances;
-        if (!instance.visible || instance.object == nullptr) continue;
-        for (std::uint32_t y = 0; y < target.height; ++y) {
-            for (std::uint32_t x = 0; x < target.width; ++x) {
-                const Float3 ray = primary_ray(basis, x, y, target.width, target.height);
-                ++stats.tracedRays;
-                const auto hit = raycast_voxels_transformed(*instance.object, instance.transform,
-                                                             camera.position, ray, maximumDistance);
-                if (!hit) continue;
-                const float cameraZ = dot(subtract(hit->worldPosition, camera.position), basis.forward);
-                if (!(cameraZ > camera.nearPlane && cameraZ < camera.farPlane)) continue;
-                const float normalizedDepth =
-                    (cameraZ - camera.nearPlane) / (camera.farPlane - camera.nearPlane);
-                const std::size_t index = static_cast<std::size_t>(y) * target.width + x;
-                if (!(normalizedDepth < target.depth[index])) continue;
+    stats.submittedInstances += instances.size();
+    // Rows are independent: every pixel visits the instances in submission order with the
+    // strict depth test and derives its sampling seed from its own index, so the image is
+    // identical for any thread count (the same contract as the radiance-cascades path).
+    auto rows = [&](std::uint32_t begin, std::uint32_t end, VoxelReferenceRenderStats& local) {
+        for (std::uint32_t y = begin; y < end; ++y) {
+            for (std::size_t k = 0; k < instances.size(); ++k) {
+                const VoxelReferenceInstance& instance = instances[k];
+                if (!instance.visible || instance.object == nullptr) continue;
+                for (std::uint32_t x = 0; x < target.width; ++x) {
+                    const Float3 ray = primary_ray(basis, x, y, target.width, target.height);
+                    ++local.tracedRays;
+                    // Bit-identical to raycast_voxels_transformed (dve_rc_spwi_tests), but with
+                    // the tracer's dense grid and exact out-of-bounds early out, so rays that
+                    // miss an instance stop at its bricks instead of marching to the far plane.
+                    const auto hit = tracer.trace_instance(k, camera.position, ray, maximumDistance);
+                    if (!hit) continue;
+                    const float cameraZ = dot(subtract(hit->worldPosition, camera.position), basis.forward);
+                    if (!(cameraZ > camera.nearPlane && cameraZ < camera.farPlane)) continue;
+                    const float normalizedDepth =
+                        (cameraZ - camera.nearPlane) / (camera.farPlane - camera.nearPlane);
+                    const std::size_t index = static_cast<std::size_t>(y) * target.width + x;
+                    if (!(normalizedDepth < target.depth[index])) continue;
 
-                bool fallback = false;
-                const VoxelMaterialDefinition& material =
-                    material_for(instance, hit->objectHit.material, &fallback);
-                if (fallback) ++stats.materialFallbacks;
-                const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
-                const float visibility = shadow_visibility(tracer, hit->worldPosition,
-                                                           hit->worldNormal, environment, distances,
-                                                           seed, stats);
-                const Float3 indirect = global_illumination(tracer, hit->worldPosition,
-                                                             hit->worldNormal, environment, distances,
-                                                             seed, stats);
-                target.hdrColor[index] = shade_voxel(material, hit->worldNormal,
-                                                     environment, visibility, indirect);
-                target.depth[index] = normalizedDepth;
-                target.objectId[index] = instance.objectId != 0U
-                    ? instance.objectId : instance.object->id();
-                target.materialIndex[index] = hit->objectHit.material;
-                ++stats.hitRays;
+                    bool fallback = false;
+                    const VoxelMaterialDefinition& material =
+                        material_for(instance, hit->objectHit.material, &fallback);
+                    if (fallback) ++local.materialFallbacks;
+                    const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
+                    const float visibility = shadow_visibility(tracer, hit->worldPosition,
+                                                               hit->worldNormal, environment, distances,
+                                                               seed, local);
+                    const Float3 indirect = global_illumination(tracer, hit->worldPosition,
+                                                                 hit->worldNormal, environment, distances,
+                                                                 seed, local);
+                    target.hdrColor[index] = shade_voxel(material, hit->worldNormal,
+                                                         environment, visibility, indirect);
+                    target.depth[index] = normalizedDepth;
+                    target.objectId[index] = instance.objectId != 0U
+                        ? instance.objectId : instance.object->id();
+                    target.materialIndex[index] = hit->objectHit.material;
+                    ++local.hitRays;
+                }
             }
         }
+    };
+    std::uint32_t threads = threadCount == 0U ? std::max(1U, std::thread::hardware_concurrency())
+                                              : threadCount;
+    threads = std::clamp(threads, 1U, std::min(16U, target.height));
+    std::vector<VoxelReferenceRenderStats> partial(threads);
+    if (threads == 1U) {
+        rows(0U, target.height, partial[0]);
+    } else {
+        std::vector<std::thread> workers;
+        workers.reserve(threads);
+        for (std::uint32_t t = 0; t < threads; ++t)
+            workers.emplace_back(rows, target.height * t / threads, target.height * (t + 1U) / threads,
+                                 std::ref(partial[t]));
+        for (std::thread& worker : workers) worker.join();
+    }
+    for (const VoxelReferenceRenderStats& local : partial) {
+        stats.tracedRays += local.tracedRays;
+        stats.hitRays += local.hitRays;
+        stats.materialFallbacks += local.materialFallbacks;
+        stats.shadowRays += local.shadowRays;
+        stats.shadowBlockedRays += local.shadowBlockedRays;
+        stats.globalIlluminationRays += local.globalIlluminationRays;
+        stats.globalIlluminationHits += local.globalIlluminationHits;
+        stats.globalIlluminationSunRays += local.globalIlluminationSunRays;
+        stats.radianceCascadeIntervalRays += local.radianceCascadeIntervalRays;
     }
     return stats;
 }
@@ -391,10 +425,13 @@ HybridReferenceRenderStats render_hybrid_reference(
     const RenderEnvironment& environment,
     PolygonRenderTarget& target,
     const PolygonRenderOptions& polygonOptions,
-    float metersPerVoxel) {
+    float metersPerVoxel,
+    std::uint32_t voxelThreadCount) {
     HybridReferenceRenderStats stats;
     ReferenceVoxelRenderer voxelRenderer;
     voxelRenderer.metersPerVoxel = metersPerVoxel;
+    voxelRenderer.threadCount = voxelThreadCount;
+    voxelRenderer.radianceCascades.threadCount = voxelThreadCount;
     stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
     PolygonRenderOptions options = polygonOptions;
     options.preserveExistingDepth = true;

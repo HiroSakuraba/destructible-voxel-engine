@@ -54,6 +54,20 @@
       }
     },
     {
+      "name": "linux-gcc-player-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + dve_player (static SDL 3.4.12, Lua 5.4, Jolt 5.6.0)",
+      "cacheVariables": {
+        "DVE_BUILD_PLAYER": "ON",
+        "BUILD_SHARED_LIBS": "OFF",
+        "DVE_FETCH_SDL3": "ON",
+        "DVE_SDL3_PREFER_FETCH": "ON",
+        "DVE_ENABLE_LUA": "ON",
+        "DVE_ENABLE_JOLT": "ON",
+        "DVE_FETCH_JOLT": "ON"
+      }
+    },
+    {
       "name": "linux-gcc-audio-release",
       "inherits": "linux-gcc-release",
       "displayName": "Linux GCC Release + SDL3 + RtMidi",
@@ -334,6 +348,10 @@
       "configurePreset": "linux-gcc-lua-release"
     },
     {
+      "name": "linux-gcc-player-release",
+      "configurePreset": "linux-gcc-player-release"
+    },
+    {
       "name": "linux-gcc-voxel-release",
       "configurePreset": "linux-gcc-voxel-release"
     },
@@ -447,6 +465,13 @@
     {
       "name": "linux-gcc-lua-release",
       "configurePreset": "linux-gcc-lua-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-player-release",
+      "configurePreset": "linux-gcc-player-release",
       "output": {
         "outputOnFailure": true
       }

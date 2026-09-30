@@ -65,6 +65,7 @@ void show_dialog(SDL_DialogFileCallback callback, void* userdata) {
 }
 
 bool SDL_Init(Uint32) { return true; }
+bool SDL_InitSubSystem(Uint32) { return true; }
 void SDL_QuitSubSystem(Uint32) {}
 const char* SDL_GetError() { return errorText.c_str(); }
 SDL_Window* SDL_CreateWindow(const char* title, int w, int h, SDL_WindowFlags flags) {

@@ -180,6 +180,9 @@ struct GameRenderObject {
     float voxelSizeMeters{};
     bool enabled{true};
     bool dynamic{};
+    // false for visual-only voxel objects (spawn_visual_asset): drawn, but no physics body and
+    // skipped by raycasts/overlaps/capsule queries.
+    bool collision{true};
 };
 
 // The tick loop and live, script-facing object model this engine did not previously have:
@@ -215,6 +218,17 @@ public:
     [[nodiscard]] GameObjectId spawn_cooked_asset(
         CookedVoxelAsset asset, std::string name, const RigidTransform& transform,
         bool dynamic, bool structural = true, std::string* error = nullptr);
+    // Visual-only voxel object: keeps the voxels and material table for rendering but creates
+    // no physics body, and raycast/sphere_overlap/capsule queries ignore it (the runtime
+    // equivalent of DVOXSCENE generateCollision=false). It moves like a marker (set_position/
+    // set_rotation always work), damage_sphere still carves it but never fragments it, and
+    // replace_voxel_brick edits it without rebuilding collision.
+    [[nodiscard]] GameObjectId spawn_visual_asset(
+        CookedVoxelAsset asset, std::string name, const RigidTransform& transform,
+        std::string* error = nullptr);
+    // false for visual-only voxel objects; true for every other live object (markers have no
+    // body either, but they never had geometry to collide with). nullopt for unknown ids.
+    [[nodiscard]] std::optional<bool> has_collision(GameObjectId id) const noexcept;
     [[nodiscard]] GameObjectId spawn_cooked_polygon_asset(
         CookedPolygonAsset asset, std::string name, const RigidTransform& transform,
         bool dynamic, bool structural = true, std::string* error = nullptr);

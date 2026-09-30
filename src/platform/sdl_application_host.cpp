@@ -136,6 +136,8 @@ struct SdlApplicationHost::Impl {
 
     SDL_Window* window{};
     bool initialized{};
+    bool audioInitialized{};
+    std::string audioInitError;
     FileDialogToken nextDialogToken{1};
     mutable std::mutex dialogMutex;
     std::unordered_map<FileDialogToken, std::unique_ptr<PendingDialog>> pendingDialogs;
@@ -210,15 +212,26 @@ bool SdlApplicationHost::create_window(const WindowDesc& desc, std::string* erro
         return false;
     }
     destroy_window();
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         set_error(error, SDL_GetError());
         return false;
     }
     impl_->initialized = true;
+    // Audio is optional: a machine without an audio driver/device must still get a window.
+    // Failure is recorded (audio_init_error) and never fails create_window.
+    impl_->audioInitError.clear();
+    if (desc.initializeAudio) {
+        impl_->audioInitialized = SDL_InitSubSystem(SDL_INIT_AUDIO);
+        if (!impl_->audioInitialized) {
+            const char* reason = SDL_GetError();
+            impl_->audioInitError = reason != nullptr && *reason != '\0' ? reason : "SDL audio init failed";
+        }
+    }
     SDL_WindowFlags flags = 0;
     if (desc.resizable) flags |= SDL_WINDOW_RESIZABLE;
     if (desc.highDpi) flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (desc.hidden) flags |= SDL_WINDOW_HIDDEN;
+    if (desc.fullscreen) flags |= SDL_WINDOW_FULLSCREEN;
     impl_->window = SDL_CreateWindow(desc.title.c_str(), desc.width, desc.height, flags);
     if (impl_->window == nullptr) {
         set_error(error, SDL_GetError());
@@ -255,13 +268,25 @@ void SdlApplicationHost::destroy_window() noexcept {
         SDL_DestroyWindow(impl_->window);
         impl_->window = nullptr;
     }
+    if (impl_->audioInitialized) {
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        impl_->audioInitialized = false;
+    }
     if (impl_->initialized) {
-        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
         impl_->initialized = false;
     }
 }
 
 bool SdlApplicationHost::has_window() const noexcept { return impl_ && impl_->window != nullptr; }
+
+bool SdlApplicationHost::audio_subsystem_initialized() const noexcept {
+    return impl_ && impl_->audioInitialized;
+}
+
+std::string SdlApplicationHost::audio_init_error() const {
+    return impl_ ? impl_->audioInitError : std::string{};
+}
 
 bool SdlApplicationHost::poll_event(PlatformEvent& output) {
     SDL_Event event{};

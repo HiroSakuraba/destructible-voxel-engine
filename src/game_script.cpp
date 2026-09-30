@@ -6,6 +6,7 @@
 #include "dve/render_environment.hpp"
 #include "dve/camera_runtime.hpp"
 #include "dve/camera_sequence.hpp"
+#include "dve/content_source.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -41,6 +42,7 @@ struct GameScriptHost::Impl {
     MaterialLibrary materials;
     RenderEnvironment environment;
     LogSink logSink;
+    const ContentSource* content{nullptr};
 };
 
 namespace {
@@ -584,8 +586,22 @@ int l_spawn_asset(lua_State* L) {
     const bool dynamic = lua_toboolean(L, 5) != 0;
     const bool structural = lua_isnoneornil(L, 6) ? true : (lua_toboolean(L, 6) != 0);
     std::string error;
-    const GameObjectId id = world_from_state(L).spawn_asset(
-        path, "", make_rigid_transform(position, {}), dynamic, structural, &error);
+    GameObjectId id = kInvalidGameObjectId;
+    if (const ContentSource* content = impl_from_state(L)->content) {
+        ContentError readError;
+        const auto bytes = content->read(path, &readError);
+        if (!bytes) {
+            error = readError.message.empty() ? std::string("could not read ") + path : readError.message;
+        } else {
+            const std::filesystem::path asPath(path);
+            id = world_from_state(L).spawn_asset_from_bytes(
+                *bytes, asPath.extension().string(), asPath.stem().string(),
+                make_rigid_transform(position, {}), dynamic, structural, &error);
+        }
+    } else {
+        id = world_from_state(L).spawn_asset(
+            path, "", make_rigid_transform(position, {}), dynamic, structural, &error);
+    }
     if (id == kInvalidGameObjectId) {
         lua_pushnil(L);
         lua_pushstring(L, error.c_str());
@@ -1471,14 +1487,25 @@ int l_camera_stop_shake(lua_State* L) {
 
 int l_camera_load_sequence(lua_State* L) {
     const auto viewport = static_cast<camera::CameraViewportId>(luaL_checkinteger(L, 1));
-    const std::filesystem::path path = luaL_checkstring(L, 2);
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        lua_pushboolean(L, 0); lua_pushstring(L, "could not open camera sequence"); return 2;
+    const char* rawPath = luaL_checkstring(L, 2);
+    std::string text;
+    if (const ContentSource* content = impl_from_state(L)->content) {
+        ContentError readError;
+        auto loaded = content->read_text(rawPath, &readError);
+        if (!loaded) {
+            lua_pushboolean(L, 0); lua_pushstring(L, "could not open camera sequence"); return 2;
+        }
+        text = std::move(*loaded);
+    } else {
+        std::ifstream input(std::filesystem::path(rawPath), std::ios::binary);
+        if (!input) {
+            lua_pushboolean(L, 0); lua_pushstring(L, "could not open camera sequence"); return 2;
+        }
+        std::ostringstream buffer; buffer << input.rdbuf();
+        text = buffer.str();
     }
-    std::ostringstream buffer; buffer << input.rdbuf();
     std::string error;
-    const auto sequence = camera::CameraSequence::parse(buffer.str(), &error);
+    const auto sequence = camera::CameraSequence::parse(text, &error);
     if (!sequence || !world_from_state(L).cameras().set_sequence(viewport, *sequence, &error)) {
         lua_pushboolean(L, 0); lua_pushstring(L, error.c_str()); return 2;
     }
@@ -1696,6 +1723,59 @@ constexpr luaL_Reg kWorldFunctions[] = {
     {nullptr, nullptr},
 };
 
+// package.searchers entry that resolves `require` through the host's ContentSource. Returns
+// the loaded chunk plus its content path (Lua passes that to the chunk as the 2nd argument),
+// or an explanatory string when no content file matches. The C++ work happens in a helper so
+// every std::string is destroyed before luaL_error can longjmp out of the C function.
+// Result: 0 = not found (message pushed), 1 = found (chunk + path pushed), -1 = load error
+// (message pushed).
+int search_content_module(lua_State* L, const char* name) {
+    const ContentSource* content = impl_from_state(L)->content;
+    if (content == nullptr) {
+        lua_pushstring(L, "\n\tno game content source");
+        return 0;
+    }
+    std::string module(name);
+    std::replace(module.begin(), module.end(), '.', '/');
+    const std::string candidates[] = {
+        "scripts/" + module + ".lua", "scripts/" + module + "/init.lua",
+        module + ".lua", module + "/init.lua"};
+    std::string tried;
+    for (const std::string& candidate : candidates) {
+        if (!normalize_content_path(candidate) || !content->exists(candidate)) {
+            tried += "\n\tno content file '" + candidate + "'";
+            continue;
+        }
+        ContentError readError;
+        const auto code = content->read_text(candidate, &readError, 16ULL * 1024ULL * 1024ULL);
+        if (!code) {
+            const std::string message = "error loading module '" + std::string(name) + "' from content '" +
+                                        candidate + "': " + readError.message;
+            lua_pushlstring(L, message.data(), message.size());
+            return -1;
+        }
+        const std::string chunkName = "@" + candidate;
+        if (luaL_loadbuffer(L, code->data(), code->size(), chunkName.c_str()) != LUA_OK) {
+            const std::string message = "error loading module '" + std::string(name) + "' from content '" +
+                                        candidate + "':\n\t" + (lua_tostring(L, -1) ? lua_tostring(L, -1) : "?");
+            lua_pop(L, 1);
+            lua_pushlstring(L, message.data(), message.size());
+            return -1;
+        }
+        lua_pushlstring(L, candidate.data(), candidate.size());
+        return 1;
+    }
+    lua_pushlstring(L, tried.data(), tried.size());
+    return 0;
+}
+
+int l_content_searcher(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    const int found = search_content_module(L, name);
+    if (found < 0) return luaL_error(L, "%s", lua_tostring(L, -1));
+    return found > 0 ? 2 : 1;
+}
+
 } // namespace
 
 GameScriptHost::GameScriptHost(GameWorld& world) : impl_(std::make_unique<Impl>()) {
@@ -1705,6 +1785,22 @@ GameScriptHost::GameScriptHost(GameWorld& world) : impl_(std::make_unique<Impl>(
 
     lua_pushlightuserdata(impl_->L, impl_.get());
     lua_setfield(impl_->L, LUA_REGISTRYINDEX, "__dve_host_impl");
+
+    // Insert the content searcher at package.searchers[2] (after preload, before the
+    // filesystem searchers). It is inert until set_content_source() provides a source.
+    if (lua_getglobal(impl_->L, "package") == LUA_TTABLE) {
+        if (lua_getfield(impl_->L, -1, "searchers") == LUA_TTABLE) {
+            const auto count = static_cast<lua_Integer>(lua_rawlen(impl_->L, -1));
+            for (lua_Integer index = count; index >= 2; --index) {
+                lua_rawgeti(impl_->L, -1, index);
+                lua_rawseti(impl_->L, -2, index + 1);
+            }
+            lua_pushcfunction(impl_->L, l_content_searcher);
+            lua_rawseti(impl_->L, -2, count >= 1 ? 2 : 1);
+        }
+        lua_pop(impl_->L, 1);
+    }
+    lua_pop(impl_->L, 1);
 
     lua_newtable(impl_->L);
     luaL_setfuncs(impl_->L, kWorldFunctions, 0);
@@ -1783,6 +1879,25 @@ bool GameScriptHost::run_string(const std::string& code, const std::string& chun
 }
 
 void GameScriptHost::set_log_sink(LogSink sink) { impl_->logSink = std::move(sink); }
+
+void GameScriptHost::set_content_source(const ContentSource* content) { impl_->content = content; }
+
+const ContentSource* GameScriptHost::content_source() const noexcept { return impl_->content; }
+
+bool GameScriptHost::run_content_file(std::string_view contentPath, std::string* error) {
+    if (impl_->content == nullptr) {
+        if (error) *error = "no content source set";
+        return false;
+    }
+    ContentError readError;
+    const auto code = impl_->content->read_text(contentPath, &readError, 16ULL * 1024ULL * 1024ULL);
+    if (!code) {
+        if (error) *error = "could not read script '" + std::string(contentPath) + "': " +
+                            (readError.message.empty() ? to_string(readError.code) : readError.message);
+        return false;
+    }
+    return run_string(*code, "@" + std::string(contentPath), error);
+}
 
 bool GameScriptHost::run_file(const std::filesystem::path& path, std::string* error) {
     std::ifstream stream(path, std::ios::binary);

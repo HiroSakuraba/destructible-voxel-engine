@@ -88,6 +88,10 @@ struct WindowDesc {
     bool resizable{true};
     bool highDpi{true};
     bool hidden{};
+    bool fullscreen{};
+    // Hosts with an audio subsystem (SDL) try to start it alongside the window. Audio is
+    // optional: failure is reported by the host but never fails create_window.
+    bool initializeAudio{true};
 };
 
 struct WindowMetrics {

@@ -21,6 +21,8 @@ option(DVE_ENABLE_SDL3_HOST "Build the shared SDL3 desktop host when SDL3 is ava
 option(DVE_ENABLE_SDL3_TTF "Use SDL3_ttf for scalable editor text in the SDL host when available (falls back to scaled debug text)" ON)
 option(DVE_ENABLE_XFT "Use Xft for scalable editor text in the X11 host when available (falls back to core bitmap fonts)" ON)
 option(DVE_FETCH_SDL3 "Fetch the pinned SDL 3.4.12 source when no installed package is available" OFF)
+option(DVE_SDL3_PREFER_FETCH "With DVE_FETCH_SDL3, build the pinned SDL statically even when an installed SDL3 exists" OFF)
+option(DVE_BUILD_PLAYER "Build the dve_player runtime library and the SDL3 dve_player executable" ON)
 option(DVE_BUILD_SDL3_CONTRACT_TESTS "Compile and execute SDL host/editor logic against the deterministic SDL API shim" ON)
 option(DVE_ENABLE_VULKAN_BUFFER_BACKEND "Build the dynamically loaded Vulkan offscreen graphics backend" ON)
 option(DVE_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -534,8 +536,13 @@ endif()
 # SDL 3.4.12 is the pinned portability dependency. Installed packages are preferred; source
 # fetching is explicit so offline and distro builds remain deterministic.
 set(DVE_SDL3_TARGET "")
+set(DVE_SDL3_FETCHED OFF)
 if(DVE_BUILD_PLATFORM AND DVE_ENABLE_SDL3_HOST)
-    find_package(SDL3 3.2 CONFIG QUIET)
+    # DVE_SDL3_PREFER_FETCH (with DVE_FETCH_SDL3) skips the installed package and links the
+    # pinned SDL statically, so a shipped dve_player has no libSDL3.so dependency (decision D3).
+    if(NOT (DVE_FETCH_SDL3 AND DVE_SDL3_PREFER_FETCH))
+        find_package(SDL3 3.2 CONFIG QUIET)
+    endif()
     if(TARGET SDL3::SDL3)
         set(DVE_SDL3_TARGET SDL3::SDL3)
     elseif(DVE_FETCH_SDL3)
@@ -544,10 +551,20 @@ if(DVE_BUILD_PLATFORM AND DVE_ENABLE_SDL3_HOST)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
         set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
         set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+        # SDL 3.4 hard-requires the XTest header when X11 is on; it is only used for
+        # synthetic input, so build without it on hosts that lack libxtst-dev.
+        if(UNIX AND NOT APPLE AND NOT DEFINED SDL_X11_XTEST)
+            find_path(DVE_XTEST_INCLUDE_DIR X11/extensions/XTest.h)
+            if(NOT DVE_XTEST_INCLUDE_DIR)
+                message(STATUS "SDL3: X11/extensions/XTest.h not found, building with SDL_X11_XTEST=OFF")
+                set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
+            endif()
+        endif()
         FetchContent_Declare(SDL3
             URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.12/SDL3-3.4.12.tar.gz
             URL_HASH SHA256=f07b958a9ac5020fb7a44cadb957f658b2149c3c8abb4f63145fac9303249db7)
         FetchContent_MakeAvailable(SDL3)
+        set(DVE_SDL3_FETCHED ON)
         if(TARGET SDL3::SDL3)
             set(DVE_SDL3_TARGET SDL3::SDL3)
         elseif(TARGET SDL3::SDL3-static)
@@ -565,6 +582,19 @@ if(DVE_BUILD_PLATFORM AND DVE_ENABLE_SDL3_HOST)
             target_compile_options(dve_platform_sdl3 PRIVATE /W4 /permissive-)
         else()
             target_compile_options(dve_platform_sdl3 PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        endif()
+        # SDL audio output/input devices. Shared by the desktop editor and dve_player.
+        if(TARGET dve_audio_synth)
+            add_library(dve_audio_sdl3 src/audio/sdl_synth_audio_device.cpp src/audio/sdl_audio_input_device.cpp)
+            add_library(dve::audio_sdl3 ALIAS dve_audio_sdl3)
+            target_include_directories(dve_audio_sdl3 PUBLIC include)
+            target_compile_features(dve_audio_sdl3 PUBLIC cxx_std_23)
+            target_link_libraries(dve_audio_sdl3 PUBLIC dve::audio_synth ${DVE_SDL3_TARGET})
+            if(MSVC)
+                target_compile_options(dve_audio_sdl3 PRIVATE /W4 /permissive-)
+            else()
+                target_compile_options(dve_audio_sdl3 PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+            endif()
         endif()
     else()
         message(STATUS "SDL3 3.2+ was not found; dve_desktop_editor is disabled (contract shim remains available to tests)")
@@ -832,7 +862,11 @@ if(DVE_BUILD_EDITOR)
         target_link_libraries(dve_editor_sdl_canvas PUBLIC dve::editor dve::platform_sdl3 ${DVE_SDL3_TARGET})
         # Optional scalable text for UI zoom. Without SDL3_ttf the canvas uses SDL's debug font
         # with integer magnification (still zoomed and legible, just blockier).
-        if(DVE_ENABLE_SDL3_TTF)
+        if(DVE_ENABLE_SDL3_TTF AND DVE_SDL3_FETCHED)
+            # An installed SDL3_ttf links the installed (shared) SDL3, which cannot be mixed
+            # with the pinned static SDL.
+            message(STATUS "DVE SDL editor text: SDL3_ttf skipped with the fetched static SDL3, using scaled debug text")
+        elseif(DVE_ENABLE_SDL3_TTF)
             find_package(SDL3_ttf CONFIG QUIET)
             if(TARGET SDL3_ttf::SDL3_ttf)
                 target_link_libraries(dve_editor_sdl_canvas PRIVATE SDL3_ttf::SDL3_ttf)
@@ -848,16 +882,6 @@ if(DVE_BUILD_EDITOR)
             target_compile_options(dve_editor_sdl_canvas PRIVATE /W4 /permissive-)
         else()
             target_compile_options(dve_editor_sdl_canvas PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-        endif()
-        add_library(dve_audio_sdl3 src/audio/sdl_synth_audio_device.cpp src/audio/sdl_audio_input_device.cpp)
-        add_library(dve::audio_sdl3 ALIAS dve_audio_sdl3)
-        target_include_directories(dve_audio_sdl3 PUBLIC include)
-        target_compile_features(dve_audio_sdl3 PUBLIC cxx_std_23)
-        target_link_libraries(dve_audio_sdl3 PUBLIC dve::audio_synth ${DVE_SDL3_TARGET})
-        if(MSVC)
-            target_compile_options(dve_audio_sdl3 PRIVATE /W4 /permissive-)
-        else()
-            target_compile_options(dve_audio_sdl3 PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
         endif()
         add_executable(dve_desktop_editor apps/dve_desktop_editor.cpp)
         target_link_libraries(dve_desktop_editor PRIVATE dve::editor_sdl_canvas dve::audio_sdl3)
@@ -1597,6 +1621,75 @@ if(DVE_ENABLE_LUA)
     endif()
 endif()
 
+# dve_player (packaging/player plan, Phase 2): a game runtime that never links dve_editor.
+# dve_player_runtime is platform-neutral (no SDL): boot from a ContentSource, fixed-step loop,
+# input bindings, Lua when built, and the CPU renderer behind IPlayerRenderer. The dve_player
+# executable adds the SDL3 window/texture presenter and the optional audio device.
+if(DVE_BUILD_PLAYER AND DVE_BUILD_RHI AND DVE_BUILD_PLATFORM)
+    add_library(dve_player_runtime
+        src/player/frame_image.cpp
+        src/player/player_input.cpp
+        src/player/cpu_player_renderer.cpp
+        src/player/player_app.cpp)
+    add_library(dve::player_runtime ALIAS dve_player_runtime)
+    target_include_directories(dve_player_runtime PUBLIC include)
+    target_compile_features(dve_player_runtime PUBLIC cxx_std_23)
+    target_link_libraries(dve_player_runtime PUBLIC dve::core dve::render_bridge dve::platform)
+    if(MSVC)
+        target_compile_options(dve_player_runtime PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_player_runtime PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+
+    if(TARGET dve_platform_sdl3)
+        add_executable(dve_player apps/dve_player.cpp)
+        target_link_libraries(dve_player PRIVATE dve::player_runtime dve::platform_sdl3)
+        target_compile_definitions(dve_player PRIVATE DVE_PLAYER_VERSION="${PROJECT_VERSION}")
+        if(TARGET dve_audio_sdl3)
+            target_link_libraries(dve_player PRIVATE dve::audio_sdl3)
+            target_compile_definitions(dve_player PRIVATE DVE_PLAYER_HAVE_AUDIO=1)
+        endif()
+        if(NOT MSVC)
+            target_compile_options(dve_player PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
+        endif()
+        message(STATUS "dve_player: enabled (SDL3 target ${DVE_SDL3_TARGET})")
+
+        # The player must never link the editor. Walk the link closure at configure time.
+        set(_dve_player_closure "")
+        set(_dve_player_pending dve_player_runtime dve_platform_sdl3)
+        if(TARGET dve_audio_sdl3)
+            list(APPEND _dve_player_pending dve_audio_sdl3)
+        endif()
+        while(_dve_player_pending)
+            list(POP_FRONT _dve_player_pending _dve_item)
+            if(_dve_item MATCHES "^dve::(.*)$")
+                set(_dve_item "dve_${CMAKE_MATCH_1}")
+            endif()
+            if(NOT TARGET ${_dve_item} OR _dve_item IN_LIST _dve_player_closure)
+                continue()
+            endif()
+            list(APPEND _dve_player_closure ${_dve_item})
+            get_target_property(_dve_aliased ${_dve_item} ALIASED_TARGET)
+            if(_dve_aliased)
+                list(APPEND _dve_player_pending ${_dve_aliased})
+            endif()
+            foreach(_dve_property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+                get_target_property(_dve_links ${_dve_item} ${_dve_property})
+                if(_dve_links)
+                    list(APPEND _dve_player_pending ${_dve_links})
+                endif()
+            endforeach()
+        endwhile()
+        if("dve_editor" IN_LIST _dve_player_closure)
+            message(FATAL_ERROR "dve_player must not link dve_editor (link closure: ${_dve_player_closure})")
+        endif()
+        list(JOIN _dve_player_closure "\n" _dve_player_closure_text)
+        file(WRITE "${CMAKE_BINARY_DIR}/dve_player_link_closure.txt" "${_dve_player_closure_text}\n")
+    else()
+        message(STATUS "dve_player: disabled (needs SDL3; dve_player_runtime is still built)")
+    endif()
+endif()
+
 if(DVE_BUILD_ASSET_COOKER)
     add_executable(dve_cook_model apps/dve_cook_model.cpp)
     target_link_libraries(dve_cook_model PRIVATE dve::asset_pipeline)
@@ -2230,6 +2323,85 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_game_scene_loader_tests PRIVATE dve::core)
     target_compile_definitions(dve_game_scene_loader_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME dve_game_scene_loader_tests COMMAND dve_game_scene_loader_tests)
+    # Phase 2: dve_player runtime + CLI tests on the sample game (tests/data/player_sample).
+    if(TARGET dve_player_runtime)
+        add_executable(dve_player_sample_generator tests/player/make_player_sample.cpp)
+        target_link_libraries(dve_player_sample_generator PRIVATE dve::core)
+        add_test(NAME dve_player_sample_assets_up_to_date
+            COMMAND ${CMAKE_COMMAND}
+                -DGENERATOR=$<TARGET_FILE:dve_player_sample_generator>
+                -DSAMPLE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_sample
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/player_sample_regenerated
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_sample_assets.cmake)
+
+        add_executable(dve_player_runtime_tests tests/test_player_runtime.cpp)
+        target_link_libraries(dve_player_runtime_tests PRIVATE dve::player_runtime)
+        target_compile_definitions(dve_player_runtime_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME dve_player_runtime_tests COMMAND dve_player_runtime_tests)
+
+        set(DVE_PLAYER_SAMPLE_PAK ${CMAKE_CURRENT_BINARY_DIR}/player_tests/player_sample.dvepak)
+        add_test(NAME dve_player_sample_pack
+            COMMAND dve_pack ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_sample ${DVE_PLAYER_SAMPLE_PAK} --all)
+        set_tests_properties(dve_player_sample_pack PROPERTIES FIXTURES_SETUP dve_player_sample_pak)
+
+        if(TARGET dve_player)
+            # Golden framebuffer hashes are per compiler and Lua on/off (the script animates the
+            # sample). Unknown combinations fall back to a tolerance check against the
+            # downsampled reference image, and the smoke test prints the new hash to add.
+            if(DVE_ENABLE_LUA)
+                set(_dve_player_variant lua)
+                set(_dve_player_lua ON)
+            else()
+                set(_dve_player_variant nolua)
+                set(_dve_player_lua OFF)
+            endif()
+            string(REGEX MATCH "^[0-9]+" _dve_compiler_major "${CMAKE_CXX_COMPILER_VERSION}")
+            set(_dve_player_hash_key "${CMAKE_CXX_COMPILER_ID}-${_dve_compiler_major}-${_dve_player_variant}")
+            file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_golden/expected_frame_hashes.txt
+                _dve_player_hash_lines REGEX "^${_dve_player_hash_key} ")
+            set(_dve_player_hashes "")
+            foreach(_dve_line IN LISTS _dve_player_hash_lines)
+                string(REGEX REPLACE "^[^ ]+ +([0-9a-f]+).*$" "\\1" _dve_hash "${_dve_line}")
+                list(APPEND _dve_player_hashes ${_dve_hash})
+            endforeach()
+            list(JOIN _dve_player_hashes "," _dve_player_hashes)
+            message(STATUS "dve_player golden hash key ${_dve_player_hash_key}: '${_dve_player_hashes}'")
+            foreach(_dve_mode smoke loose_matches_pak missing_pak corrupt_pak no_content default_pak no_audio input)
+                if(_dve_mode STREQUAL "input" AND NOT DVE_ENABLE_LUA)
+                    continue()
+                endif()
+                add_test(NAME dve_player_${_dve_mode}
+                    COMMAND ${CMAKE_COMMAND}
+                        -DMODE=${_dve_mode}
+                        -DPLAYER=$<TARGET_FILE:dve_player>
+                        -DHELPER=$<TARGET_FILE:dve_player_runtime_tests>
+                        -DPAK=${DVE_PLAYER_SAMPLE_PAK}
+                        -DPROJECT=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_sample
+                        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/player_tests/${_dve_mode}
+                        -DEXPECT=${_dve_player_hashes}
+                        -DREFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_golden/reference_${_dve_player_variant}.ppm
+                        -DLUA=${_dve_player_lua}
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_cli.cmake)
+                set_tests_properties(dve_player_${_dve_mode} PROPERTIES FIXTURES_REQUIRED dve_player_sample_pak)
+                if(_dve_mode MATCHES "^(smoke|loose_matches_pak)$")
+                    # These render with --threads 4; tell CTest so -jN does not oversubscribe
+                    # the cores under the timing-sensitive audio deadline tests.
+                    set_tests_properties(dve_player_${_dve_mode} PROPERTIES PROCESSORS 4)
+                endif()
+            endforeach()
+            add_test(NAME dve_player_no_editor_link
+                COMMAND ${CMAKE_COMMAND} -DCLOSURE=${CMAKE_BINARY_DIR}/dve_player_link_closure.txt
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_no_editor_link.cmake)
+        endif()
+    endif()
+    if(TARGET dve_desktop_editor)
+        # The editor must keep working on machines without an audio device.
+        add_test(NAME dve_desktop_editor_smoke_noaudio COMMAND dve_desktop_editor --smoke)
+        set_tests_properties(dve_desktop_editor_smoke_noaudio PROPERTIES
+            ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_AUDIO_DRIVER=dve_missing_audio_driver"
+            PASS_REGULAR_EXPRESSION "dve_desktop_editor: PASS[^\n]*\n(.*\n)*audio=unavailable")
+    endif()
+
     # dve_pack --all must not package the editor's `.autosave/` folder.
     add_test(NAME dve_pack_autosave_exclusion
         COMMAND ${CMAKE_COMMAND}

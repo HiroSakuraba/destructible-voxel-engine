@@ -101,6 +101,9 @@ public:
     // GPU's MetersToVoxelUnits with GpuRenderEnvironment::metersPerVoxel. Non-positive or
     // non-finite values fall back to kDefaultMetersPerVoxel (0.1 m).
     float metersPerVoxel{kDefaultMetersPerVoxel};
+    // Worker threads for the primary/shadow/GI pass (rows are split across threads).
+    // 0 = std::thread::hardware_concurrency() (capped at 16). Output is identical for any count.
+    std::uint32_t threadCount{0};
 
     [[nodiscard]] VoxelReferenceRenderStats render(
         std::span<const VoxelReferenceInstance> instances,
@@ -125,6 +128,7 @@ struct HybridReferenceRenderStats {
     const RenderEnvironment& environment,
     PolygonRenderTarget& target,
     const PolygonRenderOptions& polygonOptions = {},
-    float metersPerVoxel = kDefaultMetersPerVoxel);
+    float metersPerVoxel = kDefaultMetersPerVoxel,
+    std::uint32_t voxelThreadCount = 0);
 
 } // namespace dve::render

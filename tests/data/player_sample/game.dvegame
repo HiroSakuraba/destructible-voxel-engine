@@ -1,0 +1,10 @@
+DVE_GAME 1
+# Sample game used by the dve_player tests (loose folder and packed .dvepak).
+name=Player Sample
+version=0.1.0
+entryScene=scenes/main.dvoxscene.json
+startupScript=scripts/main.lua
+settings=game_settings.txt
+camera=3.3,2.6,5.2 -> 0,0.9,0
+bind.move_x=key:a/-1,key:d/+1,key:left/-1,key:right/+1,gamepad:leftx
+bind.lift=key:space,gamepad:south

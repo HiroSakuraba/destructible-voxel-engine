@@ -225,7 +225,7 @@ jobs:
       - name: Build (keep going to collect every error)
         shell: bash
         run: |
-          cmake --build out/build/windows-msvc-release --config Release --parallel -- /m /p:StopOnFirstFailure=false 2>&1 | tee build.log
+          cmake --build out/build/windows-msvc-release --config Release --parallel 4 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
           grep -E ' error (C|LNK)[0-9]+' build.log | sort | uniq | head -200 > build-errors.txt || true
           echo "distinct error lines: $(wc -l < build-errors.txt)"

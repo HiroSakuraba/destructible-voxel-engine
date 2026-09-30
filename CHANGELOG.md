@@ -1,3 +1,43 @@
+# Unreleased — Packaging Phase 3: install, exported package and CPack
+
+- Added install rules (`cmake/DveInstall.cmake`) with the components `Runtime` (`dve_player`),
+  `Editor` (`dve_desktop_editor`, `dve_native_editor_x11`, `share/dve/assets`), `Tools`
+  (`dve_pack`, `dve_cook_*`, `dve_asset_index`, `dve_prefab_tool`) and `Development` (headers,
+  static libraries, `lib/cmake/dve`). The `RuntimeDeps`/`EditorDeps`/`ToolsDeps` components hold
+  the bundled shared libraries. `assets/audio/sample_maps` is never installed
+  (`DVE_INSTALL_SAMPLE_MAPS`, decision D8).
+- Added the exported CMake package: `find_package(dve 2.35)` (`SameMinorVersion`) with
+  `dve::core`, `dve::platform`, `dve::rhi`, `dve::render_bridge`, `dve::audio_synth`,
+  `dve::player_runtime`, `dve::platform_sdl3` and `dve::audio_sdl3`.
+  - Third-party targets built in the tree (manifold; fetched Jolt/SDL3/RtMidi/Box2D/Box3D) are
+    exported alongside, as `dve::third_party_*`.
+  - Installed packages are re-found with `find_dependency`.
+  - Local import helpers (pkg-config Lua, the Lua ABI fallback, RtMidi without a package) are
+    recreated.
+  - Public include directories use `BUILD_INTERFACE`/`INSTALL_INTERFACE`.
+- Added a generated `dve/build_config.hpp`. It records the option-dependent public definitions
+  (`DVE_ENABLE_*`, `DVE_HAVE_*`, `DVE_GEOMETRY_MODE_*`) and `#error`s if a translation unit
+  disagrees with them.
+- Installed executables use a `$ORIGIN/../lib/dve` `DT_RPATH`, and
+  `install(RUNTIME_DEPENDENCY_SET)` bundles their non-system shared libraries into `lib/dve`,
+  with an allowlist for glibc, the display/audio/GPU stacks, dbus/systemd and the font stack.
+- Added a generated `dve/version.hpp` from `project(VERSION)` (the single source of truth, plus
+  `git describe`). `dve_player --version` uses it.
+- Added CPack (`cmake/DveCPack.cmake`):
+  - TGZ + DEB packages `dve-runtime`, `dve-editor`, `dve-tools` and `dve-dev` (D7).
+  - The DEB packages install into `/usr`, leave out the bundled libraries, and get `Depends`
+    from `dpkg-shlibdeps` (hand list without `dpkg-dev`). `dve-dev` depends on the owning `-dev`
+    packages.
+  - ZIP/NSIS configuration for Windows (untested).
+  - No license file is packaged yet (D1), and cpack warns about it.
+- Fixed a fresh configure of `linux-gcc-release`: `third_party/manifold`'s
+  `option(BUILD_SHARED_LIBS ... ON)` put `ON` into the cache, so `dve_player_runtime` was built
+  as a non-PIC shared library and failed to link. DVE now declares `BUILD_SHARED_LIBS` (default
+  `OFF`) first.
+- Added the tests `dve_version_consistency`, `dve_install_tree_test`,
+  `dve_package_consumer_test` (`tests/package_consumer`, a tiny game built against the installed
+  package) and `dve_cpack_test` (label `slow`).
+
 # Unreleased — Fix: shader validation with register spaces
 
 - `tools/validate_shader_contracts.py` now parses HLSL registers with an optional register

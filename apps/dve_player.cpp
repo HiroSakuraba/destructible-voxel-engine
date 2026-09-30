@@ -30,6 +30,7 @@
 #include "dve/player/frame_image.hpp"
 #include "dve/player/player_app.hpp"
 #include "dve/player/player_renderer.hpp"
+#include "dve/version.hpp"
 
 namespace {
 
@@ -138,7 +139,9 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
             *exitCode = kExitOk;
             return std::nullopt;
         } else if (argument == "--version") {
-            std::cout << "dve_player " << DVE_PLAYER_VERSION << '\n';
+            std::cout << "dve_player " << DVE_VERSION_STRING;
+            if (DVE_GIT_DESCRIBE[0] != '\0') std::cout << " (" << DVE_GIT_DESCRIBE << ')';
+            std::cout << '\n';
             *exitCode = kExitOk;
             return std::nullopt;
         } else if (argument == "--pak") {

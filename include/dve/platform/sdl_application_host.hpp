@@ -22,6 +22,10 @@ public:
     bool create_window(const WindowDesc& desc, std::string* error = nullptr) override;
     void destroy_window() noexcept override;
     [[nodiscard]] bool has_window() const noexcept override;
+    // create_window initializes SDL audio separately from video (WindowDesc::initializeAudio)
+    // and never fails because of it; these report whether that succeeded and why not.
+    [[nodiscard]] bool audio_subsystem_initialized() const noexcept;
+    [[nodiscard]] std::string audio_init_error() const;
     [[nodiscard]] bool poll_event(PlatformEvent& event) override;
     [[nodiscard]] WindowMetrics window_metrics() const noexcept override;
     [[nodiscard]] NativeWindowHandle native_window_handle() const noexcept override;

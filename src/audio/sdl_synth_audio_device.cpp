@@ -12,6 +12,7 @@ struct SdlSynthAudioDevice::Impl {
     void (*renderFunction)(void*, float*, std::size_t) noexcept{};
     std::uint32_t sampleRate{};
     SDL_AudioStream* stream{};
+    bool audioSubsystem{}; // this device's reference on SDL_INIT_AUDIO (SDL ref-counts it)
     std::array<float, 8192> scratch{}; // 4096 stereo frames, fixed-capacity callback storage
 
     static void SDLCALL callback(void* userdata, SDL_AudioStream* streamValue,
@@ -32,6 +33,14 @@ struct SdlSynthAudioDevice::Impl {
     }
 
     bool open(std::string* error) {
+        // Take our own reference on the audio subsystem so the device works whether or not
+        // the window host initialized audio, and fails cleanly (not fatally) when there is no
+        // audio driver at all.
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            if (error) *error = SDL_GetError();
+            return false;
+        }
+        audioSubsystem = true;
         SDL_AudioSpec spec{};
         spec.format = SDL_AUDIO_F32;
         spec.channels = 2;
@@ -39,15 +48,22 @@ struct SdlSynthAudioDevice::Impl {
         stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, &Impl::callback, this);
         if (stream == nullptr) {
             if (error) *error = SDL_GetError();
+            release_subsystem();
             return false;
         }
         if (!SDL_ResumeAudioStreamDevice(stream)) {
             if (error) *error = SDL_GetError();
             SDL_DestroyAudioStream(stream);
             stream = nullptr;
+            release_subsystem();
             return false;
         }
         return true;
+    }
+
+    void release_subsystem() noexcept {
+        if (audioSubsystem) SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        audioSubsystem = false;
     }
 };
 
@@ -72,7 +88,10 @@ SdlSynthAudioDevice::SdlSynthAudioDevice(AudioMixer& mixer, std::string* error)
 }
 
 SdlSynthAudioDevice::~SdlSynthAudioDevice() {
-    if (impl_ && impl_->stream != nullptr) SDL_DestroyAudioStream(impl_->stream);
+    if (!impl_) return;
+    if (impl_->stream != nullptr) SDL_DestroyAudioStream(impl_->stream);
+    impl_->stream = nullptr;
+    impl_->release_subsystem();
 }
 
 bool SdlSynthAudioDevice::valid() const noexcept { return impl_ && impl_->stream != nullptr; }

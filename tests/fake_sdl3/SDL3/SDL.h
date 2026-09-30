@@ -25,6 +25,7 @@ constexpr Uint32 SDL_INIT_AUDIO = 1U << 2U;
 constexpr SDL_WindowFlags SDL_WINDOW_RESIZABLE = 1ULL << 0U;
 constexpr SDL_WindowFlags SDL_WINDOW_HIGH_PIXEL_DENSITY = 1ULL << 1U;
 constexpr SDL_WindowFlags SDL_WINDOW_HIDDEN = 1ULL << 2U;
+constexpr SDL_WindowFlags SDL_WINDOW_FULLSCREEN = 1ULL << 5U;
 constexpr SDL_WindowFlags SDL_WINDOW_INPUT_FOCUS = 1ULL << 3U;
 constexpr SDL_WindowFlags SDL_WINDOW_MINIMIZED = 1ULL << 4U;
 
@@ -166,6 +167,7 @@ union SDL_Event {
 };
 
 bool SDL_Init(Uint32 flags);
+bool SDL_InitSubSystem(Uint32 flags);
 void SDL_QuitSubSystem(Uint32 flags);
 const char* SDL_GetError();
 SDL_Window* SDL_CreateWindow(const char* title, int w, int h, SDL_WindowFlags flags);

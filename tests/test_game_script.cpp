@@ -717,6 +717,16 @@ void test_environment_bindings_from_lua() {
     CHECK(host.environment().globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere);
     CHECK(host.environment().shadowMode == ShadowMode::Hybrid);
     CHECK(host.environment().shadowSamples == 6U);
+
+    // The CPU-reference radiance-cascades GI mode round-trips through the script API.
+    CHECK(run_ok(host, R"(
+        local ok = world.set_environment_gi_mode("radiance_cascades")
+        world.set_global("rc_mode_ok", ok and 1 or 0)
+        world.set_global("rc_readback", world.get_environment().global_illumination_mode == "radiance_cascades" and 1 or 0)
+    )", "environment_radiance_cascades"));
+    CHECK(host.global_number("rc_mode_ok") == 1.0);
+    CHECK(host.global_number("rc_readback") == 1.0);
+    CHECK(host.environment().globalIlluminationMode == GlobalIlluminationMode::RadianceCascades);
 }
 
 

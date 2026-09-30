@@ -12,11 +12,14 @@ enum class TonemapOperator : std::uint32_t { ACES = 0, Reinhard = 1, Clamp = 2 }
 // Indirect-lighting policy. AmbientHemisphere is a cheap sky/ground fallback; VoxelOneBounce
 // traces a bounded diffuse bounce through the authoritative voxel scene. New projects use the
 // one-bounce mode so global illumination is genuinely enabled rather than represented by a UI
-// checkbox that leaves the renderer unchanged.
+// checkbox that leaves the renderer unchanged. RadianceCascades is the CPU-reference screen-probe
+// radiance-cascades solve (same one-bounce radiance model, no sample cap); GPU backends do not
+// implement it yet and fall back to VoxelOneBounce (see pack_gpu_render_environment).
 enum class GlobalIlluminationMode : std::uint32_t {
     Off = 0,
     AmbientHemisphere = 1,
     VoxelOneBounce = 2,
+    RadianceCascades = 3,
 };
 
 // Directional-shadow policy used by the shared environment. Hard is one exact sun ray, Soft

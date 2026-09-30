@@ -120,7 +120,7 @@ namespace dve {
 //   world.set_environment_vector(name, x, y, z) -> bool (or false, errorString)
 //     names: SunDirection, SunColor, SkyColor, GroundColor, GlobalTint
 //   world.set_environment_tonemap_operator("aces" | "reinhard" | "clamp") -> bool (or false, errorString)
-//   world.set_environment_gi_mode("off" | "ambient" | "voxel_one_bounce") -> bool
+//   world.set_environment_gi_mode("off" | "ambient" | "voxel_one_bounce" | "radiance_cascades") -> bool
 //   world.set_environment_shadow_mode("off" | "hard" | "soft" | "contact" | "hybrid") -> bool
 //   world.get_environment() -> table snapshot of every current environment value
 //

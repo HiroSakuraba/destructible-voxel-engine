@@ -26,6 +26,7 @@ struct DashrShellVertexOutput {
 DashrShellVertexOutput main(DashrShellVertexInput input) {
     DashrShellVertexOutput output;
     output.position = mul(gObjectToClip, float4(input.position, 1.0F));
+    if (gLimits.w != 0U) output.position.z = max(output.position.z, 0.0F);
     output.objectPosition = input.position;
     output.uv = input.uv;
     return output;

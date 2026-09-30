@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "dve/game_ui.hpp"
 #include "dve/game_world.hpp"
@@ -12,6 +13,8 @@
 #include "dve/render_environment.hpp"
 
 namespace dve {
+
+class ContentSource;
 
 // Embeds Lua 5.4 and binds a `world` table to the given GameWorld's operations: object
 // lookup/spawn/destroy, transform get/set, impulse/force, damage, raycast, timers, and the
@@ -163,6 +166,20 @@ public:
     [[nodiscard]] bool run_string(const std::string& code, const std::string& chunkName, std::string* error = nullptr);
     [[nodiscard]] bool run_file(const std::filesystem::path& path, std::string* error = nullptr);
     void set_log_sink(LogSink sink);
+
+    // Routes script file access through game content (a mounted .dvepak or loose project
+    // folder) instead of the process filesystem. With a source set:
+    //   - `require "a.b"` searches the content paths scripts/a/b.lua, scripts/a/b/init.lua,
+    //     a/b.lua and a/b/init.lua (after package.preload, before Lua's own filesystem
+    //     searchers), so modules load from the pak;
+    //   - world.spawn_asset(path, ...) and world.camera_load_sequence(id, path) read `path`
+    //     as a content path;
+    //   - run_content_file(path) runs a script stored in the content.
+    // The source must outlive this host (or be cleared with nullptr first). nullptr restores
+    // the default filesystem behaviour.
+    void set_content_source(const ContentSource* content);
+    [[nodiscard]] const ContentSource* content_source() const noexcept;
+    [[nodiscard]] bool run_content_file(std::string_view contentPath, std::string* error = nullptr);
 
     // Number of Lua functions currently registered via world.on_tick/on_damage/on_destroyed.
     // Exposed mainly for tests to confirm registration actually happened.

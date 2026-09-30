@@ -89,7 +89,7 @@ GameSceneLoadResult load_scene_into_game_world(
             result.error = std::move(assetError);
             return result;
         }
-        if (metadata.generateCollision) item.asset.emplace(std::move(read.asset));
+        item.asset.emplace(std::move(read.asset));
         item.metadata = std::move(metadata);
         staged.push_back(std::move(item));
     }
@@ -115,7 +115,10 @@ GameSceneLoadResult load_scene_into_game_world(
             loaded.attached = options.attachChildrenToParents && metadata.parentIndex.has_value();
             const bool dynamic = !metadata.anchored || loaded.attached;
             std::string spawnError;
-            if (item.asset) {
+            if (item.asset && !metadata.generateCollision) {
+                loaded.gameObjectId = world.spawn_visual_asset(
+                    std::move(*item.asset), metadata.name, metadata.worldTransform, &spawnError);
+            } else if (item.asset) {
                 loaded.gameObjectId = world.spawn_cooked_asset(
                     std::move(*item.asset), metadata.name, metadata.worldTransform, dynamic, metadata.structural, &spawnError);
             } else {

@@ -10,9 +10,9 @@
 //     validate_dvoxscene_asset() exactly like RuntimeSceneWorld;
 //   - anchored => static collision, otherwise a dynamic body; `structural` is passed through;
 //     the asset's own per-material densities drive mass (GameWorld::spawn_cooked_asset);
-//   - generateCollision=false => a marker object (name + transform, no voxels/body), the same
-//     choice EditorPlaySession makes for objects with collision disabled. GameWorld has no
-//     "visual-only voxels" object yet; see the Phase 2 notes in the PR.
+//   - generateCollision=false => a visual-only voxel object (GameWorld::spawn_visual_asset):
+//     rendered with its voxels and materials, but with no physics body and ignored by
+//     collision queries. (Phase 1 spawned these as markers.)
 //   - `parent` is scene hierarchy metadata (as in RuntimeSceneWorld) and is reported in the
 //     result; with attachChildrenToParents it becomes a GameWorld attachment (child forced
 //     dynamic, world transform preserved), mirroring EditorPlaySession's attachment pass.
@@ -48,7 +48,7 @@ struct GameSceneLoadedObject {
     GameObjectId gameObjectId{kInvalidGameObjectId};
     std::optional<GameObjectId> parentGameObjectId;
     bool anchored{};
-    bool collision{true};                          // false => spawned as a marker
+    bool collision{true};                          // false => spawned visual-only
     bool attached{};
 };
 

@@ -271,6 +271,8 @@ struct GameWorld::Object {
     // create_object()/spawn_box objects, whose voxel material ids have no table of their own.
     std::vector<VoxelMaterialDefinition> materials;
     bool hasBody{};
+    // Visual-only voxels (spawn_visual_asset): never gets a body, ignored by collision queries.
+    bool visualOnly{};
     RigidBodyHandle bodyHandle{kInvalidRigidBodyHandle};
     Float3 localCenterOfMassMeters{}; // valid only if dynamic && hasBody
 };
@@ -616,6 +618,44 @@ GameObjectId GameWorld::spawn_cooked_asset(
     return id;
 }
 
+GameObjectId GameWorld::spawn_visual_asset(
+    CookedVoxelAsset asset, std::string name, const RigidTransform& transform, std::string* error) {
+    if (!geometry_kind_supported(GeometryKind::Voxel)) {
+        if (error) *error = "this build profile does not enable voxel gameplay objects";
+        return kInvalidGameObjectId;
+    }
+    if (asset.object.occupied_voxel_count() == 0) {
+        if (error) *error = "cooked asset has no occupied voxels";
+        return kInvalidGameObjectId;
+    }
+    if (!(asset.voxelSizeMeters > 0.0F) || !std::isfinite(asset.voxelSizeMeters)) {
+        if (error) *error = "cooked asset has an invalid voxelSizeMeters";
+        return kInvalidGameObjectId;
+    }
+    Object object;
+    object.name = name.empty() ? std::string("asset") : std::move(name);
+    object.authoredTransform = transform;
+    object.voxelSizeMeters = asset.voxelSizeMeters;
+    object.dynamic = false;
+    object.structural = false;
+    object.visualOnly = true;
+    object.voxels = std::make_unique<VoxelObject>(std::move(asset.object));
+    object.massTable = build_material_mass_table_from_definitions(
+        asset.materials, &object.densityQuantumKilogramsPerCubicMeter);
+    object.materials = std::move(asset.materials);
+    const GameObjectId id = allocate_id();
+    object.id = id;
+    synchronize_membership_component(object);
+    objects_.emplace(id, std::move(object));
+    dispatch_lifecycle({GameLifecycleEventKind::Spawn, id});
+    return id;
+}
+
+std::optional<bool> GameWorld::has_collision(GameObjectId id) const noexcept {
+    const auto it = objects_.find(id);
+    if (it == objects_.end()) return std::nullopt;
+    return !it->second.visualOnly;
+}
 
 GameObjectId GameWorld::spawn_polygon_asset(
     const std::filesystem::path& path, std::string name, const RigidTransform& transform,
@@ -1008,6 +1048,8 @@ bool GameWorld::replace_voxel_brick(
         return false;
     }
 
+    if (object.visualOnly) return true; // no collision to rebuild
+
     const RigidTransform currentTransform = resolve_transform(object);
     const std::optional<RigidBodyState> previousState =
         object.hasBody && object.dynamic ? physics_->state(object.bodyHandle) : std::nullopt;
@@ -1140,6 +1182,7 @@ std::vector<GameRenderObject> GameWorld::render_objects() const {
         item.voxelSizeMeters = object.voxelSizeMeters;
         item.enabled = object.enabled;
         item.dynamic = object.dynamic;
+        item.collision = !object.visualOnly;
         result.push_back(item);
     }
     std::sort(result.begin(), result.end(),
@@ -1418,7 +1461,8 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
 
     const bool destroyed = object.voxels->occupied_voxel_count() == 0;
     std::vector<GameObjectId> newFragmentIds;
-    if (!destroyed) newFragmentIds = fragment_after_damage(id, object);
+    // Visual-only voxels are carved but never split into (physical) debris.
+    if (!destroyed && !object.visualOnly) newFragmentIds = fragment_after_damage(id, object);
 
     GameDamageEvent event{id, worldCenter, radius, report.removedVoxelCount, destroyed, std::move(newFragmentIds)};
     for (const DamageListener& listener : damageListeners_) listener(event);
@@ -1565,6 +1609,7 @@ std::optional<GameRaycastHit> GameWorld::raycast(Float3 worldOrigin, Float3 worl
     const Float3 normalizedDirection = normalize(worldDirection);
 #endif
     for (const auto& [id, object] : objects_) {
+        if (object.visualOnly) continue; // no collision
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
         if (const DeformableCollisionProxy* proxy = deformables_->collision_proxy(id)) {
             std::optional<DeformableRayHit> deformableHit;
@@ -1628,6 +1673,7 @@ std::vector<GameObjectId> GameWorld::sphere_overlap(Float3 worldCenter, float ra
     if (!(radius > 0.0F) || !std::isfinite(radius)) return result;
     const float radiusSquared = radius * radius;
     for (const auto& [id, object] : objects_) {
+        if (object.visualOnly) continue; // no collision
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
         if (const DeformableCollisionProxy* proxy = deformables_->collision_proxy(id)) {
             bool overlaps{};
@@ -1677,6 +1723,7 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
         !std::isfinite(worldDisplacement.z)) return std::nullopt;
     std::optional<GameCapsuleHit> best;
     for (const auto& [id, object] : objects_) {
+        if (object.visualOnly) continue; // no collision
         if (id == ignoreObject || (!object.voxels && !object.polygon)) continue;
         const RigidTransform current = resolve_transform(object);
         std::optional<CapsuleSweepHit> hit;
@@ -1705,6 +1752,7 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
 
 bool GameWorld::capsule_overlaps(const Capsule& worldCapsule, GameObjectId ignoreObject) const {
     for (const auto& [id, object] : objects_) {
+        if (object.visualOnly) continue; // no collision
         if (id == ignoreObject) continue;
         const RigidTransform current = resolve_transform(object);
         if (object.voxels) {
@@ -1731,6 +1779,7 @@ GameCapsuleDepenetration GameWorld::depenetrate_capsule(
         bool found = false;
         GameObjectId bestObject = std::numeric_limits<GameObjectId>::max();
         for (const auto& [id, object] : objects_) {
+            if (object.visualOnly) continue; // no collision
             if (id == ignoreObject || (!object.voxels && !object.polygon)) continue;
             const RigidTransform current = resolve_transform(object);
             Float3 correction{};

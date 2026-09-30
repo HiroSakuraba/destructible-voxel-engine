@@ -63,12 +63,16 @@ int lua_rawgeti(lua_State* L, int idx, lua_Integer n);
 int lua_next(lua_State* L, int idx);
 void lua_createtable(lua_State* L, int narr, int nrec);
 void lua_setglobal(lua_State* L, const char* name);
+int lua_getglobal(lua_State* L, const char* name);
+void lua_pushcclosure(lua_State* L, lua_CFunction fn, int n);
+lua_Unsigned lua_rawlen(lua_State* L, int idx);
 void lua_setfield(lua_State* L, int idx, const char* k);
 void lua_rawseti(lua_State* L, int idx, lua_Integer n);
 int lua_pcallk(lua_State* L, int nargs, int nresults, int errfunc,
                lua_KContext ctx, lua_KFunction k);
 
 #define lua_pop(L,n) lua_settop((L), -(n)-1)
+#define lua_pushcfunction(L,f) lua_pushcclosure((L), (f), 0)
 #define lua_newtable(L) lua_createtable((L), 0, 0)
 #define lua_tostring(L,i) lua_tolstring((L), (i), NULL)
 #define lua_tonumber(L,i) lua_tonumberx((L), (i), NULL)

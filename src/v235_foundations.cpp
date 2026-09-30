@@ -570,6 +570,29 @@ const AssetDependencyNode* AssetDependencyGraph::find(std::string_view id)const 
 
 std::vector<SourceFingerprint> SourceMonitor::poll(std::span<const std::filesystem::path> files,bool hashContents){std::vector<SourceFingerprint> changed;for(const auto& path:files){std::error_code ec;if(!std::filesystem::is_regular_file(path,ec))continue;SourceFingerprint current;current.path=path;current.size=std::filesystem::file_size(path,ec);if(ec)continue;current.modifiedTicks=std::filesystem::last_write_time(path,ec).time_since_epoch().count();if(ec)continue;if(hashContents){auto bytes=read_file_bytes(path,nullptr);if(!bytes)continue;current.contentHash=fnv_bytes(*bytes);}const auto it=known_.find(path);if(it==known_.end()||it->second.size!=current.size||it->second.modifiedTicks!=current.modifiedTicks||it->second.contentHash!=current.contentHash)changed.push_back(current);known_[path]=current;}std::sort(changed.begin(),changed.end(),[](const auto& a,const auto& b){return a.path.generic_string()<b.path.generic_string();});return changed;}
 
+std::vector<SourceFingerprint> DebouncedSourceMonitor::poll(
+    std::span<const std::filesystem::path> files, Clock::time_point now,
+    std::chrono::milliseconds quietPeriod, bool hashContents) {
+    const auto observed = monitor_.poll(files, hashContents);
+    for (const SourceFingerprint& fingerprint : observed)
+        pending_[fingerprint.path] = PendingChange{fingerprint, now};
+
+    const auto quiet = std::max(quietPeriod, std::chrono::milliseconds::zero());
+    std::vector<SourceFingerprint> stable;
+    for (auto it = pending_.begin(); it != pending_.end();) {
+        if (now - it->second.observedAt >= quiet) {
+            stable.push_back(it->second.fingerprint);
+            it = pending_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    std::sort(stable.begin(), stable.end(), [](const auto& a, const auto& b) {
+        return a.path.generic_string() < b.path.generic_string();
+    });
+    return stable;
+}
+
 namespace {
 
 std::vector<std::string> input_activation_controls(const InputBinding& binding) {

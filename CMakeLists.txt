@@ -190,6 +190,7 @@ add_library(dve_core
     src/content_source.cpp
     src/game_manifest.cpp
     src/game_scene_loader.cpp
+    src/game_save.cpp
 )
 add_library(dve::core ALIAS dve_core)
 target_include_directories(dve_core PUBLIC $<BUILD_INTERFACE:${DVE_GENERATED_INCLUDE_DIR}>)
@@ -2197,6 +2198,10 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_game_world_tests tests/test_game_world.cpp)
     target_link_libraries(dve_game_world_tests PRIVATE dve::core)
     add_test(NAME dve_game_world_tests COMMAND dve_game_world_tests)
+
+    add_executable(dve_game_save_tests tests/test_game_save.cpp)
+    target_link_libraries(dve_game_save_tests PRIVATE dve::core)
+    add_test(NAME dve_game_save_tests COMMAND dve_game_save_tests)
 
     add_executable(dve_animation_tests tests/test_animation.cpp)
     target_link_libraries(dve_animation_tests PRIVATE dve::core)

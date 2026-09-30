@@ -68,7 +68,9 @@ struct RadianceCascadeSettings {
     std::uint32_t baseProbeSpacingPixels{2};
     std::uint32_t baseDirectionResolution{8};
     // Interval i covers [L0·(g^i-1)/(g-1), L0·(g^(i+1)-1)/(g-1)) world units along each
-    // direction; the top interval always ends at globalIlluminationMaxDistanceMeters.
+    // direction; the top interval always ends at globalIlluminationMaxDistanceMeters (converted
+    // to world units). World units are the reference path's voxel-index units (1 voxel = 1
+    // unit), so L0 = 1 is one voxel, whatever ReferenceVoxelRenderer::metersPerVoxel is.
     float baseIntervalLength{1.0F};
     float intervalGrowth{4.0F};
     RadianceCascadeIntervalScaling intervalScaling{RadianceCascadeIntervalScaling::World};
@@ -76,6 +78,8 @@ struct RadianceCascadeSettings {
     float intervalOverlap{1.0F};
     // 0 = as many cascades as needed to reach the GI max distance (capped at 10).
     std::uint32_t maximumCascades{0};
+    // Default by decision (docs/RADIANCE_CASCADES.md §6): the bilinear fix does not leak through
+    // 1-voxel walls at low resolution, where vanilla + overlap does.
     RadianceCascadeMerge merge{RadianceCascadeMerge::BilinearFix};
     // Bilateral weights: plane distance tolerance in upper-probe world spacings, and the power
     // applied to max(0, dot(n_lower, n_upper)).
@@ -91,6 +95,12 @@ class ReferenceVoxelRenderer {
 public:
     // Used only when RenderEnvironment::globalIlluminationMode is RadianceCascades.
     RadianceCascadeSettings radianceCascades{};
+    // Scene world scale. The reference path traces in voxel-index units (instance transforms are
+    // rigid, so 1 world unit = 1 voxel); every RenderEnvironment `*Meters` distance (GI max
+    // distance, shadow max/contact distance, shadow bias) is divided by this, exactly like the
+    // GPU's MetersToVoxelUnits with GpuRenderEnvironment::metersPerVoxel. Non-positive or
+    // non-finite values fall back to kDefaultMetersPerVoxel (0.1 m).
+    float metersPerVoxel{kDefaultMetersPerVoxel};
 
     [[nodiscard]] VoxelReferenceRenderStats render(
         std::span<const VoxelReferenceInstance> instances,
@@ -114,6 +124,7 @@ struct HybridReferenceRenderStats {
     const PolygonCamera& camera,
     const RenderEnvironment& environment,
     PolygonRenderTarget& target,
-    const PolygonRenderOptions& polygonOptions = {});
+    const PolygonRenderOptions& polygonOptions = {},
+    float metersPerVoxel = kDefaultMetersPerVoxel);
 
 } // namespace dve::render

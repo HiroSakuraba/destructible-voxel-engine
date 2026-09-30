@@ -61,6 +61,22 @@ float voxel_units_to_meters(float voxels, float metersPerVoxel) noexcept {
     return voxels * metersPerVoxel;
 }
 
+VoxelLightingDistances voxel_lighting_distances(
+    const RenderEnvironment& environment, float metersPerVoxel) noexcept {
+    VoxelLightingDistances distances;
+    distances.metersPerVoxel = resolve_meters_per_voxel(metersPerVoxel);
+    const float scale = distances.metersPerVoxel;
+    distances.globalIlluminationMaxDistance =
+        meters_to_voxel_units(environment.globalIlluminationMaxDistanceMeters, scale);
+    distances.shadowMaxDistance = meters_to_voxel_units(environment.shadowMaxDistanceMeters, scale);
+    distances.contactShadowDistance =
+        meters_to_voxel_units(environment.contactShadowDistanceMeters, scale);
+    distances.shadowBias = meters_to_voxel_units(environment.shadowBiasMeters, scale);
+    distances.subsurfaceMaxDistance =
+        meters_to_voxel_units(environment.subsurfaceMaxDistanceMeters, scale);
+    return distances;
+}
+
 float distance_weighted_ao_visibility(
     bool hit, float hitDistanceVoxels, float maximumDistanceMeters,
     float metersPerVoxel) noexcept {

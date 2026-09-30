@@ -70,8 +70,7 @@ GpuRenderEnvironment pack_gpu_render_environment(
     gpu.shadowMaxDistanceMeters = environment.shadowMaxDistanceMeters;
     gpu.contactShadowDistanceMeters = environment.contactShadowDistanceMeters;
     gpu.shadowBiasMeters = environment.shadowBiasMeters;
-    gpu.metersPerVoxel = std::isfinite(metersPerVoxel) && metersPerVoxel > 0.0F
-        ? metersPerVoxel : 0.10F;
+    gpu.metersPerVoxel = resolve_meters_per_voxel(metersPerVoxel);
     return gpu;
 }
 

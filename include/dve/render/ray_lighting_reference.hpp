@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 
+#include "dve/render_environment.hpp"
 #include "dve/types.hpp"
 
 namespace dve::render {
@@ -32,6 +33,22 @@ struct LightingTemporalSample {
 
 [[nodiscard]] float meters_to_voxel_units(float meters, float metersPerVoxel) noexcept;
 [[nodiscard]] float voxel_units_to_meters(float voxels, float metersPerVoxel) noexcept;
+
+// RenderEnvironment's metre-authored ray distances converted to the voxel-index units the
+// tracers use, exactly as the GPU does with MetersToVoxelUnits(...) and gMetersPerVoxel.
+// metersPerVoxel goes through resolve_meters_per_voxel. Minimum-bias floors (e.g. the GPU's
+// max(1e-3, bias)) are applied by the consumers, in voxel units, as on the GPU.
+struct VoxelLightingDistances {
+    float metersPerVoxel{kDefaultMetersPerVoxel};
+    float globalIlluminationMaxDistance{};
+    float shadowMaxDistance{};
+    float contactShadowDistance{};
+    float shadowBias{};
+    float subsurfaceMaxDistance{};
+};
+[[nodiscard]] VoxelLightingDistances voxel_lighting_distances(
+    const RenderEnvironment& environment, float metersPerVoxel = kDefaultMetersPerVoxel) noexcept;
+
 [[nodiscard]] float distance_weighted_ao_visibility(
     bool hit, float hitDistanceVoxels, float maximumDistanceMeters,
     float metersPerVoxel) noexcept;

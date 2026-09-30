@@ -10,6 +10,7 @@
 
 #include "dve/query.hpp"
 #include "dve/render/radiance_cascades_spwi.hpp"
+#include "dve/render/ray_lighting_reference.hpp"
 
 namespace dve::render {
 namespace {
@@ -143,19 +144,19 @@ float hard_visibility(const spwi::VoxelSceneTracer& tracer, Float3 origin,
 
 float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
                         Float3 normal, const RenderEnvironment& environment,
-                        std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
+                        const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
     if (environment.shadowMode == ShadowMode::Off) return 1.0F;
     const Float3 sun = normalize(environment.sunDirection);
-    const Float3 origin = add(point, multiply(normal, environment.shadowBiasMeters));
+    const Float3 origin = add(point, multiply(normal, distances.shadowBias));
     auto weighted = [&](float raw) {
         return std::clamp(1.0F - environment.shadowStrength * (1.0F - raw), 0.0F, 1.0F);
     };
     if (environment.shadowMode == ShadowMode::Hard)
         return weighted(hard_visibility(tracer, origin, sun,
-                                        environment.shadowMaxDistanceMeters, stats));
+                                        distances.shadowMaxDistance, stats));
     if (environment.shadowMode == ShadowMode::Contact)
         return weighted(hard_visibility(tracer, origin, sun,
-                                        environment.contactShadowDistanceMeters, stats));
+                                        distances.contactShadowDistance, stats));
 
     const std::uint32_t samples = std::clamp(environment.shadowSamples, 1U, 16U);
     float visible = 0.0F;
@@ -163,12 +164,12 @@ float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
         const Float3 direction = sample_sun_disk(sun, environment.shadowSoftnessRadians,
                                                  sample, samples, pixelSeed);
         visible += hard_visibility(tracer, origin, direction,
-                                   environment.shadowMaxDistanceMeters, stats);
+                                   distances.shadowMaxDistance, stats);
     }
     visible /= static_cast<float>(samples);
     if (environment.shadowMode == ShadowMode::Hybrid) {
         const float contact = hard_visibility(tracer, origin, sun,
-                                              environment.contactShadowDistanceMeters, stats);
+                                              distances.contactShadowDistance, stats);
         visible = std::min(visible, contact);
     }
     return weighted(visible);
@@ -176,19 +177,19 @@ float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
 
 Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                            Float3 normal, const RenderEnvironment& environment,
-                           std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
+                           const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
     if (environment.globalIlluminationMode == GlobalIlluminationMode::Off) return {};
     if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere)
         return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity);
 
     const std::uint32_t samples = std::clamp(environment.globalIlluminationSamples, 1U, 16U);
-    const Float3 origin = add(point, multiply(normal, environment.shadowBiasMeters));
+    const Float3 origin = add(point, multiply(normal, distances.shadowBias));
     Float3 accumulated{};
     for (std::uint32_t sample = 0; sample < samples; ++sample) {
         const Float3 direction = cosine_hemisphere(normal, sample, samples, pixelSeed);
         ++stats.globalIlluminationRays;
         const auto hit = tracer.trace(origin, direction,
-                                      environment.globalIlluminationMaxDistanceMeters);
+                                      distances.globalIlluminationMaxDistance);
         if (!hit) {
             accumulated = add3(accumulated, environment_radiance(environment, direction));
             continue;
@@ -197,7 +198,8 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
         // Same bounce model as resolve_gi.hlsl: hemisphere ambient plus sun with an explicit
         // visibility ray (one_bounce_diffuse_radiance). Previously only the ambient term was used.
         accumulated = add3(accumulated, spwi::bounce_hit_radiance(
-            tracer, *hit, environment, &stats.globalIlluminationSunRays));
+            tracer, *hit, environment, &stats.globalIlluminationSunRays,
+            distances.metersPerVoxel));
     }
     return multiply(accumulated,
                     environment.globalIlluminationIntensity / static_cast<float>(samples));
@@ -285,7 +287,8 @@ namespace {
 VoxelReferenceRenderStats render_radiance_cascades(
     const RadianceCascadeSettings& settings, const spwi::VoxelSceneTracer& tracer,
     std::span<const VoxelReferenceInstance> instances, const PolygonCamera& camera,
-    const RenderEnvironment& environment, PolygonRenderTarget& target) {
+    const RenderEnvironment& environment, const VoxelLightingDistances& distances,
+    PolygonRenderTarget& target) {
     VoxelReferenceRenderStats stats;
     for (const VoxelReferenceInstance& instance : instances) {
         ++stats.submittedInstances;
@@ -295,7 +298,8 @@ VoxelReferenceRenderStats render_radiance_cascades(
     const spwi::VoxelGBuffer gbuffer = spwi::build_voxel_gbuffer(
         tracer, camera, target.width, target.height, target.depth, settings.threadCount);
     const spwi::IndirectResult gi =
-        spwi::solve_radiance_cascades(tracer, gbuffer, environment, settings);
+        spwi::solve_radiance_cascades(tracer, gbuffer, environment, settings,
+                                      distances.metersPerVoxel);
     stats.radianceCascadeIntervalRays = gi.stats.intervalRays;
     stats.globalIlluminationSunRays = gi.stats.sunRays;
     for (std::size_t index = 0; index < gbuffer.texels.size(); ++index) {
@@ -307,7 +311,7 @@ VoxelReferenceRenderStats render_radiance_cascades(
         if (fallback) ++stats.materialFallbacks;
         const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
         const float visibility = shadow_visibility(tracer, texel.position, texel.normal,
-                                                   environment, seed, stats);
+                                                   environment, distances, seed, stats);
         target.hdrColor[index] = shade_voxel(material, texel.normal, environment, visibility,
                                              gi.indirect[index]);
         target.depth[index] = texel.normalizedDepth;
@@ -331,9 +335,11 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     if (!preserveExistingDepth) target.clear();
 
     const spwi::VoxelSceneTracer tracer(instances);
+    // Metre-authored distances -> voxel units, once per frame (GPU: MetersToVoxelUnits).
+    const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
     if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades)
         return render_radiance_cascades(radianceCascades, tracer, instances, camera, environment,
-                                        target);
+                                        distances, target);
 
     const CameraBasis basis = make_basis(camera, target);
     const float maximumDistance = camera.farPlane * 1.5F;
@@ -360,9 +366,11 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                 if (fallback) ++stats.materialFallbacks;
                 const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
                 const float visibility = shadow_visibility(tracer, hit->worldPosition,
-                                                           hit->worldNormal, environment, seed, stats);
+                                                           hit->worldNormal, environment, distances,
+                                                           seed, stats);
                 const Float3 indirect = global_illumination(tracer, hit->worldPosition,
-                                                             hit->worldNormal, environment, seed, stats);
+                                                             hit->worldNormal, environment, distances,
+                                                             seed, stats);
                 target.hdrColor[index] = shade_voxel(material, hit->worldNormal,
                                                      environment, visibility, indirect);
                 target.depth[index] = normalizedDepth;
@@ -382,9 +390,12 @@ HybridReferenceRenderStats render_hybrid_reference(
     const PolygonCamera& camera,
     const RenderEnvironment& environment,
     PolygonRenderTarget& target,
-    const PolygonRenderOptions& polygonOptions) {
+    const PolygonRenderOptions& polygonOptions,
+    float metersPerVoxel) {
     HybridReferenceRenderStats stats;
-    stats.voxels = ReferenceVoxelRenderer{}.render(voxels, camera, environment, target, false);
+    ReferenceVoxelRenderer voxelRenderer;
+    voxelRenderer.metersPerVoxel = metersPerVoxel;
+    stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
     PolygonRenderOptions options = polygonOptions;
     options.preserveExistingDepth = true;
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);

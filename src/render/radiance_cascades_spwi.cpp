@@ -130,22 +130,31 @@ struct Counters {
     std::uint64_t gatherFallbackPixels{};
 };
 
-Segment trace_interval(const VoxelSceneTracer& tracer, const RenderEnvironment& environment,
+// The environment plus its metre-authored distances in world (voxel) units.
+struct SceneLighting {
+    const RenderEnvironment& environment;
+    VoxelLightingDistances distances;
+};
+
+Float3 hit_radiance(const VoxelSceneTracer& tracer, const VoxelTraceHit& hit,
+                    const SceneLighting& lighting, std::uint64_t* sunRays);
+
+Segment trace_interval(const VoxelSceneTracer& tracer, const SceneLighting& lighting,
                        Float3 origin, Float3 direction, float lengthWorld, Counters& counters) {
     if (!(lengthWorld > 0.0F)) return {};
     ++counters.intervalRays;
     const auto hit = tracer.trace(origin, direction, lengthWorld);
     if (!hit) return {};
-    return {bounce_hit_radiance(tracer, *hit, environment, &counters.sunRays), 0.0F};
+    return {hit_radiance(tracer, *hit, lighting, &counters.sunRays), 0.0F};
 }
 
 // Radiance along a ray that runs to the GI max distance: a miss sees the environment.
-Float3 trace_to_end(const VoxelSceneTracer& tracer, const RenderEnvironment& environment,
+Float3 trace_to_end(const VoxelSceneTracer& tracer, const SceneLighting& lighting,
                     Float3 origin, Float3 direction, float lengthWorld, Counters& counters) {
-    const Segment segment = trace_interval(tracer, environment, origin, direction, lengthWorld,
+    const Segment segment = trace_interval(tracer, lighting, origin, direction, lengthWorld,
                                            counters);
     if (segment.transmittance > 0.0F)
-        return add3(segment.radiance, scale3(environment_radiance(environment, direction),
+        return add3(segment.radiance, scale3(environment_radiance(lighting.environment, direction),
                                              segment.transmittance));
     return segment.radiance;
 }
@@ -480,8 +489,10 @@ Float3 environment_radiance(const RenderEnvironment& environment, Float3 directi
     return add3(multiply(environment.groundColor, 1.0F - t), multiply(environment.skyColor, t));
 }
 
-Float3 bounce_hit_radiance(const VoxelSceneTracer& tracer, const VoxelTraceHit& hit,
-                           const RenderEnvironment& environment, std::uint64_t* sunRays) {
+namespace {
+Float3 hit_radiance(const VoxelSceneTracer& tracer, const VoxelTraceHit& hit,
+                    const SceneLighting& lighting, std::uint64_t* sunRays) {
+    const RenderEnvironment& environment = lighting.environment;
     const VoxelMaterialDefinition& material = tracer.material(hit.instance, hit.objectHit.material);
     const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
     const Float3 normal = hit.worldNormal;
@@ -490,14 +501,23 @@ Float3 bounce_hit_radiance(const VoxelSceneTracer& tracer, const VoxelTraceHit& 
     // A sun ray only matters when it can contribute (same result as always tracing it).
     if (environment.sunIntensity > 0.0F && dot(normal, sun) > 0.0F) {
         const Float3 origin =
-            add(hit.worldPosition, multiply(normal, std::max(1.0e-3F, environment.shadowBiasMeters)));
+            add(hit.worldPosition, multiply(normal, std::max(1.0e-3F, lighting.distances.shadowBias)));
         if (sunRays) ++*sunRays;
-        sunVisibility = tracer.occluded(origin, sun, environment.shadowMaxDistanceMeters) ? 0.0F : 1.0F;
+        sunVisibility =
+            tracer.occluded(origin, sun, lighting.distances.shadowMaxDistance) ? 0.0F : 1.0F;
     }
     return one_bounce_diffuse_radiance(base, material.metallic, material.emissive,
                                        environment_radiance(environment, normal),
                                        environment.sunColor, environment.sunIntensity, normal,
                                        environment.sunDirection, sunVisibility);
+}
+} // namespace
+
+Float3 bounce_hit_radiance(const VoxelSceneTracer& tracer, const VoxelTraceHit& hit,
+                           const RenderEnvironment& environment, std::uint64_t* sunRays,
+                           float metersPerVoxel) {
+    const SceneLighting lighting{environment, voxel_lighting_distances(environment, metersPerVoxel)};
+    return hit_radiance(tracer, hit, lighting, sunRays);
 }
 
 // ---- Octahedral maps -----------------------------------------------------------------------
@@ -534,12 +554,14 @@ std::vector<float> octahedral_texel_solid_angles(std::uint32_t resolution) {
 std::vector<CascadeLevelInfo> describe_cascades(const RadianceCascadeSettings& settings,
                                                 const RenderEnvironment& environment,
                                                 std::uint32_t width, std::uint32_t height,
-                                                float worldUnitsPerIntervalUnit) {
+                                                float worldUnitsPerIntervalUnit,
+                                                float metersPerVoxel) {
     std::vector<CascadeLevelInfo> levels;
     if (!settings.validate() || width == 0U || height == 0U) return levels;
     if (!std::isfinite(worldUnitsPerIntervalUnit) || !(worldUnitsPerIntervalUnit > 0.0F))
         return levels;
-    const float maximumDistance = environment.globalIlluminationMaxDistanceMeters;
+    const float maximumDistance =
+        voxel_lighting_distances(environment, metersPerVoxel).globalIlluminationMaxDistance;
     if (!(maximumDistance > 0.0F)) return levels;
     const std::uint32_t cap = settings.maximumCascades == 0U
         ? kMaximumCascades : std::min(settings.maximumCascades, kMaximumCascades);
@@ -574,8 +596,10 @@ std::vector<CascadeLevelInfo> describe_cascades(const RadianceCascadeSettings& s
 
 IndirectResult solve_radiance_cascades(const VoxelSceneTracer& tracer, const VoxelGBuffer& gbuffer,
                                        const RenderEnvironment& environment,
-                                       const RadianceCascadeSettings& settings) {
+                                       const RadianceCascadeSettings& settings,
+                                       float metersPerVoxel) {
     const auto started = Clock::now();
+    const SceneLighting lighting{environment, voxel_lighting_distances(environment, metersPerVoxel)};
     IndirectResult result;
     result.width = gbuffer.width;
     result.height = gbuffer.height;
@@ -594,15 +618,16 @@ IndirectResult solve_radiance_cascades(const VoxelSceneTracer& tracer, const Vox
         nearestUnit = 1.0F;
     }
     const std::vector<CascadeLevelInfo> levels =
-        describe_cascades(settings, environment, gbuffer.width, gbuffer.height, nearestUnit);
+        describe_cascades(settings, environment, gbuffer.width, gbuffer.height, nearestUnit,
+                          lighting.distances.metersPerVoxel);
     if (levels.empty()) return result;
     auto probe_ratio = [&](float viewDistance) {
         return depthScaled ? std::max(cellScale * viewDistance, 1.0e-3F) / nearestUnit : 1.0F;
     };
     const std::uint32_t threads = resolve_threads(settings.threadCount);
     const auto cascadeCount = static_cast<std::uint32_t>(levels.size());
-    const float maximumDistance = environment.globalIlluminationMaxDistanceMeters;
-    const float bias = std::max(1.0e-3F, environment.shadowBiasMeters);
+    const float maximumDistance = lighting.distances.globalIlluminationMaxDistance;
+    const float bias = std::max(1.0e-3F, lighting.distances.shadowBias);
     const bool bilinearFix = settings.merge == RadianceCascadeMerge::BilinearFix;
 
     SolveStats& stats = result.stats;
@@ -678,7 +703,7 @@ IndirectResult solve_radiance_cascades(const VoxelSceneTracer& tracer, const Vox
                     levelValid[out] = 1U;
                     const Float3 start = add(probe.origin, multiply(direction, intervalStart));
                     if (top) {
-                        levelRadiance[out] = trace_to_end(tracer, environment, start, direction,
+                        levelRadiance[out] = trace_to_end(tracer, lighting, start, direction,
                                                           intervalLength, counter);
                         continue;
                     }
@@ -695,14 +720,14 @@ IndirectResult solve_radiance_cascades(const VoxelSceneTracer& tracer, const Vox
                         // No compatible upper probe (silhouette, isolated surface, screen edge):
                         // finish this direction with one ray to the GI max distance.
                         ++counter.fallbackRays;
-                        levelRadiance[out] = trace_to_end(tracer, environment, start, direction,
+                        levelRadiance[out] = trace_to_end(tracer, lighting, start, direction,
                                                           maximumDistance - intervalStart, counter);
                         continue;
                     }
                     const float inverseTotal = 1.0F / total;
                     Float3 merged{};
                     if (!bilinearFix) {
-                        const Segment near = trace_interval(tracer, environment, start, direction,
+                        const Segment near = trace_interval(tracer, lighting, start, direction,
                                                             intervalLength + overlapLength, counter);
                         Float3 far{};
                         if (near.transmittance > 0.0F) {
@@ -726,7 +751,7 @@ IndirectResult solve_radiance_cascades(const VoxelSceneTracer& tracer, const Vox
                             const float segmentLength = length(delta);
                             Segment near;
                             if (segmentLength > 1.0e-5F)
-                                near = trace_interval(tracer, environment, start,
+                                near = trace_interval(tracer, lighting, start,
                                                       multiply(delta, 1.0F / segmentLength),
                                                       segmentLength, counter);
                             Float3 value = near.radiance;
@@ -831,7 +856,7 @@ IndirectResult solve_radiance_cascades(const VoxelSceneTracer& tracer, const Vox
                     for (std::uint32_t t = 0; t < texelCount; ++t) {
                         if (!(cosine[t] > 0.0F) || !(dot(baseDirections[t], texel.normal) > 0.0F)) continue;
                         ++counter.fallbackRays;
-                        value = add3(value, scale3(trace_to_end(tracer, environment, origin, baseDirections[t],
+                        value = add3(value, scale3(trace_to_end(tracer, lighting, origin, baseDirections[t],
                                                                 maximumDistance, counter), cosine[t]));
                         cosineSum += cosine[t];
                     }
@@ -854,8 +879,10 @@ IndirectResult solve_radiance_cascades(const VoxelSceneTracer& tracer, const Vox
 
 IndirectResult solve_brute_force_indirect(const VoxelSceneTracer& tracer, const VoxelGBuffer& gbuffer,
                                           const RenderEnvironment& environment,
-                                          std::uint32_t samples, std::uint32_t threadCount) {
+                                          std::uint32_t samples, std::uint32_t threadCount,
+                                          float metersPerVoxel) {
     const auto started = Clock::now();
+    const SceneLighting lighting{environment, voxel_lighting_distances(environment, metersPerVoxel)};
     IndirectResult result;
     result.width = gbuffer.width;
     result.height = gbuffer.height;
@@ -863,8 +890,8 @@ IndirectResult solve_brute_force_indirect(const VoxelSceneTracer& tracer, const 
     if (samples == 0U || gbuffer.texels.size() != result.indirect.size()) return result;
     const std::uint32_t threads = resolve_threads(threadCount);
     result.stats.threads = threads;
-    const float maximumDistance = environment.globalIlluminationMaxDistanceMeters;
-    const float bias = environment.shadowBiasMeters;
+    const float maximumDistance = lighting.distances.globalIlluminationMaxDistance;
+    const float bias = lighting.distances.shadowBias;
     const float scale = environment.globalIlluminationIntensity / static_cast<float>(samples);
     std::vector<Counters> counters(threads);
     parallel_for(gbuffer.height, threads, [&](std::uint32_t thread, std::uint64_t begin, std::uint64_t end) {
@@ -890,7 +917,7 @@ IndirectResult solve_brute_force_indirect(const VoxelSceneTracer& tracer, const 
                     const float lz = std::sqrt(std::max(0.0F, 1.0F - sample.x));
                     const Float3 direction = normalize(add3(add3(scale3(tangent, lx), scale3(bitangent, ly)),
                                                             scale3(texel.normal, lz)));
-                    sum = add3(sum, trace_to_end(tracer, environment, origin, direction, maximumDistance, counter));
+                    sum = add3(sum, trace_to_end(tracer, lighting, origin, direction, maximumDistance, counter));
                 }
                 result.indirect[pixel] = scale3(sum, scale);
             }
@@ -990,9 +1017,12 @@ SyntheticSceneSetup make_synthetic_scene(SyntheticScene scene) {
     setup.materials = scene_materials();
     VoxelObject& object = *setup.object;
     RenderEnvironment& environment = setup.environment;
-    environment.shadowMaxDistanceMeters = 200.0F;
+    // Metres at setup.metersPerVoxel = 0.1: GI reaches 48 voxels, the sun ray 200 voxels (the
+    // scenes are at most 48 voxels across). shadowBiasMeters keeps the engine default 0.015 m
+    // = 0.15 voxel.
+    environment.shadowMaxDistanceMeters = 20.0F;
     environment.globalIlluminationIntensity = 1.0F;
-    environment.globalIlluminationMaxDistanceMeters = 48.0F;
+    environment.globalIlluminationMaxDistanceMeters = 4.8F;
     environment.globalIlluminationSamples = 16U;
     PolygonCamera& camera = setup.camera;
     camera.nearPlane = 0.1F;

@@ -36,7 +36,7 @@ while IFS=$'\t' read -r file stage entry; do
             ;;
     esac
     checked=$((checked + 1))
-    if ! output=$(glslangValidator -D -S "$glslang_stage" -e "$entry" --target-env vulkan1.2 "$file" 2>&1); then
+    if ! output=$(glslangValidator -D -S "$glslang_stage" -e "$entry" --target-env vulkan1.2 "$SHADER_DIR/$file" 2>&1); then
         echo "FAIL: $file"
         echo "$output"
         failures=$((failures + 1))

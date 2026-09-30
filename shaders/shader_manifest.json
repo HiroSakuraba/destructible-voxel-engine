@@ -2400,6 +2400,12 @@
           "register": "t2"
         },
         {
+          "name": "gMaterialTable",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t4"
+        },
+        {
           "name": "gPrimaryResults",
           "kind": "storage_buffer",
           "access": "read",

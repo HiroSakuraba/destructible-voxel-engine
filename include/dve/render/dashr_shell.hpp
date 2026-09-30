@@ -242,6 +242,18 @@ struct DashrShadowFrameStats {
     std::uint64_t transientBindGroups{};
 };
 
+// Called while the scene renderer's cascade pass is open. The caller owns the
+// pass, its clear, the command submission, and the returned transient groups.
+[[nodiscard]] bool record_dashr_shadow_draws_in_pass(
+    rhi::IDevice& device,
+    rhi::CommandListHandle commands,
+    DashrShellRendererResources& renderer,
+    std::span<const DashrShadowDraw> draws,
+    std::size_t firstConstantOffset,
+    std::vector<rhi::BindGroupHandle>& transientGroups,
+    DashrShadowFrameStats& stats,
+    std::string* error = nullptr);
+
 [[nodiscard]] bool record_dashr_shadow_frame(
     rhi::IDevice& device,
     DashrShellRendererResources& renderer,

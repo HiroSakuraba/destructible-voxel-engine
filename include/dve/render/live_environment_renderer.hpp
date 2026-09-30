@@ -10,6 +10,7 @@
 
 #include "dve/polygon_asset.hpp"
 #include "dve/render/cascaded_shadow_atlas.hpp"
+#include "dve/render/dashr_live_surface.hpp"
 #include "dve/render/environment_lighting_gpu.hpp"
 #include "dve/render/mesh_rhi_mirror.hpp"
 #include "dve/render/main_material_table.hpp"
@@ -60,6 +61,10 @@ inline constexpr std::uint32_t kLiveObjectFlagBaseColorTexturePresent = 1U << 3U
 inline constexpr std::uint32_t kLiveObjectFlagOpacityTexturePresent = 1U << 4U;
 
 struct LiveEnvironmentRendererResources {
+    struct RetiredGroups {
+        rhi::FenceHandle fence{};
+        std::vector<rhi::BindGroupHandle> groups;
+    };
     rhi::BufferHandle frameConstants;
     rhi::BufferHandle objectConstants;
     rhi::BufferHandle cascadeConstants;
@@ -81,6 +86,7 @@ struct LiveEnvironmentRendererResources {
     std::unique_ptr<MaterialResourceResidency> materialResidency;
     std::unique_ptr<ShadowMaterialDescriptorTable> shadowMaterials;
     std::unique_ptr<MainMaterialDescriptorTable> mainMaterials;
+    std::vector<RetiredGroups> retiredGroups;
     [[nodiscard]] bool valid() const noexcept;
 };
 
@@ -91,6 +97,11 @@ struct LivePolygonDraw {
     std::array<float, 16> objectToWorld{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool castsShadow{true};
     bool staticShadowCaster{false};
+    // Runtime opt-in by submesh index. One atlas belongs to one pose/instance.
+    DashrLiveSurfaceInstance* dashr{};
+    std::span<const std::uint32_t> dashrSubmeshIndices{};
+    DashrPoseInput dashrPose{};
+    Float3 dashrCameraObjectPosition{};
 };
 
 struct LiveEnvironmentFrameDesc {
@@ -100,6 +111,10 @@ struct LiveEnvironmentFrameDesc {
     std::uint32_t height{};
     std::span<const std::byte> frameConstants;
     std::span<const LivePolygonDraw> polygonDraws;
+    // Required when any submesh selects DASHR. The current scene integration
+    // draws DASHR in a load-preserving camera pass after ordinary geometry.
+    DashrShellRendererResources* dashrRenderer{};
+    Float3 cameraWorldPosition{};
     // Legacy shared dirty set. Used for a layer when its layer-specific set is empty.
     std::vector<std::uint32_t> dirtyCascades;
     std::vector<std::uint32_t> staticDirtyCascades;
@@ -115,7 +130,10 @@ struct LiveEnvironmentFrameDesc {
 struct LiveEnvironmentFrameStats {
     std::uint64_t skyboxDraws{};
     std::uint64_t materialDraws{};
+    std::uint64_t dashrDraws{};
+    std::uint64_t dashrTriangles{};
     std::uint64_t shadowDraws{};
+    std::uint64_t dashrShadowDraws{};
     std::uint64_t materialTriangles{};
     std::uint64_t shadowTriangles{};
     std::uint64_t alphaMaskedShadowDraws{};

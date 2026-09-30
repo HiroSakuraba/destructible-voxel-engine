@@ -641,6 +641,7 @@ if(DVE_BUILD_RHI)
         src/render/mesh_rhi_mirror.cpp
         src/render/dashr_atlas.cpp
         src/render/dashr_shell.cpp
+        src/render/dashr_live_surface.cpp
         src/render/mesh_heap.cpp
         src/render/polygon_renderer.cpp
         src/render/sprite_renderer.cpp
@@ -2513,6 +2514,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_dashr_shell_tests tests/test_dashr_shell.cpp)
     target_link_libraries(dve_dashr_shell_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_dashr_shell_tests COMMAND dve_dashr_shell_tests)
+
+    add_executable(dve_dashr_live_surface_tests tests/test_dashr_live_surface.cpp)
+    target_link_libraries(dve_dashr_live_surface_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_dashr_live_surface_tests COMMAND dve_dashr_live_surface_tests)
     add_executable(dve_shadow_material_table_tests tests/test_shadow_material_table.cpp)
     target_link_libraries(dve_shadow_material_table_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_shadow_material_table_tests COMMAND dve_shadow_material_table_tests)

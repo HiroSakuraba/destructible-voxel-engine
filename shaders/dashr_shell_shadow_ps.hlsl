@@ -11,5 +11,5 @@ float main(DashrShellPixelInput input) : SV_Depth {
     const DashrTraceHit hit = DashrTraceSurfaceAlong(
         input.objectPosition, input.uv, lightRayDirectionObject);
     if (!hit.hit) discard;
-    return DashrDepthFromObjectPosition(hit.objectPosition);
+    return max(DashrDepthFromObjectPosition(hit.objectPosition), 0.0F);
 }

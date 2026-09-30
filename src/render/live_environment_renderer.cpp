@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cmath>
 #include <limits>
+#include <unordered_set>
 #include <utility>
 
 namespace dve::render {
@@ -31,6 +33,9 @@ struct PreparedSubmesh {
     bool alphaTexturePresent{};
     bool baseColorTexturePresent{};
     bool opacityTexturePresent{};
+    bool dashr{};
+    std::uint32_t submeshIndex{};
+    const MainMaterialDescriptor* mainDescriptor{};
 };
 
 GpuLiveObjectConstants make_object_constants(const LivePolygonDraw& draw,
@@ -103,6 +108,56 @@ bool bind_mesh(rhi::IDevice& device, rhi::CommandListHandle commands,
            device.bind_index_buffer(commands, draw.mirror->index_buffer(), 0U,
                                     rhi::IndexFormat::Uint32, error);
 }
+
+Float3 dashr_cross(Float3 a, Float3 b) noexcept {
+    return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
+}
+float dashr_dot(Float3 a, Float3 b) noexcept { return a.x*b.x+a.y*b.y+a.z*b.z; }
+
+bool make_dashr_shadow_draw(const PreparedSubmesh& item,
+                            const CascadedShadowCascade& cascade,
+                            DashrShadowDraw& out, std::string* error) {
+    const auto& m = item.draw->objectToWorld;
+    const Float3 x{m[0],m[1],m[2]}, y{m[4],m[5],m[6]}, z{m[8],m[9],m[10]};
+    const float determinant = dashr_dot(x,dashr_cross(y,z));
+    if (!std::isfinite(determinant) || std::abs(determinant) < 1.0e-8F) {
+        set_error(error, "DASHR shadow object transform is singular");
+        return false;
+    }
+    const Float3 forward = cascade.lightForward;
+    out.lightRayDirectionObject = {
+        dashr_dot(dashr_cross(y,z),forward)/determinant,
+        dashr_dot(dashr_cross(z,x),forward)/determinant,
+        dashr_dot(dashr_cross(x,y),forward)/determinant};
+    const float radius = std::max(cascade.radiusMeters,1.0e-5F);
+    const float depthRange = std::max(
+        cascade.maximumLightDepth-cascade.minimumLightDepth,1.0e-5F);
+    Matrix4 worldToClip = Matrix4::identity();
+    const Float3 right = cascade.lightRight, up = cascade.lightUp;
+    const Float3 center = cascade.snappedCenter;
+    worldToClip.values = {
+        right.x/radius,-up.x/radius,forward.x/depthRange,0,
+        right.y/radius,-up.y/radius,forward.y/depthRange,0,
+        right.z/radius,-up.z/radius,forward.z/depthRange,0,
+        -dashr_dot(center,right)/radius,dashr_dot(center,up)/radius,
+        -cascade.minimumLightDepth/depthRange,1};
+    Matrix4 objectToWorld;
+    objectToWorld.values = m;
+    out.objectToLightClip = multiply(worldToClip,objectToWorld).values;
+    out.shell = &item.draw->dashr->shell();
+    out.atlas = &item.draw->dashr->atlas();
+    out.shellSubmeshIndex = item.submeshIndex;
+    const auto heightIndex = static_cast<std::uint32_t>(MainMaterialTextureChannel::Height);
+    out.heightView = item.mainDescriptor->textureViews[heightIndex];
+    out.heightSampler = item.mainDescriptor->samplers[heightIndex];
+    const auto& transform = item.draw->asset->materialBindings[
+        item.submesh->materialIndex].mapping.baseTransform;
+    out.heightUvScale = transform.scale;
+    out.heightUvOffset = transform.offset;
+    out.heightUvRotationRadians = transform.rotationRadians;
+    out.settings = item.draw->dashr->settings();
+    return true;
+}
 } // namespace
 
 bool LiveEnvironmentShaderBytecode::valid() const noexcept {
@@ -127,6 +182,7 @@ bool LiveEnvironmentRendererResources::valid() const noexcept {
 bool destroy_live_environment_renderer(rhi::IDevice& device,
                                        LiveEnvironmentRendererResources& r,
                                        std::string* error) {
+    device.wait_idle();
     bool ok = true;
     std::string local;
     auto destroy = [&](bool result) {
@@ -136,6 +192,10 @@ bool destroy_live_environment_renderer(rhi::IDevice& device,
         }
         local.clear();
     };
+    for (auto& batch : r.retiredGroups)
+        for (auto group : batch.groups)
+            if (group) destroy(device.destroy_bind_group(group, &local));
+    r.retiredGroups.clear();
     if (r.skyboxPipeline) destroy(device.destroy_graphics_pipeline(r.skyboxPipeline, &local));
     if (r.materialPipeline) destroy(device.destroy_graphics_pipeline(r.materialPipeline, &local));
     if (r.shadowOpaquePipeline) destroy(device.destroy_graphics_pipeline(r.shadowOpaquePipeline, &local));
@@ -317,18 +377,36 @@ bool record_live_environment_frame(rhi::IDevice& device,
         set_error(error, "live environment frame description is invalid");
         return false;
     }
+    if (!renderer.retiredGroups.empty()) {
+        device.wait_idle();
+        for (auto& batch : renderer.retiredGroups) {
+            for (auto group : batch.groups) {
+                if (group && !device.destroy_bind_group(group, error)) return false;
+            }
+        }
+        renderer.retiredGroups.clear();
+    }
     if (!device.write_buffer(renderer.frameConstants, 0U, frame.frameConstants, error)) return false;
 
     std::vector<PreparedSubmesh> prepared;
+    std::unordered_set<DashrLiveSurfaceInstance*> usedDashrInstances;
     std::vector<rhi::BindGroupHandle> transientGroups;
+    std::vector<rhi::BindGroupHandle> dashrShadowGroups;
+    std::size_t dashrShadowConstantOffset = 0U;
     std::size_t objectOffset = 0U;
     auto cleanup_groups = [&]() {
         std::string ignored;
         for (auto it = transientGroups.rbegin(); it != transientGroups.rend(); ++it)
             if (*it) (void)device.destroy_bind_group(*it, &ignored);
         transientGroups.clear();
+        for (auto it = dashrShadowGroups.rbegin(); it != dashrShadowGroups.rend(); ++it)
+            if (*it) (void)device.destroy_bind_group(*it, &ignored);
+        dashrShadowGroups.clear();
     };
     auto fail = [&]() { cleanup_groups(); return false; };
+
+    if (frame.dashrRenderer && !frame.dashrRenderer->retiredBindGroups.empty())
+        device.wait_idle();
 
     for (const auto& draw : frame.polygonDraws) {
         if (!draw.mirror || !draw.asset || draw.instanceCount == 0U ||
@@ -336,7 +414,45 @@ bool record_live_environment_frame(rhi::IDevice& device,
             set_error(error, "live environment polygon draw is incomplete");
             return fail();
         }
-        for (const auto& submesh : draw.asset->submeshes) {
+        if (!draw.dashrSubmeshIndices.empty()) {
+            if (!draw.dashr || !frame.dashrRenderer ||
+                !frame.dashrRenderer->pbr_valid() || draw.instanceCount != 1U ||
+                frame.frameConstants.size() < 80U ||
+                draw.dashr->asset_content_hash() != draw.asset->contentHash ||
+                !usedDashrInstances.insert(draw.dashr).second ||
+                std::any_of(draw.dashrSubmeshIndices.begin(), draw.dashrSubmeshIndices.end(),
+                    [&](std::uint32_t index) { return index >= draw.asset->submeshes.size(); }) ||
+                !draw.dashr->update_pose(draw.dashrPose, error)) {
+                if (error && error->empty())
+                    set_error(error, "DASHR scene draw requires one valid posed instance and renderer");
+                return fail();
+            }
+            for (std::size_t index = 0U; index < draw.dashrSubmeshIndices.size(); ++index)
+                if (std::find(draw.dashrSubmeshIndices.begin() +
+                                  static_cast<std::ptrdiff_t>(index + 1U),
+                              draw.dashrSubmeshIndices.end(),
+                              draw.dashrSubmeshIndices[index]) !=
+                    draw.dashrSubmeshIndices.end()) {
+                    set_error(error, "DASHR submesh index is selected more than once");
+                    return fail();
+                }
+        }
+        for (std::uint32_t submeshIndex = 0U; submeshIndex < draw.asset->submeshes.size();
+             ++submeshIndex) {
+            const auto& submesh = draw.asset->submeshes[submeshIndex];
+            const bool dashr = std::find(draw.dashrSubmeshIndices.begin(),
+                                         draw.dashrSubmeshIndices.end(), submeshIndex) !=
+                               draw.dashrSubmeshIndices.end();
+            if (dashr) {
+                const auto& material = draw.asset->materials[submesh.materialIndex];
+                const auto& binding = draw.asset->materialBindings[submesh.materialIndex];
+                if (material.blendMode != MaterialBlendMode::Opaque ||
+                    binding.mapping.mappingMode != MaterialMappingMode::UV0 ||
+                    !binding.height.texture || binding.height.texcoord != 0U) {
+                    set_error(error, "DASHR camera path requires opaque UV0 material with a height texture");
+                    return fail();
+                }
+            }
             if (objectOffset + sizeof(GpuLiveObjectConstants) > renderer.objectConstantCapacity) {
                 set_error(error, "live environment object constant capacity exceeded");
                 return fail();
@@ -382,7 +498,8 @@ bool record_live_environment_frame(rhi::IDevice& device,
             }
             prepared.push_back({&draw, &submesh, group, shadowMaterialGroup,
                                 mainDescriptor->bindGroup, masked, alphaTexture,
-                                baseColorTexture, opacityTexture});
+                                baseColorTexture, opacityTexture, dashr, submeshIndex,
+                                mainDescriptor});
             objectOffset += renderer.objectConstantStride;
             ++stats.objectConstantRanges;
         }
@@ -436,6 +553,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
                     ++stats.shadowDepthRegionsCleared;
                 }
                 for (const auto& item : prepared) {
+                    if (item.dashr) continue;
                     if (!item.draw->castsShadow ||
                         item.draw->staticShadowCaster != renderStaticCasters) continue;
                     const auto pipeline = item.masked && renderer.shadowMaskedPipeline
@@ -464,6 +582,28 @@ bool record_live_environment_frame(rhi::IDevice& device,
                         ++stats.opacityTextureShadowDraws;
                     if (renderStaticCasters) ++stats.staticShadowDraws;
                     else ++stats.dynamicShadowDraws;
+                }
+                std::vector<DashrShadowDraw> dashrCasters;
+                for (const auto& item : prepared) {
+                    if (!item.dashr || !item.draw->castsShadow ||
+                        item.draw->staticShadowCaster != renderStaticCasters) continue;
+                    DashrShadowDraw dashrDraw;
+                    if (!make_dashr_shadow_draw(item,
+                            shadowPlan.cascades[region.cascadeIndex],dashrDraw,error)) return false;
+                    dashrCasters.push_back(dashrDraw);
+                }
+                if (!dashrCasters.empty()) {
+                    DashrShadowFrameStats dashrStats;
+                    if (!record_dashr_shadow_draws_in_pass(device,commands,*frame.dashrRenderer,
+                            dashrCasters,dashrShadowConstantOffset,dashrShadowGroups,
+                            dashrStats,error)) return false;
+                    dashrShadowConstantOffset += dashrStats.draws *
+                        frame.dashrRenderer->constantStride;
+                    stats.dashrShadowDraws += dashrStats.draws;
+                    stats.shadowDraws += dashrStats.draws;
+                    stats.shadowTriangles += dashrStats.shellTriangles;
+                    if (renderStaticCasters) stats.staticShadowDraws += dashrStats.draws;
+                    else stats.dynamicShadowDraws += dashrStats.draws;
                 }
                 ++stats.cascadesRendered;
                 if (renderStaticCasters) ++stats.staticCascadesRendered;
@@ -509,6 +649,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
             !device.bind_graphics_bind_group(commands, 0U, renderer.frameGroup, error) ||
             !device.bind_graphics_bind_group(commands, 2U, lighting.bindGroup, error)) return fail();
         for (const auto& item : prepared) {
+            if (item.dashr) continue;
             if (!device.bind_graphics_bind_group(commands, 1U, item.objectGroup, error) ||
                 !device.bind_graphics_bind_group(commands, 3U, item.mainMaterialGroup, error) ||
                 !bind_mesh(device, commands, *item.draw, error) ||
@@ -526,8 +667,56 @@ bool record_live_environment_frame(rhi::IDevice& device,
     if (!device.end_render_pass(commands, error)) return fail();
     const auto submitted = device.submit(commands, error);
     if (!submitted) return fail();
-    if (fence) *fence = submitted;
-    cleanup_groups();
+    renderer.retiredGroups.push_back({submitted,std::move(transientGroups)});
+    if (!dashrShadowGroups.empty()) {
+        frame.dashrRenderer->retiredBindGroups.push_back(
+            {submitted,std::move(dashrShadowGroups)});
+    }
+
+    std::vector<DashrShellDraw> dashrDraws;
+    for (const auto& item : prepared) {
+        if (!item.dashr || !frame.drawMaterials) continue;
+        Matrix4 viewProjection{};
+        std::memcpy(viewProjection.values.data(), frame.frameConstants.data(),
+                    sizeof(viewProjection.values));
+        Matrix4 objectToWorld{};
+        objectToWorld.values = item.draw->objectToWorld;
+        const auto objectToClip = multiply(viewProjection, objectToWorld);
+        const auto& transform = item.draw->asset->materialBindings[
+            item.submesh->materialIndex].mapping.baseTransform;
+        DashrShellDraw draw;
+        draw.shell = &item.draw->dashr->shell();
+        draw.atlas = &item.draw->dashr->atlas();
+        draw.shellSubmeshIndex = item.submeshIndex;
+        draw.objectToClip = objectToClip.values;
+        draw.objectToWorld = item.draw->objectToWorld;
+        draw.cameraObjectPosition = item.draw->dashrCameraObjectPosition;
+        draw.cameraWorldPosition = frame.cameraWorldPosition;
+        std::memcpy(draw.environmentParameters.data(), frame.frameConstants.data() + 64U,
+                    sizeof(draw.environmentParameters));
+        draw.heightUvScale = transform.scale;
+        draw.heightUvOffset = transform.offset;
+        draw.heightUvRotationRadians = transform.rotationRadians;
+        draw.settings = item.draw->dashr->settings();
+        draw.usePbr = true;
+        draw.material = item.mainDescriptor;
+        draw.lighting = &lighting;
+        draw.shadows = &shadowAtlas;
+        dashrDraws.push_back(draw);
+    }
+    if (!dashrDraws.empty()) {
+        DashrShellFrameDesc dashrFrame{frame.colorTarget, frame.depthTarget,
+                                      frame.width, frame.height, dashrDraws};
+        DashrShellFrameStats dashrStats;
+        rhi::FenceHandle dashrFence;
+        if (!record_dashr_shell_frame(device, *frame.dashrRenderer, dashrFrame,
+                                      dashrStats, &dashrFence, error)) return false;
+        stats.dashrDraws = dashrStats.draws;
+        stats.dashrTriangles = dashrStats.shellTriangles;
+        if (fence) *fence = dashrFence;
+    } else if (fence) {
+        *fence = submitted;
+    }
     return true;
 }
 

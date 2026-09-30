@@ -50,3 +50,5 @@ c++ -std=c++23 -ffunction-sections -fdata-sections -Wl,--gc-sections \
 
 python3 "$repo_dir/tools/validate_shader_contracts.py"
 python3 "$repo_dir/scripts/compile_shaders.py" --backend spirv --dry-run >/dev/null
+c++ -std=c++23 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror \
+    -fsyntax-only -I"$repo_dir/include" "$repo_dir/tests/test_vulkan_dashr.cpp"

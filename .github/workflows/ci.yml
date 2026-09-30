@@ -189,11 +189,12 @@ jobs:
         run: |
           vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
           "$vswhere" -latest -products '*' -format text | grep -E 'displayName|installationVersion|catalog_productLineVersion' || true
-          line=$("$vswhere" -latest -products '*' -property catalog_productLineVersion | tr -d '\r')
           major=$("$vswhere" -latest -products '*' -property installationVersion | cut -d. -f1)
-          echo "DVE_VS_GENERATOR=Visual Studio $major $line" >> "$GITHUB_ENV"
           cmake --version
-          echo "using generator: Visual Studio $major $line"
+          generator=$(cmake --help | grep -oE "Visual Studio $major [0-9]{4}" | head -1)
+          test -n "$generator"
+          echo "DVE_VS_GENERATOR=$generator" >> "$GITHUB_ENV"
+          echo "using generator: $generator"
       - name: Configure with the installed generator, no package manager
         id: nodeps
         continue-on-error: true
@@ -244,3 +245,24 @@ jobs:
             build-errors.txt
             out/build/windows-msvc-release/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
+
+  source-manifest:
+    # Informational until SOURCE_MANIFEST.sha256 is refreshed on main (it is currently stale by
+    # hundreds of entries). To make it blocking, regenerate the manifest and delete
+    # continue-on-error below.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check SOURCE_MANIFEST.sha256 is fresh
+        run: |
+          sh scripts/update_source_manifest.sh
+          if git diff --quiet -- SOURCE_MANIFEST.sha256; then
+            echo "SOURCE_MANIFEST.sha256 is up to date"
+            exit 0
+          fi
+          git diff --stat -- SOURCE_MANIFEST.sha256
+          echo "::warning file=SOURCE_MANIFEST.sha256::stale; run scripts/update_source_manifest.sh and commit the result"
+          git diff -U0 -- SOURCE_MANIFEST.sha256 | grep -E '^[+-][0-9a-f]{64} ' | sed -E 's/^([+-])[0-9a-f]{64}  /\1 /' | sort -k2 | head -100
+          exit 1

@@ -17,10 +17,13 @@ Those are the libraries copied into lib/dve for the archive packages.
 Modes
   (default)             write --output (a THIRD_PARTY_NOTICES text file)
   --check               exit 1 if a bundled shared library, a linked third-party target or a
-                        static archive has no manifest entry, or a used entry's license text
-                        cannot be found (the file is still written when --output is given)
+                        static archive has no manifest entry, a bundled library is on the
+                        manifest's "forbidden" list, or a used entry's license text cannot be
+                        found (the file is still written when --output is given)
   --verify-dir DIR      exit 1 unless every shared library file in DIR is listed in the
-                        notices file given by --notices (used on staged packages)
+                        notices file given by --notices (used on staged packages); with
+                        --manifest also unless no file there (by name or DT_NEEDED) matches the
+                        manifest's "forbidden" list (libmpg123, libmp3lame)
   --self-test           run the built-in tests (no build needed)
 
 License texts are never invented: they are read from the Debian package that owns the
@@ -241,8 +244,11 @@ def resolve_texts(entry: dict, uses, inputs: dict, source_dir: Path):
             root = inputs.get("vars", {}).get(spec["var"], "")
             if root:
                 for name in spec.get("files", []):
-                    if add(f"{name} from {spec['var']}", Path(root) / name):
+                    found = add(f"{name} from {spec.get('title', spec['var'])}", Path(root) / name)
+                    if found and not spec.get("all"):
                         break
+                    if not found and spec.get("all"):
+                        problems.append(f"{entry['id']}: license file {name} is missing in {root}")
     if not texts:
         problems.append(f"{entry['id']} ({entry['name']}): no license text found "
                         f"(tried {', '.join(sorted({k for s in entry.get('texts', []) for k in s}))})")
@@ -275,6 +281,8 @@ def analyse(manifest: dict, inputs: dict, source_dir: Path):
         if not any(u.how == use.how and u.what == use.what for u in slot.uses):
             slot.uses.append(use)
 
+    forbidden = [(f, [re.compile(p) for p in f.get("sonames", [])]) for f in manifest.get("forbidden", [])]
+
     for program in inputs.get("programs", []):
         file = program["file"]
         if not os.path.isfile(file):
@@ -283,6 +291,11 @@ def analyse(manifest: dict, inputs: dict, source_dir: Path):
         bundled, system, missing = walk_shared_dependencies(file, excludes)
         unresolved += [f"{program['name']}: {m}" for m in missing]
         for soname, path in bundled:
+            banned = next((f for f, patterns in forbidden if any(p.search(soname) for p in patterns)), None)
+            if banned:
+                unknown.append(f"forbidden bundled shared library {soname} ({path}) used by {program['name']}: "
+                               f"{banned.get('reason', banned.get('id', ''))}")
+                continue
             entry = find_entry(entries, compiled, "sonames", soname)
             if entry:
                 record(entry, Use("bundled", soname, path, program["name"]))
@@ -377,17 +390,24 @@ def render(manifest: dict, inputs: dict, used: dict, system_libraries: dict, unk
     if offers:
         lines.append("Corresponding source for copyleft components")
         lines.append("--------------------------------------------")
-        lines.append("The libraries below are shipped as unmodified shared libraries from the Debian")
-        lines.append("packages named here. Their complete corresponding source is the Debian source package")
-        lines.append("of that version (apt-get source <package>=<version>, or")
-        lines.append("https://snapshot.debian.org/package/<package>/<version>/). Whoever distributes this")
-        lines.append("package must make that source available (or include a written offer) as the license")
-        lines.append("requires; a pointer to snapshot.debian.org alone may not be enough.")
+        lines.append("The libraries below are shipped as separate shared libraries (lib/dve), so users can")
+        lines.append("replace them. A library taken from a Debian package is shipped unmodified; its complete")
+        lines.append("corresponding source is the Debian source package of that version (apt-get source")
+        lines.append("<package>=<version>, or https://snapshot.debian.org/package/<package>/<version>/). A")
+        lines.append("library DVE builds itself names its exact source and build options below. Whoever")
+        lines.append("distributes this package must make that source available (or include a written offer)")
+        lines.append("as the license requires; a pointer to a download site alone may not be enough.")
         for slot in offers:
             for use in slot.uses:
                 if use.how == "bundled":
                     pkg = debian_package(use.path)
-                    src = f"Debian source package {pkg[1]} {pkg[2]} (binary {pkg[0]})" if pkg else "source package unknown"
+                    built = inputs.get("vars", {}).get(slot.entry.get("source_var", ""), "")
+                    if pkg:
+                        src = f"Debian source package {pkg[1]} {pkg[2]} (binary {pkg[0]})"
+                    elif built:
+                        src = built
+                    else:
+                        src = "source package unknown"
                     lines.append(f"  {use.what}: {src}")
         lines.append("")
 
@@ -404,7 +424,13 @@ def render(manifest: dict, inputs: dict, used: dict, system_libraries: dict, unk
                 continue
             if use.how == "bundled":
                 pkg = debian_package(use.path)
-                origin = f" (from Debian package {pkg[0]}, source {pkg[1]} {pkg[2]})" if pkg else f" ({use.path})"
+                built = inputs.get("vars", {}).get(e.get("source_var", ""), "")
+                if pkg:
+                    origin = f" (from Debian package {pkg[0]}, source {pkg[1]} {pkg[2]})"
+                elif built:
+                    origin = " (built from source by DVE; source and options under 'Corresponding source' above)"
+                else:
+                    origin = f" ({use.path})"
                 lines.append(f"{BUNDLED_MARK}{use.what}{origin}, needed by {use.program}")
             elif use.how == "adaptation":
                 lines.append(f"Adapted in: {use.what}")
@@ -459,8 +485,19 @@ def listed_bundled(notices_text: str):
     return names
 
 
-def verify_dir(directory: Path, notices: Path):
+def forbidden_patterns(manifest: dict | None):
+    result = []
+    for item in (manifest or {}).get("forbidden", []):
+        for pattern in item.get("sonames", []):
+            result.append((item, re.compile(pattern)))
+    return result
+
+
+def verify_dir(directory: Path, notices: Path, manifest: dict | None = None):
+    """Every shared library in `directory` is listed in `notices`; none is forbidden by the
+    manifest (by file name, and by the DT_NEEDED entries of every ELF file there)."""
     listed = listed_bundled(notices.read_text(encoding="utf-8", errors="replace"))
+    banned = forbidden_patterns(manifest)
     problems = []
     for path in sorted(directory.iterdir()) if directory.is_dir() else []:
         if not path.is_file() and not path.is_symlink():
@@ -468,8 +505,33 @@ def verify_dir(directory: Path, notices: Path):
         name = path.name
         if ".so" not in name and not name.endswith(".dll") and not name.endswith(".dylib"):
             continue
+        for item, pattern in banned:
+            if pattern.search(name):
+                problems.append(f"{path} is forbidden: {item.get('reason', item.get('id', ''))}")
         if not any(name == soname or name.startswith(soname + ".") for soname in listed):
             problems.append(f"{path} is shipped but not listed in {notices.name}")
+    return problems + verify_needed(directory, banned)
+
+
+def verify_needed(directory: Path, banned) -> list[str]:
+    """DT_NEEDED of every ELF file below `directory` (the game executable, lib/dve/*)."""
+    problems = []
+    if not banned or not directory.is_dir():
+        return problems
+    root = directory.parent.parent if directory.name == "dve" and directory.parent.name == "lib" else directory
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with open(path, "rb") as handle:
+                if handle.read(4) != b"\x7fELF":
+                    continue
+        except OSError:
+            continue
+        for name in readelf_needed(str(path)):
+            for item, pattern in banned:
+                if pattern.search(name):
+                    problems.append(f"{path} needs forbidden {name}: {item.get('reason', item.get('id', ''))}")
     return problems
 
 
@@ -570,6 +632,33 @@ def self_test() -> int:
         (lib / "libsecret.so.2").write_text("")
         check(any("libsecret" in p for p in verify_dir(lib, notices)), "an unlisted shipped library is reported")
 
+        # Forbidden libraries: reported by --verify-dir with a manifest, whatever the notices say.
+        banned_manifest = {"forbidden": [{"id": "mpg123", "sonames": ["^libmpg123\\.so"], "reason": "no MP3"}]}
+        notices.write_text(f"{BUNDLED_MARK}libfoo.so.1 (x), needed by p\n{BUNDLED_MARK}libmpg123.so.0 (x), needed by p\n")
+        (lib / "libsecret.so.2").unlink()
+        check(not verify_dir(lib, notices), "without a manifest a listed library passes")
+        (lib / "libmpg123.so.0").write_text("")
+        check(any("forbidden" in p for p in verify_dir(lib, notices, banned_manifest)),
+              "a forbidden shipped library is reported")
+
+        # Built-from-source libraries: the source description replaces the Debian package, and
+        # "all" var texts include every listed file.
+        (root / "built-src" / "sub").mkdir(parents=True)
+        (root / "built-src" / "COPYING").write_text("LGPL text\n")
+        (root / "built-src" / "sub" / "NOTICE").write_text("Sub notice\n")
+        built_manifest = {"entries": [
+            {"id": "built", "name": "Built", "license": "LGPL-2.1-or-later", "copyleft": "weak",
+             "source_var": "BUILT_INFO",
+             "texts": [{"debian": True}, {"var": "BUILT_SRC", "files": ["COPYING", "sub/NOTICE"], "all": True}]}]}
+        slot = EntryUse(built_manifest["entries"][0], [Use("bundled", "libbuilt.so.1", str(root / "libbuilt.so.1"), "p")])
+        built_inputs = dict(base, targets=[], files=[], sources=[],
+                            vars={"BUILT_SRC": str(root / "built-src"), "BUILT_INFO": "built from x.tar.gz sha256 abc"})
+        text, problems = render(built_manifest, built_inputs, {"built": slot}, {}, [], root)
+        check("LGPL text" in text and "Sub notice" in text, "all var license files are included")
+        check("built from x.tar.gz sha256 abc" in text, "the source description is in the corresponding-source list")
+        check(str(root / "libbuilt.so.1") not in text, "the build path of a built library is not printed")
+        check(not problems, f"no problems for a built library ({problems})")
+
         # ELF walk on a real binary when the tools exist.
         if shutil.which("readelf") and shutil.which("ldd") and os.path.exists("/bin/ls"):
             bundled, system, _ = walk_shared_dependencies("/bin/ls", [re.compile(r"^libc\.so")])
@@ -598,7 +687,8 @@ def main() -> int:
     if args.verify_dir:
         if not args.notices:
             parser.error("--verify-dir needs --notices")
-        problems = verify_dir(Path(args.verify_dir), Path(args.notices))
+        manifest = json.loads(Path(args.manifest).read_text()) if args.manifest else None
+        problems = verify_dir(Path(args.verify_dir), Path(args.notices), manifest)
         for p in problems:
             print(f"FAIL: {p}", file=sys.stderr)
         if not problems:

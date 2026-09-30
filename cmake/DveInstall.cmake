@@ -61,6 +61,11 @@ if(NOT DVE_INSTALL_BUNDLE_JACK)
     # Left to the system (libjack0 or libjack-jackd2-0); see the option above.
     list(APPEND DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES "^libjack\\.so" "^libjackserver\\.so" "^libdb-[0-9]")
 endif()
+if(DVE_SNDFILE_PROVIDER STREQUAL "system")
+    # Fallback of cmake/DveSndFile.cmake: the distribution's libsndfile links MP3 support
+    # (libmpg123, libmp3lame), so it and its codecs are left to the system instead of bundled.
+    list(APPEND DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES "^libsndfile\\.so")
+endif()
 set(DVE_RUNTIME_DEPENDENCY_POST_EXCLUDES ".*[/\\\\][Ss]ystem32[/\\\\].*")
 
 set(DVE_INSTALLED_EXECUTABLES "")
@@ -134,10 +139,17 @@ endif()
 
 get_property(_dve_depset_components GLOBAL PROPERTY DVE_RUNTIME_DEPENDENCY_SETS)
 list(REMOVE_DUPLICATES _dve_depset_components)
+set(_dve_depset_directories "")
+if(DVE_SNDFILE_LIBRARY_DIR)
+    # The pinned no-MPEG libsndfile (cmake/DveSndFile.cmake); the executables' build RPATH
+    # already points there, this also covers libraries that need it.
+    list(APPEND _dve_depset_directories DIRECTORIES "${DVE_SNDFILE_LIBRARY_DIR}")
+endif()
 foreach(_dve_component IN LISTS _dve_depset_components)
     install(RUNTIME_DEPENDENCY_SET dve_${_dve_component}_runtime_deps
         PRE_EXCLUDE_REGEXES ${DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES}
         POST_EXCLUDE_REGEXES ${DVE_RUNTIME_DEPENDENCY_POST_EXCLUDES}
+        ${_dve_depset_directories}
         LIBRARY DESTINATION "${DVE_INSTALL_BUNDLEDIR}" COMPONENT ${_dve_component}Deps
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT ${_dve_component}Deps)
 endforeach()
@@ -256,6 +268,12 @@ foreach(_dve_dep IN LISTS _dve_recreated)
     if(NOT _dve_dep_links)
         set(_dve_dep_links "")
     endif()
+    # A library built in this tree and bundled into lib/dve (the pinned libsndfile) is found
+    # relative to the installed package; the build-tree path must not leak into it.
+    get_target_property(_dve_package_file "${_dve_dep}" DVE_PACKAGE_FILE)
+    if(_dve_package_file)
+        set(_dve_location "\${PACKAGE_PREFIX_DIR}/${_dve_package_file}")
+    endif()
     foreach(_dve_file ${_dve_location} ${_dve_dep_links})
         if(_dve_file MATCHES "^/" AND EXISTS "${_dve_file}")
             list(APPEND _dve_library_files "${_dve_file}")
@@ -355,6 +373,14 @@ endif()
 set(DVE_DEV_DEBIAN_DEPENDS "")
 find_program(DVE_DPKG_QUERY dpkg-query)
 find_program(DVE_DPKG dpkg)
+if(DVE_SNDFILE_PROVIDER STREQUAL "fetched")
+    # Without the bundled copy, a dve-dev consumer links the distribution's libsndfile.so.1.
+    find_file(DVE_SYSTEM_SNDFILE_RUNTIME NAMES libsndfile.so.1
+        PATHS /lib /usr/lib /usr/local/lib PATH_SUFFIXES x86_64-linux-gnu aarch64-linux-gnu NO_CACHE)
+    if(DVE_SYSTEM_SNDFILE_RUNTIME)
+        list(APPEND _dve_library_files "${DVE_SYSTEM_SNDFILE_RUNTIME}")
+    endif()
+endif()
 if(DVE_DPKG)
     set(_dve_owned_files ${_dve_library_files})
     foreach(_dve_package IN LISTS _dve_packages)

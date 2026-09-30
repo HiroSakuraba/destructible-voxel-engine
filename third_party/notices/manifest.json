@@ -1,7 +1,13 @@
 {
   "format": "DVE_THIRD_PARTY_NOTICES",
   "version": 1,
-  "comment": "Maps every third-party library or adapted code base that can end up in a shipped DVE binary to its license and license text. Read by tools/generate_third_party_notices.py; the dve_third_party_notices_check test fails when a bundled shared library, a linked third-party target or archive, or a matched entry's license text is not covered. 'copyleft': none | weak (LGPL-style: shipping the binary needs the library's corresponding source or a written offer, and users must be able to replace it) | strong (source-availability terms that reach the software using it). 'review' marks something a human must decide before external distribution. License texts are never written here: they come from the installed Debian package's copyright file, the fetched/vendored source tree, or the SDK.",
+  "comment": "Maps every third-party library or adapted code base that can end up in a shipped DVE binary to its license and license text. Read by tools/generate_third_party_notices.py; the dve_third_party_notices_check test fails when a bundled shared library, a linked third-party target or archive, or a matched entry's license text is not covered. 'copyleft': none | weak (LGPL-style: shipping the binary needs the library's corresponding source or a written offer, and users must be able to replace it) | strong (source-availability terms that reach the software using it). 'review' marks something a human must decide before external distribution. 'forbidden' lists shared libraries that must never be bundled (the check and --verify-dir fail on them). License texts are never written here: they come from the installed Debian package's copyright file, the fetched/vendored source tree, or the SDK.",
+  "forbidden": [
+    {"id": "mpg123", "sonames": ["^libmpg123\\.so"],
+     "reason": "libmpg123 (LGPL-2.1) is only pulled in by a libsndfile built with MPEG support; DVE needs no MP3 at run time. Build with DVE_FETCH_SNDFILE=ON (the default), which uses libsndfile without MPEG."},
+    {"id": "lame", "sonames": ["^libmp3lame\\.so"],
+     "reason": "libmp3lame (LGPL-2+, with a GPL-1+-marked fft.c in Debian's copyright file) is only pulled in by a libsndfile built with MPEG support; DVE never encodes MP3. Build with DVE_FETCH_SNDFILE=ON (the default)."}
+  ],
   "entries": [
     {
       "id": "sdl3", "name": "SDL 3 (Simple DirectMedia Layer)", "upstream": "https://libsdl.org",
@@ -45,10 +51,14 @@
     },
     {
       "id": "libsndfile", "name": "libsndfile", "upstream": "https://libsndfile.github.io/libsndfile/",
-      "license": "LGPL-2.1-or-later (some codec sources: Apache-2.0, BSD-3-Clause, GSM and Sun permissive licenses)", "copyleft": "weak",
-      "match": {"sonames": ["^libsndfile\\.so"], "archives": ["libsndfile\\.a$"]},
-      "texts": [{"debian": true}],
-      "review": "LGPL: shipping libsndfile.so needs its corresponding source (or a written offer), and users must be able to replace it (it is a separate .so in lib/dve, which satisfies that)."
+      "license": "LGPL-2.1-or-later (built-in codec sources: ALAC Apache-2.0, GSM 6.10 permissive (TU Berlin), G.72x public domain (Sun))", "copyleft": "weak",
+      "match": {"sonames": ["^libsndfile\\.so"], "archives": ["libsndfile\\.a$"], "targets": ["^dve_sndfile_imported$"]},
+      "source_var": "DVE_SNDFILE_SOURCE_INFO",
+      "texts": [{"debian": true},
+                {"var": "DVE_SNDFILE_SOURCE_DIR", "title": "the libsndfile source DVE builds", "all": true,
+                 "files": ["COPYING", "src/ALAC/LICENSE", "src/GSM610/COPYRIGHT", "src/G72x/README.original"]}],
+      "notes": "By default (DVE_FETCH_SNDFILE=ON) DVE builds libsndfile 1.2.2 itself, with Debian's 1.2.2-2+deb13u1 security patches (third_party/libsndfile/patches), as a shared library WITHOUT MPEG support, so libmpg123 and libmp3lame are neither linked nor shipped. It links the system FLAC, Ogg, Vorbis and Opus libraries, which are listed separately. Without that build DVE links the distribution's libsndfile and does not bundle it.",
+      "review": "LGPL: shipping libsndfile.so needs its corresponding source (or a written offer): the pinned tarball, the patches and the build options named under 'Corresponding source'. Users must be able to replace it; it is a separate .so in lib/dve, which satisfies that."
     },
     {
       "id": "flac", "name": "libFLAC", "upstream": "https://xiph.org/flac/",
@@ -73,20 +83,6 @@
       "license": "BSD-3-Clause (some files BSD-2-Clause)", "copyleft": "none",
       "match": {"sonames": ["^libopus\\.so"]},
       "texts": [{"debian": true}]
-    },
-    {
-      "id": "mpg123", "name": "libmpg123", "upstream": "https://www.mpg123.de",
-      "license": "LGPL-2.1", "copyleft": "weak",
-      "match": {"sonames": ["^libmpg123\\.so"]},
-      "texts": [{"debian": true}],
-      "review": "LGPL: shipping libmpg123.so needs its corresponding source (or a written offer)."
-    },
-    {
-      "id": "lame", "name": "LAME (libmp3lame)", "upstream": "https://lame.sourceforge.io",
-      "license": "LGPL-2.0-or-later (Debian's copyright file lists libmp3lame/fft.c as GPL-1.0-or-later)", "copyleft": "weak",
-      "match": {"sonames": ["^libmp3lame\\.so"]},
-      "texts": [{"debian": true}],
-      "review": "Unclear: LAME is distributed as LGPL, but Debian's copyright file marks libmp3lame/fft.c 'GPL-1+' ('No version of the GPL is explicitly given'). If that file is GPL, the library binary would be GPL, which would reach the player. Needs legal review, or avoid shipping it (it is only there because Debian's libsndfile links an MP3 encoder)."
     },
     {
       "id": "libjpeg_turbo", "name": "libjpeg-turbo", "upstream": "https://libjpeg-turbo.org",

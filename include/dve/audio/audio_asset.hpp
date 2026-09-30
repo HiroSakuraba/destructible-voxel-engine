@@ -58,6 +58,10 @@ struct AudioImportOptions {
 struct AudioImportCapabilities {
     bool nativeWav{};
     bool sndfile{};
+    // The loaded libsndfile can decode MPEG audio (MP3), i.e. it links libmpg123/libmp3lame.
+    // False with DVE's own libsndfile build (DVE_FETCH_SNDFILE, the default): MP3 is not a
+    // runtime format; authoring-time MP3 import goes through FFmpeg when available.
+    bool sndfileMpeg{};
     bool ffmpeg{};
 };
 
@@ -66,7 +70,8 @@ struct AudioImportCapabilities {
 // Imports RIFF/WAVE PCM (8/16/24/32-bit) and IEEE-float (32-bit). The cooker converts to
 // interleaved finite float samples and optionally resamples to the canonical engine rate.
 // General import entry point. Native WAV parsing is always available. Optional libsndfile adds
-// sampled-audio formats including FLAC, Ogg Vorbis, AIFF, and MP3 on current libsndfile builds.
+// sampled-audio formats including FLAC, Ogg Vorbis, Ogg Opus and AIFF (and MP3 only with a
+// system libsndfile built with MPEG support; DVE's default libsndfile build has none).
 // Optional FFmpeg authoring support extracts and decodes the first audio stream from broad media
 // containers such as MP4/M4A, MOV, WebM, and WMA. All decoding occurs off the audio callback.
 [[nodiscard]] std::optional<DecodedAudioAsset> import_audio_file(

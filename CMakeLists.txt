@@ -1671,6 +1671,12 @@ if(DVE_BUILD_TESTS)
         add_test(NAME dve_platform_rhi_tests COMMAND dve_platform_rhi_tests)
     endif()
 
+    if(DVE_BUILD_RHI)
+        add_executable(dve_rhi_mrt_tests tests/test_rhi_mrt.cpp)
+        target_link_libraries(dve_rhi_mrt_tests PRIVATE dve::rhi)
+        add_test(NAME dve_rhi_mrt_tests COMMAND dve_rhi_mrt_tests)
+    endif()
+
     if(TARGET dve_rhi_vulkan)
         add_executable(dve_vulkan_buffer_tests tests/test_vulkan_buffer_device.cpp)
         target_link_libraries(dve_vulkan_buffer_tests PRIVATE dve::rhi_vulkan dve::render_bridge)

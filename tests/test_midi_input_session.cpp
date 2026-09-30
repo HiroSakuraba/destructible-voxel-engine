@@ -267,6 +267,11 @@ void test_threaded() {
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
     }
     session->set_channel_filter({0, MidiDrumChannelMode::Play});
+    // The churn loop can stop right after an unplug or a request for no port; end in a known
+    // state (plugged exactly once, requested) so the settle check does not depend on timing.
+    backend->unplug(kMpk);
+    backend->plug(kMpk);
+    session->set_requested_port(kMpk);
     // Reaches a stable connected state once the port stays plugged.
     const auto settle = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (session->status().state != MidiConnectionState::Connected && std::chrono::steady_clock::now() < settle)

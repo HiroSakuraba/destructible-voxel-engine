@@ -281,6 +281,8 @@ What gets bundled depends on the preset. With `linux-gcc-release`, the Debian `l
 itself links X11, Wayland, PulseAudio, PipeWire and sndio directly, so a TGZ built from it needs
 those on the target machine. The portable choice for games is `linux-gcc-player-release`
 (static SDL 3.4.12, decision D3), which only bundles Lua, RtMidi and libsndfile with its codecs.
+libsndfile is DVE's own build without MP3 support in every preset (see
+[libsndfile without MP3](#libsndfile-without-mp3)), so `libmpg123` and `libmp3lame` are never bundled.
 
 ### DEB packages
 
@@ -359,7 +361,8 @@ is handled as follows:
 | Built in this tree | vendored `manifold`; fetched Jolt (`DVE_FETCH_JOLT`), SDL3-static + `SDL3_Headers` (`DVE_FETCH_SDL3`), RtMidi, Box2D/Box3D | Exported with our targets as `dve::third_party_<name>`, archives in `lib/dve/third_party`. So a fetch build yields a self-contained package. |
 | Installed package (namespaced import) | `SDL3::SDL3`, `Jolt::Jolt`, `RtMidi::rtmidi`, `Threads::Threads` | `find_dependency(<Pkg>)` in `dveConfig.cmake`, with the build-time `<Pkg>_DIR` as a hint. |
 | Local import helper | `PkgConfig::DVE_LUA`, the Lua ABI fallback `dve_lua54_runtime`, `dve_rtmidi_imported`, legacy Jolt/Box pairs | Recreated under the same name from the recorded library files. A file missing on the consumer machine is looked up with `find_library()`, else `find_package(dve)` fails with a message naming it. No include directories are recreated, because no public DVE header includes a third-party header (the install-tree test enforces this). |
-| Plain library file | `libsndfile.so` | Kept as the absolute path. `dve-dev` depends on the owning `-dev` package. |
+| Plain library file | the system `libsndfile.so` (`DVE_FETCH_SNDFILE=OFF`) | Kept as the absolute path. `dve-dev` depends on the owning `-dev` package. |
+| Library built here and bundled | `dve_sndfile_imported` (DVE's libsndfile, `DVE_FETCH_SNDFILE`) | Recreated with the location `${PACKAGE_PREFIX_DIR}/lib/dve/libsndfile.so.1` (the bundled copy from the `*Deps` components). If that file is missing, `find_library(libsndfile.so.1)` uses the system one. `dve-dev` depends on `libsndfile1`. |
 
 The package is relocatable: the install-tree test fails if any `lib/cmake/dve` file mentions the
 source or build tree. If a dependency cannot be exported (for example, a third-party target built
@@ -475,11 +478,11 @@ In the engine tree, `cmake --build <build> --target dve_sample_game_package` pac
 
 Which libraries end up in `lib/dve` depends on the preset (see
 [RPATH and bundled libraries](#rpath-and-bundled-libraries-linux)). With `linux-gcc-release` the
-sample game folder is about 12.7 MiB (6.6 MiB as `.tar.gz`): a 3.9 MB executable, a 27 KB pak,
-~310 KB of notices, and libSDL3, libsndfile and its codecs (FLAC, vorbis, vorbisenc, ogg, opus,
-mpg123, mp3lame). Debian's libopus alone is 3.5 MB. With `linux-gcc-lua-release` it is 13.1 MiB
+sample game folder is about 12.1 MiB (6.4 MiB as `.tar.gz`): a 3.9 MB executable, a 27 KB pak,
+~310 KB of notices, and libSDL3, DVE's libsndfile and its codecs (FLAC, vorbis, vorbisenc, ogg,
+opus). Debian's libopus alone is 3.5 MB. With `linux-gcc-lua-release` it is 12.5 MiB
 (adds liblua5.4). With `linux-gcc-player-release` (static SDL 3.4.12 and Lua 5.4 bundled) it is
-16.1 MiB (8.2 MiB as `.tar.gz`): the executable grows to 10 MB, but libSDL3 and its X11/Wayland/
+15.5 MiB (7.9 MiB as `.tar.gz`): the executable grows to 10 MB, but libSDL3 and its X11/Wayland/
 PulseAudio dependencies are no longer needed from the system.
 
 ### Third-party notices
@@ -504,9 +507,62 @@ PulseAudio dependencies are no longer needed from the system.
   package and version), the full license texts, an appendix with the referenced
   `/usr/share/common-licenses` files, the system libraries it relies on but does not ship, and an
   UNRESOLVED list that must be empty.
-- `--check` fails on anything unmatched or without a license text; `--verify-dir DIR --notices F`
-  fails if a `.so` in `DIR` is not listed in `F`. `dve_package_game` and the install-tree test
-  use the latter.
+- `--check` fails on anything unmatched or without a license text, and on a bundled library in
+  the manifest's `forbidden` list (`libmpg123`, `libmp3lame`). `--verify-dir DIR --notices F`
+  fails if a `.so` in `DIR` is not listed in `F`. With `--manifest`, it also fails if a file there,
+  or a `DT_NEEDED` entry of any ELF file in that folder, is forbidden. `dve_package_game` and the
+  install-tree test use the latter.
+- For a library DVE builds itself (libsndfile), the license texts come from its source tree
+  (`COPYING`, `src/ALAC/LICENSE`, `src/GSM610/COPYRIGHT`, `src/G72x/README.original`), and the
+  corresponding-source line names the tarball, hash, patches and options instead of a Debian
+  package.
+
+### libsndfile without MP3
+
+Debian's `libsndfile1` links MP3 support, which pulled `libmpg123` (LGPL-2.1) and `libmp3lame`
+(LGPL-2+; Debian marks `libmp3lame/fft.c` GPL-1+) into every package and game folder. DVE never
+needs MP3 at run time. It only opens files for reading (`src/audio/sndfile_decoder.cpp`:
+`sf_open(SFM_READ)`), and games load WAV, FLAC, Ogg Vorbis and Ogg Opus samples. MP3 import is an
+authoring feature served by the optional FFmpeg CLI path (`DVE_ENABLE_FFMPEG_CLI_IMPORT`).
+
+`DVE_FETCH_SNDFILE` (default `ON`, also set by `linux-gcc-player-release`;
+`cmake/DveSndFile.cmake`) therefore builds libsndfile itself, once at configure time, in
+`<build>/_deps/sndfile`:
+
+- **Source.** `https://github.com/libsndfile/libsndfile/archive/refs/tags/1.2.2.tar.gz`, SHA256
+  `ffe12ef8add3eaca876f04087734e6e8e029350082f3251f565fa9da55b52121`. This is byte-identical to
+  Debian's `libsndfile_1.2.2.orig.tar.gz`, and snapshot.debian.org is the fallback URL.
+  `DVE_SNDFILE_ARCHIVE=<file>` uses a local copy (offline builds).
+- **Patches.** Debian `1.2.2-2+deb13u1`'s patch series is applied on top, vendored unchanged in
+  `third_party/libsndfile/patches` (see its README). Upstream has not released the security fixes
+  (CVE-2022-33065, CVE-2024-50612), so plain upstream 1.2.2 would be less safe than the Debian
+  library it replaces.
+- **Options.** `BUILD_SHARED_LIBS=ON`, `ENABLE_MPEG=OFF`, `ENABLE_EXTERNAL_LIBS=ON` (FLAC, Ogg,
+  Vorbis, Opus from the system `-dev` packages; they are bundled as before), no programs, examples,
+  tests, CPack, pkg-config or man pages. ALSA, Speex, SQLite, mpg123 and lame are not even looked
+  for. Configure checks the result with `readelf`: it must link FLAC, Ogg, Vorbis(enc) and Opus, and
+  it fails if it links an MPEG library.
+- **Shared, not static.** As a separate `lib/dve/libsndfile.so.1`, users can replace the library
+  (LGPL-2.1 §6), and we only owe its corresponding source: the tarball, the patches and the options
+  above. The generated notices name all three in their "Corresponding source" section. A static
+  libsndfile would also oblige us to let users relink the player (ship its object files or source).
+- **Only the codecs we use.** libsndfile 1.2.2 cannot disable its external codecs one by one:
+  `ENABLE_EXTERNAL_LIBS` is FLAC + Vorbis + Opus together, and `libvorbisenc` comes with Vorbis.
+  The built-in formats (WAV, AIFF, ALAC, GSM 6.10, G.72x, …) need no extra libraries. Opus is the
+  largest bundled file (Debian's `libopus` is 3.5 MB). It stays because Ogg Opus samples are read at
+  run time.
+- **Fallback.** With `DVE_FETCH_SNDFILE=OFF`, or when the download, a codec `-dev` package, a
+  patch or the build fails (configure warns), the system libsndfile is linked but added to the
+  system-library excludes. It is then not bundled (neither are its codecs), and a game needs the
+  distribution's `libsndfile1`. Either way no MP3 library is shipped.
+- **Other paths to libsndfile.** Only `dve_audio_synth` links libsndfile (SDL3, RtMidi and Steam
+  Audio do not). The system `libpulse` also links `libsndfile.so.1`. Because the player uses a
+  `DT_RPATH`, a PulseAudio client loaded into the game process picks up the bundled copy, which is
+  ABI-identical (same 1.2.2 / `libsndfile.so.1.0.37`).
+- **DEB packages** keep depending on the distribution's `libsndfile1` (they never bundle).
+
+`AudioImportCapabilities::sndfileMpeg` reports whether the loaded libsndfile can decode MPEG.
+It is false with DVE's build.
 
 ### Third-party licenses and what to review
 
@@ -516,9 +572,8 @@ the flagged items need a decision before a public release.
 | Library | License | Shipped in | Note |
 |---|---|---|---|
 | SDL3, SDL3_ttf | Zlib (+ permissive sub-licenses) | Runtime (dynamic with `linux-gcc-release`), editor | The fetched SDL `LICENSE.txt` omits the sub-licenses listed in Debian's copyright. |
-| libsndfile | **LGPL-2.1+** | Runtime, editor, tools | Shipping requires the corresponding source or a written offer, and the right to relink (satisfied by shipping it as a separate `.so`). |
-| libmpg123 | **LGPL-2.1** | via libsndfile | Same as libsndfile. |
-| libmp3lame | **LGPL-2+** | via libsndfile | Same; Debian also marks `libmp3lame/fft.c` as GPL-1+, which is unclear — **review**. |
+| libsndfile (DVE's build, 1.2.2 + Debian patches, no MPEG) | **LGPL-2.1+** (built-in ALAC Apache-2.0, GSM 6.10 permissive, G.72x public domain) | Runtime, editor, tools | Shipping requires the corresponding source or a written offer, and the right to relink (satisfied by shipping it as a separate `.so`). See [libsndfile without MP3](#libsndfile-without-mp3). |
+| libmpg123, libmp3lame | LGPL-2.1 / LGPL-2+ (lame's `fft.c` GPL-1+ per Debian) | **never** (forbidden) | They were only there because Debian's libsndfile links MP3 support. The notices check, `--verify-dir --manifest`, `dve_package_game` and the package tests fail if either is shipped. |
 | libFLAC | BSD-3 (the `flac` tools are GPL) | via libsndfile | |
 | libvorbis, libogg, libopus | BSD-3 | via libsndfile | |
 | Lua 5.4 | MIT | Lua presets | |
@@ -550,6 +605,8 @@ Their files are not relicensed. A shipped game can carry its own `LICENSE` in th
 | `dve_third_party_notices_self_test` | The generator's matching and parsing on synthetic inputs, including the engine's MIT header and a missing `LICENSE`. |
 | `dve_third_party_notices_check_<Component>` | `--check` on the real inputs: every linked or bundled third-party library has an entry and a license text, and the engine's `LICENSE` is found. |
 | `dve_package_game_test` | Packages `player_sample` with `--tgz --verify`, extracts the archive to a temporary folder, and runs `./Player_Sample --frames 30 --hash` from another directory with no `LD_LIBRARY_PATH`: the pak is found next to the executable, 4 objects load, and the hash equals the build-tree player's and the golden hash. Then it packages a copy of `examples/editor_demo_project` (only an editor scene) and checks the export and the `.autosave` exclusion. Both check RPATH, `ldd`, the notices coverage, `DVE-LICENSE.txt` (the engine's MIT license, also recorded in `build-info.json`) and that no editor-only files or sample maps are shipped. |
+| `dve_audio_sndfile_format_tests` | WAV (native and libsndfile), FLAC (bit-exact), Ogg Vorbis and Ogg Opus fixtures (`tests/data/audio_formats`) decode through libsndfile and `import_audio_file()`. With DVE's libsndfile, `sndfileMpeg` is false, libsndfile rejects the MP3 fixture, MP3 still imports through FFmpeg when that is built, and neither `libmpg123` nor `libmp3lame` is loaded in the process (`dl_iterate_phdr`). |
+| `dve_install_tree_test`, `dve_package_game_test` (MP3) | `tests/cmake/dve_no_mpeg_check.cmake` on the install prefix and on both game folders: no `libmpg123*`/`libmp3lame*` file, no such `DT_NEEDED` in any shipped ELF (`readelf -d`), none in `ldd` of the shipped executable (not even from the system, with DVE's libsndfile), the shipped `libsndfile.so.1` is DVE's build, and the notices list no MP3 library. |
 | `dve_install_tree_test`, `dve_package_consumer_test` | Also check the installed notices (which must state the engine's MIT license), `share/doc/dve-<group>/LICENSE` and `copyright` for every installed group, and build a game package through the installed `dve_add_game_package()`. |
 
 ### Not done yet

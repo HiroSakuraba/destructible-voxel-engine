@@ -79,15 +79,10 @@ jobs:
           ccache --zero-stats
           cmake --build out/build/${{ matrix.preset }} --parallel 4
           ccache --show-stats
-      - name: Quarantined tests (excluded below)
-        run: ctest --test-dir out/build/${{ matrix.preset }} -N -L ci_quarantine
-      - name: CTest (full suite except label ci_quarantine)
-        # ci_quarantine currently holds only dve_synth_release_acceptance_tests (flaky
-        # polyphony_stress timing; fixed by PR #27). Drop the -LE once that label is removed.
+      - name: CTest (full suite, nothing excluded)
         run: >-
           xvfb-run -a ctest --test-dir out/build/${{ matrix.preset }}
           --output-on-failure --no-tests=error -j4 --timeout 1800
-          -LE ci_quarantine
           --output-junit ctest-junit.xml
       - name: Upload test logs
         if: always()
@@ -204,7 +199,7 @@ jobs:
           exit $status
       - name: CTest (Release)
         shell: bash
-        run: ctest --test-dir out/build/windows-msvc-release -C Release --output-on-failure -j4 -LE ci_quarantine
+        run: ctest --test-dir out/build/windows-msvc-release -C Release --output-on-failure -j4
       - name: Upload Windows logs
         if: always()
         uses: actions/upload-artifact@v4

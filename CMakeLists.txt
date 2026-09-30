@@ -1938,10 +1938,6 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_synth_release_acceptance_tests tests/test_synth_release_acceptance.cpp)
         target_link_libraries(dve_synth_release_acceptance_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_synth_release_acceptance_tests COMMAND dve_synth_release_acceptance_tests)
-        # TEMPORARY: polyphony_stress is timing-flaky on shared CI runners (PR #27,
-        # fix/synth-polyphony-stress, fixes it). CI excludes this label with `ctest -LE ci_quarantine`;
-        # remove this property (and the -LE in .github/workflows/ci.yml) once that PR lands.
-        set_tests_properties(dve_synth_release_acceptance_tests PROPERTIES LABELS ci_quarantine)
         add_executable(dve_midi_input_session_tests tests/test_midi_input_session.cpp)
         target_link_libraries(dve_midi_input_session_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_midi_input_session_tests COMMAND dve_midi_input_session_tests)

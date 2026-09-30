@@ -1,3 +1,25 @@
+# Unreleased — Packaging Phase 1: ContentSource and Pak-Backed Scene Loading
+
+- Added `ContentSource` (`dve/content_source.hpp`) with `LooseContentSource` (confined project
+  folder, symlink-safe) and `PakContentSource` (mounted `.dvepak`), sharing one content-path
+  normalization, size-limit and error model (`ContentErrorCode::IntegrityFailure` for pak hash
+  mismatches).
+- Added in-memory loaders: `read_dvox(span)`, `read_dmesh(span)`, `parse_dvoxscene_manifest(text)`
+  and `validate_dvoxscene_asset()`. The path-based loaders now delegate to the same decoders and
+  keep their exact behavior and error messages.
+- Added `GameWorld::spawn_asset_from_bytes`, `spawn_cooked_asset`, `spawn_cooked_polygon_asset`
+  and the read-only `GameWorld::render_objects()` accessor (voxels, polygon, materials, world
+  transform per object). Spawned `.dvox` objects now keep their material table for rendering.
+- Added `load_scene_into_game_world(ContentSource&, scene, GameWorld&)` in `dve_core`: an
+  all-or-nothing DVOXSCENE loader for shipped games that does not depend on `dve_editor`.
+- Added the `game.dvegame` project manifest (`dve/game_manifest.hpp`): `DVE_GAME 1`, name,
+  version, entry scene, optional startup script/settings/camera and reserved `bind.*` entries,
+  with strict validation and size limits.
+- `dve_pack --all` and `build_dvepak` no longer package editor `.autosave/` folders (any depth);
+  `DvePakMount::contains` is now a binary search and `DvePakMount::find` exposes entries.
+- New tests: `dve_content_source_tests`, `dve_game_manifest_tests`,
+  `dve_game_scene_loader_tests`, `dve_pack_autosave_exclusion`.
+
 # v2.35.3 — Composite Input and Rebinding Reliability
 
 - Added deterministic weighted 1D composite bindings for digital and analog controls, including

@@ -68,6 +68,8 @@ dve_pack <project-root> <output.dvepak> --all
 - `third_party/` — bundled notices, ABI shims, and reference material
 - `scripts/`, `tools/` — validation and release utilities
 - `docs/V235_FOUNDATIONS.md` — implemented boundaries and remaining production work
+- `docs/PACKAGING.md` — runtime content: `ContentSource` (loose folder or `.dvepak`),
+  pak-backed scene loading into `GameWorld`, and the `game.dvegame` manifest
 - `docs/MIDI_SETUP.md` — MIDI keyboards in the editors: RtMidi on Linux/Windows/macOS, port
   picker, hotplug, channel filter, and Akai MPK mini tips
 

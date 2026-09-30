@@ -5,6 +5,8 @@
 //   * the Oscillators / Effects / Presets pages, which compact their columns below ~920 px
 //     and scroll above the voice meter down to 640x480 (plus the header MIDI input button),
 //   * the inspector flag toggles vs the bottom dock,
+//   * the chiptune tracker toolbar, which wraps instead of running off the panel (it used to
+//     overflow below ~940 px), with the pages starting below it,
 // at 1280x719 and other common windows for every UI zoom 100-200 %.
 #include "dve/editor_native.hpp"
 #include "dve/editor_ui_zoom.hpp"
@@ -464,6 +466,59 @@ void test_inspector_toggles(const Case& c) {
     }
 }
 
+void test_chiptune_toolbar(const Case& c) {
+    const std::string tag = case_tag(c) + "chiptune: ";
+    NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
+    controller.resize(c.logicalWidth, c.logicalHeight);
+    (void)controller.dispatch_action("window.toggle_chiptune");
+    check(controller.chiptune_panel().open(), tag + "panel did not open");
+    for (std::size_t page = 0; page < 3U; ++page) {
+        click(controller, controller.chiptune_panel().layout().tabs[page]);
+        const ChiptunePanelLayout& layout = controller.chiptune_panel().layout();
+        const std::string pageTag = tag + "page " + std::to_string(page) + ": ";
+        check(static_cast<std::size_t>(controller.chiptune_panel().page()) == page, pageTag + "tab click missed");
+        const std::vector<std::pair<std::string, UiRect>> toolbar{
+            {"PLAY", layout.playSongButton}, {"AUDITION", layout.playInstrumentButton}, {"STOP", layout.stopButton},
+            {"SAVE", layout.saveButton}, {"OPEN", layout.openButton}, {"UNDO", layout.undoButton},
+            {"REDO", layout.redoButton}, {"COPY", layout.copyButton}, {"CUT", layout.cutButton},
+            {"PASTE", layout.pasteButton}};
+        int toolbarBottom = 0;
+        for (std::size_t i = 0; i < toolbar.size(); ++i) {
+            const auto& [name, rect] = toolbar[i];
+            check(visible(rect) && inside(rect, layout.panel), pageTag + name + rect_text(rect) + " outside the panel " +
+                                                                rect_text(layout.panel));
+            check(rect.x + rect.width <= layout.panel.x + layout.panel.width - 12, pageTag + name + " touches the panel edge");
+            check(!intersects(rect, layout.titleBar) && !intersects(rect, layout.closeButton), pageTag + name + " under the title bar");
+            for (const UiRect& tab : layout.tabs) check(!intersects(rect, tab), pageTag + name + " overlaps a page tab");
+            for (std::size_t j = i + 1; j < toolbar.size(); ++j)
+                check(!intersects(rect, toolbar[j].second), pageTag + name + " overlaps " + toolbar[j].first);
+            toolbarBottom = std::max(toolbarBottom, rect.y + rect.height);
+        }
+        // The page body starts below the (possibly wrapped) toolbar.
+        std::vector<std::pair<std::string, UiRect>> body;
+        if (page == 0U) body = {{"order list", layout.orderList}, {"pattern grid", layout.patternGrid},
+                                {"last pattern row", layout.cells[kChiptuneVisibleRows - 1U][0]}};
+        else if (page == 1U) body = {{"instrument <", layout.instrumentPreviousButton}, {"envelope", layout.envelopeCanvas}};
+        else body = {{"first SFX preset", layout.sfxPresetButtons[0]}, {"piano", layout.pianoArea}};
+        for (const auto& [name, rect] : body) {
+            check(rect.y >= toolbarBottom, pageTag + name + rect_text(rect) + " starts above the toolbar bottom " +
+                                           std::to_string(toolbarBottom));
+            check(inside(rect, layout.panel), pageTag + name + " outside the panel");
+        }
+        if (page == 0U)
+            check(layout.cells[kChiptuneVisibleRows - 1U][0].y + layout.cells[kChiptuneVisibleRows - 1U][0].height <=
+                      layout.patternGrid.y + layout.patternGrid.height,
+                  pageTag + "pattern rows run past the grid");
+        // Hit test on a wrapped button.
+        click(controller, layout.stopButton);
+        check(controller.chiptune_panel().status() == "Preview stopped", pageTag + "STOP click missed");
+    }
+    // The panel fits the window whenever the window is wider than the 720 px panel minimum.
+    const ChiptunePanelLayout& layout = controller.chiptune_panel().layout();
+    if (c.logicalWidth >= 744)
+        check(layout.panel.x >= 0 && layout.panel.x + layout.panel.width <= c.logicalWidth, tag + "panel wider than the window");
+}
+
 } // namespace
 
 int main() {
@@ -471,7 +526,11 @@ int main() {
         test_synth_grid_and_strips(c);
         test_synth_scrolling_pages(c);
         test_inspector_toggles(c);
+        test_chiptune_toolbar(c);
     }
+    // The widths the toolbar used to overflow at, at 100 %.
+    for (int width : {744, 800, 900, 940, 1000, 1064})
+        test_chiptune_toolbar({width, 700, 1.0F, width, 700});
     if (g_failures == 0) std::printf("editor layout overlap tests passed (%zu window/zoom cases)\n", cases().size());
     return g_failures == 0 ? 0 : 1;
 }

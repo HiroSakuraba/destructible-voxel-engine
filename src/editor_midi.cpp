@@ -61,6 +61,36 @@ std::vector<SettingChoice> midi_input_port_choices(const audio::MidiInputStatus&
     return choices;
 }
 
+std::string midi_output_port_from_settings(const EditorSettingsRegistry& settings) {
+    return read_string(settings, kMidiOutputPortSettingId, "");
+}
+
+std::vector<SettingChoice> midi_output_port_choices(const audio::MidiOutputStatus& status, std::string_view saved) {
+    using audio::MidiConnectionState;
+    const bool connected = status.state == MidiConnectionState::Connected;
+    std::vector<SettingChoice> choices;
+    std::string autoLabel = "Auto";
+    if (status.state == MidiConnectionState::Unavailable) autoLabel += " (MIDI unavailable)";
+    else if (saved.empty()) autoLabel += connected ? ": " + audio::midi_port_display_name(status.connectedPort) + " (connected)"
+                                                   : " (no output)";
+    choices.push_back({"", std::move(autoLabel)});
+    choices.push_back({std::string(audio::kMidiPortNone), "None (MIDI output off)"});
+    bool savedListed = saved.empty() || saved == audio::kMidiPortNone;
+    for (const std::string& port : status.ports) {
+        const std::string value = audio::normalize_midi_port_name(port);
+        if (std::any_of(choices.begin(), choices.end(), [&](const SettingChoice& c) { return c.value == value; })) continue;
+        std::string label = value;
+        audio::MidiPortDescriptor descriptor;
+        descriptor.name = port;
+        if (audio::is_midi_through_or_virtual_port(descriptor)) label += " [through/virtual]";
+        if (connected && audio::normalize_midi_port_name(status.connectedPort) == value) label += " (connected)";
+        if (!saved.empty() && audio::normalize_midi_port_name(saved) == value) savedListed = true;
+        choices.push_back({value, std::move(label)});
+    }
+    if (!savedListed) choices.push_back({std::string(saved), std::string(saved) + " (disconnected)"});
+    return choices;
+}
+
 std::string midi_input_button_label(const audio::MidiInputStatus& status) {
     using audio::MidiConnectionState;
     switch (status.state) {
@@ -86,17 +116,12 @@ EditorMidiStartResult start_editor_midi(NativeEditorController& controller) {
     result.error = error;
     controller.attach_midi_input(std::move(input));
     if (result.nativeBackend) {
-        // Synth MIDI out keeps the previous behaviour: the first output port (on Linux usually
-        // "Midi Through"), used for MIDI thru / arpeggiator output.
+        // Synth MIDI out (MIDI thru / arpeggiator output): the `midi.output_port` choice. Auto
+        // keeps the previous behaviour, the first output port (on Linux usually "Midi Through").
         std::string outputError;
-        if (auto output = audio::make_native_midi_backend(&outputError)) {
-            try {
-                const auto outputs = output->output_ports();
-                if (!outputs.empty()) (void)output->open_output(outputs.front().index, &outputError);
-            } catch (...) {
-            }
-            controller.attach_midi_output(std::move(output));
-        }
+        controller.attach_midi_output(audio::make_native_midi_backend(&outputError));
+    } else {
+        controller.attach_midi_output(nullptr);
     }
     return result;
 }
@@ -115,8 +140,51 @@ void NativeEditorController::attach_midi_input(std::unique_ptr<audio::IMidiBacke
     refresh_midi_status();
 }
 
-void NativeEditorController::attach_midi_output(std::unique_ptr<audio::IMidiBackend> backend) {
-    midiOutput_ = std::move(backend);
+void NativeEditorController::attach_midi_output(std::unique_ptr<audio::IMidiBackend> backend,
+                                                audio::MidiOutputSession::Options options) {
+    midiOutput_.reset(); // releases held notes on the previous port first
+    midiOutput_ = std::make_unique<audio::MidiOutputSession>(std::move(backend), options);
+    midiOutput_->set_requested_port(midi_output_port());
+    midiOutputStatusGeneration_ = ~std::uint64_t{0};
+    refresh_midi_status();
+}
+
+std::string NativeEditorController::midi_output_port() const {
+    return midi_output_port_from_settings(workspace_.settings());
+}
+
+bool NativeEditorController::set_midi_output_port(std::string name) {
+    std::string error;
+    (void)workspace_.settings().clear(SettingScope::Session, kMidiOutputPortSettingId);
+    if (!workspace_.settings().set(SettingScope::User, kMidiOutputPortSettingId, name, &error)) {
+        set_status(error, true);
+        return false;
+    }
+    if (midiOutput_) midiOutput_->set_requested_port(midi_output_port());
+    refresh_midi_status();
+    const std::string shown = name.empty() ? std::string("Auto") : name == audio::kMidiPortNone ? std::string("None") : name;
+    std::string message = "MIDI output: " + shown;
+    if (midi_output_port() != name) message += " (Project settings override the User value)";
+    if (!save_user_settings(&error)) {
+        set_status(message + "; save failed: " + error, true);
+        return false;
+    }
+    set_status(std::move(message));
+    return true;
+}
+
+bool NativeEditorController::cycle_midi_output_port(int direction) {
+    const std::string current = midi_output_port();
+    const auto choices = midi_output_port_choices(midiOutputStatus_, current);
+    if (choices.empty()) return false;
+    const auto it = std::find_if(choices.begin(), choices.end(), [&](const SettingChoice& c) {
+        return c.value == current || (!current.empty() && current != audio::kMidiPortNone &&
+                                      c.value == audio::normalize_midi_port_name(current));
+    });
+    const std::ptrdiff_t count = static_cast<std::ptrdiff_t>(choices.size());
+    std::ptrdiff_t index = it == choices.end() ? 0 : std::distance(choices.begin(), it);
+    index = (index + (direction >= 0 ? 1 : -1) + count) % count;
+    return set_midi_output_port(choices[static_cast<std::size_t>(index)].value);
 }
 
 std::string NativeEditorController::midi_input_port() const {
@@ -183,6 +251,33 @@ void NativeEditorController::refresh_midi_status() {
         settingsPanel_.dynamicChoices[std::string(kMidiInputPortSettingId)] = midi_input_port_choices(midiStatus_, saved);
         synthPanel_.set_midi_input_label(midi_input_button_label(midiStatus_),
                                          midiStatus_.state == audio::MidiConnectionState::Connected);
+    }
+
+    bool outputChanged = false;
+    if (midiOutput_) {
+        const std::uint64_t generation = midiOutput_->status_generation();
+        if (generation != midiOutputStatusGeneration_) {
+            const audio::MidiConnectionState previous = midiOutputStatus_.state;
+            const bool first = midiOutputStatusGeneration_ == ~std::uint64_t{0};
+            midiOutputStatus_ = midiOutput_->status();
+            midiOutputStatusGeneration_ = generation;
+            outputChanged = true;
+            if (!first && previous != midiOutputStatus_.state &&
+                (midiOutputStatus_.state == audio::MidiConnectionState::Connected ||
+                 previous == audio::MidiConnectionState::Connected))
+                set_status("MIDI out " + midiOutputStatus_.summary());
+        }
+    } else if (midiOutputStatusGeneration_ == ~std::uint64_t{0}) {
+        midiOutputStatus_ = {};
+        midiOutputStatusGeneration_ = 0;
+        outputChanged = true;
+    }
+    const std::string savedOutput = midi_output_port();
+    if (outputChanged || savedOutput != midiOutputChoicesPort_ ||
+        !settingsPanel_.dynamicChoices.contains(kMidiOutputPortSettingId)) {
+        midiOutputChoicesPort_ = savedOutput;
+        settingsPanel_.dynamicChoices[std::string(kMidiOutputPortSettingId)] =
+            midi_output_port_choices(midiOutputStatus_, savedOutput);
     }
 }
 

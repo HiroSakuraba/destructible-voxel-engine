@@ -364,20 +364,13 @@ if(DVE_BUILD_AUDIO_SYNTH)
         target_link_options(dve_audio_synth PUBLIC -fsanitize=address,undefined)
     endif()
 
-    find_library(DVE_SNDFILE_LIBRARY NAMES sndfile libsndfile)
-    if(NOT DVE_SNDFILE_LIBRARY AND UNIX)
-        find_file(DVE_SNDFILE_RUNTIME_LIBRARY NAMES libsndfile.so.1 libsndfile.dylib
-            PATHS /lib /usr/lib /usr/local/lib
-            PATH_SUFFIXES x86_64-linux-gnu aarch64-linux-gnu)
-        if(DVE_SNDFILE_RUNTIME_LIBRARY)
-            set(DVE_SNDFILE_LIBRARY "${DVE_SNDFILE_RUNTIME_LIBRARY}")
-        endif()
-    endif()
-    if(DVE_SNDFILE_LIBRARY)
+    # libsndfile: the pinned no-MPEG build by default, else the system one (cmake/DveSndFile.cmake).
+    include(DveSndFile)
+    if(DVE_SNDFILE_LINK)
         target_sources(dve_audio_synth PRIVATE src/audio/sndfile_decoder.cpp)
-        target_link_libraries(dve_audio_synth PRIVATE ${DVE_SNDFILE_LIBRARY})
+        target_link_libraries(dve_audio_synth PRIVATE ${DVE_SNDFILE_LINK})
         target_compile_definitions(dve_audio_synth PRIVATE DVE_HAVE_SNDFILE=1)
-        message(STATUS "libsndfile found: FLAC/Ogg/WAV import enabled")
+        message(STATUS "libsndfile (${DVE_SNDFILE_PROVIDER}): FLAC/Ogg/WAV import enabled")
     else()
         message(STATUS "libsndfile not found: native WAV import remains available")
     endif()
@@ -2026,6 +2019,14 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_edit_tests tests/test_audio_edit.cpp)
         target_link_libraries(dve_audio_edit_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_edit_tests COMMAND dve_audio_edit_tests)
+        # WAV/FLAC/Ogg Vorbis/Ogg Opus decoding and "MP3 is not needed at run time" (DVE_FETCH_SNDFILE).
+        add_executable(dve_audio_sndfile_format_tests tests/test_audio_sndfile_formats.cpp)
+        target_link_libraries(dve_audio_sndfile_format_tests PRIVATE dve::audio_synth)
+        target_compile_definitions(dve_audio_sndfile_format_tests PRIVATE
+            DVE_TEST_SNDFILE_PROVIDER="${DVE_SNDFILE_PROVIDER}"
+            $<$<BOOL:${DVE_SNDFILE_LINK}>:DVE_HAVE_SNDFILE=1>)
+        add_test(NAME dve_audio_sndfile_format_tests
+            COMMAND dve_audio_sndfile_format_tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/audio_formats)
         add_executable(dve_audio_workstation_tests tests/test_audio_workstation.cpp)
         target_link_libraries(dve_audio_workstation_tests PRIVATE dve::audio_synth)
         if(DVE_BUILD_EDITOR)

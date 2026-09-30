@@ -4,6 +4,7 @@
 
 #include "common/brick_trace_common.hlsli"
 #include "common/material_parameter_collection.hlsli"
+#include "common/material_table.hlsli"
 #include "common/pbr_lighting.hlsli"
 #include "common/environment_ibl.hlsli"
 #include "common/render_environment.hlsli"

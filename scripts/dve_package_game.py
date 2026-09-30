@@ -6,7 +6,7 @@
                      [--name <Game>] [--tgz] [--verify] [--materials <lib.dvematerials>]
                      [--dve-pack <exe>] [--dve-export-scene <exe>] [--notices <file>]
                      [--engine-license <file>]
-                     [--strict-export] [--include-sample-maps] [--keep-work]
+                     [--strict-export] [--include-sample-maps] [--allow-mp3-libraries] [--keep-work]
 
 Steps
   1. Validate <project>/game.dvegame (DVE_GAME 1; name, version, entryScene=*.dvoxscene.json).
@@ -20,6 +20,8 @@ Steps
   4. Copy the installed Runtime component: bin/dve_player becomes <output>/<Game>, and the
      shared libraries it needs from <prefix>/lib/dve go to <output>/lib/dve (the player's RPATH
      includes $ORIGIN/lib/dve, so nothing is needed on LD_LIBRARY_PATH).
+     A runtime that bundles libmpg123/libmp3lame (a libsndfile with MPEG support) is refused
+     unless --allow-mp3-libraries; DVE's default libsndfile build has no MPEG support.
   5. Copy THIRD_PARTY_NOTICES (the Runtime component's, share/doc/dve/THIRD_PARTY_NOTICES-
      runtime.txt) and check it lists every shipped shared library; copy the engine's MIT license
      (share/doc/dve-runtime/LICENSE) to <output>/DVE-LICENSE.txt next to it; copy the project's
@@ -217,6 +219,23 @@ def stage_runtime(prefix: Path, output: Path, game_name: str, strip: bool) -> di
     return {"executable": game_name, "libraries": sorted(set(libraries))}
 
 
+# libmpg123 / libmp3lame only come with a libsndfile built with MPEG support (Debian's). DVE's
+# own build (DVE_FETCH_SNDFILE, the default) has none, and DVE needs no MP3 at run time, so a
+# runtime prefix that bundles them is refused (third_party/notices/manifest.json "forbidden").
+FORBIDDEN_LIBRARIES = re.compile(r"^(libmpg123|libmp3lame)\.so")
+
+
+def check_forbidden(libraries: list[str], allow: bool) -> list[str]:
+    forbidden = sorted(lib for lib in libraries if FORBIDDEN_LIBRARIES.match(lib))
+    if forbidden and not allow:
+        raise PackageError(
+            f"the runtime bundles MP3 libraries ({', '.join(forbidden)}): it was built against a libsndfile "
+            f"with MPEG support. Rebuild DVE with -DDVE_FETCH_SNDFILE=ON (the default) so libsndfile is built "
+            f"without MPEG, or pass --allow-mp3-libraries after reviewing their licenses (LGPL; lame's fft.c "
+            f"is marked GPL-1+ by Debian)")
+    return forbidden
+
+
 def player_version(executable: Path) -> str:
     proc = subprocess.run([str(executable), "--version"], capture_output=True, text=True, env=clean_env())
     return proc.stdout.strip() or proc.stderr.strip()
@@ -349,6 +368,9 @@ def package(args) -> int:
         log(proc.stdout.strip())
 
         runtime = stage_runtime(prefix, output, game_name, not args.no_strip)
+        mp3_libraries = check_forbidden(runtime["libraries"], args.allow_mp3_libraries)
+        if mp3_libraries:
+            log(f"warning: shipping MP3 libraries (--allow-mp3-libraries): {', '.join(mp3_libraries)}")
         notices = Path(args.notices) if args.notices else prefix / "share" / "doc" / "dve" / "THIRD_PARTY_NOTICES-runtime.txt"
         flagged = copy_notices(notices, output, runtime["libraries"])
         engine_license = (Path(args.engine_license) if args.engine_license
@@ -379,7 +401,8 @@ def package(args) -> int:
             "excludedEditorOnly": staged["skipped"],
             "engineLicense": {"file": ENGINE_LICENSE_NAME, "license": "MIT"},
             "licenses": licenses, "noticesReview": flagged,
-            "options": {"includeSampleMaps": args.include_sample_maps, "strictExport": args.strict_export},
+            "options": {"includeSampleMaps": args.include_sample_maps, "strictExport": args.strict_export,
+                        "allowMp3Libraries": args.allow_mp3_libraries},
         }
         (output / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")
 
@@ -418,6 +441,8 @@ def main() -> int:
     parser.add_argument("--engine-license", help="the engine's LICENSE (default: <prefix>/share/doc/dve-runtime/LICENSE)")
     parser.add_argument("--strict-export", action="store_true")
     parser.add_argument("--include-sample-maps", action="store_true")
+    parser.add_argument("--allow-mp3-libraries", action="store_true",
+                        help="package even if the runtime bundles libmpg123/libmp3lame (refused by default)")
     parser.add_argument("--tgz", action="store_true")
     parser.add_argument("--no-strip", action="store_true", help="keep symbols in the game executable")
     parser.add_argument("--verify", action="store_true")

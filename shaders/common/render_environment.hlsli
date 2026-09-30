@@ -7,6 +7,9 @@ static const uint kTonemapClamp = 2u;
 static const uint kGlobalIlluminationOff = 0u;
 static const uint kGlobalIlluminationAmbientHemisphere = 1u;
 static const uint kGlobalIlluminationVoxelOneBounce = 2u;
+// Reserved for Radiance Cascades Phase 3 (docs/RADIANCE_CASCADES.md). Only the CPU reference
+// renderer implements it today; pack_gpu_render_environment still sends VoxelOneBounce (2).
+static const uint kGlobalIlluminationRadianceCascades = 3u;
 static const uint kShadowOff = 0u;
 static const uint kShadowHard = 1u;
 static const uint kShadowSoft = 2u;

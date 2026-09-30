@@ -1343,9 +1343,10 @@ int l_set_environment_gi_mode(lua_State* L) {
     if (name == "off") environment.globalIlluminationMode = GlobalIlluminationMode::Off;
     else if (name == "ambient") environment.globalIlluminationMode = GlobalIlluminationMode::AmbientHemisphere;
     else if (name == "voxel_one_bounce") environment.globalIlluminationMode = GlobalIlluminationMode::VoxelOneBounce;
+    else if (name == "radiance_cascades") environment.globalIlluminationMode = GlobalIlluminationMode::RadianceCascades;
     else {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "GI mode must be \"off\", \"ambient\", or \"voxel_one_bounce\"");
+        lua_pushstring(L, "GI mode must be \"off\", \"ambient\", \"voxel_one_bounce\", or \"radiance_cascades\"");
         return 2;
     }
     lua_pushboolean(L, 1);
@@ -1385,6 +1386,7 @@ int l_get_environment(lua_State* L) {
     lua_pushnumber(L, environment.subsurfaceMaxDistanceMeters); lua_setfield(L, -2, "subsurface_max_distance_meters");
     const char* giName = environment.globalIlluminationMode == GlobalIlluminationMode::Off ? "off"
                          : environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere ? "ambient"
+                         : environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades ? "radiance_cascades"
                          : "voxel_one_bounce";
     lua_pushstring(L, giName); lua_setfield(L, -2, "global_illumination_mode");
     lua_pushnumber(L, environment.globalIlluminationIntensity); lua_setfield(L, -2, "global_illumination_intensity");

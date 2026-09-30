@@ -653,6 +653,7 @@ if(DVE_BUILD_RHI)
         src/render/main_material_table.cpp
         src/render/shadow_material_table.cpp
         src/render/voxel_reference_renderer.cpp
+        src/render/radiance_cascades_spwi.cpp
         src/render/simulation_gpu.cpp)
     if(DVE_ENABLE_CPU_HAIR)
         target_sources(dve_render_bridge PRIVATE src/render/cpu_hair_renderer.cpp)
@@ -674,6 +675,8 @@ if(DVE_BUILD_RHI)
     target_link_libraries(dve_gabor_volume_v151_demo PRIVATE dve::render_bridge)
     add_executable(dve_material_preview apps/material_preview_v174.cpp)
     target_link_libraries(dve_material_preview PRIVATE dve::render_bridge)
+    add_executable(dve_rc_spwi_bench apps/rc_spwi_bench.cpp)
+    target_link_libraries(dve_rc_spwi_bench PRIVATE dve::render_bridge)
 endif()
 
 if(DVE_BUILD_ASSET_COOKER OR DVE_BUILD_BENCHMARK OR DVE_BUILD_EDITOR OR DVE_BUILD_TESTS)
@@ -2440,6 +2443,12 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_hybrid_reference_rendering_tests tests/test_hybrid_reference_rendering.cpp)
     target_link_libraries(dve_hybrid_reference_rendering_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_hybrid_reference_rendering_tests COMMAND dve_hybrid_reference_rendering_tests)
+    add_executable(dve_rc_spwi_tests tests/test_radiance_cascades_spwi.cpp)
+    target_link_libraries(dve_rc_spwi_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_rc_spwi_tests COMMAND dve_rc_spwi_tests)
+    # The tests use two worker threads; reserve them so ctest -jN leaves cores for the
+    # timing-sensitive audio acceptance tests.
+    set_tests_properties(dve_rc_spwi_tests PROPERTIES PROCESSORS 2)
     add_executable(dve_voxel_lighting_plan_tests tests/test_voxel_lighting_plan.cpp)
     target_link_libraries(dve_voxel_lighting_plan_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_voxel_lighting_plan_tests COMMAND dve_voxel_lighting_plan_tests)

@@ -6,6 +6,10 @@ renderer) landed.** Nothing runs on the GPU yet. Phase 2 adds
 GPU packing and `voxel_lighting_plan` treat it as `VoxelOneBounce`. §7 is the Phase 3 GPU
 hand-off.
 
+Since the Phase 2 follow-up, the CPU reference reads every `RenderEnvironment` `*Meters`
+distance in metres, like the GPU (§5.6). The Phase 2 review decisions (units, default merge,
+hemisphere direction maps, no temporal accumulation) are listed in §6 under "Decisions".
+
 - Phase 1: §1–§4, CPU 2D reference over voxel slices.
 - Phase 2: §5–§6, screen probes with world-space intervals.
 - Phase 3: §7, GPU hand-off.
@@ -245,7 +249,8 @@ only. The GPU path (`generate_gi_sun_rays.hlsl` + `resolve_gi.hlsl`) instead tra
 sun-visibility ray per bounce hit and adds `sun · max(0, n·l) · vis / π`. The CPU now does the
 same through `spwi::bounce_hit_radiance`:
 
-- The ray starts at `hit + n · max(1e-3, shadowBias)`.
+- The ray starts at `hit + n · max(1e-3, shadowBias)`, with the bias and the floor in voxels
+  (`shadowBiasMeters / metersPerVoxel`, §5.6). This matches `generate_gi_sun_rays.hlsl`.
 - The ray is skipped when `n·l ≤ 0` or `sunIntensity = 0`. That gives the same result as
   always tracing it.
 - Sun rays are counted in `RenderStats::globalIlluminationSunRays`, so `shadowRays` keeps
@@ -277,11 +282,17 @@ All secondary rays in `ReferenceVoxelRenderer` now go through `spwi::VoxelSceneT
     sub-texel quadrature. They sum to 4π to within 0.4%.
   - Doubling the resolution per axis gives 4× the directions, which with 4× fewer probes keeps
     memory constant per level. This is the ×4/×4 layout from Phase 1 and GM Shaders.
-- **Intervals** are in world units: level *i* covers [L₀·(4ⁱ − 1)/3, L₀·(4ⁱ⁺¹ − 1)/3) with
-  L₀ = 1 voxel. The top level always ends at `globalIlluminationMaxDistanceMeters`.
+- **Intervals** are in world units, which are voxels in the reference path: level *i* covers
+  [L₀·(4ⁱ − 1)/3, L₀·(4ⁱ⁺¹ − 1)/3) with L₀ = 1 voxel. The top level always ends at the GI max
+  distance in voxels, `globalIlluminationMaxDistanceMeters / metersPerVoxel` (§5.6).
+  `RadianceCascadeSettings` lengths (`baseIntervalLength`, overlap, tolerances) are not
+  `*Meters` fields. They stay in voxels or probe spacings.
   - Level count: add levels until the next start would pass the max distance, until 10, or
     until a level would have fewer than 2 probes on the long screen axis.
-  - With the default max distance of 48 that gives 4 levels: [0,1) [1,5) [5,21) [21,48].
+  - The synthetic scenes use a GI max distance of 4.8 m, which is 48 voxels at 0.1 m/voxel.
+    That gives 4 levels at 320×180: [0,1) [1,5) [5,21) [21,48].
+  - The engine default of 12 m (120 voxels) gives 5 levels: [0,1) [1,5) [5,21) [21,85)
+    [85,120].
   - `intervalScaling = ProbeSpacing` scales each probe's intervals by its level-0 cell size at
     its depth, i.e. depth-scaled intervals.
 - **Tracing** calls `VoxelSceneTracer::trace(start, dir, length)` per interval. A hit returns
@@ -336,37 +347,120 @@ the constant exactly.
 The whole solve is rebuilt every frame from the current voxels: the tracer snapshot (0.6–0.9
 ms), the G-buffer, all cascades and the gather. There is **no temporal accumulation, so no
 history to reset**. An edit shows up in the very next frame. `AppliedBrickEdit`-driven
-invalidation is only needed once Phase 3 adds temporal reuse (see §7.4).
+invalidation would only be needed if temporal reuse were added, and Phase 3 does not plan
+it (§6 "Decisions", §7.4).
+
+### 5.6 Units: `*Meters` settings are metres on the CPU too
+
+The Phase 2 CPU code used `globalIlluminationMaxDistanceMeters`, `shadowMaxDistanceMeters`,
+`contactShadowDistanceMeters` and `shadowBiasMeters` directly as world units, i.e. as voxel
+counts. The GPU divides them by `gMetersPerVoxel` (`MetersToVoxelUnits` in
+`render_environment.hlsli`), so the two backends disagreed by a factor of 10. The CPU now
+converts them the same way as the GPU:
+
+- `kDefaultMetersPerVoxel = 0.1` (in `render_environment.hpp`) is the engine's authored voxel
+  size, the same as the `voxelSizeMeters` defaults in `GameObjectDesc`, `VoxelizeSettings` and
+  `EditorDocument`. `GpuRenderEnvironment::metersPerVoxel` and the fallback in
+  `pack_gpu_render_environment` now use it too. `resolve_meters_per_voxel` maps
+  non-finite or non-positive values to the default on both paths.
+- `ReferenceVoxelRenderer::metersPerVoxel` (default 0.1) is the scene scale. The reference
+  path traces in voxel-index units, because instance transforms are rigid. A caller with
+  another uniform voxel size sets this field, e.g. from `RuntimeScene::uniform_voxel_size_meters()`.
+  `render_hybrid_reference` takes the same value as a trailing parameter.
+- `voxel_lighting_distances(environment, metersPerVoxel)` (in `ray_lighting_reference.hpp`)
+  converts every distance once per frame with `meters_to_voxel_units`.
+- The consumers:
+  - `ReferenceVoxelRenderer`: primary soft, hard, contact and hybrid shadows, and
+    `VoxelOneBounce` GI (bias and max distance).
+  - `spwi::bounce_hit_radiance`: the sun ray's bias and max distance.
+  - `spwi::describe_cascades`: the top interval end.
+  - `spwi::solve_radiance_cascades` and `spwi::solve_brute_force_indirect`: the GI max distance
+    and the probe/ray origin bias.
+
+  Each of these takes a trailing `metersPerVoxel` (default 0.1). `SyntheticSceneSetup` now
+  carries `metersPerVoxel` too.
+- Minimum-bias floors (`max(1e-3, bias)`) are applied in voxels after the conversion, as on
+  the GPU. `subsurfaceMaxDistanceMeters` is converted as well but has no CPU consumer.
+  The polygon reference renderer uses no distances.
+
+**Defaults.** The `RenderEnvironment` defaults (GI 12 m, shadow 2500 m, contact 2 m, bias
+0.015 m) were chosen as metres for the GPU and are shared with it, so they are unchanged. On the
+CPU they now mean what they mean on the GPU: GI reaches 120 voxels (previously 12), contact
+shadows 20 voxels (previously 2), and the bias is 0.15 voxel (previously 0.015). The values
+authored as voxel counts were rescaled so the geometry they describe is unchanged:
+
+- synthetic scenes: GI 48 → 4.8 m and sun-ray max 200 → 20 m, which is still 48 and 200 voxels
+- tests: GI 48 → 4.8 m and 40 → 4.0 m
+
+The shadow bias was left at the engine default rather than rescaled to 0.0015 m, so the
+reference now uses the GPU's 0.15-voxel bias. With the bias temporarily forced to 0.0015 m, the
+bench reproduces the pre-change tables exactly (errors, ray and sun-ray counts), apart from
+timings. Every number shift in §6 therefore comes from the bias.
+
+Checking the default 12 m on the synthetic scenes (320×180, bilinear fix + overlap, against
+brute force at the same distance):
+
+| scene | GI max | cascades | interval rays | rel RMSE |
+|---|---|---:|---:|---:|
+| courtyard | 4.8 m | 4 | 0.95 M | 0.054 |
+| courtyard | 12 m | 5 | 1.13 M | 0.056 |
+| thin wall | 4.8 m / 12 m | 4 / 5 | 1.51 M / 1.95 M | 0.146 / 0.146 |
+| bunker | 4.8 m / 12 m | 4 / 5 | 5.50 M / 7.16 M | 0.012 / 0.012 |
+
+At 12 m there is one more level, 20–30% more rays and 26% more all-levels memory
+(58.9 MB vs 46.7 MB), with the same error. The default is fine.
 
 ## 6. Phase 2 results
 
 Numbers are at 320×180 unless noted, with brute force at 2048 spp and 8 threads. MC16 is a
 16-spp estimator with the same hit model, i.e. the `VoxelOneBounce` cap. All numbers are from
-`p2-results.md`.
+`p2-results.md` and were re-run after the units change (§5.6). Timings vary by about ±20% from
+run to run.
+
+### Units change: before and after (320×180, default = bilinear fix + overlap)
+
+| scene | mode | rel RMSE before | rel RMSE after | rel max before → after | bias before → after |
+|---|---|---:|---:|---|---|
+| courtyard | MC16 | 0.073 | 0.073 | 0.41 → 0.42 | 0.000 → 0.000 |
+| courtyard | vanilla + overlap | 0.044 | 0.044 | 0.40 → 0.42 | 0.000 → 0.000 |
+| courtyard | **default** | 0.054 | 0.054 | 0.50 → 0.49 | 0.013 → 0.013 |
+| bunker | MC16 | 0.044 | 0.044 | 0.23 → 0.21 | 0.000 → 0.000 |
+| bunker | vanilla + overlap | 0.011 | 0.011 | 0.14 → 0.14 | 0.004 → 0.004 |
+| bunker | **default** | 0.012 | 0.012 | 0.13 → 0.13 | 0.005 → 0.005 |
+| thin wall | MC16 | 0.815 | 0.806 | 5.19 → 5.43 | 0.001 → 0.000 |
+| thin wall | vanilla + overlap | 0.170 | 0.164 | 1.21 → 1.11 | 0.079 → 0.079 |
+| thin wall | **default** | 0.160 | **0.146** | 0.93 → 0.82 | 0.069 → 0.062 |
+
+"Before" is main at ffd8055, where the bias was 0.015 voxel. "After" uses 0.015 m = 0.15 voxel.
+The larger bias moves probe and ray origins off the surface a little more, which mostly helps
+the thin wall's short-range emitter light. Leak ratios are unchanged: 0 for every overlap or
+bilinear mode, and 0.0077 for vanilla without overlap. Destruction still tracks brute force
+within 1% (receiver 0.0176 vs 0.0177 after the edit). Whole-frame rel RMSE after the edit is
+0.111 → 0.116 and room-only 0.112 → 0.116. The sweep ranking is unchanged.
 
 ### Accuracy and cost (default = bilinear fix + overlap, 8×8 dirs, 2 px spacing, ×4 intervals)
 
 | scene | mode | rel RMSE | rel max | bias | ms | interval rays |
 |---|---|---:|---:|---:|---:|---:|
-| courtyard | MC16 | 0.073 | 0.41 | 0.000 | 24 | 0.21 M |
+| courtyard | MC16 | 0.073 | 0.42 | 0.000 | 25 | 0.21 M |
 | courtyard | vanilla (no overlap) | 0.079 | 0.73 | −0.028 | 36 | 0.40 M |
-| courtyard | vanilla + overlap | **0.044** | 0.40 | 0.000 | 35 | 0.40 M |
-| courtyard | bilinear fix (no overlap) | 0.067 | 0.56 | 0.004 | 65 | 0.95 M |
-| courtyard | **bilinear fix + overlap** | 0.054 | 0.50 | 0.013 | 80 | 0.95 M |
-| courtyard | bilinear + overlap, ×2 intervals (paper layout) | 0.098 | 0.53 | 0.023 | 102 | 1.23 M |
-| courtyard | bilinear + overlap, depth-scaled intervals | 0.066 | 0.39 | 0.017 | 83 | 1.06 M |
+| courtyard | vanilla + overlap | **0.044** | 0.42 | 0.000 | 36 | 0.40 M |
+| courtyard | bilinear fix (no overlap) | 0.068 | 0.58 | 0.004 | 68 | 0.95 M |
+| courtyard | **bilinear fix + overlap** | 0.054 | 0.49 | 0.013 | 69 | 0.95 M |
+| courtyard | bilinear + overlap, ×2 intervals (paper layout) | 0.098 | 0.53 | 0.023 | 96 | 1.23 M |
+| courtyard | bilinear + overlap, depth-scaled intervals | 0.065 | 0.38 | 0.017 | 77 | 1.06 M |
 | courtyard | bilinear + overlap, 4×4 dirs | 0.081 | 0.53 | 0.017 | 19 | 0.21 M |
-| bunker | MC16 | 0.044 | 0.23 | 0.000 | 57 | 0.92 M |
-| bunker | vanilla + overlap | **0.011** | 0.14 | 0.004 | 66 | 1.81 M |
-| bunker | **bilinear fix + overlap** | 0.012 | 0.13 | 0.005 | 192 | 5.50 M |
-| bunker | bilinear + overlap, 4×4 dirs | 0.033 | 0.19 | 0.001 | 51 | 1.30 M |
-| thin wall (emissive panel only) | MC16 | 0.815 | 5.19 | 0.001 | 21 | 0.30 M |
-| thin wall | vanilla + overlap | 0.170 | 1.21 | 0.079 | 30 | 0.53 M |
-| thin wall | **bilinear fix + overlap** | 0.160 | 0.93 | 0.069 | 78 | 1.51 M |
+| bunker | MC16 | 0.044 | 0.21 | 0.000 | 51 | 0.92 M |
+| bunker | vanilla + overlap | **0.011** | 0.14 | 0.004 | 67 | 1.81 M |
+| bunker | **bilinear fix + overlap** | 0.012 | 0.13 | 0.005 | 181 | 5.50 M |
+| bunker | bilinear + overlap, 4×4 dirs | 0.032 | 0.19 | 0.000 | 57 | 1.30 M |
+| thin wall (emissive panel only) | MC16 | 0.806 | 5.43 | 0.000 | 21 | 0.30 M |
+| thin wall | vanilla + overlap | 0.164 | 1.11 | 0.079 | 32 | 0.53 M |
+| thin wall | **bilinear fix + overlap** | **0.146** | 0.82 | 0.062 | 82 | 1.51 M |
 
 The default beats the 16-spp GI cap everywhere. In the scenes with the sun and sky (courtyard
 and bunker) it is about 1.4× and 3.5× better. In the small-emitter thin-wall scene it is about
-5× better, where MC16 is mostly noise. Its cost is about 3× MC16 at 320×180. RC error is
+5.5× better, where MC16 is mostly noise. Its cost is about 3× MC16 at 320×180. RC error is
 bias-like (smooth and structured, see the error maps) rather than noise, so it would not
 average out temporally the way MC does.
 
@@ -396,16 +490,16 @@ at 320×180.
 
 | resolution | mode | ms (8 thr) | ms (1 thr) | rel RMSE | peak MB | all-levels MB |
 |---|---|---:|---:|---:|---:|---:|
-| 320×180 | MC16 | 22 | 66 | 0.073 | – | – |
-| 320×180 | vanilla + overlap | 40 | 85 | 0.044 | 14.7 | 46.7 |
-| 320×180 | **default** | 67 | 182 | 0.054 | 14.7 | 46.7 |
-| 320×180 | default, 4×4 dirs | 20 | 45 | 0.081 | 3.7 | 11.7 |
-| 640×360 | MC16 | 87 | 275 | 0.072 | – | – |
-| 640×360 | vanilla + overlap | 138 | 314 | 0.031 | 57.4 | 183.8 |
-| 640×360 | **default** | 283 | 803 | 0.034 | 57.4 | 183.8 |
-| 640×360 | default, 4×4 dirs | 76 | 185 | 0.070 | 14.3 | 46.0 |
+| 320×180 | MC16 | 24 | 65 | 0.073 | – | – |
+| 320×180 | vanilla + overlap | 41 | 77 | 0.044 | 14.7 | 46.7 |
+| 320×180 | **default** | 75 | 191 | 0.054 | 14.7 | 46.7 |
+| 320×180 | default, 4×4 dirs | 20 | 44 | 0.081 | 3.7 | 11.7 |
+| 640×360 | MC16 | 89 | 263 | 0.073 | – | – |
+| 640×360 | vanilla + overlap | 146 | 303 | 0.032 | 57.4 | 183.8 |
+| 640×360 | **default** | 293 | 793 | 0.034 | 57.4 | 183.8 |
+| 640×360 | default, 4×4 dirs | 76 | 183 | 0.071 | 14.3 | 46.0 |
 
-- Brute force at 2048 spp takes 2.7 s at 320×180 and 10.4 s at 640×360.
+- Brute force at 2048 spp takes 2.7 s at 320×180 and 10.2 s at 640×360.
 - Memory is 13 B per direction texel (RGB32F + a valid byte). The layout keeps it constant per
   level: 19,160 probes over 4 levels at 320×180.
 - "Peak" counts one level plus the pre-averaged upper level, which is all the CPU keeps.
@@ -418,14 +512,14 @@ at 320×180.
 
 | frame | render ms (RC mode) | receiver RC | receiver brute force | rel RMSE (whole frame) |
 |---|---:|---:|---:|---:|
-| before | 227 | 0.0153 | 0.0153 | 0.012 |
-| after | 247 | 0.0177 | 0.0178 | 0.111 |
+| before | 236 | 0.0153 | 0.0153 | 0.012 |
+| after | 236 | 0.0176 | 0.0177 | 0.116 |
 
-- `remove_box` took 0.07 ms.
+- `remove_box` took 0.07–0.11 ms.
 - "Receiver" is the mean indirect luminance on the room floor within 6 voxels of the wall.
 - RC tracks brute force to within 1% on the very next frame.
 - After the edit, the error concentrates on the 1-voxel jamb faces and the wall base beside the
-  new sunlit patch (room-only rel RMSE 0.112).
+  new sunlit patch (room-only rel RMSE 0.116).
 
 ### Parameter sweep (288 configs; `p2-sweep.csv`)
 
@@ -472,31 +566,37 @@ at 320×180.
    hemisphere. A per-pixel final gather at cascade 0, or 1 px spacing near edges, would help.
 4. **The octahedral map is hemisphere-wasteful.** Half of each probe's texels face into the
    surface and are never traced, but they are still stored. A hemi-octahedral map around the
-   normal would halve memory (open question 3).
-5. **Units:** the CPU reference renderer uses `globalIlluminationMaxDistanceMeters`,
-   `shadowBias`, etc. directly as world units, where 1 voxel = 1 unit. The GPU packer converts
-   metres to voxels with `metersPerVoxel` (0.1 in the engine). The RC interval lengths here are
-   therefore in voxels. Phase 3 must pick one convention (open question 1).
+   normal would halve memory. Phase 3 adopts it (decision 3, §7.2).
+5. **Units (resolved, §5.6):** the Phase 2 CPU reference used `globalIlluminationMaxDistanceMeters`,
+   `shadowBiasMeters`, etc. directly as world units (1 voxel = 1 unit), while the GPU packer
+   converts metres to voxels with `metersPerVoxel` (0.1 in the engine). The CPU now converts
+   them the same way. RC interval settings stay in voxels, the unit `TraceVoxelRay` uses on
+   both backends.
 6. **`voxel_lighting_plan` does not schedule the GI sun-ray passes.** `resolve_gi.hlsl` reads
    `gGiSunResults` (t9) and `generate_gi_sun_rays.hlsl` is in the shader manifest, but
    `make_voxel_lighting_frame_plan` emits only generate/trace/resolve GI. This was not changed
    here (no GPU wiring). Phase 3 should add the passes, or confirm the GPU host issues them
    elsewhere.
 
-### Open questions
+### Decisions (Phase 2 review; these were the open questions)
 
-1. Units: should the CPU reference interpret the `*Meters` fields in metres (÷ metersPerVoxel)
-   like the GPU? That would change `ReferenceVoxelRenderer` output for every GI/shadow
-   distance, so it needs its own change and golden updates.
-2. Default merge: keep the bilinear fix (robust against leaks at low resolution, about 2.4×
-   the rays) or switch to vanilla + overlap (cheaper, and better at 320×180+)? A GPU could
-   also pick per resolution.
-3. A hemi-octahedral direction map around each probe's normal (halves storage and wasted
-   texels) versus a world-aligned octahedral map (simpler merges across normals). The thesis
-   uses a world-aligned map.
-4. Temporal: RC's error is structured bias, not noise. Is temporal accumulation worth it at
-   all in Phase 3, or only for jittered probe placement? If it is used, it needs the
-   `AppliedBrickEdit` reset described in §7.4.
+1. **Units: metres everywhere.** The CPU reference interprets every `*Meters` field in metres
+   (÷ `metersPerVoxel`, default 0.1), like the GPU. It is implemented in §5.6, with the golden
+   and number changes listed there and in the before/after table above.
+2. **Default merge: the bilinear fix stays the default** (`RadianceCascadeSettings::merge =
+   BilinearFix`, checked in `dve_rc_spwi_tests`). It stays at 0 leak through a 1-voxel wall at
+   128×72, where vanilla + overlap leaks 1.4%. That is worth about 2.4× the rays of vanilla +
+   overlap, even though vanilla + overlap is slightly cheaper and more accurate at 320×180+.
+   A GPU backend may still offer vanilla + overlap as a quality or performance option, but
+   the reference default does not change.
+3. **Phase 3 uses a hemisphere direction map around each probe's normal** instead of the
+   world-aligned full-sphere octahedral map. This halves direction storage. See §7.2 for the
+   memory estimate and §7.1 for what it changes in the merge.
+4. **No temporal accumulation in Phase 3.** The remaining RC error is smooth, structured bias:
+   contact corners, sub-probe-footprint geometry, and the far-field angle of the merge. It is
+   not per-frame noise, so accumulating history would not reduce it, and it would add
+   ghosting and edit-invalidation cost. Every frame is solved from scratch, as on the CPU. See
+   §7.4 for what this means for destruction.
 
 ## 7. Phase 3 GPU hand-off
 
@@ -508,7 +608,7 @@ at 320×180.
 | 2 | `TraceRadianceCascadeIntervals` (per level, top → 0) | probes_i × dirs_i (hemisphere) | brick tables (`TraceVoxelRay` with origin = probe + d·start, `maxDistance` = interval, or up to 4 rays per texel for the bilinear fix), `gRcProbes[i]`, `gRcProbes[i+1]`, `gRcRadiance[i+1]` (pre-averaged) | `gRcHit[i]` (per ray: material, normal, hit position) |
 | 3 | `TraceRadianceCascadeSun` (per level) | hits of pass 2 | brick tables | sun visibility per hit (same as `generate_gi_sun_rays`) |
 | 4 | `MergeRadianceCascade` (per level) | probes_i × dirs_i | pass 2/3 results, bilateral weights to `gRcProbes[i+1]`, `gRcRadiance[i+1]` | `gRcRadiance[i]` |
-| 5 | `PreAverageRadianceCascade` (per level > 0) | probes_i × dirs_i / 4 | `gRcRadiance[i]` | the pre-averaged map at level i − 1's resolution (or fold into pass 4 with a bilinear octahedral fetch) |
+| 5 | `PreAverageRadianceCascade` (per level > 0) | probes_i × dirs_i / 4 | `gRcRadiance[i]` | the pre-averaged map at level i − 1's resolution (or fold into pass 4 with a bilinear hemisphere-map fetch; see the hemisphere note below) |
 | 6 | `GatherRadianceCascades` | pixels | `gRcRadiance[0]`, `gRcProbes[0]`, the G-buffer | `gIndirectDiffuse` (u3), the same buffer `resolve_gi` writes |
 | 7 | `ShadePrimary` | pixels | unchanged; it already reads `gIndirectDiffuse` (t11) | – |
 
@@ -517,17 +617,50 @@ at 320×180.
   exactly that.
 - The top level has no upper probes. It traces to the GI max distance and adds
   `EnvironmentRadiance` on a miss.
+- **Hemisphere direction maps (decision 3).** Every probe stores only the hemisphere around
+  its own normal, using a hemi-octahedral parameterisation in a tangent frame built from the
+  normal. The CPU's world-aligned map already traces only `d·n > 0`, so the ray count does not
+  change. What changes:
+  - The storage and the dispatch no longer include the half of the texels that face into the
+    surface.
+  - The merge can no longer pair texels by index. A lower probe's direction `d` has to be
+    looked up in the upper probe's frame with a bilinear fetch. A `d` below the upper probe's
+    hemisphere has no data and gets weight 0, the same as an invalid texel on the CPU. Where
+    the lower and upper normals are equal (coplanar probes, the common case), the fetch equals
+    the CPU's index-aligned 2×2 pre-average, so pass 5 folds into pass 4 as a bilinear fetch.
+  - Across creases the bilateral normal weight (`max(0, n_p·n_k)^8`) already suppresses these
+    neighbours.
+  - The gather integrates the hemisphere map about the pixel normal. With the pixel normal
+    equal to the probe normal, as on voxel faces, that is a fixed cosine table per texel.
+  - Validation: GPU output must still meet the `dve_rc_spwi_tests` thresholds against the
+    CPU's full-sphere reference on the synthetic scenes.
 
 ### 7.2 Buffers (1920×1080, RGBA16F = 8 B per direction texel, per level constant)
 
-| configuration | probes L0 | texels per level | per level | ping-pong (2 levels) | all levels (5) |
-|---|---:|---:|---:|---:|---:|
-| 2 px, 8×8 (CPU default) | 960×540 | 33.2 M | 265 MB | 531 MB | ~1.3 GB |
-| 4 px, 8×8 | 480×270 | 8.3 M | 66 MB | 133 MB | ~330 MB |
-| 4 px, 4×4 (thesis) | 480×270 | 2.1 M | 17 MB | 33 MB | ~83 MB |
+"Dirs" is the full-sphere-equivalent angular resolution at level 0. The hemisphere map (decision
+3) stores half of it per probe, e.g. 32 texels instead of 64 for 8×8. Pack it as a D × D/2
+rectangle, or use a hemi-octahedral square with the same angular density.
 
-- The CPU default is **not** a GPU budget at 1080p. Start with 4 px / 4×4, then measure
-  4 px / 8×8 and a hemi-octahedral 8×8 (half the texels).
+| configuration | probes L0 | map | texels per level | per level | ping-pong (2 levels) | all levels (5) |
+|---|---:|---|---:|---:|---:|---:|
+| 2 px, 8×8 (CPU default) | 960×540 | full sphere (CPU) | 33.2 M | 265 MB | 531 MB | ~1.3 GB |
+| 2 px, 8×8 | 960×540 | **hemisphere** | 16.6 M | 133 MB | 265 MB | ~660 MB |
+| 4 px, 8×8 | 480×270 | full sphere | 8.3 M | 66 MB | 133 MB | ~330 MB |
+| 4 px, 8×8 | 480×270 | **hemisphere** | 4.1 M | 33 MB | 66 MB | ~166 MB |
+| 4 px, 4×4 (thesis) | 480×270 | full sphere | 2.1 M | 17 MB | 33 MB | ~83 MB |
+| 4 px, 4×4 | 480×270 | **hemisphere** | 1.0 M | 8.3 MB | 17 MB | ~41 MB |
+
+- The hemisphere map halves every radiance figure, and the pre-averaged upper copy and the
+  bandwidth per merge are halved too. Probe buffers are unchanged. The interval ray count is
+  unchanged, because the CPU already skips `d·n ≤ 0`, but no GPU threads are launched for
+  below-surface texels.
+- On the CPU bench at 320×180 the same change would take the default's peak from 14.7 MB to
+  about 7.4 MB and all-levels from 46.7 MB to about 23 MB.
+- Even with the hemisphere map, the CPU default is **not** a GPU budget at 1080p (~265 MB
+  ping-pong). Start with 4 px / 4×4 hemisphere (17 MB ping-pong), then measure 4 px / 8×8
+  hemisphere (66 MB ping-pong).
+- The engine's 12 m GI default gives 5 levels at these probe counts (§5.6), which the
+  "all levels" column assumes.
 - Keep only two levels resident. The top-down merge needs only level i + 1 (pre-averaged)
   while writing level i.
 - Probe buffers are about 32 B per probe per level (float3 position, packed normal, view
@@ -552,21 +685,29 @@ at 320×180.
   `gIndirectDiffuse` for any mode ≠ 2, so skip it in mode 3 rather than let it clobber the
   gather.
 - RC parameters in the constant buffer or `GpuRenderEnvironment`: spacing, base resolution,
-  L₀, growth, overlap, the depth tolerance and the normal power. The layout is guarded by
+  L₀ (in voxels, like the CPU), growth, overlap, the depth tolerance and the normal power. The
+  GI max distance and bias arrive in metres and go through `MetersToVoxelUnits`, exactly as
+  the CPU does with `voxel_lighting_distances`. The layout is guarded by
   `tools/validate_shader_contracts.py`, so update both sides.
 - Add the missing GI sun-ray passes for `VoxelOneBounce` (finding 6) while in there.
 - Tests: extend `dve_voxel_lighting_plan_tests` (mode 3 dispatch list and capacities). The GPU
   output should be checked against `spwi::solve_radiance_cascades` on the synthetic scenes
   (`spwi::make_synthetic_scene`) with the thresholds in `dve_rc_spwi_tests`.
 
-### 7.4 Destruction on the GPU
+### 7.4 Destruction on the GPU (no temporal accumulation)
 
-Without temporal reuse nothing needs invalidating: the brick tables are the only scene input,
-and they are already updated by the edit path. If Phase 3 adds temporal accumulation of cascade
-radiance, reset (or clamp the history weight of) every probe whose interval AABB intersects an
-`AppliedBrickEdit` brick bound. At minimum, reset every probe within the GI max distance of the
-edit. A global reset on any edit is the simple first version. The CPU destruction test is the
-pass criterion: the receiver matches brute force within 5% on the first frame after the edit.
+**Decision: Phase 3 has no temporal accumulation of cascade radiance** (§6 "Decisions", 4).
+RC's residual error is smooth bias, not noise, so history would not reduce it. Every frame
+rebuilds probes and cascades from the current G-buffer and brick tables. As a result nothing
+needs invalidating. The brick tables are the only scene input, and the edit path already
+updates them, so an edit is visible on the next frame, as on the CPU. The CPU destruction test
+is the pass criterion: the receiver matches brute force within 5% on the first frame after the
+edit.
+
+If temporal reuse is ever added later, e.g. with jittered probe placement, it needs its own
+design and measurements. At minimum, reset (or clamp the history weight of) every probe whose
+interval AABB intersects an `AppliedBrickEdit` brick bound, or every probe within the GI max
+distance of the edit. A global reset on any edit is the simple first version.
 
 ## Sources
 

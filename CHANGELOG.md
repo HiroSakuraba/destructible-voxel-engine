@@ -1,3 +1,17 @@
+# Unreleased — Fix: shader validation with register spaces
+
+- `tools/validate_shader_contracts.py` now parses HLSL registers with an optional register
+  space (`register(b0, space0)`, stored in the manifest as `"b0, space0"`, the same text
+  `scripts/compile_shaders.py` checks). It validates both parts: the register class must match
+  the binding kind (b/t/u/s), the index and space must be numeric, manifest values must be in
+  canonical form, and collisions are detected per space (an omitted space is space0). Source
+  declarations with a space used to be skipped silently; they are now compared with the
+  manifest. `dve_shader_validation` passes again on the DASHR shaders from #17.
+- `tools/verify_compiled_shader_reflection.py` maps `spaceN` to SPIR-V descriptor set N instead
+  of assuming set 0.
+- Added `dve_shader_contract_validator_self_test` (`validate_shader_contracts.py --self-test`)
+  and extended the reflection self-test with register-space cases.
+
 # Unreleased — Packaging Phase 2: dve_player
 
 - Added the `dve_player` executable (SDL3, never links `dve_editor`). It runs a `.dvepak`, a

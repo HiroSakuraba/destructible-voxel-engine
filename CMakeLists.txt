@@ -1084,6 +1084,10 @@ if(DVE_BUILD_TESTS)
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/validate_shaders.sh")
     find_program(DVE_PYTHON3_EXECUTABLE python3)
     if(DVE_PYTHON3_EXECUTABLE)
+        add_test(NAME dve_shader_contract_validator_self_test
+            COMMAND ${DVE_PYTHON3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/validate_shader_contracts.py"
+                    --self-test)
         add_test(NAME dve_compiled_shader_reflection_self_test
             COMMAND ${DVE_PYTHON3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_compiled_shader_reflection.py"

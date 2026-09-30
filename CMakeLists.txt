@@ -111,6 +111,7 @@ add_library(dve_core
     src/brick_palette.cpp
     src/brick_palette_asset_cooker.cpp
     src/render/brick_palette_shading.cpp
+    src/render/radiance_cascades_2d.cpp
     src/voxel_material_switcher.cpp
     src/sprite_palette.cpp
     src/sprite_authoring.cpp

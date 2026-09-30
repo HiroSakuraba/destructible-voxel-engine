@@ -1,0 +1,218 @@
+name: CI
+
+# Full CTest coverage for the Linux presets, packaging artifacts, and an informational Windows
+# configure/build. The focused-contracts, repository-build and dashr-null-rhi jobs stay in
+# v235-foundations.yml unchanged, so existing branch-protection check names keep working.
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Debian trixie matches the development machines: GCC 14 (the dve_player golden framebuffer
+  # hashes are keyed GNU-14-*), packaged SDL3/SDL3_ttf, Lua 5.4.
+  DVE_APT_PACKAGES: >-
+    build-essential cmake ninja-build ccache git python3 pkg-config file xz-utils zstd
+    ca-certificates dpkg-dev
+    libpng-dev libjpeg-dev liblua5.4-dev libsdl3-dev libsdl3-ttf-dev
+    libx11-dev libxext-dev libxft-dev libfreetype-dev libfontconfig-dev
+    libwayland-dev libxkbcommon-dev libasound2-dev libpulse-dev libjack-dev
+    ffmpeg glslang-tools xvfb xauth
+  # Headless SDL for every test that does not pick its own driver; X11-only tests get xvfb-run.
+  SDL_VIDEO_DRIVER: offscreen
+  SDL_AUDIO_DRIVER: dummy
+  CCACHE_COMPRESS: "true"
+  CCACHE_MAXSIZE: 2G
+  CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
+
+jobs:
+  ctest:
+    name: ctest (${{ matrix.preset }})
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [linux-gcc-release, linux-gcc-lua-release, linux-gcc-player-release]
+    steps:
+      - name: Install build and test dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DVE_APT_PACKAGES
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Mark workspace safe for git and point ccache at it
+        # github.workspace is the host path in container jobs; use the in-container path.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.cache/ccache" >> "$GITHUB_ENV"
+      - name: Restore ccache and fetched content
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/ccache
+            .cache/fetchcontent/${{ matrix.preset }}
+          key: dve-${{ matrix.preset }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dve-${{ matrix.preset }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-
+            dve-${{ matrix.preset }}-
+      - name: Configure
+        run: >-
+          cmake --preset ${{ matrix.preset }}
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DFETCHCONTENT_BASE_DIR=$GITHUB_WORKSPACE/.cache/fetchcontent/${{ matrix.preset }}
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build out/build/${{ matrix.preset }} --parallel 4
+          ccache --show-stats
+      - name: Quarantined tests (excluded below)
+        run: ctest --test-dir out/build/${{ matrix.preset }} -N -L ci_quarantine
+      - name: CTest (full suite except label ci_quarantine)
+        # ci_quarantine currently holds only dve_synth_release_acceptance_tests (flaky
+        # polyphony_stress timing; fixed by PR #27). Drop the -LE once that label is removed.
+        run: >-
+          xvfb-run -a ctest --test-dir out/build/${{ matrix.preset }}
+          --output-on-failure --no-tests=error -j4 --timeout 1800
+          -LE ci_quarantine
+          --output-junit ctest-junit.xml
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-${{ matrix.preset }}
+          path: |
+            out/build/${{ matrix.preset }}/ctest-junit.xml
+            out/build/${{ matrix.preset }}/Testing/Temporary/LastTest*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  packaging:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 150
+    env:
+      PRESET: linux-gcc-player-release
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DVE_APT_PACKAGES
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Mark workspace safe for git and point ccache at it
+        # github.workspace is the host path in container jobs; use the in-container path.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.cache/ccache" >> "$GITHUB_ENV"
+      - name: Restore ccache and fetched content (shared with the player ctest leg)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/ccache
+            .cache/fetchcontent/linux-gcc-player-release
+          key: dve-linux-gcc-player-release-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dve-linux-gcc-player-release-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-
+            dve-linux-gcc-player-release-
+      - name: Configure
+        run: >-
+          cmake --preset $PRESET
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DFETCHCONTENT_BASE_DIR=$GITHUB_WORKSPACE/.cache/fetchcontent/$PRESET
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build out/build/$PRESET --parallel 4
+          ccache --show-stats
+      - name: Build the sample game package (tgz, verified)
+        run: cmake --build out/build/$PRESET --target dve_sample_game_package
+      - name: CPack DEB and TGZ
+        run: |
+          cpack --config out/build/$PRESET/CPackConfig.cmake -G "DEB;TGZ" -B out/packages
+          mkdir -p out/artifacts
+          cp out/packages/dve-runtime*.deb out/artifacts/
+          cp out/build/$PRESET/game_packages/*.tar.gz out/artifacts/
+          for deb in out/packages/*.deb; do echo "== $deb"; dpkg-deb -f "$deb"; done
+          ls -l out/packages out/artifacts
+          tar -tzf out/artifacts/*.tar.gz | head -50
+          dpkg-deb -c out/artifacts/dve-runtime*.deb
+      - name: Upload sample game tgz
+        uses: actions/upload-artifact@v4
+        with:
+          name: dve-sample-game-linux-x86_64
+          path: out/artifacts/*.tar.gz
+          if-no-files-found: error
+      - name: Upload runtime deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: dve-runtime-deb
+          path: out/artifacts/*.deb
+          if-no-files-found: error
+
+  windows-msvc:
+    # Informational only: the audit expects configure to fail (PNG/JPEG are REQUIRED and there is
+    # no vcpkg.json). This job reports what breaks; it must not block merges.
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure windows-msvc-release as-is
+        id: plain
+        continue-on-error: true
+        shell: bash
+        run: cmake --preset windows-msvc-release 2>&1 | tee configure-plain.log
+      - name: Install libpng/libjpeg-turbo with the runner's vcpkg (classic mode)
+        if: steps.plain.outcome == 'failure'
+        shell: bash
+        run: |
+          "$VCPKG_INSTALLATION_ROOT/vcpkg" install libpng:x64-windows libjpeg-turbo:x64-windows
+      - name: Configure windows-msvc-release with the vcpkg toolchain
+        if: steps.plain.outcome == 'failure'
+        shell: bash
+        run: |
+          rm -rf out/build/windows-msvc-release
+          cmake --preset windows-msvc-release \
+            "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            2>&1 | tee configure-vcpkg.log
+          exit ${PIPESTATUS[0]}
+      - name: Build (keep going to collect every error)
+        shell: bash
+        run: |
+          cmake --build out/build/windows-msvc-release --config Release --parallel -- /m /p:StopOnFirstFailure=false 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          grep -E ' error (C|LNK)[0-9]+' build.log | sort | uniq | head -200 > build-errors.txt || true
+          echo "distinct error lines: $(wc -l < build-errors.txt)"
+          head -60 build-errors.txt
+          exit $status
+      - name: CTest (Release)
+        shell: bash
+        run: ctest --test-dir out/build/windows-msvc-release -C Release --output-on-failure -j4 -LE ci_quarantine
+      - name: Upload Windows logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msvc-logs
+          path: |
+            configure-*.log
+            build.log
+            build-errors.txt
+            out/build/windows-msvc-release/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore

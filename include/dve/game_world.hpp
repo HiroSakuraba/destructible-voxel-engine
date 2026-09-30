@@ -242,12 +242,21 @@ struct GameWorldSaveState {
     std::vector<GameWorldPoolState> pools;       // sorted by id
 };
 
+struct GameWorldRestoreOptions {
+    // Keep saved timers that have no live callback as *unbound* timers (same id, schedule and
+    // order) instead of dropping them, so a script host can re-attach them by id
+    // (GameWorld::bind_restored_timer, used for named Lua timers). Unbound timers never fire;
+    // call drop_unbound_timers() once every binder has run.
+    bool keepUnboundTimers{};
+};
+
 struct GameWorldRestoreReport {
     std::size_t objectsRestored{};
     std::size_t objectsRemoved{};     // live objects that were not in the save
     std::size_t timersRestored{};
     std::size_t timersCancelled{};    // live timers that were not in the save (already fired)
     std::size_t timersDropped{};      // saved timers whose callback no longer exists
+    std::size_t timersUnbound{};      // saved timers kept without a callback (keepUnboundTimers)
     std::size_t poolsRestored{};
     std::size_t poolsDropped{};       // saved pools that were not registered again
 };
@@ -486,6 +495,7 @@ public:
     // Fires every `intervalSeconds`, starting `intervalSeconds` from now.
     TimerId schedule_repeating(float intervalSeconds, std::function<void()> callback);
     bool cancel_timer(TimerId id);
+    [[nodiscard]] bool has_timer(TimerId id) const noexcept;   // scheduled and not cancelled
 
     using TickListener = std::function<void(float)>;
     using DamageListener = std::function<void(const GameDamageEvent&)>;
@@ -507,7 +517,8 @@ public:
     [[nodiscard]] const GameObjectSource* object_source(GameObjectId id) const noexcept;
     // Everything needed to rebuild the objects, bodies, timers and pools. Polygon geometry is
     // referenced through GameObjectSource, not copied. Sub-runtimes (characters, triggers,
-    // cameras, animation, ragdolls, deformables, hair, UI) are not part of the snapshot.
+    // cameras, animation, ragdolls, hair) are captured separately by
+    // capture_game_runtime_state() in dve/game_save.hpp.
     [[nodiscard]] GameWorldSaveState capture_save_state() const;
     // Replaces the world's objects with `state` (validated first; nothing changes if
     // validation fails). Objects are matched by id: live objects missing from the save are
@@ -519,7 +530,13 @@ public:
     // incomplete; callers restoring into a fresh world should then discard it.
     [[nodiscard]] bool restore_save_state(
         const GameWorldSaveState& state, GameWorldRestoreReport* report = nullptr,
-        std::string* error = nullptr);
+        std::string* error = nullptr, GameWorldRestoreOptions options = {});
+    // Timers kept by GameWorldRestoreOptions::keepUnboundTimers, in scheduling order.
+    [[nodiscard]] std::vector<TimerId> unbound_timer_ids() const;
+    // Attaches `callback` to an unbound restored timer; false if `id` is not unbound.
+    bool bind_restored_timer(TimerId id, std::function<void()> callback);
+    // Cancels every timer that is still unbound; returns how many were dropped.
+    std::size_t drop_unbound_timers();
     // FNV-1a over the saved state (ids, flags, transforms, bodies, voxels, tables, timers):
     // equal hashes mean capture_save_state() would produce the same snapshot.
     [[nodiscard]] std::uint64_t state_hash() const;

@@ -439,6 +439,7 @@ std::optional<PlayerSaveResult> PlayerApp::save_game(std::string_view slotOrPath
     data.metadata.worldStateHash = impl.session.world->state_hash();
     data.metadata.info["physics"] = impl.session.physicsBackend;
     data.world = impl.session.world->capture_save_state();
+    data.runtimes = capture_game_runtime_state(*impl.session.world);
 #if defined(DVE_HAVE_LUA)
     if (impl.session.script) {
         std::string scriptError;
@@ -482,17 +483,23 @@ std::optional<PlayerLoadResult> PlayerApp::load_game(std::string_view slotOrPath
     if (const auto saved = data->metadata.info.find("physics");
         saved != data->metadata.info.end() && saved->second != fresh.physicsBackend)
         impl.log("save was made with " + saved->second + " physics; continuing with " + fresh.physicsBackend);
-    if (!fresh.world->restore_save_state(data->world, &result.restore, &stepError)) return fail(stepError);
+    GameWorldRestoreOptions restoreOptions;
+    restoreOptions.keepUnboundTimers = true;   // named Lua timers are bound again by load_state
+    if (!fresh.world->restore_save_state(data->world, &result.restore, &stepError, restoreOptions)) return fail(stepError);
     result.worldStateHash = fresh.world->state_hash();
     if (result.worldStateHash != data->metadata.worldStateHash)
         return fail("restored world does not match the save (state hash differs)");
+    if (!restore_game_runtime_state(*fresh.world, data->runtimes, &result.runtimes, &stepError)) return fail(stepError);
+    for (const std::string& warning : result.runtimes.warnings) impl.log("save: " + warning);
 #if defined(DVE_HAVE_LUA)
     if (fresh.script && data->scriptState) {
         if (!fresh.script->load_state(*data->scriptState, &stepError)) return fail("script state: " + stepError);
     }
 #endif
-    if (result.restore.timersDropped != 0U)
-        impl.log(std::to_string(result.restore.timersDropped) + " saved timer(s) had no callback after boot and were dropped");
+    result.namedTimersRestored = result.restore.timersUnbound - fresh.world->unbound_timer_ids().size();
+    result.timersDropped = result.restore.timersDropped + fresh.world->drop_unbound_timers();
+    if (result.timersDropped != 0U)
+        impl.log(std::to_string(result.timersDropped) + " saved timer(s) had no callback after boot and were dropped");
 
     // Swap in the new world; the old session (script host first) is destroyed here.
     { PlayerSession old = std::move(impl.session); }

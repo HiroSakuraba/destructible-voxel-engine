@@ -1895,6 +1895,39 @@ bool GameWorld::cancel_timer(TimerId id) {
     return false;
 }
 
+bool GameWorld::has_timer(TimerId id) const noexcept {
+    for (const Timer& timer : timers_)
+        if (timer.id == id && !timer.cancelled) return true;
+    return false;
+}
+
+std::vector<GameWorld::TimerId> GameWorld::unbound_timer_ids() const {
+    std::vector<TimerId> ids;
+    for (const Timer& timer : timers_)
+        if (!timer.cancelled && !timer.callback) ids.push_back(timer.id);
+    return ids;
+}
+
+bool GameWorld::bind_restored_timer(TimerId id, std::function<void()> callback) {
+    if (!callback) return false;
+    for (Timer& timer : timers_) {
+        if (timer.id != id || timer.cancelled) continue;
+        if (timer.callback) return false;
+        timer.callback = std::move(callback);
+        return true;
+    }
+    return false;
+}
+
+std::size_t GameWorld::drop_unbound_timers() {
+    std::size_t dropped = 0U;
+    for (Timer& timer : timers_) {
+        if (!timer.cancelled && !timer.callback) { timer.cancelled = true; ++dropped; }
+    }
+    std::erase_if(timers_, [](const Timer& timer) { return timer.cancelled; });
+    return dropped;
+}
+
 GameObjectPoolId GameWorld::register_pool(GameObjectPoolDesc desc, std::string* error) {
     const auto fail = [&](std::string message) {
         if (error) *error = std::move(message);
@@ -1986,7 +2019,7 @@ void GameWorld::tick(float fixedDeltaSeconds) {
     // be eligible to fire within this same tick.
     std::vector<std::function<void()>> due;
     for (Timer& timer : timers_) {
-        if (timer.cancelled || timer.fireAtSeconds > elapsedSeconds_) continue;
+        if (timer.cancelled || !timer.callback || timer.fireAtSeconds > elapsedSeconds_) continue;
         due.push_back(timer.callback);
         if (timer.intervalSeconds > 0.0F) timer.fireAtSeconds += timer.intervalSeconds;
         else timer.cancelled = true;
@@ -2234,7 +2267,8 @@ std::uint64_t GameWorld::state_hash() const {
     return hash;
 }
 
-bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRestoreReport* report, std::string* error) {
+bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRestoreReport* report, std::string* error,
+                                   GameWorldRestoreOptions options) {
     const auto fail = [&](std::string message) {
         if (error) *error = std::move(message);
         return false;
@@ -2426,28 +2460,32 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
         for (const GameObjectId reserved : pool.freeIds) highestReserved = std::max(highestReserved, reserved);
     }
 
-    // 5. Timers matched by id; ids and the clock continue from the save.
-    std::map<std::uint64_t, const GameWorldTimerState*> savedTimers;
-    for (const GameWorldTimerState& timer : state.timers) savedTimers[timer.id] = &timer;
-    std::set<std::uint64_t> liveTimers;
+    // 5. Timers matched by id; ids, order and the clock continue from the save. Live timers
+    //    missing from the save already fired (or were cancelled) in the saved session.
+    std::map<std::uint64_t, std::function<void()>> liveCallbacks;
     for (Timer& timer : timers_) {
         if (timer.cancelled) continue;
-        const auto saved = savedTimers.find(timer.id);
-        if (saved == savedTimers.end()) {
-            timer.cancelled = true;
-            ++local.timersCancelled;
-            continue;
+        liveCallbacks.emplace(timer.id, std::move(timer.callback));
+    }
+    std::vector<Timer> restoredTimers;
+    restoredTimers.reserve(state.timers.size());
+    std::set<std::uint64_t> seenTimers;
+    for (const GameWorldTimerState& saved : state.timers) {
+        if (!seenTimers.insert(saved.id).second) continue;
+        auto live = liveCallbacks.find(saved.id);
+        if (live != liveCallbacks.end()) {
+            restoredTimers.push_back({saved.id, saved.fireAtSeconds, saved.intervalSeconds, false, std::move(live->second)});
+            liveCallbacks.erase(live);
+            ++local.timersRestored;
+        } else if (options.keepUnboundTimers) {
+            restoredTimers.push_back({saved.id, saved.fireAtSeconds, saved.intervalSeconds, false, {}});
+            ++local.timersUnbound;
+        } else {
+            ++local.timersDropped;
         }
-        timer.fireAtSeconds = saved->second->fireAtSeconds;
-        timer.intervalSeconds = saved->second->intervalSeconds;
-        liveTimers.insert(timer.id);
-        ++local.timersRestored;
     }
-    std::erase_if(timers_, [](const Timer& timer) { return timer.cancelled; });
-    for (const auto& [id, timer] : savedTimers) {
-        (void)timer;
-        if (!liveTimers.contains(id)) ++local.timersDropped;
-    }
+    local.timersCancelled = liveCallbacks.size();
+    timers_ = std::move(restoredTimers);
     std::uint64_t highestTimer = 0U;
     for (const Timer& timer : timers_) highestTimer = std::max<std::uint64_t>(highestTimer, timer.id);
     nextTimerId_ = std::max<std::uint64_t>(state.nextTimerId, highestTimer + 1U);

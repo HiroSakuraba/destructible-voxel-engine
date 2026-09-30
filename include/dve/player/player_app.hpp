@@ -99,6 +99,9 @@ struct PlayerLoadResult {
     std::filesystem::path path;
     SaveGameReadReport read;            // backup fallback, migrations, file size
     GameWorldRestoreReport restore;
+    GameSaveRuntimeReport runtimes;     // characters, cameras, animation, ragdolls, hair
+    std::size_t namedTimersRestored{};  // Lua named timers bound again by the script host
+    std::size_t timersDropped{};        // saved timers nothing re-attached (anonymous Lua closures)
     std::uint64_t tickCount{};
     std::uint64_t worldStateHash{};
 };

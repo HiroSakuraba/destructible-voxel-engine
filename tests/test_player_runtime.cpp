@@ -505,6 +505,13 @@ void test_save_load() {
     press(*a->app, "F9");
     CHECK(a->app->save_events().size() == 1U && a->app->save_events().front().ok && a->app->save_events().front().load);
     CHECK(a->app->world().state_hash() == quickHash);
+    if (PlayerApp::scripting_compiled_in()) {
+        // The blast's named "aftershock" timer was pending at the quicksave: it is bound again.
+        const auto reload = a->app->load_game("quicksave", &error);
+        CHECK(reload && reload->namedTimersRestored == 1U && reload->timersDropped == 0U);
+        CHECK(reload && reload->runtimes.camerasRestored && reload->runtimes.gameplayRestored);
+        CHECK(!a->app->script_global("aftershocks").has_value());
+    }
     CHECK(a->app->tick_count() == quickTick);
     CHECK(a->app->world().object_count() == quickObjects);
     CHECK(render_hash(*a) == quickFrame);
@@ -524,6 +531,12 @@ void test_save_load() {
         run_ticks(*c->app, 15);
         CHECK(c->app->world().state_hash() == a->app->world().state_hash());
         CHECK(render_hash(*c) == render_hash(*a));
+        if (PlayerApp::scripting_compiled_in()) {
+            // 20 + 15 ticks after the blast: the restored aftershock fired in both processes,
+            // and its environment change is identical.
+            CHECK(a->app->script_global("aftershocks") == 1.0 && c->app->script_global("aftershocks") == 1.0);
+            CHECK(a->app->environment().exposure == 1.25F && c->app->environment().exposure == 1.25F);
+        }
     }
 
     // Lua-driven slots: key 1 saves "slot1" through world.save_game, key 2 loads it.

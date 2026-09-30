@@ -384,20 +384,78 @@ struct SaveGameDocument {
     std::map<std::string, std::vector<std::byte>, std::less<>> sections;
 };
 
-using SaveMigration = std::function<bool(SaveGameDocument&, std::string*)>;
+using SaveGameMigration = std::function<bool(SaveGameDocument&, std::string*)>;
+using SaveMigration = SaveGameMigration;
+
+// DVESAVE1 container limits. The defaults are the historical v2.35 ceilings; callers with a
+// known payload (for example the player's world saves, dve/game_save.hpp) pass tighter ones.
+// Every size field is checked against these *and* against the bytes actually present before
+// anything is allocated, so a truncated or hostile file cannot trigger a huge allocation.
+struct SaveGameLimits {
+    std::uint64_t maximumFileBytes{1ULL << 31U};
+    std::uint32_t maximumSections{100000U};
+    std::uint32_t maximumSectionNameBytes{1U << 20U};
+    std::uint64_t maximumSectionBytes{1ULL << 30U};
+};
+
+enum class SaveGameReadSource : std::uint8_t { Primary, Backup };
+
+struct SaveGameReadOptions {
+    // Fall back to `<slot>.bak` (the previous publish) when the slot itself is unreadable.
+    bool allowBackup{true};
+};
+
+struct SaveGameReadReport {
+    SaveGameReadSource source{SaveGameReadSource::Primary};
+    std::uint32_t storedSchemaVersion{};   // before migrations
+    std::uint32_t migrationsApplied{};
+    std::uint64_t fileBytes{};
+    std::string primaryError;              // why the primary was rejected when source == Backup
+};
+
+// DVESAVE1 byte layout (little endian; identical to what v2.35 wrote on little-endian hosts):
+//   "DVESAVE1" | u32 schemaVersion | u64 sequence | u32 sectionCount | u64 documentHash
+//   sectionCount x { u32 nameBytes | u64 payloadBytes | u64 payloadFnv1a | name | payload }
+// Sections are sorted by name. documentHash is FNV-1a over every name followed by its
+// payload hash, so both a flipped payload byte and a renamed/reordered section are caught.
+[[nodiscard]] std::vector<std::byte> encode_save_game_document(const SaveGameDocument& document);
+// Parses and verifies (magic, limits, every hash, no trailing bytes). No migration.
+[[nodiscard]] std::optional<SaveGameDocument> decode_save_game_document(
+    std::span<const std::byte> bytes, const SaveGameLimits& limits = {}, std::string* error = nullptr);
 
 class SaveGameStore {
 public:
-    explicit SaveGameStore(std::uint32_t currentVersion = 1U) : currentVersion_(currentVersion) {}
+    explicit SaveGameStore(std::uint32_t currentVersion = 1U, SaveGameLimits limits = {})
+        : currentVersion_(currentVersion), limits_(limits) {}
+    [[nodiscard]] std::uint32_t current_version() const noexcept { return currentVersion_; }
+    [[nodiscard]] const SaveGameLimits& limits() const noexcept { return limits_; }
+    // One migration per source version; each must advance schemaVersion by exactly one.
     [[nodiscard]] bool register_migration(
         std::uint32_t fromVersion, SaveMigration migration, std::string* error = nullptr);
+    // Brings `document` up to current_version() one registered step at a time. Fails on a
+    // newer schema, a missing step, or a step that does not advance exactly one version.
+    [[nodiscard]] bool migrate(
+        SaveGameDocument& document, std::uint32_t* migrationsApplied = nullptr,
+        std::string* error = nullptr) const;
+    // Writes `<slot>.tmp`, rotates an existing slot to `<slot>.bak`, then renames the temp
+    // file into place. schemaVersion is always stamped with current_version().
     [[nodiscard]] bool write_atomic(
         const std::filesystem::path& slot, SaveGameDocument document,
-        std::string* error = nullptr) const;
+        std::string* error = nullptr, std::uint64_t* writtenBytes = nullptr) const;
+    // Primary, else backup (see SaveGameReadOptions), then migrate.
+    [[nodiscard]] std::optional<SaveGameDocument> read(
+        const std::filesystem::path& slot, const SaveGameReadOptions& options,
+        SaveGameReadReport* report = nullptr, std::string* error = nullptr) const;
+    // v2.35 entry point: read() with the backup fallback enabled.
     [[nodiscard]] std::optional<SaveGameDocument> read_recover(
         const std::filesystem::path& slot, std::string* error = nullptr) const;
+    // In-memory decode + migrate (no backup).
+    [[nodiscard]] std::optional<SaveGameDocument> decode(
+        std::span<const std::byte> bytes, SaveGameReadReport* report = nullptr,
+        std::string* error = nullptr) const;
 private:
     std::uint32_t currentVersion_{};
+    SaveGameLimits limits_{};
     std::map<std::uint32_t, SaveMigration> migrations_;
 };
 

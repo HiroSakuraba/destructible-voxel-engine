@@ -14,7 +14,7 @@ are in `include/dve/rigid_body_adapter.hpp`.
 | Profiler | Thread-safe CPU scopes, counters, memory categories, per-frame model, JSON | Scope and counter capture |
 | Asset dependencies | Validation, rename fix-up, dependency-first closure, deterministic reimport, source fingerprints | Transitive order and rename tests |
 | Input | Prioritized contexts, weighted composites, analog thresholds, chords, five trigger kinds, overlap conflict detection, versioned rebind persistence | Composite cancellation/actuation, priority consumption, press/double-tap recognition, v2 round trip, and legacy load |
-| Save games | Versioned sections, migrations, atomic publish, backup rotation, hashes, recovery | Corrupted primary recovers the previous slot |
+| Save games | Versioned sections, migrations, atomic publish, backup rotation, hashes, recovery; limits checked before allocation, read reports (see [SAVE_GAMES.md](SAVE_GAMES.md), which builds the player world saves on it) | Corrupted primary recovers the previous slot |
 | Animation | Humanoid maps, CPU retargeting, morph targets, CCD IK | Rig validation, retarget, and morph checks |
 | Physics | Point loads, torque, angular impulse, ray/AABB/sphere query-all, ignore filters, stable ordering, material metadata | Reference-world load and query contracts |
 | AI | Typed blackboard, behavior tree, perception query, arrive steering | Deterministic sequence and perception order |

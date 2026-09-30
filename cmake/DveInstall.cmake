@@ -64,7 +64,11 @@ endif()
 if(DVE_SNDFILE_PROVIDER STREQUAL "system")
     # Fallback of cmake/DveSndFile.cmake: the distribution's libsndfile links MP3 support
     # (libmpg123, libmp3lame), so it and its codecs are left to the system instead of bundled.
-    list(APPEND DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES "^libsndfile\\.so")
+    # Its codec libraries come from the same distribution packages (libsndfile1's dependencies)
+    # and show up in ldd of every executable, so they count as system libraries too.
+    list(APPEND DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES "^libsndfile\\.so"
+        "^libFLAC\\.so" "^libvorbis\\.so" "^libvorbisenc\\.so" "^libvorbisfile\\.so" "^libogg\\.so"
+        "^libopus\\.so" "^libmpg123\\.so" "^libmp3lame\\.so")
 endif()
 set(DVE_RUNTIME_DEPENDENCY_POST_EXCLUDES ".*[/\\\\][Ss]ystem32[/\\\\].*")
 

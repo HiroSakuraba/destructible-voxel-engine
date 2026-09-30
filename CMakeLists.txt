@@ -174,6 +174,9 @@ add_library(dve_core
     src/simulation_quality.cpp
     src/simulation_validation.cpp
     src/v235_foundations.cpp
+    src/content_source.cpp
+    src/game_manifest.cpp
+    src/game_scene_loader.cpp
 )
 add_library(dve::core ALIAS dve_core)
 if(DVE_ENABLE_FLUODDITY)
@@ -2202,6 +2205,26 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_runtime_scene_tests PRIVATE dve::core)
     target_compile_definitions(dve_runtime_scene_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME dve_runtime_scene_tests COMMAND dve_runtime_scene_tests)
+
+    # Phase 1 of the packaging/player plan: ContentSource (loose folder or .dvepak),
+    # in-memory loaders, runtime scene loading into GameWorld, and the game.dvegame manifest.
+    add_executable(dve_content_source_tests tests/test_content_source.cpp)
+    target_link_libraries(dve_content_source_tests PRIVATE dve::core)
+    target_compile_definitions(dve_content_source_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_content_source_tests COMMAND dve_content_source_tests)
+    add_executable(dve_game_manifest_tests tests/test_game_manifest.cpp)
+    target_link_libraries(dve_game_manifest_tests PRIVATE dve::core)
+    add_test(NAME dve_game_manifest_tests COMMAND dve_game_manifest_tests)
+    add_executable(dve_game_scene_loader_tests tests/test_game_scene_loader.cpp)
+    target_link_libraries(dve_game_scene_loader_tests PRIVATE dve::core)
+    target_compile_definitions(dve_game_scene_loader_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_game_scene_loader_tests COMMAND dve_game_scene_loader_tests)
+    # dve_pack --all must not package the editor's `.autosave/` folder.
+    add_test(NAME dve_pack_autosave_exclusion
+        COMMAND ${CMAKE_COMMAND}
+            -DDVE_PACK=$<TARGET_FILE:dve_pack>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/dve_pack_autosave_exclusion
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_pack_autosave_exclusion.cmake)
 
     if(DVE_BUILD_EDITOR)
         add_executable(dve_editor_tests tests/test_editor.cpp)

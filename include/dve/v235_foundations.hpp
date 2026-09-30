@@ -151,7 +151,16 @@ struct DvePakBuildOptions {
     bool stripEditorOnly{true};
     bool incremental{true};
     std::vector<std::string> editorOnlyPrefixes{"editor/", "docs/", "tests/", "artifacts/"};
+    // Directory names that are editor-only wherever they appear in a path (any depth), e.g.
+    // the editor's crash-recovery `.autosave/` folder inside a project. Applied only when
+    // stripEditorOnly is set, like editorOnlyPrefixes.
+    std::vector<std::string> editorOnlyDirectoryNames{".autosave"};
 };
+
+// True when `normalizedPath` (forward slashes, package-relative) would be dropped by
+// build_dvepak's editor-only stripping under `options`.
+[[nodiscard]] bool dvepak_path_is_editor_only(
+    std::string_view normalizedPath, const DvePakBuildOptions& options) noexcept;
 
 struct DvePakEntry {
     std::string path;
@@ -180,6 +189,10 @@ class DvePakMount {
 public:
     [[nodiscard]] bool mount(const std::filesystem::path& package, std::string* error = nullptr);
     [[nodiscard]] bool contains(std::string_view path) const noexcept;
+    // Directory entry for `path`, or null. O(log n) over the sorted manifest.
+    [[nodiscard]] const DvePakEntry* find(std::string_view path) const noexcept;
+    [[nodiscard]] bool mounted() const noexcept { return !package_.empty(); }
+    [[nodiscard]] const std::filesystem::path& package_path() const noexcept { return package_; }
     [[nodiscard]] std::optional<std::vector<std::byte>> read(
         std::string_view path, std::string* error = nullptr) const;
     [[nodiscard]] const DvePakManifest& manifest() const noexcept { return manifest_; }

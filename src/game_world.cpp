@@ -267,6 +267,9 @@ struct GameWorld::Object {
     bool structural{true};
     MaterialMassTable massTable{};
     double densityQuantumKilogramsPerCubicMeter{1.0};
+    // Render-only copy of a cooked asset's material table (spawn_asset & friends). Empty for
+    // create_object()/spawn_box objects, whose voxel material ids have no table of their own.
+    std::vector<VoxelMaterialDefinition> materials;
     bool hasBody{};
     RigidBodyHandle bodyHandle{kInvalidRigidBodyHandle};
     Float3 localCenterOfMassMeters{}; // valid only if dynamic && hasBody
@@ -503,24 +506,68 @@ GameObjectId GameWorld::spawn_asset(
         if (error) *error = result.error.empty() ? "failed to read cooked asset" : result.error;
         return kInvalidGameObjectId;
     }
-    if (result.asset.object.occupied_voxel_count() == 0) {
+    return spawn_cooked_asset(std::move(result.asset), name.empty() ? path.stem().string() : std::move(name),
+                              transform, dynamic, structural, error);
+}
+
+GameObjectId GameWorld::spawn_asset_from_bytes(
+    std::span<const std::byte> bytes, std::string_view extension, std::string name,
+    const RigidTransform& transform, bool dynamic, bool structural, std::string* error) {
+    if (name.empty()) name = "asset";
+    if (extension == ".dmesh" || extension == ".DMESH") {
+        if (!geometry_kind_supported(GeometryKind::Polygon)) {
+            if (error) *error = "this build profile does not enable polygon gameplay objects";
+            return kInvalidGameObjectId;
+        }
+        PolygonAssetReadResult result = read_dmesh(bytes);
+        if (!result) {
+            if (error) *error = result.error.empty() ? "failed to read polygon asset" : result.error;
+            return kInvalidGameObjectId;
+        }
+        return spawn_cooked_polygon_asset(std::move(result.asset), std::move(name), transform, dynamic, structural, error);
+    }
+    if (extension != ".dvox" && extension != ".DVOX") {
+        if (error) *error = "unsupported asset extension '" + std::string(extension) + "' (expected .dvox or .dmesh)";
+        return kInvalidGameObjectId;
+    }
+    if (!geometry_kind_supported(GeometryKind::Voxel)) {
+        if (error) *error = "this build profile does not enable voxel gameplay objects";
+        return kInvalidGameObjectId;
+    }
+    DvoxReadResult result = read_dvox(bytes);
+    if (!result.success) {
+        if (error) *error = result.error.empty() ? "failed to read cooked asset" : result.error;
+        return kInvalidGameObjectId;
+    }
+    return spawn_cooked_asset(std::move(result.asset), std::move(name), transform, dynamic, structural, error);
+}
+
+GameObjectId GameWorld::spawn_cooked_asset(
+    CookedVoxelAsset asset, std::string name, const RigidTransform& transform,
+    bool dynamic, bool structural, std::string* error) {
+    if (!geometry_kind_supported(GeometryKind::Voxel)) {
+        if (error) *error = "this build profile does not enable voxel gameplay objects";
+        return kInvalidGameObjectId;
+    }
+    if (asset.object.occupied_voxel_count() == 0) {
         if (error) *error = "cooked asset has no occupied voxels";
         return kInvalidGameObjectId;
     }
-    if (!(result.asset.voxelSizeMeters > 0.0F) || !std::isfinite(result.asset.voxelSizeMeters)) {
+    if (!(asset.voxelSizeMeters > 0.0F) || !std::isfinite(asset.voxelSizeMeters)) {
         if (error) *error = "cooked asset has an invalid voxelSizeMeters";
         return kInvalidGameObjectId;
     }
 
     Object object;
-    object.name = name.empty() ? path.stem().string() : std::move(name);
+    object.name = name.empty() ? std::string("asset") : std::move(name);
     object.authoredTransform = transform;
-    object.voxelSizeMeters = result.asset.voxelSizeMeters;
+    object.voxelSizeMeters = asset.voxelSizeMeters;
     object.dynamic = dynamic;
     object.structural = structural;
-    object.voxels = std::make_unique<VoxelObject>(std::move(result.asset.object));
+    object.voxels = std::make_unique<VoxelObject>(std::move(asset.object));
     object.massTable = build_material_mass_table_from_definitions(
-        result.asset.materials, &object.densityQuantumKilogramsPerCubicMeter);
+        asset.materials, &object.densityQuantumKilogramsPerCubicMeter);
+    object.materials = std::move(asset.materials);
 
     if (object.dynamic) {
         Float3 localComMeters{};
@@ -582,12 +629,23 @@ GameObjectId GameWorld::spawn_polygon_asset(
         if (error) *error = result.error.empty() ? "failed to read polygon asset" : result.error;
         return kInvalidGameObjectId;
     }
+    return spawn_cooked_polygon_asset(std::move(result.asset), name.empty() ? path.stem().string() : std::move(name),
+                                      transform, dynamic, structural, error);
+}
+
+GameObjectId GameWorld::spawn_cooked_polygon_asset(
+    CookedPolygonAsset asset, std::string name, const RigidTransform& transform,
+    bool dynamic, bool structural, std::string* error) {
+    if (!geometry_kind_supported(GeometryKind::Polygon)) {
+        if (error) *error = "this build profile does not enable polygon gameplay objects";
+        return kInvalidGameObjectId;
+    }
     Object object;
-    object.name = name.empty() ? path.stem().string() : std::move(name);
+    object.name = name.empty() ? std::string("asset") : std::move(name);
     object.authoredTransform = transform;
     object.dynamic = dynamic;
     object.structural = structural;
-    object.polygon = std::make_unique<CookedPolygonAsset>(std::move(result.asset));
+    object.polygon = std::make_unique<CookedPolygonAsset>(std::move(asset));
     object.polygonBvh = std::make_unique<PolygonBvh>();
     if (!object.polygonBvh->build(*object.polygon, error)) return kInvalidGameObjectId;
     if (dynamic) {
@@ -1060,6 +1118,35 @@ std::optional<RigidTransform> GameWorld::transform(GameObjectId id) const {
     return resolve_transform(it->second);
 }
 
+std::vector<GameRenderObject> GameWorld::render_objects() const {
+    std::vector<GameRenderObject> result;
+    result.reserve(objects_.size());
+    for (const auto& [id, object] : objects_) {
+        GameRenderObject item;
+        item.id = id;
+        item.name = &object.name;
+        item.kind = object.voxels ? GameGeometryKind::Voxel
+                  : object.polygon ? GameGeometryKind::Polygon
+                  : GameGeometryKind::Marker;
+#if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
+        if (item.kind == GameGeometryKind::Marker && deformables_ && deformables_->contains(id)) {
+            item.kind = GameGeometryKind::Deformable;
+        }
+#endif
+        item.voxels = object.voxels.get();
+        item.polygon = object.polygon.get();
+        item.materials = object.materials;
+        item.transform = resolve_transform(object);
+        item.voxelSizeMeters = object.voxelSizeMeters;
+        item.enabled = object.enabled;
+        item.dynamic = object.dynamic;
+        result.push_back(item);
+    }
+    std::sort(result.begin(), result.end(),
+              [](const GameRenderObject& a, const GameRenderObject& b) { return a.id < b.id; });
+    return result;
+}
+
 std::optional<Float3> GameWorld::position(GameObjectId id) const {
     const auto value = transform(id);
     if (!value) return std::nullopt;
@@ -1405,6 +1492,7 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         fragmentObject.structural = false; // detached debris is not structural by definition
         fragmentObject.densityQuantumKilogramsPerCubicMeter = object.densityQuantumKilogramsPerCubicMeter;
         fragmentObject.massTable = object.massTable;
+        fragmentObject.materials = object.materials;
         fragmentObject.hasBody = true;
         fragmentObject.bodyHandle = fragmentHandle;
         fragmentObject.localCenterOfMassMeters = fragmentLocalCom;

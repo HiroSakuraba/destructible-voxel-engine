@@ -15,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -296,6 +297,29 @@ private:
     float uniformVoxelSizeMeters_{};
     bool mixedVoxelSizes_{};
 };
+
+// In-memory DVOXSCENE v1 parse (no filesystem access). Applies every structural rule the
+// path-based RuntimeSceneWorld parser applies (format/version, unknown fields, limits, ids,
+// contiguous indices, parents/cycles, rigid transforms, contained ".dvox" relative paths,
+// duplicate asset paths) with the same error codes. Objects are sorted by index and their
+// parentId is resolved. `relativeFile` is relative to the manifest's own folder.
+struct DvoxSceneManifest {
+    std::string name;
+    std::vector<RuntimeSceneObjectMetadata> objects;
+};
+[[nodiscard]] std::optional<DvoxSceneManifest> parse_dvoxscene_manifest(
+    std::string_view text,
+    const RuntimeSceneLoadOptions& options = {},
+    RuntimeSceneError* error = nullptr);
+
+// The per-object asset checks RuntimeSceneWorld applies after reading a DVOX (object ID
+// matches the manifest, material table is finite/in range, voxel material references are in
+// the table, optional voxel-size policy). Returns a NoError value on success.
+[[nodiscard]] RuntimeSceneError validate_dvoxscene_asset(
+    const RuntimeSceneObjectMetadata& metadata,
+    const CookedVoxelAsset& asset,
+    const RuntimeSceneLoadOptions& options = {},
+    const std::filesystem::path& pathForErrors = {});
 
 class RuntimeSceneStaging {
 public:

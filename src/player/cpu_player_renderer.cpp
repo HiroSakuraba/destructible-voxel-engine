@@ -1,5 +1,6 @@
 #include "dve/player/player_renderer.hpp"
 
+#include "dve/polygon_asset.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 
 #include <algorithm>
@@ -169,6 +170,9 @@ private:
             for (PolygonVertex& vertex : entry.asset.vertices) vertex.position = multiply(vertex.position, scale);
             entry.asset.bounds.minimum = multiply(entry.asset.bounds.minimum, scale);
             entry.asset.bounds.maximum = multiply(entry.asset.bounds.maximum, scale);
+            // The renderer validates every instance, including the content hash: re-hash the
+            // scaled copy, or every polygon is culled as corrupt (nothing drew before this).
+            entry.asset.contentHash = polygon_asset_content_hash(entry.asset);
         }
         return &entry.asset;
     }

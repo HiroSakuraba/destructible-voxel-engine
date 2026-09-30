@@ -2424,6 +2424,40 @@ if(DVE_BUILD_TESTS)
             add_test(NAME dve_player_no_editor_link
                 COMMAND ${CMAKE_COMMAND} -DCLOSURE=${CMAKE_BINARY_DIR}/dve_player_link_closure.txt
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_no_editor_link.cmake)
+            # Editor project -> dve_export_scene -> dve_player: .dmesh, baked 3D text and Gabor
+            # volume, components and a two-level attachment chain. Physics differs between the
+            # Jolt and reference backends, so the golden hashes are keyed by backend as well.
+            if(TARGET dve_export_scene)
+                add_executable(dve_player_export_sample_generator tests/player/make_player_export_sample.cpp)
+                target_link_libraries(dve_player_export_sample_generator PRIVATE dve::editor)
+                target_include_directories(dve_player_export_sample_generator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+                if(DVE_ENABLE_JOLT)
+                    set(_dve_export_hash_key "${_dve_player_hash_key}-jolt")
+                else()
+                    set(_dve_export_hash_key "${_dve_player_hash_key}-reference")
+                endif()
+                file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_golden/expected_export_hashes.txt
+                    _dve_export_hash_lines REGEX "^${_dve_export_hash_key} ")
+                set(_dve_export_hashes "")
+                foreach(_dve_line IN LISTS _dve_export_hash_lines)
+                    string(REGEX REPLACE "^[^ ]+ +([0-9a-f]+).*$" "\\1" _dve_hash "${_dve_line}")
+                    list(APPEND _dve_export_hashes ${_dve_hash})
+                endforeach()
+                list(JOIN _dve_export_hashes "," _dve_export_hashes)
+                message(STATUS "dve_player export-scene golden hash key ${_dve_export_hash_key}: '${_dve_export_hashes}'")
+                add_test(NAME dve_player_export_scene
+                    COMMAND ${CMAKE_COMMAND}
+                        -DGENERATOR=$<TARGET_FILE:dve_player_export_sample_generator>
+                        -DEXPORTER=$<TARGET_FILE:dve_export_scene>
+                        -DPLAYER=$<TARGET_FILE:dve_player>
+                        -DGAME_FILES=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_export_sample
+                        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/player_tests/export_scene
+                        -DEXPECT=${_dve_export_hashes}
+                        -DKEY=${_dve_export_hash_key}
+                        -DLUA=${_dve_player_lua}
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_export_scene.cmake)
+                set_tests_properties(dve_player_export_scene PROPERTIES PROCESSORS 4)
+            endif()
         endif()
     endif()
     if(TARGET dve_desktop_editor)

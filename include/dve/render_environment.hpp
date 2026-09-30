@@ -7,6 +7,21 @@
 
 namespace dve {
 
+// World scale for metre-authored lighting distances. Every `*Meters` field of RenderEnvironment
+// is in metres on every backend: the GPU divides by GpuRenderEnvironment::metersPerVoxel
+// (MetersToVoxelUnits in render_environment.hlsli) and the CPU reference renderer divides by
+// ReferenceVoxelRenderer::metersPerVoxel, because both trace in voxel-index units. This default
+// matches the engine's authored voxel size (GameObjectDesc/VoxelizeSettings/EditorDocument
+// voxelSizeMeters = 0.1 m); callers with a different uniform voxel size pass their own
+// (e.g. RuntimeScene::uniform_voxel_size_meters()).
+inline constexpr float kDefaultMetersPerVoxel = 0.10F;
+
+// Returns metersPerVoxel when finite and positive, otherwise kDefaultMetersPerVoxel.
+[[nodiscard]] constexpr float resolve_meters_per_voxel(float metersPerVoxel) noexcept {
+    return (metersPerVoxel > 0.0F && metersPerVoxel <= 3.0e38F) ? metersPerVoxel
+                                                                  : kDefaultMetersPerVoxel;
+}
+
 enum class TonemapOperator : std::uint32_t { ACES = 0, Reinhard = 1, Clamp = 2 };
 
 // Indirect-lighting policy. AmbientHemisphere is a cheap sky/ground fallback; VoxelOneBounce
@@ -35,7 +50,9 @@ enum class ShadowMode : std::uint32_t {
 
 // The Godot-"Environment"-resource-shaped settings object: lighting, global illumination,
 // shadows, exposure, tonemap, and bloom live in one validated place. CPU reference rendering,
-// GPU constant packing, scripts, and editor settings all consume the same defaults.
+// GPU constant packing, scripts, and editor settings all consume the same defaults. Distances
+// named `*Meters` are metres on the CPU and GPU alike (see kDefaultMetersPerVoxel); the defaults
+// below were chosen as metres for the GPU path.
 struct RenderEnvironment {
     Float3 sunDirection{0.45F, 0.80F, 0.35F}; // toward the sun; normalized when packed
     float sunIntensity{2.4F};

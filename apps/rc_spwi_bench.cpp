@@ -317,8 +317,8 @@ int main(int argc, char** argv) {
         t0 = std::chrono::steady_clock::now();
         const spwi::VoxelGBuffer gbuffer = spwi::build_voxel_gbuffer(tracer, setup.camera, W, H, {}, options.threads);
         const double gbufferMs = elapsed_ms(t0);
-        const auto reference = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, options.bfSamples, options.threads);
-        const auto mc16 = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, 16U, options.threads);
+        const auto reference = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, options.bfSamples, options.threads, setup.metersPerVoxel);
+        const auto mc16 = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, 16U, options.threads, setup.metersPerVoxel);
         const double meanRef = spwi::compare_indirect(reference, reference, gbuffer).meanReference;
         const double exposure = meanRef > 0.0 ? 0.6 / meanRef : 1.0;
         std::cout << sceneCase.name << ": tracer " << fmt(tracerMs, 1) << " ms, gbuffer " << fmt(gbufferMs, 1)
@@ -328,7 +328,9 @@ int main(int argc, char** argv) {
         direct.resize(W, H);
         dve::RenderEnvironment directEnvironment = setup.environment;
         directEnvironment.globalIlluminationMode = dve::GlobalIlluminationMode::Off;
-        (void)dve::render::ReferenceVoxelRenderer{}.render(instances, setup.camera, directEnvironment, direct);
+        dve::render::ReferenceVoxelRenderer directRenderer;
+        directRenderer.metersPerVoxel = setup.metersPerVoxel;
+        (void)directRenderer.render(instances, setup.camera, directEnvironment, direct);
 
         const std::string prefix = "p2-" + std::string(sceneCase.name) + "-";
         const auto finalReference = compose_final(direct, setup, gbuffer, reference.indirect);
@@ -362,7 +364,7 @@ int main(int argc, char** argv) {
         errorTiles.push_back({"err MC16", heatmap(mc16.indirect, reference.indirect, gbuffer, 0.5 * meanRef)});
 
         for (const Variant& variant : modes) {
-            const auto result = spwi::solve_radiance_cascades(tracer, gbuffer, setup.environment, variant.settings);
+            const auto result = spwi::solve_radiance_cascades(tracer, gbuffer, setup.environment, variant.settings, setup.metersPerVoxel);
             (void)emit_row(variant.label, result);
             const auto shaded = tonemap(result.indirect, gbuffer, static_cast<float>(exposure));
             const auto err = heatmap(result.indirect, reference.indirect, gbuffer, 0.5 * meanRef);
@@ -409,14 +411,15 @@ int main(int argc, char** argv) {
         environment.globalIlluminationMode = dve::GlobalIlluminationMode::RadianceCascades;
         dve::render::ReferenceVoxelRenderer renderer;
         renderer.radianceCascades = settings;
+        renderer.metersPerVoxel = setup.metersPerVoxel;
 
         auto solve = [&](const char* tag) {
             auto t0 = std::chrono::steady_clock::now();
             const spwi::VoxelSceneTracer tracer(instances);
             const double tracerMs = elapsed_ms(t0);
             const auto gbuffer = spwi::build_voxel_gbuffer(tracer, setup.camera, W, H, {}, options.threads);
-            const auto rc = spwi::solve_radiance_cascades(tracer, gbuffer, setup.environment, settings);
-            const auto bf = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, options.bfSamples, options.threads);
+            const auto rc = spwi::solve_radiance_cascades(tracer, gbuffer, setup.environment, settings, setup.metersPerVoxel);
+            const auto bf = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, options.bfSamples, options.threads, setup.metersPerVoxel);
             dve::render::PolygonRenderTarget target;
             target.resize(W, H);
             t0 = std::chrono::steady_clock::now();
@@ -486,22 +489,22 @@ int main(int argc, char** argv) {
         for (const auto& [w, h] : sizes) {
             const auto gbuffer = spwi::build_voxel_gbuffer(tracer, setup.camera, w, h, {}, options.threads);
             const std::uint32_t samples = w > 320U ? std::min(options.bfSamples, 2048U) : options.bfSamples;
-            const auto reference = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, samples, options.threads);
+            const auto reference = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, samples, options.threads, setup.metersPerVoxel);
             const std::string res = std::to_string(w) + "x" + std::to_string(h);
             report << "| " << res << " | brute force " << samples << " spp | - | - | " << reference.stats.intervalRays
                    << " | " << fmt(reference.stats.milliseconds, 0) << " | - | ref | - | - |\n";
             auto single = [&](auto&& run) { return run(1U); };
-            const auto mc = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, 16U, options.threads);
-            const auto mc1 = single([&](std::uint32_t t) { return spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, 16U, t); });
+            const auto mc = spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, 16U, options.threads, setup.metersPerVoxel);
+            const auto mc1 = single([&](std::uint32_t t) { return spwi::solve_brute_force_indirect(tracer, gbuffer, setup.environment, 16U, t, setup.metersPerVoxel); });
             report << "| " << res << " | Monte Carlo 16 spp | - | - | " << mc.stats.intervalRays << " | "
                    << fmt(mc.stats.milliseconds, 0) << " | " << fmt(mc1.stats.milliseconds, 0) << " | "
                    << fmt(spwi::compare_indirect(mc, reference, gbuffer).relativeRmse) << " | - | - |\n";
             for (const Variant& variant : modes) {
                 if (variant.key != "vanilla-overlap" && variant.key != "bilinear-overlap" && variant.key != "bilinear-4x4") continue;
-                const auto r = spwi::solve_radiance_cascades(tracer, gbuffer, setup.environment, variant.settings);
+                const auto r = spwi::solve_radiance_cascades(tracer, gbuffer, setup.environment, variant.settings, setup.metersPerVoxel);
                 RadianceCascadeSettings one = variant.settings;
                 one.threadCount = 1U;
-                const auto r1 = spwi::solve_radiance_cascades(tracer, gbuffer, setup.environment, one);
+                const auto r1 = spwi::solve_radiance_cascades(tracer, gbuffer, setup.environment, one, setup.metersPerVoxel);
                 report << "| " << res << " | " << variant.label << " | " << r.stats.cascades << " | " << r.stats.probes
                        << " | " << r.stats.intervalRays << " | " << fmt(r.stats.milliseconds, 0) << " | "
                        << fmt(r1.stats.milliseconds, 0) << " | " << fmt(spwi::compare_indirect(r, reference, gbuffer).relativeRmse)
@@ -531,7 +534,7 @@ int main(int argc, char** argv) {
         for (Prepared& p : prepared) {
             p.tracer = std::make_unique<spwi::VoxelSceneTracer>(std::span<const dve::render::VoxelReferenceInstance>(&p.instance, 1));
             p.gbuffer = spwi::build_voxel_gbuffer(*p.tracer, p.setup.camera, W, H, {}, options.threads);
-            p.reference = spwi::solve_brute_force_indirect(*p.tracer, p.gbuffer, p.setup.environment, options.bfSamples, options.threads);
+            p.reference = spwi::solve_brute_force_indirect(*p.tracer, p.gbuffer, p.setup.environment, options.bfSamples, options.threads, p.setup.metersPerVoxel);
         }
         std::ofstream csv(options.out / "p2-sweep.csv");
         csv << "merge,scaling,spacing,dirs,L0,growth,overlap,courtyard_rel_rmse,bunker_rel_rmse,thinwall_rel_rmse,leak,ms_courtyard,ms_bunker,peak_mb\n";
@@ -552,7 +555,7 @@ int main(int argc, char** argv) {
             std::array<double, 3> rel{}; std::array<double, 3> ms{}; double leak = 0.0; std::uint64_t peak = 0;
             for (std::size_t k = 0; k < prepared.size(); ++k) {
                 Prepared& p = prepared[k];
-                const auto r = spwi::solve_radiance_cascades(*p.tracer, p.gbuffer, p.setup.environment, s);
+                const auto r = spwi::solve_radiance_cascades(*p.tracer, p.gbuffer, p.setup.environment, s, p.setup.metersPerVoxel);
                 rel[k] = spwi::compare_indirect(r, p.reference, p.gbuffer).relativeRmse;
                 ms[k] = r.stats.milliseconds;
                 peak = std::max(peak, r.stats.peakBytes);

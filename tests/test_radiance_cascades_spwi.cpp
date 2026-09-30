@@ -163,7 +163,8 @@ void test_octahedral_maps_and_layout() {
         }
 
     RenderEnvironment environment;
-    environment.globalIlluminationMaxDistanceMeters = 48.0F;
+    // 4.8 m at the default 0.1 m/voxel = 48 voxels; interval bounds are in voxels.
+    environment.globalIlluminationMaxDistanceMeters = 4.8F;
     RadianceCascadeSettings settings;
     const auto levels = sp::describe_cascades(settings, environment, 320U, 180U);
     CHECK(levels.size() == 4U); // [0,1) [1,5) [5,21) [21,48]
@@ -192,6 +193,9 @@ void test_octahedral_maps_and_layout() {
     bad.baseProbeSpacingPixels = 0U;
     CHECK(!bad.validate());
     CHECK(RadianceCascadeSettings{}.validate());
+    // Decision (docs/RADIANCE_CASCADES.md §6): the bilinear fix stays the default merge.
+    CHECK(RadianceCascadeSettings{}.merge == RadianceCascadeMerge::BilinearFix);
+    CHECK(ReferenceVoxelRenderer{}.radianceCascades.merge == RadianceCascadeMerge::BilinearFix);
 }
 
 // The CPU one-bounce GI used only the hemisphere ambient at bounce hits; resolve_gi.hlsl also adds
@@ -218,7 +222,7 @@ void test_bounce_includes_sun_like_gpu() {
     environment.shadowMode = ShadowMode::Hard;
     environment.globalIlluminationSamples = 16U;
     environment.globalIlluminationIntensity = 1.0F;
-    environment.globalIlluminationMaxDistanceMeters = 40.0F;
+    environment.globalIlluminationMaxDistanceMeters = 4.0F; // 40 voxels at 0.1 m/voxel
     PolygonRenderTarget target;
     target.resize(9, 9);
     const auto stats = ReferenceVoxelRenderer{}.render({&instance, 1}, camera, environment, target);
@@ -269,7 +273,7 @@ void test_open_floor_energy() {
     RenderEnvironment environment;
     environment.sunIntensity = 0.0F;
     environment.globalIlluminationIntensity = 1.0F;
-    environment.globalIlluminationMaxDistanceMeters = 48.0F;
+    environment.globalIlluminationMaxDistanceMeters = 4.8F; // 48 voxels at 0.1 m/voxel
     const sp::VoxelSceneTracer tracer({&instance, 1});
     const auto gbuffer = sp::build_voxel_gbuffer(tracer, camera, 64, 36, {}, kThreads);
 
@@ -509,6 +513,86 @@ void test_mode_switch() {
     }
 }
 
+// Every RenderEnvironment `*Meters` distance is metres on the CPU too: the reference renderer and
+// the SPWI solvers divide by metersPerVoxel (default 0.1 m), matching the GPU's MetersToVoxelUnits.
+void test_meters_are_converted_with_voxel_size() {
+    const RenderEnvironment defaults;
+    const VoxelLightingDistances d = voxel_lighting_distances(defaults);
+    CHECK(d.metersPerVoxel == kDefaultMetersPerVoxel && kDefaultMetersPerVoxel == 0.10F);
+    CHECK(std::abs(d.globalIlluminationMaxDistance - 120.0F) < 1.0e-3F); // 12 m
+    CHECK(std::abs(d.shadowMaxDistance - 25000.0F) < 1.0e-1F);           // 2500 m
+    CHECK(std::abs(d.contactShadowDistance - 20.0F) < 1.0e-4F);          // 2 m
+    CHECK(std::abs(d.shadowBias - 0.15F) < 1.0e-6F);                     // 0.015 m
+    CHECK(std::abs(d.subsurfaceMaxDistance - 5.0F) < 1.0e-5F);           // 0.5 m
+    // Same conversion as the GPU packer's metersPerVoxel and the shader-side helper.
+    CHECK(pack_gpu_render_environment(defaults, 1U, 1U, 0.25F).metersPerVoxel == 0.25F);
+    CHECK(voxel_lighting_distances(defaults, 0.25F).globalIlluminationMaxDistance ==
+          meters_to_voxel_units(defaults.globalIlluminationMaxDistanceMeters, 0.25F));
+    for (const float invalid : {0.0F, -1.0F, std::nanf(""), INFINITY}) {
+        CHECK(voxel_lighting_distances(defaults, invalid).metersPerVoxel == kDefaultMetersPerVoxel);
+        CHECK(pack_gpu_render_environment(defaults, 1U, 1U, invalid).metersPerVoxel == kDefaultMetersPerVoxel);
+    }
+
+    // Cascade layout: the top interval ends at the GI max distance in voxels.
+    RenderEnvironment environment;
+    environment.globalIlluminationMaxDistanceMeters = 4.8F;
+    const RadianceCascadeSettings settings;
+    const auto coarse = sp::describe_cascades(settings, environment, 320U, 180U, 1.0F, 0.4F);
+    CHECK(coarse.size() == 3U && std::abs(coarse.back().intervalEnd - 12.0F) < 1.0e-4F); // [0,1) [1,5) [5,12]
+
+    // Renderer: floor at y = 0 and a roof whose underside is 9 voxels above the floor top, sun
+    // straight up. The same 0.5 m contact distance / GI reach is 5 voxels at 0.1 m/voxel (roof
+    // out of reach) and 20 voxels at 0.025 m/voxel (roof in reach).
+    VoxelObject object(503U);
+    for (int z = -20; z <= 20; ++z)
+        for (int x = -20; x <= 20; ++x) {
+            (void)object.set_voxel({x, 0, z}, 1U);
+            (void)object.set_voxel({x, 10, z}, 1U);
+        }
+    std::array<VoxelMaterialDefinition, 2> materials{};
+    materials[1].baseColor = {0.5F, 0.5F, 0.5F, 1.0F};
+    const VoxelReferenceInstance instance{503U, &object, {}, materials, true};
+    PolygonCamera camera;
+    camera.position = {0.5F, 8.0F, 0.5F};
+    camera.target = {0.5F, 0.0F, 0.5F};
+    camera.up = {0.0F, 0.0F, -1.0F};
+    camera.nearPlane = 0.1F;
+    camera.farPlane = 50.0F;
+    environment = {};
+    environment.sunDirection = {0.0F, 1.0F, 0.0F};
+    environment.sunIntensity = 2.0F;
+    environment.sunColor = {1.0F, 1.0F, 1.0F};
+    environment.shadowMode = ShadowMode::Contact;
+    environment.shadowStrength = 1.0F;
+    environment.contactShadowDistanceMeters = 0.5F;
+    environment.globalIlluminationMode = GlobalIlluminationMode::Off;
+    auto centre_red = [&](float metersPerVoxel, const RenderEnvironment& env, VoxelReferenceRenderStats* stats) {
+        ReferenceVoxelRenderer renderer;
+        renderer.metersPerVoxel = metersPerVoxel;
+        PolygonRenderTarget target;
+        target.resize(9, 9);
+        const auto s = renderer.render({&instance, 1}, camera, env, target);
+        if (stats) *stats = s;
+        CHECK(target.objectId[4U * 9U + 4U] == 503U);
+        return target.hdrColor[4U * 9U + 4U].x;
+    };
+    CHECK(std::abs(centre_red(0.10F, environment, nullptr) - 1.0F) < 1.0e-6F); // 5 voxels: lit
+    CHECK(centre_red(0.025F, environment, nullptr) == 0.0F);                   // 20 voxels: shadowed
+    CHECK(centre_red(0.0F, environment, nullptr) == centre_red(0.10F, environment, nullptr)); // fallback
+
+    environment.shadowMode = ShadowMode::Off;
+    environment.globalIlluminationMode = GlobalIlluminationMode::VoxelOneBounce;
+    environment.globalIlluminationMaxDistanceMeters = 0.5F;
+    environment.globalIlluminationSamples = 16U;
+    VoxelReferenceRenderStats nearStats, farStats;
+    (void)centre_red(0.10F, environment, &nearStats);
+    (void)centre_red(0.025F, environment, &farStats);
+    CHECK(nearStats.globalIlluminationRays > 0U && nearStats.globalIlluminationHits == 0U);
+    CHECK(farStats.globalIlluminationHits > 0U);
+    std::cout << "  units: 0.5 m contact/GI = 5 voxels at 0.1 m (roof missed), 20 voxels at 0.025 m ("
+              << farStats.globalIlluminationHits << " GI hits)\n";
+}
+
 } // namespace
 
 int main() {
@@ -523,6 +607,7 @@ int main() {
         test_determinism();
         test_destruction_updates_immediately();
         test_mode_switch();
+        test_meters_are_converted_with_voxel_size();
         std::cout << "dve_rc_spwi_tests: PASS\n";
         return 0;
     } catch (const std::exception& error) {

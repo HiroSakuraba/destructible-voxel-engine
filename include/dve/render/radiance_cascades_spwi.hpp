@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "dve/query.hpp"
+#include "dve/render/ray_lighting_reference.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 #include "dve/render_environment.hpp"
 
@@ -116,9 +117,15 @@ struct VoxelGBuffer {
 // Outgoing diffuse radiance at a GI/interval hit: one_bounce_diffuse_radiance with the hit's
 // hemisphere ambient and a hard sun-visibility ray (GPU: generate_gi_sun_rays + resolve_gi).
 // sunRays (optional) counts the visibility rays actually cast (none when n·l <= 0).
+//
+// Units: tracer positions and hits are world units = voxels. Every `*Meters` distance of the
+// environment (GI max distance, shadow max distance, shadow bias) is divided by metersPerVoxel
+// (voxel_lighting_distances), like the GPU's MetersToVoxelUnits. The same parameter on the
+// solvers below means the same thing.
 [[nodiscard]] Float3 bounce_hit_radiance(const VoxelSceneTracer& tracer, const VoxelTraceHit& hit,
                                          const RenderEnvironment& environment,
-                                         std::uint64_t* sunRays = nullptr);
+                                         std::uint64_t* sunRays = nullptr,
+                                         float metersPerVoxel = kDefaultMetersPerVoxel);
 
 // ---- Octahedral direction maps (world space, +Y at the centre) -----------------------------
 
@@ -142,13 +149,14 @@ struct CascadeLevelInfo {
     std::uint64_t bytes{}; // merged radiance + validity for this level
 };
 
-// Interval bounds are reported in world units for a probe whose interval unit is
+// Interval bounds are reported in world units (voxels) for a probe whose interval unit is
 // `worldUnitsPerIntervalUnit` (1 for World scaling; the cascade-0 cell size in world units at
 // the nearest probe for ProbeSpacing scaling, which also fixes the cascade count). The top
-// interval always ends at globalIlluminationMaxDistanceMeters.
+// interval always ends at globalIlluminationMaxDistanceMeters / metersPerVoxel.
 [[nodiscard]] std::vector<CascadeLevelInfo> describe_cascades(
     const RadianceCascadeSettings& settings, const RenderEnvironment& environment,
-    std::uint32_t width, std::uint32_t height, float worldUnitsPerIntervalUnit = 1.0F);
+    std::uint32_t width, std::uint32_t height, float worldUnitsPerIntervalUnit = 1.0F,
+    float metersPerVoxel = kDefaultMetersPerVoxel);
 
 struct SolveStats {
     std::uint32_t threads{};
@@ -177,7 +185,8 @@ struct IndirectResult {
 [[nodiscard]] IndirectResult solve_radiance_cascades(const VoxelSceneTracer& tracer,
                                                      const VoxelGBuffer& gbuffer,
                                                      const RenderEnvironment& environment,
-                                                     const RadianceCascadeSettings& settings);
+                                                     const RadianceCascadeSettings& settings,
+                                                     float metersPerVoxel = kDefaultMetersPerVoxel);
 
 // Cosine-weighted Monte Carlo over the full GI max distance with `samples` rays per pixel
 // (rotated Hammersley, deterministic), no 16-sample cap. The reference for error metrics.
@@ -185,7 +194,8 @@ struct IndirectResult {
                                                         const VoxelGBuffer& gbuffer,
                                                         const RenderEnvironment& environment,
                                                         std::uint32_t samples,
-                                                        std::uint32_t threadCount = 0);
+                                                        std::uint32_t threadCount = 0,
+                                                        float metersPerVoxel = kDefaultMetersPerVoxel);
 
 struct IndirectError {
     std::uint64_t pixels{};
@@ -206,8 +216,8 @@ struct IndirectError {
                                              std::span<const std::uint8_t> mask = {});
 
 // ---- Synthetic voxel scenes (tests and dve_rc_spwi_bench) --------------------------------------
-// World units are voxels (the reference path applies metre-authored lighting distances as world
-// units); at the engine's 0.1 m/voxel a 1-voxel wall is 0.1 m thick.
+// World units are voxels. The environments are authored in metres for metersPerVoxel = 0.1 (the
+// engine default), so a 1-voxel wall is 0.1 m thick and the 4.8 m GI max distance is 48 voxels.
 
 enum class SyntheticScene : std::uint32_t {
     // Open-air floor with coloured walls, an overhang (bounce-lit shade), a block and a pillar.
@@ -225,6 +235,9 @@ struct SyntheticSceneSetup {
     std::vector<VoxelMaterialDefinition> materials;
     PolygonCamera camera;
     RenderEnvironment environment;
+    // World scale the environment's `*Meters` distances were authored for; pass it to the
+    // renderer (ReferenceVoxelRenderer::metersPerVoxel) and the solvers.
+    float metersPerVoxel{kDefaultMetersPerVoxel};
     Int3 removableMinimum{};
     Int3 removableMaximum{}; // inclusive
     // Voxel x of the thin wall (ThinWall) or the shared wall (Bunker).

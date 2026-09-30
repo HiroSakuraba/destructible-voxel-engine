@@ -1,3 +1,15 @@
+# Unreleased — small cleanups
+
+- Editor MIDI output port picker: **Settings > Audio > MIDI > MIDI Output** (`midi.output_port`)
+  with Auto (the first output port, as before), None, and any port saved by name. A new
+  `MidiOutputSession` follows hotplug like the input and releases held notes on the old port.
+  `FakeMidiPortBackend` has output ports; `--midi-fake-ports` also fakes outputs.
+- The chiptune tracker toolbar wraps instead of running off the panel below ~940 px.
+- Removed the unused `geneNames` table (compiler warning).
+- `scripts/update_source_manifest.sh --check`; `SOURCE_MANIFEST.sha256` regenerated. Every later
+  change makes it stale again; CI's `source-manifest` job reports that but is still
+  non-blocking (`continue-on-error`).
+
 # Unreleased — Packaging: libsndfile without MP3 (no libmpg123/libmp3lame in games)
 
 - New `DVE_FETCH_SNDFILE` (default `ON`, also set by `linux-gcc-player-release`; `cmake/DveSndFile.cmake`):

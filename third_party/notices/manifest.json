@@ -2,6 +2,13 @@
   "format": "DVE_THIRD_PARTY_NOTICES",
   "version": 1,
   "comment": "Maps every third-party library or adapted code base that can end up in a shipped DVE binary to its license and license text. Read by tools/generate_third_party_notices.py; the dve_third_party_notices_check test fails when a bundled shared library, a linked third-party target or archive, or a matched entry's license text is not covered. 'copyleft': none | weak (LGPL-style: shipping the binary needs the library's corresponding source or a written offer, and users must be able to replace it) | strong (source-availability terms that reach the software using it). 'review' marks something a human must decide before external distribution. 'forbidden' lists shared libraries that must never be bundled (the check and --verify-dir fail on them). License texts are never written here: they come from the installed Debian package's copyright file, the fetched/vendored source tree, or the SDK.",
+  "engine": {
+    "name": "Destructible Voxel Engine (DVE)",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2026 Benjamin Schulz",
+    "upstream": "https://github.com/HiroSakuraba/destructible-voxel-engine",
+    "text": "LICENSE"
+  },
   "forbidden": [
     {"id": "mpg123", "sonames": ["^libmpg123\\.so"],
      "reason": "libmpg123 (LGPL-2.1) is only pulled in by a libsndfile built with MPEG support; DVE needs no MP3 at run time. Build with DVE_FETCH_SNDFILE=ON (the default), which uses libsndfile without MPEG."},

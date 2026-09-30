@@ -10,8 +10,9 @@
 #      naming the exported scene: dve_package_game must export it with dve_export_scene and
 #      keep .autosave/, the .dvescene and its revision folder out of the pak.
 # Both: the RPATH, ldd resolution inside the folder, THIRD_PARTY_NOTICES covering every
-# shipped .so (generate_third_party_notices.py --verify-dir), build-info.json, no sample maps,
-# and no MP3 library (libmpg123/libmp3lame) by file name, DT_NEEDED or ldd (dve_no_mpeg_check).
+# shipped .so (generate_third_party_notices.py --verify-dir), the engine's MIT license as
+# DVE-LICENSE.txt, build-info.json, no sample maps, and no MP3 library (libmpg123/libmp3lame)
+# by file name, DT_NEEDED or ldd (dve_no_mpeg_check).
 #   PREFIX PYTHON SCRIPT NOTICES_TOOL SAMPLE EDITOR_PROJECT WORK_DIR BUILD_PLAYER SETTINGS [EXPECT]
 cmake_minimum_required(VERSION 3.24)
 foreach(required PREFIX PYTHON SCRIPT NOTICES_TOOL SAMPLE EDITOR_PROJECT WORK_DIR BUILD_PLAYER SETTINGS)
@@ -49,11 +50,32 @@ function(check_folder folder exe)
         set(problems "${problems}" PARENT_SCOPE)
         return()
     endif()
-    foreach(file game.dvepak THIRD_PARTY_NOTICES.txt build-info.json)
+    foreach(file game.dvepak THIRD_PARTY_NOTICES.txt DVE-LICENSE.txt build-info.json)
         if(NOT EXISTS "${folder}/${file}")
             problem("${folder}/${file} missing")
         endif()
     endforeach()
+    # The engine's MIT license ships next to the notices, and the notices state it too.
+    if(EXISTS "${folder}/DVE-LICENSE.txt")
+        file(READ "${folder}/DVE-LICENSE.txt" shipped_license)
+        file(READ "${PREFIX}/share/doc/dve-runtime/LICENSE" installed_license)
+        if(NOT shipped_license STREQUAL installed_license OR NOT shipped_license MATCHES "^MIT License\n\nCopyright \\(c\\) 2026 Benjamin Schulz\n")
+            problem("${folder}/DVE-LICENSE.txt is not the engine's MIT license")
+        endif()
+    endif()
+    if(EXISTS "${folder}/THIRD_PARTY_NOTICES.txt")
+        file(READ "${folder}/THIRD_PARTY_NOTICES.txt" shipped_notices)
+        if(NOT shipped_notices MATCHES "is licensed under the MIT License" OR shipped_notices MATCHES "NO LICENSE")
+            problem("${folder}/THIRD_PARTY_NOTICES.txt does not state the engine's MIT license")
+        endif()
+    endif()
+    set(info_license "")
+    if(EXISTS "${folder}/build-info.json")
+        file(READ "${folder}/build-info.json" info_license)
+    endif()
+    if(NOT info_license MATCHES "\"engineLicense\": {[^}]*\"DVE-LICENSE.txt\"")
+        problem("${folder}/build-info.json does not record DVE-LICENSE.txt")
+    endif()
     execute_process(COMMAND readelf -d "${folder}/${exe}" OUTPUT_VARIABLE dynamic)
     if(NOT dynamic MATCHES "\\(RPATH\\)[^\n]*\\$ORIGIN/lib/dve")
         problem("${exe}: no DT_RPATH with $ORIGIN/lib/dve")

@@ -275,9 +275,16 @@ packages the exported targets reference (found with `dpkg -S` at configure time,
 On Windows, `CPACK_GENERATOR` is `ZIP;NSIS` and the executables' `$<TARGET_RUNTIME_DLLS>` are
 copied next to them. This is configured but **untested** (no Windows runner yet).
 
-**No license (D1).** There is no engine `LICENSE`, so no `CPACK_RESOURCE_FILE_LICENSE` is set,
-and `cpack` prints a warning for every generator: these packages are for internal use only. Each
-package carries its component's `THIRD_PARTY_NOTICES-<component>.txt` (Phase 4).
+**License (D1): MIT.** The engine is licensed under the MIT License (root `LICENSE`,
+`Copyright (c) 2026 Benjamin Schulz`). `cmake/DveLicense.cmake` installs it into every package
+group from its main component (`Runtime`, `Editor`, `Tools`, `Development`) as
+`share/doc/dve-<group>/LICENSE`, together with a Debian machine-readable copyright file
+`share/doc/dve-<group>/copyright` (`/usr/share/doc/dve-<group>/copyright` in the `.deb`, as Debian
+policy expects; `License: Expat` is Debian's name for MIT). One folder per package keeps the
+`.deb` files from owning the same path; the hidden `*Deps` components always ship in the archive of
+their main component. `CPACK_RESOURCE_FILE_LICENSE` is the root `LICENSE` (shown by the NSIS
+installer). Each package also carries its component's `THIRD_PARTY_NOTICES-<component>.txt`
+(Phase 4), which starts with the engine's license.
 
 ### The `dve` CMake package
 
@@ -352,7 +359,7 @@ not covered by a preset.
 | `dve_version_consistency` | `release-manifest.json`, the README title and the generated `version.hpp` match `project(VERSION)`. |
 | `dve_install_tree_test` | Installs every component into `install_tests/prefix` in the build folder and checks the expected files and that no sample maps were installed. It also checks the executables: `readelf -d` shows the `$ORIGIN` RPATH, and `ldd` finds every non-system library inside the prefix (none are "not found"). It then runs the installed `dve_player --pak <sample> --frames 30 --hash` from another directory with `LD_LIBRARY_PATH` unset: same hash as the build-tree player, and a golden hash when one is known. Finally it repacks the sample with the installed `dve_pack` and runs the installed editor's `--smoke`. |
 | `dve_package_consumer_test` | Configures, builds and runs `tests/package_consumer` against that prefix with `find_package(dve X.Y)` (10 headless frames of the sample pak). It checks that `X.Y.Z` is accepted and `X.(Y±1)` is rejected (SameMinorVersion). |
-| `dve_cpack_test` (label `slow`) | `cpack -G "TGZ;DEB"`, then checks each archive's listing and each `.deb`'s `dpkg-deb -c` / `-f` (package name, version, `Depends`, no `lib/dve` in the DEBs, no sample maps). It writes a size summary to `install_tests/cpack/summary.txt`. |
+| `dve_cpack_test` (label `slow`) | `cpack -G "TGZ;DEB"`, then checks each archive's listing and each `.deb`'s `dpkg-deb -c` / `-f` (package name, version, `Depends`, no `lib/dve` in the DEBs, no sample maps). It also requires `share/doc/dve-<group>/LICENSE` (identical to the root `LICENSE`) and `copyright` in every archive, and a DEP-5 `/usr/share/doc/dve-<group>/copyright` with `Copyright: 2026 Benjamin Schulz` and the MIT (Expat) text in every `.deb`. It writes a size summary to `install_tests/cpack/summary.txt`. |
 
 ## Shipping a game (Phase 4)
 
@@ -365,7 +372,9 @@ player can unpack and run: no editor, no engine install, nothing on `LD_LIBRARY_
   game.dvepak                cooked content: game.dvegame, scenes, .dvox, scripts, audio
   lib/dve/*.so*              only the bundled libraries this executable needs
   THIRD_PARTY_NOTICES.txt    the Runtime notices (checked to cover every lib/dve file)
-  LICENSE*/COPYING*          copied from the project folder, if it has any
+  DVE-LICENSE.txt            the engine's MIT license (share/doc/dve-runtime/LICENSE, or
+                             --engine-license)
+  LICENSE*/COPYING*          the game's own license, copied from the project folder if it has any
   build-info.json            engine version/git describe, game name/version, file list
 ```
 
@@ -466,7 +475,9 @@ PulseAudio dependencies are no longer needed from the system.
   `DT_NEEDED` recursively, prunes the system-exclude patterns, and resolves the rest with `ldd`.
   Imported targets count through their files; in-tree third-party targets (e.g. fetched Jolt,
   manifold) and absolute static archives must match a manifest entry.
-- Each notices file starts with the engine's **no-license statement (D1)**, then a summary with
+- Each notices file starts with the **engine's MIT license (D1)**: the manifest's `engine` entry
+  names it, and the text is read from the root `LICENSE` (`--check` fails without it). Then a
+  summary with
   COPYLEFT/REVIEW flags, the corresponding-source section for copyleft libraries (Debian source
   package and version), the full license texts, an appendix with the referenced
   `/usr/share/common-licenses` files, the system libraries it relies on but does not ship, and an
@@ -500,22 +511,28 @@ the flagged items need a decision before a public release.
 | Steam Audio | Apache-2.0 (Valve, 2024) | only with `DVE_STEAM_AUDIO_ROOT` | **Review**: not present on this box; the text comes from the SDK folder, which may carry more third-party notices. |
 | DASHR, BS-Cloth, Fluoddity3D, Gabor fields, Mantaflow, YASPS, Slug adaptations | MIT-0, Apache-2.0, MIT, MIT, Apache-2.0, MIT, MIT/Apache (credit required) | compiled into `dve_core` | Listed for every component, conservatively. |
 
-The engine itself has **no license (D1)**: the notices, CPack and `dve_package_game` say so,
-and nothing adds one. A shipped game can carry its own `LICENSE` in the project folder.
+The engine itself is **MIT-licensed (D1)**: the notices, every CPack package and every
+`dve_package_game` folder carry its text. MIT does not change the terms of the libraries above: a
+shipped game must still meet their conditions (for example the LGPL corresponding-source
+obligation). The adapted code bases (last row) are permissive (MIT-0, MIT, Apache-2.0, MIT OR
+Apache-2.0) and compatible with distributing the engine under MIT, provided their notices are kept;
+the Apache-2.0 ones (BS-Cloth, Mantaflow) have no upstream `NOTICE` file, and Slug's reference
+README additionally asks for credit in distributed software, which its notices section provides.
+Their files are not relicensed. A shipped game can carry its own `LICENSE` in the project folder.
 
 ### Tests
 
 | Test | What it checks |
 |---|---|
 | `dve_editor_scene_export_tests` | Exporter mapping, warnings, `--strict`, byte-identical re-export, stale file removal and bad output names. |
-| `dve_third_party_notices_self_test` | The generator's matching and parsing on synthetic inputs. |
-| `dve_third_party_notices_check_<Component>` | `--check` on the real inputs: every linked or bundled third-party library has an entry and a license text. |
-| `dve_package_game_test` | Packages `player_sample` with `--tgz --verify`, extracts the archive to a temporary folder, and runs `./Player_Sample --frames 30 --hash` from another directory with no `LD_LIBRARY_PATH`: the pak is found next to the executable, 4 objects load, and the hash equals the build-tree player's and the golden hash. Then it packages a copy of `examples/editor_demo_project` (only an editor scene) and checks the export and the `.autosave` exclusion. Both check RPATH, `ldd`, the notices coverage and that no editor-only files or sample maps are shipped. |
-| `dve_install_tree_test`, `dve_package_consumer_test` | Also check the installed notices, and build a game package through the installed `dve_add_game_package()`. |
+| `dve_third_party_notices_self_test` | The generator's matching and parsing on synthetic inputs, including the engine's MIT header and a missing `LICENSE`. |
+| `dve_third_party_notices_check_<Component>` | `--check` on the real inputs: every linked or bundled third-party library has an entry and a license text, and the engine's `LICENSE` is found. |
+| `dve_package_game_test` | Packages `player_sample` with `--tgz --verify`, extracts the archive to a temporary folder, and runs `./Player_Sample --frames 30 --hash` from another directory with no `LD_LIBRARY_PATH`: the pak is found next to the executable, 4 objects load, and the hash equals the build-tree player's and the golden hash. Then it packages a copy of `examples/editor_demo_project` (only an editor scene) and checks the export and the `.autosave` exclusion. Both check RPATH, `ldd`, the notices coverage, `DVE-LICENSE.txt` (the engine's MIT license, also recorded in `build-info.json`) and that no editor-only files or sample maps are shipped. |
+| `dve_install_tree_test`, `dve_package_consumer_test` | Also check the installed notices (which must state the engine's MIT license), `share/doc/dve-<group>/LICENSE` and `copyright` for every installed group, and build a game package through the installed `dve_add_game_package()`. |
 
 ### Not done yet
 
 - CI jobs for packaging (needs a workflow change); Windows ZIP/NSIS game packages.
-- D1 (engine license) and a legal review of the flagged libraries, including how to provide the
+- A legal review of the flagged libraries, including how to provide the
   LGPL corresponding source (a pointer to snapshot.debian.org may not be enough).
 - Exporter gaps: `text3d`, Gabor volumes, `.dmesh`, components and attachments.

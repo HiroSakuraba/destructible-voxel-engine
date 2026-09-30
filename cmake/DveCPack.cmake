@@ -6,8 +6,9 @@
 # Linux: TGZ + DEB (`cpack -G "TGZ;DEB"` in the build folder). Windows: ZIP + NSIS, configured
 # but untested (no Windows runner yet). The version is PROJECT_VERSION (see cmake/DveVersion.cmake).
 #
-# There is no engine LICENSE yet (decision D1), so no CPACK_RESOURCE_FILE_LICENSE is set and
-# cpack prints a warning: these packages are for internal use only.
+# The engine is MIT-licensed (root LICENSE, decision D1). CPACK_RESOURCE_FILE_LICENSE points at it
+# (shown by the NSIS installer), and cmake/DveLicense.cmake installs it into every package as
+# share/doc/dve-<group>/LICENSE plus a Debian copyright file (/usr/share/doc/dve-<group>/copyright).
 include_guard(GLOBAL)
 if(NOT DVE_INSTALL)
     return()
@@ -24,6 +25,7 @@ set(CPACK_PACKAGE_VERSION_MINOR "${PROJECT_VERSION_MINOR}")
 set(CPACK_PACKAGE_VERSION_PATCH "${PROJECT_VERSION_PATCH}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "DVE ${PROJECT_VERSION}")
 set(CPACK_RESOURCE_FILE_README "${PROJECT_SOURCE_DIR}/README.md")
+set(CPACK_RESOURCE_FILE_LICENSE "${DVE_LICENSE_FILE}")
 set(CPACK_PACKAGE_CHECKSUM SHA256)
 set(CPACK_STRIP_FILES ON)
 set(CPACK_THREADS 0)
@@ -115,7 +117,7 @@ set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
 set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\dve_player.exe")
 set(CPACK_NSIS_URL_INFO_ABOUT "${CPACK_PACKAGE_HOMEPAGE_URL}")
 
-# Per-generator adjustments (the DEB drops the bundled-library components; warning about D1).
+# Per-generator adjustments (the DEB drops the bundled-library components).
 set(CPACK_PROJECT_CONFIG_FILE "${PROJECT_BINARY_DIR}/DveCPackProjectConfig.cmake")
 configure_file("${CMAKE_CURRENT_LIST_DIR}/DveCPackProjectConfig.cmake.in"
     "${CPACK_PROJECT_CONFIG_FILE}" @ONLY)

@@ -56,6 +56,25 @@ endif()
 if("Editor" IN_LIST DVE_INSTALLED_COMPONENTS)
     list(APPEND expected "${DVE_DATADIR}/dve/assets/chiptune" "${DVE_DATADIR}/dve/assets/audio/presets")
 endif()
+# The engine's MIT license in every package (cmake/DveLicense.cmake): LICENSE and the Debian
+# copyright file in share/doc/dve-<group>/.
+file(READ "${DVE_SOURCE_DIR}/LICENSE" source_license)
+foreach(component Runtime Editor Tools Development)
+    if(component IN_LIST DVE_INSTALLED_COMPONENTS)
+        string(TOLOWER "${component}" lower)
+        if(lower STREQUAL "development")
+            set(lower dev)
+        endif()
+        list(APPEND expected "${DVE_DATADIR}/doc/dve-${lower}/LICENSE" "${DVE_DATADIR}/doc/dve-${lower}/copyright")
+        if(EXISTS "${PREFIX}/${DVE_DATADIR}/doc/dve-${lower}/LICENSE")
+            file(READ "${PREFIX}/${DVE_DATADIR}/doc/dve-${lower}/LICENSE" installed_license)
+            if(NOT installed_license STREQUAL source_license)
+                problem("${DVE_DATADIR}/doc/dve-${lower}/LICENSE differs from the root LICENSE")
+            endif()
+        endif()
+    endif()
+endforeach()
+
 # THIRD_PARTY_NOTICES per installed component (Phase 4).
 set(notice_files "")
 foreach(component IN LISTS DVE_NOTICES_COMPONENTS)
@@ -152,6 +171,17 @@ foreach(executable IN LISTS DVE_INSTALLED_EXECUTABLES)
                 endif()
             endif()
         endforeach()
+    endif()
+endforeach()
+
+# Every installed notices file starts with the engine's MIT license.
+foreach(file IN LISTS notice_files)
+    if(EXISTS "${file}")
+        file(READ "${file}" text)
+        if(NOT text MATCHES "is licensed under the MIT License" OR NOT text MATCHES "Copyright \\(c\\) 2026 Benjamin Schulz"
+                OR text MATCHES "NO LICENSE")
+            problem("${file} does not state the engine's MIT license")
+        endif()
     endif()
 endforeach()
 

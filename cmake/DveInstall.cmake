@@ -461,5 +461,6 @@ if(DVE_INSTALL_DEVELOPMENT)
 endif()
 message(STATUS "dve install components: ${DVE_INSTALLED_COMPONENTS}")
 
+include(DveLicense)
 include(DveNotices)
 include(DveInstallTests)

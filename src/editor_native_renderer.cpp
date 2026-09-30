@@ -1689,8 +1689,6 @@ void render_synth_panel(const IEditorCanvas& outerPainter, NativeEditorControlle
             "Chromatic", "Major", "Minor", "Pent major", "Pent minor", "Dorian"};
         static constexpr std::array<std::string_view, 4> directionNames{
             "Forward", "Reverse", "Ping-pong", "Random"};
-        static constexpr std::array<std::string_view, 8> geneNames{
-            "Oscillators", "Spectral", "Filters", "Envelopes", "Modulation", "Stereo", "Sequencer", "FX"};
         static constexpr std::array<std::string_view, 12> pitchNames{
             "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
         const auto& seq = preset.sequencer;

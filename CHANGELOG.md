@@ -38,6 +38,8 @@
   kept vector overrides whenever a scalar override existed (a short-circuited `||`).
 - Fixed: `GameCameraRuntime::restore_state` did not restore the viewport's previous live rig,
   so the first update after a restore counted a spurious camera cut.
+- `GameWorld::restore_save_state` re-applies the parent/child contact filters of attached
+  objects right after rebuilding the bodies instead of waiting for the next tick.
 - Tests: round trips for every new section (including byte-identical re-encoding and lock-step
   continuation), a real v1 → v2 migration, unbound timers, script state v2, and the sample's
   aftershock across a quicksave in `dve_player_runtime_tests`.

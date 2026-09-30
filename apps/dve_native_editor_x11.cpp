@@ -448,6 +448,10 @@ int main(int argc, char** argv) {
                 if (comma == std::string_view::npos) break;
                 rest.remove_prefix(comma + 1U);
             }
+            // The fake ports appear as inputs and as outputs (for the MIDI Output picker).
+            controller.attach_midi_output(std::make_unique<audio::FakeMidiPortBackend>(std::vector<std::string>{}, ports),
+                                          {std::chrono::milliseconds(1500), false});
+            if (auto* session = controller.midi_output_session()) session->poll_now();
             controller.attach_midi_input(std::make_unique<audio::FakeMidiPortBackend>(std::move(ports)),
                                          {std::chrono::milliseconds(1500), false});
             if (auto* session = controller.midi_input_session()) session->poll_now();

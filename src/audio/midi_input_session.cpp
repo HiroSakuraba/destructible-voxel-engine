@@ -138,7 +138,8 @@ std::string MidiInputStatus::summary() const {
     return {};
 }
 
-FakeMidiPortBackend::FakeMidiPortBackend(std::vector<std::string> inputPorts) : ports_(std::move(inputPorts)) {}
+FakeMidiPortBackend::FakeMidiPortBackend(std::vector<std::string> inputPorts, std::vector<std::string> outputPorts)
+    : ports_(std::move(inputPorts)), outputPorts_(std::move(outputPorts)) {}
 
 std::vector<MidiPortDescriptor> FakeMidiPortBackend::input_ports() const {
     std::lock_guard lock(mutex_);
@@ -217,6 +218,94 @@ std::size_t FakeMidiPortBackend::open_count() const {
 void FakeMidiPortBackend::fail_next_open(std::string message) {
     std::lock_guard lock(mutex_);
     failOpen_ = std::move(message);
+}
+
+std::vector<MidiPortDescriptor> FakeMidiPortBackend::output_ports() const {
+    std::lock_guard lock(mutex_);
+    std::vector<MidiPortDescriptor> result;
+    result.reserve(outputPorts_.size());
+    for (std::size_t i = 0; i < outputPorts_.size(); ++i) result.push_back({i, outputPorts_[i], false, true, false});
+    return result;
+}
+
+bool FakeMidiPortBackend::open_output(std::size_t portIndex, std::string* error) {
+    std::lock_guard lock(mutex_);
+    if (!failOutputOpen_.empty()) {
+        if (error) *error = failOutputOpen_;
+        failOutputOpen_.clear();
+        return false;
+    }
+    if (portIndex >= outputPorts_.size()) {
+        if (error) *error = "invalid fake MIDI output port";
+        return false;
+    }
+    openOutputPort_ = outputPorts_[portIndex];
+    outputOpen_ = true;
+    ++outputOpenCount_;
+    return true;
+}
+
+void FakeMidiPortBackend::close_output() noexcept {
+    std::lock_guard lock(mutex_);
+    outputOpen_ = false;
+    openOutputPort_.clear();
+}
+
+bool FakeMidiPortBackend::output_open() const noexcept {
+    std::lock_guard lock(mutex_);
+    return outputOpen_;
+}
+
+bool FakeMidiPortBackend::send(const MidiMessage& message, std::string* error) {
+    std::lock_guard lock(mutex_);
+    const bool present = std::any_of(outputPorts_.begin(), outputPorts_.end(),
+                                     [&](const std::string& name) { return name == openOutputPort_; });
+    if (!outputOpen_ || !present) {
+        if (error) *error = outputOpen_ ? "fake MIDI output was unplugged" : "no fake MIDI output open";
+        return false;
+    }
+    sent_.emplace_back(openOutputPort_, message);
+    return true;
+}
+
+void FakeMidiPortBackend::set_output_ports(std::vector<std::string> outputPorts) {
+    std::lock_guard lock(mutex_);
+    outputPorts_ = std::move(outputPorts);
+}
+
+void FakeMidiPortBackend::plug_output(std::string port) {
+    std::lock_guard lock(mutex_);
+    outputPorts_.push_back(std::move(port));
+}
+
+void FakeMidiPortBackend::unplug_output(std::string_view port) {
+    std::lock_guard lock(mutex_);
+    std::erase_if(outputPorts_, [&](const std::string& name) { return name == port; });
+}
+
+std::string FakeMidiPortBackend::open_output_port_name() const {
+    std::lock_guard lock(mutex_);
+    return openOutputPort_;
+}
+
+std::size_t FakeMidiPortBackend::output_open_count() const {
+    std::lock_guard lock(mutex_);
+    return outputOpenCount_;
+}
+
+std::vector<std::pair<std::string, MidiMessage>> FakeMidiPortBackend::sent_messages() const {
+    std::lock_guard lock(mutex_);
+    return sent_;
+}
+
+void FakeMidiPortBackend::clear_sent() {
+    std::lock_guard lock(mutex_);
+    sent_.clear();
+}
+
+void FakeMidiPortBackend::fail_next_output_open(std::string message) {
+    std::lock_guard lock(mutex_);
+    failOutputOpen_ = std::move(message);
 }
 
 MidiInputSession::MidiInputSession(std::unique_ptr<IMidiBackend> backend, Sink sink, Options options)

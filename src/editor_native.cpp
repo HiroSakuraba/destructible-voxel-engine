@@ -1422,6 +1422,7 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
         midiInput_->set_channel_filter(midi_channel_filter_from_settings(workspace_.settings()));
         midiInput_->set_requested_port(midi_input_port());
     }
+    if (midiOutput_) midiOutput_->set_requested_port(midi_output_port());
     try { refresh_midi_status(); } catch (...) {}
     viewportSettings_.showGrid = readBool("viewport.grid", viewportSettings_.showGrid);
     viewportSettings_.showAnchors = readBool("viewport.anchors", viewportSettings_.showAnchors);
@@ -1951,7 +1952,7 @@ void NativeEditorController::update(float elapsedSeconds) {
     synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
     synthPanel_.sync_wavetable_section(audioMixer_.synthesizer());
     refresh_midi_status();
-    if (midiOutput_ && midiOutput_->output_open()) {
+    if (midiOutput_ && midiOutput_->connected()) {
         audio::MidiMessage message;
         while (audioMixer_.synthesizer().poll_midi_output(message)) (void)midiOutput_->send(message);
     }

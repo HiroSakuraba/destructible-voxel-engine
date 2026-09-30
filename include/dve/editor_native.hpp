@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "dve/audio/midi_input_session.hpp"
+#include "dve/audio/midi_output_session.hpp"
 #include "dve/audio/mixer.hpp"
 #include "dve/editor_asset_browser.hpp"
 #include "dve/ai/live_editor_mcp.hpp"
@@ -478,8 +479,10 @@ public:
     // ports on its own thread; update() picks up status changes without blocking.
     void attach_midi_input(std::unique_ptr<audio::IMidiBackend> backend,
                            audio::MidiInputSession::Options options = {});
-    // Synth MIDI out (poll_midi_output) is sent on this backend from update(); UI thread only.
-    void attach_midi_output(std::unique_ptr<audio::IMidiBackend> backend);
+    // Synth MIDI out (poll_midi_output) is queued on this output session from update(); the
+    // session picks the port from `midi.output_port` and follows hotplug on its own thread.
+    void attach_midi_output(std::unique_ptr<audio::IMidiBackend> backend,
+                            audio::MidiOutputSession::Options options = {});
     [[nodiscard]] audio::MidiInputSession* midi_input_session() noexcept { return midiInput_.get(); }
     [[nodiscard]] const audio::MidiInputStatus& midi_input_status() const noexcept { return midiStatus_; }
     [[nodiscard]] std::string midi_input_summary() const { return midiStatus_.summary(); }
@@ -488,6 +491,13 @@ public:
     bool set_midi_input_port(std::string name);
     // Steps through Auto, None and the present ports (synth header button).
     bool cycle_midi_input_port(int direction);
+    // MIDI output, mirroring the input: "" = Auto (first port), "none" = off, or a port name.
+    [[nodiscard]] audio::MidiOutputSession* midi_output_session() noexcept { return midiOutput_.get(); }
+    [[nodiscard]] const audio::MidiOutputStatus& midi_output_status() const noexcept { return midiOutputStatus_; }
+    [[nodiscard]] std::string midi_output_summary() const { return midiOutputStatus_.summary(); }
+    [[nodiscard]] std::string midi_output_port() const;
+    bool set_midi_output_port(std::string name);
+    bool cycle_midi_output_port(int direction);
     // Pulls the latest session status into the settings choices / synth header (update() does it).
     void refresh_midi_status();
     // Last pointer position seen by pointer_move (logical px), for hover tooltips.
@@ -721,11 +731,14 @@ private:
     std::unique_ptr<ai::LiveEditorMcpHost> liveMcpHost_;
     EditorTaskManager aiTasks_{1, 8};
     // Declared last so they are destroyed first: the session's callbacks post into the synth.
-    std::unique_ptr<audio::IMidiBackend> midiOutput_;
+    std::unique_ptr<audio::MidiOutputSession> midiOutput_;
     std::unique_ptr<audio::MidiInputSession> midiInput_;
     audio::MidiInputStatus midiStatus_{};
     std::uint64_t midiStatusGeneration_{~std::uint64_t{0}};
     std::string midiChoicesPort_{"\x01"};
+    audio::MidiOutputStatus midiOutputStatus_{};
+    std::uint64_t midiOutputStatusGeneration_{~std::uint64_t{0}};
+    std::string midiOutputChoicesPort_{"\x01"};
 };
 
 [[nodiscard]] EditorDocument make_new_project_document();

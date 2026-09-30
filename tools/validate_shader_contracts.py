@@ -17,12 +17,50 @@ COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.S)
 COMMENT_LINE = re.compile(r"//.*")
 INCLUDE = re.compile(r'^\s*#include\s+"([^"]+)"', re.M)
 NUMTHREADS = re.compile(r"\[\s*numthreads\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*\]")
-CBUFFER = re.compile(r"\bcbuffer\s+(\w+)\s*:\s*register\(\s*(b\d+)\s*\)")
+# HLSL register bindings are `register(<class><index>)` or, for SM 5.1+ register spaces (which map
+# to Vulkan descriptor sets), `register(<class><index>, space<N>)`. The manifest stores the text
+# inside the parentheses (scripts/compile_shaders.py checks `register(<value>)` literally), so
+# the canonical form is "b0" or "b0, space0".
+REGISTER_BODY = r"[^)]*"
+CBUFFER = re.compile(rf"\bcbuffer\s+(\w+)\s*:\s*register\(({REGISTER_BODY})\)")
+REGISTER_VALUE = re.compile(r"^\s*([tusb])(\d+)\s*(?:,\s*space(\d+)\s*)?$")
 RESOURCE = re.compile(
     r"\b(RWStructuredBuffer|StructuredBuffer|RWByteAddressBuffer|ByteAddressBuffer|"
     r"RWTexture\w*|Texture\w*|SamplerComparisonState|SamplerState)"
-    r"(?:\s*<[^;{}]+?>)?\s+(\w+)\s*:\s*register\(\s*([tusb]\d+)\s*\)"
+    rf"(?:\s*<[^;{{}}]+?>)?\s+(\w+)\s*:\s*register\(({REGISTER_BODY})\)"
 )
+
+
+@dataclass(frozen=True, order=True)
+class RegisterSlot:
+    register_class: str
+    index: int
+    space: int | None
+
+    @property
+    def effective_space(self) -> int:
+        # An omitted space is space0 in both D3D12 and DXC's SPIR-V mapping.
+        return 0 if self.space is None else self.space
+
+    def canonical(self) -> str:
+        base = f"{self.register_class}{self.index}"
+        return base if self.space is None else f"{base}, space{self.space}"
+
+
+def parse_register(value: object) -> RegisterSlot:
+    """Parse "b0" / "t3, space1" into a slot; raise ValueError for anything else."""
+    if not isinstance(value, str):
+        raise ValueError(f"register must be a string, got {value!r}")
+    match = REGISTER_VALUE.match(value)
+    if not match:
+        raise ValueError(f"malformed register {value!r} (expected e.g. 't0' or 't0, space1')")
+    register_class, index, space = match.groups()
+    return RegisterSlot(register_class, int(index), None if space is None else int(space))
+
+
+def register_sort_key(register: str) -> tuple[str, int, int]:
+    slot = parse_register(register)
+    return slot.register_class, slot.index, slot.effective_space
 
 
 @dataclass(frozen=True)
@@ -91,22 +129,82 @@ def inspect_shader(path: Path, shader_root: Path, entry: str, stage: str) -> tup
             raise ValueError(f"{path.name}: graphics shader unexpectedly declares numthreads")
         threads = None
     bindings: list[Binding] = []
-    for name, register in CBUFFER.findall(expanded):
-        bindings.append(Binding(name, "constant_buffer", "read", register))
+    declarations = [(name, "constant_buffer", "read", register) for name, register in CBUFFER.findall(expanded)]
     for type_name, name, register in RESOURCE.findall(expanded):
         kind, access = resource_kind(type_name)
-        bindings.append(Binding(name, kind, access, register))
+        declarations.append((name, kind, access, register))
+    for name, kind, access, register in declarations:
+        try:
+            slot = parse_register(register)
+        except ValueError as exc:
+            raise ValueError(f"{path.name}: binding {name}: {exc}") from None
+        problem = register_class_problem(kind, access, slot)
+        if problem:
+            raise ValueError(f"{path.name}: binding {name}: {problem}")
+        bindings.append(Binding(name, kind, access, slot.canonical()))
     names: set[str] = set()
-    registers: set[str] = set()
+    slots: dict[tuple[str, int, int], str] = {}
     for binding in bindings:
         if binding.name in names:
             raise ValueError(f"{path.name}: duplicate binding name {binding.name}")
-        if binding.register in registers:
-            raise ValueError(f"{path.name}: register collision at {binding.register}")
+        slot = parse_register(binding.register)
+        key = (slot.register_class, slot.index, slot.effective_space)
+        if key in slots:
+            raise ValueError(
+                f"{path.name}: register collision at {slot.register_class}{slot.index}, "
+                f"space{slot.effective_space} ({slots[key]} and {binding.name})")
         names.add(binding.name)
-        registers.add(binding.register)
-    bindings.sort(key=lambda item: (item.register[0], int(item.register[1:]), item.name))
+        slots[key] = binding.name
+    bindings.sort(key=lambda item: (*register_sort_key(item.register), item.name))
     return threads, bindings
+
+
+EXPECTED_REGISTER_CLASS = {
+    ("constant_buffer", "read"): "b",
+    ("storage_buffer", "read"): "t",
+    ("storage_buffer", "read_write"): "u",
+    ("byte_address_buffer", "read"): "t",
+    ("byte_address_buffer", "read_write"): "u",
+    ("sampled_texture", "read"): "t",
+    ("storage_texture", "read_write"): "u",
+    ("sampler", "read"): "s",
+}
+
+
+def register_class_problem(kind: str, access: str, slot: RegisterSlot) -> str | None:
+    expected = EXPECTED_REGISTER_CLASS.get((kind, access))
+    if expected is None:
+        return f"unknown binding kind/access {kind}/{access}"
+    if slot.register_class != expected:
+        return f"{kind} ({access}) must use a '{expected}' register, not {slot.canonical()!r}"
+    return None
+
+
+def validate_manifest_bindings(source: str, bindings: object) -> tuple[list[dict], list[str]]:
+    """Check each manifest binding's register (class, index and optional space) before comparing."""
+    if not isinstance(bindings, list):
+        return [], [f"{source}: manifest bindings must be a list"]
+    errors: list[str] = []
+    valid: list[dict] = []
+    for item in bindings:
+        if not isinstance(item, dict) or not {"name", "kind", "access", "register"} <= set(item):
+            errors.append(f"{source}: malformed manifest binding {item!r}")
+            continue
+        try:
+            slot = parse_register(item["register"])
+        except ValueError as exc:
+            errors.append(f"{source}: manifest binding {item.get('name')}: {exc}")
+            continue
+        if item["register"] != slot.canonical():
+            errors.append(f"{source}: manifest binding {item['name']}: register {item['register']!r} "
+                          f"is not canonical (write {slot.canonical()!r})")
+            continue
+        problem = register_class_problem(str(item["kind"]), str(item["access"]), slot)
+        if problem:
+            errors.append(f"{source}: manifest binding {item['name']}: {problem}")
+            continue
+        valid.append(item)
+    return sorted(valid, key=lambda item: (*register_sort_key(item["register"]), item["name"])), errors
 
 
 def validate_material_abi(root: Path) -> list[str]:
@@ -302,11 +400,93 @@ def validate_camera_cinematic_abi(root: Path) -> list[str]:
         errors.append(f"CameraGpuPacket byte-size drift: C++={cpp_size}, HLSL={hlsl_size}")
     return errors
 
+def self_test() -> int:
+    """Exercise register parsing (index + optional space) without touching the real manifest."""
+    import tempfile
+
+    problems: list[str] = []
+
+    def expect(condition: bool, message: str) -> None:
+        if not condition:
+            problems.append(message)
+
+    expect(parse_register("b0") == RegisterSlot("b", 0, None), "plain register did not parse")
+    expect(parse_register("t12, space3") == RegisterSlot("t", 12, 3), "register with space did not parse")
+    expect(parse_register("s7 ,  space2").canonical() == "s7, space2", "register did not canonicalise")
+    for bad in ("0, space0", "b", "x1", "b0, space", "b0 space0", "b0, space0, space1", "b-1", 5):
+        try:
+            parse_register(bad)
+        except ValueError:
+            continue
+        problems.append(f"malformed register {bad!r} was accepted")
+
+    source = """
+cbuffer Frame : register(b0, space0) { float4 gValue; };
+Texture2D<float4> gAtlas : register(t0, space1);
+Texture2D<float4> gPlain : register(t0);
+SamplerState gLinear : register(s6, space1);
+RWTexture2D<float4> gOut : register(u1);
+[numthreads(8, 8, 1)] void main(uint3 id : SV_DispatchThreadID) {}
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "ok.hlsl").write_text(source, encoding="utf-8")
+        _threads, bindings = inspect_shader(root / "ok.hlsl", root, "main", "compute")
+        got = [(b.name, b.register) for b in bindings]
+        want = [("Frame", "b0, space0"), ("gLinear", "s6, space1"), ("gPlain", "t0"),
+                ("gAtlas", "t0, space1"), ("gOut", "u1")]
+        expect(got == want, f"source bindings {got} != {want}")
+        manifest = [binding.to_json() for binding in reversed(bindings)]
+        expected, errors = validate_manifest_bindings("ok.hlsl", manifest)
+        expect(not errors and expected == [b.to_json() for b in bindings],
+               f"manifest with register spaces was rejected: {errors}")
+        for register, why in (("0, space0", "missing class"), ("s6,space1", "non-canonical"),
+                              ("s6, space1x", "garbage space"), ("t6, space1", "wrong class")):
+            broken = [dict(item) for item in manifest]
+            target = next(item for item in broken if item["name"] == "gLinear")
+            target["register"] = register
+            _expected, errors = validate_manifest_bindings("ok.hlsl", broken)
+            expect(bool(errors), f"manifest register {register!r} ({why}) was accepted")
+        drifted = [dict(item) for item in manifest]
+        next(item for item in drifted if item["name"] == "gAtlas")["register"] = "t0, space2"
+        expected, errors = validate_manifest_bindings("ok.hlsl", drifted)
+        expect(not errors and expected != [b.to_json() for b in bindings], "space drift was not detected")
+
+        # Same index in different spaces is fine; an explicit space0 collides with an implicit one.
+        (root / "collide.hlsl").write_text(
+            "Texture2D<float4> gA : register(t0);\nTexture2D<float4> gB : register(t0, space0);\n"
+            "[numthreads(1, 1, 1)] void main() {}\n", encoding="utf-8")
+        try:
+            inspect_shader(root / "collide.hlsl", root, "main", "compute")
+            problems.append("t0 and t0, space0 collision was not detected")
+        except ValueError as exc:
+            expect("collision" in str(exc), f"unexpected collision error: {exc}")
+        (root / "badclass.hlsl").write_text(
+            "cbuffer C : register(t0, space0) { float x; };\n[numthreads(1, 1, 1)] void main() {}\n",
+            encoding="utf-8")
+        try:
+            inspect_shader(root / "badclass.hlsl", root, "main", "compute")
+            problems.append("cbuffer bound to a t register was accepted")
+        except ValueError:
+            pass
+
+    for problem in problems:
+        print(f"FAIL: {problem}", file=sys.stderr)
+    if problems:
+        return 1
+    print("dve_shader_contract_validator_self_test: PASS")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--write-manifest", action="store_true")
+    parser.add_argument("--self-test", action="store_true",
+                        help="run the validator's own register-parsing tests and exit")
     args = parser.parse_args()
+    if args.self_test:
+        return self_test()
     root = args.root.resolve()
     shader_root = root / "shaders"
     manifest_path = shader_root / "shader_manifest.json"
@@ -347,8 +527,10 @@ def main() -> int:
                 failures.append(f"{source}: numthreads manifest={record.get('threads')} source={threads}")
             if threads is None and "threads" in record:
                 failures.append(f"{source}: graphics shader must not declare manifest threads")
-            expected = sorted(record.get("bindings", []), key=lambda item: (item["register"][0], int(item["register"][1:]), item["name"]))
-            if expected != actual_bindings:
+            expected, binding_errors = validate_manifest_bindings(source, record.get("bindings", []))
+            if binding_errors:
+                failures.extend(binding_errors)
+            elif expected != actual_bindings:
                 failures.append(f"{source}: binding manifest drift\n  manifest={expected}\n  source={actual_bindings}")
 
     failures.extend(validate_material_abi(root))

@@ -13,7 +13,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-REGISTER = re.compile(r"([buts])(\d+)$")
+# "b8" or "t0, space1" (the text inside HLSL `register(...)`). DXC's default SPIR-V mapping
+# (no -fvk-*-shift) puts register space N in descriptor set N; an omitted space is set 0.
+REGISTER = re.compile(r"([buts])(\d+)(?:,\s*space(\d+))?")
 
 
 def expected_kind(binding: dict[str, Any]) -> str:
@@ -38,7 +40,7 @@ def expected_record(binding: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": binding["name"],
         "kind": expected_kind(binding),
-        "set": 0,
+        "set": int(match.group(3) or 0),
         "binding": int(match.group(2)),
     }
 
@@ -122,6 +124,24 @@ def self_test() -> int:
     failed = compare(record, reflection)
     if failed["status"] != "failed":
         print("reflection self-test failed to reject binding drift", file=sys.stderr)
+        return 1
+    spaced = {
+        "name": "spaced_fixture",
+        "bindings": [
+            {"name": "Shell", "kind": "constant_buffer", "register": "b0, space0"},
+            {"name": "Atlas", "kind": "sampled_texture", "register": "t2, space1"},
+        ],
+    }
+    spaced_reflection = {
+        "ubos": [{"name": "Shell", "set": 0, "binding": 0}],
+        "separate_images": [{"name": "Atlas", "set": 1, "binding": 2}],
+    }
+    if compare(spaced, spaced_reflection)["status"] != "passed":
+        print("reflection self-test rejected a correct register space -> descriptor set mapping", file=sys.stderr)
+        return 1
+    spaced_reflection["separate_images"][0]["set"] = 0
+    if compare(spaced, spaced_reflection)["status"] != "failed":
+        print("reflection self-test failed to reject descriptor set drift", file=sys.stderr)
         return 1
     print("dve_compiled_shader_reflection_self_test: PASS")
     return 0

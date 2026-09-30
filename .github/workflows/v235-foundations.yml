@@ -53,3 +53,11 @@ jobs:
         run: ./scripts/run_v235_foundation_tests.sh
       - name: Sanitized deterministic contract suite
         run: ./scripts/run_v235_foundation_tests.sh --sanitize
+
+  dashr-null-rhi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: DASHR live renderer and shader contracts
+        run: sh ./scripts/run_dashr_null_rhi_tests.sh

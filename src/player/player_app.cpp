@@ -100,11 +100,17 @@ std::unique_ptr<PlayerApp> PlayerApp::boot(
 
     // 5. Scene.
     impl.scenePath = options.sceneOverride.value_or(impl.manifest.entryScene);
-    const GameSceneLoadResult scene = load_scene_into_game_world(*impl.content, impl.scenePath, *impl.world);
+    GameSceneLoadOptions sceneOptions;
+    sceneOptions.attachChildrenToParents = options.attachChildrenToParents;
+    const GameSceneLoadResult scene =
+        load_scene_into_game_world(*impl.content, impl.scenePath, *impl.world, sceneOptions);
     if (!scene) return fail("scene '" + impl.scenePath + "': " + scene.error.message);
     impl.sceneName = scene.sceneName;
     impl.sceneObjects = scene.objects.size();
-    log("scene: " + impl.sceneName + " (" + std::to_string(impl.sceneObjects) + " objects)");
+    std::size_t attached = 0;
+    for (const GameSceneLoadedObject& object : scene.objects) attached += object.attached ? 1U : 0U;
+    log("scene: " + impl.sceneName + " (" + std::to_string(impl.sceneObjects) + " objects, " +
+        std::to_string(attached) + " attached)");
 
     // 6. Scripts (after the scene so the startup script can find scene objects).
     const std::string scriptPath = impl.manifest.startup_script_or_default();

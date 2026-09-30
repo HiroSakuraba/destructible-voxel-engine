@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "dve/dvox.hpp"
+#include "dve/polygon_asset.hpp"
 
 namespace dve {
 namespace {
@@ -25,6 +26,7 @@ struct StagedObject {
     RuntimeSceneObjectMetadata metadata;
     std::string assetPath;
     std::optional<CookedVoxelAsset> asset;
+    std::optional<CookedPolygonAsset> polygon;
 };
 
 } // namespace
@@ -79,17 +81,27 @@ GameSceneLoadResult load_scene_into_game_world(
         item.assetPath = *assetPath;
         auto bytes = content.read(item.assetPath, &readError, options.limits.maximumDvoxBytesPerObject);
         if (!bytes) return failContent(readError, false, metadata.id, "could not read DVOX asset for '" + metadata.name + "'");
-        DvoxReadResult read = read_dvox(*bytes, options.limits.maximumDvoxBytesPerObject);
-        if (!read.success) {
-            result.error = {RuntimeSceneErrorCode::DvoxReadFailed, "DVOX load failed: " + read.error, item.assetPath, metadata.id};
-            return result;
+        if (metadata.geometry == RuntimeSceneGeometry::Polygon) {
+            PolygonAssetReadResult polygon = read_dmesh(*bytes, options.limits.maximumDvoxBytesPerObject);
+            if (!polygon) {
+                result.error = {RuntimeSceneErrorCode::DvoxReadFailed, "DMESH load failed: " + polygon.error,
+                                item.assetPath, metadata.id};
+                return result;
+            }
+            item.polygon.emplace(std::move(polygon.asset));
+        } else {
+            DvoxReadResult read = read_dvox(*bytes, options.limits.maximumDvoxBytesPerObject);
+            if (!read.success) {
+                result.error = {RuntimeSceneErrorCode::DvoxReadFailed, "DVOX load failed: " + read.error, item.assetPath, metadata.id};
+                return result;
+            }
+            RuntimeSceneError assetError = validate_dvoxscene_asset(metadata, read.asset, options.limits, item.assetPath);
+            if (assetError) {
+                result.error = std::move(assetError);
+                return result;
+            }
+            item.asset.emplace(std::move(read.asset));
         }
-        RuntimeSceneError assetError = validate_dvoxscene_asset(metadata, read.asset, options.limits, item.assetPath);
-        if (assetError) {
-            result.error = std::move(assetError);
-            return result;
-        }
-        item.asset.emplace(std::move(read.asset));
         item.metadata = std::move(metadata);
         staged.push_back(std::move(item));
     }
@@ -103,7 +115,22 @@ GameSceneLoadResult load_scene_into_game_world(
     };
     try {
         result.objects.reserve(staged.size());
-        for (StagedObject& item : staged) {
+        // Which objects become GameWorld attachments (decided up front: it forces the child
+        // dynamic, so it must be known before the body is created).
+        std::vector<bool> attach(staged.size(), false);
+        for (std::size_t i = 0; i < staged.size(); ++i) {
+            const RuntimeSceneObjectMetadata& metadata = staged[i].metadata;
+            if (!metadata.parentIndex) continue;
+            if (metadata.attachment) {
+                attach[i] = true;
+            } else if (options.attachChildrenToParents) {
+                const RuntimeSceneObjectMetadata& parent = staged[*metadata.parentIndex].metadata;
+                const bool staticParent = parent.anchored && parent.generateCollision;
+                attach[i] = !(staticParent && metadata.anchored);
+            }
+        }
+        for (std::size_t stagedIndex = 0; stagedIndex < staged.size(); ++stagedIndex) {
+            StagedObject& item = staged[stagedIndex];
             const RuntimeSceneObjectMetadata& metadata = item.metadata;
             GameSceneLoadedObject loaded;
             loaded.index = metadata.index;
@@ -112,10 +139,18 @@ GameSceneLoadResult load_scene_into_game_world(
             loaded.assetPath = item.assetPath;
             loaded.anchored = metadata.anchored;
             loaded.collision = metadata.generateCollision;
-            loaded.attached = options.attachChildrenToParents && metadata.parentIndex.has_value();
+            loaded.attached = attach[stagedIndex];
+            loaded.geometry = metadata.geometry;
             const bool dynamic = !metadata.anchored || loaded.attached;
             std::string spawnError;
-            if (item.asset && !metadata.generateCollision) {
+            if (item.polygon && !metadata.generateCollision) {
+                loaded.gameObjectId = world.spawn_visual_polygon_asset(
+                    std::move(*item.polygon), metadata.name, metadata.worldTransform, &spawnError);
+            } else if (item.polygon) {
+                loaded.gameObjectId = world.spawn_cooked_polygon_asset(
+                    std::move(*item.polygon), metadata.name, metadata.worldTransform, dynamic, metadata.structural,
+                    &spawnError);
+            } else if (item.asset && !metadata.generateCollision) {
                 loaded.gameObjectId = world.spawn_visual_asset(
                     std::move(*item.asset), metadata.name, metadata.worldTransform, &spawnError);
             } else if (item.asset) {
@@ -137,6 +172,19 @@ GameSceneLoadResult load_scene_into_game_world(
                 return result;
             }
             result.objects.push_back(std::move(loaded));
+            GameSceneLoadedObject& published = result.objects.back();
+            for (const Component& component : metadata.components) {
+                std::string componentError;
+                if (!world.add_component(published.gameObjectId, component, &componentError)) {
+                    rollback();
+                    result.error = {RuntimeSceneErrorCode::InvalidManifest,
+                                    "could not add component '" + component.type + "' to '" + metadata.name +
+                                        "': " + componentError,
+                                    item.assetPath, metadata.id};
+                    return result;
+                }
+                ++published.componentCount;
+            }
         }
         for (std::size_t i = 0; i < staged.size(); ++i) {
             if (!staged[i].metadata.parentIndex) continue;
@@ -144,7 +192,9 @@ GameSceneLoadResult load_scene_into_game_world(
             child.parentGameObjectId = result.objects[*staged[i].metadata.parentIndex].gameObjectId;
             if (!child.attached) continue;
             std::string attachError;
-            if (!world.attach_object(child.gameObjectId, *child.parentGameObjectId, true, {}, true, true, &attachError)) {
+            const RuntimeSceneAttachment attachment = staged[i].metadata.attachment.value_or(RuntimeSceneAttachment{});
+            if (!world.attach_object(child.gameObjectId, *child.parentGameObjectId, true, attachment.socket,
+                                     attachment.inheritPosition, attachment.inheritRotation, &attachError)) {
                 const std::string name = child.name;
                 const std::uint64_t id = child.sceneObjectId;
                 rollback();

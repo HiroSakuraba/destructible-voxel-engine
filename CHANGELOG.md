@@ -1,3 +1,23 @@
+# Unreleased — dve_export_scene gaps and player attachments
+
+- `dve_export_scene` now exports `.dmesh` objects (copied, loaded as polygon objects), bakes 3D
+  text and Gabor volumes to voxels (the Gabor bake is visual-only; new `--gabor-opacity`), and
+  carries components, tags/groups/layer (as `dve.membership`) and attachments in a new versioned
+  per-object `extensions` block of DVOXSCENE v1 (`kDvoxSceneExtensionVersion = 1`). New
+  `--project-root` for resolving `.dmesh` sources. Only a missing/invalid `.dmesh` and unknown
+  `dve.*` component types still warn.
+- `load_scene_into_game_world` loads polygon objects and components, and attaches objects that
+  have an attachment extension. `dve_player` turns on `attachChildrenToParents`, so attached
+  objects move with their parents.
+- GameWorld: attached bodies take their parent's rigid-motion velocity instead of accumulating
+  gravity between snaps, and parent/child body pairs no longer collide
+  (`IRigidBodyWorld::set_pair_collision_enabled`, implemented by the Jolt backend with a contact
+  validation filter). New `GameWorld::spawn_visual_polygon_asset`.
+- Fixed: the CPU player renderer culled every polygon object (the rescaled copy kept the source
+  content hash and failed validation).
+- New tests: `dve_player_export_scene` (editor project -> export -> headless player hash) plus
+  new cases in the exporter, scene loader and player runtime tests.
+
 # Unreleased — MIT license
 
 - The engine is now licensed under the MIT License (decision D1): added the root `LICENSE`

@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <future>
 #include <limits>
+#include <locale>
 #include <map>
 #include <functional>
 #include <mutex>
@@ -23,6 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -528,6 +530,118 @@ void validate_hierarchy(std::span<const RuntimeSceneObject> objects) {
     for (std::size_t i = 0; i < objects.size(); ++i) visit(visit, i);
 }
 
+// ---- DVOXSCENE per-object "extensions" block (see kDvoxSceneExtensionVersion) ----------------
+constexpr std::size_t kMaximumComponentsPerObject = 256U;
+constexpr std::size_t kMaximumComponentProperties = 256U;
+
+[[nodiscard]] std::int64_t parse_i64_string(const JsonValue& value, std::string_view context) {
+    if (!value.is_string() || value.string().empty()) {
+        fail(RuntimeSceneErrorCode::InvalidManifest, std::string(context) + " must be a decimal string");
+    }
+    std::int64_t result = 0;
+    const char* begin = value.string().data();
+    const char* end = begin + value.string().size();
+    const auto parsed = std::from_chars(begin, end, result, 10);
+    if (parsed.ec != std::errc{} || parsed.ptr != end) {
+        fail(RuntimeSceneErrorCode::InvalidManifest, std::string(context) + " is not a valid int64 decimal string");
+    }
+    return result;
+}
+
+[[nodiscard]] ComponentValue parse_component_value(const JsonValue& value, std::string_view context) {
+    if (!value.is_object() || value.object().size() != 1U) {
+        fail(RuntimeSceneErrorCode::InvalidManifest,
+             std::string(context) + " must be an object with exactly one typed value");
+    }
+    const auto& [kind, payload] = *value.object().begin();
+    const std::string where = std::string(context) + "." + kind;
+    if (kind == "bool") return require_bool(payload, where);
+    if (kind == "int") return parse_i64_string(payload, where);
+    if (kind == "float") {
+        if (!payload.is_number()) fail(RuntimeSceneErrorCode::InvalidManifest, where + " must be a number");
+        return payload.number();
+    }
+    if (kind == "string") return require_string(payload, where, 4096U);
+    if (kind == "float3" || kind == "quat") {
+        const std::size_t count = kind == "float3" ? 3U : 4U;
+        if (!payload.is_array() || payload.array().size() != count) {
+            fail(RuntimeSceneErrorCode::InvalidManifest, where + " must be an array of " + std::to_string(count) + " numbers");
+        }
+        std::array<float, 4> v{};
+        for (std::size_t i = 0; i < count; ++i) v[i] = require_float(payload.array()[i], where);
+        if (count == 3U) return Float3{v[0], v[1], v[2]};
+        return Quaternion{v[0], v[1], v[2], v[3]};
+    }
+    fail(RuntimeSceneErrorCode::InvalidManifest, std::string(context) + " has unknown value type '" + kind + "'");
+}
+
+void parse_object_extensions(const JsonValue& value, RuntimeSceneObjectMetadata& metadata) {
+    if (!value.is_object()) {
+        fail(RuntimeSceneErrorCode::InvalidManifest, "object.extensions must be an object", {}, metadata.id);
+    }
+    const std::uint64_t version = parse_u64(require_field(value, "version", "object.extensions"), "object.extensions.version");
+    if (version == 0U || version > kDvoxSceneExtensionVersion) {
+        fail(RuntimeSceneErrorCode::UnsupportedVersion,
+             "object.extensions version " + std::to_string(version) + " is not supported (this runtime reads 1.." +
+                 std::to_string(kDvoxSceneExtensionVersion) + ")",
+             {}, metadata.id);
+    }
+    static constexpr std::array fields{"version"sv, "geometry"sv, "components"sv, "attachment"sv};
+    reject_unknown_fields(value, fields, "object.extensions");
+    metadata.extensionVersion = static_cast<std::uint32_t>(version);
+    if (const JsonValue* geometry = value.find("geometry")) {
+        const std::string kind = require_string(*geometry, "object.extensions.geometry", 32U);
+        if (kind == "voxel") metadata.geometry = RuntimeSceneGeometry::Voxel;
+        else if (kind == "polygon") metadata.geometry = RuntimeSceneGeometry::Polygon;
+        else fail(RuntimeSceneErrorCode::InvalidManifest, "object.extensions.geometry must be voxel or polygon", {}, metadata.id);
+    }
+    if (const JsonValue* components = value.find("components")) {
+        if (!components->is_array()) {
+            fail(RuntimeSceneErrorCode::InvalidManifest, "object.extensions.components must be an array", {}, metadata.id);
+        }
+        if (components->array().size() > kMaximumComponentsPerObject) {
+            fail(RuntimeSceneErrorCode::LimitExceeded, "object has too many components", {}, metadata.id);
+        }
+        static constexpr std::array componentFields{"id"sv, "type"sv, "enabled"sv, "properties"sv};
+        for (const JsonValue& entry : components->array()) {
+            reject_unknown_fields(entry, componentFields, "object.extensions.components[]");
+            Component component;
+            component.id = parse_u64(require_field(entry, "id", "component"), "component.id");
+            component.type = require_string(require_field(entry, "type", "component"), "component.type", 128U);
+            if (const JsonValue* enabled = entry.find("enabled")) component.enabled = require_bool(*enabled, "component.enabled");
+            if (const JsonValue* properties = entry.find("properties")) {
+                if (!properties->is_object()) {
+                    fail(RuntimeSceneErrorCode::InvalidManifest, "component.properties must be an object", {}, metadata.id);
+                }
+                if (properties->object().size() > kMaximumComponentProperties) {
+                    fail(RuntimeSceneErrorCode::LimitExceeded, "component has too many properties", {}, metadata.id);
+                }
+                for (const auto& [name, property] : properties->object()) {
+                    component.properties.emplace(name, parse_component_value(property, "component.properties." + name));
+                }
+            }
+            metadata.components.push_back(std::move(component));
+        }
+        std::string componentError;
+        if (!validate_components(metadata.components, nullptr, &componentError)) {
+            fail(RuntimeSceneErrorCode::InvalidManifest, "object components are invalid: " + componentError, {}, metadata.id);
+        }
+    }
+    if (const JsonValue* attachment = value.find("attachment")) {
+        static constexpr std::array attachmentFields{"socket"sv, "inheritPosition"sv, "inheritRotation"sv};
+        reject_unknown_fields(*attachment, attachmentFields, "object.extensions.attachment");
+        RuntimeSceneAttachment parsed;
+        if (const JsonValue* socket = attachment->find("socket")) parsed.socket = require_string(*socket, "attachment.socket", 256U);
+        if (const JsonValue* v = attachment->find("inheritPosition")) parsed.inheritPosition = require_bool(*v, "attachment.inheritPosition");
+        if (const JsonValue* v = attachment->find("inheritRotation")) parsed.inheritRotation = require_bool(*v, "attachment.inheritRotation");
+        metadata.attachment = std::move(parsed);
+    }
+}
+
+[[nodiscard]] std::string_view expected_asset_extension(const RuntimeSceneObjectMetadata& metadata) noexcept {
+    return metadata.geometry == RuntimeSceneGeometry::Polygon ? ".dmesh" : ".dvox";
+}
+
 } // namespace
 
 RuntimeScene RuntimeSceneParserAccess::parse_manifest(
@@ -550,6 +664,11 @@ RuntimeScene RuntimeSceneParserAccess::parse_manifest(
     parse_manifest_text(
         text, options, canonicalManifest,
         [&](RuntimeSceneObject& object, const std::string& file) {
+            if (object.metadata_.geometry != RuntimeSceneGeometry::Voxel) {
+                fail(RuntimeSceneErrorCode::InvalidManifest,
+                     "polygon scene objects are only supported by load_scene_into_game_world",
+                     std::filesystem::path(file), object.metadata_.id);
+            }
             object.resolvedAssetPath_ = resolve_contained_asset(packageRoot, file, object.metadata_.id,
                                                                 options.maximumDvoxBytesPerObject);
             if (!assetPaths.insert(object.resolvedAssetPath_).second) {
@@ -592,7 +711,7 @@ void RuntimeSceneParserAccess::parse_manifest_text(
     std::set<std::size_t> indices;
     static constexpr std::array objectFields{
         "index"sv, "id"sv, "name"sv, "nodePath"sv, "file"sv, "parent"sv,
-        "anchored"sv, "structural"sv, "generateCollision"sv, "worldMatrix"sv};
+        "anchored"sv, "structural"sv, "generateCollision"sv, "worldMatrix"sv, "extensions"sv};
 
     for (std::size_t arrayIndex = 0; arrayIndex < objectArray.array().size(); ++arrayIndex) {
         const JsonValue& value = objectArray.array()[arrayIndex];
@@ -611,6 +730,10 @@ void RuntimeSceneParserAccess::parse_manifest_text(
         object.metadata_.structural = require_bool(require_field(value, "structural", "manifest object"), "object.structural");
         object.metadata_.generateCollision = require_bool(require_field(value, "generateCollision", "manifest object"), "object.generateCollision");
         object.metadata_.worldTransform = parse_rigid_matrix(require_field(value, "worldMatrix", "manifest object"), object.metadata_.id);
+        if (const JsonValue* extensions = value.find("extensions")) parse_object_extensions(*extensions, object.metadata_);
+        if (object.metadata_.attachment && !object.metadata_.parentIndex) {
+            fail(RuntimeSceneErrorCode::InvalidParent, "object.extensions.attachment requires a parent", {}, object.metadata_.id);
+        }
         if (!ids.insert(object.metadata_.id).second) {
             fail(RuntimeSceneErrorCode::DuplicateObjectId, "manifest contains duplicate object ID", {}, object.metadata_.id);
         }
@@ -661,8 +784,11 @@ std::optional<DvoxSceneManifest> parse_dvoxscene_manifest(
                     fail(RuntimeSceneErrorCode::PathEscape, "object asset path is not a contained relative path",
                          relative, object.metadata().id);
                 }
-                if (relative.extension() != ".dvox") {
-                    fail(RuntimeSceneErrorCode::InvalidManifest, "object asset file must use the .dvox extension",
+                if (relative.extension() != expected_asset_extension(object.metadata())) {
+                    fail(RuntimeSceneErrorCode::InvalidManifest,
+                         object.metadata().geometry == RuntimeSceneGeometry::Polygon
+                             ? "polygon object asset file must use the .dmesh extension"
+                             : "object asset file must use the .dvox extension",
                          relative, object.metadata().id);
                 }
                 if (!assetPaths.insert(relative).second) {
@@ -1338,7 +1464,12 @@ private:
             if (element != 0U) output << ',';
             output << matrix[element];
         }
-        output << "]}" << (i + 1U == scene.objects().size() ? "\n" : ",\n");
+        output << ']';
+        // Carry the optional extensions block (components/attachment) through checkpoints.
+        const std::string extensions = dvoxscene_object_extensions_json(
+            metadata.geometry, metadata.components, metadata.attachment);
+        if (!extensions.empty()) output << ",\"extensions\":" << extensions;
+        output << '}' << (i + 1U == scene.objects().size() ? "\n" : ",\n");
     }
     output << "  ]\n}\n";
     if (!output) {
@@ -3732,4 +3863,104 @@ const char* to_string(RuntimeSceneJobPriority priority) noexcept {
     return "Unknown";
 }
 
+namespace {
+
+void append_extension_json_string(std::string& out, std::string_view text) {
+    out.push_back('"');
+    for (const unsigned char c : text) {
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20U) {
+                constexpr char digits[] = "0123456789abcdef";
+                out += "\\u00";
+                out.push_back(digits[(c >> 4U) & 0xFU]);
+                out.push_back(digits[c & 0xFU]);
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+        }
+    }
+    out.push_back('"');
+}
+
+template <typename T>
+void append_extension_number(std::string& out, T value) {
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << std::setprecision(std::numeric_limits<T>::max_digits10) << (value == T{0} ? T{0} : value);
+    out += stream.str();
+}
+
+} // namespace
+
+std::string dvoxscene_object_extensions_json(
+    RuntimeSceneGeometry geometry,
+    std::span<const Component> components,
+    const std::optional<RuntimeSceneAttachment>& attachment) {
+    if (geometry == RuntimeSceneGeometry::Voxel && components.empty() && !attachment) return {};
+    std::string out = "{\"version\":" + std::to_string(kDvoxSceneExtensionVersion);
+    if (geometry == RuntimeSceneGeometry::Polygon) out += ",\"geometry\":\"polygon\"";
+    if (!components.empty()) {
+        out += ",\"components\":[";
+        for (std::size_t i = 0; i < components.size(); ++i) {
+            const Component& component = components[i];
+            if (i != 0U) out += ',';
+            out += "{\"id\":" + std::to_string(component.id) + ",\"type\":";
+            append_extension_json_string(out, component.type);
+            out += std::string(",\"enabled\":") + (component.enabled ? "true" : "false") + ",\"properties\":{";
+            bool first = true;
+            for (const auto& [name, value] : component.properties) {
+                if (!first) out += ',';
+                first = false;
+                append_extension_json_string(out, name);
+                out += ":{";
+                std::visit([&](const auto& v) {
+                    using V = std::decay_t<decltype(v)>;
+                    if constexpr (std::is_same_v<V, bool>) {
+                        out += std::string("\"bool\":") + (v ? "true" : "false");
+                    } else if constexpr (std::is_same_v<V, std::int64_t>) {
+                        out += "\"int\":\"" + std::to_string(v) + "\"";
+                    } else if constexpr (std::is_same_v<V, double>) {
+                        out += "\"float\":";
+                        append_extension_number(out, v);
+                    } else if constexpr (std::is_same_v<V, std::string>) {
+                        out += "\"string\":";
+                        append_extension_json_string(out, v);
+                    } else if constexpr (std::is_same_v<V, Float3>) {
+                        out += "\"float3\":[";
+                        append_extension_number(out, v.x); out += ',';
+                        append_extension_number(out, v.y); out += ',';
+                        append_extension_number(out, v.z); out += ']';
+                    } else {
+                        out += "\"quat\":[";
+                        append_extension_number(out, v.x); out += ',';
+                        append_extension_number(out, v.y); out += ',';
+                        append_extension_number(out, v.z); out += ',';
+                        append_extension_number(out, v.w); out += ']';
+                    }
+                }, value);
+                out += '}';
+            }
+            out += "}}";
+        }
+        out += ']';
+    }
+    if (attachment) {
+        out += ",\"attachment\":{\"socket\":";
+        append_extension_json_string(out, attachment->socket);
+        out += std::string(",\"inheritPosition\":") + (attachment->inheritPosition ? "true" : "false") +
+               ",\"inheritRotation\":" + (attachment->inheritRotation ? "true" : "false") + "}";
+    }
+    out += '}';
+    return out;
+}
+
 } // namespace dve
+

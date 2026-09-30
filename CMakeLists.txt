@@ -675,6 +675,8 @@ if(DVE_BUILD_RHI)
     target_link_libraries(dve_gabor_volume_v151_demo PRIVATE dve::render_bridge)
     add_executable(dve_material_preview apps/material_preview_v174.cpp)
     target_link_libraries(dve_material_preview PRIVATE dve::render_bridge)
+    add_executable(dve_rc_spwi_bench apps/rc_spwi_bench.cpp)
+    target_link_libraries(dve_rc_spwi_bench PRIVATE dve::render_bridge)
 endif()
 
 if(DVE_BUILD_ASSET_COOKER OR DVE_BUILD_BENCHMARK OR DVE_BUILD_EDITOR OR DVE_BUILD_TESTS)

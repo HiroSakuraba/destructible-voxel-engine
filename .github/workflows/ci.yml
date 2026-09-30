@@ -26,6 +26,7 @@ env:
     libpng-dev libjpeg-dev liblua5.4-dev libsdl3-dev libsdl3-ttf-dev
     libx11-dev libxext-dev libxft-dev libfreetype-dev libfontconfig-dev
     libwayland-dev libxkbcommon-dev libasound2-dev libpulse-dev libjack-dev
+    libflac-dev libogg-dev libvorbis-dev libopus-dev
     ffmpeg glslang-tools xvfb xauth
   # Headless SDL for every test that does not pick its own driver; X11-only tests get xvfb-run.
   SDL_VIDEO_DRIVER: offscreen

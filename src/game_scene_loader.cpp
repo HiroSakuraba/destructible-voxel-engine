@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "dve/dvox.hpp"
+#include "dve/game_save.hpp"
 
 namespace dve {
 namespace {
@@ -24,6 +25,7 @@ namespace {
 struct StagedObject {
     RuntimeSceneObjectMetadata metadata;
     std::string assetPath;
+    std::uint64_t contentHash{};
     std::optional<CookedVoxelAsset> asset;
 };
 
@@ -79,6 +81,7 @@ GameSceneLoadResult load_scene_into_game_world(
         item.assetPath = *assetPath;
         auto bytes = content.read(item.assetPath, &readError, options.limits.maximumDvoxBytesPerObject);
         if (!bytes) return failContent(readError, false, metadata.id, "could not read DVOX asset for '" + metadata.name + "'");
+        item.contentHash = game_save_content_hash(*bytes);
         DvoxReadResult read = read_dvox(*bytes, options.limits.maximumDvoxBytesPerObject);
         if (!read.success) {
             result.error = {RuntimeSceneErrorCode::DvoxReadFailed, "DVOX load failed: " + read.error, item.assetPath, metadata.id};
@@ -136,6 +139,8 @@ GameSceneLoadResult load_scene_into_game_world(
                                 item.assetPath, metadata.id};
                 return result;
             }
+            // Save games store destruction as a delta against this asset (dve/game_save.hpp).
+            (void)world.set_object_source(loaded.gameObjectId, GameObjectSource{item.assetPath, item.contentHash, false});
             result.objects.push_back(std::move(loaded));
         }
         for (std::size_t i = 0; i < staged.size(); ++i) {

@@ -190,6 +190,7 @@ add_library(dve_core
     src/content_source.cpp
     src/game_manifest.cpp
     src/game_scene_loader.cpp
+    src/game_save.cpp
 )
 add_library(dve::core ALIAS dve_core)
 target_include_directories(dve_core PUBLIC $<BUILD_INTERFACE:${DVE_GENERATED_INCLUDE_DIR}>)
@@ -2203,6 +2204,10 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_game_world_tests PRIVATE dve::core)
     add_test(NAME dve_game_world_tests COMMAND dve_game_world_tests)
 
+    add_executable(dve_game_save_tests tests/test_game_save.cpp)
+    target_link_libraries(dve_game_save_tests PRIVATE dve::core)
+    add_test(NAME dve_game_save_tests COMMAND dve_game_save_tests)
+
     add_executable(dve_animation_tests tests/test_animation.cpp)
     target_link_libraries(dve_animation_tests PRIVATE dve::core)
     add_test(NAME dve_animation_tests COMMAND dve_animation_tests)
@@ -2397,7 +2402,7 @@ if(DVE_BUILD_TESTS)
             endforeach()
             list(JOIN _dve_player_hashes "," _dve_player_hashes)
             message(STATUS "dve_player golden hash key ${_dve_player_hash_key}: '${_dve_player_hashes}'")
-            foreach(_dve_mode smoke loose_matches_pak missing_pak corrupt_pak no_content default_pak no_audio input)
+            foreach(_dve_mode smoke loose_matches_pak missing_pak corrupt_pak no_content default_pak no_audio input save_load)
                 if(_dve_mode STREQUAL "input" AND NOT DVE_ENABLE_LUA)
                     continue()
                 endif()
@@ -2414,7 +2419,7 @@ if(DVE_BUILD_TESTS)
                         -DLUA=${_dve_player_lua}
                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_cli.cmake)
                 set_tests_properties(dve_player_${_dve_mode} PROPERTIES FIXTURES_REQUIRED dve_player_sample_pak)
-                if(_dve_mode MATCHES "^(smoke|loose_matches_pak)$")
+                if(_dve_mode MATCHES "^(smoke|loose_matches_pak|save_load)$")
                     # These render with --threads 4; tell CTest so -jN does not oversubscribe
                     # the cores under the timing-sensitive audio deadline tests.
                     set_tests_properties(dve_player_${_dve_mode} PROPERTIES PROCESSORS 4)

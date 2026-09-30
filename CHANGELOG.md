@@ -18,6 +18,20 @@
 - New tests: `dve_player_export_scene` (editor project -> export -> headless player hash) plus
   new cases in the exporter, scene loader and player runtime tests.
 
+# Unreleased — Fix flaky synth polyphony stress gate
+
+- `dve_synth_release_acceptance_tests` `polyphony_stress` timed each 512-frame block with the wall
+  clock and failed on a single block over 10.67 ms. The render code has not changed since before
+  PR #11 (identical object code at 31b0896, c6eee5f, 8d9ef38 and 1e002bf) and costs ~5.3 ms per
+  block; the misses were vCPU stalls of the shared KVM box (a 5 ms pure arithmetic loop gets
+  20–110 ms stalls too) and preemption by parallel builds (hundreds of wall misses while CPU time
+  stayed at ~5.4 ms).
+  The check now times blocks with thread CPU time, re-times over-budget blocks in up to two
+  identical, deterministic re-renders (verified by the block audio), and fails on any block that
+  misses in every pass. It still requires zero misses and catches real regressions (an injected
+  8 ms spike on every 700th block and a uniform 2× slowdown both fail).
+  `DVE_SYNTH_STRICT_REALTIME=1` keeps the old single-pass wall-clock gate for quiet hardware.
+
 # Unreleased — MIT license
 
 - The engine is now licensed under the MIT License (decision D1): added the root `LICENSE`

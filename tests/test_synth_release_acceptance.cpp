@@ -7,10 +7,14 @@
 // House style: plain int main(), require() throwing std::runtime_error,
 // PASS/FAIL lines on stdout.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -237,7 +241,50 @@ void check_mpe_note_isolation() {
 // held for 30 s; every 512-frame block must render inside its real-time
 // budget. (The plan's 48-voice figure predates the 16-voice engine; the
 // gate is the per-block deadline, which is what "no deadline misses" means.)
-void check_polyphony_stress() {
+//
+// How a miss is measured. Wall-clock time per block also counts time the
+// thread was not running: preemption by other processes, and on a shared VM,
+// stalls of the whole vCPU. On the 8-vCPU KVM build box a plain 5 ms
+// arithmetic loop with no memory traffic gets 20–110 ms stalls a few times per
+// 30 s, and with parallel builds running, several hundred of the 2812 blocks
+// miss by wall clock while their thread CPU time stays at ~5.3 ms. So:
+//   - Each block is timed with CLOCK_THREAD_CPUTIME_ID (the DSP's own cost;
+//     render() is single-threaded). Wall time is still measured and reported.
+//   - Host-level stalls are charged to the guest thread's CPU time too, so a
+//     CPU-time miss is only a candidate. Rendering is deterministic, so the
+//     same block index does the same work in a freshly built synth: the
+//     candidates are re-timed in up to two more identical passes (the block
+//     audio is compared to prove it), and a block is a deadline miss only if
+//     it misses in every pass. A real per-block spike (allocation, denormals, a
+//     slow path) misses every time; a random stall does not.
+//   - The gate is still zero misses. DVE_SYNTH_STRICT_REALTIME=1 restores the
+//     plain wall-clock gate (zero wall misses in one pass) for dedicated,
+//     quiet hardware.
+struct StressPass {
+    std::vector<double> cpuMs;
+    std::vector<double> wallMs;
+    std::vector<std::uint64_t> hashes;
+};
+
+double thread_cpu_ms() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return static_cast<double>(ts.tv_sec) * 1000.0 + static_cast<double>(ts.tv_nsec) / 1.0e6;
+}
+
+std::uint64_t hash_block(const std::vector<float>& block) {
+    std::uint64_t h = 1469598103934665603ULL;
+    for (float value : block) {
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &value, sizeof bits);
+        h = (h ^ bits) * 1099511628211ULL;
+    }
+    return h;
+}
+
+// Renders `blockCount` blocks of a freshly built 16-voice stress synth and
+// times each one (untimed 8-block warmup first).
+StressPass run_stress_pass(std::size_t blockCount) {
     SynthPreset preset = SynthPreset::make_default();
     for (auto& osc : preset.oscillators) {
         osc.enabled = true;
@@ -251,24 +298,76 @@ void check_polyphony_stress() {
     for (std::uint8_t n = 0; n < 16; ++n)
         require(synth.note_on(static_cast<std::uint8_t>(36 + n), 1.0F), "note_on failed");
     constexpr std::size_t blockFrames = 512;
-    constexpr std::size_t blocks = (48000U * 30U) / blockFrames;
-    const double budgetMs = 1000.0 * static_cast<double>(blockFrames) / 48000.0;
     std::vector<float> block(blockFrames * 2U);
     for (int i = 0; i < 8; ++i) synth.render(block.data(), blockFrames);  // warmup, untimed
-    double worstMs = 0.0;
-    std::size_t misses = 0;
-    for (std::size_t i = 0; i < blocks; ++i) {
+    StressPass pass;
+    pass.cpuMs.resize(blockCount);
+    pass.wallMs.resize(blockCount);
+    pass.hashes.resize(blockCount);
+    for (std::size_t i = 0; i < blockCount; ++i) {
+        const double c0 = thread_cpu_ms();
         const auto t0 = std::chrono::steady_clock::now();
         synth.render(block.data(), blockFrames);
         const auto t1 = std::chrono::steady_clock::now();
-        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        worstMs = std::max(worstMs, ms);
-        if (ms >= budgetMs) ++misses;
+        pass.cpuMs[i] = thread_cpu_ms() - c0;
+        pass.wallMs[i] = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        pass.hashes[i] = hash_block(block);
     }
     synth.all_notes_off(true);
-    std::printf("[polyphony_stress] 16 voices x 30 s: worst block %.2f ms (budget %.2f ms), %zu misses\n",
-                worstMs, budgetMs, misses);
-    require(misses == 0, "polyphony_stress: deadline misses");
+    return pass;
+}
+
+double percentile(std::vector<double> values, double p) {
+    std::sort(values.begin(), values.end());
+    const auto index = static_cast<std::size_t>(p * static_cast<double>(values.size() - 1U));
+    return values[index];
+}
+
+void check_polyphony_stress() {
+    constexpr std::size_t blockFrames = 512;
+    constexpr std::size_t blocks = (48000U * 30U) / blockFrames;
+    const double budgetMs = 1000.0 * static_cast<double>(blockFrames) / 48000.0;
+    const char* strictEnv = std::getenv("DVE_SYNTH_STRICT_REALTIME");
+    const bool strict = strictEnv != nullptr && std::string(strictEnv) == "1";
+
+    const StressPass first = run_stress_pass(blocks);
+    const auto count_misses = [&](const std::vector<double>& ms) {
+        return static_cast<std::size_t>(
+            std::count_if(ms.begin(), ms.end(), [&](double v) { return v >= budgetMs; }));
+    };
+    const std::size_t wallMisses = count_misses(first.wallMs);
+    std::printf("[polyphony_stress] 16 voices x 30 s, budget %.2f ms per block\n", budgetMs);
+    std::printf("[polyphony_stress]   thread CPU: p50 %.2f  p99 %.2f  max %.2f ms, %zu blocks over budget\n",
+                percentile(first.cpuMs, 0.5), percentile(first.cpuMs, 0.99),
+                *std::max_element(first.cpuMs.begin(), first.cpuMs.end()), count_misses(first.cpuMs));
+    std::printf("[polyphony_stress]   wall clock: p50 %.2f  p99 %.2f  max %.2f ms, %zu blocks over budget\n",
+                percentile(first.wallMs, 0.5), percentile(first.wallMs, 0.99),
+                *std::max_element(first.wallMs.begin(), first.wallMs.end()), wallMisses);
+    if (strict) {
+        std::printf("[polyphony_stress]   DVE_SYNTH_STRICT_REALTIME=1: gating on wall-clock misses\n");
+        require(wallMisses == 0, "polyphony_stress: deadline misses (wall clock, strict)");
+        std::printf("[polyphony_stress] PASS\n");
+        return;
+    }
+
+    std::vector<std::size_t> candidates;
+    for (std::size_t i = 0; i < blocks; ++i)
+        if (first.cpuMs[i] >= budgetMs) candidates.push_back(i);
+    for (int retry = 1; retry <= 2 && !candidates.empty(); ++retry) {
+        const StressPass again = run_stress_pass(candidates.back() + 1U);
+        std::vector<std::size_t> still;
+        for (const std::size_t i : candidates) {
+            require(again.hashes[i] == first.hashes[i],
+                    "polyphony_stress: rendering is not deterministic, cannot confirm misses");
+            std::printf("[polyphony_stress]   block %zu: %.2f ms CPU in pass 1, %.2f ms in pass %d\n", i,
+                        first.cpuMs[i], again.cpuMs[i], retry + 1);
+            if (again.cpuMs[i] >= budgetMs) still.push_back(i);
+        }
+        candidates = std::move(still);
+    }
+    std::printf("[polyphony_stress]   %zu confirmed deadline misses (over budget in every pass)\n",
+                candidates.size());
+    require(candidates.empty(), "polyphony_stress: deadline misses");
     std::printf("[polyphony_stress] PASS\n");
 }
 

@@ -10,7 +10,11 @@
 #include "dve/v235_foundations.hpp"
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <iterator>
+#include <optional>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -375,11 +379,215 @@ void test_scripts_disabled_and_polygon_seam() {
     CHECK(renderer->last_stats().voxelInstances == 5U);
 }
 
+// --- Save games ------------------------------------------------------------------------------
+
+struct SaveRig {
+    std::unique_ptr<PlayerApp> app;
+    std::unique_ptr<IPlayerRenderer> renderer;
+    MemoryFrameBlitter blitter;
+    std::vector<GameRenderObject> objects;
+};
+
+std::unique_ptr<SaveRig> make_save_rig(const std::filesystem::path& saveDir, std::string* error,
+                                       std::optional<std::string> loadSave = std::nullopt) {
+    auto rig = std::make_unique<SaveRig>();
+    PlayerBootOptions options;
+    options.saveDirectory = saveDir;
+    options.loadSave = std::move(loadSave);
+    rig->app = PlayerApp::boot(LooseContentSource::open(kSample, error), options, error);
+    if (!rig->app) return nullptr;
+    CpuPlayerRendererOptions rendererOptions;
+    rendererOptions.threadCount = 2;
+    rig->renderer = make_cpu_player_renderer(&rig->blitter, rendererOptions);
+    if (!rig->renderer->resize(96, 54, error)) return nullptr;
+    return rig;
+}
+
+std::string render_hash(SaveRig& rig) {
+    std::string error;
+    const auto view = rig.app->render_view(rig.objects, 96.0F / 54.0F);
+    CHECK(rig.renderer->render(view, &error));
+    const Rgba8Image* frame = rig.renderer->readback();
+    return frame ? format_image_hash(hash_image(*frame)) : std::string();
+}
+
+void press(PlayerApp& app, const char* name, int ticks = 1) {
+    app.handle_event(key(platform::EventType::KeyDown, name));
+    for (int i = 0; i < ticks; ++i) app.tick(1.0F / 60.0F);
+    app.handle_event(key(platform::EventType::KeyUp, name));
+}
+
+void run_ticks(PlayerApp& app, int ticks) { for (int i = 0; i < ticks; ++i) app.tick(1.0F / 60.0F); }
+
+void test_save_directories() {
+    CHECK(save_directory_slug("Player Sample") == "player-sample");
+    CHECK(save_directory_slug("  Über/Game: 2!  ") == "ber-game-2");
+    CHECK(save_directory_slug("...") == "game");
+    CHECK(save_directory_slug("a.b_c") == "a.b_c");
+    CHECK(valid_save_slot_name("quicksave") && valid_save_slot_name("slot-1.v2") && valid_save_slot_name("A_b"));
+    CHECK(!valid_save_slot_name("") && !valid_save_slot_name(".hidden") && !valid_save_slot_name("a/b") &&
+          !valid_save_slot_name("a b") && !valid_save_slot_name("..") && !valid_save_slot_name(std::string(65, 'a')));
+#if !defined(_WIN32) && !defined(__APPLE__)
+    const char* oldXdg = std::getenv("XDG_DATA_HOME");
+    const std::string savedXdg = oldXdg ? oldXdg : "";
+    GameManifest manifest;
+    manifest.name = "Player Sample";
+    ::setenv("XDG_DATA_HOME", "/tmp/dve-xdg-test", 1);
+    CHECK(user_data_directory() == std::filesystem::path("/tmp/dve-xdg-test"));
+    CHECK(default_save_directory(manifest) == std::filesystem::path("/tmp/dve-xdg-test/dve/player-sample/saves"));
+    ::setenv("XDG_DATA_HOME", "relative/ignored", 1);   // the XDG spec says to ignore relative paths
+    if (const char* home = std::getenv("HOME"))
+        CHECK(user_data_directory() == std::filesystem::path(home) / ".local" / "share");
+    if (oldXdg) ::setenv("XDG_DATA_HOME", savedXdg.c_str(), 1);
+    else ::unsetenv("XDG_DATA_HOME");
+#endif
+}
+
+void test_save_load() {
+    const auto dir = make_temp_dir("saves");
+    std::string error;
+    auto a = make_save_rig(dir, &error);
+    CHECK(a != nullptr);
+    if (!a) { std::cerr << error << '\n'; return; }
+    CHECK(a->app->save_directory() == dir);
+    CHECK(a->app->resolve_save("slot1") == dir / "slot1.dvesave");
+    CHECK(a->app->resolve_save("other/x.dvesave") == std::filesystem::path("other/x.dvesave"));
+    CHECK(!a->app->resolve_save("bad slot", &error));
+    CHECK(a->app->input().table().find("quicksave") && a->app->input().table().find("quickload"));
+
+    // Plain save -> load in a fresh app: identical world state and frame.
+    run_ticks(*a->app, 12);
+    const auto saved = a->app->save_game("plain", &error);
+    CHECK(saved.has_value());
+    if (!saved) { std::cerr << "save: " << error << '\n'; return; }
+    CHECK(saved->stats.fileBytes == std::filesystem::file_size(dir / "plain.dvesave"));
+    CHECK(saved->tickCount == 12U);
+    const std::string savedFrame = render_hash(*a);
+    {
+        auto b = make_save_rig(dir, &error, std::string("plain"));
+        CHECK(b != nullptr);
+        if (b) {
+            CHECK(b->app->tick_count() == 12U);
+            CHECK(b->app->world().state_hash() == saved->worldStateHash);
+            CHECK(b->app->world().state_hash() == a->app->world().state_hash());
+            CHECK(render_hash(*b) == savedFrame);
+        } else {
+            std::cerr << "load: " << error << '\n';
+        }
+    }
+
+    // Destruction (Lua blast, when scripts run), more ticks, then quicksave (F5) and a load.
+    if (PlayerApp::scripting_compiled_in()) {
+        const std::size_t before = a->app->world().object_count();
+        press(*a->app, "b");
+        CHECK(a->app->world().object_count() > before);   // the tower's top broke off
+    }
+    run_ticks(*a->app, 20);
+    press(*a->app, "F5");
+    CHECK(a->app->save_events().size() == 1U);
+    if (a->app->save_events().size() == 1U) {
+        const PlayerSaveEvent& event = a->app->save_events().front();
+        CHECK(event.ok && !event.load && event.path == dir / "quicksave.dvesave" && event.fileBytes > 0U);
+        std::cout << "sample quicksave after blast: " << event.fileBytes << " bytes\n";
+    }
+    const std::uint64_t quickHash = a->app->world().state_hash();
+    const std::uint64_t quickTick = a->app->tick_count();
+    const std::size_t quickObjects = a->app->world().object_count();
+    const std::string quickFrame = render_hash(*a);
+    const auto spinner = a->app->world().find_by_name("Spinner");
+    const auto quickSpinner = spinner ? a->app->world().position(*spinner) : std::nullopt;
+
+    // Keep playing, then quickload (F9) restores the quicksave in place.
+    a->app->handle_event(key(platform::EventType::KeyDown, "d"));
+    run_ticks(*a->app, 25);
+    a->app->handle_event(key(platform::EventType::KeyUp, "d"));
+    CHECK(a->app->world().state_hash() != quickHash);
+    press(*a->app, "F9");
+    CHECK(a->app->save_events().size() == 1U && a->app->save_events().front().ok && a->app->save_events().front().load);
+    CHECK(a->app->world().state_hash() == quickHash);
+    CHECK(a->app->tick_count() == quickTick);
+    CHECK(a->app->world().object_count() == quickObjects);
+    CHECK(render_hash(*a) == quickFrame);
+    if (spinner && quickSpinner) {
+        const auto now = a->app->world().position(*spinner);
+        CHECK(now && now->x == quickSpinner->x);   // Lua state (on_save/on_load) came back too
+    }
+
+    // Continuing after a load is deterministic: a fresh process loading the quicksave and
+    // the original both run 15 more ticks and end identical.
+    auto c = make_save_rig(dir, &error, std::string("quicksave"));
+    CHECK(c != nullptr);
+    if (c) {
+        CHECK(c->app->world().state_hash() == quickHash);
+        CHECK(render_hash(*c) == quickFrame);
+        run_ticks(*a->app, 15);
+        run_ticks(*c->app, 15);
+        CHECK(c->app->world().state_hash() == a->app->world().state_hash());
+        CHECK(render_hash(*c) == render_hash(*a));
+    }
+
+    // Lua-driven slots: key 1 saves "slot1" through world.save_game, key 2 loads it.
+    if (PlayerApp::scripting_compiled_in()) {
+        press(*a->app, "1");
+        CHECK(a->app->save_events().size() == 1U && a->app->save_events().front().ok &&
+              a->app->save_events().front().fromScript);
+        CHECK(std::filesystem::exists(dir / "slot1.dvesave"));
+        const std::uint64_t slotHash = a->app->world().state_hash();
+        run_ticks(*a->app, 10);
+        press(*a->app, "2");
+        CHECK(a->app->save_events().size() == 1U && a->app->save_events().front().ok &&
+              a->app->save_events().front().load);
+        CHECK(a->app->world().state_hash() == slotHash);
+    }
+
+    // Corrupt and truncated saves fail cleanly and leave the running game untouched.
+    const std::uint64_t liveHash = a->app->world().state_hash();
+    const std::uint64_t liveTick = a->app->tick_count();
+    const auto slot = dir / "plain.dvesave";
+    std::vector<char> bytes(std::filesystem::file_size(slot));
+    {
+        std::ifstream in(slot, std::ios::binary);
+        in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+    {
+        std::ofstream out(dir / "truncated.dvesave", std::ios::binary);
+        out.write(bytes.data(), static_cast<std::streamsize>(bytes.size() / 2U));
+    }
+    {
+        auto flipped = bytes;
+        flipped[flipped.size() / 2U] = static_cast<char>(flipped[flipped.size() / 2U] ^ 0x40);
+        std::ofstream out(dir / "flipped.dvesave", std::ios::binary);
+        out.write(flipped.data(), static_cast<std::streamsize>(flipped.size()));
+    }
+    for (const char* bad : {"truncated", "flipped", "missing"}) {
+        std::string message;
+        CHECK(!a->app->load_game(bad, &message).has_value());
+        CHECK(!message.empty());
+        CHECK(a->app->world().state_hash() == liveHash && a->app->tick_count() == liveTick);
+    }
+    {
+        std::string message;
+        auto broken = make_save_rig(dir, &message, std::string("truncated"));
+        CHECK(broken == nullptr);
+        CHECK(!message.empty());
+    }
+    std::filesystem::remove_all(dir);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc == 5 && std::string(argv[1]) == "--corrupt-entry") {
         return corrupt_entry(argv[2], argv[3], argv[4]) ? 0 : 1;
+    }
+    if (argc == 5 && std::string(argv[1]) == "--truncate-file") {
+        // --truncate-file <in> <out> <bytes>: copies the first <bytes> bytes (CLI save tests).
+        std::ifstream in(argv[2], std::ios::binary);
+        std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto keep = std::min<std::size_t>(bytes.size(), std::strtoull(argv[4], nullptr, 10));
+        std::ofstream out(argv[3], std::ios::binary | std::ios::trunc);
+        out.write(bytes.data(), static_cast<std::streamsize>(keep));
+        return in.good() || in.eof() ? (out.good() ? 0 : 1) : 1;
     }
     if (!geometry_kind_supported(GeometryKind::Voxel)) {
         std::cout << "voxel geometry disabled in this profile; player sample skipped\n";
@@ -393,6 +601,8 @@ int main(int argc, char** argv) {
     test_fixed_step_clock();
     test_sample_boot_loose_and_pak();
     test_scripts_disabled_and_polygon_seam();
+    test_save_directories();
+    test_save_load();
     if (failures == 0) std::cout << "dve_player_runtime_tests: PASS\n";
     return failures == 0 ? 0 : 1;
 }

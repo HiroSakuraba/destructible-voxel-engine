@@ -2397,7 +2397,7 @@ if(DVE_BUILD_TESTS)
             endforeach()
             list(JOIN _dve_player_hashes "," _dve_player_hashes)
             message(STATUS "dve_player golden hash key ${_dve_player_hash_key}: '${_dve_player_hashes}'")
-            foreach(_dve_mode smoke loose_matches_pak missing_pak corrupt_pak no_content default_pak no_audio input)
+            foreach(_dve_mode smoke loose_matches_pak missing_pak corrupt_pak no_content default_pak no_audio input save_load)
                 if(_dve_mode STREQUAL "input" AND NOT DVE_ENABLE_LUA)
                     continue()
                 endif()
@@ -2414,7 +2414,7 @@ if(DVE_BUILD_TESTS)
                         -DLUA=${_dve_player_lua}
                         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_cli.cmake)
                 set_tests_properties(dve_player_${_dve_mode} PROPERTIES FIXTURES_REQUIRED dve_player_sample_pak)
-                if(_dve_mode MATCHES "^(smoke|loose_matches_pak)$")
+                if(_dve_mode MATCHES "^(smoke|loose_matches_pak|save_load)$")
                     # These render with --threads 4; tell CTest so -jN does not oversubscribe
                     # the cores under the timing-sensitive audio deadline tests.
                     set_tests_properties(dve_player_${_dve_mode} PROPERTIES PROCESSORS 4)

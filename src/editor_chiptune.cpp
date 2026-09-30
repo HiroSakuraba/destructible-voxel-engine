@@ -75,25 +75,54 @@ void EditorChiptunePanel::set_document_path(std::filesystem::path path) noexcept
 
 void EditorChiptunePanel::resize(int width, int height, float uiScale) noexcept {
     const int panelWidth = std::clamp(static_cast<int>(1040.0F * uiScale), 720, std::max(720, width - 24));
-    const int panelHeight = std::clamp(static_cast<int>(690.0F * uiScale), 520, std::max(520, height - 52));
     const int x = std::max(12, (width - panelWidth) / 2);
+    // Toolbar: flows right of the page tabs and wraps onto extra rows (aligned under the first
+    // toolbar button) when the panel is too narrow, instead of running past the close button
+    // and off the panel (it needed ~914 px from the panel's left edge). Widths are logical
+    // pixels, so UI zoom is handled by the logical window size.
+    constexpr int kToolbarRowPitch = 29;
+    constexpr int kToolbarGap = 5;
+    const int toolbarLeft = x + 12 + static_cast<int>(layout_.tabs.size()) * 112 + 10;
+    const int toolbarRight = x + panelWidth - 12;
+    struct ToolbarItem { UiRect* rect; int width; };
+    const std::array<ToolbarItem, 10> toolbarItems{{
+        {&layout_.playSongButton, 68}, {&layout_.playInstrumentButton, 68}, {&layout_.stopButton, 48},
+        {&layout_.saveButton, 48}, {&layout_.openButton, 48}, {&layout_.undoButton, 48},
+        {&layout_.redoButton, 48}, {&layout_.copyButton, 44}, {&layout_.cutButton, 38},
+        {&layout_.pasteButton, 48}}};
+    int toolbarRows = 1;
+    {
+        int cursor = toolbarLeft;
+        for (const ToolbarItem& item : toolbarItems) {
+            if (cursor > toolbarLeft && cursor + item.width > toolbarRight) { ++toolbarRows; cursor = toolbarLeft; }
+            cursor += item.width + kToolbarGap;
+        }
+    }
+    const int toolbarExtra = (toolbarRows - 1) * kToolbarRowPitch;
+    // Extra toolbar rows grow the panel (when the window allows) so the pages keep their height.
+    const int minimumHeight = 520 + toolbarExtra;
+    const int panelHeight = std::clamp(static_cast<int>(690.0F * uiScale) + toolbarExtra, minimumHeight,
+                                       std::max(minimumHeight, height - 52));
     const int y = std::max(34, (height - panelHeight) / 2);
     layout_.panel = {x, y, panelWidth, panelHeight};
     layout_.titleBar = {x, y, panelWidth, 34};
     layout_.closeButton = {x + panelWidth - 31, y + 5, 24, 24};
     for (std::size_t i = 0; i < layout_.tabs.size(); ++i)
         layout_.tabs[i] = {x + 12 + static_cast<int>(i) * 112, y + 42, 104, 25};
-    int toolbarX = x + 358;
-    auto toolbar = [&](UiRect& rect, int w) { rect = {toolbarX, y + 42, w, 25}; toolbarX += w + 5; };
-    toolbar(layout_.playSongButton, 68); toolbar(layout_.playInstrumentButton, 68);
-    toolbar(layout_.stopButton, 48); toolbar(layout_.saveButton, 48); toolbar(layout_.openButton, 48);
-    toolbar(layout_.undoButton, 48); toolbar(layout_.redoButton, 48);
-    toolbar(layout_.copyButton, 44); toolbar(layout_.cutButton, 38); toolbar(layout_.pasteButton, 48);
+    {
+        int cursor = toolbarLeft;
+        int rowY = y + 42;
+        for (const ToolbarItem& item : toolbarItems) {
+            if (cursor > toolbarLeft && cursor + item.width > toolbarRight) { rowY += kToolbarRowPitch; cursor = toolbarLeft; }
+            *item.rect = {cursor, rowY, item.width, 25};
+            cursor += item.width + kToolbarGap;
+        }
+    }
     layout_.songBusButton = {x + 12, y + panelHeight - 66, 190, 25};
     layout_.instrumentBusButton = {x + 208, y + panelHeight - 66, 190, 25};
 
-    const int bodyY = y + 76;
-    const int bodyH = panelHeight - 154;
+    const int bodyY = y + 76 + toolbarExtra;
+    const int bodyH = panelHeight - 154 - toolbarExtra;
     const int orderW = 150;
     layout_.orderList = {x + 12, bodyY, orderW, bodyH};
     const int orderRowH = std::max(23, bodyH / static_cast<int>(kChiptuneVisibleOrders + 3U));

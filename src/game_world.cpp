@@ -2521,6 +2521,11 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
         ++local.objectsRestored;
     }
 
+    // Every body was rebuilt above (destroying a body drops its pair filters), so apply the
+    // parent/child contact filters for the restored attachments now instead of at the next tick.
+    attachmentCollisionFilters_.clear();
+    update_attachment_collision_filters();
+
     // 4. Pools: only pools the fresh world registered again (same id and name) keep their
     //    slots; the prototypes are code, not data.
     GameObjectId highestReserved = 0U;

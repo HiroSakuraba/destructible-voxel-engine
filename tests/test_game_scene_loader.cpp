@@ -4,6 +4,10 @@
 //  - the same scene from a loose folder and from a .dvepak gives identical GameWorld state
 //  - pak integrity failures, missing assets and validation errors fail cleanly (no objects)
 //  - GameWorld::render_objects() exposes voxels/materials/transforms read-only
+//  - the versioned per-object "extensions" block (components, attachment, polygon geometry):
+//    round trip, strict validation, RuntimeSceneWorld rejecting polygon objects
+//  - attachChildrenToParents policy and attached bodies riding their parents (Jolt: an
+//    attachment overlapping its parent does not push it)
 
 #include "dve/content_source.hpp"
 #include "dve/dvox.hpp"
@@ -23,6 +27,8 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
+#include <variant>
 #include <string>
 #include <vector>
 
@@ -552,6 +558,261 @@ void test_failures_are_clean() {
 
 } // namespace
 
+
+// ---------------------------------------------------------------------------------------
+
+bool same_properties(const std::map<std::string, dve::ComponentValue, std::less<>>& a,
+                     const std::map<std::string, dve::ComponentValue, std::less<>>& b) {
+    if (a.size() != b.size()) return false;
+    for (const auto& [name, value] : a) {
+        const auto it = b.find(name);
+        if (it == b.end() || it->second.index() != value.index()) return false;
+        const auto& other = it->second;
+        if (const auto* f3 = std::get_if<dve::Float3>(&value)) {
+            const auto& g = std::get<dve::Float3>(other);
+            if (f3->x != g.x || f3->y != g.y || f3->z != g.z) return false;
+        } else if (const auto* q = std::get_if<dve::Quaternion>(&value)) {
+            const auto& r = std::get<dve::Quaternion>(other);
+            if (q->x != r.x || q->y != r.y || q->z != r.z || q->w != r.w) return false;
+        } else if (const auto* i = std::get_if<std::int64_t>(&value)) {
+            if (*i != std::get<std::int64_t>(other)) return false;
+        } else if (const auto* d = std::get_if<double>(&value)) {
+            if (*d != std::get<double>(other)) return false;
+        } else if (const auto* t = std::get_if<std::string>(&value)) {
+            if (*t != std::get<std::string>(other)) return false;
+        } else if (std::get<bool>(value) != std::get<bool>(other)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void test_extensions_round_trip_and_validation() {
+    const std::string original = read_string(kExamples / kHouseFiles[0]);
+    std::vector<dve::Component> components(2);
+    components[0].id = 4;
+    components[0].type = "dve.spawn";
+    components[0].properties["category"] = std::string("a\"b\\c\n");
+    components[0].properties["enabled"] = true;
+    components[1].id = 9;
+    components[1].type = "game.stats";
+    components[1].enabled = false;
+    components[1].properties["hp"] = std::int64_t{-9007199254740993LL};
+    components[1].properties["speed"] = 1.0 / 3.0;
+    components[1].properties["offset"] = dve::Float3{0.1F, -2.5F, 1e-7F};
+    components[1].properties["turn"] = dve::Quaternion{0.5F, 0.5F, 0.5F, 0.5F};
+    const dve::RuntimeSceneAttachment attachment{"hand.R", false, true};
+    const std::string extensions = dve::dvoxscene_object_extensions_json(
+        dve::RuntimeSceneGeometry::Voxel, components, attachment);
+    CHECK(dve::dvoxscene_object_extensions_json(dve::RuntimeSceneGeometry::Voxel, {}, std::nullopt).empty());
+    std::string text = original;
+    replace_once(text, "\"worldMatrix\":[1,0,0,0,0,1,0,0,0,0,1,0,0,2,0,1]}",
+                 "\"worldMatrix\":[1,0,0,0,0,1,0,0,0,0,1,0,0,2,0,1],\"extensions\":" + extensions + "}");
+    dve::RuntimeSceneError error;
+    const auto parsed = dve::parse_dvoxscene_manifest(text, {}, &error);
+    CHECK(parsed.has_value());
+    if (!parsed) { std::cerr << error.message << "\n"; return; }
+    const auto& upper = parsed->objects[1];
+    CHECK(upper.extensionVersion == dve::kDvoxSceneExtensionVersion);
+    CHECK(parsed->objects[0].extensionVersion == 0U && parsed->objects[0].components.empty());
+    CHECK(upper.components.size() == 2U);
+    if (upper.components.size() == 2U) {
+        CHECK(upper.components[0].id == 4U && upper.components[0].type == "dve.spawn" && upper.components[0].enabled);
+        CHECK(same_properties(upper.components[0].properties, components[0].properties));
+        CHECK(same_properties(upper.components[1].properties, components[1].properties)); // exact doubles, int64, floats
+        CHECK(!upper.components[1].enabled);
+    }
+    CHECK(upper.attachment && upper.attachment->socket == "hand.R" && !upper.attachment->inheritPosition &&
+          upper.attachment->inheritRotation);
+    // Re-serializing the parsed metadata gives the same text (canonical form).
+    CHECK(dve::dvoxscene_object_extensions_json(upper.geometry, upper.components, upper.attachment) == extensions);
+
+    // The path-based RuntimeSceneWorld parser accepts the block (components are metadata there).
+    const auto temp = make_temp_dir("extensions");
+    for (const char* file : kHouseFiles) std::filesystem::copy_file(kExamples / file, temp / file);
+    write_string(temp / kHouseFiles[0], text);
+    {
+        dve::RuntimeSceneWorld runtime;
+        const auto staged = runtime.stage_scene_package(temp / kHouseFiles[0]);
+        CHECK(static_cast<bool>(staged));
+    }
+
+    struct Case { std::string replacement; dve::RuntimeSceneErrorCode code; };
+    const std::string upperMatrix = "\"worldMatrix\":[1,0,0,0,0,1,0,0,0,0,1,0,0,2,0,1]}";
+    const std::string rootMatrix = "\"worldMatrix\":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}";
+    const auto with = [&](const std::string& ext) {
+        return "\"worldMatrix\":[1,0,0,0,0,1,0,0,0,0,1,0,0,2,0,1],\"extensions\":" + ext + "}";
+    };
+    const std::vector<Case> cases = {
+        {with("{\"version\":2}"), dve::RuntimeSceneErrorCode::UnsupportedVersion},
+        {with("{\"version\":0}"), dve::RuntimeSceneErrorCode::UnsupportedVersion},
+        {with("{}"), dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("[]"), dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("{\"version\":1,\"physics\":{}}"), dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("{\"version\":1,\"geometry\":\"splat\"}"), dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("{\"version\":1,\"geometry\":\"polygon\"}"), dve::RuntimeSceneErrorCode::InvalidManifest}, // .dvox file
+        {with("{\"version\":1,\"components\":[{\"id\":1,\"type\":\"x.y\",\"properties\":{\"a\":{\"int\":5}}}]}"),
+         dve::RuntimeSceneErrorCode::InvalidManifest}, // ints are decimal strings
+        {with("{\"version\":1,\"components\":[{\"id\":1,\"type\":\"x.y\",\"properties\":{\"a\":{\"float\":1,\"int\":\"1\"}}}]}"),
+         dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("{\"version\":1,\"components\":[{\"id\":1,\"type\":\"x.y\",\"properties\":{\"a\":{\"float3\":[1,2]}}}]}"),
+         dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("{\"version\":1,\"components\":[{\"id\":0,\"type\":\"x.y\"}]}"), dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("{\"version\":1,\"components\":[{\"id\":1,\"type\":\"x.y\"},{\"id\":1,\"type\":\"x.z\"}]}"),
+         dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("{\"version\":1,\"components\":[{\"id\":1,\"type\":\"bad type!\"}]}"), dve::RuntimeSceneErrorCode::InvalidManifest},
+        {with("{\"version\":1,\"attachment\":{\"socket\":\"a\",\"weld\":true}}"), dve::RuntimeSceneErrorCode::InvalidManifest},
+    };
+    for (const Case& c : cases) {
+        std::string bad = original;
+        replace_once(bad, upperMatrix, c.replacement);
+        dve::RuntimeSceneError caseError;
+        CHECK(!dve::parse_dvoxscene_manifest(bad, {}, &caseError));
+        if (caseError.code != c.code) {
+            std::cerr << "FAIL extension case " << c.replacement << ": " << dve::to_string(caseError.code) << " ("
+                      << caseError.message << ")\n";
+            ++failures;
+        }
+    }
+    // An attachment needs a parent.
+    {
+        std::string bad = original;
+        replace_once(bad, rootMatrix, "\"worldMatrix\":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],\"extensions\":"
+                                      "{\"version\":1,\"attachment\":{}}}");
+        dve::RuntimeSceneError caseError;
+        CHECK(!dve::parse_dvoxscene_manifest(bad, {}, &caseError));
+        CHECK(caseError.code == dve::RuntimeSceneErrorCode::InvalidParent);
+    }
+    // Polygon geometry needs a .dmesh file, and the path-based RuntimeSceneWorld refuses it.
+    {
+        std::string polygon = original;
+        replace_once(polygon, "\"file\":\"multi_object_house_Furniture_3eb.dvox\"", "\"file\":\"furniture.dmesh\"");
+        replace_once(polygon, "\"worldMatrix\":[1,0,0,0,0,1,0,0,0,0,1,0,3,2,0,1]}",
+                     "\"worldMatrix\":[1,0,0,0,0,1,0,0,0,0,1,0,3,2,0,1],\"extensions\":{\"version\":1,\"geometry\":\"polygon\"}}");
+        const auto memory = dve::parse_dvoxscene_manifest(polygon, {}, &error);
+        CHECK(memory && memory->objects[2].geometry == dve::RuntimeSceneGeometry::Polygon);
+        write_string(temp / kHouseFiles[0], polygon);
+        write_string(temp / "furniture.dmesh", "not read");
+        dve::RuntimeSceneWorld runtime;
+        const auto staged = runtime.stage_scene_package(temp / kHouseFiles[0]);
+        CHECK(!staged && staged.error.code == dve::RuntimeSceneErrorCode::InvalidManifest);
+        CHECK(staged.error.message.find("polygon") != std::string::npos);
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(temp, ec);
+}
+
+void test_attach_children_policy() {
+    const auto base = make_temp_dir("attach");
+    const auto root = make_project(base);
+    std::string error;
+    auto content = dve::LooseContentSource::open(root, &error);
+    CHECK(content != nullptr);
+    if (!content) return;
+    // Default: parents are metadata only.
+    {
+        auto world = make_world();
+        const auto loaded = dve::load_scene_into_game_world(*content, kScene, *world);
+        CHECK(static_cast<bool>(loaded) && loaded.objects.size() == 3U);
+        for (const auto& object : loaded.objects) CHECK(!object.attached && !world->parent_of(object.gameObjectId));
+    }
+    // With the option (what dve_player uses) both children follow their parents.
+    dve::GameSceneLoadOptions options;
+    options.attachChildrenToParents = true;
+    {
+        auto world = make_world();
+        const auto loaded = dve::load_scene_into_game_world(*content, kScene, *world, options);
+        CHECK(static_cast<bool>(loaded) && loaded.objects.size() == 3U);
+        if (loaded.objects.size() == 3U) {
+            CHECK(!loaded.objects[0].attached && loaded.objects[1].attached && loaded.objects[2].attached);
+            CHECK(world->parent_of(loaded.objects[2].gameObjectId) == loaded.objects[1].gameObjectId);
+            const auto before = *world->position(loaded.objects[2].gameObjectId);
+            for (int i = 0; i < 60; ++i) world->tick(1.0F / 60.0F);
+            // UpperBlock rides the static foundation, so the furniture stays put too (and its
+            // body does not build up falling speed).
+            const auto after = *world->position(loaded.objects[2].gameObjectId);
+            CHECK(std::abs(after.y - before.y) < 1.0e-4F);
+            CHECK(std::abs(world->linear_velocity(loaded.objects[2].gameObjectId)->y) < 1.0e-3F);
+        }
+    }
+    // An anchored child of a static collision parent is left alone (it could never move).
+    {
+        std::string text = read_string(kExamples / kHouseFiles[0]);
+        replace_once(text, "\"parent\":0,\"anchored\":false", "\"parent\":0,\"anchored\":true");
+        write_string(root / kScene, text);
+        auto world = make_world();
+        const auto loaded = dve::load_scene_into_game_world(*content, kScene, *world, options);
+        CHECK(static_cast<bool>(loaded) && loaded.objects.size() == 3U);
+        if (loaded.objects.size() == 3U) {
+            CHECK(!loaded.objects[1].attached && loaded.objects[2].attached);
+            CHECK(!world->render_objects()[1].dynamic);
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(base, ec);
+}
+
+std::unique_ptr<dve::VoxelObject> voxel_cube(std::uint64_t id, int size) {
+    auto voxels = std::make_unique<dve::VoxelObject>(id);
+    for (int x = 0; x < size; ++x)
+        for (int y = 0; y < size; ++y)
+            for (int z = 0; z < size; ++z) (void)voxels->set_voxel({x, y, z}, 1);
+    return voxels;
+}
+
+// Parent cube resting on a slab, child cube overlapping the parent. Returns the parent's
+// horizontal drift and the parent/child world positions after `steps` ticks.
+struct OverlapRun { bool available{}; float drift{}; dve::Float3 parent{}; dve::Float3 child{}; };
+OverlapRun run_overlap(bool attach, int steps) {
+    OverlapRun run;
+    std::string error;
+    auto physics = dve::create_physics3d_world(dve::Physics3DBackend::Jolt, nullptr, &error);
+    if (!physics) return run;
+    run.available = true;
+    dve::GameWorld world(std::move(physics));
+    dve::GameObjectDesc ground;
+    ground.name = "ground";
+    ground.dynamic = false;
+    ground.voxels = std::make_unique<dve::VoxelObject>(1);
+    for (int x = -10; x < 10; ++x)
+        for (int z = -10; z < 10; ++z) (void)ground.voxels->set_voxel({x, 0, z}, 1);
+    CHECK(world.create_object(std::move(ground), &error) != dve::kInvalidGameObjectId);
+    dve::GameObjectDesc parent;
+    parent.name = "parent";
+    parent.transform.position = {0.0F, 0.12F, 0.0F};
+    parent.voxels = voxel_cube(2, 4);
+    const auto parentId = world.create_object(std::move(parent), &error);
+    dve::GameObjectDesc child;
+    child.name = "child";
+    child.transform.position = {0.25F, 0.2F, 0.05F}; // deep inside the parent's +x side
+    child.voxels = voxel_cube(3, 2);
+    const auto childId = world.create_object(std::move(child), &error);
+    CHECK(parentId != dve::kInvalidGameObjectId && childId != dve::kInvalidGameObjectId);
+    if (attach) CHECK(world.attach_object(childId, parentId, true, {}, true, true, &error));
+    for (int i = 0; i < steps; ++i) world.tick(1.0F / 60.0F);
+    run.parent = *world.position(parentId);
+    run.child = *world.position(childId);
+    run.drift = std::sqrt(run.parent.x * run.parent.x + run.parent.z * run.parent.z);
+    return run;
+}
+
+void test_jolt_attachment_does_not_push_parent() {
+    const OverlapRun attached = run_overlap(true, 120);
+    if (!attached.available) {
+        std::cout << "Jolt not compiled in; attachment/parent contact filter check skipped\n";
+        return;
+    }
+    const OverlapRun loose = run_overlap(false, 120);
+    std::cout << "overlap drift: attached=" << attached.drift << " unattached=" << loose.drift << "\n";
+    // Sanity: without the attachment the overlap really does push the parent sideways...
+    CHECK(loose.drift > 0.005F); // ~0.02 m with Jolt 5.x
+    // ...but an attached child is filtered against its parent: the parent settles in place
+    // and the child keeps its authored offset.
+    CHECK(attached.drift < 0.001F); // ~2e-6 m
+    CHECK(std::abs((attached.child.x - attached.parent.x) - 0.25F) < 1.0e-3F);
+    CHECK(std::abs((attached.child.y - attached.parent.y) - 0.08F) < 1.0e-3F);
+}
+
 int main() {
     if (!dve::geometry_kind_supported(dve::GeometryKind::Voxel)) {
         std::cout << "voxel geometry disabled in this profile; dmesh parity only\n";
@@ -564,6 +825,9 @@ int main() {
     test_manifest_memory_matches_path();
     test_loose_and_pak_give_identical_worlds();
     test_failures_are_clean();
+    test_extensions_round_trip_and_validation();
+    test_attach_children_policy();
+    test_jolt_attachment_does_not_push_parent();
     if (failures != 0) {
         std::cerr << failures << " game scene loader check(s) failed\n";
         return 1;

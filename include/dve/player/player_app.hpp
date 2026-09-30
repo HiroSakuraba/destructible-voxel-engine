@@ -69,6 +69,10 @@ struct PlayerBootOptions {
     std::optional<std::string> sceneOverride;   // content path; default manifest.entryScene
     bool enableScripts{true};
     Physics3DBackend physicsBackend{Physics3DBackend::Automatic};
+    // Scene parents become GameWorld attachments, so children follow their parents
+    // (GameSceneLoadOptions::attachChildrenToParents). Objects exported with an attachment
+    // extension are attached either way.
+    bool attachChildrenToParents{true};
     // Where slots are written; default default_save_directory(manifest). Created on first save.
     std::optional<std::filesystem::path> saveDirectory;
     // A slot name or .dvesave path (see PlayerApp::resolve_save) loaded right after boot.

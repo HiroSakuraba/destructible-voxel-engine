@@ -170,11 +170,17 @@ bool PlayerApp::Impl::build_session(PlayerSession& out, const std::string& scene
 
     // 5. Scene.
     out.scenePath = scenePath;
-    const GameSceneLoadResult scene = load_scene_into_game_world(*content, out.scenePath, *out.world);
+    GameSceneLoadOptions sceneOptions;
+    sceneOptions.attachChildrenToParents = options.attachChildrenToParents;
+    const GameSceneLoadResult scene = load_scene_into_game_world(*content, out.scenePath, *out.world, sceneOptions);
     if (!scene) return fail("scene '" + out.scenePath + "': " + scene.error.message);
     out.sceneName = scene.sceneName;
     out.sceneObjects = scene.objects.size();
-    if (logSteps) log("scene: " + out.sceneName + " (" + std::to_string(out.sceneObjects) + " objects)");
+    std::size_t attached = 0;
+    for (const GameSceneLoadedObject& object : scene.objects) attached += object.attached ? 1U : 0U;
+    if (logSteps)
+        log("scene: " + out.sceneName + " (" + std::to_string(out.sceneObjects) + " objects, " +
+            std::to_string(attached) + " attached)");
 
     // 6. Scripts (after the scene so the startup script can find scene objects).
     const std::string scriptPath = manifest.startup_script_or_default();

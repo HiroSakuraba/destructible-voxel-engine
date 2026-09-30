@@ -1,0 +1,6 @@
+# <compiler>-<major>-<lua|nolua>-<jolt|reference> <framebuffer_fnv>
+# (dve_player_export_scene: scene exported by dve_export_scene from the generated editor
+#  project; 480x270, 30 frames, fixed dt, 4 threads, headless)
+GNU-14-nolua-reference 8fa73400cbe01025
+GNU-14-lua-jolt ea2a8fbc0aa787fd
+GNU-14-lua-reference 8fa73400cbe01025

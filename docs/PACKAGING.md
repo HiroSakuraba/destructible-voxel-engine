@@ -45,8 +45,29 @@ for (const dve::GameRenderObject& object : world.render_objects()) { /* draw */ 
   (`GameWorld::spawn_visual_asset`): it renders (`GameRenderObject::collision == false`) and can
   be moved by scripts, but it has no physics body and is ignored by raycasts, overlaps, capsule
   sweeps and damage. (Before Phase 2 it was a marker, like the editor play session.)
-- `parent` is hierarchy metadata and is reported in the result. Set
-  `GameSceneLoadOptions::attachChildrenToParents` to turn it into GameWorld attachments.
+- Optional per-object `extensions` block (versioned, `"version": 1`; a newer or missing version,
+  or an unknown field, is rejected rather than half-understood):
+  - `"geometry": "polygon"`: `file` is a `.dmesh`. It spawns through
+    `GameWorld::spawn_cooked_polygon_asset` (static when anchored, dynamic otherwise), or
+    `spawn_visual_polygon_asset` when `generateCollision=false`. The CPU player renderer draws
+    polygons with `ReferencePolygonRenderer` after the voxels. Only `load_scene_into_game_world`
+    loads polygon objects; the path-based `RuntimeSceneWorld` rejects them.
+  - `"components"`: serialized `dve::Component`s (`id`, `type`, `enabled`, typed `properties`:
+    `{"bool":b}`, `{"int":"<decimal string>"}` so 64-bit values survive JSON, `{"float":d}`,
+    `{"string":s}`, `{"float3":[x,y,z]}`, `{"quat":[x,y,z,w]}`), added with
+    `GameWorld::add_component`. Tags, groups and the layer travel as a `dve.membership` component.
+  - `"attachment"`: `socket`, `inheritPosition`, `inheritRotation`. It needs a `parent`.
+- `parent` is hierarchy metadata unless the object has an `attachment` extension (always
+  attached) or `GameSceneLoadOptions::attachChildrenToParents` is set (every parented object is
+  attached, except an anchored child of a static parent). `dve_player` sets
+  `attachChildrenToParents`, so children move with their parents.
+- Physics interplay of attachments: a child with a body is snapped to its parent every tick and
+  gets the parent's rigid-motion velocity (it used to keep its own velocity and accumulate
+  gravity between snaps). Parent and child bodies never collide with each other: GameWorld
+  disables the pair through `IRigidBodyWorld::set_pair_collision_enabled` (Jolt uses a contact
+  validation filter; the reference solver has no body-body contacts). The child still collides
+  with everything else, but it cannot push its parent: contacts on the child do not propagate
+  to the parent's body.
 - Loading is all-or-nothing. Every asset is validated before the first object is created, and
   if a later step fails, the objects already created are destroyed.
 
@@ -410,26 +431,48 @@ running `./<Game>` from any directory starts the game.
 
 ```
 dve_export_scene <scene.dvescene> <out.dvoxscene.json> [--materials f.dvematerials]
-                 [--objects-dir d] [--name n] [--strict] [--quiet]
+                 [--objects-dir d] [--name n] [--project-root d] [--gabor-opacity t]
+                 [--strict] [--quiet]
 ```
 
 A Tools executable (it links `dve_editor`; the player does not). It writes a DVOXSCENE v1
-manifest and one `.dvox` per object in `<stem>.objects/`.
+manifest and one `.dvox` or `.dmesh` per object in `<stem>.objects/`.
 
 | Editor | DVOXSCENE |
 |---|---|
 | object id, name | `id`, `name` (objects in id order) |
 | world transform | rigid column-major `transform` (the editor's world matrix) |
 | voxels | `<stem>.objects/<id>.dvox` |
+| `.dmesh` object (`sourceAsset`) | validated and copied to `<stem>.objects/<id>.dmesh`, `extensions.geometry = "polygon"`. The source path is resolved against `--project-root` (default: the nearest folder above the scene that holds `project.dveproject`). |
+| 3D text (`text3d`) | baked to voxels at the object's voxel size (see below) |
+| Gabor volume | baked to visual-only voxels (see below) |
 | `anchored` / `structural` / `collisionEnabled` | `anchored` / `structural` / `generateCollision` |
-| parent | parent index (hierarchy metadata) |
+| parent | parent index |
+| attachment (socket, inherit flags) | `extensions.attachment`: the player attaches the child, so it follows its parent |
+| components | `extensions.components`: every `dve.*` type the default component registry validates, plus custom (non-`dve.`) types as-is. Unknown `dve.*` types are dropped with a warning; `dve.prefab_instance` is dropped silently (prefabs are flattened). |
+| tags, groups, layer | a `dve.membership` component (`GameWorld::find_by_tag/group/layer` work in the player) |
 | material ids | material table from the `EditorMaterialLibrary` (default or `--materials`), so colours and densities match the editor; unknown ids get a neutral material and a warning |
 
-Not exported, each with a warning: hidden and empty objects, `text3d`, Gabor volumes and `.dmesh`
-objects (skipped); components, tags, groups and layers (dropped); prefab links (flattened to their
-current voxels); attachments (kept only as hierarchy metadata, so the player does not move
-children with their parents). `--strict` makes any warning an error, and then no manifest is
-written. Re-exporting is byte-identical and removes stale `.dvox` files.
+Bakes (reported as notes, which `--strict` accepts):
+
+- **3D text.** The runtime has no Slug text renderer, so the glyphs are voxelized: a voxel
+  column is inside when its centre is inside the glyph outline (the style's non-zero or even-odd
+  fill rule over the outline edges of the cooked side mesh; the `.dtext` glyph curves are not kept after a reload).
+  The extrusion depth is split into layers centred on the text plane. The front and back layers
+  use the face colour, the inner layers the side colour, and the physical properties come from
+  the style's material ids in the library. Thin strokes narrower than a voxel disappear, so use
+  a voxel size well below the stroke width. Collision and anchoring follow the object's flags.
+- **Gabor volumes.** The runtime has no volumetric renderer and a Gabor field has no rigid
+  body, so it is voxelized: a voxel is filled when the field's density at its centre makes a
+  voxel-thick slab at least `--gabor-opacity` opaque (default 0.5, i.e. `density >= -ln(1-t) /
+  voxelSize`). The result is one visual-only, non-structural material (tint times the mean
+  albedo, plus emission). It never has collision. A field that never reaches the threshold is
+  skipped with a warning.
+
+Not exported, each with a warning: hidden and empty objects, `.dmesh` objects whose file is
+missing or invalid, and unknown engine component types. Prefab links are flattened to their
+current voxels. `--strict` makes any warning an error, and then no manifest is written.
+Re-exporting is byte-identical and removes stale `.dvox`/`.dmesh` files.
 
 ### `dve_package_game` / `dve_add_game_package()`
 
@@ -601,7 +644,10 @@ Their files are not relicensed. A shipped game can carry its own `LICENSE` in th
 
 | Test | What it checks |
 |---|---|
-| `dve_editor_scene_export_tests` | Exporter mapping, warnings, `--strict`, byte-identical re-export, stale file removal and bad output names. |
+| `dve_editor_scene_export_tests` | Exporter mapping, warnings, `--strict`, byte-identical re-export, stale file removal and bad output names; `.dmesh` copy and polygon load (collision and visual-only), the 3D text and Gabor bakes, components (64-bit ints, escaped strings, floats, vectors) and attachments that follow a falling parent. |
+| `dve_game_scene_loader_tests` | Also the `extensions` round trip and its validation errors, the attach policy, and (Jolt builds) that an attached child does not push its parent. |
+| `dve_player_runtime_tests` | Also that the CPU renderer draws polygon objects. |
+| `dve_player_export_scene` | Generates an editor project (ground, dynamic cart with a component and a tag, attached `.dmesh` crate, 3D text attached to the crate, Gabor cloud), exports it with `dve_export_scene --strict`, and runs `dve_player --headless --hash` on it: 5 objects, 2 attachments, the attached objects keep their offsets while the cart falls, Lua sees the component and tag, and the frame hash matches `tests/data/player_golden/expected_export_hashes.txt` (keyed by compiler, Lua and physics backend; unknown keys print the hash to add). |
 | `dve_third_party_notices_self_test` | The generator's matching and parsing on synthetic inputs, including the engine's MIT header and a missing `LICENSE`. |
 | `dve_third_party_notices_check_<Component>` | `--check` on the real inputs: every linked or bundled third-party library has an entry and a license text, and the engine's `LICENSE` is found. |
 | `dve_package_game_test` | Packages `player_sample` with `--tgz --verify`, extracts the archive to a temporary folder, and runs `./Player_Sample --frames 30 --hash` from another directory with no `LD_LIBRARY_PATH`: the pak is found next to the executable, 4 objects load, and the hash equals the build-tree player's and the golden hash. Then it packages a copy of `examples/editor_demo_project` (only an editor scene) and checks the export and the `.autosave` exclusion. Both check RPATH, `ldd`, the notices coverage, `DVE-LICENSE.txt` (the engine's MIT license, also recorded in `build-info.json`) and that no editor-only files or sample maps are shipped. |
@@ -614,4 +660,6 @@ Their files are not relicensed. A shipped game can carry its own `LICENSE` in th
 - CI jobs for packaging (needs a workflow change); Windows ZIP/NSIS game packages.
 - A legal review of the flagged libraries, including how to provide the
   LGPL corresponding source (a pointer to snapshot.debian.org may not be enough).
-- Exporter gaps: `text3d`, Gabor volumes, `.dmesh`, components and attachments.
+- Exporter: 3D text and Gabor volumes are baked approximations (see above), not the editor's
+  Slug text and volumetric rendering. Mixed voxel sizes still need the GPU renderer to draw in
+  the player (the CPU path skips objects whose voxel size differs from the first one).

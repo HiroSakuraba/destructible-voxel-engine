@@ -653,6 +653,7 @@ if(DVE_BUILD_RHI)
         src/render/main_material_table.cpp
         src/render/shadow_material_table.cpp
         src/render/voxel_reference_renderer.cpp
+        src/render/radiance_cascades_spwi.cpp
         src/render/simulation_gpu.cpp)
     if(DVE_ENABLE_CPU_HAIR)
         target_sources(dve_render_bridge PRIVATE src/render/cpu_hair_renderer.cpp)

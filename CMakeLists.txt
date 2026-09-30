@@ -279,6 +279,7 @@ endif()
 if(DVE_BUILD_AUDIO_SYNTH)
     add_library(dve_audio_synth
         src/audio/midi.cpp
+        src/audio/midi_input_session.cpp
         src/audio/sample_map.cpp
         src/audio/sample_map_recipe.cpp
         src/audio/synthesizer.cpp
@@ -1798,6 +1799,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_synth_release_acceptance_tests tests/test_synth_release_acceptance.cpp)
         target_link_libraries(dve_synth_release_acceptance_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_synth_release_acceptance_tests COMMAND dve_synth_release_acceptance_tests)
+        add_executable(dve_midi_input_session_tests tests/test_midi_input_session.cpp)
+        target_link_libraries(dve_midi_input_session_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_midi_input_session_tests COMMAND dve_midi_input_session_tests)
         add_executable(dve_audio_synth_phase3_serialization_tests tests/test_audio_synth_phase3_serialization.cpp)
         target_link_libraries(dve_audio_synth_phase3_serialization_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_phase3_serialization_tests COMMAND dve_audio_synth_phase3_serialization_tests)

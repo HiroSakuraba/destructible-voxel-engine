@@ -2441,6 +2441,12 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_hybrid_reference_rendering_tests tests/test_hybrid_reference_rendering.cpp)
     target_link_libraries(dve_hybrid_reference_rendering_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_hybrid_reference_rendering_tests COMMAND dve_hybrid_reference_rendering_tests)
+    add_executable(dve_rc_spwi_tests tests/test_radiance_cascades_spwi.cpp)
+    target_link_libraries(dve_rc_spwi_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_rc_spwi_tests COMMAND dve_rc_spwi_tests)
+    # The tests use two worker threads; reserve them so ctest -jN leaves cores for the
+    # timing-sensitive audio acceptance tests.
+    set_tests_properties(dve_rc_spwi_tests PROPERTIES PROCESSORS 2)
     add_executable(dve_voxel_lighting_plan_tests tests/test_voxel_lighting_plan.cpp)
     target_link_libraries(dve_voxel_lighting_plan_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_voxel_lighting_plan_tests COMMAND dve_voxel_lighting_plan_tests)

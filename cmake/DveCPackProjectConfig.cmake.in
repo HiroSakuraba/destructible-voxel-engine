@@ -7,8 +7,3 @@ if(CPACK_GENERATOR STREQUAL "DEB")
     set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
     set(CPACK_COMPONENT_INCLUDE_TOPLEVEL_DIRECTORY OFF)
 endif()
-if(NOT DEFINED ENV{DVE_CPACK_QUIET_LICENSE})
-    message(WARNING
-        "dve has no LICENSE yet (decision D1): no license file is packaged and these "
-        "${CPACK_GENERATOR} packages are for internal use only.")
-endif()

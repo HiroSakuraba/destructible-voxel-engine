@@ -225,7 +225,7 @@ public:
     // A small persistent key/value store scripts can read and write via world.set_global(key,
     // value) / world.get_global(key), and embedding C++ code can read via this accessor
     // (mainly useful for tests and for a host application polling script-side state without
-    // its own dedicated binding for it). Numbers only, not a general save-game system.
+    // its own dedicated binding for it). Numbers only; save games store them (see save_state).
     [[nodiscard]] std::optional<double> global_number(const std::string& key) const;
     [[nodiscard]] std::optional<Float4> global_vector(const std::string& key) const;
 

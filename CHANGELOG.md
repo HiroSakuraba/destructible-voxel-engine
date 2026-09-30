@@ -1,3 +1,64 @@
+# Unreleased — Player save games (world, destruction, physics, Lua)
+
+- Players can save and load the game world, including destruction: `dve/game_save.hpp`
+  (`GameSaveCodec`), `GameWorld::capture_save_state` / `restore_save_state` / `state_hash`,
+  and `docs/SAVE_GAMES.md`. A save holds the objects (ids, names, tags, components, flags,
+  transforms, attachments, pools), each voxel object's bricks after damage, the physics bodies
+  (transforms, velocities, sleeping), timers, the next ids, and the script state.
+- Built on the v2.35 `SaveGameStore` (`DVESAVE1`) rather than a new container. The world
+  format is a set of sections in a `DVESAVE1` document: `dve.meta`, `dve.world`,
+  `dve.voxels`, `dve.physics`, `dve.script`, plus game sections. The world schema is version 1.
+- Voxels are stored as a delta against the object's source asset when possible (only the
+  changed bricks, with their storage index), and as every brick otherwise (fragments,
+  runtime objects). Bricks are raw or run-length encoded. On load every source asset is read
+  again from the game content and checked against the FNV-1a hash recorded at save time; if
+  the game content changed, the load fails and names the asset. The scene loader and
+  `world.spawn_asset` record sources (`GameWorld::set_object_source`), and fragments inherit
+  them.
+- Hardened `SaveGameStore`. The byte layout is unchanged but now explicitly little endian.
+  - Every size is checked against the limits and the bytes present before allocating; a
+    truncated file used to be able to allocate up to 1 GiB.
+  - Sorted, unique sections are required and trailing bytes are rejected, with precise error
+    messages.
+  - Reads return a report: primary or `.bak`, stored version, migrations run, size.
+  - Migrations are validated: a newer schema, a missing step and a step that does not advance
+    are all refused.
+  - New free functions `encode_save_game_document` / `decode_save_game_document`.
+- Lua: `world.on_save([key,] fn)` / `world.on_load([key,] fn)` keep script state (tables of
+  nil, booleans, numbers and strings, sorted, depth ≤ 32, ≤ 16 MiB; functions and cycles
+  are rejected, naming the path). `world.save_game(slot)`, `world.load_game(slot)` and
+  `world.save_exists(slot)` are also available. `GameScriptHost::save_state` / `load_state`
+  also store `set_global` / `set_global_vector` values.
+- `dve_player`:
+  - The reserved `quicksave` / `quickload` actions default to F5 / F9 and can be rebound with
+    `bind.*` in `game.dvegame`.
+  - Slots are saved in `$XDG_DATA_HOME/dve/<game>/saves` (`~/.local/share` fallback;
+    `%APPDATA%` and `~/Library/Application Support` elsewhere), atomically and with a `.bak`.
+  - `--load <slot|file>` and `--save-dir <dir>` are new.
+  - A load boots a fresh world for the saved scene, restores it, checks the state hash, then
+    runs the Lua `on_load`, and only then swaps it in. A bad save leaves the running game
+    untouched, and with `--load` exits 3.
+  - `PlayerApp` gets `save_game`, `load_game`, `resolve_save`, `save_codec` (for migrations)
+    and `save_events`.
+- The sample game binds F5 / F9. B blasts the tower (its top breaks off as a fragment), and
+  1 / 2 save / load `slot1` from Lua. The spinner's Lua state goes through `on_save` /
+  `on_load`. The golden hashes are unchanged. The sample quicksave is 1.4 KB fresh and 2.6 KB
+  after the blast.
+- Tests:
+  - New `dve_game_save_tests`: round trips with the reference solver and Jolt; destruction
+    plus ticks; diverged worlds; changed sources; truncation, corruption and backup; a
+    synthetic v0 → v1 migration; limits; Lua state.
+  - New `dve_player_save_load` CLI test: save and `--load` in separate processes, with
+    identical loaded and continued frame hashes, and broken saves exiting 3.
+  - Save / load / quickload cases added to `dve_player_runtime_tests`.
+- Fixed: damaging a dynamic object that had moved since it spawned split it at the *spawn*
+  pose. `fragment_after_damage` built the fragments and the rebuilt body from the stale
+  `authoredTransform`, so every piece teleported back to the spawn point. There is a
+  regression test in `dve_game_world_tests`.
+- Not saved yet: sub-runtime state (characters, cameras, animation, ragdolls, deformables,
+  hair, UI), Lua closures and timers the boot does not schedule again, changes made after boot
+  to the environment, HUD or materials, and solver caches.
+
 # Unreleased — MIT license
 
 - The engine is now licensed under the MIT License (decision D1): added the root `LICENSE`

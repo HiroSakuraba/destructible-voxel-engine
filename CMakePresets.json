@@ -56,7 +56,7 @@
     {
       "name": "linux-gcc-player-release",
       "inherits": "linux-gcc-release",
-      "displayName": "Linux GCC Release + dve_player (static SDL 3.4.12, Lua 5.4, Jolt 5.6.0)",
+      "displayName": "Linux GCC Release + dve_player (static SDL 3.4.12, Lua 5.4, Jolt 5.6.0, libsndfile 1.2.2 without MP3)",
       "cacheVariables": {
         "DVE_BUILD_PLAYER": "ON",
         "BUILD_SHARED_LIBS": "OFF",
@@ -64,7 +64,8 @@
         "DVE_SDL3_PREFER_FETCH": "ON",
         "DVE_ENABLE_LUA": "ON",
         "DVE_ENABLE_JOLT": "ON",
-        "DVE_FETCH_JOLT": "ON"
+        "DVE_FETCH_JOLT": "ON",
+        "DVE_FETCH_SNDFILE": "ON"
       }
     },
     {

@@ -12,6 +12,7 @@
 
 namespace dve::audio {
 #ifdef DVE_HAVE_SNDFILE
+bool sndfile_supports_mpeg() noexcept;
 std::optional<DecodedAudioAsset> import_audio_with_sndfile(const std::filesystem::path& path,
                                                             const AudioImportOptions& options,
                                                             std::string* error);
@@ -196,6 +197,7 @@ AudioImportCapabilities audio_import_capabilities() noexcept {
     result.nativeWav = true;
 #ifdef DVE_HAVE_SNDFILE
     result.sndfile = true;
+    result.sndfileMpeg = sndfile_supports_mpeg();
 #endif
 #ifdef DVE_HAVE_FFMPEG_CLI
     result.ffmpeg = true;

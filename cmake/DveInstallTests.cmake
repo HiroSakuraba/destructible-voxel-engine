@@ -49,6 +49,10 @@ string(APPEND _dve_settings "set(DVE_NOTICES_COMPONENTS \"${DVE_NOTICES_COMPONEN
 string(APPEND _dve_settings "set(DVE_NOTICES_INSTALL_DIR \"${DVE_NOTICES_INSTALL_DIR}\")\n")
 string(APPEND _dve_settings "set(DVE_PYTHON3 \"${DVE_PYTHON3_EXECUTABLE}\")\n")
 string(APPEND _dve_settings "set(DVE_NOTICES_TOOL \"${DVE_NOTICES_GENERATOR}\")\n")
+string(APPEND _dve_settings "set(DVE_NOTICES_MANIFEST \"${DVE_NOTICES_MANIFEST}\")\n")
+string(APPEND _dve_settings "set(DVE_SNDFILE_PROVIDER \"${DVE_SNDFILE_PROVIDER}\")\n")
+# Shared libraries that must never be shipped (third_party/notices/manifest.json "forbidden").
+string(APPEND _dve_settings "set(DVE_FORBIDDEN_LIBRARIES \"libmpg123;libmp3lame\")\n")
 file(WRITE "${DVE_INSTALL_TEST_SETTINGS}" "${_dve_settings}")
 
 set(DVE_INSTALL_TEST_PREFIX "${PROJECT_BINARY_DIR}/install_tests/prefix")

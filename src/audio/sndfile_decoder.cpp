@@ -23,11 +23,21 @@ SNDFILE* sf_open(const char* path, int mode, SF_INFO* info);
 sf_count_t sf_readf_float(SNDFILE* file, float* data, sf_count_t frames);
 int sf_close(SNDFILE* file);
 const char* sf_strerror(SNDFILE* file);
+struct SF_FORMAT_INFO {
+    int format;
+    const char* name;
+    const char* extension;
+};
+int sf_command(SNDFILE* file, int command, void* data, int datasize);
 }
 
 namespace dve::audio {
 namespace {
 constexpr int kSfmRead = 0x10;
+constexpr int kSfcGetFormatMajorCount = 0x1030;
+constexpr int kSfcGetFormatMajor = 0x1031;
+constexpr int kSfFormatMpeg = 0x230000;
+constexpr int kSfFormatTypeMask = 0x0FFF0000;
 
 std::vector<float> resample(std::span<const float> input, std::uint8_t channels,
                             std::uint32_t sourceRate, std::uint32_t targetRate) {
@@ -50,6 +60,20 @@ std::vector<float> resample(std::span<const float> input, std::uint8_t channels,
     }
     return output;
 }
+}
+
+// True when the loaded libsndfile lists the MPEG major format, i.e. it was built with
+// libmpg123/libmp3lame (Debian's is; DVE's own build, DVE_FETCH_SNDFILE, is not).
+bool sndfile_supports_mpeg() noexcept {
+    int count{};
+    if (sf_command(nullptr, kSfcGetFormatMajorCount, &count, static_cast<int>(sizeof(count))) != 0) return false;
+    for (int index = 0; index < count; ++index) {
+        SF_FORMAT_INFO info{};
+        info.format = index;
+        if (sf_command(nullptr, kSfcGetFormatMajor, &info, static_cast<int>(sizeof(info))) != 0) continue;
+        if ((info.format & kSfFormatTypeMask) == kSfFormatMpeg) return true;
+    }
+    return false;
 }
 
 std::optional<DecodedAudioAsset> import_audio_with_sndfile(const std::filesystem::path& path,

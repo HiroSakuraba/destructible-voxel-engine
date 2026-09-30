@@ -11,7 +11,8 @@
 #      keep .autosave/, the .dvescene and its revision folder out of the pak.
 # Both: the RPATH, ldd resolution inside the folder, THIRD_PARTY_NOTICES covering every
 # shipped .so (generate_third_party_notices.py --verify-dir), the engine's MIT license as
-# DVE-LICENSE.txt, build-info.json, no sample maps.
+# DVE-LICENSE.txt, build-info.json, no sample maps, and no MP3 library (libmpg123/libmp3lame)
+# by file name, DT_NEEDED or ldd (dve_no_mpeg_check).
 #   PREFIX PYTHON SCRIPT NOTICES_TOOL SAMPLE EDITOR_PROJECT WORK_DIR BUILD_PLAYER SETTINGS [EXPECT]
 cmake_minimum_required(VERSION 3.24)
 foreach(required PREFIX PYTHON SCRIPT NOTICES_TOOL SAMPLE EDITOR_PROJECT WORK_DIR BUILD_PLAYER SETTINGS)
@@ -20,6 +21,7 @@ foreach(required PREFIX PYTHON SCRIPT NOTICES_TOOL SAMPLE EDITOR_PROJECT WORK_DI
     endif()
 endforeach()
 include("${SETTINGS}")
+include("${CMAKE_CURRENT_LIST_DIR}/dve_no_mpeg_check.cmake")
 set(SYSTEM_EXCLUDES ${DVE_SYSTEM_EXCLUDES})
 file(REMOVE_RECURSE "${WORK_DIR}")
 file(MAKE_DIRECTORY "${WORK_DIR}/elsewhere")
@@ -102,10 +104,26 @@ function(check_folder folder exe)
         endif()
     endforeach()
     execute_process(COMMAND "${PYTHON}" "${NOTICES_TOOL}" --verify-dir "${folder}/lib/dve"
-            --notices "${folder}/THIRD_PARTY_NOTICES.txt"
+            --notices "${folder}/THIRD_PARTY_NOTICES.txt" --manifest "${DVE_NOTICES_MANIFEST}"
         RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
     if(NOT result EQUAL 0)
         problem("THIRD_PARTY_NOTICES does not cover ${folder}/lib/dve:\n${out}${err}")
+    endif()
+    # No MP3 library in the game folder, by name, DT_NEEDED or ldd resolution (and, with DVE's
+    # own libsndfile build, not even from the system).
+    dve_check_no_mpeg("${folder}" "${folder}/${exe}" problems)
+    set(mpeg_lines "")
+    if(EXISTS "${folder}/THIRD_PARTY_NOTICES.txt")
+        file(STRINGS "${folder}/THIRD_PARTY_NOTICES.txt" mpeg_lines REGEX "^Bundled file: (libmpg123|libmp3lame)")
+    endif()
+    if(mpeg_lines)
+        problem("${folder}/THIRD_PARTY_NOTICES.txt lists bundled MP3 libraries: ${mpeg_lines}")
+    endif()
+    if(EXISTS "${folder}/build-info.json")
+        file(READ "${folder}/build-info.json" info_text)
+        if(info_text MATCHES "libmpg123|libmp3lame")
+            problem("${folder}/build-info.json records MP3 libraries")
+        endif()
     endif()
     file(GLOB_RECURSE everything RELATIVE "${folder}" "${folder}/*")
     foreach(path IN LISTS everything)

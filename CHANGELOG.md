@@ -1,3 +1,38 @@
+# Unreleased — Packaging: libsndfile without MP3 (no libmpg123/libmp3lame in games)
+
+- New `DVE_FETCH_SNDFILE` (default `ON`, also set by `linux-gcc-player-release`; `cmake/DveSndFile.cmake`):
+  DVE builds libsndfile 1.2.2 itself at configure time from the pinned upstream tag tarball
+  (SHA256 `ffe12ef8…`, byte-identical to Debian's `libsndfile_1.2.2.orig.tar.gz`; snapshot.debian.org
+  as the second URL) plus Debian 1.2.2-2+deb13u1's patch series (CVE-2022-33065, CVE-2024-50612,
+  CVE-2025-56226; vendored in `third_party/libsndfile/patches`). It is a **shared** library built with
+  `ENABLE_MPEG=OFF`, no programs/examples/tests, and only FLAC, Ogg, Vorbis and Opus as external
+  codecs. So `libmpg123` (LGPL-2.1) and `libmp3lame` (LGPL-2+, GPL-marked `fft.c`) are no longer
+  linked or bundled in `lib/dve`, the archives or packaged games. Shared, because that keeps LGPL
+  relinking simple: users can replace `lib/dve/libsndfile.so.1`, and we only owe its source.
+  `DVE_SNDFILE_ARCHIVE` points at a local copy of the tarball for offline builds.
+- Fallback (`DVE_FETCH_SNDFILE=OFF`, no download, missing codec `-dev` packages or a failed build,
+  each with a configure warning): the system libsndfile is linked but treated as a system library,
+  so it is not bundled (the game then needs the distribution's `libsndfile1`).
+- MP3 is not a runtime format. `AudioImportCapabilities::sndfileMpeg` reports whether the loaded
+  libsndfile can decode MPEG. Authoring-time MP3 import still goes through the optional FFmpeg CLI
+  path.
+- Notices: `manifest.json` drops the `mpg123` and `lame` entries and gets a `forbidden` list
+  (libmpg123, libmp3lame). `--check` and `--verify-dir --manifest` fail when either is shipped.
+  The libsndfile section of the notices now takes its texts from the built source (`COPYING`,
+  `src/ALAC/LICENSE`, `src/GSM610/COPYRIGHT`, `src/G72x/README.original`). Its corresponding-source
+  line names the tarball, hash, patches and CMake options instead of a Debian package.
+- `dve_package_game` refuses a runtime that bundles libmpg123/libmp3lame, unless you pass
+  `--allow-mp3-libraries`.
+- The dve-dev package finds the bundled `lib/dve/libsndfile.so.1` relative to the prefix, or else
+  the system `libsndfile.so.1`.
+- Tests: new `dve_audio_sndfile_format_tests` decodes WAV, FLAC, Ogg Vorbis and Ogg Opus fixtures
+  (`tests/data/audio_formats`) through libsndfile and `import_audio_file()`. It also requires that
+  DVE's libsndfile rejects MP3 and that no libmpg123/libmp3lame is loaded in the process.
+  `dve_install_tree_test` and `dve_package_game_test` check the prefix and the packaged game
+  folders with `tests/cmake/dve_no_mpeg_check.cmake`: no such file, no such `DT_NEEDED` (readelf)
+  in any shipped ELF, and no such library in `ldd` of the shipped executable. The shipped
+  `libsndfile.so.1` must also be DVE's build.
+
 # Unreleased — Fix flaky synth polyphony stress gate
 
 - `dve_synth_release_acceptance_tests` `polyphony_stress` timed each 512-frame block with the wall

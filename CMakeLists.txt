@@ -147,6 +147,7 @@ add_library(dve_core
     src/material_layers.cpp
     src/material_decal.cpp
     src/material_displacement.cpp
+    src/procedural_noise.cpp
     src/material_authoring.cpp
     src/environment_lighting.cpp
     src/environment_lighting_asset.cpp
@@ -2705,6 +2706,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_material_displacement_tests tests/test_material_displacement.cpp)
     target_link_libraries(dve_material_displacement_tests PRIVATE dve::core)
     add_test(NAME dve_material_displacement_tests COMMAND dve_material_displacement_tests)
+
+    add_executable(dve_procedural_noise_tests tests/test_procedural_noise.cpp)
+    target_link_libraries(dve_procedural_noise_tests PRIVATE dve::core)
+    add_test(NAME dve_procedural_noise_tests COMMAND dve_procedural_noise_tests)
 
     add_executable(dve_environment_lighting_tests tests/test_environment_lighting.cpp)
     target_link_libraries(dve_environment_lighting_tests PRIVATE dve::core)

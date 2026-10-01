@@ -7,6 +7,7 @@
 
 #include "dve/geometry_build.hpp"
 #include "dve/polygon_asset.hpp"
+#include "dve/procedural_noise.hpp"
 
 namespace dve {
 
@@ -23,6 +24,11 @@ struct MaterialVertexDisplacementSettings {
     float fadeStartMeters{20.0F};
     float fadeEndMeters{60.0F};
     std::uint32_t offlineSubdivisionLevels{};
+    // Optional object-space procedural height. Frequency is cycles per asset-space unit;
+    // amplitude is meters and the sampled noise is normalized approximately to [-1, 1].
+    bool proceduralNoiseEnabled{};
+    float proceduralNoiseAmplitudeMeters{};
+    FractalNoiseSettings proceduralNoise{};
     bool affectDepth{true};
     bool affectShadows{true};
 };

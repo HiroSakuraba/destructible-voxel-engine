@@ -144,6 +144,13 @@
       "texts": [{"repo": "third_party/DASHR-NOTICE.md"}, {"repo": "third_party/DASHR-LICENSE.txt"}]
     },
     {
+      "id": "meshoptimizer_remesh", "name": "meshoptimizer v1.3 (voxel remeshing and normal generation)",
+      "upstream": "https://github.com/zeux/meshoptimizer/releases/tag/v1.3", "kind": "vendored-subset",
+      "license": "MIT", "copyleft": "none",
+      "match": {"sources": ["third_party/meshoptimizer_v1_3/src/allocator.cpp", "third_party/meshoptimizer_v1_3/src/remesher.cpp", "third_party/meshoptimizer_v1_3/src/tangentspace.cpp"]},
+      "texts": [{"repo": "third_party/meshoptimizer_v1_3/LICENSE.md"}]
+    },
+    {
       "id": "bs_cloth", "name": "BS-Cloth (adapted concepts)", "upstream": "https://github.com/Simulation-Intelligence/BS-Cloth", "kind": "adaptation",
       "license": "Apache-2.0", "copyleft": "none",
       "match": {"sources": ["src/bspline_cloth.cpp"]},

@@ -84,6 +84,10 @@ void test_fractal_chain_rule() {
     require(close(sample.gradient.z,dz,1.5e-2F),"fractal z gradient omitted octave frequency chain rule");
     settings.octaves=0U;
     require(!validate_fractal_noise_settings(settings),"zero-octave noise settings were accepted");
+    settings.octaves=12U;
+    settings.frequency=100.0F;
+    settings.lacunarity=4.0F;
+    require(!validate_fractal_noise_settings(settings),"unbounded highest-octave frequency was accepted");
 }
 
 void test_noise_displacement_and_bump_normal() {

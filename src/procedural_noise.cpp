@@ -87,11 +87,19 @@ NoiseSample3 value_noise_3d(Float3 position, std::uint32_t seed) noexcept {
 }
 
 bool validate_fractal_noise_settings(const FractalNoiseSettings& settings) noexcept {
-    return std::isfinite(settings.frequency) && settings.frequency > 0.0F &&
-        settings.frequency <= 65536.0F && settings.octaves >= 1U && settings.octaves <= 12U &&
+    const bool basic=settings.octaves>=1U&&settings.octaves<=12U&&
+        std::isfinite(settings.frequency) && settings.frequency > 0.0F &&
+        settings.frequency <= 65536.0F &&
         std::isfinite(settings.lacunarity) && settings.lacunarity >= 1.0F &&
         settings.lacunarity <= 4.0F && std::isfinite(settings.persistence) &&
         settings.persistence >= 0.0F && settings.persistence <= 1.0F;
+    if (!basic) return false;
+    float highestFrequency=settings.frequency;
+    for(std::uint32_t octave=1U;octave<settings.octaves;++octave) {
+        highestFrequency*=settings.lacunarity;
+        if(!std::isfinite(highestFrequency)||highestFrequency>65536.0F)return false;
+    }
+    return true;
 }
 
 NoiseSample3 fractal_noise_3d(Float3 position, const FractalNoiseSettings& settings) noexcept {

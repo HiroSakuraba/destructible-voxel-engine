@@ -731,11 +731,26 @@ if(DVE_BUILD_ASSET_COOKER OR DVE_BUILD_BENCHMARK OR DVE_BUILD_EDITOR OR
    (DVE_BUILD_TESTS AND DVE_BUILD_ASSET_PIPELINE_TESTS))
     find_package(PNG REQUIRED)
     find_package(JPEG REQUIRED)
-    add_library(dve_asset_pipeline src/asset_cooker.cpp src/polygon_cooker.cpp src/brick_palette_asset_pipeline.cpp src/heightmap_terrain.cpp)
+    add_library(dve_meshoptimizer_remesh STATIC
+        third_party/meshoptimizer_v1_3/src/allocator.cpp
+        third_party/meshoptimizer_v1_3/src/indexgenerator.cpp
+        third_party/meshoptimizer_v1_3/src/remesher.cpp
+        third_party/meshoptimizer_v1_3/src/tangentspace.cpp)
+    target_include_directories(dve_meshoptimizer_remesh PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/meshoptimizer_v1_3/src)
+    target_compile_features(dve_meshoptimizer_remesh PUBLIC cxx_std_11)
+
+    add_library(dve_asset_pipeline
+        src/asset_cooker.cpp
+        src/polygon_cooker.cpp
+        src/brick_palette_asset_pipeline.cpp
+        src/heightmap_terrain.cpp
+        src/mesh_remesh.cpp)
     add_library(dve::asset_pipeline ALIAS dve_asset_pipeline)
     target_include_directories(dve_asset_pipeline PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_asset_pipeline PUBLIC cxx_std_23)
-    target_link_libraries(dve_asset_pipeline PUBLIC dve::core PNG::PNG JPEG::JPEG)
+    target_link_libraries(dve_asset_pipeline PUBLIC dve::core PNG::PNG JPEG::JPEG
+        PRIVATE dve_meshoptimizer_remesh)
     if(MSVC)
         target_compile_options(dve_asset_pipeline PRIVATE /W4 /permissive-)
     else()
@@ -1707,6 +1722,8 @@ if(DVE_BUILD_ASSET_COOKER)
     target_link_libraries(dve_cook_model PRIVATE dve::asset_pipeline)
     add_executable(dve_cook_mesh apps/dve_cook_mesh.cpp)
     target_link_libraries(dve_cook_mesh PRIVATE dve::asset_pipeline)
+    add_executable(dve_remesh_mesh apps/dve_remesh_mesh.cpp)
+    target_link_libraries(dve_remesh_mesh PRIVATE dve::asset_pipeline)
 endif()
 
 if(DVE_BUILD_BENCHMARK AND DVE_BUILD_RHI)
@@ -2309,6 +2326,10 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_asset_cooker_tests PRIVATE dve::asset_pipeline)
         target_compile_definitions(dve_asset_cooker_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME dve_asset_cooker_tests COMMAND dve_asset_cooker_tests)
+
+        add_executable(dve_mesh_remesh_tests tests/test_mesh_remesh.cpp)
+        target_link_libraries(dve_mesh_remesh_tests PRIVATE dve::asset_pipeline)
+        add_test(NAME dve_mesh_remesh_tests COMMAND dve_mesh_remesh_tests)
     endif()
 
     add_executable(dve_text3d_tests tests/test_text3d.cpp)

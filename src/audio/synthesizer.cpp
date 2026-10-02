@@ -6519,7 +6519,12 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "filter.formant.gain1") parsed = readFloat(result.filter.formant.gains[1]);
         else if (key == "filter.formant.gain2") parsed = readFloat(result.filter.formant.gains[2]);
         else if (key == "filter.formant.gain3") parsed = readFloat(result.filter.formant.gains[3]);
-        else if (key == "chord.enabled") parsed = readBool(result.chord.enabled);
+        else recognized = false;
+
+        // Split the large key dispatch so MSVC does not exceed its nested-block limit.
+        if (!recognized) {
+        recognized = true;
+        if (key == "chord.enabled") parsed = readBool(result.chord.enabled);
         else if (key == "chord.type") { const auto type = parse_chord_type(value); parsed = type.has_value(); if (type) result.chord.type = *type; }
         else if (key == "chord.noteCount") parsed = readUInt(result.chord.noteCount, static_cast<unsigned>(kChordIntervalCount));
         else if (key == "chord.inversion") parsed = readInt8(result.chord.inversion, -7, 7);
@@ -6587,6 +6592,7 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "sampler.startOffset") parsed = readFloat(result.sampler.startOffsetSeconds);
         else if (key == "sampler.gain") parsed = readFloat(result.sampler.gain);
         else recognized = false;
+        }
 
         if (!recognized && key.starts_with("micro.offset")) {
             std::size_t index = 0;

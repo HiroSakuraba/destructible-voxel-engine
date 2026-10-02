@@ -1,6 +1,7 @@
 #include "dve/rhi/null_device.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <cmath>
 #include <cstring>

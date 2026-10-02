@@ -112,7 +112,12 @@ public:
     [[nodiscard]] TextureResidencyStats stats() const noexcept;
 
 private:
-    struct Pending;
+    struct Pending {
+        TextureUploadRequest request;
+        PolygonTextureMipChain mipChain;
+        std::size_t bytes{};
+        std::uint64_t sourceHash{};
+    };
     bool evict_until_fits(std::size_t incomingBytes, std::uint64_t replacingAssetId,
                           std::string* error);
     static std::uint64_t image_hash(const PolygonImage& image) noexcept;

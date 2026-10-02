@@ -1,6 +1,7 @@
 #include "dve/rhi/null_device.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <cmath>
 #include <cstring>
@@ -30,10 +31,16 @@ bool range_fits(std::size_t offset, std::size_t bytes, std::size_t capacity) noe
 }
 
 std::size_t texture_pixel_bytes(TextureFormat format) noexcept {
+    if (is_block_compressed(format)) return 0U;
     switch (format) {
     case TextureFormat::RGBA32Sint: return 16U;
     case TextureFormat::RGBA16Float: return 8U;
     case TextureFormat::RG16Uint: return 4U;
+    case TextureFormat::BC1RGBAUnorm:
+    case TextureFormat::BC1RGBASrgb:
+    case TextureFormat::BC3RGBAUnorm:
+    case TextureFormat::BC3RGBASrgb:
+    case TextureFormat::BC5RGUnorm: return 0U;
     case TextureFormat::RGBA8Unorm:
     case TextureFormat::BGRA8Unorm:
     case TextureFormat::R32Uint:
@@ -55,7 +62,10 @@ std::optional<std::size_t> texture_layer_bytes(const TextureDesc& desc) noexcept
         const std::uint64_t height = mip_dimension(desc.height, mip);
         const std::uint64_t depth = desc.dimension == TextureDimension::Texture3D
             ? mip_dimension(desc.depth, mip) : desc.depth;
-        const std::uint64_t bytes = width * height * depth * texture_pixel_bytes(desc.format);
+        const std::uint64_t bytes = is_block_compressed(desc.format)
+            ? static_cast<std::uint64_t>((width + 3U) / 4U) * ((height + 3U) / 4U) *
+                  depth * texture_block_bytes(desc.format)
+            : width * height * depth * texture_pixel_bytes(desc.format);
         if (bytes > std::numeric_limits<std::size_t>::max() - total) return std::nullopt;
         total += bytes;
     }
@@ -76,10 +86,13 @@ std::optional<std::size_t> texture_subresource_offset(const TextureDesc& desc,
     if (!layerBytes || mip >= desc.mipLevels || layer >= desc.arrayLayers) return std::nullopt;
     std::uint64_t offset = static_cast<std::uint64_t>(*layerBytes) * layer;
     for (std::uint32_t index = 0; index < mip; ++index) {
-        offset += static_cast<std::uint64_t>(mip_dimension(desc.width, index)) *
-                  mip_dimension(desc.height, index) *
-                  (desc.dimension == TextureDimension::Texture3D
-                       ? mip_dimension(desc.depth, index) : desc.depth) * texture_pixel_bytes(desc.format);
+        const std::uint64_t w = mip_dimension(desc.width, index);
+        const std::uint64_t h = mip_dimension(desc.height, index);
+        const std::uint64_t d = desc.dimension == TextureDimension::Texture3D
+            ? mip_dimension(desc.depth, index) : desc.depth;
+        offset += is_block_compressed(desc.format)
+            ? ((w + 3U) / 4U) * ((h + 3U) / 4U) * d * texture_block_bytes(desc.format)
+            : w * h * d * texture_pixel_bytes(desc.format);
     }
     if (offset > std::numeric_limits<std::size_t>::max()) return std::nullopt;
     return static_cast<std::size_t>(offset);
@@ -94,6 +107,7 @@ std::vector<TextureFormat> resolved_color_formats(const GraphicsPipelineDesc& de
 
 TextureFormatCapabilities NullDevice::texture_format_capabilities(TextureFormat format) const noexcept {
     if (format == TextureFormat::D32Float) return {false, false, false, false, true};
+    if (is_block_compressed(format)) return {true, false, false, false, false};
     const bool integerAtomic = format == TextureFormat::R32Uint || format == TextureFormat::R32Sint;
     return {true, true, integerAtomic, true, false};
 }
@@ -246,19 +260,22 @@ bool NullDevice::write_texture(TextureHandle handle, std::uint32_t mipLevel,
     const std::size_t height = mip_dimension(slot->desc.height, mipLevel);
     const std::size_t depth = slot->desc.dimension == TextureDimension::Texture3D
         ? mip_dimension(slot->desc.depth, mipLevel) : slot->desc.depth;
-    const std::size_t packedRow = width * texture_pixel_bytes(slot->desc.format);
-    if (rowPitchBytes < packedRow || bytes.size() < rowPitchBytes * height * depth) {
+    const std::size_t packedRow = texture_row_bytes(slot->desc.format, static_cast<std::uint32_t>(width));
+    const std::size_t rows = texture_rows(slot->desc.format, static_cast<std::uint32_t>(height));
+    if ((is_block_compressed(slot->desc.format) && rowPitchBytes != packedRow) ||
+        (!is_block_compressed(slot->desc.format) && rowPitchBytes < packedRow) ||
+        bytes.size() < rowPitchBytes * rows * depth) {
         set_error(error, "texture upload row pitch or byte count is too small"); return false;
     }
     for (std::size_t z = 0; z < depth; ++z) {
-        for (std::size_t y = 0; y < height; ++y) {
-            const std::size_t sourceOffset = (z * height + y) * rowPitchBytes;
-            const std::size_t destinationOffset = *offset + (z * height + y) * packedRow;
+        for (std::size_t y = 0; y < rows; ++y) {
+            const std::size_t sourceOffset = (z * rows + y) * rowPitchBytes;
+            const std::size_t destinationOffset = *offset + (z * rows + y) * packedRow;
             std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(sourceOffset), packedRow,
                         slot->storage.begin() + static_cast<std::ptrdiff_t>(destinationOffset));
         }
     }
-    statistics_.uploadedBytes += packedRow * height * depth;
+    statistics_.uploadedBytes += packedRow * rows * depth;
     return true;
 }
 
@@ -276,19 +293,22 @@ bool NullDevice::read_texture(TextureHandle handle, std::uint32_t mipLevel,
     const std::size_t height = mip_dimension(slot->desc.height, mipLevel);
     const std::size_t depth = slot->desc.dimension == TextureDimension::Texture3D
         ? mip_dimension(slot->desc.depth, mipLevel) : slot->desc.depth;
-    const std::size_t packedRow = width * texture_pixel_bytes(slot->desc.format);
-    if (rowPitchBytes < packedRow || destination.size() < rowPitchBytes * height * depth) {
+    const std::size_t packedRow = texture_row_bytes(slot->desc.format, static_cast<std::uint32_t>(width));
+    const std::size_t rows = texture_rows(slot->desc.format, static_cast<std::uint32_t>(height));
+    if ((is_block_compressed(slot->desc.format) && rowPitchBytes != packedRow) ||
+        (!is_block_compressed(slot->desc.format) && rowPitchBytes < packedRow) ||
+        destination.size() < rowPitchBytes * rows * depth) {
         set_error(error, "texture readback row pitch or byte count is too small"); return false;
     }
     for (std::size_t z = 0; z < depth; ++z) {
-        for (std::size_t y = 0; y < height; ++y) {
-            const std::size_t destinationOffset = (z * height + y) * rowPitchBytes;
-            const std::size_t sourceOffset = *offset + (z * height + y) * packedRow;
+        for (std::size_t y = 0; y < rows; ++y) {
+            const std::size_t destinationOffset = (z * rows + y) * rowPitchBytes;
+            const std::size_t sourceOffset = *offset + (z * rows + y) * packedRow;
             std::copy_n(slot->storage.begin() + static_cast<std::ptrdiff_t>(sourceOffset), packedRow,
                         destination.begin() + static_cast<std::ptrdiff_t>(destinationOffset));
         }
     }
-    statistics_.readbackBytes += packedRow * height * depth;
+    statistics_.readbackBytes += packedRow * rows * depth;
     return true;
 }
 

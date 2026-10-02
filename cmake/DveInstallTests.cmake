@@ -24,6 +24,35 @@ if(DVE_PYTHON3_EXECUTABLE)
     endforeach()
 endif()
 
+# Windows: package the sample game as a zip with its DLLs and run it from the extracted
+# folder (dve_package_game_windows_test), plus the in-tree dve_sample_game_package target that
+# CI uploads. The install-tree, package-consumer, CPack and Linux packaging tests below check
+# ELF/RPATH/ldd/dpkg details and stay Linux-only (see docs/PACKAGING.md, "Windows").
+if(WIN32 AND DVE_INSTALLED_COMPONENTS AND TARGET dve_player AND TARGET dve_pack AND DVE_PYTHON3_EXECUTABLE
+        AND "Runtime" IN_LIST DVE_NOTICES_COMPONENTS)
+    dve_add_game_package(dve_sample_game_package
+        PROJECT_DIR "${PROJECT_SOURCE_DIR}/tests/data/player_sample"
+        OUTPUT_DIR "${PROJECT_BINARY_DIR}/game_packages/Player_Sample"
+        ZIP VERIFY)
+    add_test(NAME dve_package_game_windows_test
+        COMMAND ${CMAKE_COMMAND}
+            -DPYTHON=${DVE_PYTHON3_EXECUTABLE}
+            -DSCRIPT=${PROJECT_SOURCE_DIR}/scripts/dve_package_game.py
+            -DNOTICES_TOOL=${DVE_NOTICES_GENERATOR}
+            -DMANIFEST=${DVE_NOTICES_MANIFEST}
+            -DSAMPLE=${PROJECT_SOURCE_DIR}/tests/data/player_sample
+            -DWORK_DIR=${PROJECT_BINARY_DIR}/install_tests/game_package_windows
+            -DBUILD_DIR=${PROJECT_BINARY_DIR}
+            -DCONFIG=$<CONFIG>
+            -DBUILD_PLAYER=$<TARGET_FILE:dve_player>
+            -DCMAKE_EXE=${CMAKE_COMMAND}
+            -P ${PROJECT_SOURCE_DIR}/tests/cmake/dve_package_game_windows.cmake)
+    set_tests_properties(dve_package_game_windows_test PROPERTIES
+        RESOURCE_LOCK dve_install_prefix
+        PROCESSORS 4
+        TIMEOUT 1500)
+endif()
+
 if(NOT DVE_INSTALLED_COMPONENTS OR NOT UNIX OR APPLE)
     return()
 endif()

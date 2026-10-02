@@ -7,6 +7,8 @@
 #       OUTPUT_DIR  <folder to create; replaced on every run>
 #       [NAME <Game>]            executable/folder name (default: game.dvegame name, sanitized)
 #       [TGZ]                    also write <OUTPUT_DIR>/../<Game>-<version>-linux-x86_64.tar.gz
+#       [ZIP]                    also write <OUTPUT_DIR>/../<Game>-<version>-windows-x86_64.zip
+#                                (Windows: <Game>.exe with its DLLs next to it)
 #       [VERIFY]                 run the packaged game for 2 headless frames afterwards
 #       [ALL]                    build it with the default target
 #       [RUNTIME_PREFIX <dir>]   installed dve Runtime (default: this package's prefix; in the
@@ -21,7 +23,7 @@
 include_guard(GLOBAL)
 
 function(dve_add_game_package target)
-    cmake_parse_arguments(PARSE_ARGV 1 arg "TGZ;VERIFY;ALL"
+    cmake_parse_arguments(PARSE_ARGV 1 arg "TGZ;ZIP;VERIFY;ALL"
         "PROJECT_DIR;OUTPUT_DIR;NAME;RUNTIME_PREFIX;MATERIALS" "EXTRA_ARGS")
     if(NOT arg_PROJECT_DIR OR NOT arg_OUTPUT_DIR)
         message(FATAL_ERROR "dve_add_game_package(${target}): PROJECT_DIR and OUTPUT_DIR are required")
@@ -45,6 +47,11 @@ function(dve_add_game_package target)
             list(APPEND command --runtime-prefix "${arg_RUNTIME_PREFIX}")
         else()
             list(APPEND command --build-dir "${PROJECT_BINARY_DIR}" --cmake "${CMAKE_COMMAND}")
+            get_property(_dve_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+            if(_dve_multi_config)
+                # Visual Studio / Ninja Multi-Config: install the configuration being built.
+                list(APPEND command --config "$<CONFIG>")
+            endif()
         endif()
     else()
         # From an installed package: <prefix>/bin/dve_package_game and the Runtime next to it.
@@ -71,6 +78,9 @@ function(dve_add_game_package target)
     endif()
     if(arg_TGZ)
         list(APPEND command --tgz)
+    endif()
+    if(arg_ZIP)
+        list(APPEND command --zip)
     endif()
     if(arg_VERIFY)
         list(APPEND command --verify)

@@ -317,8 +317,9 @@ cannot scan, so its `Depends` lists the `-dev` packages that own the libraries a
 packages the exported targets reference (found with `dpkg -S` at configure time, e.g.
 `libsdl3-dev, librtmidi-dev, libsndfile1-dev`).
 
-On Windows, `CPACK_GENERATOR` is `ZIP;NSIS` and the executables' `$<TARGET_RUNTIME_DLLS>` are
-copied next to them. This is configured but **untested** (no Windows runner yet).
+On Windows, `CPACK_GENERATOR` is `ZIP;NSIS`, and the DLLs the executables need are installed next
+to them in `bin/` (see [Windows](#windows)). CI builds the ZIP (`cpack -G ZIP`); NSIS is configured
+but not tested.
 
 **License (D1): MIT.** The engine is licensed under the MIT License (root `LICENSE`,
 `Copyright (c) 2026 Benjamin Schulz`). `cmake/DveLicense.cmake` installs it into every package
@@ -477,8 +478,8 @@ Re-exporting is byte-identical and removes stale `.dvox`/`.dmesh` files.
 ### `dve_package_game` / `dve_add_game_package()`
 
 ```
-dve_package_game --project <dir> --output <dir> [--name N] [--tgz] [--verify]
-                 [--runtime-prefix <install prefix> | --build-dir <build dir>]
+dve_package_game --project <dir> --output <dir> [--name N] [--tgz] [--zip] [--verify]
+                 [--runtime-prefix <install prefix> | --build-dir <build dir> [--config <cfg>]]
                  [--materials f] [--strict-export] [--include-sample-maps] [--no-strip] [--keep-work]
 ```
 
@@ -512,12 +513,13 @@ find_package(dve 2.35 REQUIRED)
 dve_add_game_package(my_game_package
     PROJECT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/game
     OUTPUT_DIR ${CMAKE_BINARY_DIR}/ship/MyGame
-    [NAME MyGame] [TGZ] [VERIFY] [ALL] [RUNTIME_PREFIX <prefix>] [MATERIALS <file>]
+    [NAME MyGame] [TGZ] [ZIP] [VERIFY] [ALL] [RUNTIME_PREFIX <prefix>] [MATERIALS <file>]
     [EXTRA_ARGS ...])
 ```
 
 In the engine tree, `cmake --build <build> --target dve_sample_game_package` packages
-`tests/data/player_sample` into `<build>/game_packages/Player_Sample`.
+`tests/data/player_sample` into `<build>/game_packages/Player_Sample` (with a `.tar.gz` on Linux and
+a `.zip` on Windows). The Windows differences are described in [Windows](#windows).
 
 Which libraries end up in `lib/dve` depends on the preset (see
 [RPATH and bundled libraries](#rpath-and-bundled-libraries-linux)). With `linux-gcc-release` the
@@ -655,9 +657,10 @@ Their files are not relicensed. A shipped game can carry its own `LICENSE` in th
 | `dve_install_tree_test`, `dve_package_game_test` (MP3) | `tests/cmake/dve_no_mpeg_check.cmake` on the install prefix and on both game folders: no `libmpg123*`/`libmp3lame*` file, no such `DT_NEEDED` in any shipped ELF (`readelf -d`), none in `ldd` of the shipped executable (not even from the system, with DVE's libsndfile), the shipped `libsndfile.so.1` is DVE's build, and the notices list no MP3 library. |
 | `dve_install_tree_test`, `dve_package_consumer_test` | Also check the installed notices (which must state the engine's MIT license), `share/doc/dve-<group>/LICENSE` and `copyright` for every installed group, and build a game package through the installed `dve_add_game_package()`. |
 
+@@WINDOWS@@
 ### Not done yet
 
-- CI jobs for packaging (needs a workflow change); Windows ZIP/NSIS game packages.
+- NSIS installers (configured, not tested); macOS.
 - A legal review of the flagged libraries, including how to provide the
   LGPL corresponding source (a pointer to snapshot.debian.org may not be enough).
 - Exporter: 3D text and Gabor volumes are baked approximations (see above), not the editor's

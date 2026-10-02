@@ -247,6 +247,17 @@ jobs:
           name: dve-sample-game-windows-x86_64
           path: ${{ env.BUILD_DIR }}/game_packages/*.zip
           if-no-files-found: error
+      - name: CPack ZIP of the engine (not uploaded)
+        run: |
+          cd $BUILD_DIR
+          cpack -G ZIP -C Release 2>&1 | tail -20
+          ls -l *.zip
+          for z in *.zip; do
+            python -c "import sys, zipfile; n = zipfile.ZipFile(sys.argv[1]).namelist(); print(sys.argv[1], len(n), 'entries'); [print('  ' + x) for x in n if x.lower().endswith(('.exe', '.dll', '.txt')) or '/LICENSE' in x]" "$z"
+            if python -c "import sys, zipfile, re; sys.exit(0 if any(re.search(r'(mpg123|mp3lame)', x, re.I) for x in zipfile.ZipFile(sys.argv[1]).namelist()) else 1)" "$z"; then
+              echo "::error::$z contains an MP3 library"; exit 1
+            fi
+          done
       - name: Upload Windows logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -258,7 +269,7 @@ jobs:
             build-errors.txt
             ${{ env.BUILD_DIR }}/ctest-junit.xml
             ${{ env.BUILD_DIR }}/Testing/Temporary/LastTest*.log
-            ${{ env.BUILD_DIR }}/notices/THIRD_PARTY_NOTICES-*.txt
+            ${{ env.BUILD_DIR }}/notices/**/THIRD_PARTY_NOTICES-*.txt
             ${{ env.BUILD_DIR }}/CMakeFiles/CMakeConfigureLog.yaml
           if-no-files-found: ignore
           retention-days: 14

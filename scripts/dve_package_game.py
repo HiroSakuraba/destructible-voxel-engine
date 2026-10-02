@@ -7,6 +7,7 @@
                      [--dve-pack <exe>] [--dve-export-scene <exe>] [--notices <file>]
                      [--engine-license <file>]
                      [--strict-export] [--include-sample-maps] [--allow-mp3-libraries] [--keep-work]
+                     [--zip] [--config <cfg>]
 
 Steps
   1. Validate <project>/game.dvegame (DVE_GAME 1; name, version, entryScene=*.dvoxscene.json).
@@ -33,6 +34,14 @@ Steps
   8. --verify: run <output>/<Game> --frames 2 --hash headless from another folder with a clean
      environment (no LD_LIBRARY_PATH) and require "dve_player: PASS".
 
+Windows (the runtime prefix has bin/dve_player.exe): the player becomes <output>/<Game>.exe and
+the DLLs it imports (read from its PE import table, recursively) are copied from <prefix>/bin
+next to it, including the Visual C++ runtime the Runtime component installs; Windows system
+DLLs are not copied. Nothing is stripped. --zip writes <Game>-<version>-windows-x86_64.zip
+next to <output> (sorted entries, fixed timestamps). --verify runs <Game>.exe with PATH reduced
+to the Windows folders, so a DLL that is not in the game folder makes it fail. --config picks
+the configuration --build-dir installs (multi-config generators such as Visual Studio).
+
 --build-dir installs the Runtime and RuntimeDeps components of a DVE build folder into a
 scratch prefix first (cmake --install), and takes dve_pack/dve_export_scene from that build.
 Exit codes: 0 ok, 1 packaging failed, 2 usage error.
@@ -46,6 +55,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -170,6 +180,54 @@ def needed(path: Path) -> list[str]:
     return re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", proc.stdout)
 
 
+def pe_imports(path: Path) -> list[str]:
+    """DLL names a Windows .exe/.dll imports (import and delay-import tables). The same reader
+    as tools/generate_third_party_notices.py, kept here so the installed script stands alone."""
+    data = Path(path).read_bytes()
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return []
+    try:
+        header = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[header:header + 4] != b"PE\0\0":
+            return []
+        coff = header + 4
+        section_count = struct.unpack_from("<H", data, coff + 2)[0]
+        optional_size = struct.unpack_from("<H", data, coff + 16)[0]
+        optional = coff + 20
+        magic = struct.unpack_from("<H", data, optional)[0]
+        count_offset, directories = (optional + 92, optional + 96) if magic == 0x10B else (optional + 108, optional + 112)
+        directory_count = struct.unpack_from("<I", data, count_offset)[0]
+        sections = []
+        for index in range(section_count):
+            entry = optional + optional_size + 40 * index
+            virtual_size, address, raw_size, raw_pointer = struct.unpack_from("<IIII", data, entry + 8)
+            sections.append((address, max(virtual_size, raw_size), raw_pointer, raw_size))
+
+        def offset(rva: int):
+            for address, size, raw_pointer, raw_size in sections:
+                if address <= rva < address + size and rva - address < raw_size:
+                    return raw_pointer + rva - address
+            return None
+
+        names: list[str] = []
+        for index, size, name_field in ((1, 20, 3), (13, 32, 1)):
+            rva = struct.unpack_from("<I", data, directories + 8 * index)[0] if index < directory_count else 0
+            position = offset(rva) if rva else None
+            while position is not None and position + size <= len(data):
+                fields = struct.unpack_from("<" + "I" * (size // 4), data, position)
+                if not any(fields):
+                    break
+                start = offset(fields[name_field])
+                if start is not None:
+                    name = data[start:data.find(b"\0", start)].decode("ascii", "replace")
+                    if name and name not in names:
+                        names.append(name)
+                position += size
+        return names
+    except (struct.error, ValueError):
+        return []
+
+
 def copy_library(source_dir: Path, name: str, target_dir: Path) -> list[str]:
     """Copy lib/dve/<name> (a soname symlink or file) and what it points to."""
     copied = []
@@ -192,7 +250,41 @@ def copy_library(source_dir: Path, name: str, target_dir: Path) -> list[str]:
         return copied
 
 
+def is_windows_runtime(prefix: Path) -> bool:
+    return (prefix / "bin" / "dve_player.exe").is_file()
+
+
+def executable_name(game_name: str, windows: bool) -> str:
+    return f"{game_name}.exe" if windows else game_name
+
+
+def stage_windows_runtime(prefix: Path, output: Path, game_name: str) -> dict:
+    """bin/dve_player.exe -> <output>/<Game>.exe, plus every DLL it imports (recursively) that
+    the Runtime/RuntimeDeps components installed in bin/. Anything else is a Windows DLL."""
+    bin_dir = prefix / "bin"
+    available = {p.name.lower(): p for p in bin_dir.iterdir() if p.is_file() and p.suffix.lower() == ".dll"}
+    executable = output / executable_name(game_name, True)
+    shutil.copy2(bin_dir / "dve_player.exe", executable)
+    libraries: list[str] = []
+    pending = [bin_dir / "dve_player.exe"]
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop(0)
+        for name in pe_imports(current):
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if key in available:
+                shutil.copy2(available[key], output / available[key].name)
+                libraries.append(available[key].name)
+                pending.append(available[key])
+    return {"executable": executable.name, "libraries": sorted(libraries, key=str.lower)}
+
+
 def stage_runtime(prefix: Path, output: Path, game_name: str, strip: bool) -> dict:
+    if is_windows_runtime(prefix):
+        return stage_windows_runtime(prefix, output, game_name)
     player = prefix / "bin" / "dve_player"
     if not player.is_file():
         raise PackageError(f"{player} not found; install the Runtime component (cmake --install <build> "
@@ -222,7 +314,7 @@ def stage_runtime(prefix: Path, output: Path, game_name: str, strip: bool) -> di
 # libmpg123 / libmp3lame only come with a libsndfile built with MPEG support (Debian's). DVE's
 # own build (DVE_FETCH_SNDFILE, the default) has none, and DVE needs no MP3 at run time, so a
 # runtime prefix that bundles them is refused (third_party/notices/manifest.json "forbidden").
-FORBIDDEN_LIBRARIES = re.compile(r"^(libmpg123|libmp3lame)\.so")
+FORBIDDEN_LIBRARIES = re.compile(r"^(libmpg123|libmp3lame)\.so|^(lib)?(mpg123|mp3lame)([-_.][0-9]+)?\.dll$", re.IGNORECASE)
 
 
 def check_forbidden(libraries: list[str], allow: bool) -> list[str]:
@@ -243,6 +335,12 @@ def player_version(executable: Path) -> str:
 
 def clean_env() -> dict:
     env = {k: v for k, v in os.environ.items() if not k.startswith("LD_")}
+    if os.name == "nt":
+        # Only the Windows folders: a DLL the game folder lacks must make the run fail.
+        root = os.environ.get("SystemRoot", r"C:\Windows")
+        for key in [k for k in env if k.upper() == "PATH"]:
+            del env[key]
+        env["PATH"] = os.pathsep.join([os.path.join(root, "System32"), root, os.path.join(root, "System32", "Wbem")])
     env.setdefault("SDL_VIDEO_DRIVER", "offscreen")
     env.setdefault("SDL_AUDIO_DRIVER", "dummy")
     return env
@@ -260,7 +358,8 @@ def copy_notices(notices: Path, output: Path, libraries: list[str]) -> list[str]
     listed = {line[len(BUNDLED_MARK):].split()[0].rstrip(",")
               for line in text.splitlines() if line.startswith(BUNDLED_MARK)}
     missing = [lib for lib in libraries
-               if not any(lib == s or lib.startswith(s + ".") for s in listed)]
+               if not any(lib == s or lib.startswith(s + ".") or (lib.lower().endswith(".dll") and lib.lower() == s.lower())
+                          for s in listed)]
     if missing:
         raise PackageError(f"THIRD_PARTY_NOTICES does not cover the shipped libraries: {', '.join(missing)}")
     # Section headers are "=====\n<name>\n=====", and flagged sections carry a "REVIEW:" line.
@@ -279,6 +378,30 @@ def copy_notices(notices: Path, output: Path, libraries: list[str]) -> list[str]
 # ------------------------------------------------------------------------------------------
 # 7. archive
 # ------------------------------------------------------------------------------------------
+def write_zip(folder: Path, archive: Path) -> None:
+    # Reproducible: sorted entries, fixed timestamps (SOURCE_DATE_EPOCH, at least 1980-01-01).
+    import time
+    import zipfile
+    epoch = max(int(os.environ.get("SOURCE_DATE_EPOCH", "0") or 0), 315532800)
+    stamp = time.gmtime(epoch)[:6]
+
+    def entry(name: str, directory: bool) -> zipfile.ZipInfo:
+        info = zipfile.ZipInfo(name + ("/" if directory else ""), date_time=stamp)
+        info.create_system = 0
+        info.external_attr = 0x10 if directory else 0
+        info.compress_type = zipfile.ZIP_STORED if directory else zipfile.ZIP_DEFLATED
+        return info
+
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        zf.writestr(entry(folder.name, True), b"")
+        for path in sorted(folder.rglob("*"), key=lambda p: p.as_posix()):
+            name = f"{folder.name}/{path.relative_to(folder).as_posix()}"
+            if path.is_dir():
+                zf.writestr(entry(name, True), b"")
+            else:
+                zf.writestr(entry(name, False), path.read_bytes())
+
+
 def write_tgz(folder: Path, archive: Path) -> None:
     # Reproducible: sorted entries, root-owned, mtime SOURCE_DATE_EPOCH (default 0).
     mtime = int(os.environ.get("SOURCE_DATE_EPOCH", "0") or 0)
@@ -329,8 +452,9 @@ def package(args) -> int:
         build_dir = Path(args.build_dir).resolve() if args.build_dir else None
         if build_dir:
             prefix = work / "runtime"
+            config = ["--config", args.config] if args.config else []
             for component in ("Runtime", "RuntimeDeps"):
-                run([args.cmake, "--install", build_dir, "--prefix", prefix, "--component", component])
+                run([args.cmake, "--install", build_dir, "--prefix", prefix, "--component", component, *config])
         elif args.runtime_prefix:
             prefix = Path(args.runtime_prefix).resolve()
         else:
@@ -339,7 +463,9 @@ def package(args) -> int:
         def tool(explicit, name):
             if explicit:
                 return Path(explicit)
-            for candidate in ([build_dir / name] if build_dir else []) + [prefix / "bin" / name]:
+            names = [name, f"{name}.exe"] if os.name == "nt" else [name]
+            build_dirs = [build_dir] + ([build_dir / args.config] if args.config else []) if build_dir else []
+            for candidate in [d / n for d in build_dirs + [prefix / "bin"] for n in names]:
                 if candidate.is_file():
                     return candidate
             return None
@@ -367,6 +493,7 @@ def package(args) -> int:
         pak_files, pak_hash = (int(match.group(1)), match.group(2)) if match else (0, "")
         log(proc.stdout.strip())
 
+        windows = is_windows_runtime(prefix)
         runtime = stage_runtime(prefix, output, game_name, not args.no_strip)
         mp3_libraries = check_forbidden(runtime["libraries"], args.allow_mp3_libraries)
         if mp3_libraries:
@@ -389,12 +516,12 @@ def package(args) -> int:
             log(f"note: the game project has no LICENSE file; only the engine's MIT license "
                 f"({ENGINE_LICENSE_NAME}) and THIRD_PARTY_NOTICES.txt are included")
 
-        version = player_version(output / game_name)
+        version = player_version(output / runtime["executable"])
         info = {
             "format": "DVE_GAME_PACKAGE", "version": 1,
             "game": {"name": manifest["name"], "version": manifest["version"], "entryScene": manifest["entryScene"]},
             "engine": version,
-            "executable": game_name,
+            "executable": runtime["executable"],
             "pak": {"file": "game.dvepak", "files": pak_files, "packageHash": pak_hash},
             "bundledLibraries": runtime["libraries"],
             "exportedScenes": staged["exported"], "precookedScenes": staged["precooked"],
@@ -407,15 +534,20 @@ def package(args) -> int:
         (output / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")
 
         if args.verify:
-            fnv = verify(output / game_name)
+            fnv = verify(output / runtime["executable"])
             log(f"verified: {game_name} --frames 2 ran from a clean environment (framebuffer_fnv={fnv})")
+        system = "windows" if windows else "linux"
         if args.tgz:
-            archive = output.parent / f"{game_name}-{manifest['version']}-linux-x86_64.tar.gz"
+            archive = output.parent / f"{game_name}-{manifest['version']}-{system}-x86_64.tar.gz"
             write_tgz(output, archive)
             log(f"wrote {archive} ({archive.stat().st_size // 1024} KiB)")
+        if args.zip:
+            archive = output.parent / f"{game_name}-{manifest['version']}-{system}-x86_64.zip"
+            write_zip(output, archive)
+            log(f"wrote {archive} ({archive.stat().st_size // 1024} KiB)")
         size = sum(p.stat().st_size for p in output.rglob("*") if p.is_file() and not p.is_symlink())
-        log(f"wrote {output} ({size // 1024} KiB: {game_name}, game.dvepak, "
-            f"{len(runtime['libraries'])} files in lib/dve)")
+        log(f"wrote {output} ({size // 1024} KiB: {runtime['executable']}, game.dvepak, "
+            f"{len(runtime['libraries'])} {'DLLs' if windows else 'files in lib/dve'})")
         if flagged:
             log(f"notices flag for review before distribution: {', '.join(flagged)}")
     finally:
@@ -444,6 +576,8 @@ def main() -> int:
     parser.add_argument("--allow-mp3-libraries", action="store_true",
                         help="package even if the runtime bundles libmpg123/libmp3lame (refused by default)")
     parser.add_argument("--tgz", action="store_true")
+    parser.add_argument("--zip", action="store_true", help="also write <Game>-<version>-<system>-x86_64.zip")
+    parser.add_argument("--config", help="configuration for cmake --install with --build-dir (multi-config generators)")
     parser.add_argument("--no-strip", action="store_true", help="keep symbols in the game executable")
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--keep-work", action="store_true")

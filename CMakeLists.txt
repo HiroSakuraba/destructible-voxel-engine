@@ -1455,6 +1455,8 @@ if(DVE_ENABLE_JOLT)
         set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
         set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
         set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+        # MSVC: Jolt defaults to the static CRT (/MT); DVE and every other dependency use the DLL CRT (/MD).
+        set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
         add_subdirectory("${DVE_JOLT_SOURCE_DIR}/Build" "${CMAKE_BINARY_DIR}/_deps/jolt-build" EXCLUDE_FROM_ALL)
         set(DVE_JOLT_TARGET Jolt)
     endif()
@@ -1479,6 +1481,8 @@ if(DVE_ENABLE_JOLT)
         set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
         set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
         set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+        # MSVC: Jolt defaults to the static CRT (/MT); DVE and every other dependency use the DLL CRT (/MD).
+        set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
             JoltPhysics
             GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
@@ -2324,11 +2328,14 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_live_editor_mcp_core_tests tests/test_live_editor_mcp_core.cpp)
     target_link_libraries(dve_live_editor_mcp_core_tests PRIVATE dve::core)
     add_test(NAME dve_live_editor_mcp_core_tests COMMAND dve_live_editor_mcp_core_tests)
+    # 77: skipped where the live editor's private IPC is not implemented (Windows).
+    set_tests_properties(dve_live_editor_mcp_core_tests PROPERTIES SKIP_RETURN_CODE 77)
 
     if(DVE_BUILD_EDITOR)
         add_executable(dve_live_editor_mcp_tests tests/test_live_editor_mcp.cpp)
         target_link_libraries(dve_live_editor_mcp_tests PRIVATE dve::editor)
         add_test(NAME dve_live_editor_mcp_tests COMMAND dve_live_editor_mcp_tests)
+        set_tests_properties(dve_live_editor_mcp_tests PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     if(UNIX AND NOT APPLE)

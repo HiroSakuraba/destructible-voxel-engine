@@ -5,6 +5,7 @@
 # Components (CPack groups them into the dve-runtime/-editor/-tools/-dev packages):
 #   Runtime       bin/dve_player
 #   RuntimeDeps   lib/dve/*.so*  shared libraries dve_player needs that are not system libraries
+#                 (Windows: bin/*.dll next to the .exe, plus the Visual C++ runtime DLLs)
 #   Editor        bin/dve_desktop_editor, bin/dve_native_editor_x11, share/dve/assets
 #   EditorDeps    lib/dve/*.so*  (the editor's non-system shared libraries)
 #   Tools         bin/dve_pack, bin/dve_cook_*, bin/dve_asset_index, bin/dve_prefab_tool
@@ -21,6 +22,10 @@ option(DVE_INSTALL_BUNDLE_RUNTIME_DEPENDENCIES
     "Install the non-system shared libraries of installed executables into lib/dve (Linux)" ON)
 option(DVE_INSTALL_BUNDLE_JACK
     "Bundle libjack (and the Berkeley DB libdb it needs on JACK1) into lib/dve. Off: libjack must match the user's JACK server, and libdb's Sleepycat license reaches the software using it (see THIRD_PARTY_NOTICES)" OFF)
+option(DVE_INSTALL_MSVC_RUNTIME
+    "Windows: install the Visual C++ runtime DLLs (msvcp140, vcruntime140, ...) next to the executables in the *Deps components, so archives and game folders run without the VC++ Redistributable" ON)
+set(DVE_RUNTIME_DLL_DIRECTORIES "" CACHE STRING
+    "Windows: extra folders to resolve the DLLs of installed executables from (vcpkg's bin folder is added automatically)")
 option(DVE_INSTALL_SAMPLE_MAPS
     "Install assets/audio/sample_maps with the editor assets (off until their provenance is documented, decision D8)" OFF)
 if(NOT DVE_INSTALL)
@@ -72,6 +77,37 @@ if(DVE_SNDFILE_PROVIDER STREQUAL "system")
 endif()
 set(DVE_RUNTIME_DEPENDENCY_POST_EXCLUDES ".*[/\\\\][Ss]ystem32[/\\\\].*")
 
+# Windows: DLLs resolve from the executable's folder, then System32/the Windows folder (system,
+# not bundled), then these folders (file(GET_RUNTIME_DEPENDENCIES) DIRECTORIES): vcpkg's bin
+# (libpng, libjpeg-turbo and zlib for the tools) and DVE_RUNTIME_DLL_DIRECTORIES.
+set(DVE_RUNTIME_DLL_SEARCH_DIRS "")
+set(DVE_VCPKG_TRIPLET_DIR "")
+set(DVE_MSVC_RUNTIME_FILES "")
+if(WIN32)
+    list(APPEND DVE_RUNTIME_DEPENDENCY_POST_EXCLUDES "^[A-Za-z]:[/\\\\][Ww][Ii][Nn][Dd][Oo][Ww][Ss][/\\\\]")
+    if(DEFINED _VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET
+            AND EXISTS "${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin")
+        set(DVE_VCPKG_TRIPLET_DIR "${_VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+        list(APPEND DVE_RUNTIME_DLL_SEARCH_DIRS "${DVE_VCPKG_TRIPLET_DIR}/bin")
+    endif()
+    list(APPEND DVE_RUNTIME_DLL_SEARCH_DIRS ${DVE_RUNTIME_DLL_DIRECTORIES})
+    if(MSVC AND DVE_INSTALL_MSVC_RUNTIME AND DVE_INSTALL_BUNDLE_RUNTIME_DEPENDENCIES)
+        # The Visual C++ runtime of the compiler that built the executables (msvcp140.dll,
+        # vcruntime140.dll, vcruntime140_1.dll, ...), from the Visual Studio installation.
+        # The Universal CRT is part of Windows 10 and later and is not copied. The files are
+        # installed per *Deps component below; THIRD_PARTY_NOTICES covers the ones a program
+        # imports (third_party/notices/MSVC_RUNTIME_NOTICE.txt, flagged for review).
+        set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+        set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
+        set(CMAKE_INSTALL_DEBUG_LIBRARIES FALSE)
+        include(InstallRequiredSystemLibraries)
+        set(DVE_MSVC_RUNTIME_FILES ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS})
+        if(NOT DVE_MSVC_RUNTIME_FILES)
+            message(WARNING "dve install: the Visual C++ runtime DLLs were not found (InstallRequiredSystemLibraries); packages will need the VC++ Redistributable")
+        endif()
+    endif()
+endif()
+
 set(DVE_INSTALLED_EXECUTABLES "")
 function(dve_install_program target component)
     if(NOT TARGET ${target})
@@ -93,17 +129,13 @@ function(dve_install_program target component)
         target_link_options(${target} PRIVATE "LINKER:--disable-new-dtags")
     endif()
     set(_dve_depset "")
-    if(DVE_INSTALL_BUNDLE_RUNTIME_DEPENDENCIES AND NOT WIN32)
+    if(DVE_INSTALL_BUNDLE_RUNTIME_DEPENDENCIES)
+        # Windows too: the DLLs are installed next to the .exe (RUNTIME DESTINATION below).
         set(_dve_depset RUNTIME_DEPENDENCY_SET dve_${component}_runtime_deps)
         set_property(GLOBAL APPEND PROPERTY DVE_RUNTIME_DEPENDENCY_SETS ${component})
     endif()
     install(TARGETS ${target} ${_dve_depset}
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT ${component})
-    if(WIN32 AND DVE_INSTALL_BUNDLE_RUNTIME_DEPENDENCIES)
-        # Untested stub (no Windows runner yet): copy the DLLs CMake knows about next to the exe.
-        install(FILES $<TARGET_RUNTIME_DLLS:${target}> DESTINATION "${CMAKE_INSTALL_BINDIR}"
-            COMPONENT ${component}Deps OPTIONAL)
-    endif()
     set_property(GLOBAL APPEND PROPERTY DVE_INSTALLED_EXECUTABLES ${target})
     set_property(GLOBAL APPEND PROPERTY DVE_INSTALL_PROGRAM_COMPONENTS ${component})
     set_property(GLOBAL APPEND PROPERTY DVE_INSTALL_PROGRAMS_${component} ${target})
@@ -149,6 +181,9 @@ if(DVE_SNDFILE_LIBRARY_DIR)
     # already points there, this also covers libraries that need it.
     list(APPEND _dve_depset_directories DIRECTORIES "${DVE_SNDFILE_LIBRARY_DIR}")
 endif()
+if(DVE_RUNTIME_DLL_SEARCH_DIRS)
+    list(APPEND _dve_depset_directories DIRECTORIES ${DVE_RUNTIME_DLL_SEARCH_DIRS})
+endif()
 foreach(_dve_component IN LISTS _dve_depset_components)
     install(RUNTIME_DEPENDENCY_SET dve_${_dve_component}_runtime_deps
         PRE_EXCLUDE_REGEXES ${DVE_RUNTIME_DEPENDENCY_SYSTEM_EXCLUDES}
@@ -156,6 +191,10 @@ foreach(_dve_component IN LISTS _dve_depset_components)
         ${_dve_depset_directories}
         LIBRARY DESTINATION "${DVE_INSTALL_BUNDLEDIR}" COMPONENT ${_dve_component}Deps
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT ${_dve_component}Deps)
+    if(DVE_MSVC_RUNTIME_FILES)
+        install(FILES ${DVE_MSVC_RUNTIME_FILES} DESTINATION "${CMAKE_INSTALL_BINDIR}"
+            COMPONENT ${_dve_component}Deps)
+    endif()
 endforeach()
 
 # ----------------------------------------------------------------------------------------------

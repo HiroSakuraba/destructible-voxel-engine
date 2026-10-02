@@ -731,7 +731,7 @@ Player_Sample/
   `--verify-dir` (file names and PE imports), `dve_package_game` and the Windows package test
   fail on them.
 
-**Tests on Windows.** `ctest -C Release` runs the full suite (274 tests in CI; Linux registers 279). New:
+**Tests on Windows.** `ctest -C Release` runs the full suite (279 tests in CI, 2 of them skipped; the Linux player preset registers 284). New:
 `dve_package_game_windows_test` packages the sample with `--build-dir --zip --verify`, extracts the
 zip, checks the files, `DVE-LICENSE.txt`, `build-info.json`, the notices coverage
 (`--verify-dir`), that no MP3 DLL is shipped or imported, and runs `Player_Sample.exe --frames 30

@@ -246,7 +246,9 @@ struct PlyHeader {
 
 [[nodiscard]] std::optional<PlyHeader> parse_ply_header(std::ifstream& input, std::string& error) {
     std::string line;
-    if (!std::getline(input, line) || line != "ply") { error = "Not a PLY file"; return std::nullopt; }
+    if (!std::getline(input, line)) { error = "Not a PLY file"; return std::nullopt; }
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line != "ply") { error = "Not a PLY file"; return std::nullopt; }
     PlyHeader header;
     bool inVertex = false;
     bool ended = false;

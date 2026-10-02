@@ -4,6 +4,11 @@ project(destructible_voxel_engine_core VERSION 2.35.3 LANGUAGES CXX)
 if(WIN32)
     add_compile_definitions(NOMINMAX)
 endif()
+if(MSVC)
+    add_compile_options(/utf-8)
+    # Match the Linux test environment's stack reserve for the large synth state.
+    add_link_options(/STACK:8388608)
+endif()
 
 # DVE's libraries are static by design. Declare the default before third_party/manifold's
 # option(BUILD_SHARED_LIBS ... ON) can write ON into the cache, which would turn every later

@@ -1693,6 +1693,7 @@ std::vector<std::pair<std::string, std::string>> parse_lines(std::string_view te
     std::istringstream input{std::string(text)};
     std::string line;
     while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         const auto equals = line.find('=');
         if (equals != std::string::npos) result.emplace_back(line.substr(0, equals), line.substr(equals + 1U));
     }

@@ -692,11 +692,15 @@ timestamps) contains:
 Player_Sample/
   Player_Sample.exe        dve_player.exe renamed (SDL3, Lua and Jolt are linked in)
   game.dvepak
-  MSVCP140.dll, VCRUNTIME140.dll, VCRUNTIME140_1.dll   Visual C++ runtime (see below)
+  msvcp140.dll, msvcp140_atomic_wait.dll,
+  vcruntime140.dll, vcruntime140_1.dll                 Visual C++ runtime (see below)
   THIRD_PARTY_NOTICES.txt  the Runtime notices
   DVE-LICENSE.txt          the engine's MIT license
   build-info.json
 ```
+
+The CI sample (`dve-sample-game-windows-x86_64`) is a 2.9 MiB zip, 6.9 MiB unpacked: a 6.2 MB
+executable, a 29 KB pak, 60 KB of notices and 0.9 MB of Visual C++ runtime DLLs.
 
 - **DLLs next to the `.exe`.** Windows searches the executable's folder first, so no `PATH`
   change or manifest is needed. `dve_package_game` copies exactly the DLLs that the `.exe`
@@ -704,7 +708,7 @@ Player_Sample/
   everything else must be a Windows system DLL. Nothing is stripped (the PDBs are never
   installed).
 - **Visual C++ runtime: shipped app-locally (conservative choice).** The executables need
-  `MSVCP140.dll`, `VCRUNTIME140.dll` and `VCRUNTIME140_1.dll`, which a clean Windows install
+  `msvcp140.dll`, `msvcp140_atomic_wait.dll`, `vcruntime140.dll` and `vcruntime140_1.dll`, which a clean Windows install
   does not always have. `cmake/DveInstall.cmake` installs them next to the executables with
   CMake's `InstallRequiredSystemLibraries` (`DVE_INSTALL_MSVC_RUNTIME=ON`), so a game folder
   runs without the Visual C++ Redistributable. Microsoft permits redistributing these files

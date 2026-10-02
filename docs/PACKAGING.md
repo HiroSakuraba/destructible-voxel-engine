@@ -740,9 +740,8 @@ Windows, with the reason:
 | `dve_install_tree_test`, `dve_package_consumer_test`, `dve_package_game_test`, `dve_cpack_test` | Not registered: they check ELF details (RPATH, `readelf`, `ldd`, `dpkg-deb`). The Windows equivalents are `dve_package_game_windows_test` and the CI `cpack -G ZIP` step. |
 | `dve_native_editor_smoke`, `dve_x11_header_compat_tests` | Not built: they need the X11 native editor (`dve_native_editor_x11`), which is Linux-only. |
 
-Partial on Windows: `dve_audio_sndfile_format_tests` checks WAV only (no libsndfile, see above);
-`dve_synth_release_acceptance_tests` replaces its CPU-time deadline gate by a determinism check
-(coarse `GetThreadTimes`, existing behaviour).
+Partial on Windows: `dve_audio_sndfile_format_tests` checks WAV only (no libsndfile, see above).
+The synth polyphony deadline check is not in CTest on any platform (#40).
 
 Windows variants instead of skips: `dve_udp_multiprocess_tests` starts itself as the client with
 `CreateProcess` (Linux uses `fork`); `dve_player_save_load` and `dve_player_runtime_tests` check the

@@ -19,6 +19,10 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include "dve/audio/audio_features.hpp"
 #include "dve/audio/synthesizer.hpp"
 
@@ -267,9 +271,19 @@ struct StressPass {
 };
 
 double thread_cpu_ms() {
+#if defined(_WIN32)
+    FILETIME creation{}, exit{}, kernel{}, user{};
+    if (!GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user))
+        throw std::runtime_error("GetThreadTimes failed");
+    const auto ticks = [](const FILETIME& time) -> std::uint64_t {
+        return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32U) | time.dwLowDateTime;
+    };
+    return static_cast<double>(ticks(kernel) + ticks(user)) / 10000.0;
+#else
     timespec ts{};
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     return static_cast<double>(ts.tv_sec) * 1000.0 + static_cast<double>(ts.tv_nsec) / 1.0e6;
+#endif
 }
 
 std::uint64_t hash_block(const std::vector<float>& block) {

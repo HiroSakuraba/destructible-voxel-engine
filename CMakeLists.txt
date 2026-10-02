@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 project(destructible_voxel_engine_core VERSION 2.35.3 LANGUAGES CXX)
 
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 # DVE's libraries are static by design. Declare the default before third_party/manifold's
 # option(BUILD_SHARED_LIBS ... ON) can write ON into the cache, which would turn every later
 # add_library() (e.g. dve_player_runtime) into a non-PIC shared library on a fresh configure.

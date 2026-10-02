@@ -2835,3 +2835,18 @@ endif()
 # bundling, CPack (TGZ/DEB; ZIP/NSIS stubs for Windows) and the install/consumer/cpack tests.
 include(DveInstall)
 include(DveCPack)
+
+# Windows: vcpkg's per-target "applocal" DLL copy is off in the Windows presets (parallel MSBuild
+# projects copying the same DLLs into one output folder hit sharing violations). CTest finds the
+# vcpkg DLLs through PATH instead; installs and game packages copy them (DveInstall.cmake).
+if(WIN32 AND DVE_BUILD_TESTS AND DVE_RUNTIME_DLL_SEARCH_DIRS)
+    get_property(_dve_all_tests DIRECTORY "${PROJECT_SOURCE_DIR}" PROPERTY TESTS)
+    set(_dve_path_modifications "")
+    foreach(_dve_dir IN LISTS DVE_RUNTIME_DLL_SEARCH_DIRS)
+        file(TO_NATIVE_PATH "${_dve_dir}" _dve_native_dir)
+        list(APPEND _dve_path_modifications "PATH=path_list_prepend:${_dve_native_dir}")
+    endforeach()
+    foreach(_dve_test IN LISTS _dve_all_tests)
+        set_property(TEST "${_dve_test}" APPEND PROPERTY ENVIRONMENT_MODIFICATION ${_dve_path_modifications})
+    endforeach()
+endif()

@@ -29,6 +29,8 @@
 - Tests: Windows paths in generated Lua code use forward slashes; the recorder tap test's ring
   holds the whole take (it renders faster than real time); `MSVC-19-lua` golden player hash
   (identical to GCC's).
+- `windows-msvc-player-release` sets `VCPKG_APPLOCAL_DEPS=OFF` (parallel applocal copies hit
+  sharing violations); CTest and `dve_package_game --tool-path` put vcpkg's `bin` on `PATH`.
 - Linux behaviour is unchanged.
 
 # Unreleased — Save games v2 (characters, cameras, animation, ragdolls, hair, named timers)

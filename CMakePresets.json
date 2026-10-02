@@ -191,6 +191,7 @@
       },
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Release",
+        "VCPKG_APPLOCAL_DEPS": "OFF",
         "DVE_BUILD_PLAYER": "ON",
         "BUILD_SHARED_LIBS": "OFF",
         "DVE_FETCH_SDL3": "ON",

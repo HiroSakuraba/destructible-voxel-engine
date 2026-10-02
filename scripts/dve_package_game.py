@@ -434,6 +434,8 @@ def verify(executable: Path) -> str:
 
 
 def package(args) -> int:
+    if args.tool_path:
+        os.environ["PATH"] = os.pathsep.join([*args.tool_path, os.environ.get("PATH", "")])
     project = Path(args.project).resolve()
     output = Path(args.output).resolve()
     manifest = read_manifest(project)
@@ -577,6 +579,9 @@ def main() -> int:
                         help="package even if the runtime bundles libmpg123/libmp3lame (refused by default)")
     parser.add_argument("--tgz", action="store_true")
     parser.add_argument("--zip", action="store_true", help="also write <Game>-<version>-<system>-x86_64.zip")
+    parser.add_argument("--tool-path", action="append", default=[],
+                        help="folder prepended to PATH for dve_pack/dve_export_scene (e.g. vcpkg's bin on Windows); "
+                             "not used for --verify")
     parser.add_argument("--config", help="configuration for cmake --install with --build-dir (multi-config generators)")
     parser.add_argument("--no-strip", action="store_true", help="keep symbols in the game executable")
     parser.add_argument("--verify", action="store_true")

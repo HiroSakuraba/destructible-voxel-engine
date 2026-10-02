@@ -678,6 +678,11 @@ pinned sources as `linux-gcc-player-release`: static SDL 3.4.12 (`DVE_FETCH_SDL3
 a static library; vcpkg's `lua` port is 5.5, which the scripts are not written for). libpng and
 libjpeg-turbo (and zlib) come from vcpkg as DLLs; only the tools and the editor use them.
 Python 3 (`python.exe` is accepted) is needed for the notices and `dve_package_game`.
+The preset sets `VCPKG_APPLOCAL_DEPS=OFF`: vcpkg's per-target copy of its DLLs into the shared
+output folder fails with sharing violations when MSBuild builds projects in parallel. Instead,
+CTest prepends vcpkg's `bin` to `PATH` for every test, `dve_package_game --tool-path` does the same
+for `dve_pack`/`dve_export_scene`, and `cmake --install` copies the DLLs. To run a tool straight
+from the build folder, put `<vcpkg_installed>/x64-windows/bin` on `PATH`.
 
 **Game folder.** `dve_package_game` recognises a Windows runtime prefix by `bin/dve_player.exe`.
 The folder (and the zip, `<Game>-<version>-windows-x86_64.zip`, sorted entries with fixed

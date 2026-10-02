@@ -47,6 +47,10 @@ function(dve_add_game_package target)
             list(APPEND command --runtime-prefix "${arg_RUNTIME_PREFIX}")
         else()
             list(APPEND command --build-dir "${PROJECT_BINARY_DIR}" --cmake "${CMAKE_COMMAND}")
+            foreach(_dve_dir IN LISTS DVE_RUNTIME_DLL_SEARCH_DIRS)
+                # Windows: vcpkg's bin for the tools (the presets turn off vcpkg's applocal copies).
+                list(APPEND command --tool-path "${_dve_dir}")
+            endforeach()
             get_property(_dve_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
             if(_dve_multi_config)
                 # Visual Studio / Ninja Multi-Config: install the configuration being built.

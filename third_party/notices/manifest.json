@@ -108,9 +108,9 @@
     {
       "id": "zlib", "name": "zlib", "upstream": "https://zlib.net",
       "license": "Zlib", "copyleft": "none",
-      "match": {"sonames": ["^zlibd?1\\.dll$"], "archives": ["(^|/)zd?\\.lib$", "(^|/)zlibd?\\.lib$"]},
+      "match": {"sonames": ["^zlibd?1\\.dll$", "^zd?\\.dll$"], "archives": ["(^|/)zd?\\.lib$", "(^|/)zlibd?\\.lib$"]},
       "texts": [{"var": "DVE_VCPKG_TRIPLET_DIR", "title": "vcpkg", "files": ["share/zlib/copyright"]}],
-      "notes": "Windows only: vcpkg's zlib1.dll, which libpng needs. On Linux zlib is a system library and is not shipped."
+      "notes": "Windows only: vcpkg's zlib DLL (z.dll since zlib 1.3.2's CMake build, zlib1.dll before), which libpng needs. On Linux zlib is a system library and is not shipped."
     },
     {
       "id": "jolt", "name": "Jolt Physics", "upstream": "https://github.com/jrouwe/JoltPhysics",

@@ -1,3 +1,36 @@
+# Unreleased — Windows support (player, game zip, CI)
+
+- New preset `windows-msvc-player-release` (MSVC, newest Visual Studio): static SDL 3.4.12,
+  Jolt 5.6.0 and Lua 5.4.9 fetched and pinned; libpng/libjpeg-turbo from vcpkg for the tools.
+  New `DVE_FETCH_LUA` (`cmake/DveLua.cmake`) builds Lua 5.4.9 from the official tarball.
+- Fetched Jolt uses the DLL C runtime (`/MD`) on MSVC, like the rest of the build.
+- Windows install: `install(RUNTIME_DEPENDENCY_SET)` puts the executables' non-system DLLs in
+  `bin/` (`*Deps` components), and the Visual C++ runtime DLLs are installed next to them
+  (`DVE_INSTALL_MSVC_RUNTIME`, default ON). The UCRT is not shipped (Windows 10+).
+- `dve_package_game` / `dve_add_game_package()` on Windows: `<Game>.exe` with the DLLs it
+  imports next to it, `--zip` (`<Game>-<version>-windows-x86_64.zip`, reproducible), `--config`
+  for multi-config builds; `--verify` runs it with `PATH` reduced to the Windows folders.
+  `ZIP` keyword for `dve_add_game_package()`.
+- THIRD_PARTY_NOTICES on Windows: the generator reads PE import tables, knows vcpkg's
+  copyright files, zlib, Lua's notice and the Visual C++ runtime (flagged for review);
+  `--verify-dir` checks Windows folders. The forbidden list now also matches
+  `mpg123`/`mp3lame` DLLs. With multi-config generators the notices live in
+  `notices/<config>/`.
+- CI: `windows-msvc` builds the player preset, runs the full CTest suite, uploads the sample game
+  zip (`dve-sample-game-windows-x86_64`), runs `cpack -G ZIP`, and is now blocking.
+- Tests: `dve_package_game_windows_test`; `dve_udp_multiprocess_tests` runs on Windows
+  (`CreateProcess`); the live editor MCP tests report Skipped (77) where the private IPC is not
+  implemented; the save-directory checks cover `%APPDATA%`. Skips are listed in
+  `docs/PACKAGING.md` ("Windows").
+- Fixed on Windows: `dve_player --headless` looked for `game.dvepak` in the working directory
+  instead of next to the `.exe` (no `/proc/self/exe`; it now uses `SDL_GetBasePath`).
+- `.gitattributes` marks binary fixtures (PPM, PNG, audio, `.dvox`, …) as binary: Git for
+  Windows' `autocrlf` turned the NUL-free reference PPMs into CRLF text.
+- Tests: Windows paths in generated Lua code use forward slashes; the recorder tap test's ring
+  holds the whole take (it renders faster than real time); `MSVC-19-lua` golden player hash
+  (identical to GCC's).
+- Linux behaviour is unchanged.
+
 # Unreleased — Save games v2 (characters, cameras, animation, ragdolls, hair, named timers)
 
 - The save schema is now version 2 (`kGameSaveSchemaVersion`). `GameSaveCodec` registers

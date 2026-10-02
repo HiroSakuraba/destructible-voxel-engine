@@ -16,6 +16,11 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+// The Windows SDK aliases its DeviceCapabilities API name to a W-suffixed symbol.
+// Keep the RHI type visible in this translation unit.
+#ifdef DeviceCapabilities
+#undef DeviceCapabilities
+#endif
 #else
 #include <dlfcn.h>
 #endif

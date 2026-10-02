@@ -1961,6 +1961,17 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_patch_search_integration_tests tests/test_patch_search_integration.cpp)
         target_link_libraries(dve_patch_search_integration_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_patch_search_integration_tests COMMAND dve_patch_search_integration_tests)
+
+        # Keep the deterministic release acceptance checks in CTest. The
+        # polyphony deadline check is excluded because shared CI runner timing
+        # is not a reliable real-time performance measurement.
+        add_executable(dve_synth_release_acceptance_tests tests/test_synth_release_acceptance.cpp)
+        target_link_libraries(dve_synth_release_acceptance_tests PRIVATE dve::audio_synth)
+        foreach(check analog_pitch wavetable_continuity physics_determinism stereo_mono_compat morph_no_nan mpe_note_isolation)
+            add_test(NAME dve_synth_release_acceptance_${check}
+                     COMMAND dve_synth_release_acceptance_tests ${check})
+        endforeach()
+
         add_executable(dve_midi_input_session_tests tests/test_midi_input_session.cpp)
         target_link_libraries(dve_midi_input_session_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_midi_input_session_tests COMMAND dve_midi_input_session_tests)

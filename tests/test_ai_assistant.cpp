@@ -23,7 +23,7 @@ int failures=0;
 using namespace dve;
 using namespace dve::ai;
 
-std::filesystem::path make_temp(){auto path=std::filesystem::temp_directory_path()/"dve-ai-tests";std::filesystem::remove_all(path);std::filesystem::create_directories(path/"src");std::ofstream(path/"src"/"sample.cpp")<<"int value = 1;\n";return path;}
+std::filesystem::path make_temp(){auto path=std::filesystem::temp_directory_path()/"dve-ai-tests";std::filesystem::remove_all(path);std::filesystem::create_directories(path/"src");std::ofstream(path/"src"/"sample.cpp",std::ios::binary)<<"int value = 1;\n";return path;}
 
 class MockTransport final : public IAiHttpTransport {
 public:
@@ -54,7 +54,7 @@ void test_approval_is_bound_to_exact_arguments(){
     CHECK(otherClient.status==AiCallStatus::ApprovalRequired);
     auto replay=bridge.registry().call("dve.project.write_text",altered,AiApprovalPolicy::AskForChanges,pending.approvalId,"client-a");
     CHECK(replay.status==AiCallStatus::ApprovalRequired);
-    std::ifstream before(root/"src"/"sample.cpp");std::string unchanged((std::istreambuf_iterator<char>(before)),{});CHECK(unchanged=="int value = 1;\n");
+    std::ifstream before(root/"src"/"sample.cpp");std::string unchanged((std::istreambuf_iterator<char>(before)),{});CHECK(unchanged=="int value = 1;\n");before.close();
     auto approved=bridge.registry().call("dve.project.write_text",original,AiApprovalPolicy::AskForChanges,pending.approvalId,"client-a");
     CHECK(approved.status==AiCallStatus::Completed);
 }
@@ -81,7 +81,7 @@ void test_transactional_patch_and_rollback(){
     auto applied=bridge.registry().call("dve.project.apply_patch",args,AiApprovalPolicy::AskForChanges,pending.approvalId);
     CHECK(applied.status==AiCallStatus::Completed);const std::string transaction(applied.content.find("transaction_id")->as_string());CHECK(!transaction.empty());
     std::ifstream changed(root/"src"/"sample.cpp");std::string changedText((std::istreambuf_iterator<char>(changed)),{});CHECK(changedText=="int value = 2;\n");
-    std::ifstream created(root/"src"/"new.hpp");std::string createdText((std::istreambuf_iterator<char>(created)),{});CHECK(createdText=="#pragma once\ninline constexpr int created = 7;\n");
+    std::ifstream created(root/"src"/"new.hpp");std::string createdText((std::istreambuf_iterator<char>(created)),{});CHECK(createdText=="#pragma once\ninline constexpr int created = 7;\n");created.close();changed.close();
     JsonValue rollbackArgs=JsonValue::Object{{"transaction_id",transaction}};
     auto rollbackPending=bridge.registry().call("dve.project.rollback_patch",rollbackArgs,AiApprovalPolicy::AskForChanges,{});
     CHECK(rollbackPending.status==AiCallStatus::ApprovalRequired);CHECK(bridge.registry().approvals().approve(rollbackPending.approvalId));

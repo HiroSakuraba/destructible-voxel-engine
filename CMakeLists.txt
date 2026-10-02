@@ -70,6 +70,7 @@ option(DVE_ENABLE_JOLT "Build the Jolt Physics rigid-body backend (WP-4.4)" OFF)
 option(DVE_BUILD_JOLT_SMOKE "Build native Jolt rigid-body integration smoke tests" ON)
 option(DVE_ENABLE_JOLT_DEBUG_DRAW "Compile Jolt debug-render capture into the DVE backend" ON)
 option(DVE_ENABLE_LUA "Build the Lua 5.4 gameplay scripting binding" OFF)
+option(DVE_FETCH_LUA "Build the pinned Lua 5.4.9 source as a static library when no installed Lua 5.4 is found (the Windows build)" OFF)
 option(DVE_FETCH_JOLT "Fetch the pinned Jolt v5.6.0 source when no installed/source target is supplied" OFF)
 set(DVE_JOLT_SOURCE_DIR "" CACHE PATH "Path to a JoltPhysics 5.5.x-5.6.x source checkout")
 set(JOLT_INCLUDE_DIR "" CACHE PATH "Legacy: Jolt checkout root containing Jolt/Jolt.h")
@@ -1454,6 +1455,8 @@ if(DVE_ENABLE_JOLT)
         set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
         set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
         set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+        # MSVC: Jolt defaults to the static CRT (/MT); DVE and every other dependency use the DLL CRT (/MD).
+        set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
         add_subdirectory("${DVE_JOLT_SOURCE_DIR}/Build" "${CMAKE_BINARY_DIR}/_deps/jolt-build" EXCLUDE_FROM_ALL)
         set(DVE_JOLT_TARGET Jolt)
     endif()
@@ -1478,6 +1481,8 @@ if(DVE_ENABLE_JOLT)
         set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
         set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
         set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+        # MSVC: Jolt defaults to the static CRT (/MT); DVE and every other dependency use the DLL CRT (/MD).
+        set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
             JoltPhysics
             GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
@@ -1621,8 +1626,13 @@ if(DVE_ENABLE_LUA)
         endif()
     endif()
 
+    set(DVE_LUA_LICENSE_DIR "")
+    if(NOT DVE_LUA_TARGET AND DVE_FETCH_LUA)
+        include(DveLua)
+    endif()
+
     if(NOT DVE_LUA_TARGET)
-        message(FATAL_ERROR "DVE_ENABLE_LUA requires a Lua 5.4 development package or runtime library")
+        message(FATAL_ERROR "DVE_ENABLE_LUA requires a Lua 5.4 development package or runtime library (or DVE_FETCH_LUA=ON)")
     endif()
 
     target_sources(dve_core PRIVATE src/game_script.cpp)
@@ -2326,11 +2336,14 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_live_editor_mcp_core_tests tests/test_live_editor_mcp_core.cpp)
     target_link_libraries(dve_live_editor_mcp_core_tests PRIVATE dve::core)
     add_test(NAME dve_live_editor_mcp_core_tests COMMAND dve_live_editor_mcp_core_tests)
+    # 77: skipped where the live editor's private IPC is not implemented (Windows).
+    set_tests_properties(dve_live_editor_mcp_core_tests PROPERTIES SKIP_RETURN_CODE 77)
 
     if(DVE_BUILD_EDITOR)
         add_executable(dve_live_editor_mcp_tests tests/test_live_editor_mcp.cpp)
         target_link_libraries(dve_live_editor_mcp_tests PRIVATE dve::editor)
         add_test(NAME dve_live_editor_mcp_tests COMMAND dve_live_editor_mcp_tests)
+        set_tests_properties(dve_live_editor_mcp_tests PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     if(UNIX AND NOT APPLE)
@@ -2822,3 +2835,18 @@ endif()
 # bundling, CPack (TGZ/DEB; ZIP/NSIS stubs for Windows) and the install/consumer/cpack tests.
 include(DveInstall)
 include(DveCPack)
+
+# Windows: vcpkg's per-target "applocal" DLL copy is off in the Windows presets (parallel MSBuild
+# projects copying the same DLLs into one output folder hit sharing violations). CTest finds the
+# vcpkg DLLs through PATH instead; installs and game packages copy them (DveInstall.cmake).
+if(WIN32 AND DVE_BUILD_TESTS AND DVE_RUNTIME_DLL_SEARCH_DIRS)
+    get_property(_dve_all_tests DIRECTORY "${PROJECT_SOURCE_DIR}" PROPERTY TESTS)
+    set(_dve_path_modifications "")
+    foreach(_dve_dir IN LISTS DVE_RUNTIME_DLL_SEARCH_DIRS)
+        file(TO_NATIVE_PATH "${_dve_dir}" _dve_native_dir)
+        list(APPEND _dve_path_modifications "PATH=path_list_prepend:${_dve_native_dir}")
+    endforeach()
+    foreach(_dve_test IN LISTS _dve_all_tests)
+        set_property(TEST "${_dve_test}" APPEND PROPERTY ENVIRONMENT_MODIFICATION ${_dve_path_modifications})
+    endforeach()
+endif()

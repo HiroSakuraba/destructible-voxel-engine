@@ -1,0 +1,19 @@
+# Binary assets and test fixtures: never convert line endings. Git for Windows checks out with
+# core.autocrlf=true, and a binary file without NUL bytes (for example a PPM reference image)
+# would otherwise be treated as text and get CRLFs.
+*.ppm binary
+*.png binary
+*.jpg binary
+*.bmp binary
+*.wav binary
+*.flac binary
+*.ogg binary
+*.opus binary
+*.mp3 binary
+*.spv binary
+*.bin binary
+*.dvox binary
+*.dvepak binary
+*.dvesample binary
+*.dvepixel binary
+*.dfluoddity binary

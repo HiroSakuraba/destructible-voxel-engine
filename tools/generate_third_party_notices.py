@@ -14,6 +14,13 @@ install(RUNTIME_DEPENDENCY_SET) finds them: DT_NEEDED is walked recursively (rea
 matching the system exclude list are pruned before resolution, the rest resolve through ldd.
 Those are the libraries copied into lib/dve for the archive packages.
 
+Windows programs (PE files) are read directly (import and delay-import tables, no tools
+needed). A DLL resolves like file(GET_RUNTIME_DEPENDENCIES) on Windows: the depending file's
+folder, then System32 and the Windows folder (system: linked, not shipped), then the inputs'
+"search_dirs" (e.g. vcpkg's bin). Names are compared in lower case. The inputs'
+"bundled_files" (the Visual C++ runtime DLLs CMake installs next to the executables) are
+shipped even though a copy may also be in System32. DLLs are shipped next to the .exe.
+
 Modes
   (default)             write --output (a THIRD_PARTY_NOTICES text file)
   --check               exit 1 if a bundled shared library, a linked third-party target or a
@@ -39,6 +46,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -99,6 +107,150 @@ def walk_shared_dependencies(program: str, excludes: list[re.Pattern]):
             if name not in bundled:
                 bundled[name] = path
                 pending.append(path)
+    return sorted(bundled.items()), sorted(system.items()), unresolved
+
+
+# ------------------------------------------------------------------------------------------
+# PE (Windows) dependency walk
+# ------------------------------------------------------------------------------------------
+# Visual C++ runtime DLLs (the VC++ Redistributable). They are in System32 on machines that
+# have the redistributable installed, but not on a clean Windows, so a package must ship them.
+MSVC_RUNTIME = re.compile(r"^(msvcp140(_[0-9a-z_]+)?|vcruntime140(_1|_threads)?|concrt140|vccorlib140|vcomp140)\.dll$")
+WINDOWS_API_SETS = re.compile(r"^(api|ext)-ms-")
+
+
+def pe_imports(path: str):
+    """DLL names imported (normally or delay-loaded) by a PE file, or None if it is not one."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return None
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        return None
+    try:
+        header = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[header:header + 4] != b"PE\0\0":
+            return None
+        coff = header + 4
+        section_count = struct.unpack_from("<H", data, coff + 2)[0]
+        optional_size = struct.unpack_from("<H", data, coff + 16)[0]
+        optional = coff + 20
+        magic = struct.unpack_from("<H", data, optional)[0]
+        if magic == 0x10B:
+            count_offset, directories = optional + 92, optional + 96
+        elif magic == 0x20B:
+            count_offset, directories = optional + 108, optional + 112
+        else:
+            return None
+        directory_count = struct.unpack_from("<I", data, count_offset)[0]
+        sections = []
+        for index in range(section_count):
+            entry = optional + optional_size + 40 * index
+            virtual_size, address, raw_size, raw_pointer = struct.unpack_from("<IIII", data, entry + 8)
+            sections.append((address, max(virtual_size, raw_size), raw_pointer, raw_size))
+
+        def offset(rva: int):
+            for address, size, raw_pointer, raw_size in sections:
+                if address <= rva < address + size and rva - address < raw_size:
+                    return raw_pointer + rva - address
+            return None
+
+        def name_at(rva: int):
+            start = offset(rva)
+            if start is None:
+                return None
+            end = data.find(b"\0", start)
+            return data[start:end if end >= 0 else len(data)].decode("ascii", "replace")
+
+        def directory(index: int):
+            if index >= directory_count:
+                return 0
+            return struct.unpack_from("<I", data, directories + 8 * index)[0]
+
+        names = []
+        for index, size, name_field in ((1, 20, 3), (13, 32, 1)):   # imports, delay imports
+            rva = directory(index)
+            position = offset(rva) if rva else None
+            while position is not None and position + size <= len(data):
+                fields = struct.unpack_from("<" + "I" * (size // 4), data, position)
+                if not any(fields):
+                    break
+                name = name_at(fields[name_field])
+                if name and name not in names:
+                    names.append(name)
+                position += size
+        return names
+    except (struct.error, ValueError):
+        return []
+
+
+def windows_system_dirs() -> list[Path]:
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    return [Path(root) / "System32", Path(root)] if root else []
+
+
+def find_file_nocase(directory: Path, name: str):
+    candidate = directory / name
+    if candidate.is_file():
+        return candidate
+    try:
+        for entry in directory.iterdir():
+            if entry.name.lower() == name and entry.is_file():
+                return entry
+    except OSError:
+        pass
+    return None
+
+
+def is_windows_system_dll(name: str, system_dirs) -> bool:
+    if MSVC_RUNTIME.search(name):
+        return False
+    if WINDOWS_API_SETS.search(name):
+        return True
+    return any(find_file_nocase(Path(d), name) for d in system_dirs)
+
+
+def walk_pe_dependencies(program: str, excludes: list[re.Pattern], search_dirs=(), bundled_files=(),
+                         system_dirs=None):
+    """Like walk_shared_dependencies, for a Windows program."""
+    system_dirs = windows_system_dirs() if system_dirs is None else [Path(d) for d in system_dirs]
+    shipped_runtime = {Path(f).name.lower(): str(f) for f in bundled_files}
+    bundled: dict[str, str] = {}
+    system: dict[str, str] = {}
+    unresolved: list[str] = []
+    pending = [program]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop(0)
+        key = os.path.normcase(os.path.abspath(current))
+        if key in visited:
+            continue
+        visited.add(key)
+        for raw in pe_imports(current) or []:
+            name = raw.lower()
+            if name in bundled or name in system:
+                continue
+            if name in shipped_runtime:
+                bundled[name] = shipped_runtime[name]
+                pending.append(shipped_runtime[name])
+                continue
+            if any(p.search(name) for p in excludes) or WINDOWS_API_SETS.search(name):
+                system[name] = ""
+                continue
+            found = find_file_nocase(Path(current).parent, name)
+            if found is None:
+                in_system = next((f for f in (find_file_nocase(d, name) for d in system_dirs) if f), None)
+                if in_system is not None:
+                    system[name] = str(in_system)
+                    continue
+                found = next((f for f in (find_file_nocase(Path(d), name) for d in search_dirs) if f), None)
+            if found is None:
+                if name not in unresolved:
+                    unresolved.append(name)
+                continue
+            bundled[name] = str(found)
+            pending.append(str(found))
     return sorted(bundled.items()), sorted(system.items()), unresolved
 
 
@@ -289,7 +441,11 @@ def analyse(manifest: dict, inputs: dict, source_dir: Path):
         if not os.path.isfile(file):
             unknown.append(f"program {program['name']} not built ({file})")
             continue
-        bundled, system, missing = walk_shared_dependencies(file, excludes)
+        if pe_imports(file) is not None:
+            bundled, system, missing = walk_pe_dependencies(
+                file, excludes, inputs.get("search_dirs", []), inputs.get("bundled_files", []))
+        else:
+            bundled, system, missing = walk_shared_dependencies(file, excludes)
         unresolved += [f"{program['name']}: {m}" for m in missing]
         for soname, path in bundled:
             banned = next((f for f, patterns in forbidden if any(p.search(soname) for p in patterns)), None)
@@ -393,7 +549,10 @@ def render(manifest: dict, inputs: dict, used: dict, system_libraries: dict, unk
         hows = sorted({u.how for u in slot.uses if u.how != "system"})
         lines.append(f"  {e['name']}")
         lines.append(f"      license: {e['license']}")
-        lines.append(f"      how:     {'; '.join(HOW_TEXT[h] for h in hows)}")
+        how_text = dict(HOW_TEXT)
+        if any(u.how == "bundled" and u.what.endswith(".dll") for u in slot.uses):
+            how_text["bundled"] = "bundled DLL (next to the .exe)"
+        lines.append(f"      how:     {'; '.join(how_text[h] for h in hows)}")
         if e.get("copyleft", "none") != "none":
             lines.append(f"      COPYLEFT ({e['copyleft']}): see the notes in its section")
         if e.get("review"):
@@ -442,6 +601,8 @@ def render(manifest: dict, inputs: dict, used: dict, system_libraries: dict, unk
                 built = inputs.get("vars", {}).get(e.get("source_var", ""), "")
                 if pkg:
                     origin = f" (from Debian package {pkg[0]}, source {pkg[1]} {pkg[2]})"
+                elif e.get("origin"):
+                    origin = f" ({e['origin']})"
                 elif built:
                     origin = " (built from source by DVE; source and options under 'Corresponding source' above)"
                 else:
@@ -508,7 +669,7 @@ def forbidden_patterns(manifest: dict | None):
     return result
 
 
-def verify_dir(directory: Path, notices: Path, manifest: dict | None = None):
+def verify_dir(directory: Path, notices: Path, manifest: dict | None = None, system_dirs=None):
     """Every shared library in `directory` is listed in `notices`; none is forbidden by the
     manifest (by file name, and by the DT_NEEDED entries of every ELF file there)."""
     listed = listed_bundled(notices.read_text(encoding="utf-8", errors="replace"))
@@ -518,14 +679,42 @@ def verify_dir(directory: Path, notices: Path, manifest: dict | None = None):
         if not path.is_file() and not path.is_symlink():
             continue
         name = path.name
-        if ".so" not in name and not name.endswith(".dll") and not name.endswith(".dylib"):
+        if ".so" not in name and not name.lower().endswith(".dll") and not name.endswith(".dylib"):
             continue
         for item, pattern in banned:
-            if pattern.search(name):
+            if pattern.search(name.lower() if name.lower().endswith(".dll") else name):
                 problems.append(f"{path} is forbidden: {item.get('reason', item.get('id', ''))}")
+        if name.lower().endswith(".dll"):
+            if not any(name.lower() == soname.lower() for soname in listed):
+                problems.append(f"{path} is shipped but not listed in {notices.name}")
+            continue
         if not any(name == soname or name.startswith(soname + ".") for soname in listed):
             problems.append(f"{path} is shipped but not listed in {notices.name}")
-    return problems + verify_needed(directory, banned)
+    return problems + verify_needed(directory, banned) + verify_pe_folder(directory, banned, system_dirs)
+
+
+def verify_pe_folder(directory: Path, banned, system_dirs=None) -> list[str]:
+    """Windows game folder: every DLL imported by a shipped .exe/.dll is in the folder or is a
+    Windows system DLL, and none is forbidden."""
+    problems = []
+    if not directory.is_dir():
+        return problems
+    system_dirs = windows_system_dirs() if system_dirs is None else system_dirs
+    shipped = {p.name.lower() for p in directory.iterdir() if p.is_file()}
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in (".exe", ".dll"):
+            continue
+        imports = pe_imports(str(path))
+        if imports is None:
+            continue
+        for raw in imports:
+            name = raw.lower()
+            for item, pattern in banned:
+                if pattern.search(name):
+                    problems.append(f"{path} imports forbidden {raw}: {item.get('reason', item.get('id', ''))}")
+            if name not in shipped and not is_windows_system_dll(name, system_dirs):
+                problems.append(f"{path} imports {raw}, which is neither in {directory} nor a Windows system DLL")
+    return problems
 
 
 def verify_needed(directory: Path, banned) -> list[str]:
@@ -576,6 +765,41 @@ def run(args) -> int:
     for f in failures:
         print(f"notices[{component}]: warning: {f}", file=sys.stderr)
     return 0
+
+
+def _write_test_pe(path: Path, imports, delay_imports=()) -> None:
+    """A minimal PE32+ file with an import (and delay-import) table, for the self-test."""
+    section_rva, section_raw = 0x1000, 0x200
+    body = bytearray()
+    descriptors = 20 * (len(imports) + 1)
+    delay_at = descriptors
+    delay_size = 32 * (len(delay_imports) + 1) if delay_imports else 0
+    names_at = delay_at + delay_size
+    names = bytearray()
+    name_rvas = []
+    for name in list(imports) + list(delay_imports):
+        name_rvas.append(section_rva + names_at + len(names))
+        names += name.encode("ascii") + b"\0"
+    for index in range(len(imports)):
+        body += struct.pack("<IIIII", 0, 0, 0, name_rvas[index], 0)
+    body += bytes(20)
+    for index in range(len(delay_imports)):
+        body += struct.pack("<IIIIIIII", 1, name_rvas[len(imports) + index], 0, 0, 0, 0, 0, 0)
+    if delay_imports:
+        body += bytes(32)
+    body += names
+    optional = bytearray(240)
+    struct.pack_into("<H", optional, 0, 0x20B)
+    struct.pack_into("<I", optional, 108, 16)
+    struct.pack_into("<II", optional, 112 + 8 * 1, section_rva, descriptors)
+    if delay_imports:
+        struct.pack_into("<II", optional, 112 + 8 * 13, section_rva + delay_at, delay_size)
+    header = bytearray(b"MZ" + bytes(62))
+    struct.pack_into("<I", header, 0x3C, 64)
+    header += b"PE\0\0" + struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, len(optional), 0x22) + optional
+    header += struct.pack("<8sIIIIIIHHI", b".idata", len(body), section_rva, len(body), section_raw, 0, 0, 0, 0, 0xC0000040)
+    header += bytes(section_raw - len(header))
+    path.write_bytes(bytes(header) + bytes(body))
 
 
 # ------------------------------------------------------------------------------------------
@@ -683,6 +907,59 @@ def self_test() -> int:
         check(str(root / "libbuilt.so.1") not in text, "the build path of a built library is not printed")
         check(not problems, f"no problems for a built library ({problems})")
 
+        # Windows (PE): import and delay-import tables, DLL resolution like
+        # file(GET_RUNTIME_DEPENDENCIES): the depending file's folder, System32 (system), then
+        # the search dirs; the shipped Visual C++ runtime; case-insensitive names.
+        win = root / "win"
+        (win / "System32").mkdir(parents=True)
+        (win / "app").mkdir()
+        (win / "vcpkg" / "bin").mkdir(parents=True)
+        (win / "redist").mkdir()
+        _write_test_pe(win / "System32" / "kernel32.dll", [])
+        _write_test_pe(win / "System32" / "vcruntime140.dll", ["KERNEL32.dll"])
+        _write_test_pe(win / "redist" / "vcruntime140.dll", ["KERNEL32.dll"])
+        _write_test_pe(win / "vcpkg" / "bin" / "zlib1.dll", ["KERNEL32.dll", "VCRUNTIME140.dll"])
+        _write_test_pe(win / "app" / "libpng16.dll", ["zlib1.dll", "api-ms-win-crt-runtime-l1-1-0.dll"])
+        _write_test_pe(win / "app" / "game.exe", ["KERNEL32.dll", "libpng16.dll", "VCRUNTIME140.dll"],
+                       delay_imports=["Missing.dll"])
+        check(pe_imports(str(win / "app" / "game.exe")) == ["KERNEL32.dll", "libpng16.dll", "VCRUNTIME140.dll", "Missing.dll"],
+              f"PE import and delay-import tables are read ({pe_imports(str(win / 'app' / 'game.exe'))})")
+        check(pe_imports(str(lib / "libfoo.so.1.2.3")) is None, "a non-PE file is not read as PE")
+        bundled, system, unresolved = walk_pe_dependencies(
+            str(win / "app" / "game.exe"), [re.compile(r"^user32\.dll$")], [str(win / "vcpkg" / "bin")],
+            [str(win / "redist" / "vcruntime140.dll")], [str(win / "System32")])
+        bundled_names = dict(bundled)
+        check(set(bundled_names) == {"libpng16.dll", "zlib1.dll", "vcruntime140.dll"},
+              f"same-folder, search-dir and shipped runtime DLLs are bundled ({bundled_names})")
+        check(bundled_names.get("vcruntime140.dll", "").endswith(os.path.join("redist", "vcruntime140.dll")),
+              "the shipped Visual C++ runtime wins over the System32 copy")
+        check("kernel32.dll" in dict(system) and "api-ms-win-crt-runtime-l1-1-0.dll" in dict(system),
+              f"System32 DLLs and API sets are system libraries ({system})")
+        check(unresolved == ["missing.dll"], f"an unknown delay-loaded DLL is unresolved ({unresolved})")
+        # --verify-dir on a Windows folder: listed DLLs (any case), self-contained, not forbidden.
+        game = win / "game"
+        game.mkdir()
+        _write_test_pe(game / "Game.exe", ["KERNEL32.dll", "VCRUNTIME140.dll", "libpng16.dll"])
+        _write_test_pe(game / "libpng16.dll", ["KERNEL32.dll"])
+        notices.write_text(f"{BUNDLED_MARK}libpng16.dll (vcpkg), needed by p\n")
+        problems = verify_dir(game, notices, None, [win / "System32"])
+        check(any("vcruntime140" in p.lower() and "neither" in p for p in problems),
+              f"a Visual C++ runtime DLL missing from the folder is reported ({problems})")
+        _write_test_pe(game / "VCRUNTIME140.dll", ["KERNEL32.dll"])
+        problems = verify_dir(game, notices, None, [win / "System32"])
+        check(any("VCRUNTIME140.dll" in p and "not listed" in p for p in problems),
+              f"a shipped DLL missing from the notices is reported ({problems})")
+        notices.write_text(f"{BUNDLED_MARK}libpng16.dll (vcpkg), needed by p\n{BUNDLED_MARK}vcruntime140.dll (x), needed by p\n")
+        check(not verify_dir(game, notices, None, [win / "System32"]), "a complete Windows folder passes")
+        dll_banned = {"forbidden": [{"id": "mpg123", "sonames": ["^(lib)?mpg123([-_.][0-9]+)?\\.dll$"], "reason": "no MP3"}]}
+        _write_test_pe(game / "libsndfile-1.dll", ["KERNEL32.dll", "libmpg123-0.dll"])
+        problems = verify_dir(game, notices, dll_banned, [win / "System32"])
+        check(any("forbidden" in p and "libmpg123-0.dll" in p for p in problems),
+              f"a DLL importing a forbidden library is reported ({problems})")
+        _write_test_pe(game / "LIBMPG123-0.DLL", [])
+        problems = verify_dir(game, notices, dll_banned, [win / "System32"])
+        check(any("LIBMPG123-0.DLL is forbidden" in p for p in problems),
+              f"a shipped forbidden DLL is reported whatever its case ({problems})")
         # ELF walk on a real binary when the tools exist.
         if shutil.which("readelf") and shutil.which("ldd") and os.path.exists("/bin/ls"):
             bundled, system, _ = walk_shared_dependencies("/bin/ls", [re.compile(r"^libc\.so")])

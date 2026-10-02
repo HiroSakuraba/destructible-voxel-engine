@@ -483,6 +483,15 @@ void test_save_directories() {
         CHECK(user_data_directory() == std::filesystem::path(home) / ".local" / "share");
     if (oldXdg) ::setenv("XDG_DATA_HOME", savedXdg.c_str(), 1);
     else ::unsetenv("XDG_DATA_HOME");
+#elif defined(_WIN32)
+    const char* oldAppData = std::getenv("APPDATA");
+    const std::string savedAppData = oldAppData ? oldAppData : "";
+    GameManifest manifest;
+    manifest.name = "Player Sample";
+    _putenv_s("APPDATA", "C:\\dve-appdata-test");
+    CHECK(user_data_directory() == std::filesystem::path("C:\\dve-appdata-test"));
+    CHECK(default_save_directory(manifest) == std::filesystem::path("C:\\dve-appdata-test") / "dve" / "player-sample" / "saves");
+    _putenv_s("APPDATA", savedAppData.c_str());   // an empty value removes the variable again
 #endif
 }
 

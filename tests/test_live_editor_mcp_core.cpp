@@ -29,8 +29,9 @@ std::filesystem::path make_temp() {
 
 int main() {
 #if !defined(__unix__) && !defined(__APPLE__)
-    std::cout << "live editor MCP core test skipped: private IPC not implemented on this platform\n";
-    return 0;
+    // Exit code 77 = SKIP_RETURN_CODE: CTest reports "Skipped", not "Passed".
+    std::cout << "live editor MCP core test skipped: the live editor's private IPC (Unix domain socket) is not implemented on this platform\n";
+    return 77;
 #else
     try {
         const auto temporary = make_temp();

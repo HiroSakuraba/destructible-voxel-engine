@@ -10,9 +10,9 @@
     "text": "LICENSE"
   },
   "forbidden": [
-    {"id": "mpg123", "sonames": ["^libmpg123\\.so"],
+    {"id": "mpg123", "sonames": ["^libmpg123\\.so", "^(lib)?mpg123([-_.][0-9]+)?\\.dll$"],
      "reason": "libmpg123 (LGPL-2.1) is only pulled in by a libsndfile built with MPEG support; DVE needs no MP3 at run time. Build with DVE_FETCH_SNDFILE=ON (the default), which uses libsndfile without MPEG."},
-    {"id": "lame", "sonames": ["^libmp3lame\\.so"],
+    {"id": "lame", "sonames": ["^libmp3lame\\.so", "^(lib)?mp3lame([-_.][0-9]+)?\\.dll$"],
      "reason": "libmp3lame (LGPL-2+, with a GPL-1+-marked fft.c in Debian's copyright file) is only pulled in by a libsndfile built with MPEG support; DVE never encodes MP3. Build with DVE_FETCH_SNDFILE=ON (the default)."}
   ],
   "entries": [
@@ -34,7 +34,8 @@
       "id": "lua", "name": "Lua 5.4", "upstream": "https://www.lua.org",
       "license": "MIT (Expat)", "copyleft": "none",
       "match": {"sonames": ["^liblua5\\.4\\.so", "^liblua\\.so"], "targets": ["^dve_lua54_runtime$", "^PkgConfig::DVE_LUA$", "^lua$"], "archives": ["liblua(5\\.4)?\\.a$"], "sources": ["third_party/lua54_abi/*"]},
-      "texts": [{"debian": true}, {"file": "/usr/share/doc/liblua5.4-0/copyright"}]
+      "texts": [{"debian": true}, {"file": "/usr/share/doc/liblua5.4-0/copyright"}, {"var": "DVE_LUA_LICENSE_DIR", "title": "the fetched Lua source (src/lua.h)", "files": ["LICENSE.txt"]}],
+      "notes": "DVE_FETCH_LUA (the Windows build) links Lua 5.4.9 from lua.org statically; its license notice is read from the tarball's src/lua.h, since the release has no separate license file."
     },
     {
       "id": "rtmidi", "name": "RtMidi", "upstream": "https://github.com/thestk/rtmidi",
@@ -94,15 +95,22 @@
     {
       "id": "libjpeg_turbo", "name": "libjpeg-turbo", "upstream": "https://libjpeg-turbo.org",
       "license": "IJG AND BSD-3-Clause AND Zlib", "copyleft": "none",
-      "match": {"sonames": ["^libjpeg\\.so", "^libturbojpeg\\.so"], "archives": ["libjpeg\\.a$"]},
-      "texts": [{"debian": true}],
+      "match": {"sonames": ["^libjpeg\\.so", "^libturbojpeg\\.so", "^jpeg62\\.dll$", "^turbojpeg\\.dll$"], "archives": ["libjpeg\\.a$", "(^|/)jpeg\\.lib$", "(^|/)turbojpeg\\.lib$"]},
+      "texts": [{"debian": true}, {"var": "DVE_VCPKG_TRIPLET_DIR", "title": "vcpkg", "files": ["share/libjpeg-turbo/copyright"]}],
       "notes": "The IJG license requires the documentation to state that the software is based in part on the work of the Independent JPEG Group; this file does that."
     },
     {
       "id": "libpng", "name": "libpng", "upstream": "http://www.libpng.org",
       "license": "libpng-2.0", "copyleft": "none",
-      "match": {"sonames": ["^libpng16\\.so"], "archives": ["libpng16?\\.a$"]},
-      "texts": [{"debian": true}]
+      "match": {"sonames": ["^libpng16\\.so", "^libpng16d?\\.dll$"], "archives": ["libpng16?\\.a$", "(^|/)libpng16d?\\.lib$"]},
+      "texts": [{"debian": true}, {"var": "DVE_VCPKG_TRIPLET_DIR", "title": "vcpkg", "files": ["share/libpng/copyright"]}]
+    },
+    {
+      "id": "zlib", "name": "zlib", "upstream": "https://zlib.net",
+      "license": "Zlib", "copyleft": "none",
+      "match": {"sonames": ["^zlibd?1\\.dll$", "^zd?\\.dll$"], "archives": ["(^|/)zd?\\.lib$", "(^|/)zlibd?\\.lib$"]},
+      "texts": [{"var": "DVE_VCPKG_TRIPLET_DIR", "title": "vcpkg", "files": ["share/zlib/copyright"]}],
+      "notes": "Windows only: vcpkg's zlib DLL (z.dll since zlib 1.3.2's CMake build, zlib1.dll before), which libpng needs. On Linux zlib is a system library and is not shipped."
     },
     {
       "id": "jolt", "name": "Jolt Physics", "upstream": "https://github.com/jrouwe/JoltPhysics",
@@ -185,6 +193,15 @@
       "license": "MIT OR Apache-2.0 (credit required when distributed)", "copyleft": "none",
       "match": {"sources": ["src/text3d.cpp", "src/render/text3d_renderer.cpp", "src/runtime_text3d_world.cpp", "src/editor_text3d.cpp"]},
       "texts": [{"repo": "third_party/slug_reference/NOTICE"}, {"repo": "third_party/slug_reference/LICENSE"}, {"repo": "third_party/slug_reference/LICENSE-MIT"}]
+    },
+    {
+      "id": "msvc_runtime", "name": "Microsoft Visual C++ runtime", "upstream": "https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files",
+      "license": "Microsoft Software License Terms for Visual Studio (Distributable Code)", "copyleft": "none",
+      "origin": "Microsoft Visual C++ Redistributable, copied from the Visual Studio installation",
+      "match": {"sonames": ["^(msvcp140(_[0-9a-z_]+)?|vcruntime140(_1|_threads)?|concrt140|vccorlib140|vcomp140)\\.dll$"]},
+      "texts": [{"repo": "third_party/notices/MSVC_RUNTIME_NOTICE.txt"}],
+      "notes": "Windows only. Not part of DVE and not under its MIT license.",
+      "review": "Windows packages ship Microsoft's Visual C++ runtime DLLs next to the executable (DVE_INSTALL_MSVC_RUNTIME, default ON), so they run without the VC++ Redistributable. That is allowed for the files listed in the Visual Studio installation's redist.txt under its license terms; confirm the terms of the Visual Studio edition used for release builds, or build with DVE_INSTALL_MSVC_RUNTIME=OFF and require the Redistributable."
     }
   ]
 }

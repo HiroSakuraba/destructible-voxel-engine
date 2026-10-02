@@ -178,10 +178,18 @@ elseif(MODE STREQUAL "save_load")
     # 9 frames (must equal A's last frame). Then corrupt / truncated / foreign saves must fail
     # cleanly with the content-error exit code.
     set(save_args --headless --pak "${PAK}" --fixed-dt 0.016666668 --render-size 480x270 --threads 4 --hash)
-    set(ENV_ARGS SDL_VIDEO_DRIVER=offscreen SDL_AUDIO_DRIVER=dummy "XDG_DATA_HOME=${WORK_DIR}/xdg")
+    # The per-user data directory is %APPDATA% on Windows and $XDG_DATA_HOME on Linux.
+    if(CMAKE_HOST_WIN32)
+        set(ENV_ARGS SDL_VIDEO_DRIVER=offscreen SDL_AUDIO_DRIVER=dummy "APPDATA=${WORK_DIR}/xdg")
+    else()
+        set(ENV_ARGS SDL_VIDEO_DRIVER=offscreen SDL_AUDIO_DRIVER=dummy "XDG_DATA_HOME=${WORK_DIR}/xdg")
+    endif()
     set(save_dir "${WORK_DIR}/xdg/dve/player-sample/saves")
     run_player(result first errors ${save_args} --frames 40
         --hold b@2-3 --hold d@5-15 --hold f5@30-31 --hold 1@34-35)
+    if(CMAKE_HOST_WIN32)
+        string(REPLACE "\\" "/" first "${first}")   # std::filesystem joins with backslashes
+    endif()
     if(NOT result EQUAL 0)
         message(FATAL_ERROR "saving run failed (${result}):\n${first}\n${errors}")
     endif()

@@ -1,4 +1,6 @@
 #include "dve/editor_native_renderer.hpp"
+#include "dve/editor_midi.hpp"
+#include "dve/editor_ui_zoom.hpp"
 
 #include <algorithm>
 #include <array>
@@ -6,7 +8,10 @@
 #include <cctype>
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include <string>
+#include <tuple>
+#include <vector>
 
 namespace dve::editor {
 EditorColor rgb(unsigned r, unsigned g, unsigned b) noexcept {
@@ -764,7 +769,250 @@ void render_sprite_animation_graph_panel(const IEditorCanvas& painter,
                  "Drag nodes/ports | Ctrl+C/V | C comment | G group | S subgraph | Esc close", muted);
 }
 
-void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& controller,
+namespace {
+std::vector<FittedTextRecord>* g_fittedTextSink = nullptr;
+
+bool utf8_continuation(unsigned char byte) noexcept { return (byte & 0xC0U) == 0x80U; }
+} // namespace
+
+std::string elide_text_to_width(const IEditorCanvas& canvas, std::string_view value, int maxWidth) {
+    if (canvas.text_width(value) <= maxWidth) return std::string(value);
+    const std::string_view marker = canvas.ellipsis();
+    if (canvas.text_width(marker) > maxWidth) return {};
+    // Candidate cut points: every UTF-8 code point boundary.
+    std::vector<std::size_t> cuts;
+    cuts.reserve(value.size());
+    for (std::size_t i = 0; i < value.size(); ++i)
+        if (!utf8_continuation(static_cast<unsigned char>(value[i]))) cuts.push_back(i);
+    std::size_t lo = 0, hi = cuts.size();  // cuts[lo] (prefix length) is known to fit
+    std::string candidate;
+    auto fits = [&](std::size_t index) {
+        std::size_t length = cuts[index];
+        while (length > 0U && value[length - 1U] == ' ') --length;  // no "abc …"
+        candidate.assign(value.substr(0, length));
+        candidate.append(marker);
+        return canvas.text_width(candidate) <= maxWidth;
+    };
+    while (lo + 1U < hi) {
+        const std::size_t mid = (lo + hi) / 2U;
+        if (fits(mid)) lo = mid; else hi = mid;
+    }
+    (void)fits(lo);
+    return candidate;
+}
+
+CellFitCanvas::CellFitCanvas(const IEditorCanvas& inner, UiRect bounds, UiRect screen, int hoverX, int hoverY)
+    : inner_(inner), bounds_(bounds), screen_(screen), hoverX_(hoverX), hoverY_(hoverY) {
+    cells_.reserve(512);
+}
+
+void CellFitCanvas::set_record_sink(std::vector<FittedTextRecord>* sink) noexcept { g_fittedTextSink = sink; }
+
+void CellFitCanvas::add_cell(UiRect cell, bool focused) {
+    if (cell.width > 0 && cell.height > 0) cells_.push_back({cell, focused});
+}
+
+void CellFitCanvas::text(int x, int y, std::string_view value, EditorColor color) const {
+    const Cell* cell = nullptr;
+    for (const Cell& candidate : cells_)
+        if (candidate.rect.contains(x, y - 4)) { cell = &candidate; break; }
+    const UiRect rect = cell != nullptr ? cell->rect : bounds_;
+    const int maxWidth = rect.x + rect.width - 3 - x;
+    const std::string fitted = elide_text_to_width(inner_, value, maxWidth);
+    if (!fitted.empty()) inner_.text(x, y, fitted, color);
+    const bool elided = fitted != value;
+    if (elided) {
+        const bool hovered = rect.contains(hoverX_, hoverY_);
+        const bool focused = cell != nullptr && cell->focused;
+        if ((hovered || focused) && (!tip_ || (hovered && !tip_->hovered)))
+            tip_ = Tip{rect, std::string(value), hovered};
+    }
+    if (g_fittedTextSink != nullptr) {
+        FittedTextRecord record{rect, x, y, fitted, std::string(value), elided};
+        records_.push_back(record);
+        g_fittedTextSink->push_back(std::move(record));
+    }
+}
+
+std::optional<std::string> CellFitCanvas::tooltip_text() const {
+    if (!tip_) return std::nullopt;
+    return tip_->text;
+}
+
+void CellFitCanvas::draw_tooltip(EditorColor background, EditorColor border, EditorColor color) const {
+    if (!tip_) return;
+    const std::string label = elide_text_to_width(inner_, tip_->text, std::max(0, screen_.width - 12));
+    const int width = std::min(screen_.width, inner_.text_width(label) + 12);
+    constexpr int height = 22;
+    const UiRect cell = tip_->cell;
+    const int x = std::clamp(cell.x, screen_.x, screen_.x + screen_.width - width);
+    int y = cell.y + cell.height + 2;
+    if (y + height > screen_.y + screen_.height) y = std::max(screen_.y, cell.y - height - 2);
+    inner_.fill({x, y, width, height}, background);
+    inner_.outline({x, y, width, height}, border);
+    inner_.text(x + 6, y + 16, label, color);
+}
+
+namespace {
+// Registers `down .. up` value slots and label slots for a row of stepper buttons.
+void add_stepper_cells(CellFitCanvas& canvas, UiRect row, UiRect down, UiRect up, UiRect toggle = {}) {
+    if (row.width <= 0) return;
+    canvas.add_cell(down);
+    canvas.add_cell(up);
+    canvas.add_cell(toggle);
+    if (down.width > 0 && up.width > 0)
+        canvas.add_cell({down.x + down.width, row.y, up.x - (down.x + down.width), row.height});
+    int labelRight = row.x + row.width;
+    for (const UiRect& control : {down, toggle})
+        if (control.width > 0) labelRight = std::min(labelRight, control.x - 2);
+    canvas.add_cell({row.x, row.y, labelRight - row.x, row.height});
+    canvas.add_cell(row);
+}
+
+void draw_piano_keyboard(const IEditorCanvas& painter, const PianoKeyboard& keyboard,
+                         const std::array<bool, 128>& activeNotes, EditorColor accent, EditorColor text) {
+    const UiRect keysArea = keyboard.keys_area();
+    const int areaRight = keysArea.x + keysArea.width;
+    const int computerFirst = keyboard.computer_key_base();
+    const int computerLast = computerFirst + 19;
+    for (const PianoKey& key : keyboard.visible_keys()) {
+        const bool active = key.midi >= 0 && key.midi < 128 && activeNotes[static_cast<std::size_t>(key.midi)];
+        const EditorColor color = active ? accent : (key.black ? rgb(18,20,24) : rgb(220,225,232));
+        painter.fill(key.rect, color);
+        painter.outline(key.rect, rgb(60,65,74));
+        if (key.black) continue;
+        if (key.midi >= computerFirst && key.midi <= computerLast)  // computer-keyboard window (Z = first)
+            painter.fill({key.rect.x + 1, key.rect.y + key.rect.height - 3, std::max(1, key.rect.width - 2), 2},
+                         rgb(96,150,220));
+    }
+    // C-octave labels last: a label may run into the next (always white) D key, whose
+    // fill would otherwise paint over it. Black keys never reach the label row.
+    for (const PianoKey& key : keyboard.visible_keys()) {
+        if (key.black || key.midi % 12 != 0) continue;
+        const bool active = key.midi >= 0 && key.midi < 128 && activeNotes[static_cast<std::size_t>(key.midi)];
+        const std::string label = piano_note_name(key.midi);
+        const auto full = keyboard.key_rect(key.midi);
+        const int labelX = (full ? full->x : key.rect.x) + 3;
+        const int labelWidth = painter.text_width(label);
+        const int room = 2 * keyboard.white_key_width() - 4;
+        if (labelWidth > room || labelX < keysArea.x || labelX + labelWidth > areaRight) continue;
+        painter.text(labelX, key.rect.y + key.rect.height - 7, label, active ? text : rgb(30,34,40));
+    }
+    if (keyboard.scrollable()) {
+        painter.fill(keyboard.scrollbar_track(), rgb(20,25,31));
+        painter.fill(keyboard.scrollbar_thumb(), rgb(96,110,130));
+    }
+}
+} // namespace
+
+UiRect editor_screen_rect(const NativeEditorController& controller) noexcept {
+    const NativeEditorLayout& layout = controller.layout();
+    return {0, 0, std::max(1, layout.menuBar.width), std::max(1, layout.statusBar.y + layout.statusBar.height)};
+}
+
+void register_synth_text_cells(CellFitCanvas& canvas, const EditorSynthPanel& synthPanel) {
+    const SynthPanelLayout& layout = synthPanel.layout();
+    if (synthPanel.search_panel().open()) canvas.add_cell(synthPanel.search_panel().layout().panel);
+    // Fixed chrome first, so page content that overflows cannot capture its text.
+    canvas.add_cell(layout.keyboardKeysButton);
+    canvas.add_cell(layout.meterArea);
+    canvas.add_cell(layout.pianoArea);
+    const int helpY = layout.pianoArea.y + layout.pianoArea.height;
+    canvas.add_cell({layout.panel.x, helpY, layout.keyboardKeysButton.x - 4 - layout.panel.x,
+                     layout.panel.y + layout.panel.height - helpY});
+    for (const UiRect& rect : {layout.closeButton, layout.panicButton, layout.searchButton, layout.resetButton,
+                               layout.octaveDownButton, layout.octaveUpButton, layout.midiThruButton,
+                               layout.midiInputButton, layout.keyboardKeysButton})
+        canvas.add_cell(rect);
+    canvas.add_cell({layout.octaveDownButton.x + layout.octaveDownButton.width, layout.octaveDownButton.y,
+                     layout.octaveUpButton.x - layout.octaveDownButton.x - layout.octaveDownButton.width,
+                     layout.octaveDownButton.height});
+    for (const UiRect& tab : layout.tabButtons) canvas.add_cell(tab);
+    const SynthPanelPage page = synthPanel.page();
+    auto value_slot = [&](UiRect down, UiRect up) {
+        canvas.add_cell(down); canvas.add_cell(up);
+        canvas.add_cell({down.x + down.width, down.y, up.x - down.x - down.width, down.height});
+    };
+    if (page == SynthPanelPage::Oscillators) {
+        if (layout.oscillatorCompact && layout.oscillatorHeader.width > 0) {
+            // Column labels: each spans its value column (wave button, or "-" .. "+").
+            const UiRect& header = layout.oscillatorHeader;
+            const UiRect wave = layout.oscillatorWaveButtons[0];
+            canvas.add_cell({wave.x, header.y, wave.width, header.height});
+            const std::array<std::pair<UiRect, UiRect>, 4> groups{{
+                {layout.oscillatorGainDownButtons[0], layout.oscillatorGainUpButtons[0]},
+                {layout.oscillatorTuneDownButtons[0], layout.oscillatorTuneUpButtons[0]},
+                {layout.oscillatorFineDownButtons[0], layout.oscillatorFineUpButtons[0]},
+                {layout.oscillatorPwmDownButtons[0], layout.oscillatorPwmUpButtons[0]}}};
+            for (const auto& [down, up] : groups)
+                canvas.add_cell({down.x, header.y, up.x + up.width - down.x, header.height});
+            canvas.add_cell(header);
+        }
+        for (std::size_t i = 0; i < layout.oscillatorRows.size(); ++i) {
+            const UiRect row = layout.oscillatorRows[i];
+            if (row.width <= 0) continue;
+            canvas.add_cell(layout.oscillatorEnableButtons[i]);
+            canvas.add_cell(layout.oscillatorWaveButtons[i]);
+            value_slot(layout.oscillatorGainDownButtons[i], layout.oscillatorGainUpButtons[i]);
+            value_slot(layout.oscillatorTuneDownButtons[i], layout.oscillatorTuneUpButtons[i]);
+            value_slot(layout.oscillatorFineDownButtons[i], layout.oscillatorFineUpButtons[i]);
+            value_slot(layout.oscillatorPwmDownButtons[i], layout.oscillatorPwmUpButtons[i]);
+            const int nameX = layout.oscillatorEnableButtons[i].x + layout.oscillatorEnableButtons[i].width + 2;
+            canvas.add_cell({nameX, row.y, layout.oscillatorWaveButtons[i].x - 2 - nameX, row.height});
+        }
+        for (std::size_t i = 0; i < layout.oscillatorAdvancedRows.size(); ++i)
+            add_stepper_cells(canvas, layout.oscillatorAdvancedRows[i], layout.oscillatorAdvancedDownButtons[i],
+                              layout.oscillatorAdvancedUpButtons[i]);
+        for (const UiRect& rect : layout.wavetableFrameButtons) canvas.add_cell(rect);
+        for (const UiRect& rect : {layout.wavetableNormalizeButton, layout.wavetableRemoveDcButton,
+                                   layout.wavetableAlignButton, layout.wavetableCanvas})
+            canvas.add_cell(rect);
+        for (const UiRect& row : layout.oscillatorRows) canvas.add_cell(row);
+    } else if (page == SynthPanelPage::Effects) {
+        canvas.add_cell(layout.effectParamTitle);
+        for (std::size_t i = 0; i < layout.effectRows.size(); ++i) {
+            const UiRect row = layout.effectRows[i];
+            if (row.width <= 0) continue;
+            canvas.add_cell(layout.effectToggleButtons[i]);
+            canvas.add_cell({row.x, row.y, layout.effectToggleButtons[i].x - 2 - row.x, row.height});
+        }
+        for (std::size_t i = 0; i < layout.effectParamRows.size(); ++i)
+            add_stepper_cells(canvas, layout.effectParamRows[i], layout.effectParamDownButtons[i],
+                              layout.effectParamUpButtons[i], layout.effectParamToggleButtons[i]);
+    } else if (page == SynthPanelPage::Presets) {
+        for (const UiRect& rect : {layout.presetScanButton, layout.presetPreviousButton, layout.presetNextButton,
+                                   layout.presetLoadButton, layout.presetCaptureAButton, layout.presetCaptureBButton})
+            canvas.add_cell(rect);
+        value_slot(layout.presetMorphDownButton, layout.presetMorphUpButton);
+        for (const UiRect& rect : layout.presetEntryButtons) canvas.add_cell(rect);
+        canvas.add_cell(layout.presetStatusRow);
+        for (std::size_t i = 0; i < 7U; ++i)
+            add_stepper_cells(canvas, layout.parameterRows[i], layout.parameterDownButtons[i],
+                              layout.parameterUpButtons[i], layout.parameterToggleButtons[i]);
+    } else {
+        for (std::size_t i = 0; i < layout.parameterRows.size(); ++i)
+            add_stepper_cells(canvas, layout.parameterRows[i], layout.parameterDownButtons[i],
+                              layout.parameterUpButtons[i], layout.parameterToggleButtons[i]);
+        if (page == SynthPanelPage::Modulation)
+            for (std::size_t i = 0; i < layout.macroRows.size(); ++i)
+                add_stepper_cells(canvas, layout.macroRows[i], layout.macroDownButtons[i], layout.macroUpButtons[i]);
+        if (page == SynthPanelPage::Performance) {
+            for (const UiRect& rect : layout.arpeggiatorStepButtons) canvas.add_cell(rect);
+            for (std::size_t i = 0; i < layout.arpeggiatorStepRows.size(); ++i)
+                add_stepper_cells(canvas, layout.arpeggiatorStepRows[i], layout.arpeggiatorStepDownButtons[i],
+                                  layout.arpeggiatorStepUpButtons[i], layout.arpeggiatorStepToggleButtons[i]);
+        }
+    }
+    {
+        // Title text ends before the first title-bar button (MIDI input on compact panels).
+        const int titleRight = layout.midiInputButton.y == layout.titleBar.y + 5
+            ? std::min(layout.searchButton.x, layout.midiInputButton.x) : layout.searchButton.x;
+        canvas.add_cell({layout.titleBar.x, layout.titleBar.y, titleRight - 4 - layout.titleBar.x, layout.titleBar.height});
+    }
+    canvas.add_cell(layout.titleBar);
+}
+
+void render_synth_panel(const IEditorCanvas& outerPainter, NativeEditorController& controller,
                         EditorColor panel, EditorColor panel2, EditorColor border,
                         EditorColor text, EditorColor muted, EditorColor accent) {
     if (!controller.synth_panel().open()) return;
@@ -772,6 +1020,11 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
     const audio::SynthPreset preset = controller.synthesizer().preset();
     const audio::SynthMeters meters = controller.synthesizer().meters();
     const auto voices = controller.synthesizer().voices();
+    // Every label/value is fitted to its cell (elided with an ellipsis); the
+    // hovered cell's full text is shown as a tooltip after the panel.
+    CellFitCanvas painter(outerPainter, layout.panel, editor_screen_rect(controller),
+                          controller.hover_x(), controller.hover_y());
+    register_synth_text_cells(painter, controller.synth_panel());
     auto compact = [](float value, int digits = 2) {
         std::string result = std::to_string(value);
         const auto dot = result.find('.');
@@ -784,6 +1037,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
         return source < 0 ? std::string("Off") : "Osc " + std::to_string(static_cast<int>(source) + 1);
     };
     auto filter_oversampling_text = [](audio::FilterOversampling value) {
+        if (value == audio::FilterOversampling::Auto) return std::string("Auto");
         return std::to_string(static_cast<unsigned>(value)) + "x";
     };
     auto fm_mode_text = [](audio::FrequencyModulationMode value) -> std::string_view {
@@ -831,6 +1085,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                                    const std::array<bool, kSynthParameterRowCount>& toggles,
                                    const std::array<bool, kSynthParameterRowCount>& active) {
         for (std::size_t i = 0; i < layout.parameterRows.size(); ++i) {
+            if (layout.parameterRows[i].width <= 0) continue;  // scrolled out of view
             painter.fill(layout.parameterRows[i], panel); painter.outline(layout.parameterRows[i], border);
             painter.text(layout.parameterRows[i].x + 7, layout.parameterRows[i].y + 18, labels[i], text);
             if (toggles[i]) button(layout.parameterToggleButtons[i], values[i], active[i]);
@@ -851,18 +1106,49 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
     painter.text(layout.closeButton.x + 7, layout.closeButton.y + 17, "X", text);
     painter.fill(layout.panicButton, rgb(104,48,42)); painter.outline(layout.panicButton, border);
     painter.text(layout.panicButton.x + 8, layout.panicButton.y + 17, "ALL NOTES OFF", text);
-    button(layout.resetButton, "Reset preset"); button(layout.octaveDownButton, "-");
-    painter.text(layout.octaveDownButton.x + 38, layout.octaveDownButton.y + 17,
+    button(layout.searchButton, "SEARCH", controller.synth_panel().search_panel().open());
+    button(layout.resetButton, painter.text_width("Reset preset") + 9 <= layout.resetButton.width ? "Reset preset" : "Reset");
+    button(layout.octaveDownButton, "-");
+    painter.text(layout.octaveDownButton.x + layout.octaveDownButton.width + 4, layout.octaveDownButton.y + 17,
                  "Oct " + std::to_string(controller.synth_panel().octave()), text);
     button(layout.octaveUpButton, "+"); button(layout.midiThruButton, "MIDI THRU", preset.midiThru);
+    {
+        // MIDI input port + connection status (green when connected, amber otherwise).
+        const UiRect rect = layout.midiInputButton;
+        const bool connected = controller.synth_panel().midi_input_connected();
+        painter.fill(rect, connected ? rgb(28,74,52) : rgb(74,58,28)); painter.outline(rect, border);
+        painter.text(rect.x + 6, rect.y + 17, controller.synth_panel().midi_input_label(), text);
+    }
     static constexpr std::array<std::string_view, kSynthPanelPageCount> pageNames{
-        "OSC", "FILTER / ENV", "MOD MATRIX", "PERFORM", "EFFECTS", "PRESETS", "EXPRESSION"};
-    for (std::size_t i = 0; i < layout.tabButtons.size(); ++i)
-        button(layout.tabButtons[i], pageNames[i], static_cast<std::size_t>(controller.synth_panel().page()) == i);
+        "OSC", "FILTER / ENV", "MOD MATRIX", "PERFORM", "EFFECTS", "PRESETS", "EXPRESSION", "GENERATIVE"};
+    static constexpr std::array<std::string_view, kSynthPanelPageCount> shortPageNames{
+        "OSC", "FLT", "MOD", "PRF", "FX", "PRE", "EXP", "GEN"};
+    for (std::size_t i = 0; i < layout.tabButtons.size(); ++i) {
+        // Narrow panels use short tab names (still elided / tooltipped if even those do not fit).
+        const bool fits = painter.text_width(pageNames[i]) + 9 <= layout.tabButtons[i].width;
+        button(layout.tabButtons[i], fits ? pageNames[i] : shortPageNames[i],
+               static_cast<std::size_t>(controller.synth_panel().page()) == i);
+    }
 
     const SynthPanelPage page = controller.synth_panel().page();
     if (page == SynthPanelPage::Oscillators) {
+        const bool compactOsc = layout.oscillatorCompact;
+        if (compactOsc && layout.oscillatorHeader.width > 0 && layout.oscillatorRows[0].width > 0) {
+            // Compact columns: one label per value column instead of one per row.
+            const std::size_t first = [&] {
+                for (std::size_t i = 0; i < layout.oscillatorRows.size(); ++i)
+                    if (layout.oscillatorRows[i].width > 0) return i;
+                return std::size_t{0};
+            }();
+            const int baseline = layout.oscillatorHeader.y + 14;
+            painter.text(layout.oscillatorWaveButtons[first].x + 2, baseline, "Wave", muted);
+            painter.text(layout.oscillatorGainDownButtons[first].x + 2, baseline, "Gain", muted);
+            painter.text(layout.oscillatorTuneDownButtons[first].x + 2, baseline, "Semi", muted);
+            painter.text(layout.oscillatorFineDownButtons[first].x + 2, baseline, "Cents", muted);
+            painter.text(layout.oscillatorPwmDownButtons[first].x + 2, baseline, "PWM", muted);
+        }
         for (std::size_t i = 0; i < layout.oscillatorRows.size(); ++i) {
+            if (layout.oscillatorRows[i].width <= 0) continue;  // scrolled out of view
             const auto& osc = preset.oscillators[i];
             const bool selected = controller.synth_panel().selected_oscillator() == i;
             painter.fill(layout.oscillatorRows[i], selected ? rgb(39,58,82) : panel);
@@ -871,27 +1157,38 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             painter.text(layout.oscillatorRows[i].x + 40, layout.oscillatorRows[i].y + 21,
                          "OSC " + std::to_string(i + 1U), text);
             button(layout.oscillatorWaveButtons[i], audio::oscillator_waveform_name(osc.waveform));
-            painter.text(layout.oscillatorGainDownButtons[i].x - 38, layout.oscillatorGainDownButtons[i].y + 16, "Gain", muted);
+            if (!compactOsc) painter.text(layout.oscillatorGainDownButtons[i].x - 38, layout.oscillatorGainDownButtons[i].y + 16, "Gain", muted);
             button(layout.oscillatorGainDownButtons[i], "-");
             painter.text(layout.oscillatorGainDownButtons[i].x + 31, layout.oscillatorGainDownButtons[i].y + 16, compact(osc.gain), text);
             button(layout.oscillatorGainUpButtons[i], "+");
-            painter.text(layout.oscillatorTuneDownButtons[i].x - 38, layout.oscillatorTuneDownButtons[i].y + 16, "Semi", muted);
+            if (!compactOsc) painter.text(layout.oscillatorTuneDownButtons[i].x - 38, layout.oscillatorTuneDownButtons[i].y + 16, "Semi", muted);
             button(layout.oscillatorTuneDownButtons[i], "-");
             painter.text(layout.oscillatorTuneDownButtons[i].x + 31, layout.oscillatorTuneDownButtons[i].y + 16,
                          std::to_string(static_cast<int>(osc.semitones)), text);
             button(layout.oscillatorTuneUpButtons[i], "+");
-            painter.text(layout.oscillatorFineDownButtons[i].x - 42, layout.oscillatorFineDownButtons[i].y + 16, "Cents", muted);
+            if (!compactOsc) painter.text(layout.oscillatorFineDownButtons[i].x - 42, layout.oscillatorFineDownButtons[i].y + 16, "Cents", muted);
             button(layout.oscillatorFineDownButtons[i], "-");
             painter.text(layout.oscillatorFineDownButtons[i].x + 31, layout.oscillatorFineDownButtons[i].y + 16,
                          std::to_string(static_cast<int>(osc.cents)), text);
             button(layout.oscillatorFineUpButtons[i], "+");
-            painter.text(layout.oscillatorPwmDownButtons[i].x - 38, layout.oscillatorPwmDownButtons[i].y + 16, "PWM", muted);
+            if (!compactOsc) painter.text(layout.oscillatorPwmDownButtons[i].x - 38, layout.oscillatorPwmDownButtons[i].y + 16, "PWM", muted);
             button(layout.oscillatorPwmDownButtons[i], "-");
             painter.text(layout.oscillatorPwmDownButtons[i].x + 31, layout.oscillatorPwmDownButtons[i].y + 16,
                          compact(osc.pwmDepth), text);
             button(layout.oscillatorPwmUpButtons[i], "+");
         }
         const auto& osc = preset.oscillators[controller.synth_panel().selected_oscillator()];
+        // Phase 4/5: quality-tier text shared by the granular and spectral
+        // advanced sections.
+        auto quality_tier_text = [](audio::FilterQuality value) -> std::string_view {
+            switch (value) {
+                case audio::FilterQuality::Eco: return "Eco";
+                case audio::FilterQuality::Standard: return "Standard";
+                case audio::FilterQuality::High: return "High";
+                case audio::FilterQuality::Offline: return "Offline";
+            }
+            return "Standard";
+        };
         std::array<std::string, kSynthOscillatorAdvancedPropertyCount> labels{
             "PWM rate", "Shape / table", "Hard-sync source", "FM source", "FM mode",
             "FM amount", "Ring source", "Ring depth", "Sub level", "Sub octaves"};
@@ -907,16 +1204,75 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                       compact(osc.sampleLoopEnd), osc.sampleLoop ? "On" : "Off", osc.sampleReverse ? "On" : "Off",
                       osc.sampleKeyTrack ? "On" : "Off", compact(osc.sampleVelocityToGain),
                       osc.sampleOneShot ? "On" : "Off", std::to_string(preset.sampleBank.rootNote)};
+        } else if (osc.waveform == audio::OscillatorWaveform::Sampler) {
+            labels = {"Playback mode", "Direction", "Pitch tracking", "Start offset s", "Gain",
+                      "Loop start s", "Loop end s", "Loop xfade s", "Sampler enabled", "Root MIDI note"};
+            values = {std::string(audio::sampler_playback_mode_name(preset.sampler.playbackMode)),
+                      std::string(audio::sampler_direction_name(preset.sampler.direction)),
+                      preset.sampler.pitchTracking ? "On" : "Off", compact(preset.sampler.startOffsetSeconds),
+                      compact(preset.sampler.gain), compact(preset.sampler.loopStartSeconds),
+                      compact(preset.sampler.loopEndSeconds), compact(preset.sampler.loopCrossfadeSeconds),
+                      preset.sampler.enabled ? "On" : "Off", std::to_string(preset.sampleBank.rootNote)};
+        } else if (osc.waveform == audio::OscillatorWaveform::ModalResonator) {
+            const auto& modal = osc.modalResonator;
+            labels = {"Excitation", "Base freq Hz", "Damping", "Inharmonicity", "Brightness",
+                      "Excitation level", "Noise burst ms", "Transient ms", "Mode count", "Fundamental ratio"};
+            values = {std::string(audio::modal_excitation_source_name(modal.excitation)),
+                      modal.baseFrequency <= 0.0F ? "Note" : compact(modal.baseFrequency, 0),
+                      compact(modal.damping), compact(modal.inharmonicity), compact(modal.brightness),
+                      compact(modal.excitationLevel), compact(modal.noiseBurstMilliseconds),
+                      compact(modal.transientMilliseconds), std::to_string(modal.modeCount),
+                      compact(modal.modes[0].frequencyRatio)};
         } else if (osc.waveform == audio::OscillatorWaveform::Granular) {
-            labels = {"Grain position", "Grain size ms", "Density Hz", "Spray", "Pitch semitones",
-                      "Stereo spread", "Freeze", "Window", "Reverse", "Key tracking"};
-            const std::array<std::string_view, 3> windows{"Hann", "Triangle", "Tukey"};
-            values = {compact(osc.grainPosition), compact(osc.grainSizeMilliseconds), compact(osc.grainDensityHertz),
-                      compact(osc.grainSpray), compact(osc.grainPitchSemitones), compact(osc.grainStereoSpread),
-                      osc.grainFreeze ? "On" : "Off", std::string(windows[static_cast<std::size_t>(osc.grainWindow)]),
-                      osc.sampleReverse ? "On" : "Off", osc.sampleKeyTrack ? "On" : "Off"};
+            // Phase 4: dedicated granular generator (preset-level GranularParameters).
+            const auto& granular = preset.granular;
+            labels = {"Granular", "Density Hz", "Duration ms", "Position", "Position jitter",
+                      "Envelope", "Cloud", "Scatter", "Dust", "Freeze", "Smear", "Width",
+                      "Pitch semitones", "Gain", "Pan scatter", "Reverse prob",
+                      "Freeze position", "Quality"};
+            static constexpr std::array<std::string_view, 4> envelopes{
+                "Hann", "Triangle", "Exponential", "Planck"};
+            values = {granular.enabled ? "On" : "Off", compact(granular.densityHz, 1),
+                      compact(granular.durationMs, 0), compact(granular.position01),
+                      compact(granular.positionJitter01),
+                      std::string(envelopes[static_cast<std::size_t>(granular.envelopeShape)]),
+                      compact(granular.cloud01), compact(granular.scatter01),
+                      compact(granular.dust01), compact(granular.freeze01),
+                      compact(granular.smear01), compact(granular.width01),
+                      compact(granular.pitchSemitones, 0), compact(granular.gain),
+                      compact(granular.panScatter01), compact(granular.reverseProbability01),
+                      compact(granular.freezePosition01),
+                      std::string(quality_tier_text(granular.granularQuality))};
+        } else if (osc.waveform == audio::OscillatorWaveform::Spectral) {
+            // Phase 5: spectral/resynthesis oscillator (preset-level
+            // SpectralParameters, spectral.hpp contract). 14 rows of the
+            // 18-row advanced budget.
+            const auto& spectral = preset.spectral;
+            labels = {"Spectral", "Gain", "Stretch", "Freeze", "Formant st",
+                      "Harmonic stretch", "Tilt dB/oct", "Threshold", "Blur",
+                      "Quantize", "Inharmonicity", "Phase rnd", "Stereo spread",
+                      "Quality"};
+            values = {spectral.enabled ? "On" : "Off", compact(spectral.gain),
+                      compact(spectral.timeStretch, 2), compact(spectral.freeze01),
+                      compact(spectral.formantShiftSemitones, 1), compact(spectral.harmonicStretch, 2),
+                      compact(spectral.spectralTiltDbPerOct, 1), compact(spectral.partialThreshold01),
+                      compact(spectral.spectralBlur01), compact(spectral.frequencyQuantize01),
+                      compact(spectral.inharmonicity01), compact(spectral.phaseRandom01),
+                      compact(spectral.stereoSpread01),
+                      std::string(quality_tier_text(spectral.spectralQuality))};
         }
-        for (std::size_t i = 0; i < layout.oscillatorAdvancedRows.size(); ++i) {
+        // Other waveforms only define the original 10 advanced rows; the
+        // extra rows are the Phase 4 granular section (18 rows) and the
+        // Phase 5 spectral section (14 of the same 18-row budget, so no ABI
+        // break).
+        const std::size_t advancedRowCount =
+            osc.waveform == audio::OscillatorWaveform::Granular
+                ? kSynthOscillatorAdvancedPropertyCount
+                : (osc.waveform == audio::OscillatorWaveform::Spectral
+                       ? kSynthSpectralAdvancedRowCount
+                       : 10U);
+        for (std::size_t i = 0; i < advancedRowCount; ++i) {
+            if (layout.oscillatorAdvancedRows[i].width <= 0) continue;  // scrolled out of view
             painter.fill(layout.oscillatorAdvancedRows[i], panel); painter.outline(layout.oscillatorAdvancedRows[i], border);
             painter.text(layout.oscillatorAdvancedRows[i].x + 7, layout.oscillatorAdvancedRows[i].y + 18, labels[i], text);
             button(layout.oscillatorAdvancedDownButtons[i], "-");
@@ -924,7 +1280,8 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                          layout.oscillatorAdvancedDownButtons[i].y + 16, values[i], text);
             button(layout.oscillatorAdvancedUpButtons[i], "+");
         }
-        if (osc.waveform == audio::OscillatorWaveform::Wavetable && preset.wavetable.enabled) {
+        if (osc.waveform == audio::OscillatorWaveform::Wavetable && preset.wavetable.enabled &&
+            layout.wavetableCanvas.width > 0) {
             const UiRect graph = layout.wavetableCanvas;
             painter.fill(graph, rgb(16,22,31)); painter.outline(graph, border);
             painter.text(graph.x + 7, graph.y + 16,
@@ -946,18 +1303,21 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
         }
         if (osc.waveform == audio::OscillatorWaveform::Wavetable) {
             for (std::size_t i = 0; i < layout.wavetableFrameButtons.size(); ++i) {
+                if (layout.wavetableFrameButtons[i].width <= 0) continue;
                 const bool selectedFrame = i == controller.synth_panel().selected_wavetable_frame();
                 painter.fill(layout.wavetableFrameButtons[i], selectedFrame ? accent : panel2);
                 painter.outline(layout.wavetableFrameButtons[i], border);
                 painter.text(layout.wavetableFrameButtons[i].x + 8, layout.wavetableFrameButtons[i].y + 16,
                              "F" + std::to_string(i + 1U), text);
             }
-            button(layout.wavetableNormalizeButton, "Normalize");
-            button(layout.wavetableRemoveDcButton, "Remove DC");
-            button(layout.wavetableAlignButton, "Align");
+            if (layout.wavetableNormalizeButton.width > 0) {
+                button(layout.wavetableNormalizeButton, "Normalize");
+                button(layout.wavetableRemoveDcButton, "Remove DC");
+                button(layout.wavetableAlignButton, "Align");
+            }
         }
         if ((osc.waveform == audio::OscillatorWaveform::Sample || osc.waveform == audio::OscillatorWaveform::Granular) &&
-            preset.sampleBank.enabled && preset.sampleBank.frameCount > 1U) {
+            preset.sampleBank.enabled && preset.sampleBank.frameCount > 1U && layout.wavetableCanvas.width > 0) {
             const UiRect graph = layout.wavetableCanvas;
             painter.fill(graph, rgb(16,22,31)); painter.outline(graph, border);
             painter.text(graph.x + 7, graph.y + 16,
@@ -980,7 +1340,8 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             "Filter model", "Filter output", "Cutoff Hz", "Resonance", "Drive", "Envelope depth",
             "Ladder bass comp", "SEM morph", "Oversampling", "MS-20 high-pass", "Self oscillation", "Key tracking",
             "Amp delay", "Amp attack", "Amp hold", "Amp decay", "Amp sustain", "Amp release",
-            "Filter delay", "Filter attack", "Filter hold", "Filter decay", "Filter sustain", "Filter release"};
+            "Filter delay", "Filter attack", "Filter hold", "Filter decay", "Filter sustain", "Filter release",
+            "Comb damping", "Comb mix", "Comb feedback", "Formant dry mix"};
         std::array<std::string, kSynthParameterRowCount> values{
             std::string(audio::filter_topology_name(preset.filter.topology)), std::string(audio::filter_mode_name(preset.filter.mode)),
             compact(preset.filter.cutoffHertz,0), compact(preset.filter.resonance), compact(preset.filter.drive),
@@ -991,7 +1352,9 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             compact(preset.ampEnvelope.sustainLevel), compact(preset.ampEnvelope.releaseSeconds,3),
             compact(preset.filter.envelope.delaySeconds,3), compact(preset.filter.envelope.attackSeconds,3),
             compact(preset.filter.envelope.holdSeconds,3), compact(preset.filter.envelope.decaySeconds,3),
-            compact(preset.filter.envelope.sustainLevel), compact(preset.filter.envelope.releaseSeconds,3)};
+            compact(preset.filter.envelope.sustainLevel), compact(preset.filter.envelope.releaseSeconds,3),
+            compact(preset.filter.comb.damping), compact(preset.filter.comb.mix),
+            compact(preset.filter.comb.feedbackScale), compact(preset.filter.formant.dryMix)};
         std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
         toggles[0] = true; active[0] = preset.filter.enabled; values[0] = preset.filter.enabled ? values[0] : "Filter off";
         toggles[1] = true; active[1] = preset.filter.alternateRevision; values[1] = preset.filter.alternateRevision ? "Revision B" : "Revision A";
@@ -1004,7 +1367,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             "LFO 1 key sync", "LFO 1 tempo sync", "LFO 1 beats/cycle",
             "LFO 2", "LFO 2 wave", "LFO 2 rate", "LFO 2 depth", "LFO 2 phase", "LFO 2 fade",
             "LFO 2 key sync", "LFO 2 tempo sync", "LFO 2 beats/cycle",
-            "Modulation slot", "Source", "Destination", "Amount", "Curve", "Route enabled"};
+            "Modulation slot", "Source", "Destination", "Amount", "Curve", "Route enabled", "Bias"};
         const auto modulationInfo = controller.synthesizer().modulation_activity()[controller.synth_panel().selected_modulation_slot()];
         std::array<std::string, kSynthParameterRowCount> values{
             bool_text(lfo1.enabled), std::string(audio::lfo_waveform_name(lfo1.waveform)), compact(lfo1.rateHertz), compact(lfo1.depth),
@@ -1014,20 +1377,23 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             std::to_string(controller.synth_panel().selected_modulation_slot() + 1U),
             std::string(audio::modulation_source_name(slot.source)), std::string(audio::modulation_destination_name(slot.destination)),
             compact(slot.amount) + " | live " + compact(modulationInfo.currentValue),
-            std::string(curve_text(slot.curve)), bool_text(slot.enabled)};
+            std::string(curve_text(slot.curve)), bool_text(slot.enabled), compact(slot.bias)};
         std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
         for (std::size_t i : {0U,6U,7U,9U,15U,16U,23U}) toggles[i] = true;
         active[0]=lfo1.enabled; active[6]=lfo1.keySync; active[7]=lfo1.tempoSync;
         active[9]=lfo2.enabled; active[15]=lfo2.keySync; active[16]=lfo2.tempoSync; active[23]=slot.enabled;
         draw_parameter_rows(labels, values, toggles, active);
-        const UiRect activityTrack{layout.parameterRows[21].x + 116, layout.parameterRows[21].y + 24, 112, 4};
+        const UiRect activityTrack = layout.parameterRows[21].width <= 0 ? UiRect{} : UiRect{layout.parameterRows[21].x + 116, layout.parameterRows[21].y + layout.parameterRows[21].height - 3, 112, 3};
+        if (activityTrack.width > 0) {
         painter.fill(activityTrack, rgb(28,35,46));
         const int activityCenter = activityTrack.x + activityTrack.width / 2;
         const int activityPixels = static_cast<int>(std::clamp(modulationInfo.currentValue, -1.0F, 1.0F) *
                                                     static_cast<float>(activityTrack.width / 2));
         painter.fill({std::min(activityCenter, activityCenter + activityPixels), activityTrack.y,
                       std::max(1, std::abs(activityPixels)), activityTrack.height}, accent);
+        }
         for (std::size_t i = 0; i < layout.macroRows.size(); ++i) {
+            if (layout.macroRows[i].width <= 0) continue;
             painter.fill(layout.macroRows[i], panel); painter.outline(layout.macroRows[i], border);
             painter.text(layout.macroRows[i].x + 7, layout.macroRows[i].y + 19,
                          preset.macros.names[i], text);
@@ -1041,7 +1407,9 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             "Reference tuning", "Global transpose", "Fine tune cents", "Analog drift", "Chord engine", "Chord type",
             "Chord inversion", "Chord spread", "Chord scale", "Scale root", "Strum ms", "Chord velocity",
             "Arpeggiator", "Arp direction", "Beat division", "Internal BPM", "Clock source", "External BPM",
-            "Gate length", "Swing", "Octave range", "Step count", "Latch", "Retrigger envelopes"};
+            "Gate length", "Swing", "Octave range", "Step count", "Latch", "Retrigger envelopes",
+            "Humanize timing", "Humanize velocity", "Arp scale", "Arp scale root",
+            "Phrase vel start", "Phrase vel end"};
         static constexpr std::array<std::string_view, 12> pitchNames{
             "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
         std::array<std::string, kSynthParameterRowCount> values{
@@ -1056,7 +1424,10 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             std::string(clock_text(preset.arpeggiator.clockSource)), compact(preset.arpeggiator.externalTempoBpm,0),
             compact(preset.arpeggiator.gate), compact(preset.arpeggiator.swing), std::to_string(preset.arpeggiator.octaveRange),
             std::to_string(preset.arpeggiator.stepCount), bool_text(preset.arpeggiator.latch),
-            bool_text(preset.arpeggiator.retriggerEnvelopes)};
+            bool_text(preset.arpeggiator.retriggerEnvelopes), compact(preset.arpeggiator.humanizeTiming),
+            compact(preset.arpeggiator.humanizeVelocity), std::string(scale_text(preset.arpeggiator.scale)),
+            std::string(pitchNames[preset.arpeggiator.scaleRoot % 12U]),
+            compact(preset.arpeggiator.phraseVelocityStart), compact(preset.arpeggiator.phraseVelocityEnd)};
         std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
         for (std::size_t i : {4U,12U,22U,23U}) toggles[i] = true;
         active[4]=preset.chord.enabled; active[12]=preset.arpeggiator.enabled;
@@ -1065,6 +1436,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
 
         const std::size_t selectedStep = controller.synth_panel().selected_arpeggiator_step();
         for (std::size_t i = 0; i < layout.arpeggiatorStepButtons.size(); ++i) {
+            if (layout.arpeggiatorStepButtons[i].width <= 0) continue;
             const auto& candidate = preset.arpeggiator.steps[i];
             const bool selected = i == selectedStep;
             const bool playing = i == meters.arpeggiatorStep;
@@ -1083,6 +1455,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
                 case audio::ArpeggiatorCondition::Every4: return "Every 4";
                 case audio::ArpeggiatorCondition::FirstOf4: return "First / 4";
                 case audio::ArpeggiatorCondition::Fill: return "Fill";
+                case audio::ArpeggiatorCondition::AB: return "A:B";
             }
             return "Always";
         };
@@ -1095,21 +1468,24 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             return "Step";
         };
         const std::array<std::string, kSynthArpStepPropertyCount> stepLabels{
-            "Enabled", "Condition", "Automation", "Accent", "Slide", "Transpose", "Octave", "Velocity",
+            "Enabled", "Condition", "Cond A", "Cond B", "Automation", "Accent", "Slide", "Transpose", "Octave", "Velocity",
             "Gate", "Probability", "Ratchets", "Tie", "Macro 1", "Macro 2", "Macro 3", "Macro 4"};
         const std::array<std::string, kSynthArpStepPropertyCount> stepValues{
-            bool_text(step.enabled), std::string(condition_text(step.condition)), std::string(automation_text(step.automationCurve)),
+            bool_text(step.enabled), std::string(condition_text(step.condition)),
+            std::to_string(step.conditionA), std::to_string(step.conditionB),
+            std::string(automation_text(step.automationCurve)),
             bool_text(step.accent), bool_text(step.slide), std::to_string(static_cast<int>(step.transpose)),
             std::to_string(static_cast<int>(step.octaveOffset)), compact(step.velocityScale), compact(step.gateScale),
             compact(step.probability), std::to_string(step.ratchets), bool_text(step.tie),
             step.macro1 < 0.0F ? "Keep" : compact(step.macro1), step.macro2 < 0.0F ? "Keep" : compact(step.macro2),
             step.macro3 < 0.0F ? "Keep" : compact(step.macro3), step.macro4 < 0.0F ? "Keep" : compact(step.macro4)};
         for (std::size_t i = 0; i < layout.arpeggiatorStepRows.size(); ++i) {
+            if (layout.arpeggiatorStepRows[i].width <= 0) continue;
             painter.fill(layout.arpeggiatorStepRows[i], panel); painter.outline(layout.arpeggiatorStepRows[i], border);
             painter.text(layout.arpeggiatorStepRows[i].x + 7, layout.arpeggiatorStepRows[i].y + 18,
                          stepLabels[i], text);
-            if (i == 0U || i == 3U || i == 4U || i == 11U) {
-                const bool enabled = i == 0U ? step.enabled : (i == 3U ? step.accent : (i == 4U ? step.slide : step.tie));
+            if (i == 0U || i == 5U || i == 6U || i == 13U) {
+                const bool enabled = i == 0U ? step.enabled : (i == 5U ? step.accent : (i == 6U ? step.slide : step.tie));
                 button(layout.arpeggiatorStepToggleButtons[i], stepValues[i], enabled);
             }
             else {
@@ -1120,15 +1496,135 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
             }
         }
     } else if (page == SynthPanelPage::Effects) {
-        static constexpr std::array<std::string_view, 8> effectNames{
-            "Distortion", "3-band EQ", "Chorus", "Phaser", "Delay", "Reverb", "Compressor", "Limiter"};
-        const std::array<bool, 8> effects{
-            preset.distortion.enabled, preset.eq.enabled, preset.chorus.enabled, preset.phaser.enabled,
-            preset.delay.enabled, preset.reverb.enabled, preset.compressor.enabled, preset.limiter.enabled};
+        static constexpr std::array<std::string_view, 13> effectNames{
+            "Distortion", "Bitcrusher", "Harmonizer", "3-band EQ", "Chorus", "Flanger",
+            "Ensemble", "Phaser", "Delay", "Reverb", "Compressor", "Limiter", "Diffusion"};
+        const std::array<bool, 13> effects{
+            preset.distortion.enabled, preset.bitcrusher.enabled, preset.harmonizer.enabled,
+            preset.eq.enabled, preset.chorus.enabled, preset.flanger.enabled,
+            preset.ensemble.enabled, preset.phaser.enabled, preset.delay.enabled,
+            preset.reverb.enabled, preset.compressor.enabled, preset.limiter.enabled,
+            preset.diffusionDelay.enabled};
+        const std::size_t selectedEffect = controller.synth_panel().selected_effect();
         for (std::size_t i = 0; i < layout.effectRows.size(); ++i) {
+            if (layout.effectRows[i].width <= 0) continue;  // scrolled out of view
             painter.fill(layout.effectRows[i], panel); painter.outline(layout.effectRows[i], border);
-            painter.text(layout.effectRows[i].x + 10, layout.effectRows[i].y + 24, effectNames[i], text);
+            if (i == selectedEffect) painter.outline(layout.effectRows[i], accent);
+            painter.text(layout.effectRows[i].x + 10, layout.effectRows[i].y + 20, effectNames[i], text);
             button(layout.effectToggleButtons[i], effects[i] ? "ON" : "OFF", effects[i]);
+        }
+        // Parameter editor for the selected effect.
+        const auto paramTitle = std::string(effectNames[selectedEffect]) + " parameters";
+        if (layout.effectParamTitle.width > 0)
+            painter.text(layout.effectParamTitle.x + 7, layout.effectParamTitle.y + 15, paramTitle, text);
+        auto effect_params = [&](std::size_t effect) -> std::vector<std::tuple<std::string, std::string, bool>> {
+            // Returns (label, value, isToggle) for each parameter row.
+            std::vector<std::tuple<std::string, std::string, bool>> rows;
+            const auto f2 = [&](float v, int d) { return compact(v, d); };
+            switch (effect) {
+                case 0: {
+                    auto distortion_mode_text = [](audio::DistortionMode mode) -> std::string_view {
+                        switch (mode) {
+                            case audio::DistortionMode::Classic: return "Classic";
+                            case audio::DistortionMode::Fuzz: return "Fuzz";
+                            case audio::DistortionMode::SoftClip: return "Soft Clip";
+                            case audio::DistortionMode::Foldback: return "Foldback";
+                        }
+                        return "Classic";
+                    };
+                    rows.emplace_back("Drive", f2(preset.distortion.drive, 1), false);
+                    rows.emplace_back("Mix", f2(preset.distortion.mix, 2), false);
+                    rows.emplace_back("Mode", distortion_mode_text(preset.distortion.mode), true);
+                    break;
+                }
+                case 1:
+                    rows.emplace_back("Bits", std::to_string(preset.bitcrusher.bits), false);
+                    rows.emplace_back("Downsample", std::to_string(preset.bitcrusher.downsample), false);
+                    rows.emplace_back("Mix", f2(preset.bitcrusher.mix, 2), false);
+                    break;
+                case 2:
+                    rows.emplace_back("Sub level", f2(preset.harmonizer.subLevel, 2), false);
+                    rows.emplace_back("Up level", f2(preset.harmonizer.upLevel, 2), false);
+                    rows.emplace_back("Mix", f2(preset.harmonizer.mix, 2), false);
+                    break;
+                case 3:
+                    rows.emplace_back("Low dB", f2(preset.eq.lowGainDb, 1), false);
+                    rows.emplace_back("Mid dB", f2(preset.eq.midGainDb, 1), false);
+                    rows.emplace_back("High dB", f2(preset.eq.highGainDb, 1), false);
+                    break;
+                case 4:
+                    rows.emplace_back("Rate Hz", f2(preset.chorus.rateHertz, 2), false);
+                    rows.emplace_back("Depth ms", f2(preset.chorus.depthMilliseconds, 1), false);
+                    rows.emplace_back("Mix", f2(preset.chorus.mix, 2), false);
+                    break;
+                case 5:
+                    rows.emplace_back("Rate Hz", f2(preset.flanger.rateHertz, 2), false);
+                    rows.emplace_back("Depth ms", f2(preset.flanger.depthMilliseconds, 1), false);
+                    rows.emplace_back("Feedback", f2(preset.flanger.feedback, 2), false);
+                    rows.emplace_back("Mix", f2(preset.flanger.mix, 2), false);
+                    break;
+                case 6: {
+                    const char* modeName = preset.ensemble.mode == audio::EnsembleMode::I ? "I" :
+                        preset.ensemble.mode == audio::EnsembleMode::II ? "II" : "I+II";
+                    rows.emplace_back("Mode", modeName, true);
+                    rows.emplace_back("Mix", f2(preset.ensemble.mix, 2), false);
+                    break;
+                }
+                case 7:
+                    rows.emplace_back("Rate Hz", f2(preset.phaser.rateHertz, 2), false);
+                    rows.emplace_back("Depth", f2(preset.phaser.depth, 2), false);
+                    rows.emplace_back("Feedback", f2(preset.phaser.feedback, 2), false);
+                    rows.emplace_back("Mix", f2(preset.phaser.mix, 2), false);
+                    break;
+                case 8:
+                    rows.emplace_back("Time s", f2(preset.delay.timeSeconds, 2), false);
+                    rows.emplace_back("Feedback", f2(preset.delay.feedback, 2), false);
+                    rows.emplace_back("Mix", f2(preset.delay.mix, 2), false);
+                    rows.emplace_back("Ping-pong", preset.delay.pingPong ? "On" : "Off", true);
+                    rows.emplace_back("Tempo sync", preset.delay.tempoSync ? "On" : "Off", true);
+                    rows.emplace_back("Sync beats", f2(preset.delay.syncBeats, 2), false);
+                    break;
+                case 9:
+                    rows.emplace_back("Room size", f2(preset.reverb.roomSize, 2), false);
+                    rows.emplace_back("Damping", f2(preset.reverb.damping, 2), false);
+                    rows.emplace_back("Width", f2(preset.reverb.width, 2), false);
+                    rows.emplace_back("Mix", f2(preset.reverb.mix, 2), false);
+                    break;
+                case 10:
+                    rows.emplace_back("Threshold dB", f2(preset.compressor.thresholdDb, 1), false);
+                    rows.emplace_back("Ratio", f2(preset.compressor.ratio, 1), false);
+                    rows.emplace_back("Attack ms", f2(preset.compressor.attackMilliseconds, 1), false);
+                    rows.emplace_back("Release ms", f2(preset.compressor.releaseMilliseconds, 0), false);
+                    rows.emplace_back("Makeup dB", f2(preset.compressor.makeupDb, 1), false);
+                    break;
+                case 11:
+                    rows.emplace_back("Ceiling dB", f2(preset.limiter.ceilingDb, 1), false);
+                    rows.emplace_back("Release ms", f2(preset.limiter.releaseMilliseconds, 0), false);
+                    break;
+                case 12:
+                    rows.emplace_back("Time s", f2(preset.diffusionDelay.timeSeconds, 2), false);
+                    rows.emplace_back("Feedback", f2(preset.diffusionDelay.feedback, 2), false);
+                    rows.emplace_back("Mix", f2(preset.diffusionDelay.mix, 2), false);
+                    rows.emplace_back("Diffusion", f2(preset.diffusionDelay.diffusion, 2), false);
+                    break;
+                default: break;
+            }
+            return rows;
+        };
+        const auto params = effect_params(selectedEffect);
+        for (std::size_t i = 0; i < layout.effectParamRows.size(); ++i) {
+            if (i >= params.size()) break;
+            if (layout.effectParamRows[i].width <= 0) continue;  // scrolled out of view
+            const auto& [label, value, isToggle] = params[i];
+            painter.fill(layout.effectParamRows[i], panel); painter.outline(layout.effectParamRows[i], border);
+            painter.text(layout.effectParamRows[i].x + 7, layout.effectParamRows[i].y + 18, label, text);
+            if (isToggle) button(layout.effectParamToggleButtons[i], value, true);
+            else {
+                button(layout.effectParamDownButtons[i], "-");
+                painter.text(layout.effectParamDownButtons[i].x + 32,
+                             layout.effectParamDownButtons[i].y + 16, value, text);
+                button(layout.effectParamUpButtons[i], "+");
+            }
         }
     } else if (page == SynthPanelPage::Expression) {
         auto mpe_text = [](audio::MpeZoneMode value) -> std::string_view {
@@ -1185,22 +1681,74 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
         active[12]=preset.unison.enabled; active[17]=preset.unison.preserveLevel;
         active[23]=preset.metadata.favorite;
         draw_parameter_rows(labels, values, toggles, active);
+    } else if (page == SynthPanelPage::Generative) {
+        // Phase 3: generative sequencer / patch genetics / attractor conductor.
+        static constexpr std::array<std::string_view, 7> laneNames{
+            "Pitch", "Velocity", "Gate", "Timbre", "Probability", "Morph", "Pan"};
+        static constexpr std::array<std::string_view, 6> seqScaleNames{
+            "Chromatic", "Major", "Minor", "Pent major", "Pent minor", "Dorian"};
+        static constexpr std::array<std::string_view, 4> directionNames{
+            "Forward", "Reverse", "Ping-pong", "Random"};
+        static constexpr std::array<std::string_view, 12> pitchNames{
+            "C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+        const auto& seq = preset.sequencer;
+        const std::size_t selectedLane = controller.synth_panel().selected_sequencer_lane();
+        std::array<std::string, kSynthParameterRowCount> labels{
+            "Sequencer",
+            "Pitch steps", "Velocity steps", "Gate steps", "Timbre steps",
+            "Probability steps", "Morph steps", "Pan steps",
+            "Edit lane", "Lane direction", "Scale", "Scale root", "Octave range", "Seq seed",
+            "Mutation intensity", "Mutation seed", "Mutate now", "Breed A x B",
+            "Lock oscillators", "Lock spectral", "Lock filters", "Lock envelopes",
+            "Lock modulation", "Lock stereo", "Lock sequencer", "Lock FX",
+            "Attractor", "Attractor BPM", "", ""};
+        std::array<std::string, kSynthParameterRowCount> values{
+            bool_text(seq.enabled),
+            std::to_string(seq.lanes[0].stepCount), std::to_string(seq.lanes[1].stepCount),
+            std::to_string(seq.lanes[2].stepCount), std::to_string(seq.lanes[3].stepCount),
+            std::to_string(seq.lanes[4].stepCount), std::to_string(seq.lanes[5].stepCount),
+            std::to_string(seq.lanes[6].stepCount),
+            std::string(laneNames[selectedLane]),
+            std::string(directionNames[static_cast<std::size_t>(seq.lanes[selectedLane].direction)]),
+            std::string(seqScaleNames[static_cast<std::size_t>(seq.scale)]),
+            std::string(pitchNames[seq.rootNote % 12U]) + std::to_string(static_cast<int>(seq.rootNote / 12U) - 1),
+            std::to_string(seq.octaveRange), std::to_string(seq.randomSeed),
+            compact(preset.genetics.mutationIntensity), std::to_string(preset.genetics.mutationSeed),
+            "Go", "Go", "", "", "", "", "", "", "", "",
+            bool_text(preset.attractor.enabled), compact(static_cast<float>(preset.attractor.config.bpm), 0),
+            "", ""};
+        for (std::size_t g = 0; g < 8U; ++g)
+            values[18U + g] = (preset.genetics.lockedGroups & (1U << g)) != 0U ? "Locked" : "Free";
+        std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
+        for (std::size_t i : {0U,16U,17U,18U,19U,20U,21U,22U,23U,24U,25U,26U}) toggles[i] = true;
+        active[0] = seq.enabled;
+        for (std::size_t g = 0; g < 8U; ++g)
+            active[18U + g] = (preset.genetics.lockedGroups & (1U << g)) != 0U;
+        active[26] = preset.attractor.enabled;
+        draw_parameter_rows(labels, values, toggles, active);
     } else {
-        button(layout.presetScanButton, "Scan library");
-        button(layout.presetPreviousButton, "<"); button(layout.presetNextButton, ">");
-        button(layout.presetLoadButton, "Load"); button(layout.presetCaptureAButton, "Capture A");
-        button(layout.presetCaptureBButton, "Capture B"); button(layout.presetMorphDownButton, "-");
-        painter.text(layout.presetMorphDownButton.x + 43, layout.presetMorphDownButton.y + 18,
-                     "Morph " + compact(controller.synth_panel().preset_morph_amount()), text);
-        button(layout.presetMorphUpButton, "+");
+        if (layout.presetScanButton.width > 0) {
+            button(layout.presetScanButton, "Scan library");
+            button(layout.presetPreviousButton, "<"); button(layout.presetNextButton, ">");
+            button(layout.presetLoadButton, "Load");
+        }
+        if (layout.presetCaptureAButton.width > 0) {
+            button(layout.presetCaptureAButton, "Capture A");
+            button(layout.presetCaptureBButton, "Capture B"); button(layout.presetMorphDownButton, "-");
+            painter.text(layout.presetMorphDownButton.x + 43, layout.presetMorphDownButton.y + 18,
+                         "Morph " + compact(controller.synth_panel().preset_morph_amount()), text);
+            button(layout.presetMorphUpButton, "+");
+        }
         const auto& entries = controller.synth_panel().preset_library().entries();
         for (std::size_t i = 0; i < layout.presetEntryButtons.size(); ++i) {
+            if (layout.presetEntryButtons[i].width <= 0) continue;  // scrolled out of view
             const std::string label = i < entries.size() ? entries[i].name : "--";
             button(layout.presetEntryButtons[i], label,
                    i < entries.size() && i == controller.synth_panel().selected_preset_entry());
         }
-        painter.text(layout.panel.x + 14, layout.presetEntryButtons[3].y + 42,
-                     std::string(controller.synth_panel().preset_status()), muted);
+        if (layout.presetStatusRow.width > 0)
+            painter.text(layout.presetStatusRow.x + 2, layout.presetStatusRow.y + 14,
+                         std::string(controller.synth_panel().preset_status()), muted);
         const auto& mapping = preset.midiLearn[controller.synth_panel().selected_midi_learn_mapping()];
         std::array<std::string, kSynthParameterRowCount> labels{};
         std::array<std::string, kSynthParameterRowCount> values{};
@@ -1214,6 +1762,7 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
         std::array<bool, kSynthParameterRowCount> toggles{}; std::array<bool, kSynthParameterRowCount> active{};
         toggles[1]=true; active[1]=mapping.enabled; toggles[6]=true; active[6]=mapping.inverted;
         for (std::size_t i = 0; i < 7U; ++i) {
+            if (layout.parameterRows[i].width <= 0) continue;  // scrolled out of view
             painter.fill(layout.parameterRows[i], panel); painter.outline(layout.parameterRows[i], border);
             painter.text(layout.parameterRows[i].x + 7, layout.parameterRows[i].y + 18, labels[i], text);
             if (toggles[i]) button(layout.parameterToggleButtons[i], values[i], active[i]);
@@ -1225,32 +1774,118 @@ void render_synth_panel(const IEditorCanvas& painter, NativeEditorController& co
         }
     }
 
-    const int meterX = layout.panel.x + 14;
-    const int meterY = layout.panel.y + layout.panel.height - 151;
-    const int meterWidth = std::max(120, layout.panel.width - 28);
+    const int meterX = layout.meterArea.x + 2;
+    const int meterY = layout.meterArea.y + 13;  // text baseline (== panel bottom - 151)
+    const int meterWidth = std::max(120, layout.meterArea.width - 4);
     painter.text(meterX, meterY, "Voices " + std::to_string(meters.activeVoices) + "/16", text);
     painter.fill({meterX, meterY + 8, meterWidth, 12}, rgb(20,25,31));
     painter.fill({meterX, meterY + 8, static_cast<int>(static_cast<float>(meterWidth) * std::min(1.0F, meters.peakLeft)), 5}, rgb(72,210,130));
     painter.fill({meterX, meterY + 15, static_cast<int>(static_cast<float>(meterWidth) * std::min(1.0F, meters.peakRight)), 5}, rgb(72,160,230));
 
     std::array<bool,128> activeNotes{};
-    for (const auto& voice : voices) if (voice.active) activeNotes[voice.note] = true;
-    const int baseNote = std::clamp(controller.synth_panel().octave() * 12 + 36, 0, 103);
-    for (std::size_t i = 0; i < layout.pianoKeys.size(); ++i) {
-        const int note = baseNote + static_cast<int>(i); const int pitchClass = note % 12;
-        const bool black = pitchClass == 1 || pitchClass == 3 || pitchClass == 6 || pitchClass == 8 || pitchClass == 10;
-        const bool active = activeNotes[static_cast<std::size_t>(note)];
-        painter.fill(layout.pianoKeys[i], active ? accent : (black ? rgb(18,20,24) : rgb(220,225,232)));
-        painter.outline(layout.pianoKeys[i], rgb(60,65,74));
-        if (i % 12U == 0U) painter.text(layout.pianoKeys[i].x + 3, layout.pianoKeys[i].y + layout.pianoKeys[i].height - 7,
-            "C" + std::to_string(note / 12 - 1), active || black ? text : rgb(30,34,40));
+    for (const auto& voice : voices) if (voice.active && voice.note < 128U) activeNotes[voice.note] = true;
+    draw_piano_keyboard(painter, controller.synth_panel().keyboard(), activeNotes, accent, text);
+    {
+        const PianoKeyboard& keyboard = controller.synth_panel().keyboard();
+        button(layout.keyboardKeysButton, "Keys " + std::to_string(keyboard.key_count()) + " >");
     }
     painter.text(layout.panel.x + 12, layout.panel.y + layout.panel.height - 9,
-                 "Keys Z-M/Q-W | arrows octave | 1/3/4/5/6/7 pages | Ctrl+4 toggles", muted);
+                 "Keys Z-M/Q-W | arrows octave | 1/3/4/5/6/7 pages | wheel scrolls | Ctrl+4 toggles", muted);
+    if (layout.gridScrollTrack.width > 0) {
+        painter.fill(layout.gridScrollTrack, rgb(20,25,31));
+        painter.fill(layout.gridScrollThumb, rgb(96,110,130));
+    }
+
+    // Phase 6: patch-search browser overlay.
+    {
+        const auto& searchPanel = controller.synth_panel().search_panel();
+        if (searchPanel.open()) {
+            const auto& sl = searchPanel.layout();
+            const auto& session = searchPanel.session();
+            painter.fill(sl.panel, rgb(10, 14, 22)); painter.outline(sl.panel, accent);
+            painter.fill(sl.titleBar, rgb(27, 44, 67));
+            painter.text(sl.titleBar.x + 12, sl.titleBar.y + 23, "Patch Search - audio-to-synth", text);
+            button(sl.closeButton, "X");
+            painter.fill(sl.targetNameField, panel2); painter.outline(sl.targetNameField, border);
+            painter.text(sl.targetNameField.x + 7, sl.targetNameField.y + 18,
+                         session.targetName.empty() ? "(no target)" : session.targetName, text);
+            const std::size_t first = searchPanel.visible_first();
+            for (std::size_t r = 0; r < searchPanel.visible_count(); ++r) {
+                const auto& cand = session.candidates[first + r];
+                const bool selected = (first + r) == searchPanel.selected_candidate();
+                painter.fill(sl.candidateRows[r], selected ? rgb(39, 58, 82) : panel);
+                painter.outline(sl.candidateRows[r], selected ? accent : border);
+                char dist[32];
+                std::snprintf(dist, sizeof(dist), "%.4f", cand.distance);
+                painter.text(sl.candidateRows[r].x + 7, sl.candidateRows[r].y + 18,
+                             cand.label + "  (" + dist + ")", selected ? rgb(255, 255, 255) : text);
+            }
+            button(sl.pagePrevButton, "<"); button(sl.pageNextButton, ">");
+            painter.text(sl.pageLabel.x + 4, sl.pageLabel.y + 17, searchPanel.page_text(), muted);
+            button(sl.auditionButton, "AUDITION"); button(sl.promoteButton, "PROMOTE");
+            painter.text(sl.statusField.x + 7, sl.statusField.y + 18, std::string(searchPanel.status()), muted);
+        }
+    }
+    painter.draw_tooltip(rgb(16,20,28), accent, text);
 }
 
 
-void render_chiptune_panel(const IEditorCanvas& painter, NativeEditorController& controller,
+void register_chiptune_text_cells(CellFitCanvas& canvas, const EditorChiptunePanel& editor) {
+    const auto& layout = editor.layout();
+    const auto& session = editor.session();
+    if (editor.page() == ChiptunePanelPage::Sfx) canvas.add_cell(layout.pianoArea);
+    for (const UiRect& rect : {layout.closeButton, layout.playSongButton, layout.playInstrumentButton, layout.stopButton,
+                               layout.saveButton, layout.openButton, layout.undoButton, layout.redoButton,
+                               layout.copyButton, layout.cutButton, layout.pasteButton, layout.songBusButton,
+                               layout.instrumentBusButton})
+        canvas.add_cell(rect);
+    for (const UiRect& tab : layout.tabs) canvas.add_cell(tab);
+    const int panelRight = layout.panel.x + layout.panel.width - 12;
+    auto value_slot = [&](UiRect down, UiRect up) {
+        canvas.add_cell(down); canvas.add_cell(up);
+        canvas.add_cell({down.x + down.width, down.y, up.x - down.x - down.width, down.height});
+    };
+    if (editor.page() == ChiptunePanelPage::Pattern) {
+        for (const UiRect& rect : layout.orderRows) canvas.add_cell(rect);
+        for (const UiRect& rect : {layout.addOrderButton, layout.deleteOrderButton, layout.duplicatePatternButton,
+                                   layout.addPatternButton, layout.deletePatternButton, layout.effectPreviousButton,
+                                   layout.effectNextButton, layout.effectParamDownButton, layout.effectParamUpButton})
+            canvas.add_cell(rect);
+        const auto cursor = session.cursor();
+        for (std::size_t row = 0; row < kChiptuneVisibleRows; ++row)
+            for (std::size_t channel = 0; channel < audio::kChiptuneMaxChannels; ++channel) {
+                const bool focused = editor.first_visible_row() + row == cursor.row && channel == cursor.channel;
+                canvas.add_cell(layout.cells[row][channel], focused);
+            }
+        const UiRect up = layout.effectParamUpButton;
+        canvas.add_cell({up.x + up.width, up.y, layout.patternGrid.x + layout.patternGrid.width - up.x - up.width, up.height});
+        canvas.add_cell(layout.orderList);
+    } else if (editor.page() == ChiptunePanelPage::Instrument) {
+        for (const UiRect& rect : {layout.instrumentPreviousButton, layout.instrumentNextButton,
+                                   layout.addInstrumentButton, layout.deleteInstrumentButton,
+                                   layout.wavePreviousButton, layout.waveNextButton,
+                                   layout.normalizeWavetableButton, layout.removeDcButton})
+            canvas.add_cell(rect);
+        for (const UiRect& rect : layout.wavetableShapeButtons) canvas.add_cell(rect);
+        const UiRect next = layout.waveNextButton;
+        canvas.add_cell({next.x + next.width, next.y, panelRight - next.x - next.width, next.height});
+        canvas.add_cell(layout.envelopeCanvas);
+        canvas.add_cell(layout.wavetableCanvas);
+    } else {
+        for (const UiRect& rect : layout.sfxPresetButtons) canvas.add_cell(rect);
+        value_slot(layout.sfxBaseDownButton, layout.sfxBaseUpButton);
+        value_slot(layout.sfxDurationDownButton, layout.sfxDurationUpButton);
+        value_slot(layout.sfxGainDownButton, layout.sfxGainUpButton);
+        value_slot(layout.sfxPanDownButton, layout.sfxPanUpButton);
+        canvas.add_cell(layout.applySfxButton);
+        canvas.add_cell(layout.auditionSfxButton);
+        canvas.add_cell(layout.keyboardKeysButton);
+        canvas.add_cell(layout.pianoArea);
+    }
+    canvas.add_cell(layout.titleBar);
+}
+
+void render_chiptune_panel(const IEditorCanvas& outerPainter, NativeEditorController& controller,
                            EditorColor panel, EditorColor panel2, EditorColor border,
                            EditorColor text, EditorColor muted, EditorColor accent) {
     if (!controller.chiptune_panel().open()) return;
@@ -1258,6 +1893,9 @@ void render_chiptune_panel(const IEditorCanvas& painter, NativeEditorController&
     const auto& layout = editor.layout();
     const auto& session = editor.session();
     const auto& song = session.song();
+    CellFitCanvas painter(outerPainter, layout.panel, editor_screen_rect(controller),
+                          controller.hover_x(), controller.hover_y());
+    register_chiptune_text_cells(painter, editor);
     painter.fill(layout.panel, rgb(10,15,23));
     painter.outline(layout.panel, accent);
     painter.fill(layout.titleBar, rgb(27,44,67));
@@ -1376,17 +2014,14 @@ void render_chiptune_panel(const IEditorCanvas& painter, NativeEditorController&
         button(layout.sfxPanDownButton,"-"); button(layout.sfxPanUpButton,"+");
         painter.text(layout.sfxPanDownButton.x+38,layout.sfxPanDownButton.y+17,"Pan "+std::to_string(request.pan).substr(0,4),text);
         button(layout.applySfxButton,"APPLY TO SONG"); button(layout.auditionSfxButton,"AUDITION SFX");
-        for(std::size_t i=0;i<layout.pianoKeys.size();++i){
-            const int note=(session.octave()+1)*12+static_cast<int>(i);
-            const int pc=note%12; const bool black=pc==1||pc==3||pc==6||pc==8||pc==10;
-            painter.fill(layout.pianoKeys[i],black?rgb(18,20,24):rgb(220,225,232));
-            painter.outline(layout.pianoKeys[i],rgb(60,65,74));
-            if(i%12U==0U) painter.text(layout.pianoKeys[i].x+3,layout.pianoKeys[i].y+layout.pianoKeys[i].height-7,
-                                      "C"+std::to_string(note/12-1),black?text:rgb(30,34,40));
-        }
+        button(layout.keyboardKeysButton, "Keys " + std::to_string(editor.keyboard().key_count()) + " >");
+        std::array<bool,128> activeNotes{};
+        if (request.baseMidi >= 0 && request.baseMidi < 128) activeNotes[static_cast<std::size_t>(request.baseMidi)] = true;
+        draw_piano_keyboard(painter, editor.keyboard(), activeNotes, accent, text);
     }
     painter.text(layout.panel.x+12,layout.panel.y+layout.panel.height-12,
                  std::string(editor.status())+" | F1/F2/F3 pages | [] octave | Ctrl+9 toggles",muted);
+    painter.draw_tooltip(rgb(16,20,28), accent, text);
 }
 
 void render_audio_panel(const IEditorCanvas& painter, NativeEditorController& controller,
@@ -2342,6 +2977,30 @@ void render_sprite_authoring_panel(const IEditorCanvas& painter, NativeEditorCon
 
 } // namespace
 
+namespace {
+// Forwards to another canvas but drops text whose glyphs would reach clipY and
+// fills/outlines that extend past it. Used for the inspector's fixed-offset
+// detail lines so they never draw under the flag toggles.
+class VerticalClipCanvas final : public IEditorCanvas {
+public:
+    VerticalClipCanvas(const IEditorCanvas& inner, int clipY) : inner_(inner), clipY_(clipY) {}
+    void fill(UiRect rect, EditorColor color) const override { if (rect.y + rect.height <= clipY_) inner_.fill(rect, color); }
+    void outline(UiRect rect, EditorColor color) const override { if (rect.y + rect.height <= clipY_) inner_.outline(rect, color); }
+    void line(int x1, int y1, int x2, int y2, EditorColor color, int width) const override {
+        if (std::max(y1, y2) <= clipY_) inner_.line(x1, y1, x2, y2, color, width);
+    }
+    // y is the text baseline; allow ~4 px of descent.
+    void text(int x, int y, std::string_view value, EditorColor color) const override {
+        if (y + 4 <= clipY_) inner_.text(x, y, value, color);
+    }
+    [[nodiscard]] int text_width(std::string_view value) const override { return inner_.text_width(value); }
+    [[nodiscard]] std::string_view ellipsis() const override { return inner_.ellipsis(); }
+private:
+    const IEditorCanvas& inner_;
+    int clipY_;
+};
+} // namespace
+
 void render_native_editor(const IEditorCanvas& painter, NativeEditorController& controller, int width, int height) {
     const bool highContrast = controller.workspace().preferences().highContrast;
     const EditorColor background = highContrast ? rgb(0,0,0) : rgb(24,27,32);
@@ -2365,7 +3024,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     painter.outline(layout.inspector, border);
     painter.outline(layout.bottomPanel, border);
 
-    const int desiredMenuWidth = std::max(70, static_cast<int>(78.0F * controller.workspace().preferences().uiScale));
+    const int desiredMenuWidth = 78;
     const int menuWidth = std::max(1, std::min(desiredMenuWidth, width / static_cast<int>(kMenuBarNames.size())));
     static constexpr std::array<std::string_view, 8> kCompactMenuNames{
         "File","Edit","New","View","Tools","Build","Win","Help"};
@@ -2437,7 +3096,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
     }
 
-    const auto drawItems = controller.draw_items();
+    const auto& drawItems = controller.draw_items();
     for (const EditorVoxelDrawItem& item : drawItems) {
         const Float4 base = editor_material_display_color(controller.materials(), item.material);
         float shade = std::clamp(1.1F - item.depth * 0.018F, 0.42F, 1.0F);
@@ -2786,9 +3445,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             apply_camera_pose(previewCamera, rig->authoredPose);
             EditorViewportSettings previewSettings = controller.viewport_settings();
             previewSettings.maximumDrawVoxels = std::min<std::size_t>(previewSettings.maximumDrawVoxels, 25000U);
-            const auto previewItems = build_voxel_draw_list(controller.workspace().document(), controller.materials(),
-                                                            previewCamera, preview, previewSettings,
-                                                            controller.workspace().selected_objects());
+            const auto& previewItems = controller.camera_preview_draw_items(previewCamera, preview, previewSettings);
             for (const EditorVoxelDrawItem& item : previewItems) {
                 const Float4 base = editor_material_display_color(controller.materials(), item.material);
                 const float shade = std::clamp(1.08F - item.depth * 0.018F, 0.42F, 1.0F);
@@ -2911,17 +3568,18 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
 
     if (layout.inspector.width > 0) {
         painter.text(layout.inspector.x + 12, layout.inspector.y + 20, "INSPECTOR", muted);
+        const VerticalClipCanvas inspectorPainter(painter, layout.inspectorContentClipY);
         if (controller.workspace().selected_object()) {
             if (const EditorObject* object = controller.workspace().document().find_object(*controller.workspace().selected_object())) {
                 const bool renamingHere = controller.text_edit().kind == TextEditKind::ObjectName;
-                painter.text(layout.inspector.x + 12, layout.inspector.y + 48,
+                inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 48,
                              renamingHere ? controller.text_edit().buffer + "_" : object->name,
                              renamingHere ? accent : text);
-                painter.text(layout.inspector.x + 12, layout.inspector.y + 69,
+                inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 69,
                              "ID " + std::to_string(object->id) + "   Voxels " + std::to_string(object->voxels->occupied_voxel_count()), muted);
                 const bool editingPosition = controller.text_edit().kind == TextEditKind::Position;
-                if (editingPosition) painter.fill(layout.inspectorFields.empty() ? UiRect{} : layout.inspectorFields[0], rgb(40,54,74));
-                painter.text(layout.inspector.x + 12, layout.inspector.y + 91,
+                if (editingPosition) inspectorPainter.fill(layout.inspectorFields.empty() ? UiRect{} : layout.inspectorFields[0], rgb(40,54,74));
+                inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 91,
                              editingPosition
                                  ? "Position  " + controller.text_edit().buffer + "_"
                                  : "Position  " + std::to_string(object->transform.position.x).substr(0,5) + "  " +
@@ -2931,8 +3589,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                 constexpr float degreesPerRadian = 57.29577951308232F;
                 const Float3 euler = multiply(quaternion_to_euler_xyz(object->transform.rotation), degreesPerRadian);
                 const bool editingRotation = controller.text_edit().kind == TextEditKind::Rotation;
-                if (editingRotation) painter.fill(layout.inspectorFields.size() < 2 ? UiRect{} : layout.inspectorFields[1], rgb(40,54,74));
-                painter.text(layout.inspector.x + 12, layout.inspector.y + 113,
+                if (editingRotation) inspectorPainter.fill(layout.inspectorFields.size() < 2 ? UiRect{} : layout.inspectorFields[1], rgb(40,54,74));
+                inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 113,
                              editingRotation
                                  ? "Rotation  " + controller.text_edit().buffer + "_"
                                  : "Rotation  " + std::to_string(euler.x).substr(0,6) + "  " +
@@ -2945,8 +3603,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                                    EditorColor normalColor) {
                         const bool editing = controller.text_edit().kind == kind;
                         if (editing && fieldIndex < layout.inspectorFields.size())
-                            painter.fill(layout.inspectorFields[fieldIndex], rgb(40,54,74));
-                        painter.text(layout.inspector.x + 12, layout.inspector.y + y,
+                            inspectorPainter.fill(layout.inspectorFields[fieldIndex], rgb(40,54,74));
+                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + y,
                                      label + "  " + (editing ? controller.text_edit().buffer + "_" : value),
                                      editing ? accent : normalColor);
                     };
@@ -2968,16 +3626,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                   asset.style.alignment == Text3DHorizontalAlignment::Center ? "center" : "right", muted);
                     drawTextField(10U, TextEditKind::Text3DFillRule, 311, "Fill",
                                   asset.style.fillRule == Text3DFillRule::NonZero ? "nonzero" : "evenodd", muted);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 333,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 333,
                                  "Glyphs " + std::to_string(asset.glyphInstances.size()) +
                                  "   Curves " + std::to_string(asset.atlas.curveTexels.size()/2U), muted);
                     const auto dependency = inspect_text3d_font_dependency(
                         controller.project_root(), object->textFontAsset);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 355,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 355,
                                  dependency.packageReady ? "Font dependency ready"
                                                          : "Font license/dependency warning",
                                  dependency.packageReady ? muted : rgb(235,180,80));
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 377,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 377,
                                  "Hash " + std::to_string(asset.contentHash), muted);
                 } else if (object->gaborVolume) {
                     const auto& asset = *object->gaborVolume;
@@ -2986,8 +3644,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                                     int y, std::string label, std::string value) {
                         const bool editing = controller.text_edit().kind == kind;
                         if (editing && fieldIndex < layout.inspectorFields.size())
-                            painter.fill(layout.inspectorFields[fieldIndex], rgb(40,54,74));
-                        painter.text(layout.inspector.x + 12, layout.inspector.y + y,
+                            inspectorPainter.fill(layout.inspectorFields[fieldIndex], rgb(40,54,74));
+                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + y,
                                      label + "  " + (editing ? controller.text_edit().buffer + "_" : value),
                                      editing ? accent : muted);
                     };
@@ -3008,49 +3666,49 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     std::uint16_t maximumLod{};
                     for (const auto& primitive : asset.primitives)
                         maximumLod = std::max(maximumLod, primitive.lodLevel);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 267,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 267,
                                  "Primitives " + std::to_string(asset.primitives.size()) +
                                  "   Levels " + std::to_string(static_cast<unsigned>(maximumLod)+1U), muted);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 289,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 289,
                                  "Source " + object->sourceAsset.generic_string(), muted);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 311,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 311,
                                  "Hash " + std::to_string(asset.contentHash), muted);
                 } else {
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 135,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 135,
                                  "Selection " + std::to_string(controller.workspace().selection_count()) +
                                  "   Axes " + (controller.transform_space() == EditorTransformSpace::World ? "World" : "Local"), text);
-                    const EditorSelectionDiagnostics diagnostics = controller.selection_diagnostics();
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 157,
+                    const EditorSelectionDiagnostics& diagnostics = controller.selection_diagnostics();
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 157,
                                  "Mass " + std::to_string(diagnostics.massKilograms).substr(0,8) + " kg", muted);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 179,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 179,
                                  "Components " + std::to_string(diagnostics.connectedComponents) +
                                  "   Detached " + std::to_string(diagnostics.detachedComponents), muted);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 201,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 201,
                                  "Collision boxes " + std::to_string(diagnostics.collisionBoxes), muted);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 223,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 223,
                                  "Material " + std::to_string(controller.active_material()) + "  " +
                                  (controller.materials().find(controller.active_material()) ?
                                   controller.materials().find(controller.active_material())->definition.name : "Unknown"), text);
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 245,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 245,
                                  "Object components " + std::to_string(object->components.size()), muted);
                     if (object->attachment && object->parent) {
                         const std::string socket = object->attachment->socket.empty()
                             ? std::string("default") : object->attachment->socket;
-                        painter.text(layout.inspector.x + 12, layout.inspector.y + 267,
+                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 267,
                                      "Attached to " + std::to_string(*object->parent) + "  socket " + socket, muted);
                     } else {
-                        painter.text(layout.inspector.x + 12, layout.inspector.y + 267,
+                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 267,
                                      "Attachment  none", muted);
                     }
                     if (object->prefabLink) {
-                        painter.text(layout.inspector.x + 12, layout.inspector.y + 289,
+                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 289,
                                      "Prefab " + object->prefabLink->prefabAsset.filename().generic_string() +
                                      "  overrides " + std::to_string(object->prefabLink->overrides.size()), accent);
                     } else {
-                        painter.text(layout.inspector.x + 12, layout.inspector.y + 289,
+                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 289,
                                      "Prefab  none", muted);
                     }
-                    painter.text(layout.inspector.x + 12, layout.inspector.y + 311,
+                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 311,
                                  "Layer " + std::to_string(object->layer) + "  Tags " +
                                  std::to_string(object->tags.size()) + "  Groups " +
                                  std::to_string(object->groups.size()), muted);
@@ -3063,7 +3721,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         if (!section.properties.empty())
                             line += "  " + section.properties.front().displayName + "=" +
                                     format_component_value(section.properties.front().value);
-                        painter.text(layout.inspector.x + 12,
+                        inspectorPainter.text(layout.inspector.x + 12,
                                      layout.inspector.y + 333 + static_cast<int>(componentIndex) * 20,
                                      line, section.enabled ? text : muted);
                     }
@@ -3130,8 +3788,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
         case BottomPanelTab::Profiler: {
             painter.text(layout.bottomPanel.x + 14, bottomY,
-                         "Draw items: " + std::to_string(controller.draw_items().size()) +
-                         "   UI scale: " + std::to_string(controller.workspace().preferences().uiScale).substr(0,4), muted);
+                         "Draw items: " + std::to_string(controller.draw_item_count()) +
+                         "   UI zoom: " + format_ui_zoom_percent(controller.effective_ui_zoom()), muted);
             break;
         }
         case BottomPanelTab::Assistant: {
@@ -3242,7 +3900,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const EditorStatusMessage& status = controller.status();
     painter.text(10, layout.statusBar.y + layout.statusBar.height - 6, status.text,
                  status.error ? rgb(255,105,105) : text);
-    const std::string scale = "UI " + std::to_string(controller.workspace().preferences().uiScale).substr(0,3) + "x" +
+    const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
                                "  Snap " + std::to_string(controller.workspace().preferences().translateSnapMeters).substr(0,5) + "m";
     painter.text(width - painter.text_width(scale) - 12, layout.statusBar.y + layout.statusBar.height - 6, scale, muted);
 
@@ -3295,7 +3953,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
 
     if (controller.context_menu().open) {
         const ContextMenuState& menu = controller.context_menu();
-        const int itemHeight = std::max(22, static_cast<int>(24.0F * controller.workspace().preferences().uiScale));
+        const int itemHeight = 24;
         const UiRect popup{menu.x, menu.y, 190, itemHeight * static_cast<int>(menu.items.size())};
         painter.fill(popup, panel2);
         painter.outline(popup, border);
@@ -3320,11 +3978,28 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
 
     if (controller.settings_panel().open) {
         const NativeSettingsModalLayout settingsLayout = controller.settings_modal_layout();
+        // Every settings text is fitted to its cell (setting rows add label, marker, value and
+        // policy cells as they are drawn); long values are elided and the hovered or selected
+        // value is shown in full in a tooltip.
+        CellFitCanvas settingsText(painter, settingsLayout.panel, UiRect{0, 0, width, height},
+                                   controller.hover_x(), controller.hover_y());
+        settingsText.add_cell(settingsLayout.title);
+        for (const UiRect& tab : settingsLayout.scopeTabs) settingsText.add_cell(tab);
+        for (const UiRect& rect : {settingsLayout.searchBox, settingsLayout.changedToggle, settingsLayout.advancedToggle,
+                                   settingsLayout.resetSettingButton, settingsLayout.resetCategoryButton,
+                                   settingsLayout.discardButton, settingsLayout.applyButton})
+            settingsText.add_cell(rect);
+        for (const UiRect& row : settingsLayout.categoryRows) settingsText.add_cell(row);
+        {
+            const int hintX = settingsLayout.panel.x + 308;
+            const int hintRight = std::min(settingsLayout.discardButton.x, settingsLayout.applyButton.x) - 6;
+            settingsText.add_cell({hintX, settingsLayout.applyButton.y, hintRight - hintX, settingsLayout.applyButton.height});
+        }
+        settingsText.add_cell(settingsLayout.detailPanel);
         painter.fill({0, 0, width, height}, rgb(8,10,14));
         painter.fill(settingsLayout.panel, panel);
         painter.outline(settingsLayout.panel, accent);
-        painter.text(settingsLayout.panel.x + 16, settingsLayout.panel.y + 31,
-                     "Settings and Preferences", text);
+        settingsText.text(settingsLayout.title.x, settingsLayout.title.y + 20, "Settings and Preferences", text);
 
         static constexpr std::array<SettingScope, 3> scopes{
             SettingScope::User, SettingScope::Project, SettingScope::Session};
@@ -3332,7 +4007,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const UiRect tab = settingsLayout.scopeTabs[index];
             painter.fill(tab, controller.settings_panel().scope == scopes[index] ? accent : panel2);
             painter.outline(tab, border);
-            painter.text(tab.x + 10, tab.y + tab.height - 8, setting_scope_name(scopes[index]), text);
+            settingsText.text(tab.x + 10, tab.y + tab.height - 8, setting_scope_name(scopes[index]), text);
         }
 
         painter.fill(settingsLayout.searchBox, panel2);
@@ -3340,21 +4015,21 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         const std::string search = controller.settings_panel().searchQuery.empty()
             ? std::string("Search every option by name, description, or keyword...")
             : controller.settings_panel().searchQuery + "_";
-        painter.text(settingsLayout.searchBox.x + 8,
+        settingsText.text(settingsLayout.searchBox.x + 8,
                      settingsLayout.searchBox.y + settingsLayout.searchBox.height - 8,
                      search, controller.settings_panel().searchQuery.empty() ? muted : text);
 
         painter.fill(settingsLayout.changedToggle,
                      controller.settings_panel().changedOnly ? accent : panel2);
         painter.outline(settingsLayout.changedToggle, border);
-        painter.text(settingsLayout.changedToggle.x + 8,
+        settingsText.text(settingsLayout.changedToggle.x + 8,
                      settingsLayout.changedToggle.y + settingsLayout.changedToggle.height - 8,
                      controller.settings_panel().changedOnly ? "Changed: On" : "Changed: Off", text);
 
         painter.fill(settingsLayout.advancedToggle,
                      controller.settings_panel().includeAdvanced ? accent : panel2);
         painter.outline(settingsLayout.advancedToggle, border);
-        painter.text(settingsLayout.advancedToggle.x + 8,
+        settingsText.text(settingsLayout.advancedToggle.x + 8,
                      settingsLayout.advancedToggle.y + settingsLayout.advancedToggle.height - 8,
                      controller.settings_panel().includeAdvanced ? "Advanced: On" : "Advanced: Off", text);
 
@@ -3363,7 +4038,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const UiRect row = settingsLayout.categoryRows[index];
             if (categories[index] == controller.settings_panel().selectedCategory &&
                 controller.settings_panel().searchQuery.empty()) painter.fill(row, rgb(48,78,118));
-            painter.text(row.x + 8, row.y + row.height - 8, categories[index], text);
+            settingsText.text(row.x + 8, row.y + row.height - 8, categories[index], text);
         }
 
         const auto rows = controller.settings_rows();
@@ -3385,30 +4060,44 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             SettingScope source = SettingScope::User;
             bool inherited = false;
             (void)controller.workspace().settings().value(definition.id, &source, &inherited);
-            std::string valueText = setting_value_to_string(displayed);
+            std::string valueText = controller.settings_panel().value_label(definition, displayed);
+            if (definition.id == kUiZoomSettingId)
+                if (const auto* zoom = std::get_if<double>(&displayed))
+                {
+                    const float shown = snap_ui_zoom(static_cast<float>(*zoom));
+                    valueText = format_ui_zoom_percent(shown);
+                    if (shown > controller.ui_zoom_window_limit() + 1.0e-3F)
+                        valueText += "  (window fits " + format_ui_zoom_percent(controller.ui_zoom_window_limit()) + ")";
+                    valueText += "  Ctrl+= / Ctrl+- / Ctrl+0";
+                }
             if (controller.settings_panel().valueEditing &&
                 controller.settings_panel().valueEditId == definition.id)
                 valueText = controller.settings_panel().valueEditBuffer + "_";
             const std::uint32_t rowText = availability.available ? text : muted;
-            painter.text(row.x + 8, row.y + row.height - 8, definition.label, rowText);
             const int valueX = row.x + row.width * 2 / 3;
-            painter.text(valueX, row.y + row.height - 8, valueText,
-                         availability.available ? accent : muted);
             std::string marker;
             if (controller.settings_panel().stagedValues.contains(definition.id)) marker = "modified";
             else if (controller.settings_panel().stagedClears.contains(definition.id)) marker = "reset";
             else if (controller.workspace().settings().has_override(controller.settings_panel().scope, definition.id))
                 marker = setting_scope_name(controller.settings_panel().scope);
             else if (inherited) marker = "from " + setting_scope_name(source);
-            if (!marker.empty())
-                painter.text(valueX - painter.text_width(marker) - 12, row.y + row.height - 8, marker, muted);
             std::string policy;
             if (definition.applyPolicy == SettingApplyPolicy::RestartRequired) policy = "restart";
             else if (definition.applyPolicy == SettingApplyPolicy::OnApply) policy = "apply";
-            if (!policy.empty()) painter.text(row.x + row.width - painter.text_width(policy) - 8,
-                                               row.y + row.height - 8, policy, muted);
+            const int policyX = policy.empty() ? row.x + row.width : row.x + row.width - painter.text_width(policy) - 8;
+            const int markerX = marker.empty() ? valueX - 12 : std::max(row.x + row.width / 3, valueX - painter.text_width(marker) - 12);
+            if (!policy.empty()) settingsText.add_cell({policyX - 2, row.y, row.x + row.width - policyX + 2, row.height});
+            settingsText.add_cell({valueX - 2, row.y, policyX - 6 - valueX + 2, row.height},
+                                  rowIndex == controller.settings_panel().selectedRow);
+            if (!marker.empty()) settingsText.add_cell({markerX - 2, row.y, valueX - 4 - markerX, row.height});
+            settingsText.add_cell({row.x, row.y, markerX - 6 - row.x, row.height});
+            const int baseline = row.y + row.height - 8;
+            settingsText.text(row.x + 8, baseline, definition.label, rowText);
+            settingsText.text(valueX, baseline, valueText, availability.available ? accent : muted);
+            if (!marker.empty()) settingsText.text(markerX, baseline, marker, muted);
+            if (!policy.empty()) settingsText.text(policyX, baseline, policy, muted);
         }
-        if (rows.empty()) painter.text(settingsLayout.searchBox.x, settingsLayout.searchBox.y + 66,
+        if (rows.empty()) settingsText.text(settingsLayout.searchBox.x, settingsLayout.searchBox.y + 66,
                                        controller.settings_panel().changedOnly
                                            ? "No changed options match this view."
                                            : "No settings match this search.", muted);
@@ -3417,45 +4106,61 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         painter.outline(settingsLayout.detailPanel, border);
         if (controller.settings_panel().selectedRow < rows.size()) {
             const SettingDefinition& definition = *rows[controller.settings_panel().selectedRow];
-            painter.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 22,
+            settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 22,
                          definition.category + " > " + definition.section + " > " + definition.label, accent);
-            painter.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 45,
+            settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 45,
                          definition.description, text);
-            std::string details = "Default: " + setting_value_to_string(definition.defaultValue);
+            std::string details = "Default: " + controller.settings_panel().value_label(definition, definition.defaultValue);
             if (definition.minimum) details += "  Min: " + std::to_string(*definition.minimum);
             if (definition.maximum) details += "  Max: " + std::to_string(*definition.maximum);
-            painter.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 68, details, muted);
+            if (definition.id == kUiZoomSettingId)
+                details = "Default: 100%  Min: 100%  Max: 200%  Step: 25%  Current window allows up to " +
+                          format_ui_zoom_percent(controller.ui_zoom_window_limit());
+            settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 68, details, muted);
             const SettingAvailability availability = controller.workspace().settings().availability(
                 definition.id, controller.settings_capabilities());
             if (!availability.available)
-                painter.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 88,
+                settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 88,
                              availability.explanation, rgb(255,190,80));
+            else if (definition.id == dve::editor::kMidiOutputPortSettingId)
+                settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 88,
+                             "Status: " + controller.midi_output_summary(),
+                             controller.midi_output_status().state == audio::MidiConnectionState::Connected
+                                 ? rgb(120,220,150) : rgb(255,190,80));
+            else if (definition.id.starts_with("midi."))
+                settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 88,
+                             "Status: " + controller.midi_input_summary(),
+                             controller.midi_input_status().state == audio::MidiConnectionState::Connected
+                                 ? rgb(120,220,150) : rgb(255,190,80));
         }
         if (!controller.settings_panel().status.empty())
-            painter.text(settingsLayout.detailPanel.x + settingsLayout.detailPanel.width / 2,
+            settingsText.text(settingsLayout.detailPanel.x + settingsLayout.detailPanel.width / 2,
                          settingsLayout.detailPanel.y + settingsLayout.detailPanel.height - 10,
                          controller.settings_panel().status, muted);
 
         painter.fill(settingsLayout.resetSettingButton, panel2);
         painter.outline(settingsLayout.resetSettingButton, border);
-        painter.text(settingsLayout.resetSettingButton.x + 12,
+        settingsText.text(settingsLayout.resetSettingButton.x + 12,
                      settingsLayout.resetSettingButton.y + settingsLayout.resetSettingButton.height - 9,
                      "Reset Option", text);
         painter.fill(settingsLayout.resetCategoryButton, panel2);
         painter.outline(settingsLayout.resetCategoryButton, border);
-        painter.text(settingsLayout.resetCategoryButton.x + 12,
+        settingsText.text(settingsLayout.resetCategoryButton.x + 12,
                      settingsLayout.resetCategoryButton.y + settingsLayout.resetCategoryButton.height - 9,
                      "Reset Category", text);
         painter.fill(settingsLayout.discardButton, panel2);
         painter.outline(settingsLayout.discardButton, border);
-        painter.text(settingsLayout.discardButton.x + 18,
+        settingsText.text(settingsLayout.discardButton.x + 18,
                      settingsLayout.discardButton.y + settingsLayout.discardButton.height - 9, "Discard", text);
         painter.fill(settingsLayout.applyButton, controller.settings_panel().dirty ? accent : panel2);
         painter.outline(settingsLayout.applyButton, border);
-        painter.text(settingsLayout.applyButton.x + 24,
+        settingsText.text(settingsLayout.applyButton.x + 24,
                      settingsLayout.applyButton.y + settingsLayout.applyButton.height - 9, "Apply", text);
-        painter.text(settingsLayout.panel.x + 310, settingsLayout.applyButton.y + 22,
-                     "Enter/F2 edits | arrows adjust | Ctrl+R resets | F3 changed | Ctrl+Tab scope", muted);
+        // Key hint between Reset Category and Discard; dropped when the footer has no room.
+        if (std::min(settingsLayout.discardButton.x, settingsLayout.applyButton.x) - 6 - (settingsLayout.panel.x + 308) >= 60)
+            settingsText.text(settingsLayout.panel.x + 310, settingsLayout.applyButton.y + 22,
+                              "Enter/F2 edits | arrows adjust | Ctrl+R resets | F3 changed | Ctrl+Tab scope", muted);
+        settingsText.draw_tooltip(rgb(16,20,28), accent, text);
     }
 
     if (controller.shortcut_panel().open) {

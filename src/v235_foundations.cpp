@@ -436,6 +436,19 @@ bool DynamicNavigationWorld::rebuild_dirty(std::string* error){
 
 std::vector<NavigationDirtyTile> DynamicNavigationWorld::dirty_tiles() const{return {dirty_.begin(),dirty_.end()};}
 
+bool dvepak_path_is_editor_only(std::string_view normalized,const DvePakBuildOptions& options) noexcept{
+    if(!options.stripEditorOnly)return false;
+    if(std::any_of(options.editorOnlyPrefixes.begin(),options.editorOnlyPrefixes.end(),[&](const auto& p){return path_has_prefix(normalized,p);}))return true;
+    // Every directory component (never the final file name) is checked against the names.
+    std::size_t start=0U;
+    for(std::size_t slash=normalized.find('/');slash!=std::string_view::npos;slash=normalized.find('/',start)){
+        const std::string_view component=normalized.substr(start,slash-start);
+        if(std::find(options.editorOnlyDirectoryNames.begin(),options.editorOnlyDirectoryNames.end(),component)!=options.editorOnlyDirectoryNames.end())return true;
+        start=slash+1U;
+    }
+    return false;
+}
+
 bool build_dvepak(const std::filesystem::path& root,std::span<const std::filesystem::path> inputs,
     const std::filesystem::path& output,const DvePakBuildOptions& options,DvePakManifest* manifest,std::string* error){
     struct Pending{std::string path;std::vector<std::byte> bytes;std::uint64_t hash{};};std::vector<Pending> pending;
@@ -444,7 +457,7 @@ bool build_dvepak(const std::filesystem::path& root,std::span<const std::filesys
         auto relative=std::filesystem::relative(absolute,root,ec);if(ec)return fail(error,"package input is outside root: "+absolute.string());
         const auto normalized=normalize_package_path(relative);
         if(normalized.empty()||path_has_prefix(normalized,"../")||normalized=="..")return fail(error,"unsafe package path: "+normalized);
-        if(options.stripEditorOnly&&std::any_of(options.editorOnlyPrefixes.begin(),options.editorOnlyPrefixes.end(),[&](const auto& p){return path_has_prefix(normalized,p);}))continue;
+        if(dvepak_path_is_editor_only(normalized,options))continue;
         auto bytes=read_file_bytes(absolute,error);if(!bytes)return false;pending.push_back({normalized,std::move(*bytes),0U});pending.back().hash=fnv_bytes(pending.back().bytes);
     }
     std::sort(pending.begin(),pending.end(),[](const auto& a,const auto& b){return a.path<b.path;});
@@ -489,7 +502,11 @@ std::optional<DvePakManifest> inspect_dvepak(const std::filesystem::path& packag
 }
 
 bool DvePakMount::mount(const std::filesystem::path& package,std::string* error){auto parsed=inspect_dvepak(package,error);if(!parsed)return false;package_=package;manifest_=std::move(*parsed);return true;}
-bool DvePakMount::contains(std::string_view path) const noexcept {return std::any_of(manifest_.entries.begin(),manifest_.entries.end(),[&](const auto& e){return e.path==path;});}
+const DvePakEntry* DvePakMount::find(std::string_view path) const noexcept{
+    const auto it=std::lower_bound(manifest_.entries.begin(),manifest_.entries.end(),path,[](const auto& e,std::string_view p){return e.path<p;});
+    return it==manifest_.entries.end()||it->path!=path?nullptr:&*it;
+}
+bool DvePakMount::contains(std::string_view path) const noexcept {return find(path)!=nullptr;}
 std::optional<std::vector<std::byte>> DvePakMount::read(std::string_view path,std::string* error) const{
     const auto it=std::lower_bound(manifest_.entries.begin(),manifest_.entries.end(),path,[](const auto& e,std::string_view p){return e.path<p;});
     if(it==manifest_.entries.end()||it->path!=path)return fail(error,"package entry not found"),std::nullopt;
@@ -553,21 +570,636 @@ const AssetDependencyNode* AssetDependencyGraph::find(std::string_view id)const 
 
 std::vector<SourceFingerprint> SourceMonitor::poll(std::span<const std::filesystem::path> files,bool hashContents){std::vector<SourceFingerprint> changed;for(const auto& path:files){std::error_code ec;if(!std::filesystem::is_regular_file(path,ec))continue;SourceFingerprint current;current.path=path;current.size=std::filesystem::file_size(path,ec);if(ec)continue;current.modifiedTicks=std::filesystem::last_write_time(path,ec).time_since_epoch().count();if(ec)continue;if(hashContents){auto bytes=read_file_bytes(path,nullptr);if(!bytes)continue;current.contentHash=fnv_bytes(*bytes);}const auto it=known_.find(path);if(it==known_.end()||it->second.size!=current.size||it->second.modifiedTicks!=current.modifiedTicks||it->second.contentHash!=current.contentHash)changed.push_back(current);known_[path]=current;}std::sort(changed.begin(),changed.end(),[](const auto& a,const auto& b){return a.path.generic_string()<b.path.generic_string();});return changed;}
 
-bool InputActionSystem::set_context(InputContext context,std::string* error){if(context.name.empty())return fail(error,"input context name is empty");for(const auto& binding:context.bindings)if(binding.action.empty()||binding.primary.empty()||!std::isfinite(binding.scale)||!std::isfinite(binding.holdSeconds)||!std::isfinite(binding.doubleTapSeconds))return fail(error,"input binding is invalid");contexts_[context.name]=std::move(context);return true;}
-bool InputActionSystem::remove_context(std::string_view name){return contexts_.erase(std::string(name))!=0U;}
-void InputActionSystem::begin_frame(float deltaSeconds){if(!std::isfinite(deltaSeconds)||deltaSeconds<0.0F)deltaSeconds=0.0F;actions_.clear();for(auto& [name,state]:history_){state.previous=state.current;state.current=controls_[name];if(state.current>0.5F)state.heldSeconds+=deltaSeconds;else{if(state.previous>0.5F){state.sinceRelease=0.0F;state.releasedHeldSeconds=state.heldSeconds;}else state.sinceRelease+=deltaSeconds;state.heldSeconds=0.0F;}}for(const auto& [name,value]:controls_)if(!history_.contains(name)){auto& h=history_[name];h.current=value;h.previous=0.0F;h.heldSeconds=value>0.5F?deltaSeconds:0.0F;}
-    std::vector<const InputContext*> ordered;for(const auto& [name,context]:contexts_)if(context.enabled)ordered.push_back(&context);std::sort(ordered.begin(),ordered.end(),[](auto* a,auto* b){return a->priority!=b->priority?a->priority>b->priority:a->name<b->name;});std::set<std::string> consumed;
-    for(const auto* context:ordered)for(const auto& binding:context->bindings){if(consumed.contains(binding.primary))continue;const auto& h=history_[binding.primary];const bool chord=std::all_of(binding.chord.begin(),binding.chord.end(),[&](const auto& key){return history_[key].current>0.5F;});if(!chord)continue;const bool down=h.current>0.5F,pressed=down&&h.previous<=0.5F,released=!down&&h.previous>0.5F;bool fire=false,held=false;switch(binding.trigger){case InputTrigger::Press:fire=pressed;break;case InputTrigger::Release:fire=released;break;case InputTrigger::Hold:fire=held=down&&h.heldSeconds>=binding.holdSeconds;break;case InputTrigger::Tap:fire=released&&h.releasedHeldSeconds<=binding.holdSeconds;break;case InputTrigger::DoubleTap:fire=pressed&&h.sinceRelease<=binding.doubleTapSeconds;break;}if(fire||down){auto& action=actions_[binding.action];action.value+=h.current*binding.scale;action.pressed|=fire&&(binding.trigger==InputTrigger::Press||binding.trigger==InputTrigger::DoubleTap||binding.trigger==InputTrigger::Tap);action.released|=fire&&binding.trigger==InputTrigger::Release;action.held|=held;if(context->consume)consumed.insert(binding.primary);}}
-}
-const InputActionState* InputActionSystem::action(std::string_view name)const noexcept{const auto it=actions_.find(name);return it==actions_.end()?nullptr:&it->second;}
-std::vector<std::string> InputActionSystem::conflicts(const InputBinding& candidate)const{std::vector<std::string> out;for(const auto& [name,context]:contexts_)for(const auto& binding:context.bindings)if(binding.primary==candidate.primary&&binding.chord==candidate.chord)out.push_back(name+":"+binding.action);return out;}
-bool InputActionSystem::rebind(std::string_view contextName,std::string_view actionName,InputBinding replacement,bool allowConflict,std::string* error){auto it=contexts_.find(contextName);if(it==contexts_.end())return fail(error,"input context was not found");if(!allowConflict&&!conflicts(replacement).empty())return fail(error,"input binding conflicts with an existing binding");for(auto& binding:it->second.bindings)if(binding.action==actionName){replacement.action=std::string(actionName);binding=std::move(replacement);return true;}return fail(error,"input action was not found");}
-bool InputActionSystem::save_bindings(const std::filesystem::path& path,std::string* error)const{std::ofstream out(path,std::ios::trunc);if(!out)return fail(error,"could not save input bindings");for(const auto& [name,context]:contexts_)for(const auto& binding:context.bindings){auto valid=[](std::string_view s){return s.find_first_of("\t\r\n")==std::string_view::npos;};if(!valid(name)||!valid(binding.action)||!valid(binding.primary))return fail(error,"input binding contains an unsupported control character");out<<name<<'\t'<<context.priority<<'\t'<<context.enabled<<'\t'<<context.consume<<'\t'<<binding.action<<'\t'<<binding.primary<<'\t'<<static_cast<int>(binding.trigger)<<'\t'<<binding.holdSeconds<<'\t'<<binding.doubleTapSeconds<<'\t'<<binding.scale<<'\t';for(std::size_t i=0;i<binding.chord.size();++i){if(i)out<<',';out<<binding.chord[i];}out<<'\n';}return static_cast<bool>(out)||fail(error,"could not finalize input bindings");}
-bool InputActionSystem::load_bindings(const std::filesystem::path& path,std::string* error){std::ifstream in(path);if(!in)return fail(error,"could not load input bindings");std::map<std::string,InputContext,std::less<>> loaded;std::string line;while(std::getline(in,line)){std::vector<std::string> fields;std::size_t start=0;for(;;){const auto tab=line.find('\t',start);fields.push_back(line.substr(start,tab-start));if(tab==std::string::npos)break;start=tab+1;}if(fields.size()!=11U)return fail(error,"malformed input binding file");try{auto& context=loaded[fields[0]];context.name=fields[0];context.priority=std::stoi(fields[1]);context.enabled=std::stoi(fields[2])!=0;context.consume=std::stoi(fields[3])!=0;InputBinding binding;binding.action=fields[4];binding.primary=fields[5];binding.trigger=static_cast<InputTrigger>(std::stoi(fields[6]));binding.holdSeconds=std::stof(fields[7]);binding.doubleTapSeconds=std::stof(fields[8]);binding.scale=std::stof(fields[9]);std::size_t pos=0;while(pos<fields[10].size()){const auto comma=fields[10].find(',',pos);binding.chord.push_back(fields[10].substr(pos,comma-pos));if(comma==std::string::npos)break;pos=comma+1;}context.bindings.push_back(std::move(binding));}catch(...){return fail(error,"malformed numeric input binding field");}}contexts_=std::move(loaded);return true;}
+namespace {
 
-bool SaveGameStore::register_migration(std::uint32_t fromVersion,SaveMigration migration,std::string* error){if(fromVersion>=currentVersion_||!migration||migrations_.contains(fromVersion))return fail(error,"save migration registration is invalid");migrations_[fromVersion]=std::move(migration);return true;}
-bool SaveGameStore::write_atomic(const std::filesystem::path& slot,SaveGameDocument document,std::string* error)const{document.schemaVersion=currentVersion_;std::filesystem::create_directories(slot.parent_path());auto temp=slot;temp+=".tmp";std::ofstream out(temp,std::ios::binary|std::ios::trunc);if(!out)return fail(error,"could not create save file");out.write(kSaveMagic.data(),kSaveMagic.size());const std::uint32_t count=static_cast<std::uint32_t>(document.sections.size());std::uint64_t hash=1469598103934665603ULL;for(const auto& [name,bytes]:document.sections){fnv_mix(hash,name);const auto sectionHash=fnv_bytes(bytes);for(unsigned shift=0;shift<64;shift+=8){hash^=static_cast<std::uint8_t>(sectionHash>>shift);hash*=1099511628211ULL;}}if(!write_value(out,document.schemaVersion)||!write_value(out,document.sequence)||!write_value(out,count)||!write_value(out,hash))return fail(error,"could not write save header");for(const auto& [name,bytes]:document.sections){const auto length=static_cast<std::uint32_t>(name.size());const auto size=static_cast<std::uint64_t>(bytes.size());const auto sectionHash=fnv_bytes(bytes);if(!write_value(out,length)||!write_value(out,size)||!write_value(out,sectionHash))return fail(error,"could not write save directory");out.write(name.data(),length);if(!bytes.empty())out.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));if(!out)return fail(error,"could not write save payload");}out.close();if(!out)return fail(error,"could not finalize save");std::error_code ec;auto backup=slot;backup+=".bak";if(std::filesystem::exists(slot)){std::filesystem::remove(backup,ec);ec.clear();std::filesystem::rename(slot,backup,ec);if(ec)return fail(error,"could not rotate save backup");}std::filesystem::rename(temp,slot,ec);if(ec)return fail(error,"could not publish save: "+ec.message());return true;}
-std::optional<SaveGameDocument> SaveGameStore::read_recover(const std::filesystem::path& slot,std::string* error)const{auto load=[&](const std::filesystem::path& path)->std::optional<SaveGameDocument>{std::ifstream in(path,std::ios::binary);if(!in)return std::nullopt;std::array<char,8> magic{};in.read(magic.data(),magic.size());SaveGameDocument doc;std::uint32_t count{};std::uint64_t expected{};if(magic!=kSaveMagic||!read_value(in,doc.schemaVersion)||!read_value(in,doc.sequence)||!read_value(in,count)||!read_value(in,expected)||count>100000U)return std::nullopt;std::uint64_t actual=1469598103934665603ULL;for(std::uint32_t i=0;i<count;++i){std::uint32_t length{};std::uint64_t size{},sectionHash{};if(!read_value(in,length)||!read_value(in,size)||!read_value(in,sectionHash)||length==0U||length>1U*1024U*1024U||size>1ULL*1024ULL*1024ULL*1024ULL)return std::nullopt;std::string name(length,'\0');in.read(name.data(),length);std::vector<std::byte> bytes(static_cast<std::size_t>(size));if(!bytes.empty())in.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));if(!in||fnv_bytes(bytes)!=sectionHash||doc.sections.contains(name))return std::nullopt;fnv_mix(actual,name);for(unsigned shift=0;shift<64;shift+=8){actual^=static_cast<std::uint8_t>(sectionHash>>shift);actual*=1099511628211ULL;}doc.sections.emplace(std::move(name),std::move(bytes));}if(actual!=expected)return std::nullopt;return doc;};auto document=load(slot);if(!document){auto backup=slot;backup+=".bak";document=load(backup);}if(!document)return fail(error,"save and backup are unreadable"),std::nullopt;if(document->schemaVersion>currentVersion_)return fail(error,"save was written by a newer schema"),std::nullopt;while(document->schemaVersion<currentVersion_){const auto it=migrations_.find(document->schemaVersion);if(it==migrations_.end())return fail(error,"missing save migration"),std::nullopt;const auto before=document->schemaVersion;if(!it->second(*document,error))return std::nullopt;if(document->schemaVersion!=before+1U)return fail(error,"save migration did not advance exactly one version"),std::nullopt;}return document;}
+std::vector<std::string> input_activation_controls(const InputBinding& binding) {
+    std::vector<std::string> controls;
+    if (!binding.primary.empty()) controls.push_back(binding.primary);
+    for (const auto& part : binding.composite) controls.push_back(part.control);
+    std::sort(controls.begin(), controls.end());
+    controls.erase(std::unique(controls.begin(), controls.end()), controls.end());
+    return controls;
+}
+
+bool normalize_input_binding(InputBinding& binding, std::string* error) {
+    const bool usesPrimary = !binding.primary.empty();
+    const bool usesComposite = !binding.composite.empty();
+    if (binding.action.empty() || usesPrimary == usesComposite)
+        return fail(error, "input binding must have an action and exactly one primary or composite source");
+    if (!std::isfinite(binding.scale) || std::abs(binding.scale) <= kEpsilon ||
+        !std::isfinite(binding.holdSeconds) || binding.holdSeconds < 0.0F ||
+        !std::isfinite(binding.doubleTapSeconds) || binding.doubleTapSeconds < 0.0F ||
+        !std::isfinite(binding.actuationThreshold) || binding.actuationThreshold <= 0.0F)
+        return fail(error, "input binding timing, scale, or actuation threshold is invalid");
+    if (static_cast<unsigned>(binding.trigger) > static_cast<unsigned>(InputTrigger::DoubleTap))
+        return fail(error, "input binding trigger is invalid");
+    if (usesComposite) {
+        if (binding.composite.size() < 2U)
+            return fail(error, "input composite requires at least two parts");
+        std::sort(binding.composite.begin(), binding.composite.end(), [](const auto& a, const auto& b) {
+            return a.control < b.control;
+        });
+        for (std::size_t index = 0; index < binding.composite.size(); ++index) {
+            const auto& part = binding.composite[index];
+            if (part.control.empty() || !std::isfinite(part.scale) || std::abs(part.scale) <= kEpsilon)
+                return fail(error, "input composite part is invalid");
+            if (index != 0U && binding.composite[index - 1U].control == part.control)
+                return fail(error, "input composite contains a duplicate control");
+        }
+    }
+    std::sort(binding.chord.begin(), binding.chord.end());
+    if (std::any_of(binding.chord.begin(), binding.chord.end(), [](const auto& control) { return control.empty(); }) ||
+        std::adjacent_find(binding.chord.begin(), binding.chord.end()) != binding.chord.end())
+        return fail(error, "input chord contains an empty or duplicate control");
+    const auto activation = input_activation_controls(binding);
+    for (const auto& modifier : binding.chord)
+        if (std::binary_search(activation.begin(), activation.end(), modifier))
+            return fail(error, "input chord cannot also be an activation control");
+    return true;
+}
+
+bool input_bindings_overlap(const InputBinding& first, const InputBinding& second) {
+    if (first.chord != second.chord) return false;
+    const auto firstControls = input_activation_controls(first);
+    const auto secondControls = input_activation_controls(second);
+    std::vector<std::string> intersection;
+    std::set_intersection(firstControls.begin(), firstControls.end(), secondControls.begin(),
+                          secondControls.end(), std::back_inserter(intersection));
+    return !intersection.empty();
+}
+
+std::string input_history_key(std::string_view context, std::size_t bindingIndex) {
+    return std::string(context) + '\x1f' + std::to_string(bindingIndex);
+}
+
+float input_control_value(const std::map<std::string, float, std::less<>>& controls,
+                          std::string_view control) {
+    const auto found = controls.find(control);
+    return found == controls.end() ? 0.0F : found->second;
+}
+
+std::vector<std::string> split_input_fields(const std::string& line, char separator) {
+    std::vector<std::string> fields;
+    std::size_t start = 0U;
+    for (;;) {
+        const auto end = line.find(separator, start);
+        fields.push_back(line.substr(start, end - start));
+        if (end == std::string::npos) break;
+        start = end + 1U;
+    }
+    return fields;
+}
+
+template <class Number, class Parser>
+bool parse_input_number(std::string_view text, Number& output, Parser parser) {
+    try {
+        std::size_t consumed{};
+        const std::string owned(text);
+        output = parser(owned, &consumed);
+        return consumed == owned.size();
+    } catch (...) {
+        return false;
+    }
+}
+
+} // namespace
+
+bool InputActionSystem::set_context(InputContext context, std::string* error) {
+    if (context.name.empty()) return fail(error, "input context name is empty");
+    for (auto& binding : context.bindings)
+        if (!normalize_input_binding(binding, error)) return false;
+    const std::string contextName = context.name;
+    const std::string historyPrefix = contextName + '\x1f';
+    for (auto it = bindingHistory_.begin(); it != bindingHistory_.end();)
+        if (it->first.starts_with(historyPrefix)) it = bindingHistory_.erase(it); else ++it;
+    contexts_[contextName] = std::move(context);
+    return true;
+}
+
+bool InputActionSystem::remove_context(std::string_view name) {
+    const std::string historyPrefix = std::string(name) + '\x1f';
+    for (auto it = bindingHistory_.begin(); it != bindingHistory_.end();)
+        if (it->first.starts_with(historyPrefix)) it = bindingHistory_.erase(it); else ++it;
+    return contexts_.erase(std::string(name)) != 0U;
+}
+
+void InputActionSystem::set_control(std::string control, float value) {
+    if (control.empty()) return;
+    controls_[std::move(control)] = std::isfinite(value) ? value : 0.0F;
+}
+
+void InputActionSystem::begin_frame(float deltaSeconds) {
+    if (!std::isfinite(deltaSeconds) || deltaSeconds < 0.0F) deltaSeconds = 0.0F;
+    actions_.clear();
+    std::vector<const InputContext*> ordered;
+    for (const auto& [name, context] : contexts_) {
+        if (context.enabled) ordered.push_back(&context);
+        else for (std::size_t bindingIndex = 0; bindingIndex < context.bindings.size(); ++bindingIndex)
+            bindingHistory_.erase(input_history_key(name, bindingIndex));
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto* a, const auto* b) {
+        return a->priority != b->priority ? a->priority > b->priority : a->name < b->name;
+    });
+    std::set<std::string> consumed;
+    for (const auto* context : ordered) {
+        for (std::size_t bindingIndex = 0; bindingIndex < context->bindings.size(); ++bindingIndex) {
+            const auto& binding = context->bindings[bindingIndex];
+            const auto activationControls = input_activation_controls(binding);
+            const bool suppressed = std::any_of(activationControls.begin(), activationControls.end(),
+                [&](const auto& control) { return consumed.contains(control); });
+            auto& history = bindingHistory_[input_history_key(context->name, bindingIndex)];
+            if (suppressed) {
+                history = {};
+                continue;
+            }
+            const bool chordActive = std::all_of(binding.chord.begin(), binding.chord.end(),
+                [&](const auto& control) { return std::abs(input_control_value(controls_, control)) >= 0.5F; });
+            float sourceValue{};
+            if (chordActive) {
+                if (binding.composite.empty()) sourceValue = input_control_value(controls_, binding.primary);
+                else for (const auto& part : binding.composite)
+                    sourceValue += input_control_value(controls_, part.control) * part.scale;
+            }
+            const float value = sourceValue * binding.scale;
+            history.previousDown = history.currentDown;
+            history.currentDown = std::abs(sourceValue) >= binding.actuationThreshold;
+            const bool pressed = history.currentDown && !history.previousDown;
+            const bool released = !history.currentDown && history.previousDown;
+            if (history.currentDown) history.heldSeconds += deltaSeconds;
+            else {
+                if (released) {
+                    history.sinceRelease = 0.0F;
+                    history.releasedHeldSeconds = history.heldSeconds;
+                } else history.sinceRelease += deltaSeconds;
+                history.heldSeconds = 0.0F;
+            }
+            bool fire{};
+            bool held{};
+            switch (binding.trigger) {
+                case InputTrigger::Press: fire = pressed; break;
+                case InputTrigger::Release: fire = released; break;
+                case InputTrigger::Hold:
+                    held = history.currentDown && history.heldSeconds >= binding.holdSeconds;
+                    fire = held;
+                    break;
+                case InputTrigger::Tap:
+                    fire = released && history.releasedHeldSeconds <= binding.holdSeconds;
+                    break;
+                case InputTrigger::DoubleTap:
+                    fire = pressed && history.sinceRelease <= binding.doubleTapSeconds;
+                    break;
+            }
+            if (std::abs(value) > kEpsilon || fire || held) {
+                auto& action = actions_[binding.action];
+                action.value += value;
+                action.pressed |= fire && (binding.trigger == InputTrigger::Press ||
+                    binding.trigger == InputTrigger::Tap || binding.trigger == InputTrigger::DoubleTap);
+                action.released |= fire && binding.trigger == InputTrigger::Release;
+                action.held |= held;
+            }
+            if (context->consume && (history.currentDown || fire))
+                consumed.insert(activationControls.begin(), activationControls.end());
+        }
+    }
+}
+
+const InputActionState* InputActionSystem::action(std::string_view name) const noexcept {
+    const auto it = actions_.find(name);
+    return it == actions_.end() ? nullptr : &it->second;
+}
+
+std::vector<std::string> InputActionSystem::conflicts(const InputBinding& candidateValue) const {
+    InputBinding candidate = candidateValue;
+    if (candidate.action.empty()) candidate.action = "conflict-candidate";
+    if (!normalize_input_binding(candidate, nullptr)) return {};
+    std::vector<std::string> out;
+    for (const auto& [name, context] : contexts_)
+        for (const auto& binding : context.bindings)
+            if (input_bindings_overlap(binding, candidate)) out.push_back(name + ":" + binding.action);
+    return out;
+}
+
+bool InputActionSystem::rebind(std::string_view contextName, std::string_view actionName,
+                               InputBinding replacement, bool allowConflict, std::string* error) {
+    auto context = contexts_.find(contextName);
+    if (context == contexts_.end()) return fail(error, "input context was not found");
+    auto target = std::find_if(context->second.bindings.begin(), context->second.bindings.end(),
+        [&](const auto& binding) { return binding.action == actionName; });
+    if (target == context->second.bindings.end()) return fail(error, "input action was not found");
+    replacement.action = std::string(actionName);
+    if (!normalize_input_binding(replacement, error)) return false;
+    if (!allowConflict) {
+        for (const auto& [name, existingContext] : contexts_)
+            for (const auto& binding : existingContext.bindings) {
+                if (&binding == &*target) continue;
+                if (input_bindings_overlap(binding, replacement))
+                    return fail(error, "input binding conflicts with " + name + ":" + binding.action);
+            }
+    }
+    *target = std::move(replacement);
+    bindingHistory_.erase(input_history_key(contextName,
+        static_cast<std::size_t>(std::distance(context->second.bindings.begin(), target))));
+    return true;
+}
+
+bool InputActionSystem::save_bindings(const std::filesystem::path& path, std::string* error) const {
+    const auto validCommon = [](std::string_view text) {
+        return !text.empty() && text.find_first_of("\t\r\n") == std::string_view::npos;
+    };
+    for (const auto& [name, context] : contexts_) for (const auto& binding : context.bindings) {
+        if (!validCommon(name) || !validCommon(binding.action) ||
+            (!binding.primary.empty() && !validCommon(binding.primary)))
+            return fail(error, "input binding contains an unsupported control character");
+        for (const auto& control : binding.chord)
+            if (!validCommon(control) || control.find(',') != std::string::npos)
+                return fail(error, "input chord contains an unsupported separator");
+        for (const auto& part : binding.composite)
+            if (!validCommon(part.control) || part.control.find_first_of(";=") != std::string::npos)
+                return fail(error, "input composite contains an unsupported separator");
+    }
+    auto temporary = path;
+    temporary += ".tmp";
+    std::ofstream out(temporary, std::ios::trunc);
+    if (!out) return fail(error, "could not save input bindings");
+    out << "DVE_INPUT_BINDINGS\t2\n" << std::setprecision(std::numeric_limits<float>::max_digits10);
+    for (const auto& [name, context] : contexts_) for (const auto& binding : context.bindings) {
+        out << name << '\t' << context.priority << '\t' << context.enabled << '\t' << context.consume
+            << '\t' << binding.action << '\t' << binding.primary << '\t' << static_cast<int>(binding.trigger)
+            << '\t' << binding.holdSeconds << '\t' << binding.doubleTapSeconds << '\t' << binding.scale << '\t';
+        for (std::size_t index = 0; index < binding.chord.size(); ++index) {
+            if (index != 0U) out << ',';
+            out << binding.chord[index];
+        }
+        out << '\t' << binding.actuationThreshold << '\t';
+        for (std::size_t index = 0; index < binding.composite.size(); ++index) {
+            const auto& part = binding.composite[index];
+            if (index != 0U) out << ';';
+            out << part.control << '=' << part.scale;
+        }
+        out << '\n';
+    }
+    out.close();
+    if (!out) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        return fail(error, "could not finalize input bindings");
+    }
+    std::error_code ec;
+    std::filesystem::rename(temporary, path, ec);
+    if (!ec) return true;
+    auto backup = path;
+    backup += ".bak";
+    ec.clear();
+    std::filesystem::remove(backup, ec);
+    ec.clear();
+    if (std::filesystem::exists(path)) std::filesystem::rename(path, backup, ec);
+    if (!ec) std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::error_code restoreError;
+        if (!std::filesystem::exists(path) && std::filesystem::exists(backup))
+            std::filesystem::rename(backup, path, restoreError);
+        std::filesystem::remove(temporary, restoreError);
+        return fail(error, "could not publish input bindings: " + ec.message());
+    }
+    std::filesystem::remove(backup, ec);
+    return true;
+}
+
+bool InputActionSystem::load_bindings(const std::filesystem::path& path, std::string* error) {
+    std::ifstream in(path);
+    if (!in) return fail(error, "could not load input bindings");
+    std::map<std::string, InputContext, std::less<>> loaded;
+    std::string line;
+    bool firstLine = true;
+    int formatVersion = 1;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (firstLine && line.starts_with("DVE_INPUT_BINDINGS\t")) {
+            firstLine = false;
+            if (line != "DVE_INPUT_BINDINGS\t2") return fail(error, "unsupported input binding version");
+            formatVersion = 2;
+            continue;
+        }
+        firstLine = false;
+        if (line.empty()) continue;
+        const auto fields = split_input_fields(line, '\t');
+        const std::size_t expectedFields = formatVersion == 2 ? 13U : 11U;
+        if (fields.size() != expectedFields)
+            return fail(error, "malformed input binding file");
+        int priority{}, enabled{}, consume{}, trigger{};
+        float hold{}, doubleTap{}, scale{}, threshold{0.5F};
+        const auto parseInt = [](const std::string& value, std::size_t* consumed) { return std::stoi(value, consumed); };
+        const auto parseFloat = [](const std::string& value, std::size_t* consumed) { return std::stof(value, consumed); };
+        if (!parse_input_number(fields[1], priority, parseInt) ||
+            !parse_input_number(fields[2], enabled, parseInt) ||
+            !parse_input_number(fields[3], consume, parseInt) ||
+            !parse_input_number(fields[6], trigger, parseInt) ||
+            !parse_input_number(fields[7], hold, parseFloat) ||
+            !parse_input_number(fields[8], doubleTap, parseFloat) ||
+            !parse_input_number(fields[9], scale, parseFloat) ||
+            (fields.size() == 13U && !parse_input_number(fields[11], threshold, parseFloat)) ||
+            (enabled != 0 && enabled != 1) || (consume != 0 && consume != 1))
+            return fail(error, "malformed numeric input binding field");
+        InputBinding binding;
+        binding.action = fields[4];
+        binding.primary = fields[5];
+        binding.trigger = static_cast<InputTrigger>(trigger);
+        binding.holdSeconds = hold;
+        binding.doubleTapSeconds = doubleTap;
+        binding.scale = scale;
+        binding.actuationThreshold = threshold;
+        if (!fields[10].empty()) binding.chord = split_input_fields(fields[10], ',');
+        if (fields.size() == 13U && !fields[12].empty()) {
+            for (const auto& encoded : split_input_fields(fields[12], ';')) {
+                const auto equals = encoded.rfind('=');
+                if (equals == std::string::npos) return fail(error, "malformed input composite part");
+                InputCompositePart part;
+                part.control = encoded.substr(0U, equals);
+                if (!parse_input_number(std::string_view(encoded).substr(equals + 1U), part.scale, parseFloat))
+                    return fail(error, "malformed input composite scale");
+                binding.composite.push_back(std::move(part));
+            }
+        }
+        auto [contextIt, inserted] = loaded.try_emplace(fields[0]);
+        auto& context = contextIt->second;
+        if (inserted) {
+            context.name = fields[0];
+            context.priority = priority;
+            context.enabled = enabled != 0;
+            context.consume = consume != 0;
+        } else if (context.priority != priority || context.enabled != (enabled != 0) ||
+                   context.consume != (consume != 0)) {
+            return fail(error, "input context records disagree");
+        }
+        context.bindings.push_back(std::move(binding));
+    }
+    for (auto& [name, context] : loaded) {
+        (void)name;
+        for (auto& binding : context.bindings)
+            if (!normalize_input_binding(binding, error)) return false;
+    }
+    contexts_ = std::move(loaded);
+    bindingHistory_.clear();
+    actions_.clear();
+    return true;
+}
+
+namespace {
+
+void save_put_u32(std::vector<std::byte>& out, std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32U; shift += 8U) out.push_back(static_cast<std::byte>((value >> shift) & 0xFFU));
+}
+void save_put_u64(std::vector<std::byte>& out, std::uint64_t value) {
+    for (unsigned shift = 0; shift < 64U; shift += 8U) out.push_back(static_cast<std::byte>((value >> shift) & 0xFFU));
+}
+void save_mix_hash(std::uint64_t& hash, std::uint64_t value) noexcept {
+    for (unsigned shift = 0; shift < 64U; shift += 8U) {
+        hash ^= static_cast<std::uint8_t>(value >> shift);
+        hash *= 1099511628211ULL;
+    }
+}
+std::uint64_t save_document_hash(const SaveGameDocument& document) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const auto& [name, bytes] : document.sections) {
+        fnv_mix(hash, name);
+        save_mix_hash(hash, fnv_bytes(bytes));
+    }
+    return hash;
+}
+
+class SaveReader {
+public:
+    explicit SaveReader(std::span<const std::byte> bytes) : bytes_(bytes) {}
+    [[nodiscard]] std::uint64_t remaining() const noexcept { return bytes_.size() - offset_; }
+    bool u32(std::uint32_t& value) {
+        if (remaining() < 4U) return false;
+        value = 0U;
+        for (unsigned i = 0; i < 4U; ++i) value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes_[offset_ + i])) << (8U * i);
+        offset_ += 4U;
+        return true;
+    }
+    bool u64(std::uint64_t& value) {
+        if (remaining() < 8U) return false;
+        value = 0U;
+        for (unsigned i = 0; i < 8U; ++i) value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes_[offset_ + i])) << (8U * i);
+        offset_ += 8U;
+        return true;
+    }
+    std::span<const std::byte> take(std::uint64_t count) {
+        const auto view = bytes_.subspan(offset_, static_cast<std::size_t>(count));
+        offset_ += static_cast<std::size_t>(count);
+        return view;
+    }
+private:
+    std::span<const std::byte> bytes_;
+    std::size_t offset_{};
+};
+
+} // namespace
+
+std::vector<std::byte> encode_save_game_document(const SaveGameDocument& document) {
+    std::uint64_t total = kSaveMagic.size() + 4U + 8U + 4U + 8U;
+    for (const auto& [name, bytes] : document.sections) total += 4U + 8U + 8U + name.size() + bytes.size();
+    std::vector<std::byte> out;
+    out.reserve(static_cast<std::size_t>(total));
+    for (const char c : kSaveMagic) out.push_back(static_cast<std::byte>(c));
+    save_put_u32(out, document.schemaVersion);
+    save_put_u64(out, document.sequence);
+    save_put_u32(out, static_cast<std::uint32_t>(document.sections.size()));
+    save_put_u64(out, save_document_hash(document));
+    for (const auto& [name, bytes] : document.sections) {
+        save_put_u32(out, static_cast<std::uint32_t>(name.size()));
+        save_put_u64(out, bytes.size());
+        save_put_u64(out, fnv_bytes(bytes));
+        for (const char c : name) out.push_back(static_cast<std::byte>(c));
+        out.insert(out.end(), bytes.begin(), bytes.end());
+    }
+    return out;
+}
+
+std::optional<SaveGameDocument> decode_save_game_document(
+    std::span<const std::byte> bytes, const SaveGameLimits& limits, std::string* error) {
+    const auto reject = [&](std::string message) -> std::optional<SaveGameDocument> {
+        return fail(error, std::move(message)), std::nullopt;
+    };
+    if (bytes.size() > limits.maximumFileBytes)
+        return reject("save file is " + std::to_string(bytes.size()) + " bytes, over the " +
+                      std::to_string(limits.maximumFileBytes) + "-byte limit");
+    if (bytes.size() < kSaveMagic.size() ||
+        !std::equal(kSaveMagic.begin(), kSaveMagic.end(), bytes.begin(),
+                    [](char a, std::byte b) { return static_cast<std::byte>(a) == b; }))
+        return reject("not a DVESAVE1 save file (bad magic)");
+    SaveReader reader(bytes.subspan(kSaveMagic.size()));
+    SaveGameDocument document;
+    std::uint32_t count{};
+    std::uint64_t expected{};
+    if (!reader.u32(document.schemaVersion) || !reader.u64(document.sequence) || !reader.u32(count) || !reader.u64(expected))
+        return reject("save file is truncated (header)");
+    if (count > limits.maximumSections)
+        return reject("save file declares " + std::to_string(count) + " sections, over the limit of " +
+                      std::to_string(limits.maximumSections));
+    for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t length{};
+        std::uint64_t size{};
+        std::uint64_t sectionHash{};
+        if (!reader.u32(length) || !reader.u64(size) || !reader.u64(sectionHash))
+            return reject("save file is truncated (section " + std::to_string(index) + " header)");
+        if (length == 0U || length > limits.maximumSectionNameBytes)
+            return reject("save section " + std::to_string(index) + " has an invalid name length");
+        if (size > limits.maximumSectionBytes)
+            return reject("save section " + std::to_string(index) + " is " + std::to_string(size) +
+                          " bytes, over the " + std::to_string(limits.maximumSectionBytes) + "-byte limit");
+        if (reader.remaining() < length || reader.remaining() - length < size)
+            return reject("save file is truncated (section " + std::to_string(index) + " needs " +
+                          std::to_string(length + size) + " bytes, " + std::to_string(reader.remaining()) + " left)");
+        const auto nameBytes = reader.take(length);
+        std::string name(length, '\0');
+        std::memcpy(name.data(), nameBytes.data(), length);
+        const auto payload = reader.take(size);
+        if (fnv_bytes(payload) != sectionHash) return reject("save section '" + name + "' failed its hash check");
+        if (!document.sections.empty() && !(document.sections.rbegin()->first < name)) {
+            if (document.sections.contains(name)) return reject("save section '" + name + "' appears twice");
+            return reject("save sections are not in canonical order");
+        }
+        document.sections.emplace_hint(document.sections.end(), std::move(name),
+                                       std::vector<std::byte>(payload.begin(), payload.end()));
+    }
+    if (reader.remaining() != 0U)
+        return reject("save file has " + std::to_string(reader.remaining()) + " trailing bytes");
+    if (save_document_hash(document) != expected) return reject("save file failed its document hash check");
+    return document;
+}
+
+bool SaveGameStore::register_migration(std::uint32_t fromVersion, SaveMigration migration, std::string* error) {
+    if (fromVersion >= currentVersion_ || !migration || migrations_.contains(fromVersion))
+        return fail(error, "save migration registration is invalid");
+    migrations_[fromVersion] = std::move(migration);
+    return true;
+}
+
+bool SaveGameStore::migrate(SaveGameDocument& document, std::uint32_t* migrationsApplied, std::string* error) const {
+    std::uint32_t applied = 0U;
+    if (document.schemaVersion > currentVersion_)
+        return fail(error, "save was written by a newer schema (version " + std::to_string(document.schemaVersion) +
+                               ", this build reads up to " + std::to_string(currentVersion_) + ")");
+    while (document.schemaVersion < currentVersion_) {
+        const auto it = migrations_.find(document.schemaVersion);
+        if (it == migrations_.end())
+            return fail(error, "missing save migration from schema version " + std::to_string(document.schemaVersion));
+        const auto before = document.schemaVersion;
+        std::string stepError;
+        if (!it->second(document, &stepError))
+            return fail(error, "save migration from schema version " + std::to_string(before) + " failed" +
+                                   (stepError.empty() ? std::string() : ": " + stepError));
+        if (document.schemaVersion != before + 1U)
+            return fail(error, "save migration did not advance exactly one version");
+        ++applied;
+    }
+    if (migrationsApplied) *migrationsApplied = applied;
+    return true;
+}
+
+bool SaveGameStore::write_atomic(const std::filesystem::path& slot, SaveGameDocument document, std::string* error,
+                                 std::uint64_t* writtenBytes) const {
+    document.schemaVersion = currentVersion_;
+    for (const auto& [name, bytes] : document.sections) {
+        if (name.empty() || name.size() > limits_.maximumSectionNameBytes || bytes.size() > limits_.maximumSectionBytes)
+            return fail(error, "save section '" + name + "' exceeds the save limits");
+    }
+    if (document.sections.size() > limits_.maximumSections) return fail(error, "save has too many sections");
+    const std::vector<std::byte> bytes = encode_save_game_document(document);
+    if (bytes.size() > limits_.maximumFileBytes)
+        return fail(error, "save is " + std::to_string(bytes.size()) + " bytes, over the " +
+                               std::to_string(limits_.maximumFileBytes) + "-byte limit");
+    std::error_code ec;
+    if (slot.has_parent_path()) {
+        std::filesystem::create_directories(slot.parent_path(), ec);
+        if (ec) return fail(error, "could not create save folder: " + ec.message());
+    }
+    auto temp = slot;
+    temp += ".tmp";
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) return fail(error, "could not create save file");
+        if (!bytes.empty()) out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        out.close();
+        if (!out) {
+            std::filesystem::remove(temp, ec);
+            return fail(error, "could not write save file");
+        }
+    }
+    auto backup = slot;
+    backup += ".bak";
+    if (std::filesystem::exists(slot, ec)) {
+        std::filesystem::remove(backup, ec);
+        ec.clear();
+        std::filesystem::rename(slot, backup, ec);
+        if (ec) return fail(error, "could not rotate save backup");
+    }
+    std::filesystem::rename(temp, slot, ec);
+    if (ec) return fail(error, "could not publish save: " + ec.message());
+    if (writtenBytes) *writtenBytes = bytes.size();
+    return true;
+}
+
+std::optional<SaveGameDocument> SaveGameStore::read(
+    const std::filesystem::path& slot, const SaveGameReadOptions& options, SaveGameReadReport* report,
+    std::string* error) const {
+    SaveGameReadReport local;
+    const auto load = [&](const std::filesystem::path& path, std::string* why) -> std::optional<SaveGameDocument> {
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec) return fail(why, "cannot open save '" + path.string() + "': " + ec.message()), std::nullopt;
+        if (size > limits_.maximumFileBytes)
+            return fail(why, "save '" + path.string() + "' is over the " + std::to_string(limits_.maximumFileBytes) +
+                                 "-byte limit"), std::nullopt;
+        auto bytes = read_file_bytes(path, why);
+        if (!bytes) return std::nullopt;
+        local.fileBytes = bytes->size();
+        std::string decodeError;
+        auto document = decode_save_game_document(*bytes, limits_, &decodeError);
+        if (!document) return fail(why, "save '" + path.string() + "': " + decodeError), std::nullopt;
+        return document;
+    };
+    std::string primaryError;
+    auto document = load(slot, &primaryError);
+    if (!document && options.allowBackup) {
+        auto backup = slot;
+        backup += ".bak";
+        std::error_code ec;
+        if (std::filesystem::exists(backup, ec)) {
+            std::string backupError;
+            document = load(backup, &backupError);
+            if (document) {
+                local.source = SaveGameReadSource::Backup;
+                local.primaryError = primaryError;
+            } else {
+                primaryError += "; backup: " + backupError;
+            }
+        }
+    }
+    if (!document) return fail(error, primaryError), std::nullopt;
+    local.storedSchemaVersion = document->schemaVersion;
+    if (!migrate(*document, &local.migrationsApplied, error)) return std::nullopt;
+    if (report) *report = std::move(local);
+    return document;
+}
+
+std::optional<SaveGameDocument> SaveGameStore::read_recover(const std::filesystem::path& slot, std::string* error) const {
+    return read(slot, SaveGameReadOptions{}, nullptr, error);
+}
+
+std::optional<SaveGameDocument> SaveGameStore::decode(
+    std::span<const std::byte> bytes, SaveGameReadReport* report, std::string* error) const {
+    auto document = decode_save_game_document(bytes, limits_, error);
+    if (!document) return std::nullopt;
+    SaveGameReadReport local;
+    local.fileBytes = bytes.size();
+    local.storedSchemaVersion = document->schemaVersion;
+    if (!migrate(*document, &local.migrationsApplied, error)) return std::nullopt;
+    if (report) *report = std::move(local);
+    return document;
+}
 
 AnimationValidationResult validate_humanoid_rig(const SkeletonAsset& skeleton,const HumanoidRigMap& rig)noexcept{auto base=validate_skeleton(skeleton);if(!base)return base;if(!std::isfinite(rig.referenceHeightMeters)||rig.referenceHeightMeters<=0.0F)return {false,"humanoid reference height must be positive"};std::set<BoneIndex> used;for(const auto& [role,bone]:rig.bones){(void)role;if(bone>=skeleton.bones.size())return {false,"humanoid rig bone is outside skeleton"};if(!used.insert(bone).second)return {false,"humanoid rig maps one bone to multiple roles"};}for(auto required:{HumanoidBone::Hips,HumanoidBone::Head,HumanoidBone::LeftFoot,HumanoidBone::RightFoot})if(!rig.bones.contains(required))return {false,"humanoid rig is missing a required role"};return {true,{}};}
 LocalPose retarget_humanoid_pose(const SkeletonAsset& sourceSkeleton,std::span<const RigidTransform> sourcePose,const HumanoidRigMap& sourceRig,const SkeletonAsset& targetSkeleton,const HumanoidRigMap& targetRig,std::string* error){if(!validate_humanoid_rig(sourceSkeleton,sourceRig)||!validate_humanoid_rig(targetSkeleton,targetRig)||sourcePose.size()!=sourceSkeleton.bones.size()){fail(error,"retarget inputs are invalid");return{};}auto out=make_bind_pose(targetSkeleton);const float scale=targetRig.referenceHeightMeters/sourceRig.referenceHeightMeters;for(const auto& [role,targetBone]:targetRig.bones){const auto it=sourceRig.bones.find(role);if(it==sourceRig.bones.end())continue;out[targetBone].rotation=sourcePose[it->second].rotation;if(role==HumanoidBone::Hips)out[targetBone].position=mul(sourcePose[it->second].position,scale);}return out;}

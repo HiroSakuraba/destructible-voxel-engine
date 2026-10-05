@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -150,7 +151,16 @@ struct DvePakBuildOptions {
     bool stripEditorOnly{true};
     bool incremental{true};
     std::vector<std::string> editorOnlyPrefixes{"editor/", "docs/", "tests/", "artifacts/"};
+    // Directory names that are editor-only wherever they appear in a path (any depth), e.g.
+    // the editor's crash-recovery `.autosave/` folder inside a project. Applied only when
+    // stripEditorOnly is set, like editorOnlyPrefixes.
+    std::vector<std::string> editorOnlyDirectoryNames{".autosave"};
 };
+
+// True when `normalizedPath` (forward slashes, package-relative) would be dropped by
+// build_dvepak's editor-only stripping under `options`.
+[[nodiscard]] bool dvepak_path_is_editor_only(
+    std::string_view normalizedPath, const DvePakBuildOptions& options) noexcept;
 
 struct DvePakEntry {
     std::string path;
@@ -179,6 +189,10 @@ class DvePakMount {
 public:
     [[nodiscard]] bool mount(const std::filesystem::path& package, std::string* error = nullptr);
     [[nodiscard]] bool contains(std::string_view path) const noexcept;
+    // Directory entry for `path`, or null. O(log n) over the sorted manifest.
+    [[nodiscard]] const DvePakEntry* find(std::string_view path) const noexcept;
+    [[nodiscard]] bool mounted() const noexcept { return !package_.empty(); }
+    [[nodiscard]] const std::filesystem::path& package_path() const noexcept { return package_; }
     [[nodiscard]] std::optional<std::vector<std::byte>> read(
         std::string_view path, std::string* error = nullptr) const;
     [[nodiscard]] const DvePakManifest& manifest() const noexcept { return manifest_; }
@@ -286,7 +300,26 @@ private:
 
 enum class InputTrigger : std::uint8_t { Press, Release, Hold, Tap, DoubleTap };
 
+struct InputCompositePart {
+    std::string control;
+    float scale{1.0F};
+};
+
 struct InputBinding {
+    InputBinding() = default;
+    InputBinding(std::string actionValue, std::string primaryValue,
+                 std::vector<std::string> chordValue = {},
+                 InputTrigger triggerValue = InputTrigger::Press,
+                 float holdSecondsValue = 0.35F,
+                 float doubleTapSecondsValue = 0.25F,
+                 float scaleValue = 1.0F,
+                 float actuationThresholdValue = 0.5F,
+                 std::vector<InputCompositePart> compositeValue = {})
+        : action(std::move(actionValue)), primary(std::move(primaryValue)),
+          chord(std::move(chordValue)), trigger(triggerValue), holdSeconds(holdSecondsValue),
+          doubleTapSeconds(doubleTapSecondsValue), scale(scaleValue),
+          actuationThreshold(actuationThresholdValue), composite(std::move(compositeValue)) {}
+
     std::string action;
     std::string primary;
     std::vector<std::string> chord;
@@ -294,6 +327,10 @@ struct InputBinding {
     float holdSeconds{0.35F};
     float doubleTapSeconds{0.25F};
     float scale{1.0F};
+    float actuationThreshold{0.5F};
+    // When populated, the weighted parts replace primary. This supports deterministic
+    // digital or analog 1D composites such as A/D, S/W, or two controller triggers.
+    std::vector<InputCompositePart> composite;
 };
 
 struct InputContext {
@@ -315,7 +352,7 @@ class InputActionSystem {
 public:
     [[nodiscard]] bool set_context(InputContext context, std::string* error = nullptr);
     [[nodiscard]] bool remove_context(std::string_view name);
-    void set_control(std::string control, float value) { controls_[std::move(control)] = value; }
+    void set_control(std::string control, float value);
     void begin_frame(float deltaSeconds);
     [[nodiscard]] const InputActionState* action(std::string_view name) const noexcept;
     [[nodiscard]] std::vector<std::string> conflicts(const InputBinding& candidate) const;
@@ -325,16 +362,16 @@ public:
     [[nodiscard]] bool save_bindings(const std::filesystem::path& path, std::string* error = nullptr) const;
     [[nodiscard]] bool load_bindings(const std::filesystem::path& path, std::string* error = nullptr);
 private:
-    struct ControlHistory {
-        float previous{};
-        float current{};
+    struct BindingHistory {
+        bool previousDown{};
+        bool currentDown{};
         float heldSeconds{};
         float releasedHeldSeconds{};
         float sinceRelease{1000.0F};
     };
     std::map<std::string, InputContext, std::less<>> contexts_;
     std::map<std::string, float, std::less<>> controls_;
-    std::map<std::string, ControlHistory, std::less<>> history_;
+    std::map<std::string, BindingHistory, std::less<>> bindingHistory_;
     std::map<std::string, InputActionState, std::less<>> actions_;
 };
 
@@ -347,20 +384,78 @@ struct SaveGameDocument {
     std::map<std::string, std::vector<std::byte>, std::less<>> sections;
 };
 
-using SaveMigration = std::function<bool(SaveGameDocument&, std::string*)>;
+using SaveGameMigration = std::function<bool(SaveGameDocument&, std::string*)>;
+using SaveMigration = SaveGameMigration;
+
+// DVESAVE1 container limits. The defaults are the historical v2.35 ceilings; callers with a
+// known payload (for example the player's world saves, dve/game_save.hpp) pass tighter ones.
+// Every size field is checked against these *and* against the bytes actually present before
+// anything is allocated, so a truncated or hostile file cannot trigger a huge allocation.
+struct SaveGameLimits {
+    std::uint64_t maximumFileBytes{1ULL << 31U};
+    std::uint32_t maximumSections{100000U};
+    std::uint32_t maximumSectionNameBytes{1U << 20U};
+    std::uint64_t maximumSectionBytes{1ULL << 30U};
+};
+
+enum class SaveGameReadSource : std::uint8_t { Primary, Backup };
+
+struct SaveGameReadOptions {
+    // Fall back to `<slot>.bak` (the previous publish) when the slot itself is unreadable.
+    bool allowBackup{true};
+};
+
+struct SaveGameReadReport {
+    SaveGameReadSource source{SaveGameReadSource::Primary};
+    std::uint32_t storedSchemaVersion{};   // before migrations
+    std::uint32_t migrationsApplied{};
+    std::uint64_t fileBytes{};
+    std::string primaryError;              // why the primary was rejected when source == Backup
+};
+
+// DVESAVE1 byte layout (little endian; identical to what v2.35 wrote on little-endian hosts):
+//   "DVESAVE1" | u32 schemaVersion | u64 sequence | u32 sectionCount | u64 documentHash
+//   sectionCount x { u32 nameBytes | u64 payloadBytes | u64 payloadFnv1a | name | payload }
+// Sections are sorted by name. documentHash is FNV-1a over every name followed by its
+// payload hash, so both a flipped payload byte and a renamed/reordered section are caught.
+[[nodiscard]] std::vector<std::byte> encode_save_game_document(const SaveGameDocument& document);
+// Parses and verifies (magic, limits, every hash, no trailing bytes). No migration.
+[[nodiscard]] std::optional<SaveGameDocument> decode_save_game_document(
+    std::span<const std::byte> bytes, const SaveGameLimits& limits = {}, std::string* error = nullptr);
 
 class SaveGameStore {
 public:
-    explicit SaveGameStore(std::uint32_t currentVersion = 1U) : currentVersion_(currentVersion) {}
+    explicit SaveGameStore(std::uint32_t currentVersion = 1U, SaveGameLimits limits = {})
+        : currentVersion_(currentVersion), limits_(limits) {}
+    [[nodiscard]] std::uint32_t current_version() const noexcept { return currentVersion_; }
+    [[nodiscard]] const SaveGameLimits& limits() const noexcept { return limits_; }
+    // One migration per source version; each must advance schemaVersion by exactly one.
     [[nodiscard]] bool register_migration(
         std::uint32_t fromVersion, SaveMigration migration, std::string* error = nullptr);
+    // Brings `document` up to current_version() one registered step at a time. Fails on a
+    // newer schema, a missing step, or a step that does not advance exactly one version.
+    [[nodiscard]] bool migrate(
+        SaveGameDocument& document, std::uint32_t* migrationsApplied = nullptr,
+        std::string* error = nullptr) const;
+    // Writes `<slot>.tmp`, rotates an existing slot to `<slot>.bak`, then renames the temp
+    // file into place. schemaVersion is always stamped with current_version().
     [[nodiscard]] bool write_atomic(
         const std::filesystem::path& slot, SaveGameDocument document,
-        std::string* error = nullptr) const;
+        std::string* error = nullptr, std::uint64_t* writtenBytes = nullptr) const;
+    // Primary, else backup (see SaveGameReadOptions), then migrate.
+    [[nodiscard]] std::optional<SaveGameDocument> read(
+        const std::filesystem::path& slot, const SaveGameReadOptions& options,
+        SaveGameReadReport* report = nullptr, std::string* error = nullptr) const;
+    // v2.35 entry point: read() with the backup fallback enabled.
     [[nodiscard]] std::optional<SaveGameDocument> read_recover(
         const std::filesystem::path& slot, std::string* error = nullptr) const;
+    // In-memory decode + migrate (no backup).
+    [[nodiscard]] std::optional<SaveGameDocument> decode(
+        std::span<const std::byte> bytes, SaveGameReadReport* report = nullptr,
+        std::string* error = nullptr) const;
 private:
     std::uint32_t currentVersion_{};
+    SaveGameLimits limits_{};
     std::map<std::uint32_t, SaveMigration> migrations_;
 };
 

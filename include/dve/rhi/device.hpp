@@ -85,8 +85,33 @@ enum class TextureFormat : std::uint8_t {
     RGBA16Float,
     // Slug band atlas: two unsigned 16-bit components.
     RG16Uint,
+    // Sampled block-compressed formats. These support copy upload and sampling only.
+    BC1RGBAUnorm,
+    BC1RGBASrgb,
+    BC3RGBAUnorm,
+    BC3RGBASrgb,
+    BC5RGUnorm,
     D32Float
 };
+
+[[nodiscard]] constexpr bool is_block_compressed(TextureFormat format) noexcept {
+    return format == TextureFormat::BC1RGBAUnorm || format == TextureFormat::BC1RGBASrgb ||
+           format == TextureFormat::BC3RGBAUnorm || format == TextureFormat::BC3RGBASrgb ||
+           format == TextureFormat::BC5RGUnorm;
+}
+[[nodiscard]] constexpr std::size_t texture_block_bytes(TextureFormat format) noexcept {
+    return format == TextureFormat::BC1RGBAUnorm || format == TextureFormat::BC1RGBASrgb ? 8U :
+           is_block_compressed(format) ? 16U : 0U;
+}
+[[nodiscard]] constexpr std::size_t texture_row_bytes(TextureFormat format, std::uint32_t width) noexcept {
+    return is_block_compressed(format)
+        ? static_cast<std::size_t>((width + 3U) / 4U) * texture_block_bytes(format)
+        : static_cast<std::size_t>(width) * (format == TextureFormat::RGBA32Sint ? 16U :
+              format == TextureFormat::RGBA16Float ? 8U : format == TextureFormat::RG16Uint ? 4U : 4U);
+}
+[[nodiscard]] constexpr std::size_t texture_rows(TextureFormat format, std::uint32_t height) noexcept {
+    return is_block_compressed(format) ? (height + 3U) / 4U : height;
+}
 enum class IndexFormat : std::uint8_t { Uint16, Uint32 };
 enum class PrimitiveTopology : std::uint8_t { TriangleList };
 enum class VertexFormat : std::uint8_t { Float2, Float3, Float4 };
@@ -109,7 +134,17 @@ enum class ShaderStage : std::uint8_t { NoStage = 0, Compute = 1U << 0U, Vertex 
     return (value & stage) != ShaderStage::NoStage;
 }
 enum class BindingType : std::uint8_t {
-    UniformBuffer, StorageBufferReadOnly, StorageBufferReadWrite, SampledTexture, StorageTexture
+    UniformBuffer,
+    StorageBufferReadOnly,
+    StorageBufferReadWrite,
+    // Backward-compatible combined image+sampler descriptor.
+    SampledTexture,
+    // Explicit Vulkan-style sampled image and sampler descriptors. New shader
+    // paths should prefer these when HLSL declares Texture* and SamplerState
+    // separately in descriptor spaces.
+    SampledImage,
+    Sampler,
+    StorageTexture,
 };
 
 template <class Tag>
@@ -350,7 +385,11 @@ struct GraphicsPipelineDesc {
     std::optional<VertexBufferLayoutDesc> vertexBuffer;
     std::vector<VertexAttributeDesc> vertexAttributes;
     PrimitiveTopology topology{PrimitiveTopology::TriangleList};
+    // Legacy single-render-target format. Existing callers can keep using this field.
+    // When colorFormats is non-empty it takes precedence and describes the complete
+    // ordered MRT attachment set.
     std::optional<TextureFormat> colorFormat{TextureFormat::RGBA8Unorm};
+    std::vector<TextureFormat> colorFormats;
     std::optional<TextureFormat> depthFormat{TextureFormat::D32Float};
     CullMode cullMode{CullMode::BackFaces};
     FrontFace frontFace{FrontFace::CounterClockwise};

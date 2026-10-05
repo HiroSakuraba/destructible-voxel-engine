@@ -54,6 +54,21 @@
       }
     },
     {
+      "name": "linux-gcc-player-release",
+      "inherits": "linux-gcc-release",
+      "displayName": "Linux GCC Release + dve_player (static SDL 3.4.12, Lua 5.4, Jolt 5.6.0, libsndfile 1.2.2 without MP3)",
+      "cacheVariables": {
+        "DVE_BUILD_PLAYER": "ON",
+        "BUILD_SHARED_LIBS": "OFF",
+        "DVE_FETCH_SDL3": "ON",
+        "DVE_SDL3_PREFER_FETCH": "ON",
+        "DVE_ENABLE_LUA": "ON",
+        "DVE_ENABLE_JOLT": "ON",
+        "DVE_FETCH_JOLT": "ON",
+        "DVE_FETCH_SNDFILE": "ON"
+      }
+    },
+    {
       "name": "linux-gcc-audio-release",
       "inherits": "linux-gcc-release",
       "displayName": "Linux GCC Release + SDL3 + RtMidi",
@@ -162,6 +177,29 @@
         "DVE_ENABLE_JOLT": "ON",
         "DVE_FETCH_JOLT": "ON",
         "DVE_ENABLE_JOLT_DEBUG_DRAW": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-player-release",
+      "inherits": "base",
+      "displayName": "Windows MSVC Release + dve_player (static SDL 3.4.12, Lua 5.4.9, Jolt 5.6.0; newest installed Visual Studio)",
+      "description": "No generator is pinned, so CMake picks the newest Visual Studio (2022 or 2026). Pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake for libpng/libjpeg-turbo (docs/PACKAGING.md, Windows).",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Release",
+        "VCPKG_APPLOCAL_DEPS": "OFF",
+        "DVE_BUILD_PLAYER": "ON",
+        "BUILD_SHARED_LIBS": "OFF",
+        "DVE_FETCH_SDL3": "ON",
+        "DVE_SDL3_PREFER_FETCH": "ON",
+        "DVE_ENABLE_LUA": "ON",
+        "DVE_FETCH_LUA": "ON",
+        "DVE_ENABLE_JOLT": "ON",
+        "DVE_FETCH_JOLT": "ON"
       }
     },
     {
@@ -334,6 +372,10 @@
       "configurePreset": "linux-gcc-lua-release"
     },
     {
+      "name": "linux-gcc-player-release",
+      "configurePreset": "linux-gcc-player-release"
+    },
+    {
       "name": "linux-gcc-voxel-release",
       "configurePreset": "linux-gcc-voxel-release"
     },
@@ -364,6 +406,11 @@
     {
       "name": "linux-gcc-jolt-box-physics-release",
       "configurePreset": "linux-gcc-jolt-box-physics-release"
+    },
+    {
+      "name": "windows-msvc-player-release",
+      "configurePreset": "windows-msvc-player-release",
+      "configuration": "Release"
     },
     {
       "name": "windows-msvc-jolt-release",
@@ -452,6 +499,13 @@
       }
     },
     {
+      "name": "linux-gcc-player-release",
+      "configurePreset": "linux-gcc-player-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "linux-gcc-voxel-release",
       "configurePreset": "linux-gcc-voxel-release",
       "output": {
@@ -503,6 +557,14 @@
     {
       "name": "linux-gcc-jolt-box-physics-release",
       "configurePreset": "linux-gcc-jolt-box-physics-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-player-release",
+      "configurePreset": "windows-msvc-player-release",
+      "configuration": "Release",
       "output": {
         "outputOnFailure": true
       }

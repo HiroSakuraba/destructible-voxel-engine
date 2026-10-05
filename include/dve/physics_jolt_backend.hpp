@@ -383,6 +383,7 @@ public:
     // The sink must remain alive while registered. Jolt may invoke it concurrently from worker
     // threads during step(); the supplied implementation must therefore be callback-safe.
     void set_contact_sink(IPhysicsContactSink* sink) noexcept override;
+    bool set_pair_collision_enabled(RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept override;
     bool set_contact_material(
         RigidBodyHandle handle, std::uint16_t material) noexcept override;
 

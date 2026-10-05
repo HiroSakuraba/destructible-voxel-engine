@@ -40,6 +40,7 @@ public:
             close_input();
             callback_ = std::move(callback);
             input_->openPort(static_cast<unsigned int>(index), "DVE Synth Input");
+            callbackSet_ = true;
             input_->setCallback([](double, std::vector<unsigned char>* bytes, void* user) {
                 auto* self = static_cast<RtMidiBackend*>(user);
                 if (self == nullptr || bytes == nullptr || self->callback_ == nullptr) return;
@@ -69,7 +70,11 @@ public:
         }
     }
     void close_input() noexcept override {
+        // closePort() joins RtMidi's input thread, so the callback cannot run after this.
         try { if (input_ && input_->isPortOpen()) input_->closePort(); } catch (...) {}
+        // Without cancelCallback() a later open_input() would hit "callback already set".
+        try { if (input_ && callbackSet_) input_->cancelCallback(); } catch (...) {}
+        callbackSet_ = false;
         inputOpen_ = false;
         callback_ = {};
     }
@@ -99,6 +104,7 @@ private:
     std::unique_ptr<RtMidiIn> input_;
     std::unique_ptr<RtMidiOut> output_;
     MidiInputCallback callback_;
+    bool callbackSet_{};
     bool inputOpen_{};
     bool outputOpen_{};
 };

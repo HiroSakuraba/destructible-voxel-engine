@@ -723,6 +723,37 @@ bool ControlRigRuntime::bind(
     return true;
 }
 
+ControlRigSaveState ControlRigRuntime::capture_save_state() const {
+    ControlRigSaveState state;
+    for (const auto& [objectId, instance] : instances_) {
+        ControlRigInstanceSaveState saved{objectId, instance.rig.contentHash, instance.enabled, {}};
+        for (const auto& [control, local] : instance.controlLocals) saved.controls.emplace_back(control, local);
+        state.instances.push_back(std::move(saved));
+    }
+    return state;
+}
+
+std::size_t ControlRigRuntime::restore_save_state(const ControlRigSaveState& state, std::vector<std::string>* warnings) {
+    std::size_t restored = 0U;
+    for (const ControlRigInstanceSaveState& saved : state.instances) {
+        const auto warn = [&](std::string_view message) {
+            if (warnings) warnings->push_back("control rig " + std::to_string(saved.objectId) + ": " + std::string(message));
+        };
+        const auto found = instances_.find(saved.objectId);
+        if (found == instances_.end()) { warn("no rig is bound after boot"); continue; }
+        Instance& instance = found->second;
+        if (instance.rig.contentHash != saved.rigHash) { warn("the bound rig changed"); continue; }
+        bool valid = saved.controls.size() == instance.controlLocals.size();
+        for (const auto& [control, local] : saved.controls)
+            valid = valid && instance.controlLocals.contains(control) && finite(local);
+        if (!valid) { warn("the saved control values do not match the rig"); continue; }
+        instance.enabled = saved.enabled;
+        for (const auto& [control, local] : saved.controls) instance.controlLocals[control] = local;
+        ++restored;
+    }
+    return restored;
+}
+
 bool ControlRigRuntime::unbind(std::uint64_t objectId) noexcept {
     return instances_.erase(objectId) != 0U;
 }

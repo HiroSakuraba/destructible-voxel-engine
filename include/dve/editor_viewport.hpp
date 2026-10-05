@@ -155,6 +155,38 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
     UiRect viewport,
     const EditorViewportSettings& settings,
     std::optional<EditorObjectId> selectedObject);
+
+// Cheap O(objects + bricks + anchors) fingerprint of everything that affects the
+// voxel draw list and selection diagnostics: object ids/parents/flags/transforms/
+// voxel sizes, brick keys + generations + occupancy counts (bricks bump their
+// generation on every edit), and anchors. Used to rebuild cached per-frame data
+// only when the scene actually changed.
+[[nodiscard]] std::uint64_t editor_scene_render_fingerprint(const EditorDocument& document) noexcept;
+[[nodiscard]] std::uint64_t editor_camera_fingerprint(const EditorCamera& camera) noexcept;
+[[nodiscard]] std::uint64_t editor_selection_fingerprint(const std::set<EditorObjectId>& selection) noexcept;
+
+// Memoizes build_voxel_draw_list (projection + depth sort). get() rebuilds only
+// when the scene fingerprint, camera, viewport, draw cap, or selection change.
+class EditorVoxelDrawListCache {
+public:
+    const std::vector<EditorVoxelDrawItem>& get(
+        const EditorDocument& document,
+        const EditorMaterialLibrary& materials,
+        const EditorCamera& camera,
+        UiRect viewport,
+        const EditorViewportSettings& settings,
+        const std::set<EditorObjectId>& selectedObjects,
+        std::uint64_t sceneFingerprint);
+    void invalidate() noexcept { valid_ = false; }
+    [[nodiscard]] std::uint64_t rebuild_count() const noexcept { return rebuilds_; }
+
+private:
+    std::vector<EditorVoxelDrawItem> items_{};
+    std::uint64_t key_{};
+    bool valid_{};
+    std::uint64_t rebuilds_{};
+};
+
 [[nodiscard]] std::vector<EditorText3DDrawItem> build_text3d_draw_list(
     const EditorDocument& document,
     const EditorCamera& camera,

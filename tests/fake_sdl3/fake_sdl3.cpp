@@ -65,6 +65,7 @@ void show_dialog(SDL_DialogFileCallback callback, void* userdata) {
 }
 
 bool SDL_Init(Uint32) { return true; }
+bool SDL_InitSubSystem(Uint32) { return true; }
 void SDL_QuitSubSystem(Uint32) {}
 const char* SDL_GetError() { return errorText.c_str(); }
 SDL_Window* SDL_CreateWindow(const char* title, int w, int h, SDL_WindowFlags flags) {
@@ -147,6 +148,10 @@ bool SDL_RenderFillRect(SDL_Renderer* renderer, const SDL_FRect*) { return rende
 bool SDL_RenderRect(SDL_Renderer* renderer, const SDL_FRect*) { return renderer != nullptr; }
 bool SDL_RenderLine(SDL_Renderer* renderer, float, float, float, float) { return renderer != nullptr; }
 bool SDL_RenderDebugText(SDL_Renderer* renderer, float, float, const char*) { return renderer != nullptr; }
+bool SDL_SetRenderScale(SDL_Renderer* renderer, float scaleX, float scaleY) { return renderer != nullptr && scaleX > 0.0F && scaleY > 0.0F; }
+SDL_Surface* SDL_RenderReadPixels(SDL_Renderer* renderer, const SDL_Rect*) { if (!renderer) return nullptr; return new SDL_Surface{1, 1}; }
+bool SDL_SaveBMP(SDL_Surface* surface, const char* file) { return surface != nullptr && file != nullptr; }
+void SDL_DestroySurface(SDL_Surface* surface) { delete surface; }
 
 SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID device, const SDL_AudioSpec* spec,
                                            SDL_AudioStreamCallback callback, void* userdata) {

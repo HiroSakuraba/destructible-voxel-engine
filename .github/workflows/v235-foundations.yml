@@ -102,3 +102,11 @@ jobs:
         run: cmake --build build --target ${{ matrix.target }} --parallel 2
       - name: Run native adapter contract
         run: ctest --test-dir build --output-on-failure -R '^${{ matrix.test }}$'
+
+  dashr-null-rhi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: DASHR live renderer and shader contracts
+        run: sh ./scripts/run_dashr_null_rhi_tests.sh

@@ -1,5 +1,9 @@
 #include "dve/audio/synthesizer.hpp"
+
 #include "dve/audio/audio_asset.hpp"
+#include "dve/audio/wavetable.hpp"
+#include "dve/audio/physics_modulation.hpp"
+#include "dve/audio/generative_conductor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +15,7 @@
 #include <complex>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <numbers>
 #include <iomanip>
@@ -19,13 +24,34 @@
 #include <type_traits>
 #include <utility>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
+
 namespace dve::audio {
 namespace {
+
+// Real-time denormal guard: sustained voices at low levels (decaying
+// envelopes, reverb/filter tails) generate denormal floats, and a single
+// denormal operand can stall the FPU for microseconds — the classic cause
+// of rare multi-millisecond spikes in an otherwise steady render. Enabling
+// flush-to-zero + denormals-are-zero for the render call removes the stall;
+// affected values are < 1.2e-38 (-758 dB), far below audibility and the
+// 1e-6 A/B tolerance. MXCSR is per-thread; the previous mode is restored
+// on exit so non-audio threads are untouched.
+struct DenormalGuard {
+#if defined(__x86_64__) || defined(_M_X64)
+    unsigned saved_;
+    DenormalGuard() noexcept : saved_(_mm_getcsr()) { _mm_setcsr(saved_ | 0x8040u); }
+    ~DenormalGuard() { _mm_setcsr(saved_); }
+#else
+    DenormalGuard() noexcept = default;
+#endif
+};
 
 constexpr float kPi = std::numbers::pi_v<float>;
 constexpr float kTwoPi = 2.0F * kPi;
 constexpr std::size_t kMidiQueueCapacity = 2048;
-constexpr std::size_t kPresetQueueCapacity = 8;
 constexpr std::size_t kMidiOutQueueCapacity = 2048;
 
 float clampf(float value, float low, float high) noexcept { return std::clamp(value, low, high); }
@@ -83,6 +109,21 @@ float fast_tanh(float value) noexcept {
     return value * (27.0F + squared) / (27.0F + 9.0F * squared);
 }
 
+// Phase 2: rational soft clipper for DistortionMode::SoftClip. Unity gain at
+// zero, asymptotically +/-1, with a rounder knee (and darker harmonic series
+// at equal drive) than tanh.
+float soft_clip(float value) noexcept {
+    return value / (1.0F + std::fabs(value));
+}
+
+// Phase 2: triangle wavefolder for DistortionMode::Foldback. Maps any input
+// into [-1, 1] by folding overdriven peaks back instead of clipping them.
+float wavefold(float value) noexcept {
+    float folded = std::fmod(value + 1.0F, 4.0F);
+    if (folded < 0.0F) folded += 4.0F;
+    return folded < 2.0F ? folded - 1.0F : 3.0F - folded;
+}
+
 template <class T, std::size_t Capacity>
 class BoundedQueue {
     static_assert(std::is_trivially_copyable_v<T>);
@@ -135,6 +176,36 @@ private:
     alignas(64) std::atomic<std::size_t> dequeue_{};
 };
 
+// Latest-wins single-producer/single-consumer mailbox (triple buffer). The
+// producer overwrites whatever the consumer has not taken yet, so the newest
+// value always arrives and a burst can never be dropped. Wait-free on both
+// sides and allocation-free; producers must be serialized externally.
+template <class T>
+class LatestMailbox {
+    static_assert(std::is_trivially_copyable_v<T>);
+    static constexpr std::uint32_t kIndexMask = 3U;
+    static constexpr std::uint32_t kFresh = 4U;
+public:
+    T& producer_slot() noexcept { return slots_[back_]; }
+    // Publishes producer_slot(); returns true if it replaced an unconsumed value.
+    bool publish() noexcept {
+        const std::uint32_t previous = middle_.exchange(back_ | kFresh, std::memory_order_acq_rel);
+        back_ = previous & kIndexMask;
+        return (previous & kFresh) != 0U;
+    }
+    // Consumer: returns the newest published value, or nullptr if nothing new.
+    const T* take() noexcept {
+        if ((middle_.load(std::memory_order_relaxed) & kFresh) == 0U) return nullptr;
+        front_ = middle_.exchange(front_, std::memory_order_acq_rel) & kIndexMask;
+        return &slots_[front_];
+    }
+private:
+    std::array<T, 3> slots_{};
+    std::uint32_t back_{0};                 // producer-owned
+    std::uint32_t front_{2};                // consumer-owned
+    std::atomic<std::uint32_t> middle_{1};  // shared: index | kFresh
+};
+
 struct RealtimeMicrotuning {
     bool enabled{};
     std::uint8_t referenceNote{69};
@@ -156,12 +227,30 @@ struct RealtimeSampleBank {
     std::array<float, kSynthSampleMaxFrames> samples{};
 };
 
+// Phase 0: per-parameter smoothing. When a preset is adopted, smoothable
+// parameters don't jump to their new values instantly (which causes clicks);
+// instead they glide from current toward target with a one-pole lowpass.
+// Cutoff uses log-domain smoothing (perceptually uniform); others are linear.
+struct SmoothedFloat {
+    float current{};
+    float target{};
+    // Advances current toward target. coeff is the one-pole coefficient
+    // (0 = frozen, 1 = instant). Returns the new current value.
+    float advance(float coeff) noexcept {
+        current += (target - current) * coeff;
+        // Snap when close enough to avoid denormal crawl.
+        if (std::fabs(target - current) < 1e-6F) current = target;
+        return current;
+    }
+    void set_target(float v) noexcept { target = v; }
+    void snap(float v) noexcept { current = target = v; }
+};
+
 struct RealtimePreset {
     std::array<OscillatorParameters, kSynthOscillatorCount> oscillators{};
     AdsrParameters ampEnvelope{};
     FilterParameters filter{};
-    TuningParameters tuning{};
-    ChordParameters chord{};
+    TuningParameters tuning{};    ChordParameters chord{};
     ArpeggiatorParameters arpeggiator{};
     std::array<LfoParameters, kSynthLfoCount> lfos{};
     std::array<ModulationSlot, kSynthModulationSlotCount> modulation{};
@@ -174,16 +263,25 @@ struct RealtimePreset {
     std::array<MidiLearnMapping, kSynthMidiLearnCount> midiLearn{};
     RealtimeWavetable wavetable{};
     RealtimeSampleBank sampleBank{};
+    SamplerParameters sampler{};  // Phase 2: sampler generator parameters
+    GranularParameters granular{};  // Phase 4: granular generator parameters (SYN-014)
+    SpectralParameters spectral{};  // Phase 5: spectral resynthesis parameters (SYN-015)
+    const SpectralAssetView* spectralAsset{nullptr};  // Phase 5: non-owning cooked asset view
     MpeParameters mpe{};
     RealtimeMicrotuning microtuning{};
     UnisonParameters unison{};
     OscillatorQuality oscillatorQuality{OscillatorQuality::Normal};
     FilterQuality filterQuality{FilterQuality::Standard};
     DistortionParameters distortion{};
+    BitcrusherParameters bitcrusher{};
+    OctaveHarmonizerParameters harmonizer{};
     EqParameters eq{};
     ChorusParameters chorus{};
+    FlangerParameters flanger{};
+    EnsembleParameters ensemble{};
     PhaserParameters phaser{};
     DelayParameters delay{};
+    DiffusionDelayParameters diffusionDelay{};
     ReverbParameters reverb{};
     CompressorParameters compressor{};
     LimiterParameters limiter{};
@@ -195,6 +293,86 @@ struct RealtimePreset {
     bool midiThru{};
 };
 static_assert(std::is_trivially_copyable_v<RealtimePreset>);
+
+// Lock-free preset handoff from the UI thread to the render thread. Carries
+// everything the audio thread needs to adopt a preset: the unmorphed numeric
+// base (morph source A), the morph target B, and the sequencer/conductor
+// configs that used to be applied from the UI thread (a data race while the
+// audio thread was inside advance_sequencer()/conductor.process()).
+// Trivially copyable so the MPMC queue moves it without allocation.
+struct PresetUpdate {
+    RealtimePreset base{};      // unmorphed base preset (morph source A)
+    RealtimePreset morphB{};    // morph target B (valid when hasMorphB)
+    bool hasMorphB{false};
+    bool morphEnabled{false};
+    float morphAmount{0.0F};    // UI-authored morph amount
+    SequencerConfig sequencer{};
+    bool sequencerChanged{false};
+    AttractorConfig attractor{};
+    bool attractorEnabled{false};
+};
+static_assert(std::is_trivially_copyable_v<PresetUpdate>);
+
+// FNV-1a hash over the wavetable mip-0 content that adopt_preset() cooks into
+// the HQ table. Lets the render thread skip the re-cook (and its
+// allocations) when the wavetable data hasn't actually changed.
+std::uint64_t wavetable_content_hash(const RealtimeWavetable& wt) noexcept {
+    std::uint64_t h = 1469598103934665603ULL;
+    h ^= wt.enabled ? 1ULL : 0ULL; h *= 1099511628211ULL;
+    h ^= wt.frameCount; h *= 1099511628211ULL;
+    const std::size_t n = std::min<std::size_t>(wt.frameCount, kWavetableFrameCount) *
+                          kWavetableSampleCount;
+    for (std::size_t i = 0; i < n; ++i) {
+        h ^= static_cast<std::uint64_t>(std::bit_cast<std::uint32_t>(wt.samples[i]));
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+// Immutable set of cooked HQ wavetables published by the UI thread (cooked
+// there, never on the audio thread) and swapped in by render(): the base
+// preset's table (A) and, while an A/B morph is set up, the target's table (B).
+// The render thread only reads through raw pointers; whole sets are retired
+// back to the UI thread for destruction, so no deallocation happens in render().
+struct CookedWavetableSet {
+    std::shared_ptr<const CookedWavetable> a;
+    std::shared_ptr<const CookedWavetable> b;
+    std::uint64_t hashA{0};
+    std::uint64_t hashB{0};
+};
+
+bool wavetable_cookable(const RealtimeWavetable& wt) noexcept {
+    return wt.enabled && wt.frameCount != 0U;
+}
+
+// Resamples the preset's mip-0 frames (<= 8 x 128) to the HQ grid (64 x 512).
+void resample_preset_wavetable(const RealtimeWavetable& wt, std::vector<float>& flat) {
+    flat.resize(kHQWavetableFrames * kHQWavetableSamples);
+    const std::size_t srcFrames = std::min<std::size_t>(wt.frameCount, kWavetableFrameCount);
+    const float* mip0 = wt.samples.data(); // mip 0 is first
+    for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
+        const float srcPos = static_cast<float>(f) / static_cast<float>(kHQWavetableFrames - 1) *
+                             static_cast<float>(srcFrames - 1);
+        const std::size_t f0 = static_cast<std::size_t>(srcPos);
+        const std::size_t f1 = std::min(f0 + 1, srcFrames - 1);
+        const float frac = srcPos - static_cast<float>(f0);
+        float* frame = flat.data() + f * kHQWavetableSamples;
+        for (std::size_t i = 0; i < kHQWavetableSamples; ++i) {
+            const float srcSamplePos = static_cast<float>(i) / static_cast<float>(kHQWavetableSamples - 1) *
+                                       static_cast<float>(kWavetableSampleCount - 1);
+            const std::size_t s0 = static_cast<std::size_t>(srcSamplePos);
+            const std::size_t s1 = std::min(s0 + 1, kWavetableSampleCount - 1);
+            const float sFrac = srcSamplePos - static_cast<float>(s0);
+            const float a0 = mip0[f0 * kWavetableSampleCount + s0];
+            const float a1 = mip0[f0 * kWavetableSampleCount + s1];
+            const float b0 = mip0[f1 * kWavetableSampleCount + s0];
+            const float b1 = mip0[f1 * kWavetableSampleCount + s1];
+            const float a = a0 + (a1 - a0) * sFrac;
+            const float b = b0 + (b1 - b0) * sFrac;
+            frame[i] = a + (b - a) * frac;
+        }
+    }
+}
 
 ChordParameters resolved_chord_parameters(const SynthPreset& source) noexcept {
     ChordParameters result = source.chord;
@@ -247,6 +425,10 @@ RealtimePreset realtime_preset(const SynthPreset& source) noexcept {
     result.sampleBank.rootNote = source.sampleBank.rootNote;
     result.sampleBank.frameCount = source.sampleBank.frameCount;
     std::copy_n(source.sampleBank.samples.begin(), source.sampleBank.frameCount, result.sampleBank.samples.begin());
+    result.sampler = source.sampler;  // Phase 2: SamplerParameters is trivially copyable
+    result.granular = source.granular;  // Phase 4: GranularParameters is trivially copyable
+    result.spectral = source.spectral;  // Phase 5: SpectralParameters is trivially copyable
+    result.spectralAsset = source.spectralAsset;  // Phase 5: non-owning view, copied as a pointer>>>>>>> phase5-serial
     result.wavetable.enabled = source.wavetable.enabled;
     result.wavetable.frameCount = source.wavetable.frameCount;
     const std::size_t baseStride = kWavetableFrameCount * kWavetableSampleCount;
@@ -276,10 +458,15 @@ RealtimePreset realtime_preset(const SynthPreset& source) noexcept {
         }
     }
     result.distortion = source.distortion;
+    result.bitcrusher = source.bitcrusher;
+    result.harmonizer = source.harmonizer;
     result.eq = source.eq;
     result.chorus = source.chorus;
+    result.flanger = source.flanger;
+    result.ensemble = source.ensemble;
     result.phaser = source.phaser;
     result.delay = source.delay;
+    result.diffusionDelay = source.diffusionDelay;
     result.reverb = source.reverb;
     result.compressor = source.compressor;
     result.limiter = source.limiter;
@@ -448,16 +635,105 @@ struct Ms20Filter {
     }
 };
 
+// Phase 2: lowest comb frequency the voice comb filter supports; sizes the delay line.
+inline constexpr float kCombFilterMinFrequencyHz = 20.0F;
+
+// Phase 2: one RBJ constant-0dB-peak-gain bandpass biquad (direct form I),
+// the building block of the voice Formant topology. Promoted from the
+// physical-model "throat" biquad into a first-class voice filter path.
+struct FormantBiquad {
+    float x1{};
+    float x2{};
+    float y1{};
+    float y2{};
+
+    void reset() noexcept { x1 = 0.0F; x2 = 0.0F; y1 = 0.0F; y2 = 0.0F; }
+
+    float process(float input, float frequencyHz, float q, float sampleRate) noexcept {
+        const float w = kTwoPi * clampf(frequencyHz, 10.0F, sampleRate * 0.45F) / sampleRate;
+        const float alpha = std::sin(w) / (2.0F * q);
+        const float b0 = alpha;
+        const float b2 = -alpha;  // b1 is 0 for the bandpass form
+        const float a0 = 1.0F + alpha;
+        const float a1 = -2.0F * std::cos(w);
+        const float a2 = 1.0F - alpha;
+        const float y = (b0 / a0) * input + (b2 / a0) * x2 - (a1 / a0) * y1 - (a2 / a0) * y2;
+        x2 = x1; x1 = input; y2 = y1; y1 = y;
+        return y;
+    }
+};
+
+// Phase 2: parallel formant bank for the voice Formant topology.
+struct VoiceFormantFilter {
+    std::array<FormantBiquad, FormantParameters::kBandCount> bands{};
+
+    void reset() noexcept { for (auto& band : bands) band.reset(); }
+
+    float process(float input, float freqScale, float q, const FormantParameters& params,
+                  float sampleRate) noexcept {
+        float sum = 0.0F;
+        for (std::size_t i = 0; i < bands.size(); ++i)
+            sum += params.gains[i] * bands[i].process(input, params.frequencyHertz[i] * freqScale,
+                                                      q, sampleRate);
+        return sum + clampf(params.dryMix, 0.0F, 1.0F) * input;
+    }
+};
+
+// Phase 2: feedback comb with fractional delay and lowpass damping in the
+// feedback loop, for the voice Comb topology. Promoted from the reverb
+// CombFilter into a first-class voice filter path; the delay line is sized
+// lazily so voices that never select Comb pay no memory cost.
+struct VoiceCombFilter {
+    std::vector<float> line;
+    std::size_t writeIndex{};
+    float dampingStore{};
+
+    void reset() noexcept {
+        std::fill(line.begin(), line.end(), 0.0F);
+        writeIndex = 0;
+        dampingStore = 0.0F;
+    }
+
+    void ensure_capacity(float oversampledRate) {
+        const std::size_t needed =
+            static_cast<std::size_t>(oversampledRate / kCombFilterMinFrequencyHz) + 8U;
+        if (line.size() < needed) {
+            line.assign(needed, 0.0F);
+            writeIndex = 0;
+            dampingStore = 0.0F;
+        }
+    }
+
+    float process(float input, float delaySamples, float feedback, float damping) noexcept {
+        const float size = static_cast<float>(line.size());
+        float position = static_cast<float>(writeIndex) - delaySamples;
+        while (position < 0.0F) position += size;
+        while (position >= size) position -= size;
+        const std::size_t i0 = static_cast<std::size_t>(position) % line.size();
+        const std::size_t i1 = (i0 + 1U) % line.size();
+        const float fraction = position - std::floor(position);
+        const float delayed = line[i0] + (line[i1] - line[i0]) * fraction;
+        dampingStore = delayed * (1.0F - damping) + dampingStore * damping;
+        line[writeIndex] = input + dampingStore * feedback;
+        writeIndex = (writeIndex + 1U) % line.size();
+        return delayed;
+    }
+};
+
 struct AnalogFilter {
     StateVariableFilter stateVariable;
     MoogLadderFilter ladder;
     Ms20Filter ms20;
+    VoiceFormantFilter formant;  // Phase 2
+    VoiceCombFilter comb;        // Phase 2
     float previousInput{};
 
     void reset() noexcept {
         stateVariable.reset();
         ladder.reset();
         ms20.reset();
+        formant.reset();
+        comb.reset();
         previousInput = 0.0F;
     }
 
@@ -483,13 +759,38 @@ struct AnalogFilter {
                     ? outputs.low + (outputs.notch - outputs.low) * (morph * 2.0F)
                     : outputs.notch + (outputs.high - outputs.notch) * ((morph - 0.5F) * 2.0F);
             }
+            case FilterTopology::Comb: {
+                // Comb spacing follows the cutoff (comb frequency = cutoff Hz);
+                // resonance drives feedback. FilterMode is intentionally ignored:
+                // the dry/wet balance is CombParameters::mix.
+                const float combFrequency = clampf(cutoff, kCombFilterMinFrequencyHz, sampleRate * 0.45F);
+                comb.ensure_capacity(sampleRate);
+                const float delaySamples = sampleRate / combFrequency;
+                const float feedback = clampf(resonance * parameters.selfOscillation *
+                                              parameters.comb.feedbackScale, 0.0F, 0.97F);
+                const float wet = comb.process(fast_tanh(input * parameters.drive), delaySamples,
+                                               feedback, clampf(parameters.comb.damping, 0.0F, 1.0F));
+                const float mix = clampf(parameters.comb.mix, 0.0F, 1.0F);
+                return input * (1.0F - mix) + wet * mix;
+            }
+            case FilterTopology::Formant: {
+                // Cutoff sweeps the whole vowel bank multiplicatively:
+                // 1000 Hz leaves the authored formant frequencies untouched.
+                // FilterMode is intentionally ignored: the vowel shape is the sound.
+                const float freqScale = clampf(cutoff / 1000.0F, 0.25F, 4.0F);
+                const float q = 0.7F + clampf(resonance, 0.0F, 1.0F) * 8.0F;
+                return formant.process(fast_tanh(input * parameters.drive), freqScale, q,
+                                       parameters.formant, sampleRate);
+            }
         }
         return input;
     }
 
     float process(float input, float cutoff, float resonance, const FilterParameters& parameters,
                   float sampleRate, FilterQuality quality = FilterQuality::Standard) noexcept {
-        const unsigned configured = static_cast<unsigned>(parameters.oversampling);
+        // Phase 2: Auto oversampling resolves via effective_oversampling();
+        // explicit X1/X2/X4 settings are honored exactly.
+        const unsigned configured = static_cast<unsigned>(effective_oversampling(parameters));
         unsigned oversampling = configured == 2U || configured == 4U ? configured : 1U;
         if (quality == FilterQuality::Eco) oversampling = 1U;
         else if (quality == FilterQuality::High) oversampling = std::max(oversampling, 2U);
@@ -504,17 +805,6 @@ struct AnalogFilter {
         previousInput = input;
         return output;
     }
-};
-
-struct GrainState {
-    bool active{};
-    float position{};
-    float increment{1.0F};
-    float age{};
-    float duration{1.0F};
-    float pan{};
-    float panEnd{};
-    std::uint8_t zoneIndex{kInvalidSampleZone};
 };
 
 struct PhysicalModelState {
@@ -549,6 +839,25 @@ struct PhysicalModelState {
     float jetDelay{};           // for air-jet (flute) edge tone
 };
 
+// Phase 2: modal resonator voice state (SYN-011b). One per oscillator.
+struct ModalResonatorState {
+    struct Mode {
+        float decayCoeff{0.999F};  // per-sample envelope multiplier: exp(-1/(tau*sr))
+        float y1{};
+        float y2{};
+        float gain{1.0F};          // per-mode gain including the brightness tilt
+    };
+    std::array<Mode, kModalResonatorMaxModes> modes{};
+    std::uint8_t activeModes{};
+    bool initialized{};
+    std::uint32_t noiseState{0x5BD1E995U};
+    float exciterPhase{};                 // Oscillator excitation: internal saw phase
+    std::uint32_t exciteSamplesRemaining{};   // NoiseBurst window (and SampleTransient fallback)
+    std::uint32_t transientFramesRemaining{}; // SampleTransient window, in bank frames
+    float transientPosition{};            // fractional read position in the sample bank
+    float transientStep{1.0F};            // bank sample rate / voice sample rate
+};
+
 struct Voice {
     bool active{};
     bool keyHeld{};
@@ -559,32 +868,55 @@ struct Voice {
     float pressure{};
     float timbre{};
     float pitchBendSemitones{};
+    float releaseVelocity{};
     std::uint64_t age{};
     std::uint64_t startFrame{};
     Envelope amp;
     Envelope filterEnvelope;
     std::array<float, kSynthOscillatorCount> phases{};
+    std::array<float, 2> harmonizerPhases{};
     std::array<std::array<float, 4>, kSynthOscillatorCount> auxiliaryPhases{};
     std::array<std::uint32_t, kSynthOscillatorCount> noiseState{};
     std::array<float, kSynthOscillatorCount> previousOscillatorSamples{};
+    // Perf: cached stereo-divergence detune ratios. divergence is a preset
+    // parameter, so the exp2() pair is recomputed only when it changes
+    // (per-voice cache also covers morph-driven changes).
+    std::array<float, kSynthOscillatorCount> divergenceRatioL{};
+    std::array<float, kSynthOscillatorCount> divergenceRatioR{};
+    std::array<float, kSynthOscillatorCount> divergencePhaseOffset{};
+    std::array<float, kSynthOscillatorCount> divergenceCached{};
+    // Perf: cached base frequency. tuned_frequency()'s exp2 argument is split
+    // into a per-block-constant base (everything but slow analog drift) and a
+    // tiny drift term applied via 2nd-order Taylor (|err| < 1e-12 relative).
+    // Key: (note, referenceHertz, baseSemitones). Falls back to the direct
+    // path when microtuning or exponential FM is active.
+    std::array<float, kSynthOscillatorCount> freqCache{};
+    std::array<float, kSynthOscillatorCount> freqCacheSemitones{};
+    std::uint8_t freqCacheNote{0xFF};
+    float freqCacheRefHertz{0.0F};
     std::array<float, kSynthOscillatorCount> subPhases{};
     std::array<float, kSynthOscillatorCount> samplePositions{};
     std::array<float, kSynthOscillatorCount> sampleMapPositions{};
     std::array<float, kSynthOscillatorCount> releaseSamplePositions{};
+    std::array<float, kSynthOscillatorCount> samplerPositions{};  // Phase 2: frame position
+    std::array<bool, kSynthOscillatorCount> samplerPrimed{};      // Phase 2: start offset applied
+    std::array<bool, kSynthOscillatorCount> samplerFinished{};    // Phase 2: one-shot reached end
     std::array<bool, kSynthOscillatorCount> sampleFinished{};
     std::array<bool, kSynthOscillatorCount> releaseSampleActive{};
     std::uint8_t sampleAttackZone{kInvalidSampleZone};
     std::uint8_t sampleReleaseZone{kInvalidSampleZone};
-    std::array<float, kSynthOscillatorCount> grainCountdown{};
-    std::array<std::array<GrainState, kSynthGrainsPerOscillator>, kSynthOscillatorCount> grains{};
+    std::array<GranularEngine, kSynthOscillatorCount> granularEngines{};  // Phase 4: one grain pool per oscillator (critique fix)
+    SpectralOscillator spectralOscillator{};  // Phase 5: spectral resynthesis (one engine per voice)
     std::array<std::array<float, kSynthUnisonMax - 1U>, kSynthOscillatorCount> unisonPhases{};
     std::array<float, kSynthModulationSlotCount> modulationSmoothing{};
     std::array<bool, kSynthOscillatorCount> oscillatorWrapped{};
     std::array<float, kSynthLfoCount> lfoPhases{};
+    std::array<WavetableOscState, kSynthOscillatorCount> wavetableState{};
     std::array<float, kSynthLfoCount> lfoRandomValues{};
     std::array<float, kSynthLfoCount> lfoPreviousRandomValues{};
     std::array<std::uint32_t, kSynthLfoCount> lfoNoiseState{};
     std::array<PhysicalModelState, kSynthOscillatorCount> physicalModels{};
+    std::array<ModalResonatorState, kSynthOscillatorCount> modalResonators{};  // Phase 2
     float noteRandom{};
     AnalogFilter filterL;
     AnalogFilter filterR;
@@ -603,14 +935,16 @@ struct Voice {
         releaseSamplePositions.fill(0.0F);
         sampleFinished.fill(false);
         releaseSampleActive.fill(false);
+        harmonizerPhases.fill(0.0F);
         for (std::size_t i = 0; i < phases.size(); ++i) {
             if (preset.oscillators[i].keySync || retrigger) {
                 phases[i] = wrap_phase(preset.oscillators[i].phaseOffset);
                 subPhases[i] = wrap_phase(preset.oscillators[i].phaseOffset * 0.5F);
                 samplePositions[i] = preset.oscillators[i].sampleReverse
                     ? preset.oscillators[i].sampleEnd : preset.oscillators[i].sampleStart;
-                grainCountdown[i] = 0.0F;
-                for (auto& grain : grains[i]) grain = {};
+                samplerPrimed[i] = false;   // Phase 2: sampler start applied lazily at first render
+                samplerFinished[i] = false;
+                samplerPositions[i] = 0.0F;
                 for (std::size_t j = 0; j < auxiliaryPhases[i].size(); ++j)
                     auxiliaryPhases[i][j] = wrap_phase(preset.oscillators[i].phaseOffset + 0.173F * static_cast<float>(j + 1U));
                 for (std::size_t j = 0; j < unisonPhases[i].size(); ++j)
@@ -623,7 +957,24 @@ struct Voice {
             previousOscillatorSamples[i] = 0.0F;
             oscillatorWrapped[i] = false;
             physicalModels[i].initialized = false;
+            modalResonators[i].initialized = false;  // Phase 2: re-excite at note-on
         }
+        // Phase 4: fresh granular cloud per note, deterministically seeded from
+        // note/age so identical notes render identical grain sequences. One
+        // pool per oscillator: oscillator 0 keeps the exact legacy seed so
+        // single-oscillator determinism tests stay bit-identical; the others
+        // fold the oscillator index into the hash for independent clouds.
+        for (std::size_t i = 0; i < kSynthOscillatorCount; ++i) {
+            granularEngines[i].reset();
+            granularEngines[i].set_seed(0x51ED27B9U ^ (static_cast<std::uint32_t>(newNote) << 16U) ^
+                                        static_cast<std::uint32_t>(i * 0x85EBCA6BU) ^
+                                        static_cast<std::uint32_t>(newAge));
+        }
+        // Phase 5: fresh spectral engine per note, deterministically seeded
+        // from note/age so identical notes render identical output.
+        spectralOscillator.reset();
+        spectralOscillator.set_seed(0x5EC1A1U ^ (static_cast<std::uint32_t>(newNote) << 16U) ^
+                                    static_cast<std::uint32_t>(newAge));
         for (std::size_t i = 0; i < kSynthLfoCount; ++i) {
             if (preset.lfos[i].keySync || retrigger) lfoPhases[i] = wrap_phase(preset.lfos[i].phase);
             lfoNoiseState[i] = 0xA511E9B3U ^ (static_cast<std::uint32_t>(newNote) << 8U) ^
@@ -639,7 +990,8 @@ struct Voice {
         modulationSmoothing.fill(0.0F);
     }
     void release() noexcept { keyHeld = false; sustained = false; amp.note_off(); filterEnvelope.note_off(); }
-    void kill() noexcept { active = false; keyHeld = false; sustained = false; amp.kill(); filterEnvelope.kill(); }
+    void kill() noexcept { active = false; keyHeld = false; sustained = false; amp.kill(); filterEnvelope.kill();
+        for (auto& engine : granularEngines) engine.kill_grains(); spectralOscillator.kill(); }
 };
 
 struct DelayLine {
@@ -657,6 +1009,21 @@ struct DelayLine {
     }
     void push(float value) noexcept { data[write] = value; write = (write + 1U) % data.size(); }
 };
+
+// Phase 2: size in samples for one diffusion-delay allpass stage.
+std::size_t diffusion_stage_size(float milliseconds, std::uint32_t sampleRate) noexcept {
+    return std::max<std::size_t>(2U, static_cast<std::size_t>(
+        static_cast<double>(milliseconds) * 0.001 * static_cast<double>(sampleRate)));
+}
+
+// Phase 2: single true-allpass diffusion stage (H(z) = (z^-M - g)/(1 - g*z^-M),
+// unity magnitude for |g| < 1). The DelayLine holds w[n] = x[n] + g*y[n].
+float allpass_diffuse(DelayLine& line, float input, float coefficient) noexcept {
+    const float delayed = line.read_fractional(static_cast<float>(line.data.size() - 1U));
+    const float output = delayed - coefficient * input;
+    line.push(input + coefficient * output);
+    return output;
+}
 
 struct AllpassStage {
     float x1{};
@@ -781,6 +1148,9 @@ float oscillator_sample(OscillatorWaveform waveform, float phase, float incremen
         case OscillatorWaveform::Sample:
         case OscillatorWaveform::Granular:
         case OscillatorWaveform::PhysicalModel:
+        case OscillatorWaveform::Sampler:
+        case OscillatorWaveform::ModalResonator:
+        case OscillatorWaveform::Spectral:  // Phase 5: rendered via SpectralOscillator, not the phase path
             return 0.0F;
     }
     return 0.0F;
@@ -1142,6 +1512,166 @@ float process(PhysicalModelState& state, const OscillatorParameters& osc, float 
 
 } // namespace physical
 
+// ---------------------------------------------------------------------------
+// Modal resonator core (Phase 2, SYN-011b) — allocation-free, realtime safe.
+//
+// Each mode is a damped 2-pole resonator (Smith's formulation):
+//   y[n] = 2*R*cos(w)*y[n-1] - R^2*y[n-2] + x[n]*g_in
+// with R = exp(-1/(tau*sr)), so the mode envelope decays as e^(-t/tau).
+// Output is the gain-weighted sum of the modes; even modes pan left, odd right.
+//
+// Excitation design decisions (documented per the build spec):
+// - Impulse: one-shot initial displacement of every mode at note-on (classic
+//   modal synthesis). Modes ring freely afterwards.
+// - NoiseBurst: white noise injected through the mode inputs for
+//   noiseBurstMilliseconds at note-on, then free decay.
+// - Oscillator: a DEDICATED internal exciter (sawtooth at the voice's base
+//   frequency plus a touch of noise) drives the bank continuously while the key
+//   is held — like a bowed string driving a resonant body. This is used instead
+//   of the voice's own osc 1 to avoid feedback when osc 1 is itself the
+//   resonator, and to keep the routing explicit.
+// - SampleTransient: the first transientMilliseconds of the preset's resident
+//   sample bank (the same bank the Sample waveform uses), resampled from the
+//   bank rate to the voice rate, injected once at note-on. If the bank is
+//   disabled or empty, the documented fallback is a noise burst of the same
+//   length so the voice still sounds.
+// ---------------------------------------------------------------------------
+namespace modal_resonator {
+
+// Piano-style inharmonicity: ratio' = ratio * sqrt(1 + B*(ratio^2 - 1)).
+// ratio == 1 is untouched for any B; higher partials stretch upward.
+inline float stretch_ratio(float ratio, float inharmonicity) noexcept {
+    const float r = std::max(ratio, 0.01F);
+    const float b = std::clamp(inharmonicity, 0.0F, 1.0F);
+    return r * std::sqrt(1.0F + b * (r * r - 1.0F));
+}
+
+// Brightness gain tilt: g(m) = gain_m * (m+1)^(2*(brightness - 0.5)).
+// brightness == 0.5 is flat; 0 darkens as 1/(m+1); 1 brightens as (m+1).
+inline float tilt_gain(float gain, std::size_t modeIndex, float brightness) noexcept {
+    const float tilt = 2.0F * (std::clamp(brightness, 0.0F, 1.0F) - 0.5F);
+    return gain * std::pow(static_cast<float>(modeIndex + 1U), tilt);
+}
+
+inline float excitation_energy(const ModalResonatorParameters& params, float velocity) noexcept {
+    return (0.35F + 0.65F * std::clamp(velocity, 0.0F, 1.0F)) *
+           std::clamp(params.excitationLevel, 0.0F, 4.0F);
+}
+
+inline float base_frequency(const ModalResonatorParameters& params, float frequencyHz,
+                            float sampleRate) noexcept {
+    // MIDI pitch is authoritative when baseFrequency is 0.
+    if (params.baseFrequency > 0.0F)
+        return std::clamp(params.baseFrequency, 20.0F, sampleRate * 0.45F);
+    return std::clamp(frequencyHz, 20.0F, sampleRate * 0.45F);
+}
+
+inline float white_noise(std::uint32_t& noiseState) noexcept {
+    noiseState ^= noiseState << 13U;
+    noiseState ^= noiseState >> 17U;
+    noiseState ^= noiseState << 5U;
+    return static_cast<float>(static_cast<std::int32_t>(noiseState)) /
+           static_cast<float>(std::numeric_limits<std::int32_t>::max());
+}
+
+void initialize(ModalResonatorState& state, const ModalResonatorParameters& params,
+                float frequencyHz, float velocity, const RealtimeSampleBank& bank,
+                float sampleRate) noexcept {
+    state = ModalResonatorState{};
+    state.initialized = true;
+    state.noiseState = 0x5BD1E995U ^ static_cast<std::uint32_t>(frequencyHz * 1000.0F);
+    if (state.noiseState == 0U) state.noiseState = 0x5BD1E995U;
+    const float sr = std::max(sampleRate, 8000.0F);
+    const float base = base_frequency(params, frequencyHz, sr);
+    const float energy = excitation_energy(params, velocity);
+    const float damping = std::clamp(params.damping, 0.01F, 8.0F);
+    // Defensive clamp: the bank never exceeds kModalResonatorMaxModes entries.
+    const std::uint8_t activeModes =
+        std::clamp(params.modeCount, std::uint8_t{1}, std::uint8_t{kModalResonatorMaxModes});
+    state.activeModes = activeModes;
+    for (std::uint8_t m = 0; m < activeModes; ++m) {
+        auto& mode = state.modes[m];
+        const auto& mp = params.modes[m];
+        const float ratio = stretch_ratio(mp.frequencyRatio, params.inharmonicity);
+        const float rawFrequency = base * ratio;
+        const float decaySeconds = std::clamp(mp.decaySeconds, 0.005F, 60.0F) * damping;
+        mode.decayCoeff = std::exp(-1.0F / (std::max(decaySeconds, 0.001F) * sr));
+        mode.gain = rawFrequency >= sr * 0.45F
+            ? 0.0F
+            : tilt_gain(std::max(mp.gain, 0.0F), m, params.brightness);
+        mode.y1 = 0.0F;
+        mode.y2 = 0.0F;
+        if (params.excitation == ExcitationSource::Impulse)
+            mode.y1 = energy * mode.gain * 0.5F;
+    }
+    if (params.excitation == ExcitationSource::NoiseBurst) {
+        const float ms = std::clamp(params.noiseBurstMilliseconds, 1.0F, 2000.0F);
+        state.exciteSamplesRemaining = static_cast<std::uint32_t>(ms * 0.001F * sr);
+    } else if (params.excitation == ExcitationSource::SampleTransient) {
+        const bool haveSample = bank.enabled && bank.frameCount > 1U;
+        const float ms = std::clamp(params.transientMilliseconds, 1.0F, 2000.0F);
+        if (haveSample) {
+            const std::uint32_t bankFrames = static_cast<std::uint32_t>(
+                ms * 0.001F * static_cast<float>(std::max(bank.sampleRate, 1U)));
+            state.transientFramesRemaining = std::min(bankFrames, bank.frameCount);
+            state.transientPosition = 0.0F;
+            state.transientStep = static_cast<float>(std::max(bank.sampleRate, 1U)) / sr;
+        } else {
+            state.exciteSamplesRemaining = static_cast<std::uint32_t>(ms * 0.001F * sr);
+        }
+    }
+}
+
+std::pair<float, float> process(ModalResonatorState& state, const ModalResonatorParameters& params,
+                                float frequencyHz, float velocity, bool keyHeld,
+                                const RealtimeSampleBank& bank, float sampleRate) noexcept {
+    if (!state.initialized) initialize(state, params, frequencyHz, velocity, bank, sampleRate);
+    const float sr = std::max(sampleRate, 8000.0F);
+    const float base = base_frequency(params, frequencyHz, sr);
+    const float energy = excitation_energy(params, velocity);
+
+    // Excitation signal injected through every mode input this sample.
+    float exciter = 0.0F;
+    if (state.exciteSamplesRemaining > 0U) {
+        exciter = white_noise(state.noiseState) * energy * 0.5F;
+        --state.exciteSamplesRemaining;
+    } else if (state.transientFramesRemaining > 0U && bank.enabled && bank.frameCount > 1U) {
+        const std::uint32_t i0 = std::min(static_cast<std::uint32_t>(state.transientPosition),
+                                          bank.frameCount - 1U);
+        const std::uint32_t i1 = std::min(i0 + 1U, bank.frameCount - 1U);
+        const float frac = state.transientPosition - std::floor(state.transientPosition);
+        exciter = (bank.samples[i0] + (bank.samples[i1] - bank.samples[i0]) * frac) * energy;
+        state.transientPosition += state.transientStep;
+        --state.transientFramesRemaining;
+    } else if (params.excitation == ExcitationSource::Oscillator && keyHeld) {
+        const float increment = base / sr;
+        state.exciterPhase = wrap_phase(state.exciterPhase + increment);
+        const float saw = bandlimited_saw(state.exciterPhase, increment);
+        exciter = (saw * 0.7F + white_noise(state.noiseState) * 0.15F) * energy * 0.35F;
+    }
+
+    float left = 0.0F;
+    float right = 0.0F;
+    for (std::uint8_t m = 0; m < state.activeModes; ++m) {
+        auto& mode = state.modes[m];
+        if (mode.gain <= 0.0F) continue;
+        // Recompute per sample so pitch bend and MPE glide the whole bank.
+        const float ratio = stretch_ratio(params.modes[m].frequencyRatio, params.inharmonicity);
+        const float freq = std::min(base * ratio, sr * 0.45F);
+        const float w = kTwoPi * freq / sr;
+        const float r = mode.decayCoeff;
+        const float cosw = std::cos(w);
+        const float y = 2.0F * r * cosw * mode.y1 - r * r * mode.y2 + exciter * mode.gain;
+        mode.y2 = mode.y1;
+        mode.y1 = y;
+        if ((m & 1U) == 0U) left += y * mode.gain;
+        else right += y * mode.gain;
+    }
+    return {std::tanh(left * 0.9F), std::tanh(right * 0.9F)};
+}
+
+} // namespace modal_resonator
+
 bool finite(float value) noexcept { return std::isfinite(value); }
 
 bool validate_adsr(const AdsrParameters& p) noexcept {
@@ -1163,6 +1693,7 @@ std::vector<std::pair<std::string, std::string>> parse_lines(std::string_view te
     std::istringstream input{std::string(text)};
     std::string line;
     while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         const auto equals = line.find('=');
         if (equals != std::string::npos) result.emplace_back(line.substr(0, equals), line.substr(equals + 1U));
     }
@@ -1185,6 +1716,9 @@ std::string waveform_name(OscillatorWaveform waveform) {
         case OscillatorWaveform::Sample: return "sample";
         case OscillatorWaveform::Granular: return "granular";
         case OscillatorWaveform::PhysicalModel: return "physicalmodel";
+        case OscillatorWaveform::Sampler: return "sampler";
+        case OscillatorWaveform::ModalResonator: return "modalresonator";
+        case OscillatorWaveform::Spectral: return "spectral";
     }
     return "saw";
 }
@@ -1203,6 +1737,9 @@ std::optional<OscillatorWaveform> parse_waveform(std::string_view value) {
     if (value == "sample") return OscillatorWaveform::Sample;
     if (value == "granular") return OscillatorWaveform::Granular;
     if (value == "physicalmodel") return OscillatorWaveform::PhysicalModel;
+    if (value == "sampler") return OscillatorWaveform::Sampler;
+    if (value == "modalresonator") return OscillatorWaveform::ModalResonator;
+    if (value == "spectral") return OscillatorWaveform::Spectral;
     return std::nullopt;
 }
 
@@ -1259,6 +1796,24 @@ std::optional<PhysicalExcitation> parse_physical_excitation(std::string_view val
     return std::nullopt;
 }
 
+// Phase 2: modal resonator excitation source tokens.
+std::string_view modal_excitation_token(ExcitationSource e) noexcept {
+    switch (e) {
+        case ExcitationSource::Impulse: return "impulse";
+        case ExcitationSource::NoiseBurst: return "noiseburst";
+        case ExcitationSource::Oscillator: return "oscillator";
+        case ExcitationSource::SampleTransient: return "sampletransient";
+    }
+    return "impulse";
+}
+std::optional<ExcitationSource> parse_modal_excitation(std::string_view value) noexcept {
+    if (value == "impulse") return ExcitationSource::Impulse;
+    if (value == "noiseburst") return ExcitationSource::NoiseBurst;
+    if (value == "oscillator") return ExcitationSource::Oscillator;
+    if (value == "sampletransient") return ExcitationSource::SampleTransient;
+    return std::nullopt;
+}
+
 std::string_view physical_driver_token(PhysicalDriver d) noexcept {
     switch (d) {
         case PhysicalDriver::Disabled: return "none";
@@ -1298,6 +1853,8 @@ std::string_view filter_topology_token(FilterTopology topology) noexcept {
         case FilterTopology::MoogLadder: return "moog_ladder";
         case FilterTopology::KorgMs20: return "korg_ms20";
         case FilterTopology::OberheimSem: return "oberheim_sem";
+        case FilterTopology::Comb: return "comb";
+        case FilterTopology::Formant: return "formant";
     }
     return "clean";
 }
@@ -1306,6 +1863,8 @@ std::optional<FilterTopology> parse_filter_topology(std::string_view value) noex
     if (value == "moog_ladder") return FilterTopology::MoogLadder;
     if (value == "korg_ms20") return FilterTopology::KorgMs20;
     if (value == "oberheim_sem") return FilterTopology::OberheimSem;
+    if (value == "comb") return FilterTopology::Comb;
+    if (value == "formant") return FilterTopology::Formant;
     return std::nullopt;
 }
 std::string_view arpeggiator_mode_token(ArpeggiatorMode mode) noexcept {
@@ -1338,6 +1897,9 @@ std::string_view arpeggiator_division_token(ArpeggiatorDivision division) noexce
         case ArpeggiatorDivision::Sixteenth: return "1/16";
         case ArpeggiatorDivision::SixteenthTriplet: return "1/16T";
         case ArpeggiatorDivision::ThirtySecond: return "1/32";
+        case ArpeggiatorDivision::DottedEighth: return "1/8D";
+        case ArpeggiatorDivision::DottedQuarter: return "1/4D";
+        case ArpeggiatorDivision::SixtyFourth: return "1/64";
     }
     return "1/16";
 }
@@ -1348,6 +1910,9 @@ std::optional<ArpeggiatorDivision> parse_arpeggiator_division(std::string_view v
     if (value == "1/16") return ArpeggiatorDivision::Sixteenth;
     if (value == "1/16T") return ArpeggiatorDivision::SixteenthTriplet;
     if (value == "1/32") return ArpeggiatorDivision::ThirtySecond;
+    if (value == "1/8D") return ArpeggiatorDivision::DottedEighth;
+    if (value == "1/4D") return ArpeggiatorDivision::DottedQuarter;
+    if (value == "1/64") return ArpeggiatorDivision::SixtyFourth;
     return std::nullopt;
 }
 std::string_view chord_type_token(ChordType type) noexcept {
@@ -1421,29 +1986,33 @@ std::optional<LfoWaveform> parse_lfo_waveform(std::string_view value) noexcept {
     return std::nullopt;
 }
 std::string_view modulation_source_token(ModulationSource source) noexcept {
-    static constexpr std::array<std::string_view, 14> names{
+    static constexpr std::array<std::string_view, 24> names{
         "none","lfo1","lfo2","amp_env","filter_env","velocity","keytrack",
-        "modwheel","aftertouch","random","macro1","macro2","macro3","macro4"};
+        "modwheel","aftertouch","random","macro1","macro2","macro3","macro4",
+        "timbre","note_bend","release_vel",
+        "spring","pendulum","orbiter","lorenz",
+        "seq_timbre","seq_morph","seq_pan"};
     const auto index = static_cast<std::size_t>(source);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationSource> parse_modulation_source(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationSource::Macro4); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationSource::SeqPan); ++i)
         if (modulation_source_token(static_cast<ModulationSource>(i)) == value) return static_cast<ModulationSource>(i);
     return std::nullopt;
 }
 std::string_view modulation_destination_token(ModulationDestination destination) noexcept {
-    static constexpr std::array<std::string_view, 39> names{
+    static constexpr std::array<std::string_view, 43> names{
         "none","global_pitch","filter_cutoff","filter_resonance","filter_drive","voice_gain","voice_pan",
         "osc1_pitch","osc2_pitch","osc3_pitch","osc4_pitch","osc5_pitch","osc6_pitch","osc7_pitch","osc8_pitch",
         "osc1_shape","osc2_shape","osc3_shape","osc4_shape","osc5_shape","osc6_shape","osc7_shape","osc8_shape",
         "osc1_pw","osc2_pw","osc3_pw","osc4_pw","osc5_pw","osc6_pw","osc7_pw","osc8_pw",
-        "osc1_gain","osc2_gain","osc3_gain","osc4_gain","osc5_gain","osc6_gain","osc7_gain","osc8_gain"};
+        "osc1_gain","osc2_gain","osc3_gain","osc4_gain","osc5_gain","osc6_gain","osc7_gain","osc8_gain",
+        "wavetable_pos","morph_amount","sampler_start_pos","granular_pos"};
     const auto index = static_cast<std::size_t>(destination);
     return index < names.size() ? names[index] : names[0];
 }
 std::optional<ModulationDestination> parse_modulation_destination(std::string_view value) noexcept {
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::Osc8Gain); ++i)
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(ModulationDestination::GranularPosition); ++i)
         if (modulation_destination_token(static_cast<ModulationDestination>(i)) == value) return static_cast<ModulationDestination>(i);
     return std::nullopt;
 }
@@ -1594,11 +2163,40 @@ float arpeggiator_step_beats(ArpeggiatorDivision division) noexcept {
         case ArpeggiatorDivision::Sixteenth: return 0.25F;
         case ArpeggiatorDivision::SixteenthTriplet: return 1.0F / 6.0F;
         case ArpeggiatorDivision::ThirtySecond: return 0.125F;
+        case ArpeggiatorDivision::DottedEighth: return 0.75F;
+        case ArpeggiatorDivision::DottedQuarter: return 1.5F;
+        case ArpeggiatorDivision::SixtyFourth: return 0.0625F;
     }
     return 0.25F;
 }
 
 } // namespace
+
+// Realtime-safe counterpart of morph_synth_presets(): interpolates two
+// realtime presets without allocation (used by the audio thread's morph walk).
+// Declared here in dve::audio scope to match the definition below.
+[[nodiscard]] RealtimePreset morph_realtime_presets(const RealtimePreset& a, const RealtimePreset& b,
+                                                    float amount) noexcept;
+
+ModalResonatorParameters ModalResonatorParameters::make_default() {
+    ModalResonatorParameters params;
+    params.modeCount = 12;
+    params.baseFrequency = 0.0F;   // follow the played note
+    params.damping = 1.0F;
+    params.inharmonicity = 0.0F;
+    params.brightness = 0.5F;      // flat tilt
+    params.excitation = ExcitationSource::Impulse;
+    params.excitationLevel = 1.0F;
+    params.noiseBurstMilliseconds = 40.0F;
+    params.transientMilliseconds = 60.0F;
+    for (std::size_t m = 0; m < params.modes.size(); ++m) {
+        auto& mode = params.modes[m];
+        mode.frequencyRatio = static_cast<float>(m + 1U);              // harmonic series
+        mode.decaySeconds = 2.5F / (1.0F + 0.35F * static_cast<float>(m));
+        mode.gain = 1.0F / (1.0F + 0.5F * static_cast<float>(m));      // gentle high rolloff
+    }
+    return params;
+}
 
 std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept {
     switch (waveform) {
@@ -1616,8 +2214,20 @@ std::string_view oscillator_waveform_name(OscillatorWaveform waveform) noexcept 
         case OscillatorWaveform::Sample: return "Sample";
         case OscillatorWaveform::Granular: return "Granular";
         case OscillatorWaveform::PhysicalModel: return "Physical Model";
+        case OscillatorWaveform::Sampler: return "Sampler";
+        case OscillatorWaveform::ModalResonator: return "Modal Resonator";
+        case OscillatorWaveform::Spectral: return "Spectral";
     }
     return "Saw";
+}
+std::string_view modal_excitation_source_name(ExcitationSource source) noexcept {
+    switch (source) {
+        case ExcitationSource::Impulse: return "Impulse";
+        case ExcitationSource::NoiseBurst: return "Noise Burst";
+        case ExcitationSource::Oscillator: return "Oscillator";
+        case ExcitationSource::SampleTransient: return "Sample Transient";
+    }
+    return "Impulse";
 }
 std::string_view filter_topology_name(FilterTopology topology) noexcept {
     switch (topology) {
@@ -1625,6 +2235,8 @@ std::string_view filter_topology_name(FilterTopology topology) noexcept {
         case FilterTopology::MoogLadder: return "Moog Ladder";
         case FilterTopology::KorgMs20: return "Korg MS-20";
         case FilterTopology::OberheimSem: return "Oberheim SEM";
+        case FilterTopology::Comb: return "Comb";
+        case FilterTopology::Formant: return "Formant";
     }
     return "Clean SVF";
 }
@@ -1636,6 +2248,20 @@ std::string_view filter_mode_name(FilterMode mode) noexcept {
         case FilterMode::Notch: return "Notch";
     }
     return "Low-pass";
+}
+
+// Phase 2: auto oversampling policy. Applies only when oversampling is Auto:
+// X1 by default, upgraded under high resonance / engaged drive (where
+// nonlinear stages alias most). An explicit X1/X2/X4 setting is always honored
+// exactly, so existing presets keep their exact old behavior.
+FilterOversampling effective_oversampling(const FilterParameters& params) noexcept {
+    if (params.oversampling != FilterOversampling::Auto) return params.oversampling;
+    const bool driveEngaged = params.drive > kAutoOversampleDriveThreshold;
+    if (params.resonance > kAutoOversampleExtremeResonanceThreshold && driveEngaged)
+        return FilterOversampling::X4;
+    if (params.resonance > kAutoOversampleResonanceThreshold || driveEngaged)
+        return FilterOversampling::X2;
+    return FilterOversampling::X1;
 }
 std::string_view arpeggiator_mode_name(ArpeggiatorMode mode) noexcept {
     switch (mode) {
@@ -1747,6 +2373,46 @@ std::string_view lfo_waveform_name(LfoWaveform waveform) noexcept {
 std::string_view modulation_source_name(ModulationSource source) noexcept { return modulation_source_token(source); }
 std::string_view modulation_destination_name(ModulationDestination destination) noexcept { return modulation_destination_token(destination); }
 
+// Phase 2: sampler name strings.
+std::string_view sampler_playback_mode_name(SamplerPlaybackMode mode) noexcept {
+    switch (mode) {
+        case SamplerPlaybackMode::OneShot: return "One-Shot";
+        case SamplerPlaybackMode::Loop: return "Loop";
+    }
+    return "One-Shot";
+}
+std::string_view sampler_direction_name(SamplerDirection direction) noexcept {
+    switch (direction) {
+        case SamplerDirection::Forward: return "Forward";
+        case SamplerDirection::Reverse: return "Reverse";
+    }
+    return "Forward";
+}
+std::string_view sampler_playback_mode_token(SamplerPlaybackMode mode) noexcept {
+    switch (mode) {
+        case SamplerPlaybackMode::OneShot: return "oneshot";
+        case SamplerPlaybackMode::Loop: return "loop";
+    }
+    return "oneshot";
+}
+std::string_view sampler_direction_token(SamplerDirection direction) noexcept {
+    switch (direction) {
+        case SamplerDirection::Forward: return "forward";
+        case SamplerDirection::Reverse: return "reverse";
+    }
+    return "forward";
+}
+std::optional<SamplerPlaybackMode> parse_sampler_playback_mode(std::string_view value) noexcept {
+    if (value == "oneshot") return SamplerPlaybackMode::OneShot;
+    if (value == "loop") return SamplerPlaybackMode::Loop;
+    return std::nullopt;
+}
+std::optional<SamplerDirection> parse_sampler_direction(std::string_view value) noexcept {
+    if (value == "forward") return SamplerDirection::Forward;
+    if (value == "reverse") return SamplerDirection::Reverse;
+    return std::nullopt;
+}
+
 
 struct Synthesizer::Impl {
     struct VoiceTelemetry {
@@ -1783,15 +2449,92 @@ struct Synthesizer::Impl {
     explicit Impl(std::uint32_t rate, std::atomic<std::uint64_t>& frameCounter)
         : sampleRate(static_cast<float>(rate)), currentFrame(frameCounter),
           chorusL(static_cast<std::size_t>(rate / 10U + 32U)), chorusR(static_cast<std::size_t>(rate / 10U + 32U)),
+          flangerL(static_cast<std::size_t>(rate / 40U + 32U)), flangerR(static_cast<std::size_t>(rate / 40U + 32U)),
+          ensembleBufL(static_cast<std::size_t>(rate / 25U + 32U)), ensembleBufR(static_cast<std::size_t>(rate / 25U + 32U)),
           delayL(static_cast<std::size_t>(rate * 2U + 2U)), delayR(static_cast<std::size_t>(rate * 2U + 2U)),
+          diffDelayL(static_cast<std::size_t>(rate * 2U + 2U)), diffDelayR(static_cast<std::size_t>(rate * 2U + 2U)),
+          // Phase 2: diffusion allpass stage times (ms), decorrelated per channel.
+          diffApL{DelayLine(diffusion_stage_size(5.9F, rate)), DelayLine(diffusion_stage_size(11.3F, rate)),
+                  DelayLine(diffusion_stage_size(17.7F, rate)), DelayLine(diffusion_stage_size(23.1F, rate))},
+          diffApR{DelayLine(diffusion_stage_size(6.7F, rate)), DelayLine(diffusion_stage_size(12.9F, rate)),
+                  DelayLine(diffusion_stage_size(18.3F, rate)), DelayLine(diffusion_stage_size(25.7F, rate))},
           reverb(rate) {}
 
     float sampleRate{};
     std::atomic<std::uint64_t>& currentFrame;
     RealtimePreset parameters{};
+    // Phase 1: high-quality wavetable bank. Cooked on the UI thread (FFT) and
+    // published as a CookedWavetableSet; hqWavetable_ points into the active
+    // set (or at the zero table until the first cookable preset arrives).
+    CookedWavetable hqEmptyWavetable_{};
+    const CookedWavetable* hqWavetable_{&hqEmptyWavetable_};
+    CookedWavetableSet* activeWavetables_{nullptr};                      // render thread
+    std::atomic<CookedWavetableSet*> pendingWavetables_{nullptr};        // UI -> render
+    std::atomic<CookedWavetableSet*> retiredWavetables_{nullptr};        // render -> UI
+    SequencerConfig presetSequencerConfig_{};                            // render thread
+    // Phase 1: physics modulation bank (global).
+    PhysicsModulationBank physicsBank{};
+    // Phase 3: generative step sequencer (SYN-012). Driven once per render
+    // block by advance_sequencer(); disabled by default.
+    Sequencer sequencer{};
+    // Phase 3: generative conductor (attractor -> live synth mapping). Driven
+    // once per render block; a no-op unless enabled.
+    GenerativeConductor conductor{};
+    // Phase 3: conductor-driven filter cutoff multiplier (1.0 = no change).
+    // Written by the conductor on the render thread, read by the voice DSP
+    // on the same thread.
+    float conductorCutoffMultiplier{1.0F};
+    // Phase 1: morph A/B numeric presets, cached on the render thread so the
+    // conductor's per-block morph walk never copies strings. Populated by
+    // adopt_preset(); applied by apply_morph_amount().
+    RealtimePreset morphBaseA_{};
+    RealtimePreset morphBaseB_{};
+    bool morphHasB_{false};
+    float appliedMorphAmount_{-1.0F};  // amount baked into parameters (-1 = none)
+    // Phase 1: wavetable cook gating + cache (UI thread, wavetableCookMutex_).
+    struct WavetableCookCacheEntry {
+        std::uint64_t hash{0};
+        std::shared_ptr<const CookedWavetable> table;
+        std::uint64_t lastUse{0};
+    };
+    std::mutex wavetableCookMutex_;
+    std::array<WavetableCookCacheEntry, 3> wavetableCookCache_{};
+    std::uint64_t wavetableCookClock_{0};
+    std::shared_ptr<const CookedWavetable> publishedA_;
+    std::uint64_t publishedHashA_{0};
+    std::uint64_t publishedHashB_{0};
+    bool publishedValid_{false};
+    std::atomic<std::uint64_t> wavetableCookCount_{0};
+    std::vector<float> wavetableCookScratch_;              // flat 64x512 resample target
+    std::vector<std::complex<float>> wavetableCookSpectrum_;  // persistent DFT scratch
+    std::vector<float> wavetableCookFiltered_;             // persistent DFT scratch
+    std::vector<float> wavetableCookFrame_;                // persistent frame scratch
+    // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
+    // Phase 0: smoothed live parameters. Targets are set in adopt_preset();
+    // currents advance toward targets once per render block in
+    // advance_parameter_smoothing(). The DSP reads the smoothed currents,
+    // not parameters.X directly, for these fields.
+    SmoothedFloat smoothedFilterCutoffLog{};  // log2(cutoffHz)
+    SmoothedFloat smoothedFilterResonance{};
+    SmoothedFloat smoothedMasterGain{};
+    std::array<SmoothedFloat, kSynthOscillatorCount> smoothedOscGain{};
+    SmoothedFloat smoothedDelayTime{};
+    SmoothedFloat smoothedDiffDelayTime{};
+    SmoothedFloat smoothedDiffDelayFeedback{};
+    SmoothedFloat smoothedEqLowDb{};
+    SmoothedFloat smoothedEqMidDb{};
+    SmoothedFloat smoothedEqHighDb{};
+    SmoothedFloat smoothedDistortionDrive{};
+    SmoothedFloat smoothedDelayFeedback{};
+    SmoothedFloat smoothedFlangerFeedback{};
+    SmoothedFloat smoothedCompThresholdDb{};
+    bool parameterSmoothingInitialized{};
     BoundedQueue<MidiMessage, kMidiQueueCapacity> midiIn;
     BoundedQueue<MidiMessage, kMidiOutQueueCapacity> midiOut;
-    BoundedQueue<RealtimePreset, kPresetQueueCapacity> presetIn;
+    // Latest-wins preset handoff (was an 8-deep queue that dropped the NEWEST
+    // update on overflow, so a burst of edits could leave a stale preset live).
+    LatestMailbox<PresetUpdate> presetIn;
+    std::atomic<std::uint64_t> coalescedPresets{0};  // updates superseded before render() took them (UI thread)
     std::mutex sampleMapPublishMutex;
     std::array<SynthSampleMap, 3> sampleMaps{};
     std::atomic<int> activeSampleMapIndex{0};
@@ -1807,7 +2550,19 @@ struct Synthesizer::Impl {
     std::atomic<std::uint64_t> samplePageUnderruns{};
     std::atomic<std::uint32_t> activeGrainTelemetry{};
     std::atomic<std::uint32_t> maximumActiveGrains{};
-    std::uint32_t activeGrains{};
+    // Synth-wide profiler counters (see SynthProfiler). Updated on the render thread with
+    // relaxed ordering; read via Synthesizer::profiler().
+    std::atomic<std::uint64_t> profilerRenderCalls{};
+    std::atomic<std::uint64_t> profilerSamplesRendered{};
+    std::atomic<std::uint64_t> profilerVoicesStarted{};
+    std::atomic<std::uint64_t> profilerVoicesStolen{};
+    std::atomic<std::uint64_t> profilerVoicesRetired{};
+    std::atomic<std::uint64_t> profilerOscillatorVoiceFrames{};
+    std::atomic<std::uint64_t> profilerFilterFrames{};
+    std::atomic<std::uint64_t> profilerFxFrames{};
+    std::atomic<std::uint64_t> profilerArpSteps{};
+    std::atomic<std::uint32_t> profilerActiveVoices{};
+    std::atomic<std::uint32_t> profilerMaximumActiveVoices{};
     std::array<Voice, kSynthVoiceCount> voice{};
     std::array<VoiceTelemetry, kSynthVoiceCount> telemetry{};
     std::array<float, 16> pitchBend{};
@@ -1837,6 +2592,7 @@ struct Synthesizer::Impl {
     std::uint64_t arpOrderCounter{};
     std::uint64_t nextArpFrame{std::numeric_limits<std::uint64_t>::max()};
     std::uint64_t arpGateOffFrame{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t arpStrumMaxDelay{};
     std::uint32_t arpProgress{};
     std::uint32_t arpStepCounter{};
     std::uint32_t arpRandomState{0x51A3D8E7U};
@@ -1849,6 +2605,7 @@ struct Synthesizer::Impl {
     std::array<std::uint8_t, kSynthVoiceCount> arpPatternNotes{};
     std::array<std::uint8_t, kSynthVoiceCount> arpPatternChannels{};
     std::array<std::uint8_t, kSynthVoiceCount> arpPatternVelocities{};
+    std::array<std::uint64_t, kSynthVoiceCount> arpPatternDelays{};
     std::uint8_t arpPatternCount{};
 
     struct ScheduledVoiceEvent {
@@ -1865,6 +2622,19 @@ struct Synthesizer::Impl {
     DelayLine chorusL;
     DelayLine chorusR;
     float chorusPhase{};
+    DelayLine flangerL;
+    DelayLine flangerR;
+    float flangerPhase{};
+    float flangerFeedbackL{};
+    float flangerFeedbackR{};
+    DelayLine ensembleBufL;
+    DelayLine ensembleBufR;
+    float ensemblePhase{};
+    float fuzzToneL{};
+    float fuzzToneR{};
+    float crusherHoldL{};
+    float crusherHoldR{};
+    std::uint32_t crusherCount{};
     std::array<AllpassStage, 4> phaserL{};
     std::array<AllpassStage, 4> phaserR{};
     float phaserPhase{};
@@ -1872,6 +2642,12 @@ struct Synthesizer::Impl {
     float phaserFeedbackR{};
     DelayLine delayL;
     DelayLine delayR;
+    // Phase 2: diffusion delay — recirculating delay line plus per-channel
+    // cascaded allpass diffusion stages.
+    DelayLine diffDelayL;
+    DelayLine diffDelayR;
+    std::array<DelayLine, 4> diffApL;
+    std::array<DelayLine, 4> diffApR;
     ReverbState reverb;
     float eqLowL{}; float eqLowR{}; float eqHighL{}; float eqHighR{};
     float compressorEnvelope{};
@@ -1892,6 +2668,7 @@ struct Synthesizer::Impl {
         for (Voice& candidate : voice)
             if (candidate.active && candidate.channel == channel && candidate.note == note) return candidate;
         for (Voice& candidate : voice) if (!candidate.active) return candidate;
+        profilerVoicesStolen.fetch_add(1U, std::memory_order_relaxed);
         auto released = std::min_element(voice.begin(), voice.end(), [](const Voice& a, const Voice& b) {
             const bool ar = a.amp.stage == VoiceStage::Release;
             const bool br = b.amp.stage == VoiceStage::Release;
@@ -1900,17 +2677,6 @@ struct Synthesizer::Impl {
             return a.age < b.age;
         });
         return *released;
-    }
-
-    void retire_voice_grains(Voice& target) noexcept {
-        for (auto& oscillatorGrains : target.grains) {
-            for (GrainState& grain : oscillatorGrains) {
-                if (!grain.active) continue;
-                grain.active = false;
-                if (activeGrains > 0U) --activeGrains;
-            }
-        }
-        activeGrainTelemetry.store(activeGrains, std::memory_order_relaxed);
     }
 
     void stage_sample_map(SynthSampleMap map) {
@@ -1931,7 +2697,6 @@ struct Synthesizer::Impl {
         const int pending = pendingSampleMapIndex.exchange(-1, std::memory_order_acq_rel);
         if (pending < 0) return;
         for (Voice& candidate : voice) {
-            retire_voice_grains(candidate);
             candidate.kill();
         }
         activeSampleMapIndex.store(pending, std::memory_order_release);
@@ -2166,24 +2931,18 @@ struct Synthesizer::Impl {
                 sample * gain * std::sqrt(0.5F * (1.0F + pan))};
     }
 
-    [[nodiscard]] bool admit_grain(const Voice& target) noexcept {
-        std::uint32_t activeVoices = 0U;
-        for (const Voice& candidate : voice) if (candidate.active) ++activeVoices;
-        const std::uint32_t globalBudget = activeVoices > 12U ? 96U : (activeVoices > 8U ? 128U : 192U);
-        std::uint32_t voiceGrains = 0U;
-        for (const auto& oscillatorGrains : target.grains)
-            for (const GrainState& grain : oscillatorGrains) if (grain.active) ++voiceGrains;
-        std::uint32_t quota = std::max(2U, globalBudget / std::max(1U, activeVoices));
-        if (target.amp.stage == VoiceStage::Attack || target.amp.stage == VoiceStage::Delay) quota += 2U;
-        return activeGrains < globalBudget && voiceGrains < quota;
-    }
-
-    void note_grain_admitted() noexcept {
-        ++activeGrains;
-        activeGrainTelemetry.store(activeGrains, std::memory_order_relaxed);
-        std::uint32_t observed = maximumActiveGrains.load(std::memory_order_relaxed);
-        while (activeGrains > observed &&
-               !maximumActiveGrains.compare_exchange_weak(observed, activeGrains, std::memory_order_relaxed)) {}
+    // Phase 4: forwards one voice's drained granular counters into the
+    // synth-level profiler atomics (Synthesizer::granular_profiler()).
+    void forward_granular_counters(GranularEngine& engine) noexcept {
+        const GranularCounters drained = engine.drain_counters();
+        if (drained.requestedGrains != 0U)
+            requestedGrains.fetch_add(drained.requestedGrains, std::memory_order_relaxed);
+        if (drained.admittedGrains != 0U)
+            admittedGrains.fetch_add(drained.admittedGrains, std::memory_order_relaxed);
+        if (drained.grainSteals != 0U)
+            grainSteals.fetch_add(drained.grainSteals, std::memory_order_relaxed);
+        if (drained.grainMisses != 0U)
+            grainMisses.fetch_add(drained.grainMisses, std::memory_order_relaxed);
     }
 
     void emit_note(bool on, std::uint8_t channel, std::uint8_t note, std::uint8_t velocity,
@@ -2197,19 +2956,23 @@ struct Synthesizer::Impl {
     void direct_note_on(std::uint8_t channel, std::uint8_t note, std::uint8_t velocity,
                         bool retrigger, bool emitOutput) noexcept {
         Voice& target = allocate_voice(channel, note);
+        profilerVoicesStarted.fetch_add(1U, std::memory_order_relaxed);
         const bool sameNote = target.active && target.channel == channel && target.note == note;
         const bool restart = retrigger || !sameNote;
-        if (restart) retire_voice_grains(target);
         target.start(channel, note, static_cast<float>(velocity) / 127.0F, ++ageCounter, renderFrame,
                      parameters, restart);
         if (restart) assign_sample_zones(target);
+        // Phase 1: excite physics modulators on note-on.
+        physicsBank.note_on(static_cast<float>(velocity) / 127.0F);
         if (emitOutput) emit_note(true, channel, note, velocity, renderFrame);
     }
 
-    void direct_note_off(std::uint8_t channel, std::uint8_t note, bool emitOutput) noexcept {
+    void direct_note_off(std::uint8_t channel, std::uint8_t note, bool emitOutput,
+                         float releaseVelocity = 0.5F) noexcept {
         for (Voice& candidate : voice) {
             if (!candidate.active || candidate.channel != channel || candidate.note != note) continue;
             candidate.keyHeld = false;
+            candidate.releaseVelocity = clampf(releaseVelocity, 0.0F, 1.0F);
             if (sustain[channel]) candidate.sustained = true;
             else {
                 activate_release_samples(candidate);
@@ -2240,10 +3003,15 @@ struct Synthesizer::Impl {
     }
 
     void release_arp_notes() noexcept {
-        for (std::size_t i = 0; i < arpActiveCount; ++i)
+        for (std::size_t i = 0; i < arpActiveCount; ++i) {
+            for (ScheduledVoiceEvent& event : scheduledEvents)
+                if (event.active && event.noteOn && event.channel == arpActiveChannels[i] &&
+                    event.note == arpActiveNotes[i]) event.active = false;
             direct_note_off(arpActiveChannels[i], arpActiveNotes[i], true);
+        }
         arpActiveCount = 0;
         arpGateOffFrame = std::numeric_limits<std::uint64_t>::max();
+        arpStrumMaxDelay = 0;
     }
 
     void clear_arp_held(bool releaseCurrent) noexcept {
@@ -2258,6 +3026,7 @@ struct Synthesizer::Impl {
         nextRatchetFrame = std::numeric_limits<std::uint64_t>::max();
         arpStepEndFrame = std::numeric_limits<std::uint64_t>::max();
         arpStepTie = false;
+        arpStrumMaxDelay = 0;
     }
 
     std::size_t physical_held_count() const noexcept {
@@ -2389,13 +3158,22 @@ struct Synthesizer::Impl {
         const bool carry = allowCarry && active_pattern_matches();
         if (!carry) {
             release_arp_notes();
+            std::uint64_t maxDelay = 0;
             for (std::size_t i = 0; i < arpPatternCount && arpActiveCount < kSynthVoiceCount; ++i) {
-                direct_note_on(arpPatternChannels[i], arpPatternNotes[i], arpPatternVelocities[i],
-                               parameters.arpeggiator.retriggerEnvelopes, true);
+                const std::uint64_t delay = arpPatternDelays[i];
+                maxDelay = std::max(maxDelay, delay);
+                if (delay == 0) {
+                    direct_note_on(arpPatternChannels[i], arpPatternNotes[i], arpPatternVelocities[i],
+                                   parameters.arpeggiator.retriggerEnvelopes, true);
+                } else {
+                    (void)schedule_voice_event(true, arpPatternChannels[i], arpPatternNotes[i],
+                                               arpPatternVelocities[i], renderFrame + delay, true);
+                }
                 arpActiveNotes[arpActiveCount] = arpPatternNotes[i];
                 arpActiveChannels[arpActiveCount] = arpPatternChannels[i];
                 ++arpActiveCount;
             }
+            arpStrumMaxDelay = maxDelay;
         }
         const std::uint8_t configuredStepCount = static_cast<std::uint8_t>(
             std::clamp<unsigned>(parameters.arpeggiator.stepCount, 1U, static_cast<unsigned>(kArpeggiatorStepCount)));
@@ -2404,7 +3182,7 @@ struct Synthesizer::Impl {
         const float gate = clampf(parameters.arpeggiator.gate * step.gateScale, 0.02F, 1.0F);
         const std::uint64_t segmentEnd = std::min(arpStepEndFrame, renderFrame + arpRatchetDuration);
         arpGateOffFrame = step.tie && arpRatchetCount == 1U ? arpStepEndFrame :
-            renderFrame + std::max<std::uint64_t>(1U,
+            renderFrame + arpStrumMaxDelay + std::max<std::uint64_t>(1U,
                 static_cast<std::uint64_t>(static_cast<double>(arpRatchetDuration) * gate));
         arpGateOffFrame = std::min(arpGateOffFrame, segmentEnd);
     }
@@ -2421,6 +3199,7 @@ struct Synthesizer::Impl {
             arpPatternCount = 0U;
             return;
         }
+        profilerArpSteps.fetch_add(1U, std::memory_order_relaxed);
 
         const std::uint8_t configuredStepCount = static_cast<std::uint8_t>(
             std::clamp<unsigned>(parameters.arpeggiator.stepCount, 1U, static_cast<unsigned>(kArpeggiatorStepCount)));
@@ -2431,6 +3210,13 @@ struct Synthesizer::Impl {
         const std::uint64_t duration = arpeggiator_duration_frames(arpStepCounter);
         ++arpStepCounter;
         nextArpFrame = renderFrame + duration;
+        const float humanTiming = clampf(parameters.arpeggiator.humanizeTiming, 0.0F, 1.0F);
+        if (humanTiming > 0.0F) {
+            const float jitterMs = (random_unit() * 2.0F - 1.0F) * humanTiming * 12.0F;
+            const std::int64_t jitterFrames = static_cast<std::int64_t>(jitterMs * 0.001F * sampleRate);
+            const std::int64_t jittered = static_cast<std::int64_t>(nextArpFrame) + jitterFrames;
+            nextArpFrame = static_cast<std::uint64_t>(std::max<std::int64_t>(0, jittered));
+        }
         arpStepEndFrame = nextArpFrame;
         arpPatternCount = 0U;
         arpRatchetIndex = 0U;
@@ -2457,6 +3243,13 @@ struct Synthesizer::Impl {
             case ArpeggiatorCondition::Every4: conditionPass = sequencePosition % 4U == 0U; break;
             case ArpeggiatorCondition::FirstOf4: conditionPass = sequencePosition % 4U == 0U; break;
             case ArpeggiatorCondition::Fill: conditionPass = arpeggiatorFill.load(std::memory_order_relaxed); break;
+            case ArpeggiatorCondition::AB: {
+                const std::uint32_t a = std::clamp<std::uint32_t>(step.conditionA, 1U, 8U);
+                const std::uint32_t b = std::clamp<std::uint32_t>(step.conditionB, 1U, 8U);
+                const std::uint32_t loopPass = sequencePosition / configuredStepCount;
+                conditionPass = (loopPass % b) == (a - 1U);
+                break;
+            }
         }
         if (!step.enabled || !conditionPass || random_unit() > clampf(step.probability, 0.0F, 1.0F)) {
             release_arp_notes();
@@ -2505,26 +3298,38 @@ struct Synthesizer::Impl {
         ++arpProgress;
 
         const float velocityScale = clampf(step.velocityScale * (step.accent ? 1.22F : 1.0F), 0.0F, 2.0F);
+        const float humanVel = clampf(parameters.arpeggiator.humanizeVelocity, 0.0F, 1.0F);
+        const float velJitter = humanVel > 0.0F ? 1.0F + (random_unit() * 2.0F - 1.0F) * humanVel * 0.3F : 1.0F;
+        const float phrasePos = configuredStepCount > 1U ?
+            static_cast<float>(stepIndex) / static_cast<float>(configuredStepCount - 1U) : 0.0F;
+        const float phraseVel = clampf(parameters.arpeggiator.phraseVelocityStart +
+            (parameters.arpeggiator.phraseVelocityEnd - parameters.arpeggiator.phraseVelocityStart) * phrasePos,
+            0.0F, 2.0F);
         for (std::size_t rootIndex = 0; rootIndex < rootCount && arpPatternCount < kSynthVoiceCount; ++rootIndex) {
             const HeldNote& root = roots[rootIndex];
             const int transposed = static_cast<int>(root.note) + static_cast<int>(step.transpose) +
                                    static_cast<int>(step.octaveOffset) * 12;
-            const std::uint8_t baseNote = static_cast<std::uint8_t>(std::clamp(transposed, 0, 127));
+            const std::uint8_t baseNote = static_cast<std::uint8_t>(quantize_note_to_scale(
+                transposed, parameters.arpeggiator.scale, parameters.arpeggiator.scaleRoot));
             const std::uint8_t velocity = static_cast<std::uint8_t>(clampf(
-                static_cast<float>(root.velocity) * velocityScale, 1.0F, 127.0F));
+                static_cast<float>(root.velocity) * velocityScale * phraseVel * velJitter, 1.0F, 127.0F));
             if (parameters.chord.enabled) {
                 const ChordVoicing voicing = make_chord_voicing(baseNote, parameters.chord);
+                const std::uint64_t strumFrames = static_cast<std::uint64_t>(std::llround(
+                    clampf(parameters.chord.strumMilliseconds, 0.0F, 250.0F) * 0.001F * sampleRate));
                 for (std::size_t i = 0; i < voicing.count && arpPatternCount < kSynthVoiceCount; ++i) {
                     arpPatternNotes[arpPatternCount] = voicing.notes[i];
                     arpPatternChannels[arpPatternCount] = root.channel;
                     arpPatternVelocities[arpPatternCount] = static_cast<std::uint8_t>(clampf(
                         static_cast<float>(velocity) * parameters.chord.velocityScale, 1.0F, 127.0F));
+                    arpPatternDelays[arpPatternCount] = strumFrames * i;
                     ++arpPatternCount;
                 }
             } else {
                 arpPatternNotes[arpPatternCount] = baseNote;
                 arpPatternChannels[arpPatternCount] = root.channel;
                 arpPatternVelocities[arpPatternCount] = velocity;
+                arpPatternDelays[arpPatternCount] = 0;
                 ++arpPatternCount;
             }
         }
@@ -2549,13 +3354,168 @@ struct Synthesizer::Impl {
         if (arpActiveCount > 0U && renderFrame >= arpGateOffFrame && !arpStepTie) release_arp_notes();
     }
 
-    void adopt_preset(const RealtimePreset& next) noexcept {
+    // Applies a morph amount to the live parameters by interpolating the
+    // cached numeric A/B presets. Realtime-safe: no strings, no allocation.
+    // Skipped (cheaply) when morphing is off or the amount hasn't changed.
+    void apply_morph_amount(float amount, bool morphEnabled) noexcept {
+        if (!morphEnabled || !morphHasB_) return;
+        const float clamped = clampf(amount, 0.0F, 1.0F);
+        if (clamped == appliedMorphAmount_) return;
+        parameters = morph_realtime_presets(morphBaseA_, morphBaseB_, clamped);
+        appliedMorphAmount_ = clamped;
+        // The morphed wavetable content snaps at t >= 0.5 (see
+        // morph_realtime_presets); both A and B were pre-cooked off-thread.
+        select_cooked_wavetable();
+    }
+
+    // Points the oscillators at the cooked table matching parameters.wavetable
+    // (A, or B once an A/B morph has snapped to the target). Cheap: one FNV
+    // hash of <= 1024 floats, no cooking and no allocation on this thread. If
+    // neither matches (content not cooked yet, or wavetable disabled) the
+    // current table stays, which matches the old "cook only when enabled" rule.
+    void select_cooked_wavetable() noexcept {
+        if (activeWavetables_ == nullptr) return;
+        const std::uint64_t hash = wavetable_content_hash(parameters.wavetable);
+        if (activeWavetables_->a && hash == activeWavetables_->hashA) hqWavetable_ = activeWavetables_->a.get();
+        else if (activeWavetables_->b && hash == activeWavetables_->hashB) hqWavetable_ = activeWavetables_->b.get();
+    }
+
+    // Render thread: swap in the newest cooked set published by the UI thread.
+    // The previous set is handed back through retiredWavetables_ (freed on the
+    // UI thread); a new set is only taken once that slot has been reclaimed.
+    void adopt_pending_wavetables() noexcept {
+        if (retiredWavetables_.load(std::memory_order_acquire) != nullptr) return;
+        CookedWavetableSet* next = pendingWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        if (next == nullptr) return;
+        CookedWavetableSet* previous = activeWavetables_;
+        activeWavetables_ = next;
+        select_cooked_wavetable();
+        if (previous != nullptr) retiredWavetables_.store(previous, std::memory_order_release);
+    }
+
+    // UI thread (serialized by wavetableCookMutex_): cooked table for this
+    // content, from a small hash-keyed cache or freshly cooked with the FFT.
+    std::shared_ptr<const CookedWavetable> cooked_wavetable_for(const RealtimeWavetable& wt, std::uint64_t hash) {
+        ++wavetableCookClock_;
+        for (auto& entry : wavetableCookCache_)
+            if (entry.table && entry.hash == hash) { entry.lastUse = wavetableCookClock_; return entry.table; }
+        resample_preset_wavetable(wt, wavetableCookScratch_);
+        auto table = std::make_shared<CookedWavetable>();
+        cook_wavetable_inplace(*table, "Preset", wavetableCookScratch_.data(), kHQWavetableFrames,
+                               wavetableCookSpectrum_, wavetableCookFiltered_, wavetableCookFrame_);
+        table->contentHash = hash;
+        wavetableCookCount_.fetch_add(1U, std::memory_order_relaxed);
+        auto* slot = &wavetableCookCache_[0];
+        for (auto& entry : wavetableCookCache_) if (!entry.table || entry.lastUse < slot->lastUse) slot = &entry;
+        *slot = {hash, table, wavetableCookClock_};
+        return table;
+    }
+
+    // UI thread: cook (if needed) and publish the tables for a preset update.
+    // Returns quickly when the content is unchanged (hash compare only).
+    void publish_wavetables(const RealtimeWavetable& base, const RealtimeWavetable* morphB) {
+        std::lock_guard<std::mutex> lock(wavetableCookMutex_);
+        delete retiredWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        const bool cookA = wavetable_cookable(base);
+        const bool cookB = morphB != nullptr && wavetable_cookable(*morphB);
+        const std::uint64_t hashA = cookA ? wavetable_content_hash(base) : publishedHashA_;
+        const std::uint64_t hashB = cookB ? wavetable_content_hash(*morphB) : 0U;
+        if (publishedValid_ && hashA == publishedHashA_ && hashB == publishedHashB_) return;
+        auto* set = new CookedWavetableSet{};
+        if (cookA) { set->a = cooked_wavetable_for(base, hashA); set->hashA = hashA; }
+        else if (publishedA_) { set->a = publishedA_; set->hashA = publishedHashA_; }
+        if (cookB) { set->b = hashB == hashA ? set->a : cooked_wavetable_for(*morphB, hashB); set->hashB = hashB; }
+        publishedA_ = set->a;
+        publishedHashA_ = set->hashA;
+        publishedHashB_ = set->hashB;
+        publishedValid_ = true;
+        delete pendingWavetables_.exchange(set, std::memory_order_acq_rel);  // unconsumed older set
+    }
+
+    void release_wavetables() noexcept {
+        delete pendingWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        delete retiredWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        delete activeWavetables_;
+        activeWavetables_ = nullptr;
+        hqWavetable_ = &hqEmptyWavetable_;
+    }
+
+    void adopt_preset(const PresetUpdate& update, float morphAmount, bool morphEnabled) noexcept {
         const bool wasArpeggiating = parameters.arpeggiator.enabled;
-        parameters = next;
+        // Cache the morph endpoints for the render thread's per-block walk.
+        morphBaseA_ = update.base;
+        morphBaseB_ = update.morphB;
+        morphHasB_ = update.hasMorphB;
+        // Sequencer/conductor configs were applied from the UI thread (data
+        // race vs advance_sequencer()/conductor.process()); they are now
+        // applied here on the render thread.
+        // Compare against the last preset-applied config rather than trusting
+        // the producer's flag alone: the latest-wins mailbox may coalesce an
+        // update that carried the change with a later one that did not.
+        if (update.sequencerChanged || !(update.sequencer == presetSequencerConfig_)) {
+            sequencer.apply_config(update.sequencer);
+            presetSequencerConfig_ = update.sequencer;
+        }
+        conductor.configure(update.attractorEnabled, update.attractor);
+        parameters = update.base;
+        appliedMorphAmount_ = -1.0F;  // force re-application below
+        select_cooked_wavetable();
+        apply_morph_amount(morphAmount, morphEnabled);
         macroValues = parameters.macroValues;
         gameClockTempo.store(parameters.arpeggiator.externalTempoBpm, std::memory_order_relaxed);
         arpRandomState = parameters.arpeggiator.randomSeed == 0U ? 0x51A3D8E7U : parameters.arpeggiator.randomSeed;
         if (wasArpeggiating && !parameters.arpeggiator.enabled) clear_arp_held(true);
+        // Phase 0: retarget smoothed parameters. On the very first adoption,
+        // snap currents to targets so there's no glide from zero.
+        auto retarget = [&](SmoothedFloat& s, float v) {
+            if (!parameterSmoothingInitialized) s.snap(v);
+            else s.set_target(v);
+        };
+        retarget(smoothedFilterCutoffLog, std::log2(std::max(parameters.filter.cutoffHertz, 1.0F)));
+        retarget(smoothedFilterResonance, parameters.filter.resonance);
+        retarget(smoothedMasterGain, parameters.masterGain);
+        for (std::size_t i = 0; i < kSynthOscillatorCount; ++i)
+            retarget(smoothedOscGain[i], parameters.oscillators[i].gain);
+        // Phase 2: tempo-synced delay resolves through effective_delay_time_seconds()
+        // (manual timeSeconds when tempoSync is off), so the first adoption snaps
+        // to the synced time and later render blocks track live tempo changes.
+        retarget(smoothedDelayTime, effective_delay_time_seconds());
+        retarget(smoothedDiffDelayTime, parameters.diffusionDelay.timeSeconds);
+        retarget(smoothedEqLowDb, parameters.eq.lowGainDb);
+        retarget(smoothedEqMidDb, parameters.eq.midGainDb);
+        retarget(smoothedEqHighDb, parameters.eq.highGainDb);
+        retarget(smoothedDistortionDrive, parameters.distortion.drive);
+        retarget(smoothedDelayFeedback, parameters.delay.feedback);
+        retarget(smoothedDiffDelayFeedback, parameters.diffusionDelay.feedback);
+        retarget(smoothedFlangerFeedback, parameters.flanger.feedback);
+        retarget(smoothedCompThresholdDb, parameters.compressor.thresholdDb);
+        parameterSmoothingInitialized = true;
+    }
+
+    // Advances all smoothed parameters one step. Call once per render() call
+    // with the frame count — the one-pole coefficient is computed for the
+    // actual time elapsed. Smoothing time is ~12 ms (fast enough to feel
+    // responsive, slow enough to kill clicks).
+    void advance_parameter_smoothing(std::size_t frameCount) noexcept {
+        if (!parameterSmoothingInitialized || frameCount == 0) return;
+        // One-pole coefficient for ~12 ms time constant.
+        // coeff = 1 - exp(-elapsed / timeConstant)
+        const float elapsed = static_cast<float>(frameCount) / sampleRate;
+        const float coeff = 1.0F - std::exp(-elapsed / 0.012F);
+        smoothedFilterCutoffLog.advance(coeff);
+        smoothedFilterResonance.advance(coeff);
+        smoothedMasterGain.advance(coeff);
+        for (auto& s : smoothedOscGain) s.advance(coeff);
+        smoothedDelayTime.advance(coeff);
+        smoothedDiffDelayTime.advance(coeff);
+        smoothedDiffDelayFeedback.advance(coeff);
+        smoothedEqLowDb.advance(coeff);
+        smoothedEqMidDb.advance(coeff);
+        smoothedEqHighDb.advance(coeff);
+        smoothedDistortionDrive.advance(coeff);
+        smoothedDelayFeedback.advance(coeff);
+        smoothedFlangerFeedback.advance(coeff);
+        smoothedCompThresholdDb.advance(coeff);
     }
 
     void handle_midi(const MidiMessage& message) noexcept {
@@ -2585,9 +3545,10 @@ struct Synthesizer::Impl {
             return;
         }
         if (message.is_note_off()) {
+            const float releaseVel = message.data2 > 0 ? static_cast<float>(message.data2) / 127.0F : 0.5F;
             if (parameters.arpeggiator.enabled) arp_note_off(channel, message.data1);
             else if (parameters.chord.enabled) chord_note_off(channel, message.data1);
-            else direct_note_off(channel, message.data1, false);
+            else direct_note_off(channel, message.data1, false, releaseVel);
             return;
         }
         switch (message.type) {
@@ -2652,7 +3613,7 @@ struct Synthesizer::Impl {
                     for (ChordTrigger& trigger : chordTriggers) trigger = {};
                     for (Voice& candidate : voice) {
                         if (candidate.channel != channel) continue;
-                        if (message.data1 == 120U) { retire_voice_grains(candidate); candidate.kill(); }
+                        if (message.data1 == 120U) { candidate.kill(); }
                         else { activate_release_samples(candidate); candidate.release(); }
                     }
                 }
@@ -2669,6 +3630,48 @@ struct Synthesizer::Impl {
             case ArpeggiatorClockSource::MidiClock: return midiClockTempo;
         }
         return parameters.arpeggiator.tempoBpm;
+    }
+
+    // Phase 2: resolves the delay time honoring tempo sync, clamped to the
+    // delay line's range. Manual timeSeconds when tempoSync is off; otherwise
+    // syncBeats * 60 / effectiveTempoBpm using the same tempo source the LFO
+    // tempo sync uses (see effective_arpeggiator_tempo above).
+    float effective_delay_time_seconds() const noexcept {
+        if (!parameters.delay.tempoSync) return parameters.delay.timeSeconds;
+        const float tempo = clampf(effective_arpeggiator_tempo(), 20.0F, 400.0F);
+        const float beats = clampf(parameters.delay.syncBeats, 0.03125F, 32.0F);
+        return clampf(beats * 60.0F / tempo, 0.01F, 1.95F);
+    }
+
+    // Phase 2: keep a tempo-synced delay glued to the live tempo. The game
+    // clock / MIDI clock can move at any time without a preset adoption, so
+    // retarget the (already smoothed) delay time once per render block; the
+    // ~12 ms one-pole smoother absorbs tempo glides without zipper noise.
+    void track_tempo_synced_delay() noexcept {
+        if (parameters.delay.tempoSync)
+            smoothedDelayTime.set_target(effective_delay_time_seconds());
+    }
+
+    // Phase 3: advance the generative sequencer once per render block. The
+    // step clock is a 16th note resolved from the same tempo source the LFO
+    // tempo sync uses (effective_arpeggiator_tempo()). Note events are
+    // scheduled sample-accurately via schedule_voice_event() so onsets land
+    // inside the current block; process_scheduled_events() (called per frame
+    // below) fires them through direct_note_on/off like the arpeggiator.
+    void advance_sequencer(std::size_t frameCount) noexcept {
+        if (!sequencer.enabled()) return;
+        const float tempo = clampf(effective_arpeggiator_tempo(), 20.0F, 400.0F);
+        const std::uint64_t blockStart = currentFrame.load(std::memory_order_relaxed);
+        const std::uint8_t channel = sequencer.channel();
+        sequencer.process(static_cast<std::uint32_t>(frameCount), sampleRate, tempo,
+                          [&](const Sequencer::Event& event) {
+                              const std::uint64_t at = blockStart +
+                                  static_cast<std::uint64_t>(event.frameOffset);
+                              const std::uint8_t velocity = static_cast<std::uint8_t>(
+                                  clampf(event.velocity, 0.0F, 1.0F) * 127.0F);
+                              (void)schedule_voice_event(event.noteOn, channel, event.note,
+                                                         velocity, at, true);
+                          });
     }
 
     float advance_lfo(Voice& v, std::size_t index) noexcept {
@@ -2718,6 +3721,10 @@ struct Synthesizer::Impl {
         float filterDrive{};
         float voiceGain{};
         float voicePan{};
+        float wavetablePosition{};  // Phase 1: added
+        float morphAmount{};        // Phase 1: added
+        float samplerStartPosition{};  // Phase 2: added (normalized, scaled by sample duration at use)
+        float granularPosition{};  // Phase 4: added (grain source position offset, 0..1 over the bank)
         std::array<float, kSynthOscillatorCount> pitch{};
         std::array<float, kSynthOscillatorCount> shape{};
         std::array<float, kSynthOscillatorCount> pulseWidth{};
@@ -2753,13 +3760,27 @@ struct Synthesizer::Impl {
             case ModulationSource::Macro2: return macroValues[1];
             case ModulationSource::Macro3: return macroValues[2];
             case ModulationSource::Macro4: return macroValues[3];
+            case ModulationSource::Timbre: return clampf(v.timbre, -1.0F, 1.0F);
+            case ModulationSource::NotePitchBend:
+                return clampf(v.pitchBendSemitones / std::max(1.0F, parameters.pitchBendRangeSemitones), -1.0F, 1.0F);
+            case ModulationSource::ReleaseVelocity: return v.releaseVelocity;
+            case ModulationSource::Spring: return physicsBank.spring.position;
+            case ModulationSource::Pendulum: return std::sin(physicsBank.pendulum.angle);
+            case ModulationSource::Orbiter: return std::clamp(physicsBank.orbiter.x * 0.5F, -1.0F, 1.0F);
+            case ModulationSource::Lorenz: return std::clamp(physicsBank.lorenz.x / 20.0F, -1.0F, 1.0F);
+            // Phase 3: generative sequencer lane currents.
+            case ModulationSource::SeqTimbre: return clampf(sequencer.timbre_value(), -1.0F, 1.0F);
+            case ModulationSource::SeqMorph: return clampf(sequencer.morph_value(), 0.0F, 1.0F);
+            case ModulationSource::SeqPan: return clampf(sequencer.pan_value(), -1.0F, 1.0F);
         }
         return 0.0F;
     }
 
     static bool native_bipolar(ModulationSource source) noexcept {
         return source == ModulationSource::Lfo1 || source == ModulationSource::Lfo2 ||
-               source == ModulationSource::KeyTrack || source == ModulationSource::Random;
+               source == ModulationSource::KeyTrack || source == ModulationSource::Random ||
+               source == ModulationSource::Timbre || source == ModulationSource::NotePitchBend ||
+               source == ModulationSource::SeqTimbre || source == ModulationSource::SeqPan;
     }
 
     ModulationValues evaluate_modulation(Voice& v, float amp, float filterEnv,
@@ -2782,7 +3803,7 @@ struct Synthesizer::Impl {
             } else {
                 v.modulationSmoothing[originalIndex] = source;
             }
-            const float amount = source * clampf(slot.amount, -1.0F, 1.0F);
+            const float amount = source * clampf(slot.amount, -1.0F, 1.0F) + clampf(slot.bias, -1.0F, 1.0F);
             modulationScratch[originalIndex] = amount;
             const auto destination = static_cast<unsigned>(slot.destination);
             if (slot.destination == ModulationDestination::GlobalPitch) values.globalPitch += amount * 24.0F;
@@ -2791,6 +3812,10 @@ struct Synthesizer::Impl {
             else if (slot.destination == ModulationDestination::FilterDrive) values.filterDrive += amount * 8.0F;
             else if (slot.destination == ModulationDestination::VoiceGain) values.voiceGain += amount;
             else if (slot.destination == ModulationDestination::VoicePan) values.voicePan += amount;
+            else if (slot.destination == ModulationDestination::WavetablePosition) values.wavetablePosition += amount;
+            else if (slot.destination == ModulationDestination::MorphAmount) values.morphAmount += amount;
+            else if (slot.destination == ModulationDestination::SamplerStartPosition) values.samplerStartPosition += amount;
+            else if (slot.destination == ModulationDestination::GranularPosition) values.granularPosition += amount;
             else if (destination >= static_cast<unsigned>(ModulationDestination::Osc1Pitch) &&
                      destination <= static_cast<unsigned>(ModulationDestination::Osc8Pitch))
                 values.pitch[destination - static_cast<unsigned>(ModulationDestination::Osc1Pitch)] += amount * 24.0F;
@@ -2813,6 +3838,12 @@ struct Synthesizer::Impl {
     }
 
     float wavetable_sample(float phase, float position, float increment) const noexcept {
+        // Phase 1: use the HQ wavetable engine if cooked, else fall back to legacy.
+        if (hqWavetable_ != nullptr && hqWavetable_->valid()) {
+            const float frequency = increment * sampleRate;
+            const std::size_t mip = wavetable_mip_for_frequency(frequency, sampleRate);
+            return sample_wavetable(*hqWavetable_, phase, position, mip);
+        }
         if (!parameters.wavetable.enabled || parameters.wavetable.frameCount == 0U) return fast_sin_phase(phase);
         const std::size_t frameCount = std::clamp<std::size_t>(parameters.wavetable.frameCount, 1U, kWavetableFrameCount);
         const float framePosition = clampf(position, 0.0F, 1.0F) * static_cast<float>(frameCount - 1U);
@@ -2925,183 +3956,122 @@ struct Synthesizer::Impl {
         return {mono, mono};
     }
 
-    static float grain_window(GrainWindow window, float phase) noexcept {
-        phase = clampf(phase, 0.0F, 1.0F);
-        switch (window) {
-            case GrainWindow::Hann: return 0.5F - 0.5F * fast_sin_phase(phase - 0.25F);
-            case GrainWindow::Triangle: return 1.0F - std::abs(phase * 2.0F - 1.0F);
-            case GrainWindow::Tukey: {
-                constexpr float edge = 0.25F;
-                if (phase < edge) return 0.5F - 0.5F * fast_sin_phase(phase / (edge * 2.0F) - 0.25F);
-                if (phase > 1.0F - edge) return 0.5F - 0.5F * fast_sin_phase((1.0F - phase) / (edge * 2.0F) - 0.25F);
-                return 1.0F;
-            }
-        }
-        return 1.0F;
+    // Phase 2: cubic (Catmull-Rom) interpolation over the shared preset sample
+    // bank. Position is in frames; out-of-range positions are clamped.
+    float sampler_cubic_sample(const RealtimeSampleBank& bank, float position) const noexcept {
+        const float frames = static_cast<float>(bank.frameCount);
+        const float bounded = clampf(position, 0.0F, frames - 1.0F);
+        const std::int32_t center = static_cast<std::int32_t>(bounded);
+        const float fraction = bounded - static_cast<float>(center);
+        const std::uint32_t last = bank.frameCount - 1U;
+        const std::uint32_t i0 = static_cast<std::uint32_t>(std::max<std::int32_t>(center - 1, 0));
+        const std::uint32_t i1 = static_cast<std::uint32_t>(center);
+        const std::uint32_t i2 = std::min(i1 + 1U, last);
+        const std::uint32_t i3 = std::min(i1 + 2U, last);
+        const float p0 = bank.samples[i0];
+        const float p1 = bank.samples[i1];
+        const float p2 = bank.samples[i2];
+        const float p3 = bank.samples[i3];
+        const float f2 = fraction * fraction;
+        const float f3 = f2 * fraction;
+        return 0.5F * (2.0F * p1 + (p2 - p0) * fraction +
+                       (2.0F * p0 - 5.0F * p1 + 4.0F * p2 - p3) * f2 +
+                       (3.0F * (p1 - p2) + p3 - p0) * f3);
     }
 
-    std::pair<float, float> render_granular_oscillator(Voice& v, std::size_t oscillatorIndex,
-                                                        const OscillatorParameters& osc,
-                                                        float frequency) noexcept {
-        const SynthSampleMap* map = active_sample_map();
-        const bool mapped = map != nullptr && v.sampleAttackZone != kInvalidSampleZone;
-        if (!mapped && (!parameters.sampleBank.enabled || parameters.sampleBank.frameCount < 2U)) return {};
+    // Phase 2: dedicated sampler generator. Reads the shared preset sample
+    // bank (resident, cooked on the control thread). One-shot releases the
+    // voice at the sample end; loop mode wraps inside [loopStart, loopEnd)
+    // with an equal-power crossfade. Reverse plays backwards; the start
+    // offset is measured back from the region end in reverse so the default
+    // (offset 0) begins at the end of the sample.
+    std::pair<float, float> render_sampler(Voice& v, std::size_t oscillatorIndex,
+                                           float frequency, const ModulationValues& mod) noexcept {
+        const RealtimeSampleBank& bank = parameters.sampleBank;
+        const SamplerParameters& sampler = parameters.sampler;
+        if (!sampler.enabled || !bank.enabled || bank.frameCount < 2U) return {};
+        if (v.samplerFinished[oscillatorIndex]) return {};
+        const float frameCount = static_cast<float>(bank.frameCount);
+        const float bankRate = static_cast<float>(bank.sampleRate);
+        const float durationSeconds = frameCount / bankRate;
+        const bool reverse = sampler.direction == SamplerDirection::Reverse;
+        const bool loop = sampler.playbackMode == SamplerPlaybackMode::Loop;
 
-        auto random01 = [&]() noexcept {
-            std::uint32_t& state = v.noiseState[oscillatorIndex];
-            state ^= state << 13U; state ^= state >> 17U; state ^= state << 5U;
-            return static_cast<float>(state & 0x00FFFFFFU) / static_cast<float>(0x01000000U);
-        };
-        float& countdown = v.grainCountdown[oscillatorIndex];
-        countdown -= 1.0F;
-        if (countdown <= 0.0F) {
-            requestedGrains.fetch_add(1U, std::memory_order_relaxed);
-            const float velocityMod = 1.0F + clampf(osc.grainDensityVelocity, -1.0F, 1.0F) *
-                (v.velocity * 2.0F - 1.0F);
-            const float timbreMod = 1.0F + clampf(osc.grainDensityTimbre, -1.0F, 1.0F) *
-                (v.timbre * 2.0F - 1.0F);
-            const float density = clampf(osc.grainDensityHertz * velocityMod * timbreMod, 0.5F, 240.0F);
-            countdown += sampleRate / density;
+        float loopStart = clampf(sampler.loopStartSeconds * bankRate, 0.0F, frameCount);
+        float loopEnd = clampf(sampler.loopEndSeconds * bankRate, 0.0F, frameCount);
+        // Loop mode with a degenerate (empty or out-of-range) loop falls back to
+        // the full sample so the voice keeps sounding instead of pinning a
+        // single clamped frame.
+        if (loop && loopEnd - loopStart < 1.0F) {
+            loopStart = 0.0F;
+            loopEnd = frameCount;
+        }
+        if (loopEnd < loopStart + 1.0F) loopEnd = std::min(loopStart + 1.0F, frameCount);
+        if (loopStart > loopEnd - 1.0F) loopStart = std::max(loopEnd - 1.0F, 0.0F);
+        const float loopLength = loopEnd - loopStart;
+        const bool loopValid = loop && loopLength >= 1.0F;
+        const float crossfade = clampf(sampler.loopCrossfadeSeconds * bankRate, 0.0F, loopLength * 0.5F);
+        const float regionStart = loopValid ? loopStart : 0.0F;
+        const float regionEnd = loopValid ? loopEnd : frameCount;
+        const float regionLength = regionEnd - regionStart;
 
-            if (!admit_grain(v)) {
-                grainMisses.fetch_add(1U, std::memory_order_relaxed);
+        float& position = v.samplerPositions[oscillatorIndex];
+        if (!v.samplerPrimed[oscillatorIndex]) {
+            const float startSeconds = clampf(
+                sampler.startOffsetSeconds + mod.samplerStartPosition * durationSeconds,
+                0.0F, durationSeconds);
+            if (!reverse) {
+                position = clampf(startSeconds * bankRate, regionStart, regionEnd - 1.0F);
             } else {
-                GrainState* target = nullptr;
-                for (auto& grain : v.grains[oscillatorIndex]) {
-                    if (!grain.active) { target = &grain; break; }
-                }
-                bool stole = false;
-                if (target == nullptr) {
-                    target = &*std::max_element(v.grains[oscillatorIndex].begin(),
-                        v.grains[oscillatorIndex].end(), [](const GrainState& a, const GrainState& b) {
-                            return a.age / std::max(a.duration, 1.0F) < b.age / std::max(b.duration, 1.0F);
-                        });
-                    stole = true;
-                    grainSteals.fetch_add(1U, std::memory_order_relaxed);
-                }
-
-                float pitch = clampf(osc.grainPitchSemitones, -48.0F, 48.0F) +
-                    (random01() * 2.0F - 1.0F) * clampf(osc.grainPitchRandomSemitones, 0.0F, 48.0F);
-                const float quantize = clampf(osc.grainPitchQuantizeSemitones, 0.0F, 24.0F);
-                if (quantize >= 0.01F) pitch = std::round(pitch / quantize) * quantize;
-
-                target->active = true;
-                target->zoneIndex = mapped ? v.sampleAttackZone : kInvalidSampleZone;
-                if (mapped) {
-                    const SampleMapZone& zone = map->zones[v.sampleAttackZone];
-                    const SampleMapSource& source = map->sources[zone.sourceIndex];
-                    const auto [start, end] = sample_zone_bounds(zone, osc);
-                    const float span = std::max(1.0F, end - start);
-                    const float endPosition = last_sample_position(start, end);
-                    const float center = osc.grainFreeze
-                        ? start + clampf(osc.grainPosition, 0.0F, 1.0F) * (endPosition - start)
-                        : clampf(v.sampleMapPositions[oscillatorIndex], start, endPosition);
-                    const float spray = (random01() * 2.0F - 1.0F) *
-                                        clampf(osc.grainSpray, 0.0F, 1.0F) * span;
-                    target->position = clampf(center + spray, start, endPosition);
-                    target->increment = sample_map_pitch_ratio(zone, osc, frequency) *
-                        std::exp2(pitch / 12.0F) * static_cast<float>(source.sampleRate) / sampleRate;
-                    bool reverse = osc.sampleReverse != zone.reverse;
-                    if (random01() < clampf(osc.grainReverseProbability, 0.0F, 1.0F)) reverse = !reverse;
-                    if (reverse) target->increment = -target->increment;
-                    if (!osc.grainFreeze) {
-                        v.sampleMapPositions[oscillatorIndex] +=
-                            sample_map_pitch_ratio(zone, osc, frequency) * 0.25F;
-                        if (v.sampleMapPositions[oscillatorIndex] >= end)
-                            v.sampleMapPositions[oscillatorIndex] = start;
-                    }
-                } else {
-                    const float center = osc.grainFreeze ? osc.grainPosition :
-                        wrap_phase(v.samplePositions[oscillatorIndex] + osc.grainPosition);
-                    const float spray = (random01() * 2.0F - 1.0F) * clampf(osc.grainSpray, 0.0F, 1.0F);
-                    target->position = clampf(center + spray, 0.0F, 1.0F);
-                    target->increment = sample_pitch_ratio(osc, frequency) * std::exp2(pitch / 12.0F) *
-                        static_cast<float>(parameters.sampleBank.sampleRate) / sampleRate /
-                        static_cast<float>(parameters.sampleBank.frameCount - 1U);
-                    bool reverse = osc.sampleReverse;
-                    if (random01() < clampf(osc.grainReverseProbability, 0.0F, 1.0F)) reverse = !reverse;
-                    if (reverse) target->increment = -target->increment;
-                }
-                target->age = 0.0F;
-                target->duration = clampf(osc.grainSizeMilliseconds, 5.0F, 500.0F) * 0.001F * sampleRate;
-                target->pan = (random01() * 2.0F - 1.0F) * clampf(osc.grainStereoSpread, 0.0F, 1.0F);
-                target->panEnd = clampf(target->pan + (random01() * 2.0F - 1.0F) *
-                    clampf(osc.grainStereoMotion, 0.0F, 1.0F), -1.0F, 1.0F);
-                admittedGrains.fetch_add(1U, std::memory_order_relaxed);
-                if (!stole) note_grain_admitted();
+                const float offsetFrames = clampf(startSeconds * bankRate, 0.0F, regionLength - 1.0F);
+                position = regionEnd - 1.0F - offsetFrames;
             }
-        }
-        if (!mapped && !osc.grainFreeze) {
-            v.samplePositions[oscillatorIndex] = wrap_phase(v.samplePositions[oscillatorIndex] +
-                sample_pitch_ratio(osc, frequency) / sampleRate * 0.25F);
+            v.samplerPrimed[oscillatorIndex] = true;
         }
 
-        float left = 0.0F;
-        float right = 0.0F;
-        unsigned active = 0U;
-        for (auto& grain : v.grains[oscillatorIndex]) {
-            if (!grain.active) continue;
-            const float phase = grain.age / std::max(grain.duration, 1.0F);
-            bool expired = phase >= 1.0F;
-            float sample{};
-            bool available = false;
-            float zoneGain = 1.0F;
-            float zonePan = 0.0F;
-            if (!expired && grain.zoneIndex != kInvalidSampleZone && map != nullptr) {
-                const SampleMapZone& zone = map->zones[grain.zoneIndex];
-                const auto [start, end] = sample_zone_bounds(zone, osc);
-                expired = grain.position < start || grain.position >= end;
-                if (!expired) {
-                    available = sample_source_linear(*map, zone.sourceIndex, grain.position, sample);
-                    zoneGain = zone.gain;
-                    zonePan = zone.pan;
-                }
-            } else if (!expired) {
-                expired = grain.position < 0.0F || grain.position > 1.0F;
-                if (!expired) {
-                    sample = resident_sample(grain.position);
-                    available = true;
-                }
-            }
-            if (expired || !available) {
-                grain.active = false;
-                if (activeGrains > 0U) --activeGrains;
-                activeGrainTelemetry.store(activeGrains, std::memory_order_relaxed);
-                if (!expired) grainMisses.fetch_add(1U, std::memory_order_relaxed);
-                continue;
-            }
-            float window = grain_window(osc.grainWindow, phase);
-            const float curvature = clampf(osc.grainEnvelopeCurve, 0.25F, 4.0F);
-            if (curvature < 1.0F) {
-                const float opened = std::sqrt(std::max(window, 0.0F));
-                window += (opened - window) * (1.0F - curvature);
-            } else if (curvature <= 2.0F) {
-                const float squared = window * window;
-                window += (squared - window) * (curvature - 1.0F);
-            } else {
-                const float squared = window * window;
-                const float fourth = squared * squared;
-                window = squared + (fourth - squared) * ((curvature - 2.0F) * 0.5F);
-            }
-            const float panPhase = 0.5F - 0.5F * fast_sin_phase(phase * 0.5F + 0.25F);
-            const float pan = clampf(zonePan + grain.pan + (grain.panEnd - grain.pan) * panPhase, -1.0F, 1.0F);
-            const float value = sample * window * zoneGain;
-            left += value * std::sqrt(0.5F * (1.0F - pan));
-            right += value * std::sqrt(0.5F * (1.0F + pan));
-            grain.position += grain.increment;
-            grain.age += 1.0F;
-            ++active;
+        float ratio = 1.0F;
+        if (sampler.pitchTracking) {
+            const float root = tuned_frequency(bank.rootNote, 0.0F);
+            ratio = root > 0.0001F ? frequency / root : 1.0F;
         }
-        if (active > 1U) {
-            const float normalization = 1.0F / std::sqrt(static_cast<float>(active));
-            left *= normalization;
-            right *= normalization;
+        const float step = ratio * bankRate / sampleRate;
+
+        float output = sampler_cubic_sample(bank, position);
+        if (loopValid && crossfade > 0.0F) {
+            float phase = -1.0F;
+            float alternatePosition = 0.0F;
+            if (!reverse && position >= loopEnd - crossfade && position < loopEnd) {
+                phase = (position - (loopEnd - crossfade)) / crossfade;
+                alternatePosition = loopStart + (position - (loopEnd - crossfade));
+            } else if (reverse && position >= loopStart && position < loopStart + crossfade) {
+                phase = (loopStart + crossfade - position) / crossfade;
+                alternatePosition = loopEnd - (loopStart + crossfade - position);
+                alternatePosition = std::min(alternatePosition, loopEnd - 1.0e-4F);
+            }
+            if (phase >= 0.0F) {
+                const float alternate = sampler_cubic_sample(bank, alternatePosition);
+                const float primaryGain = fast_sin_phase(0.25F - phase * 0.25F);
+                const float alternateGain = fast_sin_phase(phase * 0.25F);
+                output = output * primaryGain + alternate * alternateGain;
+            }
         }
-        const float velocity = (1.0F - osc.sampleVelocityToGain) + osc.sampleVelocityToGain * v.velocity;
-        left *= velocity;
-        right *= velocity;
-        const auto release = render_release_sample(v, oscillatorIndex, osc, frequency);
-        return {left + release.first, right + release.second};
+
+        position += reverse ? -step : step;
+        if (loopValid) {
+            if (!reverse && position >= loopEnd) {
+                position = loopStart + std::fmod(position - loopEnd, loopLength);
+            } else if (reverse && position < loopStart) {
+                position = std::min(loopEnd - std::fmod(loopStart - position, loopLength),
+                                    loopEnd - 1.0e-4F);
+            }
+        } else if ((!reverse && position >= frameCount) || (reverse && position < 0.0F)) {
+            v.samplerFinished[oscillatorIndex] = true;
+            v.release();
+            position = reverse ? 0.0F : frameCount - 1.0F;
+        }
+
+        const float mono = output * sampler.gain * 0.70710678F;
+        return {mono, mono};
     }
 
     bool lower_zone_enabled() const noexcept {
@@ -3145,8 +4115,11 @@ struct Synthesizer::Impl {
         if (!v.active) return {};
         const float amp = v.amp.advance(parameters.ampEnvelope, sampleRate);
         const float filterEnv = v.filterEnvelope.advance(parameters.filter.envelope, sampleRate);
-        if (!v.amp.active()) { retire_voice_grains(v); v.kill(); return {}; }
-
+        if (!v.amp.active()) {
+            v.kill();
+            profilerVoicesRetired.fetch_add(1U, std::memory_order_relaxed);
+            return {};
+        }
         std::array<float, kSynthLfoCount> lfoValues{};
         for (std::size_t i = 0; i < lfoValues.size(); ++i) lfoValues[i] = advance_lfo(v, i);
         const ModulationValues mod = evaluate_modulation(v, amp, filterEnv, lfoValues);
@@ -3168,7 +4141,8 @@ struct Synthesizer::Impl {
         std::array<bool, kSynthOscillatorCount> currentWrapped{};
         for (std::size_t i = 0; i < parameters.oscillators.size(); ++i) {
             const OscillatorParameters& osc = parameters.oscillators[i];
-            if (!osc.enabled || osc.gain <= 0.0F) continue;
+            const float smoothedGain = smoothedOscGain[i].current;
+            if (!osc.enabled || smoothedGain <= 0.0F) continue;
 
             const auto source_sample = [&](std::int8_t source) noexcept {
                 if (source < 0 || source >= static_cast<std::int8_t>(kSynthOscillatorCount) ||
@@ -3187,19 +4161,55 @@ struct Synthesizer::Impl {
             const std::uint32_t hash = static_cast<std::uint32_t>(v.age) * 0x9E3779B9U ^
                                        static_cast<std::uint32_t>(i + 1U) * 0x85EBCA6BU;
             const float staticDrift = (static_cast<float>(hash & 0xFFFFU) / 32767.5F - 1.0F) * 0.65F;
-            const float driftCents = parameters.tuning.analogDriftCents * (staticDrift + slowDrift);
-            const float additionalSemitones = parameters.tuning.transposeSemitones +
-                         (parameters.tuning.fineCents + driftCents) * 0.01F + osc.semitones +
+            // Perf: split semitones into a cacheable base (constant while pitch
+            // bend / modulation are idle) and the tiny slow-drift term.
+            const float baseSemitones = parameters.tuning.transposeSemitones +
+                         parameters.tuning.fineCents * 0.01F +
+                         parameters.tuning.analogDriftCents * staticDrift * 0.01F + osc.semitones +
                          osc.cents * 0.01F + bendSemitones + legacyModulation + mod.globalPitch + mod.pitch[i];
+            const float driftSemitones = parameters.tuning.analogDriftCents * slowDrift * 0.01F;
+            const float additionalSemitones = baseSemitones + driftSemitones;
             float note = static_cast<float>(v.note) + additionalSemitones;
             const float fmSource = source_sample(osc.frequencyModSource);
             if (osc.frequencyModMode == FrequencyModulationMode::Exponential)
                 note += fmSource * clampf(osc.frequencyModAmount, -4.0F, 4.0F) * 24.0F;
-            float frequency = tuned_frequency(v.note, note - static_cast<float>(v.note));
-            if (osc.frequencyModMode == FrequencyModulationMode::Linear)
-                frequency += fmSource * frequency * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
-            frequency = clampf(frequency, 0.1F, sampleRate * 0.45F);
-            const float increment = frequency / sampleRate;
+            float increment;
+            const bool useFreqCache = !parameters.microtuning.enabled &&
+                                      osc.frequencyModMode != FrequencyModulationMode::Exponential;
+            if (useFreqCache) {
+                if (v.freqCacheNote != v.note ||
+                    v.freqCacheRefHertz != parameters.tuning.referenceHertz ||
+                    v.freqCacheSemitones[i] != baseSemitones) {
+                    // Cache the clamped increment: saves a division per sample.
+                    const float clamped = clampf(tuned_frequency(v.note, baseSemitones),
+                                                 0.1F, sampleRate * 0.45F);
+                    v.freqCache[i] = clamped / sampleRate;
+                    v.freqCacheSemitones[i] = baseSemitones;
+                    v.freqCacheNote = v.note;
+                    v.freqCacheRefHertz = parameters.tuning.referenceHertz;
+                }
+                increment = v.freqCache[i];
+                // exp2(d/12) ~= 1 + y + y^2/2 with y = d*ln2/12; |d| <= 0.0035
+                // semitones here, so the truncation error is < 1e-12 relative.
+                // (x*1.0 is bit-identical, so skipping when y==0 is safe.)
+                const float y = driftSemitones * 0.057762265F;
+                if (y != 0.0F) increment *= 1.0F + y + y * y * 0.5F;
+                if (osc.frequencyModMode == FrequencyModulationMode::Linear) {
+                    increment *= 1.0F + fmSource * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
+                    // Re-clamp: FM can push a clamped base out of range (rare).
+                    increment = clampf(increment, 0.1F / sampleRate, 0.45F);
+                }
+            } else {
+                float frequency0 = tuned_frequency(v.note, note - static_cast<float>(v.note));
+                if (osc.frequencyModMode == FrequencyModulationMode::Linear)
+                    frequency0 += fmSource * frequency0 * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
+                frequency0 = clampf(frequency0, 0.1F, sampleRate * 0.45F);
+                increment = frequency0 / sampleRate;
+            }
+            // Reconstruct for the Sample/Sampler/Granular/Spectral/Physical
+            // branches below (one multiply; the common analog waveforms use
+            // `increment` directly).
+            const float frequency = increment * sampleRate;
 
             float pulseWidth = osc.pulseWidth + mod.pulseWidth[i];
             if (osc.pwmDepth > 0.0F && (osc.waveform == OscillatorWaveform::Pulse || osc.waveform == OscillatorWaveform::Square)) {
@@ -3226,7 +4236,7 @@ struct Synthesizer::Impl {
                 float total = 0.0F;
                 for (unsigned q = 0; q < qualityFactor; ++q) {
                     total += osc.waveform == OscillatorWaveform::Wavetable
-                        ? wavetable_sample(phase, clampf(osc.wavetablePosition + shape, 0.0F, 1.0F), subIncrement)
+                        ? wavetable_sample(phase, clampf(osc.wavetablePosition + shape + mod.wavetablePosition, 0.0F, 1.0F), subIncrement)
                         : oscillator_sample(osc.waveform, phase, subIncrement, pulseWidth, shape, auxiliary, noise);
                     const float next = phase + subIncrement;
                     if (primary && next >= 1.0F) currentWrapped[i] = true;
@@ -3243,10 +4253,47 @@ struct Synthesizer::Impl {
                 stereoLeft = sampled.first;
                 stereoRight = sampled.second;
                 sample = (stereoLeft + stereoRight) * 0.70710678F;
+            } else if (osc.waveform == OscillatorWaveform::Sampler) {
+                // Phase 2: dedicated sampler generator (preset-level parameters).
+                const auto samplerOut = render_sampler(v, i, frequency, mod);
+                stereoLeft = samplerOut.first;
+                stereoRight = samplerOut.second;
+                sample = (stereoLeft + stereoRight) * 0.70710678F;
             } else if (osc.waveform == OscillatorWaveform::Granular) {
-                const auto granular = render_granular_oscillator(v, i, osc, frequency);
-                stereoLeft = granular.first;
-                stereoRight = granular.second;
+                // Phase 4: dedicated granular generator (SYN-014). Preset-level
+                // parameters; the grain source is the resident sample bank.
+                // An empty/disabled bank renders silence (counted as grain
+                // misses inside the engine, never a crash). Each oscillator
+                // owns its grain pool, and grain pitch tracks the voice's
+                // played frequency (bend/tuning/semitones already folded in)
+                // relative to the bank's recorded root note.
+                auto& engine = v.granularEngines[i];
+                engine.set_sample_rate(sampleRate);
+                const RealtimeSampleBank& bank = parameters.sampleBank;
+                const GranularSource source{bank.samples.data(),
+                                            bank.enabled ? bank.frameCount : 0U,
+                                            bank.sampleRate,
+                                            bank.rootNote};
+                const auto granularOut =
+                    engine.render(source, parameters.granular, mod.granularPosition, frequency);
+                forward_granular_counters(engine);
+                stereoLeft = granularOut.first;
+                stereoRight = granularOut.second;
+                sample = (stereoLeft + stereoRight) * 0.70710678F;
+            } else if (osc.waveform == OscillatorWaveform::Spectral) {
+                // Phase 5: spectral resynthesis oscillator (SYN-015).
+                // Preset-level parameters; the asset is a non-owning view of
+                // the cooked spectral asset (Worker C/D own its lifetime). A
+                // null/missing asset renders silence (counted inside the
+                // engine, never a crash).
+                auto& spec = v.spectralOscillator;
+                spec.set_sample_rate(sampleRate);
+                const SpectralAssetView asset =
+                    parameters.spectralAsset != nullptr ? *parameters.spectralAsset
+                                                        : SpectralAssetView{};
+                const auto spectralOut = spec.render(asset, parameters.spectral, frequency);
+                stereoLeft = spectralOut.first;
+                stereoRight = spectralOut.second;
                 sample = (stereoLeft + stereoRight) * 0.70710678F;
             } else if (osc.waveform == OscillatorWaveform::PhysicalModel) {
                 sample = physical::process(v.physicalModels[i], osc, frequency, v.velocity,
@@ -3254,16 +4301,58 @@ struct Synthesizer::Impl {
                 const float width = 0.18F + 0.22F * std::abs(osc.physicalPickupPosition - 0.5F);
                 stereoLeft = sample * (0.70710678F + width * 0.25F);
                 stereoRight = sample * (0.70710678F - width * 0.25F);
+            } else if (osc.waveform == OscillatorWaveform::ModalResonator) {
+                // Phase 2: modal resonator bank (even modes left, odd modes right).
+                const auto resonatorStereo = modal_resonator::process(
+                    v.modalResonators[i], osc.modalResonator, frequency, v.velocity, v.keyHeld,
+                    parameters.sampleBank, sampleRate);
+                stereoLeft = resonatorStereo.first * 0.70710678F;
+                stereoRight = resonatorStereo.second * 0.70710678F;
+                sample = (resonatorStereo.first + resonatorStereo.second) * 0.5F;
             } else {
-                sample = renderPhase(v.phases[i], increment, true, v.auxiliaryPhases[i], v.noiseState[i]);
-                stereoLeft = sample * 0.70710678F;
-                stereoRight = sample * 0.70710678F;
+                const float divergence = clampf(osc.stereoDivergence, 0.0F, 1.0F);
+                if (divergence > 0.001F) {
+                    // Phase 1: true stereo divergence — render L/R with slight
+                    // detune and phase offset for width without chorus.
+                    // Perf: the detune ratios depend only on the (preset-level)
+                    // divergence, so cache them per voice/osc and recompute
+                    // only on change; per sample this is then 2 multiplies.
+                    if (v.divergenceCached[i] != divergence) {
+                        v.divergenceCached[i] = divergence;
+                        const float detuneCents = divergence * 8.0F; // up to 8 cents
+                        v.divergenceRatioL[i] = std::exp2(detuneCents / 1200.0F);
+                        v.divergenceRatioR[i] = std::exp2(-detuneCents / 1200.0F);
+                        v.divergencePhaseOffset[i] = divergence * 0.02F; // up to 2% phase
+                    }
+                    const float incL = increment * v.divergenceRatioL[i];
+                    const float incR = increment * v.divergenceRatioR[i];
+                    float phaseL = v.phases[i];
+                    float phaseR = wrap_phase(v.phases[i] + v.divergencePhaseOffset[i]);
+                    auto auxL = v.auxiliaryPhases[i];
+                    auto auxR = v.auxiliaryPhases[i];
+                    std::uint32_t noiseL = v.noiseState[i];
+                    std::uint32_t noiseR = v.noiseState[i] ^ 0x9E3779B9U;
+                    const float sampleL = renderPhase(phaseL, incL, true, auxL, noiseL);
+                    const float sampleR = renderPhase(phaseR, incR, true, auxR, noiseR);
+                    // Advance the main phase by the average.
+                    v.phases[i] = wrap_phase(v.phases[i] + increment);
+                    v.auxiliaryPhases[i] = auxL;
+                    v.noiseState[i] = noiseL;
+                    sample = (sampleL + sampleR) * 0.5F;
+                    stereoLeft = sampleL * 0.70710678F;
+                    stereoRight = sampleR * 0.70710678F;
+                } else {
+                    sample = renderPhase(v.phases[i], increment, true, v.auxiliaryPhases[i], v.noiseState[i]);
+                    stereoLeft = sample * 0.70710678F;
+                    stereoRight = sample * 0.70710678F;
+                }
             }
             std::uint8_t unisonVoices = parameters.unison.enabled
                 ? std::clamp<std::uint8_t>(parameters.unison.voices, 1U, static_cast<std::uint8_t>(kSynthUnisonMax)) : 1U;
             if (osc.waveform == OscillatorWaveform::Noise || osc.waveform == OscillatorWaveform::SuperSaw ||
                 osc.waveform == OscillatorWaveform::Sample || osc.waveform == OscillatorWaveform::Granular ||
-                osc.waveform == OscillatorWaveform::PhysicalModel)
+                osc.waveform == OscillatorWaveform::PhysicalModel || osc.waveform == OscillatorWaveform::Sampler ||
+                osc.waveform == OscillatorWaveform::ModalResonator || osc.waveform == OscillatorWaveform::Spectral)
                 unisonVoices = 1U;
             for (std::uint8_t copy = 1U; copy < unisonVoices; ++copy) {
                 const float centered = static_cast<float>(copy) - 0.5F * static_cast<float>(unisonVoices - 1U);
@@ -3287,7 +4376,10 @@ struct Synthesizer::Impl {
 
             if (osc.subOscillatorLevel > 0.0F && osc.waveform != OscillatorWaveform::Sample &&
                 osc.waveform != OscillatorWaveform::Granular &&
-                osc.waveform != OscillatorWaveform::PhysicalModel) {
+                osc.waveform != OscillatorWaveform::PhysicalModel &&
+                osc.waveform != OscillatorWaveform::Sampler &&
+                osc.waveform != OscillatorWaveform::ModalResonator &&
+                osc.waveform != OscillatorWaveform::Spectral) {
                 const unsigned octaves = std::clamp<unsigned>(osc.subOscillatorOctaves, 1U, 3U);
                 const float subIncrement = increment / static_cast<float>(1U << octaves);
                 const float sub = bandlimited_pulse(v.subPhases[i], subIncrement, 0.5F) *
@@ -3305,7 +4397,7 @@ struct Synthesizer::Impl {
             }
 
             const float gainMod = clampf(1.0F + mod.gain[i], 0.0F, 3.0F);
-            const float oscillatorGain = osc.gain * gainMod;
+            const float oscillatorGain = smoothedOscGain[i].current * gainMod;
             sample *= oscillatorGain; stereoLeft *= oscillatorGain; stereoRight *= oscillatorGain;
             currentSamples[i] = clampf(sample, -8.0F, 8.0F);
             const float basePan = clampf(osc.pan + mod.voicePan, -1.0F, 1.0F);
@@ -3313,7 +4405,10 @@ struct Synthesizer::Impl {
             const float panRight = std::sqrt(0.5F * (1.0F + basePan));
             const bool intrinsicStereo = osc.waveform == OscillatorWaveform::Sample ||
                                          osc.waveform == OscillatorWaveform::Granular ||
-                                         osc.waveform == OscillatorWaveform::PhysicalModel;
+                                         osc.waveform == OscillatorWaveform::PhysicalModel ||
+                                         osc.waveform == OscillatorWaveform::Sampler ||
+                                         osc.waveform == OscillatorWaveform::ModalResonator ||
+                                         osc.waveform == OscillatorWaveform::Spectral;
             if (intrinsicStereo) {
                 left += stereoLeft * panLeft * 1.41421356F;
                 right += stereoRight * panRight * 1.41421356F;
@@ -3328,6 +4423,24 @@ struct Synthesizer::Impl {
         v.previousOscillatorSamples = currentSamples;
         v.oscillatorWrapped = currentWrapped;
 
+        if (parameters.harmonizer.enabled) {
+            const float subLevel = clampf(parameters.harmonizer.subLevel, 0.0F, 1.0F);
+            const float upLevel = clampf(parameters.harmonizer.upLevel, 0.0F, 1.0F);
+            const float harmMix = clampf(parameters.harmonizer.mix, 0.0F, 1.0F);
+            if ((subLevel > 0.0F || upLevel > 0.0F) && harmMix > 0.0F) {
+                const float harmSemitones = parameters.tuning.transposeSemitones +
+                    parameters.tuning.fineCents * 0.01F + bendSemitones + legacyModulation + mod.globalPitch;
+                const float baseFreq = tuned_frequency(v.note, harmSemitones);
+                v.harmonizerPhases[0] = wrap_phase(v.harmonizerPhases[0] + (baseFreq * 0.5F) / sampleRate);
+                v.harmonizerPhases[1] = wrap_phase(v.harmonizerPhases[1] + (baseFreq * 2.0F) / sampleRate);
+                const float harmSample = (fast_sin_phase(v.harmonizerPhases[0]) * subLevel +
+                                          fast_sin_phase(v.harmonizerPhases[1]) * upLevel) *
+                                         harmMix * 0.5F;
+                left += harmSample;
+                right += harmSample;
+            }
+        }
+
         const float pressureGain = 0.85F + 0.15F * std::max(v.pressure, channelPressure[v.channel]);
         const float gain = amp * v.velocity * pressureGain * clampf(1.0F + mod.voiceGain, 0.0F, 3.0F);
         left *= gain;
@@ -3336,10 +4449,13 @@ struct Synthesizer::Impl {
             const float timbreValue = mpe_master(v.channel) ? v.timbre : controller[74];
             const float cutoffCc = timbreValue > 0.0F ? std::exp2((timbreValue - 0.5F) * 8.0F) : 1.0F;
             const float keyTrackOctaves = (static_cast<float>(v.note) - 60.0F) / 12.0F * parameters.filter.keyTrack;
-            const float cutoff = parameters.filter.cutoffHertz * cutoffCc *
+            // Phase 3: the generative conductor scales the base cutoff with
+            // brightness (1.0 when the conductor is disabled: no-op).
+            const float cutoff = std::exp2(smoothedFilterCutoffLog.current) * cutoffCc *
+                                 conductorCutoffMultiplier *
                                  std::exp2(parameters.filter.envelopeAmountOctaves * filterEnv +
                                            keyTrackOctaves + mod.filterCutoff);
-            const float resonance = clampf(parameters.filter.resonance + controller[71] * 0.5F +
+            const float resonance = clampf(smoothedFilterResonance.current + controller[71] * 0.5F +
                                            mod.filterResonance, 0.0F, 1.0F);
             FilterParameters modulatedFilter = parameters.filter;
             modulatedFilter.drive = clampf(parameters.filter.drive + mod.filterDrive, 0.1F, 24.0F);
@@ -3351,10 +4467,42 @@ struct Synthesizer::Impl {
 
     void effects(float& left, float& right) noexcept {
         if (parameters.distortion.enabled) {
-            const float wetL = fast_tanh(left * parameters.distortion.drive);
-            const float wetR = fast_tanh(right * parameters.distortion.drive);
             const float mix = clampf(parameters.distortion.mix, 0.0F, 1.0F);
-            left += (wetL - left) * mix; right += (wetR - right) * mix;
+            const float smoothedDrive = smoothedDistortionDrive.current;
+            if (parameters.distortion.mode == DistortionMode::Fuzz) {
+                const float gain = smoothedDrive * 4.0F;
+                const float clippedL = clampf(left * gain, -0.85F, 1.0F);
+                const float clippedR = clampf(right * gain, -0.85F, 1.0F);
+                const float tone = 1.0F - std::exp(-kTwoPi * 6500.0F / sampleRate);
+                fuzzToneL += tone * (clippedL - fuzzToneL);
+                fuzzToneR += tone * (clippedR - fuzzToneR);
+                left += (fuzzToneL * 0.9F - left) * mix;
+                right += (fuzzToneR * 0.9F - right) * mix;
+            } else if (parameters.distortion.mode == DistortionMode::SoftClip) {
+                const float wetL = soft_clip(left * smoothedDrive);
+                const float wetR = soft_clip(right * smoothedDrive);
+                left += (wetL - left) * mix; right += (wetR - right) * mix;
+            } else if (parameters.distortion.mode == DistortionMode::Foldback) {
+                const float wetL = wavefold(left * smoothedDrive);
+                const float wetR = wavefold(right * smoothedDrive);
+                left += (wetL - left) * mix; right += (wetR - right) * mix;
+            } else {
+                const float wetL = fast_tanh(left * smoothedDrive);
+                const float wetR = fast_tanh(right * smoothedDrive);
+                left += (wetL - left) * mix; right += (wetR - right) * mix;
+            }
+        }
+        if (parameters.bitcrusher.enabled) {
+            const unsigned bits = std::min(16U, std::max(1U, static_cast<unsigned>(parameters.bitcrusher.bits)));
+            const unsigned downsample = std::min(64U, std::max(1U, static_cast<unsigned>(parameters.bitcrusher.downsample)));
+            const float steps = static_cast<float>(1U << (bits - 1U));
+            if (++crusherCount >= downsample) {
+                crusherCount = 0;
+                crusherHoldL = std::floor(clampf(left, -1.0F, 1.0F) * steps + 0.5F) / steps;
+                crusherHoldR = std::floor(clampf(right, -1.0F, 1.0F) * steps + 0.5F) / steps;
+            }
+            const float mix = clampf(parameters.bitcrusher.mix, 0.0F, 1.0F);
+            left += (crusherHoldL - left) * mix; right += (crusherHoldR - right) * mix;
         }
         if (parameters.eq.enabled) {
             const float lowCoefficient = 1.0F - std::exp(-kTwoPi * 220.0F / sampleRate);
@@ -3364,10 +4512,10 @@ struct Synthesizer::Impl {
             const float lowL = eqLowL; const float lowR = eqLowR;
             const float highL = left - eqHighL; const float highR = right - eqHighR;
             const float midL = left - lowL - highL; const float midR = right - lowR - highR;
-            left = lowL * db_to_gain(parameters.eq.lowGainDb) + midL * db_to_gain(parameters.eq.midGainDb) +
-                   highL * db_to_gain(parameters.eq.highGainDb);
-            right = lowR * db_to_gain(parameters.eq.lowGainDb) + midR * db_to_gain(parameters.eq.midGainDb) +
-                    highR * db_to_gain(parameters.eq.highGainDb);
+            left = lowL * db_to_gain(smoothedEqLowDb.current) + midL * db_to_gain(smoothedEqMidDb.current) +
+                   highL * db_to_gain(smoothedEqHighDb.current);
+            right = lowR * db_to_gain(smoothedEqLowDb.current) + midR * db_to_gain(smoothedEqMidDb.current) +
+                    highR * db_to_gain(smoothedEqHighDb.current);
         }
         if (parameters.chorus.enabled) {
             chorusPhase = wrap_phase(chorusPhase + parameters.chorus.rateHertz / sampleRate);
@@ -3379,6 +4527,48 @@ struct Synthesizer::Impl {
             const float mix = clampf(parameters.chorus.mix + controller[93] * 0.25F, 0.0F, 1.0F);
             left += (wetL - left) * mix; right += (wetR - right) * mix;
         } else { chorusL.push(left); chorusR.push(right); }
+        if (parameters.flanger.enabled) {
+            flangerPhase = wrap_phase(flangerPhase + parameters.flanger.rateHertz / sampleRate);
+            const float base = 1.0F * sampleRate / 1000.0F;
+            const float depth = clampf(parameters.flanger.depthMilliseconds, 0.0F, 10.0F) * sampleRate / 1000.0F;
+            const float delayL_ = base + depth * (0.5F + 0.5F * fast_sin_phase(flangerPhase));
+            const float delayR_ = base + depth * (0.5F + 0.5F * fast_sin_phase(flangerPhase + 0.5F));
+            const float feedback = clampf(smoothedFlangerFeedback.current, -0.92F, 0.92F);
+            const float inL = left + flangerFeedbackL * feedback;
+            const float inR = right + flangerFeedbackR * feedback;
+            const float wetL = flangerL.read_fractional(delayL_);
+            const float wetR = flangerR.read_fractional(delayR_);
+            flangerFeedbackL = wetL; flangerFeedbackR = wetR;
+            flangerL.push(inL); flangerR.push(inR);
+            const float mix = clampf(parameters.flanger.mix, 0.0F, 1.0F);
+            left += (wetL - left) * mix; right += (wetR - right) * mix;
+        } else { flangerL.push(left); flangerR.push(right); flangerFeedbackL = 0.0F; flangerFeedbackR = 0.0F; }
+        if (parameters.ensemble.enabled) {
+            const bool both = parameters.ensemble.mode == EnsembleMode::Both;
+            const bool modeII = parameters.ensemble.mode == EnsembleMode::II;
+            const float rate = modeII ? 0.75F : 0.45F;
+            ensemblePhase = wrap_phase(ensemblePhase + rate / sampleRate);
+            const float base = 6.0F * sampleRate / 1000.0F;
+            const float depth = (modeII ? 2.8F : 1.8F) * sampleRate / 1000.0F;
+            const float depthII = 2.8F * sampleRate / 1000.0F;
+            float wetL = 0.0F, wetR = 0.0F;
+            for (int tap = 0; tap < 3; ++tap) {
+                const float offset = static_cast<float>(tap) / 3.0F;
+                const float mod = 0.5F + 0.5F * fast_sin_phase(ensemblePhase + offset);
+                wetL += ensembleBufL.read_fractional(base + depth * mod);
+                wetR += ensembleBufR.read_fractional(base + depth * mod);
+                if (both) {
+                    const float mod2 = 0.5F + 0.5F * fast_sin_phase(ensemblePhase * 1.65F + offset + 0.13F);
+                    wetL += ensembleBufL.read_fractional(base + depthII * mod2);
+                    wetR += ensembleBufR.read_fractional(base + depthII * mod2);
+                }
+            }
+            const float taps = both ? 6.0F : 3.0F;
+            wetL /= taps; wetR /= taps;
+            ensembleBufL.push(left); ensembleBufR.push(right);
+            const float mix = clampf(parameters.ensemble.mix, 0.0F, 1.0F);
+            left += (wetL - left) * mix; right += (wetR - right) * mix;
+        } else { ensembleBufL.push(left); ensembleBufR.push(right); }
         if (parameters.phaser.enabled) {
             phaserPhase = wrap_phase(phaserPhase + parameters.phaser.rateHertz / sampleRate);
             const float lfo = 0.5F + 0.5F * fast_sin_phase(phaserPhase);
@@ -3392,15 +4582,33 @@ struct Synthesizer::Impl {
             left += (wetL - left) * mix; right += (wetR - right) * mix;
         }
         if (parameters.delay.enabled) {
-            const float delaySamples = clampf(parameters.delay.timeSeconds, 0.01F, 1.95F) * sampleRate;
+            const float delaySamples = clampf(smoothedDelayTime.current, 0.01F, 1.95F) * sampleRate;
             const float delayedL = delayL.read_fractional(delaySamples);
             const float delayedR = delayR.read_fractional(delaySamples);
-            const float feedback = clampf(parameters.delay.feedback, 0.0F, 0.94F);
+            const float feedback = clampf(smoothedDelayFeedback.current, 0.0F, 0.94F);
             delayL.push(left + (parameters.delay.pingPong ? delayedR : delayedL) * feedback);
             delayR.push(right + (parameters.delay.pingPong ? delayedL : delayedR) * feedback);
             const float mix = clampf(parameters.delay.mix, 0.0F, 1.0F);
             left += (delayedL - left) * mix; right += (delayedR - right) * mix;
         } else { delayL.push(left); delayR.push(right); }
+        // Phase 2: diffusion delay. A recirculating delay whose wet path runs
+        // through cascaded allpass stages; the recirculated signal is already
+        // diffused, so repeats smear into a reverb-ish wash instead of staying
+        // distinct. Allpass stages are unity-magnitude (|g| < 1), so the loop
+        // is stable for feedback < 1.
+        if (parameters.diffusionDelay.enabled) {
+            const float delaySamples = clampf(smoothedDiffDelayTime.current, 0.01F, 1.95F) * sampleRate;
+            const float apCoeff = clampf(parameters.diffusionDelay.diffusion, 0.0F, 1.0F) * 0.7F;
+            float wetL = diffDelayL.read_fractional(delaySamples);
+            float wetR = diffDelayR.read_fractional(delaySamples);
+            for (auto& stage : diffApL) wetL = allpass_diffuse(stage, wetL, apCoeff);
+            for (auto& stage : diffApR) wetR = allpass_diffuse(stage, wetR, apCoeff);
+            const float feedback = clampf(smoothedDiffDelayFeedback.current, 0.0F, 0.94F);
+            diffDelayL.push(left + wetL * feedback);
+            diffDelayR.push(right + wetR * feedback);
+            const float mix = clampf(parameters.diffusionDelay.mix, 0.0F, 1.0F);
+            left += (wetL - left) * mix; right += (wetR - right) * mix;
+        } else { diffDelayL.push(left); diffDelayR.push(right); }
         if (parameters.reverb.enabled) {
             float wetL = 0.0F; float wetR = 0.0F;
             reverb.process(left, right, parameters.reverb, wetL, wetR);
@@ -3416,9 +4624,10 @@ struct Synthesizer::Impl {
                 : release * compressorEnvelope + (1.0F - release) * detector;
             const float envelopeDb = 20.0F * std::log10(std::max(compressorEnvelope, 1.0e-9F));
             float reductionDb = 0.0F;
-            if (envelopeDb > parameters.compressor.thresholdDb)
-                reductionDb = (parameters.compressor.thresholdDb +
-                               (envelopeDb - parameters.compressor.thresholdDb) / std::max(1.0F, parameters.compressor.ratio)) - envelopeDb;
+            const float smoothedThreshold = smoothedCompThresholdDb.current;
+            if (envelopeDb > smoothedThreshold)
+                reductionDb = (smoothedThreshold +
+                               (envelopeDb - smoothedThreshold) / std::max(1.0F, parameters.compressor.ratio)) - envelopeDb;
             const float gain = db_to_gain(reductionDb + parameters.compressor.makeupDb);
             left *= gain; right *= gain;
         }
@@ -3450,6 +4659,10 @@ struct Synthesizer::Impl {
             if (source.active) ++count;
         }
         activeVoiceCount.store(count, std::memory_order_relaxed);
+        profilerActiveVoices.store(count, std::memory_order_relaxed);
+        std::uint32_t peak = profilerMaximumActiveVoices.load(std::memory_order_relaxed);
+        while (count > peak &&
+               !profilerMaximumActiveVoices.compare_exchange_weak(peak, count, std::memory_order_relaxed)) {}
         heldArpNoteCount.store(static_cast<std::uint32_t>(active_held_count()), std::memory_order_relaxed);
         for (std::size_t i = 0; i < modulationTelemetry.size(); ++i)
             modulationTelemetry[i].store(modulationScratch[i], std::memory_order_relaxed);
@@ -3504,7 +4717,12 @@ bool SynthSampleBank::validate(std::string* error) const {
     if (name.empty() || name.size() > 128U) return fail("sample bank name must contain 1 to 128 characters");
     if (sampleRate < 8000U || sampleRate > 192000U || rootNote > 127U || frameCount > kSynthSampleMaxFrames)
         return fail("sample bank metadata is out of range");
-    if (enabled && frameCount < 2U) return fail("enabled sample bank requires at least two frames");
+    // An enabled bank with zero frames carries no sample data (e.g. after a
+    // binary patch round-trip, which stores the enabled flag but not the
+    // audio); every render path already treats frameCount < 2 as silence, so
+    // it validates. A single frame is degenerate (nothing to interpolate
+    // from) and is still rejected.
+    if (enabled && frameCount == 1U) return fail("enabled sample bank requires at least two frames");
     for (std::size_t i = 0; i < frameCount; ++i)
         if (!finite(samples[i]) || std::abs(samples[i]) > 4.0F) return fail("sample bank contains invalid samples");
     return true;
@@ -3863,7 +5081,10 @@ SynthPreset SynthPreset::make_default() {
         OscillatorWaveform::Triangle, OscillatorWaveform::Organ, OscillatorWaveform::Noise, OscillatorWaveform::FoldedSine};
     const std::array<float, kSynthOscillatorCount> semitones{0.0F, 0.0F, -12.0F, -24.0F, 12.0F, 7.0F, 0.0F, 19.0F};
     const std::array<float, kSynthOscillatorCount> cents{-7.0F, 7.0F, 0.0F, 0.0F, 0.0F, -4.0F, 0.0F, 3.0F};
-    const std::array<float, kSynthOscillatorCount> gains{0.20F,0.18F,0.14F,0.08F,0.07F,0.06F,0.018F,0.04F};
+    // Sub-oscillator gains are kept ~15 dB below the fundamental so the
+    // stack voices the played MIDI note as the perceived fundamental
+    // (previously the -12/-24 subs dominated and A4 voiced ~110 Hz).
+    const std::array<float, kSynthOscillatorCount> gains{0.20F,0.18F,0.02F,0.01F,0.07F,0.06F,0.018F,0.04F};
     for (std::size_t i = 0; i < result.oscillators.size(); ++i) {
         auto& osc = result.oscillators[i];
         osc.waveform = waves[i]; osc.semitones = semitones[i]; osc.cents = cents[i]; osc.gain = gains[i];
@@ -3899,7 +5120,613 @@ SynthPreset SynthPreset::make_default() {
     }
     result.arpeggiator.stepCount = 8;
     for (auto& step : result.arpeggiator.steps) step = {};
+    // Phase 3: sequencer steps default to the musical lane defaults so an
+    // old preset string (no seq.* keys) loads with a sensible program.
+    for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+        const SequencerLane lane = static_cast<SequencerLane>(li);
+        for (auto& step : result.sequencer.lanes[li].steps) step = default_sequencer_step(lane);
+    }
     return result;
+}
+
+namespace {
+// Clean starting point for factory presets: every voice element silenced, pitch
+// reference exact, limiter on. Each preset below voices the played MIDI note as
+// the perceived fundamental.
+SynthPreset base_preset(const char* name) {
+    SynthPreset preset;
+    preset.name = name;
+    for (auto& osc : preset.oscillators) osc.enabled = false;
+    preset.ampEnvelope = {0.005F, 0.10F, 0.80F, 0.20F, EnvelopeCurve::Exponential};
+    preset.filter.enabled = false;
+    preset.tuning.analogDriftCents = 0.0F;
+    preset.distortion.enabled = false;
+    preset.eq.enabled = false;
+    preset.chorus.enabled = false;
+    preset.phaser.enabled = false;
+    preset.delay.enabled = false;
+    preset.reverb.enabled = false;
+    preset.compressor.enabled = false;
+    preset.limiter.enabled = true;
+    preset.masterGain = 0.70F;
+    preset.masterPan = 0.0F;
+    return preset;
+}
+
+void enable_osc(SynthPreset& preset, std::size_t index, OscillatorWaveform wave,
+                float semitones, float cents, float gain) {
+    auto& osc = preset.oscillators[index];
+    osc.enabled = true;
+    osc.waveform = wave;
+    osc.semitones = semitones;
+    osc.cents = cents;
+    osc.gain = gain;
+}
+
+void lowpass(SynthPreset& preset, float cutoffHertz, float resonance, float envOctaves,
+             float envAttack, float envDecay, float envSustain, float envRelease) {
+    preset.filter.enabled = true;
+    preset.filter.topology = FilterTopology::MoogLadder;
+    preset.filter.mode = FilterMode::LowPass;
+    preset.filter.cutoffHertz = cutoffHertz;
+    preset.filter.resonance = resonance;
+    preset.filter.envelopeAmountOctaves = envOctaves;
+    preset.filter.envelope = {envAttack, envDecay, envSustain, envRelease, EnvelopeCurve::Exponential};
+}
+
+SynthPreset make_clean_saw_lead() {
+    auto preset = base_preset("Clean Saw Lead");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.005F, 0.10F, 0.90F, 0.15F, EnvelopeCurve::Exponential};
+    lowpass(preset, 8000.0F, 0.10F, 0.5F, 0.01F, 0.20F, 0.50F, 0.20F);
+    preset.chorus.enabled = true;
+    preset.chorus.rateHertz = 0.35F;
+    preset.chorus.depthMilliseconds = 3.5F;
+    preset.chorus.mix = 0.18F;
+    return preset;
+}
+
+SynthPreset make_deep_sub_bass() {
+    auto preset = base_preset("Deep Sub Bass");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, 0.0F, 0.0F, 0.55F);
+    enable_osc(preset, 1, OscillatorWaveform::Triangle, -12.0F, 0.0F, 0.22F);
+    preset.ampEnvelope = {0.008F, 0.05F, 1.00F, 0.12F, EnvelopeCurve::Exponential};
+    lowpass(preset, 1200.0F, 0.10F, 0.0F, 0.01F, 0.20F, 0.50F, 0.20F);
+    return preset;
+}
+
+SynthPreset make_pluck() {
+    auto preset = base_preset("Pluck");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, 0.0F, 0.45F);
+    preset.ampEnvelope = {0.002F, 0.30F, 0.05F, 0.12F, EnvelopeCurve::Exponential};
+    lowpass(preset, 900.0F, 0.25F, 5.0F, 0.002F, 0.28F, 0.0F, 0.10F);
+    return preset;
+}
+
+SynthPreset make_warm_pad() {
+    auto preset = base_preset("Warm Pad");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, -6.0F, 0.28F);
+    enable_osc(preset, 1, OscillatorWaveform::Saw, 0.0F, 6.0F, 0.28F);
+    preset.ampEnvelope = {0.90F, 0.50F, 0.85F, 1.20F, EnvelopeCurve::Exponential};
+    lowpass(preset, 2200.0F, 0.10F, 0.5F, 0.40F, 0.60F, 0.60F, 0.80F);
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.22F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.70F;
+    preset.reverb.mix = 0.25F;
+    return preset;
+}
+
+SynthPreset make_chiptune_square() {
+    auto preset = base_preset("Chiptune Square");
+    enable_osc(preset, 0, OscillatorWaveform::Pulse, 0.0F, 0.0F, 0.40F);
+    auto& osc = preset.oscillators[0];
+    osc.pulseWidth = 0.50F;
+    osc.pwmDepth = 0.25F;
+    osc.pwmRateHertz = 0.35F;
+    preset.ampEnvelope = {0.003F, 0.08F, 0.70F, 0.08F, EnvelopeCurve::Exponential};
+    lowpass(preset, 12000.0F, 0.05F, 0.0F, 0.01F, 0.20F, 0.50F, 0.20F);
+    return preset;
+}
+
+SynthPreset make_organ() {
+    auto preset = base_preset("Organ");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, 0.0F, 0.0F, 0.38F);
+    enable_osc(preset, 1, OscillatorWaveform::Sine, 12.0F, 0.0F, 0.22F);
+    enable_osc(preset, 2, OscillatorWaveform::Sine, 19.0F, 0.0F, 0.12F);
+    enable_osc(preset, 3, OscillatorWaveform::Sine, 24.0F, 0.0F, 0.16F);
+    preset.ampEnvelope = {0.010F, 0.05F, 1.00F, 0.08F, EnvelopeCurve::Exponential};
+    return preset;
+}
+
+SynthPreset make_brass_stab() {
+    auto preset = base_preset("Brass Stab");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, 0.0F, 0.32F);
+    enable_osc(preset, 1, OscillatorWaveform::Saw, 0.0F, 4.0F, 0.32F);
+    preset.ampEnvelope = {0.060F, 0.15F, 0.75F, 0.20F, EnvelopeCurve::Exponential};
+    lowpass(preset, 1500.0F, 0.15F, 3.0F, 0.04F, 0.20F, 0.60F, 0.25F);
+    return preset;
+}
+
+SynthPreset make_glass_bell() {
+    auto preset = base_preset("Glass Bell");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, 0.0F, 0.0F, 0.50F);
+    enable_osc(preset, 1, OscillatorWaveform::Sine, 12.0F, 0.0F, 0.18F);
+    enable_osc(preset, 2, OscillatorWaveform::Sine, 17.54F, 0.0F, 0.12F); // 2.76x inharmonic partial
+    enable_osc(preset, 3, OscillatorWaveform::Sine, 24.0F, 0.0F, 0.08F);
+    preset.ampEnvelope = {0.002F, 1.80F, 0.00F, 2.50F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.80F;
+    preset.reverb.mix = 0.30F;
+    return preset;
+}
+
+SynthPreset make_reese_bass() {
+    auto preset = base_preset("Reese Bass");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, -8.0F, 0.34F);
+    enable_osc(preset, 1, OscillatorWaveform::Saw, 0.0F, 8.0F, 0.34F);
+    enable_osc(preset, 2, OscillatorWaveform::Sine, -12.0F, 0.0F, 0.12F);
+    preset.ampEnvelope = {0.010F, 0.10F, 0.90F, 0.15F, EnvelopeCurve::Exponential};
+    lowpass(preset, 850.0F, 0.20F, 1.0F, 0.02F, 0.25F, 0.60F, 0.25F);
+    return preset;
+}
+
+SynthPreset make_e_keys() {
+    auto preset = base_preset("E-Keys");
+    enable_osc(preset, 0, OscillatorWaveform::Triangle, 0.0F, 0.0F, 0.40F);
+    enable_osc(preset, 1, OscillatorWaveform::Sine, 12.0F, 0.0F, 0.18F);
+    preset.ampEnvelope = {0.004F, 0.50F, 0.35F, 0.40F, EnvelopeCurve::Exponential};
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.20F;
+    return preset;
+}
+
+SynthPreset make_noise_sweep_fx() {
+    auto preset = base_preset("Noise Sweep FX");
+    enable_osc(preset, 0, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.050F, 0.50F, 0.00F, 0.40F, EnvelopeCurve::Exponential};
+    lowpass(preset, 500.0F, 0.30F, 6.0F, 0.40F, 0.60F, 0.00F, 0.30F);
+    preset.delay.enabled = true;
+    return preset;
+}
+
+// Phase 2: sampler showcase. The factory preset bakes a small seamlessly
+// loopable vocal-ish tone into the preset sample bank (12000 frames = exactly
+// 110 cycles at 440 Hz, so the loop seam is click-free) and plays it back
+// through the Sampler generator with pitch tracking. If the bank were ever
+// empty the sampler would simply stay silent, but the baked sample keeps the
+// factory preset self-contained and audible.
+SynthPreset make_sampled_loop_vox() {
+    auto preset = base_preset("Sampled Loop Vox");
+    enable_osc(preset, 0, OscillatorWaveform::Sampler, 0.0F, 0.0F, 0.90F);
+    constexpr std::uint32_t kFrames = 12000U;  // 110 cycles at 440 Hz / 48 kHz: seamless loop
+    constexpr float kRate = 48000.0F;
+    constexpr float kFrequency = 440.0F;
+    constexpr float kHarmonics[8] = {1.0F, 0.55F, 0.38F, 0.26F, 0.18F, 0.12F, 0.08F, 0.05F};
+    float peak = 0.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        float sample = 0.0F;
+        const float phase = 2.0F * 3.14159265358979F * kFrequency * static_cast<float>(i) / kRate;
+        for (int harmonic = 0; harmonic < 8; ++harmonic)
+            sample += kHarmonics[harmonic] * std::sin(phase * static_cast<float>(harmonic + 1));
+        peak = std::max(peak, std::abs(sample));
+        preset.sampleBank.samples[i] = sample;
+    }
+    const float normalize = peak > 0.0F ? 0.75F / peak : 1.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) preset.sampleBank.samples[i] *= normalize;
+    preset.sampleBank.name = "Loop Vox Ah";
+    preset.sampleBank.enabled = true;
+    preset.sampleBank.sampleRate = 48000U;
+    preset.sampleBank.rootNote = 69;  // recorded at A440: MIDI 69 plays at concert pitch
+    preset.sampleBank.frameCount = kFrames;
+    preset.sampler.enabled = true;
+    preset.sampler.playbackMode = SamplerPlaybackMode::Loop;
+    preset.sampler.direction = SamplerDirection::Forward;
+    preset.sampler.loopStartSeconds = 0.0F;
+    preset.sampler.loopEndSeconds = static_cast<float>(kFrames) / kRate;
+    preset.sampler.loopCrossfadeSeconds = 0.004F;
+    preset.sampler.pitchTracking = true;
+    preset.sampler.gain = 0.8F;
+    preset.ampEnvelope = {0.008F, 0.30F, 0.70F, 0.35F, EnvelopeCurve::Exponential};
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.15F;
+    return preset;
+}
+
+// Phase 2: modal resonator showcase. A bank of damped modes struck by an
+// impulse at note-on, following the played note (baseFrequency 0): a mallet
+// with gently inharmonic upper partials.
+SynthPreset make_modal_marimba() {
+    auto preset = base_preset("Modal Marimba");
+    enable_osc(preset, 0, OscillatorWaveform::ModalResonator, 0.0F, 0.0F, 0.85F);
+    auto& mr = preset.oscillators[0].modalResonator;
+    mr.excitation = ExcitationSource::Impulse;
+    mr.modeCount = 8;
+    mr.baseFrequency = 0.0F;  // follow the played note
+    mr.damping = 1.1F;
+    mr.inharmonicity = 0.03F;
+    mr.brightness = 0.55F;
+    mr.excitationLevel = 1.0F;
+    constexpr float kRatios[8] = {1.0F, 2.01F, 2.98F, 4.16F, 5.43F, 6.79F, 8.21F, 9.65F};
+    constexpr float kGains[8] = {1.0F, 0.55F, 0.38F, 0.24F, 0.15F, 0.10F, 0.06F, 0.04F};
+    constexpr float kDecays[8] = {2.2F, 1.6F, 1.2F, 0.9F, 0.7F, 0.5F, 0.4F, 0.3F};
+    for (int i = 0; i < 8; ++i) mr.modes[i] = ModalResonatorMode{kRatios[i], kDecays[i], kGains[i]};
+    preset.ampEnvelope = {0.002F, 1.60F, 0.00F, 1.80F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.55F;
+    preset.reverb.mix = 0.22F;
+    return preset;
+}
+
+// Phase 2: diffusion delay showcase. A clean saw lead whose repeats smear
+// through the diffusion allpass stages into a reverb-ish wash.
+SynthPreset make_cloud_delay() {
+    auto preset = base_preset("Cloud Delay");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, 0.0F, 0.45F);
+    preset.ampEnvelope = {0.010F, 0.25F, 0.60F, 0.45F, EnvelopeCurve::Exponential};
+    lowpass(preset, 5200.0F, 0.12F, 0.5F, 0.02F, 0.30F, 0.50F, 0.30F);
+    preset.diffusionDelay.enabled = true;
+    preset.diffusionDelay.timeSeconds = 0.45F;
+    preset.diffusionDelay.feedback = 0.55F;
+    preset.diffusionDelay.mix = 0.38F;
+    preset.diffusionDelay.diffusion = 0.85F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.70F;
+    preset.reverb.mix = 0.15F;
+    return preset;
+}
+
+// Phase 3 showcase: a warm pad whose generative sequencer (A minor pentatonic,
+// uneven lane lengths for phasing polyrhythms) is steered live by the
+// attractor conductor over a ~2.7-minute arc. Oscillators stay at unison pitch
+// with no sub-oscillator stack so the played note remains the fundamental.
+SynthPreset make_generative_attractor_pad() {
+    auto preset = base_preset("Generative Attractor Pad");
+    enable_osc(preset, 0, OscillatorWaveform::Saw, 0.0F, -6.0F, 0.26F);
+    enable_osc(preset, 1, OscillatorWaveform::Saw, 0.0F, 6.0F, 0.26F);
+    enable_osc(preset, 2, OscillatorWaveform::Triangle, 12.0F, 0.0F, 0.10F);
+    preset.ampEnvelope = {0.90F, 0.50F, 0.85F, 1.20F, EnvelopeCurve::Exponential};
+    lowpass(preset, 2200.0F, 0.10F, 0.5F, 0.40F, 0.60F, 0.60F, 0.80F);
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.22F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.70F;
+    preset.reverb.mix = 0.25F;
+
+    // Generative sequencer: uneven lane lengths (7/5/11/8/13/9/3) phase
+    // against each other; A minor pentatonic around the played note.
+    auto& seq = preset.sequencer;
+    seq.enabled = true;
+    seq.channel = 0;
+    seq.scale = SequencerScale::PentatonicMinor;
+    seq.rootNote = 69;  // A4: the preset test holds note 69, so the sequence reinforces it
+    seq.octaveRange = 2;
+    seq.randomSeed = 0xA771AC70U;
+    const std::uint8_t lengths[kSequencerLaneCount] = {7, 5, 11, 8, 13, 9, 3};
+    const float mutations[kSequencerLaneCount] = {0.30F, 0.20F, 0.15F, 0.25F, 0.20F, 0.35F, 0.15F};
+    for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+        auto& lane = seq.lanes[li];
+        lane.stepCount = lengths[li];
+        lane.direction = SequencerDirection::Forward;
+        lane.mutationAmount = mutations[li];
+        lane.patternCycles = 4;
+        // Start from the musical lane defaults so only authored steps
+        // appear in the serialized preset text.
+        const SequencerLane which = static_cast<SequencerLane>(li);
+        for (auto& step : lane.steps) step = default_sequencer_step(which);
+    }
+    // Pitch: A minor pentatonic climb, capped at +10 semitones so sequence
+    // notes stay clear of the octave-above test band.
+    const float pitchSteps[7] = {0.0F, 3.0F, 5.0F, 7.0F, 10.0F, 7.0F, 5.0F};
+    for (std::size_t i = 0; i < 7; ++i)
+        seq.lanes[0].steps[i].value = pitchSteps[i];
+    const float velocitySteps[5] = {0.90F, 0.70F, 0.95F, 0.60F, 0.85F};
+    for (std::size_t i = 0; i < 5; ++i)
+        seq.lanes[1].steps[i].value = velocitySteps[i];
+    const float gateSteps[11] = {0.80F, 0.80F, 0.50F, 0.80F, 0.80F, 0.60F,
+                                 0.80F, 0.80F, 0.50F, 0.80F, 0.80F};
+    for (std::size_t i = 0; i < 11; ++i)
+        seq.lanes[2].steps[i].value = gateSteps[i];
+    const float timbreSteps[8] = {0.30F, 0.40F, 0.50F, 0.60F, 0.50F, 0.40F, 0.35F, 0.45F};
+    for (std::size_t i = 0; i < 8; ++i)
+        seq.lanes[3].steps[i].value = timbreSteps[i];
+    for (std::size_t i = 0; i < 12; ++i)
+        seq.lanes[4].steps[i].value = 1.0F;
+    seq.lanes[4].steps[12].value = 0.60F;
+    const float morphSteps[9] = {0.20F, 0.30F, 0.40F, 0.50F, 0.60F, 0.50F, 0.40F, 0.30F, 0.25F};
+    for (std::size_t i = 0; i < 9; ++i)
+        seq.lanes[5].steps[i].value = morphSteps[i];
+    const float panSteps[3] = {-0.40F, 0.40F, 0.00F};
+    for (std::size_t i = 0; i < 3; ++i)
+        seq.lanes[6].steps[i].value = panSteps[i];
+
+    // Genetics: moderate default mutation intensity, nothing locked.
+    preset.genetics.mutationIntensity = 0.30F;
+    preset.genetics.mutationSeed = 0xC0FFEE42ULL;
+    preset.genetics.lockedGroups = 0;
+
+    // Attractor: ~2.7-minute arc at 100 BPM (68 bars of 4/4).
+    preset.attractor.enabled = true;
+    preset.attractor.config.bpm = 100.0;
+    preset.attractor.config.barsHome = 16.0;
+    preset.attractor.config.barsRise = 16.0;
+    preset.attractor.config.barsTension = 12.0;
+    preset.attractor.config.barsPeak = 8.0;
+    preset.attractor.config.barsFall = 16.0;
+    preset.attractor.config.seed = 0x5EED1234ULL;
+
+    // The conductor's morph wander steers this preset's live evolution.
+    preset.morphEnabled = true;
+    preset.morphAmount = 0.30F;
+    return preset;
+}
+
+// Phase 4: granular showcase. Bakes a small seamlessly loopable tone into the
+// preset sample bank (the same technique as "Sampled Loop Vox": 12000 frames
+// is exactly 110 cycles at 440 Hz, so the loop seam is click-free) and plays
+// it through the dedicated granular generator as a drifting cloud: slow
+// overlapping Hann grains, wide random pan, a few reversed grains, and a
+// lush reverb tail. Because the bank tone sits at concert A440, the preset
+// test's pitch check (MIDI 69) still hears the played note as fundamental.
+SynthPreset make_granular_cloud_drift() {
+    auto preset = base_preset("Granular Cloud Drift");
+    enable_osc(preset, 0, OscillatorWaveform::Granular, 0.0F, 0.0F, 0.90F);
+    constexpr std::uint32_t kFrames = 12000U;  // 110 cycles at 440 Hz / 48 kHz: seamless loop
+    constexpr float kRate = 48000.0F;
+    constexpr float kFrequency = 440.0F;
+    constexpr float kHarmonics[8] = {1.0F, 0.55F, 0.38F, 0.26F, 0.18F, 0.12F, 0.08F, 0.05F};
+    float peak = 0.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        float sample = 0.0F;
+        const float phase = 2.0F * 3.14159265358979F * kFrequency * static_cast<float>(i) / kRate;
+        for (int harmonic = 0; harmonic < 8; ++harmonic)
+            sample += kHarmonics[harmonic] * std::sin(phase * static_cast<float>(harmonic + 1));
+        peak = std::max(peak, std::abs(sample));
+        preset.sampleBank.samples[i] = sample;
+    }
+    const float normalize = peak > 0.0F ? 0.75F / peak : 1.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) preset.sampleBank.samples[i] *= normalize;
+    preset.sampleBank.name = "Cloud Drift Tone";
+    preset.sampleBank.enabled = true;
+    preset.sampleBank.sampleRate = 48000U;
+    preset.sampleBank.rootNote = 69;  // recorded at A440: grains play at concert pitch
+    preset.sampleBank.frameCount = kFrames;
+
+    auto& g = preset.granular;
+    g.enabled = true;
+    g.densityHz = 32.0F;              // overlapping cloud
+    g.durationMs = 240.0F;            // long, slowly evolving grains
+    g.pitchSemitones = 0.0F;
+    g.position01 = 0.40F;
+    g.positionJitter01 = 0.25F;        // spray around the read position
+    g.panScatter01 = 0.90F;           // wide stereo drift
+    g.gain = 0.70F;
+    g.reverseProbability01 = 0.08F;    // occasional reversed grains
+    g.envelopeShape = GranularEnvelopeShape::Hann;
+    g.cloud01 = 0.70F;
+    g.scatter01 = 0.20F;
+    g.dust01 = 0.05F;
+    g.freeze01 = 0.0F;
+    g.freezePosition01 = 0.5F;
+    g.smear01 = 0.30F;
+    g.width01 = 0.90F;
+
+    preset.ampEnvelope = {0.08F, 0.50F, 0.80F, 0.80F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.65F;
+    preset.reverb.mix = 0.28F;
+    return preset;
+}
+
+// Phase 5: spectral showcase. Bakes a glass-like harmonic tone into the
+// preset sample bank (the same seamless-loop technique as "Sampled Loop Vox":
+// 12000 frames is exactly 110 cycles at 440 Hz, so the loop seam is
+// click-free) and voices it through the Sampler so the preset renders audibly
+// today; the spectral block is armed with a musical resynthesis setting for
+// that bank tone — gentle downward tilt for a glassy shimmer, a light blur,
+// and a touch of inharmonicity. The spectral oscillator engine (worker B)
+// will read preset.spectral from RealtimePreset when it lands. Because the
+// bank tone sits at concert A440 with a dominant fundamental, the preset
+// test's pitch check (MIDI 69) still hears the played note as fundamental.
+SynthPreset make_spectral_glass_resynthesis() {
+    auto preset = base_preset("Spectral Glass Resynthesis");
+    enable_osc(preset, 0, OscillatorWaveform::Sampler, 0.0F, 0.0F, 0.90F);
+    constexpr std::uint32_t kFrames = 12000U;  // 110 cycles at 440 Hz / 48 kHz: seamless loop
+    constexpr float kRate = 48000.0F;
+    constexpr float kFrequency = 440.0F;
+    constexpr float kHarmonics[8] = {1.0F, 0.45F, 0.30F, 0.20F, 0.14F, 0.10F, 0.07F, 0.05F};
+    float peak = 0.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        float sample = 0.0F;
+        const float phase = 2.0F * 3.14159265358979F * kFrequency * static_cast<float>(i) / kRate;
+        for (int harmonic = 0; harmonic < 8; ++harmonic)
+            sample += kHarmonics[harmonic] * std::sin(phase * static_cast<float>(harmonic + 1));
+        peak = std::max(peak, std::abs(sample));
+        preset.sampleBank.samples[i] = sample;
+    }
+    const float normalize = peak > 0.0F ? 0.75F / peak : 1.0F;
+    for (std::uint32_t i = 0; i < kFrames; ++i) preset.sampleBank.samples[i] *= normalize;
+    preset.sampleBank.name = "Glass Source A440";
+    preset.sampleBank.enabled = true;
+    preset.sampleBank.sampleRate = 48000U;
+    preset.sampleBank.rootNote = 69;  // recorded at A440: MIDI 69 plays at concert pitch
+    preset.sampleBank.frameCount = kFrames;
+    preset.sampler.enabled = true;
+    preset.sampler.playbackMode = SamplerPlaybackMode::Loop;
+    preset.sampler.direction = SamplerDirection::Forward;
+    preset.sampler.loopStartSeconds = 0.0F;
+    preset.sampler.loopEndSeconds = static_cast<float>(kFrames) / kRate;
+    preset.sampler.loopCrossfadeSeconds = 0.004F;
+    preset.sampler.pitchTracking = true;
+    preset.sampler.gain = 0.8F;
+
+    auto& s = preset.spectral;
+    s.enabled = true;
+    s.gain = 0.8F;
+    s.freeze01 = 0.0F;            // live resynthesis; freeze holds the spectrum
+    s.timeStretch = 1.0F;         // natural speed
+    s.formantShiftSemitones = 0.0F;
+    s.harmonicStretch = 1.0F;
+    s.spectralTiltDbPerOct = -3.0F;  // gentle downward tilt: glassy shimmer
+    s.partialThreshold01 = 0.15F;    // drop the quietest partials
+    s.spectralBlur01 = 0.12F;        // light spectral blur
+    s.frequencyQuantize01 = 0.0F;  // no frequency quantization
+    s.inharmonicity01 = 0.03F;      // a breath of bell-like stretch
+    s.spectralQuality = FilterQuality::Standard;
+
+    preset.ampEnvelope = {0.03F, 0.40F, 0.75F, 0.90F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.70F;
+    preset.reverb.mix = 0.30F;
+    return preset;
+}
+
+// Release bank: tuned-percussion kick. Sine body two octaves below the played
+// note with a filter-envelope pitch drop (+12 st at the hit, decaying to
+// concert pitch), plus a noise click that only survives while the filter
+// envelope holds the lowpass open.
+SynthPreset make_punch_kick() {
+    auto preset = base_preset("Punch Kick");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, -24.0F, 0.0F, 0.90F);
+    enable_osc(preset, 1, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.45F);
+    preset.ampEnvelope = {0.002F, 0.30F, 0.00F, 0.12F, EnvelopeCurve::Exponential};
+    // The filter doubles as the click shaper: wide open at the attack so the
+    // noise transient cracks through, then closing to leave the sine body.
+    lowpass(preset, 900.0F, 0.10F, 4.0F, 0.002F, 0.055F, 0.00F, 0.10F);
+    auto& slot = preset.modulation[0];
+    slot.enabled = true;
+    slot.source = ModulationSource::FilterEnvelope;
+    slot.destination = ModulationDestination::Osc1Pitch;
+    slot.amount = 0.5F;  // +12 semitones at the envelope peak, decaying to 0
+    slot.polarity = ModulationPolarity::Unipolar;
+    slot.smoothingMilliseconds = 2.0F;
+    return preset;
+}
+
+// Release bank: tuned-percussion snare. Triangle body (~190 Hz at A4) under
+// a broadband noise crack, both decaying together like a real drum.
+SynthPreset make_crack_snare() {
+    auto preset = base_preset("Crack Snare");
+    enable_osc(preset, 0, OscillatorWaveform::Triangle, -14.5F, 0.0F, 0.55F);
+    enable_osc(preset, 1, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.42F);
+    preset.ampEnvelope = {0.001F, 0.16F, 0.00F, 0.06F, EnvelopeCurve::Exponential};
+    lowpass(preset, 6500.0F, 0.05F, 1.5F, 0.001F, 0.09F, 0.00F, 0.05F);
+    return preset;
+}
+
+// Release bank: closed hi-hat. Highpassed noise with a ~60 ms decay.
+SynthPreset make_closed_hat() {
+    auto preset = base_preset("Closed Hat");
+    enable_osc(preset, 0, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.001F, 0.055F, 0.00F, 0.030F, EnvelopeCurve::Exponential};
+    preset.filter.enabled = true;
+    preset.filter.topology = FilterTopology::CleanStateVariable;
+    preset.filter.mode = FilterMode::HighPass;
+    preset.filter.cutoffHertz = 7000.0F;
+    preset.filter.resonance = 0.10F;
+    preset.filter.envelopeAmountOctaves = 0.0F;
+    return preset;
+}
+
+// Release bank: open hi-hat. Same family as Closed Hat, ~400 ms decay.
+SynthPreset make_open_hat() {
+    auto preset = base_preset("Open Hat");
+    enable_osc(preset, 0, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.001F, 0.38F, 0.00F, 0.20F, EnvelopeCurve::Exponential};
+    preset.filter.enabled = true;
+    preset.filter.topology = FilterTopology::CleanStateVariable;
+    preset.filter.mode = FilterMode::HighPass;
+    preset.filter.cutoffHertz = 6200.0F;
+    preset.filter.resonance = 0.10F;
+    preset.filter.envelopeAmountOctaves = 0.0F;
+    return preset;
+}
+
+// Release bank texture: the HQ wavetable oscillator with its read position
+// wandered by the Lorenz attractor and the filter cutoff breathed by the
+// spring. Both physics sources are excited by note-on velocity inside the
+// engine; the preset only routes them. The frames stay harmonic, so the
+// played note remains the perceived fundamental while the timbre drifts.
+SynthPreset make_lorenz_wavetable_drift() {
+    auto preset = base_preset("Lorenz Wavetable Drift");
+    enable_osc(preset, 0, OscillatorWaveform::Wavetable, 0.0F, 0.0F, 0.85F);
+    preset.oscillators[0].shape = 0.5F;  // start mid-table; Lorenz sweeps the rest
+    preset.ampEnvelope = {0.60F, 0.40F, 0.85F, 1.50F, EnvelopeCurve::Exponential};
+    lowpass(preset, 3200.0F, 0.12F, 0.0F, 0.40F, 0.60F, 0.60F, 0.80F);
+    auto& slot0 = preset.modulation[0];
+    slot0.enabled = true;
+    slot0.source = ModulationSource::Lorenz;
+    slot0.destination = ModulationDestination::WavetablePosition;
+    slot0.amount = 0.65F;
+    slot0.polarity = ModulationPolarity::Unipolar;  // Lorenz is natively bipolar; pass through
+    slot0.smoothingMilliseconds = 40.0F;
+    auto& slot1 = preset.modulation[1];
+    slot1.enabled = true;
+    slot1.source = ModulationSource::Spring;
+    slot1.destination = ModulationDestination::FilterCutoff;
+    slot1.amount = 0.35F;
+    slot1.polarity = ModulationPolarity::Unipolar;  // spring position is natively bipolar
+    slot1.smoothingMilliseconds = 60.0F;
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.20F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.75F;
+    preset.reverb.mix = 0.30F;
+    return preset;
+}
+
+// Release bank texture: bowed modal resonator. The continuous sawtooth
+// exciter acts as the bow while the key is held; low damping lets the
+// inharmonic glass partials ring against the fundamental.
+SynthPreset make_bowed_glass() {
+    auto preset = base_preset("Bowed Glass");
+    enable_osc(preset, 0, OscillatorWaveform::ModalResonator, 0.0F, 0.0F, 0.80F);
+    auto& mr = preset.oscillators[0].modalResonator;
+    mr.excitation = ExcitationSource::Oscillator;
+    mr.modeCount = 8;
+    mr.baseFrequency = 0.0F;  // follow the played note
+    mr.damping = 0.35F;
+    mr.inharmonicity = 0.08F;
+    mr.brightness = 0.60F;
+    mr.excitationLevel = 0.80F;
+    constexpr float kRatios[8] = {1.00F, 2.76F, 5.40F, 3.98F, 8.93F, 7.21F, 11.34F, 6.12F};
+    constexpr float kGains[8] = {1.00F, 0.32F, 0.20F, 0.26F, 0.13F, 0.16F, 0.09F, 0.18F};
+    constexpr float kDecays[8] = {3.20F, 2.60F, 2.10F, 2.40F, 1.80F, 2.00F, 1.60F, 2.20F};
+    for (int i = 0; i < 8; ++i) mr.modes[i] = ModalResonatorMode{kRatios[i], kDecays[i], kGains[i]};
+    preset.ampEnvelope = {0.40F, 0.30F, 0.85F, 1.20F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.80F;
+    preset.reverb.mix = 0.32F;
+    return preset;
+}
+} // namespace
+
+std::vector<SynthPreset> SynthPreset::builtin_presets() {
+    return {
+        make_clean_saw_lead(),
+        make_deep_sub_bass(),
+        make_pluck(),
+        make_warm_pad(),
+        make_chiptune_square(),
+        make_organ(),
+        make_brass_stab(),
+        make_glass_bell(),
+        make_reese_bass(),
+        make_e_keys(),
+        make_noise_sweep_fx(),
+        make_sampled_loop_vox(),
+        make_modal_marimba(),
+        make_cloud_delay(),
+        make_generative_attractor_pad(),
+        make_granular_cloud_drift(),
+        make_spectral_glass_resynthesis(),
+        make_punch_kick(),
+        make_crack_snare(),
+        make_closed_hat(),
+        make_open_hat(),
+        make_lorenz_wavetable_drift(),
+        make_bowed_glass(),
+    };
 }
 
 bool SynthPreset::validate(std::string* error) const {
@@ -3921,6 +5748,7 @@ bool SynthPreset::validate(std::string* error) const {
             !in_range(osc.frequencyModAmount, -4.0F, 4.0F) || !in_range(osc.ringModDepth, 0.0F, 1.0F) ||
             !in_range(osc.subOscillatorLevel, 0.0F, 1.0F) || osc.subOscillatorOctaves < 1U ||
             osc.subOscillatorOctaves > 3U || !in_range(osc.wavetablePosition, 0.0F, 1.0F) ||
+            !in_range(osc.stereoDivergence, 0.0F, 1.0F) ||
             !in_range(osc.sampleStart, 0.0F, 1.0F) || !in_range(osc.sampleEnd, 0.0F, 1.0F) ||
             osc.sampleEnd <= osc.sampleStart || !in_range(osc.sampleLoopStart, 0.0F, 1.0F) ||
             !in_range(osc.sampleLoopEnd, 0.0F, 1.0F) || osc.sampleLoopEnd <= osc.sampleLoopStart ||
@@ -3957,8 +5785,44 @@ bool SynthPreset::validate(std::string* error) const {
             !in_range(osc.physicalThroatQ, 0.5F, 8.0F) ||
             !in_range(osc.physicalBoreTaper, 0.0F, 1.0F) ||
             !in_range(osc.physicalPressureToBreath, 0.0F, 1.5F) ||
-            !in_range(osc.physicalVelocityToEmbouchure, 0.0F, 1.0F))
+            !in_range(osc.physicalVelocityToEmbouchure, 0.0F, 1.0F) ||
+            // Phase 2: modal resonator
+            osc.modalResonator.modeCount < 1U || osc.modalResonator.modeCount > kModalResonatorMaxModes ||
+            !in_range(osc.modalResonator.baseFrequency, 0.0F, 20000.0F) ||
+            !in_range(osc.modalResonator.damping, 0.01F, 8.0F) ||
+            !in_range(osc.modalResonator.inharmonicity, 0.0F, 1.0F) ||
+            !in_range(osc.modalResonator.brightness, 0.0F, 1.0F) ||
+            !in_range(osc.modalResonator.excitationLevel, 0.0F, 4.0F) ||
+            !in_range(osc.modalResonator.noiseBurstMilliseconds, 1.0F, 2000.0F) ||
+            !in_range(osc.modalResonator.transientMilliseconds, 1.0F, 2000.0F))
             return fail("invalid oscillator parameters");
+        for (std::size_t m = 0; m < osc.modalResonator.modes.size(); ++m) {
+            const auto& resonatorMode = osc.modalResonator.modes[m];
+            if (!in_range(resonatorMode.frequencyRatio, 0.01F, 64.0F) ||
+                !in_range(resonatorMode.decaySeconds, 0.005F, 60.0F) ||
+                !in_range(resonatorMode.gain, 0.0F, 4.0F))
+                return fail("invalid oscillator parameters");
+        }
+    }
+    // Phase 4: granular generator parameters (NaN/inf rejected by in_range's
+    // finite() check, same convention as every other section).
+    {
+        const auto& g = granular;
+        if (!in_range(g.densityHz, 0.0F, 4000.0F) || !in_range(g.durationMs, 1.0F, 10000.0F) ||
+            !in_range(g.pitchSemitones, -96.0F, 96.0F) || !in_range(g.position01, 0.0F, 1.0F) ||
+            !in_range(g.positionJitter01, 0.0F, 1.0F) || !in_range(g.panScatter01, 0.0F, 1.0F) ||
+            !in_range(g.gain, 0.0F, 4.0F) || !in_range(g.reverseProbability01, 0.0F, 1.0F) ||
+            !in_range(g.cloud01, 0.0F, 1.0F) || !in_range(g.scatter01, 0.0F, 1.0F) ||
+            !in_range(g.dust01, 0.0F, 1.0F) || !in_range(g.freeze01, 0.0F, 1.0F) ||
+            !in_range(g.freezePosition01, 0.0F, 1.0F) || !in_range(g.smear01, 0.0F, 1.0F) ||
+            !in_range(g.width01, 0.0F, 1.0F) ||
+            (g.envelopeShape != GranularEnvelopeShape::Hann &&
+             g.envelopeShape != GranularEnvelopeShape::Triangle &&
+             g.envelopeShape != GranularEnvelopeShape::ExponentialDecay &&
+             g.envelopeShape != GranularEnvelopeShape::PlanckTaper) ||
+            (g.granularQuality != FilterQuality::Eco && g.granularQuality != FilterQuality::Standard &&
+             g.granularQuality != FilterQuality::High && g.granularQuality != FilterQuality::Offline))
+            return fail("invalid granular parameters");
     }
     if (!in_range(filter.cutoffHertz, 18.0F, 24000.0F) || !in_range(filter.resonance, 0.0F, 1.0F) ||
         !in_range(filter.envelopeAmountOctaves, -12.0F, 12.0F) || !in_range(filter.keyTrack, -2.0F, 2.0F) ||
@@ -3966,8 +5830,15 @@ bool SynthPreset::validate(std::string* error) const {
         !in_range(filter.morph, 0.0F, 1.0F) || !in_range(filter.ms20HighPassCutoffHertz, 12.0F, 18000.0F) ||
         !in_range(filter.selfOscillation, 0.5F, 1.35F) ||
         (filter.oversampling != FilterOversampling::X1 && filter.oversampling != FilterOversampling::X2 &&
-         filter.oversampling != FilterOversampling::X4))
+         filter.oversampling != FilterOversampling::X4 && filter.oversampling != FilterOversampling::Auto) ||
+        !in_range(filter.comb.damping, 0.0F, 1.0F) || !in_range(filter.comb.mix, 0.0F, 1.0F) ||
+        !in_range(filter.comb.feedbackScale, 0.0F, 1.5F) || !in_range(filter.formant.dryMix, 0.0F, 1.0F))
         return fail("invalid filter parameters");
+    for (std::size_t i = 0; i < FormantParameters::kBandCount; ++i) {
+        if (!in_range(filter.formant.frequencyHertz[i], 50.0F, 12000.0F) ||
+            !in_range(filter.formant.gains[i], 0.0F, 2.0F))
+            return fail("invalid formant parameters");
+    }
     if (!in_range(tuning.referenceHertz, 400.0F, 480.0F) ||
         !in_range(tuning.transposeSemitones, -48.0F, 48.0F) || !in_range(tuning.fineCents, -100.0F, 100.0F) ||
         !in_range(tuning.analogDriftCents, 0.0F, 30.0F))
@@ -3978,9 +5849,10 @@ bool SynthPreset::validate(std::string* error) const {
             !in_range(lfo.beatsPerCycle, 0.03125F, 32.0F)) return fail("invalid LFO parameters");
     }
     for (const auto& slot : modulation) {
-        if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
-            static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::Macro4) ||
-            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::Osc8Gain))
+        if (!in_range(slot.amount, -1.0F, 1.0F) || !in_range(slot.bias, -1.0F, 1.0F) ||
+            !in_range(slot.smoothingMilliseconds, 0.0F, 2000.0F) ||
+            static_cast<unsigned>(slot.source) > static_cast<unsigned>(ModulationSource::SeqPan) ||
+            static_cast<unsigned>(slot.destination) > static_cast<unsigned>(ModulationDestination::GranularPosition))
             return fail("invalid modulation matrix slot");
     }
     for (float value : macros.values) if (!in_range(value, 0.0F, 1.0F)) return fail("invalid macro value");
@@ -3994,6 +5866,14 @@ bool SynthPreset::validate(std::string* error) const {
     if (!wavetable.validate(&wavetableError)) return fail(wavetableError);
     std::string sampleError;
     if (!sampleBank.validate(&sampleError)) return fail(sampleError);
+    // Phase 2: sampler generator parameters.
+    if (sampler.sampleIndex != 0U) return fail("invalid sampler sample index");
+    if (!in_range(sampler.loopStartSeconds, 0.0F, 3600.0F) ||
+        !in_range(sampler.loopEndSeconds, 0.0F, 3600.0F) ||
+        !in_range(sampler.loopCrossfadeSeconds, 0.0F, 60.0F) ||
+        !in_range(sampler.startOffsetSeconds, 0.0F, 3600.0F) ||
+        !in_range(sampler.gain, 0.0F, 2.0F))
+        return fail("invalid sampler parameters");
     std::string tuningError;
     if (!microtuning.validate(&tuningError)) return fail(tuningError);
     if (mpe.lowerMasterChannel > 15U || mpe.upperMasterChannel > 15U ||
@@ -4028,30 +5908,50 @@ bool SynthPreset::validate(std::string* error) const {
         !in_range(arpeggiator.swing, 0.0F, 0.75F) || arpeggiator.octaveRange < 1U ||
         arpeggiator.octaveRange > 4U || arpeggiator.stepCount < 1U ||
         arpeggiator.stepCount > kArpeggiatorStepCount ||
-        !in_range(arpeggiator.externalTempoBpm, 20.0F, 400.0F))
+        !in_range(arpeggiator.externalTempoBpm, 20.0F, 400.0F) ||
+        !in_range(arpeggiator.humanizeTiming, 0.0F, 1.0F) ||
+        !in_range(arpeggiator.humanizeVelocity, 0.0F, 1.0F) ||
+        !in_range(arpeggiator.phraseVelocityStart, 0.0F, 2.0F) ||
+        !in_range(arpeggiator.phraseVelocityEnd, 0.0F, 2.0F))
         return fail("invalid arpeggiator parameters");
     for (const auto& step : arpeggiator.steps) {
         if (step.transpose < -48 || step.transpose > 48 || step.octaveOffset < -4 || step.octaveOffset > 4 ||
             !in_range(step.velocityScale, 0.0F, 2.0F) || !in_range(step.gateScale, 0.1F, 2.0F) ||
             !in_range(step.probability, 0.0F, 1.0F) || step.ratchets < 1U || step.ratchets > 8U ||
+            step.conditionA < 1U || step.conditionA > 8U || step.conditionB < 1U || step.conditionB > 8U ||
             !in_range(step.macro1, -1.0F, 1.0F) || !in_range(step.macro2, -1.0F, 1.0F) ||
             !in_range(step.macro3, -1.0F, 1.0F) || !in_range(step.macro4, -1.0F, 1.0F))
             return fail("invalid arpeggiator step");
     }
-    if (!in_range(distortion.drive, 0.05F, 32.0F) || !in_range(distortion.mix, 0.0F, 1.0F))
+    if (!in_range(distortion.drive, 0.05F, 32.0F) || !in_range(distortion.mix, 0.0F, 1.0F) ||
+        static_cast<unsigned>(distortion.mode) > 3U)
         return fail("invalid distortion parameters");
+    if (!in_range(bitcrusher.mix, 0.0F, 1.0F) || bitcrusher.bits < 1U || bitcrusher.bits > 16U ||
+        bitcrusher.downsample < 1U || bitcrusher.downsample > 64U)
+        return fail("invalid bitcrusher parameters");
+    if (!in_range(harmonizer.subLevel, 0.0F, 1.0F) || !in_range(harmonizer.upLevel, 0.0F, 1.0F) ||
+        !in_range(harmonizer.mix, 0.0F, 1.0F))
+        return fail("invalid octave harmonizer parameters");
     if (!in_range(eq.lowGainDb, -24.0F, 24.0F) || !in_range(eq.midGainDb, -24.0F, 24.0F) ||
         !in_range(eq.highGainDb, -24.0F, 24.0F))
         return fail("invalid equalizer parameters");
     if (!in_range(chorus.rateHertz, 0.01F, 20.0F) || !in_range(chorus.depthMilliseconds, 0.0F, 30.0F) ||
         !in_range(chorus.mix, 0.0F, 1.0F))
         return fail("invalid chorus parameters");
+    if (!in_range(flanger.rateHertz, 0.01F, 20.0F) || !in_range(flanger.depthMilliseconds, 0.0F, 10.0F) ||
+        !in_range(flanger.feedback, -0.92F, 0.92F) || !in_range(flanger.mix, 0.0F, 1.0F))
+        return fail("invalid flanger parameters");
+    if (static_cast<unsigned>(ensemble.mode) > 2U || !in_range(ensemble.mix, 0.0F, 1.0F))
+        return fail("invalid ensemble parameters");
     if (!in_range(phaser.rateHertz, 0.01F, 20.0F) || !in_range(phaser.depth, 0.0F, 1.0F) ||
         !in_range(phaser.feedback, -0.95F, 0.95F) || !in_range(phaser.mix, 0.0F, 1.0F))
         return fail("invalid phaser parameters");
     if (!in_range(delay.timeSeconds, 0.01F, 1.95F) || !in_range(delay.feedback, 0.0F, 0.94F) ||
-        !in_range(delay.mix, 0.0F, 1.0F))
+        !in_range(delay.mix, 0.0F, 1.0F) || !in_range(delay.syncBeats, 0.03125F, 32.0F))
         return fail("invalid delay parameters");
+    if (!in_range(diffusionDelay.timeSeconds, 0.01F, 1.95F) || !in_range(diffusionDelay.feedback, 0.0F, 0.94F) ||
+        !in_range(diffusionDelay.mix, 0.0F, 1.0F) || !in_range(diffusionDelay.diffusion, 0.0F, 1.0F))
+        return fail("invalid diffusion delay parameters");
     if (!in_range(reverb.roomSize, 0.0F, 1.0F) || !in_range(reverb.damping, 0.0F, 0.98F) ||
         !in_range(reverb.width, 0.0F, 1.0F) || !in_range(reverb.mix, 0.0F, 1.0F))
         return fail("invalid reverb parameters");
@@ -4064,8 +5964,55 @@ bool SynthPreset::validate(std::string* error) const {
         !in_range(limiter.releaseMilliseconds, 1.0F, 5000.0F))
         return fail("invalid limiter parameters");
     if (!in_range(masterGain, 0.0F, 2.0F) || !in_range(masterPan, -1.0F, 1.0F) ||
-        !in_range(pitchBendRangeSemitones, 0.0F, 48.0F))
+        !in_range(pitchBendRangeSemitones, 0.0F, 48.0F) || !in_range(morphAmount, 0.0F, 1.0F))
         return fail("invalid master parameters");
+    // Phase 3: generative sequencer / genetics / attractor ranges.
+    {
+        if (sequencer.channel > 15U || sequencer.rootNote > 127U || sequencer.octaveRange > 8U ||
+            static_cast<unsigned>(sequencer.scale) > 5U)
+            return fail("invalid sequencer globals");
+        for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+            const auto& lane = sequencer.lanes[li];
+            const SequencerLane which = static_cast<SequencerLane>(li);
+            if (lane.stepCount < 1U || lane.stepCount > kSequencerMaxSteps ||
+                static_cast<unsigned>(lane.direction) > 3U ||
+                !in_range(lane.mutationAmount, 0.0F, 1.0F))
+                return fail("invalid sequencer lane header");
+            float valueLo = -1.0F, valueHi = 1.0F;
+            switch (which) {
+                case SequencerLane::Pitch: valueLo = -48.0F; valueHi = 48.0F; break;
+                case SequencerLane::Velocity:
+                case SequencerLane::Gate:
+                case SequencerLane::Probability:
+                case SequencerLane::Morph: valueLo = 0.0F; valueHi = 1.0F; break;
+                case SequencerLane::Timbre:
+                case SequencerLane::Pan: valueLo = -1.0F; valueHi = 1.0F; break;
+                case SequencerLane::Count: break;
+            }
+            for (const auto& step : lane.steps) {
+                if (!in_range(step.value, valueLo, valueHi) ||
+                    !in_range(step.probability, 0.0F, 1.0F) ||
+                    step.ratchets < 1U || step.ratchets > 8U ||
+                    !in_range(step.microtiming, -1.0F, 1.0F) ||
+                    !in_range(step.accent, 0.0F, 4.0F) ||
+                    static_cast<unsigned>(step.condition) > 3U ||
+                    step.conditionN < 1U || step.conditionN > 64U)
+                    return fail("invalid sequencer step");
+            }
+        }
+        if (!in_range(genetics.mutationIntensity, 0.0F, 1.0F))
+            return fail("invalid genetics settings");
+        const auto& attractorConfig = attractor.config;
+        const auto finiteDouble = [](double v) { return std::isfinite(v); };
+        if (!finiteDouble(attractorConfig.bpm) || attractorConfig.bpm < 20.0 ||
+            attractorConfig.bpm > 400.0 || !finiteDouble(attractorConfig.barsHome) ||
+            attractorConfig.barsHome < 0.0 || !finiteDouble(attractorConfig.barsRise) ||
+            attractorConfig.barsRise < 0.0 || !finiteDouble(attractorConfig.barsTension) ||
+            attractorConfig.barsTension < 0.0 || !finiteDouble(attractorConfig.barsPeak) ||
+            attractorConfig.barsPeak < 0.0 || !finiteDouble(attractorConfig.barsFall) ||
+            attractorConfig.barsFall < 0.0)
+            return fail("invalid attractor config");
+    }
     return true;
 }
 
@@ -4074,6 +6021,7 @@ std::string SynthPreset::serialize() const {
     out << "DVE_SYNTH_PRESET=5\nname=" << name << '\n'
         << "master.gain=" << masterGain << "\nmaster.pan=" << masterPan
         << "\nmaster.bend=" << pitchBendRangeSemitones << "\nmaster.midiThru=" << midiThru << '\n'
+        << "master.morphEnabled=" << morphEnabled << "\nmaster.morphAmount=" << morphAmount << '\n'
         << "tuning.reference=" << tuning.referenceHertz << "\ntuning.transpose=" << tuning.transposeSemitones
         << "\ntuning.fineCents=" << tuning.fineCents << "\ntuning.driftCents=" << tuning.analogDriftCents << '\n'
         << "quality.oscillator=" << static_cast<unsigned>(oscillatorQuality)
@@ -4122,8 +6070,15 @@ std::string SynthPreset::serialize() const {
         << "\nfilter.env.hold=" << filter.envelope.holdSeconds
         << "\nfilter.oversampling=" << static_cast<unsigned>(filter.oversampling)
         << "\nfilter.ms20HighPass=" << filter.ms20HighPassCutoffHertz
-        << "\nfilter.selfOscillation=" << filter.selfOscillation << '\n'
-        << "chord.enabled=" << chord.enabled << "\nchord.type=" << chord_type_token(chord.type)
+        << "\nfilter.selfOscillation=" << filter.selfOscillation
+        << "\nfilter.comb.damping=" << filter.comb.damping
+        << "\nfilter.comb.mix=" << filter.comb.mix
+        << "\nfilter.comb.feedbackScale=" << filter.comb.feedbackScale
+        << "\nfilter.formant.dryMix=" << filter.formant.dryMix << '\n';
+    for (std::size_t i = 0; i < FormantParameters::kBandCount; ++i)
+        out << "filter.formant.freq" << i << "=" << filter.formant.frequencyHertz[i] << '\n'
+            << "filter.formant.gain" << i << "=" << filter.formant.gains[i] << '\n';
+    out << "chord.enabled=" << chord.enabled << "\nchord.type=" << chord_type_token(chord.type)
         << "\nchord.noteCount=" << static_cast<unsigned>(chord.noteCount)
         << "\nchord.inversion=" << static_cast<int>(chord.inversion)
         << "\nchord.spread=" << static_cast<unsigned>(chord.spreadOctaves)
@@ -4144,7 +6099,13 @@ std::string SynthPreset::serialize() const {
         << "\narp.stepCount=" << static_cast<unsigned>(arpeggiator.stepCount)
         << "\narp.seed=" << arpeggiator.randomSeed
         << "\narp.clock=" << arp_clock_token(arpeggiator.clockSource)
-        << "\narp.externalTempo=" << arpeggiator.externalTempoBpm << '\n';
+        << "\narp.externalTempo=" << arpeggiator.externalTempoBpm
+        << "\narp.humanizeTiming=" << arpeggiator.humanizeTiming
+        << "\narp.humanizeVelocity=" << arpeggiator.humanizeVelocity
+        << "\narp.phraseVelStart=" << arpeggiator.phraseVelocityStart
+        << "\narp.phraseVelEnd=" << arpeggiator.phraseVelocityEnd
+        << "\narp.scale=" << chord_scale_token(arpeggiator.scale)
+        << "\narp.scaleRoot=" << static_cast<unsigned>(arpeggiator.scaleRoot) << '\n';
     for (std::size_t i = 0; i < chord.customIntervals.size(); ++i)
         out << "chord.interval" << i << '=' << static_cast<int>(chord.customIntervals[i]) << '\n';
     for (std::size_t slot = 0; slot < chordMemory.size(); ++slot) {
@@ -4176,6 +6137,7 @@ std::string SynthPreset::serialize() const {
             << prefix << "subLevel=" << osc.subOscillatorLevel << '\n'
             << prefix << "subOctaves=" << static_cast<unsigned>(osc.subOscillatorOctaves) << '\n'
             << prefix << "wavetablePosition=" << osc.wavetablePosition << '\n'
+            << prefix << "stereoDivergence=" << osc.stereoDivergence << '\n'
             << prefix << "sampleStart=" << osc.sampleStart << '\n'
             << prefix << "sampleEnd=" << osc.sampleEnd << '\n'
             << prefix << "sampleLoopStart=" << osc.sampleLoopStart << '\n'
@@ -4225,13 +6187,50 @@ std::string SynthPreset::serialize() const {
             << prefix << "physicalThroatQ=" << osc.physicalThroatQ << '\n'
             << prefix << "physicalBoreTaper=" << osc.physicalBoreTaper << '\n'
             << prefix << "physicalPressureToBreath=" << osc.physicalPressureToBreath << '\n'
-            << prefix << "physicalVelocityToEmbouchure=" << osc.physicalVelocityToEmbouchure << '\n';
+            << prefix << "physicalVelocityToEmbouchure=" << osc.physicalVelocityToEmbouchure << '\n'
+            << prefix << "modalExcitation=" << modal_excitation_token(osc.modalResonator.excitation) << '\n'
+            << prefix << "modalModeCount=" << static_cast<unsigned>(osc.modalResonator.modeCount) << '\n'
+            << prefix << "modalBaseFrequency=" << osc.modalResonator.baseFrequency << '\n'
+            << prefix << "modalDamping=" << osc.modalResonator.damping << '\n'
+            << prefix << "modalInharmonicity=" << osc.modalResonator.inharmonicity << '\n'
+            << prefix << "modalBrightness=" << osc.modalResonator.brightness << '\n'
+            << prefix << "modalExcitationLevel=" << osc.modalResonator.excitationLevel << '\n'
+            << prefix << "modalNoiseBurstMs=" << osc.modalResonator.noiseBurstMilliseconds << '\n'
+            << prefix << "modalTransientMs=" << osc.modalResonator.transientMilliseconds << '\n';
+        for (std::size_t m = 0; m < osc.modalResonator.modes.size(); ++m) {
+            const auto& resonatorMode = osc.modalResonator.modes[m];
+            out << prefix << "modalMode" << m << '=' << resonatorMode.frequencyRatio << ','
+                << resonatorMode.decaySeconds << ',' << resonatorMode.gain << '\n';
+        }
     }
+    // Phase 4: granular generator (mirrors binary patch IDs 0x0800-0x0811).
+    // Old files without these keys keep make_default() values (parse() starts
+    // from the default preset and only overwrites recognized keys).
+    out << "granular.enabled=" << granular.enabled << '\n'
+        << "granular.densityHz=" << granular.densityHz << '\n'
+        << "granular.durationMs=" << granular.durationMs << '\n'
+        << "granular.pitchSemitones=" << granular.pitchSemitones << '\n'
+        << "granular.position=" << granular.position01 << '\n'
+        << "granular.positionJitter=" << granular.positionJitter01 << '\n'
+        << "granular.panScatter=" << granular.panScatter01 << '\n'
+        << "granular.gain=" << granular.gain << '\n'
+        << "granular.reverseProbability=" << granular.reverseProbability01 << '\n'
+        << "granular.envelopeShape=" << static_cast<unsigned>(granular.envelopeShape) << '\n'
+        << "granular.cloud=" << granular.cloud01 << '\n'
+        << "granular.scatter=" << granular.scatter01 << '\n'
+        << "granular.dust=" << granular.dust01 << '\n'
+        << "granular.freeze=" << granular.freeze01 << '\n'
+        << "granular.freezePosition=" << granular.freezePosition01 << '\n'
+        << "granular.smear=" << granular.smear01 << '\n'
+        << "granular.width=" << granular.width01 << '\n'
+        << "granular.quality=" << static_cast<unsigned>(granular.granularQuality) << '\n';
     for (std::size_t i = 0; i < arpeggiator.steps.size(); ++i) {
         const auto& step = arpeggiator.steps[i];
         const std::string prefix = "arp.step" + std::to_string(i) + ".";
         out << prefix << "enabled=" << step.enabled << '\n'
             << prefix << "condition=" << static_cast<unsigned>(step.condition) << '\n'
+            << prefix << "conditionA=" << static_cast<unsigned>(step.conditionA) << '\n'
+            << prefix << "conditionB=" << static_cast<unsigned>(step.conditionB) << '\n'
             << prefix << "automation=" << static_cast<unsigned>(step.automationCurve) << '\n'
             << prefix << "accent=" << step.accent << '\n'
             << prefix << "slide=" << step.slide << '\n'
@@ -4267,6 +6266,7 @@ std::string SynthPreset::serialize() const {
             << prefix << "source=" << modulation_source_token(slot.source) << '\n'
             << prefix << "destination=" << modulation_destination_token(slot.destination) << '\n'
             << prefix << "amount=" << slot.amount << '\n'
+            << prefix << "bias=" << slot.bias << '\n'
             << prefix << "curve=" << modulation_curve_token(slot.curve) << '\n'
             << prefix << "polarity=" << static_cast<unsigned>(slot.polarity) << '\n'
             << prefix << "smoothingMs=" << slot.smoothingMilliseconds << '\n';
@@ -4310,18 +6310,46 @@ std::string SynthPreset::serialize() const {
         }
         out << '\n';
     }
+    // Phase 2: sampler generator parameters.
+    out << "sampler.enabled=" << sampler.enabled << '\n'
+        << "sampler.sampleIndex=" << static_cast<unsigned>(sampler.sampleIndex) << '\n'
+        << "sampler.mode=" << sampler_playback_mode_token(sampler.playbackMode) << '\n'
+        << "sampler.direction=" << sampler_direction_token(sampler.direction) << '\n'
+        << "sampler.loopStart=" << sampler.loopStartSeconds << '\n'
+        << "sampler.loopEnd=" << sampler.loopEndSeconds << '\n'
+        << "sampler.loopCrossfade=" << sampler.loopCrossfadeSeconds << '\n'
+        << "sampler.pitchTracking=" << sampler.pitchTracking << '\n'
+        << "sampler.startOffset=" << sampler.startOffsetSeconds << '\n'
+        << "sampler.gain=" << sampler.gain << '\n';
     out << "distortion.enabled=" << distortion.enabled << "\ndistortion.drive=" << distortion.drive
-        << "\ndistortion.mix=" << distortion.mix << '\n'
+        << "\ndistortion.mix=" << distortion.mix
+        << "\ndistortion.mode=" << static_cast<unsigned>(distortion.mode) << '\n'
+        << "bitcrusher.enabled=" << bitcrusher.enabled << "\nbitcrusher.bits=" << static_cast<unsigned>(bitcrusher.bits)
+        << "\nbitcrusher.downsample=" << static_cast<unsigned>(bitcrusher.downsample)
+        << "\nbitcrusher.mix=" << bitcrusher.mix << '\n'
+        << "harmonizer.enabled=" << harmonizer.enabled << "\nharmonizer.subLevel=" << harmonizer.subLevel
+        << "\nharmonizer.upLevel=" << harmonizer.upLevel << "\nharmonizer.mix=" << harmonizer.mix << '\n'
         << "eq.enabled=" << eq.enabled << "\neq.lowDb=" << eq.lowGainDb
         << "\neq.midDb=" << eq.midGainDb << "\neq.highDb=" << eq.highGainDb << '\n'
         << "chorus.enabled=" << chorus.enabled << "\nchorus.rate=" << chorus.rateHertz
         << "\nchorus.depthMs=" << chorus.depthMilliseconds << "\nchorus.mix=" << chorus.mix << '\n'
+        << "flanger.enabled=" << flanger.enabled << "\nflanger.rate=" << flanger.rateHertz
+        << "\nflanger.depthMs=" << flanger.depthMilliseconds << "\nflanger.feedback=" << flanger.feedback
+        << "\nflanger.mix=" << flanger.mix << '\n'
+        << "ensemble.enabled=" << ensemble.enabled << "\nensemble.mode=" << static_cast<unsigned>(ensemble.mode)
+        << "\nensemble.mix=" << ensemble.mix << '\n'
         << "phaser.enabled=" << phaser.enabled << "\nphaser.rate=" << phaser.rateHertz
         << "\nphaser.depth=" << phaser.depth << "\nphaser.feedback=" << phaser.feedback
         << "\nphaser.mix=" << phaser.mix << '\n'
         << "delay.enabled=" << delay.enabled << "\ndelay.time=" << delay.timeSeconds
         << "\ndelay.feedback=" << delay.feedback << "\ndelay.mix=" << delay.mix
-        << "\ndelay.pingPong=" << delay.pingPong << '\n'
+        << "\ndelay.pingPong=" << delay.pingPong
+        << "\ndelay.tempoSync=" << delay.tempoSync << "\ndelay.syncBeats=" << delay.syncBeats << '\n'
+        << "diffusionDelay.enabled=" << diffusionDelay.enabled
+        << "\ndiffusionDelay.time=" << diffusionDelay.timeSeconds
+        << "\ndiffusionDelay.feedback=" << diffusionDelay.feedback
+        << "\ndiffusionDelay.mix=" << diffusionDelay.mix
+        << "\ndiffusionDelay.diffusion=" << diffusionDelay.diffusion << '\n'
         << "reverb.enabled=" << reverb.enabled << "\nreverb.room=" << reverb.roomSize
         << "\nreverb.damping=" << reverb.damping << "\nreverb.width=" << reverb.width
         << "\nreverb.mix=" << reverb.mix << '\n'
@@ -4330,6 +6358,56 @@ std::string SynthPreset::serialize() const {
         << "\ncompressor.releaseMs=" << compressor.releaseMilliseconds << "\ncompressor.makeupDb=" << compressor.makeupDb << '\n'
         << "limiter.enabled=" << limiter.enabled << "\nlimiter.ceilingDb=" << limiter.ceilingDb
         << "\nlimiter.releaseMs=" << limiter.releaseMilliseconds << '\n';
+    // Phase 3: generative sequencer / genetics / attractor state. Floats use
+    // 9 significant digits so they parse back bit-exactly; steps equal to the
+    // musical lane default are omitted (parse() fills them back in).
+    {
+        auto precise = [](float value) {
+            std::ostringstream ss;
+            ss << std::setprecision(9) << value;
+            return ss.str();
+        };
+        out << "seq.enabled=" << sequencer.enabled << "\nseq.channel="
+            << static_cast<unsigned>(sequencer.channel)
+            << "\nseq.scale=" << static_cast<unsigned>(sequencer.scale)
+            << "\nseq.root=" << static_cast<unsigned>(sequencer.rootNote)
+            << "\nseq.octaves=" << static_cast<unsigned>(sequencer.octaveRange)
+            << "\nseq.seed=" << sequencer.randomSeed << '\n';
+        for (std::size_t li = 0; li < kSequencerLaneCount; ++li) {
+            const auto& lane = sequencer.lanes[li];
+            const std::string prefix = "seq.lane" + std::to_string(li) + ".";
+            out << prefix << "steps=" << static_cast<unsigned>(lane.stepCount) << '\n'
+                << prefix << "direction=" << static_cast<unsigned>(lane.direction) << '\n'
+                << prefix << "mutation=" << precise(lane.mutationAmount) << '\n'
+                << prefix << "cycles=" << static_cast<unsigned>(lane.patternCycles) << '\n';
+            const SequencerLane which = static_cast<SequencerLane>(li);
+            for (std::size_t si = 0; si < lane.steps.size(); ++si) {
+                const SequencerStep& step = lane.steps[si];
+                if (step == default_sequencer_step(which)) continue;
+                const std::string sprefix = prefix + "step" + std::to_string(si) + ".";
+                out << sprefix << "value=" << precise(step.value) << '\n'
+                    << sprefix << "probability=" << precise(step.probability) << '\n'
+                    << sprefix << "ratchets=" << static_cast<unsigned>(step.ratchets) << '\n'
+                    << sprefix << "microtiming=" << precise(step.microtiming) << '\n'
+                    << sprefix << "glide=" << step.glide << '\n'
+                    << sprefix << "accent=" << precise(step.accent) << '\n'
+                    << sprefix << "skip=" << step.skip << '\n'
+                    << sprefix << "condition=" << static_cast<unsigned>(step.condition) << '\n'
+                    << sprefix << "conditionN=" << static_cast<unsigned>(step.conditionN) << '\n';
+            }
+        }
+        out << "gen.mutationIntensity=" << precise(genetics.mutationIntensity)
+            << "\ngen.mutationSeed=" << genetics.mutationSeed
+            << "\ngen.lockedGroups=" << static_cast<unsigned>(genetics.lockedGroups) << '\n'
+            << "attr.enabled=" << attractor.enabled
+            << "\nattr.bpm=" << std::setprecision(9) << attractor.config.bpm << '\n'
+            << "attr.barsHome=" << attractor.config.barsHome
+            << "\nattr.barsRise=" << attractor.config.barsRise
+            << "\nattr.barsTension=" << attractor.config.barsTension
+            << "\nattr.barsPeak=" << attractor.config.barsPeak
+            << "\nattr.barsFall=" << attractor.config.barsFall
+            << "\nattr.seed=" << attractor.config.seed << '\n';
+    }
     return out.str();
 }
 
@@ -4369,6 +6447,8 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "master.pan") parsed = readFloat(result.masterPan);
         else if (key == "master.bend") parsed = readFloat(result.pitchBendRangeSemitones);
         else if (key == "master.midiThru") parsed = readBool(result.midiThru);
+        else if (key == "master.morphEnabled") parsed = readBool(result.morphEnabled);
+        else if (key == "master.morphAmount") parsed = readFloat(result.morphAmount);
         else if (key == "tuning.reference") parsed = readFloat(result.tuning.referenceHertz);
         else if (key == "tuning.transpose") parsed = readFloat(result.tuning.transposeSemitones);
         else if (key == "tuning.fineCents") parsed = readFloat(result.tuning.fineCents);
@@ -4425,10 +6505,27 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "filter.env.curve") parsed = readCurve(result.filter.envelope.curve);
         else if (key == "filter.env.delay") parsed = readFloat(result.filter.envelope.delaySeconds);
         else if (key == "filter.env.hold") parsed = readFloat(result.filter.envelope.holdSeconds);
-        else if (key == "filter.oversampling") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && (v==1U||v==2U||v==4U); if(parsed) result.filter.oversampling=static_cast<FilterOversampling>(v); }
+        else if (key == "filter.oversampling") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && (v==0U||v==1U||v==2U||v==4U); if(parsed) result.filter.oversampling=static_cast<FilterOversampling>(v); }
         else if (key == "filter.ms20HighPass") parsed = readFloat(result.filter.ms20HighPassCutoffHertz);
         else if (key == "filter.selfOscillation") parsed = readFloat(result.filter.selfOscillation);
-        else if (key == "chord.enabled") parsed = readBool(result.chord.enabled);
+        else if (key == "filter.comb.damping") parsed = readFloat(result.filter.comb.damping);
+        else if (key == "filter.comb.mix") parsed = readFloat(result.filter.comb.mix);
+        else if (key == "filter.comb.feedbackScale") parsed = readFloat(result.filter.comb.feedbackScale);
+        else if (key == "filter.formant.dryMix") parsed = readFloat(result.filter.formant.dryMix);
+        else if (key == "filter.formant.freq0") parsed = readFloat(result.filter.formant.frequencyHertz[0]);
+        else if (key == "filter.formant.freq1") parsed = readFloat(result.filter.formant.frequencyHertz[1]);
+        else if (key == "filter.formant.freq2") parsed = readFloat(result.filter.formant.frequencyHertz[2]);
+        else if (key == "filter.formant.freq3") parsed = readFloat(result.filter.formant.frequencyHertz[3]);
+        else if (key == "filter.formant.gain0") parsed = readFloat(result.filter.formant.gains[0]);
+        else if (key == "filter.formant.gain1") parsed = readFloat(result.filter.formant.gains[1]);
+        else if (key == "filter.formant.gain2") parsed = readFloat(result.filter.formant.gains[2]);
+        else if (key == "filter.formant.gain3") parsed = readFloat(result.filter.formant.gains[3]);
+        else recognized = false;
+
+        // Split the large key dispatch so MSVC does not exceed its nested-block limit.
+        if (!recognized) {
+        recognized = true;
+        if (key == "chord.enabled") parsed = readBool(result.chord.enabled);
         else if (key == "chord.type") { const auto type = parse_chord_type(value); parsed = type.has_value(); if (type) result.chord.type = *type; }
         else if (key == "chord.noteCount") parsed = readUInt(result.chord.noteCount, static_cast<unsigned>(kChordIntervalCount));
         else if (key == "chord.inversion") parsed = readInt8(result.chord.inversion, -7, 7);
@@ -4453,6 +6550,12 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "arp.seed") parsed = parse_number<std::uint32_t>(value, result.arpeggiator.randomSeed);
         else if (key == "arp.clock") { const auto clock = parse_arp_clock(value); parsed = clock.has_value(); if (clock) result.arpeggiator.clockSource = *clock; }
         else if (key == "arp.externalTempo") parsed = readFloat(result.arpeggiator.externalTempoBpm);
+        else if (key == "arp.humanizeTiming") parsed = readFloat(result.arpeggiator.humanizeTiming);
+        else if (key == "arp.humanizeVelocity") parsed = readFloat(result.arpeggiator.humanizeVelocity);
+        else if (key == "arp.phraseVelStart") parsed = readFloat(result.arpeggiator.phraseVelocityStart);
+        else if (key == "arp.phraseVelEnd") parsed = readFloat(result.arpeggiator.phraseVelocityEnd);
+        else if (key == "arp.scale") { const auto scale = parse_chord_scale(value); parsed = scale.has_value(); if (scale) result.arpeggiator.scale = *scale; }
+        else if (key == "arp.scaleRoot") parsed = readUInt(result.arpeggiator.scaleRoot, 127U);
         else if (key == "wavetable.name") result.wavetable.name = value;
         else if (key == "wavetable.enabled") parsed = readBool(result.wavetable.enabled);
         else if (key == "wavetable.frameCount") parsed = readUInt(result.wavetable.frameCount, static_cast<unsigned>(kWavetableFrameCount));
@@ -4479,7 +6582,18 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             }
             parsed = parsed && index == result.sampleBank.frameCount;
         }
+        else if (key == "sampler.enabled") parsed = readBool(result.sampler.enabled);
+        else if (key == "sampler.sampleIndex") parsed = readUInt(result.sampler.sampleIndex, 0U);
+        else if (key == "sampler.mode") { const auto mode = parse_sampler_playback_mode(value); parsed = mode.has_value(); if (mode) result.sampler.playbackMode = *mode; }
+        else if (key == "sampler.direction") { const auto direction = parse_sampler_direction(value); parsed = direction.has_value(); if (direction) result.sampler.direction = *direction; }
+        else if (key == "sampler.loopStart") parsed = readFloat(result.sampler.loopStartSeconds);
+        else if (key == "sampler.loopEnd") parsed = readFloat(result.sampler.loopEndSeconds);
+        else if (key == "sampler.loopCrossfade") parsed = readFloat(result.sampler.loopCrossfadeSeconds);
+        else if (key == "sampler.pitchTracking") parsed = readBool(result.sampler.pitchTracking);
+        else if (key == "sampler.startOffset") parsed = readFloat(result.sampler.startOffsetSeconds);
+        else if (key == "sampler.gain") parsed = readFloat(result.sampler.gain);
         else recognized = false;
+        }
 
         if (!recognized && key.starts_with("micro.offset")) {
             std::size_t index = 0;
@@ -4543,6 +6657,7 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (field == "subLevel") parsed = readFloat(osc.subOscillatorLevel);
             else if (field == "subOctaves") parsed = readUInt(osc.subOscillatorOctaves, 3U);
             else if (field == "wavetablePosition") parsed = readFloat(osc.wavetablePosition);
+            else if (field == "stereoDivergence") parsed = readFloat(osc.stereoDivergence);
             else if (field == "sampleStart") parsed = readFloat(osc.sampleStart);
             else if (field == "sampleEnd") parsed = readFloat(osc.sampleEnd);
             else if (field == "sampleLoopStart") parsed = readFloat(osc.sampleLoopStart);
@@ -4593,6 +6708,58 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (field == "physicalBoreTaper") parsed = readFloat(osc.physicalBoreTaper);
             else if (field == "physicalPressureToBreath") parsed = readFloat(osc.physicalPressureToBreath);
             else if (field == "physicalVelocityToEmbouchure") parsed = readFloat(osc.physicalVelocityToEmbouchure);
+            else if (field == "modalExcitation") { const auto v = parse_modal_excitation(value); parsed = v.has_value(); if (v) osc.modalResonator.excitation = *v; }
+            else if (field == "modalModeCount") { unsigned v = 0; parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 32U; if (parsed) osc.modalResonator.modeCount = static_cast<std::uint8_t>(v); }
+            else if (field == "modalBaseFrequency") parsed = readFloat(osc.modalResonator.baseFrequency);
+            else if (field == "modalDamping") parsed = readFloat(osc.modalResonator.damping);
+            else if (field == "modalInharmonicity") parsed = readFloat(osc.modalResonator.inharmonicity);
+            else if (field == "modalBrightness") parsed = readFloat(osc.modalResonator.brightness);
+            else if (field == "modalExcitationLevel") parsed = readFloat(osc.modalResonator.excitationLevel);
+            else if (field == "modalNoiseBurstMs") parsed = readFloat(osc.modalResonator.noiseBurstMilliseconds);
+            else if (field == "modalTransientMs") parsed = readFloat(osc.modalResonator.transientMilliseconds);
+            else if (field.starts_with("modalMode")) {
+                // "modalModeCount" is matched above; this branch handles "modalMode<m>=ratio,decay,gain".
+                std::size_t m = 0;
+                recognized = parse_number<std::size_t>(field.substr(9U), m) && m < kModalResonatorMaxModes;
+                if (recognized) {
+                    const std::size_t c1 = value.find(',');
+                    const std::size_t c2 = c1 == std::string_view::npos ? c1 : value.find(',', c1 + 1U);
+                    float ratio = 0.0F; float decay = 0.0F; float gain = 0.0F;
+                    parsed = c1 != std::string_view::npos && c2 != std::string_view::npos &&
+                             c2 + 1U < value.size() &&
+                             parse_number<float>(value.substr(0, c1), ratio) &&
+                             parse_number<float>(value.substr(c1 + 1U, c2 - c1 - 1U), decay) &&
+                             parse_number<float>(value.substr(c2 + 1U), gain);
+                    if (parsed) osc.modalResonator.modes[m] = ModalResonatorMode{ratio, decay, gain};
+                }
+            }
+            else recognized = false;
+        }
+        if (!recognized && key.starts_with("granular.")) {
+            // Phase 4: granular generator keys (mirrors binary IDs 0x0800-0x0811).
+            // Old files without these keys keep the make_default() values that
+            // parse() starts from.
+            const std::string_view field = std::string_view(key).substr(9U);
+            auto& g = result.granular;
+            recognized = true;
+            if (field == "enabled") parsed = readBool(g.enabled);
+            else if (field == "densityHz") parsed = readFloat(g.densityHz);
+            else if (field == "durationMs") parsed = readFloat(g.durationMs);
+            else if (field == "pitchSemitones") parsed = readFloat(g.pitchSemitones);
+            else if (field == "position") parsed = readFloat(g.position01);
+            else if (field == "positionJitter") parsed = readFloat(g.positionJitter01);
+            else if (field == "panScatter") parsed = readFloat(g.panScatter01);
+            else if (field == "gain") parsed = readFloat(g.gain);
+            else if (field == "reverseProbability") parsed = readFloat(g.reverseProbability01);
+            else if (field == "envelopeShape") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && v<=3U; if(parsed) g.envelopeShape=static_cast<GranularEnvelopeShape>(v); }
+            else if (field == "cloud") parsed = readFloat(g.cloud01);
+            else if (field == "scatter") parsed = readFloat(g.scatter01);
+            else if (field == "dust") parsed = readFloat(g.dust01);
+            else if (field == "freeze") parsed = readFloat(g.freeze01);
+            else if (field == "freezePosition") parsed = readFloat(g.freezePosition01);
+            else if (field == "smear") parsed = readFloat(g.smear01);
+            else if (field == "width") parsed = readFloat(g.width01);
+            else if (field == "quality") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && v<=3U; if(parsed) g.granularQuality=static_cast<FilterQuality>(v); }
             else recognized = false;
         }
         if (!recognized && key.starts_with("arp.step")) {
@@ -4604,7 +6771,9 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             const std::string_view field = std::string_view(key).substr(dot + 1U);
             recognized = true;
             if (field == "enabled") parsed = readBool(step.enabled);
-            else if (field == "condition") { unsigned v = 0; parsed = parse_number<unsigned>(value, v) && v <= 5U; if (parsed) step.condition = static_cast<ArpeggiatorCondition>(v); }
+            else if (field == "condition") { unsigned v = 0; parsed = parse_number<unsigned>(value, v) && v <= 6U; if (parsed) step.condition = static_cast<ArpeggiatorCondition>(v); }
+            else if (field == "conditionA") { unsigned v = 1; parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 8U; if (parsed) step.conditionA = static_cast<std::uint8_t>(v); }
+            else if (field == "conditionB") { unsigned v = 2; parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 8U; if (parsed) step.conditionB = static_cast<std::uint8_t>(v); }
             else if (field == "automation") { unsigned v = 0; parsed = parse_number<unsigned>(value, v) && v <= 2U; if (parsed) step.automationCurve = static_cast<StepAutomationCurve>(v); }
             else if (field == "accent") parsed = readBool(step.accent);
             else if (field == "slide") parsed = readBool(step.slide);
@@ -4652,6 +6821,7 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (field == "source") { const auto source = parse_modulation_source(value); parsed = source.has_value(); if (source) slot.source = *source; }
             else if (field == "destination") { const auto destination = parse_modulation_destination(value); parsed = destination.has_value(); if (destination) slot.destination = *destination; }
             else if (field == "amount") parsed = readFloat(slot.amount);
+            else if (field == "bias") parsed = readFloat(slot.bias);
             else if (field == "curve") { const auto curve = parse_modulation_curve(value); parsed = curve.has_value(); if (curve) slot.curve = *curve; }
             else if (field == "polarity") { unsigned v=0; parsed=parse_number<unsigned>(value,v) && v<=1U; if(parsed) slot.polarity=static_cast<ModulationPolarity>(v); }
             else if (field == "smoothingMs") parsed = readFloat(slot.smoothingMilliseconds);
@@ -4707,6 +6877,15 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             if (key == "distortion.enabled") parsed = readBool(result.distortion.enabled);
             else if (key == "distortion.drive") parsed = readFloat(result.distortion.drive);
             else if (key == "distortion.mix") parsed = readFloat(result.distortion.mix);
+            else if (key == "distortion.mode") parsed = readUInt(result.distortion.mode, 3U);
+            else if (key == "bitcrusher.enabled") parsed = readBool(result.bitcrusher.enabled);
+            else if (key == "bitcrusher.bits") parsed = readUInt(result.bitcrusher.bits, 16U);
+            else if (key == "bitcrusher.downsample") parsed = readUInt(result.bitcrusher.downsample, 64U);
+            else if (key == "bitcrusher.mix") parsed = readFloat(result.bitcrusher.mix);
+            else if (key == "harmonizer.enabled") parsed = readBool(result.harmonizer.enabled);
+            else if (key == "harmonizer.subLevel") parsed = readFloat(result.harmonizer.subLevel);
+            else if (key == "harmonizer.upLevel") parsed = readFloat(result.harmonizer.upLevel);
+            else if (key == "harmonizer.mix") parsed = readFloat(result.harmonizer.mix);
             else if (key == "eq.enabled") parsed = readBool(result.eq.enabled);
             else if (key == "eq.lowDb") parsed = readFloat(result.eq.lowGainDb);
             else if (key == "eq.midDb") parsed = readFloat(result.eq.midGainDb);
@@ -4715,6 +6894,14 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (key == "chorus.rate") parsed = readFloat(result.chorus.rateHertz);
             else if (key == "chorus.depthMs") parsed = readFloat(result.chorus.depthMilliseconds);
             else if (key == "chorus.mix") parsed = readFloat(result.chorus.mix);
+            else if (key == "flanger.enabled") parsed = readBool(result.flanger.enabled);
+            else if (key == "flanger.rate") parsed = readFloat(result.flanger.rateHertz);
+            else if (key == "flanger.depthMs") parsed = readFloat(result.flanger.depthMilliseconds);
+            else if (key == "flanger.feedback") parsed = readFloat(result.flanger.feedback);
+            else if (key == "flanger.mix") parsed = readFloat(result.flanger.mix);
+            else if (key == "ensemble.enabled") parsed = readBool(result.ensemble.enabled);
+            else if (key == "ensemble.mode") parsed = readUInt(result.ensemble.mode, 2U);
+            else if (key == "ensemble.mix") parsed = readFloat(result.ensemble.mix);
             else if (key == "phaser.enabled") parsed = readBool(result.phaser.enabled);
             else if (key == "phaser.rate") parsed = readFloat(result.phaser.rateHertz);
             else if (key == "phaser.depth") parsed = readFloat(result.phaser.depth);
@@ -4725,6 +6912,13 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (key == "delay.feedback") parsed = readFloat(result.delay.feedback);
             else if (key == "delay.mix") parsed = readFloat(result.delay.mix);
             else if (key == "delay.pingPong") parsed = readBool(result.delay.pingPong);
+            else if (key == "delay.tempoSync") parsed = readBool(result.delay.tempoSync);
+            else if (key == "delay.syncBeats") parsed = readFloat(result.delay.syncBeats);
+            else if (key == "diffusionDelay.enabled") parsed = readBool(result.diffusionDelay.enabled);
+            else if (key == "diffusionDelay.time") parsed = readFloat(result.diffusionDelay.timeSeconds);
+            else if (key == "diffusionDelay.feedback") parsed = readFloat(result.diffusionDelay.feedback);
+            else if (key == "diffusionDelay.mix") parsed = readFloat(result.diffusionDelay.mix);
+            else if (key == "diffusionDelay.diffusion") parsed = readFloat(result.diffusionDelay.diffusion);
             else if (key == "reverb.enabled") parsed = readBool(result.reverb.enabled);
             else if (key == "reverb.room") parsed = readFloat(result.reverb.roomSize);
             else if (key == "reverb.damping") parsed = readFloat(result.reverb.damping);
@@ -4739,6 +6933,110 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
             else if (key == "limiter.enabled") parsed = readBool(result.limiter.enabled);
             else if (key == "limiter.ceilingDb") parsed = readFloat(result.limiter.ceilingDb);
             else if (key == "limiter.releaseMs") parsed = readFloat(result.limiter.releaseMilliseconds);
+            else recognized = false;
+        }
+        // Phase 3: generative sequencer / genetics / attractor state. All
+        // keys are optional: old preset strings simply keep make_default()
+        // values for anything absent.
+        if (!recognized && key.starts_with("seq.")) {
+            recognized = true;
+            const std::string_view rest = std::string_view(key).substr(4U);
+            if (rest == "enabled") parsed = readBool(result.sequencer.enabled);
+            else if (rest == "channel") parsed = readUInt(result.sequencer.channel, 15U);
+            else if (rest == "scale") {
+                unsigned v = 0U;
+                parsed = parse_number<unsigned>(value, v) && v <= 5U;
+                if (parsed) result.sequencer.scale = static_cast<SequencerScale>(v);
+            }
+            else if (rest == "root") parsed = readUInt(result.sequencer.rootNote, 127U);
+            else if (rest == "octaves") parsed = readUInt(result.sequencer.octaveRange, 8U);
+            else if (rest == "seed") parsed = parse_number<std::uint32_t>(value, result.sequencer.randomSeed);
+            else if (rest.starts_with("lane")) {
+                const std::string_view afterLane = rest.substr(4U);
+                const auto dot = afterLane.find('.');
+                std::size_t li = 0U;
+                if (dot == std::string_view::npos ||
+                    !parse_number<std::size_t>(afterLane.substr(0, dot), li) ||
+                    li >= kSequencerLaneCount) {
+                    parsed = false;
+                } else {
+                    auto& lane = result.sequencer.lanes[li];
+                    const std::string_view field = afterLane.substr(dot + 1U);
+                    if (field == "steps") {
+                        unsigned v = 0U;
+                        parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 64U;
+                        if (parsed) lane.stepCount = static_cast<std::uint8_t>(v);
+                    }
+                    else if (field == "direction") {
+                        unsigned v = 0U;
+                        parsed = parse_number<unsigned>(value, v) && v <= 3U;
+                        if (parsed) lane.direction = static_cast<SequencerDirection>(v);
+                    }
+                    else if (field == "mutation") parsed = readFloat(lane.mutationAmount);
+                    else if (field == "cycles") parsed = readUInt(lane.patternCycles, 255U);
+                    else if (field.starts_with("step")) {
+                        const std::string_view afterStep = field.substr(4U);
+                        const auto dot2 = afterStep.find('.');
+                        std::size_t si = 0U;
+                        if (dot2 == std::string_view::npos ||
+                            !parse_number<std::size_t>(afterStep.substr(0, dot2), si) ||
+                            si >= kSequencerMaxSteps) {
+                            parsed = false;
+                        } else {
+                            auto& step = lane.steps[si];
+                            const std::string_view sub = afterStep.substr(dot2 + 1U);
+                            if (sub == "value") parsed = readFloat(step.value);
+                            else if (sub == "probability") parsed = readFloat(step.probability);
+                            else if (sub == "ratchets") {
+                                unsigned v = 0U;
+                                parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 8U;
+                                if (parsed) step.ratchets = static_cast<std::uint8_t>(v);
+                            }
+                            else if (sub == "microtiming") parsed = readFloat(step.microtiming);
+                            else if (sub == "glide") parsed = readBool(step.glide);
+                            else if (sub == "accent") parsed = readFloat(step.accent);
+                            else if (sub == "skip") parsed = readBool(step.skip);
+                            else if (sub == "condition") {
+                                unsigned v = 0U;
+                                parsed = parse_number<unsigned>(value, v) && v <= 3U;
+                                if (parsed)
+                                    step.condition = static_cast<SequencerStepCondition>(v);
+                            }
+                            else if (sub == "conditionN") {
+                                unsigned v = 0U;
+                                parsed = parse_number<unsigned>(value, v) && v >= 1U && v <= 64U;
+                                if (parsed) step.conditionN = static_cast<std::uint8_t>(v);
+                            }
+                            else recognized = false;
+                        }
+                    }
+                    else recognized = false;
+                }
+            }
+            else recognized = false;
+        }
+        if (!recognized && key.starts_with("gen.")) {
+            recognized = true;
+            const std::string_view rest = std::string_view(key).substr(4U);
+            if (rest == "mutationIntensity") parsed = readFloat(result.genetics.mutationIntensity);
+            else if (rest == "mutationSeed")
+                parsed = parse_number<std::uint64_t>(value, result.genetics.mutationSeed);
+            else if (rest == "lockedGroups") parsed = readUInt(result.genetics.lockedGroups, 255U);
+            else recognized = false;
+        }
+        if (!recognized && key.starts_with("attr.")) {
+            recognized = true;
+            const std::string_view rest = std::string_view(key).substr(5U);
+            auto readDouble = [&](double& target) { return parse_number<double>(value, target); };
+            if (rest == "enabled") parsed = readBool(result.attractor.enabled);
+            else if (rest == "bpm") parsed = readDouble(result.attractor.config.bpm);
+            else if (rest == "barsHome") parsed = readDouble(result.attractor.config.barsHome);
+            else if (rest == "barsRise") parsed = readDouble(result.attractor.config.barsRise);
+            else if (rest == "barsTension") parsed = readDouble(result.attractor.config.barsTension);
+            else if (rest == "barsPeak") parsed = readDouble(result.attractor.config.barsPeak);
+            else if (rest == "barsFall") parsed = readDouble(result.attractor.config.barsFall);
+            else if (rest == "seed")
+                parsed = parse_number<std::uint64_t>(value, result.attractor.config.seed);
             else recognized = false;
         }
         if (recognized && !parsed) return fail("invalid value for " + key);
@@ -4877,11 +7175,21 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
         r.phaseOffset=lerp(x.phaseOffset,y.phaseOffset); r.frequencyModAmount=lerp(x.frequencyModAmount,y.frequencyModAmount);
         r.ringModDepth=lerp(x.ringModDepth,y.ringModDepth); r.subOscillatorLevel=lerp(x.subOscillatorLevel,y.subOscillatorLevel);
         r.wavetablePosition=lerp(x.wavetablePosition,y.wavetablePosition);
+        r.stereoDivergence=lerp(x.stereoDivergence,y.stereoDivergence);
     }
     auto morphEnvelope = [&](AdsrParameters& r, const AdsrParameters& x, const AdsrParameters& y) {
-        r.attackSeconds=lerp(x.attackSeconds,y.attackSeconds); r.decaySeconds=lerp(x.decaySeconds,y.decaySeconds);
-        r.sustainLevel=lerp(x.sustainLevel,y.sustainLevel); r.releaseSeconds=lerp(x.releaseSeconds,y.releaseSeconds);
-        r.delaySeconds=lerp(x.delaySeconds,y.delaySeconds); r.holdSeconds=lerp(x.holdSeconds,y.holdSeconds);
+        // Phase 1: time parameters morph in log domain (perceptually uniform).
+        auto logLerp = [t](float a, float b) {
+            const float la = std::log(std::max(0.001F, a));
+            const float lb = std::log(std::max(0.001F, b));
+            return std::exp(la + (lb - la) * t);
+        };
+        r.attackSeconds=logLerp(x.attackSeconds,y.attackSeconds);
+        r.decaySeconds=logLerp(x.decaySeconds,y.decaySeconds);
+        r.sustainLevel=lerp(x.sustainLevel,y.sustainLevel);
+        r.releaseSeconds=logLerp(x.releaseSeconds,y.releaseSeconds);
+        r.delaySeconds=logLerp(x.delaySeconds,y.delaySeconds);
+        r.holdSeconds=logLerp(x.holdSeconds,y.holdSeconds);
     };
     morphEnvelope(result.ampEnvelope,a.ampEnvelope,b.ampEnvelope);
     morphEnvelope(result.filter.envelope,a.filter.envelope,b.filter.envelope);
@@ -4891,9 +7199,27 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
     result.filter.bassCompensation=lerp(a.filter.bassCompensation,b.filter.bassCompensation); result.filter.morph=lerp(a.filter.morph,b.filter.morph);
     result.filter.ms20HighPassCutoffHertz=lerp(a.filter.ms20HighPassCutoffHertz,b.filter.ms20HighPassCutoffHertz);
     result.filter.selfOscillation=lerp(a.filter.selfOscillation,b.filter.selfOscillation);
+    // Phase 2: morph the new comb/formant parameters too.
+    result.filter.comb.damping=lerp(a.filter.comb.damping,b.filter.comb.damping);
+    result.filter.comb.mix=lerp(a.filter.comb.mix,b.filter.comb.mix);
+    result.filter.comb.feedbackScale=lerp(a.filter.comb.feedbackScale,b.filter.comb.feedbackScale);
+    result.filter.formant.dryMix=lerp(a.filter.formant.dryMix,b.filter.formant.dryMix);
+    for (std::size_t i=0;i<FormantParameters::kBandCount;++i) {
+        result.filter.formant.frequencyHertz[i]=lerp(a.filter.formant.frequencyHertz[i],b.filter.formant.frequencyHertz[i]);
+        result.filter.formant.gains[i]=lerp(a.filter.formant.gains[i],b.filter.formant.gains[i]);
+    }
     result.tuning.referenceHertz=lerp(a.tuning.referenceHertz,b.tuning.referenceHertz); result.tuning.transposeSemitones=lerp(a.tuning.transposeSemitones,b.tuning.transposeSemitones);
     result.tuning.fineCents=lerp(a.tuning.fineCents,b.tuning.fineCents); result.tuning.analogDriftCents=lerp(a.tuning.analogDriftCents,b.tuning.analogDriftCents);
-    for (std::size_t i=0;i<kSynthLfoCount;++i) { result.lfos[i].rateHertz=lerp(a.lfos[i].rateHertz,b.lfos[i].rateHertz); result.lfos[i].depth=lerp(a.lfos[i].depth,b.lfos[i].depth); result.lfos[i].phase=lerp(a.lfos[i].phase,b.lfos[i].phase); result.lfos[i].fadeInSeconds=lerp(a.lfos[i].fadeInSeconds,b.lfos[i].fadeInSeconds); result.lfos[i].beatsPerCycle=lerp(a.lfos[i].beatsPerCycle,b.lfos[i].beatsPerCycle); }
+    for (std::size_t i=0;i<kSynthLfoCount;++i) {
+        // Phase 1: LFO rate morphs in log domain.
+        const float rateA = std::max(0.01F, a.lfos[i].rateHertz);
+        const float rateB = std::max(0.01F, b.lfos[i].rateHertz);
+        result.lfos[i].rateHertz=std::exp(std::log(rateA) + (std::log(rateB) - std::log(rateA)) * t);
+        result.lfos[i].depth=lerp(a.lfos[i].depth,b.lfos[i].depth);
+        result.lfos[i].phase=lerp(a.lfos[i].phase,b.lfos[i].phase);
+        result.lfos[i].fadeInSeconds=lerp(a.lfos[i].fadeInSeconds,b.lfos[i].fadeInSeconds);
+        result.lfos[i].beatsPerCycle=lerp(a.lfos[i].beatsPerCycle,b.lfos[i].beatsPerCycle);
+    }
     for (std::size_t i=0;i<kSynthModulationSlotCount;++i) result.modulation[i].amount=lerp(a.modulation[i].amount,b.modulation[i].amount);
     for (std::size_t i=0;i<kSynthMacroCount;++i) result.macros.values[i]=lerp(a.macros.values[i],b.macros.values[i]);
     result.masterGain=lerp(a.masterGain,b.masterGain); result.masterPan=lerp(a.masterPan,b.masterPan); result.pitchBendRangeSemitones=lerp(a.pitchBendRangeSemitones,b.pitchBendRangeSemitones);
@@ -4901,12 +7227,146 @@ SynthPreset morph_synth_presets(const SynthPreset& a, const SynthPreset& b, floa
     result.eq.lowGainDb=lerp(a.eq.lowGainDb,b.eq.lowGainDb); result.eq.midGainDb=lerp(a.eq.midGainDb,b.eq.midGainDb); result.eq.highGainDb=lerp(a.eq.highGainDb,b.eq.highGainDb);
     result.chorus.rateHertz=lerp(a.chorus.rateHertz,b.chorus.rateHertz); result.chorus.depthMilliseconds=lerp(a.chorus.depthMilliseconds,b.chorus.depthMilliseconds); result.chorus.mix=lerp(a.chorus.mix,b.chorus.mix);
     result.phaser.rateHertz=lerp(a.phaser.rateHertz,b.phaser.rateHertz); result.phaser.depth=lerp(a.phaser.depth,b.phaser.depth); result.phaser.feedback=lerp(a.phaser.feedback,b.phaser.feedback); result.phaser.mix=lerp(a.phaser.mix,b.phaser.mix);
-    result.delay.timeSeconds=lerp(a.delay.timeSeconds,b.delay.timeSeconds); result.delay.feedback=lerp(a.delay.feedback,b.delay.feedback); result.delay.mix=lerp(a.delay.mix,b.delay.mix);
+    result.delay.timeSeconds=std::exp(std::log(std::max(0.001F,a.delay.timeSeconds)) +
+        (std::log(std::max(0.001F,b.delay.timeSeconds)) - std::log(std::max(0.001F,a.delay.timeSeconds))) * t);
+    result.delay.feedback=lerp(a.delay.feedback,b.delay.feedback); result.delay.mix=lerp(a.delay.mix,b.delay.mix);
+    result.delay.syncBeats=lerp(a.delay.syncBeats,b.delay.syncBeats);
+    // Phase 2: diffusion delay morphs like the plain delay (log-domain time).
+    result.diffusionDelay.timeSeconds=std::exp(std::log(std::max(0.001F,a.diffusionDelay.timeSeconds)) +
+        (std::log(std::max(0.001F,b.diffusionDelay.timeSeconds)) - std::log(std::max(0.001F,a.diffusionDelay.timeSeconds))) * t);
+    result.diffusionDelay.feedback=lerp(a.diffusionDelay.feedback,b.diffusionDelay.feedback);
+    result.diffusionDelay.mix=lerp(a.diffusionDelay.mix,b.diffusionDelay.mix);
+    result.diffusionDelay.diffusion=lerp(a.diffusionDelay.diffusion,b.diffusionDelay.diffusion);
     result.reverb.roomSize=lerp(a.reverb.roomSize,b.reverb.roomSize); result.reverb.damping=lerp(a.reverb.damping,b.reverb.damping); result.reverb.width=lerp(a.reverb.width,b.reverb.width); result.reverb.mix=lerp(a.reverb.mix,b.reverb.mix);
     result.wavetable.enabled = a.wavetable.enabled || b.wavetable.enabled;
     result.wavetable.frameCount = std::max(a.wavetable.frameCount,b.wavetable.frameCount);
     for (std::size_t i=0;i<result.wavetable.samples.size();++i) result.wavetable.samples[i]=lerp(a.wavetable.samples[i],b.wavetable.samples[i]);
     result.wavetable.contentHash = 0U;
+    return result;
+}
+
+// Realtime-safe counterpart of morph_synth_presets(): interpolates two
+// numeric RealtimePresets without touching strings or allocating, so the
+// audio thread can apply the conductor's morph walk every block. Mirrors the
+// UI-thread morph's field selection exactly, with one deliberate deviation:
+// wavetable *content* snaps at t >= 0.5 instead of lerping, because lerped
+// content would force a full HQ wavetable re-cook on every morph block.
+// Wavetable *position* (the musically primary morph dimension) still
+// interpolates smoothly via oscillators[].wavetablePosition.
+RealtimePreset morph_realtime_presets(const RealtimePreset& a, const RealtimePreset& b,
+                                      float amount) noexcept {
+    const float t = clampf(amount, 0.0F, 1.0F);
+    const bool chooseB = t >= 0.5F;
+    auto lerp = [t](float x, float y) { return x + (y - x) * t; };
+    auto logLerp = [t](float x, float y) {
+        const float lx = std::log(std::max(0.001F, x));
+        const float ly = std::log(std::max(0.001F, y));
+        return std::exp(lx + (ly - lx) * t);
+    };
+    RealtimePreset result = chooseB ? b : a;
+    for (std::size_t i = 0; i < result.oscillators.size(); ++i) {
+        auto& r = result.oscillators[i]; const auto& x = a.oscillators[i]; const auto& y = b.oscillators[i];
+        r.gain=lerp(x.gain,y.gain); r.pan=lerp(x.pan,y.pan); r.semitones=lerp(x.semitones,y.semitones);
+        r.cents=lerp(x.cents,y.cents); r.pulseWidth=lerp(x.pulseWidth,y.pulseWidth); r.pwmDepth=lerp(x.pwmDepth,y.pwmDepth);
+        r.pwmRateHertz=lerp(x.pwmRateHertz,y.pwmRateHertz); r.shape=lerp(x.shape,y.shape);
+        r.phaseOffset=lerp(x.phaseOffset,y.phaseOffset); r.frequencyModAmount=lerp(x.frequencyModAmount,y.frequencyModAmount);
+        r.ringModDepth=lerp(x.ringModDepth,y.ringModDepth); r.subOscillatorLevel=lerp(x.subOscillatorLevel,y.subOscillatorLevel);
+        r.wavetablePosition=lerp(x.wavetablePosition,y.wavetablePosition);
+        r.stereoDivergence=lerp(x.stereoDivergence,y.stereoDivergence);
+    }
+    auto morphEnvelope = [&](AdsrParameters& r, const AdsrParameters& x, const AdsrParameters& y) {
+        r.attackSeconds=logLerp(x.attackSeconds,y.attackSeconds);
+        r.decaySeconds=logLerp(x.decaySeconds,y.decaySeconds);
+        r.sustainLevel=lerp(x.sustainLevel,y.sustainLevel);
+        r.releaseSeconds=logLerp(x.releaseSeconds,y.releaseSeconds);
+        r.delaySeconds=logLerp(x.delaySeconds,y.delaySeconds);
+        r.holdSeconds=logLerp(x.holdSeconds,y.holdSeconds);
+    };
+    morphEnvelope(result.ampEnvelope,a.ampEnvelope,b.ampEnvelope);
+    morphEnvelope(result.filter.envelope,a.filter.envelope,b.filter.envelope);
+    result.filter.cutoffHertz=logLerp(a.filter.cutoffHertz,b.filter.cutoffHertz);
+    result.filter.resonance=lerp(a.filter.resonance,b.filter.resonance);
+    result.filter.envelopeAmountOctaves=lerp(a.filter.envelopeAmountOctaves,b.filter.envelopeAmountOctaves);
+    result.filter.keyTrack=lerp(a.filter.keyTrack,b.filter.keyTrack);
+    result.filter.drive=lerp(a.filter.drive,b.filter.drive);
+    result.filter.bassCompensation=lerp(a.filter.bassCompensation,b.filter.bassCompensation);
+    result.filter.morph=lerp(a.filter.morph,b.filter.morph);
+    result.filter.ms20HighPassCutoffHertz=lerp(a.filter.ms20HighPassCutoffHertz,b.filter.ms20HighPassCutoffHertz);
+    result.filter.selfOscillation=lerp(a.filter.selfOscillation,b.filter.selfOscillation);
+    result.filter.comb.damping=lerp(a.filter.comb.damping,b.filter.comb.damping);
+    result.filter.comb.mix=lerp(a.filter.comb.mix,b.filter.comb.mix);
+    result.filter.comb.feedbackScale=lerp(a.filter.comb.feedbackScale,b.filter.comb.feedbackScale);
+    result.filter.formant.dryMix=lerp(a.filter.formant.dryMix,b.filter.formant.dryMix);
+    for (std::size_t i=0;i<FormantParameters::kBandCount;++i) {
+        result.filter.formant.frequencyHertz[i]=lerp(a.filter.formant.frequencyHertz[i],b.filter.formant.frequencyHertz[i]);
+        result.filter.formant.gains[i]=lerp(a.filter.formant.gains[i],b.filter.formant.gains[i]);
+    }
+    result.tuning.referenceHertz=lerp(a.tuning.referenceHertz,b.tuning.referenceHertz);
+    result.tuning.transposeSemitones=lerp(a.tuning.transposeSemitones,b.tuning.transposeSemitones);
+    result.tuning.fineCents=lerp(a.tuning.fineCents,b.tuning.fineCents);
+    result.tuning.analogDriftCents=lerp(a.tuning.analogDriftCents,b.tuning.analogDriftCents);
+    for (std::size_t i=0;i<kSynthLfoCount;++i) {
+        const float rateA = std::max(0.01F, a.lfos[i].rateHertz);
+        const float rateB = std::max(0.01F, b.lfos[i].rateHertz);
+        result.lfos[i].rateHertz=std::exp(std::log(rateA) + (std::log(rateB) - std::log(rateA)) * t);
+        result.lfos[i].depth=lerp(a.lfos[i].depth,b.lfos[i].depth);
+        result.lfos[i].phase=lerp(a.lfos[i].phase,b.lfos[i].phase);
+        result.lfos[i].fadeInSeconds=lerp(a.lfos[i].fadeInSeconds,b.lfos[i].fadeInSeconds);
+        result.lfos[i].beatsPerCycle=lerp(a.lfos[i].beatsPerCycle,b.lfos[i].beatsPerCycle);
+    }
+    for (std::size_t i=0;i<kSynthModulationSlotCount;++i) result.modulation[i].amount=lerp(a.modulation[i].amount,b.modulation[i].amount);
+    for (std::size_t i=0;i<kSynthMacroCount;++i) result.macroValues[i]=lerp(a.macroValues[i],b.macroValues[i]);
+    result.masterGain=lerp(a.masterGain,b.masterGain);
+    result.masterPan=lerp(a.masterPan,b.masterPan);
+    result.pitchBendRangeSemitones=lerp(a.pitchBendRangeSemitones,b.pitchBendRangeSemitones);
+    result.distortion.drive=lerp(a.distortion.drive,b.distortion.drive);
+    result.distortion.mix=lerp(a.distortion.mix,b.distortion.mix);
+    result.eq.lowGainDb=lerp(a.eq.lowGainDb,b.eq.lowGainDb);
+    result.eq.midGainDb=lerp(a.eq.midGainDb,b.eq.midGainDb);
+    result.eq.highGainDb=lerp(a.eq.highGainDb,b.eq.highGainDb);
+    result.chorus.rateHertz=lerp(a.chorus.rateHertz,b.chorus.rateHertz);
+    result.chorus.depthMilliseconds=lerp(a.chorus.depthMilliseconds,b.chorus.depthMilliseconds);
+    result.chorus.mix=lerp(a.chorus.mix,b.chorus.mix);
+    result.phaser.rateHertz=lerp(a.phaser.rateHertz,b.phaser.rateHertz);
+    result.phaser.depth=lerp(a.phaser.depth,b.phaser.depth);
+    result.phaser.feedback=lerp(a.phaser.feedback,b.phaser.feedback);
+    result.phaser.mix=lerp(a.phaser.mix,b.phaser.mix);
+    result.delay.timeSeconds=logLerp(a.delay.timeSeconds,b.delay.timeSeconds);
+    result.delay.feedback=lerp(a.delay.feedback,b.delay.feedback);
+    result.delay.mix=lerp(a.delay.mix,b.delay.mix);
+    result.delay.syncBeats=lerp(a.delay.syncBeats,b.delay.syncBeats);
+    result.diffusionDelay.timeSeconds=logLerp(a.diffusionDelay.timeSeconds,b.diffusionDelay.timeSeconds);
+    result.diffusionDelay.feedback=lerp(a.diffusionDelay.feedback,b.diffusionDelay.feedback);
+    result.diffusionDelay.mix=lerp(a.diffusionDelay.mix,b.diffusionDelay.mix);
+    result.diffusionDelay.diffusion=lerp(a.diffusionDelay.diffusion,b.diffusionDelay.diffusion);
+    result.reverb.roomSize=lerp(a.reverb.roomSize,b.reverb.roomSize);
+    result.reverb.damping=lerp(a.reverb.damping,b.reverb.damping);
+    result.reverb.width=lerp(a.reverb.width,b.reverb.width);
+    result.reverb.mix=lerp(a.reverb.mix,b.reverb.mix);
+    // Wavetable content snaps at the midpoint (see note above); the enable
+    // flag ORs and the frame count takes the max, as in the UI morph.
+    result.wavetable.enabled = a.wavetable.enabled || b.wavetable.enabled;
+    result.wavetable.frameCount = std::max(a.wavetable.frameCount,b.wavetable.frameCount);
+    result.wavetable.samples = chooseB ? b.wavetable.samples : a.wavetable.samples;
+    // Re-derive the fields realtime_preset() computes from the morphed values.
+    for (std::size_t i = 0; i < result.oscillators.size(); ++i) {
+        const float pan = clampf(result.oscillators[i].pan, -1.0F, 1.0F);
+        result.oscillatorPanLeft[i] = std::sqrt(0.5F * (1.0F - pan));
+        result.oscillatorPanRight[i] = std::sqrt(0.5F * (1.0F + pan));
+    }
+    const float masterPan = clampf(result.masterPan, -1.0F, 1.0F);
+    result.masterPanLeft = std::sqrt(0.5F * (1.0F - masterPan));
+    result.masterPanRight = std::sqrt(0.5F * (1.0F + masterPan));
+    result.activeModulationCount = 0;
+    for (std::size_t slotIndex = 0; slotIndex < result.modulation.size(); ++slotIndex) {
+        const ModulationSlot& slot = result.modulation[slotIndex];
+        if (slot.enabled && slot.source != ModulationSource::Off &&
+            slot.destination != ModulationDestination::Off) {
+            result.activeModulation[result.activeModulationCount] = slot;
+            result.activeModulationIndices[result.activeModulationCount] = static_cast<std::uint8_t>(slotIndex);
+            ++result.activeModulationCount;
+        }
+    }
     return result;
 }
 
@@ -4993,20 +7453,150 @@ std::vector<std::size_t> SynthPresetLibrary::find_by_tag(std::string_view tag) c
 Synthesizer::Synthesizer(std::uint32_t sampleRate)
     : sampleRate_(std::clamp<std::uint32_t>(sampleRate, 8000U, 192000U)), preset_(SynthPreset::make_default()) {
     impl_ = new Impl(sampleRate_, currentFrame_);
-    impl_->adopt_preset(realtime_preset(preset_));
+    // Wavetables are cooked on the preset-setting thread; pre-size its scratch.
+    impl_->wavetableCookScratch_.resize(kHQWavetableFrames * kHQWavetableSamples);
+    impl_->wavetableCookSpectrum_.resize(2U * kHQWavetableSamples);
+    impl_->wavetableCookFiltered_.resize(kHQWavetableSamples);
+    impl_->wavetableCookFrame_.resize(kHQWavetableSamples);
+    PresetUpdate initial{};
+    initial.base = realtime_preset(preset_);
+    initial.sequencer = preset_.sequencer;
+    initial.sequencerChanged = true;
+    initial.attractor = preset_.attractor.config;
+    initial.attractorEnabled = preset_.attractor.enabled;
+    impl_->publish_wavetables(initial.base.wavetable, nullptr);
+    impl_->adopt_pending_wavetables();
+    impl_->adopt_preset(initial, 0.0F, false);
     impl_->limiterEnvelope = 1.0F;
 }
-Synthesizer::~Synthesizer() { delete impl_; }
+Synthesizer::~Synthesizer() {
+    impl_->release_wavetables();
+    delete impl_;
+}
+
+SynthPreset Synthesizer::preset() const {
+    std::lock_guard<std::mutex> lock(presetMutex_);
+    return preset_;
+}
+
+void Synthesizer::request_morph_amount(float amount) noexcept {
+    rtMorphAmount_.store(clampf(amount, 0.0F, 1.0F), std::memory_order_relaxed);
+}
+
+std::shared_ptr<const Synthesizer::PendingConductorConfig>
+Synthesizer::take_pending_conductor_config() noexcept {
+    return pendingConductorConfig_.exchange(nullptr, std::memory_order_acq_rel);
+}
 
 void Synthesizer::set_preset(const SynthPreset& preset) {
     std::string error;
     if (!preset.validate(&error)) return;
-    preset_ = preset;
-    const RealtimePreset realtime = realtime_preset(preset_);
-    while (!impl_->presetIn.push(realtime)) {
-        RealtimePreset discarded{};
-        if (!impl_->presetIn.pop(discarded)) break;
+    std::shared_ptr<PendingConductorConfig> pendingConductor;
+    {
+        std::lock_guard<std::mutex> lock(presetMutex_);
+        // Built straight into the mailbox's producer slot (serialized by
+        // presetMutex_); published below once the wavetables are ready.
+        PresetUpdate& update = impl_->presetIn.producer_slot();
+        update = PresetUpdate{};
+        // Phase 3: the preset owns the sequencer's authored config. The live
+        // sequencer used to be reconfigured here on the UI thread while the
+        // audio thread could be inside advance_sequencer(); the config is now
+        // carried in the update and applied on the render thread inside
+        // adopt_preset() (only when it actually changed, so reseeds are
+        // avoided for identical configs).
+        const bool sequencerChanged = !(preset.sequencer == preset_.sequencer);
+        preset_ = preset;
+        update.base = realtime_preset(preset_);
+        update.hasMorphB = hasMorphPresetB_;
+        if (hasMorphPresetB_) update.morphB = realtime_preset(morphPresetB_);
+        update.morphEnabled = preset_.morphEnabled;
+        update.morphAmount = preset_.morphAmount;
+        update.sequencer = preset_.sequencer;
+        update.sequencerChanged = sequencerChanged;
+        // Phase 3: the preset's attractor settings used to be installed here
+        // too (same race vs conductor.process()); now applied on the render
+        // thread. configure() still only resets the phase machine when the
+        // flag or config actually changed.
+        update.attractor = preset_.attractor.config;
+        update.attractorEnabled = preset_.attractor.enabled;
+        rtMorphEnabled_.store(preset_.morphEnabled, std::memory_order_relaxed);
+        rtMorphAmount_.store(clampf(preset_.morphAmount, 0.0F, 1.0F), std::memory_order_relaxed);
+        // Publish the attractor config for the conductor as well, so
+        // GenerativeConductor::process() uses the preset's config even when
+        // render() hasn't run yet to drain the PresetUpdate queue (e.g. a test
+        // driving the conductor directly). Lock-free single-producer handoff;
+        // the audio thread picks it up in process(). The queued update above
+        // still applies it on the render thread via adopt_preset().
+        pendingConductor = std::make_shared<PendingConductorConfig>();
+        pendingConductor->enabled = preset_.attractor.enabled;
+        pendingConductor->config = preset_.attractor.config;
+        // Cook changed wavetables here, on the calling (UI) thread, and publish
+        // them before the preset so render() never cooks. No-op when unchanged.
+        impl_->publish_wavetables(update.base.wavetable, update.hasMorphB ? &update.morphB.wavetable : nullptr);
+        if (impl_->presetIn.publish()) impl_->coalescedPresets.fetch_add(1, std::memory_order_relaxed);
     }
+    pendingConductorConfig_.store(std::move(pendingConductor), std::memory_order_release);
+}
+
+void Synthesizer::set_morph_preset_b(const SynthPreset& presetB) {
+    std::string error;
+    if (!presetB.validate(&error)) return;
+    SynthPreset current;
+    {
+        std::lock_guard<std::mutex> lock(presetMutex_);
+        morphPresetB_ = presetB;
+        hasMorphPresetB_ = true;
+        current = preset_;
+    }
+    // Re-publish the current preset so the render thread caches the new B
+    // endpoint. (Separate lock scope above: set_preset() takes the mutex.)
+    set_preset(current);
+}
+
+void Synthesizer::clear_morph_preset_b() {
+    SynthPreset current;
+    {
+        std::lock_guard<std::mutex> lock(presetMutex_);
+        hasMorphPresetB_ = false;
+        current = preset_;
+    }
+    set_preset(current);
+}
+
+bool Synthesizer::has_morph_preset_b() const {
+    std::lock_guard<std::mutex> lock(presetMutex_);
+    return hasMorphPresetB_;
+}
+
+void Synthesizer::set_morph_amount(float amount) {
+    SynthPreset current;
+    {
+        std::lock_guard<std::mutex> lock(presetMutex_);
+        preset_.morphAmount = clampf(amount, 0.0F, 1.0F);
+        rtMorphAmount_.store(preset_.morphAmount, std::memory_order_relaxed);
+        current = preset_;
+    }
+    set_preset(current);
+}
+
+// Phase 3: generative sequencer accessors.
+Sequencer& Synthesizer::sequencer() noexcept { return impl_->sequencer; }
+const Sequencer& Synthesizer::sequencer() const noexcept { return impl_->sequencer; }
+
+// Phase 3: generative conductor accessors.
+GenerativeConductor& Synthesizer::generative_conductor() noexcept { return impl_->conductor; }
+const GenerativeConductor& Synthesizer::generative_conductor() const noexcept {
+    return impl_->conductor;
+}
+void Synthesizer::set_generative_conductor_enabled(bool enabled) noexcept {
+    impl_->conductor.set_enabled(enabled);
+}
+bool Synthesizer::generative_conductor_enabled() const noexcept {
+    return impl_->conductor.enabled();
+}
+void Synthesizer::set_conductor_cutoff_multiplier(float multiplier) noexcept {
+    impl_->conductorCutoffMultiplier =
+        std::clamp(multiplier, 0.125F, 8.0F);  // +/-3 octaves, never zero/negative
 }
 
 bool Synthesizer::set_sample_map(const SynthSampleMap& sampleMap, std::string* error) {
@@ -5044,14 +7634,53 @@ SynthGranularProfiler Synthesizer::granular_profiler() const noexcept {
             impl_->sampleStreamCache.metrics()};
 }
 
+std::uint64_t Synthesizer::wavetable_cook_count() const noexcept {
+    return impl_->wavetableCookCount_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t Synthesizer::coalesced_preset_count() const noexcept {
+    return impl_->coalescedPresets.load(std::memory_order_relaxed);
+}
+
 void Synthesizer::reset_granular_profiler() noexcept {
     impl_->requestedGrains.store(0U, std::memory_order_relaxed);
     impl_->admittedGrains.store(0U, std::memory_order_relaxed);
     impl_->grainSteals.store(0U, std::memory_order_relaxed);
     impl_->grainMisses.store(0U, std::memory_order_relaxed);
     impl_->samplePageUnderruns.store(0U, std::memory_order_relaxed);
-    impl_->maximumActiveGrains.store(impl_->activeGrains, std::memory_order_relaxed);
+    impl_->maximumActiveGrains.store(impl_->activeGrainTelemetry.load(std::memory_order_relaxed),
+                                    std::memory_order_relaxed);
     impl_->sampleStreamCache.reset_metrics();
+}
+
+SynthProfiler Synthesizer::profiler() const noexcept {
+    return {impl_->profilerRenderCalls.load(std::memory_order_relaxed),
+            impl_->profilerSamplesRendered.load(std::memory_order_relaxed),
+            impl_->profilerVoicesStarted.load(std::memory_order_relaxed),
+            impl_->profilerVoicesStolen.load(std::memory_order_relaxed),
+            impl_->profilerVoicesRetired.load(std::memory_order_relaxed),
+            impl_->profilerOscillatorVoiceFrames.load(std::memory_order_relaxed),
+            impl_->profilerFilterFrames.load(std::memory_order_relaxed),
+            impl_->profilerFxFrames.load(std::memory_order_relaxed),
+            impl_->profilerArpSteps.load(std::memory_order_relaxed),
+            impl_->droppedMidi.load(std::memory_order_relaxed),
+            impl_->profilerActiveVoices.load(std::memory_order_relaxed),
+            impl_->profilerMaximumActiveVoices.load(std::memory_order_relaxed)};
+}
+
+void Synthesizer::reset_profiler() noexcept {
+    impl_->profilerRenderCalls.store(0U, std::memory_order_relaxed);
+    impl_->profilerSamplesRendered.store(0U, std::memory_order_relaxed);
+    impl_->profilerVoicesStarted.store(0U, std::memory_order_relaxed);
+    impl_->profilerVoicesStolen.store(0U, std::memory_order_relaxed);
+    impl_->profilerVoicesRetired.store(0U, std::memory_order_relaxed);
+    impl_->profilerOscillatorVoiceFrames.store(0U, std::memory_order_relaxed);
+    impl_->profilerFilterFrames.store(0U, std::memory_order_relaxed);
+    impl_->profilerFxFrames.store(0U, std::memory_order_relaxed);
+    impl_->profilerArpSteps.store(0U, std::memory_order_relaxed);
+    impl_->profilerActiveVoices.store(0U, std::memory_order_relaxed);
+    impl_->profilerMaximumActiveVoices.store(impl_->profilerActiveVoices.load(std::memory_order_relaxed),
+                                            std::memory_order_relaxed);
 }
 
 void Synthesizer::all_notes_off(bool immediate) noexcept {
@@ -5099,15 +7728,37 @@ void Synthesizer::render(std::span<float> interleavedStereo) noexcept {
 }
 void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     if (output == nullptr || frameCount == 0) return;
+    const DenormalGuard denormalGuard{};
     impl_->adopt_pending_sample_map();
-    RealtimePreset latest{};
-    while (impl_->presetIn.pop(latest)) impl_->adopt_preset(latest);
+    // Snapshot the audio-thread morph request (the conductor walk below also
+    // writes these atomics; the drain sees a consistent snapshot).
+    const bool morphRequested = rtMorphEnabled_.load(std::memory_order_relaxed);
+    const float morphRequestedAmount = rtMorphAmount_.load(std::memory_order_relaxed);
+    impl_->adopt_pending_wavetables();
+    if (const PresetUpdate* latest = impl_->presetIn.take())
+        impl_->adopt_preset(*latest, morphRequestedAmount, morphRequested);
+    impl_->advance_parameter_smoothing(frameCount);
+    impl_->track_tempo_synced_delay();
+    // Phase 3: step physics modulation bank.
+    impl_->physicsBank.step(static_cast<float>(frameCount) / impl_->sampleRate);
+    // Phase 3: generative conductor maps attractor state onto the live synth
+    // (no-op unless enabled). Runs before the sequencer so the sequencer
+    // advances with this block's mapped scale/density/mutation. The morph
+    // walk publishes through request_morph_amount() (lock-free); the result
+    // is applied to the cached numeric presets just below.
+    impl_->conductor.process(*this, static_cast<double>(frameCount) / impl_->sampleRate);
+    impl_->apply_morph_amount(rtMorphAmount_.load(std::memory_order_relaxed),
+                              rtMorphEnabled_.load(std::memory_order_relaxed));
+    // Phase 3: advance the generative sequencer once per block (no-op unless enabled).
+    impl_->advance_sequencer(frameCount);
     if (impl_->transportRestartRequested.exchange(false, std::memory_order_acq_rel)) {
         impl_->clear_arp_held(true);
         impl_->renderFrame = impl_->transportRestartFrame.load(std::memory_order_relaxed);
         impl_->arpStepCounter = 0U;
         impl_->arpProgress = 0U;
         impl_->activeArpStep.store(0U, std::memory_order_relaxed);
+        // Phase 3: restart the sequencer with the transport.
+        impl_->sequencer.start();
     }
 
     std::array<MidiMessage, 256> pending{};
@@ -5130,6 +7781,17 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     const std::uint64_t blockStart = currentFrame_.load(std::memory_order_relaxed);
     std::size_t eventIndex = 0;
     float peakLeft = 0.0F; float peakRight = 0.0F; double squareLeft = 0.0; double squareRight = 0.0;
+    // Profiler stage activity, accumulated locally and published once per render call to keep
+    // atomics out of the per-frame hot loop.
+    std::uint64_t blockOscillatorVoiceFrames = 0;
+    std::uint64_t blockFilterFrames = 0;
+    std::uint64_t blockFxFrames = 0;
+    const bool filterEnabled = impl_->parameters.filter.enabled;
+    const bool anyFxEnabled = impl_->parameters.distortion.enabled || impl_->parameters.bitcrusher.enabled ||
+        impl_->parameters.harmonizer.enabled || impl_->parameters.eq.enabled || impl_->parameters.chorus.enabled ||
+        impl_->parameters.flanger.enabled || impl_->parameters.ensemble.enabled || impl_->parameters.phaser.enabled ||
+        impl_->parameters.delay.enabled || impl_->parameters.diffusionDelay.enabled || impl_->parameters.reverb.enabled ||
+        impl_->parameters.compressor.enabled || impl_->parameters.limiter.enabled;
     for (std::size_t frame = 0; frame < frameCount; ++frame) {
         const std::uint64_t absoluteFrame = blockStart + frame;
         impl_->renderFrame = absoluteFrame;
@@ -5138,19 +7800,25 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
         impl_->process_scheduled_events();
         impl_->advance_arpeggiator();
         float left = 0.0F; float right = 0.0F;
+        std::uint32_t frameActiveVoices = 0;
         for (Voice& voice : impl_->voice) {
+            if (voice.active) ++frameActiveVoices;
             const auto [voiceLeft, voiceRight] = impl_->render_voice(voice);
             left += voiceLeft; right += voiceRight;
         }
+        blockOscillatorVoiceFrames += frameActiveVoices;
+        if (filterEnabled && frameActiveVoices > 0U) ++blockFilterFrames;
+        if (anyFxEnabled) ++blockFxFrames;
         const float channelVolume = impl_->controller[7] > 0.0F ? impl_->controller[7] : 1.0F;
         const float panController = impl_->controller[10];
+        const float smoothedMaster = impl_->smoothedMasterGain.current;
         if (panController <= 0.0F) {
-            left *= impl_->parameters.masterGain * channelVolume * impl_->parameters.masterPanLeft;
-            right *= impl_->parameters.masterGain * channelVolume * impl_->parameters.masterPanRight;
+            left *= smoothedMaster * channelVolume * impl_->parameters.masterPanLeft;
+            right *= smoothedMaster * channelVolume * impl_->parameters.masterPanRight;
         } else {
             const float masterPan = clampf(impl_->parameters.masterPan + panController * 2.0F - 1.0F, -1.0F, 1.0F);
-            left *= impl_->parameters.masterGain * channelVolume * std::sqrt(0.5F * (1.0F - masterPan));
-            right *= impl_->parameters.masterGain * channelVolume * std::sqrt(0.5F * (1.0F + masterPan));
+            left *= smoothedMaster * channelVolume * std::sqrt(0.5F * (1.0F - masterPan));
+            right *= smoothedMaster * channelVolume * std::sqrt(0.5F * (1.0F + masterPan));
         }
         impl_->effects(left, right);
         if (!finite(left)) left = 0.0F;
@@ -5159,6 +7827,18 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
         output[frame * 2U + 1U] = right;
         peakLeft = std::max(peakLeft, std::abs(left)); peakRight = std::max(peakRight, std::abs(right));
         squareLeft += static_cast<double>(left) * left; squareRight += static_cast<double>(right) * right;
+    }
+    // Phase 4: publish granular engine activity once per block (spawn/steal/
+    // miss counters are forwarded per spawn event in the voice path above).
+    std::uint32_t blockActiveGrains = 0U;
+    for (const Voice& blockVoice : impl_->voice)
+        for (const auto& engine : blockVoice.granularEngines)
+            blockActiveGrains += engine.active_grain_count();
+    impl_->activeGrainTelemetry.store(blockActiveGrains, std::memory_order_relaxed);
+    std::uint32_t observedGrainMax = impl_->maximumActiveGrains.load(std::memory_order_relaxed);
+    while (blockActiveGrains > observedGrainMax &&
+           !impl_->maximumActiveGrains.compare_exchange_weak(observedGrainMax, blockActiveGrains,
+                                                             std::memory_order_relaxed)) {
     }
     currentFrame_.store(blockStart + frameCount, std::memory_order_relaxed);
     // Preserve events beyond this render quantum by requeuing them. This is bounded and does
@@ -5171,6 +7851,11 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     impl_->rmsL.store(static_cast<float>(std::sqrt(squareLeft / static_cast<double>(frameCount))), std::memory_order_relaxed);
     impl_->rmsR.store(static_cast<float>(std::sqrt(squareRight / static_cast<double>(frameCount))), std::memory_order_relaxed);
     impl_->renderedFrames.fetch_add(frameCount, std::memory_order_relaxed);
+    impl_->profilerRenderCalls.fetch_add(1U, std::memory_order_relaxed);
+    impl_->profilerSamplesRendered.fetch_add(frameCount, std::memory_order_relaxed);
+    impl_->profilerOscillatorVoiceFrames.fetch_add(blockOscillatorVoiceFrames, std::memory_order_relaxed);
+    impl_->profilerFilterFrames.fetch_add(blockFilterFrames, std::memory_order_relaxed);
+    impl_->profilerFxFrames.fetch_add(blockFxFrames, std::memory_order_relaxed);
     impl_->publish_telemetry();
 }
 

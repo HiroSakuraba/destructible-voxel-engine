@@ -5,8 +5,13 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <functional>
+#include <thread>
+#include <vector>
 
 #include "dve/query.hpp"
+#include "dve/render/radiance_cascades_spwi.hpp"
+#include "dve/render/ray_lighting_reference.hpp"
 
 namespace dve::render {
 namespace {
@@ -20,7 +25,6 @@ Float3 cross3(Float3 a, Float3 b) noexcept {
 }
 Float3 multiply3(Float3 a, Float3 b) noexcept { return {a.x*b.x, a.y*b.y, a.z*b.z}; }
 Float3 add3(Float3 a, Float3 b) noexcept { return {a.x+b.x, a.y+b.y, a.z+b.z}; }
-Float3 lerp3(Float3 a, Float3 b, float t) noexcept { return add3(multiply(a, 1.0F-t), multiply(b, t)); }
 
 struct CameraBasis {
     Float3 right{};
@@ -30,21 +34,32 @@ struct CameraBasis {
     float aspect{};
 };
 
-struct SceneHit {
-    const VoxelReferenceInstance* instance{};
-    TransformedRayHit hit{};
-    const VoxelMaterialDefinition* material{};
-};
-
-CameraBasis make_basis(const PolygonCamera& camera, const PolygonRenderTarget& target) noexcept {
+CameraBasis make_basis(const PolygonCamera& camera, std::uint32_t width,
+                       std::uint32_t height) noexcept {
     CameraBasis basis;
     basis.forward = normalize(subtract(camera.target, camera.position));
     basis.right = normalize(cross3(basis.forward, camera.up));
     if (length_squared(basis.right) < kEpsilon) basis.right = {1.0F, 0.0F, 0.0F};
     basis.up = normalize(cross3(basis.right, basis.forward));
     basis.tanHalf = std::tan(camera.verticalFieldOfViewRadians * 0.5F);
-    basis.aspect = static_cast<float>(target.width) / static_cast<float>(target.height);
+    basis.aspect = static_cast<float>(width) / static_cast<float>(height);
     return basis;
+}
+
+CameraBasis make_basis(const PolygonCamera& camera, const PolygonRenderTarget& target) noexcept {
+    return make_basis(camera, target.width, target.height);
+}
+
+Float3 primary_ray(const CameraBasis& basis, std::uint32_t x, std::uint32_t y,
+                   std::uint32_t width, std::uint32_t height) noexcept {
+    const float ndcY = 1.0F - 2.0F *
+        ((static_cast<float>(y) + 0.5F) / static_cast<float>(height));
+    const float ndcX = 2.0F *
+        ((static_cast<float>(x) + 0.5F) / static_cast<float>(width)) - 1.0F;
+    Float3 ray = basis.forward;
+    ray = add(ray, multiply(basis.right, ndcX * basis.tanHalf * basis.aspect));
+    ray = add(ray, multiply(basis.up, ndcY * basis.tanHalf));
+    return normalize(ray);
 }
 
 const VoxelMaterialDefinition& diagnostic_material() noexcept {
@@ -66,25 +81,8 @@ const VoxelMaterialDefinition& material_for(const VoxelReferenceInstance& instan
     return diagnostic_material();
 }
 
-std::optional<SceneHit> trace_scene(std::span<const VoxelReferenceInstance> instances,
-                                    Float3 origin, Float3 direction, float maximumDistance) {
-    std::optional<SceneHit> nearest;
-    float nearestDistance = maximumDistance;
-    for (const VoxelReferenceInstance& instance : instances) {
-        if (!instance.visible || instance.object == nullptr) continue;
-        const auto hit = raycast_voxels_transformed(*instance.object, instance.transform,
-                                                     origin, direction, nearestDistance);
-        if (!hit || hit->objectHit.distance >= nearestDistance) continue;
-        nearestDistance = hit->objectHit.distance;
-        nearest = SceneHit{&instance, *hit, &material_for(instance, hit->objectHit.material)};
-    }
-    return nearest;
-}
-
 Float3 environment_radiance(const RenderEnvironment& environment, Float3 direction) noexcept {
-    const Float3 normalized = normalize(direction);
-    return lerp3(environment.groundColor, environment.skyColor,
-                 std::clamp(0.5F + 0.5F * normalized.y, 0.0F, 1.0F));
+    return spwi::environment_radiance(environment, direction);
 }
 
 float radical_inverse(std::uint32_t bits) noexcept {
@@ -133,75 +131,76 @@ Float3 sample_sun_disk(Float3 sunDirection, float angularRadius, std::uint32_t s
              multiply(bitangent, radius * std::sin(angle)))));
 }
 
-float hard_visibility(std::span<const VoxelReferenceInstance> instances, Float3 origin,
+// Secondary rays go through spwi::VoxelSceneTracer, whose hits are bit-identical to
+// raycast_voxels_transformed over the same instances (tested in dve_rc_spwi_tests).
+float hard_visibility(const spwi::VoxelSceneTracer& tracer, Float3 origin,
                       Float3 direction, float maximumDistance, VoxelReferenceRenderStats& stats) {
     ++stats.shadowRays;
-    if (trace_scene(instances, origin, direction, maximumDistance)) {
+    if (tracer.occluded(origin, direction, maximumDistance)) {
         ++stats.shadowBlockedRays;
         return 0.0F;
     }
     return 1.0F;
 }
 
-float shadow_visibility(std::span<const VoxelReferenceInstance> instances, Float3 point,
+float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
                         Float3 normal, const RenderEnvironment& environment,
-                        std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
+                        const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
     if (environment.shadowMode == ShadowMode::Off) return 1.0F;
     const Float3 sun = normalize(environment.sunDirection);
-    const Float3 origin = add(point, multiply(normal, environment.shadowBiasMeters));
+    const Float3 origin = add(point, multiply(normal, distances.shadowBias));
     auto weighted = [&](float raw) {
         return std::clamp(1.0F - environment.shadowStrength * (1.0F - raw), 0.0F, 1.0F);
     };
     if (environment.shadowMode == ShadowMode::Hard)
-        return weighted(hard_visibility(instances, origin, sun,
-                                        environment.shadowMaxDistanceMeters, stats));
+        return weighted(hard_visibility(tracer, origin, sun,
+                                        distances.shadowMaxDistance, stats));
     if (environment.shadowMode == ShadowMode::Contact)
-        return weighted(hard_visibility(instances, origin, sun,
-                                        environment.contactShadowDistanceMeters, stats));
+        return weighted(hard_visibility(tracer, origin, sun,
+                                        distances.contactShadowDistance, stats));
 
     const std::uint32_t samples = std::clamp(environment.shadowSamples, 1U, 16U);
     float visible = 0.0F;
     for (std::uint32_t sample = 0; sample < samples; ++sample) {
         const Float3 direction = sample_sun_disk(sun, environment.shadowSoftnessRadians,
                                                  sample, samples, pixelSeed);
-        visible += hard_visibility(instances, origin, direction,
-                                   environment.shadowMaxDistanceMeters, stats);
+        visible += hard_visibility(tracer, origin, direction,
+                                   distances.shadowMaxDistance, stats);
     }
     visible /= static_cast<float>(samples);
     if (environment.shadowMode == ShadowMode::Hybrid) {
-        const float contact = hard_visibility(instances, origin, sun,
-                                              environment.contactShadowDistanceMeters, stats);
+        const float contact = hard_visibility(tracer, origin, sun,
+                                              distances.contactShadowDistance, stats);
         visible = std::min(visible, contact);
     }
     return weighted(visible);
 }
 
-Float3 global_illumination(std::span<const VoxelReferenceInstance> instances, Float3 point,
+Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                            Float3 normal, const RenderEnvironment& environment,
-                           std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
+                           const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
     if (environment.globalIlluminationMode == GlobalIlluminationMode::Off) return {};
     if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere)
         return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity);
 
     const std::uint32_t samples = std::clamp(environment.globalIlluminationSamples, 1U, 16U);
-    const Float3 origin = add(point, multiply(normal, environment.shadowBiasMeters));
+    const Float3 origin = add(point, multiply(normal, distances.shadowBias));
     Float3 accumulated{};
     for (std::uint32_t sample = 0; sample < samples; ++sample) {
         const Float3 direction = cosine_hemisphere(normal, sample, samples, pixelSeed);
         ++stats.globalIlluminationRays;
-        const auto hit = trace_scene(instances, origin, direction,
-                                     environment.globalIlluminationMaxDistanceMeters);
+        const auto hit = tracer.trace(origin, direction,
+                                      distances.globalIlluminationMaxDistance);
         if (!hit) {
             accumulated = add3(accumulated, environment_radiance(environment, direction));
             continue;
         }
         ++stats.globalIlluminationHits;
-        const VoxelMaterialDefinition& bounce = *hit->material;
-        const Float3 bounceColor{bounce.baseColor.x, bounce.baseColor.y, bounce.baseColor.z};
-        const Float3 localAmbient = environment_radiance(environment, hit->hit.worldNormal);
-        Float3 incoming = multiply3(bounceColor, multiply(localAmbient, 1.0F - bounce.metallic));
-        incoming = add3(incoming, bounce.emissive);
-        accumulated = add3(accumulated, incoming);
+        // Same bounce model as resolve_gi.hlsl: hemisphere ambient plus sun with an explicit
+        // visibility ray (one_bounce_diffuse_radiance). Previously only the ambient term was used.
+        accumulated = add3(accumulated, spwi::bounce_hit_radiance(
+            tracer, *hit, environment, &stats.globalIlluminationSunRays,
+            distances.metersPerVoxel));
     }
     return multiply(accumulated,
                     environment.globalIlluminationIntensity / static_cast<float>(samples));
@@ -224,6 +223,107 @@ Float4 shade_voxel(const VoxelMaterialDefinition& material, Float3 worldNormal,
 }
 } // namespace
 
+namespace spwi {
+VoxelGBuffer build_voxel_gbuffer(const VoxelSceneTracer& tracer, const PolygonCamera& camera,
+                                 std::uint32_t width, std::uint32_t height,
+                                 std::span<const float> initialDepth, std::uint32_t threadCount) {
+    VoxelGBuffer gbuffer;
+    gbuffer.width = width;
+    gbuffer.height = height;
+    gbuffer.cameraPosition = camera.position;
+    const std::size_t count = static_cast<std::size_t>(width) * height;
+    gbuffer.texels.assign(count, VoxelGBufferTexel{});
+    if (count == 0U || !(camera.nearPlane > 0.0F) || !(camera.farPlane > camera.nearPlane))
+        return gbuffer;
+    const CameraBasis basis = make_basis(camera, width, height);
+    gbuffer.pixelWorldScale = 2.0F * basis.tanHalf / static_cast<float>(height);
+    const float maximumDistance = camera.farPlane * 1.5F;
+    const auto instances = tracer.instances();
+    // Per pixel, instances are visited in submission order with the renderer's strict depth
+    // test, which is the same result as the renderer's instance-outer loop.
+    auto rows = [&](std::uint32_t begin, std::uint32_t end) {
+        for (std::uint32_t y = begin; y < end; ++y) {
+            for (std::uint32_t x = 0; x < width; ++x) {
+                const std::size_t index = static_cast<std::size_t>(y) * width + x;
+                float depth = index < initialDepth.size() ? initialDepth[index] : 1.0F;
+                const Float3 ray = primary_ray(basis, x, y, width, height);
+                VoxelGBufferTexel& texel = gbuffer.texels[index];
+                for (std::size_t k = 0; k < instances.size(); ++k) {
+                    if (!instances[k].visible || instances[k].object == nullptr) continue;
+                    const auto hit = tracer.trace_instance(k, camera.position, ray, maximumDistance);
+                    if (!hit) continue;
+                    const float cameraZ = dot(subtract(hit->worldPosition, camera.position), basis.forward);
+                    if (!(cameraZ > camera.nearPlane && cameraZ < camera.farPlane)) continue;
+                    const float normalizedDepth =
+                        (cameraZ - camera.nearPlane) / (camera.farPlane - camera.nearPlane);
+                    if (!(normalizedDepth < depth)) continue;
+                    depth = normalizedDepth;
+                    texel.valid = true;
+                    texel.instance = static_cast<std::uint32_t>(k);
+                    texel.material = hit->objectHit.material;
+                    texel.position = hit->worldPosition;
+                    texel.normal = hit->worldNormal;
+                    texel.viewDistance = length(subtract(hit->worldPosition, camera.position));
+                    texel.normalizedDepth = normalizedDepth;
+                }
+            }
+        }
+    };
+    std::uint32_t threads = threadCount == 0U ? std::max(1U, std::thread::hardware_concurrency())
+                                              : threadCount;
+    threads = std::clamp(threads, 1U, std::min(16U, height));
+    if (threads == 1U) {
+        rows(0U, height);
+    } else {
+        std::vector<std::thread> workers;
+        for (std::uint32_t t = 0; t < threads; ++t)
+            workers.emplace_back(rows, height * t / threads, height * (t + 1U) / threads);
+        for (std::thread& worker : workers) worker.join();
+    }
+    return gbuffer;
+}
+} // namespace spwi
+
+namespace {
+VoxelReferenceRenderStats render_radiance_cascades(
+    const RadianceCascadeSettings& settings, const spwi::VoxelSceneTracer& tracer,
+    std::span<const VoxelReferenceInstance> instances, const PolygonCamera& camera,
+    const RenderEnvironment& environment, const VoxelLightingDistances& distances,
+    PolygonRenderTarget& target) {
+    VoxelReferenceRenderStats stats;
+    for (const VoxelReferenceInstance& instance : instances) {
+        ++stats.submittedInstances;
+        if (instance.visible && instance.object != nullptr)
+            stats.tracedRays += static_cast<std::uint64_t>(target.width) * target.height;
+    }
+    const spwi::VoxelGBuffer gbuffer = spwi::build_voxel_gbuffer(
+        tracer, camera, target.width, target.height, target.depth, settings.threadCount);
+    const spwi::IndirectResult gi =
+        spwi::solve_radiance_cascades(tracer, gbuffer, environment, settings,
+                                      distances.metersPerVoxel);
+    stats.radianceCascadeIntervalRays = gi.stats.intervalRays;
+    stats.globalIlluminationSunRays = gi.stats.sunRays;
+    for (std::size_t index = 0; index < gbuffer.texels.size(); ++index) {
+        const spwi::VoxelGBufferTexel& texel = gbuffer.texels[index];
+        if (!texel.valid) continue;
+        const VoxelReferenceInstance& instance = instances[texel.instance];
+        bool fallback = false;
+        const VoxelMaterialDefinition& material = material_for(instance, texel.material, &fallback);
+        if (fallback) ++stats.materialFallbacks;
+        const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
+        const float visibility = shadow_visibility(tracer, texel.position, texel.normal,
+                                                   environment, distances, seed, stats);
+        target.hdrColor[index] = shade_voxel(material, texel.normal, environment, visibility,
+                                             gi.indirect[index]);
+        target.depth[index] = texel.normalizedDepth;
+        target.objectId[index] = instance.objectId != 0U ? instance.objectId : instance.object->id();
+        target.materialIndex[index] = texel.material;
+        ++stats.hitRays;
+    }
+    return stats;
+}
+} // namespace
+
 VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     std::span<const VoxelReferenceInstance> instances,
     const PolygonCamera& camera,
@@ -235,50 +335,85 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         !(camera.farPlane > camera.nearPlane)) return stats;
     if (!preserveExistingDepth) target.clear();
 
+    const spwi::VoxelSceneTracer tracer(instances);
+    // Metre-authored distances -> voxel units, once per frame (GPU: MetersToVoxelUnits).
+    const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
+    if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades)
+        return render_radiance_cascades(radianceCascades, tracer, instances, camera, environment,
+                                        distances, target);
+
     const CameraBasis basis = make_basis(camera, target);
     const float maximumDistance = camera.farPlane * 1.5F;
-    for (const VoxelReferenceInstance& instance : instances) {
-        ++stats.submittedInstances;
-        if (!instance.visible || instance.object == nullptr) continue;
-        for (std::uint32_t y = 0; y < target.height; ++y) {
-            const float ndcY = 1.0F - 2.0F *
-                ((static_cast<float>(y) + 0.5F) / static_cast<float>(target.height));
-            for (std::uint32_t x = 0; x < target.width; ++x) {
-                const float ndcX = 2.0F *
-                    ((static_cast<float>(x) + 0.5F) / static_cast<float>(target.width)) - 1.0F;
-                Float3 ray = basis.forward;
-                ray = add(ray, multiply(basis.right, ndcX * basis.tanHalf * basis.aspect));
-                ray = add(ray, multiply(basis.up, ndcY * basis.tanHalf));
-                ray = normalize(ray);
-                ++stats.tracedRays;
-                const auto hit = raycast_voxels_transformed(*instance.object, instance.transform,
-                                                             camera.position, ray, maximumDistance);
-                if (!hit) continue;
-                const float cameraZ = dot(subtract(hit->worldPosition, camera.position), basis.forward);
-                if (!(cameraZ > camera.nearPlane && cameraZ < camera.farPlane)) continue;
-                const float normalizedDepth =
-                    (cameraZ - camera.nearPlane) / (camera.farPlane - camera.nearPlane);
-                const std::size_t index = static_cast<std::size_t>(y) * target.width + x;
-                if (!(normalizedDepth < target.depth[index])) continue;
+    stats.submittedInstances += instances.size();
+    // Rows are independent: every pixel visits the instances in submission order with the
+    // strict depth test and derives its sampling seed from its own index, so the image is
+    // identical for any thread count (the same contract as the radiance-cascades path).
+    auto rows = [&](std::uint32_t begin, std::uint32_t end, VoxelReferenceRenderStats& local) {
+        for (std::uint32_t y = begin; y < end; ++y) {
+            for (std::size_t k = 0; k < instances.size(); ++k) {
+                const VoxelReferenceInstance& instance = instances[k];
+                if (!instance.visible || instance.object == nullptr) continue;
+                for (std::uint32_t x = 0; x < target.width; ++x) {
+                    const Float3 ray = primary_ray(basis, x, y, target.width, target.height);
+                    ++local.tracedRays;
+                    // Bit-identical to raycast_voxels_transformed (dve_rc_spwi_tests), but with
+                    // the tracer's dense grid and exact out-of-bounds early out, so rays that
+                    // miss an instance stop at its bricks instead of marching to the far plane.
+                    const auto hit = tracer.trace_instance(k, camera.position, ray, maximumDistance);
+                    if (!hit) continue;
+                    const float cameraZ = dot(subtract(hit->worldPosition, camera.position), basis.forward);
+                    if (!(cameraZ > camera.nearPlane && cameraZ < camera.farPlane)) continue;
+                    const float normalizedDepth =
+                        (cameraZ - camera.nearPlane) / (camera.farPlane - camera.nearPlane);
+                    const std::size_t index = static_cast<std::size_t>(y) * target.width + x;
+                    if (!(normalizedDepth < target.depth[index])) continue;
 
-                bool fallback = false;
-                const VoxelMaterialDefinition& material =
-                    material_for(instance, hit->objectHit.material, &fallback);
-                if (fallback) ++stats.materialFallbacks;
-                const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
-                const float visibility = shadow_visibility(instances, hit->worldPosition,
-                                                           hit->worldNormal, environment, seed, stats);
-                const Float3 indirect = global_illumination(instances, hit->worldPosition,
-                                                             hit->worldNormal, environment, seed, stats);
-                target.hdrColor[index] = shade_voxel(material, hit->worldNormal,
-                                                     environment, visibility, indirect);
-                target.depth[index] = normalizedDepth;
-                target.objectId[index] = instance.objectId != 0U
-                    ? instance.objectId : instance.object->id();
-                target.materialIndex[index] = hit->objectHit.material;
-                ++stats.hitRays;
+                    bool fallback = false;
+                    const VoxelMaterialDefinition& material =
+                        material_for(instance, hit->objectHit.material, &fallback);
+                    if (fallback) ++local.materialFallbacks;
+                    const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
+                    const float visibility = shadow_visibility(tracer, hit->worldPosition,
+                                                               hit->worldNormal, environment, distances,
+                                                               seed, local);
+                    const Float3 indirect = global_illumination(tracer, hit->worldPosition,
+                                                                 hit->worldNormal, environment, distances,
+                                                                 seed, local);
+                    target.hdrColor[index] = shade_voxel(material, hit->worldNormal,
+                                                         environment, visibility, indirect);
+                    target.depth[index] = normalizedDepth;
+                    target.objectId[index] = instance.objectId != 0U
+                        ? instance.objectId : instance.object->id();
+                    target.materialIndex[index] = hit->objectHit.material;
+                    ++local.hitRays;
+                }
             }
         }
+    };
+    std::uint32_t threads = threadCount == 0U ? std::max(1U, std::thread::hardware_concurrency())
+                                              : threadCount;
+    threads = std::clamp(threads, 1U, std::min(16U, target.height));
+    std::vector<VoxelReferenceRenderStats> partial(threads);
+    if (threads == 1U) {
+        rows(0U, target.height, partial[0]);
+    } else {
+        std::vector<std::thread> workers;
+        workers.reserve(threads);
+        for (std::uint32_t t = 0; t < threads; ++t)
+            workers.emplace_back(rows, target.height * t / threads, target.height * (t + 1U) / threads,
+                                 std::ref(partial[t]));
+        for (std::thread& worker : workers) worker.join();
+    }
+    for (const VoxelReferenceRenderStats& local : partial) {
+        stats.tracedRays += local.tracedRays;
+        stats.hitRays += local.hitRays;
+        stats.materialFallbacks += local.materialFallbacks;
+        stats.shadowRays += local.shadowRays;
+        stats.shadowBlockedRays += local.shadowBlockedRays;
+        stats.globalIlluminationRays += local.globalIlluminationRays;
+        stats.globalIlluminationHits += local.globalIlluminationHits;
+        stats.globalIlluminationSunRays += local.globalIlluminationSunRays;
+        stats.radianceCascadeIntervalRays += local.radianceCascadeIntervalRays;
     }
     return stats;
 }
@@ -289,9 +424,15 @@ HybridReferenceRenderStats render_hybrid_reference(
     const PolygonCamera& camera,
     const RenderEnvironment& environment,
     PolygonRenderTarget& target,
-    const PolygonRenderOptions& polygonOptions) {
+    const PolygonRenderOptions& polygonOptions,
+    float metersPerVoxel,
+    std::uint32_t voxelThreadCount) {
     HybridReferenceRenderStats stats;
-    stats.voxels = ReferenceVoxelRenderer{}.render(voxels, camera, environment, target, false);
+    ReferenceVoxelRenderer voxelRenderer;
+    voxelRenderer.metersPerVoxel = metersPerVoxel;
+    voxelRenderer.threadCount = voxelThreadCount;
+    voxelRenderer.radianceCascades.threadCount = voxelThreadCount;
+    stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
     PolygonRenderOptions options = polygonOptions;
     options.preserveExistingDepth = true;
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);

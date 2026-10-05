@@ -1,0 +1,207 @@
+{
+  "format": "DVE_THIRD_PARTY_NOTICES",
+  "version": 1,
+  "comment": "Maps every third-party library or adapted code base that can end up in a shipped DVE binary to its license and license text. Read by tools/generate_third_party_notices.py; the dve_third_party_notices_check test fails when a bundled shared library, a linked third-party target or archive, or a matched entry's license text is not covered. 'copyleft': none | weak (LGPL-style: shipping the binary needs the library's corresponding source or a written offer, and users must be able to replace it) | strong (source-availability terms that reach the software using it). 'review' marks something a human must decide before external distribution. 'forbidden' lists shared libraries that must never be bundled (the check and --verify-dir fail on them). License texts are never written here: they come from the installed Debian package's copyright file, the fetched/vendored source tree, or the SDK.",
+  "engine": {
+    "name": "Destructible Voxel Engine (DVE)",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2026 Benjamin Schulz",
+    "upstream": "https://github.com/HiroSakuraba/destructible-voxel-engine",
+    "text": "LICENSE"
+  },
+  "forbidden": [
+    {"id": "mpg123", "sonames": ["^libmpg123\\.so", "^(lib)?mpg123([-_.][0-9]+)?\\.dll$"],
+     "reason": "libmpg123 (LGPL-2.1) is only pulled in by a libsndfile built with MPEG support; DVE needs no MP3 at run time. Build with DVE_FETCH_SNDFILE=ON (the default), which uses libsndfile without MPEG."},
+    {"id": "lame", "sonames": ["^libmp3lame\\.so", "^(lib)?mp3lame([-_.][0-9]+)?\\.dll$"],
+     "reason": "libmp3lame (LGPL-2+, with a GPL-1+-marked fft.c in Debian's copyright file) is only pulled in by a libsndfile built with MPEG support; DVE never encodes MP3. Build with DVE_FETCH_SNDFILE=ON (the default)."}
+  ],
+  "entries": [
+    {
+      "id": "sdl3", "name": "SDL 3 (Simple DirectMedia Layer)", "upstream": "https://libsdl.org",
+      "license": "Zlib (Debian's copyright file also lists permissive sub-licenses: Expat, BSD-3-Clause, BSL-1.0, Unicode-3.0, public domain)",
+      "copyleft": "none",
+      "match": {"sonames": ["^libSDL3\\.so"], "targets": ["^SDL3(-static|-shared|_Headers)?$", "^SDL3::SDL3(-static|-shared|_Headers)?$", "^SDL_uclibc$"], "archives": ["libSDL3\\.a$"]},
+      "texts": [{"debian": true}, {"target_file": ["LICENSE.txt"]}],
+      "notes": "A DVE_FETCH_SDL3 build links SDL statically; its LICENSE.txt is used then. SDL's source tree contains a few files under other permissive licenses (hidapi, libm/SunPro, stb_image); Debian's copyright file lists them, the upstream LICENSE.txt does not."
+    },
+    {
+      "id": "sdl3_ttf", "name": "SDL_ttf 3", "upstream": "https://github.com/libsdl-org/SDL_ttf",
+      "license": "Zlib", "copyleft": "none",
+      "match": {"sonames": ["^libSDL3_ttf\\.so"], "targets": ["^SDL3_ttf(-static|-shared)?$", "^SDL3_ttf::SDL3_ttf(-static|-shared)?$"], "archives": ["libSDL3_ttf\\.a$"]},
+      "texts": [{"debian": true}, {"target_file": ["LICENSE.txt"]}]
+    },
+    {
+      "id": "lua", "name": "Lua 5.4", "upstream": "https://www.lua.org",
+      "license": "MIT (Expat)", "copyleft": "none",
+      "match": {"sonames": ["^liblua5\\.4\\.so", "^liblua\\.so"], "targets": ["^dve_lua54_runtime$", "^PkgConfig::DVE_LUA$", "^lua$"], "archives": ["liblua(5\\.4)?\\.a$"], "sources": ["third_party/lua54_abi/*"]},
+      "texts": [{"debian": true}, {"file": "/usr/share/doc/liblua5.4-0/copyright"}, {"var": "DVE_LUA_LICENSE_DIR", "title": "the fetched Lua source (src/lua.h)", "files": ["LICENSE.txt"]}],
+      "notes": "DVE_FETCH_LUA (the Windows build) links Lua 5.4.9 from lua.org statically; its license notice is read from the tarball's src/lua.h, since the release has no separate license file."
+    },
+    {
+      "id": "rtmidi", "name": "RtMidi", "upstream": "https://github.com/thestk/rtmidi",
+      "license": "MIT-style RtMidi license (its request to send modifications upstream is explicitly non-binding)", "copyleft": "none",
+      "match": {"sonames": ["^librtmidi\\.so"], "targets": ["^rtmidi$", "^RtMidi::rtmidi$", "^dve_rtmidi_imported$"], "archives": ["librtmidi\\.a$"]},
+      "texts": [{"debian": true}, {"target_file": ["LICENSE"]}]
+    },
+    {
+      "id": "jack", "name": "JACK Audio Connection Kit client library (libjack, JACK1 0.126 on Debian 13)", "upstream": "https://jackaudio.org",
+      "license": "LGPL-2.1-or-later (libjack; the JACK server and tools are GPL-2.0-or-later and are not shipped)", "copyleft": "weak",
+      "match": {"sonames": ["^libjack\\.so"]},
+      "texts": [{"debian": true}],
+      "review": "LGPL: shipping libjack.so needs its corresponding source (or a written offer) next to the package. libjack must also match the JACK server on the user's machine, so bundling it is technically fragile. It is pulled in only through RtMidi (editor); set DVE_INSTALL_BUNDLE_JACK=OFF (the default) to leave it to the system."
+    },
+    {
+      "id": "libdb", "name": "Berkeley DB 5.3 (libdb, needed by JACK1's libjack)", "upstream": "https://www.oracle.com/database/technologies/related/berkeleydb.html",
+      "license": "Sleepycat AND BSD-3-Clause", "copyleft": "strong",
+      "match": {"sonames": ["^libdb-5\\.3\\.so", "^libdb\\.so"]},
+      "texts": [{"debian": true}],
+      "review": "Sleepycat clause 3: redistribution in any form must come with information on how to obtain the complete source code of the DB software AND of any accompanying software that uses it (for an executable, all of its modules). Bundling libdb with the editor could therefore oblige you to publish the editor's source. Do not ship it: it is only reachable through libjack, which is not bundled by default (DVE_INSTALL_BUNDLE_JACK=OFF)."
+    },
+    {
+      "id": "libsndfile", "name": "libsndfile", "upstream": "https://libsndfile.github.io/libsndfile/",
+      "license": "LGPL-2.1-or-later (built-in codec sources: ALAC Apache-2.0, GSM 6.10 permissive (TU Berlin), G.72x public domain (Sun))", "copyleft": "weak",
+      "match": {"sonames": ["^libsndfile\\.so"], "archives": ["libsndfile\\.a$"], "targets": ["^dve_sndfile_imported$"]},
+      "source_var": "DVE_SNDFILE_SOURCE_INFO",
+      "texts": [{"debian": true},
+                {"var": "DVE_SNDFILE_SOURCE_DIR", "title": "the libsndfile source DVE builds", "all": true,
+                 "files": ["COPYING", "src/ALAC/LICENSE", "src/GSM610/COPYRIGHT", "src/G72x/README.original"]}],
+      "notes": "By default (DVE_FETCH_SNDFILE=ON) DVE builds libsndfile 1.2.2 itself, with Debian's 1.2.2-2+deb13u1 security patches (third_party/libsndfile/patches), as a shared library WITHOUT MPEG support, so libmpg123 and libmp3lame are neither linked nor shipped. It links the system FLAC, Ogg, Vorbis and Opus libraries, which are listed separately. Without that build DVE links the distribution's libsndfile and does not bundle it.",
+      "review": "LGPL: shipping libsndfile.so needs its corresponding source (or a written offer): the pinned tarball, the patches and the build options named under 'Corresponding source'. Users must be able to replace it; it is a separate .so in lib/dve, which satisfies that."
+    },
+    {
+      "id": "flac", "name": "libFLAC", "upstream": "https://xiph.org/flac/",
+      "license": "BSD-3-Clause (libFLAC; the flac/metaflac tools are GPL and are not shipped)", "copyleft": "none",
+      "match": {"sonames": ["^libFLAC\\.so"]},
+      "texts": [{"debian": true}]
+    },
+    {
+      "id": "vorbis", "name": "libvorbis / libvorbisenc", "upstream": "https://xiph.org/vorbis/",
+      "license": "BSD-3-Clause", "copyleft": "none",
+      "match": {"sonames": ["^libvorbis\\.so", "^libvorbisenc\\.so", "^libvorbisfile\\.so"]},
+      "texts": [{"debian": true}]
+    },
+    {
+      "id": "ogg", "name": "libogg", "upstream": "https://xiph.org/ogg/",
+      "license": "BSD-3-Clause", "copyleft": "none",
+      "match": {"sonames": ["^libogg\\.so"]},
+      "texts": [{"debian": true}]
+    },
+    {
+      "id": "opus", "name": "Opus", "upstream": "https://opus-codec.org",
+      "license": "BSD-3-Clause (some files BSD-2-Clause)", "copyleft": "none",
+      "match": {"sonames": ["^libopus\\.so"]},
+      "texts": [{"debian": true}]
+    },
+    {
+      "id": "libjpeg_turbo", "name": "libjpeg-turbo", "upstream": "https://libjpeg-turbo.org",
+      "license": "IJG AND BSD-3-Clause AND Zlib", "copyleft": "none",
+      "match": {"sonames": ["^libjpeg\\.so", "^libturbojpeg\\.so", "^jpeg62\\.dll$", "^turbojpeg\\.dll$"], "archives": ["libjpeg\\.a$", "(^|/)jpeg\\.lib$", "(^|/)turbojpeg\\.lib$"]},
+      "texts": [{"debian": true}, {"var": "DVE_VCPKG_TRIPLET_DIR", "title": "vcpkg", "files": ["share/libjpeg-turbo/copyright"]}],
+      "notes": "The IJG license requires the documentation to state that the software is based in part on the work of the Independent JPEG Group; this file does that."
+    },
+    {
+      "id": "libpng", "name": "libpng", "upstream": "http://www.libpng.org",
+      "license": "libpng-2.0", "copyleft": "none",
+      "match": {"sonames": ["^libpng16\\.so", "^libpng16d?\\.dll$"], "archives": ["libpng16?\\.a$", "(^|/)libpng16d?\\.lib$"]},
+      "texts": [{"debian": true}, {"var": "DVE_VCPKG_TRIPLET_DIR", "title": "vcpkg", "files": ["share/libpng/copyright"]}]
+    },
+    {
+      "id": "zlib", "name": "zlib", "upstream": "https://zlib.net",
+      "license": "Zlib", "copyleft": "none",
+      "match": {"sonames": ["^zlibd?1\\.dll$", "^zd?\\.dll$"], "archives": ["(^|/)zd?\\.lib$", "(^|/)zlibd?\\.lib$"]},
+      "texts": [{"var": "DVE_VCPKG_TRIPLET_DIR", "title": "vcpkg", "files": ["share/zlib/copyright"]}],
+      "notes": "Windows only: vcpkg's zlib DLL (z.dll since zlib 1.3.2's CMake build, zlib1.dll before), which libpng needs. On Linux zlib is a system library and is not shipped."
+    },
+    {
+      "id": "jolt", "name": "Jolt Physics", "upstream": "https://github.com/jrouwe/JoltPhysics",
+      "license": "MIT", "copyleft": "none",
+      "match": {"targets": ["^Jolt$", "^Jolt::Jolt$"], "sonames": ["^libJolt\\.so"], "archives": ["libJolt\\.a$"]},
+      "texts": [{"target_file": ["LICENSE"]}]
+    },
+    {
+      "id": "manifold", "name": "manifold (vendored v3.5.1)", "upstream": "https://github.com/elalish/manifold",
+      "license": "Apache-2.0", "copyleft": "none",
+      "match": {"targets": ["^manifold$", "^manifold::manifold$"], "archives": ["libmanifold\\.a$"]},
+      "texts": [{"repo": "third_party/manifold/LICENSE"}],
+      "notes": "Upstream ships no NOTICE file, so Apache-2.0 section 4(d) adds nothing beyond the license text."
+    },
+    {
+      "id": "box2d", "name": "Box2D", "upstream": "https://github.com/erincatto/box2d",
+      "license": "MIT", "copyleft": "none",
+      "match": {"targets": ["^box2d$", "^box2d::box2d$"], "archives": ["libbox2d\\.a$"]},
+      "texts": [{"target_file": ["LICENSE"]}]
+    },
+    {
+      "id": "box3d", "name": "Box3D", "upstream": "https://github.com/erincatto/box3d",
+      "license": "as stated in the fetched LICENSE file (not built or verified on the packaging box)", "copyleft": "none",
+      "match": {"targets": ["^box3d$", "^box3d::box3d$"], "archives": ["libbox3d\\.a$"]},
+      "texts": [{"target_file": ["LICENSE", "LICENSE.txt", "LICENSE.md"]}],
+      "review": "Not built in the verified presets; confirm the license of the pinned commit before shipping a Box3D build."
+    },
+    {
+      "id": "steam_audio", "name": "Steam Audio (phonon)", "upstream": "https://github.com/ValveSoftware/steam-audio",
+      "license": "Apache-2.0 (open-sourced by Valve in 2024)", "copyleft": "none",
+      "match": {"sonames": ["^libphonon\\.so"], "targets": ["^dve_audio_spatial_steam$"]},
+      "texts": [{"var": "DVE_STEAM_AUDIO_ROOT", "files": ["LICENSE.md", "LICENSE.txt", "LICENSE"]}],
+      "review": "Not available on the packaging box; the SDK archive may carry additional third-party notices (check its root) that must be added before shipping."
+    },
+    {
+      "id": "dashr", "name": "DASHR (adapted concepts)", "upstream": "https://github.com/tomforsyth1000/DASHR", "kind": "adaptation",
+      "license": "MIT-0", "copyleft": "none",
+      "match": {"sources": ["src/dashr_*.cpp", "src/render/dashr_*.cpp"]},
+      "texts": [{"repo": "third_party/DASHR-NOTICE.md"}, {"repo": "third_party/DASHR-LICENSE.txt"}]
+    },
+    {
+      "id": "meshoptimizer_remesh", "name": "meshoptimizer v1.3 (voxel remeshing and normal generation)",
+      "upstream": "https://github.com/zeux/meshoptimizer/releases/tag/v1.3", "kind": "vendored-subset",
+      "license": "MIT", "copyleft": "none",
+      "match": {"sources": ["third_party/meshoptimizer_v1_3/src/allocator.cpp", "third_party/meshoptimizer_v1_3/src/remesher.cpp", "third_party/meshoptimizer_v1_3/src/tangentspace.cpp"]},
+      "texts": [{"repo": "third_party/meshoptimizer_v1_3/LICENSE.md"}]
+    },
+    {
+      "id": "bs_cloth", "name": "BS-Cloth (adapted concepts)", "upstream": "https://github.com/Simulation-Intelligence/BS-Cloth", "kind": "adaptation",
+      "license": "Apache-2.0", "copyleft": "none",
+      "match": {"sources": ["src/bspline_cloth.cpp"]},
+      "texts": [{"repo": "third_party/BS-Cloth-NOTICE.md"}, {"repo": "third_party/BS-Cloth-LICENSE.txt"}]
+    },
+    {
+      "id": "fluoddity3d", "name": "Fluoddity3D (reimplemented simulation and preset contracts)", "upstream": "Fluoddity3D by Jesse Gelders", "kind": "adaptation",
+      "license": "MIT", "copyleft": "none",
+      "match": {"sources": ["src/fluoddity.cpp", "src/fluoddity_solver.cpp", "src/runtime_fluoddity_world.cpp"]},
+      "texts": [{"repo": "third_party/fluoddity3d_reference/NOTICE.md"}, {"repo": "third_party/fluoddity3d_reference/LICENSE"}]
+    },
+    {
+      "id": "gabor_fields", "name": "Gabor Fields (adapted data representation)", "upstream": "Graphics Group @ USI", "kind": "adaptation",
+      "license": "MIT", "copyleft": "none",
+      "match": {"sources": ["src/gabor_volume.cpp", "src/runtime_gabor_volume_world.cpp", "src/render/gabor_volume_renderer.cpp"]},
+      "texts": [{"repo": "third_party/gabor_fields_reference/DVE_INTEGRATION_NOTICE.md"}, {"repo": "third_party/gabor_fields_reference/LICENSE.md"}]
+    },
+    {
+      "id": "mantaflow", "name": "Mantaflow (informed the grid-fluid module)", "upstream": "http://mantaflow.com", "kind": "adaptation",
+      "license": "Apache-2.0", "copyleft": "none",
+      "match": {"sources": ["src/grid_fluid.cpp", "src/flip_liquid.cpp"]},
+      "texts": [{"repo": "third_party/mantaflow_reference/README.md"}, {"repo": "third_party/notices/MANTAFLOW_LICENSE.txt"}]
+    },
+    {
+      "id": "yasps", "name": "YASPS (informed the simulation-energy JOIN/UNION compiler)", "upstream": "YASPS by Xuan Tang", "kind": "adaptation",
+      "license": "MIT", "copyleft": "none",
+      "match": {"sources": ["src/simulation_energy.cpp"]},
+      "texts": [{"repo": "third_party/notices/YASPS_LICENSE.txt"}]
+    },
+    {
+      "id": "slug", "name": "Slug font rendering (reference algorithm and shaders)", "upstream": "Eric Lengyel, https://jcgt.org/published/0006/02/02/", "kind": "adaptation",
+      "license": "MIT OR Apache-2.0 (credit required when distributed)", "copyleft": "none",
+      "match": {"sources": ["src/text3d.cpp", "src/render/text3d_renderer.cpp", "src/runtime_text3d_world.cpp", "src/editor_text3d.cpp"]},
+      "texts": [{"repo": "third_party/slug_reference/NOTICE"}, {"repo": "third_party/slug_reference/LICENSE"}, {"repo": "third_party/slug_reference/LICENSE-MIT"}]
+    },
+    {
+      "id": "msvc_runtime", "name": "Microsoft Visual C++ runtime", "upstream": "https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files",
+      "license": "Microsoft Software License Terms for Visual Studio (Distributable Code)", "copyleft": "none",
+      "origin": "Microsoft Visual C++ Redistributable, copied from the Visual Studio installation",
+      "match": {"sonames": ["^(msvcp140(_[0-9a-z_]+)?|vcruntime140(_1|_threads)?|concrt140|vccorlib140|vcomp140)\\.dll$"]},
+      "texts": [{"repo": "third_party/notices/MSVC_RUNTIME_NOTICE.txt"}],
+      "notes": "Windows only. Not part of DVE and not under its MIT license.",
+      "review": "Windows packages ship Microsoft's Visual C++ runtime DLLs next to the executable (DVE_INSTALL_MSVC_RUNTIME, default ON), so they run without the VC++ Redistributable. That is allowed for the files listed in the Visual Studio installation's redist.txt under its license terms; confirm the terms of the Visual Studio edition used for release builds, or build with DVE_INSTALL_MSVC_RUNTIME=OFF and require the Redistributable."
+    }
+  ]
+}

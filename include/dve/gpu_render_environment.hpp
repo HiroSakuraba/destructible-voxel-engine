@@ -40,7 +40,7 @@ struct GpuRenderEnvironment {
     float shadowMaxDistanceMeters{0.0F};
     float contactShadowDistanceMeters{0.0F};
     float shadowBiasMeters{0.0F};
-    float metersPerVoxel{0.10F};
+    float metersPerVoxel{kDefaultMetersPerVoxel};
 };
 
 static_assert(sizeof(GpuRenderEnvironment) == 36 * sizeof(std::uint32_t));

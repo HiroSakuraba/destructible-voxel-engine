@@ -333,8 +333,16 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
         return false;
     }
     MaterialResource created;
-    created.descriptor = {bindGroup, assetResource->materialRecords, assetResource->mappingRecords,
-                          materialOffset, mappingOffset, textureMask, asset.contentHash, materialIndex};
+    created.descriptor.bindGroup = bindGroup;
+    created.descriptor.materialRecordBuffer = assetResource->materialRecords;
+    created.descriptor.mappingRecordBuffer = assetResource->mappingRecords;
+    created.descriptor.materialRecordOffset = materialOffset;
+    created.descriptor.mappingRecordOffset = mappingOffset;
+    created.descriptor.texturePresenceMask = textureMask;
+    created.descriptor.textureViews = views;
+    created.descriptor.samplers = samplers;
+    created.descriptor.assetContentHash = asset.contentHash;
+    created.descriptor.materialIndex = materialIndex;
     const auto [it, inserted] = materials_.emplace(key, created);
     (void)it;
     if (!inserted) {

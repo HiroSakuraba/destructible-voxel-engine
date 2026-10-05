@@ -4,6 +4,8 @@
 #include <charconv>
 #include <cctype>
 #include <cmath>
+#include <fstream>
+#include <iterator>
 #include <iomanip>
 #include <set>
 #include <sstream>
@@ -82,6 +84,16 @@ SettingDefinition integer_setting(std::string id, std::string category, std::str
     return {std::move(id), std::move(category), std::move(section), std::move(label),
             std::move(description), SettingType::Integer, defaultValue,
             static_cast<double>(minimum), static_cast<double>(maximum), static_cast<double>(step),
+            {}, {}, policy, capability, advanced, {}};
+}
+
+SettingDefinition string_setting(std::string id, std::string category, std::string section,
+                                 std::string label, std::string defaultValue, std::string description,
+                                 std::uint32_t capability = SettingCapabilityNone,
+                                 bool advanced = false,
+                                 SettingApplyPolicy policy = SettingApplyPolicy::Live) {
+    return {std::move(id), std::move(category), std::move(section), std::move(label),
+            std::move(description), SettingType::String, std::move(defaultValue), {}, {}, {},
             {}, {}, policy, capability, advanced, {}};
 }
 
@@ -428,6 +440,38 @@ bool EditorSettingsRegistry::parse_scope(SettingScope scope, std::string_view te
     return true;
 }
 
+bool EditorSettingsRegistry::save_scope_file(SettingScope scope, const std::filesystem::path& path,
+                                             std::string* error) const {
+    auto fail = [&](std::string message) { if (error) *error = std::move(message); return false; };
+    std::error_code ec;
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) return fail("could not create settings directory");
+    const std::filesystem::path temporary = path.string() + ".tmp";
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out) return fail("could not open temporary settings file");
+        out << serialize_scope(scope);
+        if (!out) return fail("could not write settings file");
+    }
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+        ec.clear();
+        std::filesystem::rename(temporary, path, ec);
+    }
+    if (ec) return fail("could not replace settings file");
+    return true;
+}
+
+bool EditorSettingsRegistry::load_scope_file(SettingScope scope, const std::filesystem::path& path,
+                                             std::string* error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { if (error) *error = "could not open settings file"; return false; }
+    const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    return parse_scope(scope, text, error);
+}
+
 std::string EditorSettingsRegistry::serialize_profile(std::string_view profileName,SettingScope scope) const {
     std::ostringstream out;out<<"DVE_SETTINGS_PROFILE 1 "<<std::quoted(std::string(profileName))<<' '<<setting_scope_name(scope)<<'\n';
     const auto& values=layer(scope);out<<"count "<<values.size()<<'\n';
@@ -444,7 +488,8 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
     EditorSettingsRegistry result;
     const std::vector<SettingChoice> onOffQuality{{"low","Low"},{"medium","Medium"},{"high","High"},{"ultra","Ultra"}};
     add_all(result, {
-        float_setting("editor.ui_scale","General","Interface","UI Scale",1.0,0.75,3.0,0.05,"Scale editor text and controls."),
+        float_setting("editor.ui_scale","General","Interface","UI Zoom",1.0,1.0,2.0,0.25,"Zoom editor text and controls, 100-200% in 25% steps (Ctrl+= / Ctrl+- / Ctrl+0). Capped so the layout stays at least 640x480."),
+        enum_setting("editor.keyboard_keys","General","Interface","Keyboard Keys","25",{{"25","25 keys (2 octaves)"},{"37","37 keys (3 octaves)"},{"49","49 keys (4 octaves)"},{"61","61 keys (5 octaves)"},{"76","76 keys"},{"88","88 keys (A0-C8)"}},"On-screen piano size in the synth and chiptune editors. Narrow windows scroll the keys."),
         enum_setting("editor.theme","General","Interface","Theme","dark",{{"dark","Dark"},{"light","Light"},{"system","System"}},"Editor appearance."),
         integer_setting("editor.autosave_minutes","General","Files","Autosave Interval",5,1,120,1,"Minutes between recovery saves."),
         boolean_setting("editor.confirm_destructive","General","Safety","Confirm Destructive Actions",true,"Ask before replacing dirty scenes or quitting."),
@@ -587,6 +632,14 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         enum_setting("audio.spatializer","Audio","Spatial","Spatializer","native",{{"native","DVE Native"},{"steam_audio","Steam Audio"},{"none","None"}},"Spatial audio backend.",SettingCapabilityAudio),
         boolean_setting("audio.hrtf","Audio","Spatial","HRTF",true,"Use binaural head-related transfer functions.",SettingCapabilityAudio),
         enum_setting("audio.granular_quality","Audio","Synthesis","Granular Quality","high",onOffQuality,"Maximum grain admission and interpolation quality.",SettingCapabilityAudio),
+        // MIDI input (see dve/editor_midi.hpp). The port is stored by name so the choice survives
+        // replugging and port renumbering; "" = Auto (first non-Through port), "none" = off.
+        string_setting("midi.input_port","Audio","MIDI","MIDI Input","","MIDI input port for the synthesizer. Auto picks the first hardware port (skipping Midi Through and virtual ports); the choice is saved by name and reconnects when the device is plugged back in. Left/right cycles the ports.",SettingCapabilityAudio),
+        // MIDI output for the synth's MIDI out (MIDI thru / arpeggiator notes). Same picker as
+        // the input; "" = Auto (the first output port, as before), "none" = off.
+        string_setting("midi.output_port","Audio","MIDI","MIDI Output","","MIDI output port for the synthesizer's MIDI out (MIDI thru and arpeggiator notes). Auto keeps the previous behaviour and opens the first output port (usually Midi Through, which other applications can listen to); pick a device to send to hardware. Saved by name and reconnects when the device is plugged back in. Left/right cycles the ports.",SettingCapabilityAudio),
+        enum_setting("midi.input_channel","Audio","MIDI","MIDI Channel","omni",{{"omni","Omni (all channels)"},{"1","Channel 1"},{"2","Channel 2"},{"3","Channel 3"},{"4","Channel 4"},{"5","Channel 5"},{"6","Channel 6"},{"7","Channel 7"},{"8","Channel 8"},{"9","Channel 9"},{"10","Channel 10"},{"11","Channel 11"},{"12","Channel 12"},{"13","Channel 13"},{"14","Channel 14"},{"15","Channel 15"},{"16","Channel 16"}},"Only play the synth from this MIDI channel, or Omni for every channel.",SettingCapabilityAudio),
+        enum_setting("midi.drum_channel","Audio","MIDI","Channel 10 (Drum Pads)","play",{{"play","Always play"},{"ignore","Ignore"},{"follow","Follow channel filter"}},"Channel 10 carries drum pads on most controllers (e.g. Akai MPK mini pads). Always play lets the pads through whatever the channel filter is; Ignore drops them.",SettingCapabilityAudio),
         integer_setting("audio.stream_preload_ms","Audio","Streaming","Stream Preload",250,0,10000,10,"Audio stream look-ahead in milliseconds.",SettingCapabilityAudio),
         boolean_setting("audio.loudness_normalization","Audio","Output","Loudness Normalization",false,"Apply project loudness targets during export.",SettingCapabilityAudio),
 
@@ -714,6 +767,22 @@ void EditorSettingsPanelState::discard() noexcept {
     stagedClears.clear();
     dirty = false;
 }
+bool EditorSettingsPanelState::has_choices(const SettingDefinition& definition) const {
+    if (definition.type == SettingType::Boolean || definition.type == SettingType::Enum) return true;
+    const auto dynamic = dynamicChoices.find(definition.id);
+    return definition.type == SettingType::String && dynamic != dynamicChoices.end() && !dynamic->second.empty();
+}
+std::string EditorSettingsPanelState::value_label(const SettingDefinition& definition, const SettingValue& value) const {
+    if (const auto* text = std::get_if<std::string>(&value)) {
+        if (const auto dynamic = dynamicChoices.find(definition.id); dynamic != dynamicChoices.end())
+            for (const SettingChoice& choice : dynamic->second)
+                if (choice.value == *text) return choice.label;
+        // Enum settings show their readable label ("Omni (all channels)") rather than the key.
+        for (const SettingChoice& choice : definition.choices)
+            if (choice.value == *text && !choice.label.empty()) return choice.label;
+    }
+    return setting_value_to_string(value);
+}
 SettingValue EditorSettingsPanelState::displayed_value(const EditorSettingsRegistry& registry, std::string_view id) const {
     if (const auto it = stagedValues.find(std::string(id)); it != stagedValues.end()) return it->second;
     if (stagedClears.contains(std::string(id))) return registry.inherited_value(id, scope);
@@ -740,6 +809,19 @@ bool EditorSettingsPanelState::cycle(const EditorSettingsRegistry& registry, std
     }
     SettingValue current = displayed_value(registry, id);
     if (definition->type == SettingType::Boolean) return stage(registry, id, !std::get<bool>(current), error);
+    if (definition->type == SettingType::String) {
+        if (const auto dynamic = dynamicChoices.find(id); dynamic != dynamicChoices.end() && !dynamic->second.empty()) {
+            const auto& choices = dynamic->second;
+            const std::string* selected = std::get_if<std::string>(&current);
+            auto it = std::find_if(choices.begin(), choices.end(), [&](const SettingChoice& choice) {
+                return selected != nullptr && choice.value == *selected;
+            });
+            const std::ptrdiff_t count = static_cast<std::ptrdiff_t>(choices.size());
+            std::ptrdiff_t index = it == choices.end() ? (direction >= 0 ? -1 : 0) : std::distance(choices.begin(), it);
+            index = (index + (direction >= 0 ? 1 : -1) + count) % count;
+            return stage(registry, id, choices[static_cast<std::size_t>(index)].value, error);
+        }
+    }
     if (definition->type == SettingType::Enum) {
         const std::string& selected = std::get<std::string>(current);
         auto it = std::find_if(definition->choices.begin(), definition->choices.end(), [&](const SettingChoice& choice) { return choice.value == selected; });

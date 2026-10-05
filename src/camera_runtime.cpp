@@ -606,7 +606,7 @@ bool GameCameraRuntime::restore_state(std::string_view text, std::string* error)
     in>>std::ws;if(!in.eof())return fail("trailing camera runtime state data");
     for(const Entry& entry:entries){const auto& viewport=viewports_.at(entry.id);if(entry.live!=0U&&viewport.director.find_rig(entry.live)==nullptr)return fail("camera runtime state references an unknown rig");if(!entry.state.empty()&&!viewport.director.has_state_binding(entry.state))return fail("camera runtime state references an unknown camera state");}
     if(!set_accessibility(restoredAccessibility,error))return false;
-    for(const Entry& entry:entries){auto& viewport=viewports_.at(entry.id);if(entry.live!=0U)(void)viewport.director.force_live(entry.live,true);if(!entry.state.empty())(void)viewport.director.set_state(entry.state);if(entry.hasSequence){viewport.sequencePlayer->seek(entry.time);if(entry.playing)viewport.sequencePlayer->play(false);else viewport.sequencePlayer->pause();}viewport.cutGeneration=entry.cut;}
+    for(const Entry& entry:entries){auto& viewport=viewports_.at(entry.id);if(entry.live!=0U){(void)viewport.director.force_live(entry.live,true);viewport.previousLiveRig=entry.live;}if(!entry.state.empty())(void)viewport.director.set_state(entry.state);if(entry.hasSequence){viewport.sequencePlayer->seek(entry.time);if(entry.playing)viewport.sequencePlayer->play(false);else viewport.sequencePlayer->pause();}viewport.cutGeneration=entry.cut;}
     return true;
 }
 

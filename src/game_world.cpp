@@ -9,6 +9,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <set>
+#include <type_traits>
+#include <variant>
 
 #include "dve/collision_proxy.hpp"
 #include "dve/connectivity.hpp"
@@ -177,6 +181,10 @@ std::optional<DeformableRayHit> ray_sphere_deformable(
         static_cast<MaterialId>(std::min<std::uint32_t>(hit->materialIndex, 255U))};
 }
 
+[[nodiscard]] Float3 attachment_cross(Float3 a, Float3 b) noexcept {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
 RigidTransform compose_game_attachment(
     const RigidTransform& parentWorld, const GameObjectAttachment& attachment) noexcept {
     RigidTransform result = attachment.localTransform;
@@ -224,6 +232,15 @@ std::unique_ptr<VoxelObject> clone_game_voxels(const VoxelObject* source) {
 
 constexpr std::size_t kMaxFragmentsPerDamageCall = 32U;
 
+// Safety cap for GameWorld::damage_sphere. build_damage_batches walks the sphere's voxel
+// span (O(radiusVoxels^2) z/y rows) even where no voxels exist, so an unbounded finite
+// radius (e.g. 1e30f from a script) quantizes to ~INT32_MAX subvoxel units and the batch
+// loop never finishes in practice (~1e14 row iterations). 1000 m is far beyond any
+// gameplay-scale explosion, and at any sane voxel size it keeps the quantized radius
+// (radius / voxelSizeMeters * kDamageSubvoxelScale) and its square inside int32/int64
+// range, so the int64 row arithmetic in build_damage_batches cannot overflow either.
+constexpr float kMaxDamageSphereRadiusMeters = 1000.0F;
+
 } // namespace
 
 GameObjectDesc::GameObjectDesc(const GameObjectDesc& other)
@@ -258,9 +275,15 @@ struct GameWorld::Object {
     bool structural{true};
     MaterialMassTable massTable{};
     double densityQuantumKilogramsPerCubicMeter{1.0};
+    // Render-only copy of a cooked asset's material table (spawn_asset & friends). Empty for
+    // create_object()/spawn_box objects, whose voxel material ids have no table of their own.
+    std::vector<VoxelMaterialDefinition> materials;
     bool hasBody{};
+    // Visual-only voxels (spawn_visual_asset): never gets a body, ignored by collision queries.
+    bool visualOnly{};
     RigidBodyHandle bodyHandle{kInvalidRigidBodyHandle};
     Float3 localCenterOfMassMeters{}; // valid only if dynamic && hasBody
+    std::optional<GameObjectSource> source; // save games: the asset this geometry came from
 };
 
 struct GameWorld::Timer {
@@ -494,24 +517,68 @@ GameObjectId GameWorld::spawn_asset(
         if (error) *error = result.error.empty() ? "failed to read cooked asset" : result.error;
         return kInvalidGameObjectId;
     }
-    if (result.asset.object.occupied_voxel_count() == 0) {
+    return spawn_cooked_asset(std::move(result.asset), name.empty() ? path.stem().string() : std::move(name),
+                              transform, dynamic, structural, error);
+}
+
+GameObjectId GameWorld::spawn_asset_from_bytes(
+    std::span<const std::byte> bytes, std::string_view extension, std::string name,
+    const RigidTransform& transform, bool dynamic, bool structural, std::string* error) {
+    if (name.empty()) name = "asset";
+    if (extension == ".dmesh" || extension == ".DMESH") {
+        if (!geometry_kind_supported(GeometryKind::Polygon)) {
+            if (error) *error = "this build profile does not enable polygon gameplay objects";
+            return kInvalidGameObjectId;
+        }
+        PolygonAssetReadResult result = read_dmesh(bytes);
+        if (!result) {
+            if (error) *error = result.error.empty() ? "failed to read polygon asset" : result.error;
+            return kInvalidGameObjectId;
+        }
+        return spawn_cooked_polygon_asset(std::move(result.asset), std::move(name), transform, dynamic, structural, error);
+    }
+    if (extension != ".dvox" && extension != ".DVOX") {
+        if (error) *error = "unsupported asset extension '" + std::string(extension) + "' (expected .dvox or .dmesh)";
+        return kInvalidGameObjectId;
+    }
+    if (!geometry_kind_supported(GeometryKind::Voxel)) {
+        if (error) *error = "this build profile does not enable voxel gameplay objects";
+        return kInvalidGameObjectId;
+    }
+    DvoxReadResult result = read_dvox(bytes);
+    if (!result.success) {
+        if (error) *error = result.error.empty() ? "failed to read cooked asset" : result.error;
+        return kInvalidGameObjectId;
+    }
+    return spawn_cooked_asset(std::move(result.asset), std::move(name), transform, dynamic, structural, error);
+}
+
+GameObjectId GameWorld::spawn_cooked_asset(
+    CookedVoxelAsset asset, std::string name, const RigidTransform& transform,
+    bool dynamic, bool structural, std::string* error) {
+    if (!geometry_kind_supported(GeometryKind::Voxel)) {
+        if (error) *error = "this build profile does not enable voxel gameplay objects";
+        return kInvalidGameObjectId;
+    }
+    if (asset.object.occupied_voxel_count() == 0) {
         if (error) *error = "cooked asset has no occupied voxels";
         return kInvalidGameObjectId;
     }
-    if (!(result.asset.voxelSizeMeters > 0.0F) || !std::isfinite(result.asset.voxelSizeMeters)) {
+    if (!(asset.voxelSizeMeters > 0.0F) || !std::isfinite(asset.voxelSizeMeters)) {
         if (error) *error = "cooked asset has an invalid voxelSizeMeters";
         return kInvalidGameObjectId;
     }
 
     Object object;
-    object.name = name.empty() ? path.stem().string() : std::move(name);
+    object.name = name.empty() ? std::string("asset") : std::move(name);
     object.authoredTransform = transform;
-    object.voxelSizeMeters = result.asset.voxelSizeMeters;
+    object.voxelSizeMeters = asset.voxelSizeMeters;
     object.dynamic = dynamic;
     object.structural = structural;
-    object.voxels = std::make_unique<VoxelObject>(std::move(result.asset.object));
+    object.voxels = std::make_unique<VoxelObject>(std::move(asset.object));
     object.massTable = build_material_mass_table_from_definitions(
-        result.asset.materials, &object.densityQuantumKilogramsPerCubicMeter);
+        asset.materials, &object.densityQuantumKilogramsPerCubicMeter);
+    object.materials = std::move(asset.materials);
 
     if (object.dynamic) {
         Float3 localComMeters{};
@@ -560,6 +627,67 @@ GameObjectId GameWorld::spawn_asset(
     return id;
 }
 
+GameObjectId GameWorld::spawn_visual_asset(
+    CookedVoxelAsset asset, std::string name, const RigidTransform& transform, std::string* error) {
+    if (!geometry_kind_supported(GeometryKind::Voxel)) {
+        if (error) *error = "this build profile does not enable voxel gameplay objects";
+        return kInvalidGameObjectId;
+    }
+    if (asset.object.occupied_voxel_count() == 0) {
+        if (error) *error = "cooked asset has no occupied voxels";
+        return kInvalidGameObjectId;
+    }
+    if (!(asset.voxelSizeMeters > 0.0F) || !std::isfinite(asset.voxelSizeMeters)) {
+        if (error) *error = "cooked asset has an invalid voxelSizeMeters";
+        return kInvalidGameObjectId;
+    }
+    Object object;
+    object.name = name.empty() ? std::string("asset") : std::move(name);
+    object.authoredTransform = transform;
+    object.voxelSizeMeters = asset.voxelSizeMeters;
+    object.dynamic = false;
+    object.structural = false;
+    object.visualOnly = true;
+    object.voxels = std::make_unique<VoxelObject>(std::move(asset.object));
+    object.massTable = build_material_mass_table_from_definitions(
+        asset.materials, &object.densityQuantumKilogramsPerCubicMeter);
+    object.materials = std::move(asset.materials);
+    const GameObjectId id = allocate_id();
+    object.id = id;
+    synchronize_membership_component(object);
+    objects_.emplace(id, std::move(object));
+    dispatch_lifecycle({GameLifecycleEventKind::Spawn, id});
+    return id;
+}
+
+std::optional<bool> GameWorld::has_collision(GameObjectId id) const noexcept {
+    const auto it = objects_.find(id);
+    if (it == objects_.end()) return std::nullopt;
+    return !it->second.visualOnly;
+}
+
+GameObjectId GameWorld::spawn_visual_polygon_asset(
+    CookedPolygonAsset asset, std::string name, const RigidTransform& transform, std::string* error) {
+    if (!geometry_kind_supported(GeometryKind::Polygon)) {
+        if (error) *error = "this build profile does not enable polygon gameplay objects";
+        return kInvalidGameObjectId;
+    }
+    Object object;
+    object.name = name.empty() ? std::string("asset") : std::move(name);
+    object.authoredTransform = transform;
+    object.dynamic = false;
+    object.structural = false;
+    object.visualOnly = true;
+    object.polygon = std::make_unique<CookedPolygonAsset>(std::move(asset));
+    object.polygonBvh = std::make_unique<PolygonBvh>();
+    if (!object.polygonBvh->build(*object.polygon, error)) return kInvalidGameObjectId;
+    const GameObjectId id = allocate_id();
+    object.id = id;
+    synchronize_membership_component(object);
+    objects_.emplace(id, std::move(object));
+    dispatch_lifecycle({GameLifecycleEventKind::Spawn, id});
+    return id;
+}
 
 GameObjectId GameWorld::spawn_polygon_asset(
     const std::filesystem::path& path, std::string name, const RigidTransform& transform,
@@ -573,12 +701,23 @@ GameObjectId GameWorld::spawn_polygon_asset(
         if (error) *error = result.error.empty() ? "failed to read polygon asset" : result.error;
         return kInvalidGameObjectId;
     }
+    return spawn_cooked_polygon_asset(std::move(result.asset), name.empty() ? path.stem().string() : std::move(name),
+                                      transform, dynamic, structural, error);
+}
+
+GameObjectId GameWorld::spawn_cooked_polygon_asset(
+    CookedPolygonAsset asset, std::string name, const RigidTransform& transform,
+    bool dynamic, bool structural, std::string* error) {
+    if (!geometry_kind_supported(GeometryKind::Polygon)) {
+        if (error) *error = "this build profile does not enable polygon gameplay objects";
+        return kInvalidGameObjectId;
+    }
     Object object;
-    object.name = name.empty() ? path.stem().string() : std::move(name);
+    object.name = name.empty() ? std::string("asset") : std::move(name);
     object.authoredTransform = transform;
     object.dynamic = dynamic;
     object.structural = structural;
-    object.polygon = std::make_unique<CookedPolygonAsset>(std::move(result.asset));
+    object.polygon = std::make_unique<CookedPolygonAsset>(std::move(asset));
     object.polygonBvh = std::make_unique<PolygonBvh>();
     if (!object.polygonBvh->build(*object.polygon, error)) return kInvalidGameObjectId;
     if (dynamic) {
@@ -861,7 +1000,9 @@ bool GameWorld::attach_object(
         ? game_attachment_local_from_world(parentWorld, childWorld, inheritPosition, inheritRotation)
         : childIt->second.authoredTransform;
     childIt->second.attachment = std::move(attachment);
-    return synchronize_attached_body(childIt->second);
+    const bool synchronized = synchronize_attached_body(childIt->second);
+    update_attachment_collision_filters();
+    return synchronized;
 }
 
 bool GameWorld::detach_object(GameObjectId childId, bool preserveWorldTransform, std::string* error) {
@@ -871,7 +1012,9 @@ bool GameWorld::detach_object(GameObjectId childId, bool preserveWorldTransform,
     const RigidTransform world = resolve_transform(it->second);
     it->second.attachment.reset();
     if (preserveWorldTransform) it->second.authoredTransform = world;
-    return synchronize_attached_body(it->second);
+    const bool synchronized = synchronize_attached_body(it->second);
+    update_attachment_collision_filters();
+    return synchronized;
 }
 
 std::optional<GameObjectId> GameWorld::parent_of(GameObjectId child) const noexcept {
@@ -940,6 +1083,8 @@ bool GameWorld::replace_voxel_brick(
         if (error != nullptr) *error = "brick repair cannot remove the final voxel; replicate object despawn instead";
         return false;
     }
+
+    if (object.visualOnly) return true; // no collision to rebuild
 
     const RigidTransform currentTransform = resolve_transform(object);
     const std::optional<RigidBodyState> previousState =
@@ -1023,6 +1168,32 @@ RigidTransform GameWorld::resolve_transform(const Object& object) const {
     return compose_game_attachment(*frame, *object.attachment);
 }
 
+GameWorld::MotionField GameWorld::motion_field(const Object& object, std::size_t depth) const {
+    MotionField field;
+    if (object.attachment) {
+        const auto parentIt = objects_.find(object.attachment->parent);
+        if (parentIt == objects_.end() || depth > objects_.size()) return field;
+        const MotionField parent = motion_field(parentIt->second, depth + 1U);
+        const RigidTransform parentWorld = resolve_transform(parentIt->second);
+        const RigidTransform world = resolve_transform(object);
+        field.origin = world.position;
+        if (object.attachment->inheritRotation) field.angular = parent.angular;
+        if (object.attachment->inheritPosition) {
+            // position = parent.position + R_parent * local (inheritRotation) or + local.
+            const Float3 point = object.attachment->inheritRotation ? world.position : parentWorld.position;
+            field.linear = add(parent.linear, attachment_cross(parent.angular, subtract(point, parent.origin)));
+        }
+        return field;
+    }
+    if (!object.hasBody || !object.dynamic) return field;
+    if (const auto state = physics_->state(object.bodyHandle)) {
+        field.linear = state->linearVelocity;
+        field.angular = state->angularVelocity;
+        field.origin = state->currentTransform.position;
+    }
+    return field;
+}
+
 bool GameWorld::synchronize_attached_body(Object& object) {
     if (!object.hasBody || !object.dynamic) return true;
     const RigidTransform world = resolve_transform(object);
@@ -1030,12 +1201,39 @@ bool GameWorld::synchronize_attached_body(Object& object) {
     state.currentTransform = make_rigid_transform(
         add(world.position, rotate(world.rotation, object.localCenterOfMassMeters)), world.rotation);
     state.previousTransform = state.currentTransform;
-    if (const auto existing = physics_->state(object.bodyHandle)) {
-        state.linearVelocity = existing->linearVelocity;
-        state.angularVelocity = existing->angularVelocity;
-        state.sleeping = existing->sleeping;
-    }
+    // An attached body is driven by its parent: give it the parent's rigid velocity at its
+    // centre of mass instead of keeping its own. Keeping its own velocity let gravity build
+    // up without bound between the per-tick teleports (the body then swept ever further
+    // through the scene during each step before being snapped back), and made scripts read a
+    // meaningless falling velocity for an object that visibly rides its parent.
+    const MotionField field = motion_field(object);
+    state.linearVelocity = add(field.linear,
+                               attachment_cross(field.angular, subtract(state.currentTransform.position, field.origin)));
+    state.angularVelocity = field.angular;
+    if (const auto existing = physics_->state(object.bodyHandle)) state.sleeping = existing->sleeping;
     return physics_->set_state(object.bodyHandle, state);
+}
+
+void GameWorld::update_attachment_collision_filters() {
+    std::set<std::pair<RigidBodyHandle, RigidBodyHandle>> wanted;
+    for (const auto& [id, object] : objects_) {
+        (void)id;
+        if (!object.attachment || !object.hasBody) continue;
+        const auto parent = objects_.find(object.attachment->parent);
+        if (parent == objects_.end() || !parent->second.hasBody) continue;
+        const RigidBodyHandle a = std::min(object.bodyHandle, parent->second.bodyHandle);
+        const RigidBodyHandle b = std::max(object.bodyHandle, parent->second.bodyHandle);
+        if (a != b) wanted.emplace(a, b);
+    }
+    if (wanted == attachmentCollisionFilters_) return;
+    for (const auto& pair : attachmentCollisionFilters_) {
+        if (!wanted.contains(pair)) (void)physics_->set_pair_collision_enabled(pair.first, pair.second, true);
+    }
+    for (const auto& pair : wanted) {
+        if (!attachmentCollisionFilters_.contains(pair))
+            (void)physics_->set_pair_collision_enabled(pair.first, pair.second, false);
+    }
+    attachmentCollisionFilters_ = std::move(wanted);
 }
 
 void GameWorld::synchronize_attached_bodies() {
@@ -1049,6 +1247,36 @@ std::optional<RigidTransform> GameWorld::transform(GameObjectId id) const {
     const auto it = objects_.find(id);
     if (it == objects_.end()) return std::nullopt;
     return resolve_transform(it->second);
+}
+
+std::vector<GameRenderObject> GameWorld::render_objects() const {
+    std::vector<GameRenderObject> result;
+    result.reserve(objects_.size());
+    for (const auto& [id, object] : objects_) {
+        GameRenderObject item;
+        item.id = id;
+        item.name = &object.name;
+        item.kind = object.voxels ? GameGeometryKind::Voxel
+                  : object.polygon ? GameGeometryKind::Polygon
+                  : GameGeometryKind::Marker;
+#if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
+        if (item.kind == GameGeometryKind::Marker && deformables_ && deformables_->contains(id)) {
+            item.kind = GameGeometryKind::Deformable;
+        }
+#endif
+        item.voxels = object.voxels.get();
+        item.polygon = object.polygon.get();
+        item.materials = object.materials;
+        item.transform = resolve_transform(object);
+        item.voxelSizeMeters = object.voxelSizeMeters;
+        item.enabled = object.enabled;
+        item.dynamic = object.dynamic;
+        item.collision = !object.visualOnly;
+        result.push_back(item);
+    }
+    std::sort(result.begin(), result.end(),
+              [](const GameRenderObject& a, const GameRenderObject& b) { return a.id < b.id; });
+    return result;
 }
 
 std::optional<Float3> GameWorld::position(GameObjectId id) const {
@@ -1307,6 +1535,9 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
     if (it == objects_.end() || !it->second.voxels) return std::nullopt;
     Object& object = it->second;
     if (!(radius > 0.0F) || !std::isfinite(radius)) return std::nullopt;
+    // Clamp after the NaN/non-positive guard: a huge finite radius would otherwise make
+    // build_damage_batches walk ~INT32_MAX subvoxel units per axis and never return.
+    radius = std::min(radius, kMaxDamageSphereRadiusMeters);
 
     const RigidTransform current = resolve_transform(object);
     const Float3 localMeters = inverse_transform_point(current, worldCenter);
@@ -1319,7 +1550,8 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
 
     const bool destroyed = object.voxels->occupied_voxel_count() == 0;
     std::vector<GameObjectId> newFragmentIds;
-    if (!destroyed) newFragmentIds = fragment_after_damage(id, object);
+    // Visual-only voxels are carved but never split into (physical) debris.
+    if (!destroyed && !object.visualOnly) newFragmentIds = fragment_after_damage(id, object);
 
     GameDamageEvent event{id, worldCenter, radius, report.removedVoxelCount, destroyed, std::move(newFragmentIds)};
     for (const DamageListener& listener : damageListeners_) listener(event);
@@ -1349,6 +1581,10 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
     // tick), which is physically reasonable.
     std::optional<RigidBodyState> parentState;
     if (object.hasBody && object.dynamic) parentState = physics_->state(object.bodyHandle);
+    // Fragments and the rebuilt primary body are built at authoredTransform, which is only the
+    // spawn pose for a dynamic object: re-base it on where the object is now, or every split
+    // would teleport the pieces back to the spawn point.
+    if (object.hasBody && object.dynamic) object.authoredTransform = resolve_transform(object);
 
     for (std::size_t componentIndex = 0; componentIndex < snapshot.components.size(); ++componentIndex) {
         if (componentIndex == primaryIndex) continue;
@@ -1393,9 +1629,12 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         fragmentObject.structural = false; // detached debris is not structural by definition
         fragmentObject.densityQuantumKilogramsPerCubicMeter = object.densityQuantumKilogramsPerCubicMeter;
         fragmentObject.massTable = object.massTable;
+        fragmentObject.materials = object.materials;
         fragmentObject.hasBody = true;
         fragmentObject.bodyHandle = fragmentHandle;
         fragmentObject.localCenterOfMassMeters = fragmentLocalCom;
+        fragmentObject.source = object.source;
+        if (fragmentObject.source) fragmentObject.source->derived = true;
 
         const GameObjectId fragmentId = allocate_id();
         fragmentObject.id = fragmentId;
@@ -1465,6 +1704,7 @@ std::optional<GameRaycastHit> GameWorld::raycast(Float3 worldOrigin, Float3 worl
     const Float3 normalizedDirection = normalize(worldDirection);
 #endif
     for (const auto& [id, object] : objects_) {
+        if (object.visualOnly) continue; // no collision
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
         if (const DeformableCollisionProxy* proxy = deformables_->collision_proxy(id)) {
             std::optional<DeformableRayHit> deformableHit;
@@ -1528,6 +1768,7 @@ std::vector<GameObjectId> GameWorld::sphere_overlap(Float3 worldCenter, float ra
     if (!(radius > 0.0F) || !std::isfinite(radius)) return result;
     const float radiusSquared = radius * radius;
     for (const auto& [id, object] : objects_) {
+        if (object.visualOnly) continue; // no collision
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
         if (const DeformableCollisionProxy* proxy = deformables_->collision_proxy(id)) {
             bool overlaps{};
@@ -1577,6 +1818,7 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
         !std::isfinite(worldDisplacement.z)) return std::nullopt;
     std::optional<GameCapsuleHit> best;
     for (const auto& [id, object] : objects_) {
+        if (object.visualOnly) continue; // no collision
         if (id == ignoreObject || (!object.voxels && !object.polygon)) continue;
         const RigidTransform current = resolve_transform(object);
         std::optional<CapsuleSweepHit> hit;
@@ -1605,6 +1847,7 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
 
 bool GameWorld::capsule_overlaps(const Capsule& worldCapsule, GameObjectId ignoreObject) const {
     for (const auto& [id, object] : objects_) {
+        if (object.visualOnly) continue; // no collision
         if (id == ignoreObject) continue;
         const RigidTransform current = resolve_transform(object);
         if (object.voxels) {
@@ -1631,6 +1874,7 @@ GameCapsuleDepenetration GameWorld::depenetrate_capsule(
         bool found = false;
         GameObjectId bestObject = std::numeric_limits<GameObjectId>::max();
         for (const auto& [id, object] : objects_) {
+            if (object.visualOnly) continue; // no collision
             if (id == ignoreObject || (!object.voxels && !object.polygon)) continue;
             const RigidTransform current = resolve_transform(object);
             Float3 correction{};
@@ -1735,6 +1979,39 @@ bool GameWorld::cancel_timer(TimerId id) {
     return false;
 }
 
+bool GameWorld::has_timer(TimerId id) const noexcept {
+    for (const Timer& timer : timers_)
+        if (timer.id == id && !timer.cancelled) return true;
+    return false;
+}
+
+std::vector<GameWorld::TimerId> GameWorld::unbound_timer_ids() const {
+    std::vector<TimerId> ids;
+    for (const Timer& timer : timers_)
+        if (!timer.cancelled && !timer.callback) ids.push_back(timer.id);
+    return ids;
+}
+
+bool GameWorld::bind_restored_timer(TimerId id, std::function<void()> callback) {
+    if (!callback) return false;
+    for (Timer& timer : timers_) {
+        if (timer.id != id || timer.cancelled) continue;
+        if (timer.callback) return false;
+        timer.callback = std::move(callback);
+        return true;
+    }
+    return false;
+}
+
+std::size_t GameWorld::drop_unbound_timers() {
+    std::size_t dropped = 0U;
+    for (Timer& timer : timers_) {
+        if (!timer.cancelled && !timer.callback) { timer.cancelled = true; ++dropped; }
+    }
+    std::erase_if(timers_, [](const Timer& timer) { return timer.cancelled; });
+    return dropped;
+}
+
 GameObjectPoolId GameWorld::register_pool(GameObjectPoolDesc desc, std::string* error) {
     const auto fail = [&](std::string message) {
         if (error) *error = std::move(message);
@@ -1826,7 +2103,7 @@ void GameWorld::tick(float fixedDeltaSeconds) {
     // be eligible to fire within this same tick.
     std::vector<std::function<void()>> due;
     for (Timer& timer : timers_) {
-        if (timer.cancelled || timer.fireAtSeconds > elapsedSeconds_) continue;
+        if (timer.cancelled || !timer.callback || timer.fireAtSeconds > elapsedSeconds_) continue;
         due.push_back(timer.callback);
         if (timer.intervalSeconds > 0.0F) timer.fireAtSeconds += timer.intervalSeconds;
         else timer.cancelled = true;
@@ -1834,6 +2111,9 @@ void GameWorld::tick(float fixedDeltaSeconds) {
     std::erase_if(timers_, [](const Timer& timer) { return timer.cancelled; });
     for (const auto& callback : due) callback();
 
+    // Bodies can be replaced between ticks (damage, brick edits, fragments), so re-assert the
+    // parent/child contact filters before stepping; this is a no-op when nothing changed.
+    update_attachment_collision_filters();
     physics_->step(fixedDeltaSeconds);
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
     lastDeformableTelemetry_ = deformables_->tick(fixedDeltaSeconds);
@@ -1868,6 +2148,455 @@ void GameWorld::tick(float fixedDeltaSeconds) {
     uiRuntime_->rebuild();
 
     for (const TickListener& listener : tickListeners_) listener(fixedDeltaSeconds);
+}
+
+// --- Save games -----------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::uint64_t kStateFnvOffset = 1469598103934665603ULL;
+constexpr std::uint64_t kStateFnvPrime = 1099511628211ULL;
+
+void state_hash_bytes(std::uint64_t& hash, const void* data, std::size_t size) noexcept {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= bytes[i];
+        hash *= kStateFnvPrime;
+    }
+}
+template <class T>
+void state_hash_value(std::uint64_t& hash, const T& value) noexcept {
+    static_assert(std::is_trivially_copyable_v<T>);
+    state_hash_bytes(hash, &value, sizeof(T));
+}
+void state_hash_string(std::uint64_t& hash, std::string_view text) noexcept {
+    state_hash_value(hash, static_cast<std::uint64_t>(text.size()));
+    state_hash_bytes(hash, text.data(), text.size());
+}
+void state_hash_float3(std::uint64_t& hash, Float3 value) noexcept {
+    state_hash_value(hash, value.x); state_hash_value(hash, value.y); state_hash_value(hash, value.z);
+}
+void state_hash_transform(std::uint64_t& hash, const RigidTransform& value) noexcept {
+    state_hash_float3(hash, value.position);
+    state_hash_value(hash, value.rotation.x); state_hash_value(hash, value.rotation.y);
+    state_hash_value(hash, value.rotation.z); state_hash_value(hash, value.rotation.w);
+}
+void state_hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& m) noexcept {
+    state_hash_string(hash, m.name);
+    state_hash_value(hash, m.baseColor.x); state_hash_value(hash, m.baseColor.y);
+    state_hash_value(hash, m.baseColor.z); state_hash_value(hash, m.baseColor.w);
+    state_hash_float3(hash, m.emissive);
+    state_hash_value(hash, m.metallic); state_hash_value(hash, m.roughness); state_hash_value(hash, m.specular);
+    state_hash_value(hash, m.shadingModel); state_hash_value(hash, m.blendMode);
+    state_hash_value(hash, m.subsurfaceScatterDistanceMeters); state_hash_float3(hash, m.subsurfaceColor);
+    state_hash_value(hash, m.clearCoat); state_hash_value(hash, m.clearCoatRoughness);
+    state_hash_float3(hash, m.foliageColor);
+    state_hash_value(hash, m.foliageTransmittance); state_hash_value(hash, m.foliageWrap);
+    state_hash_value(hash, static_cast<std::uint64_t>(m.layers.size()));
+    for (const VoxelMaterialLayer& layer : m.layers) {
+        state_hash_value(hash, layer.sourceMaterial); state_hash_value(hash, layer.weight);
+        state_hash_value(hash, layer.blendMode); state_hash_value(hash, layer.enabled);
+    }
+    state_hash_value(hash, m.densityKilogramsPerCubicMeter); state_hash_value(hash, m.structuralStrength);
+    state_hash_value(hash, m.fractureResistance); state_hash_value(hash, m.flammability);
+    state_hash_value(hash, m.thermalConductivity); state_hash_value(hash, m.transparent);
+    state_hash_value(hash, m.structural);
+}
+void state_hash_component(std::uint64_t& hash, const Component& component) noexcept {
+    state_hash_value(hash, component.id);
+    state_hash_string(hash, component.type);
+    state_hash_value(hash, component.enabled);
+    state_hash_value(hash, static_cast<std::uint64_t>(component.properties.size()));
+    for (const auto& [key, value] : component.properties) {
+        state_hash_string(hash, key);
+        state_hash_value(hash, static_cast<std::uint8_t>(value.index()));
+        std::visit([&](const auto& item) {
+            using T = std::decay_t<decltype(item)>;
+            if constexpr (std::is_same_v<T, std::string>) state_hash_string(hash, item);
+            else state_hash_value(hash, item);
+        }, value);
+    }
+}
+bool finite_transform(const RigidTransform& t) noexcept {
+    return std::isfinite(t.position.x) && std::isfinite(t.position.y) && std::isfinite(t.position.z) &&
+           std::isfinite(t.rotation.x) && std::isfinite(t.rotation.y) && std::isfinite(t.rotation.z) &&
+           std::isfinite(t.rotation.w);
+}
+bool finite_float3(Float3 v) noexcept { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+
+} // namespace
+
+bool GameWorld::set_object_source(GameObjectId id, GameObjectSource source) {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || (!it->second.voxels && !it->second.polygon)) return false;
+    it->second.source = std::move(source);
+    return true;
+}
+
+const GameObjectSource* GameWorld::object_source(GameObjectId id) const noexcept {
+    const auto it = objects_.find(id);
+    if (it == objects_.end() || !it->second.source) return nullptr;
+    return &*it->second.source;
+}
+
+GameWorldSaveState GameWorld::capture_save_state() const {
+    GameWorldSaveState state;
+    state.nextObjectId = nextId_;
+    state.nextPoolId = nextPoolId_;
+    state.nextTimerId = nextTimerId_;
+    state.elapsedSeconds = elapsedSeconds_;
+    const std::vector<GameObjectId> ids = object_ids();
+    state.objects.reserve(ids.size());
+    for (const GameObjectId id : ids) {
+        const Object& object = objects_.at(id);
+        GameWorldObjectState item;
+        item.id = id;
+        item.name = object.name;
+        item.tags = object.tags;
+        item.groups = object.groups;
+        item.layer = object.layer;
+        item.components = object.components;
+        item.enabled = object.enabled;
+        item.attachment = object.attachment;
+        item.authoredTransform = object.authoredTransform;
+        item.voxelSizeMeters = object.voxelSizeMeters;
+        item.kind = object.voxels ? GameGeometryKind::Voxel : object.polygon ? GameGeometryKind::Polygon : GameGeometryKind::Marker;
+        item.dynamic = object.dynamic;
+        item.structural = object.structural;
+        item.visualOnly = object.visualOnly;
+        item.source = object.source;
+        if (object.voxels) {
+            item.voxelObjectId = object.voxels->id();
+            item.bricks.reserve(object.voxels->brick_count());
+            for (const auto& [key, brick] : object.voxels->bricks())
+                item.bricks.push_back(GameWorldBrickState{key, brick.generation(), brick.materials()});
+            item.materials = object.materials;
+        }
+        for (int material = 0; material < 256; ++material)
+            item.densityUnits[static_cast<std::size_t>(material)] = object.massTable.density_units(static_cast<MaterialId>(material));
+        item.densityQuantumKilogramsPerCubicMeter = object.densityQuantumKilogramsPerCubicMeter;
+        item.hasBody = object.hasBody;
+        if (object.hasBody) {
+            if (const auto body = physics_->state(object.bodyHandle)) item.body = *body;
+            item.localCenterOfMassMeters = object.localCenterOfMassMeters;
+        }
+        if (const auto pool = objectPools_.find(id); pool != objectPools_.end()) item.pool = pool->second;
+        state.objects.push_back(std::move(item));
+    }
+    for (const Timer& timer : timers_) {
+        if (!timer.cancelled) state.timers.push_back({timer.id, timer.fireAtSeconds, timer.intervalSeconds});
+    }
+    for (const auto& [id, pool] : pools_)
+        state.pools.push_back({id, pool.name, static_cast<std::uint64_t>(pool.capacity), pool.freeIds});
+    return state;
+}
+
+std::uint64_t GameWorld::state_hash() const {
+    std::uint64_t hash = kStateFnvOffset;
+    state_hash_value(hash, nextId_);
+    state_hash_value(hash, elapsedSeconds_);
+    for (const GameObjectId id : object_ids()) {
+        const Object& object = objects_.at(id);
+        state_hash_value(hash, id);
+        state_hash_string(hash, object.name);
+        state_hash_value(hash, static_cast<std::uint64_t>(object.tags.size()));
+        for (const std::string& tag : object.tags) state_hash_string(hash, tag);
+        state_hash_value(hash, static_cast<std::uint64_t>(object.groups.size()));
+        for (const std::string& group : object.groups) state_hash_string(hash, group);
+        state_hash_value(hash, object.layer);
+        state_hash_value(hash, static_cast<std::uint64_t>(object.components.size()));
+        for (const Component& component : object.components) state_hash_component(hash, component);
+        state_hash_value(hash, object.enabled);
+        state_hash_value(hash, object.attachment.has_value());
+        if (object.attachment) {
+            state_hash_value(hash, object.attachment->parent);
+            state_hash_transform(hash, object.attachment->localTransform);
+            state_hash_string(hash, object.attachment->socket);
+            state_hash_value(hash, object.attachment->inheritPosition);
+            state_hash_value(hash, object.attachment->inheritRotation);
+        }
+        state_hash_transform(hash, object.authoredTransform);
+        state_hash_value(hash, object.voxelSizeMeters);
+        state_hash_value(hash, static_cast<std::uint8_t>(object.voxels ? 1 : object.polygon ? 2 : 0));
+        state_hash_value(hash, object.dynamic);
+        state_hash_value(hash, object.structural);
+        state_hash_value(hash, object.visualOnly);
+        if (object.voxels) {
+            state_hash_value(hash, object.voxels->state_hash());
+            state_hash_value(hash, static_cast<std::uint64_t>(object.voxels->brick_count()));
+        }
+        if (object.polygon) state_hash_value(hash, object.polygon->contentHash);
+        state_hash_value(hash, static_cast<std::uint64_t>(object.materials.size()));
+        for (const VoxelMaterialDefinition& material : object.materials) state_hash_material(hash, material);
+        for (int material = 0; material < 256; ++material)
+            state_hash_value(hash, object.massTable.density_units(static_cast<MaterialId>(material)));
+        state_hash_value(hash, object.densityQuantumKilogramsPerCubicMeter);
+        state_hash_value(hash, object.hasBody);
+        if (object.hasBody) {
+            if (const auto body = physics_->state(object.bodyHandle)) {
+                state_hash_transform(hash, body->previousTransform);
+                state_hash_transform(hash, body->currentTransform);
+                state_hash_float3(hash, body->linearVelocity);
+                state_hash_float3(hash, body->angularVelocity);
+                state_hash_value(hash, body->sleeping);
+            }
+            state_hash_float3(hash, object.localCenterOfMassMeters);
+        }
+        const auto pool = objectPools_.find(id);
+        state_hash_value(hash, pool == objectPools_.end() ? kInvalidGameObjectPoolId : pool->second);
+    }
+    for (const Timer& timer : timers_) {
+        if (timer.cancelled) continue;
+        state_hash_value(hash, timer.id);
+        state_hash_value(hash, timer.fireAtSeconds);
+        state_hash_value(hash, timer.intervalSeconds);
+    }
+    return hash;
+}
+
+bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRestoreReport* report, std::string* error,
+                                   GameWorldRestoreOptions options) {
+    const auto fail = [&](std::string message) {
+        if (error) *error = std::move(message);
+        return false;
+    };
+    GameWorldRestoreReport local;
+
+    // 1. Validate and stage every object without touching the world.
+    struct Staged {
+        Object object;
+        std::optional<RigidBodyCreateDesc> dynamicDesc;
+        std::optional<StaticRigidBodyCreateDesc> staticDesc;
+        RigidBodyState body{};
+    };
+    std::vector<Staged> staged;
+    staged.reserve(state.objects.size());
+    std::set<GameObjectId> savedIds;
+    GameObjectId previousId = kInvalidGameObjectId;
+    for (const GameWorldObjectState& item : state.objects) {
+        if (item.id == kInvalidGameObjectId || item.id <= previousId) return fail("save objects are not sorted by unique id");
+        previousId = item.id;
+        savedIds.insert(item.id);
+    }
+    for (const GameWorldObjectState& item : state.objects) {
+        const std::string label = "object " + std::to_string(item.id) + " ('" + item.name + "')";
+        if (!finite_transform(item.authoredTransform)) return fail(label + " has a non-finite transform");
+        if (item.attachment && (!savedIds.contains(item.attachment->parent) || item.attachment->parent == item.id ||
+                                !finite_transform(item.attachment->localTransform)))
+            return fail(label + " is attached to a missing parent");
+        std::string componentError;
+        if (!validate_components(item.components, nullptr, &componentError))
+            return fail(label + " has invalid components: " + componentError);
+        Staged entry;
+        Object& object = entry.object;
+        object.id = item.id;
+        object.name = item.name;
+        object.tags = normalize_membership_values(item.tags);
+        object.groups = normalize_membership_values(item.groups);
+        object.layer = std::min<std::uint32_t>(item.layer, 63U);
+        object.components = item.components;
+        object.enabled = item.enabled;
+        object.attachment = item.attachment;
+        object.authoredTransform = item.authoredTransform;
+        object.voxelSizeMeters = item.voxelSizeMeters;
+        object.dynamic = item.dynamic;
+        object.structural = item.structural;
+        object.visualOnly = item.visualOnly;
+        object.source = item.source;
+        object.materials = item.materials;
+        for (int material = 0; material < 256; ++material)
+            object.massTable.set_density_units(static_cast<MaterialId>(material), item.densityUnits[static_cast<std::size_t>(material)]);
+        object.densityQuantumKilogramsPerCubicMeter = item.densityQuantumKilogramsPerCubicMeter;
+        object.localCenterOfMassMeters = item.localCenterOfMassMeters;
+        if (item.kind == GameGeometryKind::Voxel) {
+            if (!geometry_kind_supported(GeometryKind::Voxel)) return fail(label + ": this build profile does not enable voxel objects");
+            if (!(item.voxelSizeMeters > 0.0F) || !std::isfinite(item.voxelSizeMeters)) return fail(label + " has an invalid voxel size");
+            auto voxels = std::make_unique<VoxelObject>(item.voxelObjectId);
+            voxels->reserve_bricks(item.bricks.size());
+            for (const GameWorldBrickState& brick : item.bricks) {
+                const VoxelBrickSnapshot snapshot{brick.key, brick.generation, brick.materials,
+                                                  VoxelObject::brick_content_hash(brick.materials)};
+                std::string brickError;
+                if (voxels->find_brick(brick.key) != nullptr) return fail(label + " repeats a brick");
+                if (!voxels->replace_brick(snapshot, &brickError)) return fail(label + ": " + brickError);
+            }
+            if (voxels->occupied_voxel_count() == 0U) return fail(label + " has no voxels");
+            object.voxels = std::move(voxels);
+        } else if (item.kind == GameGeometryKind::Polygon) {
+            if (!item.polygon) return fail(label + " is a polygon object without its geometry");
+            object.polygon = std::make_unique<CookedPolygonAsset>(*item.polygon);
+            object.polygonBvh = std::make_unique<PolygonBvh>();
+            std::string bvhError;
+            if (!object.polygonBvh->build(*object.polygon, &bvhError)) return fail(label + ": " + bvhError);
+        } else if (item.kind != GameGeometryKind::Marker) {
+            return fail(label + " has an unsupported geometry kind");
+        }
+        if (item.hasBody) {
+            if (object.visualOnly || (!object.voxels && !object.polygon)) return fail(label + " cannot have a physics body");
+            if (!finite_transform(item.body.currentTransform) || !finite_transform(item.body.previousTransform) ||
+                !finite_float3(item.body.linearVelocity) || !finite_float3(item.body.angularVelocity) ||
+                !finite_float3(item.localCenterOfMassMeters))
+                return fail(label + " has a non-finite body state");
+            entry.body = item.body;
+            if (object.dynamic) {
+                // Build the body where it is now (object origin = body position - R * localCom).
+                const RigidTransform& bodyTransform = item.body.currentTransform;
+                const RigidTransform origin = make_rigid_transform(
+                    subtract(bodyTransform.position, rotate(bodyTransform.rotation, item.localCenterOfMassMeters)),
+                    bodyTransform.rotation);
+                std::string buildError;
+                Float3 localCom{};
+                if (object.voxels) {
+                    entry.dynamicDesc = build_dynamic_body_desc(
+                        *object.voxels, origin, object.voxelSizeMeters, object.massTable,
+                        object.densityQuantumKilogramsPerCubicMeter, object.structural, &localCom, &buildError);
+                } else {
+                    PolygonCollisionOptions options;
+                    options.densityKilogramsPerCubicMeter = polygon_density(*object.polygon);
+                    options.structural = object.structural;
+                    entry.dynamicDesc = make_polygon_dynamic_body_desc(*object.polygon, origin, options, &localCom);
+                    if (!entry.dynamicDesc) buildError = "could not build polygon collision proxy";
+                }
+                if (!entry.dynamicDesc) return fail(label + ": " + buildError);
+                entry.dynamicDesc->linearVelocity = item.body.linearVelocity;
+                entry.dynamicDesc->angularVelocity = item.body.angularVelocity;
+                object.localCenterOfMassMeters = localCom;
+            } else if (object.voxels) {
+                const std::vector<VoxelBox> boxes = build_merged_object_box_proxy(*object.voxels);
+                StaticRigidBodyCreateDesc desc;
+                desc.transform = object.authoredTransform;
+                desc.collisionClass = RigidBodyCollisionClass::Full;
+                for (const VoxelBox& box : boxes) desc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters));
+                if (boxes.empty() || !validate_static_rigid_body_desc(desc)) return fail(label + " has no valid static collision");
+                entry.staticDesc = std::move(desc);
+            } else {
+                entry.staticDesc = make_polygon_static_body_desc(*object.polygon, object.authoredTransform);
+                if (!entry.staticDesc) return fail(label + ": could not build polygon static collision proxy");
+            }
+        }
+        staged.push_back(std::move(entry));
+    }
+    for (const GameWorldTimerState& timer : state.timers) {
+        if (!std::isfinite(timer.fireAtSeconds) || !std::isfinite(timer.intervalSeconds) || timer.intervalSeconds < 0.0F)
+            return fail("save has an invalid timer");
+    }
+    if (!std::isfinite(state.elapsedSeconds)) return fail("save has an invalid clock");
+
+    // 2. Remove objects that are not in the save, then every body that will be rebuilt.
+    for (const GameObjectId id : object_ids()) {
+        if (savedIds.contains(id)) continue;
+        if (const auto pool = objectPools_.find(id); pool != objectPools_.end()) {
+            if (auto owner = pools_.find(pool->second); owner != pools_.end()) owner->second.activeIds.erase(id);
+            objectPools_.erase(pool);
+        }
+        (void)destroy_object_internal(id, false);
+        ++local.objectsRemoved;
+    }
+    for (auto& [id, object] : objects_) {
+        (void)id;
+        if (object.hasBody) physics_->destroy_body(object.bodyHandle);
+        object.hasBody = false;
+    }
+
+    // 3. Publish in id order: bodies first (so creation order is deterministic), then objects.
+    for (Staged& entry : staged) {
+        Object& object = entry.object;
+        if (entry.dynamicDesc) {
+            const RigidBodyHandle handle = physics_->create_body(*entry.dynamicDesc);
+            if (handle == kInvalidRigidBodyHandle || !physics_->set_state(handle, entry.body)) {
+                if (handle != kInvalidRigidBodyHandle) physics_->destroy_body(handle);
+                return fail("physics backend rejected the body of object " + std::to_string(object.id));
+            }
+            object.hasBody = true;
+            object.bodyHandle = handle;
+        } else if (entry.staticDesc) {
+            const RigidBodyHandle handle = physics_->create_static_body(*entry.staticDesc);
+            if (handle == kInvalidRigidBodyHandle)
+                return fail("physics backend rejected the static body of object " + std::to_string(object.id));
+            object.hasBody = true;
+            object.bodyHandle = handle;
+        }
+        synchronize_membership_component(object);
+        objects_.insert_or_assign(object.id, std::move(object));
+        ++local.objectsRestored;
+    }
+
+    // Every body was rebuilt above (destroying a body drops its pair filters), so apply the
+    // parent/child contact filters for the restored attachments now instead of at the next tick.
+    attachmentCollisionFilters_.clear();
+    update_attachment_collision_filters();
+
+    // 4. Pools: only pools the fresh world registered again (same id and name) keep their
+    //    slots; the prototypes are code, not data.
+    GameObjectId highestReserved = 0U;
+    for (const GameWorldPoolState& saved : state.pools) {
+        auto it = pools_.find(saved.id);
+        if (it == pools_.end() || it->second.name != saved.name) {
+            ++local.poolsDropped;
+            continue;
+        }
+        it->second.freeIds = saved.freeIds;
+        it->second.activeIds.clear();
+        ++local.poolsRestored;
+    }
+    objectPools_.clear();
+    for (const GameWorldObjectState& item : state.objects) {
+        if (!item.pool) continue;
+        auto it = pools_.find(*item.pool);
+        if (it == pools_.end()) continue;
+        it->second.activeIds.insert(item.id);
+        objectPools_[item.id] = *item.pool;
+    }
+    for (const auto& [id, pool] : pools_) {
+        (void)id;
+        for (const GameObjectId reserved : pool.freeIds) highestReserved = std::max(highestReserved, reserved);
+    }
+
+    // 5. Timers matched by id; ids, order and the clock continue from the save. Live timers
+    //    missing from the save already fired (or were cancelled) in the saved session.
+    std::map<std::uint64_t, std::function<void()>> liveCallbacks;
+    for (Timer& timer : timers_) {
+        if (timer.cancelled) continue;
+        liveCallbacks.emplace(timer.id, std::move(timer.callback));
+    }
+    std::vector<Timer> restoredTimers;
+    restoredTimers.reserve(state.timers.size());
+    std::set<std::uint64_t> seenTimers;
+    for (const GameWorldTimerState& saved : state.timers) {
+        if (!seenTimers.insert(saved.id).second) continue;
+        auto live = liveCallbacks.find(saved.id);
+        if (live != liveCallbacks.end()) {
+            restoredTimers.push_back({saved.id, saved.fireAtSeconds, saved.intervalSeconds, false, std::move(live->second)});
+            liveCallbacks.erase(live);
+            ++local.timersRestored;
+        } else if (options.keepUnboundTimers) {
+            restoredTimers.push_back({saved.id, saved.fireAtSeconds, saved.intervalSeconds, false, {}});
+            ++local.timersUnbound;
+        } else {
+            ++local.timersDropped;
+        }
+    }
+    local.timersCancelled = liveCallbacks.size();
+    timers_ = std::move(restoredTimers);
+    std::uint64_t highestTimer = 0U;
+    for (const Timer& timer : timers_) highestTimer = std::max<std::uint64_t>(highestTimer, timer.id);
+    nextTimerId_ = std::max<std::uint64_t>(state.nextTimerId, highestTimer + 1U);
+    elapsedSeconds_ = state.elapsedSeconds;
+
+    GameObjectId highestObject = 0U;
+    for (const auto& [id, object] : objects_) {
+        (void)object;
+        highestObject = std::max(highestObject, id);
+    }
+    nextId_ = std::max({state.nextObjectId, highestObject + 1U, highestReserved + 1U});
+    GameObjectPoolId highestPool = 0U;
+    for (const auto& [id, pool] : pools_) {
+        (void)pool;
+        highestPool = std::max(highestPool, id);
+    }
+    nextPoolId_ = std::max(state.nextPoolId, highestPool + 1U);
+    if (report) *report = local;
+    return true;
 }
 
 } // namespace dve

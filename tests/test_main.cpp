@@ -1009,15 +1009,24 @@ void test_rigid_body_adapter() {
         {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F}));
     CHECK(world.apply_impulse_at_point(handle, {1.0F, 0.0F, 0.0F}, {3.0F, 6.0F, -1.0F}));
     world.set_contact_sink(nullptr);
-    CHECK(!world.set_contact_material(handle, 7U));
+    CHECK(world.set_contact_material(handle, 7U));
     const auto before = world.state(handle);
     world.step(1.0F / 60.0F);
     const auto after = world.state(handle);
     CHECK(before.has_value() && after.has_value());
-    CHECK(after->currentTransform.position.y < before->currentTransform.position.y);
+    // The +12 N point load above (plus the impulse) leaves the body moving UP at
+    // ~1.04 m/s, so one 1/60 s step still rises even though gravity slows it:
+    // semi-implicit Euler => v' = v - g*dt, y' = y + v'*dt.
+    constexpr float kStep = 1.0F / 60.0F;
+    CHECK(before->linearVelocity.y > 0.0F);
+    CHECK(after->linearVelocity.y < before->linearVelocity.y);  // gravity decelerates
+    CHECK(std::abs((before->linearVelocity.y - after->linearVelocity.y) - 9.81F * kStep) < 1.0e-3F);
+    CHECK(after->currentTransform.position.y > before->currentTransform.position.y);
+    CHECK(std::abs((after->currentTransform.position.y - before->currentTransform.position.y) -
+                   after->linearVelocity.y * kStep) < 1.0e-4F);
     const RigidTransform midpoint = world.interpolated_transform(handle, 0.5F);
-    CHECK(midpoint.position.y <= before->currentTransform.position.y);
-    CHECK(midpoint.position.y >= after->currentTransform.position.y);
+    CHECK(midpoint.position.y >= before->currentTransform.position.y);
+    CHECK(midpoint.position.y <= after->currentTransform.position.y);
     CHECK(world.destroy_body(handle));
     CHECK(world.active_body_count() == 0);
 

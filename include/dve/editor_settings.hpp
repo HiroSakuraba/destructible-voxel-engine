@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <optional>
 #include <set>
@@ -106,6 +107,12 @@ public:
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
 
     [[nodiscard]] std::string serialize_scope(SettingScope scope) const;
+    // Atomic (write temp + rename) file persistence of one layer, e.g. User settings in
+    // <project>/.dve/user/editor_settings.txt. load_scope_file leaves the layer untouched on failure.
+    [[nodiscard]] bool save_scope_file(SettingScope scope, const std::filesystem::path& path,
+                                       std::string* error = nullptr) const;
+    [[nodiscard]] bool load_scope_file(SettingScope scope, const std::filesystem::path& path,
+                                       std::string* error = nullptr);
     [[nodiscard]] bool parse_scope(SettingScope scope, std::string_view text,
                                    std::string* error = nullptr);
     [[nodiscard]] std::string serialize_profile(std::string_view profileName, SettingScope scope) const;
@@ -148,6 +155,15 @@ struct EditorSettingsPanelState {
     std::string status;
     std::map<std::string, SettingValue, std::less<>> stagedValues;
     std::set<std::string, std::less<>> stagedClears;
+    // Choices supplied at runtime for String settings whose options depend on the machine
+    // (e.g. `midi.input_port` lists the MIDI ports that are present). Such settings cycle through
+    // these choices with left/right/Enter/click instead of opening a text edit, and the row shows
+    // the choice label. The stored value may still be something that is not listed right now
+    // (an unplugged device), so the registry keeps validating them as plain strings.
+    std::map<std::string, std::vector<SettingChoice>, std::less<>> dynamicChoices;
+
+    [[nodiscard]] bool has_choices(const SettingDefinition& definition) const;
+    [[nodiscard]] std::string value_label(const SettingDefinition& definition, const SettingValue& value) const;
 
     void open_for(SettingScope newScope, std::string category = {});
     void close() noexcept;

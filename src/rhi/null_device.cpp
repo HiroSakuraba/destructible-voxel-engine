@@ -1,6 +1,7 @@
 #include "dve/rhi/null_device.hpp"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <cmath>
 #include <cstring>
@@ -30,10 +31,16 @@ bool range_fits(std::size_t offset, std::size_t bytes, std::size_t capacity) noe
 }
 
 std::size_t texture_pixel_bytes(TextureFormat format) noexcept {
+    if (is_block_compressed(format)) return 0U;
     switch (format) {
     case TextureFormat::RGBA32Sint: return 16U;
     case TextureFormat::RGBA16Float: return 8U;
     case TextureFormat::RG16Uint: return 4U;
+    case TextureFormat::BC1RGBAUnorm:
+    case TextureFormat::BC1RGBASrgb:
+    case TextureFormat::BC3RGBAUnorm:
+    case TextureFormat::BC3RGBASrgb:
+    case TextureFormat::BC5RGUnorm: return 0U;
     case TextureFormat::RGBA8Unorm:
     case TextureFormat::BGRA8Unorm:
     case TextureFormat::R32Uint:
@@ -55,7 +62,10 @@ std::optional<std::size_t> texture_layer_bytes(const TextureDesc& desc) noexcept
         const std::uint64_t height = mip_dimension(desc.height, mip);
         const std::uint64_t depth = desc.dimension == TextureDimension::Texture3D
             ? mip_dimension(desc.depth, mip) : desc.depth;
-        const std::uint64_t bytes = width * height * depth * texture_pixel_bytes(desc.format);
+        const std::uint64_t bytes = is_block_compressed(desc.format)
+            ? static_cast<std::uint64_t>((width + 3U) / 4U) * ((height + 3U) / 4U) *
+                  depth * texture_block_bytes(desc.format)
+            : width * height * depth * texture_pixel_bytes(desc.format);
         if (bytes > std::numeric_limits<std::size_t>::max() - total) return std::nullopt;
         total += bytes;
     }
@@ -76,18 +86,28 @@ std::optional<std::size_t> texture_subresource_offset(const TextureDesc& desc,
     if (!layerBytes || mip >= desc.mipLevels || layer >= desc.arrayLayers) return std::nullopt;
     std::uint64_t offset = static_cast<std::uint64_t>(*layerBytes) * layer;
     for (std::uint32_t index = 0; index < mip; ++index) {
-        offset += static_cast<std::uint64_t>(mip_dimension(desc.width, index)) *
-                  mip_dimension(desc.height, index) *
-                  (desc.dimension == TextureDimension::Texture3D
-                       ? mip_dimension(desc.depth, index) : desc.depth) * texture_pixel_bytes(desc.format);
+        const std::uint64_t w = mip_dimension(desc.width, index);
+        const std::uint64_t h = mip_dimension(desc.height, index);
+        const std::uint64_t d = desc.dimension == TextureDimension::Texture3D
+            ? mip_dimension(desc.depth, index) : desc.depth;
+        offset += is_block_compressed(desc.format)
+            ? ((w + 3U) / 4U) * ((h + 3U) / 4U) * d * texture_block_bytes(desc.format)
+            : w * h * d * texture_pixel_bytes(desc.format);
     }
     if (offset > std::numeric_limits<std::size_t>::max()) return std::nullopt;
     return static_cast<std::size_t>(offset);
 }
+std::vector<TextureFormat> resolved_color_formats(const GraphicsPipelineDesc& desc) {
+    if (!desc.colorFormats.empty()) return desc.colorFormats;
+    if (desc.colorFormat) return {*desc.colorFormat};
+    return {};
+}
+
 }
 
 TextureFormatCapabilities NullDevice::texture_format_capabilities(TextureFormat format) const noexcept {
     if (format == TextureFormat::D32Float) return {false, false, false, false, true};
+    if (is_block_compressed(format)) return {true, false, false, false, false};
     const bool integerAtomic = format == TextureFormat::R32Uint || format == TextureFormat::R32Sint;
     return {true, true, integerAtomic, true, false};
 }
@@ -240,19 +260,22 @@ bool NullDevice::write_texture(TextureHandle handle, std::uint32_t mipLevel,
     const std::size_t height = mip_dimension(slot->desc.height, mipLevel);
     const std::size_t depth = slot->desc.dimension == TextureDimension::Texture3D
         ? mip_dimension(slot->desc.depth, mipLevel) : slot->desc.depth;
-    const std::size_t packedRow = width * texture_pixel_bytes(slot->desc.format);
-    if (rowPitchBytes < packedRow || bytes.size() < rowPitchBytes * height * depth) {
+    const std::size_t packedRow = texture_row_bytes(slot->desc.format, static_cast<std::uint32_t>(width));
+    const std::size_t rows = texture_rows(slot->desc.format, static_cast<std::uint32_t>(height));
+    if ((is_block_compressed(slot->desc.format) && rowPitchBytes != packedRow) ||
+        (!is_block_compressed(slot->desc.format) && rowPitchBytes < packedRow) ||
+        bytes.size() < rowPitchBytes * rows * depth) {
         set_error(error, "texture upload row pitch or byte count is too small"); return false;
     }
     for (std::size_t z = 0; z < depth; ++z) {
-        for (std::size_t y = 0; y < height; ++y) {
-            const std::size_t sourceOffset = (z * height + y) * rowPitchBytes;
-            const std::size_t destinationOffset = *offset + (z * height + y) * packedRow;
+        for (std::size_t y = 0; y < rows; ++y) {
+            const std::size_t sourceOffset = (z * rows + y) * rowPitchBytes;
+            const std::size_t destinationOffset = *offset + (z * rows + y) * packedRow;
             std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(sourceOffset), packedRow,
                         slot->storage.begin() + static_cast<std::ptrdiff_t>(destinationOffset));
         }
     }
-    statistics_.uploadedBytes += packedRow * height * depth;
+    statistics_.uploadedBytes += packedRow * rows * depth;
     return true;
 }
 
@@ -270,19 +293,22 @@ bool NullDevice::read_texture(TextureHandle handle, std::uint32_t mipLevel,
     const std::size_t height = mip_dimension(slot->desc.height, mipLevel);
     const std::size_t depth = slot->desc.dimension == TextureDimension::Texture3D
         ? mip_dimension(slot->desc.depth, mipLevel) : slot->desc.depth;
-    const std::size_t packedRow = width * texture_pixel_bytes(slot->desc.format);
-    if (rowPitchBytes < packedRow || destination.size() < rowPitchBytes * height * depth) {
+    const std::size_t packedRow = texture_row_bytes(slot->desc.format, static_cast<std::uint32_t>(width));
+    const std::size_t rows = texture_rows(slot->desc.format, static_cast<std::uint32_t>(height));
+    if ((is_block_compressed(slot->desc.format) && rowPitchBytes != packedRow) ||
+        (!is_block_compressed(slot->desc.format) && rowPitchBytes < packedRow) ||
+        destination.size() < rowPitchBytes * rows * depth) {
         set_error(error, "texture readback row pitch or byte count is too small"); return false;
     }
     for (std::size_t z = 0; z < depth; ++z) {
-        for (std::size_t y = 0; y < height; ++y) {
-            const std::size_t destinationOffset = (z * height + y) * rowPitchBytes;
-            const std::size_t sourceOffset = *offset + (z * height + y) * packedRow;
+        for (std::size_t y = 0; y < rows; ++y) {
+            const std::size_t destinationOffset = (z * rows + y) * rowPitchBytes;
+            const std::size_t sourceOffset = *offset + (z * rows + y) * packedRow;
             std::copy_n(slot->storage.begin() + static_cast<std::ptrdiff_t>(sourceOffset), packedRow,
                         destination.begin() + static_cast<std::ptrdiff_t>(destinationOffset));
         }
     }
-    statistics_.readbackBytes += packedRow * height * depth;
+    statistics_.readbackBytes += packedRow * rows * depth;
     return true;
 }
 
@@ -475,7 +501,10 @@ BindGroupHandle NullDevice::create_bind_group(const BindGroupDesc& desc, std::st
         case BindingType::StorageBufferReadOnly:
         case BindingType::StorageBufferReadWrite: {
             const auto* resource = buffer(entry.buffer, error); if (!resource) return {};
-            if (entry.textureView) { set_error(error, "buffer binding also supplied a texture view"); return {}; }
+            if (entry.textureView || entry.sampler) {
+                set_error(error, "buffer binding also supplied a texture view or sampler");
+                return {};
+            }
             const std::size_t bytes = entry.bytes == 0U ? resource->desc.bytes - std::min(entry.offset, resource->desc.bytes) : entry.bytes;
             if (bytes == 0U || !range_fits(entry.offset, bytes, resource->desc.bytes)) {
                 set_error(error, "bind-group buffer range exceeds allocation"); return {};
@@ -489,25 +518,35 @@ BindGroupHandle NullDevice::create_bind_group(const BindGroupDesc& desc, std::st
             break;
         }
         case BindingType::SampledTexture:
+        case BindingType::SampledImage:
         case BindingType::StorageTexture: {
             auto* view = texture_view(entry.textureView, error); if (!view) return {};
             if (entry.buffer) { set_error(error, "texture binding also supplied a buffer"); return {}; }
             const auto* resource = texture(view->desc.texture, error); if (!resource) return {};
-            const TextureUsage required = bindingIt->type == BindingType::SampledTexture
-                                              ? TextureUsage::Sampled : TextureUsage::Storage;
+            const bool storage = bindingIt->type == BindingType::StorageTexture;
+            const TextureUsage required = storage ? TextureUsage::Storage : TextureUsage::Sampled;
             if (!has_usage(resource->desc.usage, required)) {
-                set_error(error, bindingIt->type == BindingType::SampledTexture
-                                     ? "sampled binding requires Sampled texture usage"
-                                     : "storage binding requires Storage texture usage");
+                set_error(error, storage
+                    ? "storage binding requires Storage texture usage"
+                    : "sampled binding requires Sampled texture usage");
                 return {};
             }
             if (bindingIt->type == BindingType::SampledTexture) {
                 if (!sampler(entry.sampler, error)) return {};
             } else if (entry.sampler) {
-                set_error(error, "storage texture binding cannot include a sampler"); return {};
+                set_error(error, bindingIt->type == BindingType::SampledImage
+                    ? "sampled-image binding cannot include a sampler"
+                    : "storage texture binding cannot include a sampler");
+                return {};
             }
             break;
         }
+        case BindingType::Sampler:
+            if (entry.buffer || entry.textureView || !sampler(entry.sampler, error)) {
+                set_error(error, "sampler binding must contain only a sampler");
+                return {};
+            }
+            break;
         }
     }
     const auto index = allocate_slot(bindGroups_); auto& slot = bindGroups_[index];
@@ -542,10 +581,14 @@ GraphicsPipelineHandle NullDevice::create_graphics_pipeline(const GraphicsPipeli
     if (!ready(error)) return {};
     if (!validate_vertex_input_layout(desc, error)) return {};
     const bool hasFragment = !desc.fragmentBytecode.empty() || !desc.fragmentEntryPoint.empty();
+    const auto colorFormats = resolved_color_formats(desc);
+    const bool invalidColor = colorFormats.size() > 4U ||
+        std::any_of(colorFormats.begin(), colorFormats.end(),
+                    [](TextureFormat format) { return format == TextureFormat::D32Float; });
     if (desc.vertexEntryPoint.empty() || desc.vertexBytecode.empty() ||
         (hasFragment && (desc.fragmentEntryPoint.empty() || desc.fragmentBytecode.empty())) ||
-        (!desc.colorFormat && !desc.depthFormat) || (desc.colorFormat && !hasFragment) ||
-        (desc.colorFormat && *desc.colorFormat == TextureFormat::D32Float) ||
+        (colorFormats.empty() && !desc.depthFormat) || (!colorFormats.empty() && !hasFragment) ||
+        invalidColor ||
         (desc.depthFormat && *desc.depthFormat != TextureFormat::D32Float)) {
         set_error(error, "graphics pipeline requires valid attachment formats and shader stages");
         return {};
@@ -575,8 +618,9 @@ CommandListHandle NullDevice::begin_commands(QueueKind queue, std::string_view d
     slot.renderPassOpen = false; slot.graphicsPipeline = {}; slot.vertexBuffer = {};
     slot.vertexOffset = 0U; slot.vertexStride = 0U; slot.indexBuffer = {}; slot.indexOffset = 0U;
     slot.indexFormat = IndexFormat::Uint32; slot.viewport = {}; slot.scissor = {};
-    slot.viewportSet = false; slot.scissorSet = false; slot.computeBindGroups.clear();
-    slot.graphicsBindGroups.clear();
+    slot.viewportSet = false; slot.scissorSet = false; slot.activeColorFormats.clear();
+    slot.activeDepthFormat.reset(); slot.activeDepthTexture = {};
+    slot.computeBindGroups.clear(); slot.graphicsBindGroups.clear();
     return {index, slot.generation};
 }
 bool NullDevice::copy_buffer(CommandListHandle commands, BufferHandle source, std::size_t sourceOffset,
@@ -634,6 +678,8 @@ bool NullDevice::begin_render_pass(CommandListHandle commands, const RenderPassD
         set_error(error, "render pass requires at least one attachment and at most four color attachments"); return false;
     }
     std::uint32_t width = 0U, height = 0U;
+    std::vector<TextureFormat> colorFormats;
+    colorFormats.reserve(desc.colors.size());
     for (const auto& attachment : desc.colors) {
         const auto* target = texture(attachment.texture, error); if (!target) return false;
         if (!has_usage(target->desc.usage, TextureUsage::RenderTarget)) {
@@ -646,6 +692,7 @@ bool NullDevice::begin_render_pass(CommandListHandle commands, const RenderPassD
         else if (width != target->desc.width || height != target->desc.height) {
             set_error(error, "render-pass attachment dimensions differ"); return false;
         }
+        colorFormats.push_back(target->desc.format);
     }
     if (desc.depth) {
         const auto* depth = texture(desc.depth->texture, error); if (!depth) return false;
@@ -664,7 +711,10 @@ bool NullDevice::begin_render_pass(CommandListHandle commands, const RenderPassD
     }
     list->renderPassOpen = true; list->graphicsPipeline = {}; list->vertexBuffer = {};
     list->indexBuffer = {}; list->viewportSet = false; list->scissorSet = false;
+    list->activeColorFormats = std::move(colorFormats);
     list->activeDepthTexture = desc.depth ? desc.depth->texture : TextureHandle{};
+    list->activeDepthFormat = desc.depth ? std::optional<TextureFormat>{TextureFormat::D32Float}
+                                         : std::nullopt;
     list->activePassWidth = width; list->activePassHeight = height;
     list->commands.emplace_back(BeginRenderPassCommand{desc});
     return true;
@@ -674,15 +724,23 @@ bool NullDevice::end_render_pass(CommandListHandle commands, std::string* error)
     auto* list = command_list(commands, error); if (!list) return false;
     if (!list->renderPassOpen) { set_error(error, "no render pass is open"); return false; }
     list->renderPassOpen = false;
-    list->activeDepthTexture = {}; list->activePassWidth = 0U; list->activePassHeight = 0U;
+    list->activeDepthTexture = {}; list->activeColorFormats.clear(); list->activeDepthFormat.reset();
+    list->activePassWidth = 0U; list->activePassHeight = 0U;
     list->commands.emplace_back(EndRenderPassCommand{});
     return true;
 }
 
 bool NullDevice::bind_graphics_pipeline(CommandListHandle commands, GraphicsPipelineHandle handle,
                                         std::string* error) {
-    auto* list = command_list(commands, error); if (!list || !graphics_pipeline(handle, error)) return false;
-    if (!list->renderPassOpen) { set_error(error, "graphics pipeline must be bound inside a render pass"); return false; }
+    auto* list = command_list(commands, error);
+    const auto* pipelineSlot = graphics_pipeline(handle, error);
+    if (!list || !pipelineSlot) return false;
+    if (!list->renderPassOpen ||
+        resolved_color_formats(pipelineSlot->desc) != list->activeColorFormats ||
+        pipelineSlot->desc.depthFormat != list->activeDepthFormat) {
+        set_error(error, "graphics pipeline is incompatible with the active render pass");
+        return false;
+    }
     list->graphicsPipeline = handle; return true;
 }
 

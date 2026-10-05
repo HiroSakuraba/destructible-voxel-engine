@@ -114,13 +114,6 @@ PolygonTextureMipChain generate_semantic_texture_mips(const PolygonImage& image,
     return chain;
 }
 
-struct TextureResidencyManager::Pending {
-    TextureUploadRequest request;
-    PolygonTextureMipChain mipChain;
-    std::size_t bytes{};
-    std::uint64_t sourceHash{};
-};
-
 TextureResidencyManager::TextureResidencyManager(rhi::IDevice& device, std::size_t budgetBytes)
     : device_(device) {
     stats_.budgetBytes = std::max<std::size_t>(budgetBytes, 4U);

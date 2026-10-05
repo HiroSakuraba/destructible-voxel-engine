@@ -379,7 +379,8 @@ void test_spawn_asset_from_lua() {
 
     GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
     GameScriptHost host(world);
-    const std::string script = "asset_id = world.spawn_asset(\"" + path.string() +
+    // generic_string(): Windows backslashes would be escape sequences in the Lua string literal.
+    const std::string script = "asset_id = world.spawn_asset(\"" + path.generic_string() +
                                 "\", 1.0, 2.0, 3.0, true, true)\n"
                                 "world.set_global(\"asset_id\", asset_id)\n"
                                 "local pos = world.get_position(asset_id)\n"
@@ -717,6 +718,16 @@ void test_environment_bindings_from_lua() {
     CHECK(host.environment().globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere);
     CHECK(host.environment().shadowMode == ShadowMode::Hybrid);
     CHECK(host.environment().shadowSamples == 6U);
+
+    // The CPU-reference radiance-cascades GI mode round-trips through the script API.
+    CHECK(run_ok(host, R"(
+        local ok = world.set_environment_gi_mode("radiance_cascades")
+        world.set_global("rc_mode_ok", ok and 1 or 0)
+        world.set_global("rc_readback", world.get_environment().global_illumination_mode == "radiance_cascades" and 1 or 0)
+    )", "environment_radiance_cascades"));
+    CHECK(host.global_number("rc_mode_ok") == 1.0);
+    CHECK(host.global_number("rc_readback") == 1.0);
+    CHECK(host.environment().globalIlluminationMode == GlobalIlluminationMode::RadianceCascades);
 }
 
 
@@ -731,13 +742,13 @@ void test_camera_runtime_bindings_from_lua() {
     CameraSequence sequence;sequence.name="Lua Camera";sequence.durationSeconds=2;CameraShot shot;shot.id=1;shot.name="Primary shot";shot.startSeconds=0;shot.durationSeconds=2;shot.rigId=10;shot.blendIn={CameraBlendCurve::Cut,0};sequence.shots.push_back(shot);sequence.events.push_back({1,0.25F,"cue","camera"});
     const auto base=std::filesystem::temp_directory_path()/"dve_camera_lua_test";std::filesystem::create_directories(base);const auto sequencePath=base/"camera.dvecamseq";const auto statePath=base/"camera.state";{std::ofstream output(sequencePath,std::ios::binary|std::ios::trunc);output<<sequence.serialize();}
     GameScriptHost host(world);
-    const std::string setup="local ok,err=world.camera_load_sequence(1,"+std::string("\"")+sequencePath.string()+"\")\nworld.set_global('camera_load_ok',ok and 1 or 0)\nworld.camera_play_sequence(1,false)\nworld.camera_start_shake(1,77,0.01,0.2,0.5,8)\nlocal access=world.camera_set_accessibility('photosensitive',true,0.5,1.0,1.0,0.8)\nlocal a=world.camera_get_accessibility()\nworld.set_global('camera_access_ok',access and a.preset=='photosensitive' and a.horizon_lock and 1 or 0)";
+    const std::string setup="local ok,err=world.camera_load_sequence(1,"+std::string("\"")+sequencePath.generic_string()+"\")\nworld.set_global('camera_load_ok',ok and 1 or 0)\nworld.camera_play_sequence(1,false)\nworld.camera_start_shake(1,77,0.01,0.2,0.5,8)\nlocal access=world.camera_set_accessibility('photosensitive',true,0.5,1.0,1.0,0.8)\nlocal a=world.camera_get_accessibility()\nworld.set_global('camera_access_ok',access and a.preset=='photosensitive' and a.horizon_lock and 1 or 0)";
     CHECK(run_ok(host,setup,"camera_setup"));
     world.tick(0.3F);
-    const std::string inspect="local c=world.camera_get(1)\nworld.set_global('camera_time',c.sequence_time)\nworld.set_global('camera_event_count',#c.events)\nworld.set_global('camera_force_ok',world.camera_force_live(1,11,true) and 1 or 0)\nworld.set_global('camera_state_ok',world.camera_set_state(1,'alternate') and 1 or 0)\nlocal ok=world.camera_save_runtime_state("+std::string("\"")+statePath.string()+"\")\nworld.set_global('camera_save_ok',ok and 1 or 0)";
+    const std::string inspect="local c=world.camera_get(1)\nworld.set_global('camera_time',c.sequence_time)\nworld.set_global('camera_event_count',#c.events)\nworld.set_global('camera_force_ok',world.camera_force_live(1,11,true) and 1 or 0)\nworld.set_global('camera_state_ok',world.camera_set_state(1,'alternate') and 1 or 0)\nlocal ok=world.camera_save_runtime_state("+std::string("\"")+statePath.generic_string()+"\")\nworld.set_global('camera_save_ok',ok and 1 or 0)";
     CHECK(run_ok(host,inspect,"camera_inspect"));
     CHECK(host.global_number("camera_load_ok")==1.0);CHECK(host.global_number("camera_access_ok")==1.0);CHECK(host.global_number("camera_event_count")==1.0);CHECK(host.global_number("camera_force_ok")==1.0);CHECK(host.global_number("camera_state_ok")==1.0);CHECK(host.global_number("camera_save_ok")==1.0);CHECK(host.global_number("camera_time").value_or(0.0)>0.25);
-    CHECK(run_ok(host,"world.camera_seek_sequence(1,1.5)\nworld.camera_stop_sequence(1)\nlocal ok=world.camera_load_runtime_state("+std::string("\"")+statePath.string()+"\")\nworld.set_global('camera_restore_ok',ok and 1 or 0)","camera_restore"));
+    CHECK(run_ok(host,"world.camera_seek_sequence(1,1.5)\nworld.camera_stop_sequence(1)\nlocal ok=world.camera_load_runtime_state("+std::string("\"")+statePath.generic_string()+"\")\nworld.set_global('camera_restore_ok',ok and 1 or 0)","camera_restore"));
     CHECK(host.global_number("camera_restore_ok")==1.0);CHECK(world.cameras().sequence_time(1)<0.5F);CHECK(world.cameras().sequence_playing(1));
     std::filesystem::remove_all(base);
 }

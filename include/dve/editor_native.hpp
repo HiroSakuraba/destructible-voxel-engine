@@ -12,6 +12,8 @@
 #include <string_view>
 #include <vector>
 
+#include "dve/audio/midi_input_session.hpp"
+#include "dve/audio/midi_output_session.hpp"
 #include "dve/audio/mixer.hpp"
 #include "dve/editor_asset_browser.hpp"
 #include "dve/ai/live_editor_mcp.hpp"
@@ -210,6 +212,7 @@ struct NativeMenuPopupLayout {
 
 struct NativeSettingsModalLayout {
     UiRect panel{};
+    UiRect title{};  // "Settings and Preferences", left of the scope tabs
     UiRect searchBox{};
     std::array<UiRect, 3> scopeTabs{};
     UiRect advancedToggle{};
@@ -237,6 +240,9 @@ struct NativeEditorLayout {
     UiRect hierarchyFilterBox{};
     std::vector<UiRect> inspectorToggles;
     std::vector<UiRect> inspectorFields; // [0]=Position line, [1]=Rotation line
+    // Inspector detail text at or below this y is not drawn (the flag toggles sit
+    // there when the inspector is too short for both); always <= inspector bottom.
+    int inspectorContentClipY{};
     std::vector<UiRect> bottomTabs;      // parallel to BottomPanelTab enumerators, in order
     UiRect assetSearchBox{};
     UiRect assetRefreshButton{};
@@ -451,6 +457,52 @@ public:
     void open_shortcut_editor();
     void configure_ai_assistant(std::filesystem::path projectRoot = {});
     void configure_menu_state(std::filesystem::path path);
+    // User-scope settings persistence (e.g. <project>/.dve/user/editor_settings.txt). Loads the
+    // file if present; afterwards Settings > Apply and UI-zoom hotkeys save the User layer.
+    void configure_user_settings(std::filesystem::path path);
+    [[nodiscard]] const std::filesystem::path& user_settings_path() const noexcept { return userSettingsPath_; }
+    bool save_user_settings(std::string* error = nullptr) const;
+    // UI zoom (see dve/editor_ui_zoom.hpp). ui_zoom() is the requested, step-snapped value from
+    // the `editor.ui_scale` setting; effective_ui_zoom() additionally honours the window cap the
+    // host reported via set_ui_zoom_window_limit(). Hosts render with effective_ui_zoom().
+    [[nodiscard]] float ui_zoom() const noexcept;
+    [[nodiscard]] float effective_ui_zoom() const noexcept;
+    void set_ui_zoom_window_limit(float maximumZoom) noexcept;
+    [[nodiscard]] float ui_zoom_window_limit() const noexcept { return uiZoomWindowLimit_; }
+    bool set_ui_zoom(float requested);
+    bool step_ui_zoom(int direction);
+    // On-screen piano size for the synth and chiptune editors (User-scope setting
+    // `editor.keyboard_keys`: 25, 37, 49, 61, 76 or 88 keys). Saved like UI zoom.
+    [[nodiscard]] int keyboard_key_count() const noexcept;
+    bool set_keyboard_key_count(int keys);
+    // MIDI input (see dve/editor_midi.hpp; hosts call start_editor_midi()). The session polls
+    // ports on its own thread; update() picks up status changes without blocking.
+    void attach_midi_input(std::unique_ptr<audio::IMidiBackend> backend,
+                           audio::MidiInputSession::Options options = {});
+    // Synth MIDI out (poll_midi_output) is queued on this output session from update(); the
+    // session picks the port from `midi.output_port` and follows hotplug on its own thread.
+    void attach_midi_output(std::unique_ptr<audio::IMidiBackend> backend,
+                            audio::MidiOutputSession::Options options = {});
+    [[nodiscard]] audio::MidiInputSession* midi_input_session() noexcept { return midiInput_.get(); }
+    [[nodiscard]] const audio::MidiInputStatus& midi_input_status() const noexcept { return midiStatus_; }
+    [[nodiscard]] std::string midi_input_summary() const { return midiStatus_.summary(); }
+    // Requested port ("" = Auto, "none" = off, otherwise a port name) saved in User settings.
+    [[nodiscard]] std::string midi_input_port() const;
+    bool set_midi_input_port(std::string name);
+    // Steps through Auto, None and the present ports (synth header button).
+    bool cycle_midi_input_port(int direction);
+    // MIDI output, mirroring the input: "" = Auto (first port), "none" = off, or a port name.
+    [[nodiscard]] audio::MidiOutputSession* midi_output_session() noexcept { return midiOutput_.get(); }
+    [[nodiscard]] const audio::MidiOutputStatus& midi_output_status() const noexcept { return midiOutputStatus_; }
+    [[nodiscard]] std::string midi_output_summary() const { return midiOutputStatus_.summary(); }
+    [[nodiscard]] std::string midi_output_port() const;
+    bool set_midi_output_port(std::string name);
+    bool cycle_midi_output_port(int direction);
+    // Pulls the latest session status into the settings choices / synth header (update() does it).
+    void refresh_midi_status();
+    // Last pointer position seen by pointer_move (logical px), for hover tooltips.
+    [[nodiscard]] int hover_x() const noexcept { return hoverX_; }
+    [[nodiscard]] int hover_y() const noexcept { return hoverY_; }
     [[nodiscard]] bool create_text3d(std::filesystem::path fontPath, std::string text = "3D Text",
                                      Text3DCookOptions options = {});
     [[nodiscard]] bool create_gabor_volume(std::filesystem::path sourcePath = {});
@@ -480,9 +532,25 @@ public:
     [[nodiscard]] CommandResult reorder_component_on_primary(ComponentId componentId, std::size_t newIndex);
     [[nodiscard]] CommandResult set_component_property_text_on_primary(
         ComponentId componentId, std::string property, std::string_view text);
-    [[nodiscard]] EditorSelectionDiagnostics selection_diagnostics() const;
+    // Cached: recomputed only when the selection or the scene fingerprint changes.
+    [[nodiscard]] const EditorSelectionDiagnostics& selection_diagnostics() const;
 
-    [[nodiscard]] std::vector<EditorVoxelDrawItem> draw_items() const;
+    // Cached voxel draw list (projection + depth sort); rebuilt only when the scene,
+    // camera, viewport, draw cap, or selection change.
+    [[nodiscard]] const std::vector<EditorVoxelDrawItem>& draw_items() const;
+    [[nodiscard]] std::size_t draw_item_count() const { return draw_items().size(); }
+    // Cached draw list for the selected camera rig's picture-in-picture preview.
+    [[nodiscard]] const std::vector<EditorVoxelDrawItem>& camera_preview_draw_items(
+        const EditorCamera& previewCamera, UiRect previewRect,
+        const EditorViewportSettings& previewSettings) const;
+    struct RenderCacheStats {
+        std::uint64_t drawListRebuilds{};
+        std::uint64_t previewDrawListRebuilds{};
+        std::uint64_t selectionDiagnosticsRebuilds{};
+    };
+    [[nodiscard]] RenderCacheStats render_cache_stats() const noexcept {
+        return {drawListCache_.rebuild_count(), previewDrawListCache_.rebuild_count(), selectionDiagnosticsRebuilds_};
+    }
     [[nodiscard]] std::vector<EditorText3DDrawItem> text3d_draw_items() const;
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
@@ -556,6 +624,14 @@ private:
     EditorCinematicCameraPanel cinematicCameraPanel_{};
     std::optional<ShortcutContext> shortcutContextOverride_{};
     EditorViewportSettings viewportSettings_;
+    // Per-frame render caches (logically const: pure memoization of derived data).
+    mutable EditorVoxelDrawListCache drawListCache_{};
+    mutable EditorVoxelDrawListCache previewDrawListCache_{};
+    mutable EditorSelectionDiagnostics selectionDiagnostics_{};
+    mutable std::uint64_t selectionDiagnosticsKey_{};
+    mutable bool selectionDiagnosticsValid_{};
+    mutable std::uint64_t selectionDiagnosticsRebuilds_{};
+    [[nodiscard]] std::uint64_t material_density_fingerprint() const noexcept;
     NativeEditorLayout layout_;
     int width_{1280};
     int height_{800};
@@ -574,11 +650,15 @@ private:
     std::set<std::string, std::less<>> favoriteCommandIds_;
     bool showAdvancedMenus_{};
     std::filesystem::path menuStatePath_;
+    std::filesystem::path userSettingsPath_;
+    float uiZoomWindowLimit_{2.0F};
     bool quitRequested_{};
     PendingDestructiveAction pendingDestructiveAction_{PendingDestructiveAction::Inactive};
     EditorStatusMessage status_{"Ready", false, 0.0F};
 
     PointerButton dragButton_{PointerButton::NoButton};
+    int hoverX_{-100000};
+    int hoverY_{-100000};
     int lastPointerX_{};
     int lastPointerY_{};
     int pointerDownX_{};
@@ -650,6 +730,15 @@ private:
     std::unique_ptr<ai::DveAiBridge> aiBridge_;
     std::unique_ptr<ai::LiveEditorMcpHost> liveMcpHost_;
     EditorTaskManager aiTasks_{1, 8};
+    // Declared last so they are destroyed first: the session's callbacks post into the synth.
+    std::unique_ptr<audio::MidiOutputSession> midiOutput_;
+    std::unique_ptr<audio::MidiInputSession> midiInput_;
+    audio::MidiInputStatus midiStatus_{};
+    std::uint64_t midiStatusGeneration_{~std::uint64_t{0}};
+    std::string midiChoicesPort_{"\x01"};
+    audio::MidiOutputStatus midiOutputStatus_{};
+    std::uint64_t midiOutputStatusGeneration_{~std::uint64_t{0}};
+    std::string midiOutputChoicesPort_{"\x01"};
 };
 
 [[nodiscard]] EditorDocument make_new_project_document();

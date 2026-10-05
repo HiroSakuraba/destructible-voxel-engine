@@ -78,11 +78,11 @@ Result run_benchmark(std::size_t blockFrames, double seconds) {
     preset.oscillators[6].subOscillatorLevel = 0.35F;
     preset.lfos[0] = {true, dve::audio::LfoWaveform::Triangle, 5.1F, 1.0F, 0.0F, 0.04F, true, false, 1.0F};
     preset.lfos[1] = {true, dve::audio::LfoWaveform::SmoothRandom, 0.9F, 1.0F, 0.23F, 0.0F, true, false, 1.0F};
-    preset.modulation[0] = {true, dve::audio::ModulationSource::Lfo1, dve::audio::ModulationDestination::Osc3PulseWidth, 0.75F, dve::audio::ModulationCurve::Linear};
-    preset.modulation[1] = {true, dve::audio::ModulationSource::Lfo2, dve::audio::ModulationDestination::FilterCutoff, 0.48F, dve::audio::ModulationCurve::Cubic};
-    preset.modulation[2] = {true, dve::audio::ModulationSource::Velocity, dve::audio::ModulationDestination::FilterDrive, 0.35F, dve::audio::ModulationCurve::Quadratic};
-    preset.modulation[3] = {true, dve::audio::ModulationSource::Aftertouch, dve::audio::ModulationDestination::VoiceGain, 0.20F, dve::audio::ModulationCurve::Linear};
-    preset.modulation[4] = {true, dve::audio::ModulationSource::Macro1, dve::audio::ModulationDestination::Osc1Shape, 0.60F, dve::audio::ModulationCurve::Linear};
+    preset.modulation[0] = {true, dve::audio::ModulationSource::Lfo1, dve::audio::ModulationDestination::Osc3PulseWidth, 0.75F, 0.0F, dve::audio::ModulationCurve::Linear};
+    preset.modulation[1] = {true, dve::audio::ModulationSource::Lfo2, dve::audio::ModulationDestination::FilterCutoff, 0.48F, 0.0F, dve::audio::ModulationCurve::Cubic};
+    preset.modulation[2] = {true, dve::audio::ModulationSource::Velocity, dve::audio::ModulationDestination::FilterDrive, 0.35F, 0.0F, dve::audio::ModulationCurve::Quadratic};
+    preset.modulation[3] = {true, dve::audio::ModulationSource::Aftertouch, dve::audio::ModulationDestination::VoiceGain, 0.20F, 0.0F, dve::audio::ModulationCurve::Linear};
+    preset.modulation[4] = {true, dve::audio::ModulationSource::Macro1, dve::audio::ModulationDestination::Osc1Shape, 0.60F, 0.0F, dve::audio::ModulationCurve::Linear};
     preset.macros.values[0] = 0.62F;
     preset.filter.topology = dve::audio::FilterTopology::KorgMs20;
     preset.filter.cutoffHertz = 2100.0F;

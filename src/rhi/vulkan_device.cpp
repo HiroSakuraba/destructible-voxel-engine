@@ -16,6 +16,11 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+// The Windows SDK aliases its DeviceCapabilities API name to a W-suffixed symbol.
+// Keep the RHI type visible in this translation unit.
+#ifdef DeviceCapabilities
+#undef DeviceCapabilities
+#endif
 #else
 #include <dlfcn.h>
 #endif
@@ -88,6 +93,12 @@ bool range_fits(std::size_t offset, std::size_t bytes, std::size_t capacity) noe
     return offset <= capacity && bytes <= capacity - offset;
 }
 
+std::vector<TextureFormat> resolved_color_formats(const GraphicsPipelineDesc& desc) {
+    if (!desc.colorFormats.empty()) return desc.colorFormats;
+    if (desc.colorFormat) return {*desc.colorFormat};
+    return {};
+}
+
 template <class Slot>
 std::uint32_t allocate_slot(std::vector<Slot>& slots) {
     for (std::uint32_t index = 0; index < slots.size(); ++index)
@@ -123,6 +134,11 @@ vk::Format vulkan_format(TextureFormat format) noexcept {
     case TextureFormat::RGBA32Sint: return vk::FormatR32G32B32A32Sint;
     case TextureFormat::RGBA16Float: return vk::FormatR16G16B16A16Sfloat;
     case TextureFormat::RG16Uint: return vk::FormatR16G16Uint;
+    case TextureFormat::BC1RGBAUnorm: return vk::FormatBc1RgbaUnormBlock;
+    case TextureFormat::BC1RGBASrgb: return vk::FormatBc1RgbaSrgbBlock;
+    case TextureFormat::BC3RGBAUnorm: return vk::FormatBc3UnormBlock;
+    case TextureFormat::BC3RGBASrgb: return vk::FormatBc3SrgbBlock;
+    case TextureFormat::BC5RGUnorm: return vk::FormatBc5UnormBlock;
     case TextureFormat::D32Float: return vk::FormatD32Sfloat;
     }
     return vk::FormatR8G8B8A8Unorm;
@@ -168,10 +184,16 @@ vk::ImageAspectFlags image_aspect(TextureFormat format) noexcept {
 }
 
 std::size_t texture_pixel_bytes(TextureFormat format) noexcept {
+    if (is_block_compressed(format)) return 0U;
     switch (format) {
     case TextureFormat::RGBA32Sint: return 16U;
     case TextureFormat::RGBA16Float: return 8U;
     case TextureFormat::RG16Uint: return 4U;
+    case TextureFormat::BC1RGBAUnorm:
+    case TextureFormat::BC1RGBASrgb:
+    case TextureFormat::BC3RGBAUnorm:
+    case TextureFormat::BC3RGBASrgb:
+    case TextureFormat::BC5RGUnorm: return 0U;
     case TextureFormat::RGBA8Unorm:
     case TextureFormat::BGRA8Unorm:
     case TextureFormat::R32Uint:
@@ -284,6 +306,8 @@ vk::DescriptorType vulkan_descriptor_type(BindingType type) noexcept {
     case BindingType::StorageBufferReadOnly:
     case BindingType::StorageBufferReadWrite: return vk::DescriptorTypeStorageBuffer;
     case BindingType::SampledTexture: return vk::DescriptorTypeCombinedImageSampler;
+    case BindingType::SampledImage: return vk::DescriptorTypeSampledImage;
+    case BindingType::Sampler: return vk::DescriptorTypeSampler;
     case BindingType::StorageTexture: return vk::DescriptorTypeStorageImage;
     }
     return vk::DescriptorTypeStorageBuffer;
@@ -494,7 +518,7 @@ struct VulkanDevice::Impl {
         bool activeDepthAttachment{};
         std::uint32_t activePassWidth{};
         std::uint32_t activePassHeight{};
-        std::optional<TextureFormat> activeColorFormat{TextureFormat::RGBA8Unorm};
+        std::vector<TextureFormat> activeColorFormats;
         std::optional<TextureFormat> activeDepthFormat{};
         std::vector<BindGroupHandle> computeBindGroups;
         std::vector<BindGroupHandle> graphicsBindGroups;
@@ -1249,27 +1273,32 @@ struct VulkanDevice::Impl {
                      "vkCreateImageView", error);
     }
 
-    bool create_compatible_render_pass(std::optional<TextureFormat> colorFormat,
+    bool create_compatible_render_pass(std::span<const TextureFormat> colorFormats,
                                        std::optional<TextureFormat> depthFormat,
-                                       bool clearColor, bool clearDepth,
+                                       std::span<const bool> clearColors,
+                                       bool clearDepth,
                                        vk::RenderPass& output, std::string* error) {
-        if (!colorFormat && !depthFormat) {
-            set_error(error, "Vulkan render pass requires a color or depth attachment");
+        if ((colorFormats.empty() && !depthFormat) || colorFormats.size() > 4U ||
+            clearColors.size() != colorFormats.size()) {
+            set_error(error, "Vulkan render pass requires at most four color attachments and at least one attachment");
             return false;
         }
-        std::array<vk::AttachmentDescription, 2> attachments{};
+        std::array<vk::AttachmentDescription, 5> attachments{};
+        std::array<vk::AttachmentReference, 4> colorReferences{};
         std::uint32_t attachmentCount = 0U;
-        vk::AttachmentReference colorReference{};
-        vk::AttachmentReference depthReference{};
-        if (colorFormat) {
-            const std::uint32_t index = attachmentCount++;
-            attachments[index] = {0U, vulkan_format(*colorFormat), vk::SampleCount1Bit,
-                                  clearColor ? vk::AttachmentLoadOpClear : vk::AttachmentLoadOpLoad,
-                                  vk::AttachmentStoreOpStore, vk::AttachmentLoadOpDontCare,
-                                  vk::AttachmentStoreOpDontCare, vk::ImageLayoutColorAttachmentOptimal,
-                                  vk::ImageLayoutColorAttachmentOptimal};
-            colorReference = {index, vk::ImageLayoutColorAttachmentOptimal};
+        for (std::size_t colorIndex = 0U; colorIndex < colorFormats.size(); ++colorIndex) {
+            const std::uint32_t attachmentIndex = attachmentCount++;
+            attachments[attachmentIndex] = {
+                0U, vulkan_format(colorFormats[colorIndex]), vk::SampleCount1Bit,
+                clearColors[colorIndex] ? vk::AttachmentLoadOpClear : vk::AttachmentLoadOpLoad,
+                vk::AttachmentStoreOpStore, vk::AttachmentLoadOpDontCare,
+                vk::AttachmentStoreOpDontCare, vk::ImageLayoutColorAttachmentOptimal,
+                vk::ImageLayoutColorAttachmentOptimal};
+            colorReferences[colorIndex] = {
+                attachmentIndex, vk::ImageLayoutColorAttachmentOptimal};
         }
+
+        vk::AttachmentReference depthReference{};
         if (depthFormat) {
             const std::uint32_t index = attachmentCount++;
             attachments[index] = {0U, vulkan_format(*depthFormat), vk::SampleCount1Bit,
@@ -1280,13 +1309,15 @@ struct VulkanDevice::Impl {
                                   vk::ImageLayoutDepthStencilAttachmentOptimal};
             depthReference = {index, vk::ImageLayoutDepthStencilAttachmentOptimal};
         }
+
         const vk::SubpassDescription subpass{
             0U, vk::PipelineBindPointGraphics, 0U, nullptr,
-            colorFormat ? 1U : 0U, colorFormat ? &colorReference : nullptr,
+            static_cast<std::uint32_t>(colorFormats.size()),
+            colorFormats.empty() ? nullptr : colorReferences.data(),
             nullptr, depthFormat ? &depthReference : nullptr, 0U, nullptr};
         vk::PipelineStageFlags stages = vk::PipelineStageEarlyFragmentTestsBit;
         vk::AccessFlags access = depthFormat ? vk::AccessDepthStencilAttachmentWriteBit : 0U;
-        if (colorFormat) {
+        if (!colorFormats.empty()) {
             stages |= vk::PipelineStageColorAttachmentOutputBit;
             access |= vk::AccessColorAttachmentWriteBit;
         }
@@ -1449,17 +1480,20 @@ bool VulkanDevice::write_texture(TextureHandle handle, std::uint32_t mipLevel,
     if (mipLevel >= slot->desc.mipLevels || arrayLayer >= slot->desc.arrayLayers) {
         set_error(error, "Vulkan texture upload subresource is out of range"); return false;
     }
+    const bool compressed = is_block_compressed(slot->desc.format);
     const std::size_t pixelBytes = texture_pixel_bytes(slot->desc.format);
     const std::uint32_t width = mip_dimension(slot->desc.width, mipLevel);
     const std::uint32_t height = mip_dimension(slot->desc.height, mipLevel);
-    const std::size_t tightPitch = static_cast<std::size_t>(width) * pixelBytes;
-    if (rowPitchBytes < tightPitch || rowPitchBytes % pixelBytes != 0U ||
-        bytes.size() < rowPitchBytes * static_cast<std::size_t>(height)) {
+    const std::size_t tightPitch = texture_row_bytes(slot->desc.format, width);
+    const std::size_t rows = texture_rows(slot->desc.format, height);
+    if ((compressed && rowPitchBytes != tightPitch) ||
+        (!compressed && (rowPitchBytes < tightPitch || rowPitchBytes % pixelBytes != 0U)) ||
+        bytes.size() < rowPitchBytes * rows) {
         set_error(error, "Vulkan texture upload row pitch or byte span is invalid"); return false;
     }
     Impl::RawBuffer staging;
     const auto host = vk::MemoryPropertyHostVisibleBit | vk::MemoryPropertyHostCoherentBit;
-    const std::size_t stagingBytes = rowPitchBytes * static_cast<std::size_t>(height);
+    const std::size_t stagingBytes = rowPitchBytes * rows;
     if (!impl_->create_raw_buffer(stagingBytes, vk::BufferUsageTransferSourceBit,
                                   host, host, staging, error)) return false;
     bool ok = impl_->map_copy(staging.memory, 0U, bytes.first(stagingBytes), error);
@@ -1469,7 +1503,8 @@ bool VulkanDevice::write_texture(TextureHandle handle, std::uint32_t mipLevel,
             !impl_->image_barrier(commandBuffer, *slot, slot->state,
                                   ResourceState::CopyDestination, error)) return false;
         const vk::BufferImageCopy copy{
-            0U, static_cast<std::uint32_t>(rowPitchBytes / pixelBytes), height,
+            0U, compressed ? 0U : static_cast<std::uint32_t>(rowPitchBytes / pixelBytes),
+            compressed ? 0U : height,
             {image_aspect(slot->desc.format), mipLevel, arrayLayer, 1U},
             {0, 0}, 0, {width, height, 1U}};
         impl_->fn.cmdCopyBufferToImage(commandBuffer, staging.buffer, slot->image,
@@ -1499,12 +1534,15 @@ bool VulkanDevice::read_texture(TextureHandle handle, std::uint32_t mipLevel,
     if (mipLevel >= slot->desc.mipLevels || arrayLayer >= slot->desc.arrayLayers) {
         set_error(error, "Vulkan texture readback subresource is out of range"); return false;
     }
+    const bool compressed = is_block_compressed(slot->desc.format);
     const std::size_t pixelBytes = texture_pixel_bytes(slot->desc.format);
     const std::uint32_t width = mip_dimension(slot->desc.width, mipLevel);
     const std::uint32_t height = mip_dimension(slot->desc.height, mipLevel);
-    const std::size_t tightPitch = static_cast<std::size_t>(width) * pixelBytes;
-    const std::size_t stagingBytes = rowPitchBytes * static_cast<std::size_t>(height);
-    if (rowPitchBytes < tightPitch || rowPitchBytes % pixelBytes != 0U ||
+    const std::size_t tightPitch = texture_row_bytes(slot->desc.format, width);
+    const std::size_t rows = texture_rows(slot->desc.format, height);
+    const std::size_t stagingBytes = rowPitchBytes * rows;
+    if ((compressed && rowPitchBytes != tightPitch) ||
+        (!compressed && (rowPitchBytes < tightPitch || rowPitchBytes % pixelBytes != 0U)) ||
         destination.size() < stagingBytes) {
         set_error(error, "Vulkan texture readback row pitch or byte span is invalid"); return false;
     }
@@ -1519,7 +1557,8 @@ bool VulkanDevice::read_texture(TextureHandle handle, std::uint32_t mipLevel,
             !impl_->image_barrier(commandBuffer, *slot, slot->state,
                                   ResourceState::CopySource, error)) return false;
         const vk::BufferImageCopy copy{
-            0U, static_cast<std::uint32_t>(rowPitchBytes / pixelBytes), height,
+            0U, compressed ? 0U : static_cast<std::uint32_t>(rowPitchBytes / pixelBytes),
+            compressed ? 0U : height,
             {image_aspect(slot->desc.format), mipLevel, arrayLayer, 1U},
             {0, 0}, 0, {width, height, 1U}};
         impl_->fn.cmdCopyImageToBuffer(commandBuffer, slot->image,
@@ -1804,14 +1843,29 @@ BindGroupHandle VulkanDevice::create_bind_group(const BindGroupDesc& desc, std::
             imageInfos.push_back({0U, view->view, vk::ImageLayoutGeneral});
             writes.push_back({vk::StructureTypeWriteDescriptorSet, nullptr, 0U, entry.binding, 0U,
                               1U, descriptorType, &imageInfos.back(), nullptr, nullptr});
-        } else if (bindingIt->type == BindingType::SampledTexture) {
+        } else if (bindingIt->type == BindingType::SampledTexture ||
+                   bindingIt->type == BindingType::SampledImage) {
             auto* view = impl_->texture_view(entry.textureView, error); if (!view) return {};
             const auto* resource = impl_->texture(view->desc.texture, error); if (!resource) return {};
-            const auto* sampler = impl_->sampler(entry.sampler, error); if (!sampler) return {};
             if (entry.buffer || !has_usage(resource->desc.usage, TextureUsage::Sampled)) {
-                set_error(error, "Vulkan sampled-texture binding is invalid"); return {};
+                set_error(error, "Vulkan sampled texture/image binding is invalid"); return {};
             }
-            imageInfos.push_back({sampler->sampler, view->view, vk::ImageLayoutShaderReadOnlyOptimal});
+            vk::Sampler nativeSampler{};
+            if (bindingIt->type == BindingType::SampledTexture) {
+                const auto* sampler = impl_->sampler(entry.sampler, error); if (!sampler) return {};
+                nativeSampler = sampler->sampler;
+            } else if (entry.sampler) {
+                set_error(error, "Vulkan sampled-image binding cannot include a sampler"); return {};
+            }
+            imageInfos.push_back({nativeSampler, view->view, vk::ImageLayoutShaderReadOnlyOptimal});
+            writes.push_back({vk::StructureTypeWriteDescriptorSet, nullptr, 0U, entry.binding, 0U,
+                              1U, descriptorType, &imageInfos.back(), nullptr, nullptr});
+        } else if (bindingIt->type == BindingType::Sampler) {
+            const auto* sampler = impl_->sampler(entry.sampler, error); if (!sampler) return {};
+            if (entry.buffer || entry.textureView) {
+                set_error(error, "Vulkan sampler binding supplied a buffer or texture view"); return {};
+            }
+            imageInfos.push_back({sampler->sampler, 0U, vk::ImageLayoutUndefined});
             writes.push_back({vk::StructureTypeWriteDescriptorSet, nullptr, 0U, entry.binding, 0U,
                               1U, descriptorType, &imageInfos.back(), nullptr, nullptr});
         } else {
@@ -1920,13 +1974,17 @@ GraphicsPipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipe
     if (!impl_->ready(error)) return {};
     if (!validate_vertex_input_layout(desc, error)) return {};
     const bool hasFragment = !desc.fragmentBytecode.empty() || !desc.fragmentEntryPoint.empty();
+    const auto colorFormats = resolved_color_formats(desc);
+    const bool invalidColor = colorFormats.size() > 4U ||
+        std::any_of(colorFormats.begin(), colorFormats.end(),
+                    [](TextureFormat format) { return format == TextureFormat::D32Float; });
     if (desc.vertexEntryPoint.empty() || !valid_spirv(desc.vertexBytecode) ||
         (hasFragment && (desc.fragmentEntryPoint.empty() || !valid_spirv(desc.fragmentBytecode))) ||
-        (!desc.colorFormat && !desc.depthFormat) ||
+        (colorFormats.empty() && !desc.depthFormat) ||
         desc.topology != PrimitiveTopology::TriangleList || desc.sampleCount != 1U ||
-        (desc.colorFormat && *desc.colorFormat == TextureFormat::D32Float) ||
+        invalidColor ||
         (desc.depthFormat && *desc.depthFormat != TextureFormat::D32Float) ||
-        (desc.colorFormat && !hasFragment)) {
+        (!colorFormats.empty() && !hasFragment)) {
         set_error(error, "Vulkan graphics-pipeline description or SPIR-V is invalid"); return {};
     }
     std::vector<vk::DescriptorSetLayout> nativeLayouts;
@@ -1953,8 +2011,11 @@ GraphicsPipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipe
     vk::RenderPass compatible{};
     vk::PipelineLayout layout{};
     vk::Pipeline pipeline{};
-    bool ok = impl_->create_compatible_render_pass(desc.colorFormat, desc.depthFormat,
-                                                   true, true, compatible, error);
+    std::array<bool, 4> pipelineClears{true, true, true, true};
+    bool ok = impl_->create_compatible_render_pass(
+        colorFormats, desc.depthFormat,
+        std::span<const bool>(pipelineClears.data(), colorFormats.size()),
+        true, compatible, error);
     if (ok) {
         const vk::PipelineLayoutCreateInfo layoutInfo{
             vk::StructureTypePipelineLayoutCreateInfo, nullptr, 0U,
@@ -2035,9 +2096,12 @@ GraphicsPipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipe
         }
         blend.colorBlendOp = vk::BlendOpAdd;
         blend.alphaBlendOp = vk::BlendOpAdd;
+        std::vector<vk::PipelineColorBlendAttachmentState> blendAttachments(
+            colorFormats.size(), blend);
         const vk::PipelineColorBlendStateCreateInfo blendState{
             vk::StructureTypePipelineColorBlendStateCreateInfo, nullptr, 0U,
-            0U, 0, desc.colorFormat ? 1U : 0U, desc.colorFormat ? &blend : nullptr,
+            0U, 0, static_cast<std::uint32_t>(blendAttachments.size()),
+            blendAttachments.empty() ? nullptr : blendAttachments.data(),
             {0.0F, 0.0F, 0.0F, 0.0F}};
         const std::array<vk::DynamicState, 2> dynamicStates{
             vk::DynamicStateViewport, vk::DynamicStateScissor};
@@ -2098,6 +2162,7 @@ CommandListHandle VulkanDevice::begin_commands(QueueKind queue, std::string_view
     slot.indexBuffer = {};
     slot.viewportSet = false;
     slot.scissorSet = false;
+    slot.activeColorFormats.clear();
     slot.activeDepthFormat.reset();
     slot.computeBindGroups.clear();
     slot.graphicsBindGroups.clear();
@@ -2186,12 +2251,13 @@ bool VulkanDevice::begin_render_pass(CommandListHandle commands, const RenderPas
                                      std::string* error) {
     auto* list = impl_->command(commands, error); if (!list) return false;
     if (list->queue != QueueKind::Graphics || list->renderPassOpen ||
-        desc.colors.size() > 1U || (desc.colors.empty() && !desc.depth)) {
-        set_error(error, "Vulkan render pass requires a graphics queue, at most one color target, and at least one attachment");
+        desc.colors.size() > 4U || (desc.colors.empty() && !desc.depth)) {
+        set_error(error, "Vulkan render pass requires a graphics queue, at most four color targets, and at least one attachment");
         return false;
     }
     std::uint32_t width = 0U, height = 0U;
-    std::optional<TextureFormat> colorFormat;
+    std::vector<TextureFormat> colorFormats;
+    colorFormats.reserve(desc.colors.size());
     const auto recorded_texture_state = [&](TextureHandle handle, ResourceState initial) {
         ResourceState state = initial;
         for (const Impl::RecordedCommand& command : list->commands) {
@@ -2200,23 +2266,28 @@ bool VulkanDevice::begin_render_pass(CommandListHandle commands, const RenderPas
         }
         return state;
     };
-    if (!desc.colors.empty()) {
-        const auto* color = impl_->texture(desc.colors.front().texture, error); if (!color) return false;
+    for (const auto& attachment : desc.colors) {
+        const auto* color = impl_->texture(attachment.texture, error); if (!color) return false;
         if (!has_usage(color->desc.usage, TextureUsage::RenderTarget) ||
             color->desc.format == TextureFormat::D32Float ||
-            recorded_texture_state(desc.colors.front().texture, color->state) !=
-                ResourceState::RenderTarget) {
+            recorded_texture_state(attachment.texture, color->state) != ResourceState::RenderTarget) {
             set_error(error, "Vulkan color attachment must be a RenderTarget texture in RenderTarget state");
             return false;
         }
-        width = color->desc.width; height = color->desc.height; colorFormat = color->desc.format;
+        if (width == 0U) {
+            width = color->desc.width;
+            height = color->desc.height;
+        } else if (color->desc.width != width || color->desc.height != height) {
+            set_error(error, "Vulkan render-pass color attachment dimensions differ");
+            return false;
+        }
+        colorFormats.push_back(color->desc.format);
     }
     if (desc.depth) {
         const auto* depth = impl_->texture(desc.depth->texture, error); if (!depth) return false;
         if (!has_usage(depth->desc.usage, TextureUsage::DepthStencil) ||
             depth->desc.format != TextureFormat::D32Float ||
-            recorded_texture_state(desc.depth->texture, depth->state) !=
-                ResourceState::DepthWrite ||
+            recorded_texture_state(desc.depth->texture, depth->state) != ResourceState::DepthWrite ||
             (width != 0U && (depth->desc.width != width || depth->desc.height != height)) ||
             !std::isfinite(desc.depth->clearDepth) || desc.depth->clearDepth < 0.0F ||
             desc.depth->clearDepth > 1.0F) {
@@ -2229,7 +2300,7 @@ bool VulkanDevice::begin_render_pass(CommandListHandle commands, const RenderPas
     list->vertexStride = 0U;
     list->indexBuffer = {}; list->viewportSet = false; list->scissorSet = false;
     list->graphicsBindGroups.clear();
-    list->activeColorFormat = colorFormat;
+    list->activeColorFormats = std::move(colorFormats);
     list->activeDepthFormat = desc.depth ? std::optional<TextureFormat>{TextureFormat::D32Float}
                                         : std::nullopt;
     list->activeDepthAttachment = desc.depth.has_value();
@@ -2242,7 +2313,8 @@ bool VulkanDevice::end_render_pass(CommandListHandle commands, std::string* erro
     auto* list = impl_->command(commands, error); if (!list) return false;
     if (!list->renderPassOpen) { set_error(error, "no Vulkan render pass is open"); return false; }
     list->renderPassOpen = false;
-    list->activeDepthAttachment = false; list->activePassWidth = 0U; list->activePassHeight = 0U;
+    list->activeDepthAttachment = false; list->activeColorFormats.clear();
+    list->activeDepthFormat.reset(); list->activePassWidth = 0U; list->activePassHeight = 0U;
     list->commands.emplace_back(Impl::EndRenderPassCommand{});
     return true;
 }
@@ -2253,7 +2325,8 @@ bool VulkanDevice::bind_graphics_pipeline(CommandListHandle commands,
     auto* list = impl_->command(commands, error);
     const auto* pipeline = impl_->graphics_pipeline(handle, error);
     if (!list || !pipeline) return false;
-    if (!list->renderPassOpen || pipeline->desc.colorFormat != list->activeColorFormat ||
+    if (!list->renderPassOpen ||
+        resolved_color_formats(pipeline->desc) != list->activeColorFormats ||
         pipeline->desc.depthFormat != list->activeDepthFormat) {
         set_error(error, "Vulkan graphics pipeline is incompatible with the active render pass");
         return false;
@@ -2556,29 +2629,41 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
                 auto* texture = impl_->texture(item.texture, error);
                 return texture && impl_->image_barrier(native, *texture, item.before, item.after, error);
             } else if constexpr (std::is_same_v<T, Impl::BeginRenderPassCommand>) {
-                if (nativePassOpen || item.desc.colors.size() > 1U ||
+                if (nativePassOpen || item.desc.colors.size() > 4U ||
                     (item.desc.colors.empty() && !item.desc.depth)) {
                     set_error(error, "invalid nested Vulkan render pass"); return false;
                 }
-                const Impl::TextureSlot* color = nullptr;
-                const Impl::TextureSlot* depth = nullptr;
-                if (!item.desc.colors.empty()) {
-                    color = impl_->texture(item.desc.colors.front().texture, error);
-                    if (!color) return false;
+                std::vector<const Impl::TextureSlot*> colors;
+                colors.reserve(item.desc.colors.size());
+                for (const auto& attachment : item.desc.colors) {
+                    const auto* color = impl_->texture(attachment.texture, error);
+                    if (!color || color->state != ResourceState::RenderTarget) {
+                        set_error(error, "Vulkan color attachment state changed before submission");
+                        return false;
+                    }
+                    colors.push_back(color);
                 }
+                const Impl::TextureSlot* depth = nullptr;
                 if (item.desc.depth) {
                     depth = impl_->texture(item.desc.depth->texture, error);
-                    if (!depth) return false;
+                    if (!depth || depth->state != ResourceState::DepthWrite) {
+                        set_error(error, "Vulkan depth attachment state changed before submission");
+                        return false;
+                    }
                 }
-                const std::uint32_t width = color ? color->desc.width : depth->desc.width;
-                const std::uint32_t height = color ? color->desc.height : depth->desc.height;
+                const std::uint32_t width = !colors.empty() ? colors.front()->desc.width : depth->desc.width;
+                const std::uint32_t height = !colors.empty() ? colors.front()->desc.height : depth->desc.height;
                 NativePass pass;
-                pass.views.resize((color ? 1U : 0U) + (depth ? 1U : 0U));
+                pass.views.resize(colors.size() + (depth ? 1U : 0U));
                 std::size_t viewIndex = 0U;
-                if (color) {
+                for (const auto* color : colors) {
                     if (!impl_->create_native_view(*color, 0U, 1U, 0U, 1U,
                                                    TextureViewDimension::Texture2D,
-                                                   pass.views[viewIndex++], error)) return false;
+                                                   pass.views[viewIndex++], error)) {
+                        for (auto view : pass.views) if (view)
+                            impl_->fn.destroyImageView(impl_->device, view, nullptr);
+                        return false;
+                    }
                 }
                 if (depth) {
                     if (!impl_->create_native_view(*depth, 0U, 1U, 0U, 1U,
@@ -2589,13 +2674,18 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
                         return false;
                     }
                 }
-                const std::optional<TextureFormat> colorFormat = color
-                    ? std::optional<TextureFormat>{color->desc.format} : std::nullopt;
+                std::array<TextureFormat, 4> colorFormatStorage{};
+                std::array<bool, 4> clearColorStorage{};
+                for (std::size_t index = 0U; index < colors.size(); ++index) {
+                    colorFormatStorage[index] = colors[index]->desc.format;
+                    clearColorStorage[index] = item.desc.colors[index].clear;
+                }
                 const std::optional<TextureFormat> depthFormat = depth
                     ? std::optional<TextureFormat>{depth->desc.format} : std::nullopt;
                 if (!impl_->create_compatible_render_pass(
-                        colorFormat, depthFormat,
-                        color ? item.desc.colors.front().clear : false,
+                        std::span<const TextureFormat>(colorFormatStorage.data(), colors.size()),
+                        depthFormat,
+                        std::span<const bool>(clearColorStorage.data(), colors.size()),
                         depth ? item.desc.depth->clear : false,
                         pass.renderPass, error)) {
                     for (auto view : pass.views)
@@ -2614,13 +2704,13 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
                         if (view) impl_->fn.destroyImageView(impl_->device, view, nullptr);
                     return false;
                 }
-                std::array<vk::ClearValue, 2> clearValues{};
+                std::array<vk::ClearValue, 5> clearValues{};
                 std::uint32_t clearCount = 0U;
-                if (color) {
-                    clearValues[clearCount].color.float32[0] = item.desc.colors.front().clearR;
-                    clearValues[clearCount].color.float32[1] = item.desc.colors.front().clearG;
-                    clearValues[clearCount].color.float32[2] = item.desc.colors.front().clearB;
-                    clearValues[clearCount].color.float32[3] = item.desc.colors.front().clearA;
+                for (const auto& attachment : item.desc.colors) {
+                    clearValues[clearCount].color.float32[0] = attachment.clearR;
+                    clearValues[clearCount].color.float32[1] = attachment.clearG;
+                    clearValues[clearCount].color.float32[2] = attachment.clearB;
+                    clearValues[clearCount].color.float32[3] = attachment.clearA;
                     ++clearCount;
                 }
                 if (depth) {
@@ -2628,10 +2718,11 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
                     clearValues[clearCount].depthStencil.stencil = 0U;
                     ++clearCount;
                 }
+                const vk::Rect2D renderArea{
+                    vk::Offset2D{0, 0}, vk::Extent2D{width, height}};
                 const vk::RenderPassBeginInfo passBegin{
                     vk::StructureTypeRenderPassBeginInfo, nullptr, pass.renderPass,
-                    pass.framebuffer, {{0, 0}, {width, height}},
-                    clearCount, clearValues.data()};
+                    pass.framebuffer, renderArea, clearCount, clearValues.data()};
                 impl_->fn.cmdBeginRenderPass(native, &passBegin, vk::SubpassContentsInline);
                 nativePasses.push_back(std::move(pass));
                 nativePassOpen = true;

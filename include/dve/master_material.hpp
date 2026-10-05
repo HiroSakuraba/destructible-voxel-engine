@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "dve/asset_cooker.hpp"
@@ -167,6 +168,15 @@ struct MaterialResolveResult {
     const std::vector<VoxelMaterialDefinition>& materials,
     std::string* error = nullptr);
 
+// Runtime overrides set on one resolved material (world.set_material_param /
+// set_material_layer_weight), for save games. Masters and instances are content.
+struct MaterialRuntimeOverrideState {
+    MaterialId materialId{};
+    std::vector<std::pair<std::string, float>> scalars;       // sorted by name
+    std::vector<std::pair<std::string, Float4>> vectors;      // sorted by name
+    std::vector<std::pair<std::uint32_t, float>> layerWeights;   // sorted by layer
+};
+
 class MaterialLibrary {
 public:
     [[nodiscard]] MasterMaterialId add_master(MasterMaterial master, std::string* error = nullptr);
@@ -193,6 +203,12 @@ public:
                                                 std::string* error = nullptr);
     [[nodiscard]] std::optional<float> runtime_layer_weight(MaterialId materialId, std::size_t layerIndex) const;
     bool clear_runtime_layer_weights(MaterialId materialId);
+    [[nodiscard]] std::vector<MaterialRuntimeOverrideState> capture_runtime_overrides() const;
+    // Clears every runtime override, then applies `overrides` through the validating setters;
+    // entries that no longer apply (unknown material/parameter, out of range) are skipped with
+    // a message in `warnings`. Returns the number of values applied.
+    std::size_t restore_runtime_overrides(
+        const std::vector<MaterialRuntimeOverrideState>& overrides, std::vector<std::string>* warnings = nullptr);
     [[nodiscard]] const std::vector<VoxelMaterialLayer>* layers(MaterialId materialId) const noexcept;
 
     // The bridge used by world.set_global. Updates are validate-then-commit: a value that would

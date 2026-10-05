@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 
@@ -449,6 +450,90 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     std::set<EditorObjectId> selection;
     if (selectedObject) selection.insert(*selectedObject);
     return build_voxel_draw_list(document, materials, camera, viewport, settings, selection);
+}
+
+namespace {
+struct FingerprintHasher {
+    std::uint64_t h{1469598103934665603ULL};
+    void u64(std::uint64_t v) noexcept {
+        for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xFFU; h *= 1099511628211ULL; }
+    }
+    void f32(float v) noexcept { u64(std::bit_cast<std::uint32_t>(v)); }
+    void f3(Float3 v) noexcept { f32(v.x); f32(v.y); f32(v.z); }
+    void i32(std::int32_t v) noexcept { u64(static_cast<std::uint32_t>(v)); }
+};
+} // namespace
+
+std::uint64_t editor_scene_render_fingerprint(const EditorDocument& document) noexcept {
+    FingerprintHasher hash;
+    hash.u64(document.objects().size());
+    for (const auto& [id, object] : document.objects()) {
+        hash.u64(id);
+        hash.u64(object.parent ? *object.parent + 1U : 0U);
+        const auto& f = object.flags;
+        hash.u64((f.visible ? 1U : 0U) | (f.locked ? 2U : 0U) | (f.anchored ? 4U : 0U) |
+                 (f.structural ? 8U : 0U) | (f.collisionEnabled ? 16U : 0U) | (f.decorative ? 32U : 0U));
+        hash.f3(object.transform.position);
+        hash.f32(object.transform.rotation.x); hash.f32(object.transform.rotation.y);
+        hash.f32(object.transform.rotation.z); hash.f32(object.transform.rotation.w);
+        hash.f32(object.voxelSizeMeters);
+        hash.u64(reinterpret_cast<std::uintptr_t>(object.voxels.get()));
+        if (object.voxels) {
+            hash.u64(object.voxels->brick_count());
+            for (const auto& entry : object.voxels->bricks()) {
+                hash.i32(entry.first.x); hash.i32(entry.first.y); hash.i32(entry.first.z);
+                hash.u64((static_cast<std::uint64_t>(entry.second.generation()) << 16U) | entry.second.occupied_count());
+            }
+        }
+        hash.u64(object.anchors.size());
+        for (const Int3& anchor : object.anchors) { hash.i32(anchor.x); hash.i32(anchor.y); hash.i32(anchor.z); }
+    }
+    return hash.h;
+}
+
+std::uint64_t editor_camera_fingerprint(const EditorCamera& camera) noexcept {
+    FingerprintHasher hash;
+    hash.f3(camera.position); hash.f3(camera.target); hash.f3(camera.worldUp);
+    hash.f32(camera.verticalFovRadians); hash.f32(camera.orthographicHeight);
+    hash.f32(camera.nearPlane); hash.f32(camera.farPlane);
+    hash.u64(static_cast<std::uint64_t>(camera.projection));
+    const auto& lens = camera.physicalLens;
+    hash.u64(lens.enabled ? 1U : 0U);
+    hash.f32(lens.focalLengthMillimeters); hash.f32(lens.sensorWidthMillimeters);
+    hash.f32(lens.sensorHeightMillimeters); hash.f32(lens.lensShiftX); hash.f32(lens.lensShiftY);
+    hash.f32(lens.apertureFStop); hash.f32(lens.focusDistanceMeters);
+    hash.u64(static_cast<std::uint64_t>(lens.gateFit));
+    return hash.h;
+}
+
+std::uint64_t editor_selection_fingerprint(const std::set<EditorObjectId>& selection) noexcept {
+    FingerprintHasher hash;
+    hash.u64(selection.size());
+    for (EditorObjectId id : selection) hash.u64(id);
+    return hash.h;
+}
+
+const std::vector<EditorVoxelDrawItem>& EditorVoxelDrawListCache::get(
+    const EditorDocument& document,
+    const EditorMaterialLibrary& materials,
+    const EditorCamera& camera,
+    UiRect viewport,
+    const EditorViewportSettings& settings,
+    const std::set<EditorObjectId>& selectedObjects,
+    std::uint64_t sceneFingerprint) {
+    FingerprintHasher hash;
+    hash.u64(sceneFingerprint);
+    hash.u64(editor_camera_fingerprint(camera));
+    hash.i32(viewport.x); hash.i32(viewport.y); hash.i32(viewport.width); hash.i32(viewport.height);
+    hash.u64(settings.maximumDrawVoxels);
+    hash.u64(editor_selection_fingerprint(selectedObjects));
+    if (!valid_ || hash.h != key_) {
+        items_ = build_voxel_draw_list(document, materials, camera, viewport, settings, selectedObjects);
+        key_ = hash.h;
+        valid_ = true;
+        ++rebuilds_;
+    }
+    return items_;
 }
 
 std::vector<EditorText3DDrawItem> build_text3d_draw_list(

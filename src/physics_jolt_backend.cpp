@@ -62,6 +62,7 @@
 #include <unordered_map>
 #include <string_view>
 #include <utility>
+#include <set>
 #include <vector>
 
 static_assert(JPH_VERSION_MAJOR == 5 && (JPH_VERSION_MINOR == 5 || JPH_VERSION_MINOR == 6),
@@ -372,6 +373,22 @@ struct JoltRigidBodyWorld::Impl final : public JPH::BodyActivationListener, publ
         else
             contactEventsRejected.fetch_add(1U, std::memory_order_relaxed);
     }
+
+    // Pairs whose contacts are rejected (attachments: a child body driven by its parent).
+    // Only modified outside step(); read concurrently by Jolt worker threads during step().
+    [[nodiscard]] static std::pair<RigidBodyHandle, RigidBodyHandle> ordered_pair(
+        RigidBodyHandle a, RigidBodyHandle b) noexcept {
+        return a < b ? std::pair{a, b} : std::pair{b, a};
+    }
+    JPH::ValidateResult OnContactValidate(const JPH::Body& body1, const JPH::Body& body2,
+                                          JPH::RVec3Arg /*baseOffset*/,
+                                          const JPH::CollideShapeResult& /*collisionResult*/) override {
+        if (ignoredPairs.empty()) return JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+        return ignoredPairs.contains(ordered_pair(handle_from_body(body1), handle_from_body(body2)))
+            ? JPH::ValidateResult::RejectAllContactsForThisBodyPair
+            : JPH::ValidateResult::AcceptAllContactsForThisBodyPair;
+    }
+    std::set<std::pair<RigidBodyHandle, RigidBodyHandle>> ignoredPairs{};
 
     void OnContactAdded(const JPH::Body& body1, const JPH::Body& body2,
                         const JPH::ContactManifold& manifold,
@@ -991,6 +1008,19 @@ std::vector<RigidBodyHandle> JoltRigidBodyWorld::create_static_bodies(
 
 void JoltRigidBodyWorld::set_contact_sink(IPhysicsContactSink* sink) noexcept {
     impl_->contactSink.store(sink, std::memory_order_release);
+}
+
+bool JoltRigidBodyWorld::set_pair_collision_enabled(
+    RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept {
+    if (!impl_->valid(a) || !impl_->valid(b) || a == b) return false;
+    try {
+        const auto pair = Impl::ordered_pair(a, b);
+        if (enabled) impl_->ignoredPairs.erase(pair);
+        else impl_->ignoredPairs.insert(pair);
+    } catch (...) {
+        return false;
+    }
+    return true;
 }
 
 bool JoltRigidBodyWorld::set_contact_material(
@@ -2123,6 +2153,9 @@ bool JoltRigidBodyWorld::destroy_body(RigidBodyHandle handle) {
         if (slot.alive && (slot.parentBody == handle || slot.childBody == handle))
             (void)destroy_constraint(static_cast<RigidBodyConstraintHandle>(index));
     }
+    std::erase_if(impl_->ignoredPairs, [handle](const auto& pair) {
+        return pair.first == handle || pair.second == handle;
+    });
     JPH::BodyInterface& bodyInterface = impl_->system.GetBodyInterface();
     const JPH::BodyID id = impl_->slots[handle].bodyId;
     bodyInterface.RemoveBody(id);

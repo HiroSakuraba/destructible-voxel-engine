@@ -75,25 +75,54 @@ void EditorChiptunePanel::set_document_path(std::filesystem::path path) noexcept
 
 void EditorChiptunePanel::resize(int width, int height, float uiScale) noexcept {
     const int panelWidth = std::clamp(static_cast<int>(1040.0F * uiScale), 720, std::max(720, width - 24));
-    const int panelHeight = std::clamp(static_cast<int>(690.0F * uiScale), 520, std::max(520, height - 52));
     const int x = std::max(12, (width - panelWidth) / 2);
+    // Toolbar: flows right of the page tabs and wraps onto extra rows (aligned under the first
+    // toolbar button) when the panel is too narrow, instead of running past the close button
+    // and off the panel (it needed ~914 px from the panel's left edge). Widths are logical
+    // pixels, so UI zoom is handled by the logical window size.
+    constexpr int kToolbarRowPitch = 29;
+    constexpr int kToolbarGap = 5;
+    const int toolbarLeft = x + 12 + static_cast<int>(layout_.tabs.size()) * 112 + 10;
+    const int toolbarRight = x + panelWidth - 12;
+    struct ToolbarItem { UiRect* rect; int width; };
+    const std::array<ToolbarItem, 10> toolbarItems{{
+        {&layout_.playSongButton, 68}, {&layout_.playInstrumentButton, 68}, {&layout_.stopButton, 48},
+        {&layout_.saveButton, 48}, {&layout_.openButton, 48}, {&layout_.undoButton, 48},
+        {&layout_.redoButton, 48}, {&layout_.copyButton, 44}, {&layout_.cutButton, 38},
+        {&layout_.pasteButton, 48}}};
+    int toolbarRows = 1;
+    {
+        int cursor = toolbarLeft;
+        for (const ToolbarItem& item : toolbarItems) {
+            if (cursor > toolbarLeft && cursor + item.width > toolbarRight) { ++toolbarRows; cursor = toolbarLeft; }
+            cursor += item.width + kToolbarGap;
+        }
+    }
+    const int toolbarExtra = (toolbarRows - 1) * kToolbarRowPitch;
+    // Extra toolbar rows grow the panel (when the window allows) so the pages keep their height.
+    const int minimumHeight = 520 + toolbarExtra;
+    const int panelHeight = std::clamp(static_cast<int>(690.0F * uiScale) + toolbarExtra, minimumHeight,
+                                       std::max(minimumHeight, height - 52));
     const int y = std::max(34, (height - panelHeight) / 2);
     layout_.panel = {x, y, panelWidth, panelHeight};
     layout_.titleBar = {x, y, panelWidth, 34};
     layout_.closeButton = {x + panelWidth - 31, y + 5, 24, 24};
     for (std::size_t i = 0; i < layout_.tabs.size(); ++i)
         layout_.tabs[i] = {x + 12 + static_cast<int>(i) * 112, y + 42, 104, 25};
-    int toolbarX = x + 358;
-    auto toolbar = [&](UiRect& rect, int w) { rect = {toolbarX, y + 42, w, 25}; toolbarX += w + 5; };
-    toolbar(layout_.playSongButton, 68); toolbar(layout_.playInstrumentButton, 68);
-    toolbar(layout_.stopButton, 48); toolbar(layout_.saveButton, 48); toolbar(layout_.openButton, 48);
-    toolbar(layout_.undoButton, 48); toolbar(layout_.redoButton, 48);
-    toolbar(layout_.copyButton, 44); toolbar(layout_.cutButton, 38); toolbar(layout_.pasteButton, 48);
+    {
+        int cursor = toolbarLeft;
+        int rowY = y + 42;
+        for (const ToolbarItem& item : toolbarItems) {
+            if (cursor > toolbarLeft && cursor + item.width > toolbarRight) { rowY += kToolbarRowPitch; cursor = toolbarLeft; }
+            *item.rect = {cursor, rowY, item.width, 25};
+            cursor += item.width + kToolbarGap;
+        }
+    }
     layout_.songBusButton = {x + 12, y + panelHeight - 66, 190, 25};
     layout_.instrumentBusButton = {x + 208, y + panelHeight - 66, 190, 25};
 
-    const int bodyY = y + 76;
-    const int bodyH = panelHeight - 154;
+    const int bodyY = y + 76 + toolbarExtra;
+    const int bodyH = panelHeight - 154 - toolbarExtra;
     const int orderW = 150;
     layout_.orderList = {x + 12, bodyY, orderW, bodyH};
     const int orderRowH = std::max(23, bodyH / static_cast<int>(kChiptuneVisibleOrders + 3U));
@@ -147,10 +176,24 @@ void EditorChiptunePanel::resize(int width, int height, float uiScale) noexcept 
     layout_.sfxPanDownButton = {x + 580, sfxY, 30, 25}; layout_.sfxPanUpButton = {x + 700, sfxY, 30, 25};
     layout_.applySfxButton = {x + 25, sfxY + 45, 145, 30};
     layout_.auditionSfxButton = {x + 180, sfxY + 45, 145, 30};
+    // Piano size (same User setting as the synth piano); right-aligned on the apply row.
+    layout_.keyboardKeysButton = {std::max(x + 335, x + panelWidth - 25 - 104), sfxY + 45, 104, 30};
     const int pianoY = bodyY + bodyH - 115;
-    const int pianoW = std::max(20, (panelWidth - 50) / 24);
-    for (std::size_t i = 0; i < layout_.pianoKeys.size(); ++i)
-        layout_.pianoKeys[i] = {x + 25 + static_cast<int>(i) * pianoW, pianoY, pianoW - 1, 92};
+    layout_.pianoArea = {x + 25, pianoY, panelWidth - 50, 92};
+    keyboard_.set_octave(session_.octave());
+    keyboard_.layout(layout_.pianoArea);
+}
+
+void EditorChiptunePanel::set_keyboard_key_count(int count) noexcept {
+    keyboard_.set_key_count(count);
+    keyboard_.set_octave(session_.octave());
+    keyboard_.layout(layout_.pianoArea);
+}
+
+bool EditorChiptunePanel::pointer_wheel(float steps, int x, int y) noexcept {
+    if (!open_ || !layout_.panel.contains(x, y)) return false;
+    if (page_ == ChiptunePanelPage::Sfx && layout_.pianoArea.contains(x, y)) (void)keyboard_.wheel(steps);
+    return true;
 }
 
 bool EditorChiptunePanel::pointer_down(int x, int y, audio::AudioMixer& mixer) noexcept {
@@ -246,8 +289,20 @@ bool EditorChiptunePanel::pointer_down(int x, int y, audio::AudioMixer& mixer) n
         if (adjust(layout_.sfxPanDownButton, layout_.sfxPanUpButton, [&](int d){ request.pan += 0.1F * static_cast<float>(d); session_.set_sfx_request(request); })) return true;
         if (layout_.applySfxButton.contains(x, y)) { set_status(session_.apply_sfx_request(&error) ? "SFX preset applied to document" : error); return true; }
         if (layout_.auditionSfxButton.contains(x, y)) { session_.set_song_bus(audio::AudioBusId::Effects); play_song(mixer); return true; }
-        for (std::size_t i = 0; i < layout_.pianoKeys.size(); ++i) if (layout_.pianoKeys[i].contains(x, y)) {
-            request.baseMidi = (session_.octave() + 1) * 12 + static_cast<int>(i);
+        if (layout_.keyboardKeysButton.contains(x, y)) {
+            // Cycle 25 -> 37 -> ... -> 88 -> 25; the controller persists the choice.
+            std::size_t next = 0;
+            for (std::size_t i = 0; i < kPianoKeyboardSizes.size(); ++i)
+                if (kPianoKeyboardSizes[i] == keyboard_.key_count()) next = (i + 1U) % kPianoKeyboardSizes.size();
+            set_keyboard_key_count(kPianoKeyboardSizes[next]);
+            requestedKeyCount_ = keyboard_.key_count();
+            set_status("Piano keyboard: " + std::to_string(keyboard_.key_count()) + " keys");
+            return true;
+        }
+        keyboard_.set_octave(session_.octave());
+        if (keyboard_.pointer_down(x, y)) return true;
+        if (const auto note = keyboard_.note_at(x, y)) {
+            request.baseMidi = *note;
             session_.set_sfx_request(request);
             if (session_.apply_sfx_request(&error)) {
                 session_.set_song_bus(audio::AudioBusId::Effects);
@@ -262,13 +317,15 @@ bool EditorChiptunePanel::pointer_down(int x, int y, audio::AudioMixer& mixer) n
 
 bool EditorChiptunePanel::pointer_move(int x, int y) noexcept {
     if (!open_) return false;
+    if (keyboard_.dragging()) { (void)keyboard_.pointer_drag(x); return true; }
     if (envelopeDrawing_) { draw_envelope(x, y); return true; }
     if (wavetableDrawing_) { draw_wavetable(x, y); return true; }
     return layout_.panel.contains(x, y);
 }
 
 bool EditorChiptunePanel::pointer_up(int, int) noexcept {
-    const bool handled = envelopeDrawing_ || wavetableDrawing_;
+    const bool handled = envelopeDrawing_ || wavetableDrawing_ || keyboard_.dragging();
+    keyboard_.pointer_up();
     envelopeDrawing_ = false; wavetableDrawing_ = false;
     return handled;
 }
@@ -313,8 +370,12 @@ bool EditorChiptunePanel::key_down(std::string_view key, bool control, bool shif
     if (normalized == "down") { ++cursor.row; move_cursor(cursor); return true; }
     if (normalized == "pageup") { if (cursor.order > 0U) --cursor.order; cursor.row = 0U; move_cursor(cursor); return true; }
     if (normalized == "pagedown") { ++cursor.order; cursor.row = 0U; move_cursor(cursor); return true; }
-    if (normalized == "[") { session_.set_octave(session_.octave() - 1); return true; }
-    if (normalized == "]") { session_.set_octave(session_.octave() + 1); return true; }
+    if (normalized == "[" || normalized == "]") {
+        session_.set_octave(session_.octave() + (normalized == "[" ? -1 : 1));
+        keyboard_.set_octave(session_.octave());
+        keyboard_.ensure_visible(keyboard_.computer_key_base());
+        return true;
+    }
     if (normalized == "f1") { page_ = ChiptunePanelPage::Pattern; return true; }
     if (normalized == "f2") { page_ = ChiptunePanelPage::Instrument; return true; }
     if (normalized == "f3") { page_ = ChiptunePanelPage::Sfx; return true; }

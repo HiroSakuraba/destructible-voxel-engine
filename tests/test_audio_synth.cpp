@@ -216,7 +216,7 @@ void test_v124_modulation_wavetable_and_filters(const std::filesystem::path& roo
         auto modulated = base;
         modulated.lfos[0] = {true, LfoWaveform::Triangle, 5.0F, 1.0F, 0.0F, 0.0F, true, false, 1.0F};
         modulated.modulation[0] = {true, ModulationSource::Lfo1, ModulationDestination::Osc1Pitch,
-                                  0.75F, ModulationCurve::Linear};
+                                  0.75F, 0.0F, ModulationCurve::Linear};
         require(mean_abs_difference(render_note(base), render_note(modulated)) > 0.003,
                 "LFO pitch modulation did not alter the signal");
         for (std::size_t i = 0; i < modulated.modulation.size(); ++i) {
@@ -237,7 +237,7 @@ void test_v124_modulation_wavetable_and_filters(const std::filesystem::path& roo
         auto preset = focused_preset();
         preset.macros.values[0] = 0.0F;
         preset.modulation[0] = {true, ModulationSource::Macro1, ModulationDestination::VoiceGain,
-                                1.0F, ModulationCurve::Linear};
+                                1.0F, 0.0F, ModulationCurve::Linear};
         preset.midiLearn[0] = {true, 74U, 0U, 0.0F, 1.0F, false};
         Synthesizer synth(48000);
         synth.set_preset(preset);
@@ -633,7 +633,7 @@ void test_v125_expression_microtuning_and_authoring(const std::filesystem::path&
         preset.microtuning.name = "Concert A 442";
         preset.microtuning.centsOffset[60] = 13.7F;
         preset.modulation[0] = {true, ModulationSource::Velocity,
-                                ModulationDestination::FilterCutoff, 0.75F,
+                                ModulationDestination::FilterCutoff, 0.75F, 0.0F,
                                 ModulationCurve::Quadratic, ModulationPolarity::Unipolar, 42.0F};
         preset.arpeggiator.steps[0].condition = ArpeggiatorCondition::Fill;
         preset.arpeggiator.steps[0].automationCurve = StepAutomationCurve::Smooth;
@@ -796,7 +796,7 @@ void test_v125_expression_microtuning_and_authoring(const std::filesystem::path&
 
         SynthPreset modulated = focused_preset();
         modulated.modulation[0] = {true, ModulationSource::Velocity,
-                                   ModulationDestination::VoicePan, 0.8F,
+                                   ModulationDestination::VoicePan, 0.8F, 0.0F,
                                    ModulationCurve::Linear, ModulationPolarity::Unipolar, 25.0F};
         Synthesizer synth(48000);
         synth.set_preset(modulated);

@@ -413,12 +413,51 @@ void test_lifecycle_memberships_and_deterministic_pooling() {
 
 } // namespace
 
+// Regression: a dynamic object that has moved since it spawned must split where it *is*.
+// fragment_after_damage used to rebuild the primary body and create the fragments at the
+// spawn transform (Object::authoredTransform), teleporting both back to the spawn point.
+void test_fragmentation_of_moved_dynamic_object() {
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    GameObjectDesc desc;
+    desc.name = "Dumbbell";
+    desc.voxelSizeMeters = 0.25F;
+    desc.dynamic = true;
+    desc.transform = make_rigid_transform({0.0F, 10.0F, 0.0F}, {});
+    desc.voxels = std::make_unique<VoxelObject>(77);
+    for (int x = 0; x < 3; ++x)
+        for (int z = 0; z < 3; ++z) {
+            for (int y = 0; y < 3; ++y) desc.voxels->set_voxel({x, y, z}, 1);
+            for (int y = 5; y < 8; ++y) desc.voxels->set_voxel({x, y, z}, 1);
+        }
+    desc.voxels->set_voxel({1, 3, 1}, 1);
+    desc.voxels->set_voxel({1, 4, 1}, 1);
+    std::string error;
+    const GameObjectId id = world.create_object(std::move(desc), &error);
+    CHECK(id != kInvalidGameObjectId);
+    CHECK(world.set_linear_velocity(id, {6.0F, 0.0F, 0.0F}));
+    for (int i = 0; i < 30; ++i) world.tick(1.0F / 60.0F);
+    const auto moved = world.position(id);
+    CHECK(moved && moved->x > 2.0F);
+    if (!moved) return;
+    const std::size_t before = world.object_count();
+    const Float3 neck{moved->x + 0.375F, moved->y + 1.0F, moved->z + 0.375F};
+    const auto removed = world.damage_sphere(id, neck, 0.3F);
+    CHECK(removed && *removed >= 2U);
+    CHECK(world.object_count() == before + 1U);
+    for (const GameObjectId other : world.object_ids()) {
+        const auto position = world.position(other);
+        CHECK(position.has_value());
+        if (position) CHECK(std::fabs(position->x - moved->x) < 0.25F && std::fabs(position->y - moved->y) < 0.25F);
+    }
+}
+
 int main() {
     test_marker_objects();
     test_static_object_is_immovable();
     test_dynamic_object_impulse_moves_it();
     test_damage_and_auto_destroy();
     test_fragmentation_on_disconnecting_damage();
+    test_fragmentation_of_moved_dynamic_object();
     test_spawn_asset_uses_real_per_material_density();
     test_raycast_unit_correctness();
     test_timers();

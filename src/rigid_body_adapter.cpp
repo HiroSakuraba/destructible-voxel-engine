@@ -259,6 +259,13 @@ std::vector<RigidBodyQueryHit> IRigidBodyWorld::cast_sphere_all(
     return {};
 }
 
+bool IRigidBodyWorld::set_pair_collision_enabled(RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept {
+    (void)a;
+    (void)b;
+    (void)enabled;
+    return false;
+}
+
 void IRigidBodyWorld::set_contact_sink(IPhysicsContactSink* sink) noexcept {
     (void)sink;
 }
@@ -562,10 +569,19 @@ bool ReferenceRigidBodyWorld::apply_angular_impulse(
     const double inv11 = (inertia.xx * inertia.zz - inertia.xz * inertia.xz) / determinant;
     const double inv12 = (inertia.xy * inertia.xz - inertia.xx * inertia.yz) / determinant;
     const double inv22 = (inertia.xx * inertia.yy - inertia.xy * inertia.xy) / determinant;
-    const Float3 delta{
-        static_cast<float>(inv00 * worldAngularImpulse.x + inv01 * worldAngularImpulse.y + inv02 * worldAngularImpulse.z),
-        static_cast<float>(inv01 * worldAngularImpulse.x + inv11 * worldAngularImpulse.y + inv12 * worldAngularImpulse.z),
-        static_cast<float>(inv02 * worldAngularImpulse.x + inv12 * worldAngularImpulse.y + inv22 * worldAngularImpulse.z)};
+    // The stored tensor is the body-frame inertia (built from body-frame voxel moments in
+    // fragment.cpp and never rotated afterwards), but the impulse arrives in world space.
+    // Apply the world-frame inverse inertia R * I_body^-1 * R^T: rotate the impulse into
+    // the body frame, apply the body-frame inverse inertia, then rotate the result back to
+    // world space. For an axis-aligned body R is identity and this reduces exactly to the
+    // old direct formula.
+    const Quaternion rotation = bodies_[handle].state.currentTransform.rotation;
+    const Float3 bodyImpulse = rotate(conjugate(rotation), worldAngularImpulse);
+    const Float3 bodyDelta{
+        static_cast<float>(inv00 * bodyImpulse.x + inv01 * bodyImpulse.y + inv02 * bodyImpulse.z),
+        static_cast<float>(inv01 * bodyImpulse.x + inv11 * bodyImpulse.y + inv12 * bodyImpulse.z),
+        static_cast<float>(inv02 * bodyImpulse.x + inv12 * bodyImpulse.y + inv22 * bodyImpulse.z)};
+    const Float3 delta = rotate(rotation, bodyDelta);
     Body& body = bodies_[handle];
     body.state.angularVelocity = add(body.state.angularVelocity, delta);
     body.state.sleeping = false;
@@ -689,6 +705,12 @@ bool ReferenceRigidBodyWorld::set_contact_material(
     if (handle >= bodies_.size() || !bodies_[handle].alive) return false;
     bodies_[handle].material = material;
     return true;
+}
+
+bool ReferenceRigidBodyWorld::set_pair_collision_enabled(
+    RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept {
+    (void)enabled;
+    return a < bodies_.size() && b < bodies_.size() && a != b && bodies_[a].alive && bodies_[b].alive;
 }
 
 RigidBodyConstraintHandle ReferenceRigidBodyWorld::create_constraint(

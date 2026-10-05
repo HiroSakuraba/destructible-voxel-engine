@@ -106,7 +106,10 @@ void test_edit_session(const std::filesystem::path& temp) {
 
 void test_recorder_and_mixer_taps() {
     using namespace dve::audio;
-    auto recorder = std::make_shared<AudioTakeRecorder>(48000, 2, 8192);
+    // The ring holds the whole synth take (40 blocks x 256 frames): the mixer renders faster than
+    // real time here, and the worker's 1 ms poll can sleep ~15 ms on Windows, so a smaller ring
+    // would drop frames depending on the scheduler rather than on the recorder.
+    auto recorder = std::make_shared<AudioTakeRecorder>(48000, 2, 16384);
     require(recorder->start("manual take"), "recorder start failed");
     const auto tone = make_tone(2048U);
     recorder->capture_interleaved(tone.samples, 0U);

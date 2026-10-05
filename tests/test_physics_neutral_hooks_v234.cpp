@@ -51,8 +51,8 @@ int main() {
                 {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F}),
             "non-finite point force was accepted");
     world.set_contact_sink(nullptr);
-    require(!world.set_contact_material(handle, 3U),
-            "reference backend claimed unsupported contact materials");
+    require(world.set_contact_material(handle, 3U),
+            "reference backend rejected a valid contact material");
 
     std::cout << "DVE v2.34 solver-neutral physics hook tests passed\n";
     return 0;

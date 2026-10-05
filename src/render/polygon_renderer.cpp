@@ -775,6 +775,46 @@ PolygonRenderStats ReferencePolygonRenderer::render(
 
 bool composite_hybrid_layers(const PolygonRenderTarget& voxelLayer,const PolygonRenderTarget& polygonLayer,PolygonRenderTarget& output,std::string* error){if(!voxelLayer.valid()||!polygonLayer.valid()||voxelLayer.width!=polygonLayer.width||voxelLayer.height!=polygonLayer.height){if(error)*error="hybrid layers must be valid and have identical dimensions";return false;}output.resize(voxelLayer.width,voxelLayer.height);for(std::size_t i=0;i<output.depth.size();++i){const bool polygon=polygonLayer.depth[i]<voxelLayer.depth[i];output.depth[i]=polygon?polygonLayer.depth[i]:voxelLayer.depth[i];output.hdrColor[i]=polygon?polygonLayer.hdrColor[i]:voxelLayer.hdrColor[i];output.objectId[i]=polygon?polygonLayer.objectId[i]:voxelLayer.objectId[i];output.materialIndex[i]=polygon?polygonLayer.materialIndex[i]:voxelLayer.materialIndex[i];}return true;}
 
-bool write_polygon_render_ppm(const std::filesystem::path& path,const PolygonRenderTarget& target,float exposure,std::string* error){if(!target.valid()||!(exposure>0)||!std::isfinite(exposure)){if(error)*error="invalid render target or exposure";return false;}std::ofstream out(path,std::ios::binary|std::ios::trunc);if(!out){if(error)*error="failed to open PPM output";return false;}out<<"P6\n"<<target.width<<' '<<target.height<<"\n255\n";for(const Float4& c:target.hdrColor){const std::array<char,3> pixel{static_cast<char>(srgb(aces(c.x*exposure))),static_cast<char>(srgb(aces(c.y*exposure))),static_cast<char>(srgb(aces(c.z*exposure)))};out.write(pixel.data(),3);}if(!out){if(error)*error="failed to write PPM output";return false;}return true;}
+bool resolve_polygon_render_rgba8(const PolygonRenderTarget& target, float exposure,
+                                  std::vector<std::uint8_t>& rgba, std::string* error) {
+    if (!target.valid() || !(exposure > 0) || !std::isfinite(exposure)) {
+        if (error) *error = "invalid render target or exposure";
+        return false;
+    }
+    rgba.resize(target.hdrColor.size() * 4U);
+    std::uint8_t* out = rgba.data();
+    for (const Float4& c : target.hdrColor) {
+        out[0] = srgb(aces(c.x * exposure));
+        out[1] = srgb(aces(c.y * exposure));
+        out[2] = srgb(aces(c.z * exposure));
+        out[3] = 255U;
+        out += 4;
+    }
+    return true;
+}
+
+bool write_polygon_render_ppm(const std::filesystem::path& path, const PolygonRenderTarget& target,
+                              float exposure, std::string* error) {
+    std::vector<std::uint8_t> rgba;
+    if (!resolve_polygon_render_rgba8(target, exposure, rgba, error)) return false;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        if (error) *error = "failed to open PPM output";
+        return false;
+    }
+    out << "P6\n" << target.width << ' ' << target.height << "\n255\n";
+    std::vector<char> rgb(rgba.size() / 4U * 3U);
+    for (std::size_t i = 0, j = 0; i < rgba.size(); i += 4U, j += 3U) {
+        rgb[j] = static_cast<char>(rgba[i]);
+        rgb[j + 1U] = static_cast<char>(rgba[i + 1U]);
+        rgb[j + 2U] = static_cast<char>(rgba[i + 2U]);
+    }
+    out.write(rgb.data(), static_cast<std::streamsize>(rgb.size()));
+    if (!out) {
+        if (error) *error = "failed to write PPM output";
+        return false;
+    }
+    return true;
+}
 
 } // namespace dve::render

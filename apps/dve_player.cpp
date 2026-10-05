@@ -260,6 +260,11 @@ std::optional<Options> parse_arguments(int argc, char** argv, int* exitCode) {
 }
 
 std::filesystem::path executable_directory(bool useSdl) {
+#if defined(_WIN32)
+    // No /proc on Windows; SDL_GetBasePath (GetModuleFileNameW) works without SDL_Init, so
+    // headless runs also find the content next to the .exe.
+    useSdl = true;
+#endif
     if (useSdl) {
         if (const char* base = SDL_GetBasePath()) return std::filesystem::path(base);
     }

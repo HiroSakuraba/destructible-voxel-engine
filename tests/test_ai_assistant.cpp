@@ -23,7 +23,7 @@ int failures=0;
 using namespace dve;
 using namespace dve::ai;
 
-std::filesystem::path make_temp(){auto path=std::filesystem::temp_directory_path()/"dve-ai-tests";std::filesystem::remove_all(path);std::filesystem::create_directories(path/"src");std::ofstream(path/"src"/"sample.cpp")<<"int value = 1;\n";return path;}
+std::filesystem::path make_temp(){auto path=std::filesystem::temp_directory_path()/"dve-ai-tests";std::filesystem::remove_all(path);std::filesystem::create_directories(path/"src");std::ofstream(path/"src"/"sample.cpp",std::ios::binary)<<"int value = 1;\n";return path;}
 
 class MockTransport final : public IAiHttpTransport {
 public:
@@ -54,7 +54,7 @@ void test_approval_is_bound_to_exact_arguments(){
     CHECK(otherClient.status==AiCallStatus::ApprovalRequired);
     auto replay=bridge.registry().call("dve.project.write_text",altered,AiApprovalPolicy::AskForChanges,pending.approvalId,"client-a");
     CHECK(replay.status==AiCallStatus::ApprovalRequired);
-    std::ifstream before(root/"src"/"sample.cpp");std::string unchanged((std::istreambuf_iterator<char>(before)),{});CHECK(unchanged=="int value = 1;\n");
+    std::ifstream before(root/"src"/"sample.cpp");std::string unchanged((std::istreambuf_iterator<char>(before)),{});CHECK(unchanged=="int value = 1;\n");before.close();
     auto approved=bridge.registry().call("dve.project.write_text",original,AiApprovalPolicy::AskForChanges,pending.approvalId,"client-a");
     CHECK(approved.status==AiCallStatus::Completed);
 }
@@ -81,7 +81,7 @@ void test_transactional_patch_and_rollback(){
     auto applied=bridge.registry().call("dve.project.apply_patch",args,AiApprovalPolicy::AskForChanges,pending.approvalId);
     CHECK(applied.status==AiCallStatus::Completed);const std::string transaction(applied.content.find("transaction_id")->as_string());CHECK(!transaction.empty());
     std::ifstream changed(root/"src"/"sample.cpp");std::string changedText((std::istreambuf_iterator<char>(changed)),{});CHECK(changedText=="int value = 2;\n");
-    std::ifstream created(root/"src"/"new.hpp");std::string createdText((std::istreambuf_iterator<char>(created)),{});CHECK(createdText=="#pragma once\ninline constexpr int created = 7;\n");
+    std::ifstream created(root/"src"/"new.hpp");std::string createdText((std::istreambuf_iterator<char>(created)),{});CHECK(createdText=="#pragma once\ninline constexpr int created = 7;\n");created.close();changed.close();
     JsonValue rollbackArgs=JsonValue::Object{{"transaction_id",transaction}};
     auto rollbackPending=bridge.registry().call("dve.project.rollback_patch",rollbackArgs,AiApprovalPolicy::AskForChanges,{});
     CHECK(rollbackPending.status==AiCallStatus::ApprovalRequired);CHECK(bridge.registry().approvals().approve(rollbackPending.approvalId));
@@ -110,6 +110,13 @@ void test_named_validation_task(){
     DveAiBridgeOptions envOptions;envOptions.projectRoot=root;envOptions.enableDefaultValidationTasks=false;envOptions.validationTasks.push_back({"test.env","Environment validation","Print sanitized task environment","/usr/bin/env",{},".",std::chrono::seconds(5),16384,false});DveAiBridge envBridge(std::move(envOptions));
     JsonValue envArgs=JsonValue::Object{{"name","test.env"}};auto envPending=envBridge.registry().call("dve.project.run_validation_task",envArgs,AiApprovalPolicy::AskForChanges,{});CHECK(envBridge.registry().approvals().approve(envPending.approvalId));auto envResult=envBridge.registry().call("dve.project.run_validation_task",envArgs,AiApprovalPolicy::AskForChanges,envPending.approvalId);CHECK(envResult.status==AiCallStatus::Completed);CHECK(envResult.content.find("output")->as_string().find("OPENAI_API_KEY")==std::string_view::npos);
     (void)unsetenv("OPENAI_API_KEY");
+#else
+    // Named-task execution has no Windows implementation yet (src/ai/named_tasks.cpp): the task
+    // is listed, approval still applies, and the run is refused with a clear error, never launched.
+    const auto root=make_temp();DveAiBridgeOptions options;options.projectRoot=root;options.enableDefaultValidationTasks=false;options.validationTasks.push_back({"test.echo","Echo validation","Deterministic test task","cmd.exe",{"/c","echo","validation-ok"},".",std::chrono::seconds(5),4096,false});DveAiBridge bridge(std::move(options));
+    auto list=bridge.registry().call("dve.project.list_validation_tasks",JsonValue::Object{},AiApprovalPolicy::ReadOnlyOnly,{});CHECK(list.status==AiCallStatus::Completed);CHECK(list.content.find("tasks")->as_array().size()==1);
+    JsonValue args=JsonValue::Object{{"name","test.echo"}};auto pending=bridge.registry().call("dve.project.run_validation_task",args,AiApprovalPolicy::AskForChanges,{});CHECK(pending.status==AiCallStatus::ApprovalRequired);CHECK(bridge.registry().approvals().approve(pending.approvalId));auto result=bridge.registry().call("dve.project.run_validation_task",args,AiApprovalPolicy::AskForChanges,pending.approvalId);CHECK(result.status==AiCallStatus::Failed);
+    const auto* launched=result.content.find("launched");CHECK(launched&&!launched->as_bool());
 #endif
 }
 

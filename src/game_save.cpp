@@ -9,6 +9,7 @@
 #include <utility>
 #include <variant>
 
+#include "dve/camera_runtime.hpp"
 #include "dve/dvox.hpp"
 #include "dve/polygon_asset.hpp"
 #include "dve/version.hpp"
@@ -21,6 +22,11 @@ constexpr std::string_view kWorldSection = "dve.world";
 constexpr std::string_view kVoxelSection = "dve.voxels";
 constexpr std::string_view kPhysicsSection = "dve.physics";
 constexpr std::string_view kScriptSection = "dve.script";
+constexpr std::string_view kGameplaySection = "dve.gameplay";
+constexpr std::string_view kCameraSection = "dve.cameras";
+constexpr std::string_view kAnimationSection = "dve.animation";
+constexpr std::string_view kRagdollSection = "dve.ragdolls";
+constexpr std::string_view kHairSection = "dve.hair";
 constexpr std::string_view kReservedPrefix = "dve.";
 
 constexpr std::uint8_t kFlagDynamic = 1U << 0U;
@@ -395,6 +401,428 @@ bool same_brick(const GameWorldBrickState& a, const GameWorldBrickState& b) {
 
 } // namespace
 
+namespace {
+
+// --- v2 sub-runtime sections --------------------------------------------------------------
+
+void write_pose(Writer& w, const LocalPose& pose, const GameSaveLimits& limits) {
+    w.count(pose.size(), limits.maximumRuntimeEntries, "pose bone");
+    for (const RigidTransform& bone : pose) w.transform(bone);
+}
+
+bool read_pose(Reader& r, LocalPose& pose, const GameSaveLimits& limits) {
+    std::uint32_t count{};
+    if (!r.count(count, limits.maximumRuntimeEntries, "pose bone")) return false;
+    pose.resize(count);
+    for (RigidTransform& bone : pose) if (!r.transform(bone)) return false;
+    return true;
+}
+
+void write_input(Writer& w, const CharacterInput& input) {
+    w.float3(input.move); w.boolean(input.jumpPressed); w.boolean(input.crouchHeld);
+}
+
+bool read_input(Reader& r, CharacterInput& input) {
+    return r.float3(input.move) && r.boolean(input.jumpPressed) && r.boolean(input.crouchHeld);
+}
+
+void write_replay(Writer& w, const CharacterReplay& replay, const GameSaveLimits& limits) {
+    w.count(replay.frames.size(), limits.maximumRuntimeEntries, "replay frame");
+    for (const CharacterReplayFrame& frame : replay.frames) { w.u64(frame.tick); write_input(w, frame.input); }
+}
+
+bool read_replay(Reader& r, CharacterReplay& replay, const GameSaveLimits& limits) {
+    std::uint32_t count{};
+    if (!r.count(count, limits.maximumRuntimeEntries, "replay frame")) return false;
+    replay.frames.resize(count);
+    for (CharacterReplayFrame& frame : replay.frames) if (!(r.u64(frame.tick) && read_input(r, frame.input))) return false;
+    return true;
+}
+
+std::vector<std::byte> write_gameplay(const GameplaySaveState& state, const GameSaveLimits& limits, std::string* failure) {
+    Writer w(limits);
+    w.count(state.characters.size(), limits.maximumRuntimeEntries, "character");
+    for (const GameplaySaveCharacter& c : state.characters) {
+        w.u64(c.pawn);
+        const CharacterControllerConfig& k = c.config;
+        for (const float value : {k.standingHeightMeters, k.crouchedHeightMeters, k.radiusMeters, k.skinMeters,
+                                  k.maximumGroundSpeedMetersPerSecond, k.groundAccelerationMetersPerSecondSquared,
+                                  k.airAccelerationMetersPerSecondSquared, k.groundBrakingMetersPerSecondSquared,
+                                  k.gravityMetersPerSecondSquared, k.jumpSpeedMetersPerSecond,
+                                  k.maximumFallSpeedMetersPerSecond, k.maximumSlopeDegrees, k.stepHeightMeters,
+                                  k.groundProbeMeters, k.coyoteTimeSeconds, k.jumpBufferSeconds})
+            w.f32(value);
+        w.u32(k.maximumSlideIterations);
+        const CharacterControllerState& st = c.state;
+        w.float3(st.velocity); w.boolean(st.grounded); w.u64(st.supportObject); w.float3(st.groundNormal);
+        w.u8(static_cast<std::uint8_t>(st.stance)); w.f32(st.coyoteRemainingSeconds); w.f32(st.jumpBufferRemainingSeconds);
+        w.u64(st.fixedTick);
+        write_input(w, c.input);
+    }
+    w.count(state.players.size(), limits.maximumRuntimeEntries, "player");
+    for (const GamePlayerState& p : state.players) {
+        w.u32(p.id); w.string(p.name); w.boolean(p.local); w.u64(p.pawn); write_input(w, p.input);
+    }
+    w.count(state.triggers.size(), limits.maximumRuntimeEntries, "trigger");
+    for (const GameplaySaveTrigger& t : state.triggers) {
+        w.u64(t.id); w.string(t.desc.name); w.u8(static_cast<std::uint8_t>(t.desc.shape)); w.transform(t.desc.transform);
+        w.float3(t.desc.halfExtents); w.f32(t.desc.radiusMeters); w.boolean(t.desc.enabled); w.boolean(t.desc.oneShot);
+        w.boolean(t.desc.charactersOnly); w.string(t.desc.requiredTag);
+        w.count(t.occupants.size(), limits.maximumObjects, "trigger occupant");
+        for (const GameObjectId id : t.occupants) w.u64(id);
+        w.boolean(t.fired);
+    }
+    w.count(state.recordings.size(), limits.maximumRuntimeEntries, "recording");
+    for (const GameplaySaveRecording& rec : state.recordings) { w.u32(rec.player); write_replay(w, rec.replay, limits); }
+    w.count(state.playbacks.size(), limits.maximumRuntimeEntries, "playback");
+    for (const GameplaySavePlayback& pb : state.playbacks) {
+        w.u32(pb.player); write_replay(w, pb.replay, limits); w.u64(pb.nextFrame); w.boolean(pb.loop);
+        w.u64(pb.playbackStartTick); w.u64(pb.replayFirstTick);
+    }
+    w.u32(state.nextPlayerId); w.u64(state.nextTriggerId); w.u64(state.fixedTick);
+    if (w.failed() && failure) *failure = w.failure();
+    return std::move(w.bytes());
+}
+
+bool read_gameplay(Reader& r, GameplaySaveState& state, const GameSaveLimits& limits) {
+    std::uint32_t count{};
+    if (!r.count(count, limits.maximumRuntimeEntries, "character")) return false;
+    state.characters.resize(count);
+    for (GameplaySaveCharacter& c : state.characters) {
+        CharacterControllerConfig& k = c.config;
+        std::uint8_t stance{};
+        if (!r.u64(c.pawn)) return false;
+        for (float* value : {&k.standingHeightMeters, &k.crouchedHeightMeters, &k.radiusMeters, &k.skinMeters,
+                             &k.maximumGroundSpeedMetersPerSecond, &k.groundAccelerationMetersPerSecondSquared,
+                             &k.airAccelerationMetersPerSecondSquared, &k.groundBrakingMetersPerSecondSquared,
+                             &k.gravityMetersPerSecondSquared, &k.jumpSpeedMetersPerSecond,
+                             &k.maximumFallSpeedMetersPerSecond, &k.maximumSlopeDegrees, &k.stepHeightMeters,
+                             &k.groundProbeMeters, &k.coyoteTimeSeconds, &k.jumpBufferSeconds})
+            if (!r.f32(*value)) return false;
+        CharacterControllerState& st = c.state;
+        if (!(r.u32(k.maximumSlideIterations) && r.float3(st.velocity) && r.boolean(st.grounded) &&
+              r.u64(st.supportObject) && r.float3(st.groundNormal) && r.u8(stance) && r.f32(st.coyoteRemainingSeconds) &&
+              r.f32(st.jumpBufferRemainingSeconds) && r.u64(st.fixedTick) && read_input(r, c.input)))
+            return false;
+        if (stance > static_cast<std::uint8_t>(CharacterStance::Crouched)) return r.bad("invalid character stance");
+        st.stance = static_cast<CharacterStance>(stance);
+        st.pawn = c.pawn;
+    }
+    if (!r.count(count, limits.maximumRuntimeEntries, "player")) return false;
+    state.players.resize(count);
+    for (GamePlayerState& p : state.players)
+        if (!(r.u32(p.id) && r.string(p.name) && r.boolean(p.local) && r.u64(p.pawn) && read_input(r, p.input))) return false;
+    if (!r.count(count, limits.maximumRuntimeEntries, "trigger")) return false;
+    state.triggers.resize(count);
+    for (GameplaySaveTrigger& t : state.triggers) {
+        std::uint8_t shape{};
+        std::uint32_t occupants{};
+        if (!(r.u64(t.id) && r.string(t.desc.name) && r.u8(shape) && r.transform(t.desc.transform) &&
+              r.float3(t.desc.halfExtents) && r.f32(t.desc.radiusMeters) && r.boolean(t.desc.enabled) &&
+              r.boolean(t.desc.oneShot) && r.boolean(t.desc.charactersOnly) && r.string(t.desc.requiredTag) &&
+              r.count(occupants, limits.maximumObjects, "trigger occupant")))
+            return false;
+        if (shape > static_cast<std::uint8_t>(TriggerShape::Sphere)) return r.bad("invalid trigger shape");
+        t.desc.shape = static_cast<TriggerShape>(shape);
+        t.occupants.resize(occupants);
+        for (GameObjectId& id : t.occupants) if (!r.u64(id)) return false;
+        if (!r.boolean(t.fired)) return false;
+    }
+    if (!r.count(count, limits.maximumRuntimeEntries, "recording")) return false;
+    state.recordings.resize(count);
+    for (GameplaySaveRecording& rec : state.recordings)
+        if (!(r.u32(rec.player) && read_replay(r, rec.replay, limits))) return false;
+    if (!r.count(count, limits.maximumRuntimeEntries, "playback")) return false;
+    state.playbacks.resize(count);
+    for (GameplaySavePlayback& pb : state.playbacks)
+        if (!(r.u32(pb.player) && read_replay(r, pb.replay, limits) && r.u64(pb.nextFrame) && r.boolean(pb.loop) &&
+              r.u64(pb.playbackStartTick) && r.u64(pb.replayFirstTick)))
+            return false;
+    return r.u32(state.nextPlayerId) && r.u64(state.nextTriggerId) && r.u64(state.fixedTick);
+}
+
+constexpr std::uint8_t kParameterBool = 0U, kParameterInteger = 1U, kParameterDouble = 2U;
+
+std::vector<std::byte> write_animation(const GameSaveRuntimeState& state, const GameSaveLimits& limits, std::string* failure) {
+    Writer w(limits);
+    w.boolean(state.animation.has_value());
+    if (state.animation) {
+        w.count(state.animation->instances.size(), limits.maximumRuntimeEntries, "animation instance");
+        for (const SkeletalAnimationInstanceSaveState& a : state.animation->instances) {
+            w.u64(a.objectId); w.u64(a.skeletonHash); w.string(a.activeClip); w.f32(a.time); w.string(a.targetClip);
+            w.f32(a.targetTime); w.f32(a.fadeElapsed); w.f32(a.fadeDuration); w.f32(a.playbackSpeed);
+            w.boolean(a.rootMotionEnabled); w.boolean(a.rootMotionPending); w.transform(a.rootMotionAccum);
+            write_pose(w, a.pose, limits);
+        }
+    }
+    w.boolean(state.animationControllers.has_value());
+    if (state.animationControllers) {
+        w.count(state.animationControllers->instances.size(), limits.maximumRuntimeEntries, "animation controller");
+        for (const AnimationControllerInstanceSaveState& c : state.animationControllers->instances) {
+            w.u64(c.objectId); w.string(c.controller); w.string(c.state); w.f32(c.stateTime);
+            w.count(c.parameters.size(), limits.maximumRuntimeEntries, "animation parameter");
+            for (const auto& [name, value] : c.parameters) {
+                w.string(name);
+                if (const bool* b = std::get_if<bool>(&value)) { w.u8(kParameterBool); w.boolean(*b); }
+                else if (const std::int64_t* i = std::get_if<std::int64_t>(&value)) { w.u8(kParameterInteger); w.i64(*i); }
+                else { w.u8(kParameterDouble); w.f64(std::get<double>(value)); }
+            }
+            w.count(c.triggers.size(), limits.maximumRuntimeEntries, "animation trigger");
+            for (const auto& [name, value] : c.triggers) { w.string(name); w.boolean(value); }
+        }
+    }
+    w.boolean(state.controlRigs.has_value());
+    if (state.controlRigs) {
+        w.count(state.controlRigs->instances.size(), limits.maximumRuntimeEntries, "control rig");
+        for (const ControlRigInstanceSaveState& c : state.controlRigs->instances) {
+            w.u64(c.objectId); w.u64(c.rigHash); w.boolean(c.enabled);
+            w.count(c.controls.size(), limits.maximumRuntimeEntries, "control rig control");
+            for (const auto& [id, local] : c.controls) { w.u64(id); w.transform(local); }
+        }
+    }
+    if (w.failed() && failure) *failure = w.failure();
+    return std::move(w.bytes());
+}
+
+bool read_animation(Reader& r, GameSaveRuntimeState& state, const GameSaveLimits& limits) {
+    bool present{};
+    std::uint32_t count{};
+    if (!r.boolean(present)) return false;
+    if (present) {
+        if (!r.count(count, limits.maximumRuntimeEntries, "animation instance")) return false;
+        state.animation.emplace().instances.resize(count);
+        for (SkeletalAnimationInstanceSaveState& a : state.animation->instances)
+            if (!(r.u64(a.objectId) && r.u64(a.skeletonHash) && r.string(a.activeClip) && r.f32(a.time) &&
+                  r.string(a.targetClip) && r.f32(a.targetTime) && r.f32(a.fadeElapsed) && r.f32(a.fadeDuration) &&
+                  r.f32(a.playbackSpeed) && r.boolean(a.rootMotionEnabled) && r.boolean(a.rootMotionPending) &&
+                  r.transform(a.rootMotionAccum) && read_pose(r, a.pose, limits)))
+                return false;
+    }
+    if (!r.boolean(present)) return false;
+    if (present) {
+        if (!r.count(count, limits.maximumRuntimeEntries, "animation controller")) return false;
+        state.animationControllers.emplace().instances.resize(count);
+        for (AnimationControllerInstanceSaveState& c : state.animationControllers->instances) {
+            std::uint32_t entries{};
+            if (!(r.u64(c.objectId) && r.string(c.controller) && r.string(c.state) && r.f32(c.stateTime) &&
+                  r.count(entries, limits.maximumRuntimeEntries, "animation parameter")))
+                return false;
+            for (std::uint32_t i = 0; i < entries; ++i) {
+                std::string name;
+                std::uint8_t kind{};
+                if (!(r.string(name) && r.u8(kind))) return false;
+                AnimationParameterValue value{false};
+                if (kind == kParameterBool) { bool b{}; if (!r.boolean(b)) return false; value = b; }
+                else if (kind == kParameterInteger) { std::int64_t i64{}; if (!r.i64(i64)) return false; value = i64; }
+                else if (kind == kParameterDouble) { double d{}; if (!r.f64(d)) return false; value = d; }
+                else return r.bad("invalid animation parameter type");
+                c.parameters.insert_or_assign(std::move(name), value);
+            }
+            if (!r.count(entries, limits.maximumRuntimeEntries, "animation trigger")) return false;
+            for (std::uint32_t i = 0; i < entries; ++i) {
+                std::string name;
+                bool value{};
+                if (!(r.string(name) && r.boolean(value))) return false;
+                c.triggers.insert_or_assign(std::move(name), value);
+            }
+        }
+    }
+    if (!r.boolean(present)) return false;
+    if (present) {
+        if (!r.count(count, limits.maximumRuntimeEntries, "control rig")) return false;
+        state.controlRigs.emplace().instances.resize(count);
+        for (ControlRigInstanceSaveState& c : state.controlRigs->instances) {
+            std::uint32_t controls{};
+            if (!(r.u64(c.objectId) && r.u64(c.rigHash) && r.boolean(c.enabled) &&
+                  r.count(controls, limits.maximumRuntimeEntries, "control rig control")))
+                return false;
+            c.controls.resize(controls);
+            for (auto& [id, local] : c.controls) if (!(r.u64(id) && r.transform(local))) return false;
+        }
+    }
+    return true;
+}
+
+void write_body_state(Writer& w, const RigidBodyState& body) {
+    w.transform(body.previousTransform); w.transform(body.currentTransform);
+    w.float3(body.linearVelocity); w.float3(body.angularVelocity); w.boolean(body.sleeping);
+}
+
+bool read_body_state(Reader& r, RigidBodyState& body) {
+    return r.transform(body.previousTransform) && r.transform(body.currentTransform) && r.float3(body.linearVelocity) &&
+           r.float3(body.angularVelocity) && r.boolean(body.sleeping);
+}
+
+std::vector<std::byte> write_ragdolls(const RagdollSaveState& state, const GameSaveLimits& limits, std::string* failure) {
+    Writer w(limits);
+    w.count(state.instances.size(), limits.maximumRuntimeEntries, "ragdoll");
+    for (const RagdollInstanceSaveState& g : state.instances) {
+        w.u64(g.objectId); w.u32(g.bodyCount); w.u32(g.jointCount); w.u8(static_cast<std::uint8_t>(g.state));
+        w.f32(g.blendWeight); w.f32(g.blendTargetWeight); w.f32(g.blendRatePerSecond); w.f32(g.quietSeconds);
+        w.boolean(g.settled); write_pose(w, g.recoveryStart, limits); write_pose(w, g.recoveryTarget, limits);
+        w.f32(g.recoveryElapsed); w.f32(g.recoveryDuration); w.f32(g.resumePlaybackSpeed);
+        w.u8(g.facing ? static_cast<std::uint8_t>(1U + static_cast<unsigned>(*g.facing)) : 0U);
+        write_pose(w, g.activationPose, limits); w.transform(g.activationObjectWorld); w.boolean(g.useContinuousCollision);
+        w.count(g.bodies.size(), limits.maximumRuntimeEntries, "ragdoll body");
+        for (const RigidBodyState& body : g.bodies) write_body_state(w, body);
+    }
+    if (w.failed() && failure) *failure = w.failure();
+    return std::move(w.bytes());
+}
+
+bool read_ragdolls(Reader& r, RagdollSaveState& state, const GameSaveLimits& limits) {
+    std::uint32_t count{};
+    if (!r.count(count, limits.maximumRuntimeEntries, "ragdoll")) return false;
+    state.instances.resize(count);
+    for (RagdollInstanceSaveState& g : state.instances) {
+        std::uint8_t kind{}, facing{};
+        std::uint32_t bodies{};
+        if (!(r.u64(g.objectId) && r.u32(g.bodyCount) && r.u32(g.jointCount) && r.u8(kind) && r.f32(g.blendWeight) &&
+              r.f32(g.blendTargetWeight) && r.f32(g.blendRatePerSecond) && r.f32(g.quietSeconds) && r.boolean(g.settled) &&
+              read_pose(r, g.recoveryStart, limits) && read_pose(r, g.recoveryTarget, limits) && r.f32(g.recoveryElapsed) &&
+              r.f32(g.recoveryDuration) && r.f32(g.resumePlaybackSpeed) && r.u8(facing) &&
+              read_pose(r, g.activationPose, limits) && r.transform(g.activationObjectWorld) &&
+              r.boolean(g.useContinuousCollision) && r.count(bodies, limits.maximumRuntimeEntries, "ragdoll body")))
+            return false;
+        if (kind > static_cast<std::uint8_t>(RagdollRuntimeState::Recovering)) return r.bad("invalid ragdoll state");
+        if (facing > 2U) return r.bad("invalid ragdoll facing");
+        g.state = static_cast<RagdollRuntimeState>(kind);
+        if (facing != 0U) g.facing = static_cast<RagdollRecoveryFacing>(facing - 1U);
+        g.bodies.resize(bodies);
+        for (RigidBodyState& body : g.bodies) if (!read_body_state(r, body)) return false;
+    }
+    return true;
+}
+
+#if defined(DVE_ENABLE_CPU_HAIR)
+void write_points(Writer& w, const std::vector<Float3>& points, const GameSaveLimits& limits) {
+    w.count(points.size(), limits.maximumHairPoints, "hair point");
+    for (const Float3 point : points) w.float3(point);
+}
+
+bool read_points(Reader& r, std::vector<Float3>& points, const GameSaveLimits& limits) {
+    std::uint32_t count{};
+    if (!r.count(count, limits.maximumHairPoints, "hair point")) return false;
+    points.resize(count);
+    for (Float3& point : points) if (!r.float3(point)) return false;
+    return true;
+}
+
+std::vector<std::byte> write_hair(const CpuHairSaveState& state, const GameSaveLimits& limits, std::string* failure) {
+    Writer w(limits);
+    w.count(state.owners.size(), limits.maximumRuntimeEntries, "hair instance");
+    for (const CpuHairOwnerSaveState& owner : state.owners) {
+        const CpuHairDynamicState& h = owner.state;
+        w.u64(owner.owner); w.u64(h.assetHash); w.boolean(h.running); w.boolean(h.visible); w.float3(h.gravity);
+        w.float3(h.windVelocity); w.transform(h.rootTransform); w.transform(h.pendingRootTransform);
+        w.transform(h.previousRootTransform); w.f32(h.accumulatorSeconds); w.u64(h.simulationFrame);
+        write_points(w, h.positions, limits); write_points(w, h.previousPositions, limits); write_points(w, h.velocities, limits);
+        w.count(h.sleeping.size(), limits.maximumHairPoints, "hair guide");
+        for (std::size_t i = 0; i < h.sleeping.size(); ++i) w.u8(h.sleeping[i]);
+        w.count(h.sleepCounters.size(), limits.maximumHairPoints, "hair guide");
+        for (const std::uint32_t counter : h.sleepCounters) w.u32(counter);
+        write_points(w, h.rootTargetOverrides, limits);
+        w.count(h.hasRootTargetOverride.size(), limits.maximumHairPoints, "hair guide");
+        for (const std::uint8_t flag : h.hasRootTargetOverride) w.u8(flag);
+    }
+    if (w.failed() && failure) *failure = w.failure();
+    return std::move(w.bytes());
+}
+
+bool read_hair(Reader& r, CpuHairSaveState& state, const GameSaveLimits& limits) {
+    std::uint32_t count{};
+    if (!r.count(count, limits.maximumRuntimeEntries, "hair instance")) return false;
+    state.owners.resize(count);
+    for (CpuHairOwnerSaveState& owner : state.owners) {
+        CpuHairDynamicState& h = owner.state;
+        std::uint32_t entries{};
+        if (!(r.u64(owner.owner) && r.u64(h.assetHash) && r.boolean(h.running) && r.boolean(h.visible) &&
+              r.float3(h.gravity) && r.float3(h.windVelocity) && r.transform(h.rootTransform) &&
+              r.transform(h.pendingRootTransform) && r.transform(h.previousRootTransform) && r.f32(h.accumulatorSeconds) &&
+              r.u64(h.simulationFrame) && read_points(r, h.positions, limits) && read_points(r, h.previousPositions, limits) &&
+              read_points(r, h.velocities, limits) && r.count(entries, limits.maximumHairPoints, "hair guide")))
+            return false;
+        h.sleeping.resize(entries);
+        for (std::uint8_t& flag : h.sleeping) if (!r.u8(flag)) return false;
+        if (!r.count(entries, limits.maximumHairPoints, "hair guide")) return false;
+        h.sleepCounters.resize(entries);
+        for (std::uint32_t& counter : h.sleepCounters) if (!r.u32(counter)) return false;
+        if (!(read_points(r, h.rootTargetOverrides, limits) && r.count(entries, limits.maximumHairPoints, "hair guide")))
+            return false;
+        h.hasRootTargetOverride.resize(entries);
+        for (std::uint8_t& flag : h.hasRootTargetOverride) if (!r.u8(flag)) return false;
+    }
+    return true;
+}
+#endif
+
+// v1 -> v2: v2 only adds optional sections, so a v1 document is a valid v2 document once
+// its version is bumped. The step still checks that the v1 shape is what we expect (no
+// engine section that v1 did not define), so a mislabelled document is refused here.
+bool migrate_v1_to_v2(SaveGameDocument& document, std::string* error) {
+    for (const std::string_view required : {kMetaSection, kWorldSection, kVoxelSection, kPhysicsSection}) {
+        if (!document.sections.contains(required)) {
+            if (error) *error = "v1 save is missing section '" + std::string(required) + "'";
+            return false;
+        }
+    }
+    for (const auto& [name, bytes] : document.sections) {
+        (void)bytes;
+        if (name.starts_with(kReservedPrefix) && name != kMetaSection && name != kWorldSection &&
+            name != kVoxelSection && name != kPhysicsSection && name != kScriptSection) {
+            if (error) *error = "v1 save has an engine section '" + name + "' that v1 did not define";
+            return false;
+        }
+    }
+    document.schemaVersion = 2U;
+    return true;
+}
+
+} // namespace
+
+GameSaveRuntimeState capture_game_runtime_state(const GameWorld& world) {
+    GameSaveRuntimeState state;
+    state.gameplay = world.gameplay().capture_save_state();
+    state.cameras = world.cameras().serialize_state();
+    state.animation = world.animation().capture_save_state();
+    state.animationControllers = world.animation_controllers().capture_save_state();
+    state.controlRigs = world.control_rigs().capture_save_state();
+    state.ragdolls = world.ragdolls().capture_save_state();
+#if defined(DVE_ENABLE_CPU_HAIR)
+    state.hair = world.cpu_hair().capture_save_state();
+#endif
+    return state;
+}
+
+bool restore_game_runtime_state(
+    GameWorld& world, const GameSaveRuntimeState& state, GameSaveRuntimeReport* report, std::string* error) {
+    GameSaveRuntimeReport local;
+    if (state.gameplay) {
+        std::string gameplayError;
+        if (!world.gameplay().restore_save_state(*state.gameplay, &gameplayError)) {
+            if (error) *error = "could not restore characters/triggers: " + gameplayError;
+            if (report) *report = std::move(local);
+            return false;
+        }
+        local.gameplayRestored = true;
+    }
+    if (state.animation) local.animationsRestored = world.animation().restore_save_state(*state.animation, &local.warnings);
+    if (state.animationControllers)
+        local.controllersRestored = world.animation_controllers().restore_save_state(*state.animationControllers, &local.warnings);
+    if (state.controlRigs) local.controlRigsRestored = world.control_rigs().restore_save_state(*state.controlRigs, &local.warnings);
+    if (state.ragdolls) local.ragdollsRestored = world.ragdolls().restore_save_state(*state.ragdolls, &local.warnings);
+#if defined(DVE_ENABLE_CPU_HAIR)
+    if (state.hair) local.hairRestored = world.cpu_hair().restore_save_state(*state.hair, &local.warnings);
+#endif
+    if (state.cameras) {
+        std::string cameraError;
+        if (world.cameras().restore_state(*state.cameras, &cameraError)) local.camerasRestored = true;
+        else local.warnings.push_back("cameras: " + cameraError);
+    }
+    if (report) *report = std::move(local);
+    return true;
+}
+
 std::uint64_t game_save_content_hash(std::span<const std::byte> bytes) noexcept {
     std::uint64_t hash = 1469598103934665603ULL;
     for (const std::byte value : bytes) {
@@ -407,7 +835,10 @@ std::uint64_t game_save_content_hash(std::span<const std::byte> bytes) noexcept 
 GameSaveCodec::GameSaveCodec(GameSaveSourceReader sources, GameSaveLimits limits)
     : sources_(std::move(sources)), limits_(limits),
       store_(kGameSaveSchemaVersion, SaveGameLimits{limits.maximumFileBytes, 64U + limits.maximumGameSections, 256U,
-                                                    limits.maximumFileBytes}) {}
+                                                    limits.maximumFileBytes}) {
+    std::string ignored;
+    (void)store_.register_migration(1U, migrate_v1_to_v2, &ignored);
+}
 
 bool GameSaveCodec::register_migration(std::uint32_t fromVersion, SaveGameMigration migration, std::string* error) {
     return store_.register_migration(fromVersion, std::move(migration), error);
@@ -613,6 +1044,25 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
     document.sections.emplace(std::string(kVoxelSection), std::move(voxels.bytes()));
     document.sections.emplace(std::string(kPhysicsSection), std::move(physics.bytes()));
     if (data.scriptState) document.sections.emplace(std::string(kScriptSection), *data.scriptState);
+    {
+        const GameSaveRuntimeState& runtimes = data.runtimes;
+        std::string failure;
+        if (runtimes.gameplay)
+            document.sections.emplace(std::string(kGameplaySection), write_gameplay(*runtimes.gameplay, limits_, &failure));
+        if (runtimes.cameras) {
+            if (runtimes.cameras->size() > limits_.maximumScriptStateBytes) failure = "camera state is over the save limit";
+            const auto* begin = reinterpret_cast<const std::byte*>(runtimes.cameras->data());
+            document.sections.emplace(std::string(kCameraSection), std::vector<std::byte>(begin, begin + runtimes.cameras->size()));
+        }
+        if (runtimes.animation || runtimes.animationControllers || runtimes.controlRigs)
+            document.sections.emplace(std::string(kAnimationSection), write_animation(runtimes, limits_, &failure));
+        if (runtimes.ragdolls)
+            document.sections.emplace(std::string(kRagdollSection), write_ragdolls(*runtimes.ragdolls, limits_, &failure));
+#if defined(DVE_ENABLE_CPU_HAIR)
+        if (runtimes.hair) document.sections.emplace(std::string(kHairSection), write_hair(*runtimes.hair, limits_, &failure));
+#endif
+        if (!failure.empty()) return fail(error, failure), std::nullopt;
+    }
     for (const auto& [name, bytes] : data.gameSections) document.sections.emplace(name, bytes);
     local.objects = world.objects.size();
     std::uint64_t total = 8U + 4U + 8U + 4U + 8U;
@@ -880,10 +1330,34 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (script->size() > limits_.maximumScriptStateBytes) return fail(error, "script state is over the save limit"), std::nullopt;
         data.scriptState = *script;
     }
+    if (const auto* bytes = section(kGameplaySection)) {
+        Reader r(*bytes, kGameplaySection, limits_);
+        if (!read_gameplay(r, data.runtimes.gameplay.emplace(), limits_) || !r.finish()) return corrupt(r);
+    }
+    if (const auto* bytes = section(kCameraSection)) {
+        if (bytes->size() > limits_.maximumScriptStateBytes) return fail(error, "camera state is over the save limit"), std::nullopt;
+        data.runtimes.cameras.emplace(reinterpret_cast<const char*>(bytes->data()), bytes->size());
+    }
+    if (const auto* bytes = section(kAnimationSection)) {
+        Reader r(*bytes, kAnimationSection, limits_);
+        if (!read_animation(r, data.runtimes, limits_) || !r.finish()) return corrupt(r);
+    }
+    if (const auto* bytes = section(kRagdollSection)) {
+        Reader r(*bytes, kRagdollSection, limits_);
+        if (!read_ragdolls(r, data.runtimes.ragdolls.emplace(), limits_) || !r.finish()) return corrupt(r);
+    }
+#if defined(DVE_ENABLE_CPU_HAIR)
+    if (const auto* bytes = section(kHairSection)) {
+        Reader r(*bytes, kHairSection, limits_);
+        if (!read_hair(r, data.runtimes.hair.emplace(), limits_) || !r.finish()) return corrupt(r);
+    }
+#endif
+    // (A build without DVE_ENABLE_CPU_HAIR accepts and ignores dve.hair.)
     for (const auto& [name, bytes] : document.sections) {
         if (name.starts_with(kReservedPrefix)) {
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
-                name != kScriptSection)
+                name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
+                name != kAnimationSection && name != kRagdollSection && name != kHairSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;
         }

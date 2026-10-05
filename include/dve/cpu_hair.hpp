@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -162,6 +163,29 @@ struct CpuHairView {
     bool visible{};
 };
 
+// Save-game snapshot of one CPU hair instance's simulation (dve.hair): the per-point state
+// plus the runtime switches a game changes (running, visible, wind, gravity, root targets).
+// The groom asset, solver settings and collision set are content the game binds at boot.
+struct CpuHairDynamicState {
+    std::uint64_t assetHash{};
+    bool running{true};
+    bool visible{true};
+    Float3 gravity{};
+    Float3 windVelocity{};
+    RigidTransform rootTransform{};
+    RigidTransform pendingRootTransform{};
+    RigidTransform previousRootTransform{};
+    float accumulatorSeconds{};
+    std::uint64_t simulationFrame{};
+    std::vector<Float3> positions;
+    std::vector<Float3> previousPositions;
+    std::vector<Float3> velocities;
+    std::vector<std::uint8_t> sleeping;           // per guide
+    std::vector<std::uint32_t> sleepCounters;     // per guide
+    std::vector<Float3> rootTargetOverrides;      // per guide
+    std::vector<std::uint8_t> hasRootTargetOverride;
+};
+
 class CpuHairWorld {
 public:
     explicit CpuHairWorld(std::size_t workerCount = JobSystem::default_worker_count());
@@ -198,6 +222,11 @@ public:
     [[nodiscard]] CpuHairView view(CpuHairId id) const noexcept;
     [[nodiscard]] const HairAsset* asset(CpuHairId id) const noexcept;
     [[nodiscard]] std::size_t worker_count() const noexcept;
+
+    [[nodiscard]] std::optional<CpuHairDynamicState> capture_dynamic_state(CpuHairId id) const;
+    // Validates sizes/finiteness and the asset hash against the live instance first.
+    [[nodiscard]] bool restore_dynamic_state(CpuHairId id, const CpuHairDynamicState& state,
+                                             std::string* error = nullptr);
 
 private:
     struct Impl;

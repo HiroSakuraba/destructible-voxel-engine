@@ -1,3 +1,4 @@
 # <compiler>-<major>-<lua|nolua> <framebuffer_fnv>  (dve_player_smoke: 480x270, 30 frames, fixed dt, 4 threads)
 GNU-14-nolua b619594b666b35ed
 GNU-14-lua 6ed87c5782d48323
+MSVC-19-lua 6ed87c5782d48323

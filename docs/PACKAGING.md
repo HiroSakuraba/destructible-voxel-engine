@@ -317,8 +317,9 @@ cannot scan, so its `Depends` lists the `-dev` packages that own the libraries a
 packages the exported targets reference (found with `dpkg -S` at configure time, e.g.
 `libsdl3-dev, librtmidi-dev, libsndfile1-dev`).
 
-On Windows, `CPACK_GENERATOR` is `ZIP;NSIS` and the executables' `$<TARGET_RUNTIME_DLLS>` are
-copied next to them. This is configured but **untested** (no Windows runner yet).
+On Windows, `CPACK_GENERATOR` is `ZIP;NSIS`, and the DLLs the executables need are installed next
+to them in `bin/` (see [Windows](#windows)). CI builds the ZIP (`cpack -G ZIP`); NSIS is configured
+but not tested.
 
 **License (D1): MIT.** The engine is licensed under the MIT License (root `LICENSE`,
 `Copyright (c) 2026 Benjamin Schulz`). `cmake/DveLicense.cmake` installs it into every package
@@ -477,8 +478,8 @@ Re-exporting is byte-identical and removes stale `.dvox`/`.dmesh` files.
 ### `dve_package_game` / `dve_add_game_package()`
 
 ```
-dve_package_game --project <dir> --output <dir> [--name N] [--tgz] [--verify]
-                 [--runtime-prefix <install prefix> | --build-dir <build dir>]
+dve_package_game --project <dir> --output <dir> [--name N] [--tgz] [--zip] [--verify]
+                 [--runtime-prefix <install prefix> | --build-dir <build dir> [--config <cfg>]]
                  [--materials f] [--strict-export] [--include-sample-maps] [--no-strip] [--keep-work]
 ```
 
@@ -512,12 +513,13 @@ find_package(dve 2.35 REQUIRED)
 dve_add_game_package(my_game_package
     PROJECT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/game
     OUTPUT_DIR ${CMAKE_BINARY_DIR}/ship/MyGame
-    [NAME MyGame] [TGZ] [VERIFY] [ALL] [RUNTIME_PREFIX <prefix>] [MATERIALS <file>]
+    [NAME MyGame] [TGZ] [ZIP] [VERIFY] [ALL] [RUNTIME_PREFIX <prefix>] [MATERIALS <file>]
     [EXTRA_ARGS ...])
 ```
 
 In the engine tree, `cmake --build <build> --target dve_sample_game_package` packages
-`tests/data/player_sample` into `<build>/game_packages/Player_Sample`.
+`tests/data/player_sample` into `<build>/game_packages/Player_Sample` (with a `.tar.gz` on Linux and
+a `.zip` on Windows). The Windows differences are described in [Windows](#windows).
 
 Which libraries end up in `lib/dve` depends on the preset (see
 [RPATH and bundled libraries](#rpath-and-bundled-libraries-linux)). With `linux-gcc-release` the
@@ -655,9 +657,111 @@ Their files are not relicensed. A shipped game can carry its own `LICENSE` in th
 | `dve_install_tree_test`, `dve_package_game_test` (MP3) | `tests/cmake/dve_no_mpeg_check.cmake` on the install prefix and on both game folders: no `libmpg123*`/`libmp3lame*` file, no such `DT_NEEDED` in any shipped ELF (`readelf -d`), none in `ldd` of the shipped executable (not even from the system, with DVE's libsndfile), the shipped `libsndfile.so.1` is DVE's build, and the notices list no MP3 library. |
 | `dve_install_tree_test`, `dve_package_consumer_test` | Also check the installed notices (which must state the engine's MIT license), `share/doc/dve-<group>/LICENSE` and `copyright` for every installed group, and build a game package through the installed `dve_add_game_package()`. |
 
+### Windows
+
+Windows 10 or later, x64, MSVC (Visual Studio 2022 or newer). CI builds and tests this on
+`windows-latest` (job `windows-msvc`, blocking).
+
+```bat
+vcpkg install libpng:x64-windows libjpeg-turbo:x64-windows
+cmake --preset windows-msvc-player-release -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+cmake --build out/build/windows-msvc-player-release --config Release
+ctest --test-dir out/build/windows-msvc-player-release -C Release
+cmake --build out/build/windows-msvc-player-release --config Release --target dve_sample_game_package
+```
+
+**Preset.** `windows-msvc-player-release` uses the newest installed Visual Studio generator
+(multi-config, so `--config Release` / `-C Release`), `BUILD_SHARED_LIBS=OFF`, and fetches the same
+pinned sources as `linux-gcc-player-release`: static SDL 3.4.12 (`DVE_FETCH_SDL3`), Jolt 5.6.0
+(`DVE_FETCH_JOLT`, built with the DLL C runtime `/MD` like the rest) and Lua 5.4.9
+(`DVE_FETCH_LUA`, `cmake/DveLua.cmake`: the official `lua-5.4.9.tar.gz`, SHA256-pinned, built as
+a static library; vcpkg's `lua` port is 5.5, which the scripts are not written for). libpng and
+libjpeg-turbo (and zlib) come from vcpkg as DLLs; only the tools and the editor use them.
+Python 3 (`python.exe` is accepted) is needed for the notices and `dve_package_game`.
+The preset sets `VCPKG_APPLOCAL_DEPS=OFF`: vcpkg's per-target copy of its DLLs into the shared
+output folder fails with sharing violations when MSBuild builds projects in parallel. Instead,
+CTest prepends vcpkg's `bin` to `PATH` for every test, `dve_package_game --tool-path` does the same
+for `dve_pack`/`dve_export_scene`, and `cmake --install` copies the DLLs. To run a tool straight
+from the build folder, put `<vcpkg_installed>/x64-windows/bin` on `PATH`.
+
+**Game folder.** `dve_package_game` recognises a Windows runtime prefix by `bin/dve_player.exe`.
+The folder (and the zip, `<Game>-<version>-windows-x86_64.zip`, sorted entries with fixed
+timestamps) contains:
+
+```
+Player_Sample/
+  Player_Sample.exe        dve_player.exe renamed (SDL3, Lua and Jolt are linked in)
+  game.dvepak
+  msvcp140.dll, msvcp140_atomic_wait.dll,
+  vcruntime140.dll, vcruntime140_1.dll                 Visual C++ runtime (see below)
+  THIRD_PARTY_NOTICES.txt  the Runtime notices
+  DVE-LICENSE.txt          the engine's MIT license
+  build-info.json
+```
+
+The CI sample (`dve-sample-game-windows-x86_64`) is a 2.9 MiB zip, 6.9 MiB unpacked: a 6.2 MB
+executable, a 29 KB pak, 60 KB of notices and 0.9 MB of Visual C++ runtime DLLs.
+
+- **DLLs next to the `.exe`.** Windows searches the executable's folder first, so no `PATH`
+  change or manifest is needed. `dve_package_game` copies exactly the DLLs that the `.exe`
+  (recursively, through each DLL's import and delay-import tables) imports from `<prefix>/bin`;
+  everything else must be a Windows system DLL. Nothing is stripped (the PDBs are never
+  installed).
+- **Visual C++ runtime: shipped app-locally (conservative choice).** The executables need
+  `msvcp140.dll`, `msvcp140_atomic_wait.dll`, `vcruntime140.dll` and `vcruntime140_1.dll`, which a clean Windows install
+  does not always have. `cmake/DveInstall.cmake` installs them next to the executables with
+  CMake's `InstallRequiredSystemLibraries` (`DVE_INSTALL_MSVC_RUNTIME=ON`), so a game folder
+  runs without the Visual C++ Redistributable. Microsoft permits redistributing these files
+  with an application under the Visual Studio license terms; the notices say so and flag it
+  for **review** (`third_party/notices/MSVC_RUNTIME_NOTICE.txt`). Set
+  `-DDVE_INSTALL_MSVC_RUNTIME=OFF` to require the Redistributable instead. The Universal CRT
+  (`ucrtbase.dll`, `api-ms-win-crt-*`) is part of Windows 10 and is not shipped, so Windows 7/8
+  are not supported.
+- **Install and CPack.** `install(RUNTIME_DEPENDENCY_SET)` now also runs on Windows: the
+  non-system DLLs of each executable are installed to `bin/` by the `*Deps` components (vcpkg's
+  `bin/` and `DVE_RUNTIME_DLL_DIRECTORIES` are searched; `C:\Windows` and the API sets are
+  excluded). `cpack -G ZIP` packages that tree (built in CI, not uploaded).
+- **No audio decoding libraries.** libsndfile is not built on Windows (vcpkg's port pulls in
+  mpg123/mp3lame, and `DVE_FETCH_SNDFILE` is Linux-only), so a Windows game reads WAV samples
+  only; FLAC/Ogg/Opus samples are not available there yet.
+- **Notices and the forbidden-library check.** On Windows, `tools/generate_third_party_notices.py`
+  reads PE import tables instead of `readelf`/`ldd`: a DLL found next to the program or in the
+  vcpkg/extra search folders is bundled (and must match a manifest entry: libpng, libjpeg-turbo,
+  zlib, the Visual C++ runtime with its own entry), a DLL in `C:\Windows\System32` or an
+  `api-ms-win-*`/`ext-ms-*` API set is a system library, and anything else is UNRESOLVED (an
+  error). vcpkg license texts come from `<vcpkg_installed>/<triplet>/share/<port>/copyright`, Lua's
+  from the notice in `lua.h`. The manifest's `forbidden` list also matches
+  `mpg123*.dll`/`libmpg123*.dll`/`mp3lame*.dll`/`libmp3lame*.dll` (any case): `--check`,
+  `--verify-dir` (file names and PE imports), `dve_package_game` and the Windows package test
+  fail on them.
+
+**Tests on Windows.** `ctest -C Release` runs the full suite (279 tests in CI, 2 of them skipped; the Linux player preset registers 284). New:
+`dve_package_game_windows_test` packages the sample with `--build-dir --zip --verify`, extracts the
+zip, checks the files, `DVE-LICENSE.txt`, `build-info.json`, the notices coverage
+(`--verify-dir`), that no MP3 DLL is shipped or imported, and runs `Player_Sample.exe --frames 30
+--hash` from another folder with `PATH` reduced to the Windows folders: 4 objects, the pak next to
+the executable, and the same frame hash as the build-tree `dve_player`. Skipped or not built on
+Windows, with the reason:
+
+| Test | Why |
+|---|---|
+| `dve_live_editor_mcp_tests`, `dve_live_editor_mcp_core_tests` | Reported as **Skipped** (exit code 77): the live editor's private IPC is a Unix domain socket, not implemented on Windows. |
+| `dve_install_tree_test`, `dve_package_consumer_test`, `dve_package_game_test`, `dve_cpack_test` | Not registered: they check ELF details (RPATH, `readelf`, `ldd`, `dpkg-deb`). The Windows equivalents are `dve_package_game_windows_test` and the CI `cpack -G ZIP` step. |
+| `dve_native_editor_smoke`, `dve_x11_header_compat_tests` | Not built: they need the X11 native editor (`dve_native_editor_x11`), which is Linux-only. |
+
+Partial on Windows: `dve_audio_sndfile_format_tests` checks WAV only (no libsndfile, see above).
+The synth polyphony deadline check is not in CTest on any platform (#40).
+
+Windows variants instead of skips: `dve_udp_multiprocess_tests` starts itself as the client with
+`CreateProcess` (Linux uses `fork`); `dve_player_save_load` and `dve_player_runtime_tests` check the
+`%APPDATA%` save folder; `dve_ai_assistant_tests` checks that a named validation task is refused,
+not launched (named-task execution is not implemented on Windows); `dve_player_default_pak` and
+`dve_player_smoke` run headless with the pak next to the `.exe` (the player now uses
+`SDL_GetBasePath` there), and the `MSVC-19-lua` golden hash equals GCC's.
+
 ### Not done yet
 
-- CI jobs for packaging (needs a workflow change); Windows ZIP/NSIS game packages.
+- NSIS installers (configured, not tested); macOS.
 - A legal review of the flagged libraries, including how to provide the
   LGPL corresponding source (a pointer to snapshot.debian.org may not be enough).
 - Exporter: 3D text and Gabor volumes are baked approximations (see above), not the editor's

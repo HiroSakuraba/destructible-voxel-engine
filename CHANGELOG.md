@@ -1,3 +1,87 @@
+# Unreleased — Windows support (player, game zip, CI)
+
+- New preset `windows-msvc-player-release` (MSVC, newest Visual Studio): static SDL 3.4.12,
+  Jolt 5.6.0 and Lua 5.4.9 fetched and pinned; libpng/libjpeg-turbo from vcpkg for the tools.
+  New `DVE_FETCH_LUA` (`cmake/DveLua.cmake`) builds Lua 5.4.9 from the official tarball.
+- Fetched Jolt uses the DLL C runtime (`/MD`) on MSVC, like the rest of the build.
+- Windows install: `install(RUNTIME_DEPENDENCY_SET)` puts the executables' non-system DLLs in
+  `bin/` (`*Deps` components), and the Visual C++ runtime DLLs are installed next to them
+  (`DVE_INSTALL_MSVC_RUNTIME`, default ON). The UCRT is not shipped (Windows 10+).
+- `dve_package_game` / `dve_add_game_package()` on Windows: `<Game>.exe` with the DLLs it
+  imports next to it, `--zip` (`<Game>-<version>-windows-x86_64.zip`, reproducible), `--config`
+  for multi-config builds; `--verify` runs it with `PATH` reduced to the Windows folders.
+  `ZIP` keyword for `dve_add_game_package()`.
+- THIRD_PARTY_NOTICES on Windows: the generator reads PE import tables, knows vcpkg's
+  copyright files, zlib, Lua's notice and the Visual C++ runtime (flagged for review);
+  `--verify-dir` checks Windows folders. The forbidden list now also matches
+  `mpg123`/`mp3lame` DLLs. With multi-config generators the notices live in
+  `notices/<config>/`.
+- CI: `windows-msvc` builds the player preset, runs the full CTest suite, uploads the sample game
+  zip (`dve-sample-game-windows-x86_64`), runs `cpack -G ZIP`, and is now blocking.
+- Tests: `dve_package_game_windows_test`; `dve_udp_multiprocess_tests` runs on Windows
+  (`CreateProcess`); the live editor MCP tests report Skipped (77) where the private IPC is not
+  implemented; the save-directory checks cover `%APPDATA%`. Skips are listed in
+  `docs/PACKAGING.md` ("Windows").
+- Fixed on Windows: `dve_player --headless` looked for `game.dvepak` in the working directory
+  instead of next to the `.exe` (no `/proc/self/exe`; it now uses `SDL_GetBasePath`).
+- `.gitattributes` marks binary fixtures (PPM, PNG, audio, `.dvox`, …) as binary: Git for
+  Windows' `autocrlf` turned the NUL-free reference PPMs into CRLF text.
+- Tests: Windows paths in generated Lua code use forward slashes; the recorder tap test's ring
+  holds the whole take (it renders faster than real time); `MSVC-19-lua` golden player hash
+  (identical to GCC's).
+- `windows-msvc-player-release` sets `VCPKG_APPLOCAL_DEPS=OFF` (parallel applocal copies hit
+  sharing violations); CTest and `dve_package_game --tool-path` put vcpkg's `bin` on `PATH`.
+- Linux behaviour is unchanged.
+
+# Unreleased — Save games v2 (characters, cameras, animation, ragdolls, hair, named timers)
+
+- The save schema is now version 2 (`kGameSaveSchemaVersion`). `GameSaveCodec` registers
+  the v1 → v2 migration itself, so saves written by the first save-game release still load
+  (their sub-runtimes stay as the boot left them, as before); saving again writes v2.
+- New optional sections, filled by `capture_game_runtime_state(world)` and applied by
+  `restore_game_runtime_state(world, state, &report)` (`dve/game_save.hpp`):
+  - `dve.gameplay`: characters (controller config and state, input), players and
+    possession, triggers (occupants, fired), input recordings and playbacks, id counters.
+    New `GameplayRuntime::capture_save_state` / `restore_save_state`.
+  - `dve.cameras`: `GameCameraRuntime::serialize_state()`.
+  - `dve.animation`: skeletal playback (clip, time, crossfade, speed, root motion, current
+    pose), controller state machines (state, time, typed parameters, triggers) and control
+    rig values. New save APIs on `SkeletalAnimationRuntime`, `AnimationControllerRuntime`
+    and `ControlRigRuntime`.
+  - `dve.ragdolls`: ragdoll state, blend, recovery poses and, for an active ragdoll, its
+    activation pose and every body's state; restore rebuilds the bodies and joints from the
+    activation pose. `RagdollRuntime` records the activation pose and gains save APIs.
+  - `dve.hair`: CPU hair solver state (`CpuHairWorld::capture_dynamic_state` /
+    `restore_dynamic_state`, `CpuHairRuntime::capture_save_state` / `restore_save_state`).
+  - Entries the fresh boot did not bind are skipped with a warning
+    (`GameSaveRuntimeReport::warnings`); an invalid character snapshot fails the load.
+- Lua named timers: `world.timer_handler(name, fn)`, `world.schedule_once_named(seconds,
+  name, data)` and `world.schedule_repeating_named(seconds, name, data)`. The data is
+  saveable like `on_save` results, so these timers survive a save and load; anonymous closures
+  still do not (see `docs/SAVE_GAMES.md` for why).
+- The Lua script state (`DVLS`) is version 2 and adds the render environment, the HUD model
+  (prompt, tools, selection) and the runtime material overrides. Version 1 blobs still load.
+- `GameWorld`: `GameWorldRestoreOptions::keepUnboundTimers`, `bind_restored_timer`,
+  `drop_unbound_timers`, `unbound_timer_ids`, `has_timer`, and
+  `GameWorldRestoreReport::timersUnbound`. Restored timers keep the saved order.
+- `PlayerApp::load_game` restores the sub-runtimes and named timers;
+  `PlayerLoadResult` gains `runtimes`, `namedTimersRestored` and `timersDropped`.
+- `MaterialLibrary::capture_runtime_overrides` / `restore_runtime_overrides`;
+  `ui::GameHudModel::tools`, `selected_index` and `restore`.
+- The sample game's blast schedules a named `aftershock` timer that survives a quicksave.
+- Fixed: `MaterialLibrary::clear_runtime_overrides` (Lua `world.clear_material_parameters`)
+  kept vector overrides whenever a scalar override existed (a short-circuited `||`).
+- Fixed: `GameCameraRuntime::restore_state` did not restore the viewport's previous live rig,
+  so the first update after a restore counted a spurious camera cut.
+- `GameWorld::restore_save_state` re-applies the parent/child contact filters of attached
+  objects right after rebuilding the bodies instead of waiting for the next tick.
+- Tests: round trips for every new section (including byte-identical re-encoding and lock-step
+  continuation), a real v1 → v2 migration, unbound timers, script state v2, and the sample's
+  aftershock across a quicksave in `dve_player_runtime_tests`.
+- Still not saved: Lua closures, deformables (not built by any release preset, and no
+  state write-back API), `ui::UiRuntime`, content created after boot, camera smoothing
+  internals and solver caches.
+
 # Unreleased — small cleanups
 
 - Editor MIDI output port picker: **Settings > Audio > MIDI > MIDI Output** (`midi.output_port`)
@@ -89,7 +173,8 @@
   regression test in `dve_game_world_tests`.
 - Not saved yet: sub-runtime state (characters, cameras, animation, ragdolls, deformables,
   hair, UI), Lua closures and timers the boot does not schedule again, changes made after boot
-  to the environment, HUD or materials, and solver caches.
+  to the environment, HUD or materials, and solver caches. (Most of this is covered by the
+  save games v2 entry above.)
 
 # Unreleased — Packaging: libsndfile without MP3 (no libmpg123/libmp3lame in games)
 

@@ -44,6 +44,38 @@ struct RagdollRecoveryOptions {
 
 // Owns live physics bodies/constraints for animation instances. Physics is stepped by the host;
 // tick() runs afterward and publishes the physics/recovery pose into SkeletalAnimationRuntime.
+// Save-game snapshot of one ragdoll instance (dve.ragdolls). The definition and config are
+// content bound again at boot. A physically active ragdoll is rebuilt from the pose and object
+// transform recorded when it was activated (so joint frames match the original activation),
+// then every body gets its saved state. Solver warm-start caches are not saved, so a restored
+// ragdoll continues plausibly rather than bit-identically.
+struct RagdollInstanceSaveState {
+    std::uint64_t objectId{};
+    std::uint32_t bodyCount{};
+    std::uint32_t jointCount{};
+    RagdollRuntimeState state{RagdollRuntimeState::Animated};
+    float blendWeight{};
+    float blendTargetWeight{};
+    float blendRatePerSecond{};
+    float quietSeconds{};
+    bool settled{};
+    LocalPose recoveryStart;
+    LocalPose recoveryTarget;
+    float recoveryElapsed{};
+    float recoveryDuration{};
+    float resumePlaybackSpeed{1.0F};
+    std::optional<RagdollRecoveryFacing> facing;
+    // Physically active states (BlendingIn, Simulating) only.
+    LocalPose activationPose;
+    RigidTransform activationObjectWorld{};
+    bool useContinuousCollision{true};
+    std::vector<RigidBodyState> bodies;
+};
+
+struct RagdollSaveState {
+    std::vector<RagdollInstanceSaveState> instances;   // sorted by object id
+};
+
 class RagdollRuntime {
 public:
     RagdollRuntime(SkeletalAnimationRuntime& animation, IRigidBodyWorld& physics) noexcept;
@@ -81,6 +113,11 @@ public:
         std::uint64_t objectId) const noexcept;
     [[nodiscard]] std::vector<std::uint64_t> object_ids() const;
 
+    [[nodiscard]] RagdollSaveState capture_save_state() const;
+    // Restores instances bound (after boot) with the same body/joint layout; others are
+    // skipped with a warning. Returns the number restored. Call after the animation state.
+    std::size_t restore_save_state(const RagdollSaveState& state, std::vector<std::string>* warnings = nullptr);
+
 private:
     struct Instance {
         RagdollDefinition definition;
@@ -97,9 +134,15 @@ private:
         float recoveryDuration{};
         float resumePlaybackSpeed{1.0F};
         std::optional<RagdollRecoveryFacing> facing;
+        LocalPose activationPose;
+        RigidTransform activationObjectWorld{};
+        bool useContinuousCollision{true};
     };
 
     void destroy_physics(Instance& instance) noexcept;
+    [[nodiscard]] bool build_physics(
+        std::uint64_t objectId, Instance& instance, const LocalPose& pose, const RigidTransform& objectWorld,
+        const RagdollActivationOptions& options, std::string* error);
     [[nodiscard]] bool gather_body_world(
         const Instance& instance, std::vector<RigidTransform>& bodyWorld,
         std::string* error) const;

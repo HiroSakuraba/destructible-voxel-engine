@@ -8,6 +8,7 @@
 // serialize/parse round-trip plus old-format (v5 without new keys) compat.
 #include <cmath>
 #include <iostream>
+#include <numbers>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -32,7 +33,7 @@ void fft_magnitudes(std::vector<double>& real, std::vector<double>& imag) {
         }
     }
     for (std::size_t len = 2; len <= n; len <<= 1) {
-        const double ang = -2.0 * M_PI / static_cast<double>(len);
+        const double ang = -2.0 * std::numbers::pi_v<double> / static_cast<double>(len);
         const double wr = std::cos(ang), wi = std::sin(ang);
         for (std::size_t i = 0; i < n; i += len) {
             double cr = 1.0, ci = 0.0;
@@ -60,7 +61,7 @@ double peak_frequency(const std::vector<float>& interleaved, double loHz, double
     const std::size_t n = 1U << 15;
     std::vector<double> real(n, 0.0), imag(n, 0.0);
     for (std::size_t i = 0; i < n && start + i < frames; ++i) {
-        const double w = 0.5 * (1.0 - std::cos(2.0 * M_PI * static_cast<double>(i) / static_cast<double>(n)));
+        const double w = 0.5 * (1.0 - std::cos(2.0 * std::numbers::pi_v<double> * static_cast<double>(i) / static_cast<double>(n)));
         real[i] = interleaved[(start + i) * 2] * w;
     }
     fft_magnitudes(real, imag);
@@ -81,7 +82,7 @@ double band_energy(const std::vector<float>& interleaved, double loHz, double hi
     const std::size_t n = 1U << 15;
     std::vector<double> real(n, 0.0), imag(n, 0.0);
     for (std::size_t i = 0; i < n && start + i < frames; ++i) {
-        const double w = 0.5 * (1.0 - std::cos(2.0 * M_PI * static_cast<double>(i) / static_cast<double>(n)));
+        const double w = 0.5 * (1.0 - std::cos(2.0 * std::numbers::pi_v<double> * static_cast<double>(i) / static_cast<double>(n)));
         real[i] = interleaved[(start + i) * 2] * w;
     }
     fft_magnitudes(real, imag);

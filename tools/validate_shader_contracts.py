@@ -17,12 +17,25 @@ COMMENT_BLOCK = re.compile(r"/\*.*?\*/", re.S)
 COMMENT_LINE = re.compile(r"//.*")
 INCLUDE = re.compile(r'^\s*#include\s+"([^"]+)"', re.M)
 NUMTHREADS = re.compile(r"\[\s*numthreads\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*\]")
-CBUFFER = re.compile(r"\bcbuffer\s+(\w+)\s*:\s*register\(\s*(b\d+)\s*\)")
+CBUFFER = re.compile(r"\bcbuffer\s+(\w+)\s*:\s*register\(\s*(b\d+)(?:\s*,\s*(space\d+))?\s*\)")
 RESOURCE = re.compile(
     r"\b(RWStructuredBuffer|StructuredBuffer|RWByteAddressBuffer|ByteAddressBuffer|"
     r"RWTexture\w*|Texture\w*|SamplerComparisonState|SamplerState)"
-    r"(?:\s*<[^;{}]+?>)?\s+(\w+)\s*:\s*register\(\s*([tusb]\d+)\s*\)"
+    r"(?:\s*<[^;{}]+?>)?\s+(\w+)\s*:\s*register\(\s*([tusb]\d+)(?:\s*,\s*(space\d+))?\s*\)"
 )
+REGISTER_PARTS = re.compile(r"^([tusb])(\d+)(?:,\s*space(\d+))?$")
+
+
+def canonical_register(register: str, space: str) -> str:
+    return f"{register}, {space}" if space else register
+
+
+def register_sort_key(register: str, name: str) -> tuple[int, int, str, str]:
+    match = REGISTER_PARTS.match(register)
+    if match is None:
+        raise ValueError(f"unrecognized register format: {register!r}")
+    space = int(match.group(3)) if match.group(3) is not None else 0
+    return (space, int(match.group(2)), match.group(1), name)
 
 
 @dataclass(frozen=True)
@@ -91,11 +104,11 @@ def inspect_shader(path: Path, shader_root: Path, entry: str, stage: str) -> tup
             raise ValueError(f"{path.name}: graphics shader unexpectedly declares numthreads")
         threads = None
     bindings: list[Binding] = []
-    for name, register in CBUFFER.findall(expanded):
-        bindings.append(Binding(name, "constant_buffer", "read", register))
-    for type_name, name, register in RESOURCE.findall(expanded):
+    for name, register, space in CBUFFER.findall(expanded):
+        bindings.append(Binding(name, "constant_buffer", "read", canonical_register(register, space)))
+    for type_name, name, register, space in RESOURCE.findall(expanded):
         kind, access = resource_kind(type_name)
-        bindings.append(Binding(name, kind, access, register))
+        bindings.append(Binding(name, kind, access, canonical_register(register, space)))
     names: set[str] = set()
     registers: set[str] = set()
     for binding in bindings:
@@ -105,7 +118,7 @@ def inspect_shader(path: Path, shader_root: Path, entry: str, stage: str) -> tup
             raise ValueError(f"{path.name}: register collision at {binding.register}")
         names.add(binding.name)
         registers.add(binding.register)
-    bindings.sort(key=lambda item: (item.register[0], int(item.register[1:]), item.name))
+    bindings.sort(key=lambda item: register_sort_key(item.register, item.name))
     return threads, bindings
 
 
@@ -347,7 +360,7 @@ def main() -> int:
                 failures.append(f"{source}: numthreads manifest={record.get('threads')} source={threads}")
             if threads is None and "threads" in record:
                 failures.append(f"{source}: graphics shader must not declare manifest threads")
-            expected = sorted(record.get("bindings", []), key=lambda item: (item["register"][0], int(item["register"][1:]), item["name"]))
+            expected = sorted(record.get("bindings", []), key=lambda item: register_sort_key(item["register"], item["name"]))
             if expected != actual_bindings:
                 failures.append(f"{source}: binding manifest drift\n  manifest={expected}\n  source={actual_bindings}")
 

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -21,6 +22,28 @@ constexpr std::uint32_t kMaximumBox3DWorkers = 32U;
 
 [[nodiscard]] bool finite(Float3 value) noexcept {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+[[nodiscard]] bool query_allows(
+    RigidBodyHandle handle,
+    bool isStatic,
+    const RigidBodyQueryFilter& filter) noexcept {
+    if ((isStatic && !filter.includeStatic) || (!isStatic && !filter.includeDynamic)) return false;
+    return std::find(filter.ignoredBodies.begin(), filter.ignoredBodies.end(), handle) ==
+        filter.ignoredBodies.end();
+}
+
+void sort_query_hits(std::vector<RigidBodyQueryHit>& hits) {
+    std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.fraction, a.distance, a.body, a.subShape) <
+            std::tie(b.fraction, b.distance, b.body, b.subShape);
+    });
+}
+
+[[nodiscard]] std::uint32_t query_sub_shape(int triangleIndex, int childIndex) noexcept {
+    if (triangleIndex >= 0) return static_cast<std::uint32_t>(triangleIndex);
+    if (childIndex >= 0) return static_cast<std::uint32_t>(childIndex);
+    return 0U;
 }
 
 [[nodiscard]] b3Vec3 to_b3_vec3(Float3 value) noexcept {
@@ -728,6 +751,25 @@ bool Box3DRigidBodyWorld::apply_force_at_point(
     return true;
 }
 
+bool Box3DRigidBodyWorld::apply_angular_impulse(
+    RigidBodyHandle handle,
+    Float3 worldAngularImpulse) {
+    if (!impl_->valid(handle) || impl_->slots[handle].isStatic ||
+        !finite(worldAngularImpulse)) return false;
+    b3Body_ApplyAngularImpulse(
+        impl_->slots[handle].bodyId, to_b3_vec3(worldAngularImpulse), true);
+    return true;
+}
+
+bool Box3DRigidBodyWorld::apply_torque(
+    RigidBodyHandle handle,
+    Float3 worldTorque) {
+    if (!impl_->valid(handle) || impl_->slots[handle].isStatic ||
+        !finite(worldTorque)) return false;
+    b3Body_ApplyTorque(impl_->slots[handle].bodyId, to_b3_vec3(worldTorque), true);
+    return true;
+}
+
 void Box3DRigidBodyWorld::set_contact_sink(IPhysicsContactSink* sink) noexcept {
     impl_->contactSink.store(sink, std::memory_order_release);
 }
@@ -860,6 +902,154 @@ std::optional<Box3DRayHit> Box3DRigidBodyWorld::ray_cast_closest(
     hit.triangleIndex = result.triangleIndex;
     hit.childIndex = result.childIndex;
     return hit;
+}
+
+std::vector<RigidBodyQueryHit> Box3DRigidBodyWorld::ray_cast_all(
+    Float3 origin,
+    Float3 direction,
+    float maximumDistance,
+    const RigidBodyQueryFilter& filter) const {
+    std::vector<RigidBodyQueryHit> hits;
+    if (!finite(origin) || !finite(direction) || !std::isfinite(maximumDistance) ||
+        !(maximumDistance > 0.0F) || !(length_squared(direction) > 1.0e-12F) ||
+        (!filter.includeStatic && !filter.includeDynamic)) return hits;
+    const Float3 translation = multiply(normalize(direction), maximumDistance);
+    struct Context {
+        const Impl* impl{};
+        const RigidBodyQueryFilter* filter{};
+        float maximumDistance{};
+        std::vector<RigidBodyQueryHit>* hits{};
+    } context{impl_.get(), &filter, maximumDistance, &hits};
+    const auto callback = [](
+        b3ShapeId shapeId,
+        b3Pos point,
+        b3Vec3 normal,
+        float fraction,
+        std::uint64_t userMaterialId,
+        int triangleIndex,
+        int childIndex,
+        void* rawContext) -> float {
+        auto& query = *static_cast<Context*>(rawContext);
+        if (!b3Shape_IsValid(shapeId)) return 1.0F;
+        const RigidBodyHandle handle = query.impl->handle_for_body(b3Shape_GetBody(shapeId));
+        if (handle == kInvalidRigidBodyHandle ||
+            !query_allows(handle, query.impl->slots[handle].isStatic, *query.filter)) return 1.0F;
+        query.hits->push_back({
+            handle,
+            from_b3_pos(point),
+            from_b3(normal),
+            fraction,
+            fraction * query.maximumDistance,
+            static_cast<std::uint16_t>(std::min<std::uint64_t>(
+                userMaterialId, std::numeric_limits<std::uint16_t>::max())),
+            query_sub_shape(triangleIndex, childIndex),
+        });
+        return 1.0F;
+    };
+    b3QueryFilter nativeFilter = b3DefaultQueryFilter();
+    (void)b3World_CastRay(
+        impl_->worldId, to_b3_pos(origin), to_b3_vec3(translation), nativeFilter,
+        callback, &context);
+    sort_query_hits(hits);
+    return hits;
+}
+
+std::vector<RigidBodyQueryHit> Box3DRigidBodyWorld::overlap_aabb(
+    RigidBodyWorldBounds bounds,
+    const RigidBodyQueryFilter& filter) const {
+    std::vector<RigidBodyQueryHit> hits;
+    if (!finite(bounds.minimum) || !finite(bounds.maximum) ||
+        bounds.minimum.x > bounds.maximum.x || bounds.minimum.y > bounds.maximum.y ||
+        bounds.minimum.z > bounds.maximum.z ||
+        (!filter.includeStatic && !filter.includeDynamic)) return hits;
+    struct Context {
+        const Impl* impl{};
+        const RigidBodyQueryFilter* filter{};
+        std::vector<std::uint8_t>* seen{};
+        std::vector<RigidBodyQueryHit>* hits{};
+    };
+    std::vector<std::uint8_t> seen(impl_->slots.size(), 0U);
+    Context context{impl_.get(), &filter, &seen, &hits};
+    const auto callback = [](b3ShapeId shapeId, void* rawContext) -> bool {
+        auto& query = *static_cast<Context*>(rawContext);
+        if (!b3Shape_IsValid(shapeId)) return true;
+        const RigidBodyHandle handle = query.impl->handle_for_body(b3Shape_GetBody(shapeId));
+        if (handle == kInvalidRigidBodyHandle ||
+            !query_allows(handle, query.impl->slots[handle].isStatic, *query.filter)) return true;
+        if ((*query.seen)[handle] != 0U) return true;
+        (*query.seen)[handle] = 1U;
+        query.hits->push_back({
+            handle,
+            query.impl->slots[handle].currentTransform.position,
+            {},
+            0.0F,
+            0.0F,
+            query.impl->slots[handle].material,
+            0U,
+        });
+        return true;
+    };
+    b3AABB box{};
+    box.lowerBound = to_b3_vec3(bounds.minimum);
+    box.upperBound = to_b3_vec3(bounds.maximum);
+    b3QueryFilter nativeFilter = b3DefaultQueryFilter();
+    (void)b3World_OverlapAABB(impl_->worldId, box, nativeFilter, callback, &context);
+    sort_query_hits(hits);
+    return hits;
+}
+
+std::vector<RigidBodyQueryHit> Box3DRigidBodyWorld::cast_sphere_all(
+    Float3 origin,
+    float radius,
+    Float3 direction,
+    float maximumDistance,
+    const RigidBodyQueryFilter& filter) const {
+    std::vector<RigidBodyQueryHit> hits;
+    if (!finite(origin) || !finite(direction) || !std::isfinite(radius) || radius < 0.0F ||
+        !std::isfinite(maximumDistance) || !(maximumDistance > 0.0F) ||
+        !(length_squared(direction) > 1.0e-12F) ||
+        (!filter.includeStatic && !filter.includeDynamic)) return hits;
+    const Float3 translation = multiply(normalize(direction), maximumDistance);
+    struct Context {
+        const Impl* impl{};
+        const RigidBodyQueryFilter* filter{};
+        float maximumDistance{};
+        std::vector<RigidBodyQueryHit>* hits{};
+    } context{impl_.get(), &filter, maximumDistance, &hits};
+    const auto callback = [](
+        b3ShapeId shapeId,
+        b3Pos point,
+        b3Vec3 normal,
+        float fraction,
+        std::uint64_t userMaterialId,
+        int triangleIndex,
+        int childIndex,
+        void* rawContext) -> float {
+        auto& query = *static_cast<Context*>(rawContext);
+        if (!b3Shape_IsValid(shapeId)) return 1.0F;
+        const RigidBodyHandle handle = query.impl->handle_for_body(b3Shape_GetBody(shapeId));
+        if (handle == kInvalidRigidBodyHandle ||
+            !query_allows(handle, query.impl->slots[handle].isStatic, *query.filter)) return 1.0F;
+        query.hits->push_back({
+            handle,
+            from_b3_pos(point),
+            from_b3(normal),
+            fraction,
+            fraction * query.maximumDistance,
+            static_cast<std::uint16_t>(std::min<std::uint64_t>(
+                userMaterialId, std::numeric_limits<std::uint16_t>::max())),
+            query_sub_shape(triangleIndex, childIndex),
+        });
+        return 1.0F;
+    };
+    const b3Vec3 center{};
+    const b3ShapeProxy proxy{&center, 1, radius};
+    b3QueryFilter nativeFilter = b3DefaultQueryFilter();
+    (void)b3World_CastShape(
+        impl_->worldId, to_b3_pos(origin), &proxy, to_b3_vec3(translation), nativeFilter,
+        callback, &context);
+    sort_query_hits(hits);
+    return hits;
 }
 
 std::size_t Box3DRigidBodyWorld::query_aabb(

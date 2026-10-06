@@ -11,6 +11,8 @@
 #include <set>
 #include <sstream>
 #include <system_error>
+#include <chrono>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -397,6 +399,7 @@ std::filesystem::path EditorAssetDatabase::normalize_relative(const std::filesys
 
 bool EditorAssetDatabase::load(std::string* error) {
     records_.clear();
+    thumbnailCursor_ = 0U;
     if (root_.empty()) {
         if (error) *error = "asset database has no project root";
         return false;
@@ -501,6 +504,29 @@ bool EditorAssetDatabase::save(std::string* error) const {
 }
 
 bool EditorAssetDatabase::scan(EditorAssetScanReport* report, std::string* error) {
+    return scan(report, error, EditorAssetScanOptions{});
+}
+
+namespace {
+// True when the index file would be rewritten with exactly the same records.
+bool same_persisted_records(const std::vector<EditorAssetRecord>& previous,
+                            const std::unordered_map<std::string, std::size_t>& previousByPath,
+                            const std::vector<EditorAssetRecord>& current) {
+    if (previous.size() != current.size()) return false;
+    for (const EditorAssetRecord& record : current) {
+        const auto found = previousByPath.find(record.relativePath.generic_string());
+        if (found == previousByPath.end()) return false;
+        const EditorAssetRecord& old = previous[found->second];
+        if (old.id != record.id || old.kind != record.kind || old.generation != record.generation ||
+            old.contentHash != record.contentHash || old.byteSize != record.byteSize ||
+            old.modifiedTicks != record.modifiedTicks || old.sourcePath != record.sourcePath ||
+            old.cookedPath != record.cookedPath || old.tags != record.tags) return false;
+    }
+    return true;
+}
+} // namespace
+
+bool EditorAssetDatabase::scan(EditorAssetScanReport* report, std::string* error, const EditorAssetScanOptions& options) {
     EditorAssetScanReport local;
     if (!report) report = &local;
     *report = {};
@@ -508,9 +534,26 @@ bool EditorAssetDatabase::scan(EditorAssetScanReport* report, std::string* error
         if (error) *error = "asset database has no project root";
         return false;
     }
+    // An unchanged size and modification time means unchanged content, except when
+    // the file was modified within the timestamp-granularity window before the
+    // previous index was written: a later same-size edit could then keep the same
+    // time stamp (as with git's "racily clean" entries). Such files, and every file
+    // when the index time is unknown, are hashed again.
+    std::optional<std::int64_t> previousIndexTicks;
+    {
+        std::error_code indexTimeError;
+        const auto indexTime = std::filesystem::last_write_time(index_path(), indexTimeError);
+        if (!indexTimeError) previousIndexTicks = static_cast<std::int64_t>(indexTime.time_since_epoch().count());
+    }
+    const std::int64_t racyWindowTicks = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::filesystem::file_time_type::duration>(std::chrono::seconds(2)).count());
+
     std::vector<EditorAssetRecord> previous;
     std::string loadError;
-    if (!load(&loadError)) report->warnings.push_back("Ignoring unreadable previous index: " + loadError);
+    if (!load(&loadError)) {
+        report->warnings.push_back("Ignoring unreadable previous index: " + loadError);
+        previousIndexTicks.reset();
+    }
     previous = records_;
 
     std::unordered_map<std::string, std::size_t> previousByPath;
@@ -534,7 +577,10 @@ bool EditorAssetDatabase::scan(EditorAssetScanReport* report, std::string* error
         while (!iterationError && iterator != end) {
             const auto entry = *iterator;
             std::error_code statusError;
-            std::filesystem::path relative = std::filesystem::relative(entry.path(), root_, statusError);
+            // Entries are root_/<scan root>/..., so the relative path is purely lexical;
+            // std::filesystem::relative would resolve both paths with extra syscalls.
+            std::filesystem::path relative = entry.path().lexically_relative(root_);
+            if (relative.empty()) statusError = std::make_error_code(std::errc::invalid_argument);
             if (statusError) {
                 iterator.increment(iterationError);
                 continue;
@@ -556,12 +602,29 @@ bool EditorAssetDatabase::scan(EditorAssetScanReport* report, std::string* error
             record.kind = classify_editor_asset(relative);
             record.generated = is_generated_path(relative);
             record.modifiedTicks = modified_ticks(entry.path());
-            std::string hashError;
-            if (!hash_file(entry.path(), record.contentHash, record.byteSize, &hashError)) {
-                record.health = EditorAssetHealth::Unreadable;
-                report->warnings.push_back(hashError);
-            }
             const auto previousPath = previousByPath.find(relative.generic_string());
+            bool reusedHash = false;
+            if (previousPath != previousByPath.end() && previousIndexTicks && record.modifiedTicks != 0) {
+                const EditorAssetRecord& old = previous[previousPath->second];
+                std::error_code sizeError;
+                const std::uint64_t size = entry.file_size(sizeError);
+                if (!sizeError && old.health != EditorAssetHealth::Unreadable && size == old.byteSize &&
+                    record.modifiedTicks == old.modifiedTicks &&
+                    old.modifiedTicks < *previousIndexTicks - racyWindowTicks) {
+                    record.contentHash = old.contentHash;
+                    record.byteSize = old.byteSize;
+                    reusedHash = true;
+                    ++report->reusedHashes;
+                }
+            }
+            if (!reusedHash) {
+                std::string hashError;
+                ++report->hashedFiles;
+                if (!hash_file(entry.path(), record.contentHash, record.byteSize, &hashError)) {
+                    record.health = EditorAssetHealth::Unreadable;
+                    report->warnings.push_back(hashError);
+                }
+            }
             if (previousPath != previousByPath.end()) {
                 const auto& old = previous[previousPath->second];
                 previousUsed[previousPath->second] = true;
@@ -613,11 +676,17 @@ bool EditorAssetDatabase::scan(EditorAssetScanReport* report, std::string* error
         }
     }
     report->removed = static_cast<std::size_t>(std::count(previousUsed.begin(), previousUsed.end(), false));
+    // The index on disk already holds exactly these records when nothing was hashed
+    // and nothing changed; rewriting it would only cost time. A racy file is always
+    // hashed, so its rescan rewrites the index and moves the reference time on.
+    const bool unchanged = report->hashedFiles == 0U && previousIndexTicks.has_value() &&
+                           same_persisted_records(previous, previousByPath, discovered);
     records_ = std::move(discovered);
+    thumbnailCursor_ = 0U;
     refresh_health_and_dependencies(report);
     report->indexed = records_.size();
-    if (!save(error)) return false;
-    report->thumbnailsGenerated = generate_missing_thumbnails(nullptr);
+    if (!unchanged && !save(error)) return false;
+    if (options.generateThumbnails) report->thumbnailsGenerated = generate_missing_thumbnails(nullptr);
     return true;
 }
 
@@ -632,9 +701,20 @@ void EditorAssetDatabase::refresh_health_and_dependencies(EditorAssetScanReport*
         record.dependencies.clear();
         record.unresolvedDependencies.clear();
         if (!editor_asset_is_text(record.relativePath)) continue;
-        const auto text = read_small_text(root_ / record.relativePath);
-        if (!text) continue;
-        for (const std::string& token : path_tokens(*text)) {
+        // Dependency tokens depend only on file content, so unchanged text assets
+        // are not re-read; the tokens are re-resolved against the current paths.
+        const std::string key = record.relativePath.generic_string();
+        auto cached = textTokens_.find(key);
+        if (cached == textTokens_.end() || cached->second.contentHash != record.contentHash ||
+            cached->second.byteSize != record.byteSize) {
+            const auto text = read_small_text(root_ / record.relativePath);
+            if (!text) {
+                textTokens_.erase(key);
+                continue;
+            }
+            cached = textTokens_.insert_or_assign(key, TextTokens{record.contentHash, record.byteSize, path_tokens(*text)}).first;
+        }
+        for (const std::string& token : cached->second.tokens) {
             std::optional<std::string> dependency;
             if (const auto exact = idByPath.find(token); exact != idByPath.end()) dependency = exact->second;
             else if (const auto byName = idsByFilename.find(std::filesystem::path(token).filename().generic_string());
@@ -879,20 +959,25 @@ EditorAssetMutationReport EditorAssetDatabase::move_asset(std::string_view id,
 }
 
 bool EditorAssetDatabase::generate_thumbnail(std::string_view id, std::string* error) {
-    EditorAssetRecord* record = find(id);
+    const EditorAssetRecord* record = std::as_const(*this).find(id);
     if (!record) {
         if (error) *error = "asset does not exist";
         return false;
     }
+    return write_thumbnail(*record, error);
+}
+
+bool EditorAssetDatabase::write_thumbnail(const EditorAssetRecord& asset, std::string* error) const {
+    const EditorAssetRecord* record = &asset;
     try {
         constexpr int width = 64;
         constexpr int height = 64;
         std::filesystem::create_directories(thumbnail_directory());
         const auto outputPath = root_ / record->thumbnailPath;
         const auto base = kind_color(record->kind);
-        std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
-        if (!output) throw std::runtime_error("could not create asset thumbnail");
-        output << "P6\n" << width << ' ' << height << "\n255\n";
+        // Build the image in memory and write it once (was one 3-byte write per pixel).
+        std::string image = "P6\n" + std::to_string(width) + ' ' + std::to_string(height) + "\n255\n";
+        image.reserve(image.size() + static_cast<std::size_t>(width * height * 3));
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 const bool border = x < 3 || y < 3 || x >= width - 3 || y >= height - 3;
@@ -904,9 +989,12 @@ bool EditorAssetDatabase::generate_thumbnail(std::string_view id, std::string* e
                         : checker ? base[channel] : static_cast<unsigned>(base[channel]) * 3U / 4U;
                     pixel[channel] = static_cast<unsigned char>(value);
                 }
-                output.write(reinterpret_cast<const char*>(pixel.data()), 3);
+                image.append(reinterpret_cast<const char*>(pixel.data()), 3);
             }
         }
+        std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+        if (!output) throw std::runtime_error("could not create asset thumbnail");
+        output.write(image.data(), static_cast<std::streamsize>(image.size()));
         if (!output) throw std::runtime_error("could not write asset thumbnail");
         return true;
     } catch (const std::exception& exception) {
@@ -920,13 +1008,35 @@ std::size_t EditorAssetDatabase::generate_missing_thumbnails(std::string* error)
     for (const auto& record : records_) {
         if (std::filesystem::exists(root_ / record.thumbnailPath)) continue;
         std::string localError;
-        if (!generate_thumbnail(record.id, &localError)) {
+        if (!write_thumbnail(record, &localError)) {
             if (error) *error = localError;
             return count;
         }
         ++count;
     }
     return count;
+}
+
+bool EditorAssetDatabase::generate_missing_thumbnails_for(std::chrono::microseconds budget, std::size_t* generated,
+                                                          std::string* error) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    std::size_t count{};
+    while (thumbnailCursor_ < records_.size()) {
+        const EditorAssetRecord& record = records_[thumbnailCursor_];
+        if (!std::filesystem::exists(root_ / record.thumbnailPath)) {
+            std::string localError;
+            if (!write_thumbnail(record, &localError)) {
+                if (error) *error = localError;
+                ++thumbnailCursor_;  // do not retry a failing asset every frame
+                break;
+            }
+            ++count;
+        }
+        ++thumbnailCursor_;
+        if (std::chrono::steady_clock::now() >= deadline) break;
+    }
+    if (generated) *generated = count;
+    return thumbnailCursor_ >= records_.size();
 }
 
 } // namespace dve::editor

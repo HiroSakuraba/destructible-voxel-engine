@@ -7,6 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace dve::editor;
 
@@ -236,6 +237,104 @@ void test_sprite_asset_classification() {
 
 } // namespace
 
+// Unchanged files keep their hash without being read; anything that could hide an
+// edit (size, modification time, or a time stamp too close to the last index write)
+// forces a re-hash.
+void test_incremental_rescan(const std::filesystem::path& root) {
+    std::filesystem::remove_all(root);
+    write_file(root / "assets" / "textures" / "a.png", "aaaa-texture");
+    write_file(root / "assets" / "textures" / "b.png", "bbbb-texture");
+    write_file(root / "scenes" / "level.dvescene", "texture=\"assets/textures/a.png\"\n");
+    const auto past = std::filesystem::file_time_type::clock::now() - std::chrono::hours(1);
+    for (const char* file : {"assets/textures/a.png", "assets/textures/b.png", "scenes/level.dvescene"})
+        std::filesystem::last_write_time(root / file, past);
+
+    EditorAssetDatabase database(root);
+    EditorAssetScanReport report;
+    std::string error;
+    require(database.scan(&report, &error), error.c_str());
+    require(report.hashedFiles == 3U && report.reusedHashes == 0U, "first scan should hash every file");
+    const std::string sceneId = database.find_path("scenes/level.dvescene")->id;
+    const std::string bId = database.find_path("assets/textures/b.png")->id;
+    const std::string aId = database.find_path("assets/textures/a.png")->id;
+    const auto indexTime = std::filesystem::last_write_time(database.index_path());
+
+    require(database.scan(&report, &error), error.c_str());
+    require(report.hashedFiles == 0U && report.reusedHashes == 3U, "unchanged files were read again");
+    require(std::filesystem::last_write_time(database.index_path()) == indexTime,
+            "an unchanged scan rewrote the asset index");
+
+    // A fresh database (as after restarting the editor) reuses hashes from the index.
+    EditorAssetDatabase restarted(root);
+    require(restarted.scan(&report, &error), error.c_str());
+    require(report.hashedFiles == 0U && report.reusedHashes == 3U, "hashes were not reused across sessions");
+    require(restarted.find(sceneId) && restarted.find(sceneId)->dependencies == std::vector<std::string>{aId},
+            "dependencies were lost when text was not re-read");
+
+    // Same size, new content and a new (old) time stamp: detected.
+    const std::uint64_t generation = database.find(bId)->generation;
+    write_file(root / "assets" / "textures" / "b.png", "BBBB-texture");
+    std::filesystem::last_write_time(root / "assets" / "textures" / "b.png", past + std::chrono::minutes(5));
+    require(database.scan(&report, &error), error.c_str());
+    require(report.hashedFiles == 1U && report.changed == 1U, "same-size edit was not detected");
+    require(database.find(bId)->generation == generation + 1U, "edited asset generation did not advance");
+    require(std::filesystem::last_write_time(database.index_path()) != indexTime, "a change did not rewrite the index");
+
+    // A file modified just now is within the time-stamp window of the index write and
+    // is hashed again on the next scan, even though its size and time match.
+    write_file(root / "scenes" / "level.dvescene", "texture=\"assets/textures/b.png\"\n");
+    require(database.scan(&report, &error), error.c_str());
+    require(database.find(sceneId)->dependencies == std::vector<std::string>{bId},
+            "edited text dependencies were not re-read");
+    require(database.scan(&report, &error), error.c_str());
+    require(report.hashedFiles >= 1U, "a recently modified file was trusted without re-hashing");
+
+    // Touching a file without changing it re-hashes it but keeps its generation.
+    const std::uint64_t aGeneration = database.find(aId)->generation;
+    std::filesystem::last_write_time(root / "assets" / "textures" / "a.png", past + std::chrono::minutes(9));
+    require(database.scan(&report, &error), error.c_str());
+    require(report.hashedFiles >= 1U && database.find(aId)->generation == aGeneration,
+            "a touched but unchanged file changed generation");
+    std::filesystem::remove_all(root);
+    std::cout << "incremental rescan: OK\n";
+}
+
+// The editor scans without thumbnails and fills them in under a time budget.
+void test_budgeted_thumbnails(const std::filesystem::path& root) {
+    std::filesystem::remove_all(root);
+    for (int i = 0; i < 40; ++i) write_file(root / "assets" / ("t" + std::to_string(i) + ".png"), "png " + std::to_string(i));
+    EditorAssetDatabase database(root);
+    EditorAssetScanReport report;
+    std::string error;
+    EditorAssetScanOptions options;
+    options.generateThumbnails = false;
+    require(database.scan(&report, &error, options), error.c_str());
+    require(report.thumbnailsGenerated == 0U, "thumbnails were written despite being disabled");
+    for (const auto& record : database.records())
+        require(!std::filesystem::exists(root / record.thumbnailPath), "thumbnail exists before budgeted generation");
+    std::size_t total = 0, calls = 0;
+    bool done = false;
+    while (!done && calls < 10000U) {
+        std::size_t generated = 0;
+        done = database.generate_missing_thumbnails_for(std::chrono::microseconds(1), &generated, &error);
+        total += generated;
+        ++calls;
+    }
+    require(done && total == 40U, "budgeted generation did not finish every thumbnail");
+    require(calls > 1U, "a 1 us budget should take several calls");
+    for (const auto& record : database.records())
+        require(std::filesystem::exists(root / record.thumbnailPath), "budgeted generation missed a thumbnail");
+    std::size_t again = 0;
+    require(database.generate_missing_thumbnails_for(std::chrono::milliseconds(5), &again) && again == 0U,
+            "finished budgeted generation wrote again");
+    // The default scan still writes thumbnails before returning (command-line indexer).
+    std::filesystem::remove_all(database.thumbnail_directory());
+    require(database.scan(&report, &error), error.c_str());
+    require(report.thumbnailsGenerated == 40U, "default scan no longer writes thumbnails");
+    std::filesystem::remove_all(root);
+    std::cout << "budgeted thumbnails: OK\n";
+}
+
 int main() {
     try {
         const auto root = std::filesystem::temp_directory_path() / "dve_editor_asset_browser_v176";
@@ -248,6 +347,8 @@ int main() {
         test_rejects_unsafe_index(root.parent_path());
         test_animation_asset_classification();
         test_sprite_asset_classification();
+        test_incremental_rescan(root.parent_path() / "dve_editor_asset_browser_incremental");
+        test_budgeted_thumbnails(root.parent_path() / "dve_editor_asset_browser_thumbnails");
         std::filesystem::remove_all(root);
         std::cout << "dve_editor_asset_browser_tests: PASS\n";
         return 0;

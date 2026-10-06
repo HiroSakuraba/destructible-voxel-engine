@@ -2978,6 +2978,93 @@ void render_sprite_authoring_panel(const IEditorCanvas& painter, NativeEditorCon
 } // namespace
 
 namespace {
+// Liang-Barsky: cuts the segment to the closed box [minX, maxX] x [minY, maxY].
+// Returns false when no part of it lies inside.
+bool clip_segment_to_box(float& x1, float& y1, float& x2, float& y2,
+                         float minX, float minY, float maxX, float maxY) noexcept {
+    if (maxX < minX || maxY < minY) return false;
+    const float dx = x2 - x1;
+    const float dy = y2 - y1;
+    float enter = 0.0F;
+    float leave = 1.0F;
+    const auto edge = [&](float p, float q) {
+        if (p == 0.0F) return q >= 0.0F;
+        const float t = q / p;
+        if (p < 0.0F) {
+            if (t > leave) return false;
+            enter = std::max(enter, t);
+        } else {
+            if (t < enter) return false;
+            leave = std::min(leave, t);
+        }
+        return true;
+    };
+    if (!edge(-dx, x1 - minX) || !edge(dx, maxX - x1) || !edge(-dy, y1 - minY) || !edge(dy, maxY - y1)) return false;
+    const float startX = x1;
+    const float startY = y1;
+    x1 = std::clamp(startX + enter * dx, minX, maxX);
+    y1 = std::clamp(startY + enter * dy, minY, maxY);
+    x2 = std::clamp(startX + leave * dx, minX, maxX);
+    y2 = std::clamp(startY + leave * dy, minY, maxY);
+    return true;
+}
+
+// Forwards to another canvas but keeps every primitive inside `clip`: fills are
+// intersected with it, lines and the edges of partly visible outlines are cut at its
+// border, and text anchored outside it is dropped. The 3D viewport paints through
+// one: its draw lists (voxel splats, grid, boxes, frustums) keep items whose centre
+// projects out to 1.2x the viewport (see project_with in editor_viewport.cpp), so
+// without the clip they would land on the panels around it.
+class RectClipCanvas final : public IEditorCanvas {
+public:
+    RectClipCanvas(const IEditorCanvas& inner, UiRect clip) : inner_(inner), clip_(clip) {}
+    void fill(UiRect rect, EditorColor color) const override {
+        const UiRect clipped = intersect_rect(rect, clip_);
+        if (clipped.width > 0 && clipped.height > 0) inner_.fill(clipped, color);
+    }
+    void outline(UiRect rect, EditorColor color) const override {
+        if (rect.width <= 0 || rect.height <= 0) return;
+        if (rect.x >= clip_.x && rect.y >= clip_.y && rect.x + rect.width <= clip_.x + clip_.width &&
+            rect.y + rect.height <= clip_.y + clip_.height) {
+            inner_.outline(rect, color);
+            return;
+        }
+        // Partly outside: draw the visible parts of its edges, not a new edge along the clip.
+        const int right = rect.x + rect.width - 1;
+        const int bottom = rect.y + rect.height - 1;
+        line(rect.x, rect.y, right, rect.y, color, 1);
+        line(rect.x, bottom, right, bottom, color, 1);
+        line(rect.x, rect.y, rect.x, bottom, color, 1);
+        line(right, rect.y, right, bottom, color, 1);
+    }
+    void line(int x1, int y1, int x2, int y2, EditorColor color, int width = 1) const override {
+        // Canvases widen a line by up to (width - 1) / 2 pixels before and width / 2 after
+        // its centre, so the centre line is clipped to a box inset by that much.
+        const int stroke = std::max(1, width);
+        float ax = static_cast<float>(x1);
+        float ay = static_cast<float>(y1);
+        float bx = static_cast<float>(x2);
+        float by = static_cast<float>(y2);
+        if (!clip_segment_to_box(ax, ay, bx, by,
+                                 static_cast<float>(clip_.x + (stroke - 1) / 2),
+                                 static_cast<float>(clip_.y + (stroke - 1) / 2),
+                                 static_cast<float>(clip_.x + clip_.width - 1 - stroke / 2),
+                                 static_cast<float>(clip_.y + clip_.height - 1 - stroke / 2))) return;
+        inner_.line(static_cast<int>(std::lround(ax)), static_cast<int>(std::lround(ay)),
+                    static_cast<int>(std::lround(bx)), static_cast<int>(std::lround(by)), color, width);
+    }
+    // y is the text baseline.
+    void text(int x, int y, std::string_view value, EditorColor color) const override {
+        if (x >= clip_.x && x < clip_.x + clip_.width && y >= clip_.y && y <= clip_.y + clip_.height)
+            inner_.text(x, y, value, color);
+    }
+    [[nodiscard]] int text_width(std::string_view value) const override { return inner_.text_width(value); }
+    [[nodiscard]] std::string_view ellipsis() const override { return inner_.ellipsis(); }
+private:
+    const IEditorCanvas& inner_;
+    UiRect clip_;
+};
+
 // Forwards to another canvas but drops text whose glyphs would reach clipY and
 // fills/outlines that extend past it. Used for the inspector's fixed-offset
 // detail lines so they never draw under the flag toggles.
@@ -3083,7 +3170,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
 
     const UiRect viewport = layout.viewport;
-    painter.fill(viewport, highContrast ? rgb(0,0,0) : rgb(19,23,29));
+    // Everything painted into the 3D viewport goes through a clip: the voxel, frustum, box and
+    // grid draw lists keep items out to 1.2x the viewport, which would otherwise land on the
+    // outliner, inspector and bottom panel next to it.
+    const RectClipCanvas viewportPainter(painter, viewport);
+    viewportPainter.fill(viewport, highContrast ? rgb(0,0,0) : rgb(19,23,29));
     if (controller.viewport_settings().showGrid) {
         for (int i = -20; i <= 20; ++i) {
             const ScreenPoint a = project_world_to_screen(controller.camera(), viewport, {static_cast<float>(i),0,-20});
@@ -3091,8 +3182,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const ScreenPoint c = project_world_to_screen(controller.camera(), viewport, {-20,0,static_cast<float>(i)});
             const ScreenPoint d = project_world_to_screen(controller.camera(), viewport, {20,0,static_cast<float>(i)});
             const EditorColor gridColor = i == 0 ? rgb(92,106,126) : rgb(45,51,61);
-            if (a.visible && b.visible) painter.line(static_cast<int>(a.x),static_cast<int>(a.y),static_cast<int>(b.x),static_cast<int>(b.y),gridColor);
-            if (c.visible && d.visible) painter.line(static_cast<int>(c.x),static_cast<int>(c.y),static_cast<int>(d.x),static_cast<int>(d.y),gridColor);
+            if (a.visible && b.visible) viewportPainter.line(static_cast<int>(a.x),static_cast<int>(a.y),static_cast<int>(b.x),static_cast<int>(b.y),gridColor);
+            if (c.visible && d.visible) viewportPainter.line(static_cast<int>(c.x),static_cast<int>(c.y),static_cast<int>(d.x),static_cast<int>(d.y),gridColor);
         }
     }
 
@@ -3103,16 +3194,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         if (item.selected) shade = std::min(1.0F, shade + 0.14F);
         const EditorColor voxelColor = rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade));
         const int radius = std::max(1, static_cast<int>(item.pixelRadius));
-        painter.fill({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
-                      radius * 2 + 1, radius * 2 + 1}, voxelColor);
+        viewportPainter.fill({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
+                              radius * 2 + 1, radius * 2 + 1}, voxelColor);
         if (item.selected && radius >= 3)
-            painter.outline({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
-                             radius * 2 + 1, radius * 2 + 1}, rgb(150,205,255));
+            viewportPainter.outline({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
+                                     radius * 2 + 1, radius * 2 + 1}, rgb(150,205,255));
         if (item.anchored && controller.viewport_settings().showAnchors) {
-            painter.line(static_cast<int>(item.screenX)-3,static_cast<int>(item.screenY),
-                         static_cast<int>(item.screenX)+3,static_cast<int>(item.screenY),rgb(255,218,72),2);
-            painter.line(static_cast<int>(item.screenX),static_cast<int>(item.screenY)-3,
-                         static_cast<int>(item.screenX),static_cast<int>(item.screenY)+3,rgb(255,218,72),2);
+            viewportPainter.line(static_cast<int>(item.screenX)-3,static_cast<int>(item.screenY),
+                                 static_cast<int>(item.screenX)+3,static_cast<int>(item.screenY),rgb(255,218,72),2);
+            viewportPainter.line(static_cast<int>(item.screenX),static_cast<int>(item.screenY)-3,
+                                 static_cast<int>(item.screenX),static_cast<int>(item.screenY)+3,rgb(255,218,72),2);
         }
     }
 
@@ -3132,25 +3223,25 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         UiRect sideRect = item.screenBounds;
         sideRect.x += extrusionOffset;
         sideRect.y += extrusionOffset;
-        painter.fill(sideRect, sideColor);
-        painter.fill(item.screenBounds, faceColor);
-        painter.outline(item.screenBounds, item.selected ? rgb(150,205,255) : border);
+        viewportPainter.fill(sideRect, sideColor);
+        viewportPainter.fill(item.screenBounds, faceColor);
+        viewportPainter.outline(item.screenBounds, item.selected ? rgb(150,205,255) : border);
         const int available = std::max(0, item.screenBounds.width - 10);
         std::string label = item.text;
-        while (!label.empty() && painter.text_width(label) > available) label.pop_back();
+        while (!label.empty() && viewportPainter.text_width(label) > available) label.pop_back();
         if (label.size() < item.text.size() && label.size() > 3U) {
             label.resize(label.size() - 3U);
             label += "...";
         }
         if (!label.empty() && item.screenBounds.height >= 13) {
-            const int labelX = item.screenBounds.x + std::max(5, (item.screenBounds.width - painter.text_width(label)) / 2);
+            const int labelX = item.screenBounds.x + std::max(5, (item.screenBounds.width - viewportPainter.text_width(label)) / 2);
             const int labelY = item.screenBounds.y + item.screenBounds.height / 2 + 4;
-            painter.text(labelX, labelY, label, rgb(244,246,250));
+            viewportPainter.text(labelX, labelY, label, rgb(244,246,250));
         }
         if (item.selected) {
-            painter.text(item.screenBounds.x + 4, item.screenBounds.y + 12,
-                         "Slug M" + std::to_string(item.faceMaterialId) + "/" +
-                         std::to_string(item.sideMaterialId), rgb(220,235,255));
+            viewportPainter.text(item.screenBounds.x + 4, item.screenBounds.y + 12,
+                                 "Slug M" + std::to_string(item.faceMaterialId) + "/" +
+                                 std::to_string(item.sideMaterialId), rgb(220,235,255));
         }
     }
 
@@ -3164,39 +3255,39 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                      byte(item.albedoTint.z*shade));
         UiRect inner = item.screenBounds;
         const int inset = std::max(2, std::min(inner.width, inner.height)/10);
-        painter.outline(item.screenBounds, item.selected ? rgb(150,205,255) : tint);
+        viewportPainter.outline(item.screenBounds, item.selected ? rgb(150,205,255) : tint);
         for (int ring = 1; ring <= 3; ++ring) {
             const int d = inset*ring;
             if (inner.width <= d*2 || inner.height <= d*2) break;
-            painter.outline({inner.x+d, inner.y+d, inner.width-d*2, inner.height-d*2}, tint);
+            viewportPainter.outline({inner.x+d, inner.y+d, inner.width-d*2, inner.height-d*2}, tint);
         }
         if (item.screenBounds.height >= 24) {
-            painter.text(item.screenBounds.x+5, item.screenBounds.y+14,
-                         "Gabor " + std::to_string(item.primitiveCount) +
-                         " L" + std::to_string(item.maximumLodLevel),
-                         item.selected ? rgb(220,235,255) : tint);
+            viewportPainter.text(item.screenBounds.x+5, item.screenBounds.y+14,
+                                 "Gabor " + std::to_string(item.primitiveCount) +
+                                 " L" + std::to_string(item.maximumLodLevel),
+                                 item.selected ? rgb(220,235,255) : tint);
         }
     }
 
     for (EditorObjectId selectedId : controller.workspace().selected_objects()) {
         if (const EditorObject* selected = controller.workspace().document().find_object(selectedId)) {
             if (controller.viewport_settings().showObjectBounds)
-                draw_world_box(painter, controller, object_world_bounds(*selected), rgb(100,188,255));
+                draw_world_box(viewportPainter, controller, object_world_bounds(*selected), rgb(100,188,255));
             if (controller.viewport_settings().showCollision)
-                draw_world_box(painter, controller, object_world_bounds(*selected), rgb(255,140,58));
+                draw_world_box(viewportPainter, controller, object_world_bounds(*selected), rgb(255,140,58));
         }
     }
     if (controller.hover_pick()) {
         const ScreenPoint hover = project_world_to_screen(controller.camera(), viewport, controller.hover_pick()->worldPosition);
         if (hover.visible) {
-            painter.outline({static_cast<int>(hover.x)-7,static_cast<int>(hover.y)-7,15,15},rgb(255,255,255));
+            viewportPainter.outline({static_cast<int>(hover.x)-7,static_cast<int>(hover.y)-7,15,15},rgb(255,255,255));
         }
     }
     for (const GizmoScreenAxis& axis : controller.gizmo_axes()) {
         if (!axis.start.visible || !axis.end.visible) continue;
         const EditorColor axisColor = axis.axis == 1 ? rgb(244,79,83) : axis.axis == 2 ? rgb(84,220,121) : rgb(72,139,255);
-        painter.line(static_cast<int>(axis.start.x),static_cast<int>(axis.start.y),
-                     static_cast<int>(axis.end.x),static_cast<int>(axis.end.y),axisColor,4);
+        viewportPainter.line(static_cast<int>(axis.start.x),static_cast<int>(axis.start.y),
+                             static_cast<int>(axis.end.x),static_cast<int>(axis.end.y),axisColor,4);
     }
 
     if (controller.sprite_level_playing() && controller.sprite_level() &&
@@ -3248,15 +3339,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                 diagnosticInput.paletteBytes[diagnosticAsset->paletteAsset] = 1024U;
         }
         const SpriteDiagnosticsReport diagnosticReport = build_sprite_diagnostics(diagnosticInput);
-        painter.fill(viewport, rgb(18, 30, 48));
+        viewportPainter.fill(viewport, rgb(18, 30, 48));
         const int horizon = viewport.y + viewport.height * 2 / 3;
-        painter.fill({viewport.x, horizon, viewport.width, viewport.y + viewport.height - horizon},
-                     rgb(29, 52, 45));
+        viewportPainter.fill({viewport.x, horizon, viewport.width, viewport.y + viewport.height - horizon},
+                             rgb(29, 52, 45));
         for (int band = 0; band < 5; ++band) {
             const int offset = static_cast<int>(frame.parallaxOffset.x * static_cast<float>(band + 1)) % 180;
             const int y = viewport.y + 42 + band * 24;
             for (int x = viewport.x - 180 + offset; x < viewport.x + viewport.width; x += 180)
-                painter.fill({x, y, 110, 10 + band * 3}, rgb(31 + band * 7, 55 + band * 6, 80 + band * 4));
+                viewportPainter.fill({x, y, 110, 10 + band * 3}, rgb(31 + band * 7, 55 + band * 6, 80 + band * 4));
         }
         const float cameraX = frame.camera.center.x + frame.screenShakePixels;
         const float cameraY = frame.camera.center.y;
@@ -3273,8 +3364,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const int w = std::max(1, std::abs(right - left));
             const int h = std::max(1, std::abs(bottom - top));
             const std::uint8_t shade = static_cast<std::uint8_t>(70U + (tile.atlasIndex * 17U) % 80U);
-            painter.fill({x, y, w, h}, rgb(shade, static_cast<std::uint8_t>(shade + 25U), 72));
-            if (w >= 8 && h >= 8) painter.outline({x, y, w, h}, rgb(42, 68, 52));
+            viewportPainter.fill({x, y, w, h}, rgb(shade, static_cast<std::uint8_t>(shade + 25U), 72));
+            if (w >= 8 && h >= 8) viewportPainter.outline({x, y, w, h}, rgb(42, 68, 52));
         }
         const auto draw_sprite_items = [&](const SpriteRenderList& list, bool particles) {
             for (const SpriteDrawItem& item : list.items) {
@@ -3304,7 +3395,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         default: break;
                     }
                 }
-                painter.fill(rect, color);
+                viewportPainter.fill(rect, color);
                 if (!particles) {
                     EditorColor outlineColor = rgb(18, 24, 31);
                     if (controller.sprite_diagnostics_open()) {
@@ -3315,7 +3406,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         if (layer != diagnosticReport.sortingLayers.end())
                             outlineColor = rgb(layer->displayColor[0], layer->displayColor[1], layer->displayColor[2]);
                     }
-                    painter.outline(rect, outlineColor);
+                    viewportPainter.outline(rect, outlineColor);
                 }
             }
         };
@@ -3323,37 +3414,37 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         draw_sprite_items(frame.particles.renderList, true);
         if (controller.sprite_diagnostics_open()) {
             const UiRect diagnostics{viewport.x + viewport.width - 338, viewport.y + 10, 328, 238};
-            painter.fill(diagnostics, rgb(11, 16, 23));
-            painter.outline(diagnostics, rgb(87, 176, 245));
-            painter.text(diagnostics.x + 10, diagnostics.y + 20, "SPRITE DIAGNOSTICS", rgb(220, 235, 248));
-            painter.text(diagnostics.x + 10, diagnostics.y + 40,
-                         "Draws " + std::to_string(diagnosticReport.drawCallCount) +
-                         "  Batches " + std::to_string(diagnosticReport.batchCount) +
-                         "  Breaks " + std::to_string(diagnosticReport.batchBreaks.size()), muted);
-            painter.text(diagnostics.x + 10, diagnostics.y + 58,
-                         "Sprites " + std::to_string(diagnosticReport.spriteCount) +
-                         "  Tiles " + std::to_string(diagnosticReport.tileCount) +
-                         "  Pixels " + std::to_string(diagnosticReport.visiblePixelCount), muted);
-            painter.text(diagnostics.x + 10, diagnostics.y + 76,
-                         "Textures " + std::to_string(diagnosticReport.textureCount) +
-                         "  Palettes " + std::to_string(diagnosticReport.paletteCount) +
-                         "  Missing " + std::to_string(diagnosticReport.referenceIssues.size()), muted);
-            painter.text(diagnostics.x + 10, diagnostics.y + 94,
-                         "Snap violations " + std::to_string(diagnosticReport.pixelSnapViolations.size()) +
-                         "  Budget warnings " + std::to_string(diagnosticReport.budgetViolations.size()), muted);
+            viewportPainter.fill(diagnostics, rgb(11, 16, 23));
+            viewportPainter.outline(diagnostics, rgb(87, 176, 245));
+            viewportPainter.text(diagnostics.x + 10, diagnostics.y + 20, "SPRITE DIAGNOSTICS", rgb(220, 235, 248));
+            viewportPainter.text(diagnostics.x + 10, diagnostics.y + 40,
+                                 "Draws " + std::to_string(diagnosticReport.drawCallCount) +
+                                 "  Batches " + std::to_string(diagnosticReport.batchCount) +
+                                 "  Breaks " + std::to_string(diagnosticReport.batchBreaks.size()), muted);
+            viewportPainter.text(diagnostics.x + 10, diagnostics.y + 58,
+                                 "Sprites " + std::to_string(diagnosticReport.spriteCount) +
+                                 "  Tiles " + std::to_string(diagnosticReport.tileCount) +
+                                 "  Pixels " + std::to_string(diagnosticReport.visiblePixelCount), muted);
+            viewportPainter.text(diagnostics.x + 10, diagnostics.y + 76,
+                                 "Textures " + std::to_string(diagnosticReport.textureCount) +
+                                 "  Palettes " + std::to_string(diagnosticReport.paletteCount) +
+                                 "  Missing " + std::to_string(diagnosticReport.referenceIssues.size()), muted);
+            viewportPainter.text(diagnostics.x + 10, diagnostics.y + 94,
+                                 "Snap violations " + std::to_string(diagnosticReport.pixelSnapViolations.size()) +
+                                 "  Budget warnings " + std::to_string(diagnosticReport.budgetViolations.size()), muted);
             if (!diagnosticReport.atlases.empty()) {
                 const SpriteAtlasDiagnostic& atlas = diagnosticReport.atlases.front();
                 const int occupancy = static_cast<int>(std::lround(atlas.occupancy * 100.0));
                 const int fragmentation = static_cast<int>(std::lround(atlas.packingFragmentation * 100.0));
-                painter.text(diagnostics.x + 10, diagnostics.y + 112,
-                             "Atlas " + std::to_string(occupancy) + "% used  " +
-                             std::to_string(fragmentation) + "% fragmented", muted);
+                viewportPainter.text(diagnostics.x + 10, diagnostics.y + 112,
+                                     "Atlas " + std::to_string(occupancy) + "% used  " +
+                                     std::to_string(fragmentation) + "% fragmented", muted);
             }
             const int heatX = diagnostics.x + 10;
             const int heatY = diagnostics.y + 126;
             const int heatW = 160;
             const int heatH = 90;
-            painter.fill({heatX, heatY, heatW, heatH}, rgb(6, 8, 12));
+            viewportPainter.fill({heatX, heatY, heatW, heatH}, rgb(6, 8, 12));
             const std::uint32_t sourceW = diagnosticReport.overdraw.width;
             const std::uint32_t sourceH = diagnosticReport.overdraw.height;
             for (int by = 0; by < heatH; by += 5) {
@@ -3366,27 +3457,27 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     const std::size_t offset = (static_cast<std::size_t>(sy) * sourceW + sx) * 4U;
                     const unsigned alpha = std::to_integer<unsigned>(diagnosticReport.overdraw.heatmapRgba8[offset + 3U]);
                     if (alpha == 0U) continue;
-                    painter.fill({heatX + bx, heatY + by, 5, 5},
-                        rgb(std::to_integer<unsigned>(diagnosticReport.overdraw.heatmapRgba8[offset]),
-                            std::to_integer<unsigned>(diagnosticReport.overdraw.heatmapRgba8[offset + 1U]),
-                            std::to_integer<unsigned>(diagnosticReport.overdraw.heatmapRgba8[offset + 2U])));
+                    viewportPainter.fill({heatX + bx, heatY + by, 5, 5},
+                                rgb(std::to_integer<unsigned>(diagnosticReport.overdraw.heatmapRgba8[offset]),
+                                    std::to_integer<unsigned>(diagnosticReport.overdraw.heatmapRgba8[offset + 1U]),
+                                    std::to_integer<unsigned>(diagnosticReport.overdraw.heatmapRgba8[offset + 2U])));
                 }
             }
-            painter.outline({heatX, heatY, heatW, heatH}, rgb(70, 80, 92));
-            painter.text(diagnostics.x + 182, diagnostics.y + 145,
-                         "Max overdraw " + std::to_string(diagnosticReport.overdraw.maximumOverdraw), muted);
-            painter.text(diagnostics.x + 182, diagnostics.y + 164,
-                         "Fragments " + std::to_string(diagnosticReport.fragmentCount), muted);
-            painter.text(diagnostics.x + 182, diagnostics.y + 183,
-                         "Sorting layers " + std::to_string(diagnosticReport.sortingLayers.size()), muted);
-            painter.text(diagnostics.x + 182, diagnostics.y + 202, "Profile: Retro16Bit", muted);
+            viewportPainter.outline({heatX, heatY, heatW, heatH}, rgb(70, 80, 92));
+            viewportPainter.text(diagnostics.x + 182, diagnostics.y + 145,
+                                 "Max overdraw " + std::to_string(diagnosticReport.overdraw.maximumOverdraw), muted);
+            viewportPainter.text(diagnostics.x + 182, diagnostics.y + 164,
+                                 "Fragments " + std::to_string(diagnosticReport.fragmentCount), muted);
+            viewportPainter.text(diagnostics.x + 182, diagnostics.y + 183,
+                                 "Sorting layers " + std::to_string(diagnosticReport.sortingLayers.size()), muted);
+            viewportPainter.text(diagnostics.x + 182, diagnostics.y + 202, "Profile: Retro16Bit", muted);
         }
         const UiRect hud{viewport.x + 12, viewport.y + 12, 310, 32};
-        painter.fill(hud, rgb(10, 18, 28));
-        painter.outline(hud, rgb(90, 160, 225));
-        painter.text(hud.x + 10, hud.y + 21, frame.hudText, text);
-        painter.text(viewport.x + 12, viewport.y + viewport.height - 14,
-                     "SPRITE LEVEL  |  A/D or arrows move  Space jump  X fire  R restart  Esc stop", muted);
+        viewportPainter.fill(hud, rgb(10, 18, 28));
+        viewportPainter.outline(hud, rgb(90, 160, 225));
+        viewportPainter.text(hud.x + 10, hud.y + 21, frame.hudText, text);
+        viewportPainter.text(viewport.x + 12, viewport.y + viewport.height - 14,
+                             "SPRITE LEVEL  |  A/D or arrows move  Space jump  X fire  R restart  Esc stop", muted);
     }
 
     const auto settingBool = [&](std::string_view id, bool fallback) {
@@ -3423,15 +3514,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             for (std::size_t i = 0; i < corners.size(); ++i) {
                 projected[i] = project_world_to_screen(controller.camera(), viewport, corners[i]);
                 if (origin.visible && projected[i].visible)
-                    painter.line(static_cast<int>(origin.x), static_cast<int>(origin.y),
-                                 static_cast<int>(projected[i].x), static_cast<int>(projected[i].y), rgb(255,190,80));
+                    viewportPainter.line(static_cast<int>(origin.x), static_cast<int>(origin.y),
+                                         static_cast<int>(projected[i].x), static_cast<int>(projected[i].y), rgb(255,190,80));
             }
             for (std::size_t i = 0; i < projected.size(); ++i) {
                 const ScreenPoint& a = projected[i];
                 const ScreenPoint& b = projected[(i + 1U) % projected.size()];
                 if (a.visible && b.visible)
-                    painter.line(static_cast<int>(a.x), static_cast<int>(a.y),
-                                 static_cast<int>(b.x), static_cast<int>(b.y), rgb(255,190,80));
+                    viewportPainter.line(static_cast<int>(a.x), static_cast<int>(a.y),
+                                         static_cast<int>(b.x), static_cast<int>(b.y), rgb(255,190,80));
             }
         }
         if (rig && settingBool("camera.preview_selected", true)) {
@@ -3440,23 +3531,25 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const int previewHeight = std::max(110, previewWidth * 9 / 16);
             const UiRect preview{viewport.x + viewport.width - previewWidth - 14, viewport.y + 14,
                                  previewWidth, std::min(previewHeight, viewport.height - 28)};
-            painter.fill(preview, rgb(12,16,22));
+            viewportPainter.fill(preview, rgb(12,16,22));
             EditorCamera previewCamera;
             apply_camera_pose(previewCamera, rig->authoredPose);
             EditorViewportSettings previewSettings = controller.viewport_settings();
             previewSettings.maximumDrawVoxels = std::min<std::size_t>(previewSettings.maximumDrawVoxels, 25000U);
             const auto& previewItems = controller.camera_preview_draw_items(previewCamera, preview, previewSettings);
+            // The preview list has the same 1.2x margin around the preview rect.
+            const RectClipCanvas previewPainter(viewportPainter, preview);
             for (const EditorVoxelDrawItem& item : previewItems) {
                 const Float4 base = editor_material_display_color(controller.materials(), item.material);
                 const float shade = std::clamp(1.08F - item.depth * 0.018F, 0.42F, 1.0F);
                 const int radius = std::max(1, static_cast<int>(item.pixelRadius));
-                painter.fill({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
-                              radius * 2 + 1, radius * 2 + 1},
-                             rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade)));
+                previewPainter.fill({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
+                                     radius * 2 + 1, radius * 2 + 1},
+                                    rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade)));
             }
-            painter.outline(preview, accent);
-            painter.fill({preview.x, preview.y, preview.width, 22}, rgb(28,43,63));
-            painter.text(preview.x + 7, preview.y + 16, rig->name + "  [Camera Preview]", text);
+            viewportPainter.outline(preview, accent);
+            viewportPainter.fill({preview.x, preview.y, preview.width, 22}, rgb(28,43,63));
+            viewportPainter.text(preview.x + 7, preview.y + 16, rig->name + "  [Camera Preview]", text);
         }
     }
     const CinematicCameraOverlayState& cameraOverlays =
@@ -3466,10 +3559,10 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const int insetX = std::max(12, viewport.width / 20);
     const int insetY = std::max(10, viewport.height / 20);
     if (cameraOverlays.safeFrames) {
-        painter.outline({viewport.x + insetX, viewport.y + insetY,
-                         viewport.width - insetX * 2, viewport.height - insetY * 2}, rgb(238, 214, 110));
-        painter.outline({viewport.x + insetX * 2, viewport.y + insetY * 2,
-                         viewport.width - insetX * 4, viewport.height - insetY * 4}, rgb(198, 177, 86));
+        viewportPainter.outline({viewport.x + insetX, viewport.y + insetY,
+                                 viewport.width - insetX * 2, viewport.height - insetY * 2}, rgb(238, 214, 110));
+        viewportPainter.outline({viewport.x + insetX * 2, viewport.y + insetY * 2,
+                                 viewport.width - insetX * 4, viewport.height - insetY * 4}, rgb(198, 177, 86));
     }
     if (cameraOverlays.aspectMattes) {
         const float nativeAspect = static_cast<float>(std::max(1, viewport.width)) /
@@ -3480,55 +3573,55 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const int contentHeight = std::clamp(
                 static_cast<int>(static_cast<float>(viewport.width) / targetAspect), 1, viewport.height);
             const int matte = (viewport.height - contentHeight) / 2;
-            painter.fill({viewport.x, viewport.y, viewport.width, matte}, rgb(3, 3, 4));
-            painter.fill({viewport.x, viewport.y + viewport.height - matte, viewport.width, matte}, rgb(3, 3, 4));
+            viewportPainter.fill({viewport.x, viewport.y, viewport.width, matte}, rgb(3, 3, 4));
+            viewportPainter.fill({viewport.x, viewport.y + viewport.height - matte, viewport.width, matte}, rgb(3, 3, 4));
         } else if (targetAspect < nativeAspect) {
             const int contentWidth = std::clamp(
                 static_cast<int>(static_cast<float>(viewport.height) * targetAspect), 1, viewport.width);
             const int matte = (viewport.width - contentWidth) / 2;
-            painter.fill({viewport.x, viewport.y, matte, viewport.height}, rgb(3, 3, 4));
-            painter.fill({viewport.x + viewport.width - matte, viewport.y, matte, viewport.height}, rgb(3, 3, 4));
+            viewportPainter.fill({viewport.x, viewport.y, matte, viewport.height}, rgb(3, 3, 4));
+            viewportPainter.fill({viewport.x + viewport.width - matte, viewport.y, matte, viewport.height}, rgb(3, 3, 4));
         }
     }
     if (cameraOverlays.focusPlanes) {
         const int y = viewport.y + viewport.height / 2;
-        painter.line(viewport.x + insetX, y, viewport.x + viewport.width - insetX, y, rgb(90, 220, 170), 2);
-        painter.text(viewport.x + insetX + 5, y - 7,
-                     "FOCUS " + std::to_string(overlayProfile.focusDistanceMeters).substr(0, 6) + " m",
-                     rgb(90, 220, 170));
+        viewportPainter.line(viewport.x + insetX, y, viewport.x + viewport.width - insetX, y, rgb(90, 220, 170), 2);
+        viewportPainter.text(viewport.x + insetX + 5, y - 7,
+                             "FOCUS " + std::to_string(overlayProfile.focusDistanceMeters).substr(0, 6) + " m",
+                             rgb(90, 220, 170));
     }
     if (cameraOverlays.splitDiopter) {
         const auto& split = overlayProfile.cinematic.splitDiopter;
         const float center = std::clamp(split.centerX, 0.0F, 1.0F);
         const int x = viewport.x + static_cast<int>(center * static_cast<float>(viewport.width));
-        painter.line(x, viewport.y + insetY, x, viewport.y + viewport.height - insetY,
-                     rgb(235, 130, 220), 2);
-        painter.text(x + 6, viewport.y + insetY + 18, "SPLIT DIOPTER", rgb(235, 130, 220));
+        viewportPainter.line(x, viewport.y + insetY, x, viewport.y + viewport.height - insetY,
+                             rgb(235, 130, 220), 2);
+        viewportPainter.text(x + 6, viewport.y + insetY + 18, "SPLIT DIOPTER", rgb(235, 130, 220));
     }
     if (cameraOverlays.motionVectors) {
         for (int y = viewport.y + 70; y < viewport.y + viewport.height - 30; y += 72) {
             for (int x = viewport.x + 50; x < viewport.x + viewport.width - 50; x += 96)
-                painter.line(x, y, x + 18, y - 7, rgb(100, 180, 255));
+                viewportPainter.line(x, y, x + 18, y - 7, rgb(100, 180, 255));
         }
-        painter.text(viewport.x + 12, viewport.y + 42, "MOTION VECTORS", rgb(100, 180, 255));
+        viewportPainter.text(viewport.x + 12, viewport.y + 42, "MOTION VECTORS", rgb(100, 180, 255));
     }
     if (cameraOverlays.exposurePreview) {
-        painter.text(viewport.x + 12, viewport.y + 62,
-                     "EXPOSURE PREVIEW  EV " + std::to_string(overlayProfile.exposure).substr(0, 5),
-                     rgb(255, 195, 95));
+        viewportPainter.text(viewport.x + 12, viewport.y + 62,
+                             "EXPOSURE PREVIEW  EV " + std::to_string(overlayProfile.exposure).substr(0, 5),
+                             rgb(255, 195, 95));
     }
     if (cameraOverlays.compareUngraded) {
         const int x = viewport.x + viewport.width / 2;
-        painter.line(x, viewport.y, x, viewport.y + viewport.height, rgb(245, 245, 245), 2);
-        painter.text(viewport.x + 12, viewport.y + viewport.height - 12, "UNGRADED", text);
-        painter.text(x + 12, viewport.y + viewport.height - 12, "GRADED", text);
+        viewportPainter.line(x, viewport.y, x, viewport.y + viewport.height, rgb(245, 245, 245), 2);
+        viewportPainter.text(viewport.x + 12, viewport.y + viewport.height - 12, "UNGRADED", text);
+        viewportPainter.text(x + 12, viewport.y + viewport.height - 12, "GRADED", text);
     }
 
-    painter.text(viewport.x + 12, viewport.y + 20,
-                 controller.camera_mode() == camera::CameraRigMode::FreeFly
-                     ? "RMB free look  WASDQE fly  Shift boost  MMB pan"
-                     : "RMB orbit  MMB pan  Shift-click multi-select  T move  R rotate  X local/world",
-                 muted);
+    viewportPainter.text(viewport.x + 12, viewport.y + 20,
+                         controller.camera_mode() == camera::CameraRigMode::FreeFly
+                             ? "RMB free look  WASDQE fly  Shift boost  MMB pan"
+                             : "RMB orbit  MMB pan  Shift-click multi-select  T move  R rotate  X local/world",
+                         muted);
 
     if (controller.play_session().active()) {
         const EditorPlaySession& session = controller.play_session();
@@ -3547,22 +3640,22 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             viewport.y + 12,
             overlayWidth,
             overlayHeight};
-        painter.fill(overlayRect, rgb(14, 20, 29));
-        painter.outline(overlayRect, paused ? rgb(230, 174, 62) : accent);
-        painter.text(overlayRect.x + 10, overlayRect.y + 19,
-                     sessionMode + "  " + state + "  " + cameraState,
-                     paused ? rgb(255, 216, 120) : text);
-        painter.text(overlayRect.x + 10, overlayRect.y + 39,
-                     "Tick " + std::to_string(telemetry.fixedTickCount) +
-                         "   Runtime objects " + std::to_string(telemetry.runtimeObjectCount),
-                     muted);
+        viewportPainter.fill(overlayRect, rgb(14, 20, 29));
+        viewportPainter.outline(overlayRect, paused ? rgb(230, 174, 62) : accent);
+        viewportPainter.text(overlayRect.x + 10, overlayRect.y + 19,
+                             sessionMode + "  " + state + "  " + cameraState,
+                             paused ? rgb(255, 216, 120) : text);
+        viewportPainter.text(overlayRect.x + 10, overlayRect.y + 39,
+                             "Tick " + std::to_string(telemetry.fixedTickCount) +
+                                 "   Runtime objects " + std::to_string(telemetry.runtimeObjectCount),
+                             muted);
         if (!session.hud().interactionPrompt.empty()) {
-            painter.text(overlayRect.x + 10, overlayRect.y + 61,
-                         session.hud().interactionPrompt, text);
+            viewportPainter.text(overlayRect.x + 10, overlayRect.y + 61,
+                                 session.hud().interactionPrompt, text);
         }
         if (session.hud().selectedTool) {
-            painter.text(overlayRect.x + 10, overlayRect.y + 81,
-                         "Tool: " + session.hud().selectedTool->label, muted);
+            viewportPainter.text(overlayRect.x + 10, overlayRect.y + 81,
+                                 "Tool: " + session.hud().selectedTool->label, muted);
         }
     }
 

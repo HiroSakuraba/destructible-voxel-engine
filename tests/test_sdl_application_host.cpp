@@ -28,6 +28,16 @@ int main() {
         host.set_clipboard_text("hierarchy-copy");
         require(host.clipboard_text() == "hierarchy-copy", "clipboard round trip failed");
 
+        // Editors set the title every frame; only a changed title reaches SDL.
+        const int titleCallsBefore = SDLTest_SetWindowTitleCalls();
+        host.set_window_title("SDL host test");  // the title the window was created with
+        for (int frame = 0; frame < 10; ++frame) host.set_window_title("Scene - DVE Desktop Editor");
+        require(SDLTest_SetWindowTitleCalls() - titleCallsBefore == 1, "an unchanged window title was re-sent");
+        require(std::string(SDL_GetWindowTitle(static_cast<SDL_Window*>(host.native_window_handle().window))) ==
+                    "Scene - DVE Desktop Editor", "window title was not applied");
+        host.set_window_title("Scene * - DVE Desktop Editor");
+        require(SDLTest_SetWindowTitleCalls() - titleCallsBefore == 2, "a changed window title was not sent");
+
         SDL_Event key{};
         key.type = SDL_EVENT_KEY_DOWN;
         key.key.type = SDL_EVENT_KEY_DOWN;

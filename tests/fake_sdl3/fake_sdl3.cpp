@@ -109,7 +109,10 @@ bool SDL_GetWindowSizeInPixels(SDL_Window* window, int* w, int* h) {
 float SDL_GetWindowDisplayScale(SDL_Window* window) { return window ? window->scale : 0.0F; }
 SDL_WindowFlags SDL_GetWindowFlags(SDL_Window* window) { return window ? window->flags : 0; }
 SDL_WindowID SDL_GetWindowID(SDL_Window* window) { return window ? window->id : 0; }
-bool SDL_SetWindowTitle(SDL_Window* window, const char* title) { if (!window) return false; window->title = title ? title : ""; return true; }
+namespace { int gSetWindowTitleCalls = 0; }
+bool SDL_SetWindowTitle(SDL_Window* window, const char* title) { if (!window) return false; ++gSetWindowTitleCalls; window->title = title ? title : ""; return true; }
+const char* SDL_GetWindowTitle(SDL_Window* window) { return window ? window->title.c_str() : ""; }
+int SDLTest_SetWindowTitleCalls() { return gSetWindowTitleCalls; }
 bool SDL_SetClipboardText(const char* text) { clipboard = text ? text : ""; return true; }
 char* SDL_GetClipboardText() {
     auto* result = static_cast<char*>(std::malloc(clipboard.size() + 1U));

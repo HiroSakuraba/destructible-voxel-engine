@@ -7,6 +7,8 @@
 #include <cmath>
 #include <cctype>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
@@ -135,6 +137,7 @@ struct SdlApplicationHost::Impl {
     };
 
     SDL_Window* window{};
+    std::optional<std::string> appliedTitle;  // last title passed to SDL_SetWindowTitle
     bool initialized{};
     bool audioInitialized{};
     std::string audioInitError;
@@ -233,6 +236,7 @@ bool SdlApplicationHost::create_window(const WindowDesc& desc, std::string* erro
     if (desc.hidden) flags |= SDL_WINDOW_HIDDEN;
     if (desc.fullscreen) flags |= SDL_WINDOW_FULLSCREEN;
     impl_->window = SDL_CreateWindow(desc.title.c_str(), desc.width, desc.height, flags);
+    impl_->appliedTitle = desc.title;
     if (impl_->window == nullptr) {
         set_error(error, SDL_GetError());
         destroy_window();
@@ -268,6 +272,7 @@ void SdlApplicationHost::destroy_window() noexcept {
         SDL_DestroyWindow(impl_->window);
         impl_->window = nullptr;
     }
+    impl_->appliedTitle.reset();
     if (impl_->audioInitialized) {
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
         impl_->audioInitialized = false;
@@ -426,8 +431,11 @@ NativeWindowHandle SdlApplicationHost::native_window_handle() const noexcept {
 
 void SdlApplicationHost::set_window_title(std::string_view title) {
     if (!has_window()) return;
-    const std::string owned(title);
-    (void)SDL_SetWindowTitle(impl_->window, owned.c_str());
+    // Editors set the title every frame. Setting it rewrites the window's title properties and
+    // makes the window manager repaint the title bar, so an unchanged title is not re-sent.
+    if (impl_->appliedTitle && *impl_->appliedTitle == title) return;
+    std::string owned(title);
+    if (SDL_SetWindowTitle(impl_->window, owned.c_str())) impl_->appliedTitle = std::move(owned);
 }
 
 void SdlApplicationHost::set_clipboard_text(std::string_view text) {

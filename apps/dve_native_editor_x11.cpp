@@ -542,6 +542,7 @@ int main(int argc, char** argv) {
         bool screenshotWritten = false;
         int frames = 0;
         auto previous = std::chrono::steady_clock::now();
+        std::string appliedTitle;
         while (running) {
             while (XPending(display)) {
                 XEvent event{};
@@ -623,9 +624,14 @@ int main(int argc, char** argv) {
             controller.update(elapsed);
             sync_zoom(width, height);
             {
-                const std::string title = controller.workspace().document().name() +
+                // Only a changed title is stored: each XStoreName makes the window manager
+                // repaint the title bar, and this runs every frame.
+                std::string title = controller.workspace().document().name() +
                     (controller.workspace().document().dirty() ? " *" : "") + " - DVE Native Editor";
-                XStoreName(display, window, title.c_str());
+                if (title != appliedTitle) {
+                    XStoreName(display, window, title.c_str());
+                    appliedTitle = std::move(title);
+                }
             }
             X11EditorCanvas painter{display, backBuffer, gc, fontCache, zoom
 #if DVE_HAVE_XFT

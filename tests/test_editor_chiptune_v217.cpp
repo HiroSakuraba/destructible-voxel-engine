@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 
+#include <utility>
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -36,9 +37,9 @@ int main() {
     using namespace dve::editor;
     try {
         NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
-        require(controller.workspace().menus().find("window.toggle_chiptune") != nullptr,
+        require(std::as_const(controller.workspace().menus()).find("window.toggle_chiptune") != nullptr,
                 "Chiptune Tracker is missing from the Window menu");
-        require(controller.workspace().menus().find("audio.tracker") != nullptr,
+        require(std::as_const(controller.workspace().menus()).find("audio.tracker") != nullptr,
                 "Chiptune Tracker is missing from the Audio menu");
         require(controller.dispatch_action("window.toggle_chiptune"), "tracker action failed");
         require(controller.chiptune_panel().open(), "tracker panel did not open");

@@ -105,6 +105,13 @@ struct EditorViewportSettings {
     bool showCollision{false};
     bool showObjectBounds{true};
     bool xraySelection{};
+    // Skip voxels buried at least two layers deep (whole 5x5x5 neighbourhood solid)
+    // when the splats in front of them cover them; frames were pixel-identical with
+    // and without culling in testing (see build_voxel_draw_list). Anchored voxels
+    // are always emitted.
+    // Buried voxels otherwise consume the maximumDrawVoxels cap and projection/sort
+    // time without being visible.
+    bool cullEnclosedVoxels{true};
     std::size_t maximumDrawVoxels{120000};
     float gridSpacingMeters{1.0F};
 };
@@ -156,11 +163,11 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
     const EditorViewportSettings& settings,
     std::optional<EditorObjectId> selectedObject);
 
-// Cheap O(objects + bricks + anchors) fingerprint of everything that affects the
-// voxel draw list and selection diagnostics: object ids/parents/flags/transforms/
-// voxel sizes, brick keys + generations + occupancy counts (bricks bump their
-// generation on every edit), and anchors. Used to rebuild cached per-frame data
-// only when the scene actually changed.
+// Cheap O(objects + anchors) fingerprint of everything that affects the voxel draw
+// list and selection diagnostics: object ids/parents/flags/transforms/voxel sizes,
+// each VoxelObject's content revision (which changes on every voxel edit) and brick
+// count, and anchors. Used to rebuild cached per-frame data only when the scene
+// actually changed.
 [[nodiscard]] std::uint64_t editor_scene_render_fingerprint(const EditorDocument& document) noexcept;
 [[nodiscard]] std::uint64_t editor_camera_fingerprint(const EditorCamera& camera) noexcept;
 [[nodiscard]] std::uint64_t editor_selection_fingerprint(const std::set<EditorObjectId>& selection) noexcept;

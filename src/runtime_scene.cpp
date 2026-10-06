@@ -1597,7 +1597,7 @@ bool RuntimeSceneWorld::derive_object(
             object.asset_->object,
             [&](BrickKey key) {
                 if (!object.metadata_.anchored) return Bitset512{};
-                const Brick* brick = object.asset_->object.find_brick(key);
+                const Brick* brick = std::as_const(object.asset_->object).find_brick(key);
                 return brick == nullptr ? Bitset512{} : brick->occupancy();
             });
         if (!object.connectivity_->validate(object.asset_->object)) {

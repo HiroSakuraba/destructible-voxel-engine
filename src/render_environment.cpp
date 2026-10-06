@@ -12,7 +12,8 @@ bool RenderEnvironment::validate(std::string* error) const noexcept {
     switch (globalIlluminationMode) {
         case GlobalIlluminationMode::Off:
         case GlobalIlluminationMode::AmbientHemisphere:
-        case GlobalIlluminationMode::VoxelOneBounce: break;
+        case GlobalIlluminationMode::VoxelOneBounce:
+        case GlobalIlluminationMode::RadianceCascades: break;
         default: return fail("globalIlluminationMode is invalid");
     }
     switch (shadowMode) {

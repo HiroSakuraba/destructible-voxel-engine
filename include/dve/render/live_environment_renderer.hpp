@@ -3,16 +3,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <vector>
+#include <memory>
 
 #include "dve/polygon_asset.hpp"
 #include "dve/render/cascaded_shadow_atlas.hpp"
-#include "dve/render/dashr_live_instance.hpp"
-#include "dve/render/dashr_shell.hpp"
+#include "dve/render/dashr_live_surface.hpp"
 #include "dve/render/environment_lighting_gpu.hpp"
 #include "dve/render/mesh_rhi_mirror.hpp"
 #include "dve/render/main_material_table.hpp"
@@ -30,11 +28,6 @@ struct LiveEnvironmentShaderBytecode {
     std::vector<std::byte> shadowVertex;
     // Optional for opaque depth-only casters, required by the alpha-masked caster pipeline.
     std::vector<std::byte> shadowFragment;
-
-    // Optional DASHR production path. Existing live rendering remains valid when
-    // this packet is empty; a LivePolygonDraw that opts into DASHR requires it.
-    DashrShellShaderBytecode dashrShell;
-
     [[nodiscard]] bool valid() const noexcept;
 };
 
@@ -67,12 +60,11 @@ inline constexpr std::uint32_t kLiveObjectFlagDoubleSided = 1U << 2U;
 inline constexpr std::uint32_t kLiveObjectFlagBaseColorTexturePresent = 1U << 3U;
 inline constexpr std::uint32_t kLiveObjectFlagOpacityTexturePresent = 1U << 4U;
 
-struct LiveEnvironmentRetiredBindGroups {
-    rhi::FenceHandle fence{};
-    std::vector<rhi::BindGroupHandle> groups;
-};
-
 struct LiveEnvironmentRendererResources {
+    struct RetiredGroups {
+        rhi::FenceHandle fence{};
+        std::vector<rhi::BindGroupHandle> groups;
+    };
     rhi::BufferHandle frameConstants;
     rhi::BufferHandle objectConstants;
     rhi::BufferHandle cascadeConstants;
@@ -94,22 +86,8 @@ struct LiveEnvironmentRendererResources {
     std::unique_ptr<MaterialResourceResidency> materialResidency;
     std::unique_ptr<ShadowMaterialDescriptorTable> shadowMaterials;
     std::unique_ptr<MainMaterialDescriptorTable> mainMaterials;
-
-    // One renderer/pipeline set is shared by all DASHR instances. Pose-dependent
-    // surface/shell/atlas resources live on DashrLiveSurfaceInstance instead.
-    std::unique_ptr<DashrShellRendererResources> dashrShellRenderer;
-
-    // Ordinary live rendering previously destroyed transient range descriptors
-    // immediately after submit. Retain them to the final submission fence just
-    // like the DASHR path does.
-    std::vector<LiveEnvironmentRetiredBindGroups> retiredBindGroups;
-    rhi::FenceHandle lastSubmissionFence{};
-
+    std::vector<RetiredGroups> retiredGroups;
     [[nodiscard]] bool valid() const noexcept;
-    [[nodiscard]] bool dashr_valid() const noexcept {
-        return dashrShellRenderer && dashrShellRenderer->pbr_valid() &&
-               static_cast<bool>(dashrShellRenderer->shadowPipeline);
-    }
 };
 
 struct LivePolygonDraw {
@@ -119,18 +97,11 @@ struct LivePolygonDraw {
     std::array<float, 16> objectToWorld{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool castsShadow{true};
     bool staticShadowCaster{false};
-
-    // Optional pose-owned DASHR resources. Material selection is stored by the
-    // instance, so ordinary submeshes in the same asset remain on the polygon path.
+    // Runtime opt-in by submesh index. One atlas belongs to one pose/instance.
     DashrLiveSurfaceInstance* dashr{};
-};
-
-// Explicit camera packet used only by the DASHR shell path. The legacy frame
-// constant blob remains opaque and unchanged for existing callers.
-struct LiveDashrViewDesc {
-    std::array<float, 16> worldToClip{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    Float3 cameraWorldPosition{};
-    std::array<float, 4> environmentParameters{};
+    std::span<const std::uint32_t> dashrSubmeshIndices{};
+    DashrPoseInput dashrPose{};
+    Float3 dashrCameraObjectPosition{};
 };
 
 struct LiveEnvironmentFrameDesc {
@@ -140,6 +111,10 @@ struct LiveEnvironmentFrameDesc {
     std::uint32_t height{};
     std::span<const std::byte> frameConstants;
     std::span<const LivePolygonDraw> polygonDraws;
+    // Required when any submesh selects DASHR. The current scene integration
+    // draws DASHR in a load-preserving camera pass after ordinary geometry.
+    DashrShellRendererResources* dashrRenderer{};
+    Float3 cameraWorldPosition{};
     // Legacy shared dirty set. Used for a layer when its layer-specific set is empty.
     std::vector<std::uint32_t> dirtyCascades;
     std::vector<std::uint32_t> staticDirtyCascades;
@@ -150,14 +125,15 @@ struct LiveEnvironmentFrameDesc {
     bool drawSkybox{true};
     bool drawMaterials{true};
     bool drawShadowCasters{true};
-
-    std::optional<LiveDashrViewDesc> dashrView;
 };
 
 struct LiveEnvironmentFrameStats {
     std::uint64_t skyboxDraws{};
     std::uint64_t materialDraws{};
+    std::uint64_t dashrDraws{};
+    std::uint64_t dashrTriangles{};
     std::uint64_t shadowDraws{};
+    std::uint64_t dashrShadowDraws{};
     std::uint64_t materialTriangles{};
     std::uint64_t shadowTriangles{};
     std::uint64_t alphaMaskedShadowDraws{};
@@ -181,14 +157,6 @@ struct LiveEnvironmentFrameStats {
     std::uint64_t objectConstantRanges{};
     std::uint64_t cascadeConstantRanges{};
     std::uint32_t cascadesRendered{};
-
-    // DASHR-specific scheduling/recording diagnostics.
-    std::uint64_t dashrSubmeshes{};
-    std::uint64_t dashrMaterialDraws{};
-    std::uint64_t dashrMaterialTriangles{};
-    std::uint64_t dashrShadowDraws{};
-    std::uint64_t dashrShadowTriangles{};
-    std::uint64_t dashrShadowPasses{};
 };
 
 [[nodiscard]] bool create_live_environment_renderer(

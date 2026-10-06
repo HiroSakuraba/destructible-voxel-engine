@@ -366,10 +366,24 @@ public:
         RigidBodyHandle handle, Float3 impulse, Float3 worldPoint) override;
     bool apply_force_at_point(
         RigidBodyHandle handle, Float3 force, Float3 worldPoint) override;
+    bool apply_angular_impulse(
+        RigidBodyHandle handle, Float3 worldAngularImpulse) override;
+    bool apply_torque(RigidBodyHandle handle, Float3 worldTorque) override;
+
+    [[nodiscard]] std::vector<RigidBodyQueryHit> ray_cast_all(
+        Float3 origin, Float3 direction, float maximumDistance,
+        const RigidBodyQueryFilter& filter = {}) const override;
+    [[nodiscard]] std::vector<RigidBodyQueryHit> overlap_aabb(
+        RigidBodyWorldBounds bounds,
+        const RigidBodyQueryFilter& filter = {}) const override;
+    [[nodiscard]] std::vector<RigidBodyQueryHit> cast_sphere_all(
+        Float3 origin, float radius, Float3 direction, float maximumDistance,
+        const RigidBodyQueryFilter& filter = {}) const override;
 
     // The sink must remain alive while registered. Jolt may invoke it concurrently from worker
     // threads during step(); the supplied implementation must therefore be callback-safe.
     void set_contact_sink(IPhysicsContactSink* sink) noexcept override;
+    bool set_pair_collision_enabled(RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept override;
     bool set_contact_material(
         RigidBodyHandle handle, std::uint16_t material) noexcept override;
 

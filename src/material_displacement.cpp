@@ -169,21 +169,47 @@ void apply_displacement(CookedPolygonAsset& asset,
     stats.sharedMaterialVertices=std::max(stats.sharedMaterialVertices,shared);
     for (std::size_t index=0U;index<asset.vertices.size();++index) {
         const std::uint32_t materialIndex=materials[index];
-        if (materialIndex>=settings.size()||materialIndex>=asset.materialBindings.size()) continue;
+        if (materialIndex>=settings.size()) continue;
         const auto& setting=settings[materialIndex];
         const bool active=collisionOnly
             ? setting.policy==MaterialDisplacementPolicy::CollisionAffecting
             : setting.policy!=MaterialDisplacementPolicy::Disabled;
-        if (!active || !(std::abs(setting.scaleMeters)>0.0F)) continue;
-        const auto& binding=asset.materialBindings[materialIndex];
-        if (!binding.height.texture) { ++stats.missingHeightBindings; continue; }
+        if (!active) continue;
+        const PolygonMaterialBinding* binding=materialIndex<asset.materialBindings.size()
+            ? &asset.materialBindings[materialIndex] : nullptr;
+        const bool useTexture=std::abs(setting.scaleMeters)>0.0F;
+        const bool useNoise=setting.proceduralNoiseEnabled&&
+                            std::abs(setting.proceduralNoiseAmplitudeMeters)>0.0F;
+        if (!useTexture&&!useNoise) continue;
+        if (useTexture&&(!binding||!binding->height.texture)) ++stats.missingHeightBindings;
         PolygonVertex& vertex=asset.vertices[index];
-        Float2 uv=binding.height.texcoord==1U?vertex.texcoord1:vertex.texcoord;
-        uv=transform_texture_coordinates(uv,binding.mapping.baseTransform);
-        const float height=sample_image_red(asset,binding.height,uv);
-        const float displacement=(height-setting.referencePlane)*setting.scaleMeters*
-                                 material_displacement_lod_fade(distance,setting);
+        const float fade=material_displacement_lod_fade(distance,setting);
+        float displacement=0.0F;
+        if (useTexture&&binding&&binding->height.texture) {
+            Float2 uv=binding->height.texcoord==1U?vertex.texcoord1:vertex.texcoord;
+            uv=transform_texture_coordinates(uv,binding->mapping.baseTransform);
+            const float height=sample_image_red(asset,binding->height,uv);
+            displacement+=(height-setting.referencePlane)*setting.scaleMeters*fade;
+        }
+        Float3 noiseGradient{};
+        if (useNoise) {
+            const NoiseSample3 noise=fractal_noise_3d(vertex.position,setting.proceduralNoise);
+            displacement+=noise.value*setting.proceduralNoiseAmplitudeMeters*fade;
+            noiseGradient=scale3(noise.gradient,setting.proceduralNoiseAmplitudeMeters*fade);
+        }
         vertex.position=add3(vertex.position,scale3(normalize3(vertex.normal),displacement));
+        if (useNoise) {
+            const Float3 normal=normalize3(vertex.normal);
+            const Float3 tangentGradient=add3(noiseGradient,scale3(normal,-dot3(noiseGradient,normal)));
+            const Float3 displacedNormal=normalize3(add3(normal,scale3(tangentGradient,-1.0F)),normal);
+            Float3 tangent{vertex.tangent.x,vertex.tangent.y,vertex.tangent.z};
+            tangent=normalize3(tangent, {1.0F,0.0F,0.0F});
+            tangent=add3(tangent,scale3(normal,dot3(noiseGradient,tangent)));
+            tangent=add3(tangent,scale3(displacedNormal,-dot3(tangent,displacedNormal)));
+            tangent=normalize3(tangent, {1.0F,0.0F,0.0F});
+            vertex.normal=displacedNormal;
+            vertex.tangent.x=tangent.x;vertex.tangent.y=tangent.y;vertex.tangent.z=tangent.z;
+        }
         stats.maximumAbsoluteDisplacement=std::max(stats.maximumAbsoluteDisplacement,std::abs(displacement));
         if (collisionOnly) ++stats.displacedCollisionVertices;
         else ++stats.displacedVisualVertices;
@@ -203,12 +229,17 @@ bool validate_material_vertex_displacement_settings(
         static_cast<unsigned>(MaterialDisplacementPolicy::CollisionAffecting))
         return fail("material displacement policy is invalid");
     if (!finite(settings.scaleMeters)||!finite(settings.referencePlane)||
-        !finite(settings.fadeStartMeters)||!finite(settings.fadeEndMeters))
+        !finite(settings.fadeStartMeters)||!finite(settings.fadeEndMeters)||
+        !finite(settings.proceduralNoiseAmplitudeMeters))
         return fail("material displacement settings contain a non-finite value");
     if (settings.referencePlane<0.0F||settings.referencePlane>1.0F||
         settings.fadeStartMeters<0.0F||settings.fadeEndMeters<settings.fadeStartMeters||
         settings.offlineSubdivisionLevels>4U)
         return fail("material displacement settings are outside supported bounds");
+    if (settings.proceduralNoiseEnabled && !validate_fractal_noise_settings(settings.proceduralNoise))
+        return fail("procedural noise settings are outside supported bounds");
+    if (std::abs(settings.proceduralNoiseAmplitudeMeters)>1000.0F)
+        return fail("procedural noise amplitude exceeds supported bounds");
     if (geometry==GeometryKind::Voxel&&settings.policy==MaterialDisplacementPolicy::CollisionAffecting)
         return fail("voxel-derived displacement is visual-only; revoxelization is required for collision changes");
     if (settings.policy!=MaterialDisplacementPolicy::Disabled&&
@@ -251,7 +282,10 @@ std::optional<PolygonDisplacementResult> build_displaced_polygon_asset(
             if(error)*error=validation;
             return std::nullopt;
         }
-        if (materialSettings[i].policy!=MaterialDisplacementPolicy::Disabled)
+        if (materialSettings[i].policy!=MaterialDisplacementPolicy::Disabled &&
+            (std::abs(materialSettings[i].scaleMeters)>0.0F ||
+             (materialSettings[i].proceduralNoiseEnabled &&
+              std::abs(materialSettings[i].proceduralNoiseAmplitudeMeters)>0.0F)))
             subdivisions=std::max(subdivisions,materialSettings[i].offlineSubdivisionLevels);
         collisionRequested=collisionRequested||
             materialSettings[i].policy==MaterialDisplacementPolicy::CollisionAffecting;

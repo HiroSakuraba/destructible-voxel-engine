@@ -16,6 +16,11 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+// The Windows SDK aliases its DeviceCapabilities API name to a W-suffixed symbol.
+// Keep the RHI type visible in this translation unit.
+#ifdef DeviceCapabilities
+#undef DeviceCapabilities
+#endif
 #else
 #include <dlfcn.h>
 #endif
@@ -129,6 +134,11 @@ vk::Format vulkan_format(TextureFormat format) noexcept {
     case TextureFormat::RGBA32Sint: return vk::FormatR32G32B32A32Sint;
     case TextureFormat::RGBA16Float: return vk::FormatR16G16B16A16Sfloat;
     case TextureFormat::RG16Uint: return vk::FormatR16G16Uint;
+    case TextureFormat::BC1RGBAUnorm: return vk::FormatBc1RgbaUnormBlock;
+    case TextureFormat::BC1RGBASrgb: return vk::FormatBc1RgbaSrgbBlock;
+    case TextureFormat::BC3RGBAUnorm: return vk::FormatBc3UnormBlock;
+    case TextureFormat::BC3RGBASrgb: return vk::FormatBc3SrgbBlock;
+    case TextureFormat::BC5RGUnorm: return vk::FormatBc5UnormBlock;
     case TextureFormat::D32Float: return vk::FormatD32Sfloat;
     }
     return vk::FormatR8G8B8A8Unorm;
@@ -174,10 +184,16 @@ vk::ImageAspectFlags image_aspect(TextureFormat format) noexcept {
 }
 
 std::size_t texture_pixel_bytes(TextureFormat format) noexcept {
+    if (is_block_compressed(format)) return 0U;
     switch (format) {
     case TextureFormat::RGBA32Sint: return 16U;
     case TextureFormat::RGBA16Float: return 8U;
     case TextureFormat::RG16Uint: return 4U;
+    case TextureFormat::BC1RGBAUnorm:
+    case TextureFormat::BC1RGBASrgb:
+    case TextureFormat::BC3RGBAUnorm:
+    case TextureFormat::BC3RGBASrgb:
+    case TextureFormat::BC5RGUnorm: return 0U;
     case TextureFormat::RGBA8Unorm:
     case TextureFormat::BGRA8Unorm:
     case TextureFormat::R32Uint:
@@ -1264,7 +1280,7 @@ struct VulkanDevice::Impl {
                                        vk::RenderPass& output, std::string* error) {
         if ((colorFormats.empty() && !depthFormat) || colorFormats.size() > 4U ||
             clearColors.size() != colorFormats.size()) {
-            set_error(error, "Vulkan render pass requires one to four total attachments");
+            set_error(error, "Vulkan render pass requires at most four color attachments and at least one attachment");
             return false;
         }
         std::array<vk::AttachmentDescription, 5> attachments{};
@@ -1464,17 +1480,20 @@ bool VulkanDevice::write_texture(TextureHandle handle, std::uint32_t mipLevel,
     if (mipLevel >= slot->desc.mipLevels || arrayLayer >= slot->desc.arrayLayers) {
         set_error(error, "Vulkan texture upload subresource is out of range"); return false;
     }
+    const bool compressed = is_block_compressed(slot->desc.format);
     const std::size_t pixelBytes = texture_pixel_bytes(slot->desc.format);
     const std::uint32_t width = mip_dimension(slot->desc.width, mipLevel);
     const std::uint32_t height = mip_dimension(slot->desc.height, mipLevel);
-    const std::size_t tightPitch = static_cast<std::size_t>(width) * pixelBytes;
-    if (rowPitchBytes < tightPitch || rowPitchBytes % pixelBytes != 0U ||
-        bytes.size() < rowPitchBytes * static_cast<std::size_t>(height)) {
+    const std::size_t tightPitch = texture_row_bytes(slot->desc.format, width);
+    const std::size_t rows = texture_rows(slot->desc.format, height);
+    if ((compressed && rowPitchBytes != tightPitch) ||
+        (!compressed && (rowPitchBytes < tightPitch || rowPitchBytes % pixelBytes != 0U)) ||
+        bytes.size() < rowPitchBytes * rows) {
         set_error(error, "Vulkan texture upload row pitch or byte span is invalid"); return false;
     }
     Impl::RawBuffer staging;
     const auto host = vk::MemoryPropertyHostVisibleBit | vk::MemoryPropertyHostCoherentBit;
-    const std::size_t stagingBytes = rowPitchBytes * static_cast<std::size_t>(height);
+    const std::size_t stagingBytes = rowPitchBytes * rows;
     if (!impl_->create_raw_buffer(stagingBytes, vk::BufferUsageTransferSourceBit,
                                   host, host, staging, error)) return false;
     bool ok = impl_->map_copy(staging.memory, 0U, bytes.first(stagingBytes), error);
@@ -1484,7 +1503,8 @@ bool VulkanDevice::write_texture(TextureHandle handle, std::uint32_t mipLevel,
             !impl_->image_barrier(commandBuffer, *slot, slot->state,
                                   ResourceState::CopyDestination, error)) return false;
         const vk::BufferImageCopy copy{
-            0U, static_cast<std::uint32_t>(rowPitchBytes / pixelBytes), height,
+            0U, compressed ? 0U : static_cast<std::uint32_t>(rowPitchBytes / pixelBytes),
+            compressed ? 0U : height,
             {image_aspect(slot->desc.format), mipLevel, arrayLayer, 1U},
             {0, 0}, 0, {width, height, 1U}};
         impl_->fn.cmdCopyBufferToImage(commandBuffer, staging.buffer, slot->image,
@@ -1514,12 +1534,15 @@ bool VulkanDevice::read_texture(TextureHandle handle, std::uint32_t mipLevel,
     if (mipLevel >= slot->desc.mipLevels || arrayLayer >= slot->desc.arrayLayers) {
         set_error(error, "Vulkan texture readback subresource is out of range"); return false;
     }
+    const bool compressed = is_block_compressed(slot->desc.format);
     const std::size_t pixelBytes = texture_pixel_bytes(slot->desc.format);
     const std::uint32_t width = mip_dimension(slot->desc.width, mipLevel);
     const std::uint32_t height = mip_dimension(slot->desc.height, mipLevel);
-    const std::size_t tightPitch = static_cast<std::size_t>(width) * pixelBytes;
-    const std::size_t stagingBytes = rowPitchBytes * static_cast<std::size_t>(height);
-    if (rowPitchBytes < tightPitch || rowPitchBytes % pixelBytes != 0U ||
+    const std::size_t tightPitch = texture_row_bytes(slot->desc.format, width);
+    const std::size_t rows = texture_rows(slot->desc.format, height);
+    const std::size_t stagingBytes = rowPitchBytes * rows;
+    if ((compressed && rowPitchBytes != tightPitch) ||
+        (!compressed && (rowPitchBytes < tightPitch || rowPitchBytes % pixelBytes != 0U)) ||
         destination.size() < stagingBytes) {
         set_error(error, "Vulkan texture readback row pitch or byte span is invalid"); return false;
     }
@@ -1534,7 +1557,8 @@ bool VulkanDevice::read_texture(TextureHandle handle, std::uint32_t mipLevel,
             !impl_->image_barrier(commandBuffer, *slot, slot->state,
                                   ResourceState::CopySource, error)) return false;
         const vk::BufferImageCopy copy{
-            0U, static_cast<std::uint32_t>(rowPitchBytes / pixelBytes), height,
+            0U, compressed ? 0U : static_cast<std::uint32_t>(rowPitchBytes / pixelBytes),
+            compressed ? 0U : height,
             {image_aspect(slot->desc.format), mipLevel, arrayLayer, 1U},
             {0, 0}, 0, {width, height, 1U}};
         impl_->fn.cmdCopyImageToBuffer(commandBuffer, slot->image,

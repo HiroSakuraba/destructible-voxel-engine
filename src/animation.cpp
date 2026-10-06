@@ -758,6 +758,65 @@ bool SkeletalAnimationRuntime::publish_local_pose(
     return true;
 }
 
+SkeletalAnimationSaveState SkeletalAnimationRuntime::capture_save_state() const {
+    SkeletalAnimationSaveState state;
+    for (const auto& [objectId, instance] : impl_->instances) {
+        state.instances.push_back({objectId, instance.skeleton.contentHash, instance.active, instance.time,
+                                   instance.target, instance.targetTime, instance.fadeElapsed, instance.fadeDuration,
+                                   instance.playbackSpeed, instance.rootMotionEnabled, instance.rootMotionPending,
+                                   instance.rootMotionAccum, instance.pose});
+    }
+    return state;
+}
+
+std::size_t SkeletalAnimationRuntime::restore_save_state(
+    const SkeletalAnimationSaveState& state, std::vector<std::string>* warnings) {
+    const auto warn = [&](std::uint64_t objectId, std::string_view message) {
+        if (warnings) warnings->push_back("animation " + std::to_string(objectId) + ": " + std::string(message));
+    };
+    const auto finiteTransform = [](const RigidTransform& t) {
+        return std::isfinite(t.position.x) && std::isfinite(t.position.y) && std::isfinite(t.position.z) &&
+               std::isfinite(t.rotation.x) && std::isfinite(t.rotation.y) && std::isfinite(t.rotation.z) &&
+               std::isfinite(t.rotation.w);
+    };
+    std::size_t restored = 0U;
+    for (const SkeletalAnimationInstanceSaveState& saved : state.instances) {
+        const auto found = impl_->instances.find(saved.objectId);
+        if (found == impl_->instances.end()) { warn(saved.objectId, "no skeleton is bound after boot"); continue; }
+        Impl::Instance& instance = found->second;
+        if (instance.skeleton.contentHash != saved.skeletonHash) { warn(saved.objectId, "the bound skeleton changed"); continue; }
+        if ((!saved.activeClip.empty() && !instance.clips.contains(saved.activeClip)) ||
+            (!saved.targetClip.empty() && !instance.clips.contains(saved.targetClip))) {
+            warn(saved.objectId, "a saved clip is not registered");
+            continue;
+        }
+        bool valid = std::isfinite(saved.time) && std::isfinite(saved.targetTime) && std::isfinite(saved.fadeElapsed) &&
+                     std::isfinite(saved.fadeDuration) && saved.fadeDuration >= 0.0F &&
+                     (saved.targetClip.empty() || saved.fadeDuration > 0.0F) && std::isfinite(saved.playbackSpeed) &&
+                     saved.playbackSpeed >= 0.0F && saved.playbackSpeed <= 16.0F && finiteTransform(saved.rootMotionAccum) &&
+                     saved.pose.size() == instance.skeleton.bones.size();
+        for (const RigidTransform& bone : saved.pose) valid = valid && finiteTransform(bone);
+        std::string poseError;
+        if (!valid || compute_model_pose(instance.skeleton, saved.pose, &poseError).empty()) {
+            warn(saved.objectId, "the saved playback state is invalid");
+            continue;
+        }
+        instance.active = saved.activeClip;
+        instance.time = saved.time;
+        instance.target = saved.targetClip;
+        instance.targetTime = saved.targetTime;
+        instance.fadeElapsed = saved.fadeElapsed;
+        instance.fadeDuration = saved.fadeDuration;
+        instance.playbackSpeed = saved.playbackSpeed;
+        instance.rootMotionEnabled = saved.rootMotionEnabled;
+        instance.rootMotionPending = saved.rootMotionPending;
+        instance.rootMotionAccum = saved.rootMotionAccum;
+        instance.pose = saved.pose;
+        ++restored;
+    }
+    return restored;
+}
+
 void SkeletalAnimationRuntime::tick(float deltaSeconds) {
     if (!(deltaSeconds > 0.0F) || !std::isfinite(deltaSeconds)) return;
     for (auto& [objectId, instance] : impl_->instances) {

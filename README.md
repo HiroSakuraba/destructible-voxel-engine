@@ -36,7 +36,7 @@ controlled by the `DVE_ENABLE_*` and `DVE_BUILD_*` options in `CMakeLists.txt`.
 | Tooling | CPU profiler scopes, timelines, counters, memory categories, asset dependency graph, source monitoring, and reimport ordering |
 | Gameplay | Prioritized input contexts, weighted composite bindings, analog actuation thresholds, gestures, conflict-safe remapping, versioned persistence, atomic saves, migrations, and recovery |
 | Animation | Humanoid mapping, CPU retargeting, morph targets, and CCD inverse kinematics |
-| Physics | Point forces, torque, angular impulses, deterministic ray/AABB/sphere query-all contracts, filters, ordering, and material metadata |
+| Physics | Point forces, torque, angular impulses, and native Jolt/Box3D/reference ray/AABB/sphere query-all with filters, ordering, and material metadata |
 | AI and networking | Blackboard, behavior tree, perception, steering, interpolation, rollback history, and replication relevancy |
 | Editor and plugins | Undoable operations and owner-scoped registration for panels, commands, importers, components, inspectors, and scripting bindings |
 
@@ -68,6 +68,23 @@ dve_pack <project-root> <output.dvepak> --all
 - `third_party/` — bundled notices, ABI shims, and reference material
 - `scripts/`, `tools/` — validation and release utilities
 - `docs/V235_FOUNDATIONS.md` — implemented boundaries and remaining production work
+- `docs/PACKAGING.md` — runtime content: `ContentSource` (loose folder or `.dvepak`),
+  pak-backed scene loading into `GameWorld`, and the `game.dvegame` manifest
+- `docs/SAVE_GAMES.md` — player save games: the GameWorld with its destruction state, physics
+  and Lua state in a versioned, hashed `DVESAVE1` file; quicksave/quickload, `--load`, and
+  migrations
+- `docs/MIDI_SETUP.md` — MIDI keyboards in the editors: RtMidi on Linux/Windows/macOS, port
+  picker, hotplug, channel filter, and Akai MPK mini tips
+
+## License
+
+The Destructible Voxel Engine is licensed under the [MIT License](LICENSE),
+Copyright (c) 2026 Benjamin Schulz.
+
+Third-party libraries and the adapted research code under `third_party/` keep their own
+licenses (see the notices in that folder and `third_party/notices/manifest.json`). Every
+package and packaged game carries the engine's `LICENSE` and a generated
+`THIRD_PARTY_NOTICES` file; see [docs/PACKAGING.md](docs/PACKAGING.md#third-party-licenses-and-what-to-review).
 
 ## Release integrity and scope
 
@@ -76,7 +93,7 @@ describes the source-only profile and the historical payload intentionally exclu
 repository.
 
 The v2.35 APIs are tested foundations, not a claim that every production integration is
-complete. In particular, asynchronous navigation baking/publication, native Jolt/Box3D query
-collectors, the complete network transport/replication driver, and ABI-stable dynamic plugin
-loading remain follow-up work. See [the v2.35 foundation notes](docs/V235_FOUNDATIONS.md) and
+complete. In particular, asynchronous navigation baking/publication, cross-platform native
+physics certification, the complete network transport/replication driver, and ABI-stable
+dynamic plugin loading remain follow-up work. See [the v2.35 foundation notes](docs/V235_FOUNDATIONS.md) and
 [the changelog](CHANGELOG.md) for details.

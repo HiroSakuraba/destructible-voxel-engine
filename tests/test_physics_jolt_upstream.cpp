@@ -143,6 +143,69 @@ void test_snapshot_round_trip() {
     REQUIRE(telemetry.snapshotsRestored == 1U);
 }
 
+void test_solver_neutral_loads_and_queries() {
+    JoltWorldConfig config;
+    config.workerThreads = 1U;
+    JoltRigidBodyWorld world(config);
+    world.set_gravity({});
+    IRigidBodyWorld& neutral = world;
+
+    const RigidBodyHandle first = world.create_static_box(
+        make_rigid_transform({}, {}), {0.5F, 0.5F, 0.5F});
+    const RigidBodyHandle second = world.create_static_box(
+        make_rigid_transform({3.0F, 0.0F, 0.0F}, {}), {0.5F, 0.5F, 0.5F});
+    const RigidBodyHandle dynamic = world.create_body(make_box({6.0F, 0.0F, 0.0F}));
+    REQUIRE(first != kInvalidRigidBodyHandle);
+    REQUIRE(second != kInvalidRigidBodyHandle);
+    REQUIRE(dynamic != kInvalidRigidBodyHandle);
+    REQUIRE(neutral.set_contact_material(first, 11U));
+    REQUIRE(neutral.set_contact_material(second, 22U));
+    REQUIRE(neutral.set_contact_material(dynamic, 33U));
+    world.optimize_broad_phase();
+
+    const auto rayHits = neutral.ray_cast_all({-3.0F, 0.0F, 0.0F}, {2.0F, 0.0F, 0.0F}, 12.0F);
+    REQUIRE(rayHits.size() == 3U);
+    if (rayHits.size() == 3U) {
+        REQUIRE(rayHits[0].body == first && rayHits[0].material == 11U);
+        REQUIRE(rayHits[1].body == second && rayHits[1].material == 22U);
+        REQUIRE(rayHits[2].body == dynamic && rayHits[2].material == 33U);
+        REQUIRE(rayHits[0].distance < rayHits[1].distance && rayHits[1].distance < rayHits[2].distance);
+    }
+
+    RigidBodyQueryFilter dynamicOnly;
+    dynamicOnly.includeStatic = false;
+    const auto dynamicHits = neutral.ray_cast_all(
+        {-3.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, 12.0F, dynamicOnly);
+    REQUIRE(dynamicHits.size() == 1U && dynamicHits.front().body == dynamic);
+    RigidBodyQueryFilter ignored;
+    ignored.ignoredBodies.push_back(first);
+    const auto ignoredHits = neutral.ray_cast_all(
+        {-3.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, 12.0F, ignored);
+    REQUIRE(ignoredHits.size() == 2U && ignoredHits.front().body == second);
+
+    const auto overlaps = neutral.overlap_aabb(
+        {{-0.75F, -0.75F, -0.75F}, {0.75F, 0.75F, 0.75F}});
+    REQUIRE(overlaps.size() == 1U && overlaps.front().body == first && overlaps.front().material == 11U);
+    const auto sphereHits = neutral.cast_sphere_all(
+        {-3.0F, 0.0F, 0.0F}, 0.2F, {1.0F, 0.0F, 0.0F}, 12.0F);
+    REQUIRE(sphereHits.size() == 3U);
+    if (sphereHits.size() == 3U) {
+        REQUIRE(sphereHits[0].body == first);
+        REQUIRE(sphereHits[1].body == second);
+        REQUIRE(sphereHits[2].body == dynamic);
+    }
+
+    REQUIRE(neutral.apply_angular_impulse(dynamic, {0.0F, 0.0F, 1.0F}));
+    const auto afterImpulse = neutral.state(dynamic);
+    REQUIRE(afterImpulse.has_value() && afterImpulse->angularVelocity.z > 0.0F);
+    const float impulseVelocity = afterImpulse ? afterImpulse->angularVelocity.z : 0.0F;
+    REQUIRE(neutral.apply_torque(dynamic, {0.0F, 0.0F, 2.0F}));
+    world.step(1.0F / 60.0F);
+    const auto afterTorque = neutral.state(dynamic);
+    REQUIRE(afterTorque.has_value() && afterTorque->angularVelocity.z > impulseVelocity);
+    REQUIRE(!neutral.apply_torque(first, {0.0F, 0.0F, 1.0F}));
+}
+
 void test_virtual_character() {
     JoltWorldConfig config;
     config.workerThreads = 1U;
@@ -200,6 +263,7 @@ void test_virtual_character() {
 int main() {
     test_factory_configuration();
     test_mesh_queries_and_casts();
+    test_solver_neutral_loads_and_queries();
     test_snapshot_round_trip();
     test_virtual_character();
     if (failures == 0) {

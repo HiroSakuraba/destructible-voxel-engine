@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -17,7 +18,7 @@
 namespace dve::editor {
 
 using EditorTaskId = std::uint64_t;
-enum class EditorTaskState : std::uint8_t { Queued, Running, Succeeded, Failed, Cancelled };
+enum class EditorTaskState : std::uint8_t { Queued, Running, Succeeded, Failed, Cancelled, Unknown };
 
 struct EditorTaskSnapshot {
     EditorTaskId id{};
@@ -42,7 +43,9 @@ private:
 class EditorTaskManager {
 public:
     using Work = std::function<void(EditorTaskContext&)>;
-    explicit EditorTaskManager(std::size_t workers = 2, std::size_t maximumQueued = 64);
+    // Completed task handles remain queryable until evicted from this bounded history.
+    explicit EditorTaskManager(std::size_t workers = 2, std::size_t maximumQueued = 64,
+                               std::size_t maximumCompleted = 256);
     ~EditorTaskManager();
     EditorTaskManager(const EditorTaskManager&) = delete;
     EditorTaskManager& operator=(const EditorTaskManager&) = delete;
@@ -57,11 +60,13 @@ private:
     struct Job;
     void worker_loop();
     std::size_t maximumQueued_{};
+    std::size_t maximumCompleted_{};
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     std::condition_variable idleCondition_;
     std::queue<std::shared_ptr<Job>> queue_;
     std::map<EditorTaskId, std::shared_ptr<Job>> jobs_;
+    std::deque<EditorTaskId> completed_;
     std::vector<std::thread> workers_;
     EditorTaskId nextId_{1};
     std::size_t running_{};

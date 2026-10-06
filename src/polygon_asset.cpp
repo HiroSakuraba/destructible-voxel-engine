@@ -13,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <span>
 #include <string_view>
 #include <utility>
 
@@ -111,7 +112,7 @@ public:
 
 class Reader {
 public:
-    explicit Reader(const std::vector<std::byte>& d):data(d){}
+    explicit Reader(std::span<const std::byte> d):data(d){}
     void require(std::size_t n)const{if(n>data.size()-pos)throw std::runtime_error("truncated DMESH file");}
     std::uint8_t u8(){require(1);return std::to_integer<std::uint8_t>(data[pos++]);}
     std::uint16_t u16(){const auto a=u8();const auto b=u8();return static_cast<std::uint16_t>(a|(static_cast<std::uint16_t>(b)<<8U));}
@@ -121,7 +122,7 @@ public:
     std::string string(){const auto n=u32();if(n>kMaximumFileStrings)throw std::runtime_error("DMESH string exceeds limit");require(n);std::string s(reinterpret_cast<const char*>(data.data()+pos),n);pos+=n;return s;}
     void bytes(void* out,std::size_t n){require(n);std::memcpy(out,data.data()+pos,n);pos+=n;}
     [[nodiscard]] std::size_t remaining()const noexcept{return data.size()-pos;}
-    const std::vector<std::byte>& data; std::size_t pos{};
+    std::span<const std::byte> data; std::size_t pos{};
 };
 
 std::vector<std::byte> read_all(const std::filesystem::path& path,
@@ -478,7 +479,9 @@ bool write_dmesh(const std::filesystem::path& path,const CookedPolygonAsset& inp
         std::ofstream out(path,std::ios::binary|std::ios::trunc);if(!out)throw std::runtime_error("unable to create DMESH file");if(!w.data.empty()&&!out.write(reinterpret_cast<const char*>(w.data.data()),static_cast<std::streamsize>(w.data.size())))throw std::runtime_error("unable to write DMESH file");return true;
     }catch(const std::exception& e){if(error)*error=e.what();return false;}}
 
-PolygonAssetReadResult read_dmesh(const std::filesystem::path& path,std::uint64_t maximumBytes){PolygonAssetReadResult result;try{const auto data=read_all(path,maximumBytes);Reader r(data);std::array<char,8> magic{};r.bytes(magic.data(),magic.size());if(magic!=kMagic)throw std::runtime_error("DMESH magic mismatch");const auto major=r.u16(),minor=r.u16();if(major!=kMajor||minor>kMinor){result.code=PolygonAssetErrorCode::UnsupportedVersion;result.error="unsupported DMESH version";return result;}result.asset.objectId=r.u64();const auto storedHash=r.u64();const auto materialCount=r.u32(),imageCount=r.u32(),samplerCount=r.u32(),textureCount=r.u32();const auto vertexCount=r.u64(),indexCount=r.u64();const auto submeshCount=r.u32();(void)r.u32();
+namespace {
+// Decodes a complete in-memory DMESH image into `result`. Throws on format violations.
+void decode_dmesh(std::span<const std::byte> data,PolygonAssetReadResult& result){{Reader r(data);std::array<char,8> magic{};r.bytes(magic.data(),magic.size());if(magic!=kMagic)throw std::runtime_error("DMESH magic mismatch");const auto major=r.u16(),minor=r.u16();if(major!=kMajor||minor>kMinor){result.code=PolygonAssetErrorCode::UnsupportedVersion;result.error="unsupported DMESH version";return;}result.asset.objectId=r.u64();const auto storedHash=r.u64();const auto materialCount=r.u32(),imageCount=r.u32(),samplerCount=r.u32(),textureCount=r.u32();const auto vertexCount=r.u64(),indexCount=r.u64();const auto submeshCount=r.u32();(void)r.u32();
         if (materialCount == 0 || materialCount > kMaximumFileMaterials ||
             vertexCount > kMaximumFileVertices || indexCount > kMaximumFileIndices ||
             submeshCount > indexCount / 3U + 1U) {
@@ -501,7 +504,22 @@ PolygonAssetReadResult read_dmesh(const std::filesystem::path& path,std::uint64_
         result.asset.samplers.reserve(samplerCount);for(std::uint32_t i=0;i<samplerCount;++i)result.asset.samplers.push_back({static_cast<ImportedWrapMode>(r.u16()),static_cast<ImportedWrapMode>(r.u16()),static_cast<ImportedTextureFilter>(r.u16()),static_cast<ImportedTextureFilter>(r.u16())});
         result.asset.textures.reserve(textureCount);for(std::uint32_t i=0;i<textureCount;++i){PolygonTexture t;t.name=r.string();t.imageIndex=r.u32();const bool has=r.u8()!=0;(void)r.u8();(void)r.u16();const auto sampler=r.u32();if(has)t.samplerIndex=sampler;result.asset.textures.push_back(std::move(t));}
         result.asset.vertices.resize(static_cast<std::size_t>(vertexCount));for(auto& v:result.asset.vertices){v.position={r.f32(),r.f32(),r.f32()};v.normal={r.f32(),r.f32(),r.f32()};v.tangent={r.f32(),r.f32(),r.f32(),r.f32()};v.texcoord={r.f32(),r.f32()};if(minor>=1U)v.texcoord1={r.f32(),r.f32()};v.color={r.f32(),r.f32(),r.f32(),r.f32()};}
-        result.asset.indices.resize(static_cast<std::size_t>(indexCount));for(auto& i:result.asset.indices)i=r.u32();result.asset.submeshes.reserve(submeshCount);for(std::uint32_t i=0;i<submeshCount;++i)result.asset.submeshes.push_back({r.string(),r.u32(),r.u32(),r.u32()});result.asset.bounds.minimum={r.f32(),r.f32(),r.f32()};result.asset.bounds.maximum={r.f32(),r.f32(),r.f32()};if(r.remaining()!=0)throw std::runtime_error("DMESH has trailing data");result.asset.contentHash=storedHash;const auto valid=validate_polygon_asset(result.asset);if(!valid){result.code=valid.code;result.error=valid.message;return result;}result.code=PolygonAssetErrorCode::NoError;return result;
-    }catch(const std::exception& e){result.code=PolygonAssetErrorCode::Corrupt;result.error=e.what();return result;}}
+        result.asset.indices.resize(static_cast<std::size_t>(indexCount));for(auto& i:result.asset.indices)i=r.u32();result.asset.submeshes.reserve(submeshCount);for(std::uint32_t i=0;i<submeshCount;++i)result.asset.submeshes.push_back({r.string(),r.u32(),r.u32(),r.u32()});result.asset.bounds.minimum={r.f32(),r.f32(),r.f32()};result.asset.bounds.maximum={r.f32(),r.f32(),r.f32()};if(r.remaining()!=0)throw std::runtime_error("DMESH has trailing data");result.asset.contentHash=storedHash;const auto valid=validate_polygon_asset(result.asset);if(!valid){result.code=valid.code;result.error=valid.message;return;}result.code=PolygonAssetErrorCode::NoError;return;
+    }}
+} // namespace
+
+PolygonAssetReadResult read_dmesh(const std::filesystem::path& path,std::uint64_t maximumBytes){
+    PolygonAssetReadResult result;
+    try{const auto data=read_all(path,maximumBytes);decode_dmesh(data,result);return result;}
+    catch(const std::exception& e){result.code=PolygonAssetErrorCode::Corrupt;result.error=e.what();return result;}
+}
+
+PolygonAssetReadResult read_dmesh(std::span<const std::byte> bytes,std::uint64_t maximumBytes){
+    PolygonAssetReadResult result;
+    try{
+        if(static_cast<std::uint64_t>(bytes.size())>maximumBytes)throw std::runtime_error("DMESH exceeds configured size limit");
+        decode_dmesh(bytes,result);return result;
+    }catch(const std::exception& e){result.code=PolygonAssetErrorCode::Corrupt;result.error=e.what();return result;}
+}
 
 } // namespace dve

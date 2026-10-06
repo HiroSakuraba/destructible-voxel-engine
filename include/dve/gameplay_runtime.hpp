@@ -115,6 +115,47 @@ struct GamePlayerState {
     CharacterInput input{};
 };
 
+// Plain-data snapshot of a GameplayRuntime for save games (dve.gameplay, dve/game_save.hpp).
+// Telemetry is per-step diagnostics and is not saved; trigger listeners are code.
+struct GameplaySaveCharacter {
+    GameObjectId pawn{kInvalidGameObjectId};
+    CharacterControllerConfig config{};
+    CharacterControllerState state{};
+    CharacterInput input{};
+};
+
+struct GameplaySaveTrigger {
+    GameTriggerId id{kInvalidGameTriggerId};
+    TriggerVolumeDesc desc{};
+    std::vector<GameObjectId> occupants;   // sorted
+    bool fired{};
+};
+
+struct GameplaySaveRecording {
+    GamePlayerId player{kInvalidGamePlayerId};
+    CharacterReplay replay;
+};
+
+struct GameplaySavePlayback {
+    GamePlayerId player{kInvalidGamePlayerId};
+    CharacterReplay replay;
+    std::uint64_t nextFrame{};
+    bool loop{};
+    std::uint64_t playbackStartTick{};
+    std::uint64_t replayFirstTick{};
+};
+
+struct GameplaySaveState {
+    std::vector<GameplaySaveCharacter> characters;   // sorted by pawn
+    std::vector<GamePlayerState> players;            // sorted by id
+    std::vector<GameplaySaveTrigger> triggers;       // sorted by id
+    std::vector<GameplaySaveRecording> recordings;   // sorted by player
+    std::vector<GameplaySavePlayback> playbacks;     // sorted by player
+    GamePlayerId nextPlayerId{1U};
+    GameTriggerId nextTriggerId{1U};
+    std::uint64_t fixedTick{};
+};
+
 class GameplayRuntime {
 public:
     explicit GameplayRuntime(GameWorld& world);
@@ -165,6 +206,13 @@ public:
 
     void fixed_update(float fixedDeltaSeconds);
     [[nodiscard]] std::uint64_t fixed_tick() const noexcept { return fixedTick_; }
+
+    // Whole-runtime snapshot (characters, players, possession, triggers, recordings,
+    // playbacks, id counters). restore_save_state validates everything first (pawns must
+    // exist in the world, configs/descs must be valid) and changes nothing on failure; on
+    // success it replaces the runtime's state. Listeners are kept.
+    [[nodiscard]] GameplaySaveState capture_save_state() const;
+    [[nodiscard]] bool restore_save_state(const GameplaySaveState& state, std::string* error = nullptr);
 
     [[nodiscard]] std::string serialize_trigger_state() const;
     bool restore_trigger_state(std::string_view text, std::string* error = nullptr);

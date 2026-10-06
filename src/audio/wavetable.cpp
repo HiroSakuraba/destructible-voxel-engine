@@ -2,6 +2,8 @@
 #include "dve/audio/wavetable.hpp"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <complex>
 #include <numeric>
@@ -11,7 +13,7 @@ namespace {
 
 constexpr float kTwoPi = 6.283185307179586F;
 
-// Simple DFT for cooking (offline use only).
+// Reference O(n^2) DFT, kept for non-power-of-two sizes (all shipped tables are 512).
 void forward_dft(const float* input, std::complex<float>* output, std::size_t n) {
     for (std::size_t k = 0; k < n; ++k) {
         std::complex<float> sum(0, 0);
@@ -31,6 +33,78 @@ void inverse_dft(const std::complex<float>* input, float* output, std::size_t n)
             sum += input[k] * std::complex<float>(std::cos(angle), std::sin(angle));
         }
         output[t] = sum.real() / static_cast<float>(n);
+    }
+}
+
+// Iterative in-place radix-2 FFT (n must be a power of two). Twiddles for the
+// cook size are computed once in double precision. inverse=true computes the
+// unnormalized inverse transform.
+struct FftTwiddles {
+    std::array<std::complex<float>, kHQWavetableSamples / 2> w{};
+    FftTwiddles() {
+        for (std::size_t k = 0; k < w.size(); ++k) {
+            const double angle = -6.283185307179586476925 * static_cast<double>(k) /
+                                 static_cast<double>(kHQWavetableSamples);
+            w[k] = {static_cast<float>(std::cos(angle)), static_cast<float>(std::sin(angle))};
+        }
+    }
+};
+const FftTwiddles& fft_twiddles() {
+    static const FftTwiddles twiddles;
+    return twiddles;
+}
+
+void fft_inplace(std::complex<float>* data, std::size_t n, bool inverse) noexcept {
+    for (std::size_t i = 1, j = 0; i < n; ++i) {
+        std::size_t bit = n >> 1U;
+        for (; (j & bit) != 0U; bit >>= 1U) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(data[i], data[j]);
+    }
+    const auto& w = fft_twiddles().w;
+    for (std::size_t length = 2; length <= n; length <<= 1U) {
+        const std::size_t half = length >> 1U;
+        const std::size_t stride = kHQWavetableSamples / length;
+        for (std::size_t start = 0; start < n; start += length) {
+            for (std::size_t k = 0; k < half; ++k) {
+                std::complex<float> twiddle = w[k * stride];
+                if (inverse) twiddle = std::conj(twiddle);
+                const std::complex<float> odd = data[start + k + half] * twiddle;
+                data[start + k + half] = data[start + k] - odd;
+                data[start + k] += odd;
+            }
+        }
+    }
+}
+
+bool fft_supported(std::size_t n) noexcept {
+    return n >= 2U && (n & (n - 1U)) == 0U && n <= kHQWavetableSamples && kHQWavetableSamples % n == 0U;
+}
+
+// Band-limits one frame for every mip: one forward transform per frame, then
+// one inverse per mip (the old path recomputed an O(n^2) forward DFT per mip).
+void cook_frame_mips(const float* source, std::size_t n, std::complex<float>* spectrum,
+                     std::complex<float>* work, float* const* mipDestinations) {
+    std::copy(source, source + n, mipDestinations[0]);
+    const bool fast = fft_supported(n);
+    if (fast) {
+        for (std::size_t i = 0; i < n; ++i) spectrum[i] = {source[i], 0.0F};
+        fft_inplace(spectrum, n, false);
+    } else {
+        forward_dft(source, spectrum, n);
+    }
+    for (std::size_t mip = 1; mip < kHQWavetableMips; ++mip) {
+        const std::size_t maxHarmonic = n / 2 / (1U << mip);
+        std::copy(spectrum, spectrum + n, work);
+        for (std::size_t k = maxHarmonic + 1; k < n - maxHarmonic; ++k) work[k] = {0.0F, 0.0F};
+        float* dst = mipDestinations[mip];
+        if (fast) {
+            fft_inplace(work, n, true);
+            const float scale = 1.0F / static_cast<float>(n);
+            for (std::size_t i = 0; i < n; ++i) dst[i] = work[i].real() * scale;
+        } else {
+            inverse_dft(work, dst, n);
+        }
     }
 }
 
@@ -78,33 +152,18 @@ CookedWavetable cook_wavetable(const std::string& name,
     const std::size_t n = kHQWavetableSamples;
 
     std::vector<std::complex<float>> spectrum(n);
-    std::vector<float> filtered(n);
+    std::vector<std::complex<float>> work(n);
     std::vector<float> frameBuf(n);
+    if (nFrames == 0) return table;
 
-    for (std::size_t mip = 0; mip < kHQWavetableMips; ++mip) {
-        // Each mip halves the allowed harmonic content.
-        const std::size_t maxHarmonic = n / 2 / (1U << mip);
-        for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
-            // Get source frame (wrap/clamp).
-            const std::size_t srcFrame = std::min(f, nFrames - 1);
-            const auto& src = frames[srcFrame];
-            for (std::size_t i = 0; i < n; ++i)
-                frameBuf[i] = i < src.size() ? src[i] : 0.0F;
-
-            if (mip == 0) {
-                // Full bandwidth: copy directly.
-                float* dst = table.samples.data() + (mip * kHQWavetableFrames + f) * n;
-                std::copy(frameBuf.begin(), frameBuf.end(), dst);
-            } else {
-                // Band-limit via DFT: zero harmonics above maxHarmonic.
-                forward_dft(frameBuf.data(), spectrum.data(), n);
-                for (std::size_t k = maxHarmonic + 1; k < n - maxHarmonic; ++k)
-                    spectrum[k] = std::complex<float>(0, 0);
-                inverse_dft(spectrum.data(), filtered.data(), n);
-                float* dst = table.samples.data() + (mip * kHQWavetableFrames + f) * n;
-                std::copy(filtered.begin(), filtered.end(), dst);
-            }
-        }
+    for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
+        // Get source frame (wrap/clamp).
+        const auto& src = frames[std::min(f, nFrames - 1)];
+        for (std::size_t i = 0; i < n; ++i) frameBuf[i] = i < src.size() ? src[i] : 0.0F;
+        std::array<float*, kHQWavetableMips> destinations{};
+        for (std::size_t mip = 0; mip < kHQWavetableMips; ++mip)
+            destinations[mip] = table.samples.data() + (mip * kHQWavetableFrames + f) * n;
+        cook_frame_mips(frameBuf.data(), n, spectrum.data(), work.data(), destinations.data());
     }
     return table;
 }
@@ -118,35 +177,21 @@ void cook_wavetable_inplace(CookedWavetable& table, const std::string& name,
     const std::size_t n = kHQWavetableSamples;
     const std::size_t needed = kHQWavetableMips * kHQWavetableFrames * n;
     if (table.samples.size() < needed) table.samples.resize(needed, 0.0F);
-    if (spectrum.size() < n) spectrum.resize(n);
+    // spectrum holds the frame's forward transform plus a per-mip work area.
+    if (spectrum.size() < 2U * n) spectrum.resize(2U * n);
     if (filtered.size() < n) filtered.resize(n, 0.0F);
     if (frameBuf.size() < n) frameBuf.resize(n, 0.0F);
     table.contentHash = 0;  // caller tracks content identity (see adopt_preset)
     nFrames = std::min(nFrames, kHQWavetableFrames);
     if (nFrames == 0) return;
 
-    for (std::size_t mip = 0; mip < kHQWavetableMips; ++mip) {
-        // Each mip halves the allowed harmonic content.
-        const std::size_t maxHarmonic = n / 2 / (1U << mip);
-        for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
-            // Get source frame (wrap/clamp).
-            const std::size_t srcFrame = std::min(f, nFrames - 1);
-            const float* src = flatFrames + srcFrame * n;
-            std::copy(src, src + n, frameBuf.begin());
-
-            float* dst = table.samples.data() + (mip * kHQWavetableFrames + f) * n;
-            if (mip == 0) {
-                // Full bandwidth: copy directly.
-                std::copy(frameBuf.begin(), frameBuf.end(), dst);
-            } else {
-                // Band-limit via DFT: zero harmonics above maxHarmonic.
-                forward_dft(frameBuf.data(), spectrum.data(), n);
-                for (std::size_t k = maxHarmonic + 1; k < n - maxHarmonic; ++k)
-                    spectrum[k] = std::complex<float>(0, 0);
-                inverse_dft(spectrum.data(), filtered.data(), n);
-                std::copy(filtered.begin(), filtered.end(), dst);
-            }
-        }
+    std::complex<float>* work = spectrum.data() + n;
+    for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
+        const float* src = flatFrames + std::min(f, nFrames - 1) * n;
+        std::array<float*, kHQWavetableMips> destinations{};
+        for (std::size_t mip = 0; mip < kHQWavetableMips; ++mip)
+            destinations[mip] = table.samples.data() + (mip * kHQWavetableFrames + f) * n;
+        cook_frame_mips(src, n, spectrum.data(), work, destinations.data());
     }
 }
 
@@ -164,9 +209,11 @@ float sample_wavetable(const CookedWavetable& table, float phase, float position
                        std::size_t mip) noexcept {
     if (!table.valid()) return 0.0F;
 
-    // Wrap phase and position.
+    // Wrap phase (cyclic); clamp position to [0, 1] (first..last frame).
+    // Wrapping position would turn exactly 1.0 into frame 0 while 0.999 reads
+    // the last frame — an audible click on LFO->position sweeps and a wrong
+    // frame for a static 1.0. This matches the legacy fallback path.
     phase -= std::floor(phase);
-    position -= std::floor(position);
     position = std::clamp(position, 0.0F, 1.0F);
 
     // Frame interpolation (cubic across 4 frames).

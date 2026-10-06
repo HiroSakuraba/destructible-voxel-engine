@@ -1658,6 +1658,91 @@ const HairAsset* CpuHairWorld::asset(CpuHairId id) const noexcept {
     return found == impl_->entries.end() ? nullptr : &found->second.asset;
 }
 
+std::optional<CpuHairDynamicState> CpuHairWorld::capture_dynamic_state(CpuHairId id) const {
+    const auto found = impl_->entries.find(id);
+    if (found == impl_->entries.end()) return std::nullopt;
+    const HairRuntimeEntry& entry = found->second;
+    CpuHairDynamicState state;
+    state.assetHash = entry.asset.contentHash;
+    state.running = entry.desc.running;
+    state.visible = entry.desc.visible;
+    state.gravity = entry.desc.gravity;
+    state.windVelocity = entry.desc.windVelocity;
+    state.rootTransform = entry.desc.rootTransform;
+    state.pendingRootTransform = entry.pendingRootTransform;
+    state.previousRootTransform = entry.previousRootTransform;
+    state.accumulatorSeconds = entry.accumulatorSeconds;
+    state.simulationFrame = entry.simulationFrame;
+    state.positions = entry.positions;
+    state.previousPositions = entry.previousPositions;
+    state.velocities = entry.velocities;
+    state.sleeping = entry.sleeping;
+    state.sleepCounters = entry.sleepCounters;
+    state.rootTargetOverrides = entry.rootTargetOverrides;
+    state.hasRootTargetOverride = entry.hasRootTargetOverride;
+    return state;
+}
+
+bool CpuHairWorld::restore_dynamic_state(CpuHairId id, const CpuHairDynamicState& state, std::string* error) {
+    const auto found = impl_->entries.find(id);
+    if (found == impl_->entries.end()) {
+        set_error(error, "CPU hair instance does not exist");
+        return false;
+    }
+    HairRuntimeEntry& entry = found->second;
+    const auto finiteAll = [](const std::vector<Float3>& values) {
+        return std::all_of(values.begin(), values.end(), [](Float3 v) { return finite(v); });
+    };
+    const auto finiteTransform = [](const RigidTransform& t) {
+        return finite(t.position) && std::isfinite(t.rotation.x) && std::isfinite(t.rotation.y) &&
+               std::isfinite(t.rotation.z) && std::isfinite(t.rotation.w);
+    };
+    if (state.assetHash != entry.asset.contentHash) {
+        set_error(error, "CPU hair groom changed since the save");
+        return false;
+    }
+    if (state.positions.size() != entry.positions.size() || state.previousPositions.size() != entry.previousPositions.size() ||
+        state.velocities.size() != entry.velocities.size() || state.sleeping.size() != entry.sleeping.size() ||
+        state.sleepCounters.size() != entry.sleepCounters.size() ||
+        state.rootTargetOverrides.size() != entry.rootTargetOverrides.size() ||
+        state.hasRootTargetOverride.size() != entry.hasRootTargetOverride.size()) {
+        set_error(error, "CPU hair state does not match the groom layout");
+        return false;
+    }
+    if (!finiteAll(state.positions) || !finiteAll(state.previousPositions) || !finiteAll(state.velocities) ||
+        !finiteAll(state.rootTargetOverrides) || !finite(state.gravity) || !finite(state.windVelocity) ||
+        !finiteTransform(state.rootTransform) || !finiteTransform(state.pendingRootTransform) ||
+        !finiteTransform(state.previousRootTransform) || !std::isfinite(state.accumulatorSeconds) ||
+        state.accumulatorSeconds < 0.0F) {
+        set_error(error, "CPU hair state is not finite");
+        return false;
+    }
+    entry.desc.running = state.running;
+    entry.desc.visible = state.visible;
+    entry.desc.gravity = state.gravity;
+    entry.desc.windVelocity = state.windVelocity;
+    entry.desc.rootTransform = state.rootTransform;
+    entry.pendingRootTransform = state.pendingRootTransform;
+    entry.previousRootTransform = state.previousRootTransform;
+    entry.rootTransformDirty = false;
+    entry.forceTeleport = false;
+    entry.accumulatorSeconds = state.accumulatorSeconds;
+    entry.simulationFrame = state.simulationFrame;
+    entry.positions = state.positions;
+    entry.previousPositions = state.previousPositions;
+    entry.velocities = state.velocities;
+    entry.sleeping = state.sleeping;
+    entry.sleepCounters = state.sleepCounters;
+    entry.rootTargetOverrides = state.rootTargetOverrides;
+    entry.hasRootTargetOverride = state.hasRootTargetOverride;
+    std::fill(entry.stretchLambda.begin(), entry.stretchLambda.end(), 0.0F);
+    std::fill(entry.bendLambda.begin(), entry.bendLambda.end(), 0.0F);
+    std::fill(entry.collisionFlags.begin(), entry.collisionFlags.end(), 0U);
+    std::fill(entry.selfCollisionCorrections.begin(), entry.selfCollisionCorrections.end(), Float3{});
+    entry.selfCollisionGeneration = 0U;
+    return true;
+}
+
 std::size_t CpuHairWorld::worker_count() const noexcept {
     return impl_->jobs.worker_count();
 }

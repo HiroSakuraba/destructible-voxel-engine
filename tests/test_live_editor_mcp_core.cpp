@@ -29,8 +29,9 @@ std::filesystem::path make_temp() {
 
 int main() {
 #if !defined(__unix__) && !defined(__APPLE__)
-    std::cout << "live editor MCP core test skipped: private IPC not implemented on this platform\n";
-    return 0;
+    // Exit code 77 = SKIP_RETURN_CODE: CTest reports "Skipped", not "Passed".
+    std::cout << "live editor MCP core test skipped: the live editor's private IPC (Unix domain socket) is not implemented on this platform\n";
+    return 77;
 #else
     try {
         const auto temporary = make_temp();
@@ -68,6 +69,19 @@ int main() {
 
         host.stop();
         require(!std::filesystem::exists(host.status().descriptorPath), "descriptor survived shutdown");
+
+        // stop() wakes the accept thread with shutdown() and closes the listening socket only after
+        // joining it (closing first raced with the thread's poll/accept, which ThreadSanitizer
+        // reported). It must stay prompt: repeated start/stop cycles finish well under a second.
+        for (int cycle = 0; cycle < 20; ++cycle) {
+            dve::ai::LiveEditorMcpHost cycled(bridge, hostOptions);
+            require(cycled.start(&error), error);
+            std::this_thread::sleep_for(std::chrono::milliseconds(cycle % 3));
+            const auto stopStart = std::chrono::steady_clock::now();
+            cycled.stop();
+            require(std::chrono::steady_clock::now() - stopStart < 1s, "host stop took longer than a second");
+            require(!std::filesystem::exists(cycled.status().descriptorPath), "descriptor survived a start/stop cycle");
+        }
         std::filesystem::remove_all(temporary);
         std::cout << "all live editor MCP core tests passed\n";
         return 0;

@@ -259,6 +259,13 @@ std::vector<RigidBodyQueryHit> IRigidBodyWorld::cast_sphere_all(
     return {};
 }
 
+bool IRigidBodyWorld::set_pair_collision_enabled(RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept {
+    (void)a;
+    (void)b;
+    (void)enabled;
+    return false;
+}
+
 void IRigidBodyWorld::set_contact_sink(IPhysicsContactSink* sink) noexcept {
     (void)sink;
 }
@@ -698,6 +705,12 @@ bool ReferenceRigidBodyWorld::set_contact_material(
     if (handle >= bodies_.size() || !bodies_[handle].alive) return false;
     bodies_[handle].material = material;
     return true;
+}
+
+bool ReferenceRigidBodyWorld::set_pair_collision_enabled(
+    RigidBodyHandle a, RigidBodyHandle b, bool enabled) noexcept {
+    (void)enabled;
+    return a < bodies_.size() && b < bodies_.size() && a != b && bodies_[a].alive && bodies_[b].alive;
 }
 
 RigidBodyConstraintHandle ReferenceRigidBodyWorld::create_constraint(

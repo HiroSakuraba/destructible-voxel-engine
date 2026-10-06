@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "dve/animation_controller.hpp"
@@ -136,6 +137,19 @@ struct ControlRigEvaluationTrace {
     float samplesPerSecond, std::string outputName,
     AnimationClipAsset& output, std::string* error = nullptr);
 
+// Save-game snapshot of one control rig instance (dve.animation): the enabled flag and the
+// control values a game set. The rig asset is content bound again at boot.
+struct ControlRigInstanceSaveState {
+    std::uint64_t objectId{};
+    std::uint64_t rigHash{};
+    bool enabled{true};
+    std::vector<std::pair<ControlRigControlId, RigidTransform>> controls;   // sorted by id
+};
+
+struct ControlRigSaveState {
+    std::vector<ControlRigInstanceSaveState> instances;   // sorted by object id
+};
+
 class ControlRigRuntime {
 public:
     explicit ControlRigRuntime(SkeletalAnimationRuntime& animation) noexcept;
@@ -163,6 +177,11 @@ public:
         std::uint64_t objectId) const noexcept;
     [[nodiscard]] bool evaluate(std::uint64_t objectId, std::string* error = nullptr);
     void evaluate_all();
+
+    [[nodiscard]] ControlRigSaveState capture_save_state() const;
+    // Restores enabled flags and control values for instances bound to the same rig (content
+    // hash); others are skipped with a warning. Returns the number restored.
+    std::size_t restore_save_state(const ControlRigSaveState& state, std::vector<std::string>* warnings = nullptr);
 
 private:
     struct Instance {

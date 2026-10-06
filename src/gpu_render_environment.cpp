@@ -10,6 +10,7 @@ static_assert(static_cast<std::uint32_t>(TonemapOperator::Clamp) == 2);
 static_assert(static_cast<std::uint32_t>(GlobalIlluminationMode::Off) == 0);
 static_assert(static_cast<std::uint32_t>(GlobalIlluminationMode::AmbientHemisphere) == 1);
 static_assert(static_cast<std::uint32_t>(GlobalIlluminationMode::VoxelOneBounce) == 2);
+static_assert(static_cast<std::uint32_t>(GlobalIlluminationMode::RadianceCascades) == 3);
 static_assert(static_cast<std::uint32_t>(ShadowMode::Off) == 0);
 static_assert(static_cast<std::uint32_t>(ShadowMode::Hard) == 1);
 static_assert(static_cast<std::uint32_t>(ShadowMode::Soft) == 2);
@@ -53,7 +54,12 @@ GpuRenderEnvironment pack_gpu_render_environment(
     gpu.bloomRadius = environment.bloomRadius;
     gpu.imageWidth = imageWidth;
     gpu.imageHeight = imageHeight;
-    gpu.globalIlluminationMode = static_cast<std::uint32_t>(environment.globalIlluminationMode);
+    // Radiance cascades exist only in the CPU reference path so far. The GPU shaders know modes
+    // 0..2, so RadianceCascades is packed as VoxelOneBounce rather than silently disabling GI.
+    gpu.globalIlluminationMode =
+        environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades
+            ? static_cast<std::uint32_t>(GlobalIlluminationMode::VoxelOneBounce)
+            : static_cast<std::uint32_t>(environment.globalIlluminationMode);
     gpu.globalIlluminationIntensity = environment.globalIlluminationIntensity;
     gpu.globalIlluminationMaxDistanceMeters = environment.globalIlluminationMaxDistanceMeters;
     gpu.globalIlluminationSamples = environment.globalIlluminationSamples;
@@ -64,8 +70,7 @@ GpuRenderEnvironment pack_gpu_render_environment(
     gpu.shadowMaxDistanceMeters = environment.shadowMaxDistanceMeters;
     gpu.contactShadowDistanceMeters = environment.contactShadowDistanceMeters;
     gpu.shadowBiasMeters = environment.shadowBiasMeters;
-    gpu.metersPerVoxel = std::isfinite(metersPerVoxel) && metersPerVoxel > 0.0F
-        ? metersPerVoxel : 0.10F;
+    gpu.metersPerVoxel = resolve_meters_per_voxel(metersPerVoxel);
     return gpu;
 }
 

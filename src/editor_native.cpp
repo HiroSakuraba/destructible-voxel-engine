@@ -1,8 +1,12 @@
 #include "dve/editor_native.hpp"
+#include "dve/editor_midi.hpp"
 #include "dve/editor_prefab.hpp"
+#include "dve/editor_ui_zoom.hpp"
 #include "dve/print_export.hpp"
 
+#include <mutex>
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -15,6 +19,11 @@
 
 namespace dve::editor {
 namespace {
+
+// The controller always lays out and hit-tests in logical pixels at 1x. UI zoom
+// (`editor.ui_scale`) is applied uniformly by the host (logical -> physical mapping plus
+// a font rasterized at the zoomed size), so layout code must not multiply by it again.
+constexpr float kLogicalLayoutScale = 1.0F;
 
 float point_line_distance(float px, float py, float ax, float ay, float bx, float by) noexcept {
     const float dx = bx - ax;
@@ -348,10 +357,15 @@ std::vector<const EditorAssetRecord*> NativeEditorController::asset_browser_rows
 bool NativeEditorController::refresh_asset_database(bool announce) {
     EditorAssetScanReport report;
     std::string error;
-    if (!assetDatabase_.scan(&report, &error)) {
+    // Thumbnails are written a little per frame from update() instead of inside the
+    // scan, which could otherwise block the editor for seconds on a first scan.
+    EditorAssetScanOptions options;
+    options.generateThumbnails = false;
+    if (!assetDatabase_.scan(&report, &error, options)) {
         if (announce) set_status(error.empty() ? "Asset scan failed" : error, true, 7.0F);
         return false;
     }
+    thumbnailBacklog_ = true;
     if (assetBrowserState_.selectedId && !assetDatabase_.find(*assetBrowserState_.selectedId))
         assetBrowserState_.selectedId.reset();
     assetBrowserState_.firstVisible = 0U;
@@ -617,7 +631,54 @@ std::vector<MenuAction> NativeEditorController::menu_actions(std::string_view me
     return workspace_.menus().menu(menuName, showAdvancedMenus_);
 }
 
+namespace {
+struct PaletteKeyHasher {
+    std::uint64_t h{0x9E3779B97F4A7C15ULL};
+    void u64(std::uint64_t v) noexcept {
+        h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6U) + (h >> 2U);
+        h *= 0xBF58476D1CE4E5B9ULL;
+        h ^= h >> 31U;
+    }
+    void text(std::string_view v) noexcept { u64(std::hash<std::string_view>{}(v)); u64(v.size()); }
+};
+} // namespace
+
+// The palette scores every command, setting, panel, asset and scene object, and is
+// requested on every pointer move and every frame while open. Results are cached
+// until something they are derived from changes: the query, the limit, favorites and
+// recents, the menu registry and asset database revisions, the advanced-settings
+// toggle, or the scene objects' ids and names (hashed, which is far cheaper than
+// scoring them).
 std::vector<CommandPaletteResult> NativeEditorController::command_palette_results(std::size_t limit) const {
+    PaletteKeyHasher key;
+    key.text(commandPaletteQuery_);
+    key.u64(limit);
+    key.u64(favoriteCommandIds_.size());
+    for (const std::string& id : favoriteCommandIds_) key.text(id);
+    key.u64(recentCommandIds_.size());
+    for (const std::string& id : recentCommandIds_) key.text(id);
+    key.u64(workspace_.menus().revision());
+    key.u64(assetDatabase_.revision());
+    key.u64(settingsPanel_.includeAdvanced ? 1U : 0U);
+    key.u64(workspace_.settings().definitions().size());
+    if (!commandPaletteQuery_.empty()) {
+        const auto& objects = workspace_.document().objects();
+        key.u64(objects.size());
+        for (const auto& [id, object] : objects) {
+            key.u64(id);
+            key.text(object.name);
+        }
+    }
+    if (!paletteCacheValid_ || key.h != paletteCacheKey_) {
+        paletteCache_ = build_command_palette_results(limit);
+        paletteCacheKey_ = key.h;
+        paletteCacheValid_ = true;
+        ++paletteCacheRebuilds_;
+    }
+    return paletteCache_;
+}
+
+std::vector<CommandPaletteResult> NativeEditorController::build_command_palette_results(std::size_t limit) const {
     enum class Provider : std::uint8_t { All, Commands, Settings, Panels, Assets, Objects, Documentation };
     Provider provider = Provider::All;
     std::string query = commandPaletteQuery_;
@@ -655,20 +716,20 @@ std::vector<CommandPaletteResult> NativeEditorController::command_palette_result
     if (query.empty() && (provider == Provider::All || provider == Provider::Commands)) {
         int priority = 0;
         for (const std::string& id : favoriteCommandIds_) {
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, priority++);
         }
         for (const std::string& id : recentCommandIds_) {
             if (std::any_of(scored.begin(), scored.end(), [&](const ScoredResult& item) {
                     return item.result.kind == CommandPaletteResultKind::Command && item.result.id == id;
                 })) continue;
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, 100 + priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, 100 + priority++);
         }
         for (std::string_view id : {"file.save", "edit.undo", "sprite.tile_world", "sprite.diagnostics",
                                     "render.diagnostics3d", "physics.play", "build.validate", "help.shortcuts"}) {
             if (std::any_of(scored.begin(), scored.end(), [&](const ScoredResult& item) {
                     return item.result.kind == CommandPaletteResultKind::Command && item.result.id == id;
                 })) continue;
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, 250 + priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, 250 + priority++);
         }
     } else if (provider == Provider::All || provider == Provider::Commands) {
         for (const MenuAction& action : workspace_.menus().search(query, 64)) {
@@ -716,7 +777,7 @@ std::vector<CommandPaletteResult> NativeEditorController::command_palette_result
         for (const PanelEntry& panel : panels) {
             const int score = command_center_score(query, {panel.label, panel.action, panel.detail, "panel window workspace"});
             if (score < 0) continue;
-            const MenuAction* action = workspace_.menus().find(panel.action);
+            const MenuAction* action = std::as_const(workspace_.menus()).find(panel.action);
             append(score + 2, {CommandPaletteResultKind::Panel, std::string(panel.action), std::string(panel.label),
                                "Window > Panels", std::string(panel.detail),
                                action ? action->shortcut : std::string{}, action ? action->disabledReason : std::string{},
@@ -773,7 +834,7 @@ std::vector<CommandPaletteResult> NativeEditorController::command_palette_result
 
 NativeCommandPaletteLayout NativeEditorController::command_palette_layout() const {
     NativeCommandPaletteLayout result;
-    const float scale = std::clamp(workspace_.preferences().uiScale, 0.75F, 2.0F);
+    const float scale = kLogicalLayoutScale;
     const int margin = std::max(20, static_cast<int>(30.0F * scale));
     result.panel.width = std::min(820, std::max(560, width_ - margin * 2));
     result.panel.height = std::min(560, std::max(360, height_ - margin * 2));
@@ -823,12 +884,102 @@ void NativeEditorController::configure_menu_state(std::filesystem::path path) {
         if (auto state = EditorMenuUserState::load(menuStatePath_, &error)) {
             showAdvancedMenus_ = state->showAdvancedCommands;
             for (const std::string& id : state->favoriteActionIds)
-                if (workspace_.menus().find(id)) favoriteCommandIds_.insert(id);
+                if (std::as_const(workspace_.menus()).find(id)) favoriteCommandIds_.insert(id);
             for (const std::string& id : state->recentActionIds)
-                if (workspace_.menus().find(id)) recentCommandIds_.push_back(id);
+                if (std::as_const(workspace_.menus()).find(id)) recentCommandIds_.push_back(id);
         } else if (!error.empty()) workspace_.log().add(EditorLogLevel::Warning, "Menu state load: " + error);
     }
     refresh_menu_state();
+}
+
+void NativeEditorController::configure_user_settings(std::filesystem::path path) {
+    userSettingsPath_ = std::move(path);
+    if (userSettingsPath_.empty() || !std::filesystem::exists(userSettingsPath_)) return;
+    std::string error;
+    if (!workspace_.settings().load_scope_file(SettingScope::User, userSettingsPath_, &error)) {
+        workspace_.log().add(EditorLogLevel::Warning, "User settings load: " + error);
+        return;
+    }
+    apply_settings_to_runtime();
+    synchronize_menu_shortcuts();
+    recompute_layout();
+}
+
+bool NativeEditorController::save_user_settings(std::string* error) const {
+    if (userSettingsPath_.empty()) return true;
+    return workspace_.settings().save_scope_file(SettingScope::User, userSettingsPath_, error);
+}
+
+float NativeEditorController::ui_zoom() const noexcept {
+    return snap_ui_zoom(workspace_.preferences().uiScale);
+}
+
+float NativeEditorController::effective_ui_zoom() const noexcept {
+    return std::min(ui_zoom(), std::max(kUiZoomMin, uiZoomWindowLimit_));
+}
+
+void NativeEditorController::set_ui_zoom_window_limit(float maximumZoom) noexcept {
+    uiZoomWindowLimit_ = std::isfinite(maximumZoom) ? std::clamp(maximumZoom, kUiZoomMin, kUiZoomMax) : kUiZoomMax;
+}
+
+bool NativeEditorController::set_ui_zoom(float requested) {
+    const float zoom = snap_ui_zoom(requested);
+    std::string error;
+    // UI zoom is a per-user accessibility preference: hotkeys write the User layer and drop any
+    // transient Session override so the settings row, hotkeys and hosts all read one value.
+    (void)workspace_.settings().clear(SettingScope::Session, kUiZoomSettingId);
+    if (!workspace_.settings().set(SettingScope::User, kUiZoomSettingId, static_cast<double>(zoom), &error)) {
+        set_status(error, true);
+        return false;
+    }
+    workspace_.synchronize_preferences_from_settings();
+    std::string message = "UI zoom " + format_ui_zoom_percent(ui_zoom());
+    if (workspace_.settings().has_override(SettingScope::Project, kUiZoomSettingId))
+        message += " (Project settings override the User value)";
+    else if (effective_ui_zoom() + 1.0e-3F < ui_zoom())
+        message += " (window too small; showing " + format_ui_zoom_percent(effective_ui_zoom()) + ")";
+    if (!save_user_settings(&error)) {
+        set_status(message + "; save failed: " + error, true);
+        return false;
+    }
+    set_status(std::move(message));
+    return true;
+}
+
+int NativeEditorController::keyboard_key_count() const noexcept {
+    const SettingValue value = workspace_.settings().value(kKeyboardKeysSettingId);
+    if (const auto* text = std::get_if<std::string>(&value)) {
+        int keys = kPianoDefaultKeyCount;
+        const auto [end, ec] = std::from_chars(text->data(), text->data() + text->size(), keys);
+        (void)end;
+        if (ec == std::errc{}) return snap_piano_key_count(keys);
+    }
+    return kPianoDefaultKeyCount;
+}
+
+bool NativeEditorController::set_keyboard_key_count(int keys) {
+    const int snapped = snap_piano_key_count(keys);
+    std::string error;
+    (void)workspace_.settings().clear(SettingScope::Session, kKeyboardKeysSettingId);
+    if (!workspace_.settings().set(SettingScope::User, kKeyboardKeysSettingId, std::to_string(snapped), &error)) {
+        set_status(error, true);
+        return false;
+    }
+    synthPanel_.set_keyboard_key_count(keyboard_key_count());
+    chiptunePanel_.set_keyboard_key_count(keyboard_key_count());
+    refresh_menu_state();
+    std::string message = "Piano keyboard: " + std::to_string(keyboard_key_count()) + " keys";
+    if (keyboard_key_count() != snapped) message += " (Project settings override the User value)";
+    if (!save_user_settings(&error)) {
+        set_status(message + "; save failed: " + error, true);
+        return false;
+    }
+    set_status(std::move(message));
+    return true;
+}
+
+bool NativeEditorController::step_ui_zoom(int direction) {
+    return set_ui_zoom(dve::editor::step_ui_zoom(ui_zoom(), direction));
 }
 
 void NativeEditorController::record_command_use(std::string_view actionId) {
@@ -1024,10 +1175,12 @@ std::vector<const SettingDefinition*> NativeEditorController::settings_rows() co
 
 NativeSettingsModalLayout NativeEditorController::settings_modal_layout() const {
     NativeSettingsModalLayout result;
-    const float scale = std::clamp(workspace_.preferences().uiScale, 0.75F, 2.0F);
+    const float scale = kLogicalLayoutScale;
     const int margin = std::max(20, static_cast<int>(28.0F * scale));
-    result.panel.width = std::min(1120, std::max(700, width_ - margin * 2));
-    result.panel.height = std::min(780, std::max(500, height_ - margin * 2));
+    // Preferred minimum 700x500, but never larger than the (logical) window: at the
+    // 640x480 minimum layout the modal used to hang off the left and bottom edges.
+    result.panel.width = std::clamp(width_ - margin * 2, std::min(700, width_ - 8), 1120);
+    result.panel.height = std::clamp(height_ - margin * 2, std::min(500, height_ - 8), 780);
     result.panel.x = (width_ - result.panel.width) / 2;
     result.panel.y = (height_ - result.panel.height) / 2;
     const int header = std::max(82, static_cast<int>(88.0F * scale));
@@ -1037,13 +1190,21 @@ NativeSettingsModalLayout NativeEditorController::settings_modal_layout() const 
     const int rowHeight = std::max(27, static_cast<int>(30.0F * scale));
 
     const int tabWidth = std::max(76, static_cast<int>(86.0F * scale));
+    // The title gets its own cell on the top row; the scope tabs follow it (they used to be
+    // drawn over the title). On very narrow modals the title shrinks (elided, tooltip on hover).
+    const int tabsWidth = static_cast<int>(result.scopeTabs.size()) * (tabWidth + 6);
+    const int titleWidth = std::clamp(result.panel.width - 32 - tabsWidth - 12, 60, 200);
+    result.title = {result.panel.x + 16, result.panel.y + 10, titleWidth, 28};
+    const int tabsLeft = result.title.x + result.title.width + 12;
     for (std::size_t index = 0; index < result.scopeTabs.size(); ++index)
-        result.scopeTabs[index] = {result.panel.x + 16 + static_cast<int>(index) * (tabWidth + 6),
+        result.scopeTabs[index] = {tabsLeft + static_cast<int>(index) * (tabWidth + 6),
                                    result.panel.y + 10, tabWidth, 28};
-    result.searchBox = {result.panel.x + categoryWidth + 24, result.panel.y + 44,
-                        std::max(180, result.panel.width - categoryWidth - 318), 30};
     result.advancedToggle = {result.panel.x + result.panel.width - 144, result.panel.y + 44, 124, 30};
     result.changedToggle = {result.advancedToggle.x - 124 - 8, result.panel.y + 44, 124, 30};
+    result.searchBox = {result.panel.x + categoryWidth + 24, result.panel.y + 44,
+                        std::max(180, result.panel.width - categoryWidth - 318), 30};
+    // Keep the search box clear of the Changed toggle on narrow windows.
+    result.searchBox.width = std::max(96, std::min(result.searchBox.width, result.changedToggle.x - 8 - result.searchBox.x));
 
     const int bodyY = result.panel.y + header;
     const int detailY = result.panel.y + result.panel.height - footer - detailHeight;
@@ -1090,7 +1251,7 @@ std::vector<ShortcutSearchResult> NativeEditorController::shortcut_rows() const 
 
 NativeShortcutModalLayout NativeEditorController::shortcut_modal_layout() const {
     NativeShortcutModalLayout result;
-    const float scale = std::clamp(workspace_.preferences().uiScale, 0.75F, 2.0F);
+    const float scale = kLogicalLayoutScale;
     const int margin = std::max(20, static_cast<int>(28.0F * scale));
     result.panel.width = std::min(1120, std::max(720, width_ - margin * 2));
     result.panel.height = std::min(760, std::max(480, height_ - margin * 2));
@@ -1212,12 +1373,44 @@ void NativeEditorController::close_settings(bool applyChanges) {
     if (!settingsPanel_.open) return;
     if (applyChanges) {
         std::string error;
+        // UI zoom is a per-user accessibility preference shared with the hotkeys: whichever
+        // scope tab the row was edited on, the value is written to (and saved in) the User layer.
+        std::optional<SettingValue> stagedZoom;
+        bool resetZoom = false;
+        if (const auto it = settingsPanel_.stagedValues.find(kUiZoomSettingId); it != settingsPanel_.stagedValues.end()) {
+            stagedZoom = it->second;
+            settingsPanel_.stagedValues.erase(it);
+        }
+        if (const auto it = settingsPanel_.stagedClears.find(kUiZoomSettingId); it != settingsPanel_.stagedClears.end()) {
+            resetZoom = true;
+            settingsPanel_.stagedClears.erase(it);
+        }
+        if (stagedZoom || resetZoom) {
+            (void)workspace_.settings().clear(SettingScope::Session, kUiZoomSettingId);
+            (void)workspace_.settings().clear(SettingScope::Project, kUiZoomSettingId);
+            if (stagedZoom) {
+                if (const auto* zoom = std::get_if<double>(&*stagedZoom))
+                    (void)workspace_.settings().set(SettingScope::User, kUiZoomSettingId,
+                                                    static_cast<double>(snap_ui_zoom(static_cast<float>(*zoom))));
+            }
+            else (void)workspace_.settings().clear(SettingScope::User, kUiZoomSettingId);
+        }
         if (!settingsPanel_.apply(workspace_.settings(), &error)) {
             set_status(error, true);
             return;
         }
+        // Settings typed as free numbers (e.g. 1.1) are stored snapped so the row shows what is used.
+        SettingScope zoomSource = SettingScope::User;
+        bool zoomInherited = false;
+        const SettingValue zoomValue = workspace_.settings().value(kUiZoomSettingId, &zoomSource, &zoomInherited);
+        if (const auto* zoom = std::get_if<double>(&zoomValue); zoom && !zoomInherited) {
+            const double snapped = static_cast<double>(snap_ui_zoom(static_cast<float>(*zoom)));
+            if (snapped != *zoom) (void)workspace_.settings().set(zoomSource, kUiZoomSettingId, snapped);
+        }
         apply_settings_to_runtime();
-        set_status("Settings applied");
+        if (!save_user_settings(&error)) {
+            set_status("Settings applied; User settings save failed: " + error, true);
+        } else set_status("Settings applied");
     } else {
         settingsPanel_.discard();
         set_status("Settings changes discarded");
@@ -1276,6 +1469,14 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
         if (const auto* item = std::get_if<std::string>(&value)) return *item;
         return fallback;
     };
+    synthPanel_.set_keyboard_key_count(keyboard_key_count());
+    chiptunePanel_.set_keyboard_key_count(keyboard_key_count());
+    if (midiInput_) {
+        midiInput_->set_channel_filter(midi_channel_filter_from_settings(workspace_.settings()));
+        midiInput_->set_requested_port(midi_input_port());
+    }
+    if (midiOutput_) midiOutput_->set_requested_port(midi_output_port());
+    try { refresh_midi_status(); } catch (...) {}
     viewportSettings_.showGrid = readBool("viewport.grid", viewportSettings_.showGrid);
     viewportSettings_.showAnchors = readBool("viewport.anchors", viewportSettings_.showAnchors);
     viewportSettings_.showCollision = readBool("viewport.collision", viewportSettings_.showCollision);
@@ -1319,9 +1520,14 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
 
 void NativeEditorController::refresh_menu_state() noexcept {
     auto checked = [&](std::string_view id, bool value) { (void)workspace_.menus().set_checked(id, value); };
-    auto enabled = [&](std::string_view id, bool value, std::string reason) {
-        (void)workspace_.menus().set_enabled(id, value, value ? std::string{} : std::move(reason));
+    auto enabled = [&](std::string_view id, bool value, std::string_view reason) {
+        const MenuAction* action = std::as_const(workspace_.menus()).find(id);
+        if (action && action->enabled == value &&
+            (value ? action->disabledReason.empty() : action->disabledReason == reason)) return;
+        (void)workspace_.menus().set_enabled(id, value, value ? std::string{} : std::string(reason));
     };
+    for (const int keys : kPianoKeyboardSizes)
+        checked("view.keyboard_keys_" + std::to_string(keys), keyboard_key_count() == keys);
     const bool hasSelection = workspace_.selection_count() > 0U;
     const bool singleSelection = workspace_.selection_count() == 1U;
     const bool playActive = playSession_.active();
@@ -1483,7 +1689,7 @@ void NativeEditorController::handle_settings_key(std::string_view normalized, bo
         const SettingDefinition* definition = selectedDefinition();
         if (!definition) { close_settings(true); return; }
         std::string error;
-        if (definition->type == SettingType::Boolean || definition->type == SettingType::Enum) {
+        if (settingsPanel_.has_choices(*definition)) {
             if (!settingsPanel_.cycle(workspace_.settings(), definition->id, 1, &error))
                 settingsPanel_.status = error;
         } else if (!settingsPanel_.begin_value_edit(workspace_.settings(), definition->id, &error)) {
@@ -1646,7 +1852,7 @@ void NativeEditorController::resize(int width, int height) {
 }
 
 void NativeEditorController::recompute_layout() {
-    const float scale = std::clamp(workspace_.preferences().uiScale, 0.75F, 3.0F);
+    const float scale = kLogicalLayoutScale;
     const int menuHeight = static_cast<int>(28.0F * scale);
     const int toolbarHeight = static_cast<int>(40.0F * scale);
     const int statusHeight = static_cast<int>(22.0F * scale);
@@ -1715,13 +1921,47 @@ void NativeEditorController::recompute_layout() {
                                                    inspectorWidth - 24, 18});
             }
         }
-        const float inspectorContentBottom = selectedObject && selectedObject->text3d ? 426.0F :
-                                             selectedObject && selectedObject->gaborVolume ? 360.0F : 390.0F;
-        int toggleY = contentY + static_cast<int>(inspectorContentBottom * scale);
-        for (int index = 0; index < 5; ++index) {
-            layout_.inspectorToggles.push_back({layout_.inspector.x + 12, toggleY, inspectorWidth - 24, rowHeight});
-            toggleY += rowHeight + 4;
+        // Last fixed detail line: baseline 377 (voxel/text3d) or 311 (Gabor) + descent/gap.
+        const int contentBottom = contentY + static_cast<int>(
+            (selectedObject && selectedObject->gaborVolume ? 326.0F : 390.0F) * scale);
+        const int inspectorBottom = layout_.inspector.y + layout_.inspector.height - 6;
+        // The toggles used to start at a fixed offset and simply continue downward, so at
+        // 1280x719 (inspector ends at y=547) they spilled ~50 px into the bottom dock and
+        // stole its clicks. Pick the first arrangement that fits below the details; if
+        // none does, pin the block to the inspector bottom and clip the detail text above.
+        struct ToggleArrangement { int columns; int rowHeight; int gap; };
+        const std::array<ToggleArrangement, 4> arrangements{{
+            {1, rowHeight, 4}, {1, 20, 2}, {2, rowHeight, 4}, {2, 20, 2}}};
+        constexpr int kToggleCount = 5;
+        ToggleArrangement chosen = arrangements.back();
+        bool fits = false;
+        const auto block_height = [&](const ToggleArrangement& a) {
+            const int rows = (kToggleCount + a.columns - 1) / a.columns;
+            return rows * a.rowHeight + (rows - 1) * a.gap;
+        };
+        for (const ToggleArrangement& a : arrangements) {
+            if (contentBottom + block_height(a) <= inspectorBottom) { chosen = a; fits = true; break; }
         }
+        const int blockHeight = block_height(chosen);
+        // Never cover the name / ID / Position / Rotation lines (they end near +124).
+        const int blockTop = fits ? contentBottom : std::max(contentY + 124, inspectorBottom - blockHeight);
+        const int columnGap = 8;
+        const int columnWidth = (inspectorWidth - 24 - (chosen.columns - 1) * columnGap) / chosen.columns;
+        for (int index = 0; index < kToggleCount; ++index) {
+            const int row = index / chosen.columns;
+            const int column = index % chosen.columns;
+            const UiRect toggle{layout_.inspector.x + 12 + column * (columnWidth + columnGap),
+                                blockTop + row * (chosen.rowHeight + chosen.gap), columnWidth, chosen.rowHeight};
+            if (toggle.y + toggle.height > inspectorBottom) break;  // never spill into the dock
+            layout_.inspectorToggles.push_back(toggle);
+        }
+        layout_.inspectorContentClipY = blockTop - 2;  // == contentBottom - 2 when it fits
+        for (std::size_t field = 2; field < layout_.inspectorFields.size(); ++field) {
+            UiRect& rect = layout_.inspectorFields[field];
+            if (rect.y + rect.height > layout_.inspectorContentClipY) rect = {};  // hidden -> not clickable
+        }
+    } else {
+        layout_.inspectorContentClipY = layout_.inspector.y + layout_.inspector.height;
     }
 
     layout_.bottomTabs.clear();
@@ -1764,7 +2004,148 @@ void NativeEditorController::recompute_layout() {
     }
 }
 
+struct NativeEditorController::AutosaveJob {
+    std::uint64_t manualSaveCount{};  // File > Save count when this autosave started
+    std::mutex mutex;
+    bool done{};
+    bool success{};
+    std::string error;
+    std::filesystem::path manifest;
+};
+
+namespace {
+std::string autosave_stem(const EditorDocument& document) {
+    std::string stem = !document.path().empty() ? document.path().stem().string() : document.name();
+    for (char& c : stem)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
+    return stem.empty() ? std::string("untitled") : stem;
+}
+} // namespace
+
+std::filesystem::path NativeEditorController::autosave_directory() const {
+    std::filesystem::path base = projectRoot_;
+    if (base.empty() && !workspace_.document().path().empty()) base = workspace_.document().path().parent_path();
+    if (base.empty()) {
+        std::error_code error;
+        base = std::filesystem::current_path(error);
+    }
+    return base / ".dve" / "recovery" / autosave_stem(workspace_.document());
+}
+
+std::filesystem::path NativeEditorController::autosave_manifest_path() const {
+    const auto& path = workspace_.document().path();
+    const std::string fileName = !path.empty() && path.has_filename()
+        ? path.filename().string() : autosave_stem(workspace_.document()) + ".dvescene";
+    return autosave_directory() / fileName;
+}
+
+void NativeEditorController::report_recovered_autosave() {
+    std::error_code error;
+    const auto recovery = autosave_manifest_path();
+    if (!std::filesystem::exists(recovery, error)) return;
+    const auto& scene = workspace_.document().path();
+    if (!scene.empty() && std::filesystem::exists(scene, error)) {
+        const auto sceneTime = std::filesystem::last_write_time(scene, error);
+        if (!error && sceneTime >= std::filesystem::last_write_time(recovery, error) && !error) return;
+    }
+    const std::string message = "Unsaved changes from an earlier session were autosaved to " +
+        recovery.string() + "; open that scene with --scene to recover them.";
+    workspace_.log().add(EditorLogLevel::Warning, message);
+    set_status("Autosaved changes from an earlier session are available (see Console)", false, 10.0F);
+}
+
+void NativeEditorController::autosave_tick(float elapsedSeconds) {
+    if (autosaveInFlight_) {
+        std::lock_guard lock(autosaveInFlight_->mutex);
+        if (autosaveInFlight_->done) {
+            autosaveStatus_.inFlight = false;
+            if (autosaveInFlight_->success && autosaveInFlight_->manualSaveCount != manualSaveCount_) {
+                // The scene was saved while this ran; its copy is older than the file.
+                std::error_code ignored;
+                std::filesystem::remove_all(autosaveInFlight_->manifest.parent_path(), ignored);
+            } else if (autosaveInFlight_->success) {
+                ++autosaveStatus_.completed;
+                autosaveStatus_.lastManifest = autosaveInFlight_->manifest;
+                autosaveStatus_.lastError.clear();
+                workspace_.log().add(EditorLogLevel::Info, "Autosaved to " + autosaveInFlight_->manifest.string());
+            } else {
+                ++autosaveStatus_.failed;
+                autosaveStatus_.lastError = autosaveInFlight_->error;
+                workspace_.log().add(EditorLogLevel::Warning, "Autosave failed: " + autosaveInFlight_->error);
+            }
+        }
+    }
+    if (autosaveInFlight_ && !autosaveStatus_.inFlight) autosaveInFlight_.reset();
+    if (!recoveryChecked_) {
+        recoveryChecked_ = true;
+        report_recovered_autosave();
+    }
+    if (!workspace_.document().dirty()) {
+        autosaveElapsedSeconds_ = 0.0;
+        return;
+    }
+    autosaveElapsedSeconds_ += std::max(0.0F, elapsedSeconds);
+    const SettingValue minutesValue = workspace_.settings().value("editor.autosave_minutes");
+    const std::int64_t minutes = std::clamp<std::int64_t>(
+        std::get_if<std::int64_t>(&minutesValue) ? std::get<std::int64_t>(minutesValue) : 5, 1, 120);
+    if (autosaveInFlight_ || autosaveElapsedSeconds_ < static_cast<double>(minutes) * 60.0) return;
+    autosaveElapsedSeconds_ = 0.0;
+
+    // Clone on this thread (a consistent snapshot; whole-brick copies keep it quick),
+    // then write it on the worker. The open document, its path, revision and dirty
+    // flag are untouched. The copy is staged and swapped in only once fully written,
+    // so a failed or interrupted autosave never destroys the previous one.
+    auto job = std::make_shared<AutosaveJob>();
+    job->manualSaveCount = manualSaveCount_;
+    auto snapshot = std::make_shared<EditorDocument>(clone_editor_document(workspace_.document()));
+    const auto manifest = autosave_manifest_path();
+    std::string submitError;
+    const auto task = autosaveTasks_.submit("Autosave scene", [job, snapshot, manifest](EditorTaskContext&) {
+        bool success = false;
+        std::string error;
+        try {
+            const auto folder = manifest.parent_path();
+            const std::filesystem::path staging = folder.string() + ".writing";
+            std::filesystem::remove_all(staging);
+            std::filesystem::create_directories(staging);
+            const auto result = snapshot->save_transactional(staging / manifest.filename());
+            if (result.success) {
+                std::filesystem::remove_all(folder);
+                std::filesystem::rename(staging, folder);
+                success = true;
+            } else {
+                error = result.error;
+                std::error_code cleanup;
+                std::filesystem::remove_all(staging, cleanup);
+            }
+        } catch (const std::exception& exception) {
+            error = exception.what();
+        }
+        std::lock_guard lock(job->mutex);
+        job->done = true;
+        job->success = success;
+        job->error = std::move(error);
+        job->manifest = manifest;
+    }, &submitError);
+    if (!task) {
+        ++autosaveStatus_.failed;
+        autosaveStatus_.lastError = submitError;
+        workspace_.log().add(EditorLogLevel::Warning, "Autosave could not start: " + submitError);
+        return;
+    }
+    autosaveInFlight_ = std::move(job);
+    autosaveStatus_.inFlight = true;
+}
+
 void NativeEditorController::update(float elapsedSeconds) {
+    autosave_tick(elapsedSeconds);
+    synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
+    synthPanel_.sync_wavetable_section(audioMixer_.synthesizer());
+    refresh_midi_status();
+    if (midiOutput_ && midiOutput_->connected()) {
+        audio::MidiMessage message;
+        while (audioMixer_.synthesizer().poll_midi_output(message)) (void)midiOutput_->send(message);
+    }
     spriteAuthoringPanel_.update(elapsedSeconds);
     controlRigPanel_.update(elapsedSeconds);
     if (tileWorldEditorOpen_) ++tileWorldEditorTicks_;
@@ -1795,6 +2176,16 @@ void NativeEditorController::update(float elapsedSeconds) {
         const auto& state = spriteLevel_->state();
         spriteAnimationGraph_.set_live_state(!state.grounded ? "Jump" :
             (std::fabs(state.velocity.x) > 2.0F ? "Run" : "Idle"));
+    }
+    if (thumbnailBacklog_) {
+        std::string thumbnailError;
+        thumbnailBacklog_ = !assetDatabase_.generate_missing_thumbnails_for(
+            std::chrono::milliseconds(2), nullptr, &thumbnailError);
+        if (!thumbnailError.empty()) {
+            // Log once and stop; an unwritable thumbnail folder would otherwise fail every frame.
+            workspace_.log().add(EditorLogLevel::Warning, "Asset thumbnails paused: " + thumbnailError);
+            thumbnailBacklog_ = false;
+        }
     }
     if (liveMcpHost_) (void)liveMcpHost_->pump(16);
     workspace_.ai_assistant().refresh_pending_approvals();
@@ -1924,7 +2315,7 @@ void NativeEditorController::cancel_pending_destructive_action() {
 }
 
 std::optional<std::string> NativeEditorController::menu_name_at(int x) const {
-    const int desiredWidth = std::max(70, static_cast<int>(78.0F * workspace_.preferences().uiScale));
+    const int desiredWidth = static_cast<int>(78.0F * kLogicalLayoutScale);
     const int itemWidth = std::max(1, std::min(desiredWidth, width_ / static_cast<int>(kMenuBarNames.size())));
     const int index = x / itemWidth;
     if (index < 0 || index >= static_cast<int>(kMenuBarNames.size())) return std::nullopt;
@@ -1936,7 +2327,7 @@ NativeMenuPopupLayout NativeEditorController::menu_popup_layout() const {
     if (!openMenu_) return result;
     const auto actions = menu_actions(*openMenu_);
     if (actions.empty()) return result;
-    const int itemHeight = std::max(22, static_cast<int>(24.0F * workspace_.preferences().uiScale));
+    const int itemHeight = static_cast<int>(24.0F * kLogicalLayoutScale);
     int menuIndex = 0;
     for (std::size_t candidate = 0; candidate < kMenuBarNames.size(); ++candidate) {
         if (kMenuBarNames[candidate] == *openMenu_) {
@@ -1944,9 +2335,9 @@ NativeMenuPopupLayout NativeEditorController::menu_popup_layout() const {
             break;
         }
     }
-    const int desiredWidth = std::max(70, static_cast<int>(78.0F * workspace_.preferences().uiScale));
+    const int desiredWidth = static_cast<int>(78.0F * kLogicalLayoutScale);
     const int menuWidth = std::max(1, std::min(desiredWidth, width_ / static_cast<int>(kMenuBarNames.size())));
-    const int popupWidth = std::clamp(static_cast<int>(300.0F * workspace_.preferences().uiScale), 240, 420);
+    const int popupWidth = std::clamp(static_cast<int>(300.0F * kLogicalLayoutScale), 240, 420);
     const int popupX = std::clamp(menuIndex * menuWidth, 0, std::max(0, width_ - popupWidth));
     const int availableHeight = std::max(itemHeight, height_ - layout_.menuBar.height - layout_.statusBar.height - 4);
     const std::size_t visibleCount = std::max<std::size_t>(
@@ -2365,7 +2756,7 @@ void NativeEditorController::open_context_menu(int x, int y, std::optional<Edito
     // Right-click on an unselected object selects it first, so Duplicate/Delete/Frame act on
     // the object under the cursor rather than whatever was selected before the right-click.
     if (target && !workspace_.is_selected(*target)) workspace_.select_object(*target);
-    const int itemHeight = std::max(22, static_cast<int>(24.0F * workspace_.preferences().uiScale));
+    const int itemHeight = static_cast<int>(24.0F * kLogicalLayoutScale);
     constexpr int popupWidth = 190;
     const int popupHeight = itemHeight * static_cast<int>(contextMenu_.items.size());
     contextMenu_.x = std::clamp(x, 0, std::max(0, width_ - popupWidth));
@@ -2430,6 +2821,8 @@ void NativeEditorController::update_hover(int x, int y) {
 }
 
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
+    hoverX_ = x;
+    hoverY_ = y;
     if (commandPaletteOpen_) {
         const NativeCommandPaletteLayout palette = command_palette_layout();
         const auto results = command_palette_results(64);
@@ -2725,7 +3118,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 settingsLayout.settingRows[visible].width * 2 / 3;
             if (alreadySelected || valueColumn) {
                 std::string error;
-                if (definition.type == SettingType::Boolean || definition.type == SettingType::Enum) {
+                if (settingsPanel_.has_choices(definition)) {
                     if (!settingsPanel_.cycle(workspace_.settings(), definition.id, 1, &error))
                         settingsPanel_.status = error;
                 } else if (!settingsPanel_.begin_value_edit(workspace_.settings(), definition.id, &error)) {
@@ -2888,10 +3281,17 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         (void)controlRigPanel_.pointer_down(static_cast<int>(button), x, y, modifiers);
         return;
     }
-    if (button == PointerButton::Primary && chiptunePanel_.open() && chiptunePanel_.pointer_down(x, y, audioMixer_)) return;
+    if (button == PointerButton::Primary && chiptunePanel_.open() && chiptunePanel_.pointer_down(x, y, audioMixer_)) {
+        if (const auto keys = chiptunePanel_.take_requested_key_count()) (void)set_keyboard_key_count(*keys);
+        return;
+    }
     if (button == PointerButton::Primary && audioEventPanel_.open() && audioEventPanel_.pointer_down(x, y, audioMixer_)) return;
     if (button == PointerButton::Primary && audioPanel_.open() && audioPanel_.pointer_down(x, y, audioMixer_)) return;
-    if (button == PointerButton::Primary && synthPanel_.open() && synthPanel_.pointer_down(x, y, audioMixer_.synthesizer())) return;
+    if (button == PointerButton::Primary && synthPanel_.open() && synthPanel_.pointer_down(x, y, audioMixer_.synthesizer())) {
+        if (const auto keys = synthPanel_.take_requested_key_count()) (void)set_keyboard_key_count(*keys);
+        if (const auto step = synthPanel_.take_midi_port_cycle_request()) (void)cycle_midi_input_port(*step);
+        return;
+    }
     if (contextMenu_.open) {
         if (button == PointerButton::Primary) {
             for (std::size_t i = 0; i < contextMenu_.itemRects.size(); ++i) {
@@ -3381,6 +3781,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 }
 
 void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint32_t modifiers) {
+    hoverX_ = x;
+    hoverY_ = y;
     if (commandPaletteOpen_) {
         const auto results = command_palette_results(64);
         if (!results.empty() && steps != 0.0F) {
@@ -3424,6 +3826,8 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
         (void)controlRigPanel_.pointer_wheel(steps, x, y, modifiers);
         return;
     }
+    if (chiptunePanel_.open() && chiptunePanel_.pointer_wheel(steps, x, y)) return;
+    if (synthPanel_.open() && synthPanel_.pointer_wheel(steps, x, y)) return;
     if (shortcutPanel_.open) {
         if (shortcutPanel_.capturing) {
             ShortcutGesture gesture = wheel_shortcut(steps > 0.0F, (modifiers & 2U) != 0U,
@@ -3619,7 +4023,7 @@ std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
 
 int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
     int result = 0;
-    float best = 10.0F * workspace_.preferences().uiScale;
+    float best = 10.0F * kLogicalLayoutScale;
     for (const GizmoScreenAxis& axis : gizmo_axes()) {
         if (!axis.start.visible || !axis.end.visible) continue;
         const float distance = point_line_distance(static_cast<float>(x), static_cast<float>(y),
@@ -3701,7 +4105,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     // interaction. Re-evaluate availability at the command boundary so shortcuts, automation,
     // context menus, and top-level menus all enforce the same current-state contract.
     refresh_menu_state();
-    if (const MenuAction* action = workspace_.menus().find(actionId)) {
+    if (const MenuAction* action = std::as_const(workspace_.menus()).find(actionId)) {
         if (!action->enabled) {
             set_status(action->disabledReason.empty() ? "That command is not available in the current context"
                                                        : action->disabledReason, true, 6.0F);
@@ -3779,6 +4183,18 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "camera.fly_right") return flyStep({1.0F,0.0F,0.0F});
     if (actionId == "camera.fly_down") return flyStep({0.0F,-1.0F,0.0F});
     if (actionId == "camera.fly_up") return flyStep({0.0F,1.0F,0.0F});
+    if (actionId == "view.ui_zoom_in") return step_ui_zoom(1);
+    if (actionId == "view.ui_zoom_out") return step_ui_zoom(-1);
+    if (actionId == "view.ui_zoom_reset") return step_ui_zoom(0);
+    if (actionId.starts_with("view.keyboard_keys_")) {
+        int keys = 0;
+        const std::string_view digits = actionId.substr(std::string_view("view.keyboard_keys_").size());
+        const auto [end, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), keys);
+        (void)end;
+        if (ec != std::errc{} || std::find(kPianoKeyboardSizes.begin(), kPianoKeyboardSizes.end(), keys) ==
+                                     kPianoKeyboardSizes.end()) return false;
+        return set_keyboard_key_count(keys);
+    }
     if (actionId == "view.zoom_in" || actionId == "view.zoom_out") {
         remember_camera_position();
         const SettingValue zoomValue = workspace_.settings().value("camera.zoom_sensitivity");
@@ -4421,6 +4837,13 @@ camera_menu_dispatch_complete:
         }
         const auto result = workspace_.document().save_transactional(workspace_.document().path());
         set_status(result.success ? "Scene saved" : result.error, !result.success);
+        if (result.success) {
+            // The scene file now holds everything the recovery copy did.
+            std::error_code ignored;
+            std::filesystem::remove_all(autosave_directory(), ignored);
+            autosaveElapsedSeconds_ = 0.0;
+            ++manualSaveCount_;
+        }
         return result.success;
     }
     if (actionId == "file.export_print_stl") {
@@ -5048,6 +5471,13 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         else if (normalized == "escape") cancel_pending_destructive_action();
         return;
     }
+    // UI zoom hotkeys work in every panel (accessibility), except while a shortcut is being captured.
+    if (!shortcutPanel_.capturing && !(settingsPanel_.open && settingsPanel_.valueEditing)) {
+        if (const auto direction = ui_zoom_hotkey_direction(normalized, control, alt)) {
+            (void)step_ui_zoom(*direction);
+            return;
+        }
+    }
     if (settingsPanel_.open) { handle_settings_key(normalized, control, shift, alt); return; }
     if (shortcutPanel_.open) { handle_shortcut_editor_key(normalized, control, shift, alt); return; }
     if (cinematicCameraPanel_.is_open()) {
@@ -5626,13 +6056,42 @@ CommandResult NativeEditorController::set_component_property_text_on_primary(
     return result;
 }
 
-EditorSelectionDiagnostics NativeEditorController::selection_diagnostics() const {
-    return analyze_editor_selection(workspace_.document(), materials_, workspace_.selected_objects());
+std::uint64_t NativeEditorController::material_density_fingerprint() const noexcept {
+    // Diagnostics read material densities; the library is small (tens of entries).
+    std::uint64_t h = 1469598103934665603ULL;
+    for (MaterialId id = 1; id != 0 && id <= materials_.next_available_id(); ++id) {
+        const EditorMaterialEntry* entry = materials_.find(id);
+        const std::uint64_t bits = entry == nullptr ? 0xFFFFFFFFULL
+            : std::bit_cast<std::uint32_t>(entry->definition.densityKilogramsPerCubicMeter);
+        h ^= (static_cast<std::uint64_t>(id) << 32U) ^ bits;
+        h *= 1099511628211ULL;
+    }
+    return h;
 }
 
-std::vector<EditorVoxelDrawItem> NativeEditorController::draw_items() const {
-    return build_voxel_draw_list(workspace_.document(), materials_, camera_, layout_.viewport,
-                                 viewportSettings_, workspace_.selected_objects());
+const EditorSelectionDiagnostics& NativeEditorController::selection_diagnostics() const {
+    const std::uint64_t key = editor_scene_render_fingerprint(workspace_.document()) * 31U ^
+                              editor_selection_fingerprint(workspace_.selected_objects()) * 17U ^
+                              material_density_fingerprint();
+    if (!selectionDiagnosticsValid_ || key != selectionDiagnosticsKey_) {
+        selectionDiagnostics_ = analyze_editor_selection(workspace_.document(), materials_, workspace_.selected_objects());
+        selectionDiagnosticsKey_ = key;
+        selectionDiagnosticsValid_ = true;
+        ++selectionDiagnosticsRebuilds_;
+    }
+    return selectionDiagnostics_;
+}
+
+const std::vector<EditorVoxelDrawItem>& NativeEditorController::draw_items() const {
+    return drawListCache_.get(workspace_.document(), materials_, camera_, layout_.viewport, viewportSettings_,
+                              workspace_.selected_objects(), editor_scene_render_fingerprint(workspace_.document()));
+}
+
+const std::vector<EditorVoxelDrawItem>& NativeEditorController::camera_preview_draw_items(
+    const EditorCamera& previewCamera, UiRect previewRect, const EditorViewportSettings& previewSettings) const {
+    return previewDrawListCache_.get(workspace_.document(), materials_, previewCamera, previewRect, previewSettings,
+                                     workspace_.selected_objects(),
+                                     editor_scene_render_fingerprint(workspace_.document()));
 }
 
 std::vector<EditorText3DDrawItem> NativeEditorController::text3d_draw_items() const {
@@ -5646,12 +6105,7 @@ std::vector<EditorGaborVolumeDrawItem> NativeEditorController::gabor_volume_draw
 }
 
 std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
-    std::vector<EditorObjectId> result;
-    const auto append = [&](const auto& self, EditorObjectId id, std::vector<EditorObjectId>& output) -> void {
-        output.push_back(id);
-        for (EditorObjectId child : workspace_.document().children_of(id)) self(self, child, output);
-    };
-    for (EditorObjectId root : workspace_.document().root_objects()) append(append, root, result);
+    std::vector<EditorObjectId> result = workspace_.document().hierarchy_preorder();  // O(n)
     if (hierarchyFilter_.empty()) return result;
     const std::string needle = lowercase(hierarchyFilter_);
     std::erase_if(result, [&](EditorObjectId id) {

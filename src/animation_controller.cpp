@@ -205,6 +205,49 @@ float AnimationControllerRuntime::state_time(std::uint64_t objectId) const noexc
     return instance == instances_.end() ? 0.0F : instance->second.stateTime;
 }
 
+AnimationControllerSaveState AnimationControllerRuntime::capture_save_state() const {
+    AnimationControllerSaveState state;
+    for (const auto& [objectId, instance] : instances_)
+        state.instances.push_back({objectId, instance.asset.name, instance.state, instance.stateTime,
+                                   instance.parameters, instance.triggers});
+    return state;
+}
+
+std::size_t AnimationControllerRuntime::restore_save_state(
+    const AnimationControllerSaveState& state, std::vector<std::string>* warnings) {
+    const auto warn = [&](std::uint64_t objectId, std::string_view message) {
+        if (warnings) warnings->push_back("animation controller " + std::to_string(objectId) + ": " + std::string(message));
+    };
+    std::size_t restored = 0U;
+    for (const AnimationControllerInstanceSaveState& saved : state.instances) {
+        const auto found = instances_.find(saved.objectId);
+        if (found == instances_.end()) { warn(saved.objectId, "no controller is bound after boot"); continue; }
+        Instance& instance = found->second;
+        if (instance.asset.name != saved.controller) { warn(saved.objectId, "the bound controller changed"); continue; }
+        if (!find_state(instance, saved.state) || !std::isfinite(saved.stateTime) || saved.stateTime < 0.0F) {
+            warn(saved.objectId, "the saved state is unknown or invalid");
+            continue;
+        }
+        bool valid = saved.parameters.size() == instance.parameters.size() && saved.triggers.size() == instance.triggers.size();
+        for (const auto& [name, value] : saved.parameters) {
+            const auto live = instance.parameters.find(name);
+            valid = valid && live != instance.parameters.end() && live->second.index() == value.index();
+            if (const double* number = std::get_if<double>(&value)) valid = valid && std::isfinite(*number);
+        }
+        for (const auto& [name, value] : saved.triggers) {
+            (void)value;
+            valid = valid && instance.triggers.contains(name);
+        }
+        if (!valid) { warn(saved.objectId, "the controller parameters changed"); continue; }
+        instance.state = saved.state;
+        instance.stateTime = saved.stateTime;
+        instance.parameters = saved.parameters;
+        instance.triggers = saved.triggers;
+        ++restored;
+    }
+    return restored;
+}
+
 void AnimationControllerRuntime::tick(float deltaSeconds) {
     if (!(deltaSeconds > 0.0F) || !std::isfinite(deltaSeconds)) return;
     for (auto& [objectId, instance] : instances_) {

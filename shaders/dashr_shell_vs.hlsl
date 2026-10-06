@@ -26,8 +26,6 @@ struct DashrShellVertexOutput {
 DashrShellVertexOutput main(DashrShellVertexInput input) {
     DashrShellVertexOutput output;
     output.position = mul(gObjectToClip, float4(input.position, 1.0F));
-    // Shadow recording sets gLimits.w so near-extruding conservative shell
-    // vertices use the same depth-pancaking convention as live_csm_caster_vs.
     if (gLimits.w != 0U) output.position.z = max(output.position.z, 0.0F);
     output.objectPosition = input.position;
     output.uv = input.uv;

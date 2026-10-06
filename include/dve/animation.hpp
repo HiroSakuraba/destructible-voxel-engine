@@ -148,6 +148,29 @@ struct RootMotionDelta {
     std::string_view socketName, const RigidTransform& objectWorldTransform,
     std::string* error = nullptr);
 
+// Save-game snapshot of one SkeletalAnimationRuntime instance (dve.animation). Skeletons and
+// clips are content: the game binds them again when it boots, and restore matches instances
+// by object id and skeleton content hash, then restores playback and the current pose.
+struct SkeletalAnimationInstanceSaveState {
+    std::uint64_t objectId{};
+    std::uint64_t skeletonHash{};
+    std::string activeClip;
+    float time{};
+    std::string targetClip;
+    float targetTime{};
+    float fadeElapsed{};
+    float fadeDuration{};
+    float playbackSpeed{1.0F};
+    bool rootMotionEnabled{};
+    bool rootMotionPending{};
+    RigidTransform rootMotionAccum{};
+    LocalPose pose;
+};
+
+struct SkeletalAnimationSaveState {
+    std::vector<SkeletalAnimationInstanceSaveState> instances;   // sorted by object id
+};
+
 // CPU reference animation service. It owns deterministic copies of skeletons and clips,
 // evaluates local poses, and supplies socket transforms to GameWorld attachments. Rendering
 // backends may consume its poses, but this foundation makes no GPU-skinning claim.
@@ -189,6 +212,13 @@ public:
     [[nodiscard]] std::optional<RigidTransform> socket_world_transform(
         std::uint64_t objectId, std::string_view socketName,
         const RigidTransform& objectWorldTransform) const;
+
+    [[nodiscard]] SkeletalAnimationSaveState capture_save_state() const;
+    // Restores every saved instance whose object is bound to the same skeleton and whose
+    // clips are registered; others are skipped with a message in `warnings`. Returns the
+    // number restored.
+    std::size_t restore_save_state(
+        const SkeletalAnimationSaveState& state, std::vector<std::string>* warnings = nullptr);
 
 private:
     struct Impl;

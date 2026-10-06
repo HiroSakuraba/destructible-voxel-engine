@@ -247,6 +247,9 @@ struct AssetCookerStats {
 struct ImportedModelResult {
     ImportedScene scene;
     std::vector<ImportDiagnostic> diagnostics;
+    // External files that affect the import (for example glTF buffers and images).
+    // Embedded/data-URI resources are part of the source file and are omitted.
+    std::vector<std::filesystem::path> sourceDependencies;
     bool success{};
 };
 

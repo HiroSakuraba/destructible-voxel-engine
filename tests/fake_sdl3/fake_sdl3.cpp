@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,6 +45,10 @@ int nextPixelH = 800;
 float nextScale = 1.0F;
 std::string dialogPath;
 std::string dialogError;
+std::optional<Uint64> manualTicks;
+bool vsyncSupported = true;
+int renderVsync = 0;
+int renderVsyncCalls = 0;
 const auto epoch = std::chrono::steady_clock::now();
 SDL_AudioStream* activePlaybackStream = nullptr;
 SDL_AudioStream* activeRecordingStream = nullptr;
@@ -65,6 +70,7 @@ void show_dialog(SDL_DialogFileCallback callback, void* userdata) {
 }
 
 bool SDL_Init(Uint32) { return true; }
+bool SDL_InitSubSystem(Uint32) { return true; }
 void SDL_QuitSubSystem(Uint32) {}
 const char* SDL_GetError() { return errorText.c_str(); }
 SDL_Window* SDL_CreateWindow(const char* title, int w, int h, SDL_WindowFlags flags) {
@@ -89,6 +95,11 @@ bool SDL_PollEvent(SDL_Event* event) {
     if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) modState = event->key.mod;
     return true;
 }
+bool SDL_WaitEventTimeout(SDL_Event* event, Sint32 timeoutMS) {
+    if (!events.empty()) return event ? SDL_PollEvent(event) : true;
+    if (timeoutMS > 0) SDL_Delay(static_cast<Uint32>(timeoutMS));
+    return false;
+}
 bool SDL_GetWindowSize(SDL_Window* window, int* w, int* h) {
     if (!window) return false; if (w) *w = window->logicalW; if (h) *h = window->logicalH; return true;
 }
@@ -107,8 +118,11 @@ char* SDL_GetClipboardText() {
     return result;
 }
 void SDL_free(void* pointer) { std::free(pointer); }
-Uint64 SDL_GetTicksNS() { return static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - epoch).count()); }
-void SDL_Delay(Uint32 milliseconds) { std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds)); }
+Uint64 SDL_GetTicksNS() { if (manualTicks) return *manualTicks; return static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - epoch).count()); }
+void SDL_Delay(Uint32 milliseconds) {
+    if (manualTicks) *manualTicks += static_cast<Uint64>(milliseconds) * 1'000'000;
+    else std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
+}
 const char* SDL_GetKeyName(SDL_Keycode key) {
     static char one[2]{};
     if (key >= 32 && key < 127) { one[0] = static_cast<char>(key); one[1] = 0; return one; }
@@ -123,12 +137,17 @@ void SDL_ShowSaveFileDialog(SDL_DialogFileCallback callback, void* userdata, SDL
 void SDL_ShowOpenFolderDialog(SDL_DialogFileCallback callback, void* userdata, SDL_Window*, const char*, bool) { show_dialog(callback, userdata); }
 
 void SDLTest_Reset() {
+    manualTicks.reset(); vsyncSupported = true; renderVsync = renderVsyncCalls = 0;
     errorText.clear(); clipboard.clear(); events.clear(); modState = 0;
     nextLogicalW = 1280; nextLogicalH = 800; nextPixelW = 1280; nextPixelH = 800; nextScale = 1.0F;
     dialogPath.clear(); dialogError.clear();
     if (activePlaybackStream) activePlaybackStream->data.clear();
     if (activeRecordingStream) { activeRecordingStream->inputData.clear(); activeRecordingStream->inputCursor = 0U; }
 }
+void SDLTest_SetTicksNS(Uint64 ticks) { manualTicks = ticks; }
+void SDLTest_SetVSyncSupported(bool supported) { vsyncSupported = supported; }
+int SDLTest_RenderVSync() { return renderVsync; }
+int SDLTest_RenderVSyncCalls() { return renderVsyncCalls; }
 void SDLTest_PushEvent(const SDL_Event* event) { if (event) events.push_back(*event); }
 void SDLTest_SetWindowMetrics(int logicalW, int logicalH, int pixelW, int pixelH, float scale) {
     nextLogicalW = logicalW; nextLogicalH = logicalH; nextPixelW = pixelW; nextPixelH = pixelH; nextScale = scale;
@@ -140,6 +159,12 @@ void SDLTest_SetDialogResult(const char* firstPath, const char* error) {
 struct SDL_Renderer { SDL_Window* window{}; Uint8 r{}, g{}, b{}, a{255}; };
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, const char*) { if (!window) return nullptr; return new SDL_Renderer{window}; }
 void SDL_DestroyRenderer(SDL_Renderer* renderer) { delete renderer; }
+bool SDL_SetRenderVSync(SDL_Renderer* renderer, int vsync) {
+    ++renderVsyncCalls;
+    if (!renderer || !vsyncSupported) { errorText = "renderer does not support requested vsync"; return false; }
+    renderVsync = vsync;
+    return true;
+}
 bool SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a) { if (!renderer) return false; renderer->r=r; renderer->g=g; renderer->b=b; renderer->a=a; return true; }
 bool SDL_RenderClear(SDL_Renderer* renderer) { return renderer != nullptr; }
 bool SDL_RenderPresent(SDL_Renderer* renderer) { return renderer != nullptr; }
@@ -147,6 +172,10 @@ bool SDL_RenderFillRect(SDL_Renderer* renderer, const SDL_FRect*) { return rende
 bool SDL_RenderRect(SDL_Renderer* renderer, const SDL_FRect*) { return renderer != nullptr; }
 bool SDL_RenderLine(SDL_Renderer* renderer, float, float, float, float) { return renderer != nullptr; }
 bool SDL_RenderDebugText(SDL_Renderer* renderer, float, float, const char*) { return renderer != nullptr; }
+bool SDL_SetRenderScale(SDL_Renderer* renderer, float scaleX, float scaleY) { return renderer != nullptr && scaleX > 0.0F && scaleY > 0.0F; }
+SDL_Surface* SDL_RenderReadPixels(SDL_Renderer* renderer, const SDL_Rect*) { if (!renderer) return nullptr; return new SDL_Surface{1, 1}; }
+bool SDL_SaveBMP(SDL_Surface* surface, const char* file) { return surface != nullptr && file != nullptr; }
+void SDL_DestroySurface(SDL_Surface* surface) { delete surface; }
 
 SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID device, const SDL_AudioSpec* spec,
                                            SDL_AudioStreamCallback callback, void* userdata) {

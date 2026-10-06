@@ -10,6 +10,23 @@
 namespace dve {
 
 constexpr std::int32_t kDamageSubvoxelScale = 256;
+// Global radius cap in voxel units, applied at quantization. Keeps radius^2 in
+// subvoxel units far inside int64 and bounds worst-case work for callers that
+// do not supply clip bounds (65536 voxels = 6.5 km at 0.1 m voxels).
+constexpr std::int32_t kMaxDamageRadiusVoxels = 65536;
+
+// Inclusive voxel-coordinate box that damage rasterization is clipped to.
+// apply_damage_commands derives it from the object's occupied bricks, so the
+// cost of a command is bounded by the object's size, not by the sphere's.
+struct DamageClipBounds {
+    Int3 minVoxel{};
+    Int3 maxVoxel{};
+    [[nodiscard]] bool empty() const noexcept {
+        return minVoxel.x > maxVoxel.x || minVoxel.y > maxVoxel.y || minVoxel.z > maxVoxel.z;
+    }
+};
+// Voxel bounds covering every brick of the object (empty() when it has none).
+[[nodiscard]] DamageClipBounds damage_clip_bounds(const VoxelObject& object) noexcept;
 
 struct SphereDamageCommand {
     Float3 center{};      // object-local voxel units; quantized at command ingestion
@@ -68,14 +85,16 @@ private:
     void end_growth_probe() noexcept;
 
     friend std::span<const DamageBrickBatch> build_damage_batches(
-        std::span<const SphereDamageCommand>, DamageBatchWorkspace&);
+        std::span<const SphereDamageCommand>, DamageBatchWorkspace&, const DamageClipBounds*);
     friend DamageApplyReportView apply_damage_commands(
         VoxelObject&, std::span<const SphereDamageCommand>, DamageBatchWorkspace&);
 };
 
+// clip (optional) restricts rasterization to the given voxel box.
 [[nodiscard]] std::span<const DamageBrickBatch> build_damage_batches(
     std::span<const SphereDamageCommand> commands,
-    DamageBatchWorkspace& workspace);
+    DamageBatchWorkspace& workspace,
+    const DamageClipBounds* clip = nullptr);
 
 [[nodiscard]] DamageApplyReportView apply_damage_commands(
     VoxelObject& object,

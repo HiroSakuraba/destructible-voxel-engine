@@ -15,6 +15,10 @@ using namespace dve::render;
 void require(bool condition,const char* message){
     if(!condition)throw std::runtime_error(message);
 }
+template <class Handle>
+void require(const Handle& handle, const char* message) {
+    require(static_cast<bool>(handle), message);
+}
 bool close(float a,float b,float epsilon=1.0e-4F){
     return std::abs(a-b)<=epsilon;
 }

@@ -186,6 +186,11 @@ std::string texture_format_name(dve::rhi::TextureFormat format) {
     case TextureFormat::RGBA32Sint: return "rgba32_sint";
     case TextureFormat::RGBA16Float: return "rgba16_float";
     case TextureFormat::RG16Uint: return "rg16_uint";
+    case TextureFormat::BC1RGBAUnorm: return "bc1_rgba_unorm";
+    case TextureFormat::BC1RGBASrgb: return "bc1_rgba_srgb";
+    case TextureFormat::BC3RGBAUnorm: return "bc3_rgba_unorm";
+    case TextureFormat::BC3RGBASrgb: return "bc3_rgba_srgb";
+    case TextureFormat::BC5RGUnorm: return "bc5_rg_unorm";
     case TextureFormat::D32Float: return "d32_float";
     }
     return "unknown";

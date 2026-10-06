@@ -22,7 +22,18 @@ public:
     bool create_window(const WindowDesc& desc, std::string* error = nullptr) override;
     void destroy_window() noexcept override;
     [[nodiscard]] bool has_window() const noexcept override;
+    // create_window initializes SDL audio separately from video (WindowDesc::initializeAudio)
+    // and never fails because of it; these report whether that succeeded and why not.
+    [[nodiscard]] bool audio_subsystem_initialized() const noexcept;
+    [[nodiscard]] std::string audio_init_error() const;
     [[nodiscard]] bool poll_event(PlatformEvent& event) override;
+    // Wait on the video thread without consuming an event; poll_event() still
+    // handles conversion and delivers the queued event on the next frame.
+    [[nodiscard]] bool wait_for_events(std::chrono::milliseconds timeout);
+    // Include update/render/present work in the budget, but keep a minimum frame
+    // interval even when mouse motion continuously wakes the event wait.
+    [[nodiscard]] bool wait_for_frame(double frameStart, std::chrono::milliseconds targetInterval,
+                                     std::chrono::milliseconds minimumInterval);
     [[nodiscard]] WindowMetrics window_metrics() const noexcept override;
     [[nodiscard]] NativeWindowHandle native_window_handle() const noexcept override;
     void set_window_title(std::string_view title) override;

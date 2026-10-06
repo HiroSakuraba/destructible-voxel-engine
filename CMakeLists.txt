@@ -1,6 +1,24 @@
 cmake_minimum_required(VERSION 3.24)
 project(destructible_voxel_engine_core VERSION 2.35.3 LANGUAGES CXX)
 
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+if(MSVC)
+    add_compile_options(/utf-8)
+    # Match the Linux test environment's stack reserve for the large synth state.
+    add_link_options(/STACK:8388608)
+endif()
+
+# DVE's libraries are static by design. Declare the default before third_party/manifold's
+# option(BUILD_SHARED_LIBS ... ON) can write ON into the cache, which would turn every later
+# add_library() (e.g. dve_player_runtime) into a non-PIC shared library on a fresh configure.
+option(BUILD_SHARED_LIBS "Build shared libraries (DVE's own libraries are designed to be static)" OFF)
+include(GNUInstallDirs)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+# Single version source: project(VERSION) -> generated dve/version.hpp (DVE_VERSION_*).
+include(DveVersion)
+
 option(DVE_BUILD_TESTS "Build the headless correctness tests" ON)
 option(DVE_BUILD_BENCHMARK "Build the headless benchmark" ON)
 option(DVE_BUILD_ASSET_COOKER "Build the offline model-to-voxel asset cooker" ON)
@@ -18,7 +36,11 @@ set(DVE_STEAM_AUDIO_ROOT "" CACHE PATH "Steam Audio SDK root containing include/
 option(DVE_FETCH_RTMIDI "Fetch the pinned RtMidi 6.0.0 source when no installed package is available" OFF)
 option(DVE_BUILD_LEGACY_X11_HOST "Retain the v1.14 X11 host as a comparison oracle during migration" ON)
 option(DVE_ENABLE_SDL3_HOST "Build the shared SDL3 desktop host when SDL3 is available" ON)
+option(DVE_ENABLE_SDL3_TTF "Use SDL3_ttf for scalable editor text in the SDL host when available (falls back to scaled debug text)" ON)
+option(DVE_ENABLE_XFT "Use Xft for scalable editor text in the X11 host when available (falls back to core bitmap fonts)" ON)
 option(DVE_FETCH_SDL3 "Fetch the pinned SDL 3.4.12 source when no installed package is available" OFF)
+option(DVE_SDL3_PREFER_FETCH "With DVE_FETCH_SDL3, build the pinned SDL statically even when an installed SDL3 exists" OFF)
+option(DVE_BUILD_PLAYER "Build the dve_player runtime library and the SDL3 dve_player executable" ON)
 option(DVE_BUILD_SDL3_CONTRACT_TESTS "Compile and execute SDL host/editor logic against the deterministic SDL API shim" ON)
 option(DVE_ENABLE_VULKAN_BUFFER_BACKEND "Build the dynamically loaded Vulkan offscreen graphics backend" ON)
 option(DVE_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -48,6 +70,7 @@ option(DVE_ENABLE_JOLT "Build the Jolt Physics rigid-body backend (WP-4.4)" OFF)
 option(DVE_BUILD_JOLT_SMOKE "Build native Jolt rigid-body integration smoke tests" ON)
 option(DVE_ENABLE_JOLT_DEBUG_DRAW "Compile Jolt debug-render capture into the DVE backend" ON)
 option(DVE_ENABLE_LUA "Build the Lua 5.4 gameplay scripting binding" OFF)
+option(DVE_FETCH_LUA "Build the pinned Lua 5.4.9 source as a static library when no installed Lua 5.4 is found (the Windows build)" OFF)
 option(DVE_FETCH_JOLT "Fetch the pinned Jolt v5.6.0 source when no installed/source target is supplied" OFF)
 set(DVE_JOLT_SOURCE_DIR "" CACHE PATH "Path to a JoltPhysics 5.5.x-5.6.x source checkout")
 set(JOLT_INCLUDE_DIR "" CACHE PATH "Legacy: Jolt checkout root containing Jolt/Jolt.h")
@@ -71,6 +94,7 @@ endif()
 message(STATUS "DVE geometry profile: ${DVE_GEOMETRY_MODE_NORMALIZED}")
 
 add_library(dve_core
+    src/compressed_texture.cpp
     src/brick.cpp
     src/voxel_object.cpp
     src/damage.cpp
@@ -109,6 +133,7 @@ add_library(dve_core
     src/brick_palette.cpp
     src/brick_palette_asset_cooker.cpp
     src/render/brick_palette_shading.cpp
+    src/render/radiance_cascades_2d.cpp
     src/voxel_material_switcher.cpp
     src/sprite_palette.cpp
     src/sprite_authoring.cpp
@@ -133,6 +158,7 @@ add_library(dve_core
     src/material_layers.cpp
     src/material_decal.cpp
     src/material_displacement.cpp
+    src/procedural_noise.cpp
     src/material_authoring.cpp
     src/environment_lighting.cpp
     src/environment_lighting_asset.cpp
@@ -173,8 +199,13 @@ add_library(dve_core
     src/simulation_quality.cpp
     src/simulation_validation.cpp
     src/v235_foundations.cpp
+    src/content_source.cpp
+    src/game_manifest.cpp
+    src/game_scene_loader.cpp
+    src/game_save.cpp
 )
 add_library(dve::core ALIAS dve_core)
+target_include_directories(dve_core PUBLIC $<BUILD_INTERFACE:${DVE_GENERATED_INCLUDE_DIR}>)
 if(DVE_ENABLE_FLUODDITY)
     target_sources(dve_core PRIVATE src/fluoddity.cpp src/fluoddity_solver.cpp src/runtime_fluoddity_world.cpp)
     target_compile_definitions(dve_core PUBLIC DVE_ENABLE_FLUODDITY=1)
@@ -230,6 +261,9 @@ add_executable(dve_material_system_demo apps/material_system_demo.cpp)
 target_link_libraries(dve_material_system_demo PRIVATE dve::core)
 add_executable(dve_pack apps/dve_pack.cpp)
 target_link_libraries(dve_pack PRIVATE dve::core)
+# Radiance Cascades Phase 1: CPU 2D reference bench (PNG shots + timing/error tables).
+add_executable(dve_rc2d_bench apps/rc2d_bench.cpp)
+target_link_libraries(dve_rc2d_bench PRIVATE dve::core)
 add_executable(dve_material_audit apps/material_audit_v174.cpp)
 target_link_libraries(dve_material_audit PRIVATE dve::core)
 add_executable(dve_generate_sprite_assets_v218 apps/generate_sprite_assets_v218.cpp)
@@ -279,6 +313,8 @@ endif()
 if(DVE_BUILD_AUDIO_SYNTH)
     add_library(dve_audio_synth
         src/audio/midi.cpp
+        src/audio/midi_input_session.cpp
+        src/audio/midi_output_session.cpp
         src/audio/sample_map.cpp
         src/audio/sample_map_recipe.cpp
         src/audio/synthesizer.cpp
@@ -286,12 +322,16 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/synth_patch.cpp
         src/audio/sequencer.cpp
         src/audio/patch_genetics.cpp
+        src/audio/patch_search.cpp  # Phase 6: evolutionary patch search (SYN-016)
         src/audio/attractor.cpp
         src/audio/generative_conductor.cpp
         src/audio/granular.cpp  # Phase 4: granular generator core (SYN-014)
         src/audio/spectral_analyzer.cpp  # Phase 5: offline spectral analyzer (SYN-015)
         src/audio/spectral.cpp  # Phase 5: spectral resynthesis oscillator (SYN-015)
         src/audio/spectral_profiler.cpp  # Phase 5: spectral CPU budgeting (SYN-015)
+        src/audio/audio_features.cpp  # Phase 6: audio-to-synth feature extractor (SYN-016)
+        src/audio/patch_evaluator.cpp  # Phase 6: offline render evaluator (SYN-016)
+        src/audio/patch_search_browser.cpp  # Phase 6: candidate browser (SYN-016)
         src/audio/wavetable.cpp
         src/audio/wavetable_builder.cpp
         src/audio/physics_modulation.cpp
@@ -325,7 +365,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         src/audio/acoustic_runtime.cpp
         src/audio/steam_audio.cpp)
     add_library(dve::audio_synth ALIAS dve_audio_synth)
-    target_include_directories(dve_audio_synth PUBLIC include)
+    target_include_directories(dve_audio_synth PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_audio_synth PUBLIC cxx_std_23)
     target_link_libraries(dve_audio_synth PUBLIC Threads::Threads)
     if(MSVC)
@@ -338,20 +378,13 @@ if(DVE_BUILD_AUDIO_SYNTH)
         target_link_options(dve_audio_synth PUBLIC -fsanitize=address,undefined)
     endif()
 
-    find_library(DVE_SNDFILE_LIBRARY NAMES sndfile libsndfile)
-    if(NOT DVE_SNDFILE_LIBRARY AND UNIX)
-        find_file(DVE_SNDFILE_RUNTIME_LIBRARY NAMES libsndfile.so.1 libsndfile.dylib
-            PATHS /lib /usr/lib /usr/local/lib
-            PATH_SUFFIXES x86_64-linux-gnu aarch64-linux-gnu)
-        if(DVE_SNDFILE_RUNTIME_LIBRARY)
-            set(DVE_SNDFILE_LIBRARY "${DVE_SNDFILE_RUNTIME_LIBRARY}")
-        endif()
-    endif()
-    if(DVE_SNDFILE_LIBRARY)
+    # libsndfile: the pinned no-MPEG build by default, else the system one (cmake/DveSndFile.cmake).
+    include(DveSndFile)
+    if(DVE_SNDFILE_LINK)
         target_sources(dve_audio_synth PRIVATE src/audio/sndfile_decoder.cpp)
-        target_link_libraries(dve_audio_synth PRIVATE ${DVE_SNDFILE_LIBRARY})
+        target_link_libraries(dve_audio_synth PRIVATE ${DVE_SNDFILE_LINK})
         target_compile_definitions(dve_audio_synth PRIVATE DVE_HAVE_SNDFILE=1)
-        message(STATUS "libsndfile found: FLAC/Ogg/WAV import enabled")
+        message(STATUS "libsndfile (${DVE_SNDFILE_PROVIDER}): FLAC/Ogg/WAV import enabled")
     else()
         message(STATUS "libsndfile not found: native WAV import remains available")
     endif()
@@ -382,7 +415,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
 
     add_library(dve_chiptune_vertical_slice src/chiptune_vertical_slice.cpp)
     add_library(dve::chiptune_vertical_slice ALIAS dve_chiptune_vertical_slice)
-    target_include_directories(dve_chiptune_vertical_slice PUBLIC include)
+    target_include_directories(dve_chiptune_vertical_slice PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_chiptune_vertical_slice PUBLIC cxx_std_23)
     target_link_libraries(dve_chiptune_vertical_slice PUBLIC dve::core dve::audio_synth)
     if(MSVC)
@@ -404,7 +437,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
     if(DVE_ENABLE_VFX_PARTICLES)
         add_library(dve_sprite_vertical_slice_presentation src/sprite_vertical_slice_presentation.cpp)
         add_library(dve::sprite_vertical_slice_presentation ALIAS dve_sprite_vertical_slice_presentation)
-        target_include_directories(dve_sprite_vertical_slice_presentation PUBLIC include)
+        target_include_directories(dve_sprite_vertical_slice_presentation PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
         target_compile_features(dve_sprite_vertical_slice_presentation PUBLIC cxx_std_23)
         target_link_libraries(dve_sprite_vertical_slice_presentation PUBLIC dve::chiptune_vertical_slice dve::core)
         if(MSVC)
@@ -484,7 +517,7 @@ if(DVE_BUILD_AUDIO_SYNTH)
         if(DVE_STEAM_AUDIO_INCLUDE_DIR AND DVE_STEAM_AUDIO_LIBRARY)
             add_library(dve_audio_spatial_steam src/audio/steam_audio_native.cpp)
             add_library(dve::audio_spatial_steam ALIAS dve_audio_spatial_steam)
-            target_include_directories(dve_audio_spatial_steam PUBLIC include PRIVATE ${DVE_STEAM_AUDIO_INCLUDE_DIR})
+            target_include_directories(dve_audio_spatial_steam PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS} PRIVATE ${DVE_STEAM_AUDIO_INCLUDE_DIR})
             target_compile_features(dve_audio_spatial_steam PUBLIC cxx_std_23)
             target_link_libraries(dve_audio_spatial_steam PUBLIC dve::audio_synth PRIVATE ${DVE_STEAM_AUDIO_LIBRARY})
             if(MSVC)
@@ -504,7 +537,7 @@ if(DVE_BUILD_PLATFORM)
         src/platform/application_host.cpp
         src/platform/headless_application_host.cpp)
     add_library(dve::platform ALIAS dve_platform)
-    target_include_directories(dve_platform PUBLIC include)
+    target_include_directories(dve_platform PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_platform PUBLIC cxx_std_23)
     if(MSVC)
         target_compile_options(dve_platform PRIVATE /W4 /permissive-)
@@ -520,8 +553,13 @@ endif()
 # SDL 3.4.12 is the pinned portability dependency. Installed packages are preferred; source
 # fetching is explicit so offline and distro builds remain deterministic.
 set(DVE_SDL3_TARGET "")
+set(DVE_SDL3_FETCHED OFF)
 if(DVE_BUILD_PLATFORM AND DVE_ENABLE_SDL3_HOST)
-    find_package(SDL3 3.2 CONFIG QUIET)
+    # DVE_SDL3_PREFER_FETCH (with DVE_FETCH_SDL3) skips the installed package and links the
+    # pinned SDL statically, so a shipped dve_player has no libSDL3.so dependency (decision D3).
+    if(NOT (DVE_FETCH_SDL3 AND DVE_SDL3_PREFER_FETCH))
+        find_package(SDL3 3.2 CONFIG QUIET)
+    endif()
     if(TARGET SDL3::SDL3)
         set(DVE_SDL3_TARGET SDL3::SDL3)
     elseif(DVE_FETCH_SDL3)
@@ -530,10 +568,20 @@ if(DVE_BUILD_PLATFORM AND DVE_ENABLE_SDL3_HOST)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
         set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
         set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+        # SDL 3.4 hard-requires the XTest header when X11 is on; it is only used for
+        # synthetic input, so build without it on hosts that lack libxtst-dev.
+        if(UNIX AND NOT APPLE AND NOT DEFINED SDL_X11_XTEST)
+            find_path(DVE_XTEST_INCLUDE_DIR X11/extensions/XTest.h)
+            if(NOT DVE_XTEST_INCLUDE_DIR)
+                message(STATUS "SDL3: X11/extensions/XTest.h not found, building with SDL_X11_XTEST=OFF")
+                set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
+            endif()
+        endif()
         FetchContent_Declare(SDL3
             URL https://github.com/libsdl-org/SDL/releases/download/release-3.4.12/SDL3-3.4.12.tar.gz
             URL_HASH SHA256=f07b958a9ac5020fb7a44cadb957f658b2149c3c8abb4f63145fac9303249db7)
         FetchContent_MakeAvailable(SDL3)
+        set(DVE_SDL3_FETCHED ON)
         if(TARGET SDL3::SDL3)
             set(DVE_SDL3_TARGET SDL3::SDL3)
         elseif(TARGET SDL3::SDL3-static)
@@ -544,13 +592,26 @@ if(DVE_BUILD_PLATFORM AND DVE_ENABLE_SDL3_HOST)
     if(DVE_SDL3_TARGET)
         add_library(dve_platform_sdl3 src/platform/sdl_application_host.cpp)
         add_library(dve::platform_sdl3 ALIAS dve_platform_sdl3)
-        target_include_directories(dve_platform_sdl3 PUBLIC include)
+        target_include_directories(dve_platform_sdl3 PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
         target_compile_features(dve_platform_sdl3 PUBLIC cxx_std_23)
         target_link_libraries(dve_platform_sdl3 PUBLIC dve::platform ${DVE_SDL3_TARGET})
         if(MSVC)
             target_compile_options(dve_platform_sdl3 PRIVATE /W4 /permissive-)
         else()
             target_compile_options(dve_platform_sdl3 PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        endif()
+        # SDL audio output/input devices. Shared by the desktop editor and dve_player.
+        if(TARGET dve_audio_synth)
+            add_library(dve_audio_sdl3 src/audio/sdl_synth_audio_device.cpp src/audio/sdl_audio_input_device.cpp)
+            add_library(dve::audio_sdl3 ALIAS dve_audio_sdl3)
+            target_include_directories(dve_audio_sdl3 PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+            target_compile_features(dve_audio_sdl3 PUBLIC cxx_std_23)
+            target_link_libraries(dve_audio_sdl3 PUBLIC dve::audio_synth ${DVE_SDL3_TARGET})
+            if(MSVC)
+                target_compile_options(dve_audio_sdl3 PRIVATE /W4 /permissive-)
+            else()
+                target_compile_options(dve_audio_sdl3 PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+            endif()
         endif()
     else()
         message(STATUS "SDL3 3.2+ was not found; dve_desktop_editor is disabled (contract shim remains available to tests)")
@@ -562,7 +623,7 @@ if(DVE_BUILD_RHI)
         src/rhi/device.cpp
         src/rhi/null_device.cpp)
     add_library(dve::rhi ALIAS dve_rhi)
-    target_include_directories(dve_rhi PUBLIC include)
+    target_include_directories(dve_rhi PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_rhi PUBLIC cxx_std_23)
     if(MSVC)
         target_compile_options(dve_rhi PRIVATE /W4 /permissive-)
@@ -578,7 +639,7 @@ endif()
 if(DVE_BUILD_RHI AND DVE_ENABLE_VULKAN_BUFFER_BACKEND)
     add_library(dve_rhi_vulkan src/rhi/vulkan_device.cpp)
     add_library(dve::rhi_vulkan ALIAS dve_rhi_vulkan)
-    target_include_directories(dve_rhi_vulkan PUBLIC include PRIVATE src/rhi)
+    target_include_directories(dve_rhi_vulkan PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS} PRIVATE src/rhi)
     target_compile_features(dve_rhi_vulkan PUBLIC cxx_std_23)
     target_link_libraries(dve_rhi_vulkan PUBLIC dve::rhi PRIVATE ${CMAKE_DL_LIBS})
     if(MSVC)
@@ -597,7 +658,7 @@ if(DVE_BUILD_DEVICE_TEST_RUNNER AND DVE_BUILD_RHI)
         src/simulation_kernel_conformance.cpp
         src/simulation_production_conformance.cpp)
     add_library(dve::simulation_device_validation ALIAS dve_simulation_device_validation)
-    target_include_directories(dve_simulation_device_validation PUBLIC include)
+    target_include_directories(dve_simulation_device_validation PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_simulation_device_validation PUBLIC cxx_std_23)
     target_link_libraries(dve_simulation_device_validation PUBLIC dve::core dve::rhi)
     if(MSVC)
@@ -627,7 +688,7 @@ if(DVE_BUILD_RHI)
         src/render/mesh_rhi_mirror.cpp
         src/render/dashr_atlas.cpp
         src/render/dashr_shell.cpp
-        src/render/dashr_live_instance.cpp
+        src/render/dashr_live_surface.cpp
         src/render/mesh_heap.cpp
         src/render/polygon_renderer.cpp
         src/render/sprite_renderer.cpp
@@ -647,12 +708,13 @@ if(DVE_BUILD_RHI)
         src/render/main_material_table.cpp
         src/render/shadow_material_table.cpp
         src/render/voxel_reference_renderer.cpp
+        src/render/radiance_cascades_spwi.cpp
         src/render/simulation_gpu.cpp)
     if(DVE_ENABLE_CPU_HAIR)
         target_sources(dve_render_bridge PRIVATE src/render/cpu_hair_renderer.cpp)
     endif()
     add_library(dve::render_bridge ALIAS dve_render_bridge)
-    target_include_directories(dve_render_bridge PUBLIC include)
+    target_include_directories(dve_render_bridge PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_render_bridge PUBLIC cxx_std_23)
     target_link_libraries(dve_render_bridge PUBLIC dve::core dve::rhi)
     if(MSVC)
@@ -668,6 +730,8 @@ if(DVE_BUILD_RHI)
     target_link_libraries(dve_gabor_volume_v151_demo PRIVATE dve::render_bridge)
     add_executable(dve_material_preview apps/material_preview_v174.cpp)
     target_link_libraries(dve_material_preview PRIVATE dve::render_bridge)
+    add_executable(dve_rc_spwi_bench apps/rc_spwi_bench.cpp)
+    target_link_libraries(dve_rc_spwi_bench PRIVATE dve::render_bridge)
 endif()
 
 if(DVE_BUILD_ASSET_COOKER OR DVE_BUILD_BENCHMARK OR DVE_BUILD_EDITOR OR DVE_BUILD_TESTS)
@@ -679,11 +743,26 @@ if(DVE_BUILD_ASSET_COOKER OR DVE_BUILD_BENCHMARK OR DVE_BUILD_EDITOR OR
    (DVE_BUILD_TESTS AND DVE_BUILD_ASSET_PIPELINE_TESTS))
     find_package(PNG REQUIRED)
     find_package(JPEG REQUIRED)
-    add_library(dve_asset_pipeline src/asset_cooker.cpp src/polygon_cooker.cpp src/brick_palette_asset_pipeline.cpp src/heightmap_terrain.cpp)
+    add_library(dve_meshoptimizer_remesh STATIC
+        third_party/meshoptimizer_v1_3/src/allocator.cpp
+        third_party/meshoptimizer_v1_3/src/indexgenerator.cpp
+        third_party/meshoptimizer_v1_3/src/remesher.cpp
+        third_party/meshoptimizer_v1_3/src/tangentspace.cpp)
+    target_include_directories(dve_meshoptimizer_remesh PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/meshoptimizer_v1_3/src)
+    target_compile_features(dve_meshoptimizer_remesh PUBLIC cxx_std_11)
+
+    add_library(dve_asset_pipeline
+        src/asset_cooker.cpp
+        src/polygon_cooker.cpp
+        src/brick_palette_asset_pipeline.cpp
+        src/heightmap_terrain.cpp
+        src/mesh_remesh.cpp)
     add_library(dve::asset_pipeline ALIAS dve_asset_pipeline)
-    target_include_directories(dve_asset_pipeline PUBLIC include)
+    target_include_directories(dve_asset_pipeline PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_asset_pipeline PUBLIC cxx_std_23)
-    target_link_libraries(dve_asset_pipeline PUBLIC dve::core PNG::PNG JPEG::JPEG)
+    target_link_libraries(dve_asset_pipeline PUBLIC dve::core PNG::PNG JPEG::JPEG
+        PRIVATE dve_meshoptimizer_remesh)
     if(MSVC)
         target_compile_options(dve_asset_pipeline PRIVATE /W4 /permissive-)
     else()
@@ -702,7 +781,7 @@ if(DVE_BUILD_ASSET_COOKER OR DVE_BUILD_BENCHMARK OR DVE_BUILD_EDITOR OR
         src/sprite_production_tools.cpp
         src/sprite_pixel_art.cpp)
     add_library(dve::sprite_tools ALIAS dve_sprite_tools)
-    target_include_directories(dve_sprite_tools PUBLIC include)
+    target_include_directories(dve_sprite_tools PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_sprite_tools PUBLIC cxx_std_23)
     target_link_libraries(dve_sprite_tools PUBLIC dve::core PNG::PNG JPEG::JPEG)
     if(MSVC)
@@ -736,6 +815,7 @@ if(DVE_BUILD_EDITOR)
     endif()
     add_library(dve_editor
         src/editor_document.cpp
+        src/editor_scene_export.cpp
         src/editor_scene_composition.cpp
         src/editor_component_inspector.cpp
         src/editor_control_rig.cpp
@@ -747,6 +827,9 @@ if(DVE_BUILD_EDITOR)
         src/editor_asset_browser.cpp
         src/editor_ai_tools.cpp
         src/editor_settings.cpp
+        src/editor_ui_zoom.cpp
+        src/editor_piano_keyboard.cpp
+        src/editor_midi.cpp
         src/editor_shortcuts.cpp
         src/editor_camera_sequencer.cpp
         src/editor_cinematic_camera.cpp
@@ -770,7 +853,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_audio_event.cpp
         src/editor_platform_bridge.cpp)
     add_library(dve::editor ALIAS dve_editor)
-    target_include_directories(dve_editor PUBLIC include)
+    target_include_directories(dve_editor PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_editor PUBLIC cxx_std_23)
     target_link_libraries(dve_editor PUBLIC dve::core dve::asset_pipeline dve::sprite_tools dve::platform dve::audio_synth)
     if(TARGET dve_sprite_vertical_slice_presentation)
@@ -791,6 +874,9 @@ if(DVE_BUILD_EDITOR)
     target_link_libraries(dve_asset_index PRIVATE dve::editor)
     add_executable(dve_prefab_tool apps/dve_prefab_tool.cpp)
     target_link_libraries(dve_prefab_tool PRIVATE dve::editor)
+    # Offline editor-scene -> DVOXSCENE + .dvox exporter (packaging Phase 4, decision D2).
+    add_executable(dve_export_scene apps/dve_export_scene.cpp)
+    target_link_libraries(dve_export_scene PRIVATE dve::editor)
     add_executable(dve_camera_settings_v135_demo apps/camera_settings_v135_demo.cpp)
     target_link_libraries(dve_camera_settings_v135_demo PRIVATE dve::editor)
     add_executable(dve_camera_runtime_v136_demo apps/camera_runtime_v136_demo.cpp)
@@ -807,23 +893,31 @@ if(DVE_BUILD_EDITOR)
     if(DVE_BUILD_NATIVE_EDITOR AND TARGET dve_platform_sdl3)
         add_library(dve_editor_sdl_canvas src/editor_sdl_canvas.cpp)
         add_library(dve::editor_sdl_canvas ALIAS dve_editor_sdl_canvas)
-        target_include_directories(dve_editor_sdl_canvas PUBLIC include)
+        target_include_directories(dve_editor_sdl_canvas PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
         target_compile_features(dve_editor_sdl_canvas PUBLIC cxx_std_23)
         target_link_libraries(dve_editor_sdl_canvas PUBLIC dve::editor dve::platform_sdl3 ${DVE_SDL3_TARGET})
+        # Optional scalable text for UI zoom. Without SDL3_ttf the canvas uses SDL's debug font
+        # with integer magnification (still zoomed and legible, just blockier).
+        if(DVE_ENABLE_SDL3_TTF AND DVE_SDL3_FETCHED)
+            # An installed SDL3_ttf links the installed (shared) SDL3, which cannot be mixed
+            # with the pinned static SDL.
+            message(STATUS "DVE SDL editor text: SDL3_ttf skipped with the fetched static SDL3, using scaled debug text")
+        elseif(DVE_ENABLE_SDL3_TTF)
+            find_package(SDL3_ttf CONFIG QUIET)
+            if(TARGET SDL3_ttf::SDL3_ttf)
+                target_link_libraries(dve_editor_sdl_canvas PRIVATE SDL3_ttf::SDL3_ttf)
+                target_compile_definitions(dve_editor_sdl_canvas PRIVATE DVE_HAVE_SDL_TTF=1)
+                message(STATUS "DVE SDL editor text: SDL3_ttf ${SDL3_ttf_VERSION}")
+            else()
+                message(STATUS "DVE SDL editor text: SDL3_ttf not found, using scaled debug text")
+            endif()
+        else()
+            message(STATUS "DVE SDL editor text: SDL3_ttf disabled, using scaled debug text")
+        endif()
         if(MSVC)
             target_compile_options(dve_editor_sdl_canvas PRIVATE /W4 /permissive-)
         else()
             target_compile_options(dve_editor_sdl_canvas PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
-        endif()
-        add_library(dve_audio_sdl3 src/audio/sdl_synth_audio_device.cpp src/audio/sdl_audio_input_device.cpp)
-        add_library(dve::audio_sdl3 ALIAS dve_audio_sdl3)
-        target_include_directories(dve_audio_sdl3 PUBLIC include)
-        target_compile_features(dve_audio_sdl3 PUBLIC cxx_std_23)
-        target_link_libraries(dve_audio_sdl3 PUBLIC dve::audio_synth ${DVE_SDL3_TARGET})
-        if(MSVC)
-            target_compile_options(dve_audio_sdl3 PRIVATE /W4 /permissive-)
-        else()
-            target_compile_options(dve_audio_sdl3 PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
         endif()
         add_executable(dve_desktop_editor apps/dve_desktop_editor.cpp)
         target_link_libraries(dve_desktop_editor PRIVATE dve::editor_sdl_canvas dve::audio_sdl3)
@@ -836,6 +930,21 @@ if(DVE_BUILD_EDITOR)
             target_include_directories(dve_native_editor_x11 PRIVATE ${X11_INCLUDE_DIR})
             target_link_libraries(dve_native_editor_x11 PRIVATE dve::editor ${X11_LIBRARIES})
             target_compile_definitions(dve_native_editor_x11 PRIVATE DVE_HAVE_X11=1)
+            # UI zoom: crisp scalable text via Xft when available; otherwise the host picks the
+            # largest core misc-fixed bitmap face (6x13 .. 10x20) that fits the zoomed text size.
+            set(DVE_X11_TEXT "core bitmap fonts")
+            if(DVE_ENABLE_XFT)
+                find_package(PkgConfig QUIET)
+                if(PkgConfig_FOUND)
+                    pkg_check_modules(DVE_XFT QUIET IMPORTED_TARGET xft)
+                    if(DVE_XFT_FOUND)
+                        target_link_libraries(dve_native_editor_x11 PRIVATE PkgConfig::DVE_XFT)
+                        target_compile_definitions(dve_native_editor_x11 PRIVATE DVE_HAVE_XFT=1)
+                        set(DVE_X11_TEXT "Xft ${DVE_XFT_VERSION}")
+                    endif()
+                endif()
+            endif()
+            message(STATUS "DVE X11 editor text: ${DVE_X11_TEXT}")
         else()
             message(STATUS "X11 development files were not found; native editor executable is disabled")
         endif()
@@ -846,6 +955,10 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_v235_foundations_tests tests/test_v235_foundations.cpp)
     target_link_libraries(dve_v235_foundations_tests PRIVATE dve::core)
     add_test(NAME dve_v235_foundations_tests COMMAND dve_v235_foundations_tests)
+    add_executable(dve_rc2d_tests tests/test_radiance_cascades_2d.cpp)
+    target_link_libraries(dve_rc2d_tests PRIVATE dve::core)
+    add_test(NAME dve_rc2d_tests COMMAND dve_rc2d_tests)
+    set_tests_properties(dve_rc2d_tests PROPERTIES PROCESSORS 2)
     if(TARGET manifold)
         add_executable(dve_print_export_tests tests/test_print_export.cpp)
         target_link_libraries(dve_print_export_tests PRIVATE dve::core manifold)
@@ -1007,6 +1120,10 @@ if(DVE_BUILD_TESTS)
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/validate_shaders.sh")
     find_program(DVE_PYTHON3_EXECUTABLE python3)
     if(DVE_PYTHON3_EXECUTABLE)
+        add_test(NAME dve_shader_contract_validator_self_test
+            COMMAND ${DVE_PYTHON3_EXECUTABLE}
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/validate_shader_contracts.py"
+                    --self-test)
         add_test(NAME dve_compiled_shader_reflection_self_test
             COMMAND ${DVE_PYTHON3_EXECUTABLE}
                     "${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_compiled_shader_reflection.py"
@@ -1014,7 +1131,7 @@ if(DVE_BUILD_TESTS)
     endif()
 endif()
 
-target_include_directories(dve_core PUBLIC include)
+target_include_directories(dve_core PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
 target_compile_features(dve_core PUBLIC cxx_std_23)
 
 if(MSVC)
@@ -1140,7 +1257,7 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_BOX2D_CONTRACT_TESTS)
         tests/box2d_contract/box2d_contract_stub.cpp)
     target_include_directories(dve_box2d_contract_backend
         PRIVATE tests/box2d_contract/include
-        PUBLIC include)
+        PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_box2d_contract_backend PUBLIC cxx_std_23)
     target_compile_definitions(dve_box2d_contract_backend PUBLIC DVE_HAVE_BOX2D=1)
     target_link_libraries(dve_box2d_contract_backend PUBLIC Threads::Threads)
@@ -1166,7 +1283,7 @@ if(WIN32 AND DVE_BUILD_RHI)
         src/gpu/d3d12_brickmap_backend.cpp
         src/gpu/d3d12_runtime_brickmap_world.cpp)
     add_library(dve::rhi_d3d12 ALIAS dve_rhi_d3d12)
-    target_include_directories(dve_rhi_d3d12 PUBLIC include)
+    target_include_directories(dve_rhi_d3d12 PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_rhi_d3d12 PUBLIC cxx_std_23)
     target_link_libraries(dve_rhi_d3d12 PUBLIC dve::core dve::rhi d3d12 dxgi)
     if(MSVC)
@@ -1338,6 +1455,8 @@ if(DVE_ENABLE_JOLT)
         set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
         set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
         set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+        # MSVC: Jolt defaults to the static CRT (/MT); DVE and every other dependency use the DLL CRT (/MD).
+        set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
         add_subdirectory("${DVE_JOLT_SOURCE_DIR}/Build" "${CMAKE_BINARY_DIR}/_deps/jolt-build" EXCLUDE_FROM_ALL)
         set(DVE_JOLT_TARGET Jolt)
     endif()
@@ -1362,6 +1481,8 @@ if(DVE_ENABLE_JOLT)
         set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
         set(JPH_USE_MTL OFF CACHE BOOL "" FORCE)
         set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+        # MSVC: Jolt defaults to the static CRT (/MT); DVE and every other dependency use the DLL CRT (/MD).
+        set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
             JoltPhysics
             GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
@@ -1505,8 +1626,13 @@ if(DVE_ENABLE_LUA)
         endif()
     endif()
 
+    set(DVE_LUA_LICENSE_DIR "")
+    if(NOT DVE_LUA_TARGET AND DVE_FETCH_LUA)
+        include(DveLua)
+    endif()
+
     if(NOT DVE_LUA_TARGET)
-        message(FATAL_ERROR "DVE_ENABLE_LUA requires a Lua 5.4 development package or runtime library")
+        message(FATAL_ERROR "DVE_ENABLE_LUA requires a Lua 5.4 development package or runtime library (or DVE_FETCH_LUA=ON)")
     endif()
 
     target_sources(dve_core PRIVATE src/game_script.cpp)
@@ -1544,11 +1670,81 @@ if(DVE_ENABLE_LUA)
     endif()
 endif()
 
+# dve_player (packaging/player plan, Phase 2): a game runtime that never links dve_editor.
+# dve_player_runtime is platform-neutral (no SDL): boot from a ContentSource, fixed-step loop,
+# input bindings, Lua when built, and the CPU renderer behind IPlayerRenderer. The dve_player
+# executable adds the SDL3 window/texture presenter and the optional audio device.
+if(DVE_BUILD_PLAYER AND DVE_BUILD_RHI AND DVE_BUILD_PLATFORM)
+    add_library(dve_player_runtime
+        src/player/frame_image.cpp
+        src/player/player_input.cpp
+        src/player/cpu_player_renderer.cpp
+        src/player/player_app.cpp)
+    add_library(dve::player_runtime ALIAS dve_player_runtime)
+    target_include_directories(dve_player_runtime PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_compile_features(dve_player_runtime PUBLIC cxx_std_23)
+    target_link_libraries(dve_player_runtime PUBLIC dve::core dve::render_bridge dve::platform)
+    if(MSVC)
+        target_compile_options(dve_player_runtime PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_player_runtime PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+
+    if(TARGET dve_platform_sdl3)
+        add_executable(dve_player apps/dve_player.cpp)
+        target_link_libraries(dve_player PRIVATE dve::player_runtime dve::platform_sdl3)
+        if(TARGET dve_audio_sdl3)
+            target_link_libraries(dve_player PRIVATE dve::audio_sdl3)
+            target_compile_definitions(dve_player PRIVATE DVE_PLAYER_HAVE_AUDIO=1)
+        endif()
+        if(NOT MSVC)
+            target_compile_options(dve_player PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
+        endif()
+        message(STATUS "dve_player: enabled (SDL3 target ${DVE_SDL3_TARGET})")
+
+        # The player must never link the editor. Walk the link closure at configure time.
+        set(_dve_player_closure "")
+        set(_dve_player_pending dve_player_runtime dve_platform_sdl3)
+        if(TARGET dve_audio_sdl3)
+            list(APPEND _dve_player_pending dve_audio_sdl3)
+        endif()
+        while(_dve_player_pending)
+            list(POP_FRONT _dve_player_pending _dve_item)
+            if(_dve_item MATCHES "^dve::(.*)$")
+                set(_dve_item "dve_${CMAKE_MATCH_1}")
+            endif()
+            if(NOT TARGET ${_dve_item} OR _dve_item IN_LIST _dve_player_closure)
+                continue()
+            endif()
+            list(APPEND _dve_player_closure ${_dve_item})
+            get_target_property(_dve_aliased ${_dve_item} ALIASED_TARGET)
+            if(_dve_aliased)
+                list(APPEND _dve_player_pending ${_dve_aliased})
+            endif()
+            foreach(_dve_property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+                get_target_property(_dve_links ${_dve_item} ${_dve_property})
+                if(_dve_links)
+                    list(APPEND _dve_player_pending ${_dve_links})
+                endif()
+            endforeach()
+        endwhile()
+        if("dve_editor" IN_LIST _dve_player_closure)
+            message(FATAL_ERROR "dve_player must not link dve_editor (link closure: ${_dve_player_closure})")
+        endif()
+        list(JOIN _dve_player_closure "\n" _dve_player_closure_text)
+        file(WRITE "${CMAKE_BINARY_DIR}/dve_player_link_closure.txt" "${_dve_player_closure_text}\n")
+    else()
+        message(STATUS "dve_player: disabled (needs SDL3; dve_player_runtime is still built)")
+    endif()
+endif()
+
 if(DVE_BUILD_ASSET_COOKER)
     add_executable(dve_cook_model apps/dve_cook_model.cpp)
     target_link_libraries(dve_cook_model PRIVATE dve::asset_pipeline)
     add_executable(dve_cook_mesh apps/dve_cook_mesh.cpp)
     target_link_libraries(dve_cook_mesh PRIVATE dve::asset_pipeline)
+    add_executable(dve_remesh_mesh apps/dve_remesh_mesh.cpp)
+    target_link_libraries(dve_remesh_mesh PRIVATE dve::asset_pipeline)
 endif()
 
 if(DVE_BUILD_BENCHMARK AND DVE_BUILD_RHI)
@@ -1565,7 +1761,7 @@ if(DVE_BUILD_TESTS)
         target_compile_features(dve_fake_sdl3 PUBLIC cxx_std_23)
 
         add_library(dve_platform_sdl3_contract STATIC src/platform/sdl_application_host.cpp)
-        target_include_directories(dve_platform_sdl3_contract PUBLIC include PRIVATE tests/fake_sdl3)
+        target_include_directories(dve_platform_sdl3_contract PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS} PRIVATE tests/fake_sdl3)
         target_compile_features(dve_platform_sdl3_contract PUBLIC cxx_std_23)
         target_link_libraries(dve_platform_sdl3_contract PUBLIC dve::platform dve_fake_sdl3)
         if(MSVC)
@@ -1581,7 +1777,7 @@ if(DVE_BUILD_TESTS)
 
         if(DVE_BUILD_EDITOR)
             add_library(dve_editor_sdl_canvas_contract STATIC src/editor_sdl_canvas.cpp)
-            target_include_directories(dve_editor_sdl_canvas_contract PUBLIC include PRIVATE tests/fake_sdl3)
+            target_include_directories(dve_editor_sdl_canvas_contract PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS} PRIVATE tests/fake_sdl3)
             target_compile_features(dve_editor_sdl_canvas_contract PUBLIC cxx_std_23)
             target_link_libraries(dve_editor_sdl_canvas_contract PUBLIC dve::editor dve_platform_sdl3_contract dve_fake_sdl3)
             if(MSVC)
@@ -1590,7 +1786,7 @@ if(DVE_BUILD_TESTS)
                 target_compile_options(dve_editor_sdl_canvas_contract PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
             endif()
             add_library(dve_audio_sdl3_contract STATIC src/audio/sdl_synth_audio_device.cpp src/audio/sdl_audio_input_device.cpp)
-            target_include_directories(dve_audio_sdl3_contract PUBLIC include PRIVATE tests/fake_sdl3)
+            target_include_directories(dve_audio_sdl3_contract PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS} PRIVATE tests/fake_sdl3)
             target_compile_features(dve_audio_sdl3_contract PUBLIC cxx_std_23)
             target_link_libraries(dve_audio_sdl3_contract PUBLIC dve::audio_synth dve_fake_sdl3)
             if(MSVC)
@@ -1602,6 +1798,11 @@ if(DVE_BUILD_TESTS)
             target_include_directories(dve_sdl_synth_audio_tests PRIVATE tests/fake_sdl3)
             target_link_libraries(dve_sdl_synth_audio_tests PRIVATE dve_audio_sdl3_contract dve_fake_sdl3)
             add_test(NAME dve_sdl_synth_audio_tests COMMAND dve_sdl_synth_audio_tests)
+
+            add_executable(dve_editor_sdl_canvas_zoom_tests tests/test_editor_sdl_canvas_zoom.cpp)
+            target_include_directories(dve_editor_sdl_canvas_zoom_tests PRIVATE tests/fake_sdl3)
+            target_link_libraries(dve_editor_sdl_canvas_zoom_tests PRIVATE dve_editor_sdl_canvas_contract)
+            add_test(NAME dve_editor_sdl_canvas_zoom_tests COMMAND dve_editor_sdl_canvas_zoom_tests)
 
             add_executable(dve_desktop_editor_contract apps/dve_desktop_editor.cpp)
             target_include_directories(dve_desktop_editor_contract PRIVATE tests/fake_sdl3)
@@ -1616,6 +1817,15 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_platform_rhi_tests tests/test_platform_rhi.cpp)
         target_link_libraries(dve_platform_rhi_tests PRIVATE dve::platform dve::rhi dve::render_bridge)
         add_test(NAME dve_platform_rhi_tests COMMAND dve_platform_rhi_tests)
+    endif()
+
+    if(DVE_BUILD_RHI)
+        add_executable(dve_rhi_mrt_tests tests/test_rhi_mrt.cpp)
+        target_link_libraries(dve_rhi_mrt_tests PRIVATE dve::rhi)
+        add_test(NAME dve_rhi_mrt_tests COMMAND dve_rhi_mrt_tests)
+        add_executable(dve_compressed_texture_tests tests/test_compressed_texture.cpp)
+        target_link_libraries(dve_compressed_texture_tests PRIVATE dve::core dve::rhi)
+        add_test(NAME dve_compressed_texture_tests COMMAND dve_compressed_texture_tests)
     endif()
 
     if(TARGET dve_rhi_vulkan)
@@ -1647,6 +1857,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_vulkan_live_environment_renderer_tests tests/test_vulkan_live_environment_renderer.cpp)
         target_link_libraries(dve_vulkan_live_environment_renderer_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_live_environment_renderer_tests COMMAND dve_vulkan_live_environment_renderer_tests)
+        add_executable(dve_vulkan_dashr_tests tests/test_vulkan_dashr.cpp)
+        target_link_libraries(dve_vulkan_dashr_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
+        add_test(NAME dve_vulkan_dashr_tests COMMAND dve_vulkan_dashr_tests)
         add_executable(dve_vulkan_shadow_material_table_tests tests/test_vulkan_shadow_material_table.cpp)
         target_link_libraries(dve_vulkan_shadow_material_table_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_shadow_material_table_tests COMMAND dve_vulkan_shadow_material_table_tests)
@@ -1654,7 +1867,7 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_vulkan_main_material_table_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_main_material_table_tests COMMAND dve_vulkan_main_material_table_tests)
         if(EXISTS "/usr/lib/chromium/vk_swiftshader_icd.json")
-            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests PROPERTIES
+            set_tests_properties(dve_vulkan_buffer_tests dve_vulkan_graphics_tests dve_v193_vulkan_sprite_tests dve_depth_only_rhi_tests dve_vulkan_compute_tests dve_vulkan_camera_outputs_tests dve_vulkan_environment_lighting_tests dve_vulkan_live_environment_renderer_tests dve_vulkan_dashr_tests dve_vulkan_shadow_material_table_tests dve_vulkan_main_material_table_tests PROPERTIES
                 ENVIRONMENT "VK_ICD_FILENAMES=/usr/lib/chromium/vk_swiftshader_icd.json;DVE_REQUIRE_VULKAN=1")
         endif()
     endif()
@@ -1710,6 +1923,9 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_audio_synth_tests PRIVATE dve::audio_synth)
         target_compile_definitions(dve_audio_synth_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME dve_audio_synth_tests COMMAND dve_audio_synth_tests)
+        add_executable(dve_patch_evaluator_tests tests/test_patch_evaluator.cpp)
+        target_link_libraries(dve_patch_evaluator_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_patch_evaluator_tests COMMAND dve_patch_evaluator_tests)
         add_executable(dve_audio_synth_preset_tests tests/test_audio_synth_presets.cpp)
         target_link_libraries(dve_audio_synth_preset_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_preset_tests COMMAND dve_audio_synth_preset_tests)
@@ -1749,6 +1965,29 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_synth_genetics_tests tests/test_audio_synth_genetics.cpp)
         target_link_libraries(dve_audio_synth_genetics_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_genetics_tests COMMAND dve_audio_synth_genetics_tests)
+        add_executable(dve_audio_synth_patch_search_tests tests/test_patch_search.cpp)
+        target_link_libraries(dve_audio_synth_patch_search_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_patch_search_tests COMMAND dve_audio_synth_patch_search_tests)
+        add_executable(dve_patch_search_integration_tests tests/test_patch_search_integration.cpp)
+        target_link_libraries(dve_patch_search_integration_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_patch_search_integration_tests COMMAND dve_patch_search_integration_tests)
+
+        # Keep the deterministic release acceptance checks in CTest. The
+        # polyphony deadline check is excluded because shared CI runner timing
+        # is not a reliable real-time performance measurement.
+        add_executable(dve_synth_release_acceptance_tests tests/test_synth_release_acceptance.cpp)
+        target_link_libraries(dve_synth_release_acceptance_tests PRIVATE dve::audio_synth)
+        foreach(check analog_pitch wavetable_continuity physics_determinism stereo_mono_compat morph_no_nan mpe_note_isolation)
+            add_test(NAME dve_synth_release_acceptance_${check}
+                     COMMAND dve_synth_release_acceptance_tests ${check})
+        endforeach()
+
+        add_executable(dve_midi_input_session_tests tests/test_midi_input_session.cpp)
+        target_link_libraries(dve_midi_input_session_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_midi_input_session_tests COMMAND dve_midi_input_session_tests)
+        add_executable(dve_midi_output_session_tests tests/test_midi_output_session.cpp)
+        target_link_libraries(dve_midi_output_session_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_midi_output_session_tests COMMAND dve_midi_output_session_tests)
         add_executable(dve_audio_synth_phase3_serialization_tests tests/test_audio_synth_phase3_serialization.cpp)
         target_link_libraries(dve_audio_synth_phase3_serialization_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_phase3_serialization_tests COMMAND dve_audio_synth_phase3_serialization_tests)
@@ -1788,9 +2027,18 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_synth_spectral_integration_tests tests/test_audio_synth_spectral_integration.cpp)
         target_link_libraries(dve_audio_synth_spectral_integration_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_spectral_integration_tests COMMAND dve_audio_synth_spectral_integration_tests)
+        add_executable(dve_audio_synth_features_tests tests/test_audio_synth_features.cpp)
+        target_link_libraries(dve_audio_synth_features_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_synth_features_tests COMMAND dve_audio_synth_features_tests)
         add_executable(dve_audio_critique_fixes_tests tests/test_audio_critique_fixes.cpp)
         target_link_libraries(dve_audio_critique_fixes_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_critique_fixes_tests COMMAND dve_audio_critique_fixes_tests)
+        add_executable(dve_audio_realtime_handoff_tests tests/test_audio_realtime_handoff.cpp)
+        target_link_libraries(dve_audio_realtime_handoff_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_realtime_handoff_tests COMMAND dve_audio_realtime_handoff_tests)
+        add_executable(dve_audio_patch_search_browser_tests tests/test_patch_search_browser.cpp)
+        target_link_libraries(dve_audio_patch_search_browser_tests PRIVATE dve::audio_synth)
+        add_test(NAME dve_audio_patch_search_browser_tests COMMAND dve_audio_patch_search_browser_tests)
         add_executable(dve_audio_synth_resonator_tests tests/test_audio_synth_resonator.cpp)
         target_link_libraries(dve_audio_synth_resonator_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_synth_resonator_tests COMMAND dve_audio_synth_resonator_tests)
@@ -1825,6 +2073,14 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_audio_edit_tests tests/test_audio_edit.cpp)
         target_link_libraries(dve_audio_edit_tests PRIVATE dve::audio_synth)
         add_test(NAME dve_audio_edit_tests COMMAND dve_audio_edit_tests)
+        # WAV/FLAC/Ogg Vorbis/Ogg Opus decoding and "MP3 is not needed at run time" (DVE_FETCH_SNDFILE).
+        add_executable(dve_audio_sndfile_format_tests tests/test_audio_sndfile_formats.cpp)
+        target_link_libraries(dve_audio_sndfile_format_tests PRIVATE dve::audio_synth)
+        target_compile_definitions(dve_audio_sndfile_format_tests PRIVATE
+            DVE_TEST_SNDFILE_PROVIDER="${DVE_SNDFILE_PROVIDER}"
+            $<$<BOOL:${DVE_SNDFILE_LINK}>:DVE_HAVE_SNDFILE=1>)
+        add_test(NAME dve_audio_sndfile_format_tests
+            COMMAND dve_audio_sndfile_format_tests ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/audio_formats)
         add_executable(dve_audio_workstation_tests tests/test_audio_workstation.cpp)
         target_link_libraries(dve_audio_workstation_tests PRIVATE dve::audio_synth)
         if(DVE_BUILD_EDITOR)
@@ -1885,6 +2141,9 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_physics_critique_fixes_tests tests/test_physics_critique_fixes.cpp)
     target_link_libraries(dve_physics_critique_fixes_tests PRIVATE dve::core)
     add_test(NAME dve_physics_critique_fixes_tests COMMAND dve_physics_critique_fixes_tests)
+    add_executable(dve_damage_clip_tests tests/test_damage_clip.cpp)
+    target_link_libraries(dve_damage_clip_tests PRIVATE dve::core)
+    add_test(NAME dve_damage_clip_tests COMMAND dve_damage_clip_tests)
 
     add_executable(dve_v234_physics_neutral_hooks_tests
         tests/test_physics_neutral_hooks_v234.cpp)
@@ -1994,6 +2253,10 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_game_world_tests PRIVATE dve::core)
     add_test(NAME dve_game_world_tests COMMAND dve_game_world_tests)
 
+    add_executable(dve_game_save_tests tests/test_game_save.cpp)
+    target_link_libraries(dve_game_save_tests PRIVATE dve::core)
+    add_test(NAME dve_game_save_tests COMMAND dve_game_save_tests)
+
     add_executable(dve_animation_tests tests/test_animation.cpp)
     target_link_libraries(dve_animation_tests PRIVATE dve::core)
     add_test(NAME dve_animation_tests COMMAND dve_animation_tests)
@@ -2073,11 +2336,14 @@ if(DVE_BUILD_TESTS)
     add_executable(dve_live_editor_mcp_core_tests tests/test_live_editor_mcp_core.cpp)
     target_link_libraries(dve_live_editor_mcp_core_tests PRIVATE dve::core)
     add_test(NAME dve_live_editor_mcp_core_tests COMMAND dve_live_editor_mcp_core_tests)
+    # 77: skipped where the live editor's private IPC is not implemented (Windows).
+    set_tests_properties(dve_live_editor_mcp_core_tests PROPERTIES SKIP_RETURN_CODE 77)
 
     if(DVE_BUILD_EDITOR)
         add_executable(dve_live_editor_mcp_tests tests/test_live_editor_mcp.cpp)
         target_link_libraries(dve_live_editor_mcp_tests PRIVATE dve::editor)
         add_test(NAME dve_live_editor_mcp_tests COMMAND dve_live_editor_mcp_tests)
+        set_tests_properties(dve_live_editor_mcp_tests PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     if(UNIX AND NOT APPLE)
@@ -2095,6 +2361,10 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_asset_cooker_tests PRIVATE dve::asset_pipeline)
         target_compile_definitions(dve_asset_cooker_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME dve_asset_cooker_tests COMMAND dve_asset_cooker_tests)
+
+        add_executable(dve_mesh_remesh_tests tests/test_mesh_remesh.cpp)
+        target_link_libraries(dve_mesh_remesh_tests PRIVATE dve::asset_pipeline)
+        add_test(NAME dve_mesh_remesh_tests COMMAND dve_mesh_remesh_tests)
     endif()
 
     add_executable(dve_text3d_tests tests/test_text3d.cpp)
@@ -2126,6 +2396,145 @@ if(DVE_BUILD_TESTS)
     target_compile_definitions(dve_runtime_scene_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME dve_runtime_scene_tests COMMAND dve_runtime_scene_tests)
 
+    # Phase 1 of the packaging/player plan: ContentSource (loose folder or .dvepak),
+    # in-memory loaders, runtime scene loading into GameWorld, and the game.dvegame manifest.
+    add_executable(dve_content_source_tests tests/test_content_source.cpp)
+    target_link_libraries(dve_content_source_tests PRIVATE dve::core)
+    target_compile_definitions(dve_content_source_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_content_source_tests COMMAND dve_content_source_tests)
+    add_executable(dve_game_manifest_tests tests/test_game_manifest.cpp)
+    target_link_libraries(dve_game_manifest_tests PRIVATE dve::core)
+    add_test(NAME dve_game_manifest_tests COMMAND dve_game_manifest_tests)
+    if(TARGET dve_editor)
+        add_executable(dve_editor_scene_export_tests tests/test_editor_scene_export.cpp)
+        target_link_libraries(dve_editor_scene_export_tests PRIVATE dve::editor)
+        target_compile_definitions(dve_editor_scene_export_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME dve_editor_scene_export_tests COMMAND dve_editor_scene_export_tests)
+    endif()
+    add_executable(dve_game_scene_loader_tests tests/test_game_scene_loader.cpp)
+    target_link_libraries(dve_game_scene_loader_tests PRIVATE dve::core)
+    target_compile_definitions(dve_game_scene_loader_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_game_scene_loader_tests COMMAND dve_game_scene_loader_tests)
+    # Phase 2: dve_player runtime + CLI tests on the sample game (tests/data/player_sample).
+    if(TARGET dve_player_runtime)
+        add_executable(dve_player_sample_generator tests/player/make_player_sample.cpp)
+        target_link_libraries(dve_player_sample_generator PRIVATE dve::core)
+        add_test(NAME dve_player_sample_assets_up_to_date
+            COMMAND ${CMAKE_COMMAND}
+                -DGENERATOR=$<TARGET_FILE:dve_player_sample_generator>
+                -DSAMPLE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_sample
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/player_sample_regenerated
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_sample_assets.cmake)
+
+        add_executable(dve_player_runtime_tests tests/test_player_runtime.cpp)
+        target_link_libraries(dve_player_runtime_tests PRIVATE dve::player_runtime)
+        target_compile_definitions(dve_player_runtime_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME dve_player_runtime_tests COMMAND dve_player_runtime_tests)
+
+        set(DVE_PLAYER_SAMPLE_PAK ${CMAKE_CURRENT_BINARY_DIR}/player_tests/player_sample.dvepak)
+        add_test(NAME dve_player_sample_pack
+            COMMAND dve_pack ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_sample ${DVE_PLAYER_SAMPLE_PAK} --all)
+        set_tests_properties(dve_player_sample_pack PROPERTIES FIXTURES_SETUP dve_player_sample_pak)
+
+        if(TARGET dve_player)
+            # Golden framebuffer hashes are per compiler and Lua on/off (the script animates the
+            # sample). Unknown combinations fall back to a tolerance check against the
+            # downsampled reference image, and the smoke test prints the new hash to add.
+            if(DVE_ENABLE_LUA)
+                set(_dve_player_variant lua)
+                set(_dve_player_lua ON)
+            else()
+                set(_dve_player_variant nolua)
+                set(_dve_player_lua OFF)
+            endif()
+            string(REGEX MATCH "^[0-9]+" _dve_compiler_major "${CMAKE_CXX_COMPILER_VERSION}")
+            set(_dve_player_hash_key "${CMAKE_CXX_COMPILER_ID}-${_dve_compiler_major}-${_dve_player_variant}")
+            file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_golden/expected_frame_hashes.txt
+                _dve_player_hash_lines REGEX "^${_dve_player_hash_key} ")
+            set(_dve_player_hashes "")
+            foreach(_dve_line IN LISTS _dve_player_hash_lines)
+                string(REGEX REPLACE "^[^ ]+ +([0-9a-f]+).*$" "\\1" _dve_hash "${_dve_line}")
+                list(APPEND _dve_player_hashes ${_dve_hash})
+            endforeach()
+            list(JOIN _dve_player_hashes "," _dve_player_hashes)
+            message(STATUS "dve_player golden hash key ${_dve_player_hash_key}: '${_dve_player_hashes}'")
+            foreach(_dve_mode smoke loose_matches_pak missing_pak corrupt_pak no_content default_pak no_audio input save_load)
+                if(_dve_mode STREQUAL "input" AND NOT DVE_ENABLE_LUA)
+                    continue()
+                endif()
+                add_test(NAME dve_player_${_dve_mode}
+                    COMMAND ${CMAKE_COMMAND}
+                        -DMODE=${_dve_mode}
+                        -DPLAYER=$<TARGET_FILE:dve_player>
+                        -DHELPER=$<TARGET_FILE:dve_player_runtime_tests>
+                        -DPAK=${DVE_PLAYER_SAMPLE_PAK}
+                        -DPROJECT=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_sample
+                        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/player_tests/${_dve_mode}
+                        -DEXPECT=${_dve_player_hashes}
+                        -DREFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_golden/reference_${_dve_player_variant}.ppm
+                        -DLUA=${_dve_player_lua}
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_cli.cmake)
+                set_tests_properties(dve_player_${_dve_mode} PROPERTIES FIXTURES_REQUIRED dve_player_sample_pak)
+                if(_dve_mode MATCHES "^(smoke|loose_matches_pak|save_load)$")
+                    # These render with --threads 4; tell CTest so -jN does not oversubscribe
+                    # the cores under the timing-sensitive audio deadline tests.
+                    set_tests_properties(dve_player_${_dve_mode} PROPERTIES PROCESSORS 4)
+                endif()
+            endforeach()
+            add_test(NAME dve_player_no_editor_link
+                COMMAND ${CMAKE_COMMAND} -DCLOSURE=${CMAKE_BINARY_DIR}/dve_player_link_closure.txt
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_no_editor_link.cmake)
+            # Editor project -> dve_export_scene -> dve_player: .dmesh, baked 3D text and Gabor
+            # volume, components and a two-level attachment chain. Physics differs between the
+            # Jolt and reference backends, so the golden hashes are keyed by backend as well.
+            if(TARGET dve_export_scene)
+                add_executable(dve_player_export_sample_generator tests/player/make_player_export_sample.cpp)
+                target_link_libraries(dve_player_export_sample_generator PRIVATE dve::editor)
+                target_include_directories(dve_player_export_sample_generator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+                if(DVE_ENABLE_JOLT)
+                    set(_dve_export_hash_key "${_dve_player_hash_key}-jolt")
+                else()
+                    set(_dve_export_hash_key "${_dve_player_hash_key}-reference")
+                endif()
+                file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_golden/expected_export_hashes.txt
+                    _dve_export_hash_lines REGEX "^${_dve_export_hash_key} ")
+                set(_dve_export_hashes "")
+                foreach(_dve_line IN LISTS _dve_export_hash_lines)
+                    string(REGEX REPLACE "^[^ ]+ +([0-9a-f]+).*$" "\\1" _dve_hash "${_dve_line}")
+                    list(APPEND _dve_export_hashes ${_dve_hash})
+                endforeach()
+                list(JOIN _dve_export_hashes "," _dve_export_hashes)
+                message(STATUS "dve_player export-scene golden hash key ${_dve_export_hash_key}: '${_dve_export_hashes}'")
+                add_test(NAME dve_player_export_scene
+                    COMMAND ${CMAKE_COMMAND}
+                        -DGENERATOR=$<TARGET_FILE:dve_player_export_sample_generator>
+                        -DEXPORTER=$<TARGET_FILE:dve_export_scene>
+                        -DPLAYER=$<TARGET_FILE:dve_player>
+                        -DGAME_FILES=${CMAKE_CURRENT_SOURCE_DIR}/tests/data/player_export_sample
+                        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/player_tests/export_scene
+                        -DEXPECT=${_dve_export_hashes}
+                        -DKEY=${_dve_export_hash_key}
+                        -DLUA=${_dve_player_lua}
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_player_export_scene.cmake)
+                set_tests_properties(dve_player_export_scene PROPERTIES PROCESSORS 4)
+            endif()
+        endif()
+    endif()
+    if(TARGET dve_desktop_editor)
+        # The editor must keep working on machines without an audio device.
+        add_test(NAME dve_desktop_editor_smoke_noaudio COMMAND dve_desktop_editor --smoke)
+        set_tests_properties(dve_desktop_editor_smoke_noaudio PROPERTIES
+            ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_AUDIO_DRIVER=dve_missing_audio_driver"
+            PASS_REGULAR_EXPRESSION "dve_desktop_editor: PASS[^\n]*\n(.*\n)*audio=unavailable")
+    endif()
+
+    # dve_pack --all must not package the editor's `.autosave/` folder.
+    add_test(NAME dve_pack_autosave_exclusion
+        COMMAND ${CMAKE_COMMAND}
+            -DDVE_PACK=$<TARGET_FILE:dve_pack>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/dve_pack_autosave_exclusion
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_pack_autosave_exclusion.cmake)
+
     if(DVE_BUILD_EDITOR)
         add_executable(dve_editor_tests tests/test_editor.cpp)
         target_link_libraries(dve_editor_tests PRIVATE dve::editor)
@@ -2153,12 +2562,30 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_settings_tests tests/test_editor_settings.cpp)
         target_link_libraries(dve_editor_settings_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_settings_tests COMMAND dve_editor_settings_tests)
+        add_executable(dve_settings_applied_tests tests/test_settings_applied.cpp)
+        target_link_libraries(dve_settings_applied_tests PRIVATE dve::editor)
+        add_test(NAME dve_settings_applied_tests COMMAND dve_settings_applied_tests ${CMAKE_SOURCE_DIR})
+        add_executable(dve_editor_autosave_tests tests/test_editor_autosave.cpp)
+        target_link_libraries(dve_editor_autosave_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_autosave_tests COMMAND dve_editor_autosave_tests)
         add_executable(dve_editor_shortcuts_tests tests/test_editor_shortcuts.cpp)
         target_link_libraries(dve_editor_shortcuts_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_shortcuts_tests COMMAND dve_editor_shortcuts_tests)
         add_executable(dve_menu_command_center_v220_tests tests/test_menu_command_center_v220.cpp)
         target_link_libraries(dve_menu_command_center_v220_tests PRIVATE dve::editor)
         add_test(NAME dve_menu_command_center_v220_tests COMMAND dve_menu_command_center_v220_tests)
+        add_executable(dve_editor_ui_zoom_tests tests/test_editor_ui_zoom.cpp)
+        target_link_libraries(dve_editor_ui_zoom_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_ui_zoom_tests COMMAND dve_editor_ui_zoom_tests)
+        add_executable(dve_editor_piano_keyboard_tests tests/test_editor_piano_keyboard.cpp)
+        target_link_libraries(dve_editor_piano_keyboard_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_piano_keyboard_tests COMMAND dve_editor_piano_keyboard_tests)
+        add_executable(dve_editor_text_fit_tests tests/test_editor_text_fit.cpp)
+        target_link_libraries(dve_editor_text_fit_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_text_fit_tests COMMAND dve_editor_text_fit_tests)
+        add_executable(dve_editor_midi_tests tests/test_editor_midi.cpp)
+        target_link_libraries(dve_editor_midi_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_midi_tests COMMAND dve_editor_midi_tests)
         add_executable(dve_editor_camera_sequencer_tests tests/test_editor_camera_sequencer.cpp)
         target_link_libraries(dve_editor_camera_sequencer_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_camera_sequencer_tests COMMAND dve_editor_camera_sequencer_tests)
@@ -2172,6 +2599,22 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_critique_fixes_tests tests/test_editor_critique_fixes.cpp)
         target_link_libraries(dve_editor_critique_fixes_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_critique_fixes_tests COMMAND dve_editor_critique_fixes_tests)
+        add_executable(dve_editor_spatial_tests tests/test_editor_spatial.cpp)
+        target_link_libraries(dve_editor_spatial_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_spatial_tests COMMAND dve_editor_spatial_tests)
+
+        add_executable(dve_editor_render_cache_tests tests/test_editor_render_cache.cpp)
+        target_link_libraries(dve_editor_render_cache_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_render_cache_tests COMMAND dve_editor_render_cache_tests)
+        add_executable(dve_editor_draw_culling_tests tests/test_editor_draw_culling.cpp)
+        target_link_libraries(dve_editor_draw_culling_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_draw_culling_tests COMMAND dve_editor_draw_culling_tests)
+        add_executable(dve_editor_viewport_clipping_tests tests/test_editor_viewport_clipping.cpp)
+        target_link_libraries(dve_editor_viewport_clipping_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_viewport_clipping_tests COMMAND dve_editor_viewport_clipping_tests)
+        add_executable(dve_editor_layout_overlap_tests tests/test_editor_layout_overlap.cpp)
+        target_link_libraries(dve_editor_layout_overlap_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_layout_overlap_tests COMMAND dve_editor_layout_overlap_tests)
         add_executable(dve_editor_audio_tests tests/test_editor_audio.cpp)
         target_link_libraries(dve_editor_audio_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_audio_tests COMMAND dve_editor_audio_tests)
@@ -2260,6 +2703,12 @@ if(DVE_BUILD_BENCHMARK)
     if(DVE_BUILD_EDITOR)
         add_executable(dve_editor_interaction_bench apps/editor_interaction_bench.cpp)
         target_link_libraries(dve_editor_interaction_bench PRIVATE dve::editor)
+        add_executable(dve_editor_menu_bench apps/editor_menu_bench.cpp)
+        target_link_libraries(dve_editor_menu_bench PRIVATE dve::editor)
+        add_executable(dve_editor_spatial_bench apps/editor_spatial_bench.cpp)
+        target_link_libraries(dve_editor_spatial_bench PRIVATE dve::editor)
+        add_executable(dve_editor_scene_bench apps/editor_scene_bench.cpp)
+        target_link_libraries(dve_editor_scene_bench PRIVATE dve::editor)
     endif()
     target_link_libraries(dve_adversarial_bench PRIVATE dve::core)
     target_link_libraries(dve_player_query_bench PRIVATE dve::core)
@@ -2290,10 +2739,6 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     target_link_libraries(dve_material_mapping_tests PRIVATE dve::core)
     add_test(NAME dve_material_mapping_tests COMMAND dve_material_mapping_tests)
 
-    add_executable(dve_rhi_mrt_tests tests/test_rhi_mrt.cpp)
-    target_link_libraries(dve_rhi_mrt_tests PRIVATE dve::rhi)
-    add_test(NAME dve_rhi_mrt_tests COMMAND dve_rhi_mrt_tests)
-
     add_executable(dve_dashr_surface_tests tests/test_dashr_surface.cpp)
     target_link_libraries(dve_dashr_surface_tests PRIVATE dve::core)
     add_test(NAME dve_dashr_surface_tests COMMAND dve_dashr_surface_tests)
@@ -2317,6 +2762,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_material_displacement_tests tests/test_material_displacement.cpp)
     target_link_libraries(dve_material_displacement_tests PRIVATE dve::core)
     add_test(NAME dve_material_displacement_tests COMMAND dve_material_displacement_tests)
+
+    add_executable(dve_procedural_noise_tests tests/test_procedural_noise.cpp)
+    target_link_libraries(dve_procedural_noise_tests PRIVATE dve::core)
+    add_test(NAME dve_procedural_noise_tests COMMAND dve_procedural_noise_tests)
 
     add_executable(dve_environment_lighting_tests tests/test_environment_lighting.cpp)
     target_link_libraries(dve_environment_lighting_tests PRIVATE dve::core)
@@ -2360,6 +2809,12 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_hybrid_reference_rendering_tests tests/test_hybrid_reference_rendering.cpp)
     target_link_libraries(dve_hybrid_reference_rendering_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_hybrid_reference_rendering_tests COMMAND dve_hybrid_reference_rendering_tests)
+    add_executable(dve_rc_spwi_tests tests/test_radiance_cascades_spwi.cpp)
+    target_link_libraries(dve_rc_spwi_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_rc_spwi_tests COMMAND dve_rc_spwi_tests)
+    # The tests use two worker threads; reserve them so ctest -jN leaves cores for the
+    # timing-sensitive audio acceptance tests.
+    set_tests_properties(dve_rc_spwi_tests PROPERTIES PROCESSORS 2)
     add_executable(dve_voxel_lighting_plan_tests tests/test_voxel_lighting_plan.cpp)
     target_link_libraries(dve_voxel_lighting_plan_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_voxel_lighting_plan_tests COMMAND dve_voxel_lighting_plan_tests)
@@ -2384,13 +2839,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     target_link_libraries(dve_dashr_shell_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_dashr_shell_tests COMMAND dve_dashr_shell_tests)
 
-    add_executable(dve_dashr_live_instance_tests tests/test_dashr_live_instance.cpp)
-    target_link_libraries(dve_dashr_live_instance_tests PRIVATE dve::render_bridge)
-    add_test(NAME dve_dashr_live_instance_tests COMMAND dve_dashr_live_instance_tests)
-
-    add_executable(dve_dashr_live_renderer_tests tests/test_dashr_live_renderer.cpp)
-    target_link_libraries(dve_dashr_live_renderer_tests PRIVATE dve::render_bridge)
-    add_test(NAME dve_dashr_live_renderer_tests COMMAND dve_dashr_live_renderer_tests)
+    add_executable(dve_dashr_live_surface_tests tests/test_dashr_live_surface.cpp)
+    target_link_libraries(dve_dashr_live_surface_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_dashr_live_surface_tests COMMAND dve_dashr_live_surface_tests)
     add_executable(dve_shadow_material_table_tests tests/test_shadow_material_table.cpp)
     target_link_libraries(dve_shadow_material_table_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_shadow_material_table_tests COMMAND dve_shadow_material_table_tests)
@@ -2400,4 +2851,24 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_shared_material_residency_tests tests/test_shared_material_residency.cpp)
     target_link_libraries(dve_shared_material_residency_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_shared_material_residency_tests COMMAND dve_shared_material_residency_tests)
+endif()
+
+# Packaging plan, Phase 3: install() rules, the exported dve CMake package, runtime-dependency
+# bundling, CPack (TGZ/DEB; ZIP/NSIS stubs for Windows) and the install/consumer/cpack tests.
+include(DveInstall)
+include(DveCPack)
+
+# Windows: vcpkg's per-target "applocal" DLL copy is off in the Windows presets (parallel MSBuild
+# projects copying the same DLLs into one output folder hit sharing violations). CTest finds the
+# vcpkg DLLs through PATH instead; installs and game packages copy them (DveInstall.cmake).
+if(WIN32 AND DVE_BUILD_TESTS AND DVE_RUNTIME_DLL_SEARCH_DIRS)
+    get_property(_dve_all_tests DIRECTORY "${PROJECT_SOURCE_DIR}" PROPERTY TESTS)
+    set(_dve_path_modifications "")
+    foreach(_dve_dir IN LISTS DVE_RUNTIME_DLL_SEARCH_DIRS)
+        file(TO_NATIVE_PATH "${_dve_dir}" _dve_native_dir)
+        list(APPEND _dve_path_modifications "PATH=path_list_prepend:${_dve_native_dir}")
+    endforeach()
+    foreach(_dve_test IN LISTS _dve_all_tests)
+        set_property(TEST "${_dve_test}" APPEND PROPERTY ENVIRONMENT_MODIFICATION ${_dve_path_modifications})
+    endforeach()
 endif()

@@ -136,6 +136,8 @@ struct SdlApplicationHost::Impl {
 
     SDL_Window* window{};
     bool initialized{};
+    bool audioInitialized{};
+    std::string audioInitError;
     FileDialogToken nextDialogToken{1};
     mutable std::mutex dialogMutex;
     std::unordered_map<FileDialogToken, std::unique_ptr<PendingDialog>> pendingDialogs;
@@ -210,15 +212,26 @@ bool SdlApplicationHost::create_window(const WindowDesc& desc, std::string* erro
         return false;
     }
     destroy_window();
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         set_error(error, SDL_GetError());
         return false;
     }
     impl_->initialized = true;
+    // Audio is optional: a machine without an audio driver/device must still get a window.
+    // Failure is recorded (audio_init_error) and never fails create_window.
+    impl_->audioInitError.clear();
+    if (desc.initializeAudio) {
+        impl_->audioInitialized = SDL_InitSubSystem(SDL_INIT_AUDIO);
+        if (!impl_->audioInitialized) {
+            const char* reason = SDL_GetError();
+            impl_->audioInitError = reason != nullptr && *reason != '\0' ? reason : "SDL audio init failed";
+        }
+    }
     SDL_WindowFlags flags = 0;
     if (desc.resizable) flags |= SDL_WINDOW_RESIZABLE;
     if (desc.highDpi) flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (desc.hidden) flags |= SDL_WINDOW_HIDDEN;
+    if (desc.fullscreen) flags |= SDL_WINDOW_FULLSCREEN;
     impl_->window = SDL_CreateWindow(desc.title.c_str(), desc.width, desc.height, flags);
     if (impl_->window == nullptr) {
         set_error(error, SDL_GetError());
@@ -255,13 +268,45 @@ void SdlApplicationHost::destroy_window() noexcept {
         SDL_DestroyWindow(impl_->window);
         impl_->window = nullptr;
     }
+    if (impl_->audioInitialized) {
+        SDL_QuitSubSystem(SDL_INIT_AUDIO);
+        impl_->audioInitialized = false;
+    }
     if (impl_->initialized) {
-        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
         impl_->initialized = false;
     }
 }
 
 bool SdlApplicationHost::has_window() const noexcept { return impl_ && impl_->window != nullptr; }
+
+bool SdlApplicationHost::wait_for_events(std::chrono::milliseconds timeout) {
+    if (!has_window()) return false;
+    const auto milliseconds = std::clamp<std::chrono::milliseconds::rep>(
+        timeout.count(), 0, 2'147'483'647);
+    return SDL_WaitEventTimeout(nullptr, static_cast<Sint32>(milliseconds));
+}
+
+bool SdlApplicationHost::wait_for_frame(double frameStart, std::chrono::milliseconds targetInterval,
+                                       std::chrono::milliseconds minimumInterval) {
+    if (!has_window() || !std::isfinite(frameStart)) return false;
+    const auto target = std::clamp<std::chrono::milliseconds::rep>(targetInterval.count(), 0, 2'147'483'647);
+    const auto minimum = std::clamp<std::chrono::milliseconds::rep>(minimumInterval.count(), 0, target);
+    const double minimumRemaining = (frameStart + static_cast<double>(minimum) / 1000.0 - monotonic_seconds()) * 1000.0;
+    if (minimumRemaining > 0.0) sleep_for(std::chrono::milliseconds(
+        static_cast<std::chrono::milliseconds::rep>(std::min(std::ceil(minimumRemaining), static_cast<double>(minimum)))));
+    const double remaining = (frameStart + static_cast<double>(target) / 1000.0 - monotonic_seconds()) * 1000.0;
+    return remaining > 0.0 && wait_for_events(std::chrono::milliseconds(
+        static_cast<std::chrono::milliseconds::rep>(std::min(std::ceil(remaining), static_cast<double>(target)))));
+}
+
+bool SdlApplicationHost::audio_subsystem_initialized() const noexcept {
+    return impl_ && impl_->audioInitialized;
+}
+
+std::string SdlApplicationHost::audio_init_error() const {
+    return impl_ ? impl_->audioInitError : std::string{};
+}
 
 bool SdlApplicationHost::poll_event(PlatformEvent& output) {
     SDL_Event event{};
@@ -319,6 +364,10 @@ bool SdlApplicationHost::poll_event(PlatformEvent& output) {
                 converted.type = EventType::PointerWheel;
                 converted.wheelX = event.wheel.x;
                 converted.wheelY = event.wheel.y;
+                // Pointer position at the time of the wheel event, so wheel hit-testing
+                // (menus, lists, panels) lands on the widget under the cursor.
+                converted.x = static_cast<int>(std::lround(event.wheel.mouse_x));
+                converted.y = static_cast<int>(std::lround(event.wheel.mouse_y));
                 converted.modifiers = modifiers_from_sdl(SDL_GetModState());
                 break;
             case SDL_EVENT_GAMEPAD_ADDED: {

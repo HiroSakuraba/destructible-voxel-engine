@@ -17,8 +17,6 @@ namespace {
 constexpr float kEpsilon = 1.0e-8F;
 
 bool finite(float value) noexcept { return std::isfinite(value); }
-bool finite(Float2 value) noexcept { return finite(value.x) && finite(value.y); }
-bool finite(Float3 value) noexcept { return finite(value.x) && finite(value.y) && finite(value.z); }
 
 Float2 add(Float2 a, Float2 b) noexcept { return {a.x+b.x,a.y+b.y}; }
 Float2 subtract(Float2 a, Float2 b) noexcept { return {a.x-b.x,a.y-b.y}; }
@@ -167,7 +165,8 @@ std::optional<DashrSeamMap> cook_dashr_seam_map(
     std::string* error) {
     std::string validation;
     if(!validate_dashr_seam_cook_settings(settings,&validation)) {
-        if(error)*error=validation; return std::nullopt;
+        if (error) *error = validation;
+        return std::nullopt;
     }
     const auto valid=validate_polygon_asset(asset);
     if(!valid) {if(error)*error=valid.message;return std::nullopt;}

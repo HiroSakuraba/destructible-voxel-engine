@@ -316,6 +316,76 @@ void test_constraints_and_collision_classes() {
     require(world.constraint_count() == 0U, "body destruction left stale constraints");
 }
 
+void test_solver_neutral_loads_and_queries() {
+    Box3DRigidBodyWorld world;
+    world.set_gravity({});
+    IRigidBodyWorld& neutral = world;
+
+    const RigidBodyHandle first = world.create_static_box(
+        make_rigid_transform({}, {}), {0.5F, 0.5F, 0.5F});
+    const RigidBodyHandle second = world.create_static_box(
+        make_rigid_transform({3.0F, 0.0F, 0.0F}, {}), {0.5F, 0.5F, 0.5F});
+    const RigidBodyHandle dynamic = world.create_body(
+        dynamic_box({6.0F, 0.0F, 0.0F}, {0.25F, 0.25F, 0.25F}));
+    require(first != kInvalidRigidBodyHandle && second != kInvalidRigidBodyHandle &&
+            dynamic != kInvalidRigidBodyHandle,
+        "neutral-query test body creation failed");
+    require(neutral.set_contact_material(first, 11U) &&
+            neutral.set_contact_material(second, 22U) &&
+            neutral.set_contact_material(dynamic, 33U),
+        "neutral-query materials failed");
+
+    const auto rayHits = neutral.ray_cast_all(
+        {-3.0F, 0.0F, 0.0F}, {2.0F, 0.0F, 0.0F}, 12.0F);
+    require(rayHits.size() == 3U, "neutral ray-all did not collect every body");
+    require(rayHits[0].body == first && rayHits[0].material == 11U &&
+            rayHits[1].body == second && rayHits[1].material == 22U &&
+            rayHits[2].body == dynamic && rayHits[2].material == 33U,
+        "neutral ray-all ordering or material metadata was incorrect");
+    require(rayHits[0].distance < rayHits[1].distance &&
+            rayHits[1].distance < rayHits[2].distance,
+        "neutral ray-all distances were not sorted");
+
+    RigidBodyQueryFilter dynamicOnly;
+    dynamicOnly.includeStatic = false;
+    const auto dynamicHits = neutral.ray_cast_all(
+        {-3.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, 12.0F, dynamicOnly);
+    require(dynamicHits.size() == 1U && dynamicHits.front().body == dynamic,
+        "neutral ray-all static/dynamic filter failed");
+    RigidBodyQueryFilter ignored;
+    ignored.ignoredBodies.push_back(first);
+    const auto ignoredHits = neutral.ray_cast_all(
+        {-3.0F, 0.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, 12.0F, ignored);
+    require(ignoredHits.size() == 2U && ignoredHits.front().body == second,
+        "neutral ray-all ignored-body filter failed");
+
+    const auto overlaps = neutral.overlap_aabb(
+        {{-0.75F, -0.75F, -0.75F}, {0.75F, 0.75F, 0.75F}});
+    require(overlaps.size() == 1U && overlaps.front().body == first &&
+            overlaps.front().material == 11U,
+        "neutral overlap did not preserve body and material metadata");
+    const auto sphereHits = neutral.cast_sphere_all(
+        {-3.0F, 0.0F, 0.0F}, 0.2F, {1.0F, 0.0F, 0.0F}, 12.0F);
+    require(sphereHits.size() == 3U && sphereHits[0].body == first &&
+            sphereHits[1].body == second && sphereHits[2].body == dynamic,
+        "neutral sphere cast-all did not return stable ordered hits");
+
+    require(neutral.apply_angular_impulse(dynamic, {0.0F, 0.0F, 1.0F}),
+        "neutral angular impulse failed");
+    const auto afterImpulse = neutral.state(dynamic);
+    require(afterImpulse.has_value() && afterImpulse->angularVelocity.z > 0.0F,
+        "neutral angular impulse did not change angular velocity");
+    const float impulseVelocity = afterImpulse ? afterImpulse->angularVelocity.z : 0.0F;
+    require(neutral.apply_torque(dynamic, {0.0F, 0.0F, 2.0F}),
+        "neutral torque failed");
+    world.step(1.0F / 60.0F);
+    const auto afterTorque = neutral.state(dynamic);
+    require(afterTorque.has_value() && afterTorque->angularVelocity.z > impulseVelocity,
+        "neutral torque did not affect angular velocity");
+    require(!neutral.apply_torque(first, {0.0F, 0.0F, 1.0F}),
+        "neutral torque accepted a static body");
+}
+
 } // namespace
 
 int main() {
@@ -324,6 +394,7 @@ int main() {
     test_compound_mass_frame_and_state_restore();
     test_static_mesh_and_queries();
     test_constraints_and_collision_classes();
+    test_solver_neutral_loads_and_queries();
     std::cout << "Box3D upstream integration tests passed\n";
     return 0;
 }

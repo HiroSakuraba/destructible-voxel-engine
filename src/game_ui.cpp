@@ -19,6 +19,7 @@ std::map<std::string, std::string, std::less<>> parse_lines(std::string_view tex
     std::istringstream stream{std::string(text)};
     std::string line;
     while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         const auto split = line.find('=');
         if (split != std::string::npos) result[line.substr(0, split)] = line.substr(split + 1);
     }

@@ -1,26 +1,21 @@
 #include "dve/collision_proxy.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
-#include <map>
 
 namespace dve {
+namespace {
 
-std::vector<VoxelBox> build_brick_box_proxy(const VoxelObject& object, BrickKey key) {
-    const Brick* brick = object.find_brick(key);
-    if (brick == nullptr || brick->empty()) return {};
-
-    Bitset512 remaining = brick->occupancy();
-    std::vector<VoxelBox> boxes;
+void append_brick_box_proxy(const Brick& brick, BrickKey key, std::vector<VoxelBox>& boxes) {
+    Bitset512 remaining = brick.occupancy();
     while (remaining.any()) {
         std::uint16_t seed = 0;
-        bool found = false;
-        remaining.for_each_set([&](std::uint16_t index) {
-            if (!found) {
-                seed = index;
-                found = true;
-            }
-        });
+        for (std::size_t word = 0; word < remaining.words.size(); ++word) {
+            if (remaining.words[word] == 0) continue;
+            seed = static_cast<std::uint16_t>(word * 64U + std::countr_zero(remaining.words[word]));
+            break;
+        }
         const Int3 start = local_from_index_unchecked(seed);
 
         std::int32_t endX = start.x + 1;
@@ -68,6 +63,15 @@ std::vector<VoxelBox> build_brick_box_proxy(const VoxelObject& object, BrickKey 
             {origin.x + endX, origin.y + endY, origin.z + endZ},
         });
     }
+}
+
+} // namespace
+
+std::vector<VoxelBox> build_brick_box_proxy(const VoxelObject& object, BrickKey key) {
+    std::vector<VoxelBox> boxes;
+    if (const Brick* brick = object.find_brick(key); brick != nullptr && !brick->empty()) {
+        append_brick_box_proxy(*brick, key, boxes);
+    }
     return boxes;
 }
 
@@ -75,35 +79,53 @@ std::vector<VoxelBox> build_object_box_proxy(const VoxelObject& object) {
     std::vector<VoxelBox> result;
     for (const auto& [key, brick] : object.bricks()) {
         if (brick.empty()) continue;
-        auto boxes = build_brick_box_proxy(object, key);
-        result.insert(result.end(), boxes.begin(), boxes.end());
+        append_brick_box_proxy(brick, key, result);
     }
     return result;
 }
 
 bool validate_box_proxy(const VoxelObject& object, const std::vector<VoxelBox>& boxes) {
-    std::map<Int3, std::uint16_t> coverage;
+    const auto& bricks = object.bricks();
+    std::vector<Bitset512> coverage(bricks.size());
     for (const VoxelBox& box : boxes) {
         if (box.min.x >= box.maxExclusive.x || box.min.y >= box.maxExclusive.y || box.min.z >= box.maxExclusive.z) {
             return false;
         }
-        for (std::int32_t z = box.min.z; z < box.maxExclusive.z; ++z) {
-            for (std::int32_t y = box.min.y; y < box.maxExclusive.y; ++y) {
-                for (std::int32_t x = box.min.x; x < box.maxExclusive.x; ++x) {
-                    Int3 voxel{x, y, z};
-                    if (!object.occupied_at(voxel)) return false;
-                    if (++coverage[voxel] != 1) return false;
+        const BrickKey first = brick_key_from_voxel(box.min);
+        const BrickKey last = brick_key_from_voxel({box.maxExclusive.x - 1,
+            box.maxExclusive.y - 1, box.maxExclusive.z - 1});
+        for (std::int32_t z = first.z; z <= last.z; ++z) {
+            for (std::int32_t y = first.y; y <= last.y; ++y) {
+                for (std::int32_t x = first.x; x <= last.x; ++x) {
+                    const auto brick = bricks.find({x, y, z});
+                    if (brick == bricks.end()) return false;
+                    auto& covered = coverage[static_cast<std::size_t>(brick - bricks.begin())];
+                    const auto occupied = brick->second.occupancy();
+                    // Wide origins keep clipping valid at the ends of the voxel coordinate range.
+                    const std::int64_t ox = static_cast<std::int64_t>(x) * kBrickDim;
+                    const std::int64_t oy = static_cast<std::int64_t>(y) * kBrickDim;
+                    const std::int64_t oz = static_cast<std::int64_t>(z) * kBrickDim;
+                    const auto low = [](std::int32_t value, std::int64_t origin) {
+                        return static_cast<unsigned>(std::max<std::int64_t>(0, value - origin));
+                    };
+                    const auto high = [](std::int32_t value, std::int64_t origin) {
+                        return static_cast<unsigned>(std::min<std::int64_t>(kBrickDim, value - origin));
+                    };
+                    const unsigned minX = low(box.min.x, ox), maxX = high(box.maxExclusive.x, ox);
+                    const std::uint64_t row = ((std::uint64_t{1} << (maxX - minX)) - 1U) << minX;
+                    for (unsigned localZ = low(box.min.z, oz); localZ < high(box.maxExclusive.z, oz); ++localZ) {
+                        for (unsigned localY = low(box.min.y, oy); localY < high(box.maxExclusive.y, oy); ++localY) {
+                            const std::uint64_t mask = row << (localY * kBrickDim);
+                            if ((occupied.words[localZ] & mask) != mask || (covered.words[localZ] & mask) != 0) return false;
+                            covered.words[localZ] |= mask;
+                        }
+                    }
                 }
             }
         }
     }
-    for (const auto& [key, brick] : object.bricks()) {
-        const Bitset512 occupied = brick.occupancy();
-        bool valid = true;
-        occupied.for_each_set([&](std::uint16_t index) {
-            if (coverage[global_from_local(key, local_from_index_unchecked(index))] != 1) valid = false;
-        });
-        if (!valid) return false;
+    for (std::size_t i = 0; i < bricks.size(); ++i) {
+        if (coverage[i] != bricks.begin()[i].second.occupancy()) return false;
     }
     return true;
 }

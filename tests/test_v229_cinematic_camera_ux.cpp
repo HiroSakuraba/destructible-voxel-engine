@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 
+#include <utility>
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
@@ -35,9 +36,9 @@ public:
 
 void test_registry_and_settings() {
     EditorMenuRegistry menus = EditorMenuRegistry::make_default();
-    require(menus.find("camera.inspector") != nullptr, "cinematic camera inspector command missing");
-    require(menus.find("camera.preset_imax143") != nullptr, "IMAX 1.43 command missing");
-    require(menus.find("camera.preset_split_diopter") != nullptr, "split-diopter command missing");
+    require(std::as_const(menus).find("camera.inspector") != nullptr, "cinematic camera inspector command missing");
+    require(std::as_const(menus).find("camera.preset_imax143") != nullptr, "IMAX 1.43 command missing");
+    require(std::as_const(menus).find("camera.preset_split_diopter") != nullptr, "split-diopter command missing");
     const auto bokeh = menus.search("bokeh blades", 32);
     require(std::any_of(bokeh.begin(), bokeh.end(), [](const MenuAction& action) {
         return action.id == "camera.inspector";

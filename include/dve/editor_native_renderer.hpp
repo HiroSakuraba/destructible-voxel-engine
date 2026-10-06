@@ -32,6 +32,37 @@ public:
 // empty string when not even the ellipsis fits.
 [[nodiscard]] std::string elide_text_to_width(const IEditorCanvas& canvas, std::string_view value, int maxWidth);
 
+// Glyph extent of editor text around its baseline, in logical pixels, for the 11 px UI font
+// (kUiBaseTextPixels; DejaVu Sans Mono ink reaches about 8.5 px above and 2.6 px below the
+// baseline). Canvases cannot clip glyphs, so clipping canvases use these to decide whether a
+// line of text fits.
+inline constexpr int kEditorTextAscent = 10;
+inline constexpr int kEditorTextDescent = 3;
+
+// Forwards to another canvas but keeps every primitive inside `clip`: fills are
+// intersected with it, lines and the edges of partly visible outlines are cut at its
+// border, and text is elided at its right edge (dropped when not even the ellipsis
+// fits, or when its anchor lies left of the clip or its glyphs would reach past the
+// top or bottom). The 3D viewport paints through one: its draw lists (voxel splats,
+// grid, boxes, frustums, 3D-text and Gabor labels) keep items whose centre projects out
+// to 1.2x the viewport (see project_with in editor_viewport.cpp), so without the clip
+// they would land on the panels around it.
+class RectClipCanvas final : public IEditorCanvas {
+public:
+    RectClipCanvas(const IEditorCanvas& inner, UiRect clip) : inner_(inner), clip_(clip) {}
+    void fill(UiRect rect, EditorColor color) const override;
+    void outline(UiRect rect, EditorColor color) const override;
+    void line(int x1, int y1, int x2, int y2, EditorColor color, int width = 1) const override;
+    // y is the text baseline.
+    void text(int x, int y, std::string_view value, EditorColor color) const override;
+    [[nodiscard]] int text_width(std::string_view value) const override { return inner_.text_width(value); }
+    [[nodiscard]] std::string_view ellipsis() const override { return inner_.ellipsis(); }
+
+private:
+    const IEditorCanvas& inner_;
+    UiRect clip_;
+};
+
 // One text draw that went through a CellFitCanvas.
 struct FittedTextRecord {
     UiRect cell{};

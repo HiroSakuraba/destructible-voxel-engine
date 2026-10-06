@@ -14,6 +14,12 @@ suite never ran sanitized.
   180. `UBSAN_OPTIONS=halt_on_error=1` makes any undefined-behaviour report fail its test;
   by default UBSan only prints and the test still passes. Leak checking is off
   (`ASAN_OPTIONS=detect_leaks=0`) until the suite has been checked for leaks.
+- Sanitizer builds no longer register the notices, install-tree and packaging tests
+  (`dve_third_party_notices_check_*`, `dve_install_tree_test`, `dve_package_consumer_test`,
+  `dve_package_game_test`, `dve_cpack_test`). A sanitized binary needs the toolchain's
+  `libasan`/`libubsan` and links a few extra X11 libraries (`libICE`, `libSM`), which those
+  checks correctly report as bundled libraries with no notice. Sanitizer builds are never
+  shipped, and the checks still run in every other preset.
 - `dve_editor_synth_tests` overflowed the 8 MB stack under ASan: its `main` held the
   editor controller, the panel layout and six full synth preset copies, and ASan gives
   every local its own padded slot, so the frame came to about 9 MB. The controller, layout
@@ -28,5 +34,6 @@ suite never ran sanitized.
   found no memory errors or undefined behaviour; the only failure was the synth test's
   stack overflow.
 - `dve_editor_synth_tests` passes plain and under ASan + UBSan with the default 8 MB stack.
-- The CI job has not run yet; tests that need SDL3 (built in CI, not here) run sanitized
-  for the first time there.
+- First CI run (PR #55): every test passed under ASan and UBSan, including the SDL3 editor
+  and player, except the six packaging tests above, which this change no longer registers in
+  sanitizer builds.

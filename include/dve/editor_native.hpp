@@ -624,6 +624,7 @@ private:
     EditorWorkspace workspace_;
     EditorMaterialLibrary materials_;
     EditorAssetDatabase assetDatabase_{};
+    bool thumbnailBacklog_{};
     EditorAssetBrowserState assetBrowserState_{};
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};

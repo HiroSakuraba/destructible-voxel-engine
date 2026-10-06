@@ -356,10 +356,15 @@ std::vector<const EditorAssetRecord*> NativeEditorController::asset_browser_rows
 bool NativeEditorController::refresh_asset_database(bool announce) {
     EditorAssetScanReport report;
     std::string error;
-    if (!assetDatabase_.scan(&report, &error)) {
+    // Thumbnails are written a little per frame from update() instead of inside the
+    // scan, which could otherwise block the editor for seconds on a first scan.
+    EditorAssetScanOptions options;
+    options.generateThumbnails = false;
+    if (!assetDatabase_.scan(&report, &error, options)) {
         if (announce) set_status(error.empty() ? "Asset scan failed" : error, true, 7.0F);
         return false;
     }
+    thumbnailBacklog_ = true;
     if (assetBrowserState_.selectedId && !assetDatabase_.find(*assetBrowserState_.selectedId))
         assetBrowserState_.selectedId.reset();
     assetBrowserState_.firstVisible = 0U;
@@ -1989,6 +1994,16 @@ void NativeEditorController::update(float elapsedSeconds) {
         const auto& state = spriteLevel_->state();
         spriteAnimationGraph_.set_live_state(!state.grounded ? "Jump" :
             (std::fabs(state.velocity.x) > 2.0F ? "Run" : "Idle"));
+    }
+    if (thumbnailBacklog_) {
+        std::string thumbnailError;
+        thumbnailBacklog_ = !assetDatabase_.generate_missing_thumbnails_for(
+            std::chrono::milliseconds(2), nullptr, &thumbnailError);
+        if (!thumbnailError.empty()) {
+            // Log once and stop; an unwritable thumbnail folder would otherwise fail every frame.
+            workspace_.log().add(EditorLogLevel::Warning, "Asset thumbnails paused: " + thumbnailError);
+            thumbnailBacklog_ = false;
+        }
     }
     if (liveMcpHost_) (void)liveMcpHost_->pump(16);
     workspace_.ai_assistant().refresh_pending_approvals();

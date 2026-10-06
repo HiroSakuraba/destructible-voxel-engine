@@ -721,6 +721,7 @@ const std::vector<EditorVoxelDrawItem>& EditorVoxelDrawListCache::get(
     hash.u64(editor_camera_fingerprint(camera));
     hash.i32(viewport.x); hash.i32(viewport.y); hash.i32(viewport.width); hash.i32(viewport.height);
     hash.u64(settings.maximumDrawVoxels);
+    hash.u64(settings.cullEnclosedVoxels ? 1U : 0U);
     hash.u64(editor_selection_fingerprint(selectedObjects));
     if (!valid_ || hash.h != key_) {
         items_ = build_voxel_draw_list(document, materials, camera, viewport, settings, selectedObjects);

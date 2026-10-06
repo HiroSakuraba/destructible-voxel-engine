@@ -173,7 +173,8 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
 [[nodiscard]] std::uint64_t editor_selection_fingerprint(const std::set<EditorObjectId>& selection) noexcept;
 
 // Memoizes build_voxel_draw_list (projection + depth sort). get() rebuilds only
-// when the scene fingerprint, camera, viewport, draw cap, or selection change.
+// when the scene fingerprint, camera, viewport, draw cap, culling setting, or
+// selection change.
 class EditorVoxelDrawListCache {
 public:
     const std::vector<EditorVoxelDrawItem>& get(

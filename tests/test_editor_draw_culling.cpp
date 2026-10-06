@@ -333,6 +333,28 @@ void test_cap_no_longer_starved() {
     std::printf("draw cap: OK\n");
 }
 
+// Toggling culling must rebuild a cached list even when nothing else changed.
+void test_cache_key_includes_culling() {
+    EditorDocument document("cache");
+    document.add_object(make_object(1, 0, 32, [](int, int, int) { return MaterialId{1}; }));
+    const EditorCamera camera = orbit(0.7F, 0.5F, 8.0F, {1.6F, 1.6F, 1.6F});
+    const EditorMaterialLibrary materials;
+    const UiRect viewport{0, 0, 960, 600};
+    const std::set<EditorObjectId> selection;
+    const auto fingerprint = editor_scene_render_fingerprint(document);
+    EditorVoxelDrawListCache cache;
+    EditorViewportSettings settings;
+    settings.cullEnclosedVoxels = true;
+    const std::size_t culled = cache.get(document, materials, camera, viewport, settings, selection, fingerprint).size();
+    settings.cullEnclosedVoxels = false;
+    const std::size_t full = cache.get(document, materials, camera, viewport, settings, selection, fingerprint).size();
+    require(cache.rebuild_count() == 2U, "toggling culling did not rebuild the cached draw list");
+    require(full > culled, "cached list kept the culled contents after culling was turned off");
+    (void)cache.get(document, materials, camera, viewport, settings, selection, fingerprint);
+    require(cache.rebuild_count() == 2U, "unchanged settings rebuilt the cached draw list");
+    std::printf("draw cache key: OK\n");
+}
+
 } // namespace
 
 int main() {
@@ -343,6 +365,7 @@ int main() {
         test_culling_is_pixel_identical();
         test_culling_guards();
         test_cap_no_longer_starved();
+        test_cache_key_includes_culling();
         std::printf("editor draw culling tests passed\n");
         return 0;
     } catch (const std::exception& error) {

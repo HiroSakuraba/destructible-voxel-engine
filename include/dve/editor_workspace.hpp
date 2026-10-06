@@ -98,6 +98,8 @@ private:
     [[nodiscard]] MenuAction* find_for_update(std::string_view id) noexcept;
     void rebuild_search_fields() const;
     void rebuild_menu_indices() const;
+    [[nodiscard]] std::vector<std::size_t> ordered_menu_indices(
+        std::string_view menuName, bool includeAdvanced) const;
 };
 
 struct EditorMenuUserState {

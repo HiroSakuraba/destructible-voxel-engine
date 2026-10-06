@@ -18,7 +18,7 @@
 namespace dve::editor {
 
 using EditorTaskId = std::uint64_t;
-enum class EditorTaskState : std::uint8_t { Queued, Running, Succeeded, Failed, Cancelled };
+enum class EditorTaskState : std::uint8_t { Queued, Running, Succeeded, Failed, Cancelled, Unknown };
 
 struct EditorTaskSnapshot {
     EditorTaskId id{};

@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <new>
+#include <set>
 #include <vector>
 
 namespace {
@@ -48,4 +49,15 @@ int main() {
     benchmark("search changing query", [&](int i) { return registry.search(queries[i % 8], 8).size(); });
     benchmark("search repeated query", [&](int) { return registry.search("collision", 8).size(); });
     benchmark("Tools menu", [&](int) { return registry.menu("Tools", true).size(); });
+    std::set<std::string> names;
+    for (const auto& action : registry.actions()) names.insert(action.menu);
+    auto menubar = [&](const auto& source) {
+        std::size_t items = 0;
+        for (const auto& name : names) items += source.menu(name).size();
+        return items;
+    };
+    benchmark("menubar cached", [&](int) { return menubar(registry); });
+    auto legacy = dve::editor::EditorMenuRegistry::make_default();
+    (void)legacy.find(legacy.actions().front().id); // Exercise the compatibility fallback.
+    benchmark("menubar mutable pointer", [&](int) { return menubar(legacy); });
 }

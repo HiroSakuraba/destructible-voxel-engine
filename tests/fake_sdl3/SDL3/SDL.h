@@ -194,6 +194,10 @@ SDL_Gamepad* SDL_OpenGamepad(SDL_JoystickID instance_id);
 void SDL_CloseGamepad(SDL_Gamepad* gamepad);
 
 void SDLTest_Reset();
+void SDLTest_SetTicksNS(Uint64 ticks);
+void SDLTest_SetVSyncSupported(bool supported);
+int SDLTest_RenderVSync();
+int SDLTest_RenderVSyncCalls();
 void SDLTest_PushEvent(const SDL_Event* event);
 void SDLTest_SetWindowMetrics(int logicalW, int logicalH, int pixelW, int pixelH, float scale);
 void SDLTest_SetDialogResult(const char* firstPath, const char* error);
@@ -204,6 +208,7 @@ constexpr Uint8 SDL_ALPHA_OPAQUE = 255;
 constexpr int SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE = 8;
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, const char* name);
 void SDL_DestroyRenderer(SDL_Renderer* renderer);
+bool SDL_SetRenderVSync(SDL_Renderer* renderer, int vsync);
 bool SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
 bool SDL_RenderClear(SDL_Renderer* renderer);
 bool SDL_RenderPresent(SDL_Renderer* renderer);

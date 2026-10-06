@@ -227,7 +227,7 @@ void test_import_workflow(const std::filesystem::path& root) {
 
 
 void test_live_import_preview(const std::filesystem::path& root) {
-    EditorTaskManager tasks(2, 8);
+    EditorTaskManager tasks(2, 8, 1);
     ModelImportPreviewService preview(tasks);
     const auto source = std::filesystem::path(DVE_TEST_SOURCE_DIR) / "examples/unit_cube.obj";
     VoxelizeSettings settings;
@@ -238,6 +238,11 @@ void test_live_import_preview(const std::filesystem::path& root) {
     const ImportPreviewSnapshot snapshot = preview.snapshot();
     require(snapshot.ready && snapshot.objectCount == 1, "live import preview did not complete");
     require(snapshot.occupiedVoxels > 0 && snapshot.occupiedBricks > 0, "preview statistics missing");
+    require(snapshot.taskState == EditorTaskState::Succeeded, "completed preview task state missing");
+    require(tasks.submit("evict preview history", [](EditorTaskContext&) {}).has_value(), "eviction job submit failed");
+    tasks.wait_idle();
+    require(preview.snapshot().ready && preview.snapshot().taskState == EditorTaskState::Unknown,
+            "evicted preview task was reported as queued or lost its result");
     const auto manifest = root / "preview.dvoxscene.json";
     require(preview.publish_current(manifest, &error), error.c_str());
     require(std::filesystem::exists(manifest), "preview publication did not create a scene package");
@@ -254,7 +259,7 @@ void test_live_import_preview(const std::filesystem::path& root) {
 }
 
 void test_background_object_diagnostics() {
-    EditorTaskManager tasks(2, 8);
+    EditorTaskManager tasks(2, 8, 1);
     EditorMaterialLibrary materials = EditorMaterialLibrary::make_default();
 
     // Two separate components (not six-neighbour adjacent) plus one voxel anchored to the
@@ -284,6 +289,12 @@ void test_background_object_diagnostics() {
     require(snapshot.diagnostics->detachedComponents == 1, "expected exactly one detached component");
     require(std::abs(snapshot.diagnostics->massKilograms - direct.massKilograms) < 1.0e-9,
             "mass mismatch between background and direct diagnostics");
+
+    require(snapshot.taskState == EditorTaskState::Succeeded, "completed diagnostics task state missing");
+    require(tasks.submit("evict diagnostics history", [](EditorTaskContext&) {}).has_value(), "eviction job submit failed");
+    tasks.wait_idle();
+    require(service.snapshot().ready && service.snapshot().taskState == EditorTaskState::Unknown,
+            "evicted diagnostics task was reported as queued or lost its result");
 
     // The live object must be untouched: the background path only ever sees a clone.
     require(object.voxels->occupied_voxel_count() == 4U, "background diagnostics mutated the live object");

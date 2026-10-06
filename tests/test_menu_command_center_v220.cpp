@@ -114,6 +114,20 @@ void test_menu_cache_updates() {
             "escaped pointer left stale search results");
     require(registry.menu("Other").size() == 1 && registry.menu("Test").size() == 1,
             "escaped pointer left stale menu membership");
+    // Keep mutating the retained pointer after warming both menu modes. Every
+    // read must reflect membership, visibility, section, and order immediately.
+    escaped->visibility = MenuVisibility::Advanced;
+    require(registry.menu("Other").empty() && registry.menu("Other", true).size() == 1,
+            "mutable fallback ignored visibility edits");
+    escaped->menu = "Test";
+    escaped->section = "First";
+    escaped->order = -5;
+    escaped->visibility = MenuVisibility::Primary;
+    require(registry.menu("Test").front().id == "test.renamed",
+            "mutable fallback ignored order or membership edits");
+    escaped->visibility = MenuVisibility::PaletteOnly;
+    require(registry.menu("Test", true).size() == 2,
+            "mutable fallback exposed a palette-only action");
     escaped->keywords.push_back("afterwarm");
     require(registry.search("afterwarm", 8).front().id == "test.renamed",
             "later pointer edit left stale search fields");

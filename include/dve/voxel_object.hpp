@@ -35,6 +35,12 @@ public:
     VoxelObject& operator=(VoxelObject&& other) noexcept;
 
     [[nodiscard]] std::uint64_t id() const noexcept { return id_; }
+    // Content revision for derived-data caches. It changes on every mutating call
+    // (set_voxel, fill_brick, apply, replace_brick, the mutable find_brick, and move
+    // assignment) and is drawn from a process-wide counter, so two different
+    // objects or states never share a value, even at a reused address. Edits made
+    // later through a held Brick* are not seen; mutate through apply() instead.
+    [[nodiscard]] std::uint64_t revision() const noexcept { return revision_; }
     [[nodiscard]] MaterialId material_at(Int3 globalVoxel) const;
     [[nodiscard]] bool occupied_at(Int3 globalVoxel) const { return material_at(globalVoxel) != kAirMaterial; }
 
@@ -64,7 +70,10 @@ public:
     [[nodiscard]] bool validate() const;
 
 private:
+    void touch() noexcept;
+
     std::uint64_t id_{};
+    std::uint64_t revision_{};
     // Declared before bricks_ so brick destructors return payloads before the pools are destroyed.
     std::unique_ptr<BrickPayloadPools> pools_{};
     FlatBrickMap bricks_{};

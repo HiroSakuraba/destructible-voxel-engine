@@ -1,5 +1,6 @@
 #include "dve/damage.hpp"
 
+#include <utility>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -217,14 +218,14 @@ DamageApplyReportView apply_damage_commands(
     std::uint64_t removedVoxelCount = 0;
 
     for (const DamageBrickBatch& batch : batches) {
-        const Brick* before = object.find_brick(batch.key);
+        const Brick* before = std::as_const(object).find_brick(batch.key);
         // Removal-only commands that touch absent space must not materialize empty
         // authority brick headers. Besides wasting memory, that previously made
         // renderer mirrors appear stale even though no voxel changed.
         if (before == nullptr && batch.mutation.writes.empty()) continue;
         const std::uint16_t oldCount = before == nullptr ? 0 : before->occupied_count();
         AppliedBrickEdit edit = object.apply(batch.key, batch.mutation);
-        const Brick* after = object.find_brick(batch.key);
+        const Brick* after = std::as_const(object).find_brick(batch.key);
         const std::uint16_t newCount = after == nullptr ? 0 : after->occupied_count();
         if (oldCount > newCount) removedVoxelCount += oldCount - newCount;
         if (edit.changedMask.any()) workspace.edits_.push_back(edit);

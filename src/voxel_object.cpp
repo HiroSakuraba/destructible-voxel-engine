@@ -1,5 +1,6 @@
 #include "dve/voxel_object.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <utility>
 
@@ -21,16 +22,30 @@ void hash_scalar(std::uint64_t& hash, T value) {
     for (std::size_t i = 0; i < sizeof(T); ++i) hash_byte(hash, bytes[i]);
 }
 
+std::atomic<std::uint64_t> gNextRevision{1};
+
+std::uint64_t next_revision() noexcept {
+    return gNextRevision.fetch_add(1, std::memory_order_relaxed);
+}
+
 } // namespace
 
-VoxelObject::VoxelObject(std::uint64_t id) : id_(id), pools_(std::make_unique<BrickPayloadPools>()) {}
+void VoxelObject::touch() noexcept { revision_ = next_revision(); }
+
+VoxelObject::VoxelObject(std::uint64_t id)
+    : id_(id), revision_(next_revision()), pools_(std::make_unique<BrickPayloadPools>()) {}
 VoxelObject::~VoxelObject() = default;
-VoxelObject::VoxelObject(VoxelObject&& other) noexcept = default;
+VoxelObject::VoxelObject(VoxelObject&& other) noexcept
+    : id_(other.id_), revision_(other.revision_), pools_(std::move(other.pools_)), bricks_(std::move(other.bricks_)) {
+    // The source no longer holds this content; it must not keep the revision that names it.
+    other.touch();
+}
 
 VoxelObject& VoxelObject::operator=(VoxelObject&& other) noexcept {
     if (this == &other) return *this;
     VoxelObject temporary(std::move(other));
     std::swap(id_, temporary.id_);
+    std::swap(revision_, temporary.revision_);
     std::swap(pools_, temporary.pools_);
     std::swap(bricks_, temporary.bricks_);
     return *this;
@@ -46,11 +61,14 @@ MaterialId VoxelObject::material_at(Int3 globalVoxel) const {
 BrickApplyResult VoxelObject::set_voxel(Int3 globalVoxel, MaterialId material) {
     const BrickKey key = brick_key_from_voxel(globalVoxel);
     auto [it, inserted] = bricks_.try_emplace(key, *pools_);
-    (void)inserted;
-    return it->second.set_voxel(voxel_index_unchecked(local_voxel_from_global(globalVoxel)), material);
+    const BrickApplyResult result =
+        it->second.set_voxel(voxel_index_unchecked(local_voxel_from_global(globalVoxel)), material);
+    if (inserted || result.changed) touch();
+    return result;
 }
 
 void VoxelObject::fill_brick(BrickKey key, MaterialId material) {
+    touch();
     Brick replacement = Brick::uniform_solid(*pools_, material);
     auto it = bricks_.find(key);
     if (it == bricks_.end()) bricks_.emplace(key, std::move(replacement));
@@ -59,8 +77,8 @@ void VoxelObject::fill_brick(BrickKey key, MaterialId material) {
 
 AppliedBrickEdit VoxelObject::apply(BrickKey key, const BrickMutation& mutation) {
     auto [it, inserted] = bricks_.try_emplace(key, *pools_);
-    (void)inserted;
     const BrickApplyResult result = it->second.apply(mutation);
+    if (inserted || result.changed) touch();
     return {key, result.changedMask, result.generation};
 }
 
@@ -78,7 +96,10 @@ const Brick* VoxelObject::find_brick(BrickKey key) const {
 
 Brick* VoxelObject::find_brick(BrickKey key) {
     const auto it = bricks_.find(key);
-    return it == bricks_.end() ? nullptr : &it->second;
+    if (it == bricks_.end()) return nullptr;
+    // A mutable pointer may be used to edit the brick; assume it will be.
+    touch();
+    return &it->second;
 }
 
 std::uint64_t VoxelObject::brick_content_hash(
@@ -109,6 +130,7 @@ bool VoxelObject::replace_brick(const VoxelBrickSnapshot& snapshot, std::string*
         if (error != nullptr) *error = "voxel brick snapshot content hash does not match its materials";
         return false;
     }
+    touch();
     auto [it, inserted] = bricks_.try_emplace(snapshot.key, *pools_);
     (void)inserted;
     it->second.replace_materials(snapshot.materials, snapshot.generation);

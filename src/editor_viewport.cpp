@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <limits>
+#include <map>
 
 namespace dve::editor {
 namespace {
@@ -176,35 +177,82 @@ ViewportRay make_viewport_ray(const EditorCamera& camera, UiRect viewport, float
     return {camera.position, safe_normalize(direction, basis.forward)};
 }
 
-ScreenPoint project_world_to_screen(const EditorCamera& camera, UiRect viewport, Float3 worldPoint) noexcept {
-    const CameraBasis basis = camera_basis(camera);
-    const Float3 relative = subtract(worldPoint, camera.position);
-    const float depth = dot(relative, basis.forward);
-    if (!(depth > camera.nearPlane) || depth > camera.farPlane || viewport.width <= 0 || viewport.height <= 0)
+namespace {
+
+// Everything project_world_to_screen derives from the camera and viewport alone,
+// computed once per view instead of once per voxel (the basis takes four
+// normalisations and the field of view a tan, both previously per point).
+struct ScreenProjector {
+    CameraBasis basis{};
+    Float3 position{};
+    float nearPlane{};
+    float farPlane{};
+    bool hasArea{};
+    bool orthographic{};
+    float viewportX{};
+    float viewportY{};
+    float width{};
+    float height{};
+    float aspect{};
+    float halfHeight{};
+    float tangent{};
+    float lensShiftX{};
+    float lensShiftY{};
+};
+
+ScreenProjector make_screen_projector(const EditorCamera& camera, UiRect viewport) noexcept {
+    ScreenProjector projector;
+    projector.basis = camera_basis(camera);
+    projector.position = camera.position;
+    projector.nearPlane = camera.nearPlane;
+    projector.farPlane = camera.farPlane;
+    projector.hasArea = viewport.width > 0 && viewport.height > 0;
+    if (!projector.hasArea) return projector;
+    projector.orthographic = camera.projection == EditorProjection::Orthographic;
+    projector.viewportX = static_cast<float>(viewport.x);
+    projector.viewportY = static_cast<float>(viewport.y);
+    projector.width = static_cast<float>(viewport.width);
+    projector.height = static_cast<float>(viewport.height);
+    projector.aspect = projector.width / projector.height;
+    if (projector.orthographic) {
+        projector.halfHeight = std::max(0.001F, camera.orthographicHeight * 0.5F);
+    } else {
+        projector.tangent = std::tan(std::clamp(editor_camera_vertical_fov(camera, projector.aspect), 0.1F, kPi - 0.1F) * 0.5F);
+        projector.lensShiftX = camera.physicalLens.enabled ? camera.physicalLens.lensShiftX * 2.0F : 0.0F;
+        projector.lensShiftY = camera.physicalLens.enabled ? camera.physicalLens.lensShiftY * 2.0F : 0.0F;
+    }
+    return projector;
+}
+
+ScreenPoint project_with(const ScreenProjector& projector, Float3 worldPoint) noexcept {
+    const Float3 relative = subtract(worldPoint, projector.position);
+    const float depth = dot(relative, projector.basis.forward);
+    if (!(depth > projector.nearPlane) || depth > projector.farPlane || !projector.hasArea)
         return {0.0F, 0.0F, depth, false};
-    const float x = dot(relative, basis.right);
-    const float y = dot(relative, basis.up);
-    const float width = static_cast<float>(viewport.width);
-    const float height = static_cast<float>(viewport.height);
-    const float aspect = width / height;
+    const float x = dot(relative, projector.basis.right);
+    const float y = dot(relative, projector.basis.up);
     float normalizedX{};
     float normalizedY{};
-    if (camera.projection == EditorProjection::Orthographic) {
-        const float halfHeight = std::max(0.001F, camera.orthographicHeight * 0.5F);
-        normalizedX = x / (halfHeight * aspect);
-        normalizedY = y / halfHeight;
+    if (projector.orthographic) {
+        normalizedX = x / (projector.halfHeight * projector.aspect);
+        normalizedY = y / projector.halfHeight;
     } else {
-        const float tangent = std::tan(std::clamp(editor_camera_vertical_fov(camera, aspect), 0.1F, kPi - 0.1F) * 0.5F);
-        normalizedX = x / (depth * tangent * aspect) + (camera.physicalLens.enabled ? camera.physicalLens.lensShiftX * 2.0F : 0.0F);
-        normalizedY = y / (depth * tangent) + (camera.physicalLens.enabled ? camera.physicalLens.lensShiftY * 2.0F : 0.0F);
+        normalizedX = x / (depth * projector.tangent * projector.aspect) + projector.lensShiftX;
+        normalizedY = y / (depth * projector.tangent) + projector.lensShiftY;
     }
     const bool visible = normalizedX >= -1.2F && normalizedX <= 1.2F && normalizedY >= -1.2F && normalizedY <= 1.2F;
     return {
-        static_cast<float>(viewport.x) + (normalizedX + 1.0F) * 0.5F * width,
-        static_cast<float>(viewport.y) + (1.0F - normalizedY) * 0.5F * height,
+        projector.viewportX + (normalizedX + 1.0F) * 0.5F * projector.width,
+        projector.viewportY + (1.0F - normalizedY) * 0.5F * projector.height,
         depth,
         visible,
     };
+}
+
+} // namespace
+
+ScreenPoint project_world_to_screen(const EditorCamera& camera, UiRect viewport, Float3 worldPoint) noexcept {
+    return project_with(make_screen_projector(camera, viewport), worldPoint);
 }
 
 void orbit_camera(EditorCamera& camera, float deltaX, float deltaY, float sensitivity) noexcept {
@@ -393,6 +441,134 @@ std::optional<EditorPickResult> pick_editor_document(const EditorDocument& docum
     return best;
 }
 
+namespace {
+
+// Occupied voxels of `brick` that are within two voxels of empty space: everything
+// except voxels whose whole 5x5x5 neighbourhood is solid. One solid layer (a 3x3x3
+// neighbourhood) is enough almost everywhere, but at grazing silhouettes a buried
+// voxel's splat can still leak a stray pixel past the surface splats; keeping two
+// layers made culled and unculled frames pixel-identical in every test pose.
+//
+// Bitset512 stores one z plane per word with bit (x + 8y). The 5x5x5 erosion is
+// separable (x, then y, then z), and a two-voxel reach never crosses more than one
+// brick, so each direction is a shift plus the facing columns/rows/planes of the
+// adjacent brick: 26 brick lookups per brick instead of 124 voxel lookups per voxel.
+Bitset512 exposed_voxel_mask(const VoxelObject& voxels, BrickKey key, const Brick& brick) {
+    static_assert(kBrickDim == 8, "exposed_voxel_mask assumes 8x8x8 bricks");
+    constexpr std::uint64_t kColumnX0 = 0x0101010101010101ULL;
+    // Columns x < k / x >= 8 - k, and rows y < k / y >= 8 - k, for k = 1, 2.
+    constexpr std::array<std::uint64_t, 3> kLowColumns{0, kColumnX0, kColumnX0 * 3U};
+    constexpr std::array<std::uint64_t, 3> kHighColumns{0, kColumnX0 << 7U, (kColumnX0 * 3U) << 6U};
+    constexpr std::array<std::uint64_t, 3> kLowRows{0, 0xFFULL, 0xFFFFULL};
+    constexpr std::array<std::uint64_t, 3> kHighRows{0, 0xFFULL << 56U, 0xFFFFULL << 48U};
+    const auto slot = [](int dx, int dy, int dz) { return static_cast<std::size_t>((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)); };
+
+    const Bitset512 occupied = brick.occupancy();
+    std::array<Bitset512, 27> block{};
+    for (int dx = -1; dx <= 1; ++dx)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dz = -1; dz <= 1; ++dz) {
+                if (dx == 0 && dy == 0 && dz == 0) { block[slot(0, 0, 0)] = occupied; continue; }
+                if (const Brick* adjacent = voxels.find_brick({key.x + dx, key.y + dy, key.z + dz}))
+                    block[slot(dx, dy, dz)] = adjacent->occupancy();
+            }
+
+    const auto erodeX = [&](const Bitset512& b, const Bitset512& plus, const Bitset512& minus) {
+        Bitset512 out;
+        for (std::size_t z = 0; z < 8U; ++z) {
+            const std::uint64_t p = b.words[z];
+            std::uint64_t kept = p;
+            for (unsigned k = 1; k <= 2U; ++k) {
+                kept &= ((p >> k) & ~kHighColumns[k]) | ((plus.words[z] & kLowColumns[k]) << (8U - k));
+                kept &= ((p << k) & ~kLowColumns[k]) | ((minus.words[z] & kHighColumns[k]) >> (8U - k));
+            }
+            out.words[z] = kept;
+        }
+        return out;
+    };
+    const auto erodeY = [&](const Bitset512& b, const Bitset512& plus, const Bitset512& minus) {
+        Bitset512 out;
+        for (std::size_t z = 0; z < 8U; ++z) {
+            const std::uint64_t p = b.words[z];
+            std::uint64_t kept = p;
+            for (unsigned k = 1; k <= 2U; ++k) {
+                kept &= (p >> (8U * k)) | ((plus.words[z] & kLowRows[k]) << (64U - 8U * k));
+                kept &= (p << (8U * k)) | ((minus.words[z] & kHighRows[k]) >> (64U - 8U * k));
+            }
+            out.words[z] = kept;
+        }
+        return out;
+    };
+
+    // x-erosion of the nine bricks in this brick's (y, z) neighbourhood, then
+    // y-erosion of the three bricks in its z column, then z-erosion of this brick.
+    std::array<Bitset512, 9> erodedX{};
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dz = -1; dz <= 1; ++dz)
+            erodedX[static_cast<std::size_t>((dy + 1) * 3 + (dz + 1))] =
+                erodeX(block[slot(0, dy, dz)], block[slot(1, dy, dz)], block[slot(-1, dy, dz)]);
+    std::array<Bitset512, 3> erodedXY{};
+    for (int dz = -1; dz <= 1; ++dz)
+        erodedXY[static_cast<std::size_t>(dz + 1)] = erodeY(erodedX[static_cast<std::size_t>(3 + dz + 1)],
+                                                            erodedX[static_cast<std::size_t>(6 + dz + 1)],
+                                                            erodedX[static_cast<std::size_t>(dz + 1)]);
+    const auto plane = [&](int z) -> std::uint64_t {
+        if (z < 0) return erodedXY[0].words[static_cast<std::size_t>(z + 8)];
+        if (z > 7) return erodedXY[2].words[static_cast<std::size_t>(z - 8)];
+        return erodedXY[1].words[static_cast<std::size_t>(z)];
+    };
+    Bitset512 exposed;
+    for (int z = 0; z < 8; ++z) {
+        const std::uint64_t buried = plane(z - 2) & plane(z - 1) & plane(z) & plane(z + 1) & plane(z + 2);
+        exposed.words[static_cast<std::size_t>(z)] = occupied.words[static_cast<std::size_t>(z)] & ~buried;
+    }
+    return exposed;
+}
+
+// Whether culling enclosed voxels of `object` is invisible for this view. Splats are
+// filled squares of side 2r+1 px with r = max(1, int(clamp(0.72 * edge, 1, 12))),
+// where edge is the projected voxel size; those squares tile the projected lattice
+// without gaps while edge <= 24 px. Further requirements:
+//  - the whole object is beyond the near plane (a clipped surface would expose the
+//    interior as a cross-section);
+//  - the projection is no narrower than the field of view the splat size is
+//    computed from (a zoomed physical lens makes splats smaller than the spacing);
+//  - the off-screen margin (draw items are kept out to 1.2x the viewport) is wide
+//    enough that the voxels covering a near-edge interior voxel are kept too.
+// Checked at the object's nearest depth, where voxels project largest. When any of
+// this fails, every voxel of the object is drawn as before.
+bool surface_splats_cover_object(const EditorObject& object, const EditorCamera& camera, UiRect viewport) noexcept {
+    if (viewport.width <= 0 || viewport.height <= 0 || !(object.voxelSizeMeters > 0.0F)) return false;
+    const float width = static_cast<float>(viewport.width);
+    const float height = static_cast<float>(viewport.height);
+    const float marginPixels = 0.1F * std::min(width, height);
+    const float maximumEdge = std::min(24.0F, (marginPixels - 1.0F) * 0.5F);
+    if (!(maximumEdge >= 1.0F)) return false;
+
+    const EditorObjectBounds bounds = object_world_bounds(object);
+    if (!bounds.valid) return false;
+    const Float3 forward = camera_basis(camera).forward;
+    float nearest = std::numeric_limits<float>::infinity();
+    for (Float3 corner : bounds_corners(bounds.minimum, bounds.maximum))
+        nearest = std::min(nearest, dot(subtract(corner, camera.position), forward));
+    // Bounds are voxel-centre bounds; keep a full voxel of clearance from the near plane.
+    if (!(nearest - object.voxelSizeMeters > camera.nearPlane)) return false;
+
+    if (camera.projection == EditorProjection::Orthographic) {
+        const float edge = object.voxelSizeMeters * height / std::max(0.001F, camera.orthographicHeight);
+        return edge <= maximumEdge;
+    }
+    const float aspect = width / height;
+    const float projectedTangent =
+        std::tan(std::clamp(editor_camera_vertical_fov(camera, aspect), 0.1F, kPi - 0.1F) * 0.5F);
+    const float splatTangent = std::tan(camera.verticalFovRadians * 0.5F);
+    if (!(projectedTangent >= splatTangent * 0.999F)) return false;
+    const float edge = object.voxelSizeMeters * height / (2.0F * (nearest - object.voxelSizeMeters) * projectedTangent);
+    return edge <= maximumEdge;
+}
+
+} // namespace
+
 std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     const EditorDocument& document,
     const EditorMaterialLibrary& materials,
@@ -404,16 +580,33 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     result.reserve(std::min<std::size_t>(settings.maximumDrawVoxels, 16384));
     const float viewportHeight = static_cast<float>(std::max(1, viewport.height));
     const float tangent = std::tan(camera.verticalFovRadians * 0.5F);
+    const ScreenProjector projector = make_screen_projector(camera, viewport);
+    std::map<BrickKey, Bitset512> anchorMasks;
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible) continue;
+        const bool cullEnclosed = settings.cullEnclosedVoxels &&
+                                  surface_splats_cover_object(object, camera, viewport);
+        anchorMasks.clear();
+        if (cullEnclosed) {
+            for (const Int3& anchor : object.anchors)
+                anchorMasks[brick_key_from_voxel(anchor)].set(voxel_index_unchecked(local_voxel_from_global(anchor)));
+        }
         for (const auto& entry : object.voxels->bricks()) {
             const BrickKey key = entry.first;
             const Brick& brick = entry.second;
-            brick.occupancy().for_each_set([&](std::uint16_t index) {
+            Bitset512 emitted = cullEnclosed ? exposed_voxel_mask(*object.voxels, key, brick) : brick.occupancy();
+            if (cullEnclosed && !anchorMasks.empty()) {
+                if (const auto anchors = anchorMasks.find(key); anchors != anchorMasks.end()) {
+                    const Bitset512 occupied = brick.occupancy();
+                    for (std::size_t word = 0; word < emitted.words.size(); ++word)
+                        emitted.words[word] |= anchors->second.words[word] & occupied.words[word];
+                }
+            }
+            emitted.for_each_set([&](std::uint16_t index) {
                 if (result.size() >= settings.maximumDrawVoxels) return;
                 const Int3 voxel = global_from_local(key, local_from_index_unchecked(index));
                 const Float3 world = voxel_center_world(object, voxel);
-                const ScreenPoint screen = project_world_to_screen(camera, viewport, world);
+                const ScreenPoint screen = project_with(projector, world);
                 if (!screen.visible) return;
                 float radius = 2.0F;
                 if (camera.projection == EditorProjection::Perspective) {
@@ -452,10 +645,14 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
 }
 
 namespace {
+// Word-at-a-time mixer (one multiply per 64-bit input instead of eight for byte-wise
+// FNV-1a). Fingerprints are compared only within a process, never persisted.
 struct FingerprintHasher {
-    std::uint64_t h{1469598103934665603ULL};
+    std::uint64_t h{0x9E3779B97F4A7C15ULL};
     void u64(std::uint64_t v) noexcept {
-        for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xFFU; h *= 1099511628211ULL; }
+        h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6U) + (h >> 2U);
+        h *= 0xBF58476D1CE4E5B9ULL;
+        h ^= h >> 31U;
     }
     void f32(float v) noexcept { u64(std::bit_cast<std::uint32_t>(v)); }
     void f3(Float3 v) noexcept { f32(v.x); f32(v.y); f32(v.z); }
@@ -478,11 +675,10 @@ std::uint64_t editor_scene_render_fingerprint(const EditorDocument& document) no
         hash.f32(object.voxelSizeMeters);
         hash.u64(reinterpret_cast<std::uintptr_t>(object.voxels.get()));
         if (object.voxels) {
+            // The voxel revision changes on every content mutation and is unique per
+            // process, so it stands in for walking every brick (O(objects), not O(bricks)).
+            hash.u64(object.voxels->revision());
             hash.u64(object.voxels->brick_count());
-            for (const auto& entry : object.voxels->bricks()) {
-                hash.i32(entry.first.x); hash.i32(entry.first.y); hash.i32(entry.first.z);
-                hash.u64((static_cast<std::uint64_t>(entry.second.generation()) << 16U) | entry.second.occupied_count());
-            }
         }
         hash.u64(object.anchors.size());
         for (const Int3& anchor : object.anchors) { hash.i32(anchor.x); hash.i32(anchor.y); hash.i32(anchor.z); }
@@ -525,6 +721,7 @@ const std::vector<EditorVoxelDrawItem>& EditorVoxelDrawListCache::get(
     hash.u64(editor_camera_fingerprint(camera));
     hash.i32(viewport.x); hash.i32(viewport.y); hash.i32(viewport.width); hash.i32(viewport.height);
     hash.u64(settings.maximumDrawVoxels);
+    hash.u64(settings.cullEnclosedVoxels ? 1U : 0U);
     hash.u64(editor_selection_fingerprint(selectedObjects));
     if (!valid_ || hash.h != key_) {
         items_ = build_voxel_draw_list(document, materials, camera, viewport, settings, selectedObjects);

@@ -7,6 +7,7 @@
 #include "dve/camera_runtime.hpp"
 #include "dve/game_ui.hpp"
 
+#include <utility>
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -2417,7 +2418,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
                 const VoxelBrickSnapshot snapshot{brick.key, brick.generation, brick.materials,
                                                   VoxelObject::brick_content_hash(brick.materials)};
                 std::string brickError;
-                if (voxels->find_brick(brick.key) != nullptr) return fail(label + " repeats a brick");
+                if (std::as_const(*voxels).find_brick(brick.key) != nullptr) return fail(label + " repeats a brick");
                 if (!voxels->replace_brick(snapshot, &brickError)) return fail(label + ": " + brickError);
             }
             if (voxels->occupied_voxel_count() == 0U) return fail(label + " has no voxels");

@@ -1,0 +1,32 @@
+# LeakSanitizer suppressions for the linux-gcc-asan CI job (LSAN_OPTIONS=suppressions=...).
+#
+# Only system libraries are listed. They allocate caches and connection state once per
+# process and never free it, by design, so LeakSanitizer would otherwise blame whichever
+# DVE test first opened a display, a font or an audio device. A leak whose stack runs
+# through DVE code alone is still reported. Keep this list to libraries we do not own.
+
+# X11 / Wayland connection and keymap state (SDL3 video, the native X11 editor).
+leak:libX11.so
+leak:libxcb.so
+leak:libXext.so
+leak:libXft.so
+leak:libxkbcommon.so
+leak:libwayland-client.so
+
+# Font configuration and glyph caches.
+leak:libfontconfig.so
+leak:libfreetype.so
+
+# GL/EGL drivers loaded by the SDL renderer.
+leak:libEGL_mesa.so
+leak:libGLX_mesa.so
+leak:libgallium
+
+# Audio back ends (SDL3 audio, MIDI).
+leak:libasound.so
+leak:libpulse.so
+leak:libpulsecommon
+leak:libjack.so
+
+# Session bus (SDL3 probes D-Bus for screensaver and portal services).
+leak:libdbus-1.so

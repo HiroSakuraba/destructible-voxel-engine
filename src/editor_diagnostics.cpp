@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
-#include <deque>
 #include <limits>
 #include <set>
 #include <vector>
+
+#include "dve/surface.hpp"
 
 namespace dve::editor {
 namespace {
@@ -14,8 +16,6 @@ namespace {
 constexpr std::array<Int3, 6> kNeighbors{{
     {1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}
 }};
-
-Int3 plus(Int3 a, Int3 b) noexcept { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 
 std::vector<std::pair<Int3, MaterialId>> occupied_voxels(const VoxelObject& object) {
     std::vector<std::pair<Int3, MaterialId>> result;
@@ -62,47 +62,64 @@ EditorObjectDiagnostics analyze_editor_object(
     }
 
     const auto voxels = occupied_voxels(*object.voxels);
-    std::set<Int3> occupied;
-    occupied.clear();
     for (const auto& [voxel, material] : voxels) {
-        occupied.insert(voxel);
+        (void)voxel;
         ++result.materialVoxelCounts[material];
     }
-    for (const auto& [key, brick] : object.voxels->bricks()) {
+
+    const auto& bricks = object.voxels->bricks();
+    constexpr auto missing = std::numeric_limits<std::uint32_t>::max();
+    std::vector<Bitset512> unvisited(bricks.size());
+    std::vector<std::array<std::uint32_t, 6>> adjacent(bricks.size());
+    for (std::size_t i = 0; i < bricks.size(); ++i) {
+        const auto& [key, brick] = bricks.begin()[i];
+        unvisited[i] = brick.occupancy();
         if (!brick.empty()) ++result.occupiedBricks;
-        (void)key;
-    }
-
-    for (const auto& [voxel, material] : voxels) {
-        (void)material;
-        bool surface = false;
-        for (const Int3 offset : kNeighbors) {
-            if (!occupied.contains(plus(voxel, offset))) { surface = true; break; }
+        Bitset512 surface;
+        for (const auto& face : extract_brick_face_masks(*object.voxels, key)) surface |= face;
+        result.surfaceVoxels += surface.count();
+        for (std::size_t direction = 0; direction < kNeighbors.size(); ++direction) {
+            const auto delta = kNeighbors[direction];
+            const auto neighbor = bricks.find({key.x + delta.x, key.y + delta.y, key.z + delta.z});
+            adjacent[i][direction] = neighbor == bricks.end() ? missing :
+                static_cast<std::uint32_t>(neighbor - bricks.begin());
         }
-        if (surface) ++result.surfaceVoxels;
     }
 
-    std::set<Int3> unvisited = occupied;
-    while (!unvisited.empty()) {
-        ++result.connectedComponents;
-        bool anchored = false;
-        std::deque<Int3> queue;
-        queue.push_back(*unvisited.begin());
-        unvisited.erase(unvisited.begin());
-        while (!queue.empty()) {
-            const Int3 voxel = queue.front();
-            queue.pop_front();
-            anchored = anchored || object.flags.anchored || object.anchors.contains(voxel);
-            for (const Int3 offset : kNeighbors) {
-                const Int3 neighbor = plus(voxel, offset);
-                const auto it = unvisited.find(neighbor);
-                if (it != unvisited.end()) {
-                    queue.push_back(*it);
-                    unvisited.erase(it);
+    struct PendingVoxel { std::uint32_t brick; std::uint16_t index; };
+    // Reuse contiguous work storage between components; mark before pushing so
+    // every occupied voxel enters the work list exactly once.
+    std::vector<PendingVoxel> pending;
+    auto visit = [&](std::uint32_t brick, std::uint16_t index) {
+        if (brick == missing || !unvisited[brick].test(index)) return;
+        unvisited[brick].reset(index);
+        pending.push_back({brick, index});
+    };
+    for (std::size_t i = 0; i < bricks.size(); ++i) {
+        for (std::size_t word = 0; word < unvisited[i].words.size(); ++word) {
+            while (unvisited[i].words[word] != 0) {
+                ++result.connectedComponents;
+                bool anchored = object.flags.anchored;
+                visit(static_cast<std::uint32_t>(i), static_cast<std::uint16_t>(word * 64U +
+                    std::countr_zero(unvisited[i].words[word])));
+                while (!pending.empty()) {
+                    const auto current = pending.back();
+                    pending.pop_back();
+                    const auto index = current.index;
+                    const auto local = local_from_index_unchecked(index);
+                    if (!anchored) anchored = object.anchors.contains(
+                        global_from_local(bricks.begin()[current.brick].first, local));
+                    const auto& halo = adjacent[current.brick];
+                    visit(local.x == 7 ? halo[0] : current.brick, static_cast<std::uint16_t>(local.x == 7 ? index - 7 : index + 1));
+                    visit(local.x == 0 ? halo[1] : current.brick, static_cast<std::uint16_t>(local.x == 0 ? index + 7 : index - 1));
+                    visit(local.y == 7 ? halo[2] : current.brick, static_cast<std::uint16_t>(local.y == 7 ? index - 56 : index + 8));
+                    visit(local.y == 0 ? halo[3] : current.brick, static_cast<std::uint16_t>(local.y == 0 ? index + 56 : index - 8));
+                    visit(local.z == 7 ? halo[4] : current.brick, static_cast<std::uint16_t>(local.z == 7 ? index - 448 : index + 64));
+                    visit(local.z == 0 ? halo[5] : current.brick, static_cast<std::uint16_t>(local.z == 0 ? index + 448 : index - 64));
                 }
+                if (anchored) ++result.anchoredComponents;
             }
         }
-        if (anchored) ++result.anchoredComponents;
     }
     result.detachedComponents = result.connectedComponents - result.anchoredComponents;
 

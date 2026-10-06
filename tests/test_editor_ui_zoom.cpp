@@ -6,6 +6,7 @@
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/editor_workspace.hpp"
 
+#include <utility>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -185,7 +186,7 @@ void test_controller_hotkeys_and_cap() {
     controller.close_settings(false);
     require(controller.dispatch_action("view.ui_zoom_reset") && near(controller.ui_zoom(), 1.0F), "menu reset action");
     require(controller.dispatch_action("view.ui_zoom_in") && near(controller.ui_zoom(), 1.25F), "menu zoom-in action");
-    require(controller.workspace().menus().find("view.ui_zoom_in") != nullptr, "View menu exposes UI zoom");
+    require(std::as_const(controller.workspace().menus()).find("view.ui_zoom_in") != nullptr, "View menu exposes UI zoom");
 }
 
 void test_settings_row_apply_writes_user_scope() {

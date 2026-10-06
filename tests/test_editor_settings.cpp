@@ -1,3 +1,4 @@
+#include <utility>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -111,20 +112,20 @@ void test_capability_search_and_panel_staging() {
 void test_menu_and_native_controller_integration() {
     EditorMenuRegistry menus = EditorMenuRegistry::make_default();
     require(kMenuBarNames.size() == 8U, "top-level menu bar was not simplified");
-    require(menus.find("camera.mode_orbit") != nullptr, "camera menu action missing");
-    require(menus.find("camera.mode_orbit")->menu == "View", "camera commands were not grouped under View");
-    require(menus.find("physics.settings")->menu == "Tools", "physics commands were not grouped under Tools");
+    require(std::as_const(menus).find("camera.mode_orbit") != nullptr, "camera menu action missing");
+    require(std::as_const(menus).find("camera.mode_orbit")->menu == "View", "camera commands were not grouped under View");
+    require(std::as_const(menus).find("physics.settings")->menu == "Tools", "physics commands were not grouped under Tools");
     require(!menus.search("quick actions", 8).empty(), "menu descriptions/keywords are not searchable");
     require(menus.set_checked("camera.mode_orbit", true), "camera radio check failed");
     require(menus.set_checked("camera.mode_free", true), "camera radio switch failed");
-    require(menus.find("camera.mode_free")->checked, "new camera radio item not checked");
-    require(!menus.find("camera.mode_orbit")->checked, "old camera radio item remained checked");
+    require(std::as_const(menus).find("camera.mode_free")->checked, "new camera radio item not checked");
+    require(!std::as_const(menus).find("camera.mode_orbit")->checked, "old camera radio item remained checked");
 
     NativeEditorController controller{EditorWorkspace{make_native_editor_demo_document()}};
     controller.resize(1280, 800);
     require(controller.dispatch_action("camera.mode_free"), "free camera action failed");
     require(controller.camera_mode() == camera::CameraRigMode::FreeFly, "camera mode did not change");
-    require(controller.workspace().menus().find("camera.mode_free")->checked, "menu check did not refresh");
+    require(std::as_const(controller.workspace().menus()).find("camera.mode_free")->checked, "menu check did not refresh");
     require(controller.dispatch_action("camera.physical_lens"), "physical lens action failed");
     require(controller.camera().physicalLens.enabled, "physical lens did not reach editor camera");
     controller.save_camera_bookmark(0);

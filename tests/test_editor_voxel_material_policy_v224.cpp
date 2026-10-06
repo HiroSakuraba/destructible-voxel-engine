@@ -1,5 +1,6 @@
 #include "dve/editor_native.hpp"
 
+#include <utility>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -16,7 +17,7 @@ void require(bool condition, const std::string& message) {
 int main() {
     try {
         NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
-        const MenuAction* action = controller.workspace().menus().find("render.voxel_material_policy");
+        const MenuAction* action = std::as_const(controller.workspace().menus()).find("render.voxel_material_policy");
         require(action != nullptr && action->menu == "Tools" && action->section == "Voxel Materials",
                 "voxel material policy menu action is missing or misplaced");
 

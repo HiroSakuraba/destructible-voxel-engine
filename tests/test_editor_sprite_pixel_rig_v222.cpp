@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 
+#include <utility>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -34,9 +35,9 @@ struct RecordingCanvas final : IEditorCanvas {
 void run() {
     NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
     controller.resize(1280, 800);
-    require(controller.workspace().menus().find("sprite.pixel_art") != nullptr,
+    require(std::as_const(controller.workspace().menus()).find("sprite.pixel_art") != nullptr,
             "Pixel Art Studio action is missing");
-    require(controller.workspace().menus().find("sprite.rig2d") != nullptr,
+    require(std::as_const(controller.workspace().menus()).find("sprite.rig2d") != nullptr,
             "Multi-Part Sprite Rig action is missing");
 
     require(controller.dispatch_action("sprite.pixel_art"), "could not open Pixel Art Studio");

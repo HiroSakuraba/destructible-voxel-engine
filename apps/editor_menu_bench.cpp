@@ -58,6 +58,9 @@ int main() {
     };
     benchmark("menubar cached", [&](int) { return menubar(registry); });
     auto legacy = dve::editor::EditorMenuRegistry::make_default();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     (void)legacy.find(legacy.actions().front().id); // Exercise the compatibility fallback.
+#pragma GCC diagnostic pop
     benchmark("menubar mutable pointer", [&](int) { return menubar(legacy); });
 }

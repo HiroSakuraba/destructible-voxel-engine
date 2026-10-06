@@ -56,7 +56,7 @@ void test_decoder_workspace_and_timeline() {
     require(decode_sprite_image(encoded, "image/png", decoded, &error), "decode_sprite_image(encoded, 'image/png', decoded, &error)");
     require(decoded.width == 8U && decoded.height == 4U, "decoded.width == 8U && decoded.height == 4U");
 
-    const std::filesystem::path path = std::filesystem::temp_directory_path() / "dve_v204_sprite.png";
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "dve_v205_sprite.png";
     {
         std::ofstream out(path, std::ios::binary);
         out.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
@@ -94,7 +94,7 @@ void test_decoder_workspace_and_timeline() {
     require(workspace.timeline().primarySequenceIndex == before.primarySequenceIndex,
             "reimport preserves primary frame");
 
-    const std::filesystem::path assetPath = std::filesystem::temp_directory_path() / "dve_v204_sprite.dvesprite";
+    const std::filesystem::path assetPath = std::filesystem::temp_directory_path() / "dve_v205_sprite.dvesprite";
     require(workspace.session().save(assetPath, &error), "save sprite asset: " + error);
     SpriteAuthoringWorkspace reopened;
     require(reopened.open_asset(assetPath, path.parent_path(), &error), "open saved sprite asset: " + error);
@@ -120,7 +120,7 @@ void test_decoder_workspace_and_timeline() {
     require(workspace.source_image().sourcePath == path,
             "packed preview retains the original reimport path");
     const std::filesystem::path packedAssetPath =
-        std::filesystem::temp_directory_path() / "dve_v204_sprite_packed_preview.dvesprite";
+        std::filesystem::temp_directory_path() / "dve_v205_sprite_packed_preview.dvesprite";
     require(workspace.save_asset(packedAssetPath, &error),
             "save authoring asset while packed preview is active: " + error);
     SpriteAuthoringWorkspace packedReopened;

@@ -52,6 +52,21 @@ struct AnimationControllerAsset {
 [[nodiscard]] AnimationValidationResult validate_animation_controller(
     const AnimationControllerAsset& controller) noexcept;
 
+// Save-game snapshot of one controller instance (dve.animation). The controller asset is
+// content bound again at boot; restore matches it by object id and asset name.
+struct AnimationControllerInstanceSaveState {
+    std::uint64_t objectId{};
+    std::string controller;   // AnimationControllerAsset::name
+    std::string state;
+    float stateTime{};
+    std::map<std::string, AnimationParameterValue, std::less<>> parameters;
+    std::map<std::string, bool, std::less<>> triggers;
+};
+
+struct AnimationControllerSaveState {
+    std::vector<AnimationControllerInstanceSaveState> instances;   // sorted by object id
+};
+
 class AnimationControllerRuntime {
 public:
     explicit AnimationControllerRuntime(SkeletalAnimationRuntime& animation) noexcept;
@@ -68,6 +83,14 @@ public:
     [[nodiscard]] std::string_view state(std::uint64_t objectId) const noexcept;
     [[nodiscard]] float state_time(std::uint64_t objectId) const noexcept;
     void tick(float deltaSeconds);
+
+    [[nodiscard]] AnimationControllerSaveState capture_save_state() const;
+    // Restores the state machine (current state, state time, parameters, pending triggers)
+    // of every saved instance whose object is bound to a controller of the same name and
+    // whose state and parameter types still match; others are skipped with a warning. The
+    // animation instance's clip playback is restored separately (SkeletalAnimationRuntime).
+    std::size_t restore_save_state(
+        const AnimationControllerSaveState& state, std::vector<std::string>* warnings = nullptr);
 
 private:
     struct Instance {

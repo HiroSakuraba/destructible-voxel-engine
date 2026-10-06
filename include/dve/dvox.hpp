@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <span>
 #include <string>
 
 #include "dve/asset_cooker.hpp"
@@ -29,6 +31,13 @@ struct DvoxReadResult {
 
 [[nodiscard]] DvoxReadResult read_dvox(
     const std::filesystem::path& path,
+    std::uint64_t maximumBytes = std::numeric_limits<std::uint64_t>::max());
+
+// In-memory variant for content that does not live on the filesystem (for example an entry
+// read from a mounted .dvepak through ContentSource). Validation is identical to the path
+// overload, which reads the file and then delegates here; `bytes` must be the complete file.
+[[nodiscard]] DvoxReadResult read_dvox(
+    std::span<const std::byte> bytes,
     std::uint64_t maximumBytes = std::numeric_limits<std::uint64_t>::max());
 
 } // namespace dve

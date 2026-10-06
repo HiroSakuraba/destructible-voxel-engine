@@ -1,0 +1,7 @@
+DVE_GAME 1
+# dve_player_export_scene: game manifest for the scene exported from the generated editor project.
+name=Player Export Sample
+version=0.1.0
+entryScene=scenes/main.dvoxscene.json
+startupScript=scripts/main.lua
+camera=3.3,2.6,5.2 -> 0,0.9,0

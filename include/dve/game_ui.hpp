@@ -88,6 +88,14 @@ public:
     void set_tools(std::vector<ToolWheelEntry> tools);
     [[nodiscard]] bool select_next_tool();
     [[nodiscard]] std::optional<ToolWheelEntry> selected_tool() const;
+    [[nodiscard]] const std::vector<ToolWheelEntry>& tools() const noexcept { return tools_; }
+    [[nodiscard]] std::size_t selected_index() const noexcept { return selected_; }
+    // Save games: puts back tools and the selection exactly (an out-of-range index clamps to 0).
+    void restore(std::string prompt, std::vector<ToolWheelEntry> tools, std::size_t selected) {
+        interactionPrompt_ = std::move(prompt);
+        tools_ = std::move(tools);
+        selected_ = selected < tools_.size() ? selected : 0U;
+    }
 private:
     std::string interactionPrompt_;
     std::vector<ToolWheelEntry> tools_;

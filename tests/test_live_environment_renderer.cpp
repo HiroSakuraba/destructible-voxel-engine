@@ -230,6 +230,50 @@ int main() {
         CHECK(renderer.mainMaterials->ensure_material(triangle,0U,&error)); CHECK(renderer.mainMaterials->find(triangle.contentHash,0U)!=nullptr);
         residencyStats=renderer.materialResidency->stats(); CHECK(residencyStats.assetReferenceCount==2U); CHECK(residencyStats.imagesUploaded==2U); CHECK(residencyStats.samplersCreated==1U);
 
+        // Mixed ordinary and DASHR submeshes share one cooked asset and material table.
+        auto mixed=make_triangle(); mixed.objectId=67U;
+        mixed.materials[0].blendMode=dve::MaterialBlendMode::Opaque;
+        mixed.materials.push_back(mixed.materials[0]);
+        mixed.materialBindings.push_back(mixed.materialBindings[0]);
+        mixed.images.push_back({"height", "image/raw", 1U, 1U, {128U,128U,128U,255U}});
+        mixed.textures.push_back({"height",2U,0U});
+        mixed.materialBindings[0].height.texture=2U;
+        mixed.indices.insert(mixed.indices.end(),{0U,1U,2U});
+        mixed.submeshes.push_back({"ordinary",3U,3U,1U});
+        mixed.contentHash=dve::polygon_asset_content_hash(mixed);
+        CHECK(dve::validate_polygon_asset(mixed));
+        dve::render::MeshRhiMirror mixedMirror(device); CHECK(mixedMirror.upload(mixed,&error));
+        dve::render::DashrShellShaderBytecode shellCode;
+        shellCode.vertex={std::byte{1}}; shellCode.fragment={std::byte{2}};
+        shellCode.pbrFragment={std::byte{3}}; shellCode.shadowFragment={std::byte{4}};
+        dve::render::DashrShellRendererResources shellRenderer;
+        CHECK(dve::render::create_dashr_shell_renderer(device,shellCode,
+              dve::rhi::TextureFormat::RGBA8Unorm,4096U,shellRenderer,&error));
+        dve::render::DashrLiveSurfaceInstance surface(device);
+        const dve::render::DashrAtlasShaderBytecode atlasCode{
+            {std::byte{1}},{std::byte{2}},{std::byte{3}}};
+        CHECK(surface.initialize(mixed,{},atlasCode,64U,&error));
+        const std::uint32_t selected=0U;
+        dve::render::LivePolygonDraw mixedDraw{&mixedMirror,&mixed,1U};
+        mixedDraw.dashr=&surface;
+        mixedDraw.dashrSubmeshIndices=std::span(&selected,1U);
+        mixedDraw.dashrCameraObjectPosition=camera.position;
+        frame.polygonDraws=std::span(&mixedDraw,1U);
+        frame.dashrRenderer=&shellRenderer;
+        frame.cameraWorldPosition=camera.position;
+        CHECK(dve::render::record_live_environment_frame(device,lighting,shadowPlan,atlas,
+              renderer,frame,stats,&fence,&error));
+        CHECK(stats.materialDraws==1U && stats.dashrDraws==1U);
+        CHECK(stats.dashrShadowDraws==1U && stats.shadowDraws==2U);
+        CHECK(surface.published() && surface.atlas_updates()==1U);
+        CHECK(dve::render::record_live_environment_frame(device,lighting,shadowPlan,atlas,
+              renderer,frame,stats,&fence,&error));
+        CHECK(surface.atlas_updates()==1U && surface.skipped_updates()==1U);
+        surface.reset();
+        CHECK(dve::render::destroy_dashr_shell_renderer(device,shellRenderer,&error));
+        mixedMirror.reset();
+        frame.dashrRenderer=nullptr;
+
         CHECK(device.destroy_texture(colorTarget,&error)); CHECK(device.destroy_texture(depthTarget,&error));
         CHECK(dve::render::destroy_live_environment_renderer(device,renderer,&error)); mirror.reset();
         CHECK(dve::render::destroy_cascaded_shadow_atlas(device,atlas,&error)); CHECK(dve::render::destroy_environment_lighting(device,lighting,&error));

@@ -1,0 +1,20 @@
+Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll, concrt140.dll, ...)
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+These DLLs are not part of DVE and are not covered by DVE's MIT license. They are Microsoft's
+"Distributable Code" from the Visual C++ Redistributable that ships with Visual Studio. The
+Windows build copies the files CMake's InstallRequiredSystemLibraries module finds in the
+Visual Studio installation that built the package next to the executables, so the package
+runs on a Windows 10/11 PC that does not have the Visual C++ Redistributable installed. (The
+Universal C Runtime, ucrtbase.dll / api-ms-win-crt-*.dll, is part of Windows 10 and later
+and is not shipped.)
+
+They are redistributed under the license terms of the Visual Studio edition that built the
+package (Distributable Code section) and the list of redistributable files in that
+installation's redist.txt:
+  https://visualstudio.microsoft.com/license-terms/
+  https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution
+  https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files
+
+This notice is not the license text. The terms do not let the files be distributed on their
+own, only as part of a program that uses them, and they must not be modified.

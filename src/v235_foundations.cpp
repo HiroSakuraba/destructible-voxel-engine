@@ -436,6 +436,19 @@ bool DynamicNavigationWorld::rebuild_dirty(std::string* error){
 
 std::vector<NavigationDirtyTile> DynamicNavigationWorld::dirty_tiles() const{return {dirty_.begin(),dirty_.end()};}
 
+bool dvepak_path_is_editor_only(std::string_view normalized,const DvePakBuildOptions& options) noexcept{
+    if(!options.stripEditorOnly)return false;
+    if(std::any_of(options.editorOnlyPrefixes.begin(),options.editorOnlyPrefixes.end(),[&](const auto& p){return path_has_prefix(normalized,p);}))return true;
+    // Every directory component (never the final file name) is checked against the names.
+    std::size_t start=0U;
+    for(std::size_t slash=normalized.find('/');slash!=std::string_view::npos;slash=normalized.find('/',start)){
+        const std::string_view component=normalized.substr(start,slash-start);
+        if(std::find(options.editorOnlyDirectoryNames.begin(),options.editorOnlyDirectoryNames.end(),component)!=options.editorOnlyDirectoryNames.end())return true;
+        start=slash+1U;
+    }
+    return false;
+}
+
 bool build_dvepak(const std::filesystem::path& root,std::span<const std::filesystem::path> inputs,
     const std::filesystem::path& output,const DvePakBuildOptions& options,DvePakManifest* manifest,std::string* error){
     struct Pending{std::string path;std::vector<std::byte> bytes;std::uint64_t hash{};};std::vector<Pending> pending;
@@ -444,7 +457,7 @@ bool build_dvepak(const std::filesystem::path& root,std::span<const std::filesys
         auto relative=std::filesystem::relative(absolute,root,ec);if(ec)return fail(error,"package input is outside root: "+absolute.string());
         const auto normalized=normalize_package_path(relative);
         if(normalized.empty()||path_has_prefix(normalized,"../")||normalized=="..")return fail(error,"unsafe package path: "+normalized);
-        if(options.stripEditorOnly&&std::any_of(options.editorOnlyPrefixes.begin(),options.editorOnlyPrefixes.end(),[&](const auto& p){return path_has_prefix(normalized,p);}))continue;
+        if(dvepak_path_is_editor_only(normalized,options))continue;
         auto bytes=read_file_bytes(absolute,error);if(!bytes)return false;pending.push_back({normalized,std::move(*bytes),0U});pending.back().hash=fnv_bytes(pending.back().bytes);
     }
     std::sort(pending.begin(),pending.end(),[](const auto& a,const auto& b){return a.path<b.path;});
@@ -489,7 +502,11 @@ std::optional<DvePakManifest> inspect_dvepak(const std::filesystem::path& packag
 }
 
 bool DvePakMount::mount(const std::filesystem::path& package,std::string* error){auto parsed=inspect_dvepak(package,error);if(!parsed)return false;package_=package;manifest_=std::move(*parsed);return true;}
-bool DvePakMount::contains(std::string_view path) const noexcept {return std::any_of(manifest_.entries.begin(),manifest_.entries.end(),[&](const auto& e){return e.path==path;});}
+const DvePakEntry* DvePakMount::find(std::string_view path) const noexcept{
+    const auto it=std::lower_bound(manifest_.entries.begin(),manifest_.entries.end(),path,[](const auto& e,std::string_view p){return e.path<p;});
+    return it==manifest_.entries.end()||it->path!=path?nullptr:&*it;
+}
+bool DvePakMount::contains(std::string_view path) const noexcept {return find(path)!=nullptr;}
 std::optional<std::vector<std::byte>> DvePakMount::read(std::string_view path,std::string* error) const{
     const auto it=std::lower_bound(manifest_.entries.begin(),manifest_.entries.end(),path,[](const auto& e,std::string_view p){return e.path<p;});
     if(it==manifest_.entries.end()||it->path!=path)return fail(error,"package entry not found"),std::nullopt;
@@ -927,9 +944,262 @@ bool InputActionSystem::load_bindings(const std::filesystem::path& path, std::st
     return true;
 }
 
-bool SaveGameStore::register_migration(std::uint32_t fromVersion,SaveMigration migration,std::string* error){if(fromVersion>=currentVersion_||!migration||migrations_.contains(fromVersion))return fail(error,"save migration registration is invalid");migrations_[fromVersion]=std::move(migration);return true;}
-bool SaveGameStore::write_atomic(const std::filesystem::path& slot,SaveGameDocument document,std::string* error)const{document.schemaVersion=currentVersion_;std::filesystem::create_directories(slot.parent_path());auto temp=slot;temp+=".tmp";std::ofstream out(temp,std::ios::binary|std::ios::trunc);if(!out)return fail(error,"could not create save file");out.write(kSaveMagic.data(),kSaveMagic.size());const std::uint32_t count=static_cast<std::uint32_t>(document.sections.size());std::uint64_t hash=1469598103934665603ULL;for(const auto& [name,bytes]:document.sections){fnv_mix(hash,name);const auto sectionHash=fnv_bytes(bytes);for(unsigned shift=0;shift<64;shift+=8){hash^=static_cast<std::uint8_t>(sectionHash>>shift);hash*=1099511628211ULL;}}if(!write_value(out,document.schemaVersion)||!write_value(out,document.sequence)||!write_value(out,count)||!write_value(out,hash))return fail(error,"could not write save header");for(const auto& [name,bytes]:document.sections){const auto length=static_cast<std::uint32_t>(name.size());const auto size=static_cast<std::uint64_t>(bytes.size());const auto sectionHash=fnv_bytes(bytes);if(!write_value(out,length)||!write_value(out,size)||!write_value(out,sectionHash))return fail(error,"could not write save directory");out.write(name.data(),length);if(!bytes.empty())out.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));if(!out)return fail(error,"could not write save payload");}out.close();if(!out)return fail(error,"could not finalize save");std::error_code ec;auto backup=slot;backup+=".bak";if(std::filesystem::exists(slot)){std::filesystem::remove(backup,ec);ec.clear();std::filesystem::rename(slot,backup,ec);if(ec)return fail(error,"could not rotate save backup");}std::filesystem::rename(temp,slot,ec);if(ec)return fail(error,"could not publish save: "+ec.message());return true;}
-std::optional<SaveGameDocument> SaveGameStore::read_recover(const std::filesystem::path& slot,std::string* error)const{auto load=[&](const std::filesystem::path& path)->std::optional<SaveGameDocument>{std::ifstream in(path,std::ios::binary);if(!in)return std::nullopt;std::array<char,8> magic{};in.read(magic.data(),magic.size());SaveGameDocument doc;std::uint32_t count{};std::uint64_t expected{};if(magic!=kSaveMagic||!read_value(in,doc.schemaVersion)||!read_value(in,doc.sequence)||!read_value(in,count)||!read_value(in,expected)||count>100000U)return std::nullopt;std::uint64_t actual=1469598103934665603ULL;for(std::uint32_t i=0;i<count;++i){std::uint32_t length{};std::uint64_t size{},sectionHash{};if(!read_value(in,length)||!read_value(in,size)||!read_value(in,sectionHash)||length==0U||length>1U*1024U*1024U||size>1ULL*1024ULL*1024ULL*1024ULL)return std::nullopt;std::string name(length,'\0');in.read(name.data(),length);std::vector<std::byte> bytes(static_cast<std::size_t>(size));if(!bytes.empty())in.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));if(!in||fnv_bytes(bytes)!=sectionHash||doc.sections.contains(name))return std::nullopt;fnv_mix(actual,name);for(unsigned shift=0;shift<64;shift+=8){actual^=static_cast<std::uint8_t>(sectionHash>>shift);actual*=1099511628211ULL;}doc.sections.emplace(std::move(name),std::move(bytes));}if(actual!=expected)return std::nullopt;return doc;};auto document=load(slot);if(!document){auto backup=slot;backup+=".bak";document=load(backup);}if(!document)return fail(error,"save and backup are unreadable"),std::nullopt;if(document->schemaVersion>currentVersion_)return fail(error,"save was written by a newer schema"),std::nullopt;while(document->schemaVersion<currentVersion_){const auto it=migrations_.find(document->schemaVersion);if(it==migrations_.end())return fail(error,"missing save migration"),std::nullopt;const auto before=document->schemaVersion;if(!it->second(*document,error))return std::nullopt;if(document->schemaVersion!=before+1U)return fail(error,"save migration did not advance exactly one version"),std::nullopt;}return document;}
+namespace {
+
+void save_put_u32(std::vector<std::byte>& out, std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32U; shift += 8U) out.push_back(static_cast<std::byte>((value >> shift) & 0xFFU));
+}
+void save_put_u64(std::vector<std::byte>& out, std::uint64_t value) {
+    for (unsigned shift = 0; shift < 64U; shift += 8U) out.push_back(static_cast<std::byte>((value >> shift) & 0xFFU));
+}
+void save_mix_hash(std::uint64_t& hash, std::uint64_t value) noexcept {
+    for (unsigned shift = 0; shift < 64U; shift += 8U) {
+        hash ^= static_cast<std::uint8_t>(value >> shift);
+        hash *= 1099511628211ULL;
+    }
+}
+std::uint64_t save_document_hash(const SaveGameDocument& document) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const auto& [name, bytes] : document.sections) {
+        fnv_mix(hash, name);
+        save_mix_hash(hash, fnv_bytes(bytes));
+    }
+    return hash;
+}
+
+class SaveReader {
+public:
+    explicit SaveReader(std::span<const std::byte> bytes) : bytes_(bytes) {}
+    [[nodiscard]] std::uint64_t remaining() const noexcept { return bytes_.size() - offset_; }
+    bool u32(std::uint32_t& value) {
+        if (remaining() < 4U) return false;
+        value = 0U;
+        for (unsigned i = 0; i < 4U; ++i) value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes_[offset_ + i])) << (8U * i);
+        offset_ += 4U;
+        return true;
+    }
+    bool u64(std::uint64_t& value) {
+        if (remaining() < 8U) return false;
+        value = 0U;
+        for (unsigned i = 0; i < 8U; ++i) value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes_[offset_ + i])) << (8U * i);
+        offset_ += 8U;
+        return true;
+    }
+    std::span<const std::byte> take(std::uint64_t count) {
+        const auto view = bytes_.subspan(offset_, static_cast<std::size_t>(count));
+        offset_ += static_cast<std::size_t>(count);
+        return view;
+    }
+private:
+    std::span<const std::byte> bytes_;
+    std::size_t offset_{};
+};
+
+} // namespace
+
+std::vector<std::byte> encode_save_game_document(const SaveGameDocument& document) {
+    std::uint64_t total = kSaveMagic.size() + 4U + 8U + 4U + 8U;
+    for (const auto& [name, bytes] : document.sections) total += 4U + 8U + 8U + name.size() + bytes.size();
+    std::vector<std::byte> out;
+    out.reserve(static_cast<std::size_t>(total));
+    for (const char c : kSaveMagic) out.push_back(static_cast<std::byte>(c));
+    save_put_u32(out, document.schemaVersion);
+    save_put_u64(out, document.sequence);
+    save_put_u32(out, static_cast<std::uint32_t>(document.sections.size()));
+    save_put_u64(out, save_document_hash(document));
+    for (const auto& [name, bytes] : document.sections) {
+        save_put_u32(out, static_cast<std::uint32_t>(name.size()));
+        save_put_u64(out, bytes.size());
+        save_put_u64(out, fnv_bytes(bytes));
+        for (const char c : name) out.push_back(static_cast<std::byte>(c));
+        out.insert(out.end(), bytes.begin(), bytes.end());
+    }
+    return out;
+}
+
+std::optional<SaveGameDocument> decode_save_game_document(
+    std::span<const std::byte> bytes, const SaveGameLimits& limits, std::string* error) {
+    const auto reject = [&](std::string message) -> std::optional<SaveGameDocument> {
+        return fail(error, std::move(message)), std::nullopt;
+    };
+    if (bytes.size() > limits.maximumFileBytes)
+        return reject("save file is " + std::to_string(bytes.size()) + " bytes, over the " +
+                      std::to_string(limits.maximumFileBytes) + "-byte limit");
+    if (bytes.size() < kSaveMagic.size() ||
+        !std::equal(kSaveMagic.begin(), kSaveMagic.end(), bytes.begin(),
+                    [](char a, std::byte b) { return static_cast<std::byte>(a) == b; }))
+        return reject("not a DVESAVE1 save file (bad magic)");
+    SaveReader reader(bytes.subspan(kSaveMagic.size()));
+    SaveGameDocument document;
+    std::uint32_t count{};
+    std::uint64_t expected{};
+    if (!reader.u32(document.schemaVersion) || !reader.u64(document.sequence) || !reader.u32(count) || !reader.u64(expected))
+        return reject("save file is truncated (header)");
+    if (count > limits.maximumSections)
+        return reject("save file declares " + std::to_string(count) + " sections, over the limit of " +
+                      std::to_string(limits.maximumSections));
+    for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint32_t length{};
+        std::uint64_t size{};
+        std::uint64_t sectionHash{};
+        if (!reader.u32(length) || !reader.u64(size) || !reader.u64(sectionHash))
+            return reject("save file is truncated (section " + std::to_string(index) + " header)");
+        if (length == 0U || length > limits.maximumSectionNameBytes)
+            return reject("save section " + std::to_string(index) + " has an invalid name length");
+        if (size > limits.maximumSectionBytes)
+            return reject("save section " + std::to_string(index) + " is " + std::to_string(size) +
+                          " bytes, over the " + std::to_string(limits.maximumSectionBytes) + "-byte limit");
+        if (reader.remaining() < length || reader.remaining() - length < size)
+            return reject("save file is truncated (section " + std::to_string(index) + " needs " +
+                          std::to_string(length + size) + " bytes, " + std::to_string(reader.remaining()) + " left)");
+        const auto nameBytes = reader.take(length);
+        std::string name(length, '\0');
+        std::memcpy(name.data(), nameBytes.data(), length);
+        const auto payload = reader.take(size);
+        if (fnv_bytes(payload) != sectionHash) return reject("save section '" + name + "' failed its hash check");
+        if (!document.sections.empty() && !(document.sections.rbegin()->first < name)) {
+            if (document.sections.contains(name)) return reject("save section '" + name + "' appears twice");
+            return reject("save sections are not in canonical order");
+        }
+        document.sections.emplace_hint(document.sections.end(), std::move(name),
+                                       std::vector<std::byte>(payload.begin(), payload.end()));
+    }
+    if (reader.remaining() != 0U)
+        return reject("save file has " + std::to_string(reader.remaining()) + " trailing bytes");
+    if (save_document_hash(document) != expected) return reject("save file failed its document hash check");
+    return document;
+}
+
+bool SaveGameStore::register_migration(std::uint32_t fromVersion, SaveMigration migration, std::string* error) {
+    if (fromVersion >= currentVersion_ || !migration || migrations_.contains(fromVersion))
+        return fail(error, "save migration registration is invalid");
+    migrations_[fromVersion] = std::move(migration);
+    return true;
+}
+
+bool SaveGameStore::migrate(SaveGameDocument& document, std::uint32_t* migrationsApplied, std::string* error) const {
+    std::uint32_t applied = 0U;
+    if (document.schemaVersion > currentVersion_)
+        return fail(error, "save was written by a newer schema (version " + std::to_string(document.schemaVersion) +
+                               ", this build reads up to " + std::to_string(currentVersion_) + ")");
+    while (document.schemaVersion < currentVersion_) {
+        const auto it = migrations_.find(document.schemaVersion);
+        if (it == migrations_.end())
+            return fail(error, "missing save migration from schema version " + std::to_string(document.schemaVersion));
+        const auto before = document.schemaVersion;
+        std::string stepError;
+        if (!it->second(document, &stepError))
+            return fail(error, "save migration from schema version " + std::to_string(before) + " failed" +
+                                   (stepError.empty() ? std::string() : ": " + stepError));
+        if (document.schemaVersion != before + 1U)
+            return fail(error, "save migration did not advance exactly one version");
+        ++applied;
+    }
+    if (migrationsApplied) *migrationsApplied = applied;
+    return true;
+}
+
+bool SaveGameStore::write_atomic(const std::filesystem::path& slot, SaveGameDocument document, std::string* error,
+                                 std::uint64_t* writtenBytes) const {
+    document.schemaVersion = currentVersion_;
+    for (const auto& [name, bytes] : document.sections) {
+        if (name.empty() || name.size() > limits_.maximumSectionNameBytes || bytes.size() > limits_.maximumSectionBytes)
+            return fail(error, "save section '" + name + "' exceeds the save limits");
+    }
+    if (document.sections.size() > limits_.maximumSections) return fail(error, "save has too many sections");
+    const std::vector<std::byte> bytes = encode_save_game_document(document);
+    if (bytes.size() > limits_.maximumFileBytes)
+        return fail(error, "save is " + std::to_string(bytes.size()) + " bytes, over the " +
+                               std::to_string(limits_.maximumFileBytes) + "-byte limit");
+    std::error_code ec;
+    if (slot.has_parent_path()) {
+        std::filesystem::create_directories(slot.parent_path(), ec);
+        if (ec) return fail(error, "could not create save folder: " + ec.message());
+    }
+    auto temp = slot;
+    temp += ".tmp";
+    {
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) return fail(error, "could not create save file");
+        if (!bytes.empty()) out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        out.close();
+        if (!out) {
+            std::filesystem::remove(temp, ec);
+            return fail(error, "could not write save file");
+        }
+    }
+    auto backup = slot;
+    backup += ".bak";
+    if (std::filesystem::exists(slot, ec)) {
+        std::filesystem::remove(backup, ec);
+        ec.clear();
+        std::filesystem::rename(slot, backup, ec);
+        if (ec) return fail(error, "could not rotate save backup");
+    }
+    std::filesystem::rename(temp, slot, ec);
+    if (ec) return fail(error, "could not publish save: " + ec.message());
+    if (writtenBytes) *writtenBytes = bytes.size();
+    return true;
+}
+
+std::optional<SaveGameDocument> SaveGameStore::read(
+    const std::filesystem::path& slot, const SaveGameReadOptions& options, SaveGameReadReport* report,
+    std::string* error) const {
+    SaveGameReadReport local;
+    const auto load = [&](const std::filesystem::path& path, std::string* why) -> std::optional<SaveGameDocument> {
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec) return fail(why, "cannot open save '" + path.string() + "': " + ec.message()), std::nullopt;
+        if (size > limits_.maximumFileBytes)
+            return fail(why, "save '" + path.string() + "' is over the " + std::to_string(limits_.maximumFileBytes) +
+                                 "-byte limit"), std::nullopt;
+        auto bytes = read_file_bytes(path, why);
+        if (!bytes) return std::nullopt;
+        local.fileBytes = bytes->size();
+        std::string decodeError;
+        auto document = decode_save_game_document(*bytes, limits_, &decodeError);
+        if (!document) return fail(why, "save '" + path.string() + "': " + decodeError), std::nullopt;
+        return document;
+    };
+    std::string primaryError;
+    auto document = load(slot, &primaryError);
+    if (!document && options.allowBackup) {
+        auto backup = slot;
+        backup += ".bak";
+        std::error_code ec;
+        if (std::filesystem::exists(backup, ec)) {
+            std::string backupError;
+            document = load(backup, &backupError);
+            if (document) {
+                local.source = SaveGameReadSource::Backup;
+                local.primaryError = primaryError;
+            } else {
+                primaryError += "; backup: " + backupError;
+            }
+        }
+    }
+    if (!document) return fail(error, primaryError), std::nullopt;
+    local.storedSchemaVersion = document->schemaVersion;
+    if (!migrate(*document, &local.migrationsApplied, error)) return std::nullopt;
+    if (report) *report = std::move(local);
+    return document;
+}
+
+std::optional<SaveGameDocument> SaveGameStore::read_recover(const std::filesystem::path& slot, std::string* error) const {
+    return read(slot, SaveGameReadOptions{}, nullptr, error);
+}
+
+std::optional<SaveGameDocument> SaveGameStore::decode(
+    std::span<const std::byte> bytes, SaveGameReadReport* report, std::string* error) const {
+    auto document = decode_save_game_document(bytes, limits_, error);
+    if (!document) return std::nullopt;
+    SaveGameReadReport local;
+    local.fileBytes = bytes.size();
+    local.storedSchemaVersion = document->schemaVersion;
+    if (!migrate(*document, &local.migrationsApplied, error)) return std::nullopt;
+    if (report) *report = std::move(local);
+    return document;
+}
 
 AnimationValidationResult validate_humanoid_rig(const SkeletonAsset& skeleton,const HumanoidRigMap& rig)noexcept{auto base=validate_skeleton(skeleton);if(!base)return base;if(!std::isfinite(rig.referenceHeightMeters)||rig.referenceHeightMeters<=0.0F)return {false,"humanoid reference height must be positive"};std::set<BoneIndex> used;for(const auto& [role,bone]:rig.bones){(void)role;if(bone>=skeleton.bones.size())return {false,"humanoid rig bone is outside skeleton"};if(!used.insert(bone).second)return {false,"humanoid rig maps one bone to multiple roles"};}for(auto required:{HumanoidBone::Hips,HumanoidBone::Head,HumanoidBone::LeftFoot,HumanoidBone::RightFoot})if(!rig.bones.contains(required))return {false,"humanoid rig is missing a required role"};return {true,{}};}
 LocalPose retarget_humanoid_pose(const SkeletonAsset& sourceSkeleton,std::span<const RigidTransform> sourcePose,const HumanoidRigMap& sourceRig,const SkeletonAsset& targetSkeleton,const HumanoidRigMap& targetRig,std::string* error){if(!validate_humanoid_rig(sourceSkeleton,sourceRig)||!validate_humanoid_rig(targetSkeleton,targetRig)||sourcePose.size()!=sourceSkeleton.bones.size()){fail(error,"retarget inputs are invalid");return{};}auto out=make_bind_pose(targetSkeleton);const float scale=targetRig.referenceHeightMeters/sourceRig.referenceHeightMeters;for(const auto& [role,targetBone]:targetRig.bones){const auto it=sourceRig.bones.find(role);if(it==sourceRig.bones.end())continue;out[targetBone].rotation=sourcePose[it->second].rotation;if(role==HumanoidBone::Hips)out[targetBone].position=mul(sourcePose[it->second].position,scale);}return out;}

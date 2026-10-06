@@ -1,10 +1,13 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <array>
 #include <map>
 #include <set>
+#include <span>
 #include <memory>
 #include <optional>
 #include <string>
@@ -13,6 +16,7 @@
 #include <vector>
 #include <utility>
 
+#include "dve/asset_cooker.hpp"
 #include "dve/component.hpp"
 #include "dve/damage.hpp"
 #include "dve/editor_materials.hpp"
@@ -161,6 +165,123 @@ struct GameDamageEvent {
     std::vector<GameObjectId> newFragmentIds;
 };
 
+// Where an object's geometry came from. Player saves (dve/game_save.hpp) store a voxel
+// object's destruction as a brick delta against this asset instead of every voxel, and
+// re-read polygon geometry from it. The scene loader and the Lua host's world.spawn_asset set
+// it; fragments split off by damage inherit their parent's source with `derived` set (their
+// voxels are a subset of the source, so saves store them in full but take the material table
+// from the source).
+struct GameObjectSource {
+    std::string path;               // content path (or filesystem path) of the .dvox / .dmesh
+    std::uint64_t contentHash{};    // FNV-1a 64 of the file bytes
+    bool derived{};
+    bool operator==(const GameObjectSource&) const = default;
+};
+
+// Plain-data snapshot of a GameWorld for save games (GameWorld::capture_save_state /
+// restore_save_state). Encoding, deltas and versioning live in dve/game_save.hpp; this is
+// only the in-memory state, complete enough to rebuild every object bit for bit.
+struct GameWorldBrickState {
+    BrickKey key{};
+    std::uint32_t generation{};
+    std::array<MaterialId, kBrickVoxelCount> materials{};
+};
+
+struct GameWorldObjectState {
+    GameObjectId id{kInvalidGameObjectId};
+    std::string name;
+    std::vector<std::string> tags;
+    std::vector<std::string> groups;
+    std::uint32_t layer{};
+    std::vector<Component> components;
+    bool enabled{true};
+    std::optional<GameObjectAttachment> attachment;
+    RigidTransform authoredTransform{};
+    float voxelSizeMeters{0.1F};
+    GameGeometryKind kind{GameGeometryKind::Marker};   // Marker, Voxel or Polygon
+    bool dynamic{};
+    bool structural{true};
+    bool visualOnly{};
+    std::optional<GameObjectSource> source;
+    // Voxel objects: every brick header in storage order (empty bricks included, since the
+    // engine never erases them), the VoxelObject id and the render/mass tables.
+    std::uint64_t voxelObjectId{};
+    std::vector<GameWorldBrickState> bricks;
+    std::vector<VoxelMaterialDefinition> materials;
+    std::array<std::uint16_t, 256> densityUnits{};
+    double densityQuantumKilogramsPerCubicMeter{1.0};
+    // Polygon objects: capture leaves this empty (saves re-read `source`); restore needs it.
+    std::shared_ptr<const CookedPolygonAsset> polygon;
+    // Physics body (static or dynamic) as the backend reports it.
+    bool hasBody{};
+    RigidBodyState body{};
+    Float3 localCenterOfMassMeters{};
+    std::optional<GameObjectPoolId> pool;
+};
+
+struct GameWorldTimerState {
+    std::uint64_t id{};
+    float fireAtSeconds{};
+    float intervalSeconds{};   // 0 = one-shot
+};
+
+struct GameWorldPoolState {
+    GameObjectPoolId id{kInvalidGameObjectPoolId};
+    std::string name;
+    std::uint64_t capacity{};
+    std::vector<GameObjectId> freeIds;
+};
+
+struct GameWorldSaveState {
+    GameObjectId nextObjectId{1};
+    GameObjectPoolId nextPoolId{1};
+    std::uint64_t nextTimerId{1};
+    float elapsedSeconds{};
+    std::vector<GameWorldObjectState> objects;   // sorted by id
+    std::vector<GameWorldTimerState> timers;     // live timers, in scheduling order
+    std::vector<GameWorldPoolState> pools;       // sorted by id
+};
+
+struct GameWorldRestoreOptions {
+    // Keep saved timers that have no live callback as *unbound* timers (same id, schedule and
+    // order) instead of dropping them, so a script host can re-attach them by id
+    // (GameWorld::bind_restored_timer, used for named Lua timers). Unbound timers never fire;
+    // call drop_unbound_timers() once every binder has run.
+    bool keepUnboundTimers{};
+};
+
+struct GameWorldRestoreReport {
+    std::size_t objectsRestored{};
+    std::size_t objectsRemoved{};     // live objects that were not in the save
+    std::size_t timersRestored{};
+    std::size_t timersCancelled{};    // live timers that were not in the save (already fired)
+    std::size_t timersDropped{};      // saved timers whose callback no longer exists
+    std::size_t timersUnbound{};      // saved timers kept without a callback (keepUnboundTimers)
+    std::size_t poolsRestored{};
+    std::size_t poolsDropped{};       // saved pools that were not registered again
+};
+
+// Read-only view of one GameWorld object for a renderer (see GameWorld::render_objects()).
+// Pointers/spans reference GameWorld-owned storage and stay valid only until the next
+// mutating GameWorld call (tick, spawn, destroy, damage, ...); copy what must outlive that.
+struct GameRenderObject {
+    GameObjectId id{kInvalidGameObjectId};
+    const std::string* name{};
+    GameGeometryKind kind{GameGeometryKind::Marker};
+    const VoxelObject* voxels{};                      // Voxel objects only
+    const CookedPolygonAsset* polygon{};              // Polygon objects only
+    // Cooked material table for assets spawned from .dvox (spawn_asset & friends). Empty for
+    // create_object()/spawn_box objects; renderers should fall back to a default palette.
+    std::span<const VoxelMaterialDefinition> materials;
+    RigidTransform transform{};                       // current world transform (object origin)
+    float voxelSizeMeters{};
+    bool enabled{true};
+    bool dynamic{};
+    // false for visual-only voxel objects (spawn_visual_asset): drawn, but no physics body and
+    // skipped by raycasts/overlaps/capsule queries.
+    bool collision{true};
+};
+
 // The tick loop and live, script-facing object model this engine did not previously have:
 // RuntimeSceneObject is read-only streaming/rendering linkage, EditorJoltSimulation is scoped
 // to the editor's Simulate/Play preview. GameWorld is the production runtime counterpart,
@@ -182,6 +303,37 @@ public:
     [[nodiscard]] GameObjectId spawn_asset(
         const std::filesystem::path& path, std::string name, const RigidTransform& transform,
         bool dynamic, bool structural = true, std::string* error = nullptr);
+    // In-memory variant of spawn_asset() for content read from a ContentSource/.dvepak.
+    // `extension` selects the decoder (".dvox" or ".dmesh"); `name` defaults to "asset".
+    // Validation and the resulting object are identical to spawning the same file by path.
+    [[nodiscard]] GameObjectId spawn_asset_from_bytes(
+        std::span<const std::byte> bytes, std::string_view extension, std::string name,
+        const RigidTransform& transform, bool dynamic, bool structural = true,
+        std::string* error = nullptr);
+    // Spawns an already-decoded cooked voxel asset (what spawn_asset does after read_dvox).
+    // Lets loaders validate every asset up front before creating any object.
+    [[nodiscard]] GameObjectId spawn_cooked_asset(
+        CookedVoxelAsset asset, std::string name, const RigidTransform& transform,
+        bool dynamic, bool structural = true, std::string* error = nullptr);
+    // Visual-only voxel object: keeps the voxels and material table for rendering but creates
+    // no physics body, and raycast/sphere_overlap/capsule queries ignore it (the runtime
+    // equivalent of DVOXSCENE generateCollision=false). It moves like a marker (set_position/
+    // set_rotation always work), damage_sphere still carves it but never fragments it, and
+    // replace_voxel_brick edits it without rebuilding collision.
+    [[nodiscard]] GameObjectId spawn_visual_asset(
+        CookedVoxelAsset asset, std::string name, const RigidTransform& transform,
+        std::string* error = nullptr);
+    // false for visual-only voxel objects; true for every other live object (markers have no
+    // body either, but they never had geometry to collide with). nullopt for unknown ids.
+    [[nodiscard]] std::optional<bool> has_collision(GameObjectId id) const noexcept;
+    [[nodiscard]] GameObjectId spawn_cooked_polygon_asset(
+        CookedPolygonAsset asset, std::string name, const RigidTransform& transform,
+        bool dynamic, bool structural = true, std::string* error = nullptr);
+    // Visual-only polygon object (DVOXSCENE generateCollision=false for a .dmesh): rendered,
+    // movable like a marker, no physics body, ignored by raycasts/overlaps/capsule queries.
+    [[nodiscard]] GameObjectId spawn_visual_polygon_asset(
+        CookedPolygonAsset asset, std::string name, const RigidTransform& transform,
+        std::string* error = nullptr);
     // Explicit polygon path. The generic spawn_asset() dispatches .dvox and .dmesh by extension.
     [[nodiscard]] GameObjectId spawn_polygon_asset(
         const std::filesystem::path& path, std::string name, const RigidTransform& transform,
@@ -239,6 +391,10 @@ public:
     // cached, so it is always current even if called mid-tick.
     [[nodiscard]] std::optional<RigidTransform> transform(GameObjectId id) const;
     [[nodiscard]] std::optional<Float3> position(GameObjectId id) const;
+    // Every live object (markers included, so callers can filter), sorted by id, with its
+    // current world transform and read-only geometry/material views. This is the renderer's
+    // only window into GameWorld; it never mutates state. See GameRenderObject for lifetime.
+    [[nodiscard]] std::vector<GameRenderObject> render_objects() const;
     // Markers (no body) and dynamic bodies can be moved; static voxel bodies cannot (their
     // Jolt collision is baked in at creation) and this returns false for them.
     bool set_position(GameObjectId id, Float3 worldPosition);
@@ -344,6 +500,7 @@ public:
     // Fires every `intervalSeconds`, starting `intervalSeconds` from now.
     TimerId schedule_repeating(float intervalSeconds, std::function<void()> callback);
     bool cancel_timer(TimerId id);
+    [[nodiscard]] bool has_timer(TimerId id) const noexcept;   // scheduled and not cancelled
 
     using TickListener = std::function<void(float)>;
     using DamageListener = std::function<void(const GameDamageEvent&)>;
@@ -359,6 +516,35 @@ public:
                                                  std::string* error = nullptr);
     [[nodiscard]] bool release_to_pool(GameObjectId id, std::string* error = nullptr);
     [[nodiscard]] std::size_t pool_available(GameObjectPoolId poolId) const noexcept;
+
+    // --- Save games (see dve/game_save.hpp for the file format) ---------------------------
+    bool set_object_source(GameObjectId id, GameObjectSource source);
+    [[nodiscard]] const GameObjectSource* object_source(GameObjectId id) const noexcept;
+    // Everything needed to rebuild the objects, bodies, timers and pools. Polygon geometry is
+    // referenced through GameObjectSource, not copied. Sub-runtimes (characters, triggers,
+    // cameras, animation, ragdolls, hair) are captured separately by
+    // capture_game_runtime_state() in dve/game_save.hpp.
+    [[nodiscard]] GameWorldSaveState capture_save_state() const;
+    // Replaces the world's objects with `state` (validated first; nothing changes if
+    // validation fails). Objects are matched by id: live objects missing from the save are
+    // destroyed, the others are rebuilt in place, so sub-runtime bindings keyed by id (made by
+    // the startup script of a freshly booted world) survive. Timers are matched by id: the
+    // callbacks of a fresh boot are kept with the saved schedule; saved timers whose callback
+    // no longer exists are dropped (see the report). No lifecycle/destroy events fire. If a
+    // physics backend rejects a body after validation, this returns false and the world is
+    // incomplete; callers restoring into a fresh world should then discard it.
+    [[nodiscard]] bool restore_save_state(
+        const GameWorldSaveState& state, GameWorldRestoreReport* report = nullptr,
+        std::string* error = nullptr, GameWorldRestoreOptions options = {});
+    // Timers kept by GameWorldRestoreOptions::keepUnboundTimers, in scheduling order.
+    [[nodiscard]] std::vector<TimerId> unbound_timer_ids() const;
+    // Attaches `callback` to an unbound restored timer; false if `id` is not unbound.
+    bool bind_restored_timer(TimerId id, std::function<void()> callback);
+    // Cancels every timer that is still unbound; returns how many were dropped.
+    std::size_t drop_unbound_timers();
+    // FNV-1a over the saved state (ids, flags, transforms, bodies, voxels, tables, timers):
+    // equal hashes mean capture_save_state() would produce the same snapshot.
+    [[nodiscard]] std::uint64_t state_hash() const;
 
     // Advances timers, steps physics by fixedDeltaSeconds, then fires tick listeners. Damage/
     // destroy listeners fire synchronously from damage_sphere()/destroy_object(), not from
@@ -409,6 +595,14 @@ private:
     [[nodiscard]] RigidTransform resolve_transform(const Object& object) const;
     [[nodiscard]] bool synchronize_attached_body(Object& object);
     void synchronize_attached_bodies();
+    // Rigid velocity field of an object (v(p) = linear + angular x (p - origin)), following
+    // attachments up to the first free body. Zero for markers, static and visual-only objects.
+    struct MotionField { Float3 linear{}; Float3 angular{}; Float3 origin{}; };
+    [[nodiscard]] MotionField motion_field(const Object& object, std::size_t depth = 0U) const;
+    // Keeps physics collision disabled between every attached child body and its parent body
+    // (IRigidBodyWorld::set_pair_collision_enabled), so an attachment that touches or overlaps
+    // its parent does not push it around.
+    void update_attachment_collision_filters();
     [[nodiscard]] GameObjectId allocate_id() noexcept { return nextId_++; }
     [[nodiscard]] GameObjectId create_object_internal(GameObjectDesc desc, std::optional<GameObjectId> forcedId,
                                                       bool dispatchSpawn, std::string* error);
@@ -429,6 +623,7 @@ private:
     std::vector<GameObjectId> fragment_after_damage(GameObjectId id, Object& object);
 
     std::unique_ptr<IRigidBodyWorld> physics_;
+    std::set<std::pair<RigidBodyHandle, RigidBodyHandle>> attachmentCollisionFilters_;
     std::unique_ptr<camera::GameCameraRuntime> cameras_;
     std::unique_ptr<GameplayRuntime> gameplay_;
     std::unique_ptr<SkeletalAnimationRuntime> animation_;

@@ -494,14 +494,18 @@ public:
         if (!running.exchange(false)) return;
         stopping.store(true);
 #if defined(__unix__) || defined(__APPLE__)
-        if (listenSocket >= 0) {
-            (void)::shutdown(listenSocket, SHUT_RDWR);
-            ::close(listenSocket);
-            listenSocket = -1;
-        }
+        // The accept thread polls and accepts on listenSocket, so the descriptor is closed only
+        // after that thread has exited. Closing it first raced with the thread's reads, and the
+        // descriptor number could be reused by another open() before the thread saw the stop.
+        // shutdown() wakes a blocked poll/accept; the 100 ms poll timeout bounds it otherwise.
+        if (listenSocket >= 0) (void)::shutdown(listenSocket, SHUT_RDWR);
         if (acceptThread.joinable()) {
             acceptThread.request_stop();
             acceptThread.join();
+        }
+        if (listenSocket >= 0) {
+            ::close(listenSocket);
+            listenSocket = -1;
         }
         {
             std::lock_guard lock(clientMutex);

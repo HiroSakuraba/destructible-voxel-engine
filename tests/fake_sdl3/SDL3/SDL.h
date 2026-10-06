@@ -25,6 +25,7 @@ constexpr Uint32 SDL_INIT_AUDIO = 1U << 2U;
 constexpr SDL_WindowFlags SDL_WINDOW_RESIZABLE = 1ULL << 0U;
 constexpr SDL_WindowFlags SDL_WINDOW_HIGH_PIXEL_DENSITY = 1ULL << 1U;
 constexpr SDL_WindowFlags SDL_WINDOW_HIDDEN = 1ULL << 2U;
+constexpr SDL_WindowFlags SDL_WINDOW_FULLSCREEN = 1ULL << 5U;
 constexpr SDL_WindowFlags SDL_WINDOW_INPUT_FOCUS = 1ULL << 3U;
 constexpr SDL_WindowFlags SDL_WINDOW_MINIMIZED = 1ULL << 4U;
 
@@ -127,6 +128,7 @@ struct SDL_MouseButtonEvent {
 struct SDL_MouseWheelEvent {
     Uint32 type{}; Uint32 reserved{}; Uint64 timestamp{}; SDL_WindowID windowID{};
     float x{}; float y{};
+    float mouse_x{}; float mouse_y{};
 };
 struct SDL_WindowEvent {
     Uint32 type{}; Uint32 reserved{}; Uint64 timestamp{}; SDL_WindowID windowID{};
@@ -165,6 +167,7 @@ union SDL_Event {
 };
 
 bool SDL_Init(Uint32 flags);
+bool SDL_InitSubSystem(Uint32 flags);
 void SDL_QuitSubSystem(Uint32 flags);
 const char* SDL_GetError();
 SDL_Window* SDL_CreateWindow(const char* title, int w, int h, SDL_WindowFlags flags);
@@ -173,6 +176,7 @@ bool SDL_ShowWindow(SDL_Window* window);
 bool SDL_StartTextInput(SDL_Window* window);
 bool SDL_StopTextInput(SDL_Window* window);
 bool SDL_PollEvent(SDL_Event* event);
+bool SDL_WaitEventTimeout(SDL_Event* event, Sint32 timeoutMS);
 bool SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
 bool SDL_GetWindowSizeInPixels(SDL_Window* window, int* w, int* h);
 float SDL_GetWindowDisplayScale(SDL_Window* window);
@@ -190,6 +194,10 @@ SDL_Gamepad* SDL_OpenGamepad(SDL_JoystickID instance_id);
 void SDL_CloseGamepad(SDL_Gamepad* gamepad);
 
 void SDLTest_Reset();
+void SDLTest_SetTicksNS(Uint64 ticks);
+void SDLTest_SetVSyncSupported(bool supported);
+int SDLTest_RenderVSync();
+int SDLTest_RenderVSyncCalls();
 void SDLTest_PushEvent(const SDL_Event* event);
 void SDLTest_SetWindowMetrics(int logicalW, int logicalH, int pixelW, int pixelH, float scale);
 void SDLTest_SetDialogResult(const char* firstPath, const char* error);
@@ -200,6 +208,7 @@ constexpr Uint8 SDL_ALPHA_OPAQUE = 255;
 constexpr int SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE = 8;
 SDL_Renderer* SDL_CreateRenderer(SDL_Window* window, const char* name);
 void SDL_DestroyRenderer(SDL_Renderer* renderer);
+bool SDL_SetRenderVSync(SDL_Renderer* renderer, int vsync);
 bool SDL_SetRenderDrawColor(SDL_Renderer* renderer, Uint8 r, Uint8 g, Uint8 b, Uint8 a);
 bool SDL_RenderClear(SDL_Renderer* renderer);
 bool SDL_RenderPresent(SDL_Renderer* renderer);
@@ -207,6 +216,12 @@ bool SDL_RenderFillRect(SDL_Renderer* renderer, const SDL_FRect* rect);
 bool SDL_RenderRect(SDL_Renderer* renderer, const SDL_FRect* rect);
 bool SDL_RenderLine(SDL_Renderer* renderer, float x1, float y1, float x2, float y2);
 bool SDL_RenderDebugText(SDL_Renderer* renderer, float x, float y, const char* str);
+bool SDL_SetRenderScale(SDL_Renderer* renderer, float scaleX, float scaleY);
+struct SDL_Rect { int x{}; int y{}; int w{}; int h{}; };
+struct SDL_Surface { int w{}; int h{}; };
+SDL_Surface* SDL_RenderReadPixels(SDL_Renderer* renderer, const SDL_Rect* rect);
+bool SDL_SaveBMP(SDL_Surface* surface, const char* file);
+void SDL_DestroySurface(SDL_Surface* surface);
 
 struct SDL_AudioStream;
 using SDL_AudioDeviceID = Uint32;

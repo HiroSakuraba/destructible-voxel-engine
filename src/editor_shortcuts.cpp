@@ -36,7 +36,8 @@ std::string canonical_input(std::string_view input) {
     else if (value == "braceleft") value = "[";
     else if (value == "braceright") value = "]";
     else if (value == "equal") value = "=";
-    else if (value == "minus") value = "-";
+    else if (value == "minus" || value == "kp_subtract") value = "-";
+    else if (value == "plus" || value == "kp_add") value = "+";
     else if (value == "button1") value = "mouse1";
     else if (value == "button2") value = "mouse3";
     else if (value == "button3") value = "mouse2";
@@ -46,6 +47,7 @@ std::string canonical_input(std::string_view input) {
 
 std::string title_input(std::string_view input) {
     const std::string value = canonical_input(input);
+    if (value == "+") return "Plus"; // "Ctrl++" would not survive the '+'-separated text format
     if (value == "mouse1") return "LMB";
     if (value == "mouse2") return "RMB";
     if (value == "mouse3") return "MMB";
@@ -641,6 +643,9 @@ void EditorShortcutRegistry::install_builtin_commands() {
     add("view.overdraw", "Overdraw Heatmap", "Viewport", {ShortcutContext::Viewport});
     add("view.previous_camera", "Previous Camera Position", "Camera", {ShortcutContext::Viewport, ShortcutContext::Camera});
     add("view.next_camera", "Next Camera Position", "Camera", {ShortcutContext::Viewport, ShortcutContext::Camera});
+    add("view.ui_zoom_in", "Zoom UI In", "Interface", {ShortcutContext::Global}, true, false, {"accessibility", "text size", "scale"});
+    add("view.ui_zoom_out", "Zoom UI Out", "Interface", {ShortcutContext::Global}, true, false, {"accessibility", "text size", "scale"});
+    add("view.ui_zoom_reset", "Reset UI Zoom", "Interface", {ShortcutContext::Global}, false, false, {"accessibility", "text size", "scale"});
     add("view.zoom_in", "Zoom In", "Viewport", {ShortcutContext::Viewport}, true);
     add("view.zoom_out", "Zoom Out", "Viewport", {ShortcutContext::Viewport}, true);
     add("viewport.look", "Free Look", "Viewport Navigation", {ShortcutContext::Viewport}, false, false, {"RMB"});
@@ -793,6 +798,9 @@ void EditorShortcutRegistry::install_builtin_profiles() {
 
     constexpr std::string_view dve = "DVE Default";
     bind(dve, "file.new_scene", ShortcutContext::Global, keyboard_shortcut("n", true));
+    bind(dve, "view.ui_zoom_in", ShortcutContext::Global, keyboard_shortcut("=", true), keyboard_shortcut("+", true));
+    bind(dve, "view.ui_zoom_out", ShortcutContext::Global, keyboard_shortcut("-", true));
+    bind(dve, "view.ui_zoom_reset", ShortcutContext::Global, keyboard_shortcut("0", true));
     bind(dve, "file.open_scene", ShortcutContext::Global, keyboard_shortcut("o", true));
     bind(dve, "file.save", ShortcutContext::Global, keyboard_shortcut("s", true));
     bind(dve, "file.save_as", ShortcutContext::Global, keyboard_shortcut("s", true, true));

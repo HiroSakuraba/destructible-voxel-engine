@@ -4,6 +4,7 @@
 // (the octave-flat voicing bug found in the default preset must not recur).
 #include <cmath>
 #include <iostream>
+#include <numbers>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -31,7 +32,7 @@ void fft_magnitudes(std::vector<double>& real, std::vector<double>& imag) {
         }
     }
     for (std::size_t len = 2; len <= n; len <<= 1) {
-        const double ang = -2.0 * M_PI / static_cast<double>(len);
+        const double ang = -2.0 * std::numbers::pi_v<double> / static_cast<double>(len);
         const double wr = std::cos(ang), wi = std::sin(ang);
         for (std::size_t i = 0; i < n; i += len) {
             double cr = 1.0, ci = 0.0;
@@ -58,7 +59,7 @@ double band_energy_fft(const std::vector<float>& interleaved, double loHz, doubl
     const std::size_t n = 1U << 15;
     std::vector<double> real(n, 0.0), imag(n, 0.0);
     for (std::size_t i = 0; i < n && start + i < frames; ++i) {
-        const double w = 0.5 * (1.0 - std::cos(2.0 * M_PI * static_cast<double>(i) / static_cast<double>(n)));
+        const double w = 0.5 * (1.0 - std::cos(2.0 * std::numbers::pi_v<double> * static_cast<double>(i) / static_cast<double>(n)));
         real[i] = interleaved[(start + i) * 2] * w;
     }
     fft_magnitudes(real, imag);
@@ -96,8 +97,13 @@ int main() {
         }
         std::cout << "names+validate: " << presets.size() << " presets OK\n";
 
-        // "Noise Sweep FX" is the only deliberately non-pitched preset.
-        const std::set<std::string> nonPitched{"Noise Sweep FX"};
+        // Deliberately non-pitched presets skip the fundamental-dominance
+        // check. "Noise Sweep FX" is broadband noise; the four drum presets
+        // are tuned percussion — rendered at MIDI 69 (A4) they voice drum
+        // frequencies (kick ~110 Hz, snare ~190 Hz body, hats broadband
+        // noise), so the 440 Hz check does not apply to them.
+        const std::set<std::string> nonPitched{"Noise Sweep FX", "Punch Kick",
+                                               "Crack Snare", "Closed Hat", "Open Hat"};
         for (const auto& preset : presets) {
             const auto audio = render_preset(preset, 69);
             float peak = 0.0F;
@@ -127,6 +133,18 @@ int main() {
             auto parsed = SynthPreset::parse(text, nullptr);
             require(parsed.has_value(), "parse of serialized preset failed");
             require(parsed->name == preset.name, "round-trip changed preset name");
+        }
+        // The default preset must obey the same pitch rule: the octave-flat
+        // voicing bug was found in make_default(), so it is checked directly.
+        {
+            const auto defAudio = render_preset(SynthPreset::make_default(), 69);
+            for (float s : defAudio) require(std::isfinite(s), "default preset non-finite");
+            const double eSub = band_energy_fft(defAudio, 180.0, 260.0, 48000.0);
+            const double eFund = band_energy_fft(defAudio, 400.0, 480.0, 48000.0);
+            const double eOct = band_energy_fft(defAudio, 840.0, 920.0, 48000.0);
+            require(eFund > 1.5 * eSub && eFund > eOct,
+                    "fundamental region not dominant in default preset");
+            std::cout << "default preset: fundamental dominant OK\n";
         }
         std::cout << "preset render/pitch/round-trip: ALL PASS\n";
         return 0;

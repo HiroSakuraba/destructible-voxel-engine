@@ -15,6 +15,10 @@ using namespace dve::render;
 void require(bool condition,const char* message){
     if(!condition)throw std::runtime_error(message);
 }
+template <class Handle>
+void require(const Handle& handle, const char* message) {
+    require(static_cast<bool>(handle), message);
+}
 bool close(float a,float b,float epsilon=1.0e-4F){
     return std::abs(a-b)<=epsilon;
 }
@@ -75,13 +79,13 @@ void test_explicit_image_sampler_bindings(){
     td.usage=rhi::TextureUsage::Sampled|rhi::TextureUsage::CopyDestination;
     td.initialState=rhi::ResourceState::ShaderRead;
     const auto texture=device.create_texture(td,&error);
-    require(static_cast<bool>(texture),error.c_str());
+    require(texture,error.c_str());
     rhi::TextureViewDesc vd;vd.texture=texture;
     const auto view=device.create_texture_view(vd,&error);
-    require(static_cast<bool>(view),error.c_str());
+    require(view,error.c_str());
     rhi::SamplerDesc sd;
     const auto sampler=device.create_sampler(sd,&error);
-    require(static_cast<bool>(sampler),error.c_str());
+    require(sampler,error.c_str());
 
     rhi::BindGroupLayoutDesc layout;
     layout.bindings={
@@ -89,7 +93,7 @@ void test_explicit_image_sampler_bindings(){
         {1U,rhi::BindingType::Sampler,rhi::ShaderStage::Fragment},
     };
     const auto layoutHandle=device.create_bind_group_layout(layout,&error);
-    require(static_cast<bool>(layoutHandle),error.c_str());
+    require(layoutHandle,error.c_str());
 
     rhi::BindGroupDesc group;
     group.layout=layoutHandle;
@@ -98,7 +102,7 @@ void test_explicit_image_sampler_bindings(){
         {1U,{},{},0U,0U,sampler},
     };
     const auto groupHandle=device.create_bind_group(group,&error);
-    require(static_cast<bool>(groupHandle),error.c_str());
+    require(groupHandle,error.c_str());
 
     rhi::BindGroupDesc invalidImage=group;
     invalidImage.entries[0].sampler=sampler;
@@ -142,7 +146,7 @@ dve::render::EnvironmentLightingGpuResources make_lighting(
     lut.usage=dve::rhi::TextureUsage::Sampled;
     lut.initialState=dve::rhi::ResourceState::ShaderRead;
     lighting.brdfLut=device.create_texture(lut,&error);
-    require(static_cast<bool>(lighting.brdfLut),error.c_str());
+    require(lighting.brdfLut,error.c_str());
     dve::rhi::TextureViewDesc lutView;
     lutView.texture=lighting.brdfLut;
     lighting.brdfLutView=device.create_texture_view(lutView,&error);
@@ -244,15 +248,15 @@ void test_shell_render_contract(){
     heightDesc.usage=rhi::TextureUsage::Sampled|rhi::TextureUsage::CopyDestination;
     heightDesc.initialState=rhi::ResourceState::ShaderRead;
     const auto height=device.create_texture(heightDesc,&error);
-    require(static_cast<bool>(height),error.c_str());
+    require(height,error.c_str());
     std::vector<std::byte> heightPixels(8U*8U*4U,std::byte{0x80});
     require(device.write_texture(height,0U,0U,heightPixels,8U*4U,&error),error.c_str());
     rhi::TextureViewDesc heightViewDesc;heightViewDesc.texture=height;
     const auto heightView=device.create_texture_view(heightViewDesc,&error);
-    require(static_cast<bool>(heightView),error.c_str());
+    require(heightView,error.c_str());
     rhi::SamplerDesc heightSamplerDesc;
     const auto heightSampler=device.create_sampler(heightSamplerDesc,&error);
-    require(static_cast<bool>(heightSampler),error.c_str());
+    require(heightSampler,error.c_str());
 
     DashrShellRendererResources renderer;
     DashrShellShaderBytecode shellBytecode{
@@ -266,13 +270,13 @@ void test_shell_render_contract(){
     color.usage=rhi::TextureUsage::RenderTarget|rhi::TextureUsage::CopySource;
     color.initialState=rhi::ResourceState::RenderTarget;
     const auto colorTarget=device.create_texture(color,&error);
-    require(static_cast<bool>(colorTarget),error.c_str());
+    require(colorTarget,error.c_str());
     rhi::TextureDesc depth=color;
     depth.format=rhi::TextureFormat::D32Float;
     depth.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::CopySource;
     depth.initialState=rhi::ResourceState::DepthWrite;
     const auto depthTarget=device.create_texture(depth,&error);
-    require(static_cast<bool>(depthTarget),error.c_str());
+    require(depthTarget,error.c_str());
 
     DashrShellDraw draw;
     draw.shell=&shellMirror;
@@ -311,7 +315,7 @@ void test_shell_render_contract(){
     shadowDepthDesc.usage=rhi::TextureUsage::DepthStencil|rhi::TextureUsage::CopySource;
     shadowDepthDesc.initialState=rhi::ResourceState::DepthWrite;
     const auto shadowDepth=device.create_texture(shadowDepthDesc,&error);
-    require(static_cast<bool>(shadowDepth),error.c_str());
+    require(shadowDepth,error.c_str());
 
     DashrShadowDraw shadowDraw;
     shadowDraw.shell=&shellMirror;

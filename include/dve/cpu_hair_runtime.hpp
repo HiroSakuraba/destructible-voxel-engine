@@ -13,6 +13,15 @@ namespace dve {
 
 using CpuHairOwnerId = std::uint64_t;
 
+struct CpuHairOwnerSaveState {
+    CpuHairOwnerId owner{};
+    CpuHairDynamicState state;
+};
+
+struct CpuHairSaveState {
+    std::vector<CpuHairOwnerSaveState> owners;   // sorted by owner id
+};
+
 struct CpuHairBindOptions {
     CpuHairInstanceDesc simulation{};
 };
@@ -62,6 +71,10 @@ public:
     [[nodiscard]] std::span<const CpuHairOwnerId> owner_span() const noexcept {
         return ownerIds_;
     }
+
+    [[nodiscard]] CpuHairSaveState capture_save_state() const;
+    // Restores owners bound (after boot) to the same groom; others are skipped with a warning.
+    std::size_t restore_save_state(const CpuHairSaveState& state, std::vector<std::string>* warnings = nullptr);
 
     [[nodiscard]] CpuHairWorld& solver_world() noexcept { return world_; }
     [[nodiscard]] const CpuHairWorld& solver_world() const noexcept { return world_; }

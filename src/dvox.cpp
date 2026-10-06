@@ -133,7 +133,7 @@ private:
 
 class ByteReader {
 public:
-    explicit ByteReader(const std::vector<std::byte>& bytes) : bytes_(bytes) {}
+    explicit ByteReader(std::span<const std::byte> bytes) : bytes_(bytes) {}
 
     [[nodiscard]] std::size_t remaining() const noexcept { return bytes_.size() - cursor_; }
     [[nodiscard]] std::size_t position() const noexcept { return cursor_; }
@@ -179,7 +179,7 @@ public:
     }
 
 private:
-    const std::vector<std::byte>& bytes_;
+    std::span<const std::byte> bytes_;
     std::size_t cursor_{};
 
     void require(std::size_t size) const {
@@ -466,9 +466,12 @@ bool write_dvox(
     }
 }
 
-DvoxReadResult read_dvox(const std::filesystem::path& path, std::uint64_t maximumBytes) {
-    try {
-        const std::vector<std::byte> bytes = read_all(path, maximumBytes);
+namespace {
+
+// Decodes a complete in-memory DVOX image. Throws std::runtime_error on any format violation;
+// both public read_dvox overloads translate that into DvoxReadResult::error.
+[[nodiscard]] DvoxReadResult decode_dvox(std::span<const std::byte> bytes) {
+    {
         ByteReader reader(bytes);
         std::array<char, 4> magic{};
         reader.read_bytes(magic.data(), magic.size());
@@ -621,11 +624,36 @@ DvoxReadResult read_dvox(const std::filesystem::path& path, std::uint64_t maximu
         result.asset.stats.outputBricks = result.asset.object.brick_count();
         result.success = true;
         return result;
+    }
+}
+
+[[nodiscard]] DvoxReadResult failed_dvox_read(const std::exception& exception) {
+    DvoxReadResult failed;
+    failed.error = exception.what();
+    failed.success = false;
+    return failed;
+}
+
+} // namespace
+
+DvoxReadResult read_dvox(const std::filesystem::path& path, std::uint64_t maximumBytes) {
+    try {
+        const std::vector<std::byte> bytes = read_all(path, maximumBytes);
+        return decode_dvox(bytes);
     } catch (const std::exception& exception) {
-        DvoxReadResult failed;
-        failed.error = exception.what();
-        failed.success = false;
-        return failed;
+        return failed_dvox_read(exception);
+    }
+}
+
+DvoxReadResult read_dvox(std::span<const std::byte> bytes, std::uint64_t maximumBytes) {
+    try {
+        // Same limit semantics and message as the path overload's read_all().
+        if (static_cast<std::uint64_t>(bytes.size()) > maximumBytes) {
+            throw std::runtime_error("DVOX exceeds configured size limit");
+        }
+        return decode_dvox(bytes);
+    } catch (const std::exception& exception) {
+        return failed_dvox_read(exception);
     }
 }
 

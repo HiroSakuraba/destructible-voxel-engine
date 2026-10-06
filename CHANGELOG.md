@@ -1,24 +1,394 @@
-# Unreleased — DASHR Surface-Space Heightfield Port
+# Unreleased — Windows support (player, game zip, CI)
 
-- Added a native C++23 DASHR surface-space reference layer for animated/skinned heightfield rendering,
-  including non-orthonormal object-to-surface frames, distortion-aware step damping, bounded object-space
-  ray marching, hit refinement, seam teleports, and destination-band anti-ping-pong behavior.
-- Added an atlas-specific scaled `dP/du` / `dP/dv` vertex stream with reusable GPU buffers and a
-  CPU-deformed update path; deformation ratios are measured against the rest surface instead of using
-  normalized lighting tangents.
-- Extended the RHI with backward-compatible four-target MRT pipelines/passes in Null RHI and Vulkan,
-  with ordered format compatibility, matching Vulkan render passes/framebuffers/blend attachments, and
-  focused MRT contract coverage.
-- Added a four-RGBA16F UV deformation-atlas pass, bounded two-pixel edge-fill compute pass, consumer
-  bindings, texture-state transitions, update telemetry, and deterministic atlas resource tests.
-- Added automatic seam-map cooking from duplicated manifold geometric edges with bidirectional,
-  inward-inset teleport destinations; open boundaries are ignored and non-manifold edge groups are
-  skipped conservatively.
-- Added matching HLSL surface-space/atlas math, shader inventory validation, RHI/Vulkan CI coverage,
-  deterministic surface/atlas/seam tests, and MIT-0 DASHR provenance without vendoring the upstream
-  DirectX demo framework or asset corpus.
-- The remaining major integration is the live extruded shell/material pass with authoritative
-  displaced depth, PBR shading at the recovered surface point, and matching shadow-caster tracing.
+- New preset `windows-msvc-player-release` (MSVC, newest Visual Studio): static SDL 3.4.12,
+  Jolt 5.6.0 and Lua 5.4.9 fetched and pinned; libpng/libjpeg-turbo from vcpkg for the tools.
+  New `DVE_FETCH_LUA` (`cmake/DveLua.cmake`) builds Lua 5.4.9 from the official tarball.
+- Fetched Jolt uses the DLL C runtime (`/MD`) on MSVC, like the rest of the build.
+- Windows install: `install(RUNTIME_DEPENDENCY_SET)` puts the executables' non-system DLLs in
+  `bin/` (`*Deps` components), and the Visual C++ runtime DLLs are installed next to them
+  (`DVE_INSTALL_MSVC_RUNTIME`, default ON). The UCRT is not shipped (Windows 10+).
+- `dve_package_game` / `dve_add_game_package()` on Windows: `<Game>.exe` with the DLLs it
+  imports next to it, `--zip` (`<Game>-<version>-windows-x86_64.zip`, reproducible), `--config`
+  for multi-config builds; `--verify` runs it with `PATH` reduced to the Windows folders.
+  `ZIP` keyword for `dve_add_game_package()`.
+- THIRD_PARTY_NOTICES on Windows: the generator reads PE import tables, knows vcpkg's
+  copyright files, zlib, Lua's notice and the Visual C++ runtime (flagged for review);
+  `--verify-dir` checks Windows folders. The forbidden list now also matches
+  `mpg123`/`mp3lame` DLLs. With multi-config generators the notices live in
+  `notices/<config>/`.
+- CI: `windows-msvc` builds the player preset, runs the full CTest suite, uploads the sample game
+  zip (`dve-sample-game-windows-x86_64`), runs `cpack -G ZIP`, and is now blocking.
+- Tests: `dve_package_game_windows_test`; `dve_udp_multiprocess_tests` runs on Windows
+  (`CreateProcess`); the live editor MCP tests report Skipped (77) where the private IPC is not
+  implemented; the save-directory checks cover `%APPDATA%`. Skips are listed in
+  `docs/PACKAGING.md` ("Windows").
+- Fixed on Windows: `dve_player --headless` looked for `game.dvepak` in the working directory
+  instead of next to the `.exe` (no `/proc/self/exe`; it now uses `SDL_GetBasePath`).
+- `.gitattributes` marks binary fixtures (PPM, PNG, audio, `.dvox`, …) as binary: Git for
+  Windows' `autocrlf` turned the NUL-free reference PPMs into CRLF text.
+- Tests: Windows paths in generated Lua code use forward slashes; the recorder tap test's ring
+  holds the whole take (it renders faster than real time); `MSVC-19-lua` golden player hash
+  (identical to GCC's).
+- `windows-msvc-player-release` sets `VCPKG_APPLOCAL_DEPS=OFF` (parallel applocal copies hit
+  sharing violations); CTest and `dve_package_game --tool-path` put vcpkg's `bin` on `PATH`.
+- Linux behaviour is unchanged.
+
+# Unreleased — Save games v2 (characters, cameras, animation, ragdolls, hair, named timers)
+
+- The save schema is now version 2 (`kGameSaveSchemaVersion`). `GameSaveCodec` registers
+  the v1 → v2 migration itself, so saves written by the first save-game release still load
+  (their sub-runtimes stay as the boot left them, as before); saving again writes v2.
+- New optional sections, filled by `capture_game_runtime_state(world)` and applied by
+  `restore_game_runtime_state(world, state, &report)` (`dve/game_save.hpp`):
+  - `dve.gameplay`: characters (controller config and state, input), players and
+    possession, triggers (occupants, fired), input recordings and playbacks, id counters.
+    New `GameplayRuntime::capture_save_state` / `restore_save_state`.
+  - `dve.cameras`: `GameCameraRuntime::serialize_state()`.
+  - `dve.animation`: skeletal playback (clip, time, crossfade, speed, root motion, current
+    pose), controller state machines (state, time, typed parameters, triggers) and control
+    rig values. New save APIs on `SkeletalAnimationRuntime`, `AnimationControllerRuntime`
+    and `ControlRigRuntime`.
+  - `dve.ragdolls`: ragdoll state, blend, recovery poses and, for an active ragdoll, its
+    activation pose and every body's state; restore rebuilds the bodies and joints from the
+    activation pose. `RagdollRuntime` records the activation pose and gains save APIs.
+  - `dve.hair`: CPU hair solver state (`CpuHairWorld::capture_dynamic_state` /
+    `restore_dynamic_state`, `CpuHairRuntime::capture_save_state` / `restore_save_state`).
+  - Entries the fresh boot did not bind are skipped with a warning
+    (`GameSaveRuntimeReport::warnings`); an invalid character snapshot fails the load.
+- Lua named timers: `world.timer_handler(name, fn)`, `world.schedule_once_named(seconds,
+  name, data)` and `world.schedule_repeating_named(seconds, name, data)`. The data is
+  saveable like `on_save` results, so these timers survive a save and load; anonymous closures
+  still do not (see `docs/SAVE_GAMES.md` for why).
+- The Lua script state (`DVLS`) is version 2 and adds the render environment, the HUD model
+  (prompt, tools, selection) and the runtime material overrides. Version 1 blobs still load.
+- `GameWorld`: `GameWorldRestoreOptions::keepUnboundTimers`, `bind_restored_timer`,
+  `drop_unbound_timers`, `unbound_timer_ids`, `has_timer`, and
+  `GameWorldRestoreReport::timersUnbound`. Restored timers keep the saved order.
+- `PlayerApp::load_game` restores the sub-runtimes and named timers;
+  `PlayerLoadResult` gains `runtimes`, `namedTimersRestored` and `timersDropped`.
+- `MaterialLibrary::capture_runtime_overrides` / `restore_runtime_overrides`;
+  `ui::GameHudModel::tools`, `selected_index` and `restore`.
+- The sample game's blast schedules a named `aftershock` timer that survives a quicksave.
+- Fixed: `MaterialLibrary::clear_runtime_overrides` (Lua `world.clear_material_parameters`)
+  kept vector overrides whenever a scalar override existed (a short-circuited `||`).
+- Fixed: `GameCameraRuntime::restore_state` did not restore the viewport's previous live rig,
+  so the first update after a restore counted a spurious camera cut.
+- `GameWorld::restore_save_state` re-applies the parent/child contact filters of attached
+  objects right after rebuilding the bodies instead of waiting for the next tick.
+- Tests: round trips for every new section (including byte-identical re-encoding and lock-step
+  continuation), a real v1 → v2 migration, unbound timers, script state v2, and the sample's
+  aftershock across a quicksave in `dve_player_runtime_tests`.
+- Still not saved: Lua closures, deformables (not built by any release preset, and no
+  state write-back API), `ui::UiRuntime`, content created after boot, camera smoothing
+  internals and solver caches.
+
+# Unreleased — small cleanups
+
+- Editor MIDI output port picker: **Settings > Audio > MIDI > MIDI Output** (`midi.output_port`)
+  with Auto (the first output port, as before), None, and any port saved by name. A new
+  `MidiOutputSession` follows hotplug like the input and releases held notes on the old port.
+  `FakeMidiPortBackend` has output ports; `--midi-fake-ports` also fakes outputs.
+- The chiptune tracker toolbar wraps instead of running off the panel below ~940 px.
+- Removed the unused `geneNames` table (compiler warning).
+- `scripts/update_source_manifest.sh --check`; `SOURCE_MANIFEST.sha256` regenerated. CI's
+  `source-manifest` job is now blocking: a PR that changes tracked files must also run
+  `sh scripts/update_source_manifest.sh` and commit the result.
+
+# Unreleased — dve_export_scene gaps and player attachments
+
+- `dve_export_scene` now exports `.dmesh` objects (copied, loaded as polygon objects), bakes 3D
+  text and Gabor volumes to voxels (the Gabor bake is visual-only; new `--gabor-opacity`), and
+  carries components, tags/groups/layer (as `dve.membership`) and attachments in a new versioned
+  per-object `extensions` block of DVOXSCENE v1 (`kDvoxSceneExtensionVersion = 1`). New
+  `--project-root` for resolving `.dmesh` sources. Only a missing/invalid `.dmesh` and unknown
+  `dve.*` component types still warn.
+- `load_scene_into_game_world` loads polygon objects and components, and attaches objects that
+  have an attachment extension. `dve_player` turns on `attachChildrenToParents`, so attached
+  objects move with their parents.
+- GameWorld: attached bodies take their parent's rigid-motion velocity instead of accumulating
+  gravity between snaps, and parent/child body pairs no longer collide
+  (`IRigidBodyWorld::set_pair_collision_enabled`, implemented by the Jolt backend with a contact
+  validation filter). New `GameWorld::spawn_visual_polygon_asset`.
+- Fixed: the CPU player renderer culled every polygon object (the rescaled copy kept the source
+  content hash and failed validation).
+- New tests: `dve_player_export_scene` (editor project -> export -> headless player hash) plus
+  new cases in the exporter, scene loader and player runtime tests.
+
+# Unreleased — Player save games (world, destruction, physics, Lua)
+
+- Players can save and load the game world, including destruction: `dve/game_save.hpp`
+  (`GameSaveCodec`), `GameWorld::capture_save_state` / `restore_save_state` / `state_hash`,
+  and `docs/SAVE_GAMES.md`. A save holds the objects (ids, names, tags, components, flags,
+  transforms, attachments, pools), each voxel object's bricks after damage, the physics bodies
+  (transforms, velocities, sleeping), timers, the next ids, and the script state.
+- Built on the v2.35 `SaveGameStore` (`DVESAVE1`) rather than a new container. The world
+  format is a set of sections in a `DVESAVE1` document: `dve.meta`, `dve.world`,
+  `dve.voxels`, `dve.physics`, `dve.script`, plus game sections. The world schema is version 1.
+- Voxels are stored as a delta against the object's source asset when possible (only the
+  changed bricks, with their storage index), and as every brick otherwise (fragments,
+  runtime objects). Bricks are raw or run-length encoded. On load every source asset is read
+  again from the game content and checked against the FNV-1a hash recorded at save time; if
+  the game content changed, the load fails and names the asset. The scene loader and
+  `world.spawn_asset` record sources (`GameWorld::set_object_source`), and fragments inherit
+  them.
+- Hardened `SaveGameStore`. The byte layout is unchanged but now explicitly little endian.
+  - Every size is checked against the limits and the bytes present before allocating; a
+    truncated file used to be able to allocate up to 1 GiB.
+  - Sorted, unique sections are required and trailing bytes are rejected, with precise error
+    messages.
+  - Reads return a report: primary or `.bak`, stored version, migrations run, size.
+  - Migrations are validated: a newer schema, a missing step and a step that does not advance
+    are all refused.
+  - New free functions `encode_save_game_document` / `decode_save_game_document`.
+- Lua: `world.on_save([key,] fn)` / `world.on_load([key,] fn)` keep script state (tables of
+  nil, booleans, numbers and strings, sorted, depth ≤ 32, ≤ 16 MiB; functions and cycles
+  are rejected, naming the path). `world.save_game(slot)`, `world.load_game(slot)` and
+  `world.save_exists(slot)` are also available. `GameScriptHost::save_state` / `load_state`
+  also store `set_global` / `set_global_vector` values.
+- `dve_player`:
+  - The reserved `quicksave` / `quickload` actions default to F5 / F9 and can be rebound with
+    `bind.*` in `game.dvegame`.
+  - Slots are saved in `$XDG_DATA_HOME/dve/<game>/saves` (`~/.local/share` fallback;
+    `%APPDATA%` and `~/Library/Application Support` elsewhere), atomically and with a `.bak`.
+  - `--load <slot|file>` and `--save-dir <dir>` are new.
+  - A load boots a fresh world for the saved scene, restores it, checks the state hash, then
+    runs the Lua `on_load`, and only then swaps it in. A bad save leaves the running game
+    untouched, and with `--load` exits 3.
+  - `PlayerApp` gets `save_game`, `load_game`, `resolve_save`, `save_codec` (for migrations)
+    and `save_events`.
+- The sample game binds F5 / F9. B blasts the tower (its top breaks off as a fragment), and
+  1 / 2 save / load `slot1` from Lua. The spinner's Lua state goes through `on_save` /
+  `on_load`. The golden hashes are unchanged. The sample quicksave is 1.4 KB fresh and 2.6 KB
+  after the blast.
+- Tests:
+  - New `dve_game_save_tests`: round trips with the reference solver and Jolt; destruction
+    plus ticks; diverged worlds; changed sources; truncation, corruption and backup; a
+    synthetic v0 → v1 migration; limits; Lua state.
+  - New `dve_player_save_load` CLI test: save and `--load` in separate processes, with
+    identical loaded and continued frame hashes, and broken saves exiting 3.
+  - Save / load / quickload cases added to `dve_player_runtime_tests`.
+- Fixed: damaging a dynamic object that had moved since it spawned split it at the *spawn*
+  pose. `fragment_after_damage` built the fragments and the rebuilt body from the stale
+  `authoredTransform`, so every piece teleported back to the spawn point. There is a
+  regression test in `dve_game_world_tests`.
+- Not saved yet: sub-runtime state (characters, cameras, animation, ragdolls, deformables,
+  hair, UI), Lua closures and timers the boot does not schedule again, changes made after boot
+  to the environment, HUD or materials, and solver caches. (Most of this is covered by the
+  save games v2 entry above.)
+
+# Unreleased — Packaging: libsndfile without MP3 (no libmpg123/libmp3lame in games)
+
+- New `DVE_FETCH_SNDFILE` (default `ON`, also set by `linux-gcc-player-release`; `cmake/DveSndFile.cmake`):
+  DVE builds libsndfile 1.2.2 itself at configure time from the pinned upstream tag tarball
+  (SHA256 `ffe12ef8…`, byte-identical to Debian's `libsndfile_1.2.2.orig.tar.gz`; snapshot.debian.org
+  as the second URL) plus Debian 1.2.2-2+deb13u1's patch series (CVE-2022-33065, CVE-2024-50612,
+  CVE-2025-56226; vendored in `third_party/libsndfile/patches`). It is a **shared** library built with
+  `ENABLE_MPEG=OFF`, no programs/examples/tests, and only FLAC, Ogg, Vorbis and Opus as external
+  codecs. So `libmpg123` (LGPL-2.1) and `libmp3lame` (LGPL-2+, GPL-marked `fft.c`) are no longer
+  linked or bundled in `lib/dve`, the archives or packaged games. Shared, because that keeps LGPL
+  relinking simple: users can replace `lib/dve/libsndfile.so.1`, and we only owe its source.
+  `DVE_SNDFILE_ARCHIVE` points at a local copy of the tarball for offline builds.
+- Fallback (`DVE_FETCH_SNDFILE=OFF`, no download, missing codec `-dev` packages or a failed build,
+  each with a configure warning): the system libsndfile is linked but treated as a system library,
+  so it is not bundled (the game then needs the distribution's `libsndfile1`).
+- MP3 is not a runtime format. `AudioImportCapabilities::sndfileMpeg` reports whether the loaded
+  libsndfile can decode MPEG. Authoring-time MP3 import still goes through the optional FFmpeg CLI
+  path.
+- Notices: `manifest.json` drops the `mpg123` and `lame` entries and gets a `forbidden` list
+  (libmpg123, libmp3lame). `--check` and `--verify-dir --manifest` fail when either is shipped.
+  The libsndfile section of the notices now takes its texts from the built source (`COPYING`,
+  `src/ALAC/LICENSE`, `src/GSM610/COPYRIGHT`, `src/G72x/README.original`). Its corresponding-source
+  line names the tarball, hash, patches and CMake options instead of a Debian package.
+- `dve_package_game` refuses a runtime that bundles libmpg123/libmp3lame, unless you pass
+  `--allow-mp3-libraries`.
+- The dve-dev package finds the bundled `lib/dve/libsndfile.so.1` relative to the prefix, or else
+  the system `libsndfile.so.1`.
+- Tests: new `dve_audio_sndfile_format_tests` decodes WAV, FLAC, Ogg Vorbis and Ogg Opus fixtures
+  (`tests/data/audio_formats`) through libsndfile and `import_audio_file()`. It also requires that
+  DVE's libsndfile rejects MP3 and that no libmpg123/libmp3lame is loaded in the process.
+  `dve_install_tree_test` and `dve_package_game_test` check the prefix and the packaged game
+  folders with `tests/cmake/dve_no_mpeg_check.cmake`: no such file, no such `DT_NEEDED` (readelf)
+  in any shipped ELF, and no such library in `ldd` of the shipped executable. The shipped
+  `libsndfile.so.1` must also be DVE's build.
+
+
+# Unreleased — Fix flaky synth polyphony stress gate
+
+- `dve_synth_release_acceptance_tests` `polyphony_stress` timed each 512-frame block with the wall
+  clock and failed on a single block over 10.67 ms. The render code has not changed since before
+  PR #11 (identical object code at 31b0896, c6eee5f, 8d9ef38 and 1e002bf) and costs ~5.3 ms per
+  block; the misses were vCPU stalls of the shared KVM box (a 5 ms pure arithmetic loop gets
+  20–110 ms stalls too) and preemption by parallel builds (hundreds of wall misses while CPU time
+  stayed at ~5.4 ms).
+  The check now times blocks with thread CPU time, re-times over-budget blocks in up to two
+  identical, deterministic re-renders (verified by the block audio), and fails on any block that
+  misses in every pass. It still requires zero misses and catches real regressions (an injected
+  8 ms spike on every 700th block and a uniform 2× slowdown both fail).
+  `DVE_SYNTH_STRICT_REALTIME=1` keeps the old single-pass wall-clock gate for quiet hardware.
+
+
+# Unreleased — MIT license
+
+- The engine is now licensed under the MIT License (decision D1): added the root `LICENSE`
+  (`Copyright (c) 2026 Benjamin Schulz`) and a License section in the README. The statements
+  below that the engine has no license (Phases 3 and 4) are superseded.
+- `third_party/notices/manifest.json` has an `engine` entry, and every generated
+  `THIRD_PARTY_NOTICES-<component>.txt` now starts with the engine's MIT license and its full text
+  instead of the no-license statement. `--check` fails if the root `LICENSE` is missing.
+- Packaging: `cmake/DveLicense.cmake` installs `LICENSE` and a Debian (DEP-5) `copyright` file to
+  `share/doc/dve-<group>/` in every package (`dve-runtime`, `dve-editor`, `dve-tools`, `dve-dev`;
+  `/usr/share/doc/dve-<group>/copyright` in the `.deb`), `CPACK_RESOURCE_FILE_LICENSE` is set,
+  and cpack no longer warns about a missing license. `dve_package_game` copies the engine license
+  into every game folder as `DVE-LICENSE.txt` (next to `THIRD_PARTY_NOTICES.txt`, new option
+  `--engine-license`) and records it in `build-info.json`.
+- `dve_cpack_test`, `dve_install_tree_test`, `dve_package_game_test` and
+  `dve_third_party_notices_self_test` check the license files and the MIT notice header.
+- Third-party files are not relicensed. The adapted code (DASHR MIT-0, BS-Cloth Apache-2.0,
+  Fluoddity3D MIT, Gabor Fields MIT, Mantaflow Apache-2.0, YASPS MIT, Slug MIT OR Apache-2.0) is
+  compatible with distributing the engine under MIT as long as its notices are kept.
+
+# Unreleased — Packaging Phase 4: shippable game folders and third-party notices
+
+- Added `dve_export_scene` (Tools): converts an editor `.dvescene` offline into DVOXSCENE v1 JSON
+  plus one `.dvox` per object, so `dve_player` never links `dve_editor`. Ids, world transforms,
+  anchored/structural/collision flags, parents and the editor's material table are kept.
+  Hidden/empty objects, `text3d`, Gabor volumes and `.dmesh` objects are skipped, and components,
+  tags and layers are dropped, each with a warning (`--strict` makes them errors). Re-export is
+  byte-identical.
+- Added `dve_package_game` (`scripts/dve_package_game.py`, installed as `bin/dve_package_game`)
+  and the CMake function `dve_add_game_package()` (in-tree and in the installed `dve` package).
+  They validate `game.dvegame`, stage the project without `.autosave`, editor-only folders and
+  sample maps, export editor scenes, `dve_pack` everything into `game.dvepak`, and stage the
+  installed Runtime component into `<Game>/` (renamed, stripped player; only the needed
+  `lib/dve` libraries; `THIRD_PARTY_NOTICES.txt`; `build-info.json`), optionally as a
+  reproducible `.tar.gz`, and optionally run it headless (`--verify`).
+- `dve_player` gets the extra RPATH `$ORIGIN/lib/dve` for the game-folder layout.
+- Added the third-party notices: `third_party/notices/manifest.json`,
+  `tools/generate_third_party_notices.py` and `cmake/DveNotices.cmake`. The build writes
+  `THIRD_PARTY_NOTICES-{runtime,editor,tools,dev}.txt` from the actual link closure and bundled
+  libraries, with license texts from the installed Debian packages, the repository or the fetched
+  sources, and flags copyleft libraries. Each component installs its file to `share/doc/dve`.
+  The notices state that the engine has no license (D1).
+- `libjack` and Berkeley DB (`libdb`) are no longer bundled (`DVE_INSTALL_BUNDLE_JACK`, default
+  OFF). The Phase 3 editor TGZ shipped `libdb-5.3`, whose Sleepycat license requires offering the
+  source of software that uses it.
+- New tests: `dve_editor_scene_export_tests`, `dve_third_party_notices_self_test`,
+  `dve_third_party_notices_check_<Component>` and `dve_package_game_test` (packages the sample game,
+  extracts the `.tar.gz` to a temporary folder and runs it with `--frames --hash` and no
+  `LD_LIBRARY_PATH`). `dve_install_tree_test` and `dve_package_consumer_test` also check the notices
+  and `dve_add_game_package()` through the installed package.
+- Documentation: `docs/PACKAGING.md` → "Shipping a game (Phase 4)", including the license findings
+  that need review (LGPL libsndfile/mpg123/lame shipped with games, lame's GPL-marked `fft.c`,
+  Box3D, Steam Audio).
+
+# Unreleased — Packaging Phase 3: install, exported package and CPack
+
+- Added install rules (`cmake/DveInstall.cmake`) with the components `Runtime` (`dve_player`),
+  `Editor` (`dve_desktop_editor`, `dve_native_editor_x11`, `share/dve/assets`), `Tools`
+  (`dve_pack`, `dve_cook_*`, `dve_asset_index`, `dve_prefab_tool`) and `Development` (headers,
+  static libraries, `lib/cmake/dve`). The `RuntimeDeps`/`EditorDeps`/`ToolsDeps` components hold
+  the bundled shared libraries. `assets/audio/sample_maps` is never installed
+  (`DVE_INSTALL_SAMPLE_MAPS`, decision D8).
+- Added the exported CMake package: `find_package(dve 2.35)` (`SameMinorVersion`) with
+  `dve::core`, `dve::platform`, `dve::rhi`, `dve::render_bridge`, `dve::audio_synth`,
+  `dve::player_runtime`, `dve::platform_sdl3` and `dve::audio_sdl3`.
+  - Third-party targets built in the tree (manifold; fetched Jolt/SDL3/RtMidi/Box2D/Box3D) are
+    exported alongside, as `dve::third_party_*`.
+  - Installed packages are re-found with `find_dependency`.
+  - Local import helpers (pkg-config Lua, the Lua ABI fallback, RtMidi without a package) are
+    recreated.
+  - Public include directories use `BUILD_INTERFACE`/`INSTALL_INTERFACE`.
+- Added a generated `dve/build_config.hpp`. It records the option-dependent public definitions
+  (`DVE_ENABLE_*`, `DVE_HAVE_*`, `DVE_GEOMETRY_MODE_*`) and `#error`s if a translation unit
+  disagrees with them.
+- Installed executables use a `$ORIGIN/../lib/dve` `DT_RPATH`, and
+  `install(RUNTIME_DEPENDENCY_SET)` bundles their non-system shared libraries into `lib/dve`,
+  with an allowlist for glibc, the display/audio/GPU stacks, dbus/systemd and the font stack.
+- Added a generated `dve/version.hpp` from `project(VERSION)` (the single source of truth, plus
+  `git describe`). `dve_player --version` uses it.
+- Added CPack (`cmake/DveCPack.cmake`):
+  - TGZ + DEB packages `dve-runtime`, `dve-editor`, `dve-tools` and `dve-dev` (D7).
+  - The DEB packages install into `/usr`, leave out the bundled libraries, and get `Depends`
+    from `dpkg-shlibdeps` (hand list without `dpkg-dev`). `dve-dev` depends on the owning `-dev`
+    packages.
+  - ZIP/NSIS configuration for Windows (untested).
+  - No license file is packaged yet (D1), and cpack warns about it.
+- Fixed a fresh configure of `linux-gcc-release`: `third_party/manifold`'s
+  `option(BUILD_SHARED_LIBS ... ON)` put `ON` into the cache, so `dve_player_runtime` was built
+  as a non-PIC shared library and failed to link. DVE now declares `BUILD_SHARED_LIBS` (default
+  `OFF`) first.
+- Added the tests `dve_version_consistency`, `dve_install_tree_test`,
+  `dve_package_consumer_test` (`tests/package_consumer`, a tiny game built against the installed
+  package) and `dve_cpack_test` (label `slow`).
+
+# Unreleased — Fix: shader validation with register spaces
+
+- `tools/validate_shader_contracts.py` now parses HLSL registers with an optional register
+  space (`register(b0, space0)`, stored in the manifest as `"b0, space0"`, the same text
+  `scripts/compile_shaders.py` checks). It validates both parts: the register class must match
+  the binding kind (b/t/u/s), the index and space must be numeric, manifest values must be in
+  canonical form, and collisions are detected per space (an omitted space is space0). Source
+  declarations with a space used to be skipped silently; they are now compared with the
+  manifest. `dve_shader_validation` passes again on the DASHR shaders from #17.
+- `tools/verify_compiled_shader_reflection.py` maps `spaceN` to SPIR-V descriptor set N instead
+  of assuming set 0.
+- Added `dve_shader_contract_validator_self_test` (`validate_shader_contracts.py --self-test`)
+  and extended the reflection self-test with register-space cases.
+
+# Unreleased — Packaging Phase 2: dve_player
+
+- Added the `dve_player` executable (SDL3, never links `dve_editor`). It runs a `.dvepak`, a
+  loose project folder or a pak next to the executable, reads `game.dvegame` and boots the entry
+  scene with `load_scene_into_game_world`. It has a fixed-timestep loop, the manifest camera,
+  `bind.*` input bindings (keys, gamepad buttons/axes, mouse), and clear exit codes for missing
+  or corrupt content. See docs/PACKAGING.md.
+- Added the `dve::player::IPlayerRenderer` seam and a CPU implementation over the reference
+  voxel/polygon renderers. It renders at 480×270 by default, upscales through an SDL streaming
+  texture, and has `--quality fast|balanced|reference`.
+- `ReferenceVoxelRenderer` is multithreaded by rows (`threadCount`, identical output for any
+  count), and its primary rays use the scene tracer's bounded, bit-identical DDA. The sample
+  scene went from ~21 s to ~0.1 s per 480×270 frame at the same image hash. `render_hybrid_reference`
+  gained a thread-count argument. Added `resolve_polygon_render_rgba8`.
+- Added visual-only voxel objects to `GameWorld` (`spawn_visual_asset`, `has_collision`,
+  `GameRenderObject::collision`): no body, and skipped by queries and damage. Scene objects
+  with `generateCollision=false` now use them and render (they were markers before).
+- Lua: `GameScriptHost::set_content_source` / `run_content_file`. `require` and the
+  `startupScript` load through the `ContentSource` (pak or loose), as do `world.spawn_asset` and
+  `camera_load_sequence`.
+- SDL host: audio is initialised as a separate, non-fatal subsystem (`audio_subsystem_initialized`,
+  `audio_init_error`). `WindowDesc` gained `fullscreen` and `initializeAudio`. The desktop
+  editor's `--smoke` mode no longer fails without an audio device
+  (`dve_desktop_editor_smoke_noaudio`).
+- Added the deterministic `--frames N --fixed-dt --hash` mode with golden per-compiler hashes, a
+  reference-image tolerance fallback, and PNG/PPM/BMP screenshots.
+- Added the `linux-gcc-player-release` preset (static SDL 3.4.12, Lua, Jolt 5.6.0, static libs).
+  Added `DVE_BUILD_PLAYER` and `DVE_SDL3_PREFER_FETCH`. The fetched SDL builds without XTest when
+  its header is missing and skips a system SDL3_ttf.
+- Added the sample game `tests/data/player_sample` and the tests `dve_player_runtime_tests`,
+  `dve_player_sample_assets_up_to_date`, `dve_player_{smoke, loose_matches_pak, missing_pak,
+  corrupt_pak, no_content, default_pak, no_audio, input}` and `dve_player_no_editor_link`.
+
+# Unreleased — Packaging Phase 1: ContentSource and Pak-Backed Scene Loading
+
+- Added `ContentSource` (`dve/content_source.hpp`) with `LooseContentSource` (confined project
+  folder, symlink-safe) and `PakContentSource` (mounted `.dvepak`), sharing one content-path
+  normalization, size-limit and error model (`ContentErrorCode::IntegrityFailure` for pak hash
+  mismatches).
+- Added in-memory loaders: `read_dvox(span)`, `read_dmesh(span)`, `parse_dvoxscene_manifest(text)`
+  and `validate_dvoxscene_asset()`. The path-based loaders now delegate to the same decoders and
+  keep their exact behavior and error messages.
+- Added `GameWorld::spawn_asset_from_bytes`, `spawn_cooked_asset`, `spawn_cooked_polygon_asset`
+  and the read-only `GameWorld::render_objects()` accessor (voxels, polygon, materials, world
+  transform per object). Spawned `.dvox` objects now keep their material table for rendering.
+- Added `load_scene_into_game_world(ContentSource&, scene, GameWorld&)` in `dve_core`: an
+  all-or-nothing DVOXSCENE loader for shipped games that does not depend on `dve_editor`.
+- Added the `game.dvegame` project manifest (`dve/game_manifest.hpp`): `DVE_GAME 1`, name,
+  version, entry scene, optional startup script/settings/camera and reserved `bind.*` entries,
+  with strict validation and size limits.
+- `dve_pack --all` and `build_dvepak` no longer package editor `.autosave/` folders (any depth);
+  `DvePakMount::contains` is now a binary search and `DvePakMount::find` exposes entries.
+- New tests: `dve_content_source_tests`, `dve_game_manifest_tests`,
+  `dve_game_scene_loader_tests`, `dve_pack_autosave_exclusion`.
 
 # v2.35.3 — Composite Input and Rebinding Reliability
 
@@ -33,6 +403,16 @@
 - Added focused coverage for composite actuation, cancellation, priority consumption, analog
   thresholds independent of output scaling, action-less conflict previews, round trips,
   corrupt-version rejection, legacy loading, and cross-platform CRLF loading.
+# v2.35.2 — Native Physics Query and Angular-Load Adapters
+
+- Wired the solver-neutral angular impulse and torque operations to native Jolt 5.6 and Box3D
+  0.1 body APIs, with consistent rejection of invalid, static, and non-finite requests.
+- Added native ray, AABB overlap, and sphere cast-all implementations with normalized
+  directions, maximum-distance reporting, ignored-body and static/dynamic filters, material and
+  sub-shape metadata, and deterministic result ordering.
+- Added native runtime contract tests for multi-hit ordering, filter behavior, material
+  propagation, sphere casts, overlaps, angular response, and static-body rejection.
+- Added pinned Jolt and Box3D adapter jobs to continuous integration.
 
 # v2.35.1 — Incremental Destruction-Aware Navigation
 

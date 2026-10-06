@@ -40,7 +40,9 @@ VoxelLightingFramePlan make_voxel_lighting_frame_plan(
         add_dispatch(plan, VoxelLightingPass::ResolveShadows, plan.pixelCount);
     }
 
-    if (environment.globalIlluminationMode == GlobalIlluminationMode::VoxelOneBounce) {
+    // RadianceCascades has no GPU passes yet; the GPU packs it as VoxelOneBounce, so plan that.
+    if (environment.globalIlluminationMode == GlobalIlluminationMode::VoxelOneBounce ||
+        environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades) {
         plan.globalIlluminationRayCapacity = plan.pixelCount * kMaximumVoxelLightingSamples;
         const std::uint32_t samples = std::clamp(environment.globalIlluminationSamples, 1U,
                                                  kMaximumVoxelLightingSamples);

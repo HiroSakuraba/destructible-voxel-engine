@@ -109,22 +109,13 @@ bool RagdollRuntime::unbind(std::uint64_t objectId) noexcept {
     return true;
 }
 
-bool RagdollRuntime::activate(
-    std::uint64_t objectId, const RigidTransform& objectWorld,
-    RagdollActivationOptions options, std::string* error) {
-    auto found = instances_.find(objectId);
-    if (found == instances_.end()) return fail(error, "ragdoll instance is not bound");
-    Instance& instance = found->second;
-    if (instance.state != RagdollRuntimeState::Animated)
-        return fail(error, "ragdoll instance is already active");
-    if (!finite(options.linearVelocity) || !finite(options.angularVelocity) || !finite(options.impulse) ||
-        options.impulseBody >= instance.definition.bodies.size())
-        return fail(error, "ragdoll activation options are invalid");
+bool RagdollRuntime::build_physics(
+    std::uint64_t objectId, Instance& instance, const LocalPose& pose, const RigidTransform& objectWorld,
+    const RagdollActivationOptions& options, std::string* error) {
     const SkeletonAsset* skeleton = animation_->skeleton(objectId);
-    const LocalPose* pose = animation_->local_pose(objectId);
-    if (!skeleton || !pose) return fail(error, "ragdoll animation pose is unavailable");
+    if (!skeleton) return fail(error, "ragdoll animation pose is unavailable");
     std::string poseError;
-    const auto model = compute_model_pose(*skeleton, *pose, &poseError);
+    const auto model = compute_model_pose(*skeleton, pose, &poseError);
     if (model.empty()) return fail(error, poseError);
     std::vector<RigidTransform> initialBodyWorld;
     std::vector<RigidBodyCreateDesc> descs;
@@ -165,6 +156,26 @@ bool RagdollRuntime::activate(
         }
         instance.constraints.push_back(handle);
     }
+    instance.activationPose = pose;
+    instance.activationObjectWorld = objectWorld;
+    instance.useContinuousCollision = options.useContinuousCollision;
+    return true;
+}
+
+bool RagdollRuntime::activate(
+    std::uint64_t objectId, const RigidTransform& objectWorld,
+    RagdollActivationOptions options, std::string* error) {
+    auto found = instances_.find(objectId);
+    if (found == instances_.end()) return fail(error, "ragdoll instance is not bound");
+    Instance& instance = found->second;
+    if (instance.state != RagdollRuntimeState::Animated)
+        return fail(error, "ragdoll instance is already active");
+    if (!finite(options.linearVelocity) || !finite(options.angularVelocity) || !finite(options.impulse) ||
+        options.impulseBody >= instance.definition.bodies.size())
+        return fail(error, "ragdoll activation options are invalid");
+    const LocalPose* pose = animation_->local_pose(objectId);
+    if (!pose) return fail(error, "ragdoll animation pose is unavailable");
+    if (!build_physics(objectId, instance, *pose, objectWorld, options, error)) return false;
     if (length_squared(options.impulse) > 0.0F &&
         !physics_->apply_impulse(instance.bodies[options.impulseBody], options.impulse)) {
         destroy_physics(instance);
@@ -380,6 +391,101 @@ std::vector<std::uint64_t> RagdollRuntime::object_ids() const {
         result.push_back(id);
     }
     return result;
+}
+
+RagdollSaveState RagdollRuntime::capture_save_state() const {
+    RagdollSaveState state;
+    for (const auto& [objectId, instance] : instances_) {
+        RagdollInstanceSaveState saved;
+        saved.objectId = objectId;
+        saved.bodyCount = static_cast<std::uint32_t>(instance.definition.bodies.size());
+        saved.jointCount = static_cast<std::uint32_t>(instance.definition.joints.size());
+        saved.state = instance.state;
+        saved.blendWeight = instance.blend.weight;
+        saved.blendTargetWeight = instance.blend.targetWeight;
+        saved.blendRatePerSecond = instance.blend.blendRatePerSecond;
+        saved.quietSeconds = instance.quietSeconds;
+        saved.settled = instance.settled;
+        saved.recoveryStart = instance.recoveryStart;
+        saved.recoveryTarget = instance.recoveryTarget;
+        saved.recoveryElapsed = instance.recoveryElapsed;
+        saved.recoveryDuration = instance.recoveryDuration;
+        saved.resumePlaybackSpeed = instance.resumePlaybackSpeed;
+        saved.facing = instance.facing;
+        if (!instance.bodies.empty()) {
+            saved.activationPose = instance.activationPose;
+            saved.activationObjectWorld = instance.activationObjectWorld;
+            saved.useContinuousCollision = instance.useContinuousCollision;
+            for (const RigidBodyHandle handle : instance.bodies)
+                saved.bodies.push_back(physics_->state(handle).value_or(RigidBodyState{}));
+        }
+        state.instances.push_back(std::move(saved));
+    }
+    return state;
+}
+
+std::size_t RagdollRuntime::restore_save_state(const RagdollSaveState& state, std::vector<std::string>* warnings) {
+    std::size_t restored = 0U;
+    for (const RagdollInstanceSaveState& saved : state.instances) {
+        const auto warn = [&](std::string_view message) {
+            if (warnings) warnings->push_back("ragdoll " + std::to_string(saved.objectId) + ": " + std::string(message));
+        };
+        const auto found = instances_.find(saved.objectId);
+        if (found == instances_.end()) { warn("no ragdoll is bound after boot"); continue; }
+        Instance& instance = found->second;
+        if (saved.bodyCount != instance.definition.bodies.size() || saved.jointCount != instance.definition.joints.size()) {
+            warn("the bound ragdoll definition changed");
+            continue;
+        }
+        const bool active = saved.state == RagdollRuntimeState::BlendingIn || saved.state == RagdollRuntimeState::Simulating;
+        const auto finiteState = [](const RigidBodyState& body) {
+            return finite(body.currentTransform.position) && finite(body.previousTransform.position) &&
+                   finite(body.linearVelocity) && finite(body.angularVelocity) &&
+                   std::isfinite(body.currentTransform.rotation.w) && std::isfinite(body.previousTransform.rotation.w);
+        };
+        bool valid = saved.state <= RagdollRuntimeState::Recovering && std::isfinite(saved.blendWeight) &&
+                     std::isfinite(saved.blendTargetWeight) && std::isfinite(saved.blendRatePerSecond) &&
+                     std::isfinite(saved.quietSeconds) && std::isfinite(saved.recoveryElapsed) &&
+                     std::isfinite(saved.recoveryDuration) && saved.recoveryDuration >= 0.0F &&
+                     std::isfinite(saved.resumePlaybackSpeed);
+        if (active) valid = valid && saved.bodies.size() == saved.bodyCount && std::all_of(saved.bodies.begin(), saved.bodies.end(), finiteState);
+        else valid = valid && saved.bodies.empty();
+        const SkeletonAsset* skeleton = animation_->skeleton(saved.objectId);
+        if (saved.state == RagdollRuntimeState::Recovering)
+            valid = valid && skeleton && saved.recoveryStart.size() == skeleton->bones.size() &&
+                    saved.recoveryTarget.size() == skeleton->bones.size();
+        if (!valid) { warn("the saved ragdoll state is invalid"); continue; }
+        destroy_physics(instance);
+        if (active) {
+            RagdollActivationOptions options;
+            options.useContinuousCollision = saved.useContinuousCollision;
+            std::string error;
+            bool built = build_physics(saved.objectId, instance, saved.activationPose, saved.activationObjectWorld, options, &error);
+            for (std::size_t i = 0; built && i < instance.bodies.size(); ++i)
+                built = physics_->set_state(instance.bodies[i], saved.bodies[i]);
+            if (!built) {
+                destroy_physics(instance);
+                instance.state = RagdollRuntimeState::Animated;
+                instance.blend.weight = instance.blend.targetWeight = 0.0F;
+                warn("could not rebuild the ragdoll bodies" + (error.empty() ? std::string() : ": " + error));
+                continue;
+            }
+        }
+        instance.state = saved.state;
+        instance.blend.weight = saved.blendWeight;
+        instance.blend.targetWeight = saved.blendTargetWeight;
+        instance.blend.blendRatePerSecond = saved.blendRatePerSecond;
+        instance.quietSeconds = saved.quietSeconds;
+        instance.settled = saved.settled;
+        instance.recoveryStart = saved.recoveryStart;
+        instance.recoveryTarget = saved.recoveryTarget;
+        instance.recoveryElapsed = saved.recoveryElapsed;
+        instance.recoveryDuration = saved.recoveryDuration;
+        instance.resumePlaybackSpeed = saved.resumePlaybackSpeed;
+        instance.facing = saved.facing;
+        ++restored;
+    }
+    return restored;
 }
 
 } // namespace dve

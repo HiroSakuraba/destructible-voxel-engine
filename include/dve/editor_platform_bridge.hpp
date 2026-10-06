@@ -13,9 +13,14 @@ public:
     explicit EditorPlatformBridge(NativeEditorController& controller) : controller_(controller) {}
 
     void handle_event(const platform::PlatformEvent& event);
+    // UI zoom currently applied by the host (see dve/editor_ui_zoom.hpp). Pointer positions and
+    // resize extents arrive in window coordinates and are mapped to logical editor pixels.
+    void set_ui_zoom(float zoom) noexcept { zoom_ = zoom > 0.0F ? zoom : 1.0F; }
+    [[nodiscard]] float ui_zoom() const noexcept { return zoom_; }
 
 private:
     NativeEditorController& controller_;
+    float zoom_{1.0F};
 };
 
 } // namespace dve::editor

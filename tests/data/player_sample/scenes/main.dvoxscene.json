@@ -1,0 +1,11 @@
+{
+  "format": "DVOXSCENE",
+  "version": 1,
+  "name": "PlayerSample",
+  "objects": [
+    {"index":0,"id":2001,"name":"Ground","nodePath":"/Ground","file":"ground.dvox","parent":null,"anchored":true,"structural":true,"generateCollision":true,"worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]},
+    {"index":1,"id":2002,"name":"Tower","nodePath":"/Tower","file":"tower.dvox","parent":null,"anchored":true,"structural":true,"generateCollision":true,"worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,-1.3,0,-0.7,1]},
+    {"index":2,"id":2003,"name":"Crate","nodePath":"/Crate","file":"crate.dvox","parent":null,"anchored":true,"structural":false,"generateCollision":true,"worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,1.1,0,0.3,1]},
+    {"index":3,"id":2004,"name":"Spinner","nodePath":"/Spinner","file":"spinner.dvox","parent":null,"anchored":true,"structural":false,"generateCollision":false,"worldMatrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,1.2,0.5,1]}
+  ]
+}

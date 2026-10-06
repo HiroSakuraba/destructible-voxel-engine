@@ -20,6 +20,11 @@ void check_advanced_rows(dve::editor::NativeEditorController& controller, int wi
     controller.synth_panel().resize(width, height);
     require(controller.synth_panel().page() == SynthPanelPage::Oscillators,
             "synth panel was not on the Oscillators page");
+    // Short windows scroll the Oscillators page: check each advanced row at a scroll position
+    // where it is visible (rows outside the viewport have empty rects).
+    (void)controller.synth_panel().scroll_grid(-100);
+    while (controller.synth_panel().layout().oscillatorAdvancedRows.back().width == 0 &&
+           controller.synth_panel().scroll_grid(1)) {}
     const auto layout = controller.synth_panel().layout();
     const UiRect panel = layout.panel;
     require(panel.width > 0 && panel.height > 0, "synth panel had no size");

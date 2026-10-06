@@ -157,7 +157,8 @@ void register_editor_ai_tools(ai::DveAiBridge& bridge, EditorWorkspace& workspac
                     {"default", setting_value_json(definition.defaultValue)},
                     {"source_scope", setting_scope_name(source)}, {"inherited", inherited},
                     {"advanced", definition.advanced},
-                    {"restart_required", definition.applyPolicy == SettingApplyPolicy::RestartRequired}});
+                    {"restart_required", definition.applyPolicy == SettingApplyPolicy::RestartRequired},
+                    {"applied", definition.applied}});
             }
             return ai::AiToolCallResult{ai::AiCallStatus::Completed,
                 ai::JsonValue::Object{{"settings", std::move(rows)},

@@ -1,5 +1,6 @@
 #include "dve/damage.hpp"
 
+#include <utility>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -60,7 +61,7 @@ QuantizedSphereDamageCommand quantize_damage_command(SphereDamageCommand command
         quantize(command.center.x),
         quantize(command.center.y),
         quantize(command.center.z),
-        std::max<std::int32_t>(0, quantize(command.radius)),
+        std::clamp<std::int32_t>(quantize(command.radius), 0, kMaxDamageRadiusVoxels * kDamageSubvoxelScale),
         command.sequence,
     };
 }
@@ -91,9 +92,26 @@ void DamageBatchWorkspace::reserve(
     edits_.reserve(editCapacity);
 }
 
+DamageClipBounds damage_clip_bounds(const VoxelObject& object) noexcept {
+    DamageClipBounds bounds{
+        {std::numeric_limits<std::int32_t>::max(), std::numeric_limits<std::int32_t>::max(), std::numeric_limits<std::int32_t>::max()},
+        {std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::min()}};
+    for (const auto& entry : object.bricks()) {
+        const BrickKey key = entry.first;
+        bounds.minVoxel.x = std::min(bounds.minVoxel.x, key.x * kBrickDim);
+        bounds.minVoxel.y = std::min(bounds.minVoxel.y, key.y * kBrickDim);
+        bounds.minVoxel.z = std::min(bounds.minVoxel.z, key.z * kBrickDim);
+        bounds.maxVoxel.x = std::max(bounds.maxVoxel.x, key.x * kBrickDim + kBrickDim - 1);
+        bounds.maxVoxel.y = std::max(bounds.maxVoxel.y, key.y * kBrickDim + kBrickDim - 1);
+        bounds.maxVoxel.z = std::max(bounds.maxVoxel.z, key.z * kBrickDim + kBrickDim - 1);
+    }
+    return bounds;
+}
+
 std::span<const DamageBrickBatch> build_damage_batches(
     std::span<const SphereDamageCommand> commands,
-    DamageBatchWorkspace& workspace) {
+    DamageBatchWorkspace& workspace,
+    const DamageClipBounds* clip) {
     workspace.begin_growth_probe();
     workspace.commandScratch_.clear();
     for (const SphereDamageCommand command : commands) workspace.commandScratch_.push_back(quantize_damage_command(command));
@@ -101,6 +119,10 @@ std::span<const DamageBrickBatch> build_damage_batches(
         return a.sequence < b.sequence;
     });
     workspace.batches_.clear();
+    if (clip != nullptr && clip->empty()) {
+        workspace.end_growth_probe();
+        return workspace.batches_;
+    }
 
     auto batch_for = [&](BrickKey key) -> DamageBrickBatch& {
         const auto it = std::lower_bound(
@@ -119,28 +141,49 @@ std::span<const DamageBrickBatch> build_damage_batches(
         const std::int64_t radiusSquared = radius * radius;
 
         // Conservative center-coordinate bounds. Exact row spans below reject the surplus.
-        const std::int32_t minZ = static_cast<std::int32_t>(floor_div64(command.centerZ - radius - half, scale));
-        const std::int32_t maxZ = static_cast<std::int32_t>(floor_div64(command.centerZ + radius - half, scale));
-        const std::int32_t minY = static_cast<std::int32_t>(floor_div64(command.centerY - radius - half, scale));
-        const std::int32_t maxY = static_cast<std::int32_t>(floor_div64(command.centerY + radius - half, scale));
+        std::int64_t minZ = floor_div64(command.centerZ - radius - half, scale);
+        std::int64_t maxZ = floor_div64(command.centerZ + radius - half, scale);
+        std::int64_t minY = floor_div64(command.centerY - radius - half, scale);
+        std::int64_t maxY = floor_div64(command.centerY + radius - half, scale);
+        std::int64_t clipMinX = std::numeric_limits<std::int32_t>::min();
+        std::int64_t clipMaxX = std::numeric_limits<std::int32_t>::max();
+        if (clip != nullptr) {
+            // Clip the sphere's row range to the object's voxel box: rows outside it
+            // can never touch an existing voxel, so their cost was pure waste
+            // (a 30 m sphere on a 0.1 m grid walked ~283k rows / 200k bricks).
+            minZ = std::max<std::int64_t>(minZ, clip->minVoxel.z);
+            maxZ = std::min<std::int64_t>(maxZ, clip->maxVoxel.z);
+            minY = std::max<std::int64_t>(minY, clip->minVoxel.y);
+            maxY = std::min<std::int64_t>(maxY, clip->maxVoxel.y);
+            clipMinX = clip->minVoxel.x;
+            clipMaxX = clip->maxVoxel.x;
+        }
+        minZ = std::max<std::int64_t>(minZ, std::numeric_limits<std::int32_t>::min());
+        maxZ = std::min<std::int64_t>(maxZ, std::numeric_limits<std::int32_t>::max());
+        minY = std::max<std::int64_t>(minY, std::numeric_limits<std::int32_t>::min());
+        maxY = std::min<std::int64_t>(maxY, std::numeric_limits<std::int32_t>::max());
 
-        for (std::int32_t z = minZ; z <= maxZ; ++z) {
+        for (std::int64_t z64 = minZ; z64 <= maxZ; ++z64) {
+            const auto z = static_cast<std::int32_t>(z64);
             const std::int64_t dz = static_cast<std::int64_t>(z) * scale + half - command.centerZ;
             const std::int64_t dzSquared = dz * dz;
             if (dzSquared > radiusSquared) continue;
 
-            for (std::int32_t y = minY; y <= maxY; ++y) {
+            for (std::int64_t y64 = minY; y64 <= maxY; ++y64) {
+                const auto y = static_cast<std::int32_t>(y64);
                 const std::int64_t dy = static_cast<std::int64_t>(y) * scale + half - command.centerY;
                 const std::int64_t planeSquared = dzSquared + dy * dy;
                 if (planeSquared > radiusSquared) continue;
 
                 const std::int64_t xExtent = static_cast<std::int64_t>(
                     integer_sqrt(static_cast<std::uint64_t>(radiusSquared - planeSquared)));
-                const std::int32_t minX = static_cast<std::int32_t>(
+                const std::int64_t minX64 = std::max(clipMinX,
                     ceil_div64(static_cast<std::int64_t>(command.centerX) - xExtent - half, scale));
-                const std::int32_t maxX = static_cast<std::int32_t>(
+                const std::int64_t maxX64 = std::min(clipMaxX,
                     floor_div64(static_cast<std::int64_t>(command.centerX) + xExtent - half, scale));
-                if (minX > maxX) continue;
+                if (minX64 > maxX64) continue;
+                const auto minX = static_cast<std::int32_t>(minX64);
+                const auto maxX = static_cast<std::int32_t>(maxX64);
 
                 const std::int32_t bz = floor_div(z, kBrickDim);
                 const std::int32_t by = floor_div(y, kBrickDim);
@@ -169,19 +212,20 @@ DamageApplyReportView apply_damage_commands(
     std::span<const SphereDamageCommand> commands,
     DamageBatchWorkspace& workspace) {
     workspace.begin_growth_probe();
-    const std::span<const DamageBrickBatch> batches = build_damage_batches(commands, workspace);
+    const DamageClipBounds clip = damage_clip_bounds(object);
+    const std::span<const DamageBrickBatch> batches = build_damage_batches(commands, workspace, &clip);
     workspace.edits_.clear();
     std::uint64_t removedVoxelCount = 0;
 
     for (const DamageBrickBatch& batch : batches) {
-        const Brick* before = object.find_brick(batch.key);
+        const Brick* before = std::as_const(object).find_brick(batch.key);
         // Removal-only commands that touch absent space must not materialize empty
         // authority brick headers. Besides wasting memory, that previously made
         // renderer mirrors appear stale even though no voxel changed.
         if (before == nullptr && batch.mutation.writes.empty()) continue;
         const std::uint16_t oldCount = before == nullptr ? 0 : before->occupied_count();
         AppliedBrickEdit edit = object.apply(batch.key, batch.mutation);
-        const Brick* after = object.find_brick(batch.key);
+        const Brick* after = std::as_const(object).find_brick(batch.key);
         const std::uint16_t newCount = after == nullptr ? 0 : after->occupied_count();
         if (oldCount > newCount) removedVoxelCount += oldCount - newCount;
         if (edit.changedMask.any()) workspace.edits_.push_back(edit);

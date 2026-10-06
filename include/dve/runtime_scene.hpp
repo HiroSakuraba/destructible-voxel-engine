@@ -15,10 +15,12 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 #include <vector>
 
+#include "dve/component.hpp"
 #include "dve/connectivity.hpp"
 #include "dve/dvox.hpp"
 #include "dve/job_system.hpp"
@@ -188,6 +190,36 @@ struct RuntimeSceneHotReloadResult {
     [[nodiscard]] explicit operator bool() const noexcept { return !error; }
 };
 
+// DVOXSCENE v1 per-object extension block (optional "extensions" field, versioned on its own
+// so the base format stays version 1 and old manifests keep loading unchanged):
+//
+//   "extensions": {
+//     "version": 1,                         // required; a newer version is UnsupportedVersion
+//     "geometry": "voxel" | "polygon",      // optional, default voxel; polygon => file is .dmesh
+//     "components": [                       // optional, GameWorld gameplay components
+//       {"id": 1, "type": "dve.spawn", "enabled": true,
+//        "properties": {"category": {"string": "enemy"}, "gain": {"float": 0.5},
+//                       "slot": {"int": "3"}, "loop": {"bool": false},
+//                       "offset": {"float3": [0, 1, 0]}, "turn": {"quat": [0, 0, 0, 1]}}}
+//     ],
+//     "attachment": {"socket": "", "inheritPosition": true, "inheritRotation": true}
+//   }
+//
+// "int" values are decimal strings so all 64 bits survive JSON. An attachment needs a parent;
+// the GameWorld loader turns it into GameWorld::attach_object (world transform preserved).
+// Unknown fields inside the block are rejected like everywhere else in the manifest.
+// Polygon objects are only understood by load_scene_into_game_world(); the path-based
+// RuntimeSceneWorld rejects them.
+inline constexpr std::uint32_t kDvoxSceneExtensionVersion = 1U;
+
+enum class RuntimeSceneGeometry : std::uint8_t { Voxel, Polygon };
+
+struct RuntimeSceneAttachment {
+    std::string socket;
+    bool inheritPosition{true};
+    bool inheritRotation{true};
+};
+
 struct RuntimeSceneObjectMetadata {
     std::size_t index{};
     std::uint64_t id{};
@@ -200,7 +232,20 @@ struct RuntimeSceneObjectMetadata {
     bool structural{true};
     bool generateCollision{true};
     RigidTransform worldTransform{};
+    // From the optional "extensions" block (0 = the object has no block).
+    std::uint32_t extensionVersion{};
+    RuntimeSceneGeometry geometry{RuntimeSceneGeometry::Voxel};
+    std::vector<Component> components;
+    std::optional<RuntimeSceneAttachment> attachment;
 };
+
+// Serializes the "extensions" value for one object (the text after `"extensions":`), in the
+// canonical form parse_dvoxscene_manifest() reads back. Returns an empty string when the
+// object needs no block (voxel geometry, no components, no attachment).
+[[nodiscard]] std::string dvoxscene_object_extensions_json(
+    RuntimeSceneGeometry geometry,
+    std::span<const Component> components,
+    const std::optional<RuntimeSceneAttachment>& attachment);
 
 struct RuntimeSceneObjectStats {
     std::uint64_t voxels{};
@@ -296,6 +341,29 @@ private:
     float uniformVoxelSizeMeters_{};
     bool mixedVoxelSizes_{};
 };
+
+// In-memory DVOXSCENE v1 parse (no filesystem access). Applies every structural rule the
+// path-based RuntimeSceneWorld parser applies (format/version, unknown fields, limits, ids,
+// contiguous indices, parents/cycles, rigid transforms, contained ".dvox" relative paths,
+// duplicate asset paths) with the same error codes. Objects are sorted by index and their
+// parentId is resolved. `relativeFile` is relative to the manifest's own folder.
+struct DvoxSceneManifest {
+    std::string name;
+    std::vector<RuntimeSceneObjectMetadata> objects;
+};
+[[nodiscard]] std::optional<DvoxSceneManifest> parse_dvoxscene_manifest(
+    std::string_view text,
+    const RuntimeSceneLoadOptions& options = {},
+    RuntimeSceneError* error = nullptr);
+
+// The per-object asset checks RuntimeSceneWorld applies after reading a DVOX (object ID
+// matches the manifest, material table is finite/in range, voxel material references are in
+// the table, optional voxel-size policy). Returns a NoError value on success.
+[[nodiscard]] RuntimeSceneError validate_dvoxscene_asset(
+    const RuntimeSceneObjectMetadata& metadata,
+    const CookedVoxelAsset& asset,
+    const RuntimeSceneLoadOptions& options = {},
+    const std::filesystem::path& pathForErrors = {});
 
 class RuntimeSceneStaging {
 public:

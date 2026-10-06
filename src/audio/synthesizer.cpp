@@ -1,4 +1,5 @@
 #include "dve/audio/synthesizer.hpp"
+
 #include "dve/audio/audio_asset.hpp"
 #include "dve/audio/wavetable.hpp"
 #include "dve/audio/physics_modulation.hpp"
@@ -14,6 +15,7 @@
 #include <complex>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <numbers>
 #include <iomanip>
@@ -22,13 +24,34 @@
 #include <type_traits>
 #include <utility>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
+
 namespace dve::audio {
 namespace {
+
+// Real-time denormal guard: sustained voices at low levels (decaying
+// envelopes, reverb/filter tails) generate denormal floats, and a single
+// denormal operand can stall the FPU for microseconds — the classic cause
+// of rare multi-millisecond spikes in an otherwise steady render. Enabling
+// flush-to-zero + denormals-are-zero for the render call removes the stall;
+// affected values are < 1.2e-38 (-758 dB), far below audibility and the
+// 1e-6 A/B tolerance. MXCSR is per-thread; the previous mode is restored
+// on exit so non-audio threads are untouched.
+struct DenormalGuard {
+#if defined(__x86_64__) || defined(_M_X64)
+    unsigned saved_;
+    DenormalGuard() noexcept : saved_(_mm_getcsr()) { _mm_setcsr(saved_ | 0x8040u); }
+    ~DenormalGuard() { _mm_setcsr(saved_); }
+#else
+    DenormalGuard() noexcept = default;
+#endif
+};
 
 constexpr float kPi = std::numbers::pi_v<float>;
 constexpr float kTwoPi = 2.0F * kPi;
 constexpr std::size_t kMidiQueueCapacity = 2048;
-constexpr std::size_t kPresetQueueCapacity = 8;
 constexpr std::size_t kMidiOutQueueCapacity = 2048;
 
 float clampf(float value, float low, float high) noexcept { return std::clamp(value, low, high); }
@@ -153,6 +176,36 @@ private:
     alignas(64) std::atomic<std::size_t> dequeue_{};
 };
 
+// Latest-wins single-producer/single-consumer mailbox (triple buffer). The
+// producer overwrites whatever the consumer has not taken yet, so the newest
+// value always arrives and a burst can never be dropped. Wait-free on both
+// sides and allocation-free; producers must be serialized externally.
+template <class T>
+class LatestMailbox {
+    static_assert(std::is_trivially_copyable_v<T>);
+    static constexpr std::uint32_t kIndexMask = 3U;
+    static constexpr std::uint32_t kFresh = 4U;
+public:
+    T& producer_slot() noexcept { return slots_[back_]; }
+    // Publishes producer_slot(); returns true if it replaced an unconsumed value.
+    bool publish() noexcept {
+        const std::uint32_t previous = middle_.exchange(back_ | kFresh, std::memory_order_acq_rel);
+        back_ = previous & kIndexMask;
+        return (previous & kFresh) != 0U;
+    }
+    // Consumer: returns the newest published value, or nullptr if nothing new.
+    const T* take() noexcept {
+        if ((middle_.load(std::memory_order_relaxed) & kFresh) == 0U) return nullptr;
+        front_ = middle_.exchange(front_, std::memory_order_acq_rel) & kIndexMask;
+        return &slots_[front_];
+    }
+private:
+    std::array<T, 3> slots_{};
+    std::uint32_t back_{0};                 // producer-owned
+    std::uint32_t front_{2};                // consumer-owned
+    std::atomic<std::uint32_t> middle_{1};  // shared: index | kFresh
+};
+
 struct RealtimeMicrotuning {
     bool enabled{};
     std::uint8_t referenceNote{69};
@@ -274,6 +327,51 @@ std::uint64_t wavetable_content_hash(const RealtimeWavetable& wt) noexcept {
         h *= 1099511628211ULL;
     }
     return h;
+}
+
+// Immutable set of cooked HQ wavetables published by the UI thread (cooked
+// there, never on the audio thread) and swapped in by render(): the base
+// preset's table (A) and, while an A/B morph is set up, the target's table (B).
+// The render thread only reads through raw pointers; whole sets are retired
+// back to the UI thread for destruction, so no deallocation happens in render().
+struct CookedWavetableSet {
+    std::shared_ptr<const CookedWavetable> a;
+    std::shared_ptr<const CookedWavetable> b;
+    std::uint64_t hashA{0};
+    std::uint64_t hashB{0};
+};
+
+bool wavetable_cookable(const RealtimeWavetable& wt) noexcept {
+    return wt.enabled && wt.frameCount != 0U;
+}
+
+// Resamples the preset's mip-0 frames (<= 8 x 128) to the HQ grid (64 x 512).
+void resample_preset_wavetable(const RealtimeWavetable& wt, std::vector<float>& flat) {
+    flat.resize(kHQWavetableFrames * kHQWavetableSamples);
+    const std::size_t srcFrames = std::min<std::size_t>(wt.frameCount, kWavetableFrameCount);
+    const float* mip0 = wt.samples.data(); // mip 0 is first
+    for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
+        const float srcPos = static_cast<float>(f) / static_cast<float>(kHQWavetableFrames - 1) *
+                             static_cast<float>(srcFrames - 1);
+        const std::size_t f0 = static_cast<std::size_t>(srcPos);
+        const std::size_t f1 = std::min(f0 + 1, srcFrames - 1);
+        const float frac = srcPos - static_cast<float>(f0);
+        float* frame = flat.data() + f * kHQWavetableSamples;
+        for (std::size_t i = 0; i < kHQWavetableSamples; ++i) {
+            const float srcSamplePos = static_cast<float>(i) / static_cast<float>(kHQWavetableSamples - 1) *
+                                       static_cast<float>(kWavetableSampleCount - 1);
+            const std::size_t s0 = static_cast<std::size_t>(srcSamplePos);
+            const std::size_t s1 = std::min(s0 + 1, kWavetableSampleCount - 1);
+            const float sFrac = srcSamplePos - static_cast<float>(s0);
+            const float a0 = mip0[f0 * kWavetableSampleCount + s0];
+            const float a1 = mip0[f0 * kWavetableSampleCount + s1];
+            const float b0 = mip0[f1 * kWavetableSampleCount + s0];
+            const float b1 = mip0[f1 * kWavetableSampleCount + s1];
+            const float a = a0 + (a1 - a0) * sFrac;
+            const float b = b0 + (b1 - b0) * sFrac;
+            frame[i] = a + (b - a) * frac;
+        }
+    }
 }
 
 ChordParameters resolved_chord_parameters(const SynthPreset& source) noexcept {
@@ -780,6 +878,22 @@ struct Voice {
     std::array<std::array<float, 4>, kSynthOscillatorCount> auxiliaryPhases{};
     std::array<std::uint32_t, kSynthOscillatorCount> noiseState{};
     std::array<float, kSynthOscillatorCount> previousOscillatorSamples{};
+    // Perf: cached stereo-divergence detune ratios. divergence is a preset
+    // parameter, so the exp2() pair is recomputed only when it changes
+    // (per-voice cache also covers morph-driven changes).
+    std::array<float, kSynthOscillatorCount> divergenceRatioL{};
+    std::array<float, kSynthOscillatorCount> divergenceRatioR{};
+    std::array<float, kSynthOscillatorCount> divergencePhaseOffset{};
+    std::array<float, kSynthOscillatorCount> divergenceCached{};
+    // Perf: cached base frequency. tuned_frequency()'s exp2 argument is split
+    // into a per-block-constant base (everything but slow analog drift) and a
+    // tiny drift term applied via 2nd-order Taylor (|err| < 1e-12 relative).
+    // Key: (note, referenceHertz, baseSemitones). Falls back to the direct
+    // path when microtuning or exponential FM is active.
+    std::array<float, kSynthOscillatorCount> freqCache{};
+    std::array<float, kSynthOscillatorCount> freqCacheSemitones{};
+    std::uint8_t freqCacheNote{0xFF};
+    float freqCacheRefHertz{0.0F};
     std::array<float, kSynthOscillatorCount> subPhases{};
     std::array<float, kSynthOscillatorCount> samplePositions{};
     std::array<float, kSynthOscillatorCount> sampleMapPositions{};
@@ -1579,6 +1693,7 @@ std::vector<std::pair<std::string, std::string>> parse_lines(std::string_view te
     std::istringstream input{std::string(text)};
     std::string line;
     while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         const auto equals = line.find('=');
         if (equals != std::string::npos) result.emplace_back(line.substr(0, equals), line.substr(equals + 1U));
     }
@@ -2348,8 +2463,15 @@ struct Synthesizer::Impl {
     float sampleRate{};
     std::atomic<std::uint64_t>& currentFrame;
     RealtimePreset parameters{};
-    // Phase 1: high-quality wavetable bank (cooked on preset load).
-    CookedWavetable hqWavetable{};
+    // Phase 1: high-quality wavetable bank. Cooked on the UI thread (FFT) and
+    // published as a CookedWavetableSet; hqWavetable_ points into the active
+    // set (or at the zero table until the first cookable preset arrives).
+    CookedWavetable hqEmptyWavetable_{};
+    const CookedWavetable* hqWavetable_{&hqEmptyWavetable_};
+    CookedWavetableSet* activeWavetables_{nullptr};                      // render thread
+    std::atomic<CookedWavetableSet*> pendingWavetables_{nullptr};        // UI -> render
+    std::atomic<CookedWavetableSet*> retiredWavetables_{nullptr};        // render -> UI
+    SequencerConfig presetSequencerConfig_{};                            // render thread
     // Phase 1: physics modulation bank (global).
     PhysicsModulationBank physicsBank{};
     // Phase 3: generative step sequencer (SYN-012). Driven once per render
@@ -2369,8 +2491,19 @@ struct Synthesizer::Impl {
     RealtimePreset morphBaseB_{};
     bool morphHasB_{false};
     float appliedMorphAmount_{-1.0F};  // amount baked into parameters (-1 = none)
-    // Phase 1: wavetable cook gating (fix: no per-block re-cook/allocation).
-    std::uint64_t cookedWavetableHash_{0};
+    // Phase 1: wavetable cook gating + cache (UI thread, wavetableCookMutex_).
+    struct WavetableCookCacheEntry {
+        std::uint64_t hash{0};
+        std::shared_ptr<const CookedWavetable> table;
+        std::uint64_t lastUse{0};
+    };
+    std::mutex wavetableCookMutex_;
+    std::array<WavetableCookCacheEntry, 3> wavetableCookCache_{};
+    std::uint64_t wavetableCookClock_{0};
+    std::shared_ptr<const CookedWavetable> publishedA_;
+    std::uint64_t publishedHashA_{0};
+    std::uint64_t publishedHashB_{0};
+    bool publishedValid_{false};
     std::atomic<std::uint64_t> wavetableCookCount_{0};
     std::vector<float> wavetableCookScratch_;              // flat 64x512 resample target
     std::vector<std::complex<float>> wavetableCookSpectrum_;  // persistent DFT scratch
@@ -2398,8 +2531,10 @@ struct Synthesizer::Impl {
     bool parameterSmoothingInitialized{};
     BoundedQueue<MidiMessage, kMidiQueueCapacity> midiIn;
     BoundedQueue<MidiMessage, kMidiOutQueueCapacity> midiOut;
-    BoundedQueue<PresetUpdate, kPresetQueueCapacity> presetIn;
-    std::atomic<std::uint64_t> droppedPresets{0};  // presetIn overflow (UI thread only)
+    // Latest-wins preset handoff (was an 8-deep queue that dropped the NEWEST
+    // update on overflow, so a burst of edits could leave a stale preset live).
+    LatestMailbox<PresetUpdate> presetIn;
+    std::atomic<std::uint64_t> coalescedPresets{0};  // updates superseded before render() took them (UI thread)
     std::mutex sampleMapPublishMutex;
     std::array<SynthSampleMap, 3> sampleMaps{};
     std::atomic<int> activeSampleMapIndex{0};
@@ -3229,50 +3364,80 @@ struct Synthesizer::Impl {
         parameters = morph_realtime_presets(morphBaseA_, morphBaseB_, clamped);
         appliedMorphAmount_ = clamped;
         // The morphed wavetable content snaps at t >= 0.5 (see
-        // morph_realtime_presets); re-cook only if the content actually changed.
-        cook_wavetable_if_changed();
+        // morph_realtime_presets); both A and B were pre-cooked off-thread.
+        select_cooked_wavetable();
     }
 
-    // Cooks parameters.wavetable into the HQ engine only when its content
-    // changed since the last cook. The resample target and DFT scratch are
-    // persistent members, so repeat cooks perform no allocation.
-    void cook_wavetable_if_changed() noexcept {
-        if (!parameters.wavetable.enabled || parameters.wavetable.frameCount == 0U) return;
+    // Points the oscillators at the cooked table matching parameters.wavetable
+    // (A, or B once an A/B morph has snapped to the target). Cheap: one FNV
+    // hash of <= 1024 floats, no cooking and no allocation on this thread. If
+    // neither matches (content not cooked yet, or wavetable disabled) the
+    // current table stays, which matches the old "cook only when enabled" rule.
+    void select_cooked_wavetable() noexcept {
+        if (activeWavetables_ == nullptr) return;
         const std::uint64_t hash = wavetable_content_hash(parameters.wavetable);
-        if (hash == cookedWavetableHash_) return;
-        // Phase 1: cook the preset wavetable into the HQ engine (64 frames).
-        // Interpolates the preset's mip-0 frames up to kHQWavetableFrames.
-        wavetableCookScratch_.resize(kHQWavetableFrames * kHQWavetableSamples);
-        const std::size_t srcFrames = std::min<std::size_t>(parameters.wavetable.frameCount, kWavetableFrameCount);
-        const float* mip0 = parameters.wavetable.samples.data(); // mip 0 is first
-        for (std::size_t f = 0; f < kHQWavetableFrames; ++f) {
-            const float srcPos = static_cast<float>(f) / static_cast<float>(kHQWavetableFrames - 1) *
-                                 static_cast<float>(srcFrames - 1);
-            const std::size_t f0 = static_cast<std::size_t>(srcPos);
-            const std::size_t f1 = std::min(f0 + 1, srcFrames - 1);
-            const float frac = srcPos - static_cast<float>(f0);
-            float* frame = wavetableCookScratch_.data() + f * kHQWavetableSamples;
-            for (std::size_t i = 0; i < kHQWavetableSamples; ++i) {
-                // Resample from 128 to 512 samples.
-                const float srcSamplePos = static_cast<float>(i) / static_cast<float>(kHQWavetableSamples - 1) *
-                                           static_cast<float>(kWavetableSampleCount - 1);
-                const std::size_t s0 = static_cast<std::size_t>(srcSamplePos);
-                const std::size_t s1 = std::min(s0 + 1, kWavetableSampleCount - 1);
-                const float sFrac = srcSamplePos - static_cast<float>(s0);
-                const float a0 = mip0[f0 * kWavetableSampleCount + s0];
-                const float a1 = mip0[f0 * kWavetableSampleCount + s1];
-                const float b0 = mip0[f1 * kWavetableSampleCount + s0];
-                const float b1 = mip0[f1 * kWavetableSampleCount + s1];
-                const float a = a0 + (a1 - a0) * sFrac;
-                const float b = b0 + (b1 - b0) * sFrac;
-                frame[i] = a + (b - a) * frac;
-            }
-        }
-        cook_wavetable_inplace(hqWavetable, "Preset", wavetableCookScratch_.data(),
-                               kHQWavetableFrames, wavetableCookSpectrum_,
-                               wavetableCookFiltered_, wavetableCookFrame_);
-        cookedWavetableHash_ = hash;
+        if (activeWavetables_->a && hash == activeWavetables_->hashA) hqWavetable_ = activeWavetables_->a.get();
+        else if (activeWavetables_->b && hash == activeWavetables_->hashB) hqWavetable_ = activeWavetables_->b.get();
+    }
+
+    // Render thread: swap in the newest cooked set published by the UI thread.
+    // The previous set is handed back through retiredWavetables_ (freed on the
+    // UI thread); a new set is only taken once that slot has been reclaimed.
+    void adopt_pending_wavetables() noexcept {
+        if (retiredWavetables_.load(std::memory_order_acquire) != nullptr) return;
+        CookedWavetableSet* next = pendingWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        if (next == nullptr) return;
+        CookedWavetableSet* previous = activeWavetables_;
+        activeWavetables_ = next;
+        select_cooked_wavetable();
+        if (previous != nullptr) retiredWavetables_.store(previous, std::memory_order_release);
+    }
+
+    // UI thread (serialized by wavetableCookMutex_): cooked table for this
+    // content, from a small hash-keyed cache or freshly cooked with the FFT.
+    std::shared_ptr<const CookedWavetable> cooked_wavetable_for(const RealtimeWavetable& wt, std::uint64_t hash) {
+        ++wavetableCookClock_;
+        for (auto& entry : wavetableCookCache_)
+            if (entry.table && entry.hash == hash) { entry.lastUse = wavetableCookClock_; return entry.table; }
+        resample_preset_wavetable(wt, wavetableCookScratch_);
+        auto table = std::make_shared<CookedWavetable>();
+        cook_wavetable_inplace(*table, "Preset", wavetableCookScratch_.data(), kHQWavetableFrames,
+                               wavetableCookSpectrum_, wavetableCookFiltered_, wavetableCookFrame_);
+        table->contentHash = hash;
         wavetableCookCount_.fetch_add(1U, std::memory_order_relaxed);
+        auto* slot = &wavetableCookCache_[0];
+        for (auto& entry : wavetableCookCache_) if (!entry.table || entry.lastUse < slot->lastUse) slot = &entry;
+        *slot = {hash, table, wavetableCookClock_};
+        return table;
+    }
+
+    // UI thread: cook (if needed) and publish the tables for a preset update.
+    // Returns quickly when the content is unchanged (hash compare only).
+    void publish_wavetables(const RealtimeWavetable& base, const RealtimeWavetable* morphB) {
+        std::lock_guard<std::mutex> lock(wavetableCookMutex_);
+        delete retiredWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        const bool cookA = wavetable_cookable(base);
+        const bool cookB = morphB != nullptr && wavetable_cookable(*morphB);
+        const std::uint64_t hashA = cookA ? wavetable_content_hash(base) : publishedHashA_;
+        const std::uint64_t hashB = cookB ? wavetable_content_hash(*morphB) : 0U;
+        if (publishedValid_ && hashA == publishedHashA_ && hashB == publishedHashB_) return;
+        auto* set = new CookedWavetableSet{};
+        if (cookA) { set->a = cooked_wavetable_for(base, hashA); set->hashA = hashA; }
+        else if (publishedA_) { set->a = publishedA_; set->hashA = publishedHashA_; }
+        if (cookB) { set->b = hashB == hashA ? set->a : cooked_wavetable_for(*morphB, hashB); set->hashB = hashB; }
+        publishedA_ = set->a;
+        publishedHashA_ = set->hashA;
+        publishedHashB_ = set->hashB;
+        publishedValid_ = true;
+        delete pendingWavetables_.exchange(set, std::memory_order_acq_rel);  // unconsumed older set
+    }
+
+    void release_wavetables() noexcept {
+        delete pendingWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        delete retiredWavetables_.exchange(nullptr, std::memory_order_acq_rel);
+        delete activeWavetables_;
+        activeWavetables_ = nullptr;
+        hqWavetable_ = &hqEmptyWavetable_;
     }
 
     void adopt_preset(const PresetUpdate& update, float morphAmount, bool morphEnabled) noexcept {
@@ -3284,11 +3449,17 @@ struct Synthesizer::Impl {
         // Sequencer/conductor configs were applied from the UI thread (data
         // race vs advance_sequencer()/conductor.process()); they are now
         // applied here on the render thread.
-        if (update.sequencerChanged) sequencer.apply_config(update.sequencer);
+        // Compare against the last preset-applied config rather than trusting
+        // the producer's flag alone: the latest-wins mailbox may coalesce an
+        // update that carried the change with a later one that did not.
+        if (update.sequencerChanged || !(update.sequencer == presetSequencerConfig_)) {
+            sequencer.apply_config(update.sequencer);
+            presetSequencerConfig_ = update.sequencer;
+        }
         conductor.configure(update.attractorEnabled, update.attractor);
         parameters = update.base;
         appliedMorphAmount_ = -1.0F;  // force re-application below
-        cook_wavetable_if_changed();
+        select_cooked_wavetable();
         apply_morph_amount(morphAmount, morphEnabled);
         macroValues = parameters.macroValues;
         gameClockTempo.store(parameters.arpeggiator.externalTempoBpm, std::memory_order_relaxed);
@@ -3668,10 +3839,10 @@ struct Synthesizer::Impl {
 
     float wavetable_sample(float phase, float position, float increment) const noexcept {
         // Phase 1: use the HQ wavetable engine if cooked, else fall back to legacy.
-        if (hqWavetable.valid()) {
+        if (hqWavetable_ != nullptr && hqWavetable_->valid()) {
             const float frequency = increment * sampleRate;
             const std::size_t mip = wavetable_mip_for_frequency(frequency, sampleRate);
-            return sample_wavetable(hqWavetable, phase, position, mip);
+            return sample_wavetable(*hqWavetable_, phase, position, mip);
         }
         if (!parameters.wavetable.enabled || parameters.wavetable.frameCount == 0U) return fast_sin_phase(phase);
         const std::size_t frameCount = std::clamp<std::size_t>(parameters.wavetable.frameCount, 1U, kWavetableFrameCount);
@@ -3949,7 +4120,6 @@ struct Synthesizer::Impl {
             profilerVoicesRetired.fetch_add(1U, std::memory_order_relaxed);
             return {};
         }
-
         std::array<float, kSynthLfoCount> lfoValues{};
         for (std::size_t i = 0; i < lfoValues.size(); ++i) lfoValues[i] = advance_lfo(v, i);
         const ModulationValues mod = evaluate_modulation(v, amp, filterEnv, lfoValues);
@@ -3991,19 +4161,55 @@ struct Synthesizer::Impl {
             const std::uint32_t hash = static_cast<std::uint32_t>(v.age) * 0x9E3779B9U ^
                                        static_cast<std::uint32_t>(i + 1U) * 0x85EBCA6BU;
             const float staticDrift = (static_cast<float>(hash & 0xFFFFU) / 32767.5F - 1.0F) * 0.65F;
-            const float driftCents = parameters.tuning.analogDriftCents * (staticDrift + slowDrift);
-            const float additionalSemitones = parameters.tuning.transposeSemitones +
-                         (parameters.tuning.fineCents + driftCents) * 0.01F + osc.semitones +
+            // Perf: split semitones into a cacheable base (constant while pitch
+            // bend / modulation are idle) and the tiny slow-drift term.
+            const float baseSemitones = parameters.tuning.transposeSemitones +
+                         parameters.tuning.fineCents * 0.01F +
+                         parameters.tuning.analogDriftCents * staticDrift * 0.01F + osc.semitones +
                          osc.cents * 0.01F + bendSemitones + legacyModulation + mod.globalPitch + mod.pitch[i];
+            const float driftSemitones = parameters.tuning.analogDriftCents * slowDrift * 0.01F;
+            const float additionalSemitones = baseSemitones + driftSemitones;
             float note = static_cast<float>(v.note) + additionalSemitones;
             const float fmSource = source_sample(osc.frequencyModSource);
             if (osc.frequencyModMode == FrequencyModulationMode::Exponential)
                 note += fmSource * clampf(osc.frequencyModAmount, -4.0F, 4.0F) * 24.0F;
-            float frequency = tuned_frequency(v.note, note - static_cast<float>(v.note));
-            if (osc.frequencyModMode == FrequencyModulationMode::Linear)
-                frequency += fmSource * frequency * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
-            frequency = clampf(frequency, 0.1F, sampleRate * 0.45F);
-            const float increment = frequency / sampleRate;
+            float increment;
+            const bool useFreqCache = !parameters.microtuning.enabled &&
+                                      osc.frequencyModMode != FrequencyModulationMode::Exponential;
+            if (useFreqCache) {
+                if (v.freqCacheNote != v.note ||
+                    v.freqCacheRefHertz != parameters.tuning.referenceHertz ||
+                    v.freqCacheSemitones[i] != baseSemitones) {
+                    // Cache the clamped increment: saves a division per sample.
+                    const float clamped = clampf(tuned_frequency(v.note, baseSemitones),
+                                                 0.1F, sampleRate * 0.45F);
+                    v.freqCache[i] = clamped / sampleRate;
+                    v.freqCacheSemitones[i] = baseSemitones;
+                    v.freqCacheNote = v.note;
+                    v.freqCacheRefHertz = parameters.tuning.referenceHertz;
+                }
+                increment = v.freqCache[i];
+                // exp2(d/12) ~= 1 + y + y^2/2 with y = d*ln2/12; |d| <= 0.0035
+                // semitones here, so the truncation error is < 1e-12 relative.
+                // (x*1.0 is bit-identical, so skipping when y==0 is safe.)
+                const float y = driftSemitones * 0.057762265F;
+                if (y != 0.0F) increment *= 1.0F + y + y * y * 0.5F;
+                if (osc.frequencyModMode == FrequencyModulationMode::Linear) {
+                    increment *= 1.0F + fmSource * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
+                    // Re-clamp: FM can push a clamped base out of range (rare).
+                    increment = clampf(increment, 0.1F / sampleRate, 0.45F);
+                }
+            } else {
+                float frequency0 = tuned_frequency(v.note, note - static_cast<float>(v.note));
+                if (osc.frequencyModMode == FrequencyModulationMode::Linear)
+                    frequency0 += fmSource * frequency0 * clampf(osc.frequencyModAmount, -2.0F, 2.0F);
+                frequency0 = clampf(frequency0, 0.1F, sampleRate * 0.45F);
+                increment = frequency0 / sampleRate;
+            }
+            // Reconstruct for the Sample/Sampler/Granular/Spectral/Physical
+            // branches below (one multiply; the common analog waveforms use
+            // `increment` directly).
+            const float frequency = increment * sampleRate;
 
             float pulseWidth = osc.pulseWidth + mod.pulseWidth[i];
             if (osc.pwmDepth > 0.0F && (osc.waveform == OscillatorWaveform::Pulse || osc.waveform == OscillatorWaveform::Square)) {
@@ -4108,12 +4314,20 @@ struct Synthesizer::Impl {
                 if (divergence > 0.001F) {
                     // Phase 1: true stereo divergence — render L/R with slight
                     // detune and phase offset for width without chorus.
-                    const float detuneCents = divergence * 8.0F; // up to 8 cents
-                    const float phaseOffset = divergence * 0.02F; // up to 2% phase
-                    const float incL = increment * std::exp2(detuneCents / 1200.0F);
-                    const float incR = increment * std::exp2(-detuneCents / 1200.0F);
+                    // Perf: the detune ratios depend only on the (preset-level)
+                    // divergence, so cache them per voice/osc and recompute
+                    // only on change; per sample this is then 2 multiplies.
+                    if (v.divergenceCached[i] != divergence) {
+                        v.divergenceCached[i] = divergence;
+                        const float detuneCents = divergence * 8.0F; // up to 8 cents
+                        v.divergenceRatioL[i] = std::exp2(detuneCents / 1200.0F);
+                        v.divergenceRatioR[i] = std::exp2(-detuneCents / 1200.0F);
+                        v.divergencePhaseOffset[i] = divergence * 0.02F; // up to 2% phase
+                    }
+                    const float incL = increment * v.divergenceRatioL[i];
+                    const float incR = increment * v.divergenceRatioR[i];
                     float phaseL = v.phases[i];
-                    float phaseR = wrap_phase(v.phases[i] + phaseOffset);
+                    float phaseR = wrap_phase(v.phases[i] + v.divergencePhaseOffset[i]);
                     auto auxL = v.auxiliaryPhases[i];
                     auto auxR = v.auxiliaryPhases[i];
                     std::uint32_t noiseL = v.noiseState[i];
@@ -4867,7 +5081,10 @@ SynthPreset SynthPreset::make_default() {
         OscillatorWaveform::Triangle, OscillatorWaveform::Organ, OscillatorWaveform::Noise, OscillatorWaveform::FoldedSine};
     const std::array<float, kSynthOscillatorCount> semitones{0.0F, 0.0F, -12.0F, -24.0F, 12.0F, 7.0F, 0.0F, 19.0F};
     const std::array<float, kSynthOscillatorCount> cents{-7.0F, 7.0F, 0.0F, 0.0F, 0.0F, -4.0F, 0.0F, 3.0F};
-    const std::array<float, kSynthOscillatorCount> gains{0.20F,0.18F,0.14F,0.08F,0.07F,0.06F,0.018F,0.04F};
+    // Sub-oscillator gains are kept ~15 dB below the fundamental so the
+    // stack voices the played MIDI note as the perceived fundamental
+    // (previously the -12/-24 subs dominated and A4 voiced ~110 Hz).
+    const std::array<float, kSynthOscillatorCount> gains{0.20F,0.18F,0.02F,0.01F,0.07F,0.06F,0.018F,0.04F};
     for (std::size_t i = 0; i < result.oscillators.size(); ++i) {
         auto& osc = result.oscillators[i];
         osc.waveform = waves[i]; osc.semitones = semitones[i]; osc.cents = cents[i]; osc.gain = gains[i];
@@ -5363,6 +5580,125 @@ SynthPreset make_spectral_glass_resynthesis() {
     preset.reverb.mix = 0.30F;
     return preset;
 }
+
+// Release bank: tuned-percussion kick. Sine body two octaves below the played
+// note with a filter-envelope pitch drop (+12 st at the hit, decaying to
+// concert pitch), plus a noise click that only survives while the filter
+// envelope holds the lowpass open.
+SynthPreset make_punch_kick() {
+    auto preset = base_preset("Punch Kick");
+    enable_osc(preset, 0, OscillatorWaveform::Sine, -24.0F, 0.0F, 0.90F);
+    enable_osc(preset, 1, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.45F);
+    preset.ampEnvelope = {0.002F, 0.30F, 0.00F, 0.12F, EnvelopeCurve::Exponential};
+    // The filter doubles as the click shaper: wide open at the attack so the
+    // noise transient cracks through, then closing to leave the sine body.
+    lowpass(preset, 900.0F, 0.10F, 4.0F, 0.002F, 0.055F, 0.00F, 0.10F);
+    auto& slot = preset.modulation[0];
+    slot.enabled = true;
+    slot.source = ModulationSource::FilterEnvelope;
+    slot.destination = ModulationDestination::Osc1Pitch;
+    slot.amount = 0.5F;  // +12 semitones at the envelope peak, decaying to 0
+    slot.polarity = ModulationPolarity::Unipolar;
+    slot.smoothingMilliseconds = 2.0F;
+    return preset;
+}
+
+// Release bank: tuned-percussion snare. Triangle body (~190 Hz at A4) under
+// a broadband noise crack, both decaying together like a real drum.
+SynthPreset make_crack_snare() {
+    auto preset = base_preset("Crack Snare");
+    enable_osc(preset, 0, OscillatorWaveform::Triangle, -14.5F, 0.0F, 0.55F);
+    enable_osc(preset, 1, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.42F);
+    preset.ampEnvelope = {0.001F, 0.16F, 0.00F, 0.06F, EnvelopeCurve::Exponential};
+    lowpass(preset, 6500.0F, 0.05F, 1.5F, 0.001F, 0.09F, 0.00F, 0.05F);
+    return preset;
+}
+
+// Release bank: closed hi-hat. Highpassed noise with a ~60 ms decay.
+SynthPreset make_closed_hat() {
+    auto preset = base_preset("Closed Hat");
+    enable_osc(preset, 0, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.001F, 0.055F, 0.00F, 0.030F, EnvelopeCurve::Exponential};
+    preset.filter.enabled = true;
+    preset.filter.topology = FilterTopology::CleanStateVariable;
+    preset.filter.mode = FilterMode::HighPass;
+    preset.filter.cutoffHertz = 7000.0F;
+    preset.filter.resonance = 0.10F;
+    preset.filter.envelopeAmountOctaves = 0.0F;
+    return preset;
+}
+
+// Release bank: open hi-hat. Same family as Closed Hat, ~400 ms decay.
+SynthPreset make_open_hat() {
+    auto preset = base_preset("Open Hat");
+    enable_osc(preset, 0, OscillatorWaveform::Noise, 0.0F, 0.0F, 0.50F);
+    preset.ampEnvelope = {0.001F, 0.38F, 0.00F, 0.20F, EnvelopeCurve::Exponential};
+    preset.filter.enabled = true;
+    preset.filter.topology = FilterTopology::CleanStateVariable;
+    preset.filter.mode = FilterMode::HighPass;
+    preset.filter.cutoffHertz = 6200.0F;
+    preset.filter.resonance = 0.10F;
+    preset.filter.envelopeAmountOctaves = 0.0F;
+    return preset;
+}
+
+// Release bank texture: the HQ wavetable oscillator with its read position
+// wandered by the Lorenz attractor and the filter cutoff breathed by the
+// spring. Both physics sources are excited by note-on velocity inside the
+// engine; the preset only routes them. The frames stay harmonic, so the
+// played note remains the perceived fundamental while the timbre drifts.
+SynthPreset make_lorenz_wavetable_drift() {
+    auto preset = base_preset("Lorenz Wavetable Drift");
+    enable_osc(preset, 0, OscillatorWaveform::Wavetable, 0.0F, 0.0F, 0.85F);
+    preset.oscillators[0].shape = 0.5F;  // start mid-table; Lorenz sweeps the rest
+    preset.ampEnvelope = {0.60F, 0.40F, 0.85F, 1.50F, EnvelopeCurve::Exponential};
+    lowpass(preset, 3200.0F, 0.12F, 0.0F, 0.40F, 0.60F, 0.60F, 0.80F);
+    auto& slot0 = preset.modulation[0];
+    slot0.enabled = true;
+    slot0.source = ModulationSource::Lorenz;
+    slot0.destination = ModulationDestination::WavetablePosition;
+    slot0.amount = 0.65F;
+    slot0.polarity = ModulationPolarity::Unipolar;  // Lorenz is natively bipolar; pass through
+    slot0.smoothingMilliseconds = 40.0F;
+    auto& slot1 = preset.modulation[1];
+    slot1.enabled = true;
+    slot1.source = ModulationSource::Spring;
+    slot1.destination = ModulationDestination::FilterCutoff;
+    slot1.amount = 0.35F;
+    slot1.polarity = ModulationPolarity::Unipolar;  // spring position is natively bipolar
+    slot1.smoothingMilliseconds = 60.0F;
+    preset.chorus.enabled = true;
+    preset.chorus.mix = 0.20F;
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.75F;
+    preset.reverb.mix = 0.30F;
+    return preset;
+}
+
+// Release bank texture: bowed modal resonator. The continuous sawtooth
+// exciter acts as the bow while the key is held; low damping lets the
+// inharmonic glass partials ring against the fundamental.
+SynthPreset make_bowed_glass() {
+    auto preset = base_preset("Bowed Glass");
+    enable_osc(preset, 0, OscillatorWaveform::ModalResonator, 0.0F, 0.0F, 0.80F);
+    auto& mr = preset.oscillators[0].modalResonator;
+    mr.excitation = ExcitationSource::Oscillator;
+    mr.modeCount = 8;
+    mr.baseFrequency = 0.0F;  // follow the played note
+    mr.damping = 0.35F;
+    mr.inharmonicity = 0.08F;
+    mr.brightness = 0.60F;
+    mr.excitationLevel = 0.80F;
+    constexpr float kRatios[8] = {1.00F, 2.76F, 5.40F, 3.98F, 8.93F, 7.21F, 11.34F, 6.12F};
+    constexpr float kGains[8] = {1.00F, 0.32F, 0.20F, 0.26F, 0.13F, 0.16F, 0.09F, 0.18F};
+    constexpr float kDecays[8] = {3.20F, 2.60F, 2.10F, 2.40F, 1.80F, 2.00F, 1.60F, 2.20F};
+    for (int i = 0; i < 8; ++i) mr.modes[i] = ModalResonatorMode{kRatios[i], kDecays[i], kGains[i]};
+    preset.ampEnvelope = {0.40F, 0.30F, 0.85F, 1.20F, EnvelopeCurve::Exponential};
+    preset.reverb.enabled = true;
+    preset.reverb.roomSize = 0.80F;
+    preset.reverb.mix = 0.32F;
+    return preset;
+}
 } // namespace
 
 std::vector<SynthPreset> SynthPreset::builtin_presets() {
@@ -5384,6 +5720,12 @@ std::vector<SynthPreset> SynthPreset::builtin_presets() {
         make_generative_attractor_pad(),
         make_granular_cloud_drift(),
         make_spectral_glass_resynthesis(),
+        make_punch_kick(),
+        make_crack_snare(),
+        make_closed_hat(),
+        make_open_hat(),
+        make_lorenz_wavetable_drift(),
+        make_bowed_glass(),
     };
 }
 
@@ -6178,7 +6520,12 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "filter.formant.gain1") parsed = readFloat(result.filter.formant.gains[1]);
         else if (key == "filter.formant.gain2") parsed = readFloat(result.filter.formant.gains[2]);
         else if (key == "filter.formant.gain3") parsed = readFloat(result.filter.formant.gains[3]);
-        else if (key == "chord.enabled") parsed = readBool(result.chord.enabled);
+        else recognized = false;
+
+        // Split the large key dispatch so MSVC does not exceed its nested-block limit.
+        if (!recognized) {
+        recognized = true;
+        if (key == "chord.enabled") parsed = readBool(result.chord.enabled);
         else if (key == "chord.type") { const auto type = parse_chord_type(value); parsed = type.has_value(); if (type) result.chord.type = *type; }
         else if (key == "chord.noteCount") parsed = readUInt(result.chord.noteCount, static_cast<unsigned>(kChordIntervalCount));
         else if (key == "chord.inversion") parsed = readInt8(result.chord.inversion, -7, 7);
@@ -6246,6 +6593,7 @@ std::optional<SynthPreset> SynthPreset::parse(std::string_view text, std::string
         else if (key == "sampler.startOffset") parsed = readFloat(result.sampler.startOffsetSeconds);
         else if (key == "sampler.gain") parsed = readFloat(result.sampler.gain);
         else recognized = false;
+        }
 
         if (!recognized && key.starts_with("micro.offset")) {
             std::size_t index = 0;
@@ -7105,10 +7453,9 @@ std::vector<std::size_t> SynthPresetLibrary::find_by_tag(std::string_view tag) c
 Synthesizer::Synthesizer(std::uint32_t sampleRate)
     : sampleRate_(std::clamp<std::uint32_t>(sampleRate, 8000U, 192000U)), preset_(SynthPreset::make_default()) {
     impl_ = new Impl(sampleRate_, currentFrame_);
-    // Pre-size the wavetable cook scratch on the constructing thread so the
-    // first render-thread cook (inside adopt_preset) performs no allocation.
+    // Wavetables are cooked on the preset-setting thread; pre-size its scratch.
     impl_->wavetableCookScratch_.resize(kHQWavetableFrames * kHQWavetableSamples);
-    impl_->wavetableCookSpectrum_.resize(kHQWavetableSamples);
+    impl_->wavetableCookSpectrum_.resize(2U * kHQWavetableSamples);
     impl_->wavetableCookFiltered_.resize(kHQWavetableSamples);
     impl_->wavetableCookFrame_.resize(kHQWavetableSamples);
     PresetUpdate initial{};
@@ -7117,10 +7464,15 @@ Synthesizer::Synthesizer(std::uint32_t sampleRate)
     initial.sequencerChanged = true;
     initial.attractor = preset_.attractor.config;
     initial.attractorEnabled = preset_.attractor.enabled;
+    impl_->publish_wavetables(initial.base.wavetable, nullptr);
+    impl_->adopt_pending_wavetables();
     impl_->adopt_preset(initial, 0.0F, false);
     impl_->limiterEnvelope = 1.0F;
 }
-Synthesizer::~Synthesizer() { delete impl_; }
+Synthesizer::~Synthesizer() {
+    impl_->release_wavetables();
+    delete impl_;
+}
 
 SynthPreset Synthesizer::preset() const {
     std::lock_guard<std::mutex> lock(presetMutex_);
@@ -7139,10 +7491,13 @@ Synthesizer::take_pending_conductor_config() noexcept {
 void Synthesizer::set_preset(const SynthPreset& preset) {
     std::string error;
     if (!preset.validate(&error)) return;
-    PresetUpdate update{};
     std::shared_ptr<PendingConductorConfig> pendingConductor;
     {
         std::lock_guard<std::mutex> lock(presetMutex_);
+        // Built straight into the mailbox's producer slot (serialized by
+        // presetMutex_); published below once the wavetables are ready.
+        PresetUpdate& update = impl_->presetIn.producer_slot();
+        update = PresetUpdate{};
         // Phase 3: the preset owns the sequencer's authored config. The live
         // sequencer used to be reconfigured here on the UI thread while the
         // audio thread could be inside advance_sequencer(); the config is now
@@ -7175,9 +7530,12 @@ void Synthesizer::set_preset(const SynthPreset& preset) {
         pendingConductor = std::make_shared<PendingConductorConfig>();
         pendingConductor->enabled = preset_.attractor.enabled;
         pendingConductor->config = preset_.attractor.config;
+        // Cook changed wavetables here, on the calling (UI) thread, and publish
+        // them before the preset so render() never cooks. No-op when unchanged.
+        impl_->publish_wavetables(update.base.wavetable, update.hasMorphB ? &update.morphB.wavetable : nullptr);
+        if (impl_->presetIn.publish()) impl_->coalescedPresets.fetch_add(1, std::memory_order_relaxed);
     }
     pendingConductorConfig_.store(std::move(pendingConductor), std::memory_order_release);
-    if (!impl_->presetIn.push(update)) impl_->droppedPresets.fetch_add(1U, std::memory_order_relaxed);
 }
 
 void Synthesizer::set_morph_preset_b(const SynthPreset& presetB) {
@@ -7280,6 +7638,10 @@ std::uint64_t Synthesizer::wavetable_cook_count() const noexcept {
     return impl_->wavetableCookCount_.load(std::memory_order_relaxed);
 }
 
+std::uint64_t Synthesizer::coalesced_preset_count() const noexcept {
+    return impl_->coalescedPresets.load(std::memory_order_relaxed);
+}
+
 void Synthesizer::reset_granular_profiler() noexcept {
     impl_->requestedGrains.store(0U, std::memory_order_relaxed);
     impl_->admittedGrains.store(0U, std::memory_order_relaxed);
@@ -7366,14 +7728,15 @@ void Synthesizer::render(std::span<float> interleavedStereo) noexcept {
 }
 void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     if (output == nullptr || frameCount == 0) return;
+    const DenormalGuard denormalGuard{};
     impl_->adopt_pending_sample_map();
     // Snapshot the audio-thread morph request (the conductor walk below also
     // writes these atomics; the drain sees a consistent snapshot).
     const bool morphRequested = rtMorphEnabled_.load(std::memory_order_relaxed);
     const float morphRequestedAmount = rtMorphAmount_.load(std::memory_order_relaxed);
-    PresetUpdate latest{};
-    while (impl_->presetIn.pop(latest))
-        impl_->adopt_preset(latest, morphRequestedAmount, morphRequested);
+    impl_->adopt_pending_wavetables();
+    if (const PresetUpdate* latest = impl_->presetIn.take())
+        impl_->adopt_preset(*latest, morphRequestedAmount, morphRequested);
     impl_->advance_parameter_smoothing(frameCount);
     impl_->track_tempo_synced_delay();
     // Phase 3: step physics modulation bank.

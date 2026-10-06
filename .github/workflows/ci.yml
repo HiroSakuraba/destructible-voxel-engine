@@ -1,0 +1,299 @@
+name: CI
+
+# Full CTest coverage for the Linux presets, packaging artifacts, and the Windows (MSVC) build,
+# tests and sample game ZIP. The focused-contracts, repository-build and dashr-null-rhi jobs stay in
+# v235-foundations.yml unchanged, so existing branch-protection check names keep working.
+
+on:
+  push:
+    branches: [main, "codex/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Debian trixie matches the development machines: GCC 14 (the dve_player golden framebuffer
+  # hashes are keyed GNU-14-*), packaged SDL3/SDL3_ttf, Lua 5.4.
+  DVE_APT_PACKAGES: >-
+    build-essential cmake ninja-build ccache git python3 pkg-config file xz-utils zstd
+    ca-certificates dpkg-dev
+    libpng-dev libjpeg-dev liblua5.4-dev libsdl3-dev libsdl3-ttf-dev
+    libx11-dev libxext-dev libxft-dev libfreetype-dev libfontconfig-dev
+    libwayland-dev libxkbcommon-dev libasound2-dev libpulse-dev libjack-dev
+    libflac-dev libogg-dev libvorbis-dev libopus-dev
+    ffmpeg glslang-tools xvfb xauth
+  # Headless SDL for every test that does not pick its own driver; X11-only tests get xvfb-run.
+  SDL_VIDEO_DRIVER: offscreen
+  SDL_AUDIO_DRIVER: dummy
+  CCACHE_COMPRESS: "true"
+  CCACHE_MAXSIZE: 2G
+  CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
+
+jobs:
+  ctest:
+    name: ctest (${{ matrix.preset }})
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    # linux-gcc-asan builds and runs the same suite under AddressSanitizer and UBSan, which is
+    # roughly two to three times slower than a plain Release run.
+    timeout-minutes: ${{ matrix.preset == 'linux-gcc-asan' && 300 || 180 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [linux-gcc-release, linux-gcc-lua-release, linux-gcc-player-release, linux-gcc-asan]
+    env:
+      # Only sanitizer builds read these. Any UBSan finding fails its test instead of only being
+      # printed. Leak checking stays off until the suite is leak-clean.
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - name: Install build and test dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DVE_APT_PACKAGES
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Mark workspace safe for git and point ccache at it
+        # github.workspace is the host path in container jobs; use the in-container path.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.cache/ccache" >> "$GITHUB_ENV"
+      - name: Restore ccache and fetched content
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/ccache
+            .cache/fetchcontent/${{ matrix.preset }}
+          key: dve-${{ matrix.preset }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dve-${{ matrix.preset }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-
+            dve-${{ matrix.preset }}-
+      - name: Configure
+        run: >-
+          cmake --preset ${{ matrix.preset }}
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DFETCHCONTENT_BASE_DIR=$GITHUB_WORKSPACE/.cache/fetchcontent/${{ matrix.preset }}
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build out/build/${{ matrix.preset }} --parallel 4
+          ccache --show-stats
+          df -h "$GITHUB_WORKSPACE"
+      - name: Save ccache and fetched content (also when tests fail)
+        if: always() && steps.cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/ccache
+            .cache/fetchcontent/${{ matrix.preset }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: CTest (full suite, nothing excluded)
+        run: >-
+          xvfb-run -a ctest --test-dir out/build/${{ matrix.preset }}
+          --output-on-failure --no-tests=error -j4 --timeout 1800
+          --output-junit ctest-junit.xml
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-${{ matrix.preset }}
+          path: |
+            out/build/${{ matrix.preset }}/ctest-junit.xml
+            out/build/${{ matrix.preset }}/Testing/Temporary/LastTest*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  packaging:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 150
+    env:
+      PRESET: linux-gcc-player-release
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DVE_APT_PACKAGES
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Mark workspace safe for git and point ccache at it
+        # github.workspace is the host path in container jobs; use the in-container path.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.cache/ccache" >> "$GITHUB_ENV"
+      - name: Restore ccache and fetched content (shared with the player ctest leg)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/ccache
+            .cache/fetchcontent/linux-gcc-player-release
+          key: dve-linux-gcc-player-release-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dve-linux-gcc-player-release-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-
+            dve-linux-gcc-player-release-
+      - name: Configure
+        run: >-
+          cmake --preset $PRESET
+          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DFETCHCONTENT_BASE_DIR=$GITHUB_WORKSPACE/.cache/fetchcontent/$PRESET
+      - name: Build
+        run: |
+          ccache --zero-stats
+          cmake --build out/build/$PRESET --parallel 4
+          ccache --show-stats
+      - name: Build the sample game package (tgz, verified)
+        run: cmake --build out/build/$PRESET --target dve_sample_game_package
+      - name: CPack DEB and TGZ
+        run: |
+          cpack --config out/build/$PRESET/CPackConfig.cmake -G "DEB;TGZ" -B out/packages
+          mkdir -p out/artifacts
+          cp out/packages/dve-runtime*.deb out/artifacts/
+          cp out/build/$PRESET/game_packages/*.tar.gz out/artifacts/
+          for deb in out/packages/*.deb; do echo "== $deb"; dpkg-deb -f "$deb"; done
+          ls -l out/packages out/artifacts
+          tar -tzf out/artifacts/*.tar.gz | head -50
+          dpkg-deb -c out/artifacts/dve-runtime*.deb
+      - name: Upload sample game tgz
+        uses: actions/upload-artifact@v4
+        with:
+          name: dve-sample-game-linux-x86_64
+          path: out/artifacts/*.tar.gz
+          if-no-files-found: error
+      - name: Upload runtime deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: dve-runtime-deb
+          path: out/artifacts/*.deb
+          if-no-files-found: error
+
+  windows-msvc:
+    # Windows build of the player preset (MSVC, static SDL 3.4.12, Lua 5.4.9, Jolt 5.6.0;
+    # libpng/libjpeg-turbo from the runner's vcpkg for the tools), the full CTest suite and the
+    # sample game ZIP (docs/PACKAGING.md, "Windows"). Blocking since it was green twice in a row
+    # on PR #41.
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      PRESET: windows-msvc-player-release
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Visual Studio and CMake
+        run: |
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          "$vswhere" -latest -products '*' -format text | grep -E 'displayName|installationVersion|catalog_productLineVersion' || true
+          cmake --version
+          python --version
+          echo "BUILD_DIR=out/build/$PRESET" >> "$GITHUB_ENV"
+          echo "DVE_WORKSPACE=$(cygpath -m "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
+          echo "DVE_VCPKG_ROOT=$(cygpath -m "$VCPKG_INSTALLATION_ROOT")" >> "$GITHUB_ENV"
+      - name: Install libpng/libjpeg-turbo with the runner's vcpkg (classic mode)
+        run: |
+          "$DVE_VCPKG_ROOT/vcpkg" install libpng:x64-windows libjpeg-turbo:x64-windows
+      - name: Restore fetched content (SDL, Jolt, Lua)
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/fetchcontent/${{ env.PRESET }}
+          key: dve-${{ env.PRESET }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            dve-${{ env.PRESET }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-
+            dve-${{ env.PRESET }}-
+      - name: Configure
+        run: |
+          cmake --preset $PRESET \
+            "-DCMAKE_TOOLCHAIN_FILE=$DVE_VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            "-DFETCHCONTENT_BASE_DIR=$DVE_WORKSPACE/.cache/fetchcontent/$PRESET" \
+            2>&1 | tee configure.log
+          exit ${PIPESTATUS[0]}
+      - name: Build
+        run: |
+          cmake --build $BUILD_DIR --config Release --parallel 4 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          grep -E ' error (C|LNK)[0-9]+' build.log | sort | uniq | head -200 > build-errors.txt || true
+          echo "distinct error lines: $(wc -l < build-errors.txt)"
+          head -60 build-errors.txt
+          exit $status
+      - name: Save fetched content
+        if: always() && steps.cache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/fetchcontent/${{ env.PRESET }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: CTest (full suite; skipped tests are listed with their reason)
+        env:
+          SDL_VIDEO_DRIVER: offscreen
+          SDL_AUDIO_DRIVER: dummy
+        run: >-
+          ctest --test-dir $BUILD_DIR -C Release
+          --output-on-failure --no-tests=error -j4 --timeout 1800
+          --output-junit ctest-junit.xml
+      - name: Build the sample game package (zip, verified)
+        run: |
+          cmake --build $BUILD_DIR --config Release --target dve_sample_game_package
+          ls -l $BUILD_DIR/game_packages
+          python -c "import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); [print(f'{i.file_size:>10}  {i.filename}') for i in z.infolist()]" $BUILD_DIR/game_packages/*.zip
+      - name: Upload the sample game zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: dve-sample-game-windows-x86_64
+          path: ${{ env.BUILD_DIR }}/game_packages/*.zip
+          if-no-files-found: error
+      - name: CPack ZIP of the engine (not uploaded)
+        run: |
+          cd $BUILD_DIR
+          cpack -G ZIP -C Release 2>&1 | tail -20
+          ls -l *.zip
+          for z in *.zip; do
+            python -c "import sys, zipfile; n = zipfile.ZipFile(sys.argv[1]).namelist(); print(sys.argv[1], len(n), 'entries'); [print('  ' + x) for x in n if x.lower().endswith(('.exe', '.dll', '.txt')) or '/LICENSE' in x]" "$z"
+            if python -c "import sys, zipfile, re; sys.exit(0 if any(re.search(r'(mpg123|mp3lame)', x, re.I) for x in zipfile.ZipFile(sys.argv[1]).namelist()) else 1)" "$z"; then
+              echo "::error::$z contains an MP3 library"; exit 1
+            fi
+          done
+      - name: Upload Windows logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msvc-logs
+          path: |
+            configure.log
+            build.log
+            build-errors.txt
+            ${{ env.BUILD_DIR }}/ctest-junit.xml
+            ${{ env.BUILD_DIR }}/Testing/Temporary/LastTest*.log
+            ${{ env.BUILD_DIR }}/notices/**/THIRD_PARTY_NOTICES-*.txt
+            ${{ env.BUILD_DIR }}/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  source-manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check SOURCE_MANIFEST.sha256 is fresh
+        run: |
+          sh scripts/update_source_manifest.sh
+          if git diff --quiet -- SOURCE_MANIFEST.sha256; then
+            echo "SOURCE_MANIFEST.sha256 is up to date"
+            exit 0
+          fi
+          git diff --stat -- SOURCE_MANIFEST.sha256
+          echo "::warning file=SOURCE_MANIFEST.sha256::stale; run scripts/update_source_manifest.sh and commit the result"
+          git diff -U0 -- SOURCE_MANIFEST.sha256 | grep -E '^[+-][0-9a-f]{64} ' | sed -E 's/^([+-])[0-9a-f]{64}  /\1 /' | sort -k2 | head -100
+          exit 1

@@ -638,6 +638,111 @@ void GameplayRuntime::fixed_update(float fixedDeltaSeconds) {
     update_triggers();
 }
 
+GameplaySaveState GameplayRuntime::capture_save_state() const {
+    GameplaySaveState state;
+    for (const auto& [pawn, record] : characters_)
+        state.characters.push_back({pawn, record.config, record.state, record.input});
+    std::sort(state.characters.begin(), state.characters.end(),
+              [](const auto& a, const auto& b) { return a.pawn < b.pawn; });
+    for (const auto& [id, player] : players_) { (void)id; state.players.push_back(player); }
+    std::sort(state.players.begin(), state.players.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    for (const auto& [id, record] : triggers_) {
+        GameplaySaveTrigger trigger{id, record.desc, {record.occupants.begin(), record.occupants.end()}, record.fired};
+        std::sort(trigger.occupants.begin(), trigger.occupants.end());
+        state.triggers.push_back(std::move(trigger));
+    }
+    std::sort(state.triggers.begin(), state.triggers.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    for (const auto& [player, recording] : recordings_) state.recordings.push_back({player, recording.replay});
+    std::sort(state.recordings.begin(), state.recordings.end(),
+              [](const auto& a, const auto& b) { return a.player < b.player; });
+    for (const auto& [player, playback] : playbacks_)
+        state.playbacks.push_back({player, playback.replay, static_cast<std::uint64_t>(playback.nextFrame), playback.loop,
+                                   playback.playbackStartTick, playback.replayFirstTick});
+    std::sort(state.playbacks.begin(), state.playbacks.end(),
+              [](const auto& a, const auto& b) { return a.player < b.player; });
+    state.nextPlayerId = nextPlayerId_;
+    state.nextTriggerId = nextTriggerId_;
+    state.fixedTick = fixedTick_;
+    return state;
+}
+
+bool GameplayRuntime::restore_save_state(const GameplaySaveState& state, std::string* error) {
+    const auto fail = [&](std::string message) {
+        if (error) *error = std::move(message);
+        return false;
+    };
+    std::unordered_map<GameObjectId, CharacterRecord> characters;
+    for (const GameplaySaveCharacter& saved : state.characters) {
+        const std::string label = "character " + std::to_string(saved.pawn);
+        if (!world_->has_object(saved.pawn)) return fail(label + " has no pawn object in the world");
+        std::string configError;
+        if (!saved.config.validate(&configError)) return fail(label + ": " + configError);
+        if (!finite(saved.state.velocity) || !finite(saved.state.groundNormal) || !finite(saved.input.move) ||
+            !std::isfinite(saved.state.coyoteRemainingSeconds) || !std::isfinite(saved.state.jumpBufferRemainingSeconds))
+            return fail(label + " has a non-finite state");
+        if (saved.state.stance != CharacterStance::Standing && saved.state.stance != CharacterStance::Crouched)
+            return fail(label + " has an invalid stance");
+        CharacterRecord record;
+        record.config = saved.config;
+        record.state = saved.state;
+        record.state.pawn = saved.pawn;
+        record.input = saved.input;
+        if (!characters.emplace(saved.pawn, std::move(record)).second) return fail(label + " is saved twice");
+    }
+    std::unordered_map<GamePlayerId, GamePlayerState> players;
+    std::unordered_map<GameObjectId, GamePlayerId> controllers;
+    GamePlayerId highestPlayer = 0U;
+    for (const GamePlayerState& saved : state.players) {
+        const std::string label = "player " + std::to_string(saved.id);
+        if (saved.id == kInvalidGamePlayerId || !players.emplace(saved.id, saved).second)
+            return fail(label + " has an invalid or repeated id");
+        if (!finite(saved.input.move)) return fail(label + " has a non-finite input");
+        if (saved.pawn != kInvalidGameObjectId) {
+            if (!characters.contains(saved.pawn)) return fail(label + " possesses a pawn that is not a character");
+            if (!controllers.emplace(saved.pawn, saved.id).second) return fail(label + " possesses an already possessed pawn");
+        }
+        highestPlayer = std::max(highestPlayer, saved.id);
+    }
+    std::unordered_map<GameTriggerId, TriggerRecord> triggers;
+    GameTriggerId highestTrigger = 0U;
+    for (const GameplaySaveTrigger& saved : state.triggers) {
+        const std::string label = "trigger " + std::to_string(saved.id);
+        std::string descError;
+        if (saved.id == kInvalidGameTriggerId) return fail(label + " has an invalid id");
+        if (!saved.desc.validate(&descError)) return fail(label + ": " + descError);
+        TriggerRecord record;
+        record.desc = saved.desc;
+        record.occupants.insert(saved.occupants.begin(), saved.occupants.end());
+        record.fired = saved.fired;
+        if (!triggers.emplace(saved.id, std::move(record)).second) return fail(label + " is saved twice");
+        highestTrigger = std::max(highestTrigger, saved.id);
+    }
+    std::unordered_map<GamePlayerId, RecordingState> recordings;
+    for (const GameplaySaveRecording& saved : state.recordings) {
+        if (!players.contains(saved.player) || !recordings.emplace(saved.player, RecordingState{saved.replay}).second)
+            return fail("recording for an unknown player " + std::to_string(saved.player));
+    }
+    std::unordered_map<GamePlayerId, PlaybackState> playbacks;
+    for (const GameplaySavePlayback& saved : state.playbacks) {
+        if (!players.contains(saved.player) || saved.replay.frames.empty() || saved.nextFrame > saved.replay.frames.size())
+            return fail("invalid playback for player " + std::to_string(saved.player));
+        PlaybackState playback{saved.replay, static_cast<std::size_t>(saved.nextFrame), saved.loop,
+                               saved.playbackStartTick, saved.replayFirstTick};
+        if (!playbacks.emplace(saved.player, std::move(playback)).second)
+            return fail("playback for player " + std::to_string(saved.player) + " is saved twice");
+    }
+    characters_ = std::move(characters);
+    players_ = std::move(players);
+    pawnControllers_ = std::move(controllers);
+    triggers_ = std::move(triggers);
+    recordings_ = std::move(recordings);
+    playbacks_ = std::move(playbacks);
+    nextPlayerId_ = std::max<GamePlayerId>(state.nextPlayerId, highestPlayer + 1U);
+    nextTriggerId_ = std::max<GameTriggerId>(state.nextTriggerId, highestTrigger + 1U);
+    fixedTick_ = state.fixedTick;
+    return true;
+}
+
 std::string GameplayRuntime::serialize_trigger_state() const {
     std::ostringstream output;
     output << "DVE_TRIGGER_STATE 1\n";

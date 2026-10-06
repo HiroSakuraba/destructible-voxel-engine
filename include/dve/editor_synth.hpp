@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -8,7 +9,9 @@
 #include <string>
 #include <string_view>
 
+#include "dve/audio/patch_search_browser.hpp"
 #include "dve/audio/synthesizer.hpp"
+#include "dve/editor_piano_keyboard.hpp"
 #include "dve/editor_viewport.hpp"
 
 namespace dve::editor {
@@ -25,6 +28,8 @@ enum class SynthPanelPage : std::uint8_t {
 };
 inline constexpr std::size_t kSynthPanelPageCount = 8;
 inline constexpr std::size_t kSynthParameterRowCount = 30;
+// Smallest parameter-grid row pitch (row rect = pitch - 3, buttons = pitch - 5).
+inline constexpr int kMinSynthGridRowHeight = 24;
 inline constexpr std::size_t kSynthOscillatorAdvancedPropertyCount = 18;
 inline constexpr std::size_t kSynthSpectralAdvancedRowCount = 14;  // Phase 5: spectral section rows
 inline constexpr std::size_t kSynthArpStepPropertyCount = 18;
@@ -39,6 +44,8 @@ struct SynthPanelLayout {
     UiRect octaveDownButton{};
     UiRect octaveUpButton{};
     UiRect midiThruButton{};
+    UiRect midiInputButton{};  // MIDI input port + status; click cycles Auto / None / ports
+    UiRect searchButton{};  // Phase 6: toggles the patch-search browser panel
     std::array<UiRect, kSynthPanelPageCount> tabButtons{};
 
     std::array<UiRect, audio::kSynthOscillatorCount> oscillatorRows{};
@@ -60,6 +67,10 @@ struct SynthPanelLayout {
     UiRect wavetableNormalizeButton{};
     UiRect wavetableRemoveDcButton{};
     UiRect wavetableAlignButton{};
+    // Narrow panels (< ~920 px): oscillator rows use compact columns and the Gain / Semi /
+    // Cents / PWM labels move to this header line above the rows.
+    bool oscillatorCompact{};
+    UiRect oscillatorHeader{};
 
     std::array<UiRect, kSynthParameterRowCount> parameterRows{};
     std::array<UiRect, kSynthParameterRowCount> parameterDownButtons{};
@@ -79,6 +90,7 @@ struct SynthPanelLayout {
     std::array<UiRect, 13> effectRows{};
     std::array<UiRect, 13> effectToggleButtons{};
     static constexpr std::size_t kSynthEffectParamCount = 6;
+    UiRect effectParamTitle{};  // "<Effect> parameters"
     std::array<UiRect, kSynthEffectParamCount> effectParamRows{};
     std::array<UiRect, kSynthEffectParamCount> effectParamDownButtons{};
     std::array<UiRect, kSynthEffectParamCount> effectParamUpButtons{};
@@ -93,8 +105,23 @@ struct SynthPanelLayout {
     UiRect presetMorphDownButton{};
     UiRect presetMorphUpButton{};
     std::array<UiRect, kSynthPresetVisibleEntryCount> presetEntryButtons{};
+    UiRect presetStatusRow{};
 
-    std::array<UiRect, 24> pianoKeys{};
+    // On-screen piano (see PianoKeyboard for the key rects) and its key-count button.
+    UiRect pianoArea{};
+    UiRect keyboardKeysButton{};
+
+    // Every page (grid pages Filter/Env, Mod Matrix, Perform, Expression, Generative, and
+    // Oscillators, Effects, Presets) scrolls vertically when their rows do not fit above the voice meter.
+    // Rows that are scrolled out of view get empty rects. The track is empty
+    // when the page fits.
+    UiRect gridViewport{};
+    UiRect gridScrollTrack{};
+    UiRect gridScrollThumb{};
+
+    // Voice count + peak meters drawn just above the piano.
+
+    UiRect meterArea{};
 };
 
 class EditorSynthPanel {
@@ -103,7 +130,34 @@ public:
     void set_open(bool open, audio::Synthesizer& synth) noexcept;
     void toggle(audio::Synthesizer& synth) noexcept { set_open(!open_, synth); }
     [[nodiscard]] const SynthPanelLayout& layout() const noexcept { return layout_; }
-    [[nodiscard]] int octave() const noexcept { return octave_; }
+    [[nodiscard]] int octave() const noexcept { return keyboard_.octave(); }
+    [[nodiscard]] const PianoKeyboard& keyboard() const noexcept { return keyboard_; }
+    // Applies a key count (snapped to 25/37/49/61/76/88) and re-lays out the piano.
+    void set_keyboard_key_count(int count) noexcept;
+    // Set when the user clicked the key-count button; the controller persists it.
+    [[nodiscard]] std::optional<int> take_requested_key_count() noexcept {
+        auto request = requestedKeyCount_; requestedKeyCount_.reset(); return request;
+    }
+    // MIDI input button (header): the controller sets the label; clicks request the next port.
+    void set_midi_input_label(std::string label, bool connected) {
+        midiInputLabel_ = std::move(label); midiInputConnected_ = connected;
+    }
+    [[nodiscard]] const std::string& midi_input_label() const noexcept { return midiInputLabel_; }
+    [[nodiscard]] bool midi_input_connected() const noexcept { return midiInputConnected_; }
+    [[nodiscard]] std::optional<int> take_midi_port_cycle_request() noexcept {
+        auto request = midiPortCycleRequest_; midiPortCycleRequest_.reset(); return request;
+    }
+    // Scrolls the piano so a played note is on screen.
+    void follow_note(int midi) noexcept { keyboard_.ensure_visible(midi); }
+    // Grid-page vertical scroll, in lines (grid rows / strips).
+    [[nodiscard]] int grid_scroll() const noexcept { return gridScroll_; }
+    [[nodiscard]] int grid_max_scroll() const noexcept { return gridMaxScroll_; }
+    bool scroll_grid(int lines) noexcept;
+    void set_page(SynthPanelPage page) noexcept;
+    // Oscillators page: the wavetable / sample section (canvas, frames, tools) only adds to the
+    // scroll range while the selected oscillator shows it. Called by the controller each update.
+    void sync_wavetable_section(const audio::Synthesizer& synth);
+    [[nodiscard]] bool wavetable_section_visible() const noexcept { return wavetableSectionVisible_; }
     [[nodiscard]] std::size_t selected_oscillator() const noexcept { return selectedOscillator_; }
     [[nodiscard]] std::size_t selected_arpeggiator_step() const noexcept { return selectedArpeggiatorStep_; }
     [[nodiscard]] std::size_t selected_effect() const noexcept { return selectedEffect_; }
@@ -115,7 +169,20 @@ public:
     [[nodiscard]] float preset_morph_amount() const noexcept { return presetMorphAmount_; }
     [[nodiscard]] std::string_view preset_status() const noexcept { return presetStatus_; }
     [[nodiscard]] const audio::SynthPresetLibrary& preset_library() const noexcept { return presetLibrary_; }
+    [[nodiscard]] PatchSearchBrowserPanel& search_panel() noexcept { return searchPanel_; }
+    [[nodiscard]] const PatchSearchBrowserPanel& search_panel() const noexcept { return searchPanel_; }
     [[nodiscard]] SynthPanelPage page() const noexcept { return page_; }
+    // Wavetable drawing is coalesced: strokes edit a local draft and publish it
+    // to the synth at most once per kWavetableDrawPublishInterval (plus always
+    // on pointer-up / flush), instead of a set_preset (and cook) per mouse move.
+    static constexpr std::chrono::milliseconds kWavetableDrawPublishInterval{33};
+    [[nodiscard]] std::uint64_t wavetable_draw_publish_count() const noexcept { return wavetableDrawPublishes_; }
+    [[nodiscard]] bool wavetable_draw_pending() const noexcept { return wavetableDraftDirty_; }
+    // Publishes a pending wavetable draft now.
+    void flush_wavetable_draft(audio::Synthesizer& synth) noexcept;
+    // Per-UI-update trailing edge: publishes a pending draft once the throttle
+    // interval has elapsed (so a paused-but-held stroke still becomes audible).
+    void flush_wavetable_draft_if_due(audio::Synthesizer& synth) noexcept;
 
     void set_preset_directory(std::filesystem::path directory) noexcept;
     bool refresh_preset_library() noexcept;
@@ -124,11 +191,17 @@ public:
     bool pointer_down(int x, int y, audio::Synthesizer& synth) noexcept;
     bool pointer_move(int x, int y, audio::Synthesizer& synth) noexcept;
     bool pointer_up(int x, int y, audio::Synthesizer& synth) noexcept;
+    // Mouse wheel: scrolls the piano or the grid page under the pointer.
+    bool pointer_wheel(float steps, int x, int y) noexcept;
     bool key_down(std::string_view key, audio::Synthesizer& synth) noexcept;
     bool key_up(std::string_view key, audio::Synthesizer& synth) noexcept;
 
 private:
-    static int keyboard_note(std::string_view key, int octave) noexcept;
+    // Computer-keyboard note for key ("z" = computer_key_base()), or -1.
+    static int keyboard_note(std::string_view key, int base) noexcept;
+    static int keyboard_key_index(std::string_view key) noexcept;
+    bool grid_scrollbar_press(int x, int y) noexcept;
+    void layout_scrolling_pages(int left, int top, int contentWidth, int contentLimit, int requestedScroll) noexcept;
     void release_panel_notes(audio::Synthesizer& synth) noexcept;
     void cycle_waveform(std::size_t oscillator, int direction, audio::Synthesizer& synth) noexcept;
     void toggle_effect(std::size_t index, audio::Synthesizer& synth) noexcept;
@@ -147,7 +220,14 @@ private:
 
     SynthPanelLayout layout_{};
     bool open_{};
-    int octave_{4};
+    PianoKeyboard keyboard_{};
+    std::optional<int> requestedKeyCount_{};
+    std::optional<int> midiPortCycleRequest_{};
+    std::string midiInputLabel_{"MIDI IN: n/a"};
+    bool midiInputConnected_{};
+    int gridScroll_{0};
+    bool wavetableSectionVisible_{};
+    int gridMaxScroll_{0};
     std::size_t selectedOscillator_{};
     std::size_t selectedArpeggiatorStep_{};
     std::size_t selectedEffect_{};
@@ -159,9 +239,15 @@ private:
     bool wavetableDrawing_{};
     int wavetableLastSample_{-1};
     float wavetableLastValue_{};
+    std::optional<audio::SynthPreset> wavetableDraft_{};
+    bool wavetableDraftDirty_{};
+    std::chrono::steady_clock::time_point wavetableLastPublish_{};
+    std::uint64_t wavetableDrawPublishes_{};
     SynthPanelPage page_{SynthPanelPage::Oscillators};
     int pointerNote_{-1};
     std::array<bool, 128> keyboardNotes_{};
+    std::array<int, 20> computerKeyNotes_{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                                          -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 
     std::filesystem::path presetDirectory_{"assets/audio/presets"};
     audio::SynthPresetLibrary presetLibrary_{};
@@ -169,6 +255,10 @@ private:
     std::optional<audio::SynthPreset> compareA_{};
     std::optional<audio::SynthPreset> compareB_{};
     float presetMorphAmount_{0.5F};
+    PatchSearchBrowserPanel searchPanel_;  // Phase 6: candidate browser overlay
+    int lastWidth_{1280};
+    int lastHeight_{800};
+    float lastUiScale_{1.0F};
 };
 
 } // namespace dve::editor

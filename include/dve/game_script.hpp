@@ -3,8 +3,13 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "dve/game_ui.hpp"
 #include "dve/game_world.hpp"
@@ -12,6 +17,8 @@
 #include "dve/render_environment.hpp"
 
 namespace dve {
+
+class ContentSource;
 
 // Embeds Lua 5.4 and binds a `world` table to the given GameWorld's operations: object
 // lookup/spawn/destroy, transform get/set, impulse/force, damage, raycast, timers, and the
@@ -82,6 +89,19 @@ namespace dve {
 //   world.get_axis(name) -> number / world.set_axis(name, number)
 //   world.log(message)
 //
+//   -- Save games (dve/game_save.hpp, docs/SAVE_GAMES.md)
+//   world.on_save([key,] function() return value end)   -- key defaults to "main"
+//   world.on_load([key,] function(value) ... end)       -- called after the world is restored
+//     `value` may be nil, a boolean, number, string or a table of those (nested up to 32
+//     levels; keys are strings, numbers or booleans). Functions, userdata, threads and cycles
+//     are rejected when saving. The table a load handler receives is a fresh copy.
+//   world.save_game([slot]) -> true or nil,errorString   (default slot "quicksave")
+//   world.load_game([slot]) -> true or nil,errorString
+//   world.save_exists([slot]) -> bool
+//     save_game/load_game only queue the request; the host (dve_player) performs it after the
+//     current fixed step. A load replaces the whole Lua state, so code after load_game in the
+//     same callback still runs against the old world.
+//
 //   -- Master materials (see master_material.hpp for the full design rationale: this engine
 //   -- has one shading model per voxel, not a per-material shader graph, so parameters reach
 //   -- VoxelMaterialDefinition through a small reserved-name set, not arbitrary graph wiring)
@@ -120,7 +140,7 @@ namespace dve {
 //   world.set_environment_vector(name, x, y, z) -> bool (or false, errorString)
 //     names: SunDirection, SunColor, SkyColor, GroundColor, GlobalTint
 //   world.set_environment_tonemap_operator("aces" | "reinhard" | "clamp") -> bool (or false, errorString)
-//   world.set_environment_gi_mode("off" | "ambient" | "voxel_one_bounce") -> bool
+//   world.set_environment_gi_mode("off" | "ambient" | "voxel_one_bounce" | "radiance_cascades") -> bool
 //   world.set_environment_shadow_mode("off" | "hard" | "soft" | "contact" | "hybrid") -> bool
 //   world.get_environment() -> table snapshot of every current environment value
 //
@@ -146,9 +166,14 @@ namespace dve {
 // listeners with the world (on_tick etc.) that dispatch into whatever Lua functions scripts
 // have registered via world.on_tick(fn) and friends, so a GameScriptHost must outlive any
 // script code it has run that registered such a listener.
+enum class ScriptSaveRequest : std::uint8_t { Save, Load, Exists };
+
 class GameScriptHost {
 public:
     using LogSink = std::function<void(bool, std::string)>;
+    // Answers world.save_game / load_game / save_exists. Without a handler they return
+    // nil, "saving is not available in this host" (save_exists returns false).
+    using SaveRequestHandler = std::function<bool(ScriptSaveRequest, const std::string& slot, std::string* error)>;
     explicit GameScriptHost(GameWorld& world);
     ~GameScriptHost();
     GameScriptHost(const GameScriptHost&) = delete;
@@ -164,6 +189,33 @@ public:
     [[nodiscard]] bool run_file(const std::filesystem::path& path, std::string* error = nullptr);
     void set_log_sink(LogSink sink);
 
+    // Routes script file access through game content (a mounted .dvepak or loose project
+    // folder) instead of the process filesystem. With a source set:
+    //   - `require "a.b"` searches the content paths scripts/a/b.lua, scripts/a/b/init.lua,
+    //     a/b.lua and a/b/init.lua (after package.preload, before Lua's own filesystem
+    //     searchers), so modules load from the pak;
+    //   - world.spawn_asset(path, ...) and world.camera_load_sequence(id, path) read `path`
+    //     as a content path;
+    //   - run_content_file(path) runs a script stored in the content.
+    // The source must outlive this host (or be cleared with nullptr first). nullptr restores
+    // the default filesystem behaviour.
+    void set_content_source(const ContentSource* content);
+    [[nodiscard]] const ContentSource* content_source() const noexcept;
+    [[nodiscard]] bool run_content_file(std::string_view contentPath, std::string* error = nullptr);
+
+    // Script half of a save game: every world.set_global / set_global_vector value and the
+    // value each world.on_save handler returns, in a small versioned binary blob that
+    // GameSaveData::scriptState carries. Fails (and names the key and table path) when a
+    // handler raises or returns something that cannot be saved.
+    [[nodiscard]] std::optional<std::vector<std::byte>> save_state(std::string* error = nullptr) const;
+    // Restores the globals, then calls every world.on_load handler whose key has saved data.
+    // Handler errors are reported through the log sink and do not fail the load; a malformed
+    // blob does (nothing is changed then).
+    [[nodiscard]] bool load_state(std::span<const std::byte> bytes, std::string* error = nullptr);
+    [[nodiscard]] std::size_t save_handler_count() const noexcept;
+    [[nodiscard]] std::size_t load_handler_count() const noexcept;
+    void set_save_request_handler(SaveRequestHandler handler);
+
     // Number of Lua functions currently registered via world.on_tick/on_damage/on_destroyed.
     // Exposed mainly for tests to confirm registration actually happened.
     [[nodiscard]] std::size_t tick_listener_count() const noexcept;
@@ -173,7 +225,7 @@ public:
     // A small persistent key/value store scripts can read and write via world.set_global(key,
     // value) / world.get_global(key), and embedding C++ code can read via this accessor
     // (mainly useful for tests and for a host application polling script-side state without
-    // its own dedicated binding for it). Numbers only, not a general save-game system.
+    // its own dedicated binding for it). Numbers only; save games store them (see save_state).
     [[nodiscard]] std::optional<double> global_number(const std::string& key) const;
     [[nodiscard]] std::optional<Float4> global_vector(const std::string& key) const;
 

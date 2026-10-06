@@ -1,0 +1,8 @@
+DVE_GAME_SETTINGS=2
+width=960
+height=540
+frameRateLimit=60
+fieldOfViewDegrees=60
+renderScale=1
+masterVolume=0.8
+displayMode=windowed

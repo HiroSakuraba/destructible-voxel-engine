@@ -176,7 +176,7 @@ std::vector<MaterialFeatureCapability> material_editor_capabilities() {
         {MaterialAuthoringFeature::TextureGenerationCheckedResidency,true,true,false,false,false,false,false,
          "TextureResidencyManager provides mip generation, bounded uploads, LRU eviction, hot reload, and generation-checked references; pass-wide migration remains pending."},
         {MaterialAuthoringFeature::VertexDisplacement,true,true,false,false,false,true,true,
-         "Deterministic offline subdivision and CPU normal-direction displacement support visual-only or collision-affecting polygon outputs; voxel surfaces remain visual-only without revoxelization."},
+         "Deterministic offline subdivision and CPU normal-direction displacement support visual-only or collision-affecting polygon outputs. Optional quintic-smoothed procedural noise carries an analytic gradient into normals and tangents; voxel surfaces remain visual-only without revoxelization."},
         {MaterialAuthoringFeature::ProjectedDecals,true,true,false,false,true,false,false,
          "Geometry-agnostic projected decals and a deterministic clustered CPU index support polygon and voxel-derived surface evaluators."},
         {MaterialAuthoringFeature::DestructionInteriorMaterials,true,true,false,false,false,false,false,

@@ -48,6 +48,7 @@ audio::FilterOversampling cycle_oversampling(audio::FilterOversampling value, in
 void EditorSynthPanel::set_open(bool openValue, audio::Synthesizer& synth) noexcept {
     if (open_ && !openValue) release_panel_notes(synth);
     open_ = openValue;
+    if (!openValue) searchPanel_.set_open(false);
 }
 
 void EditorSynthPanel::set_preset_directory(std::filesystem::path directory) noexcept {
@@ -77,19 +78,49 @@ bool EditorSynthPanel::refresh_preset_library() noexcept {
 }
 
 void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
+    lastWidth_ = width; lastHeight_ = height; lastUiScale_ = uiScale;
+    const int requestedScroll = gridScroll_;
     const int panelWidth = std::min(width - 24, std::max(940, static_cast<int>(1240.0F * uiScale)));
     const int panelHeight = std::min(height - 44, std::max(640, static_cast<int>(790.0F * uiScale)));
     layout_.panel = {(width - panelWidth) / 2, std::max(22, (height - panelHeight) / 2), panelWidth, panelHeight};
     layout_.titleBar = {layout_.panel.x, layout_.panel.y, panelWidth, 34};
     layout_.closeButton = {layout_.panel.x + panelWidth - 32, layout_.panel.y + 5, 24, 24};
     layout_.panicButton = {layout_.panel.x + panelWidth - 154, layout_.panel.y + 5, 108, 24};
-    layout_.resetButton = {layout_.panel.x + 12, layout_.panel.y + 43, 92, 24};
-    layout_.octaveDownButton = {layout_.panel.x + 116, layout_.panel.y + 43, 30, 24};
-    layout_.octaveUpButton = {layout_.panel.x + 184, layout_.panel.y + 43, 30, 24};
-    layout_.midiThruButton = {layout_.panel.x + 228, layout_.panel.y + 43, 106, 24};
+    // Header row: wide enough for "Reset preset" and "Oct N" without eliding at 100 %.
+    // Narrow panels (< 900 px, e.g. the 640x480 minimum) use a compact header so the
+    // eight page tabs keep room for their short names.
+    const bool compactHeader = panelWidth < 900;
+    const int headerY = layout_.panel.y + 43;
+    if (compactHeader) {
+        layout_.resetButton = {layout_.panel.x + 12, headerY, 58, 24};
+        layout_.octaveDownButton = {layout_.panel.x + 76, headerY, 24, 24};
+        layout_.octaveUpButton = {layout_.panel.x + 146, headerY, 24, 24};
+        layout_.midiThruButton = {layout_.panel.x + 176, headerY, 84, 24};
+        // No room in the header row: the MIDI input button moves to the title bar.
+        const int searchX = layout_.panel.x + panelWidth - 266;
+        const int inputWidth = std::clamp(panelWidth / 4, 110, 150);
+        layout_.midiInputButton = {searchX - 6 - inputWidth, layout_.panel.y + 5, inputWidth, 24};
+    } else {
+        layout_.resetButton = {layout_.panel.x + 12, headerY, 100, 24};
+        layout_.octaveDownButton = {layout_.panel.x + 118, headerY, 30, 24};
+        layout_.octaveUpButton = {layout_.panel.x + 194, headerY, 30, 24};
+        layout_.midiThruButton = {layout_.panel.x + 232, headerY, 102, 24};
+        layout_.midiInputButton = {layout_.panel.x + 340, headerY, 170, 24};
+    }
+    layout_.searchButton = {layout_.panel.x + panelWidth - 266, layout_.panel.y + 5, 104, 24};
+    if (searchPanel_.open()) {
+        const int searchWidth = std::min(layout_.panel.width - 80, 560);
+        const int searchHeight = std::min(layout_.panel.height - 120, 430);
+        searchPanel_.resize(layout_.panel.x + (layout_.panel.width - searchWidth) / 2,
+                            layout_.panel.y + (layout_.panel.height - searchHeight) / 2,
+                            searchWidth, searchHeight);
+    }
 
-    const int tabsLeft = layout_.panel.x + 344;
-    const int tabWidth = std::max(80, (panelWidth - 356) / static_cast<int>(kSynthPanelPageCount));
+    // Tabs share the header row with reset / octave / MIDI thru. On narrow panels they
+    // shrink (short names, elided if needed, full name on hover) instead of running off the panel.
+    const int tabsLeft = compactHeader ? layout_.midiThruButton.x + layout_.midiThruButton.width + 10
+                                       : layout_.midiInputButton.x + layout_.midiInputButton.width + 10;
+    const int tabWidth = std::max(28, (layout_.panel.x + panelWidth - 12 - tabsLeft) / static_cast<int>(kSynthPanelPageCount));
     for (std::size_t i = 0; i < layout_.tabButtons.size(); ++i)
         layout_.tabButtons[i] = {tabsLeft + static_cast<int>(i) * tabWidth,
                                  layout_.panel.y + 43, tabWidth - 4, 24};
@@ -97,132 +128,510 @@ void EditorSynthPanel::resize(int width, int height, float uiScale) noexcept {
     const int left = layout_.panel.x + 12;
     const int top = layout_.panel.y + 82;
     const int contentWidth = panelWidth - 24;
-    constexpr int oscillatorRowHeight = 34;
-    for (std::size_t i = 0; i < layout_.oscillatorRows.size(); ++i) {
-        const int y = top + static_cast<int>(i) * oscillatorRowHeight;
-        layout_.oscillatorRows[i] = {left, y, contentWidth, oscillatorRowHeight - 3};
-        layout_.oscillatorEnableButtons[i] = {left + 4, y + 4, 30, 23};
-        layout_.oscillatorWaveButtons[i] = {left + 88, y + 4, 112, 23};
-        layout_.oscillatorGainDownButtons[i] = {left + 254, y + 4, 24, 23};
-        layout_.oscillatorGainUpButtons[i] = {left + 342, y + 4, 24, 23};
-        layout_.oscillatorTuneDownButtons[i] = {left + 430, y + 4, 24, 23};
-        layout_.oscillatorTuneUpButtons[i] = {left + 506, y + 4, 24, 23};
-        layout_.oscillatorFineDownButtons[i] = {left + 600, y + 4, 24, 23};
-        layout_.oscillatorFineUpButtons[i] = {left + 688, y + 4, 24, 23};
-        layout_.oscillatorPwmDownButtons[i] = {left + 790, y + 4, 24, 23};
-        layout_.oscillatorPwmUpButtons[i] = {left + 886, y + 4, 24, 23};
-    }
-
     constexpr int parameterRowHeight = 29;
-    for (std::size_t i = 0; i < layout_.parameterRows.size(); ++i) {
-        const int column = static_cast<int>(i / 10U);
-        const int row = static_cast<int>(i % 10U);
-        const int columnWidth = (contentWidth - 20) / 3;
-        const int x = left + column * (columnWidth + 10);
-        const int y = top + row * parameterRowHeight;
-        layout_.parameterRows[i] = {x, y, columnWidth, parameterRowHeight - 3};
-        layout_.parameterDownButtons[i] = {x + columnWidth - 116, y + 2, 27, 22};
-        layout_.parameterUpButtons[i] = {x + columnWidth - 31, y + 2, 27, 22};
-        layout_.parameterToggleButtons[i] = {x + columnWidth - 82, y + 2, 78, 22};
+    // The 3x10 parameter grid shares the page with a strip below it (Mod Matrix macros,
+    // Performance arp steps). That strip used to sit at row 8 (top + 8*29 + 14), on top of
+    // grid rows 8-9, and the grid is hit-tested first, so macro clicks edited parameters.
+    // Size the grid so grid + strip fit above the piano, and put the strip after row 9.
+    // Content must end above the voice meter (text top ~panel bottom - 162), not just the
+    // piano. The Performance page is the tallest: grid + arp step buttons + 5 step rows.
+    layout_.meterArea = {left, layout_.panel.y + panelHeight - 164, contentWidth, 44};
+    const int contentLimit = layout_.meterArea.y - 4;
+    constexpr int kGridRows = 10;
+    constexpr int kStripGap = 6;
+    constexpr int kArpStepButtonsPitch = 29;
+    constexpr int kArpStepRowCount = 5;
+    const int gridRowHeight = std::clamp(
+        (contentLimit - top - kStripGap - kArpStepButtonsPitch) / (kGridRows + kArpStepRowCount),
+        kMinSynthGridRowHeight, parameterRowHeight);
+    const int gridButtonHeight = std::min(22, gridRowHeight - 5);
+    const int gridButtonInset = std::max(1, (gridRowHeight - 3 - gridButtonHeight) / 2);
+    const bool gridPage = page_ == SynthPanelPage::FilterEnvelope || page_ == SynthPanelPage::Modulation ||
+                          page_ == SynthPanelPage::Performance || page_ == SynthPanelPage::Expression ||
+                          page_ == SynthPanelPage::Generative;
+    // A grid page is a list of lines: 10 grid rows, then the page's strip (Mod
+    // Matrix macros, or Performance arp step buttons + 5 step rows). When the
+    // lines do not fit between `top` and the voice meter, the page scrolls by
+    // whole lines and lines outside the viewport get empty rects.
+    enum class LineKind : std::uint8_t { GridRow, MacroStrip, ArpButtons, ArpStepRow };
+    struct GridLine { LineKind kind; int row; int pitch; int extent; };
+    std::array<GridLine, 16> lines{};
+    int lineCount = 0;
+    for (int row = 0; row < kGridRows; ++row)
+        lines[static_cast<std::size_t>(lineCount++)] = {LineKind::GridRow, row, gridRowHeight, gridRowHeight - 3};
+    if (page_ == SynthPanelPage::Modulation)
+        lines[static_cast<std::size_t>(lineCount++)] = {LineKind::MacroStrip, 0, kStripGap + 28, kStripGap + 28};
+    if (page_ == SynthPanelPage::Performance) {
+        lines[static_cast<std::size_t>(lineCount++)] = {LineKind::ArpButtons, 0, kStripGap + kArpStepButtonsPitch, kStripGap + 23};
+        for (int row = 0; row < kArpStepRowCount; ++row)
+            lines[static_cast<std::size_t>(lineCount++)] = {LineKind::ArpStepRow, row, gridRowHeight, gridRowHeight - 3};
+    }
+    const int viewportHeight = std::max(0, contentLimit - top);
+    auto span = [&](int first) {  // height of lines [first, lineCount) when laid out from `top`
+        int height = 0;
+        for (int i = first; i < lineCount; ++i)
+            height += i + 1 == lineCount ? lines[static_cast<std::size_t>(i)].extent : lines[static_cast<std::size_t>(i)].pitch;
+        return height;
+    };
+    gridMaxScroll_ = 0;
+    if (gridPage)
+        while (gridMaxScroll_ + 1 < lineCount && span(gridMaxScroll_) > viewportHeight) ++gridMaxScroll_;
+    gridScroll_ = std::clamp(gridScroll_, 0, gridMaxScroll_);
+    const bool gridScrolls = gridPage && gridMaxScroll_ > 0;
+    const int gridWidth = gridScrolls ? contentWidth - 14 : contentWidth;
+    layout_.gridViewport = gridPage ? UiRect{left, top, contentWidth, viewportHeight} : UiRect{};
+    layout_.gridScrollTrack = {};
+    layout_.gridScrollThumb = {};
+    if (gridScrolls) {
+        layout_.gridScrollTrack = {left + contentWidth - 8, top, 8, viewportHeight};
+        int visibleLines = 0;
+        for (int i = gridScroll_, y = 0; i < lineCount; ++i) {
+            const GridLine& line = lines[static_cast<std::size_t>(i)];
+            if (y + line.extent > viewportHeight) break;
+            ++visibleLines;
+            y += line.pitch;
+        }
+        const int thumbHeight = std::clamp(viewportHeight * std::max(1, visibleLines) / std::max(1, lineCount), 16, viewportHeight);
+        layout_.gridScrollThumb = {layout_.gridScrollTrack.x,
+                                   top + (viewportHeight - thumbHeight) * gridScroll_ / std::max(1, gridMaxScroll_),
+                                   8, thumbHeight};
     }
 
-    const int oscillatorAdvancedTop = top + static_cast<int>(audio::kSynthOscillatorCount) * oscillatorRowHeight + 7;
-    for (std::size_t i = 0; i < layout_.oscillatorAdvancedRows.size(); ++i) {
-        const int column = static_cast<int>(i / 6U);
-        const int row = static_cast<int>(i % 6U);
-        const int columnWidth = (contentWidth - 20) / 3; // 3 columns x 6 rows = 18 rows
-        const int x = left + column * (columnWidth + 10);
-        const int y = oscillatorAdvancedTop + row * parameterRowHeight;
-        layout_.oscillatorAdvancedRows[i] = {x, y, columnWidth, parameterRowHeight - 3};
-        layout_.oscillatorAdvancedDownButtons[i] = {x + columnWidth - 116, y + 2, 27, 22};
-        layout_.oscillatorAdvancedUpButtons[i] = {x + columnWidth - 31, y + 2, 27, 22};
-    }
-    layout_.wavetableCanvas = {left, oscillatorAdvancedTop + 6 * parameterRowHeight + 6, contentWidth, 76};
-    const int wtButtonWidth = std::max(44, (contentWidth - 330) / static_cast<int>(audio::kWavetableFrameCount));
-    for (std::size_t i = 0; i < layout_.wavetableFrameButtons.size(); ++i)
-        layout_.wavetableFrameButtons[i] = {left + static_cast<int>(i) * wtButtonWidth,
-                                            layout_.wavetableCanvas.y + layout_.wavetableCanvas.height + 5,
-                                            wtButtonWidth - 3, 23};
-    const int toolsX = left + static_cast<int>(layout_.wavetableFrameButtons.size()) * wtButtonWidth + 8;
-    layout_.wavetableNormalizeButton = {toolsX, layout_.wavetableCanvas.y + layout_.wavetableCanvas.height + 5, 96, 23};
-    layout_.wavetableRemoveDcButton = {toolsX + 102, layout_.wavetableCanvas.y + layout_.wavetableCanvas.height + 5, 82, 23};
-    layout_.wavetableAlignButton = {toolsX + 190, layout_.wavetableCanvas.y + layout_.wavetableCanvas.height + 5, 82, 23};
+    const int columnWidth = (gridWidth - 20) / 3;
+    const int stripColumnWidth = (gridWidth - 30) / 4;
+    auto place_grid_row = [&](int row, int y) {
+        for (int column = 0; column < 3; ++column) {
+            const std::size_t i = static_cast<std::size_t>(column * kGridRows + row);
+            if (i >= layout_.parameterRows.size()) continue;
+            const int x = left + column * (columnWidth + 10);
+            const int by = y + gridButtonInset;
+            layout_.parameterRows[i] = {x, y, columnWidth, gridRowHeight - 3};
+            layout_.parameterDownButtons[i] = {x + columnWidth - 116, by, 27, gridButtonHeight};
+            layout_.parameterUpButtons[i] = {x + columnWidth - 31, by, 27, gridButtonHeight};
+            layout_.parameterToggleButtons[i] = {x + columnWidth - 82, by, 78, gridButtonHeight};
+        }
+    };
+    auto hide_grid_row = [&](int row) {
+        for (int column = 0; column < 3; ++column) {
+            const std::size_t i = static_cast<std::size_t>(column * kGridRows + row);
+            if (i >= layout_.parameterRows.size()) continue;
+            layout_.parameterRows[i] = {}; layout_.parameterDownButtons[i] = {};
+            layout_.parameterUpButtons[i] = {}; layout_.parameterToggleButtons[i] = {};
+        }
+    };
+    auto place_macros = [&](int y) {
+        for (std::size_t i = 0; i < layout_.macroRows.size(); ++i) {
+            const int x = left + static_cast<int>(i) * (stripColumnWidth + 10);
+            layout_.macroRows[i] = {x, y, stripColumnWidth, 28};
+            layout_.macroDownButtons[i] = {x + stripColumnWidth - 102, y + 3, 26, 22};
+            layout_.macroUpButtons[i] = {x + stripColumnWidth - 30, y + 3, 26, 22};
+        }
+    };
+    auto hide_macros = [&] {
+        layout_.macroRows = {}; layout_.macroDownButtons = {}; layout_.macroUpButtons = {};
+    };
+    auto place_arp_buttons = [&](int y) {
+        const int arpStepWidth = std::max(34, gridWidth / static_cast<int>(audio::kArpeggiatorStepCount));
+        for (std::size_t i = 0; i < layout_.arpeggiatorStepButtons.size(); ++i) {
+            const int x = left + static_cast<int>(i) * arpStepWidth;
+            const int right = i + 1U == layout_.arpeggiatorStepButtons.size() ? left + gridWidth : x + arpStepWidth;
+            layout_.arpeggiatorStepButtons[i] = {x, y, std::max(22, right - x - 3), 23};
+        }
+    };
+    auto place_arp_row = [&](int row, int y) {
+        for (int column = 0; column < 4; ++column) {
+            const std::size_t i = static_cast<std::size_t>(column * kArpStepRowCount + row);
+            if (i >= layout_.arpeggiatorStepRows.size()) continue;
+            const int x = left + column * (stripColumnWidth + 10);
+            const int by = y + gridButtonInset;
+            layout_.arpeggiatorStepRows[i] = {x, y, stripColumnWidth, gridRowHeight - 3};
+            layout_.arpeggiatorStepDownButtons[i] = {x + stripColumnWidth - 116, by, 27, gridButtonHeight};
+            layout_.arpeggiatorStepUpButtons[i] = {x + stripColumnWidth - 31, by, 27, gridButtonHeight};
+            layout_.arpeggiatorStepToggleButtons[i] = {x + stripColumnWidth - 82, by, 78, gridButtonHeight};
+        }
+    };
+    auto hide_arp_row = [&](int row) {
+        for (int column = 0; column < 4; ++column) {
+            const std::size_t i = static_cast<std::size_t>(column * kArpStepRowCount + row);
+            if (i >= layout_.arpeggiatorStepRows.size()) continue;
+            layout_.arpeggiatorStepRows[i] = {}; layout_.arpeggiatorStepDownButtons[i] = {};
+            layout_.arpeggiatorStepUpButtons[i] = {}; layout_.arpeggiatorStepToggleButtons[i] = {};
+        }
+    };
 
-    const int macroTop = top + 8 * parameterRowHeight + 14;
-    const int macroWidth = (contentWidth - 30) / 4;
-    for (std::size_t i = 0; i < layout_.macroRows.size(); ++i) {
-        const int x = left + static_cast<int>(i) * (macroWidth + 10);
-        layout_.macroRows[i] = {x, macroTop, macroWidth, 28};
-        layout_.macroDownButtons[i] = {x + macroWidth - 102, macroTop + 3, 26, 22};
-        layout_.macroUpButtons[i] = {x + macroWidth - 30, macroTop + 3, 26, 22};
-    }
-
-    const int arpStepTop = top + 8 * parameterRowHeight + 16;
-    const int arpStepWidth = std::max(34, contentWidth / static_cast<int>(audio::kArpeggiatorStepCount));
-    for (std::size_t i = 0; i < layout_.arpeggiatorStepButtons.size(); ++i) {
-        const int x = left + static_cast<int>(i) * arpStepWidth;
-        const int right = i + 1U == layout_.arpeggiatorStepButtons.size() ? left + contentWidth : x + arpStepWidth;
-        layout_.arpeggiatorStepButtons[i] = {x, arpStepTop, std::max(22, right - x - 3), 23};
-    }
-    for (std::size_t i = 0; i < layout_.arpeggiatorStepRows.size(); ++i) {
-        const int column = static_cast<int>(i / 5U);
-        const int row = static_cast<int>(i % 5U);
-        const int columnWidth = (contentWidth - 30) / 4;
-        const int x = left + column * (columnWidth + 10);
-        const int y = arpStepTop + 32 + row * parameterRowHeight;
-        layout_.arpeggiatorStepRows[i] = {x, y, columnWidth, parameterRowHeight - 3};
-        layout_.arpeggiatorStepDownButtons[i] = {x + columnWidth - 116, y + 2, 27, 22};
-        layout_.arpeggiatorStepUpButtons[i] = {x + columnWidth - 31, y + 2, 27, 22};
-        layout_.arpeggiatorStepToggleButtons[i] = {x + columnWidth - 82, y + 2, 78, 22};
-    }
-
-    for (std::size_t i = 0; i < layout_.effectRows.size(); ++i) {
-        const int column = static_cast<int>(i / 7U);
-        const int row = static_cast<int>(i % 7U);
-        const int columnWidth = (contentWidth - 10) / 2;
-        const int x = left + column * (columnWidth + 10);
-        const int y = top + row * 45;
-        layout_.effectRows[i] = {x, y, columnWidth, 38};
-        layout_.effectToggleButtons[i] = {x + columnWidth - 70, y + 7, 60, 24};
-    }
-    {
-        const int paramTop = top + 7 * 45 + 12;
-        const int paramColumnWidth = (contentWidth - 10) / 2;
-        for (std::size_t i = 0; i < layout_.effectParamRows.size(); ++i) {
-            const int x = left;
-            const int y = paramTop + static_cast<int>(i) * 32;
-            layout_.effectParamRows[i] = {x, y, paramColumnWidth, 29};
-            layout_.effectParamDownButtons[i] = {x + paramColumnWidth - 116, y + 2, 27, 22};
-            layout_.effectParamUpButtons[i] = {x + paramColumnWidth - 31, y + 2, 27, 22};
-            layout_.effectParamToggleButtons[i] = {x + paramColumnWidth - 82, y + 2, 78, 22};
+    if (!gridPage) {
+        // Unscrolled layout: both strips sit below the grid (only one page shows each).
+        for (int row = 0; row < kGridRows; ++row) place_grid_row(row, top + row * gridRowHeight);
+        const int gridBottom = top + kGridRows * gridRowHeight;  // one past the last row's gap
+        place_macros(gridBottom + kStripGap);
+        place_arp_buttons(gridBottom + kStripGap);
+        for (int row = 0; row < kArpStepRowCount; ++row)
+            place_arp_row(row, gridBottom + kStripGap + kArpStepButtonsPitch + row * gridRowHeight);
+    } else {
+        hide_macros();
+        layout_.arpeggiatorStepButtons = {};
+        for (int row = 0; row < kArpStepRowCount; ++row) hide_arp_row(row);
+        int y = top;
+        for (int i = 0; i < lineCount; ++i) {
+            const GridLine& line = lines[static_cast<std::size_t>(i)];
+            const bool visible = i >= gridScroll_ && y + line.extent <= contentLimit;
+            switch (line.kind) {
+                case LineKind::GridRow:
+                    if (visible) place_grid_row(line.row, y); else hide_grid_row(line.row);
+                    break;
+                case LineKind::MacroStrip:
+                    if (visible) place_macros(y + kStripGap);
+                    break;
+                case LineKind::ArpButtons:
+                    if (visible) place_arp_buttons(y + kStripGap);
+                    break;
+                case LineKind::ArpStepRow:
+                    if (visible) place_arp_row(line.row, y);
+                    break;
+            }
+            if (i >= gridScroll_) y += line.pitch;
         }
     }
 
-    layout_.presetScanButton = {left, top, 118, 26};
-    layout_.presetPreviousButton = {left + 128, top, 36, 26};
-    layout_.presetNextButton = {left + 170, top, 36, 26};
-    layout_.presetLoadButton = {left + 214, top, 90, 26};
-    layout_.presetCaptureAButton = {left + 318, top, 90, 26};
-    layout_.presetCaptureBButton = {left + 414, top, 90, 26};
-    layout_.presetMorphDownButton = {left + 520, top, 36, 26};
-    layout_.presetMorphUpButton = {left + 652, top, 36, 26};
-    for (std::size_t i = 0; i < layout_.presetEntryButtons.size(); ++i) {
-        const int column = static_cast<int>(i / 4U);
-        const int row = static_cast<int>(i % 4U);
-        const int columnWidth = (contentWidth - 10) / 2;
-        const int x = left + column * (columnWidth + 10);
-        const int y = top + 274 + row * 34;
-        layout_.presetEntryButtons[i] = {x, y, columnWidth, 29};
-    }
+    layout_scrolling_pages(left, top, contentWidth, contentLimit, requestedScroll);
 
     const int pianoY = layout_.panel.y + panelHeight - 120;
-    const int pianoWidth = panelWidth - 24;
-    const int keyWidth = std::max(16, pianoWidth / 24);
-    for (std::size_t i = 0; i < layout_.pianoKeys.size(); ++i) {
-        const int x = left + static_cast<int>(i) * keyWidth;
-        const int next = i + 1U == layout_.pianoKeys.size() ? left + pianoWidth : x + keyWidth;
-        layout_.pianoKeys[i] = {x, pianoY, next - x, 90};
+    layout_.pianoArea = {left, pianoY, contentWidth, 90};
+    keyboard_.layout(layout_.pianoArea);
+    layout_.keyboardKeysButton = {left + contentWidth - 104, layout_.panel.y + panelHeight - 27, 104, 22};
+}
+
+namespace {
+// One visual line of a scrolling page: its natural (unscrolled) vertical extent and the rects
+// that sit on it. Scrolling moves whole lines; lines outside the viewport get empty rects.
+struct PageLine {
+    int y0{};
+    int y1{};
+    std::array<UiRect*, 24> rects{};
+    std::size_t count{};
+    void add(UiRect& rect) noexcept { if (count < rects.size()) rects[count++] = &rect; }
+};
+struct PageLines {
+    std::array<PageLine, 40> lines{};
+    std::size_t count{};
+    PageLine& next(int y0, int y1) noexcept {
+        PageLine& line = lines[std::min(count, lines.size() - 1U)];
+        if (count < lines.size()) ++count;
+        line = {}; line.y0 = y0; line.y1 = y1;
+        return line;
     }
+};
+} // namespace
+
+void EditorSynthPanel::layout_scrolling_pages(int left, int top, int contentWidth, int contentLimit,
+                                              int requestedScroll) noexcept {
+    // Oscillators, Effects and Presets are laid out for `width`, then (for the current page)
+    // split into lines that scroll like the grid pages when they do not fit above the meter.
+    // Below ~920 px the oscillator rows switch to compact columns (value labels move to a
+    // header line), the advanced rows use two columns and the wavetable tools wrap.
+    std::size_t oscillatorEssentialLines = 0;
+    auto place = [&](int width, PageLines& result) {
+        result.count = 0;
+        PageLines lines;  // lines of the section being laid out; kept only for the current page
+        const SynthPanelPage page = page_;
+        // ---- Oscillators ----
+        const bool compact = width < 916;
+        layout_.oscillatorCompact = compact;
+        int y = top;
+        if (compact) {
+            layout_.oscillatorHeader = {left, y, width, 18};
+            PageLine& line = lines.next(y, y + 18);
+            if (page == SynthPanelPage::Oscillators) line.add(layout_.oscillatorHeader);
+            y += 22;
+        } else {
+            layout_.oscillatorHeader = {};
+        }
+        constexpr int oscillatorRowHeight = 34;
+        const int waveWidth = compact ? std::clamp(width - 88 - 8 - 4 * 96 - 4, 64, 112) : 112;
+        const int groupLeft = left + 88 + waveWidth + 8;
+        const int groupWidth = compact ? std::max(80, (left + width - 4 - groupLeft) / 4) : 0;
+        for (std::size_t i = 0; i < layout_.oscillatorRows.size(); ++i) {
+            const int rowY = y + static_cast<int>(i) * oscillatorRowHeight;
+            layout_.oscillatorRows[i] = {left, rowY, width, oscillatorRowHeight - 3};
+            layout_.oscillatorEnableButtons[i] = {left + 4, rowY + 4, 30, 23};
+            layout_.oscillatorWaveButtons[i] = {left + 88, rowY + 4, waveWidth, 23};
+            std::array<UiRect*, 8> buttons{&layout_.oscillatorGainDownButtons[i], &layout_.oscillatorGainUpButtons[i],
+                                           &layout_.oscillatorTuneDownButtons[i], &layout_.oscillatorTuneUpButtons[i],
+                                           &layout_.oscillatorFineDownButtons[i], &layout_.oscillatorFineUpButtons[i],
+                                           &layout_.oscillatorPwmDownButtons[i], &layout_.oscillatorPwmUpButtons[i]};
+            static constexpr std::array<int, 8> wide{254, 342, 430, 506, 600, 688, 790, 886};
+            for (std::size_t b = 0; b < buttons.size(); ++b) {
+                const int group = static_cast<int>(b / 2U);
+                const int x = compact ? groupLeft + group * groupWidth + ((b & 1U) != 0U ? groupWidth - 30 : 0)
+                                      : left + wide[b];
+                *buttons[b] = {x, rowY + 4, 24, 23};
+            }
+            PageLine& line = lines.next(rowY, rowY + oscillatorRowHeight - 3);
+            if (page == SynthPanelPage::Oscillators) {
+                line.add(layout_.oscillatorRows[i]); line.add(layout_.oscillatorEnableButtons[i]);
+                line.add(layout_.oscillatorWaveButtons[i]);
+                for (UiRect* button : buttons) line.add(*button);
+            }
+        }
+        constexpr int parameterRowHeight = 29;
+        const int advancedTop = y + static_cast<int>(audio::kSynthOscillatorCount) * oscillatorRowHeight + 7;
+        const int columns = width >= 760 ? 3 : 2;
+        const int rowsPerColumn = static_cast<int>((kSynthOscillatorAdvancedPropertyCount + static_cast<std::size_t>(columns) - 1U) /
+                                                   static_cast<std::size_t>(columns));
+        const int advancedColumnWidth = (width - 10 * (columns - 1)) / columns;
+        std::array<PageLine*, kSynthOscillatorAdvancedPropertyCount> advancedLines{};
+        for (int row = 0; row < rowsPerColumn; ++row) {
+            const int rowY = advancedTop + row * parameterRowHeight;
+            advancedLines[static_cast<std::size_t>(row)] = &lines.next(rowY, rowY + parameterRowHeight - 3);
+        }
+        for (std::size_t i = 0; i < layout_.oscillatorAdvancedRows.size(); ++i) {
+            const int column = static_cast<int>(i) / rowsPerColumn;
+            const int row = static_cast<int>(i) % rowsPerColumn;
+            const int x = left + column * (advancedColumnWidth + 10);
+            const int rowY = advancedTop + row * parameterRowHeight;
+            layout_.oscillatorAdvancedRows[i] = {x, rowY, advancedColumnWidth, parameterRowHeight - 3};
+            layout_.oscillatorAdvancedDownButtons[i] = {x + advancedColumnWidth - 116, rowY + 2, 27, 22};
+            layout_.oscillatorAdvancedUpButtons[i] = {x + advancedColumnWidth - 31, rowY + 2, 27, 22};
+            if (page == SynthPanelPage::Oscillators) {
+                PageLine& line = *advancedLines[static_cast<std::size_t>(row)];
+                line.add(layout_.oscillatorAdvancedRows[i]); line.add(layout_.oscillatorAdvancedDownButtons[i]);
+                line.add(layout_.oscillatorAdvancedUpButtons[i]);
+            }
+        }
+        oscillatorEssentialLines = lines.count;  // the wavetable section below is optional
+        const int canvasY = advancedTop + rowsPerColumn * parameterRowHeight + 6;
+        layout_.wavetableCanvas = {left, canvasY, width, 76};
+        {
+            PageLine& line = lines.next(canvasY, canvasY + 76);
+            if (page == SynthPanelPage::Oscillators) line.add(layout_.wavetableCanvas);
+        }
+        const int frames = static_cast<int>(audio::kWavetableFrameCount);
+        int frameWidth = std::max(44, (width - 330) / frames);
+        constexpr int toolsWidth = 272;
+        const bool wrapTools = frames * frameWidth + 8 + toolsWidth > width;
+        if (wrapTools) frameWidth = std::max(30, std::min(60, width / frames));
+        const int framesY = canvasY + 76 + 5;
+        PageLine& frameLine = lines.next(framesY, framesY + 23);
+        for (std::size_t i = 0; i < layout_.wavetableFrameButtons.size(); ++i) {
+            layout_.wavetableFrameButtons[i] = {left + static_cast<int>(i) * frameWidth, framesY, frameWidth - 3, 23};
+            if (page == SynthPanelPage::Oscillators) frameLine.add(layout_.wavetableFrameButtons[i]);
+        }
+        const int toolsX = wrapTools ? left : left + frames * frameWidth + 8;
+        const int toolsY = wrapTools ? framesY + 28 : framesY;
+        layout_.wavetableNormalizeButton = {toolsX, toolsY, 96, 23};
+        layout_.wavetableRemoveDcButton = {toolsX + 102, toolsY, 82, 23};
+        layout_.wavetableAlignButton = {toolsX + 190, toolsY, 82, 23};
+        PageLine& toolsLine = wrapTools ? lines.next(toolsY, toolsY + 23) : frameLine;
+        if (page == SynthPanelPage::Oscillators) {
+            toolsLine.add(layout_.wavetableNormalizeButton); toolsLine.add(layout_.wavetableRemoveDcButton);
+            toolsLine.add(layout_.wavetableAlignButton);
+        }
+        if (page == SynthPanelPage::Oscillators) result = lines;
+        lines.count = 0;
+
+        // ---- Effects ----
+        const int effectColumnWidth = (width - 10) / 2;
+        // Effect rows are 30 px on a 36 px pitch so the list plus the selected effect's
+        // parameters fit a 1280x800 window without scrolling.
+        constexpr int effectPitch = 36;
+        for (int row = 0; row < 7; ++row) {
+            const int rowY = top + row * effectPitch;
+            PageLine& line = lines.next(rowY, rowY + 30);
+            for (int column = 0; column < 2; ++column) {
+                const std::size_t i = static_cast<std::size_t>(column * 7 + row);
+                if (i >= layout_.effectRows.size()) continue;
+                const int x = left + column * (effectColumnWidth + 10);
+                layout_.effectRows[i] = {x, rowY, effectColumnWidth, 30};
+                layout_.effectToggleButtons[i] = {x + effectColumnWidth - 70, rowY + 3, 60, 24};
+                if (page == SynthPanelPage::Effects) { line.add(layout_.effectRows[i]); line.add(layout_.effectToggleButtons[i]); }
+            }
+        }
+        {
+            const int titleY = top + 7 * effectPitch;
+            layout_.effectParamTitle = {left, titleY, effectColumnWidth, 20};
+            PageLine& titleLine = lines.next(titleY, titleY + 20);
+            if (page == SynthPanelPage::Effects) titleLine.add(layout_.effectParamTitle);
+            const int paramTop = titleY + 24;
+            for (std::size_t i = 0; i < layout_.effectParamRows.size(); ++i) {
+                const int rowY = paramTop + static_cast<int>(i) * 32;
+                layout_.effectParamRows[i] = {left, rowY, effectColumnWidth, 29};
+                layout_.effectParamDownButtons[i] = {left + effectColumnWidth - 116, rowY + 2, 27, 22};
+                layout_.effectParamUpButtons[i] = {left + effectColumnWidth - 31, rowY + 2, 27, 22};
+                layout_.effectParamToggleButtons[i] = {left + effectColumnWidth - 82, rowY + 2, 78, 22};
+                PageLine& line = lines.next(rowY, rowY + 29);
+                if (page == SynthPanelPage::Effects) {
+                    line.add(layout_.effectParamRows[i]); line.add(layout_.effectParamDownButtons[i]);
+                    line.add(layout_.effectParamUpButtons[i]); line.add(layout_.effectParamToggleButtons[i]);
+                }
+            }
+        }
+        if (page == SynthPanelPage::Effects) result = lines;
+        lines.count = 0;
+
+        // ---- Presets ----
+        // Toolbar (wraps into two lines below 700 px), 7 MIDI-learn rows, the preset
+        // entries and a status line. (The learn rows used to sit on top of the toolbar.)
+        const bool wrapToolbar = width < 700;
+        y = top;
+        {
+            PageLine& line = lines.next(y, y + 26);
+            layout_.presetScanButton = {left, y, 118, 26};
+            layout_.presetPreviousButton = {left + 128, y, 36, 26};
+            layout_.presetNextButton = {left + 170, y, 36, 26};
+            layout_.presetLoadButton = {left + 214, y, 90, 26};
+            PageLine* second = &line;
+            int x = left + 318;
+            if (wrapToolbar) { y += 32; second = &lines.next(y, y + 26); x = left; }
+            layout_.presetCaptureAButton = {x, y, 90, 26};
+            layout_.presetCaptureBButton = {x + 96, y, 90, 26};
+            layout_.presetMorphDownButton = {x + 202, y, 36, 26};
+            layout_.presetMorphUpButton = {x + 334, y, 36, 26};
+            if (page == SynthPanelPage::Presets) {
+                for (UiRect* rect : {&layout_.presetScanButton, &layout_.presetPreviousButton,
+                                     &layout_.presetNextButton, &layout_.presetLoadButton}) line.add(*rect);
+                for (UiRect* rect : {&layout_.presetCaptureAButton, &layout_.presetCaptureBButton,
+                                     &layout_.presetMorphDownButton, &layout_.presetMorphUpButton}) second->add(*rect);
+            }
+            y += 34;
+        }
+        const int learnWidth = width >= 700 ? (width - 10) / 2 : width;
+        if (page == SynthPanelPage::Presets) {
+            for (std::size_t i = 0; i < kSynthParameterRowCount; ++i) {
+                if (i < 7U) {
+                    const int rowY = y + static_cast<int>(i) * parameterRowHeight;
+                    layout_.parameterRows[i] = {left, rowY, learnWidth, parameterRowHeight - 3};
+                    layout_.parameterDownButtons[i] = {left + learnWidth - 116, rowY + 2, 27, 22};
+                    layout_.parameterUpButtons[i] = {left + learnWidth - 31, rowY + 2, 27, 22};
+                    layout_.parameterToggleButtons[i] = {left + learnWidth - 82, rowY + 2, 78, 22};
+                    PageLine& line = lines.next(rowY, rowY + parameterRowHeight - 3);
+                    line.add(layout_.parameterRows[i]); line.add(layout_.parameterDownButtons[i]);
+                    line.add(layout_.parameterUpButtons[i]); line.add(layout_.parameterToggleButtons[i]);
+                } else {
+                    layout_.parameterRows[i] = {}; layout_.parameterDownButtons[i] = {};
+                    layout_.parameterUpButtons[i] = {}; layout_.parameterToggleButtons[i] = {};
+                }
+            }
+        }
+        y += 7 * parameterRowHeight + 8;
+        const int entryColumnWidth = (width - 10) / 2;
+        for (int row = 0; row < 4; ++row) {
+            const int rowY = y + row * 34;
+            PageLine& line = lines.next(rowY, rowY + 29);
+            for (int column = 0; column < 2; ++column) {
+                const std::size_t i = static_cast<std::size_t>(column * 4 + row);
+                if (i >= layout_.presetEntryButtons.size()) continue;
+                layout_.presetEntryButtons[i] = {left + column * (entryColumnWidth + 10), rowY, entryColumnWidth, 29};
+                if (page == SynthPanelPage::Presets) line.add(layout_.presetEntryButtons[i]);
+            }
+        }
+        y += 4 * 34;
+        layout_.presetStatusRow = {left, y, width, 18};
+        PageLine& statusLine = lines.next(y, y + 18);
+        if (page == SynthPanelPage::Presets) statusLine.add(layout_.presetStatusRow);
+        if (page == SynthPanelPage::Presets) result = lines;
+    };
+
+    const bool scrollingPage = page_ == SynthPanelPage::Oscillators || page_ == SynthPanelPage::Effects ||
+                               page_ == SynthPanelPage::Presets;
+    PageLines lines;
+    place(contentWidth, lines);
+    if (!scrollingPage) return;
+    const int viewportHeight = std::max(0, contentLimit - top);
+    auto max_scroll = [&] {
+        // The wavetable / sample section only counts when the selected oscillator shows it.
+        const std::size_t scrollLines = page_ == SynthPanelPage::Oscillators && !wavetableSectionVisible_
+            ? std::min(lines.count, oscillatorEssentialLines) : lines.count;
+        if (scrollLines == 0) return 0;
+        const int bottom = lines.lines[scrollLines - 1U].y1;
+        int first = 0;
+        while (first + 1 < static_cast<int>(lines.count) &&
+               bottom - lines.lines[static_cast<std::size_t>(first)].y0 > viewportHeight) ++first;
+        return first;
+    };
+    int maxScroll = max_scroll();
+    int width = contentWidth;
+    if (maxScroll > 0) {
+        width = contentWidth - 14;  // room for the scrollbar
+        place(width, lines);
+        maxScroll = max_scroll();
+    }
+    gridMaxScroll_ = maxScroll;
+    gridScroll_ = std::clamp(requestedScroll, 0, gridMaxScroll_);
+    layout_.gridViewport = {left, top, contentWidth, viewportHeight};
+    layout_.gridScrollTrack = {};
+    layout_.gridScrollThumb = {};
+    if (lines.count == 0) return;
+    const int dy = lines.lines[static_cast<std::size_t>(gridScroll_)].y0 - top;
+    int visibleLines = 0;
+    for (std::size_t i = 0; i < lines.count; ++i) {
+        PageLine& line = lines.lines[i];
+        const bool visible = static_cast<int>(i) >= gridScroll_ && line.y1 - dy <= contentLimit;
+        if (visible) ++visibleLines;
+        for (std::size_t r = 0; r < line.count; ++r) {
+            UiRect& rect = *line.rects[r];
+            if (visible) rect.y -= dy;
+            else rect = {};
+        }
+    }
+    if (gridMaxScroll_ > 0) {
+        layout_.gridScrollTrack = {left + contentWidth - 8, top, 8, viewportHeight};
+        const int thumbHeight = std::clamp(viewportHeight * std::max(1, visibleLines) /
+                                           std::max(1, static_cast<int>(lines.count)), 16, viewportHeight);
+        layout_.gridScrollThumb = {layout_.gridScrollTrack.x,
+                                   top + (viewportHeight - thumbHeight) * gridScroll_ / std::max(1, gridMaxScroll_),
+                                   8, thumbHeight};
+    }
+}
+
+void EditorSynthPanel::sync_wavetable_section(const audio::Synthesizer& synth) {
+    if (!open_ || page_ != SynthPanelPage::Oscillators) return;
+    const audio::SynthPreset preset = synth.preset();
+    const auto waveform = preset.oscillators[std::min(selectedOscillator_, preset.oscillators.size() - 1U)].waveform;
+    const bool visible = waveform == audio::OscillatorWaveform::Wavetable ||
+        ((waveform == audio::OscillatorWaveform::Sample || waveform == audio::OscillatorWaveform::Granular) &&
+         preset.sampleBank.enabled && preset.sampleBank.frameCount > 1U);
+    if (visible == wavetableSectionVisible_) return;
+    wavetableSectionVisible_ = visible;
+    resize(lastWidth_, lastHeight_, lastUiScale_);
+}
+
+void EditorSynthPanel::set_keyboard_key_count(int count) noexcept {
+    keyboard_.set_key_count(count);
+    keyboard_.layout(layout_.pianoArea);
+}
+
+void EditorSynthPanel::set_page(SynthPanelPage page) noexcept {
+    if (page_ != page) gridScroll_ = 0;
+    page_ = page;
+    resize(lastWidth_, lastHeight_, lastUiScale_);
+}
+
+bool EditorSynthPanel::scroll_grid(int lines) noexcept {
+    const int before = gridScroll_;
+    gridScroll_ = std::clamp(gridScroll_ + lines, 0, gridMaxScroll_);
+    if (gridScroll_ == before) return false;
+    resize(lastWidth_, lastHeight_, lastUiScale_);
+    return true;
+}
+
+bool EditorSynthPanel::grid_scrollbar_press(int x, int y) noexcept {
+    const UiRect& track = layout_.gridScrollTrack;
+    if (track.width <= 0 || !contains(UiRect{track.x - 3, track.y, track.width + 6, track.height}, x, y)) return false;
+    const UiRect& thumb = layout_.gridScrollThumb;
+    if (y < thumb.y) (void)scroll_grid(-3);
+    else if (y >= thumb.y + thumb.height) (void)scroll_grid(3);
+    return true;
+}
+
+bool EditorSynthPanel::pointer_wheel(float steps, int x, int y) noexcept {
+    if (!open_ || !contains(layout_.panel, x, y)) return false;
+    if (contains(layout_.pianoArea, x, y)) { (void)keyboard_.wheel(steps); return true; }
+    if (contains(layout_.gridViewport, x, y) && gridMaxScroll_ > 0) {
+        const int lines = steps > 0.0F ? -std::max(1, static_cast<int>(steps)) : std::max(1, static_cast<int>(-steps));
+        (void)scroll_grid(lines);
+        return true;
+    }
+    return true;  // the modal panel swallows wheel input
 }
 
 void EditorSynthPanel::release_panel_notes(audio::Synthesizer& synth) noexcept {
@@ -851,7 +1260,8 @@ void EditorSynthPanel::apply_preset_morph(audio::Synthesizer& synth) noexcept {
 
 void EditorSynthPanel::draw_wavetable_point(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!layout_.wavetableCanvas.contains(x, y)) return;
-    auto preset = synth.preset();
+    if (!wavetableDraft_) wavetableDraft_ = synth.preset();
+    auto& preset = *wavetableDraft_;
     preset.wavetable.enabled = true;
     preset.wavetable.frameCount = std::max<std::uint8_t>(preset.wavetable.frameCount,
         static_cast<std::uint8_t>(selectedWavetableFrame_ + 1U));
@@ -876,10 +1286,28 @@ void EditorSynthPanel::draw_wavetable_point(int x, int y, audio::Synthesizer& sy
     } else samples[base + static_cast<std::size_t>(sample)] = value;
     wavetableLastSample_ = sample;
     wavetableLastValue_ = value;
-    synth.set_preset(preset);
+    wavetableDraftDirty_ = true;
+    const auto now = std::chrono::steady_clock::now();
+    if (wavetableDrawPublishes_ == 0U || now - wavetableLastPublish_ >= kWavetableDrawPublishInterval)
+        flush_wavetable_draft(synth);
+}
+
+void EditorSynthPanel::flush_wavetable_draft_if_due(audio::Synthesizer& synth) noexcept {
+    if (wavetableDraftDirty_ &&
+        std::chrono::steady_clock::now() - wavetableLastPublish_ >= kWavetableDrawPublishInterval)
+        flush_wavetable_draft(synth);
+}
+
+void EditorSynthPanel::flush_wavetable_draft(audio::Synthesizer& synth) noexcept {
+    if (!wavetableDraftDirty_ || !wavetableDraft_) return;
+    synth.set_preset(*wavetableDraft_);
+    wavetableDraftDirty_ = false;
+    wavetableLastPublish_ = std::chrono::steady_clock::now();
+    ++wavetableDrawPublishes_;
 }
 
 bool EditorSynthPanel::pointer_move(int x, int y, audio::Synthesizer& synth) noexcept {
+    if (open_ && keyboard_.dragging()) { (void)keyboard_.pointer_drag(x); return true; }
     if (!open_ || !wavetableDrawing_) return false;
     draw_wavetable_point(x, y, synth);
     return true;
@@ -888,22 +1316,45 @@ bool EditorSynthPanel::pointer_move(int x, int y, audio::Synthesizer& synth) noe
 bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!open_ || !contains(layout_.panel, x, y)) return false;
     if (contains(layout_.closeButton, x, y)) { set_open(false, synth); return true; }
+    // Phase 6: the search browser is an overlay — it gets first refusal.
+    if (searchPanel_.open() && searchPanel_.pointer_down(x, y, synth)) return true;
+    if (contains(layout_.searchButton, x, y)) {
+        searchPanel_.toggle();
+        // Re-run layout so the overlay gets positioned on open.
+        resize(lastWidth_, lastHeight_, lastUiScale_);
+        return true;
+    }
     if (contains(layout_.panicButton, x, y)) { synth.all_notes_off(true); release_panel_notes(synth); return true; }
     if (contains(layout_.resetButton, x, y)) { synth.set_preset(audio::SynthPreset::make_default()); return true; }
-    if (contains(layout_.octaveDownButton, x, y)) { octave_ = std::max(0, octave_ - 1); return true; }
-    if (contains(layout_.octaveUpButton, x, y)) { octave_ = std::min(8, octave_ + 1); return true; }
+    if (contains(layout_.octaveDownButton, x, y)) {
+        (void)keyboard_.shift_octave(-1); keyboard_.ensure_visible(keyboard_.computer_key_base()); return true;
+    }
+    if (contains(layout_.octaveUpButton, x, y)) {
+        (void)keyboard_.shift_octave(1); keyboard_.ensure_visible(keyboard_.computer_key_base()); return true;
+    }
+    if (contains(layout_.keyboardKeysButton, x, y)) {
+        // Cycle 25 -> 37 -> ... -> 88 -> 25; the controller persists the choice.
+        std::size_t next = 0;
+        for (std::size_t i = 0; i < kPianoKeyboardSizes.size(); ++i)
+            if (kPianoKeyboardSizes[i] == keyboard_.key_count()) next = (i + 1U) % kPianoKeyboardSizes.size();
+        release_panel_notes(synth);
+        set_keyboard_key_count(kPianoKeyboardSizes[next]);
+        requestedKeyCount_ = keyboard_.key_count();
+        return true;
+    }
+    if (contains(layout_.midiInputButton, x, y)) { midiPortCycleRequest_ = 1; return true; }
     if (contains(layout_.midiThruButton, x, y)) {
         auto preset = synth.preset(); preset.midiThru = !preset.midiThru; synth.set_preset(preset); return true;
     }
     for (std::size_t i = 0; i < layout_.tabButtons.size(); ++i) {
-        if (contains(layout_.tabButtons[i], x, y)) { page_ = static_cast<SynthPanelPage>(i); return true; }
+        if (contains(layout_.tabButtons[i], x, y)) { set_page(static_cast<SynthPanelPage>(i)); return true; }
     }
 
     if (page_ == SynthPanelPage::Oscillators) {
         const auto waveform = synth.preset().oscillators[selectedOscillator_].waveform;
         if (waveform == audio::OscillatorWaveform::Wavetable) {
             if (layout_.wavetableCanvas.contains(x, y)) {
-                wavetableDrawing_ = true; wavetableLastSample_ = -1;
+                wavetableDrawing_ = true; wavetableLastSample_ = -1; wavetableDraft_.reset();
                 draw_wavetable_point(x, y, synth); return true;
             }
             for (std::size_t i = 0; i < layout_.wavetableFrameButtons.size(); ++i)
@@ -1009,49 +1460,67 @@ bool EditorSynthPanel::pointer_down(int x, int y, audio::Synthesizer& synth) noe
         }
     }
 
-    for (std::size_t i = 0; i < layout_.pianoKeys.size(); ++i) {
-        if (contains(layout_.pianoKeys[i], x, y)) {
-            pointerNote_ = std::clamp(octave_ * 12 + 36 + static_cast<int>(i), 0, 127);
-            (void)synth.note_on(static_cast<std::uint8_t>(pointerNote_), 0.85F);
-            return true;
-        }
+    if (grid_scrollbar_press(x, y)) return true;
+    if (keyboard_.pointer_down(x, y)) return true;
+    if (const auto note = keyboard_.note_at(x, y)) {
+        if (pointerNote_ >= 0) (void)synth.note_off(static_cast<std::uint8_t>(pointerNote_));
+        pointerNote_ = std::clamp(*note, 0, 127);
+        (void)synth.note_on(static_cast<std::uint8_t>(pointerNote_), 0.85F);
+        return true;
     }
     return true;
 }
 
-bool EditorSynthPanel::pointer_up(int, int, audio::Synthesizer& synth) noexcept {
+bool EditorSynthPanel::pointer_up(int x, int y, audio::Synthesizer& synth) noexcept {
     if (!open_) return false;
-    if (wavetableDrawing_) { wavetableDrawing_ = false; wavetableLastSample_ = -1; return true; }
+    if (keyboard_.dragging()) { keyboard_.pointer_up(); return true; }
+    if (searchPanel_.open() && searchPanel_.pointer_up(x, y, synth)) return true;
+    if (wavetableDrawing_) {
+        flush_wavetable_draft(synth);  // the final stroke state always lands
+        wavetableDrawing_ = false; wavetableLastSample_ = -1; wavetableDraft_.reset();
+        return true;
+    }
     if (pointerNote_ < 0) return false;
     (void)synth.note_off(static_cast<std::uint8_t>(pointerNote_));
     pointerNote_ = -1;
     return true;
 }
 
-int EditorSynthPanel::keyboard_note(std::string_view key, int octave) noexcept {
+int EditorSynthPanel::keyboard_key_index(std::string_view key) noexcept {
     static constexpr std::array<std::string_view, 20> keys{
         "z","s","x","d","c","v","g","b","h","n","j","m",",","l",".",";","/","q","2","w"};
     const std::string normalized = lower(key);
     for (std::size_t i = 0; i < keys.size(); ++i)
-        if (normalized == keys[i]) return std::clamp(octave * 12 + 24 + static_cast<int>(i), 0, 127);
+        if (normalized == keys[i]) return static_cast<int>(i);
     return -1;
+}
+
+int EditorSynthPanel::keyboard_note(std::string_view key, int base) noexcept {
+    const int index = keyboard_key_index(key);
+    return index < 0 ? -1 : std::clamp(base + index, 0, 127);
 }
 
 bool EditorSynthPanel::key_down(std::string_view key, audio::Synthesizer& synth) noexcept {
     if (!open_) return false;
     const std::string normalized = lower(key);
     if (normalized == "escape") { set_open(false, synth); return true; }
-    if (normalized == "left") { octave_ = std::max(0, octave_ - 1); return true; }
-    if (normalized == "right") { octave_ = std::min(8, octave_ + 1); return true; }
+    if (normalized == "left" || normalized == "right") {
+        (void)keyboard_.shift_octave(normalized == "left" ? -1 : 1);
+        keyboard_.ensure_visible(keyboard_.computer_key_base());
+        return true;
+    }
     static constexpr std::array<std::string_view, kSynthPanelPageCount> pageKeys{"1","3","4","5","6","7","8","9"};
     for (std::size_t i = 0; i < pageKeys.size(); ++i) {
         if (normalized == pageKeys[i] || normalized == "f" + std::to_string(i + 1U)) {
-            page_ = static_cast<SynthPanelPage>(i);
+            set_page(static_cast<SynthPanelPage>(i));
             return true;
         }
     }
-    const int note = keyboard_note(normalized, octave_);
+    const int keyIndex = keyboard_key_index(normalized);
+    const int note = keyboard_note(normalized, keyboard_.computer_key_base());
     if (note < 0) return false;
+    computerKeyNotes_[static_cast<std::size_t>(keyIndex)] = note;
+    keyboard_.ensure_visible(note);  // follow the played note on a scrolled piano
     if (!keyboardNotes_[static_cast<std::size_t>(note)]) {
         keyboardNotes_[static_cast<std::size_t>(note)] = true;
         (void)synth.note_on(static_cast<std::uint8_t>(note), 0.82F);
@@ -1061,8 +1530,12 @@ bool EditorSynthPanel::key_down(std::string_view key, audio::Synthesizer& synth)
 
 bool EditorSynthPanel::key_up(std::string_view key, audio::Synthesizer& synth) noexcept {
     if (!open_) return false;
-    const int note = keyboard_note(key, octave_);
-    if (note < 0) return false;
+    const int keyIndex = keyboard_key_index(key);
+    if (keyIndex < 0) return false;
+    // Release the note this key started, even if the octave changed meanwhile.
+    int note = computerKeyNotes_[static_cast<std::size_t>(keyIndex)];
+    if (note < 0) note = keyboard_note(key, keyboard_.computer_key_base());
+    computerKeyNotes_[static_cast<std::size_t>(keyIndex)] = -1;
     if (keyboardNotes_[static_cast<std::size_t>(note)]) {
         keyboardNotes_[static_cast<std::size_t>(note)] = false;
         (void)synth.note_off(static_cast<std::uint8_t>(note));

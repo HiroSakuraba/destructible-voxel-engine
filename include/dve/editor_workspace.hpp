@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -72,16 +73,43 @@ class EditorMenuRegistry {
 public:
     [[nodiscard]] bool add(MenuAction action, std::string* error = nullptr);
     [[nodiscard]] const MenuAction* find(std::string_view id) const noexcept;
-    [[nodiscard]] MenuAction* find(std::string_view id) noexcept;
+    // Legacy: a mutable pointer can be edited later without the registry knowing, so
+    // the first call switches this registry to uncached menu/search reads for good.
+    // Use the const overload to read and set_enabled/set_checked/set_shortcut to change.
+    [[nodiscard, deprecated("use the const find() to read and set_enabled/set_checked/set_shortcut to modify")]]
+    MenuAction* find(std::string_view id) noexcept;
     [[nodiscard]] bool set_enabled(std::string_view id, bool enabled, std::string reason = {}) noexcept;
     [[nodiscard]] bool set_checked(std::string_view id, bool checked) noexcept;
     [[nodiscard]] bool set_shortcut(std::string_view id, std::string shortcut) noexcept;
     [[nodiscard]] std::vector<MenuAction> menu(std::string_view menuName, bool includeAdvanced = false) const;
     [[nodiscard]] std::vector<MenuAction> search(std::string_view query, std::size_t limit = 12) const;
     [[nodiscard]] const std::vector<MenuAction>& actions() const noexcept { return actions_; }
+    // Changes whenever any action may have changed. After the legacy mutable find()
+    // has exposed a pointer, every call returns a new value (nothing can be cached).
+    [[nodiscard]] std::uint64_t revision() const noexcept {
+        return mutableActionExposed_ ? ++revision_ : revision_;
+    }
     [[nodiscard]] static EditorMenuRegistry make_default();
 private:
     std::vector<MenuAction> actions_;
+    std::map<std::string, std::size_t, std::less<>> actionIndices_;
+    mutable std::vector<std::vector<std::string>> searchFields_;
+    mutable std::map<std::string, std::array<std::vector<std::size_t>, 2>, std::less<>> menuIndices_;
+    mutable std::string searchQuery_;
+    mutable std::vector<std::size_t> searchResults_;
+    mutable bool searchFieldsDirty_{true};
+    mutable bool menusDirty_{true};
+    mutable bool searchResultsValid_{};
+    // Legacy mutable find() callers can keep and edit a pointer at any time. Once a
+    // pointer escapes, use uncached reads so those edits cannot leave stale results.
+    bool mutableActionExposed_{};
+    mutable std::uint64_t revision_{};
+
+    [[nodiscard]] MenuAction* find_for_update(std::string_view id) noexcept;
+    void rebuild_search_fields() const;
+    void rebuild_menu_indices() const;
+    [[nodiscard]] std::vector<std::size_t> ordered_menu_indices(
+        std::string_view menuName, bool includeAdvanced) const;
 };
 
 struct EditorMenuUserState {

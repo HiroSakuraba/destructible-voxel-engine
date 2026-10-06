@@ -122,12 +122,51 @@ void test_pipeline_compatibility_and_limits() {
             "graphics pipeline accepted more than four color formats");
 }
 
+void test_separate_image_and_sampler_bindings() {
+    NullDevice device;
+    std::string error;
+    TextureDesc textureDesc;
+    textureDesc.width = 4U;
+    textureDesc.height = 4U;
+    textureDesc.usage = TextureUsage::Sampled;
+    const auto texture = device.create_texture(textureDesc, &error);
+    TextureViewDesc viewDesc;
+    viewDesc.texture = texture;
+    const auto view = device.create_texture_view(viewDesc, &error);
+    const auto sampler = device.create_sampler(SamplerDesc{}, &error);
+    require(texture && view && sampler, error.c_str());
+
+    BindGroupLayoutDesc layoutDesc;
+    layoutDesc.bindings = {{0U, BindingType::SampledImage, ShaderStage::Fragment},
+                           {1U, BindingType::Sampler, ShaderStage::Fragment}};
+    const auto layout = device.create_bind_group_layout(layoutDesc, &error);
+    require(static_cast<bool>(layout), error.c_str());
+    BindGroupDesc groupDesc;
+    groupDesc.layout = layout;
+    groupDesc.entries = {{0U, {}, view, 0U, 0U, {}},
+                         {1U, {}, {}, 0U, 0U, sampler}};
+    const auto group = device.create_bind_group(groupDesc, &error);
+    require(static_cast<bool>(group), error.c_str());
+    require(!device.destroy_texture_view(view, &error), "separate image was not retained");
+    require(!device.destroy_sampler(sampler, &error), "separate sampler was not retained");
+
+    require(device.destroy_bind_group(group, &error), error.c_str());
+    groupDesc.entries[0].sampler = sampler;
+    require(!device.create_bind_group(groupDesc, &error),
+            "sampled-image binding accepted an embedded sampler");
+    groupDesc.entries[0].sampler = {};
+    groupDesc.entries[1].textureView = view;
+    require(!device.create_bind_group(groupDesc, &error),
+            "sampler binding accepted a texture view");
+}
+
 } // namespace
 
 int main() {
     try {
         test_four_target_pass();
         test_pipeline_compatibility_and_limits();
+        test_separate_image_and_sampler_bindings();
         std::cout << "dve_rhi_mrt_tests: PASS\n";
         return 0;
     } catch (const std::exception& e) {

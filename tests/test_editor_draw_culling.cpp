@@ -7,6 +7,7 @@
 #include "dve/editor_document.hpp"
 #include "dve/editor_materials.hpp"
 #include "dve/editor_viewport.hpp"
+#include "dve/job_system.hpp"
 #include "dve/voxel_object.hpp"
 
 #include <algorithm>
@@ -335,6 +336,69 @@ void test_cap_no_longer_starved() {
     std::printf("draw cap: OK\n");
 }
 
+bool same_draw_items(const std::vector<EditorVoxelDrawItem>& a, const std::vector<EditorVoxelDrawItem>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const EditorVoxelDrawItem& x = a[i];
+        const EditorVoxelDrawItem& y = b[i];
+        if (x.objectId != y.objectId || !(x.voxel == y.voxel) || x.material != y.material ||
+            std::bit_cast<std::uint32_t>(x.screenX) != std::bit_cast<std::uint32_t>(y.screenX) ||
+            std::bit_cast<std::uint32_t>(x.screenY) != std::bit_cast<std::uint32_t>(y.screenY) ||
+            std::bit_cast<std::uint32_t>(x.depth) != std::bit_cast<std::uint32_t>(y.depth) ||
+            std::bit_cast<std::uint32_t>(x.pixelRadius) != std::bit_cast<std::uint32_t>(y.pixelRadius) ||
+            x.selected != y.selected || x.anchored != y.anchored)
+            return false;
+    }
+    return true;
+}
+
+// Sorting on a worker pool must give exactly the single-threaded list: same items in the
+// same order, for lists above and below the parallel threshold and at the draw cap.
+void test_parallel_build_matches_serial() {
+    EditorDocument document("parallel");
+    for (EditorObjectId id = 1; id <= 6; ++id) {
+        EditorObject object = make_object(id, -20, 20, [id](int x, int y, int z) {
+            if (x * x + y * y + z * z > 380) return kAirMaterial;
+            return mix(x + static_cast<int>(id), y, z) % 100U < 12U ? kAirMaterial
+                                                                   : static_cast<MaterialId>(1 + mix(x, y, z) % 4U);
+        });
+        object.transform.position = {static_cast<float>(id) * 4.5F - 15.0F, 0.0F, 0.0F};
+        if (id % 2 == 0) object.anchors.insert({0, 0, 0});
+        if (id == 3) object.anchors.insert({-19, 0, 0});
+        if (id == 5) object.flags.visible = false;
+        document.add_object(std::move(object));
+    }
+    JobSystem jobs(3);
+    const EditorMaterialLibrary materials;
+    const std::set<EditorObjectId> selection{2, 4};
+    std::size_t compared = 0;
+    std::size_t parallelSized = 0;
+    for (int pose = 0; pose < 24; ++pose) {
+        EditorCamera camera = orbit(pose * 0.53F, -0.9F + (pose % 7) * 0.3F, 4.0F + (pose % 5) * 4.0F, {0, 0, 0});
+        if (pose % 6 == 5) {
+            camera.projection = EditorProjection::Orthographic;
+            camera.orthographicHeight = 4.0F + pose % 3;
+        }
+        for (const bool cull : {false, true}) {
+            for (const std::size_t cap : {std::size_t{120000}, std::size_t{40000}, std::size_t{4321}}) {
+                EditorViewportSettings settings;
+                settings.cullEnclosedVoxels = cull;
+                settings.maximumDrawVoxels = cap;
+                const UiRect viewport{0, 0, 960, 600};
+                const auto serial = build_voxel_draw_list(document, materials, camera, viewport, settings, selection);
+                const auto parallel = build_voxel_draw_list(document, materials, camera, viewport, settings, selection, &jobs);
+                require(same_draw_items(serial, parallel),
+                        "parallel draw list differs at pose " + std::to_string(pose) + " cull " +
+                            std::to_string(cull) + " cap " + std::to_string(cap));
+                ++compared;
+                if (serial.size() >= 32768U) ++parallelSized;
+            }
+        }
+    }
+    std::printf("parallel draw list: OK (%zu lists identical, %zu reached the parallel sort)\n", compared, parallelSized);
+    require(parallelSized >= 10U, "too few lists were large enough to sort in parallel");
+}
+
 // Toggling culling must rebuild a cached list even when nothing else changed.
 void test_cache_key_includes_culling() {
     EditorDocument document("cache");
@@ -553,6 +617,7 @@ int main() {
         test_culling_is_pixel_identical();
         test_culling_guards();
         test_cap_no_longer_starved();
+        test_parallel_build_matches_serial();
         test_cache_key_includes_culling();
         std::printf("editor draw culling tests passed\n");
         return 0;

@@ -10,6 +10,7 @@
 #include "dve/voxel_object.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -18,6 +19,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -464,6 +466,37 @@ void test_derived_bounds_cache() {
     std::printf("derived bounds cache: OK\n");
 }
 
+// Const queries on one object from several threads at once: the first query after an edit
+// fills the cache, and concurrent readers must neither race on it nor see a half-written
+// box. (Run under ThreadSanitizer this reported a race before the cache took a lock.)
+void test_derived_cache_concurrent_reads() {
+    VoxelObject object(13);
+    std::mt19937 rng(77);
+    std::uniform_int_distribution<int> coord(-40, 40);
+    for (int i = 0; i < 2000; ++i) (void)object.set_voxel({coord(rng), coord(rng), coord(rng)}, 1);
+    for (int round = 0; round < 20; ++round) {
+        (void)object.set_voxel({round, 0, 0}, 2);  // edit: the next query refreshes the cache
+        const auto roundExtent = reference_extent(object);
+        const auto roundOccupied = reference_occupied(object);
+        const auto roundCount = reference_count(object);
+        std::atomic<int> mismatches{0};
+        std::vector<std::thread> readers;
+        for (int t = 0; t < 4; ++t) {
+            readers.emplace_back([&] {
+                for (int i = 0; i < 200; ++i) {
+                    if (!same_bounds(object.brick_extent_bounds(), roundExtent) ||
+                        !same_bounds(object.occupied_bounds(), roundOccupied) ||
+                        object.occupied_voxel_count() != roundCount)
+                        mismatches.fetch_add(1);
+                }
+            });
+        }
+        for (std::thread& reader : readers) reader.join();
+        require(mismatches.load() == 0, "concurrent readers saw a wrong derived value");
+    }
+    std::printf("derived cache concurrent reads: OK\n");
+}
+
 void test_draw_sort_matches_reference() {
     const auto referenceLess = [](const EditorVoxelDrawItem& a, const EditorVoxelDrawItem& b) {
         if (a.depth != b.depth) return a.depth > b.depth;
@@ -546,6 +579,7 @@ int main() {
     try {
         test_voxel_revisions();
         test_derived_bounds_cache();
+        test_derived_cache_concurrent_reads();
         test_world_bounds_use_tight_box();
         test_draw_sort_matches_reference();
         test_scene_fingerprint();

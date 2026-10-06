@@ -30,6 +30,10 @@ public:
     // Wait on the video thread without consuming an event; poll_event() still
     // handles conversion and delivers the queued event on the next frame.
     [[nodiscard]] bool wait_for_events(std::chrono::milliseconds timeout);
+    // Include update/render/present work in the budget, but keep a minimum frame
+    // interval even when mouse motion continuously wakes the event wait.
+    [[nodiscard]] bool wait_for_frame(double frameStart, std::chrono::milliseconds targetInterval,
+                                     std::chrono::milliseconds minimumInterval);
     [[nodiscard]] WindowMetrics window_metrics() const noexcept override;
     [[nodiscard]] NativeWindowHandle native_window_handle() const noexcept override;
     void set_window_title(std::string_view title) override;

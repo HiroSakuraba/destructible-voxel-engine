@@ -169,40 +169,52 @@ bool EditorMenuRegistry::set_shortcut(std::string_view id, std::string shortcut)
     }
     return false;
 }
+std::vector<std::size_t> EditorMenuRegistry::ordered_menu_indices(
+    std::string_view menuName, bool includeAdvanced) const {
+    std::map<std::string, std::size_t, std::less<>> sections;
+    std::vector<std::size_t> indices;
+    for (std::size_t index = 0; index < actions_.size(); ++index) {
+        const MenuAction& action = actions_[index];
+        if (action.menu != menuName || action.visibility == MenuVisibility::PaletteOnly ||
+            (action.visibility == MenuVisibility::Advanced && !includeAdvanced)) continue;
+        sections.try_emplace(action.section, sections.size());
+        indices.push_back(index);
+    }
+    std::sort(indices.begin(), indices.end(), [&](std::size_t a, std::size_t b) {
+        const auto sectionA = sections.at(actions_[a].section);
+        const auto sectionB = sections.at(actions_[b].section);
+        if (sectionA != sectionB) return sectionA < sectionB;
+        if (actions_[a].order != actions_[b].order) return actions_[a].order < actions_[b].order;
+        return a < b;
+    });
+    return indices;
+}
+
 void EditorMenuRegistry::rebuild_menu_indices() const {
     menuIndices_.clear();
     for (const MenuAction& action : actions_) menuIndices_.try_emplace(action.menu);
     for (auto& [menuName, modes] : menuIndices_) {
-        for (std::size_t mode = 0; mode < modes.size(); ++mode) {
-            std::map<std::string, std::size_t, std::less<>> sections;
-            auto& indices = modes[mode];
-            for (std::size_t index = 0; index < actions_.size(); ++index) {
-                const MenuAction& action = actions_[index];
-                if (action.menu != menuName || action.visibility == MenuVisibility::PaletteOnly ||
-                    (action.visibility == MenuVisibility::Advanced && mode == 0)) continue;
-                sections.try_emplace(action.section, sections.size());
-                indices.push_back(index);
-            }
-            std::sort(indices.begin(), indices.end(), [&](std::size_t a, std::size_t b) {
-                const auto sectionA = sections.at(actions_[a].section);
-                const auto sectionB = sections.at(actions_[b].section);
-                if (sectionA != sectionB) return sectionA < sectionB;
-                if (actions_[a].order != actions_[b].order) return actions_[a].order < actions_[b].order;
-                return a < b;
-            });
-        }
+        modes[0] = ordered_menu_indices(menuName, false);
+        modes[1] = ordered_menu_indices(menuName, true);
     }
     menusDirty_ = false;
 }
 
 std::vector<MenuAction> EditorMenuRegistry::menu(std::string_view menuName, bool includeAdvanced) const {
-    if (menusDirty_ || mutableActionExposed_) rebuild_menu_indices();
     std::vector<MenuAction> result;
-    const auto found = menuIndices_.find(menuName);
-    if (found == menuIndices_.end()) return result;
-    const auto& indices = found->second[includeAdvanced ? 1U : 0U];
-    result.reserve(indices.size());
-    for (std::size_t index : indices) result.push_back(actions_[index]);
+    const auto copy_actions = [&](const auto& indices) {
+        result.reserve(indices.size());
+        for (std::size_t index : indices) result.push_back(actions_[index]);
+    };
+    if (mutableActionExposed_) {
+        // A retained pointer can change membership/order at any time. Rebuild only
+        // this menu and mode, rather than every menu in both modes on each read.
+        copy_actions(ordered_menu_indices(menuName, includeAdvanced));
+    } else {
+        if (menusDirty_) rebuild_menu_indices();
+        const auto found = menuIndices_.find(menuName);
+        if (found != menuIndices_.end()) copy_actions(found->second[includeAdvanced ? 1U : 0U]);
+    }
     return result;
 }
 

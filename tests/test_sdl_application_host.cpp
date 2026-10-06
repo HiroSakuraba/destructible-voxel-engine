@@ -93,6 +93,40 @@ int main() {
         require(!host.wait_for_events(std::chrono::milliseconds(0)), "empty queue reported an event");
         require(!host.wait_for_events(std::chrono::milliseconds(-1)), "negative wait was not clamped to a poll");
 
+        // Deterministic clock: rendering already uses 1 ms. Continuous queued
+        // motion may wake the second half of the budget, never the 4 ms floor.
+        SDLTest_SetTicksNS(0);
+        const auto target = std::chrono::milliseconds(8), minimum = std::chrono::milliseconds(4);
+        for (int frame = 0; frame < 250; ++frame) {
+            const auto startTicks = SDL_GetTicksNS();
+            const double start = host.monotonic_seconds();
+            SDL_Delay(1);
+            SDL_Event motion{}; motion.type = SDL_EVENT_MOUSE_MOTION;
+            SDLTest_PushEvent(&motion);
+            require(host.wait_for_frame(start, target, minimum), "motion did not wake paced wait");
+            const auto elapsed = SDL_GetTicksNS() - startTicks;
+            require(elapsed >= 4'000'000 && elapsed <= 5'000'000, "motion bypassed minimum frame interval");
+            require(host.poll_event(converted) && converted.type == EventType::PointerMove,
+                    "paced wait consumed queued motion");
+            require(!host.poll_event(converted), "paced wait duplicated motion");
+        }
+        auto startTicks = SDL_GetTicksNS();
+        double start = host.monotonic_seconds();
+        SDL_Delay(1);
+        require(!host.wait_for_frame(start, target, minimum), "idle paced wait reported input");
+        require(SDL_GetTicksNS() - startTicks >= 8'000'000 && SDL_GetTicksNS() - startTicks <= 9'000'000,
+                "idle budget excludes render work or waits twice");
+        start = host.monotonic_seconds();
+        SDL_Delay(12);
+        startTicks = SDL_GetTicksNS();
+        require(!host.wait_for_frame(start, target, minimum) && SDL_GetTicksNS() == startTicks,
+                "over-budget frame incurred another delay");
+        start = host.monotonic_seconds();
+        SDLTest_PushEvent(&key);
+        require(host.wait_for_frame(start, target, minimum), "key did not wake paced wait");
+        require(host.poll_event(converted) && converted.type == EventType::KeyDown,
+                "paced wait lost keyboard input");
+
         SDLTest_SetDialogResult("/tmp/scene.dvescene", nullptr);
         FileDialogRequest request;
         request.kind = FileDialogKind::OpenFile;

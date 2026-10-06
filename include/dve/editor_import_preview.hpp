@@ -15,7 +15,7 @@ namespace dve::editor {
 struct ImportPreviewSnapshot {
     std::uint64_t generation{};
     std::optional<EditorTaskId> taskId;
-    EditorTaskState taskState{EditorTaskState::Queued};
+    EditorTaskState taskState{EditorTaskState::Unknown};
     float progress{};
     std::string phase;
     bool ready{};

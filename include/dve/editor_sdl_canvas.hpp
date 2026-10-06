@@ -28,6 +28,8 @@ public:
     SdlEditorCanvas& operator=(const SdlEditorCanvas&) = delete;
 
     [[nodiscard]] bool valid() const noexcept;
+    // A driver may reject vsync; callers can retain software frame pacing.
+    [[nodiscard]] bool set_vsync(bool enabled, std::string* error = nullptr);
     // zoom = UI zoom (1.0-2.0); pixelDensity = drawable pixels per window coordinate (HiDPI).
     void set_ui_zoom(float zoom, float pixelDensity = 1.0F);
     [[nodiscard]] float render_scale() const noexcept;

@@ -287,6 +287,19 @@ bool SdlApplicationHost::wait_for_events(std::chrono::milliseconds timeout) {
     return SDL_WaitEventTimeout(nullptr, static_cast<Sint32>(milliseconds));
 }
 
+bool SdlApplicationHost::wait_for_frame(double frameStart, std::chrono::milliseconds targetInterval,
+                                       std::chrono::milliseconds minimumInterval) {
+    if (!has_window() || !std::isfinite(frameStart)) return false;
+    const auto target = std::clamp<std::chrono::milliseconds::rep>(targetInterval.count(), 0, 2'147'483'647);
+    const auto minimum = std::clamp<std::chrono::milliseconds::rep>(minimumInterval.count(), 0, target);
+    const double minimumRemaining = (frameStart + static_cast<double>(minimum) / 1000.0 - monotonic_seconds()) * 1000.0;
+    if (minimumRemaining > 0.0) sleep_for(std::chrono::milliseconds(
+        static_cast<std::chrono::milliseconds::rep>(std::min(std::ceil(minimumRemaining), static_cast<double>(minimum)))));
+    const double remaining = (frameStart + static_cast<double>(target) / 1000.0 - monotonic_seconds()) * 1000.0;
+    return remaining > 0.0 && wait_for_events(std::chrono::milliseconds(
+        static_cast<std::chrono::milliseconds::rep>(std::min(std::ceil(remaining), static_cast<double>(target)))));
+}
+
 bool SdlApplicationHost::audio_subsystem_initialized() const noexcept {
     return impl_ && impl_->audioInitialized;
 }

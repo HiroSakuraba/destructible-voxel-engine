@@ -158,10 +158,18 @@ int main(int argc, char** argv) {
         int frames = 0;
         std::optional<bool> requestedVsync;
         double previous = host.monotonic_seconds();
+        // Redraw at up to 125 fps while input arrives or the editor animates, and at about
+        // 30 fps once it has been idle for a second. Input still wakes the wait at once, so
+        // this only saves the CPU and GPU work of redrawing a frame nobody is changing.
+        constexpr double kFullRateAfterInputSeconds = 1.0;
+        double lastInput = previous;
         while (!controller.quit_requested()) {
             const double frameStart = host.monotonic_seconds();
             PlatformEvent event;
-            while (host.poll_event(event)) bridge.handle_event(event);
+            while (host.poll_event(event)) {
+                bridge.handle_event(event);
+                lastInput = frameStart;
+            }
 
             const double now = host.monotonic_seconds();
             controller.update(static_cast<float>(now - previous));
@@ -197,8 +205,11 @@ int main(int argc, char** argv) {
             if (smoke && frames >= 4) break;
             // Input may wake the latter half of the 8 ms budget. The 4 ms floor
             // bounds rendering to 250 fps even under a high-frequency motion stream.
-            if (!controller.quit_requested())
-                (void)host.wait_for_frame(frameStart, std::chrono::milliseconds(8), std::chrono::milliseconds(4));
+            if (!controller.quit_requested()) {
+                const bool fullRate = controller.animating() || frameStart - lastInput < kFullRateAfterInputSeconds;
+                (void)host.wait_for_frame(frameStart, std::chrono::milliseconds(fullRate ? 8 : 33),
+                                          std::chrono::milliseconds(4));
+            }
         }
 
         if (smoke) {

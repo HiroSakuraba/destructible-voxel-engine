@@ -183,6 +183,8 @@ float SDL_GetWindowDisplayScale(SDL_Window* window);
 SDL_WindowFlags SDL_GetWindowFlags(SDL_Window* window);
 SDL_WindowID SDL_GetWindowID(SDL_Window* window);
 bool SDL_SetWindowTitle(SDL_Window* window, const char* title);
+const char* SDL_GetWindowTitle(SDL_Window* window);
+int SDLTest_SetWindowTitleCalls();
 bool SDL_SetClipboardText(const char* text);
 char* SDL_GetClipboardText();
 void SDL_free(void* pointer);

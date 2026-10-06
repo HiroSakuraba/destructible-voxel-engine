@@ -80,6 +80,11 @@ public:
     [[nodiscard]] std::vector<MenuAction> menu(std::string_view menuName, bool includeAdvanced = false) const;
     [[nodiscard]] std::vector<MenuAction> search(std::string_view query, std::size_t limit = 12) const;
     [[nodiscard]] const std::vector<MenuAction>& actions() const noexcept { return actions_; }
+    // Changes whenever any action may have changed. After the legacy mutable find()
+    // has exposed a pointer, every call returns a new value (nothing can be cached).
+    [[nodiscard]] std::uint64_t revision() const noexcept {
+        return mutableActionExposed_ ? ++revision_ : revision_;
+    }
     [[nodiscard]] static EditorMenuRegistry make_default();
 private:
     std::vector<MenuAction> actions_;
@@ -94,6 +99,7 @@ private:
     // Legacy mutable find() callers can keep and edit a pointer at any time. Once a
     // pointer escapes, use uncached reads so those edits cannot leave stale results.
     bool mutableActionExposed_{};
+    mutable std::uint64_t revision_{};
 
     [[nodiscard]] MenuAction* find_for_update(std::string_view id) noexcept;
     void rebuild_search_fields() const;

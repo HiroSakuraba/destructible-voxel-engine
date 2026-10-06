@@ -49,17 +49,13 @@ struct LocalVoxelBounds {
 
 LocalVoxelBounds local_voxel_bounds(const EditorObject& object) noexcept {
     LocalVoxelBounds result;
-    Int3 minimum = kInt3Max;
-    Int3 maximum = kInt3Min;
-    for (const auto& entry : object.voxels->bricks()) {
-        const Int3 origin = brick_origin(entry.first);
-        minimum = min_components(minimum, origin);
-        maximum = max_components(maximum, {origin.x + kBrickDim, origin.y + kBrickDim, origin.z + kBrickDim});
+    const VoxelObject::DerivedBounds extent = object.voxels->brick_extent_bounds();
+    if (extent.valid) {
+        result.minimum = {static_cast<float>(extent.minimum.x), static_cast<float>(extent.minimum.y),
+                          static_cast<float>(extent.minimum.z)};
+        result.maximum = {static_cast<float>(extent.maximum.x), static_cast<float>(extent.maximum.y),
+                          static_cast<float>(extent.maximum.z)};
         result.valid = true;
-    }
-    if (result.valid) {
-        result.minimum = {static_cast<float>(minimum.x), static_cast<float>(minimum.y), static_cast<float>(minimum.z)};
-        result.maximum = {static_cast<float>(maximum.x), static_cast<float>(maximum.y), static_cast<float>(maximum.z)};
     }
     return result;
 }
@@ -343,21 +339,11 @@ EditorObjectBounds object_world_bounds(const EditorObject& object) noexcept {
         result.valid = true;
         return result;
     }
-    Int3 minimum = kInt3Max;
-    Int3 maximum = kInt3Min;
-    bool any = false;
-    for (const auto& entry : object.voxels->bricks()) {
-        const BrickKey key = entry.first;
-        Int3 brickMinimum, brickMaximum;
-        if (!entry.second.occupancy().bounds(brickMinimum, brickMaximum)) continue;
-        minimum = min_components(minimum, global_from_local(key, brickMinimum));
-        maximum = max_components(maximum, global_from_local(key, brickMaximum));
-        any = true;
-    }
-    if (!any) return result;
+    const VoxelObject::DerivedBounds occupied = object.voxels->occupied_bounds();
+    if (!occupied.valid) return result;
     const float size = object.voxelSizeMeters;
-    const Float3 localMinimum{static_cast<float>(minimum.x) * size, static_cast<float>(minimum.y) * size, static_cast<float>(minimum.z) * size};
-    const Float3 localMaximum{static_cast<float>(maximum.x + 1) * size, static_cast<float>(maximum.y + 1) * size, static_cast<float>(maximum.z + 1) * size};
+    const Float3 localMinimum{static_cast<float>(occupied.minimum.x) * size, static_cast<float>(occupied.minimum.y) * size, static_cast<float>(occupied.minimum.z) * size};
+    const Float3 localMaximum{static_cast<float>(occupied.maximum.x + 1) * size, static_cast<float>(occupied.maximum.y + 1) * size, static_cast<float>(occupied.maximum.z + 1) * size};
     const auto corners = bounds_corners(localMinimum, localMaximum);
     result.minimum = {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()};
     result.maximum = {-std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()};
@@ -569,6 +555,93 @@ bool surface_splats_cover_object(const EditorObject& object, const EditorCamera&
 
 } // namespace
 
+namespace {
+
+// Order-preserving map from a finite float to a uint32: ascending keys order
+// like the floats. -0.0 is canonicalized to +0.0 first so both zeroes share a
+// key and tie exactly as float equality ties them. (Depths reaching the draw
+// list are always finite: project_with rejects NaN and out-of-range depths.)
+std::uint32_t depth_sort_key(float depth) noexcept {
+    if (depth == 0.0F) depth = 0.0F;
+    const std::uint32_t bits = std::bit_cast<std::uint32_t>(depth);
+    return (bits & 0x8000'0000U) != 0 ? ~bits : bits | 0x8000'0000U;
+}
+
+// The draw order: depth descending, then object id, then voxel. No two
+// distinct items compare equal (each voxel is emitted once per object), so
+// this is a total order and any correct sort yields the same sequence.
+bool voxel_draw_item_less(const EditorVoxelDrawItem& left, const EditorVoxelDrawItem& right) noexcept {
+    if (left.depth != right.depth) return left.depth > right.depth;
+    if (left.objectId != right.objectId) return left.objectId < right.objectId;
+    return left.voxel < right.voxel;
+}
+
+// Far-to-near sort of the draw list. A comparison sort spends most of its
+// time on the float depth key, so for large lists this radix-sorts 8-byte
+// {depth key, original index} proxies by depth alone (4 stable byte passes),
+// applies the resulting permutation to the items exactly once, and then
+// repairs each maximal run of equal depths with the full comparator; small
+// lists keep the plain comparison sort. Sorting the 48-byte items by radix
+// directly was measured slower than the comparison sort at 120k items (the
+// records scatter outside the cache), while the proxies stay cache-resident.
+// The result is item-for-item identical to sorting everything with
+// voxel_draw_item_less: equal depths share a radix key, different keys are
+// depth-ordered, and the tie-break keys decide within a run exactly as the
+// comparator would.
+void sort_voxel_draw_items(std::vector<EditorVoxelDrawItem>& items) {
+    // The radix path is used only inside the size window where it was
+    // measured faster than the comparison sort on the benchmark scenes:
+    // at 46k items it roughly halves the sort, but at 120k items the
+    // permutation gather ranges over ~12 MB of item arrays and falls off a
+    // cache/TLB cliff, ending up slower than the comparison sort.
+    constexpr std::size_t kRadixSortMinimum = 8192;
+    constexpr std::size_t kRadixSortMaximum = 65536;
+    const std::size_t count = items.size();
+    if (count < kRadixSortMinimum || count > kRadixSortMaximum) {
+        std::stable_sort(items.begin(), items.end(), voxel_draw_item_less);
+        return;
+    }
+    struct SortProxy {
+        std::uint32_t key;
+        std::uint32_t index;
+    };
+    // Descending depth == ascending bitwise complement of the ascending key.
+    std::vector<SortProxy> proxies(count);
+    for (std::size_t i = 0; i < count; ++i)
+        proxies[i] = {~depth_sort_key(items[i].depth), static_cast<std::uint32_t>(i)};
+    std::vector<SortProxy> scratchProxies(count);
+    std::vector<SortProxy>* source = &proxies;
+    std::vector<SortProxy>* dest = &scratchProxies;
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        std::array<std::size_t, 256> offsets{};
+        for (const SortProxy& proxy : *source) ++offsets[(proxy.key >> shift) & 0xFFU];
+        std::size_t sum = 0;
+        for (auto& offset : offsets) {
+            const std::size_t bucket = offset;
+            offset = sum;
+            sum += bucket;
+        }
+        for (const SortProxy& proxy : *source)
+            (*dest)[offsets[(proxy.key >> shift) & 0xFFU]++] = proxy;
+        std::swap(source, dest);
+    }
+    // Four passes is even, so the sorted proxies are back in `proxies`.
+    std::vector<EditorVoxelDrawItem> sorted(count);
+    for (std::size_t i = 0; i < count; ++i) sorted[i] = items[proxies[i].index];
+    items.swap(sorted);
+    std::size_t runBegin = 0;
+    for (std::size_t i = 1; i <= count; ++i) {
+        if (i == count || items[i].depth != items[runBegin].depth) {
+            if (i - runBegin > 1)
+                std::sort(items.begin() + static_cast<std::ptrdiff_t>(runBegin),
+                          items.begin() + static_cast<std::ptrdiff_t>(i), voxel_draw_item_less);
+            runBegin = i;
+        }
+    }
+}
+
+} // namespace
+
 std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     const EditorDocument& document,
     const EditorMaterialLibrary& materials,
@@ -584,23 +657,27 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     std::map<BrickKey, Bitset512> anchorMasks;
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible) continue;
+        const bool selected = selectedObjects.contains(id);
         const bool cullEnclosed = settings.cullEnclosedVoxels &&
                                   surface_splats_cover_object(object, camera, viewport);
         anchorMasks.clear();
-        if (cullEnclosed) {
+        if (!object.anchors.empty()) {
             for (const Int3& anchor : object.anchors)
                 anchorMasks[brick_key_from_voxel(anchor)].set(voxel_index_unchecked(local_voxel_from_global(anchor)));
         }
         for (const auto& entry : object.voxels->bricks()) {
             const BrickKey key = entry.first;
             const Brick& brick = entry.second;
+            const Bitset512* anchorMask = nullptr;
+            if (!anchorMasks.empty()) {
+                if (const auto anchors = anchorMasks.find(key); anchors != anchorMasks.end())
+                    anchorMask = &anchors->second;
+            }
             Bitset512 emitted = cullEnclosed ? exposed_voxel_mask(*object.voxels, key, brick) : brick.occupancy();
-            if (cullEnclosed && !anchorMasks.empty()) {
-                if (const auto anchors = anchorMasks.find(key); anchors != anchorMasks.end()) {
-                    const Bitset512 occupied = brick.occupancy();
-                    for (std::size_t word = 0; word < emitted.words.size(); ++word)
-                        emitted.words[word] |= anchors->second.words[word] & occupied.words[word];
-                }
+            if (cullEnclosed && anchorMask) {
+                const Bitset512 occupied = brick.occupancy();
+                for (std::size_t word = 0; word < emitted.words.size(); ++word)
+                    emitted.words[word] |= anchorMask->words[word] & occupied.words[word];
             }
             emitted.for_each_set([&](std::uint16_t index) {
                 if (result.size() >= settings.maximumDrawVoxels) return;
@@ -618,17 +695,13 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
                 (void)materials;
                 result.push_back({id, voxel, brick.material(index), screen.x, screen.y, screen.depth,
                                   std::clamp(radius * 0.72F, 1.0F, 12.0F),
-                                  selectedObjects.contains(id), object.anchors.contains(voxel)});
+                                  selected, anchorMask && anchorMask->test(index)});
             });
             if (result.size() >= settings.maximumDrawVoxels) break;
         }
         if (result.size() >= settings.maximumDrawVoxels) break;
     }
-    std::stable_sort(result.begin(), result.end(), [](const EditorVoxelDrawItem& a, const EditorVoxelDrawItem& b) {
-        if (a.depth != b.depth) return a.depth > b.depth;
-        if (a.objectId != b.objectId) return a.objectId < b.objectId;
-        return a.voxel < b.voxel;
-    });
+    sort_voxel_draw_items(result);
     return result;
 }
 

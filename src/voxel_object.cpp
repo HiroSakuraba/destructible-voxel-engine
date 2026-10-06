@@ -48,7 +48,47 @@ VoxelObject& VoxelObject::operator=(VoxelObject&& other) noexcept {
     std::swap(revision_, temporary.revision_);
     std::swap(pools_, temporary.pools_);
     std::swap(bricks_, temporary.bricks_);
+    std::swap(derivedRevision_, temporary.derivedRevision_);
+    std::swap(brickExtentCache_, temporary.brickExtentCache_);
+    std::swap(occupiedCache_, temporary.occupiedCache_);
+    std::swap(occupiedCountCache_, temporary.occupiedCountCache_);
     return *this;
+}
+
+void VoxelObject::refresh_derived() const {
+    Int3 extentMinimum = kInt3Max;
+    Int3 extentMaximum = kInt3Min;
+    Int3 occupiedMinimum = kInt3Max;
+    Int3 occupiedMaximum = kInt3Min;
+    std::uint64_t occupiedCount = 0;
+    bool anyOccupied = false;
+    for (const auto& entry : bricks_) {
+        const Int3 origin = brick_origin(entry.first);
+        extentMinimum = min_components(extentMinimum, origin);
+        extentMaximum = max_components(extentMaximum,
+            {origin.x + kBrickDim, origin.y + kBrickDim, origin.z + kBrickDim});
+        occupiedCount += entry.second.occupied_count();
+        Int3 brickMinimum, brickMaximum;
+        if (entry.second.occupancy().bounds(brickMinimum, brickMaximum)) {
+            occupiedMinimum = min_components(occupiedMinimum, global_from_local(entry.first, brickMinimum));
+            occupiedMaximum = max_components(occupiedMaximum, global_from_local(entry.first, brickMaximum));
+            anyOccupied = true;
+        }
+    }
+    brickExtentCache_ = {extentMinimum, extentMaximum, !bricks_.empty()};
+    occupiedCache_ = {occupiedMinimum, occupiedMaximum, anyOccupied};
+    occupiedCountCache_ = occupiedCount;
+    derivedRevision_ = revision_;
+}
+
+VoxelObject::DerivedBounds VoxelObject::brick_extent_bounds() const {
+    if (derivedRevision_ != revision_) refresh_derived();
+    return brickExtentCache_;
+}
+
+VoxelObject::DerivedBounds VoxelObject::occupied_bounds() const {
+    if (derivedRevision_ != revision_) refresh_derived();
+    return occupiedCache_;
 }
 
 MaterialId VoxelObject::material_at(Int3 globalVoxel) const {
@@ -138,12 +178,8 @@ bool VoxelObject::replace_brick(const VoxelBrickSnapshot& snapshot, std::string*
 }
 
 std::uint64_t VoxelObject::occupied_voxel_count() const {
-    std::uint64_t total = 0;
-    for (const auto& [key, brick] : bricks_) {
-        (void)key;
-        total += brick.occupied_count();
-    }
-    return total;
+    if (derivedRevision_ != revision_) refresh_derived();
+    return occupiedCountCache_;
 }
 
 std::size_t VoxelObject::payload_bytes() const { return payload_pool_stats().livePayloadBytes; }

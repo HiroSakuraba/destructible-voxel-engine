@@ -529,6 +529,7 @@ struct GltfDocument {
     std::vector<GltfBufferView> views;
     std::vector<GltfAccessor> accessors;
     std::filesystem::path sourcePath;
+    std::vector<std::filesystem::path> sourceDependencies;
 };
 
 [[nodiscard]] std::vector<std::byte> load_uri_buffer(
@@ -743,7 +744,12 @@ void jpeg_error_exit(j_common_ptr common) {
             if (!buffer.is_object()) throw std::runtime_error("glTF buffer must be an object");
             const JsonValue* uri = buffer.find("uri");
             std::vector<std::byte> bytes;
-            if (uri != nullptr) bytes = load_uri_buffer(path, json_string(uri));
+            if (uri != nullptr) {
+                const std::string uriText = json_string(uri);
+                bytes = load_uri_buffer(path, uriText);
+                if (!uriText.starts_with("data:"))
+                    document.sourceDependencies.push_back((path.parent_path() / std::filesystem::path(uriText)).lexically_normal());
+            }
             else if (i == 0 && !glbBinary.empty()) bytes = glbBinary;
             else throw std::runtime_error("buffer without URI has no GLB BIN chunk");
             const std::size_t byteLength = json_size(buffer.find("byteLength"));
@@ -913,6 +919,7 @@ void update_world_transform(ImportedScene& scene, std::uint32_t nodeIndex, const
     try {
         const GltfDocument document = load_gltf_document(path);
         const JsonValue& root = document.root;
+        result.sourceDependencies = document.sourceDependencies;
 
         result.scene.name = path.stem().string();
 
@@ -955,7 +962,10 @@ void update_world_transform(ImportedScene& scene, std::uint32_t nodeIndex, const
                 std::vector<std::byte> owned;
                 std::span<const std::byte> encoded;
                 if (const JsonValue* uri = imageValue.find("uri")) {
-                    owned = load_uri_buffer(path, json_string(uri));
+                    const std::string uriText = json_string(uri);
+                    owned = load_uri_buffer(path, uriText);
+                    if (!uriText.starts_with("data:"))
+                        result.sourceDependencies.push_back((path.parent_path() / std::filesystem::path(uriText)).lexically_normal());
                     encoded = owned;
                 } else if (const JsonValue* view = imageValue.find("bufferView")) {
                     encoded = buffer_view_bytes(document, json_u32(view));
@@ -1270,6 +1280,9 @@ void update_world_transform(ImportedScene& scene, std::uint32_t nodeIndex, const
             }
         }
         result.success = true;
+        std::sort(result.sourceDependencies.begin(), result.sourceDependencies.end());
+        result.sourceDependencies.erase(std::unique(result.sourceDependencies.begin(), result.sourceDependencies.end()),
+                                        result.sourceDependencies.end());
     } catch (const std::exception& exception) {
         result.diagnostics.push_back({ImportDiagnostic::Severity::Error, "GLTF_IMPORT", exception.what()});
         result.success = false;

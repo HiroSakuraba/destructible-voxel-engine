@@ -72,13 +72,13 @@ EditorObject::EditorObject(EditorObjectId objectId, std::string objectName)
 std::unique_ptr<VoxelObject> clone_voxel_object(const VoxelObject& source) {
     auto copy = std::make_unique<VoxelObject>(source.id());
     copy->reserve_bricks(source.brick_count());
+    // Copy whole bricks (one encode each) instead of one set_voxel per voxel. Bricks
+    // with no occupied voxels are skipped, as before, so the copy holds the same set
+    // of bricks; their generations are carried over.
     for (const auto& entry : source.bricks()) {
-        const BrickKey key = entry.first;
-        const Brick& brick = entry.second;
-        const Bitset512 occupancy = brick.occupancy();
-        occupancy.for_each_set([&](std::uint16_t index) {
-            copy->set_voxel(global_from_local(key, local_from_index_unchecked(index)), brick.material(index));
-        });
+        if (entry.second.occupancy().none()) continue;
+        if (!copy->replace_brick(source.snapshot_brick(entry.first)))
+            throw std::runtime_error("could not clone voxel brick");
     }
     return copy;
 }

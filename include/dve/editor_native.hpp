@@ -266,6 +266,15 @@ struct GizmoScreenAxis {
     ScreenPoint end{};
 };
 
+// Background recovery saves driven by the editor.autosave_minutes setting.
+struct EditorAutosaveStatus {
+    bool inFlight{};
+    std::uint64_t completed{};
+    std::uint64_t failed{};
+    std::filesystem::path lastManifest;
+    std::string lastError;
+};
+
 class NativeEditorController {
 public:
     explicit NativeEditorController(EditorWorkspace workspace = EditorWorkspace{});
@@ -314,6 +323,12 @@ public:
     [[nodiscard]] int window_height() const noexcept { return height_; }
     [[nodiscard]] const std::optional<EditorPickResult>& hover_pick() const noexcept { return hoverPick_; }
     [[nodiscard]] const EditorStatusMessage& status() const noexcept { return status_; }
+    // Recovery copy of the current scene: <project>/.dve/recovery/<scene>/. Written in
+    // the background after editor.autosave_minutes of unsaved changes; removed by a
+    // successful File > Save.
+    [[nodiscard]] std::filesystem::path autosave_directory() const;
+    [[nodiscard]] std::filesystem::path autosave_manifest_path() const;
+    [[nodiscard]] const EditorAutosaveStatus& autosave_status() const noexcept { return autosaveStatus_; }
     [[nodiscard]] bool command_palette_open() const noexcept { return commandPaletteOpen_; }
     [[nodiscard]] std::string_view command_palette_query() const noexcept { return commandPaletteQuery_; }
     [[nodiscard]] std::vector<MenuAction> menu_actions(std::string_view menuName) const;
@@ -737,6 +752,16 @@ private:
     std::unique_ptr<ai::DveAiBridge> aiBridge_;
     std::unique_ptr<ai::LiveEditorMcpHost> liveMcpHost_;
     EditorTaskManager aiTasks_{1, 8};
+    struct AutosaveJob;
+    std::shared_ptr<AutosaveJob> autosaveInFlight_;
+    double autosaveElapsedSeconds_{};
+    std::uint64_t manualSaveCount_{};
+    EditorAutosaveStatus autosaveStatus_;
+    bool recoveryChecked_{};
+    // Declared after the state above so its worker is joined before that state goes.
+    EditorTaskManager autosaveTasks_{1, 2};
+    void autosave_tick(float elapsedSeconds);
+    void report_recovered_autosave();
     // Declared last so they are destroyed first: the session's callbacks post into the synth.
     std::unique_ptr<audio::MidiOutputSession> midiOutput_;
     std::unique_ptr<audio::MidiInputSession> midiInput_;

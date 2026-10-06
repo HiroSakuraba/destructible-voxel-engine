@@ -3974,8 +3974,10 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                              row.y + row.height - 6, badge,
                              issue ? rgb(255,190,80) : muted);
             }
+            // Const access: the mutable accessor would wait for a background scan.
             const std::string summary = std::to_string(entries.size()) + " shown / " +
-                std::to_string(controller.asset_database().records().size()) + " indexed";
+                std::to_string(std::as_const(controller).asset_database().records().size()) + " indexed" +
+                (controller.asset_scan_in_flight() ? "  (scanning...)" : "");
             painter.text(layout.assetSearchBox.x,
                          layout.assetSearchBox.y + layout.assetSearchBox.height + 14,
                          summary, muted);

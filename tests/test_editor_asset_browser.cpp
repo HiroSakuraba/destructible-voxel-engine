@@ -1,6 +1,9 @@
 #include "dve/editor_asset_browser.hpp"
 #include "dve/editor_native.hpp"
 
+#include <algorithm>
+#include <memory>
+#include <thread>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -335,6 +338,54 @@ void test_budgeted_thumbnails(const std::filesystem::path& root) {
     std::cout << "budgeted thumbnails: OK\n";
 }
 
+// Asset refreshes run on a worker: the editor keeps updating (and showing the old
+// records) while a large project is scanned, the result is applied by update(), a refresh
+// asked for mid-scan runs afterwards, and mutable access waits for the scan.
+void test_background_scan(const std::filesystem::path& root) {
+    std::filesystem::remove_all(root);
+    for (int i = 0; i < 3000; ++i)
+        write_file(root / "assets" / "data" / ("item_" + std::to_string(i) + ".txt"), "payload " + std::to_string(i));
+    auto owner = std::make_unique<NativeEditorController>();
+    NativeEditorController& controller = *owner;
+    controller.configure_ai_assistant(root);
+    const NativeEditorController& view = controller;
+    require(view.asset_database().records().empty(), "fresh project should start without records");
+
+    const auto startBegin = std::chrono::steady_clock::now();
+    require(controller.dispatch_action("asset.refresh"), "asset.refresh failed");
+    const double startMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startBegin).count();
+    require(controller.asset_scan_in_flight(), "asset.refresh did not start a background scan");
+    require(controller.dispatch_action("asset.refresh"), "a second asset.refresh failed");  // queued
+
+    double slowestUpdateMs = 0.0;
+    int updates = 0;
+    bool sawRecordsBeforeRescan = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while ((controller.asset_scan_in_flight() || updates == 0) && std::chrono::steady_clock::now() < deadline) {
+        const auto begin = std::chrono::steady_clock::now();
+        controller.update(0.008F);
+        slowestUpdateMs = std::max(slowestUpdateMs,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
+        ++updates;
+        if (!view.asset_database().records().empty() && controller.asset_scan_in_flight()) sawRecordsBeforeRescan = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    require(!controller.asset_scan_in_flight(), "background scan did not finish");
+    require(view.asset_database().records().size() == 3000U, "background scan result was not applied");
+    require(sawRecordsBeforeRescan, "the queued refresh did not run after the first scan was applied");
+    require(controller.status().text.rfind("Assets indexed: 3000", 0) == 0U, "scan completion was not announced");
+    std::cout << "background asset scan: start " << startMs << " ms, " << updates
+              << " updates while scanning, slowest " << slowestUpdateMs << " ms\n";
+
+    // Mutable access waits for a running scan, so callers see its result.
+    write_file(root / "assets" / "data" / "late.txt", "late");
+    require(controller.start_asset_scan(false), "could not start a scan");
+    require(controller.asset_database().find_path("assets/data/late.txt") != nullptr,
+            "mutable access did not wait for the scan");
+    require(!controller.asset_scan_in_flight(), "scan still in flight after mutable access");
+    std::filesystem::remove_all(root);
+}
+
 int main() {
     try {
         const auto root = std::filesystem::temp_directory_path() / "dve_editor_asset_browser_v176";
@@ -349,6 +400,7 @@ int main() {
         test_sprite_asset_classification();
         test_incremental_rescan(root.parent_path() / "dve_editor_asset_browser_incremental");
         test_budgeted_thumbnails(root.parent_path() / "dve_editor_asset_browser_thumbnails");
+        test_background_scan(root.parent_path() / "dve_editor_asset_browser_background");
         std::filesystem::remove_all(root);
         std::cout << "dve_editor_asset_browser_tests: PASS\n";
         return 0;

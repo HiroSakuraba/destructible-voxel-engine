@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -10,6 +11,7 @@ namespace dve::render {
 namespace {
 constexpr std::size_t kDefaultObjectConstantCapacity = 4U * 1024U * 1024U;
 constexpr std::size_t kDefaultCascadeConstantCapacity = 64U * 1024U;
+constexpr std::size_t kDefaultDashrShellConstantCapacity = 4U * 1024U * 1024U;
 
 void set_error(std::string* error, std::string message) {
     if (error) *error = std::move(message);
@@ -103,6 +105,67 @@ bool bind_mesh(rhi::IDevice& device, rhi::CommandListHandle commands,
            device.bind_index_buffer(commands, draw.mirror->index_buffer(), 0U,
                                     rhi::IndexFormat::Uint32, error);
 }
+
+// Row-major 4x4 product: returns a * b for matrices stored like the constant
+// buffer arrays the shaders consume with mul(matrix, vector).
+std::array<float, 16> multiply_mat4(const std::array<float, 16>& a,
+                                    const std::array<float, 16>& b) noexcept {
+    std::array<float, 16> result{};
+    for (std::size_t row = 0U; row < 4U; ++row)
+        for (std::size_t column = 0U; column < 4U; ++column) {
+            float sum = 0.0F;
+            for (std::size_t k = 0U; k < 4U; ++k)
+                sum += a[row * 4U + k] * b[k * 4U + column];
+            result[row * 4U + column] = sum;
+        }
+    return result;
+}
+
+// World -> light clip matrix matching live_csm_caster_vs.hlsl exactly:
+// x = dot(world - center, right) / radius, y negated (atlas V grows downward),
+// z = (dot(world, forward) - minDepth) / depthRange. The shader's per-vertex
+// max(z, 0) depth pancaking has no matrix equivalent; casters in front of the
+// cascade near plane are clipped instead of pancaked. Cascade depth ranges are
+// derived from the caster bounds, so in practice casters stay inside.
+std::array<float, 16> light_clip_matrix(const CascadedShadowCascade& cascade) noexcept {
+    const float radius = std::max(cascade.radiusMeters, 1.0e-5F);
+    const float depthRange = std::max(
+        cascade.maximumLightDepth - cascade.minimumLightDepth, 1.0e-5F);
+    const auto& c = cascade.snappedCenter;
+    const auto& r = cascade.lightRight;
+    const auto& u = cascade.lightUp;
+    const auto& f = cascade.lightForward;
+    const float centerRight = c.x * r.x + c.y * r.y + c.z * r.z;
+    const float centerUp = c.x * u.x + c.y * u.y + c.z * u.z;
+    return {
+        r.x / radius, r.y / radius, r.z / radius, -centerRight / radius,
+        -u.x / radius, -u.y / radius, -u.z / radius, centerUp / radius,
+        f.x / depthRange, f.y / depthRange, f.z / depthRange,
+        -cascade.minimumLightDepth / depthRange,
+        0.0F, 0.0F, 0.0F, 1.0F};
+}
+
+// Maps a world-space direction into object space through the inverse of the
+// draw's object-to-world linear part. False when that part is not invertible.
+bool object_space_direction(const std::array<float, 16>& objectToWorld,
+                            Float3 worldDirection, Float3& objectDirection) noexcept {
+    const float a = objectToWorld[0], b = objectToWorld[1], c = objectToWorld[2];
+    const float d = objectToWorld[4], e = objectToWorld[5], f = objectToWorld[6];
+    const float g = objectToWorld[8], h = objectToWorld[9], i = objectToWorld[10];
+    const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (!std::isfinite(det) || std::abs(det) < 1.0e-20F) return false;
+    const float inv = 1.0F / det;
+    const Float3 v = worldDirection;
+    Float3 result{
+        ((e * i - f * h) * v.x + (c * h - b * i) * v.y + (b * f - c * e) * v.z) * inv,
+        ((f * g - d * i) * v.x + (a * i - c * g) * v.y + (c * d - a * f) * v.z) * inv,
+        ((d * h - e * g) * v.x + (b * g - a * h) * v.y + (a * e - b * d) * v.z) * inv};
+    const float lengthSquared = result.x * result.x + result.y * result.y + result.z * result.z;
+    if (!std::isfinite(lengthSquared) || lengthSquared < 1.0e-16F) return false;
+    const float scale = 1.0F / std::sqrt(lengthSquared);
+    objectDirection = {result.x * scale, result.y * scale, result.z * scale};
+    return true;
+}
 } // namespace
 
 bool LiveEnvironmentShaderBytecode::valid() const noexcept {
@@ -136,6 +199,15 @@ bool destroy_live_environment_renderer(rhi::IDevice& device,
         }
         local.clear();
     };
+    if (r.dashrShells) {
+        const bool shellsOk = destroy_dashr_shell_renderer(device, *r.dashrShells, &local);
+        if (!shellsOk) {
+            ok = false;
+            if (error && error->empty()) *error = local;
+        }
+        local.clear();
+        r.dashrShells.reset();
+    }
     if (r.skyboxPipeline) destroy(device.destroy_graphics_pipeline(r.skyboxPipeline, &local));
     if (r.materialPipeline) destroy(device.destroy_graphics_pipeline(r.materialPipeline, &local));
     if (r.shadowOpaquePipeline) destroy(device.destroy_graphics_pipeline(r.shadowOpaquePipeline, &local));
@@ -292,6 +364,19 @@ bool create_live_environment_renderer(rhi::IDevice& device,
             std::nullopt, true, true, rhi::CullMode::Disabled);
         if (!r.shadowMaskedPipeline) return fail(local);
     }
+    if (bytecode.dashr_valid()) {
+        DashrShellShaderBytecode shellBytecode;
+        shellBytecode.vertex = bytecode.dashrVertex;
+        shellBytecode.fragment = bytecode.dashrFragment;
+        shellBytecode.pbrFragment = bytecode.dashrPbrFragment;
+        shellBytecode.shadowFragment = bytecode.dashrShadowFragment;
+        auto shells = std::make_unique<DashrShellRendererResources>();
+        if (!create_dashr_shell_renderer(device, shellBytecode, colorFormat,
+                                         kDefaultDashrShellConstantCapacity,
+                                         *shells, &local))
+            return fail(local);
+        r.dashrShells = std::move(shells);
+    }
     if (out.valid()) {
         std::string ignored;
         (void)destroy_live_environment_renderer(device, out, &ignored);
@@ -408,15 +493,105 @@ bool record_live_environment_frame(rhi::IDevice& device,
         ++stats.cascadeConstantRanges;
     }
 
+    // DASHR shell expansion: one prepared entry per (draw, submesh). PBR draws
+    // publish their material through the same main material table the polygon
+    // path uses, and a missing explicit height source falls back to the height
+    // channel the descriptor resolved for that material.
+    struct PreparedShell {
+        const LiveDashrShellDraw* draw{};
+        std::uint32_t shellSubmeshIndex{};
+        const MainMaterialDescriptor* material{};
+        rhi::TextureViewHandle heightView{};
+        rhi::SamplerHandle heightSampler{};
+    };
+    std::vector<PreparedShell> preparedShells;
+    std::vector<DashrShellDraw> shellMainDraws;
+    bool shellCastersPresent = false;
+    if (!frame.dashrShellDraws.empty()) {
+        if (!renderer.dashr_valid()) {
+            set_error(error, "live environment frame carries DASHR shell draws but the "
+                             "renderer was created without shell shader bytecode");
+            return fail();
+        }
+        for (const auto& draw : frame.dashrShellDraws) {
+            if (!draw.asset || !draw.shellMirror || !draw.shellMirror->vertex_buffer() ||
+                !draw.shellMirror->index_buffer() || !draw.atlas || !draw.atlas->valid() ||
+                !draw.atlas->published ||
+                draw.shellMirror->submeshes().size() != draw.asset->submeshes.size()) {
+                set_error(error, "live environment DASHR shell draw is incomplete");
+                return fail();
+            }
+            if (draw.castsShadow) shellCastersPresent = true;
+            for (std::size_t index = 0U; index < draw.asset->submeshes.size(); ++index) {
+                const auto& submesh = draw.asset->submeshes[index];
+                const MainMaterialDescriptor* descriptor = nullptr;
+                if (draw.usePbr) {
+                    const auto mainBefore = renderer.mainMaterials->stats().descriptorCacheHits;
+                    if (!renderer.mainMaterials->ensure_material(*draw.asset, submesh.materialIndex, error))
+                        return fail();
+                    descriptor = renderer.mainMaterials->find(
+                        draw.asset->contentHash, submesh.materialIndex);
+                    if (!descriptor || !descriptor->bindGroup ||
+                        !descriptor->materialRecordBuffer || !descriptor->mappingRecordBuffer) {
+                        set_error(error, "main material descriptor and GPU records were not published");
+                        return fail();
+                    }
+                    if (renderer.mainMaterials->stats().descriptorCacheHits > mainBefore)
+                        ++stats.persistentMainMaterialDescriptorHits;
+                }
+                rhi::TextureViewHandle heightView = draw.heightView;
+                rhi::SamplerHandle heightSampler = draw.heightSampler;
+                if (descriptor) {
+                    const auto heightChannel =
+                        static_cast<std::uint32_t>(MainMaterialTextureChannel::Height);
+                    if (!heightView) heightView = descriptor->textureViews[heightChannel];
+                    if (!heightSampler) heightSampler = descriptor->samplers[heightChannel];
+                }
+                preparedShells.push_back({&draw, static_cast<std::uint32_t>(index),
+                                          descriptor, heightView, heightSampler});
+            }
+        }
+        if (shellCastersPresent && frame.drawShadowCasters && !renderer.dashr_shadow_valid()) {
+            set_error(error, "live environment DASHR shell draws cast shadows but the "
+                             "renderer was created without a shell shadow stage");
+            return fail();
+        }
+        for (const auto& item : preparedShells) {
+            DashrShellDraw shellDraw;
+            shellDraw.shell = item.draw->shellMirror;
+            shellDraw.atlas = item.draw->atlas;
+            shellDraw.heightView = item.heightView;
+            shellDraw.heightSampler = item.heightSampler;
+            shellDraw.shellSubmeshIndex = item.shellSubmeshIndex;
+            shellDraw.objectToClip = item.draw->objectToClip;
+            shellDraw.objectToWorld = item.draw->objectToWorld;
+            shellDraw.cameraObjectPosition = item.draw->cameraObjectPosition;
+            shellDraw.cameraWorldPosition = item.draw->cameraWorldPosition;
+            shellDraw.environmentParameters = item.draw->environmentParameters;
+            shellDraw.heightUvScale = item.draw->heightUvScale;
+            shellDraw.heightUvOffset = item.draw->heightUvOffset;
+            shellDraw.heightUvRotationRadians = item.draw->heightUvRotationRadians;
+            shellDraw.settings = item.draw->settings;
+            shellDraw.debugMode = item.draw->debugMode;
+            shellDraw.usePbr = item.draw->usePbr;
+            shellDraw.material = item.material;
+            if (shellDraw.usePbr) {
+                shellDraw.lighting = &lighting;
+                shellDraw.shadows = &shadowAtlas;
+            }
+            shellMainDraws.push_back(shellDraw);
+        }
+    }
+
     auto commands = device.begin_commands(rhi::QueueKind::Graphics, "Live environment frame", error);
     if (!commands) return fail();
 
-    if (frame.drawShadowCasters) {
-        const auto& staticDirty = frame.staticDirtyCascades.empty()
-            ? frame.dirtyCascades : frame.staticDirtyCascades;
-        const auto& dynamicDirty = frame.dynamicDirtyCascades.empty()
-            ? frame.dirtyCascades : frame.dynamicDirtyCascades;
+    const auto& staticDirty = frame.staticDirtyCascades.empty()
+        ? frame.dirtyCascades : frame.staticDirtyCascades;
+    const auto& dynamicDirty = frame.dynamicDirtyCascades.empty()
+        ? frame.dirtyCascades : frame.dynamicDirtyCascades;
 
+    if (frame.drawShadowCasters) {
         auto render_shadow_layer = [&](CascadedShadowLayer layer,
                                        const std::vector<std::uint32_t>& dirty,
                                        bool renderStaticCasters) -> bool {
@@ -486,47 +661,164 @@ bool record_live_environment_frame(rhi::IDevice& device,
         if (!render_shadow_layer(CascadedShadowLayer::Dynamic, dynamicDirty, false)) return fail();
     }
 
-    rhi::RenderPassDesc pass;
-    pass.debugName = "Live environment main pass";
-    pass.colors.push_back({frame.colorTarget, true, 0.0F, 0.0F, 0.0F, 1.0F});
-    pass.depth = rhi::RenderPassDepthAttachment{frame.depthTarget, true, 1.0F};
-    if (!device.begin_render_pass(commands, pass, error) ||
-        !device.set_viewport(commands, {0.0F, 0.0F, static_cast<float>(frame.width),
-                                        static_cast<float>(frame.height), 0.0F, 1.0F}, error) ||
-        !device.set_scissor(commands, {0, 0, frame.width, frame.height}, error)) return fail();
-    if (frame.drawSkybox) {
-        if (!device.bind_graphics_pipeline(commands, renderer.skyboxPipeline, error) ||
-            !device.bind_graphics_bind_group(commands, 0U, renderer.frameGroup, error) ||
-            !device.bind_graphics_bind_group(commands, 1U, lighting.bindGroup, error) ||
-            !device.bind_vertex_buffer(commands, 0U, renderer.skyboxVertices, 0U, 4U, error) ||
-            !device.bind_index_buffer(commands, renderer.skyboxIndices, 0U,
-                                      rhi::IndexFormat::Uint32, error) ||
-            !device.draw_indexed(commands, 3U, 1U, 0U, 0, 0U, error)) return fail();
-        ++stats.skyboxDraws;
-    }
-    if (frame.drawMaterials && !prepared.empty()) {
-        if (!device.bind_graphics_pipeline(commands, renderer.materialPipeline, error) ||
-            !device.bind_graphics_bind_group(commands, 0U, renderer.frameGroup, error) ||
-            !device.bind_graphics_bind_group(commands, 2U, lighting.bindGroup, error)) return fail();
-        for (const auto& item : prepared) {
-            if (!device.bind_graphics_bind_group(commands, 1U, item.objectGroup, error) ||
-                !device.bind_graphics_bind_group(commands, 3U, item.mainMaterialGroup, error) ||
-                !bind_mesh(device, commands, *item.draw, error) ||
-                !device.draw_indexed(commands, item.submesh->indexCount,
-                                     item.draw->instanceCount, item.submesh->firstIndex,
-                                     0, 0U, error)) return fail();
-            ++stats.materialDraws;
-            ++stats.mainMaterialDescriptorsBound;
-            ++stats.gpuMaterialRecordsBound;
-            ++stats.gpuMappingRecordsBound;
-            stats.materialTriangles += static_cast<std::uint64_t>(item.submesh->indexCount / 3U) *
-                                       item.draw->instanceCount;
+    auto record_main_pass = [&](rhi::CommandListHandle target) -> bool {
+        rhi::RenderPassDesc pass;
+        pass.debugName = "Live environment main pass";
+        pass.colors.push_back({frame.colorTarget, true, 0.0F, 0.0F, 0.0F, 1.0F});
+        pass.depth = rhi::RenderPassDepthAttachment{frame.depthTarget, true, 1.0F};
+        if (!device.begin_render_pass(target, pass, error) ||
+            !device.set_viewport(target, {0.0F, 0.0F, static_cast<float>(frame.width),
+                                          static_cast<float>(frame.height), 0.0F, 1.0F}, error) ||
+            !device.set_scissor(target, {0, 0, frame.width, frame.height}, error)) return false;
+        if (frame.drawSkybox) {
+            if (!device.bind_graphics_pipeline(target, renderer.skyboxPipeline, error) ||
+                !device.bind_graphics_bind_group(target, 0U, renderer.frameGroup, error) ||
+                !device.bind_graphics_bind_group(target, 1U, lighting.bindGroup, error) ||
+                !device.bind_vertex_buffer(target, 0U, renderer.skyboxVertices, 0U, 4U, error) ||
+                !device.bind_index_buffer(target, renderer.skyboxIndices, 0U,
+                                          rhi::IndexFormat::Uint32, error) ||
+                !device.draw_indexed(target, 3U, 1U, 0U, 0, 0U, error)) return false;
+            ++stats.skyboxDraws;
         }
+        if (frame.drawMaterials && !prepared.empty()) {
+            if (!device.bind_graphics_pipeline(target, renderer.materialPipeline, error) ||
+                !device.bind_graphics_bind_group(target, 0U, renderer.frameGroup, error) ||
+                !device.bind_graphics_bind_group(target, 2U, lighting.bindGroup, error)) return false;
+            for (const auto& item : prepared) {
+                if (!device.bind_graphics_bind_group(target, 1U, item.objectGroup, error) ||
+                    !device.bind_graphics_bind_group(target, 3U, item.mainMaterialGroup, error) ||
+                    !bind_mesh(device, target, *item.draw, error) ||
+                    !device.draw_indexed(target, item.submesh->indexCount,
+                                         item.draw->instanceCount, item.submesh->firstIndex,
+                                         0, 0U, error)) return false;
+                ++stats.materialDraws;
+                ++stats.mainMaterialDescriptorsBound;
+                ++stats.gpuMaterialRecordsBound;
+                ++stats.gpuMappingRecordsBound;
+                stats.materialTriangles += static_cast<std::uint64_t>(item.submesh->indexCount / 3U) *
+                                           item.draw->instanceCount;
+            }
+        }
+        return device.end_render_pass(target, error);
+    };
+
+    if (preparedShells.empty()) {
+        if (!record_main_pass(commands)) return fail();
+        const auto submitted = device.submit(commands, error);
+        if (!submitted) return fail();
+        if (fence) *fence = submitted;
+        cleanup_groups();
+        return true;
     }
-    if (!device.end_render_pass(commands, error)) return fail();
-    const auto submitted = device.submit(commands, error);
-    if (!submitted) return fail();
-    if (fence) *fence = submitted;
+
+    // Shell frames record and submit their own command lists, so the live list
+    // is split around them: shadow work submits first, displaced shell casters
+    // then merge into the atlas depth without clearing it, the main pass
+    // renders, and shells composite over the result (their pass loads the
+    // frame targets instead of clearing them). The returned fence is the last
+    // submission's, which transitively orders the whole frame.
+    rhi::FenceHandle lastFence;
+    if (frame.drawShadowCasters && shellCastersPresent) {
+        const auto shadowSubmitted = device.submit(commands, error);
+        if (!shadowSubmitted) return fail();
+        lastFence = shadowSubmitted;
+
+        auto record_shell_shadow_layer = [&](CascadedShadowLayer layer,
+                                             const std::vector<std::uint32_t>& dirty,
+                                             bool staticCasters) -> bool {
+            const auto layerPlan = make_cascaded_shadow_atlas_frame_plan(
+                shadowPlan, shadowAtlas, dirty, layer);
+            if (!layerPlan.validate(shadowPlan, error)) return false;
+            for (const auto& region : layerPlan.regions) {
+                if (!region.dirty) continue;
+                const CascadedShadowCascade* cascadePtr = nullptr;
+                for (const auto& candidate : shadowPlan.cascades)
+                    if (candidate.index == region.cascadeIndex) cascadePtr = &candidate;
+                if (!cascadePtr) return false;
+                const auto& cascade = *cascadePtr;
+                const auto lightClip = light_clip_matrix(cascade);
+                std::vector<DashrShadowDraw> regionDraws;
+                for (const auto& item : preparedShells) {
+                    if (!item.draw->castsShadow ||
+                        item.draw->staticShadowCaster != staticCasters) continue;
+                    if (item.draw->shellMirror->submeshes()[item.shellSubmeshIndex].indexCount == 0U)
+                        continue;
+                    Float3 rayObject;
+                    if (!object_space_direction(item.draw->objectToWorld,
+                                                cascade.lightForward, rayObject)) {
+                        set_error(error, "live environment DASHR shell draw has a "
+                                         "non-invertible object transform");
+                        return false;
+                    }
+                    DashrShadowDraw shadowDraw;
+                    shadowDraw.shell = item.draw->shellMirror;
+                    shadowDraw.atlas = item.draw->atlas;
+                    shadowDraw.heightView = item.heightView;
+                    shadowDraw.heightSampler = item.heightSampler;
+                    shadowDraw.shellSubmeshIndex = item.shellSubmeshIndex;
+                    shadowDraw.objectToLightClip = multiply_mat4(
+                        lightClip, item.draw->objectToWorld);
+                    shadowDraw.lightRayDirectionObject = rayObject;
+                    shadowDraw.heightUvScale = item.draw->heightUvScale;
+                    shadowDraw.heightUvOffset = item.draw->heightUvOffset;
+                    shadowDraw.heightUvRotationRadians = item.draw->heightUvRotationRadians;
+                    shadowDraw.settings = item.draw->settings;
+                    regionDraws.push_back(shadowDraw);
+                }
+                if (regionDraws.empty()) continue;
+                DashrShadowFrameDesc shadowFrame;
+                shadowFrame.depthTarget = layer == CascadedShadowLayer::Static
+                    ? shadowAtlas.depthAtlas : shadowAtlas.dynamicDepthAtlas;
+                shadowFrame.viewport = region.viewport;
+                shadowFrame.scissor = region.scissor;
+                shadowFrame.clearDepthTarget = false;
+                shadowFrame.draws = regionDraws;
+                DashrShadowFrameStats shadowStats;
+                if (!record_dashr_shadow_frame(device, *renderer.dashrShells,
+                                               shadowFrame, shadowStats, nullptr, error))
+                    return false;
+                stats.dashrShadowDraws += shadowStats.draws;
+                stats.dashrShadowTriangles += shadowStats.shellTriangles;
+            }
+            return true;
+        };
+        if (frame.refreshStaticShadowCasters &&
+            !record_shell_shadow_layer(CascadedShadowLayer::Static, staticDirty, true))
+            return fail();
+        if (!record_shell_shadow_layer(CascadedShadowLayer::Dynamic, dynamicDirty, false))
+            return fail();
+
+        auto mainCommands = device.begin_commands(
+            rhi::QueueKind::Graphics, "Live environment main pass (shell frame)", error);
+        if (!mainCommands) return fail();
+        if (!record_main_pass(mainCommands)) return fail();
+        const auto mainSubmitted = device.submit(mainCommands, error);
+        if (!mainSubmitted) return fail();
+        lastFence = mainSubmitted;
+    } else {
+        if (!record_main_pass(commands)) return fail();
+        const auto submitted = device.submit(commands, error);
+        if (!submitted) return fail();
+        lastFence = submitted;
+    }
+
+    if (!shellMainDraws.empty()) {
+        DashrShellFrameDesc shellFrame;
+        shellFrame.colorTarget = frame.colorTarget;
+        shellFrame.depthTarget = frame.depthTarget;
+        shellFrame.width = frame.width;
+        shellFrame.height = frame.height;
+        shellFrame.draws = shellMainDraws;
+        DashrShellFrameStats shellStats;
+        rhi::FenceHandle shellFence;
+        if (!record_dashr_shell_frame(device, *renderer.dashrShells, shellFrame,
+                                      shellStats, &shellFence, error)) return fail();
+        stats.dashrShellDraws += shellStats.draws;
+        stats.dashrShellPbrDraws += shellStats.pbrDraws;
+        stats.dashrShellTriangles += shellStats.shellTriangles;
+        lastFence = shellFence;
+    }
+    if (fence) *fence = lastFence;
     cleanup_groups();
     return true;
 }

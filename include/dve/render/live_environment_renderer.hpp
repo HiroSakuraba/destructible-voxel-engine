@@ -8,8 +8,11 @@
 #include <vector>
 #include <memory>
 
+#include "dve/dashr_surface.hpp"
 #include "dve/polygon_asset.hpp"
 #include "dve/render/cascaded_shadow_atlas.hpp"
+#include "dve/render/dashr_atlas.hpp"
+#include "dve/render/dashr_shell.hpp"
 #include "dve/render/environment_lighting_gpu.hpp"
 #include "dve/render/mesh_rhi_mirror.hpp"
 #include "dve/render/main_material_table.hpp"
@@ -27,7 +30,17 @@ struct LiveEnvironmentShaderBytecode {
     std::vector<std::byte> shadowVertex;
     // Optional for opaque depth-only casters, required by the alpha-masked caster pipeline.
     std::vector<std::byte> shadowFragment;
+    // Optional DASHR shell shading stages. Vertex + fragment publish the
+    // diagnostic shell path; pbrFragment additionally publishes the production
+    // PBR shell pipeline and shadowFragment the displaced shadow caster.
+    std::vector<std::byte> dashrVertex;
+    std::vector<std::byte> dashrFragment;
+    std::vector<std::byte> dashrPbrFragment;
+    std::vector<std::byte> dashrShadowFragment;
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] bool dashr_valid() const noexcept {
+        return !dashrVertex.empty() && !dashrFragment.empty();
+    }
 };
 
 struct alignas(16) GpuLiveObjectConstants {
@@ -81,7 +94,15 @@ struct LiveEnvironmentRendererResources {
     std::unique_ptr<MaterialResourceResidency> materialResidency;
     std::unique_ptr<ShadowMaterialDescriptorTable> shadowMaterials;
     std::unique_ptr<MainMaterialDescriptorTable> mainMaterials;
+    // Present only when the creation bytecode carried DASHR shell stages.
+    std::unique_ptr<DashrShellRendererResources> dashrShells;
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] bool dashr_valid() const noexcept {
+        return dashrShells && dashrShells->valid();
+    }
+    [[nodiscard]] bool dashr_shadow_valid() const noexcept {
+        return dashr_valid() && static_cast<bool>(dashrShells->shadowPipeline);
+    }
 };
 
 struct LivePolygonDraw {
@@ -93,6 +114,36 @@ struct LivePolygonDraw {
     bool staticShadowCaster{false};
 };
 
+// One DASHR-displaced asset in the live frame. The shell mesh mirror and the
+// surface atlas stay caller-owned, mirroring how MeshRhiMirror is passed for
+// polygon draws: the caller rebuilds and re-uploads them at its own cadence
+// (per frame for a skinned hero asset, on load for a static one) and the
+// renderer only records draws from the current mirrors. Draws expand to one
+// shell draw per asset submesh; material descriptors resolve through the
+// renderer's main material table when usePbr is set.
+struct LiveDashrShellDraw {
+    const CookedPolygonAsset* asset{};
+    const DashrShellMeshMirror* shellMirror{};
+    const DashrAtlasResources* atlas{};
+    // Explicit height source. May stay empty for PBR draws, where the height
+    // image and sampler resolve from the material descriptor instead.
+    rhi::TextureViewHandle heightView{};
+    rhi::SamplerHandle heightSampler{};
+    std::array<float, 16> objectToClip{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    std::array<float, 16> objectToWorld{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    Float3 cameraObjectPosition{};
+    Float3 cameraWorldPosition{};
+    std::array<float, 4> environmentParameters{};
+    Float2 heightUvScale{1.0F, 1.0F};
+    Float2 heightUvOffset{};
+    float heightUvRotationRadians{};
+    DashrSurfaceSettings settings{};
+    std::uint32_t debugMode{};
+    bool usePbr{true};
+    bool castsShadow{true};
+    bool staticShadowCaster{false};
+};
+
 struct LiveEnvironmentFrameDesc {
     rhi::TextureHandle colorTarget;
     rhi::TextureHandle depthTarget;
@@ -100,6 +151,7 @@ struct LiveEnvironmentFrameDesc {
     std::uint32_t height{};
     std::span<const std::byte> frameConstants;
     std::span<const LivePolygonDraw> polygonDraws;
+    std::span<const LiveDashrShellDraw> dashrShellDraws;
     // Legacy shared dirty set. Used for a layer when its layer-specific set is empty.
     std::vector<std::uint32_t> dirtyCascades;
     std::vector<std::uint32_t> staticDirtyCascades;
@@ -139,6 +191,11 @@ struct LiveEnvironmentFrameStats {
     std::uint64_t objectConstantRanges{};
     std::uint64_t cascadeConstantRanges{};
     std::uint32_t cascadesRendered{};
+    std::uint64_t dashrShellDraws{};
+    std::uint64_t dashrShellPbrDraws{};
+    std::uint64_t dashrShellTriangles{};
+    std::uint64_t dashrShadowDraws{};
+    std::uint64_t dashrShadowTriangles{};
 };
 
 [[nodiscard]] bool create_live_environment_renderer(

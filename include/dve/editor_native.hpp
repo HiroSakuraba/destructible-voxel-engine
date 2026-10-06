@@ -380,8 +380,18 @@ public:
     [[nodiscard]] const HierarchyDragState& hierarchy_drag() const noexcept { return hierarchyDrag_; }
     [[nodiscard]] BottomPanelTab bottom_tab() const noexcept { return bottomTab_; }
     [[nodiscard]] std::string_view hierarchy_filter() const noexcept { return hierarchyFilter_; }
-    [[nodiscard]] EditorAssetDatabase& asset_database() noexcept { return assetDatabase_; }
+    // Mutable access first finishes a background asset scan (see start_asset_scan), so callers
+    // that edit or inspect the database after a refresh see its result. Const access returns
+    // the current records without waiting; they are replaced when a scan completes.
+    [[nodiscard]] EditorAssetDatabase& asset_database();
     [[nodiscard]] const EditorAssetDatabase& asset_database() const noexcept { return assetDatabase_; }
+    // Re-indexes the project's assets on a worker thread; update() applies the result. Opening
+    // the Assets panel, its Refresh button, Ctrl+R and asset.refresh use this. A scan asked
+    // for while one runs is queued and starts once it finishes.
+    [[nodiscard]] bool start_asset_scan(bool announce = true);
+    [[nodiscard]] bool asset_scan_in_flight() const noexcept { return static_cast<bool>(assetScanInFlight_); }
+    // Waits for a running scan and applies it. Returns false if none was running.
+    bool finish_asset_scan();
     [[nodiscard]] EditorAssetBrowserState& asset_browser_state() noexcept { return assetBrowserState_; }
     [[nodiscard]] const EditorAssetBrowserState& asset_browser_state() const noexcept { return assetBrowserState_; }
     [[nodiscard]] std::vector<const EditorAssetRecord*> asset_browser_rows() const;
@@ -758,8 +768,15 @@ private:
     std::uint64_t manualSaveCount_{};
     EditorAutosaveStatus autosaveStatus_;
     bool recoveryChecked_{};
-    // Declared after the state above so its worker is joined before that state goes.
+    struct AssetScanJob;
+    std::shared_ptr<AssetScanJob> assetScanInFlight_;
+    bool assetRescanQueued_{};
+    bool assetRescanAnnounce_{};
+    void asset_scan_tick();
+    void apply_asset_scan(AssetScanJob& job);
+    // Declared after the state above so their workers are joined before that state goes.
     EditorTaskManager autosaveTasks_{1, 2};
+    EditorTaskManager assetScanTasks_{1, 2};
     void autosave_tick(float elapsedSeconds);
     void report_recovered_autosave();
     // Declared last so they are destroyed first: the session's callbacks post into the synth.

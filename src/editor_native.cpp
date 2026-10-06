@@ -4,6 +4,7 @@
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/print_export.hpp"
 
+#include <condition_variable>
 #include <mutex>
 #include <algorithm>
 #include <bit>
@@ -310,6 +311,7 @@ void NativeEditorController::configure_ai_assistant(std::filesystem::path projec
     std::error_code projectError;
     projectRoot_ = std::filesystem::weakly_canonical(projectRoot, projectError);
     if (projectError) projectRoot_ = projectRoot.lexically_normal();
+    (void)finish_asset_scan();
     assetDatabase_.set_project_root(projectRoot_);
     std::string assetIndexError;
     if (!assetDatabase_.load(&assetIndexError) && !assetIndexError.empty())
@@ -355,6 +357,7 @@ std::vector<const EditorAssetRecord*> NativeEditorController::asset_browser_rows
 }
 
 bool NativeEditorController::refresh_asset_database(bool announce) {
+    (void)finish_asset_scan();
     EditorAssetScanReport report;
     std::string error;
     // Thumbnails are written a little per frame from update() instead of inside the
@@ -366,7 +369,7 @@ bool NativeEditorController::refresh_asset_database(bool announce) {
         return false;
     }
     thumbnailBacklog_ = true;
-    if (assetBrowserState_.selectedId && !assetDatabase_.find(*assetBrowserState_.selectedId))
+    if (assetBrowserState_.selectedId && !std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId))
         assetBrowserState_.selectedId.reset();
     assetBrowserState_.firstVisible = 0U;
     recompute_layout();
@@ -378,6 +381,121 @@ bool NativeEditorController::refresh_asset_database(bool announce) {
     }
     for (const std::string& warning : report.warnings) workspace_.log().add(EditorLogLevel::Warning, warning);
     return true;
+}
+
+struct NativeEditorController::AssetScanJob {
+    std::mutex mutex;
+    std::condition_variable finished;
+    bool done{};
+    bool success{};
+    bool announce{};
+    std::string error;
+    EditorAssetScanReport report;
+    EditorAssetDatabase database;      // a copy of the editor's database, scanned on the worker
+    std::uint64_t baseRevision{};      // the editor database's revision when the copy was made
+};
+
+bool NativeEditorController::start_asset_scan(bool announce) {
+    if (assetScanInFlight_) {
+        // Files may have changed after the running scan read them; scan again when it ends.
+        assetRescanQueued_ = true;
+        assetRescanAnnounce_ = assetRescanAnnounce_ || announce;
+        return true;
+    }
+    // The worker scans a copy, so the panel keeps showing (and querying) the current records
+    // while it runs; asset_scan_tick() swaps the result in. Anything that edits the database
+    // meanwhile calls finish_asset_scan() first, so the two never write the index together.
+    auto job = std::make_shared<AssetScanJob>();
+    job->announce = announce;
+    job->database = assetDatabase_;
+    job->baseRevision = assetDatabase_.revision();
+    std::string submitError;
+    const auto task = assetScanTasks_.submit("Scan assets", [job](EditorTaskContext&) {
+        EditorAssetScanReport report;
+        std::string error;
+        bool success = false;
+        try {
+            // Thumbnails are written a little per frame from update(), not inside the scan.
+            EditorAssetScanOptions options;
+            options.generateThumbnails = false;
+            success = job->database.scan(&report, &error, options);
+        } catch (const std::exception& exception) {
+            error = exception.what();
+        }
+        {
+            std::lock_guard lock(job->mutex);
+            job->done = true;
+            job->success = success;
+            job->error = std::move(error);
+            job->report = std::move(report);
+        }
+        job->finished.notify_all();
+    }, &submitError);
+    if (!task) return refresh_asset_database(announce);  // no worker: scan here, as before
+    assetScanInFlight_ = std::move(job);
+    assetRescanQueued_ = false;
+    assetRescanAnnounce_ = false;
+    if (announce) set_status("Scanning assets...", false, 30.0F);
+    return true;
+}
+
+void NativeEditorController::apply_asset_scan(AssetScanJob& job) {
+    if (!job.success) {
+        if (job.announce) set_status(job.error.empty() ? "Asset scan failed" : job.error, true, 7.0F);
+        else if (!job.error.empty()) workspace_.log().add(EditorLogLevel::Warning, "Asset scan failed: " + job.error);
+        return;
+    }
+    if (assetDatabase_.revision() != job.baseRevision ||
+        assetDatabase_.project_root() != job.database.project_root()) {
+        // The database changed underneath the scan (finish_asset_scan() normally prevents
+        // this): drop the result and scan the current state again.
+        assetRescanQueued_ = true;
+        assetRescanAnnounce_ = assetRescanAnnounce_ || job.announce;
+        return;
+    }
+    assetDatabase_ = std::move(job.database);
+    thumbnailBacklog_ = true;
+    if (assetBrowserState_.selectedId && !std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId))
+        assetBrowserState_.selectedId.reset();
+    // Keep the user's scroll position unless the list got shorter than it.
+    if (assetBrowserState_.firstVisible >= assetDatabase_.records().size()) assetBrowserState_.firstVisible = 0U;
+    recompute_layout();
+    const EditorAssetScanReport& report = job.report;
+    if (job.announce) {
+        set_status("Assets indexed: " + std::to_string(report.indexed) +
+                   " (added " + std::to_string(report.added) +
+                   ", changed " + std::to_string(report.changed) +
+                   ", moved " + std::to_string(report.moved) + ")");
+    }
+    for (const std::string& warning : report.warnings) workspace_.log().add(EditorLogLevel::Warning, warning);
+}
+
+void NativeEditorController::asset_scan_tick() {
+    if (assetScanInFlight_) {
+        {
+            std::lock_guard lock(assetScanInFlight_->mutex);
+            if (!assetScanInFlight_->done) return;
+        }
+        const auto job = std::move(assetScanInFlight_);
+        apply_asset_scan(*job);
+    }
+    if (assetRescanQueued_) (void)start_asset_scan(assetRescanAnnounce_);
+}
+
+bool NativeEditorController::finish_asset_scan() {
+    if (!assetScanInFlight_) return false;
+    {
+        std::unique_lock lock(assetScanInFlight_->mutex);
+        assetScanInFlight_->finished.wait(lock, [&] { return assetScanInFlight_->done; });
+    }
+    const auto job = std::move(assetScanInFlight_);
+    apply_asset_scan(*job);
+    return true;
+}
+
+EditorAssetDatabase& NativeEditorController::asset_database() {
+    (void)finish_asset_scan();
+    return assetDatabase_;
 }
 
 bool NativeEditorController::start_live_mcp_host(ai::LiveEditorMcpHostOptions options,
@@ -1027,7 +1145,7 @@ bool NativeEditorController::activate_command_palette_selection() {
         set_status("Selected " + selected.label);
         return true;
     }
-    const EditorAssetRecord* asset = assetDatabase_.find(selected.id);
+    const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(selected.id);
     if (!asset) return false;
     assetBrowserState_.selectedId = asset->id;
     assetBrowserState_.query.text.clear();
@@ -2177,7 +2295,8 @@ void NativeEditorController::update(float elapsedSeconds) {
         spriteAnimationGraph_.set_live_state(!state.grounded ? "Jump" :
             (std::fabs(state.velocity.x) > 2.0F ? "Run" : "Idle"));
     }
-    if (thumbnailBacklog_) {
+    asset_scan_tick();
+    if (thumbnailBacklog_ && !assetScanInFlight_) {
         std::string thumbnailError;
         thumbnailBacklog_ = !assetDatabase_.generate_missing_thumbnails_for(
             std::chrono::milliseconds(2), nullptr, &thumbnailError);
@@ -2500,12 +2619,13 @@ void NativeEditorController::commit_text_edit() {
             set_status("No asset selected", true);
             return;
         }
-        const EditorAssetRecord* selectedAsset = assetDatabase_.find(*assetBrowserState_.selectedId);
+        const EditorAssetRecord* selectedAsset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
         if (!selectedAsset || name.empty() || name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
             set_status("Asset rename requires a valid filename", true);
             return;
         }
         const auto target = selectedAsset->relativePath.parent_path() / name;
+        (void)finish_asset_scan();  // the move rewrites the index; never alongside a scan
         const auto moved = assetDatabase_.move_asset(*assetBrowserState_.selectedId, target, true);
         set_status(moved.success ? moved.message : moved.message, !moved.success, 7.0F);
         recompute_layout();
@@ -3510,8 +3630,8 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         for (std::size_t index = 0; index < layout_.bottomTabs.size(); ++index) {
             if (layout_.bottomTabs[index].contains(x, y)) {
                 bottomTab_ = static_cast<BottomPanelTab>(index);
-                if (bottomTab_ == BottomPanelTab::Assets && assetDatabase_.records().empty())
-                    (void)refresh_asset_database(false);
+                if (bottomTab_ == BottomPanelTab::Assets && assetDatabase_.records().empty() && !assetScanInFlight_)
+                    (void)start_asset_scan(false);
                 recompute_layout();
                 focusRegion_ = EditorFocusRegion::BottomPanel;
                 return;
@@ -3554,7 +3674,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 return;
             }
             if (layout_.assetRefreshButton.contains(x, y)) {
-                (void)refresh_asset_database(true);
+                (void)start_asset_scan(true);
                 focusRegion_ = EditorFocusRegion::BottomPanel;
                 return;
             }
@@ -4460,7 +4580,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId == "sprite.editor") {
         if (assetBrowserState_.selectedId) {
-            const EditorAssetRecord* selected = assetDatabase_.find(*assetBrowserState_.selectedId);
+            const EditorAssetRecord* selected = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
             if (selected && (selected->kind == EditorAssetKind::Sprite || selected->kind == EditorAssetKind::Texture)) {
                 return dispatch_action("asset.open");
             }
@@ -5076,7 +5196,7 @@ camera_menu_dispatch_complete:
             set_status("Select a prefab asset first", true);
             return false;
         }
-        const EditorAssetRecord* asset = assetDatabase_.find(*assetBrowserState_.selectedId);
+        const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
         if (!asset || asset->kind != EditorAssetKind::Prefab) {
             set_status("The selected asset is not a prefab", true);
             return false;
@@ -5109,7 +5229,7 @@ camera_menu_dispatch_complete:
             set_status("Select an asset to open first", true);
             return false;
         }
-        const EditorAssetRecord* asset = assetDatabase_.find(*assetBrowserState_.selectedId);
+        const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
         if (!asset) {
             set_status("Selected asset no longer exists", true);
             return false;
@@ -5378,10 +5498,10 @@ camera_menu_dispatch_complete:
         }
         return true;
     }
-    if (actionId == "asset.refresh") return refresh_asset_database(true);
+    if (actionId == "asset.refresh") return start_asset_scan(true);
     if (actionId == "asset.rename") {
         if (!assetBrowserState_.selectedId) { set_status("No asset selected", true); return false; }
-        const EditorAssetRecord* asset = assetDatabase_.find(*assetBrowserState_.selectedId);
+        const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
         if (!asset) { set_status("Selected asset no longer exists", true); return false; }
         bottomTab_ = BottomPanelTab::Assets;
         begin_text_edit(TextEditKind::AssetRename, 0, asset->relativePath.filename().string());
@@ -5391,6 +5511,7 @@ camera_menu_dispatch_complete:
     if (actionId == "asset.thumbnail") {
         if (!assetBrowserState_.selectedId) { set_status("No asset selected", true); return false; }
         std::string error;
+        (void)finish_asset_scan();
         const bool generated = assetDatabase_.generate_thumbnail(*assetBrowserState_.selectedId, &error);
         set_status(generated ? "Asset thumbnail regenerated" : error, !generated);
         return generated;
@@ -5405,8 +5526,8 @@ camera_menu_dispatch_complete:
     }
     if (actionId == "window.toggle_assets") {
         bottomTab_ = bottomTab_ == BottomPanelTab::Assets ? BottomPanelTab::Console : BottomPanelTab::Assets;
-        if (bottomTab_ == BottomPanelTab::Assets && assetDatabase_.records().empty())
-            (void)refresh_asset_database(false);
+        if (bottomTab_ == BottomPanelTab::Assets && assetDatabase_.records().empty() && !assetScanInFlight_)
+            (void)start_asset_scan(false);
         recompute_layout();
         set_status(bottomTab_ == BottomPanelTab::Assets ? "Assets shown" : "Assets hidden");
         return true;
@@ -5772,7 +5893,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     }
 
     if (bottomTab_ == BottomPanelTab::Assets && focusRegion_ == EditorFocusRegion::BottomPanel) {
-        if (control && normalized == "r") { (void)refresh_asset_database(true); return; }
+        if (control && normalized == "r") { (void)start_asset_scan(true); return; }
         if (normalized == "f2") { (void)dispatch_action("asset.rename"); return; }
         const auto rows = asset_browser_rows();
         if (!rows.empty() && (normalized == "up" || normalized == "down" || normalized == "home" || normalized == "end")) {
@@ -5796,7 +5917,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             return;
         }
         if ((normalized == "return" || normalized == "enter") && assetBrowserState_.selectedId) {
-            if (const EditorAssetRecord* asset = assetDatabase_.find(*assetBrowserState_.selectedId)) {
+            if (const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId)) {
                 if (asset->kind == EditorAssetKind::Prefab) {
                     (void)dispatch_action("asset.instantiate_prefab");
                 } else if (asset->kind == EditorAssetKind::Sprite || asset->kind == EditorAssetKind::Texture ||

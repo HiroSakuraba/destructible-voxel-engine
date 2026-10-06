@@ -1,4 +1,5 @@
 #include "common/material_mapping.hlsli"
+#include "common/dashr_surface.hlsli"
 
 cbuffer MaterialMappingReferenceConstants : register(b8) {
     float4 gReferenceUvScaleOffset;

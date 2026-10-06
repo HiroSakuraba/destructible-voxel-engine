@@ -86,6 +86,14 @@ int main() {
                                   (1U << static_cast<std::uint32_t>(dve::render::MainMaterialTextureChannel::DetailBaseColor));
         CHECK(first->texturePresenceMask == expectedMask);
         CHECK(second->texturePresenceMask == 1U);
+        CHECK(first->textureViews[static_cast<std::uint32_t>(
+                  dve::render::MainMaterialTextureChannel::BaseColor)]);
+        CHECK(first->samplers[static_cast<std::uint32_t>(
+                  dve::render::MainMaterialTextureChannel::BaseColor)]);
+        CHECK(first->textureViews[static_cast<std::uint32_t>(
+                  dve::render::MainMaterialTextureChannel::Height)]);
+        CHECK(first->samplers[static_cast<std::uint32_t>(
+                  dve::render::MainMaterialTextureChannel::Height)]);
 
         dve::GpuMaterialRecord materialRead{};
         dve::GpuPolygonMaterialMappingRecord mappingRead{};

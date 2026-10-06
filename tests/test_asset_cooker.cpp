@@ -290,6 +290,8 @@ void test_gltf_import(const std::filesystem::path& temp) {
     }
     const dve::ImportedModelResult imported = dve::import_model(gltfPath);
     require(imported.success, "minimal glTF must import");
+    require(imported.sourceDependencies == std::vector<std::filesystem::path>{binPath.lexically_normal()},
+            "glTF import reports external buffer dependencies for hot reload");
     require(imported.scene.meshes.size() == 1, "glTF mesh count mismatch");
     require(imported.scene.meshes[0].triangles.size() == 1, "glTF triangle count mismatch");
     require(imported.scene.nodes.size() == 1, "glTF node count mismatch");

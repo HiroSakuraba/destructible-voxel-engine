@@ -153,6 +153,17 @@ void test_package_and_dependencies(const std::filesystem::path& root) {
         "dependency collection is dependency-first and deterministic");
     dve::SourceMonitor monitor;std::vector<std::filesystem::path> watched{root/"content/a.txt"};
     check(monitor.poll(watched).size()==1U&&monitor.poll(watched).empty(),"source monitor reports changes once");
+    dve::DebouncedSourceMonitor debounced;const auto start=dve::DebouncedSourceMonitor::Clock::time_point{};
+    const auto quiet=std::chrono::milliseconds(100);
+    check(debounced.poll(watched,start,quiet).empty(),"debounced monitor waits for a stable source");
+    {std::ofstream(root/"content/a.txt",std::ios::trunc)<<"gamma";}
+    check(debounced.poll(watched,start+std::chrono::milliseconds(50),quiet).empty(),"first save begins debounce interval");
+    {std::ofstream(root/"content/a.txt",std::ios::trunc)<<"delta";}
+    check(debounced.poll(watched,start+std::chrono::milliseconds(90),quiet).empty(),"subsequent save restarts debounce interval");
+    check(debounced.poll(watched,start+std::chrono::milliseconds(189),quiet).empty(),"source is not emitted before quiet interval");
+    const auto stable=debounced.poll(watched,start+std::chrono::milliseconds(190),quiet);
+    check(stable.size()==1U&&stable[0].contentHash!=0U,"stable source emits one hashed reimport candidate");
+    check(debounced.poll(watched,start+std::chrono::milliseconds(300),quiet).empty(),"stable source is emitted only once");
 }
 
 void test_profiler_input_and_save(const std::filesystem::path& root) {

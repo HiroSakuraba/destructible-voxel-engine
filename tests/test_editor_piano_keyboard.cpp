@@ -5,6 +5,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_piano_keyboard.hpp"
 
+#include <utility>
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -292,9 +293,9 @@ void test_persistence() {
         check(controller.keyboard_key_count() == 25, "default key count");
         check(controller.dispatch_action("view.keyboard_keys_61"), "menu action sets 61 keys");
         check(!controller.dispatch_action("view.keyboard_keys_60"), "unsupported size is rejected");
-        const auto* item = controller.workspace().menus().find("view.keyboard_keys_61");
+        const auto* item = std::as_const(controller.workspace().menus()).find("view.keyboard_keys_61");
         check(item != nullptr && item->checked, "61-key menu item checked");
-        const auto* other = controller.workspace().menus().find("view.keyboard_keys_25");
+        const auto* other = std::as_const(controller.workspace().menus()).find("view.keyboard_keys_25");
         check(other != nullptr && !other->checked, "radio group unchecks 25");
         check(std::filesystem::exists(path), "User settings saved");
     }

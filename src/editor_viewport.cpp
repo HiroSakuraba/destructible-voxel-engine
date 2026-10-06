@@ -300,12 +300,11 @@ EditorObjectBounds object_world_bounds(const EditorObject& object) noexcept {
     bool any = false;
     for (const auto& entry : object.voxels->bricks()) {
         const BrickKey key = entry.first;
-        entry.second.occupancy().for_each_set([&](std::uint16_t index) {
-            const Int3 voxel = global_from_local(key, local_from_index_unchecked(index));
-            minimum = min_components(minimum, voxel);
-            maximum = max_components(maximum, voxel);
-            any = true;
-        });
+        Int3 brickMinimum, brickMaximum;
+        if (!entry.second.occupancy().bounds(brickMinimum, brickMaximum)) continue;
+        minimum = min_components(minimum, global_from_local(key, brickMinimum));
+        maximum = max_components(maximum, global_from_local(key, brickMaximum));
+        any = true;
     }
     if (!any) return result;
     const float size = object.voxelSizeMeters;

@@ -50,6 +50,25 @@ struct Bitset512 {
         return static_cast<std::uint16_t>(total);
     }
 
+    // Each word is one z plane, with eight contiguous x bits per y row.
+    [[nodiscard]] constexpr bool bounds(Int3& minimum, Int3& maximum) const noexcept {
+        minimum = kInt3Max;
+        maximum = kInt3Min;
+        for (std::int32_t z = 0; z < kBrickDim; ++z) {
+            const std::uint64_t plane = words[static_cast<std::size_t>(z)];
+            if (plane == 0) continue;
+            std::uint64_t columns = plane | (plane >> 32U);
+            columns |= columns >> 16U;
+            columns |= columns >> 8U;
+            columns &= 0xffU;
+            minimum = min_components(minimum, {static_cast<std::int32_t>(std::countr_zero(columns)),
+                static_cast<std::int32_t>(std::countr_zero(plane) / 8), z});
+            maximum = max_components(maximum, {static_cast<std::int32_t>(std::bit_width(columns) - 1),
+                static_cast<std::int32_t>((63 - std::countl_zero(plane)) / 8), z});
+        }
+        return minimum.x != kInt3Max.x;
+    }
+
     template <class Fn>
     constexpr void for_each_set(Fn&& fn) const {
         for (std::uint16_t wordIndex = 0; wordIndex < words.size(); ++wordIndex) {

@@ -4,6 +4,7 @@
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/print_export.hpp"
 
+#include <mutex>
 #include <algorithm>
 #include <bit>
 #include <array>
@@ -1951,7 +1952,141 @@ void NativeEditorController::recompute_layout() {
     }
 }
 
+struct NativeEditorController::AutosaveJob {
+    std::uint64_t manualSaveCount{};  // File > Save count when this autosave started
+    std::mutex mutex;
+    bool done{};
+    bool success{};
+    std::string error;
+    std::filesystem::path manifest;
+};
+
+namespace {
+std::string autosave_stem(const EditorDocument& document) {
+    std::string stem = !document.path().empty() ? document.path().stem().string() : document.name();
+    for (char& c : stem)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
+    return stem.empty() ? std::string("untitled") : stem;
+}
+} // namespace
+
+std::filesystem::path NativeEditorController::autosave_directory() const {
+    std::filesystem::path base = projectRoot_;
+    if (base.empty() && !workspace_.document().path().empty()) base = workspace_.document().path().parent_path();
+    if (base.empty()) {
+        std::error_code error;
+        base = std::filesystem::current_path(error);
+    }
+    return base / ".dve" / "recovery" / autosave_stem(workspace_.document());
+}
+
+std::filesystem::path NativeEditorController::autosave_manifest_path() const {
+    const auto& path = workspace_.document().path();
+    const std::string fileName = !path.empty() && path.has_filename()
+        ? path.filename().string() : autosave_stem(workspace_.document()) + ".dvescene";
+    return autosave_directory() / fileName;
+}
+
+void NativeEditorController::report_recovered_autosave() {
+    std::error_code error;
+    const auto recovery = autosave_manifest_path();
+    if (!std::filesystem::exists(recovery, error)) return;
+    const auto& scene = workspace_.document().path();
+    if (!scene.empty() && std::filesystem::exists(scene, error)) {
+        const auto sceneTime = std::filesystem::last_write_time(scene, error);
+        if (!error && sceneTime >= std::filesystem::last_write_time(recovery, error) && !error) return;
+    }
+    const std::string message = "Unsaved changes from an earlier session were autosaved to " +
+        recovery.string() + "; open that scene with --scene to recover them.";
+    workspace_.log().add(EditorLogLevel::Warning, message);
+    set_status("Autosaved changes from an earlier session are available (see Console)", false, 10.0F);
+}
+
+void NativeEditorController::autosave_tick(float elapsedSeconds) {
+    if (autosaveInFlight_) {
+        std::lock_guard lock(autosaveInFlight_->mutex);
+        if (autosaveInFlight_->done) {
+            autosaveStatus_.inFlight = false;
+            if (autosaveInFlight_->success && autosaveInFlight_->manualSaveCount != manualSaveCount_) {
+                // The scene was saved while this ran; its copy is older than the file.
+                std::error_code ignored;
+                std::filesystem::remove_all(autosaveInFlight_->manifest.parent_path(), ignored);
+            } else if (autosaveInFlight_->success) {
+                ++autosaveStatus_.completed;
+                autosaveStatus_.lastManifest = autosaveInFlight_->manifest;
+                autosaveStatus_.lastError.clear();
+                workspace_.log().add(EditorLogLevel::Info, "Autosaved to " + autosaveInFlight_->manifest.string());
+            } else {
+                ++autosaveStatus_.failed;
+                autosaveStatus_.lastError = autosaveInFlight_->error;
+                workspace_.log().add(EditorLogLevel::Warning, "Autosave failed: " + autosaveInFlight_->error);
+            }
+        }
+    }
+    if (autosaveInFlight_ && !autosaveStatus_.inFlight) autosaveInFlight_.reset();
+    if (!recoveryChecked_) {
+        recoveryChecked_ = true;
+        report_recovered_autosave();
+    }
+    if (!workspace_.document().dirty()) {
+        autosaveElapsedSeconds_ = 0.0;
+        return;
+    }
+    autosaveElapsedSeconds_ += std::max(0.0F, elapsedSeconds);
+    const SettingValue minutesValue = workspace_.settings().value("editor.autosave_minutes");
+    const std::int64_t minutes = std::clamp<std::int64_t>(
+        std::get_if<std::int64_t>(&minutesValue) ? std::get<std::int64_t>(minutesValue) : 5, 1, 120);
+    if (autosaveInFlight_ || autosaveElapsedSeconds_ < static_cast<double>(minutes) * 60.0) return;
+    autosaveElapsedSeconds_ = 0.0;
+
+    // Clone on this thread (a consistent snapshot; whole-brick copies keep it quick),
+    // then write it on the worker. The open document, its path, revision and dirty
+    // flag are untouched. The copy is staged and swapped in only once fully written,
+    // so a failed or interrupted autosave never destroys the previous one.
+    auto job = std::make_shared<AutosaveJob>();
+    job->manualSaveCount = manualSaveCount_;
+    auto snapshot = std::make_shared<EditorDocument>(clone_editor_document(workspace_.document()));
+    const auto manifest = autosave_manifest_path();
+    std::string submitError;
+    const auto task = autosaveTasks_.submit("Autosave scene", [job, snapshot, manifest](EditorTaskContext&) {
+        bool success = false;
+        std::string error;
+        try {
+            const auto folder = manifest.parent_path();
+            const std::filesystem::path staging = folder.string() + ".writing";
+            std::filesystem::remove_all(staging);
+            std::filesystem::create_directories(staging);
+            const auto result = snapshot->save_transactional(staging / manifest.filename());
+            if (result.success) {
+                std::filesystem::remove_all(folder);
+                std::filesystem::rename(staging, folder);
+                success = true;
+            } else {
+                error = result.error;
+                std::error_code cleanup;
+                std::filesystem::remove_all(staging, cleanup);
+            }
+        } catch (const std::exception& exception) {
+            error = exception.what();
+        }
+        std::lock_guard lock(job->mutex);
+        job->done = true;
+        job->success = success;
+        job->error = std::move(error);
+        job->manifest = manifest;
+    }, &submitError);
+    if (!task) {
+        ++autosaveStatus_.failed;
+        autosaveStatus_.lastError = submitError;
+        workspace_.log().add(EditorLogLevel::Warning, "Autosave could not start: " + submitError);
+        return;
+    }
+    autosaveInFlight_ = std::move(job);
+    autosaveStatus_.inFlight = true;
+}
+
 void NativeEditorController::update(float elapsedSeconds) {
+    autosave_tick(elapsedSeconds);
     synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
     synthPanel_.sync_wavetable_section(audioMixer_.synthesizer());
     refresh_midi_status();
@@ -4640,6 +4775,13 @@ camera_menu_dispatch_complete:
         }
         const auto result = workspace_.document().save_transactional(workspace_.document().path());
         set_status(result.success ? "Scene saved" : result.error, !result.success);
+        if (result.success) {
+            // The scene file now holds everything the recovery copy did.
+            std::error_code ignored;
+            std::filesystem::remove_all(autosave_directory(), ignored);
+            autosaveElapsedSeconds_ = 0.0;
+            ++manualSaveCount_;
+        }
         return result.success;
     }
     if (actionId == "file.export_print_stl") {

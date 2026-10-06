@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 
+#include <utility>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -47,7 +48,7 @@ int main() {
     try {
         NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
         controller.resize(1280, 800);
-        const MenuAction* action = controller.workspace().menus().find("render.diagnostics3d");
+        const MenuAction* action = std::as_const(controller.workspace().menus()).find("render.diagnostics3d");
         require(action != nullptr, "3D diagnostics menu action is missing");
         require(action->shortcut == "F11", "3D diagnostics shortcut is wrong");
         require(controller.dispatch_action("render.diagnostics3d"), "3D diagnostics action failed");

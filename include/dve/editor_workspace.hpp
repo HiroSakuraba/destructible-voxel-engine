@@ -73,7 +73,11 @@ class EditorMenuRegistry {
 public:
     [[nodiscard]] bool add(MenuAction action, std::string* error = nullptr);
     [[nodiscard]] const MenuAction* find(std::string_view id) const noexcept;
-    [[nodiscard]] MenuAction* find(std::string_view id) noexcept;
+    // Legacy: a mutable pointer can be edited later without the registry knowing, so
+    // the first call switches this registry to uncached menu/search reads for good.
+    // Use the const overload to read and set_enabled/set_checked/set_shortcut to change.
+    [[nodiscard, deprecated("use the const find() to read and set_enabled/set_checked/set_shortcut to modify")]]
+    MenuAction* find(std::string_view id) noexcept;
     [[nodiscard]] bool set_enabled(std::string_view id, bool enabled, std::string reason = {}) noexcept;
     [[nodiscard]] bool set_checked(std::string_view id, bool checked) noexcept;
     [[nodiscard]] bool set_shortcut(std::string_view id, std::string shortcut) noexcept;
@@ -98,6 +102,7 @@ private:
     [[nodiscard]] MenuAction* find_for_update(std::string_view id) noexcept;
     void rebuild_search_fields() const;
     void rebuild_menu_indices() const;
+    [[nodiscard]] std::vector<std::size_t> ordered_menu_indices(std::string_view menuName, bool includeAdvanced) const;
 };
 
 struct EditorMenuUserState {

@@ -18,6 +18,7 @@
 #include "dve/editor_platform_bridge.hpp"
 #include "dve/editor_sdl_canvas.hpp"
 #include "dve/editor_ui_zoom.hpp"
+#include "dve/platform/frame_pacing.hpp"
 #include "dve/platform/sdl_application_host.hpp"
 
 int main(int argc, char** argv) {
@@ -156,6 +157,7 @@ int main(int argc, char** argv) {
         }
 
         int frames = 0;
+        const FramePacing framePacing{};
         double previous = host.monotonic_seconds();
         while (!controller.quit_requested()) {
             const double frameStart = host.monotonic_seconds();
@@ -187,12 +189,16 @@ int main(int argc, char** argv) {
             }
             if (smoke && frames == 3) (void)controller.synthesizer().note_off(60);
             if (smoke && frames >= 4) break;
-            // Budget includes update/render/present time. Input wakes the wait so
-            // a menu click never has to sit through an unconditional post-frame sleep.
-            const double remainingMilliseconds = (frameStart + 0.008 - host.monotonic_seconds()) * 1000.0;
-            if (remainingMilliseconds >= 1.0 && !controller.quit_requested())
-                (void)host.wait_for_events(std::chrono::milliseconds(
-                    static_cast<std::chrono::milliseconds::rep>(remainingMilliseconds)));
+            // Budget includes update/render/present time. Input wakes the wait so a
+            // menu click never sits through an unconditional post-frame sleep, but
+            // frames never start closer together than the pacing floor, so mouse
+            // motion cannot drive uncapped rendering (see frame_pacing.hpp).
+            if (!controller.quit_requested()) {
+                const auto wait = frame_budget_wait(framePacing, frameStart, host.monotonic_seconds());
+                if (wait.count() > 0) (void)host.wait_for_events(wait);
+                const auto floorSleep = frame_minimum_interval_sleep(framePacing, frameStart, host.monotonic_seconds());
+                if (floorSleep.count() > 0) host.sleep_for(floorSleep);
+            }
         }
 
         if (smoke) {

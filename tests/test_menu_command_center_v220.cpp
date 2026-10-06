@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_workspace.hpp"
 
+#include <set>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -101,7 +102,10 @@ void test_menu_cache_updates() {
     require(registry.search("same", 0).empty(), "zero-limit search returned results");
 
     // Legacy callers may keep and mutate a pointer after a cache has been warmed.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     MenuAction* escaped = registry.find(second.id);
+#pragma GCC diagnostic pop
     require(escaped != nullptr, "legacy mutable lookup failed");
     (void)registry.search("same", 8);
     (void)registry.menu("Test");
@@ -117,6 +121,33 @@ void test_menu_cache_updates() {
     escaped->keywords.push_back("afterwarm");
     require(registry.search("afterwarm", 8).front().id == "test.renamed",
             "later pointer edit left stale search fields");
+    escaped->visibility = MenuVisibility::PaletteOnly;
+    require(registry.menu("Other").empty() && registry.menu("Other", true).empty(),
+            "later pointer edit left stale menu visibility");
+    escaped->visibility = MenuVisibility::Primary;
+    escaped->menu = "Test";
+    escaped->order = -1000;
+    require(registry.menu("Test").front().id == "test.renamed", "later pointer edit left stale menu order");
+
+    // After a pointer escapes, menus are ordered per request rather than from the
+    // cache; the order must match the cached one exactly for every menu and mode.
+    EditorMenuRegistry cached = EditorMenuRegistry::make_default();
+    EditorMenuRegistry exposed = EditorMenuRegistry::make_default();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    require(exposed.find(exposed.actions().front().id) != nullptr, "could not expose a default action");
+#pragma GCC diagnostic pop
+    std::set<std::string> menuNames;
+    for (const MenuAction& action : cached.actions()) menuNames.insert(action.menu);
+    for (const std::string& name : menuNames) {
+        for (const bool includeAdvanced : {false, true}) {
+            const auto a = cached.menu(name, includeAdvanced);
+            const auto b = exposed.menu(name, includeAdvanced);
+            require(a.size() == b.size(), "uncached menu changed size");
+            for (std::size_t i = 0; i < a.size(); ++i)
+                require(a[i].id == b[i].id, "uncached menu order differs from the cached order");
+        }
+    }
 }
 
 void test_command_center_providers_and_persistence(const std::filesystem::path& root) {

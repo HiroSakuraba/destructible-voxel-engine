@@ -122,8 +122,14 @@ int main() {
         const auto root = std::filesystem::temp_directory_path() / "dve_editor_autosave_tests";
         std::filesystem::remove_all(root);
         std::filesystem::create_directories(root);
-        test_autosave(root);
-        std::filesystem::remove_all(root);
+        // Match NativeEditorController::configure_ai_assistant so recovery-path
+        // comparisons stay valid on Windows, where temp_directory_path() may be
+        // an 8.3 short path and weakly_canonical expands it to the long form.
+        std::error_code ec;
+        const auto canonicalRoot = std::filesystem::weakly_canonical(root, ec);
+        const auto projectRoot = ec ? root.lexically_normal() : canonicalRoot;
+        test_autosave(projectRoot);
+        std::filesystem::remove_all(projectRoot);
         std::cout << "dve_editor_autosave_tests: PASS\n";
         return 0;
     } catch (const std::exception& exception) {

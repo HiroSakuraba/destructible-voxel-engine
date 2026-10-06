@@ -295,6 +295,24 @@ private:
     std::map<std::filesystem::path, SourceFingerprint> known_;
 };
 
+// Converts filesystem observations into one event after a source has stayed
+// unchanged for the requested interval. The caller supplies time so editor
+// loops and tests can use their own clock.
+class DebouncedSourceMonitor {
+public:
+    using Clock = std::chrono::steady_clock;
+    [[nodiscard]] std::vector<SourceFingerprint> poll(
+        std::span<const std::filesystem::path> files, Clock::time_point now,
+        std::chrono::milliseconds quietPeriod, bool hashContents = true);
+private:
+    struct PendingChange {
+        SourceFingerprint fingerprint;
+        Clock::time_point observedAt{};
+    };
+    SourceMonitor monitor_;
+    std::map<std::filesystem::path, PendingChange> pending_;
+};
+
 // -----------------------------------------------------------------------------
 // Input actions and rebinding
 

@@ -10,9 +10,11 @@
 #include "dve/voxel_object.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -357,9 +359,195 @@ void test_cache_key_includes_culling() {
 
 } // namespace
 
+// ------------------------------------------------------- derived bounds cache
+
+namespace {
+
+bool same_bounds(const VoxelObject::DerivedBounds& a, const VoxelObject::DerivedBounds& b) {
+    return a.valid == b.valid && a.minimum == b.minimum && a.maximum == b.maximum;
+}
+
+VoxelObject::DerivedBounds reference_extent(const VoxelObject& object) {
+    VoxelObject::DerivedBounds result;
+    Int3 minimum = kInt3Max, maximum = kInt3Min;
+    for (const auto& entry : object.bricks()) {
+        const Int3 origin = brick_origin(entry.first);
+        minimum = min_components(minimum, origin);
+        maximum = max_components(maximum, {origin.x + kBrickDim, origin.y + kBrickDim, origin.z + kBrickDim});
+        result.valid = true;
+    }
+    result.minimum = minimum;
+    result.maximum = maximum;
+    return result;
+}
+
+VoxelObject::DerivedBounds reference_occupied(const VoxelObject& object) {
+    VoxelObject::DerivedBounds result;
+    Int3 minimum = kInt3Max, maximum = kInt3Min;
+    for (const auto& entry : object.bricks()) {
+        Int3 brickMinimum, brickMaximum;
+        if (!entry.second.occupancy().bounds(brickMinimum, brickMaximum)) continue;
+        minimum = min_components(minimum, global_from_local(entry.first, brickMinimum));
+        maximum = max_components(maximum, global_from_local(entry.first, brickMaximum));
+        result.valid = true;
+    }
+    result.minimum = minimum;
+    result.maximum = maximum;
+    return result;
+}
+
+std::uint64_t reference_count(const VoxelObject& object) {
+    std::uint64_t total = 0;
+    for (const auto& entry : object.bricks()) total += entry.second.occupied_count();
+    return total;
+}
+
+void require_derived_matches(const VoxelObject& object, const std::string& what) {
+    // Query twice: the second call takes the cached path and must agree.
+    for (int pass = 0; pass < 2; ++pass) {
+        require(same_bounds(object.brick_extent_bounds(), reference_extent(object)),
+                what + ": extent bounds diverged from the brick walk");
+        require(same_bounds(object.occupied_bounds(), reference_occupied(object)),
+                what + ": occupied bounds diverged from the brick walk");
+        require(object.occupied_voxel_count() == reference_count(object),
+                what + ": occupied count diverged from the brick walk");
+    }
+}
+
+} // namespace
+
+void test_derived_bounds_cache() {
+    VoxelObject empty(10);
+    require(!empty.brick_extent_bounds().valid, "empty object reports extent bounds");
+    require(!empty.occupied_bounds().valid, "empty object reports occupied bounds");
+    require(empty.occupied_voxel_count() == 0, "empty object reports voxels");
+
+    VoxelObject object(11);
+    std::mt19937 rng(4242);
+    std::uniform_int_distribution<int> coord(-20, 20);
+    std::uniform_int_distribution<int> material(1, 5);
+    for (int i = 0; i < 400; ++i)
+        (void)object.set_voxel({coord(rng), coord(rng), coord(rng)},
+                               static_cast<MaterialId>(material(rng)));
+    object.fill_brick({-3, 2, 0}, 2);
+    object.fill_brick({2, -3, 1}, 3);
+    // An emptied brick stays in the map: it counts toward extent, not occupancy.
+    (void)object.set_voxel({100, 100, 100}, 1);
+    (void)object.set_voxel({100, 100, 100}, kAirMaterial);
+    require_derived_matches(object, "random fixture");
+
+    // Edits after the cache is warm must be observed.
+    (void)object.set_voxel({-80, 0, 0}, 1);
+    require_derived_matches(object, "after growing set_voxel");
+    (void)object.set_voxel({-80, 0, 0}, kAirMaterial);
+    require_derived_matches(object, "after shrinking set_voxel");
+    (void)object.find_brick(brick_key_from_voxel({0, 0, 0}));
+    require_derived_matches(object, "after mutable find_brick");
+
+    // Moves carry the content; the source is left empty.
+    const auto extentBefore = object.brick_extent_bounds();
+    const auto occupiedBefore = object.occupied_bounds();
+    const auto countBefore = object.occupied_voxel_count();
+    VoxelObject moved(std::move(object));
+    require(same_bounds(moved.brick_extent_bounds(), extentBefore), "move ctor lost extent bounds");
+    require(same_bounds(moved.occupied_bounds(), occupiedBefore), "move ctor lost occupied bounds");
+    require(moved.occupied_voxel_count() == countBefore, "move ctor lost occupied count");
+    require(!object.brick_extent_bounds().valid, "moved-from object still reports extent bounds");
+    require(object.occupied_voxel_count() == 0, "moved-from object still reports voxels");
+
+    VoxelObject assigned(12);
+    assigned = std::move(moved);
+    require(same_bounds(assigned.brick_extent_bounds(), extentBefore), "move assign lost extent bounds");
+    require(same_bounds(assigned.occupied_bounds(), occupiedBefore), "move assign lost occupied bounds");
+    require(assigned.occupied_voxel_count() == countBefore, "move assign lost occupied count");
+    require_derived_matches(assigned, "after move assignment");
+    std::printf("derived bounds cache: OK\n");
+}
+
+void test_draw_sort_matches_reference() {
+    const auto referenceLess = [](const EditorVoxelDrawItem& a, const EditorVoxelDrawItem& b) {
+        if (a.depth != b.depth) return a.depth > b.depth;
+        if (a.objectId != b.objectId) return a.objectId < b.objectId;
+        return a.voxel < b.voxel;
+    };
+    const auto sameItem = [](const EditorVoxelDrawItem& a, const EditorVoxelDrawItem& b) {
+        return a.objectId == b.objectId && a.voxel == b.voxel && a.material == b.material &&
+               std::bit_cast<std::uint32_t>(a.depth) == std::bit_cast<std::uint32_t>(b.depth) &&
+               std::bit_cast<std::uint32_t>(a.screenX) == std::bit_cast<std::uint32_t>(b.screenX) &&
+               std::bit_cast<std::uint32_t>(a.screenY) == std::bit_cast<std::uint32_t>(b.screenY) &&
+               std::bit_cast<std::uint32_t>(a.pixelRadius) == std::bit_cast<std::uint32_t>(b.pixelRadius) &&
+               a.selected == b.selected && a.anchored == b.anchored;
+    };
+    const auto check = [&](EditorDocument& document, const EditorCamera& camera, bool cull,
+                           const std::string& what, bool requireRadixPath) {
+        const auto items = draw_list(document, camera, UiRect{0, 0, 960, 600}, cull);
+        if (requireRadixPath)
+            require(items.size() > 8192U, what + ": scene too small to exercise the large-list sort");
+        auto reference = items;
+        std::stable_sort(reference.begin(), reference.end(), referenceLess);
+        require(items.size() == reference.size(), what + ": size changed");
+        for (std::size_t i = 0; i < items.size(); ++i)
+            require(sameItem(items[i], reference[i]),
+                    what + ": item " + std::to_string(i) + " of " + std::to_string(items.size()) +
+                        " differs from the reference order");
+    };
+
+    // Adversarial ties: an orthographic camera looking straight down -Z gives
+    // every voxel in a z layer the exact same depth, so each layer is one
+    // giant equal-depth run decided entirely by the tie-break keys.
+    {
+        EditorDocument document("slab");
+        document.add_object(make_object(1, -40, 40, [](int, int, int z) {
+            return z >= 0 && z < 4 ? MaterialId{1} : kAirMaterial;
+        }));
+        EditorObject second = make_object(2, -40, 40, [](int, int, int z) {
+            return z >= 0 && z < 4 ? MaterialId{2} : kAirMaterial;
+        });
+        second.transform.position = {3.0F, 0.0F, 0.0F};
+        document.add_object(std::move(second));
+        EditorCamera camera;
+        camera.position = {0.0F, 0.0F, 10.0F};
+        camera.target = {0.0F, 0.0F, 0.0F};
+        camera.projection = EditorProjection::Orthographic;
+        check(document, camera, false, "ortho slab unculled", true);
+        check(document, camera, true, "ortho slab culled", false);
+    }
+
+    // Realistic depth distribution: a solid sphere in perspective, both modes.
+    {
+        EditorDocument document("sphere");
+        document.add_object(make_object(1, -28, 28, [](int x, int y, int z) {
+            return x * x + y * y + z * z <= 784 ? MaterialId{3} : kAirMaterial;
+        }));
+        const EditorCamera camera = orbit(0.7F, 0.5F, 8.0F, {0, 0, 0});
+        check(document, camera, false, "perspective sphere unculled", true);
+        check(document, camera, true, "perspective sphere culled", true);
+    }
+    std::printf("draw sort reference equality: OK\n");
+}
+
+void test_world_bounds_use_tight_box() {    EditorObject object(21, "bounds");
+    object.voxels = std::make_unique<VoxelObject>(21);
+    object.voxelSizeMeters = 0.5F;
+    (void)object.voxels->set_voxel({3, -2, 5}, 1);
+    (void)object.voxels->set_voxel({10, 4, -7}, 1);
+    (void)object.voxels->set_voxel({-100, -100, -100}, 1);
+    (void)object.voxels->set_voxel({-100, -100, -100}, kAirMaterial);
+    const EditorObjectBounds bounds = object_world_bounds(object);
+    require(bounds.valid, "world bounds invalid for occupied object");
+    require(bounds.minimum.x == 3 * 0.5F && bounds.minimum.y == -2 * 0.5F && bounds.minimum.z == -7 * 0.5F,
+            "world bounds minimum is not the tight occupied box");
+    require(bounds.maximum.x == 11 * 0.5F && bounds.maximum.y == 5 * 0.5F && bounds.maximum.z == 6 * 0.5F,
+            "world bounds maximum is not the tight occupied box");
+    std::printf("world bounds tight box: OK\n");
+}
+
 int main() {
     try {
         test_voxel_revisions();
+        test_derived_bounds_cache();
+        test_world_bounds_use_tight_box();
+        test_draw_sort_matches_reference();
         test_scene_fingerprint();
         test_exposed_set_matches_reference();
         test_culling_is_pixel_identical();

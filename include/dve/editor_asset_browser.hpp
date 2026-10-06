@@ -124,6 +124,9 @@ public:
     void set_project_root(std::filesystem::path projectRoot);
     [[nodiscard]] const std::filesystem::path& project_root() const noexcept { return root_; }
     [[nodiscard]] bool ready() const noexcept { return !root_.empty(); }
+    // Changes whenever the records may have changed (every mutating call, including
+    // the mutable find()). Lets callers cache results derived from the records.
+    [[nodiscard]] std::uint64_t revision() const noexcept { return revision_; }
 
     [[nodiscard]] bool scan(EditorAssetScanReport* report = nullptr, std::string* error = nullptr);
     [[nodiscard]] bool scan(EditorAssetScanReport* report, std::string* error, const EditorAssetScanOptions& options);
@@ -175,6 +178,7 @@ private:
     std::filesystem::path root_;
     std::vector<EditorAssetRecord> records_;
     std::size_t thumbnailCursor_{};
+    std::uint64_t revision_{};
 };
 
 [[nodiscard]] std::string_view to_string(EditorAssetKind kind) noexcept;

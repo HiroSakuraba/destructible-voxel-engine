@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
         std::size_t drawItems = 0;
         for (int i = 0; i < 50; ++i) {
             const auto start = Clock::now();
-            const auto items = controller.draw_items();
+            const auto& items = controller.draw_items();
             const auto end = Clock::now();
             drawItems = items.size();
             listTimes.push_back(std::chrono::duration<double, std::micro>(end - start).count());

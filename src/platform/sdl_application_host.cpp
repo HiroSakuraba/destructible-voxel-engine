@@ -280,6 +280,13 @@ void SdlApplicationHost::destroy_window() noexcept {
 
 bool SdlApplicationHost::has_window() const noexcept { return impl_ && impl_->window != nullptr; }
 
+bool SdlApplicationHost::wait_for_events(std::chrono::milliseconds timeout) {
+    if (!has_window()) return false;
+    const auto milliseconds = std::clamp<std::chrono::milliseconds::rep>(
+        timeout.count(), 0, 2'147'483'647);
+    return SDL_WaitEventTimeout(nullptr, static_cast<Sint32>(milliseconds));
+}
+
 bool SdlApplicationHost::audio_subsystem_initialized() const noexcept {
     return impl_ && impl_->audioInitialized;
 }

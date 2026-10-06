@@ -176,6 +176,7 @@ bool SDL_ShowWindow(SDL_Window* window);
 bool SDL_StartTextInput(SDL_Window* window);
 bool SDL_StopTextInput(SDL_Window* window);
 bool SDL_PollEvent(SDL_Event* event);
+bool SDL_WaitEventTimeout(SDL_Event* event, Sint32 timeoutMS);
 bool SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
 bool SDL_GetWindowSizeInPixels(SDL_Window* window, int* w, int* h);
 float SDL_GetWindowDisplayScale(SDL_Window* window);

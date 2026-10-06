@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -82,6 +83,21 @@ public:
     [[nodiscard]] static EditorMenuRegistry make_default();
 private:
     std::vector<MenuAction> actions_;
+    std::map<std::string, std::size_t, std::less<>> actionIndices_;
+    mutable std::vector<std::vector<std::string>> searchFields_;
+    mutable std::map<std::string, std::array<std::vector<std::size_t>, 2>, std::less<>> menuIndices_;
+    mutable std::string searchQuery_;
+    mutable std::vector<std::size_t> searchResults_;
+    mutable bool searchFieldsDirty_{true};
+    mutable bool menusDirty_{true};
+    mutable bool searchResultsValid_{};
+    // Legacy mutable find() callers can keep and edit a pointer at any time. Once a
+    // pointer escapes, use uncached reads so those edits cannot leave stale results.
+    bool mutableActionExposed_{};
+
+    [[nodiscard]] MenuAction* find_for_update(std::string_view id) noexcept;
+    void rebuild_search_fields() const;
+    void rebuild_menu_indices() const;
 };
 
 struct EditorMenuUserState {

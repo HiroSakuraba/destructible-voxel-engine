@@ -663,20 +663,20 @@ std::vector<CommandPaletteResult> NativeEditorController::command_palette_result
     if (query.empty() && (provider == Provider::All || provider == Provider::Commands)) {
         int priority = 0;
         for (const std::string& id : favoriteCommandIds_) {
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, priority++);
         }
         for (const std::string& id : recentCommandIds_) {
             if (std::any_of(scored.begin(), scored.end(), [&](const ScoredResult& item) {
                     return item.result.kind == CommandPaletteResultKind::Command && item.result.id == id;
                 })) continue;
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, 100 + priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, 100 + priority++);
         }
         for (std::string_view id : {"file.save", "edit.undo", "sprite.tile_world", "sprite.diagnostics",
                                     "render.diagnostics3d", "physics.play", "build.validate", "help.shortcuts"}) {
             if (std::any_of(scored.begin(), scored.end(), [&](const ScoredResult& item) {
                     return item.result.kind == CommandPaletteResultKind::Command && item.result.id == id;
                 })) continue;
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, 250 + priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, 250 + priority++);
         }
     } else if (provider == Provider::All || provider == Provider::Commands) {
         for (const MenuAction& action : workspace_.menus().search(query, 64)) {
@@ -724,7 +724,7 @@ std::vector<CommandPaletteResult> NativeEditorController::command_palette_result
         for (const PanelEntry& panel : panels) {
             const int score = command_center_score(query, {panel.label, panel.action, panel.detail, "panel window workspace"});
             if (score < 0) continue;
-            const MenuAction* action = workspace_.menus().find(panel.action);
+            const MenuAction* action = std::as_const(workspace_.menus()).find(panel.action);
             append(score + 2, {CommandPaletteResultKind::Panel, std::string(panel.action), std::string(panel.label),
                                "Window > Panels", std::string(panel.detail),
                                action ? action->shortcut : std::string{}, action ? action->disabledReason : std::string{},
@@ -831,9 +831,9 @@ void NativeEditorController::configure_menu_state(std::filesystem::path path) {
         if (auto state = EditorMenuUserState::load(menuStatePath_, &error)) {
             showAdvancedMenus_ = state->showAdvancedCommands;
             for (const std::string& id : state->favoriteActionIds)
-                if (workspace_.menus().find(id)) favoriteCommandIds_.insert(id);
+                if (std::as_const(workspace_.menus()).find(id)) favoriteCommandIds_.insert(id);
             for (const std::string& id : state->recentActionIds)
-                if (workspace_.menus().find(id)) recentCommandIds_.push_back(id);
+                if (std::as_const(workspace_.menus()).find(id)) recentCommandIds_.push_back(id);
         } else if (!error.empty()) workspace_.log().add(EditorLogLevel::Warning, "Menu state load: " + error);
     }
     refresh_menu_state();
@@ -1467,8 +1467,11 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
 
 void NativeEditorController::refresh_menu_state() noexcept {
     auto checked = [&](std::string_view id, bool value) { (void)workspace_.menus().set_checked(id, value); };
-    auto enabled = [&](std::string_view id, bool value, std::string reason) {
-        (void)workspace_.menus().set_enabled(id, value, value ? std::string{} : std::move(reason));
+    auto enabled = [&](std::string_view id, bool value, std::string_view reason) {
+        const MenuAction* action = std::as_const(workspace_.menus()).find(id);
+        if (action && action->enabled == value &&
+            (value ? action->disabledReason.empty() : action->disabledReason == reason)) return;
+        (void)workspace_.menus().set_enabled(id, value, value ? std::string{} : std::string(reason));
     };
     for (const int keys : kPianoKeyboardSizes)
         checked("view.keyboard_keys_" + std::to_string(keys), keyboard_key_count() == keys);
@@ -3905,7 +3908,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     // interaction. Re-evaluate availability at the command boundary so shortcuts, automation,
     // context menus, and top-level menus all enforce the same current-state contract.
     refresh_menu_state();
-    if (const MenuAction* action = workspace_.menus().find(actionId)) {
+    if (const MenuAction* action = std::as_const(workspace_.menus()).find(actionId)) {
         if (!action->enabled) {
             set_status(action->disabledReason.empty() ? "That command is not available in the current context"
                                                        : action->disabledReason, true, 6.0F);

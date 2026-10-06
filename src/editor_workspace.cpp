@@ -121,6 +121,7 @@ bool EditorMenuRegistry::add(MenuAction action, std::string* error) {
     }
     searchFieldsDirty_ = menusDirty_ = true;
     searchResultsValid_ = false;
+    ++revision_;
     return true;
 }
 const MenuAction* EditorMenuRegistry::find(std::string_view id) const noexcept {
@@ -142,8 +143,10 @@ MenuAction* EditorMenuRegistry::find_for_update(std::string_view id) noexcept {
 bool EditorMenuRegistry::set_enabled(std::string_view id, bool enabled, std::string reason) noexcept {
     if (MenuAction* action = find_for_update(id)) {
         if (action->enabled != enabled) searchResultsValid_ = false;
+        std::string newReason = enabled ? std::string{} : std::move(reason);
+        if (action->enabled != enabled || action->disabledReason != newReason) ++revision_;
         action->enabled = enabled;
-        action->disabledReason = enabled ? std::string{} : std::move(reason);
+        action->disabledReason = std::move(newReason);
         return true;
     }
     return false;
@@ -156,6 +159,7 @@ bool EditorMenuRegistry::set_checked(std::string_view id, bool checked) noexcept
             if (candidate.radioGroup == action->radioGroup) candidate.checked = false;
     }
     action->checked = checked;
+    ++revision_;
     return true;
 }
 bool EditorMenuRegistry::set_shortcut(std::string_view id, std::string shortcut) noexcept {
@@ -164,6 +168,7 @@ bool EditorMenuRegistry::set_shortcut(std::string_view id, std::string shortcut)
             action->shortcut = std::move(shortcut);
             searchFieldsDirty_ = true;
             searchResultsValid_ = false;
+            ++revision_;
         }
         return true;
     }

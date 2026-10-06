@@ -1,11 +1,13 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace dve::editor {
@@ -86,7 +88,17 @@ struct EditorAssetScanReport {
     std::size_t removed{};
     std::size_t brokenDependencies{};
     std::size_t thumbnailsGenerated{};
+    // Files whose content was read and hashed, and files whose hash was reused
+    // because their size and modification time were unchanged since the last scan.
+    std::size_t hashedFiles{};
+    std::size_t reusedHashes{};
     std::vector<std::string> warnings;
+};
+
+struct EditorAssetScanOptions {
+    // Write missing thumbnails before scan() returns. The editor turns this off and
+    // fills them in a little per frame with generate_missing_thumbnails_for().
+    bool generateThumbnails{true};
 };
 
 struct EditorAssetMutationReport {
@@ -112,8 +124,12 @@ public:
     void set_project_root(std::filesystem::path projectRoot);
     [[nodiscard]] const std::filesystem::path& project_root() const noexcept { return root_; }
     [[nodiscard]] bool ready() const noexcept { return !root_.empty(); }
+    // Changes whenever the records may have changed (every mutating call, including
+    // the mutable find()). Lets callers cache results derived from the records.
+    [[nodiscard]] std::uint64_t revision() const noexcept { return revision_; }
 
     [[nodiscard]] bool scan(EditorAssetScanReport* report = nullptr, std::string* error = nullptr);
+    [[nodiscard]] bool scan(EditorAssetScanReport* report, std::string* error, const EditorAssetScanOptions& options);
     [[nodiscard]] bool save(std::string* error = nullptr) const;
     [[nodiscard]] bool load(std::string* error = nullptr);
 
@@ -135,6 +151,11 @@ public:
                                                         bool rewriteTextReferences = true);
     [[nodiscard]] bool generate_thumbnail(std::string_view id, std::string* error = nullptr);
     [[nodiscard]] std::size_t generate_missing_thumbnails(std::string* error = nullptr);
+    // Resumable: checks and writes missing thumbnails until the budget is spent and
+    // returns true once every record has been visited since the last scan or load.
+    [[nodiscard]] bool generate_missing_thumbnails_for(std::chrono::microseconds budget,
+                                                       std::size_t* generated = nullptr,
+                                                       std::string* error = nullptr);
 
     [[nodiscard]] std::filesystem::path index_path() const;
     [[nodiscard]] std::filesystem::path thumbnail_directory() const;
@@ -143,9 +164,21 @@ private:
     [[nodiscard]] std::filesystem::path normalize_relative(const std::filesystem::path& path,
                                                            std::string* error = nullptr) const;
     void refresh_health_and_dependencies(EditorAssetScanReport* report);
+    [[nodiscard]] bool write_thumbnail(const EditorAssetRecord& record, std::string* error) const;
+
+    // Dependency tokens of text assets by relative path, valid while the content
+    // hash and size match. In memory only; rebuilt on the first scan of a session.
+    struct TextTokens {
+        std::uint64_t contentHash{};
+        std::uint64_t byteSize{};
+        std::vector<std::string> tokens;
+    };
+    std::unordered_map<std::string, TextTokens> textTokens_;
 
     std::filesystem::path root_;
     std::vector<EditorAssetRecord> records_;
+    std::size_t thumbnailCursor_{};
+    std::uint64_t revision_{};
 };
 
 [[nodiscard]] std::string_view to_string(EditorAssetKind kind) noexcept;

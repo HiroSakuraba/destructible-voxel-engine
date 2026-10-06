@@ -63,6 +63,10 @@ struct SettingDefinition {
     std::uint32_t requiredCapabilities{SettingCapabilityNone};
     bool advanced{};
     std::vector<SettingDependency> dependencies;
+    // False while nothing in the engine or editor reads this setting yet, so changing
+    // it has no effect. The Settings panel says so, and dve_settings_applied_tests
+    // keeps the flag in sync with the code.
+    bool applied{true};
 };
 
 struct SettingSearchResult {

@@ -4177,6 +4177,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             std::string policy;
             if (definition.applyPolicy == SettingApplyPolicy::RestartRequired) policy = "restart";
             else if (definition.applyPolicy == SettingApplyPolicy::OnApply) policy = "apply";
+            if (!definition.applied) policy = "no effect yet";
             const int policyX = policy.empty() ? row.x + row.width : row.x + row.width - painter.text_width(policy) - 8;
             const int markerX = marker.empty() ? valueX - 12 : std::max(row.x + row.width / 3, valueX - painter.text_width(marker) - 12);
             if (!policy.empty()) settingsText.add_cell({policyX - 2, row.y, row.x + row.width - policyX + 2, row.height});
@@ -4209,6 +4210,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             if (definition.id == kUiZoomSettingId)
                 details = "Default: 100%  Min: 100%  Max: 200%  Step: 25%  Current window allows up to " +
                           format_ui_zoom_percent(controller.ui_zoom_window_limit());
+            if (!definition.applied) details += "  |  Not applied yet: changing this has no effect in this build.";
             settingsText.text(settingsLayout.detailPanel.x + 10, settingsLayout.detailPanel.y + 68, details, muted);
             const SettingAvailability availability = controller.workspace().settings().availability(
                 definition.id, controller.settings_capabilities());

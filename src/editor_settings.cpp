@@ -484,6 +484,51 @@ bool EditorSettingsRegistry::parse_profile(SettingScope scope,std::string_view t
     in>>std::ws;if(!in.eof())return fail("trailing settings profile data");layer(scope)=std::move(parsed);orphanedSettings_=std::move(orphans);return true;
 }
 
+namespace {
+// Settings that are defined and saved but not yet read by anything, so changing them
+// has no effect in this build. Remove an id from this list when wiring it up;
+// dve_settings_applied_tests fails if the list and the code disagree.
+constexpr std::string_view kNotYetApplied[] = {
+    "accessibility.camera_shake", "accessibility.color_vision", "accessibility.dynamic_range",
+    "accessibility.focus_indicators", "accessibility.mono_audio", "accessibility.reduced_motion",
+    "accessibility.subtitles", "audio.buffer_frames", "audio.dialogue_gain_db", "audio.effects_gain_db",
+    "audio.granular_quality", "audio.hrtf", "audio.loudness_normalization", "audio.master_gain_db",
+    "audio.music_gain_db", "audio.sample_rate", "audio.spatializer", "audio.stream_preload_ms",
+    "build.configuration", "build.deterministic_oracles", "build.headless", "build.sanitizers",
+    "build.target", "build.verify_dependencies", "camera.accessibility_disable_grain",
+    "camera.accessibility_limit_fisheye", "camera.accessibility_reduce_blur",
+    "camera.accessibility_reduce_flare", "camera.aim_damping", "camera.collision_radius",
+    "camera.collision_recovery", "camera.constant_speed_dolly", "camera.dead_zone", "camera.dof_quality",
+    "camera.film_grain_quality", "camera.horizon_lock", "camera.ignore_time_scale",
+    "camera.input_acceleration", "camera.input_smoothing", "camera.lens_effect_quality", "camera.look_ahead",
+    "camera.lut_resolution", "camera.lut_streaming", "camera.missing_lut_fallback",
+    "camera.motion_blur_quality", "camera.navigation_style", "camera.position_damping",
+    "camera.preserve_line_of_sight", "camera.render_target_outputs", "camera.sequence_scrub_rate",
+    "camera.shake_scale", "camera.show_focus_planes", "camera.soft_zone", "camera.tone_map_output",
+    "diagnostics.audio_stats", "diagnostics.camera_debug", "diagnostics.capture_repro",
+    "diagnostics.gpu_markers", "diagnostics.render_stats", "diagnostics.validation_on_save",
+    "editor.restore_workspace", "editor.telemetry_local", "editor.theme", "geometry.mode",
+    "input.controller_dead_zone", "input.gamepad_prompts", "input.raw_mouse", "input.ui_repeat_delay",
+    "input.ui_repeat_rate", "material.clear_coat", "material.foliage", "material.global_parameters",
+    "material.layer_limit", "material.subsurface", "material.validate_gpu_layout", "physics.allow_sleeping",
+    "physics.backend", "physics.continuous_collision", "physics.deterministic", "physics.fixed_timestep",
+    "physics.gravity", "physics.max_substeps", "physics.position_iterations", "physics.substeps",
+    "physics.velocity_iterations", "physics.worker_threads", "plugins.clap_host", "plugins.clap_sandbox",
+    "plugins.ffmpeg_import", "plugins.reload_on_change", "polygon.frustum_culling", "polygon.instancing",
+    "polygon.lod_bias", "polygon.mesh_streaming", "polygon.occlusion_culling", "render.anisotropy",
+    "render.ao_quality", "render.backend", "render.bloom", "render.bloom_threshold",
+    "render.contact_shadow_distance", "render.display_mode", "render.dynamic_shared_camera",
+    "render.exposure", "render.frame_limit", "render.gi_distance", "render.gi_intensity", "render.gi_mode",
+    "render.gi_quality", "render.hdr", "render.high_dpi", "render.local_players", "render.preferred_display",
+    "render.resolution_profile", "render.resolution_scale", "render.shadow_mode", "render.shadow_quality",
+    "render.shadow_softness", "render.shadow_strength", "render.spectator_window",
+    "render.split_screen_layout", "render.texture_budget_mb", "render.texture_filter", "render.tonemap",
+    "render.translucent_layers", "scripting.hot_reload", "scripting.lua", "scripting.migration_timeout_ms",
+    "scripting.strict_errors", "voxel.async_connectivity", "voxel.brick_budget", "voxel.debris_limit",
+    "voxel.destruction_quality", "voxel.ray_step_scale",
+};
+} // namespace
+
 EditorSettingsRegistry EditorSettingsRegistry::make_default() {
     EditorSettingsRegistry result;
     const std::vector<SettingChoice> onOffQuality{{"low","Low"},{"medium","Medium"},{"high","High"},{"ultra","Ultra"}};
@@ -726,6 +771,9 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
     });
     const std::vector<std::string> physicalDependents{"camera.focal_length_mm","camera.sensor_preset","camera.gate_fit","camera.aperture","camera.focus_distance","camera.depth_of_field","camera.show_focus_planes"};
     for(const std::string& id:physicalDependents) (void)result.set_dependencies(id,{{"camera.physical_lens",true,"Enable Use Physical Lens to edit this option."}});
+    for (SettingDefinition& definition : result.definitions_)
+        if (std::find(std::begin(kNotYetApplied), std::end(kNotYetApplied), definition.id) != std::end(kNotYetApplied))
+            definition.applied = false;
     return result;
 }
 

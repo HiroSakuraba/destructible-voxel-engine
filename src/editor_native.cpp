@@ -4,6 +4,7 @@
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/print_export.hpp"
 
+#include <mutex>
 #include <algorithm>
 #include <bit>
 #include <array>
@@ -356,10 +357,15 @@ std::vector<const EditorAssetRecord*> NativeEditorController::asset_browser_rows
 bool NativeEditorController::refresh_asset_database(bool announce) {
     EditorAssetScanReport report;
     std::string error;
-    if (!assetDatabase_.scan(&report, &error)) {
+    // Thumbnails are written a little per frame from update() instead of inside the
+    // scan, which could otherwise block the editor for seconds on a first scan.
+    EditorAssetScanOptions options;
+    options.generateThumbnails = false;
+    if (!assetDatabase_.scan(&report, &error, options)) {
         if (announce) set_status(error.empty() ? "Asset scan failed" : error, true, 7.0F);
         return false;
     }
+    thumbnailBacklog_ = true;
     if (assetBrowserState_.selectedId && !assetDatabase_.find(*assetBrowserState_.selectedId))
         assetBrowserState_.selectedId.reset();
     assetBrowserState_.firstVisible = 0U;
@@ -625,7 +631,54 @@ std::vector<MenuAction> NativeEditorController::menu_actions(std::string_view me
     return workspace_.menus().menu(menuName, showAdvancedMenus_);
 }
 
+namespace {
+struct PaletteKeyHasher {
+    std::uint64_t h{0x9E3779B97F4A7C15ULL};
+    void u64(std::uint64_t v) noexcept {
+        h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6U) + (h >> 2U);
+        h *= 0xBF58476D1CE4E5B9ULL;
+        h ^= h >> 31U;
+    }
+    void text(std::string_view v) noexcept { u64(std::hash<std::string_view>{}(v)); u64(v.size()); }
+};
+} // namespace
+
+// The palette scores every command, setting, panel, asset and scene object, and is
+// requested on every pointer move and every frame while open. Results are cached
+// until something they are derived from changes: the query, the limit, favorites and
+// recents, the menu registry and asset database revisions, the advanced-settings
+// toggle, or the scene objects' ids and names (hashed, which is far cheaper than
+// scoring them).
 std::vector<CommandPaletteResult> NativeEditorController::command_palette_results(std::size_t limit) const {
+    PaletteKeyHasher key;
+    key.text(commandPaletteQuery_);
+    key.u64(limit);
+    key.u64(favoriteCommandIds_.size());
+    for (const std::string& id : favoriteCommandIds_) key.text(id);
+    key.u64(recentCommandIds_.size());
+    for (const std::string& id : recentCommandIds_) key.text(id);
+    key.u64(workspace_.menus().revision());
+    key.u64(assetDatabase_.revision());
+    key.u64(settingsPanel_.includeAdvanced ? 1U : 0U);
+    key.u64(workspace_.settings().definitions().size());
+    if (!commandPaletteQuery_.empty()) {
+        const auto& objects = workspace_.document().objects();
+        key.u64(objects.size());
+        for (const auto& [id, object] : objects) {
+            key.u64(id);
+            key.text(object.name);
+        }
+    }
+    if (!paletteCacheValid_ || key.h != paletteCacheKey_) {
+        paletteCache_ = build_command_palette_results(limit);
+        paletteCacheKey_ = key.h;
+        paletteCacheValid_ = true;
+        ++paletteCacheRebuilds_;
+    }
+    return paletteCache_;
+}
+
+std::vector<CommandPaletteResult> NativeEditorController::build_command_palette_results(std::size_t limit) const {
     enum class Provider : std::uint8_t { All, Commands, Settings, Panels, Assets, Objects, Documentation };
     Provider provider = Provider::All;
     std::string query = commandPaletteQuery_;
@@ -663,20 +716,20 @@ std::vector<CommandPaletteResult> NativeEditorController::command_palette_result
     if (query.empty() && (provider == Provider::All || provider == Provider::Commands)) {
         int priority = 0;
         for (const std::string& id : favoriteCommandIds_) {
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, priority++);
         }
         for (const std::string& id : recentCommandIds_) {
             if (std::any_of(scored.begin(), scored.end(), [&](const ScoredResult& item) {
                     return item.result.kind == CommandPaletteResultKind::Command && item.result.id == id;
                 })) continue;
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, 100 + priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, 100 + priority++);
         }
         for (std::string_view id : {"file.save", "edit.undo", "sprite.tile_world", "sprite.diagnostics",
                                     "render.diagnostics3d", "physics.play", "build.validate", "help.shortcuts"}) {
             if (std::any_of(scored.begin(), scored.end(), [&](const ScoredResult& item) {
                     return item.result.kind == CommandPaletteResultKind::Command && item.result.id == id;
                 })) continue;
-            if (const MenuAction* action = workspace_.menus().find(id)) commandResult(*action, 250 + priority++);
+            if (const MenuAction* action = std::as_const(workspace_.menus()).find(id)) commandResult(*action, 250 + priority++);
         }
     } else if (provider == Provider::All || provider == Provider::Commands) {
         for (const MenuAction& action : workspace_.menus().search(query, 64)) {
@@ -724,7 +777,7 @@ std::vector<CommandPaletteResult> NativeEditorController::command_palette_result
         for (const PanelEntry& panel : panels) {
             const int score = command_center_score(query, {panel.label, panel.action, panel.detail, "panel window workspace"});
             if (score < 0) continue;
-            const MenuAction* action = workspace_.menus().find(panel.action);
+            const MenuAction* action = std::as_const(workspace_.menus()).find(panel.action);
             append(score + 2, {CommandPaletteResultKind::Panel, std::string(panel.action), std::string(panel.label),
                                "Window > Panels", std::string(panel.detail),
                                action ? action->shortcut : std::string{}, action ? action->disabledReason : std::string{},
@@ -831,9 +884,9 @@ void NativeEditorController::configure_menu_state(std::filesystem::path path) {
         if (auto state = EditorMenuUserState::load(menuStatePath_, &error)) {
             showAdvancedMenus_ = state->showAdvancedCommands;
             for (const std::string& id : state->favoriteActionIds)
-                if (workspace_.menus().find(id)) favoriteCommandIds_.insert(id);
+                if (std::as_const(workspace_.menus()).find(id)) favoriteCommandIds_.insert(id);
             for (const std::string& id : state->recentActionIds)
-                if (workspace_.menus().find(id)) recentCommandIds_.push_back(id);
+                if (std::as_const(workspace_.menus()).find(id)) recentCommandIds_.push_back(id);
         } else if (!error.empty()) workspace_.log().add(EditorLogLevel::Warning, "Menu state load: " + error);
     }
     refresh_menu_state();
@@ -1467,8 +1520,11 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
 
 void NativeEditorController::refresh_menu_state() noexcept {
     auto checked = [&](std::string_view id, bool value) { (void)workspace_.menus().set_checked(id, value); };
-    auto enabled = [&](std::string_view id, bool value, std::string reason) {
-        (void)workspace_.menus().set_enabled(id, value, value ? std::string{} : std::move(reason));
+    auto enabled = [&](std::string_view id, bool value, std::string_view reason) {
+        const MenuAction* action = std::as_const(workspace_.menus()).find(id);
+        if (action && action->enabled == value &&
+            (value ? action->disabledReason.empty() : action->disabledReason == reason)) return;
+        (void)workspace_.menus().set_enabled(id, value, value ? std::string{} : std::string(reason));
     };
     for (const int keys : kPianoKeyboardSizes)
         checked("view.keyboard_keys_" + std::to_string(keys), keyboard_key_count() == keys);
@@ -1948,7 +2004,141 @@ void NativeEditorController::recompute_layout() {
     }
 }
 
+struct NativeEditorController::AutosaveJob {
+    std::uint64_t manualSaveCount{};  // File > Save count when this autosave started
+    std::mutex mutex;
+    bool done{};
+    bool success{};
+    std::string error;
+    std::filesystem::path manifest;
+};
+
+namespace {
+std::string autosave_stem(const EditorDocument& document) {
+    std::string stem = !document.path().empty() ? document.path().stem().string() : document.name();
+    for (char& c : stem)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
+    return stem.empty() ? std::string("untitled") : stem;
+}
+} // namespace
+
+std::filesystem::path NativeEditorController::autosave_directory() const {
+    std::filesystem::path base = projectRoot_;
+    if (base.empty() && !workspace_.document().path().empty()) base = workspace_.document().path().parent_path();
+    if (base.empty()) {
+        std::error_code error;
+        base = std::filesystem::current_path(error);
+    }
+    return base / ".dve" / "recovery" / autosave_stem(workspace_.document());
+}
+
+std::filesystem::path NativeEditorController::autosave_manifest_path() const {
+    const auto& path = workspace_.document().path();
+    const std::string fileName = !path.empty() && path.has_filename()
+        ? path.filename().string() : autosave_stem(workspace_.document()) + ".dvescene";
+    return autosave_directory() / fileName;
+}
+
+void NativeEditorController::report_recovered_autosave() {
+    std::error_code error;
+    const auto recovery = autosave_manifest_path();
+    if (!std::filesystem::exists(recovery, error)) return;
+    const auto& scene = workspace_.document().path();
+    if (!scene.empty() && std::filesystem::exists(scene, error)) {
+        const auto sceneTime = std::filesystem::last_write_time(scene, error);
+        if (!error && sceneTime >= std::filesystem::last_write_time(recovery, error) && !error) return;
+    }
+    const std::string message = "Unsaved changes from an earlier session were autosaved to " +
+        recovery.string() + "; open that scene with --scene to recover them.";
+    workspace_.log().add(EditorLogLevel::Warning, message);
+    set_status("Autosaved changes from an earlier session are available (see Console)", false, 10.0F);
+}
+
+void NativeEditorController::autosave_tick(float elapsedSeconds) {
+    if (autosaveInFlight_) {
+        std::lock_guard lock(autosaveInFlight_->mutex);
+        if (autosaveInFlight_->done) {
+            autosaveStatus_.inFlight = false;
+            if (autosaveInFlight_->success && autosaveInFlight_->manualSaveCount != manualSaveCount_) {
+                // The scene was saved while this ran; its copy is older than the file.
+                std::error_code ignored;
+                std::filesystem::remove_all(autosaveInFlight_->manifest.parent_path(), ignored);
+            } else if (autosaveInFlight_->success) {
+                ++autosaveStatus_.completed;
+                autosaveStatus_.lastManifest = autosaveInFlight_->manifest;
+                autosaveStatus_.lastError.clear();
+                workspace_.log().add(EditorLogLevel::Info, "Autosaved to " + autosaveInFlight_->manifest.string());
+            } else {
+                ++autosaveStatus_.failed;
+                autosaveStatus_.lastError = autosaveInFlight_->error;
+                workspace_.log().add(EditorLogLevel::Warning, "Autosave failed: " + autosaveInFlight_->error);
+            }
+        }
+    }
+    if (autosaveInFlight_ && !autosaveStatus_.inFlight) autosaveInFlight_.reset();
+    if (!recoveryChecked_) {
+        recoveryChecked_ = true;
+        report_recovered_autosave();
+    }
+    if (!workspace_.document().dirty()) {
+        autosaveElapsedSeconds_ = 0.0;
+        return;
+    }
+    autosaveElapsedSeconds_ += std::max(0.0F, elapsedSeconds);
+    const SettingValue minutesValue = workspace_.settings().value("editor.autosave_minutes");
+    const std::int64_t minutes = std::clamp<std::int64_t>(
+        std::get_if<std::int64_t>(&minutesValue) ? std::get<std::int64_t>(minutesValue) : 5, 1, 120);
+    if (autosaveInFlight_ || autosaveElapsedSeconds_ < static_cast<double>(minutes) * 60.0) return;
+    autosaveElapsedSeconds_ = 0.0;
+
+    // Clone on this thread (a consistent snapshot; whole-brick copies keep it quick),
+    // then write it on the worker. The open document, its path, revision and dirty
+    // flag are untouched. The copy is staged and swapped in only once fully written,
+    // so a failed or interrupted autosave never destroys the previous one.
+    auto job = std::make_shared<AutosaveJob>();
+    job->manualSaveCount = manualSaveCount_;
+    auto snapshot = std::make_shared<EditorDocument>(clone_editor_document(workspace_.document()));
+    const auto manifest = autosave_manifest_path();
+    std::string submitError;
+    const auto task = autosaveTasks_.submit("Autosave scene", [job, snapshot, manifest](EditorTaskContext&) {
+        bool success = false;
+        std::string error;
+        try {
+            const auto folder = manifest.parent_path();
+            const std::filesystem::path staging = folder.string() + ".writing";
+            std::filesystem::remove_all(staging);
+            std::filesystem::create_directories(staging);
+            const auto result = snapshot->save_transactional(staging / manifest.filename());
+            if (result.success) {
+                std::filesystem::remove_all(folder);
+                std::filesystem::rename(staging, folder);
+                success = true;
+            } else {
+                error = result.error;
+                std::error_code cleanup;
+                std::filesystem::remove_all(staging, cleanup);
+            }
+        } catch (const std::exception& exception) {
+            error = exception.what();
+        }
+        std::lock_guard lock(job->mutex);
+        job->done = true;
+        job->success = success;
+        job->error = std::move(error);
+        job->manifest = manifest;
+    }, &submitError);
+    if (!task) {
+        ++autosaveStatus_.failed;
+        autosaveStatus_.lastError = submitError;
+        workspace_.log().add(EditorLogLevel::Warning, "Autosave could not start: " + submitError);
+        return;
+    }
+    autosaveInFlight_ = std::move(job);
+    autosaveStatus_.inFlight = true;
+}
+
 void NativeEditorController::update(float elapsedSeconds) {
+    autosave_tick(elapsedSeconds);
     synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
     synthPanel_.sync_wavetable_section(audioMixer_.synthesizer());
     refresh_midi_status();
@@ -1986,6 +2176,16 @@ void NativeEditorController::update(float elapsedSeconds) {
         const auto& state = spriteLevel_->state();
         spriteAnimationGraph_.set_live_state(!state.grounded ? "Jump" :
             (std::fabs(state.velocity.x) > 2.0F ? "Run" : "Idle"));
+    }
+    if (thumbnailBacklog_) {
+        std::string thumbnailError;
+        thumbnailBacklog_ = !assetDatabase_.generate_missing_thumbnails_for(
+            std::chrono::milliseconds(2), nullptr, &thumbnailError);
+        if (!thumbnailError.empty()) {
+            // Log once and stop; an unwritable thumbnail folder would otherwise fail every frame.
+            workspace_.log().add(EditorLogLevel::Warning, "Asset thumbnails paused: " + thumbnailError);
+            thumbnailBacklog_ = false;
+        }
     }
     if (liveMcpHost_) (void)liveMcpHost_->pump(16);
     workspace_.ai_assistant().refresh_pending_approvals();
@@ -3905,7 +4105,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     // interaction. Re-evaluate availability at the command boundary so shortcuts, automation,
     // context menus, and top-level menus all enforce the same current-state contract.
     refresh_menu_state();
-    if (const MenuAction* action = workspace_.menus().find(actionId)) {
+    if (const MenuAction* action = std::as_const(workspace_.menus()).find(actionId)) {
         if (!action->enabled) {
             set_status(action->disabledReason.empty() ? "That command is not available in the current context"
                                                        : action->disabledReason, true, 6.0F);
@@ -4637,6 +4837,13 @@ camera_menu_dispatch_complete:
         }
         const auto result = workspace_.document().save_transactional(workspace_.document().path());
         set_status(result.success ? "Scene saved" : result.error, !result.success);
+        if (result.success) {
+            // The scene file now holds everything the recovery copy did.
+            std::error_code ignored;
+            std::filesystem::remove_all(autosave_directory(), ignored);
+            autosaveElapsedSeconds_ = 0.0;
+            ++manualSaveCount_;
+        }
         return result.success;
     }
     if (actionId == "file.export_print_stl") {

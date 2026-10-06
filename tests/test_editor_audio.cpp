@@ -1,3 +1,4 @@
+#include <utility>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -14,7 +15,7 @@ int main() {
     using namespace dve::editor;
     try {
         NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
-        require(controller.workspace().menus().find("window.toggle_audio") != nullptr,
+        require(std::as_const(controller.workspace().menus()).find("window.toggle_audio") != nullptr,
                 "Audio Mixer is missing from the Window menu");
         require(controller.dispatch_action("window.toggle_audio"), "audio panel menu action failed");
         require(controller.audio_panel().open(), "audio panel did not open");

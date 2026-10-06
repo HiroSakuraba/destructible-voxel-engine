@@ -266,6 +266,15 @@ struct GizmoScreenAxis {
     ScreenPoint end{};
 };
 
+// Background recovery saves driven by the editor.autosave_minutes setting.
+struct EditorAutosaveStatus {
+    bool inFlight{};
+    std::uint64_t completed{};
+    std::uint64_t failed{};
+    std::filesystem::path lastManifest;
+    std::string lastError;
+};
+
 class NativeEditorController {
 public:
     explicit NativeEditorController(EditorWorkspace workspace = EditorWorkspace{});
@@ -314,6 +323,12 @@ public:
     [[nodiscard]] int window_height() const noexcept { return height_; }
     [[nodiscard]] const std::optional<EditorPickResult>& hover_pick() const noexcept { return hoverPick_; }
     [[nodiscard]] const EditorStatusMessage& status() const noexcept { return status_; }
+    // Recovery copy of the current scene: <project>/.dve/recovery/<scene>/. Written in
+    // the background after editor.autosave_minutes of unsaved changes; removed by a
+    // successful File > Save.
+    [[nodiscard]] std::filesystem::path autosave_directory() const;
+    [[nodiscard]] std::filesystem::path autosave_manifest_path() const;
+    [[nodiscard]] const EditorAutosaveStatus& autosave_status() const noexcept { return autosaveStatus_; }
     [[nodiscard]] bool command_palette_open() const noexcept { return commandPaletteOpen_; }
     [[nodiscard]] std::string_view command_palette_query() const noexcept { return commandPaletteQuery_; }
     [[nodiscard]] std::vector<MenuAction> menu_actions(std::string_view menuName) const;
@@ -322,6 +337,7 @@ public:
         return favoriteCommandIds_.contains(actionId);
     }
     [[nodiscard]] std::vector<CommandPaletteResult> command_palette_results(std::size_t limit = 10) const;
+    [[nodiscard]] std::uint64_t command_palette_rebuild_count() const noexcept { return paletteCacheRebuilds_; }
     [[nodiscard]] NativeCommandPaletteLayout command_palette_layout() const;
     [[nodiscard]] std::size_t command_palette_selection() const noexcept { return commandPaletteSelection_; }
     [[nodiscard]] std::optional<std::string_view> open_menu() const noexcept;
@@ -557,6 +573,7 @@ public:
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
 
 private:
+    [[nodiscard]] std::vector<CommandPaletteResult> build_command_palette_results(std::size_t limit) const;
     void recompute_layout();
     void update_hover(int x, int y);
     void begin_voxel_stroke(int x, int y);
@@ -609,6 +626,7 @@ private:
     EditorWorkspace workspace_;
     EditorMaterialLibrary materials_;
     EditorAssetDatabase assetDatabase_{};
+    bool thumbnailBacklog_{};
     EditorAssetBrowserState assetBrowserState_{};
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
@@ -648,6 +666,10 @@ private:
     std::size_t commandPaletteSelection_{};
     std::deque<std::string> recentCommandIds_;
     std::set<std::string, std::less<>> favoriteCommandIds_;
+    mutable std::vector<CommandPaletteResult> paletteCache_;
+    mutable std::uint64_t paletteCacheKey_{};
+    mutable bool paletteCacheValid_{};
+    mutable std::uint64_t paletteCacheRebuilds_{};
     bool showAdvancedMenus_{};
     std::filesystem::path menuStatePath_;
     std::filesystem::path userSettingsPath_;
@@ -730,6 +752,16 @@ private:
     std::unique_ptr<ai::DveAiBridge> aiBridge_;
     std::unique_ptr<ai::LiveEditorMcpHost> liveMcpHost_;
     EditorTaskManager aiTasks_{1, 8};
+    struct AutosaveJob;
+    std::shared_ptr<AutosaveJob> autosaveInFlight_;
+    double autosaveElapsedSeconds_{};
+    std::uint64_t manualSaveCount_{};
+    EditorAutosaveStatus autosaveStatus_;
+    bool recoveryChecked_{};
+    // Declared after the state above so its worker is joined before that state goes.
+    EditorTaskManager autosaveTasks_{1, 2};
+    void autosave_tick(float elapsedSeconds);
+    void report_recovered_autosave();
     // Declared last so they are destroyed first: the session's callbacks post into the synth.
     std::unique_ptr<audio::MidiOutputSession> midiOutput_;
     std::unique_ptr<audio::MidiInputSession> midiInput_;

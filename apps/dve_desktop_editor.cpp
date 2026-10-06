@@ -156,8 +156,10 @@ int main(int argc, char** argv) {
         }
 
         int frames = 0;
+        std::optional<bool> requestedVsync;
         double previous = host.monotonic_seconds();
         while (!controller.quit_requested()) {
+            const double frameStart = host.monotonic_seconds();
             PlatformEvent event;
             while (host.poll_event(event)) bridge.handle_event(event);
 
@@ -165,6 +167,13 @@ int main(int argc, char** argv) {
             controller.update(static_cast<float>(now - previous));
             previous = now;
             sync_zoom(host.window_metrics());
+            const bool vsync = std::get<bool>(controller.workspace().settings().value("render.vsync"));
+            if (requestedVsync != vsync) {
+                requestedVsync = vsync;
+                std::string vsyncError;
+                if (!canvas.set_vsync(vsync, &vsyncError))
+                    std::cerr << "SDL vsync: " << vsyncError << '\n';
+            }
             host.set_window_title(controller.workspace().document().name() +
                                   (controller.workspace().document().dirty() ? " *" : "") +
                                   " - DVE Desktop Editor");
@@ -186,7 +195,10 @@ int main(int argc, char** argv) {
             }
             if (smoke && frames == 3) (void)controller.synthesizer().note_off(60);
             if (smoke && frames >= 4) break;
-            host.sleep_for(std::chrono::milliseconds(8));
+            // Input may wake the latter half of the 8 ms budget. The 4 ms floor
+            // bounds rendering to 250 fps even under a high-frequency motion stream.
+            if (!controller.quit_requested())
+                (void)host.wait_for_frame(frameStart, std::chrono::milliseconds(8), std::chrono::milliseconds(4));
         }
 
         if (smoke) {

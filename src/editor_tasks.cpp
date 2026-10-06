@@ -28,8 +28,10 @@ void EditorTaskContext::report(float progress, std::string phase) {
     shared_->phase = std::move(phase);
 }
 
-EditorTaskManager::EditorTaskManager(std::size_t workers, std::size_t maximumQueued)
-    : maximumQueued_(std::max<std::size_t>(1, maximumQueued)) {
+EditorTaskManager::EditorTaskManager(std::size_t workers, std::size_t maximumQueued,
+                                   std::size_t maximumCompleted)
+    : maximumQueued_(std::max<std::size_t>(1, maximumQueued)),
+      maximumCompleted_(std::max<std::size_t>(1, maximumCompleted)) {
     workers = std::max<std::size_t>(1, workers);
     workers_.reserve(workers);
     for (std::size_t i = 0; i < workers; ++i) workers_.emplace_back([this] { worker_loop(); });
@@ -120,6 +122,10 @@ void EditorTaskManager::worker_loop() {
             finalState = EditorTaskState::Failed;
         }
 
+        // Release potentially large captured snapshots on every terminal path before
+        // publishing completion. Destruction happens outside the manager mutex.
+        job->work = {};
+
         {
             // Keep the same lock order used by snapshot(): manager, then shared progress.
             std::lock_guard lock(mutex_);
@@ -135,6 +141,11 @@ void EditorTaskManager::worker_loop() {
                 } else if (finalState == EditorTaskState::Failed) {
                     job->shared->phase = "Failed";
                 }
+            }
+            completed_.push_back(job->id);
+            while (completed_.size() > maximumCompleted_) {
+                jobs_.erase(completed_.front());
+                completed_.pop_front();
             }
             --running_;
             if (queue_.empty() && running_ == 0) idleCondition_.notify_all();

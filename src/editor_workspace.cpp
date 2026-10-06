@@ -102,7 +102,7 @@ bool EditorMenuRegistry::add(MenuAction action, std::string* error) {
         if (error) *error = "menu action requires id, menu, and label";
         return false;
     }
-    if (find(action.id)) { if (error) *error = "duplicate menu action id"; return false; }
+    if (find_for_update(action.id)) { if (error) *error = "duplicate menu action id"; return false; }
     if (!action.shortcut.empty()) {
         for (const MenuAction& existing : actions_) {
             if (existing.shortcut == action.shortcut) {
@@ -111,64 +111,141 @@ bool EditorMenuRegistry::add(MenuAction action, std::string* error) {
             }
         }
     }
+    const std::size_t index = actions_.size();
     actions_.push_back(std::move(action));
+    try {
+        actionIndices_.emplace(actions_.back().id, index);
+    } catch (...) {
+        actions_.pop_back();
+        throw;
+    }
+    searchFieldsDirty_ = menusDirty_ = true;
+    searchResultsValid_ = false;
+    ++revision_;
     return true;
 }
 const MenuAction* EditorMenuRegistry::find(std::string_view id) const noexcept {
+    if (!mutableActionExposed_) {
+        const auto it = actionIndices_.find(id);
+        return it == actionIndices_.end() ? nullptr : &actions_[it->second];
+    }
     const auto it = std::find_if(actions_.begin(), actions_.end(), [&](const MenuAction& action) { return action.id == id; });
     return it == actions_.end() ? nullptr : &*it;
 }
 MenuAction* EditorMenuRegistry::find(std::string_view id) noexcept {
+    MenuAction* action = find_for_update(id);
+    if (action) mutableActionExposed_ = true;
+    return action;
+}
+MenuAction* EditorMenuRegistry::find_for_update(std::string_view id) noexcept {
     return const_cast<MenuAction*>(std::as_const(*this).find(id));
 }
 bool EditorMenuRegistry::set_enabled(std::string_view id, bool enabled, std::string reason) noexcept {
-    if (MenuAction* action = find(id)) {
+    if (MenuAction* action = find_for_update(id)) {
+        if (action->enabled != enabled) searchResultsValid_ = false;
+        std::string newReason = enabled ? std::string{} : std::move(reason);
+        if (action->enabled != enabled || action->disabledReason != newReason) ++revision_;
         action->enabled = enabled;
-        action->disabledReason = enabled ? std::string{} : std::move(reason);
+        action->disabledReason = std::move(newReason);
         return true;
     }
     return false;
 }
 bool EditorMenuRegistry::set_checked(std::string_view id, bool checked) noexcept {
-    MenuAction* action = find(id);
+    MenuAction* action = find_for_update(id);
     if (!action) return false;
     if (!action->radioGroup.empty() && checked) {
         for (MenuAction& candidate : actions_)
             if (candidate.radioGroup == action->radioGroup) candidate.checked = false;
     }
     action->checked = checked;
+    ++revision_;
     return true;
 }
 bool EditorMenuRegistry::set_shortcut(std::string_view id, std::string shortcut) noexcept {
-    if (MenuAction* action = find(id)) { action->shortcut = std::move(shortcut); return true; }
+    if (MenuAction* action = find_for_update(id)) {
+        if (action->shortcut != shortcut) {
+            action->shortcut = std::move(shortcut);
+            searchFieldsDirty_ = true;
+            searchResultsValid_ = false;
+            ++revision_;
+        }
+        return true;
+    }
     return false;
 }
-std::vector<MenuAction> EditorMenuRegistry::menu(std::string_view menuName, bool includeAdvanced) const {
-    struct PositionedAction {
-        MenuAction action;
-        std::size_t sourceIndex{};
-        std::size_t sectionIndex{};
-    };
+std::vector<std::size_t> EditorMenuRegistry::ordered_menu_indices(
+    std::string_view menuName, bool includeAdvanced) const {
     std::map<std::string, std::size_t, std::less<>> sections;
-    std::vector<PositionedAction> positioned;
+    std::vector<std::size_t> indices;
     for (std::size_t index = 0; index < actions_.size(); ++index) {
         const MenuAction& action = actions_[index];
         if (action.menu != menuName || action.visibility == MenuVisibility::PaletteOnly ||
             (action.visibility == MenuVisibility::Advanced && !includeAdvanced)) continue;
-        const auto [found, inserted] = sections.emplace(action.section, sections.size());
-        (void)inserted;
-        positioned.push_back({action, index, found->second});
+        sections.try_emplace(action.section, sections.size());
+        indices.push_back(index);
     }
-    std::stable_sort(positioned.begin(), positioned.end(), [](const PositionedAction& a, const PositionedAction& b) {
-        if (a.sectionIndex != b.sectionIndex) return a.sectionIndex < b.sectionIndex;
-        if (a.action.order != b.action.order) return a.action.order < b.action.order;
-        return a.sourceIndex < b.sourceIndex;
+    std::sort(indices.begin(), indices.end(), [&](std::size_t a, std::size_t b) {
+        const auto sectionA = sections.at(actions_[a].section);
+        const auto sectionB = sections.at(actions_[b].section);
+        if (sectionA != sectionB) return sectionA < sectionB;
+        if (actions_[a].order != actions_[b].order) return actions_[a].order < actions_[b].order;
+        return a < b;
     });
+    return indices;
+}
+
+void EditorMenuRegistry::rebuild_menu_indices() const {
+    menuIndices_.clear();
+    for (const MenuAction& action : actions_) menuIndices_.try_emplace(action.menu);
+    for (auto& [menuName, modes] : menuIndices_) {
+        modes[0] = ordered_menu_indices(menuName, false);
+        modes[1] = ordered_menu_indices(menuName, true);
+    }
+    menusDirty_ = false;
+}
+
+std::vector<MenuAction> EditorMenuRegistry::menu(std::string_view menuName, bool includeAdvanced) const {
     std::vector<MenuAction> result;
-    result.reserve(positioned.size());
-    for (PositionedAction& item : positioned) result.push_back(std::move(item.action));
+    const auto copy_actions = [&](const auto& indices) {
+        result.reserve(indices.size());
+        for (std::size_t index : indices) result.push_back(actions_[index]);
+    };
+    if (mutableActionExposed_) {
+        // A retained pointer can change membership/order at any time. Rebuild only
+        // this menu and mode, rather than every menu in both modes on each read.
+        copy_actions(ordered_menu_indices(menuName, includeAdvanced));
+    } else {
+        if (menusDirty_) rebuild_menu_indices();
+        const auto found = menuIndices_.find(menuName);
+        if (found != menuIndices_.end()) copy_actions(found->second[includeAdvanced ? 1U : 0U]);
+    }
     return result;
 }
+
+void EditorMenuRegistry::rebuild_search_fields() const {
+    const auto lower = [](std::string_view value) {
+        std::string result(value);
+        std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return result;
+    };
+    searchFields_.clear();
+    searchFields_.reserve(actions_.size());
+    for (const MenuAction& action : actions_) {
+        auto& fields = searchFields_.emplace_back();
+        fields.reserve(6U + action.keywords.size());
+        for (std::string_view value : {std::string_view(action.label), std::string_view(action.id),
+                std::string_view(action.menu), std::string_view(action.section),
+                std::string_view(action.description), std::string_view(action.shortcut)})
+            fields.push_back(lower(value));
+        for (const auto& keyword : action.keywords) fields.push_back(lower(keyword));
+    }
+    searchFieldsDirty_ = false;
+    searchResultsValid_ = false;
+}
+
 std::vector<MenuAction> EditorMenuRegistry::search(std::string_view query, std::size_t limit) const {
     const auto lower = [](std::string_view value) {
         std::string result(value);
@@ -198,42 +275,48 @@ std::vector<MenuAction> EditorMenuRegistry::search(std::string_view query, std::
         return cursor == token.size() ? 60 + std::min(gap, 60) : -1;
     };
 
-    const std::vector<std::string> tokens = split(query);
-    struct Match { int score{}; std::size_t order{}; MenuAction action; };
-    std::vector<Match> matches;
-    for (std::size_t index = 0; index < actions_.size(); ++index) {
-        const MenuAction& action = actions_[index];
-        std::vector<std::string> ownedFields{
-            lower(action.label), lower(action.id), lower(action.menu), lower(action.section),
-            lower(action.description), lower(action.shortcut)};
-        ownedFields.reserve(ownedFields.size() + action.keywords.size());
-        for (const std::string& keyword : action.keywords) ownedFields.push_back(lower(keyword));
-        int score = tokens.empty() ? 100 : 0;
-        bool matched = true;
-        for (const std::string& token : tokens) {
-            int best = -1;
-            for (std::size_t fieldIndex = 0; fieldIndex < ownedFields.size(); ++fieldIndex) {
-                int candidate = field_score(ownedFields[fieldIndex], token);
-                if (candidate >= 0) candidate += static_cast<int>(fieldIndex) * 3;
-                if (candidate >= 0 && (best < 0 || candidate < best)) best = candidate;
+    if (limit == 0) return {};
+    if (searchFieldsDirty_ || mutableActionExposed_) rebuild_search_fields();
+    if (!searchResultsValid_ || query != searchQuery_) {
+        const std::vector<std::string> tokens = split(query);
+        struct Match { int score{}; std::size_t order{}; };
+        std::vector<Match> matches;
+        matches.reserve(actions_.size());
+        for (std::size_t index = 0; index < actions_.size(); ++index) {
+            const MenuAction& action = actions_[index];
+            const auto& ownedFields = searchFields_[index];
+            int score = tokens.empty() ? 100 : 0;
+            bool matched = true;
+            for (const std::string& token : tokens) {
+                int best = -1;
+                for (std::size_t fieldIndex = 0; fieldIndex < ownedFields.size(); ++fieldIndex) {
+                    int candidate = field_score(ownedFields[fieldIndex], token);
+                    if (candidate >= 0) candidate += static_cast<int>(fieldIndex) * 3;
+                    if (candidate >= 0 && (best < 0 || candidate < best)) best = candidate;
+                }
+                if (best < 0) { matched = false; break; }
+                score += best;
             }
-            if (best < 0) { matched = false; break; }
-            score += best;
+            if (!matched) continue;
+            if (!action.enabled) score += 500;
+            if (action.visibility == MenuVisibility::Advanced) score += 12;
+            if (action.visibility == MenuVisibility::PaletteOnly) score += 18;
+            matches.push_back({score, index});
         }
-        if (!matched) continue;
-        if (!action.enabled) score += 500;
-        if (action.visibility == MenuVisibility::Advanced) score += 12;
-        if (action.visibility == MenuVisibility::PaletteOnly) score += 18;
-        matches.push_back({score, index, action});
+        std::stable_sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
+            if (a.score != b.score) return a.score < b.score;
+            return a.order < b.order;
+        });
+        searchResults_.clear();
+        searchResults_.reserve(matches.size());
+        for (const Match& match : matches) searchResults_.push_back(match.order);
+        searchQuery_.assign(query);
+        searchResultsValid_ = true;
     }
-    std::stable_sort(matches.begin(), matches.end(), [](const Match& a, const Match& b) {
-        if (a.score != b.score) return a.score < b.score;
-        return a.order < b.order;
-    });
     std::vector<MenuAction> result;
-    result.reserve(std::min(limit, matches.size()));
-    for (std::size_t index = 0; index < matches.size() && index < limit; ++index)
-        result.push_back(std::move(matches[index].action));
+    result.reserve(std::min(limit, searchResults_.size()));
+    for (std::size_t index = 0; index < searchResults_.size() && index < limit; ++index)
+        result.push_back(actions_[searchResults_[index]]);
     return result;
 }
 
@@ -508,7 +591,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     }
     const auto configure = [&](std::string_view id, std::string section, std::int32_t order,
                                bool checkable = false, std::string radioGroup = {}) {
-        if (MenuAction* action = result.find(id)) {
+        if (MenuAction* action = result.find_for_update(id)) {
             action->section = std::move(section);
             action->order = order;
             action->checkable = checkable;
@@ -608,10 +691,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         action.description = action.label + " in " + action.section + ".";
     }
     const auto advanced = [&](std::string_view id) {
-        if (MenuAction* action = result.find(id)) action->visibility = MenuVisibility::Advanced;
+        if (MenuAction* action = result.find_for_update(id)) action->visibility = MenuVisibility::Advanced;
     };
     const auto paletteOnly = [&](std::string_view id) {
-        if (MenuAction* action = result.find(id)) action->visibility = MenuVisibility::PaletteOnly;
+        if (MenuAction* action = result.find_for_update(id)) action->visibility = MenuVisibility::PaletteOnly;
     };
     for (std::string_view id : {
             "asset.thumbnail", "asset.filter_stale", "transform.scale_double", "transform.scale_half",
@@ -634,37 +717,37 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             "camera.filmback_imax_digital", "camera.copy_profile", "camera.paste_profile",
             "camera.clear_effects", "camera.keyframe_profile"}) paletteOnly(id);
     for (std::string_view id : {"file.exit", "edit.delete", "help.reset_command_history"})
-        if (MenuAction* action = result.find(id)) action->dangerous = true;
-    if (MenuAction* palette = result.find("help.command_palette")) {
+        if (MenuAction* action = result.find_for_update(id)) action->dangerous = true;
+    if (MenuAction* palette = result.find_for_update("help.command_palette")) {
         palette->description = "Search commands, settings, panels, assets, scene objects, and documentation.";
         palette->keywords.insert(palette->keywords.end(), {"search", "quick actions", "options", "assets", "objects", "panels"});
     }
-    if (MenuAction* preferences = result.find("edit.preferences"))
+    if (MenuAction* preferences = result.find_for_update("edit.preferences"))
         preferences->description = "Open user-specific editor preferences.";
-    if (MenuAction* project = result.find("edit.project_settings"))
+    if (MenuAction* project = result.find_for_update("edit.project_settings"))
         project->description = "Open settings stored with the current project.";
 
-    if (MenuAction* cinematic = result.find("camera.inspector")) {
+    if (MenuAction* cinematic = result.find_for_update("camera.inspector")) {
         cinematic->description = "Open the grouped physical-lens, bokeh, split-diopter, grading, film, framing, and accessibility inspector.";
         cinematic->keywords.insert(cinematic->keywords.end(), {"bokeh", "split diopter", "fisheye", "IMAX", "anamorphic", "color grading", "LUT", "film grain", "motion blur"});
     }
-    if (MenuAction* sequencer = result.find("camera.sequencer")) {
+    if (MenuAction* sequencer = result.find_for_update("camera.sequencer")) {
         sequencer->description = "Open cinematic shot and complete-profile keyframe authoring.";
         sequencer->keywords.insert(sequencer->keywords.end(), {"timeline", "shot", "rack focus", "dolly zoom", "aspect ratio"});
     }
-    if (MenuAction* advancedMenus = result.find("view.advanced_menus")) {
+    if (MenuAction* advancedMenus = result.find_for_update("view.advanced_menus")) {
         advancedMenus->description = "Show low-frequency and expert commands in ordinary menus; all commands remain searchable.";
         advancedMenus->keywords.insert(advancedMenus->keywords.end(), {"expert", "compact menus", "hidden commands"});
     }
-    if (MenuAction* reset = result.find("help.reset_command_history"))
+    if (MenuAction* reset = result.find_for_update("help.reset_command_history"))
         reset->description = "Clear locally persisted command favorites and recent-command history.";
-    if (MenuAction* diagnostics = result.find("sprite.diagnostics"))
+    if (MenuAction* diagnostics = result.find_for_update("sprite.diagnostics"))
         diagnostics->description = "Open draw-call, overdraw, atlas, residency, sorting, and budget diagnostics.";
-    if (MenuAction* diagnostics3d = result.find("render.diagnostics3d")) {
+    if (MenuAction* diagnostics3d = result.find_for_update("render.diagnostics3d")) {
         diagnostics3d->description = "Open mesh, pipeline, residency, LOD, skinning, shadow, light, occlusion, and depth-complexity diagnostics.";
         diagnostics3d->keywords.insert(diagnostics3d->keywords.end(), {"profiler", "triangles", "vertices", "overdraw", "gpu", "lod"});
     }
-    if (MenuAction* tileWorld = result.find("sprite.tile_world"))
+    if (MenuAction* tileWorld = result.find_for_update("sprite.tile_world"))
         tileWorld->description = "Open the tileset, level, collision, prefab, validation, and play-test workspace.";
     return result;
 }

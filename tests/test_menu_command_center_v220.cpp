@@ -1,11 +1,14 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_workspace.hpp"
 
+#include <set>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <algorithm>
+#include <utility>
 
 using namespace dve;
 using namespace dve::editor;
@@ -68,6 +71,92 @@ void test_registry_visibility_search_and_state(const std::filesystem::path& root
     require(loaded->showAdvancedCommands && loaded->favoriteActionIds == state.favoriteActionIds &&
             loaded->recentActionIds == state.recentActionIds,
             "menu user state did not round-trip exactly");
+}
+
+void test_menu_cache_updates() {
+    EditorMenuRegistry registry;
+    MenuAction first{"test.first", "Test", "Same"};
+    first.section = "First";
+    first.order = 10;
+    MenuAction second{"test.second", "Test", "Same"};
+    second.section = "First";
+    second.order = 5;
+    require(registry.add(first) && registry.add(second), "cache test setup failed");
+    const auto compact = registry.menu("Test");
+    require(compact.size() == 2 && compact.front().id == second.id, "cached section order changed");
+    require(registry.search("same", 1).front().id == first.id, "equal search scores lost registration order");
+    require(registry.search("same", 8).size() == 2, "cached query was truncated by its previous limit");
+    require(registry.set_enabled(first.id, false, "Disabled"), "could not disable cached action");
+    require(registry.search("same", 1).front().id == second.id, "cached ranking ignored enable state");
+    require(registry.menu("Test")[1].disabledReason == "Disabled", "cached menu retained stale action state");
+    require(registry.set_shortcut(second.id, "Ctrl+Unique"), "could not change cached shortcut");
+    require(registry.search("ctrl+unique", 8).front().id == second.id, "search index ignored shortcut change");
+    require(registry.set_checked(second.id, true), "could not check cached action");
+    require(registry.menu("Test").front().checked, "cached menu ignored checked state");
+
+    MenuAction advanced{"test.advanced", "Test", "Advanced Unique"};
+    advanced.visibility = MenuVisibility::Advanced;
+    require(registry.add(advanced), "could not add an action after caching");
+    require(registry.menu("Test").size() == 2 && registry.menu("Test", true).size() == 3,
+            "adding an action left stale menu visibility");
+    require(registry.search("advanced unique", 8).front().id == advanced.id,
+            "adding an action left stale search fields");
+    require(registry.search("same", 0).empty(), "zero-limit search returned results");
+
+    // Legacy callers may keep and mutate a pointer after a cache has been warmed.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    MenuAction* escaped = registry.find(second.id);
+#pragma GCC diagnostic pop
+    require(escaped != nullptr, "legacy mutable lookup failed");
+    (void)registry.search("same", 8);
+    (void)registry.menu("Test");
+    escaped->id = "test.renamed";
+    escaped->label = "Changed Label";
+    escaped->menu = "Other";
+    require(std::as_const(registry).find("test.renamed") == escaped &&
+            std::as_const(registry).find(second.id) == nullptr, "mutable ID edit left stale lookup index");
+    require(registry.search("changed label", 8).front().id == "test.renamed",
+            "escaped pointer left stale search results");
+    require(registry.menu("Other").size() == 1 && registry.menu("Test").size() == 1,
+            "escaped pointer left stale menu membership");
+    // Keep mutating the retained pointer after warming both menu modes. Every
+    // read must reflect membership, visibility, section, and order immediately.
+    escaped->visibility = MenuVisibility::Advanced;
+    require(registry.menu("Other").empty() && registry.menu("Other", true).size() == 1,
+            "mutable fallback ignored visibility edits");
+    escaped->menu = "Test";
+    escaped->section = "First";
+    escaped->order = -5;
+    escaped->visibility = MenuVisibility::Primary;
+    require(registry.menu("Test").front().id == "test.renamed",
+            "mutable fallback ignored order or membership edits");
+    escaped->visibility = MenuVisibility::PaletteOnly;
+    require(registry.menu("Test", true).size() == 2,
+            "mutable fallback exposed a palette-only action");
+    escaped->keywords.push_back("afterwarm");
+    require(registry.search("afterwarm", 8).front().id == "test.renamed",
+            "later pointer edit left stale search fields");
+
+    // After a pointer escapes, menus are ordered per request rather than from the
+    // cache; the order must match the cached one exactly for every menu and mode.
+    EditorMenuRegistry cached = EditorMenuRegistry::make_default();
+    EditorMenuRegistry exposed = EditorMenuRegistry::make_default();
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    require(exposed.find(exposed.actions().front().id) != nullptr, "could not expose a default action");
+#pragma GCC diagnostic pop
+    std::set<std::string> menuNames;
+    for (const MenuAction& action : cached.actions()) menuNames.insert(action.menu);
+    for (const std::string& name : menuNames) {
+        for (const bool includeAdvanced : {false, true}) {
+            const auto a = cached.menu(name, includeAdvanced);
+            const auto b = exposed.menu(name, includeAdvanced);
+            require(a.size() == b.size(), "uncached menu changed size");
+            for (std::size_t i = 0; i < a.size(); ++i)
+                require(a[i].id == b[i].id, "uncached menu order differs from the cached order");
+        }
+    }
 }
 
 void test_command_center_providers_and_persistence(const std::filesystem::path& root) {
@@ -143,11 +232,100 @@ void test_command_center_providers_and_persistence(const std::filesystem::path& 
 
 } // namespace
 
+// Palette results are cached and reused across pointer moves and frames, and every
+// input they are derived from invalidates them.
+void test_command_palette_cache() {
+    NativeEditorController controller{EditorWorkspace{make_native_editor_demo_document()}};
+    controller.resize(1600, 900);
+    require(controller.dispatch_action("help.command_palette"), "command center did not open");
+    controller.text_input("wall");
+    const auto first = controller.command_palette_results(64);
+    const auto rebuilds = controller.command_palette_rebuild_count();
+    for (int i = 0; i < 5; ++i) {
+        controller.pointer_move(400 + i * 7, 300, 0);
+        (void)controller.command_palette_results(64);
+    }
+    require(controller.command_palette_rebuild_count() == rebuilds, "unchanged palette was rebuilt");
+    require(controller.command_palette_results(64).size() == first.size(), "cached palette changed size");
+
+    const auto has_object = [&](std::string_view name) {
+        const auto results = controller.command_palette_results(64);
+        return std::any_of(results.begin(), results.end(), [&](const CommandPaletteResult& result) {
+            return result.kind == CommandPaletteResultKind::SceneObject && result.label == name;
+        });
+    };
+    // Scene objects: adding and renaming are reflected.
+    EditorObject added(424242, "Wall Panel Probe");
+    controller.workspace().document().add_object(std::move(added));
+    require(has_object("Wall Panel Probe"), "cached palette missed a new object");
+    controller.workspace().document().find_object(424242)->name = "Wall Renamed Probe";
+    require(has_object("Wall Renamed Probe") && !has_object("Wall Panel Probe"), "cached palette missed a rename");
+
+    // Query and limit.
+    auto before = controller.command_palette_rebuild_count();
+    (void)controller.command_palette_results(3);
+    require(controller.command_palette_rebuild_count() == before + 1U, "a different limit reused the cache");
+    controller.text_input(" s");
+    (void)controller.command_palette_results(3);
+    require(controller.command_palette_rebuild_count() == before + 2U, "a query edit reused the cache");
+
+    controller.key_down("escape", false, false, false);
+    require(controller.dispatch_action("help.command_palette"), "command center did not reopen");
+    controller.text_input("sprite diagnostics");
+    auto results = controller.command_palette_results(16);
+    require(!results.empty() && results.front().id == "sprite.diagnostics", "command not found");
+    // Favorites.
+    controller.key_down("d", true, false, false);
+    require(controller.command_is_favorite("sprite.diagnostics"), "Ctrl+D did not favorite the command");
+    results = controller.command_palette_results(16);
+    require(std::any_of(results.begin(), results.end(), [](const CommandPaletteResult& result) {
+                return result.id == "sprite.diagnostics" && result.favorite;
+            }), "cached palette missed a favorite change");
+    // Menu state: disabling a command shows up in the cached results.
+    require(controller.workspace().menus().set_enabled("sprite.diagnostics", false, "Probe reason"), "disable failed");
+    results = controller.command_palette_results(16);
+    require(!results.empty(), "results vanished after disabling a command");
+    const auto diagnostics = std::find_if(results.begin(), results.end(), [](const CommandPaletteResult& result) {
+        return result.id == "sprite.diagnostics";
+    });
+    require(diagnostics != results.end() && !diagnostics->enabled && diagnostics->disabledReason == "Probe reason",
+            "cached palette kept a stale enabled state");
+
+    // The asset provider is keyed on the database revision, which every mutating call
+    // (including the mutable find) advances.
+    EditorAssetDatabase database;
+    auto revision = database.revision();
+    const auto assetRoot = std::filesystem::temp_directory_path() / "dve_palette_asset_revision";
+    std::filesystem::remove_all(assetRoot);
+    std::filesystem::create_directories(assetRoot / "assets");
+    { std::ofstream(assetRoot / "assets" / "probe.png") << "png"; }
+    database.set_project_root(assetRoot);
+    require(database.revision() != revision, "set_project_root did not advance the asset revision");
+    revision = database.revision();
+    (void)database.find("missing");
+    require(database.revision() != revision, "mutable asset find did not advance the revision");
+    revision = database.revision();
+    (void)std::as_const(database).find("missing");
+    (void)database.records();
+    require(database.revision() == revision, "const asset reads advanced the revision");
+    // The editor scans with options (thumbnails deferred); that must advance it too.
+    EditorAssetScanOptions scanOptions;
+    scanOptions.generateThumbnails = false;
+    EditorAssetScanReport scanReport;
+    std::string scanError;
+    require(database.scan(&scanReport, &scanError, scanOptions), ("probe asset scan failed: " + scanError).c_str());
+    require(database.revision() != revision, "an editor-style scan did not advance the asset revision");
+    std::filesystem::remove_all(assetRoot);
+    std::cout << "command palette cache: OK\n";
+}
+
 int main() {
     try {
         const auto root = make_temp_root();
         test_registry_visibility_search_and_state(root);
+        test_menu_cache_updates();
         test_command_center_providers_and_persistence(root);
+        test_command_palette_cache();
         std::error_code error;
         std::filesystem::remove_all(root, error);
         std::cout << "dve_menu_command_center_v220_tests: PASS\n";

@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 
+#include <utility>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -54,9 +55,9 @@ int main() {
         NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
         controller.configure_ai_assistant(DVE_SOURCE_DIR);
         controller.resize(1280, 800);
-        require(controller.workspace().menus().find("sprite.tile_world") != nullptr,
+        require(std::as_const(controller.workspace().menus()).find("sprite.tile_world") != nullptr,
                 "Tile World Editor menu action is missing");
-        require(controller.workspace().menus().find("sprite.diagnostics") != nullptr,
+        require(std::as_const(controller.workspace().menus()).find("sprite.diagnostics") != nullptr,
                 "Sprite Diagnostics menu action is missing");
         require(controller.dispatch_action("sprite.tile_world"),
                 "Tile World Editor action failed");

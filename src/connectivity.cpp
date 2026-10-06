@@ -932,7 +932,7 @@ std::optional<VoxelObject> commit_split_plan(
     std::uint64_t newObjectId) {
     if (source.id() != plan.sourceObjectId) return std::nullopt;
     for (const SplitBrickPlan& brickPlan : plan.bricks) {
-        const Brick* sourceBrick = source.find_brick(brickPlan.key);
+        const Brick* sourceBrick = std::as_const(source).find_brick(brickPlan.key);
         if (sourceBrick == nullptr || sourceBrick->generation() != brickPlan.sourceGeneration) return std::nullopt;
     }
 

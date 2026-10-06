@@ -17,6 +17,18 @@ add_test(NAME dve_version_consistency
 if(DVE_PYTHON3_EXECUTABLE)
     add_test(NAME dve_third_party_notices_self_test
         COMMAND ${DVE_PYTHON3_EXECUTABLE} ${DVE_NOTICES_GENERATOR} --self-test)
+endif()
+
+# A sanitizer build is for testing, never for shipping: its binaries depend on the toolchain's
+# sanitizer runtimes (libasan, libubsan) and pull in extra shared libraries, which the
+# notices, install-tree and packaging checks below rightly flag as unlisted bundled libraries.
+# Those checks run in the non-sanitized CI presets, so they are not registered here.
+if(DVE_ENABLE_SANITIZERS)
+    message(STATUS "DVE: sanitizer build, skipping the notices, install-tree and packaging tests")
+    return()
+endif()
+
+if(DVE_PYTHON3_EXECUTABLE)
     foreach(_dve_component IN LISTS DVE_NOTICES_COMPONENTS)
         add_test(NAME dve_third_party_notices_check_${_dve_component}
             COMMAND ${DVE_PYTHON3_EXECUTABLE} ${DVE_NOTICES_GENERATOR} --check

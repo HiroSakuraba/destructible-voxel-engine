@@ -135,6 +135,15 @@ SdlEditorCanvas::~SdlEditorCanvas() {
     if (impl_->renderer != nullptr) SDL_DestroyRenderer(impl_->renderer);
 }
 
+bool SdlEditorCanvas::set_vsync(bool enabled, std::string* error) {
+    if (!valid()) { set_error(error, "SDL editor canvas is not initialized"); return false; }
+    if (!SDL_SetRenderVSync(impl_->renderer, enabled ? 1 : 0)) {
+        set_error(error, SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
 bool SdlEditorCanvas::valid() const noexcept { return impl_ && impl_->renderer != nullptr; }
 
 void SdlEditorCanvas::set_ui_zoom(float zoom, float pixelDensity) {

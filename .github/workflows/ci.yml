@@ -40,11 +40,18 @@ jobs:
     name: ctest (${{ matrix.preset }})
     runs-on: ubuntu-latest
     container: debian:trixie
-    timeout-minutes: 180
+    # linux-gcc-asan builds and runs the same suite under AddressSanitizer and UBSan, which is
+    # roughly two to three times slower than a plain Release run.
+    timeout-minutes: ${{ matrix.preset == 'linux-gcc-asan' && 300 || 180 }}
     strategy:
       fail-fast: false
       matrix:
-        preset: [linux-gcc-release, linux-gcc-lua-release, linux-gcc-player-release]
+        preset: [linux-gcc-release, linux-gcc-lua-release, linux-gcc-player-release, linux-gcc-asan]
+    env:
+      # Only sanitizer builds read these. Any UBSan finding fails its test instead of only being
+      # printed. Leak checking stays off until the suite is leak-clean.
+      ASAN_OPTIONS: detect_leaks=0
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
       - name: Install build and test dependencies
         run: |
@@ -81,6 +88,7 @@ jobs:
           ccache --zero-stats
           cmake --build out/build/${{ matrix.preset }} --parallel 4
           ccache --show-stats
+          df -h "$GITHUB_WORKSPACE"
       - name: Save ccache and fetched content (also when tests fail)
         if: always() && steps.cache.outcome == 'success'
         uses: actions/cache/save@v4

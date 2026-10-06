@@ -460,6 +460,12 @@ public:
 
     void resize(int width, int height);
     void update(float elapsedSeconds);
+    // True while the editor changes on screen without input: a Play/Simulate session, sprite
+    // level or 2D rig playback, the sprite authoring panel (timeline and palette previews),
+    // camera blends, held fly-navigation keys, sounding synth voices and the thumbnail
+    // backlog. Hosts redraw at full rate while it is true or input is arriving, and may
+    // lower the redraw rate otherwise (anything not listed still updates, just less often).
+    [[nodiscard]] bool animating() const noexcept;
     void pointer_move(int x, int y, std::uint32_t modifiers = 0);
     void pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers = 0);
     void pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers = 0);

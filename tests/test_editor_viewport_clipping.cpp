@@ -29,8 +29,9 @@ void require(bool condition, const std::string& message) {
 }
 
 // Rasterizes fills, outlines and lines the way SdlEditorCanvas does at 100% zoom
-// (thick lines are widened perpendicular to their dominant axis). Text is not
-// rasterized: glyph extents are font dependent.
+// (thick lines are widened perpendicular to their dominant axis). Text is drawn as the
+// solid box its glyphs can cover: 7 px per byte (text_width), from 9 px above the baseline
+// to 2 px below it (the ink of the 11 px UI font).
 class RasterCanvas final : public IEditorCanvas {
 public:
     RasterCanvas(int width, int height)
@@ -57,8 +58,11 @@ public:
             else segment(x1 + offset, y1, x2 + offset, y2, color);
         }
     }
-    void text(int, int, std::string_view, EditorColor) const override {}
+    void text(int x, int y, std::string_view value, EditorColor color) const override {
+        fill({x, y - 9, text_width(value), 12}, color);
+    }
     [[nodiscard]] int text_width(std::string_view value) const override { return static_cast<int>(value.size()) * 7; }
+    [[nodiscard]] std::string_view ellipsis() const override { return "..."; }
 
     [[nodiscard]] std::uint32_t at(int x, int y) const { return pixels_[static_cast<std::size_t>(y * width_ + x)]; }
 
@@ -196,10 +200,57 @@ void test_orbit_sweep_stays_in_viewport() {
     std::printf("orbit sweep: OK (%zu of %d poses straddle the border)\n", straddling, kPoses);
 }
 
+// Records text draws (and nothing else) with the RasterCanvas metrics.
+class TextRecorder final : public IEditorCanvas {
+public:
+    struct Draw { int x; int y; std::string value; };
+    void fill(UiRect, EditorColor) const override {}
+    void outline(UiRect, EditorColor) const override {}
+    void line(int, int, int, int, EditorColor, int) const override {}
+    void text(int x, int y, std::string_view value, EditorColor) const override { draws.push_back({x, y, std::string(value)}); }
+    [[nodiscard]] int text_width(std::string_view value) const override { return static_cast<int>(value.size()) * 7; }
+    [[nodiscard]] std::string_view ellipsis() const override { return "..."; }
+    mutable std::vector<Draw> draws;
+};
+
+// Labels of objects partly off screen used to spill over the viewport edge: text was only
+// dropped when its anchor lay outside, so a label starting inside ran past the right edge,
+// and one whose baseline sat just inside the top drew its glyphs above it.
+void test_text_stays_in_clip() {
+    const UiRect clip{100, 50, 200, 100};  // x 100..299, y 50..149
+    TextRecorder recorder;
+    const RectClipCanvas canvas(recorder, clip);
+    auto drawn = [&](int x, int y, std::string_view value) -> std::string {
+        recorder.draws.clear();
+        canvas.text(x, y, value, 0U);
+        if (recorder.draws.empty()) return "<dropped>";
+        const TextRecorder::Draw& draw = recorder.draws.front();
+        require(draw.x == x && draw.y == y, "clipped text moved");
+        require(draw.x + recorder.text_width(draw.value) <= clip.x + clip.width,
+                "text '" + draw.value + "' runs past the right edge");
+        require(draw.y - kEditorTextAscent >= clip.y && draw.y + kEditorTextDescent <= clip.y + clip.height,
+                "text '" + draw.value + "' crosses the top or bottom");
+        return draw.value;
+    };
+    require(drawn(110, 80, "Gabor 12 L3") == "Gabor 12 L3", "text that fits was changed");
+    // 26 px left at x = 274: three bytes do not fit with the ellipsis, "..." alone does.
+    require(drawn(274, 80, "Slug M7/8") == "...", "long label at the right edge was not elided to fit");
+    require(drawn(250, 80, "Slug M7/8") == "Slug...", "long label was not elided at the right edge");
+    require(drawn(290, 80, "Slug M7/8") == "<dropped>", "label with no room for the ellipsis was drawn");
+    require(drawn(110, 50 + kEditorTextAscent, "Top") == "Top", "text touching the top from inside was dropped");
+    require(drawn(110, 50 + kEditorTextAscent - 1, "Top") == "<dropped>", "text whose glyphs cross the top was drawn");
+    require(drawn(110, 150 - kEditorTextDescent, "Bottom") == "Bottom", "text touching the bottom from inside was dropped");
+    require(drawn(110, 150 - kEditorTextDescent + 1, "Bottom") == "<dropped>", "text whose descenders cross the bottom was drawn");
+    require(drawn(90, 80, "Left") == "<dropped>", "text anchored left of the clip was drawn");
+    require(drawn(300, 80, "Right") == "<dropped>", "text anchored right of the clip was drawn");
+    std::printf("text clipping: OK\n");
+}
+
 } // namespace
 
 int main() {
     try {
+        test_text_stays_in_clip();
         test_large_orbit_stays_in_viewport();
         test_orbit_sweep_stays_in_viewport();
         std::printf("editor viewport clipping tests passed\n");

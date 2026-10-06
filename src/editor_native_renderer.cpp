@@ -3009,62 +3009,6 @@ bool clip_segment_to_box(float& x1, float& y1, float& x2, float& y2,
     return true;
 }
 
-// Forwards to another canvas but keeps every primitive inside `clip`: fills are
-// intersected with it, lines and the edges of partly visible outlines are cut at its
-// border, and text anchored outside it is dropped. The 3D viewport paints through
-// one: its draw lists (voxel splats, grid, boxes, frustums) keep items whose centre
-// projects out to 1.2x the viewport (see project_with in editor_viewport.cpp), so
-// without the clip they would land on the panels around it.
-class RectClipCanvas final : public IEditorCanvas {
-public:
-    RectClipCanvas(const IEditorCanvas& inner, UiRect clip) : inner_(inner), clip_(clip) {}
-    void fill(UiRect rect, EditorColor color) const override {
-        const UiRect clipped = intersect_rect(rect, clip_);
-        if (clipped.width > 0 && clipped.height > 0) inner_.fill(clipped, color);
-    }
-    void outline(UiRect rect, EditorColor color) const override {
-        if (rect.width <= 0 || rect.height <= 0) return;
-        if (rect.x >= clip_.x && rect.y >= clip_.y && rect.x + rect.width <= clip_.x + clip_.width &&
-            rect.y + rect.height <= clip_.y + clip_.height) {
-            inner_.outline(rect, color);
-            return;
-        }
-        // Partly outside: draw the visible parts of its edges, not a new edge along the clip.
-        const int right = rect.x + rect.width - 1;
-        const int bottom = rect.y + rect.height - 1;
-        line(rect.x, rect.y, right, rect.y, color, 1);
-        line(rect.x, bottom, right, bottom, color, 1);
-        line(rect.x, rect.y, rect.x, bottom, color, 1);
-        line(right, rect.y, right, bottom, color, 1);
-    }
-    void line(int x1, int y1, int x2, int y2, EditorColor color, int width = 1) const override {
-        // Canvases widen a line by up to (width - 1) / 2 pixels before and width / 2 after
-        // its centre, so the centre line is clipped to a box inset by that much.
-        const int stroke = std::max(1, width);
-        float ax = static_cast<float>(x1);
-        float ay = static_cast<float>(y1);
-        float bx = static_cast<float>(x2);
-        float by = static_cast<float>(y2);
-        if (!clip_segment_to_box(ax, ay, bx, by,
-                                 static_cast<float>(clip_.x + (stroke - 1) / 2),
-                                 static_cast<float>(clip_.y + (stroke - 1) / 2),
-                                 static_cast<float>(clip_.x + clip_.width - 1 - stroke / 2),
-                                 static_cast<float>(clip_.y + clip_.height - 1 - stroke / 2))) return;
-        inner_.line(static_cast<int>(std::lround(ax)), static_cast<int>(std::lround(ay)),
-                    static_cast<int>(std::lround(bx)), static_cast<int>(std::lround(by)), color, width);
-    }
-    // y is the text baseline.
-    void text(int x, int y, std::string_view value, EditorColor color) const override {
-        if (x >= clip_.x && x < clip_.x + clip_.width && y >= clip_.y && y <= clip_.y + clip_.height)
-            inner_.text(x, y, value, color);
-    }
-    [[nodiscard]] int text_width(std::string_view value) const override { return inner_.text_width(value); }
-    [[nodiscard]] std::string_view ellipsis() const override { return inner_.ellipsis(); }
-private:
-    const IEditorCanvas& inner_;
-    UiRect clip_;
-};
-
 // Forwards to another canvas but drops text whose glyphs would reach clipY and
 // fills/outlines that extend past it. Used for the inspector's fixed-offset
 // detail lines so they never draw under the flag toggles.
@@ -3087,6 +3031,55 @@ private:
     int clipY_;
 };
 } // namespace
+
+void RectClipCanvas::fill(UiRect rect, EditorColor color) const {
+    const UiRect clipped = intersect_rect(rect, clip_);
+    if (clipped.width > 0 && clipped.height > 0) inner_.fill(clipped, color);
+}
+
+void RectClipCanvas::outline(UiRect rect, EditorColor color) const {
+    if (rect.width <= 0 || rect.height <= 0) return;
+    if (rect.x >= clip_.x && rect.y >= clip_.y && rect.x + rect.width <= clip_.x + clip_.width &&
+        rect.y + rect.height <= clip_.y + clip_.height) {
+        inner_.outline(rect, color);
+        return;
+    }
+    // Partly outside: draw the visible parts of its edges, not a new edge along the clip.
+    const int right = rect.x + rect.width - 1;
+    const int bottom = rect.y + rect.height - 1;
+    line(rect.x, rect.y, right, rect.y, color, 1);
+    line(rect.x, bottom, right, bottom, color, 1);
+    line(rect.x, rect.y, rect.x, bottom, color, 1);
+    line(right, rect.y, right, bottom, color, 1);
+}
+
+void RectClipCanvas::line(int x1, int y1, int x2, int y2, EditorColor color, int width) const {
+    // Canvases widen a line by up to (width - 1) / 2 pixels before and width / 2 after
+    // its centre, so the centre line is clipped to a box inset by that much.
+    const int stroke = std::max(1, width);
+    float ax = static_cast<float>(x1);
+    float ay = static_cast<float>(y1);
+    float bx = static_cast<float>(x2);
+    float by = static_cast<float>(y2);
+    if (!clip_segment_to_box(ax, ay, bx, by,
+                             static_cast<float>(clip_.x + (stroke - 1) / 2),
+                             static_cast<float>(clip_.y + (stroke - 1) / 2),
+                             static_cast<float>(clip_.x + clip_.width - 1 - stroke / 2),
+                             static_cast<float>(clip_.y + clip_.height - 1 - stroke / 2))) return;
+    inner_.line(static_cast<int>(std::lround(ax)), static_cast<int>(std::lround(ay)),
+                static_cast<int>(std::lround(bx)), static_cast<int>(std::lround(by)), color, width);
+}
+
+void RectClipCanvas::text(int x, int y, std::string_view value, EditorColor color) const {
+    // Glyphs cannot be cut, so text that would cross the top or bottom is dropped and text
+    // that would run past the right edge is elided to fit (labels of objects partly off
+    // screen, and long labels anchored near the edge, used to spill onto the panels).
+    const int right = clip_.x + clip_.width;
+    if (x < clip_.x || x >= right) return;
+    if (y - kEditorTextAscent < clip_.y || y + kEditorTextDescent > clip_.y + clip_.height) return;
+    const std::string fitted = elide_text_to_width(inner_, value, right - x);
+    if (!fitted.empty()) inner_.text(x, y, fitted, color);
+}
 
 void render_native_editor(const IEditorCanvas& painter, NativeEditorController& controller, int width, int height) {
     const bool highContrast = controller.workspace().preferences().highContrast;

@@ -1,5 +1,6 @@
 #include "dve/editor_workspace.hpp"
 
+#include <utility>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -86,7 +87,7 @@ int main() {
     require(!keyboard.empty(), "visual keyboard map is empty");
     require(shortcuts.conflicts("DVE Default").empty(), "default shortcut profile contains conflicts");
 
-    const MenuAction* move = workspace.menus().find("transform.translate");
+    const MenuAction* move = std::as_const(workspace.menus()).find("transform.translate");
     require(move && move->shortcut == "W", "menu shortcut label did not synchronize with active profile");
 
     std::cout << "editor shortcut tests passed\n";

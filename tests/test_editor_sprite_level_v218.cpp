@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 
+#include <utility>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -44,7 +45,7 @@ int main() {
         NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
         controller.configure_ai_assistant(DVE_SOURCE_DIR);
         controller.resize(1280, 800);
-        require(controller.workspace().menus().find("sprite.play_level") != nullptr,
+        require(std::as_const(controller.workspace().menus()).find("sprite.play_level") != nullptr,
                 "Play Original Sprite Level is missing from the Sprite menu");
         require(controller.dispatch_action("sprite.play_level"), "sprite level action failed");
         require(controller.sprite_level_playing() && controller.sprite_level() &&
@@ -69,7 +70,7 @@ int main() {
                 "editor canvas did not render the sprite level preview");
         controller.key_down("escape", false, false, false);
         require(!controller.sprite_level_playing(), "Escape did not stop the editor sprite level");
-        require(controller.workspace().menus().find("sprite.graph") != nullptr,
+        require(std::as_const(controller.workspace().menus()).find("sprite.graph") != nullptr,
                 "Animation State Graph is missing from the Sprite menu");
         require(controller.dispatch_action("sprite.graph"), "sprite graph action failed");
         require(controller.sprite_animation_graph_open(), "sprite graph did not open");

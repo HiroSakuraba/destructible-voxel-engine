@@ -1,3 +1,4 @@
+#include <utility>
 #include <cstdio>
 #include <algorithm>
 #include <cmath>
@@ -19,7 +20,7 @@ int main() {
     try {
         using namespace dve::editor;
         NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
-        require(controller.workspace().menus().find("window.toggle_synth") != nullptr,
+        require(std::as_const(controller.workspace().menus()).find("window.toggle_synth") != nullptr,
                 "synth menu action was not registered");
         require(controller.dispatch_action("window.toggle_synth"), "synth menu action failed");
         require(controller.synth_panel().open(), "synth panel did not open");

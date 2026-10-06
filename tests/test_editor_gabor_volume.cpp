@@ -3,6 +3,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_workspace.hpp"
 
+#include <utility>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -21,9 +22,9 @@ dve::GaborVolumeAsset make_asset(){
 void run(){
     using namespace dve;using namespace dve::editor;
     EditorWorkspace workspace(EditorDocument("Gabor Project"));
-    CHECK(workspace.menus().find("create.gabor_empty")!=nullptr);
-    CHECK(workspace.menus().find("create.gabor_import")!=nullptr);
-    CHECK(workspace.menus().find("window.gabor_inspector")!=nullptr);
+    CHECK(std::as_const(workspace.menus()).find("create.gabor_empty")!=nullptr);
+    CHECK(std::as_const(workspace.menus()).find("create.gabor_import")!=nullptr);
+    CHECK(std::as_const(workspace.menus()).find("window.gabor_inspector")!=nullptr);
     CHECK(workspace.settings().find("render.gabor.enabled")!=nullptr);
     CHECK(workspace.settings().find("render.gabor.mode")!=nullptr);
 

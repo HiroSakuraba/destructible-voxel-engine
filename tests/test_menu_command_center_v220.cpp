@@ -70,6 +70,55 @@ void test_registry_visibility_search_and_state(const std::filesystem::path& root
             "menu user state did not round-trip exactly");
 }
 
+void test_menu_cache_updates() {
+    EditorMenuRegistry registry;
+    MenuAction first{"test.first", "Test", "Same"};
+    first.section = "First";
+    first.order = 10;
+    MenuAction second{"test.second", "Test", "Same"};
+    second.section = "First";
+    second.order = 5;
+    require(registry.add(first) && registry.add(second), "cache test setup failed");
+    const auto compact = registry.menu("Test");
+    require(compact.size() == 2 && compact.front().id == second.id, "cached section order changed");
+    require(registry.search("same", 1).front().id == first.id, "equal search scores lost registration order");
+    require(registry.search("same", 8).size() == 2, "cached query was truncated by its previous limit");
+    require(registry.set_enabled(first.id, false, "Disabled"), "could not disable cached action");
+    require(registry.search("same", 1).front().id == second.id, "cached ranking ignored enable state");
+    require(registry.menu("Test")[1].disabledReason == "Disabled", "cached menu retained stale action state");
+    require(registry.set_shortcut(second.id, "Ctrl+Unique"), "could not change cached shortcut");
+    require(registry.search("ctrl+unique", 8).front().id == second.id, "search index ignored shortcut change");
+    require(registry.set_checked(second.id, true), "could not check cached action");
+    require(registry.menu("Test").front().checked, "cached menu ignored checked state");
+
+    MenuAction advanced{"test.advanced", "Test", "Advanced Unique"};
+    advanced.visibility = MenuVisibility::Advanced;
+    require(registry.add(advanced), "could not add an action after caching");
+    require(registry.menu("Test").size() == 2 && registry.menu("Test", true).size() == 3,
+            "adding an action left stale menu visibility");
+    require(registry.search("advanced unique", 8).front().id == advanced.id,
+            "adding an action left stale search fields");
+    require(registry.search("same", 0).empty(), "zero-limit search returned results");
+
+    // Legacy callers may keep and mutate a pointer after a cache has been warmed.
+    MenuAction* escaped = registry.find(second.id);
+    require(escaped != nullptr, "legacy mutable lookup failed");
+    (void)registry.search("same", 8);
+    (void)registry.menu("Test");
+    escaped->id = "test.renamed";
+    escaped->label = "Changed Label";
+    escaped->menu = "Other";
+    require(std::as_const(registry).find("test.renamed") == escaped &&
+            std::as_const(registry).find(second.id) == nullptr, "mutable ID edit left stale lookup index");
+    require(registry.search("changed label", 8).front().id == "test.renamed",
+            "escaped pointer left stale search results");
+    require(registry.menu("Other").size() == 1 && registry.menu("Test").size() == 1,
+            "escaped pointer left stale menu membership");
+    escaped->keywords.push_back("afterwarm");
+    require(registry.search("afterwarm", 8).front().id == "test.renamed",
+            "later pointer edit left stale search fields");
+}
+
 void test_command_center_providers_and_persistence(const std::filesystem::path& root) {
     NativeEditorController controller{EditorWorkspace{make_native_editor_demo_document()}};
     controller.configure_ai_assistant(root);
@@ -147,6 +196,7 @@ int main() {
     try {
         const auto root = make_temp_root();
         test_registry_visibility_search_and_state(root);
+        test_menu_cache_updates();
         test_command_center_providers_and_persistence(root);
         std::error_code error;
         std::filesystem::remove_all(root, error);

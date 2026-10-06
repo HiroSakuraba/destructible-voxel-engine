@@ -158,6 +158,7 @@ int main(int argc, char** argv) {
         int frames = 0;
         double previous = host.monotonic_seconds();
         while (!controller.quit_requested()) {
+            const double frameStart = host.monotonic_seconds();
             PlatformEvent event;
             while (host.poll_event(event)) bridge.handle_event(event);
 
@@ -186,7 +187,12 @@ int main(int argc, char** argv) {
             }
             if (smoke && frames == 3) (void)controller.synthesizer().note_off(60);
             if (smoke && frames >= 4) break;
-            host.sleep_for(std::chrono::milliseconds(8));
+            // Budget includes update/render/present time. Input wakes the wait so
+            // a menu click never has to sit through an unconditional post-frame sleep.
+            const double remainingMilliseconds = (frameStart + 0.008 - host.monotonic_seconds()) * 1000.0;
+            if (remainingMilliseconds >= 1.0 && !controller.quit_requested())
+                (void)host.wait_for_events(std::chrono::milliseconds(
+                    static_cast<std::chrono::milliseconds::rep>(remainingMilliseconds)));
         }
 
         if (smoke) {

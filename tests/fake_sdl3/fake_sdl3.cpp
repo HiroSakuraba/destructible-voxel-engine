@@ -90,6 +90,11 @@ bool SDL_PollEvent(SDL_Event* event) {
     if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) modState = event->key.mod;
     return true;
 }
+bool SDL_WaitEventTimeout(SDL_Event* event, Sint32 timeoutMS) {
+    if (!events.empty()) return event ? SDL_PollEvent(event) : true;
+    if (timeoutMS > 0) std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMS));
+    return false;
+}
 bool SDL_GetWindowSize(SDL_Window* window, int* w, int* h) {
     if (!window) return false; if (w) *w = window->logicalW; if (h) *h = window->logicalH; return true;
 }

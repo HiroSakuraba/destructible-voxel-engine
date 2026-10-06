@@ -2,6 +2,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -153,6 +154,56 @@ void test_tasks() {
     tasks.wait_idle();
     require(tasks.snapshot(*task)->state == EditorTaskState::Succeeded, "task did not succeed");
     require(tasks.snapshot(*cancelTask)->state == EditorTaskState::Cancelled, "task cancellation failed");
+
+    // Task history must retain status, never the potentially large captured input.
+    for (bool fail : {false, true}) {
+        auto input = std::make_shared<std::vector<char>>(1024 * 1024);
+        std::weak_ptr<std::vector<char>> weak = input;
+        const auto id = tasks.submit("Owned input", [input, fail](EditorTaskContext&) {
+            if (fail) throw std::runtime_error("expected failure");
+        });
+        require(id.has_value(), "owned-input task was rejected");
+        input.reset();
+        tasks.wait_idle();
+        require(weak.expired(), "completed task retained its captured input");
+        require(tasks.snapshot(*id)->state == (fail ? EditorTaskState::Failed : EditorTaskState::Succeeded),
+                "releasing captured input lost the task outcome");
+    }
+
+    EditorTaskManager cancellation(1, 4);
+    std::promise<void> started, release;
+    auto released = release.get_future().share();
+    const auto blocker = cancellation.submit("Block worker", [&started, released](EditorTaskContext&) {
+        started.set_value();
+        released.wait();
+    });
+    require(blocker.has_value(), "blocker was rejected");
+    started.get_future().wait();
+    // Cancellation still releases captures if work never executes.
+    auto input = std::make_shared<int>(1);
+    std::weak_ptr<int> weak = input;
+    const auto cancelled = cancellation.submit("Cancelled input", [input](EditorTaskContext&) {
+        throw std::runtime_error("cancelled queued work must not execute");
+    });
+    require(cancelled.has_value(), "cancellation task was rejected");
+    input.reset();
+    require(cancellation.cancel(*cancelled), "owned-input cancellation failed");
+    release.set_value();
+    cancellation.wait_idle();
+    require(weak.expired(), "cancelled task retained its captured input");
+    require(cancellation.snapshot(*cancelled)->state == EditorTaskState::Cancelled, "cancelled outcome was lost");
+
+    EditorTaskManager history(1, 4, 2);
+    std::vector<EditorTaskId> ids;
+    for (int i = 0; i < 4; ++i) {
+        const auto id = history.submit("History", [](EditorTaskContext&) {});
+        require(id.has_value(), "history task was rejected");
+        ids.push_back(*id);
+        history.wait_idle();
+    }
+    require(history.snapshots().size() == 2, "completed task history was not bounded");
+    require(!history.snapshot(ids.front()), "old completed task was not evicted");
+    require(history.snapshot(ids.back())->state == EditorTaskState::Succeeded, "new completed task was evicted");
 }
 
 void test_import_workflow(const std::filesystem::path& root) {

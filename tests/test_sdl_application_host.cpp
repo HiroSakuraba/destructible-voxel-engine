@@ -73,6 +73,7 @@ int main() {
         drop.drop.data = "/tmp/model.gltf";
         SDLTest_PushEvent(&drop);
 
+        require(host.wait_for_events(std::chrono::milliseconds(1000)), "queued input did not wake the event wait");
         PlatformEvent converted;
         require(host.poll_event(converted) && converted.type == EventType::KeyDown && converted.key == "s", "key normalization failed");
         require(has_modifier(converted.modifiers, Modifier::Control) && has_modifier(converted.modifiers, Modifier::Shift), "key modifiers failed");
@@ -89,6 +90,8 @@ int main() {
                 std::abs(converted.gamepadValue + 0.5F) < 0.001F, "gamepad axis normalization failed");
         require(host.poll_event(converted) && converted.type == EventType::FileDropped && converted.path == "/tmp/model.gltf", "file drop failed");
         require(!host.poll_event(converted), "SDL event queue did not drain");
+        require(!host.wait_for_events(std::chrono::milliseconds(0)), "empty queue reported an event");
+        require(!host.wait_for_events(std::chrono::milliseconds(-1)), "negative wait was not clamped to a poll");
 
         SDLTest_SetDialogResult("/tmp/scene.dvescene", nullptr);
         FileDialogRequest request;
@@ -100,6 +103,7 @@ int main() {
 
         host.destroy_window();
         require(!host.has_window(), "destroy_window failed");
+        require(!host.wait_for_events(std::chrono::milliseconds(1000)), "destroyed host attempted an event wait");
         std::cout << "SDL application-host contract passed\n";
         return 0;
     } catch (const std::exception& exception) {

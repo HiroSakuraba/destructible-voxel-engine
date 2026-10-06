@@ -631,7 +631,54 @@ std::vector<MenuAction> NativeEditorController::menu_actions(std::string_view me
     return workspace_.menus().menu(menuName, showAdvancedMenus_);
 }
 
+namespace {
+struct PaletteKeyHasher {
+    std::uint64_t h{0x9E3779B97F4A7C15ULL};
+    void u64(std::uint64_t v) noexcept {
+        h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6U) + (h >> 2U);
+        h *= 0xBF58476D1CE4E5B9ULL;
+        h ^= h >> 31U;
+    }
+    void text(std::string_view v) noexcept { u64(std::hash<std::string_view>{}(v)); u64(v.size()); }
+};
+} // namespace
+
+// The palette scores every command, setting, panel, asset and scene object, and is
+// requested on every pointer move and every frame while open. Results are cached
+// until something they are derived from changes: the query, the limit, favorites and
+// recents, the menu registry and asset database revisions, the advanced-settings
+// toggle, or the scene objects' ids and names (hashed, which is far cheaper than
+// scoring them).
 std::vector<CommandPaletteResult> NativeEditorController::command_palette_results(std::size_t limit) const {
+    PaletteKeyHasher key;
+    key.text(commandPaletteQuery_);
+    key.u64(limit);
+    key.u64(favoriteCommandIds_.size());
+    for (const std::string& id : favoriteCommandIds_) key.text(id);
+    key.u64(recentCommandIds_.size());
+    for (const std::string& id : recentCommandIds_) key.text(id);
+    key.u64(workspace_.menus().revision());
+    key.u64(assetDatabase_.revision());
+    key.u64(settingsPanel_.includeAdvanced ? 1U : 0U);
+    key.u64(workspace_.settings().definitions().size());
+    if (!commandPaletteQuery_.empty()) {
+        const auto& objects = workspace_.document().objects();
+        key.u64(objects.size());
+        for (const auto& [id, object] : objects) {
+            key.u64(id);
+            key.text(object.name);
+        }
+    }
+    if (!paletteCacheValid_ || key.h != paletteCacheKey_) {
+        paletteCache_ = build_command_palette_results(limit);
+        paletteCacheKey_ = key.h;
+        paletteCacheValid_ = true;
+        ++paletteCacheRebuilds_;
+    }
+    return paletteCache_;
+}
+
+std::vector<CommandPaletteResult> NativeEditorController::build_command_palette_results(std::size_t limit) const {
     enum class Provider : std::uint8_t { All, Commands, Settings, Panels, Assets, Objects, Documentation };
     Provider provider = Provider::All;
     std::string query = commandPaletteQuery_;

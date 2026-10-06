@@ -368,6 +368,7 @@ bool editor_asset_is_text(const std::filesystem::path& path) noexcept {
 EditorAssetDatabase::EditorAssetDatabase(std::filesystem::path projectRoot) { set_project_root(std::move(projectRoot)); }
 
 void EditorAssetDatabase::set_project_root(std::filesystem::path projectRoot) {
+    ++revision_;
     std::error_code error;
     root_ = std::filesystem::weakly_canonical(projectRoot, error);
     if (error) root_ = std::filesystem::absolute(projectRoot, error).lexically_normal();
@@ -398,6 +399,7 @@ std::filesystem::path EditorAssetDatabase::normalize_relative(const std::filesys
 }
 
 bool EditorAssetDatabase::load(std::string* error) {
+    ++revision_;
     records_.clear();
     thumbnailCursor_ = 0U;
     if (root_.empty()) {
@@ -527,6 +529,7 @@ bool same_persisted_records(const std::vector<EditorAssetRecord>& previous,
 } // namespace
 
 bool EditorAssetDatabase::scan(EditorAssetScanReport* report, std::string* error, const EditorAssetScanOptions& options) {
+    ++revision_;
     EditorAssetScanReport local;
     if (!report) report = &local;
     *report = {};
@@ -764,6 +767,7 @@ const EditorAssetRecord* EditorAssetDatabase::find(std::string_view id) const no
     return found == records_.end() ? nullptr : &*found;
 }
 EditorAssetRecord* EditorAssetDatabase::find(std::string_view id) noexcept {
+    ++revision_;
     const auto found = std::find_if(records_.begin(), records_.end(), [&](const EditorAssetRecord& record) { return record.id == id; });
     return found == records_.end() ? nullptr : &*found;
 }
@@ -830,6 +834,7 @@ std::vector<const EditorAssetRecord*> EditorAssetDatabase::reverse_dependencies_
 }
 
 bool EditorAssetDatabase::set_tags(std::string_view id, std::vector<std::string> tags, std::string* error) {
+    ++revision_;
     EditorAssetRecord* record = find(id);
     if (!record) {
         if (error) *error = "asset does not exist";
@@ -843,6 +848,7 @@ bool EditorAssetDatabase::set_tags(std::string_view id, std::vector<std::string>
 bool EditorAssetDatabase::register_import(const std::filesystem::path& sourceRelative,
                                           const std::filesystem::path& cookedRelative,
                                           std::string* error) {
+    ++revision_;
     const auto source = normalize_relative(sourceRelative, error);
     if (source.empty()) return false;
     const auto cooked = normalize_relative(cookedRelative, error);
@@ -868,6 +874,7 @@ bool EditorAssetDatabase::register_import(const std::filesystem::path& sourceRel
 EditorAssetMutationReport EditorAssetDatabase::move_asset(std::string_view id,
                                                            const std::filesystem::path& newRelativePath,
                                                            bool rewriteTextReferences) {
+    ++revision_;
     EditorAssetMutationReport result;
     EditorAssetRecord* record = find(id);
     if (!record) { result.message = "asset does not exist"; return result; }

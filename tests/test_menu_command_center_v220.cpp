@@ -7,6 +7,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <algorithm>
+#include <utility>
 
 using namespace dve;
 using namespace dve::editor;
@@ -230,12 +232,100 @@ void test_command_center_providers_and_persistence(const std::filesystem::path& 
 
 } // namespace
 
+// Palette results are cached and reused across pointer moves and frames, and every
+// input they are derived from invalidates them.
+void test_command_palette_cache() {
+    NativeEditorController controller{EditorWorkspace{make_native_editor_demo_document()}};
+    controller.resize(1600, 900);
+    require(controller.dispatch_action("help.command_palette"), "command center did not open");
+    controller.text_input("wall");
+    const auto first = controller.command_palette_results(64);
+    const auto rebuilds = controller.command_palette_rebuild_count();
+    for (int i = 0; i < 5; ++i) {
+        controller.pointer_move(400 + i * 7, 300, 0);
+        (void)controller.command_palette_results(64);
+    }
+    require(controller.command_palette_rebuild_count() == rebuilds, "unchanged palette was rebuilt");
+    require(controller.command_palette_results(64).size() == first.size(), "cached palette changed size");
+
+    const auto has_object = [&](std::string_view name) {
+        const auto results = controller.command_palette_results(64);
+        return std::any_of(results.begin(), results.end(), [&](const CommandPaletteResult& result) {
+            return result.kind == CommandPaletteResultKind::SceneObject && result.label == name;
+        });
+    };
+    // Scene objects: adding and renaming are reflected.
+    EditorObject added(424242, "Wall Panel Probe");
+    controller.workspace().document().add_object(std::move(added));
+    require(has_object("Wall Panel Probe"), "cached palette missed a new object");
+    controller.workspace().document().find_object(424242)->name = "Wall Renamed Probe";
+    require(has_object("Wall Renamed Probe") && !has_object("Wall Panel Probe"), "cached palette missed a rename");
+
+    // Query and limit.
+    auto before = controller.command_palette_rebuild_count();
+    (void)controller.command_palette_results(3);
+    require(controller.command_palette_rebuild_count() == before + 1U, "a different limit reused the cache");
+    controller.text_input(" s");
+    (void)controller.command_palette_results(3);
+    require(controller.command_palette_rebuild_count() == before + 2U, "a query edit reused the cache");
+
+    controller.key_down("escape", false, false, false);
+    require(controller.dispatch_action("help.command_palette"), "command center did not reopen");
+    controller.text_input("sprite diagnostics");
+    auto results = controller.command_palette_results(16);
+    require(!results.empty() && results.front().id == "sprite.diagnostics", "command not found");
+    // Favorites.
+    controller.key_down("d", true, false, false);
+    require(controller.command_is_favorite("sprite.diagnostics"), "Ctrl+D did not favorite the command");
+    results = controller.command_palette_results(16);
+    require(std::any_of(results.begin(), results.end(), [](const CommandPaletteResult& result) {
+                return result.id == "sprite.diagnostics" && result.favorite;
+            }), "cached palette missed a favorite change");
+    // Menu state: disabling a command shows up in the cached results.
+    require(controller.workspace().menus().set_enabled("sprite.diagnostics", false, "Probe reason"), "disable failed");
+    results = controller.command_palette_results(16);
+    require(!results.empty(), "results vanished after disabling a command");
+    const auto diagnostics = std::find_if(results.begin(), results.end(), [](const CommandPaletteResult& result) {
+        return result.id == "sprite.diagnostics";
+    });
+    require(diagnostics != results.end() && !diagnostics->enabled && diagnostics->disabledReason == "Probe reason",
+            "cached palette kept a stale enabled state");
+
+    // The asset provider is keyed on the database revision, which every mutating call
+    // (including the mutable find) advances.
+    EditorAssetDatabase database;
+    auto revision = database.revision();
+    const auto assetRoot = std::filesystem::temp_directory_path() / "dve_palette_asset_revision";
+    std::filesystem::remove_all(assetRoot);
+    std::filesystem::create_directories(assetRoot / "assets");
+    { std::ofstream(assetRoot / "assets" / "probe.png") << "png"; }
+    database.set_project_root(assetRoot);
+    require(database.revision() != revision, "set_project_root did not advance the asset revision");
+    revision = database.revision();
+    (void)database.find("missing");
+    require(database.revision() != revision, "mutable asset find did not advance the revision");
+    revision = database.revision();
+    (void)std::as_const(database).find("missing");
+    (void)database.records();
+    require(database.revision() == revision, "const asset reads advanced the revision");
+    // The editor scans with options (thumbnails deferred); that must advance it too.
+    EditorAssetScanOptions scanOptions;
+    scanOptions.generateThumbnails = false;
+    EditorAssetScanReport scanReport;
+    std::string scanError;
+    require(database.scan(&scanReport, &scanError, scanOptions), ("probe asset scan failed: " + scanError).c_str());
+    require(database.revision() != revision, "an editor-style scan did not advance the asset revision");
+    std::filesystem::remove_all(assetRoot);
+    std::cout << "command palette cache: OK\n";
+}
+
 int main() {
     try {
         const auto root = make_temp_root();
         test_registry_visibility_search_and_state(root);
         test_menu_cache_updates();
         test_command_center_providers_and_persistence(root);
+        test_command_palette_cache();
         std::error_code error;
         std::filesystem::remove_all(root, error);
         std::cout << "dve_menu_command_center_v220_tests: PASS\n";

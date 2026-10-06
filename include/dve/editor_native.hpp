@@ -337,6 +337,7 @@ public:
         return favoriteCommandIds_.contains(actionId);
     }
     [[nodiscard]] std::vector<CommandPaletteResult> command_palette_results(std::size_t limit = 10) const;
+    [[nodiscard]] std::uint64_t command_palette_rebuild_count() const noexcept { return paletteCacheRebuilds_; }
     [[nodiscard]] NativeCommandPaletteLayout command_palette_layout() const;
     [[nodiscard]] std::size_t command_palette_selection() const noexcept { return commandPaletteSelection_; }
     [[nodiscard]] std::optional<std::string_view> open_menu() const noexcept;
@@ -572,6 +573,7 @@ public:
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
 
 private:
+    [[nodiscard]] std::vector<CommandPaletteResult> build_command_palette_results(std::size_t limit) const;
     void recompute_layout();
     void update_hover(int x, int y);
     void begin_voxel_stroke(int x, int y);
@@ -664,6 +666,10 @@ private:
     std::size_t commandPaletteSelection_{};
     std::deque<std::string> recentCommandIds_;
     std::set<std::string, std::less<>> favoriteCommandIds_;
+    mutable std::vector<CommandPaletteResult> paletteCache_;
+    mutable std::uint64_t paletteCacheKey_{};
+    mutable bool paletteCacheValid_{};
+    mutable std::uint64_t paletteCacheRebuilds_{};
     bool showAdvancedMenus_{};
     std::filesystem::path menuStatePath_;
     std::filesystem::path userSettingsPath_;

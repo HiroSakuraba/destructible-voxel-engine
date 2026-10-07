@@ -29,6 +29,8 @@ struct PlayerRenderView {
     std::span<const GameRenderObject> objects;   // GameWorld::render_objects()
     render::PolygonCamera camera;                // world space, metres
     RenderEnvironment environment;
+    bool polygonFrustumCulling{true};
+    float polygonLodBias{};
 };
 
 struct PlayerRenderStats {
@@ -40,6 +42,9 @@ struct PlayerRenderStats {
     std::uint64_t skippedObjects{}; // e.g. voxel size differs from the scene's (CPU path)
     std::uint64_t tracedRays{};
     std::uint64_t hitRays{};
+    render::PolygonRenderStats polygons;
+    std::uint64_t scaledPolygonAssets{};
+    std::uint64_t scaledPolygonCopies{};
 };
 
 // Receives finished frames (CPU backends). Implementations: SDL streaming texture, memory.

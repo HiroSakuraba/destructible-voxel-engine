@@ -26,6 +26,16 @@ private:
     const EditorSettingsRegistry& registry_;
 };
 
+// Project policy is exported into the game's existing settings file; the CPU
+// player resolves it into PolygonRenderOptions each frame, without editor linkage.
+inline ui::GameSettings polygon_game_settings(const EditorSettingsRegistry& registry,
+                                              ui::GameSettings settings = {}) {
+    const RuntimeSettingsReader s(registry);
+    settings.polygonFrustumCulling=s.get<bool>("polygon.frustum_culling");
+    settings.polygonLodBias=s.number("polygon.lod_bias");
+    return settings;
+}
+
 // Applies the Rendering settings to a render environment. Exposure is a
 // linear pre-tonemap multiplier (1 is neutral, 2 is one stop up) and replaces
 // the environment value outright, so a global and an authored exposure never

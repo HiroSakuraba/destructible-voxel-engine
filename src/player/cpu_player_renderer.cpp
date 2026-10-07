@@ -83,6 +83,8 @@ public:
         }
         if (!(voxelSize > 0.0F)) voxelSize = kDefaultMetersPerVoxel;
         const float toUnits = 1.0F / voxelSize;
+        ++polygonFrame_;
+        if(polygonScale_ != toUnits){polygonCache_.clear();polygonRenderCache_.clear();polygonScale_=toUnits;}
 
         voxels_.clear();
         polygons_.clear();
@@ -99,11 +101,18 @@ public:
                 if (materials.empty()) materials = default_palette();
                 voxels_.push_back({object.id, object.voxels, transform, materials, true});
             } else if (object.kind == GameGeometryKind::Polygon && object.polygon != nullptr) {
-                const CookedPolygonAsset* scaled = scaled_polygon(object.id, *object.polygon, toUnits);
-                polygons_.push_back({object.id, scaled, transform, {}, {1, 1, 1, 1}, true});
+                const CookedPolygonAsset* scaled = scaled_polygon(*object.polygon, toUnits);
+                std::span<const render::PolygonLodLevel> lods;
+                if(!object.polygonLods.empty()){
+                    auto& binding=polygonLods_[object.id]; binding.lastFrame=polygonFrame_; binding.levels.clear();
+                    for(const auto& level:object.polygonLods)
+                        binding.levels.push_back({level.asset ? scaled_polygon(*level.asset,toUnits) : nullptr,level.minimumProjectedDiameterPixels});
+                    lods=binding.levels;
+                }
+                polygons_.push_back({object.id, scaled, transform, lods, {1, 1, 1, 1}, true});
             }
         }
-        prune_polygon_cache(view.objects);
+        prune_polygon_cache();
         stats_.voxelInstances = voxels_.size();
         stats_.polygonInstances = polygons_.size();
 
@@ -125,8 +134,12 @@ public:
         if (!polygons_.empty()) {
             render::PolygonRenderOptions polygonOptions;
             polygonOptions.preserveExistingDepth = true;
-            (void)render::ReferencePolygonRenderer{}.render(polygons_, camera, environment, target_,
-                                                            polygonOptions);
+            polygonOptions.enableFrustumCulling = view.polygonFrustumCulling;
+            polygonOptions.lodBias = view.polygonLodBias;
+            polygonOptions.cache = &polygonRenderCache_;
+            stats_.polygons = render::ReferencePolygonRenderer{}.render(polygons_, camera, environment, target_, polygonOptions);
+        } else {
+            polygonRenderCache_.clear();
         }
         stats_.renderMilliseconds = milliseconds_since(start);
 
@@ -155,37 +168,37 @@ public:
 
 private:
     struct ScaledPolygon {
-        const CookedPolygonAsset* source{};
-        std::uint64_t contentHash{};
-        float scale{};
         CookedPolygonAsset asset;
+        std::uint64_t lastFrame{};
     };
 
-    const CookedPolygonAsset* scaled_polygon(GameObjectId id, const CookedPolygonAsset& source, float scale) {
-        ScaledPolygon& entry = polygonCache_[id];
-        if (entry.source != &source || entry.contentHash != source.contentHash || entry.scale != scale) {
-            entry.source = &source;
-            entry.contentHash = source.contentHash;
-            entry.scale = scale;
+    const CookedPolygonAsset* scaled_polygon(const CookedPolygonAsset& source, float scale) {
+        // GameWorld supplies immutable cooked assets. A content change publishes
+        // a new hash; unhashed caller assets are fingerprinted here each frame.
+        const auto hash=source.contentHash ? source.contentHash : polygon_asset_content_hash(source);
+        auto [it,inserted]=polygonCache_.try_emplace(hash);
+        auto& entry=it->second;
+        if (inserted) {
+            if(!validate_polygon_asset(source)){polygonCache_.erase(it);return nullptr;}
+            ++stats_.scaledPolygonCopies;
             entry.asset = source;
             for (PolygonVertex& vertex : entry.asset.vertices) vertex.position = multiply(vertex.position, scale);
             entry.asset.bounds.minimum = multiply(entry.asset.bounds.minimum, scale);
             entry.asset.bounds.maximum = multiply(entry.asset.bounds.maximum, scale);
-            // The renderer validates every instance, including the content hash: re-hash the
-            // scaled copy, or every polygon is culled as corrupt (nothing drew before this).
+            // Preserve hash validation after converting vertices into voxel units.
             entry.asset.contentHash = polygon_asset_content_hash(entry.asset);
         }
+        entry.lastFrame=polygonFrame_;
         return &entry.asset;
     }
 
-    void prune_polygon_cache(std::span<const GameRenderObject> objects) {
-        if (polygonCache_.size() <= polygons_.size()) return;
+    void prune_polygon_cache() {
         for (auto it = polygonCache_.begin(); it != polygonCache_.end();) {
-            const bool live = std::any_of(objects.begin(), objects.end(), [&](const GameRenderObject& object) {
-                return object.id == it->first && object.polygon != nullptr;
-            });
-            it = live ? std::next(it) : polygonCache_.erase(it);
+            it = it->second.lastFrame==polygonFrame_ ? std::next(it) : polygonCache_.erase(it);
         }
+        stats_.scaledPolygonAssets=polygonCache_.size();
+        for(auto it=polygonLods_.begin();it!=polygonLods_.end();)
+            it=it->second.lastFrame==polygonFrame_ ? std::next(it) : polygonLods_.erase(it);
     }
 
     void clear_background(const RenderEnvironment& environment) {
@@ -209,7 +222,12 @@ private:
     PlayerRenderStats stats_{};
     std::vector<render::VoxelReferenceInstance> voxels_;
     std::vector<render::PolygonRenderInstance> polygons_;
-    std::unordered_map<GameObjectId, ScaledPolygon> polygonCache_;
+    std::unordered_map<std::uint64_t, ScaledPolygon> polygonCache_;
+    struct LodBinding { std::vector<render::PolygonLodLevel> levels; std::uint64_t lastFrame{}; };
+    std::unordered_map<GameObjectId,LodBinding> polygonLods_;
+    render::PolygonRenderCache polygonRenderCache_;
+    std::uint64_t polygonFrame_{};
+    float polygonScale_{};
 };
 
 } // namespace

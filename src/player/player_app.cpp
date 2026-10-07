@@ -405,6 +405,8 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
     view.objects = objects;
     view.camera = camera(aspect);
     view.environment = environment();
+    view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
+    view.polygonLodBias = impl_->settings.polygonLodBias;
     return view;
 }
 

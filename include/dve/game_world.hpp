@@ -280,6 +280,9 @@ struct GameRenderObject {
     // false for visual-only voxel objects (spawn_visual_asset): drawn, but no physics body and
     // skipped by raycasts/overlaps/capsule queries.
     bool collision{true};
+    // Optional render-only levels supplied by the host. Their storage must
+    // outlive render(); source/collision geometry remains `polygon`.
+    std::span<const PolygonLodLevel> polygonLods;
 };
 
 // The tick loop and live, script-facing object model this engine did not previously have:

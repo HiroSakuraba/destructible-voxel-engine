@@ -268,4 +268,10 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Compiles Lua source without executing it, in a throwaway state with no
+// game bindings: false plus the compiler's message for malformed code.
+// Validation paths (scene save/build checks) use this so a broken script
+// is reported without ever running it.
+[[nodiscard]] bool check_lua_syntax(std::string_view code, std::string* error = nullptr);
+
 } // namespace dve

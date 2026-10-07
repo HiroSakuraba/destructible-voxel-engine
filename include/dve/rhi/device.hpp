@@ -217,6 +217,10 @@ struct DeviceCapabilities {
     bool waveOperations{};
     bool indirectDispatch{true};
     bool presentation{true};
+    // True only when the backend can emit debug labels a GPU debugger can
+    // capture (Vulkan: VK_EXT_debug_utils present and its commands loaded).
+    // Devices may still accept label calls as bookkeeping when this is false.
+    bool debugLabels{};
 };
 
 struct TextureFormatCapabilities {

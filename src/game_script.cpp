@@ -2454,6 +2454,18 @@ bool GameScriptHost::run_string(const std::string& code, const std::string& chun
     return true;
 }
 
+bool check_lua_syntax(std::string_view code, std::string* error) {
+    lua_State* state = luaL_newstate();
+    if (state == nullptr) {
+        if (error) *error = "could not create a Lua state for syntax checking";
+        return false;
+    }
+    const bool ok = luaL_loadbuffer(state, code.data(), code.size(), "syntax-check") == LUA_OK;
+    if (!ok && error) *error = lua_tostring(state, -1);
+    lua_close(state);
+    return ok;
+}
+
 void GameScriptHost::set_log_sink(LogSink sink) { impl_->logSink = std::move(sink); }
 
 void GameScriptHost::set_content_source(const ContentSource* content) { impl_->content = content; }

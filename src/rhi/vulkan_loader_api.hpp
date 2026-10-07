@@ -131,6 +131,7 @@ inline constexpr Result ErrorDeviceLost = -4;
 inline constexpr Result ErrorIncompatibleDriver = -9;
 
 inline constexpr StructureType StructureTypeApplicationInfo = 0;
+inline constexpr StructureType StructureTypeDebugUtilsLabelEXT = 1000128002;
 inline constexpr StructureType StructureTypeInstanceCreateInfo = 1;
 inline constexpr StructureType StructureTypeDeviceQueueCreateInfo = 2;
 inline constexpr StructureType StructureTypeDeviceCreateInfo = 3;
@@ -643,8 +644,13 @@ struct SubmitInfo {
     const std::uint64_t* pSignalSemaphores;
 };
 struct FenceCreateInfo { StructureType sType; const void* pNext; FenceCreateFlags flags; };
+struct ExtensionProperties { char extensionName[256]; std::uint32_t specVersion; };
+struct DebugUtilsLabelEXT { StructureType sType; const void* pNext; const char* pLabelName; float color[4]; };
 
 using PFN_CreateInstance = Result (DVE_VKAPI_CALL*)(const InstanceCreateInfo*, const void*, Instance*);
+using PFN_EnumerateInstanceExtensionProperties = Result (DVE_VKAPI_CALL*)(const char*, std::uint32_t*, ExtensionProperties*);
+using PFN_CmdBeginDebugUtilsLabelEXT = void (DVE_VKAPI_CALL*)(CommandBuffer, const DebugUtilsLabelEXT*);
+using PFN_CmdEndDebugUtilsLabelEXT = void (DVE_VKAPI_CALL*)(CommandBuffer);
 using PFN_DestroyInstance = void (DVE_VKAPI_CALL*)(Instance, const void*);
 using PFN_EnumeratePhysicalDevices = Result (DVE_VKAPI_CALL*)(Instance, std::uint32_t*, PhysicalDevice*);
 using PFN_GetPhysicalDeviceProperties = void (DVE_VKAPI_CALL*)(PhysicalDevice, PhysicalDeviceProperties*);

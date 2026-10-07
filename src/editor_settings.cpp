@@ -567,7 +567,7 @@ constexpr std::string_view kNotYetApplied[] = {
     "camera.dof_quality", "camera.film_grain_quality",
     "camera.lens_effect_quality", "camera.lut_resolution", "camera.lut_streaming", "camera.missing_lut_fallback",
     "camera.motion_blur_quality", "camera.render_target_outputs", "camera.sequence_scrub_rate",
-    "camera.tone_map_output", "diagnostics.capture_repro", "editor.restore_workspace",
+    "camera.tone_map_output", "diagnostics.capture_repro",
     "editor.telemetry_local", "geometry.mode", "input.gamepad_prompts",
     "material.clear_coat", "material.foliage", "material.global_parameters", "material.layer_limit",
     "material.validate_gpu_layout", "plugins.clap_host", "plugins.clap_sandbox",
@@ -593,7 +593,7 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         enum_setting("editor.theme","General","Interface","Theme","dark",{{"dark","Dark"},{"light","Light"},{"system","System"}},"Editor appearance."),
         integer_setting("editor.autosave_minutes","General","Files","Autosave Interval",5,1,120,1,"Minutes between recovery saves."),
         boolean_setting("editor.confirm_destructive","General","Safety","Confirm Destructive Actions",true,"Ask before replacing dirty scenes or quitting."),
-        boolean_setting("editor.restore_workspace","General","Startup","Restore Workspace",true,"Restore panels, selected tabs, and open assets."),
+        boolean_setting("editor.restore_workspace","General","Startup","Restore Workspace",true,"Restore supported panels, the active tab, viewport pose and saved native sprite assets when opening a project. Off ignores and preserves the saved workspace."),
         boolean_setting("editor.telemetry_local","General","Diagnostics","Collect Local Performance Telemetry",true,"Keep callback, rendering, and task statistics locally."),
 
         enum_setting("camera.navigation_style","Camera","Navigation","Navigation Style","dve",{{"dve","DVE"},{"unity","Unity"},{"unreal","Unreal"},{"blender","Blender"}},"Live DVE, Unity-, Unreal- or Blender-inspired viewport gestures. Untouched built-in mouse slots follow this style; custom profiles and edited/unbound slots keep their bindings. Switching releases held navigation."),

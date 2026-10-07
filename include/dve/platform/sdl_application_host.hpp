@@ -37,6 +37,8 @@ public:
     [[nodiscard]] WindowMetrics window_metrics() const noexcept override;
     [[nodiscard]] NativeWindowHandle native_window_handle() const noexcept override;
     void set_window_title(std::string_view title) override;
+    bool set_relative_mouse_mode(bool enabled, std::string* error = nullptr) override;
+    [[nodiscard]] bool relative_mouse_mode() const noexcept override;
 
     void set_clipboard_text(std::string_view text) override;
     [[nodiscard]] std::string clipboard_text() const override;

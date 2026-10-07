@@ -7,6 +7,7 @@ SDL_SystemTheme SDL_GetSystemTheme() { return SDL_SYSTEM_THEME_DARK; }
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <optional>
 #include <string>
 #include <thread>
@@ -33,10 +34,14 @@ struct SDL_Window {
     SDL_WindowFlags flags{SDL_WINDOW_INPUT_FOCUS};
     SDL_WindowID id{1};
     std::string title;
+    bool relativeMouse{};
 };
 
 namespace {
 std::string errorText;
+std::map<std::string, std::string, std::less<>> mouseHints;
+bool relativeMouseSupported{true};
+float mouseX{}, mouseY{};
 std::optional<std::string> audioBufferHint;
 std::string audioBufferHintAtOpen;
 int playbackRate = 48000;
@@ -96,6 +101,16 @@ void SDL_DestroyWindow(SDL_Window* window) { delete window; }
 bool SDL_ShowWindow(SDL_Window* window) { if (!window) return false; window->flags &= ~SDL_WINDOW_HIDDEN; return true; }
 bool SDL_StartTextInput(SDL_Window*) { return true; }
 bool SDL_StopTextInput(SDL_Window*) { return true; }
+bool SDL_SetWindowRelativeMouseMode(SDL_Window* window, bool enabled) {
+    if (!window || (enabled && !relativeMouseSupported)) {
+        errorText = "Relative mouse unsupported"; return false;
+    }
+    window->relativeMouse = enabled; return true;
+}
+bool SDL_GetWindowRelativeMouseMode(SDL_Window* window) { return window && window->relativeMouse; }
+Uint32 SDL_GetMouseState(float* x, float* y) { if (x) *x = mouseX; if (y) *y = mouseY; return 0; }
+void SDL_WarpMouseInWindow(SDL_Window*, float x, float y) { mouseX = x; mouseY = y; }
+void SDLTest_SetRelativeMouseSupported(bool supported) { relativeMouseSupported = supported; }
 bool SDL_PollEvent(SDL_Event* event) {
     if (!event || events.empty()) return false;
     *event = events.front();
@@ -148,6 +163,7 @@ void SDL_ShowSaveFileDialog(SDL_DialogFileCallback callback, void* userdata, SDL
 void SDL_ShowOpenFolderDialog(SDL_DialogFileCallback callback, void* userdata, SDL_Window*, const char*, bool) { show_dialog(callback, userdata); }
 
 void SDLTest_Reset() {
+    mouseHints.clear(); relativeMouseSupported = true; mouseX = mouseY = 0;
     audioBufferHint.reset(); audioBufferHintAtOpen.clear();
     playbackRate = 48000; playbackFrames = 256; failPlaybackOpen = failPlaybackQuery = false;
     manualTicks.reset(); vsyncSupported = true; renderVsync = renderVsyncCalls = 0;
@@ -263,14 +279,23 @@ SDL_AudioDeviceID SDL_GetAudioStreamDevice(SDL_AudioStream* stream) {
     return stream ? (stream->recording ? 101U : 201U) : 0U;
 }
 const char* SDL_GetHint(const char* name) {
+    if (name) { const auto it = mouseHints.find(name); if (it != mouseHints.end()) return it->second.c_str(); }
     return name && std::strcmp(name, SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) == 0 && audioBufferHint
         ? audioBufferHint->c_str() : nullptr;
 }
 bool SDL_SetHint(const char* name, const char* value) {
+    if (name && value && (std::strcmp(name, SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE) == 0 ||
+                         std::strcmp(name, SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE) == 0)) {
+        mouseHints[name] = value; return true;
+    }
     if (!name || !value || std::strcmp(name, SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) != 0) return false;
     audioBufferHint = value; return true;
 }
 bool SDL_ResetHint(const char* name) {
+    if (name && (std::strcmp(name, SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE) == 0 ||
+                 std::strcmp(name, SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE) == 0)) {
+        mouseHints.erase(name); return true;
+    }
     if (!name || std::strcmp(name, SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) != 0) return false;
     audioBufferHint.reset(); return true;
 }

@@ -303,6 +303,7 @@ bool EditorShortcutRegistry::reset_profile(std::string_view name, std::string* e
         return false;
     }
     profiles_[std::string(name)] = defaults->second;
+    editedBindings_.erase(std::string(name));
     return true;
 }
 
@@ -364,14 +365,26 @@ bool EditorShortcutRegistry::set_binding(std::string_view profile, std::string_v
             }
             for (auto& [otherKey, otherPair] : foundProfile->second) {
                 if (!contexts_overlap(context, otherKey.context)) continue;
-                if (otherPair.primary && *otherPair.primary == *gesture) otherPair.primary.reset();
-                if (otherPair.secondary && *otherPair.secondary == *gesture) otherPair.secondary.reset();
+                if (otherPair.primary && *otherPair.primary == *gesture) {
+                    otherPair.primary.reset(); editedBindings_[std::string(profile)][otherKey] |= 1U;
+                }
+                if (otherPair.secondary && *otherPair.secondary == *gesture) {
+                    otherPair.secondary.reset(); editedBindings_[std::string(profile)][otherKey] |= 2U;
+                }
             }
         }
     }
     ShortcutBindingPair& pair = foundProfile->second[{std::string(actionId), context}];
     if (slot == ShortcutSlot::Primary) pair.primary = std::move(gesture);
     else pair.secondary = std::move(gesture);
+    editedBindings_[std::string(profile)][{std::string(actionId), context}] |=
+        slot == ShortcutSlot::Primary ? 1U : 2U;
+    return true;
+}
+
+bool EditorShortcutRegistry::set_navigation_style(std::string_view style) {
+    if (style != "dve" && style != "unity" && style != "unreal" && style != "blender") return false;
+    navigationStyle_ = style;
     return true;
 }
 
@@ -380,7 +393,62 @@ ShortcutBindingPair EditorShortcutRegistry::bindings(std::string_view profile, s
     const auto foundProfile = profiles_.find(std::string(profile));
     if (foundProfile == profiles_.end()) return {};
     const auto found = foundProfile->second.find({std::string(actionId), context});
-    return found == foundProfile->second.end() ? ShortcutBindingPair{} : found->second;
+    const ShortcutBindingPair authored = found == foundProfile->second.end() ? ShortcutBindingPair{} : found->second;
+    if (navigationStyle_ == "dve" || context != ShortcutContext::Viewport ||
+        (actionId != "viewport.look" && actionId != "viewport.orbit" &&
+         actionId != "viewport.pan" && actionId != "viewport.dolly")) return authored;
+    const auto defaults = builtinDefaults_.find(profile);
+    if (defaults == builtinDefaults_.end()) return authored; // custom profile owns its complete map
+    const auto baseline = defaults->second.find({std::string(actionId), context});
+    if (baseline == defaults->second.end()) return authored;
+    unsigned edited = 0U;
+    if (const auto edits = editedBindings_.find(profile); edits != editedBindings_.end())
+        if (const auto entry = edits->second.find({std::string(actionId), context}); entry != edits->second.end())
+            edited = entry->second;
+    const auto mouse = [](std::string_view input, bool shift = false, bool control = false, bool alt = false) {
+        return mouse_shortcut(std::string(input), control, shift, alt, ShortcutActivation::Hold);
+    };
+    ShortcutBindingPair preset;
+    if (actionId == "viewport.look") preset.primary = mouse("mouse2");
+    else if (navigationStyle_ == "blender") {
+        if (actionId == "viewport.orbit") preset.primary = mouse("mouse3");
+        else if (actionId == "viewport.pan") preset.primary = mouse("mouse3", true);
+        else preset.primary = mouse("mouse3", false, true);
+    } else {
+        if (actionId == "viewport.orbit") preset.primary = mouse("mouse1", false, false, true);
+        else if (actionId == "viewport.dolly") preset.primary = mouse("mouse2", false, false, true);
+        else if (navigationStyle_ == "unity") {
+            preset.primary = mouse("mouse3");
+            preset.secondary = mouse("mouse1", false, true, true);
+        } else {
+            preset.primary = mouse("mouse3", false, false, true);
+            preset.secondary = mouse("mouse3");
+        }
+    }
+    ShortcutBindingPair result = authored;
+    const auto replace_default = [&](std::optional<ShortcutGesture>& slot,
+                                     const std::optional<ShortcutGesture>& original,
+                                     const std::optional<ShortcutGesture>& replacement) {
+        if (slot != original) return;
+        // A newly introduced default must not steal a user's edited binding.
+        if (replacement) for (const auto& [key, pair] : foundProfile->second) {
+            if (key.actionId == actionId || !contexts_overlap(key.context, context)) continue;
+            const auto old = defaults->second.find(key);
+            const ShortcutBindingPair oldPair = old == defaults->second.end() ? ShortcutBindingPair{} : old->second;
+            unsigned otherEdited = 0U;
+            if (const auto edits = editedBindings_.find(profile); edits != editedBindings_.end())
+                if (const auto entry = edits->second.find(key); entry != edits->second.end()) otherEdited = entry->second;
+            if ((pair.primary == replacement && (pair.primary != oldPair.primary || (otherEdited & 1U))) ||
+                (pair.secondary == replacement && (pair.secondary != oldPair.secondary || (otherEdited & 2U)))) {
+                slot.reset();
+                return;
+            }
+        }
+        slot = replacement;
+    };
+    if (!(edited & 1U)) replace_default(result.primary, baseline->second.primary, preset.primary);
+    if (!(edited & 2U)) replace_default(result.secondary, baseline->second.secondary, preset.secondary);
+    return result;
 }
 
 std::optional<ShortcutResolution> EditorShortcutRegistry::resolve(
@@ -599,6 +667,10 @@ bool EditorShortcutRegistry::parse_profile(std::string_view text, std::string* e
         else profiles_.erase(name);
         return fail("shortcut profile contains conflicting bindings");
     }
+    // Imported profiles are complete authored maps, including explicit empty slots.
+    auto& edits = editedBindings_[name];
+    edits.clear();
+    for (const auto& [key, pair] : profiles_[name]) { (void)pair; edits[key] = 3U; }
     return true;
 }
 
@@ -785,6 +857,7 @@ void EditorShortcutRegistry::install_builtin_commands() {
 }
 
 void EditorShortcutRegistry::install_builtin_profiles() {
+    editedBindings_.clear();
     profiles_.clear();
     builtinDefaults_.clear();
     const auto ensure = [&](std::string_view profile) -> ProfileBindings& {

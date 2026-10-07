@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
         window.hidden = smoke;
         if (!host.create_window(window, &error)) throw std::runtime_error(error);
 
-        EditorPlatformBridge bridge(controller);
+        EditorPlatformBridge bridge(controller, &host);
         SdlEditorCanvas canvas(host.native_window_handle(), &error);
         if (!canvas.valid()) throw std::runtime_error(error);
         // UI zoom: the controller runs at floor(window / zoom) logical pixels; the canvas maps
@@ -186,6 +186,7 @@ int main(int argc, char** argv) {
             const double now = host.monotonic_seconds();
             bridge.update(static_cast<float>(now - previous));
             controller.update(static_cast<float>(now - previous));
+            bridge.sync_pointer_capture();
             previous = now;
             sync_zoom(host.window_metrics());
             controller.set_system_theme_light(SDL_GetSystemTheme() == SDL_SYSTEM_THEME_LIGHT);

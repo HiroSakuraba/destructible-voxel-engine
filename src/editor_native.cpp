@@ -1460,7 +1460,7 @@ std::vector<ShortcutContext> NativeEditorController::active_shortcut_contexts() 
     if (audioPanel_.open() || audioEventPanel_.open() || synthPanel_.open() || chiptunePanel_.open())
         result.push_back(ShortcutContext::AudioEditor);
     if (focusRegion_ == EditorFocusRegion::Viewport) {
-        if (activePointerCommand_ == "viewport.look" || dragButton_ == PointerButton::Secondary)
+        if (activePointerCommand_ == "viewport.look")
             result.push_back(ShortcutContext::FlyNavigation);
         if (activeTool_ == EditorToolId::AddVoxel || activeTool_ == EditorToolId::RemoveVoxel ||
             activeTool_ == EditorToolId::PaintMaterial || activeTool_ == EditorToolId::Box ||
@@ -1477,7 +1477,7 @@ std::vector<ShortcutContext> NativeEditorController::active_shortcut_contexts() 
 
 
 void NativeEditorController::set_camera_mode(camera::CameraRigMode mode) noexcept {
-    reset_camera_navigation();
+    clear_navigation_input();
     cameraMode_ = mode;
     std::string value = "orbit";
     switch (mode) {
@@ -1687,6 +1687,13 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
         return fallback;
     };
     const float acceleration = readFloat("camera.input_acceleration", 0.0F);
+    const std::string navigationStyle = readString("camera.navigation_style", "dve");
+    const bool rawMouse = readBool("input.raw_mouse", true);
+    if (workspace_.shortcuts().navigation_style() != navigationStyle || rawMouseRequested_ != rawMouse) {
+        clear_navigation_input();
+        (void)workspace_.shortcuts().set_navigation_style(navigationStyle);
+        rawMouseRequested_ = rawMouse;
+    }
     const float smoothing = readFloat("camera.input_smoothing", 0.0F);
     if (acceleration != cameraInputAcceleration_ || smoothing != cameraInputSmoothing_) reset_camera_navigation();
     cameraInputAcceleration_ = acceleration;
@@ -1769,7 +1776,11 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
     camera_.physicalLens.focusDistanceMeters = readFloat("camera.focus_distance", 10.0F);
     const std::string profile = shortcut_profile_name(readString("input.shortcut_profile", "dve"));
     std::string shortcutError;
-    (void)workspace_.shortcuts().set_active_profile(profile, &shortcutError);
+    if (configuredShortcutProfile_ != profile) {
+        clear_navigation_input();
+        (void)workspace_.shortcuts().set_active_profile(profile, &shortcutError);
+        configuredShortcutProfile_ = profile;
+    }
     synchronize_menu_shortcuts();
     const auto previousMode = cameraMode_;
     const std::string mode = readString("camera.default_mode", "orbit");
@@ -1779,7 +1790,7 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
     else if (mode == "first_person") cameraMode_ = camera::CameraRigMode::FirstPerson;
     else if (mode == "cinematic") cameraMode_ = camera::CameraRigMode::Cinematic;
     else cameraMode_ = camera::CameraRigMode::Orbit;
-    if (previousMode != cameraMode_) reset_camera_navigation();
+    if (previousMode != cameraMode_) clear_navigation_input();
     recompute_layout();
     refresh_menu_state();
     appliedSettingsRevision_ = workspace_.settings().revision();
@@ -2412,6 +2423,10 @@ void NativeEditorController::update(float elapsedSeconds) {
             const auto position = status_.text.find("; audio changes pending");
             if (position != std::string::npos) status_.text.erase(position, 23);
         }
+    }
+    if (navigationShortcutProfile_ != workspace_.shortcuts().active_profile()) {
+        clear_navigation_input();
+        navigationShortcutProfile_ = workspace_.shortcuts().active_profile();
     }
     autosave_tick(elapsedSeconds);
     synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
@@ -3155,6 +3170,51 @@ void NativeEditorController::update_hover(int x, int y) {
                                                                                static_cast<float>(x), static_cast<float>(y)));
 }
 
+bool NativeEditorController::navigation_pointer_active() const noexcept {
+    return focusRegion_ == EditorFocusRegion::Viewport && workspace_.mode() == EditorMode::Edit &&
+        !settingsPanel_.open && !shortcutPanel_.open && !commandPaletteOpen_ &&
+        !pending_destructive_confirmation() && !openMenu_ && !contextMenu_.open &&
+        (activePointerCommand_ == "viewport.look" || activePointerCommand_ == "viewport.orbit" ||
+         activePointerCommand_ == "viewport.pan" || activePointerCommand_ == "viewport.dolly");
+}
+
+void NativeEditorController::pointer_relative(float deltaX, float deltaY) {
+    if (navigation_pointer_active() && std::isfinite(deltaX) && std::isfinite(deltaY))
+        navigate_pointer(deltaX, deltaY);
+}
+
+void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
+    if (activePointerCommand_ == "viewport.look" || activePointerCommand_ == "viewport.orbit") {
+        const SettingValue sensitivityValue = workspace_.settings().value("camera.mouse_sensitivity");
+        const SettingValue orbitValue = workspace_.settings().value("camera.orbit_sensitivity");
+        const SettingValue invertValue = workspace_.settings().value("camera.invert_y");
+        const float sensitivity = std::get_if<double>(&sensitivityValue)
+            ? static_cast<float>(std::get<double>(sensitivityValue)) : workspace_.preferences().mouseSensitivity;
+        const float orbitScale = std::get_if<double>(&orbitValue)
+            ? static_cast<float>(std::get<double>(orbitValue)) : 1.0F;
+        const bool invertY = std::get_if<bool>(&invertValue) && std::get<bool>(invertValue);
+        const float adjustedY = static_cast<float>(deltaY) * (invertY ? -1.0F : 1.0F);
+        if (cameraInputSmoothing_ > 0.0F) {
+            const float scale = 0.006F * sensitivity * (activePointerCommand_ == "viewport.orbit" ? orbitScale : 1.0F);
+            pendingCameraLook_[0] += static_cast<float>(deltaX) * scale;
+            pendingCameraLook_[1] += adjustedY * scale;
+        } else if (activePointerCommand_ == "viewport.look")
+            look_camera(camera_, static_cast<float>(deltaX), adjustedY, 0.006F * sensitivity);
+        else
+            orbit_camera(camera_, static_cast<float>(deltaX), adjustedY, 0.006F * sensitivity * orbitScale);
+    } else if (activePointerCommand_ == "viewport.pan") {
+        const SettingValue panValue = workspace_.settings().value("camera.pan_sensitivity");
+        const float panScale = std::get_if<double>(&panValue)
+            ? static_cast<float>(std::get<double>(panValue)) : 1.0F;
+        pan_camera(camera_, static_cast<float>(deltaX) * panScale, static_cast<float>(deltaY) * panScale, layout_.viewport);
+    } else if (activePointerCommand_ == "viewport.dolly") {
+        const SettingValue zoomValue = workspace_.settings().value("camera.zoom_sensitivity");
+        const float sensitivity = std::get_if<double>(&zoomValue)
+            ? static_cast<float>(std::get<double>(zoomValue)) : 1.0F;
+        zoom_camera(camera_, static_cast<float>(-deltaY) * 0.08F * sensitivity);
+    }
+}
+
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
     hoverX_ = x;
     hoverY_ = y;
@@ -3238,34 +3298,8 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     } else if (marquee_.active) {
         marquee_.currentX = x;
         marquee_.currentY = y;
-    } else if (activePointerCommand_ == "viewport.look" || activePointerCommand_ == "viewport.orbit") {
-        const SettingValue sensitivityValue = workspace_.settings().value("camera.mouse_sensitivity");
-        const SettingValue orbitValue = workspace_.settings().value("camera.orbit_sensitivity");
-        const SettingValue invertValue = workspace_.settings().value("camera.invert_y");
-        const float sensitivity = std::get_if<double>(&sensitivityValue)
-            ? static_cast<float>(std::get<double>(sensitivityValue)) : workspace_.preferences().mouseSensitivity;
-        const float orbitScale = std::get_if<double>(&orbitValue)
-            ? static_cast<float>(std::get<double>(orbitValue)) : 1.0F;
-        const bool invertY = std::get_if<bool>(&invertValue) && std::get<bool>(invertValue);
-        const float adjustedY = static_cast<float>(deltaY) * (invertY ? -1.0F : 1.0F);
-        if (cameraInputSmoothing_ > 0.0F) {
-            const float scale = 0.006F * sensitivity * (activePointerCommand_ == "viewport.orbit" ? orbitScale : 1.0F);
-            pendingCameraLook_[0] += static_cast<float>(deltaX) * scale;
-            pendingCameraLook_[1] += adjustedY * scale;
-        } else if (activePointerCommand_ == "viewport.look")
-            look_camera(camera_, static_cast<float>(deltaX), adjustedY, 0.006F * sensitivity);
-        else
-            orbit_camera(camera_, static_cast<float>(deltaX), adjustedY, 0.006F * sensitivity * orbitScale);
-    } else if (activePointerCommand_ == "viewport.pan") {
-        const SettingValue panValue = workspace_.settings().value("camera.pan_sensitivity");
-        const float panScale = std::get_if<double>(&panValue)
-            ? static_cast<float>(std::get<double>(panValue)) : 1.0F;
-        pan_camera(camera_, static_cast<float>(deltaX) * panScale, static_cast<float>(deltaY) * panScale, layout_.viewport);
-    } else if (activePointerCommand_ == "viewport.dolly") {
-        const SettingValue zoomValue = workspace_.settings().value("camera.zoom_sensitivity");
-        const float sensitivity = std::get_if<double>(&zoomValue)
-            ? static_cast<float>(std::get<double>(zoomValue)) : 1.0F;
-        zoom_camera(camera_, static_cast<float>(-deltaY) * 0.08F * sensitivity);
+    } else if (navigation_pointer_active()) {
+        navigate_pointer(static_cast<float>(deltaX), static_cast<float>(deltaY));
     } else if (gizmoDragging_) {
         update_gizmo_drag(x, y);
     } else if (voxelStrokeActive_) {
@@ -6255,6 +6289,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     // Escape and focus traversal are intentionally invariant safety/navigation controls.
     // Every productive command below is profile-driven and can be rebound or removed.
     if (normalized == "escape") {
+        clear_navigation_input();
         close_top_level_menu();
         close_context_menu();
         if (gizmoDragging_) finish_gizmo_drag(true);

@@ -162,6 +162,11 @@ struct SdlApplicationHost::Impl {
 
     SDL_Window* window{};
     std::optional<std::string> appliedTitle;  // last title passed to SDL_SetWindowTitle
+    std::optional<std::string> previousMouseSystemScale;
+    std::optional<std::string> previousMouseSpeedScale;
+    bool mouseHintsOwned{};
+    float captureOriginX{};
+    float captureOriginY{};
     bool initialized{};
     bool audioInitialized{};
     std::string audioInitError;
@@ -278,6 +283,7 @@ bool SdlApplicationHost::create_window(const WindowDesc& desc, std::string* erro
 
 void SdlApplicationHost::destroy_window() noexcept {
     if (!impl_) return;
+    (void)set_relative_mouse_mode(false);
     {
         std::scoped_lock lock(impl_->dialogMutex, Impl::registryMutex);
         for (const auto& [token, dialog] : impl_->pendingDialogs) {
@@ -309,6 +315,54 @@ void SdlApplicationHost::destroy_window() noexcept {
 }
 
 bool SdlApplicationHost::has_window() const noexcept { return impl_ && impl_->window != nullptr; }
+
+bool SdlApplicationHost::relative_mouse_mode() const noexcept {
+    return has_window() && SDL_GetWindowRelativeMouseMode(impl_->window);
+}
+
+bool SdlApplicationHost::set_relative_mouse_mode(bool enabled, std::string* error) {
+    if (!has_window()) {
+        if (enabled) set_error(error, "No SDL window is available for relative mouse capture");
+        return !enabled;
+    }
+    if (relative_mouse_mode() == enabled) return true;
+    const auto restore_hints = [&] {
+        if (!impl_->mouseHintsOwned) return;
+        if (impl_->previousMouseSystemScale)
+            SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, impl_->previousMouseSystemScale->c_str());
+        else SDL_ResetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE);
+        if (impl_->previousMouseSpeedScale)
+            SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, impl_->previousMouseSpeedScale->c_str());
+        else SDL_ResetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE);
+        impl_->mouseHintsOwned = false;
+    };
+    if (enabled) {
+        const auto save_hint = [](const char* name) -> std::optional<std::string> {
+            const char* value = SDL_GetHint(name);
+            return value ? std::optional<std::string>(value) : std::nullopt;
+        };
+        impl_->previousMouseSystemScale = save_hint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE);
+        impl_->previousMouseSpeedScale = save_hint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE);
+        impl_->mouseHintsOwned = true;
+        if (!SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "0") ||
+            !SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, "1")) {
+            restore_hints();
+            set_error(error, "SDL raw motion hints are overridden; retaining ordinary pointer input");
+            return false;
+        }
+        SDL_GetMouseState(&impl_->captureOriginX, &impl_->captureOriginY);
+    } else {
+        // SDL documents warping before disabling relative mode to restore the cursor.
+        SDL_WarpMouseInWindow(impl_->window, impl_->captureOriginX, impl_->captureOriginY);
+    }
+    if (!SDL_SetWindowRelativeMouseMode(impl_->window, enabled)) {
+        set_error(error, SDL_GetError());
+        if (enabled) restore_hints();
+        return false;
+    }
+    if (!enabled) restore_hints();
+    return true;
+}
 
 bool SdlApplicationHost::wait_for_events(std::chrono::milliseconds timeout) {
     if (!has_window()) return false;
@@ -357,7 +411,10 @@ bool SdlApplicationHost::poll_event(PlatformEvent& output) {
                 break;
             }
             case SDL_EVENT_WINDOW_FOCUS_GAINED: converted.type = EventType::WindowFocusGained; break;
-            case SDL_EVENT_WINDOW_FOCUS_LOST: converted.type = EventType::WindowFocusLost; break;
+            case SDL_EVENT_WINDOW_FOCUS_LOST:
+                (void)set_relative_mouse_mode(false);
+                converted.type = EventType::WindowFocusLost;
+                break;
             case SDL_EVENT_KEY_DOWN:
             case SDL_EVENT_KEY_UP:
                 converted.type = event.type == SDL_EVENT_KEY_DOWN ? EventType::KeyDown : EventType::KeyUp;
@@ -379,6 +436,9 @@ bool SdlApplicationHost::poll_event(PlatformEvent& output) {
                 converted.type = EventType::PointerMove;
                 converted.x = static_cast<int>(std::lround(event.motion.x));
                 converted.y = static_cast<int>(std::lround(event.motion.y));
+                converted.deltaX = event.motion.xrel;
+                converted.deltaY = event.motion.yrel;
+                converted.relativeMotion = relative_mouse_mode();
                 converted.modifiers = modifiers_from_sdl(SDL_GetModState());
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN:

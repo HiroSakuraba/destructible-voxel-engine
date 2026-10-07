@@ -93,6 +93,10 @@ public:
     [[nodiscard]] std::vector<std::string> profile_names() const;
     [[nodiscard]] std::string_view active_profile() const noexcept { return activeProfile_; }
     [[nodiscard]] bool set_active_profile(std::string_view name, std::string* error = nullptr);
+    // Changes only untouched built-in viewport navigation slots. Custom profiles,
+    // edited slots and explicit unbindings retain their authored values.
+    [[nodiscard]] bool set_navigation_style(std::string_view style);
+    [[nodiscard]] std::string_view navigation_style() const noexcept { return navigationStyle_; }
     [[nodiscard]] bool duplicate_profile(std::string_view source, std::string_view destination,
                                          std::string* error = nullptr);
     [[nodiscard]] bool remove_profile(std::string_view name, std::string* error = nullptr);
@@ -154,7 +158,9 @@ private:
     std::vector<ShortcutCommandDefinition> commands_;
     std::map<std::string, ProfileBindings, std::less<>> profiles_;
     std::map<std::string, ProfileBindings, std::less<>> builtinDefaults_;
+    std::map<std::string, std::map<BindingKey, unsigned>, std::less<>> editedBindings_;
     std::string activeProfile_{"DVE Default"};
+    std::string navigationStyle_{"dve"};
 };
 
 [[nodiscard]] std::string shortcut_context_name(ShortcutContext context);

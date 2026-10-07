@@ -277,6 +277,8 @@ struct GameWorld::Object {
     // Set only for fragments split off by damage (the debris population the
     // debris cap governs), with a world-monotonic creation sequence used
     // for oldest-first retirement. Authored objects keep sequence 0.
+    // Session state only: game saves do not persist this flag, so a debris
+    // body reloaded from a save comes back as an ordinary object.
     bool debris{};
     std::uint64_t debrisSequence{};
     MaterialMassTable massTable{};

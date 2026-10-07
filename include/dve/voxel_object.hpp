@@ -1,8 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <array>
 #include <string>
@@ -93,8 +95,13 @@ private:
     // Declared before bricks_ so brick destructors return payloads before the pools are destroyed.
     std::unique_ptr<BrickPayloadPools> pools_{};
     FlatBrickMap bricks_{};
-    // Derived-data cache, keyed by revision_ (never 0, so 0 means "stale").
-    mutable std::uint64_t derivedRevision_{};
+    // Derived-data cache, keyed by revision_ (never 0, so 0 means "stale"). Const queries may
+    // run on several threads at once (an object shared read-only between workers), so the
+    // first query after an edit refreshes the cache under derivedMutex_ and publishes it by
+    // storing derivedRevision_ with release ordering; later queries only load it (acquire).
+    void ensure_derived() const;
+    mutable std::mutex derivedMutex_;
+    mutable std::atomic<std::uint64_t> derivedRevision_{};
     mutable DerivedBounds brickExtentCache_{};
     mutable DerivedBounds occupiedCache_{};
     mutable std::uint64_t occupiedCountCache_{};

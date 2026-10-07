@@ -18,7 +18,7 @@ bool fail(std::string* error, std::string message) {
 }
 bool relative_reference(const std::filesystem::path& path) {
     const auto text = path.generic_string();
-    if (path.empty() || path.is_absolute() || path.has_root_name() || text.size() > 2048U ||
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory() || text.size() > 2048U ||
         text.find_first_of("\r\n") != std::string::npos || text.find('\0') != std::string::npos) return false;
     for (const auto& part : path) if (part == "..") return false;
     return true;

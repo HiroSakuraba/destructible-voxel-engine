@@ -349,6 +349,9 @@ public:
     // the cap, the oldest debris is retired first (deterministic FIFO);
     // a cap of zero suppresses debris creation entirely. Lowering the cap
     // below the current count retires the excess immediately.
+    // The cap is runtime-only session state: the debris marking is not
+    // written to saves, so fragments restored from a save return as
+    // ordinary objects and are not counted against the cap.
     void set_debris_limit(std::size_t limit);
     [[nodiscard]] std::size_t debris_limit() const noexcept { return debrisLimit_; }
     [[nodiscard]] std::size_t debris_count() const noexcept;

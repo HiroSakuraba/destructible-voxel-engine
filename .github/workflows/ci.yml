@@ -49,8 +49,10 @@ jobs:
         preset: [linux-gcc-release, linux-gcc-lua-release, linux-gcc-player-release, linux-gcc-asan]
     env:
       # Only sanitizer builds read these. Any UBSan finding fails its test instead of only being
-      # printed. Leak checking stays off until the suite is leak-clean.
-      ASAN_OPTIONS: detect_leaks=0
+      # printed, and a leak at exit fails it too. LSAN_OPTIONS (set below, it needs the
+      # in-container workspace path) points LeakSanitizer at tests/sanitizers/lsan.supp,
+      # which ignores one-time allocations inside system libraries (X11, fontconfig, audio).
+      ASAN_OPTIONS: detect_leaks=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
     steps:
       - name: Install build and test dependencies
@@ -66,6 +68,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.cache/ccache" >> "$GITHUB_ENV"
+          echo "LSAN_OPTIONS=suppressions=$GITHUB_WORKSPACE/tests/sanitizers/lsan.supp:print_suppressions=0" >> "$GITHUB_ENV"
       - name: Restore ccache and fetched content
         id: cache
         uses: actions/cache/restore@v4

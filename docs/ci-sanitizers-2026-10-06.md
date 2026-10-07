@@ -53,3 +53,27 @@ Turned on after the whole suite was checked: a LeakSanitizer build of every test
   `dve_editor_synth_tests` passes with leak checks on. The SDL3 editor and player are first
   leak-checked by CI; a report there that comes from SDL3 itself, rather than DVE not
   releasing something, belongs in the suppressions file with a comment.
+
+### Mesa unloaded before the leak check (PR #60 follow-up)
+
+The first CI run with leak checks failed `dve_player_smoke`, `dve_player_no_audio` and
+`dve_desktop_editor_smoke_noaudio` (2936 bytes in 4 blocks). All three run SDL3's
+`offscreen` video driver, whose renderer goes through EGL. `SDL_Quit` unloads `libEGL.so.1`,
+and libglvnd then unloads Mesa (`libEGL_mesa`, `libgallium`). Mesa's one-time display state
+(a 2696-byte block from `libEGL_mesa`, plus llvmpipe JIT state in `libLLVM`) is only
+referenced from Mesa's own globals, so once those pages are unmapped LeakSanitizer reports
+the blocks as leaked from `<unknown module>` frames that no suppression entry can match.
+A nine-line SDL program (init, window, renderer, present, destroy, `SDL_Quit`) reproduces it
+with no DVE code involved; it does not leak when `libEGL.so.1` stays resident.
+
+- `SdlApplicationHost::create_window` pins `libEGL.so.1` (`dlopen` with `RTLD_NODELETE`)
+  before `SDL_Init`, in AddressSanitizer builds on Linux only. Mesa then stays mapped until
+  exit, as it would in a process that never unloads it, and its blocks are reachable again.
+  Leaks in DVE or SDL code are still reported. Release builds and other platforms are
+  unchanged.
+- `lsan.supp` also lists `libLLVM.so` next to `libgallium`, for llvmpipe JIT allocations
+  whose fast-unwound stack stops inside libLLVM.
+- Checked locally (Debian trixie, GCC 14.2, Mesa 25.0.7, SDL 3 system package, under
+  xvfb-run): the three tests fail with the same 2696-byte report before the change and pass
+  after it, three runs with the default fast unwinder and one with `fast_unwind_on_malloc=0`
+  (no suppression was used).

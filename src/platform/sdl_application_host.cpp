@@ -12,8 +12,32 @@
 #include <unordered_map>
 #include <utility>
 
+#if defined(__SANITIZE_ADDRESS__)
+#define DVE_SDL_HOST_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define DVE_SDL_HOST_ASAN 1
+#endif
+#endif
+#if defined(__linux__) && defined(DVE_SDL_HOST_ASAN)
+#include <dlfcn.h>
+#endif
+
 namespace dve::platform {
 namespace {
+
+// AddressSanitizer builds on Linux only: pin the system EGL loader for the life of the process.
+// SDL_Quit unloads libEGL.so.1 and libglvnd then unloads Mesa's libEGL_mesa/libgallium, whose
+// globals are the only references to Mesa's one-time display state (2.7 KB plus llvmpipe JIT
+// state in libLLVM). Once those pages are unmapped, LeakSanitizer reports the blocks as leaks
+// from "<unknown module>" frames that no suppression can match. A resident loader keeps the
+// roots visible, as at a normal exit; real leaks are still reported. No effect in other builds.
+void keep_system_egl_resident_for_leak_checks() {
+#if defined(__linux__) && defined(DVE_SDL_HOST_ASAN)
+    static const bool pinned = dlopen("libEGL.so.1", RTLD_LAZY | RTLD_NODELETE) != nullptr;
+    (void)pinned;
+#endif
+}
 
 void set_error(std::string* error, std::string_view message) {
     if (error != nullptr) error->assign(message.begin(), message.end());
@@ -215,6 +239,7 @@ bool SdlApplicationHost::create_window(const WindowDesc& desc, std::string* erro
         return false;
     }
     destroy_window();
+    keep_system_egl_resident_for_leak_checks();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         set_error(error, SDL_GetError());
         return false;

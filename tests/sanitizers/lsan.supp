@@ -21,6 +21,8 @@ leak:libfreetype.so
 leak:libEGL_mesa.so
 leak:libGLX_mesa.so
 leak:libgallium
+# llvmpipe's JIT backend (loaded by libgallium); one-time LLVM pass/target registration.
+leak:libLLVM.so
 
 # Audio back ends (SDL3 audio, MIDI).
 leak:libasound.so

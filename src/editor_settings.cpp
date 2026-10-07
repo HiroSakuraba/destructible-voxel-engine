@@ -567,7 +567,7 @@ constexpr std::string_view kNotYetApplied[] = {
     "camera.dof_quality", "camera.film_grain_quality",
     "camera.lens_effect_quality", "camera.lut_resolution", "camera.lut_streaming", "camera.missing_lut_fallback",
     "camera.motion_blur_quality", "camera.navigation_style", "camera.render_target_outputs", "camera.sequence_scrub_rate",
-    "camera.tone_map_output", "diagnostics.capture_repro", "diagnostics.gpu_markers", "editor.restore_workspace",
+    "camera.tone_map_output", "diagnostics.capture_repro", "editor.restore_workspace",
     "editor.telemetry_local", "geometry.mode", "input.gamepad_prompts", "input.raw_mouse",
     "material.clear_coat", "material.foliage", "material.global_parameters", "material.layer_limit",
     "material.validate_gpu_layout", "plugins.clap_host", "plugins.clap_sandbox",
@@ -579,7 +579,7 @@ constexpr std::string_view kNotYetApplied[] = {
     "render.resolution_scale",
     "render.spectator_window", "render.split_screen_layout", "render.texture_budget_mb",
     "render.translucent_layers", "scripting.hot_reload",
-    "scripting.migration_timeout_ms", "scripting.strict_errors", "voxel.async_connectivity", "voxel.brick_budget",
+    "scripting.migration_timeout_ms", "voxel.async_connectivity", "voxel.brick_budget",
     "voxel.debris_limit", "voxel.destruction_quality", "voxel.ray_step_scale",
 };
 } // namespace

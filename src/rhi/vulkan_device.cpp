@@ -327,6 +327,9 @@ struct VulkanDevice::Impl {
         vk::GetInstanceProcAddr getInstanceProcAddr{};
         vk::GetDeviceProcAddr getDeviceProcAddr{};
         vk::PFN_CreateInstance createInstance{};
+        vk::PFN_EnumerateInstanceExtensionProperties enumerateInstanceExtensionProperties{};
+        vk::PFN_CmdBeginDebugUtilsLabelEXT cmdBeginDebugUtilsLabel{};
+        vk::PFN_CmdEndDebugUtilsLabelEXT cmdEndDebugUtilsLabel{};
         vk::PFN_DestroyInstance destroyInstance{};
         vk::PFN_EnumeratePhysicalDevices enumeratePhysicalDevices{};
         vk::PFN_GetPhysicalDeviceProperties getPhysicalDeviceProperties{};
@@ -495,11 +498,12 @@ struct VulkanDevice::Impl {
     struct IndexBufferCommand { BufferHandle buffer; std::size_t offset; IndexFormat format; };
     struct DrawIndexedCommand { std::uint32_t indexCount; std::uint32_t instanceCount; std::uint32_t firstIndex; std::int32_t vertexOffset; std::uint32_t firstInstance; };
     struct TimestampCommand { TimestampQueryPoolHandle pool; std::uint32_t index{}; };
+    struct DebugLabelCommand { std::string label; bool end{}; };
     using RecordedCommand = std::variant<CopyCommand, BarrierCommand, TextureBarrierCommand,
         BeginRenderPassCommand, EndRenderPassCommand, BindPipelineCommand, BindComputeGroupCommand,
         BindGraphicsGroupCommand, DispatchCommand, ViewportCommand, ScissorCommand,
         ClearDepthRegionCommand, VertexBufferCommand, IndexBufferCommand,
-        DrawIndexedCommand, TimestampCommand>;
+        DrawIndexedCommand, TimestampCommand, DebugLabelCommand>;
     struct CommandSlot {
         std::uint32_t generation{1};
         bool alive{};
@@ -542,6 +546,7 @@ struct VulkanDevice::Impl {
     vk::PhysicalDeviceMemoryProperties memoryProperties{};
     DeviceCapabilities capabilities{};
     bool samplerAnisotropyEnabled{};
+    bool debugUtilsLabels{};
     DeviceStatistics statistics{};
     DeviceStatus status{DeviceStatus::Lost};
     std::string reason{"Vulkan backend has not initialized"};
@@ -609,12 +614,38 @@ struct VulkanDevice::Impl {
         if (!fn.getInstanceProcAddr) { reason = "Vulkan loader does not export vkGetInstanceProcAddr"; return; }
         if (!load_global(fn.createInstance, "vkCreateInstance")) return;
 
+        // VK_EXT_debug_utils is optional: enable it at instance creation
+        // when the loader advertises it so command-buffer labels can reach a
+        // GPU debugger. Absence is normal and never fatal.
+        bool debugUtilsAvailable = false;
+        if (load_global(fn.enumerateInstanceExtensionProperties,
+                        "vkEnumerateInstanceExtensionProperties")) {
+            std::uint32_t extensionCount = 0U;
+            if (fn.enumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr) ==
+                    vk::Success && extensionCount > 0U) {
+                std::vector<vk::ExtensionProperties> extensions(extensionCount);
+                if (fn.enumerateInstanceExtensionProperties(
+                        nullptr, &extensionCount, extensions.data()) == vk::Success) {
+                    for (const auto& extension : extensions) {
+                        if (std::strcmp(extension.extensionName,
+                                        "VK_EXT_debug_utils") == 0) {
+                            debugUtilsAvailable = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        const char* enabledExtensions[] = {"VK_EXT_debug_utils"};
+
         const vk::ApplicationInfo application{
             vk::StructureTypeApplicationInfo, nullptr, "DVE Vulkan graphics validation", 1U,
             "Destructible Voxel Engine", 13400U, vk::ApiVersion10};
         const vk::InstanceCreateInfo createInfo{
             vk::StructureTypeInstanceCreateInfo, nullptr, 0U, &application,
-            0U, nullptr, 0U, nullptr};
+            0U, nullptr,
+            debugUtilsAvailable ? 1U : 0U,
+            debugUtilsAvailable ? enabledExtensions : nullptr};
         if (!check(fn.createInstance(&createInfo, nullptr, &instance), "vkCreateInstance")) return;
 
         if (!load_instance(fn.destroyInstance, "vkDestroyInstance") ||
@@ -794,6 +825,18 @@ struct VulkanDevice::Impl {
         capabilities.timestampQueries = timestampValidBits != 0U;
         capabilities.timestampValidBits = timestampValidBits;
         fn.getDeviceQueue(device, queueFamily, 0U, &queue);
+        // Debug-utils label commands are optional device functions; load
+        // them non-fatally and only claim the capability when both the
+        // instance extension and the commands are present.
+        if (debugUtilsAvailable) {
+            fn.cmdBeginDebugUtilsLabel = function_pointer<vk::PFN_CmdBeginDebugUtilsLabelEXT>(
+                fn.getDeviceProcAddr(device, "vkCmdBeginDebugUtilsLabelEXT"));
+            fn.cmdEndDebugUtilsLabel = function_pointer<vk::PFN_CmdEndDebugUtilsLabelEXT>(
+                fn.getDeviceProcAddr(device, "vkCmdEndDebugUtilsLabelEXT"));
+            debugUtilsLabels = fn.cmdBeginDebugUtilsLabel != nullptr &&
+                               fn.cmdEndDebugUtilsLabel != nullptr;
+            capabilities.debugLabels = debugUtilsLabels;
+        }
         if (!queue) { reason = "vkGetDeviceQueue returned a null queue"; return; }
         const vk::CommandPoolCreateInfo poolInfo{
             vk::StructureTypeCommandPoolCreateInfo, nullptr,
@@ -2492,6 +2535,7 @@ bool VulkanDevice::begin_debug_label(CommandListHandle commands, std::string_vie
     auto* list = impl_->command(commands, error);
     if (!list) return false;
     if (label.empty()) { set_error(error, "Vulkan debug label cannot be empty"); return false; }
+    list->commands.emplace_back(Impl::DebugLabelCommand{std::string(label), false});
     ++list->debugDepth;
     return true;
 }
@@ -2499,6 +2543,7 @@ bool VulkanDevice::end_debug_label(CommandListHandle commands, std::string* erro
     auto* list = impl_->command(commands, error);
     if (!list) return false;
     if (list->debugDepth == 0U) { set_error(error, "Vulkan debug-label stack underflow"); return false; }
+    list->commands.emplace_back(Impl::DebugLabelCommand{{}, true});
     --list->debugDepth;
     return true;
 }
@@ -2836,6 +2881,20 @@ FenceHandle VulkanDevice::submit(CommandListHandle commands, std::string* error)
                 if (!pool || nativePassOpen) return false;
                 impl_->fn.cmdWriteTimestamp(native, vk::PipelineStageBottomOfPipeBit,
                                             pool->pool, item.index);
+                return true;
+            } else if constexpr (std::is_same_v<T, Impl::DebugLabelCommand>) {
+                // Labels are debugger metadata: emit only when the debug
+                // utils commands are loaded, otherwise replay skips them.
+                if (impl_->debugUtilsLabels) {
+                    if (item.end) {
+                        impl_->fn.cmdEndDebugUtilsLabel(native);
+                    } else {
+                        const vk::DebugUtilsLabelEXT label{
+                            vk::StructureTypeDebugUtilsLabelEXT, nullptr,
+                            item.label.c_str(), {0.0F, 0.0F, 0.0F, 0.0F}};
+                        impl_->fn.cmdBeginDebugUtilsLabel(native, &label);
+                    }
+                }
                 return true;
             }
             return false;

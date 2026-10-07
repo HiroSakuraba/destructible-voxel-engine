@@ -3,9 +3,12 @@
 #include "dve/editor_midi.hpp"
 #include "dve/editor_prefab.hpp"
 #include "dve/editor_ui_zoom.hpp"
+#include "dve/game_script.hpp"
 #include "dve/print_export.hpp"
 
 #include <condition_variable>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <algorithm>
 #include <bit>
@@ -5176,6 +5179,30 @@ camera_menu_dispatch_complete:
                 return false;
             }
         }
+#ifdef DVE_HAVE_LUA
+        {
+            // Compile-check the startup script without executing it.
+            // scripting.strict_errors decides whether a broken script
+            // blocks the save (Block) or saves with the error kept visible
+            // in the editor log (Warn); the error is reported either way.
+            const auto scriptPath = project_root() / "scripts" / "main.lua";
+            std::ifstream scriptStream(scriptPath, std::ios::binary);
+            if (scriptStream) {
+                const std::string scriptCode{std::istreambuf_iterator<char>(scriptStream),
+                                             std::istreambuf_iterator<char>()};
+                std::string scriptError;
+                if (!check_lua_syntax(scriptCode, &scriptError)) {
+                    if (script_error_policy(workspace_.settings()) == ScriptErrorPolicy::Block) {
+                        set_status("Script validation failed: " + scriptError, true);
+                        return false;
+                    }
+                    workspace_.log().add(EditorLogLevel::Error,
+                        "Startup script compile error (save allowed: strict script errors "
+                        "are off): " + scriptError);
+                }
+            }
+        }
+#endif
         if (workspace_.document().path().empty()) {
             set_status("Save requires a scene path; use the headless project workflow or pass --scene", true);
             return false;

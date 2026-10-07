@@ -4,6 +4,7 @@
 // environment completion batch (bloom, GI mode/quality/intensity/distance,
 // shadow mode, contact shadow distance, material subsurface).
 #include "dve/editor_runtime_settings.hpp"
+#include "dve/game_script.hpp"
 #include "dve/render/material_resource_residency.hpp"
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/rhi/null_device.hpp"
@@ -176,6 +177,32 @@ std::uint8_t expected_byte(double linear, double exposure, TonemapOperator op) {
     return static_cast<std::uint8_t>(encoded < 0.0 ? 0.0 : (encoded > 255.0 ? 255.0 : encoded));
 }
 
+void test_host_policies() {
+    auto registry = EditorSettingsRegistry::make_default();
+    require(render_debug_labels(registry), "GPU markers default must be on");
+    require(script_error_policy(registry) == ScriptErrorPolicy::Block,
+            "strict script errors default must block");
+    set(registry, "diagnostics.gpu_markers", false);
+    set(registry, "scripting.strict_errors", false);
+    require(!render_debug_labels(registry), "GPU markers off did not resolve");
+    require(script_error_policy(registry) == ScriptErrorPolicy::Warn,
+            "lenient script errors must resolve to warn-and-continue");
+
+#ifdef DVE_HAVE_LUA
+    // The syntax checker compiles without executing: valid code passes, a
+    // runtime error is not a compile error, malformed code fails with a
+    // message from the compiler.
+    std::string error;
+    require(check_lua_syntax("local x = 1 + 2\nreturn x\n", &error), error.c_str());
+    require(check_lua_syntax("error('runtime only')\n", &error),
+            "a runtime error must not fail the compile check");
+    require(!check_lua_syntax("local x = \n", &error), "malformed Lua passed the syntax check");
+    require(!error.empty(), "syntax failure must carry the compiler's message");
+    require(!check_lua_syntax("this is not lua(((\n", &error),
+            "garbage input passed the syntax check");
+#endif
+}
+
 void test_tonemap_reference() {
     PolygonRenderTarget target;
     target.resize(4U, 1U);
@@ -341,6 +368,7 @@ int main() {
     try {
         test_environment_resolver();
         test_environment_completion_resolver();
+        test_host_policies();
         test_tonemap_reference();
         test_sampler_policy();
         std::cout << "dve_settings_render_batch_tests: PASS\n";

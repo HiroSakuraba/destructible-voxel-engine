@@ -224,7 +224,8 @@ bool create_live_environment_renderer(rhi::IDevice& device,
                                       rhi::TextureFormat colorFormat,
                                       LiveEnvironmentRendererResources& out,
                                       std::string* error,
-                                      MaterialSamplerPolicy samplerPolicy) {
+                                      MaterialSamplerPolicy samplerPolicy,
+                                      bool emitDebugLabels) {
     if (!lighting.valid() || !shadowAtlas.valid() || !bytecode.valid() ||
         maximumFrameConstantBytes == 0U || colorFormat == rhi::TextureFormat::D32Float) {
         set_error(error, "live environment renderer creation arguments are invalid");
@@ -239,6 +240,7 @@ bool create_live_environment_renderer(rhi::IDevice& device,
         return false;
     };
     r.materialResidency = std::make_unique<MaterialResourceResidency>(device, samplerPolicy);
+    r.emitDebugLabels = emitDebugLabels;
     r.shadowMaterials = std::make_unique<ShadowMaterialDescriptorTable>(device, *r.materialResidency);
     if (!r.shadowMaterials->initialize(&local)) return fail(local);
     r.mainMaterials = std::make_unique<MainMaterialDescriptorTable>(device, *r.materialResidency);
@@ -404,7 +406,18 @@ bool record_live_environment_frame(rhi::IDevice& device,
             if (*it) (void)device.destroy_bind_group(*it, &ignored);
         dashrShadowGroups.clear();
     };
-    auto fail = [&]() { cleanup_groups(); return false; };
+    // Debug-label bookkeeping for record: fail() closes any open label so
+    // the caller's command list is never left unbalanced on an error path.
+    rhi::CommandListHandle labelCommands{};
+    int openLabels = 0;
+    auto close_labels = [&]() {
+        std::string ignored;
+        while (openLabels > 0) {
+            (void)device.end_debug_label(labelCommands, &ignored);
+            --openLabels;
+        }
+    };
+    auto fail = [&]() { close_labels(); cleanup_groups(); return false; };
 
     if (frame.dashrRenderer && !frame.dashrRenderer->retiredBindGroups.empty()) {
         device.wait_idle();
@@ -529,8 +542,23 @@ bool record_live_environment_frame(rhi::IDevice& device,
 
     auto commands = device.begin_commands(rhi::QueueKind::Graphics, "Live environment frame", error);
     if (!commands) return fail();
+    labelCommands = commands;
+    auto begin_label = [&](const char* name) {
+        if (!renderer.emitDebugLabels) return true;
+        if (!device.begin_debug_label(commands, name, error)) return false;
+        ++openLabels;
+        ++stats.debugLabelsEmitted;
+        return true;
+    };
+    auto end_label = [&]() {
+        if (!renderer.emitDebugLabels) return true;
+        if (!device.end_debug_label(commands, error)) return false;
+        --openLabels;
+        return true;
+    };
 
     if (frame.drawShadowCasters) {
+        if (!begin_label("Live shadow cascades")) return fail();
         const auto& staticDirty = frame.staticDirtyCascades.empty()
             ? frame.dirtyCascades : frame.staticDirtyCascades;
         const auto& dynamicDirty = frame.dynamicDirtyCascades.empty()
@@ -628,6 +656,9 @@ bool record_live_environment_frame(rhi::IDevice& device,
         if (!render_shadow_layer(CascadedShadowLayer::Dynamic, dynamicDirty, false)) return fail();
     }
 
+    if (frame.drawShadowCasters && !end_label()) return fail();
+    if (!begin_label("Live environment main pass")) return fail();
+
     rhi::RenderPassDesc pass;
     pass.debugName = "Live environment main pass";
     pass.colors.push_back({frame.colorTarget, true, 0.0F, 0.0F, 0.0F, 1.0F});
@@ -667,6 +698,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
         }
     }
     if (!device.end_render_pass(commands, error)) return fail();
+    if (!end_label()) return fail();
     const auto submitted = device.submit(commands, error);
     if (!submitted) return fail();
     renderer.retiredGroups.push_back({submitted,std::move(transientGroups)});

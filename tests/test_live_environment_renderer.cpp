@@ -73,6 +73,20 @@ int main() {
         auto mainTableStats=renderer.mainMaterials->stats(); CHECK(mainTableStats.materialDescriptorCount==1U); CHECK(mainTableStats.assetResourceCount==1U); CHECK(mainTableStats.materialRecordsUploaded==1U); CHECK(mainTableStats.mappingRecordsUploaded==1U); CHECK(mainTableStats.imageResourceCount==2U);
         auto residencyStats=renderer.materialResidency->stats(); CHECK(residencyStats.imagesUploaded==2U); CHECK(residencyStats.samplersCreated==1U); CHECK(residencyStats.retainedAssetCount==1U); CHECK(residencyStats.assetReferenceCount==2U);
         const auto recorded=device.statistics(); CHECK(recorded.renderPassesExecuted==3U); CHECK(recorded.indexedDrawsExecuted==6U);
+        CHECK(stats.debugLabelsEmitted==0U);
+        CHECK(!device.capabilities().debugLabels);
+
+        // GPU debug markers (diagnostics.gpu_markers): a renderer created
+        // with labels enabled wraps the shadow and main sections in named
+        // RHI debug labels. The Null device rejects unbalanced submissions,
+        // so a successful record also proves the labels balance; the Null
+        // device itself claims no debugger-capture capability.
+        dve::render::LiveEnvironmentRendererResources labeledRenderer;
+        CHECK(dve::render::create_live_environment_renderer(device,lighting,atlas,bytecode,256U,dve::rhi::TextureFormat::RGBA8Unorm,labeledRenderer,&error,{},true));
+        dve::render::LiveEnvironmentFrameStats labeledStats; dve::rhi::FenceHandle labeledFence;
+        CHECK(dve::render::record_live_environment_frame(device,lighting,shadowPlan,atlas,labeledRenderer,frame,labeledStats,&labeledFence,&error));
+        CHECK(labeledStats.debugLabelsEmitted==2U);
+        CHECK(dve::render::destroy_live_environment_renderer(device,labeledRenderer,&error));
 
         auto staticDraw=draw; staticDraw.staticShadowCaster=true; frame.polygonDraws=std::span(&staticDraw,1U); frame.dirtyCascades={0U}; frame.refreshStaticShadowCasters=false;
         CHECK(dve::render::record_live_environment_frame(device,lighting,shadowPlan,atlas,renderer,frame,stats,&fence,&error));

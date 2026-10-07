@@ -161,4 +161,24 @@ inline std::array<float, 2> controller_stick_with_dead_zone(float x, float y, fl
     const float scaled = (std::min(magnitude, 1.0F) - deadZone) / (1.0F - deadZone);
     return {x / magnitude * scaled, y / magnitude * scaled};
 }
+// Resolves diagnostics.gpu_markers for renderer creation: when true, the
+// live renderer wraps its frame sections in named RHI debug labels. The
+// Vulkan backend reports DeviceCapabilities::debugLabels only when
+// VK_EXT_debug_utils is actually present; on other devices the labels
+// remain validated bookkeeping, never a claimed capture feature.
+inline bool render_debug_labels(const EditorSettingsRegistry& registry) {
+    return RuntimeSettingsReader(registry).get<bool>("diagnostics.gpu_markers");
+}
+
+// scripting.strict_errors as a validation policy. Strict blocks scene
+// saves and builds on script compile errors; lenient proceeds but keeps a
+// visible diagnostic in the editor log. Script error reporting itself is
+// never disabled by this policy.
+enum class ScriptErrorPolicy : std::uint8_t { Block, Warn };
+
+inline ScriptErrorPolicy script_error_policy(const EditorSettingsRegistry& registry) {
+    return RuntimeSettingsReader(registry).get<bool>("scripting.strict_errors")
+        ? ScriptErrorPolicy::Block : ScriptErrorPolicy::Warn;
+}
+
 } // namespace dve::editor

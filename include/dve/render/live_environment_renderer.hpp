@@ -87,6 +87,10 @@ struct LiveEnvironmentRendererResources {
     std::unique_ptr<ShadowMaterialDescriptorTable> shadowMaterials;
     std::unique_ptr<MainMaterialDescriptorTable> mainMaterials;
     std::vector<RetiredGroups> retiredGroups;
+    // When set, frame recording wraps the shadow and main sections in
+    // named RHI debug labels (the diagnostics.gpu_markers setting resolves
+    // to this at creation time). Labels are balanced on every exit path.
+    bool emitDebugLabels{};
     [[nodiscard]] bool valid() const noexcept;
 };
 
@@ -157,6 +161,7 @@ struct LiveEnvironmentFrameStats {
     std::uint64_t objectConstantRanges{};
     std::uint64_t cascadeConstantRanges{};
     std::uint32_t cascadesRendered{};
+    std::uint64_t debugLabelsEmitted{};
 };
 
 [[nodiscard]] bool create_live_environment_renderer(
@@ -168,7 +173,8 @@ struct LiveEnvironmentFrameStats {
     rhi::TextureFormat colorFormat,
     LiveEnvironmentRendererResources& resources,
     std::string* error = nullptr,
-    MaterialSamplerPolicy samplerPolicy = {});
+    MaterialSamplerPolicy samplerPolicy = {},
+    bool emitDebugLabels = false);
 
 [[nodiscard]] bool destroy_live_environment_renderer(
     rhi::IDevice& device,

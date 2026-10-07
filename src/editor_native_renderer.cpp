@@ -3083,12 +3083,14 @@ void RectClipCanvas::text(int x, int y, std::string_view value, EditorColor colo
 
 void render_native_editor(const IEditorCanvas& painter, NativeEditorController& controller, int width, int height) {
     const bool highContrast = controller.workspace().preferences().highContrast;
-    const EditorColor background = highContrast ? rgb(0,0,0) : rgb(24,27,32);
-    const EditorColor panel = highContrast ? rgb(12,12,12) : rgb(34,38,45);
-    const EditorColor panel2 = highContrast ? rgb(24,24,24) : rgb(42,47,56);
-    const EditorColor border = highContrast ? rgb(255,255,255) : rgb(76,83,96);
-    const EditorColor text = rgb(235,238,244);
-    const EditorColor muted = highContrast ? rgb(210,210,210) : rgb(160,168,181);
+    const auto theme = std::get<std::string>(controller.workspace().settings().value("editor.theme"));
+    const bool light = theme == "light" || (theme == "system" && controller.system_theme_light());
+    const EditorColor background = highContrast ? rgb(0,0,0) : light ? rgb(243,245,248) : rgb(24,27,32);
+    const EditorColor panel = highContrast ? rgb(12,12,12) : light ? rgb(255,255,255) : rgb(34,38,45);
+    const EditorColor panel2 = highContrast ? rgb(24,24,24) : light ? rgb(228,233,240) : rgb(42,47,56);
+    const EditorColor border = highContrast ? rgb(255,255,255) : light ? rgb(130,140,154) : rgb(76,83,96);
+    const EditorColor text = highContrast || !light ? rgb(235,238,244) : rgb(25,32,44);
+    const EditorColor muted = highContrast ? rgb(210,210,210) : light ? rgb(78,89,105) : rgb(160,168,181);
     const EditorColor accent = rgb(64,147,255);
 
     painter.fill({0,0,width,height}, background);
@@ -3103,6 +3105,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     painter.outline(layout.viewport, border);
     painter.outline(layout.inspector, border);
     painter.outline(layout.bottomPanel, border);
+
 
     const int desiredMenuWidth = 78;
     const int menuWidth = std::max(1, std::min(desiredMenuWidth, width / static_cast<int>(kMenuBarNames.size())));
@@ -4062,6 +4065,39 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     render_sprite_animation_graph_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_tile_world_editor_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_render3d_diagnostics_panel(painter, controller, panel, panel2, border, text, muted, accent);
+    if (std::get<bool>(controller.workspace().settings().value("accessibility.focus_indicators"))) {
+        UiRect focused = layout.viewport;
+        switch (controller.focus_region()) {
+        case EditorFocusRegion::MenuBar: focused = layout.menuBar; break;
+        case EditorFocusRegion::Toolbar: focused = layout.toolbar; break;
+        case EditorFocusRegion::SceneHierarchy: focused = layout.hierarchy; break;
+        case EditorFocusRegion::Inspector: focused = layout.inspector; break;
+        case EditorFocusRegion::BottomPanel: focused = layout.bottomPanel; break;
+        case EditorFocusRegion::Viewport: break;
+        }
+        painter.outline(focused, accent);
+    }
+
+    int diagnosticY = layout.viewport.y + 24;
+    if (std::get<bool>(controller.workspace().settings().value("diagnostics.render_stats"))) {
+        painter.text(layout.viewport.x + 12, diagnosticY,
+            "Render: " + std::to_string(controller.draw_items().size()) + " voxel draw items", text);
+        diagnosticY += 20;
+    }
+    if (std::get<bool>(controller.workspace().settings().value("diagnostics.audio_stats"))) {
+        const auto meters = controller.audio_mixer().meters();
+        painter.text(layout.viewport.x + 12, diagnosticY,
+            "Audio: " + std::to_string(meters.physicalSampleVoices) + " voices / " +
+            std::to_string(meters.streamUnderrunFrames) + " underrun frames / " +
+            std::to_string(meters.droppedCommands) + " dropped commands", text);
+        diagnosticY += 20;
+    }
+    if (std::get<bool>(controller.workspace().settings().value("diagnostics.camera_debug"))) {
+        const auto& pose = controller.camera();
+        painter.text(layout.viewport.x + 12, diagnosticY,
+            "Camera: " + std::to_string(pose.position.x) + ", " + std::to_string(pose.position.y) + ", " +
+            std::to_string(pose.position.z) + " / rig " + std::to_string(controller.camera_director().telemetry().liveRig), text);
+    }
     render_cinematic_camera_panel(painter, controller, panel, panel2, border, text, muted, accent);
 
     if (controller.settings_panel().open) {

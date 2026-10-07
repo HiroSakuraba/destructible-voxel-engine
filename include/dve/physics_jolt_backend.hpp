@@ -42,6 +42,7 @@ struct JoltWorldConfig {
     float pointVelocitySleepThreshold{0.03F};
     bool deterministicSimulation{true};
     bool allowSleeping{true};
+    bool continuousCollision{true};
 };
 
 // X11 reserves the token `None` as a macro. Public engine enums deliberately avoid that

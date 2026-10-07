@@ -13,6 +13,7 @@
 #include "dve/editor_workspace.hpp"
 #include "dve/game_ui.hpp"
 #include "dve/physics3d_backend.hpp"
+#include "dve/camera_system.hpp"
 
 namespace dve::editor {
 
@@ -95,6 +96,9 @@ public:
     [[nodiscard]] const EditorPlayHudSnapshot& hud() const noexcept { return hud_; }
     [[nodiscard]] const EditorPlaySessionTelemetry& telemetry() const noexcept { return telemetry_; }
     [[nodiscard]] const EditorPlaySessionConfig& config() const noexcept { return config_; }
+    [[nodiscard]] const camera::ICameraCollisionWorld* camera_collision_world() const noexcept;
+    // Called on the main thread before update(); keeps elapsed seconds and object state.
+    [[nodiscard]] bool apply_live_settings(const EditorPlaySessionConfig& requested, std::string* error = nullptr);
 
 private:
     class Runtime;

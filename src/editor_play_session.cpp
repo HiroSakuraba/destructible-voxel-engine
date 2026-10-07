@@ -1,4 +1,5 @@
 #include "dve/editor_play_session.hpp"
+#include "dve/camera_runtime.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -89,6 +90,7 @@ public:
         telemetry.physicsBackend = resolvedBackend;
         telemetry.productionPhysics = resolvedBackend != Physics3DBackend::Reference;
         world_ = std::make_unique<GameWorld>(std::move(physics));
+        cameraCollision_ = std::make_unique<camera::GameWorldCameraCollisionWorld>(*world_);
 
         for (const auto& [editorId, object] : document.objects()) {
             std::string objectError;
@@ -265,6 +267,7 @@ public:
 #ifdef DVE_HAVE_LUA
         scripts_.reset();
 #endif
+        cameraCollision_.reset();
         world_.reset();
         editorToRuntime_.clear();
     }
@@ -272,11 +275,44 @@ public:
 private:
     LogSink logSink_;
     std::unique_ptr<GameWorld> world_;
+    std::unique_ptr<camera::GameWorldCameraCollisionWorld> cameraCollision_;
+public:
+    [[nodiscard]] const camera::ICameraCollisionWorld* camera_collision_world() const noexcept {
+        return cameraCollision_.get();
+    }
+    [[nodiscard]] bool set_gravity(Float3 gravity) noexcept {
+        return world_ && configure_physics3d_gravity(world_->physics(), gravity);
+    }
+private:
     std::map<EditorObjectId, GameObjectId> editorToRuntime_;
 #ifdef DVE_HAVE_LUA
     std::unique_ptr<GameScriptHost> scripts_;
 #endif
 };
+
+const camera::ICameraCollisionWorld* EditorPlaySession::camera_collision_world() const noexcept {
+    return runtime_ ? runtime_->camera_collision_world() : nullptr;
+}
+
+bool EditorPlaySession::apply_live_settings(const EditorPlaySessionConfig& requested, std::string* error) {
+    if (!active()) return true;
+    if (!requested.validate(error)) return false;
+    const auto gravity = requested.physicsWorld.gravity;
+    if (!std::isfinite(gravity.x) || !std::isfinite(gravity.y) || !std::isfinite(gravity.z)) {
+        if (error) *error = "physics gravity must be finite";
+        return false;
+    }
+    const auto previous = config_.physicsWorld.gravity;
+    if ((previous.x != gravity.x || previous.y != gravity.y || previous.z != gravity.z) &&
+        !runtime_->set_gravity(gravity)) {
+        if (error) *error = "this physics adapter cannot change gravity during Play";
+        return false;
+    }
+    config_.fixedDeltaSeconds = requested.fixedDeltaSeconds;
+    config_.maximumSubstepsPerUpdate = requested.maximumSubstepsPerUpdate;
+    config_.physicsWorld.gravity = gravity;
+    return true;
+}
 
 bool EditorPlaySessionConfig::validate(std::string* error) const {
     const auto fail = [&](std::string text) {

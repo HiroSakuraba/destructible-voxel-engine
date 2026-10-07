@@ -34,6 +34,8 @@ struct EditorPlaySessionConfig {
     // Seeded into the script host's world environment when a session creates
     // one; scripts may still adjust the environment afterwards at runtime.
     RenderEnvironment environment{};
+    // Applied to the session world at start (voxel.debris_limit).
+    std::size_t debrisLimit{2048};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
 };

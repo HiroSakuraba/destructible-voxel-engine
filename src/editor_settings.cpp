@@ -580,7 +580,7 @@ constexpr std::string_view kNotYetApplied[] = {
     "render.spectator_window", "render.split_screen_layout", "render.texture_budget_mb",
     "render.translucent_layers", "scripting.hot_reload",
     "scripting.migration_timeout_ms", "voxel.async_connectivity", "voxel.brick_budget",
-    "voxel.debris_limit", "voxel.destruction_quality", "voxel.ray_step_scale",
+    "voxel.destruction_quality", "voxel.ray_step_scale",
 };
 } // namespace
 

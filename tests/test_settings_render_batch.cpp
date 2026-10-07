@@ -203,6 +203,19 @@ void test_host_policies() {
 #endif
 }
 
+void test_debris_limit_setting() {
+    auto registry = EditorSettingsRegistry::make_default();
+    require(debris_limit(registry) == 2048U, "debris limit default must be 2048");
+    require(play_session_settings(registry).debrisLimit == 2048U,
+            "play session config must carry the default debris limit");
+    set(registry, "voxel.debris_limit", std::int64_t{25});
+    require(debris_limit(registry) == 25U, "debris limit override ignored");
+    require(play_session_settings(registry).debrisLimit == 25U,
+            "play session config must carry the debris limit override");
+    set(registry, "voxel.debris_limit", std::int64_t{0});
+    require(debris_limit(registry) == 0U, "zero debris limit must resolve to zero");
+}
+
 void test_tonemap_reference() {
     PolygonRenderTarget target;
     target.resize(4U, 1U);
@@ -369,6 +382,7 @@ int main() {
         test_environment_resolver();
         test_environment_completion_resolver();
         test_host_policies();
+        test_debris_limit_setting();
         test_tonemap_reference();
         test_sampler_policy();
         std::cout << "dve_settings_render_batch_tests: PASS\n";

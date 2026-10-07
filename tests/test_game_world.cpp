@@ -272,6 +272,80 @@ void test_fragmentation_on_disconnecting_damage() {
     CHECK(world.apply_impulse(fragmentId, {0.0F, 5.0F, 0.0F})); // only dynamic bodies accept impulses
 }
 
+namespace {
+GameObjectId spawn_dumbbell(GameWorld& world, int seed, float originX) {
+    auto voxels = std::make_unique<VoxelObject>(seed);
+    for (int x = 0; x < 3; ++x)
+        for (int y = 0; y < 2; ++y)
+            for (int z = 0; z < 2; ++z) voxels->set_voxel({x, y, z}, 1);
+    voxels->set_voxel({3, 0, 0}, 1); // the bridge
+    for (int x = 4; x < 7; ++x)
+        for (int y = 0; y < 2; ++y)
+            for (int z = 0; z < 2; ++z) voxels->set_voxel({x, y, z}, 1);
+    GameObjectDesc desc;
+    desc.name = "DebrisDumbbell";
+    desc.voxelSizeMeters = 1.0F;
+    desc.dynamic = false;
+    desc.voxels = std::move(voxels);
+    desc.transform = make_rigid_transform({originX, 0.0F, 0.0F}, {});
+    std::string error;
+    const GameObjectId id = world.create_object(std::move(desc), &error);
+    CHECK(id != kInvalidGameObjectId);
+    return id;
+}
+} // namespace
+
+void test_debris_limit_recycles_oldest() {
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    world.set_debris_limit(2);
+    CHECK(world.debris_limit() == 2);
+    CHECK(world.debris_count() == 0);
+
+    // Break three dumbbells: the three primaries are never counted or
+    // retired; the debris cap keeps only the two newest fragments.
+    std::vector<GameObjectId> primaries;
+    std::vector<GameObjectId> fragments;
+    world.on_damage([&](const GameDamageEvent& event) {
+        for (const GameObjectId fragment : event.newFragmentIds) fragments.push_back(fragment);
+    });
+    for (int i = 0; i < 3; ++i) {
+        const float originX = 100.0F * static_cast<float>(i);
+        const GameObjectId id = spawn_dumbbell(world, 9100 + i, originX);
+        primaries.push_back(id);
+        const auto removed = world.damage_sphere(id, {originX + 3.5F, 0.5F, 0.5F}, 0.6F);
+        CHECK(removed.has_value() && *removed == 1);
+    }
+    CHECK(fragments.size() == 3);
+    CHECK(world.debris_count() == 2);
+    CHECK(!world.has_object(fragments[0])); // oldest retired to make room
+    CHECK(world.has_object(fragments[1]));
+    CHECK(world.has_object(fragments[2]));
+    for (const GameObjectId primary : primaries) CHECK(world.has_object(primary));
+    CHECK(world.object_count() == 5);
+
+    // Lowering the cap retires the excess immediately, oldest first.
+    world.set_debris_limit(1);
+    CHECK(world.debris_count() == 1);
+    CHECK(!world.has_object(fragments[1]));
+    CHECK(world.has_object(fragments[2]));
+    world.set_debris_limit(0);
+    CHECK(world.debris_count() == 0);
+    CHECK(!world.has_object(fragments[2]));
+    for (const GameObjectId primary : primaries) CHECK(world.has_object(primary));
+
+    // A zero cap suppresses creation: damage still carves the bridge and
+    // the primary keeps a 12-voxel piece, but no fragment body appears.
+    GameWorld dryWorld(std::make_unique<ReferenceRigidBodyWorld>());
+    dryWorld.set_debris_limit(0);
+    const GameObjectId dry = spawn_dumbbell(dryWorld, 9200, 0.0F);
+    const auto dryRemoved = dryWorld.damage_sphere(dry, {3.5F, 0.5F, 0.5F}, 0.6F);
+    CHECK(dryRemoved.has_value() && *dryRemoved == 1);
+    CHECK(dryWorld.object_count() == 1);
+    CHECK(dryWorld.debris_count() == 0);
+    const auto dryVoxels = dryWorld.voxel_count(dry);
+    CHECK(dryVoxels.has_value() && *dryVoxels == 12);
+}
+
 void test_spawn_asset_uses_real_per_material_density() {
     // Deliberately checks that spawn_asset's mass comes from the *asset's own* per-material
     // densities (build_material_mass_table_from_definitions), not a single uniform value the
@@ -457,6 +531,7 @@ int main() {
     test_dynamic_object_impulse_moves_it();
     test_damage_and_auto_destroy();
     test_fragmentation_on_disconnecting_damage();
+    test_debris_limit_recycles_oldest();
     test_fragmentation_of_moved_dynamic_object();
     test_spawn_asset_uses_real_per_material_density();
     test_raycast_unit_correctness();

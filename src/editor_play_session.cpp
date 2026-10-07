@@ -90,6 +90,7 @@ public:
         telemetry.physicsBackend = resolvedBackend;
         telemetry.productionPhysics = resolvedBackend != Physics3DBackend::Reference;
         world_ = std::make_unique<GameWorld>(std::move(physics));
+        world_->set_debris_limit(config.debrisLimit);
         cameraCollision_ = std::make_unique<camera::GameWorldCameraCollisionWorld>(*world_);
 
         for (const auto& [editorId, object] : document.objects()) {

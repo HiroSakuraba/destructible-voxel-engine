@@ -274,6 +274,11 @@ struct GameWorld::Object {
     std::unique_ptr<PolygonBvh> polygonBvh;
     bool dynamic{};
     bool structural{true};
+    // Set only for fragments split off by damage (the debris population the
+    // debris cap governs), with a world-monotonic creation sequence used
+    // for oldest-first retirement. Authored objects keep sequence 0.
+    bool debris{};
+    std::uint64_t debrisSequence{};
     MaterialMassTable massTable{};
     double densityQuantumKilogramsPerCubicMeter{1.0};
     // Render-only copy of a cooked asset's material table (spawn_asset & friends). Empty for
@@ -806,6 +811,34 @@ std::vector<GameObjectId> GameWorld::object_ids() const {
 }
 
 bool GameWorld::has_object(GameObjectId id) const { return objects_.contains(id); }
+
+std::size_t GameWorld::debris_count() const noexcept {
+    std::size_t count = 0;
+    for (const auto& [id, object] : objects_) {
+        (void)id;
+        if (object.debris) ++count;
+    }
+    return count;
+}
+
+bool GameWorld::retire_oldest_debris() {
+    GameObjectId oldest = kInvalidGameObjectId;
+    std::uint64_t oldestSequence = std::numeric_limits<std::uint64_t>::max();
+    for (const auto& [id, object] : objects_) {
+        if (object.debris && object.debrisSequence < oldestSequence) {
+            oldest = id;
+            oldestSequence = object.debrisSequence;
+        }
+    }
+    if (oldest == kInvalidGameObjectId) return false;
+    return destroy_object(oldest);
+}
+
+void GameWorld::set_debris_limit(std::size_t limit) {
+    debrisLimit_ = limit;
+    while (debris_count() > debrisLimit_ && retire_oldest_debris()) {
+    }
+}
 
 std::optional<GameObjectId> GameWorld::find_by_name(std::string_view name) const {
     for (const auto& [id, object] : objects_) {
@@ -1598,6 +1631,15 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         auto detached = commit_split_plan(*object.voxels, *plan, allocate_id());
         if (!detached) continue;
 
+        // Debris cap: free a slot before building the fragment body. The
+        // detached voxels are already carved out of the parent, so when no
+        // slot can be freed — including a zero cap, which suppresses debris
+        // creation entirely — the fragment is discarded like an
+        // unbuildable sliver.
+        while (debris_count() >= debrisLimit_ && retire_oldest_debris()) {
+        }
+        if (debris_count() >= debrisLimit_) continue;
+
         auto fragmentVoxels = std::make_unique<VoxelObject>(std::move(*detached));
         Float3 fragmentLocalCom{};
         std::string buildError;
@@ -1628,6 +1670,8 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         fragmentObject.voxels = std::move(fragmentVoxels);
         fragmentObject.dynamic = true; // debris always falls, even when split from a static parent
         fragmentObject.structural = false; // detached debris is not structural by definition
+        fragmentObject.debris = true;
+        fragmentObject.debrisSequence = nextDebrisSequence_++;
         fragmentObject.densityQuantumKilogramsPerCubicMeter = object.densityQuantumKilogramsPerCubicMeter;
         fragmentObject.massTable = object.massTable;
         fragmentObject.materials = object.materials;

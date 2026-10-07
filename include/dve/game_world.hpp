@@ -342,6 +342,16 @@ public:
     bool destroy_object(GameObjectId id);
     [[nodiscard]] bool has_object(GameObjectId id) const;
     [[nodiscard]] std::size_t object_count() const noexcept { return objects_.size(); }
+    // Debris cap (the voxel.debris_limit setting): bounds the dynamic
+    // fragments damage splits off. Only split-created debris is counted —
+    // authored objects and the surviving primary piece of a split are
+    // never counted and never retired. When a new fragment would exceed
+    // the cap, the oldest debris is retired first (deterministic FIFO);
+    // a cap of zero suppresses debris creation entirely. Lowering the cap
+    // below the current count retires the excess immediately.
+    void set_debris_limit(std::size_t limit);
+    [[nodiscard]] std::size_t debris_limit() const noexcept { return debrisLimit_; }
+    [[nodiscard]] std::size_t debris_count() const noexcept;
     [[nodiscard]] std::vector<GameObjectId> object_ids() const;
 
     [[nodiscard]] std::optional<GameObjectId> find_by_name(std::string_view name) const;
@@ -607,6 +617,9 @@ private:
     [[nodiscard]] GameObjectId create_object_internal(GameObjectDesc desc, std::optional<GameObjectId> forcedId,
                                                       bool dispatchSpawn, std::string* error);
     bool destroy_object_internal(GameObjectId id, bool dispatchDestroy);
+    // Destroys the debris body with the lowest creation sequence; false
+    // when no debris exists. Used by the debris cap and its setter.
+    bool retire_oldest_debris();
     void dispatch_lifecycle(GameLifecycleEvent event);
     void synchronize_membership_component(Object& object);
     [[nodiscard]] std::optional<RigidBodyCreateDesc> build_dynamic_body_desc(
@@ -643,6 +656,8 @@ private:
     std::map<GameObjectPoolId, Pool> pools_;
     std::unordered_map<GameObjectId, GameObjectPoolId> objectPools_;
     GameObjectId nextId_{1};
+    std::size_t debrisLimit_{2048};
+    std::uint64_t nextDebrisSequence_{1};
     GameObjectPoolId nextPoolId_{1};
     std::vector<Timer> timers_;
     TimerId nextTimerId_{1};

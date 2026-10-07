@@ -824,6 +824,8 @@ if(DVE_BUILD_EDITOR)
         src/editor_command.cpp
         src/editor_tools.cpp
         src/editor_workspace.cpp
+        src/editor_workspace_state.cpp
+        src/platform/editor_workspace_file.cpp
         src/editor_play_session.cpp
         src/editor_asset_browser.cpp
         src/editor_ai_tools.cpp
@@ -845,6 +847,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_diagnostics_background.cpp
         src/editor_accessibility.cpp
         src/editor_native.cpp
+        src/editor_native_workspace.cpp
         src/editor_native_renderer.cpp
         src/editor_synth.cpp
         src/editor_chiptune.cpp
@@ -2575,6 +2578,9 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_settings_viewport_navigation_tests PRIVATE dve::editor)
         add_test(NAME dve_settings_viewport_navigation_tests COMMAND dve_settings_viewport_navigation_tests)
         add_executable(dve_settings_applied_tests tests/test_settings_applied.cpp)
+        add_executable(dve_settings_workspace_restore_tests tests/test_settings_workspace_restore.cpp)
+        target_link_libraries(dve_settings_workspace_restore_tests PRIVATE dve::editor)
+        add_test(NAME dve_settings_workspace_restore_tests COMMAND dve_settings_workspace_restore_tests)
         if(TARGET dve_player_runtime)
             add_executable(dve_polygon_performance_tests tests/test_polygon_performance.cpp)
             target_link_libraries(dve_polygon_performance_tests PRIVATE dve::editor dve::player_runtime dve::render_bridge)

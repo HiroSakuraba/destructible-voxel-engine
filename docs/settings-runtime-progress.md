@@ -9,14 +9,22 @@ No placeholder reads have been added to claim coverage of the remaining settings
 
 ## Polygon performance batch
 
-This batch starts from main `5569fef` (PR #70): 70 of the original 134 settings
-connected and 64 remaining. It connects `polygon.frustum_culling` and
+This batch starts after the workspace restoration batch (PR #69): 71 of the original
+134 settings connected and 63 remaining. It connects `polygon.frustum_culling` and
 `polygon.lod_bias` through Project defaults export and CPU player/reference
-rendering: 72 connected and 62 remaining on this branch. These are export/player
+rendering: 73 connected and 61 remaining. These are export/player
 controls; the native editor voxel viewport has no polygon raster pass. LOD bias
-requires supplied authored levels. PR #69 workspace restoration is independent
-and is not included in these branch counts. Wiring is not full acceptance
+requires supplied authored levels. Wiring is not full acceptance
 certification. See [polygon-rendering-performance.md](polygon-rendering-performance.md).
+
+## Workspace restoration batch
+
+Main after PR #68 connected 70 of the original 134 settings, leaving 64 unapplied.
+This batch connects `editor.restore_workspace`: 71 connected and 63 unapplied.
+It restores the state supported by the fixed native editor layout; arbitrary docking
+and other asset-authoring panels remain outside this implementation. See
+[workspace-restoration.md](workspace-restoration.md) for persistence, validation,
+application timing and limitations. Wiring is not full acceptance certification.
 
 ## Viewport-navigation batch
 
@@ -169,7 +177,7 @@ do not certify the full all-settings feature; source references alone are not be
 | `render.high_dpi` | SDL window creation (restart) |
 | `scripting.lua` | EditorPlaySession startup-script lifecycle |
 
-## Remaining 62 settings
+## Remaining 61 settings
 
 
 These retain the unapplied marker in the UI. Each row records the intended behavior,
@@ -178,7 +186,6 @@ they still need actual owners, resource/lifecycle integration and behavioral che
 
 | Setting | Required behavior |
 | --- | --- |
-| `editor.restore_workspace` | When enabled, restore panel positions, active tabs, open assets and viewport state from a versioned per-project workspace record. When disabled, start from the default layout and ignore the saved record. Do not reopen untrusted assets automatically or confuse layout recovery with unsaved-scene recovery. |
 | `editor.telemetry_local` | Enable bounded local collection of frame, rendering, task and audio statistics. Turning it off stops optional collection and persistence; error reporting still works. Never transmit this data. Expose retention, clear-data and capture status so the setting has a visible meaning. |
 | `render.backend` | Select the actual graphics backend used to create the rendering device at restart. Each available choice must have a functioning device path. Preserve the requested choice and display the active backend; a missing platform/backend must produce an explicit failure or user-visible fallback, never a silent no-op. |
 | `render.display_mode` | Apply windowed, borderless fullscreen, or supported exclusive fullscreen to the selected game/presentation window. Remember the previous windowed size and position. Recreate presentation resources safely and restore them if the change fails. |

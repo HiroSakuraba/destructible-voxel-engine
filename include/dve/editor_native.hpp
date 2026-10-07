@@ -26,6 +26,7 @@
 #include "dve/editor_cinematic_camera.hpp"
 #include "dve/editor_synth.hpp"
 #include "dve/editor_sprite_authoring.hpp"
+#include "dve/editor_workspace_state.hpp"
 #include "dve/sprite_animation_graph_renderer.hpp"
 #include "dve/sprite_diagnostics.hpp"
 #include "dve/render3d_diagnostics.hpp"
@@ -501,6 +502,10 @@ public:
     void open_settings(SettingScope scope, std::string category = {});
     void open_shortcut_editor();
     void configure_ai_assistant(std::filesystem::path projectRoot = {});
+    // Explicit project roots activate per-project UI persistence. Accepted quit
+    // saves once; hosts may also checkpoint explicitly outside their frame loop.
+    [[nodiscard]] bool save_workspace_state(std::string* error = nullptr);
+    [[nodiscard]] std::filesystem::path workspace_state_path() const;
     void configure_menu_state(std::filesystem::path path);
     // User-scope settings persistence (e.g. <project>/.dve/user/editor_settings.txt). Loads the
     // file if present; afterwards Settings > Apply and UI-zoom hotkeys save the User layer.
@@ -663,6 +668,13 @@ private:
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
     std::filesystem::path projectRoot_;
+    bool workspaceProjectConfigured_{};
+    EditorWorkspaceState startupWorkspaceState_;
+    std::filesystem::path pendingWorkspaceAsset_;
+    [[nodiscard]] EditorWorkspaceState capture_workspace_state() const;
+    void restore_workspace_state();
+    void restore_workspace_asset_selection();
+    void save_workspace_state_on_quit();
     EditorCamera camera_;
     CameraNavigationFilter cameraNavigationFilter_{};
     float cameraInputAcceleration_{};

@@ -1,11 +1,15 @@
 #include "dve/editor_viewport.hpp"
 
+#include "dve/job_system.hpp"
+
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
 #include <limits>
 #include <map>
+#include <memory>
+#include <mutex>
 
 namespace dve::editor {
 namespace {
@@ -640,6 +644,47 @@ void sort_voxel_draw_items(std::vector<EditorVoxelDrawItem>& items) {
     }
 }
 
+// The sort is most of a large rebuild (about 17 ms of 20 ms for a capped 120,000-item list
+// here), so with a worker pool the list is cut into one run per thread, the runs are sorted
+// at the same time, and pairs of runs are merged level by level (also in parallel). The
+// order is a total order, so the result is item-for-item the single-threaded sort's.
+constexpr std::size_t kParallelSortMinimum = 32768;
+
+void sort_voxel_draw_items(std::vector<EditorVoxelDrawItem>& items, JobSystem* jobs) {
+    const std::size_t count = items.size();
+    const std::size_t threads = jobs != nullptr ? jobs->worker_count() + 1U : 1U;
+    if (threads < 2U || count < kParallelSortMinimum) {
+        sort_voxel_draw_items(items);
+        return;
+    }
+    const std::size_t runs = std::min(threads, count / (kParallelSortMinimum / 4U));
+    std::vector<std::size_t> bounds(runs + 1U);
+    for (std::size_t run = 0; run <= runs; ++run) bounds[run] = count * run / runs;
+    jobs->parallel_for(runs, [&](std::size_t run) {
+        std::vector<EditorVoxelDrawItem> part(items.begin() + static_cast<std::ptrdiff_t>(bounds[run]),
+                                              items.begin() + static_cast<std::ptrdiff_t>(bounds[run + 1U]));
+        sort_voxel_draw_items(part);
+        std::copy(part.begin(), part.end(), items.begin() + static_cast<std::ptrdiff_t>(bounds[run]));
+    });
+    std::vector<EditorVoxelDrawItem> scratch(count);
+    std::vector<EditorVoxelDrawItem>* source = &items;
+    std::vector<EditorVoxelDrawItem>* target = &scratch;
+    for (std::size_t width = 1; width < runs; width *= 2U) {
+        const std::size_t pairs = (runs + 2U * width - 1U) / (2U * width);
+        jobs->parallel_for(pairs, [&](std::size_t pair) {
+            const std::size_t first = bounds[pair * 2U * width];
+            const std::size_t middle = bounds[std::min(runs, pair * 2U * width + width)];
+            const std::size_t last = bounds[std::min(runs, pair * 2U * width + 2U * width)];
+            const auto begin = source->begin();
+            std::merge(begin + static_cast<std::ptrdiff_t>(first), begin + static_cast<std::ptrdiff_t>(middle),
+                       begin + static_cast<std::ptrdiff_t>(middle), begin + static_cast<std::ptrdiff_t>(last),
+                       target->begin() + static_cast<std::ptrdiff_t>(first), voxel_draw_item_less);
+        });
+        std::swap(source, target);
+    }
+    if (source != &items) items.swap(*source);
+}
+
 } // namespace
 
 std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
@@ -649,6 +694,17 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     UiRect viewport,
     const EditorViewportSettings& settings,
     const std::set<EditorObjectId>& selectedObjects) {
+    return build_voxel_draw_list(document, materials, camera, viewport, settings, selectedObjects, nullptr);
+}
+
+std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
+    const EditorDocument& document,
+    const EditorMaterialLibrary& materials,
+    const EditorCamera& camera,
+    UiRect viewport,
+    const EditorViewportSettings& settings,
+    const std::set<EditorObjectId>& selectedObjects,
+    JobSystem* jobs) {
     std::vector<EditorVoxelDrawItem> result;
     result.reserve(std::min<std::size_t>(settings.maximumDrawVoxels, 16384));
     const float viewportHeight = static_cast<float>(std::max(1, viewport.height));
@@ -701,7 +757,7 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
         }
         if (result.size() >= settings.maximumDrawVoxels) break;
     }
-    sort_voxel_draw_items(result);
+    sort_voxel_draw_items(result, jobs);
     return result;
 }
 
@@ -781,6 +837,17 @@ std::uint64_t editor_selection_fingerprint(const std::set<EditorObjectId>& selec
     return hash.h;
 }
 
+namespace {
+struct SharedDrawJobs {
+    std::mutex mutex;
+    std::unique_ptr<JobSystem> jobs;  // created on first use, joined at exit
+};
+SharedDrawJobs& shared_draw_jobs() {
+    static SharedDrawJobs shared;
+    return shared;
+}
+} // namespace
+
 const std::vector<EditorVoxelDrawItem>& EditorVoxelDrawListCache::get(
     const EditorDocument& document,
     const EditorMaterialLibrary& materials,
@@ -797,7 +864,16 @@ const std::vector<EditorVoxelDrawItem>& EditorVoxelDrawListCache::get(
     hash.u64(settings.cullEnclosedVoxels ? 1U : 0U);
     hash.u64(editor_selection_fingerprint(selectedObjects));
     if (!valid_ || hash.h != key_) {
-        items_ = build_voxel_draw_list(document, materials, camera, viewport, settings, selectedObjects);
+        // Large lists are sorted on a shared worker pool. Only one thread uses the pool at a
+        // time; anyone else (another controller on another thread) sorts alone.
+        SharedDrawJobs& shared = shared_draw_jobs();
+        std::unique_lock poolLock(shared.mutex, std::defer_lock);
+        JobSystem* jobs = nullptr;
+        if (JobSystem::default_worker_count() > 0 && poolLock.try_lock()) {
+            if (!shared.jobs) shared.jobs = std::make_unique<JobSystem>(JobSystem::default_worker_count());
+            jobs = shared.jobs.get();
+        }
+        items_ = build_voxel_draw_list(document, materials, camera, viewport, settings, selectedObjects, jobs);
         key_ = hash.h;
         valid_ = true;
         ++rebuilds_;

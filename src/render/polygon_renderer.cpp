@@ -615,6 +615,14 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
 }
 
 float aces(float x) noexcept {const float a=2.51F,b=0.03F,c=2.43F,d=0.59F,e=0.14F;return std::clamp((x*(a*x+b))/(x*(c*x+d)+e),0.0F,1.0F);}
+float reinhard(float x) noexcept {return x/(1.0F+x);}
+float tonemap_curve(float x, TonemapOperator op) noexcept {
+    switch (op) {
+        case TonemapOperator::Reinhard: return std::clamp(reinhard(x),0.0F,1.0F);
+        case TonemapOperator::Clamp: return std::clamp(x,0.0F,1.0F);
+        case TonemapOperator::ACES: default: return aces(x);
+    }
+}
 std::uint8_t srgb(float linear) noexcept {linear=std::clamp(linear,0.0F,1.0F);const float encoded=linear<=0.0031308F?12.92F*linear:1.055F*std::pow(linear,1.0F/2.4F)-0.055F;return static_cast<std::uint8_t>(std::clamp(encoded*255.0F+0.5F,0.0F,255.0F));}
 }
 
@@ -777,6 +785,12 @@ bool composite_hybrid_layers(const PolygonRenderTarget& voxelLayer,const Polygon
 
 bool resolve_polygon_render_rgba8(const PolygonRenderTarget& target, float exposure,
                                   std::vector<std::uint8_t>& rgba, std::string* error) {
+    return resolve_polygon_render_rgba8(target, exposure, TonemapOperator::ACES, rgba, error);
+}
+
+bool resolve_polygon_render_rgba8(const PolygonRenderTarget& target, float exposure,
+                                  TonemapOperator tonemapOperator,
+                                  std::vector<std::uint8_t>& rgba, std::string* error) {
     if (!target.valid() || !(exposure > 0) || !std::isfinite(exposure)) {
         if (error) *error = "invalid render target or exposure";
         return false;
@@ -784,9 +798,9 @@ bool resolve_polygon_render_rgba8(const PolygonRenderTarget& target, float expos
     rgba.resize(target.hdrColor.size() * 4U);
     std::uint8_t* out = rgba.data();
     for (const Float4& c : target.hdrColor) {
-        out[0] = srgb(aces(c.x * exposure));
-        out[1] = srgb(aces(c.y * exposure));
-        out[2] = srgb(aces(c.z * exposure));
+        out[0] = srgb(tonemap_curve(c.x * exposure, tonemapOperator));
+        out[1] = srgb(tonemap_curve(c.y * exposure, tonemapOperator));
+        out[2] = srgb(tonemap_curve(c.z * exposure, tonemapOperator));
         out[3] = 255U;
         out += 4;
     }

@@ -143,6 +143,17 @@ public:
     std::vector<std::uint8_t>& rgba,
     std::string* error = nullptr);
 
+// Operator-selecting resolve. This CPU path is the reference implementation for
+// shaders/tonemap.hlsl: ACES is Narkowicz's fitted approximation, Reinhard is
+// x / (1 + x), Clamp saturates; all three run once on exposure-scaled linear RGB
+// before the sRGB encode, exactly as the shader does.
+[[nodiscard]] bool resolve_polygon_render_rgba8(
+    const PolygonRenderTarget& target,
+    float exposure,
+    TonemapOperator tonemapOperator,
+    std::vector<std::uint8_t>& rgba,
+    std::string* error = nullptr);
+
 [[nodiscard]] bool write_polygon_render_ppm(
     const std::filesystem::path& path,
     const PolygonRenderTarget& target,

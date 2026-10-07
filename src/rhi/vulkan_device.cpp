@@ -330,6 +330,7 @@ struct VulkanDevice::Impl {
         vk::PFN_DestroyInstance destroyInstance{};
         vk::PFN_EnumeratePhysicalDevices enumeratePhysicalDevices{};
         vk::PFN_GetPhysicalDeviceProperties getPhysicalDeviceProperties{};
+        vk::PFN_GetPhysicalDeviceFeatures getPhysicalDeviceFeatures{};
         vk::PFN_GetPhysicalDeviceQueueFamilyProperties getQueueFamilyProperties{};
         vk::PFN_GetPhysicalDeviceMemoryProperties getMemoryProperties{};
         vk::PFN_GetPhysicalDeviceFormatProperties getFormatProperties{};
@@ -540,6 +541,7 @@ struct VulkanDevice::Impl {
     std::uint32_t timestampValidBits{};
     vk::PhysicalDeviceMemoryProperties memoryProperties{};
     DeviceCapabilities capabilities{};
+    bool samplerAnisotropyEnabled{};
     DeviceStatistics statistics{};
     DeviceStatus status{DeviceStatus::Lost};
     std::string reason{"Vulkan backend has not initialized"};
@@ -618,6 +620,7 @@ struct VulkanDevice::Impl {
         if (!load_instance(fn.destroyInstance, "vkDestroyInstance") ||
             !load_instance(fn.enumeratePhysicalDevices, "vkEnumeratePhysicalDevices") ||
             !load_instance(fn.getPhysicalDeviceProperties, "vkGetPhysicalDeviceProperties") ||
+            !load_instance(fn.getPhysicalDeviceFeatures, "vkGetPhysicalDeviceFeatures") ||
             !load_instance(fn.getQueueFamilyProperties, "vkGetPhysicalDeviceQueueFamilyProperties") ||
             !load_instance(fn.getMemoryProperties, "vkGetPhysicalDeviceMemoryProperties") ||
             !load_instance(fn.getFormatProperties, "vkGetPhysicalDeviceFormatProperties") ||
@@ -664,6 +667,7 @@ struct VulkanDevice::Impl {
         capabilities.apiVersion = physicalProperties.apiVersion;
         capabilities.nativeLimitsQueried = true;
         capabilities.maxTextureDimension2D = physicalProperties.limits.maxImageDimension2D;
+        capabilities.maxSamplerAnisotropy = physicalProperties.limits.maxSamplerAnisotropy;
         capabilities.maxComputeInvocations = physicalProperties.limits.maxComputeWorkGroupInvocations;
         capabilities.maxComputeWorkgroupSizeX = physicalProperties.limits.maxComputeWorkGroupSize[0];
         capabilities.maxComputeWorkgroupSizeY = physicalProperties.limits.maxComputeWorkGroupSize[1];
@@ -700,12 +704,23 @@ struct VulkanDevice::Impl {
                 capabilities.dedicatedVideoMemoryBytes += memoryProperties.memoryHeaps[heap].size;
         }
 
+        // Anisotropic filtering needs the samplerAnisotropy feature enabled at
+        // device creation; request it only when the adapter reports support
+        // (a limit above 1x) so device creation cannot fail over an optional
+        // quality feature.
+        vk::PhysicalDeviceFeatures supportedFeatures{};
+        fn.getPhysicalDeviceFeatures(physicalDevice, &supportedFeatures);
+        vk::PhysicalDeviceFeatures enabledFeatures{};
+        samplerAnisotropyEnabled = supportedFeatures.samplerAnisotropy != 0U &&
+            capabilities.maxSamplerAnisotropy > 1.0F;
+        if (samplerAnisotropyEnabled) enabledFeatures.samplerAnisotropy = 1U;
+
         const float priority = 1.0F;
         const vk::DeviceQueueCreateInfo queueInfo{
             vk::StructureTypeDeviceQueueCreateInfo, nullptr, 0U, queueFamily, 1U, &priority};
         const vk::DeviceCreateInfo deviceInfo{
             vk::StructureTypeDeviceCreateInfo, nullptr, 0U, 1U, &queueInfo,
-            0U, nullptr, 0U, nullptr, nullptr};
+            0U, nullptr, 0U, nullptr, &enabledFeatures};
         if (!check(fn.createDevice(physicalDevice, &deviceInfo, nullptr, &device),
                    "vkCreateDevice")) return;
 
@@ -1674,7 +1689,8 @@ SamplerHandle VulkanDevice::create_sampler(const SamplerDesc& desc, std::string*
     if (!std::isfinite(desc.minimumLod) || !std::isfinite(desc.maximumLod) ||
         !std::isfinite(desc.mipLodBias) || !std::isfinite(desc.maximumAnisotropy) ||
         desc.minimumLod > desc.maximumLod || desc.maximumAnisotropy < 1.0F ||
-        (desc.anisotropy && desc.maximumAnisotropy > 1.0F) ||
+        (desc.anisotropy && (!impl_->samplerAnisotropyEnabled ||
+                             desc.maximumAnisotropy > impl_->capabilities.maxSamplerAnisotropy)) ||
         static_cast<std::uint8_t>(desc.comparisonOp) > static_cast<std::uint8_t>(CompareOp::AlwaysPass)) {
         set_error(error, "Vulkan sampler description is invalid or requests unsupported anisotropy");
         return {};
@@ -1685,7 +1701,8 @@ SamplerHandle VulkanDevice::create_sampler(const SamplerDesc& desc, std::string*
         vulkan_mipmap_filter(desc.mipmapFilter),
         vulkan_address_mode(desc.addressU), vulkan_address_mode(desc.addressV),
         vulkan_address_mode(desc.addressW), desc.mipLodBias,
-        0U, 1.0F, desc.comparison ? 1U : 0U,
+        desc.anisotropy ? 1U : 0U, desc.anisotropy ? desc.maximumAnisotropy : 1.0F,
+        desc.comparison ? 1U : 0U,
         desc.comparison ? vulkan_compare(desc.comparisonOp) : vk::CompareAlways,
         desc.minimumLod, desc.maximumLod, vk::BorderColorFloatTransparentBlack, 0U};
     vk::Sampler sampler{};

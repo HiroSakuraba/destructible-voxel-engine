@@ -1,6 +1,7 @@
 #include "dve/physics3d_backend.hpp"
 
 #include <exception>
+#include <cmath>
 #include <utility>
 
 #ifdef DVE_HAVE_BOX3D
@@ -11,6 +12,21 @@
 #endif
 
 namespace dve {
+
+bool configure_physics3d_gravity(IRigidBodyWorld& world, Float3 gravity) noexcept {
+    if (!std::isfinite(gravity.x) || !std::isfinite(gravity.y) || !std::isfinite(gravity.z)) return false;
+    if (auto* reference = dynamic_cast<ReferenceRigidBodyWorld*>(&world)) {
+        reference->set_gravity(gravity);
+        return true;
+    }
+#ifdef DVE_HAVE_JOLT
+    if (auto* jolt = dynamic_cast<JoltRigidBodyWorld*>(&world)) { jolt->set_gravity(gravity); return true; }
+#endif
+#ifdef DVE_HAVE_BOX3D
+    if (auto* box3d = dynamic_cast<Box3DRigidBodyWorld*>(&world)) { box3d->set_gravity(gravity); return true; }
+#endif
+    return false;
+}
 
 Physics3DBackendAvailability physics3d_backend_availability() noexcept {
     Physics3DBackendAvailability availability;
@@ -61,6 +77,8 @@ std::unique_ptr<IRigidBodyWorld> create_physics3d_world(
         if (error != nullptr) *error = message;
         return {};
     };
+    if (!std::isfinite(config.gravity.x) || !std::isfinite(config.gravity.y) || !std::isfinite(config.gravity.z))
+        return unavailable("physics gravity must be finite");
 #ifdef DVE_HAVE_JOLT
     const auto makeJolt = [&]() -> std::unique_ptr<IRigidBodyWorld> {
         JoltWorldConfig jolt;
@@ -70,7 +88,10 @@ std::unique_ptr<IRigidBodyWorld> create_physics3d_world(
         if (config.positionIterations != 0U) jolt.positionIterations = config.positionIterations;
         jolt.deterministicSimulation = config.deterministicSimulation;
         jolt.allowSleeping = config.allowSleeping;
-        return std::make_unique<JoltRigidBodyWorld>(jolt);
+        jolt.continuousCollision = config.continuousCollision;
+        auto world = std::make_unique<JoltRigidBodyWorld>(jolt);
+        world->set_gravity(config.gravity);
+        return world;
     };
 #endif
 #ifdef DVE_HAVE_BOX3D
@@ -80,10 +101,18 @@ std::unique_ptr<IRigidBodyWorld> create_physics3d_world(
         if (config.subStepCount != 0U) box3d.subStepCount = config.subStepCount;
         box3d.enableSleeping = config.allowSleeping;
         box3d.enableContinuousCollision = config.continuousCollision;
-        return std::make_unique<Box3DRigidBodyWorld>(box3d);
+        auto world = std::make_unique<Box3DRigidBodyWorld>(box3d);
+        world->set_gravity(config.gravity);
+        return world;
     };
 #endif
 
+    const auto makeReference = [&]() -> std::unique_ptr<IRigidBodyWorld> {
+        auto world = std::make_unique<ReferenceRigidBodyWorld>();
+        world->set_gravity(config.gravity);
+        world->set_allow_sleeping(config.allowSleeping);
+        return world;
+    };
     try {
         if (backend == Physics3DBackend::Automatic) {
 #ifdef DVE_HAVE_JOLT
@@ -91,13 +120,13 @@ std::unique_ptr<IRigidBodyWorld> create_physics3d_world(
 #elif defined(DVE_HAVE_BOX3D)
             return resolve(Physics3DBackend::Box3D, makeBox3D());
 #else
-            return resolve(Physics3DBackend::Reference, std::make_unique<ReferenceRigidBodyWorld>());
+            return resolve(Physics3DBackend::Reference, makeReference());
 #endif
         }
 
         switch (backend) {
         case Physics3DBackend::Reference:
-            return resolve(backend, std::make_unique<ReferenceRigidBodyWorld>());
+            return resolve(backend, makeReference());
         case Physics3DBackend::Jolt:
 #ifdef DVE_HAVE_JOLT
             return resolve(backend, makeJolt());

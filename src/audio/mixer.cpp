@@ -68,7 +68,7 @@ private:
     alignas(64) std::atomic<std::size_t> dequeue_{};
 };
 
-enum class CommandType : std::uint8_t { Play, PlayStream, Stop, Emitter, Gain, Bus, Snapshot, Listener, AllOff };
+enum class CommandType : std::uint8_t { Play, PlayStream, Stop, Emitter, Gain, Bus, Snapshot, UserGains, Listener, AllOff };
 struct Command {
     CommandType type{};
     AudioSourceHandle handle{};
@@ -184,9 +184,17 @@ struct AudioMixer::Impl {
         controlBuses[audio_bus_index(AudioBusId::Effects)].reverbSend = 0.08F;
         controlBuses[audio_bus_index(AudioBusId::Ambience)].reverbSend = 0.25F;
         renderBuses = controlBuses;
+        controlUserGains.fill(1.0F);
+        renderUserGains.fill(1.0F);
+        targetUserGains.fill(1.0F);
     }
 
     std::uint32_t sampleRate{};
+    std::atomic<std::uint32_t> outputPolicy{};
+    std::uint32_t renderedOutputPolicy{};
+    std::uint64_t outputPolicyFramesRemaining{};
+    float monoMix{};
+    float compressionStrength{1.0F};
     Synthesizer synth;
     std::atomic<std::shared_ptr<ChiptunePlayer>> chiptunePreview{};
     std::atomic<AudioBusId> chiptunePreviewBus{AudioBusId::Music};
@@ -204,6 +212,10 @@ struct AudioMixer::Impl {
     AudioListenerState listener{};
     std::array<AudioBusParameters, kAudioBusCount> controlBuses{};
     std::array<AudioBusParameters, kAudioBusCount> renderBuses{};
+    std::array<float, kAudioBusCount> controlUserGains{};
+    std::array<float, kAudioBusCount> renderUserGains{};
+    std::array<float, kAudioBusCount> targetUserGains{};
+    std::uint64_t userGainFramesRemaining{};
     std::atomic<std::shared_ptr<const IAudioSpatializer>> spatializer;
     std::array<std::atomic<std::shared_ptr<IAudioCaptureSink>>, kMaxAudioCaptureSinks> captureSinks{};
     std::array<std::atomic<AudioCaptureTap>, kMaxAudioCaptureSinks> captureTaps{};
@@ -369,6 +381,11 @@ struct AudioMixer::Impl {
                     snapshotFramesRemaining = snapshotFramesTotal;
                     break;
                 case CommandType::Listener: listener = command.listener; break;
+                case CommandType::UserGains:
+                    for (std::size_t i = 0; i < kAudioBusCount; ++i)
+                        targetUserGains[i] = command.snapshot.buses[i].gain;
+                    userGainFramesRemaining = std::max<std::uint64_t>(1U, sampleRate / 50U);
+                    break;
                 case CommandType::AllOff:
                     for (auto& voice : voices) voice.active = false;
                     for (auto& voice : streamVoices) voice.active = false;
@@ -422,6 +439,22 @@ struct AudioMixer::Impl {
     void render_chunk(float* output, std::size_t frames) noexcept {
         process_commands();
         advance_snapshot(frames);
+        const auto userGainStart = renderUserGains;
+        std::array<float, kAudioBusCount> userGainStep{};
+        const auto userGainRampFrames = std::min<std::uint64_t>(frames, userGainFramesRemaining);
+        if (userGainFramesRemaining) {
+            for (std::size_t i = 0; i < kAudioBusCount; ++i) {
+                userGainStep[i] = (targetUserGains[i] - renderUserGains[i]) /
+                    static_cast<float>(userGainFramesRemaining);
+                renderUserGains[i] += userGainStep[i] * static_cast<float>(userGainRampFrames);
+            }
+            userGainFramesRemaining -= userGainRampFrames;
+            if (!userGainFramesRemaining) renderUserGains = targetUserGains;
+        }
+        const auto userGain = [&](std::size_t bus, std::size_t frame) {
+            return userGainStart[bus] + userGainStep[bus] *
+                static_cast<float>(std::min<std::uint64_t>(frame + 1U, userGainRampFrames));
+        };
         classify_voices();
         for (auto& bus : busScratch) std::fill_n(bus.data(), frames * 2U, 0.0F);
 
@@ -541,8 +574,9 @@ struct AudioMixer::Impl {
                 (busIndex == audio_bus_index(AudioBusId::Music) || busIndex == audio_bus_index(AudioBusId::Ambience) ? duck : 1.0F);
             auto& source = busScratch[busIndex];
             for (std::size_t f = 0; f < frames; ++f) {
-                float l = source[f * 2U] * busGain;
-                float r = source[f * 2U + 1U] * busGain;
+                const float gain = busGain * userGain(busIndex, f);
+                float l = source[f * 2U] * gain;
+                float r = source[f * 2U + 1U] * gain;
                 busFilters[busIndex].process(l, r, params.lowPassHertz, static_cast<float>(sampleRate));
                 source[f * 2U] = l; source[f * 2U + 1U] = r;
                 master[f * 2U] += l; master[f * 2U + 1U] += r;
@@ -554,15 +588,48 @@ struct AudioMixer::Impl {
         for (std::size_t f = 0; f < frames; ++f) {
             float wetL{}; float wetR{};
             reverb.process(reverbInput[f * 2U], reverbInput[f * 2U + 1U], wetL, wetR);
-            master[f * 2U] += wetL * reverbParams.gain;
-            master[f * 2U + 1U] += wetR * reverbParams.gain;
+            const float gain = reverbParams.gain * userGain(audio_bus_index(AudioBusId::Reverb), f);
+            master[f * 2U] += wetL * gain;
+            master[f * 2U + 1U] += wetR * gain;
         }
 
         const float masterGain = renderBuses[audio_bus_index(AudioBusId::Master)].mute ? 0.0F :
                                  renderBuses[audio_bus_index(AudioBusId::Master)].gain;
+        const auto policy = outputPolicy.load(std::memory_order_relaxed);
+        const bool mono = (policy & 1U) != 0U;
+        const auto range = static_cast<AudioDynamicRange>(policy >> 1U);
+        const float compression = range == AudioDynamicRange::Night ? 4.0F
+            : range == AudioDynamicRange::Medium ? 2.0F : 1.0F;
+        if (policy != renderedOutputPolicy) {
+            renderedOutputPolicy = policy;
+            outputPolicyFramesRemaining = std::max<std::uint64_t>(1U, sampleRate / 50U);
+        }
         for (std::size_t f = 0; f < frames; ++f) {
-            const float l = std::tanh(master[f * 2U] * masterGain);
-            const float r = std::tanh(master[f * 2U + 1U] * masterGain);
+            if (outputPolicyFramesRemaining) {
+                const float alpha = 1.0F / static_cast<float>(outputPolicyFramesRemaining);
+                monoMix += ((mono ? 1.0F : 0.0F) - monoMix) * alpha;
+                compressionStrength += (compression - compressionStrength) * alpha;
+                if (--outputPolicyFramesRemaining == 0) {
+                    monoMix = mono ? 1.0F : 0.0F;
+                    compressionStrength = compression;
+                }
+            }
+            const float effectiveMasterGain = masterGain * userGain(audio_bus_index(AudioBusId::Master), f);
+            float left = master[f * 2U] * effectiveMasterGain;
+            float right = master[f * 2U + 1U] * effectiveMasterGain;
+            const float center = (left + right) * 0.5F;
+            if (monoMix == 1.0F) left = right = center;
+            else if (monoMix > 0.0F) {
+                left += (center - left) * monoMix;
+                right += (center - right) * monoMix;
+            }
+            // Stereo-linked soft compression retains quiet-detail gain and lowers peaks.
+            // Full preserves the established mixer output curve exactly.
+            const float peak = std::max(std::fabs(left), std::fabs(right));
+            const float gain = compressionStrength == 1.0F ? 1.0F
+                : 1.0F / (1.0F + (compressionStrength - 1.0F) * peak);
+            const float l = std::tanh(left * gain);
+            const float r = std::tanh(right * gain);
             output[f * 2U] = l;
             output[f * 2U + 1U] = r;
             master[f * 2U] = l;
@@ -731,9 +798,10 @@ bool AudioMixer::set_bus_parameters(AudioBusId bus, const AudioBusParameters& pa
     sanitized.gain = clampf(sanitized.gain, 0.0F, 4.0F);
     sanitized.lowPassHertz = clampf(sanitized.lowPassHertz, 20.0F, 24000.0F);
     sanitized.reverbSend = clampf(sanitized.reverbSend, 0.0F, 1.0F);
-    impl_->controlBuses[audio_bus_index(bus)] = sanitized;
     Command command{}; command.type = CommandType::Bus; command.bus = bus; command.busParameters = sanitized;
-    return impl_->post(command);
+    if (!impl_->post(command)) return false;
+    impl_->controlBuses[audio_bus_index(bus)] = sanitized;
+    return true;
 }
 bool AudioMixer::apply_bus_snapshot(const AudioBusSnapshot& snapshot, float transitionSeconds) noexcept {
     AudioBusSnapshot sanitized = snapshot;
@@ -742,12 +810,13 @@ bool AudioMixer::apply_bus_snapshot(const AudioBusSnapshot& snapshot, float tran
         parameters.lowPassHertz = clampf(parameters.lowPassHertz, 20.0F, 24000.0F);
         parameters.reverbSend = clampf(parameters.reverbSend, 0.0F, 1.0F);
     }
-    impl_->controlBuses = sanitized.buses;
     Command command{};
     command.type = CommandType::Snapshot;
     command.snapshot = sanitized;
     command.value = std::clamp(transitionSeconds, 0.0F, 30.0F);
-    return impl_->post(command);
+    if (!impl_->post(command)) return false;
+    impl_->controlBuses = sanitized.buses;
+    return true;
 }
 AudioBusSnapshot AudioMixer::bus_snapshot() const noexcept { return {impl_->controlBuses}; }
 AudioBusParameters AudioMixer::bus_parameters(AudioBusId bus) const noexcept { return impl_->controlBuses[audio_bus_index(bus)]; }
@@ -844,5 +913,23 @@ std::string_view audio_bus_name(AudioBusId bus) noexcept {
         "Master", "Music", "Dialogue", "Effects", "Ambience", "UI", "Reverb"};
     return names[audio_bus_index(bus)];
 }
+
+void AudioMixer::set_output_policy(bool mono, AudioDynamicRange dynamicRange) noexcept {
+    impl_->outputPolicy.store((mono ? 1U : 0U) |
+        (static_cast<std::uint32_t>(dynamicRange) << 1U), std::memory_order_relaxed);
+}
+
+bool AudioMixer::set_user_bus_gains(const std::array<float, kAudioBusCount>& gains) noexcept {
+    for (const float gain : gains) if (!std::isfinite(gain) || gain < 0.0F || gain > 4.0F) return false;
+    if (gains == impl_->controlUserGains) return true;
+    Command command{};
+    command.type = CommandType::UserGains;
+    for (std::size_t i = 0; i < kAudioBusCount; ++i) command.snapshot.buses[i].gain = gains[i];
+    if (!impl_->post(command)) return false;
+    impl_->controlUserGains = gains;
+    return true;
+}
+
+std::array<float, kAudioBusCount> AudioMixer::user_bus_gains() const noexcept { return impl_->controlUserGains; }
 
 } // namespace dve::audio

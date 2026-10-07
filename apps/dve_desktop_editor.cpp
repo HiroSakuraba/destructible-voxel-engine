@@ -1,4 +1,5 @@
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include "dve/audio/sdl_synth_audio_device.hpp"
 #include "dve/editor_accessibility.hpp"
 #include "dve/editor_native.hpp"
+#include "dve/editor_runtime_settings.hpp"
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_platform_bridge.hpp"
 #include "dve/editor_sdl_canvas.hpp"
@@ -97,7 +99,7 @@ int main(int argc, char** argv) {
         window.title = "DVE Desktop Editor v1.18";
         window.width = initialWidth;
         window.height = initialHeight;
-        window.highDpi = true;
+        window.highDpi = std::get<bool>(controller.workspace().settings().value("render.high_dpi"));
         window.hidden = smoke;
         if (!host.create_window(window, &error)) throw std::runtime_error(error);
 
@@ -172,9 +174,11 @@ int main(int argc, char** argv) {
             }
 
             const double now = host.monotonic_seconds();
+            bridge.update(static_cast<float>(now - previous));
             controller.update(static_cast<float>(now - previous));
             previous = now;
             sync_zoom(host.window_metrics());
+            controller.set_system_theme_light(SDL_GetSystemTheme() == SDL_SYSTEM_THEME_LIGHT);
             const bool vsync = std::get<bool>(controller.workspace().settings().value("render.vsync"));
             if (requestedVsync != vsync) {
                 requestedVsync = vsync;
@@ -207,8 +211,10 @@ int main(int argc, char** argv) {
             // bounds rendering to 250 fps even under a high-frequency motion stream.
             if (!controller.quit_requested()) {
                 const bool fullRate = controller.animating() || frameStart - lastInput < kFullRateAfterInputSeconds;
-                (void)host.wait_for_frame(frameStart, std::chrono::milliseconds(fullRate ? 8 : 33),
-                                          std::chrono::milliseconds(4));
+                const auto cap = std::get<std::int64_t>(controller.workspace().settings().value("render.frame_limit"));
+                const auto floor = editor_frame_floor(cap);
+                (void)host.wait_for_frame(frameStart,
+                    std::max(std::chrono::milliseconds(fullRate ? 8 : 33), floor), floor);
             }
         }
 

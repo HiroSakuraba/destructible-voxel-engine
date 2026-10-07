@@ -13,6 +13,27 @@
 namespace dve::editor {
 namespace {
 
+bool physics_choice_compiled(std::string_view choice) noexcept {
+    if (choice == "automatic" || choice == "reference") return true;
+#ifdef DVE_HAVE_JOLT
+    if (choice == "jolt") return true;
+#endif
+#ifdef DVE_HAVE_BOX3D
+    if (choice == "box3d") return true;
+#endif
+    return false;
+}
+
+std::string_view automatic_physics_choice() noexcept {
+#ifdef DVE_HAVE_JOLT
+    return "jolt";
+#elif defined(DVE_HAVE_BOX3D)
+    return "box3d";
+#else
+    return "reference";
+#endif
+}
+
 std::string lower(std::string_view value) {
     std::string result(value);
     std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
@@ -150,6 +171,7 @@ bool EditorSettingsRegistry::add(SettingDefinition definition, std::string* erro
     if (find(definition.id)) return fail("duplicate setting id");
     if (!validate_value(definition, definition.defaultValue, error)) return false;
     definitions_.push_back(std::move(definition));
+    ++revision_;
     return true;
 }
 
@@ -278,15 +300,24 @@ bool EditorSettingsRegistry::set(SettingScope scope, std::string_view id, Settin
     const SettingDefinition* definition = find(id);
     if (!definition) { if (error) *error = "unknown setting"; return false; }
     if (!validate_value(*definition, newValue, error)) return false;
-    layer(scope)[std::string(id)] = std::move(newValue);
+    auto& values = layer(scope);
+    const auto previous = values.find(id);
+    if (previous != values.end() && previous->second == newValue) return true;
+    values[std::string(id)] = std::move(newValue);
+    ++revision_;
     return true;
 }
 
 bool EditorSettingsRegistry::clear(SettingScope scope, std::string_view id) noexcept {
-    return layer(scope).erase(std::string(id)) != 0U;
+    const bool removed = layer(scope).erase(std::string(id)) != 0U;
+    if (removed) ++revision_;
+    return removed;
 }
 
-void EditorSettingsRegistry::clear_scope(SettingScope scope) noexcept { layer(scope).clear(); }
+void EditorSettingsRegistry::clear_scope(SettingScope scope) noexcept {
+    auto& values = layer(scope);
+    if (!values.empty()) { values.clear(); ++revision_; }
+}
 
 bool EditorSettingsRegistry::differs_from_default(std::string_view id) const {
     const SettingDefinition* definition = find(id);
@@ -297,11 +328,30 @@ SettingAvailability EditorSettingsRegistry::availability(std::string_view id,std
     const SettingDefinition* definition=find(id);
     if(!definition) return {false,"Unknown setting."};
     if(!capabilities_match(*definition,capabilities)) return {false,"This option is unavailable in the current build profile."};
+    if (id == "physics.worker_threads" || id == "physics.substeps" ||
+        id == "physics.velocity_iterations" || id == "physics.position_iterations" ||
+        id == "physics.deterministic" || id == "physics.continuous_collision") {
+        const auto requested = std::get<std::string>(value("physics.backend"));
+        const std::string_view backend = requested == "automatic" ? automatic_physics_choice() : requested;
+        if (!physics_choice_compiled(backend)) return {false, "The selected physics backend is not compiled in this build."};
+        if (backend == "reference") return {false, "The reference adapter does not expose solver tuning, workers, CCD or a determinism toggle."};
+        if (backend == "box3d" && (id == "physics.velocity_iterations" || id == "physics.position_iterations" || id == "physics.deterministic"))
+            return {false, "This tuning control is supported by the Jolt adapter; Box3D does not expose it."};
+    }
     for(const SettingDependency& dependency:definition->dependencies){
         const SettingDefinition* source=find(dependency.settingId);
         if(!source) return {false,"The option has an invalid dependency."};
         if(value(dependency.settingId)!=dependency.requiredValue) return {false,dependency.explanation.empty()?"A required option is disabled.":dependency.explanation};
     }
+    return {};
+}
+SettingAvailability EditorSettingsRegistry::choice_availability(std::string_view id, std::string_view choice) const {
+    const auto* definition = find(id);
+    if (!definition || definition->type != SettingType::Enum) return {false, "Unknown enum setting."};
+    if (std::none_of(definition->choices.begin(), definition->choices.end(),
+        [&](const auto& item) { return item.value == choice; })) return {false, "Unknown enum choice."};
+    if (id == "physics.backend" && !physics_choice_compiled(choice))
+        return {false, std::string(choice) + " is not enabled in this build."};
     return {};
 }
 bool EditorSettingsRegistry::set_dependencies(std::string_view id,std::vector<SettingDependency> dependencies,std::string* error){
@@ -329,6 +379,16 @@ bool EditorSettingsRegistry::validate(std::string* error) const {
             if (!definition) { if (error) *error = "setting layer contains unknown id"; return false; }
             if (!validate_value(*definition, storedValue, error)) return false;
         }
+    }
+    if (find("camera.dead_zone") && find("camera.soft_zone") &&
+        std::get<double>(value("camera.dead_zone")) > std::get<double>(value("camera.soft_zone"))) {
+        if (error) *error = "camera.dead_zone must not exceed camera.soft_zone";
+        return false;
+    }
+    if (find("camera.near_plane") && find("camera.far_plane") &&
+        std::get<double>(value("camera.near_plane")) >= std::get<double>(value("camera.far_plane"))) {
+        if (error) *error = "camera.near_plane must be smaller than camera.far_plane";
+        return false;
     }
     return true;
 }
@@ -436,7 +496,12 @@ bool EditorSettingsRegistry::parse_scope(SettingScope scope, std::string_view te
     }
     in >> std::ws;
     if (!in.eof()) return fail("trailing data in settings file");
-    layer(scope) = std::move(parsed);
+    EditorSettingsRegistry candidate = *this;
+    candidate.layer(scope) = std::move(parsed);
+    if (!candidate.validate(error)) return false;
+    if (layer(scope) != candidate.layer(scope)) {
+        layer(scope) = std::move(candidate.layer(scope)); ++revision_;
+    }
     return true;
 }
 
@@ -481,7 +546,12 @@ std::string EditorSettingsRegistry::serialize_profile(std::string_view profileNa
 bool EditorSettingsRegistry::parse_profile(SettingScope scope,std::string_view text,std::string* error){
     auto fail=[&](std::string m){if(error)*error=std::move(m);return false;};std::istringstream in{std::string(text)};std::string magic,name,scopeName,key;int version{};if(!(in>>magic>>version>>std::quoted(name)>>scopeName)||magic!="DVE_SETTINGS_PROFILE"||version!=1)return fail("unsupported settings profile");if(scopeName!=setting_scope_name(scope))return fail("settings profile scope mismatch");std::size_t count{};if(!(in>>key>>count)||key!="count"||count>100000U)return fail("invalid settings profile count");auto parsed=layer(scope);std::vector<std::string> orphans;
     for(std::size_t index=0;index<count;++index){std::string id,typeText;if(!(in>>std::quoted(id)>>typeText))return fail("malformed settings profile entry");const auto parsedType=parse_type(typeText);SettingValue parsedValue;if(!parsedType)return fail("unknown settings profile type");if(*parsedType==SettingType::Boolean){int v{};if(!(in>>v)||(v!=0&&v!=1))return fail("invalid profile boolean");parsedValue=v!=0;}else if(*parsedType==SettingType::Integer){std::int64_t v{};if(!(in>>v))return fail("invalid profile integer");parsedValue=v;}else if(*parsedType==SettingType::Float){double v{};if(!(in>>v))return fail("invalid profile float");parsedValue=v;}else{std::string v;if(!(in>>std::quoted(v)))return fail("invalid profile string");parsedValue=std::move(v);}const SettingDefinition* definition=find(id);if(!definition){orphans.push_back(id);continue;}if(definition->type!=*parsedType||!validate_value(*definition,parsedValue,error))return false;parsed[id]=std::move(parsedValue);}
-    in>>std::ws;if(!in.eof())return fail("trailing settings profile data");layer(scope)=std::move(parsed);orphanedSettings_=std::move(orphans);return true;
+    in>>std::ws;if(!in.eof())return fail("trailing settings profile data");
+    EditorSettingsRegistry candidate = *this;
+    candidate.layer(scope) = std::move(parsed);
+    if (!candidate.validate(error)) return false;
+    if (layer(scope) != candidate.layer(scope)) { layer(scope) = std::move(candidate.layer(scope)); ++revision_; }
+    orphanedSettings_=std::move(orphans);return true;
 }
 
 namespace {
@@ -489,43 +559,29 @@ namespace {
 // has no effect in this build. Remove an id from this list when wiring it up;
 // dve_settings_applied_tests fails if the list and the code disagree.
 constexpr std::string_view kNotYetApplied[] = {
-    "accessibility.camera_shake", "accessibility.color_vision", "accessibility.dynamic_range",
-    "accessibility.focus_indicators", "accessibility.mono_audio", "accessibility.reduced_motion",
-    "accessibility.subtitles", "audio.buffer_frames", "audio.dialogue_gain_db", "audio.effects_gain_db",
-    "audio.granular_quality", "audio.hrtf", "audio.loudness_normalization", "audio.master_gain_db",
-    "audio.music_gain_db", "audio.sample_rate", "audio.spatializer", "audio.stream_preload_ms",
-    "build.configuration", "build.deterministic_oracles", "build.headless", "build.sanitizers",
-    "build.target", "build.verify_dependencies", "camera.accessibility_disable_grain",
-    "camera.accessibility_limit_fisheye", "camera.accessibility_reduce_blur",
-    "camera.accessibility_reduce_flare", "camera.aim_damping", "camera.collision_radius",
-    "camera.collision_recovery", "camera.constant_speed_dolly", "camera.dead_zone", "camera.dof_quality",
-    "camera.film_grain_quality", "camera.horizon_lock", "camera.ignore_time_scale",
-    "camera.input_acceleration", "camera.input_smoothing", "camera.lens_effect_quality", "camera.look_ahead",
-    "camera.lut_resolution", "camera.lut_streaming", "camera.missing_lut_fallback",
-    "camera.motion_blur_quality", "camera.navigation_style", "camera.position_damping",
-    "camera.preserve_line_of_sight", "camera.render_target_outputs", "camera.sequence_scrub_rate",
-    "camera.shake_scale", "camera.show_focus_planes", "camera.soft_zone", "camera.tone_map_output",
-    "diagnostics.audio_stats", "diagnostics.camera_debug", "diagnostics.capture_repro",
-    "diagnostics.gpu_markers", "diagnostics.render_stats", "diagnostics.validation_on_save",
-    "editor.restore_workspace", "editor.telemetry_local", "editor.theme", "geometry.mode",
-    "input.controller_dead_zone", "input.gamepad_prompts", "input.raw_mouse", "input.ui_repeat_delay",
-    "input.ui_repeat_rate", "material.clear_coat", "material.foliage", "material.global_parameters",
-    "material.layer_limit", "material.subsurface", "material.validate_gpu_layout", "physics.allow_sleeping",
-    "physics.backend", "physics.continuous_collision", "physics.deterministic", "physics.fixed_timestep",
-    "physics.gravity", "physics.max_substeps", "physics.position_iterations", "physics.substeps",
-    "physics.velocity_iterations", "physics.worker_threads", "plugins.clap_host", "plugins.clap_sandbox",
+    "accessibility.color_vision", "accessibility.subtitles", "audio.buffer_frames", "audio.granular_quality",
+    "audio.hrtf", "audio.loudness_normalization", "audio.sample_rate", "audio.spatializer",
+    "audio.stream_preload_ms", "build.configuration", "build.deterministic_oracles", "build.headless",
+    "build.sanitizers", "build.target", "build.verify_dependencies", "camera.accessibility_disable_grain",
+    "camera.accessibility_limit_fisheye", "camera.accessibility_reduce_blur", "camera.accessibility_reduce_flare", "camera.constant_speed_dolly",
+    "camera.dof_quality", "camera.film_grain_quality", "camera.input_acceleration", "camera.input_smoothing",
+    "camera.lens_effect_quality", "camera.lut_resolution", "camera.lut_streaming", "camera.missing_lut_fallback",
+    "camera.motion_blur_quality", "camera.navigation_style", "camera.render_target_outputs", "camera.sequence_scrub_rate",
+    "camera.tone_map_output", "diagnostics.capture_repro", "diagnostics.gpu_markers", "editor.restore_workspace",
+    "editor.telemetry_local", "geometry.mode", "input.gamepad_prompts", "input.raw_mouse",
+    "material.clear_coat", "material.foliage", "material.global_parameters", "material.layer_limit",
+    "material.subsurface", "material.validate_gpu_layout", "plugins.clap_host", "plugins.clap_sandbox",
     "plugins.ffmpeg_import", "plugins.reload_on_change", "polygon.frustum_culling", "polygon.instancing",
     "polygon.lod_bias", "polygon.mesh_streaming", "polygon.occlusion_culling", "render.anisotropy",
     "render.ao_quality", "render.backend", "render.bloom", "render.bloom_threshold",
-    "render.contact_shadow_distance", "render.display_mode", "render.dynamic_shared_camera",
-    "render.exposure", "render.frame_limit", "render.gi_distance", "render.gi_intensity", "render.gi_mode",
-    "render.gi_quality", "render.hdr", "render.high_dpi", "render.local_players", "render.preferred_display",
-    "render.resolution_profile", "render.resolution_scale", "render.shadow_mode", "render.shadow_quality",
-    "render.shadow_softness", "render.shadow_strength", "render.spectator_window",
-    "render.split_screen_layout", "render.texture_budget_mb", "render.texture_filter", "render.tonemap",
-    "render.translucent_layers", "scripting.hot_reload", "scripting.lua", "scripting.migration_timeout_ms",
-    "scripting.strict_errors", "voxel.async_connectivity", "voxel.brick_budget", "voxel.debris_limit",
-    "voxel.destruction_quality", "voxel.ray_step_scale",
+    "render.contact_shadow_distance", "render.display_mode", "render.dynamic_shared_camera", "render.exposure",
+    "render.gi_distance", "render.gi_intensity", "render.gi_mode", "render.gi_quality",
+    "render.hdr", "render.local_players", "render.preferred_display", "render.resolution_profile",
+    "render.resolution_scale", "render.shadow_mode", "render.shadow_quality", "render.shadow_softness",
+    "render.shadow_strength", "render.spectator_window", "render.split_screen_layout", "render.texture_budget_mb",
+    "render.texture_filter", "render.tonemap", "render.translucent_layers", "scripting.hot_reload",
+    "scripting.migration_timeout_ms", "scripting.strict_errors", "voxel.async_connectivity", "voxel.brick_budget",
+    "voxel.debris_limit", "voxel.destruction_quality", "voxel.ray_step_scale",
 };
 } // namespace
 
@@ -771,6 +827,18 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
     });
     const std::vector<std::string> physicalDependents{"camera.focal_length_mm","camera.sensor_preset","camera.gate_fit","camera.aperture","camera.focus_distance","camera.depth_of_field","camera.show_focus_planes"};
     for(const std::string& id:physicalDependents) (void)result.set_dependencies(id,{{"camera.physical_lens",true,"Enable Use Physical Lens to edit this option."}});
+    // World creation and script-host lifecycle controls apply to the next Play/Simulate.
+    for (auto& definition : result.definitions_) {
+        if (definition.id == "physics.backend" || definition.id == "physics.worker_threads" ||
+            definition.id == "physics.substeps" || definition.id == "physics.velocity_iterations" ||
+            definition.id == "physics.position_iterations" || definition.id == "physics.deterministic" ||
+            definition.id == "physics.continuous_collision" || definition.id == "physics.allow_sleeping" ||
+            definition.id == "scripting.lua") {
+            definition.applyPolicy = SettingApplyPolicy::OnApply;
+            definition.description += " Takes effect when a new Play or Simulate session starts.";
+        }
+        if (definition.id == "render.high_dpi") definition.applyPolicy = SettingApplyPolicy::RestartRequired;
+    }
     for (SettingDefinition& definition : result.definitions_)
         if (std::find(std::begin(kNotYetApplied), std::end(kNotYetApplied), definition.id) != std::end(kNotYetApplied))
             definition.applied = false;
@@ -827,7 +895,9 @@ std::string EditorSettingsPanelState::value_label(const SettingDefinition& defin
                 if (choice.value == *text) return choice.label;
         // Enum settings show their readable label ("Omni (all channels)") rather than the key.
         for (const SettingChoice& choice : definition.choices)
-            if (choice.value == *text && !choice.label.empty()) return choice.label;
+            if (choice.value == *text && !choice.label.empty())
+                return choice.label + (definition.id == "physics.backend" && !physics_choice_compiled(*text)
+                    ? " (unavailable in this build)" : "");
     }
     return setting_value_to_string(value);
 }
@@ -839,6 +909,12 @@ SettingValue EditorSettingsPanelState::displayed_value(const EditorSettingsRegis
 bool EditorSettingsPanelState::stage(const EditorSettingsRegistry& registry, std::string_view id,
                                      SettingValue value, std::string* error) {
     EditorSettingsRegistry copy = registry;
+    if (const auto* definition = registry.find(id); definition && definition->type == SettingType::Enum) {
+        if (const auto* choice = std::get_if<std::string>(&value)) {
+            const auto availability = registry.choice_availability(id, *choice);
+            if (!availability.available) { if (error) *error = availability.explanation; return false; }
+        }
+    }
     if (!copy.set(scope, id, value, error)) return false;
     stagedClears.erase(std::string(id));
     stagedValues[std::string(id)] = std::move(value);
@@ -876,8 +952,13 @@ bool EditorSettingsPanelState::cycle(const EditorSettingsRegistry& registry, std
         std::ptrdiff_t index = it == definition->choices.end() ? 0 : std::distance(definition->choices.begin(), it);
         const std::ptrdiff_t count = static_cast<std::ptrdiff_t>(definition->choices.size());
         if (count == 0) { if (error) *error = "setting has no choices"; return false; }
-        index = (index + (direction >= 0 ? 1 : -1) + count) % count;
-        return stage(registry, id, definition->choices[static_cast<std::size_t>(index)].value, error);
+        for (std::ptrdiff_t attempts = 0; attempts < count; ++attempts) {
+            index = (index + (direction >= 0 ? 1 : -1) + count) % count;
+            const auto& choice = definition->choices[static_cast<std::size_t>(index)].value;
+            if (registry.choice_availability(id, choice).available) return stage(registry, id, choice, error);
+        }
+        if (error) *error = "No choices are supported in this build.";
+        return false;
     }
     const double step = definition->step.value_or(1.0) * (direction >= 0 ? 1.0 : -1.0);
     if (definition->type == SettingType::Integer) {
@@ -1002,6 +1083,16 @@ bool EditorSettingsPanelState::apply(EditorSettingsRegistry& registry, std::stri
     EditorSettingsRegistry candidate = registry;
     for (const std::string& id : stagedClears) (void)candidate.clear(scope, id);
     for (const auto& [id, value] : stagedValues) if (!candidate.set(scope, id, value, error)) return false;
+    if (!candidate.validate(error)) return false;
+    std::size_t unsupported{}, restart{};
+    const auto countPending = [&](std::string_view id) {
+        if (const auto* definition = candidate.find(id)) {
+            if (!definition->applied) ++unsupported;
+            else if (definition->applyPolicy == SettingApplyPolicy::RestartRequired) ++restart;
+        }
+    };
+    for (const auto& [id, value] : stagedValues) { (void)value; countPending(id); }
+    for (const auto& id : stagedClears) countPending(id);
     registry = std::move(candidate);
     valueEditing = false;
     valueEditId.clear();
@@ -1009,7 +1100,9 @@ bool EditorSettingsPanelState::apply(EditorSettingsRegistry& registry, std::stri
     stagedValues.clear();
     stagedClears.clear();
     dirty = false;
-    status = "Settings applied";
+    status = "Settings saved";
+    if (unsupported) status += "; " + std::to_string(unsupported) + " option(s) have no runtime consumer";
+    if (restart) status += "; " + std::to_string(restart) + " option(s) require restart";
     return true;
 }
 

@@ -103,6 +103,7 @@ public:
     [[nodiscard]] bool differs_from_default(std::string_view id) const;
     [[nodiscard]] SettingAvailability availability(std::string_view id,
                                                    std::uint32_t capabilities = SettingCapabilityAll) const;
+    [[nodiscard]] SettingAvailability choice_availability(std::string_view id, std::string_view choice) const;
     [[nodiscard]] bool set_dependencies(std::string_view id, std::vector<SettingDependency> dependencies,
                                         std::string* error = nullptr);
     [[nodiscard]] std::vector<SettingSearchResult> changed(
@@ -125,6 +126,8 @@ public:
     [[nodiscard]] const std::vector<std::string>& orphaned_settings() const noexcept { return orphanedSettings_; }
 
     [[nodiscard]] const std::vector<SettingDefinition>& definitions() const noexcept { return definitions_; }
+    // Changes to layers (including loads, resets and profile imports) wake consumers once.
+    [[nodiscard]] std::uint64_t revision() const noexcept { return revision_; }
     [[nodiscard]] static EditorSettingsRegistry make_default();
 
 private:
@@ -138,6 +141,7 @@ private:
     std::map<std::string, SettingValue, std::less<>> projectValues_;
     std::map<std::string, SettingValue, std::less<>> sessionValues_;
     std::vector<std::string> orphanedSettings_;
+    std::uint64_t revision_{};
 };
 
 [[nodiscard]] std::string setting_value_to_string(const SettingValue& value);

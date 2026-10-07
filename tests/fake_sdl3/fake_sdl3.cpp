@@ -1,4 +1,6 @@
 #include <SDL3/SDL.h>
+
+SDL_SystemTheme SDL_GetSystemTheme() { return SDL_SYSTEM_THEME_DARK; }
 #include <SDL3/SDL_dialog.h>
 
 #include <chrono>

@@ -274,6 +274,7 @@ public:
     void step(float fixedDeltaSeconds) override;
 
     void set_gravity(Float3 acceleration) noexcept { gravity_ = acceleration; }
+    void set_allow_sleeping(bool enabled) noexcept { allowSleeping_ = enabled; }
     void set_sleep_thresholds(float linearSpeed, float angularSpeed, std::uint32_t quietSteps) noexcept;
     [[nodiscard]] RigidTransform interpolated_transform(RigidBodyHandle handle, float alpha) const;
     [[nodiscard]] RigidBodyCounts body_counts() const noexcept;
@@ -310,6 +311,7 @@ private:
     float sleepLinearSpeed_{0.02F};
     float sleepAngularSpeed_{0.02F};
     std::uint32_t sleepQuietSteps_{30U};
+    bool allowSleeping_{true};
 };
 
 } // namespace dve

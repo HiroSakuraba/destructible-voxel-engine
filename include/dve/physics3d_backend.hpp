@@ -26,6 +26,7 @@ struct Physics3DWorldConfig {
     bool deterministicSimulation{true};
     bool allowSleeping{true};
     bool continuousCollision{true};
+    Float3 gravity{0.0F, -9.81F, 0.0F};
 };
 
 struct Physics3DBackendAvailability {
@@ -36,6 +37,7 @@ struct Physics3DBackendAvailability {
 
 [[nodiscard]] Physics3DBackendAvailability physics3d_backend_availability() noexcept;
 [[nodiscard]] bool physics3d_backend_available(Physics3DBackend backend) noexcept;
+[[nodiscard]] bool configure_physics3d_gravity(IRigidBodyWorld& world, Float3 gravity) noexcept;
 [[nodiscard]] std::string_view physics3d_backend_label(Physics3DBackend backend) noexcept;
 
 // Automatic preserves the established preference order: Jolt, then Box3D, then the

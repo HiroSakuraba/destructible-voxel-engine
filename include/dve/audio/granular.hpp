@@ -36,6 +36,10 @@ namespace dve::audio {
 // realtime default, High permits the most expensive realtime path, and
 // Offline is for non-realtime renders.
 enum class FilterQuality : std::uint8_t { Eco, Standard, High, Offline };
+// Editor CPU policy is independent of authored instrument parameters. Inherit preserves
+// the legacy preset path. Changes affect new grains; already sounding grains finish normally.
+enum class GranularRuntimeQuality : std::uint8_t { Inherit, Low, Medium, High, Ultra };
+enum class GrainInterpolation : std::uint8_t { Linear, Cubic, Sinc8 };
 
 // Per-grain amplitude window. All four shapes are normalized to peak 1 with
 // endpoints at ~0 (no clicks when a grain expires):
@@ -137,6 +141,7 @@ struct GranularSource {
 // One live grain. Source position is in source frames; pitchIncrement is
 // source frames advanced per output sample (signed: negative = reverse).
 struct Grain {
+    GrainInterpolation interpolation{GrainInterpolation::Cubic};
     bool active{false};
     float sourcePositionFrames{0.0F};
     float durationFrames{1.0F};
@@ -225,6 +230,9 @@ public:
                                    const GranularParameters& params,
                                    float positionMod01,
                                    float frequencyHertz) noexcept;
+    std::pair<float, float> render(const GranularSource& source, const GranularParameters& params,
+                                  float positionMod01, float frequencyHertz,
+                                  GranularRuntimeQuality quality) noexcept;
 
     [[nodiscard]] std::uint32_t active_grain_count() const noexcept;
     [[nodiscard]] const GranularCounters& counters() const noexcept { return counters_; }
@@ -241,12 +249,14 @@ public:
     // Catmull-Rom cubic interpolation over the source; position is in frames
     // and is clamped to the valid range (same pattern as sampler_cubic_sample).
     static float cubic_sample(const float* source, std::uint32_t frameCount, float position) noexcept;
+    static float interpolated_sample(const float* source, std::uint32_t frameCount, float position,
+                                     GrainInterpolation interpolation, float increment = 1.0F) noexcept;
 
 private:
     std::uint32_t random_u32() noexcept;
     float random01() noexcept;
     void spawn_grain(const GranularSource& source, const GranularEffectiveParams& effective,
-                     float noteRatio) noexcept;
+                     float noteRatio, GrainInterpolation interpolation) noexcept;
 
     std::array<Grain, kMaxGrains> grains_{};
     GranularCounters counters_{};

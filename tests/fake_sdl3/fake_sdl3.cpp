@@ -37,6 +37,12 @@ struct SDL_Window {
 
 namespace {
 std::string errorText;
+std::optional<std::string> audioBufferHint;
+std::string audioBufferHintAtOpen;
+int playbackRate = 48000;
+int playbackFrames = 256;
+bool failPlaybackOpen{};
+bool failPlaybackQuery{};
 std::string clipboard;
 std::deque<SDL_Event> events;
 SDL_Keymod modState{};
@@ -142,6 +148,8 @@ void SDL_ShowSaveFileDialog(SDL_DialogFileCallback callback, void* userdata, SDL
 void SDL_ShowOpenFolderDialog(SDL_DialogFileCallback callback, void* userdata, SDL_Window*, const char*, bool) { show_dialog(callback, userdata); }
 
 void SDLTest_Reset() {
+    audioBufferHint.reset(); audioBufferHintAtOpen.clear();
+    playbackRate = 48000; playbackFrames = 256; failPlaybackOpen = failPlaybackQuery = false;
     manualTicks.reset(); vsyncSupported = true; renderVsync = renderVsyncCalls = 0;
     errorText.clear(); clipboard.clear(); events.clear(); modState = 0;
     nextLogicalW = 1280; nextLogicalH = 800; nextPixelW = 1280; nextPixelH = 800; nextScale = 1.0F;
@@ -184,6 +192,10 @@ void SDL_DestroySurface(SDL_Surface* surface) { delete surface; }
 
 SDL_AudioStream* SDL_OpenAudioDeviceStream(SDL_AudioDeviceID device, const SDL_AudioSpec* spec,
                                            SDL_AudioStreamCallback callback, void* userdata) {
+    if (device == SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK) {
+        audioBufferHintAtOpen = audioBufferHint.value_or("");
+        if (failPlaybackOpen) { errorText = "test device unavailable"; return nullptr; }
+    }
     if (!spec || spec->format != SDL_AUDIO_F32 || (spec->channels != 1 && spec->channels != 2) || spec->freq <= 0) {
         errorText = "invalid audio spec"; return nullptr;
     }
@@ -239,13 +251,34 @@ const char* SDL_GetAudioDeviceName(SDL_AudioDeviceID device) {
     return "Fake audio device";
 }
 bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID device, SDL_AudioSpec* spec, int* sampleFrames) {
+    if (device == 201U && failPlaybackQuery) return false;
     if (!spec) return false;
     spec->format = SDL_AUDIO_F32;
     spec->channels = device == 102U ? 1 : 2;
-    spec->freq = device == 102U ? 44100 : 48000;
-    if (sampleFrames) *sampleFrames = 256;
+    spec->freq = device == 102U ? 44100 : (device == 201U ? playbackRate : 48000);
+    if (sampleFrames) *sampleFrames = device == 201U ? playbackFrames : 256;
     return true;
 }
+SDL_AudioDeviceID SDL_GetAudioStreamDevice(SDL_AudioStream* stream) {
+    return stream ? (stream->recording ? 101U : 201U) : 0U;
+}
+const char* SDL_GetHint(const char* name) {
+    return name && std::strcmp(name, SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) == 0 && audioBufferHint
+        ? audioBufferHint->c_str() : nullptr;
+}
+bool SDL_SetHint(const char* name, const char* value) {
+    if (!name || !value || std::strcmp(name, SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) != 0) return false;
+    audioBufferHint = value; return true;
+}
+bool SDL_ResetHint(const char* name) {
+    if (!name || std::strcmp(name, SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) != 0) return false;
+    audioBufferHint.reset(); return true;
+}
+void SDLTest_SetAudioDevice(int rate, int frames, bool failOpen, bool failQuery) {
+    playbackRate = rate; playbackFrames = frames;
+    failPlaybackOpen = failOpen; failPlaybackQuery = failQuery;
+}
+const char* SDLTest_AudioBufferHintAtOpen() { return audioBufferHintAtOpen.c_str(); }
 void SDL_DestroyAudioStream(SDL_AudioStream* stream) {
     if (activePlaybackStream == stream) activePlaybackStream = nullptr;
     if (activeRecordingStream == stream) activeRecordingStream = nullptr;

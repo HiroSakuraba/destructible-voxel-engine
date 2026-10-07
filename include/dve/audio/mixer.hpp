@@ -163,9 +163,14 @@ public:
     // real-time callback only drains a fixed-capacity ring. One active playback voice is allowed
     // per registered stream to keep rewind and loop ownership deterministic.
     StreamSampleId register_streamed_sample(const std::filesystem::path& path,
-                                            std::size_t ringCapacityFrames = 16384,
+                                            std::size_t ringCapacityFrames = 0,
                                             std::string* error = nullptr);
     [[nodiscard]] std::string_view stream_name(StreamSampleId sample) const noexcept;
+    // Control thread only. Applied when a stream is registered; existing rings are never resized.
+    // Zero milliseconds still reserves the worker's minimum 1024-frame ring.
+    void set_stream_preload_milliseconds(std::uint32_t milliseconds) noexcept;
+    [[nodiscard]] std::size_t stream_preload_frames() const noexcept;
+    [[nodiscard]] std::size_t stream_capacity_frames(StreamSampleId sample) const noexcept;
 
     AudioSourceHandle play_sample(const PlaySampleDesc& desc) noexcept;
     AudioSourceHandle play_stream(const PlayStreamDesc& desc) noexcept;

@@ -17,8 +17,41 @@ int main() {
     try {
         SDLTest_Reset();
         dve::audio::AudioMixer mixer;
-        if (!mixer.synthesizer().note_on(60, 0.9F)) throw std::runtime_error("could not queue test note");
         std::string error;
+        // A driver can ignore the request. Report the physical format and preserve
+        // the SDL hint that belonged to the host before this device was opened.
+        (void)SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "2048");
+        SDLTest_SetAudioDevice(44100, 512, false, false);
+        {
+            dve::audio::SdlSynthAudioDevice requested(mixer, {128}, &error);
+            const auto status = requested.status();
+            if (!requested.valid() || !status.deviceFormatKnown || status.engineSampleRate != 48000 ||
+                status.deviceSampleRate != 44100 || status.requestedBufferFrames != 128 ||
+                status.deviceBufferFrames != 512 || !status.bufferHintAccepted ||
+                std::string(SDLTest_AudioBufferHintAtOpen()) != "128" ||
+                std::string(SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES)) != "2048")
+                throw std::runtime_error("device request/actual format or hint restoration failed");
+            SDLTest_RequestAudio(17); // partial final stereo frame must not loop or overrun
+            SDLTest_RequestAudio(65560); // exceeds the fixed callback scratch capacity
+        }
+        SDLTest_SetAudioDevice(44100, 512, true, false);
+        {
+            dve::audio::SdlSynthAudioDevice unavailable(mixer, {64}, &error);
+            if (unavailable.valid() || error.empty() ||
+                std::string(SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES)) != "2048")
+                throw std::runtime_error("failed device open lost previous buffer hint");
+        }
+        (void)SDL_ResetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES);
+        SDLTest_SetAudioDevice(44100, 512, false, true);
+        {
+            dve::audio::SdlSynthAudioDevice unknown(mixer, {64}, &error);
+            if (!unknown.valid() || unknown.status().deviceFormatKnown ||
+                unknown.status().deviceSampleRate != 0 || unknown.status().deviceBufferFrames != 0 ||
+                SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) != nullptr)
+                throw std::runtime_error("unavailable format query reported invented hardware values");
+        }
+        SDLTest_SetAudioDevice(48000, 256, false, false);
+        if (!mixer.synthesizer().note_on(60, 0.9F)) throw std::runtime_error("could not queue test note");
         dve::audio::SdlSynthAudioDevice device(mixer, &error);
         if (!device.valid()) throw std::runtime_error(error);
         SDLTest_RequestAudio(16384);

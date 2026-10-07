@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -285,6 +286,8 @@ public:
     [[nodiscard]] const EditorMaterialLibrary& materials() const noexcept { return materials_; }
     [[nodiscard]] EditorPlaySession& play_session() noexcept { return playSession_; }
     [[nodiscard]] const EditorPlaySession& play_session() const noexcept { return playSession_; }
+    void set_gamepad_axes(std::array<float, 2> move, std::array<float, 2> look);
+    void clear_navigation_input();
     [[nodiscard]] bool play_camera_possessed() const noexcept { return playCameraPossessed_; }
     [[nodiscard]] GaborVolumeRenderSettings gabor_render_settings() const noexcept;
     [[nodiscard]] VoxelMaterialPolicyConfig voxel_material_policy_config() const noexcept;
@@ -299,6 +302,8 @@ public:
     [[nodiscard]] camera::CameraRigMode camera_mode() const noexcept { return cameraMode_; }
     [[nodiscard]] const std::array<EditorCameraBookmark, 10>& camera_bookmarks() const noexcept { return cameraBookmarks_; }
     [[nodiscard]] const camera::CameraDirector& camera_director() const noexcept { return cameraDirector_; }
+    void set_system_theme_light(bool light) noexcept { systemThemeLight_ = light; }
+    [[nodiscard]] bool system_theme_light() const noexcept { return systemThemeLight_; }
     [[nodiscard]] camera::CameraDirector& camera_director() noexcept { return cameraDirector_; }
     [[nodiscard]] std::optional<camera::CameraRigId> selected_camera_rig() const noexcept { return selectedCameraRig_; }
     [[nodiscard]] const EditorSettingsPanelState& settings_panel() const noexcept { return settingsPanel_; }
@@ -397,6 +402,7 @@ public:
     [[nodiscard]] std::vector<const EditorAssetRecord*> asset_browser_rows() const;
     [[nodiscard]] audio::AudioMixer& audio_mixer() noexcept { return audioMixer_; }
     [[nodiscard]] const audio::AudioMixer& audio_mixer() const noexcept { return audioMixer_; }
+    [[nodiscard]] bool audio_settings_pending() const noexcept { return audioSettingsPending_; }
     [[nodiscard]] audio::Synthesizer& synthesizer() noexcept { return audioMixer_.synthesizer(); }
     [[nodiscard]] const audio::Synthesizer& synthesizer() const noexcept { return audioMixer_.synthesizer(); }
     [[nodiscard]] EditorSynthPanel& synth_panel() noexcept { return synthPanel_; }
@@ -553,6 +559,7 @@ public:
     void close_settings(bool applyChanges);
     void refresh_menu_state() noexcept;
     void apply_settings_to_runtime() noexcept;
+    [[nodiscard]] bool apply_audio_settings_to_runtime() noexcept;
     [[nodiscard]] CommandResult nudge_selection(Float3 worldDelta);
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
     [[nodiscard]] CommandResult set_primary_rotation_euler_degrees(Float3 degrees);
@@ -650,6 +657,20 @@ private:
     EditorCamera camera_;
     camera::CameraRigMode cameraMode_{camera::CameraRigMode::Orbit};
     camera::CameraDirector cameraDirector_{};
+    struct CameraTargetHistory {
+        Float3 position{};
+        Float3 velocity{};
+        std::uint64_t generation{};
+    };
+    struct CameraRigSettingsBaseline {
+        camera::CameraFramingSettings framing;
+        camera::CameraCollisionSettings collision;
+        camera::CameraFramingSettings appliedFraming;
+        camera::CameraCollisionSettings appliedCollision;
+    };
+    std::map<camera::CameraRigId, CameraRigSettingsBaseline> cameraRigSettingsBaselines_;
+    std::map<camera::CameraTargetId, CameraTargetHistory> cameraTargetHistory_;
+    std::uint64_t cameraTargetGeneration_{};
     std::optional<camera::CameraRigId> selectedCameraRig_{};
     camera::CameraRigId nextCameraRigId_{1};
     std::array<EditorCameraBookmark, 10> cameraBookmarks_{};
@@ -735,6 +756,11 @@ private:
     BottomPanelTab bottomTab_{BottomPanelTab::Console};
     std::string hierarchyFilter_;
     audio::AudioMixer audioMixer_{};
+    std::uint64_t appliedSettingsRevision_{};
+    bool systemThemeLight_{};
+    bool audioSettingsPending_{};
+    std::array<float, 2> gamepadMove_{};
+    std::array<float, 2> gamepadLook_{};
     EditorSynthPanel synthPanel_{};
     EditorChiptunePanel chiptunePanel_{};
     EditorAudioPanel audioPanel_{};

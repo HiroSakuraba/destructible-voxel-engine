@@ -1,4 +1,5 @@
 #include "dve/editor_native.hpp"
+#include "dve/editor_runtime_settings.hpp"
 #include "dve/editor_midi.hpp"
 #include "dve/editor_prefab.hpp"
 #include "dve/editor_ui_zoom.hpp"
@@ -200,7 +201,8 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
         set_status("A play-in-editor session is already active", true);
         return false;
     }
-    EditorPlaySessionConfig config;
+    EditorPlaySessionConfig config = play_session_settings(workspace_.settings());
+    cameraTargetHistory_.clear();
     config.projectRoot = projectRoot_;
     const std::filesystem::path conventionalScript = projectRoot_ / "scripts" / "main.lua";
     if (std::filesystem::exists(conventionalScript)) config.startupScript = conventionalScript;
@@ -253,6 +255,7 @@ bool NativeEditorController::stop_play_session(bool acceptChanges) {
     prePlayEditorCamera_.reset();
     possessedPlayCamera_.reset();
     playCameraPossessed_ = false;
+    cameraTargetHistory_.clear();
     workspace_.prune_selection();
     recompute_layout();
     refresh_menu_state();
@@ -301,8 +304,25 @@ void NativeEditorController::refresh_play_input_axes() {
     };
     const float moveX = (active("move_right") ? 1.0F : 0.0F) - (active("move_left") ? 1.0F : 0.0F);
     const float moveY = (active("move_forward") ? 1.0F : 0.0F) - (active("move_backward") ? 1.0F : 0.0F);
-    playSession_.set_axis("move_x", moveX);
-    playSession_.set_axis("move_y", moveY);
+    playSession_.set_axis("move_x", std::clamp(moveX + gamepadMove_[0], -1.0F, 1.0F));
+    playSession_.set_axis("move_y", std::clamp(moveY + gamepadMove_[1], -1.0F, 1.0F));
+    playSession_.set_axis("look_x", gamepadLook_[0]);
+    playSession_.set_axis("look_y", gamepadLook_[1]);
+}
+
+void NativeEditorController::set_gamepad_axes(std::array<float, 2> move, std::array<float, 2> look) {
+    gamepadMove_ = move;
+    gamepadLook_ = look;
+    refresh_play_input_axes();
+}
+
+void NativeEditorController::clear_navigation_input() {
+    heldShortcutGestures_.clear();
+    activePointerCommand_.clear();
+    playSession_.clear_input();
+    gamepadMove_ = {};
+    gamepadLook_ = {};
+    spriteLevelInput_ = {};
 }
 
 void NativeEditorController::configure_ai_assistant(std::filesystem::path projectRoot) {
@@ -1246,7 +1266,9 @@ std::vector<GaborVolumeFramePlan> NativeEditorController::gabor_frame_plans(floa
 }
 
 std::uint32_t NativeEditorController::settings_capabilities() const noexcept {
-    std::uint32_t result = SettingCapabilityEditor | SettingCapabilityAudio | SettingCapabilityVulkan;
+    // The native canvas has no active DVE Vulkan device. Compiled offscreen RHI
+    // support alone must not advertise a usable Vulkan viewport owner.
+    std::uint32_t result = SettingCapabilityEditor | SettingCapabilityAudio;
 #if defined(DVE_GEOMETRY_MODE_VOXEL) || defined(DVE_GEOMETRY_MODE_HYBRID)
     result |= SettingCapabilityVoxel;
 #endif
@@ -1451,11 +1473,16 @@ camera::CameraRigId NativeEditorController::create_camera_rig_from_view(std::str
                                                static_cast<float>(std::max(1, layout_.viewport.height)));
     rig.lens = rig.authoredPose.lens;
     rig.postProcessWeight = 1.0F;
+    const auto authoredFraming = rig.framing;
+    const auto authoredCollision = rig.collision;
+    configure_camera_rig(rig, workspace_.settings());
     std::string error;
     if (!cameraDirector_.add_or_replace_rig(rig, &error)) {
         set_status(error, true);
         return 0;
     }
+    cameraRigSettingsBaselines_.insert_or_assign(rig.id,
+        CameraRigSettingsBaseline{authoredFraming, authoredCollision, rig.framing, rig.collision});
     selectedCameraRig_ = rig.id;
     (void)cameraDirector_.force_live(rig.id, true);
     const SettingValue presetValue = workspace_.settings().value("camera.default_cinematic_preset");
@@ -1527,8 +1554,9 @@ void NativeEditorController::close_settings(bool applyChanges) {
         }
         apply_settings_to_runtime();
         if (!save_user_settings(&error)) {
-            set_status("Settings applied; User settings save failed: " + error, true);
-        } else set_status("Settings applied");
+            set_status(settingsPanel_.status + "; User settings save failed: " + error, true);
+        } else set_status(settingsPanel_.status + (audioSettingsPending_ ? "; audio changes pending" : "") + (playSession_.active()
+            ? "; simulation configuration takes effect on the next Play session" : ""));
     } else {
         settingsPanel_.discard();
         set_status("Settings changes discarded");
@@ -1564,8 +1592,37 @@ void NativeEditorController::remember_camera_position() {
 }
 
 
+bool NativeEditorController::apply_audio_settings_to_runtime() noexcept {
+    const RuntimeSettingsReader s(workspace_.settings());
+    auto gains = audioMixer_.user_bus_gains();
+    const auto gain = [&](std::string_view id, audio::AudioBusId bus) {
+        gains[audio::audio_bus_index(bus)] = std::pow(10.0F, s.number(id) / 20.0F);
+    };
+    gain("audio.master_gain_db", audio::AudioBusId::Master);
+    gain("audio.music_gain_db", audio::AudioBusId::Music);
+    gain("audio.effects_gain_db", audio::AudioBusId::Effects);
+    gain("audio.dialogue_gain_db", audio::AudioBusId::Dialogue);
+    if (!audioMixer_.set_user_bus_gains(gains)) return false;
+    const auto range = s.get<std::string>("accessibility.dynamic_range");
+    audioMixer_.set_output_policy(s.get<bool>("accessibility.mono_audio"),
+        range == "night" ? audio::AudioDynamicRange::Night :
+        range == "medium" ? audio::AudioDynamicRange::Medium : audio::AudioDynamicRange::Full);
+    return true;
+}
+
 void NativeEditorController::apply_settings_to_runtime() noexcept {
+    std::string settingsError;
+    if (!workspace_.settings().validate(&settingsError)) {
+        appliedSettingsRevision_ = workspace_.settings().revision();
+        set_status("Settings were not activated: " + settingsError, true);
+        return;
+    }
     workspace_.synchronize_preferences_from_settings();
+    if (playSession_.active()) {
+        const auto live = play_session_settings(workspace_.settings());
+        if (!playSession_.apply_live_settings(live, &settingsError))
+            set_status("Simulation settings were not activated: " + settingsError, true);
+    }
     const auto readBool = [&](std::string_view id, bool fallback) {
         const SettingValue value = workspace_.settings().value(id);
         if (const auto* item = std::get_if<bool>(&value)) return *item;
@@ -1607,6 +1664,48 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
     camera_.farPlane = std::max(camera_.nearPlane + 0.001F, readFloat("camera.far_plane", camera_.farPlane));
     camera_.projection = readString("camera.projection", "perspective") == "orthographic"
         ? EditorProjection::Orthographic : EditorProjection::Perspective;
+    cameraDirector_.set_shake_scale(readFloat("camera.shake_scale", 1.0F) *
+                                   readFloat("accessibility.camera_shake", 1.0F));
+    cameraDirector_.set_reduced_motion(readBool("accessibility.reduced_motion", false));
+    cinematicCameraPanel_.overlays().focusPlanes = readBool("camera.show_focus_planes", false);
+    for (const auto& item : cameraDirector_.rigs()) {
+        auto* rig = cameraDirector_.find_rig(item.id);
+        if (!rig) continue;
+        const auto previousFraming = rig->framing;
+        const auto previousCollision = rig->collision;
+        auto [it, inserted] = cameraRigSettingsBaselines_.try_emplace(item.id,
+            CameraRigSettingsBaseline{rig->framing, rig->collision, rig->framing, rig->collision});
+        (void)inserted;
+        auto& baseline = it->second;
+        const auto reconcile = [](auto& current, auto& authored, const auto& applied) {
+            if (current != applied) authored = current; // preserve per-instance authoring
+            current = authored;
+        };
+        reconcile(rig->framing.positionDampingSeconds, baseline.framing.positionDampingSeconds, baseline.appliedFraming.positionDampingSeconds);
+        reconcile(rig->framing.aimDampingSeconds, baseline.framing.aimDampingSeconds, baseline.appliedFraming.aimDampingSeconds);
+        reconcile(rig->framing.lookAheadSeconds, baseline.framing.lookAheadSeconds, baseline.appliedFraming.lookAheadSeconds);
+        reconcile(rig->framing.deadZoneFraction, baseline.framing.deadZoneFraction, baseline.appliedFraming.deadZoneFraction);
+        reconcile(rig->framing.softZoneFraction, baseline.framing.softZoneFraction, baseline.appliedFraming.softZoneFraction);
+        reconcile(rig->collision.enabled, baseline.collision.enabled, baseline.appliedCollision.enabled);
+        reconcile(rig->collision.probeRadiusMeters, baseline.collision.probeRadiusMeters, baseline.appliedCollision.probeRadiusMeters);
+        reconcile(rig->collision.recoverySeconds, baseline.collision.recoverySeconds, baseline.appliedCollision.recoverySeconds);
+        reconcile(rig->collision.preserveLineOfSight, baseline.collision.preserveLineOfSight, baseline.appliedCollision.preserveLineOfSight);
+        configure_camera_rig(*rig, workspace_.settings(), false);
+        if (!rig->framing.validate(&settingsError) || !rig->collision.validate(&settingsError)) {
+            rig->framing = previousFraming;
+            rig->collision = previousCollision;
+            set_status("Camera settings were not activated for " + rig->name + ": " + settingsError, true);
+        }
+        baseline.appliedFraming = rig->framing;
+        baseline.appliedCollision = rig->collision;
+    }
+    for (auto it = cameraRigSettingsBaselines_.begin(); it != cameraRigSettingsBaselines_.end();) {
+        if (!cameraDirector_.find_rig(it->first)) it = cameraRigSettingsBaselines_.erase(it);
+        else ++it;
+    }
+    audioSettingsPending_ = !apply_audio_settings_to_runtime();
+    if (audioSettingsPending_) workspace_.log().add(EditorLogLevel::Warning,
+        "Audio settings are pending until the callback drains its command queue.");
     camera_.physicalLens.enabled = readBool("camera.physical_lens", false);
     camera_.physicalLens.focalLengthMillimeters = readFloat("camera.focal_length_mm", 35.0F);
     const std::string sensor = readString("camera.sensor_preset", "full_frame");
@@ -1634,6 +1733,7 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
     else cameraMode_ = camera::CameraRigMode::Orbit;
     recompute_layout();
     refresh_menu_state();
+    appliedSettingsRevision_ = workspace_.settings().revision();
 }
 
 void NativeEditorController::refresh_menu_state() noexcept {
@@ -2256,6 +2356,14 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
 }
 
 void NativeEditorController::update(float elapsedSeconds) {
+    if (appliedSettingsRevision_ != workspace_.settings().revision()) apply_settings_to_runtime();
+    else if (audioSettingsPending_) {
+        audioSettingsPending_ = !apply_audio_settings_to_runtime();
+        if (!audioSettingsPending_) {
+            const auto position = status_.text.find("; audio changes pending");
+            if (position != std::string::npos) status_.text.erase(position, 23);
+        }
+    }
     autosave_tick(elapsedSeconds);
     synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
     synthPanel_.sync_wavetable_section(audioMixer_.synthesizer());
@@ -2324,6 +2432,7 @@ void NativeEditorController::update(float elapsedSeconds) {
     // read, so only those are refreshed: refreshing every object each frame cost about
     // 1.4 ms at 10,000 objects. A named object that no longer exists is removed as a target,
     // so a rig stops tracking a deleted object instead of its last position.
+    ++cameraTargetGeneration_;
     for (const camera::CameraRig& rig : cameraDirector_.rigs()) {
         for (const std::optional<camera::CameraTargetId>& targetId : {rig.followTarget, rig.lookAtTarget}) {
             if (!targetId) continue;
@@ -2336,8 +2445,20 @@ void NativeEditorController::update(float elapsedSeconds) {
             target.position = object->transform.position;
             target.forward = rotate(object->transform.rotation, {0.0F, 0.0F, -1.0F});
             target.up = rotate(object->transform.rotation, {0.0F, 1.0F, 0.0F});
+            auto& history = cameraTargetHistory_[*targetId];
+            if (history.generation != cameraTargetGeneration_) {
+                history.velocity = history.generation != 0U && history.generation + 1U == cameraTargetGeneration_ && elapsedSeconds > 0.0F
+                    ? multiply(subtract(target.position, history.position), 1.0F / elapsedSeconds) : Float3{};
+                history.position = target.position;
+                history.generation = cameraTargetGeneration_;
+            }
+            target.velocity = history.velocity;
             cameraDirector_.set_target(*targetId, target);
         }
+    }
+    for (auto it = cameraTargetHistory_.begin(); it != cameraTargetHistory_.end();) {
+        if (it->second.generation != cameraTargetGeneration_) it = cameraTargetHistory_.erase(it);
+        else ++it;
     }
     if (elapsedSeconds > 0.0F && !heldShortcutGestures_.empty()) {
         const auto contexts = active_shortcut_contexts();
@@ -2367,13 +2488,19 @@ void NativeEditorController::update(float elapsedSeconds) {
             }
         }
     }
-    (void)cameraDirector_.update(std::max(0.0F, elapsedSeconds));
+    float cameraElapsed = std::max(0.0F, elapsedSeconds);
+    const auto ignoreScale = workspace_.settings().value("camera.ignore_time_scale");
+    if (playSession_.active() && !std::get<bool>(ignoreScale))
+        cameraElapsed = playSession_.paused() ? 0.0F : cameraElapsed * playSession_.config().timeScale;
+    (void)cameraDirector_.update(cameraElapsed, playSession_.camera_collision_world());
     const SettingValue lockCameraValue = workspace_.settings().value("camera.lock_viewport_to_selected");
     const bool lockCamera = std::get_if<bool>(&lockCameraValue) && std::get<bool>(lockCameraValue);
     if (lockCamera && selectedCameraRig_) {
-        if (const camera::CameraRig* rig = cameraDirector_.find_rig(*selectedCameraRig_))
-            apply_camera_pose(camera_, rig->authoredPose);
+        if (cameraDirector_.find_rig(*selectedCameraRig_))
+            apply_camera_pose(camera_, cameraDirector_.current_pose());
     }
+    if (std::get<bool>(workspace_.settings().value("camera.horizon_lock")))
+        camera_.worldUp = {0.0F, 1.0F, 0.0F};
     if (status_.secondsRemaining > 0.0F) {
         status_.secondsRemaining = std::max(0.0F, status_.secondsRemaining - std::max(0.0F, elapsedSeconds));
         if (status_.secondsRemaining == 0.0F && status_.text != "Ready") status_ = {"Ready", false, 0.0F};
@@ -4970,6 +5097,13 @@ camera_menu_dispatch_complete:
         return true;
     }
     if (actionId == "file.save") {
+        if (std::get<bool>(workspace_.settings().value("diagnostics.validation_on_save"))) {
+            std::string validationError;
+            if (!workspace_.document().validate(&validationError)) {
+                set_status("Scene validation failed: " + validationError, true);
+                return false;
+            }
+        }
         if (workspace_.document().path().empty()) {
             set_status("Save requires a scene path; use the headless project workflow or pass --scene", true);
             return false;

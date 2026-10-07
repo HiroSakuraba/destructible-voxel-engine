@@ -245,4 +245,6 @@ bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID devid, SDL_AudioSpec* spec, int*
 void SDL_DestroyAudioStream(SDL_AudioStream* stream);
 void SDLTest_RequestAudio(int additionalBytes);
 void SDLTest_PushRecordingData(const float* samples, std::size_t sampleCount);
+enum SDL_SystemTheme { SDL_SYSTEM_THEME_UNKNOWN, SDL_SYSTEM_THEME_LIGHT, SDL_SYSTEM_THEME_DARK };
+SDL_SystemTheme SDL_GetSystemTheme();
 const float* SDLTest_AudioData(std::size_t* sampleCount);

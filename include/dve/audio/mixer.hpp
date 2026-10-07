@@ -29,6 +29,7 @@ inline constexpr std::size_t kMaxPhysicalSampleVoices = 48;
 inline constexpr std::size_t kMaxAudioCaptureSinks = 8;
 
 enum class AudioBusId : std::uint8_t { Master, Music, Dialogue, Effects, Ambience, UserInterface, Reverb };
+enum class AudioDynamicRange : std::uint8_t { Full, Medium, Night };
 enum class AudioCaptureTap : std::uint8_t {
     MasterPost,
     SynthDry,
@@ -178,6 +179,12 @@ public:
     [[nodiscard]] AudioBusParameters bus_parameters(AudioBusId bus) const noexcept;
     void set_listener(const AudioListenerState& listener) noexcept;
     void set_spatializer(std::shared_ptr<const IAudioSpatializer> spatializer);
+    // One atomic publication; applied once per render block without allocations or locks.
+    void set_output_policy(bool mono, AudioDynamicRange dynamicRange) noexcept;
+    // User preferences multiply authored bus/snapshot levels; one bounded command for
+    // the entire gain group, with a 20 ms transition on the callback thread.
+    [[nodiscard]] bool set_user_bus_gains(const std::array<float, kAudioBusCount>& gains) noexcept;
+    [[nodiscard]] std::array<float, kAudioBusCount> user_bus_gains() const noexcept;
 
     // Installs one callback-safe recorder/analysis tap. Passing an empty sink disables capture.
     // The sink is invoked from render() and must obey IAudioCaptureSink's real-time contract.

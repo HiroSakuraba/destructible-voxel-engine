@@ -762,7 +762,7 @@ void ReferenceRigidBodyWorld::step(float fixedDeltaSeconds) {
             body.state.currentTransform.rotation = normalize(multiply(delta, body.state.currentTransform.rotation));
         }
 
-        if (body.desc.allowSleeping && speed(body.state.linearVelocity) <= sleepLinearSpeed_ &&
+        if (allowSleeping_ && body.desc.allowSleeping && speed(body.state.linearVelocity) <= sleepLinearSpeed_ &&
             speed(body.state.angularVelocity) <= sleepAngularSpeed_) {
             ++body.quietSteps;
             if (body.quietSteps >= sleepQuietSteps_) {

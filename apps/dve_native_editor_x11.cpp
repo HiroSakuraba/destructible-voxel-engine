@@ -29,6 +29,7 @@
 #include "dve/editor_accessibility.hpp"
 #include "dve/editor_midi.hpp"
 #include "dve/editor_native.hpp"
+#include "dve/editor_runtime_settings.hpp"
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_ui_zoom.hpp"
 
@@ -655,8 +656,14 @@ int main(int argc, char** argv) {
                 screenshotWritten = true;
             }
             if (smoke && frames >= 4) running = false;
-            if (!XPending(display)) {
-                struct timespec delay{0, 8'000'000};
+            const auto cap = std::get<std::int64_t>(controller.workspace().settings().value("render.frame_limit"));
+            const auto floor = editor_frame_floor(cap);
+            const auto interval = (!XPending(display) && cap == 0) ? std::chrono::milliseconds(8) : floor;
+            const auto sinceUpdate = std::chrono::steady_clock::now() - previous;
+            const auto remaining = interval - std::chrono::duration_cast<std::chrono::milliseconds>(sinceUpdate);
+            if (remaining.count() > 0) {
+                struct timespec delay{static_cast<time_t>(remaining.count() / 1000),
+                    static_cast<long>((remaining.count() % 1000) * 1'000'000)};
                 nanosleep(&delay, nullptr);
             }
         }

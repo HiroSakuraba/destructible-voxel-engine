@@ -656,7 +656,7 @@ struct JoltRigidBodyWorld::Impl final : public JPH::BodyActivationListener, publ
         settings.mAngularVelocity = to_jolt_vec3(desc.angularVelocity);
         settings.mAllowSleeping = desc.allowSleeping;
         settings.mApplyGyroscopicForce = true;
-        settings.mMotionQuality = desc.useContinuousCollision
+        settings.mMotionQuality = config.continuousCollision && desc.useContinuousCollision
             ? JPH::EMotionQuality::LinearCast
             : JPH::EMotionQuality::Discrete;
         settings.mOverrideMassProperties = JPH::EOverrideMassProperties::MassAndInertiaProvided;

@@ -179,6 +179,11 @@ void navigation() {
     const float directDistance = length_squared(subtract(instant.camera().position, instantStart));
     const float filteredDistance = length_squared(subtract(delayed.camera().position, delayedStart));
     require(filteredDistance > 0 && filteredDistance < directDistance * 0.05F, "camera acceleration/smoothing ineffective");
+    delayed.key_up("W", false, false, false);
+    const auto coasting = delayed.camera().position;
+    delayed.update(0.1F);
+    require(length_squared(subtract(coasting, delayed.camera().position)) > 0,
+            "filtered movement stopped abruptly when no key was held");
     delayed.clear_navigation_input();
     const auto stopped = delayed.camera().position;
     delayed.update(1);

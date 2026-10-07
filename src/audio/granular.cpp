@@ -295,9 +295,9 @@ std::pair<float, float> GranularEngine::render(const GranularSource& source,
 
 float GranularEngine::interpolated_sample(const float* source, std::uint32_t frames, float position,
                                         GrainInterpolation interpolation, float increment) noexcept {
+    if (interpolation == GrainInterpolation::Cubic) return cubic_sample(source, frames, position);
     if (!source || frames == 0U || !std::isfinite(position)) return 0.0F;
     position = std::clamp(position, 0.0F, static_cast<float>(frames - 1U));
-    if (interpolation == GrainInterpolation::Cubic) return cubic_sample(source, frames, position);
     const auto base = static_cast<std::uint32_t>(position);
     const float fraction = position - static_cast<float>(base);
     if (interpolation == GrainInterpolation::Linear)

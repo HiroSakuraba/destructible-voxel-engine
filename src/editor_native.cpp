@@ -2507,9 +2507,11 @@ void NativeEditorController::update(float elapsedSeconds) {
         else ++it;
     }
     if (navigationCameraRig_ != selectedCameraRig_) reset_camera_navigation();
-    if (elapsedSeconds > 0.0F) {
+    if (elapsedSeconds > 0.0F && (!heldShortcutGestures_.empty() || cameraNavigationFilter_.has_motion() ||
+                                 pendingCameraLook_[0] != 0.0F || pendingCameraLook_[1] != 0.0F)) {
         const auto contexts = active_shortcut_contexts();
-        const bool cameraContext = std::find(contexts.begin(), contexts.end(), ShortcutContext::Camera) != contexts.end();
+        const bool flyContext = std::find(contexts.begin(), contexts.end(), ShortcutContext::FlyNavigation) != contexts.end();
+        const bool cameraContext = flyContext || std::find(contexts.begin(), contexts.end(), ShortcutContext::Camera) != contexts.end();
         if (!cameraContext) reset_camera_navigation();
         if (cameraContext && (activePointerCommand_ == "viewport.look" || activePointerCommand_ == "viewport.orbit")) {
             const float fraction = cameraInputSmoothing_ > 0.0F
@@ -2517,10 +2519,12 @@ void NativeEditorController::update(float elapsedSeconds) {
             const float dx = pendingCameraLook_[0] * fraction, dy = pendingCameraLook_[1] * fraction;
             pendingCameraLook_[0] -= dx;
             pendingCameraLook_[1] -= dy;
+            for (auto& residual : pendingCameraLook_)
+                if (std::fabs(residual) < 1.0e-7F) residual = 0.0F;
             if (activePointerCommand_ == "viewport.look") look_camera(camera_, dx, dy, 1.0F);
             else orbit_camera(camera_, dx, dy, 1.0F);
         } else pendingCameraLook_ = {};
-        if (std::find(contexts.begin(), contexts.end(), ShortcutContext::FlyNavigation) != contexts.end()) {
+        if (flyContext) {
             Float3 movement{};
             bool boosted = false;
             for (const ShortcutGesture& gesture : heldShortcutGestures_) {

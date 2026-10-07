@@ -11,6 +11,11 @@ namespace dve::editor {
 class CameraNavigationFilter {
 public:
     void reset() noexcept { acceleration_ = {}; smoothing_ = {}; }
+    [[nodiscard]] bool has_motion() const noexcept {
+        for (std::size_t i = 0; i < 3; ++i)
+            if (std::fabs(acceleration_[i]) > 1.0e-7 || std::fabs(smoothing_[i]) > 1.0e-7) return true;
+        return false;
+    }
     Float3 integrate(Float3 targetVelocity, double seconds, double acceleration, double smoothing) noexcept {
         if (!std::isfinite(seconds) || seconds <= 0.0) return {};
         const std::array<double, 3> target{targetVelocity.x, targetVelocity.y, targetVelocity.z};

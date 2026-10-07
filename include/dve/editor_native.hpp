@@ -41,6 +41,7 @@
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
+#include "dve/editor_navigation_filter.hpp"
 #include "dve/editor_workspace.hpp"
 
 namespace dve::editor {
@@ -278,7 +279,9 @@ struct EditorAutosaveStatus {
 
 class NativeEditorController {
 public:
-    explicit NativeEditorController(EditorWorkspace workspace = EditorWorkspace{});
+    explicit NativeEditorController(EditorWorkspace workspace = EditorWorkspace{},
+                                    std::filesystem::path userSettingsPath = {},
+                                    std::filesystem::path projectSettingsPath = {});
 
     [[nodiscard]] EditorWorkspace& workspace() noexcept { return workspace_; }
     [[nodiscard]] const EditorWorkspace& workspace() const noexcept { return workspace_; }
@@ -559,6 +562,7 @@ public:
     void close_settings(bool applyChanges);
     void refresh_menu_state() noexcept;
     void apply_settings_to_runtime() noexcept;
+    void reset_camera_navigation() noexcept;
     [[nodiscard]] bool apply_audio_settings_to_runtime() noexcept;
     [[nodiscard]] CommandResult nudge_selection(Float3 worldDelta);
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
@@ -655,6 +659,11 @@ private:
     EditorText3DAuthoringSession text3dAuthoring_{};
     std::filesystem::path projectRoot_;
     EditorCamera camera_;
+    CameraNavigationFilter cameraNavigationFilter_{};
+    float cameraInputAcceleration_{};
+    float cameraInputSmoothing_{};
+    std::array<float, 2> pendingCameraLook_{}; // angular delta, consumed on update
+    std::optional<camera::CameraRigId> navigationCameraRig_{};
     camera::CameraRigMode cameraMode_{camera::CameraRigMode::Orbit};
     camera::CameraDirector cameraDirector_{};
     struct CameraTargetHistory {
@@ -710,6 +719,7 @@ private:
     bool showAdvancedMenus_{};
     std::filesystem::path menuStatePath_;
     std::filesystem::path userSettingsPath_;
+    std::filesystem::path projectSettingsPath_;
     float uiZoomWindowLimit_{2.0F};
     bool quitRequested_{};
     PendingDestructiveAction pendingDestructiveAction_{PendingDestructiveAction::Inactive};

@@ -426,10 +426,10 @@ int main(int argc, char** argv) {
             if (!loaded) throw std::runtime_error(error);
             document = std::move(*loaded);
         }
-        NativeEditorController controller{EditorWorkspace(std::move(document))};
+        NativeEditorController controller{EditorWorkspace(std::move(document)),
+            std::filesystem::current_path() / ".dve" / "user" / "editor_settings.txt",
+            projectRoot / ".dve" / "project" / "editor_settings.txt"};
         controller.configure_menu_state(std::filesystem::current_path() / ".dve" / "user" / "editor_menu_state.txt");
-        // User-scope settings (UI zoom and everything else in Settings > User) persist here.
-        controller.configure_user_settings(std::filesystem::current_path() / ".dve" / "user" / "editor_settings.txt");
         if (cliZoom) {
             // Session-scope override: applies to this run only; a hotkey or Settings > Apply
             // replaces it and persists to the User layer.

@@ -559,12 +559,12 @@ namespace {
 // has no effect in this build. Remove an id from this list when wiring it up;
 // dve_settings_applied_tests fails if the list and the code disagree.
 constexpr std::string_view kNotYetApplied[] = {
-    "accessibility.color_vision", "accessibility.subtitles", "audio.buffer_frames", "audio.granular_quality",
-    "audio.hrtf", "audio.loudness_normalization", "audio.sample_rate", "audio.spatializer",
-    "audio.stream_preload_ms", "build.configuration", "build.deterministic_oracles", "build.headless",
+    "accessibility.color_vision", "accessibility.subtitles",
+    "audio.hrtf", "audio.loudness_normalization", "audio.spatializer",
+    "build.configuration", "build.deterministic_oracles", "build.headless",
     "build.sanitizers", "build.target", "build.verify_dependencies", "camera.accessibility_disable_grain",
     "camera.accessibility_limit_fisheye", "camera.accessibility_reduce_blur", "camera.accessibility_reduce_flare", "camera.constant_speed_dolly",
-    "camera.dof_quality", "camera.film_grain_quality", "camera.input_acceleration", "camera.input_smoothing",
+    "camera.dof_quality", "camera.film_grain_quality",
     "camera.lens_effect_quality", "camera.lut_resolution", "camera.lut_streaming", "camera.missing_lut_fallback",
     "camera.motion_blur_quality", "camera.navigation_style", "camera.render_target_outputs", "camera.sequence_scrub_rate",
     "camera.tone_map_output", "diagnostics.capture_repro", "diagnostics.gpu_markers", "editor.restore_workspace",
@@ -728,11 +728,11 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         float_setting("audio.music_gain_db","Audio","Mixer","Music Gain",0.0,-80.0,12.0,0.5,"Music bus gain in decibels.",SettingCapabilityAudio),
         float_setting("audio.effects_gain_db","Audio","Mixer","Effects Gain",0.0,-80.0,12.0,0.5,"Effects bus gain in decibels.",SettingCapabilityAudio),
         float_setting("audio.dialogue_gain_db","Audio","Mixer","Dialogue Gain",0.0,-80.0,12.0,0.5,"Dialogue bus gain in decibels.",SettingCapabilityAudio),
-        integer_setting("audio.sample_rate","Audio","Device","Sample Rate",48000,8000,384000,1000,"Preferred device and project sample rate.",SettingCapabilityAudio,false,SettingApplyPolicy::RestartRequired),
-        integer_setting("audio.buffer_frames","Audio","Device","Buffer Frames",256,32,4096,32,"Requested hardware callback block size.",SettingCapabilityAudio,false,SettingApplyPolicy::RestartRequired),
+        integer_setting("audio.sample_rate","Audio","Device","Sample Rate",48000,8000,384000,1000,"Editor engine sample rate at startup. Restart required; SDL converts to the device rate, reported in the console.",SettingCapabilityAudio,false,SettingApplyPolicy::RestartRequired),
+        integer_setting("audio.buffer_frames","Audio","Device","Buffer Frames",256,32,4096,32,"SDL device buffer request at startup. Restart required; drivers may choose another size, reported in the console. X11 has no SDL playback device.",SettingCapabilityAudio,false,SettingApplyPolicy::RestartRequired),
         enum_setting("audio.spatializer","Audio","Spatial","Spatializer","native",{{"native","DVE Native"},{"steam_audio","Steam Audio"},{"none","None"}},"Spatial audio backend.",SettingCapabilityAudio),
         boolean_setting("audio.hrtf","Audio","Spatial","HRTF",true,"Use binaural head-related transfer functions.",SettingCapabilityAudio),
-        enum_setting("audio.granular_quality","Audio","Synthesis","Granular Quality","high",onOffQuality,"Maximum grain admission and interpolation quality.",SettingCapabilityAudio),
+        enum_setting("audio.granular_quality","Audio","Synthesis","Granular Quality","high",onOffQuality,"New grains: Low 16/linear, Medium 32/cubic, High 64/cubic, Ultra 64/eight-tap sinc. Sounding grains finish normally; authored instrument parameters are preserved.",SettingCapabilityAudio),
         // MIDI input (see dve/editor_midi.hpp). The port is stored by name so the choice survives
         // replugging and port renumbering; "" = Auto (first non-Through port), "none" = off.
         string_setting("midi.input_port","Audio","MIDI","MIDI Input","","MIDI input port for the synthesizer. Auto picks the first hardware port (skipping Midi Through and virtual ports); the choice is saved by name and reconnects when the device is plugged back in. Left/right cycles the ports.",SettingCapabilityAudio),
@@ -741,7 +741,7 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         string_setting("midi.output_port","Audio","MIDI","MIDI Output","","MIDI output port for the synthesizer's MIDI out (MIDI thru and arpeggiator notes). Auto keeps the previous behaviour and opens the first output port (usually Midi Through, which other applications can listen to); pick a device to send to hardware. Saved by name and reconnects when the device is plugged back in. Left/right cycles the ports.",SettingCapabilityAudio),
         enum_setting("midi.input_channel","Audio","MIDI","MIDI Channel","omni",{{"omni","Omni (all channels)"},{"1","Channel 1"},{"2","Channel 2"},{"3","Channel 3"},{"4","Channel 4"},{"5","Channel 5"},{"6","Channel 6"},{"7","Channel 7"},{"8","Channel 8"},{"9","Channel 9"},{"10","Channel 10"},{"11","Channel 11"},{"12","Channel 12"},{"13","Channel 13"},{"14","Channel 14"},{"15","Channel 15"},{"16","Channel 16"}},"Only play the synth from this MIDI channel, or Omni for every channel.",SettingCapabilityAudio),
         enum_setting("midi.drum_channel","Audio","MIDI","Channel 10 (Drum Pads)","play",{{"play","Always play"},{"ignore","Ignore"},{"follow","Follow channel filter"}},"Channel 10 carries drum pads on most controllers (e.g. Akai MPK mini pads). Always play lets the pads through whatever the channel filter is; Ignore drops them.",SettingCapabilityAudio),
-        integer_setting("audio.stream_preload_ms","Audio","Streaming","Stream Preload",250,0,10000,10,"Audio stream look-ahead in milliseconds.",SettingCapabilityAudio),
+        integer_setting("audio.stream_preload_ms","Audio","Streaming","Stream Preload",250,0,10000,10,"Worker look-ahead ring for newly opened streams, in milliseconds at the active engine rate. Existing streams keep their rings. Zero uses the safe 1024-frame minimum.",SettingCapabilityAudio,false,SettingApplyPolicy::OnApply),
         boolean_setting("audio.loudness_normalization","Audio","Output","Loudness Normalization",false,"Apply project loudness targets during export.",SettingCapabilityAudio),
 
         enum_setting("input.shortcut_profile","Input","Shortcuts","Shortcut Profile","dve",{{"dve","DVE Default"},{"unity","Unity Familiar"},{"unreal","Unreal Familiar"},{"accessible","Accessibility One-Handed"},{"custom","Blank Custom"}},"Active context-aware keyboard and mouse shortcut profile."),
@@ -790,8 +790,8 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         boolean_setting("accessibility.focus_indicators","Accessibility","Navigation","Strong Focus Indicators",true,"Draw clear keyboard/controller focus outlines."),
 
         boolean_setting("camera.horizon_lock","Camera","Accessibility","Horizon Lock",false,"Keep the camera up vector aligned to the world horizon."),
-        float_setting("camera.input_acceleration","Camera","Navigation","Input Acceleration",0.0,0.0,20.0,0.05,"Gradually accelerate continuous camera movement."),
-        float_setting("camera.input_smoothing","Camera","Navigation","Input Smoothing",0.0,0.0,2.0,0.01,"Low-pass filter camera look and movement input."),
+        float_setting("camera.input_acceleration","Camera","Navigation","Input Acceleration",0.0,0.0,20.0,0.05,"Fly movement velocity time constant in seconds (63% response). Zero is immediate; capture/focus/mode changes reset movement."),
+        float_setting("camera.input_smoothing","Camera","Navigation","Input Smoothing",0.0,0.0,2.0,0.01,"Look/orbit and fly movement low-pass time constant in seconds. Zero is immediate; capture/focus/mode changes discard residual input."),
         enum_setting("camera.split_screen_layout","Camera","Outputs","Split-Screen Layout","single",{{"single","Single View"},{"vertical","Vertical Split"},{"horizontal","Horizontal Split"},{"quad","Four Views"}},"Default runtime viewport layout."),
         boolean_setting("camera.render_target_outputs","Camera","Outputs","Render-to-Texture Cameras",true,"Allow camera viewports to publish named offscreen outputs."),
         boolean_setting("camera.temporal_reset_on_cut","Camera","Rendering","Reset Temporal History on Cuts",true,"Reset TAA and motion history after camera cuts."),

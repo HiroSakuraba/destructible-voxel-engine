@@ -242,6 +242,13 @@ int SDL_GetAudioStreamAvailable(SDL_AudioStream* stream);
 SDL_AudioDeviceID* SDL_GetAudioRecordingDevices(int* count);
 const char* SDL_GetAudioDeviceName(SDL_AudioDeviceID devid);
 bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID devid, SDL_AudioSpec* spec, int* sample_frames);
+SDL_AudioDeviceID SDL_GetAudioStreamDevice(SDL_AudioStream* stream);
+#define SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES "SDL_AUDIO_DEVICE_SAMPLE_FRAMES"
+const char* SDL_GetHint(const char* name);
+bool SDL_SetHint(const char* name, const char* value);
+bool SDL_ResetHint(const char* name);
+void SDLTest_SetAudioDevice(int rate, int frames, bool failOpen, bool failQuery);
+const char* SDLTest_AudioBufferHintAtOpen();
 void SDL_DestroyAudioStream(SDL_AudioStream* stream);
 void SDLTest_RequestAudio(int additionalBytes);
 void SDLTest_PushRecordingData(const float* samples, std::size_t sampleCount);

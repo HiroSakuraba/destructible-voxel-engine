@@ -1,14 +1,52 @@
 # Settings runtime integration progress
 
-Based on main `28d391f1b3c7b41a514dfee7dcc12a3fa360ebd1` (PR #59, parallel draw-list sort).
-
-This is the first implementation batch for the 134 settings identified as unapplied.
-It connects 43 IDs to editor/runtime consumers; 91 remain unapplied. The complete
-134-setting behavior contract is not implemented by this batch. The registry's
+PR #62 connected the first 43 of the 134 initially unapplied settings.
+The audio/navigation batch starts from main `4bd208d` (PR #60, leak checks) and
+connects six more: 49 of the original 134 now have consumers, with 85 still unapplied.
+The complete 134-setting behavior contract is not implemented by these batches. The registry's
 `applied` flag and source-reference audit indicate wiring, not full behavioral certification.
 No placeholder reads have been added to claim coverage of the remaining settings.
 
-## Behavior and application boundaries
+## Audio/navigation batch
+
+| Setting | Runtime behavior | Application boundary |
+| --- | --- | --- |
+| `audio.sample_rate` | Constructs the editor mixer and synth at the same selected 8–384 kHz rate. Both native hosts load User and Project preferences before construction; Session overrides retain precedence. SDL converts engine output to its actual device rate. | Startup/restart. Editing this setting does not tear down an active engine. |
+| `audio.buffer_frames` | Requests the SDL physical buffer size before opening playback, then restores the host's previous hint. Console reports engine/device rates and requested/actual frames; ignored hints and unknown format are reported honestly. Fixed scratch storage still handles variable callback lengths. | SDL desktop startup/restart. The X11 host has no SDL playback device. |
+| `audio.granular_quality` | Low: 16 grains/linear; Medium: 32/cubic; High: 64/cubic; Ultra: 64/eight-tap windowed sinc with cutoff reduction for faster playback. Limits are per voice oscillator. Authored presets/windows remain intact; tempo and pitch increments do not change. | Next render block for admission; each grain keeps its interpolation until it expires. Lowering quality never abruptly kills live grains, so the active count can temporarily exceed its new limit. |
+| `audio.stream_preload_ms` | Allocates new stream rings at ceil(active engine rate × milliseconds / 1000). Zero reserves the safe 1024-frame minimum. Workers fill asynchronously; callback performs no file I/O. Explicit caller capacities still take precedence. Existing underrun telemetry remains available. | Apply/update, then the next stream open. Existing rings keep their capacities and are not resized concurrently. |
+| `camera.input_acceleration` | Continuous held fly velocity follows a first-order response: the setting is its time constant in seconds (63% after one constant). Zero reaches requested speed immediately. Key-down no longer adds a separate movement step. | Live, at the next controller update. |
+| `camera.input_smoothing` | Adds a first-order fly velocity filter and spreads accumulated look/orbit angular deltas over elapsed time. Zero preserves immediate mouse response. Both velocity stages are analytically integrated, keeping travel independent of frame subdivision. | Live, at the next controller update. Capture/focus/mode/rig changes and settings dialogs reset history. |
+
+Native hosts persist Project Apply to `<project-root>/.dve/project/editor_settings.txt`;
+User Apply continues to use `.dve/user/editor_settings.txt`. Both files load before
+audio construction. Session values stay transient. Invalid files log an error and
+retain the working layer.
+
+These are editor preferences. The packaged player does not load the editor registry.
+Stream assets must still be cooked at the active engine rate; this batch does not add
+automatic recooking, hot device restart, or platform hardware latency measurements.
+SDL may ignore the requested hardware buffer. An unavailable device remains nonfatal;
+an unavailable format query is reported as unknown, never as the requested format.
+The SDL driver contract follows its official
+[buffer hint](https://wiki.libsdl.org/SDL3/SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) and
+[device format query](https://wiki.libsdl.org/SDL3/SDL_GetAudioDeviceFormat) documentation.
+
+## Audio/navigation local validation
+
+All 15 targeted CTest checks pass: new audio/navigation behavior, existing settings runtime,
+registry/reference audit, editor, Play session, shortcuts, camera system, audio runtime,
+four granular core/serialization/stereo/macro checks, SDL audio, and desktop smoke.
+The new test exercises actual persisted User/Project restart and Session precedence,
+stream ring allocation, 384 kHz rendering, each grain budget/interpolation, sinc DC
+preservation/alias attenuation, preset preservation, analytic frame subdivision,
+zero-filter behavior, and capture/focus/mode reset. SDL tests cover ignored buffer
+requests, actual format reporting, failed opens, unknown formats, hint restoration,
+and callbacks larger than scratch capacity or ending in a partial frame.
+Local SDL tests use the deterministic shim. Hardware latency and driver negotiation
+on physical devices have not been measured; platform CI supplies broader build/test coverage.
+
+## First batch behavior and application boundaries
 
 - Layer changes, scope/profile loads, resets and clears increment a registry revision.
   The controller validates and resolves changes once at its update boundary.
@@ -47,7 +85,7 @@ No placeholder reads have been added to claim coverage of the remaining settings
   High DPI is read before SDL window creation and is labeled restart-required.
 - Optional save validation executes before the transactional scene save.
 
-## Validation and limits
+## First batch local validation and limits
 
 Ten targeted CTest checks pass: settings runtime behavior, registry, reference audit,
 Play session, camera system, draw culling/sorting, desktop contract smoke, SDL host, SDL audio and audio runtime.
@@ -59,10 +97,10 @@ The build uses the deterministic SDL shim and reference physics. Actual SDL hard
 Jolt, Box3D, Lua and legacy X11 integration have not been validated in this environment.
 The full engine test suite has not been run. The packaged player does not load the editor
 settings registry, so this batch is not a claim of identical player-side behavior.
-The draft must remain open until platform integration and remaining acceptance work are
-complete; passing the source audit alone is insufficient to merge an all-settings feature.
+PR #62 subsequently passed the platform CI checks and was merged. These partial batches
+do not certify the full all-settings feature; source references alone are not behavioral tests.
 
-## Connected IDs in this batch
+## First batch connected IDs
 
 | Setting | Consumer |
 | --- | --- |
@@ -110,7 +148,7 @@ complete; passing the source audit alone is insufficient to merge an all-setting
 | `render.high_dpi` | SDL window creation (restart) |
 | `scripting.lua` | EditorPlaySession startup-script lifecycle |
 
-## Remaining 91 settings
+## Remaining 85 settings
 
 These retain the unapplied marker in the UI. Each row records the intended behavior,
 not a completed implementation. Existing engine subsystems may provide part of a row;
@@ -166,12 +204,8 @@ they still need actual owners, resource/lifecycle integration and behavioral che
 | `material.foliage` | Enable thin two-sided foliage transmission/backlighting for eligible materials. Off uses a documented ordinary two-sided diffuse fallback without erasing authored transmission inputs or changing object geometry. |
 | `material.subsurface` | Enable thickness-aware subsurface transmission where a valid thickness representation exists. Off uses the ordinary surface model. Missing thickness data needs a reported fallback, and reference/GPU models must share units and bounded energy rules. |
 | `material.validate_gpu_layout` | Validate CPU/shader material record sizes, offsets, alignment, identifiers and versioning when loading/building resources. A mismatch prevents publishing incompatible buffers and reports the field; disabling optional validation does not disable essential bounds/type checks. |
-| `audio.sample_rate` | Request the device/engine sample rate in hertz at audio-engine restart. Negotiate actual hardware support and report the actual rate; resample imported clips and synth/control timing consistently. Retain the previous working device if reopening fails. |
-| `audio.buffer_frames` | Request the hardware callback block size in frames on device restart. Accept/report the size actually negotiated, size rings safely and avoid assuming callback length is constant. The setting must visibly change latency or report a driver-fixed block size. |
 | `audio.spatializer` | Choose native spatialization, a functioning Steam Audio adapter, or no spatial processing. None uses the authored nonspatial mix. Keep source identity, gain and playback phase through safe transitions; report unavailable external backends rather than silently substituting. |
 | `audio.hrtf` | Enable binaural head-related transfer function processing for supported stereo headphone spatializers. Off uses documented pan/distance processing. Mono output and unsupported backends must show why binaural processing is inactive. |
-| `audio.granular_quality` | Select published active-grain limits and interpolation/window quality for granular synthesis. Admission remains bounded and stealing/fading avoids clicks. Presets change cost and fidelity without changing tempo, pitch or automation semantics. |
-| `audio.stream_preload_ms` | Set the target look-ahead of decoded audio in milliseconds, converted using the active sample rate. Decode/read on workers, not the callback. Zero minimizes deliberate prebuffering but still uses a safe minimal ring and clearly reports underruns. |
 | `audio.loudness_normalization` | During export/cooking, measure integrated loudness and apply the selected project target plus true-peak constraint. Off leaves the intended export gain unchanged. Add explicit target/peak controls or a documented profile; a boolean alone cannot choose a loudness target. |
 | `input.gamepad_prompts` | Select keyboard, Xbox, PlayStation or Switch glyph families for action bindings. Automatic follows the most recently active meaningful input device with hysteresis, excluding noisy idle axes. Display the real assigned binding, not a hardcoded button label. |
 | `input.raw_mouse` | Use raw relative pointer motion for captured viewport look when supported; off uses the platform's normal pointer processing. Preserve normal absolute UI pointing, escape-to-release capture and focus-loss recovery. |
@@ -186,8 +220,6 @@ they still need actual owners, resource/lifecycle integration and behavioral che
 | `build.verify_dependencies` | Verify the complete required asset dependency closure and expected content hashes before publishing a package. Detect missing, stale and mismatched cooked dependencies and report the chain. Off may skip optional hash rechecking, but cannot publish dangling required references. |
 | `accessibility.color_vision` | Adapt editor/diagnostic palettes and redundant symbols for the selected color-vision mode. Keep semantic distinctions visible without relying on hue alone. Do not globally alter authored scene colors unless an explicitly separate simulation preview is requested. |
 | `accessibility.subtitles` | Show authored dialogue subtitles and audio captions when enabled, synchronized to actual playback/seek events and readable within safe areas. Off hides caption presentation, not dialogue audio. Required subtitle/caption authoring data and controls must exist. |
-| `camera.input_acceleration` | Treat the configured seconds as movement acceleration time: zero reaches requested fly speed immediately, positive values approach it smoothly with a documented response. Apply to continuous camera movement, not repeat events or mouse position. |
-| `camera.input_smoothing` | Low-pass filter camera look/movement input with this time constant in seconds. Zero bypasses smoothing. Reset history on capture/focus/rig changes to avoid residual drift; do not double-smooth input in the platform layer. |
 | `camera.render_target_outputs` | Allow configured camera rigs to publish named offscreen color/depth outputs to materials or downstream passes. Off releases/disables that output work and supplies a defined fallback texture to consumers. Check output-name collisions and cyclic dependencies. |
 | `camera.constant_speed_dolly` | Reparameterize camera spline traversal using a cached arc-length table so equal playback time advances equal world distance. Off uses authored parameter-time traversal. Rebuild only when the path changes; preserve cue/sequence timing. |
 | `camera.sequence_scrub_rate` | Scale camera-sequence preview playback by the configured factor; one is real time. Explicitly dragged timeline position still maps exactly to its requested time. Preserve cue crossings and separate preview speed from game simulation time. |

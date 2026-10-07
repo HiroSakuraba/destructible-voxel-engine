@@ -171,7 +171,7 @@ struct ReverbNetwork {
 
 struct AudioMixer::Impl {
     explicit Impl(std::uint32_t rate)
-        : sampleRate(std::max<std::uint32_t>(8000U, rate)), synth(sampleRate),
+        : sampleRate(std::clamp<std::uint32_t>(rate, 8000U, 384000U)), synth(sampleRate),
           spatializer(std::make_shared<AnalyticSpatializer>()) {
         for (auto& bus : controlBuses) bus = {};
         controlBuses[audio_bus_index(AudioBusId::Master)].gain = 0.90F;
@@ -202,6 +202,7 @@ struct AudioMixer::Impl {
     std::size_t sampleCount{};
     std::array<std::unique_ptr<StreamAsset>, kMaxStreamedSamples> streams{};
     std::size_t streamCount{};
+    std::size_t streamPreloadFrames{16384U};
     std::array<SampleVoice, kMaxLogicalSampleVoices> voices{};
     std::array<StreamVoice, kMaxStreamVoices> streamVoices{};
     BoundedQueue<Command, kCommandCapacity> commands;
@@ -738,7 +739,8 @@ StreamSampleId AudioMixer::register_streamed_sample(const std::filesystem::path&
         if (error) *error = "streamed sample capacity exhausted";
         return {};
     }
-    auto stream = std::make_unique<CookedAudioStream>(path, ringCapacityFrames, error);
+    auto stream = std::make_unique<CookedAudioStream>(path,
+        ringCapacityFrames == 0U ? impl_->streamPreloadFrames : ringCapacityFrames, error);
     if (!stream->valid()) return {};
     const auto& metadata = stream->metadata();
     if (metadata.sampleRate != impl_->sampleRate) {
@@ -760,6 +762,17 @@ StreamSampleId AudioMixer::register_streamed_sample(const std::filesystem::path&
 std::string_view AudioMixer::stream_name(StreamSampleId sample) const noexcept {
     const StreamAsset* asset = impl_->stream_asset(sample);
     return asset ? std::string_view(asset->name) : std::string_view{};
+}
+
+void AudioMixer::set_stream_preload_milliseconds(std::uint32_t milliseconds) noexcept {
+    const auto frames = (static_cast<std::uint64_t>(impl_->sampleRate) *
+                         std::min(milliseconds, 10000U) + 999U) / 1000U;
+    impl_->streamPreloadFrames = static_cast<std::size_t>(std::max<std::uint64_t>(1024U, frames));
+}
+std::size_t AudioMixer::stream_preload_frames() const noexcept { return impl_->streamPreloadFrames; }
+std::size_t AudioMixer::stream_capacity_frames(StreamSampleId sample) const noexcept {
+    const StreamAsset* asset = impl_->stream_asset(sample);
+    return asset ? asset->stream->telemetry().capacityFrames : 0U;
 }
 
 AudioSourceHandle AudioMixer::play_sample(const PlaySampleDesc& desc) noexcept {

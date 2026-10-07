@@ -180,7 +180,7 @@ GranularEffectiveParams apply_granular_macros(const GranularParameters& params,
 
 void GranularEngine::spawn_grain(const GranularSource& source,
                                  const GranularEffectiveParams& eff,
-                                 float noteRatio) noexcept {
+                                 float noteRatio, GrainInterpolation interpolation) noexcept {
     // Find a free slot; when the pool is full steal the oldest grain (nearest
     // completion), which is the least audible disruption.
     Grain* target = nullptr;
@@ -246,6 +246,7 @@ void GranularEngine::spawn_grain(const GranularSource& source,
     }
 
     target->active = true;
+    target->interpolation = interpolation;
     target->sourcePositionFrames = startPosition;
     target->durationFrames = durationFrames;
     target->pitchIncrement = increment;
@@ -289,6 +290,40 @@ std::pair<float, float> GranularEngine::render(const GranularSource& source,
                                               const GranularParameters& params,
                                               float positionMod01,
                                               float frequencyHertz) noexcept {
+    return render(source, params, positionMod01, frequencyHertz, GranularRuntimeQuality::Inherit);
+}
+
+float GranularEngine::interpolated_sample(const float* source, std::uint32_t frames, float position,
+                                        GrainInterpolation interpolation, float increment) noexcept {
+    if (!source || frames == 0U || !std::isfinite(position)) return 0.0F;
+    position = std::clamp(position, 0.0F, static_cast<float>(frames - 1U));
+    if (interpolation == GrainInterpolation::Cubic) return cubic_sample(source, frames, position);
+    const auto base = static_cast<std::uint32_t>(position);
+    const float fraction = position - static_cast<float>(base);
+    if (interpolation == GrainInterpolation::Linear)
+        return source[base] + (source[std::min(base + 1U, frames - 1U)] - source[base]) * fraction;
+    // Eight-tap windowed sinc. Scale its cutoff for grains that read faster than
+    // source rate, reducing aliasing. Fixed storage and bounded work per sample.
+    constexpr float pi = 3.14159265358979323846F;
+    const float cutoff = 1.0F / std::max(1.0F, std::fabs(increment));
+    float sum = 0.0F, weightSum = 0.0F;
+    for (int tap = -3; tap <= 4; ++tap) {
+        const float distance = static_cast<float>(tap) - fraction;
+        const float argument = pi * distance * cutoff;
+        const float sinc = std::fabs(argument) < 1.0e-6F ? 1.0F : std::sin(argument) / argument;
+        const float weight = sinc * (0.5F + 0.5F * std::cos(pi * distance / 4.0F));
+        const auto index = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+            static_cast<std::int64_t>(base) + tap, 0, static_cast<std::int64_t>(frames) - 1));
+        sum += source[index] * weight;
+        weightSum += weight;
+    }
+    return std::fabs(weightSum) > 1.0e-6F ? sum / weightSum : source[base];
+}
+
+std::pair<float, float> GranularEngine::render(const GranularSource& source,
+                                              const GranularParameters& params,
+                                              float positionMod01, float frequencyHertz,
+                                              GranularRuntimeQuality quality) noexcept {
     if (!params.enabled) return {0.0F, 0.0F};
     // Note tracking: scale grain playback by the played note relative to the
     // source's recorded root note. Non-finite/non-positive input falls back
@@ -311,7 +346,13 @@ std::pair<float, float> GranularEngine::render(const GranularSource& source,
     // as permitted; Standard keeps it unchanged).
     const float density = std::clamp(eff.densityHz, 0.0F, 4000.0F);
     spawnPhase_ += density / static_cast<float>(sampleRate_);
-    const bool ecoThrottle = eff.granularQuality == FilterQuality::Eco;
+    const bool inherited = quality == GranularRuntimeQuality::Inherit;
+    const std::size_t admissionLimit = quality == GranularRuntimeQuality::Low ? 16U
+        : quality == GranularRuntimeQuality::Medium ? 32U
+        : inherited && eff.granularQuality == FilterQuality::Eco ? kEcoMaxActiveGrains : kMaxGrains;
+    const GrainInterpolation interpolation = quality == GranularRuntimeQuality::Low
+        ? GrainInterpolation::Linear : quality == GranularRuntimeQuality::Ultra
+        ? GrainInterpolation::Sinc8 : GrainInterpolation::Cubic;
     while (spawnPhase_ >= 1.0F) {
         spawnPhase_ -= 1.0F;
         ++counters_.requestedGrains;
@@ -320,14 +361,14 @@ std::pair<float, float> GranularEngine::render(const GranularSource& source,
             ++counters_.grainMisses;
             continue;
         }
-        if (ecoThrottle && active_grain_count() >= kEcoMaxActiveGrains) {
+        if (admissionLimit < kMaxGrains && active_grain_count() >= admissionLimit) {
             // Eco CPU scaling: refuse the admission instead of stealing or
             // growing past the cap. Counted in grainMisses so the throttle is
             // visible in the synth-level profiler.
             ++counters_.grainMisses;
             continue;
         }
-        spawn_grain(source, eff, noteRatio);
+        spawn_grain(source, eff, noteRatio, interpolation);
     }
     if (!bankUsable) return {0.0F, 0.0F};
 
@@ -346,10 +387,10 @@ std::pair<float, float> GranularEngine::render(const GranularSource& source,
         // True stereo placement: L and R read from independent source
         // positions (grain.sourceOffsetL/R, both 0 at width01 == 0).
         const float basePosition = grain.sourcePositionFrames;
-        float sampleL = cubic_sample(source.samples, source.frameCount,
-                                     basePosition + grain.sourceOffsetL);
-        float sampleR = cubic_sample(source.samples, source.frameCount,
-                                     basePosition + grain.sourceOffsetR);
+        float sampleL = interpolated_sample(source.samples, source.frameCount,
+            basePosition + grain.sourceOffsetL, grain.interpolation, grain.pitchIncrement);
+        float sampleR = interpolated_sample(source.samples, source.frameCount,
+            basePosition + grain.sourceOffsetR, grain.interpolation, grain.pitchIncrement);
         grain.sourcePositionFrames = basePosition + grain.pitchIncrement;
         // Eco CPU scaling: skip the per-grain filter stage entirely when its
         // drive is neutral. Non-Eco tiers always run it (identity today;

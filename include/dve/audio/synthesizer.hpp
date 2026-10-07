@@ -794,6 +794,8 @@ public:
                                                   std::uint32_t firstFrame,
                                                   std::span<const float> monoFrames) noexcept;
     [[nodiscard]] SynthGranularProfiler granular_profiler() const noexcept;
+    void set_granular_runtime_quality(GranularRuntimeQuality quality) noexcept;
+    [[nodiscard]] GranularRuntimeQuality granular_runtime_quality() const noexcept;
     // Test introspection: how many times the HQ wavetable was cooked (on the
     // set_preset caller's thread; should stay flat across morph walks /
     // repeated set_preset, and never advance inside render()).
@@ -878,6 +880,7 @@ private:
     struct Impl;
     Impl* impl_{};
     std::uint32_t sampleRate_{};
+    std::atomic<GranularRuntimeQuality> rtGranularQuality_{GranularRuntimeQuality::Inherit};
     SynthPreset preset_{};
     SynthPreset morphPresetB_{};
     bool hasMorphPresetB_{false};

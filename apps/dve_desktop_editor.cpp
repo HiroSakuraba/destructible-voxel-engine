@@ -68,11 +68,11 @@ int main(int argc, char** argv) {
             if (!loaded) throw std::runtime_error(loadError);
             document = std::move(*loaded);
         }
-        NativeEditorController controller{EditorWorkspace(std::move(document))};
+        // Load persisted preferences before constructing the audio engine/device.
+        NativeEditorController controller{EditorWorkspace(std::move(document)),
+            std::filesystem::current_path() / ".dve" / "user" / "editor_settings.txt",
+            projectRoot / ".dve" / "project" / "editor_settings.txt"};
         controller.configure_ai_assistant(projectRoot);
-        // User-scope settings (UI zoom and everything else in Settings > User) persist here,
-        // shared with the X11 host.
-        controller.configure_user_settings(std::filesystem::current_path() / ".dve" / "user" / "editor_settings.txt");
         if (cliZoom) {
             // Session-scope override for this run; hotkeys / Settings > Apply persist to User.
             (void)controller.workspace().settings().set(SettingScope::Session, kUiZoomSettingId,
@@ -138,7 +138,17 @@ int main(int argc, char** argv) {
         // desktops) still get a working editor, just silent. The synth keeps rendering into
         // the mixer so meters and offline features behave the same.
         std::string audioError;
-        dve::audio::SdlSynthAudioDevice audioDevice(controller.audio_mixer(), &audioError);
+        dve::audio::SdlSynthAudioDevice audioDevice(controller.audio_mixer(),
+            {RuntimeSettingsReader(controller.workspace().settings()).integer("audio.buffer_frames")}, &audioError);
+        if (audioDevice.valid()) {
+            const auto device = audioDevice.status();
+            controller.workspace().log().add(EditorLogLevel::Info,
+                "Audio engine " + std::to_string(device.engineSampleRate) + " Hz; device " +
+                (device.deviceFormatKnown ? std::to_string(device.deviceSampleRate) + " Hz, " +
+                    std::to_string(device.deviceBufferFrames) + " frames" : "format unknown") +
+                "; requested " + std::to_string(device.requestedBufferFrames) + " frames" +
+                (device.bufferHintAccepted ? "" : " (buffer hint unavailable)"));
+        }
         const std::string audioStatus = audioDevice.valid()
             ? std::string(audioDevice.backend_name())
             : std::string("unavailable (") + (audioError.empty() ? "no audio device" : audioError) + ")";

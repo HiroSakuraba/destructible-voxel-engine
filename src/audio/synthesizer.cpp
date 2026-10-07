@@ -2463,6 +2463,7 @@ struct Synthesizer::Impl {
     float sampleRate{};
     std::atomic<std::uint64_t>& currentFrame;
     RealtimePreset parameters{};
+    GranularRuntimeQuality granularRuntimeQuality{GranularRuntimeQuality::Inherit};
     // Phase 1: high-quality wavetable bank. Cooked on the UI thread (FFT) and
     // published as a CookedWavetableSet; hqWavetable_ points into the active
     // set (or at the zero table until the first cookable preset arrives).
@@ -4275,7 +4276,8 @@ struct Synthesizer::Impl {
                                             bank.sampleRate,
                                             bank.rootNote};
                 const auto granularOut =
-                    engine.render(source, parameters.granular, mod.granularPosition, frequency);
+                    engine.render(source, parameters.granular, mod.granularPosition, frequency,
+                                  granularRuntimeQuality);
                 forward_granular_counters(engine);
                 stereoLeft = granularOut.first;
                 stereoRight = granularOut.second;
@@ -7451,7 +7453,7 @@ std::vector<std::size_t> SynthPresetLibrary::find_by_tag(std::string_view tag) c
 }
 
 Synthesizer::Synthesizer(std::uint32_t sampleRate)
-    : sampleRate_(std::clamp<std::uint32_t>(sampleRate, 8000U, 192000U)), preset_(SynthPreset::make_default()) {
+    : sampleRate_(std::clamp<std::uint32_t>(sampleRate, 8000U, 384000U)), preset_(SynthPreset::make_default()) {
     impl_ = new Impl(sampleRate_, currentFrame_);
     // Wavetables are cooked on the preset-setting thread; pre-size its scratch.
     impl_->wavetableCookScratch_.resize(kHQWavetableFrames * kHQWavetableSamples);
@@ -7726,9 +7728,16 @@ bool Synthesizer::post_midi_clock(std::uint64_t sampleFrame) noexcept {
 void Synthesizer::render(std::span<float> interleavedStereo) noexcept {
     render(interleavedStereo.data(), interleavedStereo.size() / 2U);
 }
+void Synthesizer::set_granular_runtime_quality(GranularRuntimeQuality quality) noexcept {
+    rtGranularQuality_.store(quality, std::memory_order_relaxed);
+}
+GranularRuntimeQuality Synthesizer::granular_runtime_quality() const noexcept {
+    return rtGranularQuality_.load(std::memory_order_relaxed);
+}
 void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     if (output == nullptr || frameCount == 0) return;
     const DenormalGuard denormalGuard{};
+    impl_->granularRuntimeQuality = rtGranularQuality_.load(std::memory_order_relaxed);
     impl_->adopt_pending_sample_map();
     // Snapshot the audio-thread morph request (the conductor walk below also
     // writes these atomics; the drain sees a consistent snapshot).

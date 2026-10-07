@@ -11,6 +11,7 @@ struct SdlSynthAudioDevice::Impl {
     void* renderer{};
     void (*renderFunction)(void*, float*, std::size_t) noexcept{};
     std::uint32_t sampleRate{};
+    SdlAudioDeviceStatus status{};
     SDL_AudioStream* stream{};
     bool audioSubsystem{}; // this device's reference on SDL_INIT_AUDIO (SDL ref-counts it)
     std::array<float, 8192> scratch{}; // 4096 stereo frames, fixed-capacity callback storage
@@ -45,11 +46,32 @@ struct SdlSynthAudioDevice::Impl {
         spec.format = SDL_AUDIO_F32;
         spec.channels = 2;
         spec.freq = static_cast<int>(sampleRate);
+        // Hints are global: scope the request to this open and restore the previous value
+        // even on failure. The physical device may still choose a different buffer size.
+        const char* hint = SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES);
+        const bool hadHint = hint != nullptr;
+        const std::string previousHint = hadHint ? hint : "";
+        if (status.requestedBufferFrames > 0U)
+            status.bufferHintAccepted = SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
+                                                    std::to_string(status.requestedBufferFrames).c_str());
         stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, &Impl::callback, this);
+        const std::string openError = stream == nullptr ? SDL_GetError() : "";
+        if (status.requestedBufferFrames > 0U) {
+            if (hadHint) (void)SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, previousHint.c_str());
+            else (void)SDL_ResetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES);
+        }
         if (stream == nullptr) {
-            if (error) *error = SDL_GetError();
+            if (error) *error = openError;
             release_subsystem();
             return false;
+        }
+        SDL_AudioSpec physicalSpec{};
+        int frames{};
+        const SDL_AudioDeviceID device = SDL_GetAudioStreamDevice(stream);
+        status.deviceFormatKnown = device != 0U && SDL_GetAudioDeviceFormat(device, &physicalSpec, &frames);
+        if (status.deviceFormatKnown) {
+            status.deviceSampleRate = static_cast<std::uint32_t>(std::max(0, physicalSpec.freq));
+            status.deviceBufferFrames = static_cast<std::uint32_t>(std::max(0, frames));
         }
         if (!SDL_ResumeAudioStreamDevice(stream)) {
             if (error) *error = SDL_GetError();
@@ -68,9 +90,14 @@ struct SdlSynthAudioDevice::Impl {
 };
 
 SdlSynthAudioDevice::SdlSynthAudioDevice(Synthesizer& synth, std::string* error)
+    : SdlSynthAudioDevice(synth, SdlAudioDeviceOptions{}, error) {}
+
+SdlSynthAudioDevice::SdlSynthAudioDevice(Synthesizer& synth, SdlAudioDeviceOptions options, std::string* error)
     : impl_(std::make_unique<Impl>()) {
     impl_->renderer = &synth;
     impl_->sampleRate = synth.sample_rate();
+    impl_->status.engineSampleRate = impl_->sampleRate;
+    impl_->status.requestedBufferFrames = options.bufferFrames;
     impl_->renderFunction = [](void* renderer, float* output, std::size_t frames) noexcept {
         static_cast<Synthesizer*>(renderer)->render(output, frames);
     };
@@ -78,9 +105,14 @@ SdlSynthAudioDevice::SdlSynthAudioDevice(Synthesizer& synth, std::string* error)
 }
 
 SdlSynthAudioDevice::SdlSynthAudioDevice(AudioMixer& mixer, std::string* error)
+    : SdlSynthAudioDevice(mixer, SdlAudioDeviceOptions{}, error) {}
+
+SdlSynthAudioDevice::SdlSynthAudioDevice(AudioMixer& mixer, SdlAudioDeviceOptions options, std::string* error)
     : impl_(std::make_unique<Impl>()) {
     impl_->renderer = &mixer;
     impl_->sampleRate = mixer.sample_rate();
+    impl_->status.engineSampleRate = impl_->sampleRate;
+    impl_->status.requestedBufferFrames = options.bufferFrames;
     impl_->renderFunction = [](void* renderer, float* output, std::size_t frames) noexcept {
         static_cast<AudioMixer*>(renderer)->render(output, frames);
     };
@@ -95,5 +127,6 @@ SdlSynthAudioDevice::~SdlSynthAudioDevice() {
 }
 
 bool SdlSynthAudioDevice::valid() const noexcept { return impl_ && impl_->stream != nullptr; }
+SdlAudioDeviceStatus SdlSynthAudioDevice::status() const noexcept { return impl_ ? impl_->status : SdlAudioDeviceStatus{}; }
 
 } // namespace dve::audio

@@ -176,8 +176,27 @@ std::string pointer_input_name(PointerButton button) {
 
 } // namespace
 
-NativeEditorController::NativeEditorController(EditorWorkspace workspace)
-    : workspace_(std::move(workspace)), materials_(EditorMaterialLibrary::make_default()) {
+namespace {
+EditorWorkspace prepare_startup_workspace(EditorWorkspace workspace, const std::filesystem::path& userPath,
+                                          const std::filesystem::path& projectPath) {
+    const auto load = [&](SettingScope scope, const std::filesystem::path& path) {
+        if (path.empty() || !std::filesystem::exists(path)) return;
+        std::string error;
+        if (!workspace.settings().load_scope_file(scope, path, &error))
+            workspace.log().add(EditorLogLevel::Warning, setting_scope_name(scope) + " settings load: " + error);
+    };
+    load(SettingScope::User, userPath);
+    load(SettingScope::Project, projectPath);
+    return workspace;
+}
+} // namespace
+
+NativeEditorController::NativeEditorController(EditorWorkspace workspace, std::filesystem::path userSettingsPath,
+                                               std::filesystem::path projectSettingsPath)
+    : workspace_(prepare_startup_workspace(std::move(workspace), userSettingsPath, projectSettingsPath)),
+      materials_(EditorMaterialLibrary::make_default()), userSettingsPath_(std::move(userSettingsPath)),
+      projectSettingsPath_(std::move(projectSettingsPath)),
+      audioMixer_(RuntimeSettingsReader(workspace_.settings()).integer("audio.sample_rate")) {
     apply_settings_to_runtime();
     const SettingValue defaultPresetValue = workspace_.settings().value("camera.default_cinematic_preset");
     const std::string defaultPresetId = std::get_if<std::string>(&defaultPresetValue)
@@ -319,10 +338,18 @@ void NativeEditorController::set_gamepad_axes(std::array<float, 2> move, std::ar
 void NativeEditorController::clear_navigation_input() {
     heldShortcutGestures_.clear();
     activePointerCommand_.clear();
+    dragButton_ = PointerButton::NoButton;
+    reset_camera_navigation();
     playSession_.clear_input();
     gamepadMove_ = {};
     gamepadLook_ = {};
     spriteLevelInput_ = {};
+}
+
+void NativeEditorController::reset_camera_navigation() noexcept {
+    cameraNavigationFilter_.reset();
+    pendingCameraLook_ = {};
+    navigationCameraRig_ = selectedCameraRig_;
 }
 
 void NativeEditorController::configure_ai_assistant(std::filesystem::path projectRoot) {
@@ -1447,6 +1474,7 @@ std::vector<ShortcutContext> NativeEditorController::active_shortcut_contexts() 
 
 
 void NativeEditorController::set_camera_mode(camera::CameraRigMode mode) noexcept {
+    reset_camera_navigation();
     cameraMode_ = mode;
     std::string value = "orbit";
     switch (mode) {
@@ -1508,6 +1536,7 @@ bool NativeEditorController::load_camera_bookmark(std::size_t index) noexcept {
 }
 
 void NativeEditorController::open_settings(SettingScope scope, std::string category) {
+    clear_navigation_input();
     settingsPanel_.open_for(scope, std::move(category));
     close_top_level_menu();
     close_context_menu();
@@ -1553,7 +1582,11 @@ void NativeEditorController::close_settings(bool applyChanges) {
             if (snapped != *zoom) (void)workspace_.settings().set(zoomSource, kUiZoomSettingId, snapped);
         }
         apply_settings_to_runtime();
-        if (!save_user_settings(&error)) {
+        const bool projectSaved = settingsPanel_.scope != SettingScope::Project || projectSettingsPath_.empty() ||
+            workspace_.settings().save_scope_file(SettingScope::Project, projectSettingsPath_, &error);
+        if (!projectSaved) {
+            set_status(settingsPanel_.status + "; Project settings save failed: " + error, true);
+        } else if (!save_user_settings(&error)) {
             set_status(settingsPanel_.status + "; User settings save failed: " + error, true);
         } else set_status(settingsPanel_.status + (audioSettingsPending_ ? "; audio changes pending" : "") + (playSession_.active()
             ? "; simulation configuration takes effect on the next Play session" : ""));
@@ -1565,6 +1598,7 @@ void NativeEditorController::close_settings(bool applyChanges) {
 }
 
 void NativeEditorController::open_shortcut_editor() {
+    clear_navigation_input();
     shortcutPanel_ = {};
     shortcutPanel_.open = true;
     shortcutPanel_.contextFilter = ShortcutContext::Viewport;
@@ -1594,6 +1628,11 @@ void NativeEditorController::remember_camera_position() {
 
 bool NativeEditorController::apply_audio_settings_to_runtime() noexcept {
     const RuntimeSettingsReader s(workspace_.settings());
+    audioMixer_.set_stream_preload_milliseconds(s.integer("audio.stream_preload_ms"));
+    const auto quality = s.get<std::string>("audio.granular_quality");
+    synthesizer().set_granular_runtime_quality(quality == "low" ? audio::GranularRuntimeQuality::Low
+        : quality == "medium" ? audio::GranularRuntimeQuality::Medium
+        : quality == "ultra" ? audio::GranularRuntimeQuality::Ultra : audio::GranularRuntimeQuality::High);
     auto gains = audioMixer_.user_bus_gains();
     const auto gain = [&](std::string_view id, audio::AudioBusId bus) {
         gains[audio::audio_bus_index(bus)] = std::pow(10.0F, s.number(id) / 20.0F);
@@ -1644,6 +1683,11 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
         if (const auto* item = std::get_if<std::string>(&value)) return *item;
         return fallback;
     };
+    const float acceleration = readFloat("camera.input_acceleration", 0.0F);
+    const float smoothing = readFloat("camera.input_smoothing", 0.0F);
+    if (acceleration != cameraInputAcceleration_ || smoothing != cameraInputSmoothing_) reset_camera_navigation();
+    cameraInputAcceleration_ = acceleration;
+    cameraInputSmoothing_ = smoothing;
     synthPanel_.set_keyboard_key_count(keyboard_key_count());
     chiptunePanel_.set_keyboard_key_count(keyboard_key_count());
     if (midiInput_) {
@@ -1724,6 +1768,7 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
     std::string shortcutError;
     (void)workspace_.shortcuts().set_active_profile(profile, &shortcutError);
     synchronize_menu_shortcuts();
+    const auto previousMode = cameraMode_;
     const std::string mode = readString("camera.default_mode", "orbit");
     if (mode == "free") cameraMode_ = camera::CameraRigMode::FreeFly;
     else if (mode == "follow") cameraMode_ = camera::CameraRigMode::Follow;
@@ -1731,6 +1776,7 @@ void NativeEditorController::apply_settings_to_runtime() noexcept {
     else if (mode == "first_person") cameraMode_ = camera::CameraRigMode::FirstPerson;
     else if (mode == "cinematic") cameraMode_ = camera::CameraRigMode::Cinematic;
     else cameraMode_ = camera::CameraRigMode::Orbit;
+    if (previousMode != cameraMode_) reset_camera_navigation();
     recompute_layout();
     refresh_menu_state();
     appliedSettingsRevision_ = workspace_.settings().revision();
@@ -2460,8 +2506,20 @@ void NativeEditorController::update(float elapsedSeconds) {
         if (it->second.generation != cameraTargetGeneration_) it = cameraTargetHistory_.erase(it);
         else ++it;
     }
-    if (elapsedSeconds > 0.0F && !heldShortcutGestures_.empty()) {
+    if (navigationCameraRig_ != selectedCameraRig_) reset_camera_navigation();
+    if (elapsedSeconds > 0.0F) {
         const auto contexts = active_shortcut_contexts();
+        const bool cameraContext = std::find(contexts.begin(), contexts.end(), ShortcutContext::Camera) != contexts.end();
+        if (!cameraContext) reset_camera_navigation();
+        if (cameraContext && (activePointerCommand_ == "viewport.look" || activePointerCommand_ == "viewport.orbit")) {
+            const float fraction = cameraInputSmoothing_ > 0.0F
+                ? -std::expm1(-elapsedSeconds / cameraInputSmoothing_) : 1.0F;
+            const float dx = pendingCameraLook_[0] * fraction, dy = pendingCameraLook_[1] * fraction;
+            pendingCameraLook_[0] -= dx;
+            pendingCameraLook_[1] -= dy;
+            if (activePointerCommand_ == "viewport.look") look_camera(camera_, dx, dy, 1.0F);
+            else orbit_camera(camera_, dx, dy, 1.0F);
+        } else pendingCameraLook_ = {};
         if (std::find(contexts.begin(), contexts.end(), ShortcutContext::FlyNavigation) != contexts.end()) {
             Float3 movement{};
             bool boosted = false;
@@ -2477,16 +2535,20 @@ void NativeEditorController::update(float elapsedSeconds) {
                 else continue;
                 boosted = boosted || gesture.shift;
             }
-            if (length_squared(movement) > 0.0F) {
+            {
                 const SettingValue speedValue = workspace_.settings().value("camera.fly_speed");
                 const SettingValue boostValue = workspace_.settings().value("camera.boost_multiplier");
                 const float speed = std::get_if<double>(&speedValue)
                     ? static_cast<float>(std::get<double>(speedValue)) : workspace_.preferences().cameraSpeed;
                 const float boost = std::get_if<double>(&boostValue)
                     ? static_cast<float>(std::get<double>(boostValue)) : 4.0F;
-                fly_camera(camera_, normalize(movement), elapsedSeconds, speed * (boosted ? boost : 1.0F));
+                const Float3 velocity = length_squared(movement) > 0.0F
+                    ? multiply(normalize(movement), speed * (boosted ? boost : 1.0F)) : Float3{};
+                const Float3 displacement = cameraNavigationFilter_.integrate(velocity, elapsedSeconds,
+                    cameraInputAcceleration_, cameraInputSmoothing_);
+                fly_camera(camera_, displacement, 1.0F, 1.0F);
             }
-        }
+        } else cameraNavigationFilter_.reset();
     }
     float cameraElapsed = std::max(0.0F, elapsedSeconds);
     const auto ignoreScale = workspace_.settings().value("camera.ignore_time_scale");
@@ -3179,7 +3241,11 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
             ? static_cast<float>(std::get<double>(orbitValue)) : 1.0F;
         const bool invertY = std::get_if<bool>(&invertValue) && std::get<bool>(invertValue);
         const float adjustedY = static_cast<float>(deltaY) * (invertY ? -1.0F : 1.0F);
-        if (activePointerCommand_ == "viewport.look")
+        if (cameraInputSmoothing_ > 0.0F) {
+            const float scale = 0.006F * sensitivity * (activePointerCommand_ == "viewport.orbit" ? orbitScale : 1.0F);
+            pendingCameraLook_[0] += static_cast<float>(deltaX) * scale;
+            pendingCameraLook_[1] += adjustedY * scale;
+        } else if (activePointerCommand_ == "viewport.look")
             look_camera(camera_, static_cast<float>(deltaX), adjustedY, 0.006F * sensitivity);
         else
             orbit_camera(camera_, static_cast<float>(deltaX), adjustedY, 0.006F * sensitivity * orbitScale);
@@ -3206,6 +3272,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    reset_camera_navigation();
     lastPointerX_ = x;
     lastPointerY_ = y;
     pointerDownX_ = x;
@@ -4041,6 +4108,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
     if (dragButton_ == button) {
         dragButton_ = PointerButton::NoButton;
         activePointerCommand_.clear();
+        reset_camera_navigation();
     }
     update_hover(x, y);
     (void)modifiers;
@@ -6172,6 +6240,10 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         const auto existing = std::find_if(heldShortcutGestures_.begin(), heldShortcutGestures_.end(),
             [&](const ShortcutGesture& gesture) { return gesture == held; });
         if (existing == heldShortcutGestures_.end()) heldShortcutGestures_.push_back(held);
+        const auto resolution = workspace_.shortcuts().resolve(held, contexts, settings_capabilities());
+        // Held movement is integrated only by update(); an extra key-down step would
+        // bypass acceleration and make travel depend on the operating system's events.
+        if (resolution && resolution->actionId.starts_with("camera.fly_")) return;
         if (dispatch_shortcut_gesture(held)) return;
         heldShortcutGestures_.pop_back();
     }
@@ -6179,6 +6251,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
 }
 
 void NativeEditorController::focus_next(bool reverse) noexcept {
+    reset_camera_navigation();
     constexpr int count = 6;
     int value = static_cast<int>(focusRegion_);
     value = reverse ? (value + count - 1) % count : (value + 1) % count;
@@ -6186,6 +6259,7 @@ void NativeEditorController::focus_next(bool reverse) noexcept {
 }
 
 void NativeEditorController::frame_selection() noexcept {
+    reset_camera_navigation();
     EditorObjectBounds combined = selection_bounds();
     if (!combined.valid) {
         for (const auto& [id, object] : workspace_.document().objects()) {

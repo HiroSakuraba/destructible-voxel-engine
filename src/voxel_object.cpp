@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <utility>
 
 namespace dve {
@@ -48,10 +49,8 @@ VoxelObject& VoxelObject::operator=(VoxelObject&& other) noexcept {
     std::swap(revision_, temporary.revision_);
     std::swap(pools_, temporary.pools_);
     std::swap(bricks_, temporary.bricks_);
-    std::swap(derivedRevision_, temporary.derivedRevision_);
-    std::swap(brickExtentCache_, temporary.brickExtentCache_);
-    std::swap(occupiedCache_, temporary.occupiedCache_);
-    std::swap(occupiedCountCache_, temporary.occupiedCountCache_);
+    // The content changed, so the cache is stale (its revision no longer matches).
+    derivedRevision_.store(0, std::memory_order_relaxed);
     return *this;
 }
 
@@ -78,16 +77,22 @@ void VoxelObject::refresh_derived() const {
     brickExtentCache_ = {extentMinimum, extentMaximum, !bricks_.empty()};
     occupiedCache_ = {occupiedMinimum, occupiedMaximum, anyOccupied};
     occupiedCountCache_ = occupiedCount;
-    derivedRevision_ = revision_;
+    derivedRevision_.store(revision_, std::memory_order_release);
+}
+
+void VoxelObject::ensure_derived() const {
+    if (derivedRevision_.load(std::memory_order_acquire) == revision_) return;
+    std::lock_guard lock(derivedMutex_);
+    if (derivedRevision_.load(std::memory_order_relaxed) != revision_) refresh_derived();
 }
 
 VoxelObject::DerivedBounds VoxelObject::brick_extent_bounds() const {
-    if (derivedRevision_ != revision_) refresh_derived();
+    ensure_derived();
     return brickExtentCache_;
 }
 
 VoxelObject::DerivedBounds VoxelObject::occupied_bounds() const {
-    if (derivedRevision_ != revision_) refresh_derived();
+    ensure_derived();
     return occupiedCache_;
 }
 
@@ -178,7 +183,7 @@ bool VoxelObject::replace_brick(const VoxelBrickSnapshot& snapshot, std::string*
 }
 
 std::uint64_t VoxelObject::occupied_voxel_count() const {
-    if (derivedRevision_ != revision_) refresh_derived();
+    ensure_derived();
     return occupiedCountCache_;
 }
 

@@ -86,6 +86,7 @@ bool GameSettings::validate(std::string* error) const {
     if (frameRateLimit < 30 || frameRateLimit > 1000) return fail("frame-rate limit is invalid");
     if (localPlayerCount == 0U || localPlayerCount > 4U) return fail("local player count is invalid");
     if (!std::isfinite(renderScale) || renderScale < 0.25F || renderScale > 2.0F) return fail("render scale is invalid");
+    if (!std::isfinite(polygonLodBias) || polygonLodBias < -4.0F || polygonLodBias > 4.0F) return fail("polygon LOD bias is invalid");
     auto unit = [&](float value) { return std::isfinite(value) && value >= 0.0F && value <= 1.0F; };
     if (!unit(masterVolume) || !unit(effectsVolume) || !unit(musicVolume) || !unit(screenShake)) return fail("volume or screen-shake value is invalid");
     if (!std::isfinite(fieldOfViewDegrees) || fieldOfViewDegrees < 60.0F || fieldOfViewDegrees > 130.0F) return fail("field of view is invalid");
@@ -114,7 +115,8 @@ std::string GameSettings::serialize() const {
         << "\nsubtitles=" << subtitles << "\nreducedMotion=" << reducedMotion
         << "\nholdToInteract=" << holdToInteract << "\ncolorVisionMode=" << colorVisionMode
         << "\ndisplayMode=" << displayMode << "\nresolutionProfile=" << resolutionProfile
-        << "\nsplitScreenLayout=" << splitScreenLayout << "\n";
+        << "\nsplitScreenLayout=" << splitScreenLayout
+        << "\npolygon.frustum_culling=" << polygonFrustumCulling << "\npolygon.lod_bias=" << polygonLodBias << "\n";
     return out.str();
 }
 std::optional<GameSettings> GameSettings::parse(std::string_view text, std::string* error) {
@@ -138,7 +140,9 @@ std::optional<GameSettings> GameSettings::parse(std::string_view text, std::stri
         !boolean("fullscreen", result.fullscreen) || !boolean("highDpi", result.highDpi) ||
         !boolean("spectatorWindow", result.spectatorWindow) || !boolean("verticalSync", result.verticalSync) ||
         !boolean("invertY", result.invertY) || !boolean("subtitles", result.subtitles) ||
-        !boolean("reducedMotion", result.reducedMotion) || !boolean("holdToInteract", result.holdToInteract)) return fail("invalid game-settings value");
+        !boolean("reducedMotion", result.reducedMotion) || !boolean("holdToInteract", result.holdToInteract) ||
+        !boolean("polygon.frustum_culling", result.polygonFrustumCulling) ||
+        !number("polygon.lod_bias", result.polygonLodBias)) return fail("invalid game-settings value");
     if (const auto it = values.find("colorVisionMode"); it != values.end()) result.colorVisionMode = it->second;
     if (const auto it = values.find("displayMode"); it != values.end()) result.displayMode = it->second;
     else result.displayMode = result.fullscreen ? "borderless" : "windowed";

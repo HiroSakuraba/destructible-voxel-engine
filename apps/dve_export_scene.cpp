@@ -13,9 +13,11 @@
 #include "dve/editor_document.hpp"
 #include "dve/editor_materials.hpp"
 #include "dve/editor_scene_export.hpp"
+#include "dve/editor_runtime_settings.hpp"
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -26,7 +28,7 @@ int usage(const char* message = nullptr) {
     if (message) std::cerr << "dve_export_scene: " << message << '\n';
     std::cerr << "usage: dve_export_scene <scene.dvescene> <out.dvoxscene.json> "
                  "[--materials <file.dvematerials>] [--objects-dir <dir>] [--name <name>] "
-                 "[--project-root <dir>] [--gabor-opacity <0..1>] [--strict] [--quiet]\n";
+                 "[--project-root <dir>] [--game-settings-output <file>] [--gabor-opacity <0..1>] [--strict] [--quiet]\n";
     return 2;
 }
 
@@ -36,6 +38,7 @@ int main(int argc, char** argv) {
     std::filesystem::path input;
     std::filesystem::path output;
     std::filesystem::path materialsPath;
+    std::filesystem::path gameSettingsOutput;
     dve::editor::EditorSceneExportOptions options;
     bool quiet = false;
     for (int i = 1; i < argc; ++i) {
@@ -64,6 +67,10 @@ int main(int argc, char** argv) {
             const char* v = value(arg);
             if (!v) return usage("--project-root needs a folder");
             options.projectRoot = v;
+        } else if (arg == "--game-settings-output") {
+            const char* v=value(arg);
+            if(!v)return usage("--game-settings-output needs a file");
+            gameSettingsOutput=v;
         } else if (arg == "--gabor-opacity") {
             const char* v = value(arg);
             if (!v) return usage("--gabor-opacity needs a value");
@@ -89,6 +96,27 @@ int main(int argc, char** argv) {
     if (input.empty() || output.empty()) return usage("an input scene and an output manifest are required");
 
     std::string error;
+    dve::ui::GameSettings gameSettings;
+    if(!gameSettingsOutput.empty()){
+        if(options.projectRoot.empty())return usage("--game-settings-output requires --project-root");
+        if(std::filesystem::weakly_canonical(gameSettingsOutput)==std::filesystem::weakly_canonical(output))
+            return usage("scene output and game-settings output must be different files");
+        // Preserve unrelated game defaults when updating an existing file.
+        if(std::filesystem::exists(gameSettingsOutput)){
+            std::ifstream in(gameSettingsOutput,std::ios::binary);
+            std::string text(64U*1024U+1U,'\0');in.read(text.data(),static_cast<std::streamsize>(text.size()));
+            text.resize(static_cast<std::size_t>(in.gcount()));
+            const auto existing=in.bad() || text.size()>64U*1024U ? std::nullopt : dve::ui::GameSettings::parse(text,&error);
+            if(!existing){std::cerr<<"dve_export_scene: cannot read existing game settings: "<<error<<'\n';return 1;}
+            gameSettings=*existing;
+        }
+        auto settings=dve::editor::EditorSettingsRegistry::make_default();
+        const auto preferences=options.projectRoot/".dve/project/editor_settings.txt";
+        if(std::filesystem::exists(preferences) && !settings.load_scope_file(dve::editor::SettingScope::Project,preferences,&error)){
+            std::cerr<<"dve_export_scene: cannot load project settings: "<<error<<'\n';return 1;
+        }
+        gameSettings=dve::editor::polygon_game_settings(settings,std::move(gameSettings));
+    }
     const auto document = dve::editor::EditorDocument::load(input, &error);
     if (!document) {
         std::cerr << "dve_export_scene: could not load " << input.generic_string() << ": " << error << '\n';
@@ -116,6 +144,9 @@ int main(int argc, char** argv) {
     if (!result.success) {
         std::cerr << "dve_export_scene: export failed: " << result.error << '\n';
         return 1;
+    }
+    if(!gameSettingsOutput.empty() && !gameSettings.save(gameSettingsOutput,&error)){
+        std::cerr<<"dve_export_scene: cannot export game settings: "<<error<<'\n';return 1;
     }
     if (!quiet) {
         std::uint64_t voxels = 0;

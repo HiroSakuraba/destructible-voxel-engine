@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <unordered_map>
 #include <span>
 #include <string>
 #include <vector>
@@ -12,6 +14,8 @@
 #include "dve/transform.hpp"
 
 namespace dve::render {
+
+class PolygonRenderCache;
 
 struct PolygonCamera {
     Float3 position{0.0F, 1.5F, 4.0F};
@@ -35,11 +39,7 @@ struct PolygonRenderTarget {
     [[nodiscard]] bool valid() const noexcept;
 };
 
-struct PolygonLodLevel {
-    const CookedPolygonAsset* asset{};
-    // Select this level when projected diameter is at least this many pixels.
-    float minimumProjectedDiameterPixels{};
-};
+using PolygonLodLevel = dve::PolygonLodLevel;
 
 struct PolygonRenderInstance {
     std::uint64_t objectId{};
@@ -78,6 +78,13 @@ struct PolygonRenderOptions {
     // Geometry-agnostic CPU decal records. The same records may be queried by voxel-derived
     // surface evaluators; this span only enables them for the polygon reference pass.
     std::span<const MaterialDecal> decals{};
+    bool enableFrustumCulling{true};
+    // Positive bias favors coarser meshes: effective diameter = diameter * 2^-bias.
+    float lodBias{};
+    float lodHysteresis{0.1F};
+    // Optional persistent cache, owned by one viewport/render thread. Without it,
+    // shared assets still reuse preparation within this render call.
+    PolygonRenderCache* cache{};
 };
 
 struct PolygonRenderStats {
@@ -102,6 +109,12 @@ struct PolygonRenderStats {
     std::uint64_t decalCandidates{};
     std::uint64_t decalProjected{};
     std::uint64_t decalFragments{};
+    std::uint64_t frustumCulledInstances{};
+    std::uint64_t assetValidations{};
+    std::uint64_t mipChainsBuilt{};
+    std::uint64_t mipCacheHits{};
+    std::uint64_t mipCacheMisses{};
+    std::uint64_t mipCacheBytes{};
 };
 
 struct PolygonTextureMip {
@@ -112,6 +125,38 @@ struct PolygonTextureMip {
 
 struct PolygonTextureMipChain {
     std::vector<PolygonTextureMip> levels;
+};
+
+// Retains immutable mip chains by validated content hash, not borrowed pointers.
+// The byte budget bounds retained RGBA payload; oversized chains are frame-local.
+// Transparent triangles pin their chains until rasterization completes.
+class PolygonRenderCache {
+public:
+    explicit PolygonRenderCache(std::size_t maximumMipBytes = 64U * 1024U * 1024U)
+        : maximumMipBytes_(maximumMipBytes) {}
+    void clear() noexcept;
+    [[nodiscard]] std::size_t resident_mip_bytes() const noexcept { return residentMipBytes_; }
+    [[nodiscard]] std::size_t cached_assets() const noexcept { return mips_.size(); }
+    [[nodiscard]] std::size_t lod_history_size() const noexcept { return lods_.size(); }
+private:
+    friend class ReferencePolygonRenderer;
+    struct MipEntry {
+        std::shared_ptr<const std::vector<PolygonTextureMipChain>> chains;
+        std::size_t bytes{};
+        std::uint64_t lastUse{};
+    };
+    struct LodEntry {
+        const CookedPolygonAsset* base{};
+        std::uint64_t baseHash{};
+        const CookedPolygonAsset* selected{};
+        float threshold{};
+        float bias{};
+        std::uint64_t lastUse{};
+    };
+    std::unordered_map<std::uint64_t, MipEntry> mips_;
+    std::unordered_map<std::uint64_t, LodEntry> lods_;
+    std::size_t maximumMipBytes_{}, residentMipBytes_{};
+    std::uint64_t frame_{};
 };
 
 [[nodiscard]] PolygonTextureMipChain generate_texture_mips(const PolygonImage& image);

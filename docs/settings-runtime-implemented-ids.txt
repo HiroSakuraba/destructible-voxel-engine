@@ -49,6 +49,8 @@ physics.position_iterations
 physics.substeps
 physics.velocity_iterations
 physics.worker_threads
+polygon.frustum_culling
+polygon.lod_bias
 render.anisotropy
 render.bloom
 render.bloom_threshold

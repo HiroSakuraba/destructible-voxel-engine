@@ -7,6 +7,16 @@ The complete 134-setting behavior contract is not implemented by these batches. 
 `applied` flag and source-reference audit indicate wiring, not full behavioral certification.
 No placeholder reads have been added to claim coverage of the remaining settings.
 
+## Polygon performance batch
+
+This batch starts after the workspace restoration batch (PR #69): 71 of the original
+134 settings connected and 63 remaining. It connects `polygon.frustum_culling` and
+`polygon.lod_bias` through Project defaults export and CPU player/reference
+rendering: 73 connected and 61 remaining. These are export/player
+controls; the native editor voxel viewport has no polygon raster pass. LOD bias
+requires supplied authored levels. Wiring is not full acceptance
+certification. See [polygon-rendering-performance.md](polygon-rendering-performance.md).
+
 ## Workspace restoration batch
 
 Main after PR #68 connected 70 of the original 134 settings, leaving 64 unapplied.
@@ -167,7 +177,7 @@ do not certify the full all-settings feature; source references alone are not be
 | `render.high_dpi` | SDL window creation (restart) |
 | `scripting.lua` | EditorPlaySession startup-script lifecycle |
 
-## Remaining 63 settings
+## Remaining 61 settings
 
 
 These retain the unapplied marker in the UI. Each row records the intended behavior,
@@ -195,9 +205,7 @@ they still need actual owners, resource/lifecycle integration and behavioral che
 | `voxel.destruction_quality` | Select documented visual debris and collision-detail budgets for destruction. All presets must preserve exact authoritative voxel removal and structural connectivity; quality may change decorative debris, proxy refinement and scheduling, not which supporting voxels exist. |
 | `voxel.async_connectivity` | Choose worker-based or synchronous connectivity/fracture discovery for newly submitted jobs. Workers read immutable snapshots and commit only results whose generation still matches. Switching must settle/cancel outstanding work safely without double-publishing fractures. |
 | `voxel.ray_step_scale` | Scale permitted sampling steps for voxel rendering without breaking exact brick/voxel boundary traversal. Values above one must not skip thin occupied surfaces; use conservative empty-space skipping or validated interval tests. Picking and collision keep their exact independent traversal. |
-| `polygon.lod_bias` | Bias screen-space mesh level-of-detail selection with a documented sign: proposed positive values favor coarser levels, negative favor finer. Retain hysteresis and available-level bounds. Do not alter source meshes or authored selection/collision behavior. |
 | `polygon.instancing` | Batch compatible draws of identical meshes/material layouts into instance records while retaining per-object transforms, material overrides and stable selection IDs. Off uses ordinary draws of the same visible objects. |
-| `polygon.frustum_culling` | Reject polygon draw candidates conservatively outside each camera's actual frustum. Use current transformed/skinned bounds and include the active projection. Off submits otherwise eligible objects without frustum rejection. |
 | `polygon.occlusion_culling` | Use supported depth/hierarchical occlusion to omit hidden polygon draws. Treat uncertain or stale queries as visible, especially after camera cuts, destruction and movement. Off removes this culling stage without disabling frustum culling. |
 | `polygon.mesh_streaming` | Load cooked mesh levels asynchronously from packaged/local assets, prioritizing visible requests and maintaining coarse resident fallbacks. Off requests an explicit resident working set before use. Missing data produces a visible diagnostic rather than a blocked frame loop. |
 | `material.global_parameters` | Publish project-wide scalar/vector parameter collections into materials that reference them. Changes update the shared binding at a frame boundary. Off uses defined authored defaults and reports collection references; do not rewrite materials or silently read stale globals. |

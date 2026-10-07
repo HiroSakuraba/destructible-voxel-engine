@@ -44,9 +44,12 @@ struct GameSettings {
     std::string displayMode{"windowed"};
     std::string resolutionProfile{"fhd_1080p"};
     std::string splitScreenLayout{"auto"};
+    bool polygonFrustumCulling{true};
+    float polygonLodBias{};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
     [[nodiscard]] std::string serialize() const;
+    [[nodiscard]] bool save(const std::filesystem::path& path, std::string* error = nullptr) const;
     [[nodiscard]] static std::optional<GameSettings> parse(std::string_view text,
                                                             std::string* error = nullptr);
 };

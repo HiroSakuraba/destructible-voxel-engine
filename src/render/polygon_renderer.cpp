@@ -359,36 +359,75 @@ struct DeferredTriangle {
     float sortDepth{};bool frontFacing{};std::shared_ptr<const std::vector<PolygonTextureMipChain>> mips;
 };
 
-float projected_diameter(const CookedPolygonAsset& asset,const RigidTransform& transform,
+float projected_diameter(const PolygonBounds& bounds,const RigidTransform& transform,
                          const PolygonCamera& camera,const CameraBasis& basis,
                          const PolygonRenderTarget& target) noexcept {
-    const Float3 center=multiply(add(asset.bounds.minimum,asset.bounds.maximum),0.5F);
-    const Float3 half=multiply(subtract(asset.bounds.maximum,asset.bounds.minimum),0.5F);
+    const Float3 center=multiply(add(bounds.minimum,bounds.maximum),0.5F);
+    const Float3 half=multiply(subtract(bounds.maximum,bounds.minimum),0.5F);
     const float radius=length(half);const Float3 world=transform_point(transform,center);
     const float z=dot(subtract(world,camera.position),basis.forward);
     if(z<=camera.nearPlane)return std::numeric_limits<float>::infinity();
     return 2.0F*radius/(z*basis.tanHalf)*static_cast<float>(target.height)*0.5F;
 }
 
-const CookedPolygonAsset* select_lod(const PolygonRenderInstance& instance,float diameter,PolygonRenderStats& stats) noexcept {
-    const CookedPolygonAsset* selected=instance.asset;float best=-1.0F;
+struct LodChoice { const CookedPolygonAsset* asset{}; float threshold{-1.0F}; };
+LodChoice select_lod(const PolygonRenderInstance& instance,float diameter) noexcept {
+    LodChoice selected{instance.asset};
+    float lowest=std::numeric_limits<float>::infinity();
+    const CookedPolygonAsset* coarsest{};
     for(const PolygonLodLevel& lod:instance.lods){
-        if(lod.asset&&diameter>=lod.minimumProjectedDiameterPixels&&lod.minimumProjectedDiameterPixels>=best){selected=lod.asset;best=lod.minimumProjectedDiameterPixels;}
+        const float threshold=lod.minimumProjectedDiameterPixels;
+        if(!lod.asset || !std::isfinite(threshold) || threshold<0.0F) continue;
+        if(threshold<lowest){lowest=threshold;coarsest=lod.asset;}
+        if(diameter>=threshold && threshold>=selected.threshold) selected={lod.asset,threshold};
     }
-    if (selected != instance.asset) {
-        ++stats.lodSelections;
-    }
+    // Below every threshold, retain the coarsest available mesh rather than
+    // unexpectedly jumping back to the full-detail base asset.
+    if(selected.threshold<0.0F && coarsest) selected={coarsest,lowest};
     return selected;
+}
+
+PolygonBounds vertex_bounds(const CookedPolygonAsset& asset) noexcept {
+    PolygonBounds bounds{asset.vertices.front().position,asset.vertices.front().position};
+    for(const auto& v:asset.vertices){
+        bounds.minimum={std::min(bounds.minimum.x,v.position.x),std::min(bounds.minimum.y,v.position.y),std::min(bounds.minimum.z,v.position.z)};
+        bounds.maximum={std::max(bounds.maximum.x,v.position.x),std::max(bounds.maximum.y,v.position.y),std::max(bounds.maximum.z,v.position.z)};
+    }
+    return bounds;
+}
+
+bool outside_frustum(const PolygonBounds& bounds,const RigidTransform& transform,
+                     const PolygonCamera& camera,const CameraBasis& basis) noexcept {
+    const Float3 center=subtract(transform_point(transform,multiply(add(bounds.minimum,bounds.maximum),0.5F)),camera.position);
+    const Float3 half=multiply(subtract(bounds.maximum,bounds.minimum),0.5F);
+    const Float3 x=transform_vector(transform,{half.x,0,0}),y=transform_vector(transform,{0,half.y,0}),z=transform_vector(transform,{0,0,half.z});
+    const auto outside=[&](Float3 normal,float offset){
+        const float distance=dot(center,normal)+offset;
+        const float radius=std::abs(dot(x,normal))+std::abs(dot(y,normal))+std::abs(dot(z,normal));
+        // Non-finite/uncertain bounds remain visible. A tolerance preserves
+        // touching and near-plane-intersecting geometry through float rounding.
+        const float margin=1.0e-5F*(1.0F+std::abs(distance)+radius);
+        return std::isfinite(distance) && std::isfinite(radius) && distance+radius < -margin;
+    };
+    const Float3 horizontal=multiply(basis.forward,basis.tanHalf*basis.aspect);
+    const Float3 vertical=multiply(basis.forward,basis.tanHalf);
+    return outside(basis.forward,-camera.nearPlane) || outside(multiply(basis.forward,-1),camera.farPlane) ||
+        outside(add(horizontal,basis.right),0) || outside(subtract(horizontal,basis.right),0) ||
+        outside(add(vertical,basis.up),0) || outside(subtract(vertical,basis.up),0);
 }
 
 void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,const RenderEnvironment& environment,
                      const PolygonRenderOptions& options,bool transparent,PolygonRenderStats& stats) {
     const float area=edge(tri.v[0].x,tri.v[0].y,tri.v[1].x,tri.v[1].y,tri.v[2].x,tri.v[2].y);
-    if(std::abs(area)<kEpsilon)return;
-    const int minX=std::max(0,static_cast<int>(std::floor(std::min({tri.v[0].x,tri.v[1].x,tri.v[2].x}))));
-    const int maxX=std::min(static_cast<int>(target.width)-1,static_cast<int>(std::ceil(std::max({tri.v[0].x,tri.v[1].x,tri.v[2].x}))));
-    const int minY=std::max(0,static_cast<int>(std::floor(std::min({tri.v[0].y,tri.v[1].y,tri.v[2].y}))));
-    const int maxY=std::min(static_cast<int>(target.height)-1,static_cast<int>(std::ceil(std::max({tri.v[0].y,tri.v[1].y,tri.v[2].y}))));
+    if(!std::isfinite(area)||std::abs(area)<kEpsilon)return;
+    const float left=std::floor(std::min({tri.v[0].x,tri.v[1].x,tri.v[2].x})),right=std::ceil(std::max({tri.v[0].x,tri.v[1].x,tri.v[2].x}));
+    const float top=std::floor(std::min({tri.v[0].y,tri.v[1].y,tri.v[2].y})),bottom=std::ceil(std::max({tri.v[0].y,tri.v[1].y,tri.v[2].y}));
+    if(right<0 || bottom<0 || left>=static_cast<float>(target.width) || top>=static_cast<float>(target.height))return;
+    // Clip floating bounds before narrowing; offscreen coordinates can exceed int.
+    const int minX=static_cast<int>(std::max(0.0F,left));
+    const int maxX=static_cast<int>(std::min(static_cast<float>(target.width-1U),right));
+    const int minY=static_cast<int>(std::max(0.0F,top));
+    const int maxY=static_cast<int>(std::min(static_cast<float>(target.height-1U),bottom));
     if(minX>maxX||minY>maxY)return;
     ++stats.rasterizedTriangles;
 
@@ -677,6 +716,10 @@ PolygonTextureMipChain generate_texture_mips(const PolygonImage& image) {
     return chain;
 }
 
+void PolygonRenderCache::clear() noexcept {
+    mips_.clear(); lods_.clear(); residentMipBytes_=0; frame_=0;
+}
+
 PolygonRenderStats ReferencePolygonRenderer::render(
     std::span<const PolygonRenderInstance> instances,
     const PolygonCamera& camera,
@@ -693,28 +736,96 @@ PolygonRenderStats ReferencePolygonRenderer::render(
     }
 
     const CameraBasis basis = make_basis(camera, target);
+    PolygonRenderCache transientCache;
+    auto& cache = options.cache ? *options.cache : transientCache;
+    ++cache.frame_;
+    struct FrameAsset {
+        bool valid{};
+        PolygonBounds bounds{};
+        std::uint64_t hash{};
+        std::shared_ptr<const std::vector<PolygonTextureMipChain>> mips;
+    };
+    std::unordered_map<const CookedPolygonAsset*, FrameAsset> prepared;
+    const auto prepare = [&](const CookedPolygonAsset* asset) -> FrameAsset& {
+        auto [it, inserted] = prepared.try_emplace(asset);
+        if(inserted){
+            ++stats.assetValidations;
+            it->second.valid=asset && static_cast<bool>(validate_polygon_asset(*asset));
+            if(it->second.valid){
+                it->second.bounds=vertex_bounds(*asset);
+                it->second.hash=asset->contentHash ? asset->contentHash : polygon_asset_content_hash(*asset);
+            }
+        }
+        return it->second;
+    };
+    static const auto emptyMips=std::make_shared<const std::vector<PolygonTextureMipChain>>();
+    const auto texture_mips = [&](const CookedPolygonAsset& asset,FrameAsset& frameAsset){
+        if(!options.enableTextures || asset.images.empty())return emptyMips;
+        if(frameAsset.mips){++stats.mipCacheHits;return frameAsset.mips;}
+        if(const auto it=cache.mips_.find(frameAsset.hash);it!=cache.mips_.end()){
+            ++stats.mipCacheHits; it->second.lastUse=cache.frame_;
+            return frameAsset.mips=it->second.chains;
+        }
+        ++stats.mipCacheMisses;
+        auto chains=std::make_shared<std::vector<PolygonTextureMipChain>>();
+        chains->reserve(asset.images.size());
+        std::size_t bytes=0;
+        for(const auto& image:asset.images){
+            chains->push_back(generate_texture_mips(image)); ++stats.mipChainsBuilt;
+            for(const auto& mip:chains->back().levels)bytes+=mip.rgba8.size();
+        }
+        frameAsset.mips=chains;
+        if(bytes<=cache.maximumMipBytes_){
+            while(!cache.mips_.empty() && (cache.residentMipBytes_>cache.maximumMipBytes_-bytes || cache.mips_.size()>=128U)){
+                const auto oldest=std::min_element(cache.mips_.begin(),cache.mips_.end(),[](const auto& a,const auto& b){return a.second.lastUse<b.second.lastUse;});
+                cache.residentMipBytes_-=oldest->second.bytes; cache.mips_.erase(oldest);
+            }
+            cache.mips_.emplace(frameAsset.hash,PolygonRenderCache::MipEntry{chains,bytes,cache.frame_});
+            cache.residentMipBytes_+=bytes;
+        }
+        return frameAsset.mips;
+    };
+    const float bias=std::isfinite(options.lodBias) ? std::clamp(options.lodBias,-4.0F,4.0F) : 0.0F;
+    const float hysteresis=std::isfinite(options.lodHysteresis) ? std::clamp(options.lodHysteresis,0.0F,0.49F) : 0.0F;
     std::vector<DeferredTriangle> transparent;
     for (const PolygonRenderInstance& instance : instances) {
         ++stats.submittedInstances;
-        if (!instance.visible || instance.asset == nullptr ||
-            !validate_polygon_asset(*instance.asset)) {
+        if (!instance.visible || instance.asset == nullptr) {
             ++stats.culledInstances;
             continue;
         }
-
+        const auto& base=prepare(instance.asset);
+        if(!base.valid){++stats.culledInstances;continue;}
         const float diameter =
-            projected_diameter(*instance.asset, instance.transform, camera, basis, target);
-        const CookedPolygonAsset* asset = select_lod(instance, diameter, stats);
+            projected_diameter(base.bounds, instance.transform, camera, basis, target);
+        const float effectiveDiameter=diameter*std::exp2(-bias);
+        auto choice=select_lod(instance,effectiveDiameter);
+        if(options.cache && choice.threshold>=0.0F){
+            if(const auto it=cache.lods_.find(instance.objectId);it!=cache.lods_.end()){
+                const auto& old=it->second;
+                const bool levelStillPresent=std::any_of(instance.lods.begin(),instance.lods.end(),[&](const auto& level){return level.asset==old.selected && level.minimumProjectedDiameterPixels==old.threshold;});
+                if(old.base==instance.asset && old.baseHash==base.hash && old.bias==bias && levelStillPresent && choice.asset!=old.selected){
+                    const bool up=choice.threshold>old.threshold;
+                    if((up && effectiveDiameter<choice.threshold*(1.0F+hysteresis)) ||
+                       (!up && effectiveDiameter>=old.threshold*(1.0F-hysteresis)))choice={old.selected,old.threshold};
+                }
+            }
+            if(cache.lods_.contains(instance.objectId) || cache.lods_.size()<4096U)
+                cache.lods_.insert_or_assign(instance.objectId,PolygonRenderCache::LodEntry{instance.asset,base.hash,choice.asset,choice.threshold,bias,cache.frame_});
+        }
+        const CookedPolygonAsset* asset=choice.asset;
         if (asset == nullptr || diameter < 0.5F) {
             ++stats.culledInstances;
             continue;
         }
 
-        auto mips = std::make_shared<std::vector<PolygonTextureMipChain>>();
-        mips->reserve(asset->images.size());
-        for (const auto& image : asset->images) {
-            mips->push_back(generate_texture_mips(image));
+        auto& selected=prepare(asset);
+        if(!selected.valid){++stats.culledInstances;continue;}
+        if(options.enableFrustumCulling && outside_frustum(selected.bounds,instance.transform,camera,basis)){
+            ++stats.culledInstances; ++stats.frustumCulledInstances; continue;
         }
+        if(asset!=instance.asset)++stats.lodSelections;
+        const auto mips=texture_mips(*asset,selected);
 
         for (const PolygonSubmesh& submesh : asset->submeshes) {
             if (submesh.materialIndex >= asset->materials.size()) {
@@ -778,6 +889,10 @@ PolygonRenderStats ReferencePolygonRenderer::render(
     for (const DeferredTriangle& triangle : transparent) {
         raster_triangle(triangle, target, environment, options, true, stats);
     }
+    for(auto it=cache.lods_.begin();it!=cache.lods_.end();){
+        it=it->second.lastUse==cache.frame_ ? std::next(it) : cache.lods_.erase(it);
+    }
+    stats.mipCacheBytes=cache.residentMipBytes_;
     return stats;
 }
 

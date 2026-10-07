@@ -126,6 +126,13 @@ struct CookedPolygonAsset {
     std::uint64_t contentHash{};
 };
 
+struct PolygonLodLevel {
+    const CookedPolygonAsset* asset{};
+    // Higher thresholds designate finer geometry; below all thresholds use
+    // the level with the smallest threshold. Caller owns the cooked assets.
+    float minimumProjectedDiameterPixels{};
+};
+
 struct PolygonCookOptions {
     std::uint64_t objectId{1};
     bool generateMissingNormals{true};

@@ -149,6 +149,7 @@ add_library(dve_core
     src/network_udp.cpp
     src/network_runtime_services.cpp
     src/game_ui.cpp
+    src/platform/game_settings_file.cpp
     src/game_ui_asset.cpp
     src/game_ui_localization.cpp
     src/material_parameter_collection.cpp
@@ -1678,6 +1679,8 @@ endif()
 # input bindings, Lua when built, and the CPU renderer behind IPlayerRenderer. The dve_player
 # executable adds the SDL3 window/texture presenter and the optional audio device.
 if(DVE_BUILD_PLAYER AND DVE_BUILD_RHI AND DVE_BUILD_PLATFORM)
+    add_executable(dve_polygon_render_bench apps/polygon_render_bench.cpp)
+    target_link_libraries(dve_polygon_render_bench PRIVATE dve::render_bridge)
     add_library(dve_player_runtime
         src/player/frame_image.cpp
         src/player/player_input.cpp
@@ -2578,6 +2581,16 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_settings_workspace_restore_tests tests/test_settings_workspace_restore.cpp)
         target_link_libraries(dve_settings_workspace_restore_tests PRIVATE dve::editor)
         add_test(NAME dve_settings_workspace_restore_tests COMMAND dve_settings_workspace_restore_tests)
+        if(TARGET dve_player_runtime)
+            add_executable(dve_polygon_performance_tests tests/test_polygon_performance.cpp)
+            target_link_libraries(dve_polygon_performance_tests PRIVATE dve::editor dve::player_runtime dve::render_bridge)
+            add_test(NAME dve_polygon_performance_tests COMMAND dve_polygon_performance_tests)
+            add_test(NAME dve_polygon_settings_export_tests COMMAND ${CMAKE_COMMAND}
+                -DHELPER=$<TARGET_FILE:dve_polygon_performance_tests>
+                -DEXPORTER=$<TARGET_FILE:dve_export_scene>
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/polygon-settings-export
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/polygon_settings_export.cmake)
+        endif()
         target_link_libraries(dve_settings_applied_tests PRIVATE dve::editor)
         add_test(NAME dve_settings_applied_tests COMMAND dve_settings_applied_tests ${CMAKE_SOURCE_DIR})
         add_executable(dve_settings_render_batch_tests tests/test_settings_render_batch.cpp)

@@ -287,6 +287,9 @@ public:
     [[nodiscard]] const camera::ICameraCollisionWorld* camera_collision_world() const noexcept {
         return cameraCollision_.get();
     }
+    [[nodiscard]] bool action_pressed(std::string_view action) const {
+        return world_ && world_->is_action_pressed(std::string(action));
+    }
     [[nodiscard]] bool set_gravity(Float3 gravity) noexcept {
         return world_ && configure_physics3d_gravity(world_->physics(), gravity);
     }
@@ -296,6 +299,10 @@ private:
     std::unique_ptr<GameScriptHost> scripts_;
 #endif
 };
+
+bool EditorPlaySession::runtime_action_pressed(std::string_view action) const {
+    return runtime_ && runtime_->action_pressed(action);
+}
 
 const camera::ICameraCollisionWorld* EditorPlaySession::camera_collision_world() const noexcept {
     return runtime_ ? runtime_->camera_collision_world() : nullptr;
@@ -487,6 +494,7 @@ bool EditorPlaySession::accept_runtime_changes(EditorWorkspace& workspace, std::
 
 void EditorPlaySession::set_action_pressed(std::string action, bool pressed) {
     if (action.empty()) return;
+    if (pressed) pressedSinceStep_.insert(action);
     input_.actions[std::move(action)] = pressed;
 }
 
@@ -495,12 +503,25 @@ void EditorPlaySession::set_axis(std::string axis, float value) {
     input_.axes[std::move(axis)] = std::clamp(value, -1.0F, 1.0F);
 }
 
-void EditorPlaySession::clear_input() noexcept { input_.actions.clear(); input_.axes.clear(); }
+void EditorPlaySession::clear_input() noexcept {
+    input_.actions.clear();
+    input_.axes.clear();
+    pressedSinceStep_.clear();
+}
 
 bool EditorPlaySession::fixed_step(EditorWorkspace& workspace, std::string* error) {
     if (!runtime_) { if (error) *error = "preview runtime is unavailable"; return false; }
-    if (!runtime_->fixed_step(workspace.document(), input_, config_.fixedDeltaSeconds, hud_, telemetry_, error))
-        return false;
+    bool stepped = false;
+    if (pressedSinceStep_.empty()) {
+        stepped = runtime_->fixed_step(workspace.document(), input_, config_.fixedDeltaSeconds, hud_, telemetry_, error);
+    } else {
+        // Presses already released since the last step still count as pressed for this step.
+        EditorPlayInputSnapshot input = input_;
+        for (const std::string& action : pressedSinceStep_) input.actions[action] = true;
+        pressedSinceStep_.clear();
+        stepped = runtime_->fixed_step(workspace.document(), input, config_.fixedDeltaSeconds, hud_, telemetry_, error);
+    }
+    if (!stepped) return false;
     ++telemetry_.fixedTickCount;
     telemetry_.simulatedSeconds += static_cast<double>(config_.fixedDeltaSeconds);
     return true;
@@ -511,6 +532,7 @@ void EditorPlaySession::reset_runtime_state() noexcept {
     runtime_.reset();
     config_ = {};
     input_ = {};
+    pressedSinceStep_.clear();
     hud_ = {};
     telemetry_.state = EditorPlaySessionState::Stopped;
     telemetry_.mode = EditorMode::Edit;

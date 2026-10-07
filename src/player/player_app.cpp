@@ -338,6 +338,7 @@ void PlayerApp::tick(float fixedDeltaSeconds) {
     impl.quickloadHeld = quickload;
 
     impl.input.apply(*impl.session.world);
+    impl.input.end_tick();  // presses shorter than a tick have now reached this tick
     impl.session.world->tick(fixedDeltaSeconds);
     ++impl.ticks;
 

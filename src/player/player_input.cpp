@@ -151,17 +151,26 @@ void PlayerInput::handle_event(const platform::PlatformEvent& event) {
     using platform::EventType;
     switch (event.type) {
         case EventType::KeyDown:
-            if (!event.repeat) keys_.insert(lower(event.key));
+            if (!event.repeat) {
+                keys_.insert(lower(event.key));
+                pressedKeys_.insert(lower(event.key));
+            }
             break;
         case EventType::KeyUp: keys_.erase(lower(event.key)); break;
-        case EventType::GamepadButtonDown: gamepadButtons_.insert(event.gamepadButton); break;
+        case EventType::GamepadButtonDown:
+            gamepadButtons_.insert(event.gamepadButton);
+            pressedGamepadButtons_.insert(event.gamepadButton);
+            break;
         case EventType::GamepadButtonUp: gamepadButtons_.erase(event.gamepadButton); break;
         case EventType::GamepadAxisMotion: gamepadAxes_[event.gamepadAxis] = event.gamepadValue; break;
         case EventType::GamepadRemoved:
             gamepadButtons_.clear();
             gamepadAxes_.clear();
             break;
-        case EventType::PointerButtonDown: mouseButtons_.insert(event.button); break;
+        case EventType::PointerButtonDown:
+            mouseButtons_.insert(event.button);
+            pressedMouseButtons_.insert(event.button);
+            break;
         case EventType::PointerButtonUp: mouseButtons_.erase(event.button); break;
         case EventType::WindowFocusLost: release_all(); break;
         default: break;
@@ -173,6 +182,13 @@ void PlayerInput::release_all() {
     gamepadButtons_.clear();
     gamepadAxes_.clear();
     mouseButtons_.clear();
+    end_tick();
+}
+
+void PlayerInput::end_tick() {
+    pressedKeys_.clear();
+    pressedGamepadButtons_.clear();
+    pressedMouseButtons_.clear();
 }
 
 float PlayerInput::source_value(const InputSource& source, bool* held) const {
@@ -210,6 +226,17 @@ bool PlayerInput::action(std::string_view name) const {
         bool held = false;
         (void)source_value(source, &held);
         if (held) return true;
+        // A press since the last tick counts even if it was released before the tick ran.
+        switch (source.kind) {
+            case InputSourceKind::Key: if (pressedKeys_.contains(source.key)) return true; break;
+            case InputSourceKind::GamepadButton:
+                if (pressedGamepadButtons_.contains(source.gamepadButton)) return true;
+                break;
+            case InputSourceKind::MouseButton:
+                if (pressedMouseButtons_.contains(source.mouseButton)) return true;
+                break;
+            case InputSourceKind::GamepadAxis: break;
+        }
     }
     return false;
 }

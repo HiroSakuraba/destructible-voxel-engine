@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <optional>
 #include <string>
@@ -103,6 +104,9 @@ public:
     [[nodiscard]] const EditorPlaySessionTelemetry& telemetry() const noexcept { return telemetry_; }
     [[nodiscard]] const EditorPlaySessionConfig& config() const noexcept { return config_; }
     [[nodiscard]] const camera::ICameraCollisionWorld* camera_collision_world() const noexcept;
+    // Whether the running world saw `action` as pressed on its most recent fixed step (what
+    // scripts read with world.is_action_pressed). False when no session is running.
+    [[nodiscard]] bool runtime_action_pressed(std::string_view action) const;
     // Called on the main thread before update(); keeps elapsed seconds and object state.
     [[nodiscard]] bool apply_live_settings(const EditorPlaySessionConfig& requested, std::string* error = nullptr);
 
@@ -115,6 +119,9 @@ private:
     std::unique_ptr<Runtime> runtime_;
     EditorPlaySessionConfig config_{};
     EditorPlayInputSnapshot input_{};
+    // Actions pressed since the last fixed step. The next step sees them as pressed even if
+    // they were released first, so a tap shorter than a tick is not lost.
+    std::set<std::string, std::less<>> pressedSinceStep_;
     EditorPlayHudSnapshot hud_{};
     EditorPlaySessionTelemetry telemetry_{};
     LogSink logSink_{};

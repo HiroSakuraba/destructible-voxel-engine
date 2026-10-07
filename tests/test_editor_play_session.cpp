@@ -171,6 +171,11 @@ world.log("env exposure=" .. tostring(env.exposure)
     .. " tonemap=" .. env.tonemap_operator
     .. " strength=" .. tostring(env.shadow_strength)
     .. " samples=" .. tostring(env.shadow_samples))
+world.log("env2 shadow=" .. env.shadow_mode
+    .. " gi=" .. env.global_illumination_mode
+    .. " gi_samples=" .. tostring(env.global_illumination_samples)
+    .. " bloom_threshold=" .. tostring(env.bloom_threshold)
+    .. " contact=" .. tostring(env.contact_shadow_distance_meters))
 )LUA";
     out.close();
 
@@ -184,15 +189,24 @@ world.log("env exposure=" .. tostring(env.exposure)
     config.environment.tonemapOperator = TonemapOperator::Reinhard;
     config.environment.shadowStrength = 0.25F;
     config.environment.shadowSamples = 8U;
+    config.environment.shadowMode = ShadowMode::Hybrid;
+    config.environment.globalIlluminationMode = GlobalIlluminationMode::Off;
+    config.environment.globalIlluminationSamples = 16U;
+    config.environment.bloomThreshold = 2.5F;
+    config.environment.contactShadowDistanceMeters = 7.5F;
     bool sawEnvironment = false;
+    bool sawEnvironment2 = false;
     std::string error;
     require(session.start(
         workspace, materials, EditorMode::Play, config,
         [&](EditorLogLevel, std::string text) {
             if (text == "env exposure=2.5 tonemap=reinhard strength=0.25 samples=8")
                 sawEnvironment = true;
+            if (text == "env2 shadow=hybrid gi=off gi_samples=16 bloom_threshold=2.5 contact=7.5")
+                sawEnvironment2 = true;
         }, &error), error.c_str());
     require(sawEnvironment, "startup script did not observe the seeded render environment");
+    require(sawEnvironment2, "startup script did not observe the seeded GI/shadow/bloom settings");
     require(session.stop(workspace, &error), error.c_str());
 }
 

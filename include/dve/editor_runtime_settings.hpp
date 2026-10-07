@@ -32,6 +32,12 @@ private:
 // multiply twice in this path. Shadow quality selects the directional sample
 // count from the published preset table (low 1, medium 2, high 4, ultra 8);
 // shadow strength and the sun's angular radius map to the same-named fields.
+// GI quality likewise selects the one-bounce sample count (low 1, medium 4,
+// high 8, ultra 16) and never touches intensity or distance. The two boolean
+// switches encode off through the fields they gate: bloom off zeroes the
+// composite intensity (the extraction threshold stays as authored), and
+// subsurface off zeroes the maximum transmission distance, which leaves the
+// ordinary surface model because a zero-length search transmits nothing.
 inline RenderEnvironment render_environment_settings(const EditorSettingsRegistry& registry,
                                                      RenderEnvironment environment = {}) {
     const RuntimeSettingsReader s(registry);
@@ -39,12 +45,31 @@ inline RenderEnvironment render_environment_settings(const EditorSettingsRegistr
     const auto tonemap = s.get<std::string>("render.tonemap");
     environment.tonemapOperator = tonemap == "reinhard" ? TonemapOperator::Reinhard
         : tonemap == "clamp" ? TonemapOperator::Clamp : TonemapOperator::ACES;
+    const auto shadowMode = s.get<std::string>("render.shadow_mode");
+    environment.shadowMode = shadowMode == "off" ? ShadowMode::Off
+        : shadowMode == "hard" ? ShadowMode::Hard
+        : shadowMode == "contact" ? ShadowMode::Contact
+        : shadowMode == "hybrid" ? ShadowMode::Hybrid : ShadowMode::Soft;
     environment.shadowStrength = s.number("render.shadow_strength");
     environment.shadowSoftnessRadians = s.number("render.shadow_softness");
     const auto quality = s.get<std::string>("render.shadow_quality");
     environment.shadowSamples = quality == "low" ? 1U
         : quality == "medium" ? 2U
         : quality == "ultra" ? 8U : 4U;
+    environment.contactShadowDistanceMeters = s.number("render.contact_shadow_distance");
+    const auto giMode = s.get<std::string>("render.gi_mode");
+    environment.globalIlluminationMode = giMode == "off" ? GlobalIlluminationMode::Off
+        : giMode == "ambient" ? GlobalIlluminationMode::AmbientHemisphere
+        : GlobalIlluminationMode::VoxelOneBounce;
+    const auto giQuality = s.get<std::string>("render.gi_quality");
+    environment.globalIlluminationSamples = giQuality == "low" ? 1U
+        : giQuality == "high" ? 8U
+        : giQuality == "ultra" ? 16U : 4U;
+    environment.globalIlluminationIntensity = s.number("render.gi_intensity");
+    environment.globalIlluminationMaxDistanceMeters = s.number("render.gi_distance");
+    environment.bloomThreshold = s.number("render.bloom_threshold");
+    if (!s.get<bool>("render.bloom")) environment.bloomIntensity = 0.0F;
+    if (!s.get<bool>("material.subsurface")) environment.subsurfaceMaxDistanceMeters = 0.0F;
     return environment;
 }
 

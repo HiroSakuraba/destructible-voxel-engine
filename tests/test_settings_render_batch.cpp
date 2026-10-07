@@ -1,6 +1,8 @@
 // Batch coverage for the render settings wiring: render.exposure,
 // render.tonemap, render.shadow_quality, render.shadow_strength,
-// render.shadow_softness, render.texture_filter, render.anisotropy.
+// render.shadow_softness, render.texture_filter, render.anisotropy, and the
+// environment completion batch (bloom, GI mode/quality/intensity/distance,
+// shadow mode, contact shadow distance, material subsurface).
 #include "dve/editor_runtime_settings.hpp"
 #include "dve/render/material_resource_residency.hpp"
 #include "dve/render/polygon_renderer.hpp"
@@ -11,6 +13,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -71,6 +74,83 @@ void test_environment_resolver() {
     const auto merged = render_environment_settings(registry, base);
     require(near(merged.sunIntensity, 3.25F), "resolver clobbered an unrelated field");
     require(merged.validate(nullptr), "resolved environment must validate");
+}
+
+void test_environment_completion_resolver() {
+    auto registry = EditorSettingsRegistry::make_default();
+    const RenderEnvironment defaults;
+    const auto resolvedDefaults = render_environment_settings(registry);
+    require(resolvedDefaults.shadowMode == ShadowMode::Soft, "default shadow mode changed");
+    require(resolvedDefaults.globalIlluminationMode == GlobalIlluminationMode::VoxelOneBounce,
+            "default GI mode changed");
+    require(resolvedDefaults.globalIlluminationSamples == 4U, "medium GI preset must keep 4 samples");
+    require(near(resolvedDefaults.globalIlluminationIntensity, 0.65F), "default GI intensity changed");
+    require(near(resolvedDefaults.globalIlluminationMaxDistanceMeters, 12.0F),
+            "default GI distance changed");
+    require(near(resolvedDefaults.contactShadowDistanceMeters, 2.0F),
+            "default contact shadow distance changed");
+    require(near(resolvedDefaults.bloomThreshold, 1.0F), "default bloom threshold changed");
+    require(near(resolvedDefaults.bloomIntensity, defaults.bloomIntensity),
+            "bloom on must preserve the authored intensity");
+    require(near(resolvedDefaults.subsurfaceMaxDistanceMeters, 0.5F),
+            "subsurface on must preserve the authored distance");
+
+    set(registry, "render.shadow_mode", std::string{"hybrid"});
+    set(registry, "render.gi_mode", std::string{"ambient"});
+    set(registry, "render.gi_quality", std::string{"ultra"});
+    set(registry, "render.gi_intensity", 1.5);
+    set(registry, "render.gi_distance", 30.0);
+    set(registry, "render.contact_shadow_distance", 5.5);
+    set(registry, "render.bloom_threshold", 2.5);
+    const auto resolved = render_environment_settings(registry);
+    require(resolved.shadowMode == ShadowMode::Hybrid, "shadow mode override ignored");
+    require(resolved.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere,
+            "GI mode override ignored");
+    require(resolved.globalIlluminationSamples == 16U, "ultra GI preset must select 16 samples");
+    require(near(resolved.globalIlluminationIntensity, 1.5F), "GI intensity override ignored");
+    require(near(resolved.globalIlluminationMaxDistanceMeters, 30.0F), "GI distance override ignored");
+    require(near(resolved.contactShadowDistanceMeters, 5.5F), "contact distance override ignored");
+    require(near(resolved.bloomThreshold, 2.5F), "bloom threshold override ignored");
+
+    // Quality presets change only the sample budget: intensity and distance
+    // stay where the user put them at every preset.
+    set(registry, "render.gi_quality", std::string{"low"});
+    const auto low = render_environment_settings(registry);
+    require(low.globalIlluminationSamples == 1U, "low GI preset must select 1 sample");
+    require(near(low.globalIlluminationIntensity, 1.5F) &&
+            near(low.globalIlluminationMaxDistanceMeters, 30.0F),
+            "GI quality preset changed intensity or distance");
+    set(registry, "render.gi_quality", std::string{"high"});
+    require(render_environment_settings(registry).globalIlluminationSamples == 8U,
+            "high GI preset must select 8 samples");
+
+    // Every shadow mode string maps to its enum value.
+    const std::pair<const char*, ShadowMode> modes[] = {
+        {"off", ShadowMode::Off}, {"hard", ShadowMode::Hard}, {"soft", ShadowMode::Soft},
+        {"contact", ShadowMode::Contact}, {"hybrid", ShadowMode::Hybrid}};
+    for (const auto& [name, mode] : modes) {
+        set(registry, "render.shadow_mode", std::string{name});
+        require(render_environment_settings(registry).shadowMode == mode,
+                "shadow mode string did not map to its enum value");
+    }
+    set(registry, "render.gi_mode", std::string{"off"});
+    require(render_environment_settings(registry).globalIlluminationMode ==
+            GlobalIlluminationMode::Off, "GI off did not map");
+
+    // The boolean switches encode off through the field they gate.
+    set(registry, "render.bloom", false);
+    const auto bloomOff = render_environment_settings(registry);
+    require(near(bloomOff.bloomIntensity, 0.0F), "bloom off must zero the composite intensity");
+    require(near(bloomOff.bloomThreshold, 2.5F), "bloom off must not clobber the threshold");
+    RenderEnvironment authored;
+    authored.subsurfaceMaxDistanceMeters = 0.9F;
+    require(near(render_environment_settings(registry, authored).subsurfaceMaxDistanceMeters, 0.9F),
+            "subsurface on must keep an authored distance");
+    set(registry, "material.subsurface", false);
+    require(near(render_environment_settings(registry, authored).subsurfaceMaxDistanceMeters, 0.0F),
+            "subsurface off must zero the transmission distance");
+    require(render_environment_settings(registry).validate(nullptr),
+            "resolved environment must validate");
 }
 
 double reference_aces(double x) {
@@ -260,6 +340,7 @@ void test_sampler_policy() {
 int main() {
     try {
         test_environment_resolver();
+        test_environment_completion_resolver();
         test_tonemap_reference();
         test_sampler_policy();
         std::cout << "dve_settings_render_batch_tests: PASS\n";

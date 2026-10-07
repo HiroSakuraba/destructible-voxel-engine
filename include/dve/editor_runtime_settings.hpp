@@ -103,6 +103,14 @@ inline render::MaterialSamplerPolicy material_sampler_policy(const EditorSetting
     return policy;
 }
 
+// Resolves voxel.debris_limit: the maximum number of active debris bodies
+// (damage-split fragments) a game world keeps. Play sessions apply it to
+// the world at start; zero suppresses debris creation.
+inline std::size_t debris_limit(const EditorSettingsRegistry& registry) {
+    const auto value = RuntimeSettingsReader(registry).get<std::int64_t>("voxel.debris_limit");
+    return value > 0 ? static_cast<std::size_t>(value) : 0U;
+}
+
 inline EditorPlaySessionConfig play_session_settings(const EditorSettingsRegistry& registry) {
     const RuntimeSettingsReader s(registry);
     EditorPlaySessionConfig config;
@@ -122,6 +130,7 @@ inline EditorPlaySessionConfig play_session_settings(const EditorSettingsRegistr
     config.physicsWorld.allowSleeping = s.get<bool>("physics.allow_sleeping");
     config.physicsWorld.continuousCollision = s.get<bool>("physics.continuous_collision");
     config.environment = render_environment_settings(registry);
+    config.debrisLimit = debris_limit(registry);
     return config;
 }
 

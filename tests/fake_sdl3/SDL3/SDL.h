@@ -120,6 +120,7 @@ struct SDL_TextInputEvent {
 struct SDL_MouseMotionEvent {
     Uint32 type{}; Uint32 reserved{}; Uint64 timestamp{}; SDL_WindowID windowID{};
     float x{}; float y{};
+    float xrel{}; float yrel{};
 };
 struct SDL_MouseButtonEvent {
     Uint32 type{}; Uint32 reserved{}; Uint64 timestamp{}; SDL_WindowID windowID{};
@@ -175,6 +176,11 @@ void SDL_DestroyWindow(SDL_Window* window);
 bool SDL_ShowWindow(SDL_Window* window);
 bool SDL_StartTextInput(SDL_Window* window);
 bool SDL_StopTextInput(SDL_Window* window);
+bool SDL_SetWindowRelativeMouseMode(SDL_Window* window, bool enabled);
+bool SDL_GetWindowRelativeMouseMode(SDL_Window* window);
+Uint32 SDL_GetMouseState(float* x, float* y);
+void SDL_WarpMouseInWindow(SDL_Window* window, float x, float y);
+void SDLTest_SetRelativeMouseSupported(bool supported);
 bool SDL_PollEvent(SDL_Event* event);
 bool SDL_WaitEventTimeout(SDL_Event* event, Sint32 timeoutMS);
 bool SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
@@ -245,6 +251,8 @@ bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID devid, SDL_AudioSpec* spec, int*
 SDL_AudioDeviceID SDL_GetAudioStreamDevice(SDL_AudioStream* stream);
 #define SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES "SDL_AUDIO_DEVICE_SAMPLE_FRAMES"
 const char* SDL_GetHint(const char* name);
+#define SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE "SDL_MOUSE_RELATIVE_SYSTEM_SCALE"
+#define SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE "SDL_MOUSE_RELATIVE_SPEED_SCALE"
 bool SDL_SetHint(const char* name, const char* value);
 bool SDL_ResetHint(const char* name);
 void SDLTest_SetAudioDevice(int rate, int frames, bool failOpen, bool failQuery);

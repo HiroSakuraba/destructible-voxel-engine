@@ -26,6 +26,31 @@ std::uint32_t pointer_modifiers(platform::Modifier modifiers) noexcept {
 
 } // namespace
 
+EditorPlatformBridge::~EditorPlatformBridge() {
+    if (host_) (void)host_->set_relative_mouse_mode(false);
+}
+
+void EditorPlatformBridge::sync_pointer_capture() {
+    const bool navigation = controller_.navigation_pointer_active();
+    if (!navigation && navigationWasActive_) controller_.clear_navigation_input();
+    navigationWasActive_ = navigation;
+    if (!host_) return;
+    const bool wanted = controller_.raw_mouse_requested() && navigation;
+    if (!wanted) {
+        if (host_->relative_mouse_mode()) {
+            (void)host_->set_relative_mouse_mode(false);
+            controller_.clear_navigation_input();
+        }
+        captureAttempted_ = false;
+    } else if (!captureAttempted_) {
+        captureAttempted_ = true;
+        std::string error;
+        if (!host_->set_relative_mouse_mode(true, &error))
+            controller_.workspace().log().add(EditorLogLevel::Warning,
+                "Raw mouse unavailable; using ordinary pointer motion: " + error);
+    }
+}
+
 void EditorPlatformBridge::handle_event(const platform::PlatformEvent& event) {
     const bool control = platform::has_modifier(event.modifiers, platform::Modifier::Control);
     const bool shift = platform::has_modifier(event.modifiers, platform::Modifier::Shift);
@@ -62,14 +87,18 @@ void EditorPlatformBridge::handle_event(const platform::PlatformEvent& event) {
             controller_.text_input(event.text);
             break;
         case platform::EventType::PointerMove:
-            controller_.pointer_move(x, y, pointer_modifiers(event.modifiers));
+            if (event.relativeMotion) controller_.pointer_relative(event.deltaX, event.deltaY);
+            else controller_.pointer_move(x, y, pointer_modifiers(event.modifiers));
             break;
         case platform::EventType::PointerButtonDown:
+            if (!host_ || !host_->relative_mouse_mode()) { capturePointerX_ = x; capturePointerY_ = y; }
             controller_.pointer_down(to_editor_button(event.button), x, y,
                                      pointer_modifiers(event.modifiers));
             break;
         case platform::EventType::PointerButtonUp:
-            controller_.pointer_up(to_editor_button(event.button), x, y,
+            controller_.pointer_up(to_editor_button(event.button),
+                                   host_ && host_->relative_mouse_mode() ? capturePointerX_ : x,
+                                   host_ && host_->relative_mouse_mode() ? capturePointerY_ : y,
                                    pointer_modifiers(event.modifiers));
             break;
         case platform::EventType::PointerWheel:
@@ -118,6 +147,7 @@ void EditorPlatformBridge::handle_event(const platform::PlatformEvent& event) {
             break;
         }
     }
+    sync_pointer_capture();
 }
 
 void EditorPlatformBridge::publish_gamepad_state() {
@@ -133,6 +163,7 @@ void EditorPlatformBridge::publish_gamepad_state() {
 }
 
 void EditorPlatformBridge::update(float elapsedSeconds) {
+    sync_pointer_capture();
     const bool playing = controller_.play_session().active();
     if (playing && (sticksDirty_ || !playWasActive_ ||
         stickSettingsRevision_ != controller_.workspace().settings().revision())) publish_gamepad_state();

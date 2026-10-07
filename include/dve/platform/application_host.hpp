@@ -121,6 +121,9 @@ struct PlatformEvent {
     PointerButton button{PointerButton::NoButton};
     int x{};
     int y{};
+    float deltaX{};
+    float deltaY{};
+    bool relativeMotion{};
     int width{};
     int height{};
     float wheelX{};
@@ -175,6 +178,12 @@ public:
     [[nodiscard]] virtual WindowMetrics window_metrics() const noexcept = 0;
     [[nodiscard]] virtual NativeWindowHandle native_window_handle() const noexcept = 0;
     virtual void set_window_title(std::string_view title) = 0;
+    // Unsupported hosts retain ordinary absolute pointing and report failure.
+    virtual bool set_relative_mouse_mode(bool enabled, std::string* error = nullptr) {
+        if (enabled && error) *error = "Relative mouse capture is unavailable in this host";
+        return !enabled;
+    }
+    [[nodiscard]] virtual bool relative_mouse_mode() const noexcept { return false; }
 
     virtual void set_clipboard_text(std::string_view text) = 0;
     [[nodiscard]] virtual std::string clipboard_text() const = 0;

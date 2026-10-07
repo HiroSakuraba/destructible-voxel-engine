@@ -100,6 +100,35 @@ int main() {
                 std::abs(converted.gamepadValue + 0.5F) < 0.001F, "gamepad axis normalization failed");
         require(host.poll_event(converted) && converted.type == EventType::FileDropped && converted.path == "/tmp/model.gltf", "file drop failed");
         require(!host.poll_event(converted), "SDL event queue did not drain");
+        SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "1");
+        SDL_SetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, "2.5");
+        auto* native = static_cast<SDL_Window*>(host.native_window_handle().window);
+        SDL_WarpMouseInWindow(native, 211.5F, 302.25F);
+        require(host.set_relative_mouse_mode(true, &error) && host.relative_mouse_mode(), "relative capture failed");
+        require(std::string(SDL_GetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE)) == "0" &&
+                std::string(SDL_GetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE)) == "1", "raw capture retained pointer scaling");
+        SDL_Event motion{};
+        motion.type = SDL_EVENT_MOUSE_MOTION;
+        motion.motion.x = 400; motion.motion.y = 300;
+        motion.motion.xrel = 0.25F; motion.motion.yrel = -1.75F;
+        SDLTest_PushEvent(&motion);
+        require(host.poll_event(converted) && converted.relativeMotion && converted.deltaX == 0.25F &&
+                converted.deltaY == -1.75F, "relative motion was rounded or lost");
+        SDL_WarpMouseInWindow(native, 900, 600);
+        require(host.set_relative_mouse_mode(false, &error), "capture release failed");
+        float cursorX{}, cursorY{};
+        SDL_GetMouseState(&cursorX, &cursorY);
+        require(cursorX == 211.5F && cursorY == 302.25F, "capture did not restore UI cursor");
+        require(std::string(SDL_GetHint(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE)) == "1" &&
+                std::string(SDL_GetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE)) == "2.5", "capture leaked global hints");
+        SDLTest_SetRelativeMouseSupported(false);
+        require(!host.set_relative_mouse_mode(true, &error) && !host.relative_mouse_mode(), "unsupported capture reported success");
+        require(std::string(SDL_GetHint(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE)) == "2.5", "failed capture leaked hints");
+        SDLTest_SetRelativeMouseSupported(true);
+        require(host.set_relative_mouse_mode(true), "second capture failed");
+        SDL_Event lost{}; lost.type = SDL_EVENT_WINDOW_FOCUS_LOST; SDLTest_PushEvent(&lost);
+        require(host.poll_event(converted) && converted.type == EventType::WindowFocusLost &&
+                !host.relative_mouse_mode(), "focus loss left mouse captured");
         require(!host.wait_for_events(std::chrono::milliseconds(0)), "empty queue reported an event");
         require(!host.wait_for_events(std::chrono::milliseconds(-1)), "negative wait was not clamped to a poll");
 

@@ -10,10 +10,13 @@ namespace dve::editor {
 // registry (for example "Escape", "Enter", "C", "F5").
 class EditorPlatformBridge {
 public:
-    explicit EditorPlatformBridge(NativeEditorController& controller) : controller_(controller) {}
+    explicit EditorPlatformBridge(NativeEditorController& controller, platform::IApplicationHost* host = nullptr)
+        : controller_(controller), host_(host) {}
+    ~EditorPlatformBridge();
 
     void handle_event(const platform::PlatformEvent& event);
     void update(float elapsedSeconds);
+    void sync_pointer_capture();
     // UI zoom currently applied by the host (see dve/editor_ui_zoom.hpp). Pointer positions and
     // resize extents arrive in window coordinates and are mapped to logical editor pixels.
     void set_ui_zoom(float zoom) noexcept { zoom_ = zoom > 0.0F ? zoom : 1.0F; }
@@ -21,6 +24,10 @@ public:
 
 private:
     NativeEditorController& controller_;
+    platform::IApplicationHost* host_{};
+    bool captureAttempted_{};
+    bool navigationWasActive_{};
+    int capturePointerX_{}, capturePointerY_{};
     float zoom_{1.0F};
     struct HeldNavigationKey {
         platform::PlatformEvent event;

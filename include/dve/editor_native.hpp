@@ -476,6 +476,10 @@ public:
     // lower the redraw rate otherwise (anything not listed still updates, just less often).
     [[nodiscard]] bool animating() const noexcept;
     void pointer_move(int x, int y, std::uint32_t modifiers = 0);
+    // Raw deltas keep fractional precision and do not change UI hover/picking coordinates.
+    void pointer_relative(float deltaX, float deltaY);
+    [[nodiscard]] bool navigation_pointer_active() const noexcept;
+    [[nodiscard]] bool raw_mouse_requested() const noexcept { return rawMouseRequested_; }
     void pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers = 0);
     void pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers = 0);
     void pointer_wheel(float steps, int x, int y, std::uint32_t modifiers = 0);
@@ -609,6 +613,7 @@ private:
     void apply_voxel_tool(const EditorPickResult& pick);
     void begin_gizmo_drag(int x, int y);
     void update_gizmo_drag(int x, int y);
+    void navigate_pointer(float deltaX, float deltaY);
     void finish_gizmo_drag(bool cancel);
     void set_status(std::string text, bool error = false, float seconds = 3.0F);
     void create_new_project_now();
@@ -726,6 +731,9 @@ private:
     EditorStatusMessage status_{"Ready", false, 0.0F};
 
     PointerButton dragButton_{PointerButton::NoButton};
+    bool rawMouseRequested_{true};
+    std::string navigationShortcutProfile_{"DVE Default"};
+    std::string configuredShortcutProfile_;
     int hoverX_{-100000};
     int hoverY_{-100000};
     int lastPointerX_{};

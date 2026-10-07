@@ -12,6 +12,10 @@
 #include "dve/editor_materials.hpp"
 #include "dve/query.hpp"
 
+namespace dve {
+class JobSystem;
+} // namespace dve
+
 namespace dve::editor {
 
 struct UiRect {
@@ -162,6 +166,17 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
     UiRect viewport,
     const EditorViewportSettings& settings,
     std::optional<EditorObjectId> selectedObject);
+// Same list, with the depth sort of large lists split across `jobs` (item-for-item
+// identical to the single-threaded build). `jobs` must not be in use by another thread;
+// nullptr builds on the calling thread.
+[[nodiscard]] std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
+    const EditorDocument& document,
+    const EditorMaterialLibrary& materials,
+    const EditorCamera& camera,
+    UiRect viewport,
+    const EditorViewportSettings& settings,
+    const std::set<EditorObjectId>& selectedObjects,
+    JobSystem* jobs);
 
 // Cheap O(objects + anchors) fingerprint of everything that affects the voxel draw
 // list and selection diagnostics: object ids/parents/flags/transforms/voxel sizes,

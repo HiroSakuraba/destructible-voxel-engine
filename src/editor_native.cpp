@@ -216,6 +216,7 @@ NativeEditorController::NativeEditorController(EditorWorkspace workspace, std::f
     (void)create_camera_rig_from_view("Editor Camera");
     configure_ai_assistant();
     spriteAuthoringPanel_.resize(width_, height_);
+    startupWorkspaceState_ = capture_workspace_state();
 }
 
 bool NativeEditorController::start_play_session(EditorMode mode) {
@@ -356,12 +357,19 @@ void NativeEditorController::reset_camera_navigation() noexcept {
 }
 
 void NativeEditorController::configure_ai_assistant(std::filesystem::path projectRoot) {
-    stop_live_mcp_host();
+    const bool explicitProject = !projectRoot.empty();
     if (projectRoot.empty()) projectRoot = std::filesystem::current_path();
     std::error_code projectError;
-    projectRoot_ = std::filesystem::weakly_canonical(projectRoot, projectError);
-    if (projectError) projectRoot_ = projectRoot.lexically_normal();
+    auto nextRoot = std::filesystem::weakly_canonical(projectRoot, projectError);
+    if (projectError) nextRoot = projectRoot.lexically_normal();
+    const bool activateWorkspace = explicitProject && (!workspaceProjectConfigured_ || nextRoot != projectRoot_);
+    if (activateWorkspace && workspaceProjectConfigured_) {
+        std::string error;
+        if (!save_workspace_state(&error)) workspace_.log().add(EditorLogLevel::Warning, "Workspace save: " + error);
+    }
+    stop_live_mcp_host();
     (void)finish_asset_scan();
+    projectRoot_ = std::move(nextRoot);
     assetDatabase_.set_project_root(projectRoot_);
     std::string assetIndexError;
     if (!assetDatabase_.load(&assetIndexError) && !assetIndexError.empty())
@@ -397,6 +405,8 @@ void NativeEditorController::configure_ai_assistant(std::filesystem::path projec
     auto transport = std::make_unique<ai::CurlAiHttpTransport>();
     auto client = std::make_unique<ai::OpenAiResponsesClient>(*aiBridge_, std::move(transport));
     workspace_.ai_assistant().attach(std::move(client), aiBridge_.get(), &aiTasks_);
+    if (explicitProject) workspaceProjectConfigured_ = true;
+    if (activateWorkspace) restore_workspace_state();
 }
 
 
@@ -422,6 +432,7 @@ bool NativeEditorController::refresh_asset_database(bool announce) {
     if (assetBrowserState_.selectedId && !std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId))
         assetBrowserState_.selectedId.reset();
     assetBrowserState_.firstVisible = 0U;
+    restore_workspace_asset_selection();
     recompute_layout();
     if (announce) {
         set_status("Assets indexed: " + std::to_string(report.indexed) +
@@ -509,6 +520,7 @@ void NativeEditorController::apply_asset_scan(AssetScanJob& job) {
         assetBrowserState_.selectedId.reset();
     // Keep the user's scroll position unless the list got shorter than it.
     if (assetBrowserState_.firstVisible >= assetDatabase_.records().size()) assetBrowserState_.firstVisible = 0U;
+    restore_workspace_asset_selection();
     recompute_layout();
     const EditorAssetScanReport& report = job.report;
     if (job.announce) {
@@ -2618,10 +2630,12 @@ std::string_view NativeEditorController::pending_confirmation_message() const no
 }
 
 void NativeEditorController::request_quit() {
+    if (quitRequested_) return;
     if (workspace_.document().dirty() && workspace_.preferences().confirmDestructiveActions) {
         pendingDestructiveAction_ = PendingDestructiveAction::Quit;
         return;
     }
+    save_workspace_state_on_quit();
     quitRequested_ = true;
 }
 
@@ -2647,6 +2661,7 @@ void NativeEditorController::confirm_pending_destructive_action() {
     const PendingDestructiveAction action = pendingDestructiveAction_;
     pendingDestructiveAction_ = PendingDestructiveAction::Inactive;
     if (action == PendingDestructiveAction::Quit) {
+        save_workspace_state_on_quit();
         quitRequested_ = true;
     } else if (action == PendingDestructiveAction::NewProject) {
         create_new_project_now();

@@ -10,3 +10,4 @@ out/
 *.bak
 *.log
 compile_commands.json
+**/.dve/user/workspace.txt

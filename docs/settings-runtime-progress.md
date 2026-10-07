@@ -7,7 +7,16 @@ The complete 134-setting behavior contract is not implemented by these batches. 
 `applied` flag and source-reference audit indicate wiring, not full behavioral certification.
 No placeholder reads have been added to claim coverage of the remaining settings.
 
-## Current viewport-navigation batch
+## Workspace restoration batch
+
+Main after PR #68 connected 70 of the original 134 settings, leaving 64 unapplied.
+This batch connects `editor.restore_workspace`: 71 connected and 63 unapplied.
+It restores the state supported by the fixed native editor layout; arbitrary docking
+and other asset-authoring panels remain outside this implementation. See
+[workspace-restoration.md](workspace-restoration.md) for persistence, validation,
+application timing and limitations. Wiring is not full acceptance certification.
+
+## Viewport-navigation batch
 
 Main after PR #67 connected 68 of the original 134 settings, leaving 66 unapplied.
 This batch connects `camera.navigation_style` and `input.raw_mouse`: 70 connected,
@@ -158,7 +167,7 @@ do not certify the full all-settings feature; source references alone are not be
 | `render.high_dpi` | SDL window creation (restart) |
 | `scripting.lua` | EditorPlaySession startup-script lifecycle |
 
-## Remaining 64 settings
+## Remaining 63 settings
 
 
 These retain the unapplied marker in the UI. Each row records the intended behavior,
@@ -167,7 +176,6 @@ they still need actual owners, resource/lifecycle integration and behavioral che
 
 | Setting | Required behavior |
 | --- | --- |
-| `editor.restore_workspace` | When enabled, restore panel positions, active tabs, open assets and viewport state from a versioned per-project workspace record. When disabled, start from the default layout and ignore the saved record. Do not reopen untrusted assets automatically or confuse layout recovery with unsaved-scene recovery. |
 | `editor.telemetry_local` | Enable bounded local collection of frame, rendering, task and audio statistics. Turning it off stops optional collection and persistence; error reporting still works. Never transmit this data. Expose retention, clear-data and capture status so the setting has a visible meaning. |
 | `render.backend` | Select the actual graphics backend used to create the rendering device at restart. Each available choice must have a functioning device path. Preserve the requested choice and display the active backend; a missing platform/backend must produce an explicit failure or user-visible fallback, never a silent no-op. |
 | `render.display_mode` | Apply windowed, borderless fullscreen, or supported exclusive fullscreen to the selected game/presentation window. Remember the previous windowed size and position. Recreate presentation resources safely and restore them if the change fails. |

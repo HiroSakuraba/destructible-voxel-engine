@@ -13,6 +13,7 @@
 #include "dve/editor_workspace.hpp"
 #include "dve/game_ui.hpp"
 #include "dve/physics3d_backend.hpp"
+#include "dve/render_environment.hpp"
 #include "dve/camera_system.hpp"
 
 namespace dve::editor {
@@ -30,6 +31,9 @@ struct EditorPlaySessionConfig {
     bool preferProductionPhysics{true};
     Physics3DBackend physicsBackend{Physics3DBackend::Automatic};
     Physics3DWorldConfig physicsWorld{};
+    // Seeded into the script host's world environment when a session creates
+    // one; scripts may still adjust the environment afterwards at runtime.
+    RenderEnvironment environment{};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
 };

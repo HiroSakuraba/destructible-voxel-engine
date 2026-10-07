@@ -244,6 +244,11 @@ public:
     // it yet (no shading pass runs on real hardware), same caveat as hud_model() above.
     [[nodiscard]] const RenderEnvironment& environment() const;
 
+    // Host-side seed for environment(): validates and replaces the current
+    // environment (for example from editor settings when a session starts).
+    // Scripts may still adjust values afterwards at runtime.
+    bool set_environment(const RenderEnvironment& environment, std::string* error = nullptr);
+
     // Masters and instances a script has defined via world.create_master_material/
     // create_material_instance, plus any runtime parameter overrides from
     // world.set_material_parameter. A host's own rendering code would read

@@ -161,6 +161,41 @@ end)
     require(session.stop(workspace, &error), error.c_str());
 }
 
+void test_lua_environment_seeded_from_settings(const std::filesystem::path& root) {
+    std::filesystem::create_directories(root / "scripts");
+    const std::filesystem::path script = root / "scripts" / "main.lua";
+    std::ofstream out(script);
+    out << R"LUA(
+local env = world.get_environment()
+world.log("env exposure=" .. tostring(env.exposure)
+    .. " tonemap=" .. env.tonemap_operator
+    .. " strength=" .. tostring(env.shadow_strength)
+    .. " samples=" .. tostring(env.shadow_samples))
+)LUA";
+    out.close();
+
+    EditorWorkspace workspace(make_session_document());
+    EditorMaterialLibrary materials = EditorMaterialLibrary::make_default();
+    EditorPlaySession session;
+    EditorPlaySessionConfig config;
+    config.projectRoot = root;
+    config.startupScript = script;
+    config.environment.exposure = 2.5F;
+    config.environment.tonemapOperator = TonemapOperator::Reinhard;
+    config.environment.shadowStrength = 0.25F;
+    config.environment.shadowSamples = 8U;
+    bool sawEnvironment = false;
+    std::string error;
+    require(session.start(
+        workspace, materials, EditorMode::Play, config,
+        [&](EditorLogLevel, std::string text) {
+            if (text == "env exposure=2.5 tonemap=reinhard strength=0.25 samples=8")
+                sawEnvironment = true;
+        }, &error), error.c_str());
+    require(sawEnvironment, "startup script did not observe the seeded render environment");
+    require(session.stop(workspace, &error), error.c_str());
+}
+
 void test_failed_lua_start_restores_edit_state(const std::filesystem::path& root) {
     std::filesystem::create_directories(root / "scripts");
     const std::filesystem::path script = root / "scripts" / "broken.lua";
@@ -233,6 +268,7 @@ int main() {
         const auto root = std::filesystem::temp_directory_path() / "dve_editor_play_session_lua";
         std::filesystem::remove_all(root);
         test_lua_input_hud_and_log(root);
+        test_lua_environment_seeded_from_settings(root);
         test_failed_lua_start_restores_edit_state(root);
         std::filesystem::remove_all(root);
 #endif

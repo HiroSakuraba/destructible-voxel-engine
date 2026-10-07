@@ -167,7 +167,8 @@ struct LiveEnvironmentFrameStats {
     std::size_t maximumFrameConstantBytes,
     rhi::TextureFormat colorFormat,
     LiveEnvironmentRendererResources& resources,
-    std::string* error = nullptr);
+    std::string* error = nullptr,
+    MaterialSamplerPolicy samplerPolicy = {});
 
 [[nodiscard]] bool destroy_live_environment_renderer(
     rhi::IDevice& device,

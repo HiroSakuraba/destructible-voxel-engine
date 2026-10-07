@@ -1,5 +1,7 @@
 #include "dve/render/material_resource_residency.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <span>
 #include <utility>
@@ -184,6 +186,25 @@ bool MaterialResourceResidency::ensure_sampler(
     desc.addressV = to_address_mode(source.wrapT);
     desc.addressW = rhi::AddressMode::Repeat;
     desc.debugName = "Shared polygon material sampler";
+    bool mipmapFallback = false;
+    if (samplerPolicy_.overrideFiltering) {
+        desc.minFilter = samplerPolicy_.minFilter;
+        desc.magFilter = samplerPolicy_.magFilter;
+        desc.mipmapFilter = samplerPolicy_.mipmapFilter;
+        // Residency images are uploaded with a single mip level, so a policy
+        // requesting mipmap filtering has no chain to sample. Fall back to
+        // non-mip filtering explicitly (and count it) instead of silently
+        // claiming trilinear/anisotropic sampling is in effect.
+        if (desc.mipmapFilter == rhi::MipmapFilterMode::Linear) {
+            desc.mipmapFilter = rhi::MipmapFilterMode::Nearest;
+            mipmapFallback = true;
+        }
+        const float grantedAnisotropy = effective_max_anisotropy();
+        if (samplerPolicy_.anisotropy && grantedAnisotropy > 1.0F) {
+            desc.anisotropy = true;
+            desc.maximumAnisotropy = grantedAnisotropy;
+        }
+    }
     std::string local;
     sampler = device_.create_sampler(desc, &local);
     if (!sampler) {
@@ -192,7 +213,18 @@ bool MaterialResourceResidency::ensure_sampler(
     }
     samplers_.emplace(key, sampler);
     ++stats_.samplersCreated;
+    if (desc.anisotropy) ++stats_.anisotropicSamplersCreated;
+    if (mipmapFallback) ++stats_.mipmapFallbackSamplersCreated;
     return true;
+}
+
+float MaterialResourceResidency::effective_max_anisotropy() const noexcept {
+    if (!samplerPolicy_.overrideFiltering || !samplerPolicy_.anisotropy) return 1.0F;
+    const float request = samplerPolicy_.requestedMaxAnisotropy;
+    const float limit = device_.capabilities().maxSamplerAnisotropy;
+    if (!std::isfinite(request) || request < 1.0F) return 1.0F;
+    if (!std::isfinite(limit) || limit < 1.0F) return 1.0F;
+    return std::min(request, limit);
 }
 
 bool MaterialResourceResidency::is_retained(std::uint64_t assetContentHash) const noexcept {

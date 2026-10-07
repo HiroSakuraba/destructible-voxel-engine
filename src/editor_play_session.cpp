@@ -184,6 +184,12 @@ public:
                     if (logSink_) logSink_(isError ? EditorLogLevel::Error : EditorLogLevel::Info,
                                            std::move(text));
                 });
+                std::string environmentError;
+                if (!scripts_->set_environment(config.environment, &environmentError)) {
+                    if (error) *error = "could not apply the session render environment: " + environmentError;
+                    stop();
+                    return false;
+                }
                 std::string scriptError;
                 if (!scripts_->run_file(startup, &scriptError)) {
                     if (error) *error = "startup script failed: " + scriptError;

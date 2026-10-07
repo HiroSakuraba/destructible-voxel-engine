@@ -2668,4 +2668,10 @@ const MaterialParameterCollection& GameScriptHost::material_parameter_collection
 }
 const RenderEnvironment& GameScriptHost::environment() const { return impl_->environment; }
 
+bool GameScriptHost::set_environment(const RenderEnvironment& environment, std::string* error) {
+    if (!environment.validate(error)) return false;
+    impl_->environment = environment;
+    return true;
+}
+
 } // namespace dve

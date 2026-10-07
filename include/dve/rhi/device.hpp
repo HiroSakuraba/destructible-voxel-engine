@@ -210,6 +210,7 @@ struct DeviceCapabilities {
     std::uint32_t minStorageBufferOffsetAlignment{16};
     std::uint32_t minUniformBufferOffsetAlignment{256};
     std::uint32_t maxTextureDimension2D{16384};
+    float maxSamplerAnisotropy{1.0F};
     bool timestampQueries{true};
     std::uint32_t timestampValidBits{64U};
     double timestampPeriodNanoseconds{1.0};

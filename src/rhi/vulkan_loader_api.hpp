@@ -368,7 +368,32 @@ struct DeviceQueueCreateInfo {
     std::uint32_t queueCount;
     const float* pQueuePriorities;
 };
-struct PhysicalDeviceFeatures;
+// VkPhysicalDeviceFeatures has a fixed Vulkan 1.0 layout of 55 Bool32 values.
+// The fields up to samplerAnisotropy are named; the remaining tail is storage
+// the driver writes in full, so it must be present at its exact size.
+struct PhysicalDeviceFeatures {
+    Bool32 robustBufferAccess;
+    Bool32 fullDrawIndexUint32;
+    Bool32 imageCubeArray;
+    Bool32 independentBlend;
+    Bool32 geometryShader;
+    Bool32 tessellationShader;
+    Bool32 sampleRateShading;
+    Bool32 dualSrcBlend;
+    Bool32 logicOp;
+    Bool32 multiDrawIndirect;
+    Bool32 drawIndirectFirstInstance;
+    Bool32 depthClamp;
+    Bool32 depthBiasClamp;
+    Bool32 fillModeNonSolid;
+    Bool32 depthBounds;
+    Bool32 wideLines;
+    Bool32 largePoints;
+    Bool32 alphaToOne;
+    Bool32 multiViewport;
+    Bool32 samplerAnisotropy;
+    Bool32 remaining[35];
+};
 // The prefix of VkPhysicalDeviceProperties is stable in Vulkan 1.0. The opaque
 // tail intentionally over-allocates storage so the loader may write the complete
 // implementation-defined limits/sparse-properties payload without requiring the SDK headers.
@@ -623,6 +648,7 @@ using PFN_CreateInstance = Result (DVE_VKAPI_CALL*)(const InstanceCreateInfo*, c
 using PFN_DestroyInstance = void (DVE_VKAPI_CALL*)(Instance, const void*);
 using PFN_EnumeratePhysicalDevices = Result (DVE_VKAPI_CALL*)(Instance, std::uint32_t*, PhysicalDevice*);
 using PFN_GetPhysicalDeviceProperties = void (DVE_VKAPI_CALL*)(PhysicalDevice, PhysicalDeviceProperties*);
+using PFN_GetPhysicalDeviceFeatures = void (DVE_VKAPI_CALL*)(PhysicalDevice, PhysicalDeviceFeatures*);
 using PFN_GetPhysicalDeviceQueueFamilyProperties = void (DVE_VKAPI_CALL*)(PhysicalDevice, std::uint32_t*, QueueFamilyProperties*);
 using PFN_GetPhysicalDeviceMemoryProperties = void (DVE_VKAPI_CALL*)(PhysicalDevice, PhysicalDeviceMemoryProperties*);
 using PFN_GetPhysicalDeviceFormatProperties = void (DVE_VKAPI_CALL*)(PhysicalDevice, Format, FormatProperties*);

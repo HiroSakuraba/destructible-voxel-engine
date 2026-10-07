@@ -118,6 +118,7 @@ NullDevice::NullDevice() {
     capabilities_.adapterClass = AdapterClass::Cpu;
     capabilities_.softwareAdapter = true;
     capabilities_.apiVersion = 1U;
+    capabilities_.maxSamplerAnisotropy = 16.0F;
 }
 
 void NullDevice::set_error(std::string* error, std::string_view message) {

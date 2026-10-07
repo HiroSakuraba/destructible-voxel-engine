@@ -132,7 +132,8 @@ public:
 
         const auto resolveStart = Clock::now();
         const float exposure = options_.exposure * (environment.exposure > 0.0F ? environment.exposure : 1.0F);
-        if (!render::resolve_polygon_render_rgba8(target_, exposure, frame_.pixels, error)) return false;
+        if (!render::resolve_polygon_render_rgba8(target_, exposure, environment.tonemapOperator,
+                                                  frame_.pixels, error)) return false;
         stats_.resolveMilliseconds = milliseconds_since(resolveStart);
         rendered_ = true;
         return true;

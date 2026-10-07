@@ -6,6 +6,8 @@
 #include "dve/editor_settings.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/camera_system.hpp"
+#include "dve/render/material_resource_residency.hpp"
+#include "dve/render_environment.hpp"
 
 namespace dve::editor {
 
@@ -23,6 +25,58 @@ public:
 private:
     const EditorSettingsRegistry& registry_;
 };
+
+// Applies the Rendering settings to a render environment. Exposure is a
+// linear pre-tonemap multiplier (1 is neutral, 2 is one stop up) and replaces
+// the environment value outright, so a global and an authored exposure never
+// multiply twice in this path. Shadow quality selects the directional sample
+// count from the published preset table (low 1, medium 2, high 4, ultra 8);
+// shadow strength and the sun's angular radius map to the same-named fields.
+inline RenderEnvironment render_environment_settings(const EditorSettingsRegistry& registry,
+                                                     RenderEnvironment environment = {}) {
+    const RuntimeSettingsReader s(registry);
+    environment.exposure = s.number("render.exposure");
+    const auto tonemap = s.get<std::string>("render.tonemap");
+    environment.tonemapOperator = tonemap == "reinhard" ? TonemapOperator::Reinhard
+        : tonemap == "clamp" ? TonemapOperator::Clamp : TonemapOperator::ACES;
+    environment.shadowStrength = s.number("render.shadow_strength");
+    environment.shadowSoftnessRadians = s.number("render.shadow_softness");
+    const auto quality = s.get<std::string>("render.shadow_quality");
+    environment.shadowSamples = quality == "low" ? 1U
+        : quality == "medium" ? 2U
+        : quality == "ultra" ? 8U : 4U;
+    return environment;
+}
+
+// Resolves render.texture_filter / render.anisotropy into the residency's
+// sampler policy. The anisotropy level is a request: the residency clamps it
+// to the device limit and reports the effective level.
+inline render::MaterialSamplerPolicy material_sampler_policy(const EditorSettingsRegistry& registry) {
+    const RuntimeSettingsReader s(registry);
+    render::MaterialSamplerPolicy policy;
+    policy.overrideFiltering = true;
+    const auto filter = s.get<std::string>("render.texture_filter");
+    if (filter == "nearest") {
+        policy.minFilter = rhi::FilterMode::Nearest;
+        policy.magFilter = rhi::FilterMode::Nearest;
+        policy.mipmapFilter = rhi::MipmapFilterMode::Nearest;
+    } else if (filter == "bilinear") {
+        policy.minFilter = rhi::FilterMode::Linear;
+        policy.magFilter = rhi::FilterMode::Linear;
+        policy.mipmapFilter = rhi::MipmapFilterMode::Nearest;
+    } else if (filter == "anisotropic") {
+        policy.minFilter = rhi::FilterMode::Linear;
+        policy.magFilter = rhi::FilterMode::Linear;
+        policy.mipmapFilter = rhi::MipmapFilterMode::Linear;
+        policy.anisotropy = true;
+        policy.requestedMaxAnisotropy = static_cast<float>(s.integer("render.anisotropy"));
+    } else {  // trilinear, the registry default
+        policy.minFilter = rhi::FilterMode::Linear;
+        policy.magFilter = rhi::FilterMode::Linear;
+        policy.mipmapFilter = rhi::MipmapFilterMode::Linear;
+    }
+    return policy;
+}
 
 inline EditorPlaySessionConfig play_session_settings(const EditorSettingsRegistry& registry) {
     const RuntimeSettingsReader s(registry);
@@ -42,6 +96,7 @@ inline EditorPlaySessionConfig play_session_settings(const EditorSettingsRegistr
     config.physicsWorld.deterministicSimulation = s.get<bool>("physics.deterministic");
     config.physicsWorld.allowSleeping = s.get<bool>("physics.allow_sleeping");
     config.physicsWorld.continuousCollision = s.get<bool>("physics.continuous_collision");
+    config.environment = render_environment_settings(registry);
     return config;
 }
 

@@ -223,7 +223,8 @@ bool create_live_environment_renderer(rhi::IDevice& device,
                                       std::size_t maximumFrameConstantBytes,
                                       rhi::TextureFormat colorFormat,
                                       LiveEnvironmentRendererResources& out,
-                                      std::string* error) {
+                                      std::string* error,
+                                      MaterialSamplerPolicy samplerPolicy) {
     if (!lighting.valid() || !shadowAtlas.valid() || !bytecode.valid() ||
         maximumFrameConstantBytes == 0U || colorFormat == rhi::TextureFormat::D32Float) {
         set_error(error, "live environment renderer creation arguments are invalid");
@@ -237,7 +238,7 @@ bool create_live_environment_renderer(rhi::IDevice& device,
         set_error(error, std::move(message));
         return false;
     };
-    r.materialResidency = std::make_unique<MaterialResourceResidency>(device);
+    r.materialResidency = std::make_unique<MaterialResourceResidency>(device, samplerPolicy);
     r.shadowMaterials = std::make_unique<ShadowMaterialDescriptorTable>(device, *r.materialResidency);
     if (!r.shadowMaterials->initialize(&local)) return fail(local);
     r.mainMaterials = std::make_unique<MainMaterialDescriptorTable>(device, *r.materialResidency);

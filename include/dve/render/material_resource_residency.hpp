@@ -19,10 +19,27 @@ struct MaterialResourceResidencyStats {
     std::uint64_t imageCacheHits{};
     std::uint64_t samplersCreated{};
     std::uint64_t samplerCacheHits{};
+    std::uint64_t anisotropicSamplersCreated{};
+    std::uint64_t mipmapFallbackSamplersCreated{};
     std::size_t retainedAssetCount{};
     std::size_t assetReferenceCount{};
     std::size_t imageResourceCount{};
     std::size_t samplerResourceCount{};
+};
+
+// Global sampling policy for shared material samplers (the render.texture_filter
+// and render.anisotropy settings resolve into this). With overrideFiltering off,
+// samplers keep their authored filter modes and anisotropy stays disabled.
+// When on, the policy replaces the authored filter selection for every shared
+// scene-texture sampler; wrap modes stay authored. UI and other dedicated
+// samplers are created outside the residency and are never affected.
+struct MaterialSamplerPolicy {
+    bool overrideFiltering{};
+    rhi::FilterMode minFilter{rhi::FilterMode::Linear};
+    rhi::FilterMode magFilter{rhi::FilterMode::Linear};
+    rhi::MipmapFilterMode mipmapFilter{rhi::MipmapFilterMode::Linear};
+    bool anisotropy{};
+    float requestedMaxAnisotropy{1.0F};
 };
 
 // Shared owner for authored polygon-material images and samplers. Descriptor tables retain an
@@ -30,10 +47,19 @@ struct MaterialResourceResidencyStats {
 // after the final table releases the asset, preventing main/shadow duplication and premature frees.
 class MaterialResourceResidency {
 public:
-    explicit MaterialResourceResidency(rhi::IDevice& device) : device_(device) {}
+    explicit MaterialResourceResidency(rhi::IDevice& device,
+                                       MaterialSamplerPolicy samplerPolicy = {})
+        : device_(device), samplerPolicy_(samplerPolicy) {}
     ~MaterialResourceResidency();
     MaterialResourceResidency(const MaterialResourceResidency&) = delete;
     MaterialResourceResidency& operator=(const MaterialResourceResidency&) = delete;
+
+    [[nodiscard]] const MaterialSamplerPolicy& sampler_policy() const noexcept {
+        return samplerPolicy_;
+    }
+    // The anisotropy level actually granted under the policy: the request
+    // clamped to the device limit, or 1 when anisotropy is not in effect.
+    [[nodiscard]] float effective_max_anisotropy() const noexcept;
 
     bool retain_asset(std::uint64_t assetContentHash, std::string* error = nullptr);
     bool release_asset(std::uint64_t assetContentHash, std::string* error = nullptr);
@@ -80,6 +106,7 @@ private:
                                  std::string* error) noexcept;
 
     rhi::IDevice& device_;
+    MaterialSamplerPolicy samplerPolicy_{};
     std::unordered_map<std::uint64_t, std::uint32_t> assetReferences_;
     std::unordered_map<ImageKey, ImageResource, KeyHash> images_;
     std::unordered_map<SamplerKey, rhi::SamplerHandle, KeyHash> samplers_;

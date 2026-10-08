@@ -219,6 +219,13 @@ void PackedBrickmapScene::write_upload(
 
 PackedBrickmapUpdateStats PackedBrickmapScene::publish_uploads(
     std::span<const GpuBrickUpload> uploads) {
+    // External uploads are expected to come from one monotonically increasing source.
+    // update() instead builds a fresh upload from its current authoritative object.
+    return publish_uploads_impl(uploads, false);
+}
+
+PackedBrickmapUpdateStats PackedBrickmapScene::publish_uploads_impl(
+    std::span<const GpuBrickUpload> uploads, bool fromCurrentObject) {
     PackedBrickmapUpdateStats stats;
     stats.candidateUploads = uploads.size();
     bool boundsChanged = false;
@@ -243,7 +250,7 @@ PackedBrickmapUpdateStats PackedBrickmapScene::publish_uploads(
                                   std::max(bounds_.maxKey.z, upload.key.z)};
                 boundsChanged = true;
             }
-        } else if (upload.generation < records_[slot].generation) {
+        } else if (!fromCurrentObject && upload.generation < records_[slot].generation) {
             ++stats.staleDropped;
             continue;
         }
@@ -303,7 +310,7 @@ PackedBrickmapUpdateStats PackedBrickmapScene::update(
     std::vector<GpuBrickUpload> uploads;
     uploads.reserve(keys.size());
     for (const BrickKey key : keys) uploads.push_back(build_gpu_brick_upload(object, key));
-    PackedBrickmapUpdateStats publish = publish_uploads(uploads);
+    PackedBrickmapUpdateStats publish = publish_uploads_impl(uploads, true);
     publish.submittedEdits = stats.submittedEdits;
     publish.staleDropped += stats.staleDropped;
     return publish;

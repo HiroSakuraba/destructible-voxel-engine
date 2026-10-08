@@ -891,6 +891,35 @@ void test_packed_brickmap_and_hdda_oracle() {
     CHECK(packed.validate_against(object));
 }
 
+void test_packed_upload_after_fill_and_repair() {
+    using namespace dve;
+    const BrickKey key{0, 0, 0};
+    VoxelObject object(711);
+    for (int i = 0; i < 9; ++i) object.set_voxel({i % 8, i / 8, 0}, 1);
+    PackedBrickmapScene scene;
+    scene.rebuild(object);
+    const auto beforeFill = std::as_const(object).find_brick(key)->generation();
+    object.fill_brick(key, 2);
+    const auto filledGeneration = std::as_const(object).find_brick(key)->generation();
+    const AppliedBrickEdit fillEdit{key, Bitset512::full(), filledGeneration};
+    const auto fillStats = scene.update(object, std::span(&fillEdit, 1));
+    CHECK(filledGeneration > beforeFill);
+    CHECK(fillStats.published == 1 && scene.validate_against(object));
+    auto oldExternal = build_gpu_brick_upload(object, key);
+    oldExternal.generation = filledGeneration - 1;
+    const auto oldStats = scene.publish_uploads(std::span(&oldExternal, 1));
+    CHECK(oldStats.staleDropped == 1 && oldStats.published == 0);
+
+    auto repair = object.snapshot_brick(key);
+    repair.generation = 3; // An authoritative network snapshot may move the number down.
+    repair.materials[0] = 7;
+    repair.contentHash = VoxelObject::brick_content_hash(repair.materials);
+    CHECK(object.replace_brick(repair));
+    const AppliedBrickEdit repairEdit{key, Bitset512::full(), repair.generation};
+    const auto repairStats = scene.update(object, std::span(&repairEdit, 1));
+    CHECK(repairStats.published == 1 && scene.validate_against(object));
+}
+
 void test_fence_upload_ring() {
     using namespace dve;
     FenceUploadRing ring(1024);
@@ -1061,6 +1090,7 @@ int main() {
         test_parallel_surface_jobs_are_deterministic();
         test_gpu_brick_mirror_and_raycast_oracle();
         test_packed_brickmap_and_hdda_oracle();
+        test_packed_upload_after_fill_and_repair();
         test_fence_upload_ring();
         test_queries();
         test_transformed_queries_and_player_safety();

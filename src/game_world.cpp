@@ -1775,14 +1775,23 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
     if (!object.voxels || object.voxels->occupied_voxel_count() == 0) return fragmentIds;
 
     const ConnectivitySnapshot snapshot = build_connectivity_snapshot(*object.voxels);
-    if (snapshot.components.size() <= 1) return fragmentIds; // still one piece: nothing to do
-    if (snapshot.components.size() > kMaxFragmentsPerDamageCall) return fragmentIds; // safety cap
-
-    // Keep the largest component as the original object (rebuilt in place, same id); split
-    // every other component off into its own new dynamic GameObject.
+    // The largest component stays with the original object. A safety cap bounds the number
+    // of detached bodies, but never skips the primary collision rebuild after a carve.
     std::size_t primaryIndex = 0;
     for (std::size_t i = 1; i < snapshot.components.size(); ++i) {
         if (snapshot.components[i].voxelCount > snapshot.components[primaryIndex].voxelCount) primaryIndex = i;
+    }
+    std::vector<std::size_t> detachedComponents;
+    for (std::size_t i = 0; i < snapshot.components.size(); ++i)
+        if (i != primaryIndex) detachedComponents.push_back(i);
+    if (detachedComponents.size() > kMaxFragmentsPerDamageCall) {
+        std::sort(detachedComponents.begin(), detachedComponents.end(), [&](std::size_t a, std::size_t b) {
+            if (snapshot.components[a].voxelCount != snapshot.components[b].voxelCount)
+                return snapshot.components[a].voxelCount > snapshot.components[b].voxelCount;
+            return a < b;
+        });
+        detachedComponents.resize(kMaxFragmentsPerDamageCall);
+        std::sort(detachedComponents.begin(), detachedComponents.end());
     }
 
     // Captured before any body is touched: a static or bodyless parent has no velocity to
@@ -1795,8 +1804,7 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
     // would teleport the pieces back to the spawn point.
     if (object.hasBody && object.dynamic) object.authoredTransform = resolve_transform(object);
 
-    for (std::size_t componentIndex = 0; componentIndex < snapshot.components.size(); ++componentIndex) {
-        if (componentIndex == primaryIndex) continue;
+    for (const std::size_t componentIndex : detachedComponents) {
         const auto plan = build_split_plan(*object.voxels, snapshot, componentIndex);
         if (!plan) continue; // stale brick generation or similar transient mismatch: skip defensively
         // commit_split_plan removes these voxels from object.voxels in place and returns a
@@ -1864,9 +1872,12 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         fragmentIds.push_back(fragmentId);
     }
 
-    // The primary component lost mass, and its center of mass may have shifted: rebuild its
-    // body from the now-reduced voxel data rather than leaving the old, wrong-shaped body in
-    // place with stale mass/inertia.
+    rebuild_primary_body(object, parentState);
+    return fragmentIds;
+}
+
+void GameWorld::rebuild_primary_body(Object& object, const std::optional<RigidBodyState>& parentState) {
+    // Even when the carve leaves one connected component, its shape and mass have changed.
     if (object.hasBody) {
         physics_->destroy_body(object.bodyHandle);
         object.hasBody = false;
@@ -1913,7 +1924,6 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         }
     }
 
-    return fragmentIds;
 }
 
 std::optional<GameRaycastHit> GameWorld::raycast(Float3 worldOrigin, Float3 worldDirection, float maxDistance) const {

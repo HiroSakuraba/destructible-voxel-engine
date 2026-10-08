@@ -42,7 +42,16 @@ if("Development" IN_LIST DVE_INSTALLED_COMPONENTS)
     list(APPEND groups dev)
 endif()
 set(expect_runtime "${DVE_BINDIR}/dve_player")
-set(expect_editor "${DVE_BINDIR}/dve_desktop_editor" "${DVE_DATADIR}/dve/assets/chiptune/")
+# The editor binary depends on the configure: SDL3 builds ship
+# dve_desktop_editor, SDL3-less X11 builds ship dve_native_editor_x11.
+# Expect whichever editor executable(s) this build actually installed
+# rather than hardcoding the SDL3 name.
+set(expect_editor "${DVE_DATADIR}/dve/assets/chiptune/")
+foreach(_editor_exe dve_desktop_editor dve_native_editor_x11)
+    if(_editor_exe IN_LIST DVE_INSTALLED_EXECUTABLES)
+        list(APPEND expect_editor "${DVE_BINDIR}/${_editor_exe}")
+    endif()
+endforeach()
 set(expect_tools "${DVE_BINDIR}/dve_pack")
 set(expect_dev "${DVE_INCLUDEDIR}/dve/version.hpp" "${DVE_INCLUDEDIR}/dve/player/player_app.hpp"
     "${DVE_LIBDIR}/libdve_core.a" "${DVE_LIBDIR}/cmake/dve/dveConfig.cmake"

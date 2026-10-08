@@ -1,3 +1,4 @@
+#include "dve/simulation_clock.hpp"
 #include "dve/physics2d.hpp"
 
 #if defined(DVE_HAVE_BOX2D)
@@ -382,15 +383,16 @@ public:
     void step(float frameDeltaSeconds) override {
         events_.clear();
         if (!(frameDeltaSeconds > 0.0F) || !std::isfinite(frameDeltaSeconds)) return;
-        accumulator_ += std::min(frameDeltaSeconds,
-                                settings_.fixedTimeStep * static_cast<float>(settings_.maxFrameSteps));
-        std::uint32_t steps = 0;
-        while (accumulator_ + std::numeric_limits<float>::epsilon() >= settings_.fixedTimeStep &&
-               steps < settings_.maxFrameSteps) {
-            fixed_step(settings_.fixedTimeStep);
-            accumulator_ -= settings_.fixedTimeStep;
-            ++steps;
-        }
+        clock_.fixedDeltaSeconds = settings_.fixedTimeStep;
+        clock_.maximumFrameSeconds = double(settings_.fixedTimeStep) * settings_.maxFrameSteps;
+        clock_.maximumSteps = settings_.maxFrameSteps;
+        const auto steps = clock_.advance(frameDeltaSeconds);
+        for (std::uint32_t i = 0; i < steps; ++i) fixed_step(settings_.fixedTimeStep);
+    }
+
+    void step_fixed(float dt) override {
+        events_.clear();
+        if (dt > 0.0F && std::isfinite(dt)) fixed_step(dt);
     }
 
     [[nodiscard]] bool body_state(Physics2DBodyHandle body, Physics2DBodyState& out) const override {
@@ -882,7 +884,7 @@ private:
     Physics2DWorldSettings settings_;
     CollisionGrid grid_{};
     bool hasGrid_{false};
-    float accumulator_{};
+    SimulationClock clock_{};
     std::uint64_t nextHandle_{1};
     std::unordered_map<std::uint64_t, NativeBody> bodies_;
     std::unordered_map<std::uint64_t, std::uint64_t> colliderOwners_;

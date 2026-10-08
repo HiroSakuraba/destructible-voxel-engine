@@ -1,3 +1,4 @@
+#include "dve/simulation_clock.hpp"
 #include "dve/runtime_fluoddity_world.hpp"
 
 #include <algorithm>
@@ -238,6 +239,7 @@ bool RuntimeFluoddityWorld::reset(RuntimeFluoddityObjectId objectId) noexcept {
     state.simulationFrame = 0U;
     state.simulationTimeSeconds = 0.0;
     state.fixedStepAccumulatorSeconds = 0.0;
+    entry->second.clock = {};
     state.pendingSingleSteps = 0U;
     state.trailReadIndex = 0U;
     ++state.resetGeneration;
@@ -278,19 +280,15 @@ std::vector<FluodditySimulationFramePlan> RuntimeFluoddityWorld::plan_frame(doub
         plan.initialTrailReadIndex = entry.state.trailReadIndex;
 
         const double fixedStep = 1.0 / static_cast<double>(entry.instance.simulationFrequencyHz);
-        if (entry.instance.running && entry.instance.timeScale > 0.0F) {
-            entry.state.fixedStepAccumulatorSeconds +=
-                boundedDelta * static_cast<double>(entry.instance.timeScale);
-        }
-        std::uint32_t automaticSteps{};
-        if (fixedStep > 0.0) {
-            automaticSteps = static_cast<std::uint32_t>(std::min<double>(
-                std::floor(entry.state.fixedStepAccumulatorSeconds / fixedStep),
-                static_cast<double>(kMaximumStepsPerFrame)));
-        }
-        if (automaticSteps > 0U) {
-            entry.state.fixedStepAccumulatorSeconds -= fixedStep * automaticSteps;
-        }
+        auto& clock = entry.clock;
+        clock.fixedDeltaSeconds = static_cast<float>(fixedStep);
+        clock.maximumFrameSeconds = boundedDelta * std::max(1.0, double(entry.instance.timeScale));
+        clock.maximumSteps = kMaximumStepsPerFrame;
+        clock.backlogPolicy = BacklogPolicy::Retain;
+        clock.accumulator = entry.state.fixedStepAccumulatorSeconds;
+        const auto automaticSteps = clock.advance(entry.instance.running
+            ? boundedDelta * double(entry.instance.timeScale) : 0.0);
+        entry.state.fixedStepAccumulatorSeconds = clock.accumulator;
         const std::uint32_t availableForManual = kMaximumStepsPerFrame - automaticSteps;
         const std::uint32_t manualSteps =
             std::min(entry.state.pendingSingleSteps, availableForManual);

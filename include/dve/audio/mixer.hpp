@@ -77,6 +77,8 @@ struct PlaySampleDesc {
     bool loop{};
     bool spatialized{true};
     std::uint64_t sampleFrame{};
+    std::uint64_t audibleHostNanoseconds{}; // optional steady_clock timestamp, mapped on submission
+    std::uint64_t deviceGeneration{}; // zero accepts current device; nonzero rejects stale requests
 };
 
 struct PlayStreamDesc {
@@ -85,6 +87,8 @@ struct PlayStreamDesc {
     float gain{1.0F};
     bool loop{};
     std::uint64_t sampleFrame{};
+    std::uint64_t audibleHostNanoseconds{}; // optional steady_clock timestamp, mapped on submission
+    std::uint64_t deviceGeneration{}; // zero accepts current device; nonzero rejects stale requests
 };
 
 struct AudioBusParameters {
@@ -142,6 +146,8 @@ public:
 
     [[nodiscard]] std::uint32_t sample_rate() const noexcept;
     [[nodiscard]] std::uint64_t current_frame() const noexcept;
+    void publish_audio_clock(AudioClockAnchor anchor) noexcept;
+    [[nodiscard]] const AudioClock& audio_clock() const noexcept;
 
     [[nodiscard]] Synthesizer& synthesizer() noexcept;
     [[nodiscard]] const Synthesizer& synthesizer() const noexcept;

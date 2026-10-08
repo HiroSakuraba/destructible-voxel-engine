@@ -1,3 +1,4 @@
+#include "dve/simulation_clock.hpp"
 #include "dve/physics_box2d_backend.hpp"
 
 #include <box2d/box2d.h>
@@ -608,12 +609,17 @@ public:
 
     void step(float frameDeltaSeconds) override {
         events_.clear();
-        if (!(frameDeltaSeconds > 0.0F) || !std::isfinite(frameDeltaSeconds)) return;
-        const float maxDelta = settings_.fixedTimeStep * static_cast<float>(settings_.maxFrameSteps);
-        accumulator_ += std::min(frameDeltaSeconds, maxDelta);
-        std::uint32_t stepCount = 0;
-        while (accumulator_ + std::numeric_limits<float>::epsilon() >= settings_.fixedTimeStep &&
-               stepCount < settings_.maxFrameSteps) {
+        clock_.fixedDeltaSeconds = settings_.fixedTimeStep;
+        clock_.maximumFrameSeconds = double(settings_.fixedTimeStep) * settings_.maxFrameSteps;
+        clock_.maximumSteps = settings_.maxFrameSteps;
+        const auto steps = clock_.advance(frameDeltaSeconds);
+        for (std::uint32_t i = 0; i < steps; ++i) advance_solver(settings_.fixedTimeStep);
+    }
+    void step_fixed(float dt) override {
+        events_.clear();
+        if (dt > 0.0F && std::isfinite(dt)) advance_solver(dt);
+    }
+    void advance_solver(float dt) {
             for (auto& [shapeHandle, shape] : shapes_) {
                 static_cast<void>(shapeHandle);
                 if (shape->oneWay && b2Shape_IsValid(shape->id)) {
@@ -622,7 +628,7 @@ public:
             }
             for (auto& [handle, body] : bodies_) {
                 static_cast<void>(handle);
-                body->dropThroughRemaining = std::max(0.0F, body->dropThroughRemaining - settings_.fixedTimeStep);
+                body->dropThroughRemaining = std::max(0.0F, body->dropThroughRemaining - dt);
                 if (b2Body_IsValid(body->id)) {
                     body->preStepLinearVelocity = b2Body_GetLinearVelocity(body->id);
                     body->preStepAabb = b2Body_ComputeAABB(body->id);
@@ -631,12 +637,9 @@ public:
                     body->hasPreStepState = false;
                 }
             }
-            b2World_Step(world_, settings_.fixedTimeStep, static_cast<int>(settings_.subStepCount));
+            b2World_Step(world_, dt, static_cast<int>(settings_.subStepCount));
             collect_events();
             collect_joint_breaks();
-            accumulator_ -= settings_.fixedTimeStep;
-            ++stepCount;
-        }
     }
 
     [[nodiscard]] bool body_state(Physics2DBodyHandle body, Physics2DBodyState& out) const override {
@@ -1303,7 +1306,7 @@ private:
     b2WorldId world_{};
     CollisionGrid tileGrid_{};
     bool hasTileGrid_{false};
-    float accumulator_{};
+    SimulationClock clock_{};
     std::uint64_t nextHandle_{1};
     std::unordered_map<std::uint64_t, std::unique_ptr<BodyRecord>> bodies_;
     std::unordered_map<std::uint64_t, std::unique_ptr<ShapeRecord>> shapes_;

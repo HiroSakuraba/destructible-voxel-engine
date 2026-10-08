@@ -98,6 +98,7 @@ add_library(dve_core
     src/brick.cpp
     src/voxel_object.cpp
     src/damage.cpp
+    src/resumable_destruction.cpp
     src/destruction_material.cpp
     src/surface.cpp
     src/connectivity.cpp
@@ -204,6 +205,7 @@ add_library(dve_core
     src/game_manifest.cpp
     src/game_scene_loader.cpp
     src/game_save.cpp
+    src/runtime_replay.cpp
 )
 add_library(dve::core ALIAS dve_core)
 target_include_directories(dve_core PUBLIC $<BUILD_INTERFACE:${DVE_GENERATED_INCLUDE_DIR}>)
@@ -2258,6 +2260,11 @@ if(DVE_BUILD_TESTS)
         add_test(NAME dve_flip_liquid_tests COMMAND dve_flip_liquid_tests)
     endif()
 
+    if(DVE_BUILD_AUDIO_SYNTH AND DVE_BUILD_PLAYER)
+        add_executable(dve_clockwork_tests tests/test_clockwork.cpp)
+        target_link_libraries(dve_clockwork_tests PRIVATE dve::core dve::player_runtime dve::audio_synth)
+        add_test(NAME dve_clockwork_tests COMMAND dve_clockwork_tests)
+    endif()
     add_executable(dve_game_world_tests tests/test_game_world.cpp)
     target_link_libraries(dve_game_world_tests PRIVATE dve::core)
     add_test(NAME dve_game_world_tests COMMAND dve_game_world_tests)

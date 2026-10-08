@@ -14,19 +14,6 @@
 
 namespace dve::player {
 
-std::uint32_t FixedStepClock::advance(double elapsedSeconds) noexcept {
-    if (!(elapsedSeconds > 0.0) || !std::isfinite(elapsedSeconds)) return 0U;
-    accumulator += std::min(elapsedSeconds, maximumFrameSeconds);
-    const double step = static_cast<double>(fixedDeltaSeconds);
-    std::uint32_t steps = 0U;
-    while (accumulator >= step && steps < maximumSteps) {
-        accumulator -= step;
-        ++steps;
-    }
-    if (steps == maximumSteps) accumulator = std::min(accumulator, step); // drop the backlog
-    return steps;
-}
-
 std::filesystem::path user_data_directory() {
     const auto env = [](const char* name) -> std::string {
         const char* value = std::getenv(name);
@@ -322,12 +309,18 @@ void PlayerApp::handle_event(const platform::PlatformEvent& event) {
     impl_->input.handle_event(event);
 }
 
+void PlayerApp::queue_event(const platform::PlatformEvent& event, std::uint64_t targetTick) {
+    if (event.type == platform::EventType::QuitRequested) impl_->quit = true;
+    impl_->input.queue_event(event, targetTick);
+}
+
 bool PlayerApp::quit_requested() const noexcept { return impl_->quit; }
 void PlayerApp::request_quit() noexcept { impl_->quit = true; }
 
 void PlayerApp::tick(float fixedDeltaSeconds) {
     Impl& impl = *impl_;
     impl.saveEvents.clear();
+    impl.input.begin_tick(impl.ticks + 1U);
     // Reserved actions fire on the press edge; the save/load itself runs after the step so
     // it never happens halfway through GameWorld::tick or a Lua callback.
     const bool quicksave = impl.input.action(kQuicksaveAction);
@@ -366,6 +359,21 @@ void PlayerApp::tick(float fixedDeltaSeconds) {
     }
 }
 
+std::optional<RuntimeReplayCheckpoint> PlayerApp::replay_checkpoint(std::string* error) const {
+    std::optional<std::vector<std::byte>> script;
+#if defined(DVE_HAVE_LUA)
+    if (impl_->session.script) {
+        script = impl_->session.script->save_state(error);
+        if (!script) return std::nullopt;
+    }
+#endif
+    const auto input = impl_->input.replay_state();
+    std::vector<std::byte> bytes(input.size());
+    std::transform(input.begin(), input.end(), bytes.begin(), [](unsigned char c) { return std::byte(c); });
+    return capture_runtime_replay_checkpoint(*impl_->session.world, *impl_->codec, std::move(script),
+        {{"player-input", std::move(bytes)}}, error);
+}
+
 std::uint64_t PlayerApp::tick_count() const noexcept { return impl_->ticks; }
 
 render::PolygonCamera PlayerApp::camera(float aspect) const {
@@ -400,8 +408,13 @@ RenderEnvironment PlayerApp::environment() const {
     return RenderEnvironment{};
 }
 
-PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, float aspect) const {
-    objects = impl_->session.world->render_objects();
+void PlayerApp::update_presentation(float frameDeltaSeconds,float interpolationAlpha) {
+    impl_->session.world->set_frame_presentation(true);
+    impl_->session.world->update_presentation(frameDeltaSeconds,interpolationAlpha);
+}
+
+PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, float aspect, float interpolationAlpha) const {
+    objects = impl_->session.world->render_objects(interpolationAlpha);
     PlayerRenderView view;
     view.objects = objects;
     view.camera = camera(aspect);
@@ -496,7 +509,9 @@ std::optional<PlayerLoadResult> PlayerApp::load_game(std::string_view slotOrPath
     restoreOptions.keepUnboundTimers = true;   // named Lua timers are bound again by load_state
     if (!fresh.world->restore_save_state(data->world, &result.restore, &stepError, restoreOptions)) return fail(stepError);
     result.worldStateHash = fresh.world->state_hash();
-    if (result.worldStateHash != data->metadata.worldStateHash)
+    // Legacy world hashes included accumulated float time. Container and source-asset
+    // hashes still validate old saves; compare the new simulation hash only for v3 clocks.
+    if (data->world.integerClock && result.worldStateHash != data->metadata.worldStateHash)
         return fail("restored world does not match the save (state hash differs)");
     if (!restore_game_runtime_state(*fresh.world, data->runtimes, &result.runtimes, &stepError)) return fail(stepError);
     for (const std::string& warning : result.runtimes.warnings) impl.log("save: " + warning);
@@ -510,9 +525,11 @@ std::optional<PlayerLoadResult> PlayerApp::load_game(std::string_view slotOrPath
     if (result.timersDropped != 0U)
         impl.log(std::to_string(result.timersDropped) + " saved timer(s) had no callback after boot and were dropped");
 
+    fresh.world->set_frame_presentation(impl.session.world->frame_presentation());
     // Swap in the new world; the old session (script host first) is destroyed here.
     { PlayerSession old = std::move(impl.session); }
     impl.session = std::move(fresh);
+    impl.input.reset_timeline();
     impl.ticks = data->metadata.tickCount;
     impl.pending.clear();
     result.tickCount = impl.ticks;

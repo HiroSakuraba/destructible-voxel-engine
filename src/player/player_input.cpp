@@ -7,6 +7,10 @@
 #include <charconv>
 #include <cmath>
 #include <utility>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <sstream>
 
 namespace dve::player {
 namespace {
@@ -147,6 +151,87 @@ const InputBinding* InputBindingTable::find(std::string_view name) const noexcep
     return nullptr;
 }
 
+void PlayerInput::queue_event(const platform::PlatformEvent& event, std::uint64_t targetTick) {
+    const auto sequence = nextSequence_++;
+    pending_.emplace(std::pair{targetTick, sequence}, TickInputEvent{targetTick, sequence, event});
+}
+void PlayerInput::begin_tick(std::uint64_t tick) {
+    tickEvents_.clear();
+    while (!pending_.empty() && pending_.begin()->first.first <= tick) {
+        auto event = std::move(pending_.begin()->second);
+        pending_.erase(pending_.begin());
+        event.tick = tick; // explicit late policy: current unsimulated tick
+        handle_event(event.event);
+        tickEvents_.push_back(std::move(event));
+    }
+}
+std::vector<TickInputEvent> PlayerInput::pending_events() const {
+    std::vector<TickInputEvent> result;
+    for (const auto& [key, event] : pending_) { (void)key; result.push_back(event); }
+    return result;
+}
+std::string PlayerInput::replay_state() const {
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::setprecision(std::numeric_limits<float>::max_digits10);
+    out << "DVE_TICK_INPUT 1 " << nextSequence_ << '\n';
+    for (const auto& binding : table_.bindings()) {
+        out << "binding " << std::quoted(binding.name) << ' ' << binding.axis << '\n';
+        for (const auto& source : binding.sources)
+            out << int(source.kind) << ' ' << std::quoted(source.key) << ' ' << int(source.gamepadButton)
+                << ' ' << int(source.gamepadAxis) << ' ' << int(source.mouseButton) << ' '
+                << source.value << ' ' << source.explicitValue << '\n';
+    }
+    const auto strings = [&](const char* tag, const auto& values) {
+        out << tag;
+        for (const auto& value : values) out << ' ' << std::quoted(value);
+        out << '\n';
+    };
+    const auto enums = [&](const char* tag, const auto& values) {
+        out << tag;
+        for (const auto value : values) out << ' ' << int(value);
+        out << '\n';
+    };
+    strings("keys", keys_); strings("pressed-keys", pressedKeys_);
+    enums("buttons", gamepadButtons_); enums("pressed-buttons", pressedGamepadButtons_);
+    enums("mouse", mouseButtons_); enums("pressed-mouse", pressedMouseButtons_);
+    out << "axes";
+    for (const auto& [axis, value] : gamepadAxes_) out << ' ' << int(axis) << ' ' << value;
+    out << '\n';
+    const auto event = [&](const TickInputEvent& timed) {
+        const auto& e = timed.event;
+        out << timed.tick << ' ' << timed.sequence << ' ' << int(e.type) << ' ' << int(e.modifiers)
+            << ' ' << int(e.button) << ' ' << e.x << ' ' << e.y << ' ' << e.deltaX << ' ' << e.deltaY
+            << ' ' << e.relativeMotion << ' ' << e.width << ' ' << e.height << ' ' << e.wheelX
+            << ' ' << e.wheelY << ' ' << e.repeat << ' ' << e.compositionStart << ' '
+            << e.compositionLength << ' ' << e.gamepadId << ' ' << int(e.gamepadButton)
+            << ' ' << int(e.gamepadAxis) << ' ' << e.gamepadValue << ' ' << std::quoted(e.key)
+            << ' ' << std::quoted(e.text) << ' ' << std::quoted(e.path) << '\n';
+    };
+    out << "pending " << pending_.size() << '\n';
+    for (const auto& [key, timed] : pending_) { (void)key; event(timed); }
+    out << "delivered " << tickEvents_.size() << '\n';
+    for (const auto& timed : tickEvents_) event(timed);
+    return out.str();
+}
+
+std::uint32_t PlayerInput::press_count(std::string_view name) const {
+    const auto* binding = table_.find(name);
+    if (!binding) return 0;
+    std::uint32_t count{};
+    for (const auto& timed : tickEvents_) {
+        const auto& event = timed.event;
+        if (event.repeat) continue;
+        for (const auto& source : binding->sources) {
+            const bool match = (source.kind == InputSourceKind::Key && event.type == platform::EventType::KeyDown && lower(event.key) == source.key) ||
+                (source.kind == InputSourceKind::GamepadButton && event.type == platform::EventType::GamepadButtonDown && event.gamepadButton == source.gamepadButton) ||
+                (source.kind == InputSourceKind::MouseButton && event.type == platform::EventType::PointerButtonDown && event.button == source.mouseButton);
+            if (match) { ++count; break; }
+        }
+    }
+    return count;
+}
+
 void PlayerInput::handle_event(const platform::PlatformEvent& event) {
     using platform::EventType;
     switch (event.type) {
@@ -175,6 +260,11 @@ void PlayerInput::handle_event(const platform::PlatformEvent& event) {
         case EventType::WindowFocusLost: release_all(); break;
         default: break;
     }
+}
+
+void PlayerInput::reset_timeline() {
+    pending_.clear(); tickEvents_.clear(); nextSequence_ = 1U;
+    release_all();
 }
 
 void PlayerInput::release_all() {

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -12,7 +13,7 @@
 namespace dve {
 
 // Small persistent worker pool for generation-keyed derived work. The authority thread remains
-// the single writer. Only one coordinator may call parallel_for at a time.
+// the single writer. Concurrent coordinators are serialized; nested work on the same pool runs locally.
 class JobSystem {
 public:
     explicit JobSystem(std::size_t workerCount = default_worker_count());
@@ -28,6 +29,9 @@ public:
 
 private:
     std::vector<std::thread> workers_{};
+    std::mutex coordinatorMutex_{};
+    std::mutex exceptionMutex_{};
+    std::exception_ptr exception_;
     std::mutex mutex_{};
     std::condition_variable startCondition_{};
     std::condition_variable doneCondition_{};

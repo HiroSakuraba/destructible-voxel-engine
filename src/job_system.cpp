@@ -3,6 +3,21 @@
 #include <algorithm>
 
 namespace dve {
+namespace {
+struct ActivePool {
+    const JobSystem* pool;
+    ActivePool* parent;
+    static thread_local ActivePool* current;
+    explicit ActivePool(const JobSystem* value) : pool(value), parent(current) { current=this; }
+    ~ActivePool() { current=parent; }
+    static bool contains(const JobSystem* value) {
+        for (auto* p=current;p;p=p->parent) if(p->pool==value) return true;
+        return false;
+    }
+};
+thread_local ActivePool* ActivePool::current{};
+}
+
 
 std::size_t JobSystem::default_worker_count() noexcept {
     const unsigned hardware = std::thread::hardware_concurrency();
@@ -28,15 +43,26 @@ JobSystem::~JobSystem() {
 }
 
 void JobSystem::consume_batch() {
+    ActivePool active(this);
     for (;;) {
         const std::size_t index = nextIndex_.fetch_add(1, std::memory_order_relaxed);
         if (index >= itemCount_) return;
-        function_(index);
+        try { function_(index); }
+        catch (...) {
+            std::lock_guard exceptionLock(exceptionMutex_);
+            if (!exception_) exception_=std::current_exception();
+        }
     }
 }
 
 void JobSystem::parallel_for(std::size_t count, const std::function<void(std::size_t)>& function) {
     if (count == 0) return;
+    if (ActivePool::contains(this)) {
+        for (std::size_t i=0;i<count;++i) function(i);
+        return;
+    }
+    std::lock_guard coordinatorLock(coordinatorMutex_);
+    ActivePool active(this);
     if (workers_.empty() || count == 1) {
         for (std::size_t i = 0; i < count; ++i) function(i);
         return;
@@ -44,6 +70,7 @@ void JobSystem::parallel_for(std::size_t count, const std::function<void(std::si
 
     {
         std::lock_guard lock(mutex_);
+        exception_ = {};
         itemCount_ = count;
         function_ = function;
         nextIndex_.store(0, std::memory_order_relaxed);
@@ -59,6 +86,7 @@ void JobSystem::parallel_for(std::size_t count, const std::function<void(std::si
     doneCondition_.wait(lock, [this] { return completedWorkers_ == workers_.size(); });
     function_ = {};
     itemCount_ = 0;
+    if (exception_) std::rethrow_exception(exception_);
 }
 
 void JobSystem::worker_loop() {

@@ -11,6 +11,10 @@ struct SdlSynthAudioDevice::Impl {
     void* renderer{};
     void (*renderFunction)(void*, float*, std::size_t) noexcept{};
     std::uint32_t sampleRate{};
+    std::uint64_t generation{};
+    std::uint32_t latencyFrames{};
+    void (*publishClock)(void*, AudioClockAnchor) noexcept{};
+    std::uint64_t (*currentFrame)(void*) noexcept{};
     SdlAudioDeviceStatus status{};
     SDL_AudioStream* stream{};
     bool audioSubsystem{}; // this device's reference on SDL_INIT_AUDIO (SDL ref-counts it)
@@ -21,6 +25,8 @@ struct SdlSynthAudioDevice::Impl {
         auto* self = static_cast<Impl*>(userdata);
         if (self == nullptr || self->renderer == nullptr || self->renderFunction == nullptr ||
             streamValue == nullptr || additionalAmount <= 0) return;
+        self->publishClock(self->renderer, {audio_host_nanoseconds(), self->currentFrame(self->renderer),
+            self->generation, self->sampleRate, self->latencyFrames});
         int remaining = additionalAmount;
         while (remaining > 0) {
             const int bytes = std::min<int>(remaining, static_cast<int>(self->scratch.size() * sizeof(float)));
@@ -42,6 +48,8 @@ struct SdlSynthAudioDevice::Impl {
             return false;
         }
         audioSubsystem = true;
+        static std::atomic<std::uint64_t> nextGeneration{1};
+        generation = nextGeneration.fetch_add(1, std::memory_order_relaxed);
         SDL_AudioSpec spec{};
         spec.format = SDL_AUDIO_F32;
         spec.channels = 2;
@@ -73,6 +81,9 @@ struct SdlSynthAudioDevice::Impl {
             status.deviceSampleRate = static_cast<std::uint32_t>(std::max(0, physicalSpec.freq));
             status.deviceBufferFrames = static_cast<std::uint32_t>(std::max(0, frames));
         }
+        latencyFrames = status.deviceSampleRate ? static_cast<std::uint32_t>(
+            std::uint64_t(status.deviceBufferFrames) * sampleRate / status.deviceSampleRate) : 0U;
+        publishClock(renderer,{audio_host_nanoseconds(),currentFrame(renderer),generation,sampleRate,latencyFrames});
         if (!SDL_ResumeAudioStreamDevice(stream)) {
             if (error) *error = SDL_GetError();
             SDL_DestroyAudioStream(stream);
@@ -101,6 +112,8 @@ SdlSynthAudioDevice::SdlSynthAudioDevice(Synthesizer& synth, SdlAudioDeviceOptio
     impl_->renderFunction = [](void* renderer, float* output, std::size_t frames) noexcept {
         static_cast<Synthesizer*>(renderer)->render(output, frames);
     };
+    impl_->publishClock = [](void* renderer, AudioClockAnchor a) noexcept { static_cast<Synthesizer*>(renderer)->publish_audio_clock(a); };
+    impl_->currentFrame = [](void* renderer) noexcept { return static_cast<Synthesizer*>(renderer)->current_frame(); };
     (void)impl_->open(error);
 }
 
@@ -116,6 +129,8 @@ SdlSynthAudioDevice::SdlSynthAudioDevice(AudioMixer& mixer, SdlAudioDeviceOption
     impl_->renderFunction = [](void* renderer, float* output, std::size_t frames) noexcept {
         static_cast<AudioMixer*>(renderer)->render(output, frames);
     };
+    impl_->publishClock = [](void* renderer, AudioClockAnchor a) noexcept { static_cast<AudioMixer*>(renderer)->publish_audio_clock(a); };
+    impl_->currentFrame = [](void* renderer) noexcept { return static_cast<AudioMixer*>(renderer)->current_frame(); };
     (void)impl_->open(error);
 }
 

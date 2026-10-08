@@ -36,6 +36,10 @@ struct MidiMessage {
     std::array<std::uint8_t, 16> bytes{};
     std::uint8_t size{};
     std::uint64_t sampleFrame{};
+    std::uint64_t hostTimestampNanoseconds{}; // steady_clock epoch; zero for untimestamped sources
+    double sourceDeltaSeconds{}; // RtMidi delivery delta, retained for diagnostics
+    std::uint64_t sourceSequence{};
+    std::uint64_t schedulingSequence{}; // synthesizer insertion order, retained when deferred
 
     [[nodiscard]] bool valid() const noexcept { return type != MidiMessageType::Invalid && size != 0; }
     [[nodiscard]] bool is_note_on() const noexcept { return type == MidiMessageType::NoteOn && data2 != 0; }

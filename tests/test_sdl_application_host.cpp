@@ -132,6 +132,18 @@ int main() {
         require(!host.wait_for_events(std::chrono::milliseconds(0)), "empty queue reported an event");
         require(!host.wait_for_events(std::chrono::milliseconds(-1)), "negative wait was not clamped to a poll");
 
+        const auto wake = host.wake_callback();
+        wake(); wake(); // worker notifications coalesce until the host drains the event
+        require(host.wait_until(std::nullopt), "worker completion did not wake an indefinite wait");
+        require(!host.poll_event(converted), "internal wake escaped as a platform input event");
+        wake();
+        require(host.wait_until(host.monotonic_nanoseconds() + 1), "wake latch did not reset");
+        require(!host.poll_event(converted), "second wake escaped as input");
+        SDLTest_SetTicksNS(0);
+        const auto deadlineStart = host.monotonic_nanoseconds();
+        require(!host.wait_until(deadlineStart + 1000001), "empty deadline wait reported input");
+        require(host.monotonic_nanoseconds() == deadlineStart + 2000000, "deadline wait truncated a fractional millisecond");
+
         // Deterministic clock: rendering already uses 1 ms. Continuous queued
         // motion may wake the second half of the budget, never the 4 ms floor.
         SDLTest_SetTicksNS(0);
@@ -176,6 +188,7 @@ int main() {
 
         host.destroy_window();
         require(!host.has_window(), "destroy_window failed");
+        wake(); // retained worker callback is safe after SDL window teardown
         require(!host.wait_for_events(std::chrono::milliseconds(1000)), "destroyed host attempted an event wait");
         std::cout << "SDL application-host contract passed\n";
         return 0;

@@ -27,6 +27,8 @@ constexpr std::string_view kCameraSection = "dve.cameras";
 constexpr std::string_view kAnimationSection = "dve.animation";
 constexpr std::string_view kRagdollSection = "dve.ragdolls";
 constexpr std::string_view kHairSection = "dve.hair";
+constexpr std::string_view kClockSection = "dve.clock";
+constexpr std::string_view kRootMotionSection = "dve.root-motion";
 constexpr std::string_view kReservedPrefix = "dve.";
 
 constexpr std::uint8_t kFlagDynamic = 1U << 0U;
@@ -838,6 +840,12 @@ GameSaveCodec::GameSaveCodec(GameSaveSourceReader sources, GameSaveLimits limits
                                                     limits.maximumFileBytes}) {
     std::string ignored;
     (void)store_.register_migration(1U, migrate_v1_to_v2, &ignored);
+    (void)store_.register_migration(2U, [](SaveGameDocument& document, std::string*) {
+        // Legacy float schedules are converted once by restore_save_state. The optional
+        // section is absent, so no inferred tick values can override the legacy data.
+        document.schemaVersion = 3U;
+        return true;
+    }, &ignored);
 }
 
 bool GameSaveCodec::register_migration(std::uint32_t fromVersion, SaveGameMigration migration, std::string* error) {
@@ -1043,6 +1051,48 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
     document.sections.emplace(std::string(kWorldSection), std::move(objects.bytes()));
     document.sections.emplace(std::string(kVoxelSection), std::move(voxels.bytes()));
     document.sections.emplace(std::string(kPhysicsSection), std::move(physics.bytes()));
+    if (world.integerClock) {
+        Writer clock(limits_);
+        clock.u64(world.tickCount); clock.f32(world.fixedDeltaSeconds);
+        clock.count(world.timers.size(), limits_.maximumTimers, "clock timer");
+        for (const auto& timer : world.timers) {
+            clock.u64(timer.id); clock.u64(timer.fireAtTick); clock.u64(timer.intervalTicks);
+            clock.u64(timer.intervalNanoseconds); clock.u64(timer.originTick); clock.u64(timer.releaseIndex);
+        }
+        clock.u64(world.nextDestructionId); clock.u32(world.destructionUnitsPerTick);
+        clock.count(world.pendingDestruction.size(), 64U, "pending destruction");
+        for (const auto& pending : world.pendingDestruction) {
+            clock.u64(pending.requestId); clock.u64(pending.objectId); clock.float3(pending.worldCenter);
+            clock.f32(pending.radius); clock.float3(pending.localCenterVoxels);
+            clock.f32(pending.localRadiusVoxels); clock.u64(pending.workUnits); clock.boolean(pending.stale);
+        }
+        clock.boolean(world.session.has_value());
+        if (world.session) {
+            const auto& session = *world.session;
+            clock.u64(session.debrisLimit); clock.u64(session.nextDebrisSequence); clock.u64(session.rejectedDestruction);
+            clock.count(session.debris.size(), limits_.maximumObjects, "debris");
+            for (const auto& [id, sequence] : session.debris) { clock.u64(id); clock.u64(sequence); }
+            clock.count(session.actions.size(), limits_.maximumRuntimeEntries, "input action");
+            for (const auto& [name, value] : session.actions) { clock.string(name); clock.boolean(value); }
+            clock.count(session.axes.size(), limits_.maximumRuntimeEntries, "input axis");
+            for (const auto& [name, value] : session.axes) { clock.string(name); clock.f32(value); }
+            clock.count(session.pendingLoads.size(), limits_.maximumObjects, "pending solver loads");
+            for (const auto& [id, loads] : session.pendingLoads) {
+                clock.u64(id); clock.float3(loads.force); clock.float3(loads.torque);
+            }
+        }
+        if (clock.failed()) return fail(error, clock.failure()), std::nullopt;
+        document.sections.emplace(std::string(kClockSection), std::move(clock.bytes()));
+    }
+    if (data.runtimes.gameplay && !data.runtimes.gameplay->pendingRootMotion.empty()) {
+        Writer motion(limits_);
+        motion.count(data.runtimes.gameplay->pendingRootMotion.size(), limits_.maximumRuntimeEntries, "root motion");
+        for (const auto& [pawn, displacement] : data.runtimes.gameplay->pendingRootMotion) {
+            motion.u64(pawn); motion.float3(displacement);
+        }
+        if (motion.failed()) return fail(error, motion.failure()), std::nullopt;
+        document.sections.emplace(std::string(kRootMotionSection), std::move(motion.bytes()));
+    }
     if (data.scriptState) document.sections.emplace(std::string(kScriptSection), *data.scriptState);
     {
         const GameSaveRuntimeState& runtimes = data.runtimes;
@@ -1213,6 +1263,67 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (!r.finish()) return corrupt(r);
     }
 
+    if (const auto* bytes = section(kClockSection)) {
+        Reader r(*bytes, kClockSection, limits_);
+        std::uint32_t count{};
+        if (!(r.u64(world.tickCount) && r.f32(world.fixedDeltaSeconds) &&
+            r.count(count, limits_.maximumTimers, "clock timer"))) return corrupt(r);
+        if (count != world.timers.size() || !(world.fixedDeltaSeconds > 0.0F) ||
+            !std::isfinite(world.fixedDeltaSeconds)) return fail(error, "invalid integer clock"), std::nullopt;
+        for (auto& timer : world.timers) {
+            std::uint64_t id{};
+            if (!(r.u64(id) && r.u64(timer.fireAtTick) && r.u64(timer.intervalTicks) &&
+                r.u64(timer.intervalNanoseconds) && r.u64(timer.originTick) && r.u64(timer.releaseIndex))) return corrupt(r);
+            if (id != timer.id) return fail(error, "clock timer order mismatch"), std::nullopt;
+        }
+        std::uint32_t pendingCount{};
+        if (!(r.u64(world.nextDestructionId) && r.u32(world.destructionUnitsPerTick) &&
+            r.count(pendingCount, 64U, "pending destruction"))) return corrupt(r);
+        world.pendingDestruction.resize(pendingCount);
+        for (auto& pending : world.pendingDestruction) {
+            if (!(r.u64(pending.requestId) && r.u64(pending.objectId) && r.float3(pending.worldCenter) &&
+                r.f32(pending.radius) && r.float3(pending.localCenterVoxels) &&
+                r.f32(pending.localRadiusVoxels) && r.u64(pending.workUnits) && r.boolean(pending.stale))) return corrupt(r);
+            if (!(pending.radius > 0.0F) || !(pending.localRadiusVoxels > 0.0F) ||
+                pending.workUnits > 100000000ULL || !pending.requestId || pending.requestId >= world.nextDestructionId)
+                return fail(error, "invalid pending destruction request"), std::nullopt;
+        }
+        bool hasSession{};
+        if (!r.boolean(hasSession)) return corrupt(r);
+        if (hasSession) {
+            auto& session = world.session.emplace();
+            if (!(r.u64(session.debrisLimit) && r.u64(session.nextDebrisSequence) && r.u64(session.rejectedDestruction) &&
+                r.count(count, limits_.maximumObjects, "debris"))) return corrupt(r);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                GameObjectId id{}; std::uint64_t sequence{};
+                if (!(r.u64(id) && r.u64(sequence))) return corrupt(r);
+                if (!indexById.contains(id) || sequence >= session.nextDebrisSequence || !session.debris.emplace(id, sequence).second)
+                    return fail(error, "invalid debris bookkeeping"), std::nullopt;
+            }
+            if (!r.count(count, limits_.maximumRuntimeEntries, "input action")) return corrupt(r);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                std::string name; bool value{};
+                if (!(r.string(name) && r.boolean(value))) return corrupt(r);
+                if (!session.actions.emplace(std::move(name), value).second) return fail(error, "duplicate input action"), std::nullopt;
+            }
+            if (!r.count(count, limits_.maximumRuntimeEntries, "input axis")) return corrupt(r);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                std::string name; float value{};
+                if (!(r.string(name) && r.f32(value))) return corrupt(r);
+                if (!session.axes.emplace(std::move(name), value).second) return fail(error, "duplicate input axis"), std::nullopt;
+            }
+            if (!r.count(count, limits_.maximumObjects, "pending solver loads")) return corrupt(r);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                GameObjectId id{}; ReferenceRigidBodyWorld::PendingLoads loads;
+                if (!(r.u64(id) && r.float3(loads.force) && r.float3(loads.torque))) return corrupt(r);
+                if (!indexById.contains(id) || !session.pendingLoads.emplace(id, loads).second)
+                    return fail(error, "invalid pending solver loads"), std::nullopt;
+            }
+        }
+        if (!r.finish()) return corrupt(r);
+        world.integerClock = true;
+    }
+
     // Sources: material tables and polygon geometry.
     for (std::size_t index = 0; index < world.objects.size(); ++index) {
         GameWorldObjectState& object = world.objects[index];
@@ -1334,6 +1445,19 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         Reader r(*bytes, kGameplaySection, limits_);
         if (!read_gameplay(r, data.runtimes.gameplay.emplace(), limits_) || !r.finish()) return corrupt(r);
     }
+    if (const auto* bytes = section(kRootMotionSection)) {
+        if (!data.runtimes.gameplay) return fail(error, "root motion requires gameplay state"), std::nullopt;
+        Reader r(*bytes, kRootMotionSection, limits_);
+        std::uint32_t count{};
+        if (!r.count(count, limits_.maximumRuntimeEntries, "root motion")) return corrupt(r);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            GameObjectId pawn{}; Float3 displacement{};
+            if (!(r.u64(pawn) && r.float3(displacement))) return corrupt(r);
+            if (!data.runtimes.gameplay->pendingRootMotion.emplace(pawn, displacement).second)
+                return fail(error, "duplicate pending root motion"), std::nullopt;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
     if (const auto* bytes = section(kCameraSection)) {
         if (bytes->size() > limits_.maximumScriptStateBytes) return fail(error, "camera state is over the save limit"), std::nullopt;
         data.runtimes.cameras.emplace(reinterpret_cast<const char*>(bytes->data()), bytes->size());
@@ -1357,7 +1481,7 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (name.starts_with(kReservedPrefix)) {
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
-                name != kAnimationSection && name != kRagdollSection && name != kHairSection)
+                name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;
         }

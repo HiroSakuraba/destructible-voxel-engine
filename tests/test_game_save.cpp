@@ -449,6 +449,7 @@ void test_migration() {
     auto document = plain.to_document(saved, nullptr, &error);
     CHECK(document.has_value());
     if (!document) return;
+    document->sections.erase("dve.clock");
     SaveGameDocument v0;
     v0.schemaVersion = 0;
     v0.sequence = 7;
@@ -480,7 +481,7 @@ void test_migration() {
     const auto migrated = migrating.decode(v0Bytes, &report, &error);
     CHECK(migrated.has_value());
     if (!migrated) std::cerr << "migration: " << error << '\n';
-    CHECK(report.storedSchemaVersion == 0U && report.migrationsApplied == 2U);   // game v0->1, engine v1->2
+    CHECK(report.storedSchemaVersion == 0U && report.migrationsApplied == 3U);   // game v0->1, engine v1->2->3
     int firesB = 0;
     Scene b = boot(assets, Physics3DBackend::Reference, &firesB);
     if (migrated) CHECK(restore(b, *migrated));
@@ -877,13 +878,13 @@ void test_v1_to_v2_migration() {
     if (!document) return;
     SaveGameDocument v1 = *document;
     v1.schemaVersion = 1U;
-    for (const char* name : {"dve.gameplay", "dve.cameras", "dve.animation", "dve.ragdolls", "dve.hair"}) v1.sections.erase(name);
+    for (const char* name : {"dve.gameplay", "dve.cameras", "dve.animation", "dve.ragdolls", "dve.hair", "dve.clock"}) v1.sections.erase(name);
     const auto v1Bytes = encode_save_game_document(v1);
     SaveGameReadReport report;
     const auto migrated = codec.decode(v1Bytes, &report, &error);
     CHECK(migrated.has_value());
     if (!migrated) { std::cerr << "v1 decode: " << error << '\n'; return; }
-    CHECK(report.storedSchemaVersion == 1U && report.migrationsApplied == 1U);
+    CHECK(report.storedSchemaVersion == 1U && report.migrationsApplied == 2U);
     CHECK(!migrated->runtimes.gameplay && !migrated->runtimes.cameras && !migrated->runtimes.animation &&
           !migrated->runtimes.ragdolls);
     Scene b = boot(assets, Physics3DBackend::Reference, &firesB);
@@ -896,7 +897,7 @@ void test_v1_to_v2_migration() {
     CHECK(b.world->gameplay().has_character(ib.pawn));   // as booted
     // Re-saving writes v2.
     const auto resaved = codec.to_document(capture_all(b), nullptr, &error);
-    CHECK(resaved && resaved->schemaVersion == 2U && resaved->sections.contains("dve.gameplay"));
+    CHECK(resaved && resaved->schemaVersion == kGameSaveSchemaVersion && resaved->sections.contains("dve.gameplay"));
 
     // A "v1" document carrying an engine section v1 never had is refused by the migration.
     SaveGameDocument mislabelled = v1;

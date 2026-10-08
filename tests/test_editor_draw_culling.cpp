@@ -401,6 +401,35 @@ void test_parallel_build_matches_serial() {
     require(parallelSized >= 10U, "too few lists were large enough to sort in parallel");
 }
 
+void test_presentation_poses_do_not_mutate_document() {
+    EditorDocument document("presentation");
+    document.add_object(make_object(1, 0, 1, [](int, int, int) { return MaterialId{1}; }));
+    const EditorMaterialLibrary materials;
+    const EditorCamera camera = orbit(0.2F, 0.2F, 8.0F, {0, 0, 0});
+    const UiRect viewport{0, 0, 800, 800};
+    EditorViewportSettings settings;
+    settings.cullEnclosedVoxels = false;
+    const std::set<EditorObjectId> selection;
+    const auto fingerprint = editor_scene_render_fingerprint(document);
+    EditorVoxelDrawListCache cache;
+    const auto authoritative = cache.get(document, materials, camera, viewport, settings, selection, fingerprint);
+    require(authoritative.size() == 1, "presentation fixture was culled");
+    const float before = authoritative.front().screenY;
+
+    std::map<EditorObjectId, RigidTransform> poses;
+    poses[1].position = {0, 2, 0};
+    const auto interpolated = cache.get(document, materials, camera, viewport, settings, selection, fingerprint, &poses);
+    require(interpolated.size() == 1 && std::abs(interpolated.front().screenY - before) > 1.0F,
+            "editor preview ignored the per-frame pose");
+    require(document.find_object(1)->transform.position.y == 0 &&
+                editor_scene_render_fingerprint(document) == fingerprint,
+            "preview wrote its render pose into the authored document");
+    poses[1].position.y = 3;
+    const auto next = cache.get(document, materials, camera, viewport, settings, selection, fingerprint, &poses);
+    require(next.size() == 1 && next.front().screenY != interpolated.front().screenY,
+            "preview cache reused the preceding pose");
+}
+
 // Toggling culling must rebuild a cached list even when nothing else changed.
 void test_cache_key_includes_culling() {
     EditorDocument document("cache");
@@ -652,6 +681,7 @@ int main() {
         test_culling_guards();
         test_cap_no_longer_starved();
         test_parallel_build_matches_serial();
+        test_presentation_poses_do_not_mutate_document();
         test_cache_key_includes_culling();
         std::printf("editor draw culling tests passed\n");
         return 0;

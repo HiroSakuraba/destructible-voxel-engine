@@ -152,6 +152,9 @@ std::string normalized_key(SDL_Keycode key) {
 } // namespace
 
 struct SdlApplicationHost::Impl {
+    struct WakeState { std::mutex mutex; bool active{}, posted{}; };
+    std::shared_ptr<WakeState> wakeState=std::make_shared<WakeState>();
+
     struct PendingDialog {
         FileDialogToken token{};
         std::vector<std::string> names;
@@ -278,10 +281,15 @@ bool SdlApplicationHost::create_window(const WindowDesc& desc, std::string* erro
         destroy_window();
         return false;
     }
+    { std::lock_guard lock(impl_->wakeState->mutex); impl_->wakeState->active=true; }
     return true;
 }
 
 void SdlApplicationHost::destroy_window() noexcept {
+    if (impl_) {
+        std::lock_guard lock(impl_->wakeState->mutex);
+        impl_->wakeState->active=false; impl_->wakeState->posted=false;
+    }
     if (!impl_) return;
     (void)set_relative_mouse_mode(false);
     {
@@ -364,6 +372,26 @@ bool SdlApplicationHost::set_relative_mouse_mode(bool enabled, std::string* erro
     return true;
 }
 
+std::uint64_t SdlApplicationHost::monotonic_nanoseconds() const noexcept { return SDL_GetTicksNS(); }
+
+bool SdlApplicationHost::wait_until(std::optional<std::uint64_t> deadline) {
+    if (!has_window()) return false;
+    if (!deadline) return SDL_WaitEventTimeout(nullptr,-1);
+    const auto now=monotonic_nanoseconds();
+    const auto remaining=*deadline>now ? *deadline-now : 0;
+    const auto milliseconds=remaining/1000000U+(remaining%1000000U!=0U);
+    return SDL_WaitEventTimeout(nullptr,static_cast<Sint32>(std::min<std::uint64_t>(milliseconds,2147483647ULL)));
+}
+std::function<void()> SdlApplicationHost::wake_callback() const {
+    const auto state=impl_->wakeState;
+    return [state] {
+        std::lock_guard lock(state->mutex);
+        if(!state->active || state->posted) return;
+        SDL_Event event{}; event.type=SDL_EVENT_USER; event.user.code=0x445645;
+        state->posted=SDL_PushEvent(&event);
+    };
+}
+
 bool SdlApplicationHost::wait_for_events(std::chrono::milliseconds timeout) {
     if (!has_window()) return false;
     const auto milliseconds = std::clamp<std::chrono::milliseconds::rep>(
@@ -398,6 +426,11 @@ bool SdlApplicationHost::poll_event(PlatformEvent& output) {
         PlatformEvent converted;
         converted.timestampNanoseconds = event.common.timestamp;
         switch (event.type) {
+            case SDL_EVENT_USER:
+                if(event.user.code==0x445645) {
+                    std::lock_guard lock(impl_->wakeState->mutex); impl_->wakeState->posted=false;
+                }
+                continue;
             case SDL_EVENT_QUIT:
             case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
                 converted.type = EventType::QuitRequested;

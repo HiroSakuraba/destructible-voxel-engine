@@ -4,6 +4,7 @@
 #include "dve/audio/wavetable.hpp"
 #include "dve/audio/physics_modulation.hpp"
 #include "dve/audio/generative_conductor.hpp"
+#include "dve/simulation_clock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2573,6 +2574,11 @@ struct Synthesizer::Impl {
     std::array<float, 128> controller{};
     std::array<float, kSynthMacroCount> macroValues{};
     std::atomic<float> gameClockTempo{120.0F};
+    GameMusicClock gameMusicClock;
+    std::optional<GameMusicClockAnchor> pendingGameMusicClock;
+    std::optional<GameMusicClockAnchor> activeGameMusicClock;
+    std::uint64_t gameMusicRevision{};
+    double gameMusicStep{};
     float midiClockTempo{120.0F};
     std::uint64_t lastMidiClockFrame{};
     std::uint32_t midiClockTickCount{};
@@ -3208,9 +3214,24 @@ struct Synthesizer::Impl {
         const ArpeggiatorStep& step = parameters.arpeggiator.steps[stepIndex];
         const std::uint32_t sequencePosition = arpStepCounter;
         activeArpStep.store(stepIndex, std::memory_order_relaxed);
-        const std::uint64_t duration = arpeggiator_duration_frames(arpStepCounter);
+        std::uint64_t duration = arpeggiator_duration_frames(arpStepCounter);
         ++arpStepCounter;
-        nextArpFrame = renderFrame + duration;
+        nextArpFrame = saturating_time_add(renderFrame, duration);
+        if (parameters.arpeggiator.clockSource == ArpeggiatorClockSource::GameClock &&
+            activeGameMusicClock && activeGameMusicClock->running) {
+            const auto& anchor = *activeGameMusicClock;
+            ++gameMusicStep;
+            const double beats = arpeggiator_step_beats(parameters.arpeggiator.division);
+            const double swing = clampf(parameters.arpeggiator.swing, 0.0F, 0.75F);
+            const double nextBeat = (gameMusicStep - (std::fmod(gameMusicStep, 2.0) >= 1.0 ? swing : 0.0)) * beats;
+            const long double absolute = static_cast<long double>(anchor.sampleFrame) +
+                (nextBeat - anchor.beat) * 60.0L * sampleRate / anchor.tempoBpm;
+            const auto maximum = std::numeric_limits<std::uint64_t>::max();
+            const auto target = absolute <= 0 ? 0U : absolute >= maximum ? maximum :
+                static_cast<std::uint64_t>(std::round(absolute));
+            nextArpFrame = std::max(saturating_time_add(renderFrame, 1U), target);
+            duration = nextArpFrame - renderFrame;
+        }
         const float humanTiming = clampf(parameters.arpeggiator.humanizeTiming, 0.0F, 1.0F);
         if (humanTiming > 0.0F) {
             const float jitterMs = (random_unit() * 2.0F - 1.0F) * humanTiming * 12.0F;
@@ -3341,8 +3362,36 @@ struct Synthesizer::Impl {
             ? renderFrame + arpRatchetDuration : std::numeric_limits<std::uint64_t>::max();
     }
 
+    void apply_game_music_clock() noexcept {
+        if (!pendingGameMusicClock || renderFrame<pendingGameMusicClock->sampleFrame) return;
+        const auto anchor=*pendingGameMusicClock;
+        pendingGameMusicClock.reset();
+        if (activeGameMusicClock && anchor.transportGeneration < activeGameMusicClock->transportGeneration) return;
+        activeGameMusicClock=anchor;
+        gameClockTempo.store(anchor.tempoBpm,std::memory_order_relaxed);
+        if (parameters.arpeggiator.clockSource!=ArpeggiatorClockSource::GameClock) return;
+        release_arp_notes();
+        const double currentBeat=anchor.beat+(anchor.running ?
+            double(renderFrame-anchor.sampleFrame)*anchor.tempoBpm/(60.0*sampleRate) : 0.0);
+        const double stepBeats=arpeggiator_step_beats(parameters.arpeggiator.division);
+        double step=std::ceil(currentBeat/stepBeats-1.0e-9);
+        const double swing=clampf(parameters.arpeggiator.swing,0.0F,0.75F);
+        const auto beatAtStep=[&](double index) {
+            return (index-(std::fmod(index,2.0)>=1.0 ? swing : 0.0))*stepBeats;
+        };
+        if (beatAtStep(step)<currentBeat-1.0e-9) ++step;
+        gameMusicStep = std::max(0.0, step);
+        arpStepCounter=static_cast<std::uint32_t>(std::fmod(std::max(0.0,step),4294967296.0));
+        const double remaining=std::max(0.0,beatAtStep(step)-currentBeat);
+        nextArpFrame=anchor.running ? renderFrame+static_cast<std::uint64_t>(std::round(remaining*60.0*sampleRate/anchor.tempoBpm)) :
+            std::numeric_limits<std::uint64_t>::max();
+        nextRatchetFrame=std::numeric_limits<std::uint64_t>::max();
+    }
+
     void advance_arpeggiator() noexcept {
         if (!parameters.arpeggiator.enabled) return;
+        if (parameters.arpeggiator.clockSource==ArpeggiatorClockSource::GameClock &&
+            activeGameMusicClock && !activeGameMusicClock->running) return;
         if (nextArpFrame == std::numeric_limits<std::uint64_t>::max() && active_held_count() > 0U)
             nextArpFrame = renderFrame;
         if (renderFrame >= nextArpFrame) start_arpeggiator_step();
@@ -7692,7 +7741,12 @@ void Synthesizer::all_notes_off(bool immediate) noexcept {
 
 bool Synthesizer::post_midi(MidiMessage message) noexcept {
     if (!message.valid()) return false;
-    if (message.sampleFrame == 0) message.sampleFrame = currentFrame_.load(std::memory_order_relaxed);
+    if (message.sampleFrame == 0) {
+        const auto earliest = writableFrame_.load(std::memory_order_acquire);
+        message.sampleFrame = message.hostTimestampNanoseconds
+            ? audioClock_.target(message.hostTimestampNanoseconds, earliest).frame : earliest;
+    }
+    message.schedulingSequence = nextMidiSequence_.fetch_add(1U, std::memory_order_relaxed);
     if (!impl_->midiIn.push(message)) {
         impl_->droppedMidi.fetch_add(1U, std::memory_order_relaxed);
         return false;
@@ -7713,6 +7767,13 @@ bool Synthesizer::pitch_bend(std::int16_t centeredValue, std::uint8_t channel, s
 }
 void Synthesizer::set_game_clock_tempo(float bpm) noexcept {
     impl_->gameClockTempo.store(clampf(bpm, 20.0F, 400.0F), std::memory_order_relaxed);
+}
+bool Synthesizer::set_game_music_clock(GameMusicClockAnchor anchor) noexcept {
+    if (!std::isfinite(anchor.beat) || anchor.beat<0.0 || !std::isfinite(anchor.tempoBpm) ||
+        anchor.tempoBpm<20.0F || anchor.tempoBpm>400.0F) return false;
+    if (!anchor.sampleFrame) anchor.sampleFrame=current_frame();
+    impl_->gameMusicClock.publish(anchor);
+    return true;
 }
 void Synthesizer::set_arpeggiator_fill(bool enabled) noexcept {
     impl_->arpeggiatorFill.store(enabled, std::memory_order_relaxed);
@@ -7736,6 +7797,7 @@ GranularRuntimeQuality Synthesizer::granular_runtime_quality() const noexcept {
 }
 void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     if (output == nullptr || frameCount == 0) return;
+    writableFrame_.store(saturating_time_add(current_frame(), frameCount), std::memory_order_release);
     const DenormalGuard denormalGuard{};
     impl_->granularRuntimeQuality = rtGranularQuality_.load(std::memory_order_relaxed);
     impl_->adopt_pending_sample_map();
@@ -7780,13 +7842,18 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
     for (std::size_t i = 1; i < pendingCount; ++i) {
         const MidiMessage value = pending[i];
         std::size_t j = i;
-        while (j > 0U && pending[j - 1U].sampleFrame > value.sampleFrame) {
+        while (j > 0U && (pending[j - 1U].sampleFrame > value.sampleFrame ||
+            (pending[j - 1U].sampleFrame == value.sampleFrame && pending[j - 1U].schedulingSequence > value.schedulingSequence))) {
             pending[j] = pending[j - 1U];
             --j;
         }
         pending[j] = value;
     }
 
+    if (const auto anchor=impl_->gameMusicClock.anchor(); anchor && anchor->revision!=impl_->gameMusicRevision) {
+        impl_->gameMusicRevision=anchor->revision;
+        impl_->pendingGameMusicClock=anchor;
+    }
     const std::uint64_t blockStart = currentFrame_.load(std::memory_order_relaxed);
     std::size_t eventIndex = 0;
     float peakLeft = 0.0F; float peakRight = 0.0F; double squareLeft = 0.0; double squareRight = 0.0;
@@ -7806,6 +7873,7 @@ void Synthesizer::render(float* output, std::size_t frameCount) noexcept {
         impl_->renderFrame = absoluteFrame;
         while (eventIndex < pendingCount && pending[eventIndex].sampleFrame <= absoluteFrame)
             impl_->handle_midi(pending[eventIndex++]);
+        impl_->apply_game_music_clock();
         impl_->process_scheduled_events();
         impl_->advance_arpeggiator();
         float left = 0.0F; float right = 0.0F;

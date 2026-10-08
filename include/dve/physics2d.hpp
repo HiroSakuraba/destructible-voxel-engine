@@ -296,6 +296,8 @@ public:
     }
 
     virtual void step(float frameDeltaSeconds) = 0;
+    // Exactly one host-owned simulation tick. Solver subStepCount is preserved.
+    virtual void step_fixed(float fixedDeltaSeconds) { step(fixedDeltaSeconds); }
     [[nodiscard]] virtual bool body_state(Physics2DBodyHandle body, Physics2DBodyState& out) const = 0;
     virtual bool set_body_transform(Physics2DBodyHandle body, TileVec2 positionPixels,
                                     float angleRadians) = 0;

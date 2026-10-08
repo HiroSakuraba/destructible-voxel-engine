@@ -35,8 +35,19 @@ int main() {
     require(beforeForce.has_value(), "reference body state missing");
     require(world.apply_force_at_point(handle, {0.0F, 120.0F, 0.0F}, {1.0F, 2.0F, 0.0F}),
             "neutral point force was rejected");
+    // Forces accumulate until the next step, which integrates them over its actual duration.
+    const auto pendingForce = world.pending_loads(handle);
+    require(pendingForce.has_value() && pendingForce->force.y == 120.0F &&
+                (pendingForce->torque.x != 0.0F || pendingForce->torque.y != 0.0F ||
+                 pendingForce->torque.z != 0.0F),
+            "reference point force was not accumulated as a pending load");
+    const auto beforeStep = world.state(handle);
+    require(beforeStep.has_value() && beforeStep->linearVelocity.y == beforeForce->linearVelocity.y,
+            "reference point force changed velocity before the step");
+    world.step(0.5F);
     const auto afterForce = world.state(handle);
-    require(afterForce.has_value() && afterForce->linearVelocity.y > beforeForce->linearVelocity.y,
+    require(afterForce.has_value() &&
+                std::abs((afterForce->linearVelocity.y - beforeForce->linearVelocity.y) - 30.0F) < 1.0e-4F,
             "reference point-force fallback did not preserve linear loading");
 
     const float beforeImpulseX = afterForce->linearVelocity.x;

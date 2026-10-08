@@ -269,4 +269,12 @@ struct SplitPlan {
     const SplitPlan& plan,
     std::uint64_t newObjectId);
 
+// Plans must all be built from the same source snapshot. On validation failure,
+// returns empty optionals without changing source. Each source brick is removed once.
+[[nodiscard]] std::vector<std::optional<VoxelObject>> commit_split_plans(
+    VoxelObject& source,
+    std::span<const SplitPlan> plans,
+    std::span<const std::uint64_t> newObjectIds,
+    std::vector<AppliedBrickEdit>* sourceEdits = nullptr);
+
 } // namespace dve

@@ -574,6 +574,33 @@ void test_fragment_cap_keeps_smallest_attached() {
     CHECK(smallest && smallest->objectId == id);
 }
 
+void test_two_fragments_sharing_a_brick() {
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    auto voxels = std::make_unique<VoxelObject>(770);
+    for (int x = 9; x < 24; ++x)
+        for (int y = 0; y < 4; ++y)
+            for (int z = 0; z < 4; ++z) voxels->set_voxel({x, y, z}, 1);
+    for (int x = 0; x < 7; ++x) {
+        voxels->set_voxel({x, 0, 0}, 1);
+        voxels->set_voxel({x, 2, 0}, 1);
+    }
+    for (int x = 7; x < 9; ++x)
+        for (int y = 0; y < 3; ++y) voxels->set_voxel({x, y, 0}, 1);
+    GameObjectDesc desc;
+    desc.name = "Two prongs";
+    desc.voxelSizeMeters = 1.0F;
+    desc.dynamic = false;
+    desc.voxels = std::move(voxels);
+    const GameObjectId id = world.create_object(std::move(desc));
+    CHECK(id != kInvalidGameObjectId);
+    std::vector<GameObjectId> fragments;
+    world.on_damage([&](const GameDamageEvent& event) { fragments = event.newFragmentIds; });
+    CHECK(world.damage_sphere(id, {8.0F, 1.5F, 0.5F}, 1.2F).value_or(0) > 0);
+    CHECK(fragments.size() == 2);
+    const auto secondProng = world.raycast({0.5F, 2.5F, -5}, {0, 0, 1}, 10.0F);
+    CHECK(secondProng && secondProng->objectId != id);
+}
+
 int main() {
     test_marker_objects();
     test_static_object_is_immovable();
@@ -584,6 +611,7 @@ int main() {
     test_fragmentation_of_moved_dynamic_object();
     test_carved_holes_rebuild_collision();
     test_fragment_cap_keeps_smallest_attached();
+    test_two_fragments_sharing_a_brick();
     test_spawn_asset_uses_real_per_material_density();
     test_raycast_unit_correctness();
     test_timers();

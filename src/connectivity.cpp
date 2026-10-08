@@ -926,32 +926,55 @@ std::optional<SplitPlan> build_split_plan(
     return plan;
 }
 
-std::optional<VoxelObject> commit_split_plan(
-    VoxelObject& source,
-    const SplitPlan& plan,
-    std::uint64_t newObjectId) {
-    if (source.id() != plan.sourceObjectId) return std::nullopt;
-    for (const SplitBrickPlan& brickPlan : plan.bricks) {
-        const Brick* sourceBrick = std::as_const(source).find_brick(brickPlan.key);
-        if (sourceBrick == nullptr || sourceBrick->generation() != brickPlan.sourceGeneration) return std::nullopt;
+std::vector<std::optional<VoxelObject>> commit_split_plans(
+    VoxelObject& source, std::span<const SplitPlan> plans,
+    std::span<const std::uint64_t> newObjectIds,
+    std::vector<AppliedBrickEdit>* sourceEdits) {
+    std::vector<std::optional<VoxelObject>> detached(plans.size());
+    if (plans.size() != newObjectIds.size()) return detached;
+
+    std::map<BrickKey, Bitset512> removals;
+    for (const SplitPlan& plan : plans) {
+        if (source.id() != plan.sourceObjectId) return detached;
+        for (const SplitBrickPlan& brickPlan : plan.bricks) {
+            const Brick* brick = std::as_const(source).find_brick(brickPlan.key);
+            if (!brick || brick->generation() != brickPlan.sourceGeneration) return detached;
+            Bitset512& mask = removals[brickPlan.key];
+            if ((mask & brickPlan.removeMask).any()) return detached;
+            mask |= brickPlan.removeMask;
+        }
     }
 
-    VoxelObject detached(newObjectId);
-    detached.reserve_bricks(plan.bricks.size());
-    for (const SplitBrickPlan& brickPlan : plan.bricks) {
-        BrickMutation writeMutation;
-        writeMutation.writes.reserve(brickPlan.voxels.size());
-        for (const SplitVoxel& voxel : brickPlan.voxels) writeMutation.writes.push_back({voxel.index, voxel.material});
-        detached.apply(brickPlan.key, writeMutation);
+    // Build every detached object before changing the source. Two plans may read
+    // the same brick generation, but their removal masks are disjoint.
+    for (std::size_t i = 0; i < plans.size(); ++i) {
+        const SplitPlan& plan = plans[i];
+        VoxelObject piece(newObjectIds[i]);
+        piece.reserve_bricks(plan.bricks.size());
+        for (const SplitBrickPlan& brickPlan : plan.bricks) {
+            BrickMutation writeMutation;
+            writeMutation.writes.reserve(brickPlan.voxels.size());
+            for (const SplitVoxel& voxel : brickPlan.voxels)
+                writeMutation.writes.push_back({voxel.index, voxel.material});
+            piece.apply(brickPlan.key, writeMutation);
+        }
+        if (!piece.validate() || piece.occupied_voxel_count() != plan.voxelCount)
+            return std::vector<std::optional<VoxelObject>>(plans.size());
+        detached[i].emplace(std::move(piece));
     }
-    if (!detached.validate() || detached.occupied_voxel_count() != plan.voxelCount) return std::nullopt;
-
-    for (const SplitBrickPlan& brickPlan : plan.bricks) {
+    for (const auto& [key, mask] : removals) {
         BrickMutation removeMutation;
-        removeMutation.removeMask = brickPlan.removeMask;
-        source.apply(brickPlan.key, removeMutation);
+        removeMutation.removeMask = mask;
+        const AppliedBrickEdit edit = source.apply(key, removeMutation);
+        if (sourceEdits) sourceEdits->push_back(edit);
     }
     return detached;
+}
+
+std::optional<VoxelObject> commit_split_plan(
+    VoxelObject& source, const SplitPlan& plan, std::uint64_t newObjectId) {
+    auto detached = commit_split_plans(source, std::span(&plan, 1), std::span(&newObjectId, 1));
+    return std::move(detached.front());
 }
 
 } // namespace dve

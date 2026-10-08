@@ -337,6 +337,36 @@ void test_connectivity_and_split_transaction() {
 }
 
 
+void test_batch_split_shared_brick() {
+    using namespace dve;
+    VoxelObject object(42);
+    for (int x : {0, 2, 4}) object.set_voxel({x, 0, 0}, 1);
+    const auto snapshot = build_connectivity_snapshot(object);
+    CHECK(snapshot.components.size() == 3);
+    const auto first = build_split_plan(object, snapshot, 1);
+    const auto second = build_split_plan(object, snapshot, 2);
+    CHECK(first && second);
+    if (!first || !second) return;
+    std::array<SplitPlan, 2> plans{*first, *second};
+    std::array<std::uint64_t, 2> ids{99, 100};
+    const auto beforeGeneration = std::as_const(object).find_brick({0, 0, 0})->generation();
+    std::vector<AppliedBrickEdit> edits;
+    auto pieces = commit_split_plans(object, plans, ids, &edits);
+    CHECK(pieces.size() == 2 && pieces[0] && pieces[1]);
+    if (pieces.size() != 2 || !pieces[0] || !pieces[1]) return;
+    CHECK(object.occupied_voxel_count() == 1);
+    CHECK(pieces[0]->occupied_voxel_count() == 1 && pieces[1]->occupied_voxel_count() == 1);
+    CHECK(edits.size() == 1 && edits[0].changedMask.count() == 2);
+    CHECK(std::as_const(object).find_brick({0, 0, 0})->generation() == beforeGeneration + 1);
+    CHECK(object.validate() && pieces[0]->validate() && pieces[1]->validate());
+    const auto afterCommit = object.state_hash();
+    edits.clear();
+    auto stale = commit_split_plans(object, plans, ids, &edits);
+    CHECK(!stale[0] && !stale[1] && edits.empty());
+    CHECK(object.state_hash() == afterCommit);
+}
+
+
 void test_box_collision_proxy() {
     using namespace dve;
     VoxelObject object;
@@ -1066,6 +1096,7 @@ int main() {
         test_transformed_queries_and_player_safety();
         test_conservative_capsule_sweep_randomized_oracle();
         test_connectivity_and_split_transaction();
+        test_batch_split_shared_brick();
         test_incremental_connectivity_cache();
         test_incremental_randomized_oracle();
         test_compact_connectivity_memory_and_csr();

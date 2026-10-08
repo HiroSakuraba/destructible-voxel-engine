@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <functional>
 
 #include "dve/platform/application_host.hpp"
 
@@ -19,6 +20,11 @@ public:
     SdlApplicationHost& operator=(SdlApplicationHost&&) noexcept;
 
     [[nodiscard]] HostBackend backend() const noexcept override { return HostBackend::SDL3; }
+    [[nodiscard]] std::uint64_t monotonic_nanoseconds() const noexcept;
+    // Empty deadline waits for activity indefinitely. Wake callbacks remain safe after
+    // window/host destruction; producers never retain a raw host pointer.
+    bool wait_until(std::optional<std::uint64_t> deadlineNanoseconds);
+    [[nodiscard]] std::function<void()> wake_callback() const;
     bool create_window(const WindowDesc& desc, std::string* error = nullptr) override;
     void destroy_window() noexcept override;
     [[nodiscard]] bool has_window() const noexcept override;

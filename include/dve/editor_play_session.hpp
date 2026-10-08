@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+#include "dve/simulation_clock.hpp"
 #include "dve/editor_materials.hpp"
 #include "dve/editor_workspace.hpp"
 #include "dve/game_ui.hpp"
@@ -107,6 +108,7 @@ public:
     // Whether the running world saw `action` as pressed on its most recent fixed step (what
     // scripts read with world.is_action_pressed). False when no session is running.
     [[nodiscard]] bool runtime_action_pressed(std::string_view action) const;
+    [[nodiscard]] std::map<EditorObjectId, RigidTransform> presentation_transforms() const;
     // Called on the main thread before update(); keeps elapsed seconds and object state.
     [[nodiscard]] bool apply_live_settings(const EditorPlaySessionConfig& requested, std::string* error = nullptr);
 
@@ -127,7 +129,7 @@ private:
     LogSink logSink_{};
     EditorPlaySessionState state_{EditorPlaySessionState::Stopped};
     EditorMode mode_{EditorMode::Edit};
-    double accumulatorSeconds_{};
+    SimulationClock clock_;
 };
 
 [[nodiscard]] std::string_view editor_play_session_state_label(EditorPlaySessionState state) noexcept;

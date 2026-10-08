@@ -64,6 +64,7 @@ constexpr SDL_Keycode SDLK_MINUS = '-';
 constexpr SDL_Keycode SDLK_LEFTBRACKET = '[';
 constexpr SDL_Keycode SDLK_RIGHTBRACKET = ']';
 
+constexpr Uint32 SDL_EVENT_USER = 0x8000;
 constexpr Uint32 SDL_EVENT_QUIT = 0x100;
 constexpr Uint32 SDL_EVENT_WINDOW_CLOSE_REQUESTED = 0x201;
 constexpr Uint32 SDL_EVENT_WINDOW_RESIZED = 0x202;
@@ -151,7 +152,9 @@ struct SDL_DropEvent {
     Uint32 type{}; Uint32 reserved{}; Uint64 timestamp{}; SDL_WindowID windowID{};
     float x{}; float y{}; const char* data{};
 };
+struct SDL_UserEvent { Uint32 type{},reserved{}; Uint64 timestamp{}; SDL_WindowID windowID{}; Sint32 code{}; void* data1{}; void* data2{}; };
 union SDL_Event {
+    SDL_UserEvent user;
     Uint32 type;
     SDL_CommonEvent common;
     SDL_KeyboardEvent key;
@@ -182,6 +185,7 @@ Uint32 SDL_GetMouseState(float* x, float* y);
 void SDL_WarpMouseInWindow(SDL_Window* window, float x, float y);
 void SDLTest_SetRelativeMouseSupported(bool supported);
 bool SDL_PollEvent(SDL_Event* event);
+bool SDL_PushEvent(SDL_Event* event);
 bool SDL_WaitEventTimeout(SDL_Event* event, Sint32 timeoutMS);
 bool SDL_GetWindowSize(SDL_Window* window, int* w, int* h);
 bool SDL_GetWindowSizeInPixels(SDL_Window* window, int* w, int* h);

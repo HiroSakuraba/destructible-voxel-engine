@@ -14,7 +14,7 @@ quickload, keeps save slots in the user's data directory and can resume a save w
 | Container (header, hashes, limits, migrations, atomic publish, `.bak`) | `SaveGameStore`, `dve/v235_foundations.hpp` |
 | World snapshot | `GameWorld::capture_save_state` / `restore_save_state` / `state_hash`, `dve/game_world.hpp` |
 | World save format (sections, voxel deltas, source checks) | `GameSaveCodec`, `dve/game_save.hpp` |
-| Sub-runtime snapshot (v2) | `capture_game_runtime_state` / `restore_game_runtime_state`, `dve/game_save.hpp`; each runtime's `capture_save_state` / `restore_save_state` |
+| Sub-runtime snapshot (v2/v3) | `capture_game_runtime_state` / `restore_game_runtime_state`, `dve/game_save.hpp`; each runtime's `capture_save_state` / `restore_save_state` |
 | Script state | `GameScriptHost::save_state` / `load_state`, `world.on_save` / `world.on_load`, `dve/game_script.hpp` |
 | Player integration | `PlayerApp::save_game` / `load_game`, `dve/player/player_app.hpp`; `dve_player --load`, `--save-dir` |
 
@@ -167,7 +167,7 @@ data is called with a fresh copy. `save_game` and `load_game` only queue a reque
 carries it out after the current fixed step, so a load never replaces the Lua state while Lua
 code is running.
 
-## Format (schema version 2)
+## Format (schema version 3)
 
 A `.dvesave` file is a `DVESAVE1` document:
 
@@ -185,9 +185,11 @@ limits and against the bytes left.
 | Section | Contents |
 |---|---|
 | `dve.meta` | engine version, game name and version, scene path, tick count, `worldStateHash`, a free-form info map (the player writes `physics=<backend>`) |
-| `dve.world` | next ids, elapsed time, the objects (everything except bricks and bodies; the 256-entry density table is run-length encoded), timers, pools |
+| `dve.world` | next ids, compatibility float elapsed time, the objects (everything except bricks and bodies; the 256-entry density table is run-length encoded), timers, pools |
 | `dve.voxels` | per voxel object: `u64 id`, `u64 voxelObjectId`, then **delta** or **full** |
 | `dve.physics` | per body: `u64 id`, previous and current transform, linear and angular velocity, sleeping, local centre of mass |
+| `dve.clock` | v3 integer tick/rate, absolute timer releases, queued destruction progress, debris and input session state |
+| `dve.root-motion` | v3 optional unconsumed character displacement intents |
 | `dve.script` | opaque bytes from the script host (optional). The Lua blob has its own magic and version (`DVLS`, v2; v1 blobs still load). |
 | `dve.gameplay` | v2, optional: character, player, trigger, recording and playback records, then the id counters and fixed tick |
 | `dve.cameras` | v2, optional: the camera runtime's text state |
@@ -241,7 +243,7 @@ reader's limits allow.
 
 ## Versions and migrations
 
-`kGameSaveSchemaVersion` is 2. When the format changes:
+`kGameSaveSchemaVersion` is 3. When the format changes:
 
 1. Bump `kGameSaveSchemaVersion`.
 2. Register a migration from the old version. A migration receives the `SaveGameDocument`
@@ -257,17 +259,21 @@ message, when:
 - a migration fails (with its own message);
 - a migration does not advance the version.
 
+**v2 -> v3.** The engine accepts the legacy sections and converts the float elapsed time and timer deadlines to tick deadlines on restore. New writes store integer clock state and pending destruction work in `dve.clock`. A previous `worldStateHash` used a float-time definition: the player checks container and source hashes but compares the new world hash only for integer-clock saves.
+
+The same clock section records pending force and torque for reference physics bodies by object id. A save between applying a load and stepping physics therefore resumes that load on the next tick. These solver loads require a reference physics backend on restore; production backend transient solver state remains backend-specific.
+
 **v1 -> v2.** `GameSaveCodec` registers this step itself (so a game cannot register another
 one for version 1). Version 2 only adds optional sections, and the `DVLS` script blob reads
 both its versions, so the step checks that the document has the four required v1 sections and
 no engine section v1 did not define, then sets the version to 2. A v1 save therefore loads with
 its world, voxels, bodies, timers and script state, and every sub-runtime stays as the boot left
-it (as it did under v1). Saving again writes v2.
+it (as it did under v1). Saving again writes v3.
 
 `dve_game_save_tests` covers this with a real v1 document, and with a synthetic version 0
 that uses the same payloads under the pre-release section names `meta`/`world`/`voxels`/
 `physics`, plus a `format` marker. With no migration registered, v0 is refused. With a game's
-`0 -> 1` migration (which renames the sections) plus the engine's `1 -> 2`, it loads and
+`0 -> 1` migration (which renames the sections) plus the engine's `1 -> 2` and `2 -> 3`, it loads and
 restores the identical world.
 
 ## The player
@@ -350,7 +356,7 @@ entries) is run-length encoded.
 
 | Test | What it checks |
 |---|---|
-| `dve_game_save_tests` | Save and load give an identical `state_hash` and byte-identical re-saves, with the reference solver and with Jolt; continuing both worlds keeps them in lock step. The same after destruction (a static tower split into a dynamic fragment, a chipped dynamic crate) plus ticks, with delta and full objects. Loading into a world that has diverged. A changed source asset is rejected. Every truncation, flipped bytes, trailing bytes, a huge declared size, a corrupt slot falling back to `.bak` (and failing when that is not allowed or missing). The synthetic v0 -> v1 -> v2 migration, a missing migration, a failing one, one that does not advance, a newer schema. Game sections and limits. Lua script state: nested tables, integer vs. float, globals, deterministic bytes, functions, cycles, errors and depth rejected, malformed blobs, and `save_game`/`load_game` with and without a host handler. **v2:** a world with a possessed character, a boot and a runtime trigger, a recording, an animation controller mid-transition, a crossfading skeleton, a control rig, an active ragdoll, CPU hair in wind and a camera state saves, loads into a fresh boot and re-encodes every sub-runtime section byte for byte; after 30 more ticks characters, animation, cameras and hair are still byte-identical and the ragdoll within 5 cm (0 m with the reference solver). A boot missing a binding gives a warning; a character without a pawn fails; every truncation of each v2 section and an unknown `dve.` section are rejected. A real v1 document migrates and loads; a mislabelled one is refused. Unbound timers keep their place and bind or drop explicitly. Script state v2: environment, HUD, material overrides and named timers (boot-scheduled and runtime-scheduled) restore, a cancelled one does not come back, an anonymous closure is dropped, the same named timers fire in both processes; unsaveable timer data and unknown handler names are errors; a v1 blob still loads. |
+| `dve_game_save_tests` | Save and load give an identical `state_hash` and byte-identical re-saves, with the reference solver and with Jolt; continuing both worlds keeps them in lock step. The same after destruction (a static tower split into a dynamic fragment, a chipped dynamic crate) plus ticks, with delta and full objects. Loading into a world that has diverged. A changed source asset is rejected. Every truncation, flipped bytes, trailing bytes, a huge declared size, a corrupt slot falling back to `.bak` (and failing when that is not allowed or missing). The synthetic v0 -> v1 -> v2 -> v3 migration, a missing migration, a failing one, one that does not advance, a newer schema. Game sections and limits. Lua script state: nested tables, integer vs. float, globals, deterministic bytes, functions, cycles, errors and depth rejected, malformed blobs, and `save_game`/`load_game` with and without a host handler. **v2:** a world with a possessed character, a boot and a runtime trigger, a recording, an animation controller mid-transition, a crossfading skeleton, a control rig, an active ragdoll, CPU hair in wind and a camera state saves, loads into a fresh boot and re-encodes every sub-runtime section byte for byte; after 30 more ticks characters, animation, cameras and hair are still byte-identical and the ragdoll within 5 cm (0 m with the reference solver). A boot missing a binding gives a warning; a character without a pawn fails; every truncation of each v2 section and an unknown `dve.` section are rejected. A real v1 document migrates and loads; a mislabelled one is refused. Unbound timers keep their place and bind or drop explicitly. Script state v2: environment, HUD, material overrides and named timers (boot-scheduled and runtime-scheduled) restore, a cancelled one does not come back, an anonymous closure is dropped, the same named timers fire in both processes; unsaveable timer data and unknown handler names are errors; a v1 blob still loads. |
 | `dve_game_world_tests` | Also the regression test for fragmenting a *moved* dynamic object (see CHANGELOG). |
 | `dve_player_runtime_tests` | In-process: save, then load in a fresh `PlayerApp` gives the same state hash and the same CPU-rendered frame. The Lua blast, then F5, then F9 restore in place (tick count, objects, frame and Lua spinner state). The blast's pending named `aftershock` timer is re-bound on load (`namedTimersRestored == 1`, nothing dropped). A fresh app loading the quicksave and the original both run 15 more ticks and stay identical, and the aftershock fires in both with the same environment change. Lua slot save and load. Truncated, flipped and missing saves fail and leave the game running. Slot names, the slug, and `XDG_DATA_HOME` handling. |
 | `dve_player_save_load` | CLI, two processes. Process A plays 40 frames: blast, move, F5 at frame 30, Lua slot save at frame 34, saving to `XDG_DATA_HOME`. Process B runs `--load quicksave`: the loaded frame equals the frame A rendered after saving, and after the remaining 9 frames its hash equals A's final hash. Loading a slot by path works. Truncated, garbage, missing and invalid-slot `--load` exit 3 with a message. |

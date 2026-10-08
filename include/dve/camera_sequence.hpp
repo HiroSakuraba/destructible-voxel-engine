@@ -86,6 +86,7 @@ struct CameraSequence {
 
 class CameraSequencePlayer {
 public:
+    [[nodiscard]] std::uint64_t state_hash() const noexcept;
     void set_sequence(const CameraSequence* sequence) noexcept;
     void play(bool loop = false) noexcept;
     void pause() noexcept { playing_ = false; }

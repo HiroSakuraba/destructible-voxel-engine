@@ -153,6 +153,7 @@ bool GameplayRuntime::add_character(GameObjectId pawn, CharacterControllerConfig
 }
 
 bool GameplayRuntime::remove_character(GameObjectId pawn) {
+    rootMotion_.erase(pawn);
     pawnControllers_.erase(pawn);
     for (auto& [id, playerState] : players_) {
         (void)id;
@@ -400,6 +401,12 @@ bool GameplayRuntime::try_set_stance(GameObjectId pawn, CharacterRecord& record,
     return true;
 }
 
+bool GameplayRuntime::queue_root_motion(GameObjectId pawn, Float3 displacement) {
+    if (!has_character(pawn) || !finite(displacement)) return false;
+    rootMotion_[pawn] = add(rootMotion_[pawn], displacement);
+    return true;
+}
+
 void GameplayRuntime::update_character(GameObjectId pawn, CharacterRecord& record, float dt, std::uint64_t simulationTick) {
     record.telemetry = {};
     if (!world_->has_object(pawn)) return;
@@ -458,6 +465,10 @@ void GameplayRuntime::update_character(GameObjectId pawn, CharacterRecord& recor
     }
 
     Float3 remaining = add(multiply(record.state.velocity, dt), multiply(supportVelocity, dt));
+    if (const auto motion = rootMotion_.find(pawn); motion != rootMotion_.end()) {
+        remaining = add(remaining, motion->second);
+        rootMotion_.erase(motion);
+    }
     const float walkableZ = std::cos(record.config.maximumSlopeDegrees * kPi / 180.0F);
     bool groundedFromMove = false;
     GameObjectId moveSupport = kInvalidGameObjectId;
@@ -663,6 +674,7 @@ GameplaySaveState GameplayRuntime::capture_save_state() const {
     state.nextPlayerId = nextPlayerId_;
     state.nextTriggerId = nextTriggerId_;
     state.fixedTick = fixedTick_;
+    state.pendingRootMotion = rootMotion_;
     return state;
 }
 
@@ -731,6 +743,11 @@ bool GameplayRuntime::restore_save_state(const GameplaySaveState& state, std::st
         if (!playbacks.emplace(saved.player, std::move(playback)).second)
             return fail("playback for player " + std::to_string(saved.player) + " is saved twice");
     }
+    for (const auto& [pawn, displacement] : state.pendingRootMotion) {
+        if (!characters.contains(pawn) || !finite(displacement))
+            return fail("invalid pending root motion");
+    }
+    rootMotion_ = state.pendingRootMotion;
     characters_ = std::move(characters);
     players_ = std::move(players);
     pawnControllers_ = std::move(controllers);

@@ -1,3 +1,6 @@
+#include "dve/world_tick_schedule.hpp"
+#include "dve/resumable_destruction.hpp"
+#include "dve/simulation_clock.hpp"
 #include "dve/game_world.hpp"
 #include "dve/animation.hpp"
 #include "dve/animation_controller.hpp"
@@ -294,10 +297,47 @@ struct GameWorld::Object {
     std::optional<GameObjectSource> source; // save games: the asset this geometry came from
 };
 
+namespace {
+std::uint64_t timer_ticks(double seconds, float fixedDelta) noexcept {
+    if (!(seconds > 0.0) || !std::isfinite(seconds)) return 0U;
+    // Authored durations are floats. Cancel conversion noise at an exact tick boundary.
+    const double ticks = seconds / static_cast<double>(fixedDelta);
+    const double rounded = std::ceil(ticks - ticks * 2.0 * std::numeric_limits<float>::epsilon());
+    return rounded >= double(std::numeric_limits<std::uint64_t>::max())
+        ? std::numeric_limits<std::uint64_t>::max() : static_cast<std::uint64_t>(std::max(1.0, rounded));
+}
+}
+
+namespace {
+std::uint64_t authored_interval_nanoseconds(float interval) noexcept {
+    double value=interval;
+    const auto micros=std::round(value*1000000.0)/1000000.0;
+    if (micros>0 && std::abs(micros-value)<=2.0*std::numeric_limits<float>::epsilon()*value) value=micros;
+    const long double nanoseconds=std::round(static_cast<long double>(value)*1000000000.0L);
+    const auto maximum=std::numeric_limits<std::uint64_t>::max();
+    return nanoseconds>=static_cast<long double>(maximum) ? maximum : static_cast<std::uint64_t>(nanoseconds);
+}
+std::uint64_t repeating_deadline(std::uint64_t origin, std::uint64_t intervalNs,
+    std::uint64_t release, float dt) noexcept {
+    SimulationClock rate; rate.fixedDeltaSeconds=dt;
+    const long double ticks=static_cast<long double>(intervalNs)*release/(1000000000.0L*rate.period_seconds());
+    const auto maximum=std::numeric_limits<std::uint64_t>::max();
+    const auto offset=ticks>=static_cast<long double>(maximum) ? maximum :
+        static_cast<std::uint64_t>(std::ceil(ticks-1.0e-9L));
+    return saturating_time_add(origin,offset);
+}
+}
+
+struct GameWorld::PendingDestruction {
+    GameWorldDestructionState state;
+    std::unique_ptr<ResumableDestruction> job;
+};
+
 struct GameWorld::Timer {
     TimerId id{};
-    float fireAtSeconds{};
-    float intervalSeconds{}; // 0 => one-shot
+    std::uint64_t fireAtTick{};
+    std::uint64_t intervalTicks{}; // 0 => one-shot
+    std::uint64_t intervalNanoseconds{}, originTick{}, releaseIndex{1};
     bool cancelled{};
     std::function<void()> callback;
 };
@@ -765,6 +805,7 @@ std::optional<GameGeometryKind> GameWorld::geometry_kind(GameObjectId id) const 
 }
 
 bool GameWorld::destroy_object(GameObjectId id) {
+    presentationPrevious_.erase(id);
     if (objectPools_.contains(id)) return release_to_pool(id, nullptr);
     return destroy_object_internal(id, true);
 }
@@ -1285,7 +1326,7 @@ std::optional<RigidTransform> GameWorld::transform(GameObjectId id) const {
     return resolve_transform(it->second);
 }
 
-std::vector<GameRenderObject> GameWorld::render_objects() const {
+std::vector<GameRenderObject> GameWorld::render_objects(float interpolationAlpha) const {
     std::vector<GameRenderObject> result;
     result.reserve(objects_.size());
     for (const auto& [id, object] : objects_) {
@@ -1304,6 +1345,9 @@ std::vector<GameRenderObject> GameWorld::render_objects() const {
         item.polygon = object.polygon.get();
         item.materials = object.materials;
         item.transform = resolve_transform(object);
+        if (const auto previous = presentationPrevious_.find(id); previous != presentationPrevious_.end())
+            item.transform = interpolate_rigid_transform(previous->second, item.transform,
+                std::isfinite(interpolationAlpha) ? std::clamp(interpolationAlpha, 0.0F, 1.0F) : 1.0F);
         item.voxelSizeMeters = object.voxelSizeMeters;
         item.enabled = object.enabled;
         item.dynamic = object.dynamic;
@@ -1322,6 +1366,7 @@ std::optional<Float3> GameWorld::position(GameObjectId id) const {
 }
 
 bool GameWorld::set_position(GameObjectId id, Float3 worldPosition) {
+    if (!inTick_) presentationPrevious_.erase(id);
     const auto it = objects_.find(id);
     if (it == objects_.end()) return false;
     Object& object = it->second;
@@ -1354,6 +1399,7 @@ bool GameWorld::set_position(GameObjectId id, Float3 worldPosition) {
 }
 
 bool GameWorld::set_rotation(GameObjectId id, Quaternion worldRotation) {
+    if (!inTick_) presentationPrevious_.erase(id);
     const auto it = objects_.find(id);
     if (it == objects_.end()) return false;
     Object& object = it->second;
@@ -1565,6 +1611,133 @@ bool GameWorld::apply_cpu_hair_impulse(GameObjectId id, Float3 impulse) noexcept
     return cpuHair_->apply_impulse(id, impulse);
 }
 #endif
+
+double GameWorld::elapsed_seconds() const noexcept {
+    SimulationClock clock;
+    clock.fixedDeltaSeconds = fixedDeltaSeconds_;
+    return double(tickCount_) * clock.period_seconds();
+}
+
+std::size_t GameWorld::pending_destruction_count() const noexcept { return pendingDestruction_.size(); }
+
+std::optional<std::uint64_t> GameWorld::queue_damage_sphere(GameObjectId id, Float3 worldCenter, float radius) {
+    const auto found = objects_.find(id);
+    if (found == objects_.end() || !found->second.voxels || found->second.visualOnly ||
+        !(radius > 0.0F) || !std::isfinite(radius) || !std::isfinite(worldCenter.x) ||
+        !std::isfinite(worldCenter.y) || !std::isfinite(worldCenter.z) || pendingDestruction_.size() >= 64U) return std::nullopt;
+    radius = std::min(radius, kMaxDamageSphereRadiusMeters);
+    const auto& object = found->second;
+    const auto local = multiply(inverse_transform_point(resolve_transform(object), worldCenter), 1.0F/object.voxelSizeMeters);
+    const auto request = nextDestructionId_++;
+    pendingDestruction_.push_back({{request, id, worldCenter, radius, local, radius/object.voxelSizeMeters, 0}, {}});
+    return request;
+}
+
+void GameWorld::process_pending_destruction() {
+    // FIFO commits make completion independent of presentation frequency and worker speed.
+    // Budgets count logical work, never microseconds. A suspended head retains its state.
+    if (pendingDestruction_.empty() || !destructionUnitsPerTick_) return;
+    auto& pending = pendingDestruction_.front();
+    const auto found = objects_.find(pending.state.objectId);
+    if (pending.state.stale || found == objects_.end() || !found->second.voxels) {
+        ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); return;
+    }
+    if (!pending.job) pending.job = std::make_unique<ResumableDestruction>(*found->second.voxels,
+        SphereDamageCommand{pending.state.localCenterVoxels, pending.state.localRadiusVoxels, pending.state.requestId}, found->second.massTable);
+    if (!pending.job->matches_mass_table(found->second.massTable)) {
+        ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); return;
+    }
+    pending.job->resume(*found->second.voxels, destructionUnitsPerTick_);
+    pending.state.workUnits = pending.job->work_units();
+    const auto phase = pending.job->phase();
+    if (phase == ResumableDestruction::Phase::Ready) {
+        // Remove before callbacks, which may enqueue another request or destroy the owner.
+        auto ready = std::move(pending);
+        pendingDestruction_.erase(pendingDestruction_.begin());
+        if (!commit_prepared_destruction(ready)) ++rejectedDestruction_;
+    } else if (phase == ResumableDestruction::Phase::Failed || phase == ResumableDestruction::Phase::Stale) {
+        ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin());
+    }
+}
+
+bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
+    auto found = objects_.find(pending.state.objectId);
+    if (found == objects_.end() || !found->second.voxels || found->second.voxels->revision() != pending.job->source_revision()) return false;
+    auto& parent = found->second;
+    const auto removed = pending.job->removed_voxels();
+    if (!removed) return true;
+    auto& components = pending.job->components();
+    if (components.empty()) {
+        const GameDamageEvent event{parent.id, pending.state.worldCenter, pending.state.radius, removed, true, {}};
+        for (const auto& listener : damageListeners_) listener(event);
+        (void)destroy_object(pending.state.objectId);
+        return true;
+    }
+    if (debris_count()+components.size()-1 > debrisLimit_) return false;
+    std::size_t primary{};
+    for (std::size_t i=1;i<components.size();++i)
+        if (components[i].voxelCount > components[primary].voxelCount) primary=i;
+    const auto origin = resolve_transform(parent);
+    const auto oldState = parent.hasBody ? physics_->state(parent.bodyHandle) : std::nullopt;
+    std::vector<RigidBodyHandle> handles(components.size(), kInvalidRigidBodyHandle);
+    std::vector<Float3> centers(components.size());
+    const auto rollback = [&] { for (const auto h : handles) if (h != kInvalidRigidBodyHandle) physics_->destroy_body(h); };
+    for (std::size_t i=0;i<components.size();++i) {
+        auto& component = components[i];
+        if (i == primary && !parent.hasBody) continue;
+        if (i == primary && !parent.dynamic) {
+            StaticRigidBodyCreateDesc desc; desc.transform=origin;
+            for (const auto& box : component.boxes) desc.boxes.push_back(voxel_box_to_solver_box(box,parent.voxelSizeMeters));
+            handles[i]=physics_->create_static_body(desc);
+        } else {
+            FragmentSolverPackage package; package.mass=component.mass;
+            const auto voxelPose=make_rigid_transform(multiply(origin.position,1.0F/parent.voxelSizeMeters),origin.rotation);
+            package.bodyTransform=make_rigid_transform(transform_point(voxelPose,component.mass.centerOfMass),origin.rotation);
+            for (const auto& box : component.boxes) {
+                const Float3 min{float(box.min.x),float(box.min.y),float(box.min.z)};
+                const Float3 max{float(box.maxExclusive.x),float(box.maxExclusive.y),float(box.maxExclusive.z)};
+                package.boxes.push_back({subtract(multiply(add(min,max),0.5F),component.mass.centerOfMass),multiply(subtract(max,min),0.5F)});
+            }
+            const auto size=parent.voxelSizeMeters;
+            auto desc=make_rigid_body_desc(package,{parent.densityQuantumKilogramsPerCubicMeter*double(size)*size*size,size});
+            if (!desc) { rollback(); return false; }
+            desc->collisionClass = i == primary && parent.structural ? RigidBodyCollisionClass::Full : RigidBodyCollisionClass::DebrisNoSelf;
+            if (oldState) {
+                desc->linearVelocity=inherited_child_center_of_mass_velocity(oldState->linearVelocity,oldState->angularVelocity,
+                    oldState->currentTransform.position,desc->transform.position);
+                desc->angularVelocity=oldState->angularVelocity;
+            }
+            centers[i]=multiply(component.mass.centerOfMass,size);
+            handles[i]=physics_->create_body(*desc);
+        }
+        if (handles[i] == kInvalidRigidBodyHandle) { rollback(); return false; }
+    }
+    // All packages exist before replacing live geometry/bodies. No listener sees a partial
+    // replacement; callbacks run only after the complete geometry/collision publication.
+    std::vector<GameObjectId> fragments;
+    for (std::size_t i=0;i<components.size();++i) {
+        if (i==primary) continue;
+        Object fragment;
+        fragment.id=allocate_id(); fragment.name=parent.name+"_fragment";
+        fragment.tags=parent.tags; fragment.groups=parent.groups; fragment.layer=parent.layer;
+        fragment.components=parent.components; fragment.authoredTransform=origin;
+        fragment.voxelSizeMeters=parent.voxelSizeMeters; fragment.voxels=std::move(components[i].voxels);
+        fragment.dynamic=true; fragment.structural=false; fragment.debris=true; fragment.debrisSequence=nextDebrisSequence_++;
+        fragment.massTable=parent.massTable; fragment.densityQuantumKilogramsPerCubicMeter=parent.densityQuantumKilogramsPerCubicMeter;
+        fragment.materials=parent.materials; fragment.hasBody=true; fragment.bodyHandle=handles[i]; fragment.localCenterOfMassMeters=centers[i];
+        fragment.source=parent.source; if(fragment.source) fragment.source->derived=true;
+        synchronize_membership_component(fragment);
+        fragments.push_back(fragment.id); objects_.emplace(fragment.id,std::move(fragment));
+    }
+    if (parent.hasBody) physics_->destroy_body(parent.bodyHandle);
+    parent.voxels=std::move(components[primary].voxels); parent.authoredTransform=origin;
+    parent.bodyHandle=handles[primary]; parent.hasBody=handles[primary]!=kInvalidRigidBodyHandle;
+    parent.localCenterOfMassMeters=centers[primary];
+    const GameDamageEvent event{parent.id,pending.state.worldCenter,pending.state.radius,removed,false,fragments};
+    for (const auto id : fragments) dispatch_lifecycle({GameLifecycleEventKind::Spawn,id});
+    for (const auto& listener : damageListeners_) listener(event);
+    return true;
+}
 
 std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 worldCenter, float radius) {
     const auto it = objects_.find(id);
@@ -2008,14 +2181,14 @@ float GameWorld::get_axis(const std::string& axis) const {
 
 GameWorld::TimerId GameWorld::schedule_once(float secondsFromNow, std::function<void()> callback) {
     const TimerId id = nextTimerId_++;
-    timers_.push_back({id, elapsedSeconds_ + std::max(0.0F, secondsFromNow), 0.0F, false, std::move(callback)});
+    timers_.push_back({id, saturating_time_add(tickCount_, timer_ticks(secondsFromNow, fixedDeltaSeconds_)), 0U, 0U, tickCount_, 1U, false, std::move(callback)});
     return id;
 }
 
 GameWorld::TimerId GameWorld::schedule_repeating(float intervalSeconds, std::function<void()> callback) {
     const TimerId id = nextTimerId_++;
     const float interval = std::max(1.0F / 1000.0F, intervalSeconds);
-    timers_.push_back({id, elapsedSeconds_ + interval, interval, false, std::move(callback)});
+    timers_.push_back({id, saturating_time_add(tickCount_, timer_ticks(interval, fixedDeltaSeconds_)), timer_ticks(interval, fixedDeltaSeconds_), authored_interval_nanoseconds(interval), tickCount_, 1U, false, std::move(callback)});
     return id;
 }
 
@@ -2136,28 +2309,76 @@ std::size_t GameWorld::pool_available(GameObjectPoolId poolId) const noexcept {
     return it == pools_.end() ? 0U : it->second.freeIds.size();
 }
 
-void GameWorld::on_tick(TickListener listener) { tickListeners_.push_back(std::move(listener)); }
+void GameWorld::on_tick(TickListener listener) {
+    if (listener) tickListeners_.push_back(std::make_shared<TickListener>(std::move(listener)));
+}
 void GameWorld::on_damage(DamageListener listener) { damageListeners_.push_back(std::move(listener)); }
 void GameWorld::on_destroyed(DestroyListener listener) { destroyListeners_.push_back(std::move(listener)); }
 void GameWorld::on_lifecycle(LifecycleListener listener) { lifecycleListeners_.push_back(std::move(listener)); }
 
 void GameWorld::tick(float fixedDeltaSeconds) {
-    if (!(fixedDeltaSeconds > 0.0F) || !std::isfinite(fixedDeltaSeconds)) return;
-    elapsedSeconds_ += fixedDeltaSeconds;
+    if (!(fixedDeltaSeconds > 0.0F) || !std::isfinite(fixedDeltaSeconds) || inTick_) return;
+    struct TickGuard { bool& flag; ~TickGuard() { flag = false; } } guard{inTick_};
+    inTick_ = true;
+    presentationPrevious_.clear();
+    for (const auto& [id, object] : objects_) presentationPrevious_.emplace(id, resolve_transform(object));
+    // This compiled serial schedule owns all mutations. Lua/timer/listener callbacks stay
+    // exclusive; the JobSystem handles nested work without changing this phase order.
+    for (const auto& phase : kWorldTickSchedule) {
+        switch (phase.phase) {
+        case WorldTickPhase::Clock: advance_world_clock(fixedDeltaSeconds); break;
+        case WorldTickPhase::Timers: dispatch_timers(); break;
+        case WorldTickPhase::Destruction: process_pending_destruction(); break;
+        case WorldTickPhase::Physics: step_physics(fixedDeltaSeconds); break;
+        case WorldTickPhase::Animation: evaluate_animation(fixedDeltaSeconds); break;
+        case WorldTickPhase::RootMotion: apply_root_motion(); break;
+        case WorldTickPhase::Gameplay: step_gameplay(fixedDeltaSeconds); break;
+        case WorldTickPhase::SecondaryMotion: step_secondary_motion(fixedDeltaSeconds); break;
+        case WorldTickPhase::Listeners:
+            cameras_->tick_sequences(fixedDeltaSeconds);
+            if (!framePresentation_) update_presentation(fixedDeltaSeconds);
+            dispatch_tick_listeners(fixedDeltaSeconds); break;
+        }
+    }
+}
 
+void GameWorld::advance_world_clock(float fixedDeltaSeconds) {
+    if (fixedDeltaSeconds != fixedDeltaSeconds_) {
+        // Compatibility for embedders choosing their fixed rate on the first step.
+        // A rate change rebases remaining deadlines and elapsed ticks once, never each frame.
+        for (auto& timer : timers_) {
+            const auto remaining = timer.fireAtTick > tickCount_ ? timer.fireAtTick - tickCount_ : 0U;
+            timer.fireAtTick = timer_ticks(double(remaining) * fixedDeltaSeconds_, fixedDeltaSeconds);
+            if (timer.intervalTicks) timer.intervalTicks = timer_ticks(double(timer.intervalTicks) * fixedDeltaSeconds_, fixedDeltaSeconds);
+            timer.originTick=timer_ticks(double(timer.originTick)*fixedDeltaSeconds_,fixedDeltaSeconds);
+        }
+        const auto rebased = timer_ticks(elapsed_seconds(), fixedDeltaSeconds);
+        for (auto& timer : timers_) timer.fireAtTick = saturating_time_add(timer.fireAtTick, rebased);
+        tickCount_ = rebased;
+        fixedDeltaSeconds_ = fixedDeltaSeconds;
+    }
+    tickCount_ = saturating_time_add(tickCount_, 1U);
+
+}
+void GameWorld::dispatch_timers() {
     // Snapshot due timers before firing any of them: a callback firing a timer can itself
     // schedule new timers (very common: "every 2s, wait 0.5s, then..."), and those must not
     // be eligible to fire within this same tick.
     std::vector<std::function<void()>> due;
     for (Timer& timer : timers_) {
-        if (timer.cancelled || !timer.callback || timer.fireAtSeconds > elapsedSeconds_) continue;
+        if (timer.cancelled || !timer.callback || timer.fireAtTick > tickCount_) continue;
         due.push_back(timer.callback);
-        if (timer.intervalSeconds > 0.0F) timer.fireAtSeconds += timer.intervalSeconds;
+        if (timer.intervalTicks > 0U) {
+            timer.releaseIndex = saturating_time_add(timer.releaseIndex,1U);
+            timer.fireAtTick = repeating_deadline(timer.originTick,timer.intervalNanoseconds,timer.releaseIndex,fixedDeltaSeconds_);
+        }
         else timer.cancelled = true;
     }
     std::erase_if(timers_, [](const Timer& timer) { return timer.cancelled; });
     for (const auto& callback : due) callback();
 
+}
+void GameWorld::step_physics(float fixedDeltaSeconds) {
     // Bodies can be replaced between ticks (damage, brick edits, fragments), so re-assert the
     // parent/child contact filters before stepping; this is a no-op when nothing changed.
     update_attachment_collision_filters();
@@ -2165,6 +2386,8 @@ void GameWorld::tick(float fixedDeltaSeconds) {
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
     lastDeformableTelemetry_ = deformables_->tick(fixedDeltaSeconds);
 #endif
+}
+void GameWorld::evaluate_animation(float fixedDeltaSeconds) {
     animationControllers_->tick(fixedDeltaSeconds);
     animation_->tick(fixedDeltaSeconds);
     controlRigs_->evaluate_all();
@@ -2172,6 +2395,8 @@ void GameWorld::tick(float fixedDeltaSeconds) {
         const auto world = transform(objectId);
         if (world) (void)ragdolls_->tick(objectId, fixedDeltaSeconds, *world, nullptr);
     }
+}
+void GameWorld::apply_root_motion() {
     for (const std::uint64_t objectId : animation_->root_motion_objects()) {
         const auto delta = animation_->consume_root_motion(objectId);
         if (ragdolls_->owns_pose(objectId)) continue;
@@ -2179,11 +2404,20 @@ void GameWorld::tick(float fixedDeltaSeconds) {
         if (!delta || !current) continue;
         const RigidTransform updated = compose_rigid_transforms(
             *current, make_rigid_transform(delta->translation, delta->rotation));
-        (void)set_position(objectId, updated.position);
+        if (gameplay_->has_character(objectId)) {
+            (void)gameplay_->queue_root_motion(objectId, subtract(updated.position, current->position));
+        } else {
+            (void)set_position(objectId, updated.position);
+        }
         (void)set_rotation(objectId, updated.rotation);
     }
+}
+void GameWorld::step_gameplay(float fixedDeltaSeconds) {
     synchronize_attached_bodies();
     gameplay_->fixed_update(fixedDeltaSeconds);
+}
+void GameWorld::step_secondary_motion(float fixedDeltaSeconds) {
+    (void)fixedDeltaSeconds;
 #if defined(DVE_ENABLE_CPU_HAIR)
     for (const CpuHairOwnerId owner : cpuHair_->owner_span()) {
         const auto worldTransform = transform(owner);
@@ -2191,11 +2425,24 @@ void GameWorld::tick(float fixedDeltaSeconds) {
     }
     lastCpuHairTelemetry_ = cpuHair_->tick(fixedDeltaSeconds);
 #endif
-    cameras_->update(*this, fixedDeltaSeconds);
-    uiRuntime_->rebuild();
-
-    for (const TickListener& listener : tickListeners_) listener(fixedDeltaSeconds);
 }
+void GameWorld::dispatch_tick_listeners(float fixedDeltaSeconds) {
+    const auto listeners = tickListeners_; // registrations made by callbacks start next tick
+    for (const auto& listener : listeners) (*listener)(fixedDeltaSeconds);
+}
+void GameWorld::update_presentation(float frameDeltaSeconds,float interpolationAlpha) {
+    if (!(frameDeltaSeconds >= 0.0F) || !std::isfinite(frameDeltaSeconds)) return;
+    cameras_->update_presentation(*this, frameDeltaSeconds,interpolationAlpha);
+    uiRuntime_->rebuild();
+}
+std::optional<RigidTransform> GameWorld::presentation_transform(GameObjectId id,float alpha) const {
+    const auto current=transform(id);
+    if(!current) return std::nullopt;
+    const auto previous=presentationPrevious_.find(id);
+    return previous==presentationPrevious_.end() ? current : std::optional<RigidTransform>(
+        interpolate_rigid_transform(previous->second,*current,std::isfinite(alpha) ? std::clamp(alpha,0.0F,1.0F) : 1.0F));
+}
+void GameWorld::reset_presentation_history() noexcept { presentationPrevious_.clear(); }
 
 // --- Save games -----------------------------------------------------------------------------
 
@@ -2291,7 +2538,37 @@ GameWorldSaveState GameWorld::capture_save_state() const {
     state.nextObjectId = nextId_;
     state.nextPoolId = nextPoolId_;
     state.nextTimerId = nextTimerId_;
-    state.elapsedSeconds = elapsedSeconds_;
+    state.elapsedSeconds = static_cast<float>(elapsed_seconds());
+    state.tickCount = tickCount_;
+    state.fixedDeltaSeconds = fixedDeltaSeconds_;
+    state.integerClock = true;
+    state.session.emplace();
+    state.session->debrisLimit = debrisLimit_;
+    state.session->nextDebrisSequence = nextDebrisSequence_;
+    state.session->rejectedDestruction = rejectedDestruction_;
+    state.session->actions.insert(actionStates_.begin(), actionStates_.end());
+    state.session->axes.insert(axisStates_.begin(), axisStates_.end());
+    for (const auto& [id, object] : objects_)
+        if (object.debris) state.session->debris.emplace(id, object.debrisSequence);
+    if (const auto* reference = dynamic_cast<const ReferenceRigidBodyWorld*>(physics_.get())) {
+        for (const auto& [id, object] : objects_) {
+            if (!object.hasBody) continue;
+            if (const auto loads = reference->pending_loads(object.bodyHandle);
+                loads && (loads->force.x != 0 || loads->force.y != 0 || loads->force.z != 0 ||
+                          loads->torque.x != 0 || loads->torque.y != 0 || loads->torque.z != 0))
+                state.session->pendingLoads.emplace(id, *loads);
+        }
+    }
+    state.nextDestructionId = nextDestructionId_;
+    state.destructionUnitsPerTick = destructionUnitsPerTick_;
+    for (const auto& pending : pendingDestruction_) {
+        auto saved = pending.state;
+        const auto owner = objects_.find(saved.objectId);
+        if (pending.job && (owner == objects_.end() || !owner->second.voxels ||
+            owner->second.voxels->revision() != pending.job->source_revision() ||
+            !pending.job->matches_mass_table(owner->second.massTable))) saved.stale = true;
+        state.pendingDestruction.push_back(saved);
+    }
     const std::vector<GameObjectId> ids = object_ids();
     state.objects.reserve(ids.size());
     for (const GameObjectId id : ids) {
@@ -2331,7 +2608,8 @@ GameWorldSaveState GameWorld::capture_save_state() const {
         state.objects.push_back(std::move(item));
     }
     for (const Timer& timer : timers_) {
-        if (!timer.cancelled) state.timers.push_back({timer.id, timer.fireAtSeconds, timer.intervalSeconds});
+        if (!timer.cancelled) state.timers.push_back({timer.id, float(double(timer.fireAtTick) * fixedDeltaSeconds_),
+            float(double(timer.intervalNanoseconds) / 1.0e9), timer.fireAtTick, timer.intervalTicks, timer.intervalNanoseconds, timer.originTick, timer.releaseIndex});
     }
     for (const auto& [id, pool] : pools_)
         state.pools.push_back({id, pool.name, static_cast<std::uint64_t>(pool.capacity), pool.freeIds});
@@ -2341,7 +2619,10 @@ GameWorldSaveState GameWorld::capture_save_state() const {
 std::uint64_t GameWorld::state_hash() const {
     std::uint64_t hash = kStateFnvOffset;
     state_hash_value(hash, nextId_);
-    state_hash_value(hash, elapsedSeconds_);
+    state_hash_value(hash, tickCount_);
+    state_hash_value(hash, fixedDeltaSeconds_);
+    state_hash_value(hash, nextTimerId_);
+    state_hash_value(hash, nextPoolId_);
     for (const GameObjectId id : object_ids()) {
         const Object& object = objects_.at(id);
         state_hash_value(hash, id);
@@ -2395,8 +2676,30 @@ std::uint64_t GameWorld::state_hash() const {
     for (const Timer& timer : timers_) {
         if (timer.cancelled) continue;
         state_hash_value(hash, timer.id);
-        state_hash_value(hash, timer.fireAtSeconds);
-        state_hash_value(hash, timer.intervalSeconds);
+        state_hash_value(hash, timer.fireAtTick);
+        state_hash_value(hash, timer.intervalTicks);
+        state_hash_value(hash, timer.intervalNanoseconds); state_hash_value(hash,timer.originTick); state_hash_value(hash,timer.releaseIndex);
+    }
+    return hash;
+}
+
+std::uint64_t GameWorld::runtime_state_hash() const {
+    auto hash=state_hash();
+    state_hash_value(hash,debrisLimit_); state_hash_value(hash,nextDebrisSequence_);
+    state_hash_value(hash,nextDestructionId_); state_hash_value(hash,destructionUnitsPerTick_); state_hash_value(hash,rejectedDestruction_);
+    for(const auto id:object_ids()) {
+        const auto& object=objects_.at(id); state_hash_value(hash,object.debris); state_hash_value(hash,object.debrisSequence);
+    }
+    const std::map<std::string,bool> actions(actionStates_.begin(),actionStates_.end());
+    const std::map<std::string,float> axes(axisStates_.begin(),axisStates_.end());
+    for(const auto& [key,value]:actions) { state_hash_string(hash,key); state_hash_value(hash,value); }
+    for(const auto& [key,value]:axes) { state_hash_string(hash,key); state_hash_value(hash,value); }
+    for(const auto& pending:pendingDestruction_) {
+        const auto& s=pending.state; state_hash_value(hash,s.requestId); state_hash_value(hash,s.objectId);
+        state_hash_float3(hash,s.worldCenter); state_hash_value(hash,s.radius);
+        state_hash_float3(hash,s.localCenterVoxels); state_hash_value(hash,s.localRadiusVoxels); state_hash_value(hash,s.workUnits); state_hash_value(hash,s.stale);
+        const auto phase=pending.job ? pending.job->phase() : ResumableDestruction::Phase::Raster;
+        state_hash_value(hash,phase);
     }
     return hash;
 }
@@ -2527,7 +2830,27 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
         if (!std::isfinite(timer.fireAtSeconds) || !std::isfinite(timer.intervalSeconds) || timer.intervalSeconds < 0.0F)
             return fail("save has an invalid timer");
     }
-    if (!std::isfinite(state.elapsedSeconds)) return fail("save has an invalid clock");
+    if (state.session) {
+        for (const auto& [id, sequence] : state.session->debris)
+            if (!savedIds.contains(id) || sequence >= state.session->nextDebrisSequence)
+                return fail("save has invalid debris bookkeeping");
+        for (const auto& [name, value] : state.session->axes) {
+            (void)name;
+            if (!std::isfinite(value)) return fail("save has a non-finite input axis");
+        }
+    }
+    if (state.pendingDestruction.size() > 64U) return fail("too many pending destruction requests");
+    std::set<std::uint64_t> requests;
+    for (const auto& pending : state.pendingDestruction) {
+        if (!pending.requestId || !requests.insert(pending.requestId).second ||
+            pending.requestId >= state.nextDestructionId || !finite_float3(pending.worldCenter) ||
+            !finite_float3(pending.localCenterVoxels) || !(pending.radius > 0.0F) ||
+            !std::isfinite(pending.radius) || !(pending.localRadiusVoxels > 0.0F) ||
+            !std::isfinite(pending.localRadiusVoxels) || pending.workUnits > 100000000ULL)
+            return fail("save has an invalid pending destruction request");
+    }
+    if (!std::isfinite(state.elapsedSeconds) || state.elapsedSeconds < 0.0F ||
+        !(state.fixedDeltaSeconds > 0.0F) || !std::isfinite(state.fixedDeltaSeconds)) return fail("save has an invalid clock");
 
     // 2. Remove objects that are not in the save, then every body that will be rebuilt.
     for (const GameObjectId id : object_ids()) {
@@ -2566,6 +2889,16 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
         synchronize_membership_component(object);
         objects_.insert_or_assign(object.id, std::move(object));
         ++local.objectsRestored;
+    }
+    if (state.session && !state.session->pendingLoads.empty()) {
+        auto* reference = dynamic_cast<ReferenceRigidBodyWorld*>(physics_.get());
+        if (!reference) return fail("saved reference solver loads require the reference backend");
+        for (const auto& [id, loads] : state.session->pendingLoads) {
+            const auto object = objects_.find(id);
+            if (object == objects_.end() || !object->second.hasBody ||
+                !reference->set_pending_loads(object->second.bodyHandle, loads))
+                return fail("invalid pending solver loads for object " + std::to_string(id));
+        }
     }
 
     // Every body was rebuilt above (destroying a body drops its pair filters), so apply the
@@ -2613,11 +2946,19 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
         if (!seenTimers.insert(saved.id).second) continue;
         auto live = liveCallbacks.find(saved.id);
         if (live != liveCallbacks.end()) {
-            restoredTimers.push_back({saved.id, saved.fireAtSeconds, saved.intervalSeconds, false, std::move(live->second)});
+            restoredTimers.push_back({saved.id, state.integerClock ? saved.fireAtTick : timer_ticks(saved.fireAtSeconds, state.fixedDeltaSeconds),
+                state.integerClock ? saved.intervalTicks : timer_ticks(saved.intervalSeconds, state.fixedDeltaSeconds),
+                state.integerClock ? saved.intervalNanoseconds : authored_interval_nanoseconds(saved.intervalSeconds),
+                state.integerClock ? saved.originTick : timer_ticks(saved.fireAtSeconds-saved.intervalSeconds,state.fixedDeltaSeconds),
+                state.integerClock ? saved.releaseIndex : 1U, false, std::move(live->second)});
             liveCallbacks.erase(live);
             ++local.timersRestored;
         } else if (options.keepUnboundTimers) {
-            restoredTimers.push_back({saved.id, saved.fireAtSeconds, saved.intervalSeconds, false, {}});
+            restoredTimers.push_back({saved.id, state.integerClock ? saved.fireAtTick : timer_ticks(saved.fireAtSeconds, state.fixedDeltaSeconds),
+                state.integerClock ? saved.intervalTicks : timer_ticks(saved.intervalSeconds, state.fixedDeltaSeconds),
+                state.integerClock ? saved.intervalNanoseconds : authored_interval_nanoseconds(saved.intervalSeconds),
+                state.integerClock ? saved.originTick : timer_ticks(saved.fireAtSeconds-saved.intervalSeconds,state.fixedDeltaSeconds),
+                state.integerClock ? saved.releaseIndex : 1U, false, {}});
             ++local.timersUnbound;
         } else {
             ++local.timersDropped;
@@ -2628,7 +2969,40 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
     std::uint64_t highestTimer = 0U;
     for (const Timer& timer : timers_) highestTimer = std::max<std::uint64_t>(highestTimer, timer.id);
     nextTimerId_ = std::max<std::uint64_t>(state.nextTimerId, highestTimer + 1U);
-    elapsedSeconds_ = state.elapsedSeconds;
+    pendingDestruction_.clear();
+    nextDestructionId_ = state.nextDestructionId;
+    destructionUnitsPerTick_ = state.destructionUnitsPerTick;
+    for (const auto& saved : state.pendingDestruction) {
+        const auto found = objects_.find(saved.objectId);
+        PendingDestruction pending{saved,{}};
+        if (saved.workUnits && !saved.stale && found != objects_.end() && found->second.voxels) {
+            pending.job = std::make_unique<ResumableDestruction>(*found->second.voxels,
+                SphereDamageCommand{saved.localCenterVoxels,saved.localRadiusVoxels,saved.requestId},found->second.massTable);
+            auto remaining=saved.workUnits;
+            while (remaining) {
+                const auto used=pending.job->resume(*found->second.voxels,static_cast<std::uint32_t>(std::min<std::uint64_t>(remaining,65536)));
+                if (!used) break;
+                remaining-=used;
+            }
+        }
+        pendingDestruction_.push_back(std::move(pending));
+    }
+    if (state.session) {
+        debrisLimit_ = static_cast<std::size_t>(state.session->debrisLimit);
+        nextDebrisSequence_ = state.session->nextDebrisSequence;
+        rejectedDestruction_ = state.session->rejectedDestruction;
+        actionStates_.clear(); axisStates_.clear();
+        actionStates_.insert(state.session->actions.begin(), state.session->actions.end());
+        axisStates_.insert(state.session->axes.begin(), state.session->axes.end());
+        for (auto& [id, object] : objects_) {
+            const auto found = state.session->debris.find(id);
+            object.debris = found != state.session->debris.end();
+            object.debrisSequence = object.debris ? found->second : 0U;
+        }
+    }
+    presentationPrevious_.clear();
+    tickCount_ = state.integerClock ? state.tickCount : timer_ticks(state.elapsedSeconds, state.fixedDeltaSeconds);
+    fixedDeltaSeconds_ = state.fixedDeltaSeconds;
 
     GameObjectId highestObject = 0U;
     for (const auto& [id, object] : objects_) {

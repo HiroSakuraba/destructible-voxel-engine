@@ -1003,7 +1003,11 @@ void test_rigid_body_adapter() {
     CHECK(world.apply_force_at_point(handle, {0.0F, 12.0F, 0.0F}, {3.0F, 6.0F, -1.0F}));
     const auto velocityAfterPointLoad = world.state(handle);
     CHECK(velocityBeforePointLoad.has_value() && velocityAfterPointLoad.has_value());
-    CHECK(velocityAfterPointLoad->linearVelocity.y > velocityBeforePointLoad->linearVelocity.y);
+    // Forces accumulate until the next step (docs/CLOCKWORK.md); velocity is unchanged until then.
+    CHECK(velocityAfterPointLoad->linearVelocity.y == velocityBeforePointLoad->linearVelocity.y);
+    const auto pendingPointLoad = world.pending_loads(handle);
+    CHECK(pendingPointLoad.has_value() && std::abs(pendingPointLoad->force.y - 12.0F) < 1.0e-6F);
+    CHECK(pendingPointLoad.has_value() && length_squared(pendingPointLoad->torque) > 0.0F);
     CHECK(!world.apply_force_at_point(
         handle, {0.0F, 1.0F, 0.0F},
         {std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F}));
@@ -1014,13 +1018,18 @@ void test_rigid_body_adapter() {
     world.step(1.0F / 60.0F);
     const auto after = world.state(handle);
     CHECK(before.has_value() && after.has_value());
-    // The +12 N point load above (plus the impulse) leaves the body moving UP at
-    // ~1.04 m/s, so one 1/60 s step still rises even though gravity slows it:
-    // semi-implicit Euler => v' = v - g*dt, y' = y + v'*dt.
+    // The pending +12 N point load is integrated over this step together with gravity:
+    // semi-implicit Euler => v' = v + (F/m - g)*dt, y' = y + v'*dt. The load outweighs
+    // gravity for this body, so it rises, and the pending load is cleared afterwards.
     constexpr float kStep = 1.0F / 60.0F;
-    CHECK(before->linearVelocity.y > 0.0F);
-    CHECK(after->linearVelocity.y < before->linearVelocity.y);  // gravity decelerates
-    CHECK(std::abs((before->linearVelocity.y - after->linearVelocity.y) - 9.81F * kStep) < 1.0e-3F);
+    const float pointLoadAcceleration = 12.0F / static_cast<float>(desc->massKilograms);
+    CHECK(pointLoadAcceleration > 9.81F);
+    CHECK(after->linearVelocity.y > before->linearVelocity.y);
+    CHECK(std::abs((after->linearVelocity.y - before->linearVelocity.y) -
+                   (pointLoadAcceleration - 9.81F) * kStep) < 1.0e-3F);
+    const auto pendingAfterStep = world.pending_loads(handle);
+    CHECK(pendingAfterStep.has_value() && length_squared(pendingAfterStep->force) == 0.0F &&
+          length_squared(pendingAfterStep->torque) == 0.0F);
     CHECK(after->currentTransform.position.y > before->currentTransform.position.y);
     CHECK(std::abs((after->currentTransform.position.y - before->currentTransform.position.y) -
                    after->linearVelocity.y * kStep) < 1.0e-4F);

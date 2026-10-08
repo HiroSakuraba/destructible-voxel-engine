@@ -13,7 +13,7 @@
 
 #include "dve/camera_system.hpp"
 
-namespace dve::camera { struct CameraSequence; class CameraSequencePlayer; }
+namespace dve::camera { struct CameraSequence; class CameraSequencePlayer; struct CameraSequenceSample; }
 
 namespace dve {
 class GameWorld;
@@ -329,6 +329,9 @@ public:
         return accessibility_;
     }
     void update(const GameWorld& world, float elapsedSeconds);
+    void tick_sequences(float fixedDeltaSeconds);
+    void update_presentation(const GameWorld& world, float frameDeltaSeconds, float interpolationAlpha=1.0F);
+    [[nodiscard]] std::uint64_t sequence_state_hash() const noexcept;
 
 private:
     struct ViewportState {
@@ -341,6 +344,9 @@ private:
         std::uint32_t cutGeneration{};
         std::shared_ptr<CameraSequence> sequence{};
         std::unique_ptr<CameraSequencePlayer> sequencePlayer{};
+        std::unique_ptr<CameraSequenceSample> sequenceSample{};
+        float previousSequenceTime{};
+        std::uint64_t sequenceAssetHash{};
         std::optional<std::uint64_t> previousShotId{};
     };
     std::map<CameraViewportId, ViewportState> viewports_;

@@ -1,4 +1,5 @@
 #include "dve/audio/mixer.hpp"
+#include "dve/simulation_clock.hpp"
 #include "dve/audio/chiptune.hpp"
 
 #include <algorithm>
@@ -110,6 +111,7 @@ struct StreamVoice {
     float fadeStep{};
     bool loop{};
     std::uint64_t startFrame{};
+    std::uint64_t deviceGeneration{};
 };
 
 struct SampleVoice {
@@ -129,6 +131,7 @@ struct SampleVoice {
     bool loop{};
     bool spatialized{true};
     std::uint64_t startFrame{};
+    std::uint64_t deviceGeneration{};
     std::uint64_t age{};
 };
 
@@ -239,6 +242,7 @@ struct AudioMixer::Impl {
     std::atomic<std::uint32_t> activeStreamVoices{};
     std::atomic<std::uint64_t> streamUnderrunFrames{};
     std::atomic<std::uint64_t> meterFrames{};
+    std::atomic<std::uint64_t> writableFrame{};
     std::atomic<std::uint64_t> stolenVoices{};
     std::atomic<std::uint32_t> lastStolenHandle{};
     std::atomic<std::uint32_t> lastStolenPriority{};
@@ -314,6 +318,7 @@ struct AudioMixer::Impl {
         slot->loop = desc.loop;
         slot->spatialized = desc.spatialized;
         slot->startFrame = desc.sampleFrame == 0U ? frame : desc.sampleFrame;
+        slot->deviceGeneration = desc.deviceGeneration;
         slot->age = ++ageCounter;
     }
 
@@ -335,6 +340,7 @@ struct AudioMixer::Impl {
         slot->gain = clampf(desc.gain, 0.0F, 8.0F);
         slot->loop = desc.loop;
         slot->startFrame = desc.sampleFrame == 0U ? frame : desc.sampleFrame;
+        slot->deviceGeneration = desc.deviceGeneration;
         asset->stream->set_looping(desc.loop);
         if (asset->hasPlayed) asset->stream->request_rewind();
         asset->hasPlayed = true;
@@ -343,7 +349,12 @@ struct AudioMixer::Impl {
 
     void process_commands() noexcept {
         Command command;
+        const auto anchor = synth.audio_clock().anchor();
+        const auto generation = anchor ? anchor->deviceGeneration : 0U;
         while (commands.pop(command)) {
+            if ((command.type == CommandType::Play && command.play.deviceGeneration && command.play.deviceGeneration != generation) ||
+                (command.type == CommandType::PlayStream && command.playStream.deviceGeneration && command.playStream.deviceGeneration != generation))
+                continue;
             switch (command.type) {
                 case CommandType::Play: start_voice(command.play, command.handle); break;
                 case CommandType::PlayStream: start_stream_voice(command.playStream, command.handle); break;
@@ -430,7 +441,9 @@ struct AudioMixer::Impl {
             candidates[count++] = {i, static_cast<float>(static_cast<unsigned>(voice.priority)) * voice.gain * audibility};
         }
         std::sort(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(count),
-                  [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
+                  [](const Candidate& a, const Candidate& b) {
+                      return a.score != b.score ? a.score > b.score : a.index < b.index;
+                  });
         for (auto& voice : voices) voice.physical = false;
         const std::size_t physical = std::min<std::size_t>(count, kMaxPhysicalSampleVoices);
         for (std::size_t i = 0; i < physical; ++i) voices[candidates[i].index].physical = true;
@@ -440,7 +453,16 @@ struct AudioMixer::Impl {
     }
 
     void render_chunk(float* output, std::size_t frames) noexcept {
+        writableFrame.store(saturating_time_add(frame, frames), std::memory_order_release);
         process_commands();
+        const auto anchor = synth.audio_clock().anchor();
+        const auto generation = anchor ? anchor->deviceGeneration : 0U;
+        for (auto& voice : voices)
+            if (voice.active && voice.startFrame >= frame && voice.deviceGeneration && voice.deviceGeneration != generation)
+                voice.active = false;
+        for (auto& voice : streamVoices)
+            if (voice.active && voice.startFrame >= frame && voice.deviceGeneration && voice.deviceGeneration != generation)
+                voice.active = false;
         advance_snapshot(frames);
         const auto userGainStart = renderUserGains;
         std::array<float, kAudioBusCount> userGainStep{};
@@ -803,22 +825,43 @@ std::size_t AudioMixer::stream_capacity_frames(StreamSampleId sample) const noex
     return asset ? asset->stream->telemetry().capacityFrames : 0U;
 }
 
+void AudioMixer::publish_audio_clock(AudioClockAnchor anchor) noexcept { impl_->synth.publish_audio_clock(anchor); }
+const AudioClock& AudioMixer::audio_clock() const noexcept { return impl_->synth.audio_clock(); }
+
 AudioSourceHandle AudioMixer::play_sample(const PlaySampleDesc& desc) noexcept {
     if (!impl_->asset(desc.sample)) return {};
+    if (desc.deviceGeneration) {
+        const auto anchor=audio_clock().anchor();
+        if (!anchor || anchor->deviceGeneration!=desc.deviceGeneration) return {};
+    }
     AudioSourceHandle handle{impl_->nextHandle.fetch_add(1U, std::memory_order_relaxed)};
     if (handle.value == 0U) handle.value = impl_->nextHandle.fetch_add(1U, std::memory_order_relaxed);
     Command command{}; command.type = CommandType::Play; command.handle = handle; command.play = desc;
+    if (!desc.sampleFrame && desc.audibleHostNanoseconds) {
+        const auto target = audio_clock().target(desc.audibleHostNanoseconds, impl_->writableFrame.load(std::memory_order_acquire), desc.deviceGeneration);
+        if (target.stale) return {};
+        command.play.sampleFrame = target.frame;
+    }
     return impl_->post(command) ? handle : AudioSourceHandle{};
 }
 
 AudioSourceHandle AudioMixer::play_stream(const PlayStreamDesc& desc) noexcept {
     if (!impl_->stream_asset(desc.sample)) return {};
+    if (desc.deviceGeneration) {
+        const auto anchor=audio_clock().anchor();
+        if (!anchor || anchor->deviceGeneration!=desc.deviceGeneration) return {};
+    }
     AudioSourceHandle handle{impl_->nextHandle.fetch_add(1U, std::memory_order_relaxed)};
     if (handle.value == 0U) handle.value = impl_->nextHandle.fetch_add(1U, std::memory_order_relaxed);
     Command command{};
     command.type = CommandType::PlayStream;
     command.handle = handle;
     command.playStream = desc;
+    if (!desc.sampleFrame && desc.audibleHostNanoseconds) {
+        const auto target = audio_clock().target(desc.audibleHostNanoseconds, impl_->writableFrame.load(std::memory_order_acquire), desc.deviceGeneration);
+        if (target.stale) return {};
+        command.playStream.sampleFrame = target.frame;
+    }
     return impl_->post(command) ? handle : AudioSourceHandle{};
 }
 

@@ -238,6 +238,10 @@ public:
 // It deliberately does not claim to be the production contact solver.
 class ReferenceRigidBodyWorld final : public IRigidBodyWorld {
 public:
+    struct PendingLoads { Float3 force{}, torque{}; };
+    [[nodiscard]] std::optional<PendingLoads> pending_loads(RigidBodyHandle handle) const noexcept;
+    bool set_pending_loads(RigidBodyHandle handle, PendingLoads loads) noexcept;
+    [[nodiscard]] std::uint64_t solver_state_hash() const noexcept;
     [[nodiscard]] RigidBodyHandle create_body(const RigidBodyCreateDesc& desc) override;
     [[nodiscard]] std::vector<RigidBodyHandle> create_bodies(
         std::span<const RigidBodyCreateDesc> descs) override;
@@ -295,6 +299,8 @@ private:
         StaticRigidBodyCreateDesc staticDesc{};
         RigidBodyState state{};
         std::uint32_t quietSteps{};
+        Float3 pendingForce{};
+        Float3 pendingTorque{};
         std::uint16_t material{};
     };
 

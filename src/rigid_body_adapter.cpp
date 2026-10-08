@@ -514,6 +514,21 @@ std::optional<RigidBodyState> ReferenceRigidBodyWorld::state(RigidBodyHandle han
     return bodies_[handle].state;
 }
 
+std::optional<ReferenceRigidBodyWorld::PendingLoads>
+ReferenceRigidBodyWorld::pending_loads(RigidBodyHandle handle) const noexcept {
+    if (handle >= bodies_.size() || !bodies_[handle].alive) return std::nullopt;
+    return PendingLoads{bodies_[handle].pendingForce, bodies_[handle].pendingTorque};
+}
+
+bool ReferenceRigidBodyWorld::set_pending_loads(RigidBodyHandle handle, PendingLoads loads) noexcept {
+    if (handle >= bodies_.size() || !bodies_[handle].alive ||
+        !std::isfinite(loads.force.x) || !std::isfinite(loads.force.y) || !std::isfinite(loads.force.z) ||
+        !std::isfinite(loads.torque.x) || !std::isfinite(loads.torque.y) || !std::isfinite(loads.torque.z)) return false;
+    bodies_[handle].pendingForce = loads.force;
+    bodies_[handle].pendingTorque = loads.torque;
+    return true;
+}
+
 bool ReferenceRigidBodyWorld::set_state(RigidBodyHandle handle, const RigidBodyState& stateValue) {
     if (handle >= bodies_.size() || !bodies_[handle].alive ||
         !rigid_body_state_is_finite(stateValue)) return false;
@@ -549,8 +564,12 @@ bool ReferenceRigidBodyWorld::apply_impulse(RigidBodyHandle handle, Float3 world
 bool ReferenceRigidBodyWorld::apply_force(RigidBodyHandle handle, Float3 worldForce) {
     // The deterministic reference world has no force accumulator. Interpret one call as one
     // 60 Hz step of force; callers sustain a force by issuing it every simulation step.
-    constexpr float kReferenceFixedStep = 1.0F / 60.0F;
-    return apply_impulse(handle, multiply(worldForce, kReferenceFixedStep));
+    if (handle >= bodies_.size() || !bodies_[handle].alive || bodies_[handle].isStatic || !finite(worldForce)) return false;
+    auto& body = bodies_[handle];
+    body.pendingForce = add(body.pendingForce, worldForce);
+    body.state.sleeping = false;
+    body.quietSteps = 0U;
+    return true;
 }
 
 bool ReferenceRigidBodyWorld::apply_angular_impulse(
@@ -590,8 +609,12 @@ bool ReferenceRigidBodyWorld::apply_angular_impulse(
 }
 
 bool ReferenceRigidBodyWorld::apply_torque(RigidBodyHandle handle, Float3 worldTorque) {
-    constexpr float kReferenceFixedStep = 1.0F / 60.0F;
-    return apply_angular_impulse(handle, multiply(worldTorque, kReferenceFixedStep));
+    if (handle >= bodies_.size() || !bodies_[handle].alive || bodies_[handle].isStatic || !finite(worldTorque)) return false;
+    auto& body = bodies_[handle];
+    body.pendingTorque = add(body.pendingTorque, worldTorque);
+    body.state.sleeping = false;
+    body.quietSteps = 0U;
+    return true;
 }
 
 bool ReferenceRigidBodyWorld::apply_impulse_at_point(
@@ -608,8 +631,12 @@ bool ReferenceRigidBodyWorld::apply_impulse_at_point(
 
 bool ReferenceRigidBodyWorld::apply_force_at_point(
     RigidBodyHandle handle, Float3 worldForce, Float3 worldPoint) {
-    constexpr float kReferenceFixedStep = 1.0F / 60.0F;
-    return apply_impulse_at_point(handle, multiply(worldForce, kReferenceFixedStep), worldPoint);
+    if (handle >= bodies_.size() || !bodies_[handle].alive || bodies_[handle].isStatic ||
+        !finite(worldForce) || !finite(worldPoint)) return false;
+    const auto lever = subtract(worldPoint, bodies_[handle].state.currentTransform.position);
+    const Float3 torque{lever.y * worldForce.z - lever.z * worldForce.y,
+        lever.z * worldForce.x - lever.x * worldForce.z, lever.x * worldForce.y - lever.y * worldForce.x};
+    return apply_force(handle, worldForce) && apply_torque(handle, torque);
 }
 
 std::vector<RigidBodyQueryHit> ReferenceRigidBodyWorld::ray_cast_all(
@@ -743,10 +770,55 @@ bool ReferenceRigidBodyWorld::destroy_constraint(RigidBodyConstraintHandle handl
     return true;
 }
 
+std::uint64_t ReferenceRigidBodyWorld::solver_state_hash() const noexcept {
+    std::uint64_t hash=1469598103934665603ULL;
+    const auto value=[&]<class T>(const T& v) {
+        const auto* bytes=reinterpret_cast<const unsigned char*>(&v);
+        for (std::size_t i=0;i<sizeof(T);++i) { hash^=bytes[i]; hash*=1099511628211ULL; }
+    };
+    const auto vector=[&](Float3 p) { value(p.x); value(p.y); value(p.z); };
+    const auto rotation=[&](Quaternion q) { value(q.x); value(q.y); value(q.z); value(q.w); };
+    const auto pose=[&](RigidTransform t) { vector(t.position); rotation(t.rotation); };
+    vector(gravity_); value(sleepLinearSpeed_); value(sleepAngularSpeed_); value(sleepQuietSteps_); value(allowSleeping_);
+    value(bodies_.size());
+    for (const auto& body:bodies_) {
+        value(body.alive); value(body.isStatic);
+        if (!body.alive) continue;
+        value(body.quietSteps); value(body.material); vector(body.pendingForce); vector(body.pendingTorque);
+        pose(body.state.previousTransform); pose(body.state.currentTransform);
+        vector(body.state.linearVelocity); vector(body.state.angularVelocity); value(body.state.sleeping);
+        const auto& desc=body.desc;
+        value(desc.massKilograms); value(desc.inertiaKilogramMetersSquared.xx); value(desc.inertiaKilogramMetersSquared.yy);
+        value(desc.inertiaKilogramMetersSquared.zz); value(desc.inertiaKilogramMetersSquared.xy);
+        value(desc.inertiaKilogramMetersSquared.xz); value(desc.inertiaKilogramMetersSquared.yz);
+        value(desc.allowSleeping); value(desc.useContinuousCollision);
+        value(body.isStatic ? body.staticDesc.collisionClass : desc.collisionClass);
+        const auto& boxes=body.isStatic ? body.staticDesc.boxes : desc.boxes;
+        value(boxes.size()); for (const auto& box:boxes) { vector(box.center); vector(box.halfExtents); }
+    }
+    value(freeHandles_.size()); for(const auto h:freeHandles_) value(h);
+    value(constraints_.size());
+    for(const auto& constraint:constraints_) {
+        value(constraint.alive); if(!constraint.alive) continue;
+        const auto& d=constraint.desc; value(d.parentBody); value(d.childBody); value(d.kind);
+        vector(d.parentAnchorLocal); vector(d.childAnchorLocal); vector(d.parentAxisLocal); rotation(d.referenceRotation);
+        value(d.minimumRadians); value(d.maximumRadians); value(d.swingLimitRadians);
+    }
+    value(freeConstraintHandles_.size()); for(const auto h:freeConstraintHandles_) value(h);
+    return hash;
+}
+
 void ReferenceRigidBodyWorld::step(float fixedDeltaSeconds) {
     if (!(fixedDeltaSeconds > 0.0F) || !std::isfinite(fixedDeltaSeconds)) return;
-    for (Body& body : bodies_) {
+    for (RigidBodyHandle handle = 0; handle < bodies_.size(); ++handle) {
+        auto& body = bodies_[handle];
         if (!body.alive || body.isStatic || body.state.sleeping) continue;
+        if (length_squared(body.pendingForce) > 0.0F)
+            (void)apply_impulse(handle, multiply(body.pendingForce, fixedDeltaSeconds));
+        if (length_squared(body.pendingTorque) > 0.0F)
+            (void)apply_angular_impulse(handle, multiply(body.pendingTorque, fixedDeltaSeconds));
+        body.pendingForce = {};
+        body.pendingTorque = {};
         body.state.previousTransform = body.state.currentTransform;
         body.state.linearVelocity = add(body.state.linearVelocity, multiply(gravity_, fixedDeltaSeconds));
         body.state.currentTransform.position = add(

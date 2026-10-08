@@ -111,6 +111,7 @@ bool SDL_GetWindowRelativeMouseMode(SDL_Window* window) { return window && windo
 Uint32 SDL_GetMouseState(float* x, float* y) { if (x) *x = mouseX; if (y) *y = mouseY; return 0; }
 void SDL_WarpMouseInWindow(SDL_Window*, float x, float y) { mouseX = x; mouseY = y; }
 void SDLTest_SetRelativeMouseSupported(bool supported) { relativeMouseSupported = supported; }
+bool SDL_PushEvent(SDL_Event* event) { if (!event) return false; events.push_back(*event); return true; }
 bool SDL_PollEvent(SDL_Event* event) {
     if (!event || events.empty()) return false;
     *event = events.front();

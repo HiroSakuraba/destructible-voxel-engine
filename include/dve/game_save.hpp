@@ -4,7 +4,7 @@
 // dve/v235_foundations.hpp), which provides the header, per-section and document hashes,
 // size limits, migrations, atomic publish and the `.bak` rotation. See docs/SAVE_GAMES.md.
 //
-// Schema version 2 (v1 saves are migrated on read: v2 only adds optional sections).
+// Schema version 3 adds integer tick deadlines in dve.clock; v1/v2 migrate on read.
 // Sections (all little endian, all bounds-checked on read):
 //   dve.meta     engine/game identity, scene, tick count, GameWorld::state_hash()
 //   dve.world    ids, names, tags, components, flags, transforms, attachments, sources,
@@ -47,7 +47,7 @@
 
 namespace dve {
 
-inline constexpr std::uint32_t kGameSaveSchemaVersion = 2U;
+inline constexpr std::uint32_t kGameSaveSchemaVersion = 3U;
 inline constexpr std::string_view kGameSaveExtension = ".dvesave";
 
 struct GameSaveLimits {
@@ -149,7 +149,7 @@ public:
     [[nodiscard]] const SaveGameStore& store() const noexcept { return store_; }
     // Games (and tests) register document migrations for older schema versions here; every
     // read and decode runs them before interpreting the sections. The codec registers the
-    // engine's own v1 -> v2 step itself.
+    // engine's own v1 -> v2 and v2 -> v3 steps itself.
     [[nodiscard]] bool register_migration(
         std::uint32_t fromVersion, SaveGameMigration migration, std::string* error = nullptr);
 

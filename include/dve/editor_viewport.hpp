@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -148,6 +149,7 @@ void fly_camera(EditorCamera& camera, Float3 localMotion, float elapsedSeconds, 
 void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& bounds) noexcept;
 
 [[nodiscard]] EditorObjectBounds object_world_bounds(const EditorObject& object) noexcept;
+[[nodiscard]] EditorObjectBounds object_world_bounds(const EditorObject& object, const RigidTransform& pose) noexcept;
 [[nodiscard]] std::optional<EditorPickResult> pick_editor_document(
     const EditorDocument& document,
     ViewportRay ray,
@@ -176,7 +178,8 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
     UiRect viewport,
     const EditorViewportSettings& settings,
     const std::set<EditorObjectId>& selectedObjects,
-    JobSystem* jobs);
+    JobSystem* jobs,
+    const std::map<EditorObjectId, RigidTransform>* presentationPoses = nullptr);
 
 // Cheap O(objects + anchors) fingerprint of everything that affects the voxel draw
 // list and selection diagnostics: object ids/parents/flags/transforms/voxel sizes,
@@ -199,7 +202,8 @@ public:
         UiRect viewport,
         const EditorViewportSettings& settings,
         const std::set<EditorObjectId>& selectedObjects,
-        std::uint64_t sceneFingerprint);
+        std::uint64_t sceneFingerprint,
+        const std::map<EditorObjectId, RigidTransform>* presentationPoses = nullptr);
     void invalidate() noexcept { valid_ = false; }
     [[nodiscard]] std::uint64_t rebuild_count() const noexcept { return rebuilds_; }
 

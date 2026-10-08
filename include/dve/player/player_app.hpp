@@ -25,8 +25,10 @@
 #include <vector>
 
 #include "dve/content_source.hpp"
+#include "dve/simulation_clock.hpp"
 #include "dve/game_manifest.hpp"
 #include "dve/game_save.hpp"
+#include "dve/runtime_replay.hpp"
 #include "dve/game_ui.hpp"
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
@@ -83,14 +85,7 @@ struct PlayerBootOptions {
 
 // Fixed-step accumulator with the EditorPlaySession parameters (1/60 s, 0.25 s clamp,
 // at most 8 steps per frame).
-struct FixedStepClock {
-    float fixedDeltaSeconds{1.0F / 60.0F};
-    double maximumFrameSeconds{0.25};
-    std::uint32_t maximumSteps{8};
-    double accumulator{};
-    // Adds wall-clock time and returns how many fixed steps to run now.
-    [[nodiscard]] std::uint32_t advance(double elapsedSeconds) noexcept;
-};
+using FixedStepClock = dve::SimulationClock;
 
 struct PlayerSaveResult {
     std::filesystem::path path;
@@ -148,12 +143,14 @@ public:
     [[nodiscard]] std::size_t scene_object_count() const noexcept;
 
     void handle_event(const platform::PlatformEvent& event);
+    void queue_event(const platform::PlatformEvent& event, std::uint64_t targetTick);
     [[nodiscard]] bool quit_requested() const noexcept;
     void request_quit() noexcept;
 
     // One fixed step: pushes input state into the world, then GameWorld::tick(dt).
     void tick(float fixedDeltaSeconds);
     [[nodiscard]] std::uint64_t tick_count() const noexcept;
+    [[nodiscard]] std::optional<RuntimeReplayCheckpoint> replay_checkpoint(std::string* error = nullptr) const;
 
     // Camera for the given aspect (width / height): the script override if set, else the
     // manifest camera, else a default. Horizontal FOV from ui::GameSettings::fieldOfViewDegrees.
@@ -162,7 +159,8 @@ public:
     [[nodiscard]] RenderEnvironment environment() const;
     // View for a renderer. `objects` must stay alive (and the world unmodified) while the
     // view is in use; pass the storage in so no allocation happens per frame.
-    [[nodiscard]] PlayerRenderView render_view(std::vector<GameRenderObject>& objects, float aspect) const;
+    [[nodiscard]] PlayerRenderView render_view(std::vector<GameRenderObject>& objects, float aspect, float interpolationAlpha = 1.0F) const;
+    void update_presentation(float frameDeltaSeconds,float interpolationAlpha=1.0F);
 
     [[nodiscard]] std::optional<double> script_global(const std::string& key) const;
 

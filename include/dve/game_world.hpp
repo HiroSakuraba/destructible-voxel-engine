@@ -82,8 +82,8 @@ struct GameObjectDesc {
     // script can query and move directly. Useful for spawn points, triggers, AI waypoints.
     std::unique_ptr<VoxelObject> voxels;
     // Ignored if voxels is null. true => dynamic rigid body (falls, can be pushed/damaged
-    // apart... though runtime splitting-on-destruction is not implemented yet, see
-    // damage_sphere). false => static collision, immovable, cannot be moved after creation.
+    // apart when damaged, see damage_sphere). false => static collision, immovable,
+    // cannot be moved after creation.
     bool dynamic{true};
     double densityKilogramsPerCubicMeter{1000.0};
     bool structural{true};
@@ -222,7 +222,10 @@ struct GameWorldObjectState {
 struct GameWorldTimerState {
     std::uint64_t id{};
     float fireAtSeconds{};
-    float intervalSeconds{};   // 0 = one-shot
+    float intervalSeconds{};   // legacy schema v1/v2
+    std::uint64_t fireAtTick{};
+    std::uint64_t intervalTicks{};
+    std::uint64_t intervalNanoseconds{}, originTick{}, releaseIndex{1};
 };
 
 struct GameWorldPoolState {
@@ -232,11 +235,38 @@ struct GameWorldPoolState {
     std::vector<GameObjectId> freeIds;
 };
 
+struct GameWorldDestructionState {
+    std::uint64_t requestId{};
+    GameObjectId objectId{};
+    Float3 worldCenter{};
+    float radius{};
+    Float3 localCenterVoxels{};
+    float localRadiusVoxels{};
+    std::uint64_t workUnits{};
+    bool stale{};
+};
+
+struct GameWorldSessionState {
+    std::uint64_t debrisLimit{}, nextDebrisSequence{}, rejectedDestruction{};
+    std::map<GameObjectId, std::uint64_t> debris;
+    std::map<std::string, bool> actions;
+    std::map<std::string, float> axes;
+    // Reference solver loads issued since the last physics step, keyed by object id.
+    std::map<GameObjectId, ReferenceRigidBodyWorld::PendingLoads> pendingLoads;
+};
+
 struct GameWorldSaveState {
     GameObjectId nextObjectId{1};
     GameObjectPoolId nextPoolId{1};
     std::uint64_t nextTimerId{1};
-    float elapsedSeconds{};
+    float elapsedSeconds{}; // legacy v1/v2 conversion boundary
+    std::uint64_t tickCount{};
+    float fixedDeltaSeconds{1.0F / 60.0F};
+    bool integerClock{};
+    std::optional<GameWorldSessionState> session;
+    std::uint64_t nextDestructionId{1};
+    std::uint32_t destructionUnitsPerTick{4096};
+    std::vector<GameWorldDestructionState> pendingDestruction;
     std::vector<GameWorldObjectState> objects;   // sorted by id
     std::vector<GameWorldTimerState> timers;     // live timers, in scheduling order
     std::vector<GameWorldPoolState> pools;       // sorted by id
@@ -410,7 +440,7 @@ public:
     // Every live object (markers included, so callers can filter), sorted by id, with its
     // current world transform and read-only geometry/material views. This is the renderer's
     // only window into GameWorld; it never mutates state. See GameRenderObject for lifetime.
-    [[nodiscard]] std::vector<GameRenderObject> render_objects() const;
+    [[nodiscard]] std::vector<GameRenderObject> render_objects(float interpolationAlpha = 1.0F) const;
     // Markers (no body) and dynamic bodies can be moved; static voxel bodies cannot (their
     // Jolt collision is baked in at creation) and this returns false for them.
     bool set_position(GameObjectId id, Float3 worldPosition);
@@ -471,6 +501,13 @@ public:
     // on_damage event for this call. Does not currently split a partially-damaged dynamic
     // object into separate fragment bodies the way the editor's derived-jobs pipeline can for
     // authored destruction; a damaged object stays one (possibly disconnected-looking) body.
+    // Optional bounded alternative. Preparation never mutates live geometry. Results
+    // publish before physics at a tick boundary. A stale source or a package exceeding
+    // 32 components / 256 proxy boxes is rejected without changing the object.
+    [[nodiscard]] std::optional<std::uint64_t> queue_damage_sphere(GameObjectId id, Float3 worldCenter, float radius);
+    void set_destruction_units_per_tick(std::uint32_t units) noexcept { destructionUnitsPerTick_ = units; }
+    [[nodiscard]] std::size_t pending_destruction_count() const noexcept;
+    [[nodiscard]] std::uint64_t rejected_destruction_requests() const noexcept { return rejectedDestruction_; }
     std::optional<std::uint64_t> damage_sphere(GameObjectId id, Float3 worldCenter, float radius);
 
     // Nearest hit across every object with voxel data, or nullopt. Static and dynamic objects
@@ -561,12 +598,23 @@ public:
     // FNV-1a over the saved state (ids, flags, transforms, bodies, voxels, tables, timers):
     // equal hashes mean capture_save_state() would produce the same snapshot.
     [[nodiscard]] std::uint64_t state_hash() const;
+    // Includes session-only authority state that the legacy world hash omitted.
+    [[nodiscard]] std::uint64_t runtime_state_hash() const;
 
     // Advances timers, steps physics by fixedDeltaSeconds, then fires tick listeners. Damage/
     // destroy listeners fire synchronously from damage_sphere()/destroy_object(), not from
     // here, since those are point-in-time actions a script triggers directly, not something
     // this loop discovers on its own (there is no "spontaneous destruction" source yet).
     void tick(float fixedDeltaSeconds);
+    // Hosts opt in to frame-driven cameras/UI; legacy embedders retain tick presentation.
+    void set_frame_presentation(bool enabled) noexcept { framePresentation_ = enabled; }
+    [[nodiscard]] bool frame_presentation() const noexcept { return framePresentation_; }
+    void update_presentation(float frameDeltaSeconds, float interpolationAlpha=1.0F);
+    [[nodiscard]] std::optional<RigidTransform> presentation_transform(GameObjectId id, float alpha=1.0F) const;
+    void reset_presentation_history() noexcept;
+    [[nodiscard]] std::uint64_t tick_count() const noexcept { return tickCount_; }
+    [[nodiscard]] float fixed_delta_seconds() const noexcept { return fixedDeltaSeconds_; }
+    [[nodiscard]] double elapsed_seconds() const noexcept;
 
     [[nodiscard]] IRigidBodyWorld& physics() noexcept { return *physics_; }
     [[nodiscard]] const IRigidBodyWorld& physics() const noexcept { return *physics_; }
@@ -601,6 +649,24 @@ public:
 #endif
 
 private:
+    struct PendingDestruction;
+    void process_pending_destruction();
+    bool commit_prepared_destruction(PendingDestruction& pending);
+    std::vector<PendingDestruction> pendingDestruction_;
+    std::uint64_t nextDestructionId_{1}, rejectedDestruction_{};
+    std::uint32_t destructionUnitsPerTick_{4096};
+    void advance_world_clock(float dt);
+    void dispatch_timers();
+    void step_physics(float dt);
+    void evaluate_animation(float dt);
+    void apply_root_motion();
+    void step_gameplay(float dt);
+    void step_secondary_motion(float dt);
+    void dispatch_tick_listeners(float dt);
+    bool framePresentation_{};
+    bool inTick_{};
+    std::map<GameObjectId, RigidTransform> presentationPrevious_;
+
     struct Object;
     struct Timer;
     struct Pool;
@@ -667,9 +733,10 @@ private:
     GameObjectPoolId nextPoolId_{1};
     std::vector<Timer> timers_;
     TimerId nextTimerId_{1};
-    float elapsedSeconds_{};
+    std::uint64_t tickCount_{};
+    float fixedDeltaSeconds_{1.0F / 60.0F};
 
-    std::vector<TickListener> tickListeners_;
+    std::vector<std::shared_ptr<TickListener>> tickListeners_;
     std::vector<DamageListener> damageListeners_;
     std::vector<DestroyListener> destroyListeners_;
     std::vector<LifecycleListener> lifecycleListeners_;

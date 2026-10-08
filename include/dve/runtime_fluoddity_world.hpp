@@ -1,4 +1,5 @@
 #pragma once
+#include "dve/simulation_clock.hpp"
 
 #include <cstdint>
 #include <map>
@@ -117,6 +118,7 @@ private:
         RuntimeFluoddityInstance instance;
         RuntimeFluoddityState state;
         std::uint32_t plannedResetGeneration{};
+        SimulationClock clock;
     };
 
     RuntimeFluoddityObjectId nextObjectId_{1U};

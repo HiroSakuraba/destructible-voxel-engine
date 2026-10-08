@@ -1,3 +1,4 @@
+#include "dve/simulation_clock.hpp"
 // The capstone this whole subsystem was building toward: a real X11 window reading real
 // keyboard input (via the normal event loop; --smoke injects synthetic X11 key events through
 // XTestFakeKeyEvent, which the X server treats indistinguishably from a real keyboard, rather
@@ -151,7 +152,9 @@ int main(int argc, char** argv) {
     bool running = true;
     int frame = 0;
     constexpr float kFixedDelta = 1.0F / 60.0F;
-    auto nextFrameTime = std::chrono::steady_clock::now();
+    dve::SimulationClock simulationClock;
+    const auto displayEpoch = std::chrono::steady_clock::now();
+    auto previousTickTime = displayEpoch;
 
     while (running) {
         // In --smoke mode, synthesize real X11 key events at fixed frames via XTestFakeKeyEvent
@@ -190,7 +193,10 @@ int main(int argc, char** argv) {
         world.set_axis("move_x", (heldD ? 1.0F : 0.0F) - (heldA ? 1.0F : 0.0F));
         world.set_axis("move_z", (heldW ? 1.0F : 0.0F) - (heldS ? 1.0F : 0.0F));
         world.set_action_pressed("jump", heldSpace);
-        world.tick(kFixedDelta);
+        const auto now = std::chrono::steady_clock::now();
+        const auto steps = simulationClock.advance(std::chrono::duration<double>(now-previousTickTime).count());
+        previousTickTime = now;
+        for (std::uint32_t i=0;i<steps;++i) world.tick(kFixedDelta);
 
         XSetForeground(display, gc, BlackPixel(display, screen));
         XFillRectangle(display, backBuffer, gc, 0, 0, static_cast<unsigned>(width), static_cast<unsigned>(height));
@@ -219,9 +225,8 @@ int main(int argc, char** argv) {
         // time, and the X server can end up delivering both in the same batch, which was
         // observed to make the held-key duration effectively zero in about half of all runs
         // (see docs/scripting_implementation_notes.md's addendum for this bug).
-        nextFrameTime += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            std::chrono::duration<float>(kFixedDelta));
-        std::this_thread::sleep_until(nextFrameTime);
+        const auto deadline = dve::tick_deadline_nanoseconds(static_cast<std::uint64_t>(frame), {60,1});
+        std::this_thread::sleep_until(displayEpoch+std::chrono::nanoseconds(deadline));
     }
 
     if (!screenshotPath.empty()) {

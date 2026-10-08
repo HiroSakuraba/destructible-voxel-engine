@@ -133,7 +133,7 @@ void NativeEditorController::attach_midi_input(std::unique_ptr<audio::IMidiBacke
     midiInput_.reset();  // closes (and releases notes of) a previous session first
     audio::Synthesizer* synth = &audioMixer_.synthesizer();
     midiInput_ = std::make_unique<audio::MidiInputSession>(
-        std::move(backend), [synth](const audio::MidiMessage& message) { (void)synth->post_midi(message); }, options);
+        std::move(backend), [synth,wake=wakeCallback_](const audio::MidiMessage& message) { (void)synth->post_midi(message); if(wake) wake(); }, options);
     midiInput_->set_channel_filter(midi_channel_filter_from_settings(workspace_.settings()));
     midiInput_->set_requested_port(midi_input_port());
     midiStatusGeneration_ = ~std::uint64_t{0};

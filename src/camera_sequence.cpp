@@ -570,6 +570,15 @@ std::optional<CameraSequence> CameraSequence::parse(std::string_view text, std::
     return result;
 }
 
+std::uint64_t CameraSequencePlayer::state_hash() const noexcept {
+    std::uint64_t hash=1469598103934665603ULL;
+    const auto value=[&]<class T>(T v) {
+        const auto* bytes=reinterpret_cast<const unsigned char*>(&v);
+        for(std::size_t i=0;i<sizeof(T);++i) { hash^=bytes[i]; hash*=1099511628211ULL; }
+    };
+    value(timeSeconds_); value(previousTimeSeconds_); value(playing_); value(loop_);
+    return hash;
+}
 void CameraSequencePlayer::set_sequence(const CameraSequence* sequence) noexcept {
     sequence_ = sequence;
     timeSeconds_ = 0.0F;

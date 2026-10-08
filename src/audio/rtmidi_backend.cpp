@@ -1,4 +1,5 @@
 #include "dve/audio/midi.hpp"
+#include "dve/audio/audio_clock.hpp"
 
 #ifdef DVE_HAVE_RTMIDI
 #include <RtMidi.h>
@@ -41,11 +42,16 @@ public:
             callback_ = std::move(callback);
             input_->openPort(static_cast<unsigned int>(index), "DVE Synth Input");
             callbackSet_ = true;
-            input_->setCallback([](double, std::vector<unsigned char>* bytes, void* user) {
+            input_->setCallback([](double sourceDelta, std::vector<unsigned char>* bytes, void* user) {
                 auto* self = static_cast<RtMidiBackend*>(user);
                 if (self == nullptr || bytes == nullptr || self->callback_ == nullptr) return;
-                const auto parsed = MidiMessage::parse(std::span<const std::uint8_t>(bytes->data(), bytes->size()));
-                if (parsed) self->callback_(*parsed);
+                auto parsed = MidiMessage::parse(std::span<const std::uint8_t>(bytes->data(), bytes->size()));
+                if (parsed) {
+                    parsed->hostTimestampNanoseconds = audio_host_nanoseconds();
+                    parsed->sourceDeltaSeconds = sourceDelta;
+                    parsed->sourceSequence = ++self->inputSequence_;
+                    self->callback_(*parsed);
+                }
             }, this);
             inputOpen_ = true;
             return true;
@@ -104,6 +110,7 @@ private:
     std::unique_ptr<RtMidiIn> input_;
     std::unique_ptr<RtMidiOut> output_;
     MidiInputCallback callback_;
+    std::uint64_t inputSequence_{};
     bool callbackSet_{};
     bool inputOpen_{};
     bool outputOpen_{};

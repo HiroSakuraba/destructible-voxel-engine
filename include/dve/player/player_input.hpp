@@ -1,4 +1,7 @@
 #pragma once
+#include <span>
+#include <cmath>
+#include <algorithm>
 // Input bindings for dve_player, interpreted from game.dvegame `bind.<name>=<spec>` entries
 // (decision D6; the v2.35 InputActionSystem migration is a follow-up).
 //
@@ -64,6 +67,25 @@ private:
     std::vector<InputBinding> bindings_;
 };
 
+struct TickInputEvent {
+    std::uint64_t tick{};
+    std::uint64_t sequence{};
+    platform::PlatformEvent event;
+};
+// Normalize at the host boundary. Events in discarded wall time are delivered on the
+// next unsimulated tick; record this result, not wall time, for deterministic playback.
+[[nodiscard]] inline std::uint64_t input_event_tick(std::uint64_t timestamp, std::uint64_t hostBegin,
+    std::uint64_t hostEnd, std::uint64_t tickBefore, double phaseBefore, double period,
+    double maximumFrameSeconds, std::uint32_t steps) noexcept {
+    if (!timestamp || hostEnd <= hostBegin || !(period > 0.0)) return tickBefore + 1U;
+    const auto acceptedNs = static_cast<std::uint64_t>(maximumFrameSeconds * 1.0e9);
+    const auto activeBegin = hostEnd - std::min(hostEnd - hostBegin, acceptedNs);
+    if (timestamp < activeBegin) return tickBefore + 1U;
+    const double offset = double(std::min(timestamp, hostEnd) - activeBegin) / 1.0e9;
+    const auto relative = static_cast<std::uint64_t>(std::max(0.0, std::floor((phaseBefore + offset) / period))) + 1U;
+    return tickBefore + std::min<std::uint64_t>(relative, std::uint64_t(steps) + 1U);
+}
+
 class PlayerInput {
 public:
     PlayerInput() = default;
@@ -71,7 +93,16 @@ public:
 
     // Tracks key / gamepad / mouse state. Key repeats are ignored; focus loss releases all.
     void handle_event(const platform::PlatformEvent& event);
+    void queue_event(const platform::PlatformEvent& event, std::uint64_t targetTick);
+    void begin_tick(std::uint64_t tick);
+    [[nodiscard]] std::span<const TickInputEvent> tick_events() const noexcept { return tickEvents_; }
+    [[nodiscard]] std::vector<TickInputEvent> pending_events() const;
+    // Includes bindings, held/edge state and the ordered normalized queue. Host timestamps
+    // are diagnostic and deliberately excluded from a simulation comparison.
+    [[nodiscard]] std::string replay_state() const;
+    [[nodiscard]] std::uint32_t press_count(std::string_view action) const;
     void release_all();
+    void reset_timeline(); // load/seek discards events addressed to the previous tick timeline
     // Ends the input window for one simulation tick. Actions report a press that happened
     // since the previous end_tick() even if it was already released, so a tap shorter than a
     // tick (common at high refresh rates, where most frames run no tick) is not lost. Call it
@@ -88,6 +119,9 @@ public:
 private:
     [[nodiscard]] float source_value(const InputSource& source, bool* held) const;
 
+    std::uint64_t nextSequence_{1};
+    std::map<std::pair<std::uint64_t, std::uint64_t>, TickInputEvent> pending_;
+    std::vector<TickInputEvent> tickEvents_;
     InputBindingTable table_;
     std::set<std::string> keys_;
     std::set<platform::GamepadButton> gamepadButtons_;

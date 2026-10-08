@@ -1,3 +1,4 @@
+#include "dve/simulation_clock.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/camera_runtime.hpp"
 
@@ -90,6 +91,7 @@ public:
         telemetry.physicsBackend = resolvedBackend;
         telemetry.productionPhysics = resolvedBackend != Physics3DBackend::Reference;
         world_ = std::make_unique<GameWorld>(std::move(physics));
+        world_->set_frame_presentation(true);
         world_->set_debris_limit(config.debrisLimit);
         cameraCollision_ = std::make_unique<camera::GameWorldCameraCollisionWorld>(*world_);
 
@@ -219,6 +221,17 @@ public:
         return true;
     }
 
+    [[nodiscard]] std::map<EditorObjectId, RigidTransform> presentation_transforms(float alpha) const {
+        std::map<EditorObjectId, RigidTransform> result;
+        if (world_) for (const auto& [editorId, runtimeId] : editorToRuntime_)
+            if (const auto pose = world_->presentation_transform(runtimeId, alpha)) result.emplace(editorId, *pose);
+        return result;
+    }
+
+    void present(float elapsedSeconds,float alpha=1.0F) {
+        if(world_) world_->update_presentation(elapsedSeconds,alpha);
+    }
+
     [[nodiscard]] bool fixed_step(
         EditorDocument& document,
         const EditorPlayInputSnapshot& input,
@@ -304,6 +317,11 @@ bool EditorPlaySession::runtime_action_pressed(std::string_view action) const {
     return runtime_ && runtime_->action_pressed(action);
 }
 
+std::map<EditorObjectId, RigidTransform> EditorPlaySession::presentation_transforms() const {
+    return runtime_ ? runtime_->presentation_transforms(paused() ? 1.0F : clock_.alpha())
+                    : std::map<EditorObjectId, RigidTransform>{};
+}
+
 const camera::ICameraCollisionWorld* EditorPlaySession::camera_collision_world() const noexcept {
     return runtime_ ? runtime_->camera_collision_world() : nullptr;
 }
@@ -383,7 +401,7 @@ bool EditorPlaySession::start(
     telemetry_ = {};
     telemetry_.state = state_;
     telemetry_.mode = mode_;
-    accumulatorSeconds_ = 0.0;
+    clock_ = {};
     runtime_ = std::make_unique<Runtime>(logSink_);
     std::string runtimeError;
     if (!runtime_->start(workspace.document(), materials, mode_, config_, telemetry_, &runtimeError)) {
@@ -407,31 +425,22 @@ bool EditorPlaySession::update(EditorWorkspace& workspace, float elapsedSeconds,
         if (error) *error = "workspace mode changed outside the play-session controller";
         return false;
     }
-    if (state_ == EditorPlaySessionState::Paused) return true;
+    if (state_ == EditorPlaySessionState::Paused) { runtime_->present(0.0F); return true; }
     if (!(elapsedSeconds >= 0.0F) || !std::isfinite(elapsedSeconds)) {
         if (error) *error = "elapsedSeconds must be finite and non-negative";
         return false;
     }
 
-    const double scaled = static_cast<double>(elapsedSeconds) * static_cast<double>(config_.timeScale);
-    const double bounded = std::min(scaled, static_cast<double>(config_.maximumAccumulatedSeconds));
-    telemetry_.droppedSeconds += std::max(0.0, scaled - bounded);
-    accumulatorSeconds_ = std::min(
-        accumulatorSeconds_ + bounded,
-        static_cast<double>(config_.maximumAccumulatedSeconds));
-
-    const double fixed = static_cast<double>(config_.fixedDeltaSeconds);
-    while (accumulatorSeconds_ + 1.0e-12 >= fixed &&
-           telemetry_.stepsLastUpdate < config_.maximumSubstepsPerUpdate) {
+    clock_.fixedDeltaSeconds = config_.fixedDeltaSeconds;
+    clock_.maximumFrameSeconds = config_.maximumAccumulatedSeconds;
+    clock_.maximumSteps = config_.maximumSubstepsPerUpdate;
+    const auto steps = clock_.advance(double(elapsedSeconds) * double(config_.timeScale));
+    for (std::uint32_t i = 0; i < steps; ++i) {
         if (!fixed_step(workspace, error)) return false;
-        accumulatorSeconds_ -= fixed;
         ++telemetry_.stepsLastUpdate;
     }
-    if (accumulatorSeconds_ + 1.0e-12 >= fixed) {
-        const double retained = std::fmod(accumulatorSeconds_, fixed);
-        telemetry_.droppedSeconds += accumulatorSeconds_ - retained;
-        accumulatorSeconds_ = retained;
-    }
+    telemetry_.droppedSeconds = clock_.droppedSeconds;
+    runtime_->present(std::min(elapsedSeconds,config_.maximumAccumulatedSeconds),clock_.alpha());
     return true;
 }
 
@@ -459,6 +468,7 @@ bool EditorPlaySession::single_step(EditorWorkspace& workspace, std::string* err
     telemetry_.stepsLastUpdate = 0U;
     if (!fixed_step(workspace, error)) return false;
     telemetry_.stepsLastUpdate = 1U;
+    runtime_->present(0.0F);
     return true;
 }
 
@@ -538,7 +548,7 @@ void EditorPlaySession::reset_runtime_state() noexcept {
     telemetry_.mode = EditorMode::Edit;
     state_ = EditorPlaySessionState::Stopped;
     mode_ = EditorMode::Edit;
-    accumulatorSeconds_ = 0.0;
+    clock_ = {};
     logSink_ = {};
 }
 

@@ -534,6 +534,7 @@ int run(int argc, char** argv) {
     log("renderer: " + std::string(renderer->name()) + " " + std::to_string(renderWidth) + "x" +
         std::to_string(renderHeight) + " -> " + presenter);
 
+    float interpolationAlpha = 1.0F;
     std::vector<GameRenderObject> objects;
     FrameTimes renderTimes;
     FrameTimes frameTimes;
@@ -542,7 +543,7 @@ int run(int argc, char** argv) {
     const auto render_frame = [&](bool captureWindow) -> bool {
         const auto frameStart = Clock::now();
         const float aspect = static_cast<float>(renderWidth) / static_cast<float>(renderHeight);
-        const PlayerRenderView view = app->render_view(objects, aspect);
+        const PlayerRenderView view = app->render_view(objects, aspect, interpolationAlpha);
         if (!renderer->render(view, &error)) return false;
         if (captureWindow && blitter && options.windowScreenshot) blitter->request_screenshot(*options.windowScreenshot);
         if (!renderer->present(&error)) return false;
@@ -552,10 +553,12 @@ int run(int argc, char** argv) {
         ++framesRendered;
         return true;
     };
+    std::vector<platform::PlatformEvent> pendingHostEvents;
     const auto poll = [&]() {
         platform::PlatformEvent event;
         while (host.has_window() && host.poll_event(event)) {
-            app->handle_event(event);
+            if (options.headless) app->handle_event(event);
+            else pendingHostEvents.push_back(event);
             if (event.type == platform::EventType::KeyDown && event.key == "escape") app->request_quit();
             if (event.type == platform::EventType::WindowResized && options.renderScale) {
                 const auto [w, h] = internal_size(options, settings, event.width, event.height);
@@ -628,18 +631,30 @@ int run(int argc, char** argv) {
         clock.fixedDeltaSeconds = options.fixedDt;
         const double minimumFrameSeconds = 1.0 / static_cast<double>(std::max(30U, settings.frameRateLimit));
         auto previous = Clock::now();
+        auto previousInputNs = host.monotonic_nanoseconds();
         auto lastReport = previous;
         while (!app->quit_requested()) {
             poll();
             const auto now = Clock::now();
             const double elapsed = std::chrono::duration<double>(now - previous).count();
             previous = now;
+            const auto inputNow = host.monotonic_nanoseconds();
+            const auto tickBefore = app->tick_count();
+            const auto phaseBefore = clock.accumulator;
+            app->world().set_frame_presentation(true);
             const std::uint32_t steps = clock.advance(elapsed);
+            for (const auto& event : pendingHostEvents)
+                app->queue_event(event, input_event_tick(event.timestampNanoseconds, previousInputNs,
+                    inputNow, tickBefore, phaseBefore, clock.period_seconds(), clock.maximumFrameSeconds, steps));
+            pendingHostEvents.clear();
+            previousInputNs = inputNow;
             for (std::uint32_t step = 0; step < steps; ++step) {
                 app->tick(clock.fixedDeltaSeconds);
                 for (const PlayerSaveEvent& event : app->save_events())
                     if (!event.ok) log(std::string(event.load ? "load failed: " : "save failed: ") + event.message);
             }
+            interpolationAlpha = clock.alpha();
+            app->update_presentation(static_cast<float>(std::min(elapsed, 0.25)),interpolationAlpha);
             if (!render_frame(false)) {
                 std::cerr << "dve_player: render failed: " << error << '\n';
                 return kExitRuntimeError;

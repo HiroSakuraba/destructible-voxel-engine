@@ -34,14 +34,14 @@ float clamp_pitch(float pitch) noexcept {
     return std::clamp(pitch, -1.553343F, 1.553343F);
 }
 
-Float3 voxel_center_world(const EditorObject& object, Int3 voxel) noexcept {
+Float3 voxel_center_world(const EditorObject& object, Int3 voxel, const RigidTransform* pose = nullptr) noexcept {
     const float size = object.voxelSizeMeters;
     const Float3 local{
         (static_cast<float>(voxel.x) + 0.5F) * size,
         (static_cast<float>(voxel.y) + 0.5F) * size,
         (static_cast<float>(voxel.z) + 0.5F) * size,
     };
-    return transform_point(object.transform, local);
+    return transform_point(pose ? *pose : object.transform, local);
 }
 
 
@@ -324,6 +324,10 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
 }
 
 EditorObjectBounds object_world_bounds(const EditorObject& object) noexcept {
+    return object_world_bounds(object, object.transform);
+}
+
+EditorObjectBounds object_world_bounds(const EditorObject& object, const RigidTransform& pose) noexcept {
     EditorObjectBounds result;
     if (object.text3d || object.gaborVolume) {
         const Float3 localMinimum = object.text3d ? object.text3d->bounds.minimum : object.gaborVolume->boundsMinimum;
@@ -334,7 +338,7 @@ EditorObjectBounds object_world_bounds(const EditorObject& object) noexcept {
         result.maximum = {-std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(),
                           -std::numeric_limits<float>::infinity()};
         for (Float3 corner : corners) {
-            const Float3 world = transform_point(object.transform, corner);
+            const Float3 world = transform_point(pose, corner);
             result.minimum = {std::min(result.minimum.x, world.x), std::min(result.minimum.y, world.y),
                               std::min(result.minimum.z, world.z)};
             result.maximum = {std::max(result.maximum.x, world.x), std::max(result.maximum.y, world.y),
@@ -352,7 +356,7 @@ EditorObjectBounds object_world_bounds(const EditorObject& object) noexcept {
     result.minimum = {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()};
     result.maximum = {-std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()};
     for (Float3 corner : corners) {
-        const Float3 world = transform_point(object.transform, corner);
+        const Float3 world = transform_point(pose, corner);
         result.minimum = {std::min(result.minimum.x, world.x), std::min(result.minimum.y, world.y), std::min(result.minimum.z, world.z)};
         result.maximum = {std::max(result.maximum.x, world.x), std::max(result.maximum.y, world.y), std::max(result.maximum.z, world.z)};
     }
@@ -527,7 +531,7 @@ Bitset512 exposed_voxel_mask(const VoxelObject& voxels, BrickKey key, const Bric
 //    enough that the voxels covering a near-edge interior voxel are kept too.
 // Checked at the object's nearest depth, where voxels project largest. When any of
 // this fails, every voxel of the object is drawn as before.
-bool surface_splats_cover_object(const EditorObject& object, const EditorCamera& camera, UiRect viewport) noexcept {
+bool surface_splats_cover_object(const EditorObject& object, const EditorCamera& camera, UiRect viewport, const RigidTransform* pose = nullptr) noexcept {
     if (viewport.width <= 0 || viewport.height <= 0 || !(object.voxelSizeMeters > 0.0F)) return false;
     const float width = static_cast<float>(viewport.width);
     const float height = static_cast<float>(viewport.height);
@@ -535,7 +539,7 @@ bool surface_splats_cover_object(const EditorObject& object, const EditorCamera&
     const float maximumEdge = std::min(24.0F, (marginPixels - 1.0F) * 0.5F);
     if (!(maximumEdge >= 1.0F)) return false;
 
-    const EditorObjectBounds bounds = object_world_bounds(object);
+    const EditorObjectBounds bounds = pose ? object_world_bounds(object, *pose) : object_world_bounds(object);
     if (!bounds.valid) return false;
     const Float3 forward = camera_basis(camera).forward;
     float nearest = std::numeric_limits<float>::infinity();
@@ -704,7 +708,8 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     UiRect viewport,
     const EditorViewportSettings& settings,
     const std::set<EditorObjectId>& selectedObjects,
-    JobSystem* jobs) {
+    JobSystem* jobs,
+    const std::map<EditorObjectId, RigidTransform>* presentationPoses) {
     std::vector<EditorVoxelDrawItem> result;
     result.reserve(std::min<std::size_t>(settings.maximumDrawVoxels, 16384));
     const float viewportHeight = static_cast<float>(std::max(1, viewport.height));
@@ -714,8 +719,13 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible) continue;
         const bool selected = selectedObjects.contains(id);
+        const RigidTransform* pose = nullptr;
+        if (presentationPoses) {
+            const auto found = presentationPoses->find(id);
+            if (found != presentationPoses->end()) pose = &found->second;
+        }
         const bool cullEnclosed = settings.cullEnclosedVoxels &&
-                                  surface_splats_cover_object(object, camera, viewport);
+                                  surface_splats_cover_object(object, camera, viewport, pose);
         anchorMasks.clear();
         if (!object.anchors.empty()) {
             for (const Int3& anchor : object.anchors)
@@ -738,7 +748,7 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
             emitted.for_each_set([&](std::uint16_t index) {
                 if (result.size() >= settings.maximumDrawVoxels) return;
                 const Int3 voxel = global_from_local(key, local_from_index_unchecked(index));
-                const Float3 world = voxel_center_world(object, voxel);
+                const Float3 world = voxel_center_world(object, voxel, pose);
                 const ScreenPoint screen = project_with(projector, world);
                 if (!screen.visible) return;
                 float radius = 2.0F;
@@ -855,9 +865,16 @@ const std::vector<EditorVoxelDrawItem>& EditorVoxelDrawListCache::get(
     UiRect viewport,
     const EditorViewportSettings& settings,
     const std::set<EditorObjectId>& selectedObjects,
-    std::uint64_t sceneFingerprint) {
+    std::uint64_t sceneFingerprint,
+    const std::map<EditorObjectId, RigidTransform>* presentationPoses) {
     FingerprintHasher hash;
     hash.u64(sceneFingerprint);
+    if (presentationPoses) for (const auto& [id, pose] : *presentationPoses) {
+        hash.u64(id);
+        for (const float v : {pose.position.x, pose.position.y, pose.position.z,
+                            pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w})
+            hash.u64(std::bit_cast<std::uint32_t>(v));
+    }
     hash.u64(editor_camera_fingerprint(camera));
     hash.i32(viewport.x); hash.i32(viewport.y); hash.i32(viewport.width); hash.i32(viewport.height);
     hash.u64(settings.maximumDrawVoxels);
@@ -873,7 +890,7 @@ const std::vector<EditorVoxelDrawItem>& EditorVoxelDrawListCache::get(
             if (!shared.jobs) shared.jobs = std::make_unique<JobSystem>(JobSystem::default_worker_count());
             jobs = shared.jobs.get();
         }
-        items_ = build_voxel_draw_list(document, materials, camera, viewport, settings, selectedObjects, jobs);
+        items_ = build_voxel_draw_list(document, materials, camera, viewport, settings, selectedObjects, jobs, presentationPoses);
         key_ = hash.h;
         valid_ = true;
         ++rebuilds_;

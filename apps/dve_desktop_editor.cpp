@@ -159,6 +159,7 @@ int main(int argc, char** argv) {
 
         // MIDI: shared with the X11 editor (dve/editor_midi.hpp). The input port comes from the
         // `midi.input_port` setting (Auto skips Midi Through); hotplug runs on a worker thread.
+        controller.set_wake_callback(host.wake_callback());
         const EditorMidiStartResult midiStart = start_editor_midi(controller);
         const std::string midiStatus = midiStart.backendName;
 
@@ -170,8 +171,8 @@ int main(int argc, char** argv) {
         int frames = 0;
         std::optional<bool> requestedVsync;
         double previous = host.monotonic_seconds();
-        // Redraw at up to 125 fps while input arrives or the editor animates, and at about
-        // 30 fps once it has been idle for a second. Input still wakes the wait at once, so
+        // Redraw at up to 125 fps while input arrives or the editor animates, and on input/task completion
+        // once it has been idle for a second (with a one-second device discovery deadline). Input still wakes the wait at once, so
         // this only saves the CPU and GPU work of redrawing a frame nobody is changing.
         constexpr double kFullRateAfterInputSeconds = 1.0;
         double lastInput = previous;
@@ -224,8 +225,12 @@ int main(int argc, char** argv) {
                 const bool fullRate = controller.animating() || frameStart - lastInput < kFullRateAfterInputSeconds;
                 const auto cap = std::get<std::int64_t>(controller.workspace().settings().value("render.frame_limit"));
                 const auto floor = editor_frame_floor(cap);
-                (void)host.wait_for_frame(frameStart,
-                    std::max(std::chrono::milliseconds(fullRate ? 8 : 33), floor), floor);
+                if(fullRate) {
+                    (void)host.wait_for_frame(frameStart,std::max(std::chrono::milliseconds(8),floor),floor);
+                } else {
+                    const auto deadline=host.monotonic_nanoseconds()+static_cast<std::uint64_t>(controller.idle_update_seconds()*1.0e9);
+                    (void)host.wait_until(deadline);
+                }
             }
         }
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "dve/simulation_clock.hpp"
 
 #include <array>
 #include <chrono>
@@ -476,6 +477,8 @@ public:
     // backlog. Hosts redraw at full rate while it is true or input is arriving, and may
     // lower the redraw rate otherwise (anything not listed still updates, just less often).
     [[nodiscard]] bool animating() const noexcept;
+    void set_wake_callback(std::function<void()> callback) { wakeCallback_=std::move(callback); }
+    [[nodiscard]] double idle_update_seconds() const noexcept;
     void pointer_move(int x, int y, std::uint32_t modifiers = 0);
     // Raw deltas keep fractional precision and do not change UI hover/picking coordinates.
     void pointer_relative(float deltaX, float deltaY);
@@ -740,6 +743,7 @@ private:
     float uiZoomWindowLimit_{2.0F};
     bool quitRequested_{};
     PendingDestructiveAction pendingDestructiveAction_{PendingDestructiveAction::Inactive};
+    std::function<void()> wakeCallback_;
     EditorStatusMessage status_{"Ready", false, 0.0F};
 
     PointerButton dragButton_{PointerButton::NoButton};
@@ -803,7 +807,7 @@ private:
     std::unique_ptr<gameplay::SpriteVerticalSlicePresentation> spriteLevelPresentation_{};
     gameplay::ChiptuneSliceInput spriteLevelInput_{};
     bool spriteLevelPlaying_{};
-    float spriteLevelAccumulator_{};
+    SimulationClock spriteLevelClock_{};
     bool spriteDiagnosticsOpen_{};
     bool render3DDiagnosticsOpen_{};
     Render3DDiagnosticsReport render3DDiagnosticsReport_{make_render3d_diagnostics_demo_report()};

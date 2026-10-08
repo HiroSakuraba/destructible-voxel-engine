@@ -154,6 +154,7 @@ struct GameplaySaveState {
     GamePlayerId nextPlayerId{1U};
     GameTriggerId nextTriggerId{1U};
     std::uint64_t fixedTick{};
+    std::map<GameObjectId, Float3> pendingRootMotion;
 };
 
 class GameplayRuntime {
@@ -169,6 +170,9 @@ public:
     [[nodiscard]] const CharacterMoveTelemetry* telemetry(GameObjectId pawn) const noexcept;
     [[nodiscard]] std::vector<GameObjectId> character_ids() const;
     bool set_character_input(GameObjectId pawn, CharacterInput input);
+    // World-space authored displacement is combined with input/support movement and
+    // resolved by the same capsule sweep, slide and step-up path during the next update.
+    bool queue_root_motion(GameObjectId pawn, Float3 displacement);
 
     [[nodiscard]] GamePlayerId create_player(std::string name, bool local = true);
     bool destroy_player(GamePlayerId player);
@@ -245,6 +249,7 @@ private:
 
     GameWorld* world_{};
     std::unordered_map<GameObjectId, CharacterRecord> characters_;
+    std::map<GameObjectId, Float3> rootMotion_;
     std::unordered_map<GamePlayerId, GamePlayerState> players_;
     std::unordered_map<GameObjectId, GamePlayerId> pawnControllers_;
     std::unordered_map<GameTriggerId, TriggerRecord> triggers_;

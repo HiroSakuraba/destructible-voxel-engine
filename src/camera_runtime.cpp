@@ -535,14 +535,14 @@ bool GameCameraRuntime::set_post_process_stack(CameraViewportId v, CameraRigId r
     it->second.postProcessStacks[r] = std::move(stack);
     return true;
 }
-bool GameCameraRuntime::set_sequence(CameraViewportId id,const CameraSequence& sequence,std::string* error){if(!sequence.validate(error))return false;auto it=viewports_.find(id);if(it==viewports_.end()){if(error)*error="unknown camera viewport";return false;}it->second.sequence=std::make_shared<CameraSequence>(sequence);it->second.sequencePlayer=std::make_unique<CameraSequencePlayer>();it->second.sequencePlayer->set_sequence(it->second.sequence.get());it->second.previousShotId.reset();return true;}
+bool GameCameraRuntime::set_sequence(CameraViewportId id,const CameraSequence& sequence,std::string* error){if(!sequence.validate(error))return false;auto it=viewports_.find(id);if(it==viewports_.end()){if(error)*error="unknown camera viewport";return false;}it->second.sequenceAssetHash=1469598103934665603ULL;for(const unsigned char c:sequence.serialize()){it->second.sequenceAssetHash^=c;it->second.sequenceAssetHash*=1099511628211ULL;}it->second.previousSequenceTime=0;it->second.sequence=std::make_shared<CameraSequence>(sequence);it->second.sequencePlayer=std::make_unique<CameraSequencePlayer>();it->second.sequencePlayer->set_sequence(it->second.sequence.get());it->second.previousShotId.reset();it->second.sequenceSample.reset();return true;}
 bool GameCameraRuntime::play_sequence(CameraViewportId id,bool loop) noexcept{auto it=viewports_.find(id);if(it==viewports_.end()||!it->second.sequencePlayer)return false;it->second.sequencePlayer->play(loop);return true;}
 bool GameCameraRuntime::pause_sequence(CameraViewportId id) noexcept{auto it=viewports_.find(id);if(it==viewports_.end()||!it->second.sequencePlayer)return false;it->second.sequencePlayer->pause();return true;}
-bool GameCameraRuntime::seek_sequence(CameraViewportId id,float t) noexcept{auto it=viewports_.find(id);if(it==viewports_.end()||!it->second.sequencePlayer)return false;it->second.sequencePlayer->seek(t);return true;}
-bool GameCameraRuntime::stop_sequence(CameraViewportId id) noexcept{auto it=viewports_.find(id);if(it==viewports_.end()||!it->second.sequencePlayer)return false;it->second.sequencePlayer->stop();return true;}
+bool GameCameraRuntime::seek_sequence(CameraViewportId id,float t) noexcept{auto it=viewports_.find(id);if(it==viewports_.end()||!it->second.sequencePlayer)return false;it->second.sequencePlayer->seek(t);it->second.sequenceSample.reset();it->second.previousShotId.reset();return true;}
+bool GameCameraRuntime::stop_sequence(CameraViewportId id) noexcept{auto it=viewports_.find(id);if(it==viewports_.end()||!it->second.sequencePlayer)return false;it->second.sequencePlayer->stop();it->second.sequenceSample.reset();it->second.previousShotId.reset();return true;}
 float GameCameraRuntime::sequence_time(CameraViewportId id) const noexcept{auto it=viewports_.find(id);return it==viewports_.end()||!it->second.sequencePlayer?0.0F:it->second.sequencePlayer->time_seconds();}
 bool GameCameraRuntime::sequence_playing(CameraViewportId id) const noexcept{auto it=viewports_.find(id);return it!=viewports_.end()&&it->second.sequencePlayer&&it->second.sequencePlayer->playing();}
-void GameCameraRuntime::clear_sequence(CameraViewportId id) noexcept{auto it=viewports_.find(id);if(it==viewports_.end())return;it->second.sequencePlayer.reset();it->second.sequence.reset();it->second.previousShotId.reset();}
+void GameCameraRuntime::clear_sequence(CameraViewportId id) noexcept{auto it=viewports_.find(id);if(it==viewports_.end())return;it->second.sequencePlayer.reset();it->second.sequence.reset();it->second.sequenceAssetHash=0;it->second.previousShotId.reset();it->second.sequenceSample.reset();it->second.frame.triggeredEvents.clear();}
 void GameCameraRuntime::set_reduced_motion(bool reduced) noexcept {
     reducedMotion_=reduced;
     const bool effective = reduced ||
@@ -606,20 +606,36 @@ bool GameCameraRuntime::restore_state(std::string_view text, std::string* error)
     in>>std::ws;if(!in.eof())return fail("trailing camera runtime state data");
     for(const Entry& entry:entries){const auto& viewport=viewports_.at(entry.id);if(entry.live!=0U&&viewport.director.find_rig(entry.live)==nullptr)return fail("camera runtime state references an unknown rig");if(!entry.state.empty()&&!viewport.director.has_state_binding(entry.state))return fail("camera runtime state references an unknown camera state");}
     if(!set_accessibility(restoredAccessibility,error))return false;
-    for(const Entry& entry:entries){auto& viewport=viewports_.at(entry.id);if(entry.live!=0U){(void)viewport.director.force_live(entry.live,true);viewport.previousLiveRig=entry.live;}if(!entry.state.empty())(void)viewport.director.set_state(entry.state);if(entry.hasSequence){viewport.sequencePlayer->seek(entry.time);if(entry.playing)viewport.sequencePlayer->play(false);else viewport.sequencePlayer->pause();}viewport.cutGeneration=entry.cut;}
+    for(const Entry& entry:entries){auto& viewport=viewports_.at(entry.id);if(entry.live!=0U){(void)viewport.director.force_live(entry.live,true);viewport.previousLiveRig=entry.live;}if(!entry.state.empty())(void)viewport.director.set_state(entry.state);if(entry.hasSequence){viewport.sequencePlayer->seek(entry.time);if(entry.playing)viewport.sequencePlayer->play(false);else viewport.sequencePlayer->pause();}viewport.sequenceSample.reset();viewport.previousShotId.reset();viewport.cutGeneration=entry.cut;}
     return true;
 }
 
 void GameCameraRuntime::update(const GameWorld& world,float elapsedSeconds) {
-    GameWorldCameraCollisionWorld collision(world);
+    tick_sequences(elapsedSeconds);
+    update_presentation(world,elapsedSeconds);
+}
+std::uint64_t GameCameraRuntime::sequence_state_hash() const noexcept {
+    std::uint64_t hash=1469598103934665603ULL;
+    const auto value=[&]<class T>(T v) {
+        const auto* bytes=reinterpret_cast<const unsigned char*>(&v);
+        for(std::size_t i=0;i<sizeof(T);++i) { hash^=bytes[i]; hash*=1099511628211ULL; }
+    };
+    for(const auto& [id,v]:viewports_) {
+        value(id); value(v.desc.enabled); value(v.sequenceAssetHash);
+        if(v.sequencePlayer) value(v.sequencePlayer->state_hash());
+        value(v.previousShotId.value_or(0));
+    }
+    return hash;
+}
+void GameCameraRuntime::tick_sequences(float elapsedSeconds) {
+    if (!(elapsedSeconds>=0.0F) || !std::isfinite(elapsedSeconds)) return;
     for(auto&[_,v]:viewports_) {
         if(!v.desc.enabled) continue;
-        for(const auto&[targetId,objectId]:v.targetBindings) {
-            const auto transform=world.transform(objectId); if(!transform){v.director.remove_target(targetId);continue;}
-            CameraTargetState state{};state.position=transform->position;state.forward=rotate(transform->rotation,{0,0,-1});state.up=rotate(transform->rotation,{0,1,0});state.velocity=world.linear_velocity(objectId).value_or(Float3{});v.director.set_target(targetId,state);
-        }
-        CameraSequenceSample sequenceSample{};
+        if(!v.sequenceSample) v.sequenceSample=std::make_unique<CameraSequenceSample>();
+        auto& sequenceSample=*v.sequenceSample;
+        sequenceSample={};
         if(v.sequencePlayer) {
+            v.previousSequenceTime=v.sequencePlayer->time_seconds();
             sequenceSample=v.sequencePlayer->update(elapsedSeconds);
             if(sequenceSample.shotId!=v.previousShotId) {
                 if(sequenceSample.rigId) {
@@ -628,6 +644,33 @@ void GameCameraRuntime::update(const GameWorld& world,float elapsedSeconds) {
                 }
                 if(!sequenceSample.stateTrigger.empty()) (void)v.director.set_state(sequenceSample.stateTrigger);
                 v.previousShotId=sequenceSample.shotId;
+            }
+        }
+        v.frame.triggeredEvents.clear();
+        for(const auto& event:sequenceSample.triggeredEvents)
+            v.frame.triggeredEvents.push_back({event.id,event.name,event.payload});
+    }
+}
+void GameCameraRuntime::update_presentation(const GameWorld& world,float elapsedSeconds,float interpolationAlpha) {
+
+    GameWorldCameraCollisionWorld collision(world);
+    for(auto&[_,v]:viewports_) {
+        if(!v.desc.enabled) continue;
+        for(const auto&[targetId,objectId]:v.targetBindings) {
+            const auto transform=world.presentation_transform(objectId,interpolationAlpha); if(!transform){v.director.remove_target(targetId);continue;}
+            CameraTargetState state{};state.position=transform->position;state.forward=rotate(transform->rotation,{0,0,-1});state.up=rotate(transform->rotation,{0,1,0});state.velocity=world.linear_velocity(objectId).value_or(Float3{});v.director.set_target(targetId,state);
+        }
+        const CameraSequenceSample emptySample{};
+        auto sequenceSample=v.sequenceSample ? *v.sequenceSample :
+            (v.sequence && v.sequencePlayer ? v.sequence->evaluate(v.sequencePlayer->time_seconds()) : emptySample);
+        if (v.sequenceSample && v.sequencePlayer && !sequenceSample.cut &&
+            v.sequencePlayer->time_seconds() >= v.previousSequenceTime) {
+            const float alpha=std::isfinite(interpolationAlpha) ? std::clamp(interpolationAlpha,0.0F,1.0F) : 1.0F;
+            const auto interpolated=v.sequence->evaluate(v.previousSequenceTime +
+                (v.sequencePlayer->time_seconds()-v.previousSequenceTime)*alpha);
+            if (interpolated.shotId==sequenceSample.shotId) {
+                sequenceSample.pose=interpolated.pose;
+                sequenceSample.postProcess=interpolated.postProcess;
             }
         }
         const float cameraElapsed=elapsedSeconds*std::clamp(accessibility_.motionScale,0.0F,2.0F);

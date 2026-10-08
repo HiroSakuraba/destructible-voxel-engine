@@ -1,4 +1,5 @@
 #pragma once
+#include "dve/audio/audio_clock.hpp"
 
 #include <array>
 #include <atomic>
@@ -810,6 +811,8 @@ public:
 
     // Post from game/editor/MIDI threads. sampleFrame==0 means the next render quantum.
     bool post_midi(MidiMessage message) noexcept;
+    void publish_audio_clock(AudioClockAnchor anchor) noexcept { audioClock_.publish(anchor); }
+    [[nodiscard]] const AudioClock& audio_clock() const noexcept { return audioClock_; }
     bool note_on(std::uint8_t note, float velocity = 1.0F, std::uint8_t channel = 0,
                  std::uint64_t sampleFrame = 0) noexcept;
     bool note_off(std::uint8_t note, float velocity = 0.0F, std::uint8_t channel = 0,
@@ -819,6 +822,8 @@ public:
     bool pitch_bend(std::int16_t centeredValue, std::uint8_t channel = 0,
                     std::uint64_t sampleFrame = 0) noexcept;
     void set_game_clock_tempo(float bpm) noexcept;
+    // Publish on pause, speed, seek or tempo changes. Beat phase is independent of tempo.
+    bool set_game_music_clock(GameMusicClockAnchor anchor) noexcept;
     void set_arpeggiator_fill(bool enabled) noexcept;
     void restart_performance_transport(std::uint64_t sampleFrame = 0) noexcept;
     bool post_midi_clock(std::uint64_t sampleFrame = 0) noexcept;
@@ -877,6 +882,7 @@ public:
     bool poll_midi_output(MidiMessage& message) noexcept;
 
 private:
+    AudioClock audioClock_;
     struct Impl;
     Impl* impl_{};
     std::uint32_t sampleRate_{};
@@ -893,6 +899,8 @@ private:
     // Mirrors (preset_.morphEnabled && hasMorphPresetB_) for the audio thread.
     std::atomic<bool> rtMorphEnabled_{false};
     std::atomic<std::uint64_t> currentFrame_{};
+    std::atomic<std::uint64_t> nextMidiSequence_{1};
+    std::atomic<std::uint64_t> writableFrame_{};
     // Pending conductor attractor config, published by set_preset() and
     // drained by GenerativeConductor::process(). Single-producer (UI thread)
     // / single-consumer (audio thread); the shared_ptr handoff keeps the

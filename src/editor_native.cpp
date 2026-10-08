@@ -471,7 +471,7 @@ bool NativeEditorController::start_asset_scan(bool announce) {
     job->database = assetDatabase_;
     job->baseRevision = assetDatabase_.revision();
     std::string submitError;
-    const auto task = assetScanTasks_.submit("Scan assets", [job](EditorTaskContext&) {
+    const auto task = assetScanTasks_.submit("Scan assets", [job,wake=wakeCallback_](EditorTaskContext&) {
         EditorAssetScanReport report;
         std::string error;
         bool success = false;
@@ -491,6 +491,7 @@ bool NativeEditorController::start_asset_scan(bool announce) {
             job->report = std::move(report);
         }
         job->finished.notify_all();
+        if(wake) wake();
     }, &submitError);
     if (!task) return refresh_asset_database(announce);  // no worker: scan here, as before
     assetScanInFlight_ = std::move(job);
@@ -2390,7 +2391,7 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
     auto snapshot = std::make_shared<EditorDocument>(clone_editor_document(workspace_.document()));
     const auto manifest = autosave_manifest_path();
     std::string submitError;
-    const auto task = autosaveTasks_.submit("Autosave scene", [job, snapshot, manifest](EditorTaskContext&) {
+    const auto task = autosaveTasks_.submit("Autosave scene", [job, snapshot, manifest,wake=wakeCallback_](EditorTaskContext&) {
         bool success = false;
         std::string error;
         try {
@@ -2411,11 +2412,12 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
         } catch (const std::exception& exception) {
             error = exception.what();
         }
-        std::lock_guard lock(job->mutex);
-        job->done = true;
-        job->success = success;
-        job->error = std::move(error);
-        job->manifest = manifest;
+        {
+            std::lock_guard lock(job->mutex);
+            job->done = true; job->success = success;
+            job->error = std::move(error); job->manifest = manifest;
+        }
+        if(wake) wake();
     }, &submitError);
     if (!task) {
         ++autosaveStatus_.failed;
@@ -2459,9 +2461,8 @@ void NativeEditorController::update(float elapsedSeconds) {
     }
     if (spriteLevelPlaying_ && spriteLevel_ && spriteLevelPresentation_) {
         constexpr float fixedStep = 1.0F / 60.0F;
-        spriteLevelAccumulator_ += std::clamp(elapsedSeconds, 0.0F, 0.25F);
-        unsigned steps{};
-        while (spriteLevelAccumulator_ >= fixedStep && steps < 8U) {
+        const auto steps = spriteLevelClock_.advance(elapsedSeconds);
+        for (std::uint32_t step = 0; step < steps; ++step) {
             spriteLevel_->step(spriteLevelInput_, fixedStep);
             spriteLevelPresentation_->sync(*spriteLevel_, fixedStep);
             spriteLevelInput_.jumpPressed = false;
@@ -2469,10 +2470,8 @@ void NativeEditorController::update(float elapsedSeconds) {
             spriteLevelInput_.savePressed = false;
             spriteLevelInput_.loadPressed = false;
             spriteLevelInput_.restartPressed = false;
-            spriteLevelAccumulator_ -= fixedStep;
-            ++steps;
         }
-        if (steps == 8U) spriteLevelAccumulator_ = std::min(spriteLevelAccumulator_, fixedStep);
+
     }
     if (spriteAnimationGraphOpen_ && spriteLevel_) {
         const auto& state = spriteLevel_->state();
@@ -2604,10 +2603,18 @@ void NativeEditorController::update(float elapsedSeconds) {
 }
 
 bool NativeEditorController::animating() const noexcept {
-    return playSession_.active() || spriteLevelPlaying_ || (spriteRig2DOpen_ && spriteRig2DPreviewPlaying_) ||
+    return playSession_.state()==EditorPlaySessionState::Running || spriteLevelPlaying_ || (spriteRig2DOpen_ && spriteRig2DPreviewPlaying_) ||
            spriteAuthoringPanel_.open() || cameraDirector_.telemetry().blendWeight < 1.0F ||
            !heldShortcutGestures_.empty() || audioMixer_.synthesizer().meters().activeVoices > 0U ||
            thumbnailBacklog_;
+}
+
+double NativeEditorController::idle_update_seconds() const noexcept {
+    // Hotplug discovery is polling-based. Everything with a completion callback wakes
+    // immediately; this deadline keeps device discovery and autosave time progressing.
+    double seconds=1.0;
+    if(status_.secondsRemaining>0.0F) seconds=std::min(seconds,double(status_.secondsRemaining));
+    return std::max(0.001,seconds);
 }
 
 void NativeEditorController::set_status(std::string text, bool error, float seconds) {
@@ -4818,7 +4825,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "sprite.play_level") {
         if (spriteLevelPlaying_) {
             spriteLevelPlaying_ = false;
-            spriteLevelAccumulator_ = 0.0F;
+            spriteLevelClock_ = {};
             spriteLevelPresentation_.reset();
             spriteLevel_.reset();
             spriteLevelInput_ = {};
@@ -4841,7 +4848,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         spriteLevel_ = std::move(level);
         spriteLevelPresentation_ = std::move(presentation);
         spriteLevelInput_ = {};
-        spriteLevelAccumulator_ = 0.0F;
+        spriteLevelClock_ = {};
         spriteLevelPlaying_ = true;
         close_top_level_menu();
         close_context_menu();
@@ -6512,15 +6519,17 @@ const EditorSelectionDiagnostics& NativeEditorController::selection_diagnostics(
 }
 
 const std::vector<EditorVoxelDrawItem>& NativeEditorController::draw_items() const {
+    const auto poses = playSession_.presentation_transforms();
     return drawListCache_.get(workspace_.document(), materials_, camera_, layout_.viewport, viewportSettings_,
-                              workspace_.selected_objects(), editor_scene_render_fingerprint(workspace_.document()));
+                              workspace_.selected_objects(), editor_scene_render_fingerprint(workspace_.document()), &poses);
 }
 
 const std::vector<EditorVoxelDrawItem>& NativeEditorController::camera_preview_draw_items(
     const EditorCamera& previewCamera, UiRect previewRect, const EditorViewportSettings& previewSettings) const {
+    const auto poses = playSession_.presentation_transforms();
     return previewDrawListCache_.get(workspace_.document(), materials_, previewCamera, previewRect, previewSettings,
                                      workspace_.selected_objects(),
-                                     editor_scene_render_fingerprint(workspace_.document()));
+                                     editor_scene_render_fingerprint(workspace_.document()), &poses);
 }
 
 std::vector<EditorText3DDrawItem> NativeEditorController::text3d_draw_items() const {

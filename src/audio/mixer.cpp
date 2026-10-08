@@ -413,13 +413,15 @@ struct AudioMixer::Impl {
         snapshotFramesRemaining = snapshotFramesTotal - nextProgressed;
     }
 
-    void classify_voices() noexcept {
+    // Picks which started voices are mixed (physical) at absolute frame `at`. Voices that have
+    // not started by then are left out and picked when the chunk reaches their start frame.
+    void classify_voices(std::uint64_t at) noexcept {
         struct Candidate { std::size_t index{}; float score{}; };
         std::array<Candidate, kMaxLogicalSampleVoices> candidates{};
         std::size_t count{};
         for (std::size_t i = 0; i < voices.size(); ++i) {
             auto& voice = voices[i];
-            if (!voice.active || frame < voice.startFrame) { voice.physical = false; continue; }
+            if (!voice.active || at < voice.startFrame) { voice.physical = false; continue; }
             const float dx = voice.emitter.position.x - listener.position.x;
             const float dy = voice.emitter.position.y - listener.position.y;
             const float dz = voice.emitter.position.z - listener.position.z;
@@ -456,7 +458,6 @@ struct AudioMixer::Impl {
             return userGainStart[bus] + userGainStep[bus] *
                 static_cast<float>(std::min<std::uint64_t>(frame + 1U, userGainRampFrames));
         };
-        classify_voices();
         for (auto& bus : busScratch) std::fill_n(bus.data(), frames * 2U, 0.0F);
 
         std::fill_n(synthScratch.data(), frames * 2U, 0.0F);
@@ -475,54 +476,81 @@ struct AudioMixer::Impl {
         }
 
         const auto activeSpatializer = spatializer.load(std::memory_order_acquire);
-        for (auto& voice : voices) {
-            if (!voice.active || frame + frames <= voice.startFrame) continue;
-            const SampleAsset* sample = asset(voice.sample);
-            if (sample == nullptr || sample->frame_count() == 0U) { voice.active = false; continue; }
-            const SpatializationResult spatial = voice.spatialized && activeSpatializer
-                ? activeSpatializer->spatialize(listener, voice.emitter)
-                : SpatializationResult{};
-            const double increment = static_cast<double>(voice.pitch * spatial.dopplerRatio) *
-                                     static_cast<double>(sample->sampleRate) / static_cast<double>(sampleRate);
-            auto& bus = busScratch[audio_bus_index(voice.bus)];
-            auto& reverbBus = busScratch[audio_bus_index(AudioBusId::Reverb)];
-            for (std::size_t f = 0; f < frames; ++f) {
-                const std::uint64_t absoluteFrame = frame + f;
-                if (absoluteFrame < voice.startFrame) continue;
-                const std::size_t frameCount = sample->frame_count();
-                if (voice.cursor >= static_cast<double>(frameCount)) {
-                    if (voice.loop) voice.cursor = std::fmod(voice.cursor, static_cast<double>(frameCount));
-                    else { voice.active = false; break; }
+        // Voices are (re)classified at the chunk start and again at every frame inside the
+        // chunk where a scheduled voice starts. Classifying only at the chunk start left a voice
+        // that starts mid-chunk virtual for the whole chunk while its cursor still advanced, so
+        // its first samples were skipped and a short sound could be lost entirely.
+        std::array<std::size_t, kMaxLogicalSampleVoices + 2U> spanStarts{};
+        std::size_t spanCount{};
+        spanStarts[spanCount++] = 0U;
+        for (const auto& voice : voices)
+            if (voice.active && voice.startFrame > frame && voice.startFrame < frame + frames)
+                spanStarts[spanCount++] = static_cast<std::size_t>(voice.startFrame - frame);
+        std::sort(spanStarts.begin(), spanStarts.begin() + static_cast<std::ptrdiff_t>(spanCount));
+        spanCount = static_cast<std::size_t>(std::unique(spanStarts.begin(),
+            spanStarts.begin() + static_cast<std::ptrdiff_t>(spanCount)) - spanStarts.begin());
+        spanStarts[spanCount] = frames;
+        std::array<SpatializationResult, kMaxLogicalSampleVoices> spatialCache{};
+        std::array<bool, kMaxLogicalSampleVoices> spatialReady{};
+        for (std::size_t span = 0; span < spanCount; ++span) {
+            const std::size_t spanBegin = spanStarts[span];
+            const std::size_t spanEnd = spanStarts[span + 1U];
+            classify_voices(frame + spanBegin);
+            for (auto& voice : voices) {
+                if (!voice.active || frame + spanEnd <= voice.startFrame) continue;
+                const SampleAsset* sample = asset(voice.sample);
+                if (sample == nullptr || sample->frame_count() == 0U) { voice.active = false; continue; }
+                // Spatialize once per voice per chunk, however many spans the chunk has.
+                const std::size_t voiceIndex = static_cast<std::size_t>(&voice - voices.data());
+                if (!spatialReady[voiceIndex]) {
+                    spatialCache[voiceIndex] = voice.spatialized && activeSpatializer
+                        ? activeSpatializer->spatialize(listener, voice.emitter)
+                        : SpatializationResult{};
+                    spatialReady[voiceIndex] = true;
                 }
-                const std::size_t i0 = std::min<std::size_t>(static_cast<std::size_t>(voice.cursor), frameCount - 1U);
-                const std::size_t i1 = voice.loop ? (i0 + 1U) % frameCount : std::min(i0 + 1U, frameCount - 1U);
-                const float fraction = static_cast<float>(voice.cursor - static_cast<double>(i0));
-                auto read = [&](std::size_t frameIndex, std::size_t channel) {
-                    if (sample->channels == 1U) return sample->samples[frameIndex];
-                    return sample->samples[frameIndex * 2U + channel];
-                };
-                float left = read(i0, 0U) + (read(i1, 0U) - read(i0, 0U)) * fraction;
-                float right = read(i0, sample->channels == 1U ? 0U : 1U) +
-                              (read(i1, sample->channels == 1U ? 0U : 1U) - read(i0, sample->channels == 1U ? 0U : 1U)) * fraction;
-                if (voice.stopping) {
-                    voice.fadeGain = std::max(0.0F, voice.fadeGain - voice.fadeStep);
-                    if (voice.fadeGain <= 0.0F) { voice.active = false; break; }
-                }
-                const float gain = voice.gain * voice.fadeGain * spatial.distanceGain;
-                if (voice.physical) {
-                    if (voice.spatialized) {
-                        const float mono = 0.5F * (left + right);
-                        left = mono * spatial.leftGain;
-                        right = mono * spatial.rightGain;
+                const SpatializationResult& spatial = spatialCache[voiceIndex];
+                const double increment = static_cast<double>(voice.pitch * spatial.dopplerRatio) *
+                                         static_cast<double>(sample->sampleRate) / static_cast<double>(sampleRate);
+                auto& bus = busScratch[audio_bus_index(voice.bus)];
+                auto& reverbBus = busScratch[audio_bus_index(AudioBusId::Reverb)];
+                for (std::size_t f = spanBegin; f < spanEnd; ++f) {
+                    const std::uint64_t absoluteFrame = frame + f;
+                    if (absoluteFrame < voice.startFrame) continue;
+                    const std::size_t frameCount = sample->frame_count();
+                    if (voice.cursor >= static_cast<double>(frameCount)) {
+                        if (voice.loop) voice.cursor = std::fmod(voice.cursor, static_cast<double>(frameCount));
+                        else { voice.active = false; break; }
                     }
-                    left *= gain; right *= gain;
-                    bus[f * 2U] += left;
-                    bus[f * 2U + 1U] += right;
-                    const float send = clampf(spatial.reverbSend + renderBuses[audio_bus_index(voice.bus)].reverbSend, 0.0F, 1.0F);
-                    reverbBus[f * 2U] += left * send;
-                    reverbBus[f * 2U + 1U] += right * send;
+                    const std::size_t i0 = std::min<std::size_t>(static_cast<std::size_t>(voice.cursor), frameCount - 1U);
+                    const std::size_t i1 = voice.loop ? (i0 + 1U) % frameCount : std::min(i0 + 1U, frameCount - 1U);
+                    const float fraction = static_cast<float>(voice.cursor - static_cast<double>(i0));
+                    auto read = [&](std::size_t frameIndex, std::size_t channel) {
+                        if (sample->channels == 1U) return sample->samples[frameIndex];
+                        return sample->samples[frameIndex * 2U + channel];
+                    };
+                    float left = read(i0, 0U) + (read(i1, 0U) - read(i0, 0U)) * fraction;
+                    float right = read(i0, sample->channels == 1U ? 0U : 1U) +
+                                  (read(i1, sample->channels == 1U ? 0U : 1U) - read(i0, sample->channels == 1U ? 0U : 1U)) * fraction;
+                    if (voice.stopping) {
+                        voice.fadeGain = std::max(0.0F, voice.fadeGain - voice.fadeStep);
+                        if (voice.fadeGain <= 0.0F) { voice.active = false; break; }
+                    }
+                    const float gain = voice.gain * voice.fadeGain * spatial.distanceGain;
+                    if (voice.physical) {
+                        if (voice.spatialized) {
+                            const float mono = 0.5F * (left + right);
+                            left = mono * spatial.leftGain;
+                            right = mono * spatial.rightGain;
+                        }
+                        left *= gain; right *= gain;
+                        bus[f * 2U] += left;
+                        bus[f * 2U + 1U] += right;
+                        const float send = clampf(spatial.reverbSend + renderBuses[audio_bus_index(voice.bus)].reverbSend, 0.0F, 1.0F);
+                        reverbBus[f * 2U] += left * send;
+                        reverbBus[f * 2U + 1U] += right * send;
+                    }
+                    voice.cursor += increment;
                 }
-                voice.cursor += increment;
             }
         }
 

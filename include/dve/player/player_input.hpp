@@ -13,7 +13,8 @@
 //   mouse:<button>[/<value>]    left middle right x1 x2
 // A binding is an *axis* if any source carries an explicit /value or is a gamepad axis:
 // its value is the clamped [-1, 1] sum of held keys/buttons' values and axis*scale (with a
-// 0.15 dead zone). Otherwise it is an *action*, pressed while any source is held.
+// 0.15 dead zone). Otherwise it is an *action*, pressed while any source is held, and for
+// the tick after a press even if the source was released before that tick ran.
 // Every frame the player pushes the state into GameWorld::set_axis / set_action_pressed,
 // which scripts read with world.get_axis / world.is_action_pressed.
 #include <map>
@@ -71,6 +72,11 @@ public:
     // Tracks key / gamepad / mouse state. Key repeats are ignored; focus loss releases all.
     void handle_event(const platform::PlatformEvent& event);
     void release_all();
+    // Ends the input window for one simulation tick. Actions report a press that happened
+    // since the previous end_tick() even if it was already released, so a tap shorter than a
+    // tick (common at high refresh rates, where most frames run no tick) is not lost. Call it
+    // after the tick has read the input (PlayerApp::tick does). Axes report held state only.
+    void end_tick();
 
     [[nodiscard]] float axis(std::string_view name) const;
     [[nodiscard]] bool action(std::string_view name) const;
@@ -87,6 +93,10 @@ private:
     std::set<platform::GamepadButton> gamepadButtons_;
     std::map<platform::GamepadAxis, float> gamepadAxes_;
     std::set<platform::PointerButton> mouseButtons_;
+    // Pressed since the last end_tick(), whether or not still held.
+    std::set<std::string> pressedKeys_;
+    std::set<platform::GamepadButton> pressedGamepadButtons_;
+    std::set<platform::PointerButton> pressedMouseButtons_;
 };
 
 } // namespace dve::player

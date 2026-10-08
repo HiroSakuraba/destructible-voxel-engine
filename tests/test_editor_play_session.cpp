@@ -97,6 +97,34 @@ void test_accept_runtime_changes() {
             "accept_runtime_changes restored instead of retaining runtime state");
 }
 
+// A tap shorter than a tick: the key goes down and up between two fixed steps (at 144 Hz most
+// editor frames run no step). The next step must still see the action pressed, once.
+void test_short_press_reaches_next_step() {
+    EditorWorkspace workspace(make_session_document());
+    EditorMaterialLibrary materials = EditorMaterialLibrary::make_default();
+    EditorPlaySession session;
+    EditorPlaySessionConfig config;
+    config.fixedDeltaSeconds = 1.0F / 60.0F;
+    std::string error;
+    require(session.start(workspace, materials, EditorMode::Simulate, config, {}, &error), error.c_str());
+    require(session.update(workspace, 1.0F / 144.0F, &error), error.c_str());  // no step yet
+    session.set_action_pressed("jump", true);
+    require(session.update(workspace, 1.0F / 144.0F, &error), error.c_str());  // still no step
+    session.set_action_pressed("jump", false);
+    require(session.telemetry().fixedTickCount == 0U, "precondition: no fixed step ran during the tap");
+    require(session.update(workspace, 1.0F / 144.0F, &error), error.c_str());  // first step
+    require(session.telemetry().fixedTickCount == 1U, "precondition: one fixed step should have run");
+    require(session.runtime_action_pressed("jump"), "a tap released before the next step was lost");
+    require(session.update(workspace, 1.0F / 60.0F, &error), error.c_str());
+    require(!session.runtime_action_pressed("jump"), "a tap stayed pressed for more than one step");
+    // A held key stays pressed across steps.
+    session.set_action_pressed("jump", true);
+    require(session.update(workspace, 1.0F / 60.0F, &error), error.c_str());
+    require(session.update(workspace, 1.0F / 60.0F, &error), error.c_str());
+    require(session.runtime_action_pressed("jump"), "a held action was not pressed");
+    require(session.stop(workspace, &error), error.c_str());
+}
+
 void test_bounded_catch_up() {
     EditorWorkspace workspace(make_session_document());
     EditorMaterialLibrary materials = EditorMaterialLibrary::make_default();
@@ -278,6 +306,7 @@ int main() {
         test_fixed_step_pause_and_restore();
         test_accept_runtime_changes();
         test_bounded_catch_up();
+        test_short_press_reaches_next_step();
 #ifdef DVE_HAVE_LUA
         const auto root = std::filesystem::temp_directory_path() / "dve_editor_play_session_lua";
         std::filesystem::remove_all(root);

@@ -177,10 +177,24 @@ void test_input_bindings() {
     CHECK(input.axis("move_x") == 1.0F); // clamped
     input.handle_event(key(EventType::KeyUp, "d"));
 
+    input.end_tick();
     CHECK(!input.action("jump"));
     input.handle_event(key(EventType::KeyDown, "Space"));
     CHECK(input.action("jump")); // key names are case-insensitive
     input.handle_event(key(EventType::KeyUp, "space"));
+    // Released before any tick ran: the press still reaches the next tick, then clears.
+    CHECK(input.action("jump"));
+    input.end_tick();
+    CHECK(!input.action("jump"));
+    platform::PlatformEvent click;
+    click.type = EventType::PointerButtonDown;
+    click.button = platform::PointerButton::Primary;
+    input.handle_event(click);
+    click.type = EventType::PointerButtonUp;
+    input.handle_event(click);
+    CHECK(input.action("jump")); // mouse taps latch too
+    input.end_tick();
+    CHECK(!input.action("jump"));
     platform::PlatformEvent button;
     button.type = EventType::GamepadButtonDown;
     button.gamepadButton = platform::GamepadButton::South;

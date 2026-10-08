@@ -114,10 +114,16 @@ BrickApplyResult VoxelObject::set_voxel(Int3 globalVoxel, MaterialId material) {
 
 void VoxelObject::fill_brick(BrickKey key, MaterialId material) {
     touch();
-    Brick replacement = Brick::uniform_solid(*pools_, material);
     auto it = bricks_.find(key);
-    if (it == bricks_.end()) bricks_.emplace(key, std::move(replacement));
-    else it->second = std::move(replacement);
+    if (it == bricks_.end()) {
+        bricks_.emplace(key, Brick::uniform_solid(*pools_, material));
+    } else {
+        std::array<MaterialId, kBrickVoxelCount> dense;
+        dense.fill(material);
+        // fill_brick is a local edit; only replace_brick takes an authoritative
+        // snapshot whose generation may legitimately move backward.
+        it->second.replace_materials(dense, it->second.generation() + 1U);
+    }
 }
 
 AppliedBrickEdit VoxelObject::apply(BrickKey key, const BrickMutation& mutation) {

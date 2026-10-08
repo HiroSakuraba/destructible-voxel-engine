@@ -102,6 +102,8 @@ public:
     [[nodiscard]] PackedBrickmapUpdateStats update(
         const VoxelObject& object,
         std::span<const AppliedBrickEdit> edits);
+    // External uploads must come from one source whose generations only increase.
+    // For network repair with a lower authoritative generation, use update(object, edits).
     [[nodiscard]] PackedBrickmapUpdateStats publish_uploads(
         std::span<const GpuBrickUpload> uploads);
 
@@ -141,6 +143,8 @@ private:
     void rebuild_index_grid();
     [[nodiscard]] std::uint32_t find_slot_linear(BrickKey key) const noexcept;
     void write_upload(std::uint32_t slot, const GpuBrickUpload& upload, PackedBrickmapUpdateStats& stats);
+    [[nodiscard]] PackedBrickmapUpdateStats publish_uploads_impl(
+        std::span<const GpuBrickUpload> uploads, bool fromCurrentObject);
 };
 
 struct BrickmapRayTraceStats {

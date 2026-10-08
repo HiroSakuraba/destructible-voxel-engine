@@ -525,6 +525,55 @@ void test_fragmentation_of_moved_dynamic_object() {
     }
 }
 
+void test_carved_holes_rebuild_collision() {
+    for (const bool dynamic : {false, true}) {
+        GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+        auto voxels = std::make_unique<VoxelObject>(100);
+        const int depth = dynamic ? 8 : 2;
+        for (int x = 0; x < 8; ++x)
+            for (int y = 0; y < 8; ++y)
+                for (int z = 0; z < depth; ++z) voxels->set_voxel({x, y, z}, 1);
+        GameObjectDesc desc;
+        desc.name = "Carved slab";
+        desc.voxelSizeMeters = 1.0F;
+        desc.dynamic = dynamic;
+        desc.voxels = std::move(voxels);
+        const GameObjectId id = world.create_object(std::move(desc));
+        CHECK(id != kInvalidGameObjectId);
+        const Float3 origin = dynamic ? Float3{0.5F, 0.5F, -5.0F} : Float3{4.0F, 4.0F, -5.0F};
+        const Float3 center = dynamic ? Float3{0, 0, 0} : Float3{4, 4, 1};
+        const float radius = dynamic ? 2.5F : 1.5F;
+        const float distance = dynamic ? 6.0F : 10.0F;
+        CHECK(!world.physics().ray_cast_all(origin, {0, 0, 1}, distance).empty());
+        CHECK(world.damage_sphere(id, center, radius).value_or(0) > 0);
+        CHECK(!world.raycast(origin, {0, 0, 1}, distance));
+        CHECK(world.physics().ray_cast_all(origin, {0, 0, 1}, distance).empty());
+    }
+}
+
+void test_fragment_cap_keeps_smallest_attached() {
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    auto voxels = make_solid_cube(101, 4, 1);
+    for (int i = 1; i <= 33; ++i) {
+        voxels->set_voxel({i * 16, 0, 0}, 1);
+        if (i != 33) voxels->set_voxel({i * 16 + 1, 0, 0}, 1);
+    }
+    GameObjectDesc desc;
+    desc.name = "Many loose pieces";
+    desc.dynamic = false;
+    desc.voxelSizeMeters = 1.0F;
+    desc.voxels = std::move(voxels);
+    const GameObjectId id = world.create_object(std::move(desc));
+    CHECK(id != kInvalidGameObjectId);
+    std::size_t fragments = 0;
+    world.on_damage([&](const GameDamageEvent& event) { fragments = event.newFragmentIds.size(); });
+    CHECK(world.damage_sphere(id, {1.5F, 1.5F, 1.5F}, 0.6F).value_or(0) == 1);
+    CHECK(fragments == 32);
+    CHECK(world.voxel_count(id).value_or(0) == 64);
+    const auto smallest = world.raycast({528.5F, 0.5F, -5}, {0, 0, 1}, 10.0F);
+    CHECK(smallest && smallest->objectId == id);
+}
+
 int main() {
     test_marker_objects();
     test_static_object_is_immovable();
@@ -533,6 +582,8 @@ int main() {
     test_fragmentation_on_disconnecting_damage();
     test_debris_limit_recycles_oldest();
     test_fragmentation_of_moved_dynamic_object();
+    test_carved_holes_rebuild_collision();
+    test_fragment_cap_keeps_smallest_attached();
     test_spawn_asset_uses_real_per_material_density();
     test_raycast_unit_correctness();
     test_timers();

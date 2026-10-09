@@ -59,4 +59,9 @@ SpatializationResult AnalyticSpatializer::spatialize(const AudioListenerState& l
     return result;
 }
 
+SpatializationResult PassThroughSpatializer::spatialize(const AudioListenerState&,
+                                                         const AudioEmitterState&) const noexcept {
+    return {};
+}
+
 } // namespace dve::audio

@@ -560,7 +560,7 @@ namespace {
 // dve_settings_applied_tests fails if the list and the code disagree.
 constexpr std::string_view kNotYetApplied[] = {
     "accessibility.color_vision", "accessibility.subtitles",
-    "audio.hrtf", "audio.loudness_normalization", "audio.spatializer",
+    "audio.hrtf", "audio.loudness_normalization",
     "build.configuration", "build.deterministic_oracles", "build.headless",
     "build.sanitizers", "build.target", "build.verify_dependencies", "camera.accessibility_disable_grain",
     "camera.accessibility_limit_fisheye", "camera.accessibility_reduce_blur", "camera.accessibility_reduce_flare", "camera.constant_speed_dolly",

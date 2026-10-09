@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <memory>
+#include "dve/audio/spatializer.hpp"
+#include "dve/audio/steam_audio.hpp"
 #include "dve/editor_settings.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/camera_system.hpp"
@@ -119,6 +122,38 @@ inline render::MaterialSamplerPolicy material_sampler_policy(const EditorSetting
 inline std::size_t debris_limit(const EditorSettingsRegistry& registry) {
     const auto value = RuntimeSettingsReader(registry).get<std::int64_t>("voxel.debris_limit");
     return value > 0 ? static_cast<std::size_t>(value) : 0U;
+}
+
+// Resolves audio.spatializer: which spatializer the editor's audio mixer runs.
+// native is the analytic spatializer the mixer already defaults to; none is a
+// full pass-through (centered, unity distance gain -- attenuation is part of
+// the spatializer result, so it goes too); steam_audio selects the Steam Audio
+// contract spatializer. The native Steam Audio backend lives in the optional
+// SDK target, which the editor does not link, so make_audio_spatializer hands
+// it no backend and it serves its documented analytic fallback while counting
+// fallback queries; callers surface that fallback to the user.
+enum class AudioSpatializerMode : std::uint8_t { Native, SteamAudio, PassThrough };
+
+inline AudioSpatializerMode audio_spatializer_mode(const EditorSettingsRegistry& registry) {
+    const auto value = RuntimeSettingsReader(registry).get<std::string>("audio.spatializer");
+    if (value == "steam_audio") return AudioSpatializerMode::SteamAudio;
+    if (value == "none") return AudioSpatializerMode::PassThrough;
+    return AudioSpatializerMode::Native;
+}
+
+// The spatializer instance for the resolved mode. Native returns nullptr:
+// AudioMixer::set_spatializer(nullptr) resets to the analytic default.
+inline std::shared_ptr<const audio::IAudioSpatializer> make_audio_spatializer(
+    const EditorSettingsRegistry& registry) {
+    switch (audio_spatializer_mode(registry)) {
+        case AudioSpatializerMode::SteamAudio:
+            return std::make_shared<audio::SteamAudioSpatializer>(nullptr);
+        case AudioSpatializerMode::PassThrough:
+            return std::make_shared<audio::PassThroughSpatializer>();
+        case AudioSpatializerMode::Native:
+            return nullptr;
+    }
+    return nullptr;
 }
 
 inline EditorPlaySessionConfig play_session_settings(const EditorSettingsRegistry& registry) {

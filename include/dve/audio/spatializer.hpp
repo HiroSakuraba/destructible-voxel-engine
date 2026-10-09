@@ -55,4 +55,14 @@ public:
                                                    const AudioEmitterState& emitter) const noexcept override;
 };
 
+// No spatialization at all (audio.spatializer = none): every emitter keeps the
+// SpatializationResult defaults -- centered equal-power gains, unity distance gain,
+// no doppler, no low-pass, no propagation delay, no reverb send. Distance attenuation
+// is part of the spatializer's result, so it is dropped along with panning.
+class PassThroughSpatializer final : public IAudioSpatializer {
+public:
+    [[nodiscard]] SpatializationResult spatialize(const AudioListenerState& listener,
+                                                   const AudioEmitterState& emitter) const noexcept override;
+};
+
 } // namespace dve::audio

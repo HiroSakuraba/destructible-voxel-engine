@@ -1662,6 +1662,16 @@ bool NativeEditorController::apply_audio_settings_to_runtime() noexcept {
     audioMixer_.set_output_policy(s.get<bool>("accessibility.mono_audio"),
         range == "night" ? audio::AudioDynamicRange::Night :
         range == "medium" ? audio::AudioDynamicRange::Medium : audio::AudioDynamicRange::Full);
+    const auto spatializerMode = editor::audio_spatializer_mode(workspace_.settings());
+    if (spatializerMode != appliedSpatializerMode_) {
+        audioMixer_.set_spatializer(editor::make_audio_spatializer(workspace_.settings()));
+        appliedSpatializerMode_ = spatializerMode;
+        if (spatializerMode == editor::AudioSpatializerMode::SteamAudio) {
+            workspace_.log().add(EditorLogLevel::Warning,
+                "audio.spatializer is set to Steam Audio, but no native Steam Audio "
+                "backend is available in this build; the analytic fallback is active.");
+        }
+    }
     return true;
 }
 

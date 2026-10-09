@@ -40,6 +40,7 @@
 #include "dve/editor_audio_event.hpp"
 #include "dve/editor_materials.hpp"
 #include "dve/editor_play_session.hpp"
+#include "dve/editor_runtime_settings.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -793,6 +794,7 @@ private:
     std::uint64_t appliedSettingsRevision_{};
     bool systemThemeLight_{};
     bool audioSettingsPending_{};
+    editor::AudioSpatializerMode appliedSpatializerMode_{editor::AudioSpatializerMode::Native};
     std::array<float, 2> gamepadMove_{};
     std::array<float, 2> gamepadLook_{};
     EditorSynthPanel synthPanel_{};

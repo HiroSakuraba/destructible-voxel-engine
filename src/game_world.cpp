@@ -1824,15 +1824,21 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
     // would teleport the pieces back to the spawn point.
     if (object.hasBody && object.dynamic) object.authoredTransform = resolve_transform(object);
 
+    std::vector<SplitPlan> plans;
+    std::vector<std::uint64_t> detachedIds;
     for (const std::size_t componentIndex : detachedComponents) {
         const auto plan = build_split_plan(*object.voxels, snapshot, componentIndex);
         if (!plan) continue; // stale brick generation or similar transient mismatch: skip defensively
-        // commit_split_plan removes these voxels from object.voxels in place and returns a
+        plans.push_back(*plan);
+        detachedIds.push_back(allocate_id());
+    }
+    auto detachedPieces = commit_split_plans(*object.voxels, plans, detachedIds);
+    for (auto& detached : detachedPieces) {
+        if (!detached) continue;
+        // The batch commit removes these voxels from object.voxels in place and returns a
         // fresh VoxelObject containing just them, still in the *same* voxel coordinate space
         // (not re-based to a local origin), so the fragment can keep the parent's exact
         // authoredTransform unchanged and still be geometrically correct.
-        auto detached = commit_split_plan(*object.voxels, *plan, allocate_id());
-        if (!detached) continue;
 
         // Debris cap: free a slot before building the fragment body. The
         // detached voxels are already carved out of the parent, so when no

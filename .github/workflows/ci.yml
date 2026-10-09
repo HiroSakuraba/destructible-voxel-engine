@@ -247,8 +247,9 @@ jobs:
             dve-vcpkg-archives-${{ env.ImageOS }}-
       - name: Install libpng/libjpeg-turbo with the runner's vcpkg (classic mode)
         run: |
+          # --vcpkg-root: the developer environment points VCPKG_ROOT at Visual Studio's own vcpkg.
           mkdir -p .cache/vcpkg-archives
-          "$DVE_VCPKG_ROOT/vcpkg" install libpng:x64-windows libjpeg-turbo:x64-windows
+          "$DVE_VCPKG_ROOT/vcpkg" install --vcpkg-root "$DVE_VCPKG_ROOT" libpng:x64-windows libjpeg-turbo:x64-windows
       - name: Save vcpkg binary archives
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -260,11 +261,13 @@ jobs:
         id: cache
         uses: actions/cache/restore@v4
         with:
-          path: .cache/fetchcontent/${{ env.PRESET }}
-          key: dve-${{ env.PRESET }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # "-ninja": the FetchContent sub-builds remember their generator, so the folder (and the
+          # cache entries) of the former Visual Studio builds cannot be reused.
+          path: .cache/fetchcontent/${{ env.PRESET }}-ninja
+          key: dve-${{ env.PRESET }}-ninja-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            dve-${{ env.PRESET }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-
-            dve-${{ env.PRESET }}-
+            dve-${{ env.PRESET }}-ninja-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-
+            dve-${{ env.PRESET }}-ninja-
       - name: Configure
         run: |
           ninja --version
@@ -277,7 +280,7 @@ jobs:
             -DGENERATE_DEBUG_SYMBOLS=OFF \
             -DVCPKG_TARGET_TRIPLET=x64-windows \
             "-DCMAKE_TOOLCHAIN_FILE=$DVE_VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-            "-DFETCHCONTENT_BASE_DIR=$DVE_WORKSPACE/.cache/fetchcontent/$PRESET" \
+            "-DFETCHCONTENT_BASE_DIR=$DVE_WORKSPACE/.cache/fetchcontent/$PRESET-ninja" \
             2>&1 | tee configure.log
           exit ${PIPESTATUS[0]}
       - name: Build
@@ -294,7 +297,7 @@ jobs:
         if: always() && steps.cache.outcome == 'success'
         uses: actions/cache/save@v4
         with:
-          path: .cache/fetchcontent/${{ env.PRESET }}
+          path: .cache/fetchcontent/${{ env.PRESET }}-ninja
           key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: CTest (full suite; skipped tests are listed with their reason)
         env:

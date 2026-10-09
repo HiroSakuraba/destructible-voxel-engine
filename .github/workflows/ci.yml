@@ -41,7 +41,7 @@ jobs:
   ctest:
     name: ctest (${{ matrix.preset }})
     runs-on: ubuntu-latest
-    container: debian:trixie
+    container: public.ecr.aws/debian/debian:trixie
     # linux-gcc-asan builds and runs the same suite under AddressSanitizer and UBSan, which is
     # roughly two to three times slower than a plain Release run.
     timeout-minutes: ${{ matrix.preset == 'linux-gcc-asan' && 300 || 180 }}
@@ -140,7 +140,7 @@ jobs:
 
   packaging:
     runs-on: ubuntu-latest
-    container: debian:trixie
+    container: public.ecr.aws/debian/debian:trixie
     timeout-minutes: 150
     env:
       PRESET: linux-gcc-player-release

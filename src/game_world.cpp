@@ -1685,15 +1685,29 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
         return true;
     }
     // Same debris policy as damage_sphere: retire the oldest debris (never the object being
-    // split) to make room. Retirement cannot be undone, so check it is possible before
-    // creating bodies, and retire only after every body exists.
+    // split) to make room, and drop any new fragments that still do not fit — the carve
+    // itself always lands, exactly as on the synchronous path. (Wholesale rejection here
+    // made queued hits silently do nothing at a zero cap, or when splitting a debris body
+    // at a full cap, while the same synchronous hit carved and dropped the fragment.)
     const std::size_t newDebris = components.size() - 1U;
     const std::size_t currentDebris = debris_count();
     const std::size_t retirable = currentDebris - (parent.debris ? 1U : 0U);
-    if (currentDebris - retirable + newDebris > debrisLimit_) return false;
+    const std::size_t floorDebris = currentDebris - retirable;
+    const std::size_t allowance = debrisLimit_ > floorDebris ? debrisLimit_ - floorDebris : 0U;
+    const std::size_t keptDebris = std::min(newDebris, allowance);
     std::size_t primary{};
     for (std::size_t i=1;i<components.size();++i)
         if (components[i].voxelCount > components[primary].voxelCount) primary=i;
+    // Non-primary components beyond the allowance are dropped: no body is built for them
+    // and they are never published, mirroring how the synchronous path discards fragments
+    // once the cap is full.
+    std::vector<char> dropped(components.size(), 0);
+    std::size_t admitted = 0;
+    for (std::size_t i = 0; i < components.size(); ++i) {
+        if (i == primary) continue;
+        if (admitted < keptDebris) ++admitted;
+        else dropped[i] = 1;
+    }
     const auto origin = resolve_transform(parent);
     const auto oldState = parent.hasBody ? physics_->state(parent.bodyHandle) : std::nullopt;
     std::vector<RigidBodyHandle> handles(components.size(), kInvalidRigidBodyHandle);
@@ -1701,6 +1715,7 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
     const auto rollback = [&] { for (const auto h : handles) if (h != kInvalidRigidBodyHandle) physics_->destroy_body(h); };
     for (std::size_t i=0;i<components.size();++i) {
         auto& component = components[i];
+        if (dropped[i]) continue;
         if (i == primary && !parent.hasBody) continue;
         if (i == primary && !parent.dynamic) {
             StaticRigidBodyCreateDesc desc; desc.transform=origin; desc.collisionClass=RigidBodyCollisionClass::Full;
@@ -1732,11 +1747,11 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
     }
     // All packages exist before replacing live geometry/bodies. No listener sees a partial
     // replacement; callbacks run only after the complete geometry/collision publication.
-    while (debris_count() + newDebris > debrisLimit_ && retire_oldest_debris(parent.id)) {
+    while (debris_count() + keptDebris > debrisLimit_ && retire_oldest_debris(parent.id)) {
     }
     std::vector<GameObjectId> fragments;
     for (std::size_t i=0;i<components.size();++i) {
-        if (i==primary) continue;
+        if (i==primary || dropped[i]) continue;
         Object fragment;
         fragment.id=allocate_id(); fragment.name=parent.name+"_fragment";
         fragment.tags=parent.tags; fragment.groups=parent.groups; fragment.layer=parent.layer;

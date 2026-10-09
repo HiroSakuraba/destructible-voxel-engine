@@ -472,7 +472,7 @@ void test_mode_switch() {
     environment.globalIlluminationMode = GlobalIlluminationMode::RadianceCascades;
     std::string error;
     CHECK(environment.validate(&error));
-    // GPU backends do not implement it yet: pack and plan it as VoxelOneBounce.
+    // GPU backends do not execute it yet: packing and the default plan retain one bounce.
     CHECK(pack_gpu_render_environment(environment, 64U, 64U, 0.1F).globalIlluminationMode ==
           static_cast<std::uint32_t>(GlobalIlluminationMode::VoxelOneBounce));
     RenderEnvironment oneBounce = environment;
@@ -480,7 +480,8 @@ void test_mode_switch() {
     const auto rcPlan = make_voxel_lighting_frame_plan(64U, 32U, environment);
     const auto obPlan = make_voxel_lighting_frame_plan(64U, 32U, oneBounce);
     CHECK(rcPlan.validate(&error) && rcPlan.dispatches.size() == obPlan.dispatches.size());
-    CHECK(rcPlan.activeGlobalIlluminationRayCount == obPlan.activeGlobalIlluminationRayCount);
+    CHECK(rcPlan.radianceCascadeLevels.empty() &&
+          rcPlan.activeGlobalIlluminationRayCount == obPlan.activeGlobalIlluminationRayCount);
 
     Fixture fixture(sp::SyntheticScene::Courtyard, 64, 36);
     RenderEnvironment rcEnvironment = fixture.setup.environment;

@@ -1,7 +1,8 @@
 # Radiance Cascades
 
 Status: **Phase 1 (CPU 2D flatland reference) and Phase 2 (CPU SPWI on the reference voxel
-renderer) landed.** Nothing runs on the GPU yet. Phase 2 adds
+renderer) landed.** The Phase 3 pass and storage contract is opt-in; no GPU executor or
+radiance-cascade shader runs yet. Phase 2 adds
 `GlobalIlluminationMode::RadianceCascades` (value 3). Only `ReferenceVoxelRenderer` implements it;
 GPU packing and `voxel_lighting_plan` treat it as `VoxelOneBounce`. §7 is the Phase 3 GPU
 hand-off.
@@ -599,6 +600,17 @@ at 320×180.
    §7.4 for what this means for destruction.
 
 ## 7. Phase 3 GPU hand-off
+
+`GpuRadianceCascadeSettings::enabled` opts `make_voxel_lighting_frame_plan` into the
+backend-independent Phase 3 pass contract. The default remains one-bounce, matching
+`pack_gpu_render_environment` and the current GPU shaders. The opt-in is for a future executor;
+it does not turn on GPU radiance cascades in the player. `dve_voxel_lighting_plan_tests` compares
+the planned level geometry and interval bounds against `spwi::describe_cascades` at three
+resolutions. It checks 4 px / 4×4 hemisphere storage, the 16,711,680-byte RGBA16F ping-pong
+budget at 1920×1080, and the top-down pass order. The plan budgets all probe records at 32
+bytes each, and assumes the interval and sun hit data can be consumed within the trace/merge
+sequence rather than retained for every level. The executor must define descriptor layouts,
+barriers and actual intermediate storage before enabling mode 3 in GPU constants.
 
 ### 7.1 Passes (per frame, after the primary trace, replacing the GI trio when mode = 3)
 

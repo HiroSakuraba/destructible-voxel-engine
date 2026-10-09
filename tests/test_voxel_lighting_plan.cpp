@@ -1,6 +1,7 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "dve/render/radiance_cascades_spwi.hpp"
 #include "dve/render/voxel_lighting_plan.hpp"
 
 namespace {
@@ -58,6 +59,72 @@ int main() {
 
         const auto empty = make_voxel_lighting_frame_plan(0U, 10U, environment);
         require(empty.validate(&error) && empty.dispatches.empty(), "empty plan is invalid");
+
+        environment.globalIlluminationMode = GlobalIlluminationMode::RadianceCascades;
+        environment.globalIlluminationMaxDistanceMeters = 12.0F;
+        const auto fallback = make_voxel_lighting_frame_plan(1920U, 1080U, environment);
+        require(fallback.validate(&error) && fallback.radianceCascadeLevels.empty() &&
+                    fallback.globalIlluminationMode == GlobalIlluminationMode::VoxelOneBounce,
+                "unimplemented GPU path stopped falling back to one bounce");
+        GpuRadianceCascadeSettings gpuSettings;
+        gpuSettings.enabled = true;
+        const auto rc = make_voxel_lighting_frame_plan(1920U, 1080U, environment, gpuSettings);
+        require(rc.validate(&error), error.c_str());
+        require(rc.radianceCascadeLevels.size() == 5U, "default GPU cascade count is wrong");
+        require(rc.radianceCascadeRadianceBytes == 16711680U,
+                "GPU ping-pong allocation missed partial probe rows");
+        require(rc.globalIlluminationRayCapacity == 0U &&
+                    rc.activeGlobalIlluminationRayCount == 0U,
+                "cascades allocated one-bounce rays");
+        require(rc.dispatches.size() == 3U + 4U * 5U + 2U,
+                "GPU cascade passes do not replace the one-bounce trio");
+        for (std::uint32_t i = 0; i < rc.radianceCascadeLevels.size(); ++i) {
+            require(rc.dispatches[3U + i].pass == VoxelLightingPass::BuildRadianceCascadeProbes &&
+                        rc.dispatches[3U + i].cascadeLevel == i,
+                    "probe build order is wrong");
+            const auto base = 3U + 5U + 3U * i;
+            const auto level = 4U - i;
+            require(rc.dispatches[base].pass == VoxelLightingPass::TraceRadianceCascadeIntervals &&
+                        rc.dispatches[base + 1U].pass == VoxelLightingPass::TraceRadianceCascadeSun &&
+                        rc.dispatches[base + 2U].pass == VoxelLightingPass::MergeRadianceCascade &&
+                        rc.dispatches[base].cascadeLevel == level,
+                    "cascade passes do not merge top down");
+        }
+        require(rc.dispatches[rc.dispatches.size() - 2U].pass ==
+                    VoxelLightingPass::GatherRadianceCascades,
+                "cascade gather is not before shading");
+
+        // Match the CPU's level geometry and interval bounds. The GPU plan stores the
+        // hemisphere only, in RGBA16F, so its direction count is half the CPU's.
+        RadianceCascadeSettings cpuSettings;
+        cpuSettings.baseProbeSpacingPixels = 4U;
+        cpuSettings.baseDirectionResolution = 4U;
+        for (const auto [width, height] : {std::pair{320U, 180U}, std::pair{17U, 9U},
+                                           std::pair{1920U, 1080U}}) {
+            const auto gpu = make_voxel_lighting_frame_plan(width, height, environment, gpuSettings);
+            const auto cpu = spwi::describe_cascades(cpuSettings, environment, width, height);
+            require(gpu.validate(&error) && gpu.radianceCascadeLevels.size() == cpu.size(),
+                    "GPU/CPU cascade level count diverged");
+            for (std::size_t i = 0; i < cpu.size(); ++i) {
+                const auto& level = gpu.radianceCascadeLevels[i];
+                require(level.probeSpacingPixels == cpu[i].probeSpacingPixels &&
+                            level.probesX == cpu[i].probesX && level.probesY == cpu[i].probesY &&
+                            level.directionResolution == cpu[i].directionResolution &&
+                            level.intervalStart == cpu[i].intervalStart &&
+                            level.intervalEnd == cpu[i].intervalEnd &&
+                            level.directionTexels * 2U == cpu[i].texels,
+                        "GPU/CPU cascade layout diverged");
+            }
+        }
+        GpuRadianceCascadeSettings invalid;
+        invalid.enabled = true;
+        invalid.baseProbeSpacingPixels = 0U;
+        require(!make_voxel_lighting_frame_plan(64U, 64U, environment, invalid).validate(),
+                "invalid GPU cascade settings silently produced a complete plan");
+        auto broken = make_voxel_lighting_frame_plan(64U, 64U, environment, gpuSettings);
+        broken.dispatches[broken.dispatches.size() - 2U].pass =
+            VoxelLightingPass::ResolveGlobalIllumination;
+        require(!broken.validate(), "missing cascade gather was accepted");
         std::cout << "dve_voxel_lighting_plan_tests: PASS\n";
         return 0;
     } catch (const std::exception& exception) {

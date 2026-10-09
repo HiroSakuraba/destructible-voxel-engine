@@ -691,7 +691,7 @@ private:
     bool destroy_object_internal(GameObjectId id, bool dispatchDestroy);
     // Destroys the debris body with the lowest creation sequence; false
     // when no debris exists. Used by the debris cap and its setter.
-    bool retire_oldest_debris();
+    bool retire_oldest_debris(GameObjectId keep = kInvalidGameObjectId);
     void dispatch_lifecycle(GameLifecycleEvent event);
     void synchronize_membership_component(Object& object);
     [[nodiscard]] std::optional<RigidBodyCreateDesc> build_dynamic_body_desc(

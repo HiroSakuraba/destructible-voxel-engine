@@ -235,6 +235,7 @@ std::unique_ptr<VoxelObject> clone_game_voxels(const VoxelObject* source) {
 }
 
 constexpr std::size_t kMaxFragmentsPerDamageCall = 32U;
+constexpr std::size_t kMaxPendingDestruction = 64U;
 
 // Safety cap for GameWorld::damage_sphere. build_damage_batches walks the sphere's voxel
 // span (O(radiusVoxels^2) z/y rows) even where no voxels exist, so an unbounded finite
@@ -864,11 +865,13 @@ std::size_t GameWorld::debris_count() const noexcept {
     return count;
 }
 
-bool GameWorld::retire_oldest_debris() {
+bool GameWorld::retire_oldest_debris(GameObjectId keep) {
+    // `keep` is the object being split right now. It may itself be debris (a fragment hit
+    // again), and retiring it would destroy the object the caller is still using.
     GameObjectId oldest = kInvalidGameObjectId;
     std::uint64_t oldestSequence = std::numeric_limits<std::uint64_t>::max();
     for (const auto& [id, object] : objects_) {
-        if (object.debris && object.debrisSequence < oldestSequence) {
+        if (id != keep && object.debris && object.debrisSequence < oldestSequence) {
             oldest = id;
             oldestSequence = object.debrisSequence;
         }
@@ -1624,7 +1627,7 @@ std::optional<std::uint64_t> GameWorld::queue_damage_sphere(GameObjectId id, Flo
     const auto found = objects_.find(id);
     if (found == objects_.end() || !found->second.voxels || found->second.visualOnly ||
         !(radius > 0.0F) || !std::isfinite(radius) || !std::isfinite(worldCenter.x) ||
-        !std::isfinite(worldCenter.y) || !std::isfinite(worldCenter.z) || pendingDestruction_.size() >= 64U) return std::nullopt;
+        !std::isfinite(worldCenter.y) || !std::isfinite(worldCenter.z) || pendingDestruction_.size() >= kMaxPendingDestruction) return std::nullopt;
     radius = std::min(radius, kMaxDamageSphereRadiusMeters);
     const auto& object = found->second;
     const auto local = multiply(inverse_transform_point(resolve_transform(object), worldCenter), 1.0F/object.voxelSizeMeters);
@@ -1636,27 +1639,35 @@ std::optional<std::uint64_t> GameWorld::queue_damage_sphere(GameObjectId id, Flo
 void GameWorld::process_pending_destruction() {
     // FIFO commits make completion independent of presentation frequency and worker speed.
     // Budgets count logical work, never microseconds. A suspended head retains its state.
-    if (pendingDestruction_.empty() || !destructionUnitsPerTick_) return;
-    auto& pending = pendingDestruction_.front();
-    const auto found = objects_.find(pending.state.objectId);
-    if (pending.state.stale || found == objects_.end() || !found->second.voxels) {
-        ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); return;
-    }
-    if (!pending.job) pending.job = std::make_unique<ResumableDestruction>(*found->second.voxels,
-        SphereDamageCommand{pending.state.localCenterVoxels, pending.state.localRadiusVoxels, pending.state.requestId}, found->second.massTable);
-    if (!pending.job->matches_mass_table(found->second.massTable)) {
-        ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); return;
-    }
-    pending.job->resume(*found->second.voxels, destructionUnitsPerTick_);
-    pending.state.workUnits = pending.job->work_units();
-    const auto phase = pending.job->phase();
-    if (phase == ResumableDestruction::Phase::Ready) {
-        // Remove before callbacks, which may enqueue another request or destroy the owner.
-        auto ready = std::move(pending);
-        pendingDestruction_.erase(pendingDestruction_.begin());
-        if (!commit_prepared_destruction(ready)) ++rejectedDestruction_;
-    } else if (phase == ResumableDestruction::Phase::Failed || phase == ResumableDestruction::Phase::Stale) {
-        ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin());
+    // Units left over after a request finishes go to the next request in the same tick, so
+    // several small hits no longer take one tick each. The request cap bounds the loop even
+    // when listeners enqueue more work from inside a commit.
+    std::uint32_t budget = destructionUnitsPerTick_;
+    for (std::size_t handled = 0; budget && handled < kMaxPendingDestruction && !pendingDestruction_.empty(); ++handled) {
+        auto& pending = pendingDestruction_.front();
+        const auto found = objects_.find(pending.state.objectId);
+        if (pending.state.stale || found == objects_.end() || !found->second.voxels) {
+            ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); continue;
+        }
+        if (!pending.job) pending.job = std::make_unique<ResumableDestruction>(*found->second.voxels,
+            SphereDamageCommand{pending.state.localCenterVoxels, pending.state.localRadiusVoxels, pending.state.requestId}, found->second.massTable);
+        if (!pending.job->matches_mass_table(found->second.massTable)) {
+            ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); continue;
+        }
+        const auto used = pending.job->resume(*found->second.voxels, budget);
+        budget -= std::min(used, budget);
+        pending.state.workUnits = pending.job->work_units();
+        const auto phase = pending.job->phase();
+        if (phase == ResumableDestruction::Phase::Ready) {
+            // Remove before callbacks, which may enqueue another request or destroy the owner.
+            auto ready = std::move(pending);
+            pendingDestruction_.erase(pendingDestruction_.begin());
+            if (!commit_prepared_destruction(ready)) ++rejectedDestruction_;
+        } else if (phase == ResumableDestruction::Phase::Failed || phase == ResumableDestruction::Phase::Stale) {
+            ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin());
+        } else {
+            break; // budget spent; the head resumes next tick
+        }
     }
 }
 
@@ -1673,7 +1684,13 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
         (void)destroy_object(pending.state.objectId);
         return true;
     }
-    if (debris_count()+components.size()-1 > debrisLimit_) return false;
+    // Same debris policy as damage_sphere: retire the oldest debris (never the object being
+    // split) to make room. Retirement cannot be undone, so check it is possible before
+    // creating bodies, and retire only after every body exists.
+    const std::size_t newDebris = components.size() - 1U;
+    const std::size_t currentDebris = debris_count();
+    const std::size_t retirable = currentDebris - (parent.debris ? 1U : 0U);
+    if (currentDebris - retirable + newDebris > debrisLimit_) return false;
     std::size_t primary{};
     for (std::size_t i=1;i<components.size();++i)
         if (components[i].voxelCount > components[primary].voxelCount) primary=i;
@@ -1686,8 +1703,9 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
         auto& component = components[i];
         if (i == primary && !parent.hasBody) continue;
         if (i == primary && !parent.dynamic) {
-            StaticRigidBodyCreateDesc desc; desc.transform=origin;
+            StaticRigidBodyCreateDesc desc; desc.transform=origin; desc.collisionClass=RigidBodyCollisionClass::Full;
             for (const auto& box : component.boxes) desc.boxes.push_back(voxel_box_to_solver_box(box,parent.voxelSizeMeters));
+            if (!validate_static_rigid_body_desc(desc)) { rollback(); return false; }
             handles[i]=physics_->create_static_body(desc);
         } else {
             FragmentSolverPackage package; package.mass=component.mass;
@@ -1714,6 +1732,8 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
     }
     // All packages exist before replacing live geometry/bodies. No listener sees a partial
     // replacement; callbacks run only after the complete geometry/collision publication.
+    while (debris_count() + newDebris > debrisLimit_ && retire_oldest_debris(parent.id)) {
+    }
     std::vector<GameObjectId> fragments;
     for (std::size_t i=0;i<components.size();++i) {
         if (i==primary) continue;
@@ -1825,7 +1845,7 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         // slot can be freed — including a zero cap, which suppresses debris
         // creation entirely — the fragment is discarded like an
         // unbuildable sliver.
-        while (debris_count() >= debrisLimit_ && retire_oldest_debris()) {
+        while (debris_count() >= debrisLimit_ && retire_oldest_debris(id)) {
         }
         if (debris_count() >= debrisLimit_) continue;
 

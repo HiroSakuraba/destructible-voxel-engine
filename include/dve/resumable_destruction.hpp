@@ -36,7 +36,11 @@ class ResumableDestruction {
         return prepared_;
     }
 
+    // A piece whose merged collision proxy needs more boxes than this is rejected.
+    static constexpr std::size_t kMaximumProxyBoxes = 256U;
+
   private:
+    [[nodiscard]] bool sphere_may_touch_brick(BrickKey key) const noexcept;
     struct Component {
         std::deque<std::pair<Int3, MaterialId>> voxels;
         Int3 minimum{kInt3Max}, maximum{kInt3Min};

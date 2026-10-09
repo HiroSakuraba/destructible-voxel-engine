@@ -574,6 +574,131 @@ void test_fragment_cap_keeps_smallest_attached() {
     CHECK(smallest && smallest->objectId == id);
 }
 
+[[nodiscard]] GameObjectId add_voxel_object(GameWorld& world, std::unique_ptr<VoxelObject> voxels, bool dynamic, const char* name) {
+    GameObjectDesc desc;
+    desc.name = name;
+    desc.dynamic = dynamic;
+    desc.voxelSizeMeters = 1.0F;
+    desc.voxels = std::move(voxels);
+    return world.create_object(std::move(desc));
+}
+
+[[nodiscard]] std::unique_ptr<VoxelObject> make_slab(std::uint64_t id, int sx, int sy, int sz) {
+    auto voxels = std::make_unique<VoxelObject>(id);
+    for (int x = 0; x < sx; ++x)
+        for (int y = 0; y < sy; ++y)
+            for (int z = 0; z < sz; ++z) voxels->set_voxel({x, y, z}, 1);
+    return voxels;
+}
+
+void run_destruction_queue(GameWorld& world, int maximumTicks, int* ticks = nullptr) {
+    int count = 0;
+    while (world.pending_destruction_count() && count < maximumTicks) {
+        world.tick(1.0F / 60.0F);
+        ++count;
+    }
+    if (ticks) *ticks = count;
+}
+
+void test_splitting_debris_at_the_cap_keeps_the_piece_being_split() {
+    // Chain: cube A (x0..1) - bar (x2..3) - cube B (x4..5) - link (x6..7) - connector
+    // (x8..9) - static block (x10..17). Hit 1 cuts the connector, so A..link becomes one
+    // debris fragment F and the cap of 1 is full. Hit 2 cuts F's bar. F needs a debris slot
+    // for cube A, and the only debris is F itself: retiring it destroyed the object being
+    // split while fragment_after_damage was still using it.
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    world.set_debris_limit(1);
+    auto voxels = std::make_unique<VoxelObject>(103);
+    for (int x = 10; x < 18; ++x)
+        for (int y = 0; y < 4; ++y)
+            for (int z = 0; z < 4; ++z) voxels->set_voxel({x, y, z}, 1);
+    for (int x = 0; x < 10; ++x) voxels->set_voxel({x, 0, 0}, 1);
+    for (const int x0 : {0, 4})
+        for (int x = x0; x < x0 + 2; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 2; ++z) voxels->set_voxel({x, y, z}, 1);
+    const GameObjectId id = add_voxel_object(world, std::move(voxels), false, "Chain");
+    CHECK(id != kInvalidGameObjectId);
+    std::vector<GameObjectId> fragments;
+    world.on_damage([&](const GameDamageEvent& event) { fragments = event.newFragmentIds; });
+    CHECK(world.damage_sphere(id, {9.0F, 0.5F, 0.5F}, 0.9F).value_or(0) == 2);
+    CHECK(fragments.size() == 1);
+    if (fragments.size() != 1) return;
+    const GameObjectId piece = fragments.front();
+    CHECK(world.voxel_count(piece).value_or(0) == 20);
+    CHECK(world.damage_sphere(piece, {3.0F, 0.5F, 0.5F}, 0.9F).value_or(0) == 2);
+    CHECK(world.has_object(piece));
+    CHECK(fragments.empty());                            // no slot for cube A: it is dropped
+    CHECK(world.voxel_count(piece).value_or(0) == 10);  // cube B and the link remain
+    CHECK(world.debris_count() == 1);
+}
+
+void test_queued_damage_on_a_large_wall_commits() {
+    // 128x128x8 is 256 bricks. Unmerged per-brick collision boxes exceeded the 256-box
+    // admission limit, so every queued hit on a wall this size was rejected.
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    const GameObjectId id = add_voxel_object(world, make_slab(104, 128, 128, 8), false, "Wall");
+    CHECK(id != kInvalidGameObjectId);
+    int events = 0;
+    world.on_damage([&](const GameDamageEvent&) { ++events; });
+    CHECK(world.queue_damage_sphere(id, {64.0F, 64.0F, 4.0F}, 4.5F).has_value());
+    run_destruction_queue(world, 2000);
+    CHECK(world.rejected_destruction_requests() == 0);
+    CHECK(events == 1);
+    CHECK(!world.raycast({64.0F, 64.0F, -5.0F}, {0, 0, 1}, 20.0F));
+    CHECK(world.physics().ray_cast_all({64.0F, 64.0F, -5.0F}, {0, 0, 1}, 20.0F).empty());
+    CHECK(!world.physics().ray_cast_all({8.0F, 8.0F, -5.0F}, {0, 0, 1}, 20.0F).empty());
+}
+
+void test_queued_damage_shares_the_tick_budget() {
+    // Twelve small objects hit in the same tick. Each request needs far less than the
+    // per-tick budget, so all twelve should finish in one tick rather than one per tick.
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    std::vector<GameObjectId> ids;
+    for (int i = 0; i < 12; ++i) {
+        GameObjectDesc desc;
+        desc.name = "Crate";
+        desc.dynamic = false;
+        desc.voxelSizeMeters = 1.0F;
+        desc.voxels = make_slab(200 + static_cast<std::uint64_t>(i), 4, 4, 4);
+        desc.transform = make_rigid_transform({static_cast<float>(i) * 10.0F, 0.0F, 0.0F}, {});
+        ids.push_back(world.create_object(std::move(desc)));
+    }
+    int events = 0;
+    world.on_damage([&](const GameDamageEvent&) { ++events; });
+    for (int i = 0; i < 12; ++i)
+        CHECK(world.queue_damage_sphere(ids[static_cast<std::size_t>(i)], {static_cast<float>(i) * 10.0F, 0.0F, 0.0F}, 1.2F).has_value());
+    int ticks = 0;
+    run_destruction_queue(world, 100, &ticks);
+    CHECK(events == 12);
+    CHECK(ticks == 1);
+    CHECK(world.rejected_destruction_requests() == 0);
+}
+
+void test_queued_damage_retires_old_debris() {
+    // At the debris cap, a queued split used to be rejected outright, while damage_sphere
+    // retires the oldest debris. Both now retire.
+    GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+    world.set_debris_limit(1);
+    auto voxels = std::make_unique<VoxelObject>(105);
+    for (int x = 0; x < 24; ++x)
+        for (int y = 0; y < 2; ++y)
+            for (int z = 0; z < 2; ++z) voxels->set_voxel({x, y, z}, 1);
+    const GameObjectId id = add_voxel_object(world, std::move(voxels), false, "Beam");
+    std::vector<GameObjectId> fragments;
+    world.on_damage([&](const GameDamageEvent& event) { fragments = event.newFragmentIds; });
+    CHECK(world.damage_sphere(id, {20.0F, 1.0F, 1.0F}, 1.6F).value_or(0) > 0);   // frees x 21..23
+    CHECK(fragments.size() == 1);
+    const GameObjectId first = fragments.empty() ? kInvalidGameObjectId : fragments.front();
+    CHECK(world.debris_count() == 1);
+    CHECK(world.queue_damage_sphere(id, {4.0F, 1.0F, 1.0F}, 1.6F).has_value());   // frees x 0..2
+    run_destruction_queue(world, 100);
+    CHECK(world.rejected_destruction_requests() == 0);
+    CHECK(fragments.size() == 1);
+    CHECK(!world.has_object(first));
+    CHECK(world.debris_count() == 1);
+}
+
 void test_two_fragments_sharing_a_brick() {
     GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
     auto voxels = std::make_unique<VoxelObject>(770);
@@ -611,6 +736,10 @@ int main() {
     test_fragmentation_of_moved_dynamic_object();
     test_carved_holes_rebuild_collision();
     test_fragment_cap_keeps_smallest_attached();
+    test_splitting_debris_at_the_cap_keeps_the_piece_being_split();
+    test_queued_damage_on_a_large_wall_commits();
+    test_queued_damage_shares_the_tick_budget();
+    test_queued_damage_retires_old_debris();
     test_two_fragments_sharing_a_brick();
     test_spawn_asset_uses_real_per_material_density();
     test_raycast_unit_correctness();

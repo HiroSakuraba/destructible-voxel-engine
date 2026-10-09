@@ -169,9 +169,12 @@ const auto request = world.queue_damage_sphere(object, hitPoint, 0.6F);
 ```
 
 Admission limits are 64 queued requests, 32 connected pieces, one million voxels and an
-extent of 4096 per piece, 256 unmerged proxy boxes per piece, and the configured debris cap.
-Exceeding a limit rejects the entire request. The proxy limit can reject an object that the
-synchronous path accepts after box merging. Map allocation, a brick operation and native
+extent of 4096 per piece, and 256 proxy boxes per piece after adjacent boxes are merged (the
+same merge the synchronous path uses). Exceeding a limit rejects the entire request. At the
+debris cap, a commit retires the oldest debris, as `damage_sphere` does, but never the object
+being split; it is rejected only when retiring every other debris object would still not make
+room. Requests share the per-tick unit budget in FIFO order: units left after one request
+commits go to the next in the same tick. Map allocation, a brick operation and native
 body creation still have variable wall time: this is deterministic work budgeting, not a
 hard real-time bound. Profile memory and commit time before making the queued path the default.
 Saving pending work records its logical cursor; loading reconstructs that preparation before

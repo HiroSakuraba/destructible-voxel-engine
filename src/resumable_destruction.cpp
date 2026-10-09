@@ -28,6 +28,17 @@ void ResumableDestruction::finish_mass(std::size_t index) {
                               double(-(c.xz - x * z / m) / 4), double(-(c.yz - y * z / m) / 4)};
 }
 
+bool ResumableDestruction::sphere_may_touch_brick(BrickKey key) const noexcept {
+    // Conservative: one voxel of margin covers command quantization and voxel-centre tests.
+    const float reach = command_.radius + 1.0F;
+    const auto overlaps = [reach](float center, std::int32_t brick) {
+        const float low = static_cast<float>(brick) * static_cast<float>(kBrickDim);
+        return center + reach >= low && center - reach <= low + static_cast<float>(kBrickDim);
+    };
+    return overlaps(command_.center.x, key.x) && overlaps(command_.center.y, key.y) &&
+           overlaps(command_.center.z, key.z);
+}
+
 std::uint32_t ResumableDestruction::resume(const VoxelObject& source, std::uint32_t maximumUnits) {
     if (source.revision() != sourceRevision_) {
         phase_ = Phase::Stale;
@@ -44,18 +55,25 @@ std::uint32_t ResumableDestruction::resume(const VoxelObject& source, std::uint3
             }
             const auto& entry =
                 *(source.bricks().begin() + static_cast<std::ptrdiff_t>(brickIndex_++));
-            VoxelObject scratch(sourceId_);
-            const auto materials = entry.second.materials();
-            scratch.replace_brick({entry.first, entry.second.generation(), materials,
-                                   VoxelObject::brick_content_hash(materials)});
-            const auto report = apply_damage_commands(scratch, {command_});
-            removed_ += report.removedVoxelCount;
-            if (const auto* brick = std::as_const(scratch).find_brick(entry.first)) {
-                brick->occupancy().for_each_set([&](std::uint16_t index) {
+            const auto collect = [&](const Brick& brick) {
+                brick.occupancy().for_each_set([&](std::uint16_t index) {
                     unvisited_.emplace(
                         global_from_local(entry.first, local_from_index_unchecked(index)),
-                        brick->material(index));
+                        brick.material(index));
                 });
+            };
+            if (!sphere_may_touch_brick(entry.first)) {
+                // Most bricks are far from the hit: copy their voxels without building a
+                // scratch object and running the damage raster on them.
+                collect(entry.second);
+            } else {
+                VoxelObject scratch(sourceId_);
+                const auto materials = entry.second.materials();
+                scratch.replace_brick({entry.first, entry.second.generation(), materials,
+                                       VoxelObject::brick_content_hash(materials)});
+                const auto report = apply_damage_commands(scratch, {command_});
+                removed_ += report.removedVoxelCount;
+                if (const auto* brick = std::as_const(scratch).find_brick(entry.first)) collect(*brick);
             }
         } else if (phase_ == Phase::Connectivity) {
             if (frontier_.empty()) {
@@ -141,6 +159,17 @@ std::uint32_t ResumableDestruction::resume(const VoxelObject& source, std::uint3
             }
             auto& out = prepared_[componentIndex_];
             if (brickIndex_ == out.voxels->brick_count()) {
+                // Merge per-brick boxes the way the synchronous path does, then apply the
+                // admission limit. Unmerged, any piece spanning more than 256 bricks
+                // (for example a 128x128x8 wall) was always rejected.
+                out.boxes = merge_adjacent_voxel_boxes(std::move(out.boxes));
+                // Admission limit bounds native body publication too. Reject without
+                // changing the world, rather than claiming a hard frame budget for an
+                // unbounded commit.
+                if (out.boxes.size() > kMaximumProxyBoxes) {
+                    phase_ = Phase::Failed;
+                    break;
+                }
                 ++componentIndex_;
                 brickIndex_ = 0;
                 continue;
@@ -149,13 +178,6 @@ std::uint32_t ResumableDestruction::resume(const VoxelObject& source, std::uint3
                 *(out.voxels->bricks().begin() + static_cast<std::ptrdiff_t>(brickIndex_++));
             const auto boxes = build_brick_box_proxy(*out.voxels, entry.first);
             out.boxes.insert(out.boxes.end(), boxes.begin(), boxes.end());
-            // Admission limit bounds native body publication too. Reject without
-            // changing the world, rather than claiming a hard frame budget for an
-            // unbounded commit.
-            if (out.boxes.size() > 256U) {
-                phase_ = Phase::Failed;
-                break;
-            }
         }
         ++used;
         ++workUnits_;

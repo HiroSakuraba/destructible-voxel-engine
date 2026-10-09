@@ -105,6 +105,19 @@ jobs:
           xvfb-run -a ctest --test-dir out/build/${{ matrix.preset }}
           --output-on-failure --no-tests=error -j4 --timeout 1800
           --output-junit ctest-junit.xml
+      - name: Collapse benchmark (report only, never gates)
+        if: matrix.preset == 'linux-gcc-release'
+        continue-on-error: true
+        run: out/build/${{ matrix.preset }}/dve_collapse_bench --quick --out collapse-bench.json
+      - name: Upload collapse benchmark
+        if: matrix.preset == 'linux-gcc-release'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: collapse-bench
+          path: collapse-bench.json
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4

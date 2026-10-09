@@ -32,7 +32,9 @@ env:
   SDL_VIDEO_DRIVER: offscreen
   SDL_AUDIO_DRIVER: dummy
   CCACHE_COMPRESS: "true"
-  CCACHE_MAXSIZE: 2G
+  # Each Linux ccache directory is saved as its own Actions cache entry; keep them small so the
+  # repository stays under GitHub's 10 GB cache quota (ccache evicts least recently used objects).
+  CCACHE_MAXSIZE: 400M
   CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
 
 jobs:
@@ -92,8 +94,15 @@ jobs:
           cmake --build out/build/${{ matrix.preset }} --parallel 4
           ccache --show-stats
           df -h "$GITHUB_WORKSPACE"
-      - name: Save ccache and fetched content (also when tests fail)
-        if: always() && steps.cache.outcome == 'success'
+      # Only pushes to main save the cache: pull requests (and other branches) restore main's
+      # entries, so PR runs no longer add a large per-run cache entry each.
+      - name: Trim ccache to CCACHE_MAXSIZE before saving
+        if: always() && steps.cache.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          ccache --cleanup
+          ccache --show-stats
+      - name: Save ccache and fetched content (main only, also when tests fail)
+        if: always() && steps.cache.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v4
         with:
           path: |

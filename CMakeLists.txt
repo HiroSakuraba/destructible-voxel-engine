@@ -2270,6 +2270,10 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_game_world_tests PRIVATE dve::core)
     add_test(NAME dve_game_world_tests COMMAND dve_game_world_tests)
 
+    add_executable(dve_bug_hunt_probes tests/test_bug_hunt_probes.cpp)
+    target_link_libraries(dve_bug_hunt_probes PRIVATE dve::core)
+    add_test(NAME dve_bug_hunt_probes COMMAND dve_bug_hunt_probes)
+
     add_executable(dve_game_save_tests tests/test_game_save.cpp)
     target_link_libraries(dve_game_save_tests PRIVATE dve::core)
     add_test(NAME dve_game_save_tests COMMAND dve_game_save_tests)

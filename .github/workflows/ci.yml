@@ -200,10 +200,20 @@ jobs:
     # libpng/libjpeg-turbo from the runner's vcpkg for the tools), the full CTest suite and the
     # sample game ZIP (docs/PACKAGING.md, "Windows"). Blocking since it was green twice in a row
     # on PR #41.
+    #
+    # CI configures the preset with the single-config Ninja generator (from a VS developer
+    # environment) instead of the preset's Visual Studio generator, so that sccache can wrap cl.exe
+    # through CMAKE_<LANG>_COMPILER_LAUNCHER (the VS generator ignores launchers) and so that Ninja
+    # compiles files in parallel across targets. --config Release / -C Release stay harmless.
+    # sccache cannot cache /Zi (shared PDB) or precompiled-header compiles, so Jolt's /Zi
+    # (GENERATE_DEBUG_SYMBOLS) and all PCH use (Jolt, SDL) are turned off for this build only.
     runs-on: windows-latest
     timeout-minutes: 150
     env:
       PRESET: windows-msvc-player-release
+      # sccache stores every object in the GitHub Actions cache (scoped like actions/cache:
+      # main's entries are readable from PRs; PR entries only from the same PR).
+      SCCACHE_GHA_ENABLED: "true"
     defaults:
       run:
         shell: bash
@@ -218,9 +228,34 @@ jobs:
           echo "BUILD_DIR=out/build/$PRESET" >> "$GITHUB_ENV"
           echo "DVE_WORKSPACE=$(cygpath -m "$GITHUB_WORKSPACE")" >> "$GITHUB_ENV"
           echo "DVE_VCPKG_ROOT=$(cygpath -m "$VCPKG_INSTALLATION_ROOT")" >> "$GITHUB_ENV"
+          echo "VCPKG_BINARY_SOURCES=clear;files,$(cygpath -m "$GITHUB_WORKSPACE")/.cache/vcpkg-archives,readwrite" >> "$GITHUB_ENV"
+      - name: Set up the MSVC developer environment (x64) for Ninja
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.18.0"
+      - name: Restore vcpkg binary archives (libpng, libjpeg-turbo)
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/vcpkg-archives
+          key: dve-vcpkg-archives-${{ env.ImageOS }}-${{ env.ImageVersion }}
+          restore-keys: |
+            dve-vcpkg-archives-${{ env.ImageOS }}-
       - name: Install libpng/libjpeg-turbo with the runner's vcpkg (classic mode)
         run: |
+          mkdir -p .cache/vcpkg-archives
           "$DVE_VCPKG_ROOT/vcpkg" install libpng:x64-windows libjpeg-turbo:x64-windows
+      - name: Save vcpkg binary archives
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/vcpkg-archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
       - name: Restore fetched content (SDL, Jolt, Lua)
         id: cache
         uses: actions/cache/restore@v4
@@ -232,15 +267,25 @@ jobs:
             dve-${{ env.PRESET }}-
       - name: Configure
         run: |
-          cmake --preset $PRESET \
+          ninja --version
+          sccache="$(cygpath -m "$SCCACHE_PATH")"
+          cmake --preset $PRESET -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
+            "-DCMAKE_C_COMPILER_LAUNCHER=$sccache" "-DCMAKE_CXX_COMPILER_LAUNCHER=$sccache" \
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
+            -DGENERATE_DEBUG_SYMBOLS=OFF \
+            -DVCPKG_TARGET_TRIPLET=x64-windows \
             "-DCMAKE_TOOLCHAIN_FILE=$DVE_VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             "-DFETCHCONTENT_BASE_DIR=$DVE_WORKSPACE/.cache/fetchcontent/$PRESET" \
             2>&1 | tee configure.log
           exit ${PIPESTATUS[0]}
       - name: Build
         run: |
+          sccache --zero-stats
           cmake --build $BUILD_DIR --config Release --parallel 4 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
+          sccache --show-stats
           grep -E ' error (C|LNK)[0-9]+' build.log | sort | uniq | head -200 > build-errors.txt || true
           echo "distinct error lines: $(wc -l < build-errors.txt)"
           head -60 build-errors.txt

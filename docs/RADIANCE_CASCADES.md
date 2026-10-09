@@ -1,8 +1,9 @@
 # Radiance Cascades
 
 Status: **Phase 1 (CPU 2D flatland reference) and Phase 2 (CPU SPWI on the reference voxel
-renderer) landed.** The Phase 3 pass and storage contract is opt-in; no GPU executor or
-radiance-cascade shader runs yet. Phase 2 adds
+renderer) landed.** The Phase 3 pass and storage contract is opt-in. An offscreen GPU
+executor exists for the probe-building pass only; interval tracing, merging, and gathering
+remain CPU reference work. Phase 2 adds
 `GlobalIlluminationMode::RadianceCascades` (value 3). Only `ReferenceVoxelRenderer` implements it;
 GPU packing and `voxel_lighting_plan` treat it as `VoxelOneBounce`. §7 is the Phase 3 GPU
 hand-off.
@@ -14,6 +15,32 @@ hemisphere direction maps, no temporal accumulation) are listed in §6 under "De
 - Phase 1: §1–§4, CPU 2D reference over voxel slices.
 - Phase 2: §5–§6, screen probes with world-space intervals.
 - Phase 3: §7, GPU hand-off.
+
+### Offscreen GPU probe slice
+
+`rc_build_probes.hlsl` copies primary-hit surface samples into one cascade's probe grid.
+`execute_radiance_cascade_probe_pass` uploads the compact 32-byte primary samples, binds a
+uniform parameter buffer and a 32-byte-per-probe output buffer, dispatches the shader, waits,
+and reads the probes back. It samples the centre of each spacing-sized cell, clamping edge
+cells, exactly as the CPU SPWI probe builder does. Invalid primary texels become zero records.
+The compact buffer is assembled from the CPU G-buffer in this test slice; a live primary-hit
+GPU buffer bridge and the remaining passes are future work. This path is offscreen and does
+not turn on mode 3 in the player.
+
+The ordinary `dve_rc_gpu_probe_tests` runs CPU and Null RHI validation. For an actual GPU
+readback check, compile the shader with `dxc` and run the same test with an installed Vulkan
+ICD (a software ICD is sufficient):
+
+```sh
+dxc -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout -T cs_6_0 -E main \
+  -Fo /tmp/rc_build_probes.spv shaders/rc_build_probes.hlsl
+DVE_REQUIRE_RC_GPU=1 DVE_RC_PROBE_SPV=/tmp/rc_build_probes.spv \
+  ./out/rc-probes/dve_rc_gpu_probe_tests
+```
+
+The required flag makes missing SPIR-V or an unavailable ICD fail instead of silently
+skipping the GPU check. This test reads back every probe and compares it to the CPU output;
+it does not yet compare a fully shaded image.
 
 # Phase 1: CPU 2D reference over voxel slices
 
@@ -603,14 +630,15 @@ at 320×180.
 
 `GpuRadianceCascadeSettings::enabled` opts `make_voxel_lighting_frame_plan` into the
 backend-independent Phase 3 pass contract. The default remains one-bounce, matching
-`pack_gpu_render_environment` and the current GPU shaders. The opt-in is for a future executor;
+`pack_gpu_render_environment` and the current GPU shaders. The opt-in is for a full executor;
 it does not turn on GPU radiance cascades in the player. `dve_voxel_lighting_plan_tests` compares
 the planned level geometry and interval bounds against `spwi::describe_cascades` at three
 resolutions. It checks 4 px / 4×4 hemisphere storage, the 16,711,680-byte RGBA16F ping-pong
 budget at 1920×1080, and the top-down pass order. The plan budgets all probe records at 32
 bytes each, and assumes the interval and sun hit data can be consumed within the trace/merge
-sequence rather than retained for every level. The executor must define descriptor layouts,
-barriers and actual intermediate storage before enabling mode 3 in GPU constants.
+sequence rather than retained for every level. The probe slice above defines its own descriptors
+and offscreen storage; later passes must define their barriers and intermediate storage before
+enabling mode 3 in GPU constants.
 
 ### 7.1 Passes (per frame, after the primary trace, replacing the GI trio when mode = 3)
 
@@ -675,8 +703,8 @@ rectangle, or use a hemi-octahedral square with the same angular density.
   "all levels" column assumes.
 - Keep only two levels resident. The top-down merge needs only level i + 1 (pre-averaged)
   while writing level i.
-- Probe buffers are about 32 B per probe per level (float3 position, packed normal, view
-  distance, flags).
+- Probe buffers are 32 B per probe per level in the offscreen slice (float3 position, float
+  view distance, float3 normal, uint valid).
 - Bilinear-fix ray results do not need storing if pass 2 merges inline.
 
 ### 7.3 What `voxel_lighting_plan` needs wired

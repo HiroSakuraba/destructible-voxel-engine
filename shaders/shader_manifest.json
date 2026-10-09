@@ -2868,6 +2868,19 @@
           "register": "u3"
         }
       ]
+    },
+    {
+      "name": "rc_build_probes",
+      "source": "rc_build_probes.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [64, 1, 1],
+      "bindings": [
+        {"name": "gPrimarySamples", "kind": "storage_buffer", "access": "read", "register": "t0"},
+        {"name": "gRcProbes", "kind": "storage_buffer", "access": "read_write", "register": "u1"},
+        {"name": "RcProbeConstants", "kind": "constant_buffer", "access": "read", "register": "b2"}
+      ]
     }
   ]
 }

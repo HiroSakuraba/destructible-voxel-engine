@@ -660,7 +660,9 @@ Their files are not relicensed. A shipped game can carry its own `LICENSE` in th
 ### Windows
 
 Windows 10 or later, x64, MSVC (Visual Studio 2022 or newer). CI builds and tests this on
-`windows-latest` (job `windows-msvc`, blocking).
+`windows-latest` (job `windows-msvc`, blocking). CI configures this preset with `-G Ninja
+-DCMAKE_BUILD_TYPE=Release` from a VS developer prompt so sccache can cache the compiles (see the
+comment on the job in `.github/workflows/ci.yml`); the commands below stay as they are.
 
 ```bat
 vcpkg install libpng:x64-windows libjpeg-turbo:x64-windows

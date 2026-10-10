@@ -119,6 +119,9 @@ struct EditorViewportSettings {
     bool cullEnclosedVoxels{true};
     std::size_t maximumDrawVoxels{120000};
     float gridSpacingMeters{1.0F};
+    // View-only isolation: when non-empty, only these objects are drawn and pickable. Authored
+    // visibility flags are not touched.
+    std::set<EditorObjectId> isolatedObjects;
 };
 
 struct EditorObjectBounds {
@@ -153,7 +156,8 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
 [[nodiscard]] std::optional<EditorPickResult> pick_editor_document(
     const EditorDocument& document,
     ViewportRay ray,
-    float maximumWorldDistance = 10000.0F);
+    float maximumWorldDistance = 10000.0F,
+    const std::set<EditorObjectId>* onlyObjects = nullptr);  // null or empty = every visible object
 [[nodiscard]] std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     const EditorDocument& document,
     const EditorMaterialLibrary& materials,

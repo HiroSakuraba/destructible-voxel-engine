@@ -639,6 +639,13 @@ public:
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
+    // View-only isolation (View > Isolate Selection): toggles between showing only the
+    // selection (with its children) and showing everything. Authored flags are untouched.
+    bool toggle_isolation();
+    [[nodiscard]] const std::set<EditorObjectId>& isolated_objects() const noexcept {
+        return viewportSettings_.isolatedObjects;
+    }
+    [[nodiscard]] bool is_isolated_out(EditorObjectId id) const noexcept;
     // Point the move/rotate/scale gizmo works about (centre of the selection's bounds).
     [[nodiscard]] Float3 selection_pivot() const noexcept;
 

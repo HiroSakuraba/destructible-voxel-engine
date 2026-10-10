@@ -256,6 +256,42 @@ void test_controller_workflow() {
           "one undo removes the whole scatter");
 }
 
+// Scatter, Slice and Boolean previews draw their panels in the same slot at the top of the
+// viewport, so opening one closes the others. Scatter output made while View > Isolate Selection
+// is on stays visible (joins the isolated set).
+void test_preview_exclusive_and_isolation() {
+    auto owner = std::make_unique<NativeEditorController>(EditorWorkspace(make_scene()));
+    NativeEditorController& controller = *owner;
+    controller.resize(1280, 720);
+    controller.workspace().select_object(2);
+    controller.workspace().add_to_selection(1);  // the surface last
+    check(controller.dispatch_action("create.scatter") && controller.scatter_active(), "scatter preview opens");
+    controller.workspace().select_object(1);
+    check(controller.dispatch_action("voxel.slice") && controller.voxel_slice().active(), "slice preview opens");
+    check(!controller.scatter_active(), "starting Slice closes the scatter preview");
+    controller.workspace().select_object(2);
+    controller.workspace().add_to_selection(1);
+    check(controller.dispatch_action("create.scatter") && controller.scatter_active(), "scatter preview reopens");
+    check(!controller.voxel_slice().active(), "starting Scatter closes the slice preview");
+    if (controller.dispatch_action("voxel.boolean_union") && controller.voxel_boolean().active())
+        check(!controller.scatter_active(), "starting a Boolean closes the scatter preview");
+    if (controller.scatter_active()) controller.cancel_scatter();
+
+    controller.workspace().select_object(1);
+    controller.workspace().add_to_selection(2);
+    check(controller.dispatch_action("view.isolate_selection"), "isolate the ground and rock");
+    controller.workspace().select_object(2);
+    controller.workspace().add_to_selection(1);
+    check(controller.dispatch_action("create.scatter"), "scatter under isolation");
+    controller.key_down("return", false, false, false);
+    const auto group = controller.workspace().selected_object();
+    check(group && *group != 1 && *group != 2, "the committed group is selected");
+    std::size_t hidden = 0;
+    for (const auto& [id, object] : controller.workspace().document().objects())
+        if (controller.is_isolated_out(id)) ++hidden;
+    check(hidden == 0, "scatter output made under isolation is visible, hidden=" + std::to_string(hidden));
+}
+
 } // namespace
 
 int main() {
@@ -266,6 +302,7 @@ int main() {
     test_stepped_hill_normal();
     test_prefab_like_source_is_independent();
     test_controller_workflow();
+    test_preview_exclusive_and_isolation();
     if (g_failures != 0) {
         std::printf("dve_editor_scatter_tests: %d failure(s)\n", g_failures);
         return 1;

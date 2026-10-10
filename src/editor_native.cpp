@@ -244,6 +244,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     brushResizing_ = false;
     brushPending_.clear();
     brushEraseIds_.clear();
+    brushCursor_.reset();
     marquee_ = {};
     hierarchyDrag_ = {};
     prePlayEditorCamera_ = camera_;
@@ -4483,7 +4484,7 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
         recompute_layout();
         return;
     }
-    if (!openMenu_ && activeTool_ == EditorToolId::ScatterBrush && (modifiers & 2U) != 0U &&
+    if (!openMenu_ && !playSession_.active() && activeTool_ == EditorToolId::ScatterBrush && (modifiers & 2U) != 0U &&
         layout_.viewport.contains(x, y) && steps != 0.0F) {
         set_scatter_brush_radius(brushRadius_ * std::pow(1.15F, steps));
         return;
@@ -7563,7 +7564,10 @@ void NativeEditorController::replan_scatter() {
 bool NativeEditorController::begin_scatter() {
     const std::string reason = scatter_disabled_reason();
     if (!reason.empty()) { set_status(reason, true, 6.0F); return false; }
+    // Scatter, Slice and Boolean previews share the panel slot at the top of the viewport, so
+    // only one is open at a time: starting one closes the others.
     if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Scatter started");
+    cancel_voxel_slice();
     scatterTarget_ = *workspace_.selected_object();
     // Sources: the selected roots other than the target. A selected object inside the target's
     // subtree, or an ancestor of it, cannot be copied onto it.
@@ -7648,6 +7652,7 @@ bool NativeEditorController::commit_scatter() {
     scatterPlan_ = {};
     scatterPrefab_.reset();
     scatterSourceRoots_.clear();
+    keep_isolated_with_subtree(build.groupId);
     workspace_.select_object(build.groupId);
     recompute_layout();
     refresh_menu_state();
@@ -7725,6 +7730,16 @@ std::string scatter_group_name(std::size_t copies) { return "Scatter (" + std::t
 bool has_generated_scatter_name(const EditorObject& group) { return group.name.starts_with("Scatter ("); }
 } // namespace
 
+void NativeEditorController::keep_isolated_with_subtree(EditorObjectId root) {
+    // While View > Isolate Selection is on, objects outside the isolated set are hidden and
+    // cannot be picked. Scatter output made under isolation joins the set, so a commit or a
+    // stroke never adds copies the user cannot see (or erase).
+    auto& isolated = viewportSettings_.isolatedObjects;
+    if (isolated.empty()) return;
+    for (const EditorObjectId id : collect_editor_object_subtree_ids(workspace_.document(), std::vector<EditorObjectId>{root}))
+        isolated.insert(id);
+}
+
 void NativeEditorController::begin_scatter_brush_session() {
     // Sources are what was selected when the tool was picked; a new session gets a new group.
     brushSourceRoots_.clear();
@@ -7791,7 +7806,7 @@ bool NativeEditorController::brush_ground_accepts(EditorObjectId id) const {
 
 void NativeEditorController::update_brush_cursor(int x, int y) {
     brushCursor_.reset();
-    if (!layout_.viewport.contains(x, y)) return;
+    if (playSession_.active() || !layout_.viewport.contains(x, y)) return;
     const ViewportRay ray = make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y));
     for (const EditorPickResult& hit : pick_editor_document_all(workspace_.document(), ray, 10000.0F,
                                                                 &viewportSettings_.isolatedObjects)) {
@@ -7893,6 +7908,7 @@ void NativeEditorController::finish_brush_stroke(bool cancel) {
     const CommandResult result = workspace_.commands().execute(document, std::move(command));
     if (!result.success) { set_status(result.message, true, 6.0F); return; }
     brushGroup_ = groupId;
+    keep_isolated_with_subtree(groupId);
     recompute_layout();
     refresh_menu_state();
     set_status("Painted " + std::to_string(pending.size()) + " copies into " +
@@ -7944,6 +7960,7 @@ bool NativeEditorController::begin_voxel_boolean(VoxelBooleanOperation operation
         set_status(reason, true, 6.0F);
         return false;
     }
+    cancel_scatter("Scatter preview closed: Boolean started");
     cancel_text_edit();
     close_context_menu();
     if (gizmoDragging_) finish_gizmo_drag(true);
@@ -8140,6 +8157,7 @@ bool NativeEditorController::begin_voxel_slice() {
         return false;
     }
     cancel_voxel_boolean();
+    cancel_scatter("Scatter preview closed: Slice started");
     cancel_text_edit();
     close_context_menu();
     if (gizmoDragging_)

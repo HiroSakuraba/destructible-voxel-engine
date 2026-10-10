@@ -271,12 +271,39 @@ void test_brush_workflow() {
     check(canvas.groupRows >= 2 && !canvas.doubledCount, "hierarchy shows 'Scatter (N)' without repeating the count");
 }
 
+
+// Strokes made while View > Isolate Selection is on stay visible and erasable.
+void test_brush_under_isolation() {
+    auto owner = std::make_unique<NativeEditorController>(EditorWorkspace(make_scene()));
+    NativeEditorController& controller = *owner;
+    controller.resize(1280, 720);
+    controller.workspace().select_object(1);
+    check(controller.dispatch_action("view.isolate_selection"), "isolate the ground");
+    (void)controller.dispatch_action("view.frame_all");
+    controller.workspace().select_object(2);  // the rock (isolated out) is still a valid source
+    controller.set_active_tool(EditorToolId::ScatterBrush);
+    controller.set_scatter_brush_radius(1.5F);
+    stroke(controller, {2.0F, 0.25F, 3.0F}, {8.0F, 0.25F, 3.0F});
+    std::vector<EditorObjectId> groups;
+    check(scatter_groups(controller.workspace().document(), &groups) == 1, "the stroke made a group");
+    const std::size_t painted = groups.empty() ? 0 : controller.workspace().document().children_of(groups.front()).size();
+    check(painted > 0, "the stroke painted copies");
+    bool visible = !groups.empty() && !controller.is_isolated_out(groups.front());
+    for (const auto& [id, object] : controller.workspace().document().objects())
+        if (object.parent && !groups.empty() && *object.parent == groups.front()) visible = visible && !controller.is_isolated_out(id);
+    check(visible, "copies painted under isolation are visible");
+    stroke(controller, {2.0F, 0.25F, 3.0F}, {8.0F, 0.25F, 3.0F}, 1U);
+    check(!groups.empty() && controller.workspace().document().children_of(groups.front()).size() < painted,
+          "and Shift-drag can erase them");
+}
+
 } // namespace
 
 int main() {
     test_dab();
     test_toolbar_entry();
     test_brush_workflow();
+    test_brush_under_isolation();
     if (g_failures != 0) {
         std::printf("dve_editor_scatter_brush_tests: %d failure(s)\n", g_failures);
         return 1;

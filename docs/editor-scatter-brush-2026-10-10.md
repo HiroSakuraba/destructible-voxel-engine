@@ -42,6 +42,10 @@ any visible voxel surface by dragging, erase them with Shift-drag.
   is inside the ring; locked copies and the original sources are never erased.
 - Copies are independent objects, as with fill (prefab links are dropped).
 - Layout is deterministic for a given seed and sequence of dabs.
+- **Isolation:** copies painted while View > Isolate Selection is on join the isolated set, so
+  they stay visible and can be erased.
+- **Play / Simulate:** the brush does nothing while playing or simulating (no ring, no
+  radius changes); starting Play mid-stroke drops the stroke.
 
 ## Code
 
@@ -61,3 +65,14 @@ release; one undo step per stroke; one group per session with a live count; eras
 Esc cancel; group re-created after undo; new group per session; brush ring drawn.
 `test_editor_chrome_fit` and `test_editor_snap_scale` now check the toolbar through
 `kToolbarTools`.
+
+## What's not done
+
+- The brush has no keyboard shortcut or command-palette action; it is picked from the
+  toolbar only. (The accessibility tree still advertises toolbar buttons by position, which
+  gives this tenth button the label "10".)
+- Spacing and Align come from the Scatter Objects settings and can only be changed through the
+  fill preview keys; the brush has no settings panel of its own, and no density, random
+  rotation or scale jitter.
+- Erase removes whole copies only; it does not thin copies out gradually.
+- Pending spots are previewed as markers, not as ghost copies of the source.

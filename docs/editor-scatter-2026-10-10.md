@@ -61,6 +61,16 @@ committing).
 - The X11 editor gained a headless `--select ID` option (repeatable; the last is active) for
   screenshots of selection-driven workflows.
 
+## Integration with Slice, Boolean, isolation and Play
+
+- **One preview at a time.** The Scatter, Slice and Boolean previews draw their panels in the
+  same place at the top of the viewport. Starting any of them closes the others (the same rule
+  Slice and Boolean already followed), so the panels never overlap.
+- **Isolation.** With View > Isolate Selection on, the committed group and every copy join the
+  isolated set, so new copies are visible and pickable instead of appearing hidden.
+- **Play / Simulate.** Scatter is disabled while playing or simulating, and starting Play or
+  Simulate closes an open preview.
+
 ## Validation
 
 New `dve_editor_scatter_tests`:
@@ -80,3 +90,17 @@ New `dve_editor_scatter_tests`:
 
 Screenshots of the X11 editor at 1280x720: the preview on a hill with Rock and Tree sources
 (20 of 20 placed), and the committed scene with the hierarchy scroll bar.
+
+## What's not done
+
+- Count, spacing, seed and Align are set only by keys while the preview is open; there is no
+  inspector panel for them and they are not saved with the project.
+- No per-copy random rotation (yaw) or scale jitter; every copy keeps its source's rotation
+  and size.
+- One surface object per fill; scattering across several objects at once (or onto copies)
+  is not supported.
+- Copies are full, independent voxel objects (no instancing), so very large counts cost as
+  much as that many hand-placed objects.
+- The open preview is not refreshed when the scene changes underneath it; Enter re-plans
+  against the current scene before committing.
+- The hierarchy scrolls with the wheel but does not yet scroll to a newly selected row.

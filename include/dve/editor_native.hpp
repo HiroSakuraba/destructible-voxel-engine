@@ -847,6 +847,7 @@ private:
     std::optional<Float3> brushLastDab_;
     std::uint64_t brushDabCounter_{};
     void begin_scatter_brush_session();
+    void keep_isolated_with_subtree(EditorObjectId root);
     [[nodiscard]] std::vector<ScatterSource> brush_sources() const;
     [[nodiscard]] bool brush_ground_accepts(EditorObjectId id) const;
     void update_brush_cursor(int x, int y);

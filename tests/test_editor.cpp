@@ -951,6 +951,23 @@ void test_interaction_core() {
     require(hits.size() == 2 && hits[0].objectId == 1 && hits[1].objectId == 2,
         "deep pick did not preserve front-to-back order");
 
+    EditorObject sparse(10, "Sparse");
+    sparse.voxelSizeMeters = 1.0F;
+    sparse.voxels->set_voxel({0, 0, 0}, 1);
+    sparse.voxels->set_voxel({10, 0, 0}, 1);
+    EditorCamera orthographic;
+    orthographic.position = {5.5F, 0.5F, 20.0F};
+    orthographic.target = {5.5F, 0.5F, 0.0F};
+    orthographic.projection = EditorProjection::Orthographic;
+    orthographic.orthographicHeight = 12.0F;
+    const UiRect fullView{0, 0, 800, 800};
+    const ScreenPoint gap = project_world_to_screen(orthographic, fullView, {5.5F, 0.5F, 0.5F});
+    require(gap.visible && !object_matches_screen_rect(sparse, orthographic, fullView,
+        {static_cast<int>(gap.x) - 3, static_cast<int>(gap.y) - 3, 7, 7}, false),
+        "box selection hit empty space between sparse voxels");
+    require(object_matches_screen_rect(sparse, orthographic, fullView, fullView, true),
+        "containment box missed visible voxels");
+
     NativeEditorController controller{EditorWorkspace(make_two_object_document())};
     require(controller.dispatch_action("view.toggle_move_snap") &&
         !controller.workspace().preferences().translateSnapEnabled, "move snap toggle did not apply");
@@ -988,6 +1005,7 @@ void test_interaction_core() {
     const float dx = axis.end.x - axis.start.x, dy = axis.end.y - axis.start.y;
     const float magnitude = std::max(1.0F, std::hypot(dx, dy));
     const auto beforeVoxels = controller.workspace().document().find_object(1)->voxels->occupied_voxel_count();
+    const Float3 pivotBeforeScale = controller.current_pivot();
     controller.pointer_down(PointerButton::Primary, sx, sy);
     controller.pointer_move(sx + static_cast<int>(100.0F * dx / magnitude),
                             sy + static_cast<int>(100.0F * dy / magnitude));
@@ -1000,6 +1018,8 @@ void test_interaction_core() {
                           sy + static_cast<int>(100.0F * dy / magnitude));
     require(controller.workspace().document().find_object(1)->voxels->occupied_voxel_count() > beforeVoxels,
         "scale drag did not resample the voxel object");
+    require(length(subtract(controller.current_pivot(), pivotBeforeScale)) < 0.01F,
+        "resample shifted the selected object's pivot");
     require(controller.workspace().commands().undo(controller.workspace().document()).success &&
         controller.workspace().document().find_object(1)->voxels->occupied_voxel_count() == beforeVoxels,
         "scale resample undo did not restore voxels");

@@ -4248,29 +4248,10 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 const int top = std::min(marquee_.startY, y);
                 const int bottom = std::max(marquee_.startY, y);
                 const bool contain = x >= marquee_.startX;
+                const UiRect rectangle{left, top, right - left + 1, bottom - top + 1};
                 for (const auto& [id, object] : workspace_.document().objects()) {
-                    if (!object.flags.visible) continue;
-                    const EditorObjectBounds bounds = object_world_bounds(object);
-                    if (!bounds.valid) continue;
-                    float minX = 1.0e9F, minY = 1.0e9F, maxX = -1.0e9F, maxY = -1.0e9F;
-                    bool anyVisible = false;
-                    for (int corner = 0; corner < 8; ++corner) {
-                        const Float3 point{
-                            (corner & 1) ? bounds.maximum.x : bounds.minimum.x,
-                            (corner & 2) ? bounds.maximum.y : bounds.minimum.y,
-                            (corner & 4) ? bounds.maximum.z : bounds.minimum.z};
-                        const ScreenPoint projected = project_world_to_screen(camera_, layout_.viewport, point);
-                        if (!projected.visible) continue;
-                        anyVisible = true;
-                        minX = std::min(minX, projected.x); maxX = std::max(maxX, projected.x);
-                        minY = std::min(minY, projected.y); maxY = std::max(maxY, projected.y);
-                    }
-                    if (!anyVisible) continue;
-                    const bool overlaps = maxX >= static_cast<float>(left) && minX <= static_cast<float>(right) &&
-                                          maxY >= static_cast<float>(top) && minY <= static_cast<float>(bottom);
-                    const bool contained = minX >= static_cast<float>(left) && maxX <= static_cast<float>(right) &&
-                                           minY >= static_cast<float>(top) && maxY <= static_cast<float>(bottom);
-                    if (contain ? contained : overlaps) hits.insert(id);
+                    if (object_matches_screen_rect(object, camera_, layout_.viewport, rectangle, contain))
+                        hits.insert(id);
                 }
             }
             workspace_.apply_selection(hits, marquee_.operation);
@@ -4764,12 +4745,34 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
                 auto compound = std::make_unique<CompoundCommand>("Resample selected voxel objects");
                 bool valid = true;
                 for (ObjectTransformChange& change : gizmoChanges_) {
+                    const EditorObject* object = workspace_.document().find_object(change.id);
                     auto command = make_rescale_voxel_object_command(workspace_.document(), change.id, scaleFactors_);
-                    if (!command) { valid = false; break; }
+                    if (!command || !object) { valid = false; break; }
                     compound->add(std::move(command));
-                    const Float3 offset = subtract(change.before.position, gizmoPivot_);
-                    change.after.position = add(gizmoPivot_, {
+                    const auto occupied = object->voxels->occupied_bounds();
+                    const Float3 localCenter = occupied.valid ? Float3{
+                        (static_cast<float>(occupied.minimum.x) + static_cast<float>(occupied.maximum.x) + 1.0F) * object->voxelSizeMeters * 0.5F,
+                        (static_cast<float>(occupied.minimum.y) + static_cast<float>(occupied.maximum.y) + 1.0F) * object->voxelSizeMeters * 0.5F,
+                        (static_cast<float>(occupied.minimum.z) + static_cast<float>(occupied.maximum.z) + 1.0F) * object->voxelSizeMeters * 0.5F}
+                        : Float3{};
+                    const auto scaled_center = [&](int minimum, int maximum, float factor) {
+                        const double sourceCenter = 0.5 * (static_cast<double>(minimum) + maximum + 1.0);
+                        const double dimension = static_cast<double>(maximum) - minimum + 1.0;
+                        const double targetDimension = std::max(1.0, static_cast<double>(std::llround(dimension * factor)));
+                        return static_cast<float>(std::floor(sourceCenter - targetDimension * 0.5) +
+                                                  targetDimension * 0.5) * object->voxelSizeMeters;
+                    };
+                    const Float3 newLocalCenter = occupied.valid ? Float3{
+                        scaled_center(occupied.minimum.x, occupied.maximum.x, scaleFactors_.x),
+                        scaled_center(occupied.minimum.y, occupied.maximum.y, scaleFactors_.y),
+                        scaled_center(occupied.minimum.z, occupied.maximum.z, scaleFactors_.z)}
+                        : Float3{};
+                    const Float3 rotatedCenter = rotate(change.before.rotation, localCenter);
+                    const Float3 centerWorld = add(change.before.position, rotatedCenter);
+                    const Float3 offset = subtract(centerWorld, gizmoPivot_);
+                    const Float3 scaledCenter = add(gizmoPivot_, {
                         offset.x * scaleFactors_.x, offset.y * scaleFactors_.y, offset.z * scaleFactors_.z});
+                    change.after.position = subtract(scaledCenter, rotate(change.before.rotation, newLocalCenter));
                 }
                 if (valid) {
                     compound->add(std::make_unique<TransformObjectsCommand>(gizmoChanges_, "Scale positions"));

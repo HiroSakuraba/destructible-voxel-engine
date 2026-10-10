@@ -461,6 +461,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"transform.surface_offset_less","Edit","Decrease Surface Offset",""},
         {"transform.scale_double","Edit","Double Voxel Object Size",""},
         {"transform.scale_half","Edit","Halve Voxel Object Size",""},
+        {"transform.scale_voxel_size_up","Edit","Scale Voxel Size x2",""},
+        {"transform.scale_voxel_size_down","Edit","Scale Voxel Size x0.5",""},
         {"edit.duplicate","Edit","Duplicate","Ctrl+D"}, {"edit.rename","Edit","Rename","F2"},
         {"edit.group","Edit","Group Selected","Ctrl+G"}, {"edit.ungroup","Edit","Ungroup","Ctrl+Shift+G"},
         {"edit.preferences","Edit","Editor Preferences","Ctrl+,"},
@@ -775,6 +777,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             for (const char* keyword : keywords) action->keywords.emplace_back(keyword);
         }
     };
+    describe("transform.scale_voxel_size_up",
+             "Double the voxel size of the selected voxel objects about the pivot; the voxel count is unchanged (no resampling). One undo step.",
+             {"scale", "resize", "grow", "bigger", "voxel size", "keep voxels", "uniform"});
+    describe("transform.scale_voxel_size_down",
+             "Halve the voxel size of the selected voxel objects about the pivot; the voxel count is unchanged (no resampling). One undo step.",
+             {"scale", "resize", "shrink", "smaller", "voxel size", "keep voxels", "uniform"});
     describe("voxel.boolean_union",
              "Preview adding the other selected voxel objects (B) to the active voxel object (A); Enter commits as one undo step.",
              {"csg", "boolean", "merge", "combine", "add", "join", "weld"});

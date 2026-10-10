@@ -176,15 +176,15 @@ CommandResult TransformObjectsCommand::apply(EditorDocument& document, bool forw
 }
 CommandResult TransformObjectsCommand::execute(EditorDocument& document) { return apply(document, true); }
 
-ScaleObjectsCommand::ScaleObjectsCommand(std::vector<ObjectScaleChange> changes, std::string label)
+ScaleVoxelSizeCommand::ScaleVoxelSizeCommand(std::vector<ObjectVoxelSizeChange> changes, std::string label)
     : changes_(std::move(changes)), label_(std::move(label)) {}
 
-CommandResult ScaleObjectsCommand::apply(EditorDocument& document, bool forward) {
-    if (changes_.empty()) return CommandResult::fail("scale command has no objects");
+CommandResult ScaleVoxelSizeCommand::apply(EditorDocument& document, bool forward) {
+    if (changes_.empty()) return CommandResult::fail("voxel size command has no objects");
     std::set<EditorObjectId> seen;
-    for (const ObjectScaleChange& change : changes_) {
+    for (const ObjectVoxelSizeChange& change : changes_) {
         if (change.id == 0 || !seen.insert(change.id).second)
-            return CommandResult::fail("scale command contains duplicate or invalid object identifiers");
+            return CommandResult::fail("voxel size command contains duplicate or invalid object identifiers");
         const EditorObject* object = document.find_object(change.id);
         if (!object) return CommandResult::fail("scale target no longer exists");
         if (object->flags.locked) return CommandResult::fail("scale target is locked");
@@ -193,7 +193,7 @@ CommandResult ScaleObjectsCommand::apply(EditorDocument& document, bool forward)
         if (!valid_transform(forward ? change.after : change.before))
             return CommandResult::fail("transform is not finite or has an invalid rotation");
     }
-    for (const ObjectScaleChange& change : changes_) {
+    for (const ObjectVoxelSizeChange& change : changes_) {
         EditorObject* object = document.find_object(change.id);
         object->voxelSizeMeters = forward ? change.afterVoxelSize : change.beforeVoxelSize;
         if (!document.set_world_transform(change.id, forward ? change.after : change.before))
@@ -202,8 +202,8 @@ CommandResult ScaleObjectsCommand::apply(EditorDocument& document, bool forward)
     document.mark_dirty();
     return CommandResult::ok();
 }
-CommandResult ScaleObjectsCommand::execute(EditorDocument& document) { return apply(document, true); }
-CommandResult ScaleObjectsCommand::undo(EditorDocument& document) { return apply(document, false); }
+CommandResult ScaleVoxelSizeCommand::execute(EditorDocument& document) { return apply(document, true); }
+CommandResult ScaleVoxelSizeCommand::undo(EditorDocument& document) { return apply(document, false); }
 CommandResult TransformObjectsCommand::undo(EditorDocument& document) { return apply(document, false); }
 
 TransformObjectCommand::TransformObjectCommand(EditorObjectId id, RigidTransform before, RigidTransform after)

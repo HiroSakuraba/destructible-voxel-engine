@@ -859,6 +859,7 @@ private:
 };
 
 [[nodiscard]] EditorDocument make_new_project_document();
+[[nodiscard]] EditorDocument make_new_scene_document();
 [[nodiscard]] EditorDocument make_native_editor_demo_document();
 
 } // namespace dve::editor

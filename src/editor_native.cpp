@@ -2668,9 +2668,13 @@ void NativeEditorController::create_new_project_now() {
 }
 
 void NativeEditorController::create_new_scene_now() {
-    workspace_.document() = EditorDocument("Untitled Scene");
+    workspace_.document() = make_new_scene_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
+    if (!workspace_.document().objects().empty()) {
+        workspace_.select_object(workspace_.document().objects().begin()->first);
+        frame_selection();
+    }
     recompute_layout();
 }
 
@@ -6563,32 +6567,30 @@ std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
     return result;
 }
 
+// The Blender-style starter solid: a 1 m cube of 0.1 m voxels resting on the
+// Y=0 grid plane, centered on its local origin in X/Z, in Standard Surface.
+void add_starter_cube(EditorDocument& document, Float3 position) {
+    EditorObject cube(document.allocate_object_id(), "Starter Cube");
+    cube.flags.structural = true;
+    cube.flags.collisionEnabled = true;
+    cube.transform.position = position;
+    for (int y = 0; y < 10; ++y)
+        for (int z = -5; z < 5; ++z)
+            for (int x = -5; x < 5; ++x)
+                cube.voxels->set_voxel({x, y, z}, kDefaultSurfaceMaterial);
+    document.add_object(std::move(cube));
+}
+
+EditorDocument make_new_scene_document() {
+    EditorDocument document("Untitled Scene");
+    add_starter_cube(document, {0.0F, 0.0F, 0.0F});
+    document.mark_clean();
+    return document;
+}
+
 EditorDocument make_new_project_document() {
     EditorDocument document("Untitled Project");
-    EditorObject oval(1, "Starter Oval");
-    oval.voxelSizeMeters = 0.25F;
-    oval.flags.structural = true;
-    oval.flags.collisionEnabled = true;
-
-    // A compact ellipsoid resting on the Y=0 grid plane. Voxel-center sampling makes the
-    // silhouette symmetric despite even diameters and avoids a flat, box-derived boundary.
-    constexpr int radiusX = 8;
-    constexpr int radiusY = 5;
-    constexpr int radiusZ = 6;
-    for (int y = 0; y < radiusY * 2; ++y) {
-        const float normalizedY = (static_cast<float>(y) + 0.5F - static_cast<float>(radiusY)) /
-                                  static_cast<float>(radiusY);
-        for (int z = -radiusZ; z < radiusZ; ++z) {
-            const float normalizedZ = (static_cast<float>(z) + 0.5F) / static_cast<float>(radiusZ);
-            for (int x = -radiusX; x < radiusX; ++x) {
-                const float normalizedX = (static_cast<float>(x) + 0.5F) / static_cast<float>(radiusX);
-                if (normalizedX * normalizedX + normalizedY * normalizedY +
-                    normalizedZ * normalizedZ <= 1.0F)
-                    oval.voxels->set_voxel({x, y, z}, kDefaultSurfaceMaterial);
-            }
-        }
-    }
-    document.add_object(std::move(oval));
+    add_starter_cube(document, {0.0F, 0.0F, 0.0F});
     document.mark_clean();
     return document;
 }

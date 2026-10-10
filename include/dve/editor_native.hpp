@@ -76,6 +76,9 @@ enum class EditorToolId : std::uint8_t {
 // Tools with a toolbar button (EditorToolId::Select .. Rotate). Scale has no button; it is
 // selected by its shortcut or the Edit menu, but still has an editor_tool_info() entry.
 inline constexpr std::size_t kEditorToolCount = 9;
+// Voxel sizes Scale Voxel Size keeps objects within (1 mm .. 10 m per voxel).
+inline constexpr float kMinVoxelSizeMeters = 0.001F;
+inline constexpr float kMaxVoxelSizeMeters = 10.0F;
 // Height of the inspector's fixed "INSPECTOR" header; scrolled details never draw above it.
 inline constexpr int kInspectorHeaderHeight = 28;
 
@@ -630,6 +633,14 @@ public:
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
     [[nodiscard]] CommandResult set_primary_rotation_euler_degrees(Float3 degrees);
     [[nodiscard]] CommandResult rescale_primary_voxel_object(Float3 scale);
+    // Scale Voxel Size (Edit menu, command palette): multiplies the voxel size of every selected
+    // voxel object by `factor` and scales their positions about current_pivot(), as one undo step.
+    // The voxel count is unchanged (contrast rescale_primary_voxel_object and the Scale tool, which
+    // resample). Non-voxel objects in the selection are skipped. The factor is limited so every
+    // resulting voxel size stays within [kMinVoxelSizeMeters, kMaxVoxelSizeMeters].
+    [[nodiscard]] CommandResult scale_selection_voxel_size(float factor);
+    // Why Scale Voxel Size is unavailable for the current selection; empty when it can run.
+    [[nodiscard]] std::string voxel_size_scale_disabled_reason() const;
     [[nodiscard]] std::vector<ComponentInspectorSection> primary_component_sections() const;
     [[nodiscard]] CommandResult add_component_to_primary(std::string_view type);
     [[nodiscard]] CommandResult remove_component_from_primary(ComponentId componentId);

@@ -4297,7 +4297,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                               std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
                                   (snapPreferences.absoluteGridSnap ? " grid" : "")) +
         "  Rotate " + snapValue(snapPreferences.rotateSnapEnabled,
-                                std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "deg") +
+                                std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "\u00B0") +
         "  Scale " + snapValue(snapPreferences.scaleSnapEnabled,
                                std::to_string(snapPreferences.scaleSnapStep).substr(0,4) + "x");
     // The snap summary keeps its place on the right; the status message is elided before it.

@@ -128,7 +128,7 @@ void test_status_bar_summary() {
                 check(summary->x + summary->width <= lw, tag + "summary stays inside the window");
                 if (zoom == 1.0F) {
                     check(summary->value.find("Move 0.10m") != std::string::npos &&
-                              summary->value.find("Rotate 15deg") != std::string::npos &&
+                              summary->value.find("Rotate 15\u00B0") != std::string::npos &&
                               summary->value.find("Scale 0.10x") != std::string::npos,
                           tag + "summary names all three snap settings, got '" + summary->value + "'");
                 }

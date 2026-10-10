@@ -24,7 +24,7 @@ favour, as the user decided, so the following are #91's behaviour, unchanged her
 
 - **Snap summary in the status bar (ART-023).** The right side of the status bar always shows
   the UI zoom and all three snap settings, for example
-  `UI 100%  Move 0.10m  Rotate 15deg  Scale 0.10x`. A switched-off snap shows `off`, and Absolute
+  `UI 100%  Move 0.10m  Rotate 15°  Scale 0.10x`. A switched-off snap shows `off`, and Absolute
   Grid Alignment adds `grid` after the move step. The status message on the left is elided before
   the summary instead of running under it. The summary itself is elided only if it would take
   more than half the bar.

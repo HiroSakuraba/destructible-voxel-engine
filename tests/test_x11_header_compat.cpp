@@ -16,5 +16,6 @@ int main() {
     static_assert(JoltPhysicsUpdateErrorFlag::NoErrors == static_cast<JoltPhysicsUpdateErrorFlag>(0));
     static_assert(platform::EventType::NoEvent == static_cast<platform::EventType>(0));
     static_assert(rhi::BufferUsage::NoUsage == static_cast<rhi::BufferUsage>(0));
+    static_assert(editor::PlacementTarget::NoTarget == static_cast<editor::PlacementTarget>(0));
     return 0;
 }

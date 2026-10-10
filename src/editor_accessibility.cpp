@@ -82,6 +82,7 @@ std::string tool_label(EditorToolId tool) {
         case EditorToolId::Beam: return "Beam";
         case EditorToolId::Anchor: return "Anchor";
         case EditorToolId::Rotate: return "Rotate";
+        case EditorToolId::Scale: return "Scale voxels";
     }
     return "Tool";
 }

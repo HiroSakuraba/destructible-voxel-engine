@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -31,12 +32,7 @@ unsigned byte(float value) noexcept {
     return static_cast<unsigned>(std::clamp(value, 0.0F, 1.0F) * 255.0F + 0.5F);
 }
 
-std::string tool_name(EditorToolId tool) {
-    static constexpr std::array<std::string_view, 9> names{
-        "Select", "Move", "Add", "Remove", "Paint", "Box", "Beam", "Anchor", "Rotate"
-    };
-    return std::string(names[static_cast<std::size_t>(tool)]);
-}
+std::string tool_name(EditorToolId tool) { return std::string(editor_tool_info(tool).name); }
 
 std::string mode_name(EditorMode mode) {
     switch (mode) {
@@ -863,6 +859,41 @@ void CellFitCanvas::draw_tooltip(EditorColor background, EditorColor border, Edi
 }
 
 namespace {
+// A multi-line hover tooltip for the main editor chrome (toolbar, menus, camera preview).
+// The first line is drawn in the text colour, the rest muted. Lines are elided to the screen.
+struct ChromeTooltip {
+    UiRect anchor{};
+    std::vector<std::string> lines;
+    bool beside{};  // to the right of the anchor (menu rows) instead of below it
+};
+
+void draw_chrome_tooltip(const IEditorCanvas& painter, const ChromeTooltip& tip, UiRect screen,
+                         EditorColor background, EditorColor border, EditorColor text, EditorColor muted) {
+    if (tip.lines.empty()) return;
+    constexpr int kLineHeight = 16;
+    std::vector<std::string> lines;
+    int width = 0;
+    for (const std::string& line : tip.lines) {
+        lines.push_back(elide_text_to_width(painter, line, std::max(0, screen.width - 16)));
+        width = std::max(width, painter.text_width(lines.back()) + 12);
+    }
+    width = std::min(width, screen.width);
+    const int height = static_cast<int>(lines.size()) * kLineHeight + 8;
+    int x = tip.anchor.x;
+    int y = tip.anchor.y + tip.anchor.height + 2;
+    if (tip.beside) {
+        x = tip.anchor.x + tip.anchor.width + 4;
+        y = tip.anchor.y;
+        if (x + width > screen.x + screen.width) x = tip.anchor.x - width - 4;
+    }
+    x = std::clamp(x, screen.x, std::max(screen.x, screen.x + screen.width - width));
+    if (y + height > screen.y + screen.height) y = std::max(screen.y, tip.anchor.y - height - 2);
+    painter.fill({x, y, width, height}, background);
+    painter.outline({x, y, width, height}, border);
+    for (std::size_t i = 0; i < lines.size(); ++i)
+        painter.text(x + 6, y + 4 + static_cast<int>(i + 1) * kLineHeight - 4, lines[i], i == 0 ? text : muted);
+}
+
 // Registers `down .. up` value slots and label slots for a row of stepper buttons.
 void add_stepper_cells(CellFitCanvas& canvas, UiRect row, UiRect down, UiRect up, UiRect toggle = {}) {
     if (row.width <= 0) return;
@@ -3128,13 +3159,32 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         painter.text(x + (menuWidth < 64 ? 5 : 10), layout.menuBar.height - 9, label, text);
     }
 
+    std::vector<ChromeTooltip> tooltips;
+    const bool chromeHoverAllowed = !controller.open_menu() && !controller.context_menu().open;
     for (std::size_t index = 0; index < layout.toolbarButtons.size(); ++index) {
         const UiRect rect = layout.toolbarButtons[index];
-        const bool selected = static_cast<std::size_t>(controller.active_tool()) == index;
+        const auto tool = static_cast<EditorToolId>(index);
+        const EditorToolInfo& info = editor_tool_info(tool);
+        const bool selected = controller.active_tool() == tool;
         painter.fill(rect, selected ? accent : panel2);
         painter.outline(rect, selected ? rgb(190,220,255) : border);
-        const std::string label = std::to_string(index + 1) + " " + tool_name(static_cast<EditorToolId>(index));
-        painter.text(rect.x + 6, rect.y + rect.height / 2 + 5, label, text);
+        // Full name, then the short name, then whatever of the short name fits; never past the
+        // button. The tooltip always has the full name, shortcut and description.
+        const int room = rect.width - 8;
+        std::string label(info.name);
+        if (painter.text_width(label) > room) label = std::string(info.shortName);
+        if (painter.text_width(label) > room) label = elide_text_to_width(painter, info.shortName, room);
+        if (!label.empty()) {
+            const int labelX = rect.x + std::max(4, (rect.width - painter.text_width(label)) / 2);
+            painter.text(labelX, rect.y + rect.height / 2 + 5, label, text);
+        }
+        if (chromeHoverAllowed && rect.contains(controller.hover_x(), controller.hover_y())) {
+            const std::string key = controller.tool_shortcut_text(tool);
+            tooltips.push_back({rect,
+                                {std::string(info.name) + (key.empty() ? "  (no shortcut)" : "  (" + key + ")"),
+                                 std::string(info.description),
+                                 "Acts on: " + std::string(info.accepts)}});
+        }
     }
     const std::string mode = mode_name(controller.workspace().mode());
     painter.text(width - painter.text_width(mode) - 18, layout.toolbar.y + layout.toolbar.height / 2 + 5,
@@ -3288,13 +3338,97 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             viewportPainter.outline({static_cast<int>(hover.x)-7,static_cast<int>(hover.y)-7,15,15},rgb(255,255,255));
         }
     }
+    if (const auto point = controller.placement_target()) {
+        const ScreenPoint target = project_world_to_screen(controller.camera(), viewport, *point);
+        if (target.visible) {
+            const int x = static_cast<int>(target.x), y = static_cast<int>(target.y);
+            viewportPainter.line(x - 9, y, x + 9, y, rgb(255,219,89), 2);
+            viewportPainter.line(x, y - 9, x, y + 9, rgb(255,219,89), 2);
+        }
+    }
+    if (const auto bounds = controller.scale_preview_bounds())
+        draw_world_box(viewportPainter, controller, *bounds, rgb(255,219,89));
+    if (controller.voxel_boolean().active()) {
+        // Boolean preview (ART-060): label A/B bounds, then mark every cell the commit would
+        // change in the target grid. Nothing in the document changes until Enter.
+        const EditorDocument& document = controller.workspace().document();
+        if (const EditorObject* target = document.find_object(controller.voxel_boolean().target()))
+            draw_world_box(viewportPainter, controller, object_world_bounds(*target), rgb(96,170,255));
+        for (const EditorObjectId operandId : controller.voxel_boolean().operands())
+            if (const EditorObject* operand = document.find_object(operandId))
+                draw_world_box(viewportPainter, controller, object_world_bounds(*operand), rgb(255,166,64));
+        const auto label_object = [&](EditorObjectId id, const std::string& label, EditorColor color) {
+            const EditorObject* object = document.find_object(id);
+            if (!object) return;
+            const EditorObjectBounds bounds = object_world_bounds(*object);
+            if (!bounds.valid) return;
+            const ScreenPoint corner = project_world_to_screen(controller.camera(), viewport,
+                {bounds.minimum.x, bounds.maximum.y, bounds.minimum.z});
+            if (!corner.visible) return;
+            const int x = static_cast<int>(corner.x);
+            const int y = static_cast<int>(corner.y) - 6;
+            const int w = viewportPainter.text_width(label) + 8;
+            viewportPainter.fill({x - 2, y - 13, w, 17}, rgb(16,20,26));
+            viewportPainter.outline({x - 2, y - 13, w, 17}, color);
+            viewportPainter.text(x + 2, y, label, color);
+        };
+        label_object(controller.voxel_boolean().target(), "A target", rgb(150,200,255));
+        const auto& operandIds = controller.voxel_boolean().operands();
+        for (std::size_t i = 0; i < operandIds.size(); ++i)
+            label_object(operandIds[i], operandIds.size() == 1 ? std::string("B operand") : "B" + std::to_string(i + 1),
+                         rgb(255,190,110));
+        for (const VoxelBooleanPreviewMarker& marker : controller.voxel_boolean_preview_markers()) {
+            const int radius = std::max(2, static_cast<int>(marker.pixelRadius));
+            const UiRect cell{static_cast<int>(marker.screenX) - radius, static_cast<int>(marker.screenY) - radius,
+                              radius * 2 + 1, radius * 2 + 1};
+            switch (marker.kind) {
+            case VoxelBooleanPreviewMarker::Kind::Added:
+                viewportPainter.fill(cell, rgb(70,205,120));
+                viewportPainter.outline(cell, rgb(190,255,205));
+                break;
+            case VoxelBooleanPreviewMarker::Kind::Removed:
+                viewportPainter.outline(cell, rgb(255,82,82));
+                viewportPainter.line(cell.x, cell.y, cell.x + cell.width - 1, cell.y + cell.height - 1, rgb(255,82,82));
+                break;
+            case VoxelBooleanPreviewMarker::Kind::Repainted:
+                viewportPainter.outline(cell, rgb(255,206,72));
+                break;
+            case VoxelBooleanPreviewMarker::Kind::Overlap:
+                viewportPainter.outline(cell, rgb(96,220,255));
+                break;
+            }
+        }
+        const std::vector<std::string> lines = controller.voxel_boolean_preview_lines();
+        int panelWidth = 0;
+        for (const std::string& line : lines) panelWidth = std::max(panelWidth, viewportPainter.text_width(line));
+        // Keep clear of the viewport hint line (top) and the camera preview inset (top right);
+        // long diagnostics are elided here and stay complete in the status/console output.
+        const int panelMaxWidth = viewport.width > 520 ? viewport.width - 200 : viewport.width - 16;
+        panelWidth = std::min(panelWidth + 20, std::max(120, panelMaxWidth));
+        const int lineHeight = 17;
+        const UiRect panel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
+        viewportPainter.fill(panel, rgb(18,23,31));
+        viewportPainter.outline(panel, controller.voxel_boolean().can_commit() ? rgb(96,170,255) : rgb(255,110,90));
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const std::string& line = lines[i];
+            EditorColor color = i == 0 ? rgb(235,242,250) : rgb(190,200,214);
+            if (line.starts_with("Cannot commit")) color = rgb(255,130,110);
+            else if (line.starts_with("Warning")) color = rgb(255,206,72);
+            else if (line.starts_with("A target")) color = rgb(150,200,255);
+            else if (line.starts_with("B")) color = rgb(255,190,110);
+            viewportPainter.text(panel.x + 10, panel.y + 18 + static_cast<int>(i) * lineHeight,
+                                 elide_text_to_width(viewportPainter, line, panel.width - 20), color);
+        }
+    }
     // Transform gizmo. Move draws shafts with solid arrowheads; Rotate draws
-    // a ring around each axis with a slim radius stub. The hovered or dragged
-    // axis is drawn thicker and brighter so the grab target reads clearly.
+    // a ring around each axis with a slim radius stub; Scale draws shafts
+    // ending in square handles. The hovered or dragged axis is drawn thicker
+    // and brighter so the grab target reads clearly.
     {
         const std::vector<GizmoScreenAxis> gizmoAxes = controller.gizmo_axes();
         const std::vector<GizmoScreenRing> gizmoRings = controller.gizmo_rings();
         const bool rotateMode = !gizmoRings.empty();
+        const bool scaleMode = controller.active_tool() == EditorToolId::Scale;
         const int activeAxis = controller.gizmo_dragging()
                                    ? controller.gizmo_axis()
                                    : controller.hit_test_gizmo_axis(controller.hover_x(),
@@ -3359,6 +3493,17 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const float length = std::max(1.0F, std::hypot(dx, dy));
             const float ux = dx / length;
             const float uy = dy / length;
+            if (scaleMode) {
+                const int half = lit ? 6 : 5;
+                const int hx = static_cast<int>(axis.end.x - ux * static_cast<float>(half));
+                const int hy = static_cast<int>(axis.end.y - uy * static_cast<float>(half));
+                viewportPainter.line(sx, sy, hx, hy, underlay, lit ? 8 : 6);
+                viewportPainter.line(sx, sy, hx, hy, lit ? shade(color, 1.35F) : color, lit ? 6 : 4);
+                const UiRect handle{hx - half, hy - half, half * 2 + 1, half * 2 + 1};
+                viewportPainter.fill(handle, lit ? shade(color, 1.35F) : color);
+                viewportPainter.outline(handle, underlay);
+                continue;
+            }
             const float headLength = std::min(22.0F, std::max(11.0F, length * 0.22F));
             const float headHalf = headLength * 0.45F;
             const ScreenPoint baseCenter{axis.end.x - ux * headLength, axis.end.y - uy * headLength, 0.0F, true};
@@ -3584,6 +3729,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         if (const auto* item = std::get_if<double>(&value)) return static_cast<float>(*item);
         return fallback;
     };
+    std::optional<UiRect> cameraPreviewRect;
     if (controller.selected_camera_rig()) {
         const camera::CameraRig* rig = controller.camera_director().find_rig(*controller.selected_camera_rig());
         if (rig && settingBool("camera.show_frustum", true)) {
@@ -3642,8 +3788,22 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                     rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade)));
             }
             viewportPainter.outline(preview, accent);
-            viewportPainter.fill({preview.x, preview.y, preview.width, 22}, rgb(28,43,63));
-            viewportPainter.text(preview.x + 7, preview.y + 16, rig->name + "  [Camera Preview]", text);
+            const UiRect titleBar{preview.x, preview.y, preview.width, 22};
+            viewportPainter.fill(titleBar, rgb(28,43,63));
+            // The rig name is elided first so the "Preview" tag stays; the full name is in a tooltip.
+            const std::string tag = "  [Preview]";
+            const int titleRoom = preview.width - 14;
+            std::string title = rig->name + tag;
+            bool elided = false;
+            if (painter.text_width(title) > titleRoom) {
+                const std::string name = elide_text_to_width(painter, rig->name, titleRoom - painter.text_width(tag));
+                elided = true;
+                title = name.empty() ? elide_text_to_width(painter, rig->name, titleRoom) : name + tag;
+            }
+            viewportPainter.text(preview.x + 7, preview.y + 16, title, text);
+            cameraPreviewRect = preview;
+            if (chromeHoverAllowed && elided && titleBar.contains(controller.hover_x(), controller.hover_y()))
+                tooltips.push_back({titleBar, {rig->name, "Camera preview of the selected rig"}});
         }
     }
     const CinematicCameraOverlayState& cameraOverlays =
@@ -3711,11 +3871,36 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         viewportPainter.text(x + 12, viewport.y + viewport.height - 12, "GRADED", text);
     }
 
-    viewportPainter.text(viewport.x + 12, viewport.y + 20,
-                         controller.camera_mode() == camera::CameraRigMode::FreeFly
-                             ? "RMB free look  WASDQE fly  Shift boost  MMB pan"
-                             : "RMB orbit  MMB pan  Shift-click multi-select  T move  R rotate  X local/world",
-                         muted);
+    {
+        // Only the active tool's gestures, and only as many whole gestures as fit left of the
+        // camera preview (they used to run underneath it). Everything else is behind the
+        // "? Shortcuts" control in the corner.
+        int hintRight = viewport.x + viewport.width - 12;
+        if (cameraPreviewRect) hintRight = std::min(hintRight, cameraPreviewRect->x - 10);
+        if (controller.play_session().active()) hintRight = std::min(hintRight, viewport.x + viewport.width - 286 - 22);
+        const int hintX = viewport.x + 12;
+        std::string hint;
+        for (const std::string& gesture : controller.viewport_tool_gestures()) {
+            const std::string candidate = hint.empty() ? gesture : hint + "   " + gesture;
+            if (hintX + viewportPainter.text_width(candidate) > hintRight) break;
+            hint = candidate;
+        }
+        if (!hint.empty()) viewportPainter.text(hintX, viewport.y + 20, hint, muted);
+        const UiRect help = layout.viewportHelpButton;
+        if (help.width > 0) {
+            const bool hovered = help.contains(controller.hover_x(), controller.hover_y());
+            viewportPainter.fill(help, hovered ? rgb(48,88,142) : rgb(28,34,44));
+            viewportPainter.outline(help, border);
+            const std::string label = elide_text_to_width(painter, "? Shortcuts", help.width - 10);
+            viewportPainter.text(help.x + std::max(5, (help.width - painter.text_width(label)) / 2),
+                                 help.y + help.height / 2 + 5, label, text);
+            if (chromeHoverAllowed && hovered) {
+                const std::string key = controller.workspace().shortcuts().display_binding("help.shortcuts");
+                tooltips.push_back({help, {"Keyboard and mouse shortcuts" + (key.empty() ? std::string() : "  (" + key + ")"),
+                                           "Every binding for the viewport and the active tool"}});
+            }
+        }
+    }
 
     if (controller.play_session().active()) {
         const EditorPlaySession& session = controller.play_session();
@@ -3755,18 +3940,30 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
 
     if (layout.inspector.width > 0) {
         painter.text(layout.inspector.x + 12, layout.inspector.y + 20, "INSPECTOR", muted);
-        const VerticalClipCanvas inspectorPainter(painter, layout.inspectorContentClipY);
+        const int detailTop = layout.inspector.y + kInspectorHeaderHeight;
+        const RectClipCanvas inspectorPainter(
+            painter, {layout.inspector.x + 1, detailTop, layout.inspector.width - 2,
+                      std::max(0, layout.inspectorContentClipY - detailTop)});
+        // Detail lines are laid out from this origin; it moves up as the details scroll.
+        const int inspectorTop = layout.inspector.y - layout.inspectorScroll;
+        if (layout.inspectorScrollMax > 0) {
+            const int track = std::max(1, layout.inspectorContentClipY - detailTop);
+            const int thumb = std::max(16, track * track / (track + layout.inspectorScrollMax));
+            const int thumbY = detailTop + (track - thumb) * layout.inspectorScroll / layout.inspectorScrollMax;
+            painter.fill({layout.inspector.x + layout.inspector.width - 5, detailTop, 3, track}, panel2);
+            painter.fill({layout.inspector.x + layout.inspector.width - 5, thumbY, 3, thumb}, muted);
+        }
         if (controller.workspace().selected_object()) {
             if (const EditorObject* object = controller.workspace().document().find_object(*controller.workspace().selected_object())) {
                 const bool renamingHere = controller.text_edit().kind == TextEditKind::ObjectName;
-                inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 48,
+                inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 48,
                              renamingHere ? controller.text_edit().buffer + "_" : object->name,
                              renamingHere ? accent : text);
-                inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 69,
+                inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 69,
                              "ID " + std::to_string(object->id) + "   Voxels " + std::to_string(object->voxels->occupied_voxel_count()), muted);
                 const bool editingPosition = controller.text_edit().kind == TextEditKind::Position;
                 if (editingPosition) inspectorPainter.fill(layout.inspectorFields.empty() ? UiRect{} : layout.inspectorFields[0], rgb(40,54,74));
-                inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 91,
+                inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 91,
                              editingPosition
                                  ? "Position  " + controller.text_edit().buffer + "_"
                                  : "Position  " + std::to_string(object->transform.position.x).substr(0,5) + "  " +
@@ -3777,7 +3974,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                 const Float3 euler = multiply(quaternion_to_euler_xyz(object->transform.rotation), degreesPerRadian);
                 const bool editingRotation = controller.text_edit().kind == TextEditKind::Rotation;
                 if (editingRotation) inspectorPainter.fill(layout.inspectorFields.size() < 2 ? UiRect{} : layout.inspectorFields[1], rgb(40,54,74));
-                inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 113,
+                inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 113,
                              editingRotation
                                  ? "Rotation  " + controller.text_edit().buffer + "_"
                                  : "Rotation  " + std::to_string(euler.x).substr(0,6) + "  " +
@@ -3791,7 +3988,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         const bool editing = controller.text_edit().kind == kind;
                         if (editing && fieldIndex < layout.inspectorFields.size())
                             inspectorPainter.fill(layout.inspectorFields[fieldIndex], rgb(40,54,74));
-                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + y,
+                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + y,
                                      label + "  " + (editing ? controller.text_edit().buffer + "_" : value),
                                      editing ? accent : normalColor);
                     };
@@ -3813,16 +4010,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                   asset.style.alignment == Text3DHorizontalAlignment::Center ? "center" : "right", muted);
                     drawTextField(10U, TextEditKind::Text3DFillRule, 311, "Fill",
                                   asset.style.fillRule == Text3DFillRule::NonZero ? "nonzero" : "evenodd", muted);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 333,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 333,
                                  "Glyphs " + std::to_string(asset.glyphInstances.size()) +
                                  "   Curves " + std::to_string(asset.atlas.curveTexels.size()/2U), muted);
                     const auto dependency = inspect_text3d_font_dependency(
                         controller.project_root(), object->textFontAsset);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 355,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 355,
                                  dependency.packageReady ? "Font dependency ready"
                                                          : "Font license/dependency warning",
                                  dependency.packageReady ? muted : rgb(235,180,80));
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 377,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 377,
                                  "Hash " + std::to_string(asset.contentHash), muted);
                 } else if (object->gaborVolume) {
                     const auto& asset = *object->gaborVolume;
@@ -3832,7 +4029,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         const bool editing = controller.text_edit().kind == kind;
                         if (editing && fieldIndex < layout.inspectorFields.size())
                             inspectorPainter.fill(layout.inspectorFields[fieldIndex], rgb(40,54,74));
-                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + y,
+                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + y,
                                      label + "  " + (editing ? controller.text_edit().buffer + "_" : value),
                                      editing ? accent : muted);
                     };
@@ -3853,49 +4050,49 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     std::uint16_t maximumLod{};
                     for (const auto& primitive : asset.primitives)
                         maximumLod = std::max(maximumLod, primitive.lodLevel);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 267,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
                                  "Primitives " + std::to_string(asset.primitives.size()) +
                                  "   Levels " + std::to_string(static_cast<unsigned>(maximumLod)+1U), muted);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 289,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 289,
                                  "Source " + object->sourceAsset.generic_string(), muted);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 311,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 311,
                                  "Hash " + std::to_string(asset.contentHash), muted);
                 } else {
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 135,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 135,
                                  "Selection " + std::to_string(controller.workspace().selection_count()) +
                                  "   Axes " + (controller.transform_space() == EditorTransformSpace::World ? "World" : "Local"), text);
                     const EditorSelectionDiagnostics& diagnostics = controller.selection_diagnostics();
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 157,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 157,
                                  "Mass " + std::to_string(diagnostics.massKilograms).substr(0,8) + " kg", muted);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 179,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 179,
                                  "Components " + std::to_string(diagnostics.connectedComponents) +
                                  "   Detached " + std::to_string(diagnostics.detachedComponents), muted);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 201,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 201,
                                  "Collision boxes " + std::to_string(diagnostics.collisionBoxes), muted);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 223,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 223,
                                  "Material " + std::to_string(controller.active_material()) + "  " +
                                  (controller.materials().find(controller.active_material()) ?
                                   controller.materials().find(controller.active_material())->definition.name : "Unknown"), text);
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 245,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 245,
                                  "Object components " + std::to_string(object->components.size()), muted);
                     if (object->attachment && object->parent) {
                         const std::string socket = object->attachment->socket.empty()
                             ? std::string("default") : object->attachment->socket;
-                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 267,
+                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
                                      "Attached to " + std::to_string(*object->parent) + "  socket " + socket, muted);
                     } else {
-                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 267,
+                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
                                      "Attachment  none", muted);
                     }
                     if (object->prefabLink) {
-                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 289,
+                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 289,
                                      "Prefab " + object->prefabLink->prefabAsset.filename().generic_string() +
                                      "  overrides " + std::to_string(object->prefabLink->overrides.size()), accent);
                     } else {
-                        inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 289,
+                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 289,
                                      "Prefab  none", muted);
                     }
-                    inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 311,
+                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 311,
                                  "Layer " + std::to_string(object->layer) + "  Tags " +
                                  std::to_string(object->tags.size()) + "  Groups " +
                                  std::to_string(object->groups.size()), muted);
@@ -3909,7 +4106,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                             line += "  " + section.properties.front().displayName + "=" +
                                     format_component_value(section.properties.front().value);
                         inspectorPainter.text(layout.inspector.x + 12,
-                                     layout.inspector.y + 333 + static_cast<int>(componentIndex) * 20,
+                                     inspectorTop + 333 + static_cast<int>(componentIndex) * 20,
                                      line, section.enabled ? text : muted);
                     }
                 }
@@ -4089,8 +4286,12 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const EditorStatusMessage& status = controller.status();
     painter.text(10, layout.statusBar.y + layout.statusBar.height - 6, status.text,
                  status.error ? rgb(255,105,105) : text);
+    const auto& prefs = controller.workspace().preferences();
     const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
-                               "  Snap " + std::to_string(controller.workspace().preferences().translateSnapMeters).substr(0,5) + "m";
+        "  M " + (prefs.translateSnapEnabled ? std::to_string(prefs.translateSnapMeters).substr(0,4) : "off") +
+        "m  R " + (prefs.rotateSnapEnabled ? std::to_string(prefs.rotateSnapDegrees).substr(0,4) : "off") +
+        "°  S " + (prefs.scaleSnapEnabled ? std::to_string(prefs.scaleSnapStep).substr(0,4) : "off") +
+        (prefs.absoluteGridSnap ? "  Grid" : "  Delta");
     painter.text(width - painter.text_width(scale) - 12, layout.statusBar.y + layout.statusBar.height - 6, scale, muted);
 
     if (controller.open_menu()) {
@@ -4116,20 +4317,35 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const int labelX = popup.x + (actions[i].checkable ? 30 : 10);
             const std::uint32_t labelColor = !actions[i].enabled ? muted
                 : actions[i].dangerous ? rgb(255,125,125) : text;
-            painter.text(labelX, y + itemHeight - 7, actions[i].label, labelColor);
             std::string rightText = actions[i].shortcut;
             if (!actions[i].enabled && !actions[i].disabledReason.empty()) rightText = "Unavailable";
             else if (actions[i].visibility == MenuVisibility::Advanced && rightText.empty()) rightText = "Advanced";
             else if (rightText.empty()) rightText = actions[i].section;
-            if (!rightText.empty()) {
-                painter.text(popup.x + popup.width - painter.text_width(rightText) - 8,
-                             y + itemHeight - 7, rightText, muted);
+            // Label and right column get separate space: the right text keeps its width (up to
+            // half the row) and the label is elided before it, with the full label in a tooltip.
+            const int rowRight = popup.x + popup.width - 8;
+            if (!rightText.empty())
+                rightText = elide_text_to_width(painter, rightText, std::max(0, (rowRight - labelX) / 2));
+            const int rightX = rightText.empty() ? rowRight : rowRight - painter.text_width(rightText);
+            const std::string label = elide_text_to_width(painter, actions[i].label, std::max(0, rightX - 12 - labelX));
+            painter.text(labelX, y + itemHeight - 7, label, labelColor);
+            if (!rightText.empty()) painter.text(rightX, y + itemHeight - 7, rightText, muted);
+            const bool hovered = controller.menu_hovered_action() && *controller.menu_hovered_action() == i;
+            const bool explain = !actions[i].enabled && !actions[i].disabledReason.empty();
+            if (hovered && (label != actions[i].label || explain)) {
+                ChromeTooltip tip{row, {actions[i].label}, true};
+                if (!actions[i].shortcut.empty()) tip.lines.front() += "  (" + actions[i].shortcut + ")";
+                if (explain) tip.lines.push_back("Unavailable: " + actions[i].disabledReason);
+                tooltips.push_back(std::move(tip));
             }
         }
         if (popupLayout.canScrollUp) painter.text(popup.x + popup.width - 18, popup.y + 14, "^", muted);
         if (popupLayout.canScrollDown)
             painter.text(popup.x + popup.width - 18, popup.y + popup.height - 6, "v", muted);
     }
+
+    for (const ChromeTooltip& tip : tooltips)
+        draw_chrome_tooltip(painter, tip, {0, 0, width, height}, rgb(16,22,31), border, text, muted);
 
     if (controller.marquee().active) {
         const MarqueeState& marquee = controller.marquee();
@@ -4143,12 +4359,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     if (controller.context_menu().open) {
         const ContextMenuState& menu = controller.context_menu();
         const int itemHeight = 24;
-        const UiRect popup{menu.x, menu.y, 190, itemHeight * static_cast<int>(menu.items.size())};
+        const UiRect popup{menu.x, menu.y, menu.width, itemHeight * static_cast<int>(menu.items.size())};
         painter.fill(popup, panel2);
         painter.outline(popup, border);
         for (std::size_t i = 0; i < menu.items.size(); ++i) {
             if (menu.hoveredItem && *menu.hoveredItem == i) painter.fill(menu.itemRects[i], rgb(48,88,142));
-            painter.text(popup.x + 10, popup.y + static_cast<int>(i) * itemHeight + itemHeight - 7, menu.items[i].label, text);
+            painter.text(popup.x + 10, popup.y + static_cast<int>(i) * itemHeight + itemHeight - 7,
+                         elide_text_to_width(painter, menu.items[i].label, popup.width - 20), text);
         }
     }
 

@@ -44,6 +44,7 @@
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
+#include "dve/editor_voxel_boolean.hpp"
 #include "dve/editor_navigation_filter.hpp"
 #include "dve/editor_workspace.hpp"
 
@@ -69,9 +70,29 @@ enum class EditorToolId : std::uint8_t {
     Beam,
     Anchor,
     Rotate,
+    Scale,
 };
 
+// Tools with a toolbar button (EditorToolId::Select .. Rotate). Scale has no button; it is
+// selected by its shortcut or the Edit menu, but still has an editor_tool_info() entry.
+inline constexpr std::size_t kEditorToolCount = 9;
+// Height of the inspector's fixed "INSPECTOR" header; scrolled details never draw above it.
+inline constexpr int kInspectorHeaderHeight = 28;
+
+// What the toolbar, its tooltips and the viewport hint say about each tool. One table, so the
+// button label, the tooltip and the hint cannot drift apart.
+struct EditorToolInfo {
+    std::string_view name;         // full button label
+    std::string_view shortName;    // used when the full name does not fit the button
+    std::string_view actionId;     // command whose shortcut selects the tool; empty = none
+    std::string_view description;  // what a click or drag does
+    std::string_view accepts;      // what the tool acts on
+};
+[[nodiscard]] const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept;
+
 enum class EditorTransformSpace : std::uint8_t { World, Local };
+enum class PlacementTarget : std::uint8_t { NoTarget, Surface, VoxelCorner, VoxelEdge, VoxelFace, BoundsVertex, CollisionBoxVertex };
+enum class PivotMode : std::uint8_t { BoundsCenter, ActiveObject, WorldOrigin, Custom };
 
 enum class PointerButton : std::uint8_t { NoButton, Primary, Auxiliary, Secondary, Extra1 };
 
@@ -126,6 +147,7 @@ struct ContextMenuState {
     bool open{};
     int x{};
     int y{};
+    int width{190};
     std::vector<ContextMenuItem> items;
     std::vector<UiRect> itemRects; // parallel to items; computed once when opened
     std::optional<std::size_t> hoveredItem;
@@ -133,6 +155,8 @@ struct ContextMenuState {
 
 struct MarqueeState {
     bool active{};
+    std::optional<EditorObjectId> clickObject;
+    SelectionOperation operation{SelectionOperation::Replace};
     int startX{};
     int startY{};
     int currentX{};
@@ -241,6 +265,8 @@ struct NativeEditorLayout {
     UiRect bottomPanel{};
     UiRect statusBar{};
     std::vector<UiRect> toolbarButtons;
+    // "? Shortcuts" control in the viewport's bottom-right corner; opens the shortcut guide.
+    UiRect viewportHelpButton{};
     std::vector<UiRect> hierarchyRows;
     UiRect hierarchyFilterBox{};
     std::vector<UiRect> inspectorToggles;
@@ -248,6 +274,10 @@ struct NativeEditorLayout {
     // Inspector detail text at or below this y is not drawn (the flag toggles sit
     // there when the inspector is too short for both); always <= inspector bottom.
     int inspectorContentClipY{};
+    // Inspector detail scroll (px). Details that do not fit above the flag toggles scroll with
+    // the mouse wheel instead of being cut off; 0 when everything fits.
+    int inspectorScroll{};
+    int inspectorScrollMax{};
     std::vector<UiRect> bottomTabs;      // parallel to BottomPanelTab enumerators, in order
     UiRect assetSearchBox{};
     UiRect assetRefreshButton{};
@@ -257,6 +287,16 @@ struct NativeEditorLayout {
     UiRect aiSendButton{};
     UiRect aiApproveButton{};
     UiRect aiDenyButton{};
+};
+
+// One highlighted primary-grid cell of an open voxel Boolean preview, projected to the screen.
+struct VoxelBooleanPreviewMarker {
+    enum class Kind : std::uint8_t { Added, Removed, Repainted, Overlap };
+    Kind kind{Kind::Added};
+    float screenX{};
+    float screenY{};
+    float depth{};
+    float pixelRadius{2.0F};
 };
 
 struct EditorStatusMessage {
@@ -333,6 +373,12 @@ public:
     [[nodiscard]] std::vector<ShortcutSearchResult> shortcut_rows() const;
     [[nodiscard]] std::vector<ShortcutContext> active_shortcut_contexts() const;
     [[nodiscard]] EditorToolId active_tool() const noexcept { return activeTool_; }
+    // Current binding that selects `tool` (for example "Q"), or empty when it has none.
+    [[nodiscard]] std::string tool_shortcut_text(EditorToolId tool) const;
+    // The two or three gestures that matter for the active tool, with their current bindings,
+    // most important first. The viewport shows as many as fit; the full list is behind the
+    // "? Shortcuts" control.
+    [[nodiscard]] std::vector<std::string> viewport_tool_gestures() const;
     [[nodiscard]] MaterialId active_material() const noexcept { return activeMaterial_; }
     [[nodiscard]] EditorTransformSpace transform_space() const noexcept { return transformSpace_; }
     [[nodiscard]] EditorFocusRegion focus_region() const noexcept { return focusRegion_; }
@@ -395,6 +441,9 @@ public:
     [[nodiscard]] const TextEditState& text_edit() const noexcept { return textEdit_; }
     [[nodiscard]] const ContextMenuState& context_menu() const noexcept { return contextMenu_; }
     [[nodiscard]] const MarqueeState& marquee() const noexcept { return marquee_; }
+    [[nodiscard]] std::optional<Float3> placement_target() const noexcept { return placementPoint_; }
+    [[nodiscard]] std::optional<EditorObjectBounds> scale_preview_bounds() const noexcept { return scalePreviewBounds_; }
+    [[nodiscard]] Float3 current_pivot() const noexcept { return selection_pivot(); }
     [[nodiscard]] const HierarchyDragState& hierarchy_drag() const noexcept { return hierarchyDrag_; }
     [[nodiscard]] BottomPanelTab bottom_tab() const noexcept { return bottomTab_; }
     [[nodiscard]] std::string_view hierarchy_filter() const noexcept { return hierarchyFilter_; }
@@ -617,6 +666,24 @@ public:
     [[nodiscard]] std::vector<EditorText3DDrawItem> text3d_draw_items() const;
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
+
+    // Authored voxel Booleans (ART-060). begin_voxel_boolean opens a non-destructive preview
+    // for the current selection (active object = target A, other selected objects = operands);
+    // while it is open Enter commits, Esc cancels, 1/2/3 switch Union/Difference/Intersection,
+    // S swaps the target, O cycles the operand policy and M toggles the overlap material.
+    [[nodiscard]] VoxelBooleanSelection voxel_boolean_selection() const;
+    // Empty when a Boolean can start now; otherwise what to select or change (ART-114).
+    [[nodiscard]] std::string voxel_boolean_disabled_reason() const;
+    [[nodiscard]] bool begin_voxel_boolean(VoxelBooleanOperation operation);
+    [[nodiscard]] CommandResult commit_voxel_boolean();
+    void cancel_voxel_boolean(std::string_view reason = {});
+    // Makes the first operand the new target (A) and the old target an operand (B).
+    [[nodiscard]] bool swap_voxel_boolean_target();
+    [[nodiscard]] const EditorVoxelBooleanSession& voxel_boolean() const noexcept { return voxelBoolean_; }
+    [[nodiscard]] VoxelBooleanOperandPolicy voxel_boolean_operand_policy() const noexcept { return voxelBooleanPolicy_; }
+    void set_voxel_boolean_operand_policy(VoxelBooleanOperandPolicy policy);
+    [[nodiscard]] std::vector<std::string> voxel_boolean_preview_lines() const;
+    [[nodiscard]] std::vector<VoxelBooleanPreviewMarker> voxel_boolean_preview_markers(std::size_t limit = 20000) const;
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
     [[nodiscard]] std::vector<GizmoScreenRing> gizmo_rings() const;
     [[nodiscard]] int hit_test_gizmo_axis(int x, int y) const;
@@ -632,7 +699,7 @@ private:
     void finish_voxel_stroke() noexcept;
     void apply_voxel_tool(const EditorPickResult& pick);
     void begin_gizmo_drag(int x, int y);
-    void update_gizmo_drag(int x, int y);
+    void update_gizmo_drag(int x, int y, std::uint32_t modifiers);
     void navigate_pointer(float deltaX, float deltaY);
     void finish_gizmo_drag(bool cancel);
     void set_status(std::string text, bool error = false, float seconds = 3.0F);
@@ -658,6 +725,10 @@ private:
     void commit_text_edit();
     void cancel_text_edit() noexcept;
     void open_context_menu(int x, int y, std::optional<EditorObjectId> target, bool fromHierarchy);
+    void open_pick_list(int x, int y, const std::vector<EditorPickResult>& hits);
+    void walk_selection(std::string_view direction);
+    void update_placement_preview(int x, int y);
+    void finish_placement(bool cancel);
     void close_context_menu() noexcept;
     [[nodiscard]] std::optional<EditorObjectId> hierarchy_row_object_at(int x, int y) const;
     void handle_settings_key(std::string_view normalized, bool control, bool shift, bool alt);
@@ -673,6 +744,8 @@ private:
     [[nodiscard]] bool refresh_asset_database(bool announce = true);
     [[nodiscard]] std::filesystem::path find_default_text3d_font() const;
     [[nodiscard]] std::filesystem::path find_default_gabor_asset() const;
+    bool handle_voxel_boolean_key(std::string_view normalized, bool control, bool shift, bool alt);
+    void voxel_boolean_tick();
 
     EditorWorkspace workspace_;
     EditorMaterialLibrary materials_;
@@ -681,6 +754,9 @@ private:
     EditorAssetBrowserState assetBrowserState_{};
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
+    EditorVoxelBooleanSession voxelBoolean_{};
+    VoxelBooleanOperandPolicy voxelBooleanPolicy_{VoxelBooleanOperandPolicy::Hide};
+    std::uint64_t voxelBooleanMenuKey_{};
     std::filesystem::path projectRoot_;
     bool workspaceProjectConfigured_{};
     EditorWorkspaceState startupWorkspaceState_;
@@ -763,6 +839,7 @@ private:
     std::string configuredShortcutProfile_;
     int hoverX_{-100000};
     int hoverY_{-100000};
+    int inspectorScroll_{};
     int lastPointerX_{};
     int lastPointerY_{};
     int pointerDownX_{};
@@ -772,6 +849,16 @@ private:
     int lastClickY_{};
     std::chrono::steady_clock::time_point lastClickTime_{};
     bool doubleClickConsumed_{};
+    int lastPickX_{};
+    int lastPickY_{};
+    std::size_t pickCycleIndex_{};
+    std::chrono::steady_clock::time_point lastPickTime_{};
+    PlacementTarget placementMode_{PlacementTarget::NoTarget};
+    std::optional<Float3> placementPoint_;
+    std::vector<ObjectTransformChange> placementChanges_;
+    Float3 placementPivot_{};
+    bool alignToSurfaceNormal_{};
+    float placementOffsetMeters_{};
     bool voxelStrokeActive_{};
     std::int32_t voxelBrushRadius_{};
     std::string activePointerCommand_;
@@ -800,6 +887,14 @@ private:
     bool gizmoDragPlane_{};
     Float3 gizmoPivot_{};
     std::vector<ObjectTransformChange> gizmoChanges_;
+    std::optional<EditorObjectBounds> scalePreviewBounds_;
+    Float3 scaleFactors_{1.0F, 1.0F, 1.0F};
+    PivotMode pivotMode_{PivotMode::BoundsCenter};
+    Float3 customPivot_{};
+    std::string transformNumeric_;
+    int gizmoLastX_{};
+    int gizmoLastY_{};
+    std::uint32_t gizmoLastModifiers_{};
     // In-process clipboard for Edit > Cut/Copy/Paste. Deep-cloned objects, not references, so
     // pasting after the source object was itself deleted (undoably or not) still works, and
     // pasting more than once duplicates the same captured content each time.

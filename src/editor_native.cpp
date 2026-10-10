@@ -4448,6 +4448,8 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Beam", "Bm", "voxel.line", "Click a voxel to add a 5-voxel beam along +X.", "Voxel objects"},
         {"Anchor", "Anc", "", "Click a voxel to toggle it as a structural anchor.", "Voxel objects"},
         {"Rotate", "Rot", "transform.rotate", "Drag a gizmo ring to rotate the selection.", "Selected objects"},
+        {"Scale", "Scl", "transform.scale", "Drag a gizmo handle to resample voxel scale around the chosen pivot.",
+         "Voxel objects"},
     }};
     const auto index = static_cast<std::size_t>(tool);
     return kTools[index < kTools.size() ? index : 0U];

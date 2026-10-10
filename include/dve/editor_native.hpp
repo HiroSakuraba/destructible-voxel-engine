@@ -73,7 +73,7 @@ enum class EditorToolId : std::uint8_t {
     Scale,
 };
 
-inline constexpr std::size_t kEditorToolCount = 9;
+inline constexpr std::size_t kEditorToolCount = 10;
 // Height of the inspector's fixed "INSPECTOR" header; scrolled details never draw above it.
 inline constexpr int kInspectorHeaderHeight = 28;
 

@@ -23,16 +23,7 @@ unsigned byte(float value) noexcept {
     return static_cast<unsigned>(std::clamp(value, 0.0F, 1.0F) * 255.0F + 0.5F);
 }
 
-<<<<<<< HEAD
 std::string tool_name(EditorToolId tool) { return std::string(editor_tool_info(tool).name); }
-=======
-std::string tool_name(EditorToolId tool) {
-    static constexpr std::array<std::string_view, 10> names{
-        "Select", "Move", "Add", "Remove", "Paint", "Box", "Beam", "Anchor", "Rotate", "Scale"
-    };
-    return std::string(names[static_cast<std::size_t>(tool)]);
-}
->>>>>>> origin/main
 
 std::string mode_name(EditorMode mode) {
     switch (mode) {

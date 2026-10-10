@@ -45,6 +45,7 @@
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
 #include "dve/editor_voxel_boolean.hpp"
+#include "dve/editor_voxel_slice.hpp"
 #include "dve/editor_navigation_filter.hpp"
 #include "dve/editor_workspace.hpp"
 
@@ -281,6 +282,8 @@ struct NativeEditorLayout {
     // the mouse wheel instead of being cut off; 0 when everything fits.
     int inspectorScroll{};
     int inspectorScrollMax{};
+    bool inspectorStackedFields{};
+    int inspectorFieldCount{};
     std::vector<UiRect> bottomTabs;      // parallel to BottomPanelTab enumerators, in order
     UiRect assetSearchBox{};
     UiRect assetRefreshButton{};
@@ -695,6 +698,12 @@ public:
     void set_voxel_boolean_operand_policy(VoxelBooleanOperandPolicy policy);
     [[nodiscard]] std::vector<std::string> voxel_boolean_preview_lines() const;
     [[nodiscard]] std::vector<VoxelBooleanPreviewMarker> voxel_boolean_preview_markers(std::size_t limit = 20000) const;
+    [[nodiscard]] bool begin_voxel_slice();
+    [[nodiscard]] std::string voxel_slice_disabled_reason() const;
+    [[nodiscard]] CommandResult commit_voxel_slice();
+    void cancel_voxel_slice();
+    [[nodiscard]] const EditorVoxelSliceSession& voxel_slice() const noexcept { return voxelSlice_; }
+    [[nodiscard]] bool configure_voxel_slice(Float3 point, Float3 normal, VoxelSliceOutput output);
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
     // View-only isolation (View > Isolate Selection): toggles between showing only the
     // selection (with its children) and showing everything. Authored flags are untouched.
@@ -762,6 +771,7 @@ private:
     [[nodiscard]] bool refresh_asset_database(bool announce = true);
     [[nodiscard]] std::filesystem::path find_default_text3d_font() const;
     [[nodiscard]] std::filesystem::path find_default_gabor_asset() const;
+    bool handle_voxel_slice_key(std::string_view normalized, bool control, bool shift, bool alt);
     bool handle_voxel_boolean_key(std::string_view normalized, bool control, bool shift, bool alt);
     void voxel_boolean_tick();
 
@@ -772,6 +782,7 @@ private:
     EditorAssetBrowserState assetBrowserState_{};
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
+    EditorVoxelSliceSession voxelSlice_{};
     EditorVoxelBooleanSession voxelBoolean_{};
     VoxelBooleanOperandPolicy voxelBooleanPolicy_{VoxelBooleanOperandPolicy::Hide};
     std::uint64_t voxelBooleanMenuKey_{};

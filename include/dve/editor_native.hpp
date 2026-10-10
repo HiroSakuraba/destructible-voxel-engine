@@ -41,6 +41,7 @@
 #include "dve/editor_materials.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/editor_runtime_settings.hpp"
+#include "dve/editor_scatter.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -61,6 +62,8 @@ namespace dve::editor {
 inline constexpr std::array<std::string_view, 8> kMenuBarNames{
     "File", "Edit", "Create", "View", "Tools", "Build", "Window", "Help"};
 
+struct EditorPrefabAsset;
+
 enum class EditorToolId : std::uint8_t {
     Select,
     Translate,
@@ -72,11 +75,16 @@ enum class EditorToolId : std::uint8_t {
     Anchor,
     Rotate,
     Scale,
+    ScatterBrush,
 };
 
-// Tools with a toolbar button (EditorToolId::Select .. Rotate). Scale has no button; it is
-// selected by its shortcut or the Edit menu, but still has an editor_tool_info() entry.
-inline constexpr std::size_t kEditorToolCount = 9;
+// Tools with a toolbar button, in button order. Scale has no button; it is selected by its
+// shortcut or the Edit menu, but still has an editor_tool_info() entry.
+inline constexpr std::array<EditorToolId, 10> kToolbarTools{
+    EditorToolId::Select, EditorToolId::Translate, EditorToolId::AddVoxel, EditorToolId::RemoveVoxel,
+    EditorToolId::PaintMaterial, EditorToolId::Box, EditorToolId::Beam, EditorToolId::Anchor,
+    EditorToolId::Rotate, EditorToolId::ScatterBrush};
+inline constexpr std::size_t kEditorToolCount = kToolbarTools.size();
 // Voxel sizes Scale Voxel Size keeps objects within (1 mm .. 10 m per voxel).
 inline constexpr float kMinVoxelSizeMeters = 0.001F;
 inline constexpr float kMaxVoxelSizeMeters = 10.0F;
@@ -271,7 +279,10 @@ struct NativeEditorLayout {
     std::vector<UiRect> toolbarButtons;
     // "? Shortcuts" control in the viewport's bottom-right corner; opens the shortcut guide.
     UiRect viewportHelpButton{};
-    std::vector<UiRect> hierarchyRows;
+    std::vector<UiRect> hierarchyRows;  // one per hierarchy_order() entry; empty when scrolled out
+    int hierarchyScroll{};               // first visible row
+    int hierarchyScrollMax{};
+    int hierarchyVisibleRows{};
     UiRect hierarchyFilterBox{};
     std::vector<UiRect> inspectorToggles;
     std::vector<UiRect> inspectorFields; // [0]=Position line, [1]=Rotation line
@@ -556,7 +567,7 @@ public:
     void text_input(char character) { text_input(std::string_view(&character, 1U)); }
 
     [[nodiscard]] bool dispatch_action(std::string_view actionId);
-    void set_active_tool(EditorToolId tool) noexcept;
+    void set_active_tool(EditorToolId tool);
     void set_active_material(MaterialId material) noexcept;
     void set_transform_space(EditorTransformSpace space) noexcept { transformSpace_ = space; }
     void focus_next(bool reverse = false) noexcept;
@@ -694,6 +705,35 @@ public:
     // Makes the first operand the new target (A) and the old target an operand (B).
     [[nodiscard]] bool swap_voxel_boolean_target();
     [[nodiscard]] const EditorVoxelBooleanSession& voxel_boolean() const noexcept { return voxelBoolean_; }
+    // Scatter Objects (Create > Scatter Objects): copies of the selected objects and/or the prefab
+    // selected in the Assets panel, placed pseudo-randomly on the active (last clicked) voxel
+    // object. Preview first; Enter commits one undo step, Esc cancels. See editor_scatter.hpp.
+    bool begin_scatter();
+    bool commit_scatter();
+    void cancel_scatter(std::string reason = {});
+    void set_scatter_settings(const ScatterSettings& settings);
+    [[nodiscard]] bool scatter_active() const noexcept { return scatterActive_; }
+    [[nodiscard]] const ScatterSettings& scatter_settings() const noexcept { return scatterSettings_; }
+    [[nodiscard]] const ScatterPlan& scatter_plan() const noexcept { return scatterPlan_; }
+    [[nodiscard]] EditorObjectId scatter_target() const noexcept { return scatterTarget_; }
+    [[nodiscard]] std::vector<std::string> scatter_preview_lines() const;
+    // Why Scatter Objects cannot start with the current selection; empty when it can.
+    [[nodiscard]] std::string scatter_disabled_reason() const;
+    // Scatter Brush tool: drag paints copies of the objects (and/or Assets-panel prefab) that
+    // were selected when the tool was chosen; Shift-drag erases scatter copies; Ctrl+wheel or
+    // Ctrl-drag sets the radius. Each stroke is one undo step; strokes of one tool session share
+    // one "Scatter (N)" group.
+    struct ScatterBrushView {
+        std::optional<Float3> cursor;          // brush centre on the ground under the pointer
+        float radius{2.0F};
+        bool stroking{};
+        bool erasing{};
+        std::vector<ScatterSample> pending;    // spots this stroke will add
+        std::vector<EditorObjectId> erasing_ids;
+        std::size_t sourceCount{};
+    };
+    [[nodiscard]] ScatterBrushView scatter_brush_view() const;
+    void set_scatter_brush_radius(float meters);
     [[nodiscard]] VoxelBooleanOperandPolicy voxel_boolean_operand_policy() const noexcept { return voxelBooleanPolicy_; }
     void set_voxel_boolean_operand_policy(VoxelBooleanOperandPolicy policy);
     [[nodiscard]] std::vector<std::string> voxel_boolean_preview_lines() const;
@@ -784,6 +824,36 @@ private:
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};
     EditorVoxelBooleanSession voxelBoolean_{};
+    bool scatterActive_{};
+    EditorObjectId scatterTarget_{};
+    std::vector<EditorObjectId> scatterSourceRoots_;
+    std::shared_ptr<const EditorPrefabAsset> scatterPrefab_;
+    ScatterSettings scatterSettings_{};
+    ScatterPlan scatterPlan_{};
+    [[nodiscard]] std::vector<ScatterSource> scatter_sources() const;
+    void replan_scatter();
+    // Scatter Brush session.
+    std::vector<EditorObjectId> brushSourceRoots_;
+    std::shared_ptr<const EditorPrefabAsset> brushPrefab_;
+    std::optional<EditorObjectId> brushGroup_;
+    float brushRadius_{2.0F};
+    std::optional<Float3> brushCursor_;
+    bool brushStroking_{};
+    bool brushErasing_{};
+    bool brushResizing_{};
+    int brushResizeLastX_{};
+    std::vector<ScatterSample> brushPending_;
+    std::set<EditorObjectId> brushEraseIds_;
+    std::optional<Float3> brushLastDab_;
+    std::uint64_t brushDabCounter_{};
+    void begin_scatter_brush_session();
+    void keep_isolated_with_subtree(EditorObjectId root);
+    [[nodiscard]] std::vector<ScatterSource> brush_sources() const;
+    [[nodiscard]] bool brush_ground_accepts(EditorObjectId id) const;
+    void update_brush_cursor(int x, int y);
+    void brush_dab();
+    void finish_brush_stroke(bool cancel);
+    bool handle_scatter_key(std::string_view normalized, bool control, bool shift, bool alt);
     VoxelBooleanOperandPolicy voxelBooleanPolicy_{VoxelBooleanOperandPolicy::Hide};
     std::uint64_t voxelBooleanMenuKey_{};
     std::filesystem::path projectRoot_;
@@ -869,6 +939,7 @@ private:
     int hoverX_{-100000};
     int hoverY_{-100000};
     int inspectorScroll_{};
+    int hierarchyScroll_{};
     int lastPointerX_{};
     int lastPointerY_{};
     int pointerDownX_{};

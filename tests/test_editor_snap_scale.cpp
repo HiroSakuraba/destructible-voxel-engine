@@ -212,7 +212,8 @@ void test_tools_say_what_they_need() {
     for (const std::string& g : gestures) worldLocal = worldLocal || g.find("world/local") != std::string::npos;
     check(worldLocal, "Move keeps the world/local hint");
     for (const std::string& g : gestures) check(g.find("Ctrl") == std::string::npos, "no Ctrl snap hint: " + g);
-    check(controller.layout().toolbarButtons.size() == 9U && kEditorToolCount == 9U,
+    check(controller.layout().toolbarButtons.size() == kEditorToolCount &&
+              std::find(kToolbarTools.begin(), kToolbarTools.end(), EditorToolId::Scale) == kToolbarTools.end(),
           "Scale still has no toolbar button");
 }
 

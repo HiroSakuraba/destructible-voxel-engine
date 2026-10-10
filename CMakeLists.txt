@@ -828,6 +828,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_command.cpp
         src/editor_voxel_slice.cpp
         src/editor_voxel_boolean.cpp
+        src/editor_scatter.cpp
         src/editor_tools.cpp
         src/editor_workspace.cpp
         src/editor_workspace_state.cpp
@@ -2689,6 +2690,12 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_snap_scale_tests tests/test_editor_snap_scale.cpp)
         target_link_libraries(dve_editor_snap_scale_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_snap_scale_tests COMMAND dve_editor_snap_scale_tests)
+        add_executable(dve_editor_scatter_tests tests/test_editor_scatter.cpp)
+        target_link_libraries(dve_editor_scatter_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_scatter_tests COMMAND dve_editor_scatter_tests)
+        add_executable(dve_editor_scatter_brush_tests tests/test_editor_scatter_brush.cpp)
+        target_link_libraries(dve_editor_scatter_brush_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_scatter_brush_tests COMMAND dve_editor_scatter_brush_tests)
         add_executable(dve_editor_chrome_fit_tests tests/test_editor_chrome_fit.cpp)
         target_link_libraries(dve_editor_chrome_fit_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_chrome_fit_tests COMMAND dve_editor_chrome_fit_tests)

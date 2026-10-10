@@ -3165,7 +3165,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const bool chromeHoverAllowed = !controller.open_menu() && !controller.context_menu().open;
     for (std::size_t index = 0; index < layout.toolbarButtons.size(); ++index) {
         const UiRect rect = layout.toolbarButtons[index];
-        const auto tool = static_cast<EditorToolId>(index);
+        const auto tool = kToolbarTools[index];
         const EditorToolInfo& info = editor_tool_info(tool);
         const bool selected = controller.active_tool() == tool;
         painter.fill(rect, selected ? accent : panel2);
@@ -3203,6 +3203,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         painter.text(layout.hierarchyFilterBox.x + 6, layout.hierarchyFilterBox.y + layout.hierarchyFilterBox.height - 6,
                      filterText, filtering || !controller.hierarchy_filter().empty() ? text : muted);
         const auto order = controller.hierarchy_order();
+        if (layout.hierarchyScrollMax > 0 && !layout.hierarchyRows.empty()) {
+            const int trackTop = layout.hierarchyFilterBox.y + layout.hierarchyFilterBox.height + 6;
+            const int track = std::max(1, layout.hierarchy.y + layout.hierarchy.height - 4 - trackTop);
+            const int total = layout.hierarchyScrollMax + layout.hierarchyVisibleRows;
+            const int thumb = std::max(16, track * layout.hierarchyVisibleRows / std::max(1, total));
+            const int thumbY = trackTop + (track - thumb) * layout.hierarchyScroll / layout.hierarchyScrollMax;
+            painter.fill({layout.hierarchy.x + layout.hierarchy.width - 5, trackTop, 3, track}, panel2);
+            painter.fill({layout.hierarchy.x + layout.hierarchy.width - 5, thumbY, 3, thumb}, muted);
+        }
         std::map<EditorObjectId, std::size_t> childCounts;  // one pass, not one per row
         for (const auto& [childId, child] : controller.workspace().document().objects()) {
             (void)childId;
@@ -3210,6 +3219,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
         for (std::size_t index = 0; index < order.size() && index < layout.hierarchyRows.size(); ++index) {
             const UiRect row = layout.hierarchyRows[index];
+            if (row.width <= 0) continue;  // scrolled out of the panel
             const EditorObject* object = controller.workspace().document().find_object(order[index]);
             if (!object) continue;
             const bool selected = controller.workspace().is_selected(object->id);
@@ -3233,7 +3243,10 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const bool renaming = controller.text_edit().kind == TextEditKind::ObjectName &&
                                    controller.text_edit().objectId == object->id;
             const std::string label = renaming ? controller.text_edit().buffer + "_"
-                : prefix + object->name + (children != 0U ? "  (" + std::to_string(children) + ")" : std::string());
+                : prefix + object->name +
+                      // Skip the count when the name already ends with it ("Scatter (40)").
+                      (children != 0U && !object->name.ends_with("(" + std::to_string(children) + ")")
+                           ? "  (" + std::to_string(children) + ")" : std::string());
             const int indent = depth * 12;
             const EditorColor rowColor = renaming ? accent
                 : (object->flags.locked || controller.is_isolated_out(object->id)) ? muted : text;
@@ -3445,6 +3458,104 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             else if (line.starts_with("B")) color = rgb(255,190,110);
             viewportPainter.text(panel.x + 10, panel.y + 18 + static_cast<int>(i) * lineHeight,
                                  elide_text_to_width(viewportPainter, line, panel.width - 20), color);
+        }
+    }
+    if (controller.scatter_active()) {
+        // Each kept spot: a diamond in its source's colour, with a tick along the surface normal
+        // when copies will be aligned to it. Nothing is in the scene until Enter.
+        const std::array<EditorColor, 6> kSourceColors{
+            rgb(120,220,140), rgb(255,190,110), rgb(150,200,255), rgb(235,140,220), rgb(255,232,120), rgb(130,230,230)};
+        const ScatterSettings& scatterSettings = controller.scatter_settings();
+        for (const ScatterSample& sample : controller.scatter_plan().samples) {
+            const ScreenPoint point = project_world_to_screen(controller.camera(), viewport, sample.position);
+            if (!point.visible) continue;
+            const int x = static_cast<int>(point.x);
+            const int y = static_cast<int>(point.y);
+            const EditorColor color = kSourceColors[sample.source % kSourceColors.size()];
+            viewportPainter.line(x - 5, y, x, y - 5, color, 2);
+            viewportPainter.line(x, y - 5, x + 5, y, color, 2);
+            viewportPainter.line(x + 5, y, x, y + 5, color, 2);
+            viewportPainter.line(x, y + 5, x - 5, y, color, 2);
+            if (scatterSettings.alignToSurface) {
+                const ScreenPoint tip = project_world_to_screen(controller.camera(), viewport,
+                                                                add(sample.position, multiply(sample.normal, 0.6F)));
+                if (tip.visible) viewportPainter.line(x, y, static_cast<int>(tip.x), static_cast<int>(tip.y), color);
+            }
+        }
+        const std::vector<std::string> lines = controller.scatter_preview_lines();
+        int panelWidth = 0;
+        for (const std::string& line : lines) panelWidth = std::max(panelWidth, viewportPainter.text_width(line));
+        const int panelMaxWidth = viewport.width > 520 ? viewport.width - 200 : viewport.width - 16;
+        panelWidth = std::min(panelWidth + 20, std::max(120, panelMaxWidth));
+        const int lineHeight = 17;
+        const UiRect panel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
+        const bool canCommit = controller.scatter_plan().error.empty() && !controller.scatter_plan().samples.empty();
+        viewportPainter.fill(panel, rgb(18,23,31));
+        viewportPainter.outline(panel, canCommit ? rgb(120,220,140) : rgb(255,110,90));
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const std::string& line = lines[i];
+            EditorColor color = i == 0 ? rgb(235,242,250) : rgb(190,200,214);
+            if (line.starts_with("Cannot commit")) color = rgb(255,130,110);
+            else if (line.starts_with("Warning")) color = rgb(255,206,72);
+            viewportPainter.text(panel.x + 10, panel.y + 18 + static_cast<int>(i) * lineHeight,
+                                 elide_text_to_width(viewportPainter, line, panel.width - 20), color);
+        }
+    }
+    if (controller.active_tool() == EditorToolId::ScatterBrush) {
+        // Scatter brush: the radius as a ring lying on the ground, the spots this stroke will add
+        // (diamonds) and the copies it will erase (red crosses). Nothing changes until release.
+        const NativeEditorController::ScatterBrushView brush = controller.scatter_brush_view();
+        const EditorColor ringColor = brush.erasing ? rgb(255,110,90) : rgb(120,220,140);
+        if (brush.cursor) {
+            constexpr int kSegments = 40;
+            std::optional<ScreenPoint> previous;
+            for (int i = 0; i <= kSegments; ++i) {
+                const float angle = 6.28318531F * static_cast<float>(i) / static_cast<float>(kSegments);
+                const Float3 world{brush.cursor->x + brush.radius * std::cos(angle), brush.cursor->y + 0.05F,
+                                   brush.cursor->z + brush.radius * std::sin(angle)};
+                const ScreenPoint point = project_world_to_screen(controller.camera(), viewport, world);
+                if (point.visible && previous && previous->visible)
+                    viewportPainter.line(static_cast<int>(previous->x), static_cast<int>(previous->y),
+                                         static_cast<int>(point.x), static_cast<int>(point.y), ringColor, 2);
+                previous = point;
+            }
+            const ScreenPoint centre = project_world_to_screen(controller.camera(), viewport, *brush.cursor);
+            if (centre.visible) {
+                const int cx = static_cast<int>(centre.x);
+                const int cy = static_cast<int>(centre.y);
+                viewportPainter.line(cx - 4, cy, cx + 4, cy, ringColor);
+                viewportPainter.line(cx, cy - 4, cx, cy + 4, ringColor);
+                char label[48];
+                std::snprintf(label, sizeof label, "%s %.1f m", brush.erasing ? "Erase" : "Scatter",
+                              static_cast<double>(brush.radius));
+                viewportPainter.text(cx + 8, cy - 8, label, ringColor);
+            }
+        }
+        const std::array<EditorColor, 6> kBrushColors{
+            rgb(120,220,140), rgb(255,190,110), rgb(150,200,255), rgb(235,140,220), rgb(255,232,120), rgb(130,230,230)};
+        for (const ScatterSample& sample : brush.pending) {
+            const ScreenPoint point = project_world_to_screen(controller.camera(), viewport, sample.position);
+            if (!point.visible) continue;
+            const int x = static_cast<int>(point.x);
+            const int y = static_cast<int>(point.y);
+            const EditorColor color = kBrushColors[sample.source % kBrushColors.size()];
+            viewportPainter.line(x - 4, y, x, y - 4, color, 2);
+            viewportPainter.line(x, y - 4, x + 4, y, color, 2);
+            viewportPainter.line(x + 4, y, x, y + 4, color, 2);
+            viewportPainter.line(x, y + 4, x - 4, y, color, 2);
+        }
+        for (const EditorObjectId id : brush.erasing_ids) {
+            const EditorObject* object = controller.workspace().document().find_object(id);
+            if (!object) continue;
+            const EditorObjectBounds bounds = object_world_bounds(*object);
+            const Float3 centre{(bounds.minimum.x + bounds.maximum.x) * 0.5F, (bounds.minimum.y + bounds.maximum.y) * 0.5F,
+                                (bounds.minimum.z + bounds.maximum.z) * 0.5F};
+            const ScreenPoint point = project_world_to_screen(controller.camera(), viewport, centre);
+            if (!point.visible) continue;
+            const int x = static_cast<int>(point.x);
+            const int y = static_cast<int>(point.y);
+            viewportPainter.line(x - 5, y - 5, x + 5, y + 5, rgb(255,90,80), 2);
+            viewportPainter.line(x - 5, y + 5, x + 5, y - 5, rgb(255,90,80), 2);
         }
     }
     if (controller.voxel_slice().active()) {

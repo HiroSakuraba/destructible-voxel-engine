@@ -233,12 +233,18 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     cancel_text_edit();
     cancel_voxel_slice();
     if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Play or Simulate started");
+    cancel_scatter("Scatter preview closed: Play or Simulate started");
     close_context_menu();
     close_top_level_menu();
     activePointerCommand_.clear();
     gizmoDragging_ = false;
     gizmoChanges_.clear();
     voxelStrokeActive_ = false;
+    brushStroking_ = false;
+    brushResizing_ = false;
+    brushPending_.clear();
+    brushEraseIds_.clear();
+    brushCursor_.reset();
     marquee_ = {};
     hierarchyDrag_ = {};
     prePlayEditorCamera_ = camera_;
@@ -1867,6 +1873,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("text3d.edit_selected", singleSelection, "Select one 3D text object first.");
     enabled("text3d.commit", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     {
+        enabled("create.scatter", scatter_disabled_reason().empty(), scatter_disabled_reason());
+        enabled("scatter.commit", scatterActive_ && scatterPlan_.error.empty() && !scatterPlan_.samples.empty(),
+                scatterActive_ ? "The scatter preview found no spots on the surface." : "No scatter preview is open.");
+        enabled("scatter.cancel", scatterActive_, "No scatter preview is open.");
         const auto sliceReason = voxel_slice_disabled_reason();
         enabled("voxel.slice", sliceReason.empty(), sliceReason);
         enabled("voxel.slice_commit", voxelSlice_.active() && voxelSlice_.blocked_reason(workspace_.document()).empty(), voxelSlice_.blocked_reason(workspace_.document()));
@@ -2243,11 +2253,20 @@ void NativeEditorController::recompute_layout() {
     layout_.hierarchyRows.clear();
     if (hierarchyWidth > 0) {
         layout_.hierarchyFilterBox = {4, contentY + 4, hierarchyWidth - 8, rowHeight};
-        int rowY = contentY + rowHeight + static_cast<int>(10.0F * scale);
+        const int firstRowY = contentY + rowHeight + static_cast<int>(10.0F * scale);
         const std::size_t rowCount = hierarchy_order().size();
+        // Rows used to continue past the panel into the bottom dock once a scene had more
+        // objects than fit (easy to hit after Scatter). Only the rows that fit get a rect; the
+        // wheel scrolls the window. Rows outside it are empty rects, so they are not clickable.
+        const int visibleRows = std::max(1, (layout_.hierarchy.y + layout_.hierarchy.height - 4 - firstRowY) / rowHeight);
+        layout_.hierarchyScrollMax = std::max(0, static_cast<int>(rowCount) - visibleRows);
+        hierarchyScroll_ = std::clamp(hierarchyScroll_, 0, layout_.hierarchyScrollMax);
+        layout_.hierarchyScroll = hierarchyScroll_;
+        layout_.hierarchyVisibleRows = visibleRows;
         for (std::size_t i = 0; i < rowCount; ++i) {
-            layout_.hierarchyRows.push_back({4, rowY, hierarchyWidth - 8, rowHeight});
-            rowY += rowHeight;
+            const int visibleIndex = static_cast<int>(i) - hierarchyScroll_;
+            if (visibleIndex < 0 || visibleIndex >= visibleRows) { layout_.hierarchyRows.push_back({}); continue; }
+            layout_.hierarchyRows.push_back({4, firstRowY + visibleIndex * rowHeight, hierarchyWidth - 8, rowHeight});
         }
     }
 
@@ -3481,8 +3500,16 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
         update_gizmo_drag(x, y, modifiers);
     } else if (voxelStrokeActive_) {
         continue_voxel_stroke(x, y);
+    } else if (brushResizing_) {
+        set_scatter_brush_radius(brushRadius_ * std::pow(1.01F, static_cast<float>(x - brushResizeLastX_)));
+        brushResizeLastX_ = x;
+    } else if (brushStroking_) {
+        update_brush_cursor(x, y);
+        if (brushCursor_ && (!brushLastDab_ || length(subtract(*brushCursor_, *brushLastDab_)) >= brushRadius_ * 0.35F))
+            brush_dab();
     } else {
         update_hover(x, y);
+        if (activeTool_ == EditorToolId::ScatterBrush) update_brush_cursor(x, y);
     }
     (void)modifiers;
     lastPointerX_ = x;
@@ -3958,7 +3985,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         }
         for (std::size_t index = 0; index < layout_.toolbarButtons.size(); ++index) {
             if (layout_.toolbarButtons[index].contains(x, y)) {
-                set_active_tool(static_cast<EditorToolId>(index));
+                set_active_tool(kToolbarTools[index]);
                 focusRegion_ = EditorFocusRegion::Toolbar;
                 return;
             }
@@ -4192,6 +4219,21 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 : (modifiers & 1U) ? SelectionOperation::Add : SelectionOperation::Replace;
             marquee_.startX = marquee_.currentX = x;
             marquee_.startY = marquee_.currentY = y;
+        } else if (activeTool_ == EditorToolId::ScatterBrush) {
+            if ((modifiers & 2U) != 0U) {
+                brushResizing_ = true;
+                brushResizeLastX_ = x;
+            } else if (brushSourceRoots_.empty() && !brushPrefab_ && (modifiers & 1U) == 0U) {
+                set_status("Nothing to paint: select objects (or a prefab in Assets), then pick the Scatter tool", true, 6.0F);
+            } else {
+                brushStroking_ = true;
+                brushErasing_ = (modifiers & 1U) != 0U;
+                brushPending_.clear();
+                brushEraseIds_.clear();
+                brushLastDab_.reset();
+                update_brush_cursor(x, y);
+                brush_dab();
+            }
         } else {
             begin_voxel_stroke(x, y);
         }
@@ -4344,6 +4386,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
         }
         if (gizmoDragging_) finish_gizmo_drag(false);
         finish_voxel_stroke();
+        brushResizing_ = false;
+        if (brushStroking_) finish_brush_stroke(false);
     }
     if (dragButton_ == button) {
         dragButton_ = PointerButton::NoButton;
@@ -4428,10 +4472,21 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
         }
         return;
     }
+    if (!openMenu_ && layout_.hierarchyScrollMax > 0 && layout_.hierarchy.contains(x, y) && steps != 0.0F) {
+        hierarchyScroll_ = std::clamp(hierarchyScroll_ - static_cast<int>(std::lround(steps * 3.0F)), 0,
+                                      layout_.hierarchyScrollMax);
+        recompute_layout();
+        return;
+    }
     if (!openMenu_ && layout_.inspectorScrollMax > 0 && layout_.inspector.contains(x, y) && steps != 0.0F) {
         inspectorScroll_ = std::clamp(inspectorScroll_ - static_cast<int>(std::lround(steps * 22.0F)), 0,
                                       layout_.inspectorScrollMax);
         recompute_layout();
+        return;
+    }
+    if (!openMenu_ && !playSession_.active() && activeTool_ == EditorToolId::ScatterBrush && (modifiers & 2U) != 0U &&
+        layout_.viewport.contains(x, y) && steps != 0.0F) {
+        set_scatter_brush_radius(brushRadius_ * std::pow(1.15F, steps));
         return;
     }
     if (openMenu_) {
@@ -4468,7 +4523,7 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
 }
 
 const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
-    static constexpr std::array<EditorToolInfo, static_cast<std::size_t>(EditorToolId::Scale) + 1U> kTools{{
+    static constexpr std::array<EditorToolInfo, static_cast<std::size_t>(EditorToolId::ScatterBrush) + 1U> kTools{{
         {"Select", "Sel", "transform.select", "Click an object to select it; drag empty space to box-select.",
          "Objects"},
         {"Move", "Mov", "transform.translate", "Drag a gizmo axis to move the selection.", "Selected objects"},
@@ -4483,6 +4538,8 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Rotate", "Rot", "transform.rotate", "Drag a gizmo ring to rotate the selection.", "Selected objects"},
         {"Scale", "Scl", "transform.scale", "Drag a gizmo handle to resample voxel scale around the chosen pivot.",
          "Voxel objects"},
+        {"Scatter", "Sct", "", "Drag to paint copies of the selected objects; Shift-drag erases copies; Ctrl+wheel sets the radius.",
+         "Any visible voxel surface"},
     }};
     const auto index = static_cast<std::size_t>(tool);
     return kTools[index < kTools.size() ? index : 0U];
@@ -4560,13 +4617,32 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
             add("Drag handle to scale");
             add("Shift toggles snap");
             break;
+        case EditorToolId::ScatterBrush: {
+            if (brushSourceRoots_.empty() && !brushPrefab_) {
+                add("Select objects or a prefab, then pick this tool");
+                break;
+            }
+            char radius[48];
+            std::snprintf(radius, sizeof radius, "Ctrl+wheel radius %.1f m", static_cast<double>(brushRadius_));
+            add("Drag paint");
+            add("Shift-drag erase");
+            add(radius);
+            break;
+        }
     }
     return gestures;
 }
 
-void NativeEditorController::set_active_tool(EditorToolId tool) noexcept {
+void NativeEditorController::set_active_tool(EditorToolId tool) {
+    const EditorToolId previous = activeTool_;
+    if (previous == EditorToolId::ScatterBrush && brushStroking_) finish_brush_stroke(false);
     activeTool_ = tool;
     close_top_level_menu();
+    if (tool == EditorToolId::ScatterBrush && previous != EditorToolId::ScatterBrush) begin_scatter_brush_session();
+    if (tool != EditorToolId::ScatterBrush) {
+        brushCursor_.reset();
+        brushResizing_ = false;
+    }
 }
 void NativeEditorController::set_active_material(MaterialId material) noexcept {
     if (material != kAirMaterial && materials_.find(material)) activeMaterial_ = material;
@@ -5210,9 +5286,12 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "view.isolate_selection") return toggle_isolation();
     if (actionId == "view.frame_all") {
         const auto selection = workspace_.selected_objects();
+        const auto active = workspace_.selected_object();
         workspace_.clear_selection();
         frame_selection();
         for (EditorObjectId id : selection) workspace_.add_to_selection(id);
+        // Re-adding in id order used to make the highest id the active object.
+        if (active) workspace_.add_to_selection(*active);
         return true;
     }
     if (actionId == "view.follow_selection") { set_status("Follow selection toggled"); return true; }
@@ -6075,6 +6154,9 @@ camera_menu_dispatch_complete:
     if (actionId == "window.gabor_inspector") return openProjectCategory("Rendering");
     if (actionId == "text3d.edit_selected") return edit_selected_text3d();
     if (actionId == "text3d.commit") return commit_text3d_authoring();
+    if (actionId == "create.scatter") return begin_scatter();
+    if (actionId == "scatter.commit") return commit_scatter();
+    if (actionId == "scatter.cancel") { if (!scatterActive_) return false; cancel_scatter(); return true; }
     if (actionId == "voxel.slice") return begin_voxel_slice();
     if (actionId == "voxel.slice_commit") return commit_voxel_slice().success;
     if (actionId == "voxel.slice_cancel") { cancel_voxel_slice(); return true; }
@@ -6993,6 +7075,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     }
     if (voxelSlice_.active() && handle_voxel_slice_key(normalized, control, shift, alt)) return;
     if (voxelBoolean_.active() && handle_voxel_boolean_key(normalized, control, shift, alt)) return;
+    if (scatterActive_ && handle_scatter_key(normalized, control, shift, alt)) return;
 
     if (alt && !control && normalized.size() == 1U) {
         const char mnemonic = normalized.front();
@@ -7014,6 +7097,8 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         close_context_menu();
         if (gizmoDragging_) finish_gizmo_drag(true);
         finish_voxel_stroke();
+        if (brushStroking_) finish_brush_stroke(true);
+        brushResizing_ = false;
         return;
     }
     if (normalized == "tab") { focus_next(shift); return; }
@@ -7440,6 +7525,417 @@ EditorDocument make_native_editor_demo_document() {
 // ---------------------------------------------------------------------------------------------
 // Authored voxel Booleans (ART-060)
 
+// --- Scatter Objects -------------------------------------------------------------------------
+
+std::string NativeEditorController::scatter_disabled_reason() const {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play or Simulate before scattering.";
+    const auto target = workspace_.selected_object();
+    if (!target) return "Select the objects to scatter, then click the surface to scatter onto last.";
+    const EditorObject* surface = workspace_.document().find_object(*target);
+    if (!surface || !surface->voxels || surface->voxels->occupied_voxel_count() == 0 || surface->text3d ||
+        surface->gaborVolume)
+        return "Click a voxel object last: the last selected object is the surface to scatter onto.";
+    bool prefabSelected = false;
+    if (assetBrowserState_.selectedId) {
+        const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
+        prefabSelected = asset && asset->kind == EditorAssetKind::Prefab;
+    }
+    if (workspace_.selection_count() < 2 && !prefabSelected)
+        return "Also select what to scatter: objects in the scene, or a prefab in the Assets panel.";
+    return {};
+}
+
+std::vector<ScatterSource> NativeEditorController::scatter_sources() const {
+    std::vector<ScatterSource> sources;
+    for (const EditorObjectId root : scatterSourceRoots_) {
+        const EditorObject* object = workspace_.document().find_object(root);
+        if (object) sources.push_back({&workspace_.document(), {root}, object->name});
+    }
+    if (scatterPrefab_)
+        sources.push_back({&scatterPrefab_->templateDocument, scatterPrefab_->rootTemplateObjectIds,
+                           "prefab " + scatterPrefab_->name});
+    return sources;
+}
+
+void NativeEditorController::replan_scatter() {
+    scatterPlan_ = plan_scatter(workspace_.document(), scatterTarget_, scatter_sources().size(), scatterSettings_);
+}
+
+bool NativeEditorController::begin_scatter() {
+    const std::string reason = scatter_disabled_reason();
+    if (!reason.empty()) { set_status(reason, true, 6.0F); return false; }
+    // Scatter, Slice and Boolean previews share the panel slot at the top of the viewport, so
+    // only one is open at a time: starting one closes the others.
+    if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Scatter started");
+    cancel_voxel_slice();
+    scatterTarget_ = *workspace_.selected_object();
+    // Sources: the selected roots other than the target. A selected object inside the target's
+    // subtree, or an ancestor of it, cannot be copied onto it.
+    scatterSourceRoots_.clear();
+    const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    const auto has_selected_ancestor = [&](const EditorObject& object) {
+        for (auto parent = object.parent; parent;) {
+            if (selected.contains(*parent)) return true;
+            const EditorObject* ancestor = workspace_.document().find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+        return false;
+    };
+    const std::vector<EditorObjectId> targetSubtree = collect_editor_object_subtree_ids(workspace_.document(), std::vector<EditorObjectId>{scatterTarget_});
+    for (const EditorObjectId id : selected) {
+        if (id == scatterTarget_) continue;
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object || has_selected_ancestor(*object)) continue;
+        if (std::find(targetSubtree.begin(), targetSubtree.end(), id) != targetSubtree.end()) continue;
+        const auto sourceTree = collect_editor_object_subtree_ids(workspace_.document(), std::vector<EditorObjectId>{id});
+        if (std::find(sourceTree.begin(), sourceTree.end(), scatterTarget_) != sourceTree.end()) continue;
+        scatterSourceRoots_.push_back(id);
+    }
+    scatterPrefab_.reset();
+    if (assetBrowserState_.selectedId) {
+        const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
+        if (asset && asset->kind == EditorAssetKind::Prefab) {
+            std::string error;
+            auto prefab = load_editor_prefab(projectRoot_ / asset->relativePath, &error);
+            if (!prefab) {
+                set_status("Could not load the selected prefab: " + error, true, 6.0F);
+                return false;
+            }
+            scatterPrefab_ = std::make_shared<const EditorPrefabAsset>(std::move(*prefab));
+        }
+    }
+    if (scatterSourceRoots_.empty() && !scatterPrefab_) {
+        set_status("Nothing to scatter: select objects other than the surface, or a prefab", true, 6.0F);
+        return false;
+    }
+    scatterActive_ = true;
+    replan_scatter();
+    refresh_menu_state();
+    set_status("Scatter preview: Enter commits, Esc cancels");
+    return true;
+}
+
+void NativeEditorController::set_scatter_settings(const ScatterSettings& settings) {
+    scatterSettings_ = settings;
+    scatterSettings_.count = std::clamp<std::uint32_t>(settings.count, 1U, kMaxScatterCount);
+    scatterSettings_.minSpacingMeters = std::clamp(settings.minSpacingMeters, kMinScatterSpacingMeters,
+                                                   kMaxScatterSpacingMeters);
+    if (scatterActive_) replan_scatter();
+}
+
+void NativeEditorController::cancel_scatter(std::string reason) {
+    if (!scatterActive_) return;
+    scatterActive_ = false;
+    scatterPlan_ = {};
+    scatterPrefab_.reset();
+    scatterSourceRoots_.clear();
+    refresh_menu_state();
+    set_status(reason.empty() ? "Scatter cancelled; nothing changed" : std::move(reason));
+}
+
+bool NativeEditorController::commit_scatter() {
+    if (!scatterActive_) { set_status("No scatter preview is open", true); return false; }
+    replan_scatter();  // the scene may have changed since the preview was drawn
+    ScatterBuildResult build = build_scatter_command(workspace_.document(), scatterTarget_, scatterPlan_,
+                                                     scatter_sources(), scatterSettings_);
+    if (!build.command) {
+        set_status(build.error.empty() ? "Scatter failed" : build.error, true, 6.0F);
+        return false;
+    }
+    const std::size_t copies = scatterPlan_.samples.size();
+    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(build.command));
+    if (!result.success) {
+        set_status(result.message, true, 6.0F);
+        return false;
+    }
+    scatterActive_ = false;
+    scatterPlan_ = {};
+    scatterPrefab_.reset();
+    scatterSourceRoots_.clear();
+    keep_isolated_with_subtree(build.groupId);
+    workspace_.select_object(build.groupId);
+    recompute_layout();
+    refresh_menu_state();
+    set_status("Scattered " + std::to_string(copies) + " copies (" + std::to_string(build.objectCount) +
+               " objects) under one group; Undo removes them all");
+    return true;
+}
+
+std::vector<std::string> NativeEditorController::scatter_preview_lines() const {
+    std::vector<std::string> lines;
+    if (!scatterActive_) return lines;
+    const EditorObject* target = workspace_.document().find_object(scatterTarget_);
+    lines.push_back("Scatter Objects - preview (scene unchanged)");
+    lines.push_back("Surface: " + (target ? target->name : std::string("(missing)")));
+    std::string sources;
+    for (const ScatterSource& source : scatter_sources()) sources += (sources.empty() ? "" : ", ") + source.label;
+    lines.push_back("Copies of: " + sources);
+    const auto meters = [](float value) {
+        char buffer[32];
+        std::snprintf(buffer, sizeof buffer, "%.2f m", static_cast<double>(value));
+        return std::string(buffer);
+    };
+    lines.push_back("Placed " + std::to_string(scatterPlan_.samples.size()) + " of " +
+                    std::to_string(scatterSettings_.count) + "   spacing " + meters(scatterSettings_.minSpacingMeters) +
+                    "   seed " + std::to_string(scatterSettings_.seed));
+    lines.push_back(std::string("Align to surface: ") + (scatterSettings_.alignToSurface ? "on" : "off"));
+    if (!scatterPlan_.error.empty()) {
+        lines.push_back("Cannot commit: " + scatterPlan_.error);
+    } else if (scatterPlan_.samples.size() < scatterSettings_.count) {
+        lines.push_back("Warning: room for " + std::to_string(scatterPlan_.samples.size()) + " (" +
+                        std::to_string(scatterPlan_.tooClose) + " spots too close, " +
+                        std::to_string(scatterPlan_.missedSurface) + " off the surface); lower spacing or count");
+    }
+    lines.push_back("Enter commit  Esc cancel  [ ] count  Shift+[ ] spacing  N new seed  A align");
+    return lines;
+}
+
+bool NativeEditorController::handle_scatter_key(std::string_view normalized, bool control, bool shift, bool alt) {
+    if (control || alt) return false;
+    ScatterSettings settings = scatterSettings_;
+    if (normalized == "escape") { cancel_scatter(); return true; }
+    if (normalized == "return" || normalized == "enter" || normalized == "kp_enter") { (void)commit_scatter(); return true; }
+    if (normalized == "bracketleft" || normalized == "[" || normalized == "bracketright" || normalized == "]") {
+        const bool up = normalized == "bracketright" || normalized == "]";
+        if (shift) settings.minSpacingMeters = std::max(kMinScatterSpacingMeters, settings.minSpacingMeters + (up ? 0.25F : -0.25F));
+        else settings.count = up ? settings.count + 5U : (settings.count > 5U ? settings.count - 5U : 1U);
+        set_scatter_settings(settings);
+        return true;
+    }
+    if (normalized == "n") { ++settings.seed; set_scatter_settings(settings); return true; }
+    if (normalized == "a") { settings.alignToSurface = !settings.alignToSurface; set_scatter_settings(settings); return true; }
+    return false;
+}
+
+namespace {
+// The scatter group an object was painted or filled into, if any (the nearest tagged ancestor).
+std::optional<EditorObjectId> enclosing_scatter_group(const EditorDocument& document, EditorObjectId id) {
+    const EditorObject* object = document.find_object(id);
+    for (auto parent = object ? object->parent : std::nullopt; parent;) {
+        const EditorObject* ancestor = document.find_object(*parent);
+        if (!ancestor) break;
+        if (is_scatter_group(*ancestor)) return ancestor->id;
+        parent = ancestor->parent;
+    }
+    return std::nullopt;
+}
+
+// Where a scatter copy stands: the bottom centre of its world bounds.
+Float3 scatter_copy_foot(const EditorObject& object) {
+    const EditorObjectBounds bounds = object_world_bounds(object);
+    return {(bounds.minimum.x + bounds.maximum.x) * 0.5F, bounds.minimum.y, (bounds.minimum.z + bounds.maximum.z) * 0.5F};
+}
+
+std::string scatter_group_name(std::size_t copies) { return "Scatter (" + std::to_string(copies) + ")"; }
+bool has_generated_scatter_name(const EditorObject& group) { return group.name.starts_with("Scatter ("); }
+} // namespace
+
+void NativeEditorController::keep_isolated_with_subtree(EditorObjectId root) {
+    // While View > Isolate Selection is on, objects outside the isolated set are hidden and
+    // cannot be picked. Scatter output made under isolation joins the set, so a commit or a
+    // stroke never adds copies the user cannot see (or erase).
+    auto& isolated = viewportSettings_.isolatedObjects;
+    if (isolated.empty()) return;
+    for (const EditorObjectId id : collect_editor_object_subtree_ids(workspace_.document(), std::vector<EditorObjectId>{root}))
+        isolated.insert(id);
+}
+
+void NativeEditorController::begin_scatter_brush_session() {
+    // Sources are what was selected when the tool was picked; a new session gets a new group.
+    brushSourceRoots_.clear();
+    brushPrefab_.reset();
+    brushGroup_.reset();
+    brushPending_.clear();
+    brushEraseIds_.clear();
+    brushStroking_ = false;
+    brushResizing_ = false;
+    const EditorDocument& document = workspace_.document();
+    const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    for (const EditorObjectId id : selected) {
+        const EditorObject* object = document.find_object(id);
+        if (!object || is_scatter_group(*object)) continue;
+        bool nested = false;
+        for (auto parent = object->parent; parent && !nested;) {
+            nested = selected.contains(*parent);
+            const EditorObject* ancestor = document.find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+        if (!nested) brushSourceRoots_.push_back(id);
+    }
+    if (assetBrowserState_.selectedId) {
+        const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
+        if (asset && asset->kind == EditorAssetKind::Prefab) {
+            std::string error;
+            auto prefab = load_editor_prefab(projectRoot_ / asset->relativePath, &error);
+            if (prefab) brushPrefab_ = std::make_shared<const EditorPrefabAsset>(std::move(*prefab));
+            else set_status("Scatter brush: could not load the selected prefab: " + error, true, 6.0F);
+        }
+    }
+    const std::size_t count = brush_sources().size();
+    if (count == 0) {
+        set_status("Scatter brush: select the objects to paint (or a prefab in Assets), then pick the tool again", true, 6.0F);
+        return;
+    }
+    set_status("Scatter brush: painting " + std::to_string(count) + " source(s); Shift-drag erases, Ctrl+wheel sets the radius");
+}
+
+std::vector<ScatterSource> NativeEditorController::brush_sources() const {
+    std::vector<ScatterSource> sources;
+    for (const EditorObjectId root : brushSourceRoots_) {
+        const EditorObject* object = workspace_.document().find_object(root);
+        if (object) sources.push_back({&workspace_.document(), {root}, object->name});
+    }
+    if (brushPrefab_)
+        sources.push_back({&brushPrefab_->templateDocument, brushPrefab_->rootTemplateObjectIds, "prefab " + brushPrefab_->name});
+    return sources;
+}
+
+bool NativeEditorController::brush_ground_accepts(EditorObjectId id) const {
+    const EditorDocument& document = workspace_.document();
+    const EditorObject* object = document.find_object(id);
+    if (!object || !object->flags.visible || !object->voxels || is_isolated_out(id)) return false;
+    if (enclosing_scatter_group(document, id)) return false;  // never paint onto earlier copies
+    for (auto cursor = std::optional<EditorObjectId>(id); cursor;) {
+        if (std::find(brushSourceRoots_.begin(), brushSourceRoots_.end(), *cursor) != brushSourceRoots_.end())
+            return false;  // nor onto the originals being copied
+        const EditorObject* current = document.find_object(*cursor);
+        cursor = current ? current->parent : std::nullopt;
+    }
+    return true;
+}
+
+void NativeEditorController::update_brush_cursor(int x, int y) {
+    brushCursor_.reset();
+    if (playSession_.active() || !layout_.viewport.contains(x, y)) return;
+    const ViewportRay ray = make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y));
+    for (const EditorPickResult& hit : pick_editor_document_all(workspace_.document(), ray, 10000.0F,
+                                                                &viewportSettings_.isolatedObjects)) {
+        if (brush_ground_accepts(hit.objectId)) { brushCursor_ = hit.worldPosition; return; }
+    }
+}
+
+void NativeEditorController::brush_dab() {
+    if (!brushStroking_ || !brushCursor_) return;
+    brushLastDab_ = brushCursor_;
+    const EditorDocument& document = workspace_.document();
+    const float radiusSquared = brushRadius_ * brushRadius_;
+    if (brushErasing_) {
+        for (const auto& [id, object] : document.objects()) {
+            if (!object.parent || object.flags.locked || is_isolated_out(id)) continue;
+            const EditorObject* parent = document.find_object(*object.parent);
+            if (!parent || !is_scatter_group(*parent)) continue;
+            const Float3 foot = scatter_copy_foot(object);
+            const float dx = foot.x - brushCursor_->x;
+            const float dz = foot.z - brushCursor_->z;
+            if (dx * dx + dz * dz <= radiusSquared && std::abs(foot.y - brushCursor_->y) <= brushRadius_ * 2.0F)
+                brushEraseIds_.insert(id);
+        }
+        return;
+    }
+    const std::size_t sourceCount = brush_sources().size();
+    if (sourceCount == 0) return;
+    std::vector<Float3> occupied;
+    for (const auto& [id, object] : document.objects()) {
+        if (!object.parent) continue;
+        const EditorObject* parent = document.find_object(*object.parent);
+        if (parent && is_scatter_group(*parent)) occupied.push_back(scatter_copy_foot(object));
+    }
+    for (const ScatterSample& sample : brushPending_) occupied.push_back(sample.position);
+    ScatterDabSettings settings;
+    settings.minSpacingMeters = scatterSettings_.minSpacingMeters;
+    settings.seed = scatterSettings_.seed * 0x9E3779B97F4A7C15ULL + (++brushDabCounter_);
+    settings.sourceCount = sourceCount;
+    settings.probeMeters = std::clamp(brushRadius_ * 0.1F, 0.1F, 1.0F);
+    const auto ground = [this](EditorObjectId id) { return brush_ground_accepts(id); };
+    for (ScatterSample& sample : plan_scatter_dab(document, *brushCursor_, brushRadius_, settings, occupied, ground))
+        brushPending_.push_back(sample);
+}
+
+void NativeEditorController::finish_brush_stroke(bool cancel) {
+    const bool erasing = brushErasing_;
+    brushStroking_ = false;
+    brushErasing_ = false;
+    brushLastDab_.reset();
+    std::vector<ScatterSample> pending = std::move(brushPending_);
+    std::set<EditorObjectId> eraseIds = std::move(brushEraseIds_);
+    brushPending_.clear();
+    brushEraseIds_.clear();
+    if (cancel) { set_status("Scatter stroke cancelled; nothing changed"); return; }
+    EditorDocument& document = workspace_.document();
+    if (erasing) {
+        if (eraseIds.empty()) return;
+        // Remaining copy count per affected group, so generated "Scatter (N)" names stay true.
+        std::map<EditorObjectId, std::size_t> removedPerGroup;
+        for (const EditorObjectId id : eraseIds)
+            if (const EditorObject* object = document.find_object(id); object && object->parent) ++removedPerGroup[*object->parent];
+        auto command = std::make_unique<CompoundCommand>("Scatter brush erase");
+        command->add(std::make_unique<RemoveObjectsCommand>(std::vector<EditorObjectId>(eraseIds.begin(), eraseIds.end()),
+                                                            "Erase scatter copies"));
+        for (const auto& [groupId, removed] : removedPerGroup) {
+            const EditorObject* group = document.find_object(groupId);
+            if (!group || !has_generated_scatter_name(*group)) continue;
+            const std::size_t remaining = document.children_of(groupId).size() - removed;
+            command->add(std::make_unique<RenameObjectCommand>(groupId, group->name, scatter_group_name(remaining)));
+        }
+        const CommandResult result = workspace_.commands().execute(document, std::move(command));
+        if (!result.success) { set_status(result.message, true, 6.0F); return; }
+        workspace_.prune_selection();
+        recompute_layout();
+        refresh_menu_state();
+        set_status("Erased " + std::to_string(eraseIds.size()) + " scatter copies; Undo restores them");
+        return;
+    }
+    if (pending.empty()) return;
+    const std::vector<ScatterSource> sources = brush_sources();
+    auto command = std::make_unique<CompoundCommand>("Scatter brush stroke");
+    // One group per tool session; make a new one if Undo (or a delete) took the old one away.
+    const EditorObject* group = brushGroup_ ? document.find_object(*brushGroup_) : nullptr;
+    if (group && !is_scatter_group(*group)) group = nullptr;
+    EditorObjectId groupId{};
+    if (group) {
+        groupId = group->id;
+        if (has_generated_scatter_name(*group))
+            command->add(std::make_unique<RenameObjectCommand>(
+                groupId, group->name, scatter_group_name(document.children_of(groupId).size() + pending.size())));
+    } else {
+        groupId = document.allocate_object_id();
+        command->add(std::make_unique<AddObjectCommand>(make_scatter_group(groupId, pending.size(), pending.front().position),
+                                                        "Scatter group"));
+    }
+    const ScatterCopiesResult copies =
+        append_scatter_copies(*command, document, groupId, pending, sources, scatterSettings_.alignToSurface);
+    if (!copies.error.empty()) { set_status(copies.error, true, 6.0F); return; }
+    const CommandResult result = workspace_.commands().execute(document, std::move(command));
+    if (!result.success) { set_status(result.message, true, 6.0F); return; }
+    brushGroup_ = groupId;
+    keep_isolated_with_subtree(groupId);
+    recompute_layout();
+    refresh_menu_state();
+    set_status("Painted " + std::to_string(pending.size()) + " copies into " +
+               (document.find_object(groupId) ? document.find_object(groupId)->name : std::string("the scatter group")) +
+               "; Undo removes this stroke");
+}
+
+NativeEditorController::ScatterBrushView NativeEditorController::scatter_brush_view() const {
+    ScatterBrushView view;
+    view.cursor = activeTool_ == EditorToolId::ScatterBrush ? brushCursor_ : std::nullopt;
+    view.radius = brushRadius_;
+    view.stroking = brushStroking_;
+    view.erasing = brushErasing_;
+    view.pending = brushPending_;
+    view.erasing_ids.assign(brushEraseIds_.begin(), brushEraseIds_.end());
+    view.sourceCount = brush_sources().size();
+    return view;
+}
+
+void NativeEditorController::set_scatter_brush_radius(float meters) {
+    if (!std::isfinite(meters)) return;
+    brushRadius_ = std::clamp(meters, 0.25F, 50.0F);
+    char text[64];
+    std::snprintf(text, sizeof text, "Scatter brush radius %.2f m", static_cast<double>(brushRadius_));
+    set_status(text);
+}
+
 VoxelBooleanSelection NativeEditorController::voxel_boolean_selection() const {
     return evaluate_voxel_boolean_selection(workspace_.document(), workspace_.selected_objects(),
                                             workspace_.selected_object(), voxelBooleanPolicy_);
@@ -7464,6 +7960,7 @@ bool NativeEditorController::begin_voxel_boolean(VoxelBooleanOperation operation
         set_status(reason, true, 6.0F);
         return false;
     }
+    cancel_scatter("Scatter preview closed: Boolean started");
     cancel_text_edit();
     close_context_menu();
     if (gizmoDragging_) finish_gizmo_drag(true);
@@ -7660,6 +8157,7 @@ bool NativeEditorController::begin_voxel_slice() {
         return false;
     }
     cancel_voxel_boolean();
+    cancel_scatter("Scatter preview closed: Slice started");
     cancel_text_edit();
     close_context_menu();
     if (gizmoDragging_)

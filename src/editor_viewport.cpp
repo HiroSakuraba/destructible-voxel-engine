@@ -364,8 +364,8 @@ EditorObjectBounds object_world_bounds(const EditorObject& object, const RigidTr
     return result;
 }
 
-std::optional<EditorPickResult> pick_editor_document(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance) {
-    std::optional<EditorPickResult> best;
+std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance) {
+    std::vector<EditorPickResult> hits;
     const Float3 worldDirection = safe_normalize(ray.direction, {0,0,-1});
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible) continue;
@@ -380,17 +380,17 @@ std::optional<EditorPickResult> pick_editor_document(const EditorDocument& docum
             if (ray_aabb_interval(localOrigin, localDirection, localMinimum,
                                   localMaximum, enter, exit)) {
                 const float worldDistance = std::clamp(enter, 0.0F, maximumWorldDistance);
-                if ((!best || worldDistance < best->worldDistance) && worldDistance <= maximumWorldDistance) {
+                if (worldDistance <= maximumWorldDistance) {
                     const Float3 localHit = add(localOrigin, multiply(localDirection, worldDistance));
                     const Float3 localNormal = box_surface_normal(localHit, localMinimum, localMaximum);
                     const auto material = object.text3d
                         ? static_cast<MaterialId>(std::min<std::uint32_t>(
                             object.text3d->style.faceMaterialId, std::numeric_limits<MaterialId>::max()))
                         : kAirMaterial;
-                    best = EditorPickResult{
+                    hits.push_back(EditorPickResult{
                         id, {}, {}, material, transform_point(object.transform, localHit),
                         safe_normalize(transform_vector(object.transform, localNormal), {0.0F, 1.0F, 0.0F}),
-                        worldDistance};
+                        worldDistance});
                 }
             }
             continue;
@@ -417,12 +417,11 @@ std::optional<EditorPickResult> pick_editor_document(const EditorDocument& docum
                                         segmentWorld * inverseScale);
         if (!hit) continue;
         const float worldDistance = startWorld + hit->distance * object.voxelSizeMeters;
-        if (best && worldDistance >= best->worldDistance) continue;
         const Float3 normalizedLocalDirection = safe_normalize(localDirectionVoxels, {0,0,-1});
         const Float3 localHitVoxels = add(clippedOriginVoxels, multiply(normalizedLocalDirection, hit->distance));
         const Float3 localHitMeters = multiply(localHitVoxels, object.voxelSizeMeters);
         const Float3 localNormal{static_cast<float>(hit->normal.x), static_cast<float>(hit->normal.y), static_cast<float>(hit->normal.z)};
-        best = EditorPickResult{
+        hits.push_back(EditorPickResult{
             id,
             hit->voxel,
             hit->normal,
@@ -430,9 +429,18 @@ std::optional<EditorPickResult> pick_editor_document(const EditorDocument& docum
             transform_point(object.transform, localHitMeters),
             safe_normalize(transform_vector(object.transform, localNormal), {0,1,0}),
             worldDistance,
-        };
+        });
     }
-    return best;
+    std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+        return a.worldDistance == b.worldDistance ? a.objectId < b.objectId : a.worldDistance < b.worldDistance;
+    });
+    return hits;
+}
+
+std::optional<EditorPickResult> pick_editor_document(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance) {
+    auto hits = pick_editor_document_all(document, ray, maximumWorldDistance);
+    if (hits.empty()) return std::nullopt;
+    return hits.front();
 }
 
 namespace {

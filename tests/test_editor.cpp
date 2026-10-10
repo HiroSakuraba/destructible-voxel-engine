@@ -916,6 +916,107 @@ void test_marquee_select() {
     require(controller.workspace().selection_count() == 0, "a plain click on empty space should clear the selection");
 }
 
+void test_interaction_core() {
+    EditorWorkspace workspace(make_two_object_document());
+    workspace.apply_selection({1}, SelectionOperation::Replace);
+    workspace.apply_selection({2}, SelectionOperation::Add);
+    require(workspace.selection_count() == 2, "add selection lost the first object");
+    workspace.apply_selection({1}, SelectionOperation::Subtract);
+    require(workspace.selection_count() == 1 && workspace.is_selected(2), "subtract selection removed the wrong object");
+    workspace.apply_selection({1, 2}, SelectionOperation::Toggle);
+    require(workspace.selection_count() == 1 && workspace.is_selected(1), "toggle selection was not symmetric");
+    workspace.apply_selection({2}, SelectionOperation::Intersect);
+    require(workspace.selection_count() == 0, "intersect should clear a disjoint selection");
+
+    EditorPreferences prefs;
+    prefs.absoluteGridSnap = true;
+    prefs.rotateSnapEnabled = false;
+    prefs.scaleSnapStep = 0.25F;
+    const auto restored = EditorPreferences::parse(prefs.serialize());
+    require(restored && restored->absoluteGridSnap && !restored->rotateSnapEnabled &&
+        std::abs(restored->scaleSnapStep - 0.25F) < 1.0e-6F,
+        "snap controls did not survive preference serialization");
+
+    EditorDocument depth("Depth hits");
+    EditorObject front(1, "Front");
+    front.voxelSizeMeters = 1.0F;
+    front.voxels->set_voxel({0, 0, 0}, 1);
+    depth.add_object(std::move(front));
+    EditorObject back(2, "Back");
+    back.voxelSizeMeters = 1.0F;
+    back.transform.position = {2.0F, 0.0F, 0.0F};
+    back.voxels->set_voxel({0, 0, 0}, 1);
+    depth.add_object(std::move(back));
+    const auto hits = pick_editor_document_all(depth, {{-3.0F, 0.5F, 0.5F}, {1.0F, 0.0F, 0.0F}});
+    require(hits.size() == 2 && hits[0].objectId == 1 && hits[1].objectId == 2,
+        "deep pick did not preserve front-to-back order");
+
+    NativeEditorController controller{EditorWorkspace(make_two_object_document())};
+    require(controller.dispatch_action("view.toggle_move_snap") &&
+        !controller.workspace().preferences().translateSnapEnabled, "move snap toggle did not apply");
+    require(controller.dispatch_action("view.toggle_absolute_grid") &&
+        controller.workspace().preferences().absoluteGridSnap, "absolute grid toggle did not apply");
+    controller.workspace().select_object(1);
+    require(controller.dispatch_action("transform.scale") && controller.active_tool() == EditorToolId::Scale,
+        "scale action did not select a usable tool");
+    require(controller.dispatch_action("transform.pivot_origin") &&
+        length(controller.current_pivot()) < 1.0e-6F, "world origin pivot did not apply");
+
+    controller.resize(1280, 800);
+    controller.workspace().clear_selection();
+    controller.frame_selection();
+    controller.workspace().select_object(1);
+    const EditorObjectBounds targetBounds = object_world_bounds(*controller.workspace().document().find_object(2));
+    const Float3 targetCenter = multiply(add(targetBounds.minimum, targetBounds.maximum), 0.5F);
+    const ScreenPoint projected = project_world_to_screen(controller.camera(), controller.layout().viewport, targetCenter);
+    require(projected.visible, "placement target is outside framed viewport");
+    require(controller.dispatch_action("transform.place_surface"), "surface placement did not start");
+    const auto beforePlace = controller.workspace().document().find_object(1)->transform.position;
+    controller.pointer_move(static_cast<int>(projected.x), static_cast<int>(projected.y));
+    require(controller.placement_target().has_value(), "surface placement has no target preview");
+    controller.pointer_down(PointerButton::Primary, static_cast<int>(projected.x), static_cast<int>(projected.y));
+    require(length(subtract(controller.workspace().document().find_object(1)->transform.position, beforePlace)) > 1.0F,
+        "surface placement did not commit the target position");
+    require(controller.workspace().commands().undo(controller.workspace().document()).success,
+        "surface placement could not be undone");
+
+    require(controller.dispatch_action("transform.pivot_bounds"), "bounds pivot could not be restored");
+    const auto axes = controller.gizmo_axes();
+    require(!axes.empty() && axes[0].start.visible && axes[0].end.visible, "scale gizmo axis missing");
+    const auto& axis = axes[0];
+    const int sx = static_cast<int>(axis.end.x), sy = static_cast<int>(axis.end.y);
+    const float dx = axis.end.x - axis.start.x, dy = axis.end.y - axis.start.y;
+    const float magnitude = std::max(1.0F, std::hypot(dx, dy));
+    const auto beforeVoxels = controller.workspace().document().find_object(1)->voxels->occupied_voxel_count();
+    controller.pointer_down(PointerButton::Primary, sx, sy);
+    controller.pointer_move(sx + static_cast<int>(100.0F * dx / magnitude),
+                            sy + static_cast<int>(100.0F * dy / magnitude));
+    require(controller.scale_preview_bounds().has_value(), "scale drag has no bounds preview");
+    controller.key_down("2", false, false, false);
+    const auto exactBounds = controller.scale_preview_bounds();
+    require(exactBounds && std::abs((exactBounds->maximum.x - exactBounds->minimum.x) - 2.0F) < 0.01F,
+        "typed scale factor did not override the drag increment");
+    controller.pointer_up(PointerButton::Primary, sx + static_cast<int>(100.0F * dx / magnitude),
+                          sy + static_cast<int>(100.0F * dy / magnitude));
+    require(controller.workspace().document().find_object(1)->voxels->occupied_voxel_count() > beforeVoxels,
+        "scale drag did not resample the voxel object");
+    require(controller.workspace().commands().undo(controller.workspace().document()).success &&
+        controller.workspace().document().find_object(1)->voxels->occupied_voxel_count() == beforeVoxels,
+        "scale resample undo did not restore voxels");
+
+    EditorDocument hierarchy = make_two_object_document();
+    hierarchy.find_object(2)->parent = 1;
+    NativeEditorController walker{EditorWorkspace(std::move(hierarchy))};
+    walker.resize(1280, 800);
+    const UiRect view = walker.layout().viewport;
+    walker.pointer_move(view.x + view.width / 2, view.y + view.height / 2);
+    walker.workspace().select_object(2);
+    walker.key_down("up", false, false, true);
+    require(walker.workspace().selected_object() == 1, "pick walk did not reach parent");
+    walker.key_down("down", false, false, true);
+    require(walker.workspace().selected_object() == 2, "pick walk did not reach child");
+}
+
 void test_context_menu_and_hierarchy_filter() {
     NativeEditorController controller{EditorWorkspace(make_two_object_document())};
     controller.resize(1280, 800);
@@ -1343,6 +1444,7 @@ int main() {
         test_snap_and_view_presets();
         test_quit_confirmation();
         test_marquee_select();
+        test_interaction_core();
         test_context_menu_and_hierarchy_filter();
         test_menu_navigation_and_small_window_layout();
         test_hierarchy_drag_reparent();

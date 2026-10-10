@@ -23,8 +23,8 @@ unsigned byte(float value) noexcept {
 }
 
 std::string tool_name(EditorToolId tool) {
-    static constexpr std::array<std::string_view, 9> names{
-        "Select", "Move", "Add", "Remove", "Paint", "Box", "Beam", "Anchor", "Rotate"
+    static constexpr std::array<std::string_view, 10> names{
+        "Select", "Move", "Add", "Remove", "Paint", "Box", "Beam", "Anchor", "Rotate", "Scale"
     };
     return std::string(names[static_cast<std::size_t>(tool)]);
 }
@@ -3279,6 +3279,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             viewportPainter.outline({static_cast<int>(hover.x)-7,static_cast<int>(hover.y)-7,15,15},rgb(255,255,255));
         }
     }
+    if (const auto point = controller.placement_target()) {
+        const ScreenPoint target = project_world_to_screen(controller.camera(), viewport, *point);
+        if (target.visible) {
+            const int x = static_cast<int>(target.x), y = static_cast<int>(target.y);
+            viewportPainter.line(x - 9, y, x + 9, y, rgb(255,219,89), 2);
+            viewportPainter.line(x, y - 9, x, y + 9, rgb(255,219,89), 2);
+        }
+    }
+    if (const auto bounds = controller.scale_preview_bounds())
+        draw_world_box(viewportPainter, controller, *bounds, rgb(255,219,89));
     for (const GizmoScreenAxis& axis : controller.gizmo_axes()) {
         if (!axis.start.visible || !axis.end.visible) continue;
         const EditorColor axisColor = axis.axis == 1 ? rgb(244,79,83) : axis.axis == 2 ? rgb(84,220,121) : rgb(72,139,255);
@@ -3991,8 +4001,12 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const EditorStatusMessage& status = controller.status();
     painter.text(10, layout.statusBar.y + layout.statusBar.height - 6, status.text,
                  status.error ? rgb(255,105,105) : text);
+    const auto& prefs = controller.workspace().preferences();
     const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
-                               "  Snap " + std::to_string(controller.workspace().preferences().translateSnapMeters).substr(0,5) + "m";
+        "  M " + (prefs.translateSnapEnabled ? std::to_string(prefs.translateSnapMeters).substr(0,4) : "off") +
+        "m  R " + (prefs.rotateSnapEnabled ? std::to_string(prefs.rotateSnapDegrees).substr(0,4) : "off") +
+        "°  S " + (prefs.scaleSnapEnabled ? std::to_string(prefs.scaleSnapStep).substr(0,4) : "off") +
+        (prefs.absoluteGridSnap ? "  Grid" : "  Delta");
     painter.text(width - painter.text_width(scale) - 12, layout.statusBar.y + layout.statusBar.height - 6, scale, muted);
 
     if (controller.open_menu()) {
@@ -4045,12 +4059,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     if (controller.context_menu().open) {
         const ContextMenuState& menu = controller.context_menu();
         const int itemHeight = 24;
-        const UiRect popup{menu.x, menu.y, 190, itemHeight * static_cast<int>(menu.items.size())};
+        const UiRect popup{menu.x, menu.y, menu.width, itemHeight * static_cast<int>(menu.items.size())};
         painter.fill(popup, panel2);
         painter.outline(popup, border);
         for (std::size_t i = 0; i < menu.items.size(); ++i) {
             if (menu.hoveredItem && *menu.hoveredItem == i) painter.fill(menu.itemRects[i], rgb(48,88,142));
-            painter.text(popup.x + 10, popup.y + static_cast<int>(i) * itemHeight + itemHeight - 7, menu.items[i].label, text);
+            painter.text(popup.x + 10, popup.y + static_cast<int>(i) * itemHeight + itemHeight - 7,
+                         elide_text_to_width(painter, menu.items[i].label, popup.width - 20), text);
         }
     }
 

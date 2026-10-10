@@ -154,6 +154,8 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
     const EditorDocument& document,
     ViewportRay ray,
     float maximumWorldDistance = 10000.0F);
+[[nodiscard]] std::vector<EditorPickResult> pick_editor_document_all(
+    const EditorDocument& document, ViewportRay ray, float maximumWorldDistance = 10000.0F);
 [[nodiscard]] std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     const EditorDocument& document,
     const EditorMaterialLibrary& materials,

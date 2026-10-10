@@ -114,7 +114,7 @@ AccessibilityNode build_editor_accessibility_tree(const NativeEditorController& 
     for (int value = 0; value < static_cast<int>(kToolbarTools.size()); ++value) {
         const auto tool = kToolbarTools[static_cast<std::size_t>(value)];
         toolbar.children.push_back({"tool." + std::to_string(value + 1), AccessibilityRole::Button,
-                                    tool_label(tool), "Activate authoring tool", std::to_string(value + 1), true,
+                                    tool_label(tool), "Activate authoring tool", controller.tool_shortcut_text(tool), true,
                                     false, controller.active_tool() == tool, {}});
     }
     root.children.push_back(std::move(toolbar));

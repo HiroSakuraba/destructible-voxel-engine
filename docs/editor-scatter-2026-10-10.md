@@ -93,12 +93,9 @@ Screenshots of the X11 editor at 1280x720: the preview on a hill with Rock and T
 
 ## What's not done
 
-- Count, spacing, seed and Align are set only by keys while the preview is open; there is no
-  inspector panel for them and they are not saved with the project.
-- No per-copy random rotation (yaw) or scale jitter; every copy keeps its source's rotation
-  and size.
-- One surface object per fill; scattering across several objects at once (or onto copies)
-  is not supported.
+- Settings panel, saving, random turn/scale and several surfaces per fill were added later; see
+  [editor-scatter-settings-2026-10-10.md](editor-scatter-settings-2026-10-10.md). Scattering
+  onto earlier copies is still not supported.
 - Copies are full, independent voxel objects (no instancing), so very large counts cost as
   much as that many hand-placed objects.
 - The open preview is not refreshed when the scene changes underneath it; Enter re-plans

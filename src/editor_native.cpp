@@ -1877,6 +1877,12 @@ void NativeEditorController::refresh_menu_state() noexcept {
         enabled("scatter.commit", scatterActive_ && scatterPlan_.error.empty() && !scatterPlan_.samples.empty(),
                 scatterActive_ ? "The scatter preview found no spots on the surface." : "No scatter preview is open.");
         enabled("scatter.cancel", scatterActive_, "No scatter preview is open.");
+        enabled("scatter.brush", workspace_.mode() == EditorMode::Edit && !playSession_.active(),
+                "Stop Play or Simulate before painting.");
+        enabled("scatter.set_sources", workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
+                    (workspace_.selection_count() > 0 || assetBrowserState_.selectedId.has_value()),
+                "Select the objects (or a prefab) to scatter first.");
+        enabled("scatter.clear_sources", scatter_sources_pinned(), "No scatter sources are set.");
         const auto sliceReason = voxel_slice_disabled_reason();
         enabled("voxel.slice", sliceReason.empty(), sliceReason);
         enabled("voxel.slice_commit", voxelSlice_.active() && voxelSlice_.blocked_reason(workspace_.document()).empty(), voxelSlice_.blocked_reason(workspace_.document()));
@@ -2272,9 +2278,22 @@ void NativeEditorController::recompute_layout() {
 
     layout_.inspectorToggles.clear();
     layout_.inspectorFields.clear();
+    layout_.scatterSettingRows.clear();
     layout_.inspectorStackedFields = inspectorWidth > 0 && inspectorWidth < 320;
     layout_.inspectorFieldCount = 0;
-    if (inspectorWidth > 0) {
+    if (inspectorWidth > 0 && scatter_settings_panel_active()) {
+        // The scatter settings replace the object details (and the flag toggles) while the fill
+        // preview is open or the Scatter brush is the tool: one row per setting.
+        const int rowStep = std::max(20, static_cast<int>(22.0F * scale));
+        const int firstRow = contentY + static_cast<int>(52.0F * scale);  // below the panel title
+        const int inspectorBottom = layout_.inspector.y + layout_.inspector.height - 6;
+        for (std::size_t index = 0; index < kScatterSettingFieldCount; ++index) {
+            const UiRect row{layout_.inspector.x + 8, firstRow + static_cast<int>(index) * rowStep, inspectorWidth - 16, rowStep - 2};
+            layout_.scatterSettingRows.push_back(row.y + row.height <= inspectorBottom ? row : UiRect{});
+        }
+        layout_.inspectorContentClipY = inspectorBottom;
+        layout_.inspectorScroll = layout_.inspectorScrollMax = 0;
+    } else if (inspectorWidth > 0) {
         // Matches the fixed y-offsets the renderer already draws the Position and Rotation
         // lines at (see apps/dve_native_editor_x11.cpp); kept here rather than computed from
         // font metrics because nothing else in this layout is font-metric-driven either.
@@ -2988,6 +3007,17 @@ void NativeEditorController::commit_text_edit() {
         recompute_layout();
         return;
     }
+    if (kind == TextEditKind::ScatterSetting) {
+        const auto field = static_cast<ScatterSettingField>(std::min<EditorObjectId>(textEdit_.objectId, kScatterSettingFieldCount - 1U));
+        std::string error;
+        if (!set_scatter_setting(field, textEdit_.buffer, &error)) {
+            textEdit_.error = error;
+            set_status(error, true);
+            return;
+        }
+        textEdit_ = {};
+        return;
+    }
     if (kind == TextEditKind::AiPrompt) {
         const std::string prompt = textEdit_.buffer;
         textEdit_ = {};
@@ -3501,11 +3531,11 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     } else if (voxelStrokeActive_) {
         continue_voxel_stroke(x, y);
     } else if (brushResizing_) {
-        set_scatter_brush_radius(brushRadius_ * std::pow(1.01F, static_cast<float>(x - brushResizeLastX_)));
+        set_scatter_brush_radius(scatterSettings_.brushRadiusMeters * std::pow(1.01F, static_cast<float>(x - brushResizeLastX_)));
         brushResizeLastX_ = x;
     } else if (brushStroking_) {
         update_brush_cursor(x, y);
-        if (brushCursor_ && (!brushLastDab_ || length(subtract(*brushCursor_, *brushLastDab_)) >= brushRadius_ * 0.35F))
+        if (brushCursor_ && (!brushLastDab_ || length(subtract(*brushCursor_, *brushLastDab_)) >= scatterSettings_.brushRadiusMeters * 0.35F))
             brush_dab();
     } else {
         update_hover(x, y);
@@ -4008,6 +4038,27 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 return;
             }
         }
+        for (std::size_t index = 0; index < layout_.scatterSettingRows.size(); ++index) {
+            if (!layout_.scatterSettingRows[index].contains(x, y)) continue;
+            focusRegion_ = EditorFocusRegion::Inspector;
+            const auto field = static_cast<ScatterSettingField>(index);
+            if (field == ScatterSettingField::Align) { nudge_scatter_setting(field, 1); return; }
+            const ScatterSettings& v = scatterSettings_;
+            char buffer[48];
+            switch (field) {
+                case ScatterSettingField::Count: std::snprintf(buffer, sizeof buffer, "%u", v.count); break;
+                case ScatterSettingField::Seed: std::snprintf(buffer, sizeof buffer, "%llu", static_cast<unsigned long long>(v.seed)); break;
+                case ScatterSettingField::Spacing: std::snprintf(buffer, sizeof buffer, "%.2f", static_cast<double>(v.minSpacingMeters)); break;
+                case ScatterSettingField::YawJitter: std::snprintf(buffer, sizeof buffer, "%.0f", static_cast<double>(v.yawJitterDegrees * 0.5F)); break;
+                case ScatterSettingField::MinScale: std::snprintf(buffer, sizeof buffer, "%.2f", static_cast<double>(v.minScale)); break;
+                case ScatterSettingField::MaxScale: std::snprintf(buffer, sizeof buffer, "%.2f", static_cast<double>(v.maxScale)); break;
+                case ScatterSettingField::BrushRadius: std::snprintf(buffer, sizeof buffer, "%.2f", static_cast<double>(v.brushRadiusMeters)); break;
+                case ScatterSettingField::BrushDensity: std::snprintf(buffer, sizeof buffer, "%.0f", static_cast<double>(v.brushDensity * 100.0F)); break;
+                default: buffer[0] = '\0'; break;
+            }
+            begin_text_edit(TextEditKind::ScatterSetting, static_cast<EditorObjectId>(index), buffer);
+            return;
+        }
         for (std::size_t index = 0; index < layout_.inspectorFields.size(); ++index) {
             if (!layout_.inspectorFields[index].contains(x, y)) continue;
             const auto selected = workspace_.selected_object();
@@ -4484,9 +4535,16 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
         recompute_layout();
         return;
     }
+    if (!openMenu_ && steps != 0.0F) {
+        for (std::size_t index = 0; index < layout_.scatterSettingRows.size(); ++index) {
+            if (!layout_.scatterSettingRows[index].contains(x, y)) continue;
+            nudge_scatter_setting(static_cast<ScatterSettingField>(index), steps > 0.0F ? 1 : -1);
+            return;
+        }
+    }
     if (!openMenu_ && !playSession_.active() && activeTool_ == EditorToolId::ScatterBrush && (modifiers & 2U) != 0U &&
         layout_.viewport.contains(x, y) && steps != 0.0F) {
-        set_scatter_brush_radius(brushRadius_ * std::pow(1.15F, steps));
+        set_scatter_brush_radius(scatterSettings_.brushRadiusMeters * std::pow(1.15F, steps));
         return;
     }
     if (openMenu_) {
@@ -4538,7 +4596,7 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Rotate", "Rot", "transform.rotate", "Drag a gizmo ring to rotate the selection.", "Selected objects"},
         {"Scale", "Scl", "transform.scale", "Drag a gizmo handle to resample voxel scale around the chosen pivot.",
          "Voxel objects"},
-        {"Scatter", "Sct", "", "Drag to paint copies of the selected objects; Shift-drag erases copies; Ctrl+wheel sets the radius.",
+        {"Scatter", "Sct", "scatter.brush", "Drag to paint copies of the selected objects; Shift-drag erases copies; Ctrl+wheel sets the radius.",
          "Any visible voxel surface"},
     }};
     const auto index = static_cast<std::size_t>(tool);
@@ -4623,7 +4681,7 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
                 break;
             }
             char radius[48];
-            std::snprintf(radius, sizeof radius, "Ctrl+wheel radius %.1f m", static_cast<double>(brushRadius_));
+            std::snprintf(radius, sizeof radius, "Ctrl+wheel radius %.1f m", static_cast<double>(scatterSettings_.brushRadiusMeters));
             add("Drag paint");
             add("Shift-drag erase");
             add(radius);
@@ -4638,7 +4696,11 @@ void NativeEditorController::set_active_tool(EditorToolId tool) {
     if (previous == EditorToolId::ScatterBrush && brushStroking_) finish_brush_stroke(false);
     activeTool_ = tool;
     close_top_level_menu();
-    if (tool == EditorToolId::ScatterBrush && previous != EditorToolId::ScatterBrush) begin_scatter_brush_session();
+    if (tool == EditorToolId::ScatterBrush && !brushStroking_) begin_scatter_brush_session();
+    if ((previous == EditorToolId::ScatterBrush) != (tool == EditorToolId::ScatterBrush)) {
+        if (textEdit_.kind == TextEditKind::ScatterSetting && !scatter_settings_panel_active()) cancel_text_edit();
+        recompute_layout();  // the scatter settings panel comes and goes with the brush
+    }
     if (tool != EditorToolId::ScatterBrush) {
         brushCursor_.reset();
         brushResizing_ = false;
@@ -6155,6 +6217,13 @@ camera_menu_dispatch_complete:
     if (actionId == "text3d.edit_selected") return edit_selected_text3d();
     if (actionId == "text3d.commit") return commit_text3d_authoring();
     if (actionId == "create.scatter") return begin_scatter();
+    if (actionId == "scatter.brush") { set_active_tool(EditorToolId::ScatterBrush); return true; }
+    if (actionId == "scatter.set_sources") return set_scatter_sources();
+    if (actionId == "scatter.clear_sources") {
+        if (!scatter_sources_pinned()) return false;
+        clear_scatter_sources();
+        return true;
+    }
     if (actionId == "scatter.commit") return commit_scatter();
     if (actionId == "scatter.cancel") { if (!scatterActive_) return false; cancel_scatter(); return true; }
     if (actionId == "voxel.slice") return begin_voxel_slice();
@@ -7527,13 +7596,143 @@ EditorDocument make_native_editor_demo_document() {
 
 // --- Scatter Objects -------------------------------------------------------------------------
 
+namespace {
+std::optional<EditorObjectId> enclosing_scatter_group(const EditorDocument& document, EditorObjectId id);
+// Top-level objects of `selection` (no selected ancestor), skipping scatter groups.
+std::vector<EditorObjectId> scatter_source_roots(const EditorDocument& document, const std::set<EditorObjectId>& selection) {
+    std::vector<EditorObjectId> roots;
+    for (const EditorObjectId id : selection) {
+        const EditorObject* object = document.find_object(id);
+        if (!object || is_scatter_group(*object)) continue;
+        bool nested = false;
+        for (auto parent = object->parent; parent && !nested;) {
+            nested = selection.contains(*parent);
+            const EditorObject* ancestor = document.find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+        if (!nested) roots.push_back(id);
+    }
+    return roots;
+}
+
+bool is_scatter_surface(const EditorObject& object) {
+    return object.voxels && object.voxels->occupied_voxel_count() > 0 && !object.text3d && !object.gaborVolume;
+}
+
+// With pinned sources: every selected voxel object that is not part of a source is a surface.
+std::vector<EditorObjectId> scatter_surfaces_from_selection(const EditorDocument& document,
+                                                            const std::set<EditorObjectId>& selection,
+                                                            const std::vector<EditorObjectId>& sourceRoots) {
+    const std::vector<EditorObjectId> sourceTree = collect_editor_object_subtree_ids(document, sourceRoots);
+    const std::set<EditorObjectId> excluded(sourceTree.begin(), sourceTree.end());
+    std::vector<EditorObjectId> surfaces;
+    for (const EditorObjectId id : selection) {
+        const EditorObject* object = document.find_object(id);
+        if (object && !excluded.contains(id) && is_scatter_surface(*object)) surfaces.push_back(id);
+    }
+    return surfaces;
+}
+
+std::string scatter_names(const EditorDocument& document, const std::vector<EditorObjectId>& ids, std::size_t limit = 3) {
+    std::string text;
+    std::size_t shown = 0;
+    for (const EditorObjectId id : ids) {
+        const EditorObject* object = document.find_object(id);
+        if (!object) continue;
+        if (shown == limit) { text += ", +" + std::to_string(ids.size() - limit) + " more"; break; }
+        text += (text.empty() ? "" : ", ") + object->name;
+        ++shown;
+    }
+    return text.empty() ? std::string("(none)") : text;
+}
+} // namespace
+
+std::shared_ptr<const EditorPrefabAsset> NativeEditorController::load_selected_scatter_prefab(std::string* error) const {
+    if (!assetBrowserState_.selectedId) return nullptr;
+    const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
+    if (!asset || asset->kind != EditorAssetKind::Prefab) return nullptr;
+    std::string loadError;
+    auto prefab = load_editor_prefab(projectRoot_ / asset->relativePath, &loadError);
+    if (!prefab) {
+        if (error) *error = loadError.empty() ? std::string("could not load the prefab") : loadError;
+        return nullptr;
+    }
+    return std::make_shared<const EditorPrefabAsset>(std::move(*prefab));
+}
+
+bool NativeEditorController::set_scatter_sources() {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
+        set_status("Stop Play or Simulate before setting scatter sources", true);
+        return false;
+    }
+    const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    std::vector<EditorObjectId> roots = scatter_source_roots(workspace_.document(), selected);
+    std::string error;
+    std::shared_ptr<const EditorPrefabAsset> prefab = load_selected_scatter_prefab(&error);
+    if (!error.empty()) { set_status("Could not load the selected prefab: " + error, true, 6.0F); return false; }
+    if (roots.empty() && !prefab) {
+        set_status("Select the objects to copy (or a prefab in Assets), then Set Scatter Sources", true, 6.0F);
+        return false;
+    }
+    pinnedScatterRoots_ = std::move(roots);
+    pinnedScatterPrefab_ = std::move(prefab);
+    if (activeTool_ == EditorToolId::ScatterBrush && !brushStroking_) begin_scatter_brush_session();
+    refresh_menu_state();
+    std::string names = pinnedScatterRoots_.empty() ? std::string() : scatter_names(workspace_.document(), pinnedScatterRoots_);
+    if (pinnedScatterPrefab_) names += (names.empty() ? "prefab " : ", prefab ") + pinnedScatterPrefab_->name;
+    set_status("Scatter sources set: " + names + ". Now select the surfaces, then Create > Scatter Objects (or paint)", false, 8.0F);
+    return true;
+}
+
+void NativeEditorController::clear_scatter_sources() {
+    pinnedScatterRoots_.clear();
+    pinnedScatterPrefab_.reset();
+    refresh_menu_state();
+    set_status("Scatter sources cleared: the selection decides again");
+}
+
+void NativeEditorController::adopt_scatter_settings() {
+    const EditorDocument& document = workspace_.document();
+    const auto adopt_from = [&](EditorObjectId groupId) {
+        const EditorObject* group = document.find_object(groupId);
+        if (!group) return false;
+        const auto stored = read_scatter_settings(*group);
+        if (!stored) return false;
+        scatterSettings_ = *stored;
+        return true;
+    };
+    // A selected scatter group (or a copy inside one) hands over the settings that made it.
+    if (const auto active = workspace_.selected_object()) {
+        const EditorObject* object = document.find_object(*active);
+        std::optional<EditorObjectId> group;
+        if (object && is_scatter_group(*object)) group = object->id;
+        else if (object) group = enclosing_scatter_group(document, object->id);
+        if (group && adopt_from(*group)) { scatterSettingsSceneKey_ = document.path(); return; }
+    }
+    // The first scatter in a scene continues from its newest scatter group, so settings come
+    // back with the scene.
+    if (scatterSettingsSceneKey_ == document.path()) return;
+    scatterSettingsSceneKey_ = document.path();
+    for (auto it = document.objects().rbegin(); it != document.objects().rend(); ++it)
+        if (is_scatter_group(it->second) && adopt_from(it->first)) return;
+}
+
 std::string NativeEditorController::scatter_disabled_reason() const {
     if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play or Simulate before scattering.";
+    const EditorDocument& document = workspace_.document();
+    if (scatter_sources_pinned()) {
+        const bool anySource = pinnedScatterPrefab_ || std::any_of(pinnedScatterRoots_.begin(), pinnedScatterRoots_.end(),
+            [&](EditorObjectId id) { return document.find_object(id) != nullptr; });
+        if (!anySource) return "The scatter sources were deleted: set them again, or Clear Scatter Sources.";
+        const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+        if (scatter_surfaces_from_selection(document, selected, pinnedScatterRoots_).empty())
+            return "Scatter sources are set: select one or more voxel surfaces to scatter onto.";
+        return {};
+    }
     const auto target = workspace_.selected_object();
     if (!target) return "Select the objects to scatter, then click the surface to scatter onto last.";
-    const EditorObject* surface = workspace_.document().find_object(*target);
-    if (!surface || !surface->voxels || surface->voxels->occupied_voxel_count() == 0 || surface->text3d ||
-        surface->gaborVolume)
+    const EditorObject* surface = document.find_object(*target);
+    if (!surface || !is_scatter_surface(*surface))
         return "Click a voxel object last: the last selected object is the surface to scatter onto.";
     bool prefabSelected = false;
     if (assetBrowserState_.selectedId) {
@@ -7558,7 +7757,7 @@ std::vector<ScatterSource> NativeEditorController::scatter_sources() const {
 }
 
 void NativeEditorController::replan_scatter() {
-    scatterPlan_ = plan_scatter(workspace_.document(), scatterTarget_, scatter_sources().size(), scatterSettings_);
+    scatterPlan_ = plan_scatter(workspace_.document(), scatterTargets_, scatter_sources().size(), scatterSettings_);
 }
 
 bool NativeEditorController::begin_scatter() {
@@ -7568,41 +7767,35 @@ bool NativeEditorController::begin_scatter() {
     // only one is open at a time: starting one closes the others.
     if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Scatter started");
     cancel_voxel_slice();
-    scatterTarget_ = *workspace_.selected_object();
-    // Sources: the selected roots other than the target. A selected object inside the target's
-    // subtree, or an ancestor of it, cannot be copied onto it.
-    scatterSourceRoots_.clear();
+    adopt_scatter_settings();
+    const EditorDocument& document = workspace_.document();
     const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
-    const auto has_selected_ancestor = [&](const EditorObject& object) {
-        for (auto parent = object.parent; parent;) {
-            if (selected.contains(*parent)) return true;
-            const EditorObject* ancestor = workspace_.document().find_object(*parent);
-            parent = ancestor ? ancestor->parent : std::nullopt;
-        }
-        return false;
-    };
-    const std::vector<EditorObjectId> targetSubtree = collect_editor_object_subtree_ids(workspace_.document(), std::vector<EditorObjectId>{scatterTarget_});
-    for (const EditorObjectId id : selected) {
-        if (id == scatterTarget_) continue;
-        const EditorObject* object = workspace_.document().find_object(id);
-        if (!object || has_selected_ancestor(*object)) continue;
-        if (std::find(targetSubtree.begin(), targetSubtree.end(), id) != targetSubtree.end()) continue;
-        const auto sourceTree = collect_editor_object_subtree_ids(workspace_.document(), std::vector<EditorObjectId>{id});
-        if (std::find(sourceTree.begin(), sourceTree.end(), scatterTarget_) != sourceTree.end()) continue;
-        scatterSourceRoots_.push_back(id);
-    }
+    scatterTargets_.clear();
+    scatterSourceRoots_.clear();
     scatterPrefab_.reset();
-    if (assetBrowserState_.selectedId) {
-        const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
-        if (asset && asset->kind == EditorAssetKind::Prefab) {
-            std::string error;
-            auto prefab = load_editor_prefab(projectRoot_ / asset->relativePath, &error);
-            if (!prefab) {
-                set_status("Could not load the selected prefab: " + error, true, 6.0F);
-                return false;
-            }
-            scatterPrefab_ = std::make_shared<const EditorPrefabAsset>(std::move(*prefab));
+    if (scatter_sources_pinned()) {
+        for (const EditorObjectId id : pinnedScatterRoots_)
+            if (document.find_object(id)) scatterSourceRoots_.push_back(id);
+        scatterPrefab_ = pinnedScatterPrefab_;
+        scatterTargets_ = scatter_surfaces_from_selection(document, selected, scatterSourceRoots_);
+    } else {
+        const EditorObjectId target = *workspace_.selected_object();
+        scatterTargets_.push_back(target);
+        // Sources: the selected roots other than the target. A selected object inside the
+        // target's subtree, or an ancestor of it, cannot be copied onto it.
+        const std::vector<EditorObjectId> targetSubtree =
+            collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{target});
+        std::set<EditorObjectId> others = selected;
+        others.erase(target);
+        for (const EditorObjectId id : scatter_source_roots(document, others)) {
+            if (std::find(targetSubtree.begin(), targetSubtree.end(), id) != targetSubtree.end()) continue;
+            const auto sourceTree = collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{id});
+            if (std::find(sourceTree.begin(), sourceTree.end(), target) != sourceTree.end()) continue;
+            scatterSourceRoots_.push_back(id);
         }
+        std::string error;
+        scatterPrefab_ = load_selected_scatter_prefab(&error);
+        if (!error.empty()) { set_status("Could not load the selected prefab: " + error, true, 6.0F); return false; }
     }
     if (scatterSourceRoots_.empty() && !scatterPrefab_) {
         set_status("Nothing to scatter: select objects other than the surface, or a prefab", true, 6.0F);
@@ -7610,16 +7803,14 @@ bool NativeEditorController::begin_scatter() {
     }
     scatterActive_ = true;
     replan_scatter();
+    recompute_layout();  // the inspector shows the scatter settings
     refresh_menu_state();
-    set_status("Scatter preview: Enter commits, Esc cancels");
+    set_status("Scatter preview: Enter commits, Esc cancels; settings are in the Inspector");
     return true;
 }
 
 void NativeEditorController::set_scatter_settings(const ScatterSettings& settings) {
-    scatterSettings_ = settings;
-    scatterSettings_.count = std::clamp<std::uint32_t>(settings.count, 1U, kMaxScatterCount);
-    scatterSettings_.minSpacingMeters = std::clamp(settings.minSpacingMeters, kMinScatterSpacingMeters,
-                                                   kMaxScatterSpacingMeters);
+    scatterSettings_ = sanitize_scatter_settings(settings);
     if (scatterActive_) replan_scatter();
 }
 
@@ -7629,6 +7820,8 @@ void NativeEditorController::cancel_scatter(std::string reason) {
     scatterPlan_ = {};
     scatterPrefab_.reset();
     scatterSourceRoots_.clear();
+    if (textEdit_.kind == TextEditKind::ScatterSetting && !scatter_settings_panel_active()) cancel_text_edit();
+    recompute_layout();
     refresh_menu_state();
     set_status(reason.empty() ? "Scatter cancelled; nothing changed" : std::move(reason));
 }
@@ -7636,7 +7829,7 @@ void NativeEditorController::cancel_scatter(std::string reason) {
 bool NativeEditorController::commit_scatter() {
     if (!scatterActive_) { set_status("No scatter preview is open", true); return false; }
     replan_scatter();  // the scene may have changed since the preview was drawn
-    ScatterBuildResult build = build_scatter_command(workspace_.document(), scatterTarget_, scatterPlan_,
+    ScatterBuildResult build = build_scatter_command(workspace_.document(), scatterTargets_, scatterPlan_,
                                                      scatter_sources(), scatterSettings_);
     if (!build.command) {
         set_status(build.error.empty() ? "Scatter failed" : build.error, true, 6.0F);
@@ -7652,6 +7845,7 @@ bool NativeEditorController::commit_scatter() {
     scatterPlan_ = {};
     scatterPrefab_.reset();
     scatterSourceRoots_.clear();
+    if (textEdit_.kind == TextEditKind::ScatterSetting && !scatter_settings_panel_active()) cancel_text_edit();
     keep_isolated_with_subtree(build.groupId);
     workspace_.select_object(build.groupId);
     recompute_layout();
@@ -7664,12 +7858,13 @@ bool NativeEditorController::commit_scatter() {
 std::vector<std::string> NativeEditorController::scatter_preview_lines() const {
     std::vector<std::string> lines;
     if (!scatterActive_) return lines;
-    const EditorObject* target = workspace_.document().find_object(scatterTarget_);
+    const EditorDocument& document = workspace_.document();
     lines.push_back("Scatter Objects - preview (scene unchanged)");
-    lines.push_back("Surface: " + (target ? target->name : std::string("(missing)")));
+    lines.push_back(std::string(scatterTargets_.size() == 1 ? "Surface: " : "Surfaces (" + std::to_string(scatterTargets_.size()) + "): ") +
+                    scatter_names(document, scatterTargets_));
     std::string sources;
     for (const ScatterSource& source : scatter_sources()) sources += (sources.empty() ? "" : ", ") + source.label;
-    lines.push_back("Copies of: " + sources);
+    lines.push_back("Copies of: " + sources + (scatter_sources_pinned() ? "  (set sources)" : ""));
     const auto meters = [](float value) {
         char buffer[32];
         std::snprintf(buffer, sizeof buffer, "%.2f m", static_cast<double>(value));
@@ -7678,7 +7873,11 @@ std::vector<std::string> NativeEditorController::scatter_preview_lines() const {
     lines.push_back("Placed " + std::to_string(scatterPlan_.samples.size()) + " of " +
                     std::to_string(scatterSettings_.count) + "   spacing " + meters(scatterSettings_.minSpacingMeters) +
                     "   seed " + std::to_string(scatterSettings_.seed));
-    lines.push_back(std::string("Align to surface: ") + (scatterSettings_.alignToSurface ? "on" : "off"));
+    char variation[128];
+    std::snprintf(variation, sizeof variation, "Align to surface: %s   turn +/-%.0f deg   scale %.2f-%.2f",
+                  scatterSettings_.alignToSurface ? "on" : "off", static_cast<double>(scatterSettings_.yawJitterDegrees * 0.5F),
+                  static_cast<double>(scatterSettings_.minScale), static_cast<double>(scatterSettings_.maxScale));
+    lines.push_back(variation);
     if (!scatterPlan_.error.empty()) {
         lines.push_back("Cannot commit: " + scatterPlan_.error);
     } else if (scatterPlan_.samples.size() < scatterSettings_.count) {
@@ -7686,8 +7885,114 @@ std::vector<std::string> NativeEditorController::scatter_preview_lines() const {
                         std::to_string(scatterPlan_.tooClose) + " spots too close, " +
                         std::to_string(scatterPlan_.missedSurface) + " off the surface); lower spacing or count");
     }
-    lines.push_back("Enter commit  Esc cancel  [ ] count  Shift+[ ] spacing  N new seed  A align");
+    lines.push_back("Enter commit  Esc cancel  [ ] count  Shift+[ ] spacing  N seed  A align");
+    lines.push_back("More settings in the Inspector");
     return lines;
+}
+
+bool NativeEditorController::scatter_settings_panel_active() const noexcept {
+    return workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
+           (scatterActive_ || activeTool_ == EditorToolId::ScatterBrush);
+}
+
+std::vector<NativeEditorController::ScatterSettingRow> NativeEditorController::scatter_setting_rows() const {
+    const ScatterSettings& v = scatterSettings_;
+    const bool filling = scatterActive_;
+    const bool brushing = activeTool_ == EditorToolId::ScatterBrush;
+    const auto fixed = [](double value, int digits, std::string_view unit = {}) {
+        char buffer[48];
+        std::snprintf(buffer, sizeof buffer, "%.*f%s", digits, value, std::string(unit).c_str());
+        return std::string(buffer);
+    };
+    return {
+        {ScatterSettingField::Count, "Count", std::to_string(v.count), filling},
+        {ScatterSettingField::Spacing, "Spacing", fixed(v.minSpacingMeters, 2, " m"), true},
+        {ScatterSettingField::Seed, "Seed", std::to_string(v.seed), true},
+        {ScatterSettingField::Align, "Align to surface", v.alignToSurface ? "on" : "off", true},
+        {ScatterSettingField::YawJitter, "Random turn",
+         v.yawJitterDegrees > 0.0F ? "+/-" + fixed(v.yawJitterDegrees * 0.5F, 0, " deg") : std::string("off"), true},
+        {ScatterSettingField::MinScale, "Scale min", fixed(v.minScale, 2), true},
+        {ScatterSettingField::MaxScale, "Scale max", fixed(v.maxScale, 2), true},
+        {ScatterSettingField::BrushRadius, "Brush radius", fixed(v.brushRadiusMeters, 2, " m"), brushing},
+        {ScatterSettingField::BrushDensity, "Brush density", fixed(v.brushDensity * 100.0F, 0, "%"), brushing},
+    };
+}
+
+bool NativeEditorController::set_scatter_setting(ScatterSettingField field, std::string_view text, std::string* error) {
+    const auto fail = [&](std::string message) {
+        if (error) *error = std::move(message);
+        return false;
+    };
+    std::string cleaned;
+    for (const char c : text)
+        if (!std::isspace(static_cast<unsigned char>(c)) && c != '%' && c != 'm' && c != '+' && c != '/') cleaned += c;
+    if (cleaned.ends_with("deg")) cleaned.resize(cleaned.size() - 3U);
+    ScatterSettings next = scatterSettings_;
+    if (field == ScatterSettingField::Align) {
+        if (cleaned == "on" || cleaned == "1" || cleaned == "true" || cleaned == "yes") next.alignToSurface = true;
+        else if (cleaned == "off" || cleaned == "0" || cleaned == "false" || cleaned == "no") next.alignToSurface = false;
+        else return fail("Align: type on or off");
+    } else if (field == ScatterSettingField::Seed || field == ScatterSettingField::Count) {
+        std::uint64_t value{};
+        const auto [end, ec] = std::from_chars(cleaned.data(), cleaned.data() + cleaned.size(), value);
+        if (ec != std::errc{} || end != cleaned.data() + cleaned.size() || cleaned.empty())
+            return fail(std::string(field == ScatterSettingField::Seed ? "Seed" : "Count") + ": type a whole number");
+        if (field == ScatterSettingField::Seed) next.seed = value;
+        else next.count = static_cast<std::uint32_t>(std::min<std::uint64_t>(value, kMaxScatterCount));
+    } else {
+        char* end = nullptr;
+        const float value = std::strtof(cleaned.c_str(), &end);
+        if (cleaned.empty() || end != cleaned.c_str() + cleaned.size() || !std::isfinite(value))
+            return fail("Type a number");
+        switch (field) {
+            case ScatterSettingField::Spacing: next.minSpacingMeters = value; break;
+            case ScatterSettingField::YawJitter: next.yawJitterDegrees = value * 2.0F; break;  // typed as +/- half
+            case ScatterSettingField::MinScale:
+                next.minScale = value;
+                next.maxScale = std::max(next.maxScale, value);
+                break;
+            case ScatterSettingField::MaxScale:
+                next.maxScale = value;
+                next.minScale = std::min(next.minScale, value);
+                break;
+            case ScatterSettingField::BrushRadius: next.brushRadiusMeters = value; break;
+            case ScatterSettingField::BrushDensity: next.brushDensity = value / 100.0F; break;
+            default: break;
+        }
+    }
+    set_scatter_settings(next);
+    return true;
+}
+
+void NativeEditorController::nudge_scatter_setting(ScatterSettingField field, int steps) {
+    if (steps == 0) return;
+    ScatterSettings next = scatterSettings_;
+    const float n = static_cast<float>(steps);
+    switch (field) {
+        case ScatterSettingField::Count: {
+            const std::int64_t count = static_cast<std::int64_t>(next.count) + steps * 5;
+            next.count = static_cast<std::uint32_t>(std::clamp<std::int64_t>(count, 1, kMaxScatterCount));
+            break;
+        }
+        case ScatterSettingField::Spacing: next.minSpacingMeters += 0.25F * n; break;
+        case ScatterSettingField::Seed:
+            next.seed = steps > 0 ? next.seed + static_cast<std::uint64_t>(steps)
+                                  : next.seed - std::min<std::uint64_t>(next.seed, static_cast<std::uint64_t>(-steps));
+            break;
+        case ScatterSettingField::Align: next.alignToSurface = !next.alignToSurface; break;
+        case ScatterSettingField::YawJitter: next.yawJitterDegrees += 30.0F * n; break;  // +/-15 deg per notch
+        case ScatterSettingField::MinScale:
+            next.minScale += 0.05F * n;
+            next.maxScale = std::max(next.maxScale, next.minScale);
+            break;
+        case ScatterSettingField::MaxScale:
+            next.maxScale += 0.05F * n;
+            next.minScale = std::min(next.minScale, next.maxScale);
+            break;
+        case ScatterSettingField::BrushRadius: next.brushRadiusMeters *= std::pow(1.15F, n); break;
+        case ScatterSettingField::BrushDensity: next.brushDensity += 0.05F * n; break;
+    }
+    set_scatter_settings(next);
 }
 
 bool NativeEditorController::handle_scatter_key(std::string_view normalized, bool control, bool shift, bool alt) {
@@ -7741,7 +8046,9 @@ void NativeEditorController::keep_isolated_with_subtree(EditorObjectId root) {
 }
 
 void NativeEditorController::begin_scatter_brush_session() {
-    // Sources are what was selected when the tool was picked; a new session gets a new group.
+    // Sources are the set scatter sources, or else what is selected when the tool is picked.
+    // Picking the tool again starts a new session (and a new group), unless a scatter group is
+    // the active selection: then strokes continue that group with its stored settings.
     brushSourceRoots_.clear();
     brushPrefab_.reset();
     brushGroup_.reset();
@@ -7749,34 +8056,31 @@ void NativeEditorController::begin_scatter_brush_session() {
     brushEraseIds_.clear();
     brushStroking_ = false;
     brushResizing_ = false;
+    adopt_scatter_settings();
     const EditorDocument& document = workspace_.document();
-    const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
-    for (const EditorObjectId id : selected) {
-        const EditorObject* object = document.find_object(id);
-        if (!object || is_scatter_group(*object)) continue;
-        bool nested = false;
-        for (auto parent = object->parent; parent && !nested;) {
-            nested = selected.contains(*parent);
-            const EditorObject* ancestor = document.find_object(*parent);
-            parent = ancestor ? ancestor->parent : std::nullopt;
-        }
-        if (!nested) brushSourceRoots_.push_back(id);
+    if (const auto active = workspace_.selected_object())
+        if (const EditorObject* object = document.find_object(*active); object && is_scatter_group(*object))
+            brushGroup_ = object->id;
+    if (scatter_sources_pinned()) {
+        for (const EditorObjectId id : pinnedScatterRoots_)
+            if (document.find_object(id)) brushSourceRoots_.push_back(id);
+        brushPrefab_ = pinnedScatterPrefab_;
+    } else {
+        const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+        brushSourceRoots_ = scatter_source_roots(document, selected);
+        std::string error;
+        brushPrefab_ = load_selected_scatter_prefab(&error);
+        if (!error.empty()) set_status("Scatter brush: could not load the selected prefab: " + error, true, 6.0F);
     }
-    if (assetBrowserState_.selectedId) {
-        const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
-        if (asset && asset->kind == EditorAssetKind::Prefab) {
-            std::string error;
-            auto prefab = load_editor_prefab(projectRoot_ / asset->relativePath, &error);
-            if (prefab) brushPrefab_ = std::make_shared<const EditorPrefabAsset>(std::move(*prefab));
-            else set_status("Scatter brush: could not load the selected prefab: " + error, true, 6.0F);
-        }
-    }
+    recompute_layout();  // the inspector shows the scatter settings
     const std::size_t count = brush_sources().size();
     if (count == 0) {
         set_status("Scatter brush: select the objects to paint (or a prefab in Assets), then pick the tool again", true, 6.0F);
         return;
     }
-    set_status("Scatter brush: painting " + std::to_string(count) + " source(s); Shift-drag erases, Ctrl+wheel sets the radius");
+    const EditorObject* group = brushGroup_ ? document.find_object(*brushGroup_) : nullptr;
+    set_status("Scatter brush: painting " + std::to_string(count) + " source(s)" +
+               (group ? " into " + group->name : std::string()) + "; Shift-drag erases, Ctrl+wheel sets the radius");
 }
 
 std::vector<ScatterSource> NativeEditorController::brush_sources() const {
@@ -7818,7 +8122,7 @@ void NativeEditorController::brush_dab() {
     if (!brushStroking_ || !brushCursor_) return;
     brushLastDab_ = brushCursor_;
     const EditorDocument& document = workspace_.document();
-    const float radiusSquared = brushRadius_ * brushRadius_;
+    const float radiusSquared = scatterSettings_.brushRadiusMeters * scatterSettings_.brushRadiusMeters;
     if (brushErasing_) {
         for (const auto& [id, object] : document.objects()) {
             if (!object.parent || object.flags.locked || is_isolated_out(id)) continue;
@@ -7827,7 +8131,7 @@ void NativeEditorController::brush_dab() {
             const Float3 foot = scatter_copy_foot(object);
             const float dx = foot.x - brushCursor_->x;
             const float dz = foot.z - brushCursor_->z;
-            if (dx * dx + dz * dz <= radiusSquared && std::abs(foot.y - brushCursor_->y) <= brushRadius_ * 2.0F)
+            if (dx * dx + dz * dz <= radiusSquared && std::abs(foot.y - brushCursor_->y) <= scatterSettings_.brushRadiusMeters * 2.0F)
                 brushEraseIds_.insert(id);
         }
         return;
@@ -7845,9 +8149,13 @@ void NativeEditorController::brush_dab() {
     settings.minSpacingMeters = scatterSettings_.minSpacingMeters;
     settings.seed = scatterSettings_.seed * 0x9E3779B97F4A7C15ULL + (++brushDabCounter_);
     settings.sourceCount = sourceCount;
-    settings.probeMeters = std::clamp(brushRadius_ * 0.1F, 0.1F, 1.0F);
+    settings.probeMeters = std::clamp(scatterSettings_.brushRadiusMeters * 0.1F, 0.1F, 1.0F);
+    settings.density = scatterSettings_.brushDensity;
+    settings.yawJitterDegrees = scatterSettings_.yawJitterDegrees;
+    settings.minScale = scatterSettings_.minScale;
+    settings.maxScale = scatterSettings_.maxScale;
     const auto ground = [this](EditorObjectId id) { return brush_ground_accepts(id); };
-    for (ScatterSample& sample : plan_scatter_dab(document, *brushCursor_, brushRadius_, settings, occupied, ground))
+    for (ScatterSample& sample : plan_scatter_dab(document, *brushCursor_, scatterSettings_.brushRadiusMeters, settings, occupied, ground))
         brushPending_.push_back(sample);
 }
 
@@ -7897,10 +8205,11 @@ void NativeEditorController::finish_brush_stroke(bool cancel) {
         if (has_generated_scatter_name(*group))
             command->add(std::make_unique<RenameObjectCommand>(
                 groupId, group->name, scatter_group_name(document.children_of(groupId).size() + pending.size())));
+        append_scatter_settings_update(*command, *group, scatterSettings_);  // the group remembers its settings
     } else {
         groupId = document.allocate_object_id();
-        command->add(std::make_unique<AddObjectCommand>(make_scatter_group(groupId, pending.size(), pending.front().position),
-                                                        "Scatter group"));
+        command->add(std::make_unique<AddObjectCommand>(
+            make_scatter_group(groupId, pending.size(), pending.front().position, scatterSettings_), "Scatter group"));
     }
     const ScatterCopiesResult copies =
         append_scatter_copies(*command, document, groupId, pending, sources, scatterSettings_.alignToSurface);
@@ -7919,7 +8228,7 @@ void NativeEditorController::finish_brush_stroke(bool cancel) {
 NativeEditorController::ScatterBrushView NativeEditorController::scatter_brush_view() const {
     ScatterBrushView view;
     view.cursor = activeTool_ == EditorToolId::ScatterBrush ? brushCursor_ : std::nullopt;
-    view.radius = brushRadius_;
+    view.radius = scatterSettings_.brushRadiusMeters;
     view.stroking = brushStroking_;
     view.erasing = brushErasing_;
     view.pending = brushPending_;
@@ -7930,9 +8239,11 @@ NativeEditorController::ScatterBrushView NativeEditorController::scatter_brush_v
 
 void NativeEditorController::set_scatter_brush_radius(float meters) {
     if (!std::isfinite(meters)) return;
-    brushRadius_ = std::clamp(meters, 0.25F, 50.0F);
+    ScatterSettings settings = scatterSettings_;
+    settings.brushRadiusMeters = meters;
+    scatterSettings_ = sanitize_scatter_settings(settings);
     char text[64];
-    std::snprintf(text, sizeof text, "Scatter brush radius %.2f m", static_cast<double>(brushRadius_));
+    std::snprintf(text, sizeof text, "Scatter brush radius %.2f m", static_cast<double>(scatterSettings_.brushRadiusMeters));
     set_status(text);
 }
 

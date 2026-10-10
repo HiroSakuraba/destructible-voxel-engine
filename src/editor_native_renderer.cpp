@@ -3443,7 +3443,12 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         for (const std::string& line : lines) panelWidth = std::max(panelWidth, viewportPainter.text_width(line));
         // Keep clear of the viewport hint line (top) and the camera preview inset (top right);
         // long diagnostics are elided here and stay complete in the status/console output.
-        const int panelMaxWidth = viewport.width > 520 ? viewport.width - 200 : viewport.width - 16;
+        // Stop short of the camera preview inset (top right), which is drawn later on top.
+        const auto previewSetting = controller.workspace().settings().value("camera.preview_size");
+        const float previewRatio = std::clamp(std::get_if<double>(&previewSetting)
+            ? static_cast<float>(std::get<double>(previewSetting)) : 0.25F, 0.1F, 0.75F);
+        const int previewReserve = std::max(180, static_cast<int>(static_cast<float>(viewport.width) * previewRatio)) + 14 + 16;
+        const int panelMaxWidth = viewport.width > 520 ? viewport.width - previewReserve : viewport.width - 16;
         panelWidth = std::min(panelWidth + 20, std::max(120, panelMaxWidth));
         const int lineHeight = 17;
         const UiRect panel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
@@ -3485,7 +3490,12 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         const std::vector<std::string> lines = controller.scatter_preview_lines();
         int panelWidth = 0;
         for (const std::string& line : lines) panelWidth = std::max(panelWidth, viewportPainter.text_width(line));
-        const int panelMaxWidth = viewport.width > 520 ? viewport.width - 200 : viewport.width - 16;
+        // Stop short of the camera preview inset (top right), which is drawn later on top.
+        const auto previewSetting = controller.workspace().settings().value("camera.preview_size");
+        const float previewRatio = std::clamp(std::get_if<double>(&previewSetting)
+            ? static_cast<float>(std::get<double>(previewSetting)) : 0.25F, 0.1F, 0.75F);
+        const int previewReserve = std::max(180, static_cast<int>(static_cast<float>(viewport.width) * previewRatio)) + 14 + 16;
+        const int panelMaxWidth = viewport.width > 520 ? viewport.width - previewReserve : viewport.width - 16;
         panelWidth = std::min(panelWidth + 20, std::max(120, panelMaxWidth));
         const int lineHeight = 17;
         const UiRect panel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
@@ -4157,7 +4167,48 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             }
             inspectorPainter.text(x,y+extra,elide_text_to_width(inspectorPainter,value,available),color);
         };
-        if (controller.workspace().selected_object()) {
+        if (!layout.scatterSettingRows.empty()) {
+            // Scatter settings replace the object details while scattering (fill preview or brush).
+            const bool brushing = controller.active_tool() == EditorToolId::ScatterBrush;
+            inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 48,
+                                  brushing && !controller.scatter_active() ? "Scatter brush settings" : "Scatter settings", text);
+            const auto rows = controller.scatter_setting_rows();
+            const auto& edit = controller.text_edit();
+            const int labelWidth = std::min(118, layout.inspector.width / 2);
+            int lastBottom = layout.inspector.y + 54;
+            for (std::size_t i = 0; i < rows.size() && i < layout.scatterSettingRows.size(); ++i) {
+                const UiRect rect = layout.scatterSettingRows[i];
+                if (rect.width <= 0) continue;
+                const bool editing = edit.kind == TextEditKind::ScatterSetting && edit.objectId == i;
+                const bool hovered = rect.contains(controller.hover_x(), controller.hover_y());
+                if (editing || hovered) inspectorPainter.fill(rect, editing ? rgb(40,54,74) : panel2);
+                const EditorColor labelColor = rows[i].used ? muted : rgb(92,100,112);
+                const EditorColor valueColor = editing ? accent : rows[i].used ? text : rgb(92,100,112);
+                const int baseline = rect.y + rect.height - 6;
+                inspectorPainter.text(rect.x + 4, baseline, elide_text_to_width(inspectorPainter, rows[i].label, labelWidth - 8), labelColor);
+                const std::string value = editing ? edit.buffer + "_" : rows[i].value;
+                inspectorPainter.text(rect.x + labelWidth, baseline,
+                                      elide_text_to_width(inspectorPainter, value, std::max(0, rect.width - labelWidth - 4)), valueColor);
+                lastBottom = rect.y + rect.height;
+            }
+            int noteY = lastBottom + 20;
+            const auto note = [&](const std::string& line, EditorColor color) {
+                inspectorPainter.text(layout.inspector.x + 12, noteY,
+                                      elide_text_to_width(inspectorPainter, line, layout.inspector.width - 24), color);
+                noteY += 18;
+            };
+            if (edit.kind == TextEditKind::ScatterSetting && !edit.error.empty()) note(edit.error, rgb(255,130,110));
+            note("Click a value to type; wheel nudges it", muted);
+            note("Stored on the scatter group (saved", muted);
+            note("with the scene)", muted);
+            if (controller.scatter_sources_pinned()) {
+                std::string names;
+                for (const EditorObjectId id : controller.pinned_scatter_sources())
+                    if (const EditorObject* source = controller.workspace().document().find_object(id))
+                        names += (names.empty() ? "" : ", ") + source->name;
+                note("Sources set: " + (names.empty() ? std::string("prefab") : names), rgb(150,200,255));
+            }
+        } else if (controller.workspace().selected_object()) {
             if (const EditorObject* object = controller.workspace().document().find_object(*controller.workspace().selected_object())) {
                 const bool renamingHere = controller.text_edit().kind == TextEditKind::ObjectName;
                 drawInspectorText(layout.inspector.x + 12, inspectorTop + 48,

@@ -571,6 +571,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"create.gabor_import","Create","Volume: Import Gabor Field",""},
         {"create.prefab_from_selection","Create","Prefab from Selection","Ctrl+Shift+P"},
         {"create.scatter","Create","Scatter Objects",""},
+        {"scatter.brush","Create","Scatter Brush",""},
+        {"scatter.set_sources","Create","Set Scatter Sources",""},
+        {"scatter.clear_sources","Create","Clear Scatter Sources",""},
         {"scatter.commit","Create","Commit Scatter","Enter"},
         {"scatter.cancel","Create","Cancel Scatter","Esc"},
         {"asset.instantiate_prefab","Create","Instantiate Selected Prefab",""},
@@ -798,6 +801,13 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
              "Preview copies of the selected objects (or the selected prefab) placed pseudo-randomly on the last selected voxel object; Enter commits as one undo step.",
              {"scatter", "foliage", "random", "distribute", "populate", "rocks", "trees", "organic", "place"});
     describe("scatter.commit", "Add the previewed scatter copies under one group as one undoable edit.", {"scatter", "apply"});
+    describe("scatter.brush",
+             "Paint copies of the selected objects (or set scatter sources) onto any voxel surface; Shift-drag erases, Ctrl+wheel sets the radius.",
+             {"scatter", "brush", "paint", "foliage", "trees", "rocks", "populate", "erase"});
+    describe("scatter.set_sources",
+             "Remember the selected objects (and the selected prefab) as what Scatter copies; then select any number of surfaces to scatter onto.",
+             {"scatter", "sources", "several surfaces", "multiple", "pick"});
+    describe("scatter.clear_sources", "Forget the set scatter sources; Scatter uses the selection again.", {"scatter", "sources", "reset"});
     describe("scatter.cancel", "Close the scatter preview without changing the scene.", {"scatter"});
     describe("voxel.slice", "Preview a cell-centre plane cut; keep front, back, or both as separate objects.", {"slice", "cut", "plane"});
     describe("voxel.slice_commit", "Apply the open Slice preview in one undo step.", {"slice", "apply"});
@@ -878,7 +888,7 @@ EditorWorkspace::EditorWorkspace(EditorDocument document)
         command.label = action.label;
         command.category = action.menu;
         command.contexts = {ShortcutContext::Global};
-        if (action.id.starts_with("transform.") || action.id.starts_with("view."))
+        if (action.id.starts_with("transform.") || action.id.starts_with("view.") || action.id == "scatter.brush")
             command.contexts = {ShortcutContext::Viewport};
         else if (action.id.starts_with("camera."))
             command.contexts = {ShortcutContext::Camera, ShortcutContext::Viewport};

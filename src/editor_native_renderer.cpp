@@ -1,6 +1,7 @@
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_midi.hpp"
 #include "dve/editor_ui_zoom.hpp"
+#include "dve/editor_text_encoding.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3283,9 +3284,14 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         viewportPainter.outline(item.screenBounds, item.selected ? rgb(150,205,255) : border);
         const int available = std::max(0, item.screenBounds.width - 10);
         std::string label = item.text;
-        while (!label.empty() && viewportPainter.text_width(label) > available) label.pop_back();
-        if (label.size() < item.text.size() && label.size() > 3U) {
-            label.resize(label.size() - 3U);
+        // Trim whole UTF-8 code points so a multi-byte character is never split.
+        const auto pop_code_point = [](std::string& value) {
+            while (!value.empty() && utf8_continuation(static_cast<unsigned char>(value.back()))) value.pop_back();
+            if (!value.empty()) value.pop_back();
+        };
+        while (!label.empty() && viewportPainter.text_width(label) > available) pop_code_point(label);
+        if (label.size() < item.text.size() && utf8_code_point_count(label) > 3U) {
+            for (int i = 0; i < 3; ++i) pop_code_point(label);
             label += "...";
         }
         if (!label.empty() && item.screenBounds.height >= 13) {

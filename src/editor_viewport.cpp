@@ -442,11 +442,13 @@ bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& 
     return contain && foundVoxel && allContained;
 }
 
-std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance) {
+std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance,
+                                                       const std::set<EditorObjectId>* onlyObjects) {
     std::vector<EditorPickResult> hits;
     const Float3 worldDirection = safe_normalize(ray.direction, {0,0,-1});
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible) continue;
+        if (onlyObjects && !onlyObjects->empty() && !onlyObjects->contains(id)) continue;
         if (object.text3d || object.gaborVolume) {
             const Float3 localMinimum = object.text3d ? object.text3d->bounds.minimum : object.gaborVolume->boundsMinimum;
             const Float3 localMaximum = object.text3d ? object.text3d->bounds.maximum : object.gaborVolume->boundsMaximum;
@@ -515,8 +517,9 @@ std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& doc
     return hits;
 }
 
-std::optional<EditorPickResult> pick_editor_document(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance) {
-    auto hits = pick_editor_document_all(document, ray, maximumWorldDistance);
+std::optional<EditorPickResult> pick_editor_document(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance,
+                                                     const std::set<EditorObjectId>* onlyObjects) {
+    auto hits = pick_editor_document_all(document, ray, maximumWorldDistance, onlyObjects);
     if (hits.empty()) return std::nullopt;
     return hits.front();
 }
@@ -804,6 +807,7 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     std::map<BrickKey, Bitset512> anchorMasks;
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible) continue;
+        if (!settings.isolatedObjects.empty() && !settings.isolatedObjects.contains(id)) continue;
         const bool selected = selectedObjects.contains(id);
         const RigidTransform* pose = nullptr;
         if (presentationPoses) {
@@ -966,6 +970,7 @@ const std::vector<EditorVoxelDrawItem>& EditorVoxelDrawListCache::get(
     hash.u64(settings.maximumDrawVoxels);
     hash.u64(settings.cullEnclosedVoxels ? 1U : 0U);
     hash.u64(editor_selection_fingerprint(selectedObjects));
+    hash.u64(editor_selection_fingerprint(settings.isolatedObjects) ^ 0x150A7EDULL);
     if (!valid_ || hash.h != key_) {
         // Large lists are sorted on a shared worker pool. Only one thread uses the pool at a
         // time; anyone else (another controller on another thread) sorts alone.

@@ -1886,6 +1886,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("camera.keyframe_profile", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
     enabled("camera.paste_profile", cinematicCameraPanel_.can_paste(), "Copy a cinematic profile first.");
     checked("view.grid", viewportSettings_.showGrid);
+    checked("view.isolate_selection", !viewportSettings_.isolatedObjects.empty());
     checked("view.collision", viewportSettings_.showCollision);
     checked("view.anchors", viewportSettings_.showAnchors);
     checked("view.bounds", viewportSettings_.showObjectBounds);
@@ -3318,7 +3319,8 @@ void NativeEditorController::update_hover(int x, int y) {
         return;
     }
     hoverPick_ = pick_editor_document(workspace_.document(), make_viewport_ray(camera_, layout_.viewport,
-                                                                               static_cast<float>(x), static_cast<float>(y)));
+                                                                               static_cast<float>(x), static_cast<float>(y)),
+                                      10000.0F, &viewportSettings_.isolatedObjects);
 }
 
 bool NativeEditorController::navigation_pointer_active() const noexcept {
@@ -4284,7 +4286,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                     if ((modifiers & 7U) == 0U || (modifiers & 4U) != 0U) {
                         const auto depthHits = pick_editor_document_all(workspace_.document(),
                             make_viewport_ray(camera_, layout_.viewport,
-                                static_cast<float>(marquee_.startX), static_cast<float>(marquee_.startY)));
+                                static_cast<float>(marquee_.startX), static_cast<float>(marquee_.startY)),
+                            10000.0F, &viewportSettings_.isolatedObjects);
                         if ((modifiers & 4U) != 0U && (modifiers & 3U) == 0U && depthHits.size() > 1U) {
                             open_pick_list(x, y, depthHits);
                             marquee_ = {};
@@ -4311,6 +4314,9 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 const bool contain = x >= marquee_.startX;
                 const UiRect rectangle{left, top, right - left + 1, bottom - top + 1};
                 for (const auto& [id, object] : workspace_.document().objects()) {
+                    // Box selection only takes what is on screen: isolated-out objects are skipped
+                    // (object_matches_screen_rect already skips hidden ones).
+                    if (is_isolated_out(id)) continue;
                     if (object_matches_screen_rect(object, camera_, layout_.viewport, rectangle, contain))
                         hits.insert(id);
                 }
@@ -4701,7 +4707,8 @@ void NativeEditorController::update_placement_preview(int x, int y) {
     apply_transform_preview(placementChanges_, false);
     placementPoint_.reset();
     const auto hits = pick_editor_document_all(workspace_.document(),
-        make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)));
+        make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
+        10000.0F, &viewportSettings_.isolatedObjects);
     const auto it = std::find_if(hits.begin(), hits.end(), [&](const EditorPickResult& hit) {
         return !workspace_.is_selected(hit.objectId);
     });
@@ -5182,6 +5189,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_status("Next camera position");
         return true;
     }
+    if (actionId == "view.isolate_selection") return toggle_isolation();
     if (actionId == "view.frame_all") {
         const auto selection = workspace_.selected_objects();
         workspace_.clear_selection();
@@ -7024,7 +7032,8 @@ void NativeEditorController::frame_selection() noexcept {
     EditorObjectBounds combined = selection_bounds();
     if (!combined.valid) {
         for (const auto& [id, object] : workspace_.document().objects()) {
-            (void)id;
+            // Frame All frames what is shown: visible objects, and only the isolated ones.
+            if (!object.flags.visible || is_isolated_out(id)) continue;
             const EditorObjectBounds bounds = object_world_bounds(object);
             if (!bounds.valid) continue;
             if (!combined.valid) combined = bounds;
@@ -7280,13 +7289,53 @@ const std::vector<EditorVoxelDrawItem>& NativeEditorController::camera_preview_d
 }
 
 std::vector<EditorText3DDrawItem> NativeEditorController::text3d_draw_items() const {
-    return build_text3d_draw_list(workspace_.document(), camera_, layout_.viewport,
-                                  workspace_.selected_objects());
+    auto items = build_text3d_draw_list(workspace_.document(), camera_, layout_.viewport,
+                                        workspace_.selected_objects());
+    const auto& isolated = viewportSettings_.isolatedObjects;
+    if (!isolated.empty())
+        std::erase_if(items, [&](const EditorText3DDrawItem& item) { return !isolated.contains(item.objectId); });
+    return items;
 }
 
 std::vector<EditorGaborVolumeDrawItem> NativeEditorController::gabor_volume_draw_items() const {
-    return build_gabor_volume_draw_list(workspace_.document(), camera_, layout_.viewport,
-                                        workspace_.selected_objects());
+    auto items = build_gabor_volume_draw_list(workspace_.document(), camera_, layout_.viewport,
+                                              workspace_.selected_objects());
+    const auto& isolated = viewportSettings_.isolatedObjects;
+    if (!isolated.empty())
+        std::erase_if(items, [&](const EditorGaborVolumeDrawItem& item) { return !isolated.contains(item.objectId); });
+    return items;
+}
+
+bool NativeEditorController::is_isolated_out(EditorObjectId id) const noexcept {
+    const auto& isolated = viewportSettings_.isolatedObjects;
+    return !isolated.empty() && !isolated.contains(id);
+}
+
+bool NativeEditorController::toggle_isolation() {
+    auto& isolated = viewportSettings_.isolatedObjects;
+    if (!isolated.empty()) {
+        isolated.clear();
+        set_status("Isolation off: all visible objects shown");
+        refresh_menu_state();
+        return true;
+    }
+    if (workspace_.selected_objects().empty()) {
+        set_status("Select objects to isolate first", true);
+        return false;
+    }
+    // The selection and everything parented under it (an isolated group keeps its children).
+    std::set<EditorObjectId> result(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    for (const auto& [id, object] : workspace_.document().objects()) {
+        for (auto parent = object.parent; parent;) {
+            if (result.contains(*parent)) { result.insert(id); break; }
+            const EditorObject* ancestor = workspace_.document().find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+    }
+    isolated = std::move(result);
+    set_status("Isolated " + std::to_string(isolated.size()) + " object(s); View > Isolate Selection restores the rest");
+    refresh_menu_state();
+    return true;
 }
 
 std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {

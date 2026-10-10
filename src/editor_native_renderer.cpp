@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
+#include <map>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -3202,6 +3203,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         painter.text(layout.hierarchyFilterBox.x + 6, layout.hierarchyFilterBox.y + layout.hierarchyFilterBox.height - 6,
                      filterText, filtering || !controller.hierarchy_filter().empty() ? text : muted);
         const auto order = controller.hierarchy_order();
+        std::map<EditorObjectId, std::size_t> childCounts;  // one pass, not one per row
+        for (const auto& [childId, child] : controller.workspace().document().objects()) {
+            (void)childId;
+            if (child.parent) ++childCounts[*child.parent];
+        }
         for (std::size_t index = 0; index < order.size() && index < layout.hierarchyRows.size(); ++index) {
             const UiRect row = layout.hierarchyRows[index];
             const EditorObject* object = controller.workspace().document().find_object(order[index]);
@@ -3214,10 +3220,25 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             std::string prefix = object->flags.visible ? "[x] " : "[ ] ";
             if (object->prefabLink) prefix += "P ";
             else if (object->attachment) prefix += "> ";
+            // Parent-group nesting is shown by indentation, and a parent lists its child count,
+            // so a group reads differently from a named membership group (inspector "Named groups").
+            int depth = 0;
+            for (auto parent = object->parent; parent && depth < 8;) {
+                ++depth;
+                const EditorObject* ancestor = controller.workspace().document().find_object(*parent);
+                parent = ancestor ? ancestor->parent : std::nullopt;
+            }
+            const auto childEntry = childCounts.find(object->id);
+            const std::size_t children = childEntry == childCounts.end() ? 0U : childEntry->second;
             const bool renaming = controller.text_edit().kind == TextEditKind::ObjectName &&
                                    controller.text_edit().objectId == object->id;
-            const std::string label = renaming ? controller.text_edit().buffer + "_" : (prefix + object->name);
-            painter.text(row.x + 8, row.y + row.height - 7, label, renaming ? accent : (object->flags.locked ? muted : text));
+            const std::string label = renaming ? controller.text_edit().buffer + "_"
+                : prefix + object->name + (children != 0U ? "  (" + std::to_string(children) + ")" : std::string());
+            const int indent = depth * 12;
+            const EditorColor rowColor = renaming ? accent
+                : (object->flags.locked || controller.is_isolated_out(object->id)) ? muted : text;
+            painter.text(row.x + 8 + indent, row.y + row.height - 7,
+                         elide_text_to_width(painter, label, std::max(0, row.width - 12 - indent)), rowColor);
         }
         if (controller.hierarchy_drag().active && !controller.hierarchy_drag().hoverTarget) {
             painter.text(layout.hierarchy.x + 10, layout.hierarchy.y + layout.hierarchy.height - 10,
@@ -3892,6 +3913,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             hint = candidate;
         }
         if (!hint.empty()) viewportPainter.text(hintX, viewport.y + 20, hint, muted);
+        if (!controller.isolated_objects().empty()) {
+            // Always say when the view is filtered, and how to undo it.
+            const int bannerRight = layout.viewportHelpButton.width > 0 ? layout.viewportHelpButton.x - 10
+                                                                         : viewport.x + viewport.width - 12;
+            const std::string banner = elide_text_to_width(
+                painter, "ISOLATED: " + std::to_string(controller.isolated_objects().size()) +
+                             " object(s)  View > Isolate Selection shows all",
+                std::max(0, bannerRight - (viewport.x + 12)));
+            viewportPainter.text(viewport.x + 12, viewport.y + viewport.height - 14, banner, rgb(255,191,74));
+        }
         const UiRect help = layout.viewportHelpButton;
         if (help.width > 0) {
             const bool hovered = help.contains(controller.hover_x(), controller.hover_y());
@@ -4086,9 +4117,14 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                             ? std::string("default") : object->attachment->socket;
                         inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
                                      "Attached to " + std::to_string(*object->parent) + "  socket " + socket, muted);
+                    } else if (object->parent) {
+                        // Parent group (from Group Selected), distinct from named groups below.
+                        const EditorObject* group = controller.workspace().document().find_object(*object->parent);
+                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
+                                     "Parent group  " + (group ? group->name : std::to_string(*object->parent)), muted);
                     } else {
                         inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
-                                     "Attachment  none", muted);
+                                     "Parent group  none", muted);
                     }
                     if (object->prefabLink) {
                         inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 289,
@@ -4100,7 +4136,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     }
                     inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 311,
                                  "Layer " + std::to_string(object->layer) + "  Tags " +
-                                 std::to_string(object->tags.size()) + "  Groups " +
+                                 std::to_string(object->tags.size()) + "  Named groups " +
                                  std::to_string(object->groups.size()), muted);
                     const auto componentSections = controller.primary_component_sections();
                     for (std::size_t componentIndex = 0;

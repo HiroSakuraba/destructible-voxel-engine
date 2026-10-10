@@ -696,6 +696,13 @@ public:
     [[nodiscard]] std::vector<std::string> voxel_boolean_preview_lines() const;
     [[nodiscard]] std::vector<VoxelBooleanPreviewMarker> voxel_boolean_preview_markers(std::size_t limit = 20000) const;
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
+    // View-only isolation (View > Isolate Selection): toggles between showing only the
+    // selection (with its children) and showing everything. Authored flags are untouched.
+    bool toggle_isolation();
+    [[nodiscard]] const std::set<EditorObjectId>& isolated_objects() const noexcept {
+        return viewportSettings_.isolatedObjects;
+    }
+    [[nodiscard]] bool is_isolated_out(EditorObjectId id) const noexcept;
     [[nodiscard]] std::vector<GizmoScreenRing> gizmo_rings() const;
     [[nodiscard]] int hit_test_gizmo_axis(int x, int y) const;
     [[nodiscard]] int gizmo_axis() const noexcept { return gizmoAxis_; }

@@ -4290,15 +4290,23 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
 
     const EditorStatusMessage& status = controller.status();
-    painter.text(10, layout.statusBar.y + layout.statusBar.height - 6, status.text,
-                 status.error ? rgb(255,105,105) : text);
-    const auto& prefs = controller.workspace().preferences();
+    const EditorPreferences& snapPreferences = controller.workspace().preferences();
+    const auto snapValue = [](bool enabled, std::string value) { return enabled ? value : std::string("off"); };
     const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
-        "  M " + (prefs.translateSnapEnabled ? std::to_string(prefs.translateSnapMeters).substr(0,4) : "off") +
-        "m  R " + (prefs.rotateSnapEnabled ? std::to_string(prefs.rotateSnapDegrees).substr(0,4) : "off") +
-        "°  S " + (prefs.scaleSnapEnabled ? std::to_string(prefs.scaleSnapStep).substr(0,4) : "off") +
-        (prefs.absoluteGridSnap ? "  Grid" : "  Delta");
-    painter.text(width - painter.text_width(scale) - 12, layout.statusBar.y + layout.statusBar.height - 6, scale, muted);
+        "  Move " + snapValue(snapPreferences.translateSnapEnabled,
+                              std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
+                                  (snapPreferences.absoluteGridSnap ? " grid" : "")) +
+        "  Rotate " + snapValue(snapPreferences.rotateSnapEnabled,
+                                std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "deg") +
+        "  Scale " + snapValue(snapPreferences.scaleSnapEnabled,
+                               std::to_string(snapPreferences.scaleSnapStep).substr(0,4) + "x");
+    // The snap summary keeps its place on the right; the status message is elided before it.
+    const std::string summary = elide_text_to_width(painter, scale, std::max(0, width / 2 - 12));
+    const int summaryX = width - painter.text_width(summary) - 12;
+    painter.text(summaryX, layout.statusBar.y + layout.statusBar.height - 6, summary, muted);
+    painter.text(10, layout.statusBar.y + layout.statusBar.height - 6,
+                 elide_text_to_width(painter, status.text, std::max(0, summaryX - 24)),
+                 status.error ? rgb(255,105,105) : text);
 
     if (controller.open_menu()) {
         const auto actions = controller.menu_actions(*controller.open_menu());

@@ -543,7 +543,7 @@ void test_materials_viewport_and_native_controller(const std::filesystem::path& 
 
     NativeEditorController controller{EditorWorkspace(make_native_editor_demo_document())};
     controller.resize(1280, 800);
-    require(controller.layout().viewport.width > 0 && controller.layout().toolbarButtons.size() == 9,
+    require(controller.layout().viewport.width > 0 && controller.layout().toolbarButtons.size() == kEditorToolCount,
             "native editor layout failed");
     controller.set_active_tool(EditorToolId::AddVoxel);
     require(controller.active_tool() == EditorToolId::AddVoxel, "tool selection failed");

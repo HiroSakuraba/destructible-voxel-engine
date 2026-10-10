@@ -1846,6 +1846,11 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
     enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
+    {
+        const std::string voxelSizeReason = voxel_size_scale_disabled_reason();
+        for (std::string_view id : {"transform.scale_voxel_size_up", "transform.scale_voxel_size_down"})
+            enabled(id, voxelSizeReason.empty(), voxelSizeReason);
+    }
     enabled("edit.paste", !clipboard_.empty(), "Copy or cut an object before pasting.");
     enabled("asset.open", assetBrowserState_.selectedId.has_value(), "Select an asset in the Assets panel first.");
     enabled("asset.rename", assetBrowserState_.selectedId.has_value(), "Select an asset in the Assets panel first.");
@@ -4489,6 +4494,14 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
         add("Shift boost");
         return gestures;
     }
+    const bool transformTool = activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
+                               activeTool_ == EditorToolId::Scale;
+    if (transformTool && workspace_.selected_objects().empty()) {
+        // Say what the tool needs instead of listing gestures that cannot work yet.
+        const std::string selectKey = binding("transform.select");
+        add("Select an object first" + (selectKey.empty() ? std::string() : " (" + selectKey + " select tool)"));
+        return gestures;
+    }
     switch (activeTool_) {
         case EditorToolId::Select:
             add("Click select");
@@ -5800,6 +5813,8 @@ camera_menu_dispatch_complete:
     if (actionId == "transform.scale_half") {
         return rescale_primary_voxel_object({0.5F, 0.5F, 0.5F}).success;
     }
+    if (actionId == "transform.scale_voxel_size_up") return scale_selection_voxel_size(2.0F).success;
+    if (actionId == "transform.scale_voxel_size_down") return scale_selection_voxel_size(0.5F).success;
     if (actionId == "view.frame") { frame_selection(); return true; }
     if (actionId == "view.grid") return toggleSessionSetting("viewport.grid");
     if (actionId == "view.collision") return toggleSessionSetting("viewport.collision");
@@ -7070,6 +7085,80 @@ CommandResult NativeEditorController::rescale_primary_voxel_object(Float3 scale)
     CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
     set_status(result.success ? "Rescaled voxel object; runtime transform remains rigid" : result.message,
                !result.success);
+    return result;
+}
+
+namespace {
+// Objects with occupied voxels (as the Scale tool requires); empties, 3D text and Gabor volumes
+// are skipped.
+[[nodiscard]] bool voxel_size_scalable(const EditorObject& object) noexcept {
+    return object.voxels && object.voxels->brick_count() != 0U && !object.text3d && !object.gaborVolume;
+}
+} // namespace
+
+std::string NativeEditorController::voxel_size_scale_disabled_reason() const {
+    if (workspace_.selected_objects().empty()) return "Select one or more voxel objects first.";
+    std::size_t voxelObjects = 0;
+    for (EditorObjectId id : workspace_.selected_objects()) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object || !voxel_size_scalable(*object)) continue;
+        if (object->flags.locked) return "Unlock the selected voxel objects first.";
+        ++voxelObjects;
+    }
+    if (voxelObjects == 0U) return "Scale Voxel Size works on voxel objects; none are selected.";
+    return {};
+}
+
+CommandResult NativeEditorController::scale_selection_voxel_size(float factor) {
+    const std::string reason = voxel_size_scale_disabled_reason();
+    if (!reason.empty()) {
+        set_status(reason, true);
+        return CommandResult::fail(reason);
+    }
+    if (!std::isfinite(factor) || !(factor > 0.0F)) {
+        set_status("Voxel size factor must be a positive number", true);
+        return CommandResult::fail("invalid voxel size factor");
+    }
+    std::vector<ObjectVoxelSizeChange> changes;
+    std::size_t skipped = 0;
+    // Limit the factor (the same for every object, so relative sizes and pivot distances are kept)
+    // so that every resulting voxel size stays within the supported range.
+    float applied = factor;
+    for (EditorObjectId id : workspace_.selected_objects()) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object || !voxel_size_scalable(*object)) { ++skipped; continue; }
+        changes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, object->voxelSizeMeters});
+        const float size = object->voxelSizeMeters;
+        if (!(size > 0.0F) || !std::isfinite(size)) continue;
+        applied = std::min(applied, std::max(1.0F, kMaxVoxelSizeMeters / size));
+        applied = std::max(applied, std::min(1.0F, kMinVoxelSizeMeters / size));
+    }
+    if (std::abs(applied - 1.0F) <= 1.0e-6F) {
+        const std::string message = factor > 1.0F ? "Voxel size is already at the 10 m maximum"
+                                                   : "Voxel size is already at the 1 mm minimum";
+        set_status(message, true);
+        return CommandResult::fail(message);
+    }
+    const Float3 pivot = selection_pivot();
+    for (ObjectVoxelSizeChange& change : changes) {
+        change.after.position = add(pivot, multiply(subtract(change.before.position, pivot), applied));
+        change.afterVoxelSize = std::clamp(change.beforeVoxelSize * applied, kMinVoxelSizeMeters, kMaxVoxelSizeMeters);
+    }
+    const std::size_t scaled = changes.size();
+    CommandResult result = workspace_.commands().execute(
+        workspace_.document(), std::make_unique<ScaleVoxelSizeCommand>(std::move(changes), "Scale voxel size"));
+    if (!result.success) {
+        set_status(result.message, true);
+        return result;
+    }
+    std::string factorText = std::to_string(applied);
+    while (factorText.size() > 1U && factorText.back() == '0') factorText.pop_back();
+    if (!factorText.empty() && factorText.back() == '.') factorText.pop_back();
+    std::string message = "Scaled voxel size x" + factorText + " on " + std::to_string(scaled) +
+                          " voxel object(s); voxel count unchanged";
+    if (std::abs(applied - factor) > 1.0e-6F) message += " (limited to the 1 mm .. 10 m voxel size range)";
+    if (skipped != 0U) message += "; skipped " + std::to_string(skipped) + " non-voxel object(s)";
+    set_status(message);
     return result;
 }
 

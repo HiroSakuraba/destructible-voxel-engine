@@ -312,16 +312,14 @@ void test_new_project_template() {
     EditorDocument document = make_new_project_document();
     require(document.name() == "Untitled Project", "new project template has the wrong name");
     require(!document.dirty(), "new project template should start clean");
-    require(document.objects().size() == 1U, "new project template should contain one starter object");
-    const EditorObject& oval = document.objects().begin()->second;
-    require(oval.name == "Starter Oval", "starter object is not the oval template");
-    require(oval.voxels->occupied_voxel_count() > 1000U, "starter oval is unexpectedly sparse");
-    require(oval.voxels->material_at({0, 4, 0}) == kDefaultSurfaceMaterial,
-            "starter oval does not use Standard Surface");
-    require(!oval.voxels->occupied_at({-8, 0, -6}) && !oval.voxels->occupied_at({7, 9, 5}),
-            "starter oval retained bounding-box corner voxels");
-    require(oval.voxels->occupied_at({-7, 4, 0}) && oval.voxels->occupied_at({0, 4, -5}),
-            "starter oval radii were not populated");
+    require(document.objects().size() == 1U, "new project template should contain only the starter cube");
+    const EditorObject& starter = document.objects().begin()->second;
+    require(starter.name == "Starter Cube", "starter object is not the cube template");
+    require(starter.voxels->occupied_voxel_count() == 1000U, "starter cube is not a solid 10x10x10");
+    require(starter.voxels->material_at({0, 4, 0}) == kDefaultSurfaceMaterial,
+            "starter cube does not use Standard Surface");
+    require(starter.voxels->occupied_at({-5, 0, -5}) && starter.voxels->occupied_at({4, 9, 4}),
+            "starter cube corners are missing");
 
     EditorMaterialLibrary materials = EditorMaterialLibrary::make_default();
     const EditorMaterialEntry* standard = materials.find(kDefaultSurfaceMaterial);
@@ -350,9 +348,114 @@ void test_new_project_template() {
     require(controller.dispatch_action("file.new_project"), "new project action failed");
     require(controller.workspace().document().objects().size() == 1U &&
             controller.workspace().selected_object().has_value(),
-            "new project action did not create and select the oval");
+            "new project action did not create and select the starter cube");
     require(controller.active_material() == kDefaultSurfaceMaterial,
             "new project editor paint material is not Standard Surface");
+}
+
+void test_starter_cube(const std::filesystem::path& root) {
+    // New scenes start with exactly the starter cube: 1 m, at the origin, clean.
+    EditorDocument scene = make_new_scene_document();
+    require(scene.name() == "Untitled Scene", "new scene has the wrong name");
+    require(!scene.dirty(), "new scene should start clean");
+    require(scene.objects().size() == 1U, "new scene should contain only the starter cube");
+    const EditorObject& cube = scene.objects().begin()->second;
+    require(cube.name == "Starter Cube", "starter object is not the cube");
+    require(std::abs(cube.voxelSizeMeters - 0.10F) < 1.0e-6F, "starter cube voxel size changed");
+    require(cube.voxels->occupied_voxel_count() == 1000U, "starter cube is not a solid 10x10x10");
+    require(cube.voxels->occupied_at({-5, 0, -5}) && cube.voxels->occupied_at({4, 9, 4}) &&
+            cube.voxels->occupied_at({0, 0, 0}), "starter cube corners are missing");
+    require(!cube.voxels->occupied_at({5, 0, 0}) && !cube.voxels->occupied_at({0, 10, 0}) &&
+            !cube.voxels->occupied_at({0, -1, 0}), "starter cube exceeds its 1 m bounds");
+    require(cube.voxels->material_at({0, 0, 0}) == kDefaultSurfaceMaterial,
+            "starter cube does not use Standard Surface");
+    require(cube.transform.position.x == 0.0F && cube.transform.position.y == 0.0F &&
+            cube.transform.position.z == 0.0F, "starter cube is not at the origin");
+
+    // It is an ordinary object: it can be removed like any other.
+    EditorDocument editable = make_new_scene_document();
+    const EditorObjectId cubeId = editable.objects().begin()->first;
+    require(editable.remove_object(cubeId) && editable.objects().empty(),
+            "starter cube cannot be removed");
+
+    // The new-project template holds the same single starter cube, at the
+    // origin (the oval that used to share the template is gone).
+    EditorDocument project = make_new_project_document();
+    require(project.objects().size() == 1U, "new project should hold only the starter cube");
+    const EditorObject& projectCube = project.objects().begin()->second;
+    require(projectCube.name == "Starter Cube", "new project is missing the starter cube");
+    require(projectCube.transform.position.x == 0.0F &&
+            projectCube.transform.position.y == 0.0F &&
+            projectCube.transform.position.z == 0.0F, "project starter cube is not at the origin");
+    require(projectCube.voxels->occupied_voxel_count() == 1000U, "project starter cube is not solid");
+
+    // A save/load round trip neither adds nor loses starter objects: loading
+    // an existing scene never re-seeds.
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    const auto scenePath = root / "starter.dvescene";
+    require(scene.save_transactional(scenePath).success, "starter scene save failed");
+    std::string loadError;
+    auto loaded = EditorDocument::load(scenePath, &loadError);
+    require(loaded.has_value(), loadError.c_str());
+    require(loaded->objects().size() == 1U &&
+            loaded->objects().begin()->second.name == "Starter Cube",
+            "loading a saved scene must not add or lose starter objects");
+
+    // The File > New Scene action seeds the cube and selects it for framing.
+    NativeEditorController controller{EditorWorkspace(EditorDocument("Temporary"))};
+    require(controller.dispatch_action("file.new_scene"), "new scene action failed");
+    require(controller.workspace().document().objects().size() == 1U &&
+            controller.workspace().document().objects().begin()->second.name == "Starter Cube",
+            "new scene action did not seed the starter cube");
+    require(controller.workspace().selected_object().has_value(),
+            "new scene action did not select the starter cube");
+}
+
+void test_gizmo_rings_and_plane_rotation() {
+    NativeEditorController controller{EditorWorkspace(make_new_scene_document())};
+    controller.resize(1280, 800);
+    require(controller.dispatch_action("file.new_scene"), "new scene for the gizmo test failed");
+    require(controller.dispatch_action("transform.rotate"), "rotate tool activation failed");
+
+    const std::vector<GizmoScreenRing> rings = controller.gizmo_rings();
+    require(rings.size() == 3U, "rotate tool should expose three gizmo rings");
+    for (const GizmoScreenRing& ring : rings)
+        require(ring.points.size() == 40U, "gizmo ring has the wrong segment count");
+    require(controller.gizmo_axes().size() == 3U, "rotate tool should keep three axis stubs");
+    require(rings[1].axis == 2, "second gizmo ring is not the Y axis");
+
+    // Hit testing: points on the Y ring resolve to the Y axis, including
+    // ring-only territory far from the axis stubs (crossings may differ).
+    const GizmoScreenRing& yRing = rings[1];
+    int hits = 0;
+    for (const ScreenPoint& point : yRing.points)
+        if (point.visible && controller.hit_test_gizmo_axis(static_cast<int>(point.x),
+                                                            static_cast<int>(point.y)) == 2)
+            ++hits;
+    require(hits >= 30, "ring hit testing does not resolve the Y ring to the Y axis");
+
+    // A stepped drag along the Y ring through 45 degrees of ring parameter
+    // rotates the cube about Y by roughly an eighth turn: its local X axis
+    // ends up diagonal between world X and world Z.
+    const ScreenPoint& grab = yRing.points[0];
+    require(grab.visible, "gizmo drag grab point is not visible");
+    controller.pointer_down(PointerButton::Primary, static_cast<int>(grab.x),
+                            static_cast<int>(grab.y));
+    require(controller.gizmo_dragging() && controller.gizmo_axis() == 2,
+            "pressing the Y ring did not start a Y gizmo drag");
+    for (int step = 1; step <= 5; ++step) {
+        const ScreenPoint& point = yRing.points[static_cast<std::size_t>(step)];
+        controller.pointer_move(static_cast<int>(point.x), static_cast<int>(point.y));
+    }
+    const ScreenPoint& release = yRing.points[5];
+    controller.pointer_up(PointerButton::Primary, static_cast<int>(release.x),
+                          static_cast<int>(release.y));
+    const EditorObject& cube = controller.workspace().document().objects().begin()->second;
+    const Float3 localX = rotate(cube.transform.rotation, {1.0F, 0.0F, 0.0F});
+    require(std::abs(localX.x) > 0.4F && std::abs(localX.z) > 0.4F && std::abs(localX.y) < 0.2F,
+            "ring drag did not rotate the cube about Y by roughly 45 degrees");
+    require(controller.workspace().commands().can_undo(), "gizmo rotation did not commit an undo step");
 }
 
 void test_materials_viewport_and_native_controller(const std::filesystem::path& root) {
@@ -645,9 +748,11 @@ void test_object_lifecycle_actions() {
             "new scene discarded dirty content before confirmation");
     controller.key_down("return", false, false, false);
     require(!controller.pending_destructive_confirmation(), "new scene confirmation did not close");
-    require(controller.workspace().document().objects().empty(), "new scene was not empty");
+    require(controller.workspace().document().objects().size() == 1U &&
+            controller.workspace().document().objects().begin()->second.name == "Starter Cube",
+            "new scene did not reset to the starter cube");
     require(!controller.workspace().commands().can_undo(), "new scene did not clear undo history");
-    require(controller.workspace().selection_count() == 0, "new scene did not clear selection");
+    require(controller.workspace().selection_count() == 1, "new scene did not select the starter cube");
 
     // file.exit: signals the host loop to close, does not itself terminate the process.
     require(!controller.quit_requested(), "quit was requested before file.exit was dispatched");
@@ -1453,6 +1558,8 @@ int main() {
         test_live_import_preview(root / "preview");
         test_background_object_diagnostics();
         test_new_project_template();
+        test_starter_cube(root / "starter");
+        test_gizmo_rings_and_plane_rotation();
         test_file_workflow_and_recent_projects(root / "recent");
         test_materials_viewport_and_native_controller(root / "native");
         test_voxel_rescale_command();

@@ -2722,9 +2722,13 @@ void NativeEditorController::create_new_project_now() {
 }
 
 void NativeEditorController::create_new_scene_now() {
-    workspace_.document() = EditorDocument("Untitled Scene");
+    workspace_.document() = make_new_scene_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
+    if (!workspace_.document().objects().empty()) {
+        workspace_.select_object(workspace_.document().objects().begin()->first);
+        frame_selection();
+    }
     recompute_layout();
 }
 
@@ -4667,6 +4671,37 @@ void NativeEditorController::apply_transform_preview(const std::vector<ObjectTra
     }
 }
 
+// Orthonormal basis (u, v) spanning the plane perpendicular to an axis: the
+// rotate ring for the axis lies in this plane.
+void gizmo_ring_basis(Float3 axisWorld, Float3& u, Float3& v) noexcept {
+    const auto cross3 = [](Float3 a, Float3 b) noexcept {
+        return Float3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    };
+    const Float3 helper = std::abs(axisWorld.y) < 0.9F ? Float3{0.0F, 1.0F, 0.0F}
+                                                       : Float3{1.0F, 0.0F, 0.0F};
+    u = normalize(cross3(axisWorld, helper));
+    v = cross3(axisWorld, u);
+}
+
+// World angle of a pointer position around a ring: intersect the pointer
+// ray with the ring's plane through the pivot and measure the hit in the
+// ring basis. False when the ray is nearly parallel to the plane or lands
+// on the pivot, where the angle is undefined.
+bool gizmo_pointer_ring_angle(const EditorCamera& camera, UiRect viewport, Float3 pivot,
+                              Float3 axisWorld, Float3 basisU, Float3 basisV, int x, int y,
+                              float& angleOut) noexcept {
+    const ViewportRay ray = make_viewport_ray(camera, viewport, static_cast<float>(x),
+                                              static_cast<float>(y));
+    const float denom = dot(ray.direction, axisWorld);
+    if (std::abs(denom) < 1.0e-4F) return false;
+    const float t = dot(subtract(pivot, ray.origin), axisWorld) / denom;
+    if (!(t > 0.0F)) return false;
+    const Float3 rel = subtract(add(ray.origin, multiply(ray.direction, t)), pivot);
+    if (dot(rel, rel) < 1.0e-8F) return false;
+    angleOut = std::atan2(dot(rel, basisV), dot(rel, basisU));
+    return true;
+}
+
 void NativeEditorController::update_placement_preview(int x, int y) {
     if (placementMode_ == PlacementTarget::NoTarget) return;
     apply_transform_preview(placementChanges_, false);
@@ -4789,6 +4824,32 @@ std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     return axes;
 }
 
+std::vector<GizmoScreenRing> NativeEditorController::gizmo_rings() const {
+    std::vector<GizmoScreenRing> rings;
+    if (activeTool_ != EditorToolId::Rotate || workspace_.selected_objects().empty()) return rings;
+    const Float3 origin = gizmoDragging_ ? gizmoPivot_ : selection_pivot();
+    const float radius = std::max(0.5F, length(subtract(camera_.position, origin)) * 0.12F);
+    constexpr int kSegments = 40;
+    for (int axis = 1; axis <= 3; ++axis) {
+        const Float3 axisWorld = gizmo_axis_world(axis);
+        Float3 u{};
+        Float3 v{};
+        gizmo_ring_basis(axisWorld, u, v);
+        GizmoScreenRing ring;
+        ring.axis = axis;
+        ring.points.reserve(kSegments);
+        for (int i = 0; i < kSegments; ++i) {
+            const float theta = static_cast<float>(i) * 6.283185307179586F /
+                                static_cast<float>(kSegments);
+            const Float3 point = add(origin, add(multiply(u, std::cos(theta) * radius),
+                                                 multiply(v, std::sin(theta) * radius)));
+            ring.points.push_back(project_world_to_screen(camera_, layout_.viewport, point));
+        }
+        rings.push_back(std::move(ring));
+    }
+    return rings;
+}
+
 int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
     int result = 0;
     float best = 10.0F * kLogicalLayoutScale;
@@ -4797,6 +4858,19 @@ int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
         const float distance = point_line_distance(static_cast<float>(x), static_cast<float>(y),
                                                    axis.start.x, axis.start.y, axis.end.x, axis.end.y);
         if (distance < best) { best = distance; result = axis.axis; }
+    }
+    if (activeTool_ == EditorToolId::Rotate) {
+        for (const GizmoScreenRing& ring : gizmo_rings()) {
+            const std::vector<ScreenPoint>& points = ring.points;
+            for (std::size_t i = 0; i < points.size(); ++i) {
+                const ScreenPoint& a = points[i];
+                const ScreenPoint& b = points[(i + 1U) % points.size()];
+                if (!a.visible || !b.visible) continue;
+                const float distance = point_line_distance(
+                    static_cast<float>(x), static_cast<float>(y), a.x, a.y, b.x, b.y);
+                if (distance < best) { best = distance; result = ring.axis; }
+            }
+        }
     }
     return result;
 }
@@ -4826,6 +4900,18 @@ void NativeEditorController::begin_gizmo_drag(int x, int y) {
     transformNumeric_.clear();
     scalePreviewBounds_.reset();
     scaleFactors_ = {1.0F, 1.0F, 1.0F};
+    gizmoDragPlane_ = false;
+    gizmoDragWorldAccum_ = 0.0F;
+    if (activeTool_ == EditorToolId::Rotate) {
+        const Float3 axisWorld = gizmo_axis_world(gizmoAxis_);
+        gizmo_ring_basis(axisWorld, gizmoDragBasisU_, gizmoDragBasisV_);
+        float angle = 0.0F;
+        if (gizmo_pointer_ring_angle(camera_, layout_.viewport, gizmoPivot_, axisWorld,
+                                     gizmoDragBasisU_, gizmoDragBasisV_, x, y, angle)) {
+            gizmoDragWorldAngle_ = angle;
+            gizmoDragPlane_ = true;
+        }
+    }
 }
 
 void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modifiers) {
@@ -4833,6 +4919,17 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
     gizmoLastX_ = x;
     gizmoLastY_ = y;
     gizmoLastModifiers_ = modifiers;
+    if (activeTool_ == EditorToolId::Rotate && gizmoDragPlane_) {
+        float angle = 0.0F;
+        if (gizmo_pointer_ring_angle(camera_, layout_.viewport, gizmoPivot_,
+                                     gizmo_axis_world(gizmoAxis_), gizmoDragBasisU_,
+                                     gizmoDragBasisV_, x, y, angle)) {
+            const float delta = std::atan2(std::sin(angle - gizmoDragWorldAngle_),
+                                           std::cos(angle - gizmoDragWorldAngle_));
+            gizmoDragWorldAccum_ += delta;
+            gizmoDragWorldAngle_ = angle;
+        }
+    }
     const auto axes = gizmo_axes();
     if (gizmoAxis_ < 1 || gizmoAxis_ > static_cast<int>(axes.size())) return;
     const GizmoScreenAxis& screenAxis = axes[static_cast<std::size_t>(gizmoAxis_ - 1)];
@@ -4876,7 +4973,9 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
         if (activeTool_ == EditorToolId::Rotate) {
             constexpr float degreesToRadians = 0.017453292519943295F;
             const float snapRadians = preferences.rotateSnapDegrees * degreesToRadians;
-            const float rawAngle = numeric ? *numeric * degreesToRadians : projectedDelta * 0.012F;
+            const float rawAngle = numeric ? *numeric * degreesToRadians
+                                 : gizmoDragPlane_ ? gizmoDragWorldAccum_
+                                                   : projectedDelta * 0.012F;
             const float angle = (!numeric && preferences.rotateSnapEnabled != temporaryOverride)
                 ? std::round(rawAngle / snapRadians) * snapRadians : rawAngle;
             const Quaternion delta = quaternion_from_axis_angle(worldAxis, angle);
@@ -7250,32 +7349,30 @@ std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
     return result;
 }
 
+// The Blender-style starter solid: a 1 m cube of 0.1 m voxels resting on the
+// Y=0 grid plane, centered on its local origin in X/Z, in Standard Surface.
+void add_starter_cube(EditorDocument& document, Float3 position) {
+    EditorObject cube(document.allocate_object_id(), "Starter Cube");
+    cube.flags.structural = true;
+    cube.flags.collisionEnabled = true;
+    cube.transform.position = position;
+    for (int y = 0; y < 10; ++y)
+        for (int z = -5; z < 5; ++z)
+            for (int x = -5; x < 5; ++x)
+                cube.voxels->set_voxel({x, y, z}, kDefaultSurfaceMaterial);
+    document.add_object(std::move(cube));
+}
+
+EditorDocument make_new_scene_document() {
+    EditorDocument document("Untitled Scene");
+    add_starter_cube(document, {0.0F, 0.0F, 0.0F});
+    document.mark_clean();
+    return document;
+}
+
 EditorDocument make_new_project_document() {
     EditorDocument document("Untitled Project");
-    EditorObject oval(1, "Starter Oval");
-    oval.voxelSizeMeters = 0.25F;
-    oval.flags.structural = true;
-    oval.flags.collisionEnabled = true;
-
-    // A compact ellipsoid resting on the Y=0 grid plane. Voxel-center sampling makes the
-    // silhouette symmetric despite even diameters and avoids a flat, box-derived boundary.
-    constexpr int radiusX = 8;
-    constexpr int radiusY = 5;
-    constexpr int radiusZ = 6;
-    for (int y = 0; y < radiusY * 2; ++y) {
-        const float normalizedY = (static_cast<float>(y) + 0.5F - static_cast<float>(radiusY)) /
-                                  static_cast<float>(radiusY);
-        for (int z = -radiusZ; z < radiusZ; ++z) {
-            const float normalizedZ = (static_cast<float>(z) + 0.5F) / static_cast<float>(radiusZ);
-            for (int x = -radiusX; x < radiusX; ++x) {
-                const float normalizedX = (static_cast<float>(x) + 0.5F) / static_cast<float>(radiusX);
-                if (normalizedX * normalizedX + normalizedY * normalizedY +
-                    normalizedZ * normalizedZ <= 1.0F)
-                    oval.voxels->set_voxel({x, y, z}, kDefaultSurfaceMaterial);
-            }
-        }
-    }
-    document.add_object(std::move(oval));
+    add_starter_cube(document, {0.0F, 0.0F, 0.0F});
     document.mark_clean();
     return document;
 }

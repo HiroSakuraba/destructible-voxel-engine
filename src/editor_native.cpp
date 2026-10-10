@@ -231,6 +231,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     const std::filesystem::path conventionalScript = projectRoot_ / "scripts" / "main.lua";
     if (std::filesystem::exists(conventionalScript)) config.startupScript = conventionalScript;
     cancel_text_edit();
+    if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Play or Simulate started");
     close_context_menu();
     close_top_level_menu();
     activePointerCommand_.clear();
@@ -1859,6 +1860,19 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("sprite.repack", spriteAuthoringPanel_.open(), "Open a sprite asset before repacking its atlas.");
     enabled("text3d.edit_selected", singleSelection, "Select one 3D text object first.");
     enabled("text3d.commit", text3dAuthoring_.active(), "No 3D text authoring session is active.");
+    {
+        const std::string booleanReason = voxel_boolean_disabled_reason();
+        for (std::string_view id : {"voxel.boolean_union", "voxel.boolean_difference", "voxel.boolean_intersection"})
+            enabled(id, booleanReason.empty(), booleanReason);
+        enabled("voxel.boolean_commit", voxelBoolean_.can_commit(), voxelBoolean_.commit_blocked_reason());
+        enabled("voxel.boolean_swap", voxelBoolean_.active(),
+                "No Boolean preview is open. Select voxel objects and choose Tools > Voxel Boolean.");
+        enabled("voxel.boolean_cancel", voxelBoolean_.active(),
+                "No Boolean preview is open. Select voxel objects and choose Tools > Voxel Boolean.");
+        checked("voxel.boolean_operands_hide", voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Hide);
+        checked("voxel.boolean_operands_delete", voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Delete);
+        checked("voxel.boolean_operands_keep", voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Keep);
+    }
     enabled("text3d.cancel", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     enabled("build.cook", !playActive, "Stop Play or Simulate before cooking content.");
     enabled("build.package", !playActive, "Stop Play or Simulate before packaging the game.");
@@ -2459,6 +2473,7 @@ void NativeEditorController::update(float elapsedSeconds) {
         navigationShortcutProfile_ = workspace_.shortcuts().active_profile();
     }
     autosave_tick(elapsedSeconds);
+    voxel_boolean_tick();
     synthPanel_.flush_wavetable_draft_if_due(audioMixer_.synthesizer());
     synthPanel_.sync_wavetable_section(audioMixer_.synthesizer());
     refresh_midi_status();
@@ -3133,6 +3148,12 @@ void NativeEditorController::open_context_menu(int x, int y, std::optional<Edito
         contextMenu_.items.push_back({"edit.duplicate", "Duplicate"});
         if (fromHierarchy) contextMenu_.items.push_back({"edit.rename", "Rename"});
         contextMenu_.items.push_back({"view.frame", "Frame Selection"});
+        if (workspace_.selection_count() >= 2U && (!target || workspace_.is_selected(*target)) &&
+            voxel_boolean_disabled_reason().empty()) {
+            contextMenu_.items.push_back({"voxel.boolean_union", "Boolean Union"});
+            contextMenu_.items.push_back({"voxel.boolean_difference", "Boolean Difference"});
+            contextMenu_.items.push_back({"voxel.boolean_intersection", "Boolean Intersection"});
+        }
         contextMenu_.items.push_back({"edit.delete", "Delete"});
     } else {
         if (!clipboard_.empty()) contextMenu_.items.push_back({"edit.paste", "Paste"});
@@ -5788,6 +5809,23 @@ camera_menu_dispatch_complete:
     if (actionId == "window.gabor_inspector") return openProjectCategory("Rendering");
     if (actionId == "text3d.edit_selected") return edit_selected_text3d();
     if (actionId == "text3d.commit") return commit_text3d_authoring();
+    if (actionId == "voxel.boolean_union") return begin_voxel_boolean(VoxelBooleanOperation::Union);
+    if (actionId == "voxel.boolean_difference") return begin_voxel_boolean(VoxelBooleanOperation::Difference);
+    if (actionId == "voxel.boolean_intersection") return begin_voxel_boolean(VoxelBooleanOperation::Intersection);
+    if (actionId == "voxel.boolean_commit") return commit_voxel_boolean().success;
+    if (actionId == "voxel.boolean_swap") return swap_voxel_boolean_target();
+    if (actionId == "voxel.boolean_cancel") {
+        if (!voxelBoolean_.active()) { set_status("No Boolean preview is open", true); return false; }
+        cancel_voxel_boolean();
+        return true;
+    }
+    if (actionId == "voxel.boolean_operands_hide" || actionId == "voxel.boolean_operands_delete" ||
+        actionId == "voxel.boolean_operands_keep") {
+        set_voxel_boolean_operand_policy(actionId == "voxel.boolean_operands_hide" ? VoxelBooleanOperandPolicy::Hide
+                                         : actionId == "voxel.boolean_operands_delete" ? VoxelBooleanOperandPolicy::Delete
+                                                                                       : VoxelBooleanOperandPolicy::Keep);
+        return true;
+    }
     if (actionId == "text3d.cancel") { cancel_text3d_authoring(); return true; }
     if (actionId == "create.prefab_from_selection") {
         if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
@@ -6684,6 +6722,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         // Alt+mnemonic opening can be added once labels carry explicit mnemonic metadata.
         return;
     }
+    if (voxelBoolean_.active() && handle_voxel_boolean_key(normalized, control, shift, alt)) return;
 
     if (alt && !control && normalized.size() == 1U) {
         const char mnemonic = normalized.front();
@@ -7013,6 +7052,202 @@ EditorDocument make_native_editor_demo_document() {
     document.add_object(std::move(crate));
     document.mark_clean();
     return document;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Authored voxel Booleans (ART-060)
+
+VoxelBooleanSelection NativeEditorController::voxel_boolean_selection() const {
+    return evaluate_voxel_boolean_selection(workspace_.document(), workspace_.selected_objects(),
+                                            workspace_.selected_object(), voxelBooleanPolicy_);
+}
+
+std::string NativeEditorController::voxel_boolean_disabled_reason() const {
+    if (playSession_.active() || workspace_.mode() != EditorMode::Edit)
+        return "Stop Play or Simulate (Shift+F5) before running a Boolean.";
+    const VoxelBooleanSelection selection = voxel_boolean_selection();
+    return selection.valid ? std::string{} : selection.reason;
+}
+
+bool NativeEditorController::begin_voxel_boolean(VoxelBooleanOperation operation) {
+    if (voxelBoolean_.active()) {
+        voxelBoolean_.set_operation(workspace_.document(), operation);
+        refresh_menu_state();
+        set_status("Boolean preview: " + std::string(voxel_boolean_operation_name(operation)), false, 4.0F);
+        return true;
+    }
+    if (const std::string reason = voxel_boolean_disabled_reason(); !reason.empty()) {
+        set_status(reason, true, 6.0F);
+        return false;
+    }
+    cancel_text_edit();
+    close_context_menu();
+    if (gizmoDragging_) finish_gizmo_drag(true);
+    finish_voxel_stroke();
+    std::string error;
+    if (!voxelBoolean_.begin(workspace_.document(), voxel_boolean_selection(), operation, voxelBooleanPolicy_, &error)) {
+        set_status(error, true, 6.0F);
+        return false;
+    }
+    refresh_menu_state();
+    const VoxelBooleanResult& result = voxelBoolean_.result();
+    set_status(result.can_commit()
+                   ? "Boolean " + std::string(voxel_boolean_operation_name(operation)) +
+                         " preview: Enter to commit, Esc to cancel"
+                   : "Boolean preview: " + result.blocking_reason(),
+               !result.can_commit(), 8.0F);
+    return true;
+}
+
+CommandResult NativeEditorController::commit_voxel_boolean() {
+    if (!voxelBoolean_.active()) {
+        const std::string reason = voxelBoolean_.commit_blocked_reason();
+        set_status(reason, true, 6.0F);
+        return CommandResult::fail(reason);
+    }
+    voxelBoolean_.set_operand_policy(voxelBooleanPolicy_);
+    const CommandResult result = voxelBoolean_.commit(workspace_);
+    if (!result.success) {
+        set_status("Boolean not applied: " + result.message, true, 8.0F);
+        refresh_menu_state();
+        return result;
+    }
+    const auto& report = *voxelBoolean_.last_commit();
+    recompute_layout();
+    refresh_menu_state();
+    std::string text = "Boolean " + std::string(voxel_boolean_operation_name(report.operation)) + " applied: +" +
+                       std::to_string(report.stats.addedVoxels) + " / -" + std::to_string(report.stats.removedVoxels) +
+                       " voxels, " + (report.collisionEnabled ? "collision rebuilt (" + std::to_string(report.collisionBoxes) + " boxes)"
+                                                               : std::string("collision off on target"));
+    if (report.policy == VoxelBooleanOperandPolicy::Hide) text += ", operands hidden";
+    else if (report.policy == VoxelBooleanOperandPolicy::Delete) text += ", operands deleted";
+    set_status(text + ". Ctrl+Z undoes it in one step.", false, 8.0F);
+    return result;
+}
+
+void NativeEditorController::cancel_voxel_boolean(std::string_view reason) {
+    if (!voxelBoolean_.active()) return;
+    voxelBoolean_.cancel();
+    refresh_menu_state();
+    set_status(reason.empty() ? std::string("Boolean preview cancelled; the scene is unchanged") : std::string(reason),
+               false, 4.0F);
+}
+
+bool NativeEditorController::swap_voxel_boolean_target() {
+    if (!voxelBoolean_.active() || voxelBoolean_.operands().empty()) {
+        set_status("No Boolean preview is open", true);
+        return false;
+    }
+    const EditorObjectId newTarget = voxelBoolean_.operands().front();
+    const VoxelBooleanOperation operation = voxelBoolean_.operation();
+    voxelBoolean_.cancel();
+    workspace_.add_to_selection(newTarget); // makes it the active (primary) selection
+    if (!begin_voxel_boolean(operation)) return false;
+    const EditorObject* target = workspace_.document().find_object(newTarget);
+    set_status("Boolean target is now " + (target ? "'" + target->name + "'" : std::string("the first operand")),
+               false, 4.0F);
+    return true;
+}
+
+void NativeEditorController::set_voxel_boolean_operand_policy(VoxelBooleanOperandPolicy policy) {
+    voxelBooleanPolicy_ = policy;
+    voxelBoolean_.set_operand_policy(policy);
+    refresh_menu_state();
+    set_status("Boolean operands after commit: " + std::string(voxel_boolean_operand_policy_name(policy)), false, 4.0F);
+}
+
+bool NativeEditorController::handle_voxel_boolean_key(std::string_view normalized, bool control, bool shift, bool alt) {
+    (void)shift;
+    if (control || alt) return false;
+    if (normalized == "escape") { cancel_voxel_boolean(); return true; }
+    if (normalized == "return" || normalized == "enter" || normalized == "kp_enter") {
+        (void)commit_voxel_boolean();
+        return true;
+    }
+    if (normalized == "1" || normalized == "2" || normalized == "3") {
+        (void)begin_voxel_boolean(normalized == "1" ? VoxelBooleanOperation::Union
+                                  : normalized == "2" ? VoxelBooleanOperation::Difference
+                                                      : VoxelBooleanOperation::Intersection);
+        return true;
+    }
+    if (normalized == "s") { (void)swap_voxel_boolean_target(); return true; }
+    if (normalized == "o") {
+        set_voxel_boolean_operand_policy(voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Hide ? VoxelBooleanOperandPolicy::Delete
+                                         : voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Delete ? VoxelBooleanOperandPolicy::Keep
+                                                                                                   : VoxelBooleanOperandPolicy::Hide);
+        return true;
+    }
+    if (normalized == "m") {
+        voxelBoolean_.set_overlap_material(workspace_.document(),
+            voxelBoolean_.overlap_material() == VoxelBooleanOverlapMaterial::KeepPrimary
+                ? VoxelBooleanOverlapMaterial::TakeOperand : VoxelBooleanOverlapMaterial::KeepPrimary);
+        refresh_menu_state();
+        set_status(voxelBoolean_.overlap_material() == VoxelBooleanOverlapMaterial::KeepPrimary
+                       ? "Overlapping voxels keep the target's material"
+                       : "Overlapping voxels take the operand's material", false, 4.0F);
+        return true;
+    }
+    return false;
+}
+
+void NativeEditorController::voxel_boolean_tick() {
+    if (voxelBoolean_.active()) {
+        std::set<EditorObjectId> participants(voxelBoolean_.operands().begin(), voxelBoolean_.operands().end());
+        participants.insert(voxelBoolean_.target());
+        if (participants != workspace_.selected_objects() || workspace_.selected_object() != voxelBoolean_.target()) {
+            cancel_voxel_boolean("Boolean preview cancelled: the selection changed");
+        } else if (!voxelBoolean_.refresh(workspace_.document())) {
+            refresh_menu_state();
+            set_status("Boolean preview closed: an object it used was removed or changed type", true, 6.0F);
+        }
+    }
+    // Keep the Boolean commands' enabled state and disabled reasons in step with the selection.
+    std::uint64_t key = editor_selection_fingerprint(workspace_.selected_objects());
+    key = key * 1099511628211ULL ^ workspace_.selected_object().value_or(0U);
+    key = key * 1099511628211ULL ^ workspace_.commands().size();
+    key = key * 1099511628211ULL ^ (workspace_.commands().can_undo() ? 1U : 0U) ^ (workspace_.commands().can_redo() ? 2U : 0U);
+    key = key * 1099511628211ULL ^ (playSession_.active() ? 1U : 0U) ^ (voxelBoolean_.active() ? 2U : 0U);
+    if (key != voxelBooleanMenuKey_) {
+        voxelBooleanMenuKey_ = key;
+        refresh_menu_state();
+    }
+}
+
+std::vector<std::string> NativeEditorController::voxel_boolean_preview_lines() const {
+    return voxelBoolean_.describe(workspace_.document());
+}
+
+std::vector<VoxelBooleanPreviewMarker> NativeEditorController::voxel_boolean_preview_markers(std::size_t limit) const {
+    std::vector<VoxelBooleanPreviewMarker> markers;
+    if (!voxelBoolean_.active()) return markers;
+    const EditorObject* target = workspace_.document().find_object(voxelBoolean_.target());
+    if (!target) return markers;
+    const UiRect viewport = layout_.viewport;
+    const float viewportHeight = static_cast<float>(std::max(1, viewport.height));
+    const float tangent = std::tan(camera_.verticalFovRadians * 0.5F);
+    const float size = target->voxelSizeMeters;
+    const auto push = [&](Int3 voxel, VoxelBooleanPreviewMarker::Kind kind) {
+        if (markers.size() >= limit) return;
+        const Float3 local{(static_cast<float>(voxel.x) + 0.5F) * size, (static_cast<float>(voxel.y) + 0.5F) * size,
+                           (static_cast<float>(voxel.z) + 0.5F) * size};
+        const ScreenPoint screen = project_world_to_screen(camera_, viewport, transform_point(target->transform, local));
+        if (!screen.visible) return;
+        const float radius = camera_.projection == EditorProjection::Perspective
+            ? size * viewportHeight / std::max(0.001F, 2.0F * screen.depth * tangent)
+            : size * viewportHeight / std::max(0.001F, camera_.orthographicHeight);
+        markers.push_back({kind, screen.x, screen.y, screen.depth, std::clamp(radius * 0.72F, 1.5F, 12.0F)});
+    };
+    const VoxelBooleanResult& result = voxelBoolean_.result();
+    for (const VoxelBooleanChange& change : result.changes)
+        push(change.voxel, change.after == kAirMaterial ? VoxelBooleanPreviewMarker::Kind::Removed
+                           : change.before == kAirMaterial ? VoxelBooleanPreviewMarker::Kind::Added
+                                                           : VoxelBooleanPreviewMarker::Kind::Repainted);
+    if (result.operation == VoxelBooleanOperation::Union)
+        for (const Int3 cell : result.overlapCells) push(cell, VoxelBooleanPreviewMarker::Kind::Overlap);
+    std::sort(markers.begin(), markers.end(), [](const VoxelBooleanPreviewMarker& a, const VoxelBooleanPreviewMarker& b) {
+        return a.depth > b.depth;
+    });
+    return markers;
 }
 
 } // namespace dve::editor

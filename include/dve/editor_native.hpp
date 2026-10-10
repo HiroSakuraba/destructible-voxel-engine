@@ -44,6 +44,7 @@
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
+#include "dve/editor_voxel_boolean.hpp"
 #include "dve/editor_navigation_filter.hpp"
 #include "dve/editor_workspace.hpp"
 
@@ -263,6 +264,16 @@ struct NativeEditorLayout {
     UiRect aiSendButton{};
     UiRect aiApproveButton{};
     UiRect aiDenyButton{};
+};
+
+// One highlighted primary-grid cell of an open voxel Boolean preview, projected to the screen.
+struct VoxelBooleanPreviewMarker {
+    enum class Kind : std::uint8_t { Added, Removed, Repainted, Overlap };
+    Kind kind{Kind::Added};
+    float screenX{};
+    float screenY{};
+    float depth{};
+    float pixelRadius{2.0F};
 };
 
 struct EditorStatusMessage {
@@ -619,6 +630,24 @@ public:
     [[nodiscard]] std::vector<EditorText3DDrawItem> text3d_draw_items() const;
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
+
+    // Authored voxel Booleans (ART-060). begin_voxel_boolean opens a non-destructive preview
+    // for the current selection (active object = target A, other selected objects = operands);
+    // while it is open Enter commits, Esc cancels, 1/2/3 switch Union/Difference/Intersection,
+    // S swaps the target, O cycles the operand policy and M toggles the overlap material.
+    [[nodiscard]] VoxelBooleanSelection voxel_boolean_selection() const;
+    // Empty when a Boolean can start now; otherwise what to select or change (ART-114).
+    [[nodiscard]] std::string voxel_boolean_disabled_reason() const;
+    [[nodiscard]] bool begin_voxel_boolean(VoxelBooleanOperation operation);
+    [[nodiscard]] CommandResult commit_voxel_boolean();
+    void cancel_voxel_boolean(std::string_view reason = {});
+    // Makes the first operand the new target (A) and the old target an operand (B).
+    [[nodiscard]] bool swap_voxel_boolean_target();
+    [[nodiscard]] const EditorVoxelBooleanSession& voxel_boolean() const noexcept { return voxelBoolean_; }
+    [[nodiscard]] VoxelBooleanOperandPolicy voxel_boolean_operand_policy() const noexcept { return voxelBooleanPolicy_; }
+    void set_voxel_boolean_operand_policy(VoxelBooleanOperandPolicy policy);
+    [[nodiscard]] std::vector<std::string> voxel_boolean_preview_lines() const;
+    [[nodiscard]] std::vector<VoxelBooleanPreviewMarker> voxel_boolean_preview_markers(std::size_t limit = 20000) const;
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
 
 private:
@@ -676,6 +705,8 @@ private:
     [[nodiscard]] bool refresh_asset_database(bool announce = true);
     [[nodiscard]] std::filesystem::path find_default_text3d_font() const;
     [[nodiscard]] std::filesystem::path find_default_gabor_asset() const;
+    bool handle_voxel_boolean_key(std::string_view normalized, bool control, bool shift, bool alt);
+    void voxel_boolean_tick();
 
     EditorWorkspace workspace_;
     EditorMaterialLibrary materials_;
@@ -684,6 +715,9 @@ private:
     EditorAssetBrowserState assetBrowserState_{};
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
+    EditorVoxelBooleanSession voxelBoolean_{};
+    VoxelBooleanOperandPolicy voxelBooleanPolicy_{VoxelBooleanOperandPolicy::Hide};
+    std::uint64_t voxelBooleanMenuKey_{};
     std::filesystem::path projectRoot_;
     bool workspaceProjectConfigured_{};
     EditorWorkspaceState startupWorkspaceState_;

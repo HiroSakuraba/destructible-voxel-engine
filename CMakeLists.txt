@@ -115,6 +115,7 @@ add_library(dve_core
     src/camera_runtime.cpp
     src/camera_sequence.cpp
     src/collision_proxy.cpp
+    src/voxel_boolean.cpp
     src/fragment.cpp
     src/work_debt.cpp
     src/job_system.cpp
@@ -825,6 +826,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_control_rig.cpp
         src/editor_prefab.cpp
         src/editor_command.cpp
+        src/editor_voxel_boolean.cpp
         src/editor_tools.cpp
         src/editor_workspace.cpp
         src/editor_workspace_state.cpp
@@ -973,6 +975,9 @@ if(DVE_BUILD_TESTS)
     endif()
 
     enable_testing()
+    add_executable(dve_voxel_boolean_tests tests/test_voxel_boolean.cpp)
+    target_link_libraries(dve_voxel_boolean_tests PRIVATE dve::core)
+    add_test(NAME dve_voxel_boolean_tests COMMAND dve_voxel_boolean_tests)
     add_executable(dve_camera_system_tests tests/test_camera_system.cpp)
     target_link_libraries(dve_camera_system_tests PRIVATE dve::core)
     add_test(NAME dve_camera_system_tests COMMAND dve_camera_system_tests)
@@ -2645,6 +2650,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_synth_tests tests/test_editor_synth.cpp)
         target_link_libraries(dve_editor_synth_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_synth_tests COMMAND dve_editor_synth_tests)
+        add_executable(dve_editor_voxel_boolean_tests tests/test_editor_voxel_boolean.cpp)
+        target_link_libraries(dve_editor_voxel_boolean_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_voxel_boolean_tests COMMAND dve_editor_voxel_boolean_tests)
         add_executable(dve_editor_critique_fixes_tests tests/test_editor_critique_fixes.cpp)
         target_link_libraries(dve_editor_critique_fixes_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_critique_fixes_tests COMMAND dve_editor_critique_fixes_tests)

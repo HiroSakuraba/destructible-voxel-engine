@@ -4488,7 +4488,7 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
     switch (activeTool_) {
         case EditorToolId::Select:
             add("Click select");
-            add("Shift-click add/remove");
+            add("Shift-click add");
             add("Drag empty space: box select");
             break;
         case EditorToolId::Translate:
@@ -4515,6 +4515,10 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
         case EditorToolId::Box: add("Click to add a 3x3x3 box"); break;
         case EditorToolId::Beam: add("Click to add a beam along +X"); break;
         case EditorToolId::Anchor: add("Click voxel to toggle anchor"); break;
+        case EditorToolId::Scale:
+            add("Drag handle to scale");
+            add("Shift toggles snap");
+            break;
     }
     return gestures;
 }

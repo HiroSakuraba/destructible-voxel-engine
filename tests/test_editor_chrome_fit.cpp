@@ -152,6 +152,13 @@ void test_toolbar_tooltips() {
     check(controller.tool_shortcut_text(EditorToolId::Translate) == "W", "Move is W");
     check(controller.tool_shortcut_text(EditorToolId::Rotate) == "E", "Rotate is E");
     check(controller.tool_shortcut_text(EditorToolId::Scale) == "R", "Scale is R");
+    // Scale has no toolbar button but still gets its own viewport hint.
+    controller.set_active_tool(EditorToolId::Scale);
+    const auto scaleGestures = controller.viewport_tool_gestures();
+    check(!scaleGestures.empty() && scaleGestures.front() == "Drag handle to scale", "Scale has a viewport hint");
+    controller.set_active_tool(EditorToolId::Select);
+    const auto selectGestures = controller.viewport_tool_gestures();
+    check(selectGestures.size() > 1 && selectGestures[1] == "Shift-click add", "Shift-click adds to the selection");
 }
 
 void test_viewport_hint(const Case& c) {

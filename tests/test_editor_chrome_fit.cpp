@@ -151,6 +151,7 @@ void test_toolbar_tooltips() {
     check(controller.tool_shortcut_text(EditorToolId::Select) == "Q", "Select is Q");
     check(controller.tool_shortcut_text(EditorToolId::Translate) == "W", "Move is W");
     check(controller.tool_shortcut_text(EditorToolId::Rotate) == "E", "Rotate is E");
+    check(controller.tool_shortcut_text(EditorToolId::Scale) == "R", "Scale is R");
 }
 
 void test_viewport_hint(const Case& c) {

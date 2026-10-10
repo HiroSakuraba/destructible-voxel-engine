@@ -231,6 +231,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     const std::filesystem::path conventionalScript = projectRoot_ / "scripts" / "main.lua";
     if (std::filesystem::exists(conventionalScript)) config.startupScript = conventionalScript;
     cancel_text_edit();
+    cancel_voxel_slice();
     if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Play or Simulate started");
     close_context_menu();
     close_top_level_menu();
@@ -1866,6 +1867,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("text3d.edit_selected", singleSelection, "Select one 3D text object first.");
     enabled("text3d.commit", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     {
+        const auto sliceReason = voxel_slice_disabled_reason();
+        enabled("voxel.slice", sliceReason.empty(), sliceReason);
+        enabled("voxel.slice_commit", voxelSlice_.active() && voxelSlice_.blocked_reason(workspace_.document()).empty(), voxelSlice_.blocked_reason(workspace_.document()));
+        enabled("voxel.slice_cancel", voxelSlice_.active(), "No Slice preview is open.");
         const std::string booleanReason = voxel_boolean_disabled_reason();
         for (std::string_view id : {"voxel.boolean_union", "voxel.boolean_difference", "voxel.boolean_intersection"})
             enabled(id, booleanReason.empty(), booleanReason);
@@ -2247,6 +2252,8 @@ void NativeEditorController::recompute_layout() {
 
     layout_.inspectorToggles.clear();
     layout_.inspectorFields.clear();
+    layout_.inspectorStackedFields = inspectorWidth > 0 && inspectorWidth < 320;
+    layout_.inspectorFieldCount = 0;
     if (inspectorWidth > 0) {
         // Matches the fixed y-offsets the renderer already draws the Position and Rotation
         // lines at (see apps/dve_native_editor_x11.cpp); kept here rather than computed from
@@ -2266,9 +2273,17 @@ void NativeEditorController::recompute_layout() {
                                                    inspectorWidth - 24, 18});
             }
         }
+        layout_.inspectorFieldCount = static_cast<int>(layout_.inspectorFields.size());
+        const int reflowExtra = layout_.inspectorStackedFields ? 22 * layout_.inspectorFieldCount : 0;
+        if (layout_.inspectorStackedFields) {
+            for (std::size_t index = 0; index < layout_.inspectorFields.size(); ++index) {
+                layout_.inspectorFields[index].y += static_cast<int>(index) * 22;
+                layout_.inspectorFields[index].height = 40;
+            }
+        }
         // Last fixed detail line: baseline 377 (voxel/text3d) or 311 (Gabor) + descent/gap.
         const int contentBottom = contentY + static_cast<int>(
-            (selectedObject && selectedObject->gaborVolume ? 326.0F : 390.0F) * scale);
+            (selectedObject && selectedObject->gaborVolume ? 326.0F : 390.0F) * scale) + reflowExtra;
         const int inspectorBottom = layout_.inspector.y + layout_.inspector.height - 6;
         // The toggles used to start at a fixed offset and simply continue downward, so at
         // 1280x719 (inspector ends at y=547) they spilled ~50 px into the bottom dock and
@@ -2289,7 +2304,7 @@ void NativeEditorController::recompute_layout() {
         }
         const int blockHeight = block_height(chosen);
         // Never cover the name / ID / Position / Rotation lines (they end near +124).
-        const int blockTop = fits ? contentBottom : std::max(contentY + 124, inspectorBottom - blockHeight);
+        const int blockTop = fits ? contentBottom : std::max(contentY + kInspectorHeaderHeight + 40, inspectorBottom - blockHeight);
         const int columnGap = 8;
         const int columnWidth = (inspectorWidth - 24 - (chosen.columns - 1) * columnGap) / chosen.columns;
         for (int index = 0; index < kToggleCount; ++index) {
@@ -2310,7 +2325,10 @@ void NativeEditorController::recompute_layout() {
             UiRect& rect = layout_.inspectorFields[field];
             rect.y -= inspectorScroll_;
             // Scrolled out of view -> not clickable.
-            if (rect.y < detailTop || rect.y + rect.height > layout_.inspectorContentClipY) rect = {};
+            const int top = std::max(rect.y, detailTop);
+            const int bottom = std::min(rect.y + rect.height, layout_.inspectorContentClipY);
+            if (bottom <= top) rect = {};
+            else { rect.y = top; rect.height = bottom - top; }
         }
     } else {
         layout_.inspectorContentClipY = layout_.inspector.y + layout_.inspector.height;
@@ -6049,6 +6067,9 @@ camera_menu_dispatch_complete:
     if (actionId == "window.gabor_inspector") return openProjectCategory("Rendering");
     if (actionId == "text3d.edit_selected") return edit_selected_text3d();
     if (actionId == "text3d.commit") return commit_text3d_authoring();
+    if (actionId == "voxel.slice") return begin_voxel_slice();
+    if (actionId == "voxel.slice_commit") return commit_voxel_slice().success;
+    if (actionId == "voxel.slice_cancel") { cancel_voxel_slice(); return true; }
     if (actionId == "voxel.boolean_union") return begin_voxel_boolean(VoxelBooleanOperation::Union);
     if (actionId == "voxel.boolean_difference") return begin_voxel_boolean(VoxelBooleanOperation::Difference);
     if (actionId == "voxel.boolean_intersection") return begin_voxel_boolean(VoxelBooleanOperation::Intersection);
@@ -6962,6 +6983,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         // Alt+mnemonic opening can be added once labels carry explicit mnemonic metadata.
         return;
     }
+    if (voxelSlice_.active() && handle_voxel_slice_key(normalized, control, shift, alt)) return;
     if (voxelBoolean_.active() && handle_voxel_boolean_key(normalized, control, shift, alt)) return;
 
     if (alt && !control && normalized.size() == 1U) {
@@ -7382,6 +7404,7 @@ std::string NativeEditorController::voxel_boolean_disabled_reason() const {
 }
 
 bool NativeEditorController::begin_voxel_boolean(VoxelBooleanOperation operation) {
+    cancel_voxel_slice();
     if (voxelBoolean_.active()) {
         voxelBoolean_.set_operation(workspace_.document(), operation);
         refresh_menu_state();
@@ -7503,6 +7526,11 @@ bool NativeEditorController::handle_voxel_boolean_key(std::string_view normalize
 }
 
 void NativeEditorController::voxel_boolean_tick() {
+    if (voxelSlice_.active() && (workspace_.selection_count() != 1 || workspace_.selected_object() != voxelSlice_.target() ||
+        !voxelSlice_.target_unchanged(workspace_.document()))) {
+        cancel_voxel_slice();
+        set_status("Slice preview cancelled: selection or target changed", true);
+    }
     if (voxelBoolean_.active()) {
         std::set<EditorObjectId> participants(voxelBoolean_.operands().begin(), voxelBoolean_.operands().end());
         participants.insert(voxelBoolean_.target());
@@ -7518,7 +7546,7 @@ void NativeEditorController::voxel_boolean_tick() {
     key = key * 1099511628211ULL ^ workspace_.selected_object().value_or(0U);
     key = key * 1099511628211ULL ^ workspace_.commands().size();
     key = key * 1099511628211ULL ^ (workspace_.commands().can_undo() ? 1U : 0U) ^ (workspace_.commands().can_redo() ? 2U : 0U);
-    key = key * 1099511628211ULL ^ (playSession_.active() ? 1U : 0U) ^ (voxelBoolean_.active() ? 2U : 0U);
+    key = key * 1099511628211ULL ^ (playSession_.active() ? 1U : 0U) ^ (voxelBoolean_.active() ? 2U : 0U) ^ (voxelSlice_.active() ? 4U : 0U);
     if (key != voxelBooleanMenuKey_) {
         voxelBooleanMenuKey_ = key;
         refresh_menu_state();
@@ -7562,4 +7590,114 @@ std::vector<VoxelBooleanPreviewMarker> NativeEditorController::voxel_boolean_pre
     return markers;
 }
 
+} // namespace dve::editor
+
+namespace dve::editor {
+std::string NativeEditorController::voxel_slice_disabled_reason() const {
+    if (playSession_.active() || workspace_.mode() != EditorMode::Edit)
+        return "Stop Play or Simulate before slicing.";
+    if (workspace_.selection_count() != 1)
+        return "Select exactly one occupied voxel object to slice.";
+    const auto* o = workspace_.document().find_object(*workspace_.selected_object());
+    if (!o || !o->voxels || o->text3d || o->gaborVolume || !o->voxels->occupied_voxel_count())
+        return "Select an occupied voxel object.";
+    if (o->flags.locked)
+        return "Unlock the object before slicing.";
+    return {};
+}
+bool NativeEditorController::begin_voxel_slice() {
+    if (const auto reason = voxel_slice_disabled_reason(); !reason.empty()) {
+        set_status(reason, true);
+        return false;
+    }
+    cancel_voxel_boolean();
+    cancel_text_edit();
+    close_context_menu();
+    if (gizmoDragging_)
+        finish_gizmo_drag(true);
+    finish_voxel_stroke();
+    const auto bounds = selection_bounds();
+    std::string error;
+    if (!voxelSlice_.begin(workspace_.document(), *workspace_.selected_object(),
+                           multiply(add(bounds.minimum, bounds.maximum), 0.5F), {1, 0, 0}, &error)) {
+        set_status(error, true);
+        return false;
+    }
+    refresh_menu_state();
+    set_status("Slice preview: X/Y/Z axis, arrows move, 1/2/3 output, Enter applies, Esc cancels", false, 8);
+    return true;
+}
+bool NativeEditorController::configure_voxel_slice(Float3 point, Float3 normal, VoxelSliceOutput output) {
+    if (!voxelSlice_.active())
+        return false;
+    std::string error;
+    const bool ok = voxelSlice_.configure(workspace_.document(), point, normal, output, &error);
+    if (!ok)
+        set_status(error, true);
+    refresh_menu_state();
+    return ok;
+}
+CommandResult NativeEditorController::commit_voxel_slice() {
+    if (const auto reason = voxel_slice_disabled_reason(); !reason.empty()) {
+        set_status(reason, true);
+        return CommandResult::fail(reason);
+    }
+    if (!voxelSlice_.active() || workspace_.selected_object() != voxelSlice_.target())
+        return CommandResult::fail("Slice selection changed; reopen the preview.");
+    auto result = voxelSlice_.commit(workspace_);
+    recompute_layout();
+    refresh_menu_state();
+    set_status(result.success ? "Slice applied. Ctrl+Z restores both halves in one step." : result.message,
+               !result.success, 8);
+    return result;
+}
+void NativeEditorController::cancel_voxel_slice() {
+    if (!voxelSlice_.active())
+        return;
+    voxelSlice_.cancel();
+    refresh_menu_state();
+    set_status("Slice cancelled; scene unchanged");
+}
+bool NativeEditorController::handle_voxel_slice_key(std::string_view key, bool control, bool shift,
+                                                    bool alt) {
+    if (control || alt)
+        return false;
+    if (key == "escape") {
+        cancel_voxel_slice();
+        return true;
+    }
+    if (key == "enter" || key == "return") {
+        (void)commit_voxel_slice();
+        return true;
+    }
+    auto point = voxelSlice_.point();
+    auto normal = voxelSlice_.normal();
+    auto output = voxelSlice_.output();
+    if (key == "x")
+        normal = {1, 0, 0};
+    else if (key == "y")
+        normal = {0, 1, 0};
+    else if (key == "z")
+        normal = {0, 0, 1};
+    else if (key == "1")
+        output = VoxelSliceOutput::Front;
+    else if (key == "2")
+        output = VoxelSliceOutput::Back;
+    else if (key == "3")
+        output = VoxelSliceOutput::Separate;
+    else if (key == "left" || key == "down" || key == "right" || key == "up") {
+        const auto* o = workspace_.document().find_object(voxelSlice_.target());
+        if (!o) {
+            cancel_voxel_slice();
+            return true;
+        }
+        float delta = o->voxelSizeMeters * (shift ? 0.1F : 1.0F);
+        if (key == "left" || key == "down")
+            delta = -delta;
+        point = add(point, multiply(normal, delta));
+    } else
+        return false;
+    (void)configure_voxel_slice(point, normal, output);
+    return true;
+}
 } // namespace dve::editor

@@ -3426,6 +3426,42 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                  elide_text_to_width(viewportPainter, line, panel.width - 20), color);
         }
     }
+    if (controller.voxel_slice().active()) {
+        const auto& slice=controller.voxel_slice();
+        std::size_t drawn=0;
+        for (const auto& cell:slice.cells()) {
+            if(drawn++>=20000) break;
+            const auto screen=project_world_to_screen(controller.camera(),viewport,cell.worldCenter);
+            if(screen.visible) viewportPainter.outline({static_cast<int>(screen.x)-2,static_cast<int>(screen.y)-2,5,5},
+                                                       cell.front?rgb(100,200,255):rgb(255,160,90));
+        }
+        const auto crossPlane = [](Float3 a, Float3 b) {
+            return Float3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
+        };
+        const auto* target = controller.workspace().document().find_object(slice.target());
+        const auto bounds = target ? object_world_bounds(*target) : EditorObjectBounds{};
+        const float radius = std::max(0.1F, length(subtract(bounds.maximum,bounds.minimum))*0.6F);
+        const auto u = multiply(normalize(crossPlane(slice.normal(),
+            std::abs(slice.normal().y)<0.9F ? Float3{0,1,0} : Float3{1,0,0})),radius);
+        const auto v = multiply(normalize(crossPlane(slice.normal(),u)),radius);
+        const std::array<Float3,4> corners{{add(slice.point(),add(u,v)),add(slice.point(),subtract(u,v)),
+            subtract(slice.point(),add(u,v)),add(slice.point(),subtract(v,u))}};
+        for(std::size_t i=0;i<corners.size();++i) {
+            const auto a=project_world_to_screen(controller.camera(),viewport,corners[i]);
+            const auto b=project_world_to_screen(controller.camera(),viewport,corners[(i+1)%corners.size()]);
+            if(a.visible && b.visible) viewportPainter.line(static_cast<int>(a.x),static_cast<int>(a.y),
+                static_cast<int>(b.x),static_cast<int>(b.y),rgb(255,230,90),1);
+        }
+        const auto origin=project_world_to_screen(controller.camera(),viewport,slice.point());
+        const auto tip=project_world_to_screen(controller.camera(),viewport,add(slice.point(),multiply(slice.normal(),0.5F)));
+        if(origin.visible && tip.visible) viewportPainter.line(static_cast<int>(origin.x),static_cast<int>(origin.y),
+            static_cast<int>(tip.x),static_cast<int>(tip.y),rgb(255,230,90),2);
+        const auto lines=slice.describe(controller.workspace().document());
+        const UiRect slicePanel{viewport.x+8,viewport.y+28,std::max(1,std::min(500,viewport.width-16)),static_cast<int>(lines.size())*17+10};
+        viewportPainter.fill(slicePanel,rgb(18,23,31));
+        for(std::size_t i=0;i<lines.size();++i) viewportPainter.text(slicePanel.x+10,slicePanel.y+18+static_cast<int>(i)*17,
+            elide_text_to_width(viewportPainter,lines[i],std::max(0,slicePanel.width-20)),rgb(210,220,235));
+    }
     // Transform gizmo. Move draws shafts with solid arrowheads; Rotate draws
     // a ring around each axis with a slim radius stub; Scale draws shafts
     // ending in square handles. The hovered or dragged axis is drawn thicker
@@ -3959,17 +3995,37 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             painter.fill({layout.inspector.x + layout.inspector.width - 5, detailTop, 3, track}, panel2);
             painter.fill({layout.inspector.x + layout.inspector.width - 5, thumbY, 3, thumb}, muted);
         }
+        const auto drawInspectorText = [&](int x, int y, std::string_view value, EditorColor color) {
+            const int baseline = y - inspectorTop;
+            int extra = 0;
+            bool field = false;
+            if (layout.inspectorStackedFields && baseline >= 91) {
+                const int row = (baseline - 91) / 22;
+                extra = std::min(row, layout.inspectorFieldCount) * 22;
+                field = row < layout.inspectorFieldCount && (baseline - 91) % 22 == 0;
+            }
+            const int available = std::max(0, layout.inspector.x + layout.inspector.width - 12 - x);
+            if (field) {
+                const auto separator = value.find("  ");
+                if (separator != std::string_view::npos) {
+                    inspectorPainter.text(x, y + extra, elide_text_to_width(inspectorPainter, value.substr(0,separator),available),color);
+                    inspectorPainter.text(x, y + extra + 18, elide_text_to_width(inspectorPainter, value.substr(separator+2),available),color);
+                    return;
+                }
+            }
+            inspectorPainter.text(x,y+extra,elide_text_to_width(inspectorPainter,value,available),color);
+        };
         if (controller.workspace().selected_object()) {
             if (const EditorObject* object = controller.workspace().document().find_object(*controller.workspace().selected_object())) {
                 const bool renamingHere = controller.text_edit().kind == TextEditKind::ObjectName;
-                inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 48,
+                drawInspectorText(layout.inspector.x + 12, inspectorTop + 48,
                              renamingHere ? controller.text_edit().buffer + "_" : object->name,
                              renamingHere ? accent : text);
-                inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 69,
+                drawInspectorText(layout.inspector.x + 12, inspectorTop + 69,
                              "ID " + std::to_string(object->id) + "   Voxels " + std::to_string(object->voxels->occupied_voxel_count()), muted);
                 const bool editingPosition = controller.text_edit().kind == TextEditKind::Position;
                 if (editingPosition) inspectorPainter.fill(layout.inspectorFields.empty() ? UiRect{} : layout.inspectorFields[0], rgb(40,54,74));
-                inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 91,
+                drawInspectorText(layout.inspector.x + 12, inspectorTop + 91,
                              editingPosition
                                  ? "Position  " + controller.text_edit().buffer + "_"
                                  : "Position  " + std::to_string(object->transform.position.x).substr(0,5) + "  " +
@@ -3980,7 +4036,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                 const Float3 euler = multiply(quaternion_to_euler_xyz(object->transform.rotation), degreesPerRadian);
                 const bool editingRotation = controller.text_edit().kind == TextEditKind::Rotation;
                 if (editingRotation) inspectorPainter.fill(layout.inspectorFields.size() < 2 ? UiRect{} : layout.inspectorFields[1], rgb(40,54,74));
-                inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 113,
+                drawInspectorText(layout.inspector.x + 12, inspectorTop + 113,
                              editingRotation
                                  ? "Rotation  " + controller.text_edit().buffer + "_"
                                  : "Rotation  " + std::to_string(euler.x).substr(0,6) + "  " +
@@ -3994,7 +4050,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         const bool editing = controller.text_edit().kind == kind;
                         if (editing && fieldIndex < layout.inspectorFields.size())
                             inspectorPainter.fill(layout.inspectorFields[fieldIndex], rgb(40,54,74));
-                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + y,
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + y,
                                      label + "  " + (editing ? controller.text_edit().buffer + "_" : value),
                                      editing ? accent : normalColor);
                     };
@@ -4016,16 +4072,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                   asset.style.alignment == Text3DHorizontalAlignment::Center ? "center" : "right", muted);
                     drawTextField(10U, TextEditKind::Text3DFillRule, 311, "Fill",
                                   asset.style.fillRule == Text3DFillRule::NonZero ? "nonzero" : "evenodd", muted);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 333,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 333,
                                  "Glyphs " + std::to_string(asset.glyphInstances.size()) +
                                  "   Curves " + std::to_string(asset.atlas.curveTexels.size()/2U), muted);
                     const auto dependency = inspect_text3d_font_dependency(
                         controller.project_root(), object->textFontAsset);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 355,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 355,
                                  dependency.packageReady ? "Font dependency ready"
                                                          : "Font license/dependency warning",
                                  dependency.packageReady ? muted : rgb(235,180,80));
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 377,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 377,
                                  "Hash " + std::to_string(asset.contentHash), muted);
                 } else if (object->gaborVolume) {
                     const auto& asset = *object->gaborVolume;
@@ -4035,7 +4091,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         const bool editing = controller.text_edit().kind == kind;
                         if (editing && fieldIndex < layout.inspectorFields.size())
                             inspectorPainter.fill(layout.inspectorFields[fieldIndex], rgb(40,54,74));
-                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + y,
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + y,
                                      label + "  " + (editing ? controller.text_edit().buffer + "_" : value),
                                      editing ? accent : muted);
                     };
@@ -4056,49 +4112,49 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     std::uint16_t maximumLod{};
                     for (const auto& primitive : asset.primitives)
                         maximumLod = std::max(maximumLod, primitive.lodLevel);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 267,
                                  "Primitives " + std::to_string(asset.primitives.size()) +
                                  "   Levels " + std::to_string(static_cast<unsigned>(maximumLod)+1U), muted);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 289,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 289,
                                  "Source " + object->sourceAsset.generic_string(), muted);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 311,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 311,
                                  "Hash " + std::to_string(asset.contentHash), muted);
                 } else {
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 135,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 135,
                                  "Selection " + std::to_string(controller.workspace().selection_count()) +
                                  "   Axes " + (controller.transform_space() == EditorTransformSpace::World ? "World" : "Local"), text);
                     const EditorSelectionDiagnostics& diagnostics = controller.selection_diagnostics();
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 157,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 157,
                                  "Mass " + std::to_string(diagnostics.massKilograms).substr(0,8) + " kg", muted);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 179,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 179,
                                  "Components " + std::to_string(diagnostics.connectedComponents) +
                                  "   Detached " + std::to_string(diagnostics.detachedComponents), muted);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 201,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 201,
                                  "Collision boxes " + std::to_string(diagnostics.collisionBoxes), muted);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 223,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 223,
                                  "Material " + std::to_string(controller.active_material()) + "  " +
                                  (controller.materials().find(controller.active_material()) ?
                                   controller.materials().find(controller.active_material())->definition.name : "Unknown"), text);
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 245,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 245,
                                  "Object components " + std::to_string(object->components.size()), muted);
                     if (object->attachment && object->parent) {
                         const std::string socket = object->attachment->socket.empty()
                             ? std::string("default") : object->attachment->socket;
-                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 267,
                                      "Attached to " + std::to_string(*object->parent) + "  socket " + socket, muted);
                     } else {
-                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 267,
                                      "Attachment  none", muted);
                     }
                     if (object->prefabLink) {
-                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 289,
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 289,
                                      "Prefab " + object->prefabLink->prefabAsset.filename().generic_string() +
                                      "  overrides " + std::to_string(object->prefabLink->overrides.size()), accent);
                     } else {
-                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 289,
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 289,
                                      "Prefab  none", muted);
                     }
-                    inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 311,
+                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 311,
                                  "Layer " + std::to_string(object->layer) + "  Tags " +
                                  std::to_string(object->tags.size()) + "  Groups " +
                                  std::to_string(object->groups.size()), muted);
@@ -4111,7 +4167,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         if (!section.properties.empty())
                             line += "  " + section.properties.front().displayName + "=" +
                                     format_component_value(section.properties.front().value);
-                        inspectorPainter.text(layout.inspector.x + 12,
+                        drawInspectorText(layout.inspector.x + 12,
                                      inspectorTop + 333 + static_cast<int>(componentIndex) * 20,
                                      line, section.enabled ? text : muted);
                     }

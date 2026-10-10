@@ -826,6 +826,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_control_rig.cpp
         src/editor_prefab.cpp
         src/editor_command.cpp
+        src/editor_voxel_boolean.cpp
         src/editor_tools.cpp
         src/editor_workspace.cpp
         src/editor_workspace_state.cpp
@@ -2649,6 +2650,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_synth_tests tests/test_editor_synth.cpp)
         target_link_libraries(dve_editor_synth_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_synth_tests COMMAND dve_editor_synth_tests)
+        add_executable(dve_editor_voxel_boolean_tests tests/test_editor_voxel_boolean.cpp)
+        target_link_libraries(dve_editor_voxel_boolean_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_voxel_boolean_tests COMMAND dve_editor_voxel_boolean_tests)
         add_executable(dve_editor_critique_fixes_tests tests/test_editor_critique_fixes.cpp)
         target_link_libraries(dve_editor_critique_fixes_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_critique_fixes_tests COMMAND dve_editor_critique_fixes_tests)

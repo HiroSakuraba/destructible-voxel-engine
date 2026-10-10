@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <initializer_list>
 #include <iomanip>
 #include <sstream>
 #include <utility>
@@ -543,6 +544,15 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.paint","Voxel","Paint Material","5"}, {"voxel.box","Voxel","Box Tool","6"},
         {"voxel.beam","Voxel","Beam Tool","7"}, {"voxel.anchor","Voxel","Anchor Brush","8"},
         {"voxel.settings","Voxel","Voxel Settings",""},
+        {"voxel.boolean_union","Voxel","Boolean Union",""},
+        {"voxel.boolean_difference","Voxel","Boolean Difference",""},
+        {"voxel.boolean_intersection","Voxel","Boolean Intersection",""},
+        {"voxel.boolean_commit","Voxel","Commit Boolean",""},
+        {"voxel.boolean_cancel","Voxel","Cancel Boolean",""},
+        {"voxel.boolean_swap","Voxel","Swap Boolean Target",""},
+        {"voxel.boolean_operands_hide","Voxel","Boolean Operands: Hide",""},
+        {"voxel.boolean_operands_delete","Voxel","Boolean Operands: Delete",""},
+        {"voxel.boolean_operands_keep","Voxel","Boolean Operands: Keep",""},
         {"polygon.import","Polygon","Import Polygon Model",""}, {"polygon.lod","Polygon","LOD Settings",""},
         {"polygon.collision","Polygon","Collision Settings",""}, {"polygon.streaming","Polygon","Streaming Settings",""},
         {"material.library","Materials","Material Library",""}, {"material.globals","Materials","Global Parameters",""},
@@ -643,6 +653,14 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("camera.load_bookmark_2", "Bookmarks", 63);
     configure("camera.settings", "Settings", 90);
     configure("voxel.settings", "Settings", 90);
+    configure("voxel.boolean_union", "Voxel Boolean", 60);
+    configure("voxel.boolean_difference", "Voxel Boolean", 61);
+    configure("voxel.boolean_intersection", "Voxel Boolean", 62);
+    configure("voxel.boolean_commit", "Voxel Boolean", 63);
+    configure("voxel.boolean_cancel", "Voxel Boolean", 64);
+    configure("voxel.boolean_swap", "Voxel Boolean", 64);
+    for (std::string_view id : {"voxel.boolean_operands_hide", "voxel.boolean_operands_delete", "voxel.boolean_operands_keep"})
+        configure(id, "Voxel Boolean", 65, true, "voxel.boolean_operands");
     configure("physics.settings", "Settings", 90);
     configure("build.settings", "Settings", 90);
     configure("audio.settings", "Settings", 90);
@@ -707,7 +725,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             "render.gabor.quality_cinematic", "render.gabor.continuous_lod", "render.gabor.temporal",
             "render.gabor.shadows", "sprite.slice_grid", "sprite.repack", "audio.settings",
             "physics.settings", "build.settings"}) advanced(id);
-    for (std::string_view id : {"text3d.commit", "text3d.cancel",
+    for (std::string_view id : {"text3d.commit", "text3d.cancel", "voxel.boolean_commit", "voxel.boolean_cancel", "voxel.boolean_swap",
             "camera.scope_instance", "camera.scope_shot", "camera.scope_project", "camera.scope_preview",
             "camera.preset_neutral", "camera.preset_academy", "camera.preset_imax143",
             "camera.preset_imax190", "camera.preset_scope239", "camera.preset_anamorphic",
@@ -716,6 +734,27 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             "camera.filmback_full_frame", "camera.filmback_anamorphic35", "camera.filmback_imax15",
             "camera.filmback_imax_digital", "camera.copy_profile", "camera.paste_profile",
             "camera.clear_effects", "camera.keyframe_profile"}) paletteOnly(id);
+    const auto describe = [&](std::string_view id, std::string description, std::initializer_list<const char*> keywords) {
+        if (MenuAction* action = result.find_for_update(id)) {
+            action->description = std::move(description);
+            for (const char* keyword : keywords) action->keywords.emplace_back(keyword);
+        }
+    };
+    describe("voxel.boolean_union",
+             "Preview adding the other selected voxel objects (B) to the active voxel object (A); Enter commits as one undo step.",
+             {"csg", "boolean", "merge", "combine", "add", "join", "weld"});
+    describe("voxel.boolean_difference",
+             "Preview carving the other selected voxel objects (B) out of the active voxel object (A); Enter commits as one undo step.",
+             {"csg", "boolean", "subtract", "subtraction", "minus", "carve", "cut"});
+    describe("voxel.boolean_intersection",
+             "Preview keeping only the part of the active voxel object (A) inside the other selected objects (B); Enter commits as one undo step.",
+             {"csg", "boolean", "intersect", "common", "overlap", "and"});
+    describe("voxel.boolean_commit", "Apply the open voxel Boolean preview as one undoable edit.", {"csg", "boolean", "apply"});
+    describe("voxel.boolean_cancel", "Close the open voxel Boolean preview without changing the scene.", {"csg", "boolean", "escape"});
+    describe("voxel.boolean_swap", "Make the first operand the Boolean target (A) and the target an operand (B).", {"csg", "boolean", "order", "reverse"});
+    describe("voxel.boolean_operands_hide", "After a Boolean, hide the operand objects (default; show them again to re-run).", {"csg", "boolean", "output"});
+    describe("voxel.boolean_operands_delete", "After a Boolean, delete the operand objects (undo restores them).", {"csg", "boolean", "output"});
+    describe("voxel.boolean_operands_keep", "After a Boolean, leave the operand objects visible and unchanged.", {"csg", "boolean", "output"});
     for (std::string_view id : {"file.exit", "edit.delete", "help.reset_command_history"})
         if (MenuAction* action = result.find_for_update(id)) action->dangerous = true;
     if (MenuAction* palette = result.find_for_update("help.command_palette")) {

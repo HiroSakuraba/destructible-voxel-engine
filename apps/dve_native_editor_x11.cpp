@@ -30,6 +30,7 @@
 #include "dve/editor_midi.hpp"
 #include "dve/editor_native.hpp"
 #include "dve/editor_runtime_settings.hpp"
+#include "dve/editor_text_encoding.hpp"
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_ui_zoom.hpp"
 
@@ -167,6 +168,20 @@ private:
 #endif
 };
 
+// True when a core (single-byte drawn) font has a real glyph for this Latin-1 byte. XDrawString
+// treats each byte as byte2 with byte1 = 0, so this also works for 2-byte ISO 10646 fonts.
+bool core_font_has_glyph(const XFontStruct* font, unsigned char byte) {
+    if (font == nullptr) return false;
+    if (font->min_byte1 > 0U) return false;
+    if (byte < font->min_char_or_byte2 || byte > font->max_char_or_byte2) return false;
+    if (font->per_char == nullptr) return true;  // every character in range has the max-bounds metrics
+    // min_byte1 == 0, so row 0 is the first row of per_char.
+    const XCharStruct& metrics = font->per_char[byte - font->min_char_or_byte2];
+    // Nonexistent characters have all-zero metrics.
+    return metrics.width != 0 || metrics.lbearing != 0 || metrics.rbearing != 0 ||
+           metrics.ascent != 0 || metrics.descent != 0;
+}
+
 class X11EditorCanvas final : public IEditorCanvas {
 public:
     X11EditorCanvas(Display* display, Drawable target, GC gc, X11FontCache& fonts, float zoom
@@ -222,8 +237,11 @@ public:
         }
 #endif
         XSetForeground(display_, gc_, static_cast<unsigned long>(color));
+        // Core fonts are indexed by single bytes (Latin-1): decode the UTF-8 first, or "°"
+        // (C2 B0) would draw as two glyphs, "Â°".
+        const std::string bytes = core_font_text(value);
         if (coreMagnification_ > 1) {
-            if (const auto* scaled = fonts_.scaled_text(target_, coreFont_, value, coreMagnification_)) {
+            if (const auto* scaled = fonts_.scaled_text(target_, coreFont_, bytes, coreMagnification_)) {
                 const int left = px(x);
                 const int top = px(y) - scaled->ascent;
                 XSetClipMask(display_, gc_, scaled->mask);
@@ -235,7 +253,7 @@ public:
                 return;
             }
         }
-        XDrawString(display_, target_, gc_, px(x), px(y), value.data(), static_cast<int>(value.size()));
+        XDrawString(display_, target_, gc_, px(x), px(y), bytes.data(), static_cast<int>(bytes.size()));
     }
     // The core-font fallback draws Latin-1 bytes, so it cannot show U+2026.
     [[nodiscard]] std::string_view ellipsis() const override {
@@ -254,12 +272,17 @@ public:
             return static_cast<int>(std::ceil(static_cast<float>(extents.xOff) / zoom_));
         }
 #endif
-        if (coreFont_ == nullptr) return static_cast<int>(value.size()) * 7;
+        if (coreFont_ == nullptr) return static_cast<int>(utf8_code_point_count(value)) * 7;
+        const std::string bytes = core_font_text(value);
         return static_cast<int>(std::ceil(
-            static_cast<float>(XTextWidth(coreFont_, value.data(), static_cast<int>(value.size())) * coreMagnification_) / zoom_));
+            static_cast<float>(XTextWidth(coreFont_, bytes.data(), static_cast<int>(bytes.size())) * coreMagnification_) / zoom_));
     }
 
 private:
+    [[nodiscard]] std::string core_font_text(std::string_view value) const {
+        const XFontStruct* font = coreFont_;
+        return utf8_to_single_byte_font_text(value, [font](unsigned char byte) { return core_font_has_glyph(font, byte); });
+    }
     [[nodiscard]] int px(int logical) const noexcept { return ui_zoom_to_physical(logical, zoom_); }
     [[nodiscard]] int stroke() const noexcept { return ui_zoom_stroke(1.0F, std::floor(zoom_)); }
     [[nodiscard]] UiRect to_physical(UiRect rect) const noexcept { return ui_zoom_to_physical(rect, zoom_); }

@@ -391,6 +391,7 @@ int main(int argc, char** argv) {
     bool liveMcpReadOnly = false;
     std::string synthPage;
     std::vector<std::string> dispatchActions;
+    std::vector<std::uint64_t> startupSelection;
     std::vector<std::string> startupKeys;
     std::optional<std::pair<int, int>> startupHover;
     std::optional<float> cliZoom;
@@ -416,6 +417,9 @@ int main(int argc, char** argv) {
         // with --screenshot to capture a specific menu/tool/panel state without needing real
         // input) rather than for end users.
         else if (argument == "--dispatch" && index + 1 < argc) dispatchActions.push_back(argv[++index]);
+        // Repeatable: selects object ID before the dispatches run; the last one is the active
+        // (primary) selection. For screenshots of selection-driven workflows such as Scatter.
+        else if (argument == "--select" && index + 1 < argc) startupSelection.push_back(std::strtoull(argv[++index], nullptr, 10));
         // Headless verification helpers: press keys (e.g. synth computer-keyboard notes)
         // and move the pointer to logical X,Y (hover tooltips) after the first layout.
         else if (argument == "--key-down" && index + 1 < argc) startupKeys.push_back(argv[++index]);
@@ -502,6 +506,10 @@ int main(int argc, char** argv) {
             auto preset = audio::SynthPreset::load(synthPresetPath, &presetError);
             if (!preset) throw std::runtime_error("could not load synthesizer preset: " + presetError);
             controller.synthesizer().set_preset(*preset);
+        }
+        if (!startupSelection.empty()) {
+            controller.workspace().clear_selection();
+            for (const std::uint64_t id : startupSelection) controller.workspace().add_to_selection(id);
         }
         for (const std::string& action : dispatchActions) (void)controller.dispatch_action(action);
         if (!settingsCategory.empty()) controller.open_settings(SettingScope::User, settingsCategory);

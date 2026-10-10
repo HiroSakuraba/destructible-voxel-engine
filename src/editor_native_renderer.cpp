@@ -3193,8 +3193,18 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         painter.text(layout.hierarchyFilterBox.x + 6, layout.hierarchyFilterBox.y + layout.hierarchyFilterBox.height - 6,
                      filterText, filtering || !controller.hierarchy_filter().empty() ? text : muted);
         const auto order = controller.hierarchy_order();
+        if (layout.hierarchyScrollMax > 0 && !layout.hierarchyRows.empty()) {
+            const int trackTop = layout.hierarchyFilterBox.y + layout.hierarchyFilterBox.height + 6;
+            const int track = std::max(1, layout.hierarchy.y + layout.hierarchy.height - 4 - trackTop);
+            const int total = layout.hierarchyScrollMax + layout.hierarchyVisibleRows;
+            const int thumb = std::max(16, track * layout.hierarchyVisibleRows / std::max(1, total));
+            const int thumbY = trackTop + (track - thumb) * layout.hierarchyScroll / layout.hierarchyScrollMax;
+            painter.fill({layout.hierarchy.x + layout.hierarchy.width - 5, trackTop, 3, track}, panel2);
+            painter.fill({layout.hierarchy.x + layout.hierarchy.width - 5, thumbY, 3, thumb}, muted);
+        }
         for (std::size_t index = 0; index < order.size() && index < layout.hierarchyRows.size(); ++index) {
             const UiRect row = layout.hierarchyRows[index];
+            if (row.width <= 0) continue;  // scrolled out of the panel
             const EditorObject* object = controller.workspace().document().find_object(order[index]);
             if (!object) continue;
             const bool selected = controller.workspace().is_selected(object->id);
@@ -3413,6 +3423,47 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             else if (line.starts_with("Warning")) color = rgb(255,206,72);
             else if (line.starts_with("A target")) color = rgb(150,200,255);
             else if (line.starts_with("B")) color = rgb(255,190,110);
+            viewportPainter.text(panel.x + 10, panel.y + 18 + static_cast<int>(i) * lineHeight,
+                                 elide_text_to_width(viewportPainter, line, panel.width - 20), color);
+        }
+    }
+    if (controller.scatter_active()) {
+        // Each kept spot: a diamond in its source's colour, with a tick along the surface normal
+        // when copies will be aligned to it. Nothing is in the scene until Enter.
+        const std::array<EditorColor, 6> kSourceColors{
+            rgb(120,220,140), rgb(255,190,110), rgb(150,200,255), rgb(235,140,220), rgb(255,232,120), rgb(130,230,230)};
+        const ScatterSettings& scatterSettings = controller.scatter_settings();
+        for (const ScatterSample& sample : controller.scatter_plan().samples) {
+            const ScreenPoint point = project_world_to_screen(controller.camera(), viewport, sample.position);
+            if (!point.visible) continue;
+            const int x = static_cast<int>(point.x);
+            const int y = static_cast<int>(point.y);
+            const EditorColor color = kSourceColors[sample.source % kSourceColors.size()];
+            viewportPainter.line(x - 5, y, x, y - 5, color, 2);
+            viewportPainter.line(x, y - 5, x + 5, y, color, 2);
+            viewportPainter.line(x + 5, y, x, y + 5, color, 2);
+            viewportPainter.line(x, y + 5, x - 5, y, color, 2);
+            if (scatterSettings.alignToSurface) {
+                const ScreenPoint tip = project_world_to_screen(controller.camera(), viewport,
+                                                                add(sample.position, multiply(sample.normal, 0.6F)));
+                if (tip.visible) viewportPainter.line(x, y, static_cast<int>(tip.x), static_cast<int>(tip.y), color);
+            }
+        }
+        const std::vector<std::string> lines = controller.scatter_preview_lines();
+        int panelWidth = 0;
+        for (const std::string& line : lines) panelWidth = std::max(panelWidth, viewportPainter.text_width(line));
+        const int panelMaxWidth = viewport.width > 520 ? viewport.width - 200 : viewport.width - 16;
+        panelWidth = std::min(panelWidth + 20, std::max(120, panelMaxWidth));
+        const int lineHeight = 17;
+        const UiRect panel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
+        const bool canCommit = controller.scatter_plan().error.empty() && !controller.scatter_plan().samples.empty();
+        viewportPainter.fill(panel, rgb(18,23,31));
+        viewportPainter.outline(panel, canCommit ? rgb(120,220,140) : rgb(255,110,90));
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const std::string& line = lines[i];
+            EditorColor color = i == 0 ? rgb(235,242,250) : rgb(190,200,214);
+            if (line.starts_with("Cannot commit")) color = rgb(255,130,110);
+            else if (line.starts_with("Warning")) color = rgb(255,206,72);
             viewportPainter.text(panel.x + 10, panel.y + 18 + static_cast<int>(i) * lineHeight,
                                  elide_text_to_width(viewportPainter, line, panel.width - 20), color);
         }

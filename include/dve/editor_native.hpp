@@ -41,6 +41,7 @@
 #include "dve/editor_materials.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/editor_runtime_settings.hpp"
+#include "dve/editor_scatter.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -59,6 +60,8 @@ namespace dve::editor {
 // toggles the Scene Hierarchy / Inspector panels and the bottom panel's Assets tab.
 inline constexpr std::array<std::string_view, 8> kMenuBarNames{
     "File", "Edit", "Create", "View", "Tools", "Build", "Window", "Help"};
+
+struct EditorPrefabAsset;
 
 enum class EditorToolId : std::uint8_t {
     Select,
@@ -270,7 +273,10 @@ struct NativeEditorLayout {
     std::vector<UiRect> toolbarButtons;
     // "? Shortcuts" control in the viewport's bottom-right corner; opens the shortcut guide.
     UiRect viewportHelpButton{};
-    std::vector<UiRect> hierarchyRows;
+    std::vector<UiRect> hierarchyRows;  // one per hierarchy_order() entry; empty when scrolled out
+    int hierarchyScroll{};               // first visible row
+    int hierarchyScrollMax{};
+    int hierarchyVisibleRows{};
     UiRect hierarchyFilterBox{};
     std::vector<UiRect> inspectorToggles;
     std::vector<UiRect> inspectorFields; // [0]=Position line, [1]=Rotation line
@@ -684,6 +690,20 @@ public:
     // Makes the first operand the new target (A) and the old target an operand (B).
     [[nodiscard]] bool swap_voxel_boolean_target();
     [[nodiscard]] const EditorVoxelBooleanSession& voxel_boolean() const noexcept { return voxelBoolean_; }
+    // Scatter Objects (Create > Scatter Objects): copies of the selected objects and/or the prefab
+    // selected in the Assets panel, placed pseudo-randomly on the active (last clicked) voxel
+    // object. Preview first; Enter commits one undo step, Esc cancels. See editor_scatter.hpp.
+    bool begin_scatter();
+    bool commit_scatter();
+    void cancel_scatter(std::string reason = {});
+    void set_scatter_settings(const ScatterSettings& settings);
+    [[nodiscard]] bool scatter_active() const noexcept { return scatterActive_; }
+    [[nodiscard]] const ScatterSettings& scatter_settings() const noexcept { return scatterSettings_; }
+    [[nodiscard]] const ScatterPlan& scatter_plan() const noexcept { return scatterPlan_; }
+    [[nodiscard]] EditorObjectId scatter_target() const noexcept { return scatterTarget_; }
+    [[nodiscard]] std::vector<std::string> scatter_preview_lines() const;
+    // Why Scatter Objects cannot start with the current selection; empty when it can.
+    [[nodiscard]] std::string scatter_disabled_reason() const;
     [[nodiscard]] VoxelBooleanOperandPolicy voxel_boolean_operand_policy() const noexcept { return voxelBooleanPolicy_; }
     void set_voxel_boolean_operand_policy(VoxelBooleanOperandPolicy policy);
     [[nodiscard]] std::vector<std::string> voxel_boolean_preview_lines() const;
@@ -756,6 +776,15 @@ private:
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelBooleanSession voxelBoolean_{};
+    bool scatterActive_{};
+    EditorObjectId scatterTarget_{};
+    std::vector<EditorObjectId> scatterSourceRoots_;
+    std::shared_ptr<const EditorPrefabAsset> scatterPrefab_;
+    ScatterSettings scatterSettings_{};
+    ScatterPlan scatterPlan_{};
+    [[nodiscard]] std::vector<ScatterSource> scatter_sources() const;
+    void replan_scatter();
+    bool handle_scatter_key(std::string_view normalized, bool control, bool shift, bool alt);
     VoxelBooleanOperandPolicy voxelBooleanPolicy_{VoxelBooleanOperandPolicy::Hide};
     std::uint64_t voxelBooleanMenuKey_{};
     std::filesystem::path projectRoot_;
@@ -841,6 +870,7 @@ private:
     int hoverX_{-100000};
     int hoverY_{-100000};
     int inspectorScroll_{};
+    int hierarchyScroll_{};
     int lastPointerX_{};
     int lastPointerY_{};
     int pointerDownX_{};

@@ -569,6 +569,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"create.gabor_empty","Create","Volume: Empty Gabor Volume",""},
         {"create.gabor_import","Create","Volume: Import Gabor Field",""},
         {"create.prefab_from_selection","Create","Prefab from Selection","Ctrl+Shift+P"},
+        {"create.scatter","Create","Scatter Objects",""},
+        {"scatter.commit","Create","Commit Scatter","Enter"},
+        {"scatter.cancel","Create","Cancel Scatter","Esc"},
         {"asset.instantiate_prefab","Create","Instantiate Selected Prefab",""},
         {"text3d.edit_selected","Create","Edit Selected 3D Text",""},
         {"text3d.commit","Create","Commit 3D Text Changes",""},
@@ -783,6 +786,11 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("transform.scale_voxel_size_down",
              "Halve the voxel size of the selected voxel objects about the pivot; the voxel count is unchanged (no resampling). One undo step.",
              {"scale", "resize", "shrink", "smaller", "voxel size", "keep voxels", "uniform"});
+    describe("create.scatter",
+             "Preview copies of the selected objects (or the selected prefab) placed pseudo-randomly on the last selected voxel object; Enter commits as one undo step.",
+             {"scatter", "foliage", "random", "distribute", "populate", "rocks", "trees", "organic", "place"});
+    describe("scatter.commit", "Add the previewed scatter copies under one group as one undoable edit.", {"scatter", "apply"});
+    describe("scatter.cancel", "Close the scatter preview without changing the scene.", {"scatter"});
     describe("voxel.boolean_union",
              "Preview adding the other selected voxel objects (B) to the active voxel object (A); Enter commits as one undo step.",
              {"csg", "boolean", "merge", "combine", "add", "join", "weld"});

@@ -705,6 +705,13 @@ public:
     [[nodiscard]] const EditorVoxelSliceSession& voxel_slice() const noexcept { return voxelSlice_; }
     [[nodiscard]] bool configure_voxel_slice(Float3 point, Float3 normal, VoxelSliceOutput output);
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
+    // View-only isolation (View > Isolate Selection): toggles between showing only the
+    // selection (with its children) and showing everything. Authored flags are untouched.
+    bool toggle_isolation();
+    [[nodiscard]] const std::set<EditorObjectId>& isolated_objects() const noexcept {
+        return viewportSettings_.isolatedObjects;
+    }
+    [[nodiscard]] bool is_isolated_out(EditorObjectId id) const noexcept;
     [[nodiscard]] std::vector<GizmoScreenRing> gizmo_rings() const;
     [[nodiscard]] int hit_test_gizmo_axis(int x, int y) const;
     [[nodiscard]] int gizmo_axis() const noexcept { return gizmoAxis_; }

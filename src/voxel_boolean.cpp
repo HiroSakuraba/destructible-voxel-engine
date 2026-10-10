@@ -268,7 +268,7 @@ VoxelBooleanResult compute_voxel_boolean(const VoxelBooleanVolume& primary,
         } else {
             ++result.stats.resampledOperands;
             add_diagnostic(result, VoxelBooleanSeverity::Warning, VoxelBooleanDiagnosticCode::ResampledOperand,
-                           "Operand " + name + " is resampled into " + primaryName + "'s grid (" + reason +
+                           "Operand " + name + " is resampled into the grid of " + primaryName + " (" + reason +
                                "); details thinner than one target voxel may be lost.",
                            i);
         }

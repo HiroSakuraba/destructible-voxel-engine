@@ -115,6 +115,7 @@ add_library(dve_core
     src/camera_runtime.cpp
     src/camera_sequence.cpp
     src/collision_proxy.cpp
+    src/voxel_boolean.cpp
     src/fragment.cpp
     src/work_debt.cpp
     src/job_system.cpp
@@ -973,6 +974,9 @@ if(DVE_BUILD_TESTS)
     endif()
 
     enable_testing()
+    add_executable(dve_voxel_boolean_tests tests/test_voxel_boolean.cpp)
+    target_link_libraries(dve_voxel_boolean_tests PRIVATE dve::core)
+    add_test(NAME dve_voxel_boolean_tests COMMAND dve_voxel_boolean_tests)
     add_executable(dve_camera_system_tests tests/test_camera_system.cpp)
     target_link_libraries(dve_camera_system_tests PRIVATE dve::core)
     add_test(NAME dve_camera_system_tests COMMAND dve_camera_system_tests)

@@ -151,12 +151,21 @@ void test_toolbar_tooltips() {
     check(controller.tool_shortcut_text(EditorToolId::Select) == "Q", "Select is Q");
     check(controller.tool_shortcut_text(EditorToolId::Translate) == "W", "Move is W");
     check(controller.tool_shortcut_text(EditorToolId::Rotate) == "E", "Rotate is E");
+    check(controller.tool_shortcut_text(EditorToolId::Scale) == "R", "Scale is R");
+    // Scale has no toolbar button but still gets its own viewport hint.
+    controller.set_active_tool(EditorToolId::Scale);
+    const auto scaleGestures = controller.viewport_tool_gestures();
+    check(!scaleGestures.empty() && scaleGestures.front() == "Drag handle to scale", "Scale has a viewport hint");
+    controller.set_active_tool(EditorToolId::Select);
+    const auto selectGestures = controller.viewport_tool_gestures();
+    check(selectGestures.size() > 1 && selectGestures[1] == "Shift-click add", "Shift-click adds to the selection");
 }
 
 void test_viewport_hint(const Case& c) {
     MAKE_CONTROLLER(controller, c);
     const UiRect viewport = controller.layout().viewport;
-    for (std::size_t i = 0; i < kEditorToolCount; ++i) {
+    // Every tool, including Scale, which has no toolbar button.
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(EditorToolId::Scale); ++i) {
         controller.set_active_tool(static_cast<EditorToolId>(i));
         const auto gestures = controller.viewport_tool_gestures();
         check(!gestures.empty() && gestures.size() <= 3, c.tag + "two or three gestures per tool");

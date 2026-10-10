@@ -153,11 +153,18 @@ void frame_camera_on_bounds(EditorCamera& camera, const EditorObjectBounds& boun
 
 [[nodiscard]] EditorObjectBounds object_world_bounds(const EditorObject& object) noexcept;
 [[nodiscard]] EditorObjectBounds object_world_bounds(const EditorObject& object, const RigidTransform& pose) noexcept;
+// Select against occupied voxel geometry; object bounds provide only a broad phase.
+[[nodiscard]] bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& camera,
+                                               UiRect viewport, UiRect selection, bool contain);
+// onlyObjects: when non-null and non-empty, only these objects can be hit (view isolation).
 [[nodiscard]] std::optional<EditorPickResult> pick_editor_document(
     const EditorDocument& document,
     ViewportRay ray,
     float maximumWorldDistance = 10000.0F,
-    const std::set<EditorObjectId>* onlyObjects = nullptr);  // null or empty = every visible object
+    const std::set<EditorObjectId>* onlyObjects = nullptr);
+[[nodiscard]] std::vector<EditorPickResult> pick_editor_document_all(
+    const EditorDocument& document, ViewportRay ray, float maximumWorldDistance = 10000.0F,
+    const std::set<EditorObjectId>* onlyObjects = nullptr);
 [[nodiscard]] std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
     const EditorDocument& document,
     const EditorMaterialLibrary& materials,

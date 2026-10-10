@@ -1,7 +1,7 @@
 # Editor isolation and group labels
 
-Artist worklist items ART-020 (isolate part) and ART-034, with a box-selection fix found
-along the way. Builds on the snapping and Scale tool change.
+Artist worklist items ART-020 (isolate part) and ART-034. Builds on the editor interaction
+core (#91), legibility (#92) and snap summary (#93) changes.
 
 ## What changed
 
@@ -17,8 +17,8 @@ along the way. Builds on the snapping and Scale tool change.
   parent (12 px per level) and shows a parent's child count, for example "Group  (2)". The
   inspector shows "Parent group  <name>" (or "none") for unattached objects, and the
   membership count is now "Named groups" instead of "Groups", which read like the parent group.
-- **Box selection ignored visibility.** Box selection selected hidden objects too. It now
-  takes only visible objects (and, while isolated, only isolated ones).
+- Box selection, depth picking (the pick list) and surface placement from #91 also respect
+  isolation: isolated-out objects cannot be hit.
 - Hierarchy labels are elided at the row edge instead of running past the panel.
 
 ## Validation

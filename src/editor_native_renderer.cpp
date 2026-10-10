@@ -1,6 +1,7 @@
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_midi.hpp"
 #include "dve/editor_ui_zoom.hpp"
+#include "dve/editor_text_encoding.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3295,9 +3296,14 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         viewportPainter.outline(item.screenBounds, item.selected ? rgb(150,205,255) : border);
         const int available = std::max(0, item.screenBounds.width - 10);
         std::string label = item.text;
-        while (!label.empty() && viewportPainter.text_width(label) > available) label.pop_back();
-        if (label.size() < item.text.size() && label.size() > 3U) {
-            label.resize(label.size() - 3U);
+        // Trim whole UTF-8 code points so a multi-byte character is never split.
+        const auto pop_code_point = [](std::string& value) {
+            while (!value.empty() && utf8_continuation(static_cast<unsigned char>(value.back()))) value.pop_back();
+            if (!value.empty()) value.pop_back();
+        };
+        while (!label.empty() && viewportPainter.text_width(label) > available) pop_code_point(label);
+        if (label.size() < item.text.size() && utf8_code_point_count(label) > 3U) {
+            for (int i = 0; i < 3; ++i) pop_code_point(label);
             label += "...";
         }
         if (!label.empty() && item.screenBounds.height >= 13) {
@@ -3350,13 +3356,93 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             viewportPainter.outline({static_cast<int>(hover.x)-7,static_cast<int>(hover.y)-7,15,15},rgb(255,255,255));
         }
     }
+    if (const auto point = controller.placement_target()) {
+        const ScreenPoint target = project_world_to_screen(controller.camera(), viewport, *point);
+        if (target.visible) {
+            const int x = static_cast<int>(target.x), y = static_cast<int>(target.y);
+            viewportPainter.line(x - 9, y, x + 9, y, rgb(255,219,89), 2);
+            viewportPainter.line(x, y - 9, x, y + 9, rgb(255,219,89), 2);
+        }
+    }
+    if (const auto bounds = controller.scale_preview_bounds())
+        draw_world_box(viewportPainter, controller, *bounds, rgb(255,219,89));
+    if (controller.voxel_boolean().active()) {
+        // Boolean preview (ART-060): label A/B bounds, then mark every cell the commit would
+        // change in the target grid. Nothing in the document changes until Enter.
+        const EditorDocument& document = controller.workspace().document();
+        if (const EditorObject* target = document.find_object(controller.voxel_boolean().target()))
+            draw_world_box(viewportPainter, controller, object_world_bounds(*target), rgb(96,170,255));
+        for (const EditorObjectId operandId : controller.voxel_boolean().operands())
+            if (const EditorObject* operand = document.find_object(operandId))
+                draw_world_box(viewportPainter, controller, object_world_bounds(*operand), rgb(255,166,64));
+        const auto label_object = [&](EditorObjectId id, const std::string& label, EditorColor color) {
+            const EditorObject* object = document.find_object(id);
+            if (!object) return;
+            const EditorObjectBounds bounds = object_world_bounds(*object);
+            if (!bounds.valid) return;
+            const ScreenPoint corner = project_world_to_screen(controller.camera(), viewport,
+                {bounds.minimum.x, bounds.maximum.y, bounds.minimum.z});
+            if (!corner.visible) return;
+            const int x = static_cast<int>(corner.x);
+            const int y = static_cast<int>(corner.y) - 6;
+            const int w = viewportPainter.text_width(label) + 8;
+            viewportPainter.fill({x - 2, y - 13, w, 17}, rgb(16,20,26));
+            viewportPainter.outline({x - 2, y - 13, w, 17}, color);
+            viewportPainter.text(x + 2, y, label, color);
+        };
+        label_object(controller.voxel_boolean().target(), "A target", rgb(150,200,255));
+        const auto& operandIds = controller.voxel_boolean().operands();
+        for (std::size_t i = 0; i < operandIds.size(); ++i)
+            label_object(operandIds[i], operandIds.size() == 1 ? std::string("B operand") : "B" + std::to_string(i + 1),
+                         rgb(255,190,110));
+        for (const VoxelBooleanPreviewMarker& marker : controller.voxel_boolean_preview_markers()) {
+            const int radius = std::max(2, static_cast<int>(marker.pixelRadius));
+            const UiRect cell{static_cast<int>(marker.screenX) - radius, static_cast<int>(marker.screenY) - radius,
+                              radius * 2 + 1, radius * 2 + 1};
+            switch (marker.kind) {
+            case VoxelBooleanPreviewMarker::Kind::Added:
+                viewportPainter.fill(cell, rgb(70,205,120));
+                viewportPainter.outline(cell, rgb(190,255,205));
+                break;
+            case VoxelBooleanPreviewMarker::Kind::Removed:
+                viewportPainter.outline(cell, rgb(255,82,82));
+                viewportPainter.line(cell.x, cell.y, cell.x + cell.width - 1, cell.y + cell.height - 1, rgb(255,82,82));
+                break;
+            case VoxelBooleanPreviewMarker::Kind::Repainted:
+                viewportPainter.outline(cell, rgb(255,206,72));
+                break;
+            case VoxelBooleanPreviewMarker::Kind::Overlap:
+                viewportPainter.outline(cell, rgb(96,220,255));
+                break;
+            }
+        }
+        const std::vector<std::string> lines = controller.voxel_boolean_preview_lines();
+        int panelWidth = 0;
+        for (const std::string& line : lines) panelWidth = std::max(panelWidth, viewportPainter.text_width(line));
+        // Keep clear of the viewport hint line (top) and the camera preview inset (top right);
+        // long diagnostics are elided here and stay complete in the status/console output.
+        const int panelMaxWidth = viewport.width > 520 ? viewport.width - 200 : viewport.width - 16;
+        panelWidth = std::min(panelWidth + 20, std::max(120, panelMaxWidth));
+        const int lineHeight = 17;
+        const UiRect panel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
+        viewportPainter.fill(panel, rgb(18,23,31));
+        viewportPainter.outline(panel, controller.voxel_boolean().can_commit() ? rgb(96,170,255) : rgb(255,110,90));
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const std::string& line = lines[i];
+            EditorColor color = i == 0 ? rgb(235,242,250) : rgb(190,200,214);
+            if (line.starts_with("Cannot commit")) color = rgb(255,130,110);
+            else if (line.starts_with("Warning")) color = rgb(255,206,72);
+            else if (line.starts_with("A target")) color = rgb(150,200,255);
+            else if (line.starts_with("B")) color = rgb(255,190,110);
+            viewportPainter.text(panel.x + 10, panel.y + 18 + static_cast<int>(i) * lineHeight,
+                                 elide_text_to_width(viewportPainter, line, panel.width - 20), color);
+        }
+    }
     for (const GizmoScreenAxis& axis : controller.gizmo_axes()) {
         if (!axis.start.visible || !axis.end.visible) continue;
         const EditorColor axisColor = axis.axis == 1 ? rgb(244,79,83) : axis.axis == 2 ? rgb(84,220,121) : rgb(72,139,255);
         viewportPainter.line(static_cast<int>(axis.start.x),static_cast<int>(axis.start.y),
                              static_cast<int>(axis.end.x),static_cast<int>(axis.end.y),axisColor,4);
-        if (controller.active_tool() == EditorToolId::Scale)  // square handles mark the scale gizmo
-            viewportPainter.fill({static_cast<int>(axis.end.x) - 5, static_cast<int>(axis.end.y) - 5, 11, 11}, axisColor);
     }
 
     if (controller.sprite_level_playing() && controller.sprite_level() &&
@@ -4134,7 +4220,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
         "  Move " + snapValue(snapPreferences.translateSnapEnabled,
                               std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
-                                  (snapPreferences.translateSnapToGrid ? " grid" : "")) +
+                                  (snapPreferences.absoluteGridSnap ? " grid" : "")) +
         "  Rotate " + snapValue(snapPreferences.rotateSnapEnabled,
                                 std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "deg") +
         "  Scale " + snapValue(snapPreferences.scaleSnapEnabled,
@@ -4212,12 +4298,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     if (controller.context_menu().open) {
         const ContextMenuState& menu = controller.context_menu();
         const int itemHeight = 24;
-        const UiRect popup{menu.x, menu.y, 190, itemHeight * static_cast<int>(menu.items.size())};
+        const UiRect popup{menu.x, menu.y, menu.width, itemHeight * static_cast<int>(menu.items.size())};
         painter.fill(popup, panel2);
         painter.outline(popup, border);
         for (std::size_t i = 0; i < menu.items.size(); ++i) {
             if (menu.hoveredItem && *menu.hoveredItem == i) painter.fill(menu.itemRects[i], rgb(48,88,142));
-            painter.text(popup.x + 10, popup.y + static_cast<int>(i) * itemHeight + itemHeight - 7, menu.items[i].label, text);
+            painter.text(popup.x + 10, popup.y + static_cast<int>(i) * itemHeight + itemHeight - 7,
+                         elide_text_to_width(painter, menu.items[i].label, popup.width - 20), text);
         }
     }
 

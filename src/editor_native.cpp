@@ -6537,7 +6537,7 @@ camera_menu_dispatch_complete:
         if (actionId == "view.increase_angle_snap") nearest = std::min(nearest + 1, kSteps.size() - 1);
         else nearest = nearest == 0 ? 0 : nearest - 1;
         snap = kSteps[nearest];
-        set_status("Angle snap: " + std::to_string(snap).substr(0, 5) + " deg");
+        set_status("Angle snap: " + std::to_string(snap).substr(0, 5) + "\u00B0");
         return true;
     }
     if (actionId == "help.about") {

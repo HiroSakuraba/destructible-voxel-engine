@@ -44,6 +44,8 @@ bool EditorPreferences::validate(std::string* error) const {
         return fail("translate snap must be between 0 and 100 meters");
     if (!std::isfinite(rotateSnapDegrees) || rotateSnapDegrees <= 0.0F || rotateSnapDegrees > 180.0F)
         return fail("rotate snap must be between 0 and 180 degrees");
+    if (!std::isfinite(scaleSnapStep) || scaleSnapStep < 0.01F || scaleSnapStep > 1.0F)
+        return fail("scale snap must be between 0.01 and 1");
     return true;
 }
 
@@ -56,6 +58,11 @@ std::string EditorPreferences::serialize() const {
         << "autosaveMinutes=" << autosaveMinutes << "\n"
         << "translateSnapMeters=" << translateSnapMeters << "\n"
         << "rotateSnapDegrees=" << rotateSnapDegrees << "\n"
+        << "scaleSnapStep=" << scaleSnapStep << "\n"
+        << "translateSnapEnabled=" << translateSnapEnabled << "\n"
+        << "rotateSnapEnabled=" << rotateSnapEnabled << "\n"
+        << "scaleSnapEnabled=" << scaleSnapEnabled << "\n"
+        << "translateSnapToGrid=" << translateSnapToGrid << "\n"
         << "highContrast=" << highContrast << "\n"
         << "reducedMotion=" << reducedMotion << "\n"
         << "colorBlindSafeDiagnostics=" << colorBlindSafeDiagnostics << "\n"
@@ -87,6 +94,11 @@ std::optional<EditorPreferences> EditorPreferences::parse(std::string_view text,
         !readFloat("mouseSensitivity", result.mouseSensitivity) || !readUInt("autosaveMinutes", result.autosaveMinutes) ||
         !readFloat("translateSnapMeters", result.translateSnapMeters) ||
         !readFloat("rotateSnapDegrees", result.rotateSnapDegrees) ||
+        !readFloat("scaleSnapStep", result.scaleSnapStep) ||
+        !readBool("translateSnapEnabled", result.translateSnapEnabled) ||
+        !readBool("rotateSnapEnabled", result.rotateSnapEnabled) ||
+        !readBool("scaleSnapEnabled", result.scaleSnapEnabled) ||
+        !readBool("translateSnapToGrid", result.translateSnapToGrid) ||
         !readBool("highContrast", result.highContrast) || !readBool("reducedMotion", result.reducedMotion) ||
         !readBool("colorBlindSafeDiagnostics", result.colorBlindSafeDiagnostics) ||
         !readBool("confirmDestructiveActions", result.confirmDestructiveActions)) return fail("invalid preferences value");
@@ -467,6 +479,11 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"view.increase_snap","View","Increase Move Snap","]"}, {"view.decrease_snap","View","Decrease Move Snap","["},
         {"view.increase_angle_snap","View","Increase Angle Snap","Shift+]"},
         {"view.decrease_angle_snap","View","Decrease Angle Snap","Shift+["},
+        {"view.toggle_move_snap","View","Move Snap",""}, {"view.toggle_angle_snap","View","Angle Snap",""},
+        {"view.toggle_scale_snap","View","Scale Snap",""},
+        {"view.snap_to_grid","View","Move Snaps to World Grid",""},
+        {"view.increase_scale_snap","View","Increase Scale Snap",""},
+        {"view.decrease_scale_snap","View","Decrease Scale Snap",""},
         {"view.collision","View","Collision Shapes","Ctrl+Alt+C"}, {"view.anchors","View","Anchors","Ctrl+Alt+A"},
         {"view.bounds","View","Object Bounds",""}, {"view.xray","View","X-Ray Selection",""},
         {"view.statistics","View","Viewport Statistics",""}, {"view.safe_frames","View","Safe Frames",""},
@@ -617,6 +634,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("render.gabor.settings", "Gabor Volumes", 90);
     for (std::string_view id : {"view.grid","view.collision","view.anchors","view.bounds","view.xray","view.statistics","view.safe_frames"})
         configure(id, "Overlays", 50, true);
+    for (std::string_view id : {"view.toggle_move_snap","view.toggle_angle_snap","view.toggle_scale_snap","view.snap_to_grid"})
+        configure(id, "Snapping", 40, true);
     configure("view.advanced_menus", "Interface", 90, true);
     configure("view.ui_zoom_in", "Interface", 91);
     configure("view.ui_zoom_out", "Interface", 92);

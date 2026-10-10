@@ -235,6 +235,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     activePointerCommand_.clear();
     gizmoDragging_ = false;
     gizmoChanges_.clear();
+    gizmoScaleChanges_.clear();
     voxelStrokeActive_ = false;
     marquee_ = {};
     hierarchyDrag_ = {};
@@ -1861,6 +1862,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("camera.keyframe_profile", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
     enabled("camera.paste_profile", cinematicCameraPanel_.can_paste(), "Copy a cinematic profile first.");
     checked("view.grid", viewportSettings_.showGrid);
+    checked("view.toggle_move_snap", workspace_.preferences().translateSnapEnabled);
+    checked("view.toggle_angle_snap", workspace_.preferences().rotateSnapEnabled);
+    checked("view.toggle_scale_snap", workspace_.preferences().scaleSnapEnabled);
+    checked("view.snap_to_grid", workspace_.preferences().translateSnapToGrid);
     checked("view.collision", viewportSettings_.showCollision);
     checked("view.anchors", viewportSettings_.showAnchors);
     checked("view.bounds", viewportSettings_.showObjectBounds);
@@ -3360,7 +3365,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     } else if (navigation_pointer_active()) {
         navigate_pointer(static_cast<float>(deltaX), static_cast<float>(deltaY));
     } else if (gizmoDragging_) {
-        update_gizmo_drag(x, y);
+        update_gizmo_drag(x, y, modifiers);
     } else if (voxelStrokeActive_) {
         continue_voxel_stroke(x, y);
     } else {
@@ -4053,11 +4058,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     dragButton_ = button;
     if (button == PointerButton::Primary) {
         update_hover(x, y);
-        if ((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate) &&
+        if ((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
+             activeTool_ == EditorToolId::Scale) &&
             hit_test_gizmo_axis(x, y) != 0) {
             begin_gizmo_drag(x, y);
         } else if (activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
-                   activeTool_ == EditorToolId::Rotate) {
+                   activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale) {
             if (hoverPick_) {
                 if ((modifiers & 1U) != 0U) workspace_.toggle_selection(hoverPick_->objectId);
                 else workspace_.select_object(hoverPick_->objectId);
@@ -4345,6 +4351,9 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Beam", "Bm", "voxel.line", "Click a voxel to add a 5-voxel beam along +X.", "Voxel objects"},
         {"Anchor", "Anc", "", "Click a voxel to toggle it as a structural anchor.", "Voxel objects"},
         {"Rotate", "Rot", "transform.rotate", "Drag a gizmo ring to rotate the selection.", "Selected objects"},
+        {"Scale", "Scl", "transform.scale",
+         "Drag a gizmo handle to scale the selection uniformly (changes voxel size, keeps voxel count).",
+         "Selected voxel objects"},
     }};
     const auto index = static_cast<std::size_t>(tool);
     return kTools[index < kTools.size() ? index : 0U];
@@ -4380,6 +4389,14 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
         add("Shift boost");
         return gestures;
     }
+    const bool transformTool = activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
+                               activeTool_ == EditorToolId::Scale;
+    if (transformTool && workspace_.selected_objects().empty()) {
+        // Say what the tool needs instead of listing gestures that cannot work yet.
+        const std::string selectKey = binding("transform.select");
+        add("Select an object first" + (selectKey.empty() ? std::string() : " (" + selectKey + " select tool)"));
+        return gestures;
+    }
     switch (activeTool_) {
         case EditorToolId::Select:
             add("Click select");
@@ -4389,12 +4406,12 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
         case EditorToolId::Translate:
             add("Drag axis to move");
             add(pair("view.decrease_snap", "view.increase_snap", "snap step"));
-            add(keyed("transform.space", "world/local"));
+            add("Ctrl snap on/off");
             break;
         case EditorToolId::Rotate:
             add("Drag ring to rotate");
             add(pair("view.decrease_angle_snap", "view.increase_angle_snap", "angle snap"));
-            add(keyed("transform.space", "world/local"));
+            add("Ctrl snap on/off");
             break;
         case EditorToolId::AddVoxel:
         case EditorToolId::RemoveVoxel:
@@ -4406,6 +4423,10 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
             add("Click to paint");
             add(pair("voxel.brush_decrease", "voxel.brush_increase", "brush size"));
             add(keyed("voxel.sample_material", "pick material"));
+            break;
+        case EditorToolId::Scale:
+            add("Drag handle to scale");
+            add("Ctrl snap on/off");
             break;
         case EditorToolId::Box: add("Click to add a 3x3x3 box"); break;
         case EditorToolId::Beam: add("Click to add a beam along +X"); break;
@@ -4535,7 +4556,8 @@ void NativeEditorController::apply_transform_preview(const std::vector<ObjectTra
 
 std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     std::vector<GizmoScreenAxis> axes;
-    if ((activeTool_ != EditorToolId::Translate && activeTool_ != EditorToolId::Rotate) ||
+    if ((activeTool_ != EditorToolId::Translate && activeTool_ != EditorToolId::Rotate &&
+         activeTool_ != EditorToolId::Scale) ||
         workspace_.selected_objects().empty()) return axes;
     const Float3 origin = selection_pivot();
     const float distance = std::max(0.5F, length(subtract(camera_.position, origin)) * 0.12F);
@@ -4572,15 +4594,34 @@ void NativeEditorController::begin_gizmo_drag(int x, int y) {
             return;
         }
     }
+    gizmoScaleChanges_.clear();
+    if (activeTool_ == EditorToolId::Scale) {
+        std::size_t skipped = 0;
+        for (EditorObjectId id : workspace_.selected_objects()) {
+            const EditorObject* object = workspace_.document().find_object(id);
+            if (!object || !object->voxels || object->text3d || object->gaborVolume) { ++skipped; continue; }
+            gizmoScaleChanges_.push_back({id, object->transform, object->transform,
+                                          object->voxelSizeMeters, object->voxelSizeMeters});
+        }
+        if (gizmoScaleChanges_.empty()) {
+            set_status("Scale works on voxel objects; select one first", true);
+            gizmoAxis_ = 0;
+            return;
+        }
+        if (skipped != 0U)
+            set_status("Scaling " + std::to_string(gizmoScaleChanges_.size()) + " voxel object(s); " +
+                       std::to_string(skipped) + " other object(s) keep their size");
+    }
     gizmoDragging_ = true;
     gizmoStartX_ = x;
     gizmoStartY_ = y;
     gizmoPivot_ = selection_pivot();
-    gizmoChanges_ = selection_transform_snapshot();
+    gizmoChanges_ = activeTool_ == EditorToolId::Scale ? std::vector<ObjectTransformChange>{}
+                                                       : selection_transform_snapshot();
 }
 
-void NativeEditorController::update_gizmo_drag(int x, int y) {
-    if (!gizmoDragging_ || gizmoChanges_.empty()) return;
+void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modifiers) {
+    if (!gizmoDragging_ || (gizmoChanges_.empty() && gizmoScaleChanges_.empty())) return;
     const auto axes = gizmo_axes();
     if (gizmoAxis_ < 1 || gizmoAxis_ > static_cast<int>(axes.size())) return;
     const GizmoScreenAxis& screenAxis = axes[static_cast<std::size_t>(gizmoAxis_ - 1)];
@@ -4590,13 +4631,36 @@ void NativeEditorController::update_gizmo_drag(int x, int y) {
     const float projectedDelta = ((static_cast<float>(x - gizmoStartX_) * dx) +
                                   (static_cast<float>(y - gizmoStartY_) * dy)) / screenLength;
     const Float3 worldAxis = gizmo_axis_world(gizmoAxis_);
+    const EditorPreferences& preferences = workspace_.preferences();
+    // Holding Ctrl inverts the active kind of snapping for this drag update.
+    const bool invertSnap = (modifiers & 2U) != 0U;
+    const auto snapping = [&](bool enabled) { return enabled != invertSnap; };
+    if (activeTool_ == EditorToolId::Scale) {
+        float factor = std::max(0.05F, 1.0F + projectedDelta * 0.01F);
+        if (snapping(preferences.scaleSnapEnabled)) {
+            const float step = preferences.scaleSnapStep;
+            factor = std::max(step, std::round(factor / step) * step);
+        }
+        for (ObjectScaleChange& change : gizmoScaleChanges_) {
+            change.after = change.before;
+            change.after.position = add(gizmoPivot_, multiply(subtract(change.before.position, gizmoPivot_), factor));
+            change.afterVoxelSize = change.beforeVoxelSize * factor;
+        }
+        gizmoScaleFactor_ = factor;
+        apply_scale_preview(true);
+        return;
+    }
+    // World-grid snapping only makes sense for world axes; local axes always use the delta.
+    const bool gridSnap = preferences.translateSnapToGrid && transformSpace_ == EditorTransformSpace::World;
+    const int axisIndex = gizmoAxis_ - 1;
     for (ObjectTransformChange& change : gizmoChanges_) {
         change.after = change.before;
         if (activeTool_ == EditorToolId::Rotate) {
             constexpr float degreesToRadians = 0.017453292519943295F;
-            const float snapRadians = workspace_.preferences().rotateSnapDegrees * degreesToRadians;
+            const float snapRadians = preferences.rotateSnapDegrees * degreesToRadians;
             const float rawAngle = projectedDelta * 0.012F;
-            const float angle = std::round(rawAngle / snapRadians) * snapRadians;
+            const float angle = snapping(preferences.rotateSnapEnabled)
+                ? std::round(rawAngle / snapRadians) * snapRadians : rawAngle;
             const Quaternion delta = quaternion_from_axis_angle(worldAxis, angle);
             change.after.position = add(gizmoPivot_, rotate(delta, subtract(change.before.position, gizmoPivot_)));
             change.after.rotation = normalize(multiply(delta, change.before.rotation));
@@ -4605,16 +4669,51 @@ void NativeEditorController::update_gizmo_drag(int x, int y) {
             const float worldPerPixel = 2.0F * depth * std::tan(camera_.verticalFovRadians * 0.5F) /
                                         static_cast<float>(std::max(1, layout_.viewport.height));
             float worldDelta = projectedDelta * worldPerPixel;
-            const float snapMeters = workspace_.preferences().translateSnapMeters;
-            worldDelta = std::round(worldDelta / snapMeters) * snapMeters;
-            change.after.position = add(change.before.position, multiply(worldAxis, worldDelta));
+            const float snapMeters = preferences.translateSnapMeters;
+            if (!snapping(preferences.translateSnapEnabled)) {
+                change.after.position = add(change.before.position, multiply(worldAxis, worldDelta));
+            } else if (gridSnap) {
+                // Land on the world grid along the drag axis; the other axes are untouched.
+                std::array<float, 3> position{change.before.position.x, change.before.position.y,
+                                              change.before.position.z};
+                position[static_cast<std::size_t>(axisIndex)] =
+                    std::round((position[static_cast<std::size_t>(axisIndex)] + worldDelta) / snapMeters) * snapMeters;
+                change.after.position = {position[0], position[1], position[2]};
+            } else {
+                worldDelta = std::round(worldDelta / snapMeters) * snapMeters;
+                change.after.position = add(change.before.position, multiply(worldAxis, worldDelta));
+            }
         }
     }
     apply_transform_preview(gizmoChanges_, true);
 }
 
+void NativeEditorController::apply_scale_preview(bool after) {
+    for (const ObjectScaleChange& change : gizmoScaleChanges_) {
+        if (EditorObject* object = workspace_.document().find_object(change.id)) {
+            object->transform = after ? change.after : change.before;
+            object->voxelSizeMeters = after ? change.afterVoxelSize : change.beforeVoxelSize;
+        }
+    }
+}
+
 void NativeEditorController::finish_gizmo_drag(bool cancel) {
     if (!gizmoDragging_) return;
+    if (!gizmoScaleChanges_.empty()) {
+        apply_scale_preview(false);
+        if (!cancel) {
+            const CommandResult result = workspace_.commands().execute(
+                workspace_.document(), std::make_unique<ScaleObjectsCommand>(gizmoScaleChanges_, "Scale objects"));
+            set_status(result.success ? "Scaled " + std::to_string(gizmoScaleChanges_.size()) + " object(s) by " +
+                                            std::to_string(gizmoScaleFactor_).substr(0, 5) + "x"
+                                      : result.message,
+                       !result.success);
+        }
+        gizmoScaleChanges_.clear();
+        gizmoDragging_ = false;
+        gizmoAxis_ = 0;
+        return;
+    }
     apply_transform_preview(gizmoChanges_, false);
     if (!cancel && !gizmoChanges_.empty()) {
         const std::string label = activeTool_ == EditorToolId::Rotate ? "Rotate objects" : "Move objects";
@@ -4699,10 +4798,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         return true;
     }
     if (actionId == "transform.select") { set_active_tool(EditorToolId::Select); return true; }
-    if (actionId == "transform.scale") {
-        set_status("Scale tool selected; polygon component scaling and voxel rescale use context-specific commands");
-        return true;
-    }
+    if (actionId == "transform.scale") { set_active_tool(EditorToolId::Scale); return true; }
     if (actionId == "transform.universal") { set_active_tool(EditorToolId::Translate); return true; }
     if (actionId == "camera.fly_forward") return flyStep({0.0F,0.0F,1.0F});
     if (actionId == "camera.fly_backward") return flyStep({0.0F,0.0F,-1.0F});
@@ -5988,6 +6084,34 @@ camera_menu_dispatch_complete:
         }
         set_status(std::string("View: ") + (actionId == "view.top" ? "Top" : actionId == "view.front" ? "Front"
                    : actionId == "view.side" ? "Side" : "Perspective"));
+        return true;
+    }
+    if (actionId == "view.toggle_move_snap" || actionId == "view.toggle_angle_snap" ||
+        actionId == "view.toggle_scale_snap" || actionId == "view.snap_to_grid") {
+        EditorPreferences& preferences = workspace_.preferences();
+        bool& flag = actionId == "view.toggle_move_snap" ? preferences.translateSnapEnabled
+                   : actionId == "view.toggle_angle_snap" ? preferences.rotateSnapEnabled
+                   : actionId == "view.toggle_scale_snap" ? preferences.scaleSnapEnabled
+                                                          : preferences.translateSnapToGrid;
+        flag = !flag;
+        refresh_menu_state();
+        set_status(actionId == "view.snap_to_grid"
+                       ? (flag ? "Move snap: world grid" : "Move snap: relative steps")
+                       : std::string(actionId == "view.toggle_move_snap" ? "Move" :
+                                     actionId == "view.toggle_angle_snap" ? "Angle" : "Scale") +
+                             (flag ? " snap on" : " snap off"));
+        return true;
+    }
+    if (actionId == "view.increase_scale_snap" || actionId == "view.decrease_scale_snap") {
+        static constexpr std::array<float, 5> kSteps{0.01F, 0.05F, 0.10F, 0.25F, 0.5F};
+        float& snap = workspace_.preferences().scaleSnapStep;
+        std::size_t nearest = 0;
+        for (std::size_t i = 1; i < kSteps.size(); ++i)
+            if (std::abs(kSteps[i] - snap) < std::abs(kSteps[nearest] - snap)) nearest = i;
+        if (actionId == "view.increase_scale_snap") nearest = std::min(nearest + 1, kSteps.size() - 1);
+        else nearest = nearest == 0 ? 0 : nearest - 1;
+        snap = kSteps[nearest];
+        set_status("Scale snap: " + std::to_string(snap).substr(0, 4) + "x");
         return true;
     }
     if (actionId == "view.increase_snap" || actionId == "view.decrease_snap") {

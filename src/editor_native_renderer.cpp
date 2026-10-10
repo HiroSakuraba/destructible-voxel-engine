@@ -3334,6 +3334,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         const EditorColor axisColor = axis.axis == 1 ? rgb(244,79,83) : axis.axis == 2 ? rgb(84,220,121) : rgb(72,139,255);
         viewportPainter.line(static_cast<int>(axis.start.x),static_cast<int>(axis.start.y),
                              static_cast<int>(axis.end.x),static_cast<int>(axis.end.y),axisColor,4);
+        if (controller.active_tool() == EditorToolId::Scale)  // square handles mark the scale gizmo
+            viewportPainter.fill({static_cast<int>(axis.end.x) - 5, static_cast<int>(axis.end.y) - 5, 11, 11}, axisColor);
     }
 
     if (controller.sprite_level_playing() && controller.sprite_level() &&
@@ -4091,11 +4093,23 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
 
     const EditorStatusMessage& status = controller.status();
-    painter.text(10, layout.statusBar.y + layout.statusBar.height - 6, status.text,
-                 status.error ? rgb(255,105,105) : text);
+    const EditorPreferences& snapPreferences = controller.workspace().preferences();
+    const auto snapValue = [](bool enabled, std::string value) { return enabled ? value : std::string("off"); };
     const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
-                               "  Snap " + std::to_string(controller.workspace().preferences().translateSnapMeters).substr(0,5) + "m";
-    painter.text(width - painter.text_width(scale) - 12, layout.statusBar.y + layout.statusBar.height - 6, scale, muted);
+        "  Move " + snapValue(snapPreferences.translateSnapEnabled,
+                              std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
+                                  (snapPreferences.translateSnapToGrid ? " grid" : "")) +
+        "  Rotate " + snapValue(snapPreferences.rotateSnapEnabled,
+                                std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "deg") +
+        "  Scale " + snapValue(snapPreferences.scaleSnapEnabled,
+                               std::to_string(snapPreferences.scaleSnapStep).substr(0,4) + "x");
+    // The snap summary keeps its place on the right; the status message is elided before it.
+    const std::string summary = elide_text_to_width(painter, scale, std::max(0, width / 2 - 12));
+    const int summaryX = width - painter.text_width(summary) - 12;
+    painter.text(summaryX, layout.statusBar.y + layout.statusBar.height - 6, summary, muted);
+    painter.text(10, layout.statusBar.y + layout.statusBar.height - 6,
+                 elide_text_to_width(painter, status.text, std::max(0, summaryX - 24)),
+                 status.error ? rgb(255,105,105) : text);
 
     if (controller.open_menu()) {
         const auto actions = controller.menu_actions(*controller.open_menu());

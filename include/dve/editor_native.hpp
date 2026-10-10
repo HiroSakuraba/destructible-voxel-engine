@@ -69,9 +69,10 @@ enum class EditorToolId : std::uint8_t {
     Beam,
     Anchor,
     Rotate,
+    Scale,
 };
 
-inline constexpr std::size_t kEditorToolCount = 9;
+inline constexpr std::size_t kEditorToolCount = 10;
 // Height of the inspector's fixed "INSPECTOR" header; scrolled details never draw above it.
 inline constexpr int kInspectorHeaderHeight = 28;
 
@@ -638,6 +639,8 @@ public:
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
+    // Point the move/rotate/scale gizmo works about (centre of the selection's bounds).
+    [[nodiscard]] Float3 selection_pivot() const noexcept;
 
 private:
     [[nodiscard]] std::vector<CommandPaletteResult> build_command_palette_results(std::size_t limit) const;
@@ -648,15 +651,15 @@ private:
     void finish_voxel_stroke() noexcept;
     void apply_voxel_tool(const EditorPickResult& pick);
     void begin_gizmo_drag(int x, int y);
-    void update_gizmo_drag(int x, int y);
+    void update_gizmo_drag(int x, int y, std::uint32_t modifiers = 0);
     void navigate_pointer(float deltaX, float deltaY);
     void finish_gizmo_drag(bool cancel);
+    void apply_scale_preview(bool after);
     void set_status(std::string text, bool error = false, float seconds = 3.0F);
     void create_new_project_now();
     void create_new_scene_now();
     [[nodiscard]] int hit_test_gizmo_axis(int x, int y) const;
     [[nodiscard]] Float3 gizmo_axis_world(int axis) const noexcept;
-    [[nodiscard]] Float3 selection_pivot() const noexcept;
     [[nodiscard]] EditorObjectBounds selection_bounds() const noexcept;
     [[nodiscard]] std::vector<ObjectTransformChange> selection_transform_snapshot() const;
     void apply_transform_preview(const std::vector<ObjectTransformChange>& changes, bool after);
@@ -807,6 +810,8 @@ private:
     int gizmoStartY_{};
     Float3 gizmoPivot_{};
     std::vector<ObjectTransformChange> gizmoChanges_;
+    std::vector<ObjectScaleChange> gizmoScaleChanges_;
+    float gizmoScaleFactor_{1.0F};
     // In-process clipboard for Edit > Cut/Copy/Paste. Deep-cloned objects, not references, so
     // pasting after the source object was itself deleted (undoably or not) still works, and
     // pasting more than once duplicates the same captured content each time.

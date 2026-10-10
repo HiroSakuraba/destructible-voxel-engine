@@ -32,6 +32,15 @@ struct EditorPreferences {
     std::uint32_t autosaveMinutes{5};
     float translateSnapMeters{0.10F};
     float rotateSnapDegrees{15.0F};
+    // Scale gizmo step, as a fraction of the starting size (0.10 = 10 % steps).
+    float scaleSnapStep{0.10F};
+    // Each kind of snapping has its own switch; holding Ctrl during a drag inverts it.
+    bool translateSnapEnabled{true};
+    bool rotateSnapEnabled{true};
+    bool scaleSnapEnabled{true};
+    // false: the move delta is quantized (an off-grid object stays off-grid by the same
+    // amount). true: each object's position on the drag axis lands on a multiple of the step.
+    bool translateSnapToGrid{false};
     bool highContrast{};
     bool reducedMotion{};
     bool colorBlindSafeDiagnostics{true};

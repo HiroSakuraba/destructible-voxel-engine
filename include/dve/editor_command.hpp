@@ -108,6 +108,28 @@ struct ObjectTransformChange {
     RigidTransform after{};
 };
 
+// Uniform scale of a voxel object: its voxel size and its position (scaling is about a pivot).
+// The voxels themselves are untouched; resampling to a new voxel count is a separate command.
+struct ObjectScaleChange {
+    EditorObjectId id{};
+    RigidTransform before{};
+    RigidTransform after{};
+    float beforeVoxelSize{};
+    float afterVoxelSize{};
+};
+
+class ScaleObjectsCommand final : public IEditorCommand {
+public:
+    explicit ScaleObjectsCommand(std::vector<ObjectScaleChange> changes, std::string label = "Scale objects");
+    [[nodiscard]] std::string_view label() const noexcept override { return label_; }
+    CommandResult execute(EditorDocument&) override;
+    CommandResult undo(EditorDocument&) override;
+private:
+    CommandResult apply(EditorDocument&, bool forward);
+    std::vector<ObjectScaleChange> changes_;
+    std::string label_;
+};
+
 class TransformObjectsCommand final : public IEditorCommand {
 public:
     explicit TransformObjectsCommand(std::vector<ObjectTransformChange> changes,

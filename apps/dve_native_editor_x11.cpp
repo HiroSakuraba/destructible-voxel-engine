@@ -394,6 +394,7 @@ int main(int argc, char** argv) {
     std::vector<std::uint64_t> startupSelection;
     std::vector<std::string> startupKeys;
     std::optional<std::pair<int, int>> startupHover;
+    std::vector<std::string> startupDrags;
     std::optional<float> cliZoom;
     bool noMidi = false;
     std::optional<std::string> fakeMidiPorts;
@@ -429,6 +430,10 @@ int main(int argc, char** argv) {
             if (comma != std::string::npos)
                 startupHover = std::pair{std::atoi(point.substr(0, comma).c_str()), std::atoi(point.substr(comma + 1).c_str())};
         }
+        // Repeatable: a primary-button drag "x1,y1,x2,y2[,shift|ctrl][,hold]" in logical pixels,
+        // run after --key-down (same start and end is a click; "hold" leaves the button down so a
+        // screenshot shows an in-progress stroke).
+        else if (argument == "--drag" && index + 1 < argc) startupDrags.push_back(argv[++index]);
         else if (argument == "--no-midi") noMidi = true;
         // Headless verification: open User settings on this category (e.g. Audio).
         else if (argument == "--settings-category" && index + 1 < argc) settingsCategory = argv[++index];
@@ -538,6 +543,30 @@ int main(int argc, char** argv) {
         const auto logical = [&](int physical) { return ui_zoom_to_logical(physical, zoom); };
         sync_zoom(initialWidth, initialHeight);
         for (const std::string& key : startupKeys) controller.key_down(key, false, false, false);
+        for (const std::string& drag : startupDrags) {
+            std::vector<std::string> parts;
+            for (std::size_t start = 0;;) {
+                const std::size_t comma = drag.find(',', start);
+                parts.push_back(drag.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+            if (parts.size() < 4) continue;
+            std::uint32_t modifiers = 0;
+            bool hold = false;
+            for (std::size_t part = 4; part < parts.size(); ++part) {
+                if (parts[part] == "shift") modifiers |= 1U;
+                else if (parts[part] == "ctrl") modifiers |= 2U;
+                else if (parts[part] == "hold") hold = true;
+            }
+            const int x1 = std::atoi(parts[0].c_str()), y1 = std::atoi(parts[1].c_str());
+            const int x2 = std::atoi(parts[2].c_str()), y2 = std::atoi(parts[3].c_str());
+            controller.pointer_move(x1, y1, modifiers);
+            controller.pointer_down(PointerButton::Primary, x1, y1, modifiers);
+            for (int step = 1; step <= 16; ++step)
+                controller.pointer_move(x1 + (x2 - x1) * step / 16, y1 + (y2 - y1) * step / 16, modifiers);
+            if (!hold) controller.pointer_up(PointerButton::Primary, x2, y2, modifiers);
+        }
         if (startupHover) controller.pointer_move(startupHover->first, startupHover->second);
         if (!accessibilityDump.empty()) {
             std::string accessibilityError;

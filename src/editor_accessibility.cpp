@@ -83,6 +83,7 @@ std::string tool_label(EditorToolId tool) {
         case EditorToolId::Anchor: return "Anchor";
         case EditorToolId::Rotate: return "Rotate";
         case EditorToolId::Scale: return "Scale voxels";
+        case EditorToolId::ScatterBrush: return "Scatter brush";
     }
     return "Tool";
 }
@@ -110,8 +111,8 @@ AccessibilityNode build_editor_accessibility_tree(const NativeEditorController& 
 
     AccessibilityNode toolbar{"toolbar", AccessibilityRole::ToolBar, "Authoring tools", {}, {}, true,
                               controller.focus_region() == EditorFocusRegion::Toolbar, false, {}};
-    for (int value = 0; value <= static_cast<int>(EditorToolId::Rotate); ++value) {
-        const auto tool = static_cast<EditorToolId>(value);
+    for (int value = 0; value < static_cast<int>(kToolbarTools.size()); ++value) {
+        const auto tool = kToolbarTools[static_cast<std::size_t>(value)];
         toolbar.children.push_back({"tool." + std::to_string(value + 1), AccessibilityRole::Button,
                                     tool_label(tool), "Activate authoring tool", std::to_string(value + 1), true,
                                     false, controller.active_tool() == tool, {}});

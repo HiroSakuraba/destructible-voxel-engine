@@ -1,8 +1,8 @@
 # Scatter Objects
 
 Pseudo-random placement of copies across a surface, for organic scenes: rocks, plants,
-debris. This first version fills a target surface; a paint-with-a-brush mode (worklist ART-093)
-is a planned follow-up. Covers the fill half of ART-093 and part of ART-095 (preview before
+debris. This page covers filling a target surface; painting with a brush is the Scatter
+toolbar tool (see [editor-scatter-brush-2026-10-10.md](editor-scatter-brush-2026-10-10.md)). Covers the fill half of ART-093 and part of ART-095 (preview before
 committing).
 
 ## Workflow

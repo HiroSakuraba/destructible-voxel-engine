@@ -18,7 +18,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <string_view>
 #include <string>
 #include <vector>
 
@@ -77,11 +79,43 @@ struct ScatterBuildResult {
     std::string error;
 };
 
+// Scatter groups (fill and brush) carry this tag; the brush erases only their children.
+inline constexpr std::string_view kScatterGroupTag = "dve.scatter";
+[[nodiscard]] EditorObject make_scatter_group(EditorObjectId id, std::size_t copies, Float3 position);
+[[nodiscard]] bool is_scatter_group(const EditorObject& object) noexcept;
+
+struct ScatterCopiesResult {
+    std::vector<EditorObjectId> rootIds;  // one per copy
+    std::size_t objectCount{};            // copies including their children
+    std::string error;
+};
+// Adds one AddObjectCommand per copied object to `command`, parented under `groupId`.
+[[nodiscard]] ScatterCopiesResult append_scatter_copies(CompoundCommand& command, EditorDocument& document,
+                                                        EditorObjectId groupId,
+                                                        const std::vector<ScatterSample>& samples,
+                                                        const std::vector<ScatterSource>& sources,
+                                                        bool alignToSurface);
+
 // Builds (does not execute) the command that adds the "Scatter" group and every copy. Ids are
 // allocated from `document`. Copies are independent: prefab links are dropped.
 [[nodiscard]] ScatterBuildResult build_scatter_command(EditorDocument& document, EditorObjectId target,
                                                        const ScatterPlan& plan,
                                                        const std::vector<ScatterSource>& sources,
                                                        const ScatterSettings& settings);
+
+// Scatter brush: one dab places spots inside a disk around `center`, dropped onto any object
+// `ground` accepts, at least the spacing from each other and from every point in `occupied`
+// (copies already placed). Deterministic for a given seed.
+inline constexpr std::uint32_t kMaxScatterDabAttempts = 200;
+struct ScatterDabSettings {
+    float minSpacingMeters{1.0F};
+    std::uint64_t seed{1};
+    std::size_t sourceCount{};
+    float probeMeters{0.5F};  // slope sampling distance for the surface normal
+};
+[[nodiscard]] std::vector<ScatterSample> plan_scatter_dab(const EditorDocument& document, Float3 center, float radius,
+                                                          const ScatterDabSettings& settings,
+                                                          const std::vector<Float3>& occupied,
+                                                          const std::function<bool(EditorObjectId)>& ground);
 
 } // namespace dve::editor

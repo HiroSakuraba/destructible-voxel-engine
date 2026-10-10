@@ -107,7 +107,7 @@ void test_toolbar(const Case& c) {
     MeasuringCanvas canvas;
     render_native_editor(canvas, controller, c.w, c.h);
     const auto& buttons = controller.layout().toolbarButtons;
-    check(buttons.size() == kEditorToolCount, c.tag + "nine toolbar buttons");
+    check(buttons.size() == kEditorToolCount, c.tag + "one button per toolbar tool");
     for (std::size_t i = 0; i < buttons.size(); ++i) {
         const UiRect& b = buttons[i];
         check(b.x + b.width <= c.w, c.tag + "toolbar button " + std::to_string(i) + " leaves the window");
@@ -124,7 +124,7 @@ void test_toolbar(const Case& c) {
     // At the default 1280x720 every tool shows its full name.
     if (c.tag.starts_with("1280x720@100%")) {
         for (std::size_t i = 0; i < kEditorToolCount; ++i) {
-            const auto name = editor_tool_info(static_cast<EditorToolId>(i)).name;
+            const auto name = editor_tool_info(kToolbarTools[i]).name;
             const DrawnText* t = canvas.find(name);
             check(t && t->value == name, c.tag + "full toolbar name '" + std::string(name) + "' is shown");
         }
@@ -135,7 +135,7 @@ void test_toolbar_tooltips() {
     const Case c{1280, 720, "1280x720 "};
     MAKE_CONTROLLER(controller, c);
     for (std::size_t i = 0; i < kEditorToolCount; ++i) {
-        const auto tool = static_cast<EditorToolId>(i);
+        const auto tool = kToolbarTools[i];
         const UiRect b = controller.layout().toolbarButtons[i];
         controller.pointer_move(b.x + b.width / 2, b.y + b.height / 2);
         MeasuringCanvas canvas;
@@ -165,7 +165,7 @@ void test_viewport_hint(const Case& c) {
     MAKE_CONTROLLER(controller, c);
     const UiRect viewport = controller.layout().viewport;
     // Every tool, including Scale, which has no toolbar button.
-    for (std::size_t i = 0; i <= static_cast<std::size_t>(EditorToolId::Scale); ++i) {
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(EditorToolId::ScatterBrush); ++i) {
         controller.set_active_tool(static_cast<EditorToolId>(i));
         const auto gestures = controller.viewport_tool_gestures();
         check(!gestures.empty() && gestures.size() <= 3, c.tag + "two or three gestures per tool");

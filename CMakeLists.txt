@@ -836,6 +836,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_ai_tools.cpp
         src/editor_settings.cpp
         src/editor_ui_zoom.cpp
+        src/editor_text_encoding.cpp
         src/editor_piano_keyboard.cpp
         src/editor_midi.cpp
         src/editor_shortcuts.cpp
@@ -2634,6 +2635,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_piano_keyboard_tests tests/test_editor_piano_keyboard.cpp)
         target_link_libraries(dve_editor_piano_keyboard_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_piano_keyboard_tests COMMAND dve_editor_piano_keyboard_tests)
+        add_executable(dve_editor_text_encoding_tests tests/test_editor_text_encoding.cpp)
+        target_link_libraries(dve_editor_text_encoding_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_text_encoding_tests COMMAND dve_editor_text_encoding_tests)
         add_executable(dve_editor_text_fit_tests tests/test_editor_text_fit.cpp)
         target_link_libraries(dve_editor_text_fit_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_text_fit_tests COMMAND dve_editor_text_fit_tests)

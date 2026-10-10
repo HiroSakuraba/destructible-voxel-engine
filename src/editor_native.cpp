@@ -4435,7 +4435,7 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
 }
 
 const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
-    static constexpr std::array<EditorToolInfo, kEditorToolCount> kTools{{
+    static constexpr std::array<EditorToolInfo, static_cast<std::size_t>(EditorToolId::Scale) + 1U> kTools{{
         {"Select", "Sel", "transform.select", "Click an object to select it; drag empty space to box-select.",
          "Objects"},
         {"Move", "Mov", "transform.translate", "Drag a gizmo axis to move the selection.", "Selected objects"},

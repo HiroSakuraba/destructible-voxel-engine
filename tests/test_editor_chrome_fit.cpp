@@ -157,7 +157,8 @@ void test_toolbar_tooltips() {
 void test_viewport_hint(const Case& c) {
     MAKE_CONTROLLER(controller, c);
     const UiRect viewport = controller.layout().viewport;
-    for (std::size_t i = 0; i < kEditorToolCount; ++i) {
+    // Every tool, including Scale, which has no toolbar button.
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(EditorToolId::Scale); ++i) {
         controller.set_active_tool(static_cast<EditorToolId>(i));
         const auto gestures = controller.viewport_tool_gestures();
         check(!gestures.empty() && gestures.size() <= 3, c.tag + "two or three gestures per tool");

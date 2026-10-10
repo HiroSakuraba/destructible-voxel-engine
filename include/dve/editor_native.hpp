@@ -73,7 +73,9 @@ enum class EditorToolId : std::uint8_t {
     Scale,
 };
 
-inline constexpr std::size_t kEditorToolCount = 10;
+// Tools with a toolbar button (EditorToolId::Select .. Rotate). Scale has no button; it is
+// selected by its shortcut or the Edit menu, but still has an editor_tool_info() entry.
+inline constexpr std::size_t kEditorToolCount = 9;
 // Height of the inspector's fixed "INSPECTOR" header; scrolled details never draw above it.
 inline constexpr int kInspectorHeaderHeight = 28;
 

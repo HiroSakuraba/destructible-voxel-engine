@@ -1,4 +1,5 @@
 #include "dve/editor_sdl_canvas.hpp"
+#include "dve/editor_text_encoding.hpp"
 
 #include <SDL3/SDL.h>
 #if DVE_HAVE_SDL_TTF
@@ -303,7 +304,8 @@ int SdlEditorCanvas::text_width(std::string_view value) const {
     }
 #endif
     const int magnification = impl_ ? impl_->debugMagnification : 1;
-    const float physical = static_cast<float>(value.size()) *
+    // SDL_RenderDebugText decodes UTF-8 and draws one cell per code point, not per byte.
+    const float physical = static_cast<float>(utf8_code_point_count(value)) *
                            static_cast<float>(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * magnification);
     return static_cast<int>(std::ceil(physical / scale));
 }

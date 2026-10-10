@@ -364,8 +364,86 @@ EditorObjectBounds object_world_bounds(const EditorObject& object, const RigidTr
     return result;
 }
 
-std::optional<EditorPickResult> pick_editor_document(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance) {
-    std::optional<EditorPickResult> best;
+bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& camera,
+                                UiRect viewport, UiRect selection, bool contain) {
+    if (!object.flags.visible || selection.width <= 0 || selection.height <= 0) return false;
+    struct Projected {
+        float left{}, top{}, right{}, bottom{};
+        bool valid{}, fullyVisible{};
+    };
+    const auto project_box = [&](Float3 minimum, Float3 maximum, bool worldSpace) {
+        Projected result;
+        result.left = result.top = std::numeric_limits<float>::infinity();
+        result.right = result.bottom = -std::numeric_limits<float>::infinity();
+        result.fullyVisible = true;
+        for (int corner = 0; corner < 8; ++corner) {
+            Float3 point{(corner & 1) ? maximum.x : minimum.x,
+                         (corner & 2) ? maximum.y : minimum.y,
+                         (corner & 4) ? maximum.z : minimum.z};
+            if (!worldSpace) point = transform_point(object.transform, point);
+            const ScreenPoint screen = project_world_to_screen(camera, viewport, point);
+            if (!screen.visible) { result.fullyVisible = false; continue; }
+            result.valid = true;
+            result.left = std::min(result.left, screen.x);
+            result.top = std::min(result.top, screen.y);
+            result.right = std::max(result.right, screen.x);
+            result.bottom = std::max(result.bottom, screen.y);
+        }
+        return result;
+    };
+    const float left = static_cast<float>(selection.x);
+    const float top = static_cast<float>(selection.y);
+    const float right = left + static_cast<float>(selection.width);
+    const float bottom = top + static_cast<float>(selection.height);
+    const auto overlaps = [&](const Projected& p) {
+        return p.valid && p.right >= left && p.left <= right && p.bottom >= top && p.top <= bottom;
+    };
+    const auto contained = [&](const Projected& p) {
+        return p.valid && p.fullyVisible && p.left >= left && p.right <= right &&
+               p.top >= top && p.bottom <= bottom;
+    };
+    const EditorObjectBounds world = object_world_bounds(object);
+    if (!world.valid) return false;
+    const Projected broad = project_box(world.minimum, world.maximum, true);
+    if (!overlaps(broad)) return false;
+    if (contain && contained(broad)) return true;
+    if (!object.voxels || object.voxels->occupied_voxel_count() == 0)
+        return contain ? contained(broad) : overlaps(broad);
+
+    const float size = object.voxelSizeMeters;
+    bool foundVoxel = false;
+    bool allContained = true;
+    for (const auto& entry : object.voxels->bricks()) {
+        const Brick& brick = entry.second;
+        if (brick.empty()) continue;
+        const Int3 origin = global_from_local(entry.first, {0, 0, 0});
+        const Float3 brickMin{origin.x * size, origin.y * size, origin.z * size};
+        const Float3 brickMax{(origin.x + kBrickDim) * size,
+                              (origin.y + kBrickDim) * size, (origin.z + kBrickDim) * size};
+        const Projected brickBox = project_box(brickMin, brickMax, false);
+        if (!contain && !overlaps(brickBox)) continue;
+        if (contain && !overlaps(brickBox)) return false;
+        if (contain && contained(brickBox)) { foundVoxel = true; continue; }
+        if (!contain && contained(brickBox)) return true;
+        brick.occupancy().for_each_set([&](std::uint16_t index) {
+            if (foundVoxel && !contain) return;
+            const Int3 voxel = global_from_local(entry.first, local_from_index_unchecked(index));
+            const Float3 voxelMin{voxel.x * size, voxel.y * size, voxel.z * size};
+            const Float3 voxelMax{(voxel.x + 1) * size, (voxel.y + 1) * size, (voxel.z + 1) * size};
+            const Projected cube = project_box(voxelMin, voxelMax, false);
+            if (contain) {
+                foundVoxel = true;
+                if (!contained(cube)) allContained = false;
+            } else if (overlaps(cube)) foundVoxel = true;
+        });
+        if (foundVoxel && !contain) return true;
+        if (!allContained) return false;
+    }
+    return contain && foundVoxel && allContained;
+}
+
+std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance) {
+    std::vector<EditorPickResult> hits;
     const Float3 worldDirection = safe_normalize(ray.direction, {0,0,-1});
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible) continue;
@@ -380,17 +458,17 @@ std::optional<EditorPickResult> pick_editor_document(const EditorDocument& docum
             if (ray_aabb_interval(localOrigin, localDirection, localMinimum,
                                   localMaximum, enter, exit)) {
                 const float worldDistance = std::clamp(enter, 0.0F, maximumWorldDistance);
-                if ((!best || worldDistance < best->worldDistance) && worldDistance <= maximumWorldDistance) {
+                if (worldDistance <= maximumWorldDistance) {
                     const Float3 localHit = add(localOrigin, multiply(localDirection, worldDistance));
                     const Float3 localNormal = box_surface_normal(localHit, localMinimum, localMaximum);
                     const auto material = object.text3d
                         ? static_cast<MaterialId>(std::min<std::uint32_t>(
                             object.text3d->style.faceMaterialId, std::numeric_limits<MaterialId>::max()))
                         : kAirMaterial;
-                    best = EditorPickResult{
+                    hits.push_back(EditorPickResult{
                         id, {}, {}, material, transform_point(object.transform, localHit),
                         safe_normalize(transform_vector(object.transform, localNormal), {0.0F, 1.0F, 0.0F}),
-                        worldDistance};
+                        worldDistance});
                 }
             }
             continue;
@@ -417,12 +495,11 @@ std::optional<EditorPickResult> pick_editor_document(const EditorDocument& docum
                                         segmentWorld * inverseScale);
         if (!hit) continue;
         const float worldDistance = startWorld + hit->distance * object.voxelSizeMeters;
-        if (best && worldDistance >= best->worldDistance) continue;
         const Float3 normalizedLocalDirection = safe_normalize(localDirectionVoxels, {0,0,-1});
         const Float3 localHitVoxels = add(clippedOriginVoxels, multiply(normalizedLocalDirection, hit->distance));
         const Float3 localHitMeters = multiply(localHitVoxels, object.voxelSizeMeters);
         const Float3 localNormal{static_cast<float>(hit->normal.x), static_cast<float>(hit->normal.y), static_cast<float>(hit->normal.z)};
-        best = EditorPickResult{
+        hits.push_back(EditorPickResult{
             id,
             hit->voxel,
             hit->normal,
@@ -430,9 +507,18 @@ std::optional<EditorPickResult> pick_editor_document(const EditorDocument& docum
             transform_point(object.transform, localHitMeters),
             safe_normalize(transform_vector(object.transform, localNormal), {0,1,0}),
             worldDistance,
-        };
+        });
     }
-    return best;
+    std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) {
+        return a.worldDistance == b.worldDistance ? a.objectId < b.objectId : a.worldDistance < b.worldDistance;
+    });
+    return hits;
+}
+
+std::optional<EditorPickResult> pick_editor_document(const EditorDocument& document, ViewportRay ray, float maximumWorldDistance) {
+    auto hits = pick_editor_document_all(document, ray, maximumWorldDistance);
+    if (hits.empty()) return std::nullopt;
+    return hits.front();
 }
 
 namespace {

@@ -4417,6 +4417,37 @@ void NativeEditorController::apply_transform_preview(const std::vector<ObjectTra
     }
 }
 
+// Orthonormal basis (u, v) spanning the plane perpendicular to an axis: the
+// rotate ring for the axis lies in this plane.
+void gizmo_ring_basis(Float3 axisWorld, Float3& u, Float3& v) noexcept {
+    const auto cross3 = [](Float3 a, Float3 b) noexcept {
+        return Float3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    };
+    const Float3 helper = std::abs(axisWorld.y) < 0.9F ? Float3{0.0F, 1.0F, 0.0F}
+                                                       : Float3{1.0F, 0.0F, 0.0F};
+    u = normalize(cross3(axisWorld, helper));
+    v = cross3(axisWorld, u);
+}
+
+// World angle of a pointer position around a ring: intersect the pointer
+// ray with the ring's plane through the pivot and measure the hit in the
+// ring basis. False when the ray is nearly parallel to the plane or lands
+// on the pivot, where the angle is undefined.
+bool gizmo_pointer_ring_angle(const EditorCamera& camera, UiRect viewport, Float3 pivot,
+                              Float3 axisWorld, Float3 basisU, Float3 basisV, int x, int y,
+                              float& angleOut) noexcept {
+    const ViewportRay ray = make_viewport_ray(camera, viewport, static_cast<float>(x),
+                                              static_cast<float>(y));
+    const float denom = dot(ray.direction, axisWorld);
+    if (std::abs(denom) < 1.0e-4F) return false;
+    const float t = dot(subtract(pivot, ray.origin), axisWorld) / denom;
+    if (!(t > 0.0F)) return false;
+    const Float3 rel = subtract(add(ray.origin, multiply(ray.direction, t)), pivot);
+    if (dot(rel, rel) < 1.0e-8F) return false;
+    angleOut = std::atan2(dot(rel, basisV), dot(rel, basisU));
+    return true;
+}
+
 std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     std::vector<GizmoScreenAxis> axes;
     if ((activeTool_ != EditorToolId::Translate && activeTool_ != EditorToolId::Rotate) ||
@@ -4432,6 +4463,32 @@ std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     return axes;
 }
 
+std::vector<GizmoScreenRing> NativeEditorController::gizmo_rings() const {
+    std::vector<GizmoScreenRing> rings;
+    if (activeTool_ != EditorToolId::Rotate || workspace_.selected_objects().empty()) return rings;
+    const Float3 origin = selection_pivot();
+    const float radius = std::max(0.5F, length(subtract(camera_.position, origin)) * 0.12F);
+    constexpr int kSegments = 40;
+    for (int axis = 1; axis <= 3; ++axis) {
+        const Float3 axisWorld = gizmo_axis_world(axis);
+        Float3 u{};
+        Float3 v{};
+        gizmo_ring_basis(axisWorld, u, v);
+        GizmoScreenRing ring;
+        ring.axis = axis;
+        ring.points.reserve(kSegments);
+        for (int i = 0; i < kSegments; ++i) {
+            const float theta = static_cast<float>(i) * 6.283185307179586F /
+                                static_cast<float>(kSegments);
+            const Float3 point = add(origin, add(multiply(u, std::cos(theta) * radius),
+                                                 multiply(v, std::sin(theta) * radius)));
+            ring.points.push_back(project_world_to_screen(camera_, layout_.viewport, point));
+        }
+        rings.push_back(std::move(ring));
+    }
+    return rings;
+}
+
 int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
     int result = 0;
     float best = 10.0F * kLogicalLayoutScale;
@@ -4440,6 +4497,19 @@ int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
         const float distance = point_line_distance(static_cast<float>(x), static_cast<float>(y),
                                                    axis.start.x, axis.start.y, axis.end.x, axis.end.y);
         if (distance < best) { best = distance; result = axis.axis; }
+    }
+    if (activeTool_ == EditorToolId::Rotate) {
+        for (const GizmoScreenRing& ring : gizmo_rings()) {
+            const std::vector<ScreenPoint>& points = ring.points;
+            for (std::size_t i = 0; i < points.size(); ++i) {
+                const ScreenPoint& a = points[i];
+                const ScreenPoint& b = points[(i + 1U) % points.size()];
+                if (!a.visible || !b.visible) continue;
+                const float distance = point_line_distance(
+                    static_cast<float>(x), static_cast<float>(y), a.x, a.y, b.x, b.y);
+                if (distance < best) { best = distance; result = ring.axis; }
+            }
+        }
     }
     return result;
 }
@@ -4461,10 +4531,33 @@ void NativeEditorController::begin_gizmo_drag(int x, int y) {
     gizmoStartY_ = y;
     gizmoPivot_ = selection_pivot();
     gizmoChanges_ = selection_transform_snapshot();
+    gizmoDragPlane_ = false;
+    gizmoDragWorldAccum_ = 0.0F;
+    if (activeTool_ == EditorToolId::Rotate) {
+        const Float3 axisWorld = gizmo_axis_world(gizmoAxis_);
+        gizmo_ring_basis(axisWorld, gizmoDragBasisU_, gizmoDragBasisV_);
+        float angle = 0.0F;
+        if (gizmo_pointer_ring_angle(camera_, layout_.viewport, gizmoPivot_, axisWorld,
+                                     gizmoDragBasisU_, gizmoDragBasisV_, x, y, angle)) {
+            gizmoDragWorldAngle_ = angle;
+            gizmoDragPlane_ = true;
+        }
+    }
 }
 
 void NativeEditorController::update_gizmo_drag(int x, int y) {
     if (!gizmoDragging_ || gizmoChanges_.empty()) return;
+    if (activeTool_ == EditorToolId::Rotate && gizmoDragPlane_) {
+        float angle = 0.0F;
+        if (gizmo_pointer_ring_angle(camera_, layout_.viewport, gizmoPivot_,
+                                     gizmo_axis_world(gizmoAxis_), gizmoDragBasisU_,
+                                     gizmoDragBasisV_, x, y, angle)) {
+            const float delta = std::atan2(std::sin(angle - gizmoDragWorldAngle_),
+                                           std::cos(angle - gizmoDragWorldAngle_));
+            gizmoDragWorldAccum_ += delta;
+            gizmoDragWorldAngle_ = angle;
+        }
+    }
     const auto axes = gizmo_axes();
     if (gizmoAxis_ < 1 || gizmoAxis_ > static_cast<int>(axes.size())) return;
     const GizmoScreenAxis& screenAxis = axes[static_cast<std::size_t>(gizmoAxis_ - 1)];
@@ -4479,7 +4572,8 @@ void NativeEditorController::update_gizmo_drag(int x, int y) {
         if (activeTool_ == EditorToolId::Rotate) {
             constexpr float degreesToRadians = 0.017453292519943295F;
             const float snapRadians = workspace_.preferences().rotateSnapDegrees * degreesToRadians;
-            const float rawAngle = projectedDelta * 0.012F;
+            const float rawAngle = gizmoDragPlane_ ? gizmoDragWorldAccum_
+                                                   : projectedDelta * 0.012F;
             const float angle = std::round(rawAngle / snapRadians) * snapRadians;
             const Quaternion delta = quaternion_from_axis_angle(worldAxis, angle);
             change.after.position = add(gizmoPivot_, rotate(delta, subtract(change.before.position, gizmoPivot_)));

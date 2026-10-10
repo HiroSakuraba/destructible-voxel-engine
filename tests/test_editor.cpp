@@ -412,6 +412,52 @@ void test_starter_cube(const std::filesystem::path& root) {
             "new scene action did not select the starter cube");
 }
 
+void test_gizmo_rings_and_plane_rotation() {
+    NativeEditorController controller{EditorWorkspace(make_new_scene_document())};
+    controller.resize(1280, 800);
+    require(controller.dispatch_action("file.new_scene"), "new scene for the gizmo test failed");
+    require(controller.dispatch_action("transform.rotate"), "rotate tool activation failed");
+
+    const std::vector<GizmoScreenRing> rings = controller.gizmo_rings();
+    require(rings.size() == 3U, "rotate tool should expose three gizmo rings");
+    for (const GizmoScreenRing& ring : rings)
+        require(ring.points.size() == 40U, "gizmo ring has the wrong segment count");
+    require(controller.gizmo_axes().size() == 3U, "rotate tool should keep three axis stubs");
+    require(rings[1].axis == 2, "second gizmo ring is not the Y axis");
+
+    // Hit testing: points on the Y ring resolve to the Y axis, including
+    // ring-only territory far from the axis stubs (crossings may differ).
+    const GizmoScreenRing& yRing = rings[1];
+    int hits = 0;
+    for (const ScreenPoint& point : yRing.points)
+        if (point.visible && controller.hit_test_gizmo_axis(static_cast<int>(point.x),
+                                                            static_cast<int>(point.y)) == 2)
+            ++hits;
+    require(hits >= 30, "ring hit testing does not resolve the Y ring to the Y axis");
+
+    // A stepped drag along the Y ring through 45 degrees of ring parameter
+    // rotates the cube about Y by roughly an eighth turn: its local X axis
+    // ends up diagonal between world X and world Z.
+    const ScreenPoint& grab = yRing.points[0];
+    require(grab.visible, "gizmo drag grab point is not visible");
+    controller.pointer_down(PointerButton::Primary, static_cast<int>(grab.x),
+                            static_cast<int>(grab.y));
+    require(controller.gizmo_dragging() && controller.gizmo_axis() == 2,
+            "pressing the Y ring did not start a Y gizmo drag");
+    for (int step = 1; step <= 5; ++step) {
+        const ScreenPoint& point = yRing.points[static_cast<std::size_t>(step)];
+        controller.pointer_move(static_cast<int>(point.x), static_cast<int>(point.y));
+    }
+    const ScreenPoint& release = yRing.points[5];
+    controller.pointer_up(PointerButton::Primary, static_cast<int>(release.x),
+                          static_cast<int>(release.y));
+    const EditorObject& cube = controller.workspace().document().objects().begin()->second;
+    const Float3 localX = rotate(cube.transform.rotation, {1.0F, 0.0F, 0.0F});
+    require(std::abs(localX.x) > 0.4F && std::abs(localX.z) > 0.4F && std::abs(localX.y) < 0.2F,
+            "ring drag did not rotate the cube about Y by roughly 45 degrees");
+    require(controller.workspace().commands().can_undo(), "gizmo rotation did not commit an undo step");
+}
+
 void test_materials_viewport_and_native_controller(const std::filesystem::path& root) {
     EditorMaterialLibrary materials = EditorMaterialLibrary::make_default();
     require(materials.find(1) && materials.find(4), "default material presets missing");
@@ -1392,6 +1438,7 @@ int main() {
         test_background_object_diagnostics();
         test_new_project_template();
         test_starter_cube(root / "starter");
+        test_gizmo_rings_and_plane_rotation();
         test_file_workflow_and_recent_projects(root / "recent");
         test_materials_viewport_and_native_controller(root / "native");
         test_voxel_rescale_command();

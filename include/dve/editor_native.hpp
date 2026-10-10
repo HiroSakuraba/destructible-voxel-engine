@@ -271,6 +271,13 @@ struct GizmoScreenAxis {
     ScreenPoint end{};
 };
 
+// One rotate ring: the projected circle around an axis, as screen points in
+// order (the renderer closes the loop back to the first point).
+struct GizmoScreenRing {
+    int axis{}; // 1 x, 2 y, 3 z
+    std::vector<ScreenPoint> points{};
+};
+
 // Background recovery saves driven by the editor.autosave_minutes setting.
 struct EditorAutosaveStatus {
     bool inFlight{};
@@ -611,6 +618,10 @@ public:
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
+    [[nodiscard]] std::vector<GizmoScreenRing> gizmo_rings() const;
+    [[nodiscard]] int hit_test_gizmo_axis(int x, int y) const;
+    [[nodiscard]] int gizmo_axis() const noexcept { return gizmoAxis_; }
+    [[nodiscard]] bool gizmo_dragging() const noexcept { return gizmoDragging_; }
 
 private:
     [[nodiscard]] std::vector<CommandPaletteResult> build_command_palette_results(std::size_t limit) const;
@@ -627,7 +638,6 @@ private:
     void set_status(std::string text, bool error = false, float seconds = 3.0F);
     void create_new_project_now();
     void create_new_scene_now();
-    [[nodiscard]] int hit_test_gizmo_axis(int x, int y) const;
     [[nodiscard]] Float3 gizmo_axis_world(int axis) const noexcept;
     [[nodiscard]] Float3 selection_pivot() const noexcept;
     [[nodiscard]] EditorObjectBounds selection_bounds() const noexcept;
@@ -777,6 +787,17 @@ private:
     int gizmoAxis_{};
     int gizmoStartX_{};
     int gizmoStartY_{};
+    // Plane-measured rotate dragging: the pointer ray is intersected with
+    // the grabbed ring's plane and the world angle around the axis is
+    // accumulated (unwrapped), so rotation tracks the pointer exactly
+    // regardless of how the ring projects on screen. Falls back to the
+    // linear projection method when the grab ray is nearly parallel to
+    // the ring plane.
+    Float3 gizmoDragBasisU_{};
+    Float3 gizmoDragBasisV_{};
+    float gizmoDragWorldAngle_{};
+    float gizmoDragWorldAccum_{};
+    bool gizmoDragPlane_{};
     Float3 gizmoPivot_{};
     std::vector<ObjectTransformChange> gizmoChanges_;
     // In-process clipboard for Edit > Cut/Copy/Paste. Deep-cloned objects, not references, so

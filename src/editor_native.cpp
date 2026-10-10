@@ -5,6 +5,7 @@
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/game_script.hpp"
 #include "dve/print_export.hpp"
+#include "dve/collision_proxy.hpp"
 
 #include <condition_variable>
 #include <fstream>
@@ -1828,6 +1829,11 @@ void NativeEditorController::refresh_menu_state() noexcept {
             (value ? action->disabledReason.empty() : action->disabledReason == reason)) return;
         (void)workspace_.menus().set_enabled(id, value, value ? std::string{} : std::string(reason));
     };
+    checked("view.toggle_move_snap", workspace_.preferences().translateSnapEnabled);
+    checked("view.toggle_angle_snap", workspace_.preferences().rotateSnapEnabled);
+    checked("view.toggle_scale_snap", workspace_.preferences().scaleSnapEnabled);
+    checked("view.toggle_absolute_grid", workspace_.preferences().absoluteGridSnap);
+    checked("transform.align_surface", alignToSurfaceNormal_);
     for (const int keys : kPianoKeyboardSizes)
         checked("view.keyboard_keys_" + std::to_string(keys), keyboard_key_count() == keys);
     const bool hasSelection = workspace_.selection_count() > 0U;
@@ -3171,6 +3177,62 @@ void NativeEditorController::open_context_menu(int x, int y, std::optional<Edito
     }
 }
 
+void NativeEditorController::open_pick_list(int x, int y, const std::vector<EditorPickResult>& hits) {
+    contextMenu_ = {};
+    contextMenu_.open = true;
+    const int itemHeight = static_cast<int>(24.0F * kLogicalLayoutScale);
+    const int popupWidth = 290;
+    contextMenu_.width = popupWidth;
+    const std::size_t count = std::min<std::size_t>(hits.size(), 16U);
+    contextMenu_.x = std::clamp(x, 0, std::max(0, width_ - popupWidth));
+    contextMenu_.y = std::clamp(y, layout_.menuBar.height,
+        std::max(layout_.menuBar.height, height_ - itemHeight * static_cast<int>(count)));
+    for (std::size_t index = 0; index < count; ++index) {
+        const EditorObjectId id = hits[index].objectId;
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object) continue;
+        std::string label = object->name;
+        for (auto parent = object->parent; parent;) {
+            const EditorObject* ancestor = workspace_.document().find_object(*parent);
+            if (!ancestor) break;
+            label = ancestor->name + "/" + label;
+            parent = ancestor->parent;
+        }
+        contextMenu_.items.push_back({"selection.pick." + std::to_string(id), std::move(label)});
+        contextMenu_.itemRects.push_back({contextMenu_.x,
+            contextMenu_.y + static_cast<int>(contextMenu_.itemRects.size()) * itemHeight,
+            popupWidth, itemHeight});
+    }
+}
+
+void NativeEditorController::walk_selection(std::string_view direction) {
+    const auto current = workspace_.selected_object();
+    if (!current) return;
+    const EditorObject* object = workspace_.document().find_object(*current);
+    if (!object) return;
+    std::optional<EditorObjectId> next;
+    if (direction == "up") next = object->parent;
+    else if (direction == "down") {
+        for (const auto& [id, candidate] : workspace_.document().objects()) {
+            if (candidate.parent == current && candidate.flags.visible) { next = id; break; }
+        }
+    } else {
+        std::vector<EditorObjectId> siblings;
+        for (const auto& [id, candidate] : workspace_.document().objects())
+            if (candidate.parent == object->parent && candidate.flags.visible) siblings.push_back(id);
+        const auto it = std::find(siblings.begin(), siblings.end(), *current);
+        if (it != siblings.end() && siblings.size() > 1U) {
+            const std::size_t index = static_cast<std::size_t>(it - siblings.begin());
+            next = siblings[(index + (direction == "left" ? siblings.size() - 1U : 1U)) % siblings.size()];
+        }
+    }
+    if (next) {
+        workspace_.select_object(next);
+        if (const EditorObject* selected = workspace_.document().find_object(*next))
+            set_status("Selected " + selected->name);
+    }
+}
+
 std::optional<EditorObjectId> NativeEditorController::hierarchy_row_object_at(int x, int y) const {
     const auto order = hierarchy_order();
     for (std::size_t index = 0; index < layout_.hierarchyRows.size() && index < order.size(); ++index) {
@@ -3329,6 +3391,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
         return;
     }
     if (contextMenu_.open) {
+        const auto previous = contextMenu_.hoveredItem;
         contextMenu_.hoveredItem.reset();
         for (std::size_t index = 0; index < contextMenu_.itemRects.size(); ++index) {
             if (contextMenu_.itemRects[index].contains(x, y)) {
@@ -3336,13 +3399,18 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
                 break;
             }
         }
+        if (contextMenu_.hoveredItem != previous && contextMenu_.hoveredItem &&
+            contextMenu_.items[*contextMenu_.hoveredItem].actionId.starts_with("selection.pick."))
+            set_status(contextMenu_.items[*contextMenu_.hoveredItem].label, false, 6.0F);
         lastPointerX_ = x;
         lastPointerY_ = y;
         return;
     }
     const int deltaX = x - lastPointerX_;
     const int deltaY = y - lastPointerY_;
-    if (hierarchyDrag_.sourceId != 0) {
+    if (placementMode_ != PlacementTarget::NoTarget && layout_.viewport.contains(x, y)) {
+        update_placement_preview(x, y);
+    } else if (hierarchyDrag_.sourceId != 0) {
         // Promote a pending hierarchy-row press into an active drag once the pointer has
         // moved enough that this clearly isn't just a click.
         const int distanceSquared = (x - pointerDownX_) * (x - pointerDownX_) + (y - pointerDownY_) * (y - pointerDownY_);
@@ -3354,7 +3422,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     } else if (navigation_pointer_active()) {
         navigate_pointer(static_cast<float>(deltaX), static_cast<float>(deltaY));
     } else if (gizmoDragging_) {
-        update_gizmo_drag(x, y);
+        update_gizmo_drag(x, y, modifiers);
     } else if (voxelStrokeActive_) {
         continue_voxel_stroke(x, y);
     } else {
@@ -4042,22 +4110,28 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     }
     dragButton_ = button;
     if (button == PointerButton::Primary) {
+        if (placementMode_ != PlacementTarget::NoTarget) {
+            update_placement_preview(x, y);
+            if (placementPoint_) finish_placement(false);
+            return;
+        }
         update_hover(x, y);
-        if ((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate) &&
+        if ((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
+             activeTool_ == EditorToolId::Scale) &&
             hit_test_gizmo_axis(x, y) != 0) {
             begin_gizmo_drag(x, y);
         } else if (activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
-                   activeTool_ == EditorToolId::Rotate) {
-            if (hoverPick_) {
-                if ((modifiers & 1U) != 0U) workspace_.toggle_selection(hoverPick_->objectId);
-                else workspace_.select_object(hoverPick_->objectId);
-            } else {
-                // Nothing under the cursor: could be a plain click (clear selection, handled
-                // in pointer_up if the pointer barely moves) or the start of a marquee drag.
-                marquee_.active = true;
-                marquee_.startX = marquee_.currentX = x;
-                marquee_.startY = marquee_.currentY = y;
-            }
+                   activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale) {
+            // Defer selection until release so a box can start over geometry. Shift adds,
+            // Ctrl toggles, Alt subtracts, and Shift+Ctrl intersects the current set.
+            marquee_.active = true;
+            marquee_.clickObject = hoverPick_ ? std::optional<EditorObjectId>(hoverPick_->objectId) : std::nullopt;
+            marquee_.operation = (modifiers & 3U) == 3U ? SelectionOperation::Intersect
+                : (modifiers & 4U) ? SelectionOperation::Subtract
+                : (modifiers & 2U) ? SelectionOperation::Toggle
+                : (modifiers & 1U) ? SelectionOperation::Add : SelectionOperation::Replace;
+            marquee_.startX = marquee_.currentX = x;
+            marquee_.startY = marquee_.currentY = y;
         } else {
             begin_voxel_stroke(x, y);
         }
@@ -4164,36 +4238,44 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
     if (button == PointerButton::Primary) {
         if (marquee_.active) {
             const int distanceSquared = (x - marquee_.startX) * (x - marquee_.startX) + (y - marquee_.startY) * (y - marquee_.startY);
+            std::set<EditorObjectId> hits;
             if (distanceSquared <= 25) {
-                if ((modifiers & 1U) == 0U) workspace_.clear_selection();
+                if (marquee_.clickObject) {
+                    if ((modifiers & 7U) == 0U || (modifiers & 4U) != 0U) {
+                        const auto depthHits = pick_editor_document_all(workspace_.document(),
+                            make_viewport_ray(camera_, layout_.viewport,
+                                static_cast<float>(marquee_.startX), static_cast<float>(marquee_.startY)));
+                        if ((modifiers & 4U) != 0U && (modifiers & 3U) == 0U && depthHits.size() > 1U) {
+                            open_pick_list(x, y, depthHits);
+                            marquee_ = {};
+                            return;
+                        }
+                        if ((modifiers & 7U) == 0U && depthHits.size() > 1U) {
+                            const auto now = std::chrono::steady_clock::now();
+                            const int dx = x - lastPickX_, dy = y - lastPickY_;
+                            if (dx * dx + dy * dy <= 25 &&
+                                now - lastPickTime_ < std::chrono::milliseconds(750))
+                                pickCycleIndex_ = (pickCycleIndex_ + 1U) % depthHits.size();
+                            else pickCycleIndex_ = 0U;
+                            lastPickTime_ = now;
+                            lastPickX_ = x; lastPickY_ = y;
+                            hits.insert(depthHits[pickCycleIndex_].objectId);
+                        } else hits.insert(*marquee_.clickObject);
+                    } else hits.insert(*marquee_.clickObject);
+                }
             } else {
                 const int left = std::min(marquee_.startX, x);
                 const int right = std::max(marquee_.startX, x);
                 const int top = std::min(marquee_.startY, y);
                 const int bottom = std::max(marquee_.startY, y);
-                if ((modifiers & 1U) == 0U) workspace_.clear_selection();
+                const bool contain = x >= marquee_.startX;
+                const UiRect rectangle{left, top, right - left + 1, bottom - top + 1};
                 for (const auto& [id, object] : workspace_.document().objects()) {
-                    const EditorObjectBounds bounds = object_world_bounds(object);
-                    if (!bounds.valid) continue;
-                    float minX = 1.0e9F, minY = 1.0e9F, maxX = -1.0e9F, maxY = -1.0e9F;
-                    bool anyVisible = false;
-                    for (int corner = 0; corner < 8; ++corner) {
-                        const Float3 point{
-                            (corner & 1) ? bounds.maximum.x : bounds.minimum.x,
-                            (corner & 2) ? bounds.maximum.y : bounds.minimum.y,
-                            (corner & 4) ? bounds.maximum.z : bounds.minimum.z};
-                        const ScreenPoint projected = project_world_to_screen(camera_, layout_.viewport, point);
-                        if (!projected.visible) continue;
-                        anyVisible = true;
-                        minX = std::min(minX, projected.x); maxX = std::max(maxX, projected.x);
-                        minY = std::min(minY, projected.y); maxY = std::max(maxY, projected.y);
-                    }
-                    if (!anyVisible) continue;
-                    const bool overlaps = maxX >= static_cast<float>(left) && minX <= static_cast<float>(right) &&
-                                          maxY >= static_cast<float>(top) && minY <= static_cast<float>(bottom);
-                    if (overlaps) workspace_.add_to_selection(id);
+                    if (object_matches_screen_rect(object, camera_, layout_.viewport, rectangle, contain))
+                        hits.insert(id);
                 }
             }
+            workspace_.apply_selection(hits, marquee_.operation);
             marquee_ = {};
         }
         if (gizmoDragging_) finish_gizmo_drag(false);
@@ -4397,6 +4479,12 @@ EditorObjectBounds NativeEditorController::selection_bounds() const noexcept {
 }
 
 Float3 NativeEditorController::selection_pivot() const noexcept {
+    if (pivotMode_ == PivotMode::WorldOrigin) return {};
+    if (pivotMode_ == PivotMode::Custom) return customPivot_;
+    if (pivotMode_ == PivotMode::ActiveObject && workspace_.selected_object()) {
+        if (const EditorObject* object = workspace_.document().find_object(*workspace_.selected_object()))
+            return object->transform.position;
+    }
     const EditorObjectBounds bounds = selection_bounds();
     if (bounds.valid) return multiply(add(bounds.minimum, bounds.maximum), 0.5F);
     if (workspace_.selected_object()) {
@@ -4434,11 +4522,117 @@ void NativeEditorController::apply_transform_preview(const std::vector<ObjectTra
     }
 }
 
+void NativeEditorController::update_placement_preview(int x, int y) {
+    if (placementMode_ == PlacementTarget::NoTarget) return;
+    apply_transform_preview(placementChanges_, false);
+    placementPoint_.reset();
+    const auto hits = pick_editor_document_all(workspace_.document(),
+        make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)));
+    const auto it = std::find_if(hits.begin(), hits.end(), [&](const EditorPickResult& hit) {
+        return !workspace_.is_selected(hit.objectId);
+    });
+    if (it == hits.end()) return;
+    const EditorObject* target = workspace_.document().find_object(it->objectId);
+    if (!target) return;
+    Float3 point = add(it->worldPosition, multiply(it->worldNormal, placementOffsetMeters_));
+    if (placementMode_ != PlacementTarget::Surface) {
+        std::vector<Float3> candidates;
+        if (placementMode_ == PlacementTarget::BoundsVertex) {
+            const EditorObjectBounds bounds = object_world_bounds(*target);
+            if (!bounds.valid) return;
+            for (int corner = 0; corner < 8; ++corner)
+                candidates.push_back({(corner & 1) ? bounds.maximum.x : bounds.minimum.x,
+                    (corner & 2) ? bounds.maximum.y : bounds.minimum.y,
+                    (corner & 4) ? bounds.maximum.z : bounds.minimum.z});
+        } else if (placementMode_ == PlacementTarget::CollisionBoxVertex && target->flags.collisionEnabled &&
+                   target->voxels && target->voxels->brick_count() > 0) {
+            const auto boxes = build_brick_box_proxy(*target->voxels, brick_key_from_voxel(it->voxel));
+            for (const VoxelBox& box : boxes) {
+                if (it->voxel.x < box.min.x || it->voxel.y < box.min.y || it->voxel.z < box.min.z ||
+                    it->voxel.x >= box.maxExclusive.x || it->voxel.y >= box.maxExclusive.y ||
+                    it->voxel.z >= box.maxExclusive.z) continue;
+                for (int corner = 0; corner < 8; ++corner)
+                    candidates.push_back(transform_point(target->transform, multiply(Float3{
+                        static_cast<float>((corner & 1) ? box.maxExclusive.x : box.min.x),
+                        static_cast<float>((corner & 2) ? box.maxExclusive.y : box.min.y),
+                        static_cast<float>((corner & 4) ? box.maxExclusive.z : box.min.z)},
+                        target->voxelSizeMeters)));
+            }
+        } else if (target->voxels && target->voxels->brick_count() > 0 && target->voxelSizeMeters > 0.0F) {
+            const float size = target->voxelSizeMeters;
+            std::array<Float3, 8> corners{};
+            for (int corner = 0; corner < 8; ++corner) {
+                corners[static_cast<std::size_t>(corner)] = transform_point(target->transform,
+                    Float3{(static_cast<float>(it->voxel.x) + ((corner & 1) ? 1.0F : 0.0F)) * size,
+                           (static_cast<float>(it->voxel.y) + ((corner & 2) ? 1.0F : 0.0F)) * size,
+                           (static_cast<float>(it->voxel.z) + ((corner & 4) ? 1.0F : 0.0F)) * size});
+            }
+            if (placementMode_ == PlacementTarget::VoxelCorner) candidates.assign(corners.begin(), corners.end());
+            else if (placementMode_ == PlacementTarget::VoxelEdge) {
+                for (int a = 0; a < 8; ++a)
+                    for (int b = a + 1; b < 8; ++b)
+                        if (std::popcount(static_cast<unsigned>(a ^ b)) == 1)
+                            candidates.push_back(multiply(add(corners[static_cast<std::size_t>(a)],
+                                corners[static_cast<std::size_t>(b)]), 0.5F));
+            } else if (placementMode_ == PlacementTarget::VoxelFace) {
+                for (int axis = 0; axis < 3; ++axis)
+                    for (int side = 0; side < 2; ++side) {
+                        Float3 center{};
+                        for (int corner = 0; corner < 8; ++corner)
+                            if (((corner >> axis) & 1) == side)
+                                center = add(center, corners[static_cast<std::size_t>(corner)]);
+                        candidates.push_back(multiply(center, 0.25F));
+                    }
+            }
+        }
+        if (candidates.empty()) return;
+        point = *std::min_element(candidates.begin(), candidates.end(), [&](Float3 a, Float3 b) {
+            return length_squared(subtract(a, it->worldPosition)) < length_squared(subtract(b, it->worldPosition));
+        });
+    }
+    placementPoint_ = point;
+    const Float3 delta = subtract(point, placementPivot_);
+    for (ObjectTransformChange& change : placementChanges_) {
+        change.after = change.before;
+        change.after.position = add(change.before.position, delta);
+        if (placementMode_ == PlacementTarget::Surface && alignToSurfaceNormal_) {
+            const Float3 n = normalize(it->worldNormal);
+            const Float3 up = rotate(change.before.rotation, {0.0F, 1.0F, 0.0F});
+            const float d = dot(up, n);
+            const Float3 cross{up.y * n.z - up.z * n.y, up.z * n.x - up.x * n.z,
+                               up.x * n.y - up.y * n.x};
+            const Float3 fallback = std::abs(up.x) < 0.9F ? Float3{1.0F, 0.0F, 0.0F}
+                                                      : Float3{0.0F, 0.0F, 1.0F};
+            const Float3 oppositeAxis{up.y * fallback.z - up.z * fallback.y,
+                                      up.z * fallback.x - up.x * fallback.z,
+                                      up.x * fallback.y - up.y * fallback.x};
+            const Quaternion alignment = d < -0.999F ? quaternion_from_axis_angle(oppositeAxis, 3.14159265F)
+                : normalize(Quaternion{cross.x, cross.y, cross.z, 1.0F + d});
+            change.after.rotation = normalize(multiply(alignment, change.before.rotation));
+        }
+    }
+    apply_transform_preview(placementChanges_, true);
+}
+
+void NativeEditorController::finish_placement(bool cancel) {
+    if (placementMode_ == PlacementTarget::NoTarget) return;
+    apply_transform_preview(placementChanges_, false);
+    if (!cancel && placementPoint_) {
+        const CommandResult result = workspace_.commands().execute(workspace_.document(),
+            std::make_unique<TransformObjectsCommand>(placementChanges_, "Place objects"));
+        set_status(result.success ? "Placed selection" : result.message, !result.success);
+    } else set_status("Placement canceled");
+    placementChanges_.clear();
+    placementPoint_.reset();
+    placementMode_ = PlacementTarget::NoTarget;
+}
+
 std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     std::vector<GizmoScreenAxis> axes;
-    if ((activeTool_ != EditorToolId::Translate && activeTool_ != EditorToolId::Rotate) ||
+    if ((activeTool_ != EditorToolId::Translate && activeTool_ != EditorToolId::Rotate &&
+         activeTool_ != EditorToolId::Scale) ||
         workspace_.selected_objects().empty()) return axes;
-    const Float3 origin = selection_pivot();
+    const Float3 origin = gizmoDragging_ ? gizmoPivot_ : selection_pivot();
     const float distance = std::max(0.5F, length(subtract(camera_.position, origin)) * 0.12F);
     for (int axis = 1; axis <= 3; ++axis) {
         const ScreenPoint start = project_world_to_screen(camera_, layout_.viewport, origin);
@@ -4472,16 +4666,27 @@ void NativeEditorController::begin_gizmo_drag(int x, int y) {
             gizmoAxis_ = 0;
             return;
         }
+        if (activeTool_ == EditorToolId::Scale && (!object->voxels || object->voxels->brick_count() == 0)) {
+            set_status("Voxel scale requires occupied voxel objects", true);
+            gizmoAxis_ = 0;
+            return;
+        }
     }
     gizmoDragging_ = true;
     gizmoStartX_ = x;
     gizmoStartY_ = y;
     gizmoPivot_ = selection_pivot();
     gizmoChanges_ = selection_transform_snapshot();
+    transformNumeric_.clear();
+    scalePreviewBounds_.reset();
+    scaleFactors_ = {1.0F, 1.0F, 1.0F};
 }
 
-void NativeEditorController::update_gizmo_drag(int x, int y) {
+void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modifiers) {
     if (!gizmoDragging_ || gizmoChanges_.empty()) return;
+    gizmoLastX_ = x;
+    gizmoLastY_ = y;
+    gizmoLastModifiers_ = modifiers;
     const auto axes = gizmo_axes();
     if (gizmoAxis_ < 1 || gizmoAxis_ > static_cast<int>(axes.size())) return;
     const GizmoScreenAxis& screenAxis = axes[static_cast<std::size_t>(gizmoAxis_ - 1)];
@@ -4491,13 +4696,43 @@ void NativeEditorController::update_gizmo_drag(int x, int y) {
     const float projectedDelta = ((static_cast<float>(x - gizmoStartX_) * dx) +
                                   (static_cast<float>(y - gizmoStartY_) * dy)) / screenLength;
     const Float3 worldAxis = gizmo_axis_world(gizmoAxis_);
+    const EditorPreferences& preferences = workspace_.preferences();
+    const bool temporaryOverride = (modifiers & 1U) != 0U;
+    std::optional<float> numeric;
+    if (!transformNumeric_.empty() && transformNumeric_ != "-" && transformNumeric_ != ".") {
+        char* end = nullptr;
+        const float parsed = std::strtof(transformNumeric_.c_str(), &end);
+        if (end && *end == '\0' && std::isfinite(parsed)) numeric = parsed;
+    }
+    if (activeTool_ == EditorToolId::Scale) {
+        float factor = numeric.value_or(1.0F + projectedDelta * 0.01F);
+        factor = std::clamp(factor, 0.1F, 10.0F);
+        if (!numeric && preferences.scaleSnapEnabled != temporaryOverride)
+            factor = std::max(0.1F, 1.0F + std::round((factor - 1.0F) / preferences.scaleSnapStep) * preferences.scaleSnapStep);
+        scaleFactors_ = {1.0F, 1.0F, 1.0F};
+        if ((modifiers & 4U) != 0U) scaleFactors_ = {factor, factor, factor};
+        else if (gizmoAxis_ == 1) scaleFactors_.x = factor;
+        else if (gizmoAxis_ == 2) scaleFactors_.y = factor;
+        else scaleFactors_.z = factor;
+        const EditorObjectBounds bounds = selection_bounds();
+        if (bounds.valid) {
+            auto scaled = [&](Float3 p) {
+                const Float3 d = subtract(p, gizmoPivot_);
+                return add(gizmoPivot_, {d.x * scaleFactors_.x, d.y * scaleFactors_.y, d.z * scaleFactors_.z});
+            };
+            scalePreviewBounds_ = {scaled(bounds.minimum), scaled(bounds.maximum), true};
+        }
+        set_status("Voxel resample preview: " + std::to_string(factor).substr(0, 5) + "x (Alt: uniform)", false, 1.0F);
+        return;
+    }
     for (ObjectTransformChange& change : gizmoChanges_) {
         change.after = change.before;
         if (activeTool_ == EditorToolId::Rotate) {
             constexpr float degreesToRadians = 0.017453292519943295F;
-            const float snapRadians = workspace_.preferences().rotateSnapDegrees * degreesToRadians;
-            const float rawAngle = projectedDelta * 0.012F;
-            const float angle = std::round(rawAngle / snapRadians) * snapRadians;
+            const float snapRadians = preferences.rotateSnapDegrees * degreesToRadians;
+            const float rawAngle = numeric ? *numeric * degreesToRadians : projectedDelta * 0.012F;
+            const float angle = (!numeric && preferences.rotateSnapEnabled != temporaryOverride)
+                ? std::round(rawAngle / snapRadians) * snapRadians : rawAngle;
             const Quaternion delta = quaternion_from_axis_angle(worldAxis, angle);
             change.after.position = add(gizmoPivot_, rotate(delta, subtract(change.before.position, gizmoPivot_)));
             change.after.rotation = normalize(multiply(delta, change.before.rotation));
@@ -4505,9 +4740,15 @@ void NativeEditorController::update_gizmo_drag(int x, int y) {
             const float depth = std::max(0.1F, length(subtract(camera_.position, gizmoPivot_)));
             const float worldPerPixel = 2.0F * depth * std::tan(camera_.verticalFovRadians * 0.5F) /
                                         static_cast<float>(std::max(1, layout_.viewport.height));
-            float worldDelta = projectedDelta * worldPerPixel;
-            const float snapMeters = workspace_.preferences().translateSnapMeters;
-            worldDelta = std::round(worldDelta / snapMeters) * snapMeters;
+            float worldDelta = numeric.value_or(projectedDelta * worldPerPixel);
+            if (!numeric && preferences.translateSnapEnabled != temporaryOverride) {
+                const float snapMeters = preferences.translateSnapMeters;
+                if (preferences.absoluteGridSnap) {
+                    const float coordinate = dot(change.before.position, worldAxis) + worldDelta;
+                    worldDelta = std::round(coordinate / snapMeters) * snapMeters -
+                                 dot(change.before.position, worldAxis);
+                } else worldDelta = std::round(worldDelta / snapMeters) * snapMeters;
+            }
             change.after.position = add(change.before.position, multiply(worldAxis, worldDelta));
         }
     }
@@ -4518,17 +4759,72 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
     if (!gizmoDragging_) return;
     apply_transform_preview(gizmoChanges_, false);
     if (!cancel && !gizmoChanges_.empty()) {
-        const std::string label = activeTool_ == EditorToolId::Rotate ? "Rotate objects" : "Move objects";
-        const CommandResult result = workspace_.commands().execute(
-            workspace_.document(), std::make_unique<TransformObjectsCommand>(gizmoChanges_, label));
-        set_status(result.success ? label : result.message, !result.success);
+        if (activeTool_ == EditorToolId::Scale) {
+            if (std::abs(scaleFactors_.x - 1.0F) > 0.0001F ||
+                std::abs(scaleFactors_.y - 1.0F) > 0.0001F ||
+                std::abs(scaleFactors_.z - 1.0F) > 0.0001F) {
+                auto compound = std::make_unique<CompoundCommand>("Resample selected voxel objects");
+                bool valid = true;
+                for (ObjectTransformChange& change : gizmoChanges_) {
+                    const EditorObject* object = workspace_.document().find_object(change.id);
+                    auto command = make_rescale_voxel_object_command(workspace_.document(), change.id, scaleFactors_);
+                    if (!command || !object) { valid = false; break; }
+                    compound->add(std::move(command));
+                    const auto occupied = object->voxels->occupied_bounds();
+                    const Float3 localCenter = occupied.valid ? Float3{
+                        (static_cast<float>(occupied.minimum.x) + static_cast<float>(occupied.maximum.x) + 1.0F) * object->voxelSizeMeters * 0.5F,
+                        (static_cast<float>(occupied.minimum.y) + static_cast<float>(occupied.maximum.y) + 1.0F) * object->voxelSizeMeters * 0.5F,
+                        (static_cast<float>(occupied.minimum.z) + static_cast<float>(occupied.maximum.z) + 1.0F) * object->voxelSizeMeters * 0.5F}
+                        : Float3{};
+                    const auto scaled_center = [&](int minimum, int maximum, float factor) {
+                        const double sourceCenter = 0.5 * (static_cast<double>(minimum) + maximum + 1.0);
+                        const double dimension = static_cast<double>(maximum) - minimum + 1.0;
+                        const double targetDimension = std::max(1.0, static_cast<double>(std::llround(dimension * factor)));
+                        return static_cast<float>(std::floor(sourceCenter - targetDimension * 0.5) +
+                                                  targetDimension * 0.5) * object->voxelSizeMeters;
+                    };
+                    const Float3 newLocalCenter = occupied.valid ? Float3{
+                        scaled_center(occupied.minimum.x, occupied.maximum.x, scaleFactors_.x),
+                        scaled_center(occupied.minimum.y, occupied.maximum.y, scaleFactors_.y),
+                        scaled_center(occupied.minimum.z, occupied.maximum.z, scaleFactors_.z)}
+                        : Float3{};
+                    const Float3 rotatedCenter = rotate(change.before.rotation, localCenter);
+                    const Float3 centerWorld = add(change.before.position, rotatedCenter);
+                    const Float3 offset = subtract(centerWorld, gizmoPivot_);
+                    const Float3 scaledCenter = add(gizmoPivot_, {
+                        offset.x * scaleFactors_.x, offset.y * scaleFactors_.y, offset.z * scaleFactors_.z});
+                    change.after.position = subtract(scaledCenter, rotate(change.before.rotation, newLocalCenter));
+                }
+                if (valid) {
+                    compound->add(std::make_unique<TransformObjectsCommand>(gizmoChanges_, "Scale positions"));
+                    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(compound));
+                    set_status(result.success ? "Resampled selected voxels" : result.message, !result.success);
+                } else set_status("Voxel resample exceeds the supported range", true);
+            }
+        } else {
+            const std::string label = activeTool_ == EditorToolId::Rotate ? "Rotate objects" : "Move objects";
+            const CommandResult result = workspace_.commands().execute(
+                workspace_.document(), std::make_unique<TransformObjectsCommand>(gizmoChanges_, label));
+            set_status(result.success ? label : result.message, !result.success);
+        }
     }
     gizmoDragging_ = false;
     gizmoAxis_ = 0;
     gizmoChanges_.clear();
+    scalePreviewBounds_.reset();
+    transformNumeric_.clear();
 }
 
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
+    if (actionId.starts_with("selection.pick.")) {
+        EditorObjectId id{};
+        const auto value = actionId.substr(std::string_view("selection.pick.").size());
+        const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), id);
+        if (error != std::errc{} || end != value.data() + value.size() ||
+            !workspace_.document().find_object(id)) return false;
+        workspace_.select_object(id);
+        return true;
+    }
     // Selection, clipboard, play-session, and authoring-panel state can change outside menu
     // interaction. Re-evaluate availability at the command boundary so shortcuts, automation,
     // context menus, and top-level menus all enforce the same current-state contract.
@@ -4601,7 +4897,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId == "transform.select") { set_active_tool(EditorToolId::Select); return true; }
     if (actionId == "transform.scale") {
-        set_status("Scale tool selected; polygon component scaling and voxel rescale use context-specific commands");
+        set_active_tool(EditorToolId::Scale);
+        set_status("Voxel scale: drag an axis to preview resampling; Alt for uniform scale");
         return true;
     }
     if (actionId == "transform.universal") { set_active_tool(EditorToolId::Translate); return true; }
@@ -5225,6 +5522,51 @@ camera_menu_dispatch_complete:
         transformSpace_ = transformSpace_ == EditorTransformSpace::World ? EditorTransformSpace::Local
                                                                          : EditorTransformSpace::World;
         set_status(transformSpace_ == EditorTransformSpace::World ? "World transform axes" : "Local transform axes");
+        return true;
+    }
+    if (actionId == "transform.pivot_bounds" || actionId == "transform.pivot_active" ||
+        actionId == "transform.pivot_origin" || actionId == "transform.pivot_cursor") {
+        if (actionId == "transform.pivot_cursor") {
+            if (!hoverPick_) { set_status("Point at geometry to set a custom pivot", true); return false; }
+            customPivot_ = hoverPick_->worldPosition;
+            pivotMode_ = PivotMode::Custom;
+        } else pivotMode_ = actionId == "transform.pivot_active" ? PivotMode::ActiveObject
+            : actionId == "transform.pivot_origin" ? PivotMode::WorldOrigin : PivotMode::BoundsCenter;
+        set_status("Transform pivot changed");
+        return true;
+    }
+    if (actionId == "transform.align_surface") {
+        alignToSurfaceNormal_ = !alignToSurfaceNormal_;
+        refresh_menu_state();
+        set_status(alignToSurfaceNormal_ ? "Surface normal alignment enabled" : "Surface normal alignment disabled");
+        return true;
+    }
+    if (actionId == "transform.surface_offset_more" || actionId == "transform.surface_offset_less") {
+        placementOffsetMeters_ = std::clamp(placementOffsetMeters_ +
+            (actionId == "transform.surface_offset_more" ? 0.05F : -0.05F), -10.0F, 10.0F);
+        set_status("Surface offset: " + std::to_string(placementOffsetMeters_) + " m");
+        return true;
+    }
+    if (actionId == "transform.place_surface" || actionId == "transform.place_voxel_corner" ||
+        actionId == "transform.place_voxel_edge" || actionId == "transform.place_voxel_face" ||
+        actionId == "transform.place_bounds_vertex" || actionId == "transform.place_collision_vertex") {
+        if (workspace_.selected_objects().empty()) { set_status("Select an object to place", true); return false; }
+        if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
+        for (EditorObjectId id : workspace_.selected_objects()) {
+            const EditorObject* object = workspace_.document().find_object(id);
+            if (!object || object->flags.locked) {
+                set_status("Unlock the selected objects before placement", true); return false;
+            }
+        }
+        placementMode_ = actionId == "transform.place_surface" ? PlacementTarget::Surface
+            : actionId == "transform.place_voxel_corner" ? PlacementTarget::VoxelCorner
+            : actionId == "transform.place_voxel_edge" ? PlacementTarget::VoxelEdge
+            : actionId == "transform.place_voxel_face" ? PlacementTarget::VoxelFace
+            : actionId == "transform.place_collision_vertex" ? PlacementTarget::CollisionBoxVertex
+            : PlacementTarget::BoundsVertex;
+        placementChanges_ = selection_transform_snapshot();
+        placementPivot_ = selection_pivot();
+        set_status("Move over a target and click to place; Escape cancels");
         return true;
     }
     if (actionId == "transform.scale_double") {
@@ -5920,6 +6262,24 @@ camera_menu_dispatch_complete:
         set_status("Move snap: " + std::to_string(snap).substr(0, 5) + " m");
         return true;
     }
+    if (actionId == "view.toggle_move_snap" || actionId == "view.toggle_angle_snap" ||
+        actionId == "view.toggle_scale_snap" || actionId == "view.toggle_absolute_grid") {
+        EditorPreferences& preferences = workspace_.preferences();
+        bool* state = actionId == "view.toggle_move_snap" ? &preferences.translateSnapEnabled
+            : actionId == "view.toggle_angle_snap" ? &preferences.rotateSnapEnabled
+            : actionId == "view.toggle_scale_snap" ? &preferences.scaleSnapEnabled
+            : &preferences.absoluteGridSnap;
+        *state = !*state;
+        refresh_menu_state();
+        set_status(std::string(actionId) + (*state ? " enabled" : " disabled"));
+        return true;
+    }
+    if (actionId == "view.increase_scale_snap" || actionId == "view.decrease_scale_snap") {
+        float& step = workspace_.preferences().scaleSnapStep;
+        step = std::clamp(step * (actionId == "view.increase_scale_snap" ? 2.0F : 0.5F), 0.01F, 1.0F);
+        set_status("Scale snap step: " + std::to_string(step));
+        return true;
+    }
     if (actionId == "view.increase_angle_snap" || actionId == "view.decrease_angle_snap") {
         static constexpr std::array<float, 6> kSteps{1.0F, 5.0F, 15.0F, 30.0F, 45.0F, 90.0F};
         float& snap = workspace_.preferences().rotateSnapDegrees;
@@ -5947,6 +6307,24 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         if (normalized == "return" || normalized == "enter") confirm_pending_destructive_action();
         else if (normalized == "escape") cancel_pending_destructive_action();
         return;
+    }
+    if (gizmoDragging_ && !control) {
+        if (normalized == "enter" || normalized == "return") { finish_gizmo_drag(false); return; }
+        if (normalized == "escape") { finish_gizmo_drag(true); return; }
+        if (normalized == "backspace") {
+            if (!transformNumeric_.empty()) transformNumeric_.pop_back();
+            update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);
+            return;
+        }
+        const char digit = normalized.size() == 1U ? normalized.front() : '\0';
+        if ((digit >= '0' && digit <= '9') ||
+            ((digit == '.' || normalized == "period") && transformNumeric_.find('.') == std::string::npos) ||
+            ((digit == '-' || normalized == "minus") && transformNumeric_.empty())) {
+            if (transformNumeric_.size() < 16U) transformNumeric_.push_back(
+                normalized == "period" ? '.' : normalized == "minus" ? '-' : digit);
+            update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);
+            return;
+        }
     }
     // UI zoom hotkeys work in every panel (accessibility), except while a shortcut is being captured.
     if (!shortcutPanel_.capturing && !(settingsPanel_.open && settingsPanel_.valueEditing)) {
@@ -6360,6 +6738,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     // Escape and focus traversal are intentionally invariant safety/navigation controls.
     // Every productive command below is profile-driven and can be rebound or removed.
     if (normalized == "escape") {
+        if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
         clear_navigation_input();
         close_top_level_menu();
         close_context_menu();
@@ -6368,6 +6747,11 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         return;
     }
     if (normalized == "tab") { focus_next(shift); return; }
+    if (focusRegion_ == EditorFocusRegion::Viewport && alt && !control &&
+        (normalized == "up" || normalized == "down" || normalized == "left" || normalized == "right")) {
+        walk_selection(normalized);
+        return;
+    }
 
     // Fly navigation is a held-command context. It must resolve before ordinary key presses
     // so RMB+W moves the camera while plain W still selects the Move tool.

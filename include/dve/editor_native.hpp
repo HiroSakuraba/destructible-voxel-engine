@@ -70,9 +70,12 @@ enum class EditorToolId : std::uint8_t {
     Beam,
     Anchor,
     Rotate,
+    Scale,
 };
 
 enum class EditorTransformSpace : std::uint8_t { World, Local };
+enum class PlacementTarget : std::uint8_t { NoTarget, Surface, VoxelCorner, VoxelEdge, VoxelFace, BoundsVertex, CollisionBoxVertex };
+enum class PivotMode : std::uint8_t { BoundsCenter, ActiveObject, WorldOrigin, Custom };
 
 enum class PointerButton : std::uint8_t { NoButton, Primary, Auxiliary, Secondary, Extra1 };
 
@@ -127,6 +130,7 @@ struct ContextMenuState {
     bool open{};
     int x{};
     int y{};
+    int width{190};
     std::vector<ContextMenuItem> items;
     std::vector<UiRect> itemRects; // parallel to items; computed once when opened
     std::optional<std::size_t> hoveredItem;
@@ -134,6 +138,8 @@ struct ContextMenuState {
 
 struct MarqueeState {
     bool active{};
+    std::optional<EditorObjectId> clickObject;
+    SelectionOperation operation{SelectionOperation::Replace};
     int startX{};
     int startY{};
     int currentX{};
@@ -399,6 +405,9 @@ public:
     [[nodiscard]] const TextEditState& text_edit() const noexcept { return textEdit_; }
     [[nodiscard]] const ContextMenuState& context_menu() const noexcept { return contextMenu_; }
     [[nodiscard]] const MarqueeState& marquee() const noexcept { return marquee_; }
+    [[nodiscard]] std::optional<Float3> placement_target() const noexcept { return placementPoint_; }
+    [[nodiscard]] std::optional<EditorObjectBounds> scale_preview_bounds() const noexcept { return scalePreviewBounds_; }
+    [[nodiscard]] Float3 current_pivot() const noexcept { return selection_pivot(); }
     [[nodiscard]] const HierarchyDragState& hierarchy_drag() const noexcept { return hierarchyDrag_; }
     [[nodiscard]] BottomPanelTab bottom_tab() const noexcept { return bottomTab_; }
     [[nodiscard]] std::string_view hierarchy_filter() const noexcept { return hierarchyFilter_; }
@@ -650,7 +659,7 @@ private:
     void finish_voxel_stroke() noexcept;
     void apply_voxel_tool(const EditorPickResult& pick);
     void begin_gizmo_drag(int x, int y);
-    void update_gizmo_drag(int x, int y);
+    void update_gizmo_drag(int x, int y, std::uint32_t modifiers);
     void navigate_pointer(float deltaX, float deltaY);
     void finish_gizmo_drag(bool cancel);
     void set_status(std::string text, bool error = false, float seconds = 3.0F);
@@ -677,6 +686,10 @@ private:
     void commit_text_edit();
     void cancel_text_edit() noexcept;
     void open_context_menu(int x, int y, std::optional<EditorObjectId> target, bool fromHierarchy);
+    void open_pick_list(int x, int y, const std::vector<EditorPickResult>& hits);
+    void walk_selection(std::string_view direction);
+    void update_placement_preview(int x, int y);
+    void finish_placement(bool cancel);
     void close_context_menu() noexcept;
     [[nodiscard]] std::optional<EditorObjectId> hierarchy_row_object_at(int x, int y) const;
     void handle_settings_key(std::string_view normalized, bool control, bool shift, bool alt);
@@ -796,6 +809,16 @@ private:
     int lastClickY_{};
     std::chrono::steady_clock::time_point lastClickTime_{};
     bool doubleClickConsumed_{};
+    int lastPickX_{};
+    int lastPickY_{};
+    std::size_t pickCycleIndex_{};
+    std::chrono::steady_clock::time_point lastPickTime_{};
+    PlacementTarget placementMode_{PlacementTarget::NoTarget};
+    std::optional<Float3> placementPoint_;
+    std::vector<ObjectTransformChange> placementChanges_;
+    Float3 placementPivot_{};
+    bool alignToSurfaceNormal_{};
+    float placementOffsetMeters_{};
     bool voxelStrokeActive_{};
     std::int32_t voxelBrushRadius_{};
     std::string activePointerCommand_;
@@ -813,6 +836,14 @@ private:
     int gizmoStartY_{};
     Float3 gizmoPivot_{};
     std::vector<ObjectTransformChange> gizmoChanges_;
+    std::optional<EditorObjectBounds> scalePreviewBounds_;
+    Float3 scaleFactors_{1.0F, 1.0F, 1.0F};
+    PivotMode pivotMode_{PivotMode::BoundsCenter};
+    Float3 customPivot_{};
+    std::string transformNumeric_;
+    int gizmoLastX_{};
+    int gizmoLastY_{};
+    std::uint32_t gizmoLastModifiers_{};
     // In-process clipboard for Edit > Cut/Copy/Paste. Deep-cloned objects, not references, so
     // pasting after the source object was itself deleted (undoably or not) still works, and
     // pasting more than once duplicates the same captured content each time.

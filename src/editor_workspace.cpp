@@ -45,6 +45,8 @@ bool EditorPreferences::validate(std::string* error) const {
         return fail("translate snap must be between 0 and 100 meters");
     if (!std::isfinite(rotateSnapDegrees) || rotateSnapDegrees <= 0.0F || rotateSnapDegrees > 180.0F)
         return fail("rotate snap must be between 0 and 180 degrees");
+    if (!std::isfinite(scaleSnapStep) || scaleSnapStep <= 0.0F || scaleSnapStep > 10.0F)
+        return fail("scale snap must be between 0 and 10");
     return true;
 }
 
@@ -57,6 +59,11 @@ std::string EditorPreferences::serialize() const {
         << "autosaveMinutes=" << autosaveMinutes << "\n"
         << "translateSnapMeters=" << translateSnapMeters << "\n"
         << "rotateSnapDegrees=" << rotateSnapDegrees << "\n"
+        << "scaleSnapStep=" << scaleSnapStep << "\n"
+        << "translateSnapEnabled=" << translateSnapEnabled << "\n"
+        << "rotateSnapEnabled=" << rotateSnapEnabled << "\n"
+        << "scaleSnapEnabled=" << scaleSnapEnabled << "\n"
+        << "absoluteGridSnap=" << absoluteGridSnap << "\n"
         << "highContrast=" << highContrast << "\n"
         << "reducedMotion=" << reducedMotion << "\n"
         << "colorBlindSafeDiagnostics=" << colorBlindSafeDiagnostics << "\n"
@@ -88,6 +95,11 @@ std::optional<EditorPreferences> EditorPreferences::parse(std::string_view text,
         !readFloat("mouseSensitivity", result.mouseSensitivity) || !readUInt("autosaveMinutes", result.autosaveMinutes) ||
         !readFloat("translateSnapMeters", result.translateSnapMeters) ||
         !readFloat("rotateSnapDegrees", result.rotateSnapDegrees) ||
+        !readFloat("scaleSnapStep", result.scaleSnapStep) ||
+        !readBool("translateSnapEnabled", result.translateSnapEnabled) ||
+        !readBool("rotateSnapEnabled", result.rotateSnapEnabled) ||
+        !readBool("scaleSnapEnabled", result.scaleSnapEnabled) ||
+        !readBool("absoluteGridSnap", result.absoluteGridSnap) ||
         !readBool("highContrast", result.highContrast) || !readBool("reducedMotion", result.reducedMotion) ||
         !readBool("colorBlindSafeDiagnostics", result.colorBlindSafeDiagnostics) ||
         !readBool("confirmDestructiveActions", result.confirmDestructiveActions)) return fail("invalid preferences value");
@@ -434,6 +446,19 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"transform.translate","Edit","Move Tool",""}, {"transform.rotate","Edit","Rotate Tool",""},
         {"transform.scale","Edit","Scale Tool",""}, {"transform.universal","Edit","Universal Transform",""},
         {"transform.space","Edit","Toggle Local / World",""},
+        {"transform.pivot_bounds","Edit","Pivot at Selection Center",""},
+        {"transform.pivot_active","Edit","Pivot at Active Object",""},
+        {"transform.pivot_origin","Edit","Pivot at World Origin",""},
+        {"transform.pivot_cursor","Edit","Pivot at Cursor Hit",""},
+        {"transform.place_surface","Edit","Place on Surface",""},
+        {"transform.place_voxel_corner","Edit","Snap to Voxel Corner",""},
+        {"transform.place_voxel_edge","Edit","Snap to Voxel Edge",""},
+        {"transform.place_voxel_face","Edit","Snap to Voxel Face",""},
+        {"transform.place_bounds_vertex","Edit","Snap to Bounds Vertex",""},
+        {"transform.place_collision_vertex","Edit","Snap to Collision Box Vertex",""},
+        {"transform.align_surface","Edit","Align Up to Surface Normal",""},
+        {"transform.surface_offset_more","Edit","Increase Surface Offset",""},
+        {"transform.surface_offset_less","Edit","Decrease Surface Offset",""},
         {"transform.scale_double","Edit","Double Voxel Object Size",""},
         {"transform.scale_half","Edit","Halve Voxel Object Size",""},
         {"edit.duplicate","Edit","Duplicate","Ctrl+D"}, {"edit.rename","Edit","Rename","F2"},
@@ -466,6 +491,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"view.top","View","Top View","Numpad7"}, {"view.front","View","Front View","Numpad1"},
         {"view.side","View","Side View","Numpad3"}, {"view.perspective","View","Perspective View","Numpad0"},
         {"view.increase_snap","View","Increase Move Snap","]"}, {"view.decrease_snap","View","Decrease Move Snap","["},
+        {"view.toggle_move_snap","View","Snap Movement",""},
+        {"view.toggle_angle_snap","View","Snap Rotation",""},
+        {"view.toggle_scale_snap","View","Snap Scale",""},
+        {"view.toggle_absolute_grid","View","Absolute Grid Alignment",""},
+        {"view.increase_scale_snap","View","Increase Scale Snap",""},
+        {"view.decrease_scale_snap","View","Decrease Scale Snap",""},
         {"view.increase_angle_snap","View","Increase Angle Snap","Shift+]"},
         {"view.decrease_angle_snap","View","Decrease Angle Snap","Shift+["},
         {"view.collision","View","Collision Shapes","Ctrl+Alt+C"}, {"view.anchors","View","Anchors","Ctrl+Alt+A"},
@@ -627,7 +658,11 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("render.gabor.settings", "Gabor Volumes", 90);
     for (std::string_view id : {"view.grid","view.collision","view.anchors","view.bounds","view.xray","view.statistics","view.safe_frames"})
         configure(id, "Overlays", 50, true);
+    for (std::string_view id : {"view.toggle_move_snap", "view.toggle_angle_snap",
+                                "view.toggle_scale_snap", "view.toggle_absolute_grid"})
+        configure(id, "Snapping", 30, true);
     configure("view.advanced_menus", "Interface", 90, true);
+    configure("transform.align_surface", "Placement", 20, true);
     configure("view.ui_zoom_in", "Interface", 91);
     configure("view.ui_zoom_out", "Interface", 92);
     configure("view.ui_zoom_reset", "Interface", 93);
@@ -910,6 +945,26 @@ void EditorWorkspace::toggle_selection(EditorObjectId id) noexcept {
     } else {
         selection_.insert(id);
         primarySelection_ = id;
+    }
+}
+
+void EditorWorkspace::apply_selection(const std::set<EditorObjectId>& hits, SelectionOperation operation) noexcept {
+    if (operation == SelectionOperation::Replace) selection_.clear();
+    if (operation == SelectionOperation::Intersect) {
+        std::erase_if(selection_, [&](EditorObjectId id) { return !hits.contains(id); });
+    } else {
+        for (EditorObjectId id : hits) {
+            if (!document_.find_object(id)) continue;
+            if (operation == SelectionOperation::Subtract) selection_.erase(id);
+            else if (operation == SelectionOperation::Toggle) {
+                if (selection_.contains(id)) selection_.erase(id);
+                else selection_.insert(id);
+            } else selection_.insert(id);
+        }
+    }
+    if (!primarySelection_ || !selection_.contains(*primarySelection_)) {
+        primarySelection_ = selection_.empty() ? std::nullopt
+            : std::optional<EditorObjectId>(*selection_.rbegin());
     }
 }
 

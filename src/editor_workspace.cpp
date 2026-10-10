@@ -490,6 +490,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"window.camera_diagnostics","Window","Camera Diagnostics",""},
         {"window.gabor_inspector","Window","Gabor Volume Inspector",""},
         {"view.frame","View","Frame Selection","F"}, {"view.grid","View","Grid","G"},
+        {"view.isolate_selection","View","Isolate Selection",""},
         {"view.top","View","Top View","Numpad7"}, {"view.front","View","Front View","Numpad1"},
         {"view.side","View","Side View","Numpad3"}, {"view.perspective","View","Perspective View","Numpad0"},
         {"view.increase_snap","View","Increase Move Snap","]"}, {"view.decrease_snap","View","Decrease Move Snap","["},
@@ -663,6 +664,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("render.gabor.settings", "Gabor Volumes", 90);
     for (std::string_view id : {"view.grid","view.collision","view.anchors","view.bounds","view.xray","view.statistics","view.safe_frames"})
         configure(id, "Overlays", 50, true);
+    configure("view.isolate_selection", "Visibility", 45, true);
     for (std::string_view id : {"view.toggle_move_snap", "view.toggle_angle_snap",
                                 "view.toggle_scale_snap", "view.toggle_absolute_grid"})
         configure(id, "Snapping", 30, true);

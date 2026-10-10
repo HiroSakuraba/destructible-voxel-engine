@@ -1891,6 +1891,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("camera.keyframe_profile", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
     enabled("camera.paste_profile", cinematicCameraPanel_.can_paste(), "Copy a cinematic profile first.");
     checked("view.grid", viewportSettings_.showGrid);
+    checked("view.isolate_selection", !viewportSettings_.isolatedObjects.empty());
     checked("view.collision", viewportSettings_.showCollision);
     checked("view.anchors", viewportSettings_.showAnchors);
     checked("view.bounds", viewportSettings_.showObjectBounds);
@@ -2735,9 +2736,13 @@ void NativeEditorController::create_new_project_now() {
 }
 
 void NativeEditorController::create_new_scene_now() {
-    workspace_.document() = EditorDocument("Untitled Scene");
+    workspace_.document() = make_new_scene_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
+    if (!workspace_.document().objects().empty()) {
+        workspace_.select_object(workspace_.document().objects().begin()->first);
+        frame_selection();
+    }
     recompute_layout();
 }
 
@@ -3328,7 +3333,8 @@ void NativeEditorController::update_hover(int x, int y) {
         return;
     }
     hoverPick_ = pick_editor_document(workspace_.document(), make_viewport_ray(camera_, layout_.viewport,
-                                                                               static_cast<float>(x), static_cast<float>(y)));
+                                                                               static_cast<float>(x), static_cast<float>(y)),
+                                      10000.0F, &viewportSettings_.isolatedObjects);
 }
 
 bool NativeEditorController::navigation_pointer_active() const noexcept {
@@ -4294,7 +4300,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                     if ((modifiers & 7U) == 0U || (modifiers & 4U) != 0U) {
                         const auto depthHits = pick_editor_document_all(workspace_.document(),
                             make_viewport_ray(camera_, layout_.viewport,
-                                static_cast<float>(marquee_.startX), static_cast<float>(marquee_.startY)));
+                                static_cast<float>(marquee_.startX), static_cast<float>(marquee_.startY)),
+                            10000.0F, &viewportSettings_.isolatedObjects);
                         if ((modifiers & 4U) != 0U && (modifiers & 3U) == 0U && depthHits.size() > 1U) {
                             open_pick_list(x, y, depthHits);
                             marquee_ = {};
@@ -4321,6 +4328,9 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 const bool contain = x >= marquee_.startX;
                 const UiRect rectangle{left, top, right - left + 1, bottom - top + 1};
                 for (const auto& [id, object] : workspace_.document().objects()) {
+                    // Box selection only takes what is on screen: isolated-out objects are skipped
+                    // (object_matches_screen_rect already skips hidden ones).
+                    if (is_isolated_out(id)) continue;
                     if (object_matches_screen_rect(object, camera_, layout_.viewport, rectangle, contain))
                         hits.insert(id);
                 }
@@ -4681,12 +4691,44 @@ void NativeEditorController::apply_transform_preview(const std::vector<ObjectTra
     }
 }
 
+// Orthonormal basis (u, v) spanning the plane perpendicular to an axis: the
+// rotate ring for the axis lies in this plane.
+void gizmo_ring_basis(Float3 axisWorld, Float3& u, Float3& v) noexcept {
+    const auto cross3 = [](Float3 a, Float3 b) noexcept {
+        return Float3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    };
+    const Float3 helper = std::abs(axisWorld.y) < 0.9F ? Float3{0.0F, 1.0F, 0.0F}
+                                                       : Float3{1.0F, 0.0F, 0.0F};
+    u = normalize(cross3(axisWorld, helper));
+    v = cross3(axisWorld, u);
+}
+
+// World angle of a pointer position around a ring: intersect the pointer
+// ray with the ring's plane through the pivot and measure the hit in the
+// ring basis. False when the ray is nearly parallel to the plane or lands
+// on the pivot, where the angle is undefined.
+bool gizmo_pointer_ring_angle(const EditorCamera& camera, UiRect viewport, Float3 pivot,
+                              Float3 axisWorld, Float3 basisU, Float3 basisV, int x, int y,
+                              float& angleOut) noexcept {
+    const ViewportRay ray = make_viewport_ray(camera, viewport, static_cast<float>(x),
+                                              static_cast<float>(y));
+    const float denom = dot(ray.direction, axisWorld);
+    if (std::abs(denom) < 1.0e-4F) return false;
+    const float t = dot(subtract(pivot, ray.origin), axisWorld) / denom;
+    if (!(t > 0.0F)) return false;
+    const Float3 rel = subtract(add(ray.origin, multiply(ray.direction, t)), pivot);
+    if (dot(rel, rel) < 1.0e-8F) return false;
+    angleOut = std::atan2(dot(rel, basisV), dot(rel, basisU));
+    return true;
+}
+
 void NativeEditorController::update_placement_preview(int x, int y) {
     if (placementMode_ == PlacementTarget::NoTarget) return;
     apply_transform_preview(placementChanges_, false);
     placementPoint_.reset();
     const auto hits = pick_editor_document_all(workspace_.document(),
-        make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)));
+        make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
+        10000.0F, &viewportSettings_.isolatedObjects);
     const auto it = std::find_if(hits.begin(), hits.end(), [&](const EditorPickResult& hit) {
         return !workspace_.is_selected(hit.objectId);
     });
@@ -4802,6 +4844,32 @@ std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     return axes;
 }
 
+std::vector<GizmoScreenRing> NativeEditorController::gizmo_rings() const {
+    std::vector<GizmoScreenRing> rings;
+    if (activeTool_ != EditorToolId::Rotate || workspace_.selected_objects().empty()) return rings;
+    const Float3 origin = gizmoDragging_ ? gizmoPivot_ : selection_pivot();
+    const float radius = std::max(0.5F, length(subtract(camera_.position, origin)) * 0.12F);
+    constexpr int kSegments = 40;
+    for (int axis = 1; axis <= 3; ++axis) {
+        const Float3 axisWorld = gizmo_axis_world(axis);
+        Float3 u{};
+        Float3 v{};
+        gizmo_ring_basis(axisWorld, u, v);
+        GizmoScreenRing ring;
+        ring.axis = axis;
+        ring.points.reserve(kSegments);
+        for (int i = 0; i < kSegments; ++i) {
+            const float theta = static_cast<float>(i) * 6.283185307179586F /
+                                static_cast<float>(kSegments);
+            const Float3 point = add(origin, add(multiply(u, std::cos(theta) * radius),
+                                                 multiply(v, std::sin(theta) * radius)));
+            ring.points.push_back(project_world_to_screen(camera_, layout_.viewport, point));
+        }
+        rings.push_back(std::move(ring));
+    }
+    return rings;
+}
+
 int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
     int result = 0;
     float best = 10.0F * kLogicalLayoutScale;
@@ -4810,6 +4878,19 @@ int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
         const float distance = point_line_distance(static_cast<float>(x), static_cast<float>(y),
                                                    axis.start.x, axis.start.y, axis.end.x, axis.end.y);
         if (distance < best) { best = distance; result = axis.axis; }
+    }
+    if (activeTool_ == EditorToolId::Rotate) {
+        for (const GizmoScreenRing& ring : gizmo_rings()) {
+            const std::vector<ScreenPoint>& points = ring.points;
+            for (std::size_t i = 0; i < points.size(); ++i) {
+                const ScreenPoint& a = points[i];
+                const ScreenPoint& b = points[(i + 1U) % points.size()];
+                if (!a.visible || !b.visible) continue;
+                const float distance = point_line_distance(
+                    static_cast<float>(x), static_cast<float>(y), a.x, a.y, b.x, b.y);
+                if (distance < best) { best = distance; result = ring.axis; }
+            }
+        }
     }
     return result;
 }
@@ -4839,6 +4920,18 @@ void NativeEditorController::begin_gizmo_drag(int x, int y) {
     transformNumeric_.clear();
     scalePreviewBounds_.reset();
     scaleFactors_ = {1.0F, 1.0F, 1.0F};
+    gizmoDragPlane_ = false;
+    gizmoDragWorldAccum_ = 0.0F;
+    if (activeTool_ == EditorToolId::Rotate) {
+        const Float3 axisWorld = gizmo_axis_world(gizmoAxis_);
+        gizmo_ring_basis(axisWorld, gizmoDragBasisU_, gizmoDragBasisV_);
+        float angle = 0.0F;
+        if (gizmo_pointer_ring_angle(camera_, layout_.viewport, gizmoPivot_, axisWorld,
+                                     gizmoDragBasisU_, gizmoDragBasisV_, x, y, angle)) {
+            gizmoDragWorldAngle_ = angle;
+            gizmoDragPlane_ = true;
+        }
+    }
 }
 
 void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modifiers) {
@@ -4846,6 +4939,17 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
     gizmoLastX_ = x;
     gizmoLastY_ = y;
     gizmoLastModifiers_ = modifiers;
+    if (activeTool_ == EditorToolId::Rotate && gizmoDragPlane_) {
+        float angle = 0.0F;
+        if (gizmo_pointer_ring_angle(camera_, layout_.viewport, gizmoPivot_,
+                                     gizmo_axis_world(gizmoAxis_), gizmoDragBasisU_,
+                                     gizmoDragBasisV_, x, y, angle)) {
+            const float delta = std::atan2(std::sin(angle - gizmoDragWorldAngle_),
+                                           std::cos(angle - gizmoDragWorldAngle_));
+            gizmoDragWorldAccum_ += delta;
+            gizmoDragWorldAngle_ = angle;
+        }
+    }
     const auto axes = gizmo_axes();
     if (gizmoAxis_ < 1 || gizmoAxis_ > static_cast<int>(axes.size())) return;
     const GizmoScreenAxis& screenAxis = axes[static_cast<std::size_t>(gizmoAxis_ - 1)];
@@ -4889,7 +4993,9 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
         if (activeTool_ == EditorToolId::Rotate) {
             constexpr float degreesToRadians = 0.017453292519943295F;
             const float snapRadians = preferences.rotateSnapDegrees * degreesToRadians;
-            const float rawAngle = numeric ? *numeric * degreesToRadians : projectedDelta * 0.012F;
+            const float rawAngle = numeric ? *numeric * degreesToRadians
+                                 : gizmoDragPlane_ ? gizmoDragWorldAccum_
+                                                   : projectedDelta * 0.012F;
             const float angle = (!numeric && preferences.rotateSnapEnabled != temporaryOverride)
                 ? std::round(rawAngle / snapRadians) * snapRadians : rawAngle;
             const Quaternion delta = quaternion_from_axis_angle(worldAxis, angle);
@@ -5103,6 +5209,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_status("Next camera position");
         return true;
     }
+    if (actionId == "view.isolate_selection") return toggle_isolation();
     if (actionId == "view.frame_all") {
         const auto selection = workspace_.selected_objects();
         const auto active = workspace_.selected_object();
@@ -6456,7 +6563,7 @@ camera_menu_dispatch_complete:
         if (actionId == "view.increase_angle_snap") nearest = std::min(nearest + 1, kSteps.size() - 1);
         else nearest = nearest == 0 ? 0 : nearest - 1;
         snap = kSteps[nearest];
-        set_status("Angle snap: " + std::to_string(snap).substr(0, 5) + " deg");
+        set_status("Angle snap: " + std::to_string(snap).substr(0, 5) + "\u00B0");
         return true;
     }
     if (actionId == "help.about") {
@@ -6952,7 +7059,8 @@ void NativeEditorController::frame_selection() noexcept {
     EditorObjectBounds combined = selection_bounds();
     if (!combined.valid) {
         for (const auto& [id, object] : workspace_.document().objects()) {
-            (void)id;
+            // Frame All frames what is shown: visible objects, and only the isolated ones.
+            if (!object.flags.visible || is_isolated_out(id)) continue;
             const EditorObjectBounds bounds = object_world_bounds(object);
             if (!bounds.valid) continue;
             if (!combined.valid) combined = bounds;
@@ -7208,13 +7316,53 @@ const std::vector<EditorVoxelDrawItem>& NativeEditorController::camera_preview_d
 }
 
 std::vector<EditorText3DDrawItem> NativeEditorController::text3d_draw_items() const {
-    return build_text3d_draw_list(workspace_.document(), camera_, layout_.viewport,
-                                  workspace_.selected_objects());
+    auto items = build_text3d_draw_list(workspace_.document(), camera_, layout_.viewport,
+                                        workspace_.selected_objects());
+    const auto& isolated = viewportSettings_.isolatedObjects;
+    if (!isolated.empty())
+        std::erase_if(items, [&](const EditorText3DDrawItem& item) { return !isolated.contains(item.objectId); });
+    return items;
 }
 
 std::vector<EditorGaborVolumeDrawItem> NativeEditorController::gabor_volume_draw_items() const {
-    return build_gabor_volume_draw_list(workspace_.document(), camera_, layout_.viewport,
-                                        workspace_.selected_objects());
+    auto items = build_gabor_volume_draw_list(workspace_.document(), camera_, layout_.viewport,
+                                              workspace_.selected_objects());
+    const auto& isolated = viewportSettings_.isolatedObjects;
+    if (!isolated.empty())
+        std::erase_if(items, [&](const EditorGaborVolumeDrawItem& item) { return !isolated.contains(item.objectId); });
+    return items;
+}
+
+bool NativeEditorController::is_isolated_out(EditorObjectId id) const noexcept {
+    const auto& isolated = viewportSettings_.isolatedObjects;
+    return !isolated.empty() && !isolated.contains(id);
+}
+
+bool NativeEditorController::toggle_isolation() {
+    auto& isolated = viewportSettings_.isolatedObjects;
+    if (!isolated.empty()) {
+        isolated.clear();
+        set_status("Isolation off: all visible objects shown");
+        refresh_menu_state();
+        return true;
+    }
+    if (workspace_.selected_objects().empty()) {
+        set_status("Select objects to isolate first", true);
+        return false;
+    }
+    // The selection and everything parented under it (an isolated group keeps its children).
+    std::set<EditorObjectId> result(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    for (const auto& [id, object] : workspace_.document().objects()) {
+        for (auto parent = object.parent; parent;) {
+            if (result.contains(*parent)) { result.insert(id); break; }
+            const EditorObject* ancestor = workspace_.document().find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+    }
+    isolated = std::move(result);
+    set_status("Isolated " + std::to_string(isolated.size()) + " object(s); View > Isolate Selection restores the rest");
+    refresh_menu_state();
+    return true;
 }
 
 std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
@@ -7228,32 +7376,30 @@ std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
     return result;
 }
 
+// The Blender-style starter solid: a 1 m cube of 0.1 m voxels resting on the
+// Y=0 grid plane, centered on its local origin in X/Z, in Standard Surface.
+void add_starter_cube(EditorDocument& document, Float3 position) {
+    EditorObject cube(document.allocate_object_id(), "Starter Cube");
+    cube.flags.structural = true;
+    cube.flags.collisionEnabled = true;
+    cube.transform.position = position;
+    for (int y = 0; y < 10; ++y)
+        for (int z = -5; z < 5; ++z)
+            for (int x = -5; x < 5; ++x)
+                cube.voxels->set_voxel({x, y, z}, kDefaultSurfaceMaterial);
+    document.add_object(std::move(cube));
+}
+
+EditorDocument make_new_scene_document() {
+    EditorDocument document("Untitled Scene");
+    add_starter_cube(document, {0.0F, 0.0F, 0.0F});
+    document.mark_clean();
+    return document;
+}
+
 EditorDocument make_new_project_document() {
     EditorDocument document("Untitled Project");
-    EditorObject oval(1, "Starter Oval");
-    oval.voxelSizeMeters = 0.25F;
-    oval.flags.structural = true;
-    oval.flags.collisionEnabled = true;
-
-    // A compact ellipsoid resting on the Y=0 grid plane. Voxel-center sampling makes the
-    // silhouette symmetric despite even diameters and avoids a flat, box-derived boundary.
-    constexpr int radiusX = 8;
-    constexpr int radiusY = 5;
-    constexpr int radiusZ = 6;
-    for (int y = 0; y < radiusY * 2; ++y) {
-        const float normalizedY = (static_cast<float>(y) + 0.5F - static_cast<float>(radiusY)) /
-                                  static_cast<float>(radiusY);
-        for (int z = -radiusZ; z < radiusZ; ++z) {
-            const float normalizedZ = (static_cast<float>(z) + 0.5F) / static_cast<float>(radiusZ);
-            for (int x = -radiusX; x < radiusX; ++x) {
-                const float normalizedX = (static_cast<float>(x) + 0.5F) / static_cast<float>(radiusX);
-                if (normalizedX * normalizedX + normalizedY * normalizedY +
-                    normalizedZ * normalizedZ <= 1.0F)
-                    oval.voxels->set_voxel({x, y, z}, kDefaultSurfaceMaterial);
-            }
-        }
-    }
-    document.add_object(std::move(oval));
+    add_starter_cube(document, {0.0F, 0.0F, 0.0F});
     document.mark_clean();
     return document;
 }

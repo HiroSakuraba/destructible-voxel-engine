@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
+#include <map>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -18,6 +19,15 @@
 namespace dve::editor {
 EditorColor rgb(unsigned r, unsigned g, unsigned b) noexcept {
     return ((r & 255U) << 16U) | ((g & 255U) << 8U) | (b & 255U);
+}
+
+// Scales a packed color's brightness (gizmo shading: dimmed stubs, lit highlights).
+EditorColor shade(EditorColor color, float factor) noexcept {
+    const auto channel = [color, factor](unsigned shift) {
+        const float scaled = static_cast<float>((color >> shift) & 255U) * factor;
+        return static_cast<unsigned>(std::min(255.0F, std::max(0.0F, scaled)));
+    };
+    return rgb(channel(16U), channel(8U), channel(0U));
 }
 
 unsigned byte(float value) noexcept {
@@ -3202,6 +3212,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             painter.fill({layout.hierarchy.x + layout.hierarchy.width - 5, trackTop, 3, track}, panel2);
             painter.fill({layout.hierarchy.x + layout.hierarchy.width - 5, thumbY, 3, thumb}, muted);
         }
+        std::map<EditorObjectId, std::size_t> childCounts;  // one pass, not one per row
+        for (const auto& [childId, child] : controller.workspace().document().objects()) {
+            (void)childId;
+            if (child.parent) ++childCounts[*child.parent];
+        }
         for (std::size_t index = 0; index < order.size() && index < layout.hierarchyRows.size(); ++index) {
             const UiRect row = layout.hierarchyRows[index];
             if (row.width <= 0) continue;  // scrolled out of the panel
@@ -3215,10 +3230,25 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             std::string prefix = object->flags.visible ? "[x] " : "[ ] ";
             if (object->prefabLink) prefix += "P ";
             else if (object->attachment) prefix += "> ";
+            // Parent-group nesting is shown by indentation, and a parent lists its child count,
+            // so a group reads differently from a named membership group (inspector "Named groups").
+            int depth = 0;
+            for (auto parent = object->parent; parent && depth < 8;) {
+                ++depth;
+                const EditorObject* ancestor = controller.workspace().document().find_object(*parent);
+                parent = ancestor ? ancestor->parent : std::nullopt;
+            }
+            const auto childEntry = childCounts.find(object->id);
+            const std::size_t children = childEntry == childCounts.end() ? 0U : childEntry->second;
             const bool renaming = controller.text_edit().kind == TextEditKind::ObjectName &&
                                    controller.text_edit().objectId == object->id;
-            const std::string label = renaming ? controller.text_edit().buffer + "_" : (prefix + object->name);
-            painter.text(row.x + 8, row.y + row.height - 7, label, renaming ? accent : (object->flags.locked ? muted : text));
+            const std::string label = renaming ? controller.text_edit().buffer + "_"
+                : prefix + object->name + (children != 0U ? "  (" + std::to_string(children) + ")" : std::string());
+            const int indent = depth * 12;
+            const EditorColor rowColor = renaming ? accent
+                : (object->flags.locked || controller.is_isolated_out(object->id)) ? muted : text;
+            painter.text(row.x + 8 + indent, row.y + row.height - 7,
+                         elide_text_to_width(painter, label, std::max(0, row.width - 12 - indent)), rowColor);
         }
         if (controller.hierarchy_drag().active && !controller.hierarchy_drag().hoverTarget) {
             painter.text(layout.hierarchy.x + 10, layout.hierarchy.y + layout.hierarchy.height - 10,
@@ -3468,11 +3498,113 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                  elide_text_to_width(viewportPainter, line, panel.width - 20), color);
         }
     }
-    for (const GizmoScreenAxis& axis : controller.gizmo_axes()) {
-        if (!axis.start.visible || !axis.end.visible) continue;
-        const EditorColor axisColor = axis.axis == 1 ? rgb(244,79,83) : axis.axis == 2 ? rgb(84,220,121) : rgb(72,139,255);
-        viewportPainter.line(static_cast<int>(axis.start.x),static_cast<int>(axis.start.y),
-                             static_cast<int>(axis.end.x),static_cast<int>(axis.end.y),axisColor,4);
+    // Transform gizmo. Move draws shafts with solid arrowheads; Rotate draws
+    // a ring around each axis with a slim radius stub; Scale draws shafts
+    // ending in square handles. The hovered or dragged axis is drawn thicker
+    // and brighter so the grab target reads clearly.
+    {
+        const std::vector<GizmoScreenAxis> gizmoAxes = controller.gizmo_axes();
+        const std::vector<GizmoScreenRing> gizmoRings = controller.gizmo_rings();
+        const bool rotateMode = !gizmoRings.empty();
+        const bool scaleMode = controller.active_tool() == EditorToolId::Scale;
+        const int activeAxis = controller.gizmo_dragging()
+                                   ? controller.gizmo_axis()
+                                   : controller.hit_test_gizmo_axis(controller.hover_x(),
+                                                                    controller.hover_y());
+        const auto axis_color = [](int axis) {
+            return axis == 1 ? rgb(244, 79, 83) : axis == 2 ? rgb(84, 220, 121) : rgb(72, 139, 255);
+        };
+        const EditorColor underlay = rgb(10, 11, 14);
+        const auto fill_triangle = [&](ScreenPoint a, ScreenPoint b, ScreenPoint c, EditorColor color) {
+            const ScreenPoint pts[3] = {a, b, c};
+            const int minY = static_cast<int>(std::floor(std::min({a.y, b.y, c.y})));
+            const int maxY = static_cast<int>(std::ceil(std::max({a.y, b.y, c.y})));
+            for (int y = minY; y <= maxY; ++y) {
+                const float yc = static_cast<float>(y) + 0.5F;
+                float xs[3];
+                int count = 0;
+                for (int e = 0; e < 3; ++e) {
+                    const ScreenPoint p = pts[e];
+                    const ScreenPoint q = pts[(e + 1) % 3];
+                    if ((p.y <= yc && q.y > yc) || (q.y <= yc && p.y > yc))
+                        xs[count++] = p.x + (yc - p.y) / (q.y - p.y) * (q.x - p.x);
+                }
+                if (count >= 2) {
+                    const int x0 = static_cast<int>(std::floor(std::min(xs[0], xs[1])));
+                    const int x1 = static_cast<int>(std::ceil(std::max(xs[0], xs[1])));
+                    if (x1 > x0) viewportPainter.fill({x0, y, x1 - x0, 1}, color);
+                }
+            }
+        };
+        if (rotateMode) {
+            for (const GizmoScreenRing& ring : gizmoRings) {
+                const bool lit = ring.axis == activeAxis;
+                const EditorColor color = axis_color(ring.axis);
+                const std::vector<ScreenPoint>& points = ring.points;
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const ScreenPoint& a = points[i];
+                    const ScreenPoint& b = points[(i + 1U) % points.size()];
+                    if (!a.visible || !b.visible) continue;
+                    viewportPainter.line(static_cast<int>(a.x), static_cast<int>(a.y),
+                                         static_cast<int>(b.x), static_cast<int>(b.y),
+                                         underlay, lit ? 7 : 5);
+                    viewportPainter.line(static_cast<int>(a.x), static_cast<int>(a.y),
+                                         static_cast<int>(b.x), static_cast<int>(b.y),
+                                         lit ? shade(color, 1.35F) : color, lit ? 5 : 3);
+                }
+            }
+        }
+        for (const GizmoScreenAxis& axis : gizmoAxes) {
+            if (!axis.start.visible || !axis.end.visible) continue;
+            const EditorColor color = axis_color(axis.axis);
+            const bool lit = axis.axis == activeAxis;
+            const int sx = static_cast<int>(axis.start.x);
+            const int sy = static_cast<int>(axis.start.y);
+            const int ex = static_cast<int>(axis.end.x);
+            const int ey = static_cast<int>(axis.end.y);
+            if (rotateMode) {
+                viewportPainter.line(sx, sy, ex, ey, shade(color, 0.55F), 2);
+                continue;
+            }
+            const float dx = axis.end.x - axis.start.x;
+            const float dy = axis.end.y - axis.start.y;
+            const float length = std::max(1.0F, std::hypot(dx, dy));
+            const float ux = dx / length;
+            const float uy = dy / length;
+            if (scaleMode) {
+                const int half = lit ? 6 : 5;
+                const int hx = static_cast<int>(axis.end.x - ux * static_cast<float>(half));
+                const int hy = static_cast<int>(axis.end.y - uy * static_cast<float>(half));
+                viewportPainter.line(sx, sy, hx, hy, underlay, lit ? 8 : 6);
+                viewportPainter.line(sx, sy, hx, hy, lit ? shade(color, 1.35F) : color, lit ? 6 : 4);
+                const UiRect handle{hx - half, hy - half, half * 2 + 1, half * 2 + 1};
+                viewportPainter.fill(handle, lit ? shade(color, 1.35F) : color);
+                viewportPainter.outline(handle, underlay);
+                continue;
+            }
+            const float headLength = std::min(22.0F, std::max(11.0F, length * 0.22F));
+            const float headHalf = headLength * 0.45F;
+            const ScreenPoint baseCenter{axis.end.x - ux * headLength, axis.end.y - uy * headLength, 0.0F, true};
+            const ScreenPoint baseA{baseCenter.x - uy * headHalf, baseCenter.y + ux * headHalf, 0.0F, true};
+            const ScreenPoint baseB{baseCenter.x + uy * headHalf, baseCenter.y - ux * headHalf, 0.0F, true};
+            viewportPainter.line(sx, sy, static_cast<int>(baseCenter.x), static_cast<int>(baseCenter.y),
+                                 underlay, lit ? 8 : 6);
+            viewportPainter.line(sx, sy, static_cast<int>(baseCenter.x), static_cast<int>(baseCenter.y),
+                                 lit ? shade(color, 1.35F) : color, lit ? 6 : 4);
+            fill_triangle(axis.end, baseA, baseB, underlay);
+            const ScreenPoint tipIn{axis.end.x - ux * 2.0F, axis.end.y - uy * 2.0F, 0.0F, true};
+            const ScreenPoint baseAi{baseCenter.x - uy * (headHalf - 2.0F),
+                                     baseCenter.y + ux * (headHalf - 2.0F), 0.0F, true};
+            const ScreenPoint baseBi{baseCenter.x + uy * (headHalf - 2.0F),
+                                     baseCenter.y - ux * (headHalf - 2.0F), 0.0F, true};
+            fill_triangle(tipIn, baseAi, baseBi, lit ? shade(color, 1.35F) : color);
+        }
+        if (!gizmoAxes.empty() && gizmoAxes.front().start.visible) {
+            const int px = static_cast<int>(gizmoAxes.front().start.x);
+            const int py = static_cast<int>(gizmoAxes.front().start.y);
+            viewportPainter.fill({px - 4, py - 4, 9, 9}, rgb(240, 242, 245));
+            viewportPainter.outline({px - 4, py - 4, 9, 9}, underlay);
+        }
     }
 
     if (controller.sprite_level_playing() && controller.sprite_level() &&
@@ -3832,6 +3964,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             hint = candidate;
         }
         if (!hint.empty()) viewportPainter.text(hintX, viewport.y + 20, hint, muted);
+        if (!controller.isolated_objects().empty()) {
+            // Always say when the view is filtered, and how to undo it.
+            const int bannerRight = layout.viewportHelpButton.width > 0 ? layout.viewportHelpButton.x - 10
+                                                                         : viewport.x + viewport.width - 12;
+            const std::string banner = elide_text_to_width(
+                painter, "ISOLATED: " + std::to_string(controller.isolated_objects().size()) +
+                             " object(s)  View > Isolate Selection shows all",
+                std::max(0, bannerRight - (viewport.x + 12)));
+            viewportPainter.text(viewport.x + 12, viewport.y + viewport.height - 14, banner, rgb(255,191,74));
+        }
         const UiRect help = layout.viewportHelpButton;
         if (help.width > 0) {
             const bool hovered = help.contains(controller.hover_x(), controller.hover_y());
@@ -4026,9 +4168,14 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                             ? std::string("default") : object->attachment->socket;
                         inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
                                      "Attached to " + std::to_string(*object->parent) + "  socket " + socket, muted);
+                    } else if (object->parent) {
+                        // Parent group (from Group Selected), distinct from named groups below.
+                        const EditorObject* group = controller.workspace().document().find_object(*object->parent);
+                        inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
+                                     "Parent group  " + (group ? group->name : std::to_string(*object->parent)), muted);
                     } else {
                         inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 267,
-                                     "Attachment  none", muted);
+                                     "Parent group  none", muted);
                     }
                     if (object->prefabLink) {
                         inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 289,
@@ -4040,7 +4187,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     }
                     inspectorPainter.text(layout.inspector.x + 12, inspectorTop + 311,
                                  "Layer " + std::to_string(object->layer) + "  Tags " +
-                                 std::to_string(object->tags.size()) + "  Groups " +
+                                 std::to_string(object->tags.size()) + "  Named groups " +
                                  std::to_string(object->groups.size()), muted);
                     const auto componentSections = controller.primary_component_sections();
                     for (std::size_t componentIndex = 0;
@@ -4237,7 +4384,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                               std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
                                   (snapPreferences.absoluteGridSnap ? " grid" : "")) +
         "  Rotate " + snapValue(snapPreferences.rotateSnapEnabled,
-                                std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "deg") +
+                                std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "\u00B0") +
         "  Scale " + snapValue(snapPreferences.scaleSnapEnabled,
                                std::to_string(snapPreferences.scaleSnapStep).substr(0,4) + "x");
     // The snap summary keeps its place on the right; the status message is elided before it.

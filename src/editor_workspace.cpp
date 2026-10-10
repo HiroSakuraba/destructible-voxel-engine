@@ -581,6 +581,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.paint","Voxel","Paint Material","5"}, {"voxel.box","Voxel","Box Tool","6"},
         {"voxel.beam","Voxel","Beam Tool","7"}, {"voxel.anchor","Voxel","Anchor Brush","8"},
         {"voxel.settings","Voxel","Voxel Settings",""},
+        {"voxel.slice","Voxel","Slice Voxel Object",""},
+        {"voxel.slice_commit","Voxel","Commit Slice",""},
+        {"voxel.slice_cancel","Voxel","Cancel Slice",""},
         {"voxel.boolean_union","Voxel","Boolean Union",""},
         {"voxel.boolean_difference","Voxel","Boolean Difference",""},
         {"voxel.boolean_intersection","Voxel","Boolean Intersection",""},
@@ -695,6 +698,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("camera.load_bookmark_2", "Bookmarks", 63);
     configure("camera.settings", "Settings", 90);
     configure("voxel.settings", "Settings", 90);
+    configure("voxel.slice", "Voxel Slice", 66);
+    configure("voxel.slice_commit", "Voxel Slice", 67);
+    configure("voxel.slice_cancel", "Voxel Slice", 68);
     configure("voxel.boolean_union", "Voxel Boolean", 60);
     configure("voxel.boolean_difference", "Voxel Boolean", 61);
     configure("voxel.boolean_intersection", "Voxel Boolean", 62);
@@ -793,6 +799,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
              {"scatter", "foliage", "random", "distribute", "populate", "rocks", "trees", "organic", "place"});
     describe("scatter.commit", "Add the previewed scatter copies under one group as one undoable edit.", {"scatter", "apply"});
     describe("scatter.cancel", "Close the scatter preview without changing the scene.", {"scatter"});
+    describe("voxel.slice", "Preview a cell-centre plane cut; keep front, back, or both as separate objects.", {"slice", "cut", "plane"});
+    describe("voxel.slice_commit", "Apply the open Slice preview in one undo step.", {"slice", "apply"});
+    describe("voxel.slice_cancel", "Close Slice without changing the scene.", {"slice", "escape"});
     describe("voxel.boolean_union",
              "Preview adding the other selected voxel objects (B) to the active voxel object (A); Enter commits as one undo step.",
              {"csg", "boolean", "merge", "combine", "add", "join", "weld"});

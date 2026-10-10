@@ -73,7 +73,7 @@ enum class EditorToolId : std::uint8_t {
 };
 
 enum class EditorTransformSpace : std::uint8_t { World, Local };
-enum class PlacementTarget : std::uint8_t { None, Surface, VoxelCorner, VoxelEdge, VoxelFace, BoundsVertex, CollisionBoxVertex };
+enum class PlacementTarget : std::uint8_t { NoTarget, Surface, VoxelCorner, VoxelEdge, VoxelFace, BoundsVertex, CollisionBoxVertex };
 enum class PivotMode : std::uint8_t { BoundsCenter, ActiveObject, WorldOrigin, Custom };
 
 enum class PointerButton : std::uint8_t { NoButton, Primary, Auxiliary, Secondary, Extra1 };
@@ -779,7 +779,7 @@ private:
     int lastPickY_{};
     std::size_t pickCycleIndex_{};
     std::chrono::steady_clock::time_point lastPickTime_{};
-    PlacementTarget placementMode_{PlacementTarget::None};
+    PlacementTarget placementMode_{PlacementTarget::NoTarget};
     std::optional<Float3> placementPoint_;
     std::vector<ObjectTransformChange> placementChanges_;
     Float3 placementPivot_{};

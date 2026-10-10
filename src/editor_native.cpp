@@ -3387,7 +3387,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     }
     const int deltaX = x - lastPointerX_;
     const int deltaY = y - lastPointerY_;
-    if (placementMode_ != PlacementTarget::None && layout_.viewport.contains(x, y)) {
+    if (placementMode_ != PlacementTarget::NoTarget && layout_.viewport.contains(x, y)) {
         update_placement_preview(x, y);
     } else if (hierarchyDrag_.sourceId != 0) {
         // Promote a pending hierarchy-row press into an active drag once the pointer has
@@ -4089,7 +4089,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     }
     dragButton_ = button;
     if (button == PointerButton::Primary) {
-        if (placementMode_ != PlacementTarget::None) {
+        if (placementMode_ != PlacementTarget::NoTarget) {
             update_placement_preview(x, y);
             if (placementPoint_) finish_placement(false);
             return;
@@ -4502,7 +4502,7 @@ void NativeEditorController::apply_transform_preview(const std::vector<ObjectTra
 }
 
 void NativeEditorController::update_placement_preview(int x, int y) {
-    if (placementMode_ == PlacementTarget::None) return;
+    if (placementMode_ == PlacementTarget::NoTarget) return;
     apply_transform_preview(placementChanges_, false);
     placementPoint_.reset();
     const auto hits = pick_editor_document_all(workspace_.document(),
@@ -4594,7 +4594,7 @@ void NativeEditorController::update_placement_preview(int x, int y) {
 }
 
 void NativeEditorController::finish_placement(bool cancel) {
-    if (placementMode_ == PlacementTarget::None) return;
+    if (placementMode_ == PlacementTarget::NoTarget) return;
     apply_transform_preview(placementChanges_, false);
     if (!cancel && placementPoint_) {
         const CommandResult result = workspace_.commands().execute(workspace_.document(),
@@ -4603,7 +4603,7 @@ void NativeEditorController::finish_placement(bool cancel) {
     } else set_status("Placement canceled");
     placementChanges_.clear();
     placementPoint_.reset();
-    placementMode_ = PlacementTarget::None;
+    placementMode_ = PlacementTarget::NoTarget;
 }
 
 std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
@@ -5530,7 +5530,7 @@ camera_menu_dispatch_complete:
         actionId == "transform.place_voxel_edge" || actionId == "transform.place_voxel_face" ||
         actionId == "transform.place_bounds_vertex" || actionId == "transform.place_collision_vertex") {
         if (workspace_.selected_objects().empty()) { set_status("Select an object to place", true); return false; }
-        if (placementMode_ != PlacementTarget::None) finish_placement(true);
+        if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
         for (EditorObjectId id : workspace_.selected_objects()) {
             const EditorObject* object = workspace_.document().find_object(id);
             if (!object || object->flags.locked) {
@@ -6699,7 +6699,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     // Escape and focus traversal are intentionally invariant safety/navigation controls.
     // Every productive command below is profile-driven and can be rebound or removed.
     if (normalized == "escape") {
-        if (placementMode_ != PlacementTarget::None) finish_placement(true);
+        if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
         clear_navigation_input();
         close_top_level_menu();
         close_context_menu();

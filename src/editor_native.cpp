@@ -2202,10 +2202,29 @@ void NativeEditorController::recompute_layout() {
 
     layout_.toolbarButtons.clear();
     const int buttonSize = std::max(28, toolbarHeight - 8);
-    int x = 8;
-    for (int index = 0; index < 9; ++index) {
-        layout_.toolbarButtons.push_back({x, menuHeight + 4, buttonSize + 18, buttonSize});
-        x += buttonSize + 24;
+    {
+        // Share the toolbar between the nine tools, leaving room for the mode label on the
+        // right. Buttons were a fixed 50 px, so "Select", "Remove" and "Anchor" ran past them.
+        constexpr int kGap = 4;
+        constexpr int kLeft = 8;
+        const int modeReserve = static_cast<int>(96.0F * scale);
+        const int tools = static_cast<int>(kEditorToolCount);
+        const int available = width_ - kLeft - modeReserve - kGap * (tools - 1);
+        const int buttonWidth = std::clamp(available / tools, 30, 84);
+        int x = kLeft;
+        for (int index = 0; index < tools; ++index) {
+            layout_.toolbarButtons.push_back({x, menuHeight + 4, buttonWidth, buttonSize});
+            x += buttonWidth + kGap;
+        }
+    }
+    {
+        const int helpWidth = static_cast<int>(92.0F * scale);
+        const int helpHeight = std::max(18, static_cast<int>(20.0F * scale));
+        layout_.viewportHelpButton = {layout_.viewport.x + layout_.viewport.width - helpWidth - 8,
+                                      layout_.viewport.y + layout_.viewport.height - helpHeight - 8,
+                                      helpWidth, helpHeight};
+        if (layout_.viewport.width < helpWidth + 16 || layout_.viewport.height < helpHeight + 16)
+            layout_.viewportHelpButton = {};
     }
 
     const int rowHeight = std::max(20, static_cast<int>(24.0F * scale));
@@ -2277,12 +2296,20 @@ void NativeEditorController::recompute_layout() {
             layout_.inspectorToggles.push_back(toggle);
         }
         layout_.inspectorContentClipY = blockTop - 2;  // == contentBottom - 2 when it fits
-        for (std::size_t field = 2; field < layout_.inspectorFields.size(); ++field) {
+        // Details that do not fit above the toggles scroll instead of being cut off.
+        layout_.inspectorScrollMax = fits ? 0 : std::max(0, contentBottom - layout_.inspectorContentClipY);
+        inspectorScroll_ = std::clamp(inspectorScroll_, 0, layout_.inspectorScrollMax);
+        layout_.inspectorScroll = inspectorScroll_;
+        const int detailTop = layout_.inspector.y + kInspectorHeaderHeight;
+        for (std::size_t field = 0; field < layout_.inspectorFields.size(); ++field) {
             UiRect& rect = layout_.inspectorFields[field];
-            if (rect.y + rect.height > layout_.inspectorContentClipY) rect = {};  // hidden -> not clickable
+            rect.y -= inspectorScroll_;
+            // Scrolled out of view -> not clickable.
+            if (rect.y < detailTop || rect.y + rect.height > layout_.inspectorContentClipY) rect = {};
         }
     } else {
         layout_.inspectorContentClipY = layout_.inspector.y + layout_.inspector.height;
+        layout_.inspectorScroll = layout_.inspectorScrollMax = 0;
     }
 
     layout_.bottomTabs.clear();
@@ -3896,6 +3923,10 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         return;
     }
     if (button == PointerButton::Primary) {
+        if (layout_.viewportHelpButton.contains(x, y)) {
+            open_shortcut_editor();
+            return;
+        }
         for (std::size_t index = 0; index < layout_.toolbarButtons.size(); ++index) {
             if (layout_.toolbarButtons[index].contains(x, y)) {
                 set_active_tool(static_cast<EditorToolId>(index));
@@ -4364,6 +4395,12 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
         }
         return;
     }
+    if (!openMenu_ && layout_.inspectorScrollMax > 0 && layout_.inspector.contains(x, y) && steps != 0.0F) {
+        inspectorScroll_ = std::clamp(inspectorScroll_ - static_cast<int>(std::lround(steps * 22.0F)), 0,
+                                      layout_.inspectorScrollMax);
+        recompute_layout();
+        return;
+    }
     if (openMenu_) {
         const auto actions = menu_actions(*openMenu_);
         const NativeMenuPopupLayout popup = menu_popup_layout();
@@ -4395,6 +4432,95 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
     const ShortcutGesture gesture = wheel_shortcut(steps > 0.0F, (modifiers & 2U) != 0U,
                                                     (modifiers & 1U) != 0U, (modifiers & 4U) != 0U);
     if (dispatch_shortcut_gesture(gesture)) return;
+}
+
+const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
+    static constexpr std::array<EditorToolInfo, static_cast<std::size_t>(EditorToolId::Scale) + 1U> kTools{{
+        {"Select", "Sel", "transform.select", "Click an object to select it; drag empty space to box-select.",
+         "Objects"},
+        {"Move", "Mov", "transform.translate", "Drag a gizmo axis to move the selection.", "Selected objects"},
+        {"Add", "Add", "voxel.brush", "Click a voxel face to add voxels of the active material.",
+         "Voxel objects"},
+        {"Remove", "Rem", "voxel.erase", "Click voxels to remove them.", "Voxel objects"},
+        {"Paint", "Pnt", "voxel.paint_material", "Click voxels to repaint them with the active material.",
+         "Voxel objects"},
+        {"Box", "Box", "voxel.volume", "Click a voxel to add a 3x3x3 box around it.", "Voxel objects"},
+        {"Beam", "Bm", "voxel.line", "Click a voxel to add a 5-voxel beam along +X.", "Voxel objects"},
+        {"Anchor", "Anc", "", "Click a voxel to toggle it as a structural anchor.", "Voxel objects"},
+        {"Rotate", "Rot", "transform.rotate", "Drag a gizmo ring to rotate the selection.", "Selected objects"},
+        {"Scale", "Scl", "transform.scale", "Drag a gizmo handle to resample voxel scale around the chosen pivot.",
+         "Voxel objects"},
+    }};
+    const auto index = static_cast<std::size_t>(tool);
+    return kTools[index < kTools.size() ? index : 0U];
+}
+
+std::string NativeEditorController::tool_shortcut_text(EditorToolId tool) const {
+    const EditorToolInfo& info = editor_tool_info(tool);
+    if (info.actionId.empty()) return {};
+    static constexpr std::array<ShortcutContext, 2> kContexts{ShortcutContext::Viewport, ShortcutContext::VoxelEditor};
+    return workspace_.shortcuts().display_binding(info.actionId, kContexts);
+}
+
+std::vector<std::string> NativeEditorController::viewport_tool_gestures() const {
+    const auto& shortcuts = workspace_.shortcuts();
+    static constexpr std::array<ShortcutContext, 3> kContexts{
+        ShortcutContext::VoxelEditor, ShortcutContext::Viewport, ShortcutContext::Camera};
+    const auto binding = [&](std::string_view actionId) { return shortcuts.display_binding(actionId, kContexts); };
+    const auto pair = [&](std::string_view down, std::string_view up, std::string_view what) {
+        const std::string a = binding(down);
+        const std::string b = binding(up);
+        if (a.empty() || b.empty()) return std::string{};
+        return a + "/" + b + " " + std::string(what);
+    };
+    std::vector<std::string> gestures;
+    const auto add = [&](std::string text) { if (!text.empty()) gestures.push_back(std::move(text)); };
+    const auto keyed = [&](std::string_view actionId, std::string_view what) {
+        const std::string key = binding(actionId);
+        return key.empty() ? std::string{} : key + " " + std::string(what);
+    };
+    if (camera_mode() == camera::CameraRigMode::FreeFly) {
+        add("RMB free look");
+        add("WASDQE fly");
+        add("Shift boost");
+        return gestures;
+    }
+    switch (activeTool_) {
+        case EditorToolId::Select:
+            add("Click select");
+            add("Shift-click add");
+            add("Drag empty space: box select");
+            break;
+        case EditorToolId::Translate:
+            add("Drag axis to move");
+            add(pair("view.decrease_snap", "view.increase_snap", "snap step"));
+            add(keyed("transform.space", "world/local"));
+            break;
+        case EditorToolId::Rotate:
+            add("Drag ring to rotate");
+            add(pair("view.decrease_angle_snap", "view.increase_angle_snap", "angle snap"));
+            add(keyed("transform.space", "world/local"));
+            break;
+        case EditorToolId::AddVoxel:
+        case EditorToolId::RemoveVoxel:
+            add(activeTool_ == EditorToolId::AddVoxel ? "Click face to add" : "Click to remove");
+            add(pair("voxel.brush_decrease", "voxel.brush_increase", "brush size"));
+            add(keyed("voxel.toggle_operation", "add/remove"));
+            break;
+        case EditorToolId::PaintMaterial:
+            add("Click to paint");
+            add(pair("voxel.brush_decrease", "voxel.brush_increase", "brush size"));
+            add(keyed("voxel.sample_material", "pick material"));
+            break;
+        case EditorToolId::Box: add("Click to add a 3x3x3 box"); break;
+        case EditorToolId::Beam: add("Click to add a beam along +X"); break;
+        case EditorToolId::Anchor: add("Click voxel to toggle anchor"); break;
+        case EditorToolId::Scale:
+            add("Drag handle to scale");
+            add("Shift toggles snap");
+            break;
+    }
+    return gestures;
 }
 
 void NativeEditorController::set_active_tool(EditorToolId tool) noexcept {

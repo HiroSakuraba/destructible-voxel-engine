@@ -73,6 +73,23 @@ enum class EditorToolId : std::uint8_t {
     Scale,
 };
 
+// Tools with a toolbar button (EditorToolId::Select .. Rotate). Scale has no button; it is
+// selected by its shortcut or the Edit menu, but still has an editor_tool_info() entry.
+inline constexpr std::size_t kEditorToolCount = 9;
+// Height of the inspector's fixed "INSPECTOR" header; scrolled details never draw above it.
+inline constexpr int kInspectorHeaderHeight = 28;
+
+// What the toolbar, its tooltips and the viewport hint say about each tool. One table, so the
+// button label, the tooltip and the hint cannot drift apart.
+struct EditorToolInfo {
+    std::string_view name;         // full button label
+    std::string_view shortName;    // used when the full name does not fit the button
+    std::string_view actionId;     // command whose shortcut selects the tool; empty = none
+    std::string_view description;  // what a click or drag does
+    std::string_view accepts;      // what the tool acts on
+};
+[[nodiscard]] const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept;
+
 enum class EditorTransformSpace : std::uint8_t { World, Local };
 enum class PlacementTarget : std::uint8_t { NoTarget, Surface, VoxelCorner, VoxelEdge, VoxelFace, BoundsVertex, CollisionBoxVertex };
 enum class PivotMode : std::uint8_t { BoundsCenter, ActiveObject, WorldOrigin, Custom };
@@ -248,6 +265,8 @@ struct NativeEditorLayout {
     UiRect bottomPanel{};
     UiRect statusBar{};
     std::vector<UiRect> toolbarButtons;
+    // "? Shortcuts" control in the viewport's bottom-right corner; opens the shortcut guide.
+    UiRect viewportHelpButton{};
     std::vector<UiRect> hierarchyRows;
     UiRect hierarchyFilterBox{};
     std::vector<UiRect> inspectorToggles;
@@ -255,6 +274,10 @@ struct NativeEditorLayout {
     // Inspector detail text at or below this y is not drawn (the flag toggles sit
     // there when the inspector is too short for both); always <= inspector bottom.
     int inspectorContentClipY{};
+    // Inspector detail scroll (px). Details that do not fit above the flag toggles scroll with
+    // the mouse wheel instead of being cut off; 0 when everything fits.
+    int inspectorScroll{};
+    int inspectorScrollMax{};
     std::vector<UiRect> bottomTabs;      // parallel to BottomPanelTab enumerators, in order
     UiRect assetSearchBox{};
     UiRect assetRefreshButton{};
@@ -343,6 +366,12 @@ public:
     [[nodiscard]] std::vector<ShortcutSearchResult> shortcut_rows() const;
     [[nodiscard]] std::vector<ShortcutContext> active_shortcut_contexts() const;
     [[nodiscard]] EditorToolId active_tool() const noexcept { return activeTool_; }
+    // Current binding that selects `tool` (for example "Q"), or empty when it has none.
+    [[nodiscard]] std::string tool_shortcut_text(EditorToolId tool) const;
+    // The two or three gestures that matter for the active tool, with their current bindings,
+    // most important first. The viewport shows as many as fit; the full list is behind the
+    // "? Shortcuts" control.
+    [[nodiscard]] std::vector<std::string> viewport_tool_gestures() const;
     [[nodiscard]] MaterialId active_material() const noexcept { return activeMaterial_; }
     [[nodiscard]] EditorTransformSpace transform_space() const noexcept { return transformSpace_; }
     [[nodiscard]] EditorFocusRegion focus_region() const noexcept { return focusRegion_; }
@@ -800,6 +829,7 @@ private:
     std::string configuredShortcutProfile_;
     int hoverX_{-100000};
     int hoverY_{-100000};
+    int inspectorScroll_{};
     int lastPointerX_{};
     int lastPointerY_{};
     int pointerDownX_{};

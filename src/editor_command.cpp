@@ -27,11 +27,11 @@ EditorCommandStack::EditorCommandStack(std::size_t maximumEntries)
 
 CommandResult EditorCommandStack::execute(EditorDocument& document, std::unique_ptr<IEditorCommand> command) {
     if (!command) return CommandResult::fail("null editor command");
-    if (cursor_ < history_.size()) history_.erase(history_.begin() + static_cast<std::ptrdiff_t>(cursor_), history_.end());
     CommandResult result = command->execute(document);
     if (!result.success) return result;
-    if (cursor_ > 0 && history_[cursor_ - 1]->merge_with(*command)) return result;
-    history_.push_back(std::move(command));
+    if (cursor_ < history_.size()) history_.erase(history_.begin() + static_cast<std::ptrdiff_t>(cursor_), history_.end());
+    if (cursor_ > 0 && history_[cursor_ - 1].command->merge_with(*command)) return result;
+    history_.push_back({std::move(command), std::nullopt});
     cursor_ = history_.size();
     if (history_.size() > maximumEntries_) {
         history_.erase(history_.begin());
@@ -42,21 +42,34 @@ CommandResult EditorCommandStack::execute(EditorDocument& document, std::unique_
 
 CommandResult EditorCommandStack::undo(EditorDocument& document) {
     if (!can_undo()) return CommandResult::fail("nothing to undo");
-    CommandResult result = history_[cursor_ - 1]->undo(document);
+    CommandResult result = history_[cursor_ - 1].command->undo(document);
     if (result.success) --cursor_;
     return result;
 }
 CommandResult EditorCommandStack::redo(EditorDocument& document) {
     if (!can_redo()) return CommandResult::fail("nothing to redo");
-    CommandResult result = history_[cursor_]->redo(document);
+    CommandResult result = history_[cursor_].command->redo(document);
     if (result.success) ++cursor_;
     return result;
 }
+void EditorCommandStack::set_last_selection_transition(EditorSelectionSnapshot before, EditorSelectionSnapshot after) {
+    if (cursor_ == 0 || cursor_ != history_.size()) return;
+    history_[cursor_ - 1].selection.emplace(std::move(before), std::move(after));
+}
+const EditorSelectionSnapshot* EditorCommandStack::undo_selection() const noexcept {
+    if (!can_undo() || !history_[cursor_ - 1].selection) return nullptr;
+    return &history_[cursor_ - 1].selection->first;
+}
+const EditorSelectionSnapshot* EditorCommandStack::redo_selection() const noexcept {
+    if (!can_redo() || !history_[cursor_].selection) return nullptr;
+    return &history_[cursor_].selection->second;
+}
+
 void EditorCommandStack::clear() noexcept { history_.clear(); cursor_ = 0; }
 bool EditorCommandStack::can_undo() const noexcept { return cursor_ > 0; }
 bool EditorCommandStack::can_redo() const noexcept { return cursor_ < history_.size(); }
-std::string_view EditorCommandStack::undo_label() const noexcept { return can_undo() ? history_[cursor_ - 1]->label() : std::string_view{}; }
-std::string_view EditorCommandStack::redo_label() const noexcept { return can_redo() ? history_[cursor_]->label() : std::string_view{}; }
+std::string_view EditorCommandStack::undo_label() const noexcept { return can_undo() ? history_[cursor_ - 1].command->label() : std::string_view{}; }
+std::string_view EditorCommandStack::redo_label() const noexcept { return can_redo() ? history_[cursor_].command->label() : std::string_view{}; }
 
 VoxelObjectState capture_voxel_object_state(const EditorObject& object) {
     VoxelObjectState state;
@@ -364,7 +377,16 @@ CommandResult CompoundCommand::execute(EditorDocument& document) {
 CommandResult CompoundCommand::undo(EditorDocument& document) {
     for (std::size_t i = commands_.size(); i > 0; --i) {
         CommandResult result = commands_[i - 1]->undo(document);
-        if (!result.success) return result;
+        if (!result.success) {
+            // Put successfully undone children back in forward order. The history
+            // cursor remains unchanged when undo fails.
+            for (std::size_t restored = i; restored < commands_.size(); ++restored) {
+                const CommandResult rollback = commands_[restored]->redo(document);
+                if (!rollback.success)
+                    return CommandResult::fail(result.message + "; undo rollback failed: " + rollback.message);
+            }
+            return result;
+        }
     }
     return CommandResult::ok();
 }

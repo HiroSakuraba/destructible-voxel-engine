@@ -4,9 +4,11 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "dve/editor_document.hpp"
@@ -30,6 +32,14 @@ public:
     [[nodiscard]] virtual bool merge_with(const IEditorCommand&) { return false; }
 };
 
+struct EditorSelectionSnapshot {
+    std::set<EditorObjectId> objects;
+    std::optional<EditorObjectId> primary;
+    bool voxelDomain{};
+    EditorObjectId voxelObject{};
+    std::set<Int3> voxels;
+};
+
 class EditorCommandStack {
 public:
     explicit EditorCommandStack(std::size_t maximumEntries = 256);
@@ -42,9 +52,16 @@ public:
     [[nodiscard]] std::string_view undo_label() const noexcept;
     [[nodiscard]] std::string_view redo_label() const noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return history_.size(); }
+    void set_last_selection_transition(EditorSelectionSnapshot before, EditorSelectionSnapshot after);
+    [[nodiscard]] const EditorSelectionSnapshot* undo_selection() const noexcept;
+    [[nodiscard]] const EditorSelectionSnapshot* redo_selection() const noexcept;
 
 private:
-    std::vector<std::unique_ptr<IEditorCommand>> history_;
+    struct Entry {
+        std::unique_ptr<IEditorCommand> command;
+        std::optional<std::pair<EditorSelectionSnapshot, EditorSelectionSnapshot>> selection;
+    };
+    std::vector<Entry> history_;
     std::size_t cursor_{};
     std::size_t maximumEntries_{};
 };

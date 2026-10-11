@@ -89,6 +89,14 @@ Float3 slope_normal(const EditorPickResult& hit, float probe,
     return normalize(Float3{-slopeX, 1.0F, -slopeZ});
 }
 
+// Mirrors kMinVoxelSizeMeters / kMaxVoxelSizeMeters (editor_native.hpp), the Scale tool's range.
+constexpr float kScatterMinVoxelSizeMeters = 0.001F;
+constexpr float kScatterMaxVoxelSizeMeters = 10.0F;
+
+bool scales_with_voxel_size(const EditorObject& object) noexcept {
+    return object.voxels != nullptr && !object.text3d && !object.gaborVolume;
+}
+
 } // namespace
 
 ScatterSettings sanitize_scatter_settings(ScatterSettings settings) noexcept {
@@ -209,6 +217,10 @@ ScatterCopiesResult append_scatter_copies(CompoundCommand& command, EditorDocume
         const ScatterSource* source{};
         std::vector<EditorObjectId> closure;
         Float3 base{};
+        // Per-copy scale limits that keep every scaled voxel size inside the editor's valid
+        // range (the Scale tool's limits), so a copy never gets a voxel size it would refuse.
+        float scaleLow{kMinScatterScale};
+        float scaleHigh{kMaxScatterScale};
     };
     std::vector<PreparedSource> prepared;
     for (const ScatterSource& source : sources) {
@@ -218,6 +230,13 @@ ScatterCopiesResult append_scatter_copies(CompoundCommand& command, EditorDocume
         const EditorObjectBounds bounds = subtree_bounds(*source.document, entry.closure);
         entry.base = {(bounds.minimum.x + bounds.maximum.x) * 0.5F, bounds.minimum.y,
                       (bounds.minimum.z + bounds.maximum.z) * 0.5F};
+        for (const EditorObjectId id : entry.closure) {
+            const EditorObject* object = source.document->find_object(id);
+            if (!object || !scales_with_voxel_size(*object) || !(object->voxelSizeMeters > 0.0F)) continue;
+            entry.scaleLow = std::max(entry.scaleLow, kScatterMinVoxelSizeMeters / object->voxelSizeMeters);
+            entry.scaleHigh = std::min(entry.scaleHigh, kScatterMaxVoxelSizeMeters / object->voxelSizeMeters);
+        }
+        if (entry.scaleHigh < entry.scaleLow) entry.scaleLow = entry.scaleHigh = 1.0F;
         prepared.push_back(std::move(entry));
     }
     for (const ScatterSample& sample : samples) {
@@ -227,7 +246,7 @@ ScatterCopiesResult append_scatter_copies(CompoundCommand& command, EditorDocume
         const Quaternion yaw = sample.yawRadians != 0.0F
             ? quaternion_from_axis_angle({0.0F, 1.0F, 0.0F}, sample.yawRadians) : Quaternion{};
         const Quaternion align = normalize(multiply(alignToSurface ? rotation_from_up(sample.normal) : Quaternion{}, yaw));
-        const float scale = std::isfinite(sample.scale) ? std::clamp(sample.scale, kMinScatterScale, kMaxScatterScale) : 1.0F;
+        const float scale = std::isfinite(sample.scale) ? std::clamp(sample.scale, source.scaleLow, source.scaleHigh) : 1.0F;
         std::map<EditorObjectId, EditorObjectId> idMap;
         for (const EditorObjectId oldId : source.closure) idMap.emplace(oldId, document.allocate_object_id());
         const std::set<EditorObjectId> roots(source.source->roots.begin(), source.source->roots.end());
@@ -249,7 +268,9 @@ ScatterCopiesResult append_scatter_copies(CompoundCommand& command, EditorDocume
             copy.transform.position = add(sample.position, rotate(align, offset));
             copy.transform.rotation = normalize(multiply(align, original->transform.rotation));
             if (scale != 1.0F) {
-                copy.voxelSizeMeters *= scale;
+                // Only plain voxel objects grow with their voxel size; 3D text and Gabor volumes
+                // would just be re-voxelized coarser at the same size, so they keep theirs.
+                if (scales_with_voxel_size(copy)) copy.voxelSizeMeters *= scale;
                 if (copy.attachment)
                     copy.attachment->localTransform.position = multiply(copy.attachment->localTransform.position, scale);
             }

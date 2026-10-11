@@ -386,6 +386,106 @@ void test_shortcut_and_accessibility() {
     check(labelled, "accessibility gives the brush button its real shortcut, not its position");
 }
 
+// Review follow-ups: surfaces respect hidden/isolated/copy state; voxel sizes stay in range;
+// older or partial settings components load with defaults; Play hides the panel; Y is not
+// stolen from a text field.
+void test_review_fixes() {
+    {
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        EditorDocument& document = controller.workspace().document();
+        controller.workspace().select_object(3);
+        check(controller.dispatch_action("scatter.set_sources"), "set sources (review)");
+        document.find_object(2)->flags.visible = false;
+        controller.workspace().select_object(1);
+        controller.workspace().add_to_selection(2);
+        check(controller.dispatch_action("create.scatter"), "fill with one visible and one hidden surface");
+        check(controller.scatter_targets() == std::vector<EditorObjectId>{1}, "a hidden selected object is not a surface");
+        controller.dispatch_action("scatter.cancel");
+        controller.workspace().select_object(2);
+        check(!controller.scatter_disabled_reason().empty(), "only a hidden surface selected: refused");
+        document.find_object(2)->flags.visible = true;
+        // Isolate Ground A only: Ground B is isolated out and must not be a surface.
+        controller.workspace().select_object(1);
+        check(controller.toggle_isolation(), "isolate Ground A");
+        controller.workspace().select_object(1);
+        controller.workspace().add_to_selection(2);
+        check(controller.dispatch_action("create.scatter"), "fill with Ground B isolated out");
+        check(controller.scatter_targets() == std::vector<EditorObjectId>{1}, "an isolated-out object is not a surface");
+        controller.dispatch_action("scatter.cancel");
+        (void)controller.toggle_isolation();
+        // Unpinned (one-surface) path: a hidden last-clicked surface is refused too.
+        controller.clear_scatter_sources();
+        document.find_object(1)->flags.visible = false;
+        controller.workspace().select_object(3);
+        controller.workspace().add_to_selection(1);
+        check(!controller.scatter_disabled_reason().empty(), "a hidden one-surface target is refused");
+        document.find_object(1)->flags.visible = true;
+    }
+    {
+        // Voxel size stays inside the editor's range (0.001..10 m) whatever the scale.
+        EditorDocument target = make_scene();
+        target.find_object(3)->voxelSizeMeters = 4.0F;
+        std::vector<ScatterSample> samples{{{3.0F, 0.25F, 3.0F}, {0, 1, 0}, 0, 0.0F, 10.0F}};
+        const std::vector<ScatterSource> sources{{&target, {3}, "Rock"}};
+        auto command = std::make_unique<CompoundCommand>("test");
+        EditorCommandStack stack;
+        check(stack.execute(target, std::make_unique<AddObjectCommand>(make_scatter_group(999, 1, {}))).success, "group");
+        const ScatterCopiesResult copies = append_scatter_copies(*command, target, 999, samples, sources, false);
+        check(stack.execute(target, std::move(command)).success && copies.rootIds.size() == 1, "big copy added");
+        const EditorObject* copy = copies.rootIds.empty() ? nullptr : target.find_object(copies.rootIds.front());
+        check(copy && copy->voxelSizeMeters <= 10.0F + 1.0e-4F, "scale x10 of a 4 m voxel stops at a 10 m voxel size");
+    }
+    {
+        // A component written by an older build (only some keys, seed as an integer) loads with defaults.
+        EditorObject group(60, "Scatter (old)");
+        group.tags.push_back(std::string(kScatterGroupTag));
+        Component old;
+        old.id = 1;
+        old.type = std::string(kScatterSettingsComponent);
+        old.properties.emplace("count", std::int64_t{7});
+        old.properties.emplace("seed", std::int64_t{99});
+        old.properties.emplace("future_key", std::string("ignored"));
+        old.properties.emplace("scale_min", std::string("not a number"));
+        group.components.push_back(old);
+        const auto read = read_scatter_settings(group);
+        check(read && read->count == 7 && read->seed == 99 && read->minScale == 1.0F && read->maxScale == 1.0F &&
+                  read->yawJitterDegrees == 0.0F && read->brushDensity == 1.0F,
+              "partial or unknown keys fall back to defaults");
+        EditorObject plain(61, "Scatter (pre-settings)");
+        plain.tags.push_back(std::string(kScatterGroupTag));
+        check(!read_scatter_settings(plain).has_value(), "a group from before settings has none (defaults are used)");
+    }
+    {
+        // Play hides the panel even with the brush tool active, and leaves no stale edit.
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        controller.workspace().select_object(3);
+        controller.set_active_tool(EditorToolId::ScatterBrush);
+        check(!controller.layout().scatterSettingRows.empty(), "brush shows the panel (review)");
+        check(controller.dispatch_action("physics.play"), "Play starts");
+        check(controller.layout().scatterSettingRows.empty(), "Play hides the scatter settings panel");
+        check(!controller.scatter_settings_panel_active(), "panel inactive during Play");
+        check(!controller.dispatch_action("scatter.brush") || controller.layout().scatterSettingRows.empty(),
+              "Scatter Brush during Play shows no panel");
+    }
+    {
+        // Y typed into a text field is text, not the brush shortcut.
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        controller.workspace().select_object(3);
+        check(controller.dispatch_action("edit.rename"), "rename opens a text field");
+        check(controller.text_edit().kind != TextEditKind::Inactive, "a text field is open");
+        controller.key_down("y", false, false, false);
+        check(controller.active_tool() != EditorToolId::ScatterBrush, "Y in a text field does not pick the brush");
+        // The shortcut table has no conflicts with Y in any built-in profile.
+        for (const std::string profile : {"DVE Default", "Unity Familiar", "Unreal Familiar", "Accessibility One-Handed"})
+            for (const auto& conflict : controller.workspace().shortcuts().conflicts(profile))
+                check(conflict.actionId != "scatter.brush" && conflict.otherActionId != "scatter.brush",
+                      "scatter.brush has no shortcut conflict in " + profile);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -395,6 +495,7 @@ int main() {
     test_inspector_panel();
     test_two_step_sources_and_saving();
     test_shortcut_and_accessibility();
+    test_review_fixes();
     if (g_failures != 0) {
         std::printf("dve_editor_scatter_settings_tests: %d failure(s)\n", g_failures);
         return 1;

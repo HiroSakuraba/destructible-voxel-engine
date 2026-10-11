@@ -258,6 +258,8 @@ class CompoundCommand final : public IEditorCommand {
 public:
     explicit CompoundCommand(std::string label);
     void add(std::unique_ptr<IEditorCommand> command);
+    [[nodiscard]] bool empty() const noexcept { return commands_.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return commands_.size(); }
     [[nodiscard]] std::string_view label() const noexcept override { return label_; }
     CommandResult execute(EditorDocument&) override;
     CommandResult undo(EditorDocument&) override;

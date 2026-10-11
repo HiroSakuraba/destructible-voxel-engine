@@ -68,11 +68,7 @@ Esc cancel; group re-created after undo; new group per session; brush ring drawn
 
 ## What's not done
 
-- The brush has no keyboard shortcut or command-palette action; it is picked from the
-  toolbar only. (The accessibility tree still advertises toolbar buttons by position, which
-  gives this tenth button the label "10".)
-- Spacing and Align come from the Scatter Objects settings and can only be changed through the
-  fill preview keys; the brush has no settings panel of its own, and no density, random
-  rotation or scale jitter.
 - Erase removes whole copies only; it does not thin copies out gradually.
 - Pending spots are previewed as markers, not as ghost copies of the source.
+- Shortcut, settings panel, density and random turn/scale were added later; see
+  [editor-scatter-settings-2026-10-10.md](editor-scatter-settings-2026-10-10.md).

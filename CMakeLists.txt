@@ -828,6 +828,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_command.cpp
         src/editor_voxel_slice.cpp
         src/editor_voxel_boolean.cpp
+        src/editor_voxel_join.cpp
         src/editor_scatter.cpp
         src/editor_tools.cpp
         src/editor_workspace.cpp
@@ -2662,6 +2663,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_authoring_gaps_tests tests/test_editor_authoring_gaps.cpp)
         target_link_libraries(dve_editor_authoring_gaps_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_authoring_gaps_tests COMMAND dve_editor_authoring_gaps_tests)
+        add_executable(dve_editor_voxel_join_tests tests/test_editor_voxel_join.cpp)
+        target_link_libraries(dve_editor_voxel_join_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_voxel_join_tests COMMAND dve_editor_voxel_join_tests)
         add_executable(dve_editor_voxel_boolean_tests tests/test_editor_voxel_boolean.cpp)
         target_link_libraries(dve_editor_voxel_boolean_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_boolean_tests COMMAND dve_editor_voxel_boolean_tests)

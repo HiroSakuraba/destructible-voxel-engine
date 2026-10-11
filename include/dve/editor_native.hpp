@@ -42,6 +42,7 @@
 #include "dve/editor_play_session.hpp"
 #include "dve/editor_runtime_settings.hpp"
 #include "dve/editor_scatter.hpp"
+#include "dve/editor_voxel_join.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -767,6 +768,17 @@ public:
     void set_voxel_boolean_operand_policy(VoxelBooleanOperandPolicy policy);
     [[nodiscard]] std::vector<std::string> voxel_boolean_preview_lines() const;
     [[nodiscard]] std::vector<VoxelBooleanPreviewMarker> voxel_boolean_preview_markers(std::size_t limit = 20000) const;
+    // Join (Tools > Voxel > Join Objects): merge the other selected voxel objects into the active
+    // one, previewed; off-grid objects need R (resample) or G (group instead) every time.
+    // Separate Islands: split each selected voxel object into its connected pieces; the largest
+    // stays. See editor_voxel_join.hpp.
+    bool begin_voxel_join();
+    CommandResult commit_voxel_join();
+    void cancel_voxel_join(std::string reason = {});
+    [[nodiscard]] std::string voxel_join_disabled_reason() const;
+    [[nodiscard]] const EditorVoxelJoinSession& voxel_join() const noexcept { return voxelJoin_; }
+    bool separate_voxel_islands();
+    [[nodiscard]] std::string separate_islands_disabled_reason() const;
     [[nodiscard]] bool begin_voxel_slice();
     [[nodiscard]] std::string voxel_slice_disabled_reason() const;
     [[nodiscard]] CommandResult commit_voxel_slice();
@@ -853,6 +865,8 @@ private:
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};
     EditorVoxelBooleanSession voxelBoolean_{};
+    EditorVoxelJoinSession voxelJoin_{};
+    bool handle_voxel_join_key(std::string_view normalized, bool control, bool shift, bool alt);
     bool scatterActive_{};
     std::vector<EditorObjectId> scatterTargets_;
     std::vector<EditorObjectId> scatterSourceRoots_;

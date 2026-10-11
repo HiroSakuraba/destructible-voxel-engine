@@ -3331,8 +3331,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             const int indent = depth * 12;
             const EditorColor rowColor = renaming ? accent
                 : (object->flags.locked || controller.is_isolated_out(object->id)) ? muted : text;
-            painter.text(row.x + 8 + indent, row.y + row.height - 7,
-                         elide_text_to_width(painter, label, std::max(0, row.width - 12 - indent)), rowColor);
+            if (index < layout.hierarchyDisclosureButtons.size()) {
+                const UiRect disclosure = layout.hierarchyDisclosureButtons[index];
+                if (disclosure.width > 0) {
+                    const bool collapsed = controller.hierarchy_filter().empty() && controller.hierarchy_collapsed(object->id);
+                    painter.text(disclosure.x + 1, row.y + row.height - 7, collapsed ? ">" : "v", muted);
+                }
+            }
+            painter.text(row.x + 24 + indent, row.y + row.height - 7,
+                         elide_text_to_width(painter, label, std::max(0, row.width - 28 - indent)), rowColor);
         }
         if (controller.hierarchy_drag().active && !controller.hierarchy_drag().hoverTarget) {
             painter.text(layout.hierarchy.x + 10, layout.hierarchy.y + layout.hierarchy.height - 10,

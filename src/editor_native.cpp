@@ -1961,6 +1961,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
         }
         for (std::string_view id : {"file.open_scene", "file.open_project", "file.save_as"})
             enabled(id, !playActive && workspace_.mode() == EditorMode::Edit, "Stop Play or Simulate first.");
+        enabled("hierarchy.reveal_selection", workspace_.selected_object().has_value(), "Select an object first.");
+        for (std::string_view id : {"hierarchy.expand_all", "hierarchy.collapse_all"})
+            enabled(id, hierarchyFilter_.empty(), "Clear the hierarchy filter first.");
         enabled("voxel.fill", !playActive && workspace_.mode() == EditorMode::Edit, "Stop Play or Simulate before filling.");
         enabled("view.drop_to_surface", hasSelection && !playActive && workspace_.mode() == EditorMode::Edit,
                 playActive || workspace_.mode() != EditorMode::Edit ? "Stop Play or Simulate before moving objects."
@@ -2386,10 +2389,17 @@ void NativeEditorController::recompute_layout() {
     const int rowHeight = std::max(20, static_cast<int>(24.0F * scale));
     layout_.hierarchyFilterBox = {};
     layout_.hierarchyRows.clear();
+    layout_.hierarchyDisclosureButtons.clear();
     if (hierarchyWidth > 0) {
         layout_.hierarchyFilterBox = {4, contentY + 4, hierarchyWidth - 8, rowHeight};
         const int firstRowY = contentY + rowHeight + static_cast<int>(10.0F * scale);
-        const std::size_t rowCount = hierarchy_order().size();
+        const auto hierarchyOrder = hierarchy_order();
+        const std::size_t rowCount = hierarchyOrder.size();
+        std::set<EditorObjectId> parents;
+        for (const auto& [id, object] : workspace_.document().objects()) {
+            (void)id;
+            if (object.parent) parents.insert(*object.parent);
+        }
         // Rows used to continue past the panel into the bottom dock once a scene had more
         // objects than fit (easy to hit after Scatter). Only the rows that fit get a rect; the
         // wheel scrolls the window. Rows outside it are empty rects, so they are not clickable.
@@ -2400,8 +2410,20 @@ void NativeEditorController::recompute_layout() {
         layout_.hierarchyVisibleRows = visibleRows;
         for (std::size_t i = 0; i < rowCount; ++i) {
             const int visibleIndex = static_cast<int>(i) - hierarchyScroll_;
+            layout_.hierarchyDisclosureButtons.push_back({});
             if (visibleIndex < 0 || visibleIndex >= visibleRows) { layout_.hierarchyRows.push_back({}); continue; }
-            layout_.hierarchyRows.push_back({4, firstRowY + visibleIndex * rowHeight, hierarchyWidth - 8, rowHeight});
+            const UiRect row{4, firstRowY + visibleIndex * rowHeight, hierarchyWidth - 8, rowHeight};
+            layout_.hierarchyRows.push_back(row);
+            if (parents.contains(hierarchyOrder[i])) {
+                int depth = 0;
+                const EditorObject* object = workspace_.document().find_object(hierarchyOrder[i]);
+                for (auto parent = object ? object->parent : std::nullopt; parent && depth < 8;) {
+                    ++depth;
+                    const EditorObject* ancestor = workspace_.document().find_object(*parent);
+                    parent = ancestor ? ancestor->parent : std::nullopt;
+                }
+                layout_.hierarchyDisclosureButtons.back() = {row.x + 8 + depth * 12, row.y, 14, row.height};
+            }
         }
     }
 
@@ -2922,6 +2944,7 @@ void NativeEditorController::request_quit() {
 }
 
 void NativeEditorController::create_new_project_now() {
+    reset_hierarchy_view();
     workspace_.document() = make_new_project_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
@@ -2934,6 +2957,7 @@ void NativeEditorController::create_new_project_now() {
 }
 
 void NativeEditorController::create_new_scene_now() {
+    reset_hierarchy_view();
     workspace_.document() = make_new_scene_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
@@ -3444,6 +3468,7 @@ void NativeEditorController::text_input(std::string_view text) {
     textEdit_.buffer.append(text);
     if (textEdit_.kind == TextEditKind::HierarchyFilter) {
         hierarchyFilter_ = textEdit_.buffer;
+        hierarchyScroll_ = 0;
         recompute_layout();
     } else if (textEdit_.kind == TextEditKind::AssetSearch) {
         assetBrowserState_.query.text = textEdit_.buffer;
@@ -3463,6 +3488,7 @@ void NativeEditorController::open_context_menu(int x, int y, std::optional<Edito
         contextMenu_.items.push_back({"edit.duplicate", "Duplicate"});
         if (fromHierarchy) contextMenu_.items.push_back({"edit.rename", "Rename"});
         contextMenu_.items.push_back({"view.frame", "Frame Selection"});
+        contextMenu_.items.push_back({"hierarchy.reveal_selection", "Reveal in Hierarchy"});
         if (workspace_.selection_count() >= 2U && (!target || workspace_.is_selected(*target)) &&
             voxel_boolean_disabled_reason().empty()) {
             contextMenu_.items.push_back({"voxel.boolean_union", "Boolean Union"});
@@ -4320,6 +4346,13 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         const auto order = hierarchy_order();
         for (std::size_t index = 0; index < layout_.hierarchyRows.size() && index < order.size(); ++index) {
             if (layout_.hierarchyRows[index].contains(x, y)) {
+                if (index < layout_.hierarchyDisclosureButtons.size() &&
+                    layout_.hierarchyDisclosureButtons[index].contains(x, y)) {
+                    hierarchyDrag_ = {};
+                    focusRegion_ = EditorFocusRegion::SceneHierarchy;
+                    (void)set_hierarchy_expanded(order[index], hierarchy_collapsed(order[index]));
+                    return;
+                }
                 if ((modifiers & 1U) != 0U) workspace_.toggle_selection(order[index]);
                 else workspace_.select_object(order[index]);
                 focusRegion_ = EditorFocusRegion::SceneHierarchy;
@@ -6426,6 +6459,23 @@ camera_menu_dispatch_complete:
     }
     if (actionId == "transform.scale_voxel_size_up") return scale_selection_voxel_size(2.0F).success;
     if (actionId == "transform.scale_voxel_size_down") return scale_selection_voxel_size(0.5F).success;
+    if (actionId == "hierarchy.reveal_selection") return reveal_selection_in_hierarchy();
+    if (actionId == "hierarchy.expand_all" || actionId == "hierarchy.collapse_all") {
+        if (!hierarchyFilter_.empty()) {
+            set_status("Clear the hierarchy filter before collapsing or expanding rows", true);
+            return false;
+        }
+        collapsedHierarchy_.clear();
+        if (actionId == "hierarchy.collapse_all") {
+            for (const auto& [id, object] : workspace_.document().objects()) {
+                (void)id;
+                if (object.parent) collapsedHierarchy_.insert(*object.parent);
+            }
+        }
+        hierarchyDrag_ = {};
+        recompute_layout();
+        return true;
+    }
     if (actionId == "view.frame") { frame_selection(); return true; }
     if (actionId == "view.grid") return toggleSessionSetting("viewport.grid");
     if (actionId == "view.collision") return toggleSessionSetting("viewport.collision");
@@ -7456,6 +7506,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             }
             if (textEdit_.kind == TextEditKind::HierarchyFilter) {
                 hierarchyFilter_ = textEdit_.buffer;
+                hierarchyScroll_ = 0;
                 recompute_layout();
             } else if (textEdit_.kind == TextEditKind::AssetSearch) {
                 assetBrowserState_.query.text = textEdit_.buffer;
@@ -7654,6 +7705,8 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         return;
     }
     if (normalized == "tab") { focus_next(shift); return; }
+    if (focusRegion_ == EditorFocusRegion::SceneHierarchy && !control && !shift && !alt &&
+        navigate_hierarchy(normalized)) return;
     if (focusRegion_ == EditorFocusRegion::Viewport && alt && !control &&
         (normalized == "up" || normalized == "down" || normalized == "left" || normalized == "right")) {
         walk_selection(normalized);
@@ -8053,14 +8106,129 @@ bool NativeEditorController::toggle_isolation() {
 }
 
 std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
-    std::vector<EditorObjectId> result = workspace_.document().hierarchy_preorder();  // O(n)
-    if (hierarchyFilter_.empty()) return result;
-    const std::string needle = lowercase(hierarchyFilter_);
-    std::erase_if(result, [&](EditorObjectId id) {
-        const EditorObject* object = workspace_.document().find_object(id);
-        return !object || lowercase(object->name).find(needle) == std::string::npos;
-    });
+    const auto& document = workspace_.document();
+    const auto order = document.hierarchy_preorder();
+    std::set<EditorObjectId> included;
+    if (!hierarchyFilter_.empty()) {
+        const std::string needle = lowercase(hierarchyFilter_);
+        for (const auto id : order) {
+            const auto* object = document.find_object(id);
+            if (object && lowercase(object->name).find(needle) != std::string::npos) included.insert(id);
+        }
+        // Children precede their parents in this pass, so each ancestor is visited once.
+        // Filtering temporarily exposes matching paths without modifying collapsed state.
+        for (auto it = order.rbegin(); it != order.rend(); ++it) {
+            const auto* object = document.find_object(*it);
+            if (object && object->parent && included.contains(*it)) included.insert(*object->parent);
+        }
+    }
+    std::vector<EditorObjectId> result;
+    result.reserve(order.size());
+    std::set<EditorObjectId> visible;
+    for (const auto id : order) {
+        const auto* object = document.find_object(id);
+        if (!object) continue;
+        if (!hierarchyFilter_.empty()) {
+            if (!included.contains(id)) continue;
+        } else if (object->parent &&
+                   (!visible.contains(*object->parent) || collapsedHierarchy_.contains(*object->parent))) continue;
+        visible.insert(id);
+        result.push_back(id);
+    }
     return result;
+}
+
+void NativeEditorController::reset_hierarchy_view() {
+    collapsedHierarchy_.clear();
+    hierarchyFilter_.clear();
+    hierarchyScroll_ = 0;
+    hierarchyDrag_ = {};
+}
+
+bool NativeEditorController::set_hierarchy_expanded(EditorObjectId id, bool expanded) {
+    if (!workspace_.document().find_object(id)) return false;
+    if (!hierarchyFilter_.empty()) {
+        set_status("Clear the hierarchy filter before collapsing or expanding rows", true);
+        return false;
+    }
+    const auto& objects = workspace_.document().objects();
+    const bool hasChildren = std::any_of(objects.begin(), objects.end(), [id](const auto& entry) {
+        return entry.second.parent == id;
+    });
+    if (!hasChildren) return false;
+    if (expanded) collapsedHierarchy_.erase(id);
+    else collapsedHierarchy_.insert(id);
+    recompute_layout();
+    return true;
+}
+
+void NativeEditorController::scroll_hierarchy_to(EditorObjectId id) {
+    recompute_layout();
+    const auto order = hierarchy_order();
+    const auto found = std::find(order.begin(), order.end(), id);
+    if (found == order.end()) return;
+    const int index = static_cast<int>(found - order.begin());
+    if (index < hierarchyScroll_) hierarchyScroll_ = index;
+    else if (index >= hierarchyScroll_ + layout_.hierarchyVisibleRows)
+        hierarchyScroll_ = index - layout_.hierarchyVisibleRows + 1;
+    recompute_layout();
+}
+
+bool NativeEditorController::reveal_selection_in_hierarchy() {
+    const auto selected = workspace_.selected_object();
+    const auto* object = selected ? workspace_.document().find_object(*selected) : nullptr;
+    if (!object) { set_status("Select an object to reveal in the hierarchy", true); return false; }
+    if (textEdit_.kind == TextEditKind::HierarchyFilter) textEdit_ = {};
+    hierarchyFilter_.clear();
+    std::set<EditorObjectId> visited;
+    for (auto parent = object->parent; parent && visited.insert(*parent).second;) {
+        collapsedHierarchy_.erase(*parent);
+        const auto* ancestor = workspace_.document().find_object(*parent);
+        parent = ancestor ? ancestor->parent : std::nullopt;
+    }
+    workspace_.set_panel_visible(PanelId::SceneHierarchy, true);
+    focusRegion_ = EditorFocusRegion::SceneHierarchy;
+    scroll_hierarchy_to(*selected);
+    set_status("Revealed " + object->name + " in hierarchy");
+    return true;
+}
+
+bool NativeEditorController::navigate_hierarchy(std::string_view key) {
+    if (key != "up" && key != "down" && key != "left" && key != "right" && key != "home" && key != "end") return false;
+    const auto order = hierarchy_order();
+    if (order.empty()) return true;
+    auto current = workspace_.selected_object();
+    auto found = current ? std::find(order.begin(), order.end(), *current) : order.end();
+    // A collapsed branch can still hold the primary selection. Resume from its visible ancestor.
+    std::set<EditorObjectId> visited;
+    while (found == order.end() && current && visited.insert(*current).second) {
+        const auto* object = workspace_.document().find_object(*current);
+        current = object ? object->parent : std::nullopt;
+        if (current) found = std::find(order.begin(), order.end(), *current);
+    }
+    EditorObjectId next = found == order.end() ? order.front() : *found;
+    if (key == "home") next = order.front();
+    else if (key == "end") next = order.back();
+    else if (found != order.end()) {
+        const auto index = static_cast<std::size_t>(found - order.begin());
+        const auto* object = workspace_.document().find_object(*found);
+        if (key == "up" && index > 0) next = order[index - 1];
+        else if (key == "down" && index + 1 < order.size()) next = order[index + 1];
+        else if (key == "left") {
+            const bool hasVisibleChild = index + 1 < order.size() &&
+                workspace_.document().find_object(order[index + 1])->parent == *found;
+            if (hierarchyFilter_.empty() && hasVisibleChild) (void)set_hierarchy_expanded(*found, false);
+            else if (object && object->parent && std::find(order.begin(), order.end(), *object->parent) != order.end())
+                next = *object->parent;
+        } else if (key == "right") {
+            if (hierarchyFilter_.empty() && hierarchy_collapsed(*found)) (void)set_hierarchy_expanded(*found, true);
+            else if (index + 1 < order.size() && workspace_.document().find_object(order[index + 1])->parent == *found)
+                next = order[index + 1];
+        }
+    }
+    workspace_.select_object(next);
+    scroll_hierarchy_to(next);
+    return true;
 }
 
 // The Blender-style starter solid: a 1 m cube of 0.1 m voxels resting on the
@@ -9950,6 +10118,7 @@ bool NativeEditorController::open_scene_now(const std::filesystem::path& path) {
     floodFillArmed_ = false;
     followSelection_ = false;
     followAnchor_.reset();
+    reset_hierarchy_view();
     workspace_.document() = std::move(*loaded);
     workspace_.commands().clear();
     workspace_.clear_selection();

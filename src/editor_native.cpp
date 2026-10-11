@@ -6366,19 +6366,25 @@ camera_menu_dispatch_complete:
     }
 
     if (actionId == "edit.undo") {
+        const auto* selection = workspace_.commands().undo_selection();
         const CommandResult result = workspace_.commands().undo(workspace_.document());
         if (result.success) {
-            workspace_.prune_selection();
+            if (selection) restore_selection_snapshot(*selection);
+            else { workspace_.prune_selection(); prune_voxel_selection(); }
             recompute_layout();
+            refresh_menu_state();
         }
         set_status(result.success ? "Undo" : result.message, !result.success);
         return result.success;
     }
     if (actionId == "edit.redo") {
+        const auto* selection = workspace_.commands().redo_selection();
         const CommandResult result = workspace_.commands().redo(workspace_.document());
         if (result.success) {
-            workspace_.prune_selection();
+            if (selection) restore_selection_snapshot(*selection);
+            else { workspace_.prune_selection(); prune_voxel_selection(); }
             recompute_layout();
+            refresh_menu_state();
         }
         set_status(result.success ? "Redo" : result.message, !result.success);
         return result.success;
@@ -8965,12 +8971,14 @@ CommandResult NativeEditorController::commit_voxel_boolean() {
         return CommandResult::fail(reason);
     }
     voxelBoolean_.set_operand_policy(voxelBooleanPolicy_);
+    const auto beforeSelection = capture_selection_snapshot();
     const CommandResult result = voxelBoolean_.commit(workspace_);
     if (!result.success) {
         set_status("Boolean not applied: " + result.message, true, 8.0F);
         refresh_menu_state();
         return result;
     }
+    workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
     const auto& report = *voxelBoolean_.last_commit();
     recompute_layout();
     refresh_menu_state();
@@ -9192,11 +9200,13 @@ CommandResult NativeEditorController::commit_voxel_join() {
     }
     const std::size_t count = voxelJoin_.operands().size() + 1U;
     const EditorObjectId target = voxelJoin_.target();
+    const auto beforeSelection = capture_selection_snapshot();
     const CommandResult result = voxelJoin_.commit(workspace_);
     if (!result.success) {
         set_status(result.message, true, 6.0F);
         return result;
     }
+    workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
     recompute_layout();
     refresh_menu_state();
     const EditorObject* joined = workspace_.document().find_object(target);
@@ -10858,6 +10868,32 @@ void NativeEditorController::prune_voxel_selection() {
     }
 }
 
+EditorSelectionSnapshot NativeEditorController::capture_selection_snapshot() const {
+    return {workspace_.selected_objects(), workspace_.selected_object(), selectionDomain_ == SelectionDomain::Voxels,
+            voxelSelectionObject_, voxelSelection_};
+}
+
+void NativeEditorController::restore_selection_snapshot(const EditorSelectionSnapshot& snapshot) {
+    workspace_.clear_selection();
+    for (const auto id : snapshot.objects) {
+        const auto* object = workspace_.document().find_object(id);
+        if (object && object->flags.visible && !is_isolated_out(id)) workspace_.add_to_selection(id);
+    }
+    if (snapshot.primary && workspace_.is_selected(*snapshot.primary)) workspace_.add_to_selection(*snapshot.primary);
+    reset_voxel_selection_state();
+    selectionDomain_ = snapshot.voxelDomain ? SelectionDomain::Voxels : SelectionDomain::Objects;
+    if (snapshot.voxelDomain) {
+        const auto* object = workspace_.document().find_object(snapshot.voxelObject);
+        if (object && object->voxels && object->flags.visible && !is_isolated_out(object->id)) {
+            voxelSelectionObject_ = object->id;
+            for (const auto cell : snapshot.voxels)
+                if (object->voxels->occupied_at(cell)) voxelSelection_.insert(cell);
+            voxelSelectionRevision_ = object->voxels->revision();
+            ++voxelSelectionSerial_;
+        }
+    }
+}
+
 void NativeEditorController::reset_voxel_selection_state() {
     voxelSelection_.clear();
     ++voxelSelectionSerial_;
@@ -11072,6 +11108,7 @@ bool NativeEditorController::move_selected_voxels(Int3 offset) {
     std::string error;
     auto command = build_move_voxels_command(*object, voxelSelection_, offset, &error);
     if (!command) { set_status(error, true); return false; }
+    const auto beforeSelection = capture_selection_snapshot();
     close_previews_for_voxel_edit("voxels moved");
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
     if (!result.success) { set_status(result.message, true, 6.0F); return false; }
@@ -11080,6 +11117,7 @@ bool NativeEditorController::move_selected_voxels(Int3 offset) {
     voxelSelection_ = std::move(moved);
     ++voxelSelectionSerial_;
     voxelSelectionRevision_ = object->voxels->revision();
+    workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
     set_status("Moved " + std::to_string(voxelSelection_.size()) + " voxel(s) by (" + std::to_string(offset.x) + ", " +
                std::to_string(offset.y) + ", " + std::to_string(offset.z) + "); Undo puts them back");
     return true;

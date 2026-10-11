@@ -1046,6 +1046,8 @@ private:
     mutable Float3 voxelCentreCacheLocal_{};
     void prune_voxel_selection();
     void reset_voxel_selection_state();
+    [[nodiscard]] EditorSelectionSnapshot capture_selection_snapshot() const;
+    void restore_selection_snapshot(const EditorSelectionSnapshot& snapshot);
     void close_previews_for_voxel_edit(std::string_view what);
     [[nodiscard]] Float3 voxel_selection_centre() const;
     [[nodiscard]] Float3 voxel_move_axis_world(int axis) const;

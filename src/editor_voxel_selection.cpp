@@ -40,6 +40,7 @@ std::set<Int3> voxel_connected_piece(const VoxelObject& voxels, Int3 seed, std::
             const Int3 next = add(at, face);
             if (piece.contains(next) || !voxels.occupied_at(next)) continue;
             piece.insert(next);
+            if (piece.size() > limit) break;
             stack.push_back(next);
         }
     }

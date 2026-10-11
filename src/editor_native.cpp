@@ -234,6 +234,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     cancel_voxel_slice();
     if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Play or Simulate started");
     cancel_scatter("Scatter preview closed: Play or Simulate started");
+    cancel_voxel_join("Join preview closed: Play or Simulate started");
     close_context_menu();
     close_top_level_menu();
     activePointerCommand_.clear();
@@ -1881,6 +1882,13 @@ void NativeEditorController::refresh_menu_state() noexcept {
         enabled("voxel.slice", sliceReason.empty(), sliceReason);
         enabled("voxel.slice_commit", voxelSlice_.active() && voxelSlice_.blocked_reason(workspace_.document()).empty(), voxelSlice_.blocked_reason(workspace_.document()));
         enabled("voxel.slice_cancel", voxelSlice_.active(), "No Slice preview is open.");
+        const std::string joinReason = voxel_join_disabled_reason();
+        enabled("voxel.join", joinReason.empty(), joinReason);
+        const std::string joinBlocked = voxelJoin_.blocked_reason(workspace_.document());
+        enabled("voxel.join_commit", voxelJoin_.active() && joinBlocked.empty(), joinBlocked);
+        enabled("voxel.join_cancel", voxelJoin_.active(), "No Join preview is open.");
+        const std::string separateReason = separate_islands_disabled_reason();
+        enabled("voxel.separate_islands", separateReason.empty(), separateReason);
         const std::string booleanReason = voxel_boolean_disabled_reason();
         for (std::string_view id : {"voxel.boolean_union", "voxel.boolean_difference", "voxel.boolean_intersection"})
             enabled(id, booleanReason.empty(), booleanReason);
@@ -6157,6 +6165,14 @@ camera_menu_dispatch_complete:
     if (actionId == "create.scatter") return begin_scatter();
     if (actionId == "scatter.commit") return commit_scatter();
     if (actionId == "scatter.cancel") { if (!scatterActive_) return false; cancel_scatter(); return true; }
+    if (actionId == "voxel.join") return begin_voxel_join();
+    if (actionId == "voxel.join_commit") return commit_voxel_join().success;
+    if (actionId == "voxel.join_cancel") {
+        if (!voxelJoin_.active()) return false;
+        cancel_voxel_join();
+        return true;
+    }
+    if (actionId == "voxel.separate_islands") return separate_voxel_islands();
     if (actionId == "voxel.slice") return begin_voxel_slice();
     if (actionId == "voxel.slice_commit") return commit_voxel_slice().success;
     if (actionId == "voxel.slice_cancel") { cancel_voxel_slice(); return true; }
@@ -7076,6 +7092,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     if (voxelSlice_.active() && handle_voxel_slice_key(normalized, control, shift, alt)) return;
     if (voxelBoolean_.active() && handle_voxel_boolean_key(normalized, control, shift, alt)) return;
     if (scatterActive_ && handle_scatter_key(normalized, control, shift, alt)) return;
+    if (voxelJoin_.active() && handle_voxel_join_key(normalized, control, shift, alt)) return;
 
     if (alt && !control && normalized.size() == 1U) {
         const char mnemonic = normalized.front();
@@ -7568,6 +7585,7 @@ bool NativeEditorController::begin_scatter() {
     // only one is open at a time: starting one closes the others.
     if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Scatter started");
     cancel_voxel_slice();
+    cancel_voxel_join("Join preview closed: Scatter started");
     scatterTarget_ = *workspace_.selected_object();
     // Sources: the selected roots other than the target. A selected object inside the target's
     // subtree, or an ancestor of it, cannot be copied onto it.
@@ -7961,6 +7979,7 @@ bool NativeEditorController::begin_voxel_boolean(VoxelBooleanOperation operation
         return false;
     }
     cancel_scatter("Scatter preview closed: Boolean started");
+    cancel_voxel_join("Join preview closed: Boolean started");
     cancel_text_edit();
     close_context_menu();
     if (gizmoDragging_) finish_gizmo_drag(true);
@@ -8087,12 +8106,22 @@ void NativeEditorController::voxel_boolean_tick() {
             set_status("Boolean preview closed: an object it used was removed or changed type", true, 6.0F);
         }
     }
+    if (voxelJoin_.active()) {
+        const std::vector<EditorObjectId> participants = voxelJoin_.participants();
+        if (std::set<EditorObjectId>(participants.begin(), participants.end()) != workspace_.selected_objects()) {
+            cancel_voxel_join("Join preview cancelled: the selection changed");
+        } else if (!voxelJoin_.refresh(workspace_.document())) {
+            refresh_menu_state();
+            set_status("Join preview closed: an object it used was removed or changed type", true, 6.0F);
+        }
+    }
     // Keep the Boolean commands' enabled state and disabled reasons in step with the selection.
     std::uint64_t key = editor_selection_fingerprint(workspace_.selected_objects());
     key = key * 1099511628211ULL ^ workspace_.selected_object().value_or(0U);
     key = key * 1099511628211ULL ^ workspace_.commands().size();
     key = key * 1099511628211ULL ^ (workspace_.commands().can_undo() ? 1U : 0U) ^ (workspace_.commands().can_redo() ? 2U : 0U);
-    key = key * 1099511628211ULL ^ (playSession_.active() ? 1U : 0U) ^ (voxelBoolean_.active() ? 2U : 0U) ^ (voxelSlice_.active() ? 4U : 0U);
+    key = key * 1099511628211ULL ^ (playSession_.active() ? 1U : 0U) ^ (voxelBoolean_.active() ? 2U : 0U) ^
+          (voxelSlice_.active() ? 4U : 0U) ^ (voxelJoin_.active() ? 8U : 0U);
     if (key != voxelBooleanMenuKey_) {
         voxelBooleanMenuKey_ = key;
         refresh_menu_state();
@@ -8151,6 +8180,142 @@ std::string NativeEditorController::voxel_slice_disabled_reason() const {
         return "Unlock the object before slicing.";
     return {};
 }
+// --- Join and Separate Islands (ART-061, ART-062) --------------------------------------------
+
+std::string NativeEditorController::voxel_join_disabled_reason() const {
+    if (playSession_.active() || workspace_.mode() != EditorMode::Edit) return "Stop Play or Simulate before joining.";
+    return EditorVoxelJoinSession::selection_problem(workspace_.document(), workspace_.selected_objects(),
+                                                     workspace_.selected_object());
+}
+
+bool NativeEditorController::begin_voxel_join() {
+    if (const std::string reason = voxel_join_disabled_reason(); !reason.empty()) {
+        set_status(reason, true, 6.0F);
+        return false;
+    }
+    // Join shares the preview panel slot with Scatter, Slice and Boolean: one at a time.
+    cancel_voxel_slice();
+    if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Join started");
+    cancel_scatter("Scatter preview closed: Join started");
+    cancel_text_edit();
+    close_context_menu();
+    if (gizmoDragging_) finish_gizmo_drag(true);
+    finish_voxel_stroke();
+    std::string error;
+    if (!voxelJoin_.begin(workspace_.document(), workspace_.selected_objects(), workspace_.selected_object(), &error)) {
+        set_status(error, true, 6.0F);
+        return false;
+    }
+    refresh_menu_state();
+    set_status(voxelJoin_.needs_choice()
+                   ? "Join preview: some objects are off the target's grid. R resample, G group instead, Tab next target"
+                   : "Join preview: Enter joins, Esc cancels, Tab picks another target",
+               voxelJoin_.needs_choice(), 8.0F);
+    return true;
+}
+
+CommandResult NativeEditorController::commit_voxel_join() {
+    if (!voxelJoin_.active()) {
+        set_status("No Join preview is open", true);
+        return CommandResult::fail("No Join preview is open");
+    }
+    const std::size_t count = voxelJoin_.operands().size() + 1U;
+    const EditorObjectId target = voxelJoin_.target();
+    const CommandResult result = voxelJoin_.commit(workspace_);
+    if (!result.success) {
+        set_status(result.message, true, 6.0F);
+        return result;
+    }
+    recompute_layout();
+    refresh_menu_state();
+    const EditorObject* joined = workspace_.document().find_object(target);
+    set_status("Joined " + std::to_string(count) + " objects into " + (joined ? joined->name : std::string("the target")) +
+               "; Undo restores them");
+    return result;
+}
+
+void NativeEditorController::cancel_voxel_join(std::string reason) {
+    if (!voxelJoin_.active()) return;
+    voxelJoin_.cancel();
+    refresh_menu_state();
+    set_status(reason.empty() ? "Join cancelled; scene unchanged" : std::move(reason));
+}
+
+bool NativeEditorController::handle_voxel_join_key(std::string_view normalized, bool control, bool shift, bool alt) {
+    (void)shift;
+    if (control || alt) return false;
+    if (normalized == "escape") { cancel_voxel_join(); return true; }
+    if (normalized == "return" || normalized == "enter" || normalized == "kp_enter") {
+        (void)commit_voxel_join();
+        return true;
+    }
+    if (normalized == "r" && voxelJoin_.has_mismatch()) {
+        voxelJoin_.choose_resample();
+        refresh_menu_state();
+        set_status("Join: off-grid objects will be resampled into the target's grid; Enter joins", false, 6.0F);
+        return true;
+    }
+    if (normalized == "g") {
+        // Group instead: keep every object as it is and put them under one group.
+        cancel_voxel_join("Join cancelled: grouping instead");
+        (void)dispatch_action("edit.group");
+        return true;
+    }
+    if (normalized == "tab") {
+        voxelJoin_.cycle_target(workspace_.document());
+        workspace_.add_to_selection(voxelJoin_.target());  // already selected: makes it the active object
+        refresh_menu_state();
+        const EditorObject* target = workspace_.document().find_object(voxelJoin_.target());
+        set_status("Join target: " + (target ? target->name : std::string("?")), false, 4.0F);
+        return true;
+    }
+    return false;
+}
+
+std::string NativeEditorController::separate_islands_disabled_reason() const {
+    if (playSession_.active() || workspace_.mode() != EditorMode::Edit) return "Stop Play or Simulate before separating.";
+    if (workspace_.selection_count() == 0) return "Select a voxel object to split into its connected pieces.";
+    std::string last;
+    for (const EditorObjectId id : workspace_.selected_objects()) {
+        last = separate_islands_problem(workspace_.document(), id);
+        if (last.empty()) return {};
+    }
+    return last;
+}
+
+bool NativeEditorController::separate_voxel_islands() {
+    if (const std::string reason = separate_islands_disabled_reason(); !reason.empty()) {
+        set_status(reason, true, 6.0F);
+        return false;
+    }
+    cancel_voxel_join("Join preview closed: Separate Islands");
+    if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Separate Islands");
+    cancel_voxel_slice();
+    const std::vector<EditorObjectId> ids(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    SeparateIslandsBuild build = build_separate_islands_command(workspace_.document(), ids);
+    if (!build.command) {
+        set_status(build.skipped.empty() ? "Nothing to separate" : "Nothing to separate: " + build.skipped.front(), true, 6.0F);
+        return false;
+    }
+    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(build.command));
+    if (!result.success) {
+        set_status(result.message, true, 6.0F);
+        return false;
+    }
+    // Select every piece; the originals (largest pieces) stay selected and active.
+    const auto active = workspace_.selected_object();
+    for (const EditorObjectId id : build.newObjects) {
+        workspace_.add_to_selection(id);
+        if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+    }
+    if (active) workspace_.add_to_selection(*active);
+    recompute_layout();
+    refresh_menu_state();
+    set_status("Separated " + std::to_string(build.newObjects.size()) + " piece(s) from " +
+               std::to_string(build.separatedObjects) + " object(s); the largest piece keeps each original. Undo restores");
+    return true;
+}
+
 bool NativeEditorController::begin_voxel_slice() {
     if (const auto reason = voxel_slice_disabled_reason(); !reason.empty()) {
         set_status(reason, true);
@@ -8158,6 +8323,7 @@ bool NativeEditorController::begin_voxel_slice() {
     }
     cancel_voxel_boolean();
     cancel_scatter("Scatter preview closed: Slice started");
+    cancel_voxel_join("Join preview closed: Slice started");
     cancel_text_edit();
     close_context_menu();
     if (gizmoDragging_)

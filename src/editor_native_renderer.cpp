@@ -3388,6 +3388,52 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
     if (const auto bounds = controller.scale_preview_bounds())
         draw_world_box(viewportPainter, controller, *bounds, rgb(255,219,89));
+    if (controller.voxel_join().active()) {
+        // Join preview (ART-062): the target in blue, objects on its grid in green, objects that
+        // must be resampled in orange; the panel names each mismatch and the choice it needs.
+        const EditorDocument& document = controller.workspace().document();
+        const auto& join = controller.voxel_join();
+        const auto label_object = [&](EditorObjectId id, const std::string& label, EditorColor color) {
+            const EditorObject* object = document.find_object(id);
+            if (!object) return;
+            const EditorObjectBounds bounds = object_world_bounds(*object);
+            if (!bounds.valid) return;
+            draw_world_box(viewportPainter, controller, bounds, color);
+            const ScreenPoint corner = project_world_to_screen(controller.camera(), viewport,
+                {bounds.minimum.x, bounds.maximum.y, bounds.minimum.z});
+            if (!corner.visible) return;
+            const int x = static_cast<int>(corner.x);
+            const int y = static_cast<int>(corner.y) - 6;
+            const int w = viewportPainter.text_width(label) + 8;
+            viewportPainter.fill({x - 2, y - 13, w, 17}, rgb(16,20,26));
+            viewportPainter.outline({x - 2, y - 13, w, 17}, color);
+            viewportPainter.text(x + 2, y, label, color);
+        };
+        label_object(join.target(), "Target", rgb(96,170,255));
+        for (const VoxelJoinOperand& operand : join.operands())
+            label_object(operand.id, operand.mismatch.empty() ? "On grid" : join.resample_chosen() ? "Resample" : "Off grid",
+                         operand.mismatch.empty() ? rgb(70,205,120) : rgb(255,166,64));
+        const std::vector<std::string> lines = join.describe(document);
+        int panelWidth = 0;
+        for (const std::string& line : lines) panelWidth = std::max(panelWidth, viewportPainter.text_width(line));
+        const int panelMaxWidth = viewport.width > 520 ? viewport.width - 230 : viewport.width - 16;
+        panelWidth = std::min(panelWidth + 20, std::max(120, panelMaxWidth));
+        const int lineHeight = 17;
+        const UiRect panel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
+        const bool ready = join.blocked_reason(document).empty();
+        viewportPainter.fill(panel, rgb(18,23,31));
+        viewportPainter.outline(panel, ready ? rgb(96,170,255) : join.needs_choice() ? rgb(255,166,64) : rgb(255,110,90));
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const std::string& line = lines[i];
+            EditorColor color = i == 0 ? rgb(235,242,250) : rgb(190,200,214);
+            if (line.starts_with("Cannot commit")) color = rgb(255,130,110);
+            else if (line.starts_with("  !") || line.starts_with("Off-grid")) color = rgb(255,190,110);
+            else if (line.starts_with("  +")) color = rgb(150,225,170);
+            else if (line.starts_with("Target")) color = rgb(150,200,255);
+            viewportPainter.text(panel.x + 10, panel.y + 18 + static_cast<int>(i) * lineHeight,
+                                 elide_text_to_width(viewportPainter, line, panel.width - 20), color);
+        }
+    }
     if (controller.voxel_boolean().active()) {
         // Boolean preview (ART-060): label A/B bounds, then mark every cell the commit would
         // change in the target grid. Nothing in the document changes until Enter.

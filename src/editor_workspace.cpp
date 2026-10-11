@@ -581,6 +581,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.paint","Voxel","Paint Material","5"}, {"voxel.box","Voxel","Box Tool","6"},
         {"voxel.beam","Voxel","Beam Tool","7"}, {"voxel.anchor","Voxel","Anchor Brush","8"},
         {"voxel.settings","Voxel","Voxel Settings",""},
+        {"voxel.join","Voxel","Join Objects",""},
+        {"voxel.join_commit","Voxel","Commit Join",""},
+        {"voxel.join_cancel","Voxel","Cancel Join",""},
+        {"voxel.separate_islands","Voxel","Separate Islands",""},
         {"voxel.slice","Voxel","Slice Voxel Object",""},
         {"voxel.slice_commit","Voxel","Commit Slice",""},
         {"voxel.slice_cancel","Voxel","Cancel Slice",""},
@@ -698,6 +702,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("camera.load_bookmark_2", "Bookmarks", 63);
     configure("camera.settings", "Settings", 90);
     configure("voxel.settings", "Settings", 90);
+    configure("voxel.join", "Voxel Join and Separate", 56);
+    configure("voxel.join_commit", "Voxel Join and Separate", 57);
+    configure("voxel.join_cancel", "Voxel Join and Separate", 58);
+    configure("voxel.separate_islands", "Voxel Join and Separate", 59);
     configure("voxel.slice", "Voxel Slice", 66);
     configure("voxel.slice_commit", "Voxel Slice", 67);
     configure("voxel.slice_cancel", "Voxel Slice", 68);
@@ -800,6 +808,14 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("scatter.commit", "Add the previewed scatter copies under one group as one undoable edit.", {"scatter", "apply"});
     describe("scatter.cancel", "Close the scatter preview without changing the scene.", {"scatter"});
     describe("voxel.slice", "Preview a cell-centre plane cut; keep front, back, or both as separate objects.", {"slice", "cut", "plane"});
+    describe("voxel.join",
+             "Preview merging the other selected voxel objects into the active one as one object (not a group); off-grid objects ask to resample or group instead.",
+             {"join", "merge", "combine", "weld", "attach", "unite", "one object"});
+    describe("voxel.join_commit", "Apply the open Join preview in one undo step.", {"join", "apply"});
+    describe("voxel.join_cancel", "Close Join without changing the scene.", {"join", "escape"});
+    describe("voxel.separate_islands",
+             "Split each selected voxel object into its connected pieces; the largest piece stays, the others become sibling objects in place.",
+             {"separate", "split", "islands", "pieces", "detach", "loose parts", "break apart"});
     describe("voxel.slice_commit", "Apply the open Slice preview in one undo step.", {"slice", "apply"});
     describe("voxel.slice_cancel", "Close Slice without changing the scene.", {"slice", "escape"});
     describe("voxel.boolean_union",

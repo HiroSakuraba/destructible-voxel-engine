@@ -913,6 +913,7 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "transform.rotate", ShortcutContext::Viewport, keyboard_shortcut("e"));
     bind(dve, "transform.scale", ShortcutContext::Viewport, keyboard_shortcut("r"));
     bind(dve, "transform.universal", ShortcutContext::Viewport, keyboard_shortcut("t"));
+    bind(dve, "scatter.brush", ShortcutContext::Viewport, keyboard_shortcut("y"));
     bind(dve, "transform.space", ShortcutContext::Viewport, keyboard_shortcut("space"));
     bind(dve, "view.frame", ShortcutContext::Viewport, keyboard_shortcut("f"),
          mouse_shortcut("mouse1", false, false, false, ShortcutActivation::DoubleClick));

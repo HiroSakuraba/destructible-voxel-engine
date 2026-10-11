@@ -134,7 +134,7 @@ enum class TextEditKind : std::uint8_t {
     Text3DLetterSpacing, Text3DFaceMaterial, Text3DSideMaterial, Text3DFontPath,
     Text3DAlignment, Text3DFillRule, GaborDensity, GaborTint, GaborEmission,
     GaborAnisotropy, GaborShadowStrength, GaborLodBias, HierarchyFilter, AssetSearch,
-    AssetRename, AiPrompt
+    AssetRename, AiPrompt, ScatterSetting  // ScatterSetting: objectId holds the field index
 };
 
 struct TextEditState {
@@ -286,6 +286,9 @@ struct NativeEditorLayout {
     UiRect hierarchyFilterBox{};
     std::vector<UiRect> inspectorToggles;
     std::vector<UiRect> inspectorFields; // [0]=Position line, [1]=Rotation line
+    // Scatter settings rows (one per NativeEditorController::ScatterSettingField) while the
+    // scatter settings panel replaces the object inspector; empty otherwise.
+    std::vector<UiRect> scatterSettingRows;
     // Inspector detail text at or below this y is not drawn (the flag toggles sit
     // there when the inspector is too short for both); always <= inspector bottom.
     int inspectorContentClipY{};
@@ -715,7 +718,33 @@ public:
     [[nodiscard]] bool scatter_active() const noexcept { return scatterActive_; }
     [[nodiscard]] const ScatterSettings& scatter_settings() const noexcept { return scatterSettings_; }
     [[nodiscard]] const ScatterPlan& scatter_plan() const noexcept { return scatterPlan_; }
-    [[nodiscard]] EditorObjectId scatter_target() const noexcept { return scatterTarget_; }
+    [[nodiscard]] EditorObjectId scatter_target() const noexcept { return scatterTargets_.empty() ? 0 : scatterTargets_.front(); }
+    [[nodiscard]] const std::vector<EditorObjectId>& scatter_targets() const noexcept { return scatterTargets_; }
+    // Two-step selection for several surfaces: Create > Set Scatter Sources remembers the
+    // selected objects (and the Assets-panel prefab) as what to copy; afterwards every selected
+    // voxel object is a surface for Scatter Objects, and the brush paints those sources. Stays
+    // set until Clear Scatter Sources (or until the sources are deleted).
+    bool set_scatter_sources();
+    void clear_scatter_sources();
+    [[nodiscard]] bool scatter_sources_pinned() const noexcept { return !pinnedScatterRoots_.empty() || pinnedScatterPrefab_ != nullptr; }
+    [[nodiscard]] const std::vector<EditorObjectId>& pinned_scatter_sources() const noexcept { return pinnedScatterRoots_; }
+    // Scatter settings panel: replaces the object inspector while the fill preview is open or the
+    // Scatter brush is the active tool. Click a row to type a value (Align toggles); the wheel
+    // over a row nudges it. Settings are stored on the scatter group they made.
+    enum class ScatterSettingField : std::uint8_t {
+        Count, Spacing, Seed, Align, YawJitter, MinScale, MaxScale, BrushRadius, BrushDensity
+    };
+    static constexpr std::size_t kScatterSettingFieldCount = 9;
+    struct ScatterSettingRow {
+        ScatterSettingField field{};
+        std::string label;
+        std::string value;
+        bool used{true};  // false: shown dimmed (e.g. brush radius while filling)
+    };
+    [[nodiscard]] bool scatter_settings_panel_active() const noexcept;
+    [[nodiscard]] std::vector<ScatterSettingRow> scatter_setting_rows() const;
+    bool set_scatter_setting(ScatterSettingField field, std::string_view text, std::string* error = nullptr);
+    void nudge_scatter_setting(ScatterSettingField field, int steps);
     [[nodiscard]] std::vector<std::string> scatter_preview_lines() const;
     // Why Scatter Objects cannot start with the current selection; empty when it can.
     [[nodiscard]] std::string scatter_disabled_reason() const;
@@ -825,8 +854,15 @@ private:
     EditorVoxelSliceSession voxelSlice_{};
     EditorVoxelBooleanSession voxelBoolean_{};
     bool scatterActive_{};
-    EditorObjectId scatterTarget_{};
+    std::vector<EditorObjectId> scatterTargets_;
     std::vector<EditorObjectId> scatterSourceRoots_;
+    std::vector<EditorObjectId> pinnedScatterRoots_;
+    std::shared_ptr<const EditorPrefabAsset> pinnedScatterPrefab_;
+    // Scatter settings come from the newest scatter group the first time a scene scatters (see
+    // adopt_scatter_settings); this remembers which scene that was.
+    std::optional<std::filesystem::path> scatterSettingsSceneKey_;
+    void adopt_scatter_settings();
+    [[nodiscard]] std::shared_ptr<const EditorPrefabAsset> load_selected_scatter_prefab(std::string* error) const;
     std::shared_ptr<const EditorPrefabAsset> scatterPrefab_;
     ScatterSettings scatterSettings_{};
     ScatterPlan scatterPlan_{};
@@ -836,7 +872,6 @@ private:
     std::vector<EditorObjectId> brushSourceRoots_;
     std::shared_ptr<const EditorPrefabAsset> brushPrefab_;
     std::optional<EditorObjectId> brushGroup_;
-    float brushRadius_{2.0F};
     std::optional<Float3> brushCursor_;
     bool brushStroking_{};
     bool brushErasing_{};

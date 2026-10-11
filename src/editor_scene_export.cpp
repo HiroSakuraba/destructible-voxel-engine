@@ -155,7 +155,8 @@ struct VoxelRange {
 
 // Keeps the component list the runtime can take: GameWorld accepts any component that passes
 // validate_components; known dve.* types must also match their schema; unknown dve.* types are
-// engine-reserved names this runtime does not implement. dve.prefab_instance is editor-only.
+// engine-reserved names this runtime does not implement. dve.prefab_instance and
+// dve.editor_scatter are editor-only.
 std::vector<Component> exportable_components(const EditorObject& object, const ComponentTypeRegistry& registry,
                                              const std::function<void(std::string)>& warn,
                                              const std::string& label) {
@@ -163,6 +164,7 @@ std::vector<Component> exportable_components(const EditorObject& object, const C
     bool hasMembership = false;
     for (const Component& component : object.components) {
         if (component.type == "dve.prefab_instance") continue;
+        if (component.type == "dve.editor_scatter") continue;  // scatter settings: editor-only
         std::string reason;
         if (!validate_components(std::span<const Component>(&component, 1U), nullptr, &reason)) {
         } else if (component.type.starts_with("dve.")) {

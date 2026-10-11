@@ -392,9 +392,9 @@ int main(int argc, char** argv) {
     std::string synthPage;
     std::vector<std::string> dispatchActions;
     std::vector<std::uint64_t> startupSelection;
-    std::vector<std::string> startupKeys;
+    // Ordered headless input: (kind, value) with kind "key", "drag", "type" or "wheel".
+    std::vector<std::pair<std::string, std::string>> startupInput;
     std::optional<std::pair<int, int>> startupHover;
-    std::vector<std::string> startupDrags;
     std::optional<float> cliZoom;
     bool noMidi = false;
     std::optional<std::string> fakeMidiPorts;
@@ -423,7 +423,7 @@ int main(int argc, char** argv) {
         else if (argument == "--select" && index + 1 < argc) startupSelection.push_back(std::strtoull(argv[++index], nullptr, 10));
         // Headless verification helpers: press keys (e.g. synth computer-keyboard notes)
         // and move the pointer to logical X,Y (hover tooltips) after the first layout.
-        else if (argument == "--key-down" && index + 1 < argc) startupKeys.push_back(argv[++index]);
+        else if (argument == "--key-down" && index + 1 < argc) startupInput.emplace_back("key", argv[++index]);
         else if (argument == "--hover" && index + 1 < argc) {
             const std::string point = argv[++index];
             const auto comma = point.find(',');
@@ -433,7 +433,11 @@ int main(int argc, char** argv) {
         // Repeatable: a primary-button drag "x1,y1,x2,y2[,shift|ctrl][,hold]" in logical pixels,
         // run after --key-down (same start and end is a click; "hold" leaves the button down so a
         // screenshot shows an in-progress stroke).
-        else if (argument == "--drag" && index + 1 < argc) startupDrags.push_back(argv[++index]);
+        else if (argument == "--drag" && index + 1 < argc) startupInput.emplace_back("drag", argv[++index]);
+        // Repeatable: types text into the open text field, and turns the wheel ("x,y,steps[,ctrl]"),
+        // in order with --key-down and --drag.
+        else if (argument == "--type" && index + 1 < argc) startupInput.emplace_back("type", argv[++index]);
+        else if (argument == "--wheel" && index + 1 < argc) startupInput.emplace_back("wheel", argv[++index]);
         else if (argument == "--no-midi") noMidi = true;
         // Headless verification: open User settings on this category (e.g. Audio).
         else if (argument == "--settings-category" && index + 1 < argc) settingsCategory = argv[++index];
@@ -542,23 +546,29 @@ int main(int argc, char** argv) {
         };
         const auto logical = [&](int physical) { return ui_zoom_to_logical(physical, zoom); };
         sync_zoom(initialWidth, initialHeight);
-        for (const std::string& key : startupKeys) controller.key_down(key, false, false, false);
-        for (const std::string& drag : startupDrags) {
+        for (const auto& [kind, value] : startupInput) {
+            if (kind == "key") { controller.key_down(value, false, false, false); continue; }
+            if (kind == "type") { controller.text_input(value); continue; }
             std::vector<std::string> parts;
             for (std::size_t start = 0;;) {
-                const std::size_t comma = drag.find(',', start);
-                parts.push_back(drag.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+                const std::size_t comma = value.find(',', start);
+                parts.push_back(value.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
                 if (comma == std::string::npos) break;
                 start = comma + 1;
             }
-            if (parts.size() < 4) continue;
             std::uint32_t modifiers = 0;
             bool hold = false;
-            for (std::size_t part = 4; part < parts.size(); ++part) {
-                if (parts[part] == "shift") modifiers |= 1U;
-                else if (parts[part] == "ctrl") modifiers |= 2U;
-                else if (parts[part] == "hold") hold = true;
+            for (const std::string& part : parts) {
+                if (part == "shift") modifiers |= 1U;
+                else if (part == "ctrl") modifiers |= 2U;
+                else if (part == "hold") hold = true;
             }
+            if (kind == "wheel" && parts.size() >= 3) {
+                controller.pointer_wheel(std::strtof(parts[2].c_str(), nullptr), std::atoi(parts[0].c_str()),
+                                         std::atoi(parts[1].c_str()), modifiers);
+                continue;
+            }
+            if (kind != "drag" || parts.size() < 4) continue;
             const int x1 = std::atoi(parts[0].c_str()), y1 = std::atoi(parts[1].c_str());
             const int x2 = std::atoi(parts[2].c_str()), y2 = std::atoi(parts[3].c_str());
             controller.pointer_move(x1, y1, modifiers);

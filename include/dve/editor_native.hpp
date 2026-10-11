@@ -153,6 +153,17 @@ struct TextEditState {
     // convention is the only usable behavior; without this, typing would append after the
     // pre-filled text instead of replacing it.
     bool replaceOnNextInput{true};
+    std::set<EditorObjectId> transformSelection;
+    std::vector<ObjectTransformChange> transformSnapshot;
+    Float3 transformPivot{};
+};
+
+enum class InspectorFlagState : std::uint8_t { Off, On, Mixed };
+struct InspectorSelectionSummary {
+    std::size_t count{};
+    bool positionMixed{};
+    bool rotationMixed{};
+    std::array<InspectorFlagState, 5> flags{};
 };
 
 struct ContextMenuItem {
@@ -778,6 +789,8 @@ public:
     [[nodiscard]] bool apply_audio_settings_to_runtime() noexcept;
     [[nodiscard]] CommandResult nudge_selection(Float3 worldDelta);
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
+    [[nodiscard]] InspectorSelectionSummary inspector_selection_summary() const;
+    [[nodiscard]] CommandResult toggle_inspector_flag(std::size_t index);
     [[nodiscard]] CommandResult set_primary_rotation_euler_degrees(Float3 degrees);
     [[nodiscard]] CommandResult rescale_primary_voxel_object(Float3 scale);
     // Scale Voxel Size (Edit menu, command palette): multiplies the voxel size of every selected

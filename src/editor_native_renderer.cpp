@@ -4504,18 +4504,22 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             }
         } else if (controller.workspace().selected_object()) {
             if (const EditorObject* object = controller.workspace().document().find_object(*controller.workspace().selected_object())) {
+                const auto selectionSummary = controller.inspector_selection_summary();
+                const bool multiple = selectionSummary.count > 1;
                 const bool renamingHere = controller.text_edit().kind == TextEditKind::ObjectName;
                 drawInspectorText(layout.inspector.x + 12, inspectorTop + 48,
-                             renamingHere ? controller.text_edit().buffer + "_" : object->name,
+                             renamingHere ? controller.text_edit().buffer + "_"
+                                 : (multiple ? std::to_string(selectionSummary.count) + " selected; primary " : "") + object->name,
                              renamingHere ? accent : text);
                 drawInspectorText(layout.inspector.x + 12, inspectorTop + 69,
-                             "ID " + std::to_string(object->id) + "   Voxels " + std::to_string(object->voxels->occupied_voxel_count()), muted);
+                             multiple ? "Group edits from primary (m / deg)"
+                                 : "ID " + std::to_string(object->id) + "   Voxels " + std::to_string(object->voxels->occupied_voxel_count()), muted);
                 const bool editingPosition = controller.text_edit().kind == TextEditKind::Position;
                 if (editingPosition) inspectorPainter.fill(layout.inspectorFields.empty() ? UiRect{} : layout.inspectorFields[0], rgb(40,54,74));
                 drawInspectorText(layout.inspector.x + 12, inspectorTop + 91,
                              editingPosition
                                  ? "Position  " + controller.text_edit().buffer + "_"
-                                 : "Position  " + std::to_string(object->transform.position.x).substr(0,5) + "  " +
+                                 : "Position  " + (selectionSummary.positionMixed ? std::string("Mixed; primary ") : std::string()) + std::to_string(object->transform.position.x).substr(0,5) + "  " +
                                        std::to_string(object->transform.position.y).substr(0,5) + "  " +
                                        std::to_string(object->transform.position.z).substr(0,5),
                              editingPosition ? accent : muted);
@@ -4526,7 +4530,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                 drawInspectorText(layout.inspector.x + 12, inspectorTop + 113,
                              editingRotation
                                  ? "Rotation  " + controller.text_edit().buffer + "_"
-                                 : "Rotation  " + std::to_string(euler.x).substr(0,6) + "  " +
+                                 : "Rotation  " + (selectionSummary.rotationMixed ? std::string("Mixed; primary ") : std::string()) + std::to_string(euler.x).substr(0,6) + "  " +
                                        std::to_string(euler.y).substr(0,6) + "  " + std::to_string(euler.z).substr(0,6),
                              editingRotation ? accent : muted);
                 if (object->text3d) {
@@ -4665,14 +4669,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     }
                 }
                 static constexpr std::array<std::string_view,5> labels{"Visible","Locked","Anchored","Structural","Collision"};
-                const std::array<bool,5> values{object->flags.visible,object->flags.locked,object->flags.anchored,
-                                                object->flags.structural,object->flags.collisionEnabled};
+                const auto& values = selectionSummary.flags;
                 for (std::size_t i = 0; i < layout.inspectorToggles.size(); ++i) {
                     const UiRect row = layout.inspectorToggles[i];
-                    painter.fill({row.x,row.y,18,18}, values[i] ? accent : panel2);
+                    painter.fill({row.x,row.y,18,18}, values[i] == InspectorFlagState::On ? accent : panel2);
                     painter.outline({row.x,row.y,18,18}, border);
-                    if (values[i]) painter.text(row.x+4,row.y+14,"x",text);
-                    painter.text(row.x+27,row.y+15,labels[i],text);
+                    if (values[i] == InspectorFlagState::On) painter.text(row.x+4,row.y+14,"x",text);
+                    else if (values[i] == InspectorFlagState::Mixed) painter.text(row.x+4,row.y+14,"-",text);
+                    const std::string label = std::string(labels[i]) +
+                        (values[i] == InspectorFlagState::Mixed ? " (Mixed)" : "");
+                    painter.text(row.x+27,row.y+15,elide_text_to_width(painter, label, std::max(0, row.width-27)),text);
                 }
             }
         } else {

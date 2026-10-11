@@ -3130,6 +3130,16 @@ void NativeEditorController::begin_text_edit(TextEditKind kind, EditorObjectId o
     textEdit_.buffer = std::move(initialBuffer);
     textEdit_.error.clear();
     textEdit_.replaceOnNextInput = true;
+    textEdit_.transformSelection.clear();
+    textEdit_.transformSnapshot.clear();
+    if (kind == TextEditKind::Position || kind == TextEditKind::Rotation) {
+        textEdit_.transformSelection = workspace_.selected_objects();
+        textEdit_.transformSnapshot = selection_transform_snapshot();
+        textEdit_.transformPivot = selection_pivot();
+        set_status(kind == TextEditKind::Position
+            ? "Position in meters: moves selection by the primary object's delta"
+            : "Rotation in degrees: rotates selection together about the current pivot", false, 8.0F);
+    }
     close_context_menu();
     commandPaletteOpen_ = false;
     close_top_level_menu();
@@ -3321,6 +3331,30 @@ void NativeEditorController::commit_text_edit() {
         return;
     }
 
+    // Transform fields describe the primary of the selection captured when editing began.
+    // A selection or transform changed by another route must never receive this old value.
+    if (kind == TextEditKind::Position || kind == TextEditKind::Rotation) {
+        if (textEdit_.replaceOnNextInput) { textEdit_ = {}; return; }
+        const auto sameVector = [](Float3 a, Float3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
+        bool stale = workspace_.selected_object() != textEdit_.objectId ||
+                     workspace_.selected_objects() != textEdit_.transformSelection;
+        for (const auto& change : textEdit_.transformSnapshot) {
+            const auto* object = workspace_.document().find_object(change.id);
+            if (!object) { stale = true; break; }
+            const auto& a = object->transform.rotation; const auto& b = change.before.rotation;
+            if (!sameVector(object->transform.position, change.before.position) ||
+                a.x != b.x || a.y != b.y || a.z != b.z || a.w != b.w) stale = true;
+            if (object->flags.locked) {
+                set_status("Unlock every selected object before editing its transform", true, 8.0F);
+                textEdit_ = {}; return;
+            }
+        }
+        if (kind == TextEditKind::Rotation && !sameVector(selection_pivot(), textEdit_.transformPivot)) stale = true;
+        if (stale) {
+            set_status("Selection or transform changed: reopen the field before applying a value", true, 8.0F);
+            textEdit_ = {}; return;
+        }
+    }
     const auto parsed = parse_float3_line(textEdit_.buffer);
     if (!parsed) {
         set_status("Could not parse three numbers", true);
@@ -4365,35 +4399,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         if (workspace_.selected_object()) {
             for (std::size_t index = 0; index < layout_.inspectorToggles.size(); ++index) {
                 if (!layout_.inspectorToggles[index].contains(x, y)) continue;
-                const EditorObject* primary = workspace_.document().find_object(*workspace_.selected_object());
-                if (!primary) break;
-                bool target = false;
-                switch (index) {
-                    case 0: target = !primary->flags.visible; break;
-                    case 1: target = !primary->flags.locked; break;
-                    case 2: target = !primary->flags.anchored; break;
-                    case 3: target = !primary->flags.structural; break;
-                    case 4: target = !primary->flags.collisionEnabled; break;
-                    default: break;
-                }
-                std::vector<ObjectFlagsChange> changes;
-                for (EditorObjectId id : workspace_.selected_objects()) {
-                    const EditorObject* object = workspace_.document().find_object(id);
-                    if (!object) continue;
-                    EditorObjectFlags after = object->flags;
-                    switch (index) {
-                        case 0: after.visible = target; break;
-                        case 1: after.locked = target; break;
-                        case 2: after.anchored = target; break;
-                        case 3: after.structural = target; break;
-                        case 4: after.collisionEnabled = target; break;
-                        default: break;
-                    }
-                    changes.push_back({id, object->flags, after});
-                }
-                const CommandResult result = workspace_.commands().execute(
-                    workspace_.document(), std::make_unique<SetObjectFlagsBatchCommand>(std::move(changes)));
-                set_status(result.success ? "Updated selected object policies" : result.message, !result.success);
+                (void)toggle_inspector_flag(index);
                 focusRegion_ = EditorFocusRegion::Inspector;
                 return;
             }
@@ -7706,6 +7712,61 @@ CommandResult NativeEditorController::nudge_selection(Float3 worldDelta) {
     CommandResult result = workspace_.commands().execute(
         workspace_.document(), std::make_unique<TransformObjectsCommand>(std::move(changes), "Nudge objects"));
     set_status(result.success ? "Nudged selection" : result.message, !result.success);
+    return result;
+}
+
+InspectorSelectionSummary NativeEditorController::inspector_selection_summary() const {
+    InspectorSelectionSummary summary;
+    const EditorObject* first = nullptr;
+    std::array<bool, 5> baseline{};
+    for (const auto id : workspace_.selected_objects()) {
+        const auto* object = workspace_.document().find_object(id);
+        if (!object) continue;
+        const std::array<bool, 5> flags{object->flags.visible, object->flags.locked,
+            object->flags.anchored, object->flags.structural, object->flags.collisionEnabled};
+        if (!first) {
+            first = object; baseline = flags;
+            for (std::size_t i = 0; i < flags.size(); ++i)
+                summary.flags[i] = flags[i] ? InspectorFlagState::On : InspectorFlagState::Off;
+        } else {
+            const auto& a = object->transform.position; const auto& b = first->transform.position;
+            summary.positionMixed |= a.x != b.x || a.y != b.y || a.z != b.z;
+            const auto qa = normalize(object->transform.rotation), qb = normalize(first->transform.rotation);
+            // q and -q are the same rotation; Euler representations need not be identical.
+            const float alignment = std::abs(qa.x*qb.x + qa.y*qb.y + qa.z*qb.z + qa.w*qb.w);
+            summary.rotationMixed |= alignment < 1.0F - 1.0e-6F;
+            for (std::size_t i = 0; i < flags.size(); ++i)
+                if (flags[i] != baseline[i]) summary.flags[i] = InspectorFlagState::Mixed;
+        }
+        ++summary.count;
+    }
+    return summary;
+}
+
+CommandResult NativeEditorController::toggle_inspector_flag(std::size_t index) {
+    if (index >= 5) return CommandResult::fail("invalid inspector flag");
+    const auto summary = inspector_selection_summary();
+    if (summary.count == 0) return CommandResult::fail("select an object first");
+    // A mixed checkbox first enables every selected object, regardless of primary order.
+    const bool target = summary.flags[index] != InspectorFlagState::On;
+    std::vector<ObjectFlagsChange> changes;
+    for (const auto id : workspace_.selected_objects()) {
+        const auto* object = workspace_.document().find_object(id);
+        if (!object) continue;
+        auto after = object->flags;
+        switch (index) {
+            case 0: after.visible = target; break;
+            case 1: after.locked = target; break;
+            case 2: after.anchored = target; break;
+            case 3: after.structural = target; break;
+            case 4: after.collisionEnabled = target; break;
+            default: break;
+        }
+        changes.push_back({id, object->flags, after});
+    }
+    const auto result = workspace_.commands().execute(workspace_.document(),
+        std::make_unique<SetObjectFlagsBatchCommand>(std::move(changes)));
+    set_status(result.success ? "Updated selected object policies" : result.message, !result.success);
     return result;
 }
 

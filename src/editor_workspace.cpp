@@ -491,6 +491,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"window.gabor_inspector","Window","Gabor Volume Inspector",""},
         {"view.frame","View","Frame Selection","F"}, {"view.grid","View","Grid","G"},
         {"view.isolate_selection","View","Isolate Selection",""},
+        {"view.drop_to_surface","View","Drop Selection to Surface",""},
         {"view.follow_selection","View","Follow Selection",""},
         {"view.lit","View","Shading: Lit",""}, {"view.unlit","View","Shading: Unlit",""},
         {"view.wireframe","View","Shading: Wireframe",""}, {"view.material_ids","View","Shading: Material IDs",""},
@@ -598,6 +599,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.select_shrink","Voxel","Shrink Voxel Selection",""},
         {"voxel.select_invert","Voxel","Invert Voxel Selection",""},
         {"voxel.extract_selection","Voxel","Extract Selected Voxels to New Object",""},
+        {"voxel.fill","Voxel","Flood Fill",""},
+        {"voxel.rebuild_collision","Voxel","Rebuild Collision",""},
+        {"voxel.rebuild_brickmaps","Voxel","Rebuild Brickmaps",""},
         {"voxel.join","Voxel","Join Objects",""},
         {"voxel.join_commit","Voxel","Commit Join",""},
         {"voxel.join_cancel","Voxel","Cancel Join",""},
@@ -729,6 +733,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (std::string_view id : {"voxel.select_all", "voxel.select_none", "voxel.select_grow", "voxel.select_shrink",
                                 "voxel.select_invert", "voxel.extract_selection"})
         configure(id, "Voxel Selection", 50);
+    configure("voxel.fill", "Voxel Edit", 50);
+    configure("voxel.rebuild_collision", "Collision", 80);
+    configure("voxel.rebuild_brickmaps", "Collision", 81);
+    configure("view.drop_to_surface", "Camera", 21);
     configure("voxel.join", "Voxel Join and Separate", 56);
     configure("voxel.join_commit", "Voxel Join and Separate", 57);
     configure("voxel.join_cancel", "Voxel Join and Separate", 58);

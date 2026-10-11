@@ -3504,22 +3504,23 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             for (const EditorObjectId id : controller.workspace().selected_objects())
                 if (const EditorObject* object = shadingDocument.find_object(id)) draw_object(*object);
         if (skipped > 0)
-            viewportPainter.text(viewport.x + 10, viewport.y + viewport.height - 30,
+            // Above the shading-mode tag (bottom left), so the two never overlap.
+            viewportPainter.text(viewport.x + 10, viewport.y + viewport.height - 36,
                                  "Collision: " + std::to_string(drawn) + " boxes shown, " + std::to_string(skipped) + " more not drawn",
                                  rgb(255,170,90));
     }
     if (shading != ShadingMode::Lit) {
         const std::string label = "View: " + std::string(shading_mode_label(shading)) + "  (Alt+1 Lit)";
-        const int width = viewportPainter.text_width(label) + 12;
-        const UiRect tag{viewport.x + 8, viewport.y + viewport.height - 26, width, 18};
+        const int tagWidth = viewportPainter.text_width(label) + 12;
+        const UiRect tag{viewport.x + 8, viewport.y + viewport.height - 26, tagWidth, 18};
         viewportPainter.fill(tag, rgb(18,23,31));
         viewportPainter.outline(tag, rgb(96,170,255));
         viewportPainter.text(tag.x + 6, tag.y + 13, label, rgb(190,220,255));
     }
     if (controller.flood_fill_armed()) {
         const std::string label = "Flood Fill: click a voxel  (Esc cancels)";
-        const int width = viewportPainter.text_width(label) + 12;
-        const UiRect tag{viewport.x + viewport.width / 2 - width / 2, viewport.y + viewport.height - 26, width, 18};
+        const int tagWidth = viewportPainter.text_width(label) + 12;
+        const UiRect tag{viewport.x + viewport.width / 2 - tagWidth / 2, viewport.y + viewport.height - 26, tagWidth, 18};
         viewportPainter.fill(tag, rgb(18,23,31));
         viewportPainter.outline(tag, rgb(255,206,72));
         viewportPainter.text(tag.x + 6, tag.y + 13, label, rgb(255,220,120));
@@ -5275,9 +5276,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                              row.y + 20, result.shortcut, muted);
             const std::string detail = !result.enabled && !result.disabledReason.empty()
                 ? result.disabledReason : result.description;
-            if (!detail.empty())
-                painter.text(row.x + row.width / 2, row.y + row.height - 8,
-                             detail, !result.enabled ? rgb(255,150,120) : muted);
+            if (!detail.empty()) {
+                // Starts after the breadcrumb (at most mid-row) and is elided to the row, so a long
+                // disabled reason never runs past the panel; running the command shows it in full.
+                const int detailX = std::min(row.x + row.width / 2,
+                                             row.x + 86 + painter.text_width(result.breadcrumb) + 24);
+                painter.text(detailX, row.y + row.height - 8,
+                             elide_text_to_width(painter, detail, std::max(0, row.x + row.width - 10 - detailX)),
+                             !result.enabled ? rgb(255,150,120) : muted);
+            }
             painter.line(row.x, row.y + row.height - 1, row.x + row.width,
                          row.y + row.height - 1, border);
         }

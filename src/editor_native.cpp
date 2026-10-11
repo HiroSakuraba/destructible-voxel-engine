@@ -29,6 +29,22 @@
 
 namespace dve::editor {
 namespace {
+// Reasons shown for commands this editor build does not implement (menu, Command Center, status).
+constexpr std::string_view kAudioImportUnavailable =
+    "Not connected in this editor yet: this build has no audio importer behind Audio > Import Audio";
+constexpr std::string_view kCreatePolygonUnavailable =
+    "Not in this editor yet: polygon meshes are not authored here; File > Import Model brings a model in as voxels";
+constexpr std::string_view kCookUnavailable =
+    "Not connected in this editor yet: cook content with the dve_cook_* command-line tools";
+constexpr std::string_view kPackageUnavailable =
+    "Not connected in this editor yet: package the game with the dve_pack command-line tool";
+constexpr std::string_view kDocsUnavailable =
+    "Not in this editor yet: the documentation is in the engine's docs/ folder";
+constexpr std::string_view kRebuildBrickmapsUnavailable =
+    "Nothing to rebuild: this viewport draws voxels directly (brickmaps are built by the runtime renderer)";
+} // namespace
+
+namespace {
 
 // The controller always lays out and hit-tests in logical pixels at 1x. UI zoom
 // (`editor.ui_scale`) is applied uniformly by the host (logical -> physical mapping plus
@@ -239,6 +255,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Play or Simulate started");
     cancel_scatter("Scatter preview closed: Play or Simulate started");
     cancel_voxel_join("Join preview closed: Play or Simulate started");
+    floodFillArmed_ = false;  // an armed Flood Fill must not edit the scene from a Play click
     close_context_menu();
     close_top_level_menu();
     activePointerCommand_.clear();
@@ -1905,9 +1922,23 @@ void NativeEditorController::refresh_menu_state() noexcept {
                 ? std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId) : nullptr;
             std::string extension = asset ? asset->relativePath.extension().string() : std::string();
             for (char& ch : extension) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            enabled("file.import", extension == ".obj" || extension == ".gltf" || extension == ".glb",
-                    "Select an OBJ, glTF or GLB model in the Assets panel first.");
+            const bool model = extension == ".obj" || extension == ".gltf" || extension == ".glb";
+            for (std::string_view id : {"file.import", "polygon.import"})
+                enabled(id, model && !playActive, playActive ? "Stop Play or Simulate before importing."
+                                                             : "Select an OBJ, glTF or GLB model in the Assets panel first.");
         }
+        for (std::string_view id : {"file.open_scene", "file.open_project", "file.save_as"})
+            enabled(id, !playActive && workspace_.mode() == EditorMode::Edit, "Stop Play or Simulate first.");
+        enabled("voxel.fill", !playActive && workspace_.mode() == EditorMode::Edit, "Stop Play or Simulate before filling.");
+        enabled("view.drop_to_surface", hasSelection && !playActive && workspace_.mode() == EditorMode::Edit,
+                playActive || workspace_.mode() != EditorMode::Edit ? "Stop Play or Simulate before moving objects."
+                                                                    : "Select the objects to drop first.");
+        enabled("view.follow_selection", followSelection_ || hasSelection, "Select something to follow first.");
+        // Not implemented in this editor build: disabled with the reason, so the menu and the
+        // Command Center say so before the command is tried.
+        enabled("voxel.rebuild_brickmaps", false, kRebuildBrickmapsUnavailable);
+        enabled("audio.import", false, kAudioImportUnavailable);
+        enabled("create.polygon", false, kCreatePolygonUnavailable);
         const std::string joinReason = voxel_join_disabled_reason();
         enabled("voxel.join", joinReason.empty(), joinReason);
         const std::string joinBlocked = voxelJoin_.blocked_reason(workspace_.document());
@@ -1939,8 +1970,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
         checked("voxel.boolean_operands_keep", voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Keep);
     }
     enabled("text3d.cancel", text3dAuthoring_.active(), "No 3D text authoring session is active.");
-    enabled("build.cook", !playActive, "Stop Play or Simulate before cooking content.");
-    enabled("build.package", !playActive, "Stop Play or Simulate before packaging the game.");
+    // Cook, Package and Documentation have no handler in this editor build: say so up front.
+    enabled("build.cook", false, kCookUnavailable);
+    enabled("build.package", false, kPackageUnavailable);
+    enabled("help.docs", false, kDocsUnavailable);
     enabled("camera.pilot_selected", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
     enabled("camera.align_to_view", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
     enabled("camera.keyframe_profile", selectedCameraRig_.has_value(), "Select or create a camera rig first.");
@@ -2620,7 +2653,8 @@ void NativeEditorController::update(float elapsedSeconds) {
         if (workspace_.selected_objects().empty() || playSession_.active()) {
             followSelection_ = false;
             followAnchor_.reset();
-            set_status("Stopped following: nothing selected");
+            set_status(playSession_.active() ? "Stopped following the selection: Play started"
+                                             : "Stopped following: nothing selected");
             refresh_menu_state();
         } else if (!navigation_pointer_active()) {
             const Float3 pivot = selection_pivot();
@@ -2877,10 +2911,10 @@ void NativeEditorController::confirm_pending_destructive_action() {
     } else if (action == PendingDestructiveAction::NewScene) {
         create_new_scene_now();
         set_status("New scene");
-    } else if (action == PendingDestructiveAction::OpenScene) {
-        (void)open_scene_now(pendingOpenPath_);
-    } else if (action == PendingDestructiveAction::OpenProject) {
-        (void)open_project_now(pendingOpenPath_);
+    } else if (action == PendingDestructiveAction::OpenScene || action == PendingDestructiveAction::OpenProject) {
+        const std::filesystem::path path = std::exchange(pendingOpenPath_, {});
+        if (action == PendingDestructiveAction::OpenScene) (void)open_scene_now(path);
+        else (void)open_project_now(path);
     }
 }
 
@@ -3765,8 +3799,15 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             if (filePicker_.kind == FilePickerKind::SaveSceneAs) {
                 // Clicking an existing scene fills its name in; Enter then asks before replacing.
                 const auto matches = file_picker_matches();
-                if (filePicker_.selected < matches.size())
-                    filePicker_.query = filePicker_.entries[matches[filePicker_.selected]].path.stem().string();
+                if (filePicker_.selected < matches.size()) {
+                    // A scene outside scenes/ keeps its folder, so Enter targets that same file.
+                    const std::filesystem::path& clicked = filePicker_.entries[matches[filePicker_.selected]].path;
+                    std::error_code relativeError;
+                    std::filesystem::path relative = std::filesystem::relative(clicked, projectRoot_, relativeError);
+                    if (relativeError || relative.empty() || *relative.begin() == "..") relative = clicked;
+                    relative.replace_extension();
+                    filePicker_.query = relative.parent_path() == "scenes" ? relative.filename().string() : relative.generic_string();
+                }
                 filePicker_.confirmReplace.reset();
             } else {
                 (void)accept_file_picker();
@@ -5717,7 +5758,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "voxel.commit") { finish_voxel_stroke(); set_status("Voxel operation committed"); return true; }
     if (actionId == "voxel.rebuild_brickmaps") {
         // The native editor draws voxels directly from the document; it keeps no brickmaps.
-        set_status("Nothing to rebuild: this viewport draws voxels directly (brickmaps are built by the runtime renderer)", true, 6.0F);
+        set_status(std::string(kRebuildBrickmapsUnavailable), true, 6.0F);
         return false;
     }
     if (actionId == "voxel.rebuild_collision") return rebuild_collision_proxies();
@@ -5928,14 +5969,9 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_status("Not in this editor yet: material instances and previews; edit materials under Materials > Material Library", true, 6.0F);
         return false;
     }
-    if (actionId.starts_with("polygon.")) {
-        set_status("Not in this editor yet: polygon mesh editing (vertex/edge/face tools); models import as voxels (File > Import Model)", true, 6.0F);
-        return false;
-    }
-    if (actionId.starts_with("audio.") || actionId.starts_with("sequencer.")) {
-        set_status("Open the audio editor or sequencer first; this command works inside it", true, 6.0F);
-        return false;
-    }
+    // polygon.* / audio.* / sequencer.* commands without their own handler are refused at the
+    // end of dispatch (after polygon.lod, polygon.import, audio.settings, audio.mixer, ... had
+    // their chance; a catch-all here used to shadow those menu items).
 
     if (actionId == "edit.preferences") { open_settings(SettingScope::User, "General"); return true; }
     if (actionId == "edit.project_settings" || actionId == "window.settings") {
@@ -6175,9 +6211,14 @@ camera_menu_dispatch_complete:
         set_camera_mode(camera::CameraRigMode::Cinematic);
         return create_camera_rig_from_view() != 0;
     }
-    if (actionId == "create.polygon" || actionId == "polygon.import") {
-        set_status("Polygon import is available through File > Import Model and the .dmesh cooker");
-        return true;
+    if (actionId == "polygon.import") {
+        // Models import as voxels: this is File > Import Model (disabled with a reason until a
+        // model is selected in the Assets panel).
+        return import_selected_model();
+    }
+    if (actionId == "create.polygon") {
+        set_status(std::string(kCreatePolygonUnavailable), true, 6.0F);
+        return false;
     }
     if (actionId == "build.validate") {
         (void)validate_project();
@@ -7014,6 +7055,19 @@ camera_menu_dispatch_complete:
     if (actionId == "help.about") {
         set_status("Destructible Voxel Engine native editor (Linux/X11 authoring host)", false, 6.0F);
         return true;
+    }
+    if (actionId.starts_with("polygon.")) {
+        set_status("Not in this editor yet: polygon mesh editing (vertex/edge/face tools); models import as voxels (File > Import Model)", true, 6.0F);
+        return false;
+    }
+    if (actionId == "audio.import" || actionId == "build.cook" || actionId == "build.package" || actionId == "help.docs") {
+        set_status(std::string(actionId == "audio.import" ? kAudioImportUnavailable : actionId == "build.cook" ? kCookUnavailable
+                               : actionId == "build.package" ? kPackageUnavailable : kDocsUnavailable), true, 6.0F);
+        return false;
+    }
+    if (actionId.starts_with("audio.") || actionId.starts_with("sequencer.")) {
+        set_status("Open the audio editor or sequencer first; this command works inside it", true, 6.0F);
+        return false;
     }
     set_status("Not available in this editor build: " + std::string(actionId), true, 6.0F);
     return false;
@@ -8074,6 +8128,7 @@ void NativeEditorController::replan_scatter() {
 }
 
 bool NativeEditorController::begin_scatter() {
+    floodFillArmed_ = false;  // another tool takes the next viewport click
     const std::string reason = scatter_disabled_reason();
     if (!reason.empty()) { set_status(reason, true, 6.0F); return false; }
     // Scatter, Slice and Boolean previews share the panel slot at the top of the viewport, so
@@ -8361,6 +8416,7 @@ void NativeEditorController::keep_isolated_with_subtree(EditorObjectId root) {
 }
 
 void NativeEditorController::begin_scatter_brush_session() {
+    floodFillArmed_ = false;  // another tool takes the next viewport click
     // Sources are the set scatter sources, or else what is selected when the tool is picked.
     // Picking the tool again starts a new session (and a new group), unless a scatter group is
     // the active selection: then strokes continue that group with its stored settings.
@@ -8583,6 +8639,7 @@ std::string NativeEditorController::voxel_boolean_disabled_reason() const {
 }
 
 bool NativeEditorController::begin_voxel_boolean(VoxelBooleanOperation operation) {
+    floodFillArmed_ = false;  // another tool takes the next viewport click
     cancel_voxel_slice();
     if (voxelBoolean_.active()) {
         voxelBoolean_.set_operation(workspace_.document(), operation);
@@ -8816,6 +8873,7 @@ std::string NativeEditorController::voxel_join_disabled_reason() const {
 }
 
 bool NativeEditorController::begin_voxel_join() {
+    floodFillArmed_ = false;  // another tool takes the next viewport click
     if (const std::string reason = voxel_join_disabled_reason(); !reason.empty()) {
         set_status(reason, true, 6.0F);
         return false;
@@ -8969,6 +9027,12 @@ bool NativeEditorController::arm_flood_fill() {
         set_status("Pick a material first (sample one with Mouse4 or the material list)", true);
         return false;
     }
+    // The next click belongs to the fill: close any Join/Slice/Boolean/Scatter preview first
+    // (one preview at a time, like Join), so the fill cannot edit an object under a preview.
+    cancel_voxel_slice();
+    if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Flood Fill armed");
+    cancel_scatter("Scatter preview closed: Flood Fill armed");
+    cancel_voxel_join("Join preview closed: Flood Fill armed");
     floodFillArmed_ = true;
     set_status("Flood Fill: click a voxel to repaint its connected same-material region with material " +
                std::to_string(activeMaterial_) + " (Esc cancels)", false, 10.0F);
@@ -8977,7 +9041,15 @@ bool NativeEditorController::arm_flood_fill() {
 
 bool NativeEditorController::flood_fill_at(EditorObjectId objectId, Int3 start) {
     floodFillArmed_ = false;
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
+        set_status("Stop Play or Simulate before filling", true);
+        return false;
+    }
     const EditorObject* object = workspace_.document().find_object(objectId);
+    if (object && (!object->flags.visible || is_isolated_out(objectId))) {
+        set_status("Flood Fill: " + object->name + " is hidden or isolated out of view", true);
+        return false;
+    }
     if (!object || !object->voxels || object->text3d || object->gaborVolume) {
         set_status("Flood Fill works on voxel objects", true);
         return false;
@@ -9041,6 +9113,12 @@ bool NativeEditorController::drop_selection_to_surface() {
         const EditorObject* object = document.find_object(id);
         if (!object) continue;
         if (object->flags.locked) { set_status("Unlock " + object->name + " before dropping it", true); return false; }
+        // Same rule as Join and Scatter (#99/#100): never move what cannot be seen.
+        if (!object->flags.visible) { set_status("'" + object->name + "' is hidden. Show it or deselect it before dropping", true); return false; }
+        if (is_isolated_out(id)) {
+            set_status("'" + object->name + "' is isolated out of view. Turn isolation off or deselect it", true);
+            return false;
+        }
         bool nested = false;
         for (auto parent = object->parent; parent && !nested;) {
             nested = selected.contains(*parent);
@@ -9165,7 +9243,7 @@ std::size_t NativeEditorController::validate_project() {
         ++found;
     };
     const auto resolve = [&](const std::filesystem::path& path) {
-        return path.is_absolute() ? path : projectRoot_ / path;
+        return path.has_root_directory() || path.has_root_name() ? path : projectRoot_ / path;
     };
     std::error_code ec;
     std::string sceneError;
@@ -9245,7 +9323,7 @@ std::string lowercase_copy(std::string_view text) {
 std::string relative_label(const std::filesystem::path& path, const std::filesystem::path& root) {
     std::error_code ec;
     const auto relative = std::filesystem::relative(path, root, ec);
-    if (ec || relative.empty() || relative.native().starts_with("..")) return path.generic_string();
+    if (ec || relative.empty() || *relative.begin() == "..") return path.generic_string();
     return relative.generic_string();
 }
 
@@ -9294,6 +9372,39 @@ std::vector<std::filesystem::path> find_project_folders(const std::filesystem::p
     children(std::filesystem::current_path(ec));
     std::sort(projects.begin(), projects.end());
     return projects;
+}
+
+// File > Save As target: <name> goes to <project>/scenes/<name>.dvescene, a relative path with
+// folders is under the project, and a rooted path is taken as typed. The result must stay inside
+// the project. "Rooted" uses has_root_directory()/has_root_name(), not is_absolute(): on Windows
+// "/foo" is not is_absolute(), and appending it to the project root would leave the project.
+std::optional<std::filesystem::path> scene_save_target(std::string_view nameOrPath, const std::filesystem::path& projectRoot,
+                                                       std::string* error) {
+    std::string name(nameOrPath);
+    while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+    while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.erase(name.begin());
+    const auto fail = [&](std::string message) -> std::optional<std::filesystem::path> {
+        if (error) *error = std::move(message);
+        return std::nullopt;
+    };
+    if (name.empty()) return fail("Type a name for the scene");
+    std::filesystem::path path(name);
+    if (path.extension() != ".dvescene") path += ".dvescene";
+    const std::string fileName = path.filename().string();
+    if (path.stem().empty() || fileName.starts_with('.')) return fail("Type a name for the scene");
+    for (const char c : fileName)
+        if (static_cast<unsigned char>(c) < 32U || std::string_view("<>:\"|?*\\").find(c) != std::string_view::npos)
+            return fail("A scene name cannot contain < > : \" | ? * or \\");
+    const bool rooted = path.has_root_directory() || path.has_root_name();
+    std::filesystem::path target = rooted ? path : path.has_parent_path() ? projectRoot / path : projectRoot / "scenes" / path;
+    target = target.lexically_normal();
+    if (!projectRoot.empty()) {
+        const std::filesystem::path relative = target.lexically_relative(projectRoot.lexically_normal());
+        if (relative.empty() || *relative.begin() == "..")
+            return fail("Scenes are saved inside the project; " + target.generic_string() + " is outside " +
+                        projectRoot.filename().string());
+    }
+    return target;
 }
 
 Quaternion quaternion_from_rotation_matrix(const Matrix4& m) {
@@ -9350,8 +9461,13 @@ bool NativeEditorController::open_file_picker(FilePickerKind kind) {
         std::error_code ec;
         for (const auto& path : recent) if (std::filesystem::exists(path, ec)) add(path, "recent");
         for (const auto& path : find_scene_files(projectRoot_)) add(path, {});
-        if (kind == FilePickerKind::SaveSceneAs && !current.empty())
-            filePicker_.query = current.stem().string();
+        if (kind == FilePickerKind::SaveSceneAs && !current.empty()) {
+            // Prefill so Enter targets the current file (keeping its folder when not in scenes/).
+            std::filesystem::path relative = std::filesystem::relative(current, projectRoot_, ec);
+            if (ec || relative.empty() || *relative.begin() == "..") relative = current;
+            relative.replace_extension();
+            filePicker_.query = relative.parent_path() == "scenes" ? relative.filename().string() : relative.generic_string();
+        }
     }
     if (kind == FilePickerKind::SaveSceneAs) {
         filePicker_.message = "Type a scene name; it is saved as scenes/<name>.dvescene in " + projectRoot_.filename().string();
@@ -9429,14 +9545,12 @@ bool NativeEditorController::accept_file_picker() {
         std::string name = filePicker_.query;
         while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
         if (name.empty() && !matches.empty()) name = filePicker_.entries[matches[std::min(filePicker_.selected, matches.size() - 1)]].path.string();
-        if (name.empty()) return fail("Type a name for the scene");
-        const bool replace = filePicker_.confirmReplace.has_value();
-        const std::filesystem::path target = [&] {
-            std::filesystem::path path(name);
-            if (path.extension() != ".dvescene") path += ".dvescene";
-            return path.is_absolute() || path.has_parent_path() ? (path.is_absolute() ? path : projectRoot_ / path)
-                                                                 : projectRoot_ / "scenes" / path;
-        }();
+        std::string invalid;
+        const auto resolved = scene_save_target(name, projectRoot_, &invalid);
+        if (!resolved) return fail(invalid);
+        const std::filesystem::path target = *resolved;
+        // The confirmation is for this exact file: a different selection or name asks again.
+        const bool replace = filePicker_.confirmReplace && filePicker_.confirmReplace->lexically_normal() == target;
         if (!replace && std::filesystem::exists(target, ec) &&
             target.lexically_normal() != workspace_.document().path().lexically_normal()) {
             filePicker_.confirmReplace = target;
@@ -9444,7 +9558,6 @@ bool NativeEditorController::accept_file_picker() {
             filePicker_.messageIsError = true;
             return false;
         }
-        if (replace && filePicker_.confirmReplace != target) filePicker_.confirmReplace.reset();
         close_file_picker();
         return save_scene_as(target.string(), true);
     }
@@ -9452,8 +9565,12 @@ bool NativeEditorController::accept_file_picker() {
     if (!matches.empty()) chosen = filePicker_.entries[matches[std::min(filePicker_.selected, matches.size() - 1)]].path;
     else if (!filePicker_.query.empty()) {
         std::filesystem::path typed(filePicker_.query);
-        if (typed.is_relative()) typed = projectRoot_ / typed;
-        if (std::filesystem::exists(typed, ec)) chosen = typed;
+        // has_root_directory(), not is_relative(): on Windows "/foo" is relative (no drive).
+        if (!typed.has_root_directory() && !typed.has_root_name()) typed = projectRoot_ / typed;
+        const bool usable = filePicker_.kind == FilePickerKind::OpenScene
+            ? typed.extension() == ".dvescene" && std::filesystem::is_regular_file(typed, ec)
+            : std::filesystem::is_regular_file(typed / "project.dveproject", ec);
+        if (usable) chosen = typed;
     }
     if (!chosen) return fail(filePicker_.kind == FilePickerKind::OpenScene ? "No scene matches; type part of a name or a path"
                                                                            : "No project matches; type a folder that holds project.dveproject");
@@ -9468,7 +9585,7 @@ void NativeEditorController::remember_recent_scene(const std::filesystem::path& 
     if (!project) return;
     std::error_code ec;
     const auto relative = std::filesystem::relative(path, projectRoot_, ec);
-    if (ec || relative.empty() || relative.native().starts_with("..")) return;
+    if (ec || relative.empty() || *relative.begin() == "..") return;
     std::erase(project->recentScenes, relative);
     project->recentScenes.insert(project->recentScenes.begin(), relative);
     if (project->recentScenes.size() > 10) project->recentScenes.resize(10);
@@ -9496,6 +9613,11 @@ bool NativeEditorController::open_scene_now(const std::filesystem::path& path) {
     cancel_voxel_join();
     if (voxelBoolean_.active()) cancel_voxel_boolean();
     cancel_voxel_slice();
+    cancel_text_edit();
+    if (gizmoDragging_) finish_gizmo_drag(true);
+    floodFillArmed_ = false;
+    followSelection_ = false;
+    followAnchor_.reset();
     workspace_.document() = std::move(*loaded);
     workspace_.commands().clear();
     workspace_.clear_selection();
@@ -9511,17 +9633,21 @@ bool NativeEditorController::open_scene_now(const std::filesystem::path& path) {
 }
 
 bool NativeEditorController::save_scene_as(std::string_view nameOrPath, bool replaceExisting) {
-    std::filesystem::path target(nameOrPath);
-    if (target.extension() != ".dvescene") target += ".dvescene";
-    if (!target.is_absolute()) target = target.has_parent_path() ? projectRoot_ / target : projectRoot_ / "scenes" / target;
+    std::string invalid;
+    const auto resolved = scene_save_target(nameOrPath, projectRoot_, &invalid);
+    if (!resolved) { set_status("Save As: " + invalid, true); return false; }
+    const std::filesystem::path target = *resolved;
     std::error_code ec;
     if (!replaceExisting && std::filesystem::exists(target, ec)) {
         set_status(relative_label(target, projectRoot_) + " already exists", true);
         return false;
     }
     std::filesystem::create_directories(target.parent_path(), ec);
+    const std::filesystem::path previousRecovery = autosave_directory();  // keyed by the old name
     const auto result = workspace_.document().save_transactional(target);
     if (!result.success) { set_status("Save As failed: " + result.error, true, 8.0F); return false; }
+    // The saved file holds everything the old recovery copy did (and the new name has none yet).
+    std::filesystem::remove_all(previousRecovery, ec);
     std::filesystem::remove_all(autosave_directory(), ec);
     autosaveElapsedSeconds_ = 0.0;
     ++manualSaveCount_;
@@ -9978,6 +10104,7 @@ bool NativeEditorController::move_selected_voxels(Int3 offset) {
 }
 
 bool NativeEditorController::begin_voxel_slice() {
+    floodFillArmed_ = false;  // another tool takes the next viewport click
     if (const auto reason = voxel_slice_disabled_reason(); !reason.empty()) {
         set_status(reason, true);
         return false;

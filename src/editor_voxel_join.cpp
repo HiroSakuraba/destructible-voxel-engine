@@ -34,6 +34,13 @@ std::string voxel_problem(const EditorObject& object) {
     return {};
 }
 
+bool has_owned_components(const EditorObject& object) {
+    // Tags, Layer and Groups live in the membership component; everything else (scripts, audio,
+    // ...) is data a removed object would lose.
+    return std::any_of(object.components.begin(), object.components.end(),
+                       [](const Component& c) { return c.type != "dve.membership"; });
+}
+
 bool is_descendant_of(const EditorDocument& document, EditorObjectId id, EditorObjectId ancestor) {
     const EditorObject* object = document.find_object(id);
     for (std::size_t guard = 0; object && object->parent && guard < 4096; ++guard) {
@@ -101,6 +108,10 @@ std::string separate_islands_problem(const EditorDocument& document, EditorObjec
     if (!object) return "the object no longer exists";
     if (std::string problem = voxel_problem(*object); !problem.empty()) return problem;
     if (object->flags.locked) return quoted(*object) + " is locked";
+    // Same rules as Slice's Separate (#97): a prefab instance's pieces would silently diverge from
+    // the prefab, and an attached object's pieces would all hang off the same socket.
+    if (object->prefabLink) return quoted(*object) + " is a prefab instance; unpack it first";
+    if (object->attachment) return quoted(*object) + " is attached to a socket; detach it first";
     if (object->voxels->occupied_voxel_count() > kMaxSeparateVoxels)
         return quoted(*object) + " has more than " + std::to_string(kMaxSeparateVoxels) + " voxels";
     return {};
@@ -121,6 +132,12 @@ SeparateIslandsBuild build_separate_islands_command(EditorDocument& document, co
             build.skipped.push_back(quoted(source) + " is already one piece");
             continue;
         }
+        if (islands.size() > kMaxSeparateIslands) {
+            build.skipped.push_back(quoted(source) + " has " + std::to_string(islands.size()) +
+                                    " separate pieces; Separate Islands makes at most " +
+                                    std::to_string(kMaxSeparateIslands) + ". Clean up stray voxels first");
+            continue;
+        }
         // The largest island stays in the original; every other island leaves it.
         std::vector<VoxelBooleanChange> changes;
         std::vector<Int3> anchorsBefore(source.anchors.begin(), source.anchors.end());
@@ -138,6 +155,7 @@ SeparateIslandsBuild build_separate_islands_command(EditorDocument& document, co
             part.sourceAsset.clear();
             part.importRecipe.clear();
             part.prefabLink.reset();
+            part.attachment.reset();
             std::erase_if(part.components, [](const Component& c) { return c.type != "dve.membership" && c.type != "dve.tags"; });
             for (const auto& cell : islands[piece]) {
                 (void)part.voxels->set_voxel(cell.voxel, cell.material);
@@ -145,6 +163,7 @@ SeparateIslandsBuild build_separate_islands_command(EditorDocument& document, co
                 if (source.anchors.contains(cell.voxel)) part.anchors.insert(cell.voxel);
             }
             build.newObjects.push_back(part.id);
+            build.newObjectSources.push_back(id);
             command->add(std::make_unique<AddObjectCommand>(std::move(part), "Add separated piece"));
             ++added;
         }
@@ -173,6 +192,22 @@ std::string EditorVoxelJoinSession::selection_problem(const EditorDocument& docu
         if (std::string problem = voxel_problem(*object); !problem.empty())
             return problem + "; Join merges voxel objects only. Deselect it, or use Group.";
         if (object->flags.locked) return quoted(*object) + " is locked. Turn off Locked first.";
+        if (!object->flags.visible) return quoted(*object) + " is hidden. Show it first, or deselect it.";
+        if (id != target) {
+            // The operands are removed: refuse what that would silently throw away.
+            if (has_owned_components(*object))
+                return quoted(*object) + " has components that Join would delete. Click it last to make it the "
+                                         "target, or move its components first.";
+            if (object->prefabLink)
+                return quoted(*object) + " is a prefab instance that Join would delete. Click it last to make it the target, "
+                                         "or unpack it first.";
+            for (const EditorObjectId child : document.children_of(id)) {
+                const EditorObject* moved = document.find_object(child);
+                if (moved && !selection.contains(child) && moved->flags.locked)
+                    return quoted(*object) + " has a locked child (" + quoted(*moved) +
+                           ") that Join would move under the target. Unlock it first.";
+            }
+        }
         if (id != target && is_descendant_of(document, target, id))
             return "The target is inside " + quoted(*object) + ", which Join would remove. Make that object the target "
                    "(Tab in the preview) or detach the target first.";
@@ -329,6 +364,21 @@ std::vector<std::string> EditorVoxelJoinSession::describe(const EditorDocument& 
         for (const EditorObjectId child : document.children_of(operand.id))
             if (std::find(all.begin(), all.end(), child) == all.end()) ++children;
     if (children > 0) lines.push_back(std::to_string(children) + " child object(s) of the joined objects move under the target");
+    // The result is one object with the target's flags: say so when an operand's differ.
+    if (target) {
+        std::size_t differing = 0;
+        for (const VoxelJoinOperand& operand : operands_) {
+            const EditorObject* object = document.find_object(operand.id);
+            if (object && (object->flags.collisionEnabled != target->flags.collisionEnabled ||
+                           object->flags.structural != target->flags.structural ||
+                           object->flags.anchored != target->flags.anchored ||
+                           object->flags.decorative != target->flags.decorative || object->layer != target->layer))
+                ++differing;
+        }
+        if (differing > 0)
+            lines.push_back(std::to_string(differing) + " object(s) differ in collision/structural/anchored/decorative/layer; "
+                            "the target's settings apply to the result");
+    }
     if (has_mismatch())
         lines.push_back(resampleChosen_ ? "Resampling into the target's grid (chosen)"
                                         : "Off-grid objects: R resample   G group instead   Tab next target");

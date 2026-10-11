@@ -1,15 +1,19 @@
 #pragma once
 
-// Join and Separate for voxel objects (artist worklist ART-061, ART-062).
+// Join and Separate for voxel objects (artist worklist ART-061 Separate Islands, ART-062 Join).
 //
 // Separate Islands: each selected voxel object is split into its face-connected pieces
-// ("islands"). The largest island stays in the original object (same id, children, components,
-// attachment); every other island becomes a new sibling object with the same transform and
-// voxel size, so nothing moves in the world. One undo step for the whole selection.
+// ("islands"). The largest island stays in the original object (same id, children, components);
+// every other island becomes a new sibling object with the same transform and voxel size, so
+// nothing moves in the world. One undo step for the whole selection. Like Slice's Separate,
+// prefab instances and attached objects are refused; an object that would split into more than
+// kMaxSeparateIslands pieces is refused too.
 //
 // Join: merges the geometry of the other selected voxel objects ("operands") into the active
 // one ("target"). Unlike Group, the result is one voxel object. Operands are removed; their child
-// objects move under the target. Where pieces overlap, the target's material wins.
+// objects move under the target. Where pieces overlap, the target's material wins. Operands with
+// components (other than Tags/Layer/Groups membership) or prefab links are refused, since Join
+// would delete them; so are hidden participants and locked children of an operand.
 //   - Operands on the target's grid (same voxel size, rotation a multiple of 90 degrees, whole-
 //     voxel offset) are copied voxel for voxel.
 //   - Any other operand must be resampled into the target's grid. The preview names each
@@ -35,6 +39,9 @@ class EditorWorkspace;
 [[nodiscard]] std::vector<std::vector<SparseVoxelStateEntry>> find_voxel_islands(const VoxelObject& voxels);
 
 inline constexpr std::size_t kMaxSeparateVoxels = 2'000'000;
+// At most this many pieces (the original plus new objects) per object: thousands of stray single
+// voxels would otherwise flood the outliner with objects in one click.
+inline constexpr std::size_t kMaxSeparateIslands = 256;
 
 // Why `id` cannot be separated (empty when it can; "already one piece" is a reason too).
 [[nodiscard]] std::string separate_islands_problem(const EditorDocument& document, EditorObjectId id);
@@ -42,6 +49,7 @@ inline constexpr std::size_t kMaxSeparateVoxels = 2'000'000;
 struct SeparateIslandsBuild {
     std::unique_ptr<CompoundCommand> command;  // null when nothing can be separated
     std::vector<EditorObjectId> newObjects;    // ids of the new pieces
+    std::vector<EditorObjectId> newObjectSources;  // the original each new piece came from (parallel)
     std::size_t separatedObjects{};            // objects that had more than one piece
     std::vector<std::string> skipped;          // one line per selected object left alone, and why
 };

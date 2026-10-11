@@ -6,6 +6,7 @@
 #include "dve/game_script.hpp"
 #include "dve/print_export.hpp"
 #include "dve/collision_proxy.hpp"
+#include "dve/fragment.hpp"
 
 #include <condition_variable>
 #include <fstream>
@@ -8510,12 +8511,21 @@ std::string NativeEditorController::voxel_slice_disabled_reason() const {
         return "Unlock the object before slicing.";
     return {};
 }
-// --- Join and Separate Islands (ART-061, ART-062) --------------------------------------------
+// --- Join (ART-062) and Separate Islands (ART-061) --------------------------------------------
 
 std::string NativeEditorController::voxel_join_disabled_reason() const {
     if (playSession_.active() || workspace_.mode() != EditorMode::Edit) return "Stop Play or Simulate before joining.";
-    return EditorVoxelJoinSession::selection_problem(workspace_.document(), workspace_.selected_objects(),
-                                                     workspace_.selected_object());
+    std::string problem = EditorVoxelJoinSession::selection_problem(workspace_.document(), workspace_.selected_objects(),
+                                                                    workspace_.selected_object());
+    if (!problem.empty()) return problem;
+    // Under View > Isolate Selection, objects isolated out of view cannot be seen: never merge them.
+    for (const EditorObjectId id : workspace_.selected_objects())
+        if (is_isolated_out(id)) {
+            const EditorObject* object = workspace_.document().find_object(id);
+            return "'" + (object ? object->name : std::to_string(id)) +
+                   "' is isolated out of view. Turn isolation off or deselect it.";
+        }
+    return {};
 }
 
 bool NativeEditorController::begin_voxel_join() {
@@ -8559,8 +8569,12 @@ CommandResult NativeEditorController::commit_voxel_join() {
     recompute_layout();
     refresh_menu_state();
     const EditorObject* joined = workspace_.document().find_object(target);
+    // Rebuild the target's collision proxy now (as Boolean does) so its cost is known at commit.
+    std::string collision = "collision off on target";
+    if (joined && joined->flags.collisionEnabled && joined->voxels)
+        collision = "collision rebuilt (" + std::to_string(build_merged_object_box_proxy(*joined->voxels).size()) + " boxes)";
     set_status("Joined " + std::to_string(count) + " objects into " + (joined ? joined->name : std::string("the target")) +
-               "; Undo restores them");
+               ", " + collision + "; Undo restores them");
     return result;
 }
 
@@ -8634,15 +8648,22 @@ bool NativeEditorController::separate_voxel_islands() {
     }
     // Select every piece; the originals (largest pieces) stay selected and active.
     const auto active = workspace_.selected_object();
-    for (const EditorObjectId id : build.newObjects) {
+    for (std::size_t i = 0; i < build.newObjects.size(); ++i) {
+        const EditorObjectId id = build.newObjects[i];
         workspace_.add_to_selection(id);
-        if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+        // Under isolation, a piece stays visible exactly when its original was.
+        if (i < build.newObjectSources.size() && viewportSettings_.isolatedObjects.contains(build.newObjectSources[i]))
+            viewportSettings_.isolatedObjects.insert(id);
     }
     if (active) workspace_.add_to_selection(*active);
     recompute_layout();
     refresh_menu_state();
-    set_status("Separated " + std::to_string(build.newObjects.size()) + " piece(s) from " +
-               std::to_string(build.separatedObjects) + " object(s); the largest piece keeps each original. Undo restores");
+    std::string message = "Separated " + std::to_string(build.newObjects.size()) + " piece(s) from " +
+                          std::to_string(build.separatedObjects) +
+                          " object(s); the largest piece keeps each original. Undo restores";
+    if (!build.skipped.empty())
+        message += ". Skipped " + std::to_string(build.skipped.size()) + ": " + build.skipped.front();
+    set_status(message, !build.skipped.empty(), build.skipped.empty() ? 4.0F : 8.0F);
     return true;
 }
 

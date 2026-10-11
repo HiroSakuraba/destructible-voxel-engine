@@ -3413,16 +3413,24 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         for (const VoxelJoinOperand& operand : join.operands())
             label_object(operand.id, operand.mismatch.empty() ? "On grid" : join.resample_chosen() ? "Resample" : "Off grid",
                          operand.mismatch.empty() ? rgb(70,205,120) : rgb(255,166,64));
-        const std::vector<std::string> lines = join.describe(document);
+        std::vector<std::string> lines = join.describe(document);
+        // Fit the viewport: drop operand rows from the middle, keeping the header, the result and
+        // the key/choice lines at the bottom.
+        const int lineHeight = 17;
+        const std::size_t maxRows = static_cast<std::size_t>(std::max(5, (viewport.height - 48) / lineHeight));
+        if (lines.size() > maxRows) {
+            const std::size_t dropped = lines.size() - maxRows + 1U;
+            lines.erase(lines.begin() + 2, lines.begin() + 2 + static_cast<std::ptrdiff_t>(dropped));
+            lines.insert(lines.begin() + 2, "  ... " + std::to_string(dropped) + " more line(s)");
+        }
         int panelWidth = 0;
         for (const std::string& line : lines) panelWidth = std::max(panelWidth, viewportPainter.text_width(line));
         const int panelMaxWidth = viewport.width > 520 ? viewport.width - 230 : viewport.width - 16;
         panelWidth = std::min(panelWidth + 20, std::max(120, panelMaxWidth));
-        const int lineHeight = 17;
-        const UiRect panel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
+        const UiRect joinPanel{viewport.x + 8, viewport.y + 28, panelWidth, static_cast<int>(lines.size()) * lineHeight + 10};
         const bool ready = join.blocked_reason(document).empty();
-        viewportPainter.fill(panel, rgb(18,23,31));
-        viewportPainter.outline(panel, ready ? rgb(96,170,255) : join.needs_choice() ? rgb(255,166,64) : rgb(255,110,90));
+        viewportPainter.fill(joinPanel, rgb(18,23,31));
+        viewportPainter.outline(joinPanel, ready ? rgb(96,170,255) : join.needs_choice() ? rgb(255,166,64) : rgb(255,110,90));
         for (std::size_t i = 0; i < lines.size(); ++i) {
             const std::string& line = lines[i];
             EditorColor color = i == 0 ? rgb(235,242,250) : rgb(190,200,214);
@@ -3430,8 +3438,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             else if (line.starts_with("  !") || line.starts_with("Off-grid")) color = rgb(255,190,110);
             else if (line.starts_with("  +")) color = rgb(150,225,170);
             else if (line.starts_with("Target")) color = rgb(150,200,255);
-            viewportPainter.text(panel.x + 10, panel.y + 18 + static_cast<int>(i) * lineHeight,
-                                 elide_text_to_width(viewportPainter, line, panel.width - 20), color);
+            viewportPainter.text(joinPanel.x + 10, joinPanel.y + 18 + static_cast<int>(i) * lineHeight,
+                                 elide_text_to_width(viewportPainter, line, joinPanel.width - 20), color);
         }
     }
     if (controller.voxel_boolean().active()) {

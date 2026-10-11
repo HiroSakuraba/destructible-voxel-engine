@@ -1111,7 +1111,7 @@ void test_interaction_core() {
     const float magnitude = std::max(1.0F, std::hypot(dx, dy));
     const auto beforeVoxels = controller.workspace().document().find_object(1)->voxels->occupied_voxel_count();
     const Float3 pivotBeforeScale = controller.current_pivot();
-    controller.pointer_down(PointerButton::Primary, sx, sy);
+    controller.pointer_down(PointerButton::Primary, sx, sy, 2U);
     controller.pointer_move(sx + static_cast<int>(100.0F * dx / magnitude),
                             sy + static_cast<int>(100.0F * dy / magnitude));
     require(controller.scale_preview_bounds().has_value(), "scale drag has no bounds preview");

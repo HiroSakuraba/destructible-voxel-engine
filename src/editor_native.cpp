@@ -376,6 +376,7 @@ void NativeEditorController::set_gamepad_axes(std::array<float, 2> move, std::ar
 
 void NativeEditorController::clear_navigation_input() {
     finish_slice_pointer(true);
+    if (gizmoDragging_) finish_gizmo_drag(true);
     heldShortcutGestures_.clear();
     activePointerCommand_.clear();
     dragButton_ = PointerButton::NoButton;
@@ -4271,7 +4272,8 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     const int clickDy = y - lastClickY_;
     const bool doubleClick = button == lastClickButton_ && lastClickTime_.time_since_epoch().count() != 0 &&
         now - lastClickTime_ <= doubleMs && clickDx * clickDx + clickDy * clickDy <= doubleDistance * doubleDistance;
-    if (doubleClick) {
+    if (doubleClick && !(activeTool_ == EditorToolId::Scale && layout_.viewport.contains(x,y) &&
+                         hit_test_gizmo_axis(x,y) != 0)) {
         const ShortcutGesture gesture = mouse_shortcut(pointer_input_name(button),
             (modifiers & 2U) != 0U, (modifiers & 1U) != 0U, (modifiers & 4U) != 0U,
             ShortcutActivation::DoubleClick);
@@ -4622,7 +4624,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         if ((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
              activeTool_ == EditorToolId::Scale) &&
             hit_test_gizmo_axis(x, y) != 0) {
-            begin_gizmo_drag(x, y);
+            begin_gizmo_drag(x, y, modifiers);
         } else if (activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                    activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale) {
             // Defer selection until release so a box can start over geometry. Shift adds,
@@ -4990,7 +4992,7 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Beam", "Bm", "voxel.line", "Click a voxel to add a 5-voxel beam along +X.", "Voxel objects"},
         {"Anchor", "Anc", "", "Click a voxel to toggle it as a structural anchor.", "Voxel objects"},
         {"Rotate", "Rot", "transform.rotate", "Drag a gizmo ring to rotate the selection.", "Selected objects"},
-        {"Scale", "Scl", "transform.scale", "Drag a gizmo handle to resample voxel scale around the chosen pivot.",
+        {"Scale", "Scl", "transform.scale", "Drag to scale uniformly without resampling; Ctrl-drag resamples an axis.",
          "Voxel objects"},
         {"Scatter", "Sct", "scatter.brush", "Drag to paint copies of the selected objects; Shift-drag erases copies; Ctrl+wheel sets the radius.",
          "Any visible voxel surface"},
@@ -5476,7 +5478,7 @@ int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
     return result;
 }
 
-void NativeEditorController::begin_gizmo_drag(int x, int y) {
+void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifiers) {
     if (workspace_.selected_objects().empty()) return;
     gizmoAxis_ = hit_test_gizmo_axis(x, y);
     if (gizmoAxis_ == 0) return;
@@ -5487,7 +5489,9 @@ void NativeEditorController::begin_gizmo_drag(int x, int y) {
             gizmoAxis_ = 0;
             return;
         }
-        if (activeTool_ == EditorToolId::Scale && (!object->voxels || object->voxels->brick_count() == 0)) {
+        if (activeTool_ == EditorToolId::Scale && (!object->voxels || object->voxels->brick_count() == 0 ||
+            object->text3d || object->gaborVolume || !std::isfinite(object->voxelSizeMeters) ||
+            object->voxelSizeMeters < 0.001F || object->voxelSizeMeters > 10.0F)) {
             set_status("Voxel scale requires occupied voxel objects", true);
             gizmoAxis_ = 0;
             return;
@@ -5498,6 +5502,15 @@ void NativeEditorController::begin_gizmo_drag(int x, int y) {
     gizmoStartY_ = y;
     gizmoPivot_ = selection_pivot();
     gizmoChanges_ = selection_transform_snapshot();
+    gizmoSizeChanges_.clear();
+    gizmoResampleScale_ = (modifiers & 2U) != 0U;
+    if (activeTool_ == EditorToolId::Scale && !gizmoResampleScale_) {
+        for (const auto& change : gizmoChanges_) {
+            const auto* object = workspace_.document().find_object(change.id);
+            gizmoSizeChanges_.push_back({change.id, change.before, change.before,
+                object->voxelSizeMeters, object->voxelSizeMeters});
+        }
+    }
     transformNumeric_.clear();
     scalePreviewBounds_.reset();
     scaleFactors_ = {1.0F, 1.0F, 1.0F};
@@ -5553,6 +5566,26 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
         factor = std::clamp(factor, 0.1F, 10.0F);
         if (!numeric && preferences.scaleSnapEnabled != temporaryOverride)
             factor = std::max(0.1F, 1.0F + std::round((factor - 1.0F) / preferences.scaleSnapStep) * preferences.scaleSnapStep);
+        if (!gizmoResampleScale_) {
+            float minimum=0.1F, maximum=10.0F;
+            for (const auto& change : gizmoSizeChanges_) {
+                minimum=std::max(minimum,0.001F/change.beforeVoxelSize);
+                maximum=std::min(maximum,10.0F/change.beforeVoxelSize);
+            }
+            factor=std::clamp(factor,minimum,maximum);
+            scaleFactors_={factor,factor,factor};
+            for (auto& change : gizmoSizeChanges_) {
+                change.after=change.before;
+                change.after.position=add(gizmoPivot_,multiply(subtract(change.before.position,gizmoPivot_),factor));
+                change.afterVoxelSize=change.beforeVoxelSize*factor;
+                if (auto* object=workspace_.document().find_object(change.id)) {
+                    object->voxelSizeMeters=change.afterVoxelSize;
+                    object->transform=change.after;
+                }
+            }
+            set_status("Continuous uniform scale: " + std::to_string(factor).substr(0,5) + "x; cells unchanged",false,1);
+            return;
+        }
         scaleFactors_ = {1.0F, 1.0F, 1.0F};
         if ((modifiers & 4U) != 0U) scaleFactors_ = {factor, factor, factor};
         else if (gizmoAxis_ == 1) scaleFactors_.x = factor;
@@ -5603,49 +5636,63 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
 
 void NativeEditorController::finish_gizmo_drag(bool cancel) {
     if (!gizmoDragging_) return;
+    for (const auto& change : gizmoSizeChanges_) {
+        if (auto* object=workspace_.document().find_object(change.id)) {
+            object->voxelSizeMeters=change.beforeVoxelSize;
+            object->transform=change.before;
+        }
+    }
     apply_transform_preview(gizmoChanges_, false);
     if (!cancel && !gizmoChanges_.empty()) {
         if (activeTool_ == EditorToolId::Scale) {
-            if (std::abs(scaleFactors_.x - 1.0F) > 0.0001F ||
-                std::abs(scaleFactors_.y - 1.0F) > 0.0001F ||
-                std::abs(scaleFactors_.z - 1.0F) > 0.0001F) {
-                auto compound = std::make_unique<CompoundCommand>("Resample selected voxel objects");
-                bool valid = true;
-                for (ObjectTransformChange& change : gizmoChanges_) {
-                    const EditorObject* object = workspace_.document().find_object(change.id);
-                    auto command = make_rescale_voxel_object_command(workspace_.document(), change.id, scaleFactors_);
-                    if (!command || !object) { valid = false; break; }
-                    compound->add(std::move(command));
-                    const auto occupied = object->voxels->occupied_bounds();
-                    const Float3 localCenter = occupied.valid ? Float3{
-                        (static_cast<float>(occupied.minimum.x) + static_cast<float>(occupied.maximum.x) + 1.0F) * object->voxelSizeMeters * 0.5F,
-                        (static_cast<float>(occupied.minimum.y) + static_cast<float>(occupied.maximum.y) + 1.0F) * object->voxelSizeMeters * 0.5F,
-                        (static_cast<float>(occupied.minimum.z) + static_cast<float>(occupied.maximum.z) + 1.0F) * object->voxelSizeMeters * 0.5F}
-                        : Float3{};
-                    const auto scaled_center = [&](int minimum, int maximum, float factor) {
-                        const double sourceCenter = 0.5 * (static_cast<double>(minimum) + maximum + 1.0);
-                        const double dimension = static_cast<double>(maximum) - minimum + 1.0;
-                        const double targetDimension = std::max(1.0, static_cast<double>(std::llround(dimension * factor)));
-                        return static_cast<float>(std::floor(sourceCenter - targetDimension * 0.5) +
-                                                  targetDimension * 0.5) * object->voxelSizeMeters;
-                    };
-                    const Float3 newLocalCenter = occupied.valid ? Float3{
-                        scaled_center(occupied.minimum.x, occupied.maximum.x, scaleFactors_.x),
-                        scaled_center(occupied.minimum.y, occupied.maximum.y, scaleFactors_.y),
-                        scaled_center(occupied.minimum.z, occupied.maximum.z, scaleFactors_.z)}
-                        : Float3{};
-                    const Float3 rotatedCenter = rotate(change.before.rotation, localCenter);
-                    const Float3 centerWorld = add(change.before.position, rotatedCenter);
-                    const Float3 offset = subtract(centerWorld, gizmoPivot_);
-                    const Float3 scaledCenter = add(gizmoPivot_, {
-                        offset.x * scaleFactors_.x, offset.y * scaleFactors_.y, offset.z * scaleFactors_.z});
-                    change.after.position = subtract(scaledCenter, rotate(change.before.rotation, newLocalCenter));
+            if (!gizmoResampleScale_) {
+                if (std::abs(scaleFactors_.x-1.0F)>0.000001F) {
+                    const auto result=workspace_.commands().execute(workspace_.document(),
+                        std::make_unique<ScaleVoxelSizeCommand>(gizmoSizeChanges_,"Scale objects continuously"));
+                    set_status(result.success ? "Scaled objects; voxel cells unchanged" : result.message,!result.success);
                 }
-                if (valid) {
-                    compound->add(std::make_unique<TransformObjectsCommand>(gizmoChanges_, "Scale positions"));
-                    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(compound));
-                    set_status(result.success ? "Resampled selected voxels" : result.message, !result.success);
-                } else set_status("Voxel resample exceeds the supported range", true);
+            } else {
+                if (std::abs(scaleFactors_.x - 1.0F) > 0.0001F ||
+                    std::abs(scaleFactors_.y - 1.0F) > 0.0001F ||
+                    std::abs(scaleFactors_.z - 1.0F) > 0.0001F) {
+                    auto compound = std::make_unique<CompoundCommand>("Resample selected voxel objects");
+                    bool valid = true;
+                    for (ObjectTransformChange& change : gizmoChanges_) {
+                        const EditorObject* object = workspace_.document().find_object(change.id);
+                        auto command = make_rescale_voxel_object_command(workspace_.document(), change.id, scaleFactors_);
+                        if (!command || !object) { valid = false; break; }
+                        compound->add(std::move(command));
+                        const auto occupied = object->voxels->occupied_bounds();
+                        const Float3 localCenter = occupied.valid ? Float3{
+                            (static_cast<float>(occupied.minimum.x) + static_cast<float>(occupied.maximum.x) + 1.0F) * object->voxelSizeMeters * 0.5F,
+                            (static_cast<float>(occupied.minimum.y) + static_cast<float>(occupied.maximum.y) + 1.0F) * object->voxelSizeMeters * 0.5F,
+                            (static_cast<float>(occupied.minimum.z) + static_cast<float>(occupied.maximum.z) + 1.0F) * object->voxelSizeMeters * 0.5F}
+                            : Float3{};
+                        const auto scaled_center = [&](int minimum, int maximum, float factor) {
+                            const double sourceCenter = 0.5 * (static_cast<double>(minimum) + maximum + 1.0);
+                            const double dimension = static_cast<double>(maximum) - minimum + 1.0;
+                            const double targetDimension = std::max(1.0, static_cast<double>(std::llround(dimension * factor)));
+                            return static_cast<float>(std::floor(sourceCenter - targetDimension * 0.5) +
+                                                      targetDimension * 0.5) * object->voxelSizeMeters;
+                        };
+                        const Float3 newLocalCenter = occupied.valid ? Float3{
+                            scaled_center(occupied.minimum.x, occupied.maximum.x, scaleFactors_.x),
+                            scaled_center(occupied.minimum.y, occupied.maximum.y, scaleFactors_.y),
+                            scaled_center(occupied.minimum.z, occupied.maximum.z, scaleFactors_.z)}
+                            : Float3{};
+                        const Float3 rotatedCenter = rotate(change.before.rotation, localCenter);
+                        const Float3 centerWorld = add(change.before.position, rotatedCenter);
+                        const Float3 offset = subtract(centerWorld, gizmoPivot_);
+                        const Float3 scaledCenter = add(gizmoPivot_, {
+                            offset.x * scaleFactors_.x, offset.y * scaleFactors_.y, offset.z * scaleFactors_.z});
+                        change.after.position = subtract(scaledCenter, rotate(change.before.rotation, newLocalCenter));
+                    }
+                    if (valid) {
+                        compound->add(std::make_unique<TransformObjectsCommand>(gizmoChanges_, "Scale positions"));
+                        const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(compound));
+                        set_status(result.success ? "Resampled selected voxels" : result.message, !result.success);
+                    } else set_status("Voxel resample exceeds the supported range", true);
+                }
             }
         } else {
             const std::string label = activeTool_ == EditorToolId::Rotate ? "Rotate objects" : "Move objects";
@@ -5657,6 +5704,7 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
     gizmoDragging_ = false;
     gizmoAxis_ = 0;
     gizmoChanges_.clear();
+    gizmoSizeChanges_.clear();
     scalePreviewBounds_.reset();
     transformNumeric_.clear();
 }
@@ -5753,7 +5801,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "transform.select") { set_active_tool(EditorToolId::Select); return true; }
     if (actionId == "transform.scale") {
         set_active_tool(EditorToolId::Scale);
-        set_status("Voxel scale: drag an axis to preview resampling; Alt for uniform scale");
+        set_status("Scale: drag for continuous uniform size; Ctrl-drag resamples, Alt makes resampling uniform");
         return true;
     }
     if (actionId == "transform.universal") { set_active_tool(EditorToolId::Translate); return true; }
@@ -9379,6 +9427,7 @@ bool NativeEditorController::separate_voxel_islands() {
         set_status(build.skipped.empty() ? "Nothing to separate" : "Nothing to separate: " + build.skipped.front(), true, 6.0F);
         return false;
     }
+    const auto beforeSelection = capture_selection_snapshot();
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(build.command));
     if (!result.success) {
         set_status(result.message, true, 6.0F);
@@ -9394,6 +9443,8 @@ bool NativeEditorController::separate_voxel_islands() {
             viewportSettings_.isolatedObjects.insert(id);
     }
     if (active) workspace_.add_to_selection(*active);
+    prune_voxel_selection();
+    workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
     recompute_layout();
     refresh_menu_state();
     std::string message = "Separated " + std::to_string(build.newObjects.size()) + " piece(s) from " +
@@ -11141,6 +11192,7 @@ bool NativeEditorController::extract_selected_voxels() {
     if (!build.command) { set_status(build.error, true, 6.0F); return false; }
     close_previews_for_voxel_edit("voxels extracted");
     const std::size_t count = voxelSelection_.size();
+    const auto beforeSelection = capture_selection_snapshot();
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(build.command));
     if (!result.success) { set_status(result.message, true, 6.0F); return false; }
     if (!viewportSettings_.isolatedObjects.empty() && viewportSettings_.isolatedObjects.contains(voxelSelectionObject_))
@@ -11149,6 +11201,7 @@ bool NativeEditorController::extract_selected_voxels() {
     ++voxelSelectionSerial_;
     selectionDomain_ = SelectionDomain::Objects;
     workspace_.select_object(build.newObject);
+    workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
     recompute_layout();
     refresh_menu_state();
     const EditorObject* part = workspace_.document().find_object(build.newObject);

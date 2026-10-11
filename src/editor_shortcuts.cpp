@@ -877,6 +877,8 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "file.open_scene", ShortcutContext::Global, keyboard_shortcut("o", true));
     bind(dve, "file.save", ShortcutContext::Global, keyboard_shortcut("s", true));
     bind(dve, "file.save_as", ShortcutContext::Global, keyboard_shortcut("s", true, true));
+    bind(dve, "file.open_project", ShortcutContext::Global, keyboard_shortcut("o", true, true));
+    bind(dve, "file.import", ShortcutContext::Global, keyboard_shortcut("i", true));
     bind(dve, "edit.undo", ShortcutContext::Global, keyboard_shortcut("z", true));
     bind(dve, "edit.redo", ShortcutContext::Global, keyboard_shortcut("y", true), keyboard_shortcut("z", true, true));
     bind(dve, "edit.cut", ShortcutContext::Global, keyboard_shortcut("x", true));
@@ -1018,7 +1020,7 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "voxel.brush", ShortcutContext::VoxelEditor, keyboard_shortcut("b"));
     bind(dve, "voxel.erase", ShortcutContext::VoxelEditor, keyboard_shortcut("b", false, true));
     bind(dve, "voxel.toggle_operation", ShortcutContext::VoxelEditor, keyboard_shortcut("x"));
-    bind(dve, "voxel.fill", ShortcutContext::VoxelEditor, keyboard_shortcut("f"));
+    // voxel.fill has no default key: F in the voxel context used to shadow Frame Selection.
     bind(dve, "voxel.line", ShortcutContext::VoxelEditor, keyboard_shortcut("l"));
     bind(dve, "voxel.volume", ShortcutContext::VoxelEditor, keyboard_shortcut("v"));
     bind(dve, "voxel.carve", ShortcutContext::VoxelEditor, keyboard_shortcut("c"));

@@ -71,6 +71,70 @@ void draw_world_box(const IEditorCanvas& painter, const NativeEditorController& 
                                                  static_cast<int>(b.x), static_cast<int>(b.y), color, 2);
     }
 }
+// Draws one collision box of a voxel object's proxy (voxel coordinates) at its world pose.
+void draw_voxel_box(const IEditorCanvas& painter, const NativeEditorController& controller,
+                    const EditorObject& object, const VoxelBox& box, EditorColor color) {
+    std::array<ScreenPoint, 8> points{};
+    const float size = object.voxelSizeMeters;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const Float3 local{static_cast<float>((i & 1U) ? box.maxExclusive.x : box.min.x) * size,
+                           static_cast<float>((i & 2U) ? box.maxExclusive.y : box.min.y) * size,
+                           static_cast<float>((i & 4U) ? box.maxExclusive.z : box.min.z) * size};
+        points[i] = project_world_to_screen(controller.camera(), controller.layout().viewport,
+                                            transform_point(object.transform, local));
+    }
+    static constexpr std::array<std::array<int,2>,12> edges{{
+        {{0,1}},{{0,2}},{{0,4}},{{1,3}},{{1,5}},{{2,3}},{{2,6}},{{3,7}},{{4,5}},{{4,6}},{{5,7}},{{6,7}}
+    }};
+    for (const auto edge : edges) {
+        const auto& a = points[static_cast<std::size_t>(edge[0])];
+        const auto& b = points[static_cast<std::size_t>(edge[1])];
+        if (a.visible && b.visible) painter.line(static_cast<int>(a.x), static_cast<int>(a.y),
+                                                 static_cast<int>(b.x), static_cast<int>(b.y), color);
+    }
+}
+
+// Viewport shading modes (View > Lit, Unlit, ... ; Alt+1..8). The software viewport draws one
+// square per visible voxel, so every mode is a colouring of those squares, except Overdraw,
+// which counts how many squares cover each patch of the screen.
+enum class ShadingMode : std::uint8_t { Lit, Unlit, Wireframe, MaterialIds, Normals, Collision, VoxelDebug, LightingOnly, Overdraw };
+ShadingMode viewport_shading_mode(const NativeEditorController& controller) {
+    const SettingValue value = controller.workspace().settings().value("viewport.shading_mode");
+    const std::string* mode = std::get_if<std::string>(&value);
+    if (!mode) return ShadingMode::Lit;
+    if (*mode == "unlit") return ShadingMode::Unlit;
+    if (*mode == "wireframe") return ShadingMode::Wireframe;
+    if (*mode == "material_ids") return ShadingMode::MaterialIds;
+    if (*mode == "normals") return ShadingMode::Normals;
+    if (*mode == "collision") return ShadingMode::Collision;
+    if (*mode == "voxel_debug") return ShadingMode::VoxelDebug;
+    if (*mode == "lighting_only") return ShadingMode::LightingOnly;
+    if (*mode == "overdraw") return ShadingMode::Overdraw;
+    return ShadingMode::Lit;
+}
+std::string_view shading_mode_label(ShadingMode mode) {
+    switch (mode) {
+        case ShadingMode::Lit: return "Lit";
+        case ShadingMode::Unlit: return "Unlit";
+        case ShadingMode::Wireframe: return "Wireframe";
+        case ShadingMode::MaterialIds: return "Material IDs";
+        case ShadingMode::Normals: return "Normals";
+        case ShadingMode::Collision: return "Collision";
+        case ShadingMode::VoxelDebug: return "Voxel Debug (bricks)";
+        case ShadingMode::LightingOnly: return "Lighting Only";
+        case ShadingMode::Overdraw: return "Overdraw";
+    }
+    return "Lit";
+}
+EditorColor hashed_color(std::uint64_t key) {
+    std::uint64_t h = key * 0x9E3779B97F4A7C15ULL;
+    h ^= h >> 29U;
+    h *= 0xBF58476D1CE4E5B9ULL;
+    h ^= h >> 32U;
+    // Bright, distinct hues: each channel in 70..245.
+    return rgb(static_cast<std::uint8_t>(70U + (h & 0xFFU) % 176U), static_cast<std::uint8_t>(70U + ((h >> 8U) & 0xFFU) % 176U),
+               static_cast<std::uint8_t>(70U + ((h >> 16U) & 0xFFU) % 176U));
+}
 
 
 
@@ -3278,23 +3342,145 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
 
     const auto& drawItems = controller.draw_items();
+    const ShadingMode shading = viewport_shading_mode(controller);
+    const EditorDocument& shadingDocument = controller.workspace().document();
+    const Float3 cameraPosition = controller.camera().position;
+    // Overdraw: count squares per 8 px screen cell, then paint the counts as a heat map.
+    constexpr int kOverdrawCell = 8;
+    const int overdrawColumns = std::max(1, (viewport.width + kOverdrawCell - 1) / kOverdrawCell);
+    const int overdrawRows = std::max(1, (viewport.height + kOverdrawCell - 1) / kOverdrawCell);
+    std::vector<std::uint16_t> overdraw(shading == ShadingMode::Overdraw
+                                        ? static_cast<std::size_t>(overdrawColumns * overdrawRows) : 0U, 0U);
+    const EditorObject* cachedObject = nullptr;
     for (const EditorVoxelDrawItem& item : drawItems) {
         const Float4 base = editor_material_display_color(controller.materials(), item.material);
         float shade = std::clamp(1.1F - item.depth * 0.018F, 0.42F, 1.0F);
         if (item.selected) shade = std::min(1.0F, shade + 0.14F);
-        const EditorColor voxelColor = rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade));
+        EditorColor voxelColor = rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade));
         const int radius = std::max(1, static_cast<int>(item.pixelRadius));
-        viewportPainter.fill({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
-                              radius * 2 + 1, radius * 2 + 1}, voxelColor);
+        const UiRect square{static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
+                            radius * 2 + 1, radius * 2 + 1};
+        if (!cachedObject || cachedObject->id != item.objectId) cachedObject = shadingDocument.find_object(item.objectId);
+        switch (shading) {
+            case ShadingMode::Lit: break;
+            case ShadingMode::Unlit: voxelColor = rgb(byte(base.x), byte(base.y), byte(base.z)); break;
+            case ShadingMode::LightingOnly: voxelColor = rgb(byte(0.78F * shade), byte(0.78F * shade), byte(0.80F * shade)); break;
+            case ShadingMode::MaterialIds: voxelColor = hashed_color(item.material); break;
+            case ShadingMode::VoxelDebug: {
+                // One colour per 8x8x8 brick (per object), so brick boundaries are visible.
+                const auto brick = [](int v) { return static_cast<std::uint64_t>(static_cast<std::uint32_t>(v >= 0 ? v / 8 : (v - 7) / 8)); };
+                voxelColor = hashed_color(item.objectId * 0x100000001B3ULL ^ (brick(item.voxel.x) << 42U) ^
+                                          (brick(item.voxel.y) << 21U) ^ brick(item.voxel.z));
+                break;
+            }
+            case ShadingMode::Normals: {
+                // The exposed face of this voxel that faces the camera most, as an RGB normal.
+                Float3 best{0.0F, 1.0F, 0.0F};
+                if (cachedObject && cachedObject->voxels) {
+                    const float size = cachedObject->voxelSizeMeters;
+                    const Float3 centre = transform_point(cachedObject->transform,
+                        {(static_cast<float>(item.voxel.x) + 0.5F) * size, (static_cast<float>(item.voxel.y) + 0.5F) * size,
+                         (static_cast<float>(item.voxel.z) + 0.5F) * size});
+                    const Float3 toCamera = subtract(cameraPosition, centre);
+                    static constexpr Int3 kFaces[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+                    float bestDot = -2.0F;
+                    for (const Int3 face : kFaces) {
+                        if (cachedObject->voxels->occupied_at({item.voxel.x + face.x, item.voxel.y + face.y, item.voxel.z + face.z})) continue;
+                        const Float3 normal = rotate(cachedObject->transform.rotation,
+                            {static_cast<float>(face.x), static_cast<float>(face.y), static_cast<float>(face.z)});
+                        const float d = dot(normal, toCamera);
+                        if (d > bestDot) { bestDot = d; best = normal; }
+                    }
+                }
+                voxelColor = rgb(byte(0.5F + 0.5F * best.x), byte(0.5F + 0.5F * best.y), byte(0.5F + 0.5F * best.z));
+                break;
+            }
+            case ShadingMode::Collision: voxelColor = rgb(byte(base.x * shade * 0.45F), byte(base.y * shade * 0.45F), byte(base.z * shade * 0.45F)); break;
+            case ShadingMode::Wireframe:
+            case ShadingMode::Overdraw: break;
+        }
+        if (shading == ShadingMode::Overdraw) {
+            const int x0 = std::max(0, (square.x - viewport.x) / kOverdrawCell);
+            const int y0 = std::max(0, (square.y - viewport.y) / kOverdrawCell);
+            const int x1 = std::min(overdrawColumns - 1, (square.x + square.width - 1 - viewport.x) / kOverdrawCell);
+            const int y1 = std::min(overdrawRows - 1, (square.y + square.height - 1 - viewport.y) / kOverdrawCell);
+            for (int row = y0; row <= y1; ++row)
+                for (int column = x0; column <= x1; ++column) {
+                    std::uint16_t& count = overdraw[static_cast<std::size_t>(row * overdrawColumns + column)];
+                    if (count < 0xFFFFU) ++count;
+                }
+            continue;
+        }
+        if (shading == ShadingMode::Wireframe) viewportPainter.outline(square, voxelColor);
+        else viewportPainter.fill(square, voxelColor);
         if (item.selected && radius >= 3)
-            viewportPainter.outline({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
-                                     radius * 2 + 1, radius * 2 + 1}, rgb(150,205,255));
+            viewportPainter.outline(square, rgb(150,205,255));
         if (item.anchored && controller.viewport_settings().showAnchors) {
             viewportPainter.line(static_cast<int>(item.screenX)-3,static_cast<int>(item.screenY),
                                  static_cast<int>(item.screenX)+3,static_cast<int>(item.screenY),rgb(255,218,72),2);
             viewportPainter.line(static_cast<int>(item.screenX),static_cast<int>(item.screenY)-3,
                                  static_cast<int>(item.screenX),static_cast<int>(item.screenY)+3,rgb(255,218,72),2);
         }
+    }
+    if (shading == ShadingMode::Overdraw) {
+        // 1 layer blue, 2-3 green, 4-7 yellow, 8+ red.
+        for (int row = 0; row < overdrawRows; ++row)
+            for (int column = 0; column < overdrawColumns; ++column) {
+                const std::uint16_t count = overdraw[static_cast<std::size_t>(row * overdrawColumns + column)];
+                if (count == 0) continue;
+                const EditorColor heat = count == 1 ? rgb(40,70,150) : count <= 3 ? rgb(60,170,90)
+                                       : count <= 7 ? rgb(230,200,60) : rgb(230,70,60);
+                viewportPainter.fill({viewport.x + column * kOverdrawCell, viewport.y + row * kOverdrawCell, kOverdrawCell, kOverdrawCell}, heat);
+            }
+    }
+    // X-Ray Selection: the selection's voxels drawn again on top, so they show through whatever
+    // is in front of them.
+    if (controller.viewport_settings().xraySelection && shading != ShadingMode::Overdraw)
+        for (const EditorVoxelDrawItem& item : drawItems) {
+            if (!item.selected) continue;
+            const int radius = std::max(1, static_cast<int>(item.pixelRadius));
+            viewportPainter.outline({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
+                                     radius * 2 + 1, radius * 2 + 1}, rgb(120,200,255));
+        }
+    // Collision: View > Collision Shapes draws the selected objects' merged box proxies (the boxes
+    // Play uses); the Collision shading mode draws every visible object's.
+    if (controller.viewport_settings().showCollision || shading == ShadingMode::Collision) {
+        constexpr std::size_t kMaxDrawnBoxes = 4000;
+        std::size_t drawn = 0, skipped = 0;
+        const auto draw_object = [&](const EditorObject& object) {
+            if (!object.flags.visible || controller.is_isolated_out(object.id)) return;
+            for (const VoxelBox& box : controller.collision_proxy(object.id)) {
+                if (drawn >= kMaxDrawnBoxes) { ++skipped; continue; }
+                draw_voxel_box(viewportPainter, controller, object, box, rgb(255,140,58));
+                ++drawn;
+            }
+        };
+        if (shading == ShadingMode::Collision)
+            for (const auto& [id, object] : shadingDocument.objects()) draw_object(object);
+        else
+            for (const EditorObjectId id : controller.workspace().selected_objects())
+                if (const EditorObject* object = shadingDocument.find_object(id)) draw_object(*object);
+        if (skipped > 0)
+            // Above the shading-mode tag (bottom left), so the two never overlap.
+            viewportPainter.text(viewport.x + 10, viewport.y + viewport.height - 36,
+                                 "Collision: " + std::to_string(drawn) + " boxes shown, " + std::to_string(skipped) + " more not drawn",
+                                 rgb(255,170,90));
+    }
+    if (shading != ShadingMode::Lit) {
+        const std::string label = "View: " + std::string(shading_mode_label(shading)) + "  (Alt+1 Lit)";
+        const int tagWidth = viewportPainter.text_width(label) + 12;
+        const UiRect tag{viewport.x + 8, viewport.y + viewport.height - 26, tagWidth, 18};
+        viewportPainter.fill(tag, rgb(18,23,31));
+        viewportPainter.outline(tag, rgb(96,170,255));
+        viewportPainter.text(tag.x + 6, tag.y + 13, label, rgb(190,220,255));
+    }
+    if (controller.flood_fill_armed()) {
+        const std::string label = "Flood Fill: click a voxel  (Esc cancels)";
+        const int tagWidth = viewportPainter.text_width(label) + 12;
+        const UiRect tag{viewport.x + viewport.width / 2 - tagWidth / 2, viewport.y + viewport.height - 26, tagWidth, 18};
+        viewportPainter.fill(tag, rgb(18,23,31));
+        viewportPainter.outline(tag, rgb(255,206,72));
+        viewportPainter.text(tag.x + 6, tag.y + 13, label, rgb(255,220,120));
     }
 
     // The software editor uses a bounded text proxy while production rendering consumes the
@@ -3368,8 +3554,6 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         if (const EditorObject* selected = controller.workspace().document().find_object(selectedId)) {
             if (controller.viewport_settings().showObjectBounds)
                 draw_world_box(viewportPainter, controller, object_world_bounds(*selected), rgb(100,188,255));
-            if (controller.viewport_settings().showCollision)
-                draw_world_box(viewportPainter, controller, object_world_bounds(*selected), rgb(255,140,58));
         }
     }
     if (controller.hover_pick()) {
@@ -5049,9 +5233,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                              row.y + 20, result.shortcut, muted);
             const std::string detail = !result.enabled && !result.disabledReason.empty()
                 ? result.disabledReason : result.description;
-            if (!detail.empty())
-                painter.text(row.x + row.width / 2, row.y + row.height - 8,
-                             detail, !result.enabled ? rgb(255,150,120) : muted);
+            if (!detail.empty()) {
+                // Starts after the breadcrumb (at most mid-row) and is elided to the row, so a long
+                // disabled reason never runs past the panel; running the command shows it in full.
+                const int detailX = std::min(row.x + row.width / 2,
+                                             row.x + 86 + painter.text_width(result.breadcrumb) + 24);
+                painter.text(detailX, row.y + row.height - 8,
+                             elide_text_to_width(painter, detail, std::max(0, row.x + row.width - 10 - detailX)),
+                             !result.enabled ? rgb(255,150,120) : muted);
+            }
             painter.line(row.x, row.y + row.height - 1, row.x + row.width,
                          row.y + row.height - 1, border);
         }
@@ -5062,6 +5252,47 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         painter.text(paletteLayout.hintBar.x + 8,
                      paletteLayout.hintBar.y + paletteLayout.hintBar.height - 9,
                      "Up/Down select  Enter open/run  Ctrl+D favorite command  Prefix filters available  Esc close", muted);
+    }
+
+    if (controller.file_picker().open) {
+        const FilePickerState& picker = controller.file_picker();
+        const NativeFilePickerLayout pickerLayout = controller.file_picker_layout();
+        painter.fill({0, 0, width, height}, rgb(8,10,14));
+        painter.fill(pickerLayout.panel, panel);
+        painter.outline(pickerLayout.panel, accent);
+        const std::string title = picker.kind == FilePickerKind::OpenScene ? "Open Scene"
+                                : picker.kind == FilePickerKind::OpenProject ? "Open Project" : "Save Scene As";
+        painter.text(pickerLayout.panel.x + 16, pickerLayout.panel.y + 26, title, text);
+        painter.fill(pickerLayout.searchBox, panel2);
+        painter.outline(pickerLayout.searchBox, accent);
+        const std::string placeholder = picker.kind == FilePickerKind::SaveSceneAs ? "Scene name..."
+                                      : picker.kind == FilePickerKind::OpenScene ? "Filter scenes, or type a path..."
+                                                                                 : "Filter projects, or type a folder path...";
+        painter.text(pickerLayout.searchBox.x + 12, pickerLayout.searchBox.y + pickerLayout.searchBox.height - 11,
+                     picker.query.empty() ? placeholder : picker.query + "_", picker.query.empty() ? muted : text);
+        if (!picker.message.empty())
+            painter.text(pickerLayout.searchBox.x, pickerLayout.searchBox.y + pickerLayout.searchBox.height + 18,
+                         elide_text_to_width(painter, picker.message, pickerLayout.searchBox.width),
+                         picker.messageIsError ? rgb(255,170,110) : muted);
+        const auto matches = controller.file_picker_matches();
+        for (std::size_t visible = 0; visible < pickerLayout.rows.size(); ++visible) {
+            const std::size_t rowIndex = pickerLayout.firstVisibleRow + visible;
+            if (rowIndex >= matches.size()) break;
+            const FilePickerEntry& entry = picker.entries[matches[rowIndex]];
+            const UiRect row = pickerLayout.rows[visible];
+            if (rowIndex == picker.selected) painter.fill(row, rgb(45,68,96));
+            else if ((visible & 1U) != 0U) painter.fill(row, rgb(24,29,37));
+            const int detailWidth = entry.detail.empty() ? 0 : std::min(row.width / 2, painter.text_width(entry.detail) + 16);
+            painter.text(row.x + 8, row.y + row.height - 7,
+                         elide_text_to_width(painter, entry.label, row.width - 16 - detailWidth), text);
+            if (!entry.detail.empty())
+                painter.text(row.x + row.width - detailWidth + 8, row.y + row.height - 7,
+                             elide_text_to_width(painter, entry.detail, detailWidth - 16), muted);
+        }
+        painter.fill(pickerLayout.hintBar, panel2);
+        painter.text(pickerLayout.hintBar.x + 8, pickerLayout.hintBar.y + pickerLayout.hintBar.height - 9,
+                     picker.kind == FilePickerKind::SaveSceneAs ? "Type a name  Enter save  Click a scene to reuse its name  Esc close"
+                                                               : "Type to filter  Up/Down select  Enter open  Esc close", muted);
     }
 
     if (controller.pending_destructive_confirmation()) {

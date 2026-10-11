@@ -255,6 +255,7 @@ struct ImportedModelResult {
 
 struct CookedVoxelAsset {
     float voxelSizeMeters{0.10F};
+    Float3 voxelScale{1,1,1};
     std::vector<VoxelMaterialDefinition> materials;
     VoxelObject object;
     AssetCookerStats stats;

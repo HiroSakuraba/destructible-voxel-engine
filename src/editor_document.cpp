@@ -1,3 +1,4 @@
+#include "dve/voxel_metric.hpp"
 #include "dve/editor_document.hpp"
 
 #include <unordered_map>
@@ -93,6 +94,7 @@ EditorObject clone_editor_object(const EditorObject& source) {
     cloned.importRecipe = source.importRecipe;
     cloned.textFontAsset = source.textFontAsset;
     cloned.voxelSizeMeters = source.voxelSizeMeters;
+    cloned.voxelScale = source.voxelScale;
     cloned.voxels = clone_voxel_object(*source.voxels);
     cloned.text3d = source.text3d;
     cloned.gaborVolume = source.gaborVolume;
@@ -286,7 +288,7 @@ bool EditorDocument::validate(std::string* error) const {
             std::string prefabError;
             if (!object.prefabLink->validate(&prefabError)) return fail("invalid prefab link: " + prefabError);
         }
-        if (!(object.voxelSizeMeters > 0.0F)) return fail("invalid voxel size");
+        if (!valid_voxel_metric(object.voxelScale) || !std::isfinite(object.voxelSizeMeters) || !(object.voxelSizeMeters > 0.0F)) return fail("invalid voxel size");
         for (const Int3 anchor : object.anchors) {
             if (!object.voxels->occupied_at(anchor)) return fail("anchor references air");
         }
@@ -336,6 +338,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             }
             CookedVoxelAsset asset(id);
             asset.voxelSizeMeters = object.voxelSizeMeters;
+            asset.voxelScale = object.voxelScale;
             MaterialId maximumMaterial = 0;
             for (const auto& entry : object.voxels->bricks()) {
                 const Brick& brick = entry.second;
@@ -357,7 +360,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         std::filesystem::create_directories(manifestPath.parent_path().empty() ? "." : manifestPath.parent_path());
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) throw std::runtime_error("could not open temporary scene manifest");
-        output << "DVE_EDITOR_SCENE 5\n";
+        output << "DVE_EDITOR_SCENE 6\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -371,6 +374,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                    << quote_text(object.importRecipe.generic_string()) << ' '
                    << quote_text(object.textFontAsset.generic_string()) << ' '
                    << object.voxelSizeMeters << ' '
+                   << object.voxelScale.x << ' ' << object.voxelScale.y << ' ' << object.voxelScale.z << ' '
                    << object.transform.position.x << ' ' << object.transform.position.y << ' ' << object.transform.position.z << ' '
                    << object.transform.rotation.x << ' ' << object.transform.rotation.y << ' '
                    << object.transform.rotation.z << ' ' << object.transform.rotation.w << ' '
@@ -453,7 +457,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -474,8 +478,9 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
             if (version >= 2) input >> geometryKind;
             input >> std::quoted(objectName) >> std::quoted(source) >> std::quoted(recipe);
             if (version >= 2) input >> std::quoted(fontSource);
-            input >> object.voxelSizeMeters
-                  >> object.transform.position.x >> object.transform.position.y >> object.transform.position.z
+            input >> object.voxelSizeMeters;
+            if (version >= 6) input >> object.voxelScale.x >> object.voxelScale.y >> object.voxelScale.z;
+            input >> object.transform.position.x >> object.transform.position.y >> object.transform.position.z
                   >> object.transform.rotation.x >> object.transform.rotation.y >> object.transform.rotation.z >> object.transform.rotation.w
                   >> object.flags.visible >> object.flags.locked >> object.flags.anchored >> object.flags.structural
                   >> object.flags.collisionEnabled >> object.flags.decorative;

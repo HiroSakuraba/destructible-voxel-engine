@@ -1,3 +1,4 @@
+#include "dve/voxel_metric.hpp"
 #include "dve/dvox.hpp"
 
 #include <algorithm>
@@ -86,12 +87,17 @@ void hash_span(std::uint64_t& hash, std::span<const std::byte> bytes) noexcept {
     std::uint32_t brickCount,
     std::span<const std::byte> materialBytes,
     std::span<const std::byte> tableBytes,
-    std::span<const std::byte> payloadBytes) noexcept {
+    std::span<const std::byte> payloadBytes, Float3 voxelScale = {1,1,1}) noexcept {
     std::uint64_t hash = kFnvOffset;
     hash_u16_le(hash, kVersionMajor);
     hash_u16_le(hash, versionMinor);
     hash_u32_le(hash, flags);
     hash_u32_le(hash, std::bit_cast<std::uint32_t>(voxelSizeMeters));
+    if (versionMinor >= 3) {
+        hash_u32_le(hash,std::bit_cast<std::uint32_t>(voxelScale.x));
+        hash_u32_le(hash,std::bit_cast<std::uint32_t>(voxelScale.y));
+        hash_u32_le(hash,std::bit_cast<std::uint32_t>(voxelScale.z));
+    }
     hash_u64_le(hash, objectId);
     hash_u32_le(hash, materialCount);
     hash_u32_le(hash, brickCount);
@@ -394,6 +400,9 @@ bool write_dvox(
         if (!asset.object.validate()) throw std::runtime_error("cannot serialize invalid VoxelObject");
         if (asset.materials.size() > 256) throw std::runtime_error("DVOX supports at most 256 materials");
 
+        if (!valid_voxel_metric(asset.voxelScale)) throw std::runtime_error("invalid DVOX axis scale");
+        const std::uint16_t versionMinor=unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) write_material(materials, material);
 
@@ -428,13 +437,13 @@ bool write_dvox(
         const std::uint32_t materialCount = static_cast<std::uint32_t>(asset.materials.size());
         const std::uint32_t brickCount = static_cast<std::uint32_t>(bricks.size());
         const std::uint64_t fullContentHash = content_hash_v1_1(
-            kVersionMinor, flags, asset.voxelSizeMeters, asset.object.id(), materialCount, brickCount,
-            materials.bytes(), table.bytes(), payloads.bytes());
+            versionMinor, flags, asset.voxelSizeMeters, asset.object.id(), materialCount, brickCount,
+            materials.bytes(), table.bytes(), payloads.bytes(), asset.voxelScale);
 
         ByteWriter header;
         header.write_bytes(kMagic.data(), kMagic.size());
         header.write_u16(kVersionMajor);
-        header.write_u16(kVersionMinor);
+        header.write_u16(versionMinor);
         header.write_u32(flags);
         header.write_float(asset.voxelSizeMeters);
         header.write_u64(asset.object.id());
@@ -444,7 +453,8 @@ bool write_dvox(
         header.write_u64(table.size());
         header.write_u64(payloads.size());
         header.write_u64(fullContentHash);
-        if (header.size() != kHeaderSize) throw std::runtime_error("internal DVOX header size mismatch");
+        if (versionMinor >= 3) { header.write_float(asset.voxelScale.x); header.write_float(asset.voxelScale.y); header.write_float(asset.voxelScale.z); }
+        if (header.size() != headerSize) throw std::runtime_error("internal DVOX header size mismatch");
 
         std::ofstream output(path, std::ios::binary);
         if (!output) throw std::runtime_error("unable to open DVOX output");
@@ -478,7 +488,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > kVersionMinor) {
+        if (major != kVersionMajor || minor > 3) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();
@@ -492,6 +502,10 @@ namespace {
         const std::uint64_t tableBytes = reader.read_u64();
         const std::uint64_t payloadBytes = reader.read_u64();
         const std::uint64_t expectedHash = reader.read_u64();
+        Float3 voxelScale{1,1,1};
+        if (minor >= 3) voxelScale={reader.read_float(),reader.read_float(),reader.read_float()};
+        if (!valid_voxel_metric(voxelScale)) throw std::runtime_error("invalid DVOX axis scale");
+        const std::uint32_t headerSize=kHeaderSize+(minor>=3 ? 12 : 0);
         if (materialCount > 256U) throw std::runtime_error("DVOX material count exceeds 256");
         if (tableBytes != static_cast<std::uint64_t>(brickCount) * kBrickRecordSize) {
             throw std::runtime_error("DVOX brick table has invalid size");
@@ -502,25 +516,26 @@ namespace {
             }
             return a + b;
         };
-        std::uint64_t total = kHeaderSize;
+        std::uint64_t total = headerSize;
         total = checked_add(total, materialBytes);
         total = checked_add(total, tableBytes);
         total = checked_add(total, payloadBytes);
         if (total != bytes.size()) throw std::runtime_error("DVOX section sizes do not match file length");
         if (minor >= 1U) {
-            const std::size_t materialOffset = kHeaderSize;
+            const std::size_t materialOffset = headerSize;
             const std::size_t tableOffset = materialOffset + static_cast<std::size_t>(materialBytes);
             const std::size_t payloadOffset = tableOffset + static_cast<std::size_t>(tableBytes);
             const std::uint64_t actualHash = content_hash_v1_1(
                 minor, flags, voxelSize, objectId, materialCount, brickCount,
                 std::span<const std::byte>(bytes).subspan(materialOffset, static_cast<std::size_t>(materialBytes)),
                 std::span<const std::byte>(bytes).subspan(tableOffset, static_cast<std::size_t>(tableBytes)),
-                std::span<const std::byte>(bytes).subspan(payloadOffset, static_cast<std::size_t>(payloadBytes)));
+                std::span<const std::byte>(bytes).subspan(payloadOffset, static_cast<std::size_t>(payloadBytes)),voxelScale);
             if (actualHash != expectedHash) throw std::runtime_error("DVOX full-content hash mismatch");
         }
 
         DvoxReadResult result(objectId);
         result.asset.voxelSizeMeters = voxelSize;
+        result.asset.voxelScale = voxelScale;
         const std::size_t materialEnd = reader.position() + static_cast<std::size_t>(materialBytes);
         result.asset.materials.reserve(materialCount);
         for (std::uint32_t i = 0; i < materialCount; ++i) result.asset.materials.push_back(read_material(reader, minor));

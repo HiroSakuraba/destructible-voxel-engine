@@ -1,4 +1,5 @@
 #include "dve/query.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <algorithm>
 #include <array>
@@ -249,6 +250,22 @@ std::optional<TransformedRayHit> raycast_voxels_transformed(
         transform_point(objectTransform, localPosition),
         normalize(transform_vector(objectTransform, localNormal)),
     };
+}
+
+std::optional<TransformedRayHit> raycast_voxels_scaled(
+    const VoxelObject& object, const RigidTransform& pose, Float3 spacing,
+    Float3 origin, Float3 direction, float maximum) {
+    if (!valid_voxel_metric(spacing) || !(maximum > 0)) return std::nullopt;
+    const auto localOrigin=world_to_voxel(pose,spacing,origin);
+    const auto localDirection=divide_components(inverse_transform_vector(pose,normalize(direction)),spacing);
+    const float metric=length(localDirection);
+    if (!(metric>0) || !std::isfinite(metric)) return std::nullopt;
+    auto hit=raycast_voxels(object,localOrigin,localDirection,maximum*metric);
+    if (!hit) return std::nullopt;
+    const auto point=add(localOrigin,multiply(normalize(localDirection),hit->distance));
+    const Float3 normal{float(hit->normal.x),float(hit->normal.y),float(hit->normal.z)};
+    hit->distance/=metric;
+    return TransformedRayHit{*hit,voxel_to_world(pose,spacing,point),voxel_normal_to_world(pose,spacing,normal)};
 }
 
 bool overlaps_voxels(

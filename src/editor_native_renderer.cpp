@@ -3255,6 +3255,21 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const std::string mode = mode_name(controller.workspace().mode());
     painter.text(width - painter.text_width(mode) - 18, layout.toolbar.y + layout.toolbar.height / 2 + 5,
                  mode, controller.workspace().mode() == EditorMode::Edit ? rgb(102,220,144) : rgb(255,191,74));
+    {
+        // Selection domain chip (1 Objects / 2 Voxels), when the toolbar has room for it.
+        const bool voxels = controller.selection_domain() == SelectionDomain::Voxels;
+        const std::string chip = voxels ? "Selecting: VOXELS (" + std::to_string(controller.voxel_selection().size()) + ")  M objects"
+                                        : "Selecting: Objects  M voxels";
+        const int chipWidth = painter.text_width(chip) + 14;
+        const int chipX = width - painter.text_width(mode) - 18 - 12 - chipWidth;
+        const int toolbarEnd = layout.toolbarButtons.empty() ? 0 : layout.toolbarButtons.back().x + layout.toolbarButtons.back().width;
+        if (chipX > toolbarEnd + 8) {
+            const UiRect chipRect{chipX, layout.toolbar.y + layout.toolbar.height / 2 - 10, chipWidth, 20};
+            painter.fill(chipRect, voxels ? rgb(70,52,20) : panel2);
+            painter.outline(chipRect, voxels ? rgb(255,196,80) : border);
+            painter.text(chipRect.x + 7, chipRect.y + 14, chip, voxels ? rgb(255,214,120) : muted);
+        }
+    }
 
     if (layout.hierarchy.width > 0) {
         painter.fill(layout.hierarchyFilterBox, panel2);
@@ -3442,6 +3457,34 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             viewportPainter.outline({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
                                      radius * 2 + 1, radius * 2 + 1}, rgb(120,200,255));
         }
+    // Voxel selection: selected cells outlined in amber; while dragging the Move gizmo, a ghost of
+    // where they will land.
+    if (!controller.voxel_selection().empty()) {
+        const std::set<Int3>& cells = controller.voxel_selection();
+        for (const EditorVoxelDrawItem& item : drawItems) {
+            if (item.objectId != controller.voxel_selection_object() || !cells.contains(item.voxel)) continue;
+            const int radius = std::max(1, static_cast<int>(item.pixelRadius));
+            const UiRect square{static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
+                                radius * 2 + 1, radius * 2 + 1};
+            viewportPainter.outline(square, rgb(255,196,64));
+            if (radius >= 3) viewportPainter.outline({square.x + 1, square.y + 1, square.width - 2, square.height - 2}, rgb(255,196,64));
+        }
+        if (const auto offset = controller.voxel_move_preview(); offset && (offset->x || offset->y || offset->z)) {
+            if (const EditorObject* object = shadingDocument.find_object(controller.voxel_selection_object())) {
+                std::size_t drawn = 0;
+                const float size = object->voxelSizeMeters;
+                for (const Int3 cell : cells) {
+                    if (++drawn > 20000) break;
+                    const Float3 centre = transform_point(object->transform,
+                        {(static_cast<float>(cell.x + offset->x) + 0.5F) * size, (static_cast<float>(cell.y + offset->y) + 0.5F) * size,
+                         (static_cast<float>(cell.z + offset->z) + 0.5F) * size});
+                    const ScreenPoint point = project_world_to_screen(controller.camera(), viewport, centre);
+                    if (!point.visible) continue;
+                    viewportPainter.outline({static_cast<int>(point.x) - 3, static_cast<int>(point.y) - 3, 7, 7}, rgb(120,230,255));
+                }
+            }
+        }
+    }
     // Collision: View > Collision Shapes draws the selected objects' merged box proxies (the boxes
     // Play uses); the Collision shading mode draws every visible object's.
     if (controller.viewport_settings().showCollision || shading == ShadingMode::Collision) {

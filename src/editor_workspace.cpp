@@ -589,6 +589,15 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.paint","Voxel","Paint Material","5"}, {"voxel.box","Voxel","Box Tool","6"},
         {"voxel.beam","Voxel","Beam Tool","7"}, {"voxel.anchor","Voxel","Anchor Brush","8"},
         {"voxel.settings","Voxel","Voxel Settings",""},
+        {"select.domain_objects","Edit","Select Objects",""},
+        {"select.domain_voxels","Edit","Select Voxels",""},
+        {"select.domain_toggle","Edit","Toggle Objects / Voxels",""},
+        {"voxel.select_all","Voxel","Select All Voxels",""},
+        {"voxel.select_none","Voxel","Deselect Voxels",""},
+        {"voxel.select_grow","Voxel","Grow Voxel Selection",""},
+        {"voxel.select_shrink","Voxel","Shrink Voxel Selection",""},
+        {"voxel.select_invert","Voxel","Invert Voxel Selection",""},
+        {"voxel.extract_selection","Voxel","Extract Selected Voxels to New Object",""},
         {"voxel.join","Voxel","Join Objects",""},
         {"voxel.join_commit","Voxel","Commit Join",""},
         {"voxel.join_cancel","Voxel","Cancel Join",""},
@@ -714,6 +723,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("camera.load_bookmark_2", "Bookmarks", 63);
     configure("camera.settings", "Settings", 90);
     configure("voxel.settings", "Settings", 90);
+    configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
+    configure("select.domain_voxels", "Selection Domain", 31, true, "select.domain");
+    configure("select.domain_toggle", "Selection Domain", 32);
+    for (std::string_view id : {"voxel.select_all", "voxel.select_none", "voxel.select_grow", "voxel.select_shrink",
+                                "voxel.select_invert", "voxel.extract_selection"})
+        configure(id, "Voxel Selection", 50);
     configure("voxel.join", "Voxel Join and Separate", 56);
     configure("voxel.join_commit", "Voxel Join and Separate", 57);
     configure("voxel.join_cancel", "Voxel Join and Separate", 58);
@@ -827,6 +842,15 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("scatter.clear_sources", "Forget the set scatter sources; Scatter uses the selection again.", {"scatter", "sources", "reset"});
     describe("scatter.cancel", "Close the scatter preview without changing the scene.", {"scatter"});
     describe("voxel.slice", "Preview a cell-centre plane cut; keep front, back, or both as separate objects.", {"slice", "cut", "plane"});
+    describe("select.domain_objects", "Select and Move work on whole objects.", {"object mode", "selection mode", "domain"});
+    describe("select.domain_voxels",
+             "Select and Move work on voxels of one object: click a piece, drag a box, Ctrl+Shift-drag to brush; Shift adds, Ctrl removes.",
+             {"voxel mode", "voxel select", "region", "selection mode", "domain", "cells"});
+    describe("voxel.extract_selection", "Move the selected voxels into a new object in place (Separate Selected).",
+             {"extract", "separate", "split", "detach", "new object", "voxels"});
+    describe("voxel.select_grow", "Add the voxels touching the selection.", {"grow", "expand", "select"});
+    describe("voxel.select_shrink", "Drop the selection's outer layer.", {"shrink", "contract", "select"});
+    describe("voxel.select_invert", "Select the object's other voxels instead.", {"invert", "inverse", "select"});
     describe("voxel.join",
              "Preview merging the other selected voxel objects into the active one as one object (not a group); off-grid objects ask to resample or group instead.",
              {"join", "merge", "combine", "weld", "attach", "unite", "one object"});
@@ -913,7 +937,8 @@ EditorWorkspace::EditorWorkspace(EditorDocument document)
         command.label = action.label;
         command.category = action.menu;
         command.contexts = {ShortcutContext::Global};
-        if (action.id.starts_with("transform.") || action.id.starts_with("view.") || action.id == "scatter.brush")
+        if (action.id.starts_with("transform.") || action.id.starts_with("view.") || action.id == "scatter.brush" ||
+            action.id.starts_with("select."))
             command.contexts = {ShortcutContext::Viewport};
         else if (action.id.starts_with("camera."))
             command.contexts = {ShortcutContext::Camera, ShortcutContext::Viewport};

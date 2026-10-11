@@ -990,7 +990,7 @@ private:
     void continue_voxel_stroke(int x, int y);
     void finish_voxel_stroke() noexcept;
     void apply_voxel_tool(const EditorPickResult& pick);
-    void begin_gizmo_drag(int x, int y);
+    void begin_gizmo_drag(int x, int y, std::uint32_t modifiers = 0);
     void update_gizmo_drag(int x, int y, std::uint32_t modifiers);
     void navigate_pointer(float deltaX, float deltaY);
     void finish_gizmo_drag(bool cancel);
@@ -1286,6 +1286,8 @@ private:
     bool gizmoDragPlane_{};
     Float3 gizmoPivot_{};
     std::vector<ObjectTransformChange> gizmoChanges_;
+    std::vector<ObjectVoxelSizeChange> gizmoSizeChanges_;
+    bool gizmoResampleScale_{};
     std::optional<EditorObjectBounds> scalePreviewBounds_;
     Float3 scaleFactors_{1.0F, 1.0F, 1.0F};
     PivotMode pivotMode_{PivotMode::BoundsCenter};

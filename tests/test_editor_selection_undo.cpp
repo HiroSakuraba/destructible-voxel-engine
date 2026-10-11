@@ -99,5 +99,27 @@ void test_history_metadata() {
     require(stack.undo(doc).success && !stack.can_undo(),"trimmed oldest entry gone");
     stack.clear(); require(!stack.undo_selection() && !stack.redo_selection(),"clear removes metadata");
 }
+void test_separate_and_extract(bool extract) {
+    auto c=controller(); c->workspace().select_object(1);
+    (void)c->workspace().document().find_object(1)->voxels->set_voxel({8,0,0},1);
+    const std::set<Int3> cells{{0,0,0},{8,0,0}};
+    c->set_selection_domain(SelectionDomain::Voxels);
+    c->select_voxels(1,cells,SelectionOperation::Replace);
+    require(c->toggle_isolation(),"isolate source");
+    require(extract ? c->extract_selected_voxels() : c->separate_voxel_islands(),"split operation");
+    const auto after=c->workspace().selected_objects(), isolated=c->isolated_objects();
+    const auto primary=c->workspace().selected_object();
+    const auto domain=c->selection_domain(); const auto resultCells=c->voxel_selection();
+    for(int i=0;i<3;++i) {
+        c->workspace().clear_selection();
+        require(c->dispatch_action("edit.undo"),"split undo");
+        require(c->workspace().selected_objects()==std::set<EditorObjectId>{1} && c->workspace().selected_object()==1 &&
+            c->selection_domain()==SelectionDomain::Voxels && c->voxel_selection()==cells,"split original selection restored");
+        require(c->dispatch_action("edit.redo"),"split redo");
+        require(c->workspace().selected_objects()==after && c->workspace().selected_object()==primary &&
+            c->selection_domain()==domain && c->voxel_selection()==resultCells,"split result selection restored");
+        require(c->isolated_objects()==isolated,"split cycle retains isolation membership");
+    }
 }
-int main(){try{test_boolean("voxel.boolean_operands_hide");test_boolean("voxel.boolean_operands_delete");test_boolean("voxel.boolean_operands_keep");test_join_and_branch();test_voxel_move();test_visibility_and_failed_undo();test_history_metadata();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Selection undo passed\n";}
+}
+int main(){try{test_boolean("voxel.boolean_operands_hide");test_boolean("voxel.boolean_operands_delete");test_boolean("voxel.boolean_operands_keep");test_join_and_branch();test_voxel_move();test_visibility_and_failed_undo();test_history_metadata();test_separate_and_extract(false);test_separate_and_extract(true);}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Selection undo passed\n";}

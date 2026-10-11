@@ -8,6 +8,7 @@
 #include <set>
 #include <vector>
 
+#include "dve/fragment.hpp"
 #include "dve/surface.hpp"
 
 namespace dve::editor {
@@ -166,7 +167,8 @@ EditorObjectDiagnostics analyze_editor_object(
     }
 
     if (object.flags.collisionEnabled) {
-        const std::vector<VoxelBox> boxes = build_object_box_proxy(*object.voxels);
+        // The merged proxy is what Play, Boolean and Join build, so the Inspector reports the same count.
+        const std::vector<VoxelBox> boxes = build_merged_object_box_proxy(*object.voxels);
         result.collisionBoxes = boxes.size();
         result.collisionProxyValid = validate_box_proxy(*object.voxels, boxes);
     } else {

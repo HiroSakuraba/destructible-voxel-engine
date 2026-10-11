@@ -41,6 +41,7 @@
 #include "dve/editor_materials.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/editor_runtime_settings.hpp"
+#include "dve/collision_proxy.hpp"
 #include "dve/editor_scatter.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_text3d.hpp"
@@ -123,7 +124,7 @@ enum class EditorFocusRegion : std::uint8_t {
 // them actually showed anything. Assets is a fifth tab rather than a separate toggleable
 // panel: it reuses this already-tabbed region instead of inventing a new layout slot.
 enum class BottomPanelTab : std::uint8_t { Problems, Tasks, Console, Profiler, Assets, Assistant };
-enum class PendingDestructiveAction : std::uint8_t { Inactive, Quit, NewProject, NewScene };
+enum class PendingDestructiveAction : std::uint8_t { Inactive, Quit, NewProject, NewScene, OpenScene, OpenProject };
 
 // What a click-to-edit text field is currently bound to, if any. Position and Rotation each
 // edit all three components as one space-separated line (matching how they are already
@@ -234,6 +235,32 @@ struct CommandPaletteResult {
     std::string disabledReason;
     bool enabled{true};
     bool favorite{};
+};
+
+// File > Open Scene / Open Project / Save As: an in-editor picker (the native editor has no OS
+// file dialog). Type to filter (or type a name for Save As), Up/Down, Enter, Esc.
+enum class FilePickerKind : std::uint8_t { OpenScene, OpenProject, SaveSceneAs };
+struct FilePickerEntry {
+    std::string label;   // what the row shows (relative path or project name)
+    std::string detail;  // "recent", "current", the folder, ...
+    std::filesystem::path path;
+};
+struct FilePickerState {
+    bool open{};
+    FilePickerKind kind{FilePickerKind::OpenScene};
+    std::string query;
+    std::vector<FilePickerEntry> entries;
+    std::size_t selected{};       // index into the filtered rows
+    std::string message;          // validation or confirmation text under the search box
+    bool messageIsError{};
+    std::optional<std::filesystem::path> confirmReplace;  // Save As: Enter again replaces this file
+};
+struct NativeFilePickerLayout {
+    UiRect panel{};
+    UiRect searchBox{};
+    std::vector<UiRect> rows;
+    std::size_t firstVisibleRow{};
+    UiRect hintBar{};
 };
 
 struct NativeCommandPaletteLayout {
@@ -424,6 +451,20 @@ public:
     [[nodiscard]] std::vector<CommandPaletteResult> command_palette_results(std::size_t limit = 10) const;
     [[nodiscard]] std::uint64_t command_palette_rebuild_count() const noexcept { return paletteCacheRebuilds_; }
     [[nodiscard]] NativeCommandPaletteLayout command_palette_layout() const;
+    bool open_file_picker(FilePickerKind kind);
+    void close_file_picker();
+    [[nodiscard]] const FilePickerState& file_picker() const noexcept { return filePicker_; }
+    [[nodiscard]] std::vector<std::size_t> file_picker_matches() const;  // entry indexes, filtered by the query
+    [[nodiscard]] NativeFilePickerLayout file_picker_layout() const;
+    bool accept_file_picker();
+    // Open a scene file (asks first when there are unsaved changes, like New Scene).
+    bool open_scene_file(const std::filesystem::path& path);
+    // Save the scene under the project's scenes/ folder as <name>.dvescene (or a given path).
+    bool save_scene_as(std::string_view nameOrPath, bool replaceExisting = false);
+    bool open_project_folder(const std::filesystem::path& root);
+    // File > Import Model: voxelizes the model selected in the Assets panel (OBJ/glTF/GLB) with
+    // default settings and adds its objects under one group; one undo step; reports a summary.
+    bool import_selected_model();
     [[nodiscard]] std::size_t command_palette_selection() const noexcept { return commandPaletteSelection_; }
     [[nodiscard]] std::optional<std::string_view> open_menu() const noexcept;
     [[nodiscard]] NativeMenuPopupLayout menu_popup_layout() const;
@@ -772,6 +813,22 @@ public:
     // one, previewed; off-grid objects need R (resample) or G (group instead) every time.
     // Separate Islands: split each selected voxel object into its connected pieces; the largest
     // stays. See editor_voxel_join.hpp.
+    // Flood Fill (Voxel > Flood Fill): arms a one-shot fill; the next viewport click repaints the
+    // clicked voxel's face-connected same-material region with the active material (one undo).
+    bool arm_flood_fill();
+    [[nodiscard]] bool flood_fill_armed() const noexcept { return floodFillArmed_; }
+    [[nodiscard]] bool follow_selection() const noexcept { return followSelection_; }
+    bool flood_fill_at(EditorObjectId object, Int3 voxel);
+    // View > Drop Selection to Surface: drops each selected object straight down onto what is
+    // below it (any visible object that is not being dropped, else the y = 0 grid); one undo.
+    bool drop_selection_to_surface();
+    // Voxel > Rebuild Collision: rebuilds the merged box proxies Play uses for the selected (or all)
+    // voxel objects and reports the box count. View > Collision Shapes draws these boxes.
+    bool rebuild_collision_proxies();
+    [[nodiscard]] const std::vector<VoxelBox>& collision_proxy(EditorObjectId id) const;
+    // Build > Validate Project: lists problems (missing files, broken references, empty or
+    // invalid objects, stale assets) in the Problems panel; returns how many were found.
+    std::size_t validate_project();
     bool begin_voxel_join();
     CommandResult commit_voxel_join();
     void cancel_voxel_join(std::string reason = {});
@@ -866,6 +923,12 @@ private:
     EditorVoxelSliceSession voxelSlice_{};
     EditorVoxelBooleanSession voxelBoolean_{};
     EditorVoxelJoinSession voxelJoin_{};
+    bool floodFillArmed_{};
+    // View > Follow Selection (Shift+F): the camera keeps the selection framed as it moves.
+    bool followSelection_{};
+    std::optional<Float3> followAnchor_;
+    struct CachedCollisionProxy { std::uint64_t revision{}; std::uint64_t objectStamp{}; std::vector<VoxelBox> boxes; };
+    mutable std::map<EditorObjectId, CachedCollisionProxy> collisionProxyCache_;
     bool handle_voxel_join_key(std::string_view normalized, bool control, bool shift, bool alt);
     bool scatterActive_{};
     std::vector<EditorObjectId> scatterTargets_;
@@ -978,6 +1041,12 @@ private:
     float uiZoomWindowLimit_{2.0F};
     bool quitRequested_{};
     PendingDestructiveAction pendingDestructiveAction_{PendingDestructiveAction::Inactive};
+    FilePickerState filePicker_;
+    std::filesystem::path pendingOpenPath_;
+    bool open_scene_now(const std::filesystem::path& path);
+    bool open_project_now(const std::filesystem::path& root);
+    void remember_recent_scene(const std::filesystem::path& path);
+    bool handle_file_picker_key(std::string_view normalized);
     std::function<void()> wakeCallback_;
     EditorStatusMessage status_{"Ready", false, 0.0F};
 

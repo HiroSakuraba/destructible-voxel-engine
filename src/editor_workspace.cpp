@@ -491,6 +491,11 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"window.gabor_inspector","Window","Gabor Volume Inspector",""},
         {"view.frame","View","Frame Selection","F"}, {"view.grid","View","Grid","G"},
         {"view.isolate_selection","View","Isolate Selection",""},
+        {"view.follow_selection","View","Follow Selection",""},
+        {"view.lit","View","Shading: Lit",""}, {"view.unlit","View","Shading: Unlit",""},
+        {"view.wireframe","View","Shading: Wireframe",""}, {"view.material_ids","View","Shading: Material IDs",""},
+        {"view.normals","View","Shading: Normals",""}, {"view.lighting_only","View","Shading: Lighting Only",""},
+        {"view.overdraw","View","Shading: Overdraw",""}, {"view.voxel_debug","View","Shading: Voxel Debug",""},
         {"view.top","View","Top View","Numpad7"}, {"view.front","View","Front View","Numpad1"},
         {"view.side","View","Side View","Numpad3"}, {"view.perspective","View","Perspective View","Numpad0"},
         {"view.increase_snap","View","Increase Move Snap","]"}, {"view.decrease_snap","View","Decrease Move Snap","["},
@@ -655,6 +660,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             action->radioGroup = std::move(radioGroup);
         }
     };
+    for (std::string_view id : {"view.lit", "view.unlit", "view.wireframe", "view.material_ids", "view.normals",
+                                "view.lighting_only", "view.overdraw", "view.voxel_debug"})
+        configure(id, "Shading", 40, true, "viewport.shading");
+    configure("view.follow_selection", "Camera", 20, true);
     configure("edit.preferences", "Settings", 90);
     configure("edit.project_settings", "Settings", 91);
     configure("window.toggle_ai_assistant", "AI", 70, true);

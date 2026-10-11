@@ -1018,7 +1018,7 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "voxel.brush", ShortcutContext::VoxelEditor, keyboard_shortcut("b"));
     bind(dve, "voxel.erase", ShortcutContext::VoxelEditor, keyboard_shortcut("b", false, true));
     bind(dve, "voxel.toggle_operation", ShortcutContext::VoxelEditor, keyboard_shortcut("x"));
-    bind(dve, "voxel.fill", ShortcutContext::VoxelEditor, keyboard_shortcut("f"));
+    // voxel.fill has no default key: F in the voxel context used to shadow Frame Selection.
     bind(dve, "voxel.line", ShortcutContext::VoxelEditor, keyboard_shortcut("l"));
     bind(dve, "voxel.volume", ShortcutContext::VoxelEditor, keyboard_shortcut("v"));
     bind(dve, "voxel.carve", ShortcutContext::VoxelEditor, keyboard_shortcut("c"));

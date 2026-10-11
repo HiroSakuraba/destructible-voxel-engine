@@ -78,10 +78,10 @@ struct Aabb {
     });
 }
 
-[[nodiscard]] bool capsule_overlaps_voxel(const Capsule& capsule, Int3 voxel) noexcept {
+[[nodiscard]] bool capsule_overlaps_voxel(const Capsule& capsule, Int3 voxel, Float3 spacing) noexcept {
     const Aabb box{
-        {static_cast<float>(voxel.x), static_cast<float>(voxel.y), static_cast<float>(voxel.z)},
-        {static_cast<float>(voxel.x + 1), static_cast<float>(voxel.y + 1), static_cast<float>(voxel.z + 1)},
+        multiply_components({static_cast<float>(voxel.x), static_cast<float>(voxel.y), static_cast<float>(voxel.z)},spacing),
+        multiply_components({static_cast<float>(voxel.x + 1), static_cast<float>(voxel.y + 1), static_cast<float>(voxel.z + 1)},spacing),
     };
     const float radius = std::max(0.0F, capsule.radius);
     return segment_aabb_distance_squared(capsule.pointA, capsule.pointB, box) <= radius * radius + 1.0e-6F;
@@ -255,7 +255,7 @@ std::optional<TransformedRayHit> raycast_voxels_transformed(
 std::optional<TransformedRayHit> raycast_voxels_scaled(
     const VoxelObject& object, const RigidTransform& pose, Float3 spacing,
     Float3 origin, Float3 direction, float maximum) {
-    if (!valid_voxel_metric(spacing) || !(maximum > 0)) return std::nullopt;
+    if (!valid_voxel_metric(spacing) || !(maximum >= 0) || !std::isfinite(maximum)) return std::nullopt;
     const auto localOrigin=world_to_voxel(pose,spacing,origin);
     const auto localDirection=divide_components(inverse_transform_vector(pose,normalize(direction)),spacing);
     const float metric=length(localDirection);
@@ -292,21 +292,24 @@ bool overlaps_voxels(
 bool capsule_overlaps_voxels(
     const VoxelObject& object,
     const RigidTransform& objectTransform,
-    const Capsule& worldCapsule) {
+    const Capsule& worldCapsule, Float3 spacing) {
+    if (!valid_voxel_metric(spacing)) return false;
+    const auto occupied=object.occupied_bounds();
+    if (!occupied.valid) { return false; }
     const Capsule local = inverse_transform_capsule(objectTransform, worldCapsule);
     const Aabb bounds = capsule_aabb(local);
-    const std::int32_t minX = static_cast<std::int32_t>(std::floor(bounds.min.x));
-    const std::int32_t minY = static_cast<std::int32_t>(std::floor(bounds.min.y));
-    const std::int32_t minZ = static_cast<std::int32_t>(std::floor(bounds.min.z));
-    const std::int32_t maxX = static_cast<std::int32_t>(std::ceil(bounds.max.x)) - 1;
-    const std::int32_t maxY = static_cast<std::int32_t>(std::ceil(bounds.max.y)) - 1;
-    const std::int32_t maxZ = static_cast<std::int32_t>(std::ceil(bounds.max.z)) - 1;
+    const std::int32_t minX = static_cast<std::int32_t>(std::clamp(std::floor(double(bounds.min.x)/spacing.x),double(occupied.minimum.x),double(occupied.maximum.x)+1));
+    const std::int32_t minY = static_cast<std::int32_t>(std::clamp(std::floor(double(bounds.min.y)/spacing.y),double(occupied.minimum.y),double(occupied.maximum.y)+1));
+    const std::int32_t minZ = static_cast<std::int32_t>(std::clamp(std::floor(double(bounds.min.z)/spacing.z),double(occupied.minimum.z),double(occupied.maximum.z)+1));
+    const std::int32_t maxX = static_cast<std::int32_t>(std::clamp(std::ceil(double(bounds.max.x)/spacing.x),double(occupied.minimum.x),double(occupied.maximum.x)+1)) - 1;
+    const std::int32_t maxY = static_cast<std::int32_t>(std::clamp(std::ceil(double(bounds.max.y)/spacing.y),double(occupied.minimum.y),double(occupied.maximum.y)+1)) - 1;
+    const std::int32_t maxZ = static_cast<std::int32_t>(std::clamp(std::ceil(double(bounds.max.z)/spacing.z),double(occupied.minimum.z),double(occupied.maximum.z)+1)) - 1;
 
     for (std::int32_t z = minZ; z <= maxZ; ++z) {
         for (std::int32_t y = minY; y <= maxY; ++y) {
             for (std::int32_t x = minX; x <= maxX; ++x) {
                 const Int3 voxel{x, y, z};
-                if (object.occupied_at(voxel) && capsule_overlaps_voxel(local, voxel)) return true;
+                if (object.occupied_at(voxel) && capsule_overlaps_voxel(local, voxel,spacing)) return true;
             }
         }
     }
@@ -317,7 +320,10 @@ std::optional<CapsuleSweepHit> sweep_capsule_conservative(
     const VoxelObject& object,
     const RigidTransform& objectTransform,
     const Capsule& worldCapsule,
-    Float3 worldDisplacement) {
+    Float3 worldDisplacement, Float3 spacing) {
+    if (!valid_voxel_metric(spacing)) return std::nullopt;
+    const auto occupied=object.occupied_bounds();
+    if (!occupied.valid) { return std::nullopt; }
     const Capsule localCapsule = inverse_transform_capsule(objectTransform, worldCapsule);
     const Float3 localDisplacement = inverse_transform_vector(objectTransform, worldDisplacement);
     const Aabb startBounds = capsule_aabb(localCapsule);
@@ -335,12 +341,12 @@ std::optional<CapsuleSweepHit> sweep_capsule_conservative(
         },
     };
 
-    const std::int32_t minX = static_cast<std::int32_t>(std::floor(broad.min.x));
-    const std::int32_t minY = static_cast<std::int32_t>(std::floor(broad.min.y));
-    const std::int32_t minZ = static_cast<std::int32_t>(std::floor(broad.min.z));
-    const std::int32_t maxX = static_cast<std::int32_t>(std::ceil(broad.max.x)) - 1;
-    const std::int32_t maxY = static_cast<std::int32_t>(std::ceil(broad.max.y)) - 1;
-    const std::int32_t maxZ = static_cast<std::int32_t>(std::ceil(broad.max.z)) - 1;
+    const std::int32_t minX = static_cast<std::int32_t>(std::clamp(std::floor(double(broad.min.x)/spacing.x),double(occupied.minimum.x),double(occupied.maximum.x)+1));
+    const std::int32_t minY = static_cast<std::int32_t>(std::clamp(std::floor(double(broad.min.y)/spacing.y),double(occupied.minimum.y),double(occupied.maximum.y)+1));
+    const std::int32_t minZ = static_cast<std::int32_t>(std::clamp(std::floor(double(broad.min.z)/spacing.z),double(occupied.minimum.z),double(occupied.maximum.z)+1));
+    const std::int32_t maxX = static_cast<std::int32_t>(std::clamp(std::ceil(double(broad.max.x)/spacing.x),double(occupied.minimum.x),double(occupied.maximum.x)+1)) - 1;
+    const std::int32_t maxY = static_cast<std::int32_t>(std::clamp(std::ceil(double(broad.max.y)/spacing.y),double(occupied.minimum.y),double(occupied.maximum.y)+1)) - 1;
+    const std::int32_t maxZ = static_cast<std::int32_t>(std::clamp(std::ceil(double(broad.max.z)/spacing.z),double(occupied.minimum.z),double(occupied.maximum.z)+1)) - 1;
 
     float bestTime = std::numeric_limits<float>::infinity();
     Float3 bestNormal{};
@@ -353,8 +359,8 @@ std::optional<CapsuleSweepHit> sweep_capsule_conservative(
                 const MaterialId material = object.material_at(voxel);
                 if (material == kAirMaterial) continue;
                 const Aabb obstacle{
-                    {static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)},
-                    {static_cast<float>(x + 1), static_cast<float>(y + 1), static_cast<float>(z + 1)},
+                    multiply_components({static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)},spacing),
+                    multiply_components({static_cast<float>(x + 1), static_cast<float>(y + 1), static_cast<float>(z + 1)},spacing),
                 };
                 float time = 0.0F;
                 Float3 normal{};
@@ -390,18 +396,21 @@ Float3 depenetrate_capsule_conservative(
     const Capsule& worldCapsule,
     std::size_t maxIterations,
     float skin,
-    std::size_t* iterationsUsed) {
+    std::size_t* iterationsUsed, Float3 spacing) {
+    if (!valid_voxel_metric(spacing)) { if (iterationsUsed) *iterationsUsed=0; return {}; }
+    const auto occupied=object.occupied_bounds();
+    if (!occupied.valid) { if (iterationsUsed) *iterationsUsed=0; return {}; }
     Capsule local = inverse_transform_capsule(objectTransform, worldCapsule);
     Float3 totalLocalCorrection{};
     std::size_t completedIterations = 0;
     for (std::size_t iteration = 0; iteration < maxIterations; ++iteration) {
         const Aabb bounds = capsule_aabb(local);
-        const std::int32_t minX = static_cast<std::int32_t>(std::floor(bounds.min.x));
-        const std::int32_t minY = static_cast<std::int32_t>(std::floor(bounds.min.y));
-        const std::int32_t minZ = static_cast<std::int32_t>(std::floor(bounds.min.z));
-        const std::int32_t maxX = static_cast<std::int32_t>(std::ceil(bounds.max.x)) - 1;
-        const std::int32_t maxY = static_cast<std::int32_t>(std::ceil(bounds.max.y)) - 1;
-        const std::int32_t maxZ = static_cast<std::int32_t>(std::ceil(bounds.max.z)) - 1;
+        const std::int32_t minX = static_cast<std::int32_t>(std::clamp(std::floor(double(bounds.min.x)/spacing.x),double(occupied.minimum.x),double(occupied.maximum.x)+1));
+        const std::int32_t minY = static_cast<std::int32_t>(std::clamp(std::floor(double(bounds.min.y)/spacing.y),double(occupied.minimum.y),double(occupied.maximum.y)+1));
+        const std::int32_t minZ = static_cast<std::int32_t>(std::clamp(std::floor(double(bounds.min.z)/spacing.z),double(occupied.minimum.z),double(occupied.maximum.z)+1));
+        const std::int32_t maxX = static_cast<std::int32_t>(std::clamp(std::ceil(double(bounds.max.x)/spacing.x),double(occupied.minimum.x),double(occupied.maximum.x)+1)) - 1;
+        const std::int32_t maxY = static_cast<std::int32_t>(std::clamp(std::ceil(double(bounds.max.y)/spacing.y),double(occupied.minimum.y),double(occupied.maximum.y)+1)) - 1;
+        const std::int32_t maxZ = static_cast<std::int32_t>(std::clamp(std::ceil(double(bounds.max.z)/spacing.z),double(occupied.minimum.z),double(occupied.maximum.z)+1)) - 1;
 
         bool found = false;
         Float3 bestCorrection{};
@@ -411,13 +420,13 @@ Float3 depenetrate_capsule_conservative(
                 for (std::int32_t x = minX; x <= maxX; ++x) {
                     if (!object.occupied_at({x, y, z})) continue;
                     const Aabb obstacle{
-                        {static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)},
-                        {static_cast<float>(x + 1), static_cast<float>(y + 1), static_cast<float>(z + 1)},
+                        multiply_components({static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)},spacing),
+                        multiply_components({static_cast<float>(x + 1), static_cast<float>(y + 1), static_cast<float>(z + 1)},spacing),
                     };
                     const bool aabbOverlap = bounds.max.x > obstacle.min.x && bounds.min.x < obstacle.max.x &&
                                              bounds.max.y > obstacle.min.y && bounds.min.y < obstacle.max.y &&
                                              bounds.max.z > obstacle.min.z && bounds.min.z < obstacle.max.z;
-                    if (!aabbOverlap || !capsule_overlaps_voxel(local, {x, y, z})) continue;
+                    if (!aabbOverlap || !capsule_overlaps_voxel(local, {x, y, z},spacing)) continue;
                     const Float3 correction = conservative_overlap_correction(bounds, obstacle, skin);
                     const float correctionLength = length_squared(correction);
                     if (correctionLength < bestLength) {

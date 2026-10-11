@@ -1,4 +1,5 @@
 #include "dve/editor_native.hpp"
+#include "dve/voxel_metric.hpp"
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -27,15 +28,15 @@ void scale_test() {
     check(c.gizmo_dragging(),"scale handle starts drag");
     c.key_down("1",false,false,false); c.key_down(".",false,false,false); c.key_down("3",false,false,false);
     auto* o=c.workspace().document().find_object(1);
-    check(std::abs(o->voxelSizeMeters-0.325F)<0.00001F,"fractional scale previews continuously");
-    check(length(subtract(o->transform.position,add(pivot,multiply(subtract(a.position,pivot),1.3F))))<0.0001F,"group pivot positions");
+    check(std::abs(o->voxelScale.x-1.3F)<0.00001F && o->voxelScale.y==1 && o->voxelScale.z==1 && o->voxelSizeMeters==0.25F,"axis scale previews continuously");
+    check(length(subtract(o->transform.position,add(pivot,rotate(a.rotation,multiply_components(rotate(conjugate(a.rotation),subtract(a.position,pivot)),{1.3F,1,1})))))<0.0001F,"group pivot positions");
     check(o->voxels->revision()==revision && o->voxels->occupied_voxel_count()==2 && o->anchors.contains({2,0,0}),"preview preserves grid and anchors");
     check(c.workspace().commands().size()==0,"preview has no history");
     c.key_down("escape",false,false,false);
-    check(std::abs(o->voxelSizeMeters-0.25F)<0.00001F && length(subtract(o->transform.position,a.position))<0.0001F,"cancel restores size and position");
+    check(std::abs(o->voxelScale.x-1.0F)<0.00001F && length(subtract(o->transform.position,a.position))<0.0001F,"cancel restores size and position");
     c.pointer_down(PointerButton::Primary,x,y);
     c.key_down("2",false,false,false); c.clear_navigation_input();
-    check(!c.gizmo_dragging() && std::abs(o->voxelSizeMeters-0.25F)<0.00001F,"focus loss cancels resize");
+    check(!c.gizmo_dragging() && std::abs(o->voxelScale.x-1.0F)<0.00001F,"focus loss cancels resize");
     c.pointer_down(PointerButton::Primary,x,y); c.pointer_up(PointerButton::Primary,x,y);
     check(c.workspace().commands().size()==0,"no-op drag adds no history");
     c.pointer_down(PointerButton::Primary,x,y);
@@ -43,11 +44,11 @@ void scale_test() {
     c.pointer_up(PointerButton::Primary,x,y);
     check(c.workspace().commands().size()==1,"scale commits once");
     for(int i=0;i<3;++i) {
-        check(c.dispatch_action("edit.undo") && std::abs(o->voxelSizeMeters-0.25F)<0.00001F,"scale undo");
-        check(c.dispatch_action("edit.redo") && std::abs(o->voxelSizeMeters-0.325F)<0.00001F,"scale redo");
+        check(c.dispatch_action("edit.undo") && std::abs(o->voxelScale.x-1.0F)<0.00001F,"scale undo");
+        check(c.dispatch_action("edit.redo") && std::abs(o->voxelScale.x-1.3F)<0.00001F,"scale redo");
         check(o->voxels->revision()==revision && o->anchors.contains({2,0,0}),"history preserves cell state");
     }
-    const auto center=transform_point(o->transform,multiply(Float3{0.5F,0.5F,0.5F},o->voxelSizeMeters));
+    const auto center=voxel_to_world(o->transform,multiply(o->voxelScale,o->voxelSizeMeters),{0.5F,0.5F,0.5F});
     const auto hit=pick_editor_document(c.workspace().document(),{subtract(center,{0,0,10}),{0,0,1}});
     check(hit.has_value(),"picking uses resized geometry");
     const auto directory=std::filesystem::temp_directory_path()/"dve-continuous-scale-test";
@@ -55,18 +56,35 @@ void scale_test() {
     const auto saved=c.workspace().document().save_transactional(directory/"scene.dvescene");
     check(saved.success,"scaled scene saves");
     auto loaded=EditorDocument::load(saved.manifestPath);
-    check(loaded && std::abs(loaded->find_object(1)->voxelSizeMeters-0.325F)<0.00001F &&
+    check(loaded && std::abs(loaded->find_object(1)->voxelScale.x-1.3F)<0.00001F &&
         loaded->find_object(1)->voxels->occupied_voxel_count()==2,"scale survives round trip");
     std::filesystem::remove_all(directory);
-    o->voxelSizeMeters=8;
+    // Y and Z commit and undo independently; Alt during a drag uniformly scales all axes.
+    for (int axis=1;axis<3;++axis) {
+        c.frame_selection(); const auto handle=c.gizmo_axes()[axis];
+        c.pointer_down(PointerButton::Primary,int(handle.end.x),int(handle.end.y));
+        check(c.gizmo_dragging(),"other axis starts drag");
+        c.key_down("2",false,false,false); c.pointer_up(PointerButton::Primary,int(handle.end.x),int(handle.end.y));
+        check(std::abs((axis==1?o->voxelScale.y:o->voxelScale.z)-2)<0.0001F,"other axis changes");
+        check(c.dispatch_action("edit.undo"),"other axis undo");
+    }
+    c.frame_selection(); const auto uniform=c.gizmo_axes()[0];
+    c.pointer_down(PointerButton::Primary,int(uniform.end.x),int(uniform.end.y));
+    c.pointer_move(int(uniform.end.x),int(uniform.end.y),4U);
+    c.key_down("2",false,false,false);
+    check(std::abs(o->voxelScale.x-2.6F)<0.0001F && o->voxelScale.y==2 && o->voxelScale.z==2,"Alt uniform retains aspect ratio");
+    c.key_down("escape",false,false,false);
+    check(o->voxelScale.y==1 && o->voxelScale.z==1,"uniform cancel");
+    o->voxelSizeMeters=8; o->voxelScale={1,1,1};
+    c.workspace().document().find_object(2)->voxelScale={1,1,1};
     c.frame_selection();
     const auto limit=c.gizmo_axes()[0];
     c.pointer_down(PointerButton::Primary,int(limit.end.x),int(limit.end.y));
     c.key_down("2",false,false,false);
-    check(std::abs(o->voxelSizeMeters-10)<0.00001F &&
-        std::abs(c.workspace().document().find_object(2)->voxelSizeMeters-0.40625F)<0.00001F,"shared factor clamps to size limit");
+    check(std::abs(o->voxelScale.x-1.25F)<0.00001F &&
+        std::abs(c.workspace().document().find_object(2)->voxelScale.x-1.25F)<0.00001F,"shared factor clamps cell dimension to 10 meters");
     c.key_down("escape",false,false,false);
-    check(std::abs(o->voxelSizeMeters-8)<0.00001F,"clamped preview cancels");
+    check(o->voxelScale.x==1 && o->voxelSizeMeters==8,"clamped preview cancels");
 }
 }
 int main() { try { scale_test(); std::cout<<"Continuous scale passed\n"; }

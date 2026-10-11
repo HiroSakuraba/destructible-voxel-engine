@@ -1,4 +1,5 @@
 #include "dve/editor_native.hpp"
+#include "dve/voxel_metric.hpp"
 #include "dve/asset_cooker.hpp"
 #include "dve/editor_import_workflow.hpp"
 #include "dve/editor_project.hpp"
@@ -3802,7 +3803,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
             if (pixels < 1.0F) break;
             const float along = (static_cast<float>(x - voxelMoveStartX_) * sx + static_cast<float>(y - voxelMoveStartY_) * sy) / pixels;
             const float worldPerPixel = std::max(0.5F, length(subtract(camera_.position, voxel_selection_centre())) * 0.12F) / pixels;
-            voxelMoveSteps_ = static_cast<int>(std::lround(along * worldPerPixel / object->voxelSizeMeters));
+            voxelMoveSteps_ = static_cast<int>(std::lround(along * worldPerPixel / (object->voxelSizeMeters * (voxelMoveAxis_ == 1 ? object->voxelScale.x : voxelMoveAxis_ == 2 ? object->voxelScale.y : object->voxelScale.z))));
             set_status("Move voxels: " + std::to_string(voxelMoveSteps_) + " voxel(s) along " +
                        std::string(voxelMoveAxis_ == 1 ? "X" : voxelMoveAxis_ == 2 ? "Y" : "Z") + " (release applies, Esc cancels)", false, 2.0F);
             break;
@@ -4992,7 +4993,7 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Beam", "Bm", "voxel.line", "Click a voxel to add a 5-voxel beam along +X.", "Voxel objects"},
         {"Anchor", "Anc", "", "Click a voxel to toggle it as a structural anchor.", "Voxel objects"},
         {"Rotate", "Rot", "transform.rotate", "Drag a gizmo ring to rotate the selection.", "Selected objects"},
-        {"Scale", "Scl", "transform.scale", "Drag to scale uniformly without resampling; Ctrl-drag resamples an axis.",
+        {"Scale", "Scl", "transform.scale", "Drag to scale a local axis without resampling; Alt: uniform; Ctrl at start: resample.",
          "Voxel objects"},
         {"Scatter", "Sct", "scatter.brush", "Drag to paint copies of the selected objects; Shift-drag erases copies; Ctrl+wheel sets the radius.",
          "Any visible voxel surface"},
@@ -5235,7 +5236,7 @@ Float3 NativeEditorController::selection_pivot() const noexcept {
 Float3 NativeEditorController::gizmo_axis_world(int axis) const noexcept {
     Float3 direction = axis == 1 ? Float3{1.0F, 0.0F, 0.0F} :
                        axis == 2 ? Float3{0.0F, 1.0F, 0.0F} : Float3{0.0F, 0.0F, 1.0F};
-    if (transformSpace_ == EditorTransformSpace::Local && workspace_.selected_object()) {
+    if ((transformSpace_ == EditorTransformSpace::Local || activeTool_ == EditorToolId::Scale) && workspace_.selected_object()) {
         if (const EditorObject* object = workspace_.document().find_object(*workspace_.selected_object()))
             direction = transform_vector(object->transform, direction);
     }
@@ -5322,20 +5323,19 @@ void NativeEditorController::update_placement_preview(int x, int y) {
                     it->voxel.x >= box.maxExclusive.x || it->voxel.y >= box.maxExclusive.y ||
                     it->voxel.z >= box.maxExclusive.z) continue;
                 for (int corner = 0; corner < 8; ++corner)
-                    candidates.push_back(transform_point(target->transform, multiply(Float3{
+                    candidates.push_back(voxel_to_world(target->transform, multiply(target->voxelScale,target->voxelSizeMeters),Float3{
                         static_cast<float>((corner & 1) ? box.maxExclusive.x : box.min.x),
                         static_cast<float>((corner & 2) ? box.maxExclusive.y : box.min.y),
-                        static_cast<float>((corner & 4) ? box.maxExclusive.z : box.min.z)},
-                        target->voxelSizeMeters)));
+                        static_cast<float>((corner & 4) ? box.maxExclusive.z : box.min.z)}));
             }
         } else if (target->voxels && target->voxels->brick_count() > 0 && target->voxelSizeMeters > 0.0F) {
             const float size = target->voxelSizeMeters;
             std::array<Float3, 8> corners{};
             for (int corner = 0; corner < 8; ++corner) {
                 corners[static_cast<std::size_t>(corner)] = transform_point(target->transform,
-                    Float3{(static_cast<float>(it->voxel.x) + ((corner & 1) ? 1.0F : 0.0F)) * size,
+                    multiply_components(Float3{(static_cast<float>(it->voxel.x) + ((corner & 1) ? 1.0F : 0.0F)) * size,
                            (static_cast<float>(it->voxel.y) + ((corner & 2) ? 1.0F : 0.0F)) * size,
-                           (static_cast<float>(it->voxel.z) + ((corner & 4) ? 1.0F : 0.0F)) * size});
+                           (static_cast<float>(it->voxel.z) + ((corner & 4) ? 1.0F : 0.0F)) * size},target->voxelScale));
             }
             if (placementMode_ == PlacementTarget::VoxelCorner) candidates.assign(corners.begin(), corners.end());
             else if (placementMode_ == PlacementTarget::VoxelEdge) {
@@ -5491,7 +5491,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
         }
         if (activeTool_ == EditorToolId::Scale && (!object->voxels || object->voxels->brick_count() == 0 ||
             object->text3d || object->gaborVolume || !std::isfinite(object->voxelSizeMeters) ||
-            object->voxelSizeMeters < 0.001F || object->voxelSizeMeters > 10.0F)) {
+            object->voxelSizeMeters < 0.001F || object->voxelSizeMeters > 10.0F || !valid_voxel_metric(object->voxelScale))) {
             set_status("Voxel scale requires occupied voxel objects", true);
             gizmoAxis_ = 0;
             return;
@@ -5500,6 +5500,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
     gizmoDragging_ = true;
     gizmoStartX_ = x;
     gizmoStartY_ = y;
+    gizmoLastX_ = x; gizmoLastY_ = y; gizmoLastModifiers_ = modifiers;
     gizmoPivot_ = selection_pivot();
     gizmoChanges_ = selection_transform_snapshot();
     gizmoSizeChanges_.clear();
@@ -5508,7 +5509,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
         for (const auto& change : gizmoChanges_) {
             const auto* object = workspace_.document().find_object(change.id);
             gizmoSizeChanges_.push_back({change.id, change.before, change.before,
-                object->voxelSizeMeters, object->voxelSizeMeters});
+                object->voxelSizeMeters, object->voxelSizeMeters, object->voxelScale, object->voxelScale});
         }
     }
     transformNumeric_.clear();
@@ -5567,23 +5568,42 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
         if (!numeric && preferences.scaleSnapEnabled != temporaryOverride)
             factor = std::max(0.1F, 1.0F + std::round((factor - 1.0F) / preferences.scaleSnapStep) * preferences.scaleSnapStep);
         if (!gizmoResampleScale_) {
-            float minimum=0.1F, maximum=10.0F;
+            scaleFactors_ = {1,1,1};
+            const bool uniform = (modifiers & 4U) != 0U;
+            if (uniform) scaleFactors_ = {factor,factor,factor};
+            else if (gizmoAxis_ == 1) scaleFactors_.x = factor;
+            else if (gizmoAxis_ == 2) scaleFactors_.y = factor;
+            else scaleFactors_.z = factor;
+            float minimum = 0.1F, maximum = 10.0F;
             for (const auto& change : gizmoSizeChanges_) {
-                minimum=std::max(minimum,0.001F/change.beforeVoxelSize);
-                maximum=std::min(maximum,10.0F/change.beforeVoxelSize);
-            }
-            factor=std::clamp(factor,minimum,maximum);
-            scaleFactors_={factor,factor,factor};
-            for (auto& change : gizmoSizeChanges_) {
-                change.after=change.before;
-                change.after.position=add(gizmoPivot_,multiply(subtract(change.before.position,gizmoPivot_),factor));
-                change.afterVoxelSize=change.beforeVoxelSize*factor;
-                if (auto* object=workspace_.document().find_object(change.id)) {
-                    object->voxelSizeMeters=change.afterVoxelSize;
-                    object->transform=change.after;
+                const Float3 spacing = multiply(*change.beforeAxisScale, change.beforeVoxelSize);
+                const float values[] = {spacing.x,spacing.y,spacing.z};
+                for (int axis=0; axis<3; ++axis) if (uniform || axis+1 == gizmoAxis_) {
+                    minimum = std::max(minimum,0.001F/values[axis]);
+                    maximum = std::min(maximum,10.0F/values[axis]);
                 }
             }
-            set_status("Continuous uniform scale: " + std::to_string(factor).substr(0,5) + "x; cells unchanged",false,1);
+            // Invalid imported metrics are rejected at drag start; never pass reversed clamp bounds.
+            if (minimum > maximum) { set_status("Cell dimensions exceed the scale limits",true); return; }
+            factor = std::clamp(factor,minimum,maximum);
+            scaleFactors_ = {1,1,1};
+            if (uniform) scaleFactors_ = {factor,factor,factor};
+            else if (gizmoAxis_ == 1) scaleFactors_.x = factor;
+            else if (gizmoAxis_ == 2) scaleFactors_.y = factor;
+            else scaleFactors_.z = factor;
+            const auto* primary = workspace_.document().find_object(*workspace_.selected_object());
+            const Quaternion frame = primary ? primary->transform.rotation : Quaternion{};
+            for (auto& change : gizmoSizeChanges_) {
+                change.after = change.before;
+                const Float3 offset = rotate(conjugate(frame),subtract(change.before.position,gizmoPivot_));
+                change.after.position = add(gizmoPivot_,rotate(frame,multiply_components(offset,scaleFactors_)));
+                change.afterAxisScale = multiply_components(*change.beforeAxisScale,scaleFactors_);
+                if (auto* object = workspace_.document().find_object(change.id)) {
+                    object->voxelScale = *change.afterAxisScale;
+                    object->transform = change.after;
+                }
+            }
+            set_status("Continuous local-axis scale: " + std::to_string(factor).substr(0,5) + "x (Alt: uniform); cells unchanged",false,1);
             return;
         }
         scaleFactors_ = {1.0F, 1.0F, 1.0F};
@@ -5639,6 +5659,7 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
     for (const auto& change : gizmoSizeChanges_) {
         if (auto* object=workspace_.document().find_object(change.id)) {
             object->voxelSizeMeters=change.beforeVoxelSize;
+            if (change.beforeAxisScale) object->voxelScale=*change.beforeAxisScale;
             object->transform=change.before;
         }
     }
@@ -5646,7 +5667,7 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
     if (!cancel && !gizmoChanges_.empty()) {
         if (activeTool_ == EditorToolId::Scale) {
             if (!gizmoResampleScale_) {
-                if (std::abs(scaleFactors_.x-1.0F)>0.000001F) {
+                if (std::abs(scaleFactors_.x-1.0F)>0.000001F || std::abs(scaleFactors_.y-1.0F)>0.000001F || std::abs(scaleFactors_.z-1.0F)>0.000001F) {
                     const auto result=workspace_.commands().execute(workspace_.document(),
                         std::make_unique<ScaleVoxelSizeCommand>(gizmoSizeChanges_,"Scale objects continuously"));
                     set_status(result.success ? "Scaled objects; voxel cells unchanged" : result.message,!result.success);
@@ -5680,12 +5701,12 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
                             scaled_center(occupied.minimum.y, occupied.maximum.y, scaleFactors_.y),
                             scaled_center(occupied.minimum.z, occupied.maximum.z, scaleFactors_.z)}
                             : Float3{};
-                        const Float3 rotatedCenter = rotate(change.before.rotation, localCenter);
+                        const Float3 rotatedCenter = rotate(change.before.rotation, multiply_components(localCenter,object->voxelScale));
                         const Float3 centerWorld = add(change.before.position, rotatedCenter);
                         const Float3 offset = subtract(centerWorld, gizmoPivot_);
                         const Float3 scaledCenter = add(gizmoPivot_, {
                             offset.x * scaleFactors_.x, offset.y * scaleFactors_.y, offset.z * scaleFactors_.z});
-                        change.after.position = subtract(scaledCenter, rotate(change.before.rotation, newLocalCenter));
+                        change.after.position = subtract(scaledCenter, rotate(change.before.rotation, multiply_components(newLocalCenter,object->voxelScale)));
                     }
                     if (valid) {
                         compound->add(std::make_unique<TransformObjectsCommand>(gizmoChanges_, "Scale positions"));
@@ -5801,7 +5822,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "transform.select") { set_active_tool(EditorToolId::Select); return true; }
     if (actionId == "transform.scale") {
         set_active_tool(EditorToolId::Scale);
-        set_status("Scale: drag for continuous uniform size; Ctrl-drag resamples, Alt makes resampling uniform");
+        set_status("Scale: local-axis drag keeps cells; Alt during drag: uniform; Ctrl at start: resample");
         return true;
     }
     if (actionId == "transform.universal") { set_active_tool(EditorToolId::Translate); return true; }
@@ -6649,6 +6670,7 @@ camera_menu_dispatch_complete:
         }
         PrintExportOptions options;
         options.voxelSizeMeters = static_cast<double>(object->voxelSizeMeters);
+        options.voxelScale = object->voxelScale;
         std::filesystem::path dir = project_root() / "exports";
         std::error_code dirError;
         std::filesystem::create_directories(dir, dirError);
@@ -9259,7 +9281,7 @@ std::vector<VoxelBooleanPreviewMarker> NativeEditorController::voxel_boolean_pre
         if (markers.size() >= limit) return;
         const Float3 local{(static_cast<float>(voxel.x) + 0.5F) * size, (static_cast<float>(voxel.y) + 0.5F) * size,
                            (static_cast<float>(voxel.z) + 0.5F) * size};
-        const ScreenPoint screen = project_world_to_screen(camera_, viewport, transform_point(target->transform, local));
+        const ScreenPoint screen = project_world_to_screen(camera_, viewport, transform_point(target->transform, multiply_components(local,target->voxelScale)));
         if (!screen.visible) return;
         const float radius = camera_.projection == EditorProjection::Perspective
             ? size * viewportHeight / std::max(0.001F, 2.0F * screen.depth * tangent)
@@ -10702,6 +10724,7 @@ bool NativeEditorController::start_import_job(bool reimport) {
                     const EditorObjectId id = partIds[k];
                     EditorObject object(id, part.name.empty() ? name : part.name);
                     object.voxelSizeMeters = part.asset.voxelSizeMeters;
+                    object.voxelScale = part.asset.voxelScale;
                     object.voxels = voxel_copy_with_id(part.asset.object, id);
                     object.transform = make_rigid_transform({part.worldTransform.values[12], part.worldTransform.values[13], part.worldTransform.values[14]},
                                                             quaternion_from_rotation_matrix(part.worldTransform));
@@ -11079,7 +11102,7 @@ Float3 NativeEditorController::voxel_selection_centre() const {
         voxelCentreCacheSerial_ = voxelSelectionSerial_;
         voxelCentreCacheValid_ = true;
     }
-    return transform_point(object->transform, multiply(voxelCentreCacheLocal_, object->voxelSizeMeters));
+    return voxel_to_world(object->transform, multiply(object->voxelScale,object->voxelSizeMeters),voxelCentreCacheLocal_);
 }
 
 Float3 NativeEditorController::voxel_move_axis_world(int axis) const {

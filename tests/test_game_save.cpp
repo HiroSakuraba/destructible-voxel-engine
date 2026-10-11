@@ -450,6 +450,7 @@ void test_migration() {
     CHECK(document.has_value());
     if (!document) return;
     document->sections.erase("dve.clock");
+    document->sections.erase("dve.voxel_axes");
     SaveGameDocument v0;
     v0.schemaVersion = 0;
     v0.sequence = 7;
@@ -481,7 +482,7 @@ void test_migration() {
     const auto migrated = migrating.decode(v0Bytes, &report, &error);
     CHECK(migrated.has_value());
     if (!migrated) std::cerr << "migration: " << error << '\n';
-    CHECK(report.storedSchemaVersion == 0U && report.migrationsApplied == 3U);   // game v0->1, engine v1->2->3
+    CHECK(report.storedSchemaVersion == 0U && report.migrationsApplied == 4U);   // game v0->1, engine v1->2->3->4
     int firesB = 0;
     Scene b = boot(assets, Physics3DBackend::Reference, &firesB);
     if (migrated) CHECK(restore(b, *migrated));
@@ -878,13 +879,13 @@ void test_v1_to_v2_migration() {
     if (!document) return;
     SaveGameDocument v1 = *document;
     v1.schemaVersion = 1U;
-    for (const char* name : {"dve.gameplay", "dve.cameras", "dve.animation", "dve.ragdolls", "dve.hair", "dve.clock"}) v1.sections.erase(name);
+    for (const char* name : {"dve.gameplay", "dve.cameras", "dve.animation", "dve.ragdolls", "dve.hair", "dve.clock", "dve.voxel_axes"}) v1.sections.erase(name);
     const auto v1Bytes = encode_save_game_document(v1);
     SaveGameReadReport report;
     const auto migrated = codec.decode(v1Bytes, &report, &error);
     CHECK(migrated.has_value());
     if (!migrated) { std::cerr << "v1 decode: " << error << '\n'; return; }
-    CHECK(report.storedSchemaVersion == 1U && report.migrationsApplied == 2U);
+    CHECK(report.storedSchemaVersion == 1U && report.migrationsApplied == 3U);
     CHECK(!migrated->runtimes.gameplay && !migrated->runtimes.cameras && !migrated->runtimes.animation &&
           !migrated->runtimes.ragdolls);
     Scene b = boot(assets, Physics3DBackend::Reference, &firesB);

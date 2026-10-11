@@ -51,6 +51,7 @@ struct VoxelBooleanVolume {
     float voxelSizeMeters{0.10F};       // voxel v occupies [v, v + 1) * size in local space
     std::span<const Int3> anchors{};    // anchored voxels in this object's grid
     std::string_view name{};            // used in diagnostics only
+    Float3 voxelScale{1,1,1};
 };
 
 struct VoxelBooleanOptions {

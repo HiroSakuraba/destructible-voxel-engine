@@ -1,4 +1,5 @@
 #include "dve/damage.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <utility>
 #include <algorithm>
@@ -49,6 +50,8 @@ void set_local_row_span(Bitset512& mask, std::int32_t localY, std::int32_t local
 } // namespace
 
 QuantizedSphereDamageCommand quantize_damage_command(SphereDamageCommand command) noexcept {
+    if (!valid_voxel_metric(command.metric) || !std::isfinite(command.radius) ||
+        !std::isfinite(command.center.x) || !std::isfinite(command.center.y) || !std::isfinite(command.center.z)) return {};
     auto quantize = [](float value) -> std::int32_t {
         const double scaled = static_cast<double>(value) * static_cast<double>(kDamageSubvoxelScale);
         const double clamped = std::clamp(
@@ -62,7 +65,7 @@ QuantizedSphereDamageCommand quantize_damage_command(SphereDamageCommand command
         quantize(command.center.y),
         quantize(command.center.z),
         std::clamp<std::int32_t>(quantize(command.radius), 0, kMaxDamageRadiusVoxels * kDamageSubvoxelScale),
-        command.sequence,
+        command.sequence,command.metric.x,command.metric.y,command.metric.z,
     };
 }
 
@@ -140,11 +143,16 @@ std::span<const DamageBrickBatch> build_damage_batches(
         const std::int64_t radius = command.radius;
         const std::int64_t radiusSquared = radius * radius;
 
+        const bool unit=command.metricX==1 && command.metricY==1 && command.metricZ==1;
+        // Bound conversion before int64 casts, even for extremely small imported metrics.
+        const auto reach=[&](float axis) { return static_cast<std::int64_t>(std::min(
+            double(std::numeric_limits<std::int32_t>::max())*scale,std::ceil(double(radius)/axis))); };
+        const auto radiusY=reach(command.metricY), radiusZ=reach(command.metricZ);
         // Conservative center-coordinate bounds. Exact row spans below reject the surplus.
-        std::int64_t minZ = floor_div64(command.centerZ - radius - half, scale);
-        std::int64_t maxZ = floor_div64(command.centerZ + radius - half, scale);
-        std::int64_t minY = floor_div64(command.centerY - radius - half, scale);
-        std::int64_t maxY = floor_div64(command.centerY + radius - half, scale);
+        std::int64_t minZ = floor_div64(command.centerZ - radiusZ - half, scale);
+        std::int64_t maxZ = floor_div64(command.centerZ + radiusZ - half, scale);
+        std::int64_t minY = floor_div64(command.centerY - radiusY - half, scale);
+        std::int64_t maxY = floor_div64(command.centerY + radiusY - half, scale);
         std::int64_t clipMinX = std::numeric_limits<std::int32_t>::min();
         std::int64_t clipMaxX = std::numeric_limits<std::int32_t>::max();
         if (clip != nullptr) {
@@ -166,17 +174,21 @@ std::span<const DamageBrickBatch> build_damage_batches(
         for (std::int64_t z64 = minZ; z64 <= maxZ; ++z64) {
             const auto z = static_cast<std::int32_t>(z64);
             const std::int64_t dz = static_cast<std::int64_t>(z) * scale + half - command.centerZ;
-            const std::int64_t dzSquared = dz * dz;
-            if (dzSquared > radiusSquared) continue;
+            const std::int64_t dzSquared = unit ? dz * dz : 0;
+            const double metricDz=double(dz)*command.metricZ;
+            if (unit ? dzSquared > radiusSquared : metricDz*metricDz > double(radiusSquared)) continue;
 
             for (std::int64_t y64 = minY; y64 <= maxY; ++y64) {
                 const auto y = static_cast<std::int32_t>(y64);
                 const std::int64_t dy = static_cast<std::int64_t>(y) * scale + half - command.centerY;
-                const std::int64_t planeSquared = dzSquared + dy * dy;
-                if (planeSquared > radiusSquared) continue;
-
-                const std::int64_t xExtent = static_cast<std::int64_t>(
-                    integer_sqrt(static_cast<std::uint64_t>(radiusSquared - planeSquared)));
+                const std::int64_t planeSquared = unit ? dzSquared + dy * dy : 0;
+                const double metricDy=double(dy)*command.metricY;
+                const double metricPlane=metricDz*metricDz+metricDy*metricDy;
+                if (unit ? planeSquared > radiusSquared : metricPlane > double(radiusSquared)) continue;
+                const std::int64_t xExtent = unit ? static_cast<std::int64_t>(
+                    integer_sqrt(static_cast<std::uint64_t>(radiusSquared - planeSquared))) :
+                    static_cast<std::int64_t>(std::min(double(std::numeric_limits<std::int32_t>::max())*scale,
+                        std::floor(std::sqrt(std::max(0.0,double(radiusSquared)-metricPlane))/command.metricX)));
                 const std::int64_t minX64 = std::max(clipMinX,
                     ceil_div64(static_cast<std::int64_t>(command.centerX) - xExtent - half, scale));
                 const std::int64_t maxX64 = std::min(clipMaxX,

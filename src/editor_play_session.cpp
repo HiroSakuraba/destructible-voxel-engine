@@ -118,6 +118,7 @@ public:
                 desc.enabled = object.flags.visible;
                 desc.transform = document.world_transform(editorId).value_or(object.transform);
                 desc.voxelSizeMeters = object.voxelSizeMeters;
+                desc.voxelScale = object.voxelScale;
                 desc.dynamic = !object.flags.anchored || object.attachment.has_value();
                 desc.structural = object.flags.structural;
                 desc.densityKilogramsPerCubicMeter = editor_object_density(object, materials);

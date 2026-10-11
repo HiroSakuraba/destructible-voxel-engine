@@ -1,4 +1,5 @@
 #include "dve/editor_voxel_slice.hpp"
+#include "dve/voxel_metric.hpp"
 #include "dve/editor_workspace.hpp"
 #include <algorithm>
 #include <cmath>
@@ -74,15 +75,15 @@ bool EditorVoxelSliceSession::configure(const EditorDocument& doc, Float3 point,
     voxelRevision_ = o->voxels->revision();
     transform_ = o->transform;
     voxelSize_ = o->voxelSizeMeters;
+    voxelScale_ = o->voxelScale;
     const auto state = capture_voxel_object_state(*o);
     anchors_ = state.anchors;
     cells_.clear();
     cells_.reserve(state.voxels.size());
     for (const auto& cell : state.voxels) {
         const Float3 world =
-            transform_point(o->transform, {(static_cast<float>(cell.voxel.x) + 0.5F) * voxelSize_,
-                                           (static_cast<float>(cell.voxel.y) + 0.5F) * voxelSize_,
-                                           (static_cast<float>(cell.voxel.z) + 0.5F) * voxelSize_});
+            voxel_to_world(o->transform, multiply(voxelScale_,voxelSize_),
+                {float(cell.voxel.x)+0.5F,float(cell.voxel.y)+0.5F,float(cell.voxel.z)+0.5F});
         cells_.push_back({cell.voxel, cell.material, world, dot(subtract(world, point_), normal_) >= 0});
     }
     active_ = true;
@@ -92,6 +93,7 @@ bool EditorVoxelSliceSession::target_unchanged(const EditorDocument& doc) const 
     const auto* o = doc.find_object(target_);
     return active_ && o && o->voxels && !o->text3d && !o->gaborVolume && !o->flags.locked &&
            o->voxels->revision() == voxelRevision_ && o->voxelSizeMeters == voxelSize_ &&
+           same(o->voxelScale,voxelScale_) &&
            same(o->transform.position, transform_.position) &&
            same(o->transform.rotation, transform_.rotation) &&
            std::equal(o->anchors.begin(), o->anchors.end(), anchors_.begin(), anchors_.end());

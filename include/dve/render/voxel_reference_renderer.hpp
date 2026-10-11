@@ -22,6 +22,7 @@ struct VoxelReferenceInstance {
     // Indexed by MaterialId. Missing entries use a visible magenta diagnostic material.
     std::span<const VoxelMaterialDefinition> materials{};
     bool visible{true};
+    Float3 spacing{1,1,1}; // local cell dimensions in scene world units
 };
 
 struct VoxelReferenceRenderStats {

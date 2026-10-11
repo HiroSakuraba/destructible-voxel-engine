@@ -125,7 +125,7 @@ struct ObjectTransformChange {
     RigidTransform after{};
 };
 
-// Scale Voxel Size: uniform resize of a voxel object by changing its voxel size and moving its
+// Scale Voxel Size: resize geometry by changing base size or optional local axis scales, moving its
 // origin so the object scales about a pivot. The voxels themselves are untouched (same count,
 // same grid); resampling to a new voxel count is the separate rescale/resample command.
 struct ObjectVoxelSizeChange {
@@ -134,6 +134,8 @@ struct ObjectVoxelSizeChange {
     RigidTransform after{};
     float beforeVoxelSize{};
     float afterVoxelSize{};
+    std::optional<Float3> beforeAxisScale;
+    std::optional<Float3> afterAxisScale;
 };
 
 class ScaleVoxelSizeCommand final : public IEditorCommand {

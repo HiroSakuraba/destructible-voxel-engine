@@ -74,7 +74,7 @@ struct PlayerEditResolution {
 [[nodiscard]] bool capsule_overlaps_voxels(
     const VoxelObject& object,
     const RigidTransform& objectTransform,
-    const Capsule& worldCapsule);
+    const Capsule& worldCapsule, Float3 spacing = {1,1,1});
 
 // Conservative sweep: the capsule's object-local AABB is swept against voxel
 // AABBs. It may report early corner contacts, but cannot miss a true capsule
@@ -83,7 +83,7 @@ struct PlayerEditResolution {
     const VoxelObject& object,
     const RigidTransform& objectTransform,
     const Capsule& worldCapsule,
-    Float3 worldDisplacement);
+    Float3 worldDisplacement, Float3 spacing = {1,1,1});
 
 // Previous/current transform hook for moving voxel bodies. Translation and
 // rotation are sampled at alpha; callers can substep if body rotation is large.
@@ -100,7 +100,7 @@ struct PlayerEditResolution {
     const Capsule& worldCapsule,
     std::size_t maxIterations = 8,
     float skin = 0.001F,
-    std::size_t* iterationsUsed = nullptr);
+    std::size_t* iterationsUsed = nullptr, Float3 spacing = {1,1,1});
 
 [[nodiscard]] PlayerEditResolution resolve_player_after_voxel_edit(
     const VoxelObject& object,

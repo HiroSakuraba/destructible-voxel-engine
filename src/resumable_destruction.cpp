@@ -30,13 +30,13 @@ void ResumableDestruction::finish_mass(std::size_t index) {
 
 bool ResumableDestruction::sphere_may_touch_brick(BrickKey key) const noexcept {
     // Conservative: one voxel of margin covers command quantization and voxel-centre tests.
-    const float reach = command_.radius + 1.0F;
-    const auto overlaps = [reach](float center, std::int32_t brick) {
+    const auto overlaps = [&](float center, std::int32_t brick, float metric) {
+        const float reach = command_.radius / metric + 1.0F;
         const float low = static_cast<float>(brick) * static_cast<float>(kBrickDim);
         return center + reach >= low && center - reach <= low + static_cast<float>(kBrickDim);
     };
-    return overlaps(command_.center.x, key.x) && overlaps(command_.center.y, key.y) &&
-           overlaps(command_.center.z, key.z);
+    return overlaps(command_.center.x, key.x,command_.metric.x) && overlaps(command_.center.y, key.y,command_.metric.y) &&
+           overlaps(command_.center.z, key.z,command_.metric.z);
 }
 
 std::uint32_t ResumableDestruction::resume(const VoxelObject& source, std::uint32_t maximumUnits) {

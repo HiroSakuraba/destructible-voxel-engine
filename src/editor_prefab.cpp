@@ -1,4 +1,5 @@
 #include "dve/editor_prefab.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -137,6 +138,10 @@ bool apply_template_property(EditorObject& object, std::string_view propertyPath
         return fail("invalid prefab template override");
     if (propertyPath == "name") {
         if (const auto* typed = std::get_if<std::string>(&value)) { object.name = *typed; return true; }
+    } else if (propertyPath == "voxel.scale") {
+        if (const auto* typed=std::get_if<Float3>(&value); typed && valid_voxel_metric(*typed)) {
+            object.voxelScale=*typed; return true;
+        }
     } else if (propertyPath == "transform.position") {
         if (const auto* typed = std::get_if<Float3>(&value)) { object.transform.position = *typed; return true; }
     } else if (propertyPath == "transform.rotation") {
@@ -315,6 +320,7 @@ std::uint64_t editor_prefab_content_hash(const EditorPrefabAsset& prefab) noexce
         for (const std::string& group : object.groups) hash = hash_text(hash, group);
         hash = hash_text(hash, object.sourceAsset.generic_string());
         hash = hash_value(hash, object.voxelSizeMeters);
+        hash = hash_float3(hash,object.voxelScale);
         if (object.attachment) {
             hash = hash_float3(hash, object.attachment->localTransform.position);
             hash = hash_quaternion(hash, object.attachment->localTransform.rotation);
@@ -621,6 +627,7 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
             if (!object_has_override(*target, "flags.structural")) target->flags.structural = source.flags.structural;
             if (!object_has_override(*target, "flags.collision_enabled")) target->flags.collisionEnabled = source.flags.collisionEnabled;
             if (!object_has_override(*target, "flags.decorative")) target->flags.decorative = source.flags.decorative;
+            if (!object_has_override(*target,"voxel.scale")) target->voxelScale=source.voxelScale;
             target->tags = source.tags;
             target->groups = source.groups;
             target->layer = source.layer;
@@ -737,6 +744,10 @@ bool apply_editor_prefab_override(
     bool applied = false;
     if (propertyPath == "name") {
         if (const auto* typed = std::get_if<std::string>(&value)) { object->name = *typed; applied = true; }
+    } else if (propertyPath == "voxel.scale") {
+        if (const auto* typed=std::get_if<Float3>(&value); typed && valid_voxel_metric(*typed)) {
+            object->voxelScale=*typed; applied=true;
+        }
     } else if (propertyPath == "transform.position") {
         if (const auto* typed = std::get_if<Float3>(&value)) {
             RigidTransform transform = object->transform;

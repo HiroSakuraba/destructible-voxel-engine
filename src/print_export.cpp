@@ -6,6 +6,7 @@
 // is a valid 2-manifold before anything is written to disk.
 
 #include "dve/print_export.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <array>
 #include <cmath>
@@ -75,7 +76,7 @@ manifold::Manifold build_solid(const VoxelObject& object,
         errorOut = "internal error: face winding table is inconsistent";
         return {};
     }
-    if (!(options.voxelSizeMeters > 0.0) || !(options.scale > 0.0)) {
+    if (!(options.voxelSizeMeters > 0.0) || !(options.scale > 0.0) || !valid_voxel_metric(options.voxelScale)) {
         errorOut = "voxelSizeMeters and scale must be positive";
         return {};
     }
@@ -112,11 +113,11 @@ manifold::Manifold build_solid(const VoxelObject& object,
                     static_cast<std::uint64_t>(mesh.vertProperties.size() / 3);
                 for (const Corner& corner : face.corners) {
                     mesh.vertProperties.push_back(
-                        (static_cast<double>(vx + corner.x)) * unit);
+                        (static_cast<double>(vx + corner.x)) * unit * options.voxelScale.x);
                     mesh.vertProperties.push_back(
-                        (static_cast<double>(vy + corner.y)) * unit);
+                        (static_cast<double>(vy + corner.y)) * unit * options.voxelScale.y);
                     mesh.vertProperties.push_back(
-                        (static_cast<double>(vz + corner.z)) * unit);
+                        (static_cast<double>(vz + corner.z)) * unit * options.voxelScale.z);
                 }
                 mesh.triVerts.insert(mesh.triVerts.end(),
                                      {base, base + 1, base + 2,
@@ -250,11 +251,11 @@ PrintMeshSoup extract_print_surface(const VoxelObject& object,
                     static_cast<std::uint32_t>(soup.positions.size() / 3);
                 for (const Corner& corner : face.corners) {
                     soup.positions.push_back(
-                        static_cast<double>(vx + corner.x) * unit);
+                        static_cast<double>(vx + corner.x) * unit * options.voxelScale.x);
                     soup.positions.push_back(
-                        static_cast<double>(vy + corner.y) * unit);
+                        static_cast<double>(vy + corner.y) * unit * options.voxelScale.y);
                     soup.positions.push_back(
-                        static_cast<double>(vz + corner.z) * unit);
+                        static_cast<double>(vz + corner.z) * unit * options.voxelScale.z);
                 }
                 soup.triangles.insert(soup.triangles.end(),
                                       {base, base + 1, base + 2,

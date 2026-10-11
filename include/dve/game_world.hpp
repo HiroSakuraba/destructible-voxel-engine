@@ -78,6 +78,7 @@ struct GameObjectDesc {
     bool enabled{true};
     RigidTransform transform{};
     float voxelSizeMeters{0.1F};
+    Float3 voxelScale{1,1,1};
     // Null => a marker object: no voxels, no physics body, just an id/name/tags/transform a
     // script can query and move directly. Useful for spawn points, triggers, AI waypoints.
     std::unique_ptr<VoxelObject> voxels;
@@ -198,6 +199,7 @@ struct GameWorldObjectState {
     std::optional<GameObjectAttachment> attachment;
     RigidTransform authoredTransform{};
     float voxelSizeMeters{0.1F};
+    Float3 voxelScale{1,1,1};
     GameGeometryKind kind{GameGeometryKind::Marker};   // Marker, Voxel or Polygon
     bool dynamic{};
     bool structural{true};
@@ -305,6 +307,7 @@ struct GameRenderObject {
     std::span<const VoxelMaterialDefinition> materials;
     RigidTransform transform{};                       // current world transform (object origin)
     float voxelSizeMeters{};
+    Float3 voxelScale{1,1,1};
     bool enabled{true};
     bool dynamic{};
     // false for visual-only voxel objects (spawn_visual_asset): drawn, but no physics body and
@@ -697,7 +700,7 @@ private:
     [[nodiscard]] std::optional<RigidBodyCreateDesc> build_dynamic_body_desc(
         const VoxelObject& voxels, const RigidTransform& authoredTransform, float voxelSizeMeters,
         const MaterialMassTable& massTable, double densityQuantumKilogramsPerCubicMeter, bool structural,
-        Float3* outLocalCenterOfMassMeters, std::string* error) const;
+        Float3* outLocalCenterOfMassMeters, std::string* error, Float3 axes = {1,1,1}) const;
     // Splits off every non-primary connected component left after a damage_sphere() call into
     // its own new dynamic GameObject (falling debris), rebuilds the (now smaller) primary
     // body in place, and returns the ids of every fragment created. Capped at

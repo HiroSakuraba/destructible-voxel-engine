@@ -1,4 +1,5 @@
 #include "dve/voxel_boolean.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <algorithm>
 #include <array>
@@ -67,6 +68,16 @@ Affine compose(const Affine& outer, const Affine& inner) noexcept {
     return result;
 }
 
+// Rigid relative frame plus geometry scale: destination^-1 * rotation * source.
+Affine with_axes(Affine relative, Float3 source, Float3 destination) noexcept {
+    const double src[]{source.x,source.y,source.z},dst[]{destination.x,destination.y,destination.z};
+    for (int i=0;i<3;++i) {
+        relative.t[i]/=dst[i];
+        for (int j=0;j<3;++j) relative.r[i][j]*=src[j]/dst[i];
+    }
+    return relative;
+}
+
 // Maps voxel indices of a source grid to voxel indices of a destination grid by transforming the
 // source voxel centre and flooring. `local` maps source-local metres to destination-local metres.
 struct GridMap {
@@ -93,7 +104,7 @@ bool finite_transform(const RigidTransform& t) noexcept {
 
 bool valid_volume(const VoxelBooleanVolume& v) noexcept {
     return v.voxels != nullptr && std::isfinite(v.voxelSizeMeters) && v.voxelSizeMeters > 0.0F &&
-           finite_transform(v.transform);
+           finite_transform(v.transform) && valid_voxel_metric(v.voxelScale);
 }
 
 std::string display_name(const VoxelBooleanVolume& v, std::string_view fallback) {
@@ -256,8 +267,9 @@ VoxelBooleanResult compute_voxel_boolean(const VoxelBooleanVolume& primary,
         plan.volume = &operand;
         plan.index = i;
         const Affine operandWorld = affine_from(operand.transform);
-        plan.operandToPrimaryLocal = compose(worldToPrimary, operandWorld);
-        const Affine primaryToOperandLocal = inverse(plan.operandToPrimaryLocal);
+        const Affine relative = compose(worldToPrimary, operandWorld);
+        plan.operandToPrimaryLocal = with_axes(relative,operand.voxelScale,primary.voxelScale);
+        const Affine primaryToOperandLocal = with_axes(inverse(relative),primary.voxelScale,operand.voxelScale);
         plan.toPrimary = {plan.operandToPrimaryLocal, operand.voxelSizeMeters, primarySize};
         plan.toOperand = {primaryToOperandLocal, primarySize, operand.voxelSizeMeters};
         const std::string reason = misalignment_reason(plan.operandToPrimaryLocal, primarySize,

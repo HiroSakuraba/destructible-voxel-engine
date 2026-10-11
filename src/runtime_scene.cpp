@@ -1,4 +1,5 @@
 #include "dve/runtime_scene.hpp"
+#include "dve/voxel_metric.hpp"
 #include "dve/master_material.hpp"
 
 #include "dve/job_system.hpp"
@@ -1554,6 +1555,11 @@ bool RuntimeSceneWorld::load_object_asset(
         if (!read.success) {
             fail(RuntimeSceneErrorCode::DvoxReadFailed,
                  "DVOX load failed: " + read.error, object.resolvedAssetPath_, object.metadata_.id);
+        }
+        if (!unit_voxel_scale(read.asset.voxelScale)) {
+            fail(RuntimeSceneErrorCode::DvoxReadFailed,
+                 "Axis-scaled DVOX requires the GameWorld CPU path; streaming GPU metrics are not implemented",
+                 object.resolvedAssetPath_,object.metadata_.id);
         }
         validate_scene_asset(object.metadata_, read.asset, options, object.resolvedAssetPath_);
         object.asset_.emplace(std::move(read.asset));

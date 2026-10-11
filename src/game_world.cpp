@@ -1,4 +1,5 @@
 #include "dve/world_tick_schedule.hpp"
+#include "dve/voxel_axis_physics.hpp"
 #include "dve/resumable_destruction.hpp"
 #include "dve/simulation_clock.hpp"
 #include "dve/game_world.hpp"
@@ -70,7 +71,7 @@ namespace {
     return table;
 }
 
-[[nodiscard]] SolverBox voxel_box_to_solver_box(const VoxelBox& box, float voxelSizeMeters) noexcept {
+[[nodiscard]] SolverBox voxel_box_to_solver_box(const VoxelBox& box, float voxelSizeMeters, Float3 axes = {1,1,1}) noexcept {
     const Float3 minimum{
         static_cast<float>(box.min.x) * voxelSizeMeters,
         static_cast<float>(box.min.y) * voxelSizeMeters,
@@ -79,7 +80,8 @@ namespace {
         static_cast<float>(box.maxExclusive.x) * voxelSizeMeters,
         static_cast<float>(box.maxExclusive.y) * voxelSizeMeters,
         static_cast<float>(box.maxExclusive.z) * voxelSizeMeters};
-    return {multiply(add(minimum, maximum), 0.5F), multiply(subtract(maximum, minimum), 0.5F)};
+    return {multiply_components(multiply(add(minimum, maximum), 0.5F),axes),
+        multiply_components(multiply(subtract(maximum, minimum), 0.5F),axes)};
 }
 
 
@@ -251,7 +253,7 @@ constexpr float kMaxDamageSphereRadiusMeters = 1000.0F;
 GameObjectDesc::GameObjectDesc(const GameObjectDesc& other)
     : name(other.name), tags(other.tags), groups(other.groups), layer(other.layer),
       components(other.components), enabled(other.enabled), transform(other.transform),
-      voxelSizeMeters(other.voxelSizeMeters), voxels(clone_game_voxels(other.voxels.get())),
+      voxelSizeMeters(other.voxelSizeMeters), voxelScale(other.voxelScale), voxels(clone_game_voxels(other.voxels.get())),
       dynamic(other.dynamic), densityKilogramsPerCubicMeter(other.densityKilogramsPerCubicMeter),
       structural(other.structural) {}
 
@@ -273,6 +275,7 @@ struct GameWorld::Object {
     std::optional<GameObjectAttachment> attachment;
     RigidTransform authoredTransform{};
     float voxelSizeMeters{0.1F};
+    Float3 voxelScale{1,1,1};
     std::unique_ptr<VoxelObject> voxels;
     std::unique_ptr<CookedPolygonAsset> polygon;
     std::unique_ptr<PolygonBvh> polygonBvh;
@@ -425,7 +428,7 @@ void GameWorld::synchronize_membership_component(Object& object) {
 std::optional<RigidBodyCreateDesc> GameWorld::build_dynamic_body_desc(
     const VoxelObject& voxels, const RigidTransform& authoredTransform, float voxelSizeMeters,
     const MaterialMassTable& massTable, double densityQuantumKilogramsPerCubicMeter, bool structural,
-    Float3* outLocalCenterOfMassMeters, std::string* error) const {
+    Float3* outLocalCenterOfMassMeters, std::string* error, Float3 axes) const {
     if (!(densityQuantumKilogramsPerCubicMeter > 0.0)) {
         if (error) *error = "object has no positive finite material density to build a body from";
         return std::nullopt;
@@ -448,12 +451,17 @@ std::optional<RigidBodyCreateDesc> GameWorld::build_dynamic_body_desc(
         if (error) *error = "could not build a rigid body for this object's voxel content";
         return std::nullopt;
     }
+    const Float3 baseCenter = multiply(package.mass.centerOfMass,voxelSizeMeters);
+    if (!scale_voxel_body(*bodyDesc,authoredTransform,baseCenter,axes)) {
+        if (error) *error="invalid axis-scaled rigid body";
+        return std::nullopt;
+    }
     bodyDesc->collisionClass = structural ? RigidBodyCollisionClass::Full : RigidBodyCollisionClass::DebrisNoSelf;
     if (!validate_rigid_body_desc(*bodyDesc)) {
         if (error) *error = "constructed rigid body descriptor failed validation";
         return std::nullopt;
     }
-    if (outLocalCenterOfMassMeters) *outLocalCenterOfMassMeters = multiply(package.mass.centerOfMass, voxelSizeMeters);
+    if (outLocalCenterOfMassMeters) *outLocalCenterOfMassMeters = multiply_components(baseCenter,axes);
     return bodyDesc;
 }
 
@@ -481,9 +489,10 @@ GameObjectId GameWorld::create_object_internal(
     }
     object.authoredTransform = desc.transform;
     object.voxelSizeMeters = desc.voxelSizeMeters;
+    object.voxelScale = desc.voxelScale;
     object.dynamic = desc.dynamic;
 
-    if (desc.voxels && (!(desc.voxelSizeMeters > 0.0F) || !std::isfinite(desc.voxelSizeMeters))) {
+    if (desc.voxels && (!(desc.voxelSizeMeters > 0.0F) || !std::isfinite(desc.voxelSizeMeters) || !valid_voxel_metric(desc.voxelScale))) {
         if (error) *error = "voxelSizeMeters must be a positive, finite number of meters";
         return kInvalidGameObjectId;
     }
@@ -499,7 +508,7 @@ GameObjectId GameWorld::create_object_internal(
             const std::optional<RigidBodyCreateDesc> bodyDesc = build_dynamic_body_desc(
                 *object.voxels, object.authoredTransform, object.voxelSizeMeters,
                 object.massTable, object.densityQuantumKilogramsPerCubicMeter, desc.structural,
-                &localComMeters, error);
+                &localComMeters, error, object.voxelScale);
             if (!bodyDesc) return kInvalidGameObjectId;
             const RigidBodyHandle handle = physics_->create_body(*bodyDesc);
             if (handle == kInvalidRigidBodyHandle) {
@@ -519,7 +528,7 @@ GameObjectId GameWorld::create_object_internal(
             staticDesc.transform = object.authoredTransform;
             staticDesc.collisionClass = RigidBodyCollisionClass::Full;
             staticDesc.boxes.reserve(boxes.size());
-            for (const VoxelBox& box : boxes) staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters));
+            for (const VoxelBox& box : boxes) staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale));
             if (!validate_static_rigid_body_desc(staticDesc)) {
                 if (error) *error = "constructed static body descriptor failed validation";
                 return kInvalidGameObjectId;
@@ -613,7 +622,7 @@ GameObjectId GameWorld::spawn_cooked_asset(
         if (error) *error = "cooked asset has no occupied voxels";
         return kInvalidGameObjectId;
     }
-    if (!(asset.voxelSizeMeters > 0.0F) || !std::isfinite(asset.voxelSizeMeters)) {
+    if (!(asset.voxelSizeMeters > 0.0F) || !std::isfinite(asset.voxelSizeMeters) || !valid_voxel_metric(asset.voxelScale)) {
         if (error) *error = "cooked asset has an invalid voxelSizeMeters";
         return kInvalidGameObjectId;
     }
@@ -622,6 +631,7 @@ GameObjectId GameWorld::spawn_cooked_asset(
     object.name = name.empty() ? std::string("asset") : std::move(name);
     object.authoredTransform = transform;
     object.voxelSizeMeters = asset.voxelSizeMeters;
+    object.voxelScale = asset.voxelScale;
     object.dynamic = dynamic;
     object.structural = structural;
     object.voxels = std::make_unique<VoxelObject>(std::move(asset.object));
@@ -634,7 +644,7 @@ GameObjectId GameWorld::spawn_cooked_asset(
         const std::optional<RigidBodyCreateDesc> bodyDesc = build_dynamic_body_desc(
             *object.voxels, object.authoredTransform, object.voxelSizeMeters,
             object.massTable, object.densityQuantumKilogramsPerCubicMeter, object.structural,
-            &localComMeters, error);
+            &localComMeters, error, object.voxelScale);
         if (!bodyDesc) return kInvalidGameObjectId;
         const RigidBodyHandle handle = physics_->create_body(*bodyDesc);
         if (handle == kInvalidRigidBodyHandle) {
@@ -654,7 +664,7 @@ GameObjectId GameWorld::spawn_cooked_asset(
         staticDesc.transform = object.authoredTransform;
         staticDesc.collisionClass = RigidBodyCollisionClass::Full;
         staticDesc.boxes.reserve(boxes.size());
-        for (const VoxelBox& box : boxes) staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters));
+        for (const VoxelBox& box : boxes) staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale));
         if (!validate_static_rigid_body_desc(staticDesc)) {
             if (error) *error = "constructed static body descriptor failed validation";
             return kInvalidGameObjectId;
@@ -686,7 +696,7 @@ GameObjectId GameWorld::spawn_visual_asset(
         if (error) *error = "cooked asset has no occupied voxels";
         return kInvalidGameObjectId;
     }
-    if (!(asset.voxelSizeMeters > 0.0F) || !std::isfinite(asset.voxelSizeMeters)) {
+    if (!(asset.voxelSizeMeters > 0.0F) || !std::isfinite(asset.voxelSizeMeters) || !valid_voxel_metric(asset.voxelScale)) {
         if (error) *error = "cooked asset has an invalid voxelSizeMeters";
         return kInvalidGameObjectId;
     }
@@ -694,6 +704,7 @@ GameObjectId GameWorld::spawn_visual_asset(
     object.name = name.empty() ? std::string("asset") : std::move(name);
     object.authoredTransform = transform;
     object.voxelSizeMeters = asset.voxelSizeMeters;
+    object.voxelScale = asset.voxelScale;
     object.dynamic = false;
     object.structural = false;
     object.visualOnly = true;
@@ -1177,7 +1188,7 @@ bool GameWorld::replace_voxel_brick(
         auto bodyDesc = build_dynamic_body_desc(
             *object.voxels, currentTransform, object.voxelSizeMeters, object.massTable,
             object.densityQuantumKilogramsPerCubicMeter, object.structural,
-            &replacementLocalCenterOfMass, &buildError);
+            &replacementLocalCenterOfMass, &buildError, object.voxelScale);
         if (bodyDesc && previousState) {
             bodyDesc->linearVelocity = previousState->linearVelocity;
             bodyDesc->angularVelocity = previousState->angularVelocity;
@@ -1197,7 +1208,7 @@ bool GameWorld::replace_voxel_brick(
         staticDesc.collisionClass = RigidBodyCollisionClass::Full;
         staticDesc.boxes.reserve(boxes.size());
         for (const VoxelBox& box : boxes)
-            staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters));
+            staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale));
         if (boxes.empty() || !validate_static_rigid_body_desc(staticDesc)) {
             (void)object.voxels->replace_brick(before);
             if (error != nullptr) *error = "repaired static voxel collision is invalid";
@@ -1352,6 +1363,7 @@ std::vector<GameRenderObject> GameWorld::render_objects(float interpolationAlpha
             item.transform = interpolate_rigid_transform(previous->second, item.transform,
                 std::isfinite(interpolationAlpha) ? std::clamp(interpolationAlpha, 0.0F, 1.0F) : 1.0F);
         item.voxelSizeMeters = object.voxelSizeMeters;
+        item.voxelScale = object.voxelScale;
         item.enabled = object.enabled;
         item.dynamic = object.dynamic;
         item.collision = !object.visualOnly;
@@ -1630,7 +1642,7 @@ std::optional<std::uint64_t> GameWorld::queue_damage_sphere(GameObjectId id, Flo
         !std::isfinite(worldCenter.y) || !std::isfinite(worldCenter.z) || pendingDestruction_.size() >= kMaxPendingDestruction) return std::nullopt;
     radius = std::min(radius, kMaxDamageSphereRadiusMeters);
     const auto& object = found->second;
-    const auto local = multiply(inverse_transform_point(resolve_transform(object), worldCenter), 1.0F/object.voxelSizeMeters);
+    const auto local = world_to_voxel(resolve_transform(object),multiply(object.voxelScale,object.voxelSizeMeters),worldCenter);
     const auto request = nextDestructionId_++;
     pendingDestruction_.push_back({{request, id, worldCenter, radius, local, radius/object.voxelSizeMeters, 0}, {}});
     return request;
@@ -1650,7 +1662,7 @@ void GameWorld::process_pending_destruction() {
             ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); continue;
         }
         if (!pending.job) pending.job = std::make_unique<ResumableDestruction>(*found->second.voxels,
-            SphereDamageCommand{pending.state.localCenterVoxels, pending.state.localRadiusVoxels, pending.state.requestId}, found->second.massTable);
+            SphereDamageCommand{pending.state.localCenterVoxels, pending.state.localRadiusVoxels, pending.state.requestId,found->second.voxelScale}, found->second.massTable);
         if (!pending.job->matches_mass_table(found->second.massTable)) {
             ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); continue;
         }
@@ -1719,7 +1731,7 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
         if (i == primary && !parent.hasBody) continue;
         if (i == primary && !parent.dynamic) {
             StaticRigidBodyCreateDesc desc; desc.transform=origin; desc.collisionClass=RigidBodyCollisionClass::Full;
-            for (const auto& box : component.boxes) desc.boxes.push_back(voxel_box_to_solver_box(box,parent.voxelSizeMeters));
+            for (const auto& box : component.boxes) desc.boxes.push_back(voxel_box_to_solver_box(box,parent.voxelSizeMeters,parent.voxelScale));
             if (!validate_static_rigid_body_desc(desc)) { rollback(); return false; }
             handles[i]=physics_->create_static_body(desc);
         } else {
@@ -1733,14 +1745,14 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
             }
             const auto size=parent.voxelSizeMeters;
             auto desc=make_rigid_body_desc(package,{parent.densityQuantumKilogramsPerCubicMeter*double(size)*size*size,size});
-            if (!desc) { rollback(); return false; }
+            if (!desc || !scale_voxel_body(*desc,origin,multiply(component.mass.centerOfMass,size),parent.voxelScale)) { rollback(); return false; }
             desc->collisionClass = i == primary && parent.structural ? RigidBodyCollisionClass::Full : RigidBodyCollisionClass::DebrisNoSelf;
             if (oldState) {
                 desc->linearVelocity=inherited_child_center_of_mass_velocity(oldState->linearVelocity,oldState->angularVelocity,
                     oldState->currentTransform.position,desc->transform.position);
                 desc->angularVelocity=oldState->angularVelocity;
             }
-            centers[i]=multiply(component.mass.centerOfMass,size);
+            centers[i]=multiply_components(multiply(component.mass.centerOfMass,size),parent.voxelScale);
             handles[i]=physics_->create_body(*desc);
         }
         if (handles[i] == kInvalidRigidBodyHandle) { rollback(); return false; }
@@ -1756,7 +1768,7 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
         fragment.id=allocate_id(); fragment.name=parent.name+"_fragment";
         fragment.tags=parent.tags; fragment.groups=parent.groups; fragment.layer=parent.layer;
         fragment.components=parent.components; fragment.authoredTransform=origin;
-        fragment.voxelSizeMeters=parent.voxelSizeMeters; fragment.voxels=std::move(components[i].voxels);
+        fragment.voxelSizeMeters=parent.voxelSizeMeters; fragment.voxelScale=parent.voxelScale; fragment.voxels=std::move(components[i].voxels);
         fragment.dynamic=true; fragment.structural=false; fragment.debris=true; fragment.debrisSequence=nextDebrisSequence_++;
         fragment.massTable=parent.massTable; fragment.densityQuantumKilogramsPerCubicMeter=parent.densityQuantumKilogramsPerCubicMeter;
         fragment.materials=parent.materials; fragment.hasBody=true; fragment.bodyHandle=handles[i]; fragment.localCenterOfMassMeters=centers[i];
@@ -1785,10 +1797,10 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
 
     const RigidTransform current = resolve_transform(object);
     const Float3 localMeters = inverse_transform_point(current, worldCenter);
-    const Float3 localVoxelUnits = multiply(localMeters, 1.0F / object.voxelSizeMeters);
+    const Float3 localVoxelUnits = divide_components(localMeters,multiply(object.voxelScale,object.voxelSizeMeters));
     const float radiusVoxelUnits = radius / object.voxelSizeMeters;
 
-    const SphereDamageCommand command{localVoxelUnits, radiusVoxelUnits, 0};
+    const SphereDamageCommand command{localVoxelUnits, radiusVoxelUnits, 0,object.voxelScale};
     const DamageApplyReport report = apply_damage_commands(*object.voxels, {command});
     if (report.removedVoxelCount == 0) return 0U;
 
@@ -1870,7 +1882,7 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         std::optional<RigidBodyCreateDesc> fragmentDesc = build_dynamic_body_desc(
             *fragmentVoxels, object.authoredTransform, object.voxelSizeMeters,
             object.massTable, object.densityQuantumKilogramsPerCubicMeter, object.structural,
-            &fragmentLocalCom, &buildError);
+            &fragmentLocalCom, &buildError, object.voxelScale);
         if (!fragmentDesc) continue; // e.g. a sliver too small/odd to form a valid body; those voxels are simply lost
 
         if (parentState) {
@@ -1891,6 +1903,7 @@ std::vector<GameObjectId> GameWorld::fragment_after_damage(GameObjectId id, Obje
         fragmentObject.components = object.components;
         fragmentObject.authoredTransform = object.authoredTransform;
         fragmentObject.voxelSizeMeters = object.voxelSizeMeters;
+        fragmentObject.voxelScale = object.voxelScale;
         fragmentObject.voxels = std::move(fragmentVoxels);
         fragmentObject.dynamic = true; // debris always falls, even when split from a static parent
         fragmentObject.structural = false; // detached debris is not structural by definition
@@ -1930,7 +1943,7 @@ void GameWorld::rebuild_primary_body(Object& object, const std::optional<RigidBo
             std::optional<RigidBodyCreateDesc> primaryDesc = build_dynamic_body_desc(
                 *object.voxels, object.authoredTransform, object.voxelSizeMeters,
                 object.massTable, object.densityQuantumKilogramsPerCubicMeter, object.structural,
-                &localCom, &buildError);
+                &localCom, &buildError, object.voxelScale);
             if (primaryDesc) {
                 if (parentState) {
                     primaryDesc->linearVelocity = inherited_child_center_of_mass_velocity(
@@ -1953,7 +1966,7 @@ void GameWorld::rebuild_primary_body(Object& object, const std::optional<RigidBo
                 staticDesc.collisionClass = RigidBodyCollisionClass::Full;
                 staticDesc.boxes.reserve(boxes.size());
                 for (const VoxelBox& box : boxes)
-                    staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters));
+                    staticDesc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale));
                 if (validate_static_rigid_body_desc(staticDesc)) {
                     const RigidBodyHandle handle = physics_->create_static_body(staticDesc);
                     if (handle != kInvalidRigidBodyHandle) {
@@ -2012,21 +2025,14 @@ std::optional<GameRaycastHit> GameWorld::raycast(Float3 worldOrigin, Float3 worl
             }
         }
         if (!object.voxels) continue;
-        // raycast_voxels_transformed works in whatever units objectTransform.position and the
-        // ray are expressed in consistently (see query.cpp: it never multiplies by a separate
-        // voxel scale). Convert everything to voxel-index units going in, and the returned
-        // worldPosition/normal/distance back to meters coming out.
-        const RigidTransform voxelUnitTransform = make_rigid_transform(
-            multiply(current.position, 1.0F / object.voxelSizeMeters), current.rotation);
-        const Float3 voxelUnitOrigin = multiply(worldOrigin, 1.0F / object.voxelSizeMeters);
-        const float voxelUnitMaxDistance = maxDistance / object.voxelSizeMeters;
-        const auto hit = raycast_voxels_transformed(*object.voxels, voxelUnitTransform, voxelUnitOrigin, worldDirection, voxelUnitMaxDistance);
+        const auto hit = raycast_voxels_scaled(*object.voxels,current,
+            multiply(object.voxelScale,object.voxelSizeMeters),worldOrigin,worldDirection,maxDistance);
         if (!hit) continue;
-        const float distanceMeters = hit->objectHit.distance * object.voxelSizeMeters;
+        const float distanceMeters = hit->objectHit.distance;
         if (best && distanceMeters >= best->distance) continue;
         best = GameRaycastHit{
             id,
-            multiply(hit->worldPosition, object.voxelSizeMeters),
+            hit->worldPosition,
             hit->worldNormal,
             distanceMeters,
             hit->objectHit.material};
@@ -2065,7 +2071,7 @@ std::vector<GameObjectId> GameWorld::sphere_overlap(Float3 worldCenter, float ra
         const Float3 localCenter = inverse_transform_point(current, worldCenter);
         bool overlaps = false;
         for (const VoxelBox& box : build_merged_object_box_proxy(*object.voxels)) {
-            const SolverBox solverBox = voxel_box_to_solver_box(box, object.voxelSizeMeters);
+            const SolverBox solverBox = voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale);
             const Float3 boxMin = subtract(solverBox.center, solverBox.halfExtents);
             const Float3 boxMax = add(solverBox.center, solverBox.halfExtents);
             const Float3 closest{
@@ -2094,15 +2100,8 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
         const RigidTransform current = resolve_transform(object);
         std::optional<CapsuleSweepHit> hit;
         if (object.voxels) {
-            const float inverseScale = 1.0F / object.voxelSizeMeters;
-            const RigidTransform voxelTransform = make_rigid_transform(
-                multiply(current.position, inverseScale), current.rotation);
-            Capsule voxelCapsule{
-                multiply(worldCapsule.pointA, inverseScale),
-                multiply(worldCapsule.pointB, inverseScale),
-                worldCapsule.radius * inverseScale};
-            hit = sweep_capsule_conservative(
-                *object.voxels, voxelTransform, voxelCapsule, multiply(worldDisplacement, inverseScale));
+            hit = sweep_capsule_conservative(*object.voxels,current,worldCapsule,worldDisplacement,
+                multiply(object.voxelScale,object.voxelSizeMeters));
         } else if (object.polygon && object.polygonBvh) {
             hit = sweep_polygon_capsule(*object.polygonBvh, current, worldCapsule, worldDisplacement);
         }
@@ -2122,13 +2121,8 @@ bool GameWorld::capsule_overlaps(const Capsule& worldCapsule, GameObjectId ignor
         if (id == ignoreObject) continue;
         const RigidTransform current = resolve_transform(object);
         if (object.voxels) {
-            const float inverseScale = 1.0F / object.voxelSizeMeters;
-            const RigidTransform voxelTransform = make_rigid_transform(
-                multiply(current.position, inverseScale), current.rotation);
-            const Capsule voxelCapsule{
-                multiply(worldCapsule.pointA, inverseScale), multiply(worldCapsule.pointB, inverseScale),
-                worldCapsule.radius * inverseScale};
-            if (capsule_overlaps_voxels(*object.voxels, voxelTransform, voxelCapsule)) return true;
+            if (capsule_overlaps_voxels(*object.voxels,current,worldCapsule,
+                multiply(object.voxelScale,object.voxelSizeMeters))) return true;
         } else if (object.polygon && object.polygonBvh &&
                    polygon_capsule_overlap(*object.polygonBvh, current, worldCapsule)) return true;
     }
@@ -2151,17 +2145,9 @@ GameCapsuleDepenetration GameWorld::depenetrate_capsule(
             Float3 correction{};
             bool penetrated = false;
             if (object.voxels) {
-                const float inverseScale = 1.0F / object.voxelSizeMeters;
-                const RigidTransform voxelTransform = make_rigid_transform(
-                    multiply(current.position, inverseScale), current.rotation);
-                const Capsule voxelCapsule{
-                    multiply(worldCapsule.pointA, inverseScale), multiply(worldCapsule.pointB, inverseScale),
-                    worldCapsule.radius * inverseScale};
                 std::size_t iterations{};
-                const Float3 voxelCorrection = depenetrate_capsule_conservative(
-                    *object.voxels, voxelTransform, voxelCapsule, 1U,
-                    std::max(0.0F, skinMeters * inverseScale), &iterations);
-                correction = multiply(voxelCorrection, object.voxelSizeMeters);
+                correction = depenetrate_capsule_conservative(*object.voxels,current,worldCapsule,1U,
+                    std::max(0.0F,skinMeters),&iterations,multiply(object.voxelScale,object.voxelSizeMeters));
                 penetrated = iterations > 0U;
             } else if (object.polygonBvh) {
                 const auto contact = polygon_capsule_contact_world(
@@ -2635,6 +2621,7 @@ GameWorldSaveState GameWorld::capture_save_state() const {
         item.attachment = object.attachment;
         item.authoredTransform = object.authoredTransform;
         item.voxelSizeMeters = object.voxelSizeMeters;
+        item.voxelScale = object.voxelScale;
         item.kind = object.voxels ? GameGeometryKind::Voxel : object.polygon ? GameGeometryKind::Polygon : GameGeometryKind::Marker;
         item.dynamic = object.dynamic;
         item.structural = object.structural;
@@ -2696,6 +2683,7 @@ std::uint64_t GameWorld::state_hash() const {
         }
         state_hash_transform(hash, object.authoredTransform);
         state_hash_value(hash, object.voxelSizeMeters);
+        state_hash_float3(hash,object.voxelScale);
         state_hash_value(hash, static_cast<std::uint8_t>(object.voxels ? 1 : object.polygon ? 2 : 0));
         state_hash_value(hash, object.dynamic);
         state_hash_value(hash, object.structural);
@@ -2800,6 +2788,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
         object.attachment = item.attachment;
         object.authoredTransform = item.authoredTransform;
         object.voxelSizeMeters = item.voxelSizeMeters;
+        object.voxelScale = item.voxelScale;
         object.dynamic = item.dynamic;
         object.structural = item.structural;
         object.visualOnly = item.visualOnly;
@@ -2811,7 +2800,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
         object.localCenterOfMassMeters = item.localCenterOfMassMeters;
         if (item.kind == GameGeometryKind::Voxel) {
             if (!geometry_kind_supported(GeometryKind::Voxel)) return fail(label + ": this build profile does not enable voxel objects");
-            if (!(item.voxelSizeMeters > 0.0F) || !std::isfinite(item.voxelSizeMeters)) return fail(label + " has an invalid voxel size");
+            if (!(item.voxelSizeMeters > 0.0F) || !std::isfinite(item.voxelSizeMeters) || !valid_voxel_metric(item.voxelScale)) return fail(label + " has an invalid voxel size");
             auto voxels = std::make_unique<VoxelObject>(item.voxelObjectId);
             voxels->reserve_bricks(item.bricks.size());
             for (const GameWorldBrickState& brick : item.bricks) {
@@ -2850,7 +2839,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
                 if (object.voxels) {
                     entry.dynamicDesc = build_dynamic_body_desc(
                         *object.voxels, origin, object.voxelSizeMeters, object.massTable,
-                        object.densityQuantumKilogramsPerCubicMeter, object.structural, &localCom, &buildError);
+                        object.densityQuantumKilogramsPerCubicMeter, object.structural, &localCom, &buildError, object.voxelScale);
                 } else {
                     PolygonCollisionOptions options;
                     options.densityKilogramsPerCubicMeter = polygon_density(*object.polygon);
@@ -2867,7 +2856,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
                 StaticRigidBodyCreateDesc desc;
                 desc.transform = object.authoredTransform;
                 desc.collisionClass = RigidBodyCollisionClass::Full;
-                for (const VoxelBox& box : boxes) desc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters));
+                for (const VoxelBox& box : boxes) desc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale));
                 if (boxes.empty() || !validate_static_rigid_body_desc(desc)) return fail(label + " has no valid static collision");
                 entry.staticDesc = std::move(desc);
             } else {
@@ -3028,7 +3017,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
         PendingDestruction pending{saved,{}};
         if (saved.workUnits && !saved.stale && found != objects_.end() && found->second.voxels) {
             pending.job = std::make_unique<ResumableDestruction>(*found->second.voxels,
-                SphereDamageCommand{saved.localCenterVoxels,saved.localRadiusVoxels,saved.requestId},found->second.massTable);
+                SphereDamageCommand{saved.localCenterVoxels,saved.localRadiusVoxels,saved.requestId,found->second.voxelScale},found->second.massTable);
             auto remaining=saved.workUnits;
             while (remaining) {
                 const auto used=pending.job->resume(*found->second.voxels,static_cast<std::uint32_t>(std::min<std::uint64_t>(remaining,65536)));

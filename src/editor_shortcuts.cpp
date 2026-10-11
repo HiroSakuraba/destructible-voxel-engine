@@ -702,6 +702,7 @@ void EditorShortcutRegistry::install_builtin_commands() {
     add("view.frame_all", "Frame Entire Scene", "Viewport", {ShortcutContext::Viewport});
     add("view.drop_to_surface", "Drop Selection to Surface", "Viewport", {ShortcutContext::Viewport});
     add("view.follow_selection", "Follow Selection", "Viewport", {ShortcutContext::Viewport, ShortcutContext::Camera});
+    add("select.domain_toggle", "Toggle Selection Domain (Objects / Voxels)", "Edit", {ShortcutContext::Viewport});
     add("view.game_view", "Toggle Game View", "Viewport", {ShortcutContext::Viewport});
     add("view.realtime", "Toggle Realtime Viewport", "Viewport", {ShortcutContext::Viewport});
     add("view.immersive", "Toggle Immersive Viewport", "Viewport", {ShortcutContext::Viewport});
@@ -916,6 +917,9 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "transform.scale", ShortcutContext::Viewport, keyboard_shortcut("r"));
     bind(dve, "transform.universal", ShortcutContext::Viewport, keyboard_shortcut("t"));
     bind(dve, "scatter.brush", ShortcutContext::Viewport, keyboard_shortcut("y"));
+    // 1 / 2 are camera bookmark recall in the Camera context (which overlaps Viewport), so the
+    // selection domain toggles on M ("mode") instead.
+    bind(dve, "select.domain_toggle", ShortcutContext::Viewport, keyboard_shortcut("m"));
     bind(dve, "transform.space", ShortcutContext::Viewport, keyboard_shortcut("space"));
     bind(dve, "view.frame", ShortcutContext::Viewport, keyboard_shortcut("f"),
          mouse_shortcut("mouse1", false, false, false, ShortcutActivation::DoubleClick));

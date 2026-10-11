@@ -44,6 +44,7 @@
 #include "dve/collision_proxy.hpp"
 #include "dve/editor_scatter.hpp"
 #include "dve/editor_voxel_join.hpp"
+#include "dve/editor_voxel_selection.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -167,9 +168,13 @@ struct ContextMenuState {
     std::optional<std::size_t> hoveredItem;
 };
 
+// What Select and Move act on (M toggles): whole objects or voxel cells of one object.
+enum class SelectionDomain : std::uint8_t { Objects, Voxels };
+
 struct MarqueeState {
     bool active{};
     std::optional<EditorObjectId> clickObject;
+    std::optional<EditorPickResult> clickVoxel;  // Voxel domain: the voxel under the press
     SelectionOperation operation{SelectionOperation::Replace};
     int startX{};
     int startY{};
@@ -813,6 +818,25 @@ public:
     // one, previewed; off-grid objects need R (resample) or G (group instead) every time.
     // Separate Islands: split each selected voxel object into its connected pieces; the largest
     // stays. See editor_voxel_join.hpp.
+    // Voxel selection (Edit > Selection Domain, M). See editor_voxel_selection.hpp.
+    [[nodiscard]] SelectionDomain selection_domain() const noexcept { return selectionDomain_; }
+    void set_selection_domain(SelectionDomain domain);
+    [[nodiscard]] EditorObjectId voxel_selection_object() const noexcept { return voxelSelectionObject_; }
+    [[nodiscard]] const std::set<Int3>& voxel_selection() const noexcept { return voxelSelection_; }
+    void select_voxels(EditorObjectId object, const std::set<Int3>& cells, SelectionOperation operation);
+    void clear_voxel_selection();
+    bool grow_voxel_selection_cmd();
+    bool shrink_voxel_selection_cmd();
+    bool invert_voxel_selection_cmd();
+    bool select_all_voxels();
+    bool delete_selected_voxels();
+    bool extract_selected_voxels();
+    bool copy_selected_voxels(bool cut);
+    bool paste_voxels();
+    bool move_selected_voxels(Int3 offset);
+    // During a Move-gizmo drag in the Voxel domain: the whole-voxel offset the release applies.
+    [[nodiscard]] std::optional<Int3> voxel_move_preview() const noexcept;
+    [[nodiscard]] bool voxel_brush_selecting() const noexcept { return voxelBrushSelecting_; }
     // Flood Fill (Voxel > Flood Fill): arms a one-shot fill; the next viewport click repaints the
     // clicked voxel's face-connected same-material region with the active material (one undo).
     bool arm_flood_fill();
@@ -924,6 +948,29 @@ private:
     EditorVoxelBooleanSession voxelBoolean_{};
     EditorVoxelJoinSession voxelJoin_{};
     bool floodFillArmed_{};
+    SelectionDomain selectionDomain_{SelectionDomain::Objects};
+    EditorObjectId voxelSelectionObject_{};
+    std::set<Int3> voxelSelection_;
+    std::uint64_t voxelSelectionRevision_{};
+    bool voxelBrushSelecting_{};
+    SelectionOperation voxelBrushOperation_{SelectionOperation::Add};
+    int voxelMoveAxis_{};
+    int voxelMoveStartX_{};
+    int voxelMoveStartY_{};
+    int voxelMoveSteps_{};
+    std::optional<VoxelClipboard> voxelClipboard_;
+    bool voxelClipboardNewest_{};  // Paste uses whichever clipboard was filled last
+    std::uint64_t voxelSelectionSerial_{};  // bumped whenever voxelSelection_ changes
+    mutable std::uint64_t voxelCentreCacheSerial_{};
+    mutable bool voxelCentreCacheValid_{};
+    mutable Float3 voxelCentreCacheLocal_{};
+    void prune_voxel_selection();
+    void reset_voxel_selection_state();
+    void close_previews_for_voxel_edit(std::string_view what);
+    [[nodiscard]] Float3 voxel_selection_centre() const;
+    [[nodiscard]] Float3 voxel_move_axis_world(int axis) const;
+    void voxel_brush_select_at(int x, int y);
+    void finish_voxel_marquee(int x, int y);
     // View > Follow Selection (Shift+F): the camera keeps the selection framed as it moves.
     bool followSelection_{};
     std::optional<Float3> followAnchor_;

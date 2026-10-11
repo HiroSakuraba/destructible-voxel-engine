@@ -437,7 +437,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"file.new_project","File","New Project","Ctrl+Shift+N"}, {"file.open_project","File","Open Project","Ctrl+Shift+O"},
         {"file.new_scene","File","New Scene","Ctrl+N"}, {"file.open_scene","File","Open Scene","Ctrl+O"},
         {"file.save","File","Save","Ctrl+S"}, {"file.save_as","File","Save As","Ctrl+Shift+S"},
-        {"file.import","File","Import Model","Ctrl+I"}, {"file.export_print_stl","File","Export for Printing (STL)",""},
+        {"file.import","File","Import Model","Ctrl+I"}, {"file.reimport","File","Reimport Model",""}, {"file.export_print_stl","File","Export for Printing (STL)",""},
         {"file.exit","File","Exit","Alt+F4"},
         {"edit.undo","Edit","Undo","Ctrl+Z"}, {"edit.redo","Edit","Redo","Ctrl+Y"},
         {"edit.cut","Edit","Cut","Ctrl+X"}, {"edit.copy","Edit","Copy","Ctrl+C"},
@@ -622,6 +622,19 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"polygon.collision","Polygon","Collision Settings",""}, {"polygon.streaming","Polygon","Streaming Settings",""},
         {"material.library","Materials","Material Library",""}, {"material.globals","Materials","Global Parameters",""},
         {"material.layers","Materials","Material Layers",""}, {"material.rendering","Materials","Shading Models",""},
+        // Mesh and material editing commands with no implementation here: listed (disabled, with
+        // the reason) so they are not shortcut-only.
+        {"polygon.vertex_mode","Polygon","Vertex Selection Mode",""}, {"polygon.edge_mode","Polygon","Edge Selection Mode",""},
+        {"polygon.face_mode","Polygon","Face Selection Mode",""}, {"polygon.object_mode","Polygon","Object Selection Mode",""},
+        {"polygon.component_toggle","Polygon","Toggle Object or Component Editing",""},
+        {"polygon.bevel","Polygon","Bevel",""}, {"polygon.extrude","Polygon","Extrude",""}, {"polygon.inset","Polygon","Inset",""},
+        {"polygon.uv_tools","Polygon","UV Tools",""}, {"polygon.recalculate_normals","Polygon","Recalculate Normals",""},
+        {"polygon.flip_normals","Polygon","Flip Normals",""},
+        {"material.assign","Materials","Assign or Open Material",""}, {"material.apply","Materials","Compile and Apply Material",""},
+        {"material.link","Materials","Link Materials or Settings",""},
+        {"material.create_instance","Materials","Create Material Instance",""},
+        {"material.create_master","Materials","Create Master Material",""},
+        {"material.preview","Materials","Preview Material",""}, {"material.pin_preview","Materials","Pin Material Preview",""},
         {"render.diagnostics3d","Rendering","3D Rendering Diagnostics","F11"},
         {"render.voxel_material_policy","Rendering","Voxel Material Policy",""},
         {"render.gabor.enabled","Rendering","Enable Gabor Fields",""},
@@ -677,6 +690,13 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
                                 "view.lighting_only", "view.overdraw", "view.voxel_debug"})
         configure(id, "Shading", 40, true, "viewport.shading");
     configure("view.follow_selection", "Camera", 20, true);
+    for (std::string_view id : {"polygon.vertex_mode", "polygon.edge_mode", "polygon.face_mode", "polygon.object_mode",
+                                "polygon.component_toggle", "polygon.bevel", "polygon.extrude", "polygon.inset",
+                                "polygon.uv_tools", "polygon.recalculate_normals", "polygon.flip_normals"})
+        configure(id, "Mesh Editing (not in this editor)", 80);
+    for (std::string_view id : {"material.assign", "material.apply", "material.link", "material.create_instance",
+                                "material.create_master", "material.preview", "material.pin_preview"})
+        configure(id, "Material Editing (not in this editor)", 80);
     configure("edit.preferences", "Settings", 90);
     configure("edit.project_settings", "Settings", 91);
     configure("window.toggle_ai_assistant", "AI", 70, true);
@@ -805,6 +825,14 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     const auto paletteOnly = [&](std::string_view id) {
         if (MenuAction* action = result.find_for_update(id)) action->visibility = MenuVisibility::PaletteOnly;
     };
+    // Not-implemented mesh/material editing commands: always in the Command Center (disabled, with
+    // the reason); in Tools only with View > Advanced Menus, so they do not lengthen Tools.
+    for (std::string_view id : {"polygon.vertex_mode", "polygon.edge_mode", "polygon.face_mode", "polygon.object_mode",
+                                "polygon.component_toggle", "polygon.bevel", "polygon.extrude", "polygon.inset",
+                                "polygon.uv_tools", "polygon.recalculate_normals", "polygon.flip_normals",
+                                "material.assign", "material.apply", "material.link", "material.create_instance",
+                                "material.create_master", "material.preview", "material.pin_preview"})
+        advanced(id);
     for (std::string_view id : {
             "asset.thumbnail", "asset.filter_stale", "transform.scale_double", "transform.scale_half",
             "view.xray", "camera.physical_lens", "camera.collision", "camera.preview_shakes",

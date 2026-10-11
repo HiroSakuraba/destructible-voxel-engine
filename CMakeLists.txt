@@ -831,6 +831,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_voxel_join.cpp
         src/editor_voxel_selection.cpp
         src/editor_scatter.cpp
+        src/editor_model_import.cpp
         src/editor_tools.cpp
         src/editor_workspace.cpp
         src/editor_workspace_state.cpp
@@ -2670,6 +2671,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_honest_commands_tests tests/test_editor_honest_commands.cpp)
         target_link_libraries(dve_editor_honest_commands_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_honest_commands_tests COMMAND dve_editor_honest_commands_tests)
+        add_executable(dve_editor_honest_followups_tests tests/test_editor_honest_followups.cpp)
+        target_link_libraries(dve_editor_honest_followups_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_honest_followups_tests COMMAND dve_editor_honest_followups_tests)
         add_executable(dve_editor_voxel_join_tests tests/test_editor_voxel_join.cpp)
         target_link_libraries(dve_editor_voxel_join_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_join_tests COMMAND dve_editor_voxel_join_tests)

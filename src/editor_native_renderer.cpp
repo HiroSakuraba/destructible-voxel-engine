@@ -2,6 +2,8 @@
 #include "dve/editor_midi.hpp"
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/editor_text_encoding.hpp"
+#include "dve/editor_lighting_preview.hpp"
+#include "dve/editor_runtime_settings.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3360,6 +3362,29 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const ShadingMode shading = viewport_shading_mode(controller);
     const EditorDocument& shadingDocument = controller.workspace().document();
     const Float3 cameraPosition = controller.camera().position;
+    // Lighting Only uses the scene's light (the same environment settings Play renders with).
+    const RenderEnvironment lightingEnvironment = shading == ShadingMode::LightingOnly
+        ? render_environment_settings(controller.workspace().settings()) : RenderEnvironment{};
+    // The exposed face of a voxel that faces the camera most (Normals and Lighting Only).
+    const auto camera_facing_normal = [&](const EditorVoxelDrawItem& item, const EditorObject* object) {
+        Float3 best{0.0F, 1.0F, 0.0F};
+        if (!object || !object->voxels) return best;
+        const float size = object->voxelSizeMeters;
+        const Float3 centre = transform_point(object->transform,
+            {(static_cast<float>(item.voxel.x) + 0.5F) * size, (static_cast<float>(item.voxel.y) + 0.5F) * size,
+             (static_cast<float>(item.voxel.z) + 0.5F) * size});
+        const Float3 toCamera = subtract(cameraPosition, centre);
+        static constexpr Int3 kFaces[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+        float bestDot = -2.0F;
+        for (const Int3 face : kFaces) {
+            if (object->voxels->occupied_at({item.voxel.x + face.x, item.voxel.y + face.y, item.voxel.z + face.z})) continue;
+            const Float3 normal = rotate(object->transform.rotation,
+                {static_cast<float>(face.x), static_cast<float>(face.y), static_cast<float>(face.z)});
+            const float d = dot(normal, toCamera);
+            if (d > bestDot) { bestDot = d; best = normal; }
+        }
+        return best;
+    };
     // Overdraw: count squares per 8 px screen cell, then paint the counts as a heat map.
     constexpr int kOverdrawCell = 8;
     const int overdrawColumns = std::max(1, (viewport.width + kOverdrawCell - 1) / kOverdrawCell);
@@ -3379,7 +3404,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         switch (shading) {
             case ShadingMode::Lit: break;
             case ShadingMode::Unlit: voxelColor = rgb(byte(base.x), byte(base.y), byte(base.z)); break;
-            case ShadingMode::LightingOnly: voxelColor = rgb(byte(0.78F * shade), byte(0.78F * shade), byte(0.80F * shade)); break;
+            case ShadingMode::LightingOnly: {
+                const Float3 light = lighting_only_color(camera_facing_normal(item, cachedObject), lightingEnvironment);
+                voxelColor = rgb(byte(light.x), byte(light.y), byte(light.z));
+                break;
+            }
             case ShadingMode::MaterialIds: voxelColor = hashed_color(item.material); break;
             case ShadingMode::VoxelDebug: {
                 // One colour per 8x8x8 brick (per object), so brick boundaries are visible.
@@ -3390,23 +3419,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             }
             case ShadingMode::Normals: {
                 // The exposed face of this voxel that faces the camera most, as an RGB normal.
-                Float3 best{0.0F, 1.0F, 0.0F};
-                if (cachedObject && cachedObject->voxels) {
-                    const float size = cachedObject->voxelSizeMeters;
-                    const Float3 centre = transform_point(cachedObject->transform,
-                        {(static_cast<float>(item.voxel.x) + 0.5F) * size, (static_cast<float>(item.voxel.y) + 0.5F) * size,
-                         (static_cast<float>(item.voxel.z) + 0.5F) * size});
-                    const Float3 toCamera = subtract(cameraPosition, centre);
-                    static constexpr Int3 kFaces[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-                    float bestDot = -2.0F;
-                    for (const Int3 face : kFaces) {
-                        if (cachedObject->voxels->occupied_at({item.voxel.x + face.x, item.voxel.y + face.y, item.voxel.z + face.z})) continue;
-                        const Float3 normal = rotate(cachedObject->transform.rotation,
-                            {static_cast<float>(face.x), static_cast<float>(face.y), static_cast<float>(face.z)});
-                        const float d = dot(normal, toCamera);
-                        if (d > bestDot) { bestDot = d; best = normal; }
-                    }
-                }
+                const Float3 best = camera_facing_normal(item, cachedObject);
                 voxelColor = rgb(byte(0.5F + 0.5F * best.x), byte(0.5F + 0.5F * best.y), byte(0.5F + 0.5F * best.z));
                 break;
             }
@@ -5336,6 +5349,87 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         painter.text(pickerLayout.hintBar.x + 8, pickerLayout.hintBar.y + pickerLayout.hintBar.height - 9,
                      picker.kind == FilePickerKind::SaveSceneAs ? "Type a name  Enter save  Click a scene to reuse its name  Esc close"
                                                                : "Type to filter  Up/Down select  Enter open  Esc close", muted);
+    }
+
+    if (controller.import_options().open) {
+        const ImportOptionsState& options = controller.import_options();
+        const NativeImportOptionsLayout panelLayout = controller.import_options_layout();
+        painter.fill({0, 0, width, height}, rgb(8,10,14));
+        painter.fill(panelLayout.panel, panel);
+        painter.outline(panelLayout.panel, accent);
+        const std::string title = std::string(options.reimport ? "Reimport " : "Import ") + options.relativeSource.generic_string();
+        painter.text(panelLayout.panel.x + 16, panelLayout.panel.y + 26,
+                     elide_text_to_width(painter, title, panelLayout.panel.width - 32), text);
+        const auto rows = controller.import_option_rows();
+        for (std::size_t visible = 0; visible < panelLayout.rows.size(); ++visible) {
+            const std::size_t index = panelLayout.rowIndex[visible];
+            if (index >= rows.size()) break;
+            const UiRect row = panelLayout.rows[visible];
+            if (index == options.selected) painter.fill(row, rgb(45,68,96));
+            else if ((visible & 1U) != 0U) painter.fill(row, rgb(24,29,37));
+            if (index == 3) painter.line(row.x, row.y - 1, row.x + row.width, row.y - 1, border);  // meshes start
+            const bool excluded = index >= 3 && rows[index].first.starts_with("[ ]");
+            const int valueWidth = std::min(row.width / 2, painter.text_width(rows[index].second) + 16);
+            painter.text(row.x + 8, row.y + row.height - 7,
+                         elide_text_to_width(painter, rows[index].first, row.width - 16 - valueWidth), excluded ? muted : text);
+            painter.text(row.x + row.width - valueWidth + 8, row.y + row.height - 7,
+                         elide_text_to_width(painter, rows[index].second, valueWidth - 16),
+                         index < 3 ? accent : muted);
+        }
+        const EditorImportEstimate& estimate = options.estimate;
+        painter.fill(panelLayout.estimateBox, panel2);
+        painter.outline(panelLayout.estimateBox, estimate.refusal.empty() ? border : rgb(255,150,100));
+        const auto thousands = [](std::uint64_t value) {
+            std::string digits = std::to_string(value);
+            for (int i = static_cast<int>(digits.size()) - 3; i > 0; i -= 3) digits.insert(static_cast<std::size_t>(i), ",");
+            return digits;
+        };
+        const std::string estimateLine = "Estimate: up to " + thousands(estimate.voxels) + " voxels  (" +
+            std::to_string(estimate.includedNodes) + " of " + std::to_string(estimate.totalNodes) + " meshes, " +
+            thousands(estimate.triangles) + " triangles; limit " + thousands(kMaxImportVoxels) + ")";
+        painter.text(panelLayout.estimateBox.x + 10, panelLayout.estimateBox.y + 20,
+                     elide_text_to_width(painter, estimateLine, panelLayout.estimateBox.width - 20), text);
+        const std::string note = !options.message.empty() ? options.message
+            : "The estimate counts each mesh's bounding box in voxels; solid fill reaches it only for box-like meshes.";
+        painter.text(panelLayout.estimateBox.x + 10, panelLayout.estimateBox.y + 40,
+                     elide_text_to_width(painter, note, panelLayout.estimateBox.width - 20),
+                     options.messageIsError ? rgb(255,170,110) : muted);
+        const bool canImport = estimate.refusal.empty();
+        painter.fill(panelLayout.importButton, canImport ? rgb(40,96,60) : panel2);
+        painter.outline(panelLayout.importButton, canImport ? rgb(102,220,144) : border);
+        const std::string importLabel = options.reimport ? "Reimport" : "Import";
+        painter.text(panelLayout.importButton.x + (panelLayout.importButton.width - painter.text_width(importLabel)) / 2,
+                     panelLayout.importButton.y + 20, importLabel, canImport ? text : muted);
+        painter.fill(panelLayout.cancelButton, panel2);
+        painter.outline(panelLayout.cancelButton, border);
+        painter.text(panelLayout.cancelButton.x + (panelLayout.cancelButton.width - painter.text_width("Cancel")) / 2,
+                     panelLayout.cancelButton.y + 20, "Cancel", text);
+        painter.fill(panelLayout.hintBar, panel2);
+        painter.text(panelLayout.hintBar.x + 8, panelLayout.hintBar.y + panelLayout.hintBar.height - 9,
+                     elide_text_to_width(painter, "Up/Down row  Left/Right or wheel change  Type a number + Enter  Space toggles a mesh  Enter import  Esc cancel",
+                                         panelLayout.hintBar.width - 16), muted);
+    }
+
+    if (controller.long_job_active()) {
+        const LongJobView job = controller.long_job_view();
+        const NativeLongJobLayout jobLayout = controller.long_job_layout();
+        painter.fill(jobLayout.panel, panel);
+        painter.outline(jobLayout.panel, accent);
+        const int percent = static_cast<int>(std::lround(job.progress * 100.0F));
+        const std::string heading = job.label + "  " + std::to_string(percent) + "%";
+        painter.text(jobLayout.panel.x + 12, jobLayout.panel.y + 22,
+                     elide_text_to_width(painter, heading, jobLayout.cancelButton.x - jobLayout.panel.x - 20), text);
+        painter.text(jobLayout.panel.x + 12, jobLayout.panel.y + 42,
+                     elide_text_to_width(painter, job.phase + "  (Esc cancels; editing waits until it finishes)",
+                                         jobLayout.panel.width - 24), muted);
+        painter.fill(jobLayout.bar, panel2);
+        painter.fill({jobLayout.bar.x, jobLayout.bar.y, std::max(0, static_cast<int>(static_cast<float>(jobLayout.bar.width) * job.progress)),
+                      jobLayout.bar.height}, accent);
+        painter.outline(jobLayout.bar, border);
+        painter.fill(jobLayout.cancelButton, panel2);
+        painter.outline(jobLayout.cancelButton, border);
+        painter.text(jobLayout.cancelButton.x + (jobLayout.cancelButton.width - painter.text_width("Cancel")) / 2,
+                     jobLayout.cancelButton.y + 18, "Cancel", text);
     }
 
     if (controller.pending_destructive_confirmation()) {

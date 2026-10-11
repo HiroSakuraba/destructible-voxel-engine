@@ -79,8 +79,8 @@ type to filter, Up/Down to choose, Enter to accept, Esc to close.
 - **Import Model (Ctrl+I, now bound; Polygon > Import Polygon Model runs the same command):**
   - Select an OBJ, glTF or GLB file in the Assets panel first; the command is disabled with that
     reason until you do.
-  - The model is voxelized with default settings, one object per mesh node, keeping node
-    transforms.
+  - The model is voxelized one object per mesh node, keeping node transforms. (Follow-up: an
+    options panel comes first; see `docs/editor-honest-followups-2026-10-11.md`.)
   - The objects are added under an "Imported <name>" group in one undo step. The group is selected
     and framed.
   - A summary reports the objects, voxels and voxel size; any warnings go to the Console.
@@ -124,11 +124,9 @@ on main instead of opening.
 
 ## What's not done
 
-- **Long-job progress and cancel:** not added. Import Model, Flood Fill (up to 2,000,000 voxels),
-  Validate Project and Rebuild Collision run synchronously on the UI thread, with no progress bar
-  or cancel. A large model import can freeze the editor until it finishes.
-- **Import options:** the step-by-step options (node choices, voxel settings, preview), reimport,
-  and a voxel or size cap on import.
+- **Long-job progress and cancel:** done in the follow-up, see
+  `docs/editor-honest-followups-2026-10-11.md`.
+- **Import options:** options panel, estimate, import cap and Reimport are done in the follow-up.
 - **OS file dialogs:** the pickers are in-editor lists; there is no native Open/Save dialog.
 - **Material editing commands:** Assign, Apply, Link, instances and previews are refused with a
   reason, not implemented.
@@ -137,10 +135,8 @@ on main instead of opening.
   the command-line `dve_cook_*` and `dve_pack` tools and the `docs/` folder.
 - **Brickmaps:** Rebuild Brickmaps stays disabled; the runtime renderer owns brickmaps.
 - **Shading modes:** these are colourings of the software viewport's voxel squares, not GPU
-  render passes. Lighting Only is flat grey; there is no lighting model here.
-- **Shortcut-only commands:** commands that are only in the shortcut set (polygon tools, material
-  commands) are refused when used, but they are not menu items. They do not show a disabled state
-  ahead of time.
+  render passes. Lighting Only now uses the scene's sun (N·L plus sky/ground ambient; follow-up).
+- **Shortcut-only commands:** now menu items, disabled with their reason (follow-up).
 
 ## Tests
 

@@ -362,7 +362,9 @@ void test_import_model() {
     controller.asset_browser_state().selectedId = record->id;
     controller.update(0.016F);
     const std::size_t before = controller.workspace().document().objects().size();
-    check(controller.dispatch_action("file.import"), "Import Model imports the selected model: " + controller.status().text);
+    check(controller.dispatch_action("file.import") && controller.import_options().open,
+          "Import Model opens the import options for the selected model: " + controller.status().text);
+    check(controller.accept_import_options(), "Enter imports with the default options: " + controller.status().text);
     const EditorDocument& document = controller.workspace().document();
     check(document.objects().size() >= before + 2, "a group and at least one voxel object were added");
     const auto active = controller.workspace().selected_object();

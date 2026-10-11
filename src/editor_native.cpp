@@ -11,7 +11,9 @@
 #include "dve/collision_proxy.hpp"
 #include "dve/fragment.hpp"
 
+#include <atomic>
 #include <condition_variable>
+#include <thread>
 #include <fstream>
 #include <iterator>
 #include <mutex>
@@ -1660,11 +1662,41 @@ void NativeEditorController::close_shortcut_editor() noexcept {
     shortcutPanel_ = {};
 }
 
+namespace {
+// Commands that exist only as Polygon Editor / Material Editor shortcuts (#101 refused them only
+// when used). Each is a disabled menu item with this reason.
+const std::vector<std::pair<std::string, std::string>>& editor_context_only_commands() {
+    static const std::vector<std::pair<std::string, std::string>> kCommands = [] {
+        std::vector<std::pair<std::string, std::string>> list;
+        const std::string mesh = "Not in this editor yet: polygon mesh editing (vertex/edge/face tools); models import as voxels (File > Import Model).";
+        for (const char* id : {"polygon.vertex_mode", "polygon.edge_mode", "polygon.face_mode", "polygon.object_mode",
+                               "polygon.component_toggle", "polygon.bevel", "polygon.extrude", "polygon.inset", "polygon.uv_tools",
+                               "polygon.recalculate_normals", "polygon.flip_normals"})
+            list.emplace_back(id, mesh);
+        const std::string paint = "Not in this editor yet: use the Paint tool (5) or Voxel > Flood Fill to apply the active material.";
+        const std::string instances = "Not in this editor yet: material instances and previews; edit materials under Materials > Material Library.";
+        list.emplace_back("material.assign", paint);
+        list.emplace_back("material.apply", paint);
+        for (const char* id : {"material.link", "material.create_instance", "material.create_master", "material.preview", "material.pin_preview"})
+            list.emplace_back(id, instances);
+        return list;
+    }();
+    return kCommands;
+}
+} // namespace
+
 void NativeEditorController::synchronize_menu_shortcuts() noexcept {
     const SettingValue visibleValue = workspace_.settings().value("input.show_shortcuts_in_menus");
     const bool visible = !std::get_if<bool>(&visibleValue) || std::get<bool>(visibleValue);
-    for (const MenuAction& action : workspace_.menus().actions())
-        (void)workspace_.menus().set_shortcut(action.id, visible ? workspace_.shortcuts().display_binding(action.id) : std::string{});
+    const auto& contextOnly = editor_context_only_commands();
+    for (const MenuAction& action : workspace_.menus().actions()) {
+        // Polygon/Material Editor keys (B, E, M, P, ...) only apply in editors this build does
+        // not have; next to a viewport menu they would read as viewport shortcuts (M is the
+        // selection domain), so those rows show no key.
+        const bool hide = std::any_of(contextOnly.begin(), contextOnly.end(),
+                                      [&](const auto& entry) { return entry.first == action.id; });
+        (void)workspace_.menus().set_shortcut(action.id, visible && !hide ? workspace_.shortcuts().display_binding(action.id) : std::string{});
+    }
 }
 
 void NativeEditorController::remember_camera_position() {
@@ -1968,6 +2000,19 @@ void NativeEditorController::refresh_menu_state() noexcept {
         checked("voxel.boolean_operands_hide", voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Hide);
         checked("voxel.boolean_operands_delete", voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Delete);
         checked("voxel.boolean_operands_keep", voxelBooleanPolicy_ == VoxelBooleanOperandPolicy::Keep);
+    }
+    {
+        const std::string reimportReason = reimport_disabled_reason();
+        enabled("file.reimport", reimportReason.empty(), reimportReason);
+        // Polygon mesh and material editing commands that only had shortcuts (#101): listed in
+        // their menus (and so the Command Center) as disabled, with the reason, before use.
+        for (const auto& [id, reason] : editor_context_only_commands()) enabled(id, false, reason);
+        if (longJob_) {
+            const std::string busy = long_job_busy_reason();
+            for (std::string_view id : {"file.import", "polygon.import", "file.reimport", "voxel.fill", "voxel.rebuild_collision",
+                                        "build.validate", "file.open_scene", "file.open_project", "file.save_as"})
+                enabled(id, false, busy);
+        }
     }
     enabled("text3d.cancel", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     // Cook, Package and Documentation have no handler in this editor build: say so up front.
@@ -2646,6 +2691,7 @@ void NativeEditorController::update(float elapsedSeconds) {
         navigationShortcutProfile_ = workspace_.shortcuts().active_profile();
     }
     autosave_tick(elapsedSeconds);
+    poll_long_job();
     voxel_boolean_tick();
     prune_voxel_selection();
     if (followSelection_) {
@@ -3321,6 +3367,14 @@ void NativeEditorController::key_up(std::string_view key, bool control, bool, bo
 }
 
 void NativeEditorController::text_input(std::string_view text) {
+    if (longJob_) return;
+    if (importOptions_.open) {
+        // Typing a number into the Voxel size or Scale row; Enter applies it.
+        if (importOptions_.selected < 2)
+            for (const char c : text)
+                if ((std::isdigit(static_cast<unsigned char>(c)) || c == '.') && importOptions_.typed.size() < 12) importOptions_.typed += c;
+        return;
+    }
     if (shortcutPanel_.open && !shortcutPanel_.capturing && !text.empty()) {
         shortcutPanel_.searchQuery.append(text);
         shortcutPanel_.selectedRow = 0U;
@@ -3561,6 +3615,11 @@ void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
     hoverX_ = x;
     hoverY_ = y;
+    if (longJob_ || importOptions_.open) {
+        lastPointerX_ = x;
+        lastPointerY_ = y;
+        return;
+    }
     if (filePicker_.open) {
         const NativeFilePickerLayout picker = file_picker_layout();
         for (std::size_t visible = 0; visible < picker.rows.size(); ++visible)
@@ -3708,6 +3767,29 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         if (button == PointerButton::Secondary) playSession_.set_action_pressed("aim", true);
     }
     if (pending_destructive_confirmation()) return;
+    if (longJob_) {
+        if (button == PointerButton::Primary && long_job_layout().cancelButton.contains(x, y)) (void)cancel_long_job();
+        else set_status(long_job_busy_reason(), true, 3.0F);
+        return;
+    }
+    if (importOptions_.open) {
+        if (button != PointerButton::Primary) return;
+        const NativeImportOptionsLayout panel = import_options_layout();
+        if (panel.importButton.contains(x, y)) { (void)accept_import_options(); return; }
+        if (panel.cancelButton.contains(x, y) || !panel.panel.contains(x, y)) {
+            close_import_options(importOptions_.reimport ? "Reimport cancelled; the scene is unchanged"
+                                                         : "Import cancelled; the scene is unchanged");
+            return;
+        }
+        for (std::size_t i = 0; i < panel.rows.size(); ++i) {
+            if (!panel.rows[i].contains(x, y)) continue;
+            if (importOptions_.selected != panel.rowIndex[i]) importOptions_.typed.clear();
+            importOptions_.selected = panel.rowIndex[i];
+            if (panel.rowIndex[i] >= 2) nudge_import_option(panel.rowIndex[i], 1);  // Fill cycles, a mesh toggles
+            return;
+        }
+        return;
+    }
     if (spritePixelArtOpen_) {
         const UiRect canvas = sprite_pixel_art_canvas();
         if (!canvas.contains(x, y)) return;
@@ -4510,6 +4592,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (longJob_ || importOptions_.open) {
+        // Nothing that started before the job may finish into the scene now.
+        dragButton_ = PointerButton::NoButton;
+        activePointerCommand_.clear();
+        return;
+    }
     if (playSession_.active()) {
         const std::string input = pointer_input_name(button);
         if (!input.empty()) playSession_.set_action_pressed(input, false);
@@ -4677,6 +4765,16 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint32_t modifiers) {
     hoverX_ = x;
     hoverY_ = y;
+    if (longJob_) return;
+    if (importOptions_.open) {
+        const NativeImportOptionsLayout panel = import_options_layout();
+        for (std::size_t i = 0; i < panel.rows.size(); ++i)
+            if (panel.rows[i].contains(x, y) && panel.rowIndex[i] < 3) {
+                importOptions_.selected = panel.rowIndex[i];
+                nudge_import_option(panel.rowIndex[i], steps > 0.0F ? 1 : -1);
+            }
+        return;
+    }
     if (commandPaletteOpen_) {
         const auto results = command_palette_results(64);
         if (!results.empty() && steps != 0.0F) {
@@ -5489,6 +5587,15 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
 }
 
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
+    if (longJob_ || importOptions_.open) {
+        // Only the viewport shading modes leave the scene alone while a long job runs.
+        static constexpr std::array<std::string_view, 8> kSafeWhileBusy{
+            "view.lit", "view.unlit", "view.wireframe", "view.material_ids", "view.normals",
+            "view.lighting_only", "view.overdraw", "view.voxel_debug"};
+        const bool safe = std::find(kSafeWhileBusy.begin(), kSafeWhileBusy.end(), actionId) != kSafeWhileBusy.end();
+        if (longJob_ && !safe) { set_status(long_job_busy_reason(), true, 4.0F); return false; }
+        if (importOptions_.open && !safe) close_import_options();
+    }
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
         const auto value = actionId.substr(std::string_view("selection.pick.").size());
@@ -6431,6 +6538,7 @@ camera_menu_dispatch_complete:
     if (actionId == "file.open_project") return open_file_picker(FilePickerKind::OpenProject);
     if (actionId == "file.save_as") return open_file_picker(FilePickerKind::SaveSceneAs);
     if (actionId == "file.import") return import_selected_model();
+    if (actionId == "file.reimport") return reimport_selected_model();
     if (actionId == "file.new_scene") {
         if (workspace_.document().dirty() && workspace_.preferences().confirmDestructiveActions) {
             pendingDestructiveAction_ = PendingDestructiveAction::NewScene;
@@ -7081,6 +7189,16 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         else if (normalized == "escape") cancel_pending_destructive_action();
         return;
     }
+    if (longJob_) {
+        // A long job owns the scene until it finishes: Esc cancels, other keys only explain.
+        const bool modifier = normalized.starts_with("shift") || normalized.starts_with("control") ||
+                              normalized.starts_with("alt") || normalized.starts_with("super") ||
+                              normalized.starts_with("meta") || normalized == "caps_lock";
+        if (normalized == "escape") (void)cancel_long_job();
+        else if (!modifier) set_status(long_job_busy_reason(), true, 3.0F);
+        return;
+    }
+    if (importOptions_.open) { (void)handle_import_options_key(normalized); return; }
     if (filePicker_.open) { (void)handle_file_picker_key(normalized); return; }
     if (gizmoDragging_ && !control) {
         if (normalized == "enter" || normalized == "return") { finish_gizmo_drag(false); return; }
@@ -9012,6 +9130,60 @@ bool NativeEditorController::separate_voxel_islands() {
     return true;
 }
 
+// --- Long job state (see start_long_job) -------------------------------------------------------
+
+namespace {
+// Changes to the scene while a long job runs: the command history plus each object's identity,
+// name, parent, voxel revision, transform, flags and components. EditorDocument::revision() is
+// the saved revision, so it cannot tell.
+std::uint64_t scene_change_fingerprint(const EditorDocument& document, const EditorCommandStack& commands) {
+    std::uint64_t h = 1469598103934665603ULL;
+    const auto mix = [&](std::uint64_t v) { h ^= v + 0x9E3779B97F4A7C15ULL + (h << 6U) + (h >> 2U); h *= 1099511628211ULL; };
+    const auto mixf = [&](float v) { mix(std::bit_cast<std::uint32_t>(v)); };
+    mix(commands.size());
+    mix((commands.can_undo() ? 1U : 0U) | (commands.can_redo() ? 2U : 0U));
+    mix(std::hash<std::string_view>{}(commands.undo_label()));
+    mix(document.objects().size());
+    for (const auto& [id, object] : document.objects()) {
+        mix(id);
+        mix(object.parent.value_or(0));
+        mix(std::hash<std::string>{}(object.name));
+        mix(object.voxels ? object.voxels->revision() : 0U);
+        mix(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(object.voxels.get())));
+        mixf(object.transform.position.x); mixf(object.transform.position.y); mixf(object.transform.position.z);
+        mixf(object.transform.rotation.x); mixf(object.transform.rotation.y); mixf(object.transform.rotation.z);
+        mixf(object.transform.rotation.w);
+        mix((object.flags.visible ? 1U : 0U) | (object.flags.locked ? 2U : 0U) | (object.flags.anchored ? 4U : 0U) |
+            (object.flags.structural ? 8U : 0U) | (object.flags.collisionEnabled ? 16U : 0U) | (object.flags.decorative ? 32U : 0U));
+        mix(object.components.size());
+    }
+    return h;
+}
+} // namespace
+
+struct NativeEditorController::LongJob {
+    LongJobKind kind{LongJobKind::Idle};
+    std::string label;
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> done{false};
+    std::atomic<float> progress{0.0F};
+    mutable std::mutex mutex;
+    std::string phase;
+    std::string error;
+    std::uint64_t documentRevision{};
+    std::function<bool(LongJob&)> commit;
+    void report(float value, std::string text) {
+        progress.store(std::clamp(value, 0.0F, 1.0F));
+        std::lock_guard lock(mutex);
+        phase = std::move(text);
+    }
+    [[nodiscard]] bool cancelled() const noexcept { return cancel.load(); }
+};
+
+NativeEditorController::LongJobCancelOnExit::~LongJobCancelOnExit() {
+    if (job && *job) (*job)->cancel = true;
+}
+
 // --- Flood Fill, Drop to Surface, collision, validation (honest commands) --------------------
 
 namespace {
@@ -9045,6 +9217,7 @@ bool NativeEditorController::flood_fill_at(EditorObjectId objectId, Int3 start) 
         set_status("Stop Play or Simulate before filling", true);
         return false;
     }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
     const EditorObject* object = workspace_.document().find_object(objectId);
     if (object && (!object->flags.visible || is_isolated_out(objectId))) {
         set_status("Flood Fill: " + object->name + " is hidden or isolated out of view", true);
@@ -9067,36 +9240,63 @@ bool NativeEditorController::flood_fill_at(EditorObjectId objectId, Int3 start) 
         set_status("Flood Fill: click inside the voxel selection (or clear it)", true);
         return false;
     }
-    std::vector<VoxelBooleanChange> changes;
-    std::set<Int3> seen{start};
-    std::vector<Int3> stack{start};
-    static constexpr Int3 kSteps[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-    while (!stack.empty()) {
-        const Int3 at = stack.back();
-        stack.pop_back();
-        changes.push_back({at, from, activeMaterial_});
-        if (changes.size() > kMaxFloodFillVoxels) {
-            set_status("Flood Fill stopped: the region has more than 2,000,000 voxels", true, 6.0F);
-            return false;
-        }
-        for (const Int3 step : kSteps) {
-            const Int3 next{at.x + step.x, at.y + step.y, at.z + step.z};
-            if (seen.contains(next) || object->voxels->material_at(next) != from) continue;
-            if (limitToSelection && !voxelSelection_.contains(next)) continue;
-            seen.insert(next);
-            stack.push_back(next);
-        }
-    }
-    std::sort(changes.begin(), changes.end());
-    const std::vector<Int3> anchors(object->anchors.begin(), object->anchors.end());
-    const std::size_t count = changes.size();
-    const CommandResult result = workspace_.commands().execute(
-        workspace_.document(),
-        std::make_unique<ApplyVoxelBooleanCommand>(objectId, std::move(changes), anchors, anchors, "Flood fill"));
-    if (!result.success) { set_status(result.message, true, 6.0F); return false; }
-    set_status("Filled " + std::to_string(count) + " voxels with material " + std::to_string(activeMaterial_) +
-               "; Undo restores");
-    return true;
+    // The fill reads a snapshot (a copy of the object and of the voxel selection), so a long
+    // fill can run on the worker; the repaint is applied on the UI thread as one undo step.
+    const std::uint64_t occupied = object->voxels->occupied_voxel_count();
+    const bool background = occupied > longJobThreshold_;
+    std::shared_ptr<const VoxelObject> voxels = background ? std::shared_ptr<const VoxelObject>(clone_voxel_object(*object->voxels))
+                                                           : std::shared_ptr<const VoxelObject>(object->voxels.get(), [](const VoxelObject*) {});
+    auto selection = limitToSelection ? std::make_shared<const std::set<Int3>>(voxelSelection_) : nullptr;
+    const MaterialId to = activeMaterial_;
+    const std::uint64_t revision = object->voxels->revision();
+    struct FillResult { std::vector<VoxelBooleanChange> changes; bool tooLarge{}; };
+    auto result = std::make_shared<FillResult>();
+    return start_long_job(
+        LongJobKind::FloodFill, "Flood Fill " + object->name, occupied,
+        [voxels, selection, start, from, to, occupied, result](LongJob& job) {
+            std::set<Int3> seen{start};
+            std::vector<Int3> stack{start};
+            static constexpr Int3 kSteps[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+            while (!stack.empty()) {
+                const Int3 at = stack.back();
+                stack.pop_back();
+                result->changes.push_back({at, from, to});
+                if (result->changes.size() > kMaxFloodFillVoxels) { result->tooLarge = true; return; }
+                if ((result->changes.size() & 0x3FFFU) == 0U) {
+                    if (job.cancelled()) return;
+                    job.report(0.9F * static_cast<float>(result->changes.size()) / static_cast<float>(std::max<std::uint64_t>(1, occupied)),
+                               "Filling: " + std::to_string(result->changes.size()) + " voxels so far");
+                }
+                for (const Int3 step : kSteps) {
+                    const Int3 next{at.x + step.x, at.y + step.y, at.z + step.z};
+                    if (seen.contains(next) || voxels->material_at(next) != from) continue;
+                    if (selection && !selection->contains(next)) continue;
+                    seen.insert(next);
+                    stack.push_back(next);
+                }
+            }
+            job.report(0.95F, "Sorting " + std::to_string(result->changes.size()) + " voxels");
+            std::sort(result->changes.begin(), result->changes.end());
+        },
+        [this, objectId, revision, to, result](LongJob&) {
+            if (result->tooLarge) {
+                set_status("Flood Fill stopped: the region has more than 2,000,000 voxels", true, 6.0F);
+                return false;
+            }
+            const EditorObject* target = workspace_.document().find_object(objectId);
+            if (!target || !target->voxels || target->voxels->revision() != revision) {
+                set_status("Flood Fill was not applied: the object changed", true, 6.0F);
+                return false;
+            }
+            const std::vector<Int3> anchors(target->anchors.begin(), target->anchors.end());
+            const std::size_t count = result->changes.size();
+            const CommandResult executed = workspace_.commands().execute(
+                workspace_.document(),
+                std::make_unique<ApplyVoxelBooleanCommand>(objectId, std::move(result->changes), anchors, anchors, "Flood fill"));
+            if (!executed.success) { set_status(executed.message, true, 6.0F); return false; }
+            set_status("Filled " + std::to_string(count) + " voxels with material " + std::to_string(to) + "; Undo restores");
+            return true;
+        });
 }
 
 bool NativeEditorController::drop_selection_to_surface() {
@@ -9207,108 +9407,179 @@ const std::vector<VoxelBox>& NativeEditorController::collision_proxy(EditorObjec
 }
 
 bool NativeEditorController::rebuild_collision_proxies() {
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
     const EditorDocument& document = workspace_.document();
     std::vector<EditorObjectId> ids;
     if (!workspace_.selected_objects().empty()) ids.assign(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
     else for (const auto& [id, object] : document.objects()) ids.push_back(id);
-    std::size_t objects = 0, boxes = 0, disabled = 0;
+    struct Target {
+        EditorObjectId id{};
+        std::uint64_t revision{};
+        std::uint64_t stamp{};
+        std::shared_ptr<const VoxelObject> voxels;
+        std::vector<VoxelBox> boxes;
+    };
+    std::vector<Target> targets;
+    std::size_t disabled = 0;
+    std::uint64_t voxelTotal = 0;
     for (const EditorObjectId id : ids) {
         const EditorObject* object = document.find_object(id);
         if (!object || !object->voxels || object->text3d || object->gaborVolume || object->voxels->occupied_voxel_count() == 0) continue;
         if (!object->flags.collisionEnabled) { ++disabled; continue; }
-        collisionProxyCache_.erase(id);
-        boxes += collision_proxy(id).size();
-        ++objects;
+        voxelTotal += object->voxels->occupied_voxel_count();
+        targets.push_back({id, object->voxels->revision(), static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(object->voxels.get())), nullptr, {}});
     }
-    if (objects == 0) {
+    if (targets.empty()) {
         set_status(disabled > 0 ? "The selected objects have Collision turned off" : "No voxel objects to rebuild collision for", true);
         return false;
     }
-    set_status("Rebuilt collision for " + std::to_string(objects) + " object(s): " + std::to_string(boxes) +
-               " merged boxes, the same proxy Play uses" +
-               (disabled > 0 ? "; " + std::to_string(disabled) + " with Collision off skipped" : std::string()));
-    return true;
+    // Snapshot the voxels when the work goes to the worker; small work reads them in place.
+    const bool background = voxelTotal > longJobThreshold_;
+    for (Target& target : targets) {
+        const VoxelObject& live = *document.find_object(target.id)->voxels;
+        target.voxels = background ? std::shared_ptr<const VoxelObject>(clone_voxel_object(live))
+                                   : std::shared_ptr<const VoxelObject>(&live, [](const VoxelObject*) {});
+    }
+    auto shared = std::make_shared<std::vector<Target>>(std::move(targets));
+    return start_long_job(
+        LongJobKind::RebuildCollision, "Rebuild Collision", voxelTotal,
+        [shared](LongJob& job) {
+            for (std::size_t i = 0; i < shared->size(); ++i) {
+                if (job.cancelled()) return;
+                job.report(static_cast<float>(i) / static_cast<float>(shared->size()),
+                           "Object " + std::to_string(i + 1) + " of " + std::to_string(shared->size()));
+                (*shared)[i].boxes = build_merged_object_box_proxy(*(*shared)[i].voxels);
+                (*shared)[i].voxels.reset();
+            }
+            job.report(1.0F, "Done");
+        },
+        [this, shared, disabled](LongJob&) {
+            std::size_t objects = 0, boxes = 0;
+            for (Target& target : *shared) {
+                const EditorObject* object = workspace_.document().find_object(target.id);
+                if (!object || !object->voxels || object->voxels->revision() != target.revision ||
+                    static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(object->voxels.get())) != target.stamp) continue;
+                CachedCollisionProxy& cached = collisionProxyCache_[target.id];
+                cached.revision = target.revision;
+                cached.objectStamp = target.stamp;
+                cached.boxes = std::move(target.boxes);
+                boxes += cached.boxes.size();
+                ++objects;
+            }
+            set_status("Rebuilt collision for " + std::to_string(objects) + " object(s): " + std::to_string(boxes) +
+                       " merged boxes, the same proxy Play uses" +
+                       (disabled > 0 ? "; " + std::to_string(disabled) + " with Collision off skipped" : std::string()));
+            return objects > 0;
+        });
 }
 
 std::size_t NativeEditorController::validate_project() {
-    static constexpr std::array<std::string_view, 7> kCodes{
-        "validate.scene", "validate.missing_file", "validate.component", "validate.empty_object",
-        "validate.collision", "validate.assets", "validate.ok"};
-    for (const std::string_view code : kCodes) workspace_.problems().clear_code(code);
-    const EditorDocument& document = workspace_.document();
-    std::size_t found = 0;
-    const auto add = [&](ProblemSeverity severity, std::string_view code, std::string summary, std::string details,
-                         std::optional<EditorObjectId> object) {
-        workspace_.problems().add({severity, std::string(code), std::move(summary), std::move(details), object, {}});
-        ++found;
-    };
-    const auto resolve = [&](const std::filesystem::path& path) {
-        return path.has_root_directory() || path.has_root_name() ? path : projectRoot_ / path;
-    };
-    std::error_code ec;
-    std::string sceneError;
-    if (!document.validate(&sceneError))
-        add(ProblemSeverity::Error, "validate.scene", "Scene is invalid: " + sceneError, "Saving will fail until this is fixed.", std::nullopt);
-    static const ComponentTypeRegistry registry = ComponentTypeRegistry::make_default();
-    for (const auto& [id, object] : document.objects()) {
-        const std::string name = object.name.empty() ? "object " + std::to_string(id) : object.name;
-        if (!object.sourceAsset.empty() && !std::filesystem::exists(resolve(object.sourceAsset), ec))
-            add(ProblemSeverity::Warning, "validate.missing_file", name + ": source asset missing",
-                object.sourceAsset.generic_string() + " was not found; it cannot be reimported.", id);
-        if (!object.textFontAsset.empty() && !std::filesystem::exists(resolve(object.textFontAsset), ec))
-            add(ProblemSeverity::Warning, "validate.missing_file", name + ": font missing",
-                object.textFontAsset.generic_string() + " was not found; the text cannot be recooked.", id);
-        if (object.prefabLink && object.prefabLink->instanceRoot && !object.prefabLink->prefabAsset.empty() &&
-            !std::filesystem::exists(resolve(object.prefabLink->prefabAsset), ec))
-            add(ProblemSeverity::Error, "validate.missing_file", name + ": prefab file missing",
-                object.prefabLink->prefabAsset.generic_string() + " was not found; the instance cannot update.", id);
-        for (const Component& component : object.components) {
-            std::string reason;
-            if (!registry.validate(component, &reason)) {
-                add(ProblemSeverity::Error, "validate.component", name + ": component '" + component.type + "' is invalid", reason, id);
-                continue;
-            }
-            const ComponentTypeSchema* schema = registry.find(component.type);
-            if (!schema) continue;
-            for (const ComponentPropertySchema& property : schema->properties) {
-                if (!property.assetReference) continue;
-                const auto it = component.properties.find(property.name);
-                const auto* path = it == component.properties.end() ? nullptr : std::get_if<std::string>(&it->second);
-                if (!path || path->empty()) {
-                    if (property.required)
-                        add(ProblemSeverity::Error, "validate.component", name + ": " + component.type + " has no " + property.name,
-                            "Set the " + property.name + " asset in the component.", id);
-                    continue;
-                }
-                if (!std::filesystem::exists(resolve(*path), ec))
-                    add(ProblemSeverity::Error, "validate.component", name + ": " + component.type + " references a missing file",
-                        *path + " was not found.", id);
-            }
-        }
-        const bool voxelObject = object.voxels && !object.text3d && !object.gaborVolume;
-        if (voxelObject && object.voxels->occupied_voxel_count() > 0 && object.flags.collisionEnabled &&
-            !validate_box_proxy(*object.voxels, collision_proxy(id)))
-            add(ProblemSeverity::Error, "validate.collision", name + ": collision proxy does not cover its voxels",
-                "Run Voxel > Rebuild Collision; report this if it persists.", id);
-        if (voxelObject && object.voxels->occupied_voxel_count() == 0 && document.children_of(id).empty() &&
-            object.components.empty() && !object.prefabLink && !is_scatter_group(object))
-            add(ProblemSeverity::Information, "validate.empty_object", name + " has no voxels, children or components",
-                "An empty object does nothing in Play; delete it or give it content.", id);
-    }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return 0; }
+    const EditorDocument& live = workspace_.document();
+    std::uint64_t workUnits = live.objects().size();
+    for (const auto& [id, object] : live.objects())
+        if (object.voxels && object.flags.collisionEnabled && !object.text3d && !object.gaborVolume) workUnits += object.voxels->occupied_voxel_count();
+    // The checks read a snapshot of the scene (a copy when they run on the worker).
+    const bool background = workUnits > longJobThreshold_;
+    std::shared_ptr<const EditorDocument> document = background
+        ? std::make_shared<const EditorDocument>(clone_editor_document(live))
+        : std::shared_ptr<const EditorDocument>(&live, [](const EditorDocument*) {});
     std::size_t staleAssets = 0;
     for (const EditorAssetRecord& record : std::as_const(assetDatabase_).records())
         if (record.health != EditorAssetHealth::Current) ++staleAssets;
-    if (staleAssets > 0)
-        add(ProblemSeverity::Warning, "validate.assets", std::to_string(staleAssets) + " asset(s) are stale or broken",
-            "Open the Assets panel and choose Issues to see them.", std::nullopt);
-    if (found == 0)
-        workspace_.problems().add({ProblemSeverity::Information, "validate.ok", "Validation passed: no problems found",
-                                   "Checked the scene, file references, components, collision and assets.", std::nullopt, {}});
-    bottomTab_ = BottomPanelTab::Problems;
-    recompute_layout();
-    set_status(found == 0 ? "Validation passed: no problems found"
-                          : "Validation found " + std::to_string(found) + " problem(s); see Problems", found > 0);
-    return found;
+    struct ValidateResult { std::vector<EditorProblem> problems; std::size_t found{}; };
+    auto result = std::make_shared<ValidateResult>();
+    lastValidateFound_ = 0;
+    return start_long_job(
+        LongJobKind::ValidateProject, "Validate Project", workUnits,
+        [document, root = projectRoot_, staleAssets, result](LongJob& job) {
+            const auto add = [&](ProblemSeverity severity, std::string_view code, std::string summary, std::string details,
+                                 std::optional<EditorObjectId> object) {
+                result->problems.push_back({severity, std::string(code), std::move(summary), std::move(details), object, {}});
+                ++result->found;
+            };
+            const auto resolve = [&](const std::filesystem::path& path) {
+                return path.has_root_directory() || path.has_root_name() ? path : root / path;
+            };
+            std::error_code ec;
+            std::string sceneError;
+            job.report(0.02F, "Checking the scene");
+            if (!document->validate(&sceneError))
+                add(ProblemSeverity::Error, "validate.scene", "Scene is invalid: " + sceneError, "Saving will fail until this is fixed.", std::nullopt);
+            static const ComponentTypeRegistry registry = ComponentTypeRegistry::make_default();
+            const std::size_t total = std::max<std::size_t>(1, document->objects().size());
+            std::size_t done = 0;
+            for (const auto& [id, object] : document->objects()) {
+                if ((++done & 0x3FU) == 0U) {
+                    if (job.cancelled()) return;
+                    job.report(0.05F + 0.9F * static_cast<float>(done) / static_cast<float>(total),
+                               "Object " + std::to_string(done) + " of " + std::to_string(total));
+                }
+                const std::string name = object.name.empty() ? "object " + std::to_string(id) : object.name;
+                if (!object.sourceAsset.empty() && !std::filesystem::exists(resolve(object.sourceAsset), ec))
+                    add(ProblemSeverity::Warning, "validate.missing_file", name + ": source asset missing",
+                        object.sourceAsset.generic_string() + " was not found; it cannot be reimported.", id);
+                if (!object.textFontAsset.empty() && !std::filesystem::exists(resolve(object.textFontAsset), ec))
+                    add(ProblemSeverity::Warning, "validate.missing_file", name + ": font missing",
+                        object.textFontAsset.generic_string() + " was not found; the text cannot be recooked.", id);
+                if (object.prefabLink && object.prefabLink->instanceRoot && !object.prefabLink->prefabAsset.empty() &&
+                    !std::filesystem::exists(resolve(object.prefabLink->prefabAsset), ec))
+                    add(ProblemSeverity::Error, "validate.missing_file", name + ": prefab file missing",
+                        object.prefabLink->prefabAsset.generic_string() + " was not found; the instance cannot update.", id);
+                for (const Component& component : object.components) {
+                    std::string reason;
+                    if (!registry.validate(component, &reason)) {
+                        add(ProblemSeverity::Error, "validate.component", name + ": component '" + component.type + "' is invalid", reason, id);
+                        continue;
+                    }
+                    const ComponentTypeSchema* schema = registry.find(component.type);
+                    if (!schema) continue;
+                    for (const ComponentPropertySchema& property : schema->properties) {
+                        if (!property.assetReference) continue;
+                        const auto it = component.properties.find(property.name);
+                        const auto* path = it == component.properties.end() ? nullptr : std::get_if<std::string>(&it->second);
+                        if (!path || path->empty()) {
+                            if (property.required)
+                                add(ProblemSeverity::Error, "validate.component", name + ": " + component.type + " has no " + property.name,
+                                    "Set the " + property.name + " asset in the component.", id);
+                            continue;
+                        }
+                        if (!std::filesystem::exists(resolve(*path), ec))
+                            add(ProblemSeverity::Error, "validate.component", name + ": " + component.type + " references a missing file",
+                                *path + " was not found.", id);
+                    }
+                }
+                const bool voxelObject = object.voxels && !object.text3d && !object.gaborVolume;
+                if (voxelObject && object.voxels->occupied_voxel_count() > 0 && object.flags.collisionEnabled &&
+                    !validate_box_proxy(*object.voxels, build_merged_object_box_proxy(*object.voxels)))
+                    add(ProblemSeverity::Error, "validate.collision", name + ": collision proxy does not cover its voxels",
+                        "Run Voxel > Rebuild Collision; report this if it persists.", id);
+                if (voxelObject && object.voxels->occupied_voxel_count() == 0 && document->children_of(id).empty() &&
+                    object.components.empty() && !object.prefabLink && !is_scatter_group(object))
+                    add(ProblemSeverity::Information, "validate.empty_object", name + " has no voxels, children or components",
+                        "An empty object does nothing in Play; delete it or give it content.", id);
+            }
+            if (staleAssets > 0)
+                add(ProblemSeverity::Warning, "validate.assets", std::to_string(staleAssets) + " asset(s) are stale or broken",
+                    "Open the Assets panel and choose Issues to see them.", std::nullopt);
+            job.report(1.0F, "Done");
+        },
+        [this, result](LongJob&) {
+            static constexpr std::array<std::string_view, 7> kCodes{
+                "validate.scene", "validate.missing_file", "validate.component", "validate.empty_object",
+                "validate.collision", "validate.assets", "validate.ok"};
+            for (const std::string_view code : kCodes) workspace_.problems().clear_code(code);
+            for (EditorProblem& problem : result->problems) workspace_.problems().add(std::move(problem));
+            if (result->found == 0)
+                workspace_.problems().add({ProblemSeverity::Information, "validate.ok", "Validation passed: no problems found",
+                                           "Checked the scene, file references, components, collision and assets.", std::nullopt, {}});
+            bottomTab_ = BottomPanelTab::Problems;
+            recompute_layout();
+            set_status(result->found == 0 ? "Validation passed: no problems found"
+                                          : "Validation found " + std::to_string(result->found) + " problem(s); see Problems", result->found > 0);
+            lastValidateFound_ = result->found;
+            return true;
+        }) ? lastValidateFound_ : 0;
 }
 
 // --- File > Open Scene / Open Project / Save As / Import Model --------------------------------
@@ -9692,72 +9963,614 @@ bool NativeEditorController::open_project_now(const std::filesystem::path& root)
     return true;
 }
 
+// --- File > Import Model / Reimport Model (options panel, long job) ---------------------------
+
+namespace {
+constexpr std::array<float, 13> kImportVoxelSizes{0.005F, 0.01F, 0.02F, 0.025F, 0.05F, 0.1F, 0.2F, 0.25F, 0.5F, 1.0F, 2.0F, 5.0F, 10.0F};
+constexpr std::array<float, 11> kImportScales{0.001F, 0.01F, 0.1F, 0.25F, 0.5F, 1.0F, 2.0F, 4.0F, 10.0F, 100.0F, 1000.0F};
+constexpr std::size_t kImportSettingRows = 3;  // voxel size, scale, fill; mesh rows follow
+
+std::string format_meters(float value) {
+    char text[32];
+    std::snprintf(text, sizeof text, "%.4g m", static_cast<double>(value));
+    return text;
+}
+std::string format_scale(float value) {
+    char text[32];
+    std::snprintf(text, sizeof text, "%.4gx", static_cast<double>(value));
+    return text;
+}
+std::string format_thousands(std::uint64_t value) {
+    std::string digits = std::to_string(value);
+    for (int i = static_cast<int>(digits.size()) - 3; i > 0; i -= 3) digits.insert(static_cast<std::size_t>(i), ",");
+    return digits;
+}
+std::optional<float> parse_float(std::string_view text) {
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.remove_prefix(1);
+    while (!text.empty() && (std::isspace(static_cast<unsigned char>(text.back())) || text.back() == 'm' || text.back() == 'x'))
+        text.remove_suffix(1);
+    if (text.empty()) return std::nullopt;
+    // strtod on a copy: std::from_chars for float is not in every standard library this builds with.
+    const std::string copy(text);
+    char* end = nullptr;
+    const double value = std::strtod(copy.c_str(), &end);
+    if (end != copy.c_str() + copy.size() || !std::isfinite(value)) return std::nullopt;
+    return static_cast<float>(value);
+}
+
+// An import group: the object itself (or its nearest ancestor) that came from a model file and
+// is the top of that import (a group holding the settings, or whose parent is from elsewhere).
+std::optional<EditorObjectId> find_import_root(const EditorDocument& document, EditorObjectId id) {
+    const EditorObject* object = document.find_object(id);
+    std::optional<EditorObjectId> found;
+    for (int depth = 0; object && depth < 64; ++depth) {
+        if (read_import_settings(*object)) return object->id;
+        if (!object->sourceAsset.empty() && is_model_source(object->sourceAsset)) {
+            const EditorObject* parent = object->parent ? document.find_object(*object->parent) : nullptr;
+            if (!parent || parent->sourceAsset != object->sourceAsset) return object->id;
+            found = object->id;
+        }
+        object = object->parent ? document.find_object(*object->parent) : nullptr;
+    }
+    return found;
+}
+
+std::unique_ptr<VoxelObject> voxel_copy_with_id(const VoxelObject& source, EditorObjectId id) {
+    // EditorDocument::add_object rebuilds a voxel object whose id differs; doing it here keeps
+    // that per-voxel copy on the import worker instead of the UI thread.
+    auto copy = std::make_unique<VoxelObject>(id);
+    for (const auto& entry : source.bricks()) {
+        const BrickKey key = entry.first;
+        const Brick& brick = entry.second;
+        brick.occupancy().for_each_set([&](std::uint16_t index) {
+            copy->set_voxel(global_from_local(key, local_from_index_unchecked(index)), brick.material(index));
+        });
+    }
+    return copy;
+}
+} // namespace
+
 bool NativeEditorController::import_selected_model() {
     if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before importing", true); return false; }
     const EditorAssetRecord* asset = assetBrowserState_.selectedId ? std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId) : nullptr;
-    const std::string extension = asset ? lowercase_copy(asset->relativePath.extension().string()) : std::string();
-    if (!asset || (extension != ".obj" && extension != ".gltf" && extension != ".glb")) {
+    if (!asset || !is_model_source(asset->relativePath)) {
         set_status("Select an OBJ, glTF or GLB model in the Assets panel, then Import Model", true, 6.0F);
         return false;
     }
-    const std::filesystem::path source = projectRoot_ / asset->relativePath;
-    ModelImportWorkflow workflow;
-    std::string error;
-    if (!workflow.choose_source(source, &error)) { set_status("Import failed: " + error, true, 8.0F); return false; }
-    SceneCookSettings sceneSettings;
-    sceneSettings.defaults = workflow.settings();
-    sceneSettings.splitByNode = true;
-    const CookedVoxelScene cooked = voxelize_scene_objects(workflow.imported().scene, sceneSettings);
-    if (!cooked.success || cooked.objects.empty()) {
-        std::string reason = "the model produced no voxels";
-        for (const ImportDiagnostic& d : cooked.diagnostics)
-            if (d.severity == ImportDiagnostic::Severity::Error) { reason = d.message; break; }
-        set_status("Import failed: " + reason, true, 8.0F);
+    return open_import_options(asset->relativePath);
+}
+
+bool NativeEditorController::open_import_options(const std::filesystem::path& relativeSource) {
+    return open_import_options_for(relativeSource, false, 0, EditorImportSettings{});
+}
+
+bool NativeEditorController::open_import_options_for(const std::filesystem::path& relativeSource, bool reimport,
+                                                     EditorObjectId target, EditorImportSettings settings) {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before importing", true); return false; }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
+    if (!is_model_source(relativeSource)) { set_status("Import Model reads OBJ, glTF and GLB files", true); return false; }
+    const std::filesystem::path source = relativeSource.has_root_directory() || relativeSource.has_root_name()
+        ? relativeSource : projectRoot_ / relativeSource;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(source, ec)) {
+        set_status("Import: " + relativeSource.generic_string() + " was not found", true, 6.0F);
         return false;
     }
-    EditorDocument& document = workspace_.document();
-    auto command = std::make_unique<CompoundCommand>("Import " + asset->relativePath.filename().string());
-    const EditorObjectId groupId = document.allocate_object_id();
-    EditorObject group(groupId, "Imported " + asset->relativePath.stem().string());
-    group.sourceAsset = asset->relativePath;
-    command->add(std::make_unique<AddObjectCommand>(std::move(group), "Import group"));
-    std::vector<EditorObjectId> ids(cooked.objects.size());
-    for (EditorObjectId& id : ids) id = document.allocate_object_id();
-    std::uint64_t voxels = 0;
-    for (std::size_t i = 0; i < cooked.objects.size(); ++i) {
-        const CookedVoxelObject& part = cooked.objects[i];
-        EditorObject object(ids[i], part.name.empty() ? "Part " + std::to_string(i + 1) : part.name);
-        object.parent = part.parentObject && *part.parentObject < ids.size() ? ids[*part.parentObject] : groupId;
-        object.voxelSizeMeters = part.asset.voxelSizeMeters;
-        object.voxels = clone_voxel_object(part.asset.object);
-        object.transform = make_rigid_transform({part.worldTransform.values[12], part.worldTransform.values[13], part.worldTransform.values[14]},
-                                                quaternion_from_rotation_matrix(part.worldTransform));
-        object.flags.anchored = part.anchored;
-        object.flags.structural = part.structural;
-        object.flags.collisionEnabled = part.generateCollision;
-        object.sourceAsset = asset->relativePath;
-        voxels += object.voxels->occupied_voxel_count();
-        command->add(std::make_unique<AddObjectCommand>(std::move(object), "Imported part"));
+    // A modal panel: close menus, text edits and any preview first (one preview at a time).
+    close_import_options();
+    close_file_picker();
+    cancel_text_edit();
+    close_top_level_menu();
+    close_context_menu();
+    commandPaletteOpen_ = false;
+    floodFillArmed_ = false;
+    close_previews_for_voxel_edit(reimport ? "Reimport started" : "Import started");
+    const std::uint64_t bytes = std::filesystem::file_size(source, ec);
+    auto model = std::make_shared<ImportedModelResult>();
+    const std::string fileName = source.filename().string();
+    return start_long_job(
+        LongJobKind::ReadModel, "Read " + fileName, ec ? 0 : bytes / 4,
+        [model, source, fileName](LongJob& job) {
+            job.report(0.05F, "Reading " + fileName);
+            *model = import_model(source);
+            job.report(1.0F, "Read " + fileName);
+        },
+        [this, model, relativeSource, reimport, target, settings](LongJob&) mutable {
+            if (!model->success) {
+                std::string reason = "the file could not be read";
+                for (const ImportDiagnostic& d : model->diagnostics)
+                    if (d.severity == ImportDiagnostic::Severity::Error) { reason = d.message; break; }
+                set_status("Import failed: " + reason, true, 8.0F);
+                return false;
+            }
+            importOptions_ = {};
+            importOptions_.open = true;
+            importOptions_.reimport = reimport;
+            importOptions_.reimportTarget = target;
+            importOptions_.relativeSource = relativeSource;
+            importOptions_.nodes = list_import_nodes(model->scene);
+            importOptions_.model = std::move(model);
+            // Keep only left-out names the file still has.
+            std::erase_if(settings.excludedNodes, [&](const std::string& name) {
+                return std::none_of(importOptions_.nodes.begin(), importOptions_.nodes.end(),
+                                    [&](const EditorImportNode& node) { return node.name == name; });
+            });
+            importOptions_.settings = std::move(settings);
+            refresh_import_estimate();
+            set_status(std::string(reimport ? "Reimport" : "Import") +
+                       " options: Up/Down pick a row, Left/Right or type a value, Space toggles a mesh, Enter imports, Esc cancels",
+                       false, 10.0F);
+            return true;
+        });
+}
+
+void NativeEditorController::close_import_options(std::string reason) {
+    if (!importOptions_.open) return;
+    importOptions_ = {};
+    if (!reason.empty()) set_status(std::move(reason));
+}
+
+void NativeEditorController::refresh_import_estimate() {
+    if (!importOptions_.model) return;
+    importOptions_.estimate = estimate_import(importOptions_.model->scene, importOptions_.settings);
+    if (!importOptions_.estimate.refusal.empty()) {
+        importOptions_.message = importOptions_.estimate.refusal;
+        importOptions_.messageIsError = true;
+    } else if (importOptions_.messageIsError) {
+        importOptions_.message.clear();
+        importOptions_.messageIsError = false;
     }
-    const CommandResult result = workspace_.commands().execute(document, std::move(command));
-    if (!result.success) { set_status("Import failed: " + result.message, true, 8.0F); return false; }
-    std::size_t warnings = 0;
-    for (const ImportDiagnostic& d : cooked.diagnostics)
-        if (d.severity != ImportDiagnostic::Severity::Info) {
-            ++warnings;
-            workspace_.log().add(EditorLogLevel::Warning, "Import " + asset->relativePath.generic_string() + ": " + d.message);
+}
+
+std::vector<std::pair<std::string, std::string>> NativeEditorController::import_option_rows() const {
+    std::vector<std::pair<std::string, std::string>> rows;
+    if (!importOptions_.open) return rows;
+    const auto typed = [&](std::size_t row, std::string value) {
+        return importOptions_.selected == row && !importOptions_.typed.empty() ? importOptions_.typed + "_" : std::move(value);
+    };
+    rows.emplace_back("Voxel size", typed(0, format_meters(importOptions_.settings.voxelSizeMeters)));
+    rows.emplace_back("Scale", typed(1, format_scale(importOptions_.settings.scale)));
+    rows.emplace_back("Fill", std::string(import_mode_label(importOptions_.settings.mode)));
+    for (const EditorImportNode& node : importOptions_.nodes)
+        rows.emplace_back((importOptions_.settings.excludedNodes.contains(node.name) ? "[ ] " : "[x] ") + node.path,
+                          format_thousands(node.triangles) + " triangles");
+    return rows;
+}
+
+bool NativeEditorController::set_import_option(ImportOptionsRow row, std::string_view text, std::size_t node) {
+    if (!importOptions_.open) return false;
+    const auto fail = [&](std::string message) {
+        importOptions_.message = std::move(message);
+        importOptions_.messageIsError = true;
+        set_status(importOptions_.message, true);
+        return false;
+    };
+    EditorImportSettings& settings = importOptions_.settings;
+    switch (row) {
+        case ImportOptionsRow::VoxelSize: {
+            const auto value = parse_float(text);
+            if (!value || *value < kMinImportVoxelSize || *value > kMaxImportVoxelSize)
+                return fail("Voxel size must be a number of meters from 0.005 to 10");
+            settings.voxelSizeMeters = *value;
+            break;
         }
-    workspace_.select_object(groupId);
-    frame_selection();
-    recompute_layout();
-    refresh_menu_state();
-    char voxelSize[32];
-    std::snprintf(voxelSize, sizeof voxelSize, "%.3g m", static_cast<double>(cooked.objects.front().asset.voxelSizeMeters));
-    set_status("Imported " + asset->relativePath.filename().string() + ": " + std::to_string(cooked.objects.size()) +
-               " object(s), " + std::to_string(voxels) + " voxels @ " + voxelSize +
-               (warnings > 0 ? ", " + std::to_string(warnings) + " warning(s) in Console" : std::string()) +
-               "; Undo removes it", warnings > 0, 10.0F);
+        case ImportOptionsRow::Scale: {
+            const auto value = parse_float(text);
+            if (!value || *value < kMinImportScale || *value > kMaxImportScale) return fail("Scale must be a number from 0.001 to 1000");
+            settings.scale = *value;
+            break;
+        }
+        case ImportOptionsRow::Mode: {
+            const std::string mode = lowercase_copy(text);
+            if (mode == "solid") settings.mode = VoxelizationMode::Solid;
+            else if (mode == "shell") settings.mode = VoxelizationMode::Shell;
+            else if (mode == "surface" || mode == "surface only") settings.mode = VoxelizationMode::SurfaceOnly;
+            else return fail("Fill is Solid, Shell or Surface");
+            break;
+        }
+        case ImportOptionsRow::Node: {
+            if (node >= importOptions_.nodes.size()) return fail("No such mesh");
+            const std::string& name = importOptions_.nodes[node].name;
+            const std::string value = lowercase_copy(text);
+            const bool include = value == "toggle" ? settings.excludedNodes.contains(name) : value == "on" || value == "include";
+            if (include) settings.excludedNodes.erase(name);
+            else settings.excludedNodes.insert(name);
+            break;
+        }
+    }
+    importOptions_.typed.clear();
+    if (!importOptions_.messageIsError || importOptions_.message != importOptions_.estimate.refusal) importOptions_.message.clear();
+    importOptions_.messageIsError = false;
+    refresh_import_estimate();
     return true;
+}
+
+void NativeEditorController::nudge_import_option(std::size_t row, int steps) {
+    if (!importOptions_.open || steps == 0) return;
+    EditorImportSettings& settings = importOptions_.settings;
+    const auto step = [&](const auto& list, float current) {
+        // The next preset above (or below) the current value.
+        if (steps > 0) {
+            for (const float value : list) if (value > current * 1.0001F) return value;
+            return list.back();
+        }
+        for (auto it = list.rbegin(); it != list.rend(); ++it) if (*it < current * 0.9999F) return *it;
+        return list.front();
+    };
+    importOptions_.typed.clear();
+    if (row == 0) settings.voxelSizeMeters = step(kImportVoxelSizes, settings.voxelSizeMeters);
+    else if (row == 1) settings.scale = step(kImportScales, settings.scale);
+    else if (row == 2) {
+        const int mode = (static_cast<int>(settings.mode) + (steps > 0 ? 1 : 2)) % 3;
+        settings.mode = static_cast<VoxelizationMode>(mode);
+    } else if (row - kImportSettingRows < importOptions_.nodes.size()) {
+        (void)set_import_option(ImportOptionsRow::Node, "toggle", row - kImportSettingRows);
+        return;
+    }
+    refresh_import_estimate();
+}
+
+NativeImportOptionsLayout NativeEditorController::import_options_layout() const {
+    NativeImportOptionsLayout result;
+    result.panel.width = std::min(720, std::max(480, width_ - 60));
+    result.panel.height = std::min(500, std::max(340, height_ - 80));
+    result.panel.x = (width_ - result.panel.width) / 2;
+    result.panel.y = std::max(32, (height_ - result.panel.height) / 3);
+    result.hintBar = {result.panel.x + 12, result.panel.y + result.panel.height - 36, result.panel.width - 24, 28};
+    const int buttonY = result.hintBar.y - 40;
+    result.cancelButton = {result.panel.x + result.panel.width - 16 - 96, buttonY, 96, 30};
+    result.importButton = {result.cancelButton.x - 12 - 120, buttonY, 120, 30};
+    result.estimateBox = {result.panel.x + 16, buttonY - 58, result.panel.width - 32, 50};
+    const int rowHeight = 24;
+    const int bodyY = result.panel.y + 44;
+    const int visible = std::max(1, (result.estimateBox.y - 8 - bodyY) / rowHeight);
+    const std::size_t total = kImportSettingRows + importOptions_.nodes.size();
+    std::size_t first = 0;
+    if (importOptions_.selected >= static_cast<std::size_t>(visible)) first = importOptions_.selected - static_cast<std::size_t>(visible) + 1U;
+    for (std::size_t index = first; index < total && result.rows.size() < static_cast<std::size_t>(visible); ++index) {
+        result.rows.push_back({result.panel.x + 12, bodyY + static_cast<int>(result.rows.size()) * rowHeight, result.panel.width - 24, rowHeight - 2});
+        result.rowIndex.push_back(index);
+    }
+    return result;
+}
+
+bool NativeEditorController::handle_import_options_key(std::string_view normalized) {
+    const std::size_t total = kImportSettingRows + importOptions_.nodes.size();
+    std::size_t& selected = importOptions_.selected;
+    if (normalized == "escape") {
+        if (!importOptions_.typed.empty()) { importOptions_.typed.clear(); return true; }
+        close_import_options(importOptions_.reimport ? "Reimport cancelled; the scene is unchanged" : "Import cancelled; the scene is unchanged");
+        return true;
+    }
+    if (normalized == "up") { importOptions_.typed.clear(); selected = selected == 0 ? total - 1 : selected - 1; return true; }
+    if (normalized == "down" || normalized == "tab") { importOptions_.typed.clear(); selected = (selected + 1) % total; return true; }
+    if (normalized == "left") { nudge_import_option(selected, -1); return true; }
+    if (normalized == "right") { nudge_import_option(selected, 1); return true; }
+    if (normalized == "space") { if (selected >= 2) nudge_import_option(selected, 1); return true; }
+    if (normalized == "backspace") { if (!importOptions_.typed.empty()) importOptions_.typed.pop_back(); return true; }
+    if (normalized == "return" || normalized == "enter" || normalized == "kp_enter") {
+        if (!importOptions_.typed.empty()) {
+            const std::string typed = importOptions_.typed;
+            (void)set_import_option(selected == 0 ? ImportOptionsRow::VoxelSize : ImportOptionsRow::Scale, typed);
+            return true;
+        }
+        (void)accept_import_options();
+        return true;
+    }
+    return true;  // modal: other keys do nothing else
+}
+
+bool NativeEditorController::accept_import_options() {
+    if (!importOptions_.open) return false;
+    if (!importOptions_.typed.empty()) {
+        const std::string typed = importOptions_.typed;
+        if (!set_import_option(importOptions_.selected == 0 ? ImportOptionsRow::VoxelSize : ImportOptionsRow::Scale, typed)) return false;
+    }
+    refresh_import_estimate();
+    if (!importOptions_.estimate.refusal.empty()) {
+        importOptions_.message = importOptions_.estimate.refusal;
+        importOptions_.messageIsError = true;
+        set_status(importOptions_.estimate.refusal, true, 8.0F);
+        return false;
+    }
+    return start_import_job(importOptions_.reimport);
+}
+
+std::string NativeEditorController::reimport_disabled_reason() const {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play or Simulate before reimporting.";
+    const auto selected = workspace_.selected_object();
+    if (!selected) return "Select an imported model (its group or one of its parts) first.";
+    const EditorDocument& document = workspace_.document();
+    const auto root = find_import_root(document, *selected);
+    if (!root) return "The selection was not imported from a model file.";
+    const EditorObject* group = document.find_object(*root);
+    for (const EditorObjectId id : collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{*root})) {
+        const EditorObject* object = document.find_object(id);
+        if (!object) continue;
+        if (object->flags.locked) return "Unlock " + object->name + " before reimporting " + group->name + ".";
+        if (!object->flags.visible || is_isolated_out(id))
+            return object->name + " is hidden or isolated out of view; show it before reimporting " + group->name + ".";
+    }
+    std::error_code ec;
+    const std::filesystem::path source = group->sourceAsset.has_root_directory() || group->sourceAsset.has_root_name()
+        ? group->sourceAsset : projectRoot_ / group->sourceAsset;
+    if (!std::filesystem::is_regular_file(source, ec)) return group->sourceAsset.generic_string() + " was not found.";
+    return {};
+}
+
+bool NativeEditorController::reimport_selected_model() {
+    if (const std::string reason = reimport_disabled_reason(); !reason.empty()) { set_status(reason, true, 6.0F); return false; }
+    const EditorDocument& document = workspace_.document();
+    const EditorObjectId root = *find_import_root(document, *workspace_.selected_object());
+    const EditorObject* group = document.find_object(root);
+    EditorImportSettings settings = read_import_settings(*group).value_or(EditorImportSettings{});
+    if (!read_import_settings(*group)) {
+        // Imported before the options existed: start from the voxel size the parts have.
+        for (const auto& [id, object] : document.objects())
+            if (object.parent == root && object.voxels) { settings.voxelSizeMeters = object.voxelSizeMeters; break; }
+    }
+    return open_import_options_for(group->sourceAsset, true, root, std::move(settings));
+}
+
+bool NativeEditorController::start_import_job(bool reimport) {
+    const ImportOptionsState options = importOptions_;
+    EditorDocument& document = workspace_.document();
+    if (reimport) {
+        if (!document.find_object(options.reimportTarget)) { close_import_options("Reimport: the model group was deleted"); return false; }
+        if (const std::string reason = reimport_disabled_reason(); !reason.empty()) {
+            importOptions_.message = reason;
+            importOptions_.messageIsError = true;
+            set_status(reason, true, 6.0F);
+            return false;
+        }
+    }
+    // Ids are reserved now (cheap, and they do not change the scene) so the worker can build the
+    // parts with their final ids; a cancelled import just leaves the ids unused.
+    const EditorObjectId groupId = reimport ? options.reimportTarget : document.allocate_object_id();
+    std::vector<EditorObjectId> partIds(options.estimate.includedNodes);
+    for (EditorObjectId& id : partIds) id = document.allocate_object_id();
+    struct ImportResult {
+        std::vector<EditorObject> parts;
+        std::vector<std::string> warnings;
+        std::string error;
+        std::uint64_t voxels{};
+        float voxelSize{};
+    };
+    auto result = std::make_shared<ImportResult>();
+    const std::filesystem::path relativeSource = options.relativeSource;
+    const std::string fileName = relativeSource.filename().string();
+    const std::string label = (reimport ? "Reimport " : "Import ") + fileName;
+    importOptions_ = {};
+    return start_long_job(
+        reimport ? LongJobKind::ReimportModel : LongJobKind::ImportModel, label, options.estimate.voxels,
+        [model = options.model, settings = options.settings, partIds, groupId, relativeSource, result](LongJob& job) {
+            job.report(0.02F, "Preparing");
+            ImportedScene scene = scaled_import_scene(model->scene, settings.scale);
+            const SceneCookSettings cook = import_cook_settings(scene, settings);
+            std::vector<std::optional<std::uint32_t>> meshes(scene.nodes.size());
+            std::vector<std::uint32_t> included;
+            for (std::uint32_t i = 0; i < scene.nodes.size(); ++i) {
+                meshes[i] = scene.nodes[i].mesh;
+                if (meshes[i] && *meshes[i] < scene.meshes.size() && !settings.excludedNodes.contains(scene.nodes[i].name))
+                    included.push_back(i);
+            }
+            std::map<std::uint32_t, EditorObjectId> nodeToPart;
+            std::vector<std::uint32_t> partNodes;
+            // One node at a time, so progress is per mesh and Cancel stops between meshes.
+            for (std::size_t k = 0; k < included.size() && k < partIds.size(); ++k) {
+                if (job.cancelled()) return;
+                const std::uint32_t nodeIndex = included[k];
+                const std::string name = scene.nodes[nodeIndex].name.empty() ? "Part " + std::to_string(k + 1) : scene.nodes[nodeIndex].name;
+                job.report(0.05F + 0.9F * static_cast<float>(k) / static_cast<float>(included.size()),
+                           "Voxelizing " + std::to_string(k + 1) + " of " + std::to_string(included.size()) + ": " + name);
+                for (std::uint32_t j = 0; j < scene.nodes.size(); ++j) scene.nodes[j].mesh = j == nodeIndex ? meshes[j] : std::nullopt;
+                CookedVoxelScene cooked = voxelize_scene_objects(scene, cook);
+                for (const ImportDiagnostic& d : cooked.diagnostics) {
+                    if (d.code == "NO_COOKED_OBJECTS") continue;
+                    if (d.severity == ImportDiagnostic::Severity::Error) { result->error = d.message; return; }
+                    if (d.severity == ImportDiagnostic::Severity::Warning) result->warnings.push_back(d.message);
+                }
+                for (CookedVoxelObject& part : cooked.objects) {
+                    if (part.sourceNode != nodeIndex) continue;
+                    const EditorObjectId id = partIds[k];
+                    EditorObject object(id, part.name.empty() ? name : part.name);
+                    object.voxelSizeMeters = part.asset.voxelSizeMeters;
+                    object.voxels = voxel_copy_with_id(part.asset.object, id);
+                    object.transform = make_rigid_transform({part.worldTransform.values[12], part.worldTransform.values[13], part.worldTransform.values[14]},
+                                                            quaternion_from_rotation_matrix(part.worldTransform));
+                    object.flags.anchored = part.anchored;
+                    object.flags.structural = part.structural;
+                    object.flags.collisionEnabled = part.generateCollision;
+                    object.sourceAsset = relativeSource;
+                    result->voxels += object.voxels->occupied_voxel_count();
+                    result->voxelSize = part.asset.voxelSizeMeters;
+                    nodeToPart[nodeIndex] = id;
+                    partNodes.push_back(nodeIndex);
+                    result->parts.push_back(std::move(object));
+                    break;
+                }
+            }
+            if (job.cancelled()) return;
+            job.report(0.97F, "Linking parts");
+            // Parent each part to the nearest imported ancestor mesh, else to the group.
+            for (std::size_t i = 0; i < result->parts.size(); ++i) {
+                result->parts[i].parent = groupId;
+                for (auto parent = model->scene.nodes[partNodes[i]].parent; parent && *parent < model->scene.nodes.size();
+                     parent = model->scene.nodes[*parent].parent) {
+                    if (const auto it = nodeToPart.find(*parent); it != nodeToPart.end()) { result->parts[i].parent = it->second; break; }
+                }
+            }
+            if (result->voxels > kMaxImportVoxels) result->error = "the model made more than " + format_thousands(kMaxImportVoxels) + " voxels";
+            job.report(1.0F, "Done");
+        },
+        [this, result, groupId, reimport, settings = options.settings, relativeSource, label, fileName](LongJob&) {
+            if (!result->error.empty()) { set_status(label + " failed: " + result->error, true, 8.0F); return false; }
+            if (result->parts.empty() || result->voxels == 0) { set_status(label + " failed: the model produced no voxels", true, 8.0F); return false; }
+            EditorDocument& document = workspace_.document();
+            auto command = std::make_unique<CompoundCommand>(label);
+            RigidTransform placement{};
+            if (reimport) {
+                const EditorObject* group = document.find_object(groupId);
+                if (!group) { set_status("Reimport: the model group was deleted", true, 6.0F); return false; }
+                placement = group->transform;
+                EditorObject replacement = clone_editor_object(*group);
+                std::erase_if(replacement.components, [](const Component& c) { return c.type == kImportSettingsComponent; });
+                ComponentId componentId = 1;
+                for (const Component& component : replacement.components) componentId = std::max(componentId, component.id + 1);
+                replacement.components.push_back(make_import_settings_component(settings, componentId));
+                command->add(std::make_unique<RemoveObjectsCommand>(
+                    collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{groupId}), "Remove old parts"));
+                command->add(std::make_unique<AddObjectCommand>(std::move(replacement), "Reimported group"));
+            } else {
+                EditorObject group(groupId, "Imported " + relativeSource.stem().string());
+                group.sourceAsset = relativeSource;
+                group.components.push_back(make_import_settings_component(settings, 1));
+                command->add(std::make_unique<AddObjectCommand>(std::move(group), "Import group"));
+            }
+            std::vector<EditorObjectId> added{groupId};
+            const std::size_t partCount = result->parts.size();
+            for (EditorObject& part : result->parts) {
+                // Parts sit where the group is: a moved group keeps its place on reimport.
+                if (reimport) part.transform = compose_rigid_transforms(placement, part.transform);
+                added.push_back(part.id);
+                command->add(std::make_unique<AddObjectCommand>(std::move(part), "Imported part"));
+            }
+            result->parts.clear();
+            const CommandResult executed = workspace_.commands().execute(document, std::move(command));
+            if (!executed.success) { set_status(label + " failed: " + executed.message, true, 8.0F); return false; }
+            if (!viewportSettings_.isolatedObjects.empty() && (!reimport || viewportSettings_.isolatedObjects.contains(groupId)))
+                viewportSettings_.isolatedObjects.insert(added.begin(), added.end());
+            for (const std::string& warning : result->warnings)
+                workspace_.log().add(EditorLogLevel::Warning, label + ": " + warning);
+            workspace_.select_object(groupId);
+            if (!reimport) frame_selection();
+            recompute_layout();
+            refresh_menu_state();
+            const std::size_t warnings = result->warnings.size();
+            set_status(std::string(reimport ? "Reimported " : "Imported ") + fileName + ": " + std::to_string(partCount) +
+                       " object(s), " + format_thousands(result->voxels) + " voxels @ " + format_meters(result->voxelSize) +
+                       (warnings > 0 ? ", " + std::to_string(warnings) + " warning(s) in Console" : std::string()) +
+                       "; Undo " + (reimport ? "restores the previous parts" : "removes it"), warnings > 0, 10.0F);
+            return true;
+        });
+}
+
+// --- Long jobs ---------------------------------------------------------------------------------
+
+bool NativeEditorController::start_long_job(LongJobKind kind, std::string label, std::uint64_t workUnits,
+                                            std::function<void(LongJob&)> work, std::function<bool(LongJob&)> commit) {
+    if (longJob_) { set_status(long_job_busy_reason(), true, 4.0F); return false; }
+    auto job = std::make_shared<LongJob>();
+    job->kind = kind;
+    job->label = label;
+    job->documentRevision = scene_change_fingerprint(workspace_.document(), workspace_.commands());
+    job->commit = std::move(commit);
+    if (workUnits <= longJobThreshold_) {
+        // Small enough to finish at once: same work and commit, no progress UI.
+        try { work(*job); } catch (const std::exception& exception) { job->error = exception.what(); }
+        job->done = true;
+        if (!job->error.empty()) { set_status(label + " failed: " + job->error, true, 8.0F); return false; }
+        return job->commit(*job);
+    }
+    // Nothing may change the scene while the job runs: end any gesture first.
+    finish_voxel_stroke();
+    if (gizmoDragging_) finish_gizmo_drag(true);
+    cancel_text_edit();
+    close_top_level_menu();
+    close_context_menu();
+    commandPaletteOpen_ = false;
+    floodFillArmed_ = false;
+    job->report(0.0F, "Starting");
+    std::string error;
+    const auto task = longJobTasks_.submit(label, [job, work = std::move(work), wake = wakeCallback_](EditorTaskContext&) {
+        try {
+            // A job cancelled while it waited behind an earlier (cancelled) one does no work.
+            if (!job->cancelled()) work(*job);
+        } catch (const std::exception& exception) {
+            std::lock_guard lock(job->mutex);
+            job->error = exception.what();
+        }
+        job->done = true;
+        if (wake) wake();
+    }, &error);
+    if (!task) { set_status(label + " could not start: " + error, true, 6.0F); return false; }
+    longJob_ = std::move(job);
+    refresh_menu_state();
+    set_status(label + ": working (Esc cancels)", false, 0.0F);
+    return true;
+}
+
+void NativeEditorController::poll_long_job() {
+    if (longJob_ && longJob_->done.load()) finish_long_job();
+}
+
+void NativeEditorController::finish_long_job() {
+    const std::shared_ptr<LongJob> job = std::move(longJob_);
+    longJob_.reset();
+    if (!job) return;
+    std::string error;
+    {
+        std::lock_guard lock(job->mutex);
+        error = job->error;
+    }
+    if (job->cancelled()) set_status(job->label + " cancelled; the scene is unchanged");
+    else if (!error.empty()) set_status(job->label + " failed: " + error, true, 8.0F);
+    else if (job->documentRevision != scene_change_fingerprint(workspace_.document(), workspace_.commands()))
+        set_status(job->label + " was not applied: the scene changed while it ran. Run it again", true, 8.0F);
+    else (void)job->commit(*job);
+    refresh_menu_state();
+}
+
+bool NativeEditorController::cancel_long_job() {
+    if (!longJob_) return false;
+    // The worker stops at its next check; its result is never applied, so nothing changed.
+    longJob_->cancel = true;
+    const std::string label = longJob_->label;
+    longJob_.reset();
+    refresh_menu_state();
+    set_status(label + " cancelled; the scene is unchanged");
+    return true;
+}
+
+bool NativeEditorController::wait_for_long_job(double timeoutSeconds) {
+    if (!longJob_) return false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeoutSeconds);
+    while (!longJob_->done.load()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    finish_long_job();
+    return true;
+}
+
+LongJobView NativeEditorController::long_job_view() const {
+    LongJobView view;
+    if (!longJob_) return view;
+    view.active = true;
+    view.kind = longJob_->kind;
+    view.label = longJob_->label;
+    view.progress = longJob_->progress.load();
+    view.cancelling = longJob_->cancelled();
+    std::lock_guard lock(longJob_->mutex);
+    view.phase = longJob_->phase;
+    return view;
+}
+
+NativeLongJobLayout NativeEditorController::long_job_layout() const {
+    NativeLongJobLayout result;
+    const UiRect area = layout_.viewport.width > 0 ? layout_.viewport : UiRect{0, 0, width_, height_};
+    result.panel.width = std::max(260, std::min(560, area.width - 32));
+    result.panel.height = 78;
+    result.panel.x = area.x + (area.width - result.panel.width) / 2;
+    result.panel.y = area.y + area.height - result.panel.height - 18;
+    result.cancelButton = {result.panel.x + result.panel.width - 12 - 84, result.panel.y + 10, 84, 26};
+    result.bar = {result.panel.x + 12, result.panel.y + result.panel.height - 26, result.panel.width - 24, 14};
+    return result;
+}
+
+std::string NativeEditorController::long_job_busy_reason() const {
+    if (!longJob_) return {};
+    return "Busy: " + longJob_->label + " is running. Wait for it, or press Esc to cancel";
 }
 
 // --- Voxel selection (ART-043) -----------------------------------------------------------------

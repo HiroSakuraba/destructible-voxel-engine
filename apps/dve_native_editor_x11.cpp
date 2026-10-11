@@ -382,6 +382,7 @@ using namespace dve::editor;
 int main(int argc, char** argv) {
     bool smoke = false;
     std::filesystem::path screenshot;
+    std::filesystem::path importModelPath;
     std::filesystem::path accessibilityDump;
     std::filesystem::path scenePath;
     std::filesystem::path synthPresetPath;
@@ -418,6 +419,8 @@ int main(int argc, char** argv) {
         // with --screenshot to capture a specific menu/tool/panel state without needing real
         // input) rather than for end users.
         else if (argument == "--dispatch" && index + 1 < argc) dispatchActions.push_back(argv[++index]);
+        // Open File > Import Model's options for a project-relative model (screenshots, tools).
+        else if (argument == "--import-model" && index + 1 < argc) importModelPath = argv[++index];
         // Repeatable: selects object ID before the dispatches run; the last one is the active
         // (primary) selection. For screenshots of selection-driven workflows such as Scatter.
         else if (argument == "--select" && index + 1 < argc) startupSelection.push_back(std::strtoull(argv[++index], nullptr, 10));
@@ -521,6 +524,7 @@ int main(int argc, char** argv) {
             for (const std::uint64_t id : startupSelection) controller.workspace().add_to_selection(id);
         }
         for (const std::string& action : dispatchActions) (void)controller.dispatch_action(action);
+        if (!importModelPath.empty()) (void)controller.open_import_options(importModelPath);
         if (!settingsCategory.empty()) controller.open_settings(SettingScope::User, settingsCategory);
         if (!synthPage.empty() && controller.synth_panel().open()) {
             const std::string key = synthPage == "oscillators" ? "1" : synthPage == "filter" ? "3" :

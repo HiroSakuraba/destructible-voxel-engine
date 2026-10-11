@@ -6,6 +6,7 @@
 #include <deque>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <map>
 #include <optional>
@@ -43,6 +44,7 @@
 #include "dve/editor_runtime_settings.hpp"
 #include "dve/collision_proxy.hpp"
 #include "dve/editor_scatter.hpp"
+#include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
 #include "dve/editor_text3d.hpp"
@@ -268,6 +270,52 @@ struct NativeFilePickerLayout {
     UiRect hintBar{};
 };
 
+// Long jobs (Import Model, Reimport, large Flood Fills, Validate Project, Rebuild Collision):
+// the work runs on a worker thread on a snapshot of its inputs while the editor shows progress;
+// Esc (or the Cancel button) cancels. While one runs, edits are refused, so the scene cannot
+// change under it; the result is applied on the UI thread as one undo step (or not at all when
+// cancelled, or when the scene changed anyway).
+enum class LongJobKind : std::uint8_t { Idle, ReadModel, ImportModel, ReimportModel, FloodFill, ValidateProject, RebuildCollision };
+struct LongJobView {
+    bool active{};
+    LongJobKind kind{LongJobKind::Idle};
+    std::string label;      // "Import crate.obj"
+    std::string phase;      // "Voxelizing 2 of 5: Wheel"
+    float progress{};       // 0..1
+    bool cancelling{};
+};
+struct NativeLongJobLayout {
+    UiRect panel{};
+    UiRect bar{};
+    UiRect cancelButton{};
+};
+
+// File > Import Model / Reimport Model options panel (in-editor, like the file pickers).
+enum class ImportOptionsRow : std::uint8_t { VoxelSize, Scale, Mode, Node };
+struct ImportOptionsState {
+    bool open{};
+    bool reimport{};
+    EditorObjectId reimportTarget{};
+    std::filesystem::path relativeSource;      // as stored on the group (project-relative)
+    std::shared_ptr<const ImportedModelResult> model;
+    std::vector<EditorImportNode> nodes;
+    EditorImportSettings settings;
+    EditorImportEstimate estimate;
+    std::size_t selected{};                     // 0 voxel size, 1 scale, 2 mode, 3.. nodes
+    std::string typed;                          // a number being typed into the selected row
+    std::string message;
+    bool messageIsError{};
+};
+struct NativeImportOptionsLayout {
+    UiRect panel{};
+    std::vector<UiRect> rows;                   // one per visible row (settings, then nodes)
+    std::vector<std::size_t> rowIndex;          // the option index each visible row shows
+    UiRect estimateBox{};
+    UiRect importButton{};
+    UiRect cancelButton{};
+    UiRect hintBar{};
+};
+
 struct NativeCommandPaletteLayout {
     UiRect panel{};
     UiRect searchBox{};
@@ -467,9 +515,37 @@ public:
     // Save the scene under the project's scenes/ folder as <name>.dvescene (or a given path).
     bool save_scene_as(std::string_view nameOrPath, bool replaceExisting = false);
     bool open_project_folder(const std::filesystem::path& root);
-    // File > Import Model: voxelizes the model selected in the Assets panel (OBJ/glTF/GLB) with
-    // default settings and adds its objects under one group; one undo step; reports a summary.
+    // File > Import Model: opens the import options panel for the model selected in the Assets
+    // panel (OBJ/glTF/GLB): voxel size, scale, fill mode, which meshes to include, and an
+    // estimate checked against the import cap. Enter imports (a long job); the parts go under
+    // one group as one undo step.
     bool import_selected_model();
+    // Same, for a project file (tools and tests).
+    bool open_import_options(const std::filesystem::path& relativeSource);
+    // File > Reimport Model: rebuilds the selected import group from its source file with its
+    // stored options (shown first); keeps the group's id, name, transform and parent. One undo.
+    bool reimport_selected_model();
+    [[nodiscard]] std::string reimport_disabled_reason() const;
+    [[nodiscard]] const ImportOptionsState& import_options() const noexcept { return importOptions_; }
+    [[nodiscard]] NativeImportOptionsLayout import_options_layout() const;
+    [[nodiscard]] std::vector<std::pair<std::string, std::string>> import_option_rows() const;  // label, value
+    bool set_import_option(ImportOptionsRow row, std::string_view text, std::size_t node = 0);
+    void nudge_import_option(std::size_t row, int steps);
+    bool accept_import_options();
+    void close_import_options(std::string reason = {});
+    // Long jobs: see LongJobKind.
+    [[nodiscard]] bool long_job_active() const noexcept { return longJob_ != nullptr; }
+    [[nodiscard]] LongJobView long_job_view() const;
+    [[nodiscard]] NativeLongJobLayout long_job_layout() const;
+    bool cancel_long_job();
+    // Blocks until the running job's worker is done, then applies (or discards) it as update()
+    // would. For tests and headless tools; returns false on timeout or when nothing ran.
+    bool wait_for_long_job(double timeoutSeconds = 120.0);
+    // Work bigger than this (voxels, or objects for Validate) runs as a long job; smaller work
+    // finishes at once. 0 sends everything through the long-job path.
+    void set_long_job_threshold(std::uint64_t workUnits) noexcept { longJobThreshold_ = workUnits; }
+    [[nodiscard]] std::uint64_t long_job_threshold() const noexcept { return longJobThreshold_; }
+    [[nodiscard]] std::string long_job_busy_reason() const;
     [[nodiscard]] std::size_t command_palette_selection() const noexcept { return commandPaletteSelection_; }
     [[nodiscard]] std::optional<std::string_view> open_menu() const noexcept;
     [[nodiscard]] NativeMenuPopupLayout menu_popup_layout() const;
@@ -1089,6 +1165,22 @@ private:
     bool quitRequested_{};
     PendingDestructiveAction pendingDestructiveAction_{PendingDestructiveAction::Inactive};
     FilePickerState filePicker_;
+    ImportOptionsState importOptions_;
+    bool handle_import_options_key(std::string_view normalized);
+    void refresh_import_estimate();
+    bool start_import_job(bool reimport);
+    struct LongJob;
+    std::shared_ptr<LongJob> longJob_;
+    std::uint64_t longJobThreshold_{250'000};
+    // Runs work (on the worker thread, or at once when workUnits <= the threshold) and then
+    // commit on the UI thread unless it was cancelled. Refuses when another job runs.
+    bool start_long_job(LongJobKind kind, std::string label, std::uint64_t workUnits,
+                        std::function<void(LongJob&)> work, std::function<bool(LongJob&)> commit);
+    bool open_import_options_for(const std::filesystem::path& relativeSource, bool reimport, EditorObjectId target,
+                                 EditorImportSettings settings);
+    std::size_t lastValidateFound_{};
+    void poll_long_job();
+    void finish_long_job();
     std::filesystem::path pendingOpenPath_;
     bool open_scene_now(const std::filesystem::path& path);
     bool open_project_now(const std::filesystem::path& root);
@@ -1226,6 +1318,12 @@ private:
     // Declared after the state above so their workers are joined before that state goes.
     EditorTaskManager autosaveTasks_{1, 2};
     EditorTaskManager assetScanTasks_{1, 2};
+    EditorTaskManager longJobTasks_{1, 16}; // one worker; cancelled jobs still queued skip their work
+    // Destroyed before longJobTasks_ joins its worker: asks a running long job to stop.
+    struct LongJobCancelOnExit {
+        std::shared_ptr<LongJob>* job{};
+        ~LongJobCancelOnExit();
+    } longJobCancelOnExit_{&longJob_};
     void autosave_tick(float elapsedSeconds);
     void report_recovered_autosave();
     // Declared last so they are destroyed first: the session's callbacks post into the synth.

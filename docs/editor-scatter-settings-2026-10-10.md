@@ -26,10 +26,17 @@ preview's keys (`[` `]`, Shift+`[` `]`, N, A) still work.
 - **Turn and scale do not move spots.** They come from their own seeded stream, so changing
   them never re-rolls the layout, and copy *i* always gets the same turn and size for a seed.
 - **Scale changes voxel size**, not voxel count (a 2× copy has the same voxels at twice the
-  size). It scales about the copy's footprint, so it still stands on its spot. Children scale
-  with it.
+  size), so it costs the same as an unscaled copy: no resampling, no extra voxels. It scales
+  about the copy's footprint, so it still stands on its spot. Children scale with it.
+  - The scale is limited per copy so every voxel size stays inside the editor's range
+    (0.001–10 m, the Scale tool's limits); scale itself is 0.1–10, never zero or negative.
+  - Only plain voxel objects grow. 3D text and Gabor volumes keep their voxel size (a larger
+    voxel would only re-voxelize them coarser at the same size), and polygon meshes keep
+    their size; their positions inside the copy still spread with the scale.
 - **Density** caps how many copies a dab keeps, counting copies already under the brush, so
   going over an area again (or the overlap between dabs in a stroke) does not build up past it.
+- One brush stroke adds at most 1000 copies (the fill's count cap), however long or dense it is;
+  release and paint again for more.
 
 ## Saved with the scene
 
@@ -40,7 +47,12 @@ from runtime exports.
 - Brush strokes into an existing group update its stored settings in the same undo step.
 - The first fill or brush session in a scene starts from the **newest** scatter group's settings.
 - Selecting a scatter group (or a copy inside one) before starting Scatter Objects or picking the
-  brush takes **that** group's settings. With the brush, strokes then go into that group.
+  brush takes **that** group's settings. With the brush and the group itself selected, strokes
+  then go into that group.
+- Changing a setting in the panel is not an undo step by itself (no undo spam); it is stored on
+  the group in the same single undo step as the fill or stroke that uses it.
+- Older scenes load unchanged: a group without the component, or a component with missing,
+  extra or wrongly typed keys, falls back to the defaults for those keys.
 
 ## Several surfaces (two-step selection)
 
@@ -49,7 +61,11 @@ from runtime exports.
    object that isn't a source is a surface. Each candidate spot first picks a surface, weighted
    by its footprint, so copies spread evenly across all of them and no tries are wasted on gaps
    between them. The preview lists the surfaces and says "(set sources)".
+   Hidden objects, objects isolated out of view (View > Isolate Selection) and earlier scatter
+   copies are never surfaces, the same ground rules as the brush. Locked objects can be
+   surfaces: scattering onto them adds new objects and does not change them.
 3. **Create > Clear Scatter Sources** goes back to the one-surface rule (last clicked = surface).
+   A hidden or isolated-out last-clicked surface is refused with a reason there too.
 
 The brush also paints the set sources when they are set.
 
@@ -97,8 +113,17 @@ The brush also paints the set sources when they are set.
 - **Workflow:** set sources, then fill two surfaces; group stores settings; a selected group
   hands its settings over; a reopened scene continues from the newest group.
 - **Shortcut and menus:** Y, menu items, accessibility shortcut.
+- **Review follow-ups:** hidden and isolated-out objects are not surfaces (several or one);
+  voxel size stays within 0.001–10 m; older or partial settings components load with defaults;
+  Play hides the panel with the brush selected; Y typed into a text field is text; no shortcut
+  conflicts for `scatter.brush` in any built-in profile.
 
 Existing scatter and brush tests are unchanged and pass.
+
+## Play / Simulate
+
+The panel is shown only in Edit mode: starting Play or Simulate hides it (even with the brush
+tool still selected) and drops any value being typed.
 
 ## What's not done
 
@@ -106,3 +131,6 @@ Existing scatter and brush tests are unchanged and pass.
 - Slope or height limits, and per-source weights.
 - The brush still previews markers, not ghost copies, so turn and scale show only after release.
 - Settings changed in the panel without painting or committing are not stored anywhere.
+- The panel does not scroll: in a very short Inspector the rows that do not fit are not shown
+  (their values still apply and the fill keys still work).
+- Panel edits are not undoable on their own.

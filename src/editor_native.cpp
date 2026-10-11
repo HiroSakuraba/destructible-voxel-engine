@@ -270,6 +270,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
         set_status(error.empty() ? "Could not start play-in-editor" : error, true);
         return false;
     }
+    recompute_layout();  // the Scatter settings panel (shown with the brush tool) gives way to Play
     set_status(mode == EditorMode::Play ? "Play-in-editor started" : "Simulation started");
     refresh_menu_state();
     return true;
@@ -3016,6 +3017,7 @@ void NativeEditorController::commit_text_edit() {
         return;
     }
     if (kind == TextEditKind::ScatterSetting) {
+        if (!scatter_settings_panel_active()) { textEdit_ = {}; recompute_layout(); return; }  // panel went away (e.g. Play)
         const auto field = static_cast<ScatterSettingField>(std::min<EditorObjectId>(textEdit_.objectId, kScatterSettingFieldCount - 1U));
         std::string error;
         if (!set_scatter_setting(field, textEdit_.buffer, &error)) {
@@ -7636,16 +7638,21 @@ bool is_scatter_surface(const EditorObject& object) {
     return object.voxels && object.voxels->occupied_voxel_count() > 0 && !object.text3d && !object.gaborVolume;
 }
 
-// With pinned sources: every selected voxel object that is not part of a source is a surface.
+// With pinned sources: every selected voxel object that is not part of a source is a surface,
+// except hidden objects, objects isolated out of view, and earlier scatter copies (the same
+// ground rules as the brush).
 std::vector<EditorObjectId> scatter_surfaces_from_selection(const EditorDocument& document,
                                                             const std::set<EditorObjectId>& selection,
-                                                            const std::vector<EditorObjectId>& sourceRoots) {
+                                                            const std::vector<EditorObjectId>& sourceRoots,
+                                                            const std::function<bool(EditorObjectId)>& isolatedOut) {
     const std::vector<EditorObjectId> sourceTree = collect_editor_object_subtree_ids(document, sourceRoots);
     const std::set<EditorObjectId> excluded(sourceTree.begin(), sourceTree.end());
     std::vector<EditorObjectId> surfaces;
     for (const EditorObjectId id : selection) {
         const EditorObject* object = document.find_object(id);
-        if (object && !excluded.contains(id) && is_scatter_surface(*object)) surfaces.push_back(id);
+        if (!object || excluded.contains(id) || !is_scatter_surface(*object)) continue;
+        if (!object->flags.visible || isolatedOut(id) || enclosing_scatter_group(document, id)) continue;
+        surfaces.push_back(id);
     }
     return surfaces;
 }
@@ -7742,8 +7749,9 @@ std::string NativeEditorController::scatter_disabled_reason() const {
             [&](EditorObjectId id) { return document.find_object(id) != nullptr; });
         if (!anySource) return "The scatter sources were deleted: set them again, or Clear Scatter Sources.";
         const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
-        if (scatter_surfaces_from_selection(document, selected, pinnedScatterRoots_).empty())
-            return "Scatter sources are set: select one or more voxel surfaces to scatter onto.";
+        if (scatter_surfaces_from_selection(document, selected, pinnedScatterRoots_,
+                                            [this](EditorObjectId id) { return is_isolated_out(id); }).empty())
+            return "Scatter sources are set: select one or more visible voxel surfaces to scatter onto.";
         return {};
     }
     const auto target = workspace_.selected_object();
@@ -7751,6 +7759,8 @@ std::string NativeEditorController::scatter_disabled_reason() const {
     const EditorObject* surface = document.find_object(*target);
     if (!surface || !is_scatter_surface(*surface))
         return "Click a voxel object last: the last selected object is the surface to scatter onto.";
+    if (!surface->flags.visible || is_isolated_out(surface->id))
+        return "The surface is hidden (or isolated out of view): show it before scattering onto it.";
     bool prefabSelected = false;
     if (assetBrowserState_.selectedId) {
         const EditorAssetRecord* asset = std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId);
@@ -7795,7 +7805,8 @@ bool NativeEditorController::begin_scatter() {
         for (const EditorObjectId id : pinnedScatterRoots_)
             if (document.find_object(id)) scatterSourceRoots_.push_back(id);
         scatterPrefab_ = pinnedScatterPrefab_;
-        scatterTargets_ = scatter_surfaces_from_selection(document, selected, scatterSourceRoots_);
+        scatterTargets_ = scatter_surfaces_from_selection(document, selected, scatterSourceRoots_,
+                                                          [this](EditorObjectId id) { return is_isolated_out(id); });
     } else {
         const EditorObjectId target = *workspace_.selected_object();
         scatterTargets_.push_back(target);
@@ -8173,8 +8184,16 @@ void NativeEditorController::brush_dab() {
     settings.minScale = scatterSettings_.minScale;
     settings.maxScale = scatterSettings_.maxScale;
     const auto ground = [this](EditorObjectId id) { return brush_ground_accepts(id); };
-    for (ScatterSample& sample : plan_scatter_dab(document, *brushCursor_, scatterSettings_.brushRadiusMeters, settings, occupied, ground))
+    // One stroke adds at most kMaxScatterCount copies (the fill's cap), however long or dense it is.
+    if (brushPending_.size() >= kMaxScatterCount) {
+        set_status("Scatter brush: this stroke reached " + std::to_string(kMaxScatterCount) +
+                   " copies; release and paint again for more", true, 4.0F);
+        return;
+    }
+    for (ScatterSample& sample : plan_scatter_dab(document, *brushCursor_, scatterSettings_.brushRadiusMeters, settings, occupied, ground)) {
+        if (brushPending_.size() >= kMaxScatterCount) break;
         brushPending_.push_back(sample);
+    }
 }
 
 void NativeEditorController::finish_brush_stroke(bool cancel) {

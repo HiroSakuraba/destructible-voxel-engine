@@ -375,6 +375,7 @@ void NativeEditorController::set_gamepad_axes(std::array<float, 2> move, std::ar
 }
 
 void NativeEditorController::clear_navigation_input() {
+    finish_slice_pointer(true);
     heldShortcutGestures_.clear();
     activePointerCommand_.clear();
     dragButton_ = PointerButton::NoButton;
@@ -2829,7 +2830,7 @@ void NativeEditorController::update(float elapsedSeconds) {
         else ++it;
     }
     if (navigationCameraRig_ != selectedCameraRig_) reset_camera_navigation();
-    if (elapsedSeconds > 0.0F && (!heldShortcutGestures_.empty() || cameraNavigationFilter_.has_motion() ||
+    if (!sliceDrag_ && elapsedSeconds > 0.0F && (!heldShortcutGestures_.empty() || cameraNavigationFilter_.has_motion() ||
                                  pendingCameraLook_[0] != 0.0F || pendingCameraLook_[1] != 0.0F)) {
         const auto contexts = active_shortcut_contexts();
         const bool flyContext = std::find(contexts.begin(), contexts.end(), ShortcutContext::FlyNavigation) != contexts.end();
@@ -3172,6 +3173,19 @@ void NativeEditorController::begin_text_edit(TextEditKind kind, EditorObjectId o
 void NativeEditorController::commit_text_edit() {
     const TextEditKind kind = textEdit_.kind;
     if (kind == TextEditKind::Inactive) return;
+    if (kind == TextEditKind::SlicePoint || kind == TextEditKind::SliceNormal) {
+        if (!voxelSlice_.active() || voxelSlice_.target() != textEdit_.objectId ||
+            workspace_.selected_object() != textEdit_.objectId) { cancel_text_edit(); return; }
+        const auto parsed = parse_float3_line(textEdit_.buffer);
+        if (!parsed || !configure_voxel_slice(kind == TextEditKind::SlicePoint ? *parsed : voxelSlice_.point(),
+                kind == TextEditKind::SliceNormal ? *parsed : voxelSlice_.normal(), voxelSlice_.output())) {
+            textEdit_.error = "Enter three finite numbers; the normal must be nonzero.";
+            set_status(textEdit_.error, true);
+            return;
+        }
+        textEdit_ = {};
+        return;
+    }
     if (kind == TextEditKind::HierarchyFilter) {
         textEdit_ = {};
         return;
@@ -3675,6 +3689,11 @@ void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
     hoverX_ = x;
     hoverY_ = y;
+    if (sliceDrag_) {
+        update_slice_pointer(x, y, modifiers);
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
+    }
     if (longJob_ || importOptions_.open) {
         lastPointerX_ = x;
         lastPointerY_ = y;
@@ -3815,6 +3834,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (sliceDrag_) finish_slice_pointer(true);
     reset_camera_navigation();
     lastPointerX_ = x;
     lastPointerY_ = y;
@@ -4233,6 +4253,13 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         return;
     }
 
+    if ((textEdit_.kind == TextEditKind::SlicePoint || textEdit_.kind == TextEditKind::SliceNormal) &&
+        !layout_.viewport.contains(x,y)) {
+        commit_text_edit();
+        if (textEdit_.kind != TextEditKind::Inactive) return;
+    }
+    if (button == PointerButton::Primary && begin_slice_pointer(x, y, modifiers)) return;
+
     const auto now = std::chrono::steady_clock::now();
     const SettingValue doubleMsValue = workspace_.settings().value("input.double_click_ms");
     const SettingValue doubleDistanceValue = workspace_.settings().value("input.double_click_distance_px");
@@ -4631,6 +4658,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (button == PointerButton::Primary && sliceDrag_) {
+        update_slice_pointer(x, y, modifiers);
+        finish_slice_pointer(false);
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
+    }
     if (longJob_ || importOptions_.open) {
         // Nothing that started before the job may finish into the scene now.
         dragButton_ = PointerButton::NoButton;
@@ -4802,6 +4835,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 }
 
 void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint32_t modifiers) {
+    if (sliceDrag_) return;
     hoverX_ = x;
     hoverY_ = y;
     if (longJob_) return;
@@ -5363,6 +5397,7 @@ void NativeEditorController::finish_placement(bool cancel) {
 
 std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     std::vector<GizmoScreenAxis> axes;
+    if (voxelSlice_.active()) return axes;
     if (selectionDomain_ == SelectionDomain::Voxels) {
         // Voxel domain: only Move has a gizmo, at the voxel selection, along the object's grid.
         if (activeTool_ != EditorToolId::Translate || voxelSelection_.empty()) return axes;
@@ -5390,6 +5425,7 @@ std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
 
 std::vector<GizmoScreenRing> NativeEditorController::gizmo_rings() const {
     std::vector<GizmoScreenRing> rings;
+    if (voxelSlice_.active()) return rings;
     if (selectionDomain_ == SelectionDomain::Voxels) return rings;
     if (activeTool_ != EditorToolId::Rotate || workspace_.selected_objects().empty()) return rings;
     const Float3 origin = gizmoDragging_ ? gizmoPivot_ : selection_pivot();
@@ -11198,6 +11234,11 @@ bool NativeEditorController::begin_voxel_slice() {
     if (gizmoDragging_)
         finish_gizmo_drag(true);
     finish_voxel_stroke();
+    finish_slice_pointer(false);
+    marquee_ = {};
+    voxelMoveAxis_ = 0;
+    voxelMoveSteps_ = 0;
+    voxelBrushSelecting_ = false;
     const auto bounds = selection_bounds();
     std::string error;
     if (!voxelSlice_.begin(workspace_.document(), *workspace_.selected_object(),
@@ -11206,7 +11247,7 @@ bool NativeEditorController::begin_voxel_slice() {
         return false;
     }
     refresh_menu_state();
-    set_status("Slice preview: X/Y/Z axis, arrows move, 1/2/3 output, Enter applies, Esc cancels", false, 8);
+    set_status("Slice: drag yellow shaft to move, coloured rings to rotate; panel edits plane and output", false, 8);
     return true;
 }
 bool NativeEditorController::configure_voxel_slice(Float3 point, Float3 normal, VoxelSliceOutput output) {
@@ -11220,13 +11261,24 @@ bool NativeEditorController::configure_voxel_slice(Float3 point, Float3 normal, 
     return ok;
 }
 CommandResult NativeEditorController::commit_voxel_slice() {
+    if (textEdit_.kind == TextEditKind::SlicePoint || textEdit_.kind == TextEditKind::SliceNormal) {
+        commit_text_edit();
+        if (textEdit_.kind != TextEditKind::Inactive) return CommandResult::fail(textEdit_.error);
+    }
     if (const auto reason = voxel_slice_disabled_reason(); !reason.empty()) {
         set_status(reason, true);
         return CommandResult::fail(reason);
     }
     if (!voxelSlice_.active() || workspace_.selected_object() != voxelSlice_.target())
         return CommandResult::fail("Slice selection changed; reopen the preview.");
+    finish_slice_pointer(false);
+    const auto beforeSelection = capture_selection_snapshot();
     auto result = voxelSlice_.commit(workspace_);
+    if (result.success) {
+        prune_voxel_selection();
+        workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
+        if (textEdit_.kind == TextEditKind::SlicePoint || textEdit_.kind == TextEditKind::SliceNormal) cancel_text_edit();
+    }
     recompute_layout();
     refresh_menu_state();
     set_status(result.success ? "Slice applied. Ctrl+Z restores both halves in one step." : result.message,
@@ -11234,6 +11286,8 @@ CommandResult NativeEditorController::commit_voxel_slice() {
     return result;
 }
 void NativeEditorController::cancel_voxel_slice() {
+    finish_slice_pointer(false);
+    if (textEdit_.kind == TextEditKind::SlicePoint || textEdit_.kind == TextEditKind::SliceNormal) cancel_text_edit();
     if (!voxelSlice_.active())
         return;
     voxelSlice_.cancel();
@@ -11245,11 +11299,20 @@ bool NativeEditorController::handle_voxel_slice_key(std::string_view key, bool c
     if (control || alt)
         return false;
     if (key == "escape") {
+        if (sliceDrag_) { finish_slice_pointer(true); return true; }
         cancel_voxel_slice();
         return true;
     }
     if (key == "enter" || key == "return") {
         (void)commit_voxel_slice();
+        return true;
+    }
+    if (sliceDrag_) return true;
+    if (key == "s") { sliceSnap_ = !sliceSnap_; return true; }
+    if (key == "p" || key == "n") {
+        const auto value = key == "p" ? voxelSlice_.point() : voxelSlice_.normal();
+        begin_text_edit(key == "p" ? TextEditKind::SlicePoint : TextEditKind::SliceNormal, voxelSlice_.target(),
+            std::to_string(value.x) + " " + std::to_string(value.y) + " " + std::to_string(value.z));
         return true;
     }
     auto point = voxelSlice_.point();

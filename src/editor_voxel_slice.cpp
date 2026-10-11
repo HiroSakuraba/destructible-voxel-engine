@@ -65,6 +65,12 @@ bool EditorVoxelSliceSession::configure(const EditorDocument& doc, Float3 point,
     point_ = point;
     normal_ = normalize(normal);
     output_ = output;
+    // Interactive plane drags reuse the immutable target's world-space centres.
+    // Avoid rebuilding and sorting the sparse voxel state on every pointer event.
+    if (active_) {
+        for (auto& cell : cells_) cell.front = dot(subtract(cell.worldCenter, point_), normal_) >= 0;
+        return true;
+    }
     voxelRevision_ = o->voxels->revision();
     transform_ = o->transform;
     voxelSize_ = o->voxelSizeMeters;
@@ -158,11 +164,18 @@ CommandResult EditorVoxelSliceSession::commit(EditorWorkspace& workspace) {
     auto compound = std::make_unique<CompoundCommand>("Slice voxel object");
     compound->add(std::make_unique<ApplyVoxelBooleanCommand>(target_, std::move(changes), anchors_,
                                                              std::move(keptAnchors), "Slice cells"));
+    const EditorObjectId separatedId = separated.id;
     if (output_ == VoxelSliceOutput::Separate)
         compound->add(std::make_unique<AddObjectCommand>(std::move(separated), "Add back half"));
     const auto result = workspace.commands().execute(doc, std::move(compound));
-    if (result.success)
+    if (result.success) {
+        workspace.select_object(target_);
+        if (output_ == VoxelSliceOutput::Separate) {
+            workspace.add_to_selection(separatedId);
+            workspace.add_to_selection(target_);
+        }
         cancel();
+    }
     return result;
 }
 } // namespace dve::editor

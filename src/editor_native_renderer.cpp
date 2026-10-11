@@ -3895,15 +3895,55 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             if(a.visible && b.visible) viewportPainter.line(static_cast<int>(a.x),static_cast<int>(a.y),
                 static_cast<int>(b.x),static_cast<int>(b.y),rgb(255,230,90),1);
         }
-        const auto origin=project_world_to_screen(controller.camera(),viewport,slice.point());
-        const auto tip=project_world_to_screen(controller.camera(),viewport,add(slice.point(),multiply(slice.normal(),0.5F)));
-        if(origin.visible && tip.visible) viewportPainter.line(static_cast<int>(origin.x),static_cast<int>(origin.y),
-            static_cast<int>(tip.x),static_cast<int>(tip.y),rgb(255,230,90),2);
+        for (const auto& ring : controller.voxel_slice_rotate_handles()) {
+            const auto colour = ring.axis == 1 ? rgb(255,100,100) : ring.axis == 2 ? rgb(100,230,130) : rgb(100,165,255);
+            for (std::size_t i=0; i<ring.points.size(); ++i) {
+                const auto a=ring.points[i], b=ring.points[(i+1)%ring.points.size()];
+                if (a.visible && b.visible) viewportPainter.line(static_cast<int>(a.x),static_cast<int>(a.y),
+                    static_cast<int>(b.x),static_cast<int>(b.y),colour,controller.voxel_slice_drag_handle()==ring.axis ? 3 : 2);
+            }
+        }
+        const auto move = controller.voxel_slice_move_handle();
+        if (move.start.visible && move.end.visible) {
+            viewportPainter.line(static_cast<int>(move.start.x),static_cast<int>(move.start.y),
+                static_cast<int>(move.end.x),static_cast<int>(move.end.y),rgb(255,230,90),3);
+            for (const auto point : {move.start,move.end})
+                viewportPainter.fill({static_cast<int>(point.x)-5,static_cast<int>(point.y)-5,11,11},rgb(255,230,90));
+        }
+        const auto panel = controller.voxel_slice_panel_layout();
+        viewportPainter.fill(panel.panel,rgb(18,23,31));
+        const auto label = [&](int y, const std::string& value, std::uint32_t colour) {
+            viewportPainter.text(panel.panel.x+8,y,
+                elide_text_to_width(viewportPainter,value,std::max(0,panel.panel.width-16)),colour);
+        };
         const auto lines=slice.describe(controller.workspace().document());
-        const UiRect slicePanel{viewport.x+8,viewport.y+28,std::max(1,std::min(500,viewport.width-16)),static_cast<int>(lines.size())*17+10};
-        viewportPainter.fill(slicePanel,rgb(18,23,31));
-        for(std::size_t i=0;i<lines.size();++i) viewportPainter.text(slicePanel.x+10,slicePanel.y+18+static_cast<int>(i)*17,
-            elide_text_to_width(viewportPainter,lines[i],std::max(0,slicePanel.width-20)),rgb(210,220,235));
+        label(panel.panel.y+16,lines[0],rgb(235,235,245));
+        label(panel.panel.y+35,lines[1],rgb(210,220,235));
+        const auto button = [&](UiRect rect, const std::string& value, bool selected=false, bool enabled=true) {
+            viewportPainter.fill(rect,selected ? rgb(60,82,108) : rgb(35,43,55));
+            viewportPainter.outline(rect,selected ? rgb(125,175,230) : rgb(70,82,100));
+            viewportPainter.text(rect.x+5,rect.y+17,elide_text_to_width(viewportPainter,value,std::max(0,rect.width-10)),
+                enabled ? rgb(220,230,242) : rgb(125,130,140));
+        };
+        const auto vectorText=[](Float3 value) {
+            char buffer[128];
+            std::snprintf(buffer,sizeof buffer,"%.4g %.4g %.4g",static_cast<double>(value.x),static_cast<double>(value.y),static_cast<double>(value.z));
+            return std::string(buffer);
+        };
+        const auto& edit=controller.text_edit();
+        button(panel.point,"Point (m): "+(edit.kind==TextEditKind::SlicePoint ? edit.buffer+"_" : vectorText(slice.point())),edit.kind==TextEditKind::SlicePoint);
+        button(panel.normal,"Normal: "+(edit.kind==TextEditKind::SliceNormal ? edit.buffer+"_" : vectorText(slice.normal())),edit.kind==TextEditKind::SliceNormal);
+        const std::array<std::string,3> axes{{"X normal","Y normal","Z normal"}}, outputs{{"Keep Front","Keep Back","Separate"}};
+        for (std::size_t i=0; i<3; ++i) {
+            button(panel.axes[i],axes[i]);
+            button(panel.outputs[i],outputs[i],static_cast<std::size_t>(slice.output())==i);
+        }
+        const auto reason=slice.blocked_reason(controller.workspace().document());
+        button(panel.snap,controller.voxel_slice_snap() ? "Snap: on" : "Snap: off",controller.voxel_slice_snap());
+        button(panel.apply,"Apply",false,reason.empty()); button(panel.cancel,"Cancel");
+        label(panel.panel.y+189,"Drag shaft/rings | Shift: fine | Ctrl: snap",rgb(175,190,210));
+        label(panel.panel.y+208,!edit.error.empty() ? edit.error : reason.empty()
+            ? "P/N: numeric | S: snap | Enter: apply | Esc: cancel" : reason,rgb(235,190,130));
     }
     // Transform gizmo. Move draws shafts with solid arrowheads; Rotate draws
     // a ring around each axis with a slim radius stub; Scale draws shafts

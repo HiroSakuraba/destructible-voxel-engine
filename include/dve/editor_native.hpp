@@ -139,7 +139,7 @@ enum class TextEditKind : std::uint8_t {
     Text3DLetterSpacing, Text3DFaceMaterial, Text3DSideMaterial, Text3DFontPath,
     Text3DAlignment, Text3DFillRule, GaborDensity, GaborTint, GaborEmission,
     GaborAnisotropy, GaborShadowStrength, GaborLodBias, HierarchyFilter, AssetSearch,
-    AssetRename, AiPrompt, ScatterSetting  // ScatterSetting: objectId holds the field index
+    AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal
 };
 
 struct TextEditState {
@@ -429,6 +429,11 @@ struct GizmoScreenAxis {
 struct GizmoScreenRing {
     int axis{}; // 1 x, 2 y, 3 z
     std::vector<ScreenPoint> points{};
+};
+
+struct NativeSlicePanelLayout {
+    UiRect panel{}, point{}, normal{}, snap{}, apply{}, cancel{};
+    std::array<UiRect, 3> axes{}, outputs{};
 };
 
 // Background recovery saves driven by the editor.autosave_minutes setting.
@@ -959,6 +964,11 @@ public:
     void cancel_voxel_slice();
     [[nodiscard]] const EditorVoxelSliceSession& voxel_slice() const noexcept { return voxelSlice_; }
     [[nodiscard]] bool configure_voxel_slice(Float3 point, Float3 normal, VoxelSliceOutput output);
+    [[nodiscard]] NativeSlicePanelLayout voxel_slice_panel_layout() const;
+    [[nodiscard]] GizmoScreenAxis voxel_slice_move_handle() const;
+    [[nodiscard]] std::vector<GizmoScreenRing> voxel_slice_rotate_handles() const;
+    [[nodiscard]] bool voxel_slice_snap() const noexcept { return sliceSnap_; }
+    [[nodiscard]] int voxel_slice_drag_handle() const noexcept { return sliceDrag_; }
     [[nodiscard]] std::vector<GizmoScreenAxis> gizmo_axes() const;
     // View-only isolation (View > Isolate Selection): toggles between showing only the
     // selection (with its children) and showing everything. Authored flags are untouched.
@@ -1027,6 +1037,9 @@ private:
     [[nodiscard]] std::filesystem::path find_default_text3d_font() const;
     [[nodiscard]] std::filesystem::path find_default_gabor_asset() const;
     bool handle_voxel_slice_key(std::string_view normalized, bool control, bool shift, bool alt);
+    bool begin_slice_pointer(int x, int y, std::uint32_t modifiers);
+    void update_slice_pointer(int x, int y, std::uint32_t modifiers);
+    void finish_slice_pointer(bool cancel);
     bool handle_voxel_boolean_key(std::string_view normalized, bool control, bool shift, bool alt);
     void voxel_boolean_tick();
 
@@ -1038,6 +1051,12 @@ private:
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};
+    bool sliceSnap_{true};
+    int sliceDrag_{}; // -1 normal translation, 1/2/3 world-axis rotation
+    int sliceStartX_{}, sliceStartY_{};
+    Float3 sliceStartPoint_{}, sliceStartNormal_{};
+    float sliceStartParameter_{}, sliceLastAngle_{}, sliceAngle_{};
+    bool sliceAxisFallback_{};
     EditorVoxelBooleanSession voxelBoolean_{};
     EditorVoxelJoinSession voxelJoin_{};
     bool floodFillArmed_{};

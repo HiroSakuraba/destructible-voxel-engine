@@ -361,6 +361,7 @@ struct NativeEditorLayout {
     // "? Shortcuts" control in the viewport's bottom-right corner; opens the shortcut guide.
     UiRect viewportHelpButton{};
     std::vector<UiRect> hierarchyRows;  // one per hierarchy_order() entry; empty when scrolled out
+    std::vector<UiRect> hierarchyDisclosureButtons;  // same indices; empty for leaves
     int hierarchyScroll{};               // first visible row
     int hierarchyScrollMax{};
     int hierarchyVisibleRows{};
@@ -817,6 +818,9 @@ public:
     [[nodiscard]] std::vector<EditorText3DDrawItem> text3d_draw_items() const;
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
+    [[nodiscard]] bool hierarchy_collapsed(EditorObjectId id) const noexcept { return collapsedHierarchy_.contains(id); }
+    bool set_hierarchy_expanded(EditorObjectId id, bool expanded);
+    bool reveal_selection_in_hierarchy();
 
     // Authored voxel Booleans (ART-060). begin_voxel_boolean opens a non-destructive preview
     // for the current selection (active object = target A, other selected objects = operands);
@@ -1197,6 +1201,10 @@ private:
     int hoverY_{-100000};
     int inspectorScroll_{};
     int hierarchyScroll_{};
+    std::set<EditorObjectId> collapsedHierarchy_;  // view state; never changes authored groups
+    void reset_hierarchy_view();
+    void scroll_hierarchy_to(EditorObjectId id);
+    bool navigate_hierarchy(std::string_view key);
     int lastPointerX_{};
     int lastPointerY_{};
     int pointerDownX_{};

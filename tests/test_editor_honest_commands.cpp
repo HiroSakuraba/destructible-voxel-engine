@@ -389,6 +389,165 @@ void test_honest_fallbacks() {
           "unknown actions are not reported as done");
 }
 
+// Review fixes: Play/preview gating for Flood Fill, the #99/#100 visibility rule for Drop to
+// Surface and Flood Fill, Save As confirmation/path validation, menu reasons, unshadowed handlers.
+void test_fill_and_drop_gating() {
+    {
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        controller.set_active_material(4);
+        controller.workspace().document().find_object(1)->flags.visible = false;
+        check(!controller.flood_fill_at(1, {0, 0, 0}) && controller.status().text.find("hidden") != std::string::npos,
+              "Flood Fill refuses a hidden object");
+        controller.workspace().document().find_object(1)->flags.visible = true;
+        // Arming the fill closes an open Join preview (one preview at a time).
+        controller.workspace().select_object(1);
+        controller.workspace().add_to_selection(2);
+        check(controller.begin_voxel_join() && controller.voxel_join().active(), "Join preview opens: " + controller.status().text);
+        check(controller.dispatch_action("voxel.fill") && !controller.voxel_join().active(),
+              "arming Flood Fill closes the Join preview");
+        controller.workspace().clear_selection();
+        check(controller.dispatch_action("voxel.fill") && controller.flood_fill_armed(), "armed");
+        check(controller.dispatch_action("physics.simulate"), "Simulate starts");
+        {
+            check(!controller.flood_fill_armed(), "starting Simulate disarms the fill");
+            check(!controller.flood_fill_at(1, {0, 0, 0}) && controller.workspace().document().find_object(1)->voxels->material_at({0, 0, 0}) == 1,
+                  "no fill while Simulate runs");
+            const MenuAction* fill = std::as_const(controller.workspace().menus()).find("voxel.fill");
+            check(fill && !fill->enabled && !fill->disabledReason.empty(), "Flood Fill is disabled with a reason in Play");
+            (void)controller.dispatch_action("physics.stop");
+        }
+    }
+    {
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        EditorDocument& document = controller.workspace().document();
+        controller.workspace().select_object(2);
+        document.find_object(2)->flags.visible = false;
+        check(!controller.dispatch_action("view.drop_to_surface") && near(object_world_bounds(*document.find_object(2)).minimum.y, 5.0F),
+              "Drop to Surface refuses a hidden selected object");
+        document.find_object(2)->flags.visible = true;
+        // Isolate the floor, then select the block (isolated out of view): refused, nothing moves.
+        controller.workspace().select_object(1);
+        check(controller.dispatch_action("view.isolate_selection"), "isolate the floor");
+        controller.workspace().select_object(2);
+        check(!controller.dispatch_action("view.drop_to_surface") &&
+                  controller.status().text.find("isolated") != std::string::npos &&
+                  near(object_world_bounds(*document.find_object(2)).minimum.y, 5.0F),
+              "Drop to Surface refuses an isolated-out object");
+        controller.workspace().clear_selection();
+        controller.refresh_menu_state();
+        const MenuAction* drop = std::as_const(controller.workspace().menus()).find("view.drop_to_surface");
+        check(drop && !drop->enabled && drop->disabledReason.find("Select") != std::string::npos,
+              "View > Drop Selection to Surface is disabled with a reason when nothing is selected");
+    }
+}
+
+void test_save_as_review_fixes() {
+    const std::filesystem::path base = std::filesystem::temp_directory_path() / "dve_honest_saveas";
+    std::filesystem::remove_all(base);
+    write_project(base / "Gamma", "Gamma Project", {"Alpha", "Bravo"});
+    const std::filesystem::path bravo = base / "Gamma" / "scenes" / "Bravo.dvescene";
+    const auto bravoTime = std::filesystem::last_write_time(bravo);
+    auto owner = make_controller();
+    NativeEditorController& controller = *owner;
+    controller.configure_ai_assistant(base / "Gamma");
+    controller.workspace().document().mark_clean();
+
+    // Confirming a replace of one scene must not carry over to another chosen with Up/Down.
+    check(controller.dispatch_action("file.save_as"), "Save As opens");
+    while (!controller.file_picker().query.empty()) controller.key_down("backspace", false, false, false);
+    controller.key_down("return", false, false, false);  // empty name: the selected row (Alpha) is the target
+    check(controller.file_picker().open && controller.file_picker().confirmReplace.has_value() &&
+              controller.file_picker().confirmReplace->filename() == "Alpha.dvescene",
+          "replacing Alpha asks first");
+    controller.key_down("down", false, false, false);  // now Bravo is selected
+    controller.key_down("return", false, false, false);
+    check(controller.file_picker().open && controller.file_picker().confirmReplace &&
+              controller.file_picker().confirmReplace->filename() == "Bravo.dvescene" &&
+              std::filesystem::last_write_time(bravo) == bravoTime,
+          "Bravo is not overwritten on the strength of Alpha's confirmation; it asks again");
+    controller.key_down("escape", false, false, false);
+
+    // Path validation: the scene stays inside the project.
+    for (const std::string& bad : std::vector<std::string>{"../escape", (base / "elsewhere").string(), "bad:name", "levels/../../out", ".dvescene"}) {
+        check(!controller.save_scene_as(bad), "Save As refuses '" + bad + "'");
+        check(controller.status().error, "and says why: " + controller.status().text);
+    }
+    check(!std::filesystem::exists(base / "escape.dvescene") && !std::filesystem::exists(base / "elsewhere.dvescene") &&
+              !std::filesystem::exists(base / "out.dvescene"),
+          "nothing was written outside the project");
+    check(controller.save_scene_as("levels/Night") && std::filesystem::exists(base / "Gamma" / "levels" / "Night.dvescene"),
+          "a relative folder saves under the project");
+    check(controller.dispatch_action("file.save_as") && controller.file_picker().query == "levels/Night",
+          "Save As of a scene outside scenes/ keeps its folder, so Enter targets the same file");
+    controller.key_down("escape", false, false, false);
+
+    // A typed absolute path opens (Open Scene); a non-scene file does not.
+    check(controller.dispatch_action("file.open_scene"), "Open Scene");
+    type(controller, bravo.string());
+    controller.key_down("return", false, false, false);
+    check(controller.workspace().document().path().filename() == "Bravo.dvescene", "a typed absolute path opens");
+    std::ofstream(base / "Gamma" / "notes.txt") << "not a scene\n";
+    check(controller.dispatch_action("file.open_scene"), "Open Scene again");
+    type(controller, "notes.txt");
+    controller.key_down("return", false, false, false);
+    check(controller.file_picker().open && controller.file_picker().messageIsError, "a non-scene file is refused");
+    controller.key_down("escape", false, false, false);
+    std::filesystem::remove_all(base);
+}
+
+void test_menu_reasons_and_handlers() {
+    auto owner = make_controller();
+    NativeEditorController& controller = *owner;
+    controller.refresh_menu_state();
+    const auto& menus = std::as_const(controller.workspace().menus());
+    for (const char* id : {"voxel.rebuild_brickmaps", "create.polygon", "audio.import", "file.import", "polygon.import",
+                           "build.cook", "build.package", "help.docs"}) {
+        const MenuAction* action = menus.find(id);
+        check(action && !action->enabled && !action->disabledReason.empty(), std::string(id) + " is disabled with a reason");
+    }
+    for (const char* id : {"voxel.fill", "voxel.rebuild_collision", "view.drop_to_surface", "build.validate"})
+        check(menus.find(id) != nullptr, std::string(id) + " is in the menus (and so in the Command Center)");
+    const MenuAction* import = menus.find("file.import");
+    const MenuAction* openProject = menus.find("file.open_project");
+    check(import && import->shortcut.find("I") != std::string::npos, "Import Model shows its shortcut: " + (import ? import->shortcut : ""));
+    check(openProject && openProject->shortcut.find("O") != std::string::npos, "Open Project shows its shortcut");
+    // The Command Center lists the disabled command with its reason.
+    check(controller.dispatch_action("help.command_palette"), "Command Center opens");
+    type(controller, "rebuild brickmaps");
+    bool listed = false;
+    for (const CommandPaletteResult& result : controller.command_palette_results(20))
+        if (result.id == "voxel.rebuild_brickmaps") listed = !result.enabled && !result.disabledReason.empty();
+    check(listed, "the Command Center shows Rebuild Brickmaps as disabled with its reason");
+    {
+        // The reason is elided to the Command Center row instead of running past the panel.
+        struct Placed final : IEditorCanvas {
+            void fill(UiRect, EditorColor) const override {}
+            void outline(UiRect, EditorColor) const override {}
+            void line(int, int, int, int, EditorColor, int) const override {}
+            void text(int x, int, std::string_view value, EditorColor) const override {
+                if (value.find("Nothing to rebuild") != std::string_view::npos) right = std::max(right, x + text_width(value));
+            }
+            [[nodiscard]] int text_width(std::string_view value) const override { return static_cast<int>(value.size()) * 7; }
+            mutable int right{};
+        } placed;
+        render_native_editor(placed, controller, 1280, 720);
+        const UiRect panel = controller.command_palette_layout().panel;
+        check(placed.right > 0 && placed.right <= panel.x + panel.width,
+              "the disabled reason fits the Command Center (" + std::to_string(placed.right) + " <= " +
+                  std::to_string(panel.x + panel.width) + ")");
+    }
+    controller.key_down("escape", false, false, false);
+    // Handlers that a polygon./audio. catch-all used to shadow.
+    check(controller.dispatch_action("polygon.lod") && controller.settings_panel().open, "Polygon > LOD Settings opens settings");
+    controller.key_down("escape", false, false, false);
+    check(controller.dispatch_action("audio.settings"), "Audio > Audio Settings opens settings");
+    check(!controller.dispatch_action("create.polygon") && controller.status().error, "Create > Polygon Mesh is refused honestly");
+    check(!controller.dispatch_action("polygon.import") && controller.status().text.find("Assets panel") != std::string::npos,
+          "Polygon > Import is Import Model (needs a selected model)");
+}
+
 } // namespace
 
 int main() {
@@ -401,6 +560,9 @@ int main() {
     test_file_pickers();
     test_import_model();
     test_honest_fallbacks();
+    test_fill_and_drop_gating();
+    test_save_as_review_fixes();
+    test_menu_reasons_and_handlers();
     if (g_failures != 0) {
         std::printf("dve_editor_honest_commands_tests: %d failure(s)\n", g_failures);
         return 1;

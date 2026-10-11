@@ -6,6 +6,8 @@ alternative.
 
 ## Voxel and viewport
 
+The Voxel commands are listed under the Tools menu; the Command Center shows them as "Tools > ...".
+
 | Command | Now |
 | --- | --- |
 | **Voxel > Flood Fill** | Arms a one-shot fill. The next viewport click repaints the clicked voxel's face-connected region of the same material with the active material, as one undo step. The viewport shows "Flood Fill: click a voxel"; Esc cancels. Refuses empty cells, locked objects, and regions that already use that material. The region is capped at 2,000,000 voxels. **F is no longer bound to it**: in voxel tools F used to shadow Frame Selection. |
@@ -13,8 +15,8 @@ alternative.
 | **Voxel > Rebuild Collision** | Rebuilds the merged box proxy that Play, Boolean and Join use, for the selection (or every voxel object), and reports the box count. |
 | **View > Collision Shapes** | Draws the selected objects' actual proxy boxes at their world pose, instead of a bounds box. Capped at 4,000 boxes, with a note when more exist. The **Collision** shading mode draws every visible object's proxy. |
 | Inspector "Collision boxes" | Now counts the **merged** proxy, so it matches what Play builds. It used to count the unmerged one. |
-| **Voxel > Rebuild Brickmaps** | Refused with the reason: this viewport draws voxels directly, and brickmaps belong to the runtime renderer. |
-| **View > Shading** (Alt+1…8, now also in the View menu) | The viewport reads `viewport.shading_mode`. A tag at the bottom left names the mode ("View: Wireframe  (Alt+1 Lit)"), and the menu checks the active one. Modes are described below. |
+| **Voxel > Rebuild Brickmaps** | Disabled in the menu and the Command Center with the reason: this viewport draws voxels directly, and brickmaps belong to the runtime renderer. |
+| **View > Shading** (Alt+1…9; Alt+6 is Collision; the other eight are also in the View menu) | The viewport reads `viewport.shading_mode`. A tag at the bottom left names the mode ("View: Wireframe  (Alt+1 Lit)"), and the menu checks the active one. Modes are described below. |
 | **View > X-Ray Selection** | The selection's voxels are drawn again on top of everything, so they show through what is in front of them. |
 | **View > Follow Selection** (Shift+F, now also in the View menu) | Frames the selection, then moves the camera with it as it moves. Off when toggled again, when nothing is selected, or when Play starts. It used to only print "toggled". |
 
@@ -52,23 +54,29 @@ type to filter, Up/Down to choose, Enter to accept, Esc to close.
 - **Open Scene (Ctrl+O):**
   - Lists the project's recent scenes first, then every `.dvescene` under the project. Hidden,
     `cooked` and `build` folders are skipped.
-  - You can also type a path.
+  - You can also type a path; it must be a `.dvescene` file.
   - With unsaved changes it asks first, like New Scene.
   - Opening clears undo and isolation, frames the scene, and records it as recent in
     `project.dveproject`.
 - **Save As (Ctrl+Shift+S):**
-  - Type a name and the scene is saved as `scenes/<name>.dvescene` in the project. Clicking an
-    existing scene fills in its name.
-  - An existing file needs a second Enter to replace it.
+  - Type a name and the scene is saved as `scenes/<name>.dvescene` in the project. A relative path
+    with folders (`levels/Night`) saves under the project. Clicking an existing scene fills in its
+    name, keeping its folder when it is not in `scenes/`.
+  - The target must stay inside the project: `..` escapes, rooted paths outside it, and names with
+    `< > : " | ? * \` are refused with the reason. Rooted means `has_root_directory()` or
+    `has_root_name()`, not `is_absolute()` (on Windows `"/foo"` is not absolute).
+  - An existing file needs a second Enter to replace it, and the confirmation is for that exact
+    file: choosing another row with Up/Down asks again.
+  - The old name's recovery copy is removed once the save succeeds.
   - The saved file becomes the current scene and is recorded as recent.
   - **Save** on a never-saved scene now opens Save As, instead of failing with "pass --scene".
-- **Open Project (Ctrl+Shift+O):**
+- **Open Project (Ctrl+Shift+O, now bound):**
   - Lists folders that hold a `project.dveproject`: the current project, its children and
     siblings, and the working directory's children. Each is shown by its project name.
   - You can also type a folder path.
   - Opening activates the project (asset index, workspace state) and opens its most recent scene,
     or a new scene if it has none.
-- **Import Model (Ctrl+I):**
+- **Import Model (Ctrl+I, now bound; Polygon > Import Polygon Model runs the same command):**
   - Select an OBJ, glTF or GLB file in the Assets panel first; the command is disabled with that
     reason until you do.
   - The model is voxelized with default settings, one object per mesh node, keeping node
@@ -88,9 +96,51 @@ type to filter, Up/Down to choose, Enter to accept, Esc to close.
 - **Polygon mesh editing commands:** say mesh editing is not available, and that models import as
   voxels.
 - **Audio and sequencer shortcuts outside their editors:** say to open that editor first.
+- **Audio > Import Audio**, **Create > Polygon Mesh**, **Build > Cook Scene**, **Build > Package
+  Game** and **Help > Documentation:** disabled in the menu and Command Center with the reason
+  and the alternative. None of them had a handler; they fell through to "not connected".
 - **Any other unconnected action:** "Not available in this editor build: <id>", shown as an error.
 
 All of these return failure instead of reporting success.
+
+The polygon/audio/sequencer catch-all now runs at the end of dispatch. It used to run first and
+shadow real handlers: Polygon > LOD/Collision/Streaming Settings and Audio > Audio Settings, Mixer,
+Synthesizer, Tracker, Interactive Audio and Music and Sound Editor reported "Shortcut dispatched"
+on main instead of opening.
+
+## Menus and gating
+
+- Flood Fill, Rebuild Collision, Rebuild Brickmaps (disabled) and Drop Selection to Surface are now
+  menu items, so they appear in the Command Center with their state.
+- Disabled with a reason: Flood Fill and the file pickers during Play/Simulate; Drop to Surface
+  with nothing selected; Import Model without a selected model; Follow Selection with nothing
+  selected.
+- Flood Fill: starting Play/Simulate, Join, Slice, Boolean or Scatter disarms it. Arming it closes
+  an open Join/Slice/Boolean/Scatter preview, one preview at a time, as Join does. A fill never runs
+  during Play, and hidden or isolated-out objects are refused.
+- Drop to Surface: a hidden or isolated-out selected object is refused with the reason, the same
+  rule as Join and Scatter (#99/#100).
+- Opening a scene also clears an armed fill, Follow Selection, text edits and gizmo drags.
+
+## What's not done
+
+- **Long-job progress and cancel:** not added. Import Model, Flood Fill (up to 2,000,000 voxels),
+  Validate Project and Rebuild Collision run synchronously on the UI thread, with no progress bar
+  or cancel. A large model import can freeze the editor until it finishes.
+- **Import options:** the step-by-step options (node choices, voxel settings, preview), reimport,
+  and a voxel or size cap on import.
+- **OS file dialogs:** the pickers are in-editor lists; there is no native Open/Save dialog.
+- **Material editing commands:** Assign, Apply, Link, instances and previews are refused with a
+  reason, not implemented.
+- **Polygon mesh editing:** vertex, edge and face tools, bevel, extrude and UV tools are refused.
+- **Audio > Import Audio, Build > Cook Scene / Package Game, Help > Documentation:** disabled; use
+  the command-line `dve_cook_*` and `dve_pack` tools and the `docs/` folder.
+- **Brickmaps:** Rebuild Brickmaps stays disabled; the runtime renderer owns brickmaps.
+- **Shading modes:** these are colourings of the software viewport's voxel squares, not GPU
+  render passes. Lighting Only is flat grey; there is no lighting model here.
+- **Shortcut-only commands:** commands that are only in the shortcut set (polygon tools, material
+  commands) are refused when used, but they are not menu items. They do not show a disabled state
+  ahead of time.
 
 ## Tests
 
@@ -110,3 +160,10 @@ All of these return failure instead of reporting success.
   name, replace confirmation, Save on a new scene); Open Project (sibling list, opens its scene).
 - **Import Model:** needs a selected model, imports an OBJ crate as a group, summary, one undo.
 - **Fallbacks:** say what is not available.
+- **Review fixes:** Flood Fill refuses hidden objects, closes a Join preview when armed, is
+  disarmed by Simulate and is disabled in Play. Drop to Surface refuses hidden and isolated-out
+  objects, and its menu item is disabled with a reason. Save As does not carry a confirmation
+  across rows, refuses paths outside the project, saves `levels/Night`, and prefills the folder.
+  Open Scene accepts a typed absolute path and refuses non-scene files. Menu and Command Center
+  reasons for the disabled commands, the Ctrl+I and Ctrl+Shift+O shortcuts, and Polygon > LOD and
+  Audio Settings are no longer shadowed.

@@ -3461,7 +3461,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             for (const EditorObjectId id : controller.workspace().selected_objects())
                 if (const EditorObject* object = shadingDocument.find_object(id)) draw_object(*object);
         if (skipped > 0)
-            viewportPainter.text(viewport.x + 10, viewport.y + viewport.height - 30,
+            // Above the shading-mode tag (bottom left), so the two never overlap.
+            viewportPainter.text(viewport.x + 10, viewport.y + viewport.height - 36,
                                  "Collision: " + std::to_string(drawn) + " boxes shown, " + std::to_string(skipped) + " more not drawn",
                                  rgb(255,170,90));
     }
@@ -5232,9 +5233,15 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                              row.y + 20, result.shortcut, muted);
             const std::string detail = !result.enabled && !result.disabledReason.empty()
                 ? result.disabledReason : result.description;
-            if (!detail.empty())
-                painter.text(row.x + row.width / 2, row.y + row.height - 8,
-                             detail, !result.enabled ? rgb(255,150,120) : muted);
+            if (!detail.empty()) {
+                // Starts after the breadcrumb (at most mid-row) and is elided to the row, so a long
+                // disabled reason never runs past the panel; running the command shows it in full.
+                const int detailX = std::min(row.x + row.width / 2,
+                                             row.x + 86 + painter.text_width(result.breadcrumb) + 24);
+                painter.text(detailX, row.y + row.height - 8,
+                             elide_text_to_width(painter, detail, std::max(0, row.x + row.width - 10 - detailX)),
+                             !result.enabled ? rgb(255,150,120) : muted);
+            }
             painter.line(row.x, row.y + row.height - 1, row.x + row.width,
                          row.y + row.height - 1, border);
         }

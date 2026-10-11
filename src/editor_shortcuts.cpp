@@ -877,6 +877,8 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "file.open_scene", ShortcutContext::Global, keyboard_shortcut("o", true));
     bind(dve, "file.save", ShortcutContext::Global, keyboard_shortcut("s", true));
     bind(dve, "file.save_as", ShortcutContext::Global, keyboard_shortcut("s", true, true));
+    bind(dve, "file.open_project", ShortcutContext::Global, keyboard_shortcut("o", true, true));
+    bind(dve, "file.import", ShortcutContext::Global, keyboard_shortcut("i", true));
     bind(dve, "edit.undo", ShortcutContext::Global, keyboard_shortcut("z", true));
     bind(dve, "edit.redo", ShortcutContext::Global, keyboard_shortcut("y", true), keyboard_shortcut("z", true, true));
     bind(dve, "edit.cut", ShortcutContext::Global, keyboard_shortcut("x", true));

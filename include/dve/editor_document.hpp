@@ -48,6 +48,7 @@ struct EditorObject {
     // stores only the used glyph subset and never embeds the font itself.
     std::filesystem::path textFontAsset;
     float voxelSizeMeters{0.10F};
+    Float3 voxelScale{1,1,1};
     std::unique_ptr<VoxelObject> voxels;
     std::optional<CookedText3DAsset> text3d;
     std::optional<GaborVolumeAsset> gaborVolume;

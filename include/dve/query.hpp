@@ -61,6 +61,11 @@ struct PlayerEditResolution {
     Float3 worldDirection,
     float maxDistance);
 
+// Spacing is object-local geometry scale; distance and hit position remain world units.
+[[nodiscard]] std::optional<TransformedRayHit> raycast_voxels_scaled(
+    const VoxelObject&, const RigidTransform&, Float3 spacing,
+    Float3 worldOrigin, Float3 worldDirection, float maxDistance);
+
 [[nodiscard]] bool overlaps_voxels(
     const VoxelObject& object,
     Float3 minCorner,

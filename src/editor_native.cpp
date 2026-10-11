@@ -9154,7 +9154,7 @@ std::string lowercase_copy(std::string_view text) {
 std::string relative_label(const std::filesystem::path& path, const std::filesystem::path& root) {
     std::error_code ec;
     const auto relative = std::filesystem::relative(path, root, ec);
-    if (ec || relative.empty() || relative.native().starts_with("..")) return path.generic_string();
+    if (ec || relative.empty() || *relative.begin() == "..") return path.generic_string();
     return relative.generic_string();
 }
 
@@ -9416,7 +9416,7 @@ void NativeEditorController::remember_recent_scene(const std::filesystem::path& 
     if (!project) return;
     std::error_code ec;
     const auto relative = std::filesystem::relative(path, projectRoot_, ec);
-    if (ec || relative.empty() || relative.native().starts_with("..")) return;
+    if (ec || relative.empty() || *relative.begin() == "..") return;
     std::erase(project->recentScenes, relative);
     project->recentScenes.insert(project->recentScenes.begin(), relative);
     if (project->recentScenes.size() > 10) project->recentScenes.resize(10);

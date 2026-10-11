@@ -3468,16 +3468,16 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
     if (shading != ShadingMode::Lit) {
         const std::string label = "View: " + std::string(shading_mode_label(shading)) + "  (Alt+1 Lit)";
-        const int width = viewportPainter.text_width(label) + 12;
-        const UiRect tag{viewport.x + 8, viewport.y + viewport.height - 26, width, 18};
+        const int tagWidth = viewportPainter.text_width(label) + 12;
+        const UiRect tag{viewport.x + 8, viewport.y + viewport.height - 26, tagWidth, 18};
         viewportPainter.fill(tag, rgb(18,23,31));
         viewportPainter.outline(tag, rgb(96,170,255));
         viewportPainter.text(tag.x + 6, tag.y + 13, label, rgb(190,220,255));
     }
     if (controller.flood_fill_armed()) {
         const std::string label = "Flood Fill: click a voxel  (Esc cancels)";
-        const int width = viewportPainter.text_width(label) + 12;
-        const UiRect tag{viewport.x + viewport.width / 2 - width / 2, viewport.y + viewport.height - 26, width, 18};
+        const int tagWidth = viewportPainter.text_width(label) + 12;
+        const UiRect tag{viewport.x + viewport.width / 2 - tagWidth / 2, viewport.y + viewport.height - 26, tagWidth, 18};
         viewportPainter.fill(tag, rgb(18,23,31));
         viewportPainter.outline(tag, rgb(255,206,72));
         viewportPainter.text(tag.x + 6, tag.y + 13, label, rgb(255,220,120));

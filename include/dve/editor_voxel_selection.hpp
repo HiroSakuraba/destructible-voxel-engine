@@ -1,8 +1,8 @@
 #pragma once
 
 // Voxel selection (artist worklist ART-043): a set of voxel cells in one voxel object, and the
-// edits that act on it. The editor's selection domain decides whether Select and Move work on
-// objects (1) or on voxels (2); see NativeEditorController::set_selection_domain.
+// edits that act on it. The editor's selection domain (M) decides whether Select and Move work on
+// objects or on voxels; see NativeEditorController::set_selection_domain.
 //
 //   gestures (Voxel domain, Select or Move tool): click = the clicked face-connected piece,
 //   drag = box (front-facing voxels; every voxel in the box with X-Ray Selection on),
@@ -11,6 +11,7 @@
 //   the gizmo in whole voxels, Grow/Shrink/Invert/Select All; Paint, Remove and Flood Fill only
 //   touch selected voxels while a selection exists.
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -23,15 +24,25 @@
 
 namespace dve::editor {
 
+// The most voxels one selection may hold. A std::set cell costs ~50 bytes, and the highlight,
+// pruning and the Move gizmo walk the set, so a bigger region is refused with a message (use
+// Separate Islands or Slice for whole-object work).
+inline constexpr std::size_t kMaxVoxelSelection = 500'000;
+
 // Face-connected (6-neighbour) occupied cells reachable from `seed` (empty when seed is air).
-[[nodiscard]] std::set<Int3> voxel_connected_piece(const VoxelObject& voxels, Int3 seed);
+// Stops once the piece holds more than `limit` cells (callers treat size() > limit as too big).
+[[nodiscard]] std::set<Int3> voxel_connected_piece(const VoxelObject& voxels, Int3 seed,
+                                                   std::size_t limit = static_cast<std::size_t>(-1));
 // Every occupied cell.
 [[nodiscard]] std::set<Int3> all_occupied_voxels(const VoxelObject& voxels);
 // Grow: adds occupied face neighbours. Shrink: drops cells with a face neighbour outside the
-// selection (its boundary). Invert: occupied cells not selected.
-[[nodiscard]] std::set<Int3> grow_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection);
+// selection (its boundary). Invert: occupied cells not selected. Grow and Invert stop once the
+// result holds more than `limit` cells.
+[[nodiscard]] std::set<Int3> grow_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection,
+                                                  std::size_t limit = static_cast<std::size_t>(-1));
 [[nodiscard]] std::set<Int3> shrink_voxel_selection(const std::set<Int3>& selection);
-[[nodiscard]] std::set<Int3> invert_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection);
+[[nodiscard]] std::set<Int3> invert_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection,
+                                                    std::size_t limit = static_cast<std::size_t>(-1));
 
 // Cells of `object` whose centres project inside `rect`. Without `through`, only cells with an
 // exposed face turned towards the camera count (what the artist can see on a solid object).
@@ -71,6 +82,9 @@ struct ExtractVoxelsBuild {
     std::string error;
 };
 // Moves the cells into a new sibling object (same transform and voxel size, so nothing moves).
+// Same rules as Separate Islands / Slice's Separate: prefab instances and objects attached to a
+// socket are refused; the new object keeps flags, tags, groups, layer and membership, not the
+// import source, prefab link or other components.
 [[nodiscard]] ExtractVoxelsBuild build_extract_voxels_command(EditorDocument& document, EditorObjectId id,
                                                               const std::set<Int3>& cells);
 

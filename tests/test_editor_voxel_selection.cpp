@@ -1,5 +1,5 @@
 // Voxel selection (artist worklist ART-043): the Objects / Voxels selection domain (M), click /
-// box / brush gestures with Shift-add and Alt-remove, grow / shrink / invert / select all, and
+// box / brush gestures with Shift-add and Ctrl-remove, grow / shrink / invert / select all, and
 // the edits on a selection: delete, extract, copy / cut / paste, move with the gizmo, and Paint,
 // Remove and Flood Fill limited to the selection.
 #include "dve/editor_native.hpp"
@@ -7,6 +7,7 @@
 #include "dve/editor_voxel_selection.hpp"
 
 #include <cmath>
+#include <utility>
 #include <cstdio>
 #include <memory>
 #include <set>
@@ -311,6 +312,165 @@ void test_move_and_limited_tools() {
     check(!controller.voxel_selection().contains({2, 0, 0}) && controller.voxel_selection().contains({3, 0, 0}), "selection prunes removed voxels");
 }
 
+// Review fixes: hidden / isolated objects, scene changes and Play, previews, caps, Extract rules,
+// Cut on a locked object, menu reasons in the Voxels domain, and the gizmo following the selection.
+void test_review_fixes() {
+    {
+        // A hidden object's voxels cannot stay selected (Delete must never act on unseen voxels).
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        EditorDocument& document = controller.workspace().document();
+        (void)controller.dispatch_action("select.domain_voxels");
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0}), SelectionOperation::Replace);
+        check(controller.voxel_selection().size() == 8, "review: selected");
+        document.find_object(1)->flags.visible = false;
+        controller.update(0.016F);
+        check(controller.voxel_selection().empty(), "review: hiding the object clears its voxel selection");
+        controller.select_voxels(1, {{8, 0, 0}}, SelectionOperation::Replace);
+        check(controller.voxel_selection().empty(), "review: voxels of a hidden object cannot be selected");
+        check(!controller.dispatch_action("edit.delete") && document.find_object(1)->voxels->occupied_voxel_count() == 72,
+              "review: Delete does nothing to the hidden object");
+        document.find_object(1)->flags.visible = true;
+
+        // Isolation (#95): isolating another object clears the selection too.
+        EditorObject other(2, "Other");
+        fill_box(other, {0, 0, 0}, {1, 1, 1}, 3);
+        other.transform.position = {5.0F, 0.0F, 0.0F};
+        document.add_object(std::move(other));
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0}), SelectionOperation::Replace);
+        controller.viewport_settings().isolatedObjects = {2};
+        controller.update(0.016F);
+        check(controller.voxel_selection().empty(), "review: isolating another object clears the selection");
+        controller.viewport_settings().isolatedObjects.clear();
+    }
+    {
+        // Menu reasons in the Voxels domain: Delete / Copy / Cut follow the voxel selection.
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        EditorDocument& document = controller.workspace().document();
+        (void)controller.dispatch_action("select.domain_voxels");
+        const MenuAction* del = std::as_const(controller.workspace().menus()).find("edit.delete");
+        check(del && !del->enabled && del->disabledReason.find("No voxels selected") != std::string::npos,
+              "review: Delete is disabled with a reason while no voxels are selected");
+        const MenuAction* all = std::as_const(controller.workspace().menus()).find("voxel.select_all");
+        check(all && all->enabled, "review: Select All Voxels is enabled with a voxel object");
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0}), SelectionOperation::Replace);
+        del = std::as_const(controller.workspace().menus()).find("edit.delete");
+        check(del && del->enabled, "review: Delete is enabled once voxels are selected");
+        check(!controller.dispatch_action("voxel.select_none") || controller.voxel_selection().empty(), "review: deselect");
+        check(!controller.dispatch_action("voxel.select_none"), "review: Deselect with nothing selected does not report success");
+
+        // Cut on a locked object fails and leaves the clipboard alone.
+        controller.select_voxels(1, {{0, 0, 0}}, SelectionOperation::Replace);
+        check(controller.dispatch_action("edit.copy"), "review: copy one voxel");
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0}), SelectionOperation::Replace);
+        document.find_object(1)->flags.locked = true;
+        check(!controller.dispatch_action("edit.cut") && document.find_object(1)->voxels->occupied_voxel_count() == 72,
+              "review: Cut on a locked object is refused");
+        document.find_object(1)->flags.locked = false;
+        check(controller.dispatch_action("edit.paste"), "review: paste");
+        const auto pasted = controller.workspace().selected_object();
+        check(pasted && document.find_object(*pasted)->voxels->occupied_voxel_count() == 1,
+              "review: the failed Cut did not replace the clipboard");
+    }
+    {
+        // Scene changes and Play drop the voxel selection (object ids restart per scene).
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        EditorDocument& document = controller.workspace().document();
+        (void)controller.dispatch_action("select.domain_voxels");
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0}), SelectionOperation::Replace);
+        (void)controller.dispatch_action("file.new_scene");
+        if (controller.pending_destructive_confirmation()) controller.confirm_pending_destructive_action();
+        check(controller.voxel_selection().empty() && controller.voxel_selection_object() == 0,
+              "review: a new scene clears the voxel selection");
+    }
+    {
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        EditorDocument& document = controller.workspace().document();
+        (void)controller.dispatch_action("select.domain_voxels");
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0}), SelectionOperation::Replace);
+        check(controller.dispatch_action("physics.play"), "review: Play starts");
+        check(controller.voxel_selection().empty(), "review: Play clears the voxel selection");
+        check(!controller.dispatch_action("voxel.select_all"), "review: voxel selection commands are refused during Play");
+        (void)controller.dispatch_action("physics.stop");
+    }
+    {
+        // One preview at a time (#98): a voxel edit closes an open Slice preview.
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        EditorDocument& document = controller.workspace().document();
+        check(controller.dispatch_action("voxel.slice") && controller.voxel_slice().active(), "review: Slice opens");
+        (void)controller.dispatch_action("select.domain_voxels");
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0}), SelectionOperation::Replace);
+        check(controller.dispatch_action("edit.delete"), "review: delete with a Slice preview open");
+        check(!controller.voxel_slice().active(), "review: the voxel edit closed the Slice preview");
+    }
+    {
+        // Caps: pieces, grow and invert stop early; select_voxels refuses an oversized region.
+        const EditorObject rocks = make_rocks();
+        check(voxel_connected_piece(*rocks.voxels, {0, 0, 0}, 10).size() == 11, "review: a capped piece stops just past the limit");
+        check(grow_voxel_selection(*rocks.voxels, voxel_connected_piece(*rocks.voxels, {0, 0, 0}), 64).size() == 64,
+              "review: grow below the cap is unchanged by it");
+        check(invert_voxel_selection(*rocks.voxels, {}, 5).size() == 6, "review: a capped invert stops just past the limit");
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        (void)controller.dispatch_action("select.domain_voxels");
+        controller.select_voxels(1, {{0, 0, 0}}, SelectionOperation::Replace);
+        std::set<Int3> huge;
+        for (int i = 0; huge.size() <= kMaxVoxelSelection; ++i) huge.insert({i % 1000, (i / 1000) % 1000, i / 1000000});
+        controller.select_voxels(1, huge, SelectionOperation::Replace);
+        check(controller.voxel_selection().size() == 1, "review: an oversized selection is refused and the old one kept");
+    }
+    {
+        // Extract follows Separate Islands' rules: prefab instances and attached objects refuse;
+        // the part keeps membership/tags components but not import source or other components.
+        EditorDocument document("extract rules");
+        EditorObject rocks = make_rocks();
+        rocks.sourceAsset = "models/rocks.vox";
+        Component membership;
+        membership.type = "dve.membership";
+        Component light;
+        light.type = "dve.light";
+        rocks.components = {membership, light};
+        document.add_object(std::move(rocks));
+        const std::set<Int3> pieceB = voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0});
+        document.find_object(1)->prefabLink = EditorPrefabLink{};
+        check(!build_extract_voxels_command(document, 1, pieceB).command, "review: extract from a prefab instance is refused");
+        document.find_object(1)->prefabLink.reset();
+        document.find_object(1)->attachment = EditorAttachment{};
+        check(!build_extract_voxels_command(document, 1, pieceB).command, "review: extract from an attached object is refused");
+        document.find_object(1)->attachment.reset();
+        ExtractVoxelsBuild build = build_extract_voxels_command(document, 1, pieceB);
+        EditorCommandStack stack;
+        check(build.command && stack.execute(document, std::move(build.command)).success, "review: extract executes");
+        const EditorObject* part = document.find_object(build.newObject);
+        bool keepsMembership = false, keepsLight = false;
+        if (part)
+            for (const Component& c : part->components) {
+                keepsMembership = keepsMembership || c.type == "dve.membership";
+                keepsLight = keepsLight || c.type == "dve.light";
+            }
+        check(part && keepsMembership && !keepsLight && part->sourceAsset.empty() && !part->attachment,
+              "review: the extracted part keeps membership only and no import source");
+    }
+    {
+        // The Move gizmo follows the selection (its centre is cached per selection change).
+        auto owner = make_controller();
+        NativeEditorController& controller = *owner;
+        EditorDocument& document = controller.workspace().document();
+        (void)controller.dispatch_action("select.domain_voxels");
+        controller.set_active_tool(EditorToolId::Translate);
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0}), SelectionOperation::Replace);
+        const auto first = controller.gizmo_axes();
+        controller.select_voxels(1, voxel_connected_piece(*document.find_object(1)->voxels, {0, 0, 0}), SelectionOperation::Replace);
+        const auto second = controller.gizmo_axes();
+        check(!first.empty() && !second.empty() && std::abs(first.front().start.x - second.front().start.x) > 2.0F,
+              "review: the gizmo moves to the new selection");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -318,6 +478,7 @@ int main() {
     test_domain_and_gestures();
     test_edits();
     test_move_and_limited_tools();
+    test_review_fixes();
     if (g_failures != 0) {
         std::printf("dve_editor_voxel_selection_tests: %d failure(s)\n", g_failures);
         return 1;

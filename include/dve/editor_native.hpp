@@ -168,7 +168,7 @@ struct ContextMenuState {
     std::optional<std::size_t> hoveredItem;
 };
 
-// What Select and Move act on: whole objects (1) or voxel cells of one object (2).
+// What Select and Move act on (M toggles): whole objects or voxel cells of one object.
 enum class SelectionDomain : std::uint8_t { Objects, Voxels };
 
 struct MarqueeState {
@@ -818,7 +818,7 @@ public:
     // one, previewed; off-grid objects need R (resample) or G (group instead) every time.
     // Separate Islands: split each selected voxel object into its connected pieces; the largest
     // stays. See editor_voxel_join.hpp.
-    // Voxel selection (Edit > Selection Domain, keys 1 / 2). See editor_voxel_selection.hpp.
+    // Voxel selection (Edit > Selection Domain, M). See editor_voxel_selection.hpp.
     [[nodiscard]] SelectionDomain selection_domain() const noexcept { return selectionDomain_; }
     void set_selection_domain(SelectionDomain domain);
     [[nodiscard]] EditorObjectId voxel_selection_object() const noexcept { return voxelSelectionObject_; }
@@ -960,7 +960,13 @@ private:
     int voxelMoveSteps_{};
     std::optional<VoxelClipboard> voxelClipboard_;
     bool voxelClipboardNewest_{};  // Paste uses whichever clipboard was filled last
+    std::uint64_t voxelSelectionSerial_{};  // bumped whenever voxelSelection_ changes
+    mutable std::uint64_t voxelCentreCacheSerial_{};
+    mutable bool voxelCentreCacheValid_{};
+    mutable Float3 voxelCentreCacheLocal_{};
     void prune_voxel_selection();
+    void reset_voxel_selection_state();
+    void close_previews_for_voxel_edit(std::string_view what);
     [[nodiscard]] Float3 voxel_selection_centre() const;
     [[nodiscard]] Float3 voxel_move_axis_world(int axis) const;
     void voxel_brush_select_at(int x, int y);

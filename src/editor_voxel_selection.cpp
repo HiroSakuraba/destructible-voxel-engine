@@ -28,12 +28,12 @@ std::string object_problem(const EditorObject& object) {
 
 } // namespace
 
-std::set<Int3> voxel_connected_piece(const VoxelObject& voxels, Int3 seed) {
+std::set<Int3> voxel_connected_piece(const VoxelObject& voxels, Int3 seed, std::size_t limit) {
     std::set<Int3> piece;
     if (!voxels.occupied_at(seed)) return piece;
     std::vector<Int3> stack{seed};
     piece.insert(seed);
-    while (!stack.empty()) {
+    while (!stack.empty() && piece.size() <= limit) {
         const Int3 at = stack.back();
         stack.pop_back();
         for (const Int3 face : kFaces) {
@@ -52,13 +52,15 @@ std::set<Int3> all_occupied_voxels(const VoxelObject& voxels) {
     return cells;
 }
 
-std::set<Int3> grow_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection) {
+std::set<Int3> grow_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection, std::size_t limit) {
     std::set<Int3> grown = selection;
-    for (const Int3 cell : selection)
+    for (const Int3 cell : selection) {
+        if (grown.size() > limit) break;
         for (const Int3 face : kFaces) {
             const Int3 next = add(cell, face);
             if (voxels.occupied_at(next)) grown.insert(next);
         }
+    }
     return grown;
 }
 
@@ -72,9 +74,11 @@ std::set<Int3> shrink_voxel_selection(const std::set<Int3>& selection) {
     return shrunk;
 }
 
-std::set<Int3> invert_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection) {
+std::set<Int3> invert_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection, std::size_t limit) {
     std::set<Int3> inverted;
-    for_each_occupied(voxels, [&](Int3 cell, MaterialId) { if (!selection.contains(cell)) inverted.insert(cell); });
+    for_each_occupied(voxels, [&](Int3 cell, MaterialId) {
+        if (inverted.size() <= limit && !selection.contains(cell)) inverted.insert(cell);
+    });
     return inverted;
 }
 
@@ -207,6 +211,11 @@ ExtractVoxelsBuild build_extract_voxels_command(EditorDocument& document, Editor
     const EditorObject* object = document.find_object(id);
     if (!object) { build.error = "The object no longer exists"; return build; }
     if (std::string problem = object_problem(*object); !problem.empty()) { build.error = problem; return build; }
+    // Same rules as Separate Islands and Slice's Separate (#97, #100): a prefab instance's part
+    // would silently diverge from the prefab, and parts of an attached object would all hang off
+    // the same socket.
+    if (object->prefabLink) { build.error = object->name + " is a prefab instance; unpack it first"; return build; }
+    if (object->attachment) { build.error = object->name + " is attached to a socket; detach it first"; return build; }
     const VoxelClipboard clipboard = copy_voxels(*object, cells);
     if (clipboard.cells.empty()) { build.error = "No voxels selected"; return build; }
     if (clipboard.cells.size() == object->voxels->occupied_voxel_count()) {
@@ -218,10 +227,14 @@ ExtractVoxelsBuild build_extract_voxels_command(EditorDocument& document, Editor
     if (!remove) { build.error = error; return build; }
     build.newObject = document.allocate_object_id();
     EditorObject part = make_object_from_voxels(build.newObject, clipboard, object->name + " (extract)");
+    // Like Separate Islands' pieces: keep flags, tags, groups, layer and membership; geometry no
+    // longer matches an import source or prefab, so those (and other components) stay behind.
+    part.flags = object->flags;
     part.tags = object->tags;
     part.groups = object->groups;
     part.layer = object->layer;
-    if (object->attachment) part.attachment = object->attachment;  // same parent, same pose
+    for (const Component& component : object->components)
+        if (component.type == "dve.membership" || component.type == "dve.tags") part.components.push_back(component);
     build.command = std::make_unique<CompoundCommand>("Extract voxels");
     build.command->add(std::move(remove));
     build.command->add(std::make_unique<AddObjectCommand>(std::move(part), "Extracted voxels"));

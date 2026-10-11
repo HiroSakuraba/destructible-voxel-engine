@@ -36,7 +36,7 @@ Rotate and Scale have no voxel gizmo; their hint says to press M.
 | Command | Effect |
 | --- | --- |
 | **Delete** | Removes the selected voxels. Anchors on them are removed and come back on undo. With no voxels selected, Delete does nothing; it never deletes the object instead. |
-| **Voxel > Extract Selected Voxels to New Object** | Moves the selection into a new sibling, "Name (extract)", with the same transform and voxel size, so nothing moves. It keeps materials, anchors, tags, groups and layer. The new object is selected in the Objects domain. Refused when every voxel is selected (that is the whole object). |
+| **Voxel > Extract Selected Voxels to New Object** | Moves the selection into a new sibling, "Name (extract)", with the same transform and voxel size, so nothing moves. Like Separate Islands' pieces it keeps materials, anchors, flags, tags, groups, layer and membership, but not the import source, prefab link or other components. The new object is selected in the Objects domain. Refused when every voxel is selected (that is the whole object), and, as with Slice's Separate and Separate Islands, for prefab instances (unpack first) and objects attached to a socket (detach first). |
 | **Copy / Cut / Paste** (Ctrl+C / Ctrl+X / Ctrl+V) | Copy keeps the voxels; Cut also deletes them. Paste adds a new object, "Name (copy)", at the same place, selected in the Objects domain so it can be moved with W. Paste uses whichever clipboard, voxels or objects, was filled last. |
 | **Move** (W, drag a gizmo axis) | The gizmo sits on the selection, along the object's own grid axes. Dragging previews where the voxels will land as cyan ghosts and shows the whole-voxel offset in the status bar; release applies it, Esc cancels. Moved voxels replace whatever is at the destination; the cells they leave become empty; anchors move with them; the selection follows. |
 | **Voxel > Grow / Shrink / Invert Voxel Selection** | Grow adds the touching voxels, Shrink drops the outer layer, Invert selects the other voxels of the object. |
@@ -47,6 +47,27 @@ Rotate and Scale have no voxel gizmo; their hint says to press M.
 
 Every edit is one undo step. The selection drops voxels that stop existing (undo, other tools),
 so it never refers to empty cells.
+
+## Limits and when the selection clears
+
+- A selection holds at most 500,000 voxels (`kMaxVoxelSelection`). A click, box, Grow, Invert or
+  Select All that would go past it is refused with a message and the current selection is kept;
+  piece, grow and invert searches stop as soon as they pass the cap. Use Separate Islands or Slice
+  for whole-object work on bigger objects.
+- The selection clears when its object is hidden or isolated out of view (#95), when a scene is
+  opened or a new scene or project is made (object ids restart per scene), and when Play or
+  Simulate starts (Stop restores the document). Voxels of a hidden or isolated-out object cannot be
+  selected, so Delete and Move never act on voxels the artist cannot see.
+- Locked objects can be selected but every edit says "Unlock ... first"; a Cut that cannot delete
+  leaves the clipboard unchanged.
+- One preview at a time (#98): Delete, Extract, Paste, Cut and starting a voxel Move close any open
+  Slice, Boolean, Join or Scatter preview first, like Flood Fill and Separate Islands.
+- In the Voxels domain, Edit > Cut / Copy / Delete are disabled with "No voxels selected" until
+  voxels are selected, and Select All Voxels says "Select a voxel object first" when there is none
+  (nothing reports success while doing nothing, #101).
+- The highlight costs one set lookup per drawn voxel of the selected object; the Move gizmo's
+  centre is cached per selection change rather than recomputed every frame; Move ghosts are capped
+  at 20,000.
 
 ## Code
 
@@ -84,8 +105,12 @@ so it never refers to empty cells.
 
 ## What's not done
 
+- Selection changes themselves are not undo steps (Ctrl+Z undoes edits, not picks), and undoing a
+  Move leaves the selection on the destination cells (pruned to what still exists there) rather
+  than restoring the pre-move selection.
 - Lasso selection, and selecting by material.
 - Rotate or scale a voxel selection.
 - Moving into another object, and keyboard nudging.
 - Selections across several objects.
 - A soft (falloff) selection.
+- Paste always makes a new object; pasting voxels into an existing object is not done.

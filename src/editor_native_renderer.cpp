@@ -3256,7 +3256,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     painter.text(width - painter.text_width(mode) - 18, layout.toolbar.y + layout.toolbar.height / 2 + 5,
                  mode, controller.workspace().mode() == EditorMode::Edit ? rgb(102,220,144) : rgb(255,191,74));
     {
-        // Selection domain chip (1 Objects / 2 Voxels), when the toolbar has room for it.
+        // Selection domain chip (M toggles Objects / Voxels), when the toolbar has room for it.
         const bool voxels = controller.selection_domain() == SelectionDomain::Voxels;
         const std::string chip = voxels ? "Selecting: VOXELS (" + std::to_string(controller.voxel_selection().size()) + ")  M objects"
                                         : "Selecting: Objects  M voxels";

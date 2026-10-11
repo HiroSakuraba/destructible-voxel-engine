@@ -252,6 +252,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     brushCursor_.reset();
     marquee_ = {};
     hierarchyDrag_ = {};
+    reset_voxel_selection_state();  // Play edits voxels; Stop restores the document
     prePlayEditorCamera_ = camera_;
     possessedPlayCamera_ = camera_;
     playCameraPossessed_ = mode == EditorMode::Play;
@@ -1856,6 +1857,11 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("edit.redo", workspace_.commands().can_redo(), "There is no authored edit to redo.");
     for (std::string_view id : {"edit.cut", "edit.copy", "edit.delete", "edit.duplicate", "edit.group"})
         enabled(id, hasSelection, "Select one or more scene objects first.");
+    if (selectionDomain_ == SelectionDomain::Voxels) {
+        // In the Voxels domain Cut, Copy and Delete act on voxels only (never the whole object).
+        for (std::string_view id : {"edit.cut", "edit.copy", "edit.delete"})
+            enabled(id, !voxelSelection_.empty(), "No voxels selected: click or drag on a voxel object (M returns to objects).");
+    }
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
     enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
@@ -1913,6 +1919,13 @@ void NativeEditorController::refresh_menu_state() noexcept {
         for (std::string_view id : {"voxel.select_grow", "voxel.select_shrink", "voxel.select_none", "voxel.extract_selection"})
             enabled(id, voxelsSelected, "Select voxels first: press M, then click or drag on a voxel object.");
         enabled("voxel.select_invert", voxelSelectionObject_ != 0, "Press M and click a voxel object first.");
+        {
+            EditorObjectId target = voxelSelectionObject_;
+            if (!workspace_.document().find_object(target) && workspace_.selected_object()) target = *workspace_.selected_object();
+            const EditorObject* object = workspace_.document().find_object(target);
+            enabled("voxel.select_all", object && object->voxels && !object->text3d && !object->gaborVolume,
+                    "Select a voxel object first.");
+        }
         const std::string booleanReason = voxel_boolean_disabled_reason();
         for (std::string_view id : {"voxel.boolean_union", "voxel.boolean_difference", "voxel.boolean_intersection"})
             enabled(id, booleanReason.empty(), booleanReason);
@@ -2832,6 +2845,7 @@ void NativeEditorController::create_new_project_now() {
     workspace_.document() = make_new_project_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
+    reset_voxel_selection_state();
     if (!workspace_.document().objects().empty()) {
         workspace_.select_object(workspace_.document().objects().begin()->first);
         frame_selection();
@@ -2843,6 +2857,7 @@ void NativeEditorController::create_new_scene_now() {
     workspace_.document() = make_new_scene_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
+    reset_voxel_selection_state();
     if (!workspace_.document().objects().empty()) {
         workspace_.select_object(workspace_.document().objects().begin()->first);
         frame_selection();
@@ -4387,6 +4402,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             prune_voxel_selection();
             if (activeTool_ == EditorToolId::Translate && !voxelSelection_.empty()) {
                 if (const int axis = hit_test_gizmo_axis(x, y); axis != 0) {
+                    close_previews_for_voxel_edit("voxel move started");
                     voxelMoveAxis_ = axis;
                     voxelMoveStartX_ = x;
                     voxelMoveStartY_ = y;
@@ -5679,7 +5695,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "voxel.select_invert") return invert_voxel_selection_cmd();
     if (actionId == "voxel.select_all") return select_all_voxels();
     if (actionId == "voxel.select_none") {
-        if (voxelSelection_.empty()) return false;
+        if (voxelSelection_.empty()) { set_status("No voxels are selected", true); return false; }
         clear_voxel_selection();
         set_status("Voxel selection cleared");
         return true;
@@ -5693,7 +5709,6 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         if (actionId == "edit.delete") return delete_selected_voxels();
         if (actionId == "edit.copy" || actionId == "edit.cut") {
             if (voxelSelection_.empty()) { set_status("No voxels selected (press M to work on objects)", true); return false; }
-            voxelClipboardNewest_ = true;
             return copy_selected_voxels(actionId == "edit.cut");
         }
     }
@@ -9484,6 +9499,7 @@ bool NativeEditorController::open_scene_now(const std::filesystem::path& path) {
     workspace_.document() = std::move(*loaded);
     workspace_.commands().clear();
     workspace_.clear_selection();
+    reset_voxel_selection_state();  // ids restart per scene: never carry cells to another object
     viewportSettings_.isolatedObjects.clear();
     collisionProxyCache_.clear();
     (void)dispatch_action("view.frame_all");
@@ -9630,7 +9646,10 @@ void NativeEditorController::set_selection_domain(SelectionDomain domain) {
         const auto active = workspace_.selected_object();
         const EditorObject* object = active ? workspace_.document().find_object(*active) : nullptr;
         if (object && object->voxels && !object->text3d && !object->gaborVolume) {
-            if (voxelSelectionObject_ != object->id) voxelSelection_.clear();
+            if (voxelSelectionObject_ != object->id) {
+                voxelSelection_.clear();
+                ++voxelSelectionSerial_;
+            }
             voxelSelectionObject_ = object->id;
             voxelSelectionRevision_ = object->voxels->revision();
         }
@@ -9644,15 +9663,42 @@ void NativeEditorController::set_selection_domain(SelectionDomain domain) {
 
 void NativeEditorController::clear_voxel_selection() {
     voxelSelection_.clear();
+    ++voxelSelectionSerial_;
     refresh_menu_state();
 }
 
 void NativeEditorController::select_voxels(EditorObjectId objectId, const std::set<Int3>& cells, SelectionOperation operation) {
     const EditorObject* object = workspace_.document().find_object(objectId);
-    if (!object || !object->voxels) return;
+    if (!object || !object->voxels || object->text3d || object->gaborVolume) return;
+    if (!object->flags.visible || is_isolated_out(objectId)) {
+        set_status(object->name + " is hidden or isolated out of view: show it before selecting its voxels", true);
+        return;
+    }
+    // Cap: refuse (and keep the current selection) rather than build a huge set.
+    {
+        const bool sameObject = objectId == voxelSelectionObject_;
+        std::size_t projected = cells.size();
+        if (sameObject && (operation == SelectionOperation::Add || operation == SelectionOperation::Toggle))
+            projected += voxelSelection_.size();
+        else if (sameObject && (operation == SelectionOperation::Subtract || operation == SelectionOperation::Intersect))
+            projected = 0;
+        if (projected > kMaxVoxelSelection) {
+            std::size_t result = projected;
+            if (sameObject && operation == SelectionOperation::Add) {
+                result = voxelSelection_.size();
+                for (const Int3 cell : cells) if (!voxelSelection_.contains(cell)) ++result;
+            }
+            if (result > kMaxVoxelSelection) {
+                set_status("That would select more than " + std::to_string(kMaxVoxelSelection) +
+                           " voxels; the selection is unchanged (use Separate Islands or Slice for whole-object work)", true, 6.0F);
+                return;
+            }
+        }
+    }
     if (objectId != voxelSelectionObject_) {
         // One object at a time: picking voxels of another object starts over there.
         voxelSelection_.clear();
+        ++voxelSelectionSerial_;
         voxelSelectionObject_ = objectId;
         if (operation == SelectionOperation::Subtract || operation == SelectionOperation::Intersect) operation = SelectionOperation::Replace;
         workspace_.select_object(objectId);
@@ -9672,6 +9718,7 @@ void NativeEditorController::select_voxels(EditorObjectId objectId, const std::s
             break;
         }
     }
+    ++voxelSelectionSerial_;
     refresh_menu_state();
     set_status(std::to_string(voxelSelection_.size()) + " voxel(s) selected in " + object->name, false, 3.0F);
 }
@@ -9681,22 +9728,66 @@ void NativeEditorController::prune_voxel_selection() {
     const EditorObject* object = workspace_.document().find_object(voxelSelectionObject_);
     if (!object || !object->voxels) {
         voxelSelection_.clear();
+        ++voxelSelectionSerial_;
         voxelSelectionObject_ = 0;
+        return;
+    }
+    if (!voxelSelection_.empty() && (!object->flags.visible || is_isolated_out(object->id))) {
+        // Never keep (and let Delete or Move act on) voxels the artist cannot see.
+        voxelSelection_.clear();
+        ++voxelSelectionSerial_;
+        voxelMoveAxis_ = 0;
+        voxelMoveSteps_ = 0;
+        set_status("Voxel selection cleared: " + object->name + " is hidden or isolated out of view", false, 4.0F);
+        refresh_menu_state();
         return;
     }
     if (object->voxels->revision() == voxelSelectionRevision_) return;
     voxelSelectionRevision_ = object->voxels->revision();
-    std::erase_if(voxelSelection_, [&](Int3 cell) { return !object->voxels->occupied_at(cell); });
+    if (std::erase_if(voxelSelection_, [&](Int3 cell) { return !object->voxels->occupied_at(cell); }) > 0) {
+        ++voxelSelectionSerial_;
+        refresh_menu_state();
+    }
+}
+
+void NativeEditorController::reset_voxel_selection_state() {
+    voxelSelection_.clear();
+    ++voxelSelectionSerial_;
+    voxelSelectionObject_ = 0;
+    voxelSelectionRevision_ = 0;
+    voxelBrushSelecting_ = false;
+    voxelMoveAxis_ = 0;
+    voxelMoveSteps_ = 0;
+    marquee_.clickVoxel.reset();
+}
+
+void NativeEditorController::close_previews_for_voxel_edit(std::string_view what) {
+    // One preview at a time (#98): a voxel edit closes any open Slice / Boolean / Join / Scatter
+    // preview first, so the edit cannot change an object under a preview.
+    const std::string reason = std::string(what);
+    cancel_voxel_slice();
+    if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: " + reason);
+    cancel_scatter("Scatter preview closed: " + reason);
+    cancel_voxel_join("Join preview closed: " + reason);
 }
 
 Float3 NativeEditorController::voxel_selection_centre() const {
     const EditorObject* object = workspace_.document().find_object(voxelSelectionObject_);
     if (!object || voxelSelection_.empty()) return selection_pivot();
-    Float3 sum{};
-    for (const Int3 cell : voxelSelection_)
-        sum = add(sum, Float3{static_cast<float>(cell.x) + 0.5F, static_cast<float>(cell.y) + 0.5F, static_cast<float>(cell.z) + 0.5F});
-    const float n = static_cast<float>(voxelSelection_.size());
-    return transform_point(object->transform, multiply(Float3{sum.x / n, sum.y / n, sum.z / n}, object->voxelSizeMeters));
+    // The gizmo asks for this several times a frame; walk the set only when it changed.
+    if (voxelCentreCacheSerial_ != voxelSelectionSerial_ || !voxelCentreCacheValid_) {
+        double sx = 0.0, sy = 0.0, sz = 0.0;
+        for (const Int3 cell : voxelSelection_) {
+            sx += static_cast<double>(cell.x) + 0.5;
+            sy += static_cast<double>(cell.y) + 0.5;
+            sz += static_cast<double>(cell.z) + 0.5;
+        }
+        const double n = static_cast<double>(voxelSelection_.size());
+        voxelCentreCacheLocal_ = {static_cast<float>(sx / n), static_cast<float>(sy / n), static_cast<float>(sz / n)};
+        voxelCentreCacheSerial_ = voxelSelectionSerial_;
+        voxelCentreCacheValid_ = true;
+    }
+    return transform_point(object->transform, multiply(voxelCentreCacheLocal_, object->voxelSizeMeters));
 }
 
 Float3 NativeEditorController::voxel_move_axis_world(int axis) const {
@@ -9730,7 +9821,8 @@ void NativeEditorController::finish_voxel_marquee(int x, int y) {
         if (marquee.clickVoxel) {
             const EditorObject* object = workspace_.document().find_object(marquee.clickVoxel->objectId);
             if (object && object->voxels)
-                select_voxels(object->id, voxel_connected_piece(*object->voxels, marquee.clickVoxel->voxel), marquee.operation);
+                select_voxels(object->id, voxel_connected_piece(*object->voxels, marquee.clickVoxel->voxel, kMaxVoxelSelection),
+                              marquee.operation);
         } else if (marquee.operation == SelectionOperation::Replace) {
             clear_voxel_selection();
             set_status("Voxel selection cleared", false, 2.0F);
@@ -9756,7 +9848,7 @@ void NativeEditorController::finish_voxel_marquee(int x, int y) {
 bool NativeEditorController::grow_voxel_selection_cmd() {
     const EditorObject* object = workspace_.document().find_object(voxelSelectionObject_);
     if (!object || voxelSelection_.empty()) { set_status("Select voxels first (press M)", true); return false; }
-    select_voxels(object->id, grow_voxel_selection(*object->voxels, voxelSelection_), SelectionOperation::Replace);
+    select_voxels(object->id, grow_voxel_selection(*object->voxels, voxelSelection_, kMaxVoxelSelection), SelectionOperation::Replace);
     return true;
 }
 bool NativeEditorController::shrink_voxel_selection_cmd() {
@@ -9768,7 +9860,7 @@ bool NativeEditorController::shrink_voxel_selection_cmd() {
 bool NativeEditorController::invert_voxel_selection_cmd() {
     const EditorObject* object = workspace_.document().find_object(voxelSelectionObject_);
     if (!object || !object->voxels) { set_status("Pick a voxel object first (press M and click it)", true); return false; }
-    select_voxels(object->id, invert_voxel_selection(*object->voxels, voxelSelection_), SelectionOperation::Replace);
+    select_voxels(object->id, invert_voxel_selection(*object->voxels, voxelSelection_, kMaxVoxelSelection), SelectionOperation::Replace);
     return true;
 }
 bool NativeEditorController::select_all_voxels() {
@@ -9776,8 +9868,13 @@ bool NativeEditorController::select_all_voxels() {
     if (!workspace_.document().find_object(target) && workspace_.selected_object()) target = *workspace_.selected_object();
     const EditorObject* object = workspace_.document().find_object(target);
     if (!object || !object->voxels || object->text3d || object->gaborVolume) { set_status("Select a voxel object first", true); return false; }
+    if (object->voxels->occupied_voxel_count() > kMaxVoxelSelection) {
+        set_status(object->name + " has more than " + std::to_string(kMaxVoxelSelection) +
+                   " voxels; select a region instead (use Separate Islands or Slice for whole-object work)", true, 6.0F);
+        return false;
+    }
     select_voxels(object->id, all_occupied_voxels(*object->voxels), SelectionOperation::Replace);
-    return true;
+    return voxelSelectionObject_ == object->id && !voxelSelection_.empty();
 }
 
 bool NativeEditorController::delete_selected_voxels() {
@@ -9786,10 +9883,12 @@ bool NativeEditorController::delete_selected_voxels() {
     std::string error;
     auto command = build_delete_voxels_command(*object, voxelSelection_, &error);
     if (!command) { set_status(error, true); return false; }
+    close_previews_for_voxel_edit("voxels deleted");
     const std::size_t count = voxelSelection_.size();
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
     if (!result.success) { set_status(result.message, true, 6.0F); return false; }
     voxelSelection_.clear();
+    ++voxelSelectionSerial_;
     refresh_menu_state();
     set_status("Deleted " + std::to_string(count) + " voxel(s); Undo restores them");
     return true;
@@ -9799,12 +9898,14 @@ bool NativeEditorController::extract_selected_voxels() {
     if (voxelSelection_.empty()) { set_status("Select the voxels to extract first (press M)", true); return false; }
     ExtractVoxelsBuild build = build_extract_voxels_command(workspace_.document(), voxelSelectionObject_, voxelSelection_);
     if (!build.command) { set_status(build.error, true, 6.0F); return false; }
+    close_previews_for_voxel_edit("voxels extracted");
     const std::size_t count = voxelSelection_.size();
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(build.command));
     if (!result.success) { set_status(result.message, true, 6.0F); return false; }
     if (!viewportSettings_.isolatedObjects.empty() && viewportSettings_.isolatedObjects.contains(voxelSelectionObject_))
         viewportSettings_.isolatedObjects.insert(build.newObject);
     voxelSelection_.clear();
+    ++voxelSelectionSerial_;
     selectionDomain_ = SelectionDomain::Objects;
     workspace_.select_object(build.newObject);
     recompute_layout();
@@ -9818,7 +9919,13 @@ bool NativeEditorController::extract_selected_voxels() {
 bool NativeEditorController::copy_selected_voxels(bool cut) {
     const EditorObject* object = workspace_.document().find_object(voxelSelectionObject_);
     if (!object || voxelSelection_.empty()) { set_status("No voxels selected", true); return false; }
+    if (cut) {
+        // A Cut that cannot delete (locked object, ...) must not replace the clipboard either.
+        std::string error;
+        if (!build_delete_voxels_command(*object, voxelSelection_, &error)) { set_status(error, true); return false; }
+    }
     voxelClipboard_ = copy_voxels(*object, voxelSelection_);
+    voxelClipboardNewest_ = true;
     const std::size_t count = voxelClipboard_->cells.size();
     if (cut) {
         if (!delete_selected_voxels()) return false;
@@ -9836,12 +9943,14 @@ bool NativeEditorController::paste_voxels() {
     const EditorObjectId id = document.allocate_object_id();
     VoxelClipboard clipboard = *voxelClipboard_;
     if (clipboard.parent && !document.find_object(*clipboard.parent)) clipboard.parent.reset();
+    close_previews_for_voxel_edit("voxels pasted");
     const CommandResult result = workspace_.commands().execute(document, std::make_unique<AddObjectCommand>(
         make_object_from_voxels(id, clipboard, clipboard.name + " (copy)"), "Paste voxels"));
     if (!result.success) { set_status(result.message, true, 6.0F); return false; }
     if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
     selectionDomain_ = SelectionDomain::Objects;
     voxelSelection_.clear();
+    ++voxelSelectionSerial_;
     workspace_.select_object(id);
     recompute_layout();
     refresh_menu_state();
@@ -9855,11 +9964,13 @@ bool NativeEditorController::move_selected_voxels(Int3 offset) {
     std::string error;
     auto command = build_move_voxels_command(*object, voxelSelection_, offset, &error);
     if (!command) { set_status(error, true); return false; }
+    close_previews_for_voxel_edit("voxels moved");
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
     if (!result.success) { set_status(result.message, true, 6.0F); return false; }
     std::set<Int3> moved;
     for (const Int3 cell : voxelSelection_) moved.insert({cell.x + offset.x, cell.y + offset.y, cell.z + offset.z});
     voxelSelection_ = std::move(moved);
+    ++voxelSelectionSerial_;
     voxelSelectionRevision_ = object->voxels->revision();
     set_status("Moved " + std::to_string(voxelSelection_.size()) + " voxel(s) by (" + std::to_string(offset.x) + ", " +
                std::to_string(offset.y) + ", " + std::to_string(offset.z) + "); Undo puts them back");

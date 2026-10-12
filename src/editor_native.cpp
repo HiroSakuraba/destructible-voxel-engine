@@ -1916,6 +1916,12 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
     enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
+    const auto hierarchyPrimary = workspace_.selected_object();
+    const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;
+    enabled("select.parent", singleSelection && hierarchyObject && hierarchyObject->parent.has_value(),
+            "Select one object with a parent.");
+    enabled("select.children", hasSelection, "Select a parent object.");
+    enabled("select.siblings", singleSelection, "Select one scene object.");
     {
         const std::string voxelSizeReason = voxel_size_scale_disabled_reason();
         for (std::string_view id : {"transform.scale_voxel_size_up", "transform.scale_voxel_size_down"})
@@ -2034,7 +2040,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
             enabled(id,mesh && !preview,"Select an unlocked polygon mesh in Edit mode first.");
         for (auto id:{"polygon.extrude","polygon.inset","polygon.bevel","polygon.uv_tools","polygon.extract","polygon.assign_material"})
             enabled(id,components && polygonSelection_.mode==PolygonSelectionMode::Face && !preview,"Select polygon triangle faces first.");
-        for (auto id:{"polygon.weld","polygon.flip_normals","polygon.select_shell"})
+        for (auto id:{"polygon.weld","polygon.flip_normals","polygon.select_shell","polygon.select_grow","polygon.select_shrink"})
             enabled(id,components && !preview,"Select polygon components first.");
         enabled("polygon.recalculate_normals",mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter a polygon component mode first.");
         for (auto id:{"polygon.select_invert","polygon.select_none"}) enabled(id,mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter polygon component mode first.");
@@ -7252,6 +7258,31 @@ camera_menu_dispatch_complete:
         begin_text_edit(TextEditKind::ObjectName, *id, object->name);
         return true;
     }
+    if (actionId == "select.parent" || actionId == "select.children" || actionId == "select.siblings") {
+        std::set<EditorObjectId> hits;
+        const auto active = workspace_.selected_object();
+        const auto* object = active ? workspace_.document().find_object(*active) : nullptr;
+        if (actionId == "select.parent") {
+            if (object && object->parent) hits.insert(*object->parent);
+        } else if (actionId == "select.children") {
+            for (const auto id : workspace_.selected_objects())
+                for (const auto child : workspace_.document().children_of(id)) hits.insert(child);
+        } else if (object) {
+            const auto siblings = object->parent ? workspace_.document().children_of(*object->parent)
+                                                 : workspace_.document().root_objects();
+            hits.insert(siblings.begin(),siblings.end());
+        }
+        std::erase_if(hits,[&](auto id) {
+            const auto* candidate = workspace_.document().find_object(id);
+            return !candidate || !candidate->flags.visible || is_isolated_out(id);
+        });
+        if (hits.empty()) { set_status("No visible hierarchy relatives to select",true); return false; }
+        set_selection_domain(SelectionDomain::Objects);
+        workspace_.apply_selection(hits,SelectionOperation::Replace);
+        recompute_layout();
+        set_status(std::to_string(hits.size())+" hierarchy objects selected");
+        return true;
+    }
     if (actionId == "edit.group") {
         if (workspace_.selection_count() == 0) {
             set_status("Nothing selected to group", true);
@@ -7276,19 +7307,28 @@ camera_menu_dispatch_complete:
         }
         if (roots.empty()) return false;
 
+        const auto beforeSelection = capture_selection_snapshot();
         Float3 centroid{};
         std::optional<EditorObjectId> commonParent;
         bool firstParent = true;
         for (const EditorObjectId id : roots) {
             const EditorObject* object = workspace_.document().find_object(id);
             if (!object) return false;
-            centroid = add(centroid, object->transform.position);
+            centroid = add(centroid, workspace_.document().world_transform(id).value_or(object->transform).position);
             if (firstParent) { commonParent = object->parent; firstParent = false; }
             else if (commonParent != object->parent) commonParent.reset();
         }
         centroid = multiply(centroid, 1.0F / static_cast<float>(roots.size()));
 
-        EditorObject group(workspace_.document().allocate_object_id(), "Group");
+        std::set<std::string> names;
+        for (const auto& [id, object] : workspace_.document().objects()) {
+            (void)id;
+            names.insert(object.name);
+        }
+        std::string groupName = "Group";
+        for (unsigned suffix = 2; names.contains(groupName); ++suffix)
+            groupName = "Group " + std::to_string(suffix);
+        EditorObject group(workspace_.document().allocate_object_id(), groupName);
         group.parent = commonParent;
         group.transform = make_rigid_transform(centroid, {});
         group.flags.structural = false;
@@ -7305,13 +7345,17 @@ camera_menu_dispatch_complete:
         compound->add(std::make_unique<ReparentObjectsCommand>(std::move(reparents), "Group objects"));
         const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(compound));
         if (result.success) {
+            set_selection_domain(SelectionDomain::Objects);
             workspace_.select_object(groupId);
+            workspace_.commands().set_last_selection_transition(beforeSelection,capture_selection_snapshot());
+            if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(groupId);
             recompute_layout();
         }
         set_status(result.success ? "Grouped selection" : result.message, !result.success);
         return result.success;
     }
     if (actionId == "edit.ungroup") {
+        const auto beforeSelection = capture_selection_snapshot();
         std::vector<EditorObjectId> groupsToDissolve;
         for (const EditorObjectId id : workspace_.selected_objects()) {
             const EditorObject* group = workspace_.document().find_object(id);
@@ -7331,7 +7375,12 @@ camera_menu_dispatch_complete:
         std::vector<EditorObjectId> emptyGroupsToDelete;
         for (const EditorObjectId groupId : groupsToDissolve) {
             const EditorObject* group = workspace_.document().find_object(groupId);
-            if (group && (!group->voxels || group->voxels->occupied_voxel_count() == 0))
+            // Delete only empty containers. Owned geometry and authored metadata must survive.
+            if (group && (!group->voxels || group->voxels->occupied_voxel_count() == 0) &&
+                !group->polygon && !group->text3d && !group->gaborVolume &&
+                group->components.empty() && group->anchors.empty() && !group->prefabLink &&
+                group->sourceAsset.empty() && group->importRecipe.empty() && group->textFontAsset.empty() &&
+                group->tags.empty() && group->groups.empty() && group->layer == 0)
                 emptyGroupsToDelete.push_back(groupId);
         }
         const std::set<EditorObjectId> deleteSet(emptyGroupsToDelete.begin(), emptyGroupsToDelete.end());
@@ -7350,6 +7399,10 @@ camera_menu_dispatch_complete:
             reparents.push_back({id, object.parent, target});
         }
 
+        std::set<EditorObjectId> released;
+        for (const auto& change : reparents) released.insert(change.id);
+        for (const auto id : workspace_.selected_objects())
+            if (!deleteSet.contains(id)) released.insert(id);
         auto compound = std::make_unique<CompoundCommand>("Ungroup");
         if (!reparents.empty())
             compound->add(std::make_unique<ReparentObjectsCommand>(std::move(reparents), "Ungroup"));
@@ -7357,7 +7410,12 @@ camera_menu_dispatch_complete:
             compound->add(std::make_unique<RemoveObjectsCommand>(std::move(emptyGroupsToDelete), "Ungroup"));
         const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(compound));
         if (result.success) {
-            workspace_.clear_selection();
+            set_selection_domain(SelectionDomain::Objects);
+            workspace_.apply_selection(released,SelectionOperation::Replace);
+            workspace_.commands().set_last_selection_transition(beforeSelection,capture_selection_snapshot());
+            if (!viewportSettings_.isolatedObjects.empty())
+                viewportSettings_.isolatedObjects.insert(released.begin(),released.end());
+            for (const auto id : deleteSet) viewportSettings_.isolatedObjects.erase(id);
             recompute_layout();
         }
         set_status(result.success ? "Ungrouped selection" : result.message, !result.success);

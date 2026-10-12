@@ -188,10 +188,10 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
     if(key=="1"||key=="2"||key=="3"||key=="4"){if(!s.uvBefore&&s.tool==0){s.uvMode=unsigned(key[0]-'1');return true;}}
     if(key=="tab"){cancel_mesh_authoring_drag();s.channel=1-s.channel;s.corners.clear();return true;}
     if(key=="q"){cancel_mesh_authoring_drag();s.tool=0;return true;}
-    if(key=="g"||key=="r"||key=="s"){s.tool=key=="g"?1:key=="r"?2:3;s.axis=0;return true;}
+    if(key=="g"||key=="r"||key=="s"){cancel_mesh_authoring_drag();s.tool=key=="g"?1:key=="r"?2:3;s.axis=0;return true;}
     if(key=="p"){for(auto c:s.corners){if(s.uvPins[s.channel].contains(c))s.uvPins[s.channel].erase(c);else if(c<object->polygon->indices.size())s.uvPins[s.channel][c]=texcoord(object->polygon->vertices[object->polygon->indices[c]],s.channel);}return true;}
     if(key=="t"){s.texture=!s.texture;return true;}
-    if(key=="plus"||key=="equal"||key=="minus"){if(!s.uvBefore){s.zoom=std::clamp(s.zoom*(key=="minus"?.8F:1.25F),.05F,64.0F);return true;}}
+    if(key=="plus"||key=="equal"||key=="minus"){if(!s.uvBefore && (key!="minus" || s.tool==0)){s.zoom=std::clamp(s.zoom*(key=="minus"?.8F:1.25F),.05F,64.0F);return true;}}
     if(key=="f"){
         Float2 minimum{INFINITY,INFINITY},maximum{-INFINITY,-INFINITY};auto points=s.corners;if(points.empty())for(std::uint32_t c=0;c<object->polygon->indices.size();++c)points.insert(c);
         for(auto c:points){auto p=texcoord(object->polygon->vertices[object->polygon->indices[c]],s.channel);minimum={std::min(minimum.x,p.x),std::min(minimum.y,p.y)};maximum={std::max(maximum.x,p.x),std::max(maximum.y,p.y)};}
@@ -244,7 +244,7 @@ bool NativeEditorController::mesh_authoring_pointer_move(int x,int y,std::uint32
     if(!meshAuthoring_||meshAuthoring_->kind!=NativeMeshAuthoringState::Kind::Uv)return false;auto& s=*meshAuthoring_;if(!s.dragging&&!s.panning&&!s.selecting)return false;
     auto* object=workspace_.document().find_object(s.object);if(!object||!object->polygon){cancel_mesh_authoring_drag();return true;}
     s.lastX=x;s.lastY=y;auto current=from_screen(x,y,s,layout_.viewport);
-    if(s.panning){auto start=from_screen(s.startX,s.startY,s,layout_.viewport);s.center={s.center.x+start.x-current.x,s.center.y+start.y-current.y};return true;}
+    if(s.panning){auto start=from_screen(s.startX,s.startY,s,layout_.viewport);s.center={s.panStart.x+start.x-current.x,s.panStart.y+start.y-current.y};return true;}
     if(s.selecting)return true;
     *object->polygon=*s.uvBefore;UvEditSettings settings;settings.channel=s.channel;settings.pivot=s.pivot;auto operation=s.tool==1?UvEdit::Translate:s.tool==2?UvEdit::Rotate:UvEdit::Scale;
     if(s.tool==1){settings.vector={current.x-s.startUv.x,current.y-s.startUv.y};if(s.axis==1)settings.vector.y=0;if(s.axis==2)settings.vector.x=0;if(modifiers&2U){settings.vector.x=std::round(settings.vector.x*10)/10;settings.vector.y=std::round(settings.vector.y*10)/10;}if(settings.vector.x==0&&settings.vector.y==0)return true;}

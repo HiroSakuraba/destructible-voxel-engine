@@ -205,6 +205,66 @@ std::set<std::uint32_t> polygon_selected_faces(const CookedPolygonAsset& mesh,co
     return result;
 }
 
+std::set<std::uint64_t> edit_polygon_selection(const CookedPolygonAsset& mesh,
+    const PolygonSelection& selection, PolygonSelectionEdit operation) {
+    if (!validate_polygon_asset(mesh) || !polygon_selection_valid(mesh, selection)) return {};
+    const auto& selected = selection.components;
+    if (selected.empty()) return {};
+    const auto canon = canonical(mesh);
+    // Incidence buckets avoid constructing dense adjacency cliques at high-valence vertices.
+    std::map<std::uint64_t, std::set<std::uint64_t>> buckets;
+    std::map<std::uint64_t, std::set<std::uint64_t>> membership;
+    const auto connect = [&](std::uint64_t component, std::uint64_t bucket) {
+        buckets[bucket].insert(component);
+        membership[component].insert(bucket);
+    };
+    for (std::uint32_t f = 0; f < mesh.indices.size()/3; ++f) {
+        for (unsigned j = 0; j < 3; ++j) {
+            const auto a = canon[mesh.indices[std::size_t(f)*3+j]];
+            const auto b = canon[mesh.indices[std::size_t(f)*3+(j+1)%3]];
+            if (a == b) continue;
+            const auto key = edge(a,b).key();
+            if (selection.mode == PolygonSelectionMode::Face) connect(f,key);
+            else if (selection.mode == PolygonSelectionMode::Edge) {
+                connect(key,a);
+                connect(key,b);
+            } else {
+                connect(a,key);
+                connect(b,key);
+            }
+        }
+    }
+    auto result = selected;
+    if (operation == PolygonSelectionEdit::Shrink) {
+        for (const auto component : selected) {
+            bool boundary = false;
+            for (const auto bucket : membership[component]) {
+                for (const auto neighbor : buckets[bucket]) {
+                    if (!selected.contains(neighbor)) { boundary = true; break; }
+                }
+                if (boundary) break;
+            }
+            if (boundary) result.erase(component);
+        }
+        return result;
+    }
+    std::queue<std::uint64_t> pending;
+    for (const auto component : selected) pending.push(component);
+    std::set<std::uint64_t> visitedBuckets;
+    while (!pending.empty()) {
+        const auto component = pending.front();
+        pending.pop();
+        for (const auto bucket : membership[component]) {
+            if (!visitedBuckets.insert(bucket).second) continue;
+            for (const auto neighbor : buckets[bucket]) {
+                if (result.insert(neighbor).second && operation == PolygonSelectionEdit::Connected)
+                    pending.push(neighbor);
+            }
+        }
+    }
+    return result;
+}
+
 PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSelection& selection,
                                PolygonEdit operation,const PolygonEditSettings& settings) {
     PolygonEditResult result{source,selection,{}}; auto& mesh=result.mesh;
@@ -638,14 +698,77 @@ std::optional<std::uint64_t> pick_polygon_component(const EditorObject& object,c
     return result;
 }
 std::set<std::uint64_t> polygon_components_in_rect(const EditorObject& object,const EditorCamera& camera,
-    UiRect viewport,UiRect rect,PolygonSelectionMode mode,bool through) {
+    UiRect viewport,UiRect rect,PolygonSelectionMode mode,bool through,bool crossing) {
     std::set<std::uint64_t> result;
-    if(!object.polygon) return result;
-    for(const auto item:component_points(*object.polygon,mode)) {
-        const auto world=voxel_to_world(object.transform,object.voxelScale,item.point);
-        const auto p=project_world_to_screen(camera,viewport,world);
-        if(p.visible&&rect.contains(int(p.x),int(p.y))&&(through||visible_point(object,camera,viewport,world)))
-            result.insert(item.key);
+    if (!object.polygon || rect.width <= 0 || rect.height <= 0) return result;
+    const auto& mesh = *object.polygon;
+    const double left = rect.x, top = rect.y;
+    const double right = left+rect.width-1, bottom = top+rect.height-1;
+    const auto inside = [&](ScreenPoint p) {
+        return p.x >= left && p.x <= right && p.y >= top && p.y <= bottom;
+    };
+    const auto intersects = [&](ScreenPoint a, ScreenPoint b) {
+        double low = 0, high = 1;
+        const auto clip = [&](double origin, double delta, double minimum, double maximum) {
+            if (std::abs(delta) < 1e-12) return origin >= minimum && origin <= maximum;
+            double first = (minimum-origin)/delta, last = (maximum-origin)/delta;
+            if (first > last) std::swap(first,last);
+            low = std::max(low,first);
+            high = std::min(high,last);
+            return low <= high;
+        };
+        return clip(a.x,double(b.x)-a.x,left,right) && clip(a.y,double(b.y)-a.y,top,bottom);
+    };
+    for (const auto item : component_points(mesh,mode)) {
+        std::array<Float3,3> local{};
+        unsigned count = 1;
+        local[0] = item.point;
+        if (mode == PolygonSelectionMode::Edge) {
+            count = 2;
+            local[0] = mesh.vertices[std::size_t(item.key>>32U)].position;
+            local[1] = mesh.vertices[std::size_t(item.key&0xffffffffU)].position;
+        } else if (mode == PolygonSelectionMode::Face) {
+            count = 3;
+            for (unsigned j = 0; j < count; ++j)
+                local[j] = mesh.vertices[mesh.indices[std::size_t(item.key)*3+j]].position;
+        }
+        std::array<ScreenPoint,3> points{};
+        bool projectable = true, contained = true, hit = false;
+        for (unsigned j = 0; j < count; ++j) {
+            points[j] = project_world_to_screen(camera,viewport,
+                voxel_to_world(object.transform,object.voxelScale,local[j]));
+            if (!points[j].visible || !std::isfinite(points[j].x) || !std::isfinite(points[j].y)) {
+                projectable = false;
+                break;
+            }
+            const bool in = inside(points[j]);
+            contained = contained && in;
+            hit = hit || in;
+        }
+        if (!projectable) continue; // Near-plane clipping is intentionally left to a future pass.
+        if (!crossing) hit = contained;
+        else if (!hit && count > 1) {
+            for (unsigned j = 0; j < (count == 2 ? 1U : 3U); ++j)
+                hit = hit || intersects(points[j],points[(j+1)%count]);
+            if (!hit && count == 3) {
+                const auto side = [](ScreenPoint a, ScreenPoint b, double x, double y) {
+                    return (double(b.x)-a.x)*(y-a.y)-(double(b.y)-a.y)*(x-a.x);
+                };
+                const double area = side(points[0],points[1],points[2].x,points[2].y);
+                if (std::abs(area) > 1e-12) {
+                    const std::array<std::array<double,2>,4> corners{{
+                        {left,top},{right,top},{right,bottom},{left,bottom}}};
+                    for (const auto& corner : corners) {
+                        const double x = side(points[0],points[1],corner[0],corner[1]);
+                        const double y = side(points[1],points[2],corner[0],corner[1]);
+                        const double z = side(points[2],points[0],corner[0],corner[1]);
+                        hit = hit || ((x>=0 && y>=0 && z>=0) || (x<=0 && y<=0 && z<=0));
+                    }
+                }
+            }
+        }
+        const auto world = voxel_to_world(object.transform,object.voxelScale,item.point);
+        if (hit && (through || visible_point(object,camera,viewport,world))) result.insert(item.key);
     }
     return result;
 }

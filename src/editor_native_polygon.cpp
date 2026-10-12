@@ -41,7 +41,7 @@ bool NativeEditorController::set_polygon_mode(PolygonSelectionMode mode) {
     marquee_ = {};
     focusRegion_ = EditorFocusRegion::Viewport;
     set_active_tool(EditorToolId::Select);
-    set_status(std::string("Selecting polygon ") + mode_name(mode) + ": click/box; Shift add, Ctrl toggle, Ctrl+Shift intersect; 1/2/3 modes, 4 objects");
+    set_status(std::string("Selecting polygon ") + mode_name(mode) + ": click/box (left to right: window; right to left: crossing); Shift add, Ctrl toggle, Ctrl+Shift intersect");
     refresh_menu_state(); return true;
 }
 
@@ -101,7 +101,7 @@ void NativeEditorController::finish_polygon_marquee(int x, int y) {
         if (hit) hits.insert(*hit);
     } else {
         const UiRect rect{std::min(x,marquee.startX), std::min(y,marquee.startY), std::abs(dx)+1, std::abs(dy)+1};
-        hits = polygon_components_in_rect(*object,camera_,layout_.viewport,rect,polygonSelection_.mode,viewportSettings_.xraySelection);
+        hits = polygon_components_in_rect(*object,camera_,layout_.viewport,rect,polygonSelection_.mode,viewportSettings_.xraySelection,x < marquee.startX);
     }
     if (!viewportSettings_.xraySelection) std::erase_if(hits,[&](auto id) { return !polygon_component_visible(id); });
     select_polygon_components(hits,marquee.operation);
@@ -459,22 +459,12 @@ bool NativeEditorController::handle_polygon_action(std::string_view action) {
         else if (action=="polygon.select_invert") for (auto id:polygonSelection_.components) hits.erase(id);
         select_polygon_components(hits,SelectionOperation::Replace); return true;
     }
-    if (action=="polygon.select_shell") {
-        // Traverse face adjacency using geometric vertex identity across attribute seams.
-        auto faces=polygon_selected_faces(*object->polygon,polygonSelection_);
-        if (faces.empty()) return false;
-        std::map<std::tuple<float,float,float>,std::vector<std::uint32_t>> adjacency;
-        for (std::uint32_t f=0;f<object->polygon->indices.size()/3;++f) for (int j=0;j<3;++j) {
-            const auto p=object->polygon->vertices[object->polygon->indices[f*3+std::uint32_t(j)]].position;
-            adjacency[{p.x,p.y,p.z}].push_back(f);
-        }
-        std::queue<std::uint32_t> queue; for (auto f:faces) queue.push(f);
-        while (!queue.empty()) { const auto f=queue.front(); queue.pop(); for (int j=0;j<3;++j) {
-            const auto p=object->polygon->vertices[object->polygon->indices[f*3+std::uint32_t(j)]].position;
-            for (auto next:adjacency[{p.x,p.y,p.z}]) if (faces.insert(next).second) queue.push(next);
-        } }
-        polygonSelection_.mode=PolygonSelectionMode::Face; polygonSelection_.components={faces.begin(),faces.end()};
-        refresh_menu_state(); return true;
+    if (action=="polygon.select_shell" || action=="polygon.select_grow" || action=="polygon.select_shrink") {
+        const auto operation = action=="polygon.select_grow" ? PolygonSelectionEdit::Grow
+            : action=="polygon.select_shrink" ? PolygonSelectionEdit::Shrink : PolygonSelectionEdit::Connected;
+        const auto hits = edit_polygon_selection(*object->polygon,polygonSelection_,operation);
+        select_polygon_components(hits,SelectionOperation::Replace);
+        return true;
     }
     if (action=="edit.delete") return apply_polygon_edit(PolygonEdit::Delete);
     if (action=="edit.duplicate") { PolygonEditSettings settings; settings.vector={.1F,0,0}; return apply_polygon_edit(PolygonEdit::Duplicate,settings); }

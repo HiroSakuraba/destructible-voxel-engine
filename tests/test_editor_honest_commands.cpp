@@ -385,8 +385,8 @@ void test_honest_fallbacks() {
     check(!controller.dispatch_action("material.assign") && controller.status().error &&
               controller.status().text.find("Paint tool") != std::string::npos,
           "Material > Assign says what to use instead");
-    check(!controller.dispatch_action("polygon.extrude") && controller.status().text.find("Not in this editor yet") != std::string::npos,
-          "polygon tools say they are not available");
+    check(!controller.dispatch_action("polygon.extrude") && controller.status().text.find("Select polygon triangle faces") != std::string::npos,
+          "polygon tools explain the required component selection");
     check(!controller.dispatch_action("no.such.action") && controller.status().text.find("Not available") != std::string::npos,
           "unknown actions are not reported as done");
 }

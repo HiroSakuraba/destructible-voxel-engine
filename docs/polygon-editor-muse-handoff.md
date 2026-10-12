@@ -49,10 +49,19 @@ then CI). Fixes made on top of the original draft:
 - New regression test target: dve_editor_polygon_tests. These tests are written,
   not yet run on this exact tree.
 
-## Remaining native component wiring
+## Follow-up native component wiring
 
-Keep component controls disabled until this section is implemented and validated.
-Do not merely remove the disabled reasons in editor_context_only_commands.
+The follow-up in `docs/native-polygon-editing-2026-10-12.md` implements component
+selection, highlights, gizmos, history snapshots, clipboard, tool previews,
+materials, Join/Extract/Separate and world-axis Slice. The numbered list below is
+retained as the original design checklist; mouse-draggable arbitrary Slice planes
+and brush strokes are still outstanding. Consult the follow-up for actual scope
+and validation rather than treating this old checklist as current missing status.
+
+## Original native component wiring checklist
+
+Component controls must have working native handlers and validation before enablement;
+the follow-up supplies these handlers for the supported operations.
 
 1. Extend SelectionDomain with Polygons and give NativeEditorController a
    PolygonSelection. Extend EditorSelectionSnapshot with polygon domain, object,

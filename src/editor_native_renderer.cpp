@@ -3261,7 +3261,10 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     {
         // Selection domain chip (M toggles Objects / Voxels), when the toolbar has room for it.
         const bool voxels = controller.selection_domain() == SelectionDomain::Voxels;
-        const std::string chip = voxels ? "Selecting: VOXELS (" + std::to_string(controller.voxel_selection().size()) + ")  M objects"
+        const bool polygons=controller.selection_domain()==SelectionDomain::Polygons;
+        const auto& selectedPolygon=controller.polygon_selection();
+        const std::string component=selectedPolygon.mode==PolygonSelectionMode::Vertex?"Vertices":selectedPolygon.mode==PolygonSelectionMode::Edge?"Edges":"Faces";
+        const std::string chip = polygons ? component+" ("+std::to_string(selectedPolygon.components.size())+")  1/2/3/4 modes" : voxels ? "Selecting: VOXELS (" + std::to_string(controller.voxel_selection().size()) + ")  M objects"
                                         : "Selecting: Objects  M voxels";
         const int chipWidth = painter.text_width(chip) + 14;
         const int chipX = width - painter.text_width(mode) - 18 - 12 - chipWidth;
@@ -3519,6 +3522,55 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
     // Voxel selection: selected cells outlined in amber; while dragging the Move gizmo, a ghost of
     // where they will land.
+    if (controller.selection_domain()==SelectionDomain::Polygons && controller.viewport_settings().xraySelection)
+        for (const auto& item:polygonItems) if (item.selected) paintPolygon(item);
+    if (controller.selection_domain()==SelectionDomain::Polygons) {
+        const auto& selection=controller.polygon_selection();
+        const auto* object=controller.workspace().document().find_object(selection.object);
+        if (object && object->polygon && object->flags.visible && !controller.is_isolated_out(object->id)) {
+            const auto point=[&](std::uint32_t index) { return project_world_to_screen(controller.camera(),viewport,
+                voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[index].position)); };
+            const auto visible=[&](std::uint32_t index) {
+                if (controller.viewport_settings().xraySelection) return true;
+                const auto world=voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[index].position);
+                const auto p=point(index); if (!p.visible) return false;
+                const auto ray=make_viewport_ray(controller.camera(),viewport,p.x,p.y);
+                const float distance=length(subtract(world,ray.origin));
+                const auto hits=pick_editor_document_all(controller.workspace().document(),ray,distance+.002F,&controller.viewport_settings().isolatedObjects);
+                return hits.empty() || hits.front().worldDistance>=distance-.002F;
+            };
+            if (selection.mode==PolygonSelectionMode::Vertex) {
+                std::size_t count=0;
+                for (const auto id:polygon_all_components(*object->polygon,PolygonSelectionMode::Vertex)) {
+                    if (++count>20000) break;
+                    const auto p=point(std::uint32_t(id)); if (!p.visible||!visible(std::uint32_t(id))) continue;
+                    const bool selected=selection.components.contains(id);
+                    const int radius=selected?4:2;
+                    viewportPainter.fill({int(p.x)-radius,int(p.y)-radius,radius*2+1,radius*2+1},selected?rgb(255,155,45):rgb(165,180,200));
+                }
+            } else if (selection.mode==PolygonSelectionMode::Edge) {
+                std::size_t count=0;
+                for (const auto edge:polygon_edges(*object->polygon)) {
+                    if (++count>20000) break;
+                    const auto a=point(edge.a),b=point(edge.b);
+                    if (!a.visible||!b.visible||(!visible(edge.a)&&!visible(edge.b))) continue;
+                    const bool selected=selection.components.contains(edge.key());
+                    viewportPainter.line(int(std::clamp(a.x,-100000.0F,100000.0F)),int(std::clamp(a.y,-100000.0F,100000.0F)),
+                        int(std::clamp(b.x,-100000.0F,100000.0F)),int(std::clamp(b.y,-100000.0F,100000.0F)),
+                        selected?rgb(255,155,45):rgb(130,150,170),selected?3:1);
+                }
+            }
+        }
+    }
+    {
+        const auto lines=controller.polygon_preview_lines();
+        if (!lines.empty()) {
+            const int panelWidth=std::max(1,std::min(410,viewport.width-20));
+            viewportPainter.fill({viewport.x+10,viewport.y+10,panelWidth,int(lines.size())*22+16},rgb(24,32,45));
+            for (std::size_t i=0;i<lines.size();++i)
+                viewportPainter.text(viewport.x+20,viewport.y+32+int(i)*22,lines[i],rgb(235,220,190));
+        }
+    }
     if (!controller.voxel_selection().empty()) {
         const std::set<Int3>& cells = controller.voxel_selection();
         for (const EditorVoxelDrawItem& item : drawItems) {

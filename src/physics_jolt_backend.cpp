@@ -26,6 +26,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 #include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
@@ -583,7 +584,11 @@ struct JoltRigidBodyWorld::Impl final : public JPH::BodyActivationListener, publ
 
     [[nodiscard]] JPH::RefConst<JPH::Shape> build_shape(const RigidBodyCreateDesc& desc) const {
         JPH::RefConst<JPH::Shape> shape;
-        if (desc.boxes.size() == 1U && desc.boxes.front().center.x == 0.0F &&
+        if (!desc.convexHullPoints.empty()) {
+            JPH::Array<JPH::Vec3> points;for(auto p:desc.convexHullPoints)points.push_back(to_jolt_vec3(p));
+            JPH::ConvexHullShapeSettings settings(points,0.0F);const auto result=settings.Create();
+            if(result.HasError())return {};shape=result.Get();
+        } else if (desc.boxes.size() == 1U && desc.boxes.front().center.x == 0.0F &&
             desc.boxes.front().center.y == 0.0F && desc.boxes.front().center.z == 0.0F) {
             const SolverBox& box = desc.boxes.front();
             shape = new JPH::BoxShape(
@@ -617,6 +622,11 @@ struct JoltRigidBodyWorld::Impl final : public JPH::BodyActivationListener, publ
     [[nodiscard]] JPH::RefConst<JPH::Shape> build_static_shape(
         const StaticRigidBodyCreateDesc& desc) const {
         if (!validate_static_rigid_body_desc(desc)) return {};
+        if (!desc.convexHullPoints.empty()) {
+            JPH::Array<JPH::Vec3> points;for(auto p:desc.convexHullPoints)points.push_back(to_jolt_vec3(p));
+            JPH::ConvexHullShapeSettings settings(points,0.0F);const auto result=settings.Create();
+            if(result.HasError())return {};return result.Get();
+        }
         if (desc.boxes.size() == 1U && desc.boxes.front().center.x == 0.0F &&
             desc.boxes.front().center.y == 0.0F && desc.boxes.front().center.z == 0.0F) {
             const SolverBox& box = desc.boxes.front();

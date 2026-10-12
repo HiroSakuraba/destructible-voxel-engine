@@ -379,6 +379,7 @@ void NativeEditorController::set_gamepad_axes(std::array<float, 2> move, std::ar
 void NativeEditorController::clear_navigation_input() {
     finish_slice_pointer(true);
     cancel_polygon_preview();
+    cancel_mesh_authoring_drag();
     if (gizmoDragging_) finish_gizmo_drag(true);
     heldShortcutGestures_.clear();
     activePointerCommand_.clear();
@@ -2054,6 +2055,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
         checked("polygon.edge_mode",selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge);
         checked("polygon.face_mode",selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Face);
     }
+    refresh_mesh_authoring_menu_state();
     enabled("text3d.cancel", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     // Cook, Package and Documentation have no handler in this editor build: say so up front.
     enabled("build.cook", false, kCookUnavailable);
@@ -2686,7 +2688,7 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
     const SettingValue minutesValue = workspace_.settings().value("editor.autosave_minutes");
     const std::int64_t minutes = std::clamp<std::int64_t>(
         std::get_if<std::int64_t>(&minutesValue) ? std::get<std::int64_t>(minutesValue) : 5, 1, 120);
-    if (polygonPreviewBefore_ || polygonDragBefore_) return;
+    if (polygonPreviewBefore_ || polygonDragBefore_ || mesh_authoring_dragging()) return;
     if (autosaveInFlight_ || autosaveElapsedSeconds_ < static_cast<double>(minutes) * 60.0) return;
     autosaveElapsedSeconds_ = 0.0;
 
@@ -3726,6 +3728,7 @@ void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
 }
 
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
+    if(!longJob_ && textEdit_.kind==TextEditKind::Inactive && mesh_authoring_pointer_move(x,y,modifiers)){lastPointerX_=x;lastPointerY_=y;return;}
     hoverX_ = x;
     hoverY_ = y;
     if (sliceDrag_) {
@@ -3873,6 +3876,8 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
+       !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers))return;
     if (sliceDrag_) finish_slice_pointer(true);
     reset_camera_navigation();
     lastPointerX_ = x;
@@ -4712,6 +4717,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if(mesh_authoring_pointer_up(button,x,y,modifiers)){dragButton_=PointerButton::NoButton;return;}
     if (button == PointerButton::Primary && sliceDrag_) {
         update_slice_pointer(x, y, modifiers);
         finish_slice_pointer(false);
@@ -4890,6 +4896,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 }
 
 void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint32_t modifiers) {
+    if(!settingsPanel_.open && !longJob_ && mesh_authoring_wheel(steps,x,y))return;
     if (sliceDrag_) return;
     hoverX_ = x;
     hoverY_ = y;
@@ -5866,6 +5873,9 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (polygonPreviewBefore_ && !actionId.starts_with("view.") && actionId != "polygon.preview_apply" && actionId != "polygon.preview_cancel") {
         set_status("Apply or cancel the polygon preview first",true); return false;
     }
+    if(mesh_authoring_dragging() && !actionId.starts_with("view.")) {
+        set_status("Apply or cancel the mesh workspace preview first",true);return false;
+    }
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
         const auto value = actionId.substr(std::string_view("selection.pick.").size());
@@ -6108,6 +6118,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_selection_domain(selectionDomain_ == SelectionDomain::Objects ? SelectionDomain::Voxels : SelectionDomain::Objects);
         return true;
     }
+    if (actionId.starts_with("mesh.")) return dispatch_mesh_authoring_action(actionId);
     if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.create_plane" &&
         actionId != "polygon.lod" && actionId != "polygon.collision" && actionId != "polygon.streaming")
         return handle_polygon_action(actionId);
@@ -7518,6 +7529,8 @@ camera_menu_dispatch_complete:
 
 void NativeEditorController::key_down(std::string_view key, bool control, bool shift, bool alt) {
     const std::string normalized = lowercase(key);
+    if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
+       !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_key(normalized,control,shift,alt))return;
     if (polygonPreviewBefore_) { (void)handle_polygon_preview_key(normalized); return; }
     route_play_key(normalized, true);
     if (pending_destructive_confirmation()) {
@@ -8352,6 +8365,8 @@ std::vector<EditorPolygonDrawTriangle> NativeEditorController::polygon_draw_item
     const auto poses=playSession_.presentation_transforms();
     auto items = build_editor_polygon_draw_list(workspace_.document(),camera_,layout_.viewport,
         workspace_.selected_objects(),viewportSettings_.isolatedObjects,100000,&poses);
+    const auto hidden=mesh_authoring_hidden_objects();
+    std::erase_if(items,[&](const auto& item){return hidden.contains(item.object);});
     if (selectionDomain_ == SelectionDomain::Polygons) for (auto& item:items) {
         item.selected = item.object == polygonSelection_.object && polygonSelection_.mode == PolygonSelectionMode::Face &&
             polygonSelection_.components.contains(item.face);

@@ -35,6 +35,9 @@ struct StaticRigidBodyCreateDesc {
     RigidTransform transform{};
     std::vector<SolverBox> boxes{}; // meters, relative to the object origin
     RigidBodyCollisionClass collisionClass{RigidBodyCollisionClass::Full};
+    // Optional convex point cloud replaces the box shape in supported production backends.
+    // Boxes retain its bounds for the reference solver's approximate queries.
+    std::vector<Float3> convexHullPoints;
 };
 
 struct RigidBodyCreateDesc {
@@ -48,6 +51,9 @@ struct RigidBodyCreateDesc {
     bool allowSleeping{true};
     bool useContinuousCollision{};  // requests solver linear-cast / CCD motion quality
     RigidBodyCollisionClass collisionClass{RigidBodyCollisionClass::Full};
+    // Optional convex point cloud replaces the box shape in supported production backends.
+    // Boxes retain its bounds for the reference solver's approximate queries.
+    std::vector<Float3> convexHullPoints;
 };
 
 struct RigidBodyState {

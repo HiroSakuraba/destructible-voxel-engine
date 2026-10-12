@@ -1,5 +1,6 @@
 #include "dve/simulation_clock.hpp"
 #include "dve/editor_polygon.hpp"
+#include "dve/collision_hull.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/camera_runtime.hpp"
 
@@ -145,7 +146,7 @@ public:
                 for (const Component& component : object.components) {
                     hasMembership = hasMembership || component.type == "dve.membership";
                     std::string componentError;
-                    if (!world_->add_component(runtimeId, component, &componentError)) {
+                    if (!world_->add_component(runtimeId, object.polygon ? bake_collision_hull_component(component,object.voxelScale) : component, &componentError)) {
                         if (error) *error = "could not publish component on '" + object.name + "': " + componentError;
                         stop();
                         return false;

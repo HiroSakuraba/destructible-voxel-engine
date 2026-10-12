@@ -1,5 +1,6 @@
 #include "dve/editor_scene_export.hpp"
 #include "dve/editor_polygon.hpp"
+#include "dve/collision_hull.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <algorithm>
@@ -451,6 +452,7 @@ EditorSceneExportResult export_editor_scene(
             continue;
         }
         item.components = exportable_components(object, registry, warn, label(object));
+        if(object.polygon)for(auto& component:item.components)component=bake_collision_hull_component(std::move(component),object.voxelScale);
         if (object.prefabLink) {
             warn(label(object) + ": prefab link flattened (the current voxels are exported)");
         }

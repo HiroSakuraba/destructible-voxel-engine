@@ -76,6 +76,7 @@ set(DVE_JOLT_SOURCE_DIR "" CACHE PATH "Path to a JoltPhysics 5.5.x-5.6.x source 
 set(JOLT_INCLUDE_DIR "" CACHE PATH "Legacy: Jolt checkout root containing Jolt/Jolt.h")
 set(JOLT_LIBRARY "" CACHE FILEPATH "Legacy: built libJolt.a or Jolt.lib")
 set(DVE_JOLT_LEGACY_VERSION "" CACHE STRING "Required version for legacy Jolt include/library pairs (supported: 5.5.x-5.6.x)")
+option(DVE_ENABLE_MESH_AUTHORING "Build Manifold mesh Boolean and convex-hull authoring" ON)
 option(DVE_ENABLE_PRINT_EXPORT "Build the manifold-based watertight print export (STL)" ON)
 set(DVE_MANIFOLD_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/manifold" CACHE PATH "Path to a manifold3d v3.5.x source checkout")
 
@@ -181,6 +182,7 @@ add_library(dve_core
     src/runtime_gabor_volume_world.cpp
     src/hybrid_geometry_world.cpp
     src/polygon_collision.cpp
+    src/collision_hull.cpp
     src/polygon_bvh.cpp
     src/hybrid_scene_manifest.cpp
     src/runtime_scene.cpp
@@ -834,6 +836,10 @@ if(DVE_BUILD_EDITOR)
         src/editor_scatter.cpp
         src/editor_polygon.cpp
         src/editor_native_polygon.cpp
+        src/editor_native_mesh_authoring.cpp
+        src/editor_mesh_boolean.cpp
+        src/editor_topology.cpp
+        src/editor_uv.cpp
         src/editor_model_import.cpp
         src/editor_tools.cpp
         src/editor_workspace.cpp
@@ -977,7 +983,7 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_rc2d_tests PRIVATE dve::core)
     add_test(NAME dve_rc2d_tests COMMAND dve_rc2d_tests)
     set_tests_properties(dve_rc2d_tests PROPERTIES PROCESSORS 2)
-    if(TARGET manifold)
+    if(TARGET manifold AND DVE_ENABLE_PRINT_EXPORT)
         add_executable(dve_print_export_tests tests/test_print_export.cpp)
         target_link_libraries(dve_print_export_tests PRIVATE dve::core manifold)
         add_test(NAME dve_print_export_tests COMMAND dve_print_export_tests)
@@ -1589,7 +1595,7 @@ endif()
 
 # Optional manifold-based watertight print export. Vendored manifold3d lives in
 # third_party/manifold; point DVE_MANIFOLD_SOURCE_DIR elsewhere to use another checkout.
-if(DVE_ENABLE_PRINT_EXPORT)
+if(DVE_ENABLE_PRINT_EXPORT OR DVE_ENABLE_MESH_AUTHORING)
     if(NOT EXISTS "${DVE_MANIFOLD_SOURCE_DIR}/CMakeLists.txt")
         message(WARNING "DVE_ENABLE_PRINT_EXPORT=ON but no manifold3d sources at ${DVE_MANIFOLD_SOURCE_DIR}; print export disabled")
         set(DVE_ENABLE_PRINT_EXPORT OFF)
@@ -1600,9 +1606,15 @@ if(DVE_ENABLE_PRINT_EXPORT)
         set(MANIFOLD_CBIND OFF CACHE BOOL "" FORCE)
         set(MANIFOLD_PYBIND OFF CACHE BOOL "" FORCE)
         add_subdirectory("${DVE_MANIFOLD_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/manifold-build" EXCLUDE_FROM_ALL)
-        target_sources(dve_core PRIVATE src/print_export.cpp)
-        target_link_libraries(dve_core PRIVATE manifold)
-        target_compile_definitions(dve_core PUBLIC DVE_HAVE_MANIFOLD=1)
+        if(DVE_ENABLE_PRINT_EXPORT)
+            target_sources(dve_core PRIVATE src/print_export.cpp)
+            target_link_libraries(dve_core PRIVATE manifold)
+            target_compile_definitions(dve_core PUBLIC DVE_HAVE_MANIFOLD=1)
+        endif()
+        if(DVE_ENABLE_MESH_AUTHORING AND TARGET dve_editor)
+            target_link_libraries(dve_editor PRIVATE manifold)
+            target_compile_definitions(dve_editor PRIVATE DVE_HAVE_MESH_AUTHORING=1)
+        endif()
     endif()
 endif()
 
@@ -2733,6 +2745,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_snap_scale_tests tests/test_editor_snap_scale.cpp)
         target_link_libraries(dve_editor_snap_scale_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_snap_scale_tests COMMAND dve_editor_snap_scale_tests)
+        add_executable(dve_editor_mesh_authoring_tests tests/test_editor_mesh_authoring.cpp)
+        target_link_libraries(dve_editor_mesh_authoring_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_mesh_authoring_tests COMMAND dve_editor_mesh_authoring_tests)
         add_executable(dve_editor_native_polygon_tests tests/test_editor_native_polygon.cpp)
         target_link_libraries(dve_editor_native_polygon_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_native_polygon_tests COMMAND dve_editor_native_polygon_tests)

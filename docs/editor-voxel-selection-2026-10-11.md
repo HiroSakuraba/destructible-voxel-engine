@@ -22,14 +22,21 @@ there. Selected voxels are outlined in amber.
 | --- | --- |
 | Click a voxel | Its face-connected piece |
 | Click empty space | Clears the selection |
-| Drag a box | Voxels whose centres fall in the box and that have an exposed face turned towards the camera (what you can see). With **View > X-Ray Selection** on: every voxel in the box, through the object. |
-| Ctrl+Shift-drag | Brush: adds the voxels in a cube of the voxel brush size (`[` / `]`) under the cursor |
+| Left-to-right box | Cells whose whole projected volume is contained in the box. |
+| Right-to-left box | Cells whose projected volume touches the box, including clipped cells. |
+| Voxel > Selection Brush | Toggle explicit brush selection with Select: drag adds, Ctrl-drag removes; `[` / `]` changes radius. Toggle it off to use boxes. |
 | Shift + click or box | Adds |
-| Ctrl + click or box | Removes |
+| Ctrl + click or box | Toggles |
+| Ctrl+Shift + click or box | Intersects |
+
+Without **View > X-Ray Selection**, cells need an exposed camera-facing face. This is a surface
+filter, not scene occlusion: another object or concave surface can still hide a candidate.
 
 Alt is not used because Alt+drag orbits the camera in the default navigation.
 
-Rotate and Scale have no voxel gizmo; their hint says to press M.
+Rotate and Scale have no voxel gizmo. Use **Voxel > Voxel Region Editing** for grid-aligned
+quarter turns, integer scaling and directional extrusion; see
+[region tool details](editor-voxel-region-tools-2026-10-12.md).
 
 ## Operations
 

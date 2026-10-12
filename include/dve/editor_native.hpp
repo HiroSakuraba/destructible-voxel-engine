@@ -958,6 +958,8 @@ public:
     bool copy_selected_voxels(bool cut);
     bool paste_voxels();
     bool move_selected_voxels(Int3 offset);
+    bool edit_selected_voxel_region(VoxelRegionEdit edit, VoxelRegionSettings settings);
+    [[nodiscard]] std::string voxel_region_disabled_reason() const;
     // During a Move-gizmo drag in the Voxel domain: the whole-voxel offset the release applies.
     [[nodiscard]] std::optional<Int3> voxel_move_preview() const noexcept;
     [[nodiscard]] bool voxel_brush_selecting() const noexcept { return voxelBrushSelecting_; }
@@ -1118,6 +1120,10 @@ private:
     std::set<Int3> voxelSelection_;
     std::uint64_t voxelSelectionRevision_{};
     bool voxelBrushSelecting_{};
+    bool voxelSelectionBrushEnabled_{};
+    std::optional<Int3> voxelRegionRotationPivot_;
+    EditorObjectId voxelRegionRotationObject_{};
+    std::uint64_t voxelRegionRotationSerial_{};
     SelectionOperation voxelBrushOperation_{SelectionOperation::Add};
     int voxelMoveAxis_{};
     int voxelMoveStartX_{};

@@ -18,6 +18,7 @@ c++ -std=c++23 -O1 -g -Wall -Wextra -Wpedantic -Werror $sanitize_flags \
     "$repo_dir/src/animation.cpp" \
     "$repo_dir/src/transform.cpp" \
     "$repo_dir/src/rigid_body_adapter.cpp" \
+    "$repo_dir/src/collision_hull.cpp" \
     -pthread -o "$output_path"
 
 "$output_path"

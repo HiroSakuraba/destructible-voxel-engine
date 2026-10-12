@@ -1,9 +1,29 @@
 # Polygon editor draft and Muse handoff
 
-This is a draft, not a completed or validated polygon editor release. The execution
-environment stopped responding during native wiring. The last local editor build
-completed earlier in development; this exact published tree has not been compiled
-or tested. No passing-test claim applies to this branch.
+This is a draft, not a completed polygon editor release. The execution environment
+stopped responding during native wiring; the original tree was published untested.
+See "Status after the first CI run" below for what has since been built, tested and fixed.
+
+## Status after the first CI run (follow-up fixes)
+
+The tree has since been built and tested (Linux Release locally with the full ctest suite,
+then CI). Fixes made on top of the original draft:
+
+- Slice caps: ear clipping now treats a loop vertex lying on the new diagonal as blocking,
+  so collinear contour points (e.g. a cube cut through its face diagonals) no longer leave a
+  zero-area remainder and the back half of a capped slice is produced.
+- The viewport preview clips triangles against the near plane and keeps triangles that are
+  partly off screen; a large plane near the camera no longer disappears. Faces are shaded by
+  their angle to the view.
+- Honest commands (#101/#103): the component tools stay disabled with a "Not in this editor
+  yet: polygon mesh editing ..." reason. Create > Polygon Cube and Polygon > Create Mesh Plane
+  are real commands (one undo step, disabled with a reason during Play, new objects stay
+  visible while isolated). Polygon > Import Polygon Model refuses with the Assets-panel reason
+  when nothing is selected and imports owned meshes (DMESH/OBJ/glTF/GLB) as a cancellable job.
+- Scenes are written as format 7 only when they contain owned polygon objects; other scenes
+  stay format 6 (with the #109 axis scale), so older editors can still open them.
+- Validate no longer reports owned polygon objects as empty voxel objects; Flood Fill refuses
+  polygon objects explicitly.
 
 ## Code in this draft
 

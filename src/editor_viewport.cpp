@@ -1,4 +1,5 @@
 #include "dve/editor_viewport.hpp"
+#include "dve/editor_polygon.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include "dve/job_system.hpp"
@@ -330,6 +331,16 @@ EditorObjectBounds object_world_bounds(const EditorObject& object) noexcept {
 
 EditorObjectBounds object_world_bounds(const EditorObject& object, const RigidTransform& pose) noexcept {
     EditorObjectBounds result;
+    if (object.polygon) {
+        const auto corners=bounds_corners(object.polygon->bounds.minimum,object.polygon->bounds.maximum);
+        result.minimum={INFINITY,INFINITY,INFINITY};result.maximum={-INFINITY,-INFINITY,-INFINITY};
+        for (auto point:corners) {
+            point=voxel_to_world(pose,object.voxelScale,point);
+            result.minimum={std::min(result.minimum.x,point.x),std::min(result.minimum.y,point.y),std::min(result.minimum.z,point.z)};
+            result.maximum={std::max(result.maximum.x,point.x),std::max(result.maximum.y,point.y),std::max(result.maximum.z,point.z)};
+        }
+        result.valid=true;return result;
+    }
     if (object.text3d || object.gaborVolume) {
         const Float3 localMinimum = object.text3d ? object.text3d->bounds.minimum : object.gaborVolume->boundsMinimum;
         const Float3 localMaximum = object.text3d ? object.text3d->bounds.maximum : object.gaborVolume->boundsMaximum;
@@ -408,6 +419,25 @@ bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& 
     const Projected broad = project_box(world.minimum, world.maximum, true);
     if (!overlaps(broad)) return false;
     if (contain && contained(broad)) return true;
+    if (object.polygon) {
+        bool any=false;
+        for (std::size_t i=0;i<object.polygon->indices.size();i+=3) {
+            Projected projected;projected.left=projected.top=INFINITY;
+            projected.right=projected.bottom=-INFINITY;projected.fullyVisible=true;
+            for (int j=0;j<3;++j) {
+                const auto local=object.polygon->vertices[object.polygon->indices[i+std::size_t(j)]].position;
+                const auto screen=project_world_to_screen(camera,viewport,voxel_to_world(object.transform,object.voxelScale,local));
+                if (!screen.visible) {projected.fullyVisible=false;continue;}
+                projected.valid=true;
+                projected.left=std::min(projected.left,screen.x);projected.right=std::max(projected.right,screen.x);
+                projected.top=std::min(projected.top,screen.y);projected.bottom=std::max(projected.bottom,screen.y);
+            }
+            if (!contain && overlaps(projected)) return true;
+            if (contain && !contained(projected)) return false;
+            any=any||projected.valid;
+        }
+        return contain && any;
+    }
     if (!object.voxels || object.voxels->occupied_voxel_count() == 0)
         return contain ? contained(broad) : overlaps(broad);
 
@@ -450,6 +480,14 @@ std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& doc
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible) continue;
         if (onlyObjects && !onlyObjects->empty() && !onlyObjects->contains(id)) continue;
+        if (object.polygon) {
+            const auto hit=pick_editor_polygon(object,ray,maximumWorldDistance);
+            if (hit) {
+                EditorPickResult picked{id,{}, {},static_cast<MaterialId>(std::min(hit->materialIndex,255U)),hit->position,hit->normal,hit->distance};
+                picked.polygonFace=hit->triangleIndex;hits.push_back(picked);
+            }
+            continue;
+        }
         if (object.text3d || object.gaborVolume) {
             const Float3 localMinimum = object.text3d ? object.text3d->bounds.minimum : object.gaborVolume->boundsMinimum;
             const Float3 localMaximum = object.text3d ? object.text3d->bounds.maximum : object.gaborVolume->boundsMaximum;
@@ -919,6 +957,7 @@ std::uint64_t editor_scene_render_fingerprint(const EditorDocument& document) no
         hash.f3(object.transform.position);
         hash.f32(object.transform.rotation.x); hash.f32(object.transform.rotation.y);
         hash.f32(object.transform.rotation.z); hash.f32(object.transform.rotation.w);
+        hash.u64(object.polygon?object.polygon->contentHash:0);
         hash.f32(object.voxelSizeMeters);
         hash.f32(object.voxelScale.x); hash.f32(object.voxelScale.y); hash.f32(object.voxelScale.z);
         hash.u64(reinterpret_cast<std::uintptr_t>(object.voxels.get()));

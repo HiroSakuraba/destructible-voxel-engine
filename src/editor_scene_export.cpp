@@ -1,4 +1,5 @@
 #include "dve/editor_scene_export.hpp"
+#include "dve/editor_polygon.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <algorithm>
@@ -401,6 +402,8 @@ EditorSceneExportResult export_editor_scene(
             skip = "is hidden (DVOXSCENE v1 has no disabled flag)";
         } else if (!(object.voxelSizeMeters > 0.0F) || !std::isfinite(object.voxelSizeMeters) || !valid_voxel_metric(object.voxelScale)) {
             return fail(label(object) + " has an invalid voxel size");
+        } else if (object.polygon) {
+            item.kind=EditorSceneExportKind::Polygon;
         } else if (object.is_text3d()) {
             item.kind = EditorSceneExportKind::BakedText3D;
             std::string bakeError;
@@ -484,7 +487,10 @@ EditorSceneExportResult export_editor_scene(
             const std::string fileName = std::to_string(object.id) + ".dmesh";
             const std::filesystem::path target = objectFolder / fileName;
             const std::filesystem::path temporary = target.string() + ".tmp";
-            {
+            if (object.polygon) {
+                std::string meshError;
+                if (!write_dmesh(temporary,bake_editor_polygon(object),&meshError)) return fail(meshError);
+            } else {
                 std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
                 if (!output || !output.write(item.polygonBytes.data(), static_cast<std::streamsize>(item.polygonBytes.size())))
                     return fail("could not write " + temporary.string());

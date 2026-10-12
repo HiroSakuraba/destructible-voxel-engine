@@ -94,7 +94,7 @@ constexpr float kScatterMinVoxelSizeMeters = 0.001F;
 constexpr float kScatterMaxVoxelSizeMeters = 10.0F;
 
 bool scales_with_voxel_size(const EditorObject& object) noexcept {
-    return object.voxels != nullptr && !object.text3d && !object.gaborVolume;
+    return object.voxels != nullptr && !object.polygon && !object.text3d && !object.gaborVolume;
 }
 
 } // namespace
@@ -140,7 +140,7 @@ ScatterPlan plan_scatter(const EditorDocument& document, const std::vector<Edito
     for (const EditorObjectId target : targets) {
         const EditorObject* surface = document.find_object(target);
         if (!surface) { plan.error = "A target surface no longer exists"; return plan; }
-        if (!surface->voxels || surface->voxels->occupied_voxel_count() == 0 || surface->text3d || surface->gaborVolume) {
+        if (!surface->polygon && (!surface->voxels || surface->voxels->occupied_voxel_count() == 0 || surface->text3d || surface->gaborVolume)) {
             plan.error = targets.size() == 1 ? "The target must be a voxel object with voxels to scatter onto"
                                              : "Every surface must be a voxel object with voxels ('" + surface->name + "' is not)";
             return plan;
@@ -198,7 +198,7 @@ ScatterPlan plan_scatter(const EditorDocument& document, const std::vector<Edito
             return dx * dx + dz * dz < spacingSquared;
         });
         if (crowded) { ++plan.tooClose; continue; }
-        plan.samples.push_back({hit.worldPosition, slope_normal(hit, surface->probe, drop), source});
+        plan.samples.push_back({hit.worldPosition, document.find_object(surface->id)->polygon ? normalize(hit.worldNormal) : slope_normal(hit, surface->probe, drop), source});
     }
     assign_scatter_variation(plan.samples, 0, clean.seed, clean.yawJitterDegrees, clean.minScale, clean.maxScale);
     return plan;
@@ -270,6 +270,7 @@ ScatterCopiesResult append_scatter_copies(CompoundCommand& command, EditorDocume
             if (scale != 1.0F) {
                 // Only plain voxel objects grow with their voxel size; 3D text and Gabor volumes
                 // would just be re-voxelized coarser at the same size, so they keep theirs.
+                if (copy.polygon) copy.voxelScale=multiply(copy.voxelScale,scale);
                 if (scales_with_voxel_size(copy)) copy.voxelSizeMeters *= scale;
                 if (copy.attachment)
                     copy.attachment->localTransform.position = multiply(copy.attachment->localTransform.position, scale);

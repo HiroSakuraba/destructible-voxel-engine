@@ -102,6 +102,7 @@ std::filesystem::path instance_prefab_reference(
 }
 
 void remap_embedded_object_id(EditorObject& object, EditorObjectId id) {
+    if (object.polygon) {object.polygon->objectId=id;object.polygon->contentHash=polygon_asset_content_hash(*object.polygon);}
     if (!object.text3d) return;
     object.text3d->objectId = id;
     object.text3d->sideMesh.objectId = id;
@@ -319,6 +320,7 @@ std::uint64_t editor_prefab_content_hash(const EditorPrefabAsset& prefab) noexce
         for (const std::string& tag : object.tags) hash = hash_text(hash, tag);
         for (const std::string& group : object.groups) hash = hash_text(hash, group);
         hash = hash_text(hash, object.sourceAsset.generic_string());
+        hash = hash_value(hash,object.polygon?object.polygon->contentHash:0);
         hash = hash_value(hash, object.voxelSizeMeters);
         hash = hash_float3(hash,object.voxelScale);
         if (object.attachment) {
@@ -628,6 +630,10 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
             if (!object_has_override(*target, "flags.collision_enabled")) target->flags.collisionEnabled = source.flags.collisionEnabled;
             if (!object_has_override(*target, "flags.decorative")) target->flags.decorative = source.flags.decorative;
             if (!object_has_override(*target,"voxel.scale")) target->voxelScale=source.voxelScale;
+            if (!object_has_override(*target,"polygon.geometry")) {
+                target->polygon=source.polygon;
+                if (target->polygon) {target->polygon->objectId=target->id;target->polygon->contentHash=polygon_asset_content_hash(*target->polygon);}
+            }
             target->tags = source.tags;
             target->groups = source.groups;
             target->layer = source.layer;

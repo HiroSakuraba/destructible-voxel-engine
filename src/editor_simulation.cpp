@@ -1,4 +1,5 @@
 #include "dve/editor_simulation.hpp"
+#include "dve/voxel_axis_physics.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -38,7 +39,7 @@ namespace {
     return table;
 }
 
-[[nodiscard]] SolverBox voxel_box_to_solver_box(const VoxelBox& box, float voxelSizeMeters) noexcept {
+[[nodiscard]] SolverBox voxel_box_to_solver_box(const VoxelBox& box, float voxelSizeMeters, Float3 axes) noexcept {
     const Float3 minimum{
         static_cast<float>(box.min.x) * voxelSizeMeters,
         static_cast<float>(box.min.y) * voxelSizeMeters,
@@ -47,7 +48,8 @@ namespace {
         static_cast<float>(box.maxExclusive.x) * voxelSizeMeters,
         static_cast<float>(box.maxExclusive.y) * voxelSizeMeters,
         static_cast<float>(box.maxExclusive.z) * voxelSizeMeters};
-    return {multiply(add(minimum, maximum), 0.5F), multiply(subtract(maximum, minimum), 0.5F)};
+    return {multiply_components(multiply(add(minimum, maximum), 0.5F),axes),
+        multiply_components(multiply(subtract(maximum, minimum), 0.5F),axes)};
 }
 
 // Builds a dynamic RigidBodyCreateDesc for a non-anchored object. The fragment package is
@@ -77,13 +79,14 @@ namespace {
         densityQuantum * static_cast<double>(voxelSizeMeters) * voxelSizeMeters * voxelSizeMeters,
         voxelSizeMeters};
     std::optional<RigidBodyCreateDesc> desc = make_rigid_body_desc(package, scale);
-    if (!desc) return std::nullopt;
+    if (!desc || !scale_voxel_body(*desc,object.transform,
+        multiply(package.mass.centerOfMass,voxelSizeMeters),object.voxelScale)) return std::nullopt;
 
     desc->collisionClass =
         object.flags.structural ? RigidBodyCollisionClass::Full : RigidBodyCollisionClass::DebrisNoSelf;
     if (!validate_rigid_body_desc(*desc)) return std::nullopt;
 
-    outLocalCenterOfMassMeters = multiply(package.mass.centerOfMass, voxelSizeMeters);
+    outLocalCenterOfMassMeters = multiply_components(multiply(package.mass.centerOfMass, voxelSizeMeters),object.voxelScale);
     return desc;
 }
 
@@ -96,7 +99,7 @@ namespace {
     desc.transform = object.transform;
     desc.collisionClass = RigidBodyCollisionClass::Full;
     desc.boxes.reserve(boxes.size());
-    for (const VoxelBox& box : boxes) desc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters));
+    for (const VoxelBox& box : boxes) desc.boxes.push_back(voxel_box_to_solver_box(box, object.voxelSizeMeters,object.voxelScale));
     if (!validate_static_rigid_body_desc(desc)) return std::nullopt;
     return desc;
 }

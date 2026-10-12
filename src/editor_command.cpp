@@ -1,4 +1,5 @@
 #include "dve/editor_command.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <algorithm>
 #include <map>
@@ -203,12 +204,18 @@ CommandResult ScaleVoxelSizeCommand::apply(EditorDocument& document, bool forwar
         if (object->flags.locked) return CommandResult::fail("scale target is locked");
         const float size = forward ? change.afterVoxelSize : change.beforeVoxelSize;
         if (!std::isfinite(size) || !(size > 0.0F)) return CommandResult::fail("scaled voxel size is invalid");
+        if (change.beforeAxisScale.has_value()!=change.afterAxisScale.has_value())
+            return CommandResult::fail("axis scale history is incomplete");
+        const auto axes = forward ? change.afterAxisScale : change.beforeAxisScale;
+        if (axes && !valid_voxel_metric(*axes)) return CommandResult::fail("axis scale is invalid");
         if (!valid_transform(forward ? change.after : change.before))
             return CommandResult::fail("transform is not finite or has an invalid rotation");
     }
     for (const ObjectVoxelSizeChange& change : changes_) {
         EditorObject* object = document.find_object(change.id);
         object->voxelSizeMeters = forward ? change.afterVoxelSize : change.beforeVoxelSize;
+        const auto axes = forward ? change.afterAxisScale : change.beforeAxisScale;
+        if (axes) object->voxelScale = *axes;
         if (!document.set_world_transform(change.id, forward ? change.after : change.before))
             return CommandResult::fail("failed to apply object transform");
     }

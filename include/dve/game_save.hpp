@@ -47,7 +47,7 @@
 
 namespace dve {
 
-inline constexpr std::uint32_t kGameSaveSchemaVersion = 3U;
+inline constexpr std::uint32_t kGameSaveSchemaVersion = 4U;
 inline constexpr std::string_view kGameSaveExtension = ".dvesave";
 
 struct GameSaveLimits {
@@ -149,7 +149,7 @@ public:
     [[nodiscard]] const SaveGameStore& store() const noexcept { return store_; }
     // Games (and tests) register document migrations for older schema versions here; every
     // read and decode runs them before interpreting the sections. The codec registers the
-    // engine's own v1 -> v2 and v2 -> v3 steps itself.
+    // engine's own v1 -> v2 -> v3 -> v4 steps itself.
     [[nodiscard]] bool register_migration(
         std::uint32_t fromVersion, SaveGameMigration migration, std::string* error = nullptr);
 

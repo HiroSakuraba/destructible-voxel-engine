@@ -41,6 +41,7 @@ class EditorVoxelSliceSession {
     std::uint64_t voxelRevision_{};
     RigidTransform transform_{};
     float voxelSize_{};
+    Float3 voxelScale_{1,1,1};
     std::vector<Int3> anchors_;
     std::vector<VoxelSliceCell> cells_;
 };

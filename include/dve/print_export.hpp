@@ -17,6 +17,7 @@ struct PrintExportOptions {
     // Extra uniform scale applied on top of voxelSizeMeters (e.g. to print a
     // miniature at half scale).
     double scale = 1.0;
+    Float3 voxelScale{1,1,1};
 };
 
 // The solid/air boundary surface of a voxel model as a plain triangle soup.

@@ -1,5 +1,9 @@
 # Continuous uniform scaling and split selection history
 
+Historical PR #108 behavior is recorded below. The axis-scale follow-up is documented
+in `voxel-axis-scale-editor-runtime.md`; ordinary handles now change local axes and
+Alt during dragging keeps uniform scaling available.
+
 Ordinary Scale gizmo drags now resize voxel objects continuously and uniformly,
 using the existing world voxel size. Drag any handle or type a factor such as 1.3.
 The scene previews its actual geometry, not just a resampled bounds estimate.

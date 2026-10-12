@@ -1,4 +1,5 @@
 #include "dve/editor_viewport.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include "dve/job_system.hpp"
 
@@ -41,7 +42,7 @@ Float3 voxel_center_world(const EditorObject& object, Int3 voxel, const RigidTra
         (static_cast<float>(voxel.y) + 0.5F) * size,
         (static_cast<float>(voxel.z) + 0.5F) * size,
     };
-    return transform_point(pose ? *pose : object.transform, local);
+    return transform_point(pose ? *pose : object.transform, multiply_components(local,object.voxelScale));
 }
 
 
@@ -356,7 +357,7 @@ EditorObjectBounds object_world_bounds(const EditorObject& object, const RigidTr
     result.minimum = {std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity()};
     result.maximum = {-std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()};
     for (Float3 corner : corners) {
-        const Float3 world = transform_point(pose, corner);
+        const Float3 world = transform_point(pose, multiply_components(corner,object.voxelScale));
         result.minimum = {std::min(result.minimum.x, world.x), std::min(result.minimum.y, world.y), std::min(result.minimum.z, world.z)};
         result.maximum = {std::max(result.maximum.x, world.x), std::max(result.maximum.y, world.y), std::max(result.maximum.z, world.z)};
     }
@@ -380,7 +381,7 @@ bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& 
             Float3 point{(corner & 1) ? maximum.x : minimum.x,
                          (corner & 2) ? maximum.y : minimum.y,
                          (corner & 4) ? maximum.z : minimum.z};
-            if (!worldSpace) point = transform_point(object.transform, point);
+            if (!worldSpace) point = transform_point(object.transform, multiply_components(point,object.voxelScale));
             const ScreenPoint screen = project_world_to_screen(camera, viewport, point);
             if (!screen.visible) { result.fullyVisible = false; continue; }
             result.valid = true;
@@ -476,11 +477,13 @@ std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& doc
             continue;
         }
         if (object.voxelSizeMeters <= 0.0F || object.voxels->brick_count() == 0) continue;
-        const float inverseScale = 1.0F / object.voxelSizeMeters;
+        const Float3 spacing = multiply(object.voxelScale,object.voxelSizeMeters);
+        if (!valid_voxel_metric(spacing)) continue;
         const Float3 localOriginMeters = inverse_transform_point(object.transform, ray.origin);
         const Float3 localDirection = inverse_transform_vector(object.transform, worldDirection);
-        const Float3 localOriginVoxels = multiply(localOriginMeters, inverseScale);
-        const Float3 localDirectionVoxels = multiply(localDirection, inverseScale);
+        const Float3 localOriginVoxels = divide_components(localOriginMeters,spacing);
+        const Float3 localDirectionVoxels = divide_components(localDirection,spacing);
+        const float rayMetric = length(localDirectionVoxels);
         const LocalVoxelBounds broad = local_voxel_bounds(object);
         float enterWorld = 0.0F;
         float exitWorld = maximumWorldDistance;
@@ -494,12 +497,12 @@ std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& doc
         const Float3 clippedOriginVoxels = add(localOriginVoxels, multiply(localDirectionVoxels, startWorld));
         const float segmentWorld = exitWorld - startWorld + epsilonWorld;
         const auto hit = raycast_voxels(*object.voxels, clippedOriginVoxels, localDirectionVoxels,
-                                        segmentWorld * inverseScale);
+                                        segmentWorld * rayMetric);
         if (!hit) continue;
-        const float worldDistance = startWorld + hit->distance * object.voxelSizeMeters;
+        const float worldDistance = startWorld + hit->distance / rayMetric;
         const Float3 normalizedLocalDirection = safe_normalize(localDirectionVoxels, {0,0,-1});
         const Float3 localHitVoxels = add(clippedOriginVoxels, multiply(normalizedLocalDirection, hit->distance));
-        const Float3 localHitMeters = multiply(localHitVoxels, object.voxelSizeMeters);
+        const Float3 localHitMeters = multiply_components(localHitVoxels,spacing);
         const Float3 localNormal{static_cast<float>(hit->normal.x), static_cast<float>(hit->normal.y), static_cast<float>(hit->normal.z)};
         hits.push_back(EditorPickResult{
             id,
@@ -507,7 +510,7 @@ std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& doc
             hit->normal,
             hit->material,
             transform_point(object.transform, localHitMeters),
-            safe_normalize(transform_vector(object.transform, localNormal), {0,1,0}),
+            voxel_normal_to_world(object.transform, spacing, localNormal),
             worldDistance,
         });
     }
@@ -621,6 +624,7 @@ Bitset512 exposed_voxel_mask(const VoxelObject& voxels, BrickKey key, const Bric
 // Checked at the object's nearest depth, where voxels project largest. When any of
 // this fails, every voxel of the object is drawn as before.
 bool surface_splats_cover_object(const EditorObject& object, const EditorCamera& camera, UiRect viewport, const RigidTransform* pose = nullptr) noexcept {
+    if (!unit_voxel_scale(object.voxelScale)) return false;
     if (viewport.width <= 0 || viewport.height <= 0 || !(object.voxelSizeMeters > 0.0F)) return false;
     const float width = static_cast<float>(viewport.width);
     const float height = static_cast<float>(viewport.height);
@@ -848,10 +852,24 @@ std::vector<EditorVoxelDrawItem> build_voxel_draw_list(
                 } else {
                     radius = object.voxelSizeMeters * viewportHeight / std::max(0.001F, camera.orthographicHeight);
                 }
+                float extentX=0,extentY=0;
+                if (!unit_voxel_scale(object.voxelScale)) {
+                    float left=screen.x,right=screen.x,top=screen.y,bottom=screen.y;
+                    for (int corner=0;corner<8;++corner) {
+                        const Float3 p{float(voxel.x+((corner&1)?1:0)),float(voxel.y+((corner&2)?1:0)),float(voxel.z+((corner&4)?1:0))};
+                        const auto projected=project_with(projector,voxel_to_world(pose?*pose:object.transform,
+                            multiply(object.voxelScale,object.voxelSizeMeters),p));
+                        if (!projected.visible) continue;
+                        left=std::min(left,projected.x); right=std::max(right,projected.x);
+                        top=std::min(top,projected.y); bottom=std::max(bottom,projected.y);
+                    }
+                    extentX=std::max(1.0F,(right-left)*0.5F);
+                    extentY=std::max(1.0F,(bottom-top)*0.5F);
+                }
                 (void)materials;
                 result.push_back({id, voxel, brick.material(index), screen.x, screen.y, screen.depth,
                                   std::clamp(radius * 0.72F, 1.0F, 12.0F),
-                                  selected, anchorMask && anchorMask->test(index)});
+                                  selected, anchorMask && anchorMask->test(index),extentX,extentY});
             });
             if (result.size() >= settings.maximumDrawVoxels) break;
         }
@@ -902,6 +920,7 @@ std::uint64_t editor_scene_render_fingerprint(const EditorDocument& document) no
         hash.f32(object.transform.rotation.x); hash.f32(object.transform.rotation.y);
         hash.f32(object.transform.rotation.z); hash.f32(object.transform.rotation.w);
         hash.f32(object.voxelSizeMeters);
+        hash.f32(object.voxelScale.x); hash.f32(object.voxelScale.y); hash.f32(object.voxelScale.z);
         hash.u64(reinterpret_cast<std::uintptr_t>(object.voxels.get()));
         if (object.voxels) {
             // The voxel revision changes on every content mutation and is unique per

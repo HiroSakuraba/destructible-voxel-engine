@@ -177,6 +177,7 @@ std::uint64_t EditorVoxelBooleanSession::participants_fingerprint(const EditorDo
         if (!object) { hash.u64(0xDEADU); return; }
         hash.u64(object->voxels ? object->voxels->revision() : 0U);
         hash.f32(object->voxelSizeMeters);
+        hash.f32(object->voxelScale.x); hash.f32(object->voxelScale.y); hash.f32(object->voxelScale.z);
         hash.f32(object->transform.position.x); hash.f32(object->transform.position.y); hash.f32(object->transform.position.z);
         hash.f32(object->transform.rotation.x); hash.f32(object->transform.rotation.y);
         hash.f32(object->transform.rotation.z); hash.f32(object->transform.rotation.w);
@@ -206,7 +207,7 @@ void EditorVoxelBooleanSession::recompute(const EditorDocument& document) {
         if (!operand) return;
         operandAnchors.emplace_back(operand->anchors.begin(), operand->anchors.end());
         volumes.push_back({operand->voxels.get(), operand->transform, operand->voxelSizeMeters,
-                           operandAnchors.back(), operand->name});
+                           operandAnchors.back(), operand->name,operand->voxelScale});
     }
     VoxelBooleanOptions options;
     options.operation = operation_;
@@ -214,7 +215,7 @@ void EditorVoxelBooleanSession::recompute(const EditorDocument& document) {
     options.collectOverlapCells = true;
     options.maximumOverlapCells = 32768;
     result_ = compute_voxel_boolean({target->voxels.get(), target->transform, target->voxelSizeMeters,
-                                     targetAnchors, target->name},
+                                     targetAnchors, target->name,target->voxelScale},
                                     volumes, options);
 }
 

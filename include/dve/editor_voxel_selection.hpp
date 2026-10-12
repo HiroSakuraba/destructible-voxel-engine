@@ -66,6 +66,7 @@ inline constexpr std::size_t kMaxVoxelSelection = 500'000;
 struct VoxelClipboard {
     std::string name;
     float voxelSizeMeters{0.1F};
+    Float3 voxelScale{1,1,1};
     RigidTransform transform{};
     std::optional<EditorObjectId> parent;
     EditorObjectFlags flags{};

@@ -266,6 +266,9 @@ std::uint64_t EditorVoxelJoinSession::fingerprint(const EditorDocument& document
         if (!object) { mix(0xDEAD); continue; }
         mix(object->voxels ? object->voxels->revision() : 0U);
         mix(std::bit_cast<std::uint32_t>(object->voxelSizeMeters));
+        mix(std::bit_cast<std::uint32_t>(object->voxelScale.x));
+        mix(std::bit_cast<std::uint32_t>(object->voxelScale.y));
+        mix(std::bit_cast<std::uint32_t>(object->voxelScale.z));
         for (const float f : {object->transform.position.x, object->transform.position.y, object->transform.position.z,
                               object->transform.rotation.x, object->transform.rotation.y, object->transform.rotation.z,
                               object->transform.rotation.w})
@@ -291,13 +294,13 @@ void EditorVoxelJoinSession::recompute(const EditorDocument& document) {
         operand.mismatch.clear();
         operandAnchors.emplace_back(object->anchors.begin(), object->anchors.end());
         volumes.push_back({object->voxels.get(), object->transform, object->voxelSizeMeters, operandAnchors.back(),
-                           object->name});
+                           object->name,object->voxelScale});
     }
     VoxelBooleanOptions options;
     options.operation = VoxelBooleanOperation::Union;
     options.overlapMaterial = VoxelBooleanOverlapMaterial::KeepPrimary;
     result_ = compute_voxel_boolean({target->voxels.get(), target->transform, target->voxelSizeMeters, targetAnchors,
-                                     target->name},
+                                     target->name,target->voxelScale},
                                     volumes, options);
     for (const VoxelBooleanDiagnostic& diagnostic : result_.diagnostics) {
         if (diagnostic.code != VoxelBooleanDiagnosticCode::ResampledOperand || diagnostic.operandIndex >= operands_.size())

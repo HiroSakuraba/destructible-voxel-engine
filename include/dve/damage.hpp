@@ -32,6 +32,7 @@ struct SphereDamageCommand {
     Float3 center{};      // object-local voxel units; quantized at command ingestion
     float radius{};
     std::uint64_t sequence{};
+    Float3 metric{1,1,1};
 };
 
 struct QuantizedSphereDamageCommand {
@@ -40,6 +41,7 @@ struct QuantizedSphereDamageCommand {
     std::int32_t centerZ{};
     std::int32_t radius{};
     std::uint64_t sequence{};
+    float metricX{1},metricY{1},metricZ{1};
     auto operator<=>(const QuantizedSphereDamageCommand&) const = default;
 };
 

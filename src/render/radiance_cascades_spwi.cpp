@@ -1,4 +1,5 @@
 #include "dve/render/radiance_cascades_spwi.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <algorithm>
 #include <array>
@@ -455,6 +456,21 @@ std::optional<VoxelTraceHit> VoxelSceneTracer::trace_instance(std::size_t instan
     const VoxelReferenceInstance& instance = instances_[instanceIndex];
     const Grid& grid = grids_[instanceIndex];
     if (!instance.visible || instance.object == nullptr || !grid.active) return std::nullopt;
+    if (!valid_voxel_metric(instance.spacing)) return std::nullopt;
+    if (!unit_voxel_scale(instance.spacing)) {
+        const Float3 localOrigin=world_to_voxel(instance.transform,instance.spacing,origin);
+        const Float3 localDirection=divide_components(inverse_transform_vector(instance.transform,normalize(direction)),instance.spacing);
+        const float metric=length(localDirection);
+        if (!(metric>0) || !std::isfinite(metric)) return std::nullopt;
+        auto hit=raycast_local(grid,localOrigin,localDirection,maximumDistance*metric);
+        if (!hit) return std::nullopt;
+        const Float3 localPosition=add(localOrigin,multiply(normalize(localDirection),hit->distance));
+        const Float3 normal{float(hit->normal.x),float(hit->normal.y),float(hit->normal.z)};
+        hit->distance/=metric;
+        return VoxelTraceHit{static_cast<std::uint32_t>(instanceIndex),*hit,
+            voxel_to_world(instance.transform,instance.spacing,localPosition),
+            voxel_normal_to_world(instance.transform,instance.spacing,normal)};
+    }
     // Same sequence as raycast_voxels_transformed.
     const Float3 localOrigin = inverse_transform_point(instance.transform, origin);
     const Float3 localDirection = inverse_transform_vector(instance.transform, direction);

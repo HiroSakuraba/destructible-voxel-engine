@@ -1,4 +1,5 @@
 #include "dve/game_save.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -27,6 +28,7 @@ constexpr std::string_view kCameraSection = "dve.cameras";
 constexpr std::string_view kAnimationSection = "dve.animation";
 constexpr std::string_view kRagdollSection = "dve.ragdolls";
 constexpr std::string_view kHairSection = "dve.hair";
+constexpr std::string_view kAxisSection = "dve.voxel_axes";
 constexpr std::string_view kClockSection = "dve.clock";
 constexpr std::string_view kRootMotionSection = "dve.root-motion";
 constexpr std::string_view kReservedPrefix = "dve.";
@@ -846,6 +848,10 @@ GameSaveCodec::GameSaveCodec(GameSaveSourceReader sources, GameSaveLimits limits
         document.schemaVersion = 3U;
         return true;
     }, &ignored);
+    (void)store_.register_migration(3U, [](SaveGameDocument& document,std::string*) {
+        // Legacy grids have unit axes; the new optional section is absent.
+        document.schemaVersion=4U; return true;
+    }, &ignored);
 }
 
 bool GameSaveCodec::register_migration(std::uint32_t fromVersion, SaveGameMigration migration, std::string* error) {
@@ -1051,6 +1057,14 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
     document.sections.emplace(std::string(kWorldSection), std::move(objects.bytes()));
     document.sections.emplace(std::string(kVoxelSection), std::move(voxels.bytes()));
     document.sections.emplace(std::string(kPhysicsSection), std::move(physics.bytes()));
+    Writer axes(limits_);
+    axes.count(world.objects.size(),limits_.maximumObjects,"axis scale");
+    for (const auto& object:world.objects) {
+        if (!valid_voxel_metric(object.voxelScale)) return fail(error,"invalid object axis scale"),std::nullopt;
+        axes.u64(object.id); axes.float3(object.voxelScale);
+    }
+    if (axes.failed()) return fail(error,axes.failure()),std::nullopt;
+    document.sections.emplace(std::string(kAxisSection),std::move(axes.bytes()));
     if (world.integerClock) {
         Writer clock(limits_);
         clock.u64(world.tickCount); clock.f32(world.fixedDeltaSeconds);
@@ -1263,6 +1277,22 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (!r.finish()) return corrupt(r);
     }
 
+    if (const auto* bytes=section(kAxisSection)) {
+        Reader r(*bytes,kAxisSection,limits_);
+        std::uint32_t count{};
+        if (!r.count(count,limits_.maximumObjects,"axis scale")) return corrupt(r);
+        if (count!=world.objects.size()) return fail(error,"axis scale object count mismatch"),std::nullopt;
+        std::set<GameObjectId> seen;
+        for (std::uint32_t i=0;i<count;++i) {
+            GameObjectId id{}; Float3 axes{};
+            if (!(r.u64(id) && r.float3(axes))) return corrupt(r);
+            const auto found=indexById.find(id);
+            if (found==indexById.end() || !seen.insert(id).second || !valid_voxel_metric(axes))
+                return fail(error,"invalid or duplicate axis scale object"),std::nullopt;
+            world.objects[found->second].voxelScale=axes;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
     if (const auto* bytes = section(kClockSection)) {
         Reader r(*bytes, kClockSection, limits_);
         std::uint32_t count{};
@@ -1481,7 +1511,7 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (name.starts_with(kReservedPrefix)) {
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
-                name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection)
+                name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;
         }

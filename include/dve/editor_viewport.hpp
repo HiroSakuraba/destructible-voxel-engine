@@ -81,6 +81,8 @@ struct EditorVoxelDrawItem {
     float pixelRadius{1.0F};
     bool selected{};
     bool anchored{};
+    float pixelExtentX{};
+    float pixelExtentY{};
 };
 
 struct EditorText3DDrawItem {

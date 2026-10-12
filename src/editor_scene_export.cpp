@@ -1,4 +1,5 @@
 #include "dve/editor_scene_export.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <algorithm>
 #include <array>
@@ -398,7 +399,7 @@ EditorSceneExportResult export_editor_scene(
         std::string skip;
         if (!object.flags.visible) {
             skip = "is hidden (DVOXSCENE v1 has no disabled flag)";
-        } else if (!(object.voxelSizeMeters > 0.0F) || !std::isfinite(object.voxelSizeMeters)) {
+        } else if (!(object.voxelSizeMeters > 0.0F) || !std::isfinite(object.voxelSizeMeters) || !valid_voxel_metric(object.voxelScale)) {
             return fail(label(object) + " has an invalid voxel size");
         } else if (object.is_text3d()) {
             item.kind = EditorSceneExportKind::BakedText3D;
@@ -529,6 +530,7 @@ EditorSceneExportResult export_editor_scene(
             }
             asset.object = std::move(*clone_voxel_object(*object.voxels));
         }
+        asset.voxelScale = object.voxelScale;
         const std::string fileName = std::to_string(object.id) + ".dvox";
         std::string writeError;
         if (!write_dvox(objectFolder / fileName, asset, {}, &writeError)) {

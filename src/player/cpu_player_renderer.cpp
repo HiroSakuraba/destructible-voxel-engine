@@ -93,13 +93,10 @@ public:
             RigidTransform transform = object.transform;
             transform.position = multiply(transform.position, toUnits);
             if (object.kind == GameGeometryKind::Voxel && object.voxels != nullptr) {
-                if (std::abs(object.voxelSizeMeters - voxelSize) > 1.0e-6F * voxelSize) {
-                    ++stats_.skippedObjects; // mixed voxel sizes need per-instance scale (GPU path)
-                    continue;
-                }
                 std::span<const VoxelMaterialDefinition> materials = object.materials;
                 if (materials.empty()) materials = default_palette();
-                voxels_.push_back({object.id, object.voxels, transform, materials, true});
+                voxels_.push_back({object.id, object.voxels, transform, materials, true,
+                    multiply(object.voxelScale,object.voxelSizeMeters*toUnits)});
             } else if (object.kind == GameGeometryKind::Polygon && object.polygon != nullptr) {
                 const CookedPolygonAsset* scaled = scaled_polygon(*object.polygon, toUnits);
                 std::span<const render::PolygonLodLevel> lods;

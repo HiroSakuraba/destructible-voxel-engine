@@ -1,4 +1,5 @@
 #include "dve/editor_voxel_selection.hpp"
+#include "dve/voxel_metric.hpp"
 
 #include <algorithm>
 #include <map>
@@ -89,9 +90,8 @@ std::set<Int3> voxels_in_screen_rect(const EditorObject& object, const EditorCam
     if (!object.voxels) return cells;
     const float size = object.voxelSizeMeters;
     for_each_occupied(*object.voxels, [&](Int3 cell, MaterialId) {
-        const Float3 centre = transform_point(object.transform,
-            {(static_cast<float>(cell.x) + 0.5F) * size, (static_cast<float>(cell.y) + 0.5F) * size,
-             (static_cast<float>(cell.z) + 0.5F) * size});
+        const Float3 centre = voxel_to_world(object.transform,multiply(object.voxelScale,size),
+            {float(cell.x)+0.5F,float(cell.y)+0.5F,float(cell.z)+0.5F});
         const ScreenPoint point = project_world_to_screen(camera, viewport, centre);
         if (!point.visible || !rect.contains(static_cast<int>(point.x), static_cast<int>(point.y))) return;
         if (!through) {
@@ -182,6 +182,7 @@ VoxelClipboard copy_voxels(const EditorObject& object, const std::set<Int3>& cel
     VoxelClipboard clipboard;
     clipboard.name = object.name;
     clipboard.voxelSizeMeters = object.voxelSizeMeters;
+    clipboard.voxelScale = object.voxelScale;
     clipboard.transform = object.transform;
     clipboard.parent = object.parent;
     clipboard.flags = object.flags;
@@ -199,6 +200,7 @@ VoxelClipboard copy_voxels(const EditorObject& object, const std::set<Int3>& cel
 EditorObject make_object_from_voxels(EditorObjectId id, const VoxelClipboard& clipboard, std::string name) {
     EditorObject object(id, std::move(name));
     object.voxelSizeMeters = clipboard.voxelSizeMeters;
+    object.voxelScale = clipboard.voxelScale;
     object.transform = clipboard.transform;
     object.parent = clipboard.parent;
     object.flags = clipboard.flags;

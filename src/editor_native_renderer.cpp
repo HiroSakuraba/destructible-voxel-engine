@@ -1,4 +1,5 @@
 #include "dve/editor_native_renderer.hpp"
+#include "dve/voxel_metric.hpp"
 #include "dve/editor_midi.hpp"
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/editor_text_encoding.hpp"
@@ -83,7 +84,7 @@ void draw_voxel_box(const IEditorCanvas& painter, const NativeEditorController& 
                            static_cast<float>((i & 2U) ? box.maxExclusive.y : box.min.y) * size,
                            static_cast<float>((i & 4U) ? box.maxExclusive.z : box.min.z) * size};
         points[i] = project_world_to_screen(controller.camera(), controller.layout().viewport,
-                                            transform_point(object.transform, local));
+                                            transform_point(object.transform,multiply_components(local,object.voxelScale)));
     }
     static constexpr std::array<std::array<int,2>,12> edges{{
         {{0,1}},{{0,2}},{{0,4}},{{1,3}},{{1,5}},{{2,3}},{{2,6}},{{3,7}},{{4,5}},{{4,6}},{{5,7}},{{6,7}}
@@ -3377,9 +3378,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         Float3 best{0.0F, 1.0F, 0.0F};
         if (!object || !object->voxels) return best;
         const float size = object->voxelSizeMeters;
-        const Float3 centre = transform_point(object->transform,
-            {(static_cast<float>(item.voxel.x) + 0.5F) * size, (static_cast<float>(item.voxel.y) + 0.5F) * size,
-             (static_cast<float>(item.voxel.z) + 0.5F) * size});
+        const Float3 centre = voxel_to_world(object->transform,multiply(object->voxelScale,size),
+            {float(item.voxel.x)+0.5F,float(item.voxel.y)+0.5F,float(item.voxel.z)+0.5F});
         const Float3 toCamera = subtract(cameraPosition, centre);
         static constexpr Int3 kFaces[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
         float bestDot = -2.0F;
@@ -3405,8 +3405,10 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         if (item.selected) shade = std::min(1.0F, shade + 0.14F);
         EditorColor voxelColor = rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade));
         const int radius = std::max(1, static_cast<int>(item.pixelRadius));
-        const UiRect square{static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
-                            radius * 2 + 1, radius * 2 + 1};
+        const int rx = item.pixelExtentX > 0 ? std::max(1,int(item.pixelExtentX)) : radius;
+        const int ry = item.pixelExtentY > 0 ? std::max(1,int(item.pixelExtentY)) : radius;
+        const UiRect square{static_cast<int>(item.screenX) - rx, static_cast<int>(item.screenY) - ry,
+                            rx * 2 + 1, ry * 2 + 1};
         if (!cachedObject || cachedObject->id != item.objectId) cachedObject = shadingDocument.find_object(item.objectId);
         switch (shading) {
             case ShadingMode::Lit: break;
@@ -3484,8 +3486,9 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         for (const EditorVoxelDrawItem& item : drawItems) {
             if (item.objectId != controller.voxel_selection_object() || !cells.contains(item.voxel)) continue;
             const int radius = std::max(1, static_cast<int>(item.pixelRadius));
-            const UiRect square{static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,
-                                radius * 2 + 1, radius * 2 + 1};
+            const int rx=item.pixelExtentX>0?std::max(1,int(item.pixelExtentX)):radius;
+            const int ry=item.pixelExtentY>0?std::max(1,int(item.pixelExtentY)):radius;
+            const UiRect square{static_cast<int>(item.screenX)-rx,static_cast<int>(item.screenY)-ry,rx*2+1,ry*2+1};
             viewportPainter.outline(square, rgb(255,196,64));
             if (radius >= 3) viewportPainter.outline({square.x + 1, square.y + 1, square.width - 2, square.height - 2}, rgb(255,196,64));
         }
@@ -3495,9 +3498,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                 const float size = object->voxelSizeMeters;
                 for (const Int3 cell : cells) {
                     if (++drawn > 20000) break;
-                    const Float3 centre = transform_point(object->transform,
-                        {(static_cast<float>(cell.x + offset->x) + 0.5F) * size, (static_cast<float>(cell.y + offset->y) + 0.5F) * size,
-                         (static_cast<float>(cell.z + offset->z) + 0.5F) * size});
+                    const Float3 centre = voxel_to_world(object->transform,multiply(object->voxelScale,size),
+                        {float(cell.x+offset->x)+0.5F,float(cell.y+offset->y)+0.5F,float(cell.z+offset->z)+0.5F});
                     const ScreenPoint point = project_world_to_screen(controller.camera(), viewport, centre);
                     if (!point.visible) continue;
                     viewportPainter.outline({static_cast<int>(point.x) - 3, static_cast<int>(point.y) - 3, 7, 7}, rgb(120,230,255));

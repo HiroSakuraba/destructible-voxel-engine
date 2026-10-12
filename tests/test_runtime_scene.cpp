@@ -176,6 +176,22 @@ void check_distinct_body_state(const dve::RigidBodyState& state) {
     CHECK(!state.sleeping);
 }
 
+void test_axis_scale_refused_transactionally() {
+    using namespace dve;
+    const auto temp=make_temp_dir();copy_house_package(temp);
+    const auto path=temp/"multi_object_house_Foundation_3e9.dvox";
+    auto asset=read_dvox(path);CHECK(asset.success);asset.asset.voxelScale={2,0.5F,3};
+    CHECK(write_dvox(path,asset.asset));
+    ReferenceRigidBodyWorld physics;ReferenceRuntimeBrickmapWorld renderer;
+    RuntimeSceneWorld world(&physics,&renderer);
+    const auto before=world.state_hash();
+    const auto result=world.load_scene_package(temp/"multi_object_house.dvoxscene.json");
+    CHECK(!result && result.error.code==RuntimeSceneErrorCode::DvoxReadFailed);
+    CHECK(result.error.message.find("streaming GPU metrics")!=std::string::npos);
+    CHECK(world.state_hash()==before && physics.body_count()==0 && renderer.object_count()==0);
+    std::filesystem::remove_all(temp);
+}
+
 void test_valid_transaction_and_unload() {
     using namespace dve;
     ReferenceRigidBodyWorld physics;
@@ -1371,6 +1387,7 @@ void test_authority_publication_queue_priority() {
 
 int main() {
     try {
+        test_axis_scale_refused_transactionally();
         test_valid_transaction_and_unload();
         test_deferred_loading_preserves_ids();
         test_rigid_matrix_rotation_and_translation();

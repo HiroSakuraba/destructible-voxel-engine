@@ -118,6 +118,9 @@ void test_example_scene() {
         if (runtime.voxels) CHECK(voxel_hash(*runtime.voxels) == voxel_hash(*object.voxels));
         CHECK(runtime.dynamic == !object.flags.anchored);
         CHECK(near(runtime.voxelSizeMeters, object.voxelSizeMeters));
+        CHECK(near(runtime.voxelScale.x,object.voxelScale.x));
+        CHECK(near(runtime.voxelScale.y,object.voxelScale.y));
+        CHECK(near(runtime.voxelScale.z,object.voxelScale.z));
         const dve::RigidTransform expected = document->world_transform(id).value_or(object.transform);
         CHECK(near(runtime.transform.position.x, expected.position.x));
         CHECK(near(runtime.transform.position.y, expected.position.y));
@@ -161,6 +164,7 @@ void test_mapping_and_warnings() {
     EditorDocument document("Mapping");
     auto base = voxel_object(10, "Base", {0, 0, 0}, 1, 4);
     base.flags.anchored = true;
+    base.voxelScale={2,0.5F,3};
     document.add_object(std::move(base));
     auto hidden = voxel_object(11, "Hidden", {1, 0, 0}, 1, 2);
     hidden.flags.visible = false;
@@ -208,6 +212,8 @@ void test_mapping_and_warnings() {
     CHECK(loaded.result.objects.size() == 3U);
     if (loaded.result.objects.size() == 3U) {
         CHECK(loaded.result.objects[0].anchored);
+        const auto scaled=loaded.world->render_objects()[0];
+        CHECK(near(scaled.voxelScale.x,2) && near(scaled.voxelScale.y,0.5F) && near(scaled.voxelScale.z,3));
         CHECK(!loaded.result.objects[1].collision);
         CHECK(loaded.result.objects[2].parentGameObjectId == loaded.result.objects[0].gameObjectId);
         CHECK(loaded.result.objects[2].attached);

@@ -39,7 +39,7 @@ struct PlayerRenderStats {
     double presentMilliseconds{};  // blit / swap
     std::uint64_t voxelInstances{};
     std::uint64_t polygonInstances{};
-    std::uint64_t skippedObjects{}; // e.g. voxel size differs from the scene's (CPU path)
+    std::uint64_t skippedObjects{}; // objects rejected by the active renderer
     std::uint64_t tracedRays{};
     std::uint64_t hitRays{};
     render::PolygonRenderStats polygons;

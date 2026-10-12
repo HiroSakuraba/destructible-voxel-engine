@@ -33,7 +33,10 @@ bool NativeEditorController::set_polygon_mode(PolygonSelectionMode mode) {
         set_status("Select a visible, unlocked polygon mesh in Edit mode first", true); return false;
     }
     close_previews_for_voxel_edit("polygon component editing");
-    if (polygonSelection_.object != object->id || polygonSelection_.mode != mode) polygonSelection_.components.clear();
+    if (selectionDomain_ != SelectionDomain::Polygons || polygonSelection_.object != object->id)
+        polygonSelection_.components.clear();
+    else if (polygonSelection_.mode != mode)
+        polygonSelection_ = convert_polygon_selection(*object->polygon,polygonSelection_,mode);
     polygonSelection_.object = object->id;
     polygonSelection_.mode = mode;
     workspace_.select_object(object->id);
@@ -95,15 +98,17 @@ void NativeEditorController::finish_polygon_marquee(int x, int y) {
     if (!editable(object) || selectionDomain_ != SelectionDomain::Polygons) return;
     std::set<std::uint64_t> hits;
     const int dx = x-marquee.startX, dy = y-marquee.startY;
-    if (dx*dx+dy*dy <= 25) {
+    const bool click = std::hypot(double(dx),double(dy)) <= 5.0;
+    if (click) {
         const auto hit = pick_polygon_component(*object, camera_, layout_.viewport, marquee.startX, marquee.startY,
                                                 polygonSelection_.mode, viewportSettings_.xraySelection);
         if (hit) hits.insert(*hit);
     } else {
         const UiRect rect{std::min(x,marquee.startX), std::min(y,marquee.startY), std::abs(dx)+1, std::abs(dy)+1};
-        hits = polygon_components_in_rect(*object,camera_,layout_.viewport,rect,polygonSelection_.mode,viewportSettings_.xraySelection,x < marquee.startX);
+        hits = polygon_components_in_rect(*object,camera_,layout_.viewport,rect,polygonSelection_.mode,viewportSettings_.xraySelection,x < marquee.startX,
+            &workspace_.document(),&viewportSettings_.isolatedObjects);
     }
-    if (!viewportSettings_.xraySelection) std::erase_if(hits,[&](auto id) { return !polygon_component_visible(id); });
+    if (click && !viewportSettings_.xraySelection) std::erase_if(hits,[&](auto id) { return !polygon_component_visible(id); });
     select_polygon_components(hits,marquee.operation);
 }
 

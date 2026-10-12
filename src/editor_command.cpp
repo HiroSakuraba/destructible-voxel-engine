@@ -631,29 +631,69 @@ ReparentObjectsCommand::ReparentObjectsCommand(std::vector<ObjectReparentChange>
 CommandResult ReparentObjectsCommand::apply(EditorDocument& document, bool forward) {
     if (changes_.empty()) return CommandResult::fail("reparent command has no objects");
     std::set<EditorObjectId> seen;
+    std::vector<HierarchyState> original;
+    original.reserve(changes_.size());
     for (const ObjectReparentChange& change : changes_) {
         if (change.id == 0 || !seen.insert(change.id).second)
             return CommandResult::fail("reparent command contains duplicate or invalid identifiers");
         const EditorObject* object = document.find_object(change.id);
         if (!object) return CommandResult::fail("reparent target no longer exists");
         if (object->flags.locked) return CommandResult::fail("reparent target is locked");
+        original.push_back({object->parent,object->attachment,object->transform});
     }
-    std::size_t applied = 0;
-    for (const ObjectReparentChange& change : changes_) {
-        const auto target = forward ? change.after : change.before;
-        if (!document.reparent(change.id, target)) {
-            // Roll back whatever this call already applied: reparent's cycle check depends on
-            // the current parent chain, so a batch is not naturally atomic the way a flags or
-            // transform batch is, and a partial application here would silently corrupt the
-            // hierarchy instead of just refusing the whole command.
-            for (std::size_t i = applied; i > 0; --i) {
-                const ObjectReparentChange& rollback = changes_[i - 1];
-                (void)document.reparent(rollback.id, forward ? rollback.before : rollback.after);
-            }
-            return CommandResult::fail("reparent would create a cycle or an invalid parent");
+    if (capturedStates_) {
+        const auto& target = forward ? afterStates_ : beforeStates_;
+        std::map<EditorObjectId,std::optional<EditorObjectId>> parents;
+        for (std::size_t i = 0; i < changes_.size(); ++i) {
+            if (target[i].parent && !document.find_object(*target[i].parent))
+                return CommandResult::fail("reparent parent no longer exists");
+            parents.emplace(changes_[i].id,target[i].parent);
         }
-        ++applied;
+        // Validate the complete restored hierarchy before changing any object.
+        for (const auto& change : changes_) {
+            std::set<EditorObjectId> ancestors{change.id};
+            auto cursor = parents.at(change.id);
+            while (cursor) {
+                if (!ancestors.insert(*cursor).second)
+                    return CommandResult::fail("reparent would create a cycle");
+                const auto planned = parents.find(*cursor);
+                if (planned != parents.end()) cursor = planned->second;
+                else {
+                    const auto* parent = document.find_object(*cursor);
+                    if (!parent) return CommandResult::fail("reparent parent no longer exists");
+                    cursor = parent->parent;
+                }
+            }
+        }
+        for (std::size_t i = 0; i < changes_.size(); ++i) {
+            auto* object = document.find_object(changes_[i].id);
+            object->parent = target[i].parent;
+            object->attachment = target[i].attachment;
+            object->transform = target[i].transform;
+        }
+    } else {
+        if (!forward) return CommandResult::fail("reparent command has not executed");
+        for (const auto& change : changes_) {
+            if (!document.reparent(change.id,change.after)) {
+                // Restore attachment records too: detaching to a root clears them.
+                for (std::size_t i = 0; i < changes_.size(); ++i) {
+                    auto* object = document.find_object(changes_[i].id);
+                    object->parent = original[i].parent;
+                    object->attachment = original[i].attachment;
+                    object->transform = original[i].transform;
+                }
+                document.refresh_attachment_world_transforms();
+                return CommandResult::fail("reparent would create a cycle or an invalid parent");
+            }
+        }
+        beforeStates_ = std::move(original);
+        for (const auto& change : changes_) {
+            const auto* object = document.find_object(change.id);
+            afterStates_.push_back({object->parent,object->attachment,object->transform});
+        }
+        capturedStates_ = true;
     }
+    document.refresh_attachment_world_transforms();
     document.mark_dirty();
     return CommandResult::ok();
 }

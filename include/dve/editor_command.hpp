@@ -468,7 +468,15 @@ public:
     CommandResult undo(EditorDocument&) override;
 private:
     CommandResult apply(EditorDocument&, bool forward);
+    struct HierarchyState {
+        std::optional<EditorObjectId> parent;
+        std::optional<EditorAttachment> attachment;
+        RigidTransform transform{};
+    };
     std::vector<ObjectReparentChange> changes_;
+    std::vector<HierarchyState> beforeStates_;
+    std::vector<HierarchyState> afterStates_;
+    bool capturedStates_{};
     std::string label_;
 };
 

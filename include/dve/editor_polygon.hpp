@@ -48,6 +48,8 @@ void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
 [[nodiscard]] std::set<std::uint32_t> polygon_selected_faces(const CookedPolygonAsset&,const PolygonSelection&);
 [[nodiscard]] bool polygon_selection_valid(const CookedPolygonAsset&,const PolygonSelection&);
 [[nodiscard]] std::set<std::uint64_t> polygon_all_components(const CookedPolygonAsset&,PolygonSelectionMode);
+// Conversion selects incident components; face-to-edge keeps only edges of selected faces.
+[[nodiscard]] PolygonSelection convert_polygon_selection(const CookedPolygonAsset&,const PolygonSelection&,PolygonSelectionMode);
 // Faces connect across shared geometric edges; vertices/edges connect at their endpoints.
 // Shrink removes components adjacent to an unselected component; a full mesh stays selected.
 [[nodiscard]] std::set<std::uint64_t> edit_polygon_selection(const CookedPolygonAsset&,const PolygonSelection&,PolygonSelectionEdit);
@@ -59,7 +61,8 @@ void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
 [[nodiscard]] std::vector<CookedPolygonAsset> separate_polygon_components(const CookedPolygonAsset&);
 [[nodiscard]] std::optional<PolygonBvhHit> pick_editor_polygon(const EditorObject&,ViewportRay,float maximum=10000);
 [[nodiscard]] std::optional<std::uint64_t> pick_polygon_component(const EditorObject&,const EditorCamera&,UiRect,int x,int y,PolygonSelectionMode,bool through=false);
-[[nodiscard]] std::set<std::uint64_t> polygon_components_in_rect(const EditorObject&,const EditorCamera&,UiRect,UiRect,PolygonSelectionMode,bool through=false,bool crossing=false);
+[[nodiscard]] std::set<std::uint64_t> polygon_components_in_rect(const EditorObject&,const EditorCamera&,UiRect,UiRect,PolygonSelectionMode,bool through=false,bool crossing=false,
+    const EditorDocument* scene=nullptr,const std::set<EditorObjectId>* onlyObjects=nullptr);
 class ReplacePolygonCommand final : public IEditorCommand {
 public:
     ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,std::string label,std::uint64_t stroke=0);

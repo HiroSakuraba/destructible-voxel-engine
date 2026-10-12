@@ -1,4 +1,5 @@
 #include "dve/simulation_clock.hpp"
+#include "dve/editor_polygon.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/camera_runtime.hpp"
 
@@ -100,7 +101,13 @@ public:
             GameObjectId runtimeId = kInvalidGameObjectId;
             const std::filesystem::path source = resolve_project_path(config.projectRoot, object.sourceAsset);
             const std::string extension = source.extension().string();
-            if (object.flags.collisionEnabled && !source.empty() &&
+            if (object.polygon) {
+                const auto pose=document.world_transform(editorId).value_or(object.transform);
+                auto mesh=bake_editor_polygon(object);
+                runtimeId=object.flags.collisionEnabled ? world_->spawn_cooked_polygon_asset(std::move(mesh),object.name,pose,
+                    !object.flags.anchored || object.attachment.has_value(),object.flags.structural,&objectError) :
+                    world_->spawn_visual_polygon_asset(std::move(mesh),object.name,pose,&objectError);
+            } else if (object.flags.collisionEnabled && !source.empty() &&
                 (extension == ".dmesh" || extension == ".DMESH") &&
                 std::filesystem::exists(source)) {
                 const RigidTransform worldTransform = document.world_transform(editorId).value_or(object.transform);
@@ -133,7 +140,7 @@ public:
                 stop();
                 return false;
             }
-            if (extension == ".dmesh" || extension == ".DMESH") {
+            if (object.polygon || extension == ".dmesh" || extension == ".DMESH") {
                 bool hasMembership = false;
                 for (const Component& component : object.components) {
                     hasMembership = hasMembership || component.type == "dve.membership";

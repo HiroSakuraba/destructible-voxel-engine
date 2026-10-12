@@ -44,6 +44,7 @@
 #include "dve/editor_runtime_settings.hpp"
 #include "dve/collision_proxy.hpp"
 #include "dve/editor_scatter.hpp"
+#include "dve/editor_polygon.hpp"
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
@@ -820,6 +821,8 @@ public:
     // Cached voxel draw list (projection + depth sort); rebuilt only when the scene,
     // camera, viewport, draw cap, or selection change.
     [[nodiscard]] const std::vector<EditorVoxelDrawItem>& draw_items() const;
+    [[nodiscard]] std::vector<EditorPolygonDrawTriangle> polygon_draw_items() const;
+    bool import_polygon_model(const std::filesystem::path&);
     [[nodiscard]] std::size_t draw_item_count() const { return draw_items().size(); }
     // Cached draw list for the selected camera rig's picture-in-picture preview.
     [[nodiscard]] const std::vector<EditorVoxelDrawItem>& camera_preview_draw_items(

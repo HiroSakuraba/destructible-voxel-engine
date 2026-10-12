@@ -95,6 +95,7 @@ EditorObject clone_editor_object(const EditorObject& source) {
     cloned.textFontAsset = source.textFontAsset;
     cloned.voxelSizeMeters = source.voxelSizeMeters;
     cloned.voxelScale = source.voxelScale;
+    cloned.polygon = source.polygon;
     cloned.voxels = clone_voxel_object(*source.voxels);
     cloned.text3d = source.text3d;
     cloned.gaborVolume = source.gaborVolume;
@@ -142,6 +143,10 @@ EditorObject& EditorDocument::add_object(EditorObject object) {
             }
         }
         object.voxels = std::move(replacement);
+    }
+    if (object.polygon) {
+        object.polygon->objectId=object.id;
+        object.polygon->contentHash=polygon_asset_content_hash(*object.polygon);
     }
     nextObjectId_ = std::max(nextObjectId_, object.id + 1);
     const auto [it, inserted] = objects_.emplace(object.id, std::move(object));
@@ -288,6 +293,12 @@ bool EditorDocument::validate(std::string* error) const {
             std::string prefabError;
             if (!object.prefabLink->validate(&prefabError)) return fail("invalid prefab link: " + prefabError);
         }
+        if (object.polygon) {
+            const auto valid=validate_polygon_asset(*object.polygon);
+            if (!valid || object.polygon->objectId!=id) return fail("invalid polygon object");
+            if (object.text3d || object.gaborVolume || object.voxels->occupied_voxel_count()!=0)
+                return fail("object has conflicting geometry");
+        }
         if (!valid_voxel_metric(object.voxelScale) || !std::isfinite(object.voxelSizeMeters) || !(object.voxelSizeMeters > 0.0F)) return fail("invalid voxel size");
         for (const Int3 anchor : object.anchors) {
             if (!object.voxels->occupied_at(anchor)) return fail("anchor references air");
@@ -319,6 +330,11 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
 
         for (const auto& [id, object] : objects_) {
             std::string writeError;
+            if (object.polygon) {
+                auto mesh=*object.polygon;mesh.objectId=id;mesh.contentHash=polygon_asset_content_hash(mesh);
+                if (!write_dmesh(stagingPath/(std::to_string(id)+".dmesh"),mesh,&writeError)) throw std::runtime_error(writeError);
+                continue;
+            }
             if (object.text3d) {
                 CookedText3DAsset text = *object.text3d;
                 text.objectId = id;
@@ -360,7 +376,11 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         std::filesystem::create_directories(manifestPath.parent_path().empty() ? "." : manifestPath.parent_path());
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) throw std::runtime_error("could not open temporary scene manifest");
-        output << "DVE_EDITOR_SCENE 6\n";
+        // Format 7 only adds owned polygon objects (geometry kind 3). Scenes without them stay
+        // format 6, so editors from before #111 can still open them.
+        const bool hasPolygons = std::any_of(objects_.begin(), objects_.end(),
+                                             [](const auto& entry) { return entry.second.polygon.has_value(); });
+        output << "DVE_EDITOR_SCENE " << (hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -368,7 +388,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         output << std::setprecision(9);
         for (const auto& [id, object] : objects_) {
             output << "object " << id << ' ' << (object.parent ? *object.parent : 0) << ' '
-                   << (object.text3d ? 1 : object.gaborVolume ? 2 : 0) << ' '
+                   << (object.polygon ? 3 : object.text3d ? 1 : object.gaborVolume ? 2 : 0) << ' '
                    << quote_text(object.name) << ' '
                    << quote_text(object.sourceAsset.generic_string()) << ' '
                    << quote_text(object.importRecipe.generic_string()) << ' '
@@ -457,7 +477,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -496,14 +516,18 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                 for (std::string& group : object.groups) input >> std::quoted(group);
             }
             input >> anchorCount;
-            if (!input || key != "object" || geometryKind > 2U) throw std::runtime_error("malformed object record");
+            if (!input || key != "object" || geometryKind > (version>=7?3U:2U)) throw std::runtime_error("malformed object record");
             object.id = id;
             object.name = objectName;
             object.parent = parent == 0 ? std::nullopt : std::optional<EditorObjectId>(parent);
             object.sourceAsset = source;
             object.importRecipe = recipe;
             object.textFontAsset = fontSource;
-            if (geometryKind == 1U) {
+            if (geometryKind == 3U) {
+                auto loaded=read_dmesh(manifestPath.parent_path()/revisionDirectory/(std::to_string(id)+".dmesh"));
+                if (!loaded) throw std::runtime_error("could not load polygon object: "+loaded.error);
+                object.polygon=std::move(loaded.asset);object.voxels=std::make_unique<VoxelObject>(id);
+            } else if (geometryKind == 1U) {
                 const auto dtext = manifestPath.parent_path() / revisionDirectory / (std::to_string(id) + ".dtext");
                 Text3DReadResult loaded = read_dtext(dtext);
                 if (!loaded) throw std::runtime_error("could not load 3D text object " + std::to_string(id) + ": " + loaded.error);

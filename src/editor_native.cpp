@@ -35,8 +35,7 @@ namespace {
 // Reasons shown for commands this editor build does not implement (menu, Command Center, status).
 constexpr std::string_view kAudioImportUnavailable =
     "Not connected in this editor yet: this build has no audio importer behind Audio > Import Audio";
-constexpr std::string_view kCreatePolygonUnavailable =
-    "Not in this editor yet: polygon meshes are not authored here; File > Import Model brings a model in as voxels";
+constexpr std::string_view kCreatePolygonBlocked = "Stop Play or Simulate before creating polygon meshes.";
 constexpr std::string_view kCookUnavailable =
     "Not connected in this editor yet: cook content with the dve_cook_* command-line tools";
 constexpr std::string_view kPackageUnavailable =
@@ -1671,7 +1670,8 @@ namespace {
 const std::vector<std::pair<std::string, std::string>>& editor_context_only_commands() {
     static const std::vector<std::pair<std::string, std::string>> kCommands = [] {
         std::vector<std::pair<std::string, std::string>> list;
-        const std::string mesh = "Not in this editor yet: polygon mesh editing (vertex/edge/face tools); models import as voxels (File > Import Model).";
+        // The component APIs exist (editor_polygon.hpp) but the native controls are not wired yet.
+        const std::string mesh = "Not in this editor yet: polygon mesh editing (vertex/edge/face tools); Create > Polygon Cube and Polygon > Import Polygon Model make owned meshes.";
         for (const char* id : {"polygon.vertex_mode", "polygon.edge_mode", "polygon.face_mode", "polygon.object_mode",
                                "polygon.component_toggle", "polygon.bevel", "polygon.extrude", "polygon.inset", "polygon.uv_tools",
                                "polygon.recalculate_normals", "polygon.flip_normals"})
@@ -1958,7 +1958,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
             std::string extension = asset ? asset->relativePath.extension().string() : std::string();
             for (char& ch : extension) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             const bool model = extension == ".obj" || extension == ".gltf" || extension == ".glb";
-            for (std::string_view id : {"file.import", "polygon.import"})
+            enabled("polygon.import", (model || extension == ".dmesh") && !playActive,
+                    playActive ? "Stop Play or Simulate before importing."
+                               : "Select an OBJ, glTF, GLB or DMESH model in the Assets panel first.");
+            for (std::string_view id : {"file.import"})
                 enabled(id, model && !playActive, playActive ? "Stop Play or Simulate before importing."
                                                              : "Select an OBJ, glTF or GLB model in the Assets panel first.");
         }
@@ -1976,7 +1979,8 @@ void NativeEditorController::refresh_menu_state() noexcept {
         // Command Center say so before the command is tried.
         enabled("voxel.rebuild_brickmaps", false, kRebuildBrickmapsUnavailable);
         enabled("audio.import", false, kAudioImportUnavailable);
-        enabled("create.polygon", false, kCreatePolygonUnavailable);
+        for (std::string_view id : {"create.polygon", "polygon.create_plane"})
+            enabled(id, !playActive && workspace_.mode() == EditorMode::Edit, kCreatePolygonBlocked);
         const std::string joinReason = voxel_join_disabled_reason();
         enabled("voxel.join", joinReason.empty(), joinReason);
         const std::string joinBlocked = voxelJoin_.blocked_reason(workspace_.document());
@@ -4996,7 +5000,7 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Scale", "Scl", "transform.scale", "Drag to scale a local axis without resampling; Alt: uniform; Ctrl at start: resample.",
          "Voxel objects"},
         {"Scatter", "Sct", "scatter.brush", "Drag to paint copies of the selected objects; Shift-drag erases copies; Ctrl+wheel sets the radius.",
-         "Any visible voxel surface"},
+         "Any visible voxel or polygon surface"},
     }};
     const auto index = static_cast<std::size_t>(tool);
     return kTools[index < kTools.size() ? index : 0U];
@@ -5142,6 +5146,9 @@ void NativeEditorController::finish_voxel_stroke() noexcept { voxelStrokeActive_
 void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
     const EditorObject* object = workspace_.document().find_object(pick.objectId);
     if (!object) return;
+    if (object->polygon) {
+        set_status("Voxel brushes cannot edit polygon geometry; mesh component controls are pending",true);return;
+    }
     std::unique_ptr<IEditorCommand> command;
     if (activeTool_ == EditorToolId::Anchor) {
         const bool addAnchor = !object->anchors.contains(pick.voxel);
@@ -5489,10 +5496,16 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
             gizmoAxis_ = 0;
             return;
         }
-        if (activeTool_ == EditorToolId::Scale && (!object->voxels || object->voxels->brick_count() == 0 ||
+        if (activeTool_ == EditorToolId::Scale && ((!object->polygon && (!object->voxels || object->voxels->brick_count() == 0)) ||
             object->text3d || object->gaborVolume || !std::isfinite(object->voxelSizeMeters) ||
             object->voxelSizeMeters < 0.001F || object->voxelSizeMeters > 10.0F || !valid_voxel_metric(object->voxelScale))) {
-            set_status("Voxel scale requires occupied voxel objects", true);
+            set_status("Scale requires polygon or occupied voxel geometry", true);
+            gizmoAxis_ = 0;
+            return;
+        }
+        if (activeTool_ == EditorToolId::Scale && (modifiers & 2U) != 0U && object->polygon) {
+            // Ctrl-scale resamples voxels; polygon geometry has no cells to resample.
+            set_status("Ctrl resamples voxels; release Ctrl to scale polygon geometry", true);
             gizmoAxis_ = 0;
             return;
         }
@@ -5603,7 +5616,7 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
                     object->transform = change.after;
                 }
             }
-            set_status("Continuous local-axis scale: " + std::to_string(factor).substr(0,5) + "x (Alt: uniform); cells unchanged",false,1);
+            set_status("Continuous local-axis scale: " + std::to_string(factor).substr(0,5) + "x (Alt: uniform)",false,1);
             return;
         }
         scaleFactors_ = {1.0F, 1.0F, 1.0F};
@@ -5670,7 +5683,7 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
                 if (std::abs(scaleFactors_.x-1.0F)>0.000001F || std::abs(scaleFactors_.y-1.0F)>0.000001F || std::abs(scaleFactors_.z-1.0F)>0.000001F) {
                     const auto result=workspace_.commands().execute(workspace_.document(),
                         std::make_unique<ScaleVoxelSizeCommand>(gizmoSizeChanges_,"Scale objects continuously"));
-                    set_status(result.success ? "Scaled objects; voxel cells unchanged" : result.message,!result.success);
+                    set_status(result.success ? "Scaled geometry without resampling" : result.message,!result.success);
                 }
             } else {
                 if (std::abs(scaleFactors_.x - 1.0F) > 0.0001F ||
@@ -6463,13 +6476,38 @@ camera_menu_dispatch_complete:
         return create_camera_rig_from_view() != 0;
     }
     if (actionId == "polygon.import") {
-        // Models import as voxels: this is File > Import Model (disabled with a reason until a
-        // model is selected in the Assets panel).
-        return import_selected_model();
+        const auto* asset=assetBrowserState_.selectedId?
+            std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId):nullptr;
+        if(!asset){set_status("Select an OBJ, glTF, GLB or DMESH model in the Assets panel first.",true);return false;}
+        return import_polygon_model(asset->relativePath);
     }
-    if (actionId == "create.polygon") {
-        set_status(std::string(kCreatePolygonUnavailable), true, 6.0F);
-        return false;
+    if (actionId == "create.polygon" || actionId == "polygon.create_plane") {
+        if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
+            set_status(std::string(kCreatePolygonBlocked), true);
+            return false;
+        }
+        close_previews_for_voxel_edit("polygon mesh created");
+        const bool plane = actionId == "polygon.create_plane";
+        auto& document = workspace_.document();
+        const auto id = document.allocate_object_id();
+        const auto before = capture_selection_snapshot();
+        EditorObject object(id, plane ? "Polygon Plane" : "Polygon Cube");
+        object.voxelSizeMeters = 1.0F;
+        object.polygon = plane ? make_editor_polygon_plane(id) : make_editor_polygon_cube(id);
+        object.transform.position = camera_.target;
+        object.flags.anchored = plane;
+        const auto result = workspace_.commands().execute(
+            document, std::make_unique<AddObjectCommand>(std::move(object), plane ? "Create polygon plane" : "Create polygon cube"));
+        if (!result.success) { set_status(result.message, true); return false; }
+        // A new object stays visible while the view is isolated (as Import and Paste do).
+        if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+        workspace_.select_object(id);
+        selectionDomain_ = SelectionDomain::Objects;
+        workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
+        frame_selection();
+        refresh_menu_state();
+        set_status(plane ? "Created a polygon plane" : "Created a polygon cube");
+        return true;
     }
     if (actionId == "build.validate") {
         (void)validate_project();
@@ -8153,6 +8191,12 @@ const EditorSelectionDiagnostics& NativeEditorController::selection_diagnostics(
     return selectionDiagnostics_;
 }
 
+std::vector<EditorPolygonDrawTriangle> NativeEditorController::polygon_draw_items() const {
+    const auto poses=playSession_.presentation_transforms();
+    return build_editor_polygon_draw_list(workspace_.document(),camera_,layout_.viewport,
+        workspace_.selected_objects(),viewportSettings_.isolatedObjects,100000,&poses);
+}
+
 const std::vector<EditorVoxelDrawItem>& NativeEditorController::draw_items() const {
     const auto poses = playSession_.presentation_transforms();
     return drawListCache_.get(workspace_.document(), materials_, camera_, layout_.viewport, viewportSettings_,
@@ -8434,7 +8478,7 @@ std::vector<EditorObjectId> scatter_source_roots(const EditorDocument& document,
 }
 
 bool is_scatter_surface(const EditorObject& object) {
-    return object.voxels && object.voxels->occupied_voxel_count() > 0 && !object.text3d && !object.gaborVolume;
+    return object.polygon || (object.voxels && object.voxels->occupied_voxel_count() > 0 && !object.text3d && !object.gaborVolume);
 }
 
 // With pinned sources: every selected voxel object that is not part of a source is a surface,
@@ -8550,14 +8594,14 @@ std::string NativeEditorController::scatter_disabled_reason() const {
         const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
         if (scatter_surfaces_from_selection(document, selected, pinnedScatterRoots_,
                                             [this](EditorObjectId id) { return is_isolated_out(id); }).empty())
-            return "Scatter sources are set: select one or more visible voxel surfaces to scatter onto.";
+            return "Scatter sources are set: select one or more visible voxel or polygon surfaces to scatter onto.";
         return {};
     }
     const auto target = workspace_.selected_object();
     if (!target) return "Select the objects to scatter, then click the surface to scatter onto last.";
     const EditorObject* surface = document.find_object(*target);
     if (!surface || !is_scatter_surface(*surface))
-        return "Click a voxel object last: the last selected object is the surface to scatter onto.";
+        return "Click a voxel or polygon object last: the last selected object is the surface to scatter onto.";
     if (!surface->flags.visible || is_isolated_out(surface->id))
         return "The surface is hidden (or isolated out of view): show it before scattering onto it.";
     bool prefabSelected = false;
@@ -9496,6 +9540,8 @@ std::uint64_t scene_change_fingerprint(const EditorDocument& document, const Edi
         mix(id);
         mix(object.parent.value_or(0));
         mix(std::hash<std::string>{}(object.name));
+        mix(object.polygon?object.polygon->contentHash:0);
+        mixf(object.voxelScale.x);mixf(object.voxelScale.y);mixf(object.voxelScale.z);
         mix(object.voxels ? object.voxels->revision() : 0U);
         mix(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(object.voxels.get())));
         mixf(object.transform.position.x); mixf(object.transform.position.y); mixf(object.transform.position.z);
@@ -9571,7 +9617,7 @@ bool NativeEditorController::flood_fill_at(EditorObjectId objectId, Int3 start) 
         set_status("Flood Fill: " + object->name + " is hidden or isolated out of view", true);
         return false;
     }
-    if (!object || !object->voxels || object->text3d || object->gaborVolume) {
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume) {
         set_status("Flood Fill works on voxel objects", true);
         return false;
     }
@@ -9897,7 +9943,7 @@ std::size_t NativeEditorController::validate_project() {
                                 *path + " was not found.", id);
                     }
                 }
-                const bool voxelObject = object.voxels && !object.text3d && !object.gaborVolume;
+                const bool voxelObject = object.voxels && !object.polygon && !object.text3d && !object.gaborVolume;
                 if (voxelObject && object.voxels->occupied_voxel_count() > 0 && object.flags.collisionEnabled &&
                     !validate_box_proxy(*object.voxels, build_merged_object_box_proxy(*object.voxels)))
                     add(ProblemSeverity::Error, "validate.collision", name + ": collision proxy does not cover its voxels",
@@ -10806,6 +10852,71 @@ bool NativeEditorController::start_import_job(bool reimport) {
 }
 
 // --- Long jobs ---------------------------------------------------------------------------------
+
+bool NativeEditorController::import_polygon_model(const std::filesystem::path& path) {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
+        set_status("Stop Play or Simulate before importing.", true);
+        return false;
+    }
+    // has_root_* rather than is_absolute(): a rooted path is never joined to the project on Windows.
+    const auto absolute = (path.has_root_directory() || path.has_root_name()) ? path : projectRoot_ / path;
+    std::string extension = path.extension().string();
+    for (auto& ch : extension) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (!is_model_source(path) && extension != ".dmesh") {
+        set_status("Polygon import reads OBJ, glTF, GLB and DMESH files.", true);
+        return false;
+    }
+    close_previews_for_voxel_edit("Import started");
+    auto mesh = std::make_shared<std::optional<CookedPolygonAsset>>();
+    const auto id = workspace_.document().allocate_object_id();
+    return start_long_job(LongJobKind::ImportModel, "Import polygon " + path.filename().string(), longJobThreshold_ + 1,
+        [mesh, absolute, id, extension](LongJob& job) {
+            const auto fail = [&job](std::string message) {
+                std::lock_guard lock(job.mutex);
+                job.error = std::move(message);
+            };
+            if (job.cancelled()) return;
+            job.report(0.1F, "Reading polygon geometry and materials");
+            if (extension == ".dmesh") {
+                auto loaded = read_dmesh(absolute, 256ULL * 1024ULL * 1024ULL);
+                if (!loaded) { fail(loaded.error); return; }
+                *mesh = std::move(loaded.asset);
+            } else {
+                PolygonCookOptions options;
+                options.objectId = id;
+                options.maximumVertices = 1000000;
+                options.maximumIndices = 6000000;
+                *mesh = cook_polygon_model(absolute, {}, options);
+            }
+            if (job.cancelled()) return;
+            // Keep the cooked attributes (authored tangents included); only the owner changes.
+            (*mesh)->objectId = id;
+            (*mesh)->contentHash = polygon_asset_content_hash(**mesh);
+            const auto valid = validate_polygon_asset(**mesh);
+            if (!valid) { fail(valid.message); return; }
+            job.report(1.0F, "Polygon ready");
+        },
+        [this, mesh, path, id](LongJob& job) {
+            if (!*mesh) { set_status(job.label + " produced no geometry", true, 8.0F); return false; }
+            const auto before = capture_selection_snapshot();
+            EditorObject object(id, path.stem().string());
+            object.voxelSizeMeters = 1.0F;
+            object.polygon = std::move(**mesh);
+            object.sourceAsset = path;
+            object.transform.position = camera_.target;
+            const auto result = workspace_.commands().execute(
+                workspace_.document(), std::make_unique<AddObjectCommand>(std::move(object), "Import polygon model"));
+            if (!result.success) { set_status(result.message, true); return false; }
+            if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+            workspace_.select_object(id);
+            selectionDomain_ = SelectionDomain::Objects;
+            workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
+            frame_selection();
+            refresh_menu_state();
+            set_status("Imported " + path.filename().string() + " as an owned polygon mesh; the source file is unchanged");
+            return true;
+        });
+}
 
 bool NativeEditorController::start_long_job(LongJobKind kind, std::string label, std::uint64_t workUnits,
                                             std::function<void(LongJob&)> work, std::function<bool(LongJob&)> commit) {

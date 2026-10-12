@@ -3398,8 +3398,45 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const int overdrawRows = std::max(1, (viewport.height + kOverdrawCell - 1) / kOverdrawCell);
     std::vector<std::uint16_t> overdraw(shading == ShadingMode::Overdraw
                                         ? static_cast<std::size_t>(overdrawColumns * overdrawRows) : 0U, 0U);
+    const auto polygonItems=controller.polygon_draw_items();
+    std::size_t polygonCursor=0;
+    const auto paintPolygon=[&](const EditorPolygonDrawTriangle& triangle) {
+        const auto& p=triangle.points;
+        const float low=std::max(float(viewport.y),std::min({p[0].y,p[1].y,p[2].y}));
+        const float high=std::min(float(viewport.y+viewport.height-1),std::max({p[0].y,p[1].y,p[2].y}));
+        // Named so it does not shadow the theme's `light` flag (MSVC C4456).
+        const float polygonShade=std::clamp(1.1F-triangle.depth*.018F,.42F,1.0F)*(0.45F+0.55F*triangle.facing);
+        const auto color=rgb(byte(triangle.color.x*polygonShade),byte(triangle.color.y*polygonShade),
+                             byte(triangle.color.z*polygonShade));
+        if(low<=high && shading!=ShadingMode::Wireframe)for(int y=int(std::ceil(low));y<=int(std::floor(high));++y) {
+            std::vector<float> xs;const float scan=float(y)+.5F;
+            for(int edge=0;edge<3;++edge) {
+                const auto& a=p[std::size_t(edge)];const auto& b=p[std::size_t((edge+1)%3)];
+                if((a.y<=scan&&b.y>scan)||(b.y<=scan&&a.y>scan))
+                    xs.push_back(a.x+(scan-a.y)*(b.x-a.x)/(b.y-a.y));
+            }
+            if(xs.size()!=2)continue;
+            const float left=std::max(float(viewport.x),std::min(xs[0],xs[1]));
+            const float right=std::min(float(viewport.x+viewport.width-1),std::max(xs[0],xs[1]));
+            if(left<=right)viewportPainter.fill({int(std::ceil(left)),y,
+                std::max(1,int(std::floor(right))-int(std::ceil(left))+1),1},color);
+        }
+        if(triangle.selected||shading==ShadingMode::Wireframe)
+            for(int edge=0;edge<3;++edge) {
+                const auto& a=p[std::size_t(edge)];const auto& b=p[std::size_t((edge+1)%3)];
+                // Bound the software canvas coordinates before converting to integers.
+                const auto bound=[](float v){return int(std::clamp(v,-100000.0F,100000.0F));};
+                viewportPainter.line(bound(a.x),bound(a.y),bound(b.x),bound(b.y),
+                    triangle.selected?rgb(120,200,255):rgb(150,165,185));
+            }
+    };
+    const auto polygonsUntil=[&](float depth) {
+        while(polygonCursor<polygonItems.size() && polygonItems[polygonCursor].depth>=depth)
+            paintPolygon(polygonItems[polygonCursor++]);
+    };
     const EditorObject* cachedObject = nullptr;
     for (const EditorVoxelDrawItem& item : drawItems) {
+        polygonsUntil(item.depth);
         const Float4 base = editor_material_display_color(controller.materials(), item.material);
         float shade = std::clamp(1.1F - item.depth * 0.018F, 0.42F, 1.0F);
         if (item.selected) shade = std::min(1.0F, shade + 0.14F);
@@ -3459,6 +3496,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                  static_cast<int>(item.screenX),static_cast<int>(item.screenY)+3,rgb(255,218,72),2);
         }
     }
+    polygonsUntil(-INFINITY);
     if (shading == ShadingMode::Overdraw) {
         // 1 layer blue, 2-3 green, 4-7 yellow, 8+ red.
         for (int row = 0; row < overdrawRows; ++row)

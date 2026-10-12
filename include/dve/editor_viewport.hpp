@@ -69,6 +69,7 @@ struct EditorPickResult {
     Float3 worldPosition{};
     Float3 worldNormal{};
     float worldDistance{};
+    std::optional<std::uint32_t> polygonFace;
 };
 
 struct EditorVoxelDrawItem {

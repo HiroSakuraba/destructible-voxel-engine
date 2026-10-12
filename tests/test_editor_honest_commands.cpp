@@ -504,10 +504,16 @@ void test_menu_reasons_and_handlers() {
     NativeEditorController& controller = *owner;
     controller.refresh_menu_state();
     const auto& menus = std::as_const(controller.workspace().menus());
-    for (const char* id : {"voxel.rebuild_brickmaps", "create.polygon", "audio.import", "file.import", "polygon.import",
+    for (const char* id : {"voxel.rebuild_brickmaps", "audio.import", "file.import", "polygon.import",
                            "build.cook", "build.package", "help.docs"}) {
         const MenuAction* action = menus.find(id);
         check(action && !action->enabled && !action->disabledReason.empty(), std::string(id) + " is disabled with a reason");
+    }
+    // #111: Create > Polygon Cube and Polygon > Create Mesh Plane really create owned meshes in Edit
+    // mode, so they are enabled there (and disabled with a reason during Play).
+    for (const char* id : {"create.polygon", "polygon.create_plane"}) {
+        const MenuAction* action = menus.find(id);
+        check(action && action->enabled, std::string(id) + " is enabled in Edit mode");
     }
     for (const char* id : {"voxel.fill", "voxel.rebuild_collision", "view.drop_to_surface", "build.validate"})
         check(menus.find(id) != nullptr, std::string(id) + " is in the menus (and so in the Command Center)");
@@ -545,9 +551,22 @@ void test_menu_reasons_and_handlers() {
     check(controller.dispatch_action("polygon.lod") && controller.settings_panel().open, "Polygon > LOD Settings opens settings");
     controller.key_down("escape", false, false, false);
     check(controller.dispatch_action("audio.settings"), "Audio > Audio Settings opens settings");
-    check(!controller.dispatch_action("create.polygon") && controller.status().error, "Create > Polygon Mesh is refused honestly");
-    check(!controller.dispatch_action("polygon.import") && controller.status().text.find("Assets panel") != std::string::npos,
-          "Polygon > Import is Import Model (needs a selected model)");
+    {
+        // #111: Create > Polygon Cube makes a real owned mesh object in one undo step.
+        const std::size_t before = controller.workspace().document().objects().size();
+        check(controller.dispatch_action("create.polygon") && !controller.status().error,
+              "Create > Polygon Cube creates a mesh");
+        const auto created = controller.workspace().selected_object();
+        const EditorObject* cube = created ? controller.workspace().document().find_object(*created) : nullptr;
+        check(cube && cube->polygon && !cube->polygon->indices.empty() &&
+                  controller.workspace().document().objects().size() == before + 1,
+              "the new cube is a selected, owned polygon object");
+        check(controller.dispatch_action("edit.undo") && controller.workspace().document().objects().size() == before,
+              "one undo removes the cube");
+    }
+    check(!controller.dispatch_action("polygon.import") && controller.status().error &&
+              controller.status().text.find("Assets panel") != std::string::npos,
+          "Polygon > Import Polygon Model needs a model selected in the Assets panel");
 }
 
 } // namespace

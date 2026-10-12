@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "dve/asset_cooker.hpp"
+#include "dve/polygon_asset.hpp"
 #include "dve/component.hpp"
 #include "dve/editor_scene_composition.hpp"
 #include "dve/gabor_volume.hpp"
@@ -50,6 +51,7 @@ struct EditorObject {
     float voxelSizeMeters{0.10F};
     Float3 voxelScale{1,1,1};
     std::unique_ptr<VoxelObject> voxels;
+    std::optional<CookedPolygonAsset> polygon;
     std::optional<CookedText3DAsset> text3d;
     std::optional<GaborVolumeAsset> gaborVolume;
     std::set<Int3> anchors;
@@ -59,6 +61,7 @@ struct EditorObject {
     std::uint32_t layer{};
     std::optional<EditorPrefabLink> prefabLink;
 
+    [[nodiscard]] bool is_polygon() const noexcept { return polygon.has_value(); }
     [[nodiscard]] bool is_text3d() const noexcept { return text3d.has_value(); }
     [[nodiscard]] bool is_gabor_volume() const noexcept { return gaborVolume.has_value(); }
 

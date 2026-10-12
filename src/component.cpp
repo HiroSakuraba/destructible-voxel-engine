@@ -1,4 +1,5 @@
 #include "dve/component.hpp"
+#include "dve/collision_hull.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -110,6 +111,7 @@ bool ComponentTypeRegistry::validate(const Component& component, std::string* er
         if (!component_property_name_is_valid(name)) return fail("invalid component property name");
         if (!component_value_is_finite(value)) return fail("component property is not finite");
     }
+    if(component.type==kCollisionHullComponent && !collision_hull_component_points(component))return fail("invalid collision hull control points");
     const ComponentTypeSchema* schema = find(component.type);
     if (!schema) return true; // Open composition: unregistered components remain valid and serializable.
     for (const ComponentPropertySchema& property : schema->properties) {
@@ -127,6 +129,8 @@ bool ComponentTypeRegistry::validate(const Component& component, std::string* er
 ComponentTypeRegistry ComponentTypeRegistry::make_default() {
     ComponentTypeRegistry registry;
     std::string ignored;
+    (void)registry.register_type({"dve.collision_hull","Authored Collision Hull",false,
+        {{"points",std::string{},true,false,"Hull control points"}}}, &ignored);
     (void)registry.register_type({
         "dve.script", "Lua Script", true,
         {{"asset", std::string{}, true, true}, {"startup", false, false, false}}}, &ignored);
@@ -368,6 +372,7 @@ bool validate_components(
         if (component.id == kInvalidComponentId || !ids.insert(component.id).second)
             return fail("duplicate or invalid component id");
         if (!component_type_name_is_valid(component.type)) return fail("invalid component type name");
+        if(component.type==kCollisionHullComponent && !collision_hull_component_points(component))return fail("invalid collision hull control points");
         for (const auto& [name, value] : component.properties) {
             if (!component_property_name_is_valid(name)) return fail("invalid component property name");
             if (!component_value_is_finite(value)) return fail("component property is not finite");

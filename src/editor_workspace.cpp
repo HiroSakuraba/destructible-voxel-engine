@@ -633,6 +633,23 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"polygon.bevel","Polygon","Face Bevel (tapered extrusion)",""}, {"polygon.extrude","Polygon","Extrude",""}, {"polygon.inset","Polygon","Inset",""},
         {"polygon.uv_tools","Polygon","UV Tools",""}, {"polygon.recalculate_normals","Polygon","Recalculate Normals",""},
         {"polygon.flip_normals","Polygon","Flip Normals",""},
+        {"mesh.boolean_union","Polygon","Mesh Boolean Union",""},
+        {"mesh.boolean_difference","Polygon","Mesh Boolean A minus B",""},
+        {"mesh.boolean_reverse","Polygon","Mesh Boolean B minus A",""},
+        {"mesh.boolean_intersection","Polygon","Mesh Boolean Intersection",""},
+        {"mesh.hull_fit","Polygon","Fit Convex Collision Hull",""},
+        {"mesh.hull_edit","Polygon","Edit Collision Hull Points",""},
+        {"mesh.hull_remove","Polygon","Remove Authored Collision Hull",""},
+        {"mesh.bevel_edges","Polygon","Bevel Edges (convex solid)",""},
+        {"mesh.subdivide","Polygon","Subdivide Selected Faces",""},
+        {"mesh.split_edges","Polygon","Split Selected Edges",""},
+        {"mesh.flip_diagonal","Polygon","Flip Triangle Diagonal",""},
+        {"mesh.bridge","Polygon","Bridge Boundary Loops",""},
+        {"mesh.cap","Polygon","Cap Boundary Loop",""},
+        {"mesh.hard_normals","Polygon","Hard Face Normals",""},
+        {"mesh.smooth_normals","Polygon","Smooth Selected Normals",""},
+        {"mesh.diagnostics","Polygon","Topology Diagnostics Overlay",""},
+        {"mesh.uv_editor","Polygon","UV Workspace",""},
         {"polygon.assign_material","Polygon","Assign Active Material to Faces",""},
         {"polygon.weld","Polygon","Weld by Distance",""},
         {"polygon.select_shell","Polygon","Select Connected Shell",""},
@@ -710,6 +727,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         configure(id, "Mesh Editing", 80);
     for (auto id:{"polygon.vertex_mode","polygon.edge_mode","polygon.face_mode","polygon.object_mode"})
         configure(id,"Mesh Editing",80,true,"polygon.selection");
+    for(auto id:{"mesh.boolean_union","mesh.boolean_difference","mesh.boolean_reverse","mesh.boolean_intersection"})configure(id,"Mesh Booleans",70);
+    for(auto id:{"mesh.hull_fit","mesh.hull_edit","mesh.hull_remove"})configure(id,"Collision Hull",75);
+    for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
     for (auto id:{"polygon.assign_material","polygon.weld","polygon.select_shell","polygon.select_invert","polygon.select_none","polygon.extract",
                  "polygon.join","polygon.separate","polygon.slice","polygon.preview_apply","polygon.preview_cancel"}) configure(id,"Mesh Editing",80);
     for (std::string_view id : {"material.assign", "material.apply", "material.link", "material.create_instance",

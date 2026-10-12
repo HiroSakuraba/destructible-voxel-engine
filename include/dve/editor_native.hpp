@@ -446,6 +446,8 @@ struct EditorAutosaveStatus {
     std::string lastError;
 };
 
+struct NativeMeshAuthoringState;
+class IEditorCanvas;
 class NativeEditorController {
 public:
     explicit NativeEditorController(EditorWorkspace workspace = EditorWorkspace{},
@@ -932,6 +934,17 @@ public:
     bool extract_selected_polygon();
     [[nodiscard]] std::vector<std::string> polygon_preview_lines() const;
     void cancel_polygon_preview();
+    bool dispatch_mesh_authoring_action(std::string_view);
+    bool mesh_authoring_key(std::string_view,bool control,bool shift,bool alt);
+    bool mesh_authoring_pointer_down(PointerButton,int,int,std::uint32_t);
+    bool mesh_authoring_pointer_move(int,int,std::uint32_t);
+    bool mesh_authoring_pointer_up(PointerButton,int,int,std::uint32_t);
+    bool mesh_authoring_wheel(float,int,int);
+    void cancel_mesh_authoring_drag();
+    void draw_mesh_authoring(const IEditorCanvas&,UiRect) const;
+    [[nodiscard]] bool mesh_authoring_dragging() const noexcept;
+    [[nodiscard]] std::set<EditorObjectId> mesh_authoring_hidden_objects() const;
+    void refresh_mesh_authoring_menu_state();
     [[nodiscard]] EditorObjectId voxel_selection_object() const noexcept { return voxelSelectionObject_; }
     [[nodiscard]] const std::set<Int3>& voxel_selection() const noexcept { return voxelSelection_; }
     void select_voxels(EditorObjectId object, const std::set<Int3>& cells, SelectionOperation operation);
@@ -1419,6 +1432,7 @@ private:
     audio::MidiOutputStatus midiOutputStatus_{};
     std::uint64_t midiOutputStatusGeneration_{~std::uint64_t{0}};
     std::string midiOutputChoicesPort_{"\x01"};
+    std::shared_ptr<NativeMeshAuthoringState> meshAuthoring_;
 };
 
 [[nodiscard]] EditorDocument make_new_project_document();

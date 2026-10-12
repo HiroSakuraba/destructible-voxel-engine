@@ -671,6 +671,7 @@ private:
     std::map<GameObjectId, RigidTransform> presentationPrevious_;
 
     struct Object;
+    bool rebuild_authored_polygon_hull(Object&,const Component*,std::string* error=nullptr);
     struct Timer;
     struct Pool;
 

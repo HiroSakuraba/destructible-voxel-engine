@@ -1,4 +1,5 @@
 #include "dve/rigid_body_adapter.hpp"
+#include "dve/collision_hull.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -166,7 +167,7 @@ bool inertia_is_positive_definite(const SolverInertiaTensor& inertia) noexcept {
 
 RigidBodyValidationResult validate_rigid_body_desc(const RigidBodyCreateDesc& desc) noexcept {
     RigidBodyValidationResult result;
-    if (desc.boxes.empty()) {
+    if (desc.boxes.empty() || (!desc.convexHullPoints.empty() && !validate_collision_hull_points(desc.convexHullPoints))) {
         result.error = RigidBodyValidationError::EmptyCollisionShape;
         return result;
     }
@@ -296,7 +297,7 @@ bool validate_rigid_body_constraint_desc(const RigidBodyConstraintDesc& desc) no
 
 
 bool validate_static_rigid_body_desc(const StaticRigidBodyCreateDesc& desc) noexcept {
-    if (desc.boxes.empty() || !finite(desc.transform)) return false;
+    if (desc.boxes.empty() || !finite(desc.transform) || (!desc.convexHullPoints.empty() && !validate_collision_hull_points(desc.convexHullPoints))) return false;
     const double rotationNormSquared =
         static_cast<double>(desc.transform.rotation.x) * desc.transform.rotation.x +
         static_cast<double>(desc.transform.rotation.y) * desc.transform.rotation.y +
@@ -795,6 +796,8 @@ std::uint64_t ReferenceRigidBodyWorld::solver_state_hash() const noexcept {
         value(body.isStatic ? body.staticDesc.collisionClass : desc.collisionClass);
         const auto& boxes=body.isStatic ? body.staticDesc.boxes : desc.boxes;
         value(boxes.size()); for (const auto& box:boxes) { vector(box.center); vector(box.halfExtents); }
+        const auto& points=body.isStatic?body.staticDesc.convexHullPoints:desc.convexHullPoints;
+        value(points.size());for(auto point:points)vector(point);
     }
     value(freeHandles_.size()); for(const auto h:freeHandles_) value(h);
     value(constraints_.size());

@@ -152,7 +152,9 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
                 found=true;
             }
             if(!found) { set_status("No saved UV flags to reset",true); return false; }
+            const auto snapshot=capture_selection_snapshot();
             const auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
+            if(result.success)workspace_.commands().set_last_selection_transition(snapshot,capture_selection_snapshot());
             s.uvFlagsObject=0;
             if(s.object==object->id)(void)refresh_uv_flags(s,*object);
             set_status(result.success?"Reset saved UV seams and pins":result.message,!result.success);
@@ -199,7 +201,9 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
         std::string error;
         auto command=make_polygon_uv_authoring_command(workspace_.document(),*object,flags,&error);
         if(!command) { set_status(error,true); return false; }
+        const auto snapshot=capture_selection_snapshot();
         const auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
+        if(result.success)workspace_.commands().set_last_selection_transition(snapshot,capture_selection_snapshot());
         s.uvFlagsObject=0;
         if(result.success) {
             s.object=object->id;

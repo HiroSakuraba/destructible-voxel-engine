@@ -35,8 +35,7 @@ namespace {
 // Reasons shown for commands this editor build does not implement (menu, Command Center, status).
 constexpr std::string_view kAudioImportUnavailable =
     "Not connected in this editor yet: this build has no audio importer behind Audio > Import Audio";
-constexpr std::string_view kCreatePolygonUnavailable =
-    "Not in this editor yet: polygon meshes are not authored here; File > Import Model brings a model in as voxels";
+constexpr std::string_view kCreatePolygonBlocked = "Stop Play or Simulate before creating polygon meshes.";
 constexpr std::string_view kCookUnavailable =
     "Not connected in this editor yet: cook content with the dve_cook_* command-line tools";
 constexpr std::string_view kPackageUnavailable =
@@ -224,8 +223,6 @@ NativeEditorController::NativeEditorController(EditorWorkspace workspace, std::f
       materials_(EditorMaterialLibrary::make_default()), userSettingsPath_(std::move(userSettingsPath)),
       projectSettingsPath_(std::move(projectSettingsPath)),
       audioMixer_(RuntimeSettingsReader(workspace_.settings()).integer("audio.sample_rate")) {
-    MenuAction meshPlane("polygon.create_plane","Polygon","Create Mesh Plane");
-    (void)workspace_.menus().add(std::move(meshPlane));
     apply_settings_to_runtime();
     const SettingValue defaultPresetValue = workspace_.settings().value("camera.default_cinematic_preset");
     const std::string defaultPresetId = std::get_if<std::string>(&defaultPresetValue)
@@ -1673,7 +1670,8 @@ namespace {
 const std::vector<std::pair<std::string, std::string>>& editor_context_only_commands() {
     static const std::vector<std::pair<std::string, std::string>> kCommands = [] {
         std::vector<std::pair<std::string, std::string>> list;
-        const std::string mesh = "Mesh component controls are pending validation; Polygon > Import creates owned mesh objects.";
+        // The component APIs exist (editor_polygon.hpp) but the native controls are not wired yet.
+        const std::string mesh = "Not in this editor yet: polygon mesh editing (vertex/edge/face tools); Create > Polygon Cube and Polygon > Import Polygon Model make owned meshes.";
         for (const char* id : {"polygon.vertex_mode", "polygon.edge_mode", "polygon.face_mode", "polygon.object_mode",
                                "polygon.component_toggle", "polygon.bevel", "polygon.extrude", "polygon.inset", "polygon.uv_tools",
                                "polygon.recalculate_normals", "polygon.flip_normals"})
@@ -1960,8 +1958,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
             std::string extension = asset ? asset->relativePath.extension().string() : std::string();
             for (char& ch : extension) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             const bool model = extension == ".obj" || extension == ".gltf" || extension == ".glb";
-            enabled("polygon.import",(model||extension==".dmesh")&&!playActive,
-                "Select an OBJ, glTF, GLB or DMESH in Assets and stop Play first");
+            enabled("polygon.import", (model || extension == ".dmesh") && !playActive,
+                    playActive ? "Stop Play or Simulate before importing."
+                               : "Select an OBJ, glTF, GLB or DMESH model in the Assets panel first.");
             for (std::string_view id : {"file.import"})
                 enabled(id, model && !playActive, playActive ? "Stop Play or Simulate before importing."
                                                              : "Select an OBJ, glTF or GLB model in the Assets panel first.");
@@ -1980,8 +1979,8 @@ void NativeEditorController::refresh_menu_state() noexcept {
         // Command Center say so before the command is tried.
         enabled("voxel.rebuild_brickmaps", false, kRebuildBrickmapsUnavailable);
         enabled("audio.import", false, kAudioImportUnavailable);
-        enabled("create.polygon",!playActive&&workspace_.mode()==EditorMode::Edit,"Stop Play before creating meshes");
-        enabled("polygon.create_plane",!playActive&&workspace_.mode()==EditorMode::Edit,"Stop Play before creating meshes");
+        for (std::string_view id : {"create.polygon", "polygon.create_plane"})
+            enabled(id, !playActive && workspace_.mode() == EditorMode::Edit, kCreatePolygonBlocked);
         const std::string joinReason = voxel_join_disabled_reason();
         enabled("voxel.join", joinReason.empty(), joinReason);
         const std::string joinBlocked = voxelJoin_.blocked_reason(workspace_.document());
@@ -5504,11 +5503,12 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
             gizmoAxis_ = 0;
             return;
         }
-    }
-    if(activeTool_==EditorToolId::Scale && (modifiers&2U) &&
-        std::any_of(workspace_.selected_objects().begin(),workspace_.selected_objects().end(),
-            [&](auto id){return workspace_.document().find_object(id)->polygon.has_value();})) {
-        set_status("Ctrl resamples voxels; release Ctrl to scale polygon geometry",true);return;
+        if (activeTool_ == EditorToolId::Scale && (modifiers & 2U) != 0U && object->polygon) {
+            // Ctrl-scale resamples voxels; polygon geometry has no cells to resample.
+            set_status("Ctrl resamples voxels; release Ctrl to scale polygon geometry", true);
+            gizmoAxis_ = 0;
+            return;
+        }
     }
     gizmoDragging_ = true;
     gizmoStartX_ = x;
@@ -6478,23 +6478,36 @@ camera_menu_dispatch_complete:
     if (actionId == "polygon.import") {
         const auto* asset=assetBrowserState_.selectedId?
             std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId):nullptr;
-        if(!asset){set_status("Select an OBJ, glTF, GLB or DMESH in Assets first",true);return false;}
+        if(!asset){set_status("Select an OBJ, glTF, GLB or DMESH model in the Assets panel first.",true);return false;}
         return import_polygon_model(asset->relativePath);
     }
     if (actionId == "create.polygon" || actionId == "polygon.create_plane") {
-        if (workspace_.mode()!=EditorMode::Edit || playSession_.active()) return false;
-        const bool plane=actionId=="polygon.create_plane";
-        auto& document=workspace_.document();const auto id=document.allocate_object_id();
-        const auto before=capture_selection_snapshot();
-        EditorObject object(id,plane?"Polygon Plane":"Polygon Cube");object.voxelSizeMeters=1;
-        object.polygon=plane?make_editor_polygon_plane(id):make_editor_polygon_cube(id);
-        object.transform.position=camera_.target;object.flags.anchored=plane;
-        const auto result=workspace_.commands().execute(document,
-            std::make_unique<AddObjectCommand>(std::move(object),"Create polygon"));
-        if(!result.success){set_status(result.message,true);return false;}
-        workspace_.select_object(id);selectionDomain_=SelectionDomain::Objects;
-        workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
-        frame_selection();refresh_menu_state();set_status("Created editable polygon geometry");return true;
+        if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
+            set_status(std::string(kCreatePolygonBlocked), true);
+            return false;
+        }
+        close_previews_for_voxel_edit("polygon mesh created");
+        const bool plane = actionId == "polygon.create_plane";
+        auto& document = workspace_.document();
+        const auto id = document.allocate_object_id();
+        const auto before = capture_selection_snapshot();
+        EditorObject object(id, plane ? "Polygon Plane" : "Polygon Cube");
+        object.voxelSizeMeters = 1.0F;
+        object.polygon = plane ? make_editor_polygon_plane(id) : make_editor_polygon_cube(id);
+        object.transform.position = camera_.target;
+        object.flags.anchored = plane;
+        const auto result = workspace_.commands().execute(
+            document, std::make_unique<AddObjectCommand>(std::move(object), plane ? "Create polygon plane" : "Create polygon cube"));
+        if (!result.success) { set_status(result.message, true); return false; }
+        // A new object stays visible while the view is isolated (as Import and Paste do).
+        if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+        workspace_.select_object(id);
+        selectionDomain_ = SelectionDomain::Objects;
+        workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
+        frame_selection();
+        refresh_menu_state();
+        set_status(plane ? "Created a polygon plane" : "Created a polygon cube");
+        return true;
     }
     if (actionId == "build.validate") {
         (void)validate_project();
@@ -9604,7 +9617,7 @@ bool NativeEditorController::flood_fill_at(EditorObjectId objectId, Int3 start) 
         set_status("Flood Fill: " + object->name + " is hidden or isolated out of view", true);
         return false;
     }
-    if (!object || !object->voxels || object->text3d || object->gaborVolume) {
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume) {
         set_status("Flood Fill works on voxel objects", true);
         return false;
     }
@@ -9930,7 +9943,7 @@ std::size_t NativeEditorController::validate_project() {
                                 *path + " was not found.", id);
                     }
                 }
-                const bool voxelObject = object.voxels && !object.text3d && !object.gaborVolume;
+                const bool voxelObject = object.voxels && !object.polygon && !object.text3d && !object.gaborVolume;
                 if (voxelObject && object.voxels->occupied_voxel_count() > 0 && object.flags.collisionEnabled &&
                     !validate_box_proxy(*object.voxels, build_merged_object_box_proxy(*object.voxels)))
                     add(ProblemSeverity::Error, "validate.collision", name + ": collision proxy does not cover its voxels",
@@ -10841,36 +10854,67 @@ bool NativeEditorController::start_import_job(bool reimport) {
 // --- Long jobs ---------------------------------------------------------------------------------
 
 bool NativeEditorController::import_polygon_model(const std::filesystem::path& path) {
-    if(workspace_.mode()!=EditorMode::Edit||playSession_.active())return false;
-    const auto absolute=path.is_absolute()?path:projectRoot_/path;
-    std::string extension=path.extension().string();
-    for(auto& ch:extension)ch=static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    if(!is_model_source(path)&&extension!=".dmesh"){set_status("Polygon import reads OBJ, glTF, GLB and DMESH",true);return false;}
-    auto mesh=std::make_shared<std::optional<CookedPolygonAsset>>();
-    const auto id=workspace_.document().allocate_object_id();
-    return start_long_job(LongJobKind::ImportModel,"Import polygon "+path.filename().string(),longJobThreshold_+1,
-        [mesh,absolute,id,extension](LongJob& job) {
-            if(job.cancel)return;job.report(.1F,"Reading polygon geometry and materials");
-            if(extension==".dmesh"){
-                auto loaded=read_dmesh(absolute,256ULL*1024*1024);
-                if(!loaded){job.error=loaded.error;return;}*mesh=std::move(loaded.asset);
-            }else{
-                PolygonCookOptions options;options.objectId=id;options.maximumVertices=1000000;options.maximumIndices=6000000;
-                *mesh=cook_polygon_model(absolute,{},options);
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
+        set_status("Stop Play or Simulate before importing.", true);
+        return false;
+    }
+    // has_root_* rather than is_absolute(): a rooted path is never joined to the project on Windows.
+    const auto absolute = (path.has_root_directory() || path.has_root_name()) ? path : projectRoot_ / path;
+    std::string extension = path.extension().string();
+    for (auto& ch : extension) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (!is_model_source(path) && extension != ".dmesh") {
+        set_status("Polygon import reads OBJ, glTF, GLB and DMESH files.", true);
+        return false;
+    }
+    close_previews_for_voxel_edit("Import started");
+    auto mesh = std::make_shared<std::optional<CookedPolygonAsset>>();
+    const auto id = workspace_.document().allocate_object_id();
+    return start_long_job(LongJobKind::ImportModel, "Import polygon " + path.filename().string(), longJobThreshold_ + 1,
+        [mesh, absolute, id, extension](LongJob& job) {
+            const auto fail = [&job](std::string message) {
+                std::lock_guard lock(job.mutex);
+                job.error = std::move(message);
+            };
+            if (job.cancelled()) return;
+            job.report(0.1F, "Reading polygon geometry and materials");
+            if (extension == ".dmesh") {
+                auto loaded = read_dmesh(absolute, 256ULL * 1024ULL * 1024ULL);
+                if (!loaded) { fail(loaded.error); return; }
+                *mesh = std::move(loaded.asset);
+            } else {
+                PolygonCookOptions options;
+                options.objectId = id;
+                options.maximumVertices = 1000000;
+                options.maximumIndices = 6000000;
+                *mesh = cook_polygon_model(absolute, {}, options);
             }
-            if(job.cancel)return;(*mesh)->objectId=id;refresh_editor_polygon(**mesh);
-            const auto valid=validate_polygon_asset(**mesh);
-            if(!valid){job.error=valid.message;return;}job.report(1,"Polygon ready");
-        },[this,mesh,path,id](LongJob&) {
-            if(!*mesh)return false;const auto before=capture_selection_snapshot();
-            EditorObject object(id,path.stem().string());object.voxelSizeMeters=1;
-            object.polygon=std::move(**mesh);object.sourceAsset=path;object.transform.position=camera_.target;
-            const auto result=workspace_.commands().execute(workspace_.document(),
-                std::make_unique<AddObjectCommand>(std::move(object),"Import polygon"));
-            if(!result.success){set_status(result.message,true);return false;}
-            workspace_.select_object(id);selectionDomain_=SelectionDomain::Objects;
-            workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
-            frame_selection();refresh_menu_state();set_status("Imported polygon; source file preserved");return true;
+            if (job.cancelled()) return;
+            // Keep the cooked attributes (authored tangents included); only the owner changes.
+            (*mesh)->objectId = id;
+            (*mesh)->contentHash = polygon_asset_content_hash(**mesh);
+            const auto valid = validate_polygon_asset(**mesh);
+            if (!valid) { fail(valid.message); return; }
+            job.report(1.0F, "Polygon ready");
+        },
+        [this, mesh, path, id](LongJob& job) {
+            if (!*mesh) { set_status(job.label + " produced no geometry", true, 8.0F); return false; }
+            const auto before = capture_selection_snapshot();
+            EditorObject object(id, path.stem().string());
+            object.voxelSizeMeters = 1.0F;
+            object.polygon = std::move(**mesh);
+            object.sourceAsset = path;
+            object.transform.position = camera_.target;
+            const auto result = workspace_.commands().execute(
+                workspace_.document(), std::make_unique<AddObjectCommand>(std::move(object), "Import polygon model"));
+            if (!result.success) { set_status(result.message, true); return false; }
+            if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+            workspace_.select_object(id);
+            selectionDomain_ = SelectionDomain::Objects;
+            workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
+            frame_selection();
+            refresh_menu_state();
+            set_status("Imported " + path.filename().string() + " as an owned polygon mesh; the source file is unchanged");
+            return true;
         });
 }
 

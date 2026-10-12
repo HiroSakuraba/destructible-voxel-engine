@@ -5,7 +5,10 @@
 #include "dve/editor_scatter.hpp"
 #include "dve/voxel_metric.hpp"
 #include <chrono>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <string>
 #include <iostream>
 #include <stdexcept>
 
@@ -48,7 +51,8 @@ void geometry() {
     check(bool(bevel),"face bevel");
     const auto front=slice_polygon(cube,{.5F,0,0},{1,0,0},true);
     const auto back=slice_polygon(cube,{.5F,0,0},{1,0,0},false);
-    check(bool(front)&&bool(back),"capped closed-mesh slice");
+    check(bool(front),("capped closed-mesh slice (front): "+front.error).c_str());
+    check(bool(back),("capped closed-mesh slice (back): "+back.error).c_str());
     near(volume(front.mesh),.5F,"front closed volume");near(volume(back.mesh),.5F,"back closed volume");
     check(!slice_polygon(plane,{0,0,0},{1,0,0},true,true),"open contour refused for caps");
     check(bool(slice_polygon(plane,{0,0,0},{1,0,0},true,false)),"open surface cut without caps");
@@ -71,6 +75,14 @@ void geometry() {
     const auto all=polygon_components_in_rect(*document.find_object(1),camera,{0,0,800,600},{0,0,800,600},
         PolygonSelectionMode::Vertex,true);
     check(all.size()==8,"through rectangle component selection");
+
+    // A large surface that passes behind the camera keeps its visible part (near-plane clipping).
+    EditorDocument ground("Ground");ground.add_object(mesh_object(1,true));
+    EditorCamera low;low.position={1.9F,.3F,0};low.target={-2,0,0};
+    const auto drawn=build_editor_polygon_draw_list(ground,low,{0,0,800,600},{},{});
+    check(!drawn.empty(),"plane partly behind the camera still draws");
+    for(const auto& triangle:drawn) for(const auto& point:triangle.points)
+        check(std::isfinite(point.x)&&std::isfinite(point.y)&&point.depth>low.nearPlane,"clipped preview points are in front");
 }
 void history_and_storage() {
     EditorDocument document("Polygon storage");document.add_object(mesh_object(1));
@@ -92,6 +104,18 @@ void history_and_storage() {
         ("dve-polygon-editor-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(directory);
     const auto saved=document.save_transactional(directory/"scene.dvescene");check(saved.success,saved.error.c_str());
+    const auto header=[](const std::filesystem::path& path) {
+        std::ifstream input(path);std::string magic;int version{};input>>magic>>version;return version;
+    };
+    check(header(saved.manifestPath)==7,"scenes with owned meshes are format 7");
+    {
+        EditorDocument voxelsOnly("Voxels only");EditorObject box(1,"Box");box.voxels->set_voxel({0,0,0},1);
+        box.voxelScale={2,1,.5F};voxelsOnly.add_object(std::move(box));
+        const auto plain=voxelsOnly.save_transactional(directory/"voxels.dvescene");check(plain.success,plain.error.c_str());
+        check(header(plain.manifestPath)==6,"scenes without meshes stay format 6 for older editors");
+        std::string plainError;const auto reopened=EditorDocument::load(plain.manifestPath,&plainError);
+        check(reopened&&reopened->find_object(1)->voxelScale.x==2&&!reopened->find_object(1)->polygon,"format 6 axis scale round trip");
+    }
     std::string error;auto loaded=EditorDocument::load(saved.manifestPath,&error);check(bool(loaded),error.c_str());
     check(loaded->find_object(1)->polygon&&loaded->find_object(1)->polygon->contentHash==hash,"owned mesh scene round trip");
     near(loaded->find_object(1)->voxelScale.z,3,"scene mesh scale");

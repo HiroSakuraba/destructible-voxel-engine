@@ -78,6 +78,7 @@ struct EditorPolygonDrawTriangle {
     std::array<ScreenPoint,3> points;
     Float4 color{};
     float depth{};
+    float facing{1.0F}; // |cos| between the face normal and the view direction, for flat shading
     bool selected{};
 };
 // Bounded software preview. Runtime poses are optional; production textures use the player renderer.

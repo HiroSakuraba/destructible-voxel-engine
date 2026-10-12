@@ -3404,8 +3404,10 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         const auto& p=triangle.points;
         const float low=std::max(float(viewport.y),std::min({p[0].y,p[1].y,p[2].y}));
         const float high=std::min(float(viewport.y+viewport.height-1),std::max({p[0].y,p[1].y,p[2].y}));
-        const float light=std::clamp(1.1F-triangle.depth*.018F,.42F,1.0F);
-        const auto color=rgb(byte(triangle.color.x*light),byte(triangle.color.y*light),byte(triangle.color.z*light));
+        // Named so it does not shadow the theme's `light` flag (MSVC C4456).
+        const float polygonShade=std::clamp(1.1F-triangle.depth*.018F,.42F,1.0F)*(0.45F+0.55F*triangle.facing);
+        const auto color=rgb(byte(triangle.color.x*polygonShade),byte(triangle.color.y*polygonShade),
+                             byte(triangle.color.z*polygonShade));
         if(low<=high && shading!=ShadingMode::Wireframe)for(int y=int(std::ceil(low));y<=int(std::floor(high));++y) {
             std::vector<float> xs;const float scan=float(y)+.5F;
             for(int edge=0;edge<3;++edge) {

@@ -376,7 +376,11 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         std::filesystem::create_directories(manifestPath.parent_path().empty() ? "." : manifestPath.parent_path());
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) throw std::runtime_error("could not open temporary scene manifest");
-        output << "DVE_EDITOR_SCENE 7\n";
+        // Format 7 only adds owned polygon objects (geometry kind 3). Scenes without them stay
+        // format 6, so editors from before #111 can still open them.
+        const bool hasPolygons = std::any_of(objects_.begin(), objects_.end(),
+                                             [](const auto& entry) { return entry.second.polygon.has_value(); });
+        output << "DVE_EDITOR_SCENE " << (hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";

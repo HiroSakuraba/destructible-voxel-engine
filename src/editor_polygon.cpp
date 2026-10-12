@@ -340,7 +340,8 @@ PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSel
         }
     } else if(operation==PolygonEdit::AssignMaterial) {
         if(settings.material>=mesh.materials.size()) { result.error="Material is outside the mesh palette"; return result; }
-        for(const auto face:faces) materials[face]=settings.material; submeshes(mesh,materials);
+        for(const auto face:faces) materials[face]=settings.material;
+        submeshes(mesh,materials);
     } else if(operation==PolygonEdit::Weld) {
         if(!(settings.amount>0)) { result.error="Weld distance must be positive"; return result; }
         if(selected.size()>10000) { result.error="Weld exceeds the 10,000 selected-vertex budget"; return result; }
@@ -410,7 +411,7 @@ PolygonEditResult slice_polygon(const CookedPolygonAsset& source,Float3 point,Fl
     }
     if(cap&&!segments.empty()) {
         std::map<std::uint32_t,std::set<std::uint32_t>> graph;
-        for(const auto [a,b]:segments) { graph[a].insert(b); graph[b].insert(a); }
+        for(const auto& [a,b]:segments) { graph[a].insert(b); graph[b].insert(a); }
         for(const auto& [vertex,links]:graph) {
             (void)vertex; if(links.size()!=2) {
                 result.error="Slice cap needs closed simple contours; disable caps for open meshes"; return result;
@@ -466,7 +467,9 @@ PolygonEditResult slice_polygon(const CookedPolygonAsset& source,Float3 point,Fl
                     for(const auto other:loop) {
                         if(other==a||other==b||other==c) continue;
                         const auto p=project(other);
-                        if(orient(pa,pb,p)>epsilon*epsilon&&orient(pb,pc,p)>epsilon*epsilon&&orient(pc,pa,p)>epsilon*epsilon) {
+                        // Closed test: a loop vertex on the new diagonal (a,c) would become a T-junction
+                        // and later leave a zero-area remainder, so it blocks this ear as well.
+                        if(orient(pa,pb,p)>=-epsilon*epsilon&&orient(pb,pc,p)>=-epsilon*epsilon&&orient(pc,pa,p)>=-epsilon*epsilon) {
                             covered=true; break;
                         }
                     }
@@ -506,7 +509,7 @@ PolygonEditResult join_editor_polygons(const EditorDocument& document,EditorObje
             mesh.textures.push_back(std::move(texture));
         }
         for(auto material:source.materials) {
-            for(auto& layer:material.layers) layer.sourceMaterial+=materialOffset;
+            for(auto& layer:material.layers) layer.sourceMaterial=static_cast<MaterialId>(layer.sourceMaterial+materialOffset);
             mesh.materials.push_back(std::move(material));
         }
         for(std::size_t i=0;i<source.materials.size();++i) {
@@ -626,7 +629,8 @@ std::optional<std::uint64_t> pick_polygon_component(const EditorObject& object,c
         if(!a.visible||!b.visible) continue;
         const float dx=b.x-a.x,dy=b.y-a.y;
         const float t=std::clamp(((float(x)-a.x)*dx+(float(y)-a.y)*dy)/std::max(0.001F,dx*dx+dy*dy),0.0F,1.0F);
-        const float distance=std::pow(float(x)-a.x-t*dx,2)+std::pow(float(y)-a.y-t*dy,2);
+        const float ex=float(x)-a.x-t*dx,ey=float(y)-a.y-t*dy;
+        const float distance=ex*ex+ey*ey;
         const auto world=voxel_to_world(object.transform,object.voxelScale,
             add(mesh.vertices[e.a].position,multiply(subtract(mesh.vertices[e.b].position,mesh.vertices[e.a].position),t)));
         if(distance<best&&(through||visible_point(object,camera,viewport,world))) { best=distance; result=e.key(); }
@@ -694,17 +698,48 @@ std::vector<EditorPolygonDrawTriangle> build_editor_polygon_draw_list(
         auto pose=object.transform;
         if(poses) if(const auto it=poses->find(id);it!=poses->end()) pose=it->second;
         for(std::uint32_t face=0;face<mesh.indices.size()/3&&result.size()<maximum;++face) {
-            EditorPolygonDrawTriangle triangle;triangle.object=id;triangle.face=face;bool visible=true;
+            std::array<Float3,3> world{};std::array<float,3> depth{};bool finite=true;
             for(int j=0;j<3;++j) {
-                auto& p=triangle.points[std::size_t(j)];
-                p=project_world_to_screen(camera,viewport,voxel_to_world(pose,object.voxelScale,
-                    mesh.vertices[mesh.indices[std::size_t(face)*3+std::size_t(j)]].position));
-                visible=visible&&p.visible&&std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.depth);
-                triangle.depth+=p.depth/3;
+                world[std::size_t(j)]=voxel_to_world(pose,object.voxelScale,
+                    mesh.vertices[mesh.indices[std::size_t(face)*3+std::size_t(j)]].position);
+                depth[std::size_t(j)]=project_world_to_screen(camera,viewport,world[std::size_t(j)]).depth;
+                finite=finite&&finite3(world[std::size_t(j)])&&std::isfinite(depth[std::size_t(j)]);
             }
-            if(!visible) continue;
-            triangle.selected=selected.contains(id);triangle.color=mesh.materials[materials[face]].baseColor;
-            result.push_back(triangle);
+            if(!finite) continue;
+            // Clip against the near plane (view depth is affine in world position), so a large
+            // surface that passes behind the camera keeps its visible part. Off-screen points in
+            // front of the camera are kept; the canvas clips them.
+            const float nearDepth=camera.nearPlane+std::max(1e-4F,camera.nearPlane*1e-3F);
+            std::array<Float3,4> clipped{};std::size_t count=0;
+            for(std::size_t j=0;j<3;++j) {
+                const std::size_t k=(j+1)%3;
+                const bool inA=depth[j]>=nearDepth,inB=depth[k]>=nearDepth;
+                if(inA) clipped[count++]=world[j];
+                if(inA!=inB) {
+                    const float t=(nearDepth-depth[j])/(depth[k]-depth[j]);
+                    clipped[count++]=add(world[j],multiply(subtract(world[k],world[j]),t));
+                }
+            }
+            if(count<3) continue;
+            std::array<ScreenPoint,4> screen{};bool usable=true;float depthSum=0;
+            for(std::size_t j=0;j<count;++j) {
+                screen[j]=project_world_to_screen(camera,viewport,clipped[j]);
+                usable=usable&&screen[j].depth>camera.nearPlane&&screen[j].depth<=camera.farPlane&&
+                    std::isfinite(screen[j].x)&&std::isfinite(screen[j].y);
+                depthSum+=screen[j].depth;
+            }
+            if(!usable) continue;
+            const auto normal=normalize(cross3(subtract(world[1],world[0]),subtract(world[2],world[0])));
+            const auto centre=multiply(add(add(world[0],world[1]),world[2]),1.0F/3.0F);
+            const float facing=std::abs(dot(normal,normalize(subtract(camera.position,centre))));
+            for(std::size_t j=1;j+1<count&&result.size()<maximum;++j) {
+                EditorPolygonDrawTriangle triangle;triangle.object=id;triangle.face=face;
+                triangle.points={screen[0],screen[j],screen[j+1]};
+                triangle.depth=depthSum/float(count);
+                triangle.facing=std::isfinite(facing)?std::clamp(facing,0.0F,1.0F):1.0F;
+                triangle.selected=selected.contains(id);triangle.color=mesh.materials[materials[face]].baseColor;
+                result.push_back(triangle);
+            }
         }
     }
     std::stable_sort(result.begin(),result.end(),[](const auto& a,const auto& b){return a.depth>b.depth;});

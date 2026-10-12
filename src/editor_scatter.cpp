@@ -141,8 +141,8 @@ ScatterPlan plan_scatter(const EditorDocument& document, const std::vector<Edito
         const EditorObject* surface = document.find_object(target);
         if (!surface) { plan.error = "A target surface no longer exists"; return plan; }
         if (!surface->polygon && (!surface->voxels || surface->voxels->occupied_voxel_count() == 0 || surface->text3d || surface->gaborVolume)) {
-            plan.error = targets.size() == 1 ? "The target must be a voxel object with voxels to scatter onto"
-                                             : "Every surface must be a voxel object with voxels ('" + surface->name + "' is not)";
+            plan.error = targets.size() == 1 ? "The target must be a polygon object or a voxel object with voxels to scatter onto"
+                                             : "Every surface must be a polygon object or a voxel object with voxels ('" + surface->name + "' is not)";
             return plan;
         }
         const EditorObjectBounds bounds = object_world_bounds(*surface);

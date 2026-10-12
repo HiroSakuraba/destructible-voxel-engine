@@ -427,7 +427,9 @@ bool object_matches_screen_rect(const EditorObject& object, const EditorCamera& 
             for (int j=0;j<3;++j) {
                 const auto local=object.polygon->vertices[object.polygon->indices[i+std::size_t(j)]].position;
                 const auto screen=project_world_to_screen(camera,viewport,voxel_to_world(object.transform,object.voxelScale,local));
-                if (!screen.visible) {projected.fullyVisible=false;continue;}
+                // Off-screen but in front still bounds the triangle; behind the camera does not.
+                if (!screen.visible) projected.fullyVisible=false;
+                if (!(screen.depth>camera.nearPlane) || !std::isfinite(screen.x) || !std::isfinite(screen.y)) continue;
                 projected.valid=true;
                 projected.left=std::min(projected.left,screen.x);projected.right=std::max(projected.right,screen.x);
                 projected.top=std::min(projected.top,screen.y);projected.bottom=std::max(projected.bottom,screen.y);

@@ -1042,7 +1042,7 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "polygon.object_mode", ShortcutContext::PolygonEditor, keyboard_shortcut("4"));
     bind(dve, "polygon.component_toggle", ShortcutContext::PolygonEditor, keyboard_shortcut("tab"));
     bind(dve, "polygon.bevel", ShortcutContext::PolygonEditor, keyboard_shortcut("b"));
-    bind(dve, "polygon.extrude", ShortcutContext::PolygonEditor, keyboard_shortcut("e"));
+    bind(dve, "polygon.extrude", ShortcutContext::PolygonEditor, keyboard_shortcut("e", true));
     bind(dve, "polygon.inset", ShortcutContext::PolygonEditor, keyboard_shortcut("i"));
     bind(dve, "polygon.uv_tools", ShortcutContext::PolygonEditor, keyboard_shortcut("u"));
     bind(dve, "polygon.recalculate_normals", ShortcutContext::PolygonEditor, keyboard_shortcut("n"));

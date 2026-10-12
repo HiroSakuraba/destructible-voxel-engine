@@ -444,8 +444,7 @@ void test_context_only_commands_listed() {
     NativeEditorController& controller = *owner;
     controller.update(0.016F);
     const auto& menus = std::as_const(controller.workspace().menus());
-    for (const char* id : {"polygon.extrude", "polygon.bevel", "polygon.vertex_mode", "polygon.flip_normals",
-                           "material.assign", "material.apply", "material.create_instance", "material.preview"}) {
+    for (const char* id : {"material.assign", "material.apply", "material.create_instance", "material.preview"}) {
         const MenuAction* action = menus.find(id);
         check(action && !action->enabled && action->disabledReason.find("Not in this editor yet") != std::string::npos,
               std::string(id) + " is a menu item, disabled with its reason");
@@ -455,14 +454,14 @@ void test_context_only_commands_listed() {
         for (const MenuAction& action : controller.menu_actions("Tools")) if (action.id == "polygon.extrude") return true;
         return false;
     };
-    check(!inTools(), "the not-available mesh tools do not lengthen Tools by default");
-    check(controller.dispatch_action("view.advanced_menus") && inTools(), "with Advanced Menus, Extrude is listed under Tools");
+    check(inTools(), "mesh tools are discoverable in standard menus");
+    check(controller.dispatch_action("view.advanced_menus") && inTools(), "Extrude remains available in Advanced Menus");
     (void)controller.dispatch_action("view.advanced_menus");
     check(controller.dispatch_action("help.command_palette"), "Command Center opens");
     type(controller, "extrude");
     bool listed = false;
     for (const CommandPaletteResult& result : controller.command_palette_results(20))
-        if (result.id == "polygon.extrude") listed = !result.enabled && result.disabledReason.find("polygon mesh editing") != std::string::npos;
+        if (result.id == "polygon.extrude") listed = !result.enabled && result.disabledReason.find("Select polygon triangle faces") != std::string::npos;
     check(listed, "the Command Center shows Extrude disabled with its reason before use");
     controller.key_down("escape", false, false, false);
     check(!controller.dispatch_action("polygon.extrude") && controller.status().error, "running it still explains");

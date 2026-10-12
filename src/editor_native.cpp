@@ -253,6 +253,8 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     const std::filesystem::path conventionalScript = projectRoot_ / "scripts" / "main.lua";
     if (std::filesystem::exists(conventionalScript)) config.startupScript = conventionalScript;
     cancel_text_edit();
+    cancel_polygon_preview();
+    if (gizmoDragging_) finish_gizmo_drag(true);
     cancel_voxel_slice();
     if (voxelBoolean_.active()) cancel_voxel_boolean("Boolean preview closed: Play or Simulate started");
     cancel_scatter("Scatter preview closed: Play or Simulate started");
@@ -376,6 +378,7 @@ void NativeEditorController::set_gamepad_axes(std::array<float, 2> move, std::ar
 
 void NativeEditorController::clear_navigation_input() {
     finish_slice_pointer(true);
+    cancel_polygon_preview();
     if (gizmoDragging_) finish_gizmo_drag(true);
     heldShortcutGestures_.clear();
     activePointerCommand_.clear();
@@ -1510,6 +1513,7 @@ std::vector<ShortcutContext> NativeEditorController::active_shortcut_contexts() 
     if (audioPanel_.open() || audioEventPanel_.open() || synthPanel_.open() || chiptunePanel_.open())
         result.push_back(ShortcutContext::AudioEditor);
     if (focusRegion_ == EditorFocusRegion::Viewport) {
+        if (selectionDomain_==SelectionDomain::Polygons) result.push_back(ShortcutContext::PolygonEditor);
         if (activePointerCommand_ == "viewport.look")
             result.push_back(ShortcutContext::FlyNavigation);
         if (activeTool_ == EditorToolId::AddVoxel || activeTool_ == EditorToolId::RemoveVoxel ||
@@ -1670,12 +1674,6 @@ namespace {
 const std::vector<std::pair<std::string, std::string>>& editor_context_only_commands() {
     static const std::vector<std::pair<std::string, std::string>> kCommands = [] {
         std::vector<std::pair<std::string, std::string>> list;
-        // The component APIs exist (editor_polygon.hpp) but the native controls are not wired yet.
-        const std::string mesh = "Not in this editor yet: polygon mesh editing (vertex/edge/face tools); Create > Polygon Cube and Polygon > Import Polygon Model make owned meshes.";
-        for (const char* id : {"polygon.vertex_mode", "polygon.edge_mode", "polygon.face_mode", "polygon.object_mode",
-                               "polygon.component_toggle", "polygon.bevel", "polygon.extrude", "polygon.inset", "polygon.uv_tools",
-                               "polygon.recalculate_normals", "polygon.flip_normals"})
-            list.emplace_back(id, mesh);
         const std::string paint = "Not in this editor yet: use the Paint tool (5) or Voxel > Flood Fill to apply the active material.";
         const std::string instances = "Not in this editor yet: material instances and previews; edit materials under Materials > Material Library.";
         list.emplace_back("material.assign", paint);
@@ -1996,7 +1994,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
             EditorObjectId target = voxelSelectionObject_;
             if (!workspace_.document().find_object(target) && workspace_.selected_object()) target = *workspace_.selected_object();
             const EditorObject* object = workspace_.document().find_object(target);
-            enabled("voxel.select_all", object && object->voxels && !object->text3d && !object->gaborVolume,
+            enabled("voxel.select_all", object && object->voxels && !object->polygon && !object->text3d && !object->gaborVolume,
                     "Select a voxel object first.");
         }
         const std::string booleanReason = voxel_boolean_disabled_reason();
@@ -2023,6 +2021,38 @@ void NativeEditorController::refresh_menu_state() noexcept {
                                         "build.validate", "file.open_scene", "file.open_project", "file.save_as"})
                 enabled(id, false, busy);
         }
+    }
+    {
+        const auto primary=workspace_.selected_object();
+        const auto* object=primary?workspace_.document().find_object(*primary):nullptr;
+        const bool mesh=object && object->polygon && object->flags.visible && !object->flags.locked &&
+            !is_isolated_out(object->id) && !playActive && workspace_.mode()==EditorMode::Edit && !longJob_;
+        const bool components=mesh && selectionDomain_==SelectionDomain::Polygons && !polygonSelection_.components.empty();
+        const bool preview=polygonPreviewBefore_.has_value();
+        for (auto id:{"polygon.vertex_mode","polygon.edge_mode","polygon.face_mode","polygon.object_mode","polygon.component_toggle"})
+            enabled(id,mesh && !preview,"Select an unlocked polygon mesh in Edit mode first.");
+        for (auto id:{"polygon.extrude","polygon.inset","polygon.bevel","polygon.uv_tools","polygon.extract","polygon.assign_material"})
+            enabled(id,components && polygonSelection_.mode==PolygonSelectionMode::Face && !preview,"Select polygon triangle faces first.");
+        for (auto id:{"polygon.weld","polygon.flip_normals","polygon.select_shell"})
+            enabled(id,components && !preview,"Select polygon components first.");
+        enabled("polygon.recalculate_normals",mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter a polygon component mode first.");
+        for (auto id:{"polygon.select_invert","polygon.select_none"}) enabled(id,mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter polygon component mode first.");
+        enabled("polygon.join",mesh && workspace_.selection_count()>1 && !preview,"Select at least two polygon meshes.");
+        enabled("polygon.slice",mesh && !preview,"Select a polygon mesh first.");
+        enabled("polygon.separate",mesh && !preview,"Select a polygon mesh first.");
+        enabled("polygon.preview_apply",preview && polygonPreviewValid_,"No valid polygon preview to apply.");
+        enabled("polygon.preview_cancel",preview,"No polygon preview to cancel.");
+        if (selectionDomain_==SelectionDomain::Polygons) {
+            for (auto id:{"edit.cut","edit.copy","edit.delete","edit.duplicate"}) enabled(id,components && !preview,"Select polygon components first.");
+            for (auto id:{"edit.cut","edit.copy"}) enabled(id,components && polygonSelection_.mode==PolygonSelectionMode::Face && !preview,"Select polygon faces to copy/cut.");
+        }
+        enabled("edit.paste",!clipboard_.empty() || (voxelClipboard_ && !voxelClipboard_->cells.empty()) || polygonClipboard_.has_value(),"Copy geometry before pasting.");
+        if (preview) for (auto id:{"edit.undo","edit.redo","edit.delete","edit.cut","edit.paste","edit.duplicate","physics.play","physics.simulate"})
+            enabled(id,false,"Apply or cancel the polygon preview first.");
+        checked("polygon.object_mode",selectionDomain_==SelectionDomain::Objects);
+        checked("polygon.vertex_mode",selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Vertex);
+        checked("polygon.edge_mode",selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge);
+        checked("polygon.face_mode",selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Face);
     }
     enabled("text3d.cancel", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     // Cook, Package and Documentation have no handler in this editor build: say so up front.
@@ -2656,6 +2686,7 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
     const SettingValue minutesValue = workspace_.settings().value("editor.autosave_minutes");
     const std::int64_t minutes = std::clamp<std::int64_t>(
         std::get_if<std::int64_t>(&minutesValue) ? std::get<std::int64_t>(minutesValue) : 5, 1, 120);
+    if (polygonPreviewBefore_ || polygonDragBefore_) return;
     if (autosaveInFlight_ || autosaveElapsedSeconds_ < static_cast<double>(minutes) * 60.0) return;
     autosaveElapsedSeconds_ = 0.0;
 
@@ -2723,6 +2754,7 @@ void NativeEditorController::update(float elapsedSeconds) {
     poll_long_job();
     voxel_boolean_tick();
     prune_voxel_selection();
+    prune_polygon_selection();
     if (followSelection_) {
         // Keep the camera's offset to the selection: move eye and target by how far it moved.
         if (workspace_.selected_objects().empty() || playSession_.active()) {
@@ -3446,6 +3478,7 @@ void NativeEditorController::key_up(std::string_view key, bool control, bool, bo
 
 void NativeEditorController::text_input(std::string_view text) {
     if (longJob_) return;
+    if (polygonPreviewBefore_) return; // Numeric preview input is handled once in key_down.
     if (importOptions_.open) {
         // Typing a number into the Voxel size or Scale row; Enter applies it.
         if (importOptions_.selected < 2)
@@ -4277,7 +4310,8 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     const int clickDy = y - lastClickY_;
     const bool doubleClick = button == lastClickButton_ && lastClickTime_.time_since_epoch().count() != 0 &&
         now - lastClickTime_ <= doubleMs && clickDx * clickDx + clickDy * clickDy <= doubleDistance * doubleDistance;
-    if (doubleClick && !(activeTool_ == EditorToolId::Scale && layout_.viewport.contains(x,y) &&
+    if (doubleClick && !((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
+                          activeTool_ == EditorToolId::Scale) && layout_.viewport.contains(x,y) &&
                          hit_test_gizmo_axis(x,y) != 0)) {
         const ShortcutGesture gesture = mouse_shortcut(pointer_input_name(button),
             (modifiers & 2U) != 0U, (modifiers & 1U) != 0U, (modifiers & 4U) != 0U,
@@ -4580,6 +4614,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     }
     dragButton_ = button;
     if (button == PointerButton::Primary) {
+        if (polygonPreviewBefore_) return;
         if (floodFillArmed_) {
             update_hover(x, y);
             if (hoverPick_) (void)flood_fill_at(hoverPick_->objectId, hoverPick_->voxel);
@@ -4594,6 +4629,18 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         update_hover(x, y);
         const bool selectLikeTool = activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                                     activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale;
+        if (selectionDomain_ == SelectionDomain::Polygons && selectLikeTool) {
+            prune_polygon_selection();
+            if (!polygonSelection_.components.empty() && activeTool_ != EditorToolId::Select && hit_test_gizmo_axis(x,y)) {
+                begin_gizmo_drag(x,y,modifiers); return;
+            }
+            marquee_.active = true;
+            marquee_.operation = (modifiers & 3U) == 3U ? SelectionOperation::Intersect
+                : (modifiers & 4U) ? SelectionOperation::Subtract : (modifiers & 2U) ? SelectionOperation::Toggle
+                : (modifiers & 1U) ? SelectionOperation::Add : SelectionOperation::Replace;
+            marquee_.startX = marquee_.currentX = x; marquee_.startY = marquee_.currentY = y;
+            return;
+        }
         if (selectionDomain_ == SelectionDomain::Voxels && selectLikeTool) {
             prune_voxel_selection();
             if (activeTool_ == EditorToolId::Translate && !voxelSelection_.empty()) {
@@ -4780,6 +4827,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
             voxelMoveSteps_ = 0;
             if (offset && (offset->x != 0 || offset->y != 0 || offset->z != 0)) (void)move_selected_voxels(*offset);
         }
+        if (marquee_.active && selectionDomain_ == SelectionDomain::Polygons) finish_polygon_marquee(x,y);
         if (marquee_.active && selectionDomain_ == SelectionDomain::Voxels) finish_voxel_marquee(x, y);
         if (marquee_.active) {
             const int distanceSquared = (x - marquee_.startX) * (x - marquee_.startX) + (y - marquee_.startY) * (y - marquee_.startY);
@@ -5036,6 +5084,13 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
         add("Shift boost");
         return gestures;
     }
+    if (selectionDomain_==SelectionDomain::Polygons) {
+        add("Polygon: click / box; Shift add, Ctrl toggle");
+        add("1 vertices  2 edges  3 faces  4 objects");
+        if (activeTool_==EditorToolId::Translate||activeTool_==EditorToolId::Rotate||activeTool_==EditorToolId::Scale)
+            add("Drag axis/ring; type value; Enter apply, Esc cancel");
+        return gestures;
+    }
     if (selectionDomain_ == SelectionDomain::Voxels &&
         (activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
          activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale)) {
@@ -5113,6 +5168,10 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
 }
 
 void NativeEditorController::set_active_tool(EditorToolId tool) {
+    if (tool != activeTool_) {
+        cancel_polygon_preview();
+        if (gizmoDragging_) finish_gizmo_drag(true);
+    }
     const EditorToolId previous = activeTool_;
     if (previous == EditorToolId::ScatterBrush && brushStroking_) finish_brush_stroke(false);
     activeTool_ = tool;
@@ -5147,7 +5206,7 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
     const EditorObject* object = workspace_.document().find_object(pick.objectId);
     if (!object) return;
     if (object->polygon) {
-        set_status("Voxel brushes cannot edit polygon geometry; mesh component controls are pending",true);return;
+        set_status("Use Polygon > component modes to edit mesh geometry or assign materials to faces",true);return;
     }
     std::unique_ptr<IEditorCommand> command;
     if (activeTool_ == EditorToolId::Anchor) {
@@ -5225,6 +5284,7 @@ EditorObjectBounds NativeEditorController::selection_bounds() const noexcept {
 }
 
 Float3 NativeEditorController::selection_pivot() const noexcept {
+    if (selectionDomain_ == SelectionDomain::Polygons) return polygon_selection_centre();
     if (pivotMode_ == PivotMode::WorldOrigin) return {};
     if (pivotMode_ == PivotMode::Custom) return customPivot_;
     if (pivotMode_ == PivotMode::ActiveObject && workspace_.selected_object()) {
@@ -5406,7 +5466,7 @@ void NativeEditorController::finish_placement(bool cancel) {
 
 std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
     std::vector<GizmoScreenAxis> axes;
-    if (voxelSlice_.active()) return axes;
+    if (voxelSlice_.active() || (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.components.empty())) return axes;
     if (selectionDomain_ == SelectionDomain::Voxels) {
         // Voxel domain: only Move has a gizmo, at the voxel selection, along the object's grid.
         if (activeTool_ != EditorToolId::Translate || voxelSelection_.empty()) return axes;
@@ -5434,7 +5494,7 @@ std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
 
 std::vector<GizmoScreenRing> NativeEditorController::gizmo_rings() const {
     std::vector<GizmoScreenRing> rings;
-    if (voxelSlice_.active()) return rings;
+    if (voxelSlice_.active() || (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.components.empty())) return rings;
     if (selectionDomain_ == SelectionDomain::Voxels) return rings;
     if (activeTool_ != EditorToolId::Rotate || workspace_.selected_objects().empty()) return rings;
     const Float3 origin = gizmoDragging_ ? gizmoPivot_ : selection_pivot();
@@ -5487,6 +5547,7 @@ int NativeEditorController::hit_test_gizmo_axis(int x, int y) const {
 
 void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifiers) {
     if (workspace_.selected_objects().empty()) return;
+    if (selectionDomain_ == SelectionDomain::Polygons && polygonSelection_.components.empty()) return;
     gizmoAxis_ = hit_test_gizmo_axis(x, y);
     if (gizmoAxis_ == 0) return;
     for (EditorObjectId id : workspace_.selected_objects()) {
@@ -5510,6 +5571,12 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
             return;
         }
     }
+    if (selectionDomain_ == SelectionDomain::Polygons) {
+        close_previews_for_voxel_edit("polygon transform");
+        const auto* object=workspace_.document().find_object(polygonSelection_.object);
+        if (!object || !object->polygon) return;
+        polygonDragBefore_=*object->polygon;
+    }
     gizmoDragging_ = true;
     gizmoStartX_ = x;
     gizmoStartY_ = y;
@@ -5518,7 +5585,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
     gizmoChanges_ = selection_transform_snapshot();
     gizmoSizeChanges_.clear();
     gizmoResampleScale_ = (modifiers & 2U) != 0U;
-    if (activeTool_ == EditorToolId::Scale && !gizmoResampleScale_) {
+    if (activeTool_ == EditorToolId::Scale && !gizmoResampleScale_ && selectionDomain_ != SelectionDomain::Polygons) {
         for (const auto& change : gizmoChanges_) {
             const auto* object = workspace_.document().find_object(change.id);
             gizmoSizeChanges_.push_back({change.id, change.before, change.before,
@@ -5574,6 +5641,34 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
         char* end = nullptr;
         const float parsed = std::strtof(transformNumeric_.c_str(), &end);
         if (end && *end == '\0' && std::isfinite(parsed)) numeric = parsed;
+    }
+    if (polygonDragBefore_) {
+        auto* object=workspace_.document().find_object(polygonSelection_.object);
+        if (!object || !object->polygon) { finish_gizmo_drag(true); return; }
+        *object->polygon=*polygonDragBefore_;
+        Float3 translation{}, scale{1,1,1}; Quaternion rotation{};
+        if (activeTool_==EditorToolId::Scale) {
+            float factor=std::clamp(numeric.value_or(1.0F+projectedDelta*.01F),.1F,10.0F);
+            if (!numeric && preferences.scaleSnapEnabled != temporaryOverride)
+                factor=std::max(.1F,1.0F+std::round((factor-1.0F)/preferences.scaleSnapStep)*preferences.scaleSnapStep);
+            if (modifiers & 4U) scale={factor,factor,factor};
+            else if (gizmoAxis_==1) scale.x=factor; else if (gizmoAxis_==2) scale.y=factor; else scale.z=factor;
+        } else if (activeTool_==EditorToolId::Rotate) {
+            const float step=preferences.rotateSnapDegrees*.01745329252F;
+            float angle=numeric?*numeric*.01745329252F:gizmoDragPlane_?gizmoDragWorldAccum_:projectedDelta*.012F;
+            if (!numeric && preferences.rotateSnapEnabled != temporaryOverride) angle=std::round(angle/step)*step;
+            rotation=quaternion_from_axis_angle(worldAxis,angle);
+        } else {
+            const float depth=std::max(.1F,length(subtract(camera_.position,gizmoPivot_)));
+            float delta=numeric.value_or(projectedDelta*2*depth*std::tan(camera_.verticalFovRadians*.5F)/float(std::max(1,layout_.viewport.height)));
+            if (!numeric && preferences.translateSnapEnabled != temporaryOverride) {
+                const float step=preferences.translateSnapMeters;
+                delta=preferences.absoluteGridSnap?std::round((dot(gizmoPivot_,worldAxis)+delta)/step)*step-dot(gizmoPivot_,worldAxis):std::round(delta/step)*step;
+            }
+            translation=multiply(worldAxis,delta);
+        }
+        (void)transform_polygon_components(translation,rotation,scale,gizmoPivot_);
+        return;
     }
     if (activeTool_ == EditorToolId::Scale) {
         float factor = numeric.value_or(1.0F + projectedDelta * 0.01F);
@@ -5669,6 +5764,21 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
 
 void NativeEditorController::finish_gizmo_drag(bool cancel) {
     if (!gizmoDragging_) return;
+    if (polygonDragBefore_) {
+        auto* object=workspace_.document().find_object(polygonSelection_.object);
+        if (object && object->polygon) {
+            auto mesh=*object->polygon; *object->polygon=*polygonDragBefore_;
+            if (!cancel && mesh.contentHash!=polygonDragBefore_->contentHash) {
+                const auto before=capture_selection_snapshot();
+                const auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(
+                    object->id,*polygonDragBefore_,std::move(mesh),"Transform polygon components"));
+                if (result.success) workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
+                set_status(result.success?"Transformed polygon components":result.message,!result.success);
+            }
+        }
+        polygonDragBefore_.reset(); gizmoDragging_=false; gizmoAxis_=0; gizmoChanges_.clear();
+        gizmoSizeChanges_.clear(); transformNumeric_.clear(); return;
+    }
     for (const auto& change : gizmoSizeChanges_) {
         if (auto* object=workspace_.document().find_object(change.id)) {
             object->voxelSizeMeters=change.beforeVoxelSize;
@@ -5752,6 +5862,9 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         const bool safe = std::find(kSafeWhileBusy.begin(), kSafeWhileBusy.end(), actionId) != kSafeWhileBusy.end();
         if (longJob_ && !safe) { set_status(long_job_busy_reason(), true, 4.0F); return false; }
         if (importOptions_.open && !safe) close_import_options();
+    }
+    if (polygonPreviewBefore_ && !actionId.starts_with("view.") && actionId != "polygon.preview_apply" && actionId != "polygon.preview_cancel") {
+        set_status("Apply or cancel the polygon preview first",true); return false;
     }
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
@@ -5994,6 +6107,22 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "select.domain_toggle") {
         set_selection_domain(selectionDomain_ == SelectionDomain::Objects ? SelectionDomain::Voxels : SelectionDomain::Objects);
         return true;
+    }
+    if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.create_plane" &&
+        actionId != "polygon.lod" && actionId != "polygon.collision" && actionId != "polygon.streaming")
+        return handle_polygon_action(actionId);
+    if (selectionDomain_ == SelectionDomain::Polygons && (actionId == "edit.select_all" || actionId == "edit.copy" ||
+        actionId == "edit.cut" || actionId == "edit.delete" || actionId == "edit.duplicate")) return handle_polygon_action(actionId);
+    if (actionId == "edit.copy" || actionId == "edit.cut") polygonClipboardNewest_=false;
+    if (actionId == "edit.paste" && polygonClipboardNewest_ && polygonClipboard_) {
+        const auto before=capture_selection_snapshot(); const auto id=workspace_.document().allocate_object_id();
+        EditorObject part(id,"Pasted polygon faces"); part.polygon=*polygonClipboard_; part.polygon->objectId=id;
+        refresh_editor_polygon(*part.polygon); part.transform=polygonClipboardPose_; part.voxelScale=polygonClipboardScale_;
+        const auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<AddObjectCommand>(std::move(part),"Paste polygon faces"));
+        if (result.success) { if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+            workspace_.select_object(id); selectionDomain_=SelectionDomain::Objects;
+            workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot()); recompute_layout(); }
+        return result.success;
     }
     if (actionId == "voxel.select_grow") return grow_voxel_selection_cmd();
     if (actionId == "voxel.select_shrink") return shrink_voxel_selection_cmd();
@@ -7389,6 +7518,7 @@ camera_menu_dispatch_complete:
 
 void NativeEditorController::key_down(std::string_view key, bool control, bool shift, bool alt) {
     const std::string normalized = lowercase(key);
+    if (polygonPreviewBefore_) { (void)handle_polygon_preview_key(normalized); return; }
     route_play_key(normalized, true);
     if (pending_destructive_confirmation()) {
         if (normalized == "return" || normalized == "enter") confirm_pending_destructive_action();
@@ -7854,7 +7984,18 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         brushResizing_ = false;
         return;
     }
-    if (normalized == "tab") { focus_next(shift); return; }
+    if (normalized == "tab") {
+        if (!shift && !control && !alt && focusRegion_==EditorFocusRegion::Viewport && workspace_.mode()==EditorMode::Edit) {
+            const auto primary=workspace_.selected_object();
+            const auto* object=primary?workspace_.document().find_object(*primary):nullptr;
+            if (object && object->polygon && object->flags.visible && !object->flags.locked && !is_isolated_out(object->id)) {
+                const std::array<ShortcutContext,1> contexts{ShortcutContext::PolygonEditor};
+                const auto resolved=workspace_.shortcuts().resolve(keyboard_shortcut(normalized,false,false,false),contexts,settings_capabilities());
+                if (resolved && resolved->actionId=="polygon.component_toggle") { (void)dispatch_action(resolved->actionId); return; }
+            }
+        }
+        focus_next(shift); return;
+    }
     if (focusRegion_ == EditorFocusRegion::SceneHierarchy && !control && !shift && !alt &&
         navigate_hierarchy(normalized)) return;
     if (focusRegion_ == EditorFocusRegion::Viewport && alt && !control &&
@@ -7892,6 +8033,18 @@ void NativeEditorController::focus_next(bool reverse) noexcept {
 void NativeEditorController::frame_selection() noexcept {
     reset_camera_navigation();
     EditorObjectBounds combined = selection_bounds();
+    if (selectionDomain_==SelectionDomain::Polygons && !polygonSelection_.components.empty()) {
+        const auto* object=workspace_.document().find_object(polygonSelection_.object);
+        if (object && object->polygon) {
+            combined={};
+            for (auto index:polygon_selected_vertices(*object->polygon,polygonSelection_)) {
+                const auto p=voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[index].position);
+                if (!combined.valid) combined={p,p,true};
+                else { combined.minimum={std::min(combined.minimum.x,p.x),std::min(combined.minimum.y,p.y),std::min(combined.minimum.z,p.z)};
+                    combined.maximum={std::max(combined.maximum.x,p.x),std::max(combined.maximum.y,p.y),std::max(combined.maximum.z,p.z)}; }
+            }
+        }
+    }
     if (!combined.valid) {
         for (const auto& [id, object] : workspace_.document().objects()) {
             // Frame All frames what is shown: visible objects, and only the isolated ones.
@@ -7909,6 +8062,10 @@ void NativeEditorController::frame_selection() noexcept {
 }
 
 CommandResult NativeEditorController::nudge_selection(Float3 worldDelta) {
+    if (selectionDomain_==SelectionDomain::Polygons) {
+        const bool success=transform_polygon_components(worldDelta,{}, {1,1,1},polygon_selection_centre());
+        return success?CommandResult::ok():CommandResult::fail("Select unlocked polygon components to nudge");
+    }
     std::vector<ObjectTransformChange> changes = selection_transform_snapshot();
     if (changes.empty()) return CommandResult::fail("no objects selected");
     for (ObjectTransformChange& change : changes) change.after.position = add(change.before.position, worldDelta);
@@ -8193,8 +8350,27 @@ const EditorSelectionDiagnostics& NativeEditorController::selection_diagnostics(
 
 std::vector<EditorPolygonDrawTriangle> NativeEditorController::polygon_draw_items() const {
     const auto poses=playSession_.presentation_transforms();
-    return build_editor_polygon_draw_list(workspace_.document(),camera_,layout_.viewport,
+    auto items = build_editor_polygon_draw_list(workspace_.document(),camera_,layout_.viewport,
         workspace_.selected_objects(),viewportSettings_.isolatedObjects,100000,&poses);
+    if (selectionDomain_ == SelectionDomain::Polygons) for (auto& item:items) {
+        item.selected = item.object == polygonSelection_.object && polygonSelection_.mode == PolygonSelectionMode::Face &&
+            polygonSelection_.components.contains(item.face);
+        if (item.selected) item.color={1.0F,.55F,.15F,1};
+    }
+    if (polygonSlicePreview_ && polygonSliceBack_) {
+        const auto* source=workspace_.document().find_object(polygonPreviewSelection_.object);
+        if (source) {
+            EditorDocument preview("Slice back preview");
+            EditorObject back(source->id,source->name); back.polygon=*polygonSliceBack_;
+            back.transform=source->transform; back.voxelScale=source->voxelScale;
+            preview.add_object(std::move(back));
+            auto backItems=build_editor_polygon_draw_list(preview,camera_,layout_.viewport,{}, {},100000);
+            for (auto& item:backItems) { item.color={.2F,.7F,1.0F,1}; item.selected=false; }
+            items.insert(items.end(),backItems.begin(),backItems.end());
+            std::stable_sort(items.begin(),items.end(),[](const auto& a,const auto& b) { return a.depth>b.depth; });
+        }
+    }
+    return items;
 }
 
 const std::vector<EditorVoxelDrawItem>& NativeEditorController::draw_items() const {
@@ -11038,6 +11214,9 @@ std::string NativeEditorController::long_job_busy_reason() const {
 
 void NativeEditorController::set_selection_domain(SelectionDomain domain) {
     if (selectionDomain_ == domain) return;
+    cancel_polygon_preview();
+    if (gizmoDragging_) finish_gizmo_drag(true);
+    if (domain == SelectionDomain::Polygons) { (void)set_polygon_mode(PolygonSelectionMode::Face); return; }
     selectionDomain_ = domain;
     voxelBrushSelecting_ = false;
     voxelMoveAxis_ = 0;
@@ -11152,7 +11331,8 @@ void NativeEditorController::prune_voxel_selection() {
 
 EditorSelectionSnapshot NativeEditorController::capture_selection_snapshot() const {
     return {workspace_.selected_objects(), workspace_.selected_object(), selectionDomain_ == SelectionDomain::Voxels,
-            voxelSelectionObject_, voxelSelection_};
+            voxelSelectionObject_, voxelSelection_, selectionDomain_ == SelectionDomain::Polygons,
+            polygonSelection_.object, static_cast<std::uint8_t>(polygonSelection_.mode), polygonSelection_.components};
 }
 
 void NativeEditorController::restore_selection_snapshot(const EditorSelectionSnapshot& snapshot) {
@@ -11163,7 +11343,9 @@ void NativeEditorController::restore_selection_snapshot(const EditorSelectionSna
     }
     if (snapshot.primary && workspace_.is_selected(*snapshot.primary)) workspace_.add_to_selection(*snapshot.primary);
     reset_voxel_selection_state();
-    selectionDomain_ = snapshot.voxelDomain ? SelectionDomain::Voxels : SelectionDomain::Objects;
+    selectionDomain_ = snapshot.polygonDomain ? SelectionDomain::Polygons : snapshot.voxelDomain ? SelectionDomain::Voxels : SelectionDomain::Objects;
+    polygonSelection_ = {snapshot.polygonObject, static_cast<PolygonSelectionMode>(snapshot.polygonMode), snapshot.polygonComponents};
+    if (snapshot.polygonDomain) prune_polygon_selection();
     if (snapshot.voxelDomain) {
         const auto* object = workspace_.document().find_object(snapshot.voxelObject);
         if (object && object->voxels && object->flags.visible && !is_isolated_out(object->id)) {
@@ -11188,6 +11370,7 @@ void NativeEditorController::reset_voxel_selection_state() {
 }
 
 void NativeEditorController::close_previews_for_voxel_edit(std::string_view what) {
+    cancel_polygon_preview();
     // One preview at a time (#98): a voxel edit closes any open Slice / Boolean / Join / Scatter
     // preview first, so the edit cannot change an object under a preview.
     const std::string reason = std::string(what);

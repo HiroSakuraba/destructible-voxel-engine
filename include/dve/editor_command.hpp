@@ -38,6 +38,10 @@ struct EditorSelectionSnapshot {
     bool voxelDomain{};
     EditorObjectId voxelObject{};
     std::set<Int3> voxels;
+    bool polygonDomain{};
+    EditorObjectId polygonObject{};
+    std::uint8_t polygonMode{2};
+    std::set<std::uint64_t> polygonComponents;
 };
 
 class EditorCommandStack {

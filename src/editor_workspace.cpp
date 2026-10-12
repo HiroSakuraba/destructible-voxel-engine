@@ -626,14 +626,24 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"polygon.collision","Polygon","Collision Settings",""}, {"polygon.streaming","Polygon","Streaming Settings",""},
         {"material.library","Materials","Material Library",""}, {"material.globals","Materials","Global Parameters",""},
         {"material.layers","Materials","Material Layers",""}, {"material.rendering","Materials","Shading Models",""},
-        // Mesh and material editing commands with no implementation here: listed (disabled, with
-        // the reason) so they are not shortcut-only.
+        // Polygon authoring and component modes; availability is enforced by the native controller.
         {"polygon.vertex_mode","Polygon","Vertex Selection Mode",""}, {"polygon.edge_mode","Polygon","Edge Selection Mode",""},
         {"polygon.face_mode","Polygon","Face Selection Mode",""}, {"polygon.object_mode","Polygon","Object Selection Mode",""},
         {"polygon.component_toggle","Polygon","Toggle Object or Component Editing",""},
-        {"polygon.bevel","Polygon","Bevel",""}, {"polygon.extrude","Polygon","Extrude",""}, {"polygon.inset","Polygon","Inset",""},
+        {"polygon.bevel","Polygon","Face Bevel (tapered extrusion)",""}, {"polygon.extrude","Polygon","Extrude",""}, {"polygon.inset","Polygon","Inset",""},
         {"polygon.uv_tools","Polygon","UV Tools",""}, {"polygon.recalculate_normals","Polygon","Recalculate Normals",""},
         {"polygon.flip_normals","Polygon","Flip Normals",""},
+        {"polygon.assign_material","Polygon","Assign Active Material to Faces",""},
+        {"polygon.weld","Polygon","Weld by Distance",""},
+        {"polygon.select_shell","Polygon","Select Connected Shell",""},
+        {"polygon.select_invert","Polygon","Invert Component Selection",""},
+        {"polygon.select_none","Polygon","Clear Component Selection",""},
+        {"polygon.extract","Polygon","Extract Selected Faces",""},
+        {"polygon.slice","Polygon","Slice Polygon Mesh",""},
+        {"polygon.join","Polygon","Join Polygon Meshes",""},
+        {"polygon.separate","Polygon","Separate Connected Shells",""},
+        {"polygon.preview_apply","Polygon","Apply Tool Preview",""},
+        {"polygon.preview_cancel","Polygon","Cancel Tool Preview",""},
         {"material.assign","Materials","Assign or Open Material",""}, {"material.apply","Materials","Compile and Apply Material",""},
         {"material.link","Materials","Link Materials or Settings",""},
         {"material.create_instance","Materials","Create Material Instance",""},
@@ -697,7 +707,11 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (std::string_view id : {"polygon.vertex_mode", "polygon.edge_mode", "polygon.face_mode", "polygon.object_mode",
                                 "polygon.component_toggle", "polygon.bevel", "polygon.extrude", "polygon.inset",
                                 "polygon.uv_tools", "polygon.recalculate_normals", "polygon.flip_normals"})
-        configure(id, "Mesh Editing (not in this editor)", 80);
+        configure(id, "Mesh Editing", 80);
+    for (auto id:{"polygon.vertex_mode","polygon.edge_mode","polygon.face_mode","polygon.object_mode"})
+        configure(id,"Mesh Editing",80,true,"polygon.selection");
+    for (auto id:{"polygon.assign_material","polygon.weld","polygon.select_shell","polygon.select_invert","polygon.select_none","polygon.extract",
+                 "polygon.join","polygon.separate","polygon.slice","polygon.preview_apply","polygon.preview_cancel"}) configure(id,"Mesh Editing",80);
     for (std::string_view id : {"material.assign", "material.apply", "material.link", "material.create_instance",
                                 "material.create_master", "material.preview", "material.pin_preview"})
         configure(id, "Material Editing (not in this editor)", 80);
@@ -829,12 +843,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     const auto paletteOnly = [&](std::string_view id) {
         if (MenuAction* action = result.find_for_update(id)) action->visibility = MenuVisibility::PaletteOnly;
     };
-    // Not-implemented mesh/material editing commands: always in the Command Center (disabled, with
-    // the reason); in Tools only with View > Advanced Menus, so they do not lengthen Tools.
-    for (std::string_view id : {"polygon.vertex_mode", "polygon.edge_mode", "polygon.face_mode", "polygon.object_mode",
-                                "polygon.component_toggle", "polygon.bevel", "polygon.extrude", "polygon.inset",
-                                "polygon.uv_tools", "polygon.recalculate_normals", "polygon.flip_normals",
-                                "material.assign", "material.apply", "material.link", "material.create_instance",
+    // Material instance commands remain unavailable and appear only in Advanced Menus.
+    for (std::string_view id : {"material.assign", "material.apply", "material.link", "material.create_instance",
                                 "material.create_master", "material.preview", "material.pin_preview"})
         advanced(id);
     for (std::string_view id : {

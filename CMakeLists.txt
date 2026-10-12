@@ -833,6 +833,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_voxel_selection.cpp
         src/editor_scatter.cpp
         src/editor_polygon.cpp
+        src/editor_native_polygon.cpp
         src/editor_model_import.cpp
         src/editor_tools.cpp
         src/editor_workspace.cpp
@@ -2732,6 +2733,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_snap_scale_tests tests/test_editor_snap_scale.cpp)
         target_link_libraries(dve_editor_snap_scale_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_snap_scale_tests COMMAND dve_editor_snap_scale_tests)
+        add_executable(dve_editor_native_polygon_tests tests/test_editor_native_polygon.cpp)
+        target_link_libraries(dve_editor_native_polygon_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_native_polygon_tests COMMAND dve_editor_native_polygon_tests)
         add_executable(dve_editor_polygon_tests tests/test_editor_polygon.cpp)
         target_link_libraries(dve_editor_polygon_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_polygon_tests COMMAND dve_editor_polygon_tests)

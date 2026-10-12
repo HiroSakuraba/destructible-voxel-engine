@@ -183,7 +183,7 @@ struct ContextMenuState {
 };
 
 // What Select and Move act on (M toggles): whole objects or voxel cells of one object.
-enum class SelectionDomain : std::uint8_t { Objects, Voxels };
+enum class SelectionDomain : std::uint8_t { Objects, Voxels, Polygons };
 
 struct MarqueeState {
     bool active{};
@@ -922,6 +922,16 @@ public:
     // Voxel selection (Edit > Selection Domain, M). See editor_voxel_selection.hpp.
     [[nodiscard]] SelectionDomain selection_domain() const noexcept { return selectionDomain_; }
     void set_selection_domain(SelectionDomain domain);
+    [[nodiscard]] const PolygonSelection& polygon_selection() const noexcept { return polygonSelection_; }
+    bool set_polygon_mode(PolygonSelectionMode mode);
+    void select_polygon_components(const std::set<std::uint64_t>&, SelectionOperation);
+    bool apply_polygon_edit(PolygonEdit, const PolygonEditSettings& = {});
+    bool transform_polygon_components(Float3 translation, Quaternion rotation, Float3 scale, Float3 worldPivot);
+    bool join_selected_polygons();
+    bool separate_selected_polygon();
+    bool extract_selected_polygon();
+    [[nodiscard]] std::vector<std::string> polygon_preview_lines() const;
+    void cancel_polygon_preview();
     [[nodiscard]] EditorObjectId voxel_selection_object() const noexcept { return voxelSelectionObject_; }
     [[nodiscard]] const std::set<Int3>& voxel_selection() const noexcept { return voxelSelection_; }
     void select_voxels(EditorObjectId object, const std::set<Int3>& cells, SelectionOperation operation);
@@ -1064,6 +1074,33 @@ private:
     EditorVoxelJoinSession voxelJoin_{};
     bool floodFillArmed_{};
     SelectionDomain selectionDomain_{SelectionDomain::Objects};
+    PolygonSelection polygonSelection_{};
+    std::optional<CookedPolygonAsset> polygonDragBefore_;
+    std::optional<CookedPolygonAsset> polygonPreviewBefore_;
+    std::optional<CookedPolygonAsset> polygonClipboard_;
+    RigidTransform polygonClipboardPose_{};
+    Float3 polygonClipboardScale_{1,1,1};
+    bool polygonClipboardNewest_{};
+    PolygonSelection polygonPreviewSelection_{};
+    PolygonEdit polygonPreviewOperation_{PolygonEdit::Extrude};
+    PolygonEditSettings polygonPreviewSettings_{};
+    std::string polygonPreviewTyped_;
+    bool polygonPreviewValid_{};
+    bool polygonSlicePreview_{};
+    Float3 polygonSlicePoint_{}, polygonSliceOrigin_{}, polygonSliceNormal_{1,0,0};
+    int polygonSliceOutput_{}; // 0 front, 1 back, 2 separate
+    bool polygonSliceCap_{true};
+    std::optional<CookedPolygonAsset> polygonSliceBack_;
+    bool begin_polygon_slice();
+    void prune_polygon_selection();
+    void finish_polygon_marquee(int, int);
+    bool polygon_component_visible(std::uint64_t) const;
+    bool handle_polygon_action(std::string_view);
+    bool begin_polygon_preview(PolygonEdit);
+    void update_polygon_preview();
+    bool commit_polygon_preview();
+    bool handle_polygon_preview_key(std::string_view);
+    Float3 polygon_selection_centre() const;
     EditorObjectId voxelSelectionObject_{};
     std::set<Int3> voxelSelection_;
     std::uint64_t voxelSelectionRevision_{};

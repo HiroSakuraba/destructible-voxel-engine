@@ -1,4 +1,5 @@
 #include "dve/editor_mesh_authoring.hpp"
+#include "dve/editor_subdivision.hpp"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -48,16 +49,16 @@ PolygonEditResult boolean_editor_polygons(const EditorDocument& document,EditorO
     if (!first||!second||!first->polygon||!second->polygon) return fail("Select two owned polygon meshes");
     for (const auto* object:{first,second}) {
         if (!object->flags.visible||object->flags.locked) return fail("Boolean operands must be visible and unlocked");
-        const auto d=diagnose_polygon_topology(*object->polygon);
+        const auto d=diagnose_polygon_topology(*editor_surface_mesh(*object));
         if (d.boundaries||d.nonmanifold||d.degenerate||d.inconsistentWinding)
             return fail(object->name+": Boolean input must be closed, consistently wound and manifold; run Topology Diagnostics");
     }
     try {
-        const std::array<EditorObjectId,2> ids{a,b}; auto result=join_editor_polygons(document,a,ids);
+        const std::array<EditorObjectId,2> ids{a,b}; auto result=join_editor_polygons(document,a,ids,true);
         if (!result) return result;
-        const auto count=first->polygon->indices.size(); const auto original=manifold::Manifold::ReserveIDs(2);
+        const auto count=editor_surface_mesh(*first)->indices.size(); const auto original=manifold::Manifold::ReserveIDs(2);
         const manifold::Manifold A(manifold_mesh(result.mesh,0,count,original));
-        const manifold::Manifold B(manifold_mesh(result.mesh,count,second->polygon->indices.size(),original+1));
+        const manifold::Manifold B(manifold_mesh(result.mesh,count,editor_surface_mesh(*second)->indices.size(),original+1));
         if (A.Status()!=manifold::Manifold::Error::NoError||B.Status()!=manifold::Manifold::Error::NoError)
             return fail("Manifold rejected the input topology");
         if (!(A.Volume()>0)||!(B.Volume()>0)) return fail("Boolean operands need outward winding and positive enclosed volume");

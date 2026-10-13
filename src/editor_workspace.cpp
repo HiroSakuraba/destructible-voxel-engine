@@ -646,12 +646,74 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.boolean_operands_hide","Voxel","Boolean Operands: Hide",""},
         {"voxel.boolean_operands_delete","Voxel","Boolean Operands: Delete",""},
         {"voxel.boolean_operands_keep","Voxel","Boolean Operands: Keep",""},
+        {"create.subdivision","Create","Subdivision Surface",""},
         {"polygon.import","Polygon","Import Polygon Model",""}, {"polygon.create_plane","Polygon","Create Mesh Plane",""},
         {"polygon.lod","Polygon","LOD Settings",""},
         {"polygon.collision","Polygon","Collision Settings",""}, {"polygon.streaming","Polygon","Streaming Settings",""},
         {"material.library","Materials","Material Library",""}, {"material.globals","Materials","Global Parameters",""},
         {"material.layers","Materials","Material Layers",""}, {"material.rendering","Materials","Shading Models",""},
         // Polygon authoring and component modes; availability is enforced by the native controller.
+        {"subdiv.create_cube","Subdivision","Create Subdivision Cube",""},
+        {"subdiv.create_plane","Subdivision","Create Subdivision Plane",""},
+        {"subdiv.from_polygon","Subdivision","Convert Polygon to Subdivision",""},
+        {"subdiv.from_voxels","Subdivision","Convert Voxels to Subdivision",""},
+        {"subdiv.bake_polygon","Subdivision","Bake Evaluated Surface to Polygon",""},
+        {"subdiv.to_voxels","Subdivision","Convert Evaluated Surface to Voxels",""},
+        {"subdiv.level_0","Subdivision","Level 0: Control Cage",""},
+        {"subdiv.level_1","Subdivision","Level 1",""},
+        {"subdiv.level_2","Subdivision","Level 2",""},
+        {"subdiv.level_3","Subdivision","Level 3",""},
+        {"subdiv.level_4","Subdivision","Level 4",""},
+        {"subdiv.level_up","Subdivision","Increase Subdivision Level",""},
+        {"subdiv.level_down","Subdivision","Decrease Subdivision Level",""},
+        {"subdiv.sharp_toggle","Subdivision","Preserve Sharp Cage Edges (60 deg)",""},
+        {"subdiv.cage_toggle","Subdivision","Show Control Cage",""},
+        {"subdiv.conversion_apply","Subdivision","Apply Conversion Preview",""},
+        {"subdiv.conversion_cancel","Subdivision","Cancel Conversion Preview",""},
+        {"subdiv.vertex_mode","Subdivision","Vertex Selection",""},
+        {"subdiv.edge_mode","Subdivision","Edge Selection",""},
+        {"subdiv.face_mode","Subdivision","Face Selection",""},
+        {"subdiv.object_mode","Subdivision","Object Selection",""},
+        {"subdiv.move","Subdivision","Move Cage / Object",""},
+        {"subdiv.rotate","Subdivision","Rotate Cage / Object",""},
+        {"subdiv.scale","Subdivision","Scale Cage / Object",""},
+        {"subdiv.select_all","Subdivision","Select All Components",""},
+        {"subdiv.select_grow","Subdivision","Grow Selection",""},
+        {"subdiv.select_shrink","Subdivision","Shrink Selection",""},
+        {"subdiv.select_connected","Subdivision","Select Connected",""},
+        {"subdiv.select_invert","Subdivision","Invert Selection",""},
+        {"subdiv.select_none","Subdivision","Clear Selection",""},
+        {"subdiv.extrude","Subdivision","Extrude Control Faces",""},
+        {"subdiv.inset","Subdivision","Inset Control Faces",""},
+        {"subdiv.bevel","Subdivision","Bevel Control Faces",""},
+        {"subdiv.bevel_edges","Subdivision","Bevel Cage Edges (Convex)",""},
+        {"subdiv.weld","Subdivision","Weld Cage Vertices",""},
+        {"subdiv.split_edges","Subdivision","Split Cage Corners",""},
+        {"subdiv.subdivide_cage","Subdivision","Refine Selected Cage Faces",""},
+        {"subdiv.bridge","Subdivision","Bridge Cage Boundaries",""},
+        {"subdiv.cap","Subdivision","Cap Cage Boundary",""},
+        {"subdiv.extract","Subdivision","Extract Control Faces",""},
+        {"subdiv.join","Subdivision","Join Control Cages",""},
+        {"subdiv.separate","Subdivision","Separate Cage Shells",""},
+        {"subdiv.slice","Subdivision","Slice Control Cage",""},
+        {"subdiv.assign_material","Subdivision","Assign Material to Control Faces",""},
+        {"subdiv.uv_editor","Subdivision","UV Workspace",""},
+        {"subdiv.uv_mark_seam","Subdivision","Mark UV Seam",""},
+        {"subdiv.uv_clear_seam","Subdivision","Clear UV Seam",""},
+        {"subdiv.uv_toggle_pin","Subdivision","Toggle Saved UV Pins",""},
+        {"subdiv.uv_reset_flags","Subdivision","Reset Saved UV Seams and Pins",""},
+        {"subdiv.diagnostics","Subdivision","Cage Topology Diagnostics",""},
+        {"subdiv.boolean_union","Subdivision","Boolean Union",""},
+        {"subdiv.boolean_difference","Subdivision","Boolean A minus B",""},
+        {"subdiv.boolean_reverse","Subdivision","Boolean B minus A",""},
+        {"subdiv.boolean_intersection","Subdivision","Boolean Intersection",""},
+        {"subdiv.hull_fit","Subdivision","Fit Collision Hull",""},
+        {"subdiv.hull_edit","Subdivision","Edit Collision Hull",""},
+        {"subdiv.hull_remove","Subdivision","Remove Collision Hull",""},
+        {"subdiv.preview_apply","Subdivision","Apply Modeling Preview",""},
+        {"subdiv.preview_cancel","Subdivision","Cancel Modeling Preview",""},
+        {"subdiv.delete","Subdivision","Delete Selection",""},
+        {"subdiv.duplicate","Subdivision","Duplicate Selection",""},
         {"polygon.vertex_mode","Polygon","Vertex Selection Mode",""}, {"polygon.edge_mode","Polygon","Edge Selection Mode",""},
         {"polygon.face_mode","Polygon","Face Selection Mode",""}, {"polygon.object_mode","Polygon","Object Selection Mode",""},
         {"polygon.component_toggle","Polygon","Toggle Object or Component Editing",""},
@@ -823,6 +885,67 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (std::string_view id : {"voxel.select_all", "voxel.select_none", "voxel.select_grow", "voxel.select_shrink",
                                 "voxel.select_invert", "voxel.extract_selection"})
         configure(id, "Voxel Selection", 50);
+    configure("subdiv.create_cube","Subdivision Create",0,false);
+    configure("subdiv.create_plane","Subdivision Create",1,false);
+    configure("subdiv.from_polygon","Subdivision Conversion",2,false);
+    configure("subdiv.from_voxels","Subdivision Conversion",3,false);
+    configure("subdiv.bake_polygon","Subdivision Conversion",4,false);
+    configure("subdiv.to_voxels","Subdivision Conversion",5,false);
+    configure("subdiv.level_0","Subdivision Surface",6,true, "subdiv.level");
+    configure("subdiv.level_1","Subdivision Surface",7,true, "subdiv.level");
+    configure("subdiv.level_2","Subdivision Surface",8,true, "subdiv.level");
+    configure("subdiv.level_3","Subdivision Surface",9,true, "subdiv.level");
+    configure("subdiv.level_4","Subdivision Surface",10,true, "subdiv.level");
+    configure("subdiv.level_up","Subdivision Surface",11,false);
+    configure("subdiv.level_down","Subdivision Surface",12,false);
+    configure("subdiv.sharp_toggle","Subdivision Surface",13,true);
+    configure("subdiv.cage_toggle","Subdivision Surface",14,true);
+    configure("subdiv.conversion_apply","Subdivision Conversion",15,false);
+    configure("subdiv.conversion_cancel","Subdivision Conversion",16,false);
+    configure("subdiv.vertex_mode","Subdivision Selection",30,true, "subdiv.mode");
+    configure("subdiv.edge_mode","Subdivision Selection",31,true, "subdiv.mode");
+    configure("subdiv.face_mode","Subdivision Selection",32,true, "subdiv.mode");
+    configure("subdiv.object_mode","Subdivision Selection",33,true, "subdiv.mode");
+    configure("subdiv.move","Subdivision Transform",34,false);
+    configure("subdiv.rotate","Subdivision Transform",35,false);
+    configure("subdiv.scale","Subdivision Transform",36,false);
+    configure("subdiv.select_all","Subdivision Selection",37,false);
+    configure("subdiv.select_grow","Subdivision Selection",38,false);
+    configure("subdiv.select_shrink","Subdivision Selection",39,false);
+    configure("subdiv.select_connected","Subdivision Selection",40,false);
+    configure("subdiv.select_invert","Subdivision Selection",41,false);
+    configure("subdiv.select_none","Subdivision Selection",42,false);
+    configure("subdiv.extrude","Subdivision Modeling",43,false);
+    configure("subdiv.inset","Subdivision Modeling",44,false);
+    configure("subdiv.bevel","Subdivision Modeling",45,false);
+    configure("subdiv.bevel_edges","Subdivision Modeling",46,false);
+    configure("subdiv.weld","Subdivision Modeling",47,false);
+    configure("subdiv.split_edges","Subdivision Topology",48,false);
+    configure("subdiv.subdivide_cage","Subdivision Topology",49,false);
+    configure("subdiv.bridge","Subdivision Topology",50,false);
+    configure("subdiv.cap","Subdivision Topology",51,false);
+    configure("subdiv.extract","Subdivision Modeling",52,false);
+    configure("subdiv.join","Subdivision Modeling",53,false);
+    configure("subdiv.separate","Subdivision Modeling",54,false);
+    configure("subdiv.slice","Subdivision Modeling",55,false);
+    configure("subdiv.assign_material","Subdivision Materials and UV",56,false);
+    configure("subdiv.uv_editor","Subdivision Materials and UV",57,false);
+    configure("subdiv.uv_mark_seam","Subdivision Materials and UV",57,false);
+    configure("subdiv.uv_clear_seam","Subdivision Materials and UV",57,false);
+    configure("subdiv.uv_toggle_pin","Subdivision Materials and UV",57,false);
+    configure("subdiv.uv_reset_flags","Subdivision Materials and UV",57,false);
+    configure("subdiv.diagnostics","Subdivision Topology",58,false);
+    configure("subdiv.boolean_union","Subdivision Booleans",59,false);
+    configure("subdiv.boolean_difference","Subdivision Booleans",60,false);
+    configure("subdiv.boolean_reverse","Subdivision Booleans",61,false);
+    configure("subdiv.boolean_intersection","Subdivision Booleans",62,false);
+    configure("subdiv.hull_fit","Subdivision Collision",63,false);
+    configure("subdiv.hull_edit","Subdivision Collision",64,false);
+    configure("subdiv.hull_remove","Subdivision Collision",65,false);
+    configure("subdiv.preview_apply","Subdivision Preview",66,false);
+    configure("subdiv.preview_cancel","Subdivision Preview",67,false);
+    configure("subdiv.delete","Subdivision Modeling",68,false);
+    configure("subdiv.duplicate","Subdivision Modeling",69,false);
     configure("voxel.selection_brush", "Voxel Selection", 51, true);
     configure("voxel.select_cells", "Voxel Selection", 48, true, "voxel.click_selection");
     configure("voxel.select_connected", "Voxel Selection", 49, true, "voxel.click_selection");
@@ -949,6 +1072,68 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             for (const char* keyword : keywords) action->keywords.emplace_back(keyword);
         }
     };
+    describe("subdiv.vertex_mode","Vertex Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.edge_mode","Edge Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.face_mode","Face Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.object_mode","Object Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.move","Move Cage / Object through the shared control-cage transform workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.rotate","Rotate Cage / Object through the shared control-cage transform workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.scale","Scale Cage / Object through the shared control-cage transform workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.select_all","Select All Components through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.select_grow","Grow Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.select_shrink","Shrink Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.select_connected","Select Connected through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.select_invert","Invert Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.select_none","Clear Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.extrude","Extrude Control Faces through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.inset","Inset Control Faces through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.bevel","Bevel Control Faces through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.bevel_edges","Bevel Cage Edges (Convex) through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.weld","Weld Cage Vertices through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.split_edges","Split Cage Edges through the shared control-cage topology workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.subdivide_cage","Refine Selected Cage Faces through the shared control-cage topology workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.bridge","Bridge Cage Boundaries through the shared control-cage topology workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.cap","Cap Cage Boundary through the shared control-cage topology workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.extract","Extract Control Faces through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.join","Join Control Cages through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.separate","Separate Cage Shells through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.slice","Slice Control Cage through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.assign_material","Assign Material to Control Faces through the shared control-cage materials and uv workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.uv_editor","UV Workspace through the shared control-cage materials and uv workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.uv_mark_seam","Mark UV Seam on the control cage through the shared UV workspace.",{"subdivision","subdiv","cage","uv"});
+    describe("subdiv.uv_clear_seam","Clear UV Seam on the control cage through the shared UV workspace.",{"subdivision","subdiv","cage","uv"});
+    describe("subdiv.uv_toggle_pin","Toggle Saved UV Pins on the control cage through the shared UV workspace.",{"subdivision","subdiv","cage","uv"});
+    describe("subdiv.uv_reset_flags","Reset Saved UV Seams and Pins on the control cage through the shared UV workspace.",{"subdivision","subdiv","cage","uv"});
+    describe("subdiv.diagnostics","Cage Topology Diagnostics through the shared control-cage topology workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.boolean_union","Boolean Union through the shared control-cage booleans workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.boolean_difference","Boolean A minus B through the shared control-cage booleans workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.boolean_reverse","Boolean B minus A through the shared control-cage booleans workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.boolean_intersection","Boolean Intersection through the shared control-cage booleans workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.hull_fit","Fit Collision Hull through the shared control-cage collision workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.hull_edit","Edit Collision Hull through the shared control-cage collision workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.hull_remove","Remove Collision Hull through the shared control-cage collision workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.preview_apply","Apply Modeling Preview through the shared control-cage preview workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.preview_cancel","Cancel Modeling Preview through the shared control-cage preview workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.delete","Delete Selection through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.duplicate","Duplicate Selection through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("create.subdivision","Create an owned Catmull-Clark subdivision surface with an editable cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.create_cube","Create a smooth subdivision cube, retaining its small control cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.create_plane","Create a subdivision plane with interpolated boundary corners.",{"subdivision","subdiv","cage"});
+    describe("subdiv.from_polygon","Create a new subdivision surface from the selected polygon cage; retain the source.",{"subdivision","subdiv","cage"});
+    describe("subdiv.from_voxels","Preview a voxel block surface as a subdivision cage; choose level 0..4, Apply keeps the voxels.",{"subdivision","subdiv","cage"});
+    describe("subdiv.bake_polygon","Create an ordinary editable polygon from the evaluated surface; retain the subdivision source.",{"subdivision","subdiv","cage"});
+    describe("subdiv.to_voxels","Preview voxelizing the evaluated smooth surface, with cell size and fill controls.",{"subdivision","subdiv","cage"});
+    describe("subdiv.sharp_toggle","Toggle preservation of cage edges whose dihedral angle exceeds 60 degrees.",{"subdivision","subdiv","cage"});
+    describe("subdiv.cage_toggle","Show or hide the control-cage overlay without changing geometry.",{"subdivision","subdiv","cage"});
+    describe("subdiv.level_up","Increase finite Catmull-Clark refinement while retaining the cage, UVs and materials.",{"subdivision","subdiv","cage"});
+    describe("subdiv.level_down","Decrease finite Catmull-Clark refinement while retaining the cage, UVs and materials.",{"subdivision","subdiv","cage"});
+    describe("subdiv.conversion_apply","Apply a reviewed conversion result in one geometry/selection Undo step.",{"subdivision","subdiv","cage"});
+    describe("subdiv.conversion_cancel","Discard the conversion preview without changing the source.",{"subdivision","subdiv","cage"});
+    describe("subdiv.level_0","Set finite subdivision refinement to level 0; zero displays the cage. Rejects excessive or invalid generated geometry.",{"subdivision","level","smooth"});
+    describe("subdiv.level_1","Set finite subdivision refinement to level 1; zero displays the cage. Rejects excessive or invalid generated geometry.",{"subdivision","level","smooth"});
+    describe("subdiv.level_2","Set finite subdivision refinement to level 2; zero displays the cage. Rejects excessive or invalid generated geometry.",{"subdivision","level","smooth"});
+    describe("subdiv.level_3","Set finite subdivision refinement to level 3; zero displays the cage. Rejects excessive or invalid generated geometry.",{"subdivision","level","smooth"});
+    describe("subdiv.level_4","Set finite subdivision refinement to level 4; zero displays the cage. Rejects excessive or invalid generated geometry.",{"subdivision","level","smooth"});
     describe("transform.scale_voxel_size_up",
              "Double the voxel size of the selected voxel objects about the pivot; the voxel count is unchanged (no resampling). One undo step.",
              {"scale", "resize", "grow", "bigger", "voxel size", "keep voxels", "uniform"});

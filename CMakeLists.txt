@@ -835,6 +835,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_voxel_selection.cpp
         src/editor_scatter.cpp
         src/editor_polygon.cpp
+        src/editor_subdivision.cpp
         src/editor_native_polygon.cpp
         src/editor_native_mesh_authoring.cpp
         src/editor_mesh_boolean.cpp

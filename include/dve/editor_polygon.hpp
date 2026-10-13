@@ -42,7 +42,7 @@ struct PolygonEditResult {
 [[nodiscard]] CookedPolygonAsset make_editor_polygon_cube(EditorObjectId id,float size=1);
 [[nodiscard]] CookedPolygonAsset make_editor_polygon_plane(EditorObjectId id,float size=4);
 void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
-[[nodiscard]] CookedPolygonAsset bake_editor_polygon(const EditorObject&);
+[[nodiscard]] CookedPolygonAsset bake_editor_polygon(const EditorObject&, bool controlCage = false);
 [[nodiscard]] std::vector<PolygonEdge> polygon_edges(const CookedPolygonAsset&);
 [[nodiscard]] std::set<std::uint32_t> polygon_selected_vertices(const CookedPolygonAsset&,const PolygonSelection&);
 [[nodiscard]] std::set<std::uint32_t> polygon_selected_faces(const CookedPolygonAsset&,const PolygonSelection&);
@@ -56,10 +56,10 @@ void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
 [[nodiscard]] PolygonEditResult edit_polygon(const CookedPolygonAsset&,const PolygonSelection&,PolygonEdit,const PolygonEditSettings& = {});
 // Cuts interpolate vertex attributes. Caps support simple contours without nested holes.
 [[nodiscard]] PolygonEditResult slice_polygon(const CookedPolygonAsset&,Float3 point,Float3 normal,bool front,bool cap=true);
-[[nodiscard]] PolygonEditResult join_editor_polygons(const EditorDocument&,EditorObjectId primary,std::span<const EditorObjectId>);
+[[nodiscard]] PolygonEditResult join_editor_polygons(const EditorDocument&,EditorObjectId primary,std::span<const EditorObjectId>, bool evaluated = false);
 [[nodiscard]] CookedPolygonAsset extract_polygon_faces(const CookedPolygonAsset&,const PolygonSelection&);
 [[nodiscard]] std::vector<CookedPolygonAsset> separate_polygon_components(const CookedPolygonAsset&);
-[[nodiscard]] std::optional<PolygonBvhHit> pick_editor_polygon(const EditorObject&,ViewportRay,float maximum=10000);
+[[nodiscard]] std::optional<PolygonBvhHit> pick_editor_polygon(const EditorObject&,ViewportRay,float maximum=10000,bool controlCage=false);
 [[nodiscard]] std::optional<std::uint64_t> pick_polygon_component(const EditorObject&,const EditorCamera&,UiRect,int x,int y,PolygonSelectionMode,bool through=false);
 [[nodiscard]] std::set<std::uint64_t> polygon_components_in_rect(const EditorObject&,const EditorCamera&,UiRect,UiRect,PolygonSelectionMode,bool through=false,bool crossing=false,
     const EditorDocument* scene=nullptr,const std::set<EditorObjectId>* onlyObjects=nullptr);

@@ -1,4 +1,5 @@
 #include "dve/editor_viewport.hpp"
+#include "dve/editor_subdivision.hpp"
 #include "dve/editor_polygon.hpp"
 #include "dve/voxel_metric.hpp"
 
@@ -486,7 +487,7 @@ std::vector<EditorPickResult> pick_editor_document_all(const EditorDocument& doc
             const auto hit=pick_editor_polygon(object,ray,maximumWorldDistance);
             if (hit) {
                 EditorPickResult picked{id,{}, {},static_cast<MaterialId>(std::min(hit->materialIndex,255U)),hit->position,hit->normal,hit->distance};
-                picked.polygonFace=hit->triangleIndex;hits.push_back(picked);
+                picked.polygonFace=subdivision_control_triangle(object,hit->triangleIndex);hits.push_back(picked);
             }
             continue;
         }

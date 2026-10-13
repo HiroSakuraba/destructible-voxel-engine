@@ -1,4 +1,5 @@
 #include "dve/editor_polygon.hpp"
+#include "dve/editor_subdivision.hpp"
 #include "dve/voxel_metric.hpp"
 #include <algorithm>
 #include <array>
@@ -144,8 +145,8 @@ CookedPolygonAsset make_editor_polygon_plane(EditorObjectId id,float size) {
     mesh.submeshes={{"Plane",0,6,0}}; mesh.materialBindings[0].doubleSided=true;
     refresh_editor_polygon(mesh,true); return mesh;
 }
-CookedPolygonAsset bake_editor_polygon(const EditorObject& object) {
-    auto mesh=*object.polygon; mesh.objectId=object.id;
+CookedPolygonAsset bake_editor_polygon(const EditorObject& object,bool controlCage) {
+    auto mesh=controlCage ? *object.polygon : *editor_surface_mesh(object); mesh.objectId=object.id;
     for(auto& vertex:mesh.vertices) {
         vertex.position=multiply_components(vertex.position,object.voxelScale);
         vertex.normal=normalize(divide_components(vertex.normal,object.voxelScale));
@@ -575,7 +576,7 @@ PolygonEditResult slice_polygon(const CookedPolygonAsset& source,Float3 point,Fl
     return result;
 }
 
-PolygonEditResult join_editor_polygons(const EditorDocument& document,EditorObjectId primary,std::span<const EditorObjectId> ids) {
+PolygonEditResult join_editor_polygons(const EditorDocument& document,EditorObjectId primary,std::span<const EditorObjectId> ids,bool evaluated) {
     PolygonEditResult result; const auto* target=document.find_object(primary);
     if(!target||!target->polygon) { result.error="Join needs a primary polygon object"; return result; }
     auto& mesh=result.mesh; mesh.objectId=primary; result.selection={primary,PolygonSelectionMode::Face,{}};
@@ -586,7 +587,7 @@ PolygonEditResult join_editor_polygons(const EditorDocument& document,EditorObje
         if(!object||!object->polygon||object->flags.locked||!validate_polygon_asset(*object->polygon)) {
             result.error="Join needs valid unlocked polygon objects"; return result;
         }
-        const auto& source=*object->polygon;
+        const auto& source=evaluated ? *editor_surface_mesh(*object) : *object->polygon;
         const auto vertexOffset=std::uint32_t(mesh.vertices.size()),materialOffset=std::uint32_t(mesh.materials.size());
         const auto textureOffset=std::uint32_t(mesh.textures.size()),imageOffset=std::uint32_t(mesh.images.size());
         const auto samplerOffset=std::uint32_t(mesh.samplers.size());
@@ -649,21 +650,22 @@ std::vector<CookedPolygonAsset> separate_polygon_components(const CookedPolygonA
     return result;
 }
 
-std::optional<PolygonBvhHit> pick_editor_polygon(const EditorObject& object,ViewportRay ray,float maximum) {
+std::optional<PolygonBvhHit> pick_editor_polygon(const EditorObject& object,ViewportRay ray,float maximum,bool controlCage) {
     if(!object.polygon||!valid_voxel_metric(object.voxelScale)) return std::nullopt;
     struct Cached { std::uint64_t hash{}; Float3 scale{}; std::shared_ptr<PolygonBvh> bvh; };
-    static std::mutex mutex; static std::map<EditorObjectId,Cached> cache;
+    static std::mutex mutex; static std::map<std::pair<EditorObjectId,bool>,Cached> cache;
     std::shared_ptr<PolygonBvh> bvh;
     {
-        std::lock_guard lock(mutex); auto& entry=cache[object.id]; const auto scale=object.voxelScale;
-        if(entry.hash!=object.polygon->contentHash||entry.scale.x!=scale.x||entry.scale.y!=scale.y||
+        const auto* surface=controlCage ? &*object.polygon : editor_surface_mesh(object);
+        std::lock_guard lock(mutex); auto& entry=cache[{object.id,controlCage}]; const auto scale=object.voxelScale;
+        if(entry.hash!=surface->contentHash||entry.scale.x!=scale.x||entry.scale.y!=scale.y||
            entry.scale.z!=scale.z||!entry.bvh) {
             auto next=std::make_shared<PolygonBvh>();
-            if(!next->build(bake_editor_polygon(object))) return std::nullopt;
-            entry={object.polygon->contentHash,scale,next};
+            if(!next->build(bake_editor_polygon(object,controlCage))) return std::nullopt;
+            entry={surface->contentHash,scale,next};
         }
         bvh=entry.bvh;
-        if(cache.size()>128) { auto retained=entry; cache.clear(); cache.emplace(object.id,std::move(retained)); }
+        if(cache.size()>128) { auto retained=entry; cache.clear(); cache.emplace(std::make_pair(object.id,controlCage),std::move(retained)); }
     }
     auto hit=bvh->raycast(inverse_transform_point(object.transform,ray.origin),
         normalize(inverse_transform_vector(object.transform,ray.direction)),maximum);
@@ -693,7 +695,7 @@ bool visible_point(const EditorObject& object,const EditorCamera& camera,UiRect 
     if(!projected.visible) return false;
     const auto ray=make_viewport_ray(camera,viewport,projected.x,projected.y);
     const float distance=length(subtract(world,ray.origin));
-    const auto hit=pick_editor_polygon(object,ray,distance+0.001F);
+    const auto hit=pick_editor_polygon(object,ray,distance+0.001F,true);
     return !hit||hit->distance>=distance-0.002F;
 }
 }
@@ -701,10 +703,11 @@ std::optional<std::uint64_t> pick_polygon_component(const EditorObject& object,c
     UiRect viewport,int x,int y,PolygonSelectionMode mode,bool through) {
     if(!object.polygon) return std::nullopt;
     if(mode==PolygonSelectionMode::Face) {
-        const auto hit=pick_editor_polygon(object,make_viewport_ray(camera,viewport,float(x),float(y)));
+        const auto hit=pick_editor_polygon(object,make_viewport_ray(camera,viewport,float(x),float(y)),10000,true);
         return hit?std::optional<std::uint64_t>(hit->triangleIndex):std::nullopt;
     }
     float best=100; std::optional<std::uint64_t> result; const auto& mesh=*object.polygon;
+    const auto controlEdges=object.subdivision && mode==PolygonSelectionMode::Edge ? subdivision_control_edges(mesh) : std::set<std::uint64_t>{};
     if(mode==PolygonSelectionMode::Vertex) for(const auto item:component_points(mesh,mode)) {
         const auto world=voxel_to_world(object.transform,object.voxelScale,item.point);
         const auto p=project_world_to_screen(camera,viewport,world);
@@ -712,6 +715,7 @@ std::optional<std::uint64_t> pick_polygon_component(const EditorObject& object,c
         const float distance=(p.x-float(x))*(p.x-float(x))+(p.y-float(y))*(p.y-float(y));
         if(distance<best) { best=distance; result=item.key; }
     } else for(const auto e:polygon_edges(mesh)) {
+        if (object.subdivision && !controlEdges.contains(e.key())) continue;
         const auto a=project_world_to_screen(camera,viewport,voxel_to_world(object.transform,object.voxelScale,mesh.vertices[e.a].position));
         const auto b=project_world_to_screen(camera,viewport,voxel_to_world(object.transform,object.voxelScale,mesh.vertices[e.b].position));
         if(!a.visible||!b.visible) continue;
@@ -827,9 +831,13 @@ std::set<std::uint64_t> polygon_components_in_rect(const EditorObject& object,co
         if (!(distance > .002F)) return true;
         if (scene) {
             const auto hit = pick_editor_document(*scene,ray,distance+.002F,onlyObjects);
+            if (hit && hit->objectId==object.id && object.subdivision) {
+                const auto cageHit=pick_editor_polygon(object,ray,distance+.002F,true);
+                return !cageHit || cageHit->distance>=distance-.002F;
+            }
             return !hit || hit->worldDistance >= distance-.002F;
         }
-        const auto hit = pick_editor_polygon(object,ray,distance+.002F);
+        const auto hit = pick_editor_polygon(object,ray,distance+.002F,true);
         return !hit || hit->distance >= distance-.002F;
     };
     for (const auto item : component_points(mesh,mode)) {
@@ -886,6 +894,11 @@ CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const Cooked
     if(!object||!object->polygon) return CommandResult::fail("Polygon target no longer exists");
     if(object->flags.locked) return CommandResult::fail("Polygon target is locked");
     const auto valid=validate_polygon_asset(mesh); if(!valid) return CommandResult::fail(valid.message);
+    if (object->subdivision) {
+        const auto evaluated=evaluate_subdivision(mesh,*object->subdivision);
+        if (!evaluated.mesh) return CommandResult::fail(evaluated.error);
+    }
+    object->subdivisionCache.reset();
     object->polygon=mesh; object->polygon->objectId=id_; refresh_editor_polygon(*object->polygon);
     document.mark_dirty(); return CommandResult::ok();
 }
@@ -923,7 +936,7 @@ std::vector<EditorPolygonDrawTriangle> build_editor_polygon_draw_list(
     std::vector<EditorPolygonDrawTriangle> result;
     for(const auto& [id,object]:document.objects()) {
         if(!object.polygon||!object.flags.visible||(!isolated.empty()&&!isolated.contains(id))) continue;
-        const auto& mesh=*object.polygon;const auto materials=face_materials(mesh);
+        const auto& mesh=*editor_surface_mesh(object);const auto materials=face_materials(mesh);
         auto pose=object.transform;
         if(poses) if(const auto it=poses->find(id);it!=poses->end()) pose=it->second;
         for(std::uint32_t face=0;face<mesh.indices.size()/3&&result.size()<maximum;++face) {
@@ -962,7 +975,7 @@ std::vector<EditorPolygonDrawTriangle> build_editor_polygon_draw_list(
             const auto centre=multiply(add(add(world[0],world[1]),world[2]),1.0F/3.0F);
             const float facing=std::abs(dot(normal,normalize(subtract(camera.position,centre))));
             for(std::size_t j=1;j+1<count&&result.size()<maximum;++j) {
-                EditorPolygonDrawTriangle triangle;triangle.object=id;triangle.face=face;
+                EditorPolygonDrawTriangle triangle;triangle.object=id;triangle.face=subdivision_control_triangle(object,face);
                 triangle.points={screen[0],screen[j],screen[j+1]};
                 triangle.depth=depthSum/float(count);
                 triangle.facing=std::isfinite(facing)?std::clamp(facing,0.0F,1.0F):1.0F;

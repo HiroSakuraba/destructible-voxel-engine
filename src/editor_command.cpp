@@ -1,4 +1,5 @@
 #include "dve/editor_command.hpp"
+#include "dve/editor_subdivision.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <algorithm>
@@ -404,6 +405,11 @@ AddObjectCommand::AddObjectCommand(EditorObject object, std::string label)
 CommandResult AddObjectCommand::execute(EditorDocument& document) {
     if (!pending_) return CommandResult::fail("object was already added");
     if (document.find_object(id_)) return CommandResult::fail("an object with this identifier already exists");
+    if (pending_->subdivision) {
+        if (!pending_->polygon) return CommandResult::fail("Subdivision object has no cage");
+        const auto evaluated=evaluate_subdivision(*pending_->polygon,*pending_->subdivision);
+        if (!evaluated.mesh) return CommandResult::fail(evaluated.error);
+    }
     document.add_object(std::move(*pending_));
     pending_.reset();
     document.mark_dirty();

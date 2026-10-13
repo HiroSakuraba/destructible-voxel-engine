@@ -124,7 +124,7 @@ public:
                 desc.groups = object.groups;
                 desc.layer = object.layer;
                 desc.components = object.components;
-                std::erase_if(desc.components,[](const Component& component) { return component.type==kUvAuthoringComponent; });
+                std::erase_if(desc.components,[](const Component& component) { return component.type==kUvAuthoringComponent||component.type=="dve.exact_brep"; });
                 desc.enabled = object.flags.visible;
                 desc.transform = document.world_transform(editorId).value_or(object.transform);
                 desc.voxelSizeMeters = object.voxelSizeMeters;

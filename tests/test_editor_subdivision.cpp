@@ -1,11 +1,13 @@
 // Subdivision surface editor workflow: create/level/undo history, selection restore, locked,
-// hidden and Play refusals with honest menu reasons, and the scene format bump (v9 only when a
-// subdivision object exists; older polygon scenes still save as v7 and load).
+// hidden and Play refusals with honest menu reasons, and the scene format bump (v10 only when a
+// subdivision object exists; older polygon scenes still save as v7 and load; v9 scenes migrate).
+// Also: edge-crease save/load, control-quad/triangulate undo and no-op honesty.
 #include "dve/editor_native.hpp"
 #include "dve/editor_subdivision.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -106,9 +108,9 @@ void scene_format() {
         const auto path = root / "subdiv.dvescene";
         const auto saved = doc.save_transactional(path);
         check(saved.success, "subdivision save: " + saved.error);
-        check(first_line(path) == "DVE_EDITOR_SCENE 9", "subdivision scene uses format 9, got " + first_line(path));
+        check(first_line(path) == "DVE_EDITOR_SCENE 10", "subdivision scene uses format 10, got " + first_line(path));
         std::string error; const auto loaded = EditorDocument::load(path, &error);
-        check(bool(loaded), "format 9 scene loads: " + error);
+        check(bool(loaded), "format 10 scene loads: " + error);
         const auto* object = loaded->find_object(1);
         check(object && object->subdivision && object->subdivision->level == 3 && object->subdivision->preserveSharpEdges,
               "subdivision settings round-trip");
@@ -118,10 +120,116 @@ void scene_format() {
     }
     std::filesystem::remove_all(root);
 }
+
+std::string read_all(const std::filesystem::path& path) { std::ifstream in(path); std::stringstream b; b << in.rdbuf(); return b.str(); }
+
+void creases_and_migration() {
+    const auto root = std::filesystem::temp_directory_path() / "dve_subdivision_crease_test";
+    std::filesystem::remove_all(root); std::filesystem::create_directories(root);
+    EditorDocument doc("Creases");
+    EditorObject surface(1, "Surface"); surface.polygon = make_editor_polygon_cube(1);
+    SubdivisionSettings settings{2, false};
+    freeze_subdivision_topology(*surface.polygon, settings);
+    const auto edges = subdivision_control_edges(*surface.polygon, &settings);
+    check(edges.size() >= 2, "cube has control edges");
+    settings.edgeCreases[*edges.begin()] = 4.0F; settings.edgeCreases[*std::next(edges.begin())] = 0.5F;
+    const auto creased = evaluate_subdivision(*surface.polygon, settings);
+    auto plain = settings; plain.edgeCreases.clear();
+    const auto smooth = evaluate_subdivision(*surface.polygon, plain);
+    check(creased.mesh && smooth.mesh, "creased and smooth surfaces evaluate: " + creased.error);
+    bool differs = false;
+    for (std::size_t i = 0; i < creased.mesh->vertices.size() && i < smooth.mesh->vertices.size(); ++i) {
+        const auto a = creased.mesh->vertices[i].position, b = smooth.mesh->vertices[i].position;
+        differs = differs || a.x != b.x || a.y != b.y || a.z != b.z;
+    }
+    check(differs, "edge creases change the evaluated surface");
+    surface.subdivision = settings; doc.add_object(std::move(surface));
+    const auto path = root / "creased.dvescene";
+    const auto saved = doc.save_transactional(path);
+    check(saved.success, "creased save: " + saved.error);
+    std::string error; auto loaded = EditorDocument::load(path, &error);
+    check(loaded && loaded->find_object(1) && loaded->find_object(1)->subdivision, "creased scene loads: " + error);
+    check(*loaded->find_object(1)->subdivision == settings, "control faces and crease strengths round-trip exactly");
+
+    // Hand-write the legacy format 9 form of the same scene (no topology records).
+    std::istringstream lines(read_all(path)); std::ostringstream legacy; std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind("DVE_EDITOR_SCENE", 0) == 0) line = "DVE_EDITOR_SCENE 9";
+        if (line.rfind("control_face", 0) == 0 || line.rfind("edge_crease", 0) == 0) continue;
+        legacy << line << '\n';
+    }
+    const auto legacyPath = root / "legacy.dvescene";
+    { std::ofstream out(legacyPath); out << legacy.str(); }
+    error.clear(); auto migrated = EditorDocument::load(legacyPath, &error);
+    check(migrated && migrated->find_object(1) && migrated->find_object(1)->subdivision, "format 9 scene loads: " + error);
+    const auto& m = *migrated->find_object(1)->subdivision;
+    check(m.level == 2 && m.edgeCreases.empty(), "format 9 migration keeps level and has no creases");
+    SubdivisionSettings expected{2, false}; freeze_subdivision_topology(*migrated->find_object(1)->polygon, expected);
+    check(!m.controlFaces.empty() && m.controlFaces == expected.controlFaces, "format 9 legacy pairing is frozen on load");
+    check(editor_surface_mesh(*migrated->find_object(1))->indices.size() == smooth.mesh->indices.size(),
+          "migrated surface evaluates like the legacy pairing");
+    std::filesystem::remove_all(root);
+}
+
+void control_face_undo() {
+    auto owner = controller(); auto& c = *owner;
+    check(c.dispatch_action("subdiv.from_polygon"), "convert");
+    const auto id = *c.workspace().selected_object();
+    const auto groupsOf = [&] {
+        const auto* o = c.workspace().document().find_object(id);
+        return subdivision_control_face_triangles(*o->polygon, &*o->subdivision);
+    };
+    const auto before = groupsOf();
+    std::size_t quad = before.size();
+    for (std::size_t i = 0; i < before.size(); ++i) if (before[i].size() == 2) { quad = i; break; }
+    check(quad < before.size(), "cube cage starts with control quads");
+    check(c.dispatch_action("subdiv.face_mode"), "face mode");
+    const std::set<std::uint64_t> picked(before[quad].begin(), before[quad].end());
+    c.select_polygon_components(picked, SelectionOperation::Replace); c.update(0);
+    check(c.polygon_selection().components == picked, "quad selected");
+    const auto history = c.workspace().commands().size();
+
+    check(c.dispatch_action("subdiv.make_quad"), "make quad on an existing quad is an honest no-op");
+    check(c.workspace().commands().size() == history, "no-op make quad adds no undo step");
+
+    check(c.dispatch_action("subdiv.triangulate_faces"), "triangulate selected quad");
+    check(groupsOf().size() == before.size() + 1, "quad becomes two control triangles");
+    check(c.workspace().commands().size() == history + 1, "triangulate is one undo step");
+    check(c.dispatch_action("subdiv.triangulate_faces"), "re-triangulating is an honest no-op");
+    check(c.workspace().commands().size() == history + 1, "no-op triangulate adds no undo step");
+
+    check(c.dispatch_action("subdiv.make_quad"), "rebuild the quad from the two triangles");
+    check(groupsOf().size() == before.size(), "two triangles become one control quad");
+    check(c.workspace().commands().size() == history + 2, "make quad is one undo step");
+
+    check(c.dispatch_action("edit.undo"), "undo make quad");
+    check(groupsOf().size() == before.size() + 1, "undo restores the triangles");
+    c.select_polygon_components({}, SelectionOperation::Replace);
+    check(c.dispatch_action("edit.undo"), "undo triangulate");
+    check(groupsOf().size() == before.size(), "undo restores the quad");
+    check(c.polygon_selection().components == picked, "undo restores the face selection");
+
+    check(c.dispatch_action("subdiv.edge_mode"), "edge mode");
+    const auto* o = c.workspace().document().find_object(id);
+    const auto edges = subdivision_control_edges(*o->polygon, &*o->subdivision);
+    c.select_polygon_components({*edges.begin()}, SelectionOperation::Replace); c.update(0);
+    check(c.dispatch_action("subdiv.crease_2"), "set crease 2");
+    check(c.workspace().document().find_object(id)->subdivision->edgeCreases.at(*edges.begin()) == 2.0F, "crease stored");
+    const auto h2 = c.workspace().commands().size(); // history truncated to the crease step
+    check(c.dispatch_action("subdiv.crease_2") && c.workspace().commands().size() == h2, "same crease adds no undo step");
+    check(c.dispatch_action("edit.undo"), "undo crease");
+    check(c.workspace().document().find_object(id)->subdivision->edgeCreases.empty(), "undo clears crease");
+    check(groupsOf().size() == before.size() && c.workspace().commands().can_undo(), "crease was exactly one undo step");
+
+    c.workspace().document().find_object(id)->flags.locked = true; c.update(0);
+    const auto* crease = action(c, "subdiv.crease_1");
+    check(crease && !crease->enabled && !crease->disabledReason.empty(), "locked: crease disabled with a reason");
+    check(!c.dispatch_action("subdiv.crease_1") && !c.dispatch_action("subdiv.triangulate_faces"), "locked: topology edits refused");
+}
 } // namespace
 
 int main() {
-    try { create_level_undo(); refusals(); scene_format(); }
+    try { create_level_undo(); refusals(); scene_format(); creases_and_migration(); control_face_undo(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     std::cout << "Subdivision editor regression checks passed\n";
 }

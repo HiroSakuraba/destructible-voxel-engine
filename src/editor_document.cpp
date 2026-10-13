@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -310,6 +311,10 @@ bool EditorDocument::validate(std::string* error) const {
             if (!object.polygon) return fail("subdivision object has no control cage");
             if (object.polygon->indices.size()/3>kMaxSubdivisionControlTriangles || object.polygon->vertices.size()>100000)
                 return fail("subdivision control cage exceeds its budget");
+            if (object.subdivision->level==0) {
+                const auto evaluated=evaluate_subdivision(*object.polygon,*object.subdivision);
+                if (!evaluated.mesh) return fail(evaluated.error);
+            }
             (void)editor_surface_mesh(object);
             if (object.subdivision->level>kMaxSubdivisionLevel ||
                 (object.subdivisionCache && !object.subdivisionCache->mesh))
@@ -414,7 +419,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         // Format 8 adds only explicit palette ID lists; material definitions remain in DVOX.
         const bool hasSubdivisions=std::any_of(objects_.begin(),objects_.end(),
             [](const auto& entry) {return entry.second.subdivision.has_value();});
-        output << "DVE_EDITOR_SCENE " << (hasSubdivisions ? 9 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
+        output << "DVE_EDITOR_SCENE " << (hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -506,9 +511,19 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             const auto count=std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) {return entry.second.subdivision.has_value();});
             output << "subdivisions " << count << "\n";
-            for (const auto& [id,object] : objects_) if (object.subdivision)
-                output << "subdivision " << id << ' ' << object.subdivision->level << ' '
-                       << object.subdivision->preserveSharpEdges << "\n";
+            for (const auto& [id,object] : objects_) if (object.subdivision) {
+                auto settings=*object.subdivision;freeze_subdivision_topology(*object.polygon,settings);
+                output << "subdivision " << id << ' ' << settings.level << ' ' << settings.preserveSharpEdges << "\n";
+                output << "control_faces " << settings.controlFaces.size() << "\n";
+                for (const auto& face : settings.controlFaces) {
+                    output << "control_face " << face.size();
+                    for (auto index : face) output << ' ' << index;
+                    output << "\n";
+                }
+                output << "edge_creases " << settings.edgeCreases.size() << "\n";
+                for (const auto& [edge,strength] : settings.edgeCreases)
+                    output << "edge_crease " << edge << ' ' << strength << "\n";
+            }
         }
         output.flush();
         if (!output) throw std::runtime_error("failed to write scene manifest");
@@ -532,7 +547,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -719,7 +734,34 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                 auto* object=document.find_object(id);
                 if (!input || key!="subdivision" || !object || !object->subdivision || settings.level>kMaxSubdivisionLevel ||
                     sharp>1 || !seen.insert(id).second) throw std::runtime_error("invalid subdivision record");
-                settings.preserveSharpEdges=sharp!=0;object->subdivision=settings;
+                settings.preserveSharpEdges=sharp!=0;
+                if (version>=10) {
+                    std::size_t faceCount{},cornersTotal{};input >> key >> faceCount;
+                    if (!input || key!="control_faces" || faceCount==0 || faceCount>kMaxSubdivisionControlTriangles)
+                        throw std::runtime_error("invalid control face count");
+                    for (std::size_t f=0;f<faceCount;++f) {
+                        std::size_t corners{};input >> key >> corners;
+                        if (!input || key!="control_face" || (corners!=3 && corners!=6) ||
+                            (cornersTotal+=corners)>kMaxSubdivisionControlTriangles*3)
+                            throw std::runtime_error("invalid control face record");
+                        std::vector<std::uint32_t> face(corners);
+                        for (auto& index : face) {
+                            input >> index;
+                            if (!input || index>=object->polygon->vertices.size()) throw std::runtime_error("invalid control face vertex");
+                        }
+                        settings.controlFaces.push_back(std::move(face));
+                    }
+                    std::size_t creaseCount{};input >> key >> creaseCount;
+                    if (!input || key!="edge_creases" || creaseCount>kMaxSubdivisionControlTriangles*3)
+                        throw std::runtime_error("invalid edge crease count");
+                    for (std::size_t e=0;e<creaseCount;++e) {
+                        std::uint64_t edge{};float strength{};input >> key >> edge >> strength;
+                        if (!input || key!="edge_crease" || !std::isfinite(strength) || strength<=0 || strength>4 ||
+                            !settings.edgeCreases.emplace(edge,strength).second)
+                            throw std::runtime_error("invalid edge crease record");
+                    }
+                } else freeze_subdivision_topology(*object->polygon,settings);
+                object->subdivision=std::move(settings);
             }
         }
         document.path_ = manifestPath;

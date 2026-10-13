@@ -16,6 +16,7 @@
 #include "dve/editor_command.hpp"
 
 namespace dve::editor {
+static std::uint64_t subdivision_prefab_hash(const EditorPrefabAsset&,bool topologyMetadata) noexcept;
 namespace {
 
 std::uint64_t hash_bytes(std::uint64_t hash, const void* data, std::size_t size) noexcept {
@@ -305,7 +306,15 @@ std::optional<EditorPrefabAsset> load_editor_prefab_impl(
         prefab.parentPrefabAsset = std::move(parentPath);
         prefab.inheritanceDepth = inheritanceDepth;
         prefab.contentHash = editor_prefab_content_hash(prefab);
-        if (prefab.contentHash != storedHash) throw std::runtime_error("prefab content hash mismatch");
+        if (prefab.contentHash != storedHash) {
+            // Only legacy scenes can use the pre-topology hash. New crease/face metadata
+            // must participate in integrity checking; never ignore it for format 10.
+            std::ifstream sceneHeader(prefabPath.parent_path()/relativeTemplate);
+            std::string sceneMagic;unsigned sceneVersion{};sceneHeader >> sceneMagic >> sceneVersion;
+            if (!sceneHeader || sceneMagic!="DVE_EDITOR_SCENE" || sceneVersion>=10 ||
+                subdivision_prefab_hash(prefab,false)!=storedHash)
+                throw std::runtime_error("prefab content hash mismatch");
+        }
         visited.erase(keyPath);
         return prefab;
     } catch (const std::exception& exception) {
@@ -316,7 +325,7 @@ std::optional<EditorPrefabAsset> load_editor_prefab_impl(
 
 } // namespace
 
-std::uint64_t editor_prefab_content_hash(const EditorPrefabAsset& prefab) noexcept {
+static std::uint64_t subdivision_prefab_hash(const EditorPrefabAsset& prefab,bool topologyMetadata) noexcept {
     std::uint64_t hash = 1469598103934665603ULL;
     hash = hash_text(hash, prefab.name);
     hash = hash_text(hash, prefab.parentPrefabAsset.filename().generic_string());
@@ -341,7 +350,20 @@ std::uint64_t editor_prefab_content_hash(const EditorPrefabAsset& prefab) noexce
         hash = hash_value(hash,object.polygon?object.polygon->contentHash:0);
         // Preserve legacy hashes for objects without subdivision settings.
         if (object.subdivision) {hash=hash_value(hash,std::uint32_t{0x53554244});
-            hash=hash_value(hash,object.subdivision->level);hash=hash_value(hash,object.subdivision->preserveSharpEdges);}
+            hash=hash_value(hash,object.subdivision->level);hash=hash_value(hash,object.subdivision->preserveSharpEdges);
+            if (topologyMetadata) {
+                auto settings=*object.subdivision;
+                if (object.polygon) freeze_subdivision_topology(*object.polygon,settings);
+                hash=hash_value(hash,settings.controlFaces.size());
+                for (const auto& face : settings.controlFaces) {
+                    hash=hash_value(hash,face.size());for (auto index : face) hash=hash_value(hash,index);
+                }
+                hash=hash_value(hash,settings.edgeCreases.size());
+                for (const auto& [edge,strength] : settings.edgeCreases) {
+                    hash=hash_value(hash,edge);hash=hash_value(hash,strength);
+                }
+            }
+        }
         hash = hash_value(hash, object.voxelSizeMeters);
         hash = hash_float3(hash,object.voxelScale);
         if (object.attachment) {
@@ -363,6 +385,10 @@ std::uint64_t editor_prefab_content_hash(const EditorPrefabAsset& prefab) noexce
         if (object.voxels) hash = hash_voxels(hash, *object.voxels);
     }
     return hash;
+}
+
+std::uint64_t editor_prefab_content_hash(const EditorPrefabAsset& prefab) noexcept {
+    return subdivision_prefab_hash(prefab,true);
 }
 
 EditorPrefabCaptureResult capture_editor_prefab(

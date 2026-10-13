@@ -407,6 +407,7 @@ CommandResult AddObjectCommand::execute(EditorDocument& document) {
     if (document.find_object(id_)) return CommandResult::fail("an object with this identifier already exists");
     if (pending_->subdivision) {
         if (!pending_->polygon) return CommandResult::fail("Subdivision object has no cage");
+        freeze_subdivision_topology(*pending_->polygon,*pending_->subdivision);
         const auto evaluated=evaluate_subdivision(*pending_->polygon,*pending_->subdivision);
         if (!evaluated.mesh) return CommandResult::fail(evaluated.error);
     }

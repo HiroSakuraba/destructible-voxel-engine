@@ -61,7 +61,7 @@ void NativeEditorController::prune_polygon_selection() {
     }
     auto all = polygon_all_components(*object->polygon, polygonSelection_.mode);
     if (object->subdivision && polygonSelection_.mode==PolygonSelectionMode::Edge)
-        all=subdivision_control_edges(*object->polygon);
+        all=subdivision_control_edges(*object->polygon,&*object->subdivision);
     std::erase_if(polygonSelection_.components, [&](auto id) { return !all.contains(id); });
 }
 
@@ -73,9 +73,9 @@ void NativeEditorController::select_polygon_components(const std::set<std::uint6
     auto all = polygon_all_components(*object->polygon, polygonSelection_.mode);
     auto hits=inputHits;
     if (object->subdivision) {
-        if (polygonSelection_.mode==PolygonSelectionMode::Edge) all=subdivision_control_edges(*object->polygon);
+        if (polygonSelection_.mode==PolygonSelectionMode::Edge) all=subdivision_control_edges(*object->polygon,&*object->subdivision);
         if (polygonSelection_.mode==PolygonSelectionMode::Face)
-            for (const auto& face : subdivision_control_face_triangles(*object->polygon))
+            for (const auto& face : subdivision_control_face_triangles(*object->polygon,&*object->subdivision))
                 if (std::any_of(face.begin(),face.end(),[&](auto id){return hits.contains(id);}))
                     hits.insert(face.begin(),face.end());
     }
@@ -90,7 +90,7 @@ void NativeEditorController::select_polygon_components(const std::set<std::uint6
     std::size_t count=selected.size();
     if (object->subdivision && polygonSelection_.mode==PolygonSelectionMode::Face) {
         count=0;
-        for (const auto& face : subdivision_control_face_triangles(*object->polygon))
+        for (const auto& face : subdivision_control_face_triangles(*object->polygon,&*object->subdivision))
             if (std::any_of(face.begin(),face.end(),[&](auto id){return selected.contains(id);})) ++count;
     }
     set_status(std::to_string(count)+(object->subdivision ? " subdivision control " : " polygon ")+
@@ -125,16 +125,16 @@ void NativeEditorController::finish_polygon_marquee(int x, int y) {
     const bool click = std::hypot(double(dx),double(dy)) <= 5.0;
     if (click) {
         const auto hit = pick_polygon_component(*object, camera_, layout_.viewport, marquee.startX, marquee.startY,
-                                                polygonSelection_.mode, viewportSettings_.xraySelection);
+                                                polygonSelection_.mode, viewportSettings_.xraySelection || (object->subdivision && subdivisionCageXray_));
         if (hit) hits.insert(*hit);
     } else {
         const UiRect rect{std::min(x,marquee.startX), std::min(y,marquee.startY), std::abs(dx)+1, std::abs(dy)+1};
-        hits = polygon_components_in_rect(*object,camera_,layout_.viewport,rect,polygonSelection_.mode,viewportSettings_.xraySelection,x < marquee.startX,
+        hits = polygon_components_in_rect(*object,camera_,layout_.viewport,rect,polygonSelection_.mode,viewportSettings_.xraySelection || (object->subdivision && subdivisionCageXray_),x < marquee.startX,
             &workspace_.document(),&viewportSettings_.isolatedObjects);
     }
-    if (click && !viewportSettings_.xraySelection) std::erase_if(hits,[&](auto id) { return !polygon_component_visible(id); });
+    if (click && !viewportSettings_.xraySelection && !(object->subdivision && subdivisionCageXray_)) std::erase_if(hits,[&](auto id) { return !polygon_component_visible(id); });
     if (!click && x>=marquee.startX && object->subdivision && polygonSelection_.mode==PolygonSelectionMode::Face)
-        for (const auto& face : subdivision_control_face_triangles(*object->polygon))
+        for (const auto& face : subdivision_control_face_triangles(*object->polygon,&*object->subdivision))
             if (!std::all_of(face.begin(),face.end(),[&](auto id){return hits.contains(id);}))
                 for (auto id : face) hits.erase(id);
     select_polygon_components(hits,marquee.operation);
@@ -219,7 +219,7 @@ bool NativeEditorController::begin_polygon_preview(PolygonEdit operation) {
         polygonSelection_.mode!=PolygonSelectionMode::Face) { set_status("Select triangle faces for this tool",true); return false; }
     if (gizmoDragging_) finish_gizmo_drag(true);
     close_previews_for_voxel_edit("polygon tool preview");
-    polygonPreviewBefore_ = *object->polygon;
+    polygonPreviewBefore_ = *object->polygon; polygonPreviewSubdivision_=object->subdivision;
     polygonPreviewSelection_ = polygonSelection_;
     polygonPreviewOperation_ = operation;
     polygonPreviewSettings_ = {};
@@ -238,7 +238,7 @@ bool NativeEditorController::begin_polygon_slice() {
     close_previews_for_voxel_edit("polygon Slice");
     polygonPreviewSelection_=polygonSelection_;
     polygonPreviewSelection_.object=object->id;
-    polygonPreviewBefore_=*object->polygon;
+    polygonPreviewBefore_=*object->polygon; polygonPreviewSubdivision_=object->subdivision;
     polygonSlicePreview_=true; polygonSliceOutput_=0; polygonSliceCap_=true; polygonSliceBack_.reset();
     polygonSliceOrigin_=voxel_to_world(object->transform,object->voxelScale,multiply(add(object->polygon->bounds.minimum,object->polygon->bounds.maximum),.5F));
     polygonSlicePoint_=polygonSliceOrigin_; polygonSliceNormal_={1,0,0}; polygonPreviewTyped_.clear();
@@ -249,7 +249,7 @@ void NativeEditorController::update_polygon_preview() {
     if (!polygonPreviewBefore_) return;
     auto* object = workspace_.document().find_object(polygonPreviewSelection_.object);
     if (!editable(object)) { cancel_polygon_preview(); return; }
-    *object->polygon = *polygonPreviewBefore_;
+    *object->polygon = *polygonPreviewBefore_; object->subdivision=polygonPreviewSubdivision_;
     polygonSelection_ = polygonPreviewSelection_;
     if (polygonSlicePreview_) {
         float offset=0;
@@ -271,7 +271,7 @@ void NativeEditorController::update_polygon_preview() {
             if (polygonPreviewValid_) polygonSliceBack_=back.mesh;
             else set_status(back.error.empty()?"Slice leaves an empty part":back.error,true);
         }
-        if (polygonPreviewValid_) { *object->polygon=front.mesh; polygonSelection_.components.clear(); }
+        if (polygonPreviewValid_) { *object->polygon=front.mesh; if (polygonPreviewSubdivision_) object->subdivision=remap_subdivision_topology(*polygonPreviewBefore_,front.mesh,*polygonPreviewSubdivision_); polygonSelection_.components.clear(); }
         else set_status(front.error.empty()?"Slice preview is empty or invalid":front.error,true);
         refresh_menu_state(); return;
     }
@@ -287,16 +287,16 @@ void NativeEditorController::update_polygon_preview() {
     // Face bevel exposes both height (typed) and inset (arrow keys).
     const auto edited=edit_polygon(*polygonPreviewBefore_,polygonPreviewSelection_,polygonPreviewOperation_,settings);
     polygonPreviewValid_=bool(edited);
-    if (edited) { *object->polygon=edited.mesh; polygonSelection_=edited.selection; }
+    if (edited) { *object->polygon=edited.mesh; if (polygonPreviewSubdivision_) object->subdivision=remap_subdivision_topology(*polygonPreviewBefore_,edited.mesh,*polygonPreviewSubdivision_); polygonSelection_=edited.selection; }
     else { polygonSelection_=polygonPreviewSelection_; set_status(edited.error,true); }
     refresh_menu_state();
 }
 
 void NativeEditorController::cancel_polygon_preview() {
     if (!polygonPreviewBefore_) return;
-    if (auto* object=workspace_.document().find_object(polygonPreviewSelection_.object)) object->polygon=*polygonPreviewBefore_;
+    if (auto* object=workspace_.document().find_object(polygonPreviewSelection_.object)) {object->polygon=*polygonPreviewBefore_;object->subdivision=polygonPreviewSubdivision_;object->subdivisionCache.reset();}
     polygonSelection_=polygonPreviewSelection_;
-    polygonPreviewBefore_.reset(); polygonPreviewTyped_.clear(); polygonPreviewValid_=false;
+    polygonPreviewBefore_.reset(); polygonPreviewSubdivision_.reset(); polygonPreviewTyped_.clear(); polygonPreviewValid_=false;
     polygonSlicePreview_=false; polygonSliceBack_.reset();
 }
 
@@ -314,7 +314,7 @@ bool NativeEditorController::commit_polygon_preview() {
     if (back) {
         const auto id=workspace_.document().allocate_object_id(); partId=id;
         EditorObject part(id,object->name+" (slice back)"); part.polygon=std::move(*back); part.polygon->objectId=id;
-        refresh_editor_polygon(*part.polygon); part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision;
+        refresh_editor_polygon(*part.polygon); part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision; if (part.subdivision) *part.subdivision=remap_subdivision_topology(*object->polygon,*part.polygon,*part.subdivision);
         part.flags=object->flags; part.parent=object->parent;
         command->add(std::make_unique<AddObjectCommand>(std::move(part),"Add sliced polygon part"));
     }
@@ -416,7 +416,7 @@ bool NativeEditorController::separate_selected_polygon() {
     for (std::size_t i=1;i<parts.size();++i) {
         const auto id=workspace_.document().allocate_object_id(); EditorObject part(id,object->name+" (shell "+std::to_string(i+1)+")");
         part.polygon=parts[i]; part.polygon->objectId=id; refresh_editor_polygon(*part.polygon);
-        part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision; part.flags=object->flags; part.parent=object->parent;
+        part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision; if (part.subdivision) *part.subdivision=remap_subdivision_topology(*object->polygon,*part.polygon,*part.subdivision); part.flags=object->flags; part.parent=object->parent;
         command->add(std::make_unique<AddObjectCommand>(std::move(part),"Add polygon shell")); ids.push_back(id);
     }
     const auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
@@ -435,7 +435,7 @@ bool NativeEditorController::extract_selected_polygon() {
     const auto before=capture_selection_snapshot();
     const auto id=workspace_.document().allocate_object_id(); EditorObject part(id,object->name+" (extract)");
     part.polygon=mesh; part.polygon->objectId=id; refresh_editor_polygon(*part.polygon);
-    part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision; part.flags=object->flags; part.parent=object->parent;
+    part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision; if (part.subdivision) *part.subdivision=remap_subdivision_topology(*object->polygon,*part.polygon,*part.subdivision); part.flags=object->flags; part.parent=object->parent;
     auto command=std::make_unique<CompoundCommand>("Extract polygon faces");
     command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,remaining.mesh,"Remove extracted faces"));
     command->add(std::make_unique<AddObjectCommand>(std::move(part),"Add extracted polygon"));
@@ -497,7 +497,7 @@ bool NativeEditorController::handle_polygon_action(std::string_view action) {
             : action=="polygon.select_shrink" ? PolygonSelectionEdit::Shrink : PolygonSelectionEdit::Connected;
         auto hits = edit_polygon_selection(*object->polygon,polygonSelection_,operation);
         if (object->subdivision && action=="polygon.select_shrink" && polygonSelection_.mode==PolygonSelectionMode::Face)
-            for (const auto& face : subdivision_control_face_triangles(*object->polygon))
+            for (const auto& face : subdivision_control_face_triangles(*object->polygon,&*object->subdivision))
                 if (!std::all_of(face.begin(),face.end(),[&](auto id){return hits.contains(id);}))
                     for (auto id : face) hits.erase(id);
         select_polygon_components(hits,SelectionOperation::Replace);
@@ -508,7 +508,7 @@ bool NativeEditorController::handle_polygon_action(std::string_view action) {
     if (action=="edit.copy"||action=="edit.cut") {
         if (polygonSelection_.mode!=PolygonSelectionMode::Face||polygonSelection_.components.empty()) { set_status("Select triangle faces to copy/cut",true); return false; }
         auto mesh=extract_polygon_faces(*object->polygon,polygonSelection_);
-        const auto pose=object->transform; const auto scale=object->voxelScale; const auto subdivision=object->subdivision;
+        const auto pose=object->transform; const auto scale=object->voxelScale; auto subdivision=object->subdivision; if (subdivision) *subdivision=remap_subdivision_topology(*object->polygon,mesh,*subdivision);
         if (action=="edit.cut"&&!apply_polygon_edit(PolygonEdit::Delete)) return false;
         polygonClipboard_=std::move(mesh); polygonClipboardPose_=pose; polygonClipboardScale_=scale;
         polygonClipboardSubdivision_=subdivision;
@@ -599,6 +599,19 @@ void NativeEditorController::refresh_subdivision_menu_state() {
         object->subdivision->level>0,"Select a subdivision object above level 0.");
     enabled("subdiv.sharp_toggle",surface && !polygonPreviewBefore_ && !mesh_authoring_dragging(),"Select a subdivision object and finish the preview.");
     enabled("subdiv.cage_toggle",surface,"Select a subdivision object.");
+    for (auto id : {"subdiv.cage_xray","subdiv.cage_only"}) enabled(id,surface,"Select a subdivision object.");
+    const bool faceReady=surface && selectionDomain_==SelectionDomain::Polygons &&
+        polygonSelection_.object==object->id && polygonSelection_.mode==PolygonSelectionMode::Face &&
+        !polygonSelection_.components.empty() && !polygonPreviewBefore_ && !mesh_authoring_dragging();
+    enabled("subdiv.make_quad",faceReady && polygonSelection_.components.size()==2,"Select exactly two adjacent same-material cage triangles.");
+    enabled("subdiv.triangulate_faces",faceReady,"Select control faces and finish the active preview.");
+    const bool creaseReady=surface && selectionDomain_==SelectionDomain::Polygons &&
+        polygonSelection_.object==object->id && polygonSelection_.mode==PolygonSelectionMode::Edge &&
+        !polygonSelection_.components.empty() && !polygonPreviewBefore_ && !mesh_authoring_dragging();
+    for (auto id : {"subdiv.crease_clear","subdiv.crease_half","subdiv.crease_1","subdiv.crease_2","subdiv.crease_3","subdiv.crease_4"})
+        enabled(id,creaseReady,"Select control-cage edges and finish the active preview.");
+    (void)workspace_.menus().set_checked("subdiv.cage_xray",subdivisionCageXray_);
+    (void)workspace_.menus().set_checked("subdiv.cage_only",subdivisionCageOnly_);
     (void)workspace_.menus().set_checked("subdiv.sharp_toggle",object && object->subdivision && object->subdivision->preserveSharpEdges);
     (void)workspace_.menus().set_checked("subdiv.cage_toggle",subdivisionCageVisible_);
     for (const auto& [id,destination] : subdivision_tools()) {
@@ -663,6 +676,91 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
     if (action=="subdiv.cage_toggle") {
         subdivisionCageVisible_=!subdivisionCageVisible_;refresh_menu_state();return true;
     }
+    if (action=="subdiv.cage_xray" || action=="subdiv.cage_only") {
+        if (action=="subdiv.cage_xray") subdivisionCageXray_=!subdivisionCageXray_;
+        else {subdivisionCageOnly_=!subdivisionCageOnly_;subdivisionCageVisible_=true;}
+        refresh_menu_state();set_status(action=="subdiv.cage_xray" ?
+            "Cage X-ray toggled: click and box selection use the same visibility rule" :
+            "Selected cage preview toggled; saved subdivision level is unchanged");return true;
+    }
+    if (action=="subdiv.make_quad" || action=="subdiv.triangulate_faces") {
+        if (selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.object!=source->id ||
+            polygonSelection_.mode!=PolygonSelectionMode::Face || polygonSelection_.components.empty() ||
+            polygonPreviewBefore_ || mesh_authoring_dragging() || gizmoDragging_) {
+            set_status("Select control faces of this subdivision surface and finish the active preview first",true);return false;
+        }
+        const auto& mesh=*source->polygon;auto settings=*source->subdivision;freeze_subdivision_topology(mesh,settings);
+        const auto groups=subdivision_control_face_triangles(mesh,&settings);
+        std::vector<std::vector<std::uint32_t>> records;
+        for (std::size_t i=0;i<groups.size();++i) {
+            const auto& group=groups[i];
+            const bool selected=std::all_of(group.begin(),group.end(),[&](auto id){return polygonSelection_.components.contains(id);});
+            if (!selected) records.push_back(settings.controlFaces[i]);
+            else if (action=="subdiv.triangulate_faces") for (auto id : group)
+                records.push_back({mesh.indices[id*3],mesh.indices[id*3+1],mesh.indices[id*3+2]});
+        }
+        if (action=="subdiv.make_quad") {
+            if (polygonSelection_.components.size()!=2) {set_status("Select exactly two cage triangles",true);return false;}
+            std::vector<std::uint32_t> record;
+            for (auto id : polygonSelection_.components) {
+                if (id>=mesh.indices.size()/3) return false;
+                for (unsigned j=0;j<3;++j) record.push_back(mesh.indices[std::size_t(id)*3+j]);
+            }
+            records.push_back(std::move(record));
+        }
+        settings.controlFaces=std::move(records);
+        const auto groupsAfter=subdivision_control_face_triangles(mesh,&settings);
+        if (groupsAfter.empty()) {set_status("Choose two adjacent, consistently wound, same-material triangles for a control quad",true);return false;}
+        const auto canonical=[](std::vector<std::vector<std::uint32_t>> faces) {
+            for (auto& face : faces) std::sort(face.begin(),face.end());
+            std::sort(faces.begin(),faces.end());return faces;
+        };
+        if (canonical(groupsAfter)==canonical(groups)) {
+            set_status(action=="subdiv.make_quad"?"The selected triangles already form one control quad":
+                "The selected control faces are already triangles");
+            return true; // Already in the requested state: no undo step.
+        }
+        const auto allowed=subdivision_control_edges(mesh,&settings);
+        std::erase_if(settings.edgeCreases,[&](const auto& item){return !allowed.contains(item.first);});
+        const auto before=capture_selection_snapshot();
+        const auto result=workspace_.commands().execute(workspace_.document(),
+            std::make_unique<SetSubdivisionSettingsCommand>(source->id,*source->subdivision,std::move(settings)));
+        if (result.success) {prune_polygon_selection();workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());}
+        set_status(result.success?"Updated explicit control faces; cage vertices and UVs retained":result.message,!result.success);
+        refresh_menu_state();return result.success;
+    }
+    if (action.starts_with("subdiv.crease_")) {
+        if (selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.object!=source->id ||
+            polygonSelection_.mode!=PolygonSelectionMode::Edge || polygonSelection_.components.empty() ||
+            polygonPreviewBefore_ || mesh_authoring_dragging() || gizmoDragging_) {
+            set_status("Select cage edges and finish the active preview before editing creases",true);return false;
+        }
+        float strength{};
+        if (action=="subdiv.crease_half") strength=0.5F;
+        else if (action=="subdiv.crease_1") strength=1;
+        else if (action=="subdiv.crease_2") strength=2;
+        else if (action=="subdiv.crease_3") strength=3;
+        else if (action=="subdiv.crease_4") strength=4;
+        else if (action!="subdiv.crease_clear") return false;
+        auto settings=*source->subdivision;freeze_subdivision_topology(*source->polygon,settings);
+        const auto allowed=subdivision_control_edges(*source->polygon,&settings);
+        const auto frozen=settings;std::size_t touched=0;
+        for (auto edge : polygonSelection_.components) if (allowed.contains(edge)) {
+            ++touched;
+            if (strength==0) settings.edgeCreases.erase(edge);else settings.edgeCreases[edge]=strength;
+        }
+        if (touched==0) {set_status("Select control-cage edges (not quad diagonals) to edit creases",true);return false;}
+        if (settings==frozen) {
+            set_status(strength==0?"Selected edges have no creases":"Selected edges already have this crease strength");
+            return true; // Already in the requested state: no undo step.
+        }
+        const auto before=capture_selection_snapshot();
+        const auto result=workspace_.commands().execute(workspace_.document(),
+            std::make_unique<SetSubdivisionSettingsCommand>(source->id,*source->subdivision,std::move(settings)));
+        if (result.success) workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
+        set_status(result.success ? strength==0?"Cleared selected edge creases":"Set selected crease strength to "+std::to_string(strength) : result.message,!result.success);
+        refresh_menu_state();return result.success;
+    }
     if (action.starts_with("subdiv.level_") || action=="subdiv.sharp_toggle") {
         auto settings=*source->subdivision;
         if (action=="subdiv.level_up") settings.level=std::min(kMaxSubdivisionLevel,settings.level+1);
@@ -690,11 +788,12 @@ void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,U
     if (workspace_.mode()!=EditorMode::Edit || playSession_.active()) return;
     const auto primary=workspace_.selected_object();const auto* object=primary?workspace_.document().find_object(*primary):nullptr;
     if (!object || !object->subdivision || !object->polygon || !object->flags.visible || is_isolated_out(object->id)) return;
-    if (subdivisionCageDrawHash_!=object->polygon->contentHash || subdivisionCageDrawObject_!=object->id) {
+    if (subdivisionCageDrawHash_!=object->polygon->contentHash || subdivisionCageDrawObject_!=object->id ||
+        subdivisionCageDrawSettings_!=*object->subdivision) {
         subdivisionCageDrawEdges_.clear();
-        const auto allowed=subdivision_control_edges(*object->polygon);
+        const auto allowed=subdivision_control_edges(*object->polygon,&*object->subdivision);
         for (auto edge : polygon_edges(*object->polygon)) if (allowed.contains(edge.key())) subdivisionCageDrawEdges_.push_back(edge);
-        subdivisionCageDrawHash_=object->polygon->contentHash;subdivisionCageDrawObject_=object->id;
+        subdivisionCageDrawHash_=object->polygon->contentHash;subdivisionCageDrawObject_=object->id;subdivisionCageDrawSettings_=*object->subdivision;
     }
     if (subdivisionCageVisible_) {
         std::size_t drawn=0;
@@ -707,7 +806,9 @@ void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,U
             const auto bounded=[](float v){return int(std::clamp(v,-100000.0F,100000.0F));};
             const bool selected=selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge &&
                 polygonSelection_.components.contains(edge.key());
-            canvas.line(bounded(a.x),bounded(a.y),bounded(b.x),bounded(b.y),selected?0xffb75a:0x66d8e8,selected?2:1);
+            const auto crease=object->subdivision->edgeCreases.find(edge.key());
+            const bool creased=crease!=object->subdivision->edgeCreases.end();
+            canvas.line(bounded(a.x),bounded(a.y),bounded(b.x),bounded(b.y),selected?0xffb75a:creased?0xdb7cf2:0x66d8e8,selected||creased?2:1);
         }
         if (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Vertex)
             for (const auto id : polygon_all_components(*object->polygon,PolygonSelectionMode::Vertex)) {
@@ -718,10 +819,21 @@ void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,U
     const UiRect caption{viewport.x+10,viewport.y+10,std::max(1,std::min(490,viewport.width-20)),42};
     RectClipCanvas painter(canvas,caption);painter.fill(caption,0x17202b);
     const std::string text="SUBDIVISION | level "+std::to_string(object->subdivision->level)+
-        (selectionDomain_==SelectionDomain::Polygons?" | edit control cage":" | select object / cage modes");
+        (subdivisionCageOnly_?" | cage preview":" | smooth surface")+
+        (subdivisionCageXray_?" | cage X-ray":" | visible cage selection");
     painter.text(caption.x+8,caption.y+16,elide_text_to_width(painter,text,caption.width-16),0x66d8e8);
-    const std::string detail=object->subdivisionCache && !object->subdivisionCache->mesh ?
-        object->subdivisionCache->error : "Extrude / inset / topology / UV / convert | Undo supported";
+    std::string detail=object->subdivisionCache && !object->subdivisionCache->mesh ?
+        object->subdivisionCache->error : "Purple = authored creases | strengths 0.5..4 | Undo supported";
+    if (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge &&
+        !polygonSelection_.components.empty()) {
+        float minimum=4,maximum=0;
+        for (auto edge : polygonSelection_.components) {
+            const auto at=object->subdivision->edgeCreases.find(edge);
+            const float strength=at==object->subdivision->edgeCreases.end()?0:at->second;
+            minimum=std::min(minimum,strength);maximum=std::max(maximum,strength);
+        }
+        detail="Selected crease range "+std::to_string(minimum)+".."+std::to_string(maximum)+" | purple = authored";
+    }
     painter.text(caption.x+8,caption.y+34,elide_text_to_width(painter,detail,caption.width-16),0xe0e9f5);
 }
 

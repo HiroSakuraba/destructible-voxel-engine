@@ -71,10 +71,11 @@ public:
     CommandResult undo(EditorDocument&) override;
     [[nodiscard]] bool merge_with(const IEditorCommand&) override;
 private:
-    CommandResult apply(EditorDocument&,const CookedPolygonAsset&);
+    CommandResult apply(EditorDocument&,const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&);
     EditorObjectId id_{};
     std::uint64_t stroke_{};
     CookedPolygonAsset before_,after_;
+    std::optional<SubdivisionSettings> beforeSubdivision_,afterSubdivision_;
     std::string label_;
     bool capturedOverride_{};
     std::optional<ComponentValue> previousOverride_;
@@ -92,5 +93,5 @@ struct EditorPolygonDrawTriangle {
 [[nodiscard]] std::vector<EditorPolygonDrawTriangle> build_editor_polygon_draw_list(
     const EditorDocument&,const EditorCamera&,UiRect,const std::set<EditorObjectId>& selected,
     const std::set<EditorObjectId>& isolated,std::size_t maximum=100000,
-    const std::map<EditorObjectId,RigidTransform>* poses=nullptr);
+    const std::map<EditorObjectId,RigidTransform>* poses=nullptr,EditorObjectId cagePreview=0);
 } // namespace dve::editor

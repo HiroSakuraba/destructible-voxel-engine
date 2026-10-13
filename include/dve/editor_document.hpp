@@ -12,6 +12,7 @@
 
 #include "dve/asset_cooker.hpp"
 #include "dve/polygon_asset.hpp"
+#include "dve/subdivision_surface.hpp"
 #include "dve/component.hpp"
 #include "dve/editor_scene_composition.hpp"
 #include "dve/gabor_volume.hpp"
@@ -54,7 +55,11 @@ struct EditorObject {
     // Object-owned overrides, stored in the DVOX palette. Conversion reserves IDs outside
     // the editor paint palette, so painting with an existing editor material stays consistent.
     std::map<MaterialId, VoxelMaterialDefinition> voxelMaterials;
-    std::optional<CookedPolygonAsset> polygon;
+    std::optional<CookedPolygonAsset> polygon; // Control cage when subdivision is present
+    std::optional<SubdivisionSettings> subdivision;
+    mutable std::optional<SubdivisionEvaluation> subdivisionCache;
+    mutable std::uint64_t subdivisionCacheHash{};
+    mutable SubdivisionSettings subdivisionCacheSettings{};
     std::optional<CookedText3DAsset> text3d;
     std::optional<GaborVolumeAsset> gaborVolume;
     std::set<Int3> anchors;
@@ -64,7 +69,8 @@ struct EditorObject {
     std::uint32_t layer{};
     std::optional<EditorPrefabLink> prefabLink;
 
-    [[nodiscard]] bool is_polygon() const noexcept { return polygon.has_value(); }
+    [[nodiscard]] bool is_polygon() const noexcept { return polygon.has_value() && !subdivision; }
+    [[nodiscard]] bool is_subdivision() const noexcept { return subdivision.has_value(); }
     [[nodiscard]] bool is_text3d() const noexcept { return text3d.has_value(); }
     [[nodiscard]] bool is_gabor_volume() const noexcept { return gaborVolume.has_value(); }
 

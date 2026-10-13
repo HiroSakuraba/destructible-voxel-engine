@@ -45,6 +45,7 @@
 #include "dve/collision_proxy.hpp"
 #include "dve/editor_scatter.hpp"
 #include "dve/editor_polygon.hpp"
+#include "dve/editor_subdivision.hpp"
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
@@ -65,8 +66,12 @@ namespace dve::editor {
 // duplication that silently drifts (add a menu in one place, forget the other, and clicks hit
 // the wrong menu). "Window" mirrors Unreal Editor's placement (right after Edit) and is what
 // toggles the Scene Hierarchy / Inspector panels and the bottom panel's Assets tab.
-inline constexpr std::array<std::string_view, 8> kMenuBarNames{
-    "File", "Edit", "Create", "View", "Tools", "Build", "Window", "Help"};
+inline constexpr std::array<std::string_view, 9> kMenuBarNames{
+    "File", "Edit", "Create", "View", "Subdivision", "Tools", "Build", "Window", "Help"};
+// Short titles, index-aligned with kMenuBarNames, drawn when a full title does not fit its menu
+// bar slot (narrow windows; "Subdivision" is wider than the 71 px slot at 640 px).
+inline constexpr std::array<std::string_view, kMenuBarNames.size()> kCompactMenuBarNames{
+    "File", "Edit", "New", "View", "Subdiv", "Tools", "Build", "Win", "Help"};
 
 struct EditorPrefabAsset;
 
@@ -950,6 +955,9 @@ public:
     [[nodiscard]] bool mesh_authoring_dragging() const noexcept;
     [[nodiscard]] std::set<EditorObjectId> mesh_authoring_hidden_objects() const;
     void refresh_mesh_authoring_menu_state();
+    bool dispatch_subdivision_action(std::string_view action);
+    void refresh_subdivision_menu_state();
+    void draw_subdivision_cage(const IEditorCanvas&,UiRect viewport) const;
     [[nodiscard]] EditorObjectId voxel_selection_object() const noexcept { return voxelSelectionObject_; }
     [[nodiscard]] const std::set<Int3>& voxel_selection() const noexcept { return voxelSelection_; }
     void select_voxels(EditorObjectId object, const std::set<Int3>& cells, SelectionOperation operation);
@@ -965,7 +973,7 @@ public:
     bool move_selected_voxels(Int3 offset);
     bool edit_selected_voxel_region(VoxelRegionEdit edit, VoxelRegionSettings settings);
     bool begin_voxel_region_preview(VoxelRegionEdit edit, VoxelRegionSettings settings);
-    bool begin_geometry_conversion(bool toVoxels);
+    bool begin_geometry_conversion(bool toVoxels, bool subdivisionOutput = false);
     bool update_voxel_authoring_preview();
     bool apply_voxel_authoring_preview();
     void cancel_voxel_authoring_preview();
@@ -1109,6 +1117,11 @@ private:
     std::optional<CookedPolygonAsset> polygonDragBefore_;
     std::optional<CookedPolygonAsset> polygonPreviewBefore_;
     std::optional<CookedPolygonAsset> polygonClipboard_;
+    std::optional<SubdivisionSettings> polygonClipboardSubdivision_;
+    bool subdivisionCageVisible_{true};
+    mutable std::uint64_t subdivisionCageDrawHash_{};
+    mutable EditorObjectId subdivisionCageDrawObject_{};
+    mutable std::vector<PolygonEdge> subdivisionCageDrawEdges_;
     RigidTransform polygonClipboardPose_{};
     Float3 polygonClipboardScale_{1,1,1};
     bool polygonClipboardNewest_{};
@@ -1139,6 +1152,8 @@ private:
         VoxelRegionEdit edit{VoxelRegionEdit::Extrude};
         VoxelRegionSettings settings{};
         GeometryConversionSettings conversion{};
+        bool subdivisionOutput{};
+        std::uint32_t subdivisionLevel{2};
         int pivotMode{}; // bounds centre, cell (0,0,0) centre, custom cell centre
         Int3 customPivot{};
         std::vector<MaterialId> paletteSlots;

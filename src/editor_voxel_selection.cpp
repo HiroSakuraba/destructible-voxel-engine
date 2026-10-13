@@ -1,6 +1,7 @@
 #include "dve/editor_voxel_selection.hpp"
 #include "dve/voxel_metric.hpp"
 #include "dve/editor_polygon.hpp"
+#include "dve/editor_subdivision.hpp"
 
 #include <algorithm>
 #include <map>
@@ -524,7 +525,7 @@ GeometryConversionBuild polygon_to_voxels(const EditorObject& source, EditorObje
     }
     if (settings.mode != VoxelizationMode::Solid && settings.mode != VoxelizationMode::Shell &&
         settings.mode != VoxelizationMode::SurfaceOnly) { result.error = "Invalid voxelization mode"; return result; }
-    const auto& mesh = *source.polygon;
+    const auto& mesh = *editor_surface_mesh(source);
     if (const auto valid = validate_polygon_asset(mesh); !valid) { result.error = valid.message; return result; }
     if (mesh.indices.size()/3 > 500'000 || mesh.vertices.size() > 1'000'000) {
         result.error = "Convert a smaller mesh (at most 500000 triangles and 1000000 vertices)"; return result;

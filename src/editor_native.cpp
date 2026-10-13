@@ -2114,6 +2114,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
         checked("polygon.face_mode",selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Face);
     }
     refresh_mesh_authoring_menu_state();
+    refresh_subdivision_menu_state();
     enabled("text3d.cancel", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     // Cook, Package and Documentation have no handler in this editor build: say so up front.
     enabled("build.cook", false, kCookUnavailable);
@@ -5930,18 +5931,20 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         if (longJob_ && !safe) { set_status(long_job_busy_reason(), true, 4.0F); return false; }
         if (importOptions_.open && !safe) close_import_options();
     }
-    if (polygonPreviewBefore_ && !actionId.starts_with("view.") && actionId != "polygon.preview_apply" && actionId != "polygon.preview_cancel") {
+    if (polygonPreviewBefore_ && !actionId.starts_with("view.") && actionId != "polygon.preview_apply" && actionId != "polygon.preview_cancel" &&
+        actionId != "subdiv.preview_apply" && actionId != "subdiv.preview_cancel") {
         set_status("Apply or cancel the polygon preview first",true); return false;
     }
     if(mesh_authoring_dragging() && !actionId.starts_with("view.")) {
         set_status("Apply or cancel the mesh workspace preview first",true);return false;
     }
     if (voxel_authoring_active() && !actionId.starts_with("view.") &&
-        actionId != "voxel.authoring_apply" && actionId != "voxel.authoring_cancel") {
+        actionId != "voxel.authoring_apply" && actionId != "voxel.authoring_cancel" &&
+        actionId != "subdiv.conversion_apply" && actionId != "subdiv.conversion_cancel") {
         set_status("Apply or cancel the voxel/conversion preview first",true); return false;
     }
-    if (actionId == "voxel.authoring_apply") return apply_voxel_authoring_preview();
-    if (actionId == "voxel.authoring_cancel") {
+    if (actionId == "voxel.authoring_apply" || actionId == "subdiv.conversion_apply") return apply_voxel_authoring_preview();
+    if (actionId == "voxel.authoring_cancel" || actionId == "subdiv.conversion_cancel") {
         if (!voxel_authoring_active()) { set_status("No voxel/conversion preview is open",true); return false; }
         cancel_voxel_authoring_preview(); refresh_menu_state(); set_status("Preview cancelled; scene unchanged"); return true;
     }
@@ -6187,6 +6190,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_selection_domain(selectionDomain_ == SelectionDomain::Objects ? SelectionDomain::Voxels : SelectionDomain::Objects);
         return true;
     }
+    if (actionId.starts_with("subdiv.") || actionId=="create.subdivision")
+        return dispatch_subdivision_action(actionId=="create.subdivision" ? "subdiv.create_cube" : actionId);
     if (actionId.starts_with("mesh.")) return dispatch_mesh_authoring_action(actionId);
     if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.import_exact" &&
         actionId != "polygon.create_plane" &&
@@ -6199,6 +6204,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         const auto before=capture_selection_snapshot(); const auto id=workspace_.document().allocate_object_id();
         EditorObject part(id,"Pasted polygon faces"); part.polygon=*polygonClipboard_; part.polygon->objectId=id;
         refresh_editor_polygon(*part.polygon); part.transform=polygonClipboardPose_; part.voxelScale=polygonClipboardScale_;
+        part.subdivision=polygonClipboardSubdivision_;
         const auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<AddObjectCommand>(std::move(part),"Paste polygon faces"));
         if (result.success) { if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
             workspace_.select_object(id); selectionDomain_=SelectionDomain::Objects;
@@ -12129,7 +12135,7 @@ bool NativeEditorController::begin_voxel_region_preview(VoxelRegionEdit edit, Vo
     return update_voxel_authoring_preview();
 }
 
-bool NativeEditorController::begin_geometry_conversion(bool toVoxels) {
+bool NativeEditorController::begin_geometry_conversion(bool toVoxels,bool subdivisionOutput) {
     if (longJob_ || workspace_.mode() != EditorMode::Edit || playSession_.active() || workspace_.selection_count() != 1) {
         set_status(workspace_.selection_count() != 1 ? "Select exactly one object to convert"
                                                      : "Stop Play and finish background work before converting",true);
@@ -12158,12 +12164,15 @@ bool NativeEditorController::begin_geometry_conversion(bool toVoxels) {
     voxelAuthoring_.kind = toVoxels ? VoxelAuthoringState::Kind::PolygonToVoxel : VoxelAuthoringState::Kind::VoxelToPolygon;
     voxelAuthoring_.object = source->id;
     voxelAuthoring_.output = workspace_.document().allocate_object_id();
+    voxelAuthoring_.subdivisionOutput = subdivisionOutput;
     voxelAuthoring_.conversion.voxelSizeMeters = std::clamp(source->voxelSizeMeters,0.005F,10.0F);
     return update_voxel_authoring_preview();
 }
 
 std::string NativeEditorController::voxel_authoring_field_value(int field) const {
     const auto& s = voxelAuthoring_;
+    if (field==0 && s.kind==VoxelAuthoringState::Kind::VoxelToPolygon && s.subdivisionOutput)
+        return std::to_string(s.subdivisionLevel);
     if (field != 0) return std::to_string(field == 1 ? s.customPivot.x : field == 2 ? s.customPivot.y : s.customPivot.z);
     if (s.kind == VoxelAuthoringState::Kind::PolygonToVoxel) return std::to_string(s.conversion.voxelSizeMeters);
     return std::to_string(s.edit == VoxelRegionEdit::RotateQuarterTurn ? s.settings.amount*90 : s.settings.amount);
@@ -12184,7 +12193,10 @@ bool NativeEditorController::commit_voxel_authoring_field() {
         if (error != std::errc{} || end != s.typed.data()+s.typed.size()) {
             s.error = "Enter a whole number"; set_status(s.error,true); return false;
         }
-        if (s.field != 0) {
+        if (s.field==0 && s.kind==VoxelAuthoringState::Kind::VoxelToPolygon && s.subdivisionOutput) {
+            if (value<0 || value>4) {s.error="Subdivision level must be 0..4";set_status(s.error,true);return false;}
+            s.subdivisionLevel=static_cast<std::uint32_t>(value);
+        } else if (s.field != 0) {
             if (value < kInt3Min.x+kBrickDim || value > kInt3Max.x-kBrickDim) { s.error = "Pivot exceeds the grid"; return false; }
             if (s.field == 1) s.customPivot.x = value;
             else if (s.field == 2) s.customPivot.y = value; else s.customPivot.z = value;
@@ -12243,12 +12255,14 @@ bool NativeEditorController::update_voxel_authoring_preview() {
     const auto generation = ++voxelAuthoringGeneration_;
     const auto kind = s.kind; const auto operation = s.edit; const auto settings = s.settings;
     const auto conversion = s.conversion; const auto output = s.output; const auto slots = s.paletteSlots;
+    const bool subdivisionOutput = s.subdivisionOutput;
+    const auto subdivisionLevel = s.subdivisionLevel;
     auto snapshot = std::make_shared<EditorObject>(clone_editor_object(*source));
     const auto selection = voxelSelection_;
     const auto library = materials_;
     auto prepared = std::make_shared<GeometryConversionBuild>();
     return start_long_job(LongJobKind::ImportModel,"Voxel/conversion preview",longJobThreshold_+1,
-        [snapshot,selection,kind,operation,settings,conversion,output,slots,library,prepared](LongJob& job) {
+        [snapshot,selection,kind,operation,settings,conversion,output,slots,library,prepared,subdivisionOutput,subdivisionLevel](LongJob& job) {
             if (job.cancelled()) return;
             job.report(0.1F,"Building grid geometry");
             try {
@@ -12268,7 +12282,17 @@ bool NativeEditorController::update_voxel_authoring_preview() {
                     }
                 } else if (kind == VoxelAuthoringState::Kind::PolygonToVoxel)
                     *prepared = polygon_to_voxels(*snapshot,output,conversion,slots);
-                else *prepared = voxels_to_polygon(*snapshot,output,library);
+                else {
+                    *prepared = voxels_to_polygon(*snapshot,output,library);
+                    if (subdivisionOutput && prepared->object) {
+                        auto& object=*prepared->object;object.subdivision=SubdivisionSettings{subdivisionLevel,false};
+                        auto evaluated=evaluate_subdivision(*object.polygon,*object.subdivision);
+                        if (!evaluated.mesh) {prepared->error=evaluated.error;prepared->object.reset();}
+                        else {object.subdivisionCache=std::move(evaluated);object.subdivisionCacheHash=object.polygon->contentHash;
+                            object.subdivisionCacheSettings=*object.subdivision;object.name=snapshot->name+" (subdivision)";
+                            prepared->note="Editable subdivision cage; source voxels retained.";}
+                    }
+                }
             } catch (const std::exception& exception) { prepared->error = exception.what(); }
             if (job.cancelled()) return;
             job.report(1.0F,"Preview ready");
@@ -12368,7 +12392,7 @@ bool NativeEditorController::voxel_authoring_pointer_down(PointerButton button,i
         if (!commit_voxel_authoring_field()) return;
         s.field = field; s.typed = voxel_authoring_field_value(field); s.fieldEditing = true; s.replaceTyped = true;
     };
-    if (panel.amount.contains(x,y) && s.kind != VoxelAuthoringState::Kind::VoxelToPolygon) { beginField(0); return true; }
+    if (panel.amount.contains(x,y) && (s.kind != VoxelAuthoringState::Kind::VoxelToPolygon || s.subdivisionOutput)) { beginField(0); return true; }
     for (int i = 0; i < 3; ++i) {
         if (panel.axes[i].contains(x,y)) {
             if (!commit_voxel_authoring_field()) return true;
@@ -12393,7 +12417,7 @@ bool NativeEditorController::voxel_authoring_key(std::string_view key,bool contr
     auto& s = voxelAuthoring_;
     if (key == "escape") { cancel_voxel_authoring_preview(); refresh_menu_state(); set_status("Preview cancelled; scene unchanged"); return true; }
     if (key == "return" || key == "enter") { (void)apply_voxel_authoring_preview(); return true; }
-    if (key == "tab" && s.kind != VoxelAuthoringState::Kind::VoxelToPolygon) {
+    if (key == "tab" && (s.kind != VoxelAuthoringState::Kind::VoxelToPolygon || s.subdivisionOutput)) {
         if (!commit_voxel_authoring_field()) return true;
         s.field = s.kind == VoxelAuthoringState::Kind::Region && s.edit == VoxelRegionEdit::RotateQuarterTurn ? (s.field+1)%4 : 0;
         s.typed = voxel_authoring_field_value(s.field); s.fieldEditing = true; s.replaceTyped = true; return true;
@@ -12405,7 +12429,7 @@ bool NativeEditorController::voxel_authoring_key(std::string_view key,bool contr
     }
     const char c = key == "period" ? '.' : key == "minus" ? '-' : key.size() == 1 ? key[0] : '\0';
     if (key == "backspace" || (c >= '0' && c <= '9') || c == '.' || c == '-') {
-        if (s.kind == VoxelAuthoringState::Kind::VoxelToPolygon) return true;
+        if (s.kind == VoxelAuthoringState::Kind::VoxelToPolygon && !s.subdivisionOutput) return true;
         if (!s.fieldEditing) { s.field = 0; s.fieldEditing = true; s.typed.clear(); s.replaceTyped = false; }
         if (s.replaceTyped) { s.typed.clear(); s.replaceTyped = false; }
         if (key == "backspace") { if (!s.typed.empty()) s.typed.pop_back(); }
@@ -12467,14 +12491,16 @@ void NativeEditorController::draw_voxel_authoring(const IEditorCanvas& canvas,Ui
     const bool region = s.kind == VoxelAuthoringState::Kind::Region;
     const std::string title = region ? s.edit == VoxelRegionEdit::Extrude ? "EXTRUDE VOXEL REGION" :
         s.edit == VoxelRegionEdit::RotateQuarterTurn ? "ROTATE VOXEL REGION" : "SCALE VOXEL REGION" :
-        s.kind == VoxelAuthoringState::Kind::PolygonToVoxel ? "POLYGON TO VOXELS" : "VOXELS TO POLYGON";
+        s.kind == VoxelAuthoringState::Kind::PolygonToVoxel ? "MESH TO VOXELS" :
+        s.subdivisionOutput ? "VOXELS TO SUBDIVISION" : "VOXELS TO POLYGON";
     painter.text(ui.panel.x+12,ui.panel.y+20,title,accent);
     for (int i = 0; i < 3; ++i)
         if (s.kind == VoxelAuthoringState::Kind::PolygonToVoxel)
             label(ui.axes[i],i == 0 ? "Solid" : i == 1 ? "Shell" : "Surface",int(s.conversion.mode) == i);
         else if (region && s.edit != VoxelRegionEdit::ScaleInteger) label(ui.axes[i],i == 0 ? "Grid X" : i == 1 ? "Grid Y" : "Grid Z",s.settings.axis == i);
-    if (s.kind != VoxelAuthoringState::Kind::VoxelToPolygon) {
-        const std::string prefix = s.kind == VoxelAuthoringState::Kind::PolygonToVoxel ? "Local cell metres: " :
+    if ((s.kind != VoxelAuthoringState::Kind::VoxelToPolygon || s.subdivisionOutput)) {
+        const std::string prefix = s.kind==VoxelAuthoringState::Kind::VoxelToPolygon && s.subdivisionOutput ? "Subdivision level (0..4): " :
+            s.kind == VoxelAuthoringState::Kind::PolygonToVoxel ? "Local cell metres: " :
             s.edit == VoxelRegionEdit::Extrude ? "Signed cells: " : s.edit == VoxelRegionEdit::RotateQuarterTurn ? "Degrees (+/-90): " : "Integer factor (2..8): ";
         label(ui.amount,prefix+(s.fieldEditing && s.field == 0 ? s.typed : voxel_authoring_field_value(0)),s.fieldEditing && s.field == 0);
     }

@@ -13,6 +13,7 @@
 
 #include "dve/dvox.hpp"
 #include "dve/editor_materials.hpp"
+#include "dve/editor_subdivision.hpp"
 
 namespace dve::editor {
 namespace {
@@ -98,6 +99,7 @@ EditorObject clone_editor_object(const EditorObject& source) {
     cloned.voxelScale = source.voxelScale;
     cloned.voxelMaterials = source.voxelMaterials;
     cloned.polygon = source.polygon;
+    cloned.subdivision = source.subdivision;
     cloned.voxels = clone_voxel_object(*source.voxels);
     cloned.text3d = source.text3d;
     cloned.gaborVolume = source.gaborVolume;
@@ -304,6 +306,15 @@ bool EditorDocument::validate(std::string* error) const {
                     return fail("invalid voxel palette: "+materialError);
             }
         }
+        if (object.subdivision) {
+            if (!object.polygon) return fail("subdivision object has no control cage");
+            if (object.polygon->indices.size()/3>kMaxSubdivisionControlTriangles || object.polygon->vertices.size()>100000)
+                return fail("subdivision control cage exceeds its budget");
+            (void)editor_surface_mesh(object);
+            if (object.subdivision->level>kMaxSubdivisionLevel ||
+                (object.subdivisionCache && !object.subdivisionCache->mesh))
+                return fail(object.subdivisionCache ? object.subdivisionCache->error : "invalid subdivision level");
+        }
         if (object.polygon) {
             const auto valid=validate_polygon_asset(*object.polygon);
             if (!valid || object.polygon->objectId!=id) return fail("invalid polygon object");
@@ -342,8 +353,10 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         for (const auto& [id, object] : objects_) {
             std::string writeError;
             if (object.polygon) {
-                auto mesh=*object.polygon;mesh.objectId=id;mesh.contentHash=polygon_asset_content_hash(mesh);
+                auto mesh=*editor_surface_mesh(object);mesh.objectId=id;mesh.contentHash=polygon_asset_content_hash(mesh);
                 if (!write_dmesh(stagingPath/(std::to_string(id)+".dmesh"),mesh,&writeError)) throw std::runtime_error(writeError);
+                if (object.subdivision && !write_dmesh(stagingPath/(std::to_string(id)+".cage.dmesh"),*object.polygon,&writeError))
+                    throw std::runtime_error(writeError);
                 continue;
             }
             if (object.text3d) {
@@ -399,7 +412,9 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         const bool hasVoxelPalettes = std::any_of(objects_.begin(),objects_.end(),
             [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
         // Format 8 adds only explicit palette ID lists; material definitions remain in DVOX.
-        output << "DVE_EDITOR_SCENE " << (hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
+        const bool hasSubdivisions=std::any_of(objects_.begin(),objects_.end(),
+            [](const auto& entry) {return entry.second.subdivision.has_value();});
+        output << "DVE_EDITOR_SCENE " << (hasSubdivisions ? 9 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -407,7 +422,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         output << std::setprecision(9);
         for (const auto& [id, object] : objects_) {
             output << "object " << id << ' ' << (object.parent ? *object.parent : 0) << ' '
-                   << (object.polygon ? 3 : object.text3d ? 1 : object.gaborVolume ? 2 : 0) << ' '
+                   << (object.subdivision ? 4 : object.polygon ? 3 : object.text3d ? 1 : object.gaborVolume ? 2 : 0) << ' '
                    << quote_text(object.name) << ' '
                    << quote_text(object.sourceAsset.generic_string()) << ' '
                    << quote_text(object.importRecipe.generic_string()) << ' '
@@ -474,7 +489,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             }
         }
         output << "next_prefab_instance " << nextPrefabInstanceId_ << "\n";
-        if (hasVoxelPalettes) {
+        if (hasVoxelPalettes || hasSubdivisions) {
             const auto count = std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
             output << "voxel_palettes " << count << "\n";
@@ -486,6 +501,14 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 }
                 output << "\n";
             }
+        }
+        if (hasSubdivisions) {
+            const auto count=std::count_if(objects_.begin(),objects_.end(),
+                [](const auto& entry) {return entry.second.subdivision.has_value();});
+            output << "subdivisions " << count << "\n";
+            for (const auto& [id,object] : objects_) if (object.subdivision)
+                output << "subdivision " << id << ' ' << object.subdivision->level << ' '
+                       << object.subdivision->preserveSharpEdges << "\n";
         }
         output.flush();
         if (!output) throw std::runtime_error("failed to write scene manifest");
@@ -509,7 +532,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -549,15 +572,17 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                 for (std::string& group : object.groups) input >> std::quoted(group);
             }
             input >> anchorCount;
-            if (!input || key != "object" || geometryKind > (version>=7?3U:2U)) throw std::runtime_error("malformed object record");
+            if (!input || key != "object" || geometryKind > (version>=9?4U:version>=7?3U:2U)) throw std::runtime_error("malformed object record");
             object.id = id;
             object.name = objectName;
             object.parent = parent == 0 ? std::nullopt : std::optional<EditorObjectId>(parent);
             object.sourceAsset = source;
             object.importRecipe = recipe;
             object.textFontAsset = fontSource;
-            if (geometryKind == 3U) {
-                auto loaded=read_dmesh(manifestPath.parent_path()/revisionDirectory/(std::to_string(id)+".dmesh"));
+            if (geometryKind == 3U || geometryKind == 4U) {
+                auto loaded=read_dmesh(manifestPath.parent_path()/revisionDirectory/
+                    (std::to_string(id)+(geometryKind==4U?".cage.dmesh":".dmesh")));
+                if (geometryKind==4U) object.subdivision=SubdivisionSettings{};
                 if (!loaded) throw std::runtime_error("could not load polygon object: "+loaded.error);
                 object.polygon=std::move(loaded.asset);object.voxels=std::make_unique<VoxelObject>(id);
             } else if (geometryKind == 1U) {
@@ -679,6 +704,22 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                         !object->voxelMaterials.emplace(static_cast<MaterialId>(materialId),palette->second[materialId]).second)
                         throw std::runtime_error("invalid voxel palette material");
                 }
+            }
+        }
+        if (version>=9) {
+            std::size_t count{};input >> key >> count;
+            const auto expected=std::count_if(document.objects_.begin(),document.objects_.end(),
+                [](const auto& entry) {return entry.second.subdivision.has_value();});
+            if (!input || key!="subdivisions" || count!=static_cast<std::size_t>(expected))
+                throw std::runtime_error("invalid subdivision section");
+            std::set<EditorObjectId> seen;
+            for (std::size_t i=0;i<count;++i) {
+                EditorObjectId id{};SubdivisionSettings settings;unsigned sharp{};
+                input >> key >> id >> settings.level >> sharp;
+                auto* object=document.find_object(id);
+                if (!input || key!="subdivision" || !object || !object->subdivision || settings.level>kMaxSubdivisionLevel ||
+                    sharp>1 || !seen.insert(id).second) throw std::runtime_error("invalid subdivision record");
+                settings.preserveSharpEdges=sharp!=0;object->subdivision=settings;
             }
         }
         document.path_ = manifestPath;

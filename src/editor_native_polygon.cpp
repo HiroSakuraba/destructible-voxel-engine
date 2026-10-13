@@ -1,9 +1,11 @@
 #include "dve/editor_native.hpp"
+#include "dve/editor_native_renderer.hpp"
 #include "dve/voxel_metric.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <queue>
+#include <utility>
 
 namespace dve::editor {
 namespace {
@@ -44,7 +46,8 @@ bool NativeEditorController::set_polygon_mode(PolygonSelectionMode mode) {
     marquee_ = {};
     focusRegion_ = EditorFocusRegion::Viewport;
     set_active_tool(EditorToolId::Select);
-    set_status(std::string("Selecting polygon ") + mode_name(mode) + ": click/box (left to right: window; right to left: crossing); Shift add, Ctrl toggle, Ctrl+Shift intersect");
+    prune_polygon_selection();
+    set_status(std::string(object->subdivision ? "Selecting subdivision cage " : "Selecting polygon ") + mode_name(mode) + ": click/box (left to right: window; right to left: crossing); Shift add, Ctrl toggle, Ctrl+Shift intersect");
     refresh_menu_state(); return true;
 }
 
@@ -56,16 +59,26 @@ void NativeEditorController::prune_polygon_selection() {
         if (gizmoDragging_) finish_gizmo_drag(true);
         polygonSelection_.components.clear(); selectionDomain_ = SelectionDomain::Objects; return;
     }
-    const auto all = polygon_all_components(*object->polygon, polygonSelection_.mode);
+    auto all = polygon_all_components(*object->polygon, polygonSelection_.mode);
+    if (object->subdivision && polygonSelection_.mode==PolygonSelectionMode::Edge)
+        all=subdivision_control_edges(*object->polygon);
     std::erase_if(polygonSelection_.components, [&](auto id) { return !all.contains(id); });
 }
 
-void NativeEditorController::select_polygon_components(const std::set<std::uint64_t>& hits, SelectionOperation operation) {
+void NativeEditorController::select_polygon_components(const std::set<std::uint64_t>& inputHits, SelectionOperation operation) {
     if (polygonPreviewBefore_ || gizmoDragging_) return;
     prune_polygon_selection();
     const auto* object = workspace_.document().find_object(polygonSelection_.object);
     if (selectionDomain_ != SelectionDomain::Polygons || !editable(object)) return;
-    const auto all = polygon_all_components(*object->polygon, polygonSelection_.mode);
+    auto all = polygon_all_components(*object->polygon, polygonSelection_.mode);
+    auto hits=inputHits;
+    if (object->subdivision) {
+        if (polygonSelection_.mode==PolygonSelectionMode::Edge) all=subdivision_control_edges(*object->polygon);
+        if (polygonSelection_.mode==PolygonSelectionMode::Face)
+            for (const auto& face : subdivision_control_face_triangles(*object->polygon))
+                if (std::any_of(face.begin(),face.end(),[&](auto id){return hits.contains(id);}))
+                    hits.insert(face.begin(),face.end());
+    }
     auto& selected = polygonSelection_.components;
     if (operation == SelectionOperation::Replace) selected.clear();
     if (operation == SelectionOperation::Intersect) std::erase_if(selected, [&](auto id) { return !hits.contains(id); });
@@ -74,7 +87,14 @@ void NativeEditorController::select_polygon_components(const std::set<std::uint6
         else if (operation == SelectionOperation::Toggle && selected.contains(id)) selected.erase(id);
         else selected.insert(id);
     }
-    set_status(std::to_string(selected.size()) + " polygon " + mode_name(polygonSelection_.mode) + " selected");
+    std::size_t count=selected.size();
+    if (object->subdivision && polygonSelection_.mode==PolygonSelectionMode::Face) {
+        count=0;
+        for (const auto& face : subdivision_control_face_triangles(*object->polygon))
+            if (std::any_of(face.begin(),face.end(),[&](auto id){return selected.contains(id);})) ++count;
+    }
+    set_status(std::to_string(count)+(object->subdivision ? " subdivision control " : " polygon ")+
+        (object->subdivision && polygonSelection_.mode==PolygonSelectionMode::Face ? "faces" : mode_name(polygonSelection_.mode))+" selected");
     refresh_menu_state();
 }
 
@@ -88,6 +108,10 @@ bool NativeEditorController::polygon_component_visible(std::uint64_t id) const {
     const auto ray = make_viewport_ray(camera_, layout_.viewport, screen.x, screen.y);
     const float distance = length(subtract(world, ray.origin));
     const auto hits = pick_editor_document_all(workspace_.document(), ray, distance + .002F, &viewportSettings_.isolatedObjects);
+    if (!hits.empty() && hits.front().objectId==object->id && object->subdivision) {
+        const auto cageHit=pick_editor_polygon(*object,ray,distance+.002F,true);
+        return !cageHit || cageHit->distance>=distance-.002F;
+    }
     return hits.empty() || hits.front().worldDistance >= distance - .002F;
 }
 
@@ -109,6 +133,10 @@ void NativeEditorController::finish_polygon_marquee(int x, int y) {
             &workspace_.document(),&viewportSettings_.isolatedObjects);
     }
     if (click && !viewportSettings_.xraySelection) std::erase_if(hits,[&](auto id) { return !polygon_component_visible(id); });
+    if (!click && x>=marquee.startX && object->subdivision && polygonSelection_.mode==PolygonSelectionMode::Face)
+        for (const auto& face : subdivision_control_face_triangles(*object->polygon))
+            if (!std::all_of(face.begin(),face.end(),[&](auto id){return hits.contains(id);}))
+                for (auto id : face) hits.erase(id);
     select_polygon_components(hits,marquee.operation);
 }
 
@@ -286,7 +314,7 @@ bool NativeEditorController::commit_polygon_preview() {
     if (back) {
         const auto id=workspace_.document().allocate_object_id(); partId=id;
         EditorObject part(id,object->name+" (slice back)"); part.polygon=std::move(*back); part.polygon->objectId=id;
-        refresh_editor_polygon(*part.polygon); part.transform=object->transform; part.voxelScale=object->voxelScale;
+        refresh_editor_polygon(*part.polygon); part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision;
         part.flags=object->flags; part.parent=object->parent;
         command->add(std::make_unique<AddObjectCommand>(std::move(part),"Add sliced polygon part"));
     }
@@ -388,7 +416,7 @@ bool NativeEditorController::separate_selected_polygon() {
     for (std::size_t i=1;i<parts.size();++i) {
         const auto id=workspace_.document().allocate_object_id(); EditorObject part(id,object->name+" (shell "+std::to_string(i+1)+")");
         part.polygon=parts[i]; part.polygon->objectId=id; refresh_editor_polygon(*part.polygon);
-        part.transform=object->transform; part.voxelScale=object->voxelScale; part.flags=object->flags; part.parent=object->parent;
+        part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision; part.flags=object->flags; part.parent=object->parent;
         command->add(std::make_unique<AddObjectCommand>(std::move(part),"Add polygon shell")); ids.push_back(id);
     }
     const auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
@@ -407,7 +435,7 @@ bool NativeEditorController::extract_selected_polygon() {
     const auto before=capture_selection_snapshot();
     const auto id=workspace_.document().allocate_object_id(); EditorObject part(id,object->name+" (extract)");
     part.polygon=mesh; part.polygon->objectId=id; refresh_editor_polygon(*part.polygon);
-    part.transform=object->transform; part.voxelScale=object->voxelScale; part.flags=object->flags; part.parent=object->parent;
+    part.transform=object->transform; part.voxelScale=object->voxelScale; part.subdivision=object->subdivision; part.flags=object->flags; part.parent=object->parent;
     auto command=std::make_unique<CompoundCommand>("Extract polygon faces");
     command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,remaining.mesh,"Remove extracted faces"));
     command->add(std::make_unique<AddObjectCommand>(std::move(part),"Add extracted polygon"));
@@ -467,7 +495,11 @@ bool NativeEditorController::handle_polygon_action(std::string_view action) {
     if (action=="polygon.select_shell" || action=="polygon.select_grow" || action=="polygon.select_shrink") {
         const auto operation = action=="polygon.select_grow" ? PolygonSelectionEdit::Grow
             : action=="polygon.select_shrink" ? PolygonSelectionEdit::Shrink : PolygonSelectionEdit::Connected;
-        const auto hits = edit_polygon_selection(*object->polygon,polygonSelection_,operation);
+        auto hits = edit_polygon_selection(*object->polygon,polygonSelection_,operation);
+        if (object->subdivision && action=="polygon.select_shrink" && polygonSelection_.mode==PolygonSelectionMode::Face)
+            for (const auto& face : subdivision_control_face_triangles(*object->polygon))
+                if (!std::all_of(face.begin(),face.end(),[&](auto id){return hits.contains(id);}))
+                    for (auto id : face) hits.erase(id);
         select_polygon_components(hits,SelectionOperation::Replace);
         return true;
     }
@@ -476,11 +508,221 @@ bool NativeEditorController::handle_polygon_action(std::string_view action) {
     if (action=="edit.copy"||action=="edit.cut") {
         if (polygonSelection_.mode!=PolygonSelectionMode::Face||polygonSelection_.components.empty()) { set_status("Select triangle faces to copy/cut",true); return false; }
         auto mesh=extract_polygon_faces(*object->polygon,polygonSelection_);
-        const auto pose=object->transform; const auto scale=object->voxelScale;
+        const auto pose=object->transform; const auto scale=object->voxelScale; const auto subdivision=object->subdivision;
         if (action=="edit.cut"&&!apply_polygon_edit(PolygonEdit::Delete)) return false;
         polygonClipboard_=std::move(mesh); polygonClipboardPose_=pose; polygonClipboardScale_=scale;
+        polygonClipboardSubdivision_=subdivision;
         polygonClipboardNewest_=true; voxelClipboardNewest_=false; return true;
     }
     return false;
 }
+
+namespace {
+const std::map<std::string_view,std::string_view>& subdivision_tools() {
+    static const std::map<std::string_view,std::string_view> tools{
+        {"subdiv.vertex_mode","polygon.vertex_mode"},
+        {"subdiv.edge_mode","polygon.edge_mode"},
+        {"subdiv.face_mode","polygon.face_mode"},
+        {"subdiv.object_mode","polygon.object_mode"},
+        {"subdiv.move","transform.translate"},
+        {"subdiv.rotate","transform.rotate"},
+        {"subdiv.scale","transform.scale"},
+        {"subdiv.select_all","edit.select_all"},
+        {"subdiv.select_grow","polygon.select_grow"},
+        {"subdiv.select_shrink","polygon.select_shrink"},
+        {"subdiv.select_connected","polygon.select_shell"},
+        {"subdiv.select_invert","polygon.select_invert"},
+        {"subdiv.select_none","polygon.select_none"},
+        {"subdiv.extrude","polygon.extrude"},
+        {"subdiv.inset","polygon.inset"},
+        {"subdiv.bevel","polygon.bevel"},
+        {"subdiv.bevel_edges","mesh.bevel_edges"},
+        {"subdiv.weld","polygon.weld"},
+        {"subdiv.split_edges","mesh.split_edges"},
+        {"subdiv.subdivide_cage","mesh.subdivide"},
+        {"subdiv.bridge","mesh.bridge"},
+        {"subdiv.cap","mesh.cap"},
+        {"subdiv.extract","polygon.extract"},
+        {"subdiv.join","polygon.join"},
+        {"subdiv.separate","polygon.separate"},
+        {"subdiv.slice","polygon.slice"},
+        {"subdiv.assign_material","polygon.assign_material"},
+        {"subdiv.uv_editor","mesh.uv_editor"},
+        {"subdiv.uv_mark_seam","mesh.uv_mark_seam"},
+        {"subdiv.uv_clear_seam","mesh.uv_clear_seam"},
+        {"subdiv.uv_toggle_pin","mesh.uv_toggle_pin"},
+        {"subdiv.uv_reset_flags","mesh.uv_reset_flags"},
+        {"subdiv.diagnostics","mesh.diagnostics"},
+        {"subdiv.boolean_union","mesh.boolean_union"},
+        {"subdiv.boolean_difference","mesh.boolean_difference"},
+        {"subdiv.boolean_reverse","mesh.boolean_reverse"},
+        {"subdiv.boolean_intersection","mesh.boolean_intersection"},
+        {"subdiv.hull_fit","mesh.hull_fit"},
+        {"subdiv.hull_edit","mesh.hull_edit"},
+        {"subdiv.hull_remove","mesh.hull_remove"},
+        {"subdiv.preview_apply","polygon.preview_apply"},
+        {"subdiv.preview_cancel","polygon.preview_cancel"},
+        {"subdiv.delete","edit.delete"},
+        {"subdiv.duplicate","edit.duplicate"}
+    };return tools;
+}
+}
+void NativeEditorController::refresh_subdivision_menu_state() {
+    const auto primary=workspace_.selected_object();
+    const auto* object=primary?workspace_.document().find_object(*primary):nullptr;
+    const bool ready=workspace_.mode()==EditorMode::Edit && !playSession_.active() && !longJob_ &&
+        !gizmoDragging_ && !voxel_authoring_active();
+    const bool surface=ready && object && object->polygon && object->subdivision &&
+        object->flags.visible && !object->flags.locked && !is_isolated_out(object->id);
+    const auto enabled=[&](std::string_view id,bool value,std::string reason) {
+        (void)workspace_.menus().set_enabled(id,value,value?std::string{}:std::move(reason));
+    };
+    for (auto id : {"subdiv.create_cube","subdiv.create_plane","create.subdivision"})
+        enabled(id,ready && !polygonPreviewBefore_ && !mesh_authoring_dragging(),"Finish the active preview and stop Play before creating subdivision geometry.");
+    enabled("subdiv.from_polygon",ready && object && object->polygon && !object->subdivision &&
+        workspace_.selection_count()==1 && object->flags.visible && !object->flags.locked && !is_isolated_out(object->id),
+        "Select one visible unlocked polygon mesh.");
+    enabled("subdiv.from_voxels",ready && object && object->voxels && !object->polygon && !object->text3d && !object->gaborVolume &&
+        workspace_.selection_count()==1 && object->flags.visible && !object->flags.locked && !is_isolated_out(object->id),
+        "Select one visible unlocked voxel object.");
+    for (auto id : {"subdiv.bake_polygon","subdiv.to_voxels"})
+        enabled(id,surface && workspace_.selection_count()==1 && !polygonPreviewBefore_ && !mesh_authoring_dragging(),
+            "Select one subdivision object and finish the active preview.");
+    for (std::uint32_t level=0;level<=kMaxSubdivisionLevel;++level) {
+        const auto id="subdiv.level_"+std::to_string(level);
+        enabled(id,surface && !polygonPreviewBefore_ && !mesh_authoring_dragging(),"Select a subdivision surface and finish the preview.");
+        (void)workspace_.menus().set_checked(id,object && object->subdivision && object->subdivision->level==level);
+    }
+    enabled("subdiv.level_up",surface && !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
+        object->subdivision->level<kMaxSubdivisionLevel,"Select a subdivision object below level 4.");
+    enabled("subdiv.level_down",surface && !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
+        object->subdivision->level>0,"Select a subdivision object above level 0.");
+    enabled("subdiv.sharp_toggle",surface && !polygonPreviewBefore_ && !mesh_authoring_dragging(),"Select a subdivision object and finish the preview.");
+    enabled("subdiv.cage_toggle",surface,"Select a subdivision object.");
+    (void)workspace_.menus().set_checked("subdiv.sharp_toggle",object && object->subdivision && object->subdivision->preserveSharpEdges);
+    (void)workspace_.menus().set_checked("subdiv.cage_toggle",subdivisionCageVisible_);
+    for (const auto& [id,destination] : subdivision_tools()) {
+        const auto* target=std::as_const(workspace_.menus()).find(destination);
+        const bool previewAction=id=="subdiv.preview_apply" || id=="subdiv.preview_cancel";
+        enabled(id,surface && target && target->enabled && (!polygonPreviewBefore_ || previewAction),
+            target && !target->enabled ? target->disabledReason : "Select a subdivision surface or its control components.");
+        if (target && (id=="subdiv.vertex_mode" || id=="subdiv.edge_mode" || id=="subdiv.face_mode" || id=="subdiv.object_mode"))
+            (void)workspace_.menus().set_checked(id,surface && (id=="subdiv.object_mode" ? selectionDomain_==SelectionDomain::Objects : target->checked));
+    }
+    enabled("subdiv.conversion_apply",voxel_authoring_preview_ready() && !longJob_,"Update the conversion preview first.");
+    enabled("subdiv.conversion_cancel",voxel_authoring_active() && !longJob_,"No conversion preview is open.");
+}
+bool NativeEditorController::dispatch_subdivision_action(std::string_view action) {
+    if (workspace_.mode()!=EditorMode::Edit || playSession_.active() || longJob_) {
+        set_status("Stop Play and finish background work before editing subdivision surfaces",true);return false;
+    }
+    const auto primary=workspace_.selected_object();
+    const auto* source=primary?workspace_.document().find_object(*primary):nullptr;
+    if (action=="subdiv.from_voxels") return begin_geometry_conversion(false,true);
+    if (action=="subdiv.to_voxels") return begin_geometry_conversion(true);
+    if (action=="subdiv.create_cube" || action=="subdiv.create_plane" || action=="subdiv.from_polygon" ||
+        action=="subdiv.bake_polygon") {
+        const bool create=action=="subdiv.create_cube" || action=="subdiv.create_plane";
+        const bool bake=action=="subdiv.bake_polygon";
+        if (!create && (!editable(source) || is_isolated_out(source->id) || workspace_.selection_count()!=1 ||
+            (bake ? !source->subdivision : source->subdivision.has_value()))) {
+            set_status(bake ? "Select one visible unlocked subdivision surface to bake"
+                            : "Select one visible unlocked polygon mesh to convert",true);
+            return false;
+        }
+        cancel_mesh_authoring_drag();meshAuthoring_.reset();close_previews_for_voxel_edit("subdivision geometry");
+        const auto before=capture_selection_snapshot();const auto id=workspace_.document().allocate_object_id();
+        EditorObject object(id,create ? action=="subdiv.create_plane"?"Subdivision Plane":"Subdivision Cube" :
+            source->name+(bake?" (baked polygon)":" (subdivision)"));
+        object.voxelSizeMeters=0.1F;
+        object.polygon=create ? action=="subdiv.create_plane"?make_editor_polygon_plane(id):make_editor_polygon_cube(id) :
+            bake ? *editor_surface_mesh(*source) : *source->polygon;
+        object.polygon->objectId=id;refresh_editor_polygon(*object.polygon);
+        if (!bake) object.subdivision=SubdivisionSettings{};
+        if (create) {object.transform.position=camera_.target;object.flags.anchored=action=="subdiv.create_plane";}
+        else {
+            object.transform=source->transform;object.voxelScale=source->voxelScale;object.voxelSizeMeters=source->voxelSizeMeters;
+            object.flags=source->flags;object.flags.locked=false;object.parent=source->prefabLink?std::nullopt:source->parent;
+            object.tags=source->tags;object.groups=source->groups;object.layer=source->layer;
+            for (const auto& component : source->components)
+                if (component.type=="dve.membership" || component.type=="dve.tags") object.components.push_back(component);
+        }
+        const auto result=workspace_.commands().execute(workspace_.document(),
+            std::make_unique<AddObjectCommand>(std::move(object),bake?"Bake subdivision surface":"Create subdivision surface"));
+        if (!result.success) {set_status(result.message,true);return false;}
+        if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+        workspace_.select_object(id);selectionDomain_=SelectionDomain::Objects;polygonSelection_={};
+        workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
+        frame_selection();refresh_menu_state();
+        set_status(bake?"Created a baked polygon; subdivision source retained":"Created subdivision surface; use the Subdivision menu for cage modes and modeling");
+        return true;
+    }
+    if (!editable(source) || !source->subdivision || is_isolated_out(source->id)) {
+        set_status("Select a visible unlocked subdivision surface first",true);return false;
+    }
+    if (action=="subdiv.cage_toggle") {
+        subdivisionCageVisible_=!subdivisionCageVisible_;refresh_menu_state();return true;
+    }
+    if (action.starts_with("subdiv.level_") || action=="subdiv.sharp_toggle") {
+        auto settings=*source->subdivision;
+        if (action=="subdiv.level_up") settings.level=std::min(kMaxSubdivisionLevel,settings.level+1);
+        else if (action=="subdiv.level_down") settings.level=settings.level>0?settings.level-1:0;
+        else if (action=="subdiv.sharp_toggle") settings.preserveSharpEdges=!settings.preserveSharpEdges;
+        else {
+            const auto text=action.substr(std::string_view("subdiv.level_").size());
+            if (text.size()!=1 || text[0]<'0' || text[0]>'4') {set_status("Unknown subdivision level",true);return false;}
+            settings.level=std::uint32_t(text[0]-'0');
+        }
+        if (settings==*source->subdivision) return true;
+        cancel_mesh_authoring_drag();meshAuthoring_.reset();close_previews_for_voxel_edit("subdivision settings");
+        const auto before=capture_selection_snapshot();
+        const auto result=workspace_.commands().execute(workspace_.document(),
+            std::make_unique<SetSubdivisionSettingsCommand>(source->id,*source->subdivision,settings));
+        if (result.success) workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
+        set_status(result.success?"Subdivision level "+std::to_string(settings.level)+"; cage and materials retained":result.message,!result.success);
+        refresh_menu_state();return result.success;
+    }
+    if (const auto at=subdivision_tools().find(action);at!=subdivision_tools().end()) return dispatch_action(at->second);
+    set_status("Unknown subdivision command",true);
+    return false;
+}
+void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,UiRect viewport) const {
+    if (workspace_.mode()!=EditorMode::Edit || playSession_.active()) return;
+    const auto primary=workspace_.selected_object();const auto* object=primary?workspace_.document().find_object(*primary):nullptr;
+    if (!object || !object->subdivision || !object->polygon || !object->flags.visible || is_isolated_out(object->id)) return;
+    if (subdivisionCageDrawHash_!=object->polygon->contentHash || subdivisionCageDrawObject_!=object->id) {
+        subdivisionCageDrawEdges_.clear();
+        const auto allowed=subdivision_control_edges(*object->polygon);
+        for (auto edge : polygon_edges(*object->polygon)) if (allowed.contains(edge.key())) subdivisionCageDrawEdges_.push_back(edge);
+        subdivisionCageDrawHash_=object->polygon->contentHash;subdivisionCageDrawObject_=object->id;
+    }
+    if (subdivisionCageVisible_) {
+        std::size_t drawn=0;
+        for (const auto edge : subdivisionCageDrawEdges_) {
+            if (++drawn>12000) break;
+            const auto a=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[edge.a].position));
+            const auto b=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[edge.b].position));
+            if (a.depth<=camera_.nearPlane || b.depth<=camera_.nearPlane || !std::isfinite(a.x) || !std::isfinite(a.y) ||
+                !std::isfinite(b.x) || !std::isfinite(b.y)) continue;
+            const auto bounded=[](float v){return int(std::clamp(v,-100000.0F,100000.0F));};
+            const bool selected=selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge &&
+                polygonSelection_.components.contains(edge.key());
+            canvas.line(bounded(a.x),bounded(a.y),bounded(b.x),bounded(b.y),selected?0xffb75a:0x66d8e8,selected?2:1);
+        }
+        if (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Vertex)
+            for (const auto id : polygon_all_components(*object->polygon,PolygonSelectionMode::Vertex)) {
+                const auto p=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[std::size_t(id)].position));
+                if (p.visible) canvas.fill({int(p.x)-3,int(p.y)-3,7,7},polygonSelection_.components.contains(id)?0xffb75a:0x66d8e8);
+            }
+    }
+    const UiRect caption{viewport.x+10,viewport.y+10,std::max(1,std::min(490,viewport.width-20)),42};
+    RectClipCanvas painter(canvas,caption);painter.fill(caption,0x17202b);
+    const std::string text="SUBDIVISION | level "+std::to_string(object->subdivision->level)+
+        (selectionDomain_==SelectionDomain::Polygons?" | edit control cage":" | select object / cage modes");
+    painter.text(caption.x+8,caption.y+16,elide_text_to_width(painter,text,caption.width-16),0x66d8e8);
+    const std::string detail=object->subdivisionCache && !object->subdivisionCache->mesh ?
+        object->subdivisionCache->error : "Extrude / inset / topology / UV / convert | Undo supported";
+    painter.text(caption.x+8,caption.y+34,elide_text_to_width(painter,detail,caption.width-16),0xe0e9f5);
+}
+
 } // namespace dve::editor

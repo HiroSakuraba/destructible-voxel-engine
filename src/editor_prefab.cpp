@@ -1,4 +1,5 @@
 #include "dve/editor_prefab.hpp"
+#include "dve/editor_subdivision.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <algorithm>
@@ -139,6 +140,23 @@ bool apply_template_property(EditorObject& object, std::string_view propertyPath
         return fail("invalid prefab template override");
     if (propertyPath == "name") {
         if (const auto* typed = std::get_if<std::string>(&value)) { object.name = *typed; return true; }
+    } else if (propertyPath == "subdivision.level" || propertyPath == "subdivision.sharp_edges") {
+        if (!object.subdivision || !object.polygon) return fail("subdivision override needs a control cage");
+        auto settings=*object.subdivision;
+        if (propertyPath=="subdivision.level") {
+            const auto* level=std::get_if<std::int64_t>(&value);
+            if (!level || *level<0 || *level>kMaxSubdivisionLevel) return fail("subdivision level must be 0..4");
+            settings.level=static_cast<std::uint32_t>(*level);
+        } else {
+            const auto* sharp=std::get_if<bool>(&value);
+            if (!sharp) return fail("subdivision sharp edge override needs a boolean");
+            settings.preserveSharpEdges=*sharp;
+        }
+        auto evaluated=evaluate_subdivision(*object.polygon,settings);
+        if (!evaluated.mesh) return fail(evaluated.error);
+        object.subdivision=settings;object.subdivisionCache=std::move(evaluated);
+        object.subdivisionCacheHash=object.polygon->contentHash;object.subdivisionCacheSettings=settings;
+        return true;
     } else if (propertyPath == "voxel.scale") {
         if (const auto* typed=std::get_if<Float3>(&value); typed && valid_voxel_metric(*typed)) {
             object.voxelScale=*typed; return true;
@@ -321,6 +339,9 @@ std::uint64_t editor_prefab_content_hash(const EditorPrefabAsset& prefab) noexce
         for (const std::string& group : object.groups) hash = hash_text(hash, group);
         hash = hash_text(hash, object.sourceAsset.generic_string());
         hash = hash_value(hash,object.polygon?object.polygon->contentHash:0);
+        // Preserve legacy hashes for objects without subdivision settings.
+        if (object.subdivision) {hash=hash_value(hash,std::uint32_t{0x53554244});
+            hash=hash_value(hash,object.subdivision->level);hash=hash_value(hash,object.subdivision->preserveSharpEdges);}
         hash = hash_value(hash, object.voxelSizeMeters);
         hash = hash_float3(hash,object.voxelScale);
         if (object.attachment) {
@@ -630,10 +651,19 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
             if (!object_has_override(*target, "flags.collision_enabled")) target->flags.collisionEnabled = source.flags.collisionEnabled;
             if (!object_has_override(*target, "flags.decorative")) target->flags.decorative = source.flags.decorative;
             if (!object_has_override(*target,"voxel.scale")) target->voxelScale=source.voxelScale;
+            const auto previousSubdivision=target->subdivision;
             if (!object_has_override(*target,"polygon.geometry")) {
+                target->subdivision=source.subdivision;
                 target->polygon=source.polygon;
                 if (target->polygon) {target->polygon->objectId=target->id;target->polygon->contentHash=polygon_asset_content_hash(*target->polygon);}
             }
+            if (source.subdivision && target->subdivision) {
+                target->subdivision->level=object_has_override(*target,"subdivision.level") && previousSubdivision ?
+                    previousSubdivision->level : source.subdivision->level;
+                target->subdivision->preserveSharpEdges=object_has_override(*target,"subdivision.sharp_edges") && previousSubdivision ?
+                    previousSubdivision->preserveSharpEdges : source.subdivision->preserveSharpEdges;
+            }
+            target->subdivisionCache.reset();
             target->tags = source.tags;
             target->groups = source.groups;
             target->layer = source.layer;

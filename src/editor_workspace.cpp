@@ -604,7 +604,23 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.select_grow","Voxel","Grow Voxel Selection",""},
         {"voxel.select_shrink","Voxel","Shrink Voxel Selection",""},
         {"voxel.select_invert","Voxel","Invert Voxel Selection",""},
+        {"voxel.selection_brush","Voxel","Selection Brush",""},
         {"voxel.extract_selection","Voxel","Extract Selected Voxels to New Object",""},
+        {"voxel.region_extrude_x_positive","Voxel","Extrude Region +X (1 Cell)",""},
+        {"voxel.region_extrude_x_negative","Voxel","Extrude Region -X (1 Cell)",""},
+        {"voxel.region_extrude_y_positive","Voxel","Extrude Region +Y (1 Cell)",""},
+        {"voxel.region_extrude_y_negative","Voxel","Extrude Region -Y (1 Cell)",""},
+        {"voxel.region_extrude_z_positive","Voxel","Extrude Region +Z (1 Cell)",""},
+        {"voxel.region_extrude_z_negative","Voxel","Extrude Region -Z (1 Cell)",""},
+        {"voxel.region_rotate_x_positive","Voxel","Rotate Region X +90 Degrees",""},
+        {"voxel.region_rotate_x_negative","Voxel","Rotate Region X -90 Degrees",""},
+        {"voxel.region_rotate_y_positive","Voxel","Rotate Region Y +90 Degrees",""},
+        {"voxel.region_rotate_y_negative","Voxel","Rotate Region Y -90 Degrees",""},
+        {"voxel.region_rotate_z_positive","Voxel","Rotate Region Z +90 Degrees",""},
+        {"voxel.region_rotate_z_negative","Voxel","Rotate Region Z -90 Degrees",""},
+        {"voxel.region_scale_2","Voxel","Scale Region x2",""},
+        {"voxel.region_scale_3","Voxel","Scale Region x3",""},
+        {"voxel.region_scale_4","Voxel","Scale Region x4",""},
         {"voxel.fill","Voxel","Flood Fill",""},
         {"voxel.rebuild_collision","Voxel","Rebuild Collision",""},
         {"voxel.rebuild_brickmaps","Voxel","Rebuild Brickmaps",""},
@@ -801,6 +817,24 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (std::string_view id : {"voxel.select_all", "voxel.select_none", "voxel.select_grow", "voxel.select_shrink",
                                 "voxel.select_invert", "voxel.extract_selection"})
         configure(id, "Voxel Selection", 50);
+    configure("voxel.selection_brush", "Voxel Selection", 51, true);
+    for (std::string_view id : {
+            "voxel.region_extrude_x_positive",
+            "voxel.region_extrude_x_negative",
+            "voxel.region_extrude_y_positive",
+            "voxel.region_extrude_y_negative",
+            "voxel.region_extrude_z_positive",
+            "voxel.region_extrude_z_negative",
+            "voxel.region_rotate_x_positive",
+            "voxel.region_rotate_x_negative",
+            "voxel.region_rotate_y_positive",
+            "voxel.region_rotate_y_negative",
+            "voxel.region_rotate_z_positive",
+            "voxel.region_rotate_z_negative",
+            "voxel.region_scale_2",
+            "voxel.region_scale_3",
+            "voxel.region_scale_4"})
+        configure(id, "Voxel Region Editing", 52);
     configure("voxel.fill", "Voxel Edit", 50);
     configure("voxel.rebuild_collision", "Collision", 80);
     configure("voxel.rebuild_brickmaps", "Collision", 81);
@@ -924,10 +958,27 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("voxel.slice", "Preview a cell-centre plane cut; keep front, back, or both as separate objects.", {"slice", "cut", "plane"});
     describe("select.domain_objects", "Select and Move work on whole objects.", {"object mode", "selection mode", "domain"});
     describe("select.domain_voxels",
-             "Select and Move work on voxels of one object: click a piece, drag a box, Ctrl+Shift-drag to brush; Shift adds, Ctrl removes.",
+             "Select cells of one voxel object: left-to-right box contains, right-to-left crosses; Shift adds, Ctrl toggles, Ctrl+Shift intersects. Selection Brush is a separate mode.",
              {"voxel mode", "voxel select", "region", "selection mode", "domain", "cells"});
     describe("voxel.extract_selection", "Move the selected voxels into a new object in place (Separate Selected).",
              {"extract", "separate", "split", "detach", "new object", "voxels"});
+    describe("voxel.selection_brush", "Toggle voxel Selection Brush: drag adds, Ctrl-drag removes, [ / ] changes radius; turn it off to box-select.",
+             {"selection", "brush", "paint", "region", "voxels"});
+    describe("voxel.region_extrude_x_positive", "Extend the selected column frontiers by one cell along object-grid +X; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_x_negative", "Extend the selected column frontiers by one cell along object-grid -X; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_y_positive", "Extend the selected column frontiers by one cell along object-grid +Y; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_y_negative", "Extend the selected column frontiers by one cell along object-grid -Y; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_z_positive", "Extend the selected column frontiers by one cell along object-grid +Z; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_z_negative", "Extend the selected column frontiers by one cell along object-grid -Z; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
+    describe("voxel.region_rotate_x_positive", "Rotate selected cells +90 degrees around object-grid X, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_x_negative", "Rotate selected cells -90 degrees around object-grid X, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_y_positive", "Rotate selected cells +90 degrees around object-grid Y, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_y_negative", "Rotate selected cells -90 degrees around object-grid Y, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_z_positive", "Rotate selected cells +90 degrees around object-grid Z, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_z_negative", "Rotate selected cells -90 degrees around object-grid Z, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
+    describe("voxel.region_scale_2", "Expand each selected cell to a 2 x 2 x 2 block from the region minimum corner; blocked destinations cancel the edit.", {"region", "voxels", "scale"});
+    describe("voxel.region_scale_3", "Expand each selected cell to a 3 x 3 x 3 block from the region minimum corner; blocked destinations cancel the edit.", {"region", "voxels", "scale"});
+    describe("voxel.region_scale_4", "Expand each selected cell to a 4 x 4 x 4 block from the region minimum corner; blocked destinations cancel the edit.", {"region", "voxels", "scale"});
     describe("voxel.select_grow", "Add the voxels touching the selection.", {"grow", "expand", "select"});
     describe("voxel.select_shrink", "Drop the selection's outer layer.", {"shrink", "contract", "select"});
     describe("voxel.select_invert", "Select the object's other voxels instead.", {"invert", "inverse", "select"});

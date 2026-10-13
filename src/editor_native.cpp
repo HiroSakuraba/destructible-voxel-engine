@@ -1998,6 +1998,28 @@ void NativeEditorController::refresh_menu_state() noexcept {
         enabled("voxel.join_cancel", voxelJoin_.active(), "No Join preview is open.");
         const std::string separateReason = separate_islands_disabled_reason();
         enabled("voxel.separate_islands", separateReason.empty(), separateReason);
+        const auto regionReason = voxel_region_disabled_reason();
+        for (std::string_view id : {
+            "voxel.region_extrude_x_positive",
+            "voxel.region_extrude_x_negative",
+            "voxel.region_extrude_y_positive",
+            "voxel.region_extrude_y_negative",
+            "voxel.region_extrude_z_positive",
+            "voxel.region_extrude_z_negative",
+            "voxel.region_rotate_x_positive",
+            "voxel.region_rotate_x_negative",
+            "voxel.region_rotate_y_positive",
+            "voxel.region_rotate_y_negative",
+            "voxel.region_rotate_z_positive",
+            "voxel.region_rotate_z_negative",
+            "voxel.region_scale_2",
+            "voxel.region_scale_3",
+            "voxel.region_scale_4"})
+            enabled(id, regionReason.empty(), regionReason);
+        enabled("voxel.selection_brush", workspace_.mode() == EditorMode::Edit && !playSession_.active(),
+                "Stop Play before selecting voxels.");
+        checked("voxel.selection_brush", selectionDomain_ == SelectionDomain::Voxels &&
+                activeTool_ == EditorToolId::Select && voxelSelectionBrushEnabled_);
         const bool voxelsSelected = !voxelSelection_.empty();
         for (std::string_view id : {"voxel.select_grow", "voxel.select_shrink", "voxel.select_none", "voxel.extract_selection"})
             enabled(id, voxelsSelected, "Select voxels first: press M, then click or drag on a voxel object.");
@@ -4669,18 +4691,18 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                     return;
                 }
             }
-            // Shift adds, Ctrl removes (Alt+drag is orbit in the default navigation), Ctrl+Shift
-            // drag paints the selection with the voxel brush.
-            const bool shiftHeld = (modifiers & 1U) != 0U;
-            const bool ctrlHeld = (modifiers & 2U) != 0U;
-            if (shiftHeld && ctrlHeld) {
+            // Box modifiers match polygon selection. Brush selection has its own explicit mode
+            // so Ctrl+Shift can intersect a box; brush dabs add, or remove while Ctrl is held.
+            if (voxelSelectionBrushEnabled_ && activeTool_ == EditorToolId::Select) {
                 voxelBrushSelecting_ = true;
-                voxelBrushOperation_ = SelectionOperation::Add;
+                voxelBrushOperation_ = (modifiers & 2U) ? SelectionOperation::Subtract : SelectionOperation::Add;
                 voxel_brush_select_at(x, y);
                 return;
             }
-            const SelectionOperation operation = ctrlHeld ? SelectionOperation::Subtract
-                : shiftHeld ? SelectionOperation::Add : SelectionOperation::Replace;
+            const SelectionOperation operation = (modifiers & 3U) == 3U ? SelectionOperation::Intersect
+                : (modifiers & 4U) ? SelectionOperation::Subtract
+                : (modifiers & 2U) ? SelectionOperation::Toggle
+                : (modifiers & 1U) ? SelectionOperation::Add : SelectionOperation::Replace;
             marquee_.active = true;
             marquee_.clickObject.reset();
             marquee_.clickVoxel = hoverPick_;
@@ -5112,19 +5134,19 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
     if (selectionDomain_ == SelectionDomain::Voxels &&
         (activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
          activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale)) {
-        if (activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale) {
-            add("Rotate and Scale work on objects: press M");
+        if (voxelSelectionBrushEnabled_ && activeTool_ == EditorToolId::Select) {
+            add("Selection Brush: drag adds, Ctrl removes");
+            add("[ / ] brush radius");
+            add("Voxel > Selection Brush: return to boxes");
             return gestures;
         }
-        if (activeTool_ == EditorToolId::Translate && !voxelSelection_.empty()) {
+        if (activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale)
+            add("Voxel menu: region rotation / integer scale");
+        if (activeTool_ == EditorToolId::Translate && !voxelSelection_.empty())
             add("Drag axis: move voxels");
-            add("Click piece  Drag box");
-            add("Shift add  Ctrl remove");
-            return gestures;
-        }
         add("Voxels: click piece");
-        add("Drag box  Ctrl+Shift-drag brush");
-        add("Shift add  Ctrl remove");
+        add("Box: rightward contains, leftward crosses");
+        add("Shift add  Ctrl toggle  Ctrl+Shift intersect");
         return gestures;
     }
     const bool transformTool = activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
@@ -6157,6 +6179,35 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         return true;
     }
     if (actionId == "voxel.extract_selection") return extract_selected_voxels();
+    if (actionId == "voxel.selection_brush") {
+        const bool enable = !(selectionDomain_ == SelectionDomain::Voxels && activeTool_ == EditorToolId::Select &&
+                              voxelSelectionBrushEnabled_);
+        set_selection_domain(SelectionDomain::Voxels);
+        set_active_tool(EditorToolId::Select);
+        voxelSelectionBrushEnabled_ = enable;
+        voxelBrushSelecting_ = false;
+        marquee_ = {};
+        refresh_menu_state();
+        set_status(enable ? "Selection Brush: drag adds, Ctrl-drag removes; [ / ] changes radius; choose Selection Brush again for boxes"
+                          : "Box selection: left-to-right contains, right-to-left crosses; Shift adds, Ctrl toggles, Ctrl+Shift intersects");
+        return true;
+    }
+    if (actionId == "voxel.region_extrude_x_positive") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {0,1});
+    if (actionId == "voxel.region_extrude_x_negative") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {0,-1});
+    if (actionId == "voxel.region_extrude_y_positive") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {1,1});
+    if (actionId == "voxel.region_extrude_y_negative") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {1,-1});
+    if (actionId == "voxel.region_extrude_z_positive") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {2,1});
+    if (actionId == "voxel.region_extrude_z_negative") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {2,-1});
+    if (actionId == "voxel.region_rotate_x_positive") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {0,1});
+    if (actionId == "voxel.region_rotate_x_negative") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {0,-1});
+    if (actionId == "voxel.region_rotate_y_positive") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {1,1});
+    if (actionId == "voxel.region_rotate_y_negative") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {1,-1});
+    if (actionId == "voxel.region_rotate_z_positive") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {2,1});
+    if (actionId == "voxel.region_rotate_z_negative") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {2,-1});
+    if (actionId == "voxel.region_scale_2") return edit_selected_voxel_region(VoxelRegionEdit::ScaleInteger, {0,2});
+    if (actionId == "voxel.region_scale_3") return edit_selected_voxel_region(VoxelRegionEdit::ScaleInteger, {0,3});
+    if (actionId == "voxel.region_scale_4") return edit_selected_voxel_region(VoxelRegionEdit::ScaleInteger, {0,4});
+
     if (selectionDomain_ == SelectionDomain::Voxels) {
         prune_voxel_selection();
         if (actionId == "edit.select_all") return select_all_voxels();
@@ -10039,7 +10090,7 @@ bool NativeEditorController::drop_selection_to_surface() {
 const std::vector<VoxelBox>& NativeEditorController::collision_proxy(EditorObjectId id) const {
     static const std::vector<VoxelBox> kNone;
     const EditorObject* object = workspace_.document().find_object(id);
-    if (!object || !object->voxels || object->text3d || object->gaborVolume || !object->flags.collisionEnabled) {
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume || !object->flags.collisionEnabled) {
         collisionProxyCache_.erase(id);
         return kNone;
     }
@@ -10073,7 +10124,7 @@ bool NativeEditorController::rebuild_collision_proxies() {
     std::uint64_t voxelTotal = 0;
     for (const EditorObjectId id : ids) {
         const EditorObject* object = document.find_object(id);
-        if (!object || !object->voxels || object->text3d || object->gaborVolume || object->voxels->occupied_voxel_count() == 0) continue;
+        if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume || object->voxels->occupied_voxel_count() == 0) continue;
         if (!object->flags.collisionEnabled) { ++disabled; continue; }
         voxelTotal += object->voxels->occupied_voxel_count();
         targets.push_back({id, object->voxels->revision(), static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(object->voxels.get())), nullptr, {}});
@@ -11298,12 +11349,13 @@ void NativeEditorController::set_selection_domain(SelectionDomain domain) {
     if (domain == SelectionDomain::Polygons) { (void)set_polygon_mode(PolygonSelectionMode::Face); return; }
     selectionDomain_ = domain;
     voxelBrushSelecting_ = false;
+    voxelSelectionBrushEnabled_ = false;
     voxelMoveAxis_ = 0;
     marquee_ = {};
     if (domain == SelectionDomain::Voxels) {
         const auto active = workspace_.selected_object();
         const EditorObject* object = active ? workspace_.document().find_object(*active) : nullptr;
-        if (object && object->voxels && !object->text3d && !object->gaborVolume) {
+        if (object && object->voxels && !object->polygon && !object->text3d && !object->gaborVolume) {
             if (voxelSelectionObject_ != object->id) {
                 voxelSelection_.clear();
                 ++voxelSelectionSerial_;
@@ -11312,7 +11364,7 @@ void NativeEditorController::set_selection_domain(SelectionDomain domain) {
             voxelSelectionRevision_ = object->voxels->revision();
         }
         set_status("Selecting voxels" + (object ? " of " + object->name : std::string()) +
-                   ": click a piece, drag a box, Ctrl+Shift-drag to brush; Shift adds, Ctrl removes (M returns to objects)");
+                   ": click a piece; left-to-right box contains, right-to-left crosses; Shift adds, Ctrl toggles, Ctrl+Shift intersects (M returns to objects)");
     } else {
         set_status("Selecting objects");
     }
@@ -11327,9 +11379,15 @@ void NativeEditorController::clear_voxel_selection() {
 
 void NativeEditorController::select_voxels(EditorObjectId objectId, const std::set<Int3>& cells, SelectionOperation operation) {
     const EditorObject* object = workspace_.document().find_object(objectId);
-    if (!object || !object->voxels || object->text3d || object->gaborVolume) return;
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume) return;
     if (!object->flags.visible || is_isolated_out(objectId)) {
         set_status(object->name + " is hidden or isolated out of view: show it before selecting its voxels", true);
+        return;
+    }
+    // An over-budget search may have stopped early: never apply its partial result, even for
+    // subtraction or intersection, whose final selection would otherwise fit the budget.
+    if (cells.size() > kMaxVoxelSelection) {
+        set_status("That box or connected piece exceeds 500000 voxels; the selection is unchanged",true,6.0F);
         return;
     }
     // Cap: refuse (and keep the current selection) rather than build a huge set.
@@ -11342,9 +11400,12 @@ void NativeEditorController::select_voxels(EditorObjectId objectId, const std::s
             projected = 0;
         if (projected > kMaxVoxelSelection) {
             std::size_t result = projected;
-            if (sameObject && operation == SelectionOperation::Add) {
+            if (sameObject && (operation == SelectionOperation::Add || operation == SelectionOperation::Toggle)) {
                 result = voxelSelection_.size();
-                for (const Int3 cell : cells) if (!voxelSelection_.contains(cell)) ++result;
+                for (const Int3 cell : cells) {
+                    if (!voxelSelection_.contains(cell)) ++result;
+                    else if (operation == SelectionOperation::Toggle) --result;
+                }
             }
             if (result > kMaxVoxelSelection) {
                 set_status("That would select more than " + std::to_string(kMaxVoxelSelection) +
@@ -11443,6 +11504,10 @@ void NativeEditorController::reset_voxel_selection_state() {
     voxelSelectionObject_ = 0;
     voxelSelectionRevision_ = 0;
     voxelBrushSelecting_ = false;
+    voxelSelectionBrushEnabled_ = false;
+    voxelRegionRotationPivot_.reset();
+    voxelRegionRotationObject_ = 0;
+    voxelRegionRotationSerial_ = 0;
     voxelMoveAxis_ = 0;
     voxelMoveSteps_ = 0;
     marquee_.clickVoxel.reset();
@@ -11523,13 +11588,13 @@ void NativeEditorController::finish_voxel_marquee(int x, int y) {
         target = active ? *active : 0;
     }
     const EditorObject* object = workspace_.document().find_object(target);
-    if (!object || !object->voxels || object->text3d || object->gaborVolume) {
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume) {
         set_status("Box-select voxels of an object: click one of its voxels first", true);
         return;
     }
     const UiRect rect{std::min(marquee.startX, x), std::min(marquee.startY, y), std::abs(x - marquee.startX) + 1,
                       std::abs(y - marquee.startY) + 1};
-    select_voxels(target, voxels_in_screen_rect(*object, camera_, layout_.viewport, rect, viewportSettings_.xraySelection),
+    select_voxels(target, voxels_in_screen_rect(*object, camera_, layout_.viewport, rect, viewportSettings_.xraySelection, x < marquee.startX),
                   marquee.operation);
 }
 
@@ -11555,7 +11620,7 @@ bool NativeEditorController::select_all_voxels() {
     EditorObjectId target = voxelSelectionObject_;
     if (!workspace_.document().find_object(target) && workspace_.selected_object()) target = *workspace_.selected_object();
     const EditorObject* object = workspace_.document().find_object(target);
-    if (!object || !object->voxels || object->text3d || object->gaborVolume) { set_status("Select a voxel object first", true); return false; }
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume) { set_status("Select a voxel object first", true); return false; }
     if (object->voxels->occupied_voxel_count() > kMaxVoxelSelection) {
         set_status(object->name + " has more than " + std::to_string(kMaxVoxelSelection) +
                    " voxels; select a region instead (use Separate Islands or Slice for whole-object work)", true, 6.0F);
@@ -11666,6 +11731,55 @@ bool NativeEditorController::move_selected_voxels(Int3 offset) {
     workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
     set_status("Moved " + std::to_string(voxelSelection_.size()) + " voxel(s) by (" + std::to_string(offset.x) + ", " +
                std::to_string(offset.y) + ", " + std::to_string(offset.z) + "); Undo puts them back");
+    return true;
+}
+
+std::string NativeEditorController::voxel_region_disabled_reason() const {
+    if (longJob_) return long_job_busy_reason();
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play before editing voxels.";
+    if (gizmoDragging_ || voxelMoveAxis_ != 0 || voxelStrokeActive_ || voxelBrushSelecting_ || marquee_.active)
+        return "Finish the current drag or brush stroke first.";
+    if (selectionDomain_ != SelectionDomain::Voxels || voxelSelection_.empty())
+        return "Select a voxel region first: press M, then click or box-select cells.";
+    const auto* object = workspace_.document().find_object(voxelSelectionObject_);
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume)
+        return "Select cells of a voxel object.";
+    if (object->flags.locked) return "Unlock " + object->name + " first.";
+    if (!object->flags.visible || is_isolated_out(object->id)) return "Show the voxel object before editing its cells.";
+    return {};
+}
+
+bool NativeEditorController::edit_selected_voxel_region(VoxelRegionEdit edit, VoxelRegionSettings settings) {
+    prune_voxel_selection();
+    if (const auto reason = voxel_region_disabled_reason(); !reason.empty()) {
+        set_status(reason,true); return false;
+    }
+    const auto id = voxelSelectionObject_;
+    const auto* object = workspace_.document().find_object(id);
+    // Keep the same snapped pivot for consecutive quarter turns. Re-snapping an even-width
+    // region after every turn would drift by a cell when its rotated bounds change parity.
+    if (edit == VoxelRegionEdit::RotateQuarterTurn && !settings.rotationPivot &&
+        voxelRegionRotationObject_ == id && voxelRegionRotationSerial_ == voxelSelectionSerial_)
+        settings.rotationPivot = voxelRegionRotationPivot_;
+    auto built = build_voxel_region_command(*object,voxelSelection_,edit,settings);
+    if (!built.command) { set_status(built.error,true,6.0F); return false; }
+    const auto before = capture_selection_snapshot();
+    close_previews_for_voxel_edit("selected voxel region edited");
+    const auto result = workspace_.commands().execute(workspace_.document(),std::move(built.command));
+    if (!result.success) { set_status(result.message,true,6.0F); return false; }
+    voxelSelection_ = std::move(built.selection);
+    ++voxelSelectionSerial_;
+    voxelRegionRotationPivot_ = built.rotationPivot;
+    voxelRegionRotationObject_ = id;
+    voxelRegionRotationSerial_ = voxelSelectionSerial_;
+    object = workspace_.document().find_object(id);
+    voxelSelectionRevision_ = object->voxels->revision();
+    workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
+    recompute_layout();
+    refresh_menu_state();
+    const std::string operation = edit == VoxelRegionEdit::Extrude ? "Extruded" :
+        edit == VoxelRegionEdit::RotateQuarterTurn ? "Rotated 90 degrees" : "Scaled by integer " + std::to_string(settings.amount);
+    set_status(operation + ": " + std::to_string(voxelSelection_.size()) + " voxel(s) selected; Undo restores the region",false,5.0F);
     return true;
 }
 

@@ -5,8 +5,10 @@
 // objects or on voxels; see NativeEditorController::set_selection_domain.
 //
 //   gestures (Voxel domain, Select or Move tool): click = the clicked face-connected piece,
-//   drag = box (front-facing voxels; every voxel in the box with X-Ray Selection on),
-//   Ctrl+Shift-drag = brush (the voxel brush size, [ ]); Shift adds, Ctrl removes.
+//   left-to-right drag = window (whole cells), right-to-left = crossing (touching cells).
+//   Shift adds, Ctrl toggles, Ctrl+Shift intersects; X-Ray includes buried cells.
+//   Selection Brush is an explicit mode (the voxel brush size, [ ]); drag adds, Ctrl removes.
+//   Alt subtracts from boxes when not bound to navigation.
 //   edits: Delete, Extract to New Object, Copy/Cut/Paste (as a new object in place), Move with
 //   the gizmo in whole voxels, Grow/Shrink/Invert/Select All; Paint, Remove and Flood Fill only
 //   touch selected voxels while a selection exists.
@@ -44,10 +46,11 @@ inline constexpr std::size_t kMaxVoxelSelection = 500'000;
 [[nodiscard]] std::set<Int3> invert_voxel_selection(const VoxelObject& voxels, const std::set<Int3>& selection,
                                                     std::size_t limit = static_cast<std::size_t>(-1));
 
-// Cells of `object` whose centres project inside `rect`. Without `through`, only cells with an
-// exposed face turned towards the camera count (what the artist can see on a solid object).
+// Window: whole projected cells inside rect; crossing: the clipped cell silhouette touches it.
+// Without through, require an exposed camera-facing face (not scene-occlusion testing).
+// Stops collecting after kMaxVoxelSelection + 1 cells, so callers can refuse an oversized box.
 [[nodiscard]] std::set<Int3> voxels_in_screen_rect(const EditorObject& object, const EditorCamera& camera,
-                                                   UiRect viewport, UiRect rect, bool through);
+                                                   UiRect viewport, UiRect rect, bool through, bool crossing = true);
 // Occupied cells in a cube of `radius` around `center` (radius 0 = the cell itself).
 [[nodiscard]] std::set<Int3> voxels_in_cube(const VoxelObject& voxels, Int3 center, int radius);
 
@@ -61,6 +64,27 @@ inline constexpr std::size_t kMaxVoxelSelection = 500'000;
 [[nodiscard]] std::unique_ptr<IEditorCommand> build_move_voxels_command(const EditorObject& object,
                                                                         const std::set<Int3>& cells, Int3 offset,
                                                                         std::string* error = nullptr);
+
+enum class VoxelRegionEdit : std::uint8_t { Extrude, RotateQuarterTurn, ScaleInteger };
+struct VoxelRegionSettings {
+    int axis{};   // 0 = object-grid X, 1 = Y, 2 = Z
+    int amount{1}; // Extrude: signed 1..32 layers; Rotate: +1/-1 quarter turn; Scale: 2..8
+    std::optional<Int3> rotationPivot{}; // Cell-centre pivot; absent = nearest bounds-centre cell
+};
+struct VoxelRegionBuild {
+    std::unique_ptr<IEditorCommand> command;
+    std::set<Int3> selection;
+    std::optional<Int3> rotationPivot;
+    std::string error;
+};
+// Atomic edits, capped at kMaxVoxelSelection output cells. Occupied unselected destinations,
+// stale selection, invalid settings and coordinate overflow are refused without edits.
+// Extrude extends the directional frontier of each selected column, retaining the originals.
+// Rotate uses a cell-centre pivot nearest the selected bounds centre (ties toward minimum).
+// Scale expands every cell to an amount^3 block anchored at the selected minimum corner.
+// Materials follow cells; selected anchors rotate or expand; extrusions create no new anchors.
+[[nodiscard]] VoxelRegionBuild build_voxel_region_command(const EditorObject& object,
+    const std::set<Int3>& cells, VoxelRegionEdit edit, VoxelRegionSettings settings);
 
 // A copy of selected cells, independent of the scene.
 struct VoxelClipboard {

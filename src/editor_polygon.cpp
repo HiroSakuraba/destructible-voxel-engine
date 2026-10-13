@@ -205,6 +205,34 @@ std::set<std::uint32_t> polygon_selected_faces(const CookedPolygonAsset& mesh,co
     return result;
 }
 
+PolygonSelection convert_polygon_selection(const CookedPolygonAsset& mesh,
+    const PolygonSelection& source, PolygonSelectionMode mode) {
+    PolygonSelection result{mesh.objectId,mode,{}};
+    if (!validate_polygon_asset(mesh) || !polygon_selection_valid(mesh,source)) return result;
+    if (source.mode == mode) { result.components = source.components; return result; }
+    const auto canon = canonical(mesh);
+    if (mode == PolygonSelectionMode::Vertex) {
+        for (const auto index : polygon_selected_vertices(mesh,source))
+            result.components.insert(canon[index]);
+    } else if (mode == PolygonSelectionMode::Face) {
+        const auto faces = polygon_selected_faces(mesh,source);
+        result.components.insert(faces.begin(),faces.end());
+    } else if (source.mode == PolygonSelectionMode::Face) {
+        for (const auto face : source.components)
+            for (unsigned j = 0; j < 3; ++j)
+                result.components.insert(edge(canon[mesh.indices[std::size_t(face)*3+j]],
+                    canon[mesh.indices[std::size_t(face)*3+(j+1)%3]]).key());
+    } else {
+        std::set<std::uint32_t> points;
+        for (const auto index : polygon_selected_vertices(mesh,source)) points.insert(canon[index]);
+        for (const auto item : polygon_edges(mesh))
+            if (points.contains(item.a) || points.contains(item.b)) result.components.insert(item.key());
+    }
+    const auto valid = polygon_all_components(mesh,mode);
+    std::erase_if(result.components,[&](auto key) { return !valid.contains(key); });
+    return result;
+}
+
 std::set<std::uint64_t> edit_polygon_selection(const CookedPolygonAsset& mesh,
     const PolygonSelection& selection, PolygonSelectionEdit operation) {
     if (!validate_polygon_asset(mesh) || !polygon_selection_valid(mesh, selection)) return {};
@@ -698,77 +726,155 @@ std::optional<std::uint64_t> pick_polygon_component(const EditorObject& object,c
     return result;
 }
 std::set<std::uint64_t> polygon_components_in_rect(const EditorObject& object,const EditorCamera& camera,
-    UiRect viewport,UiRect rect,PolygonSelectionMode mode,bool through,bool crossing) {
+    UiRect viewport,UiRect rect,PolygonSelectionMode mode,bool through,bool crossing,
+    const EditorDocument* scene,const std::set<EditorObjectId>* onlyObjects) {
     std::set<std::uint64_t> result;
-    if (!object.polygon || rect.width <= 0 || rect.height <= 0) return result;
+    if (!object.polygon || rect.width <= 0 || rect.height <= 0 ||
+        viewport.width <= 0 || viewport.height <= 0) return result;
     const auto& mesh = *object.polygon;
-    const double left = rect.x, top = rect.y;
-    const double right = left+rect.width-1, bottom = top+rect.height-1;
-    const auto inside = [&](ScreenPoint p) {
-        return p.x >= left && p.x <= right && p.y >= top && p.y <= bottom;
+    const auto basis = camera_basis(camera);
+    const double near = std::max(1e-6,double(camera.nearPlane)), far = camera.farPlane;
+    if (!(far > near) || !std::isfinite(far)) return result;
+    const double aspect = double(viewport.width)/viewport.height;
+    const bool orthographic = camera.projection == EditorProjection::Orthographic;
+    const double halfHeight = std::max(.001,double(camera.orthographicHeight)*.5);
+    const double tangent = std::tan(double(std::clamp(
+        editor_camera_vertical_fov(camera,float(aspect)),.1F,3.14159265358979323846F-.1F))*.5);
+    const double shiftX = camera.physicalLens.enabled ? double(camera.physicalLens.lensShiftX)*2 : 0;
+    const double shiftY = camera.physicalLens.enabled ? double(camera.physicalLens.lensShiftY)*2 : 0;
+    const double left = std::max(double(rect.x),double(viewport.x));
+    const double top = std::max(double(rect.y),double(viewport.y));
+    const double right = std::min(double(rect.x)+rect.width-1,double(viewport.x)+viewport.width-1);
+    const double bottom = std::min(double(rect.y)+rect.height-1,double(viewport.y)+viewport.height-1);
+    if (right < left || bottom < top) return result;
+
+    struct Point { Float3 world; double vx{},vy{},depth{},x{},y{}; };
+    const auto viewPoint = [&](Float3 world) {
+        const double x = double(world.x)-camera.position.x;
+        const double y = double(world.y)-camera.position.y;
+        const double z = double(world.z)-camera.position.z;
+        return Point{world,x*basis.right.x+y*basis.right.y+z*basis.right.z,
+            x*basis.up.x+y*basis.up.y+z*basis.up.z,
+            x*basis.forward.x+y*basis.forward.y+z*basis.forward.z,0,0};
     };
-    const auto intersects = [&](ScreenPoint a, ScreenPoint b) {
-        double low = 0, high = 1;
-        const auto clip = [&](double origin, double delta, double minimum, double maximum) {
-            if (std::abs(delta) < 1e-12) return origin >= minimum && origin <= maximum;
-            double first = (minimum-origin)/delta, last = (maximum-origin)/delta;
-            if (first > last) std::swap(first,last);
-            low = std::max(low,first);
-            high = std::min(high,last);
-            return low <= high;
+    const auto project = [&](Point point) {
+        // Use depth validity separately from viewport bounds. Off-screen endpoints are
+        // necessary to select long edges and large triangles crossing the marquee.
+        const double nx = orthographic ? point.vx/(halfHeight*aspect)
+            : point.vx/(point.depth*tangent*aspect)+shiftX;
+        const double ny = orthographic ? point.vy/halfHeight
+            : point.vy/(point.depth*tangent)+shiftY;
+        point.x = viewport.x+(nx+1)*.5*viewport.width;
+        point.y = viewport.y+(1-ny)*.5*viewport.height;
+        return point;
+    };
+    const auto interpolate = [](const Point& a,const Point& b,double t) {
+        return Point{{float(double(a.world.x)+(double(b.world.x)-a.world.x)*t),
+                      float(double(a.world.y)+(double(b.world.y)-a.world.y)*t),
+                      float(double(a.world.z)+(double(b.world.z)-a.world.z)*t)},
+            a.vx+(b.vx-a.vx)*t,a.vy+(b.vy-a.vy)*t,a.depth+(b.depth-a.depth)*t,
+            a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t};
+    };
+    const auto screenInterpolate = [&](const Point& a,const Point& b,double t) {
+        // Perspective-correct world position at a screen-space edge intersection.
+        const double worldT = orthographic ? t : (t/b.depth)/((1-t)/a.depth+t/b.depth);
+        auto point = interpolate(a,b,worldT);
+        point.x = a.x+(b.x-a.x)*t;
+        point.y = a.y+(b.y-a.y)*t;
+        return point;
+    };
+    const auto clip = [&](std::vector<Point> input,unsigned axis,double bound,bool greater,bool screen) {
+        std::vector<Point> output;
+        if (input.empty()) return output;
+        const auto value = [&](const Point& point) { return axis==2 ? point.depth : axis==0 ? point.x : point.y; };
+        const auto inside = [&](const Point& point) { return greater ? value(point)>=bound : value(point)<=bound; };
+        const auto intersection = [&](const Point& a,const Point& b) {
+            const double t = std::clamp((bound-value(a))/(value(b)-value(a)),0.0,1.0);
+            auto point = screen ? screenInterpolate(a,b,t) : interpolate(a,b,t);
+            if (axis==2) point.depth=bound;
+            else if (axis==0) point.x=bound;
+            else point.y=bound;
+            return point;
         };
-        return clip(a.x,double(b.x)-a.x,left,right) && clip(a.y,double(b.y)-a.y,top,bottom);
+        if (input.size()==1) {
+            if (inside(input[0])) output.push_back(input[0]);
+        } else if (input.size()==2) {
+            const bool aInside=inside(input[0]), bInside=inside(input[1]);
+            if (aInside && bInside) return input;
+            if (aInside) output={input[0],intersection(input[0],input[1])};
+            else if (bInside) output={intersection(input[0],input[1]),input[1]};
+        } else {
+            auto previous=input.back();
+            bool previousInside=inside(previous);
+            for (const auto& current : input) {
+                const bool currentInside=inside(current);
+                if (currentInside != previousInside) output.push_back(intersection(previous,current));
+                if (currentInside) output.push_back(current);
+                previous=current;
+                previousInside=currentInside;
+            }
+        }
+        return output;
+    };
+    const auto visible = [&](const Point& point) {
+        auto ray = make_viewport_ray(camera,viewport,float(point.x),float(point.y));
+        const float cosine = dot(ray.direction,basis.forward);
+        if (!(cosine > 0)) return false;
+        // Geometry behind the near plane cannot occlude a visible clipped component.
+        ray.origin = add(ray.origin,multiply(ray.direction,float(near)/cosine));
+        const float distance = dot(subtract(point.world,ray.origin),ray.direction);
+        if (!std::isfinite(distance)) return false;
+        if (!(distance > .002F)) return true;
+        if (scene) {
+            const auto hit = pick_editor_document(*scene,ray,distance+.002F,onlyObjects);
+            return !hit || hit->worldDistance >= distance-.002F;
+        }
+        const auto hit = pick_editor_polygon(object,ray,distance+.002F);
+        return !hit || hit->distance >= distance-.002F;
     };
     for (const auto item : component_points(mesh,mode)) {
-        std::array<Float3,3> local{};
-        unsigned count = 1;
-        local[0] = item.point;
-        if (mode == PolygonSelectionMode::Edge) {
-            count = 2;
-            local[0] = mesh.vertices[std::size_t(item.key>>32U)].position;
-            local[1] = mesh.vertices[std::size_t(item.key&0xffffffffU)].position;
-        } else if (mode == PolygonSelectionMode::Face) {
-            count = 3;
-            for (unsigned j = 0; j < count; ++j)
-                local[j] = mesh.vertices[mesh.indices[std::size_t(item.key)*3+j]].position;
+        std::vector<Point> patch;
+        if (mode==PolygonSelectionMode::Edge) {
+            patch.push_back(viewPoint(voxel_to_world(object.transform,object.voxelScale,
+                mesh.vertices[std::size_t(item.key>>32U)].position)));
+            patch.push_back(viewPoint(voxel_to_world(object.transform,object.voxelScale,
+                mesh.vertices[std::size_t(item.key&0xffffffffU)].position)));
+        } else if (mode==PolygonSelectionMode::Face) {
+            for (unsigned j=0;j<3;++j) patch.push_back(viewPoint(voxel_to_world(object.transform,object.voxelScale,
+                mesh.vertices[mesh.indices[std::size_t(item.key)*3+j]].position)));
+        } else patch.push_back(viewPoint(voxel_to_world(object.transform,object.voxelScale,item.point)));
+        if (crossing) {
+            patch=clip(std::move(patch),2,near,true,false);
+            patch=clip(std::move(patch),2,far,false,false);
+        } else if (std::any_of(patch.begin(),patch.end(),[&](const auto& point) {
+            return point.depth < near || point.depth > far;
+        })) continue;
+        if (patch.empty()) continue;
+        for (auto& point : patch) point=project(point);
+        if (std::any_of(patch.begin(),patch.end(),[](const auto& point) {
+            return !std::isfinite(point.x) || !std::isfinite(point.y);
+        })) continue;
+        if (!crossing && std::any_of(patch.begin(),patch.end(),[&](const auto& point) {
+            return point.x < left || point.x > right || point.y < top || point.y > bottom;
+        })) continue;
+        if (crossing) {
+            patch=clip(std::move(patch),0,left,true,true);
+            patch=clip(std::move(patch),0,right,false,true);
+            patch=clip(std::move(patch),1,top,true,true);
+            patch=clip(std::move(patch),1,bottom,false,true);
         }
-        std::array<ScreenPoint,3> points{};
-        bool projectable = true, contained = true, hit = false;
-        for (unsigned j = 0; j < count; ++j) {
-            points[j] = project_world_to_screen(camera,viewport,
-                voxel_to_world(object.transform,object.voxelScale,local[j]));
-            if (!points[j].visible || !std::isfinite(points[j].x) || !std::isfinite(points[j].y)) {
-                projectable = false;
-                break;
-            }
-            const bool in = inside(points[j]);
-            contained = contained && in;
-            hit = hit || in;
+        if (patch.empty()) continue;
+        if (through) { result.insert(item.key); continue; }
+        auto center=patch.front();
+        for (std::size_t i=1;i<patch.size();++i) center=interpolate(center,patch[i],1.0/double(i+1));
+        center=project(center);
+        bool seen=visible(center);
+        for (std::size_t i=0;!seen && i<patch.size();++i) {
+            seen=visible(patch[i]);
+            if (!seen && patch.size()>1)
+                seen=visible(screenInterpolate(patch[i],patch[(i+1)%patch.size()],.5));
         }
-        if (!projectable) continue; // Near-plane clipping is intentionally left to a future pass.
-        if (!crossing) hit = contained;
-        else if (!hit && count > 1) {
-            for (unsigned j = 0; j < (count == 2 ? 1U : 3U); ++j)
-                hit = hit || intersects(points[j],points[(j+1)%count]);
-            if (!hit && count == 3) {
-                const auto side = [](ScreenPoint a, ScreenPoint b, double x, double y) {
-                    return (double(b.x)-a.x)*(y-a.y)-(double(b.y)-a.y)*(x-a.x);
-                };
-                const double area = side(points[0],points[1],points[2].x,points[2].y);
-                if (std::abs(area) > 1e-12) {
-                    const std::array<std::array<double,2>,4> corners{{
-                        {left,top},{right,top},{right,bottom},{left,bottom}}};
-                    for (const auto& corner : corners) {
-                        const double x = side(points[0],points[1],corner[0],corner[1]);
-                        const double y = side(points[1],points[2],corner[0],corner[1]);
-                        const double z = side(points[2],points[0],corner[0],corner[1]);
-                        hit = hit || ((x>=0 && y>=0 && z>=0) || (x<=0 && y<=0 && z<=0));
-                    }
-                }
-            }
-        }
-        const auto world = voxel_to_world(object.transform,object.voxelScale,item.point);
-        if (hit && (through || visible_point(object,camera,viewport,world))) result.insert(item.key);
+        if (seen) result.insert(item.key);
     }
     return result;
 }

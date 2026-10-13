@@ -1918,10 +1918,15 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
     const auto hierarchyPrimary = workspace_.selected_object();
     const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;
-    enabled("select.parent", singleSelection && hierarchyObject && hierarchyObject->parent.has_value(),
-            "Select one object with a parent.");
-    enabled("select.children", hasSelection, "Select a parent object.");
-    enabled("select.siblings", singleSelection, "Select one scene object.");
+    const bool hierarchySelectionReady = !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
+        !gizmoDragging_ && !longJob_ && !importOptions_.open;
+    const std::string_view hierarchyPreviewReason = "Apply or cancel the active preview first.";
+    enabled("select.parent", hierarchySelectionReady && singleSelection && hierarchyObject && hierarchyObject->parent.has_value(),
+            hierarchySelectionReady ? "Select one object with a parent." : hierarchyPreviewReason);
+    enabled("select.children", hierarchySelectionReady && hasSelection,
+            hierarchySelectionReady ? "Select a parent object." : hierarchyPreviewReason);
+    enabled("select.siblings", hierarchySelectionReady && singleSelection,
+            hierarchySelectionReady ? "Select one scene object." : hierarchyPreviewReason);
     {
         const std::string voxelSizeReason = voxel_size_scale_disabled_reason();
         for (std::string_view id : {"transform.scale_voxel_size_up", "transform.scale_voxel_size_down"})
@@ -3905,7 +3910,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
-       !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers))return;
+       !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers)){refresh_menu_state();return;}
     if (sliceDrag_) finish_slice_pointer(true);
     reset_camera_navigation();
     lastPointerX_ = x;
@@ -4745,7 +4750,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
-    if(mesh_authoring_pointer_up(button,x,y,modifiers)){dragButton_=PointerButton::NoButton;return;}
+    if(mesh_authoring_pointer_up(button,x,y,modifiers)){dragButton_=PointerButton::NoButton;refresh_menu_state();return;}
     if (button == PointerButton::Primary && sliceDrag_) {
         update_slice_pointer(x, y, modifiers);
         finish_slice_pointer(false);
@@ -7310,6 +7315,7 @@ camera_menu_dispatch_complete:
         return true;
     }
     if (actionId == "select.parent" || actionId == "select.children" || actionId == "select.siblings") {
+        if (gizmoDragging_) { set_status("Finish the active transform first",true); return false; }
         std::set<EditorObjectId> hits;
         const auto active = workspace_.selected_object();
         const auto* object = active ? workspace_.document().find_object(*active) : nullptr;
@@ -7639,7 +7645,7 @@ camera_menu_dispatch_complete:
 void NativeEditorController::key_down(std::string_view key, bool control, bool shift, bool alt) {
     const std::string normalized = lowercase(key);
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
-       !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_key(normalized,control,shift,alt))return;
+       !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_key(normalized,control,shift,alt)){refresh_menu_state();return;}
     if (polygonPreviewBefore_) { (void)handle_polygon_preview_key(normalized); return; }
     route_play_key(normalized, true);
     if (pending_destructive_confirmation()) {

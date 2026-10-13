@@ -186,17 +186,53 @@ void test_domain_and_gestures() {
     check(controller.voxel_selection().size() == 72, "with X-Ray the box takes every voxel");
     (void)controller.dispatch_action("view.xray");
 
-    // Ctrl+Shift-drag brush: radius 0 paints single voxels into the selection.
+    // Ctrl+Shift box intersects (it no longer paints with the brush).
+    (void)controller.dispatch_action("view.xray");
+    box(0U);
+    controller.select_voxels(1, voxel_connected_piece(*controller.workspace().document().find_object(1)->voxels, {8, 0, 0}),
+                             SelectionOperation::Add);
+    box(3U);
+    check(controller.voxel_selection().size() == 72, "Ctrl+Shift box intersects with the selection, not brushes");
+    (void)controller.dispatch_action("view.xray");
+    // Window vs crossing: a box smaller than one cell contains no whole cell, but crosses it.
+    {
+        const Screen c = voxel_top(controller, {1, 3, 1});
+        const auto drag = [&](int x0, int x1) {
+            controller.pointer_move(x0, c.y - 3, 0U);
+            controller.pointer_down(PointerButton::Primary, x0, c.y - 3, 0U);
+            controller.pointer_move(x1, c.y + 3, 0U);
+            controller.pointer_up(PointerButton::Primary, x1, c.y + 3, 0U);
+        };
+        drag(c.x - 4, c.x + 4);
+        check(controller.voxel_selection().empty(), "a left-to-right window smaller than a cell selects nothing");
+        drag(c.x + 4, c.x - 4);
+        check(!controller.voxel_selection().empty() && controller.voxel_selection().contains({1, 3, 1}),
+              "a right-to-left crossing box takes the cell it touches");
+    }
+
+    // Selection Brush mode: radius 0 paints single voxels into the selection; Ctrl-drag removes.
     (void)controller.dispatch_action("voxel.select_none");
     check(controller.voxel_selection().empty(), "Deselect Voxels");
+    check(controller.dispatch_action("voxel.selection_brush"), "Selection Brush turns on");
+    const MenuAction* brushItem = std::as_const(controller.workspace().menus()).find("voxel.selection_brush");
+    check(brushItem && brushItem->checked, "the Selection Brush menu item is checked");
     const Screen a = voxel_top(controller, {0, 3, 0});
     const Screen b = voxel_top(controller, {3, 3, 0});
-    controller.pointer_move(a.x, a.y, 3U);
-    controller.pointer_down(PointerButton::Primary, a.x, a.y, 3U);
-    for (int i = 1; i <= 10; ++i) controller.pointer_move(a.x + (b.x - a.x) * i / 10, a.y + (b.y - a.y) * i / 10, 3U);
-    controller.pointer_up(PointerButton::Primary, b.x, b.y, 3U);
+    const auto stroke = [&](std::uint32_t modifiers) {
+        controller.pointer_move(a.x, a.y, modifiers);
+        controller.pointer_down(PointerButton::Primary, a.x, a.y, modifiers);
+        for (int i = 1; i <= 10; ++i) controller.pointer_move(a.x + (b.x - a.x) * i / 10, a.y + (b.y - a.y) * i / 10, modifiers);
+        controller.pointer_up(PointerButton::Primary, b.x, b.y, modifiers);
+    };
+    stroke(0U);
     const std::size_t brushed = controller.voxel_selection().size();
-    check(brushed >= 3 && brushed <= 8, "Ctrl+Shift-drag brushes a row of top voxels (" + std::to_string(brushed) + ")");
+    check(brushed >= 3 && brushed <= 8, "the Selection Brush paints a row of top voxels (" + std::to_string(brushed) + ")");
+    stroke(2U);
+    check(controller.voxel_selection().size() < brushed, "Ctrl-drag with the Selection Brush removes");
+    stroke(0U);
+    check(controller.dispatch_action("voxel.selection_brush"), "Selection Brush turns off");
+    brushItem = std::as_const(controller.workspace().menus()).find("voxel.selection_brush");
+    check(brushItem && !brushItem->checked, "and the menu item is unchecked");
 
     // Grow / Shrink / Invert / Select All.
     check(controller.dispatch_action("voxel.select_grow") && controller.voxel_selection().size() > brushed, "Grow");
@@ -286,8 +322,8 @@ void test_move_and_limited_tools() {
         check(controller.dispatch_action("edit.undo") && document.find_object(1)->voxels->material_at({8, 0, 0}) == 2, "one undo");
     }
     controller.set_active_tool(EditorToolId::Rotate);
-    check(controller.gizmo_axes().empty() && controller.viewport_tool_gestures().front().find("objects") != std::string::npos,
-          "Rotate has no voxel gizmo and says it works on objects");
+    check(controller.gizmo_axes().empty() && controller.viewport_tool_gestures().front().find("Voxel menu") != std::string::npos,
+          "Rotate has no voxel gizmo and points to the Voxel menu region rotation");
 
     // Paint only touches selected voxels: select two top voxels, paint with a radius-2 brush.
     controller.select_voxels(1, {{0, 3, 0}, {1, 3, 0}}, SelectionOperation::Replace);
@@ -471,6 +507,117 @@ void test_review_fixes() {
     }
 }
 
+void test_region_core() {
+    EditorDocument document("region");
+    document.add_object(make_rocks());
+    EditorCommandStack stack;
+    const auto object = [&]() -> const EditorObject& { return *document.find_object(1); };
+    const std::set<Int3> pieceB = voxel_connected_piece(*object().voxels, {8, 0, 0});
+
+    // Extrude +X: one new layer past each column frontier; originals stay selected.
+    auto extrude = build_voxel_region_command(object(), pieceB, VoxelRegionEdit::Extrude, {0, 1});
+    check(extrude.command && extrude.selection.size() == 12, "region: extrude +X builds 4 new cells plus the 8 selected");
+    check(extrude.command && stack.execute(document, std::move(extrude.command)).success &&
+              object().voxels->occupied_voxel_count() == 76 && object().voxels->material_at({10, 1, 1}) == 2 &&
+              !object().anchors.contains({10, 0, 0}),
+          "region: extruded cells copy the material and create no anchors");
+    check(stack.undo(document).success && object().voxels->occupied_voxel_count() == 72, "region: one undo removes the extrusion");
+    auto blocked = build_voxel_region_command(object(), pieceB, VoxelRegionEdit::Extrude, {0, -5});
+    check(!blocked.command && !blocked.error.empty(), "region: extruding into unselected voxels is refused");
+    check(!build_voxel_region_command(object(), pieceB, VoxelRegionEdit::Extrude, {0, 0}).command &&
+              !build_voxel_region_command(object(), pieceB, VoxelRegionEdit::Extrude, {3, 1}).command &&
+              !build_voxel_region_command(object(), pieceB, VoxelRegionEdit::ScaleInteger, {0, 1}).command &&
+              !build_voxel_region_command(object(), pieceB, VoxelRegionEdit::RotateQuarterTurn, {0, 2}).command,
+          "region: invalid amounts and axes are refused");
+    check(!build_voxel_region_command(object(), {{5, 5, 5}}, VoxelRegionEdit::Extrude, {0, 1}).command,
+          "region: a stale selection of empty cells is refused");
+
+    // Rotate +90 about Z around the snapped pivot (8,0,0): x' = 8 - y, y' = x - 8.
+    auto rotate = build_voxel_region_command(object(), pieceB, VoxelRegionEdit::RotateQuarterTurn, {2, 1});
+    check(rotate.command && rotate.rotationPivot && *rotate.rotationPivot == Int3{8, 0, 0}, "region: rotation reports its pivot");
+    check(rotate.command && stack.execute(document, std::move(rotate.command)).success &&
+              object().voxels->occupied_voxel_count() == 72 && object().voxels->material_at({7, 1, 1}) == 2 &&
+              object().voxels->material_at({9, 0, 0}) == kAirMaterial && object().anchors.contains({8, 0, 0}),
+          "region: a quarter turn moves cells, materials and anchors");
+    check(stack.undo(document).success && object().voxels->material_at({9, 1, 1}) == 2 &&
+              object().voxels->material_at({7, 1, 1}) == kAirMaterial,
+          "region: undo restores the unrotated cells");
+
+    // Integer scale x2 from the minimum corner: 8 cells become 64; anchors expand with them.
+    auto scale = build_voxel_region_command(object(), pieceB, VoxelRegionEdit::ScaleInteger, {0, 2});
+    check(scale.command && scale.selection.size() == 64 && stack.execute(document, std::move(scale.command)).success &&
+              object().voxels->occupied_voxel_count() == 128 && object().voxels->material_at({11, 3, 3}) == 2 &&
+              object().anchors.contains({9, 1, 1}) && object().anchors.contains({8, 0, 0}),
+          "region: scale x2 expands each cell into a 2x2x2 block");
+    check(stack.undo(document).success && object().voxels->occupied_voxel_count() == 72 &&
+              !object().anchors.contains({9, 1, 1}),
+          "region: undo restores the unscaled cells and anchors");
+    const std::set<Int3> cube = voxel_connected_piece(*object().voxels, {0, 0, 0});
+    check(!build_voxel_region_command(object(), cube, VoxelRegionEdit::ScaleInteger, {0, 3}).command,
+          "region: scaling over another piece is refused");
+
+    document.find_object(1)->flags.locked = true;
+    check(!build_voxel_region_command(object(), pieceB, VoxelRegionEdit::Extrude, {0, 1}).command,
+          "region: a locked object is refused");
+}
+
+void test_region_controller() {
+    auto owner = make_controller();
+    NativeEditorController& controller = *owner;
+    EditorDocument& document = controller.workspace().document();
+    const auto enabled = [&](std::string_view id) {
+        controller.refresh_menu_state();
+        const MenuAction* action = std::as_const(controller.workspace().menus()).find(id);
+        return action && action->enabled;
+    };
+    const auto reason = [&](std::string_view id) {
+        controller.refresh_menu_state();
+        const MenuAction* action = std::as_const(controller.workspace().menus()).find(id);
+        return action ? action->disabledReason : std::string();
+    };
+    (void)controller.dispatch_action("select.domain_voxels");
+    check(!enabled("voxel.region_extrude_x_positive") && !reason("voxel.region_extrude_x_positive").empty(),
+          "region menu: disabled with a reason before anything is selected");
+    check(!controller.dispatch_action("voxel.region_extrude_x_positive"), "region menu: no false success without a selection");
+    const std::set<Int3> pieceB = voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0});
+    controller.select_voxels(1, pieceB, SelectionOperation::Replace);
+    check(enabled("voxel.region_extrude_x_positive"), "region menu: enabled with a selection");
+
+    const std::size_t undoBefore = controller.workspace().commands().size();
+    check(controller.dispatch_action("voxel.region_extrude_x_positive") &&
+              document.find_object(1)->voxels->occupied_voxel_count() == 76 && controller.voxel_selection().size() == 12,
+          "region: Extrude +X edits and selects the result");
+    check(controller.workspace().commands().size() == undoBefore + 1, "region: one undo step per edit");
+    check(controller.dispatch_action("edit.undo") && document.find_object(1)->voxels->occupied_voxel_count() == 72 &&
+              controller.voxel_selection() == pieceB,
+          "region: undo restores the voxels and the previous selection");
+    check(controller.dispatch_action("edit.redo") && document.find_object(1)->voxels->occupied_voxel_count() == 76 &&
+              controller.voxel_selection().size() == 12,
+          "region: redo restores the edited selection");
+    (void)controller.dispatch_action("edit.undo");
+    controller.select_voxels(1, pieceB, SelectionOperation::Replace);
+
+    // A blocked edit fails honestly and changes nothing.
+    const std::set<Int3> cube = voxel_connected_piece(*document.find_object(1)->voxels, {0, 0, 0});
+    controller.select_voxels(1, cube, SelectionOperation::Replace);
+    const std::size_t undoBlocked = controller.workspace().commands().size();
+    check(!controller.dispatch_action("voxel.region_scale_3") &&
+              controller.workspace().commands().size() == undoBlocked &&
+              document.find_object(1)->voxels->occupied_voxel_count() == 72 && controller.voxel_selection() == cube,
+          "region: a blocked scale reports failure without editing");
+
+    // Locked and hidden objects are refused.
+    document.find_object(1)->flags.locked = true;
+    check(!enabled("voxel.region_rotate_z_positive") && reason("voxel.region_rotate_z_positive").find("Unlock") != std::string::npos,
+          "region menu: a locked object is disabled with a reason");
+    check(!controller.dispatch_action("voxel.region_rotate_z_positive") && document.find_object(1)->voxels->occupied_voxel_count() == 72,
+          "region: a locked object is not edited");
+    document.find_object(1)->flags.locked = false;
+    document.find_object(1)->flags.visible = false;
+    check(!enabled("voxel.region_rotate_z_positive"), "region menu: a hidden object is disabled");
+    document.find_object(1)->flags.visible = true;
+}
+
 } // namespace
 
 int main() {
@@ -479,6 +626,8 @@ int main() {
     test_edits();
     test_move_and_limited_tools();
     test_review_fixes();
+    test_region_core();
+    test_region_controller();
     if (g_failures != 0) {
         std::printf("dve_editor_voxel_selection_tests: %d failure(s)\n", g_failures);
         return 1;

@@ -1,4 +1,5 @@
 #include "dve/editor_native.hpp"
+#include "dve/editor_exact_cad.hpp"
 #include "dve/voxel_metric.hpp"
 #include "dve/asset_cooker.hpp"
 #include "dve/editor_import_workflow.hpp"
@@ -1973,6 +1974,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
             enabled("polygon.import", (model || extension == ".dmesh") && !playActive,
                     playActive ? "Stop Play or Simulate before importing."
                                : "Select an OBJ, glTF, GLB or DMESH model in the Assets panel first.");
+            enabled("polygon.import_exact", asset && is_exact_cad_source(asset->relativePath) && !playActive,
+                    playActive ? "Stop Play or Simulate before importing."
+                               : "Select a STEP, BREP or OpenUSD B-rep (.usda) file in the Assets panel first.");
             for (std::string_view id : {"file.import"})
                 enabled(id, model && !playActive, playActive ? "Stop Play or Simulate before importing."
                                                              : "Select an OBJ, glTF or GLB model in the Assets panel first.");
@@ -2072,7 +2076,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
         for (const auto& [id, reason] : editor_context_only_commands()) enabled(id, false, reason);
         if (longJob_) {
             const std::string busy = long_job_busy_reason();
-            for (std::string_view id : {"file.import", "polygon.import", "file.reimport", "voxel.fill", "voxel.rebuild_collision",
+            for (std::string_view id : {"file.import", "polygon.import", "polygon.import_exact", "file.reimport", "voxel.fill", "voxel.rebuild_collision",
                                         "build.validate", "file.open_scene", "file.open_project", "file.save_as"})
                 enabled(id, false, busy);
         }
@@ -6184,7 +6188,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         return true;
     }
     if (actionId.starts_with("mesh.")) return dispatch_mesh_authoring_action(actionId);
-    if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.create_plane" &&
+    if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.import_exact" &&
+        actionId != "polygon.create_plane" &&
         actionId != "polygon.lod" && actionId != "polygon.convert_to_voxels" && actionId != "polygon.collision" && actionId != "polygon.streaming")
         return handle_polygon_action(actionId);
     if (selectionDomain_ == SelectionDomain::Polygons && (actionId == "edit.select_all" || actionId == "edit.copy" ||
@@ -6725,6 +6730,12 @@ camera_menu_dispatch_complete:
             std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId):nullptr;
         if(!asset){set_status("Select an OBJ, glTF, GLB or DMESH model in the Assets panel first.",true);return false;}
         return import_polygon_model(asset->relativePath);
+    }
+    if (actionId == "polygon.import_exact") {
+        const auto* asset=assetBrowserState_.selectedId?
+            std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId):nullptr;
+        if(!asset){set_status("Select a STEP, BREP or OpenUSD B-rep (.usda) file in the Assets panel first.",true);return false;}
+        return import_exact_cad_model(asset->relativePath);
     }
     if (actionId == "create.polygon" || actionId == "polygon.create_plane") {
         if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
@@ -11264,6 +11275,118 @@ bool NativeEditorController::import_polygon_model(const std::filesystem::path& p
             frame_selection();
             refresh_menu_state();
             set_status("Imported " + path.filename().string() + " as an owned polygon mesh; the source file is unchanged");
+            return true;
+        });
+}
+
+// Exact Boolean through brepkernel. Prepared here (copies what the tool needs), run on the
+// long-job worker, applied on completion as one undo step: a new "<A> (Exact Boolean)" object
+// carrying the re-meshed result and its exact source. The operands stay as they are. A
+// refusal changes nothing; when Manifold is built in, its uncertified mesh preview opens so
+// the user can still choose a mesh-only result (Enter) or cancel (Esc).
+bool NativeEditorController::start_exact_boolean(EditorObjectId a,EditorObjectId b,MeshBoolean op){
+    auto request=prepare_exact_boolean(projectRoot_,workspace_.document(),a,b,op);
+    if(!request.error.empty()){set_status(request.error,true);return false;}
+    auto output=std::make_shared<std::optional<ExactBooleanResult>>();
+    const auto root=projectRoot_;
+    const auto settings=ExactCadSettings::from_environment();
+    const char* label=op==MeshBoolean::Union?"union":op==MeshBoolean::Difference?"A minus B":op==MeshBoolean::ReverseDifference?"B minus A":"intersection";
+    return start_long_job(LongJobKind::ImportModel,std::string("Exact Boolean ")+label,longJobThreshold_+1,
+        [output,request,root,settings](LongJob& job){
+            if(job.cancelled())return;
+            job.report(.1F,"brepkernel is computing and certifying the exact result");
+            auto result=run_exact_boolean(root,request,settings);
+            if(job.cancelled())return;
+            *output=std::move(result);
+            job.report(1.F,"Exact Boolean finished");
+        },
+        [this,output,request](LongJob& job){
+            if(!*output){set_status(job.label+" produced no result",true,8.F);return false;}
+            auto& r=**output;
+            auto& document=workspace_.document();
+            if(exact_operand_stamp(document,request.a,request.b)!=request.operandStamp){
+                set_status(job.label+" was not applied: an operand changed while it ran. Run it again",true,8.F);return false;}
+            const auto* objectA=document.find_object(request.a);
+            if(!objectA){set_status(job.label+" was not applied: operand A is gone",true,8.F);return false;}
+            if(r.refused){
+                std::string message=r.edit.error;if(!r.advisory.empty())message+=". "+r.advisory;
+                if(open_mesh_boolean_preview(request.a,request.b,request.operation))
+                    message+=". Showing the uncertified Manifold mesh preview instead: Enter applies a mesh-only result (no exact source), Esc cancels";
+                set_status(message,true,12.F);return false;
+            }
+            if(!r){set_status(r.edit.error,true,8.F);return false;}
+            const auto before=capture_selection_snapshot();
+            const auto id=document.allocate_object_id();
+            EditorObject result(id,objectA->name+" (Exact Boolean)");
+            result.polygon=std::move(r.edit.mesh);result.polygon->objectId=id;refresh_editor_polygon(*result.polygon);
+            // Same parent and local pose as A: the result is in A's mesh-local frame.
+            result.transform=objectA->transform;result.parent=objectA->parent;result.voxelScale=objectA->voxelScale;
+            result.voxelSizeMeters=objectA->voxelSizeMeters;result.flags=objectA->flags;
+            Component exact=make_exact_brep_component(r.source);exact.id=1;result.components.push_back(std::move(exact));
+            auto added=workspace_.commands().execute(document,std::make_unique<AddObjectCommand>(std::move(result),"Create exact Boolean result"));
+            if(!added.success){set_status(added.message,true);return false;}
+            if(!viewportSettings_.isolatedObjects.empty())viewportSettings_.isolatedObjects.insert(id);
+            workspace_.select_object(id);selectionDomain_=SelectionDomain::Objects;
+            workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
+            recompute_layout();refresh_menu_state();
+            set_status(r.summary+"; the operands are unchanged");
+            return true;
+        });
+}
+
+// Exact CAD: brepkernel turns the file into a project-owned .brep plus a meshed polygon; the
+// object keeps the .brep as its dve.exact_brep source so exact Booleans can use it later.
+bool NativeEditorController::import_exact_cad_model(const std::filesystem::path& path) {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
+        set_status("Stop Play or Simulate before importing.", true);
+        return false;
+    }
+    if (!is_exact_cad_source(path)) {
+        set_status("Exact CAD import reads STEP, BREP and OpenUSD B-rep (.usda) files.", true);
+        return false;
+    }
+    const auto absolute = (path.has_root_directory() || path.has_root_name()) ? path : projectRoot_ / path;
+    close_previews_for_voxel_edit("Import started");
+    auto imported = std::make_shared<std::optional<ExactCadImportResult>>();
+    const auto id = workspace_.document().allocate_object_id();
+    const auto root = projectRoot_;
+    const auto settings = ExactCadSettings::from_environment();
+    return start_long_job(LongJobKind::ImportModel, "Import exact CAD " + path.filename().string(), longJobThreshold_ + 1,
+        [imported, absolute, id, root, settings](LongJob& job) {
+            if (job.cancelled()) return;
+            job.report(0.1F, "Reading the B-rep and meshing it with brepkernel");
+            auto result = import_exact_cad(root, absolute, id, settings);
+            if (job.cancelled()) return;
+            if (!result) {
+                std::lock_guard lock(job.mutex);
+                job.error = result.error;
+                return;
+            }
+            *imported = std::move(result);
+            job.report(1.0F, "Exact CAD ready");
+        },
+        [this, imported, path, id](LongJob& job) {
+            if (!*imported) { set_status(job.label + " produced no geometry", true, 8.0F); return false; }
+            auto& result = **imported;
+            const auto before = capture_selection_snapshot();
+            EditorObject object(id, path.stem().string());
+            object.voxelSizeMeters = 1.0F;
+            object.polygon = std::move(result.mesh);
+            object.sourceAsset = path;
+            object.transform.position = camera_.target;
+            Component exact = make_exact_brep_component(result.source);
+            exact.id = 1;                    // component ids are per object; this is the first
+            object.components.push_back(std::move(exact));
+            const auto added = workspace_.commands().execute(
+                workspace_.document(), std::make_unique<AddObjectCommand>(std::move(object), "Import exact CAD"));
+            if (!added.success) { set_status(added.message, true); return false; }
+            if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+            workspace_.select_object(id);
+            selectionDomain_ = SelectionDomain::Objects;
+            workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
+            frame_selection();
+            refresh_menu_state();
+            set_status(result.summary + "; exact source kept at " + result.source.relativePath.generic_string());
             return true;
         });
 }

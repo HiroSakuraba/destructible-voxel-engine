@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_mesh_authoring.hpp"
+#include "dve/editor_exact_cad.hpp"
 #include "dve/collision_hull.hpp"
 #include "dve/voxel_metric.hpp"
 #include <algorithm>
@@ -102,6 +103,11 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
     auto enabled=[&](std::string_view id,bool value,std::string_view reason){(void)workspace_.menus().set_enabled(id,value,value?std::string{}:std::string(reason));};
     bool pair=mesh&&workspace_.selection_count()==2;if(pair)for(auto id:workspace_.selected_objects()){auto* o=workspace_.document().find_object(id);pair=pair&&o&&o->polygon&&!o->flags.locked&&o->flags.visible&&!is_isolated_out(id);}
     for(auto id:{"mesh.boolean_union","mesh.boolean_difference","mesh.boolean_reverse","mesh.boolean_intersection"})enabled(id,pair&&mesh_boolean_available(),mesh_boolean_available()?"Select exactly two visible unlocked polygon meshes":"This build needs the Manifold authoring backend");
+    {
+        bool exact=pair;if(exact)for(auto id:workspace_.selected_objects()){auto* o=workspace_.document().find_object(id);exact=exact&&o&&exact_brep_source(*o).has_value();}
+        for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection"})
+            enabled(id,exact,pair?"Both operands need an exact CAD source (Polygon > Import Exact CAD)":"Select exactly two visible unlocked polygon meshes");
+    }
     for(auto id:{"mesh.hull_fit","mesh.hull_edit"})enabled(id,mesh&&mesh_boolean_available(),"Select an unlocked polygon mesh in a build with Manifold authoring");
     enabled("mesh.hull_remove",mesh&&object&&find_component_by_type(std::span<const Component>(object->components),kCollisionHullComponent),"Select a polygon with an authored collision hull");
     for(auto id:{"mesh.uv_editor","mesh.diagnostics"})enabled(id,mesh,"Select an unlocked polygon mesh in Edit mode");
@@ -216,6 +222,15 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
         return result.success;
     }
 
+    if(action.starts_with("mesh.exact_boolean_")){
+        cancel_mesh_authoring_drag();close_previews_for_voxel_edit("exact Boolean");
+        if(workspace_.selection_count()!=2){set_status("Select exactly two polygon operands with exact CAD sources; the active object is A",true);return false;}
+        auto other=*std::find_if(workspace_.selected_objects().begin(),workspace_.selected_objects().end(),[&](auto id){return id!=object->id;});
+        if(is_isolated_out(other)){set_status("Boolean operand is isolated out",true);return false;}
+        const auto op=action=="mesh.exact_boolean_difference"?MeshBoolean::Difference:action=="mesh.exact_boolean_reverse"?MeshBoolean::ReverseDifference:
+            action=="mesh.exact_boolean_intersection"?MeshBoolean::Intersection:MeshBoolean::Union;
+        return start_exact_boolean(object->id,other,op);
+    }
     if(action.starts_with("mesh.boolean_")){
         cancel_mesh_authoring_drag();close_previews_for_voxel_edit("mesh Boolean");
         if(workspace_.selection_count()!=2){set_status("Select exactly two owned polygon operands; active object is A",true);return false;}
@@ -266,6 +281,18 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
     auto edited=edit_polygon_topology(*object->polygon,polygonSelection_,op);if(!edited){set_status(edited.error,true);return false;}
     const auto before=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(edited.mesh),"Edit polygon topology"));
     if(result.success){polygonSelection_=edited.selection;workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());if(s.kind==NativeMeshAuthoringState::Kind::Uv)s.corners.clear();}set_status(result.success?"Edited polygon topology":result.message,!result.success);return result.success;
+}
+
+// Opens the (uncertified) Manifold Boolean preview for a, b without applying it; used as the
+// fallback when brepkernel refuses an exact Boolean.
+bool NativeEditorController::open_mesh_boolean_preview(EditorObjectId a,EditorObjectId b,MeshBoolean op){
+    if(!mesh_boolean_available())return false;
+    auto& document=workspace_.document();const auto* objectA=document.find_object(a);if(!objectA)return false;
+    auto preview=boolean_editor_polygons(document,a,b,op);if(!preview)return false;
+    if(!meshAuthoring_)meshAuthoring_=std::make_shared<NativeMeshAuthoringState>();auto& s=*meshAuthoring_;
+    s.kind=NativeMeshAuthoringState::Kind::Boolean;s.object=a;s.operand=b;s.boolean=op;s.result=std::move(preview);s.replace=false;
+    s.operandStamp=stamp(document,a,b);s.booleanPose=document.world_transform(a).value_or(objectA->transform);s.booleanMetric=objectA->voxelScale;
+    return true;
 }
 
 bool NativeEditorController::mesh_authoring_key(std::string_view key,bool control,bool shift,bool alt){

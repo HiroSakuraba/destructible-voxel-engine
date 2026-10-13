@@ -613,7 +613,9 @@ void NativeEditorController::refresh_subdivision_menu_state() {
     enabled("subdiv.conversion_cancel",voxel_authoring_active() && !longJob_,"No conversion preview is open.");
 }
 bool NativeEditorController::dispatch_subdivision_action(std::string_view action) {
-    if (workspace_.mode()!=EditorMode::Edit || playSession_.active() || longJob_) return false;
+    if (workspace_.mode()!=EditorMode::Edit || playSession_.active() || longJob_) {
+        set_status("Stop Play and finish background work before editing subdivision surfaces",true);return false;
+    }
     const auto primary=workspace_.selected_object();
     const auto* source=primary?workspace_.document().find_object(*primary):nullptr;
     if (action=="subdiv.from_voxels") return begin_geometry_conversion(false,true);
@@ -623,7 +625,11 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
         const bool create=action=="subdiv.create_cube" || action=="subdiv.create_plane";
         const bool bake=action=="subdiv.bake_polygon";
         if (!create && (!editable(source) || is_isolated_out(source->id) || workspace_.selection_count()!=1 ||
-            (bake ? !source->subdivision : source->subdivision.has_value()))) return false;
+            (bake ? !source->subdivision : source->subdivision.has_value()))) {
+            set_status(bake ? "Select one visible unlocked subdivision surface to bake"
+                            : "Select one visible unlocked polygon mesh to convert",true);
+            return false;
+        }
         cancel_mesh_authoring_drag();meshAuthoring_.reset();close_previews_for_voxel_edit("subdivision geometry");
         const auto before=capture_selection_snapshot();const auto id=workspace_.document().allocate_object_id();
         EditorObject object(id,create ? action=="subdiv.create_plane"?"Subdivision Plane":"Subdivision Cube" :
@@ -664,7 +670,7 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
         else if (action=="subdiv.sharp_toggle") settings.preserveSharpEdges=!settings.preserveSharpEdges;
         else {
             const auto text=action.substr(std::string_view("subdiv.level_").size());
-            if (text.size()!=1 || text[0]<'0' || text[0]>'4') return false;
+            if (text.size()!=1 || text[0]<'0' || text[0]>'4') {set_status("Unknown subdivision level",true);return false;}
             settings.level=std::uint32_t(text[0]-'0');
         }
         if (settings==*source->subdivision) return true;
@@ -677,6 +683,7 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
         refresh_menu_state();return result.success;
     }
     if (const auto at=subdivision_tools().find(action);at!=subdivision_tools().end()) return dispatch_action(at->second);
+    set_status("Unknown subdivision command",true);
     return false;
 }
 void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,UiRect viewport) const {

@@ -68,6 +68,10 @@ namespace dve::editor {
 // toggles the Scene Hierarchy / Inspector panels and the bottom panel's Assets tab.
 inline constexpr std::array<std::string_view, 9> kMenuBarNames{
     "File", "Edit", "Create", "View", "Subdivision", "Tools", "Build", "Window", "Help"};
+// Short titles, index-aligned with kMenuBarNames, drawn when a full title does not fit its menu
+// bar slot (narrow windows; "Subdivision" is wider than the 71 px slot at 640 px).
+inline constexpr std::array<std::string_view, kMenuBarNames.size()> kCompactMenuBarNames{
+    "File", "Edit", "New", "View", "Subdiv", "Tools", "Build", "Win", "Help"};
 
 struct EditorPrefabAsset;
 

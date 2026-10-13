@@ -227,6 +227,23 @@ void test_camera_preview_title() {
           "hovering the elided title shows the full rig name");
 }
 
+// Every menu bar title stays inside its slot: the full title where it fits, the compact one
+// (index-aligned with kMenuBarNames) otherwise.
+void test_menu_bar_titles(const Case& c) {
+    MAKE_CONTROLLER(controller, c);
+    MeasuringCanvas canvas;
+    render_native_editor(canvas, controller, c.w, c.h);
+    const int menuWidth = std::max(1, std::min(78, c.w / static_cast<int>(kMenuBarNames.size())));
+    for (std::size_t m = 0; m < kMenuBarNames.size(); ++m) {
+        const UiRect slot{static_cast<int>(m) * menuWidth, 0, menuWidth, controller.layout().menuBar.height};
+        const DrawnText* title = nullptr;
+        for (const DrawnText& t : canvas.texts)
+            if (contains_origin(slot, t) && (t.value == kMenuBarNames[m] || t.value == kCompactMenuBarNames[m])) { title = &t; break; }
+        check(title != nullptr, c.tag + "menu bar title for " + std::string(kMenuBarNames[m]) + " drawn");
+        if (title) check(inside_x(*title, slot), c.tag + "menu bar title '" + title->value + "' leaves its slot");
+    }
+}
+
 void test_menus(const Case& c) {
     MAKE_CONTROLLER(controller, c);
     for (std::size_t m = 0; m < kMenuBarNames.size(); ++m) {
@@ -327,6 +344,7 @@ int main() {
         test_toolbar(c);
         test_viewport_hint(c);
         test_menus(c);
+        test_menu_bar_titles(c);
     }
     test_toolbar_tooltips();
     test_help_control_opens_guide();

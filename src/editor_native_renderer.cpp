@@ -3218,14 +3218,14 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
 
     const int desiredMenuWidth = 78;
     const int menuWidth = std::max(1, std::min(desiredMenuWidth, width / static_cast<int>(kMenuBarNames.size())));
-    static constexpr std::array<std::string_view, 8> kCompactMenuNames{
-        "File","Edit","New","View","Tools","Build","Win","Help"};
     for (std::size_t index = 0; index < kMenuBarNames.size(); ++index) {
         const int x = static_cast<int>(index) * menuWidth;
         if (controller.open_menu() && *controller.open_menu() == kMenuBarNames[index])
             painter.fill({x,0,menuWidth,layout.menuBar.height}, accent);
-        const std::string_view label = menuWidth < 64 ? kCompactMenuNames[index] : kMenuBarNames[index];
-        painter.text(x + (menuWidth < 64 ? 5 : 10), layout.menuBar.height - 9, label, text);
+        // Full title with 10 px padding when it fits; otherwise the compact title with 5 px.
+        const bool full = menuWidth >= 64 && 10 + painter.text_width(kMenuBarNames[index]) <= menuWidth;
+        const std::string_view label = full ? kMenuBarNames[index] : kCompactMenuBarNames[index];
+        painter.text(x + (full ? 10 : 5), layout.menuBar.height - 9, label, text);
     }
 
     std::vector<ChromeTooltip> tooltips;

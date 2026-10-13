@@ -707,7 +707,7 @@ std::optional<std::uint64_t> pick_polygon_component(const EditorObject& object,c
         return hit?std::optional<std::uint64_t>(hit->triangleIndex):std::nullopt;
     }
     float best=100; std::optional<std::uint64_t> result; const auto& mesh=*object.polygon;
-    const auto controlEdges=object.subdivision && mode==PolygonSelectionMode::Edge ? subdivision_control_edges(mesh) : std::set<std::uint64_t>{};
+    const auto controlEdges=object.subdivision && mode==PolygonSelectionMode::Edge ? subdivision_control_edges(mesh,&*object.subdivision) : std::set<std::uint64_t>{};
     if(mode==PolygonSelectionMode::Vertex) for(const auto item:component_points(mesh,mode)) {
         const auto world=voxel_to_world(object.transform,object.voxelScale,item.point);
         const auto p=project_world_to_screen(camera,viewport,world);
@@ -840,7 +840,10 @@ std::set<std::uint64_t> polygon_components_in_rect(const EditorObject& object,co
         const auto hit = pick_editor_polygon(object,ray,distance+.002F,true);
         return !hit || hit->distance >= distance-.002F;
     };
+    const auto cageEdges=object.subdivision && mode==PolygonSelectionMode::Edge ?
+        subdivision_control_edges(mesh,&*object.subdivision):std::set<std::uint64_t>{};
     for (const auto item : component_points(mesh,mode)) {
+        if (object.subdivision && mode==PolygonSelectionMode::Edge && !cageEdges.contains(item.key)) continue;
         std::vector<Point> patch;
         if (mode==PolygonSelectionMode::Edge) {
             patch.push_back(viewPoint(voxel_to_world(object.transform,object.voxelScale,
@@ -889,34 +892,41 @@ std::set<std::uint64_t> polygon_components_in_rect(const EditorObject& object,co
 ReplacePolygonCommand::ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,
     std::string label,std::uint64_t stroke):
     id_(id),stroke_(stroke),before_(std::move(before)),after_(std::move(after)),label_(std::move(label)) {}
-CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const CookedPolygonAsset& mesh) {
+CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const CookedPolygonAsset& mesh,const std::optional<SubdivisionSettings>& settings) {
     auto* object=document.find_object(id_);
     if(!object||!object->polygon) return CommandResult::fail("Polygon target no longer exists");
     if(object->flags.locked) return CommandResult::fail("Polygon target is locked");
     const auto valid=validate_polygon_asset(mesh); if(!valid) return CommandResult::fail(valid.message);
-    if (object->subdivision) {
-        const auto evaluated=evaluate_subdivision(mesh,*object->subdivision);
+    if (settings) {
+        const auto evaluated=evaluate_subdivision(mesh,*settings);
         if (!evaluated.mesh) return CommandResult::fail(evaluated.error);
     }
-    object->subdivisionCache.reset();
+    object->subdivision=settings;object->subdivisionCache.reset();
     object->polygon=mesh; object->polygon->objectId=id_; refresh_editor_polygon(*object->polygon);
     document.mark_dirty(); return CommandResult::ok();
 }
 CommandResult ReplacePolygonCommand::execute(EditorDocument& document) {
     auto* object=document.find_object(id_);
+    const auto valid=validate_polygon_asset(after_);
+    if (!valid) return CommandResult::fail(valid.message);
     if(!capturedOverride_) {
         if(object&&object->prefabLink) {
             const auto it=object->prefabLink->overrides.find("polygon.geometry");
             if(it!=object->prefabLink->overrides.end()) previousOverride_=it->second;
         }
+        if (object && object->subdivision) {
+            beforeSubdivision_=*object->subdivision;
+            freeze_subdivision_topology(before_,*beforeSubdivision_);
+            afterSubdivision_=remap_subdivision_topology(before_,after_,*beforeSubdivision_);
+        }
         capturedOverride_=true;
     }
-    const auto result=apply(document,after_);
+    const auto result=apply(document,after_,afterSubdivision_);
     if(result.success&&object->prefabLink) object->prefabLink->overrides["polygon.geometry"]=std::int64_t{1};
     return result;
 }
 CommandResult ReplacePolygonCommand::undo(EditorDocument& document) {
-    const auto result=apply(document,before_);
+    const auto result=apply(document,before_,beforeSubdivision_);
     if(result.success) if(auto* object=document.find_object(id_);object->prefabLink) {
         if(previousOverride_) object->prefabLink->overrides["polygon.geometry"]=*previousOverride_;
         else object->prefabLink->overrides.erase("polygon.geometry");
@@ -926,17 +936,18 @@ CommandResult ReplacePolygonCommand::undo(EditorDocument& document) {
 bool ReplacePolygonCommand::merge_with(const IEditorCommand& other) {
     const auto* next=dynamic_cast<const ReplacePolygonCommand*>(&other);
     if(!next||stroke_==0||stroke_!=next->stroke_||id_!=next->id_||label_!=next->label_) return false;
-    after_=next->after_; return true;
+    after_=next->after_; afterSubdivision_=next->afterSubdivision_; return true;
 }
 
 std::vector<EditorPolygonDrawTriangle> build_editor_polygon_draw_list(
     const EditorDocument& document,const EditorCamera& camera,UiRect viewport,
     const std::set<EditorObjectId>& selected,const std::set<EditorObjectId>& isolated,std::size_t maximum,
-    const std::map<EditorObjectId,RigidTransform>* poses) {
+    const std::map<EditorObjectId,RigidTransform>* poses,EditorObjectId cagePreview) {
     std::vector<EditorPolygonDrawTriangle> result;
     for(const auto& [id,object]:document.objects()) {
         if(!object.polygon||!object.flags.visible||(!isolated.empty()&&!isolated.contains(id))) continue;
-        const auto& mesh=*editor_surface_mesh(object);const auto materials=face_materials(mesh);
+        const bool showCage=object.subdivision && id==cagePreview;
+        const auto& mesh=showCage?*object.polygon:*editor_surface_mesh(object);const auto materials=face_materials(mesh);
         auto pose=object.transform;
         if(poses) if(const auto it=poses->find(id);it!=poses->end()) pose=it->second;
         for(std::uint32_t face=0;face<mesh.indices.size()/3&&result.size()<maximum;++face) {
@@ -975,7 +986,7 @@ std::vector<EditorPolygonDrawTriangle> build_editor_polygon_draw_list(
             const auto centre=multiply(add(add(world[0],world[1]),world[2]),1.0F/3.0F);
             const float facing=std::abs(dot(normal,normalize(subtract(camera.position,centre))));
             for(std::size_t j=1;j+1<count&&result.size()<maximum;++j) {
-                EditorPolygonDrawTriangle triangle;triangle.object=id;triangle.face=subdivision_control_triangle(object,face);
+                EditorPolygonDrawTriangle triangle;triangle.object=id;triangle.face=showCage?face:subdivision_control_triangle(object,face);
                 triangle.points={screen[0],screen[j],screen[j+1]};
                 triangle.depth=depthSum/float(count);
                 triangle.facing=std::isfinite(facing)?std::clamp(facing,0.0F,1.0F):1.0F;

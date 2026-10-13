@@ -669,6 +669,16 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"subdiv.level_down","Subdivision","Decrease Subdivision Level",""},
         {"subdiv.sharp_toggle","Subdivision","Preserve Sharp Cage Edges (60 deg)",""},
         {"subdiv.cage_toggle","Subdivision","Show Control Cage",""},
+        {"subdiv.cage_xray","Subdivision","Cage X-ray Selection",""},
+        {"subdiv.cage_only","Subdivision","Preview Selected Cage Only",""},
+        {"subdiv.make_quad","Subdivision","Make Selected Control Quad",""},
+        {"subdiv.triangulate_faces","Subdivision","Triangulate Selected Control Faces",""},
+        {"subdiv.crease_clear","Subdivision","Clear Selected Edge Creases",""},
+        {"subdiv.crease_half","Subdivision","Selected Crease Strength: 0.5",""},
+        {"subdiv.crease_1","Subdivision","Selected Crease Strength: 1",""},
+        {"subdiv.crease_2","Subdivision","Selected Crease Strength: 2",""},
+        {"subdiv.crease_3","Subdivision","Selected Crease Strength: 3",""},
+        {"subdiv.crease_4","Subdivision","Selected Crease Strength: 4",""},
         {"subdiv.conversion_apply","Subdivision","Apply Conversion Preview",""},
         {"subdiv.conversion_cancel","Subdivision","Cancel Conversion Preview",""},
         {"subdiv.vertex_mode","Subdivision","Vertex Selection",""},
@@ -906,6 +916,16 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("subdiv.level_down","Subdivision Surface",12,false);
     configure("subdiv.sharp_toggle","Subdivision Surface",13,true);
     configure("subdiv.cage_toggle","Subdivision Surface",14,true);
+    configure("subdiv.cage_xray","Subdivision Surface",15,true);
+    configure("subdiv.cage_only","Subdivision Surface",15,true);
+    configure("subdiv.make_quad","Subdivision Topology",16,false);
+    configure("subdiv.triangulate_faces","Subdivision Topology",16,false);
+    configure("subdiv.crease_clear","Subdivision Creases",15,false);
+    configure("subdiv.crease_half","Subdivision Creases",15,false);
+    configure("subdiv.crease_1","Subdivision Creases",15,false);
+    configure("subdiv.crease_2","Subdivision Creases",15,false);
+    configure("subdiv.crease_3","Subdivision Creases",15,false);
+    configure("subdiv.crease_4","Subdivision Creases",15,false);
     configure("subdiv.conversion_apply","Subdivision Conversion",15,false);
     configure("subdiv.conversion_cancel","Subdivision Conversion",16,false);
     configure("subdiv.vertex_mode","Subdivision Selection",30,true, "subdiv.mode");
@@ -1131,6 +1151,16 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("subdiv.to_voxels","Preview voxelizing the evaluated smooth surface, with cell size and fill controls.",{"subdivision","subdiv","cage"});
     describe("subdiv.sharp_toggle","Toggle preservation of cage edges whose dihedral angle exceeds 60 degrees.",{"subdivision","subdiv","cage"});
     describe("subdiv.cage_toggle","Show or hide the control-cage overlay without changing geometry.",{"subdivision","subdiv","cage"});
+    describe("subdiv.cage_xray","Cage X-ray Selection; uses the saved control-face topology.",{"subdivision","cage","crease"});
+    describe("subdiv.cage_only","Preview Selected Cage Only; uses the saved control-face topology.",{"subdivision","cage","crease"});
+    describe("subdiv.make_quad","Make Selected Control Quad without moving vertices or changing UVs; supports Undo.",{"subdivision","topology","quad"});
+    describe("subdiv.triangulate_faces","Triangulate Selected Control Faces without moving vertices or changing UVs; supports Undo.",{"subdivision","topology","quad"});
+    describe("subdiv.crease_clear","Clear Selected Edge Creases; uses the saved control-face topology.",{"subdivision","cage","crease"});
+    describe("subdiv.crease_half","Selected Crease Strength: 0.5; uses the saved control-face topology.",{"subdivision","cage","crease"});
+    describe("subdiv.crease_1","Selected Crease Strength: 1; uses the saved control-face topology.",{"subdivision","cage","crease"});
+    describe("subdiv.crease_2","Selected Crease Strength: 2; uses the saved control-face topology.",{"subdivision","cage","crease"});
+    describe("subdiv.crease_3","Selected Crease Strength: 3; uses the saved control-face topology.",{"subdivision","cage","crease"});
+    describe("subdiv.crease_4","Selected Crease Strength: 4; uses the saved control-face topology.",{"subdivision","cage","crease"});
     describe("subdiv.level_up","Increase finite Catmull-Clark refinement while retaining the cage, UVs and materials.",{"subdivision","subdiv","cage"});
     describe("subdiv.level_down","Decrease finite Catmull-Clark refinement while retaining the cage, UVs and materials.",{"subdivision","subdiv","cage"});
     describe("subdiv.conversion_apply","Apply a reviewed conversion result in one geometry/selection Undo step.",{"subdivision","subdiv","cage"});

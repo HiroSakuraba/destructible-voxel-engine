@@ -1116,9 +1116,13 @@ private:
     PolygonSelection polygonSelection_{};
     std::optional<CookedPolygonAsset> polygonDragBefore_;
     std::optional<CookedPolygonAsset> polygonPreviewBefore_;
+    std::optional<SubdivisionSettings> polygonPreviewSubdivision_;
     std::optional<CookedPolygonAsset> polygonClipboard_;
     std::optional<SubdivisionSettings> polygonClipboardSubdivision_;
     bool subdivisionCageVisible_{true};
+    bool subdivisionCageXray_{};
+    bool subdivisionCageOnly_{};
+    mutable SubdivisionSettings subdivisionCageDrawSettings_{};
     mutable std::uint64_t subdivisionCageDrawHash_{};
     mutable EditorObjectId subdivisionCageDrawObject_{};
     mutable std::vector<PolygonEdge> subdivisionCageDrawEdges_;

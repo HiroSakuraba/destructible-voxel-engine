@@ -76,7 +76,7 @@ bool quad_pair(const Cage& cage,const Face& a,const Face& b,Face& result) {
     result.triangles.insert(result.triangles.end(),b.triangles.begin(),b.triangles.end());
     return true;
 }
-Cage parse_cage(const CookedPolygonAsset& mesh) {
+Cage parse_cage(const CookedPolygonAsset& mesh,const SubdivisionSettings* settings=nullptr,std::string* error=nullptr) {
     Cage cage;
     std::map<std::tuple<float,float,float>,std::uint32_t> weld;
     std::vector<std::uint32_t> indices(mesh.vertices.size());
@@ -102,7 +102,40 @@ Cage parse_cage(const CookedPolygonAsset& mesh) {
         face.rootAttributes=std::make_shared<const std::vector<AttributeTriangle>>(std::vector<AttributeTriangle>{root});
         triangles.push_back(std::move(face));
     }
-    for (std::size_t i=0;i<triangles.size();++i) {
+    if (settings && !settings->controlFaces.empty()) {
+        using Signature=std::array<std::uint32_t,3>;
+        const auto signature=[](Signature a) {
+            if (a[1]<a[0] && a[1]<a[2]) return Signature{a[1],a[2],a[0]};
+            if (a[2]<a[0] && a[2]<a[1]) return Signature{a[2],a[0],a[1]};
+            return a;
+        };
+        std::map<Signature,std::vector<std::uint32_t>> lookup;
+        for (std::uint32_t i=0;i<triangles.size();++i)
+            lookup[signature({mesh.indices[i*3],mesh.indices[i*3+1],mesh.indices[i*3+2]})].push_back(i);
+        std::set<std::uint32_t> used;
+        for (const auto& record : settings->controlFaces) {
+            std::vector<std::uint32_t> ids;
+            bool valid=record.size()==3 || record.size()==6;
+            for (std::size_t j=0;valid && j<record.size();j+=3) {
+                const auto at=lookup.find(signature({record[j],record[j+1],record[j+2]}));
+                if (at==lookup.end()) {valid=false;break;}
+                const auto id=std::find_if(at->second.begin(),at->second.end(),[&](auto v){return !used.contains(v);});
+                if (id==at->second.end()) {valid=false;break;}
+                ids.push_back(*id);used.insert(*id);
+            }
+            Face pair;
+            if (valid && ids.size()==2) valid=quad_pair(cage,triangles[ids[0]],triangles[ids[1]],pair);
+            if (!valid) {
+                if (error) *error="Saved control face does not match this cage; repair topology metadata";
+                cage.faces.clear();return cage;
+            }
+            cage.faces.push_back(ids.size()==2?std::move(pair):triangles[ids[0]]);
+        }
+        if (used.size()!=triangles.size()) {
+            if (error) *error="Saved control faces do not cover the cage";
+            cage.faces.clear();
+        }
+    } else for (std::size_t i=0;i<triangles.size();++i) {
         Face pair;
         if (i+1<triangles.size() && quad_pair(cage,triangles[i],triangles[i+1],pair)) {
             cage.faces.push_back(std::move(pair)); ++i;
@@ -110,14 +143,14 @@ Cage parse_cage(const CookedPolygonAsset& mesh) {
     }
     return cage;
 }
-struct EdgeData { std::vector<std::uint32_t> faces; bool sharp{}; std::uint32_t point{}; };
+struct EdgeData { std::vector<std::uint32_t> faces; bool sharp{}; float strength{}; std::uint32_t point{}; };
 struct Topology {
     std::map<Edge,EdgeData> edges;
     std::vector<std::vector<Edge>> vertexEdges;
     std::vector<std::vector<std::uint32_t>> vertexFaces;
     std::vector<Float3> normals;
 };
-bool topology(const Cage& cage,Topology& result,const std::set<Edge>& creases,bool detectSharp,std::string& error) {
+bool topology(const Cage& cage,Topology& result,const std::map<Edge,float>& creases,bool detectSharp,std::string& error) {
     result.vertexEdges.resize(cage.points.size()); result.vertexFaces.resize(cage.points.size());
     std::map<Edge,int> winding;
     for (std::uint32_t i=0;i<cage.faces.size();++i) {
@@ -137,9 +170,11 @@ bool topology(const Cage& cage,Topology& result,const std::set<Edge>& creases,bo
     for (auto& [key,data] : result.edges) {
         if (data.faces.size()>2) { error="Non-manifold cage edge; split or repair it first"; return false; }
         if (data.faces.size()==2 && winding[key]!=0) {error="Inconsistent cage winding; repair face orientation";return false;}
-        data.sharp=data.faces.size()==1 || creases.contains(key);
-        if (detectSharp && data.faces.size()==2)
-            data.sharp=data.sharp || dot(normal(result.normals[data.faces[0]]),normal(result.normals[data.faces[1]]))<0.5F;
+        data.strength=data.faces.size()==1 ? 100.0F : 0.0F;
+        if (const auto at=creases.find(key);at!=creases.end()) data.strength=std::max(data.strength,at->second);
+        if (detectSharp && data.faces.size()==2 &&
+            dot(normal(result.normals[data.faces[0]]),normal(result.normals[data.faces[1]]))<0.5F) data.strength=100.0F;
+        data.sharp=data.strength>=1.0F;
         result.vertexEdges[key.first].push_back(key); result.vertexEdges[key.second].push_back(key);
     }
     for (std::uint32_t v=0;v<cage.points.size();++v) {
@@ -193,7 +228,7 @@ PolygonVertex sample_attributes(const AttributeTriangle& triangle,Float2 p) {
     return result;
 }
 
-bool refine(Cage& cage,Topology& graph,std::set<Edge>& creases,std::string& error) {
+bool refine(Cage& cage,Topology& graph,std::map<Edge,float>& creases,std::string& error) {
     std::size_t count=0; for (const auto& face : cage.faces) count+=face.vertices.size();
     if (count>kMaxSubdivisionFaces || cage.points.size()+graph.edges.size()+cage.faces.size()>500'000) {
         error="Subdivision exceeds 125000 faces / 500000 points; lower the level or simplify the cage"; return false;
@@ -206,31 +241,43 @@ bool refine(Cage& cage,Topology& graph,std::set<Edge>& creases,std::string& erro
         next.points.push_back(multiply(centre,1/float(face.vertices.size())));
     }
     for (auto& [key,data] : graph.edges) {
-        auto p=add(cage.points[key.first],cage.points[key.second]);
-        if (!data.sharp) for (auto face : data.faces) p=add(p,next.points[centres[face]]);
-        p=multiply(p,data.sharp ? 0.5F : 0.25F);
+        const auto midpoint=multiply(add(cage.points[key.first],cage.points[key.second]),0.5F);
+        auto smooth=midpoint;
+        if (data.faces.size()==2) smooth=multiply(add(add(cage.points[key.first],cage.points[key.second]),
+            add(next.points[centres[data.faces[0]]],next.points[centres[data.faces[1]]])),0.25F);
+        const float weight=std::clamp(data.strength,0.0F,1.0F);
+        const auto p=add(multiply(smooth,1-weight),multiply(midpoint,weight));
         data.point=static_cast<std::uint32_t>(next.points.size()); next.points.push_back(p);
     }
     for (std::uint32_t v=0;v<cage.points.size();++v) {
         const auto& edges=graph.vertexEdges[v];const auto& faces=graph.vertexFaces[v];
         if (faces.empty()) continue;
-        std::vector<std::uint32_t> sharp;
-        for (auto key : edges) if (graph.edges.at(key).sharp) sharp.push_back(key.first==v ? key.second : key.first);
-        if (sharp.size()>=3 || (sharp.size()==2 && faces.size()==1)) continue; // Boundary corners interpolate.
-        if (sharp.size()==2) {
-            next.points[v]=add(multiply(cage.points[v],0.75F),multiply(add(cage.points[sharp[0]],cage.points[sharp[1]]),0.125F));
-        } else {
-            Float3 f{},r{};
-            for (auto face : faces) f=add(f,next.points[centres[face]]);
-            for (auto key : edges) r=add(r,multiply(add(cage.points[key.first],cage.points[key.second]),0.5F));
-            const float n=float(faces.size());
-            next.points[v]=multiply(add(add(multiply(f,1/n),multiply(r,2/float(edges.size()))),
-                                             multiply(cage.points[v],n-3)),1/n);
+        Float3 f{},r{};
+        for (auto face : faces) f=add(f,next.points[centres[face]]);
+        for (auto key : edges) r=add(r,multiply(add(cage.points[key.first],cage.points[key.second]),0.5F));
+        const float n=float(faces.size());
+        const auto smooth=multiply(add(add(multiply(f,1/n),multiply(r,2/float(edges.size()))),
+            multiply(cage.points[v],n-3)),1/n);
+        std::vector<std::pair<float,std::uint32_t>> sharp;
+        for (auto key : edges) if (graph.edges.at(key).strength>0)
+            sharp.push_back({graph.edges.at(key).strength,key.first==v?key.second:key.first});
+        std::sort(sharp.begin(),sharp.end(),[](const auto& a,const auto& b){return a.first>b.first;});
+        auto point=smooth;
+        if (sharp.size()>=2) {
+            const auto crease=add(multiply(cage.points[v],0.75F),
+                multiply(add(cage.points[sharp[0].second],cage.points[sharp[1].second]),0.125F));
+            const float w=std::clamp(sharp[1].first,0.0F,1.0F);
+            point=add(multiply(smooth,1-w),multiply(crease,w));
+            const float corner=sharp.size()>=3?std::clamp(sharp[2].first,0.0F,1.0F):
+                faces.size()==1?std::clamp(sharp[1].first,0.0F,1.0F):0.0F;
+            point=add(multiply(point,1-corner),multiply(cage.points[v],corner));
         }
+        next.points[v]=point;
     }
-    std::set<Edge> childCreases;
-    for (const auto& [key,data] : graph.edges) if (data.sharp) {
-        childCreases.insert(edge(key.first,data.point));childCreases.insert(edge(data.point,key.second));
+    std::map<Edge,float> childCreases;
+    for (const auto& [key,data] : graph.edges) if (data.strength>1.0F) {
+        childCreases[edge(key.first,data.point)]=data.strength-1.0F;
+        childCreases[edge(data.point,key.second)]=data.strength-1.0F;
     }
     for (std::uint32_t face=0;face<cage.faces.size();++face) {
         const auto& original=cage.faces[face];const auto centre=average_attributes(original.attributes);
@@ -255,16 +302,16 @@ bool refine(Cage& cage,Topology& graph,std::set<Edge>& creases,std::string& erro
 }
 }
 
-std::vector<std::vector<std::uint32_t>> subdivision_control_face_triangles(const CookedPolygonAsset& mesh) {
+std::vector<std::vector<std::uint32_t>> subdivision_control_face_triangles(const CookedPolygonAsset& mesh,const SubdivisionSettings* settings) {
     if (!validate_polygon_asset(mesh) || mesh.indices.size()/3>kMaxSubdivisionControlTriangles) return {};
-    const auto cage=parse_cage(mesh);std::vector<std::vector<std::uint32_t>> result;
+    const auto cage=parse_cage(mesh,settings);std::vector<std::vector<std::uint32_t>> result;
     for (const auto& face : cage.faces) result.push_back(face.triangles);
     return result;
 }
 
-std::set<std::uint64_t> subdivision_control_edges(const CookedPolygonAsset& mesh) {
+std::set<std::uint64_t> subdivision_control_edges(const CookedPolygonAsset& mesh,const SubdivisionSettings* settings) {
     if (!validate_polygon_asset(mesh) || mesh.indices.size()/3>kMaxSubdivisionControlTriangles) return {};
-    const auto cage=parse_cage(mesh);
+    const auto cage=parse_cage(mesh,settings);
     std::map<std::tuple<float,float,float>,std::uint32_t> first;
     for (std::uint32_t i=0;i<mesh.vertices.size();++i) {
         const auto p=mesh.vertices[i].position;first.emplace(std::make_tuple(p.x,p.y,p.z),i);
@@ -278,7 +325,100 @@ std::set<std::uint64_t> subdivision_control_edges(const CookedPolygonAsset& mesh
     return result;
 }
 
-SubdivisionEvaluation evaluate_subdivision(const CookedPolygonAsset& control,SubdivisionSettings settings) {
+void freeze_subdivision_topology(const CookedPolygonAsset& mesh,SubdivisionSettings& settings) {
+    if (!settings.controlFaces.empty()) return;
+    for (const auto& face : subdivision_control_face_triangles(mesh)) {
+        std::vector<std::uint32_t> record;
+        for (auto triangle : face) for (unsigned j=0;j<3;++j) record.push_back(mesh.indices[triangle*3+j]);
+        settings.controlFaces.push_back(std::move(record));
+    }
+}
+SubdivisionSettings remap_subdivision_topology(const CookedPolygonAsset& before,
+    const CookedPolygonAsset& after,const SubdivisionSettings& original) {
+    if (!validate_polygon_asset(before) || !validate_polygon_asset(after) ||
+        before.indices.size()/3>kMaxSubdivisionControlTriangles || after.indices.size()/3>kMaxSubdivisionControlTriangles)
+        return original; // The committing command reports invalid geometry before mutating the object.
+    auto source=original;freeze_subdivision_topology(before,source);
+    const auto materialIds=[](const CookedPolygonAsset& mesh) {
+        std::vector<std::uint32_t> ids(mesh.indices.size()/3);
+        for (const auto& part : mesh.submeshes)
+            for (auto t=part.firstIndex/3;t<(part.firstIndex+part.indexCount)/3;++t) ids[t]=part.materialIndex;
+        return ids;
+    };
+    if (before.indices==after.indices && before.vertices.size()==after.vertices.size() &&
+        materialIds(before)==materialIds(after)) return source;
+    auto result=source;result.controlFaces.clear();result.edgeCreases.clear();
+    std::map<std::tuple<float,float,float>,std::uint32_t> positions;
+    for (std::uint32_t i=0;i<after.vertices.size();++i) {
+        const auto p=after.vertices[i].position;positions.emplace(std::make_tuple(p.x,p.y,p.z),i);
+    }
+    const auto mapVertex=[&](std::uint32_t index)->std::optional<std::uint32_t> {
+        if (index>=before.vertices.size()) return {};
+        const auto p=before.vertices[index].position;
+        const auto at=positions.find(std::make_tuple(p.x,p.y,p.z));
+        return at==positions.end()?std::nullopt:std::optional<std::uint32_t>(at->second);
+    };
+    using Signature=std::array<std::uint32_t,3>;
+    const auto signature=[](Signature v) {
+        if (v[1]<v[0] && v[1]<v[2]) return Signature{v[1],v[2],v[0]};
+        if (v[2]<v[0] && v[2]<v[1]) return Signature{v[2],v[0],v[1]};
+        return v;
+    };
+    std::map<Signature,std::vector<std::uint32_t>> lookup;
+    for (std::uint32_t i=0;i<after.indices.size()/3;++i) {
+        Signature v{};
+        for (unsigned j=0;j<3;++j) {const auto p=after.vertices[after.indices[i*3+j]].position;v[j]=positions.at(std::make_tuple(p.x,p.y,p.z));}
+        lookup[signature(v)].push_back(i);
+    }
+    std::set<std::uint32_t> used;
+    SubdivisionSettings triangleSettings;
+    for (std::size_t i=0;i<after.indices.size();i+=3)
+        triangleSettings.controlFaces.push_back({after.indices[i],after.indices[i+1],after.indices[i+2]});
+    const auto triangleCage=parse_cage(after,&triangleSettings);
+    for (const auto& group : subdivision_control_face_triangles(before,&source)) {
+        std::vector<std::uint32_t> ids;bool valid=true;
+        for (auto triangle : group) {
+            Signature mapped{};
+            for (unsigned j=0;j<3;++j) {
+                const auto v=mapVertex(before.indices[triangle*3+j]);
+                if (!v) {valid=false;break;}mapped[j]=*v;
+            }
+            if (!valid) break;
+            const auto at=lookup.find(signature(mapped));
+            if (at==lookup.end()) {valid=false;break;}
+            const auto id=std::find_if(at->second.begin(),at->second.end(),[&](auto v){return !used.contains(v) && std::find(ids.begin(),ids.end(),v)==ids.end();});
+            if (id==at->second.end()) {valid=false;break;}ids.push_back(*id);
+        }
+        if (!valid) continue;
+        // A material split turns a former quad into two independent triangle faces.
+        std::vector<std::uint32_t> record;
+        for (auto id : ids) for (unsigned j=0;j<3;++j) record.push_back(after.indices[id*3+j]);
+        Face pair;
+        const bool keepQuad=ids.size()==2 && quad_pair(triangleCage,triangleCage.faces[ids[0]],triangleCage.faces[ids[1]],pair);
+        if (ids.size()==1 || keepQuad) result.controlFaces.push_back(std::move(record));
+        else for (auto id : ids) result.controlFaces.push_back({after.indices[id*3],after.indices[id*3+1],after.indices[id*3+2]});
+        used.insert(ids.begin(),ids.end());
+    }
+    // Never pair a surviving old triangle with unrelated newly created geometry.
+    for (const auto& group : subdivision_control_face_triangles(after)) {
+        std::vector<std::uint32_t> remaining;
+        for (auto id : group) if (!used.contains(id)) remaining.push_back(id);
+        if (remaining.empty()) continue;
+        std::vector<std::uint32_t> record;
+        for (auto id : remaining) for (unsigned j=0;j<3;++j) record.push_back(after.indices[id*3+j]);
+        result.controlFaces.push_back(std::move(record));used.insert(remaining.begin(),remaining.end());
+    }
+    const auto allowed=subdivision_control_edges(after,&result);
+    for (const auto& [key,strength] : source.edgeCreases) {
+        const auto a=mapVertex(std::uint32_t(key>>32U)),b=mapVertex(std::uint32_t(key));
+        if (!a || !b || *a==*b) continue;
+        const auto v=edge(*a,*b);const auto mapped=(std::uint64_t(v.first)<<32U)|v.second;
+        if (allowed.contains(mapped)) result.edgeCreases[mapped]=strength;
+    }
+    return result;
+}
+
+SubdivisionEvaluation evaluate_subdivision(const CookedPolygonAsset& control,const SubdivisionSettings& settings) {
     SubdivisionEvaluation result;
     if (settings.level>kMaxSubdivisionLevel) {result.error="Choose subdivision level 0..4";return result;}
     if (const auto valid=validate_polygon_asset(control);!valid) {result.error=valid.message;return result;}
@@ -290,11 +430,34 @@ SubdivisionEvaluation evaluate_subdivision(const CookedPolygonAsset& control,Sub
         if (image.rgba8.size()>64U*1024U*1024U-imageBytes) {result.error="Subdivision texture data exceeds 64 MiB";return result;}
         imageBytes+=image.rgba8.size();
     }
+    if (settings.controlFaces.size()>kMaxSubdivisionControlTriangles || settings.edgeCreases.size()>kMaxSubdivisionControlTriangles*3) {
+        result.error="Subdivision metadata exceeds its budget";return result;
+    }
+    std::size_t recorded=0;
+    for (const auto& face : settings.controlFaces) {
+        if ((face.size()!=3 && face.size()!=6) || (recorded+=face.size())>control.indices.size()) {
+            result.error="Invalid subdivision control-face metadata";return result;
+        }
+    }
+    auto cage=parse_cage(control,&settings,&result.error);
+    if (!result.error.empty()) return result;
+    std::map<std::tuple<float,float,float>,std::uint32_t> geometric;
+    for (std::uint32_t i=0;i<cage.points.size();++i) {
+        const auto p=cage.points[i];geometric.emplace(std::make_tuple(p.x,p.y,p.z),i);
+    }
+    const auto allowed=subdivision_control_edges(control,&settings);
+    std::map<Edge,float> creases;
+    for (const auto& [key,strength] : settings.edgeCreases) {
+        if (!std::isfinite(strength) || strength<=0 || strength>4 || !allowed.contains(key)) {
+            result.error="Invalid saved subdivision edge crease";return result;
+        }
+        const auto a=control.vertices[std::size_t(key>>32U)].position,b=control.vertices[std::size_t(key&0xffffffffU)].position;
+        creases[edge(geometric.at(std::make_tuple(a.x,a.y,a.z)),geometric.at(std::make_tuple(b.x,b.y,b.z)))]=strength;
+    }
     if (settings.level==0) {
         result.mesh=control;for (std::uint32_t i=0;i<control.indices.size()/3;++i) result.controlTriangles.push_back(i);
         return result;
     }
-    auto cage=parse_cage(control);std::set<Edge> creases;
     for (std::uint32_t level=0;level<settings.level;++level) {
         Topology graph;
         if (!topology(cage,graph,creases,level==0 && settings.preserveSharpEdges,result.error) ||
@@ -390,13 +553,17 @@ CommandResult SetSubdivisionSettingsCommand::execute(EditorDocument& document) {
             const auto& overrides=object->prefabLink->overrides;
             if (const auto at=overrides.find("subdivision.level");at!=overrides.end()) levelOverride_=at->second;
             if (const auto at=overrides.find("subdivision.sharp_edges");at!=overrides.end()) sharpOverride_=at->second;
+            if (const auto at=overrides.find("polygon.geometry");at!=overrides.end()) geometryOverride_=at->second;
         }
         captured_=true;
     }
     const auto result=apply(document,before_,after_);
     if (result.success && object->prefabLink) {
-        object->prefabLink->overrides["subdivision.level"]=std::int64_t(after_.level);
-        object->prefabLink->overrides["subdivision.sharp_edges"]=after_.preserveSharpEdges;
+        if (before_.level!=after_.level) object->prefabLink->overrides["subdivision.level"]=std::int64_t(after_.level);
+        if (before_.preserveSharpEdges!=after_.preserveSharpEdges)
+            object->prefabLink->overrides["subdivision.sharp_edges"]=after_.preserveSharpEdges;
+        if (before_.edgeCreases!=after_.edgeCreases || before_.controlFaces!=after_.controlFaces)
+            object->prefabLink->overrides["polygon.geometry"]=std::int64_t{1};
     }
     return result;
 }
@@ -406,6 +573,7 @@ CommandResult SetSubdivisionSettingsCommand::undo(EditorDocument& document) {
         auto& overrides=object->prefabLink->overrides;
         if (levelOverride_) overrides["subdivision.level"]=*levelOverride_;else overrides.erase("subdivision.level");
         if (sharpOverride_) overrides["subdivision.sharp_edges"]=*sharpOverride_;else overrides.erase("subdivision.sharp_edges");
+        if (geometryOverride_) overrides["polygon.geometry"]=*geometryOverride_;else overrides.erase("polygon.geometry");
     }
     return result;
 }

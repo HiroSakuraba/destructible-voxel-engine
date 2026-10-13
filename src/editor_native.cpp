@@ -8540,7 +8540,8 @@ const EditorSelectionDiagnostics& NativeEditorController::selection_diagnostics(
 std::vector<EditorPolygonDrawTriangle> NativeEditorController::polygon_draw_items() const {
     const auto poses=playSession_.presentation_transforms();
     auto items = build_editor_polygon_draw_list(workspace_.document(),camera_,layout_.viewport,
-        workspace_.selected_objects(),viewportSettings_.isolatedObjects,100000,&poses);
+        workspace_.selected_objects(),viewportSettings_.isolatedObjects,100000,&poses,
+        subdivisionCageOnly_ && workspace_.mode()==EditorMode::Edit ? workspace_.selected_object().value_or(0):0);
     const auto hidden=mesh_authoring_hidden_objects();
     std::erase_if(items,[&](const auto& item){return hidden.contains(item.object);});
     if (selectionDomain_ == SelectionDomain::Polygons) for (auto& item:items) {
@@ -8552,7 +8553,8 @@ std::vector<EditorPolygonDrawTriangle> NativeEditorController::polygon_draw_item
         const auto* source=workspace_.document().find_object(polygonPreviewSelection_.object);
         if (source) {
             EditorDocument preview("Slice back preview");
-            EditorObject back(source->id,source->name); back.polygon=*polygonSliceBack_;
+            EditorObject back(source->id,source->name); back.polygon=*polygonSliceBack_; back.subdivision=source->subdivision;
+            if (back.subdivision) *back.subdivision=remap_subdivision_topology(*source->polygon,*back.polygon,*back.subdivision);
             back.transform=source->transform; back.voxelScale=source->voxelScale;
             preview.add_object(std::move(back));
             auto backItems=build_editor_polygon_draw_list(preview,camera_,layout_.viewport,{}, {},100000);

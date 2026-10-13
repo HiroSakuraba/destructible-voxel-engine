@@ -16,6 +16,6 @@ private:
     EditorObjectId id_{};
     SubdivisionSettings before_{},after_{};
     bool captured_{};
-    std::optional<ComponentValue> levelOverride_,sharpOverride_;
+    std::optional<ComponentValue> levelOverride_,sharpOverride_,geometryOverride_;
 };
 }

@@ -449,6 +449,7 @@ struct EditorAutosaveStatus {
 };
 
 struct NativeMeshAuthoringState;
+enum class MeshBoolean : std::uint8_t;
 class IEditorCanvas;
 class NativeEditorController {
 public:
@@ -827,6 +828,7 @@ public:
     [[nodiscard]] const std::vector<EditorVoxelDrawItem>& draw_items() const;
     [[nodiscard]] std::vector<EditorPolygonDrawTriangle> polygon_draw_items() const;
     bool import_polygon_model(const std::filesystem::path&);
+    bool import_exact_cad_model(const std::filesystem::path&);
     [[nodiscard]] std::size_t draw_item_count() const { return draw_items().size(); }
     // Cached draw list for the selected camera rig's picture-in-picture preview.
     [[nodiscard]] const std::vector<EditorVoxelDrawItem>& camera_preview_draw_items(
@@ -937,6 +939,8 @@ public:
     [[nodiscard]] std::vector<std::string> polygon_preview_lines() const;
     void cancel_polygon_preview();
     bool dispatch_mesh_authoring_action(std::string_view);
+    bool start_exact_boolean(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
+    bool open_mesh_boolean_preview(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
     bool mesh_authoring_key(std::string_view,bool control,bool shift,bool alt);
     bool mesh_authoring_pointer_down(PointerButton,int,int,std::uint32_t);
     bool mesh_authoring_pointer_move(int,int,std::uint32_t);

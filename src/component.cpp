@@ -133,6 +133,11 @@ ComponentTypeRegistry ComponentTypeRegistry::make_default() {
         {{"state",std::string{},true,false,"UV authoring state"}}}, &ignored);
     (void)registry.register_type({"dve.collision_hull","Authored Collision Hull",false,
         {{"points",std::string{},true,false,"Hull control points"}}}, &ignored);
+    // Exact CAD source of a polygon object (editor_exact_cad.hpp): authoring-only.
+    (void)registry.register_type({"dve.exact_brep","Exact CAD Source",false,
+        {{"source",std::string{},true,true,"Exact B-rep (.brep)"},
+         {"sha256",std::string{},false,false,"SHA-256"},
+         {"origin",std::string{},false,false,"Origin"}}}, &ignored);
     (void)registry.register_type({
         "dve.script", "Lua Script", true,
         {{"asset", std::string{}, true, true}, {"startup", false, false, false}}}, &ignored);

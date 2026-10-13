@@ -61,6 +61,107 @@ void hull(){
     check(world.add_component(id,component,&error)!=nullptr,"runtime applies authored hull");check(!world.set_component_property(id,100,"points",std::string("invalid"),&error),"runtime refuses invalid hull edit");check(std::get<std::string>(world.component(id,100)->properties.at("points"))==std::get<std::string>(component.properties.at("points")),"invalid hull update retains metadata");check(world.set_component_enabled(id,100,false),"runtime disables hull");check(!world.set_component_property(id,100,"points",std::string("invalid"),&error),"disabled hull still validates points");check(world.set_component_enabled(id,100,true),"runtime reenables hull");check(world.remove_component(id,100),"runtime restores default collision");
 }
 struct Canvas final:IEditorCanvas{mutable unsigned lines{},fills{};void fill(UiRect,EditorColor)const override{++fills;}void outline(UiRect,EditorColor)const override{}void line(int,int,int,int,EditorColor,int)const override{++lines;}void text(int,int,std::string_view,EditorColor)const override{}int text_width(std::string_view s)const override{return int(s.size()*8);}};
+
+std::string first_line(const std::filesystem::path& p){std::ifstream in(p);std::string line;std::getline(in,line);return line;}
+std::uint64_t edge_key(std::uint32_t a,std::uint32_t b){return (std::uint64_t(std::min(a,b))<<32U)|std::max(a,b);}
+void uv_flags_persistence(){
+    EditorDocument document("UV flags");document.add_object(cube(1));
+    auto* object=document.find_object(1);std::string error;
+    auto empty=read_polygon_uv_authoring(*object,&error);check(empty&&empty->enabled&&empty->seams[0].empty()&&empty->pins[1].empty(),"no record reads as empty flags");
+    PolygonUvAuthoring flags=*empty;const auto edges=polygon_all_components(*object->polygon,PolygonSelectionMode::Edge);
+    flags.seams[0].insert(*edges.begin());flags.seams[1].insert(*edges.rbegin());flags.pins[0]={0,5};flags.pins[1]={7};
+    auto command=make_polygon_uv_authoring_command(document,*object,flags,&error);check(bool(command),"UV flag command builds");
+    EditorCommandStack stack;check(stack.execute(document,std::move(command)).success,"UV flag command executes");
+    auto directory=std::filesystem::temp_directory_path()/"dve_uv_flags_roundtrip";std::filesystem::remove_all(directory);
+    auto saved=document.save_transactional(directory/"scene.dvescene");check(saved.success,"UV flag scene saves");
+    check(first_line(saved.manifestPath)=="DVE_EDITOR_SCENE 7","polygon scene is format 7");
+    auto loaded=EditorDocument::load(saved.manifestPath,&error);check(bool(loaded),"UV flag scene reloads");
+    auto restored=read_polygon_uv_authoring(*loaded->find_object(1),&error);
+    check(restored&&restored->seams==flags.seams&&restored->pins==flags.pins&&restored->enabled,"UV seams and pins survive save/load per channel");
+    auto& bad=*loaded->find_object(1);for(auto& c:bad.components)if(c.type==kUvAuthoringComponent)c.properties["state"]=std::string("DVE_UV 1 0 36\n0 0\n0 0\n");
+    check(!read_polygon_uv_authoring(bad,&error)&&!error.empty(),"stale layout hash refused with reason");
+    EditorDocument plain("No polygons");plain.add_object(EditorObject(1,"Empty"));
+    auto plainSaved=plain.save_transactional(directory/"plain.dvescene");check(plainSaved.success,"plain scene saves");
+    check(first_line(plainSaved.manifestPath)=="DVE_EDITOR_SCENE 6","scenes without polygons stay format 6");
+    check(bool(EditorDocument::load(plainSaved.manifestPath,&error)),"format 6 scene reloads");
+    std::filesystem::remove_all(directory);
+}
+void seam_unwrap(){
+    auto plane=make_editor_polygon_plane(1);const std::set<std::uint32_t> all{0,1,2,3,4,5};
+    check(polygon_uv_islands(plane).size()==1,"plane is one island without seams");
+    const auto geometric=polygon_geometric_vertices(plane);
+    UvEditSettings settings;settings.seams={edge_key(geometric[plane.indices[0]],geometric[plane.indices[2]])};
+    check(polygon_uv_islands(plane,0,settings.seams).size()==2,"diagonal seam splits the island");
+    auto cut=edit_polygon_uv(plane,all,UvEdit::Unwrap,settings);if(!cut)throw std::runtime_error(cut.error);
+    check(cut.mesh.vertices.size()>plane.vertices.size(),"seam unwrap duplicates seam vertices");
+    check(polygon_uv_islands(cut.mesh,0,settings.seams).size()==2,"seam unwrap keeps separate UV islands");check(cut.mesh.indices[0]!=cut.mesh.indices[3]||cut.mesh.indices[2]!=cut.mesh.indices[4],"seam corners no longer share vertex attributes");
+    check(polygon_uv_layout_hash(cut.mesh)==polygon_uv_layout_hash(plane),"seam cut keeps the saved-flag layout hash");
+    settings.seams={edge_key(1000,1001)};check(!edit_polygon_uv(plane,all,UvEdit::Unwrap,settings),"stale seam refused");
+    auto closed=make_editor_polygon_cube(1);for(auto& v:closed.vertices)v.texcoord={v.position.x*.3F+v.position.z*.1F,v.position.y*.3F+v.position.z*.05F};
+    std::set<std::uint32_t> cubeAll;for(std::uint32_t c=0;c<closed.indices.size();++c)cubeAll.insert(c);
+    refresh_editor_polygon(closed,false);check(polygon_uv_islands(closed).size()==1,"welded cube is one closed island");
+    check(bool(edit_polygon_uv(closed,cubeAll,UvEdit::Unwrap)),"closed chart without seams falls back per triangle");
+    const auto cg=polygon_geometric_vertices(closed);settings.seams={edge_key(cg[closed.indices[0]],cg[closed.indices[1]])};
+    auto failed=edit_polygon_uv(closed,cubeAll,UvEdit::Unwrap,settings);
+    check(!failed&&failed.error.find("disk boundary")!=std::string::npos,"seamed chart that cannot flatten fails honestly");
+}
+const MenuAction& menu(NativeEditorController& c,std::string_view id){c.refresh_menu_state();const auto& menus=c.workspace().menus();const auto* a=menus.find(id);if(!a)throw std::runtime_error("missing menu");return *a;}
+bool has_flags(NativeEditorController& c){return find_component_by_type(std::span<const Component>(c.workspace().document().find_object(1)->components),kUvAuthoringComponent)!=nullptr;}
+void uv_flag_controller(){
+    EditorDocument d("UV flag gating");d.add_object(cube(1));d.add_object(cube(2));
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(d)));auto& c=*owner;c.resize(1600,900);c.workspace().select_object(1);
+    check(c.set_polygon_mode(PolygonSelectionMode::Edge),"edge mode");
+    const auto edges=polygon_all_components(*c.workspace().document().find_object(1)->polygon,PolygonSelectionMode::Edge);
+    const std::set<std::uint64_t> picked{*edges.begin()};c.select_polygon_components(picked,SelectionOperation::Replace);
+    check(menu(c,"mesh.uv_mark_seam").enabled,"mark seam enabled with edges");
+    check(!menu(c,"mesh.uv_reset_flags").enabled&&!menu(c,"mesh.uv_reset_flags").disabledReason.empty(),"reset disabled with reason when no flags");
+    check(!c.dispatch_action("mesh.uv_reset_flags")&&!has_flags(c),"reset without flags refuses");
+    auto refused=[&](const char* why){auto& m=menu(c,"mesh.uv_mark_seam");check(!m.enabled&&!m.disabledReason.empty(),why);check(!c.dispatch_action("mesh.uv_mark_seam")&&!has_flags(c),why);};
+    auto* o=c.workspace().document().find_object(1);
+    o->flags.locked=true;refused("locked mesh refuses seam edits");o->flags.locked=false;
+    o->flags.visible=false;refused("hidden mesh refuses seam edits");o->flags.visible=true;
+    c.workspace().select_object(2);check(c.dispatch_action("view.isolate_selection"),"isolate other");c.workspace().select_object(1);
+    check(c.is_isolated_out(1),"object isolated out");refused("isolated-out mesh refuses seam edits");
+    c.workspace().select_object(2);(void)c.dispatch_action("view.isolate_selection");check(c.isolated_objects().empty(),"isolation cleared");
+    c.workspace().select_object(1);
+    if(c.dispatch_action("physics.play")){check(c.play_session().active(),"play active");refused("Play refuses seam edits");check(c.dispatch_action("physics.stop"),"stop play");}
+    else throw std::runtime_error("physics.play did not start");
+    check(c.set_polygon_mode(PolygonSelectionMode::Edge),"edge mode again");c.select_polygon_components(picked,SelectionOperation::Replace);
+    // Mark seam: one undo step, selection restored on undo.
+    check(c.dispatch_action("mesh.uv_mark_seam")&&has_flags(c),"mark seam saves flags");
+    c.select_polygon_components({},SelectionOperation::Replace);
+    check(c.dispatch_action("edit.undo")&&!has_flags(c),"mark seam undoes in one step");
+    check(c.polygon_selection().components==picked,"mark seam undo restores selection");
+    check(c.dispatch_action("edit.redo")&&has_flags(c),"mark seam redo");
+    c.select_polygon_components(picked,SelectionOperation::Replace);
+    check(c.dispatch_action("mesh.uv_clear_seam"),"clear seam");
+    check(read_polygon_uv_authoring(*c.workspace().document().find_object(1))->seams[0].empty(),"seam cleared");
+    c.select_polygon_components({},SelectionOperation::Replace);
+    check(c.dispatch_action("edit.undo")&&read_polygon_uv_authoring(*c.workspace().document().find_object(1))->seams[0]==picked,"clear seam undo");
+    check(c.polygon_selection().components==picked,"clear seam undo restores selection");
+    // Pins in the UV workspace.
+    check(c.dispatch_action("mesh.uv_editor"),"UV workspace opens");c.key_down("a",false,false,false);
+    const auto faces=c.polygon_selection().components;check(!faces.empty(),"UV select all");
+    check(menu(c,"mesh.uv_toggle_pin").enabled,"toggle pin enabled");
+    check(c.dispatch_action("mesh.uv_toggle_pin"),"toggle pins");
+    check(read_polygon_uv_authoring(*c.workspace().document().find_object(1))->pins[0].size()==36,"all corners pinned");
+    c.select_polygon_components({},SelectionOperation::Replace);
+    check(c.dispatch_action("edit.undo")&&read_polygon_uv_authoring(*c.workspace().document().find_object(1))->pins[0].empty(),"pin undo one step");
+    check(c.polygon_selection().components==faces,"pin undo restores selection");
+    // Another preview open refuses flag edits.
+    c.key_down("a",false,false,false);c.key_down("g",false,false,false);c.key_down("1",false,false,false);check(c.mesh_authoring_dragging(),"UV preview open");
+    check(!menu(c,"mesh.uv_toggle_pin").enabled&&!menu(c,"mesh.uv_toggle_pin").disabledReason.empty(),"pin disabled during preview");
+    check(!menu(c,"mesh.uv_reset_flags").enabled,"reset disabled during preview");
+    check(!c.dispatch_action("mesh.uv_toggle_pin"),"pin refused during preview");
+    c.key_down("escape",false,false,false);check(!c.mesh_authoring_dragging(),"preview cancelled");
+    // Reset.
+    check(menu(c,"mesh.uv_reset_flags").enabled,"reset enabled with flags");
+    const auto before=c.polygon_selection().components;
+    check(c.dispatch_action("mesh.uv_reset_flags")&&!has_flags(c),"reset removes flags");
+    c.select_polygon_components({},SelectionOperation::Replace);
+    check(c.dispatch_action("edit.undo")&&has_flags(c),"reset undo one step");
+    check(c.polygon_selection().components==before,"reset undo restores selection");
+}
 void native(){
     EditorDocument d("Native authoring");d.add_object(cube(1));auto b=cube(2);b.transform.position={.5F,0,0};d.add_object(std::move(b));auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(d)));auto& c=*owner;c.resize(1600,900);c.workspace().select_object(2);c.workspace().add_to_selection(1);
     check(c.dispatch_action("mesh.boolean_difference"),"native Boolean preview");check(c.workspace().document().objects().size()==2,"preview preserves inputs");c.key_down("enter",false,false,false);check(c.workspace().document().objects().size()==3,"Boolean new output");check(c.dispatch_action("edit.undo")&&c.workspace().document().objects().size()==2,"Boolean Undo");check(c.workspace().selection_count()==2,"Boolean undo selection");
@@ -68,4 +169,4 @@ void native(){
     check(c.dispatch_action("mesh.uv_editor"),"UV workspace opens");c.key_down("a",false,false,false);c.key_down("g",false,false,false);c.key_down("1",false,false,false);check(c.mesh_authoring_dragging(),"typed UV preview");check(!c.dispatch_action("file.save"),"unapplied UVs cannot save");c.key_down("enter",false,false,false);check(c.workspace().document().find_object(1)->polygon->contentHash!=geometry,"UV edit applies");check(c.dispatch_action("edit.undo")&&c.workspace().document().find_object(1)->polygon->contentHash==geometry,"UV Undo exact");Canvas canvas;c.draw_mesh_authoring(canvas,c.layout().viewport);check(canvas.lines&&canvas.fills,"UV canvas draws geometry and checker");
 }
 }
-int main(){try{if(!mesh_boolean_available()){std::cout<<"Manifold authoring disabled in this build\n";return 0;}booleans();topology();uv();hull();native();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Mesh authoring regression checks passed\n";}
+int main(){try{uv_flags_persistence();seam_unwrap();uv_flag_controller();if(!mesh_boolean_available()){std::cout<<"Manifold authoring disabled in this build\n";return 0;}booleans();topology();uv();hull();native();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Mesh authoring regression checks passed\n";}

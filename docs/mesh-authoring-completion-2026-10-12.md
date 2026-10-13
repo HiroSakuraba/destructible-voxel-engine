@@ -1,5 +1,9 @@
 # Mesh authoring follow-up
 
+Saved seams/pins are implemented by the later follow-up in
+[Saved UV seams and pins](uv-seams-pins-2026-10-12.md); the session-only limitations
+below describe the earlier implementation.
+
 This builds on #112 with mesh Booleans, independent collision-hull authoring,
 additional topology operations and a native UV workspace. These are working
 editor paths, with bounded geometry APIs and atomic history commands. They do

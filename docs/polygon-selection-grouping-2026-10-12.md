@@ -1,5 +1,9 @@
 # Polygon selection and grouping follow-up
 
+Saved seams/pins are implemented by the later follow-up in
+[Saved UV seams and pins](uv-seams-pins-2026-10-12.md); the session-only limitations
+below describe the earlier implementation.
+
 This batch follows merged PR #113. It is a source-reviewed change. No builds,
 tests, or CI runs were performed for this batch, at the user's request.
 The publication commit includes `[skip ci]` for the repository's push and

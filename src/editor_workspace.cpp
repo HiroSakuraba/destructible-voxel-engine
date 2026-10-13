@@ -669,6 +669,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.smooth_normals","Polygon","Smooth Selected Normals",""},
         {"mesh.diagnostics","Polygon","Topology Diagnostics Overlay",""},
         {"mesh.uv_editor","Polygon","UV Workspace",""},
+        {"mesh.uv_mark_seam","Polygon","Mark UV Seam",""},
+        {"mesh.uv_clear_seam","Polygon","Clear UV Seam",""},
+        {"mesh.uv_toggle_pin","Polygon","Toggle Saved UV Pins",""},
+        {"mesh.uv_reset_flags","Polygon","Reset Saved UV Seams and Pins",""},
         {"polygon.assign_material","Polygon","Assign Active Material to Faces",""},
         {"polygon.weld","Polygon","Weld by Distance",""},
         {"polygon.select_shell","Polygon","Select Connected Components",""},
@@ -751,6 +755,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for(auto id:{"mesh.boolean_union","mesh.boolean_difference","mesh.boolean_reverse","mesh.boolean_intersection"})configure(id,"Mesh Booleans",70);
     for(auto id:{"mesh.hull_fit","mesh.hull_edit","mesh.hull_remove"})configure(id,"Collision Hull",75);
     for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
+    for(auto id:{"mesh.uv_editor","mesh.uv_mark_seam","mesh.uv_clear_seam","mesh.uv_toggle_pin","mesh.uv_reset_flags"})configure(id,"UV Editing",82);
     for (auto id:{"polygon.assign_material","polygon.weld","polygon.select_shell","polygon.select_invert","polygon.select_none","polygon.extract",
                  "polygon.join","polygon.separate","polygon.slice","polygon.preview_apply","polygon.preview_cancel"}) configure(id,"Mesh Editing",80);
     for (std::string_view id : {"material.assign", "material.apply", "material.link", "material.create_instance",

@@ -168,6 +168,7 @@ std::vector<Component> exportable_components(const EditorObject& object, const C
     for (const Component& component : object.components) {
         if (component.type == "dve.prefab_instance") continue;
         if (component.type == "dve.editor_scatter") continue;  // scatter settings: editor-only
+        if (component.type == kUvAuthoringComponent) continue;
         std::string reason;
         if (!validate_components(std::span<const Component>(&component, 1U), nullptr, &reason)) {
         } else if (component.type.starts_with("dve.")) {

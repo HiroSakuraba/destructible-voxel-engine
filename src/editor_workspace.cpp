@@ -605,6 +605,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.select_shrink","Voxel","Shrink Voxel Selection",""},
         {"voxel.select_invert","Voxel","Invert Voxel Selection",""},
         {"voxel.selection_brush","Voxel","Selection Brush",""},
+        {"polygon.convert_to_voxels","Polygon","Convert Selected Mesh to Voxels",""},
+        {"voxel.convert_to_polygon","Voxel","Convert Selected Voxels to Polygon",""},
+        {"voxel.authoring_apply","Voxel","Apply Voxel / Conversion Preview",""},
+        {"voxel.authoring_cancel","Voxel","Cancel Voxel / Conversion Preview",""},
+        {"voxel.select_cells","Voxel","Click Selection: Single Cell",""},
+        {"voxel.select_connected","Voxel","Click Selection: Connected Piece",""},
         {"voxel.extract_selection","Voxel","Extract Selected Voxels to New Object",""},
         {"voxel.region_extrude_x_positive","Voxel","Extrude Region +X (1 Cell)",""},
         {"voxel.region_extrude_x_negative","Voxel","Extrude Region -X (1 Cell)",""},
@@ -813,6 +819,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
                                 "voxel.select_invert", "voxel.extract_selection"})
         configure(id, "Voxel Selection", 50);
     configure("voxel.selection_brush", "Voxel Selection", 51, true);
+    configure("voxel.select_cells", "Voxel Selection", 48, true, "voxel.click_selection");
+    configure("voxel.select_connected", "Voxel Selection", 49, true, "voxel.click_selection");
+    configure("polygon.convert_to_voxels", "Geometry Conversion", 60);
+    configure("voxel.convert_to_polygon", "Geometry Conversion", 60);
+    configure("voxel.authoring_apply", "Voxel Preview", 70);
+    configure("voxel.authoring_cancel", "Voxel Preview", 71);
     for (std::string_view id : {
             "voxel.region_extrude_x_positive",
             "voxel.region_extrude_x_negative",
@@ -957,23 +969,31 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
              {"voxel mode", "voxel select", "region", "selection mode", "domain", "cells"});
     describe("voxel.extract_selection", "Move the selected voxels into a new object in place (Separate Selected).",
              {"extract", "separate", "split", "detach", "new object", "voxels"});
+    describe("polygon.convert_to_voxels", "Preview voxelizing the selected owned polygon mesh; choose cell size and fill mode, Apply creates a new object and keeps the source.",
+             {"convert", "voxelize", "polygon", "mesh", "voxels"});
+    describe("voxel.convert_to_polygon", "Preview an editable block-surface mesh with material groups and UV0/UV1; Apply creates a new object and keeps the source.",
+             {"convert", "surface", "mesh", "polygon", "voxels"});
+    describe("voxel.authoring_apply", "Apply the reviewed voxel region or conversion result in one Undo step.", {"apply", "preview", "conversion"});
+    describe("voxel.authoring_cancel", "Close the voxel region or conversion preview without changing scene geometry.", {"cancel", "preview", "conversion"});
+    describe("voxel.select_cells", "Viewport clicks select individual voxel cells; box gestures stay the same.", {"selection", "cell", "precision", "voxel"});
+    describe("voxel.select_connected", "Viewport clicks select the face-connected voxel piece, including buried cells.", {"selection", "piece", "connected", "voxel"});
     describe("voxel.selection_brush", "Toggle voxel Selection Brush: drag adds, Ctrl-drag removes, [ / ] changes radius; turn it off to box-select.",
              {"selection", "brush", "paint", "region", "voxels"});
-    describe("voxel.region_extrude_x_positive", "Extend the selected column frontiers by one cell along object-grid +X; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
-    describe("voxel.region_extrude_x_negative", "Extend the selected column frontiers by one cell along object-grid -X; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
-    describe("voxel.region_extrude_y_positive", "Extend the selected column frontiers by one cell along object-grid +Y; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
-    describe("voxel.region_extrude_y_negative", "Extend the selected column frontiers by one cell along object-grid -Y; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
-    describe("voxel.region_extrude_z_positive", "Extend the selected column frontiers by one cell along object-grid +Z; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
-    describe("voxel.region_extrude_z_negative", "Extend the selected column frontiers by one cell along object-grid -Z; blocked destinations cancel the edit.", {"region", "voxels", "extrude"});
-    describe("voxel.region_rotate_x_positive", "Rotate selected cells +90 degrees around object-grid X, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
-    describe("voxel.region_rotate_x_negative", "Rotate selected cells -90 degrees around object-grid X, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
-    describe("voxel.region_rotate_y_positive", "Rotate selected cells +90 degrees around object-grid Y, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
-    describe("voxel.region_rotate_y_negative", "Rotate selected cells -90 degrees around object-grid Y, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
-    describe("voxel.region_rotate_z_positive", "Rotate selected cells +90 degrees around object-grid Z, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
-    describe("voxel.region_rotate_z_negative", "Rotate selected cells -90 degrees around object-grid Z, using a snapped cell-centre pivot; blocked destinations cancel the edit.", {"region", "voxels", "rotate"});
-    describe("voxel.region_scale_2", "Expand each selected cell to a 2 x 2 x 2 block from the region minimum corner; blocked destinations cancel the edit.", {"region", "voxels", "scale"});
-    describe("voxel.region_scale_3", "Expand each selected cell to a 3 x 3 x 3 block from the region minimum corner; blocked destinations cancel the edit.", {"region", "voxels", "scale"});
-    describe("voxel.region_scale_4", "Expand each selected cell to a 4 x 4 x 4 block from the region minimum corner; blocked destinations cancel the edit.", {"region", "voxels", "scale"});
+    describe("voxel.region_extrude_x_positive", "Preview extending selected column frontiers; edit the signed cell distance along object-grid +X; blocked destinations refuse the preview.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_x_negative", "Preview extending selected column frontiers; edit the signed cell distance along object-grid -X; blocked destinations refuse the preview.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_y_positive", "Preview extending selected column frontiers; edit the signed cell distance along object-grid +Y; blocked destinations refuse the preview.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_y_negative", "Preview extending selected column frontiers; edit the signed cell distance along object-grid -Y; blocked destinations refuse the preview.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_z_positive", "Preview extending selected column frontiers; edit the signed cell distance along object-grid +Z; blocked destinations refuse the preview.", {"region", "voxels", "extrude"});
+    describe("voxel.region_extrude_z_negative", "Preview extending selected column frontiers; edit the signed cell distance along object-grid -Z; blocked destinations refuse the preview.", {"region", "voxels", "extrude"});
+    describe("voxel.region_rotate_x_positive", "Preview rotating selected cells +90 degrees around object-grid X, using a snapped cell-centre pivot; blocked destinations refuse the preview.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_x_negative", "Preview rotating selected cells -90 degrees around object-grid X, using a snapped cell-centre pivot; blocked destinations refuse the preview.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_y_positive", "Preview rotating selected cells +90 degrees around object-grid Y, using a snapped cell-centre pivot; blocked destinations refuse the preview.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_y_negative", "Preview rotating selected cells -90 degrees around object-grid Y, using a snapped cell-centre pivot; blocked destinations refuse the preview.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_z_positive", "Preview rotating selected cells +90 degrees around object-grid Z, using a snapped cell-centre pivot; blocked destinations refuse the preview.", {"region", "voxels", "rotate"});
+    describe("voxel.region_rotate_z_negative", "Preview rotating selected cells -90 degrees around object-grid Z, using a snapped cell-centre pivot; blocked destinations refuse the preview.", {"region", "voxels", "rotate"});
+    describe("voxel.region_scale_2", "Preview expanding cells to integer blocks (editable factor 2..8) from the region minimum corner; blocked destinations refuse the preview.", {"region", "voxels", "scale"});
+    describe("voxel.region_scale_3", "Preview expanding cells to integer blocks (editable factor 2..8) from the region minimum corner; blocked destinations refuse the preview.", {"region", "voxels", "scale"});
+    describe("voxel.region_scale_4", "Preview expanding cells to integer blocks (editable factor 2..8) from the region minimum corner; blocked destinations refuse the preview.", {"region", "voxels", "scale"});
     describe("voxel.select_grow", "Add the voxels touching the selection.", {"grow", "expand", "select"});
     describe("voxel.select_shrink", "Drop the selection's outer layer.", {"shrink", "contract", "select"});
     describe("voxel.select_invert", "Select the object's other voxels instead.", {"invert", "inverse", "select"});

@@ -3439,8 +3439,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     };
     const EditorObject* cachedObject = nullptr;
     for (const EditorVoxelDrawItem& item : drawItems) {
+        if (controller.voxel_preview_replaces_cell(item.objectId,item.voxel)) continue;
         polygonsUntil(item.depth);
-        const Float4 base = editor_material_display_color(controller.materials(), item.material);
+        const auto* paletteObject = shadingDocument.find_object(item.objectId);
+        const auto owned = paletteObject ? paletteObject->voxelMaterials.find(item.material) :
+            std::map<MaterialId,VoxelMaterialDefinition>::const_iterator{};
+        const Float4 base = paletteObject && owned != paletteObject->voxelMaterials.end() ? owned->second.baseColor :
+            editor_material_display_color(controller.materials(),item.material);
         float shade = std::clamp(1.1F - item.depth * 0.018F, 0.42F, 1.0F);
         if (item.selected) shade = std::min(1.0F, shade + 0.14F);
         EditorColor voxelColor = rgb(byte(base.x * shade), byte(base.y * shade), byte(base.z * shade));
@@ -4397,7 +4402,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             // The preview list has the same 1.2x margin around the preview rect.
             const RectClipCanvas previewPainter(viewportPainter, preview);
             for (const EditorVoxelDrawItem& item : previewItems) {
-                const Float4 base = editor_material_display_color(controller.materials(), item.material);
+                const auto* paletteObject = controller.workspace().document().find_object(item.objectId);
+                const auto owned = paletteObject ? paletteObject->voxelMaterials.find(item.material) :
+                    std::map<MaterialId,VoxelMaterialDefinition>::const_iterator{};
+                const Float4 base = paletteObject && owned != paletteObject->voxelMaterials.end() ? owned->second.baseColor :
+                    editor_material_display_color(controller.materials(),item.material);
                 const float shade = std::clamp(1.08F - item.depth * 0.018F, 0.42F, 1.0F);
                 const int radius = std::max(1, static_cast<int>(item.pixelRadius));
                 previewPainter.fill({static_cast<int>(item.screenX) - radius, static_cast<int>(item.screenY) - radius,

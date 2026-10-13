@@ -23,6 +23,7 @@
 
 #include "dve/editor_command.hpp"
 #include "dve/editor_viewport.hpp"
+#include "dve/editor_materials.hpp"
 
 namespace dve::editor {
 
@@ -50,7 +51,16 @@ inline constexpr std::size_t kMaxVoxelSelection = 500'000;
 // Without through, require an exposed camera-facing face (not scene-occlusion testing).
 // Stops collecting after kMaxVoxelSelection + 1 cells, so callers can refuse an oversized box.
 [[nodiscard]] std::set<Int3> voxels_in_screen_rect(const EditorObject& object, const EditorCamera& camera,
-                                                   UiRect viewport, UiRect rect, bool through, bool crossing = true);
+                                                   UiRect viewport, UiRect rect, bool through, bool crossing = true,
+                                                   const EditorDocument* document = nullptr,
+                                                   const std::set<EditorObjectId>* onlyObjects = nullptr,
+                                                   std::string* error = nullptr);
+// Visibility is established by first-hit scene rays, including self-occlusion. Samples are
+// bounded; narrow visible slivers can be missed, but occluded samples never select a cell.
+inline constexpr std::size_t kMaxVoxelSelectionRays = 100'000;
+[[nodiscard]] bool voxel_cell_visible(const EditorDocument& document, const EditorObject& object, Int3 cell,
+    const EditorCamera& camera, UiRect viewport, const std::set<EditorObjectId>* onlyObjects,
+    std::size_t& rayBudget);
 // Occupied cells in a cube of `radius` around `center` (radius 0 = the cell itself).
 [[nodiscard]] std::set<Int3> voxels_in_cube(const VoxelObject& voxels, Int3 center, int radius);
 
@@ -86,6 +96,23 @@ struct VoxelRegionBuild {
 [[nodiscard]] VoxelRegionBuild build_voxel_region_command(const EditorObject& object,
     const std::set<Int3>& cells, VoxelRegionEdit edit, VoxelRegionSettings settings);
 
+inline constexpr std::uint64_t kMaxConversionWorkingCells = 2'000'000;
+inline constexpr std::size_t kMaxConversionFaces = 250'000;
+struct GeometryConversionSettings {
+    float voxelSizeMeters{0.1F}; // Source-local units; the object's existing scale is retained
+    VoxelizationMode mode{VoxelizationMode::Solid};
+};
+struct GeometryConversionBuild {
+    std::optional<EditorObject> object;
+    std::set<Int3> selectedCells; // Region preview output, unused by conversions
+    std::string error;
+    std::string note;
+};
+[[nodiscard]] GeometryConversionBuild polygon_to_voxels(const EditorObject& source,
+    EditorObjectId outputId, GeometryConversionSettings settings, const std::vector<MaterialId>& paletteSlots);
+[[nodiscard]] GeometryConversionBuild voxels_to_polygon(const EditorObject& source,
+    EditorObjectId outputId, const EditorMaterialLibrary& materials);
+
 // A copy of selected cells, independent of the scene.
 struct VoxelClipboard {
     std::string name;
@@ -95,6 +122,7 @@ struct VoxelClipboard {
     std::optional<EditorObjectId> parent;
     EditorObjectFlags flags{};
     std::vector<SparseVoxelStateEntry> cells;
+    std::map<MaterialId,VoxelMaterialDefinition> materials;
     std::vector<Int3> anchors;
 };
 [[nodiscard]] VoxelClipboard copy_voxels(const EditorObject& object, const std::set<Int3>& cells);

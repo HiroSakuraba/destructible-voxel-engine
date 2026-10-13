@@ -12,6 +12,7 @@
 #include <system_error>
 
 #include "dve/dvox.hpp"
+#include "dve/editor_materials.hpp"
 
 namespace dve::editor {
 namespace {
@@ -95,6 +96,7 @@ EditorObject clone_editor_object(const EditorObject& source) {
     cloned.textFontAsset = source.textFontAsset;
     cloned.voxelSizeMeters = source.voxelSizeMeters;
     cloned.voxelScale = source.voxelScale;
+    cloned.voxelMaterials = source.voxelMaterials;
     cloned.polygon = source.polygon;
     cloned.voxels = clone_voxel_object(*source.voxels);
     cloned.text3d = source.text3d;
@@ -293,6 +295,15 @@ bool EditorDocument::validate(std::string* error) const {
             std::string prefabError;
             if (!object.prefabLink->validate(&prefabError)) return fail("invalid prefab link: " + prefabError);
         }
+        if (!object.voxelMaterials.empty()) {
+            if (object.polygon || object.text3d || object.gaborVolume) return fail("palette belongs to non-voxel geometry");
+            EditorMaterialLibrary paletteValidator;
+            for (const auto& [materialId,definition] : object.voxelMaterials) {
+                std::string materialError;
+                if (materialId == kAirMaterial || !paletteValidator.upsert({materialId,definition,false},&materialError))
+                    return fail("invalid voxel palette: "+materialError);
+            }
+        }
         if (object.polygon) {
             const auto valid=validate_polygon_asset(*object.polygon);
             if (!valid || object.polygon->objectId!=id) return fail("invalid polygon object");
@@ -362,8 +373,13 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                     maximumMaterial = std::max(maximumMaterial, brick.material(index));
                 });
             }
+            for (const auto& [materialId, definition] : object.voxelMaterials) {
+                (void)definition;
+                maximumMaterial = std::max(maximumMaterial,materialId);
+            }
             asset.materials.reserve(static_cast<std::size_t>(maximumMaterial) + 1U);
             for (std::size_t i = 0; i <= maximumMaterial; ++i) asset.materials.push_back(default_material(i));
+            for (const auto& [materialId, definition] : object.voxelMaterials) asset.materials[materialId] = definition;
             auto cloned = clone_voxel_object(*object.voxels);
             asset.object = std::move(*cloned);
             const auto output = stagingPath / (std::to_string(id) + ".dvox");
@@ -380,7 +396,10 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         // format 6, so editors from before #111 can still open them.
         const bool hasPolygons = std::any_of(objects_.begin(), objects_.end(),
                                              [](const auto& entry) { return entry.second.polygon.has_value(); });
-        output << "DVE_EDITOR_SCENE " << (hasPolygons ? 7 : 6) << "\n";
+        const bool hasVoxelPalettes = std::any_of(objects_.begin(),objects_.end(),
+            [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
+        // Format 8 adds only explicit palette ID lists; material definitions remain in DVOX.
+        output << "DVE_EDITOR_SCENE " << (hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -455,6 +474,19 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             }
         }
         output << "next_prefab_instance " << nextPrefabInstanceId_ << "\n";
+        if (hasVoxelPalettes) {
+            const auto count = std::count_if(objects_.begin(),objects_.end(),
+                [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
+            output << "voxel_palettes " << count << "\n";
+            for (const auto& [id, object] : objects_) {
+                if (object.voxelMaterials.empty()) continue;
+                output << "voxel_palette " << id << ' ' << object.voxelMaterials.size();
+                for (const auto& [materialId, definition] : object.voxelMaterials) {
+                    (void)definition; output << ' ' << unsigned(materialId);
+                }
+                output << "\n";
+            }
+        }
         output.flush();
         if (!output) throw std::runtime_error("failed to write scene manifest");
         output.close();
@@ -477,7 +509,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -488,6 +520,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         input >> key >> std::quoted(revisionDirectory); if (key != "revision_dir") throw std::runtime_error("missing revision directory");
         input >> key >> objectCount; if (key != "objects") throw std::runtime_error("missing object count");
         EditorDocument document(name);
+        std::map<EditorObjectId,std::vector<VoxelMaterialDefinition>> loadedPalettes;
         for (std::size_t i = 0; i < objectCount; ++i) {
             EditorObjectId id{}, parent{};
             std::uint32_t geometryKind{};
@@ -544,6 +577,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                 DvoxReadResult loaded = read_dvox(dvox);
                 if (!loaded.success) throw std::runtime_error("could not load object " + std::to_string(id) + ": " + loaded.error);
                 object.voxels = std::make_unique<VoxelObject>(std::move(loaded.asset.object));
+                if (version >= 8) loadedPalettes.emplace(id,std::move(loaded.asset.materials));
             }
             for (std::size_t a = 0; a < anchorCount; ++a) {
                 Int3 anchor{}; input >> anchor.x >> anchor.y >> anchor.z; object.anchors.insert(anchor);
@@ -624,6 +658,28 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
             input >> key >> document.nextPrefabInstanceId_;
             if (!input || key != "next_prefab_instance") throw std::runtime_error("missing prefab-instance counter");
             document.refresh_attachment_world_transforms();
+        }
+        if (version >= 8) {
+            std::size_t paletteCount{};
+            input >> key >> paletteCount;
+            if (!input || key != "voxel_palettes" || paletteCount > objectCount)
+                throw std::runtime_error("invalid voxel palette section");
+            std::set<EditorObjectId> paletteObjects;
+            for (std::size_t i = 0; i < paletteCount; ++i) {
+                EditorObjectId id{}; std::size_t count{};
+                input >> key >> id >> count;
+                auto* object = document.find_object(id);
+                const auto palette = loadedPalettes.find(id);
+                if (!input || key != "voxel_palette" || !object || object->polygon || object->text3d ||
+                    object->gaborVolume || count > 255 || palette == loadedPalettes.end() ||
+                    !paletteObjects.insert(id).second) throw std::runtime_error("invalid voxel palette record");
+                for (std::size_t j = 0; j < count; ++j) {
+                    unsigned materialId{}; input >> materialId;
+                    if (!input || materialId == 0 || materialId >= palette->second.size() || materialId > 255 ||
+                        !object->voxelMaterials.emplace(static_cast<MaterialId>(materialId),palette->second[materialId]).second)
+                        throw std::runtime_error("invalid voxel palette material");
+                }
+            }
         }
         document.path_ = manifestPath;
         document.revision_ = revision;

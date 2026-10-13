@@ -46,9 +46,10 @@ namespace {
         for (const MaterialId material : dense) {
             if (material == kAirMaterial) continue;
             const EditorMaterialEntry* entry = materials.find(material);
-            const double density = entry
-                ? static_cast<double>(entry->definition.densityKilogramsPerCubicMeter)
-                : 1000.0;
+            const auto owned = object.voxelMaterials.find(material);
+            const double density = owned != object.voxelMaterials.end()
+                ? static_cast<double>(owned->second.densityKilogramsPerCubicMeter)
+                : entry ? static_cast<double>(entry->definition.densityKilogramsPerCubicMeter) : 1000.0;
             if (density > 0.0 && std::isfinite(density)) {
                 weightedDensity += static_cast<long double>(density);
                 ++weightedCount;

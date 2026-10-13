@@ -198,6 +198,11 @@ std::string EditorVoxelJoinSession::selection_problem(const EditorDocument& docu
             if (has_owned_components(*object))
                 return quoted(*object) + " has components that Join would delete. Click it last to make it the "
                                          "target, or move its components first.";
+            if (const EditorObject* targetObject = document.find_object(target))
+                for (const auto& entry : object->voxelMaterials)
+                    if (!targetObject->voxelMaterials.contains(entry.first))
+                        return quoted(*object) + " owns converted materials the target lacks; Join would lose their "
+                                                 "colours. Click it last to make it the target, or repaint it first.";
             if (object->prefabLink)
                 return quoted(*object) + " is a prefab instance that Join would delete. Click it last to make it the target, "
                                          "or unpack it first.";

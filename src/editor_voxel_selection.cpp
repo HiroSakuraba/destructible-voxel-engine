@@ -34,9 +34,9 @@ bool sample_hits_cell(const EditorDocument& document, EditorObjectId object, Int
     auto ray = make_viewport_ray(camera,viewport,x,y);
     const float cosine = dot(ray.direction,camera_basis(camera).forward);
     if (cosine <= 0 || camera.farPlane <= camera.nearPlane) return false;
-    const float near = std::max(0.00001F,camera.nearPlane);
-    ray.origin = add(ray.origin,multiply(ray.direction,near/cosine));
-    const auto hit = pick_editor_document(document,ray,(camera.farPlane-near)/cosine,onlyObjects);
+    const float nearDistance = std::max(0.00001F,camera.nearPlane);
+    ray.origin = add(ray.origin,multiply(ray.direction,nearDistance/cosine));
+    const auto hit = pick_editor_document(document,ray,(camera.farPlane-nearDistance)/cosine,onlyObjects);
     return hit && hit->objectId == object && !hit->polygonFace && hit->voxel == cell;
 }
 

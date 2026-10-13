@@ -5937,7 +5937,10 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_status("Apply or cancel the voxel/conversion preview first",true); return false;
     }
     if (actionId == "voxel.authoring_apply") return apply_voxel_authoring_preview();
-    if (actionId == "voxel.authoring_cancel") { cancel_voxel_authoring_preview(); return true; }
+    if (actionId == "voxel.authoring_cancel") {
+        if (!voxel_authoring_active()) { set_status("No voxel/conversion preview is open",true); return false; }
+        cancel_voxel_authoring_preview(); refresh_menu_state(); set_status("Preview cancelled; scene unchanged"); return true;
+    }
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
         const auto value = actionId.substr(std::string_view("selection.pick.").size());
@@ -6182,7 +6185,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId.starts_with("mesh.")) return dispatch_mesh_authoring_action(actionId);
     if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.create_plane" &&
-        actionId != "polygon.lod" && actionId != "polygon.collision" && actionId != "polygon.streaming")
+        actionId != "polygon.lod" && actionId != "polygon.convert_to_voxels" && actionId != "polygon.collision" && actionId != "polygon.streaming")
         return handle_polygon_action(actionId);
     if (selectionDomain_ == SelectionDomain::Polygons && (actionId == "edit.select_all" || actionId == "edit.copy" ||
         actionId == "edit.cut" || actionId == "edit.delete" || actionId == "edit.duplicate")) return handle_polygon_action(actionId);
@@ -11970,7 +11973,7 @@ bool NativeEditorController::handle_voxel_slice_key(std::string_view key, bool c
 }
 
 bool NativeEditorController::voxel_authoring_active() const noexcept {
-    return voxelAuthoring_.kind != VoxelAuthoringState::Kind::None;
+    return voxelAuthoring_.kind != VoxelAuthoringState::Kind::Inactive;
 }
 bool NativeEditorController::voxel_authoring_preview_ready() const noexcept {
     return voxel_authoring_active() && voxelAuthoring_.ready && voxelAuthoring_.preview.has_value();
@@ -12004,8 +12007,11 @@ bool NativeEditorController::begin_voxel_region_preview(VoxelRegionEdit edit, Vo
 }
 
 bool NativeEditorController::begin_geometry_conversion(bool toVoxels) {
-    if (longJob_ || workspace_.mode() != EditorMode::Edit || playSession_.active() || workspace_.selection_count() != 1)
+    if (longJob_ || workspace_.mode() != EditorMode::Edit || playSession_.active() || workspace_.selection_count() != 1) {
+        set_status(workspace_.selection_count() != 1 ? "Select exactly one object to convert"
+                                                     : "Stop Play and finish background work before converting",true);
         return false;
+    }
     const auto* source = workspace_.document().find_object(*workspace_.selected_object());
     if (!source || !source->flags.visible || source->flags.locked || is_isolated_out(source->id) ||
         (toVoxels ? !source->polygon : !source->voxels || source->polygon || source->text3d || source->gaborVolume)) {
@@ -12165,13 +12171,18 @@ bool NativeEditorController::apply_voxel_authoring_preview() {
         if (!commit_voxel_authoring_field()) return false;
         return update_voxel_authoring_preview(); // Changed input must be previewed before it can apply.
     }
-    if (!voxel_authoring_preview_ready()) return update_voxel_authoring_preview();
+    if (!voxel_authoring_preview_ready()) {
+        // Never report success for an Apply that applied nothing (a failed or pending preview).
+        set_status(voxelAuthoring_.error.empty() ? "Update the preview before applying" : voxelAuthoring_.error,true);
+        return false;
+    }
     auto& s = voxelAuthoring_;
     if (s.documentRevision != scene_change_fingerprint(workspace_.document(),workspace_.commands()) ||
         (s.kind == VoxelAuthoringState::Kind::Region && (s.selectionSerial != voxelSelectionSerial_ ||
          selectionDomain_ != SelectionDomain::Voxels || voxelSelectionObject_ != s.object))) {
-        set_status("Scene or region changed: update and inspect the preview before applying",true);
-        return update_voxel_authoring_preview();
+        (void)update_voxel_authoring_preview();
+        set_status("Scene or region changed: inspect the updated preview before applying",true);
+        return false;
     }
     const auto* source = workspace_.document().find_object(s.object);
     if (!source || source->flags.locked || !source->flags.visible || is_isolated_out(s.object)) return false;
@@ -12184,7 +12195,10 @@ bool NativeEditorController::apply_voxel_authoring_preview() {
     if (!previewObject) return false;
     for (const auto& [material,definition] : previewObject->voxelMaterials) {
         (void)definition;
-        if (materials_.find(material)) { set_status("Paint palette changed; update the conversion preview",true); return update_voxel_authoring_preview(); }
+        if (materials_.find(material)) {
+            (void)update_voxel_authoring_preview();
+            set_status("Paint palette changed; inspect the updated conversion preview",true); return false;
+        }
     }
     auto object = clone_editor_object(*previewObject);
     const auto before = capture_selection_snapshot();

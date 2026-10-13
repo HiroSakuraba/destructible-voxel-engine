@@ -92,6 +92,15 @@ VoxelBooleanSelection evaluate_voxel_boolean_selection(const EditorDocument& doc
         result.reason = "Target " + quoted(*target) + " is locked. Turn off Locked in the Inspector first.";
         return result;
     }
+    for (const EditorObjectId id : result.operands) {
+        const EditorObject* operand = document.find_object(id);
+        for (const auto& entry : operand->voxelMaterials)
+            if (!target->voxelMaterials.contains(entry.first)) {
+                result.reason = "Operand " + quoted(*operand) + " owns converted materials the target lacks; the result "
+                                "would lose their colours. Make it the target, or repaint it first.";
+                return result;
+            }
+    }
     if (policy == VoxelBooleanOperandPolicy::Delete) {
         for (const EditorObjectId id : result.operands) {
             const EditorObject* operand = document.find_object(id);

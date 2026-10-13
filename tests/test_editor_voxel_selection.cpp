@@ -5,6 +5,11 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_voxel_selection.hpp"
+#include "dve/editor_voxel_boolean.hpp"
+#include "dve/editor_voxel_join.hpp"
+
+#include <filesystem>
+#include <fstream>
 
 #include <cmath>
 #include <utility>
@@ -584,7 +589,9 @@ void test_region_controller() {
     check(enabled("voxel.region_extrude_x_positive"), "region menu: enabled with a selection");
 
     const std::size_t undoBefore = controller.workspace().commands().size();
-    check(controller.dispatch_action("voxel.region_extrude_x_positive") &&
+    // Region tools open a preview (#118); Apply performs the edit.
+    check(controller.dispatch_action("voxel.region_extrude_x_positive") && controller.wait_for_long_job() &&
+              controller.dispatch_action("voxel.authoring_apply") &&
               document.find_object(1)->voxels->occupied_voxel_count() == 76 && controller.voxel_selection().size() == 12,
           "region: Extrude +X edits and selects the result");
     check(controller.workspace().commands().size() == undoBefore + 1, "region: one undo step per edit");
@@ -601,10 +608,14 @@ void test_region_controller() {
     const std::set<Int3> cube = voxel_connected_piece(*document.find_object(1)->voxels, {0, 0, 0});
     controller.select_voxels(1, cube, SelectionOperation::Replace);
     const std::size_t undoBlocked = controller.workspace().commands().size();
-    check(!controller.dispatch_action("voxel.region_scale_3") &&
+    // The blocked result surfaces when the preview job finishes; nothing can be applied.
+    (void)controller.dispatch_action("voxel.region_scale_3");
+    (void)controller.wait_for_long_job();
+    check(!controller.voxel_authoring_preview_ready() && !controller.dispatch_action("voxel.authoring_apply") &&
               controller.workspace().commands().size() == undoBlocked &&
               document.find_object(1)->voxels->occupied_voxel_count() == 72 && controller.voxel_selection() == cube,
           "region: a blocked scale reports failure without editing");
+    (void)controller.dispatch_action("voxel.authoring_cancel");
 
     // Locked and hidden objects are refused.
     document.find_object(1)->flags.locked = true;
@@ -618,6 +629,114 @@ void test_region_controller() {
     document.find_object(1)->flags.visible = true;
 }
 
+std::string scene_header(const std::filesystem::path& path) {
+    std::ifstream in(path); std::string magic; int version{}; in >> magic >> version;
+    return magic + " " + std::to_string(version);
+}
+
+void test_authoring_previews() {
+    auto owner = make_controller();
+    NativeEditorController& controller = *owner;
+    EditorDocument& document = controller.workspace().document();
+    const auto enabled = [&](std::string_view id) {
+        controller.refresh_menu_state();
+        const MenuAction* action = std::as_const(controller.workspace().menus()).find(id);
+        return action && action->enabled;
+    };
+    check(!controller.dispatch_action("voxel.authoring_cancel"), "authoring: Cancel with no preview open is not a false success");
+    check(!enabled("voxel.authoring_apply") && !enabled("voxel.authoring_cancel"), "authoring: apply/cancel disabled without a preview");
+
+    // Region preview: the scene stays unchanged until Apply, which is one undo step.
+    (void)controller.dispatch_action("select.domain_voxels");
+    const std::set<Int3> pieceB = voxel_connected_piece(*document.find_object(1)->voxels, {8, 0, 0});
+    controller.select_voxels(1, pieceB, SelectionOperation::Replace);
+    const std::size_t undoBefore = controller.workspace().commands().size();
+    check(controller.dispatch_action("voxel.region_extrude_x_positive") && controller.wait_for_long_job() &&
+              controller.voxel_authoring_preview_ready() &&
+              document.find_object(1)->voxels->occupied_voxel_count() == 72,
+          "authoring: region preview leaves the scene unchanged");
+    check(!controller.dispatch_action("voxel.region_rotate_z_positive") && controller.voxel_authoring_preview_ready(),
+          "authoring: only one preview at a time; a second region tool is refused");
+    check(!enabled("voxel.convert_to_polygon"), "authoring: conversion disabled while a region preview is open");
+    check(controller.dispatch_action("voxel.authoring_apply") && !controller.voxel_authoring_active() &&
+              document.find_object(1)->voxels->occupied_voxel_count() == 76 &&
+              controller.workspace().commands().size() == undoBefore + 1,
+          "authoring: region Apply edits in one undo step");
+    check(controller.dispatch_action("edit.undo") && controller.voxel_selection() == pieceB &&
+              document.find_object(1)->voxels->occupied_voxel_count() == 72,
+          "authoring: undo restores the region and its selection");
+    controller.select_voxels(1, pieceB, SelectionOperation::Replace);
+    const bool redoBeforeCancel = controller.workspace().commands().can_redo();
+    check(controller.dispatch_action("voxel.region_extrude_x_positive") && controller.wait_for_long_job() &&
+              controller.dispatch_action("voxel.authoring_cancel") && !controller.voxel_authoring_active() &&
+              controller.workspace().commands().can_redo() == redoBeforeCancel &&
+              document.find_object(1)->voxels->occupied_voxel_count() == 72,
+          "authoring: Cancel closes the preview without an edit");
+    (void)controller.dispatch_action("select.domain_objects");
+
+    // Voxel -> polygon conversion keeps the source and adds one undo step.
+    controller.workspace().select_object(1);
+    document.find_object(1)->flags.locked = true;
+    check(!enabled("voxel.convert_to_polygon") && !controller.dispatch_action("voxel.convert_to_polygon"),
+          "conversion: a locked source is refused");
+    document.find_object(1)->flags.locked = false;
+    document.find_object(1)->flags.visible = false;
+    check(!enabled("voxel.convert_to_polygon"), "conversion: a hidden source is refused");
+    document.find_object(1)->flags.visible = true;
+    const std::size_t objectsBefore = document.objects().size();
+    check(controller.dispatch_action("voxel.convert_to_polygon") && controller.wait_for_long_job() &&
+              controller.voxel_authoring_preview_ready() && document.objects().size() == objectsBefore,
+          "conversion: voxel->polygon preview adds nothing yet");
+    const bool applied = controller.dispatch_action("voxel.authoring_apply");
+    check(applied && document.objects().size() == objectsBefore + 1 &&
+              controller.workspace().commands().undo_label() == "Convert geometry (keep source)" &&
+              document.find_object(1)->voxels,
+          "conversion: Apply adds one object, keeps the source, one undo step");
+    const auto meshId = *controller.workspace().selected_object();
+    check(meshId != 1 && document.find_object(meshId)->polygon.has_value(), "conversion: the result is a selected polygon mesh");
+    check(controller.dispatch_action("edit.undo") && document.objects().size() == objectsBefore &&
+              controller.workspace().selected_object() == std::optional<EditorObjectId>(1),
+          "conversion: undo removes the result and restores the selection");
+    (void)controller.dispatch_action("edit.redo");
+    controller.workspace().select_object(meshId);
+
+    // Polygon -> voxel conversion produces an object-owned palette.
+    const bool p2v = controller.dispatch_action("polygon.convert_to_voxels");
+    check(p2v && controller.wait_for_long_job() && controller.voxel_authoring_preview_ready() &&
+              controller.dispatch_action("voxel.authoring_apply"),
+          "conversion: polygon->voxel applies");
+    const auto voxId = *controller.workspace().selected_object();
+    const EditorObject* converted = document.find_object(voxId);
+    check(converted && converted->voxels && converted->voxels->occupied_voxel_count() > 0 && !converted->voxelMaterials.empty(),
+          "conversion: polygon->voxel result owns its palette");
+
+    // Join / Boolean refuse to drop an operand's owned palette.
+    check(!EditorVoxelJoinSession::selection_problem(document, {1, voxId}, EditorObjectId{1}).empty(),
+          "join: an operand with an owned palette the target lacks is refused");
+    check(EditorVoxelJoinSession::selection_problem(document, {1, voxId}, voxId).empty(),
+          "join: making the palette owner the target is allowed");
+    check(!evaluate_voxel_boolean_selection(document, {1, voxId}, EditorObjectId{1}, VoxelBooleanOperandPolicy::Hide).valid,
+          "boolean: an operand with an owned palette the target lacks is refused");
+
+    // Scenes: palettes round-trip as format 8; a plain voxel scene stays format 6.
+    const auto dir = std::filesystem::temp_directory_path() / "dve_voxel_authoring_scene_test";
+    std::filesystem::remove_all(dir); std::filesystem::create_directories(dir);
+    EditorDocument copy("Copy");
+    copy.add_object(clone_editor_object(*converted));
+    check(copy.save_transactional(dir / "palette.dvescene").success && scene_header(dir / "palette.dvescene") == "DVE_EDITOR_SCENE 8",
+          "scene: an owned palette saves as format 8");
+    std::string error;
+    const auto loaded = EditorDocument::load(dir / "palette.dvescene", &error);
+    check(loaded && loaded->find_object(voxId) && loaded->find_object(voxId)->voxelMaterials.size() == converted->voxelMaterials.size(),
+          "scene: the owned palette loads back (" + error + ")");
+    EditorDocument plain("Plain");
+    plain.add_object(make_rocks());
+    check(plain.save_transactional(dir / "plain.dvescene").success && scene_header(dir / "plain.dvescene") == "DVE_EDITOR_SCENE 6",
+          "scene: a voxel scene without polygons or palettes stays format 6");
+    check(EditorDocument::load(dir / "plain.dvescene").has_value(), "scene: format 6 still loads");
+    std::filesystem::remove_all(dir);
+}
+
 } // namespace
 
 int main() {
@@ -628,6 +747,7 @@ int main() {
     test_review_fixes();
     test_region_core();
     test_region_controller();
+    test_authoring_previews();
     if (g_failures != 0) {
         std::printf("dve_editor_voxel_selection_tests: %d failure(s)\n", g_failures);
         return 1;

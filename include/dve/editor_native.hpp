@@ -1129,8 +1129,8 @@ private:
     bool handle_polygon_preview_key(std::string_view);
     Float3 polygon_selection_centre() const;
     struct VoxelAuthoringState {
-        enum class Kind { None, Region, PolygonToVoxel, VoxelToPolygon };
-        Kind kind{Kind::None};
+        enum class Kind { Inactive, Region, PolygonToVoxel, VoxelToPolygon };
+        Kind kind{Kind::Inactive};
         EditorObjectId object{},output{};
         VoxelRegionEdit edit{VoxelRegionEdit::Extrude};
         VoxelRegionSettings settings{};

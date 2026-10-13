@@ -13,6 +13,19 @@ struct TopologyDiagnostics {
 [[nodiscard]] TopologyDiagnostics diagnose_polygon_topology(const CookedPolygonAsset&);
 enum class TopologyEdit : std::uint8_t { Subdivide, SplitEdges, FlipDiagonal, BridgeLoops, CapBoundaries, HardNormals, SmoothNormals, BevelConvexEdges };
 [[nodiscard]] PolygonEditResult edit_polygon_topology(const CookedPolygonAsset&,const PolygonSelection&,TopologyEdit,float amount=.5F);
+enum class BevelOffsetType : std::uint8_t { Fractional, Absolute };
+struct EdgeBevelSettings {
+    float width{0.2F};
+    BevelOffsetType offsetType{BevelOffsetType::Fractional};
+    bool worldSpace{true};
+    std::uint32_t segments{1};
+    float depth{1.0F}; // 0 = flat chamfer; 1 = circular convex profile
+    bool autoFit{true}; // conservative shortest-edge width cap
+    float smoothingAngle{30.0F};
+};
+[[nodiscard]] PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset&,const PolygonSelection&,
+    const EdgeBevelSettings&,Float3 objectScale={1,1,1});
+// Compatibility overload: original mesh-local bisector-plane offset and flat chamfer.
 [[nodiscard]] PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset&,const PolygonSelection&,float width);
 [[nodiscard]] PolygonEditResult convex_editor_hull(EditorObjectId,std::span<const Float3>);
 struct PolygonUvAuthoring {

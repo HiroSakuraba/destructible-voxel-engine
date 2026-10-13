@@ -697,7 +697,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"subdiv.extrude","Subdivision","Extrude Control Faces",""},
         {"subdiv.inset","Subdivision","Inset Control Faces",""},
         {"subdiv.bevel","Subdivision","Bevel Control Faces",""},
-        {"subdiv.bevel_edges","Subdivision","Bevel Cage Edges (Convex)",""},
+        {"subdiv.bevel_edges","Subdivision","Bevel Cage Edges: Options (Convex)",""},
+        {"subdiv.chamfer_edges","Subdivision","Chamfer Cage Edges (Convex)",""},
+        {"subdiv.fillet_edges","Subdivision","Rounded Fillet Cage Edges (Convex)",""},
         {"subdiv.weld","Subdivision","Weld Cage Vertices",""},
         {"subdiv.split_edges","Subdivision","Split Cage Corners",""},
         {"subdiv.subdivide_cage","Subdivision","Refine Selected Cage Faces",""},
@@ -742,7 +744,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.hull_fit","Polygon","Fit Convex Collision Hull",""},
         {"mesh.hull_edit","Polygon","Edit Collision Hull Points",""},
         {"mesh.hull_remove","Polygon","Remove Authored Collision Hull",""},
-        {"mesh.bevel_edges","Polygon","Bevel Edges (convex solid)",""},
+        {"mesh.bevel_edges","Polygon","Bevel Edges: Options (Convex)",""},
+        {"mesh.chamfer_edges","Polygon","Chamfer Edges (Convex)",""},
+        {"mesh.fillet_edges","Polygon","Rounded Fillet Edges (Convex)",""},
         {"mesh.subdivide","Polygon","Subdivide Selected Faces",""},
         {"mesh.split_edges","Polygon","Split Selected Edges",""},
         {"mesh.flip_diagonal","Polygon","Flip Triangle Diagonal",""},
@@ -945,6 +949,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("subdiv.inset","Subdivision Modeling",44,false);
     configure("subdiv.bevel","Subdivision Modeling",45,false);
     configure("subdiv.bevel_edges","Subdivision Modeling",46,false);
+    configure("subdiv.chamfer_edges","Subdivision Modeling",46,false);
+    configure("subdiv.fillet_edges","Subdivision Modeling",46,false);
+    configure("mesh.chamfer_edges","Mesh Editing",80);
+    configure("mesh.fillet_edges","Mesh Editing",80);
     configure("subdiv.weld","Subdivision Modeling",47,false);
     configure("subdiv.split_edges","Subdivision Topology",48,false);
     configure("subdiv.subdivide_cage","Subdivision Topology",49,false);
@@ -1142,6 +1150,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("subdiv.preview_cancel","Cancel Modeling Preview through the shared control-cage preview workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.delete","Delete Selection through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.duplicate","Duplicate Selection through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("mesh.chamfer_edges","Preview a flat one-segment chamfer with editable width and offset space.",{"mesh","bevel","chamfer"});
+    describe("mesh.fillet_edges","Preview a segmented circular convex mesh fillet with Width, Segments, Depth and Smoothing Angle.",{"mesh","bevel","fillet","round"});
+    describe("subdiv.chamfer_edges","Chamfer selected convex cage edges through the shared options preview.",{"subdivision","chamfer"});
+    describe("subdiv.fillet_edges","Round selected convex cage edges through the shared options preview.",{"subdivision","fillet","round"});
     describe("create.subdivision","Create an owned Catmull-Clark subdivision surface with an editable cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.create_cube","Create a smooth subdivision cube, retaining its small control cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.create_plane","Create a subdivision plane with interpolated boundary corners.",{"subdivision","subdiv","cage"});

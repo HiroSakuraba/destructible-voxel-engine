@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
+#include <limits>
 #include <tuple>
 #ifdef DVE_HAVE_MESH_AUTHORING
 #include <manifold/manifold.h>
@@ -35,6 +37,54 @@ manifold::MeshGL64 manifold_mesh(const CookedPolygonAsset& source,std::size_t fi
     mesh.runIndex={0,std::uint64_t(count)}; mesh.runOriginalID={original};
     for (std::size_t i=0;i<count/3;++i) mesh.faceID.push_back(first/3+i);
     return mesh;
+}
+void smooth_bevel_normals(CookedPolygonAsset& mesh,float angle) {
+    const auto cross=[](Float3 a,Float3 b){return Float3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+    std::map<std::tuple<float,float,float>,std::uint32_t> points;
+    std::vector<std::uint32_t> canonical(mesh.vertices.size());
+    for (std::uint32_t i=0;i<mesh.vertices.size();++i) {
+        const auto p=mesh.vertices[i].position;auto [at,inserted]=points.emplace(std::tuple{p.x,p.y,p.z},i);
+        (void)inserted;canonical[i]=at->second;
+    }
+    const auto edgeKey=[](std::uint32_t a,std::uint32_t b){return (std::uint64_t(std::min(a,b))<<32U)|std::max(a,b);};
+    const std::size_t count=mesh.indices.size()/3;
+    std::vector<Float3> normals(count);std::map<std::uint64_t,std::vector<std::uint32_t>> edges;
+    std::map<std::uint32_t,std::vector<std::uint32_t>> faces;
+    for (std::uint32_t f=0;f<count;++f) {
+        const auto a=mesh.vertices[mesh.indices[f*3]].position,b=mesh.vertices[mesh.indices[f*3+1]].position,c=mesh.vertices[mesh.indices[f*3+2]].position;
+        normals[f]=cross(subtract(b,a),subtract(c,a));
+        for (unsigned j=0;j<3;++j) {
+            const auto v=canonical[mesh.indices[f*3+j]],next=canonical[mesh.indices[f*3+(j+1)%3]];
+            faces[v].push_back(f);edges[edgeKey(v,next)].push_back(f);
+        }
+    }
+    const float threshold=std::cos(angle*3.14159265358979323846F/180);
+    std::map<std::pair<std::uint32_t,std::uint32_t>,Float3> fanNormals;
+    for (const auto& [v,incident] : faces) {
+        std::set<std::uint32_t> remaining(incident.begin(),incident.end());
+        while (!remaining.empty()) {
+            std::vector<std::uint32_t> pending{*remaining.begin()},fan;remaining.erase(pending.back());Float3 sum{};
+            while (!pending.empty()) {
+                const auto f=pending.back();pending.pop_back();fan.push_back(f);sum=add(sum,normals[f]);
+                if (angle==0) continue;
+                for (unsigned j=0;j<3;++j) {
+                    const auto a=canonical[mesh.indices[f*3+j]],b=canonical[mesh.indices[f*3+(j+1)%3]];
+                    if (a!=v && b!=v) continue;
+                    for (auto next : edges.at(edgeKey(a,b))) if (remaining.contains(next) &&
+                        dot(normalize(normals[f]),normalize(normals[next]))>=threshold-1e-6F) {
+                        remaining.erase(next);pending.push_back(next);
+                    }
+                }
+            }
+            for (auto f : fan) fanNormals[{v,f}]=normalize(sum);
+        }
+    }
+    // Each triangle corner can belong to a different normal fan; keep UV/color domains intact.
+    auto old=std::move(mesh.vertices);mesh.vertices.clear();mesh.vertices.reserve(mesh.indices.size());
+    for (std::uint32_t f=0;f<count;++f) for (unsigned j=0;j<3;++j) {
+        const auto original=mesh.indices[f*3+j];auto vertex=old[original];vertex.normal=fanNormals.at({canonical[original],f});
+        mesh.indices[f*3+j]=std::uint32_t(mesh.vertices.size());mesh.vertices.push_back(vertex);
+    }
 }
 PolygonEditResult fail(std::string message) { PolygonEditResult r; r.error=std::move(message); return r; }
 }
@@ -94,26 +144,91 @@ PolygonEditResult boolean_editor_polygons(const EditorDocument& document,EditorO
     } catch (const std::exception& e) { return fail(std::string("Boolean failed: ")+e.what()); }
 #endif
 }
-PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset& source,const PolygonSelection& selection,float width){
+PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset& source,const PolygonSelection& selection,const EdgeBevelSettings& settings,Float3 objectScale){
 #ifndef DVE_HAVE_MESH_AUTHORING
-    (void)source;(void)selection;(void)width;PolygonEditResult r;r.error="Edge bevel requires Manifold";return r;
+    (void)source;(void)selection;(void)settings;(void)objectScale;PolygonEditResult r;r.error="Edge bevel requires Manifold";return r;
 #else
-    if(selection.mode!=PolygonSelectionMode::Edge||selection.components.empty()||!polygon_selection_valid(source,selection)||!(width>0)||!std::isfinite(width))return fail("Select edges and enter a positive bevel offset");
+    if (!validate_polygon_asset(source) || selection.mode!=PolygonSelectionMode::Edge || selection.components.empty() ||
+        !polygon_selection_valid(source,selection)) return fail("Select valid convex crease edges");
+    if (!std::isfinite(settings.width) || !(settings.width>0) ||
+        (settings.offsetType==BevelOffsetType::Fractional && settings.width>1) ||
+        settings.segments<1 || settings.segments>16 || !std::isfinite(settings.depth) || settings.depth<0 || settings.depth>1 ||
+        !std::isfinite(settings.smoothingAngle) || settings.smoothingAngle<0 || settings.smoothingAngle>180 ||
+        (settings.offsetType!=BevelOffsetType::Fractional && settings.offsetType!=BevelOffsetType::Absolute))
+        return fail("Width must be positive (fraction <=1), Segments 1..16, Depth 0..1 and Smoothing Angle 0..180");
+    if (source.indices.size()/3>100000 || source.vertices.size()>200000 ||
+        selection.components.size()>256/settings.segments) return fail("Split the selection: bevel supports 256 profile planes and 100000 source triangles");
+    const bool world=settings.offsetType==BevelOffsetType::Absolute && settings.worldSpace;
+    if (world && (!std::isfinite(objectScale.x) || !std::isfinite(objectScale.y) || !std::isfinite(objectScale.z) ||
+        objectScale.x<=1e-8F || objectScale.y<=1e-8F || objectScale.z<=1e-8F)) return fail("World offset requires a finite positive object scale");
+    auto working=source;
+    if (world) for (auto& vertex : working.vertices) {
+        vertex.position={vertex.position.x*objectScale.x,vertex.position.y*objectScale.y,vertex.position.z*objectScale.z};
+        if (!std::isfinite(vertex.position.x) || !std::isfinite(vertex.position.y) || !std::isfinite(vertex.position.z))
+            return fail("World-space bevel coordinates overflow; reduce object scale");
+    }
+    const auto& input=working;
     auto diagnostics=diagnose_polygon_topology(source);if(diagnostics.boundaries||diagnostics.nonmanifold||diagnostics.degenerate||diagnostics.inconsistentWinding)return fail("Edge bevel needs a closed manifold solid");
     try{
-        const auto original=manifold::Manifold::ReserveIDs(1);manifold::Manifold solid(manifold_mesh(source,0,source.indices.size(),original));
-        const auto sourceVolume=solid.Volume();if(solid.Status()!=manifold::Manifold::Error::NoError||!(sourceVolume>0))return fail("Invalid bevel solid");
+        const auto original=manifold::Manifold::ReserveIDs(1);manifold::Manifold solid(manifold_mesh(input,0,input.indices.size(),original));
+        const auto sourceVolume=solid.Volume();if(solid.Status()!=manifold::Manifold::Error::NoError||!std::isfinite(sourceVolume)||!(sourceVolume>0))return fail("Invalid bevel solid");
         if(std::abs(solid.Hull().Volume()-sourceVolume)>std::max(1e-8,sourceVolume*1e-6))return fail("This bevel tool supports convex solids; concave edge reconstruction is separate work");
         auto cross=[](Float3 a,Float3 b){return Float3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
-        std::map<std::tuple<float,float,float>,std::uint32_t> points;std::vector<std::uint32_t> canonical;for(std::uint32_t i=0;i<source.vertices.size();++i){auto p=source.vertices[i].position;auto [it,added]=points.emplace(std::tuple{p.x,p.y,p.z},i);(void)added;canonical.push_back(it->second);}
+        std::map<std::tuple<float,float,float>,std::uint32_t> points;std::vector<std::uint32_t> canonical;for(std::uint32_t i=0;i<input.vertices.size();++i){auto p=input.vertices[i].position;auto [it,added]=points.emplace(std::tuple{p.x,p.y,p.z},i);(void)added;canonical.push_back(it->second);}
         std::map<std::uint64_t,std::vector<Float3>> edgeNormals;
-        for(std::size_t f=0;f<source.indices.size()/3;++f){auto a=source.vertices[source.indices[f*3]].position,b=source.vertices[source.indices[f*3+1]].position,c=source.vertices[source.indices[f*3+2]].position;auto normal=normalize(cross(subtract(b,a),subtract(c,a)));
+        for(std::size_t f=0;f<input.indices.size()/3;++f){auto a=input.vertices[input.indices[f*3]].position,b=input.vertices[input.indices[f*3+1]].position,c=input.vertices[input.indices[f*3+2]].position;auto normal=normalize(cross(subtract(b,a),subtract(c,a)));
             for(unsigned j=0;j<3;++j){auto x=canonical[source.indices[f*3+j]],y=canonical[source.indices[f*3+(j+1)%3]];auto k=(std::uint64_t(std::min(x,y))<<32U)|std::max(x,y);edgeNormals[k].push_back(normal);}}
-        for(auto key:selection.components){auto normals=edgeNormals.at(key);if(normals.size()!=2||dot(normals[0],normals[1])>.99999F)return fail("Select a crease edge, not a coplanar triangle diagonal");
-            auto normal=normalize(add(normals[0],normals[1]));if(length_squared(normal)<.5F)return fail("Edge normals are opposed");auto a=source.vertices[std::size_t(key>>32U)].position,b=source.vertices[std::size_t(key&0xffffffffU)].position;
-            double distance=dot(normal,multiply(add(a,b),.5F))-width;solid=solid.TrimByPlane({-normal.x,-normal.y,-normal.z},-distance);}
+        float shortest=std::numeric_limits<float>::infinity(),minSine=1;
+        for (const auto& [key,normals] : edgeNormals) if (normals.size()==2 && dot(normals[0],normals[1])<.99999F) {
+            const auto a=input.vertices[std::size_t(key>>32U)].position,b=input.vertices[std::size_t(key&0xffffffffU)].position;
+            shortest=std::min(shortest,length(subtract(a,b)));
+        }
+        for (auto key : selection.components) {
+            const auto& normals=edgeNormals.at(key);
+            if (normals.size()!=2 || dot(normals[0],normals[1])>.99999F) return fail("Select a crease edge, not a coplanar triangle diagonal");
+            const float cosine=std::clamp(dot(normals[0],normals[1]),-1.0F,1.0F);
+            if (cosine<-.9999F) return fail("Edge normals are opposed");
+            minSine=std::min(minSine,std::sqrt((1-cosine)*.5F));
+        }
+        // Conservative common width protects short features; this is not Maya's maximum-fit solver.
+        const float safeWidth=shortest*.49F*minSine;
+        if (!std::isfinite(safeWidth) || !(safeWidth>0)) return fail("Cannot determine a safe bevel width");
+        float width=settings.offsetType==BevelOffsetType::Fractional ? settings.width*safeWidth : settings.width;
+        if (settings.autoFit) width=std::min(width,safeWidth);
+        for (auto key : selection.components) {
+            const auto& normals=edgeNormals.at(key);
+            const auto n1=normals[0],n2=normals[1];
+            const float cosine=std::clamp(dot(n1,n2),-1.0F,1.0F),angle=std::acos(cosine);
+            const float c=std::cos(angle*.5F),sinHalf=std::sin(angle*.5F);
+            const auto bisector=normalize(add(n1,n2));
+            const auto a=input.vertices[std::size_t(key>>32U)].position,b=input.vertices[std::size_t(key&0xffffffffU)].position;
+            const auto origin=multiply(add(a,b),.5F),direction=normalize(subtract(b,a));
+            const float radius=width*c/(sinHalf*sinHalf);
+            const auto centre=subtract(origin,multiply(bisector,radius/c));
+            const auto first=add(centre,multiply(n1,radius)),last=add(centre,multiply(n2,radius));
+            const auto point=[&](float t) {
+                const auto arcNormal=multiply(add(multiply(n1,std::sin((1-t)*angle)),multiply(n2,std::sin(t*angle))),1/std::sin(angle));
+                const auto arc=add(centre,multiply(arcNormal,radius));
+                const auto flat=add(first,multiply(subtract(last,first),t));
+                return add(flat,multiply(subtract(arc,flat),settings.depth));
+            };
+            const auto segments=settings.depth==0?1U:settings.segments;
+            auto previous=point(0);
+            for (std::uint32_t i=1;i<=segments;++i) {
+                const auto next=point(float(i)/float(segments));
+                auto normal=normalize(cross(direction,subtract(next,previous)));
+                if (dot(normal,bisector)<0) normal=multiply(normal,-1);
+                if (length_squared(normal)<.5F) return fail("Bevel profile collapsed; reduce width or segments");
+                const double distance=dot(normal,multiply(add(previous,next),.5F));
+                solid=solid.TrimByPlane({-normal.x,-normal.y,-normal.z},-distance);
+                if (solid.IsEmpty() || solid.Status()!=manifold::Manifold::Error::NoError) return fail("Bevel removes the solid; reduce Width or enable Auto Fit");
+                previous=next;
+            }
+        }
         if(solid.IsEmpty()||solid.Status()!=manifold::Manifold::Error::NoError)return fail("Bevel removes the whole solid; reduce the offset");
-        const auto output=solid.GetMeshGL64(3);if(output.NumVert()>1000000||output.triVerts.size()>6000000||output.numProp<18)return fail("Bevel output exceeds limits or lost attributes");
+        const auto output=solid.GetMeshGL64(3);if(output.NumVert()>1000000||output.triVerts.size()>1000000||output.numProp<18)return fail("Bevel output exceeds the one-million-corner budget or lost attributes");
+        if (output.faceID.size()!=output.NumTri() || output.runOriginalID.empty() ||
+            output.runIndex.size()!=output.runOriginalID.size()+1) return fail("Bevel output lost surface provenance");
         PolygonEditResult result{source,selection,{}};auto& mesh=result.mesh;std::vector<std::uint32_t> materials(source.indices.size()/3);for(const auto& s:source.submeshes)for(std::size_t f=s.firstIndex/3;f<(s.firstIndex+s.indexCount)/3;++f)materials[f]=s.materialIndex;
         auto capMaterial=std::uint32_t(mesh.materials.size());mesh.materials.push_back(source.materials[0]);mesh.materialBindings.resize(source.materials.size());mesh.materialBindings.push_back(source.materialBindings.empty()?PolygonMaterialBinding{}:source.materialBindings[0]);mesh.vertices.clear();mesh.indices.clear();mesh.submeshes.clear();
         for(std::size_t i=0;i<output.NumVert();++i){auto k=i*std::size_t(output.numProp);auto& p=output.vertProperties;PolygonVertex v;v.position={float(p[k]),float(p[k+1]),float(p[k+2])};v.normal={float(p[k+3]),float(p[k+4]),float(p[k+5])};v.texcoord={float(p[k+6]),float(p[k+7])};v.texcoord1={float(p[k+8]),float(p[k+9])};v.color={float(p[k+10]),float(p[k+11]),float(p[k+12]),float(p[k+13])};mesh.vertices.push_back(v);}
@@ -122,9 +237,22 @@ PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset& source,con
             std::array<std::uint32_t,3> ids;for(unsigned j=0;j<3;++j)ids[j]=std::uint32_t(output.triVerts[f*3+j]);
             if(cap){auto a=mesh.vertices[ids[0]].position,b=mesh.vertices[ids[1]].position,c=mesh.vertices[ids[2]].position;auto normal=normalize(cross(subtract(b,a),subtract(c,a)));for(auto& id:ids){auto v=mesh.vertices[id];v.normal=normal;v.color={1,1,1,1};v.texcoord=std::abs(normal.x)>std::abs(normal.y)&&std::abs(normal.x)>std::abs(normal.z)?Float2{v.position.z,v.position.y}:std::abs(normal.y)>std::abs(normal.z)?Float2{v.position.x,v.position.z}:Float2{v.position.x,v.position.y};v.texcoord1=v.texcoord;id=std::uint32_t(mesh.vertices.size());mesh.vertices.push_back(v);}result.selection.components.insert(f);}
             mesh.indices.insert(mesh.indices.end(),ids.begin(),ids.end());if(mesh.submeshes.empty()||mesh.submeshes.back().materialIndex!=material)mesh.submeshes.push_back({"Bevel surface",std::uint32_t(f*3),3,material});else mesh.submeshes.back().indexCount+=3;}
-        refresh_editor_polygon(mesh);auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);return result;
+        if (result.selection.components.empty()) return fail("Bevel width is too small to change the mesh; increase Width");
+        if (world) for (auto& vertex : mesh.vertices)
+            vertex.position={vertex.position.x/objectScale.x,vertex.position.y/objectScale.y,vertex.position.z/objectScale.z};
+        smooth_bevel_normals(mesh,settings.smoothingAngle);
+        refresh_editor_polygon(mesh);auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);
+        const auto topology=diagnose_polygon_topology(mesh);
+        if (topology.boundaries || topology.nonmanifold || topology.degenerate || topology.inconsistentWinding)
+            return fail("Bevel output has invalid topology; reduce width or segments");
+        return result;
     }catch(const std::exception& e){return fail(e.what());}
 #endif
+}
+PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset& source,const PolygonSelection& selection,float width) {
+    EdgeBevelSettings settings;settings.width=width;settings.offsetType=BevelOffsetType::Absolute;
+    settings.worldSpace=false;settings.depth=0;settings.autoFit=false;settings.smoothingAngle=0;
+    return bevel_convex_editor_edges(source,selection,settings);
 }
 PolygonEditResult convex_editor_hull(EditorObjectId id,std::span<const Float3> points) {
     PolygonEditResult r;

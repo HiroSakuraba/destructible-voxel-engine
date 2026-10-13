@@ -512,12 +512,29 @@ void native_commands(const fs::path& root) {
 
 } // namespace
 
+// A scene can name any path in dve.exact_brep; only project-contained relative sources run.
+void source_outside_project_refused() {
+    TempDir dir;
+    fs::create_directories(dir.path / "sources/exact");
+    write_text(dir.path / "sources/exact/a.brep", "a");
+    write_text(dir.path / "outside.brep", "o");
+    for (const std::string bad : {std::string("../outside.brep"), std::string("sources/../../outside.brep"),
+                                  (dir.path / "outside.brep").generic_string()}) {
+        EditorDocument document("Outside");
+        document.add_object(exact_object(1, "A", "sources/exact/a.brep"));
+        document.add_object(exact_object(2, "B", bad));
+        const auto request = prepare_exact_boolean(dir.path, document, 1, 2, MeshBoolean::Union);
+        check(request.error.find("outside the project") != std::string::npos, "source outside project refused: " + bad);
+    }
+}
+
 int main() {
     try {
         placement_matches_voxel_metric();
         component_round_trip_and_export();
         fake_import();
         fake_boolean();
+        source_outside_project_refused();
         TempDir dir;
         const auto settings = ExactCadSettings::from_environment();
         const char* require = std::getenv("DVE_REQUIRE_BREPKERNEL");

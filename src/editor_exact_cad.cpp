@@ -44,6 +44,20 @@ void append_bounded(std::string& out, std::string_view chunk, std::uint64_t limi
     out.append(chunk.substr(0, static_cast<std::size_t>(std::min<std::uint64_t>(chunk.size(), limit - out.size()))));
 }
 
+// UTF-8 text of a path for brepkernel's argv. path::string() on Windows converts through the
+// ANSI code page and throws or garbles non-ASCII paths; the Windows runner widens argv as UTF-8.
+std::string utf8(const std::filesystem::path& path) {
+    const auto text = path.u8string();
+    return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+}
+
+// A stored exact source must stay inside the project: relative, no root, no "..".
+bool contained_relative(const std::filesystem::path& relative) {
+    if (relative.empty() || relative.has_root_name() || relative.has_root_directory()) return false;
+    for (const auto& part : relative) if (part == "..") return false;
+    return true;
+}
+
 bool on_path(const std::string& name) {
     const char* path = std::getenv("PATH");
     if (!path) return false;
@@ -127,7 +141,7 @@ ToolRun run_tool(const ExactCadSettings& settings, const ExactCadRunner& runner,
     auto argv = settings.command.empty() ? ExactCadSettings::from_environment().command : settings.command;
     argv.insert(argv.end(), arguments.begin(), arguments.end());
     argv.push_back("--report");
-    argv.push_back(reportPath.string());
+    argv.push_back(utf8(reportPath));
     const auto result = runner ? runner(argv, settings.timeout, settings.maximumOutputBytes)
                                : run_exact_cad_process(argv, settings.timeout, settings.maximumOutputBytes);
     run.exitCode = result.exitCode;
@@ -201,13 +215,13 @@ std::optional<ExactBrepSource> adopt_brep(const std::filesystem::path& projectRo
     const auto target = projectRoot / relative;
     std::error_code ec;
     std::filesystem::create_directories(target.parent_path(), ec);
-    if (ec) { if (error) *error = "Cannot create " + target.parent_path().string() + ": " + ec.message(); return std::nullopt; }
+    if (ec) { if (error) *error = "Cannot create " + utf8(target.parent_path()) + ": " + ec.message(); return std::nullopt; }
     if (!std::filesystem::exists(target, ec)) {
         std::filesystem::rename(written, target, ec);
         if (ec) {                                    // different volume: copy
             ec.clear();
             std::filesystem::copy_file(written, target, std::filesystem::copy_options::overwrite_existing, ec);
-            if (ec) { if (error) *error = "Cannot store " + target.string() + ": " + ec.message(); return std::nullopt; }
+            if (ec) { if (error) *error = "Cannot store " + utf8(target) + ": " + ec.message(); return std::nullopt; }
         }
     }
     return ExactBrepSource{relative.generic_string(), sha256, std::move(origin)};
@@ -267,7 +281,7 @@ ExactCadSettings ExactCadSettings::from_environment() {
 }
 
 bool is_exact_cad_source(const std::filesystem::path& path) {
-    const auto extension = lower(path.extension().string());
+    const auto extension = lower(utf8(path.extension()));
     return extension == ".step" || extension == ".stp" || extension == ".brep" || extension == ".usda";
 }
 
@@ -334,7 +348,7 @@ ExactCadImportResult import_exact_cad(const std::filesystem::path& projectRoot, 
     if (!temp.ok()) { result.error = "Cannot create a temporary folder"; return result; }
     const auto brep = temp.path() / "part.brep";
     const auto glb = temp.path() / "part.glb";
-    std::vector<std::string> args{"import", cadFile.string(), "-o", brep.string(), "--mesh", glb.string()};
+    std::vector<std::string> args{"import", utf8(cadFile), "-o", utf8(brep), "--mesh", utf8(glb)};
     mesh_options(settings, args);
     auto run = run_tool(settings, runner, std::move(args), temp.path() / "report.json");
     if (!run.report) { result.error = run.error; return result; }
@@ -347,8 +361,8 @@ ExactCadImportResult import_exact_cad(const std::filesystem::path& projectRoot, 
     std::string error;
     auto mesh = cook_glb(glb, id, &error);
     if (!mesh) { result.error = error; return result; }
-    auto source = adopt_brep(projectRoot, brep, json_string(report, {"output", "sha256"}), cadFile.stem().string(),
-                             cadFile.filename().string(), &error);
+    auto source = adopt_brep(projectRoot, brep, json_string(report, {"output", "sha256"}), utf8(cadFile.stem()),
+                             utf8(cadFile.filename()), &error);
     if (!source) { result.error = error; return result; }
     result.mesh = std::move(*mesh);
     result.source = std::move(*source);
@@ -397,11 +411,14 @@ ExactBooleanRequest prepare_exact_boolean(const std::filesystem::path& projectRo
         if (!exact_brep_source(*object))
             return fail(object->name + " has no exact CAD source; import it with Polygon > Import Exact CAD");
     }
+    for (const auto* object : {first, second})
+        if (!contained_relative(exact_brep_source(*object)->relativePath))
+            return fail(object->name + " has an exact CAD source outside the project; import it again");
     request.brepA = projectRoot / exact_brep_source(*first)->relativePath;
     request.brepB = projectRoot / exact_brep_source(*second)->relativePath;
     std::error_code ec;
     for (const auto& p : {request.brepA, request.brepB})
-        if (!std::filesystem::is_regular_file(p, ec)) return fail("Exact CAD source is missing: " + p.string());
+        if (!std::filesystem::is_regular_file(p, ec)) return fail("Exact CAD source is missing: " + utf8(p));
     const auto placement = exact_relative_placement(document, a, b);
     if (!placement) return fail("Operand transforms cannot be combined (zero scale?)");
     request.placement = *placement;
@@ -431,8 +448,8 @@ ExactBooleanResult run_exact_boolean(const std::filesystem::path& projectRoot, c
     const bool reverse = request.operation == MeshBoolean::ReverseDifference;
     const char* op = request.operation == MeshBoolean::Union ? "union"
         : request.operation == MeshBoolean::Intersection ? "intersection" : "difference";
-    std::vector<std::string> args{"boolean", request.brepA.string(), request.brepB.string(), "--op", op, "-o", brep.string(),
-                                  "--b-transform", matrix, "--mesh", glb.string()};
+    std::vector<std::string> args{"boolean", utf8(request.brepA), utf8(request.brepB), "--op", op, "-o", utf8(brep),
+                                  "--b-transform", matrix, "--mesh", utf8(glb)};
     if (reverse) args.push_back("--reverse");
     if (settings.advisory) args.push_back("--advisory");
     mesh_options(settings, args);
@@ -608,6 +625,7 @@ ExactCadProcessResult run_exact_cad_process(const std::vector<std::string>& argv
     ExactCadProcessResult result;
     if (argv.empty()) { result.error = "empty command"; return result; }
     TemporaryDirectory temp;
+    if (!temp.ok()) { result.error = "could not create a temporary folder"; return result; }
     const auto logPath = temp.path() / "output.txt";
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE log = CreateFileW(logPath.wstring().c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS,

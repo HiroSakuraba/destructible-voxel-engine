@@ -184,6 +184,7 @@ struct ContextMenuState {
 
 // What Select and Move act on (M toggles): whole objects or voxel cells of one object.
 enum class SelectionDomain : std::uint8_t { Objects, Voxels, Polygons };
+enum class VoxelClickSelection : std::uint8_t { Cell, ConnectedPiece };
 
 struct MarqueeState {
     bool active{};
@@ -959,6 +960,17 @@ public:
     bool paste_voxels();
     bool move_selected_voxels(Int3 offset);
     bool edit_selected_voxel_region(VoxelRegionEdit edit, VoxelRegionSettings settings);
+    bool begin_voxel_region_preview(VoxelRegionEdit edit, VoxelRegionSettings settings);
+    bool begin_geometry_conversion(bool toVoxels);
+    bool update_voxel_authoring_preview();
+    bool apply_voxel_authoring_preview();
+    void cancel_voxel_authoring_preview();
+    bool voxel_authoring_key(std::string_view key, bool control, bool shift, bool alt);
+    bool voxel_authoring_pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers);
+    void draw_voxel_authoring(const IEditorCanvas&, UiRect viewport) const;
+    [[nodiscard]] bool voxel_authoring_active() const noexcept;
+    [[nodiscard]] bool voxel_authoring_preview_ready() const noexcept;
+    [[nodiscard]] bool voxel_preview_replaces_cell(EditorObjectId object, Int3 cell) const noexcept;
     [[nodiscard]] std::string voxel_region_disabled_reason() const;
     // During a Move-gizmo drag in the Voxel domain: the whole-voxel offset the release applies.
     [[nodiscard]] std::optional<Int3> voxel_move_preview() const noexcept;
@@ -1116,6 +1128,32 @@ private:
     bool commit_polygon_preview();
     bool handle_polygon_preview_key(std::string_view);
     Float3 polygon_selection_centre() const;
+    struct VoxelAuthoringState {
+        enum class Kind { Inactive, Region, PolygonToVoxel, VoxelToPolygon };
+        Kind kind{Kind::Inactive};
+        EditorObjectId object{},output{};
+        VoxelRegionEdit edit{VoxelRegionEdit::Extrude};
+        VoxelRegionSettings settings{};
+        GeometryConversionSettings conversion{};
+        int pivotMode{}; // bounds centre, cell (0,0,0) centre, custom cell centre
+        Int3 customPivot{};
+        std::vector<MaterialId> paletteSlots;
+        std::optional<EditorDocument> preview;
+        std::set<Int3> previewCells;
+        std::uint64_t documentRevision{},selectionSerial{};
+        bool ready{},fieldEditing{},replaceTyped{true};
+        int field{}; // amount/size, pivot X/Y/Z
+        std::string typed,error,note;
+    } voxelAuthoring_;
+    std::uint64_t voxelAuthoringGeneration_{};
+    VoxelClickSelection voxelClickSelection_{VoxelClickSelection::ConnectedPiece};
+    bool commit_voxel_authoring_field();
+    struct VoxelAuthoringLayout {
+        UiRect panel{},amount{},refresh{},apply{},cancel{};
+        std::array<UiRect,3> axes{},pivots{},coordinates{};
+    };
+    [[nodiscard]] VoxelAuthoringLayout voxel_authoring_layout(UiRect viewport) const;
+    [[nodiscard]] std::string voxel_authoring_field_value(int field) const;
     EditorObjectId voxelSelectionObject_{};
     std::set<Int3> voxelSelection_;
     std::uint64_t voxelSelectionRevision_{};

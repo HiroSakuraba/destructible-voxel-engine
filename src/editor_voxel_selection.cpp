@@ -1,5 +1,6 @@
 #include "dve/editor_voxel_selection.hpp"
 #include "dve/voxel_metric.hpp"
+#include "dve/editor_polygon.hpp"
 
 #include <algorithm>
 #include <map>
@@ -22,6 +23,21 @@ void for_each_occupied(const VoxelObject& voxels, Fn&& fn) {
         brick.occupancy().for_each_set([&](std::uint16_t index) {
             fn(global_from_local(key, local_from_index_unchecked(index)), brick.material(index));
         });
+}
+
+
+bool sample_hits_cell(const EditorDocument& document, EditorObjectId object, Int3 cell,
+                     const EditorCamera& camera, UiRect viewport, float x, float y,
+                     const std::set<EditorObjectId>* onlyObjects, std::size_t& rayBudget) {
+    if (rayBudget == 0) return false;
+    --rayBudget;
+    auto ray = make_viewport_ray(camera,viewport,x,y);
+    const float cosine = dot(ray.direction,camera_basis(camera).forward);
+    if (cosine <= 0 || camera.farPlane <= camera.nearPlane) return false;
+    const float nearDistance = std::max(0.00001F,camera.nearPlane);
+    ray.origin = add(ray.origin,multiply(ray.direction,nearDistance/cosine));
+    const auto hit = pick_editor_document(document,ray,(camera.farPlane-nearDistance)/cosine,onlyObjects);
+    return hit && hit->objectId == object && !hit->polygonFace && hit->voxel == cell;
 }
 
 std::string object_problem(const EditorObject& object) {
@@ -88,10 +104,14 @@ std::set<Int3> invert_voxel_selection(const VoxelObject& voxels, const std::set<
 }
 
 std::set<Int3> voxels_in_screen_rect(const EditorObject& object, const EditorCamera& camera, UiRect viewport,
-                                     UiRect rect, bool through, bool crossing) {
+                                     UiRect rect, bool through, bool crossing, const EditorDocument* document,
+                                     const std::set<EditorObjectId>* onlyObjects, std::string* error) {
     std::set<Int3> cells;
     if (!object.voxels || object.polygon || object.text3d || object.gaborVolume ||
         viewport.width <= 0 || viewport.height <= 0 || rect.width <= 0 || rect.height <= 0) return cells;
+    if (error) error->clear();
+    std::size_t rayBudget = kMaxVoxelSelectionRays;
+    bool exhausted = false;
     const auto basis = camera_basis(camera);
     const float aspect = float(viewport.width)/float(viewport.height);
     const float tangent = std::tan(std::clamp(editor_camera_vertical_fov(camera,aspect),0.1F,3.04159265F)*0.5F);
@@ -116,7 +136,7 @@ std::set<Int3> voxels_in_screen_rect(const EditorObject& object, const EditorCam
     };
     const auto turn = [](Point a,Point b,Point c) { return (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x); };
     for_each_occupied(*object.voxels, [&](Int3 cell, MaterialId) {
-        if (cells.size() > kMaxVoxelSelection) return; // Caller refuses an over-budget box.
+        if (exhausted || cells.size() > kMaxVoxelSelection) return; // Caller refuses an over-budget box.
         const Float3 centre = voxel_to_world(object.transform,multiply(object.voxelScale,object.voxelSizeMeters),
             {float(cell.x)+0.5F,float(cell.y)+0.5F,float(cell.z)+0.5F});
         if (!through) {
@@ -150,7 +170,7 @@ std::set<Int3> voxels_in_screen_rect(const EditorObject& object, const EditorCam
             contained = contained && inside(screen);
             points.push_back(screen);
         }
-        if (!crossing) { if (contained) cells.insert(cell); return; }
+        if (!crossing && !contained) return;
         // Near/far clipping creates cap vertices. Keep them even when original corners are
         // off screen; crossing operates on the actual projected convex cell, not its centre.
         for (int i = 0; i < 8; ++i)
@@ -199,9 +219,64 @@ std::set<Int3> voxels_in_screen_rect(const EditorObject& object, const EditorCam
             }
             hull = std::move(clipped);
         }
-        if (!hull.empty()) cells.insert(cell);
+        if (hull.empty()) return;
+        if (!through && document) {
+            Point centre{};
+            for (auto p : hull) { centre.x += p.x; centre.y += p.y; }
+            centre.x /= float(hull.size()); centre.y /= float(hull.size());
+            const auto visible = [&](Point p) {
+                if (rayBudget == 0) { exhausted = true; return false; }
+                return sample_hits_cell(*document,object.id,cell,camera,viewport,p.x,p.y,onlyObjects,rayBudget);
+            };
+            bool hit = visible(centre);
+            for (std::size_t i = 0; i < hull.size() && !hit && !exhausted; ++i) {
+                // Interior-biased corners and edge centres avoid ambiguous shared cell edges.
+                const auto a = hull[i], b = hull[(i+1)%hull.size()];
+                hit = visible({centre.x*0.1F+a.x*0.9F,centre.y*0.1F+a.y*0.9F}) ||
+                      visible({centre.x*0.1F+(a.x+b.x)*0.45F,centre.y*0.1F+(a.y+b.y)*0.45F});
+            }
+            if (!hit) return;
+        }
+        cells.insert(cell);
     });
+    if (exhausted) {
+        cells.clear();
+        if (error) *error = "Visible selection exceeds 100000 scene rays; use a smaller box or X-Ray";
+    }
     return cells;
+}
+
+bool voxel_cell_visible(const EditorDocument& document, const EditorObject& object, Int3 cell,
+                        const EditorCamera& camera, UiRect viewport,
+                        const std::set<EditorObjectId>* onlyObjects, std::size_t& rayBudget) {
+    if (!object.voxels || !object.voxels->occupied_at(cell)) return false;
+    for (unsigned axis = 0; axis < 3; ++axis)
+        for (int sign : {-1,1}) {
+            std::array<std::int64_t,3> neighbour{cell.x,cell.y,cell.z};
+            neighbour[axis] += sign;
+            const bool valid = neighbour[axis] >= kInt3Min.x && neighbour[axis] <= kInt3Max.x;
+            if (valid && object.voxels->occupied_at({static_cast<std::int32_t>(neighbour[0]),
+                static_cast<std::int32_t>(neighbour[1]),static_cast<std::int32_t>(neighbour[2])})) continue;
+            for (unsigned sample = 0; sample < 5; ++sample) {
+                Float3 local{float(cell.x)+0.5F,float(cell.y)+0.5F,float(cell.z)+0.5F};
+                float* coordinates[] = {&local.x,&local.y,&local.z};
+                *coordinates[axis] += float(sign)*0.5F;
+                if (sample != 0) {
+                    *coordinates[(axis+1)%3] += (sample&1U) ? 0.35F : -0.35F;
+                    *coordinates[(axis+2)%3] += (sample&2U) ? 0.35F : -0.35F;
+                }
+                const auto world = voxel_to_world(object.transform,multiply(object.voxelScale,object.voxelSizeMeters),local);
+                const auto screen = project_world_to_screen(camera,viewport,world);
+                if (screen.depth <= camera.nearPlane || screen.depth > camera.farPlane ||
+                    !std::isfinite(screen.x) || !std::isfinite(screen.y) ||
+                    screen.x < viewport.x || screen.x >= viewport.x+viewport.width ||
+                    screen.y < viewport.y || screen.y >= viewport.y+viewport.height) continue;
+                if (sample_hits_cell(document,object.id,cell,camera,viewport,screen.x,screen.y,onlyObjects,rayBudget))
+                    return true;
+                if (rayBudget == 0) return false;
+            }
+        }
+    return false;
 }
 
 std::set<Int3> voxels_in_cube(const VoxelObject& voxels, Int3 center, int radius) {
@@ -421,11 +496,237 @@ VoxelRegionBuild build_voxel_region_command(const EditorObject& object, const st
     return result;
 }
 
+
+namespace {
+EditorObject conversion_sibling(const EditorObject& source, EditorObjectId id, std::string suffix) {
+    EditorObject result(id,source.name+suffix);
+    result.transform = source.transform;
+    result.voxelScale = source.voxelScale;
+    result.voxelSizeMeters = source.voxelSizeMeters;
+    result.flags = source.flags; result.flags.locked = false;
+    result.parent = source.prefabLink ? std::nullopt : source.parent;
+    result.tags = source.tags; result.groups = source.groups; result.layer = source.layer;
+    for (const auto& component : source.components)
+        if (component.type == "dve.membership" || component.type == "dve.tags") result.components.push_back(component);
+    return result;
+}
+}
+
+GeometryConversionBuild polygon_to_voxels(const EditorObject& source, EditorObjectId outputId,
+    GeometryConversionSettings settings, const std::vector<MaterialId>& paletteSlots) {
+    GeometryConversionBuild result;
+    if (!source.polygon || source.flags.locked || !source.flags.visible) {
+        result.error = "Select a visible unlocked polygon mesh"; return result;
+    }
+    if (!std::isfinite(settings.voxelSizeMeters) || settings.voxelSizeMeters < 0.005F ||
+        settings.voxelSizeMeters > 10.0F || !valid_voxel_metric(source.voxelScale)) {
+        result.error = "Use a finite local voxel size between 0.005 and 10 metres"; return result;
+    }
+    if (settings.mode != VoxelizationMode::Solid && settings.mode != VoxelizationMode::Shell &&
+        settings.mode != VoxelizationMode::SurfaceOnly) { result.error = "Invalid voxelization mode"; return result; }
+    const auto& mesh = *source.polygon;
+    if (const auto valid = validate_polygon_asset(mesh); !valid) { result.error = valid.message; return result; }
+    if (mesh.indices.size()/3 > 500'000 || mesh.vertices.size() > 1'000'000) {
+        result.error = "Convert a smaller mesh (at most 500000 triangles and 1000000 vertices)"; return result;
+    }
+    std::set<MaterialId> slots(paletteSlots.begin(),paletteSlots.end());
+    if (slots.size() != paletteSlots.size() || slots.empty() || slots.contains(kAirMaterial)) {
+        result.error = "No free palette slots; use fewer materials"; return result;
+    }
+    const float size = settings.voxelSizeMeters;
+    std::uint64_t cells = 1;
+    const std::array<double,3> lo{mesh.bounds.minimum.x,mesh.bounds.minimum.y,mesh.bounds.minimum.z};
+    const std::array<double,3> hi{mesh.bounds.maximum.x,mesh.bounds.maximum.y,mesh.bounds.maximum.z};
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        const double a = std::floor(lo[axis]/size)-1, b = std::floor(hi[axis]/size)+1;
+        if (!std::isfinite(a) || !std::isfinite(b) || a < double(kInt3Min.x)+kBrickDim ||
+            b > double(kInt3Max.x)-kBrickDim || b < a || b-a+1 > double(kMaxConversionWorkingCells)) {
+            result.error = "Conversion bounds exceed the supported voxel grid"; return result;
+        }
+        const auto extent = static_cast<std::uint64_t>(b-a+1);
+        if (cells > kMaxConversionWorkingCells/extent) {
+            result.error = "Conversion exceeds 2000000 working cells; use a larger voxel size"; return result;
+        }
+        cells *= extent;
+    }
+    try {
+        ImportedScene scene; scene.name = source.name;
+        for (const auto& image : mesh.images)
+            scene.images.push_back({image.name,image.mimeType,image.width,image.height,image.rgba8});
+        for (const auto& sampler : mesh.samplers)
+            scene.samplers.push_back({sampler.wrapS,sampler.wrapT,sampler.minFilter,sampler.magFilter});
+        for (const auto& texture : mesh.textures)
+            scene.textures.push_back({texture.name,texture.imageIndex,texture.samplerIndex});
+        for (std::size_t i = 0; i < mesh.materials.size(); ++i) {
+            const auto& material = mesh.materials[i];
+            ImportedMaterial imported;
+            imported.name = std::to_string(i)+":"+material.name;
+            imported.baseColorFactor = material.baseColor;
+            imported.emissiveFactor = material.emissive;
+            imported.metallicFactor = material.metallic;
+            imported.roughnessFactor = material.roughness;
+            imported.alphaMode = material.blendMode == MaterialBlendMode::Masked ? ImportedAlphaMode::Mask :
+                material.blendMode == MaterialBlendMode::Translucent || material.transparent ? ImportedAlphaMode::Blend :
+                ImportedAlphaMode::Opaque;
+            if (i < mesh.materialBindings.size()) {
+                const auto& binding = mesh.materialBindings[i];
+                imported.baseColorTexture = binding.baseColor.texture;
+                imported.alphaCutoff = binding.alphaCutoff;
+                imported.doubleSided = binding.doubleSided;
+            }
+            // The voxelizer samples UV0; each triangle below supplies its material's selected
+            // base-color channel there. Other shader/detail/normal maps are not baked.
+            scene.materials.push_back(std::move(imported));
+        }
+        ImportedMesh importedMesh; importedMesh.name = source.name;
+        std::uint64_t triangleWork = 0; // Bound raster work as well as the dense grid allocation.
+        std::map<std::pair<std::uint32_t,std::uint32_t>,std::uint32_t> vertexMap;
+        for (const auto& submesh : mesh.submeshes) {
+            const auto channel = submesh.materialIndex < mesh.materialBindings.size() ?
+                mesh.materialBindings[submesh.materialIndex].baseColor.texcoord : 0U;
+            for (std::uint32_t at = submesh.firstIndex; at < submesh.firstIndex+submesh.indexCount; at += 3) {
+                ImportedTriangle triangle; triangle.materialIndex = submesh.materialIndex;
+                for (unsigned corner = 0; corner < 3; ++corner) {
+                    const auto index = mesh.indices[at+corner];
+                    const auto key = std::make_pair(index,channel);
+                    auto [found,inserted] = vertexMap.try_emplace(key,static_cast<std::uint32_t>(importedMesh.vertices.size()));
+                    if (inserted) {
+                        const auto& vertex = mesh.vertices[index];
+                        importedMesh.vertices.push_back({vertex.position,vertex.normal,
+                            channel == 1 ? vertex.texcoord1 : vertex.texcoord,vertex.color,vertex.texcoord1});
+                    }
+                    triangle.indices[corner] = found->second;
+                }
+                std::uint64_t work = 1;
+                for (unsigned axis = 0; axis < 3; ++axis) {
+                    double minimum = std::numeric_limits<double>::infinity(), maximum = -minimum;
+                    for (const auto index : triangle.indices) {
+                        const auto p = importedMesh.vertices[index].position;
+                        const double coordinate = axis == 0 ? p.x : axis == 1 ? p.y : p.z;
+                        minimum = std::min(minimum,coordinate); maximum = std::max(maximum,coordinate);
+                    }
+                    const auto extent = static_cast<std::uint64_t>(std::floor(maximum/size)-std::floor(minimum/size)+3);
+                    if (work > 16'000'000/extent) { result.error = "Triangle raster work exceeds conversion budget; use a larger voxel size"; return result; }
+                    work *= extent;
+                }
+                if (triangleWork > 16'000'000-work) { result.error = "Triangle raster work exceeds conversion budget; use a larger voxel size"; return result; }
+                triangleWork += work;
+                importedMesh.triangles.push_back(triangle);
+            }
+        }
+        scene.meshes.push_back(std::move(importedMesh));
+        ImportedNode node; node.name = source.name; node.mesh = 0;
+        scene.nodes.push_back(std::move(node)); scene.roots.push_back(0);
+        VoxelizeSettings cook;
+        cook.objectId = outputId; cook.voxelSizeMeters = size; cook.mode = settings.mode;
+        cook.maximumWorkingVoxels = kMaxConversionWorkingCells;
+        cook.maximumPaletteMaterials = std::min<std::uint32_t>(256,static_cast<std::uint32_t>(paletteSlots.size()+1));
+        auto cooked = voxelize_scene(scene,cook);
+        for (const auto& diagnostic : cooked.diagnostics) {
+            if (diagnostic.severity == ImportDiagnostic::Severity::Error) { result.error = diagnostic.message; return result; }
+            if (diagnostic.severity == ImportDiagnostic::Severity::Warning) result.note += diagnostic.message+" ";
+        }
+        if (cooked.object.occupied_voxel_count() == 0 || cooked.materials.size() > paletteSlots.size()+1) {
+            result.error = "Conversion produced no cells or exceeded the available palette"; return result;
+        }
+        auto object = conversion_sibling(source,outputId," (voxels)");
+        object.voxelSizeMeters = size;
+        object.voxels = std::make_unique<VoxelObject>(outputId);
+        for (std::size_t localId = 1; localId < cooked.materials.size(); ++localId) {
+            auto material = cooked.materials[localId];
+            for (std::size_t original = 0; original < mesh.materials.size(); ++original)
+                if (material.name.starts_with(std::to_string(original)+":")) {
+                    auto full = mesh.materials[original];
+                    full.name = mesh.materials[original].name+" (voxel)";
+                    full.baseColor = material.baseColor;
+                    full.transparent = material.transparent;
+                    full.layers.clear(); // Layer stacks need their own baking, not copied palette references.
+                    material = std::move(full); break;
+                }
+            object.voxelMaterials.emplace(paletteSlots[localId-1],std::move(material));
+        }
+        for_each_occupied(cooked.object,[&](Int3 cell,MaterialId material) {
+            object.voxels->set_voxel(cell,paletteSlots[static_cast<std::size_t>(material)-1]);
+        });
+        result.note += "Base color/alpha and vertex colors are sampled; shader detail and normal maps are not baked.";
+        result.object = std::move(object);
+    } catch (const std::exception& exception) { result.error = exception.what(); }
+    return result;
+}
+
+GeometryConversionBuild voxels_to_polygon(const EditorObject& source, EditorObjectId outputId,
+                                          const EditorMaterialLibrary& materials) {
+    GeometryConversionBuild result;
+    if (auto problem = object_problem(source); !problem.empty()) { result.error = problem; return result; }
+    if (!source.flags.visible || !valid_voxel_metric(source.voxelScale) ||
+        !std::isfinite(source.voxelSizeMeters) || source.voxelSizeMeters <= 0) {
+        result.error = "Select visible voxels with a valid grid size"; return result;
+    }
+    if (source.voxels->occupied_voxel_count() == 0 || source.voxels->occupied_voxel_count() > 250'000) {
+        result.error = "Convert an occupied object with at most 250000 cells"; return result;
+    }
+    constexpr int corners[6][4][3] = {
+        {{1,0,0},{1,1,0},{1,1,1},{1,0,1}}, {{0,0,0},{0,0,1},{0,1,1},{0,1,0}},
+        {{0,1,0},{0,1,1},{1,1,1},{1,1,0}}, {{0,0,0},{1,0,0},{1,0,1},{0,0,1}},
+        {{0,0,1},{1,0,1},{1,1,1},{0,1,1}}, {{0,0,0},{0,1,0},{1,1,0},{1,0,0}}
+    };
+    constexpr Float2 uv[4] = {{0,0},{1,0},{1,1},{0,1}};
+    CookedPolygonAsset mesh; mesh.objectId = outputId;
+    std::map<MaterialId,std::vector<std::uint32_t>> groups;
+    std::size_t faceCount = 0;
+    bool tooLarge = false;
+    for_each_occupied(*source.voxels,[&](Int3 cell,MaterialId material) {
+        if (tooLarge) return;
+        for (unsigned face = 0; face < 6; ++face) {
+            const auto delta = kFaces[face];
+            const std::int64_t nx = std::int64_t(cell.x)+delta.x, ny = std::int64_t(cell.y)+delta.y, nz = std::int64_t(cell.z)+delta.z;
+            const bool valid = nx >= kInt3Min.x && nx <= kInt3Max.x && ny >= kInt3Min.y && ny <= kInt3Max.y &&
+                               nz >= kInt3Min.z && nz <= kInt3Max.z;
+            if (valid && source.voxels->occupied_at({static_cast<std::int32_t>(nx),static_cast<std::int32_t>(ny),
+                                                  static_cast<std::int32_t>(nz)})) continue;
+            if (++faceCount > kMaxConversionFaces) { tooLarge = true; return; }
+            const auto base = static_cast<std::uint32_t>(mesh.vertices.size());
+            for (unsigned corner = 0; corner < 4; ++corner) {
+                PolygonVertex vertex;
+                vertex.position = {float(double(cell.x)+corners[face][corner][0])*source.voxelSizeMeters,
+                    float(double(cell.y)+corners[face][corner][1])*source.voxelSizeMeters,
+                    float(double(cell.z)+corners[face][corner][2])*source.voxelSizeMeters};
+                vertex.normal = {float(delta.x),float(delta.y),float(delta.z)};
+                vertex.texcoord = vertex.texcoord1 = uv[corner];
+                mesh.vertices.push_back(vertex);
+            }
+            auto& indices = groups[material];
+            indices.insert(indices.end(),{base,base+1,base+2,base,base+2,base+3});
+        }
+    });
+    if (tooLarge) { result.error = "Surface exceeds 250000 exposed faces; split the object first"; return result; }
+    for (const auto& [materialId,indices] : groups) {
+        VoxelMaterialDefinition definition;
+        if (const auto owned = source.voxelMaterials.find(materialId); owned != source.voxelMaterials.end()) definition = owned->second;
+        else if (const auto* entry = materials.find(materialId)) definition = entry->definition;
+        else { definition.name = "Material "+std::to_string(materialId); definition.baseColor = {0.65F,0.68F,0.72F,1}; }
+        definition.layers.clear();
+        const auto materialIndex = static_cast<std::uint32_t>(mesh.materials.size());
+        mesh.materials.push_back(std::move(definition)); mesh.materialBindings.emplace_back();
+        mesh.submeshes.push_back({mesh.materials.back().name,static_cast<std::uint32_t>(mesh.indices.size()),
+            static_cast<std::uint32_t>(indices.size()),materialIndex});
+        mesh.indices.insert(mesh.indices.end(),indices.begin(),indices.end());
+    }
+    refresh_editor_polygon(mesh,false);
+    if (const auto valid = validate_polygon_asset(mesh); !valid) { result.error = valid.message; return result; }
+    auto object = conversion_sibling(source,outputId," (polygon)");
+    object.polygon = std::move(mesh);
+    result.object = std::move(object);
+    result.note = "Block surface; UV0/UV1 repeat a unit square per face. Materials are grouped; no smoothing or UV packing.";
+    return result;
+}
+
 VoxelClipboard copy_voxels(const EditorObject& object, const std::set<Int3>& cells) {
     VoxelClipboard clipboard;
     clipboard.name = object.name;
     clipboard.voxelSizeMeters = object.voxelSizeMeters;
     clipboard.voxelScale = object.voxelScale;
+    clipboard.materials = object.voxelMaterials;
     clipboard.transform = object.transform;
     clipboard.parent = object.parent;
     clipboard.flags = object.flags;
@@ -444,6 +745,7 @@ EditorObject make_object_from_voxels(EditorObjectId id, const VoxelClipboard& cl
     EditorObject object(id, std::move(name));
     object.voxelSizeMeters = clipboard.voxelSizeMeters;
     object.voxelScale = clipboard.voxelScale;
+    object.voxelMaterials = clipboard.materials;
     object.transform = clipboard.transform;
     object.parent = clipboard.parent;
     object.flags = clipboard.flags;

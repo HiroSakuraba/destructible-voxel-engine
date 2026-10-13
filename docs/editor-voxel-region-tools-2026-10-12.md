@@ -19,7 +19,11 @@ hidden or non-voxel objects, integer coordinate overflow and outputs above 500,0
 are refused. Coordinates keep an eight-cell margin inside the signed 32-bit grid so brick
 extents and neighbouring-cell queries remain representable. Material changes and anchors use the existing expected-state voxel patch command.
 Each successful edit records one undo/redo transition for both geometry and cell selection.
-There is no preview; each menu command applies one bounded edit immediately.
+Menu choices now open a non-destructive preview panel: edit signed distance, +/-90 degree turn
+or integer scale factor 2..8, then Update Preview and Apply/Cancel. Rotation pivots can use the
+nearest bounds-centre cell, cell (0,0,0), or custom X/Y/Z cell indices. Enter applies a reviewed
+preview; Esc cancels. Preview geometry is displayed with a 20,000-cell/triangle cap. See
+[conversion and selection follow-up](editor-conversion-selection-preview-2026-10-12.md).
 
 ## Selection gestures
 
@@ -36,8 +40,8 @@ There is no preview; each menu command applies one bounded edit immediately.
 
 Crossing uses a convex projected silhouette clipped at near/far depth planes and against the
 selection rectangle, rather than a cell-centre or screen bounding-box test. Orthographic facing
-uses the camera direction. X-Ray includes buried cells; without X-Ray the existing exposed-face
-filter remains, without scene-occlusion testing. A selection still belongs to one object.
+uses the camera direction. X-Ray includes buried cells; without X-Ray, box and brush candidates are now checked against
+first-hit scene rays, including self-occlusion. Bounded samples can miss narrow visible slivers. A selection still belongs to one object.
 Oversized box results stop at the selection budget plus one; an oversized result is refused.
 Ctrl toggle now computes the resulting set size correctly when toggling off a large selection.
 

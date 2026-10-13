@@ -92,6 +92,7 @@ std::set<std::uint32_t> uv_click(const CookedPolygonAsset& m,const NativeMeshAut
 }
 }
 std::set<EditorObjectId> NativeEditorController::mesh_authoring_hidden_objects() const{
+
     if(!meshAuthoring_||!meshAuthoring_->result)return {};const auto& s=*meshAuthoring_;
     if(s.kind==NativeMeshAuthoringState::Kind::Boolean)return {s.object,s.operand};if(s.kind==NativeMeshAuthoringState::Kind::Topology)return {s.object};return {};
 }
@@ -426,6 +427,7 @@ bool NativeEditorController::mesh_authoring_wheel(float steps,int x,int y){
     auto after=from_screen(x,y,state,layout_.viewport);state.center.x+=before.x-after.x;state.center.y+=before.y-after.y;return true;
 }
 void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiRect viewport) const{
+    if (voxel_authoring_active()) { draw_voxel_authoring(canvas,viewport); return; }
     if(!meshAuthoring_||workspace_.mode()!=EditorMode::Edit||playSession_.active())return;auto& s=*meshAuthoring_;const auto* object=workspace_.document().find_object(s.object);if(!object||!object->polygon||!object->flags.visible||is_isolated_out(s.object))return;
     auto line=[&](ScreenPoint a,ScreenPoint b,EditorColor c,int width=1){if(a.visible&&b.visible)canvas.line(int(std::clamp(a.x,-100000.0F,100000.0F)),int(std::clamp(a.y,-100000.0F,100000.0F)),int(std::clamp(b.x,-100000.0F,100000.0F)),int(std::clamp(b.y,-100000.0F,100000.0F)),c,width);};
     if(s.diagnostics){auto d=diagnose_polygon_topology(*object->polygon);for(auto e:polygon_edges(*object->polygon))if(d.problemEdges.contains(e.key())){auto a=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[e.a].position)),b=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[e.b].position));line(a,b,color(255,55,80),3);}}

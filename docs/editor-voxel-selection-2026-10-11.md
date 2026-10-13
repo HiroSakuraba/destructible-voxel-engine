@@ -29,8 +29,11 @@ there. Selected voxels are outlined in amber.
 | Ctrl + click or box | Toggles |
 | Ctrl+Shift + click or box | Intersects |
 
-Without **View > X-Ray Selection**, cells need an exposed camera-facing face. This is a surface
-filter, not scene occlusion: another object or concave surface can still hide a candidate.
+Without **View > X-Ray Selection**, boxes and brushes check candidates against first-hit scene
+rays, including self-occlusion and other objects. Bounded samples can miss narrow visible slivers;
+a ray-budget overflow refuses the selection instead of applying a partial result.
+**Voxel > Click Selection: Single Cell / Connected Piece** switches click behavior. Connected
+Piece intentionally selects the entire connected volume, including buried cells.
 
 Alt is not used because Alt+drag orbits the camera in the default navigation.
 

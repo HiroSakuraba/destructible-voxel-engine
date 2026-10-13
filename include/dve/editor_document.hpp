@@ -51,6 +51,9 @@ struct EditorObject {
     float voxelSizeMeters{0.10F};
     Float3 voxelScale{1,1,1};
     std::unique_ptr<VoxelObject> voxels;
+    // Object-owned overrides, stored in the DVOX palette. Conversion reserves IDs outside
+    // the editor paint palette, so painting with an existing editor material stays consistent.
+    std::map<MaterialId, VoxelMaterialDefinition> voxelMaterials;
     std::optional<CookedPolygonAsset> polygon;
     std::optional<CookedText3DAsset> text3d;
     std::optional<GaborVolumeAsset> gaborVolume;

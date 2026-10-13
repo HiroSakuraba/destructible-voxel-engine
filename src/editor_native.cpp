@@ -9,6 +9,7 @@
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/game_script.hpp"
 #include "dve/print_export.hpp"
+#include "dve/editor_native_renderer.hpp"
 #include "dve/collision_proxy.hpp"
 #include "dve/fragment.hpp"
 
@@ -377,6 +378,7 @@ void NativeEditorController::set_gamepad_axes(std::array<float, 2> move, std::ar
 }
 
 void NativeEditorController::clear_navigation_input() {
+    cancel_voxel_authoring_preview();
     finish_slice_pointer(true);
     cancel_polygon_preview();
     cancel_mesh_authoring_drag();
@@ -1998,6 +2000,25 @@ void NativeEditorController::refresh_menu_state() noexcept {
         enabled("voxel.join_cancel", voxelJoin_.active(), "No Join preview is open.");
         const std::string separateReason = separate_islands_disabled_reason();
         enabled("voxel.separate_islands", separateReason.empty(), separateReason);
+        const auto primary = workspace_.selected_object();
+        const auto* conversionObject = primary ? workspace_.document().find_object(*primary) : nullptr;
+        const bool conversionReady = workspace_.mode() == EditorMode::Edit && !playSession_.active() && !longJob_ &&
+            !voxel_authoring_active() && !gizmoDragging_ && !voxelStrokeActive_ && voxelMoveAxis_ == 0 &&
+            !marquee_.active && !mesh_authoring_dragging() && !polygonPreviewBefore_ &&
+            workspace_.selection_count() == 1 && conversionObject &&
+            conversionObject->flags.visible && !conversionObject->flags.locked && !is_isolated_out(conversionObject->id);
+        enabled("polygon.convert_to_voxels",conversionReady && conversionObject->polygon.has_value(),
+                "Select one visible unlocked polygon mesh and finish any preview.");
+        enabled("voxel.convert_to_polygon",conversionReady && conversionObject->voxels && !conversionObject->polygon &&
+                !conversionObject->text3d && !conversionObject->gaborVolume,
+                "Select one visible unlocked voxel object and finish any preview.");
+        enabled("voxel.authoring_apply",voxel_authoring_preview_ready() && !longJob_,"Update the preview before applying.");
+        enabled("voxel.authoring_cancel",voxel_authoring_active() && !longJob_,"No voxel/conversion preview is open.");
+        for (auto id : {"voxel.select_cells","voxel.select_connected"})
+            enabled(id,workspace_.mode() == EditorMode::Edit && !playSession_.active() && !longJob_,
+                    "Stop Play and finish background work before changing selection mode.");
+        checked("voxel.select_cells",voxelClickSelection_ == VoxelClickSelection::Cell);
+        checked("voxel.select_connected",voxelClickSelection_ == VoxelClickSelection::ConnectedPiece);
         const auto regionReason = voxel_region_disabled_reason();
         for (std::string_view id : {
             "voxel.region_extrude_x_positive",
@@ -3513,6 +3534,7 @@ void NativeEditorController::key_up(std::string_view key, bool control, bool, bo
 
 void NativeEditorController::text_input(std::string_view text) {
     if (longJob_) return;
+    if (voxel_authoring_active()) return; // Numeric authoring input is handled once in key_down.
     if (polygonPreviewBefore_) return; // Numeric preview input is handled once in key_down.
     if (importOptions_.open) {
         // Typing a number into the Voxel size or Scale row; Enter applies it.
@@ -3909,6 +3931,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (!longJob_ && voxel_authoring_pointer_down(button,x,y,modifiers)) return;
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers)){refresh_menu_state();return;}
     if (sliceDrag_) finish_slice_pointer(true);
@@ -5144,7 +5167,7 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
             add("Voxel menu: region rotation / integer scale");
         if (activeTool_ == EditorToolId::Translate && !voxelSelection_.empty())
             add("Drag axis: move voxels");
-        add("Voxels: click piece");
+        add(voxelClickSelection_ == VoxelClickSelection::Cell ? "Voxels: click one cell" : "Voxels: click piece");
         add("Box: rightward contains, leftward crosses");
         add("Shift add  Ctrl toggle  Ctrl+Shift intersect");
         return gestures;
@@ -5909,6 +5932,15 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if(mesh_authoring_dragging() && !actionId.starts_with("view.")) {
         set_status("Apply or cancel the mesh workspace preview first",true);return false;
     }
+    if (voxel_authoring_active() && !actionId.starts_with("view.") &&
+        actionId != "voxel.authoring_apply" && actionId != "voxel.authoring_cancel") {
+        set_status("Apply or cancel the voxel/conversion preview first",true); return false;
+    }
+    if (actionId == "voxel.authoring_apply") return apply_voxel_authoring_preview();
+    if (actionId == "voxel.authoring_cancel") {
+        if (!voxel_authoring_active()) { set_status("No voxel/conversion preview is open",true); return false; }
+        cancel_voxel_authoring_preview(); refresh_menu_state(); set_status("Preview cancelled; scene unchanged"); return true;
+    }
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
         const auto value = actionId.substr(std::string_view("selection.pick.").size());
@@ -6153,7 +6185,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId.starts_with("mesh.")) return dispatch_mesh_authoring_action(actionId);
     if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.create_plane" &&
-        actionId != "polygon.lod" && actionId != "polygon.collision" && actionId != "polygon.streaming")
+        actionId != "polygon.lod" && actionId != "polygon.convert_to_voxels" && actionId != "polygon.collision" && actionId != "polygon.streaming")
         return handle_polygon_action(actionId);
     if (selectionDomain_ == SelectionDomain::Polygons && (actionId == "edit.select_all" || actionId == "edit.copy" ||
         actionId == "edit.cut" || actionId == "edit.delete" || actionId == "edit.duplicate")) return handle_polygon_action(actionId);
@@ -6179,6 +6211,17 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         return true;
     }
     if (actionId == "voxel.extract_selection") return extract_selected_voxels();
+    if (actionId == "polygon.convert_to_voxels") return begin_geometry_conversion(true);
+    if (actionId == "voxel.convert_to_polygon") return begin_geometry_conversion(false);
+    if (actionId == "voxel.select_cells" || actionId == "voxel.select_connected") {
+        set_selection_domain(SelectionDomain::Voxels); set_active_tool(EditorToolId::Select);
+        voxelSelectionBrushEnabled_ = false;
+        voxelClickSelection_ = actionId == "voxel.select_cells" ? VoxelClickSelection::Cell : VoxelClickSelection::ConnectedPiece;
+        refresh_menu_state();
+        set_status(voxelClickSelection_ == VoxelClickSelection::Cell ? "Click selects one voxel cell; box modifiers are unchanged"
+                                                                  : "Click selects the face-connected piece");
+        return true;
+    }
     if (actionId == "voxel.selection_brush") {
         const bool enable = !(selectionDomain_ == SelectionDomain::Voxels && activeTool_ == EditorToolId::Select &&
                               voxelSelectionBrushEnabled_);
@@ -6192,21 +6235,21 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
                           : "Box selection: left-to-right contains, right-to-left crosses; Shift adds, Ctrl toggles, Ctrl+Shift intersects");
         return true;
     }
-    if (actionId == "voxel.region_extrude_x_positive") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {0,1});
-    if (actionId == "voxel.region_extrude_x_negative") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {0,-1});
-    if (actionId == "voxel.region_extrude_y_positive") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {1,1});
-    if (actionId == "voxel.region_extrude_y_negative") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {1,-1});
-    if (actionId == "voxel.region_extrude_z_positive") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {2,1});
-    if (actionId == "voxel.region_extrude_z_negative") return edit_selected_voxel_region(VoxelRegionEdit::Extrude, {2,-1});
-    if (actionId == "voxel.region_rotate_x_positive") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {0,1});
-    if (actionId == "voxel.region_rotate_x_negative") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {0,-1});
-    if (actionId == "voxel.region_rotate_y_positive") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {1,1});
-    if (actionId == "voxel.region_rotate_y_negative") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {1,-1});
-    if (actionId == "voxel.region_rotate_z_positive") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {2,1});
-    if (actionId == "voxel.region_rotate_z_negative") return edit_selected_voxel_region(VoxelRegionEdit::RotateQuarterTurn, {2,-1});
-    if (actionId == "voxel.region_scale_2") return edit_selected_voxel_region(VoxelRegionEdit::ScaleInteger, {0,2});
-    if (actionId == "voxel.region_scale_3") return edit_selected_voxel_region(VoxelRegionEdit::ScaleInteger, {0,3});
-    if (actionId == "voxel.region_scale_4") return edit_selected_voxel_region(VoxelRegionEdit::ScaleInteger, {0,4});
+    if (actionId == "voxel.region_extrude_x_positive") return begin_voxel_region_preview(VoxelRegionEdit::Extrude, {0,1});
+    if (actionId == "voxel.region_extrude_x_negative") return begin_voxel_region_preview(VoxelRegionEdit::Extrude, {0,-1});
+    if (actionId == "voxel.region_extrude_y_positive") return begin_voxel_region_preview(VoxelRegionEdit::Extrude, {1,1});
+    if (actionId == "voxel.region_extrude_y_negative") return begin_voxel_region_preview(VoxelRegionEdit::Extrude, {1,-1});
+    if (actionId == "voxel.region_extrude_z_positive") return begin_voxel_region_preview(VoxelRegionEdit::Extrude, {2,1});
+    if (actionId == "voxel.region_extrude_z_negative") return begin_voxel_region_preview(VoxelRegionEdit::Extrude, {2,-1});
+    if (actionId == "voxel.region_rotate_x_positive") return begin_voxel_region_preview(VoxelRegionEdit::RotateQuarterTurn, {0,1});
+    if (actionId == "voxel.region_rotate_x_negative") return begin_voxel_region_preview(VoxelRegionEdit::RotateQuarterTurn, {0,-1});
+    if (actionId == "voxel.region_rotate_y_positive") return begin_voxel_region_preview(VoxelRegionEdit::RotateQuarterTurn, {1,1});
+    if (actionId == "voxel.region_rotate_y_negative") return begin_voxel_region_preview(VoxelRegionEdit::RotateQuarterTurn, {1,-1});
+    if (actionId == "voxel.region_rotate_z_positive") return begin_voxel_region_preview(VoxelRegionEdit::RotateQuarterTurn, {2,1});
+    if (actionId == "voxel.region_rotate_z_negative") return begin_voxel_region_preview(VoxelRegionEdit::RotateQuarterTurn, {2,-1});
+    if (actionId == "voxel.region_scale_2") return begin_voxel_region_preview(VoxelRegionEdit::ScaleInteger, {0,2});
+    if (actionId == "voxel.region_scale_3") return begin_voxel_region_preview(VoxelRegionEdit::ScaleInteger, {0,3});
+    if (actionId == "voxel.region_scale_4") return begin_voxel_region_preview(VoxelRegionEdit::ScaleInteger, {0,4});
 
     if (selectionDomain_ == SelectionDomain::Voxels) {
         prune_voxel_selection();
@@ -7644,6 +7687,7 @@ camera_menu_dispatch_complete:
 
 void NativeEditorController::key_down(std::string_view key, bool control, bool shift, bool alt) {
     const std::string normalized = lowercase(key);
+    if (!longJob_ && voxel_authoring_key(normalized,control,shift,alt)) { refresh_menu_state(); return; }
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_key(normalized,control,shift,alt)){refresh_menu_state();return;}
     if (polygonPreviewBefore_) { (void)handle_polygon_preview_key(normalized); return; }
@@ -11294,6 +11338,7 @@ bool NativeEditorController::cancel_long_job() {
     longJob_->cancel = true;
     const std::string label = longJob_->label;
     longJob_.reset();
+    cancel_voxel_authoring_preview();
     refresh_menu_state();
     set_status(label + " cancelled; the scene is unchanged");
     return true;
@@ -11499,6 +11544,7 @@ void NativeEditorController::restore_selection_snapshot(const EditorSelectionSna
 }
 
 void NativeEditorController::reset_voxel_selection_state() {
+    cancel_voxel_authoring_preview();
     voxelSelection_.clear();
     ++voxelSelectionSerial_;
     voxelSelectionObject_ = 0;
@@ -11514,6 +11560,7 @@ void NativeEditorController::reset_voxel_selection_state() {
 }
 
 void NativeEditorController::close_previews_for_voxel_edit(std::string_view what) {
+    cancel_voxel_authoring_preview();
     cancel_polygon_preview();
     // One preview at a time (#98): a voxel edit closes any open Slice / Boolean / Join / Scatter
     // preview first, so the edit cannot change an object under a preview.
@@ -11562,7 +11609,17 @@ void NativeEditorController::voxel_brush_select_at(int x, int y) {
     const EditorObject* object = workspace_.document().find_object(hoverPick_->objectId);
     if (!object || !object->voxels) return;
     if (hoverPick_->objectId != voxelSelectionObject_ && voxelBrushOperation_ == SelectionOperation::Subtract) return;
-    select_voxels(hoverPick_->objectId, voxels_in_cube(*object->voxels, hoverPick_->voxel, voxelBrushRadius_), voxelBrushOperation_);
+    auto cells = voxels_in_cube(*object->voxels,hoverPick_->voxel,voxelBrushRadius_);
+    if (!viewportSettings_.xraySelection) {
+        std::size_t budget = kMaxVoxelSelectionRays;
+        for (auto at = cells.begin(); at != cells.end();) {
+            if (voxel_cell_visible(workspace_.document(),*object,*at,camera_,layout_.viewport,
+                                   &viewportSettings_.isolatedObjects,budget)) ++at;
+            else at = cells.erase(at);
+            if (budget == 0) { set_status("Visible brush exceeds the ray budget; use a smaller radius or X-Ray",true); return; }
+        }
+    }
+    select_voxels(hoverPick_->objectId,cells,voxelBrushOperation_);
 }
 
 void NativeEditorController::finish_voxel_marquee(int x, int y) {
@@ -11573,9 +11630,12 @@ void NativeEditorController::finish_voxel_marquee(int x, int y) {
         // Click: the clicked face-connected piece; on empty space a plain click clears.
         if (marquee.clickVoxel) {
             const EditorObject* object = workspace_.document().find_object(marquee.clickVoxel->objectId);
-            if (object && object->voxels)
-                select_voxels(object->id, voxel_connected_piece(*object->voxels, marquee.clickVoxel->voxel, kMaxVoxelSelection),
-                              marquee.operation);
+            if (object && object->voxels && !object->polygon) {
+                const auto cells = voxelClickSelection_ == VoxelClickSelection::Cell ?
+                    std::set<Int3>{marquee.clickVoxel->voxel} :
+                    voxel_connected_piece(*object->voxels,marquee.clickVoxel->voxel,kMaxVoxelSelection);
+                select_voxels(object->id,cells,marquee.operation);
+            }
         } else if (marquee.operation == SelectionOperation::Replace) {
             clear_voxel_selection();
             set_status("Voxel selection cleared", false, 2.0F);
@@ -11594,8 +11654,11 @@ void NativeEditorController::finish_voxel_marquee(int x, int y) {
     }
     const UiRect rect{std::min(marquee.startX, x), std::min(marquee.startY, y), std::abs(x - marquee.startX) + 1,
                       std::abs(y - marquee.startY) + 1};
-    select_voxels(target, voxels_in_screen_rect(*object, camera_, layout_.viewport, rect, viewportSettings_.xraySelection, x < marquee.startX),
-                  marquee.operation);
+    std::string error;
+    const auto cells = voxels_in_screen_rect(*object,camera_,layout_.viewport,rect,viewportSettings_.xraySelection,
+        x < marquee.startX,&workspace_.document(),&viewportSettings_.isolatedObjects,&error);
+    if (!error.empty()) { set_status(error,true,6.0F); return; }
+    select_voxels(target,cells,marquee.operation);
 }
 
 bool NativeEditorController::grow_voxel_selection_cmd() {
@@ -11908,4 +11971,404 @@ bool NativeEditorController::handle_voxel_slice_key(std::string_view key, bool c
     (void)configure_voxel_slice(point, normal, output);
     return true;
 }
+
+bool NativeEditorController::voxel_authoring_active() const noexcept {
+    return voxelAuthoring_.kind != VoxelAuthoringState::Kind::Inactive;
+}
+bool NativeEditorController::voxel_authoring_preview_ready() const noexcept {
+    return voxel_authoring_active() && voxelAuthoring_.ready && voxelAuthoring_.preview.has_value();
+}
+bool NativeEditorController::voxel_preview_replaces_cell(EditorObjectId object, Int3 cell) const noexcept {
+    return voxel_authoring_preview_ready() && voxelAuthoring_.kind == VoxelAuthoringState::Kind::Region &&
+           voxelAuthoring_.object == object && voxelSelection_.contains(cell);
+}
+void NativeEditorController::cancel_voxel_authoring_preview() {
+    ++voxelAuthoringGeneration_;
+    voxelAuthoring_ = {};
+}
+
+bool NativeEditorController::begin_voxel_region_preview(VoxelRegionEdit edit, VoxelRegionSettings settings) {
+    prune_voxel_selection();
+    if (const auto reason = voxel_region_disabled_reason(); !reason.empty()) { set_status(reason,true); return false; }
+    const auto* source = workspace_.document().find_object(voxelSelectionObject_);
+    if (source->voxels->occupied_voxel_count() > kMaxConversionWorkingCells) {
+        set_status("Region preview supports objects up to 2000000 cells; split the object first",true); return false;
+    }
+    cancel_mesh_authoring_drag(); meshAuthoring_.reset();
+    close_previews_for_voxel_edit("voxel region preview");
+    if (edit == VoxelRegionEdit::RotateQuarterTurn && !settings.rotationPivot &&
+        voxelRegionRotationObject_ == source->id && voxelRegionRotationSerial_ == voxelSelectionSerial_)
+        settings.rotationPivot = voxelRegionRotationPivot_;
+    voxelAuthoring_.kind = VoxelAuthoringState::Kind::Region;
+    voxelAuthoring_.object = source->id;
+    voxelAuthoring_.edit = edit; voxelAuthoring_.settings = settings;
+    if (settings.rotationPivot) { voxelAuthoring_.pivotMode = 2; voxelAuthoring_.customPivot = *settings.rotationPivot; }
+    return update_voxel_authoring_preview();
+}
+
+bool NativeEditorController::begin_geometry_conversion(bool toVoxels) {
+    if (longJob_ || workspace_.mode() != EditorMode::Edit || playSession_.active() || workspace_.selection_count() != 1) {
+        set_status(workspace_.selection_count() != 1 ? "Select exactly one object to convert"
+                                                     : "Stop Play and finish background work before converting",true);
+        return false;
+    }
+    const auto* source = workspace_.document().find_object(*workspace_.selected_object());
+    if (!source || !source->flags.visible || source->flags.locked || is_isolated_out(source->id) ||
+        (toVoxels ? !source->polygon : !source->voxels || source->polygon || source->text3d || source->gaborVolume)) {
+        set_status("Select one visible unlocked object of the conversion's source type",true); return false;
+    }
+    if ((source->polygon && (source->polygon->vertices.size() > 1'000'000 || source->polygon->indices.size() > 1'500'000)) ||
+        (!toVoxels && source->voxels->occupied_voxel_count() > 250'000)) {
+        set_status("Split this object before converting: conversion size limit exceeded",true); return false;
+    }
+    if (source->polygon) {
+        std::size_t bytes = 0;
+        for (const auto& image : source->polygon->images) {
+            if (image.rgba8.size() > 64U*1024U*1024U-bytes) {
+                set_status("Conversion texture data exceeds 64 MiB; reduce source textures first",true); return false;
+            }
+            bytes += image.rgba8.size();
+        }
+    }
+    cancel_mesh_authoring_drag(); meshAuthoring_.reset();
+    close_previews_for_voxel_edit("geometry conversion");
+    voxelAuthoring_.kind = toVoxels ? VoxelAuthoringState::Kind::PolygonToVoxel : VoxelAuthoringState::Kind::VoxelToPolygon;
+    voxelAuthoring_.object = source->id;
+    voxelAuthoring_.output = workspace_.document().allocate_object_id();
+    voxelAuthoring_.conversion.voxelSizeMeters = std::clamp(source->voxelSizeMeters,0.005F,10.0F);
+    return update_voxel_authoring_preview();
+}
+
+std::string NativeEditorController::voxel_authoring_field_value(int field) const {
+    const auto& s = voxelAuthoring_;
+    if (field != 0) return std::to_string(field == 1 ? s.customPivot.x : field == 2 ? s.customPivot.y : s.customPivot.z);
+    if (s.kind == VoxelAuthoringState::Kind::PolygonToVoxel) return std::to_string(s.conversion.voxelSizeMeters);
+    return std::to_string(s.edit == VoxelRegionEdit::RotateQuarterTurn ? s.settings.amount*90 : s.settings.amount);
+}
+bool NativeEditorController::commit_voxel_authoring_field() {
+    auto& s = voxelAuthoring_;
+    if (!s.fieldEditing) return true;
+    if (s.field == 0 && s.kind == VoxelAuthoringState::Kind::PolygonToVoxel) {
+        float value{};
+        const auto [end,error] = std::from_chars(s.typed.data(),s.typed.data()+s.typed.size(),value);
+        if (error != std::errc{} || end != s.typed.data()+s.typed.size() || !std::isfinite(value) || value < 0.005F || value > 10) {
+            s.error = "Voxel size must be 0.005..10"; set_status(s.error,true); return false;
+        }
+        s.conversion.voxelSizeMeters = value;
+    } else {
+        std::int32_t value{};
+        const auto [end,error] = std::from_chars(s.typed.data(),s.typed.data()+s.typed.size(),value);
+        if (error != std::errc{} || end != s.typed.data()+s.typed.size()) {
+            s.error = "Enter a whole number"; set_status(s.error,true); return false;
+        }
+        if (s.field != 0) {
+            if (value < kInt3Min.x+kBrickDim || value > kInt3Max.x-kBrickDim) { s.error = "Pivot exceeds the grid"; return false; }
+            if (s.field == 1) s.customPivot.x = value;
+            else if (s.field == 2) s.customPivot.y = value; else s.customPivot.z = value;
+            s.pivotMode = 2;
+        } else {
+            const bool valid = s.edit == VoxelRegionEdit::Extrude ? value != 0 && value >= -32 && value <= 32 :
+                s.edit == VoxelRegionEdit::RotateQuarterTurn ? value == -90 || value == 90 : value >= 2 && value <= 8;
+            if (!valid) { s.error = "Distance +/-1..32, turn +/-90, scale 2..8"; set_status(s.error,true); return false; }
+            s.settings.amount = s.edit == VoxelRegionEdit::RotateQuarterTurn ? value/90 : value;
+        }
+    }
+    s.fieldEditing = false; s.typed.clear(); s.error.clear(); s.ready = false; s.preview.reset();
+    return true;
+}
+
+bool NativeEditorController::update_voxel_authoring_preview() {
+    if (!voxel_authoring_active() || longJob_ || workspace_.mode() != EditorMode::Edit || playSession_.active() ||
+        !commit_voxel_authoring_field()) return false;
+    auto& s = voxelAuthoring_;
+    const auto* source = workspace_.document().find_object(s.object);
+    if (!source || source->flags.locked || !source->flags.visible || is_isolated_out(s.object)) {
+        s.error = "Source is missing, locked or hidden"; s.ready = false; s.preview.reset(); return false;
+    }
+    if (s.kind == VoxelAuthoringState::Kind::Region &&
+        (selectionDomain_ != SelectionDomain::Voxels || voxelSelectionObject_ != s.object || voxelSelection_.empty())) {
+        s.error = "Region selection changed; reopen the tool"; return false;
+    }
+    if (s.kind == VoxelAuthoringState::Kind::PolygonToVoxel) {
+        std::array<bool,256> reserved{};
+        for (const auto& entry : materials_.entries()) reserved[entry.id] = true;
+        for (const auto& [id,object] : workspace_.document().objects()) {
+            (void)id;
+            for (const auto& [material,definition] : object.voxelMaterials) { (void)definition; reserved[material] = true; }
+            if (!object.voxels) continue;
+            for (const auto& [key,brick] : object.voxels->bricks()) {
+                (void)key;
+                brick.occupancy().for_each_set([&](std::uint16_t at) { reserved[brick.material(at)] = true; });
+            }
+        }
+        s.paletteSlots.clear();
+        for (unsigned id = 1; id < 256; ++id) if (!reserved[id]) s.paletteSlots.push_back(static_cast<MaterialId>(id));
+    }
+    if (s.kind == VoxelAuthoringState::Kind::Region && s.edit == VoxelRegionEdit::RotateQuarterTurn) {
+        if (s.pivotMode == 0) {
+            Int3 minimum = *voxelSelection_.begin(), maximum = minimum;
+            for (auto cell : voxelSelection_) { minimum = min_components(minimum,cell); maximum = max_components(maximum,cell); }
+            s.customPivot = {static_cast<std::int32_t>(std::int64_t(minimum.x)+(std::int64_t(maximum.x)-minimum.x)/2),
+                static_cast<std::int32_t>(std::int64_t(minimum.y)+(std::int64_t(maximum.y)-minimum.y)/2),
+                static_cast<std::int32_t>(std::int64_t(minimum.z)+(std::int64_t(maximum.z)-minimum.z)/2)};
+        }
+        s.settings.rotationPivot = s.pivotMode == 1 ? Int3{} : s.customPivot;
+    }
+    s.ready = false; s.preview.reset(); s.error.clear(); s.note = "Computing preview";
+    s.documentRevision = scene_change_fingerprint(workspace_.document(),workspace_.commands());
+    s.selectionSerial = voxelSelectionSerial_;
+    const auto generation = ++voxelAuthoringGeneration_;
+    const auto kind = s.kind; const auto operation = s.edit; const auto settings = s.settings;
+    const auto conversion = s.conversion; const auto output = s.output; const auto slots = s.paletteSlots;
+    auto snapshot = std::make_shared<EditorObject>(clone_editor_object(*source));
+    const auto selection = voxelSelection_;
+    const auto library = materials_;
+    auto prepared = std::make_shared<GeometryConversionBuild>();
+    return start_long_job(LongJobKind::ImportModel,"Voxel/conversion preview",longJobThreshold_+1,
+        [snapshot,selection,kind,operation,settings,conversion,output,slots,library,prepared](LongJob& job) {
+            if (job.cancelled()) return;
+            job.report(0.1F,"Building grid geometry");
+            try {
+                if (kind == VoxelAuthoringState::Kind::Region) {
+                    auto built = build_voxel_region_command(*snapshot,selection,operation,settings);
+                    if (!built.command) prepared->error = built.error;
+                    else {
+                        EditorDocument preview("Voxel region preview");
+                        preview.add_object(std::move(*snapshot));
+                        const auto result = built.command->execute(preview);
+                        if (!result.success) prepared->error = result.message;
+                        else {
+                            prepared->object = clone_editor_object(preview.objects().begin()->second);
+                            prepared->selectedCells = std::move(built.selection);
+                        }
+                        prepared->note = "Grid result; original scene is unchanged until Apply.";
+                    }
+                } else if (kind == VoxelAuthoringState::Kind::PolygonToVoxel)
+                    *prepared = polygon_to_voxels(*snapshot,output,conversion,slots);
+                else *prepared = voxels_to_polygon(*snapshot,output,library);
+            } catch (const std::exception& exception) { prepared->error = exception.what(); }
+            if (job.cancelled()) return;
+            job.report(1.0F,"Preview ready");
+        },
+        [this,prepared,generation](LongJob&) {
+            if (generation != voxelAuthoringGeneration_ || !voxel_authoring_active()) return false;
+            auto& state = voxelAuthoring_;
+            state.note = prepared->note; state.error = prepared->error;
+            if (!prepared->object) { state.ready = false; refresh_menu_state(); set_status(state.error,true,6.0F); return false; }
+            state.previewCells = std::move(prepared->selectedCells);
+            state.preview.emplace("Voxel/conversion preview");
+            state.preview->add_object(std::move(*prepared->object));
+            state.ready = true;
+            refresh_menu_state();
+            set_status("Preview ready: adjust settings and Update, then Apply or Cancel; Enter applies, Esc cancels",false,7.0F);
+            return true;
+        });
+}
+
+bool NativeEditorController::apply_voxel_authoring_preview() {
+    if (!voxel_authoring_active() || longJob_ || workspace_.mode() != EditorMode::Edit || playSession_.active()) return false;
+    if (voxelAuthoring_.fieldEditing) {
+        if (!commit_voxel_authoring_field()) return false;
+        return update_voxel_authoring_preview(); // Changed input must be previewed before it can apply.
+    }
+    if (!voxel_authoring_preview_ready()) {
+        // Never report success for an Apply that applied nothing (a failed or pending preview).
+        set_status(voxelAuthoring_.error.empty() ? "Update the preview before applying" : voxelAuthoring_.error,true);
+        return false;
+    }
+    auto& s = voxelAuthoring_;
+    if (s.documentRevision != scene_change_fingerprint(workspace_.document(),workspace_.commands()) ||
+        (s.kind == VoxelAuthoringState::Kind::Region && (s.selectionSerial != voxelSelectionSerial_ ||
+         selectionDomain_ != SelectionDomain::Voxels || voxelSelectionObject_ != s.object))) {
+        (void)update_voxel_authoring_preview();
+        set_status("Scene or region changed: inspect the updated preview before applying",true);
+        return false;
+    }
+    const auto* source = workspace_.document().find_object(s.object);
+    if (!source || source->flags.locked || !source->flags.visible || is_isolated_out(s.object)) return false;
+    if (s.kind == VoxelAuthoringState::Kind::Region) {
+        const auto operation = s.edit; const auto settings = s.settings;
+        return edit_selected_voxel_region(operation,settings);
+    }
+    const auto id = s.output;
+    const auto* previewObject = s.preview->find_object(id);
+    if (!previewObject) return false;
+    for (const auto& [material,definition] : previewObject->voxelMaterials) {
+        (void)definition;
+        if (materials_.find(material)) {
+            (void)update_voxel_authoring_preview();
+            set_status("Paint palette changed; inspect the updated conversion preview",true); return false;
+        }
+    }
+    auto object = clone_editor_object(*previewObject);
+    const auto before = capture_selection_snapshot();
+    const auto result = workspace_.commands().execute(workspace_.document(),
+        std::make_unique<AddObjectCommand>(std::move(object),"Convert geometry (keep source)"));
+    if (!result.success) { set_status(result.message,true); return false; }
+    cancel_voxel_authoring_preview(); reset_voxel_selection_state();
+    selectionDomain_ = SelectionDomain::Objects; polygonSelection_ = {};
+    if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+    workspace_.select_object(id);
+    workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
+    recompute_layout(); refresh_menu_state();
+    set_status("Created converted object; source retained. Undo removes the result and restores selection.",false,6.0F);
+    return true;
+}
+
+NativeEditorController::VoxelAuthoringLayout NativeEditorController::voxel_authoring_layout(UiRect viewport) const {
+    VoxelAuthoringLayout result;
+    result.panel = {viewport.x+8,viewport.y+8,std::max(1,std::min(370,viewport.width-16)),std::max(1,std::min(274,viewport.height-16))};
+    const auto p = result.panel; const int width = std::max(1,(p.width-24)/3);
+    result.amount = {p.x+12,p.y+56,p.width-24,24};
+    for (int i = 0; i < 3; ++i) {
+        result.axes[i] = {p.x+12+i*width,p.y+28,width-3,22};
+        result.pivots[i] = {p.x+12+i*width,p.y+86,width-3,22};
+        result.coordinates[i] = {p.x+12+i*width,p.y+114,width-3,22};
+    }
+    result.refresh = {p.x+12,p.y+144,p.width-24,24};
+    result.apply = {p.x+12,p.y+174,(p.width-30)/2,24};
+    result.cancel = {p.x+18+(p.width-30)/2,p.y+174,(p.width-30)/2,24};
+    return result;
+}
+
+bool NativeEditorController::voxel_authoring_pointer_down(PointerButton button,int x,int y,std::uint32_t modifiers) {
+    if (!voxel_authoring_active() || button != PointerButton::Primary || (modifiers&4U)) return false;
+    const auto panel = voxel_authoring_layout(layout_.viewport);
+    auto& s = voxelAuthoring_;
+    // Preview owns authoring input; menus can still expose view commands, and camera
+    // navigation uses non-primary or Alt gestures. Do not edit the inspector behind it.
+    if (!panel.panel.contains(x,y)) return !layout_.menuBar.contains(x,y) && !open_menu();
+    if (panel.cancel.contains(x,y)) { cancel_voxel_authoring_preview(); refresh_menu_state(); set_status("Preview cancelled; scene unchanged"); return true; }
+    if (panel.apply.contains(x,y)) { (void)apply_voxel_authoring_preview(); return true; }
+    if (panel.refresh.contains(x,y)) { (void)update_voxel_authoring_preview(); return true; }
+    const auto beginField = [&](int field) {
+        if (!commit_voxel_authoring_field()) return;
+        s.field = field; s.typed = voxel_authoring_field_value(field); s.fieldEditing = true; s.replaceTyped = true;
+    };
+    if (panel.amount.contains(x,y) && s.kind != VoxelAuthoringState::Kind::VoxelToPolygon) { beginField(0); return true; }
+    for (int i = 0; i < 3; ++i) {
+        if (panel.axes[i].contains(x,y)) {
+            if (!commit_voxel_authoring_field()) return true;
+            if (s.kind == VoxelAuthoringState::Kind::PolygonToVoxel) s.conversion.mode = static_cast<VoxelizationMode>(i);
+            else if (s.kind == VoxelAuthoringState::Kind::Region) s.settings.axis = i;
+            (void)update_voxel_authoring_preview(); return true;
+        }
+        if (s.kind == VoxelAuthoringState::Kind::Region && s.edit == VoxelRegionEdit::RotateQuarterTurn) {
+            if (panel.pivots[i].contains(x,y)) {
+                if (!commit_voxel_authoring_field()) return true;
+                s.pivotMode = i; (void)update_voxel_authoring_preview(); return true;
+            }
+            if (panel.coordinates[i].contains(x,y)) { beginField(i+1); return true; }
+        }
+    }
+    return true;
+}
+
+bool NativeEditorController::voxel_authoring_key(std::string_view key,bool control,bool shift,bool alt) {
+    (void)shift;
+    if (!voxel_authoring_active() || control || alt) return false;
+    auto& s = voxelAuthoring_;
+    if (key == "escape") { cancel_voxel_authoring_preview(); refresh_menu_state(); set_status("Preview cancelled; scene unchanged"); return true; }
+    if (key == "return" || key == "enter") { (void)apply_voxel_authoring_preview(); return true; }
+    if (key == "tab" && s.kind != VoxelAuthoringState::Kind::VoxelToPolygon) {
+        if (!commit_voxel_authoring_field()) return true;
+        s.field = s.kind == VoxelAuthoringState::Kind::Region && s.edit == VoxelRegionEdit::RotateQuarterTurn ? (s.field+1)%4 : 0;
+        s.typed = voxel_authoring_field_value(s.field); s.fieldEditing = true; s.replaceTyped = true; return true;
+    }
+    if (s.kind == VoxelAuthoringState::Kind::Region && (key == "x" || key == "y" || key == "z")) {
+        if (!commit_voxel_authoring_field()) return true;
+        s.settings.axis = key == "x" ? 0 : key == "y" ? 1 : 2;
+        (void)update_voxel_authoring_preview(); return true;
+    }
+    const char c = key == "period" ? '.' : key == "minus" ? '-' : key.size() == 1 ? key[0] : '\0';
+    if (key == "backspace" || (c >= '0' && c <= '9') || c == '.' || c == '-') {
+        if (s.kind == VoxelAuthoringState::Kind::VoxelToPolygon) return true;
+        if (!s.fieldEditing) { s.field = 0; s.fieldEditing = true; s.typed.clear(); s.replaceTyped = false; }
+        if (s.replaceTyped) { s.typed.clear(); s.replaceTyped = false; }
+        if (key == "backspace") { if (!s.typed.empty()) s.typed.pop_back(); }
+        else if (s.typed.size() < 24) s.typed.push_back(c);
+        return true;
+    }
+    return false;
+}
+
+void NativeEditorController::draw_voxel_authoring(const IEditorCanvas& canvas,UiRect viewport) const {
+    const auto& s = voxelAuthoring_;
+    if (!voxel_authoring_active()) return;
+    const EditorColor ink = 0xe0e9f5, accent = 0x65d7ff, button = 0x293746;
+    if (s.preview && s.ready) {
+        EditorViewportSettings settings; settings.showGrid = false; settings.maximumDrawVoxels = 20000;
+        if (s.kind == VoxelAuthoringState::Kind::Region) {
+            const auto* object = s.preview->find_object(s.object);
+            std::size_t drawn = 0;
+            if (object) for (const auto cell : s.previewCells) {
+                if (++drawn > 20000) break;
+                const auto centre = voxel_to_world(object->transform,multiply(object->voxelScale,object->voxelSizeMeters),
+                    {float(cell.x)+0.5F,float(cell.y)+0.5F,float(cell.z)+0.5F});
+                const auto point = project_world_to_screen(camera_,viewport,centre);
+                if (!point.visible) continue;
+                float extentX = 1,extentY = 1;
+                for (int corner = 0; corner < 8; ++corner) {
+                    const auto world = voxel_to_world(object->transform,multiply(object->voxelScale,object->voxelSizeMeters),
+                        {float(cell.x)+float(corner&1),float(cell.y)+float((corner>>1)&1),float(cell.z)+float((corner>>2)&1)});
+                    const auto screen = project_world_to_screen(camera_,viewport,world);
+                    if (screen.depth > camera_.nearPlane) {
+                        extentX = std::max(extentX,std::abs(screen.x-point.x));
+                        extentY = std::max(extentY,std::abs(screen.y-point.y));
+                    }
+                }
+                const int rx = int(std::min(extentX,float(viewport.width))),ry = int(std::min(extentY,float(viewport.height)));
+                canvas.outline({int(point.x)-rx,int(point.y)-ry,rx*2+1,ry*2+1},accent);
+            }
+        } else {
+            const auto voxels = build_voxel_draw_list(*s.preview,materials_,camera_,viewport,settings,std::set<EditorObjectId>{});
+            for (const auto& voxel : voxels) {
+                const int rx = std::max(1,int(voxel.pixelExtentX > 0 ? voxel.pixelExtentX : voxel.pixelRadius));
+                const int ry = std::max(1,int(voxel.pixelExtentY > 0 ? voxel.pixelExtentY : voxel.pixelRadius));
+                canvas.outline({int(voxel.screenX)-rx,int(voxel.screenY)-ry,rx*2+1,ry*2+1},accent);
+            }
+        }
+        for (const auto& triangle : build_editor_polygon_draw_list(*s.preview,camera_,viewport,{}, {},20000))
+            for (unsigned i = 0; i < 3; ++i) {
+                const auto a = triangle.points[i], b = triangle.points[(i+1)%3];
+                canvas.line(int(a.x),int(a.y),int(b.x),int(b.y),accent,1);
+            }
+    }
+    const auto ui = voxel_authoring_layout(viewport);
+    RectClipCanvas painter(canvas,ui.panel);
+    painter.fill(ui.panel,0x17202b); painter.outline(ui.panel,accent);
+    const auto label = [&](UiRect rect,std::string text,bool selected = false) {
+        painter.fill(rect,selected ? 0x456782 : button);
+        painter.text(rect.x+5,rect.y+16,elide_text_to_width(painter,text,rect.width-10),ink);
+    };
+    const bool region = s.kind == VoxelAuthoringState::Kind::Region;
+    const std::string title = region ? s.edit == VoxelRegionEdit::Extrude ? "EXTRUDE VOXEL REGION" :
+        s.edit == VoxelRegionEdit::RotateQuarterTurn ? "ROTATE VOXEL REGION" : "SCALE VOXEL REGION" :
+        s.kind == VoxelAuthoringState::Kind::PolygonToVoxel ? "POLYGON TO VOXELS" : "VOXELS TO POLYGON";
+    painter.text(ui.panel.x+12,ui.panel.y+20,title,accent);
+    for (int i = 0; i < 3; ++i)
+        if (s.kind == VoxelAuthoringState::Kind::PolygonToVoxel)
+            label(ui.axes[i],i == 0 ? "Solid" : i == 1 ? "Shell" : "Surface",int(s.conversion.mode) == i);
+        else if (region && s.edit != VoxelRegionEdit::ScaleInteger) label(ui.axes[i],i == 0 ? "Grid X" : i == 1 ? "Grid Y" : "Grid Z",s.settings.axis == i);
+    if (s.kind != VoxelAuthoringState::Kind::VoxelToPolygon) {
+        const std::string prefix = s.kind == VoxelAuthoringState::Kind::PolygonToVoxel ? "Local cell metres: " :
+            s.edit == VoxelRegionEdit::Extrude ? "Signed cells: " : s.edit == VoxelRegionEdit::RotateQuarterTurn ? "Degrees (+/-90): " : "Integer factor (2..8): ";
+        label(ui.amount,prefix+(s.fieldEditing && s.field == 0 ? s.typed : voxel_authoring_field_value(0)),s.fieldEditing && s.field == 0);
+    }
+    if (region && s.edit == VoxelRegionEdit::RotateQuarterTurn) {
+        for (int i = 0; i < 3; ++i) {
+            label(ui.pivots[i],i == 0 ? "Bounds" : i == 1 ? "Cell 0" : "Custom",s.pivotMode == i);
+            label(ui.coordinates[i],std::string(i == 0 ? "X: " : i == 1 ? "Y: " : "Z: ")+
+                (s.fieldEditing && s.field == i+1 ? s.typed : voxel_authoring_field_value(i+1)),s.fieldEditing && s.field == i+1);
+        }
+    }
+    label(ui.refresh,"Update Preview");
+    label(ui.apply,s.ready ? "Apply (Enter)" : "Preview first",s.ready);
+    label(ui.cancel,"Cancel (Esc)");
+    painter.text(ui.panel.x+12,ui.panel.y+218,region ? "Object grid | source unchanged until Apply" : "New sibling | source retained | Undo supported",ink);
+    painter.text(ui.panel.x+12,ui.panel.y+240,elide_text_to_width(painter,s.error.empty() ? s.note : s.error,ui.panel.width-24),
+        s.error.empty() ? ink : 0xffae83);
+    painter.text(ui.panel.x+12,ui.panel.y+260,"Display capped at 20k cells / triangles",ink);
+}
+
 } // namespace dve::editor

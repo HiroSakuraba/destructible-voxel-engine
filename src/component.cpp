@@ -129,6 +129,8 @@ bool ComponentTypeRegistry::validate(const Component& component, std::string* er
 ComponentTypeRegistry ComponentTypeRegistry::make_default() {
     ComponentTypeRegistry registry;
     std::string ignored;
+    (void)registry.register_type({std::string(kUvAuthoringComponent),"UV Seams and Pins",false,
+        {{"state",std::string{},true,false,"UV authoring state"}}}, &ignored);
     (void)registry.register_type({"dve.collision_hull","Authored Collision Hull",false,
         {{"points",std::string{},true,false,"Hull control points"}}}, &ignored);
     (void)registry.register_type({

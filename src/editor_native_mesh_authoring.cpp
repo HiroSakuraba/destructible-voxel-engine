@@ -16,7 +16,13 @@ struct NativeMeshAuthoringState {
     bool diagnostics{};float bevelWidth{.1F};
     std::uint32_t channel{},uvMode{};std::set<std::uint32_t> corners;Float2 center{.5F,.5F};float zoom{1};bool uvFocus{true},texture{};
     int tool{},axis{};bool dragging{},panning{},selecting{};int startX{},startY{},lastX{},lastY{};Float2 startUv{},pivot{},panStart{};
-    std::array<std::map<std::uint32_t,Float2>,2> uvPins;
+    PolygonUvAuthoring uvFlags;
+    bool uvFlagsValid{},showUvSeams{},uvFlagsEnabled{true};
+    EditorObjectId uvFlagsObject{};
+    std::uint64_t uvFlagsMeshHash{};
+    std::size_t uvFlagsComponentCount{};
+    std::string uvFlagsData,uvFlagsError;
+    std::vector<std::uint32_t> uvGeometric;
     std::string typed;std::optional<CookedPolygonAsset> uvBefore;
     SelectionOperation selectionOperation{SelectionOperation::Replace};
     std::set<std::uint32_t> hullSelection;std::optional<std::vector<Float3>> hullBefore;std::vector<Float3> hullPreview;bool hullValid{};
@@ -36,6 +42,44 @@ std::unique_ptr<IEditorCommand> hull_command(EditorDocument& document,EditorObje
     auto text=encode_collision_hull_points(points);if(auto* c=find_component_by_type(std::span<Component>(object.components),kCollisionHullComponent))return std::make_unique<SetComponentPropertyCommand>(object.id,c->id,"points",c->properties.at("points"),ComponentValue{text},"Edit collision hull");
     Component c;c.id=document.allocate_component_id(object.id);c.type=std::string(kCollisionHullComponent);c.properties["points"]=text;return std::make_unique<AddComponentCommand>(object.id,std::move(c),"Create collision hull");
 }
+
+bool refresh_uv_flags(NativeMeshAuthoringState& state,const EditorObject& object) {
+    const std::string* text=nullptr;
+    std::size_t count=0;
+    bool enabled=true;
+    for(const auto& component : object.components) if(component.type==kUvAuthoringComponent) {
+        ++count;
+        enabled=component.enabled;
+        const auto property=component.properties.find("state");
+        if(property!=component.properties.end()) text=std::get_if<std::string>(&property->second);
+    }
+    const std::string_view data=text?std::string_view(*text):std::string_view{};
+    if(state.uvFlagsObject==object.id && state.uvFlagsMeshHash==object.polygon->contentHash &&
+       state.uvFlagsComponentCount==count && state.uvFlagsEnabled==enabled && data==state.uvFlagsData) return state.uvFlagsValid;
+    state.uvFlagsObject=object.id;
+    state.uvFlagsMeshHash=object.polygon->contentHash;
+    state.uvFlagsComponentCount=count;
+    state.uvFlagsEnabled=enabled;
+    state.uvFlagsData=data;
+    state.uvGeometric=polygon_geometric_vertices(*object.polygon);
+    const auto flags=read_polygon_uv_authoring(object,&state.uvFlagsError);
+    state.uvFlagsValid=bool(flags);
+    state.uvFlags=flags.value_or(PolygonUvAuthoring{});
+    return state.uvFlagsValid;
+}
+std::set<std::uint64_t> selected_uv_edges(const CookedPolygonAsset& mesh,
+    const std::set<std::uint32_t>& corners) {
+    const auto geometric=polygon_geometric_vertices(mesh);
+    std::set<std::uint64_t> result;
+    for(std::uint32_t c=0;c<mesh.indices.size();++c) {
+        const auto other=c/3*3+(c+1)%3;
+        if(!corners.contains(c) || !corners.contains(other)) continue;
+        const auto a=geometric[mesh.indices[c]],b=geometric[mesh.indices[other]];
+        if(a!=b)result.insert((std::uint64_t(std::min(a,b))<<32U)|std::max(a,b));
+    }
+    return result;
+}
+
 std::set<std::uint32_t> uv_click(const CookedPolygonAsset& m,const NativeMeshAuthoringState& s,UiRect view,int x,int y){
     std::set<std::uint32_t> hit;float best=10;std::optional<std::uint32_t> chosen;
     if(s.uvMode==0){for(std::uint32_t c=0;c<m.indices.size();++c){auto p=screen_uv(texcoord(m.vertices[m.indices[c]],s.channel),s,view);float distance=std::hypot(float(x)-p.x,float(y)-p.y);if(distance<best){best=distance;chosen=c;}}
@@ -43,7 +87,7 @@ std::set<std::uint32_t> uv_click(const CookedPolygonAsset& m,const NativeMeshAut
     else if(s.uvMode==1){for(std::uint32_t c=0;c<m.indices.size();++c){auto other=c/3*3+(c+1)%3;auto a=screen_uv(texcoord(m.vertices[m.indices[c]],s.channel),s,view),b=screen_uv(texcoord(m.vertices[m.indices[other]],s.channel),s,view);auto distance=line_distance(float(x),float(y),a,b);if(distance<best){best=distance;chosen=c;}}
         if(chosen){auto other=*chosen/3*3+(*chosen+1)%3;auto a=m.indices[*chosen],b=m.indices[other];for(std::uint32_t c=0;c<m.indices.size();++c)if(m.indices[c]==a||m.indices[c]==b)hit.insert(c);}}
     else{auto p=from_screen(x,y,s,view);for(std::uint32_t f=0;f<m.indices.size()/3;++f){if(!triangle_contains(p,texcoord(m.vertices[m.indices[f*3]],s.channel),texcoord(m.vertices[m.indices[f*3+1]],s.channel),texcoord(m.vertices[m.indices[f*3+2]],s.channel)))continue;
-            if(s.uvMode==2){hit={f*3,f*3+1,f*3+2};}else for(const auto& island:polygon_uv_islands(m,s.channel))if(island.contains(f))for(auto face:island)for(unsigned j=0;j<3;++j)hit.insert(face*3+j);break;}}
+            if(s.uvMode==2){hit={f*3,f*3+1,f*3+2};}else for(const auto& island:polygon_uv_islands(m,s.channel,s.uvFlags.enabled?s.uvFlags.seams[s.channel]:std::set<std::uint64_t>{}))if(island.contains(f))for(auto face:island)for(unsigned j=0;j<3;++j)hit.insert(face*3+j);break;}}
     return hit;
 }
 }
@@ -61,6 +105,26 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
     for(auto id:{"mesh.hull_fit","mesh.hull_edit"})enabled(id,mesh&&mesh_boolean_available(),"Select an unlocked polygon mesh in a build with Manifold authoring");
     enabled("mesh.hull_remove",mesh&&object&&find_component_by_type(std::span<const Component>(object->components),kCollisionHullComponent),"Select a polygon with an authored collision hull");
     for(auto id:{"mesh.uv_editor","mesh.diagnostics"})enabled(id,mesh,"Select an unlocked polygon mesh in Edit mode");
+    const bool uvWorkspace=mesh && meshAuthoring_ && meshAuthoring_->kind==NativeMeshAuthoringState::Kind::Uv &&
+        meshAuthoring_->object==object->id;
+    const bool flagPreview=polygonPreviewBefore_ || mesh_authoring_dragging() || gizmoDragging_ ||
+        (meshAuthoring_ && meshAuthoring_->kind!=NativeMeshAuthoringState::Kind::None &&
+         meshAuthoring_->kind!=NativeMeshAuthoringState::Kind::Uv);
+    const bool flagsValid=mesh && (meshAuthoring_ ? refresh_uv_flags(*meshAuthoring_,*object)
+                                                   : bool(read_polygon_uv_authoring(*object)));
+    const bool edgesSelected=mesh && ((selectionDomain_==SelectionDomain::Polygons &&
+        polygonSelection_.object==object->id && polygonSelection_.mode==PolygonSelectionMode::Edge &&
+        !polygonSelection_.components.empty()) || (uvWorkspace && meshAuthoring_->uvMode==1 &&
+        !meshAuthoring_->corners.empty()));
+    for(auto id:{"mesh.uv_mark_seam","mesh.uv_clear_seam"})
+        enabled(id,edgesSelected && flagsValid && !flagPreview,"Select edges with valid saved UV flags; apply/close previews first");
+    const bool facePins=uvWorkspace && polygonSelection_.object==object->id &&
+        polygonSelection_.mode==PolygonSelectionMode::Face && !polygonSelection_.components.empty();
+    enabled("mesh.uv_toggle_pin",uvWorkspace && flagsValid && !flagPreview &&
+        (!meshAuthoring_->corners.empty() || facePins),"Select UV corners and apply/close previews first");
+    enabled("mesh.uv_reset_flags",mesh && !flagPreview &&
+        find_component_by_type(std::span<const Component>(object->components),kUvAuthoringComponent),
+        "Select a polygon with saved UV flags; apply/close previews first");
     bool components=mesh&&selectionDomain_==SelectionDomain::Polygons&&!polygonSelection_.components.empty();
     for(auto id:{"mesh.subdivide","mesh.hard_normals","mesh.smooth_normals"})enabled(id,components,"Select polygon components first");
     for(auto id:{"mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.bevel_edges"})enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&(std::string_view(id)!="mesh.bevel_edges"||mesh_boolean_available()),"Select polygon edges in a supported authoring build");
@@ -73,6 +137,85 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
     if(!meshAuthoring_)meshAuthoring_=std::make_shared<NativeMeshAuthoringState>();auto& s=*meshAuthoring_;
     const auto primary=workspace_.selected_object();auto* object=primary?workspace_.document().find_object(*primary):nullptr;
     if(!object||!object->polygon||object->flags.locked||!object->flags.visible||is_isolated_out(object->id)){set_status("Select a visible unlocked polygon mesh first",true);return false;}
+
+    if(action=="mesh.uv_mark_seam" || action=="mesh.uv_clear_seam" ||
+       action=="mesh.uv_toggle_pin" || action=="mesh.uv_reset_flags") {
+        if(polygonPreviewBefore_ || mesh_authoring_dragging() || gizmoDragging_ ||
+           (s.kind!=NativeMeshAuthoringState::Kind::None && s.kind!=NativeMeshAuthoringState::Kind::Uv)) {
+            set_status("Apply or close the active mesh preview before editing UV flags",true);
+            return false;
+        }
+        if(action=="mesh.uv_reset_flags") {
+            auto command=std::make_unique<CompoundCommand>("Reset UV seams and pins");
+            bool found=false;
+            for(const auto& component : object->components) if(component.type==kUvAuthoringComponent) {
+                command->add(std::make_unique<RemoveComponentCommand>(object->id,component.id,"Remove UV flags"));
+                found=true;
+            }
+            if(!found) { set_status("No saved UV flags to reset",true); return false; }
+            const auto snapshot=capture_selection_snapshot();
+            const auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
+            if(result.success)workspace_.commands().set_last_selection_transition(snapshot,capture_selection_snapshot());
+            s.uvFlagsObject=0;
+            if(s.object==object->id)(void)refresh_uv_flags(s,*object);
+            set_status(result.success?"Reset saved UV seams and pins":result.message,!result.success);
+            return result.success;
+        }
+        if(!refresh_uv_flags(s,*object)) { set_status(s.uvFlagsError,true); return false; }
+        const unsigned channel=s.kind==NativeMeshAuthoringState::Kind::Uv && s.object==object->id?s.channel:0;
+        auto flags=s.uvFlags;
+        flags.enabled=true;
+        if(action=="mesh.uv_toggle_pin") {
+            if(s.kind!=NativeMeshAuthoringState::Kind::Uv || s.object!=object->id) {
+                set_status("Select UV corners in the active UV workspace",true);
+                return false;
+            }
+            auto pinCorners=s.corners;
+            if(!s.uvFocus && polygonSelection_.object==object->id && polygonSelection_.mode==PolygonSelectionMode::Face) {
+                pinCorners.clear();
+                for(const auto face : polygonSelection_.components) for(unsigned j=0;j<3;++j)
+                    if(face<object->polygon->indices.size()/3)pinCorners.insert(std::uint32_t(face*3+j));
+            }
+            if(pinCorners.empty()) { set_status("Select UV corners or faces to pin",true); return false; }
+            for(const auto corner : pinCorners) {
+                if(corner>=object->polygon->indices.size())continue;
+                if(!flags.pins[channel].erase(corner))flags.pins[channel].insert(corner);
+            }
+        } else {
+            std::set<std::uint64_t> edges;
+            const bool uvEdges=s.kind==NativeMeshAuthoringState::Kind::Uv && s.object==object->id && s.uvMode==1;
+            if(uvEdges && s.uvFocus)edges=selected_uv_edges(*object->polygon,s.corners);
+            else if(selectionDomain_==SelectionDomain::Polygons && polygonSelection_.object==object->id &&
+                    polygonSelection_.mode==PolygonSelectionMode::Edge)
+                edges=polygonSelection_.components;
+            else if(uvEdges)edges=selected_uv_edges(*object->polygon,s.corners);
+            if(edges.empty()) { set_status("Select geometric edges or UV edges first",true); return false; }
+            for(const auto edge : edges) {
+                if(action=="mesh.uv_mark_seam")flags.seams[channel].insert(edge);
+                else flags.seams[channel].erase(edge);
+            }
+        }
+        if(flags.enabled==s.uvFlags.enabled && flags.seams==s.uvFlags.seams && flags.pins==s.uvFlags.pins) {
+            set_status("Saved UV flags already match the selection");
+            return true;
+        }
+        std::string error;
+        auto command=make_polygon_uv_authoring_command(workspace_.document(),*object,flags,&error);
+        if(!command) { set_status(error,true); return false; }
+        const auto snapshot=capture_selection_snapshot();
+        const auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
+        if(result.success)workspace_.commands().set_last_selection_transition(snapshot,capture_selection_snapshot());
+        s.uvFlagsObject=0;
+        if(result.success) {
+            s.object=object->id;
+            s.channel=channel;
+            s.showUvSeams=true;
+            (void)refresh_uv_flags(s,*object);
+        }
+        set_status(result.success?"Saved UV seams and pins for channel "+std::to_string(channel):result.message,!result.success);
+        return result.success;
+    }
+
     if(action.starts_with("mesh.boolean_")){
         cancel_mesh_authoring_drag();close_previews_for_voxel_edit("mesh Boolean");
         if(workspace_.selection_count()!=2){set_status("Select exactly two owned polygon operands; active object is A",true);return false;}
@@ -93,10 +236,13 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
     }
     if(action=="mesh.uv_editor"){
         cancel_mesh_authoring_drag();if(s.kind==NativeMeshAuthoringState::Kind::Uv&&s.object==object->id){s.kind=NativeMeshAuthoringState::Kind::None;return true;}
-        if(s.object!=object->id)for(auto& pins:s.uvPins)pins.clear();
+        s.uvFlagsObject=0;
         close_previews_for_voxel_edit("UV Workspace");if(!set_polygon_mode(PolygonSelectionMode::Face))return false;
         s.kind=NativeMeshAuthoringState::Kind::Uv;s.object=object->id;s.channel=0;s.center={.5F,.5F};s.zoom=1;s.tool=0;s.uvFocus=true;s.corners.clear();
-        set_status("UV Workspace: 1 vertices, 2 edges, 3 faces, 4 islands; G/R/S transform; U unwrap, K pack; Enter applies typed transforms");return true;
+        s.showUvSeams=true;
+        if(!refresh_uv_flags(s,*object))set_status(s.uvFlagsError,true);
+        else set_status("UV Workspace: P saved pins; M mark seam, Shift+M clear; U unwrap, K pack; Tab channel");
+        return true;
     }
     if(action=="mesh.hull_fit"||action=="mesh.hull_edit"){
         cancel_mesh_authoring_drag();close_previews_for_voxel_edit("hull authoring");
@@ -181,6 +327,7 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
         return false;
     }
     if(s.kind!=NativeMeshAuthoringState::Kind::Uv||!s.uvFocus)return false;
+    (void)refresh_uv_flags(s,*object);
     std::erase_if(s.corners,[&](auto c){return c>=object->polygon->indices.size();});
     if(control&&key=="z"){cancel_mesh_authoring_drag();return false;}
     if(control&&key=="a"){s.corners.clear();for(std::uint32_t c=0;c<object->polygon->indices.size();++c)s.corners.insert(c);polygonSelection_={s.object,PolygonSelectionMode::Face,{}};for(auto c:s.corners)polygonSelection_.components.insert(c/3);return true;}
@@ -190,7 +337,11 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
     if(key=="tab"){cancel_mesh_authoring_drag();s.channel=1-s.channel;s.corners.clear();return true;}
     if(key=="q"){cancel_mesh_authoring_drag();s.tool=0;return true;}
     if(key=="g"||key=="r"||key=="s"){cancel_mesh_authoring_drag();s.tool=key=="g"?1:key=="r"?2:3;s.axis=0;return true;}
-    if(key=="p"){for(auto c:s.corners){if(s.uvPins[s.channel].contains(c))s.uvPins[s.channel].erase(c);else if(c<object->polygon->indices.size())s.uvPins[s.channel][c]=texcoord(object->polygon->vertices[object->polygon->indices[c]],s.channel);}return true;}
+    if(key=="p" || key=="m") {
+        if(workspace_.selected_object()!=s.object) { set_status("Select the UV workspace object first",true); return true; }
+        (void)dispatch_mesh_authoring_action(key=="p"?"mesh.uv_toggle_pin":shift?"mesh.uv_clear_seam":"mesh.uv_mark_seam");
+        return true;
+    }
     if(key=="t"){s.texture=!s.texture;return true;}
     if(key=="plus"||key=="equal"||key=="minus"){if(!s.uvBefore && (key!="minus" || s.tool==0)){s.zoom=std::clamp(s.zoom*(key=="minus"?.8F:1.25F),.05F,64.0F);return true;}}
     if(key=="f"){
@@ -201,7 +352,11 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
     if(key=="x"||key=="y"){s.axis=key=="x"?1:2;return true;}
     auto commit=[&](PolygonEditResult edited,const CookedPolygonAsset& before){if(!edited){set_status(edited.error,true);return false;}auto snapshot=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,before,std::move(edited.mesh),"Edit UV coordinates"));if(result.success)workspace_.commands().set_last_selection_transition(snapshot,capture_selection_snapshot());set_status(result.success?"Edited UV coordinates":result.message,!result.success);return result.success;};
     if(key=="u"||key=="k"||key=="h"||key=="v"||key=="j"||key=="d"){
-        cancel_mesh_authoring_drag();UvEditSettings settings;settings.channel=s.channel;for(auto [c,p]:s.uvPins[s.channel])if(c<object->polygon->indices.size())settings.pins[c]=texcoord(object->polygon->vertices[object->polygon->indices[c]],s.channel);if(key=="d")settings.vector={.05F,0};auto op=key=="u"?UvEdit::Unwrap:key=="k"?UvEdit::Pack:key=="h"?UvEdit::FlipU:key=="v"?UvEdit::FlipV:key=="j"?UvEdit::Stitch:UvEdit::Split;
+        cancel_mesh_authoring_drag();UvEditSettings settings;settings.channel=s.channel;
+        if((key=="u" || key=="k") && !refresh_uv_flags(s,*object)) { set_status(s.uvFlagsError,true); return true; }
+        if(s.uvFlags.enabled)settings.seams=s.uvFlags.seams[s.channel];
+        const auto pins=s.uvFlags.enabled?s.uvFlags.pins[s.channel]:std::set<std::uint32_t>{};
+        for(auto c:pins)if(c<object->polygon->indices.size())settings.pins[c]=texcoord(object->polygon->vertices[object->polygon->indices[c]],s.channel);if(key=="d")settings.vector={.05F,0};auto op=key=="u"?UvEdit::Unwrap:key=="k"?UvEdit::Pack:key=="h"?UvEdit::FlipU:key=="v"?UvEdit::FlipV:key=="j"?UvEdit::Stitch:UvEdit::Split;
         (void)commit(edit_polygon_uv(*object->polygon,s.corners,op,settings),*object->polygon);return true;
     }
     if(key=="enter"||key=="return"){if(s.uvBefore){auto edited=*object->polygon, before=*s.uvBefore;cancel_mesh_authoring_drag();if(edited.contentHash!=before.contentHash){PolygonEditResult r;r.mesh=std::move(edited);(void)commit(std::move(r),before);}}return true;}
@@ -224,7 +379,9 @@ bool NativeEditorController::mesh_authoring_pointer_down(PointerButton button,in
         auto points=hull_points(*object);float best=10;std::optional<std::uint32_t> chosen;for(std::uint32_t i=0;i<points.size();++i){auto p=project_world_to_screen(camera_,layout_.viewport,voxel_to_world(object->transform,object->voxelScale,points[i]));float distance=std::hypot(float(x)-p.x,float(y)-p.y);if(p.visible&&distance<best){best=distance;chosen=i;}}
         if(chosen){cancel_mesh_authoring_drag();if((modifiers&1U)==0)s.hullSelection.clear();if((modifiers&2U)&&s.hullSelection.contains(*chosen))s.hullSelection.erase(*chosen);else s.hullSelection.insert(*chosen);return true;}return false;
     }
-    if(s.kind!=NativeMeshAuthoringState::Kind::Uv)return false;auto panel=uv_panel(layout_.viewport);if(!panel.contains(x,y)){if(s.uvBefore&&button==PointerButton::Primary){set_status("Apply or cancel the UV preview first",true);return true;}s.uvFocus=false;return false;}
+    if(s.kind!=NativeMeshAuthoringState::Kind::Uv)return false;
+    (void)refresh_uv_flags(s,*object);
+    auto panel=uv_panel(layout_.viewport);if(!panel.contains(x,y)){if(s.uvBefore&&button==PointerButton::Primary){set_status("Apply or cancel the UV preview first",true);return true;}s.uvFocus=false;return false;}
     if(!s.uvFocus&&polygonSelection_.object==s.object&&polygonSelection_.mode==PolygonSelectionMode::Face){s.corners.clear();for(auto f:polygonSelection_.components)for(unsigned j=0;j<3;++j)s.corners.insert(std::uint32_t(f*3+j));}s.uvFocus=true;
     if(button==PointerButton::Primary){
         const int modeWidth=std::max(1,(panel.width-16)/4),actionWidth=std::max(1,(panel.width-16)/5);
@@ -259,7 +416,7 @@ bool NativeEditorController::mesh_authoring_pointer_up(PointerButton button,int 
     if(!s.selecting)return false;s.selecting=false;auto* object=workspace_.document().find_object(s.object);if(!object||!object->polygon)return true;std::set<std::uint32_t> hits;
     if(std::hypot(float(x-s.startX),float(y-s.startY))<=5)hits=uv_click(*object->polygon,s,layout_.viewport,x,y);
     else{UiRect rect{std::min(x,s.startX),std::min(y,s.startY),std::abs(x-s.startX)+1,std::abs(y-s.startY)+1};for(std::uint32_t c=0;c<object->polygon->indices.size();++c){auto p=screen_uv(texcoord(object->polygon->vertices[object->polygon->indices[c]],s.channel),s,layout_.viewport);if(rect.contains(int(p.x),int(p.y)))hits.insert(c);}
-        if(s.uvMode>=2){std::set<std::uint32_t> faces;for(auto c:hits)faces.insert(c/3);if(s.uvMode==3)for(auto island:polygon_uv_islands(*object->polygon,s.channel)){bool selected=std::any_of(island.begin(),island.end(),[&](auto f){return faces.contains(f);});if(selected)faces.insert(island.begin(),island.end());}hits.clear();for(auto f:faces)for(unsigned j=0;j<3;++j)hits.insert(f*3+j);}}
+        if(s.uvMode>=2){std::set<std::uint32_t> faces;for(auto c:hits)faces.insert(c/3);if(s.uvMode==3)for(auto island:polygon_uv_islands(*object->polygon,s.channel,s.uvFlags.enabled?s.uvFlags.seams[s.channel]:std::set<std::uint64_t>{})){bool selected=std::any_of(island.begin(),island.end(),[&](auto f){return faces.contains(f);});if(selected)faces.insert(island.begin(),island.end());}hits.clear();for(auto f:faces)for(unsigned j=0;j<3;++j)hits.insert(f*3+j);}}
     if(s.selectionOperation==SelectionOperation::Replace)s.corners.clear();if(s.selectionOperation==SelectionOperation::Intersect)std::erase_if(s.corners,[&](auto c){return !hits.contains(c);});else for(auto c:hits){if(s.selectionOperation==SelectionOperation::Toggle&&s.corners.contains(c))s.corners.erase(c);else s.corners.insert(c);}
     polygonSelection_={s.object,PolygonSelectionMode::Face,{}};for(auto c:s.corners)polygonSelection_.components.insert(c/3);selectionDomain_=SelectionDomain::Polygons;return true;
 }
@@ -271,9 +428,17 @@ bool NativeEditorController::mesh_authoring_wheel(float steps,int x,int y){
 }
 void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiRect viewport) const{
     if (voxel_authoring_active()) { draw_voxel_authoring(canvas,viewport); return; }
-    if(!meshAuthoring_||workspace_.mode()!=EditorMode::Edit||playSession_.active())return;const auto& s=*meshAuthoring_;const auto* object=workspace_.document().find_object(s.object);if(!object||!object->polygon||!object->flags.visible||is_isolated_out(s.object))return;
+    if(!meshAuthoring_||workspace_.mode()!=EditorMode::Edit||playSession_.active())return;auto& s=*meshAuthoring_;const auto* object=workspace_.document().find_object(s.object);if(!object||!object->polygon||!object->flags.visible||is_isolated_out(s.object))return;
     auto line=[&](ScreenPoint a,ScreenPoint b,EditorColor c,int width=1){if(a.visible&&b.visible)canvas.line(int(std::clamp(a.x,-100000.0F,100000.0F)),int(std::clamp(a.y,-100000.0F,100000.0F)),int(std::clamp(b.x,-100000.0F,100000.0F)),int(std::clamp(b.y,-100000.0F,100000.0F)),c,width);};
     if(s.diagnostics){auto d=diagnose_polygon_topology(*object->polygon);for(auto e:polygon_edges(*object->polygon))if(d.problemEdges.contains(e.key())){auto a=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[e.a].position)),b=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[e.b].position));line(a,b,color(255,55,80),3);}}
+    if(s.showUvSeams && (s.kind==NativeMeshAuthoringState::Kind::None || s.kind==NativeMeshAuthoringState::Kind::Uv) &&
+       refresh_uv_flags(s,*object) && s.uvFlags.enabled) {
+        for(const auto edge : polygon_edges(*object->polygon)) if(s.uvFlags.seams[s.channel].contains(edge.key()))
+            line(project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,
+                    object->polygon->vertices[edge.a].position)),
+                 project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,
+                    object->polygon->vertices[edge.b].position)),color(235,95,85),3);
+    }
     if(s.kind==NativeMeshAuthoringState::Kind::Topology){
         if(s.result){EditorDocument preview("Bevel preview");EditorObject o(s.object,"Result");o.polygon=s.result.mesh;o.transform=object->transform;o.voxelScale=object->voxelScale;preview.add_object(std::move(o));for(const auto& t:build_editor_polygon_draw_list(preview,camera_,viewport,{}, {},20000))for(unsigned j=0;j<3;++j)line(t.points[j],t.points[(j+1)%3],color(255,175,55),2);}
         canvas.fill({viewport.x+10,viewport.y+10,std::max(1,std::min(460,viewport.width-20)),66},color(23,32,43));canvas.text(viewport.x+20,viewport.y+30,"Convex edge bevel | offset: "+(s.typed.empty()?std::to_string(s.bevelWidth):s.typed),color(255,210,140));canvas.text(viewport.x+20,viewport.y+52,s.result?"Type local plane offset | Enter apply | Esc cancel":s.result.error,color(225,235,245));return;
@@ -288,7 +453,9 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
         for(std::uint32_t i=0;i<points.size();++i){auto p=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,points[i]));if(p.visible)canvas.fill({int(p.x)-4,int(p.y)-4,9,9},s.hullSelection.contains(i)?color(255,175,60):color(65,215,240));}
         canvas.fill({viewport.x+10,viewport.y+10,std::min(510,viewport.width-20),90},color(23,32,43));canvas.text(viewport.x+20,viewport.y+30,"Collision hull only | "+std::to_string(points.size())+" points | axis "+(s.axis==0?"X":s.axis==1?"Y":"Z"),color(80,230,240));canvas.text(viewport.x+20,viewport.y+51,"Click/Shift select | A all | N add | Delete remove | B bounds",color(220,230,240));canvas.text(viewport.x+20,viewport.y+72,"G move / R rotate degrees / S scale | X/Y/Z axis | type value",color(220,230,240));canvas.text(viewport.x+20,viewport.y+93,s.typed.empty()?"Enter apply typed edit | arrows nudge | Esc close":("Value: "+s.typed+(s.hullValid?" | Enter apply":" | invalid hull")),color(255,200,130));return;
     }
-    if(s.kind!=NativeMeshAuthoringState::Kind::Uv)return;auto panel=uv_panel(viewport),rect=uv_canvas(viewport);RectClipCanvas painter(canvas,rect);canvas.fill(panel,color(20,27,36));canvas.text(panel.x+12,panel.y+23,"UV WORKSPACE | channel "+std::to_string(s.channel)+" | "+std::to_string(s.corners.size())+" corners | Tab channel",color(120,215,255));const int modeWidth=std::max(1,(panel.width-16)/4),actionWidth=std::max(1,(panel.width-16)/5);
+    if(s.kind!=NativeMeshAuthoringState::Kind::Uv)return;
+    (void)refresh_uv_flags(s,*object);
+    auto panel=uv_panel(viewport),rect=uv_canvas(viewport);RectClipCanvas painter(canvas,rect);canvas.fill(panel,color(20,27,36));canvas.text(panel.x+12,panel.y+23,"UV WORKSPACE | channel "+std::to_string(s.channel)+" | "+std::to_string(s.corners.size())+" corners"+(s.uvFlags.enabled?" | Tab channel":" | flags disabled"),color(120,215,255));const int modeWidth=std::max(1,(panel.width-16)/4),actionWidth=std::max(1,(panel.width-16)/5);
     const char* modes[]={"1 Vertex","2 Edge","3 Face","4 Island"};const char* actions[]={"G Move","R Rotate","S Scale","U Unwrap","K Pack"};
     for(unsigned i=0;i<4;++i){UiRect button{panel.x+8+int(i)*modeWidth,panel.y+28,modeWidth-2,20};canvas.fill(button,s.uvMode==i?color(80,92,112):color(38,48,64));canvas.text(button.x+4,button.y+15,modes[i],color(225,230,240));}
     for(unsigned i=0;i<5;++i){UiRect button{panel.x+8+int(i)*actionWidth,panel.y+50,actionWidth-2,20};canvas.fill(button,color(38,48,64));canvas.text(button.x+4,button.y+15,actions[i],color(225,230,240));}
@@ -297,8 +464,28 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
         if(image&&p.x>=0&&p.x<1&&p.y>=0&&p.y<1&&image->width&&image->height&&image->rgba8.size()>=std::size_t(image->width)*image->height*4){auto ix=std::min(image->width-1,std::uint32_t(p.x*image->width)),iy=std::min(image->height-1,std::uint32_t((1-p.y)*image->height));auto k=(std::size_t(iy)*image->width+ix)*4;c=color(image->rgba8[k],image->rgba8[k+1],image->rgba8[k+2]);}painter.fill({x,y,tile,tile},c);}
     std::array<Float2,4> unit{{{0,0},{1,0},{1,1},{0,1}}};for(unsigned j=0;j<4;++j){auto a=screen_uv(unit[j],s,viewport),b=screen_uv(unit[(j+1)%4],s,viewport);painter.line(int(a.x),int(a.y),int(b.x),int(b.y),color(245,200,95),2);}
     const auto& mesh=*object->polygon;std::set<std::uint32_t> selected=s.corners;if(!s.uvFocus&&polygonSelection_.object==s.object&&polygonSelection_.mode==PolygonSelectionMode::Face){selected.clear();for(auto f:polygonSelection_.components)for(unsigned j=0;j<3;++j)selected.insert(std::uint32_t(f*3+j));}
-    for(std::uint32_t c=0;c<std::min<std::size_t>(mesh.indices.size(),60000);++c){auto a=screen_uv(texcoord(mesh.vertices[mesh.indices[c]],s.channel),s,viewport),b=screen_uv(texcoord(mesh.vertices[mesh.indices[c/3*3+(c+1)%3]],s.channel),s,viewport);auto tint=selected.contains(c)?color(255,175,55):color(105,210,190);painter.line(int(std::clamp(a.x,-100000.0F,100000.0F)),int(std::clamp(a.y,-100000.0F,100000.0F)),int(std::clamp(b.x,-100000.0F,100000.0F)),int(std::clamp(b.y,-100000.0F,100000.0F)),tint,selected.contains(c)?2:1);if(s.uvMode==0)painter.fill({int(std::clamp(a.x,-100000.0F,100000.0F))-3,int(std::clamp(a.y,-100000.0F,100000.0F))-3,7,7},s.uvPins[s.channel].contains(c)?color(230,110,245):tint);}
+    for(std::uint32_t c=0;c<std::min<std::size_t>(mesh.indices.size(),60000);++c) {
+        const auto other=c/3*3+(c+1)%3;
+        const auto a=screen_uv(texcoord(mesh.vertices[mesh.indices[c]],s.channel),s,viewport);
+        const auto b=screen_uv(texcoord(mesh.vertices[mesh.indices[other]],s.channel),s,viewport);
+        const auto x=s.uvGeometric[mesh.indices[c]],y=s.uvGeometric[mesh.indices[other]];
+        const auto edge=(std::uint64_t(std::min(x,y))<<32U)|std::max(x,y);
+        const bool seam=s.uvFlagsValid && s.uvFlags.enabled && s.uvFlags.seams[s.channel].contains(edge);
+        const auto tint=selected.contains(c)?color(255,175,55):seam?color(235,95,85):color(105,210,190);
+        painter.line(int(std::clamp(a.x,-100000.0F,100000.0F)),int(std::clamp(a.y,-100000.0F,100000.0F)),
+            int(std::clamp(b.x,-100000.0F,100000.0F)),int(std::clamp(b.y,-100000.0F,100000.0F)),
+            tint,seam?3:selected.contains(c)?2:1);
+        if(s.uvMode==0)painter.fill({int(std::clamp(a.x,-100000.0F,100000.0F))-3,
+            int(std::clamp(a.y,-100000.0F,100000.0F))-3,7,7},
+            s.uvFlagsValid && s.uvFlags.enabled && s.uvFlags.pins[s.channel].contains(c)?color(230,110,245):tint);
+    }
+    if(s.uvMode==0 && s.uvFlagsValid && s.uvFlags.enabled) for(const auto corner : s.uvFlags.pins[s.channel]) {
+        if(corner>=mesh.indices.size() || corner>=60000)continue;
+        const auto point=screen_uv(texcoord(mesh.vertices[mesh.indices[corner]],s.channel),s,viewport);
+        painter.fill({int(std::clamp(point.x,-100000.0F,100000.0F))-3,
+            int(std::clamp(point.y,-100000.0F,100000.0F))-3,7,7},color(230,110,245));
+    }
     if(s.selecting)painter.outline({std::min(s.startX,s.lastX),std::min(s.startY,s.lastY),std::abs(s.lastX-s.startX)+1,std::abs(s.lastY-s.startY)+1},color(255,190,65));
-    canvas.text(panel.x+12,panel.y+panel.height-28,"Middle drag pan | wheel/+/- zoom | F frame | T texture/checker",color(205,220,235));canvas.text(panel.x+12,panel.y+panel.height-8,s.typed.empty()?"P pin | D detach(+0.05U) | J stitch | H/V flip | Esc close":("Value: "+s.typed+" | Enter apply | Esc cancel"),color(255,205,145));
+    canvas.text(panel.x+12,panel.y+panel.height-28,"Middle drag pan | wheel/+/- zoom | F frame | T texture/checker",color(205,220,235));canvas.text(panel.x+12,panel.y+panel.height-8,s.typed.empty()?(s.uvFlagsValid?"P saved pin | M seam / Shift+M clear | J stitch | Esc close":"Saved UV flags need Reset UV Flags (or Undo topology edit)"):("Value: "+s.typed+" | Enter apply | Esc cancel"),color(255,205,145));
 }
 } // namespace dve::editor

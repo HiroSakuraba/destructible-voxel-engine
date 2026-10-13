@@ -686,7 +686,9 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
     if (action=="subdiv.make_quad" || action=="subdiv.triangulate_faces") {
         if (selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.object!=source->id ||
             polygonSelection_.mode!=PolygonSelectionMode::Face || polygonSelection_.components.empty() ||
-            polygonPreviewBefore_ || mesh_authoring_dragging() || gizmoDragging_) return false;
+            polygonPreviewBefore_ || mesh_authoring_dragging() || gizmoDragging_) {
+            set_status("Select control faces of this subdivision surface and finish the active preview first",true);return false;
+        }
         const auto& mesh=*source->polygon;auto settings=*source->subdivision;freeze_subdivision_topology(mesh,settings);
         const auto groups=subdivision_control_face_triangles(mesh,&settings);
         std::vector<std::vector<std::uint32_t>> records;
@@ -709,6 +711,15 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
         settings.controlFaces=std::move(records);
         const auto groupsAfter=subdivision_control_face_triangles(mesh,&settings);
         if (groupsAfter.empty()) {set_status("Choose two adjacent, consistently wound, same-material triangles for a control quad",true);return false;}
+        const auto canonical=[](std::vector<std::vector<std::uint32_t>> faces) {
+            for (auto& face : faces) std::sort(face.begin(),face.end());
+            std::sort(faces.begin(),faces.end());return faces;
+        };
+        if (canonical(groupsAfter)==canonical(groups)) {
+            set_status(action=="subdiv.make_quad"?"The selected triangles already form one control quad":
+                "The selected control faces are already triangles");
+            return true; // Already in the requested state: no undo step.
+        }
         const auto allowed=subdivision_control_edges(mesh,&settings);
         std::erase_if(settings.edgeCreases,[&](const auto& item){return !allowed.contains(item.first);});
         const auto before=capture_selection_snapshot();
@@ -733,8 +744,15 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
         else if (action!="subdiv.crease_clear") return false;
         auto settings=*source->subdivision;freeze_subdivision_topology(*source->polygon,settings);
         const auto allowed=subdivision_control_edges(*source->polygon,&settings);
+        const auto frozen=settings;std::size_t touched=0;
         for (auto edge : polygonSelection_.components) if (allowed.contains(edge)) {
+            ++touched;
             if (strength==0) settings.edgeCreases.erase(edge);else settings.edgeCreases[edge]=strength;
+        }
+        if (touched==0) {set_status("Select control-cage edges (not quad diagonals) to edit creases",true);return false;}
+        if (settings==frozen) {
+            set_status(strength==0?"Selected edges have no creases":"Selected edges already have this crease strength");
+            return true; // Already in the requested state: no undo step.
         }
         const auto before=capture_selection_snapshot();
         const auto result=workspace_.commands().execute(workspace_.document(),

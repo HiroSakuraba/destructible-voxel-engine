@@ -169,4 +169,27 @@ void native(){
     check(c.dispatch_action("mesh.uv_editor"),"UV workspace opens");c.key_down("a",false,false,false);c.key_down("g",false,false,false);c.key_down("1",false,false,false);check(c.mesh_authoring_dragging(),"typed UV preview");check(!c.dispatch_action("file.save"),"unapplied UVs cannot save");c.key_down("enter",false,false,false);check(c.workspace().document().find_object(1)->polygon->contentHash!=geometry,"UV edit applies");check(c.dispatch_action("edit.undo")&&c.workspace().document().find_object(1)->polygon->contentHash==geometry,"UV Undo exact");Canvas canvas;c.draw_mesh_authoring(canvas,c.layout().viewport);check(canvas.lines&&canvas.fills,"UV canvas draws geometry and checker");
 }
 }
-int main(){try{uv_flags_persistence();seam_unwrap();uv_flag_controller();if(!mesh_boolean_available()){std::cout<<"Manifold authoring disabled in this build\n";return 0;}booleans();topology();uv();hull();native();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Mesh authoring regression checks passed\n";}
+void bevel_options(){
+    auto cubeMesh=make_editor_polygon_cube(1);PolygonSelection edge{1,PolygonSelectionMode::Edge,{1}};
+    const auto sound=[](const PolygonEditResult& r,const char* what){if(!r)throw std::runtime_error(std::string(what)+": "+r.error);auto t=diagnose_polygon_topology(r.mesh);
+        check(!t.boundaries&&!t.nonmanifold&&!t.degenerate&&!t.inconsistentWinding,"bevel option output is a closed manifold");check(r.selection.mode==PolygonSelectionMode::Face&&!r.selection.components.empty(),"bevel selects new faces");
+        for(const auto& v:r.mesh.vertices){check(std::abs(length(v.normal)-1)<1e-3F,"unit bevel normals");check(std::isfinite(v.texcoord.x)&&std::isfinite(v.texcoord.y)&&std::isfinite(v.texcoord1.x),"finite bevel UVs");}};
+    EdgeBevelSettings chamfer;chamfer.depth=0;chamfer.segments=1;auto flat=bevel_convex_editor_edges(cubeMesh,edge,chamfer);sound(flat,"chamfer");
+    EdgeBevelSettings round;round.depth=1;round.segments=4;round.smoothingAngle=60;auto fillet=bevel_convex_editor_edges(cubeMesh,edge,round);sound(fillet,"fillet");
+    const double vc=volume(flat.mesh),vf=volume(fillet.mesh);check(vc<1&&vf<1&&vc>.9,"bevel removes material");check(vf>vc,"rounded fillet removes less than flat chamfer");
+    check(fillet.mesh.indices.size()>flat.mesh.indices.size(),"segments add profile faces");
+    // Smoothing angle 60 smooths the 22.5-degree fillet steps: some corner normal is not a face normal.
+    bool smoothed=false;for(std::size_t i=0;i<fillet.mesh.indices.size()&&!smoothed;i+=3){auto a=fillet.mesh.vertices[fillet.mesh.indices[i]],b=fillet.mesh.vertices[fillet.mesh.indices[i+1]],c=fillet.mesh.vertices[fillet.mesh.indices[i+2]];
+        auto x=subtract(b.position,a.position),y=subtract(c.position,a.position);auto n=normalize(Float3{x.y*y.z-x.z*y.y,x.z*y.x-x.x*y.z,x.x*y.y-x.y*y.x});smoothed=dot(n,a.normal)<.999F;}
+    check(smoothed,"fillet smoothing angle produces shared normals");
+    EdgeBevelSettings bad=round;bad.segments=0;check(!bevel_convex_editor_edges(cubeMesh,edge,bad),"zero segments refused");bad=round;bad.width=1.5F;check(!bevel_convex_editor_edges(cubeMesh,edge,bad),"fraction above one refused");
+    bad=round;bad.width=0;check(!bevel_convex_editor_edges(cubeMesh,edge,bad),"zero width refused");bad=round;bad.depth=2;check(!bevel_convex_editor_edges(cubeMesh,edge,bad),"depth above one refused");
+    EdgeBevelSettings tiny;tiny.offsetType=BevelOffsetType::Absolute;tiny.width=1e-9F;tiny.autoFit=false;auto none=bevel_convex_editor_edges(cubeMesh,edge,tiny);check(!none||!none.selection.components.empty(),"zero-width bevel is refused, never a no-op success");
+    EdgeBevelSettings world;world.offsetType=BevelOffsetType::Absolute;world.width=.1F;world.depth=0;world.autoFit=false;auto scaled=bevel_convex_editor_edges(cubeMesh,edge,world,{2,2,2});sound(scaled,"world-space bevel");
+    world.worldSpace=false;auto local=bevel_convex_editor_edges(cubeMesh,edge,world,{2,2,2});sound(local,"local bevel");check(volume(scaled.mesh)>volume(local.mesh),"world offset scales with object size");
+    world.worldSpace=true;check(!bevel_convex_editor_edges(cubeMesh,edge,world,{0,1,1}),"zero object scale refused");
+    EditorDocument d("Concave");d.add_object(cube(1));auto b=cube(2);b.transform.position={.5F,.5F,0};d.add_object(std::move(b));auto ell=boolean_editor_polygons(d,1,2,MeshBoolean::Union);check(bool(ell),"L solid");
+    bool refusedConcave=false;for(auto key:polygon_all_components(ell.mesh,PolygonSelectionMode::Edge)){auto r=bevel_convex_editor_edges(ell.mesh,{1,PolygonSelectionMode::Edge,{key}},round);check(!r,"concave solid bevel refused");if(r.error.find("convex")!=std::string::npos)refusedConcave=true;}
+    check(refusedConcave,"concave refusal names the convex limitation");
+}
+int main(){try{uv_flags_persistence();seam_unwrap();uv_flag_controller();if(!mesh_boolean_available()){std::cout<<"Manifold authoring disabled in this build\n";return 0;}booleans();topology();bevel_options();uv();hull();native();}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Mesh authoring regression checks passed\n";}

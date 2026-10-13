@@ -455,6 +455,7 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
 bool NativeEditorController::mesh_authoring_pointer_down(PointerButton button,int x,int y,std::uint32_t modifiers){
     if(!meshAuthoring_||workspace_.mode()!=EditorMode::Edit||playSession_.active()||(modifiers&4U))return false;auto& s=*meshAuthoring_;auto* object=workspace_.document().find_object(s.object);if(!object||!object->polygon||object->flags.locked)return false;
     if(s.kind==NativeMeshAuthoringState::Kind::Topology && button==PointerButton::Primary && layout_.viewport.contains(x,y)) {
+        if(!object->flags.visible||is_isolated_out(s.object)){cancel_mesh_authoring_drag();s.kind=NativeMeshAuthoringState::Kind::None;set_status("Bevel preview closed: object is hidden or isolated out",true);return true;}
         const auto view=layout_.viewport;
         for(int i=0;i<3;++i) if(bevel_button(view,0,i).contains(x,y)) {
             if(i==0)(void)mesh_authoring_key("c",false,false,false);

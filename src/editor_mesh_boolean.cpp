@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <set>
 #include <limits>
 #include <tuple>
 #ifdef DVE_HAVE_MESH_AUTHORING
@@ -162,7 +163,7 @@ PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset& source,con
         objectScale.x<=1e-8F || objectScale.y<=1e-8F || objectScale.z<=1e-8F)) return fail("World offset requires a finite positive object scale");
     auto working=source;
     if (world) for (auto& vertex : working.vertices) {
-        vertex.position=multiply_components(vertex.position,objectScale);
+        vertex.position={vertex.position.x*objectScale.x,vertex.position.y*objectScale.y,vertex.position.z*objectScale.z};
         if (!std::isfinite(vertex.position.x) || !std::isfinite(vertex.position.y) || !std::isfinite(vertex.position.z))
             return fail("World-space bevel coordinates overflow; reduce object scale");
     }
@@ -236,6 +237,7 @@ PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset& source,con
             std::array<std::uint32_t,3> ids;for(unsigned j=0;j<3;++j)ids[j]=std::uint32_t(output.triVerts[f*3+j]);
             if(cap){auto a=mesh.vertices[ids[0]].position,b=mesh.vertices[ids[1]].position,c=mesh.vertices[ids[2]].position;auto normal=normalize(cross(subtract(b,a),subtract(c,a)));for(auto& id:ids){auto v=mesh.vertices[id];v.normal=normal;v.color={1,1,1,1};v.texcoord=std::abs(normal.x)>std::abs(normal.y)&&std::abs(normal.x)>std::abs(normal.z)?Float2{v.position.z,v.position.y}:std::abs(normal.y)>std::abs(normal.z)?Float2{v.position.x,v.position.z}:Float2{v.position.x,v.position.y};v.texcoord1=v.texcoord;id=std::uint32_t(mesh.vertices.size());mesh.vertices.push_back(v);}result.selection.components.insert(f);}
             mesh.indices.insert(mesh.indices.end(),ids.begin(),ids.end());if(mesh.submeshes.empty()||mesh.submeshes.back().materialIndex!=material)mesh.submeshes.push_back({"Bevel surface",std::uint32_t(f*3),3,material});else mesh.submeshes.back().indexCount+=3;}
+        if (result.selection.components.empty()) return fail("Bevel width is too small to change the mesh; increase Width");
         if (world) for (auto& vertex : mesh.vertices)
             vertex.position={vertex.position.x/objectScale.x,vertex.position.y/objectScale.y,vertex.position.z/objectScale.z};
         smooth_bevel_normals(mesh,settings.smoothingAngle);

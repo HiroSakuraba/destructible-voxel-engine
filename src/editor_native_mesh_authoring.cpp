@@ -14,7 +14,9 @@ struct NativeMeshAuthoringState {
     enum class Kind {None,Boolean,Topology,Uv,Hull};Kind kind{Kind::None};
     EditorObjectId object{},operand{};MeshBoolean boolean{MeshBoolean::Union};bool replace{};PolygonEditResult result;
     std::uint64_t operandStamp{};RigidTransform booleanPose{};Float3 booleanMetric{1,1,1};
-    bool diagnostics{};float bevelWidth{.1F};
+    bool diagnostics{};EdgeBevelSettings bevel;
+    PolygonSelection bevelSelection;
+    int bevelField{};bool bevelReplaceTyped{true},bevelInputValid{true};
     std::uint32_t channel{},uvMode{};std::set<std::uint32_t> corners;Float2 center{.5F,.5F};float zoom{1};bool uvFocus{true},texture{};
     int tool{},axis{};bool dragging{},panning{},selecting{};int startX{},startY{},lastX{},lastY{};Float2 startUv{},pivot{},panStart{};
     PolygonUvAuthoring uvFlags;
@@ -30,6 +32,20 @@ struct NativeMeshAuthoringState {
 };
 namespace {
 EditorColor color(unsigned r,unsigned g,unsigned b){return (r<<16U)|(g<<8U)|b;}
+UiRect bevel_panel(UiRect view) {return {view.x+8,view.y+8,std::max(1,std::min(420,view.width-16)),std::max(1,std::min(250,view.height-16))};}
+UiRect bevel_button(UiRect view,int row,int column,int count=3) {
+    const auto panel=bevel_panel(view);const int width=std::max(1,(panel.width-16)/count);
+    return {panel.x+8+column*width,panel.y+28+row*24,width-3,21};
+}
+UiRect bevel_field(UiRect view,int field) {const auto p=bevel_panel(view);return {p.x+8,p.y+80+field*27,std::max(1,p.width-16),24};}
+std::string bevel_value(const NativeMeshAuthoringState& state,int field) {
+    if (field==1) return std::to_string(state.bevel.segments);
+    return std::to_string(field==0?state.bevel.width:field==2?state.bevel.depth:state.bevel.smoothingAngle);
+}
+void update_bevel(NativeMeshAuthoringState& state,const EditorObject& object) {
+    state.bevelInputValid=true;
+    state.result=bevel_convex_editor_edges(*object.polygon,state.bevelSelection,state.bevel,object.voxelScale);
+}
 UiRect uv_panel(UiRect view){int width=std::max(1,view.width/2);return {view.x+view.width-width,view.y,width,view.height};}
 UiRect uv_canvas(UiRect view){auto p=uv_panel(view);return {p.x+8,p.y+70,std::max(1,p.width-16),std::max(1,p.height-116)};}
 Float2 texcoord(const PolygonVertex& v,unsigned channel){return channel?v.texcoord1:v.texcoord;}
@@ -95,7 +111,7 @@ std::set<std::uint32_t> uv_click(const CookedPolygonAsset& m,const NativeMeshAut
 std::set<EditorObjectId> NativeEditorController::mesh_authoring_hidden_objects() const{
 
     if(!meshAuthoring_||!meshAuthoring_->result)return {};const auto& s=*meshAuthoring_;
-    if(s.kind==NativeMeshAuthoringState::Kind::Boolean)return {s.object,s.operand};if(s.kind==NativeMeshAuthoringState::Kind::Topology)return {s.object};return {};
+    if(s.kind==NativeMeshAuthoringState::Kind::Boolean)return {s.object,s.operand};if(s.kind==NativeMeshAuthoringState::Kind::Topology && s.result)return {s.object};return {};
 }
 void NativeEditorController::refresh_mesh_authoring_menu_state(){
     auto primary=workspace_.selected_object();auto* object=primary?workspace_.document().find_object(*primary):nullptr;
@@ -133,7 +149,9 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
         "Select a polygon with saved UV flags; apply/close previews first");
     bool components=mesh&&selectionDomain_==SelectionDomain::Polygons&&!polygonSelection_.components.empty();
     for(auto id:{"mesh.subdivide","mesh.hard_normals","mesh.smooth_normals"})enabled(id,components,"Select polygon components first");
-    for(auto id:{"mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.bevel_edges"})enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&(std::string_view(id)!="mesh.bevel_edges"||mesh_boolean_available()),"Select polygon edges in a supported authoring build");
+    for(auto id:{"mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap"})enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge,"Select polygon edges first");
+    for(auto id:{"mesh.bevel_edges","mesh.chamfer_edges","mesh.fillet_edges"})
+        enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&mesh_boolean_available(),"Select convex crease edges in a Manifold authoring build");
 }
 bool NativeEditorController::mesh_authoring_dragging() const noexcept {return meshAuthoring_&&(meshAuthoring_->uvBefore||meshAuthoring_->hullBefore);}
 void NativeEditorController::cancel_mesh_authoring_drag(){if(!meshAuthoring_)return;auto& s=*meshAuthoring_;if(s.uvBefore){if(auto* o=workspace_.document().find_object(s.object))o->polygon=*s.uvBefore;}s.uvBefore.reset();s.hullBefore.reset();s.hullPreview.clear();s.typed.clear();s.dragging=s.panning=s.selecting=false;}
@@ -242,12 +260,15 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
         s.operandStamp=stamp(workspace_.document(),s.object,s.operand);s.booleanPose=workspace_.document().world_transform(s.object).value_or(object->transform);s.booleanMetric=object->voxelScale;
         set_status("Mesh Boolean preview: U/D/X/I operation, Tab swaps operands, R new/replace A, Enter apply, Esc cancel");return true;
     }
-    if(action=="mesh.bevel_edges"){
+    if(action=="mesh.bevel_edges" || action=="mesh.chamfer_edges" || action=="mesh.fillet_edges"){
         cancel_mesh_authoring_drag();close_previews_for_voxel_edit("edge bevel");
-        if(selectionDomain_!=SelectionDomain::Polygons||polygonSelection_.mode!=PolygonSelectionMode::Edge){set_status("Select crease edges in polygon Edge mode first",true);return false;}
-        s.result=bevel_convex_editor_edges(*object->polygon,polygonSelection_,.1F);if(!s.result){set_status(s.result.error,true);return false;}
-        s.kind=NativeMeshAuthoringState::Kind::Topology;s.object=object->id;s.bevelWidth=.1F;s.typed.clear();s.operandStamp=stamp(workspace_.document(),s.object,s.object);
-        set_status("Convex edge bevel preview: type mesh-local plane offset, Enter apply, Esc cancel");return true;
+        if(selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.object!=object->id || polygonSelection_.mode!=PolygonSelectionMode::Edge){set_status("Select convex crease edges in Edge mode first",true);return false;}
+        s.bevel=EdgeBevelSettings{};s.bevelSelection=polygonSelection_;
+        if(action=="mesh.chamfer_edges") {s.bevel.depth=0;s.bevel.segments=1;}
+        if(action=="mesh.fillet_edges") {s.bevel.depth=1;s.bevel.segments=4;s.bevel.smoothingAngle=60;}
+        update_bevel(s,*object);if(!s.result){set_status(s.result.error,true);return false;}
+        s.kind=NativeMeshAuthoringState::Kind::Topology;s.object=object->id;s.bevelField=0;s.bevelReplaceTyped=true;s.typed.clear();s.operandStamp=stamp(workspace_.document(),s.object,s.object);
+        set_status("Edge bevel options: Width, Segments, Depth and Smoothing Angle; Enter Apply, Esc Cancel");return true;
     }
     if(action=="mesh.uv_editor"){
         cancel_mesh_authoring_drag();if(s.kind==NativeMeshAuthoringState::Kind::Uv&&s.object==object->id){s.kind=NativeMeshAuthoringState::Kind::None;return true;}
@@ -299,15 +320,46 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
     if(!meshAuthoring_||workspace_.mode()!=EditorMode::Edit||playSession_.active()||alt)return false;auto& s=*meshAuthoring_;auto* object=workspace_.document().find_object(s.object);
     if(!object||!object->polygon||object->flags.locked||!object->flags.visible||is_isolated_out(s.object)){cancel_mesh_authoring_drag();s.kind=NativeMeshAuthoringState::Kind::None;return false;}
     if(s.kind==NativeMeshAuthoringState::Kind::Topology){
-        if(key=="escape"){s.kind=NativeMeshAuthoringState::Kind::None;return true;}
+        if(key=="escape"){s.kind=NativeMeshAuthoringState::Kind::None;refresh_menu_state();set_status("Bevel cancelled; source unchanged");return true;}
         if(key=="enter"||key=="return"){
-            if(stamp(workspace_.document(),s.object,s.object)!=s.operandStamp){s.result=bevel_convex_editor_edges(*object->polygon,polygonSelection_,s.bevelWidth);s.operandStamp=stamp(workspace_.document(),s.object,s.object);set_status("Geometry changed: inspect updated bevel and press Enter again",!s.result);return true;}
-            if(!s.result){set_status(s.result.error,true);return true;}auto before=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,s.result.mesh,"Bevel convex edges"));
-            if(result.success){polygonSelection_=s.result.selection;workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());s.kind=NativeMeshAuthoringState::Kind::None;}set_status(result.success?"Beveled convex edges":result.message,!result.success);return true;}
-        if(key=="backspace"){if(!s.typed.empty())s.typed.pop_back();}
-        else if((key.size()==1&&((key[0]>='0'&&key[0]<='9')||key[0]=='.'))||key=="period"){if(s.typed.size()<16)s.typed+=key=="period"?".":std::string(key);}else return !control;
-        char* end{};float value=std::strtof(s.typed.c_str(),&end);if(s.typed.empty()||end!=s.typed.c_str()+s.typed.size()||!std::isfinite(value)||!(value>0)){s.result.error="Enter a positive bevel offset";return true;}
-        s.bevelWidth=value;s.result=bevel_convex_editor_edges(*object->polygon,polygonSelection_,value);if(!s.result)set_status(s.result.error,true);return true;
+            if(!s.bevelInputValid){set_status(s.result.error,true);return true;}
+            if(stamp(workspace_.document(),s.object,s.object)!=s.operandStamp){update_bevel(s,*object);s.operandStamp=stamp(workspace_.document(),s.object,s.object);set_status("Geometry changed: inspect updated bevel and press Enter again",!s.result);return true;}
+            if(!s.result){set_status(s.result.error,true);return true;}
+            auto before=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,s.result.mesh,"Bevel / chamfer / rounded fillet"));
+            if(result.success){polygonSelection_=s.result.selection;workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());s.kind=NativeMeshAuthoringState::Kind::None;}
+            set_status(result.success?"Applied edge bevel; Undo restores cage and selection":result.message,!result.success);refresh_menu_state();return true;
+        }
+        if (control) return false;
+        bool update=false;
+        if(key=="tab") {s.bevelField=(s.bevelField+(shift?3:1))%4;s.typed.clear();s.bevelReplaceTyped=true;update=true;}
+        else if(key=="f") {s.bevel.offsetType=s.bevel.offsetType==BevelOffsetType::Fractional?BevelOffsetType::Absolute:BevelOffsetType::Fractional;if(s.bevel.offsetType==BevelOffsetType::Fractional)s.bevel.width=std::min(1.0F,s.bevel.width);update=true;}
+        else if(key=="w") {if(s.bevel.offsetType==BevelOffsetType::Absolute){s.bevel.worldSpace=!s.bevel.worldSpace;update=true;}else return true;}
+        else if(key=="a") {s.bevel.autoFit=!s.bevel.autoFit;update=true;}
+        else if(key=="c") {s.bevel.segments=1;s.bevel.depth=0;s.bevel.smoothingAngle=30;update=true;}
+        else if(key=="r") {s.bevel.segments=4;s.bevel.depth=1;s.bevel.smoothingAngle=60;update=true;}
+        else if(key=="up"||key=="down"||key=="left"||key=="right") {
+            const float direction=key=="up"||key=="right"?1.0F:-1.0F;
+            if(s.bevelField==1)s.bevel.segments=std::uint32_t(std::clamp(int(s.bevel.segments)+int(direction),1,16));
+            else if(s.bevelField==2)s.bevel.depth=std::clamp(s.bevel.depth+direction*.1F,0.0F,1.0F);
+            else if(s.bevelField==3)s.bevel.smoothingAngle=std::clamp(s.bevel.smoothingAngle+direction*5,0.0F,180.0F);
+            else s.bevel.width=std::clamp(s.bevel.width*(direction>0?1.1F:1/1.1F),0.000001F,s.bevel.offsetType==BevelOffsetType::Fractional?1.0F:1000000.0F);
+            update=true;
+        }
+        if(update) {s.typed.clear();s.bevelReplaceTyped=true;update_bevel(s,*object);return true;}
+        if(key=="backspace") {if(s.bevelReplaceTyped){s.typed.clear();s.bevelReplaceTyped=false;}else if(!s.typed.empty())s.typed.pop_back();}
+        else if((key.size()==1&&((key[0]>='0'&&key[0]<='9')||key[0]=='.'))||key=="period") {
+            if(s.bevelReplaceTyped){s.typed.clear();s.bevelReplaceTyped=false;}
+            if(s.typed.size()<16)s.typed+=key=="period"?".":std::string(key);
+        } else return true;
+        char* end{};const float value=std::strtof(s.typed.c_str(),&end);
+        if(s.typed.empty()||end!=s.typed.c_str()+s.typed.size()||!std::isfinite(value)) {s.bevelInputValid=false;s.result.error="Enter a finite number for the highlighted option";return true;}
+        const bool valid=s.bevelField==1?value>=1 && value<=16 && std::floor(value)==value:
+            s.bevelField==2?value>=0 && value<=1:s.bevelField==3?value>=0 && value<=180:
+            value>0 && (s.bevel.offsetType!=BevelOffsetType::Fractional || value<=1);
+        if(!valid){s.bevelInputValid=false;s.result.error="Width >0 (fraction <=1), Segments 1..16, Depth 0..1, Smoothing 0..180";return true;}
+        if(s.bevelField==0)s.bevel.width=value;else if(s.bevelField==1)s.bevel.segments=std::uint32_t(value);
+        else if(s.bevelField==2)s.bevel.depth=value;else s.bevel.smoothingAngle=value;
+        update_bevel(s,*object);return true;
     }
     if(s.kind==NativeMeshAuthoringState::Kind::Boolean){
         if(control)return false;
@@ -402,6 +454,25 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
 }
 bool NativeEditorController::mesh_authoring_pointer_down(PointerButton button,int x,int y,std::uint32_t modifiers){
     if(!meshAuthoring_||workspace_.mode()!=EditorMode::Edit||playSession_.active()||(modifiers&4U))return false;auto& s=*meshAuthoring_;auto* object=workspace_.document().find_object(s.object);if(!object||!object->polygon||object->flags.locked)return false;
+    if(s.kind==NativeMeshAuthoringState::Kind::Topology && button==PointerButton::Primary && layout_.viewport.contains(x,y)) {
+        const auto view=layout_.viewport;
+        for(int i=0;i<3;++i) if(bevel_button(view,0,i).contains(x,y)) {
+            if(i==0)(void)mesh_authoring_key("c",false,false,false);
+            else if(i==1)(void)mesh_authoring_key("r",false,false,false);
+            else {s.bevel=EdgeBevelSettings{};s.typed.clear();s.bevelReplaceTyped=true;update_bevel(s,*object);}
+            return true;
+        }
+        for(int i=0;i<3;++i) if(bevel_button(view,1,i).contains(x,y)) {
+            (void)mesh_authoring_key(i==0?"f":i==1?"w":"a",false,false,false);return true;
+        }
+        for(int i=0;i<4;++i) if(bevel_field(view,i).contains(x,y)) {
+            s.bevelField=i;s.typed=bevel_value(s,i);s.bevelReplaceTyped=true;update_bevel(s,*object);return true;
+        }
+        const auto panel=bevel_panel(view);const int width=std::max(1,(panel.width-16)/2);
+        if(UiRect{panel.x+8,panel.y+191,width-3,23}.contains(x,y))(void)mesh_authoring_key("enter",false,false,false);
+        else if(UiRect{panel.x+8+width,panel.y+191,width-3,23}.contains(x,y))(void)mesh_authoring_key("escape",false,false,false);
+        return true; // Preview owns primary authoring input; Alt/non-primary camera gestures still work.
+    }
     if(s.kind==NativeMeshAuthoringState::Kind::Hull&&button==PointerButton::Primary&&layout_.viewport.contains(x,y)){
         auto points=hull_points(*object);float best=10;std::optional<std::uint32_t> chosen;for(std::uint32_t i=0;i<points.size();++i){auto p=project_world_to_screen(camera_,layout_.viewport,voxel_to_world(object->transform,object->voxelScale,points[i]));float distance=std::hypot(float(x)-p.x,float(y)-p.y);if(p.visible&&distance<best){best=distance;chosen=i;}}
         if(chosen){cancel_mesh_authoring_drag();if((modifiers&1U)==0)s.hullSelection.clear();if((modifiers&2U)&&s.hullSelection.contains(*chosen))s.hullSelection.erase(*chosen);else s.hullSelection.insert(*chosen);return true;}return false;
@@ -469,7 +540,20 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
     }
     if(s.kind==NativeMeshAuthoringState::Kind::Topology){
         if(s.result){EditorDocument preview("Bevel preview");EditorObject o(s.object,"Result");o.polygon=s.result.mesh;o.subdivision=object->subdivision;if(o.subdivision)*o.subdivision=remap_subdivision_topology(*object->polygon,*o.polygon,*o.subdivision);o.transform=object->transform;o.voxelScale=object->voxelScale;preview.add_object(std::move(o));for(const auto& t:build_editor_polygon_draw_list(preview,camera_,viewport,{}, {},20000))for(unsigned j=0;j<3;++j)line(t.points[j],t.points[(j+1)%3],color(255,175,55),2);}
-        canvas.fill({viewport.x+10,viewport.y+10,std::max(1,std::min(460,viewport.width-20)),66},color(23,32,43));canvas.text(viewport.x+20,viewport.y+30,"Convex edge bevel | offset: "+(s.typed.empty()?std::to_string(s.bevelWidth):s.typed),color(255,210,140));canvas.text(viewport.x+20,viewport.y+52,s.result?"Type local plane offset | Enter apply | Esc cancel":s.result.error,color(225,235,245));return;
+        const auto panel=bevel_panel(viewport);RectClipCanvas painter(canvas,panel);painter.fill(panel,color(23,32,43));
+        const auto label=[&](UiRect rect,std::string text,EditorColor shade){painter.text(rect.x+5,rect.y+16,elide_text_to_width(painter,text,std::max(1,rect.width-10)),shade);};
+        label({panel.x+8,panel.y+3,panel.width-16,22},"Edge Bevel / Chamfer / Rounded Fillet",color(255,210,140));
+        const char* presets[]={"Chamfer","Rounded","Reset"};
+        for(int i=0;i<3;++i){const auto button=bevel_button(viewport,0,i);painter.fill(button,color(38,48,64));label(button,presets[i],color(225,235,245));}
+        const std::string toggles[]={s.bevel.offsetType==BevelOffsetType::Fractional?"Fractional":"Absolute",
+            s.bevel.offsetType==BevelOffsetType::Fractional?"Local fraction":s.bevel.worldSpace?"World space":"Local space",s.bevel.autoFit?"Auto Fit: on":"Auto Fit: off"};
+        for(int i=0;i<3;++i){const auto button=bevel_button(viewport,1,i);painter.fill(button,color(38,48,64));label(button,toggles[i],color(225,235,245));}
+        const char* fields[]={"Width","Segments","Depth / Profile","Smoothing Angle"};
+        for(int i=0;i<4;++i){const auto field=bevel_field(viewport,i);painter.fill(field,s.bevelField==i?color(66,82,106):color(32,42,56));
+            label(field,std::string(fields[i])+": "+(s.bevelField==i&&!s.typed.empty()?s.typed:bevel_value(s,i)),color(225,235,245));}
+        const int width=std::max(1,(panel.width-16)/2);const UiRect apply{panel.x+8,panel.y+191,width-3,23},cancel{panel.x+8+width,panel.y+191,width-3,23};
+        painter.fill(apply,s.result?color(40,92,64):color(68,44,44));painter.fill(cancel,color(55,64,78));label(apply,"Apply (Enter)",color(225,235,245));label(cancel,"Cancel (Esc)",color(225,235,245));
+        label({panel.x+8,panel.y+215,panel.width-16,23},s.result?"Tab: field | Arrows: adjust | C: chamfer | R: round":s.result.error,s.result?color(185,200,220):color(255,145,130));return;
     }
     if(s.kind==NativeMeshAuthoringState::Kind::Boolean){
         if(s.result){EditorDocument preview("Boolean preview");EditorObject o(s.object,"Result");o.polygon=s.result.mesh;o.subdivision=s.replace?object->subdivision:std::optional<SubdivisionSettings>{};if(o.subdivision)*o.subdivision=remap_subdivision_topology(*object->polygon,*o.polygon,*o.subdivision);o.transform=s.booleanPose;o.voxelScale=s.booleanMetric;preview.add_object(std::move(o));for(const auto& triangle:build_editor_polygon_draw_list(preview,camera_,viewport,{}, {},20000))for(unsigned j=0;j<3;++j)line(triangle.points[j],triangle.points[(j+1)%3],color(255,175,55),2);}

@@ -537,6 +537,8 @@ const std::map<std::string_view,std::string_view>& subdivision_tools() {
         {"subdiv.inset","polygon.inset"},
         {"subdiv.bevel","polygon.bevel"},
         {"subdiv.bevel_edges","mesh.bevel_edges"},
+        {"subdiv.chamfer_edges","mesh.chamfer_edges"},
+        {"subdiv.fillet_edges","mesh.fillet_edges"},
         {"subdiv.weld","polygon.weld"},
         {"subdiv.split_edges","mesh.split_edges"},
         {"subdiv.subdivide_cage","mesh.subdivide"},

@@ -139,11 +139,11 @@ void scene_and_prefab_persistence() {
     auto f=quad();EditorDocument doc("Topology persistence");EditorObject object(1,"Quad");object.polygon=f.mesh;object.subdivision=f.settings;doc.add_object(std::move(object));std::string error;
     const auto root=std::filesystem::temp_directory_path()/"dve-modeling-record-roundtrip";std::filesystem::remove_all(root);
     const auto path=root/"scene.dvescene";check(doc.save_transactional(path).success,"legacy scene save");
-    std::ifstream legacyFile(path);std::string header;std::getline(legacyFile,header);check(header=="DVE_EDITOR_SCENE 10","untouched legacy scenes keep their existing format");
+    std::ifstream legacyFile(path);std::string header;std::getline(legacyFile,header);legacyFile.close();check(header=="DVE_EDITOR_SCENE 10","untouched legacy scenes keep their existing format");
     auto legacy=EditorDocument::load(path,&error);check(legacy&&!legacy->find_object(1)->modelingTopology,"old format loads without fabricated IDs");
     check(ensure_modeling_topology(*legacy->find_object(1),&error),error);const auto original=*legacy->find_object(1)->modelingTopology;
     legacy->find_object(1)->modelingNextId+=99;check(legacy->save_transactional(path).success,"save identity scene with higher retired-ID floor");
-    std::ifstream identityFile(path);std::getline(identityFile,header);check(header=="DVE_EDITOR_SCENE 11","persistent IDs use version 11");
+    std::ifstream identityFile(path);std::getline(identityFile,header);identityFile.close();check(header=="DVE_EDITOR_SCENE 11","persistent IDs use version 11");
     auto loaded=EditorDocument::load(path,&error);check(bool(loaded),error);
     auto expected=original;expected.nextId=legacy->find_object(1)->modelingNextId;
     check(*loaded->find_object(1)->modelingTopology==expected&&loaded->find_object(1)->modelingNextId==expected.nextId,"scene round trip preserves IDs and retired allocation floor");
@@ -182,7 +182,7 @@ void legacy_migration_is_not_an_edit() {
     check(c.dispatch_action("subdiv.loop_cut")&&c.dispatch_action("subdiv.preview_apply")&&c.workspace().document().find_object(1)->modelingTopology,"legacy cut Apply records IDs");
     check(c.dispatch_action("edit.undo")&&!c.workspace().document().find_object(1)->modelingTopology&&c.polygon_selection().components==std::set{seed},"Undo restores the exact ID-less state and selection");
     const auto path=std::filesystem::temp_directory_path()/"dve-modeling-legacy-test"/"scene.dvescene";std::filesystem::remove_all(path.parent_path());
-    check(c.workspace().document().save_transactional(path).success,"save legacy after Undo");std::ifstream manifest(path);std::string header;std::getline(manifest,header);
+    check(c.workspace().document().save_transactional(path).success,"save legacy after Undo");std::ifstream manifest(path);std::string header;std::getline(manifest,header);manifest.close();
     check(header=="DVE_EDITOR_SCENE 10","no identity field written after Undo removed every edit");
     check(c.dispatch_action("edit.redo")&&c.workspace().document().find_object(1)->modelingTopology,"Redo restores IDs");
     check(c.dispatch_action("edit.undo")&&c.dispatch_action("subdiv.loop_cut"),"re-migrating after Undo still works");c.key_down("escape",false,false,false);
@@ -192,7 +192,7 @@ void scene_history_and_prefab() {
     auto f=quad();EditorDocument document("Persistent identities");EditorObject object(1,"Cage");object.polygon=f.mesh;object.subdivision=f.settings;std::string error;
     check(ensure_modeling_topology(object,&error),error);const auto initial=*object.modelingTopology;document.add_object(std::move(object));
     const auto path=std::filesystem::temp_directory_path()/"dve-modeling-identities-test"/"scene.dvescene";std::filesystem::remove_all(path.parent_path());
-    const auto saved=document.save_transactional(path);check(saved.success,saved.error);std::ifstream manifest(path);std::string header;std::getline(manifest,header);check(header=="DVE_EDITOR_SCENE 11","identity scene uses format 11");
+    const auto saved=document.save_transactional(path);check(saved.success,saved.error);std::ifstream manifest(path);std::string header;std::getline(manifest,header);manifest.close();check(header=="DVE_EDITOR_SCENE 11","identity scene uses format 11");
     auto loaded=EditorDocument::load(path,&error);check(bool(loaded),error);check(loaded->find_object(1)->modelingTopology==initial,"scene save/reopen preserves modeling IDs");
     auto cloned=clone_editor_document(*loaded);check(cloned.find_object(1)->modelingTopology==initial,"document clone retains local identity namespace");
     auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(*loaded)));auto& c=*owner;c.resize(1600,900);c.workspace().select_object(1);

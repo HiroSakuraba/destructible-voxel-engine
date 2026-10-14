@@ -1145,6 +1145,8 @@ private:
     std::optional<ModelingTopology> polygonPreviewModelingBefore_,polygonPreviewModelingAfter_;
     ModelingId polygonPreviewModelingFloor_{1};
     bool polygonPreviewModelingMigrated_{};
+    // Allocation floor before the preview; Cancel/refusal restore it so no unapplied ID is reserved.
+    std::optional<ModelingId> polygonPreviewModelingNextIdBefore_;
     bool begin_modeling_identity_preview(EditorObject&);
     bool update_modeling_identity_preview(const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&,PolygonTopologyLineage);
     bool begin_polygon_loop_cut();

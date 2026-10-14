@@ -226,7 +226,7 @@ bool NativeEditorController::begin_polygon_preview(PolygonEdit operation) {
     // Attribute-only edits do not force legacy meshes into a new identity namespace.
     if(object->modelingTopology || (operation!=PolygonEdit::ProjectUV&&operation!=PolygonEdit::FlipNormals)) {
         if(!begin_modeling_identity_preview(*object))return false;
-    }else polygonPreviewModelingMigrated_=false;
+    }else {polygonPreviewModelingMigrated_=false;polygonPreviewModelingNextIdBefore_.reset();}
     close_previews_for_voxel_edit("polygon tool preview");
     polygonFaceAuthoringPreview_=true;
     polygonPreviewModelingBefore_=object->modelingTopology;polygonPreviewModelingAfter_.reset();
@@ -295,13 +295,14 @@ bool NativeEditorController::clean_unused_polygon_vertices() {
 
 bool NativeEditorController::begin_modeling_identity_preview(EditorObject& object) {
     if(object.prefabLink) {set_status("Edit the prefab source or detach this instance before changing topology",true);return false;}
-    std::string error;const bool migrated=!object.modelingTopology.has_value();
-    if(!ensure_modeling_topology(object,&error)) {set_status(error,true);return false;}
+    std::string error;const bool migrated=!object.modelingTopology.has_value();const auto nextIdBefore=object.modelingNextId;
+    if(!ensure_modeling_topology(object,&error)) {if(migrated)object.modelingTopology.reset();object.modelingNextId=nextIdBefore;set_status(error,true);return false;}
     if(!modeling_matches_legacy_partition(*object.polygon,*object.modelingTopology)) {
         if(migrated)object.modelingTopology.reset();
+        object.modelingNextId=nextIdBefore;
         set_status("This tool does not support coincident independent geometric vertices yet",true);return false;
     }
-    polygonPreviewModelingMigrated_=migrated;
+    polygonPreviewModelingMigrated_=migrated;polygonPreviewModelingNextIdBefore_=nextIdBefore;
     polygonPreviewModelingBefore_=object.modelingTopology;polygonPreviewModelingAfter_.reset();
     polygonPreviewModelingFloor_=(std::max)(object.modelingNextId,object.modelingTopology->nextId);return true;
 }
@@ -536,8 +537,12 @@ void NativeEditorController::cancel_polygon_preview() {
     if (!polygonPreviewBefore_) return;
     if (auto* object=workspace_.document().find_object(polygonPreviewSelection_.object)) {object->polygon=*polygonPreviewBefore_;object->subdivision=polygonPreviewSubdivision_;
         // A preview-time migration is discarded so Cancel and Undo restore the exact ID-less state.
-        object->modelingTopology=polygonPreviewModelingMigrated_?std::nullopt:polygonPreviewModelingBefore_;object->subdivisionCache.reset();}
-    polygonPreviewModelingMigrated_=false;
+        object->modelingTopology=polygonPreviewModelingMigrated_?std::nullopt:polygonPreviewModelingBefore_;object->subdivisionCache.reset();
+        // A discarded preview-time migration was never committed or saved, so it must not leave a retired
+        // floor behind (that would silently switch an untouched legacy scene to format 12). Identified
+        // meshes keep the raised floor, matching #127's no-reuse rule for cancelled previews.
+        if(polygonPreviewModelingMigrated_&&polygonPreviewModelingNextIdBefore_)object->modelingNextId=*polygonPreviewModelingNextIdBefore_;}
+    polygonPreviewModelingMigrated_=false;polygonPreviewModelingNextIdBefore_.reset();
     polygonSelection_=polygonPreviewSelection_;
     polygonPreviewBefore_.reset(); polygonPreviewSubdivision_.reset(); polygonPreviewTyped_.clear(); polygonPreviewValid_=false;
     polygonLoopCutPreview_=false; polygonLoopCutDragging_=false;

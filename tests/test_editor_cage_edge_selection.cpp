@@ -1,4 +1,5 @@
 #include "dve/editor_subdivision.hpp"
+#include "dve/subdivision_surface.hpp"
 #include "dve/editor_mesh_authoring.hpp"
 #ifndef DVE_CAGE_SELECTION_CORE_ONLY
 #include "dve/editor_native.hpp"
@@ -7,6 +8,9 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <set>
+#include <string>
 #include <iostream>
 #include <memory>
 #include <limits>
@@ -433,7 +437,17 @@ void native_cut_history_and_preview() {
     check(polygon_asset_content_hash(*c.workspace().document().find_object(1)->polygon)==before,"Cancel restores original cage");
     check(c.dispatch_action("subdiv.loop_cut"),"focus-loss preview opens"); c.clear_navigation_input();
     check(polygon_asset_content_hash(*c.workspace().document().find_object(1)->polygon)==before,"focus loss cancels loop cut");
-    check(c.dispatch_action("subdiv.face_mode")&&c.dispatch_action("subdiv.inset"),"open a previous Inset tool");
+    check(c.dispatch_action("subdiv.face_mode"),"face mode before a previous Inset tool");
+    {
+        // Authored face tools refuse partial control faces up front, so widen the converted triangles to whole faces.
+        const auto* cage=c.workspace().document().find_object(1);
+        const auto selected=c.polygon_selection().components; std::set<std::uint64_t> whole;
+        for(const auto& group:subdivision_control_face_triangles(*cage->polygon,&*cage->subdivision))
+            if(std::any_of(group.begin(),group.end(),[&](auto t){return selected.contains(t);})) whole.insert(group.begin(),group.end());
+        check(!whole.empty(),"converted face selection maps to control faces");
+        c.select_polygon_components(whole,SelectionOperation::Replace);
+    }
+    check(c.dispatch_action("subdiv.inset"),"open a previous Inset tool");
     c.key_down("escape",false,false,false);
     check(c.dispatch_action("subdiv.edge_mode"),"return to cut seed selection"); c.select_polygon_components({seed},SelectionOperation::Replace);
     check(c.dispatch_action("subdiv.loop_cut"),"cut after Inset opens"); c.key_down("up",false,false,false);
@@ -668,11 +682,43 @@ void native_history_menus_and_search() {
 }
 #endif
 }
+void native_face_tool_cancel_keeps_legacy_state() {
+    auto f=grid();
+    EditorDocument document("Face tool cancel"); EditorObject object(1,"Cage"); object.polygon=f.mesh; object.subdivision=f.settings;
+    document.add_object(std::move(object));
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(document))); auto& c=*owner;
+    c.resize(1600,900); c.workspace().select_object(1); check(c.dispatch_action("subdiv.face_mode"),"face cancel: face mode");
+    c.select_polygon_components({0,1},SelectionOperation::Replace);
+    const auto before=polygon_asset_content_hash(*c.workspace().document().find_object(1)->polygon);
+    const auto history=c.workspace().commands().size();
+    const auto header=[&]{
+        const auto root=std::filesystem::temp_directory_path()/"dve-face-tool-cancel"; std::filesystem::create_directories(root);
+        const auto path=root/"face.dvescene"; const auto saved=c.workspace().document().save_transactional(path); check(saved.success,saved.error.c_str());
+        std::ifstream input(path); std::string line; std::getline(input,line); input.close(); std::filesystem::remove_all(root); return line;
+    };
+    for (const auto* action:{"subdiv.inset","subdiv.extrude"}) {
+        check(c.dispatch_action(action),"face tool preview opens on an ID-less cage");
+        check(c.workspace().document().find_object(1)->modelingTopology.has_value(),"preview migrates for lineage");
+        c.key_down("escape",false,false,false);
+        const auto* target=c.workspace().document().find_object(1);
+        check(!target->modelingTopology&&target->modelingNextId<=1,"Cancel leaves no identity record or reserved allocation floor");
+        check(polygon_asset_content_hash(*target->polygon)==before&&c.workspace().commands().size()==history,"Cancel restores geometry without history");
+        check(c.polygon_selection().components==std::set<std::uint64_t>{0,1},"Cancel restores face selection");
+    }
+    check(header()=="DVE_EDITOR_SCENE 10","cancelled face tools do not switch scene format");
+    check(c.dispatch_action("subdiv.inset")&&c.dispatch_action("subdiv.preview_apply"),"inset applies");
+    check(c.workspace().commands().size()==history+1,"inset is one undo step");
+    check(header()=="DVE_EDITOR_SCENE 11","applied identity edit writes format 11");
+    check(c.dispatch_action("edit.undo"),"inset undo");
+    const auto* target=c.workspace().document().find_object(1);
+    check(!target->modelingTopology&&polygon_asset_content_hash(*target->polygon)==before,"Undo removes migrated identities and restores geometry");
+}
+
 int main() {
     try {
         open_strip_and_seams(); closed_cycles_and_reordering(); stops_and_atomic_refusals(); additional_topologies(); cuts_slide_and_lineage(); dissolve_and_cleanup_core(); vertex_cleanup_core();
 #ifndef DVE_CAGE_SELECTION_CORE_ONLY
-        native_commands_and_guards(); native_history_menus_and_search(); native_cut_history_and_preview(); native_cut_guards_and_input(); native_cleanup_history(); native_vertex_cleanup_history();
+        native_commands_and_guards(); native_history_menus_and_search(); native_cut_history_and_preview(); native_cut_guards_and_input(); native_cleanup_history(); native_vertex_cleanup_history(); native_face_tool_cancel_keeps_legacy_state();
 #endif
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     std::cout<<"Cage selection, cut/slide, dissolve and cleanup regression checks passed\n";

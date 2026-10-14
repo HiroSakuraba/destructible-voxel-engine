@@ -711,6 +711,53 @@ std::optional<SubdivisionSettings> remap_compacted_cage(const CookedPolygonAsset
     return result;
 }
 
+
+std::optional<SubdivisionSettings> remap_cleanup_cage(const CookedPolygonAsset& before,const CookedPolygonAsset& after,
+    const SubdivisionSettings& settings,PolygonTopologyLineage& lineage,std::string* error) {
+    const auto fail=[&](std::string message)->std::optional<SubdivisionSettings>{if(error)*error=std::move(message);return {};};
+    if(error)error->clear();auto initial=settings;initial.level=0;
+    if(auto valid=evaluate_subdivision(before,initial);!valid.mesh)return fail(valid.error);
+    const auto groups=subdivision_control_face_triangles(before,&settings);
+    if(groups.empty())return fail("Cleanup requires resolvable saved control faces");
+    auto result=settings;result.controlFaces.clear();result.edgeCreases.clear();
+    std::vector<std::set<std::uint32_t>> mapped;
+    for(const auto& group:groups) {
+        std::set<std::uint32_t> descendants;
+        for(auto triangle:group) {
+            auto at=lineage.triangleDescendants.find(triangle);
+            if(at==lineage.triangleDescendants.end()||at->second.empty())return fail("Control triangle has no cleanup lineage");
+            descendants.insert(at->second.begin(),at->second.end());
+        }
+        mapped.push_back(std::move(descendants));
+    }
+    // Triangle pairs that dissolve to one triangle share the same new face record.
+    std::set<std::uint32_t> assigned;
+    std::map<std::set<std::uint32_t>,std::uint32_t> savedGroups;
+    for(std::uint32_t old=0;old<mapped.size();++old) {
+        if(auto existing=savedGroups.find(mapped[old]);existing!=savedGroups.end()) {
+            lineage.controlFaceDescendants[old]={existing->second};continue;
+        }
+        std::vector<std::uint32_t> record;
+        for(auto triangle:mapped[old]) {
+            if(!assigned.insert(triangle).second)return fail("Cleanup would split overlapping saved control faces");
+            for(unsigned j=0;j<3;++j)record.push_back(after.indices[triangle*3+j]);
+        }
+        lineage.controlFaceDescendants[old]={std::uint32_t(result.controlFaces.size())};
+        savedGroups.emplace(mapped[old],std::uint32_t(result.controlFaces.size()));
+        result.controlFaces.push_back(std::move(record));
+    }
+    const auto edges=subdivision_control_edges(after,&result);
+    for(const auto& [edge,strength]:settings.edgeCreases) {
+        auto at=lineage.edgeDescendants.find(edge);
+        if(at==lineage.edgeDescendants.end()||at->second.size()!=1||!edges.contains(*at->second.begin()))return fail("Cleanup would retire an authored crease");
+        const auto next=*at->second.begin();
+        if(auto prior=result.edgeCreases.find(next);prior!=result.edgeCreases.end()&&prior->second!=strength)return fail("Merge would combine creases with different strengths");
+        result.edgeCreases[next]=strength;
+    }
+    if(auto valid=evaluate_subdivision(after,result);!valid.mesh)return fail(valid.error);
+    return result;
+}
+
 void freeze_subdivision_topology(const CookedPolygonAsset& mesh,SubdivisionSettings& settings) {
     if (!settings.controlFaces.empty()) return;
     for (const auto& face : subdivision_control_face_triangles(mesh)) {

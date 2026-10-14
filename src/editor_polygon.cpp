@@ -340,6 +340,192 @@ PolygonCleanupResult compact_polygon_vertices(const CookedPolygonAsset& source,c
     return result;
 }
 
+
+namespace {
+// Geometric manifold check includes disconnected vertex fans, not only edge incidence.
+bool cleanup_topology(const CookedPolygonAsset& mesh) {
+    const auto canon=canonical(mesh);
+    std::map<std::uint64_t,std::vector<std::pair<std::uint32_t,bool>>> edges;
+    std::map<std::uint32_t,std::set<std::uint32_t>> incident;
+    std::set<std::array<std::uint32_t,3>> triangles;
+    for(std::uint32_t f=0;f<mesh.indices.size()/3;++f) {
+        std::array<std::uint32_t,3> v;
+        for(unsigned j=0;j<3;++j) {v[j]=canon[mesh.indices[f*3+j]];incident[v[j]].insert(f);}
+        if(v[0]==v[1]||v[1]==v[2]||v[2]==v[0]) return false;
+        auto sorted=v;std::sort(sorted.begin(),sorted.end());if(!triangles.insert(sorted).second)return false;
+        for(unsigned j=0;j<3;++j) {
+            auto a=v[j],b=v[(j+1)%3];auto& list=edges[edge(a,b).key()];
+            list.emplace_back(f,a<b);
+            if(list.size()>2 || (list.size()==2&&list[0].second==list[1].second))return false;
+        }
+    }
+    std::map<std::uint32_t,std::map<std::uint32_t,std::set<std::uint32_t>>> fans;
+    std::map<std::uint32_t,unsigned> boundary;
+    for(const auto& [key,list]:edges)for(auto v:{std::uint32_t(key>>32U),std::uint32_t(key)}) {
+        if(list.size()==1)++boundary[v];
+        else {fans[v][list[0].first].insert(list[1].first);fans[v][list[1].first].insert(list[0].first);}
+    }
+    for(const auto& [v,faces]:incident) {
+        if(boundary[v]!=0&&boundary[v]!=2)return false;
+        std::set<std::uint32_t> visited;std::vector<std::uint32_t> todo{*faces.begin()};
+        while(!todo.empty()) {auto f=todo.back();todo.pop_back();if(!visited.insert(f).second)continue;
+            for(auto next:fans[v][f])todo.push_back(next);}
+        if(visited.size()!=faces.size())return false;
+    }
+    return true;
+}
+bool cleanup_source(const CookedPolygonAsset& source,const PolygonSelection& selection,std::string& error) {
+    if(source.vertices.size()>100'000||source.indices.size()>150'000)error="Cleanup exceeds 100000 attributes / 50000 triangles";
+    else if(const auto valid=validate_polygon_asset(source);!valid)error=valid.message;
+    else if(selection.mode!=PolygonSelectionMode::Vertex||selection.components.empty()||!polygon_selection_valid(source,selection))
+        error="Select valid mesh vertices first";
+    else if(selection.components.size()>2048)error="Cleanup exceeds 2048 selected geometric vertices";
+    else if(!cleanup_topology(source))error="Cleanup requires a consistently wound manifold mesh";
+    return error.empty();
+}
+// cornerOrigins and triangleOrigins record provenance before array compaction.
+PolygonCleanupResult finish_cleanup(const CookedPolygonAsset& source,CookedPolygonAsset mesh,
+    const PolygonSelection& selection,const std::vector<std::uint32_t>& cornerOrigins,
+    const std::vector<std::set<std::uint32_t>>& triangleOrigins) {
+    PolygonCleanupResult result;result.polygon={mesh,selection,{}};
+    auto& output=result.polygon.mesh;output.vertices.clear();
+    std::set<std::uint32_t> used(mesh.indices.begin(),mesh.indices.end());
+    for(auto old:used) {result.lineage.vertexSurvivors[old]=std::uint32_t(output.vertices.size());output.vertices.push_back(mesh.vertices[old]);}
+    result.removedVertices=source.vertices.size()-output.vertices.size();
+    for(auto& i:output.indices)i=result.lineage.vertexSurvivors.at(i);
+    const auto beforeCanonical=canonical(source),afterCanonical=canonical(output);
+    std::map<std::uint32_t,std::uint32_t> geometric;
+    for(const auto& [old,next]:result.lineage.vertexSurvivors)geometric.emplace(beforeCanonical[old],afterCanonical[next]);
+    const auto allowed=polygon_all_components(output,PolygonSelectionMode::Edge);
+    for(auto old:polygon_all_components(source,PolygonSelectionMode::Edge)) {
+        auto& descendants=result.lineage.edgeDescendants[old];
+        const auto a=geometric.find(std::uint32_t(old>>32U)),b=geometric.find(std::uint32_t(old));
+        if(a!=geometric.end()&&b!=geometric.end()&&a->second!=b->second) {
+            auto key=edge(a->second,b->second).key();if(allowed.contains(key))descendants.insert(key);
+        }
+    }
+    for(std::uint32_t i=0;i<source.indices.size();++i)result.lineage.cornerDescendants[i];
+    for(std::uint32_t i=0;i<cornerOrigins.size();++i)result.lineage.cornerDescendants[cornerOrigins[i]].insert(i);
+    for(std::uint32_t i=0;i<source.indices.size()/3;++i)result.lineage.triangleDescendants[i];
+    for(std::uint32_t i=0;i<triangleOrigins.size();++i)for(auto old:triangleOrigins[i])result.lineage.triangleDescendants[old].insert(i);
+    result.polygon.selection.components.clear();
+    for(auto old:selection.components)if(auto at=geometric.find(std::uint32_t(old));at!=geometric.end())result.polygon.selection.components.insert(at->second);
+    // Preserve surviving normals, UV channels, colors and tangents exactly.
+    output.bounds.minimum=output.bounds.maximum=output.vertices.front().position;
+    for(const auto& v:output.vertices) {
+        auto p=v.position;auto& b=output.bounds;
+        b.minimum={(std::min)(b.minimum.x,p.x),(std::min)(b.minimum.y,p.y),(std::min)(b.minimum.z,p.z)};
+        b.maximum={(std::max)(b.maximum.x,p.x),(std::max)(b.maximum.y,p.y),(std::max)(b.maximum.z,p.z)};
+    }
+    output.contentHash=polygon_asset_content_hash(output);
+    if(auto valid=validate_polygon_asset(output);!valid)result.polygon.error=valid.message;
+    else if(!cleanup_topology(output))result.polygon.error="Cleanup would create duplicate faces, inconsistent winding or nonmanifold topology";
+    return result;
+}
+bool affine_attributes(const PolygonVertex& v,const PolygonVertex& a,const PolygonVertex& b,float t) {
+    const auto close=[&](float x,float y,float z){return std::abs(x-(y+(z-y)*t))<=1e-6F*(std::max)(1.F,(std::max)(std::abs(y),std::abs(z)));};
+    return close(v.texcoord.x,a.texcoord.x,b.texcoord.x)&&close(v.texcoord.y,a.texcoord.y,b.texcoord.y)&&
+        close(v.texcoord1.x,a.texcoord1.x,b.texcoord1.x)&&close(v.texcoord1.y,a.texcoord1.y,b.texcoord1.y)&&
+        close(v.normal.x,a.normal.x,b.normal.x)&&close(v.normal.y,a.normal.y,b.normal.y)&&close(v.normal.z,a.normal.z,b.normal.z)&&
+        close(v.color.x,a.color.x,b.color.x)&&close(v.color.y,a.color.y,b.color.y)&&close(v.color.z,a.color.z,b.color.z)&&close(v.color.w,a.color.w,b.color.w)&&
+        close(v.tangent.x,a.tangent.x,b.tangent.x)&&close(v.tangent.y,a.tangent.y,b.tangent.y)&&close(v.tangent.z,a.tangent.z,b.tangent.z)&&close(v.tangent.w,a.tangent.w,b.tangent.w);
+}
+}
+PolygonCleanupResult merge_polygon_vertices(const CookedPolygonAsset& source,const PolygonSelection& selection,float distance) {
+    PolygonCleanupResult fail;
+    if(!std::isfinite(distance)||distance<=0) {fail.polygon.error="Merge distance must be finite and positive";return fail;}
+    if(!cleanup_source(source,selection,fail.polygon.error))return fail;
+    const auto canon=canonical(source);std::vector<std::uint32_t> anchors;
+    std::map<std::uint32_t,std::uint32_t> target;std::size_t changes=0;
+    // Anchor-based clusters deliberately do not follow transitive chains beyond the radius.
+    for(auto id:selection.components) {
+        auto v=std::uint32_t(id);
+        auto at=std::find_if(anchors.begin(),anchors.end(),[&](auto a){return length(subtract(source.vertices[v].position,source.vertices[a].position))<=distance;});
+        if(at==anchors.end()){anchors.push_back(v);target[v]=v;}else{target[v]=*at;++changes;}
+    }
+    if(!changes){fail.polygon.error="No selected vertices within merge distance";return fail;}
+    auto mesh=source;
+    for(std::uint32_t i=0;i<mesh.vertices.size();++i)if(auto at=target.find(canon[i]);at!=target.end())mesh.vertices[i].position=source.vertices[at->second].position;
+    std::vector<std::uint32_t> origins;std::vector<std::set<std::uint32_t>> triangles;
+    for(std::uint32_t f=0;f<mesh.indices.size()/3;++f) {
+        const auto p=[&](const CookedPolygonAsset& m,unsigned j){return m.vertices[m.indices[f*3+j]].position;};
+        const auto old=cross3(subtract(p(source,1),p(source,0)),subtract(p(source,2),p(source,0)));
+        const auto next=cross3(subtract(p(mesh,1),p(mesh,0)),subtract(p(mesh,2),p(mesh,0)));
+        if(!finite3(next)||length_squared(next)<=length_squared(old)*1e-12F||dot(old,next)<=0) {
+            fail.polygon.error="Merge would collapse or invert a face; reduce the distance or selection";return fail;
+        }
+        for(unsigned j=0;j<3;++j)origins.push_back(f*3+j);triangles.push_back({f});
+    }
+    return finish_cleanup(source,std::move(mesh),selection,origins,triangles);
+}
+PolygonCleanupResult dissolve_polygon_vertices(const CookedPolygonAsset& source,const PolygonSelection& selection,
+    const std::set<std::uint64_t>& protectedEdges) {
+    PolygonCleanupResult fail;if(!cleanup_source(source,selection,fail.polygon.error))return fail;
+    const auto canon=canonical(source);const auto materials=face_materials(source);
+    std::map<std::uint32_t,std::vector<std::uint32_t>> incident;
+    for(std::uint32_t f=0;f<source.indices.size()/3;++f)for(unsigned j=0;j<3;++j)incident[canon[source.indices[f*3+j]]].push_back(f);
+    std::map<std::uint32_t,std::array<std::uint32_t,3>> replacements;
+    std::map<std::uint32_t,std::set<std::uint32_t>> merged;
+    std::set<std::uint32_t> reserved,removed;
+    for(auto id:selection.components) {
+        const auto v=std::uint32_t(id);const auto& faces=incident[v];
+        const auto error=[&](const char* message){fail.polygon.error=message;return fail;};
+        if(faces.size()!=2)return error("Dissolve currently requires a straight boundary vertex in a two-triangle fan");
+        const auto f=faces[0],g=faces[1];
+        if(!reserved.insert(f).second||!reserved.insert(g).second)return error("Selected dissolve fans overlap; dissolve separately");
+        if(materials[f]!=materials[g])return error("Dissolve protects material boundaries");
+        std::map<std::uint32_t,std::uint32_t> attributes;
+        std::map<std::uint64_t,std::pair<std::uint32_t,std::uint32_t>> boundary;
+        for(auto face:faces) {
+            for(unsigned j=0;j<3;++j) {
+                auto a=source.indices[face*3+j],b=source.indices[face*3+(j+1)%3];
+                auto key=edge(canon[a],canon[b]).key();if(boundary.contains(key))boundary.erase(key);else boundary[key]={canon[a],canon[b]};
+                if(auto at=attributes.find(canon[a]);at!=attributes.end()) {
+                    if(!affine_attributes(source.vertices[a],source.vertices[at->second],source.vertices[at->second],0))return error("Dissolve protects attribute discontinuities");
+                }else attributes[canon[a]]=a;
+                if((canon[a]==v||canon[b]==v)&&protectedEdges.contains(key))return error("Dissolve protects seams and creases incident to the vertex");
+            }
+        }
+        std::optional<std::uint32_t> a,b;
+        for(const auto& [key,e]:boundary) {if(e.second==v)a=e.first;if(e.first==v)b=e.second;}
+        if(!a||!b)return error("Dissolve supports boundary vertices only");
+        const auto pa=source.vertices[*a].position,pb=source.vertices[*b].position,pv=source.vertices[v].position;
+        const auto ab=subtract(pb,pa);const auto len=length_squared(ab);const auto t=dot(subtract(pv,pa),ab)/len;
+        if(!(len>0&&t>0&&t<1)||length(subtract(pv,add(pa,multiply(ab,t))))>std::sqrt(len)*1e-6F)
+            return error("Dissolve requires a straight boundary without changing its shape");
+        if(!affine_attributes(source.vertices[attributes.at(v)],source.vertices[attributes.at(*a)],source.vertices[attributes.at(*b)],t))
+            return error("Dissolve would change interpolated UVs, normals, colors or tangents");
+        // Boundary after retirement is the oriented triangle a -> b -> c -> a.
+        std::optional<std::uint32_t> c;
+        for(const auto& [key,e]:boundary)if(e.first==*b&&e.second!=v)c=e.second;
+        if(!c||!boundary.contains(edge(*c,*a).key()))return error("Dissolve fan has unsupported topology");
+        replacements[f]={attributes.at(*a),attributes.at(*b),attributes.at(*c)};merged[f]={f,g};removed.insert(g);
+    }
+    auto mesh=source;mesh.indices.clear();std::vector<std::uint32_t> newMaterials,origins;
+    std::vector<std::set<std::uint32_t>> triangles;
+    for(std::uint32_t f=0;f<source.indices.size()/3;++f) {
+        if(removed.contains(f))continue;
+        if(auto at=replacements.find(f);at!=replacements.end()) {
+            mesh.indices.insert(mesh.indices.end(),at->second.begin(),at->second.end());triangles.push_back(merged.at(f));
+            for(auto index:at->second) {
+                auto origin=std::uint32_t(source.indices.size());
+                for(auto old:merged.at(f))for(unsigned j=0;j<3;++j)if(source.indices[old*3+j]==index)origin=(std::min)(origin,old*3+j);
+                origins.push_back(origin);
+            }
+        }else {for(unsigned j=0;j<3;++j){mesh.indices.push_back(source.indices[f*3+j]);origins.push_back(f*3+j);}triangles.push_back({f});}
+        newMaterials.push_back(materials[f]);
+    }
+    submeshes(mesh,newMaterials);
+    auto result=finish_cleanup(source,std::move(mesh),selection,origins,triangles);
+    // Surviving corners from both fan triangles inherit the single output corner.
+    for(const auto& [f,oldFaces]:merged) {
+        const auto next=*result.lineage.triangleDescendants.at(f).begin();
+        for(auto old:oldFaces)for(unsigned j=0;j<3;++j)for(unsigned k=0;k<3;++k)
+            if(canon[source.indices[old*3+j]]==canon[source.indices[origins[next*3+k]]])result.lineage.cornerDescendants[old*3+j].insert(next*3+k);
+    }
+    return result;
+}
+
 PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSelection& selection,
                                PolygonEdit operation,const PolygonEditSettings& settings) {
     PolygonEditResult result{source,selection,{}}; auto& mesh=result.mesh;

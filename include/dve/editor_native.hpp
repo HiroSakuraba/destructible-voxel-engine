@@ -1136,9 +1136,11 @@ private:
     bool polygonPreviewValid_{};
     bool polygonLoopCutPreview_{},polygonLoopCutDragging_{};
     bool polygonDissolvePreview_{};
+    bool polygonVertexDissolvePreview_{},polygonMergePreview_{};
+    bool begin_polygon_cleanup(bool merge);
     int polygonLoopCutStartX_{};
     float polygonLoopCutStartFraction_{.5F};
-    std::optional<std::string> polygonLoopCutUvRecord_;
+    std::optional<std::string> polygonPreviewUvRecord_;
     bool begin_polygon_loop_cut();
     bool begin_polygon_dissolve();
     bool clean_unused_polygon_vertices();

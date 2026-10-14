@@ -708,7 +708,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"subdiv.bevel_edges","Subdivision","Bevel Cage Edges: Options (Convex)",""},
         {"subdiv.chamfer_edges","Subdivision","Chamfer Cage Edges (Convex)",""},
         {"subdiv.fillet_edges","Subdivision","Rounded Fillet Cage Edges (Convex)",""},
-        {"subdiv.weld","Subdivision","Weld Cage Vertices",""},
+        {"subdiv.weld","Subdivision","Merge Cage Vertices by Distance",""},
+        {"subdiv.dissolve_vertices","Subdivision","Dissolve Redundant Cage Vertices",""},
         {"subdiv.split_edges","Subdivision","Split Cage Corners",""},
         {"subdiv.subdivide_cage","Subdivision","Refine Selected Cage Faces",""},
         {"subdiv.bridge","Subdivision","Bridge Cage Boundaries",""},
@@ -769,7 +770,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.uv_toggle_pin","Polygon","Toggle Saved UV Pins",""},
         {"mesh.uv_reset_flags","Polygon","Reset Saved UV Seams and Pins",""},
         {"polygon.assign_material","Polygon","Assign Active Material to Faces",""},
-        {"polygon.weld","Polygon","Weld by Distance",""},
+        {"polygon.weld","Polygon","Merge Vertices by Distance",""},
+        {"polygon.dissolve_vertices","Polygon","Dissolve Redundant Vertices",""},
         {"polygon.select_shell","Polygon","Select Connected Components",""},
         {"polygon.select_loop","Polygon","Select Cage Edge Loops",""},
         {"polygon.select_ring","Polygon","Select Cage Edge Rings",""},
@@ -957,6 +959,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("subdiv.select_loop","Subdivision Selection",38,false);
     configure("subdiv.select_ring","Subdivision Selection",38,false);
     configure("subdiv.loop_cut","Subdivision Modeling",43,false);
+    configure("subdiv.dissolve_vertices","Subdivision Modeling",44,false);
+    configure("polygon.dissolve_vertices","Mesh Editing",80,false);
     configure("subdiv.dissolve_edges","Subdivision Modeling",44,false);
     configure("subdiv.clean_unused","Subdivision Modeling",45,false);
     configure("polygon.dissolve_edges","Mesh Editing",80,false);
@@ -1154,7 +1158,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("subdiv.inset","Inset Control Faces through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.bevel","Bevel Control Faces through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.bevel_edges","Bevel Cage Edges (Convex) through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
-    describe("subdiv.weld","Weld Cage Vertices through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("polygon.weld","Preview merging selected vertices to existing anchors within a mesh-space distance; retains seam attributes and refuses collapsed or nonmanifold faces.",{"merge","weld","distance","cleanup"});
+    describe("polygon.dissolve_vertices","Preview removing straight boundary vertices in disjoint two-triangle fans; protects seams, creases and interpolated attributes.",{"dissolve","vertex","cleanup"});
+    describe("subdiv.dissolve_vertices","Dissolve redundant boundary vertices with explicit control-face and crease mappings.",{"dissolve","subdivision","cleanup"});
+    describe("subdiv.weld","Preview merging selected cage vertices by distance while preserving control faces, crease strengths and UV flags.",{"subdivision","subdiv","cage"});
     describe("subdiv.split_edges","Split Cage Edges through the shared control-cage topology workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.subdivide_cage","Refine Selected Cage Faces through the shared control-cage topology workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.bridge","Bridge Cage Boundaries through the shared control-cage topology workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});

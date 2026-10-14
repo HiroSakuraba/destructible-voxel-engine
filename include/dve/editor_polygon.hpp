@@ -46,6 +46,7 @@ struct PolygonTopologyLineage {
     std::map<std::uint64_t,std::set<std::uint64_t>> edgeDescendants;
     std::map<std::uint32_t,std::set<std::uint32_t>> cornerDescendants;
     std::map<std::uint32_t,std::vector<std::uint32_t>> controlFaceDescendants;
+    std::map<std::uint32_t,std::set<std::uint32_t>> triangleDescendants;
 };
 struct PolygonCleanupResult {
     PolygonEditResult polygon;
@@ -56,6 +57,12 @@ struct PolygonCleanupResult {
 // Removes only unreferenced attribute vertices. Triangle/corner order and surviving
 // attributes remain exact; seam copies used by triangles are never welded together.
 [[nodiscard]] PolygonCleanupResult compact_polygon_vertices(const CookedPolygonAsset&,const PolygonSelection&);
+// Conservative boundary dissolve: two-triangle fans, straight boundary and affine attributes.
+[[nodiscard]] PolygonCleanupResult dissolve_polygon_vertices(const CookedPolygonAsset&,const PolygonSelection&,
+    const std::set<std::uint64_t>& protectedEdges = {});
+// Selected geometric vertices snap to deterministic existing anchors. Attribute seam copies
+// remain separate. Refuses face collapse, inversion and nonmanifold output; never drops faces.
+[[nodiscard]] PolygonCleanupResult merge_polygon_vertices(const CookedPolygonAsset&,const PolygonSelection&,float distance);
 [[nodiscard]] CookedPolygonAsset make_editor_polygon_cube(EditorObjectId id,float size=1);
 [[nodiscard]] CookedPolygonAsset make_editor_polygon_plane(EditorObjectId id,float size=4);
 void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);

@@ -1136,6 +1136,7 @@ private:
     bool polygonPreviewValid_{};
     bool polygonLoopCutPreview_{},polygonLoopCutDragging_{};
     bool polygonDissolvePreview_{};
+    bool polygonFaceAuthoringPreview_{};
     bool polygonVertexDissolvePreview_{},polygonMergePreview_{};
     bool begin_polygon_cleanup(bool merge);
     int polygonLoopCutStartX_{};

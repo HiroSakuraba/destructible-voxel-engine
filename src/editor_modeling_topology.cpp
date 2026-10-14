@@ -134,6 +134,14 @@ ModelingChange advance_modeling_topology(const CookedPolygonAsset& before,const 
         for(auto label:lineage.afterVertexGroups)if(!groups.contains(label)){ModelingId chosen=0;for(auto id:parents[label])if(taken.insert(id).second){chosen=id;break;}groups[label]=chosen?chosen:allocate(topo.nextId);}
         for(auto label:lineage.afterVertexGroups)topo.vertices.push_back(groups.at(label));
         for(auto& [old,next]:lineage.vertexSurvivors)result.descendants[source.vertices[old]].insert(topo.vertices[next]);
+        for(const auto& [old,next]:lineage.geometricVertexCopies)for(auto index:next) {
+            if(old>=source.vertices.size()||index>=topo.vertices.size())throw std::runtime_error("Invalid geometric copy lineage");
+            result.descendants[source.vertices[old]].insert(topo.vertices[index]);
+        }
+        for(const auto& [old,next]:lineage.attributeCopies)for(auto index:next) {
+            if(old>=source.attributes.size()||index>=topo.attributes.size())throw std::runtime_error("Invalid attribute copy lineage");
+            result.descendants[source.attributes[old]].insert(topo.attributes[index]);
+        }
         topo.corners=assign(source.corners,lineage.cornerDescendants,after.indices.size());
         topo.triangles=assign(source.triangles,lineage.triangleDescendants,after.indices.size()/3);
         const auto faces=face_groups(after,settings);std::map<std::uint32_t,std::set<std::uint32_t>> faceMap;
@@ -142,7 +150,7 @@ ModelingChange advance_modeling_topology(const CookedPolygonAsset& before,const 
         for(auto& face:faces){std::vector<ModelingId> ids;for(auto t:face)ids.push_back(topo.triangles.at(t));topo.faceTriangles.push_back(std::move(ids));}
         std::map<Pair,std::set<ModelingId>> edgeParents;
         const auto endpoint=[&](std::uint64_t key,const ModelingTopology& t){auto a=std::uint32_t(key>>32U),b=std::uint32_t(key);if(a>=t.vertices.size()||b>=t.vertices.size())throw std::runtime_error("Stale edge lineage");return pair(t.vertices[a],t.vertices[b]);};
-        for(auto& [old,next]:lineage.edgeDescendants){auto at=source.edges.find(endpoint(old,source));if(at==source.edges.end())throw std::runtime_error("Unknown source edge identity");if(next.size()==1)edgeParents[endpoint(*next.begin(),topo)].insert(at->second);}
+        for(auto& [old,next]:lineage.edgeDescendants){auto at=source.edges.find(endpoint(old,source));if(at==source.edges.end())throw std::runtime_error("Unknown source edge identity");for(auto descendant:next) {const auto e=endpoint(descendant,topo);if(next.size()==1||e==at->first)edgeParents[e].insert(at->second);}}
         taken.clear();for(auto e:mesh_edges(after,topo.vertices)){ModelingId chosen=0;for(auto id:edgeParents[e])if(taken.insert(id).second){chosen=id;break;}topo.edges[e]=chosen?chosen:allocate(topo.nextId);}
         for(auto& [old,next]:lineage.edgeDescendants){auto id=source.edges.at(endpoint(old,source));for(auto n:next){auto at=topo.edges.find(endpoint(n,topo));if(at==topo.edges.end())throw std::runtime_error("Missing descendant edge");result.descendants[id].insert(at->second);}}
     }catch(const std::exception& e){return fail(e.what());}

@@ -49,6 +49,7 @@ struct PolygonTopologyLineage {
     std::map<std::uint32_t,std::set<std::uint32_t>> triangleDescendants;
     // Explicit geometric partition of the output attribute array, provided by the operation.
     std::vector<std::uint32_t> afterVertexGroups;
+    std::map<std::uint32_t,std::set<std::uint32_t>> geometricVertexCopies,attributeCopies;
 };
 struct PolygonCleanupResult {
     PolygonEditResult polygon;
@@ -79,7 +80,16 @@ void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
 // Faces connect across shared geometric edges; vertices/edges connect at their endpoints.
 // Shrink removes components adjacent to an unselected component; a full mesh stays selected.
 [[nodiscard]] std::set<std::uint64_t> edit_polygon_selection(const CookedPolygonAsset&,const PolygonSelection&,PolygonSelectionEdit);
-[[nodiscard]] PolygonEditResult edit_polygon(const CookedPolygonAsset&,const PolygonSelection&,PolygonEdit,const PolygonEditSettings& = {});
+[[nodiscard]] PolygonEditResult edit_polygon(const CookedPolygonAsset&,const PolygonSelection&,PolygonEdit,const PolygonEditSettings& = {},PolygonTopologyLineage* = nullptr);
+struct PolygonFaceEditResult {
+    PolygonEditResult polygon;
+    PolygonTopologyLineage lineage;
+    std::optional<SubdivisionSettings> subdivision;
+    [[nodiscard]] explicit operator bool() const noexcept {return bool(polygon);}
+};
+// Explicit cap/side provenance for Extrude, Inset, face Bevel, UV projection and FlipNormals.
+[[nodiscard]] PolygonFaceEditResult edit_polygon_authored_faces(const CookedPolygonAsset&,const PolygonSelection&,
+    PolygonEdit,const PolygonEditSettings& = {},const SubdivisionSettings* = nullptr);
 // Cuts interpolate vertex attributes. Caps support simple contours without nested holes.
 [[nodiscard]] PolygonEditResult slice_polygon(const CookedPolygonAsset&,Float3 point,Float3 normal,bool front,bool cap=true);
 [[nodiscard]] PolygonEditResult join_editor_polygons(const EditorDocument&,EditorObjectId primary,std::span<const EditorObjectId>, bool evaluated = false);

@@ -425,7 +425,8 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         const bool hasSubdivisions=std::any_of(objects_.begin(),objects_.end(),
             [](const auto& entry) {return entry.second.subdivision.has_value();});
         const bool hasModeling=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
-        output << "DVE_EDITOR_SCENE " << (hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
+        const bool hasRetiredModeling=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return !entry.second.modelingTopology&&entry.second.modelingNextId>1;});
+        output << "DVE_EDITOR_SCENE " << (hasRetiredModeling ? 12 : hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -500,7 +501,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             }
         }
         output << "next_prefab_instance " << nextPrefabInstanceId_ << "\n";
-        if (hasVoxelPalettes || hasSubdivisions || hasModeling) {
+        if (hasVoxelPalettes || hasSubdivisions || hasModeling || hasRetiredModeling) {
             const auto count = std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
             output << "voxel_palettes " << count << "\n";
@@ -513,7 +514,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output << "\n";
             }
         }
-        if (hasSubdivisions || hasModeling) {
+        if (hasSubdivisions || hasModeling || hasRetiredModeling) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) {return entry.second.subdivision.has_value();});
             output << "subdivisions " << count << "\n";
@@ -531,13 +532,18 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                     output << "edge_crease " << edge << ' ' << strength << "\n";
             }
         }
-        if(hasModeling) {
+        if(hasModeling || hasRetiredModeling) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
             output<<"modeling_topologies "<<count<<"\n";
             for(const auto& [id,object]:objects_)if(object.modelingTopology) {
                 auto topology=*object.modelingTopology;topology.nextId=(std::max)(topology.nextId,object.modelingNextId);
                 output<<"modeling_object "<<id<<"\n";write_modeling_topology(output,topology);
             }
+        }
+        if(hasRetiredModeling) {
+            const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return !entry.second.modelingTopology&&entry.second.modelingNextId>1;});
+            output<<"modeling_floors "<<count<<"\n";
+            for(const auto& [id,object]:objects_)if(!object.modelingTopology&&object.modelingNextId>1)output<<"modeling_floor "<<id<<' '<<object.modelingNextId<<"\n";
         }
         output.flush();
         if (!output) throw std::runtime_error("failed to write scene manifest");
@@ -561,7 +567,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -788,6 +794,15 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                 std::string reason;auto topology=read_modeling_topology(input,&reason);
                 if(!topology||!validate_modeling_topology(*object->polygon,object->subdivision?&*object->subdivision:nullptr,*topology,&reason))throw std::runtime_error(reason);
                 object->modelingNextId=topology->nextId;object->modelingTopology=std::move(topology);
+            }
+        }
+        if(version>=12) {
+            std::size_t count{};input>>key>>count;if(!input||key!="modeling_floors"||count>document.objects_.size())throw std::runtime_error("Invalid retired modeling namespace count");
+            std::set<EditorObjectId> seen;
+            for(std::size_t i=0;i<count;++i) {
+                EditorObjectId id{};ModelingId floor{};input>>key>>id>>floor;auto* object=document.find_object(id);
+                if(!input||key!="modeling_floor"||!object||object->modelingTopology||floor<=1||!seen.insert(id).second)throw std::runtime_error("Invalid retired modeling namespace record");
+                object->modelingNextId=floor;
             }
         }
         document.path_ = manifestPath;

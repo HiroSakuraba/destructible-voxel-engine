@@ -528,7 +528,7 @@ PolygonCleanupResult dissolve_polygon_vertices(const CookedPolygonAsset& source,
 }
 
 PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSelection& selection,
-                               PolygonEdit operation,const PolygonEditSettings& settings) {
+                               PolygonEdit operation,const PolygonEditSettings& settings,PolygonTopologyLineage* lineage) {
     PolygonEditResult result{source,selection,{}}; auto& mesh=result.mesh;
     if(!validate_polygon_asset(source)||!polygon_selection_valid(source,selection)) {
         result.error="Mesh or component selection is invalid"; return result;
@@ -538,6 +538,12 @@ PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSel
     }
     if(selection.components.empty()&&operation!=PolygonEdit::RecalculateNormals) {
         result.error="Select mesh components first"; return result;
+    }
+    if(lineage) {
+        if(operation!=PolygonEdit::Extrude&&operation!=PolygonEdit::Inset&&operation!=PolygonEdit::Bevel&&operation!=PolygonEdit::ProjectUV&&operation!=PolygonEdit::FlipNormals) {
+            result.error="No explicit lineage for this operation";return result;
+        }
+        *lineage=identity_polygon_lineage(source);
     }
     const auto selected=polygon_selected_vertices(source,selection);
     const auto faces=polygon_selected_faces(source,selection);
@@ -621,22 +627,41 @@ PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSel
         if(mesh.vertices.size()+direct.size()>settings.maximumVertices||mesh.indices.size()+boundary.size()*6>settings.maximumIndices) {
             result.error="Polygon edit exceeds the geometry budget"; return result;
         }
-        std::map<std::uint32_t,std::uint32_t> remap;
+        std::map<std::uint32_t,std::uint32_t> remap,topGroups;
         for(const auto vertex:direct) {
             auto next=source.vertices[vertex]; next.position=add(center,multiply(subtract(next.position,center),1-inset));
             if(operation!=PolygonEdit::Inset) next.position=add(next.position,multiply(normalize(normalsAt[canon[vertex]]),settings.amount));
-            remap[vertex]=std::uint32_t(mesh.vertices.size()); mesh.vertices.push_back(next);
+            const auto index=std::uint32_t(mesh.vertices.size());remap[vertex]=index;mesh.vertices.push_back(next);
+            if(lineage) {
+                const auto group=topGroups.emplace(canon[vertex],index).first->second;
+                lineage->afterVertexGroups.push_back(group);
+                lineage->geometricVertexCopies[canon[vertex]].insert(index);
+                lineage->attributeCopies[vertex].insert(index);
+            }
         }
         for(const auto face:faces) for(int j=0;j<3;++j)
             mesh.indices[std::size_t(face)*3+std::size_t(j)]=remap.at(source.indices[std::size_t(face)*3+std::size_t(j)]);
         for(const auto& [key,edges]:boundary) {
-            (void)key; if(edges.size()!=1) continue; const auto [a,b]=edges[0]; const auto mat=materials[*faces.begin()];
+            (void)key; if(edges.size()!=1) continue; const auto [a,b]=edges[0]; const auto mat=materials[atEdge.at(key).front()];
             append_face(mesh,materials,a,b,remap.at(b),mat); append_face(mesh,materials,a,remap.at(b),remap.at(a),mat);
+        }
+        if(lineage) {
+            const auto allowed=polygon_all_components(mesh,PolygonSelectionMode::Edge);
+            for(auto& [old,descendants]:lineage->edgeDescendants) {
+                descendants.clear();if(allowed.contains(old))descendants.insert(old);
+                const auto a=std::uint32_t(old>>32U),b=std::uint32_t(old);
+                if(topGroups.contains(a)&&topGroups.contains(b)) {
+                    const auto next=edge(topGroups.at(a),topGroups.at(b)).key();if(allowed.contains(next))descendants.insert(next);
+                }
+            }
         }
         submeshes(mesh,materials); normals=true;
     } else if(operation==PolygonEdit::RecalculateNormals) normals=true;
     else if(operation==PolygonEdit::FlipNormals) {
-        for(const auto face:faces) std::swap(mesh.indices[std::size_t(face)*3+1],mesh.indices[std::size_t(face)*3+2]);
+        for(const auto face:faces) {
+            std::swap(mesh.indices[std::size_t(face)*3+1],mesh.indices[std::size_t(face)*3+2]);
+            if(lineage) {lineage->cornerDescendants[face*3+1]={face*3+2};lineage->cornerDescendants[face*3+2]={face*3+1};}
+        }
         normals=true;
     } else if(operation==PolygonEdit::ProjectUV) {
         // Detach shared attributes before changing face UVs; geometric seam identity still joins positions.
@@ -649,7 +674,10 @@ PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSel
             uvVertices.clear();
             for(const auto vertex:direct) {
                 auto current=vertex;
-                if(elsewhere.contains(vertex)) { current=std::uint32_t(mesh.vertices.size()); mesh.vertices.push_back(source.vertices[vertex]); }
+                if(elsewhere.contains(vertex)) {
+                    current=std::uint32_t(mesh.vertices.size());mesh.vertices.push_back(source.vertices[vertex]);
+                    if(lineage) {lineage->afterVertexGroups.push_back(lineage->afterVertexGroups.at(vertex));lineage->attributeCopies[vertex].insert(current);}
+                }
                 remap[vertex]=current; uvVertices.insert(current);
             }
             for(const auto face:faces) for(int j=0;j<3;++j)
@@ -688,6 +716,69 @@ PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSel
     }
     refresh_editor_polygon(mesh,normals);
     if(!mesh.indices.empty()) { const auto valid=validate_polygon_asset(mesh); if(!valid) result.error=valid.message; }
+    return result;
+}
+
+PolygonFaceEditResult edit_polygon_authored_faces(const CookedPolygonAsset& source,const PolygonSelection& selection,
+    PolygonEdit operation,const PolygonEditSettings& settings,const SubdivisionSettings* authored) {
+    PolygonFaceEditResult result;
+    const auto fail=[&](std::string error){result.polygon.error=std::move(error);return result;};
+    if(selection.mode!=PolygonSelectionMode::Face||selection.components.empty())return fail("Select authored faces first");
+    if(operation==PolygonEdit::ProjectUV&&settings.uvAxis>2)return fail("UV projection axis must be X, Y or Z");
+    if(source.vertices.size()>100000||source.indices.size()>150000)return fail("Face tool exceeds its modeling budget");
+    if(!validate_polygon_asset(source)||!polygon_selection_valid(source,selection))return fail("Invalid face selection or mesh");
+    if(!cleanup_topology(source))return fail("Face tools require consistently wound manifold input");
+    auto bounded=settings;bounded.maximumVertices=(std::min)(bounded.maximumVertices,std::uint64_t{100000});bounded.maximumIndices=(std::min)(bounded.maximumIndices,std::uint64_t{150000});
+    const auto selected=polygon_selected_faces(source,selection);
+    std::vector<std::vector<std::uint32_t>> groups;
+    if(authored) {
+        auto initial=*authored;initial.level=0;if(const auto valid=evaluate_subdivision(source,initial);!valid.mesh)return fail(valid.error);
+        groups=subdivision_control_face_triangles(source,authored);
+        if(operation!=PolygonEdit::ProjectUV)for(const auto& group:groups) {
+            const auto count=std::count_if(group.begin(),group.end(),[&](auto t){return selected.contains(t);});
+            if(count!=0&&std::size_t(count)!=group.size())return fail("Select whole authored control faces for this operation");
+        }
+    }else for(std::uint32_t t=0;t<source.indices.size()/3;++t)groups.push_back({t});
+    result.polygon=edit_polygon(source,selection,operation,bounded,&result.lineage);if(!result.polygon)return result;
+    auto& mesh=result.polygon.mesh;
+    // Independent authored groups must not collapse to the position-based legacy partition.
+    const auto actual=canonical(mesh);std::map<std::uint32_t,std::uint32_t> forward,back;
+    for(std::size_t i=0;i<actual.size();++i) {
+        auto group=result.lineage.afterVertexGroups.at(i);
+        if(auto [at,added]=forward.emplace(group,actual[i]);!added&&at->second!=actual[i])return fail("Face tool split one geometric group inconsistently");
+        if(auto [at,added]=back.emplace(actual[i],group);!added&&at->second!=group)return fail("Face tool would collapse independent vertices; adjust its value");
+    }
+    for(std::size_t i=0;i<mesh.indices.size();i+=3) {
+        const auto a=mesh.vertices[mesh.indices[i]].position,b=mesh.vertices[mesh.indices[i+1]].position,c=mesh.vertices[mesh.indices[i+2]].position;
+        const auto n=cross3(subtract(b,a),subtract(c,a));const auto scale=(std::max)({length_squared(subtract(b,a)),length_squared(subtract(c,a)),length_squared(subtract(c,b))});
+        if(!finite3(n)||!std::isfinite(scale)||length_squared(n)<=scale*scale*1e-12F)return fail("Face tool produces a degenerate triangle");
+        if(i<source.indices.size()&&operation!=PolygonEdit::FlipNormals&&dot(n,normal3(source,std::uint32_t(i/3)))<=0)return fail("Face tool folds or inverts a cap face");
+    }
+    if(!cleanup_topology(mesh))return fail("Face tool creates invalid winding or nonmanifold connectivity");
+    result.lineage.controlFaceDescendants.clear();
+    SubdivisionSettings updated=authored?*authored:SubdivisionSettings{};updated.controlFaces.clear();updated.edgeCreases.clear();
+    for(std::uint32_t f=0;f<groups.size();++f) {
+        std::vector<std::uint32_t> record;for(auto t:groups[f])for(unsigned j=0;j<3;++j)record.push_back(mesh.indices[t*3+j]);
+        result.lineage.controlFaceDescendants[f]={std::uint32_t(updated.controlFaces.size())};updated.controlFaces.push_back(std::move(record));
+    }
+    // Each emitted side is an explicit quad, rather than relying on subsequent triangle pairing.
+    for(std::size_t i=source.indices.size();i<mesh.indices.size();i+=6) {
+        if(authored)updated.controlFaces.push_back({mesh.indices.begin()+std::ptrdiff_t(i),mesh.indices.begin()+std::ptrdiff_t(i+6)});
+    }
+    if(authored) {
+        const auto edges=subdivision_control_edges(mesh,&updated);
+        for(const auto& [old,strength]:authored->edgeCreases) {
+            const auto at=result.lineage.edgeDescendants.find(old);
+            if(at==result.lineage.edgeDescendants.end()||at->second.empty())return fail("Face tool cannot preserve an authored crease");
+            for(auto next:at->second) {
+                if(!edges.contains(next))return fail("Face tool would move a crease to a hidden diagonal");
+                if(auto prior=updated.edgeCreases.find(next);prior!=updated.edgeCreases.end()&&prior->second!=strength)return fail("Face tool combines incompatible crease strengths");
+                updated.edgeCreases[next]=strength;
+            }
+        }
+        if(const auto valid=evaluate_subdivision(mesh,updated);!valid.mesh)return fail(valid.error);
+        result.subdivision=std::move(updated);
+    }
     return result;
 }
 

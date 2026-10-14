@@ -217,20 +217,27 @@ bool NativeEditorController::begin_polygon_preview(PolygonEdit operation) {
     auto* object = workspace_.document().find_object(polygonSelection_.object);
     if (workspace_.mode()!=EditorMode::Edit || playSession_.active() || selectionDomain_!=SelectionDomain::Polygons ||
         !editable(object) || polygonSelection_.components.empty()) return false;
-    if ((operation==PolygonEdit::Extrude||operation==PolygonEdit::Inset||operation==PolygonEdit::Bevel||operation==PolygonEdit::ProjectUV) &&
+    if ((operation==PolygonEdit::Extrude||operation==PolygonEdit::Inset||operation==PolygonEdit::Bevel||operation==PolygonEdit::ProjectUV||operation==PolygonEdit::FlipNormals) &&
         polygonSelection_.mode!=PolygonSelectionMode::Face) { set_status("Select triangle faces for this tool",true); return false; }
-    if(object->modelingTopology && operation!=PolygonEdit::ProjectUV) {
-        set_status("This tool cannot preserve persistent element references yet",true);return false;
+    if(workspace_.selection_count()!=1||longJob_||mesh_authoring_dragging()||voxel_authoring_active()||is_isolated_out(object->id)) {
+        set_status("Select one visible unlocked mesh and finish the active edit first",true);return false;
     }
     if (gizmoDragging_) finish_gizmo_drag(true);
+    // Attribute-only edits do not force legacy meshes into a new identity namespace.
+    if(object->modelingTopology || (operation!=PolygonEdit::ProjectUV&&operation!=PolygonEdit::FlipNormals)) {
+        if(!begin_modeling_identity_preview(*object))return false;
+    }else {polygonPreviewModelingMigrated_=false;polygonPreviewModelingNextIdBefore_.reset();}
     close_previews_for_voxel_edit("polygon tool preview");
+    polygonFaceAuthoringPreview_=true;
     polygonPreviewModelingBefore_=object->modelingTopology;polygonPreviewModelingAfter_.reset();
     polygonPreviewBefore_ = *object->polygon; polygonPreviewSubdivision_=object->subdivision;
     polygonPreviewSelection_ = polygonSelection_;
     polygonPreviewOperation_ = operation;
     polygonPreviewSettings_ = {};
     polygonPreviewTyped_.clear();
-    update_polygon_preview(); return true;
+    update_polygon_preview();
+    if(!polygonPreviewValid_){const auto reason=status_.text;cancel_polygon_preview();set_status(reason,true);refresh_menu_state();return false;}
+    return true;
 }
 
 bool NativeEditorController::clean_unused_polygon_vertices() {
@@ -288,13 +295,14 @@ bool NativeEditorController::clean_unused_polygon_vertices() {
 
 bool NativeEditorController::begin_modeling_identity_preview(EditorObject& object) {
     if(object.prefabLink) {set_status("Edit the prefab source or detach this instance before changing topology",true);return false;}
-    std::string error;const bool migrated=!object.modelingTopology.has_value();
-    if(!ensure_modeling_topology(object,&error)) {set_status(error,true);return false;}
+    std::string error;const bool migrated=!object.modelingTopology.has_value();const auto nextIdBefore=object.modelingNextId;
+    if(!ensure_modeling_topology(object,&error)) {if(migrated)object.modelingTopology.reset();object.modelingNextId=nextIdBefore;set_status(error,true);return false;}
     if(!modeling_matches_legacy_partition(*object.polygon,*object.modelingTopology)) {
         if(migrated)object.modelingTopology.reset();
+        object.modelingNextId=nextIdBefore;
         set_status("This tool does not support coincident independent geometric vertices yet",true);return false;
     }
-    polygonPreviewModelingMigrated_=migrated;
+    polygonPreviewModelingMigrated_=migrated;polygonPreviewModelingNextIdBefore_=nextIdBefore;
     polygonPreviewModelingBefore_=object.modelingTopology;polygonPreviewModelingAfter_.reset();
     polygonPreviewModelingFloor_=(std::max)(object.modelingNextId,object.modelingTopology->nextId);return true;
 }
@@ -506,6 +514,17 @@ void NativeEditorController::update_polygon_preview() {
         if (polygonPreviewOperation_==PolygonEdit::Inset) settings.inset=value;
         else settings.amount=value;
     }
+    if(polygonFaceAuthoringPreview_) {
+        polygonPreviewValid_=false;polygonPreviewUvRecord_.reset();
+        const auto edited=edit_polygon_authored_faces(*polygonPreviewBefore_,polygonPreviewSelection_,polygonPreviewOperation_,settings,
+            polygonPreviewSubdivision_?&*polygonPreviewSubdivision_:nullptr);
+        if(!edited){set_status(edited.polygon.error,true);refresh_menu_state();return;}
+        std::string error;const auto record=remap_polygon_uv_authoring_record(*object,edited.polygon.mesh,edited.lineage,&error);
+        if(!record){set_status(error,true);refresh_menu_state();return;}
+        if(polygonPreviewModelingBefore_&&!update_modeling_identity_preview(edited.polygon.mesh,edited.subdivision,edited.lineage)){refresh_menu_state();return;}
+        *object->polygon=edited.polygon.mesh;object->subdivision=edited.subdivision;object->modelingTopology=polygonPreviewModelingAfter_;object->subdivisionCache.reset();
+        polygonSelection_=edited.polygon.selection;polygonPreviewUvRecord_=record;polygonPreviewSettings_=settings;polygonPreviewValid_=true;refresh_menu_state();return;
+    }
     // Face bevel exposes both height (typed) and inset (arrow keys).
     const auto edited=edit_polygon(*polygonPreviewBefore_,polygonPreviewSelection_,polygonPreviewOperation_,settings);
     polygonPreviewValid_=bool(edited);
@@ -518,12 +537,16 @@ void NativeEditorController::cancel_polygon_preview() {
     if (!polygonPreviewBefore_) return;
     if (auto* object=workspace_.document().find_object(polygonPreviewSelection_.object)) {object->polygon=*polygonPreviewBefore_;object->subdivision=polygonPreviewSubdivision_;
         // A preview-time migration is discarded so Cancel and Undo restore the exact ID-less state.
-        object->modelingTopology=polygonPreviewModelingMigrated_?std::nullopt:polygonPreviewModelingBefore_;object->subdivisionCache.reset();}
-    polygonPreviewModelingMigrated_=false;
+        object->modelingTopology=polygonPreviewModelingMigrated_?std::nullopt:polygonPreviewModelingBefore_;object->subdivisionCache.reset();
+        // A discarded preview-time migration was never committed or saved, so it must not leave a retired
+        // floor behind (that would silently switch an untouched legacy scene to format 12). Identified
+        // meshes keep the raised floor, matching #127's no-reuse rule for cancelled previews.
+        if(polygonPreviewModelingMigrated_&&polygonPreviewModelingNextIdBefore_)object->modelingNextId=*polygonPreviewModelingNextIdBefore_;}
+    polygonPreviewModelingMigrated_=false;polygonPreviewModelingNextIdBefore_.reset();
     polygonSelection_=polygonPreviewSelection_;
     polygonPreviewBefore_.reset(); polygonPreviewSubdivision_.reset(); polygonPreviewTyped_.clear(); polygonPreviewValid_=false;
     polygonLoopCutPreview_=false; polygonLoopCutDragging_=false;
-    polygonDissolvePreview_=false;polygonVertexDissolvePreview_=false;polygonMergePreview_=false;
+    polygonDissolvePreview_=false;polygonFaceAuthoringPreview_=false;polygonVertexDissolvePreview_=false;polygonMergePreview_=false;
     polygonPreviewUvRecord_.reset();polygonPreviewModelingBefore_.reset();polygonPreviewModelingAfter_.reset();
     polygonSlicePreview_=false; polygonSliceBack_.reset();
 }
@@ -531,7 +554,7 @@ void NativeEditorController::cancel_polygon_preview() {
 bool NativeEditorController::commit_polygon_preview() {
     if (!polygonPreviewBefore_ || !polygonPreviewValid_) { set_status("Fix the polygon preview before applying it",true); return false; }
     // Revalidate saved flags at Apply, including inspector mutations since the last drag.
-    if (polygonLoopCutPreview_ || polygonDissolvePreview_ || polygonVertexDissolvePreview_ || polygonMergePreview_) {
+    if (polygonLoopCutPreview_ || polygonDissolvePreview_ || polygonVertexDissolvePreview_ || polygonMergePreview_ || polygonFaceAuthoringPreview_) {
         update_polygon_preview();
         if (!polygonPreviewBefore_ || !polygonPreviewValid_) return false;
     }
@@ -540,11 +563,12 @@ bool NativeEditorController::commit_polygon_preview() {
     const bool loopCut=polygonLoopCutPreview_;
     const bool dissolve=polygonDissolvePreview_;
     const bool cleanup=polygonVertexDissolvePreview_||polygonMergePreview_;
+    const bool faceTool=polygonFaceAuthoringPreview_;
     const std::string cleanupLabel=polygonMergePreview_?"Merge vertices by distance":"Dissolve redundant vertices";
     const auto uvRecord=polygonPreviewUvRecord_;
     const auto authoredTopology=polygonPreviewModelingAfter_;
     const Component* uvComponent=nullptr;
-    if (loopCut || dissolve || cleanup) {
+    if (loopCut || dissolve || cleanup || faceTool) {
         // Refuse before cancelling so the user keeps the slid preview to fix and retry.
         if (is_isolated_out(object->id)) {
             set_status("Modeling target is isolated out of view; show it before applying",true); refresh_menu_state(); return false;
@@ -558,14 +582,14 @@ bool NativeEditorController::commit_polygon_preview() {
     if (uvComponent) if (const auto at=uvComponent->properties.find("state");at!=uvComponent->properties.end()) previousUvState=at->second;
     const auto uvComponentId=uvComponent?std::optional{uvComponent->id}:std::nullopt;
     auto mesh=*object->polygon; const auto selection=polygonSelection_;
-    const auto authoredAfter=(loopCut||dissolve||cleanup)?object->subdivision:std::optional<SubdivisionSettings>{};
+    const auto authoredAfter=(loopCut||dissolve||cleanup||faceTool)?object->subdivision:std::optional<SubdivisionSettings>{};
     const bool slice=polygonSlicePreview_; auto back=polygonSliceBack_;
     cancel_polygon_preview();
     const auto before=capture_selection_snapshot();
     auto command=std::make_unique<CompoundCommand>(cleanup?cleanupLabel:slice?"Slice polygon mesh":loopCut?"Loop cut and slide":dissolve?"Dissolve cage edges":"Apply polygon tool");
     if (dissolve) command->add(std::make_unique<SetSubdivisionSettingsCommand>(object->id,*object->subdivision,*authoredAfter,authoredTopology));
     else command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),
-        cleanup?cleanupLabel:slice?"Slice polygon geometry":loopCut?"Loop cut and slide":"Apply polygon tool",0,authoredAfter,!cleanup,authoredTopology));
+        cleanup?cleanupLabel:slice?"Slice polygon geometry":loopCut?"Loop cut and slide":"Apply polygon tool",0,authoredAfter,!cleanup&&!faceTool,authoredTopology));
     if (uvComponentId)
         command->add(std::make_unique<SetComponentPropertyCommand>(object->id,*uvComponentId,"state",
             previousUvState,ComponentValue{*uvRecord},"Preserve modeling UV seams and pins"));
@@ -596,7 +620,7 @@ bool NativeEditorController::handle_polygon_preview_key(std::string_view key) {
     if (!polygonPreviewBefore_) return false;
     if (key=="escape") { cancel_polygon_preview(); refresh_menu_state(); return true; }
     if (key=="return"||key=="enter") { (void)commit_polygon_preview(); return true; }
-    if (polygonDissolvePreview_ || polygonVertexDissolvePreview_) return true;
+    if (polygonDissolvePreview_ || polygonVertexDissolvePreview_ || (polygonFaceAuthoringPreview_&&polygonPreviewOperation_==PolygonEdit::FlipNormals)) return true;
     if (polygonSlicePreview_ && (key=="f"||key=="b"||key=="s"||key=="c"||key=="x"||key=="y"||key=="z")) {
         if (key=="f") polygonSliceOutput_=0; else if (key=="b") polygonSliceOutput_=1; else if (key=="s") polygonSliceOutput_=2;
         else if (key=="c") polygonSliceCap_=!polygonSliceCap_;
@@ -757,7 +781,7 @@ bool NativeEditorController::handle_polygon_action(std::string_view action) {
         set_status(result.success?"Assigned active material to selected faces":result.message,!result.success); return result.success;
     }
     if (action=="polygon.recalculate_normals") return apply_polygon_edit(PolygonEdit::RecalculateNormals);
-    if (action=="polygon.flip_normals") return apply_polygon_edit(PolygonEdit::FlipNormals);
+    if (action=="polygon.flip_normals") return begin_polygon_preview(PolygonEdit::FlipNormals)&&commit_polygon_preview();
     if (selectionDomain_!=SelectionDomain::Polygons) return false;
     prune_polygon_selection();
     const auto* object=workspace_.document().find_object(polygonSelection_.object);

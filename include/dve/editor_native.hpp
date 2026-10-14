@@ -1136,6 +1136,7 @@ private:
     bool polygonPreviewValid_{};
     bool polygonLoopCutPreview_{},polygonLoopCutDragging_{};
     bool polygonDissolvePreview_{};
+    bool polygonFaceAuthoringPreview_{};
     bool polygonVertexDissolvePreview_{},polygonMergePreview_{};
     bool begin_polygon_cleanup(bool merge);
     int polygonLoopCutStartX_{};
@@ -1144,6 +1145,8 @@ private:
     std::optional<ModelingTopology> polygonPreviewModelingBefore_,polygonPreviewModelingAfter_;
     ModelingId polygonPreviewModelingFloor_{1};
     bool polygonPreviewModelingMigrated_{};
+    // Allocation floor before the preview; Cancel/refusal restore it so no unapplied ID is reserved.
+    std::optional<ModelingId> polygonPreviewModelingNextIdBefore_;
     bool begin_modeling_identity_preview(EditorObject&);
     bool update_modeling_identity_preview(const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&,PolygonTopologyLineage);
     bool begin_polygon_loop_cut();

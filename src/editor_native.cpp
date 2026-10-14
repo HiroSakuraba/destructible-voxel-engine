@@ -2091,9 +2091,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
         const bool preview=polygonPreviewBefore_.has_value();
         for (auto id:{"polygon.vertex_mode","polygon.edge_mode","polygon.face_mode","polygon.object_mode","polygon.component_toggle"})
             enabled(id,mesh && !preview,"Select an unlocked polygon mesh in Edit mode first.");
-        for (auto id:{"polygon.extrude","polygon.inset","polygon.bevel","polygon.uv_tools","polygon.extract","polygon.assign_material"})
+        for (auto id:{"polygon.extrude","polygon.inset","polygon.bevel","polygon.uv_tools","polygon.flip_normals","polygon.extract","polygon.assign_material"})
             enabled(id,components && polygonSelection_.mode==PolygonSelectionMode::Face && !preview,"Select polygon triangle faces first.");
-        for (auto id:{"polygon.flip_normals","polygon.select_shell","polygon.select_grow","polygon.select_shrink"})
+        for (auto id:{"polygon.select_shell","polygon.select_grow","polygon.select_shrink"})
             enabled(id,components && !preview,"Select polygon components first.");
         for(auto id:{"polygon.weld","polygon.dissolve_vertices"})
             enabled(id,components && workspace_.selection_count()==1 && polygonSelection_.object==object->id &&

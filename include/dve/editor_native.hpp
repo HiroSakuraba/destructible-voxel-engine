@@ -1137,6 +1137,8 @@ private:
     bool polygonLoopCutPreview_{},polygonLoopCutDragging_{};
     bool polygonDissolvePreview_{};
     bool polygonFaceAuthoringPreview_{};
+    bool polygonBoundaryPreview_{},polygonBoundaryBridge_{};
+    bool begin_polygon_boundary(bool bridge);
     bool polygonVertexDissolvePreview_{},polygonMergePreview_{};
     bool begin_polygon_cleanup(bool merge);
     int polygonLoopCutStartX_{};

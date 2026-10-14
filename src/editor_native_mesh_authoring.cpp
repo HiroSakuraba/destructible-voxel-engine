@@ -297,7 +297,15 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
     }
     if(action=="mesh.diagnostics"){s.object=object->id;s.diagnostics=!s.diagnostics;auto d=diagnose_polygon_topology(*object->polygon);set_status("Topology: "+std::to_string(d.boundaries)+" boundary edges, "+std::to_string(d.nonmanifold)+" nonmanifold, "+std::to_string(d.inconsistentWinding)+" winding errors, "+std::to_string(d.degenerate)+" degenerate triangles");return true;}
     TopologyEdit op;
-    if(action=="mesh.subdivide")op=TopologyEdit::Subdivide;else if(action=="mesh.split_edges")op=TopologyEdit::SplitEdges;else if(action=="mesh.flip_diagonal")op=TopologyEdit::FlipDiagonal;else if(action=="mesh.bridge")op=TopologyEdit::BridgeLoops;else if(action=="mesh.cap")op=TopologyEdit::CapBoundaries;else if(action=="mesh.hard_normals")op=TopologyEdit::HardNormals;else if(action=="mesh.smooth_normals")op=TopologyEdit::SmoothNormals;else return false;
+    if(action=="mesh.bridge"||action=="mesh.cap") {
+        if(s.kind==NativeMeshAuthoringState::Kind::Topology||s.kind==NativeMeshAuthoringState::Kind::Boolean) {
+            set_status("Apply or close the active mesh preview first",true);return false;
+        }
+        const auto opened=begin_polygon_boundary(action=="mesh.bridge");
+        if(opened){s.kind=NativeMeshAuthoringState::Kind::None;s.corners.clear();}
+        return opened;
+    }
+    if(action=="mesh.subdivide")op=TopologyEdit::Subdivide;else if(action=="mesh.split_edges")op=TopologyEdit::SplitEdges;else if(action=="mesh.flip_diagonal")op=TopologyEdit::FlipDiagonal;else if(action=="mesh.hard_normals")op=TopologyEdit::HardNormals;else if(action=="mesh.smooth_normals")op=TopologyEdit::SmoothNormals;else return false;
     cancel_mesh_authoring_drag();if(selectionDomain_!=SelectionDomain::Polygons||polygonSelection_.object!=object->id){set_status("Enter polygon component mode and select components first",true);return false;}
     auto edited=edit_polygon_topology(*object->polygon,polygonSelection_,op);if(!edited){set_status(edited.error,true);return false;}
     const auto before=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(edited.mesh),"Edit polygon topology"));
@@ -317,6 +325,7 @@ bool NativeEditorController::open_mesh_boolean_preview(EditorObjectId a,EditorOb
 }
 
 bool NativeEditorController::mesh_authoring_key(std::string_view key,bool control,bool shift,bool alt){
+    if(polygonPreviewBefore_)return false;
     if(!meshAuthoring_||workspace_.mode()!=EditorMode::Edit||playSession_.active()||alt)return false;auto& s=*meshAuthoring_;auto* object=workspace_.document().find_object(s.object);
     if(!object||!object->polygon||object->flags.locked||!object->flags.visible||is_isolated_out(s.object)){cancel_mesh_authoring_drag();s.kind=NativeMeshAuthoringState::Kind::None;return false;}
     if(s.kind==NativeMeshAuthoringState::Kind::Topology){

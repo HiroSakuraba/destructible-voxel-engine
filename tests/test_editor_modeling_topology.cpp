@@ -110,6 +110,85 @@ void dissolve_and_merge_identities() {
     for(auto id:triangleTopo->controlEdges)if(!faces.topology.controlEdges.contains(id))check(resolve_modeling_selection(quadSource.mesh,faces.topology,1,{id}).empty(),"dissolved authored diagonals cannot be recalled as selectable cage edges");
 }
 
+Fixture boundary_fixture(bool tube,const std::vector<Float3>& contour={{0,0,0},{1,0,0},{1,1,0},{0,1,0}}) {
+    Fixture f;f.mesh.objectId=1;f.mesh.materials.resize(1);f.mesh.materialBindings.resize(1);f.settings.level=0;
+    for(unsigned layer=0;layer<2;++layer)for(auto point:contour) {
+        PolygonVertex vertex;vertex.position=add(point,{0,0,float(layer)});vertex.texcoord={point.x,point.y};
+        vertex.texcoord1={point.x+.2F,point.y+.4F};vertex.color={.2F,.4F,.6F,.8F};f.mesh.vertices.push_back(vertex);
+    }
+    const auto n=std::uint32_t(contour.size());
+    if(tube)for(std::uint32_t j=0;j<n;++j) {
+        const auto k=(j+1)%n;std::vector<std::uint32_t> face{j,k,k+n,j,k+n,j+n};
+        f.mesh.indices.insert(f.mesh.indices.end(),face.begin(),face.end());f.settings.controlFaces.push_back(face);
+    }
+    else {f.mesh.indices={0,2,1,0,3,2,4,5,6,4,6,7};f.settings.controlFaces={{0,2,1,0,3,2},{4,5,6,4,6,7}};}
+    f.mesh.submeshes={{"Boundary fixture",0,std::uint32_t(f.mesh.indices.size()),0}};refresh_editor_polygon(f.mesh,true);return f;
+}
+PolygonSelection boundary_selection(const CookedPolygonAsset& mesh,bool upperOnly=false) {
+    auto edges=diagnose_polygon_topology(mesh).problemEdges;
+    if(upperOnly)std::erase_if(edges,[&](auto edge){return mesh.vertices[std::uint32_t(edge>>32U)].position.z<.5F||mesh.vertices[std::uint32_t(edge)].position.z<.5F;});
+    return {1,PolygonSelectionMode::Edge,edges};
+}
+void boundary_tool_lineage() {
+    for(bool bridge:{false,true})for(bool cage:{false,true}) {
+        auto f=boundary_fixture(!bridge);const auto selection=boundary_selection(f.mesh,!bridge);const auto seed=*selection.components.begin();f.settings.edgeCreases[seed]=2;
+        std::string error;auto topo=make_modeling_topology(f.mesh,cage?&f.settings:nullptr,{},&error);check(bool(topo),error);
+        auto edit=edit_polygon_boundaries(f.mesh,selection,bridge?TopologyEdit::BridgeLoops:TopologyEdit::CapBoundaries,cage?&f.settings:nullptr);check(bool(edit),edit.polygon.error);
+        const auto& mesh=edit.polygon.mesh;
+        check(mesh.indices.size()==f.mesh.indices.size()+(bridge?24:6)&&std::equal(f.mesh.indices.begin(),f.mesh.indices.end(),mesh.indices.begin()),"boundary edits append triangles and preserve all old corners");
+        auto sourcePrefix=mesh;sourcePrefix.vertices.resize(f.mesh.vertices.size());sourcePrefix.indices=f.mesh.indices;sourcePrefix.submeshes=f.mesh.submeshes;
+        check(polygon_asset_content_hash(sourcePrefix)==polygon_asset_content_hash(f.mesh),"boundary edits keep original vertex attributes byte-for-byte");
+        const auto diagnostics=diagnose_polygon_topology(mesh);check(diagnostics.boundaries==(bridge?0:4)&&!diagnostics.nonmanifold&&!diagnostics.inconsistentWinding&&!diagnostics.degenerate,"bridge closes both rims; cap closes only its selected rim");
+        auto ids=advance_modeling_topology(f.mesh,mesh,edit.subdivision?&*edit.subdivision:nullptr,*topo,edit.lineage);check(bool(ids),ids.error);
+        for(auto member:{&ModelingTopology::vertices,&ModelingTopology::attributes,&ModelingTopology::corners,&ModelingTopology::triangles,&ModelingTopology::faces})
+            check(std::equal((topo.value().*member).begin(),(topo.value().*member).end(),(ids.topology.*member).begin()),"all original identity domains retain their IDs");
+        for(const auto& [edge,id]:topo->edges)check(ids.topology.edges.at(edge)==id,"original render and boundary edges retain IDs");
+        check(!ids.created.empty(),"added faces, corners, attributes and connecting edges have fresh identities");
+        for(const auto& [old,copies]:edit.lineage.attributeCopies)for(auto copy:copies) {
+            check(ids.topology.vertices[copy]==topo->vertices[old]&&ids.topology.attributes[copy]!=topo->attributes[old],"wall/cap attributes retain geometry ID and acquire a new attribute ID");
+            check(mesh.vertices[copy].texcoord.x==f.mesh.vertices[old].texcoord.x&&mesh.vertices[copy].texcoord1.y==f.mesh.vertices[old].texcoord1.y&&mesh.vertices[copy].color.w==f.mesh.vertices[old].color.w,"new surfaces copy both UV channels and color");
+        }
+        PolygonUvAuthoring flags;flags.enabled=false;flags.layoutHash=polygon_uv_layout_hash(f.mesh);flags.seams[0]={seed};flags.seams[1]={seed};flags.pins[0]={0};flags.pins[1]={1};
+        auto mapped=remap_polygon_uv_authoring(flags,mesh,edit.lineage,&error);check(mapped&&!mapped->enabled&&mapped->seams==flags.seams&&mapped->pins==flags.pins,"both saved seam/pin channels remain attached to existing elements");
+        if(cage) {
+            check(edit.subdivision&&edit.subdivision->controlFaces.size()==f.settings.controlFaces.size()+(bridge?4:2),"bridge adds explicit quads; cap adds explicit triangle control faces");
+            check(edit.subdivision->edgeCreases==f.settings.edgeCreases,"rim crease strengths survive; unrelated new edges stay smooth");
+            auto smoothed=*edit.subdivision;smoothed.level=1;check(bool(evaluate_subdivision(mesh,smoothed).mesh),"edited cage evaluates at subdivision level one");
+        }
+        auto again=edit_polygon_boundaries(f.mesh,selection,bridge?TopologyEdit::BridgeLoops:TopologyEdit::CapBoundaries,cage?&f.settings:nullptr);
+        auto repeated=advance_modeling_topology(f.mesh,again.polygon.mesh,again.subdivision?&*again.subdivision:nullptr,*topo,again.lineage);
+        check(repeated&&repeated.topology==ids.topology,"preview recomputation keeps provisional identities stable");
+        auto partial=selection;partial.components.erase(partial.components.begin());
+        auto refused=edit_polygon_boundaries(f.mesh,partial,bridge?TopologyEdit::BridgeLoops:TopologyEdit::CapBoundaries,cage?&f.settings:nullptr);
+        check(!refused&&polygon_asset_content_hash(refused.polygon.mesh)==polygon_asset_content_hash(f.mesh)&&refused.lineage.vertexSurvivors.empty(),"incomplete loop refuses without partial geometry or provenance");
+    }
+    auto concave=boundary_fixture(true,{{0,0,0},{2,0,0},{2,1,0},{1,1,0},{1,2,0},{0,2,0}});
+    auto cap=edit_polygon_boundaries(concave.mesh,boundary_selection(concave.mesh,true),TopologyEdit::CapBoundaries,&concave.settings);
+    check(cap&&cap.polygon.mesh.indices.size()==concave.mesh.indices.size()+12,"simple concave cap ear-clips into four triangles");
+    auto nonplanar=concave.mesh;nonplanar.vertices[6].position.z+=.3F;refresh_editor_polygon(nonplanar);
+    check(!edit_polygon_boundaries(nonplanar,boundary_selection(nonplanar,true),TopologyEdit::CapBoundaries,&concave.settings),"nonplanar cap refuses");
+    check(!edit_polygon_boundaries(concave.mesh,boundary_selection(concave.mesh),TopologyEdit::CapBoundaries,&concave.settings),"multiple contours refuse cap");
+    auto mismatch=boundary_fixture(false);mismatch.mesh.materials.resize(2);mismatch.mesh.materialBindings.resize(2);mismatch.mesh.submeshes={{"Lower",0,6,0},{"Upper",6,6,1}};refresh_editor_polygon(mismatch.mesh);
+    check(bool(edit_polygon_boundaries(mismatch.mesh,boundary_selection(mismatch.mesh),TopologyEdit::BridgeLoops,&mismatch.settings)),"equivalent joined palette slots allow bridge");
+    mismatch.mesh.materials[1].roughness=.3F;refresh_editor_polygon(mismatch.mesh);
+    check(!edit_polygon_boundaries(mismatch.mesh,boundary_selection(mismatch.mesh),TopologyEdit::BridgeLoops,&mismatch.settings),"conflicting bridge materials refuse");
+    auto tube=boundary_fixture(true);tube.mesh.materials.resize(2);tube.mesh.materialBindings.resize(2);tube.mesh.materials[1].roughness=.3F;tube.mesh.submeshes={{"First",0,6,1},{"Others",6,18,0}};refresh_editor_polygon(tube.mesh);
+    check(!edit_polygon_boundaries(tube.mesh,boundary_selection(tube.mesh,true),TopologyEdit::CapBoundaries,&tube.settings),"conflicting cap materials refuse");
+    auto uneven=boundary_fixture(false);auto edge=*boundary_selection(uneven.mesh,true).components.begin();
+    auto split=edit_polygon_topology(uneven.mesh,{1,PolygonSelectionMode::Edge,{edge}},TopologyEdit::SplitEdges);
+    check(split&&!edit_polygon_boundaries(split.mesh,boundary_selection(split.mesh),TopologyEdit::BridgeLoops),"unequal loop counts refuse bridge");
+    auto crossing=boundary_fixture(true,{{0,0,0},{3,0,0},{0,2,0},{2,2,0}});
+    check(!edit_polygon_boundaries(crossing.mesh,boundary_selection(crossing.mesh,true),TopologyEdit::CapBoundaries,&crossing.settings),"self-intersecting contour refuses cap");
+    auto folded=boundary_fixture(false);folded.mesh.vertices[4].position.x=-2;refresh_editor_polygon(folded.mesh);
+    check(!edit_polygon_boundaries(folded.mesh,boundary_selection(folded.mesh),TopologyEdit::BridgeLoops,&folded.settings),"folded bridge correspondence refuses");
+    auto cube=make_editor_polygon_cube(1);auto missing=edit_polygon(cube,{1,PolygonSelectionMode::Face,{0,1}},PolygonEdit::Delete);
+    auto repaired=edit_polygon_topology(missing.mesh,boundary_selection(missing.mesh),TopologyEdit::CapBoundaries);
+    check(repaired&&!diagnose_polygon_topology(repaired.mesh).boundaries,"legacy cap API still closes a cube with split boundary attributes");
+    std::vector<Float3> oversized;for(unsigned i=0;i<513;++i){const auto a=float(i)*6.2831853F/513;oversized.push_back({std::cos(a),std::sin(a),0});}
+    auto large=boundary_fixture(true,oversized);
+    check(!edit_polygon_boundaries(large.mesh,boundary_selection(large.mesh,true),TopologyEdit::CapBoundaries,&large.settings),"contour exceeding 512 edges refuses before triangulation");
+}
+
 void authored_face_tool_lineage() {
     auto f=quad();for(std::size_t i=0;i<f.mesh.vertices.size();++i){f.mesh.vertices[i].texcoord1={.25F+float(i),.75F-float(i)};f.mesh.vertices[i].color={.2F,.3F,.4F,.5F};}refresh_editor_polygon(f.mesh);
     std::string error;const auto seed=*subdivision_control_edges(f.mesh,&f.settings).begin();f.settings.edgeCreases[seed]=2;
@@ -208,6 +287,28 @@ void command_history() {
         check(history.redo(patchDoc).success&&*patchDoc.find_object(1)->modelingTopology==ids.topology,"real compound face Redo restores exact IDs");
     }
 
+    for(bool bridge:{false,true})for(bool identified:{false,true}) {
+        auto boundary=boundary_fixture(!bridge);const auto selected=boundary_selection(boundary.mesh,!bridge);const auto edge=*selected.components.begin();boundary.settings.edgeCreases[edge]=3;
+        EditorDocument document("Boundary history");EditorObject target(1,"Boundary");target.polygon=boundary.mesh;target.subdivision=boundary.settings;
+        if(identified)check(ensure_modeling_topology(target,&error),error);const auto beforeIds=target.modelingTopology;document.add_object(std::move(target));
+        PolygonUvAuthoring flags;flags.layoutHash=polygon_uv_layout_hash(boundary.mesh);flags.seams[0]={edge};flags.seams[1]={edge};flags.pins[0]={0};flags.pins[1]={1};
+        auto saved=make_polygon_uv_authoring_command(document,*document.find_object(1),flags,&error);check(saved&&saved->execute(document).success,"save boundary flags");
+        auto sourceIds=make_modeling_topology(boundary.mesh,&boundary.settings,{},&error);check(bool(sourceIds),error);
+        auto edit=edit_polygon_boundaries(boundary.mesh,selected,bridge?TopologyEdit::BridgeLoops:TopologyEdit::CapBoundaries,&boundary.settings);check(bool(edit),edit.polygon.error);
+        auto ids=advance_modeling_topology(boundary.mesh,edit.polygon.mesh,&*edit.subdivision,identified?*beforeIds:*sourceIds,edit.lineage);check(bool(ids),ids.error);
+        auto record=remap_polygon_uv_authoring_record(*document.find_object(1),edit.polygon.mesh,edit.lineage,&error);check(bool(record),error);
+        const auto* component=find_component_by_type(std::span<const Component>(document.find_object(1)->components),kUvAuthoringComponent);
+        auto compound=std::make_unique<CompoundCommand>(bridge?"Bridge":"Cap");
+        compound->add(std::make_unique<ReplacePolygonCommand>(1,boundary.mesh,edit.polygon.mesh,"Boundary edit",0,edit.subdivision,false,ids.topology));
+        compound->add(std::make_unique<SetComponentPropertyCommand>(1,component->id,"state",component->properties.at("state"),ComponentValue{*record},"Preserve boundary UV flags"));
+        EditorCommandStack history;check(history.execute(document,std::move(compound)).success,"actual compound boundary Apply");
+        check(document.find_object(1)->modelingTopology==ids.topology&&document.find_object(1)->subdivision->controlFaces==edit.subdivision->controlFaces,"boundary Apply keeps prepared face and element IDs");
+        auto mapped=read_polygon_uv_authoring(*document.find_object(1),&error);check(mapped&&mapped->seams==flags.seams&&mapped->pins==flags.pins,"boundary Apply saves both UV channels");
+        const auto floor=document.find_object(1)->modelingNextId;
+        check(history.undo(document).success&&document.find_object(1)->modelingTopology==beforeIds&&polygon_asset_content_hash(*document.find_object(1)->polygon)==polygon_asset_content_hash(boundary.mesh)&&document.find_object(1)->modelingNextId>=floor,"boundary Undo restores exact identified/legacy source and retains allocation floor");
+        mapped=read_polygon_uv_authoring(*document.find_object(1),&error);check(mapped&&mapped->layoutHash==flags.layoutHash,"boundary Undo restores source UV layout record");
+        check(history.redo(document).success&&document.find_object(1)->modelingTopology==ids.topology&&polygon_asset_content_hash(*document.find_object(1)->polygon)==polygon_asset_content_hash(edit.polygon.mesh),"boundary Redo restores exact output and identities");
+    }
 }
 #endif
 #if defined(DVE_MODELING_TOPOLOGY_SCENE) || !defined(DVE_MODELING_TOPOLOGY_CORE_ONLY)
@@ -241,6 +342,39 @@ void scene_and_prefab_persistence() {
 }
 #endif
 #ifndef DVE_MODELING_TOPOLOGY_CORE_ONLY
+void native_boundary_tools() {
+    for(bool bridge:{false,true})for(bool identified:{false,true})for(bool cage:{false,true}) {
+        auto f=boundary_fixture(!bridge);const auto selected=boundary_selection(f.mesh,!bridge);const auto edge=*selected.components.begin();f.settings.edgeCreases[edge]=2;
+        EditorDocument document("Native boundary preview");EditorObject object(1,"Boundary");object.polygon=f.mesh;if(cage)object.subdivision=f.settings;
+        std::string error;if(identified)check(ensure_modeling_topology(object,&error),error);const auto initial=object.modelingTopology;document.add_object(std::move(object));
+        auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(document)));auto& c=*owner;c.resize(1600,900);c.workspace().select_object(1);
+        PolygonUvAuthoring flags;flags.layoutHash=polygon_uv_layout_hash(f.mesh);flags.seams[0]={edge};flags.seams[1]={edge};flags.pins[0]={0};flags.pins[1]={1};
+        auto uv=make_polygon_uv_authoring_command(c.workspace().document(),*c.workspace().document().find_object(1),flags,&error);
+        check(uv&&c.workspace().commands().execute(c.workspace().document(),std::move(uv)).success,"save native boundary flags");
+        check(c.dispatch_action(cage?"subdiv.edge_mode":"polygon.edge_mode"),"boundary edge mode");c.select_polygon_components(selected.components,SelectionOperation::Replace);
+        const auto action=cage?(bridge?"subdiv.bridge":"subdiv.cap"):(bridge?"mesh.bridge":"mesh.cap");
+        const auto history=c.workspace().commands().size(),hash=polygon_asset_content_hash(f.mesh);
+        check(c.dispatch_action(action),"open native boundary preview");c.key_down("escape",false,false,false);
+        auto* target=c.workspace().document().find_object(1);
+        check(target->modelingTopology==initial&&polygon_asset_content_hash(*target->polygon)==hash&&c.polygon_selection().components==selected.components&&c.workspace().commands().size()==history,"boundary Cancel restores exact source and selection without history");
+        check(c.dispatch_action(action),"reopen boundary preview");const auto preview=*target->modelingTopology;
+        c.key_down("1",false,false,false);check(*target->modelingTopology==preview,"parameterless preview ignores numeric keys");
+        c.key_down("enter",false,false,false);
+        const auto outputHash=polygon_asset_content_hash(*target->polygon);const auto outputSelection=c.polygon_selection().components;
+        check(target->modelingTopology==preview&&outputHash!=hash&&c.workspace().commands().size()==history+1,"Enter applies prepared boundary IDs as one history entry");
+        auto mapped=read_polygon_uv_authoring(*target,&error);check(mapped&&mapped->seams==flags.seams&&mapped->pins==flags.pins,"native boundary Apply retains both seam/pin channels");
+        check(c.dispatch_action("edit.undo")&&target->modelingTopology==initial&&polygon_asset_content_hash(*target->polygon)==hash&&c.polygon_selection().components==selected.components,"native boundary Undo restores exact legacy/identified mesh and selected rim");
+        check(c.dispatch_action("edit.redo")&&target->modelingTopology==preview&&polygon_asset_content_hash(*target->polygon)==outputHash&&c.polygon_selection().components==outputSelection,"native boundary Redo restores selected new faces and IDs");
+        check(c.dispatch_action("edit.undo"),"restore native boundary source");
+        auto partial=selected.components;partial.erase(partial.begin());c.select_polygon_components(partial,SelectionOperation::Replace);
+        check(!c.dispatch_action(action)&&target->modelingTopology==initial&&polygon_asset_content_hash(*target->polygon)==hash,"native incomplete contour refuses without an open preview");
+        c.select_polygon_components(selected.components,SelectionOperation::Replace);check(c.dispatch_action(action),"boundary flag validation preview");
+        auto* component=find_component_by_type(std::span<Component>(target->components),kUvAuthoringComponent);const auto saved=component->properties.at("state");component->properties["state"]=std::string("invalid");
+        check(!c.dispatch_action("polygon.preview_apply"),"boundary Apply revalidates inspector-modified UV flags");
+        component->properties["state"]=saved;c.key_down("enter",false,false,false);
+        check(polygon_asset_content_hash(*target->polygon)!=hash&&target->modelingTopology.has_value(),"fixed UV flags allow Enter to retry boundary Apply");
+    }
+}
 void native_authored_face_tools() {
     for(const auto* action:{"subdiv.extrude","subdiv.inset","subdiv.bevel","polygon.uv_tools"}) {
         auto f=quad();std::string error;const auto seed=*subdivision_control_edges(f.mesh,&f.settings).begin();f.settings.edgeCreases[seed]=2;
@@ -311,7 +445,7 @@ void scene_history_and_prefab() {
 }
 #endif
 }
-int main(){try{serialization_and_partitions();movement_reorder_and_retirement();cut_and_cleanup();dissolve_and_merge_identities();authored_face_tool_lineage();
+int main(){try{serialization_and_partitions();movement_reorder_and_retirement();cut_and_cleanup();dissolve_and_merge_identities();authored_face_tool_lineage();boundary_tool_lineage();
 #if defined(DVE_MODELING_TOPOLOGY_COMMANDS) || !defined(DVE_MODELING_TOPOLOGY_CORE_ONLY)
 command_history();
 #endif
@@ -319,6 +453,6 @@ command_history();
 scene_and_prefab_persistence();
 #endif
 #ifndef DVE_MODELING_TOPOLOGY_CORE_ONLY
-scene_history_and_prefab();legacy_migration_is_not_an_edit();native_authored_face_tools();
+scene_history_and_prefab();legacy_migration_is_not_an_edit();native_authored_face_tools();native_boundary_tools();
 #endif
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Persistent modeling topology regression checks passed\n";}

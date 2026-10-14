@@ -1135,10 +1135,13 @@ private:
     std::string polygonPreviewTyped_;
     bool polygonPreviewValid_{};
     bool polygonLoopCutPreview_{},polygonLoopCutDragging_{};
+    bool polygonDissolvePreview_{};
     int polygonLoopCutStartX_{};
     float polygonLoopCutStartFraction_{.5F};
     std::optional<std::string> polygonLoopCutUvRecord_;
     bool begin_polygon_loop_cut();
+    bool begin_polygon_dissolve();
+    bool clean_unused_polygon_vertices();
     bool polygonSlicePreview_{};
     Float3 polygonSlicePoint_{}, polygonSliceOrigin_{}, polygonSliceNormal_{1,0,0};
     int polygonSliceOutput_{}; // 0 front, 1 back, 2 separate

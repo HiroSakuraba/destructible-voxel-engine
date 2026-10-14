@@ -603,6 +603,114 @@ CageLoopCutResult cut_cage_edge_ring(const CookedPolygonAsset& source,
     return result;
 }
 
+CageDissolveResult dissolve_cage_edges(const CookedPolygonAsset& mesh,const SubdivisionSettings& settings,
+    const PolygonSelection& selection,const std::set<std::uint64_t>& protectedEdges) {
+    CageDissolveResult result;
+    const auto fail=[&](std::string message){result.error=std::move(message);return result;};
+    if (selection.object!=mesh.objectId || selection.mode!=PolygonSelectionMode::Edge || selection.components.empty())
+        return fail("Select control-cage edges to dissolve");
+    if (settings.controlFaces.empty()) return fail("Dissolve requires saved triangle/quad control faces");
+    auto initial=settings;initial.level=0;
+    if (const auto valid=evaluate_subdivision(mesh,initial);!valid.mesh) return fail(valid.error);
+    const auto cage=parse_cage(mesh,&settings);Topology graph;std::string error;
+    if (!topology(cage,graph,{},false,error)) return fail(error);
+    std::map<std::tuple<float,float,float>,std::uint32_t> first;
+    for (std::uint32_t i=0;i<mesh.vertices.size();++i) {
+        const auto p=mesh.vertices[i].position;first.emplace(std::make_tuple(p.x,p.y,p.z),i);
+        result.lineage.vertexSurvivors.emplace(i,i);
+    }
+    std::vector<std::uint32_t> canonical;
+    for (auto p : cage.points) canonical.push_back(first.at(std::make_tuple(p.x,p.y,p.z)));
+    const auto sourceKey=[&](Edge e){const auto p=edge(canonical[e.first],canonical[e.second]);return (std::uint64_t(p.first)<<32U)|p.second;};
+    std::map<std::uint64_t,Edge> lookup;
+    for (const auto& [key,data] : graph.edges) {(void)data;lookup.emplace(sourceKey(key),key);}
+    std::map<std::uint32_t,std::uint32_t> partners;
+    std::set<std::uint32_t> reserved;
+    const auto same=[](const PolygonVertex& a,const PolygonVertex& b) {
+        return a.texcoord.x==b.texcoord.x&&a.texcoord.y==b.texcoord.y&&
+            a.texcoord1.x==b.texcoord1.x&&a.texcoord1.y==b.texcoord1.y&&
+            a.color.x==b.color.x&&a.color.y==b.color.y&&a.color.z==b.color.z&&a.color.w==b.color.w&&
+            a.normal.x==b.normal.x&&a.normal.y==b.normal.y&&a.normal.z==b.normal.z;
+    };
+    for (auto key : selection.components) {
+        const auto at=lookup.find(key);
+        if (at==lookup.end()) return fail("Dissolve selection includes a stale edge or hidden diagonal");
+        if (protectedEdges.contains(key)) return fail("Dissolve protects saved UV seams; clear the seam deliberately first");
+        if (settings.edgeCreases.contains(key)) return fail("Dissolve protects authored creases; clear the crease deliberately first");
+        const auto& faces=graph.edges.at(at->second).faces;
+        if (faces.size()!=2) return fail("Boundary edges cannot be dissolved without removing the surrounding surface");
+        const auto a=(std::min)(faces[0],faces[1]),b=(std::max)(faces[0],faces[1]);
+        if (cage.faces[a].vertices.size()!=3 || cage.faces[b].vertices.size()!=3)
+            return fail("Initial dissolve joins two triangles; merging existing quads needs larger authored faces");
+        if (!reserved.insert(a).second || !reserved.insert(b).second)
+            return fail("Selected dissolves share a face; choose disjoint triangle pairs");
+        Face pair;
+        if (!quad_pair(cage,cage.faces[a],cage.faces[b],pair))
+            return fail("Dissolve requires adjacent, consistently wound triangles with the same material");
+        const auto n=normal(face_normal(cage,pair));const auto origin=cage.points[pair.vertices[0]];
+        float scale=0;for(auto v:pair.vertices)scale=(std::max)(scale,length(subtract(cage.points[v],origin)));
+        for (unsigned j=0;j<4;++j) {
+            const auto p=cage.points[pair.vertices[j]],q=cage.points[pair.vertices[(j+1)%4]],r=cage.points[pair.vertices[(j+2)%4]];
+            if (std::abs(dot(subtract(p,origin),n))>scale*1e-5F ||
+                dot(cross(subtract(q,p),subtract(r,q)),n)<=scale*scale*1e-8F)
+                return fail("Dissolve requires a convex planar quad to retain the surrounding shape");
+        }
+        for (auto endpoint : {at->second.first,at->second.second}) {
+            const PolygonVertex* left=nullptr;const PolygonVertex* right=nullptr;
+            for (unsigned j=0;j<3;++j) {
+                if (cage.faces[a].vertices[j]==endpoint) left=&cage.faces[a].attributes[j];
+                if (cage.faces[b].vertices[j]==endpoint) right=&cage.faces[b].attributes[j];
+            }
+            if (!left || !right || !same(*left,*right))
+                return fail("Dissolve protects UV, color and normal discontinuities across the selected edge");
+        }
+        partners.emplace(a,b);
+    }
+    result.subdivision=settings;result.subdivision.controlFaces.clear();
+    result.selection={mesh.objectId,PolygonSelectionMode::Face,{}};
+    std::set<std::uint32_t> consumed;
+    for (std::uint32_t i=0;i<cage.faces.size();++i) {
+        if (consumed.contains(i)) continue;
+        const auto next=std::uint32_t(result.subdivision.controlFaces.size());
+        auto record=settings.controlFaces[i];result.lineage.controlFaceDescendants[i].push_back(next);
+        if (const auto at=partners.find(i);at!=partners.end()) {
+            const auto b=at->second;consumed.insert(b);
+            record.insert(record.end(),settings.controlFaces[b].begin(),settings.controlFaces[b].end());
+            result.lineage.controlFaceDescendants[b].push_back(next);
+            for (auto triangle : cage.faces[i].triangles) result.selection.components.insert(triangle);
+            for (auto triangle : cage.faces[b].triangles) result.selection.components.insert(triangle);
+        }
+        result.subdivision.controlFaces.push_back(std::move(record));
+    }
+    for (auto key : subdivision_control_edges(mesh,&settings))
+        if (!selection.components.contains(key)) result.lineage.edgeDescendants[key].insert(key);
+        else result.lineage.edgeDescendants[key]; // Explicit retirement of the authored edge.
+    for (std::uint32_t i=0;i<mesh.indices.size();++i) result.lineage.cornerDescendants[i].insert(i);
+    if (const auto evaluated=evaluate_subdivision(mesh,result.subdivision);!evaluated.mesh) return fail(evaluated.error);
+    return result;
+}
+
+std::optional<SubdivisionSettings> remap_compacted_cage(const CookedPolygonAsset& before,
+    const CookedPolygonAsset& after,const SubdivisionSettings& settings,const PolygonTopologyLineage& lineage,std::string* error) {
+    const auto fail=[&](std::string message)->std::optional<SubdivisionSettings>{if(error)*error=std::move(message);return {};};
+    if(error)error->clear();auto initial=settings;initial.level=0;
+    if (const auto valid=evaluate_subdivision(before,initial);!valid.mesh) return fail(valid.error);
+    auto result=settings;freeze_subdivision_topology(before,result);
+    for (auto& face : result.controlFaces) for (auto& vertex : face) {
+        const auto at=lineage.vertexSurvivors.find(vertex);
+        if (at==lineage.vertexSurvivors.end()) return fail("Saved control-face corner has no compaction survivor");
+        vertex=at->second;
+    }
+    result.edgeCreases.clear();
+    for (const auto& [edge,strength] : settings.edgeCreases) {
+        const auto at=lineage.edgeDescendants.find(edge);
+        if (at==lineage.edgeDescendants.end() || at->second.size()!=1) return fail("Saved crease has no unique compaction descendant");
+        result.edgeCreases[*at->second.begin()]=strength;
+    }
+    if (const auto valid=evaluate_subdivision(after,result);!valid.mesh) return fail(valid.error);
+    return result;
+}
+
 void freeze_subdivision_topology(const CookedPolygonAsset& mesh,SubdivisionSettings& settings) {
     if (!settings.controlFaces.empty()) return;
     for (const auto& face : subdivision_control_face_triangles(mesh)) {

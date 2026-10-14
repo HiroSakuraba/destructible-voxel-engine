@@ -47,6 +47,15 @@ struct PolygonTopologyLineage {
     std::map<std::uint32_t,std::set<std::uint32_t>> cornerDescendants;
     std::map<std::uint32_t,std::vector<std::uint32_t>> controlFaceDescendants;
 };
+struct PolygonCleanupResult {
+    PolygonEditResult polygon;
+    PolygonTopologyLineage lineage;
+    std::size_t removedVertices{};
+    [[nodiscard]] explicit operator bool() const noexcept { return bool(polygon); }
+};
+// Removes only unreferenced attribute vertices. Triangle/corner order and surviving
+// attributes remain exact; seam copies used by triangles are never welded together.
+[[nodiscard]] PolygonCleanupResult compact_polygon_vertices(const CookedPolygonAsset&,const PolygonSelection&);
 [[nodiscard]] CookedPolygonAsset make_editor_polygon_cube(EditorObjectId id,float size=1);
 [[nodiscard]] CookedPolygonAsset make_editor_polygon_plane(EditorObjectId id,float size=4);
 void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
@@ -74,7 +83,7 @@ void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
 class ReplacePolygonCommand final : public IEditorCommand {
 public:
     ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,std::string label,std::uint64_t stroke=0,
-        std::optional<SubdivisionSettings> authoredAfter = {});
+        std::optional<SubdivisionSettings> authoredAfter = {},bool refreshAfter = true);
     [[nodiscard]] std::string_view label() const noexcept override { return label_; }
     CommandResult execute(EditorDocument&) override;
     CommandResult undo(EditorDocument&) override;
@@ -86,6 +95,7 @@ private:
     CookedPolygonAsset before_,after_;
     std::optional<SubdivisionSettings> beforeSubdivision_,afterSubdivision_;
     bool explicitSubdivision_{};
+    bool refreshAfter_{true};
     std::string label_;
     bool capturedOverride_{};
     std::optional<ComponentValue> previousOverride_;

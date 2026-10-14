@@ -228,6 +228,70 @@ bool NativeEditorController::begin_polygon_preview(PolygonEdit operation) {
     update_polygon_preview(); return true;
 }
 
+bool NativeEditorController::clean_unused_polygon_vertices() {
+    const auto primary=workspace_.selected_object();auto* object=primary?workspace_.document().find_object(*primary):nullptr;
+    if (!editable(object) || workspace_.selection_count()!=1 || workspace_.mode()!=EditorMode::Edit ||
+        playSession_.active() || longJob_ || gizmoDragging_ || polygonPreviewBefore_ ||
+        mesh_authoring_dragging() || voxel_authoring_active() || is_isolated_out(object->id)) {
+        set_status("Select one visible unlocked mesh and finish the active edit first",true);return false;
+    }
+    const bool components=selectionDomain_==SelectionDomain::Polygons && polygonSelection_.object==object->id;
+    const auto selection=components?polygonSelection_:PolygonSelection{object->id,PolygonSelectionMode::Face,{}};
+    auto cleanup=compact_polygon_vertices(*object->polygon,selection);
+    if (!cleanup) {set_status(cleanup.polygon.error,true);return false;}
+    std::string error;std::optional<SubdivisionSettings> authoredAfter;
+    if (object->subdivision) {
+        authoredAfter=remap_compacted_cage(*object->polygon,cleanup.polygon.mesh,*object->subdivision,cleanup.lineage,&error);
+        if (!authoredAfter) {set_status(error,true);return false;}
+    }
+    const auto record=remap_polygon_uv_authoring_record(*object,cleanup.polygon.mesh,cleanup.lineage,&error);
+    if (!record) {set_status(error,true);return false;}
+    std::unique_ptr<IEditorCommand> uvCommand;
+    if (!record->empty()) {
+        const auto* component=find_component_by_type(std::span<const Component>(object->components),kUvAuthoringComponent);
+        const auto at=component->properties.find("state");
+        uvCommand=std::make_unique<SetComponentPropertyCommand>(object->id,component->id,"state",
+            at==component->properties.end()?std::optional<ComponentValue>{}:at->second,ComponentValue{*record},"Preserve cleanup UV flags");
+    }
+    auto command=std::make_unique<CompoundCommand>("Clean unused mesh vertices");
+    command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(cleanup.polygon.mesh),
+        "Clean unused mesh vertices",0,authoredAfter,false));
+    if (uvCommand) command->add(std::move(uvCommand));
+    const auto before=capture_selection_snapshot();
+    const auto applied=workspace_.commands().execute(workspace_.document(),std::move(command));
+    if (applied.success) {
+        if (components) {polygonSelection_=cleanup.polygon.selection;prune_polygon_selection();}
+        workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());recompute_layout();
+    }
+    set_status(applied.success?"Removed "+std::to_string(cleanup.removedVertices)+" unused vertices; Undo restores them":applied.message,!applied.success);
+    refresh_menu_state();return applied.success;
+}
+
+bool NativeEditorController::begin_polygon_dissolve() {
+    cancel_polygon_preview();prune_polygon_selection();
+    const auto* object=workspace_.document().find_object(polygonSelection_.object);
+    if (!editable(object) || !object->subdivision || workspace_.mode()!=EditorMode::Edit ||
+        playSession_.active() || longJob_ || gizmoDragging_ || mesh_authoring_dragging() ||
+        selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.mode!=PolygonSelectionMode::Edge ||
+        voxel_authoring_active() || polygonSelection_.components.empty() || is_isolated_out(object->id)) {
+        set_status("Select subdivision cage edges and finish the active edit first",true);return false;
+    }
+    std::string error;
+    const auto flags=read_polygon_uv_authoring(*object,&error);
+    if (!flags) {set_status(error,true);return false;}
+    // Refuse up front instead of opening a preview that can never apply (no false success).
+    auto protectedEdges=flags->seams[0];protectedEdges.insert(flags->seams[1].begin(),flags->seams[1].end());
+    if (const auto check=dissolve_cage_edges(*object->polygon,*object->subdivision,polygonSelection_,protectedEdges);!check) {
+        set_status(check.error,true);refresh_menu_state();return false;
+    }
+    close_previews_for_voxel_edit("dissolve preview");
+    polygonPreviewBefore_=*object->polygon;polygonPreviewSubdivision_=object->subdivision;
+    polygonPreviewSelection_=polygonSelection_;polygonPreviewTyped_.clear();polygonDissolvePreview_=true;
+    update_polygon_preview();
+    if (!polygonPreviewValid_) {cancel_polygon_preview();refresh_menu_state();return false;}
+    return true;
+}
+
 bool NativeEditorController::begin_polygon_loop_cut() {
     cancel_polygon_preview(); prune_polygon_selection();
     const auto* object=workspace_.document().find_object(polygonSelection_.object);
@@ -270,6 +334,16 @@ void NativeEditorController::update_polygon_preview() {
     if (!editable(object)) { cancel_polygon_preview(); return; }
     *object->polygon = *polygonPreviewBefore_; object->subdivision=polygonPreviewSubdivision_;
     polygonSelection_ = polygonPreviewSelection_;
+    if (polygonDissolvePreview_) {
+        polygonPreviewValid_=false;std::string error;
+        const auto flags=read_polygon_uv_authoring(*object,&error);
+        if (!flags) {set_status(error,true);refresh_menu_state();return;}
+        auto protectedEdges=flags->seams[0];protectedEdges.insert(flags->seams[1].begin(),flags->seams[1].end());
+        const auto dissolved=dissolve_cage_edges(*polygonPreviewBefore_,*polygonPreviewSubdivision_,polygonPreviewSelection_,protectedEdges);
+        if (!dissolved) {set_status(dissolved.error,true);refresh_menu_state();return;}
+        object->subdivision=dissolved.subdivision;object->subdivisionCache.reset();polygonSelection_=dissolved.selection;
+        polygonPreviewValid_=true;refresh_menu_state();return;
+    }
     if (polygonLoopCutPreview_) {
         polygonLoopCutUvRecord_.reset(); polygonPreviewValid_=false;
         float fraction=polygonPreviewSettings_.amount;
@@ -340,6 +414,7 @@ void NativeEditorController::cancel_polygon_preview() {
     polygonSelection_=polygonPreviewSelection_;
     polygonPreviewBefore_.reset(); polygonPreviewSubdivision_.reset(); polygonPreviewTyped_.clear(); polygonPreviewValid_=false;
     polygonLoopCutPreview_=false; polygonLoopCutDragging_=false;
+    polygonDissolvePreview_=false;
     polygonLoopCutUvRecord_.reset();
     polygonSlicePreview_=false; polygonSliceBack_.reset();
 }
@@ -347,19 +422,20 @@ void NativeEditorController::cancel_polygon_preview() {
 bool NativeEditorController::commit_polygon_preview() {
     if (!polygonPreviewBefore_ || !polygonPreviewValid_) { set_status("Fix the polygon preview before applying it",true); return false; }
     // Revalidate saved flags at Apply, including inspector mutations since the last drag.
-    if (polygonLoopCutPreview_) {
+    if (polygonLoopCutPreview_ || polygonDissolvePreview_) {
         update_polygon_preview();
         if (!polygonPreviewBefore_ || !polygonPreviewValid_) return false;
     }
     auto* object=workspace_.document().find_object(polygonPreviewSelection_.object);
     if (!editable(object) || workspace_.mode()!=EditorMode::Edit) { cancel_polygon_preview(); return false; }
     const bool loopCut=polygonLoopCutPreview_;
+    const bool dissolve=polygonDissolvePreview_;
     const auto uvRecord=polygonLoopCutUvRecord_;
     const Component* uvComponent=nullptr;
-    if (loopCut) {
+    if (loopCut || dissolve) {
         // Refuse before cancelling so the user keeps the slid preview to fix and retry.
         if (is_isolated_out(object->id)) {
-            set_status("Loop cut target is isolated out of view; show it before applying",true); refresh_menu_state(); return false;
+            set_status("Modeling target is isolated out of view; show it before applying",true); refresh_menu_state(); return false;
         }
         if (uvRecord && !uvRecord->empty()) {
             uvComponent=find_component_by_type(std::span<const Component>(object->components),kUvAuthoringComponent);
@@ -370,12 +446,13 @@ bool NativeEditorController::commit_polygon_preview() {
     if (uvComponent) if (const auto at=uvComponent->properties.find("state");at!=uvComponent->properties.end()) previousUvState=at->second;
     const auto uvComponentId=uvComponent?std::optional{uvComponent->id}:std::nullopt;
     auto mesh=*object->polygon; const auto selection=polygonSelection_;
-    const auto authoredAfter=loopCut?object->subdivision:std::optional<SubdivisionSettings>{};
+    const auto authoredAfter=(loopCut||dissolve)?object->subdivision:std::optional<SubdivisionSettings>{};
     const bool slice=polygonSlicePreview_; auto back=polygonSliceBack_;
     cancel_polygon_preview();
     const auto before=capture_selection_snapshot();
-    auto command=std::make_unique<CompoundCommand>(slice?"Slice polygon mesh":loopCut?"Loop cut and slide":"Apply polygon tool");
-    command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),
+    auto command=std::make_unique<CompoundCommand>(slice?"Slice polygon mesh":loopCut?"Loop cut and slide":dissolve?"Dissolve cage edges":"Apply polygon tool");
+    if (dissolve) command->add(std::make_unique<SetSubdivisionSettingsCommand>(object->id,*object->subdivision,*authoredAfter));
+    else command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),
         slice?"Slice polygon geometry":loopCut?"Loop cut and slide":"Apply polygon tool",0,authoredAfter));
     if (uvComponentId)
         command->add(std::make_unique<SetComponentPropertyCommand>(object->id,*uvComponentId,"state",
@@ -399,7 +476,7 @@ bool NativeEditorController::commit_polygon_preview() {
         workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
         recompute_layout();
     }
-    set_status(result.success ? (loopCut?"Applied loop cut and slide":slice?"Applied polygon slice":"Applied polygon tool") : result.message,!result.success);
+    set_status(result.success ? (dissolve?"Dissolved cage edges":loopCut?"Applied loop cut and slide":slice?"Applied polygon slice":"Applied polygon tool") : result.message,!result.success);
     refresh_menu_state(); return result.success;
 }
 
@@ -407,6 +484,7 @@ bool NativeEditorController::handle_polygon_preview_key(std::string_view key) {
     if (!polygonPreviewBefore_) return false;
     if (key=="escape") { cancel_polygon_preview(); refresh_menu_state(); return true; }
     if (key=="return"||key=="enter") { (void)commit_polygon_preview(); return true; }
+    if (polygonDissolvePreview_) return true;
     if (polygonSlicePreview_ && (key=="f"||key=="b"||key=="s"||key=="c"||key=="x"||key=="y"||key=="z")) {
         if (key=="f") polygonSliceOutput_=0; else if (key=="b") polygonSliceOutput_=1; else if (key=="s") polygonSliceOutput_=2;
         else if (key=="c") polygonSliceCap_=!polygonSliceCap_;
@@ -431,6 +509,9 @@ bool NativeEditorController::handle_polygon_preview_key(std::string_view key) {
 
 std::vector<std::string> NativeEditorController::polygon_preview_lines() const {
     if (!polygonPreviewBefore_) return {};
+    if (polygonDissolvePreview_) return {"Dissolve Cage Edges",std::to_string(polygonPreviewSelection_.components.size())+" selected edges",
+        "Protected seams, creases, material and attribute boundaries are refused",
+        polygonPreviewValid_?"Enter apply | Esc cancel":"Invalid preview | Esc cancel"};
     if (polygonLoopCutPreview_) return {"Loop Cut and Slide (convex planar quad strip)",
         "Position along seed: "+(polygonPreviewTyped_.empty()?std::to_string(polygonPreviewSettings_.amount):polygonPreviewTyped_),
         "Drag left/right in viewport or type 0.001..0.999; arrows adjust",
@@ -523,6 +604,8 @@ bool NativeEditorController::extract_selected_polygon() {
 }
 
 bool NativeEditorController::handle_polygon_action(std::string_view action) {
+    if (action=="polygon.dissolve_edges") return begin_polygon_dissolve();
+    if (action=="polygon.clean_unused") return clean_unused_polygon_vertices();
     if (action=="polygon.loop_cut") return begin_polygon_loop_cut();
     if (action=="polygon.vertex_mode") return set_polygon_mode(PolygonSelectionMode::Vertex);
     if (action=="polygon.edge_mode") return set_polygon_mode(PolygonSelectionMode::Edge);
@@ -624,6 +707,8 @@ const std::map<std::string_view,std::string_view>& subdivision_tools() {
         {"subdiv.select_loop","polygon.select_loop"},
         {"subdiv.select_ring","polygon.select_ring"},
         {"subdiv.loop_cut","polygon.loop_cut"},
+        {"subdiv.dissolve_edges","polygon.dissolve_edges"},
+        {"subdiv.clean_unused","polygon.clean_unused"},
         {"subdiv.select_grow","polygon.select_grow"},
         {"subdiv.select_shrink","polygon.select_shrink"},
         {"subdiv.select_connected","polygon.select_shell"},

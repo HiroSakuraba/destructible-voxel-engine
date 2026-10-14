@@ -37,6 +37,12 @@ struct PolygonUvAuthoring {
 [[nodiscard]] std::vector<std::uint32_t> polygon_geometric_vertices(const CookedPolygonAsset&);
 [[nodiscard]] std::uint64_t polygon_uv_layout_hash(const CookedPolygonAsset&);
 [[nodiscard]] std::optional<PolygonUvAuthoring> read_polygon_uv_authoring(const EditorObject&,std::string* error=nullptr);
+// Returns the encoded after record, or an empty string when no saved component exists.
+// Retired seams/pins without supported lineage refuse the edit instead of silently clearing.
+[[nodiscard]] std::optional<PolygonUvAuthoring> remap_polygon_uv_authoring(const PolygonUvAuthoring&,
+    const CookedPolygonAsset& after, const PolygonTopologyLineage&, std::string* error=nullptr);
+[[nodiscard]] std::optional<std::string> remap_polygon_uv_authoring_record(const EditorObject&,
+    const CookedPolygonAsset& after, const PolygonTopologyLineage&, std::string* error=nullptr);
 [[nodiscard]] std::unique_ptr<IEditorCommand> make_polygon_uv_authoring_command(
     EditorDocument&,const EditorObject&,const PolygonUvAuthoring&,std::string* error=nullptr);
 [[nodiscard]] std::vector<std::set<std::uint32_t>> polygon_uv_islands(

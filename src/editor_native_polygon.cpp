@@ -281,8 +281,8 @@ bool NativeEditorController::begin_polygon_cleanup(bool merge) {
     polygonPreviewBefore_=*object->polygon;polygonPreviewSubdivision_=object->subdivision;polygonPreviewSelection_=polygonSelection_;
     polygonVertexDissolvePreview_=!merge;polygonMergePreview_=merge;polygonPreviewSettings_={};polygonPreviewSettings_.amount=.01F;polygonPreviewTyped_.clear();
     update_polygon_preview();
-    // A distance preview may start with no candidates; its tolerance is adjustable.
-    if(!merge&&!polygonPreviewValid_) {cancel_polygon_preview();refresh_menu_state();return false;}
+    // Refuse up front instead of opening a dead preview; keep the refusal reason visible.
+    if(!polygonPreviewValid_) {const auto reason=status_.text;cancel_polygon_preview();set_status(reason,true);refresh_menu_state();return false;}
     return true;
 }
 

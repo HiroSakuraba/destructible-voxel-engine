@@ -556,9 +556,17 @@ void native_vertex_cleanup_history() {
             c.key_down("escape",false,false,false);
         }
         if(merge) {
+            // Undo keeps the redo entry in the stack, so compare against the live size.
+            const auto reopenHistory=c.workspace().commands().size();
+            c.select_polygon_components({0,4},SelectionOperation::Replace);
+            check(!c.dispatch_action(action)&&c.polygon_preview_lines().empty()&&c.workspace().commands().size()==reopenHistory,
+                "merge with no candidates refuses up front instead of opening a dead preview");
+            check(c.status().error&&!c.status().text.empty(),"refused merge reports its reason");
+            c.select_polygon_components(seeds,SelectionOperation::Replace);
             check(c.dispatch_action(action),"merge preview reopens");
             for(const auto* digit:{"0",".","0","0","1"})c.key_down(digit,false,false,false);
-            check(!c.dispatch_action("subdiv.preview_apply")&&c.workspace().commands().size()==history,"typed no-op merge refuses Apply and history");
+            check(!c.dispatch_action("subdiv.preview_apply"),"typed no-op merge refuses Apply");
+            check(c.workspace().commands().size()==reopenHistory&&polygon_asset_content_hash(*c.workspace().document().find_object(1)->polygon)==original,"typed no-op merge adds no history or mutation");
             c.key_down("escape",false,false,false);
         }
     }

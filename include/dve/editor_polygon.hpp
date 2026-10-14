@@ -47,6 +47,8 @@ struct PolygonTopologyLineage {
     std::map<std::uint32_t,std::set<std::uint32_t>> cornerDescendants;
     std::map<std::uint32_t,std::vector<std::uint32_t>> controlFaceDescendants;
     std::map<std::uint32_t,std::set<std::uint32_t>> triangleDescendants;
+    // Explicit geometric partition of the output attribute array, provided by the operation.
+    std::vector<std::uint32_t> afterVertexGroups;
 };
 struct PolygonCleanupResult {
     PolygonEditResult polygon;
@@ -90,18 +92,21 @@ void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
 class ReplacePolygonCommand final : public IEditorCommand {
 public:
     ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,std::string label,std::uint64_t stroke=0,
-        std::optional<SubdivisionSettings> authoredAfter = {},bool refreshAfter = true);
+        std::optional<SubdivisionSettings> authoredAfter = {},bool refreshAfter = true,
+        std::optional<ModelingTopology> authoredTopology = {});
     [[nodiscard]] std::string_view label() const noexcept override { return label_; }
     CommandResult execute(EditorDocument&) override;
     CommandResult undo(EditorDocument&) override;
     [[nodiscard]] bool merge_with(const IEditorCommand&) override;
 private:
-    CommandResult apply(EditorDocument&,const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&,bool refresh);
+    CommandResult apply(EditorDocument&,const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&,bool refresh,const std::optional<ModelingTopology>&);
     EditorObjectId id_{};
     std::uint64_t stroke_{};
     CookedPolygonAsset before_,after_;
     std::optional<SubdivisionSettings> beforeSubdivision_,afterSubdivision_;
     bool explicitSubdivision_{};
+    std::optional<ModelingTopology> beforeTopology_,afterTopology_;
+    bool explicitTopology_{};
     bool refreshAfter_{true};
     std::string label_;
     bool capturedOverride_{};

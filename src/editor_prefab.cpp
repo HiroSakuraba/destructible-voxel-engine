@@ -348,6 +348,7 @@ static std::uint64_t subdivision_prefab_hash(const EditorPrefabAsset& prefab,boo
         for (const std::string& group : object.groups) hash = hash_text(hash, group);
         hash = hash_text(hash, object.sourceAsset.generic_string());
         hash = hash_value(hash,object.polygon?object.polygon->contentHash:0);
+        if(object.modelingTopology)hash=hash_value(hash,modeling_topology_hash(*object.modelingTopology));
         // Preserve legacy hashes for objects without subdivision settings.
         if (object.subdivision) {hash=hash_value(hash,std::uint32_t{0x53554244});
             hash=hash_value(hash,object.subdivision->level);hash=hash_value(hash,object.subdivision->preserveSharpEdges);
@@ -681,6 +682,8 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
             if (!object_has_override(*target,"polygon.geometry")) {
                 target->subdivision=source.subdivision;
                 target->polygon=source.polygon;
+                target->modelingTopology=source.modelingTopology;
+                target->modelingNextId=(std::max)(target->modelingNextId,source.modelingNextId);
                 if (target->polygon) {target->polygon->objectId=target->id;target->polygon->contentHash=polygon_asset_content_hash(*target->polygon);}
             }
             if (source.subdivision && target->subdivision) {

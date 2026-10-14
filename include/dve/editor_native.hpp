@@ -1141,6 +1141,11 @@ private:
     int polygonLoopCutStartX_{};
     float polygonLoopCutStartFraction_{.5F};
     std::optional<std::string> polygonPreviewUvRecord_;
+    std::optional<ModelingTopology> polygonPreviewModelingBefore_,polygonPreviewModelingAfter_;
+    ModelingId polygonPreviewModelingFloor_{1};
+    bool polygonPreviewModelingMigrated_{};
+    bool begin_modeling_identity_preview(EditorObject&);
+    bool update_modeling_identity_preview(const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&,PolygonTopologyLineage);
     bool begin_polygon_loop_cut();
     bool begin_polygon_dissolve();
     bool clean_unused_polygon_vertices();

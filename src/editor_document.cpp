@@ -101,6 +101,7 @@ EditorObject clone_editor_object(const EditorObject& source) {
     cloned.voxelMaterials = source.voxelMaterials;
     cloned.polygon = source.polygon;
     cloned.subdivision = source.subdivision;
+    cloned.modelingTopology = source.modelingTopology;cloned.modelingNextId=source.modelingNextId;
     cloned.voxels = clone_voxel_object(*source.voxels);
     cloned.text3d = source.text3d;
     cloned.gaborVolume = source.gaborVolume;
@@ -320,6 +321,10 @@ bool EditorDocument::validate(std::string* error) const {
                 (object.subdivisionCache && !object.subdivisionCache->mesh))
                 return fail(object.subdivisionCache ? object.subdivisionCache->error : "invalid subdivision level");
         }
+        if (object.modelingTopology) {
+            if(!object.polygon || object.modelingNextId<object.modelingTopology->nextId ||
+                !validate_modeling_topology(*object.polygon,object.subdivision?&*object.subdivision:nullptr,*object.modelingTopology,error)) return fail("Invalid persistent modeling topology");
+        }
         if (object.polygon) {
             const auto valid=validate_polygon_asset(*object.polygon);
             if (!valid || object.polygon->objectId!=id) return fail("invalid polygon object");
@@ -419,7 +424,8 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
         // Format 8 adds only explicit palette ID lists; material definitions remain in DVOX.
         const bool hasSubdivisions=std::any_of(objects_.begin(),objects_.end(),
             [](const auto& entry) {return entry.second.subdivision.has_value();});
-        output << "DVE_EDITOR_SCENE " << (hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
+        const bool hasModeling=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
+        output << "DVE_EDITOR_SCENE " << (hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -494,7 +500,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             }
         }
         output << "next_prefab_instance " << nextPrefabInstanceId_ << "\n";
-        if (hasVoxelPalettes || hasSubdivisions) {
+        if (hasVoxelPalettes || hasSubdivisions || hasModeling) {
             const auto count = std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
             output << "voxel_palettes " << count << "\n";
@@ -507,7 +513,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output << "\n";
             }
         }
-        if (hasSubdivisions) {
+        if (hasSubdivisions || hasModeling) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) {return entry.second.subdivision.has_value();});
             output << "subdivisions " << count << "\n";
@@ -523,6 +529,14 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output << "edge_creases " << settings.edgeCreases.size() << "\n";
                 for (const auto& [edge,strength] : settings.edgeCreases)
                     output << "edge_crease " << edge << ' ' << strength << "\n";
+            }
+        }
+        if(hasModeling) {
+            const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
+            output<<"modeling_topologies "<<count<<"\n";
+            for(const auto& [id,object]:objects_)if(object.modelingTopology) {
+                auto topology=*object.modelingTopology;topology.nextId=(std::max)(topology.nextId,object.modelingNextId);
+                output<<"modeling_object "<<id<<"\n";write_modeling_topology(output,topology);
             }
         }
         output.flush();
@@ -547,7 +561,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -762,6 +776,18 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                     }
                 } else freeze_subdivision_topology(*object->polygon,settings);
                 object->subdivision=std::move(settings);
+            }
+        }
+        if(version>=11) {
+            std::size_t count{};input>>key>>count;
+            if(!input||key!="modeling_topologies"||count>document.objects_.size())throw std::runtime_error("Invalid modeling topology count");
+            std::set<EditorObjectId> seen;
+            for(std::size_t i=0;i<count;++i) {
+                EditorObjectId id{};input>>key>>id;auto* object=document.find_object(id);
+                if(!input||key!="modeling_object"||!object||!object->polygon||!seen.insert(id).second)throw std::runtime_error("Invalid modeling object record");
+                std::string reason;auto topology=read_modeling_topology(input,&reason);
+                if(!topology||!validate_modeling_topology(*object->polygon,object->subdivision?&*object->subdivision:nullptr,*topology,&reason))throw std::runtime_error(reason);
+                object->modelingNextId=topology->nextId;object->modelingTopology=std::move(topology);
             }
         }
         document.path_ = manifestPath;

@@ -1,4 +1,5 @@
 #pragma once
+#include "dve/editor_modeling_topology.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -57,6 +58,8 @@ struct EditorObject {
     std::map<MaterialId, VoxelMaterialDefinition> voxelMaterials;
     std::optional<CookedPolygonAsset> polygon; // Control cage when subdivision is present
     std::optional<SubdivisionSettings> subdivision;
+    std::optional<ModelingTopology> modelingTopology;
+    ModelingId modelingNextId{1}; // high-water mark; Undo and cancelled previews never lower it
     mutable std::optional<SubdivisionEvaluation> subdivisionCache;
     mutable std::uint64_t subdivisionCacheHash{};
     mutable SubdivisionSettings subdivisionCacheSettings{};

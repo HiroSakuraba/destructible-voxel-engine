@@ -11692,9 +11692,14 @@ void NativeEditorController::prune_voxel_selection() {
 }
 
 EditorSelectionSnapshot NativeEditorController::capture_selection_snapshot() const {
-    return {workspace_.selected_objects(), workspace_.selected_object(), selectionDomain_ == SelectionDomain::Voxels,
+    EditorSelectionSnapshot snapshot{workspace_.selected_objects(), workspace_.selected_object(), selectionDomain_ == SelectionDomain::Voxels,
             voxelSelectionObject_, voxelSelection_, selectionDomain_ == SelectionDomain::Polygons,
-            polygonSelection_.object, static_cast<std::uint8_t>(polygonSelection_.mode), polygonSelection_.components};
+            polygonSelection_.object, static_cast<std::uint8_t>(polygonSelection_.mode), polygonSelection_.components,false,{}};
+    const auto* object=workspace_.document().find_object(polygonSelection_.object);
+    if(snapshot.polygonDomain && object && object->polygon && object->modelingTopology) {
+        snapshot.polygonPersistent=true;snapshot.polygonIdentities=modeling_selection_ids(*object->polygon,*object->modelingTopology,polygonSelection_);
+    }
+    return snapshot;
 }
 
 void NativeEditorController::restore_selection_snapshot(const EditorSelectionSnapshot& snapshot) {
@@ -11707,6 +11712,12 @@ void NativeEditorController::restore_selection_snapshot(const EditorSelectionSna
     reset_voxel_selection_state();
     selectionDomain_ = snapshot.polygonDomain ? SelectionDomain::Polygons : snapshot.voxelDomain ? SelectionDomain::Voxels : SelectionDomain::Objects;
     polygonSelection_ = {snapshot.polygonObject, static_cast<PolygonSelectionMode>(snapshot.polygonMode), snapshot.polygonComponents};
+    if(snapshot.polygonPersistent) {
+        polygonSelection_.components.clear();
+        const auto* object=workspace_.document().find_object(snapshot.polygonObject);
+        if(object&&object->polygon&&object->modelingTopology)polygonSelection_.components=resolve_modeling_selection(
+            *object->polygon,*object->modelingTopology,snapshot.polygonMode,snapshot.polygonIdentities);
+    }
     if (snapshot.polygonDomain) prune_polygon_selection();
     if (snapshot.voxelDomain) {
         const auto* object = workspace_.document().find_object(snapshot.voxelObject);

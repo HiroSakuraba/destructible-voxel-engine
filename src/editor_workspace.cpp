@@ -694,6 +694,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"subdiv.select_all","Subdivision","Select All Components",""},
         {"subdiv.select_loop","Subdivision","Select Edge Loops",""},
         {"subdiv.select_ring","Subdivision","Select Edge Rings",""},
+        {"subdiv.loop_cut","Subdivision","Loop Cut and Slide",""},
         {"subdiv.select_grow","Subdivision","Grow Selection",""},
         {"subdiv.select_shrink","Subdivision","Shrink Selection",""},
         {"subdiv.select_connected","Subdivision","Select Connected",""},
@@ -770,6 +771,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"polygon.select_shell","Polygon","Select Connected Components",""},
         {"polygon.select_loop","Polygon","Select Cage Edge Loops",""},
         {"polygon.select_ring","Polygon","Select Cage Edge Rings",""},
+        {"polygon.loop_cut","Polygon","Cage Loop Cut and Slide",""},
         {"polygon.select_grow","Polygon","Grow Component Selection",""},
         {"polygon.select_shrink","Polygon","Shrink Component Selection",""},
         {"polygon.select_invert","Polygon","Invert Component Selection",""},
@@ -950,6 +952,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("subdiv.select_grow","Subdivision Selection",38,false);
     configure("subdiv.select_loop","Subdivision Selection",38,false);
     configure("subdiv.select_ring","Subdivision Selection",38,false);
+    configure("subdiv.loop_cut","Subdivision Modeling",43,false);
+    configure("polygon.loop_cut","Mesh Editing",80,false);
     configure("subdiv.select_shrink","Subdivision Selection",39,false);
     configure("subdiv.select_connected","Subdivision Selection",40,false);
     configure("subdiv.select_invert","Subdivision Selection",41,false);
@@ -1128,6 +1132,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("subdiv.select_ring","Select opposite edges across saved control quads; stops at boundaries and triangles.",{"subdivision","edge","ring"});
     describe("polygon.select_loop","Select loops on an authored subdivision control cage; convert an ordinary polygon mesh to subdivision first.",{"cage","edge","loop"});
     describe("polygon.select_ring","Select rings on an authored subdivision control cage; convert an ordinary polygon mesh to subdivision first.",{"cage","edge","ring"});
+    describe("subdiv.loop_cut","Preview a cut across a planar quad strip and slide it by dragging or typing a fraction; preserve crease and UV lineage.",{"subdivision","cut","slide"});
+    describe("polygon.loop_cut","Cut and slide an authored subdivision cage strip with Apply and Cancel.",{"cage","cut","slide"});
     describe("subdiv.select_shrink","Shrink Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_connected","Select Connected through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_invert","Invert Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});

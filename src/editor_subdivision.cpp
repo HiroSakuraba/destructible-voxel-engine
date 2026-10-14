@@ -434,6 +434,174 @@ CageEdgeSelectionResult select_cage_edge_chain(const CookedPolygonAsset& mesh,
     return result;
 }
 
+CageLoopCutResult cut_cage_edge_ring(const CookedPolygonAsset& source,
+    const SubdivisionSettings& settings,std::uint64_t seed,float fraction) {
+    CageLoopCutResult result;
+    const auto fail=[&](std::string message) { result.polygon.error=std::move(message); return result; };
+    if (!std::isfinite(fraction) || fraction<.001F || fraction>.999F)
+        return fail("Loop position must be finite and between 0.001 and 0.999");
+    const auto ring=select_cage_edge_chain(source,settings,{seed},CageEdgeTraversal::Ring);
+    if (!ring) return fail(ring.error);
+    if (ring.stops.contains(CageEdgeStop::Triangle)) return fail("Loop cut requires a complete quad strip; it cannot split a neighboring triangle");
+    auto initial=settings; initial.level=0;
+    if (const auto evaluated=evaluate_subdivision(source,initial); !evaluated.mesh) return fail(evaluated.error);
+    const auto cage=parse_cage(source,&settings);
+    Topology graph; std::string error;
+    if (!topology(cage,graph,{},false,error)) return fail(error);
+    std::map<std::tuple<float,float,float>,std::uint32_t> first;
+    for (std::uint32_t i=0;i<source.vertices.size();++i) {
+        const auto p=source.vertices[i].position; first.emplace(std::make_tuple(p.x,p.y,p.z),i);
+        result.lineage.vertexSurvivors.emplace(i,i);
+    }
+    std::vector<std::uint32_t> canonical;
+    for (auto p : cage.points) canonical.push_back(first.at(std::make_tuple(p.x,p.y,p.z)));
+    const auto keyOf=[&](Edge key) {
+        const auto indices=edge(canonical[key.first],canonical[key.second]);
+        return (std::uint64_t(indices.first)<<32U)|indices.second;
+    };
+    std::map<std::uint64_t,Edge> lookup;
+    for (const auto& [key,data] : graph.edges) { (void)data; lookup.emplace(keyOf(key),key); }
+    const auto start=lookup.at(seed);
+    std::map<Edge,float> fractions{{start,canonical[start.first]<canonical[start.second]?fraction:1-fraction}};
+    std::vector<Edge> pending{start};
+    while (!pending.empty()) {
+        const auto incoming=pending.back(); pending.pop_back();
+        for (auto id : graph.edges.at(incoming).faces) {
+            const auto& face=cage.faces[id];
+            for (std::size_t i=0;i<4;++i) if (edge(face.vertices[i],face.vertices[(i+1)%4])==incoming) {
+                const float t=face.vertices[i]==incoming.first?fractions.at(incoming):1-fractions.at(incoming);
+                const auto a=face.vertices[(i+2)%4],b=face.vertices[(i+3)%4];
+                const auto opposite=edge(a,b); const float next=a<b?1-t:t;
+                const auto [at,inserted]=fractions.emplace(opposite,next);
+                if (!inserted && std::abs(at->second-next)>1e-5F) return fail("Quad strip has conflicting slide orientation");
+                if (inserted) pending.push_back(opposite);
+            }
+        }
+    }
+    std::map<Edge,Float3> cutPoints;
+    std::map<std::tuple<float,float,float>,Edge> distinctPoints;
+    for (const auto& [key,t] : fractions) {
+        const auto p=add(multiply(cage.points[key.first],1-t),multiply(cage.points[key.second],t));
+        const auto position=std::make_tuple(p.x,p.y,p.z);
+        if (first.contains(position) || !distinctPoints.emplace(position,key).second)
+            return fail("Loop cut would merge distinct control vertices; choose another position");
+        cutPoints.emplace(key,p);
+    }
+    result.polygon.mesh=source; auto& mesh=result.polygon.mesh;
+    mesh.indices.clear(); mesh.submeshes.clear();
+    result.subdivision=settings; result.subdivision.controlFaces.clear(); result.subdivision.edgeCreases.clear();
+    result.polygon.selection={source.objectId,PolygonSelectionMode::Edge,{}};
+    std::map<Edge,std::uint32_t> midpoint;
+    std::vector<std::pair<std::uint32_t,std::uint32_t>> selectedPairs;
+    const auto sameAttributes=[](const PolygonVertex& a,const PolygonVertex& b) {
+        return a.texcoord.x==b.texcoord.x && a.texcoord.y==b.texcoord.y &&
+            a.texcoord1.x==b.texcoord1.x && a.texcoord1.y==b.texcoord1.y &&
+            a.color.x==b.color.x && a.color.y==b.color.y && a.color.z==b.color.z && a.color.w==b.color.w &&
+            a.normal.x==b.normal.x && a.normal.y==b.normal.y && a.normal.z==b.normal.z;
+    };
+    const auto emit=[&](std::array<std::uint32_t,3> indices,std::uint32_t material,
+                        const Face& original,bool unchanged,std::uint32_t triangle) {
+        const auto firstIndex=std::uint32_t(mesh.indices.size());
+        for (unsigned j=0;j<3;++j) {
+            mesh.indices.push_back(indices[j]);
+            if (unchanged) result.lineage.cornerDescendants[triangle*3+j].insert(firstIndex+j);
+            else for (auto oldTriangle : original.triangles) for (unsigned k=0;k<3;++k)
+                if (source.indices[oldTriangle*3+k]==indices[j])
+                    result.lineage.cornerDescendants[oldTriangle*3+k].insert(firstIndex+j);
+        }
+        if (!mesh.submeshes.empty() && mesh.submeshes.back().materialIndex==material) mesh.submeshes.back().indexCount+=3;
+        else mesh.submeshes.push_back({"Control faces",firstIndex,3,material});
+    };
+    for (std::uint32_t faceId=0;faceId<cage.faces.size();++faceId) {
+        const auto& face=cage.faces[faceId]; std::vector<std::size_t> cuts;
+        for (std::size_t j=0;j<face.vertices.size();++j)
+            if (fractions.contains(edge(face.vertices[j],face.vertices[(j+1)%face.vertices.size()]))) cuts.push_back(j);
+        auto& descendants=result.lineage.controlFaceDescendants[faceId];
+        if (cuts.empty()) {
+            std::vector<std::uint32_t> record;
+            for (auto triangle : face.triangles) {
+                const std::array<std::uint32_t,3> ids={source.indices[triangle*3],source.indices[triangle*3+1],source.indices[triangle*3+2]};
+                emit(ids,face.material,face,true,triangle); record.insert(record.end(),ids.begin(),ids.end());
+            }
+            descendants.push_back(std::uint32_t(result.subdivision.controlFaces.size()));
+            result.subdivision.controlFaces.push_back(std::move(record)); continue;
+        }
+        if (face.vertices.size()!=4 || cuts.size()!=2 || (cuts[0]+2)%4!=cuts[1])
+            return fail("The selected ring crosses itself or does not define a simple quad strip");
+        if (mesh.vertices.size()+2>100'000 || result.subdivision.controlFaces.size()+2>kMaxSubdivisionControlTriangles)
+            return fail("Loop cut exceeds the cage size budget");
+        const auto n=normal(face_normal(cage,face)); const auto origin=cage.points[face.vertices[0]];
+        float scale=0;
+        for (auto v : face.vertices) scale=std::max(scale,length(subtract(cage.points[v],origin)));
+        for (std::size_t j=0;j<4;++j) {
+            const auto p=cage.points[face.vertices[j]],q=cage.points[face.vertices[(j+1)%4]],r=cage.points[face.vertices[(j+2)%4]];
+            if (std::abs(dot(subtract(p,origin),n))>scale*1e-5F ||
+                dot(cross(subtract(q,p),subtract(r,q)),n)<=scale*scale*1e-8F)
+                return fail("Initial loop cut supports convex planar control quads; repair this strip first");
+        }
+        std::vector<std::uint32_t> attributes;
+        for (auto geometric : face.vertices) {
+            std::optional<std::uint32_t> chosen;
+            for (auto triangle : face.triangles) for (unsigned j=0;j<3;++j) {
+                const auto index=source.indices[triangle*3+j]; const auto p=source.vertices[index].position;
+                if (first.at(std::make_tuple(p.x,p.y,p.z))!=canonical[geometric]) continue;
+                if (chosen && !sameAttributes(source.vertices[*chosen],source.vertices[index]))
+                    return fail("Control quad has an internal UV/color/normal split; triangulate it before loop cutting");
+                if (chosen && *chosen!=index)
+                    return fail("Control quad has distinct attribute corners on its diagonal; triangulate it before loop cutting");
+                chosen=index;
+            }
+            if (!chosen) return fail("Control face is missing an attribute corner");
+            attributes.push_back(*chosen);
+        }
+        const auto mid=[&](std::size_t j) {
+            const auto a=face.vertices[j],b=face.vertices[(j+1)%4]; const auto key=edge(a,b);
+            const float t=a==key.first?fractions.at(key):1-fractions.at(key);
+            const auto& va=source.vertices[attributes[j]]; const auto& vb=source.vertices[attributes[(j+1)%4]];
+            auto v=va; v.position=cutPoints.at(key); v.normal=normal(add(multiply(va.normal,1-t),multiply(vb.normal,t)));
+            v.texcoord={va.texcoord.x*(1-t)+vb.texcoord.x*t,va.texcoord.y*(1-t)+vb.texcoord.y*t};
+            v.texcoord1={va.texcoord1.x*(1-t)+vb.texcoord1.x*t,va.texcoord1.y*(1-t)+vb.texcoord1.y*t};
+            v.color={va.color.x*(1-t)+vb.color.x*t,va.color.y*(1-t)+vb.color.y*t,va.color.z*(1-t)+vb.color.z*t,va.color.w*(1-t)+vb.color.w*t};
+            const auto index=std::uint32_t(mesh.vertices.size()); mesh.vertices.push_back(v); midpoint.emplace(key,index); return index;
+        };
+        const auto i=cuts[0]; const auto m=mid(i),other=mid((i+2)%4);
+        selectedPairs.push_back({m,other});
+        const std::array<std::uint32_t,4> quads[]={{attributes[i],m,other,attributes[(i+3)%4]},
+            {m,attributes[(i+1)%4],attributes[(i+2)%4],other}};
+        for (const auto& quad : quads) {
+            const std::array<std::uint32_t,3> a={quad[0],quad[1],quad[2]},b={quad[0],quad[2],quad[3]};
+            emit(a,face.material,face,false,0); emit(b,face.material,face,false,0);
+            descendants.push_back(std::uint32_t(result.subdivision.controlFaces.size()));
+            result.subdivision.controlFaces.push_back({a[0],a[1],a[2],b[0],b[1],b[2]});
+        }
+    }
+    if (mesh.indices.size()/3>kMaxSubdivisionControlTriangles) return fail("Loop cut exceeds 50000 control triangles");
+    refresh_editor_polygon(mesh);
+    // Canonical IDs are resolved after emission, but lineage is built from known endpoints,
+    // never from nearest-position matching between the before and after meshes.
+    std::map<std::tuple<float,float,float>,std::uint32_t> afterFirst;
+    std::vector<std::uint32_t> afterCanonical;
+    for (std::uint32_t i=0;i<mesh.vertices.size();++i) {
+        const auto p=mesh.vertices[i].position; afterCanonical.push_back(afterFirst.emplace(std::make_tuple(p.x,p.y,p.z),i).first->second);
+    }
+    const auto afterKey=[&](std::uint32_t a,std::uint32_t b) {
+        const auto key=edge(afterCanonical[a],afterCanonical[b]); return (std::uint64_t(key.first)<<32U)|key.second;
+    };
+    const auto allowed=polygon_all_components(mesh,PolygonSelectionMode::Edge);
+    for (auto old : polygon_all_components(source,PolygonSelectionMode::Edge))
+        if (allowed.contains(old)) result.lineage.edgeDescendants[old].insert(old);
+    for (const auto& [key,index] : midpoint)
+        result.lineage.edgeDescendants[keyOf(key)]={afterKey(canonical[key.first],index),afterKey(index,canonical[key.second])};
+    for (const auto& [key,strength] : settings.edgeCreases) {
+        const auto at=result.lineage.edgeDescendants.find(key);
+        if (at==result.lineage.edgeDescendants.end() || at->second.empty()) return fail("Saved crease has no supported cut lineage");
+        for (auto descendant : at->second) result.subdivision.edgeCreases[descendant]=strength;
+    }
+    for (auto [a,b] : selectedPairs) result.polygon.selection.components.insert(afterKey(a,b));
+    if (const auto evaluated=evaluate_subdivision(mesh,result.subdivision); !evaluated.mesh) return fail(evaluated.error);
+    return result;
+}
+
 void freeze_subdivision_topology(const CookedPolygonAsset& mesh,SubdivisionSettings& settings) {
     if (!settings.controlFaces.empty()) return;
     for (const auto& face : subdivision_control_face_triangles(mesh)) {

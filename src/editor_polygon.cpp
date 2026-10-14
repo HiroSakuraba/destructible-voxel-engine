@@ -890,8 +890,9 @@ std::set<std::uint64_t> polygon_components_in_rect(const EditorObject& object,co
     return result;
 }
 ReplacePolygonCommand::ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,
-    std::string label,std::uint64_t stroke):
-    id_(id),stroke_(stroke),before_(std::move(before)),after_(std::move(after)),label_(std::move(label)) {}
+    std::string label,std::uint64_t stroke,std::optional<SubdivisionSettings> authoredAfter):
+    id_(id),stroke_(stroke),before_(std::move(before)),after_(std::move(after)),
+    afterSubdivision_(std::move(authoredAfter)),explicitSubdivision_(afterSubdivision_.has_value()),label_(std::move(label)) {}
 CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const CookedPolygonAsset& mesh,const std::optional<SubdivisionSettings>& settings) {
     auto* object=document.find_object(id_);
     if(!object||!object->polygon) return CommandResult::fail("Polygon target no longer exists");
@@ -917,7 +918,7 @@ CommandResult ReplacePolygonCommand::execute(EditorDocument& document) {
         if (object && object->subdivision) {
             beforeSubdivision_=*object->subdivision;
             freeze_subdivision_topology(before_,*beforeSubdivision_);
-            afterSubdivision_=remap_subdivision_topology(before_,after_,*beforeSubdivision_);
+            if (!explicitSubdivision_) afterSubdivision_=remap_subdivision_topology(before_,after_,*beforeSubdivision_);
         }
         capturedOverride_=true;
     }

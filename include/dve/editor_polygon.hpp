@@ -39,6 +39,14 @@ struct PolygonEditResult {
     std::string error;
     [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
 };
+// Operation-specific lineage; IDs here are scoped to the before/after mesh arrays.
+// This is not a persistent global topology-ID scheme or a nearest-position remap.
+struct PolygonTopologyLineage {
+    std::map<std::uint32_t,std::uint32_t> vertexSurvivors;
+    std::map<std::uint64_t,std::set<std::uint64_t>> edgeDescendants;
+    std::map<std::uint32_t,std::set<std::uint32_t>> cornerDescendants;
+    std::map<std::uint32_t,std::vector<std::uint32_t>> controlFaceDescendants;
+};
 [[nodiscard]] CookedPolygonAsset make_editor_polygon_cube(EditorObjectId id,float size=1);
 [[nodiscard]] CookedPolygonAsset make_editor_polygon_plane(EditorObjectId id,float size=4);
 void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
@@ -65,7 +73,8 @@ void refresh_editor_polygon(CookedPolygonAsset&,bool normals=false);
     const EditorDocument* scene=nullptr,const std::set<EditorObjectId>* onlyObjects=nullptr);
 class ReplacePolygonCommand final : public IEditorCommand {
 public:
-    ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,std::string label,std::uint64_t stroke=0);
+    ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,std::string label,std::uint64_t stroke=0,
+        std::optional<SubdivisionSettings> authoredAfter = {});
     [[nodiscard]] std::string_view label() const noexcept override { return label_; }
     CommandResult execute(EditorDocument&) override;
     CommandResult undo(EditorDocument&) override;
@@ -76,6 +85,7 @@ private:
     std::uint64_t stroke_{};
     CookedPolygonAsset before_,after_;
     std::optional<SubdivisionSettings> beforeSubdivision_,afterSubdivision_;
+    bool explicitSubdivision_{};
     std::string label_;
     bool capturedOverride_{};
     std::optional<ComponentValue> previousOverride_;

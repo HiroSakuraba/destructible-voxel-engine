@@ -119,6 +119,45 @@ std::optional<PolygonUvAuthoring> read_polygon_uv_authoring(const EditorObject& 
     if(!valid_uv_authoring(*object.polygon,state,error)) return {};
     return state;
 }
+std::optional<PolygonUvAuthoring> remap_polygon_uv_authoring(const PolygonUvAuthoring& state,
+    const CookedPolygonAsset& after,const PolygonTopologyLineage& lineage,std::string* error) {
+    const auto fail=[&](std::string message)->std::optional<PolygonUvAuthoring> {
+        if(error)*error=std::move(message); return {};
+    };
+    if (error) error->clear();
+    if (const auto valid=validate_polygon_asset(after); !valid) return fail(valid.message);
+    PolygonUvAuthoring mapped; mapped.enabled=state.enabled; mapped.layoutHash=polygon_uv_layout_hash(after);
+    for (unsigned channel=0;channel<2;++channel) {
+        if (state.seams[channel].size()>kMaximumUvSeams || state.pins[channel].size()>kMaximumUvPins)
+            return fail("Source UV flags exceed their per-channel budget");
+        for (auto seam : state.seams[channel]) {
+            const auto at=lineage.edgeDescendants.find(seam);
+            if (at==lineage.edgeDescendants.end() || at->second.empty())
+                return fail("A saved UV seam has no cut lineage; triangulate the control face or clear that seam first");
+            mapped.seams[channel].insert(at->second.begin(),at->second.end());
+        }
+        for (auto pin : state.pins[channel]) {
+            const auto at=lineage.cornerDescendants.find(pin);
+            if (at==lineage.cornerDescendants.end() || at->second.empty())
+                return fail("A saved UV pin has no cut lineage; edit refused");
+            mapped.pins[channel].insert(at->second.begin(),at->second.end());
+        }
+    }
+    if (!valid_uv_authoring(after,mapped,error)) return {};
+    return mapped;
+}
+std::optional<std::string> remap_polygon_uv_authoring_record(const EditorObject& object,
+    const CookedPolygonAsset& after,const PolygonTopologyLineage& lineage,std::string* error) {
+    const auto state=read_polygon_uv_authoring(object,error);
+    if (!state) return {};
+    if (!find_component_by_type(std::span<const Component>(object.components),kUvAuthoringComponent)) return std::string{};
+    const auto mapped=remap_polygon_uv_authoring(*state,after,lineage,error);
+    if (!mapped) return {};
+    auto data=encode_uv_authoring(*mapped,after.indices.size());
+    if (data.size()>kMaximumUvStateBytes) { if(error)*error="Remapped UV authoring record exceeds 4 MiB"; return {}; }
+    return data;
+}
+
 std::unique_ptr<IEditorCommand> make_polygon_uv_authoring_command(EditorDocument& document,
     const EditorObject& object,const PolygonUvAuthoring& state,std::string* error) {
     if(!read_polygon_uv_authoring(object,error) || !valid_uv_authoring(*object.polygon,state,error)) return {};

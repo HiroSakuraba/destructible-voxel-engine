@@ -2100,6 +2100,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
                 !mesh_authoring_dragging() && !voxel_authoring_active(),
                 "Select subdivision control-cage edges and finish the active edit first.");
         enabled("polygon.recalculate_normals",mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter a polygon component mode first.");
+        enabled("polygon.loop_cut",components && object->subdivision && polygonSelection_.object==object->id &&
+            polygonSelection_.mode==PolygonSelectionMode::Edge && polygonSelection_.components.size()==1 &&
+            !preview && !gizmoDragging_ && !mesh_authoring_dragging() && !voxel_authoring_active(),
+            "Select one subdivision cage edge and finish the active edit first.");
         for (auto id:{"polygon.select_invert","polygon.select_none"}) enabled(id,mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter polygon component mode first.");
         enabled("polygon.join",mesh && workspace_.selection_count()>1 && !preview,"Select at least two polygon meshes.");
         enabled("polygon.slice",mesh && !preview,"Select a polygon mesh first.");
@@ -3793,6 +3797,12 @@ void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
 }
 
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
+    if (polygonLoopCutDragging_) {
+        polygonPreviewTyped_.clear();
+        polygonPreviewSettings_.amount=std::clamp(polygonLoopCutStartFraction_+
+            (float(x)-float(polygonLoopCutStartX_))/float(std::max(120,layout_.viewport.width/2)),.001F,.999F);
+        update_polygon_preview(); lastPointerX_=x; lastPointerY_=y; return;
+    }
     if(!longJob_ && textEdit_.kind==TextEditKind::Inactive && mesh_authoring_pointer_move(x,y,modifiers)){lastPointerX_=x;lastPointerY_=y;return;}
     hoverX_ = x;
     hoverY_ = y;
@@ -3941,6 +3951,10 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (polygonLoopCutPreview_ && button==PointerButton::Primary && layout_.viewport.contains(x,y) && !(modifiers&4U)) {
+        polygonLoopCutDragging_=true; polygonLoopCutStartX_=x;
+        polygonLoopCutStartFraction_=polygonPreviewSettings_.amount; return;
+    }
     if (!longJob_ && voxel_authoring_pointer_down(button,x,y,modifiers)) return;
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers)){refresh_menu_state();return;}
@@ -4783,6 +4797,9 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (polygonLoopCutDragging_ && button==PointerButton::Primary) {
+        pointer_move(x,y,modifiers); polygonLoopCutDragging_=false; return;
+    }
     if(mesh_authoring_pointer_up(button,x,y,modifiers)){dragButton_=PointerButton::NoButton;refresh_menu_state();return;}
     if (button == PointerButton::Primary && sliceDrag_) {
         update_slice_pointer(x, y, modifiers);

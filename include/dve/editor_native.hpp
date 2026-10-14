@@ -1134,6 +1134,11 @@ private:
     PolygonEditSettings polygonPreviewSettings_{};
     std::string polygonPreviewTyped_;
     bool polygonPreviewValid_{};
+    bool polygonLoopCutPreview_{},polygonLoopCutDragging_{};
+    int polygonLoopCutStartX_{};
+    float polygonLoopCutStartFraction_{.5F};
+    std::optional<std::string> polygonLoopCutUvRecord_;
+    bool begin_polygon_loop_cut();
     bool polygonSlicePreview_{};
     Float3 polygonSlicePoint_{}, polygonSliceOrigin_{}, polygonSliceNormal_{1,0,0};
     int polygonSliceOutput_{}; // 0 front, 1 back, 2 separate

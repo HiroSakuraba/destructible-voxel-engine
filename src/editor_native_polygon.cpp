@@ -1,5 +1,6 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
+#include "dve/editor_mesh_authoring.hpp"
 #include "dve/voxel_metric.hpp"
 #include <algorithm>
 #include <cmath>
@@ -227,6 +228,24 @@ bool NativeEditorController::begin_polygon_preview(PolygonEdit operation) {
     update_polygon_preview(); return true;
 }
 
+bool NativeEditorController::begin_polygon_loop_cut() {
+    cancel_polygon_preview(); prune_polygon_selection();
+    const auto* object=workspace_.document().find_object(polygonSelection_.object);
+    if (!editable(object) || !object->subdivision || workspace_.mode()!=EditorMode::Edit ||
+        playSession_.active() || longJob_ || gizmoDragging_ || mesh_authoring_dragging() ||
+        selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.mode!=PolygonSelectionMode::Edge ||
+        polygonSelection_.components.size()!=1 || is_isolated_out(object->id)) {
+        set_status("Select one subdivision cage edge and finish the active edit first",true); return false;
+    }
+    std::string error;
+    if (!read_polygon_uv_authoring(*object,&error)) {set_status(error,true);return false;}
+    close_previews_for_voxel_edit("loop cut preview");
+    polygonPreviewBefore_=*object->polygon; polygonPreviewSubdivision_=object->subdivision;
+    polygonPreviewSelection_=polygonSelection_; polygonPreviewSettings_={}; polygonPreviewSettings_.amount=.5F;
+    polygonPreviewTyped_.clear(); polygonLoopCutPreview_=true;
+    update_polygon_preview(); return true;
+}
+
 bool NativeEditorController::begin_polygon_slice() {
     cancel_polygon_preview();
     if (gizmoDragging_) finish_gizmo_drag(true);
@@ -251,6 +270,27 @@ void NativeEditorController::update_polygon_preview() {
     if (!editable(object)) { cancel_polygon_preview(); return; }
     *object->polygon = *polygonPreviewBefore_; object->subdivision=polygonPreviewSubdivision_;
     polygonSelection_ = polygonPreviewSelection_;
+    if (polygonLoopCutPreview_) {
+        polygonLoopCutUvRecord_.reset(); polygonPreviewValid_=false;
+        float fraction=polygonPreviewSettings_.amount;
+        if (!polygonPreviewTyped_.empty()) {
+            char* end{}; fraction=std::strtof(polygonPreviewTyped_.c_str(),&end);
+            if (end!=polygonPreviewTyped_.c_str()+polygonPreviewTyped_.size() || !std::isfinite(fraction)) {
+                set_status("Enter a finite loop position",true); refresh_menu_state(); return;
+            }
+        }
+        auto cut=cut_cage_edge_ring(*polygonPreviewBefore_,*polygonPreviewSubdivision_,
+            *polygonPreviewSelection_.components.begin(),fraction);
+        if (!cut) {set_status(cut.polygon.error,true);refresh_menu_state();return;}
+        std::string error;
+        auto record=remap_polygon_uv_authoring_record(*object,cut.polygon.mesh,cut.lineage,&error);
+        if (!record) {set_status(error,true);refresh_menu_state();return;}
+        polygonPreviewSettings_.amount=fraction;
+        *object->polygon=cut.polygon.mesh; object->subdivision=cut.subdivision; object->subdivisionCache.reset();
+        polygonSelection_=cut.polygon.selection; polygonLoopCutUvRecord_=std::move(record);
+        polygonPreviewValid_=true;
+        refresh_menu_state(); return;
+    }
     if (polygonSlicePreview_) {
         float offset=0;
         if (!polygonPreviewTyped_.empty()) {
@@ -297,19 +337,37 @@ void NativeEditorController::cancel_polygon_preview() {
     if (auto* object=workspace_.document().find_object(polygonPreviewSelection_.object)) {object->polygon=*polygonPreviewBefore_;object->subdivision=polygonPreviewSubdivision_;object->subdivisionCache.reset();}
     polygonSelection_=polygonPreviewSelection_;
     polygonPreviewBefore_.reset(); polygonPreviewSubdivision_.reset(); polygonPreviewTyped_.clear(); polygonPreviewValid_=false;
+    polygonLoopCutPreview_=false; polygonLoopCutDragging_=false;
+    polygonLoopCutUvRecord_.reset();
     polygonSlicePreview_=false; polygonSliceBack_.reset();
 }
 
 bool NativeEditorController::commit_polygon_preview() {
     if (!polygonPreviewBefore_ || !polygonPreviewValid_) { set_status("Fix the polygon preview before applying it",true); return false; }
+    // Revalidate saved flags at Apply, including inspector mutations since the last drag.
+    if (polygonLoopCutPreview_) {
+        update_polygon_preview();
+        if (!polygonPreviewBefore_ || !polygonPreviewValid_) return false;
+    }
     auto* object=workspace_.document().find_object(polygonPreviewSelection_.object);
     if (!editable(object) || workspace_.mode()!=EditorMode::Edit) { cancel_polygon_preview(); return false; }
     auto mesh=*object->polygon; const auto selection=polygonSelection_;
+    const bool loopCut=polygonLoopCutPreview_;
+    const auto authoredAfter=loopCut?object->subdivision:std::optional<SubdivisionSettings>{};
+    const auto uvRecord=polygonLoopCutUvRecord_;
     const bool slice=polygonSlicePreview_; auto back=polygonSliceBack_;
     cancel_polygon_preview();
     const auto before=capture_selection_snapshot();
-    auto command=std::make_unique<CompoundCommand>(slice?"Slice polygon mesh":"Apply polygon tool");
-    command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),slice?"Slice polygon geometry":"Apply polygon tool"));
+    auto command=std::make_unique<CompoundCommand>(slice?"Slice polygon mesh":loopCut?"Loop cut and slide":"Apply polygon tool");
+    command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),
+        slice?"Slice polygon geometry":loopCut?"Loop cut and slide":"Apply polygon tool",0,authoredAfter));
+    if (loopCut && uvRecord && !uvRecord->empty()) {
+        const auto* component=find_component_by_type(std::span<const Component>(object->components),kUvAuthoringComponent);
+        if (!component) {set_status("UV authoring component changed; recompute the cut",true);return false;}
+        const auto at=component->properties.find("state");
+        command->add(std::make_unique<SetComponentPropertyCommand>(object->id,component->id,"state",
+            at==component->properties.end()?std::optional<ComponentValue>{}:at->second,ComponentValue{*uvRecord},"Preserve loop-cut UV seams and pins"));
+    }
     std::optional<EditorObjectId> partId;
     if (back) {
         const auto id=workspace_.document().allocate_object_id(); partId=id;
@@ -347,9 +405,10 @@ bool NativeEditorController::handle_polygon_preview_key(std::string_view key) {
     else if (key=="x"||key=="y"||key=="z") polygonPreviewSettings_.uvAxis=key=="x"?0U:key=="y"?1U:2U;
     else if (key=="up"||key=="down") {
         const float step=key=="up"?.01F:-.01F;
-        if (polygonPreviewOperation_==PolygonEdit::Inset||polygonPreviewOperation_==PolygonEdit::Bevel)
+        if (!polygonLoopCutPreview_ && (polygonPreviewOperation_==PolygonEdit::Inset||polygonPreviewOperation_==PolygonEdit::Bevel))
             polygonPreviewSettings_.inset=std::clamp(polygonPreviewSettings_.inset+step,0.0F,.99F);
-        else polygonPreviewSettings_.amount+=step;
+        else polygonPreviewSettings_.amount=polygonLoopCutPreview_?
+            std::clamp(polygonPreviewSettings_.amount+step,.001F,.999F):polygonPreviewSettings_.amount+step;
         polygonPreviewTyped_.clear();
     } else if (key.size()==1 && ((key[0]>='0'&&key[0]<='9')||key[0]=='.'||key[0]=='-')) {
         if (polygonPreviewTyped_.size()<16) polygonPreviewTyped_+=key;
@@ -360,6 +419,11 @@ bool NativeEditorController::handle_polygon_preview_key(std::string_view key) {
 
 std::vector<std::string> NativeEditorController::polygon_preview_lines() const {
     if (!polygonPreviewBefore_) return {};
+    if (polygonLoopCutPreview_) return {"Loop Cut and Slide (convex planar quad strip)",
+        "Position along seed: "+(polygonPreviewTyped_.empty()?std::to_string(polygonPreviewSettings_.amount):polygonPreviewTyped_),
+        "Drag left/right in viewport or type 0.001..0.999; arrows adjust",
+        "One cut; split creases, seams and pinned corners follow edit lineage",
+        polygonPreviewValid_?"Enter apply | Esc cancel":"Invalid preview | Esc cancel"};
     if (polygonSlicePreview_) return {"Polygon Slice",std::string("World axis: ")+(polygonSliceNormal_.x?"X":polygonSliceNormal_.y?"Y":"Z")+" | offset m: "+(polygonPreviewTyped_.empty()?"0":polygonPreviewTyped_),
         std::string("Output: ")+(polygonSliceOutput_==0?"Front":polygonSliceOutput_==1?"Back":"Separate")+" | caps: "+(polygonSliceCap_?"on":"off"),
         "X/Y/Z axis | F/B/S output | C caps",polygonPreviewValid_?"Enter apply | Esc cancel":"Invalid preview | Esc cancel"};
@@ -447,6 +511,7 @@ bool NativeEditorController::extract_selected_polygon() {
 }
 
 bool NativeEditorController::handle_polygon_action(std::string_view action) {
+    if (action=="polygon.loop_cut") return begin_polygon_loop_cut();
     if (action=="polygon.vertex_mode") return set_polygon_mode(PolygonSelectionMode::Vertex);
     if (action=="polygon.edge_mode") return set_polygon_mode(PolygonSelectionMode::Edge);
     if (action=="polygon.face_mode") return set_polygon_mode(PolygonSelectionMode::Face);
@@ -546,6 +611,7 @@ const std::map<std::string_view,std::string_view>& subdivision_tools() {
         {"subdiv.select_all","edit.select_all"},
         {"subdiv.select_loop","polygon.select_loop"},
         {"subdiv.select_ring","polygon.select_ring"},
+        {"subdiv.loop_cut","polygon.loop_cut"},
         {"subdiv.select_grow","polygon.select_grow"},
         {"subdiv.select_shrink","polygon.select_shrink"},
         {"subdiv.select_connected","polygon.select_shell"},

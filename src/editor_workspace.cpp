@@ -1189,7 +1189,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("subdiv.delete","Delete Selection through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.duplicate","Duplicate Selection through the shared control-cage modeling workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("mesh.chamfer_edges","Preview a flat one-segment chamfer with editable width and offset space.",{"mesh","bevel","chamfer"});
-    describe("mesh.fillet_edges","Preview a segmented circular convex mesh fillet with Width, Segments, Depth and Smoothing Angle.",{"mesh","bevel","fillet","round"});
+    describe("mesh.fillet_edges","Preview a segmented fillet on a convex solid, straight open crease or rolled boundary; unsupported corner joins are refused.",{"mesh","bevel","fillet","round"});
     describe("subdiv.chamfer_edges","Chamfer selected convex cage edges through the shared options preview.",{"subdivision","chamfer"});
     describe("subdiv.fillet_edges","Round selected convex cage edges through the shared options preview.",{"subdivision","fillet","round"});
     describe("create.subdivision","Create an owned Catmull-Clark subdivision surface with an editable cage.",{"subdivision","subdiv","cage"});

@@ -26,6 +26,10 @@ struct EdgeBevelSettings {
     bool autoFit{true}; // conservative shortest-edge width cap
     float smoothingAngle{30.0F};
 };
+// Explicit reconstruction and provenance: closed convex solids, straight open crease chains,
+// and straight open boundary chains. Unsupported endpoint/corner joins refuse atomically.
+[[nodiscard]] PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset&,const PolygonSelection&,
+    const EdgeBevelSettings&,Float3 objectScale={1,1,1},const SubdivisionSettings* authored=nullptr);
 [[nodiscard]] PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset&,const PolygonSelection&,
     const EdgeBevelSettings&,Float3 objectScale={1,1,1});
 // Compatibility overload: original mesh-local bisector-plane offset and flat chamfer.

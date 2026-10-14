@@ -273,12 +273,23 @@ bool NativeEditorController::begin_polygon_dissolve() {
     if (!editable(object) || !object->subdivision || workspace_.mode()!=EditorMode::Edit ||
         playSession_.active() || longJob_ || gizmoDragging_ || mesh_authoring_dragging() ||
         selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.mode!=PolygonSelectionMode::Edge ||
-        polygonSelection_.components.empty() || is_isolated_out(object->id)) {
+        voxel_authoring_active() || polygonSelection_.components.empty() || is_isolated_out(object->id)) {
         set_status("Select subdivision cage edges and finish the active edit first",true);return false;
     }
+    std::string error;
+    const auto flags=read_polygon_uv_authoring(*object,&error);
+    if (!flags) {set_status(error,true);return false;}
+    // Refuse up front instead of opening a preview that can never apply (no false success).
+    auto protectedEdges=flags->seams[0];protectedEdges.insert(flags->seams[1].begin(),flags->seams[1].end());
+    if (const auto check=dissolve_cage_edges(*object->polygon,*object->subdivision,polygonSelection_,protectedEdges);!check) {
+        set_status(check.error,true);refresh_menu_state();return false;
+    }
+    close_previews_for_voxel_edit("dissolve preview");
     polygonPreviewBefore_=*object->polygon;polygonPreviewSubdivision_=object->subdivision;
     polygonPreviewSelection_=polygonSelection_;polygonPreviewTyped_.clear();polygonDissolvePreview_=true;
-    update_polygon_preview();return true;
+    update_polygon_preview();
+    if (!polygonPreviewValid_) {cancel_polygon_preview();refresh_menu_state();return false;}
+    return true;
 }
 
 bool NativeEditorController::begin_polygon_loop_cut() {

@@ -21,6 +21,7 @@
 #include <iterator>
 #include <mutex>
 #include <algorithm>
+#include <vector>
 #include <bit>
 #include <array>
 #include <charconv>
@@ -2108,8 +2109,18 @@ void NativeEditorController::refresh_menu_state() noexcept {
             polygonSelection_.mode==PolygonSelectionMode::Edge && !preview && !gizmoDragging_ &&
             !mesh_authoring_dragging() && !voxel_authoring_active(),
             "Select subdivision cage edges and finish the active edit first.");
-        enabled("polygon.clean_unused",mesh && workspace_.selection_count()==1 && !preview && !gizmoDragging_ &&
-            !mesh_authoring_dragging() && !voxel_authoring_active(),"Select one visible unlocked mesh and finish the active edit first.");
+        {
+            const bool ready=mesh && workspace_.selection_count()==1 && !preview && !gizmoDragging_ &&
+                !mesh_authoring_dragging() && !voxel_authoring_active();
+            bool unused=false;
+            if (ready) {
+                std::vector<bool> used(object->polygon->vertices.size());
+                for (auto index : object->polygon->indices) if (index<used.size()) used[index]=true;
+                unused=std::find(used.begin(),used.end(),false)!=used.end();
+            }
+            enabled("polygon.clean_unused",ready && unused,ready?"No unused vertices to remove.":
+                "Select one visible unlocked mesh and finish the active edit first.");
+        }
         for (auto id:{"polygon.select_invert","polygon.select_none"}) enabled(id,mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter polygon component mode first.");
         enabled("polygon.join",mesh && workspace_.selection_count()>1 && !preview,"Select at least two polygon meshes.");
         enabled("polygon.slice",mesh && !preview,"Select a polygon mesh first.");

@@ -467,8 +467,16 @@ void native_cleanup_history() {
     PolygonUvAuthoring flags;flags.layoutHash=polygon_uv_layout_hash(f.mesh);flags.seams[1]={diagonal};std::string error;
     auto command=make_polygon_uv_authoring_command(c.workspace().document(),*c.workspace().document().find_object(1),flags,&error);
     check(bool(command)&&c.workspace().commands().execute(c.workspace().document(),std::move(command)).success,"save protected UV1 seam");
-    check(c.dispatch_action("subdiv.dissolve_edges")&&!c.dispatch_action("subdiv.preview_apply"),"UV1 seam blocks dissolve Apply");
-    c.key_down("escape",false,false,false);
+    const auto seamHistory=c.workspace().commands().size();
+    check(!c.dispatch_action("subdiv.dissolve_edges"),"UV1 seam refuses dissolve instead of opening a dead preview");
+    check(c.polygon_preview_lines().empty()&&c.workspace().commands().size()==seamHistory&&
+        *c.workspace().document().find_object(1)->subdivision==f.settings,"refused dissolve leaves no preview, history or metadata change");
+    c.workspace().document().find_object(1)->flags.locked=true;
+    check(!c.dispatch_action("subdiv.dissolve_edges")&&c.polygon_preview_lines().empty(),"locked cage refuses dissolve");
+    c.workspace().document().find_object(1)->flags.locked=false;
+    c.workspace().document().find_object(1)->flags.visible=false;
+    check(!c.dispatch_action("subdiv.dissolve_edges")&&c.polygon_preview_lines().empty(),"hidden cage refuses dissolve");
+    c.workspace().document().find_object(1)->flags.visible=true;
 
     auto dirty=with_unused_vertices();const auto oldEdge=key(dirty.mesh,{1,1,0},{2,1,0});dirty.settings.edgeCreases[oldEdge]=2;
     EditorDocument d("Cleanup history");EditorObject mesh(1,"Dirty cage");mesh.polygon=dirty.mesh;mesh.subdivision=dirty.settings;d.add_object(std::move(mesh));
@@ -489,6 +497,11 @@ void native_cleanup_history() {
     const auto undone=read_polygon_uv_authoring(*target,&error);check(undone&&undone->seams==flags.seams&&undone->pins==flags.pins,"cleanup Undo restores UV record");
     check(clean.dispatch_action("edit.redo"),"cleanup Redo");const auto noOpCount=clean.workspace().commands().size();
     check(!clean.dispatch_action("subdiv.clean_unused")&&clean.workspace().commands().size()==noOpCount,"repeated cleanup adds no false Undo entry");
+    {
+        clean.refresh_menu_state();
+        const auto* action=std::as_const(clean.workspace().menus()).find("polygon.clean_unused");
+        check(action&&!action->enabled&&!action->disabledReason.empty(),"cleanup menu is disabled with a reason when nothing is unused");
+    }
     target=clean.workspace().document().find_object(1);
     clean.workspace().document().find_object(1)->flags.locked=true;check(!clean.dispatch_action("subdiv.clean_unused"),"locked mesh refuses cleanup");
     clean.workspace().document().find_object(1)->flags.locked=false;

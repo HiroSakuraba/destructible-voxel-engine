@@ -486,6 +486,22 @@ bool NativeEditorController::handle_polygon_action(std::string_view action) {
     prune_polygon_selection();
     const auto* object=workspace_.document().find_object(polygonSelection_.object);
     if (!editable(object)) return false;
+    if (action=="polygon.select_loop" || action=="polygon.select_ring") {
+        if (!object->subdivision || polygonSelection_.mode!=PolygonSelectionMode::Edge ||
+            polygonSelection_.components.empty() || polygonPreviewBefore_ || mesh_authoring_dragging() ||
+            gizmoDragging_ || workspace_.mode()!=EditorMode::Edit || playSession_.active() || longJob_ ||
+            is_isolated_out(object->id)) {
+            set_status("Select subdivision cage edges and finish the active edit first",true); return false;
+        }
+        const auto result=select_cage_edge_chain(*object->polygon,*object->subdivision,
+            polygonSelection_.components,action=="polygon.select_loop"?CageEdgeTraversal::Loop:CageEdgeTraversal::Ring);
+        if (!result) { set_status(result.error,true); return false; }
+        select_polygon_components(result.edges,SelectionOperation::Replace);
+        std::string message=std::to_string(result.edges.size())+" cage edges selected";
+        for (auto stop : result.stops) message+=stop==CageEdgeStop::Boundary?"; stopped at boundary":
+            stop==CageEdgeStop::Pole?"; stopped at pole":"; stopped at triangle";
+        set_status(std::move(message)); return true;
+    }
     if (action=="edit.select_all"||action=="polygon.select_invert"||action=="polygon.select_none") {
         auto hits=polygon_all_components(*object->polygon,polygonSelection_.mode);
         if (action=="polygon.select_none") hits.clear();
@@ -528,6 +544,8 @@ const std::map<std::string_view,std::string_view>& subdivision_tools() {
         {"subdiv.rotate","transform.rotate"},
         {"subdiv.scale","transform.scale"},
         {"subdiv.select_all","edit.select_all"},
+        {"subdiv.select_loop","polygon.select_loop"},
+        {"subdiv.select_ring","polygon.select_ring"},
         {"subdiv.select_grow","polygon.select_grow"},
         {"subdiv.select_shrink","polygon.select_shrink"},
         {"subdiv.select_connected","polygon.select_shell"},

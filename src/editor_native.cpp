@@ -2094,6 +2094,11 @@ void NativeEditorController::refresh_menu_state() noexcept {
             enabled(id,components && polygonSelection_.mode==PolygonSelectionMode::Face && !preview,"Select polygon triangle faces first.");
         for (auto id:{"polygon.weld","polygon.flip_normals","polygon.select_shell","polygon.select_grow","polygon.select_shrink"})
             enabled(id,components && !preview,"Select polygon components first.");
+        for (auto id:{"polygon.select_loop","polygon.select_ring"})
+            enabled(id,components && object->subdivision && polygonSelection_.object==object->id &&
+                polygonSelection_.mode==PolygonSelectionMode::Edge && !preview && !gizmoDragging_ &&
+                !mesh_authoring_dragging() && !voxel_authoring_active(),
+                "Select subdivision control-cage edges and finish the active edit first.");
         enabled("polygon.recalculate_normals",mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter a polygon component mode first.");
         for (auto id:{"polygon.select_invert","polygon.select_none"}) enabled(id,mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter polygon component mode first.");
         enabled("polygon.join",mesh && workspace_.selection_count()>1 && !preview,"Select at least two polygon meshes.");

@@ -49,7 +49,8 @@ struct CageDissolveResult {
 [[nodiscard]] std::uint32_t subdivision_control_triangle(const EditorObject&, std::uint32_t evaluatedTriangle);
 class SetSubdivisionSettingsCommand final : public IEditorCommand {
 public:
-    SetSubdivisionSettingsCommand(EditorObjectId id, SubdivisionSettings before, SubdivisionSettings after);
+    SetSubdivisionSettingsCommand(EditorObjectId id, SubdivisionSettings before, SubdivisionSettings after,
+        std::optional<ModelingTopology> authoredTopology = {});
     std::string_view label() const noexcept override { return "Subdivision surface settings"; }
     CommandResult execute(EditorDocument&) override;
     CommandResult undo(EditorDocument&) override;
@@ -58,6 +59,7 @@ private:
     EditorObjectId id_{};
     SubdivisionSettings before_{},after_{};
     bool captured_{};
+    std::optional<ModelingTopology> beforeTopology_,afterTopology_;
     std::optional<ComponentValue> levelOverride_,sharpOverride_,geometryOverride_;
 };
 }

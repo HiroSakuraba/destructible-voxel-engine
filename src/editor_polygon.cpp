@@ -316,13 +316,14 @@ PolygonCleanupResult compact_polygon_vertices(const CookedPolygonAsset& source,c
         geometricSurvivors.emplace(beforeCanonical[i],next);
     }
     for (auto& index : mesh.indices) index=result.lineage.vertexSurvivors.at(index);
-    const auto afterCanonical=canonical(mesh);
+    const auto afterCanonical=canonical(mesh);result.lineage.afterVertexGroups=afterCanonical;
     for (auto& [old,next] : geometricSurvivors) { (void)old; next=afterCanonical[next]; }
     for (auto old : polygon_all_components(source,PolygonSelectionMode::Edge)) {
         const auto a=geometricSurvivors.at(std::uint32_t(old>>32U)),b=geometricSurvivors.at(std::uint32_t(old));
         result.lineage.edgeDescendants[old].insert(edge(a,b).key());
     }
     for (std::uint32_t i=0;i<mesh.indices.size();++i) result.lineage.cornerDescendants[i].insert(i);
+    for (std::uint32_t i=0;i<mesh.indices.size()/3;++i) result.lineage.triangleDescendants[i]={i};
     auto& selected=result.polygon.selection.components;selected.clear();
     for (auto id : selection.components) {
         if (selection.mode==PolygonSelectionMode::Face) selected.insert(id);
@@ -393,7 +394,7 @@ PolygonCleanupResult finish_cleanup(const CookedPolygonAsset& source,CookedPolyg
     for(auto old:used) {result.lineage.vertexSurvivors[old]=std::uint32_t(output.vertices.size());output.vertices.push_back(mesh.vertices[old]);}
     result.removedVertices=source.vertices.size()-output.vertices.size();
     for(auto& i:output.indices)i=result.lineage.vertexSurvivors.at(i);
-    const auto beforeCanonical=canonical(source),afterCanonical=canonical(output);
+    const auto beforeCanonical=canonical(source),afterCanonical=canonical(output);result.lineage.afterVertexGroups=afterCanonical;
     std::map<std::uint32_t,std::uint32_t> geometric;
     for(const auto& [old,next]:result.lineage.vertexSurvivors)geometric.emplace(beforeCanonical[old],afterCanonical[next]);
     const auto allowed=polygon_all_components(output,PolygonSelectionMode::Edge);
@@ -1122,10 +1123,10 @@ std::set<std::uint64_t> polygon_components_in_rect(const EditorObject& object,co
     return result;
 }
 ReplacePolygonCommand::ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,
-    std::string label,std::uint64_t stroke,std::optional<SubdivisionSettings> authoredAfter,bool refreshAfter):
+    std::string label,std::uint64_t stroke,std::optional<SubdivisionSettings> authoredAfter,bool refreshAfter,std::optional<ModelingTopology> authoredTopology):
     id_(id),stroke_(stroke),before_(std::move(before)),after_(std::move(after)),
-    afterSubdivision_(std::move(authoredAfter)),explicitSubdivision_(afterSubdivision_.has_value()),refreshAfter_(refreshAfter),label_(std::move(label)) {}
-CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const CookedPolygonAsset& mesh,const std::optional<SubdivisionSettings>& settings,bool refresh) {
+    afterSubdivision_(std::move(authoredAfter)),explicitSubdivision_(afterSubdivision_.has_value()),afterTopology_(std::move(authoredTopology)),explicitTopology_(afterTopology_.has_value()),refreshAfter_(refreshAfter),label_(std::move(label)) {}
+CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const CookedPolygonAsset& mesh,const std::optional<SubdivisionSettings>& settings,bool refresh,const std::optional<ModelingTopology>& topology) {
     auto* object=document.find_object(id_);
     if(!object||!object->polygon) return CommandResult::fail("Polygon target no longer exists");
     if(object->flags.locked) return CommandResult::fail("Polygon target is locked");
@@ -1134,6 +1135,10 @@ CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const Cooked
         const auto evaluated=evaluate_subdivision(mesh,*settings);
         if (!evaluated.mesh) return CommandResult::fail(evaluated.error);
     }
+    std::string topologyError;
+    if(topology&&!validate_modeling_topology(mesh,settings?&*settings:nullptr,*topology,&topologyError))return CommandResult::fail(topologyError);
+    object->modelingTopology=topology;
+    if(topology)object->modelingNextId=(std::max)(object->modelingNextId,topology->nextId);
     object->subdivision=settings;object->subdivisionCache.reset();
     object->polygon=mesh; object->polygon->objectId=id_;
     // Undo restores the exact captured cage; re-deriving bounds/tangents would drift its content hash.
@@ -1154,14 +1159,27 @@ CommandResult ReplacePolygonCommand::execute(EditorDocument& document) {
             freeze_subdivision_topology(before_,*beforeSubdivision_);
             if (!explicitSubdivision_) afterSubdivision_=remap_subdivision_topology(before_,after_,*beforeSubdivision_);
         }
+        beforeTopology_=object?object->modelingTopology:std::nullopt;
+        if(beforeTopology_ && !explicitTopology_) {
+            if(before_.indices!=after_.indices || before_.vertices.size()!=after_.vertices.size())
+                return CommandResult::fail("This topology edit cannot preserve persistent element references yet");
+            std::string error;afterTopology_=beforeTopology_;
+            if(!validate_modeling_topology(after_,afterSubdivision_?&*afterSubdivision_:nullptr,*afterTopology_,&error)) {
+                if(!modeling_matches_legacy_partition(before_,*beforeTopology_))return CommandResult::fail(error);
+                const auto changed=change_modeling_faces(before_,beforeSubdivision_?&*beforeSubdivision_:nullptr,
+                    afterSubdivision_?&*afterSubdivision_:nullptr,*beforeTopology_,object->modelingNextId,&after_);
+                if(!changed)return CommandResult::fail(changed.error);afterTopology_=changed.topology;
+            }
+        }
+        if(beforeTopology_) {std::string error;if(!validate_modeling_topology(before_,beforeSubdivision_?&*beforeSubdivision_:nullptr,*beforeTopology_,&error))return CommandResult::fail(error);}
         capturedOverride_=true;
     }
-    const auto result=apply(document,after_,afterSubdivision_,refreshAfter_);
+    const auto result=apply(document,after_,afterSubdivision_,refreshAfter_,afterTopology_);
     if(result.success&&object->prefabLink) object->prefabLink->overrides["polygon.geometry"]=std::int64_t{1};
     return result;
 }
 CommandResult ReplacePolygonCommand::undo(EditorDocument& document) {
-    const auto result=apply(document,before_,beforeSubdivision_,false);
+    const auto result=apply(document,before_,beforeSubdivision_,false,beforeTopology_);
     if(result.success) if(auto* object=document.find_object(id_);object->prefabLink) {
         if(previousOverride_) object->prefabLink->overrides["polygon.geometry"]=*previousOverride_;
         else object->prefabLink->overrides.erase("polygon.geometry");
@@ -1171,7 +1189,7 @@ CommandResult ReplacePolygonCommand::undo(EditorDocument& document) {
 bool ReplacePolygonCommand::merge_with(const IEditorCommand& other) {
     const auto* next=dynamic_cast<const ReplacePolygonCommand*>(&other);
     if(!next||stroke_==0||stroke_!=next->stroke_||id_!=next->id_||label_!=next->label_) return false;
-    after_=next->after_; afterSubdivision_=next->afterSubdivision_; refreshAfter_=next->refreshAfter_; return true;
+    after_=next->after_; afterSubdivision_=next->afterSubdivision_;afterTopology_=next->afterTopology_; refreshAfter_=next->refreshAfter_; return true;
 }
 
 std::vector<EditorPolygonDrawTriangle> build_editor_polygon_draw_list(

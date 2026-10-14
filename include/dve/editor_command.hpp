@@ -42,6 +42,8 @@ struct EditorSelectionSnapshot {
     EditorObjectId polygonObject{};
     std::uint8_t polygonMode{2};
     std::set<std::uint64_t> polygonComponents;
+    bool polygonPersistent{};
+    std::set<ModelingId> polygonIdentities;
 };
 
 class EditorCommandStack {

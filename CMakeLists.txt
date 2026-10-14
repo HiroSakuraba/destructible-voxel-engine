@@ -835,6 +835,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_voxel_selection.cpp
         src/editor_scatter.cpp
         src/editor_polygon.cpp
+        src/editor_modeling_topology.cpp
         src/editor_subdivision.cpp
         src/editor_native_polygon.cpp
         src/editor_native_mesh_authoring.cpp
@@ -2753,6 +2754,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_subdivision_tests tests/test_editor_subdivision.cpp)
         target_link_libraries(dve_editor_subdivision_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_subdivision_tests COMMAND dve_editor_subdivision_tests)
+        add_executable(dve_editor_modeling_topology_tests tests/test_editor_modeling_topology.cpp)
+        target_link_libraries(dve_editor_modeling_topology_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_modeling_topology_tests COMMAND dve_editor_modeling_topology_tests)
         add_executable(dve_editor_cage_edge_selection_tests tests/test_editor_cage_edge_selection.cpp)
         target_link_libraries(dve_editor_cage_edge_selection_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_cage_edge_selection_tests COMMAND dve_editor_cage_edge_selection_tests)

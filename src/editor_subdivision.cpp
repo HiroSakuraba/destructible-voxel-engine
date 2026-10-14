@@ -503,6 +503,8 @@ CageLoopCutResult cut_cage_edge_ring(const CookedPolygonAsset& source,
     const auto emit=[&](std::array<std::uint32_t,3> indices,std::uint32_t material,
                         const Face& original,bool unchanged,std::uint32_t triangle) {
         const auto firstIndex=std::uint32_t(mesh.indices.size());
+        if(unchanged)result.lineage.triangleDescendants[triangle].insert(firstIndex/3);
+        else for(auto old:original.triangles)result.lineage.triangleDescendants[old].insert(firstIndex/3);
         for (unsigned j=0;j<3;++j) {
             mesh.indices.push_back(indices[j]);
             if (unchanged) result.lineage.cornerDescendants[triangle*3+j].insert(firstIndex+j);
@@ -585,6 +587,7 @@ CageLoopCutResult cut_cage_edge_ring(const CookedPolygonAsset& source,
     for (std::uint32_t i=0;i<mesh.vertices.size();++i) {
         const auto p=mesh.vertices[i].position; afterCanonical.push_back(afterFirst.emplace(std::make_tuple(p.x,p.y,p.z),i).first->second);
     }
+    result.lineage.afterVertexGroups=afterCanonical;
     const auto afterKey=[&](std::uint32_t a,std::uint32_t b) {
         const auto key=edge(afterCanonical[a],afterCanonical[b]); return (std::uint64_t(key.first)<<32U)|key.second;
     };
@@ -967,8 +970,8 @@ std::uint32_t subdivision_control_triangle(const EditorObject& object,std::uint3
         triangle<object.subdivisionCache->controlTriangles.size()) return object.subdivisionCache->controlTriangles[triangle];
     return triangle;
 }
-SetSubdivisionSettingsCommand::SetSubdivisionSettingsCommand(EditorObjectId id,SubdivisionSettings before,SubdivisionSettings after):
-    id_(id),before_(before),after_(after) {}
+SetSubdivisionSettingsCommand::SetSubdivisionSettingsCommand(EditorObjectId id,SubdivisionSettings before,SubdivisionSettings after,std::optional<ModelingTopology> authoredTopology):
+    id_(id),before_(before),after_(after),afterTopology_(std::move(authoredTopology)) {}
 CommandResult SetSubdivisionSettingsCommand::apply(EditorDocument& document,SubdivisionSettings expected,SubdivisionSettings value) {
     auto* object=document.find_object(id_);
     if (!object || !object->polygon || !object->subdivision) return CommandResult::fail("Subdivision source no longer exists");
@@ -988,9 +991,17 @@ CommandResult SetSubdivisionSettingsCommand::execute(EditorDocument& document) {
             if (const auto at=overrides.find("subdivision.sharp_edges");at!=overrides.end()) sharpOverride_=at->second;
             if (const auto at=overrides.find("polygon.geometry");at!=overrides.end()) geometryOverride_=at->second;
         }
+        beforeTopology_=object?object->modelingTopology:std::nullopt;
+        if(beforeTopology_&&object->prefabLink&&before_.controlFaces!=after_.controlFaces)return CommandResult::fail("Edit the prefab source or detach this instance before changing topology");
+        if(beforeTopology_ && !afterTopology_) {
+            const auto changed=change_modeling_faces(*object->polygon,&before_,&after_,*beforeTopology_,object->modelingNextId);
+            if(!changed)return CommandResult::fail(changed.error);afterTopology_=changed.topology;
+        }
+        if(afterTopology_) {std::string error;if(!validate_modeling_topology(*object->polygon,&after_,*afterTopology_,&error))return CommandResult::fail(error);}
         captured_=true;
     }
     const auto result=apply(document,before_,after_);
+    if(result.success && afterTopology_) {object->modelingTopology=afterTopology_;object->modelingNextId=(std::max)(object->modelingNextId,afterTopology_->nextId);}
     if (result.success && object->prefabLink) {
         if (before_.level!=after_.level) object->prefabLink->overrides["subdivision.level"]=std::int64_t(after_.level);
         if (before_.preserveSharpEdges!=after_.preserveSharpEdges)
@@ -1002,6 +1013,7 @@ CommandResult SetSubdivisionSettingsCommand::execute(EditorDocument& document) {
 }
 CommandResult SetSubdivisionSettingsCommand::undo(EditorDocument& document) {
     const auto result=apply(document,after_,before_);
+    if(result.success)document.find_object(id_)->modelingTopology=beforeTopology_;
     if (result.success) if (auto* object=document.find_object(id_);object && object->prefabLink) {
         auto& overrides=object->prefabLink->overrides;
         if (levelOverride_) overrides["subdivision.level"]=*levelOverride_;else overrides.erase("subdivision.level");

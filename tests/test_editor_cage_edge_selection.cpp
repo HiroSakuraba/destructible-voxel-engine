@@ -2,6 +2,7 @@
 #include "dve/editor_mesh_authoring.hpp"
 #ifndef DVE_CAGE_SELECTION_CORE_ONLY
 #include "dve/editor_native.hpp"
+#include "dve/editor_runtime_settings.hpp"
 #endif
 #include <algorithm>
 #include <cmath>
@@ -312,6 +313,73 @@ void native_cut_history_and_preview() {
     c.key_down("escape",false,false,false); current->components[0].properties["state"]=savedRecord;
 }
 
+void native_cut_guards_and_input() {
+    auto f=grid(); const auto seed=key(f.mesh,{1,1,0},{2,1,0});
+    EditorDocument document("Loop cut guards"); EditorObject object(1,"Cage"); object.polygon=f.mesh; object.subdivision=f.settings;
+    document.add_object(std::move(object));
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(document))); auto& c=*owner;
+    c.resize(1600,900); c.workspace().select_object(1); check(c.dispatch_action("subdiv.edge_mode"),"guards: edge mode");
+    c.select_polygon_components({seed},SelectionOperation::Replace);
+    const auto hash=[&]{ return polygon_asset_content_hash(*c.workspace().document().find_object(1)->polygon); };
+    const auto source=hash();
+    const auto view=c.layout().viewport; const int x=view.x+view.width/2,y=view.y+view.height/2;
+    // Modal settings panel over the viewport receives the click; the slide is not captured.
+    c.open_settings(SettingScope::User);
+    check(c.dispatch_action("subdiv.loop_cut")&&!c.polygon_preview_lines().empty(),"guards: preview opens under settings panel");
+    const auto centered=hash();
+    check(centered!=source,"guards: preview geometry is live");
+    c.pointer_down(PointerButton::Primary,x,y); c.pointer_move(x+view.width/4,y); c.pointer_up(PointerButton::Primary,x+view.width/4,y);
+    check(hash()==centered,"settings panel click does not slide the loop cut");
+    c.key_down("escape",false,false,false);
+    if (c.polygon_preview_lines().empty()) {
+        c.select_polygon_components({seed},SelectionOperation::Replace);
+        check(c.dispatch_action("subdiv.loop_cut"),"guards: preview reopens after settings");
+    }
+    const auto reopened=hash();
+    // Clicks outside the viewport (e.g. toolbar/outliner) do not start a slide either.
+    c.pointer_down(PointerButton::Primary,2,2); c.pointer_move(x,y); c.pointer_up(PointerButton::Primary,x,y);
+    check(hash()==reopened,"click outside viewport is not captured by the slide");
+    check(!c.polygon_preview_lines().empty(),"guards: preview open for typed input");
+    {
+        // Typed values validate with the same 0.001..0.999 range as drag.
+        for (auto k : {"5"}) c.key_down(k,false,false,false);
+        c.update(0); c.refresh_menu_state();
+        check(!std::as_const(c.workspace().menus()).find("subdiv.preview_apply")->enabled,"out-of-range typed position disables Apply");
+        check(!c.dispatch_action("subdiv.preview_apply"),"out-of-range typed position refuses Apply");
+        check(!c.polygon_preview_lines().empty(),"refused typed Apply keeps preview open");
+        c.key_down("backspace",false,false,false);
+        for (auto k : {"0",".","0","0","0","5"}) c.key_down(k,false,false,false);
+        check(!c.dispatch_action("subdiv.preview_apply"),"typed position below 0.001 refused");
+        c.key_down("escape",false,false,false);
+    }
+    check(hash()==source,"guards: escape restores source");
+    // Apply refuses an isolated-out target without discarding the preview.
+    c.select_polygon_components({seed},SelectionOperation::Replace);
+    check(c.dispatch_action("subdiv.loop_cut"),"guards: isolated preview opens");
+    const auto previewHash=hash(); const auto history=c.workspace().commands().size();
+    c.viewport_settings().isolatedObjects={2};
+    check(!c.dispatch_action("subdiv.preview_apply"),"isolated-out target refuses Apply");
+    check(!c.polygon_preview_lines().empty()&&hash()==previewHash,"isolated refusal keeps the preview");
+    check(c.workspace().commands().size()==history,"refused Apply adds no undo step");
+    c.viewport_settings().isolatedObjects.clear();
+    check(c.dispatch_action("subdiv.preview_apply"),"Apply succeeds once visible again");
+    check(c.workspace().commands().size()==history+1,"loop cut is exactly one undo step");
+    check(c.dispatch_action("edit.undo")&&hash()==source,"single undo restores the source cage");
+    check(c.polygon_selection().components==std::set{seed},"single undo restores seed selection");
+    // Locked and hidden cages refuse to open a preview.
+    auto* target=c.workspace().document().find_object(1);
+    target->flags.locked=true; check(!c.dispatch_action("subdiv.loop_cut")&&hash()==source,"locked cage refuses loop cut");
+    target->flags.locked=false; target->flags.visible=false; check(!c.dispatch_action("subdiv.loop_cut"),"hidden cage refuses loop cut");
+    target->flags.visible=true; c.viewport_settings().isolatedObjects={2};
+    c.refresh_menu_state();
+    check(!std::as_const(c.workspace().menus()).find("subdiv.loop_cut")->enabled,"isolated-out cage disables loop cut menu");
+    check(!c.dispatch_action("subdiv.loop_cut"),"isolated-out cage refuses loop cut");
+    c.viewport_settings().isolatedObjects.clear();
+    c.refresh_menu_state();
+    const auto results=c.workspace().menus().search("copy",8);
+    check(!results.empty()&&results.front().id=="edit.copy","Edit > Copy stays first after loop cut commands");
+}
+
 void native_history_menus_and_search() {
     auto f=grid(); EditorDocument document("Cage selection history");
     EditorObject object(1,"Cage"); object.polygon=f.mesh; object.subdivision=f.settings;
@@ -352,7 +420,7 @@ int main() {
     try {
         open_strip_and_seams(); closed_cycles_and_reordering(); stops_and_atomic_refusals(); additional_topologies(); cuts_slide_and_lineage();
 #ifndef DVE_CAGE_SELECTION_CORE_ONLY
-        native_commands_and_guards(); native_history_menus_and_search(); native_cut_history_and_preview();
+        native_commands_and_guards(); native_history_menus_and_search(); native_cut_history_and_preview(); native_cut_guards_and_input();
 #endif
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     std::cout<<"Cage edge selection, cut/slide and lineage regression checks passed\n";

@@ -275,8 +275,10 @@ void NativeEditorController::update_polygon_preview() {
         float fraction=polygonPreviewSettings_.amount;
         if (!polygonPreviewTyped_.empty()) {
             char* end{}; fraction=std::strtof(polygonPreviewTyped_.c_str(),&end);
-            if (end!=polygonPreviewTyped_.c_str()+polygonPreviewTyped_.size() || !std::isfinite(fraction)) {
-                set_status("Enter a finite loop position",true); refresh_menu_state(); return;
+            // Typed positions obey the same 0.001..0.999 range as drag and arrow keys.
+            if (end!=polygonPreviewTyped_.c_str()+polygonPreviewTyped_.size() || !std::isfinite(fraction) ||
+                fraction<.001F || fraction>.999F) {
+                set_status("Enter a loop position from 0.001 to 0.999",true); refresh_menu_state(); return;
             }
         }
         auto cut=cut_cage_edge_ring(*polygonPreviewBefore_,*polygonPreviewSubdivision_,
@@ -351,23 +353,33 @@ bool NativeEditorController::commit_polygon_preview() {
     }
     auto* object=workspace_.document().find_object(polygonPreviewSelection_.object);
     if (!editable(object) || workspace_.mode()!=EditorMode::Edit) { cancel_polygon_preview(); return false; }
-    auto mesh=*object->polygon; const auto selection=polygonSelection_;
     const bool loopCut=polygonLoopCutPreview_;
-    const auto authoredAfter=loopCut?object->subdivision:std::optional<SubdivisionSettings>{};
     const auto uvRecord=polygonLoopCutUvRecord_;
+    const Component* uvComponent=nullptr;
+    if (loopCut) {
+        // Refuse before cancelling so the user keeps the slid preview to fix and retry.
+        if (is_isolated_out(object->id)) {
+            set_status("Loop cut target is isolated out of view; show it before applying",true); refresh_menu_state(); return false;
+        }
+        if (uvRecord && !uvRecord->empty()) {
+            uvComponent=find_component_by_type(std::span<const Component>(object->components),kUvAuthoringComponent);
+            if (!uvComponent) {set_status("UV authoring component changed; recompute the cut",true);refresh_menu_state();return false;}
+        }
+    }
+    std::optional<ComponentValue> previousUvState;
+    if (uvComponent) if (const auto at=uvComponent->properties.find("state");at!=uvComponent->properties.end()) previousUvState=at->second;
+    const auto uvComponentId=uvComponent?std::optional{uvComponent->id}:std::nullopt;
+    auto mesh=*object->polygon; const auto selection=polygonSelection_;
+    const auto authoredAfter=loopCut?object->subdivision:std::optional<SubdivisionSettings>{};
     const bool slice=polygonSlicePreview_; auto back=polygonSliceBack_;
     cancel_polygon_preview();
     const auto before=capture_selection_snapshot();
     auto command=std::make_unique<CompoundCommand>(slice?"Slice polygon mesh":loopCut?"Loop cut and slide":"Apply polygon tool");
     command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),
         slice?"Slice polygon geometry":loopCut?"Loop cut and slide":"Apply polygon tool",0,authoredAfter));
-    if (loopCut && uvRecord && !uvRecord->empty()) {
-        const auto* component=find_component_by_type(std::span<const Component>(object->components),kUvAuthoringComponent);
-        if (!component) {set_status("UV authoring component changed; recompute the cut",true);return false;}
-        const auto at=component->properties.find("state");
-        command->add(std::make_unique<SetComponentPropertyCommand>(object->id,component->id,"state",
-            at==component->properties.end()?std::optional<ComponentValue>{}:at->second,ComponentValue{*uvRecord},"Preserve loop-cut UV seams and pins"));
-    }
+    if (uvComponentId)
+        command->add(std::make_unique<SetComponentPropertyCommand>(object->id,*uvComponentId,"state",
+            previousUvState,ComponentValue{*uvRecord},"Preserve loop-cut UV seams and pins"));
     std::optional<EditorObjectId> partId;
     if (back) {
         const auto id=workspace_.document().allocate_object_id(); partId=id;
@@ -387,7 +399,7 @@ bool NativeEditorController::commit_polygon_preview() {
         workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
         recompute_layout();
     }
-    set_status(result.success ? "Applied polygon tool" : result.message,!result.success);
+    set_status(result.success ? (loopCut?"Applied loop cut and slide":slice?"Applied polygon slice":"Applied polygon tool") : result.message,!result.success);
     refresh_menu_state(); return result.success;
 }
 

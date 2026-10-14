@@ -533,7 +533,7 @@ CageLoopCutResult cut_cage_edge_ring(const CookedPolygonAsset& source,
             return fail("Loop cut exceeds the cage size budget");
         const auto n=normal(face_normal(cage,face)); const auto origin=cage.points[face.vertices[0]];
         float scale=0;
-        for (auto v : face.vertices) scale=std::max(scale,length(subtract(cage.points[v],origin)));
+        for (auto v : face.vertices) scale=(std::max)(scale,length(subtract(cage.points[v],origin)));
         for (std::size_t j=0;j<4;++j) {
             const auto p=cage.points[face.vertices[j]],q=cage.points[face.vertices[(j+1)%4]],r=cage.points[face.vertices[(j+2)%4]];
             if (std::abs(dot(subtract(p,origin),n))>scale*1e-5F ||

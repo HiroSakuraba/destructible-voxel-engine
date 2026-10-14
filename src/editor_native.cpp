@@ -3800,7 +3800,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     if (polygonLoopCutDragging_) {
         polygonPreviewTyped_.clear();
         polygonPreviewSettings_.amount=std::clamp(polygonLoopCutStartFraction_+
-            (float(x)-float(polygonLoopCutStartX_))/float(std::max(120,layout_.viewport.width/2)),.001F,.999F);
+            (float(x)-float(polygonLoopCutStartX_))/float((std::max)(120,layout_.viewport.width/2)),.001F,.999F);
         update_polygon_preview(); lastPointerX_=x; lastPointerY_=y; return;
     }
     if(!longJob_ && textEdit_.kind==TextEditKind::Inactive && mesh_authoring_pointer_move(x,y,modifiers)){lastPointerX_=x;lastPointerY_=y;return;}
@@ -3951,10 +3951,6 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
-    if (polygonLoopCutPreview_ && button==PointerButton::Primary && layout_.viewport.contains(x,y) && !(modifiers&4U)) {
-        polygonLoopCutDragging_=true; polygonLoopCutStartX_=x;
-        polygonLoopCutStartFraction_=polygonPreviewSettings_.amount; return;
-    }
     if (!longJob_ && voxel_authoring_pointer_down(button,x,y,modifiers)) return;
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers)){refresh_menu_state();return;}
@@ -4676,6 +4672,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         return;
     }
     focusRegion_ = EditorFocusRegion::Viewport;
+    // Loop-cut slide only captures clicks that reached the viewport itself: modal panels,
+    // palettes, toolbars and overlays above it have already consumed theirs.
+    if (polygonLoopCutPreview_ && button==PointerButton::Primary && !(modifiers&4U)) {
+        polygonLoopCutDragging_=true; polygonLoopCutStartX_=x;
+        polygonLoopCutStartFraction_=polygonPreviewSettings_.amount; return;
+    }
     if (button == PointerButton::Extra1) {
         const SettingValue overrideValue = workspace_.settings().value("input.mouse4_viewport");
         const std::string overrideAction = std::get_if<std::string>(&overrideValue)

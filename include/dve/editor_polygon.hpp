@@ -80,7 +80,7 @@ public:
     CommandResult undo(EditorDocument&) override;
     [[nodiscard]] bool merge_with(const IEditorCommand&) override;
 private:
-    CommandResult apply(EditorDocument&,const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&);
+    CommandResult apply(EditorDocument&,const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&,bool refresh);
     EditorObjectId id_{};
     std::uint64_t stroke_{};
     CookedPolygonAsset before_,after_;

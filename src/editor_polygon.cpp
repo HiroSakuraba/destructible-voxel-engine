@@ -893,7 +893,7 @@ ReplacePolygonCommand::ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsse
     std::string label,std::uint64_t stroke,std::optional<SubdivisionSettings> authoredAfter):
     id_(id),stroke_(stroke),before_(std::move(before)),after_(std::move(after)),
     afterSubdivision_(std::move(authoredAfter)),explicitSubdivision_(afterSubdivision_.has_value()),label_(std::move(label)) {}
-CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const CookedPolygonAsset& mesh,const std::optional<SubdivisionSettings>& settings) {
+CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const CookedPolygonAsset& mesh,const std::optional<SubdivisionSettings>& settings,bool refresh) {
     auto* object=document.find_object(id_);
     if(!object||!object->polygon) return CommandResult::fail("Polygon target no longer exists");
     if(object->flags.locked) return CommandResult::fail("Polygon target is locked");
@@ -903,7 +903,9 @@ CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const Cooked
         if (!evaluated.mesh) return CommandResult::fail(evaluated.error);
     }
     object->subdivision=settings;object->subdivisionCache.reset();
-    object->polygon=mesh; object->polygon->objectId=id_; refresh_editor_polygon(*object->polygon);
+    object->polygon=mesh; object->polygon->objectId=id_;
+    // Undo restores the exact captured cage; re-deriving bounds/tangents would drift its content hash.
+    if(refresh) refresh_editor_polygon(*object->polygon);
     document.mark_dirty(); return CommandResult::ok();
 }
 CommandResult ReplacePolygonCommand::execute(EditorDocument& document) {
@@ -922,12 +924,12 @@ CommandResult ReplacePolygonCommand::execute(EditorDocument& document) {
         }
         capturedOverride_=true;
     }
-    const auto result=apply(document,after_,afterSubdivision_);
+    const auto result=apply(document,after_,afterSubdivision_,true);
     if(result.success&&object->prefabLink) object->prefabLink->overrides["polygon.geometry"]=std::int64_t{1};
     return result;
 }
 CommandResult ReplacePolygonCommand::undo(EditorDocument& document) {
-    const auto result=apply(document,before_,beforeSubdivision_);
+    const auto result=apply(document,before_,beforeSubdivision_,false);
     if(result.success) if(auto* object=document.find_object(id_);object->prefabLink) {
         if(previousOverride_) object->prefabLink->overrides["polygon.geometry"]=*previousOverride_;
         else object->prefabLink->overrides.erase("polygon.geometry");

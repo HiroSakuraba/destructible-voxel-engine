@@ -13,6 +13,9 @@ struct TopologyDiagnostics {
 [[nodiscard]] TopologyDiagnostics diagnose_polygon_topology(const CookedPolygonAsset&);
 enum class TopologyEdit : std::uint8_t { Subdivide, SplitEdges, FlipDiagonal, BridgeLoops, CapBoundaries, HardNormals, SmoothNormals, BevelConvexEdges };
 [[nodiscard]] PolygonEditResult edit_polygon_topology(const CookedPolygonAsset&,const PolygonSelection&,TopologyEdit,float amount=.5F);
+// Append-only boundary tools with explicit attribute, corner, edge and authored-face provenance.
+[[nodiscard]] PolygonFaceEditResult edit_polygon_boundaries(const CookedPolygonAsset&,const PolygonSelection&,
+    TopologyEdit,const SubdivisionSettings* authored=nullptr);
 enum class BevelOffsetType : std::uint8_t { Fractional, Absolute };
 struct EdgeBevelSettings {
     float width{0.2F};

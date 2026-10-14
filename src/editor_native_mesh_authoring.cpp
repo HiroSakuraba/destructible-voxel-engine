@@ -149,7 +149,18 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
         "Select a polygon with saved UV flags; apply/close previews first");
     bool components=mesh&&selectionDomain_==SelectionDomain::Polygons&&!polygonSelection_.components.empty();
     for(auto id:{"mesh.subdivide","mesh.hard_normals","mesh.smooth_normals"})enabled(id,components,"Select polygon components first");
-    for(auto id:{"mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap"})enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge,"Select polygon edges first");
+    for(auto id:{"mesh.split_edges","mesh.flip_diagonal"})enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge,"Select polygon edges first");
+    {
+        // Mirror begin_polygon_boundary's up-front refusals so the menu never offers a preview that cannot open.
+        const bool edges=components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&polygonSelection_.object==object->id;
+        const bool meshPreview=meshAuthoring_&&(meshAuthoring_->kind==NativeMeshAuthoringState::Kind::Topology||meshAuthoring_->kind==NativeMeshAuthoringState::Kind::Boolean);
+        const bool busy=polygonPreviewBefore_.has_value()||meshPreview||gizmoDragging_||mesh_authoring_dragging()||voxel_authoring_active();
+        const bool prefab=object&&object->prefabLink.has_value();
+        const std::string_view reason=!edges?"Select complete boundary loop edges first":
+            workspace_.selection_count()!=1?"Select exactly one polygon mesh":
+            prefab?"Edit the prefab source or detach this instance before changing topology":"Apply or close the active preview first";
+        for(auto id:{"mesh.bridge","mesh.cap"})enabled(id,edges&&workspace_.selection_count()==1&&!prefab&&!busy,reason);
+    }
     for(auto id:{"mesh.bevel_edges","mesh.chamfer_edges","mesh.fillet_edges"})
         enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&mesh_boolean_available(),"Select convex crease edges in a Manifold authoring build");
 }
@@ -297,7 +308,15 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
     }
     if(action=="mesh.diagnostics"){s.object=object->id;s.diagnostics=!s.diagnostics;auto d=diagnose_polygon_topology(*object->polygon);set_status("Topology: "+std::to_string(d.boundaries)+" boundary edges, "+std::to_string(d.nonmanifold)+" nonmanifold, "+std::to_string(d.inconsistentWinding)+" winding errors, "+std::to_string(d.degenerate)+" degenerate triangles");return true;}
     TopologyEdit op;
-    if(action=="mesh.subdivide")op=TopologyEdit::Subdivide;else if(action=="mesh.split_edges")op=TopologyEdit::SplitEdges;else if(action=="mesh.flip_diagonal")op=TopologyEdit::FlipDiagonal;else if(action=="mesh.bridge")op=TopologyEdit::BridgeLoops;else if(action=="mesh.cap")op=TopologyEdit::CapBoundaries;else if(action=="mesh.hard_normals")op=TopologyEdit::HardNormals;else if(action=="mesh.smooth_normals")op=TopologyEdit::SmoothNormals;else return false;
+    if(action=="mesh.bridge"||action=="mesh.cap") {
+        if(s.kind==NativeMeshAuthoringState::Kind::Topology||s.kind==NativeMeshAuthoringState::Kind::Boolean) {
+            set_status("Apply or close the active mesh preview first",true);return false;
+        }
+        const auto opened=begin_polygon_boundary(action=="mesh.bridge");
+        if(opened){s.kind=NativeMeshAuthoringState::Kind::None;s.corners.clear();}
+        return opened;
+    }
+    if(action=="mesh.subdivide")op=TopologyEdit::Subdivide;else if(action=="mesh.split_edges")op=TopologyEdit::SplitEdges;else if(action=="mesh.flip_diagonal")op=TopologyEdit::FlipDiagonal;else if(action=="mesh.hard_normals")op=TopologyEdit::HardNormals;else if(action=="mesh.smooth_normals")op=TopologyEdit::SmoothNormals;else return false;
     cancel_mesh_authoring_drag();if(selectionDomain_!=SelectionDomain::Polygons||polygonSelection_.object!=object->id){set_status("Enter polygon component mode and select components first",true);return false;}
     auto edited=edit_polygon_topology(*object->polygon,polygonSelection_,op);if(!edited){set_status(edited.error,true);return false;}
     const auto before=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(edited.mesh),"Edit polygon topology"));
@@ -317,6 +336,7 @@ bool NativeEditorController::open_mesh_boolean_preview(EditorObjectId a,EditorOb
 }
 
 bool NativeEditorController::mesh_authoring_key(std::string_view key,bool control,bool shift,bool alt){
+    if(polygonPreviewBefore_)return false;
     if(!meshAuthoring_||workspace_.mode()!=EditorMode::Edit||playSession_.active()||alt)return false;auto& s=*meshAuthoring_;auto* object=workspace_.document().find_object(s.object);
     if(!object||!object->polygon||object->flags.locked||!object->flags.visible||is_isolated_out(s.object)){cancel_mesh_authoring_drag();s.kind=NativeMeshAuthoringState::Kind::None;return false;}
     if(s.kind==NativeMeshAuthoringState::Kind::Topology){

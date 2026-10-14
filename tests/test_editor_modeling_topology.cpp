@@ -161,6 +161,33 @@ void scene_and_prefab_persistence() {
 }
 #endif
 #ifndef DVE_MODELING_TOPOLOGY_CORE_ONLY
+void legacy_migration_is_not_an_edit() {
+    auto f=quad();std::string error;
+    {EditorObject retired(2,"Retired");retired.polygon=f.mesh;retired.subdivision=f.settings;retired.modelingNextId=50;
+     check(ensure_modeling_topology(retired,&error),"re-migration after Undo removed a record must succeed: "+error);
+     std::set<ModelingId> ids(retired.modelingTopology->vertices.begin(),retired.modelingTopology->vertices.end());
+     for(auto* list:{&retired.modelingTopology->attributes,&retired.modelingTopology->corners,&retired.modelingTopology->triangles,&retired.modelingTopology->faces})ids.insert(list->begin(),list->end());
+     for(auto& [e,id]:retired.modelingTopology->edges)ids.insert(id);
+     check(*ids.begin()>=50&&retired.modelingNextId>*ids.rbegin(),"re-migrated IDs stay above the retired high-water mark");}
+    {std::istringstream truncated("modeling_ids 9\ngeometric_ids 4 1 2");check(!read_modeling_topology(truncated,&error),"truncated record refuses");
+     std::istringstream huge("modeling_ids 9\ngeometric_ids 18446744073709551615");check(!read_modeling_topology(huge,&error),"oversized count refuses before allocation");
+     std::istringstream zero("modeling_ids 0\n");check(!read_modeling_topology(zero,&error),"zero allocation counter refuses");}
+    EditorDocument document("Legacy");EditorObject object(1,"Cage");object.polygon=f.mesh;object.subdivision=f.settings;document.add_object(std::move(object));
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(document)));auto& c=*owner;c.resize(1600,900);c.workspace().select_object(1);
+    check(c.dispatch_action("subdiv.edge_mode"),"edge mode");const auto seed=*subdivision_control_edges(f.mesh,&f.settings).begin();c.select_polygon_components({seed},SelectionOperation::Replace);
+    const auto history=c.workspace().commands().size();
+    check(c.dispatch_action("subdiv.loop_cut")&&c.workspace().document().find_object(1)->modelingTopology,"legacy preview migrates lazily");
+    c.key_down("escape",false,false,false);
+    check(!c.workspace().document().find_object(1)->modelingTopology&&c.workspace().commands().size()==history,"Cancel discards the lazy migration and adds no history");
+    check(c.dispatch_action("subdiv.loop_cut")&&c.dispatch_action("subdiv.preview_apply")&&c.workspace().document().find_object(1)->modelingTopology,"legacy cut Apply records IDs");
+    check(c.dispatch_action("edit.undo")&&!c.workspace().document().find_object(1)->modelingTopology&&c.polygon_selection().components==std::set{seed},"Undo restores the exact ID-less state and selection");
+    const auto path=std::filesystem::temp_directory_path()/"dve-modeling-legacy-test"/"scene.dvescene";std::filesystem::remove_all(path.parent_path());
+    check(c.workspace().document().save_transactional(path).success,"save legacy after Undo");std::ifstream manifest(path);std::string header;std::getline(manifest,header);
+    check(header=="DVE_EDITOR_SCENE 10","no identity field written after Undo removed every edit");
+    check(c.dispatch_action("edit.redo")&&c.workspace().document().find_object(1)->modelingTopology,"Redo restores IDs");
+    check(c.dispatch_action("edit.undo")&&c.dispatch_action("subdiv.loop_cut"),"re-migrating after Undo still works");c.key_down("escape",false,false,false);
+    std::filesystem::remove_all(path.parent_path());
+}
 void scene_history_and_prefab() {
     auto f=quad();EditorDocument document("Persistent identities");EditorObject object(1,"Cage");object.polygon=f.mesh;object.subdivision=f.settings;std::string error;
     check(ensure_modeling_topology(object,&error),error);const auto initial=*object.modelingTopology;document.add_object(std::move(object));
@@ -193,6 +220,6 @@ command_history();
 scene_and_prefab_persistence();
 #endif
 #ifndef DVE_MODELING_TOPOLOGY_CORE_ONLY
-scene_history_and_prefab();
+scene_history_and_prefab();legacy_migration_is_not_an_edit();
 #endif
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}std::cout<<"Persistent modeling topology regression checks passed\n";}

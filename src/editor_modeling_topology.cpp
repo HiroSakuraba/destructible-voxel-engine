@@ -170,8 +170,19 @@ bool ensure_modeling_topology(EditorObject& object,std::string* error) {
     if(!object.polygon){if(error)*error="Modeling identities need a polygon mesh";return false;}
     if(object.modelingTopology)return validate_modeling_topology(*object.polygon,object.subdivision?&*object.subdivision:nullptr,*object.modelingTopology,error);
     auto topo=make_modeling_topology(*object.polygon,object.subdivision?&*object.subdivision:nullptr,{},error);if(!topo)return false;
-    // A previously retired identity namespace cannot be restarted.
-    if(object.modelingNextId>1){if(error)*error="Retired modeling identities require explicit migration";return false;}
+    // Re-migrating after Undo removed an earlier record: shift the fresh IDs above the
+    // allocation high-water mark so retired IDs held by history/selection are never reused.
+    if(object.modelingNextId>1) {
+        const ModelingId offset=object.modelingNextId-1;
+        if(topo->nextId>(std::numeric_limits<ModelingId>::max)()-offset){if(error)*error="Modeling identity space exhausted";return false;}
+        const auto shift=[&](std::vector<ModelingId>& ids){for(auto& id:ids)id+=offset;};
+        shift(topo->vertices);shift(topo->attributes);shift(topo->corners);shift(topo->triangles);shift(topo->faces);
+        for(auto& face:topo->faceTriangles)shift(face);
+        std::map<Pair,ModelingId> edges;for(auto& [e,id]:topo->edges)edges.emplace(Pair{e.first+offset,e.second+offset},id+offset);topo->edges=std::move(edges);
+        std::set<ModelingId> control;for(auto id:topo->controlEdges)control.insert(id+offset);topo->controlEdges=std::move(control);
+        topo->nextId+=offset;
+        if(!validate_modeling_topology(*object.polygon,object.subdivision?&*object.subdivision:nullptr,*topo,error))return false;
+    }
     object.modelingNextId=topo->nextId;object.modelingTopology=std::move(topo);return true;
 }
 std::set<ModelingId> modeling_selection_ids(const CookedPolygonAsset&,const ModelingTopology& topo,const PolygonSelection& selection) {

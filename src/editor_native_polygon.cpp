@@ -245,18 +245,23 @@ bool NativeEditorController::clean_unused_polygon_vertices() {
     auto cleanup=compact_polygon_vertices(*object->polygon,selection);
     if (!cleanup) {set_status(cleanup.polygon.error,true);return false;}
     std::string error;
-    if(!ensure_modeling_topology(*object,&error)||!modeling_matches_legacy_partition(*object->polygon,*object->modelingTopology)) {
-        set_status(error.empty()?"Cleanup does not support coincident independent vertices yet":error,true);return false;
-    }
+    // Lazy migration is not an edit: a refused cleanup must leave legacy objects untouched,
+    // and Undo of an applied cleanup must restore the exact pre-edit (ID-less) state.
+    const bool migrated=!object->modelingTopology.has_value();
+    const auto refuse=[&](const std::string& reason){if(migrated)object->modelingTopology.reset();set_status(reason,true);return false;};
+    if(!ensure_modeling_topology(*object,&error)||!modeling_matches_legacy_partition(*object->polygon,*object->modelingTopology))
+        return refuse(error.empty()?"Cleanup does not support coincident independent vertices yet":error);
     std::optional<SubdivisionSettings> authoredAfter;
     if (object->subdivision) {
         authoredAfter=remap_compacted_cage(*object->polygon,cleanup.polygon.mesh,*object->subdivision,cleanup.lineage,&error);
-        if (!authoredAfter) {set_status(error,true);return false;}
+        if (!authoredAfter) return refuse(error);
     }
     for(std::uint32_t i=0;i<object->modelingTopology->faces.size();++i)cleanup.lineage.controlFaceDescendants[i]={i};
     const auto identities=advance_modeling_topology(*object->polygon,cleanup.polygon.mesh,authoredAfter?&*authoredAfter:nullptr,
         *object->modelingTopology,cleanup.lineage,object->modelingNextId);
-    if(!identities){set_status(identities.error,true);return false;}
+    if(!identities) return refuse(identities.error);
+    object->modelingNextId=(std::max)(object->modelingNextId,identities.topology.nextId);
+    if(migrated)object->modelingTopology.reset();
     const auto record=remap_polygon_uv_authoring_record(*object,cleanup.polygon.mesh,cleanup.lineage,&error);
     if (!record) {set_status(error,true);return false;}
     std::unique_ptr<IEditorCommand> uvCommand;
@@ -283,11 +288,13 @@ bool NativeEditorController::clean_unused_polygon_vertices() {
 
 bool NativeEditorController::begin_modeling_identity_preview(EditorObject& object) {
     if(object.prefabLink) {set_status("Edit the prefab source or detach this instance before changing topology",true);return false;}
-    std::string error;
+    std::string error;const bool migrated=!object.modelingTopology.has_value();
     if(!ensure_modeling_topology(object,&error)) {set_status(error,true);return false;}
     if(!modeling_matches_legacy_partition(*object.polygon,*object.modelingTopology)) {
+        if(migrated)object.modelingTopology.reset();
         set_status("This tool does not support coincident independent geometric vertices yet",true);return false;
     }
+    polygonPreviewModelingMigrated_=migrated;
     polygonPreviewModelingBefore_=object.modelingTopology;polygonPreviewModelingAfter_.reset();
     polygonPreviewModelingFloor_=(std::max)(object.modelingNextId,object.modelingTopology->nextId);return true;
 }
@@ -509,7 +516,10 @@ void NativeEditorController::update_polygon_preview() {
 
 void NativeEditorController::cancel_polygon_preview() {
     if (!polygonPreviewBefore_) return;
-    if (auto* object=workspace_.document().find_object(polygonPreviewSelection_.object)) {object->polygon=*polygonPreviewBefore_;object->subdivision=polygonPreviewSubdivision_;object->modelingTopology=polygonPreviewModelingBefore_;object->subdivisionCache.reset();}
+    if (auto* object=workspace_.document().find_object(polygonPreviewSelection_.object)) {object->polygon=*polygonPreviewBefore_;object->subdivision=polygonPreviewSubdivision_;
+        // A preview-time migration is discarded so Cancel and Undo restore the exact ID-less state.
+        object->modelingTopology=polygonPreviewModelingMigrated_?std::nullopt:polygonPreviewModelingBefore_;object->subdivisionCache.reset();}
+    polygonPreviewModelingMigrated_=false;
     polygonSelection_=polygonPreviewSelection_;
     polygonPreviewBefore_.reset(); polygonPreviewSubdivision_.reset(); polygonPreviewTyped_.clear(); polygonPreviewValid_=false;
     polygonLoopCutPreview_=false; polygonLoopCutDragging_=false;

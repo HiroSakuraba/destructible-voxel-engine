@@ -1,6 +1,13 @@
 #pragma once
 #include "dve/subdivision_surface.hpp"
+#include <cstdint>
 #include <iosfwd>
+#include <map>
+#include <optional>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
 #include <span>
 namespace dve::editor {
 using ModelingId = std::uint64_t;

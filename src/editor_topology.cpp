@@ -2,8 +2,13 @@
 #include "dve/editor_modeling_topology.hpp"
 #include "dve/editor_subdivision.hpp"
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cmath>
 #include <map>
+#include <set>
+#include <string>
+#include <vector>
 #include <tuple>
 namespace dve::editor {
 namespace {

@@ -354,8 +354,18 @@ void native_boundary_tools() {
         check(c.dispatch_action(cage?"subdiv.edge_mode":"polygon.edge_mode"),"boundary edge mode");c.select_polygon_components(selected.components,SelectionOperation::Replace);
         const auto action=cage?(bridge?"subdiv.bridge":"subdiv.cap"):(bridge?"mesh.bridge":"mesh.cap");
         const auto history=c.workspace().commands().size(),hash=polygon_asset_content_hash(f.mesh);
-        check(c.dispatch_action(action),"open native boundary preview");c.key_down("escape",false,false,false);
+        const auto nextIdBefore=c.workspace().document().find_object(1)->modelingNextId;
+        {const auto* menu=c.workspace().menus().find(bridge?"mesh.bridge":"mesh.cap");check(menu&&menu->enabled,"boundary tool enabled for a selected rim");}
+        check(c.dispatch_action(action),"open native boundary preview");
+        for(const auto* id:{"mesh.bridge","mesh.cap"}) {
+            const auto* menu=c.workspace().menus().find(id);
+            check(menu&&!menu->enabled&&!menu->disabledReason.empty(),"boundary tools are disabled with a reason while a preview is open");
+        }
+        check(!c.dispatch_action(bridge?"mesh.cap":"mesh.bridge"),"second boundary preview is refused while one is open");
+        c.key_down("escape",false,false,false);
         auto* target=c.workspace().document().find_object(1);
+        // Identified meshes keep #127's raised floor; a discarded migration must leave an ID-less mesh untouched.
+        if(!identified)check(!target->modelingTopology&&target->modelingNextId==nextIdBefore,"boundary Cancel leaves no reserved allocation floor behind");
         check(target->modelingTopology==initial&&polygon_asset_content_hash(*target->polygon)==hash&&c.polygon_selection().components==selected.components&&c.workspace().commands().size()==history,"boundary Cancel restores exact source and selection without history");
         check(c.dispatch_action(action),"reopen boundary preview");const auto preview=*target->modelingTopology;
         c.key_down("1",false,false,false);check(*target->modelingTopology==preview,"parameterless preview ignores numeric keys");

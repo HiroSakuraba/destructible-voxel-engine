@@ -149,7 +149,18 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
         "Select a polygon with saved UV flags; apply/close previews first");
     bool components=mesh&&selectionDomain_==SelectionDomain::Polygons&&!polygonSelection_.components.empty();
     for(auto id:{"mesh.subdivide","mesh.hard_normals","mesh.smooth_normals"})enabled(id,components,"Select polygon components first");
-    for(auto id:{"mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap"})enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge,"Select polygon edges first");
+    for(auto id:{"mesh.split_edges","mesh.flip_diagonal"})enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge,"Select polygon edges first");
+    {
+        // Mirror begin_polygon_boundary's up-front refusals so the menu never offers a preview that cannot open.
+        const bool edges=components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&polygonSelection_.object==object->id;
+        const bool meshPreview=meshAuthoring_&&(meshAuthoring_->kind==NativeMeshAuthoringState::Kind::Topology||meshAuthoring_->kind==NativeMeshAuthoringState::Kind::Boolean);
+        const bool busy=polygonPreviewBefore_.has_value()||meshPreview||gizmoDragging_||mesh_authoring_dragging()||voxel_authoring_active();
+        const bool prefab=object&&object->prefabLink.has_value();
+        const std::string_view reason=!edges?"Select complete boundary loop edges first":
+            workspace_.selection_count()!=1?"Select exactly one polygon mesh":
+            prefab?"Edit the prefab source or detach this instance before changing topology":"Apply or close the active preview first";
+        for(auto id:{"mesh.bridge","mesh.cap"})enabled(id,edges&&workspace_.selection_count()==1&&!prefab&&!busy,reason);
+    }
     for(auto id:{"mesh.bevel_edges","mesh.chamfer_edges","mesh.fillet_edges"})
         enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&mesh_boolean_available(),"Select convex crease edges in a Manifold authoring build");
 }

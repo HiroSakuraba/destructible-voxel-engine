@@ -311,7 +311,10 @@ std::vector<MenuAction> EditorMenuRegistry::search(std::string_view query, std::
                 score += best;
             }
             if (!matched) continue;
-            if (!action.enabled) score += 500;
+            // A relevant disabled command must remain discoverable with its reason.
+            // A large penalty let dozens of weak subsequence matches bury exact Copy.
+            // Keep enabled commands first at equal relevance, without hiding exact hits.
+            if (!action.enabled) score += tokens.empty() ? 500 : 24;
             if (action.visibility == MenuVisibility::Advanced) score += 12;
             if (action.visibility == MenuVisibility::PaletteOnly) score += 18;
             matches.push_back({score, index});

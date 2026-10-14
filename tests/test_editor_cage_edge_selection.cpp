@@ -135,6 +135,32 @@ void stops_and_atomic_refusals() {
     check(bool(cubeRing)&&cubeRing.edges.size()==4&&cubeRing.stops.empty(),"closed cube ring follows saved quads");
 }
 
+void additional_topologies() {
+    // Open cylinder rim: a closed boundary loop through regular valence-three vertices.
+    auto f=grid(6,2,true); const auto& r=f.settings.controlFaces.front();
+    const auto rim=edgeKey(vertex(f.mesh,f.mesh.vertices[r[0]].position),vertex(f.mesh,f.mesh.vertices[r[1]].position));
+    const auto rimLoop=select_cage_edge_chain(f.mesh,f.settings,{rim},CageEdgeTraversal::Loop);
+    check(bool(rimLoop)&&rimLoop.edges.size()==6&&rimLoop.stops.empty(),"closed boundary rim loop terminates once");
+    auto g=grid(4,3);
+    const auto vertical=key(g.mesh,{2,1,0},{2,2,0});
+    const auto column=select_cage_edge_chain(g.mesh,g.settings,{vertical},CageEdgeTraversal::Loop);
+    check(bool(column)&&column.edges.size()==3&&column.stops==std::set{CageEdgeStop::Boundary},"vertical loop spans grid");
+    const auto row=select_cage_edge_chain(g.mesh,g.settings,{vertical},CageEdgeTraversal::Ring);
+    check(bool(row)&&row.edges.size()==5,"vertical ring spans every column");
+    const auto side=select_cage_edge_chain(g.mesh,g.settings,{key(g.mesh,{0,1,0},{0,2,0})},CageEdgeTraversal::Loop);
+    check(bool(side)&&side.edges.size()==3,"side boundary loop stops at corners");
+    for (std::uint32_t level : {1U,2U}) {
+        auto settings=g.settings; settings.level=level;
+        const auto leveled=select_cage_edge_chain(g.mesh,settings,{key(g.mesh,{1,1,0},{2,1,0})},CageEdgeTraversal::Loop);
+        check(bool(leveled)&&leveled.edges.size()==4,"subdivision level does not change cage traversal");
+    }
+    const auto cube=make_editor_polygon_cube(1); SubdivisionSettings cubeSettings; freeze_subdivision_topology(cube,cubeSettings);
+    for (auto e : subdivision_control_edges(cube,&cubeSettings)) {
+        const auto ring=select_cage_edge_chain(cube,cubeSettings,{e},CageEdgeTraversal::Ring);
+        check(bool(ring)&&ring.edges.size()==4,"every cube edge has a four-edge ring");
+    }
+}
+
 #ifndef DVE_CAGE_SELECTION_CORE_ONLY
 void native_commands_and_guards() {
     auto f=grid(); EditorDocument document("Cage selection regression");
@@ -169,13 +195,48 @@ void native_commands_and_guards() {
     c.workspace().document().find_object(1)->subdivision.reset();
     check(!c.dispatch_action("polygon.select_loop"),"ordinary triangles are not guessed into quads");
 }
+
+void native_history_menus_and_search() {
+    auto f=grid(); EditorDocument document("Cage selection history");
+    EditorObject object(1,"Cage"); object.polygon=f.mesh; object.subdivision=f.settings;
+    document.add_object(std::move(object));
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(document)));
+    auto& c=*owner;
+    c.resize(1600,900); c.workspace().select_object(1);
+    check(c.dispatch_action("subdiv.edge_mode"),"history: cage edge mode");
+    const auto seed=key(f.mesh,{1,1,0},{2,1,0});
+    c.select_polygon_components({seed},SelectionOperation::Replace);
+    const auto history=c.workspace().commands().size();
+    check(c.dispatch_action("subdiv.select_loop"),"history: loop command");
+    check(c.dispatch_action("subdiv.select_loop"),"history: repeated loop command");
+    check(c.dispatch_action("subdiv.select_ring"),"history: ring command");
+    check(c.workspace().commands().size()==history && !c.workspace().commands().can_undo(),
+        "selection traversal adds no geometry undo step");
+    const auto disabled=[&](const char* id) {
+        c.refresh_menu_state();
+        const auto* action=std::as_const(c.workspace().menus()).find(id);
+        return action && !action->enabled && !action->disabledReason.empty();
+    };
+    auto* cage=c.workspace().document().find_object(1);
+    cage->flags.locked=true;
+    check(disabled("subdiv.select_loop")&&disabled("polygon.select_ring"),"locked cage menus disabled with reason");
+    cage->flags.locked=false; cage->flags.visible=false;
+    check(disabled("subdiv.select_ring")&&disabled("polygon.select_loop"),"hidden cage menus disabled with reason");
+    cage->flags.visible=true; c.viewport_settings().isolatedObjects={2};
+    check(disabled("subdiv.select_loop")&&disabled("polygon.select_ring"),"isolated-out cage menus disabled with reason");
+    c.viewport_settings().isolatedObjects.clear();
+    c.refresh_menu_state();
+    // The new cage commands mention polygons/convert; they must not outrank Edit > Copy.
+    const auto results=c.workspace().menus().search("copy",8);
+    check(!results.empty()&&results.front().id=="edit.copy","Edit > Copy stays first for copy search");
+}
 #endif
 }
 int main() {
     try {
-        open_strip_and_seams(); closed_cycles_and_reordering(); stops_and_atomic_refusals();
+        open_strip_and_seams(); closed_cycles_and_reordering(); stops_and_atomic_refusals(); additional_topologies();
 #ifndef DVE_CAGE_SELECTION_CORE_ONLY
-        native_commands_and_guards();
+        native_commands_and_guards(); native_history_menus_and_search();
 #endif
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     std::cout<<"Cage edge loop/ring regression checks passed\n";

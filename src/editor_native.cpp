@@ -2093,8 +2093,13 @@ void NativeEditorController::refresh_menu_state() noexcept {
             enabled(id,mesh && !preview,"Select an unlocked polygon mesh in Edit mode first.");
         for (auto id:{"polygon.extrude","polygon.inset","polygon.bevel","polygon.uv_tools","polygon.extract","polygon.assign_material"})
             enabled(id,components && polygonSelection_.mode==PolygonSelectionMode::Face && !preview,"Select polygon triangle faces first.");
-        for (auto id:{"polygon.weld","polygon.flip_normals","polygon.select_shell","polygon.select_grow","polygon.select_shrink"})
+        for (auto id:{"polygon.flip_normals","polygon.select_shell","polygon.select_grow","polygon.select_shrink"})
             enabled(id,components && !preview,"Select polygon components first.");
+        for(auto id:{"polygon.weld","polygon.dissolve_vertices"})
+            enabled(id,components && workspace_.selection_count()==1 && polygonSelection_.object==object->id &&
+                polygonSelection_.mode==PolygonSelectionMode::Vertex && (id!=std::string_view{"polygon.weld"} || polygonSelection_.components.size()>1) && !preview && !gizmoDragging_ &&
+                !mesh_authoring_dragging() && !voxel_authoring_active(),
+                "Select vertices on one visible unlocked mesh and finish the active edit first.");
         for (auto id:{"polygon.select_loop","polygon.select_ring"})
             enabled(id,components && object->subdivision && polygonSelection_.object==object->id &&
                 polygonSelection_.mode==PolygonSelectionMode::Edge && !preview && !gizmoDragging_ &&

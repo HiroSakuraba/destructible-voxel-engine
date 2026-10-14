@@ -267,6 +267,25 @@ bool NativeEditorController::clean_unused_polygon_vertices() {
     refresh_menu_state();return applied.success;
 }
 
+
+bool NativeEditorController::begin_polygon_cleanup(bool merge) {
+    if(polygonPreviewBefore_) {set_status("Finish the active preview first",true);return false;}
+    prune_polygon_selection();auto* object=workspace_.document().find_object(polygonSelection_.object);
+    if(!editable(object)||workspace_.selection_count()!=1||workspace_.mode()!=EditorMode::Edit||playSession_.active()||
+        longJob_||gizmoDragging_||mesh_authoring_dragging()||voxel_authoring_active()||is_isolated_out(object->id)||
+        selectionDomain_!=SelectionDomain::Polygons||polygonSelection_.mode!=PolygonSelectionMode::Vertex||polygonSelection_.components.empty()) {
+        set_status("Select vertices on one visible unlocked mesh and finish the active edit first",true);return false;
+    }
+    if(merge && polygonSelection_.components.size()<2) {set_status("Select at least two vertices to merge",true);return false;}
+    close_previews_for_voxel_edit("vertex cleanup");
+    polygonPreviewBefore_=*object->polygon;polygonPreviewSubdivision_=object->subdivision;polygonPreviewSelection_=polygonSelection_;
+    polygonVertexDissolvePreview_=!merge;polygonMergePreview_=merge;polygonPreviewSettings_={};polygonPreviewSettings_.amount=.01F;polygonPreviewTyped_.clear();
+    update_polygon_preview();
+    // Refuse up front instead of opening a dead preview; keep the refusal reason visible.
+    if(!polygonPreviewValid_) {const auto reason=status_.text;cancel_polygon_preview();set_status(reason,true);refresh_menu_state();return false;}
+    return true;
+}
+
 bool NativeEditorController::begin_polygon_dissolve() {
     cancel_polygon_preview();prune_polygon_selection();
     const auto* object=workspace_.document().find_object(polygonSelection_.object);
@@ -334,6 +353,33 @@ void NativeEditorController::update_polygon_preview() {
     if (!editable(object)) { cancel_polygon_preview(); return; }
     *object->polygon = *polygonPreviewBefore_; object->subdivision=polygonPreviewSubdivision_;
     polygonSelection_ = polygonPreviewSelection_;
+    if (polygonVertexDissolvePreview_ || polygonMergePreview_) {
+        polygonPreviewValid_=false;polygonPreviewUvRecord_.reset();std::string error;
+        const auto flags=read_polygon_uv_authoring(*object,&error);
+        if(!flags){set_status(error,true);refresh_menu_state();return;}
+        float distance=polygonPreviewSettings_.amount;
+        if(polygonMergePreview_&&!polygonPreviewTyped_.empty()) {
+            char* end{};distance=std::strtof(polygonPreviewTyped_.c_str(),&end);
+            if(end!=polygonPreviewTyped_.c_str()+polygonPreviewTyped_.size()||!std::isfinite(distance)||distance<=0) {
+                set_status("Enter a finite positive merge distance in mesh units",true);refresh_menu_state();return;
+            }
+        }
+        auto protectedEdges=flags->seams[0];protectedEdges.insert(flags->seams[1].begin(),flags->seams[1].end());
+        if(polygonPreviewSubdivision_)for(const auto& [edge,strength]:polygonPreviewSubdivision_->edgeCreases)protectedEdges.insert(edge);
+        auto cleanup=polygonMergePreview_?merge_polygon_vertices(*polygonPreviewBefore_,polygonPreviewSelection_,distance):
+            dissolve_polygon_vertices(*polygonPreviewBefore_,polygonPreviewSelection_,protectedEdges);
+        if(!cleanup){set_status(cleanup.polygon.error,true);refresh_menu_state();return;}
+        std::optional<SubdivisionSettings> authored;
+        if(polygonPreviewSubdivision_) {
+            authored=remap_cleanup_cage(*polygonPreviewBefore_,cleanup.polygon.mesh,*polygonPreviewSubdivision_,cleanup.lineage,&error);
+            if(!authored){set_status(error,true);refresh_menu_state();return;}
+        }
+        const auto record=remap_polygon_uv_authoring_record(*object,cleanup.polygon.mesh,cleanup.lineage,&error);
+        if(!record){set_status(error,true);refresh_menu_state();return;}
+        *object->polygon=std::move(cleanup.polygon.mesh);object->subdivision=std::move(authored);object->subdivisionCache.reset();
+        polygonSelection_=std::move(cleanup.polygon.selection);polygonPreviewUvRecord_=record;polygonPreviewSettings_.amount=distance;
+        polygonPreviewValid_=true;refresh_menu_state();return;
+    }
     if (polygonDissolvePreview_) {
         polygonPreviewValid_=false;std::string error;
         const auto flags=read_polygon_uv_authoring(*object,&error);
@@ -345,7 +391,7 @@ void NativeEditorController::update_polygon_preview() {
         polygonPreviewValid_=true;refresh_menu_state();return;
     }
     if (polygonLoopCutPreview_) {
-        polygonLoopCutUvRecord_.reset(); polygonPreviewValid_=false;
+        polygonPreviewUvRecord_.reset(); polygonPreviewValid_=false;
         float fraction=polygonPreviewSettings_.amount;
         if (!polygonPreviewTyped_.empty()) {
             char* end{}; fraction=std::strtof(polygonPreviewTyped_.c_str(),&end);
@@ -363,7 +409,7 @@ void NativeEditorController::update_polygon_preview() {
         if (!record) {set_status(error,true);refresh_menu_state();return;}
         polygonPreviewSettings_.amount=fraction;
         *object->polygon=cut.polygon.mesh; object->subdivision=cut.subdivision; object->subdivisionCache.reset();
-        polygonSelection_=cut.polygon.selection; polygonLoopCutUvRecord_=std::move(record);
+        polygonSelection_=cut.polygon.selection; polygonPreviewUvRecord_=std::move(record);
         polygonPreviewValid_=true;
         refresh_menu_state(); return;
     }
@@ -414,15 +460,15 @@ void NativeEditorController::cancel_polygon_preview() {
     polygonSelection_=polygonPreviewSelection_;
     polygonPreviewBefore_.reset(); polygonPreviewSubdivision_.reset(); polygonPreviewTyped_.clear(); polygonPreviewValid_=false;
     polygonLoopCutPreview_=false; polygonLoopCutDragging_=false;
-    polygonDissolvePreview_=false;
-    polygonLoopCutUvRecord_.reset();
+    polygonDissolvePreview_=false;polygonVertexDissolvePreview_=false;polygonMergePreview_=false;
+    polygonPreviewUvRecord_.reset();
     polygonSlicePreview_=false; polygonSliceBack_.reset();
 }
 
 bool NativeEditorController::commit_polygon_preview() {
     if (!polygonPreviewBefore_ || !polygonPreviewValid_) { set_status("Fix the polygon preview before applying it",true); return false; }
     // Revalidate saved flags at Apply, including inspector mutations since the last drag.
-    if (polygonLoopCutPreview_ || polygonDissolvePreview_) {
+    if (polygonLoopCutPreview_ || polygonDissolvePreview_ || polygonVertexDissolvePreview_ || polygonMergePreview_) {
         update_polygon_preview();
         if (!polygonPreviewBefore_ || !polygonPreviewValid_) return false;
     }
@@ -430,33 +476,35 @@ bool NativeEditorController::commit_polygon_preview() {
     if (!editable(object) || workspace_.mode()!=EditorMode::Edit) { cancel_polygon_preview(); return false; }
     const bool loopCut=polygonLoopCutPreview_;
     const bool dissolve=polygonDissolvePreview_;
-    const auto uvRecord=polygonLoopCutUvRecord_;
+    const bool cleanup=polygonVertexDissolvePreview_||polygonMergePreview_;
+    const std::string cleanupLabel=polygonMergePreview_?"Merge vertices by distance":"Dissolve redundant vertices";
+    const auto uvRecord=polygonPreviewUvRecord_;
     const Component* uvComponent=nullptr;
-    if (loopCut || dissolve) {
+    if (loopCut || dissolve || cleanup) {
         // Refuse before cancelling so the user keeps the slid preview to fix and retry.
         if (is_isolated_out(object->id)) {
             set_status("Modeling target is isolated out of view; show it before applying",true); refresh_menu_state(); return false;
         }
         if (uvRecord && !uvRecord->empty()) {
             uvComponent=find_component_by_type(std::span<const Component>(object->components),kUvAuthoringComponent);
-            if (!uvComponent) {set_status("UV authoring component changed; recompute the cut",true);refresh_menu_state();return false;}
+            if (!uvComponent) {set_status("UV authoring component changed; recompute the preview",true);refresh_menu_state();return false;}
         }
     }
     std::optional<ComponentValue> previousUvState;
     if (uvComponent) if (const auto at=uvComponent->properties.find("state");at!=uvComponent->properties.end()) previousUvState=at->second;
     const auto uvComponentId=uvComponent?std::optional{uvComponent->id}:std::nullopt;
     auto mesh=*object->polygon; const auto selection=polygonSelection_;
-    const auto authoredAfter=(loopCut||dissolve)?object->subdivision:std::optional<SubdivisionSettings>{};
+    const auto authoredAfter=(loopCut||dissolve||cleanup)?object->subdivision:std::optional<SubdivisionSettings>{};
     const bool slice=polygonSlicePreview_; auto back=polygonSliceBack_;
     cancel_polygon_preview();
     const auto before=capture_selection_snapshot();
-    auto command=std::make_unique<CompoundCommand>(slice?"Slice polygon mesh":loopCut?"Loop cut and slide":dissolve?"Dissolve cage edges":"Apply polygon tool");
+    auto command=std::make_unique<CompoundCommand>(cleanup?cleanupLabel:slice?"Slice polygon mesh":loopCut?"Loop cut and slide":dissolve?"Dissolve cage edges":"Apply polygon tool");
     if (dissolve) command->add(std::make_unique<SetSubdivisionSettingsCommand>(object->id,*object->subdivision,*authoredAfter));
     else command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),
-        slice?"Slice polygon geometry":loopCut?"Loop cut and slide":"Apply polygon tool",0,authoredAfter));
+        cleanup?cleanupLabel:slice?"Slice polygon geometry":loopCut?"Loop cut and slide":"Apply polygon tool",0,authoredAfter,!cleanup));
     if (uvComponentId)
         command->add(std::make_unique<SetComponentPropertyCommand>(object->id,*uvComponentId,"state",
-            previousUvState,ComponentValue{*uvRecord},"Preserve loop-cut UV seams and pins"));
+            previousUvState,ComponentValue{*uvRecord},"Preserve modeling UV seams and pins"));
     std::optional<EditorObjectId> partId;
     if (back) {
         const auto id=workspace_.document().allocate_object_id(); partId=id;
@@ -476,7 +524,7 @@ bool NativeEditorController::commit_polygon_preview() {
         workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
         recompute_layout();
     }
-    set_status(result.success ? (dissolve?"Dissolved cage edges":loopCut?"Applied loop cut and slide":slice?"Applied polygon slice":"Applied polygon tool") : result.message,!result.success);
+    set_status(result.success ? (cleanup?cleanupLabel:dissolve?"Dissolved cage edges":loopCut?"Applied loop cut and slide":slice?"Applied polygon slice":"Applied polygon tool") : result.message,!result.success);
     refresh_menu_state(); return result.success;
 }
 
@@ -484,7 +532,7 @@ bool NativeEditorController::handle_polygon_preview_key(std::string_view key) {
     if (!polygonPreviewBefore_) return false;
     if (key=="escape") { cancel_polygon_preview(); refresh_menu_state(); return true; }
     if (key=="return"||key=="enter") { (void)commit_polygon_preview(); return true; }
-    if (polygonDissolvePreview_) return true;
+    if (polygonDissolvePreview_ || polygonVertexDissolvePreview_) return true;
     if (polygonSlicePreview_ && (key=="f"||key=="b"||key=="s"||key=="c"||key=="x"||key=="y"||key=="z")) {
         if (key=="f") polygonSliceOutput_=0; else if (key=="b") polygonSliceOutput_=1; else if (key=="s") polygonSliceOutput_=2;
         else if (key=="c") polygonSliceCap_=!polygonSliceCap_;
@@ -495,10 +543,11 @@ bool NativeEditorController::handle_polygon_preview_key(std::string_view key) {
     else if (key=="x"||key=="y"||key=="z") polygonPreviewSettings_.uvAxis=key=="x"?0U:key=="y"?1U:2U;
     else if (key=="up"||key=="down") {
         const float step=key=="up"?.01F:-.01F;
-        if (!polygonLoopCutPreview_ && (polygonPreviewOperation_==PolygonEdit::Inset||polygonPreviewOperation_==PolygonEdit::Bevel))
+        if (!polygonLoopCutPreview_ && !polygonMergePreview_ && (polygonPreviewOperation_==PolygonEdit::Inset||polygonPreviewOperation_==PolygonEdit::Bevel))
             polygonPreviewSettings_.inset=std::clamp(polygonPreviewSettings_.inset+step,0.0F,.99F);
         else polygonPreviewSettings_.amount=polygonLoopCutPreview_?
-            std::clamp(polygonPreviewSettings_.amount+step,.001F,.999F):polygonPreviewSettings_.amount+step;
+            std::clamp(polygonPreviewSettings_.amount+step,.001F,.999F):polygonMergePreview_?
+            (std::max)(.000001F,polygonPreviewSettings_.amount+step):polygonPreviewSettings_.amount+step;
         polygonPreviewTyped_.clear();
     } else if (key.size()==1 && ((key[0]>='0'&&key[0]<='9')||key[0]=='.'||key[0]=='-')) {
         if (polygonPreviewTyped_.size()<16) polygonPreviewTyped_+=key;
@@ -509,6 +558,8 @@ bool NativeEditorController::handle_polygon_preview_key(std::string_view key) {
 
 std::vector<std::string> NativeEditorController::polygon_preview_lines() const {
     if (!polygonPreviewBefore_) return {};
+    if (polygonVertexDissolvePreview_) return {"Dissolve Redundant Vertices","Straight boundary; two-triangle fans; preserves interpolated attributes",polygonPreviewValid_?"Enter apply | Esc cancel":"Invalid preview | Esc cancel"};
+    if (polygonMergePreview_) return {"Merge by Distance","Distance (mesh units): "+(polygonPreviewTyped_.empty()?std::to_string(polygonPreviewSettings_.amount):polygonPreviewTyped_),"Type distance; arrows adjust; seam attributes retained",polygonPreviewValid_?"Enter apply | Esc cancel":"Invalid preview | Esc cancel"};
     if (polygonDissolvePreview_) return {"Dissolve Cage Edges",std::to_string(polygonPreviewSelection_.components.size())+" selected edges",
         "Protected seams, creases, material and attribute boundaries are refused",
         polygonPreviewValid_?"Enter apply | Esc cancel":"Invalid preview | Esc cancel"};
@@ -623,7 +674,8 @@ bool NativeEditorController::handle_polygon_action(std::string_view action) {
     if (action=="polygon.extrude") return begin_polygon_preview(PolygonEdit::Extrude);
     if (action=="polygon.inset") return begin_polygon_preview(PolygonEdit::Inset);
     if (action=="polygon.bevel") return begin_polygon_preview(PolygonEdit::Bevel);
-    if (action=="polygon.weld") return begin_polygon_preview(PolygonEdit::Weld);
+    if (action=="polygon.weld") return begin_polygon_cleanup(true);
+    if (action=="polygon.dissolve_vertices") return begin_polygon_cleanup(false);
     if (action=="polygon.uv_tools") return begin_polygon_preview(PolygonEdit::ProjectUV);
     if (action=="polygon.assign_material") {
         auto* object=workspace_.document().find_object(polygonSelection_.object);
@@ -708,6 +760,7 @@ const std::map<std::string_view,std::string_view>& subdivision_tools() {
         {"subdiv.select_ring","polygon.select_ring"},
         {"subdiv.loop_cut","polygon.loop_cut"},
         {"subdiv.dissolve_edges","polygon.dissolve_edges"},
+        {"subdiv.dissolve_vertices","polygon.dissolve_vertices"},
         {"subdiv.clean_unused","polygon.clean_unused"},
         {"subdiv.select_grow","polygon.select_grow"},
         {"subdiv.select_shrink","polygon.select_shrink"},

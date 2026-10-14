@@ -42,6 +42,8 @@ struct CageDissolveResult {
 // Compaction uses explicit attribute-index survivors and geometric-edge descendants.
 [[nodiscard]] std::optional<SubdivisionSettings> remap_compacted_cage(const CookedPolygonAsset& before,
     const CookedPolygonAsset& after,const SubdivisionSettings&,const PolygonTopologyLineage&,std::string* error=nullptr);
+[[nodiscard]] std::optional<SubdivisionSettings> remap_cleanup_cage(const CookedPolygonAsset& before,
+    const CookedPolygonAsset& after,const SubdivisionSettings&,PolygonTopologyLineage&,std::string* error=nullptr);
 // Returns the cage for ordinary polygons and level zero; otherwise caches the evaluated surface.
 [[nodiscard]] const CookedPolygonAsset* editor_surface_mesh(const EditorObject& object);
 [[nodiscard]] std::uint32_t subdivision_control_triangle(const EditorObject&, std::uint32_t evaluatedTriangle);

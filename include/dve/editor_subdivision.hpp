@@ -28,6 +28,20 @@ struct CageLoopCutResult {
 // Touched faces must be convex planar quads with compatible attributes on their diagonal.
 [[nodiscard]] CageLoopCutResult cut_cage_edge_ring(const CookedPolygonAsset&,
     const SubdivisionSettings&, std::uint64_t seed, float fraction = .5F);
+struct CageDissolveResult {
+    SubdivisionSettings subdivision;
+    PolygonSelection selection;
+    PolygonTopologyLineage lineage;
+    std::string error;
+    [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
+};
+// Dissolves disjoint edges between two saved triangles into convex planar control quads.
+// Preserves render triangles/attributes and refuses seams, creases and attribute breaks.
+[[nodiscard]] CageDissolveResult dissolve_cage_edges(const CookedPolygonAsset&,const SubdivisionSettings&,
+    const PolygonSelection&,const std::set<std::uint64_t>& protectedEdges = {});
+// Compaction uses explicit attribute-index survivors and geometric-edge descendants.
+[[nodiscard]] std::optional<SubdivisionSettings> remap_compacted_cage(const CookedPolygonAsset& before,
+    const CookedPolygonAsset& after,const SubdivisionSettings&,const PolygonTopologyLineage&,std::string* error=nullptr);
 // Returns the cage for ordinary polygons and level zero; otherwise caches the evaluated surface.
 [[nodiscard]] const CookedPolygonAsset* editor_surface_mesh(const EditorObject& object);
 [[nodiscard]] std::uint32_t subdivision_control_triangle(const EditorObject&, std::uint32_t evaluatedTriangle);

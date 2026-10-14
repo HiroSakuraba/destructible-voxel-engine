@@ -294,6 +294,52 @@ std::set<std::uint64_t> edit_polygon_selection(const CookedPolygonAsset& mesh,
     return result;
 }
 
+PolygonCleanupResult compact_polygon_vertices(const CookedPolygonAsset& source,const PolygonSelection& selection) {
+    PolygonCleanupResult result;
+    const auto fail=[&](std::string message){result.polygon.error=std::move(message);return result;};
+    if (source.vertices.size()>100'000 || source.indices.size()>150'000)
+        return fail("Unused-vertex cleanup exceeds 100000 vertices / 50000 triangles");
+    if (const auto valid=validate_polygon_asset(source);!valid) return fail(valid.message);
+    if (!polygon_selection_valid(source,selection)) return fail("Cleanup selection is stale or belongs to another object");
+    std::vector<bool> used(source.vertices.size());
+    for (auto index : source.indices) used[index]=true;
+    const auto count=std::size_t(std::count(used.begin(),used.end(),true));
+    result.removedVertices=source.vertices.size()-count;
+    if (!result.removedVertices) return fail("No unused vertices to remove");
+    result.polygon={source,selection,{}};
+    auto& mesh=result.polygon.mesh;mesh.vertices.clear();mesh.vertices.reserve(count);
+    const auto beforeCanonical=canonical(source);
+    std::map<std::uint32_t,std::uint32_t> geometricSurvivors;
+    for (std::uint32_t i=0;i<source.vertices.size();++i) if (used[i]) {
+        const auto next=std::uint32_t(mesh.vertices.size());
+        result.lineage.vertexSurvivors.emplace(i,next);mesh.vertices.push_back(source.vertices[i]);
+        geometricSurvivors.emplace(beforeCanonical[i],next);
+    }
+    for (auto& index : mesh.indices) index=result.lineage.vertexSurvivors.at(index);
+    const auto afterCanonical=canonical(mesh);
+    for (auto& [old,next] : geometricSurvivors) { (void)old; next=afterCanonical[next]; }
+    for (auto old : polygon_all_components(source,PolygonSelectionMode::Edge)) {
+        const auto a=geometricSurvivors.at(std::uint32_t(old>>32U)),b=geometricSurvivors.at(std::uint32_t(old));
+        result.lineage.edgeDescendants[old].insert(edge(a,b).key());
+    }
+    for (std::uint32_t i=0;i<mesh.indices.size();++i) result.lineage.cornerDescendants[i].insert(i);
+    auto& selected=result.polygon.selection.components;selected.clear();
+    for (auto id : selection.components) {
+        if (selection.mode==PolygonSelectionMode::Face) selected.insert(id);
+        else if (selection.mode==PolygonSelectionMode::Edge) {
+            const auto& next=result.lineage.edgeDescendants.at(id);selected.insert(next.begin(),next.end());
+        } else if (const auto at=geometricSurvivors.find(std::uint32_t(id));at!=geometricSurvivors.end()) selected.insert(at->second);
+    }
+    mesh.bounds.minimum=mesh.bounds.maximum=mesh.vertices.front().position;
+    for (const auto& v : mesh.vertices) {
+        mesh.bounds.minimum={(std::min)(mesh.bounds.minimum.x,v.position.x),(std::min)(mesh.bounds.minimum.y,v.position.y),(std::min)(mesh.bounds.minimum.z,v.position.z)};
+        mesh.bounds.maximum={(std::max)(mesh.bounds.maximum.x,v.position.x),(std::max)(mesh.bounds.maximum.y,v.position.y),(std::max)(mesh.bounds.maximum.z,v.position.z)};
+    }
+    mesh.contentHash=polygon_asset_content_hash(mesh);
+    if (const auto valid=validate_polygon_asset(mesh);!valid) return fail(valid.message);
+    return result;
+}
+
 PolygonEditResult edit_polygon(const CookedPolygonAsset& source,const PolygonSelection& selection,
                                PolygonEdit operation,const PolygonEditSettings& settings) {
     PolygonEditResult result{source,selection,{}}; auto& mesh=result.mesh;
@@ -890,9 +936,9 @@ std::set<std::uint64_t> polygon_components_in_rect(const EditorObject& object,co
     return result;
 }
 ReplacePolygonCommand::ReplacePolygonCommand(EditorObjectId id,CookedPolygonAsset before,CookedPolygonAsset after,
-    std::string label,std::uint64_t stroke,std::optional<SubdivisionSettings> authoredAfter):
+    std::string label,std::uint64_t stroke,std::optional<SubdivisionSettings> authoredAfter,bool refreshAfter):
     id_(id),stroke_(stroke),before_(std::move(before)),after_(std::move(after)),
-    afterSubdivision_(std::move(authoredAfter)),explicitSubdivision_(afterSubdivision_.has_value()),label_(std::move(label)) {}
+    afterSubdivision_(std::move(authoredAfter)),explicitSubdivision_(afterSubdivision_.has_value()),refreshAfter_(refreshAfter),label_(std::move(label)) {}
 CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const CookedPolygonAsset& mesh,const std::optional<SubdivisionSettings>& settings,bool refresh) {
     auto* object=document.find_object(id_);
     if(!object||!object->polygon) return CommandResult::fail("Polygon target no longer exists");
@@ -924,7 +970,7 @@ CommandResult ReplacePolygonCommand::execute(EditorDocument& document) {
         }
         capturedOverride_=true;
     }
-    const auto result=apply(document,after_,afterSubdivision_,true);
+    const auto result=apply(document,after_,afterSubdivision_,refreshAfter_);
     if(result.success&&object->prefabLink) object->prefabLink->overrides["polygon.geometry"]=std::int64_t{1};
     return result;
 }
@@ -939,7 +985,7 @@ CommandResult ReplacePolygonCommand::undo(EditorDocument& document) {
 bool ReplacePolygonCommand::merge_with(const IEditorCommand& other) {
     const auto* next=dynamic_cast<const ReplacePolygonCommand*>(&other);
     if(!next||stroke_==0||stroke_!=next->stroke_||id_!=next->id_||label_!=next->label_) return false;
-    after_=next->after_; afterSubdivision_=next->afterSubdivision_; return true;
+    after_=next->after_; afterSubdivision_=next->afterSubdivision_; refreshAfter_=next->refreshAfter_; return true;
 }
 
 std::vector<EditorPolygonDrawTriangle> build_editor_polygon_draw_list(

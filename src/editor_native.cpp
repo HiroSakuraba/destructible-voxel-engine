@@ -2104,6 +2104,12 @@ void NativeEditorController::refresh_menu_state() noexcept {
             polygonSelection_.mode==PolygonSelectionMode::Edge && polygonSelection_.components.size()==1 &&
             !preview && !gizmoDragging_ && !mesh_authoring_dragging() && !voxel_authoring_active(),
             "Select one subdivision cage edge and finish the active edit first.");
+        enabled("polygon.dissolve_edges",components && object->subdivision && polygonSelection_.object==object->id &&
+            polygonSelection_.mode==PolygonSelectionMode::Edge && !preview && !gizmoDragging_ &&
+            !mesh_authoring_dragging() && !voxel_authoring_active(),
+            "Select subdivision cage edges and finish the active edit first.");
+        enabled("polygon.clean_unused",mesh && workspace_.selection_count()==1 && !preview && !gizmoDragging_ &&
+            !mesh_authoring_dragging() && !voxel_authoring_active(),"Select one visible unlocked mesh and finish the active edit first.");
         for (auto id:{"polygon.select_invert","polygon.select_none"}) enabled(id,mesh && selectionDomain_==SelectionDomain::Polygons && !preview,"Enter polygon component mode first.");
         enabled("polygon.join",mesh && workspace_.selection_count()>1 && !preview,"Select at least two polygon meshes.");
         enabled("polygon.slice",mesh && !preview,"Select a polygon mesh first.");

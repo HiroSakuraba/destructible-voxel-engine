@@ -219,6 +219,73 @@ void additional_topologies() {
     }
 }
 
+void triangulate(Fixture& f) {
+    f.settings.controlFaces.clear();
+    for (std::size_t i=0;i<f.mesh.indices.size();i+=3)
+        f.settings.controlFaces.push_back({f.mesh.indices[i],f.mesh.indices[i+1],f.mesh.indices[i+2]});
+}
+Fixture with_unused_vertices() {
+    auto f=grid();f.mesh.vertices.insert(f.mesh.vertices.begin(),f.mesh.vertices.front());
+    for (auto& index : f.mesh.indices) ++index;
+    for (auto& face : f.settings.controlFaces) for (auto& index : face) ++index;
+    auto orphan=f.mesh.vertices.front();orphan.position={100,100,100};f.mesh.vertices.push_back(orphan);
+    f.mesh.bounds.maximum={100,100,100};return f;
+}
+void dissolve_and_cleanup_core() {
+    auto f=grid();triangulate(f);
+    const auto diagonal=key(f.mesh,{0,0,0},{1,1,0}),other=key(f.mesh,{2,0,0},{3,1,0});
+    const auto before=polygon_asset_content_hash(f.mesh);
+    const auto dissolved=dissolve_cage_edges(f.mesh,f.settings,{1,PolygonSelectionMode::Edge,{diagonal,other}});
+    check(bool(dissolved),dissolved.error.c_str());
+    check(dissolved.subdivision.controlFaces.size()==22&&dissolved.selection.components.size()==4,"batch dissolve produces two disjoint control quads");
+    const auto edges=subdivision_control_edges(f.mesh,&dissolved.subdivision);
+    check(!edges.contains(diagonal)&&!edges.contains(other),"dissolved diagonals disappear from authored cage selection");
+    check(dissolved.lineage.edgeDescendants.at(diagonal).empty(),"dissolved edge is explicitly retired");
+    check(dissolved.lineage.controlFaceDescendants.at(0)==dissolved.lineage.controlFaceDescendants.at(1),"triangle identities map to their common quad");
+    check(polygon_asset_content_hash(f.mesh)==before,"dissolve retains every render vertex and attribute");
+    const PolygonSelection seed{1,PolygonSelectionMode::Edge,{diagonal}};
+    check(!dissolve_cage_edges(f.mesh,f.settings,seed,{diagonal}),"authored seam protects diagonal");
+    auto creased=f.settings;creased.edgeCreases[diagonal]=2;
+    check(!dissolve_cage_edges(f.mesh,creased,seed),"authored crease protects diagonal");
+    check(!dissolve_cage_edges(f.mesh,f.settings,{1,PolygonSelectionMode::Edge,{key(f.mesh,{0,0,0},{1,0,0})}}),"boundary dissolve refuses removing the surface");
+    check(!dissolve_cage_edges(f.mesh,f.settings,{1,PolygonSelectionMode::Edge,{diagonal,key(f.mesh,{1,0,0},{1,1,0})}}),"overlapping triangle pairs refuse as one batch");
+    auto split=f;auto v=split.mesh.vertices[0];v.texcoord1.x=7;split.mesh.vertices.push_back(v);
+    split.mesh.indices[3]=std::uint32_t(split.mesh.vertices.size()-1);split.settings.controlFaces[1][0]=split.mesh.indices[3];
+    check(!dissolve_cage_edges(split.mesh,split.settings,seed),"UV1 discontinuity protects diagonal independently of UV0");
+    auto material=f;material.mesh.materials.resize(2);material.mesh.materialBindings.resize(2);
+    material.mesh.submeshes={{"A",0,3,0},{"B",3,3,1},{"Rest",6,std::uint32_t(material.mesh.indices.size()-6),0}};
+    check(!dissolve_cage_edges(material.mesh,material.settings,seed),"material boundary protects diagonal");
+    auto bent=f;for(auto& vertex:bent.mesh.vertices)if(vertex.position.x==0&&vertex.position.y==1)vertex.position.z=.3F;
+    check(!dissolve_cage_edges(bent.mesh,bent.settings,seed),"nonplanar pair refused");
+    const auto quads=grid();
+    check(!dissolve_cage_edges(quads.mesh,quads.settings,{1,PolygonSelectionMode::Edge,{key(quads.mesh,{1,0,0},{1,1,0})}}),"quad-to-quad dissolve is deferred until larger face support");
+
+    auto dirty=with_unused_vertices();const auto oldHash=polygon_asset_content_hash(dirty.mesh);
+    const auto oldEdge=key(dirty.mesh,{1,1,0},{2,1,0});dirty.settings.edgeCreases[oldEdge]=2.5F;
+    const auto compacted=compact_polygon_vertices(dirty.mesh,{1,PolygonSelectionMode::Vertex,{0}});
+    check(bool(compacted),compacted.polygon.error.c_str());
+    check(compacted.removedVertices==2&&compacted.polygon.mesh.vertices.size()==48,"only unreferenced vertices removed; used attribute splits remain");
+    check(compacted.polygon.selection.components==std::set<std::uint64_t>{0},"orphan canonical alias maps to the surviving geometric vertex");
+    check(compacted.polygon.mesh.indices==grid().mesh.indices,"triangle and corner ordering retained after compaction");
+    for (std::size_t i=0;i<dirty.mesh.indices.size();++i) {
+        const auto& a=dirty.mesh.vertices[dirty.mesh.indices[i]];const auto& b=compacted.polygon.mesh.vertices[compacted.polygon.mesh.indices[i]];
+        check(a.position.x==b.position.x&&a.position.y==b.position.y&&a.position.z==b.position.z&&
+            a.texcoord.x==b.texcoord.x&&a.texcoord.y==b.texcoord.y&&a.texcoord1.x==b.texcoord1.x&&a.texcoord1.y==b.texcoord1.y&&
+            a.normal.x==b.normal.x&&a.normal.y==b.normal.y&&a.normal.z==b.normal.z&&a.tangent.x==b.tangent.x&&a.tangent.w==b.tangent.w,
+            "referenced corner geometry, UVs, normals and tangents are exact");
+    }
+    PolygonUvAuthoring flags;flags.enabled=false;flags.layoutHash=polygon_uv_layout_hash(dirty.mesh);
+    flags.seams[0]={oldEdge};flags.pins[0]={0};flags.pins[1]={7};
+    std::string error;const auto mapped=remap_polygon_uv_authoring(flags,compacted.polygon.mesh,compacted.lineage,&error);
+    check(bool(mapped),error.c_str());
+    check(!mapped->enabled&&mapped->pins==flags.pins&&mapped->seams[0]==compacted.lineage.edgeDescendants.at(oldEdge),"compaction preserves disabled independent UV authoring flags");
+    const auto settings=remap_compacted_cage(dirty.mesh,compacted.polygon.mesh,dirty.settings,compacted.lineage,&error);
+    check(bool(settings),error.c_str());
+    check(settings->controlFaces==grid().settings.controlFaces&&settings->edgeCreases.begin()->second==2.5F,"explicit control faces and authored crease remap without inference or decay");
+    check(polygon_asset_content_hash(dirty.mesh)==oldHash,"cleanup computation leaves source unchanged");
+    check(!compact_polygon_vertices(compacted.polygon.mesh,compacted.polygon.selection),"no-op cleanup is not reported as a mutation");
+}
+
 #ifndef DVE_CAGE_SELECTION_CORE_ONLY
 void native_commands_and_guards() {
     auto f=grid(); EditorDocument document("Cage selection regression");
@@ -380,6 +447,53 @@ void native_cut_guards_and_input() {
     check(!results.empty()&&results.front().id=="edit.copy","Edit > Copy stays first after loop cut commands");
 }
 
+void native_cleanup_history() {
+    auto f=grid();triangulate(f);const auto diagonal=key(f.mesh,{0,0,0},{1,1,0});
+    EditorDocument document("Dissolve history");EditorObject object(1,"Cage");object.polygon=f.mesh;object.subdivision=f.settings;
+    document.add_object(std::move(object));
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(document)));auto& c=*owner;
+    c.resize(1600,900);c.workspace().select_object(1);check(c.dispatch_action("subdiv.edge_mode"),"dissolve edge mode");
+    c.select_polygon_components({diagonal},SelectionOperation::Replace);
+    const auto hash=polygon_asset_content_hash(f.mesh);const auto history=c.workspace().commands().size();
+    check(c.dispatch_action("subdiv.dissolve_edges"),"dissolve opens preview");
+    check(c.workspace().document().find_object(1)->subdivision->controlFaces.size()==23,"dissolve metadata is previewed");
+    c.key_down("escape",false,false,false);
+    check(*c.workspace().document().find_object(1)->subdivision==f.settings&&c.workspace().commands().size()==history,"dissolve Cancel restores settings without history");
+    check(c.dispatch_action("subdiv.dissolve_edges")&&c.dispatch_action("subdiv.preview_apply"),"dissolve commits from menu");
+    check(c.workspace().commands().size()==history+1&&c.polygon_selection().mode==PolygonSelectionMode::Face,"dissolve is one history step and selects merged face");
+    check(polygon_asset_content_hash(*c.workspace().document().find_object(1)->polygon)==hash,"native dissolve keeps render attributes exact");
+    check(c.dispatch_action("edit.undo")&&*c.workspace().document().find_object(1)->subdivision==f.settings&&c.polygon_selection().components==std::set{diagonal},"Undo restores triangle topology and seed edge");
+    check(c.dispatch_action("edit.redo"),"dissolve Redo");check(c.dispatch_action("edit.undo"),"restore dissolve source");
+    PolygonUvAuthoring flags;flags.layoutHash=polygon_uv_layout_hash(f.mesh);flags.seams[1]={diagonal};std::string error;
+    auto command=make_polygon_uv_authoring_command(c.workspace().document(),*c.workspace().document().find_object(1),flags,&error);
+    check(bool(command)&&c.workspace().commands().execute(c.workspace().document(),std::move(command)).success,"save protected UV1 seam");
+    check(c.dispatch_action("subdiv.dissolve_edges")&&!c.dispatch_action("subdiv.preview_apply"),"UV1 seam blocks dissolve Apply");
+    c.key_down("escape",false,false,false);
+
+    auto dirty=with_unused_vertices();const auto oldEdge=key(dirty.mesh,{1,1,0},{2,1,0});dirty.settings.edgeCreases[oldEdge]=2;
+    EditorDocument d("Cleanup history");EditorObject mesh(1,"Dirty cage");mesh.polygon=dirty.mesh;mesh.subdivision=dirty.settings;d.add_object(std::move(mesh));
+    auto next=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(d)));auto& clean=*next;
+    clean.resize(1600,900);clean.workspace().select_object(1);check(clean.dispatch_action("subdiv.edge_mode"),"cleanup edge mode");
+    clean.select_polygon_components({oldEdge},SelectionOperation::Replace);
+    flags={};flags.enabled=false;flags.layoutHash=polygon_uv_layout_hash(dirty.mesh);flags.seams[0]={oldEdge};flags.pins[1]={7};
+    command=make_polygon_uv_authoring_command(clean.workspace().document(),*clean.workspace().document().find_object(1),flags,&error);
+    check(bool(command)&&clean.workspace().commands().execute(clean.workspace().document(),std::move(command)).success,"save cleanup UV flags");
+    const auto original=polygon_asset_content_hash(dirty.mesh);const auto count=clean.workspace().commands().size();
+    const auto expected=compact_polygon_vertices(dirty.mesh,clean.polygon_selection());
+    check(clean.dispatch_action("subdiv.clean_unused"),"cleanup native command connected");
+    const auto* target=clean.workspace().document().find_object(1);const auto restoredFlags=read_polygon_uv_authoring(*target,&error);
+    check(target->polygon->contentHash==expected.polygon.mesh.contentHash&&restoredFlags&&!restoredFlags->enabled&&restoredFlags->pins==flags.pins,"cleanup retains exact surviving attributes and saved UV pins");
+    check(clean.workspace().commands().size()==count+1&&clean.polygon_selection().components==expected.polygon.selection.components,"cleanup geometry, metadata and selection are one transaction");
+    check(clean.dispatch_action("edit.undo"),"cleanup Undo");target=clean.workspace().document().find_object(1);
+    check(polygon_asset_content_hash(*target->polygon)==original&&*target->subdivision==dirty.settings&&clean.polygon_selection().components==std::set{oldEdge},"cleanup Undo restores exact geometry, topology, creases and edge identity");
+    const auto undone=read_polygon_uv_authoring(*target,&error);check(undone&&undone->seams==flags.seams&&undone->pins==flags.pins,"cleanup Undo restores UV record");
+    check(clean.dispatch_action("edit.redo"),"cleanup Redo");const auto noOpCount=clean.workspace().commands().size();
+    check(!clean.dispatch_action("subdiv.clean_unused")&&clean.workspace().commands().size()==noOpCount,"repeated cleanup adds no false Undo entry");
+    target=clean.workspace().document().find_object(1);
+    clean.workspace().document().find_object(1)->flags.locked=true;check(!clean.dispatch_action("subdiv.clean_unused"),"locked mesh refuses cleanup");
+    clean.workspace().document().find_object(1)->flags.locked=false;
+}
+
 void native_history_menus_and_search() {
     auto f=grid(); EditorDocument document("Cage selection history");
     EditorObject object(1,"Cage"); object.polygon=f.mesh; object.subdivision=f.settings;
@@ -418,10 +532,10 @@ void native_history_menus_and_search() {
 }
 int main() {
     try {
-        open_strip_and_seams(); closed_cycles_and_reordering(); stops_and_atomic_refusals(); additional_topologies(); cuts_slide_and_lineage();
+        open_strip_and_seams(); closed_cycles_and_reordering(); stops_and_atomic_refusals(); additional_topologies(); cuts_slide_and_lineage(); dissolve_and_cleanup_core();
 #ifndef DVE_CAGE_SELECTION_CORE_ONLY
-        native_commands_and_guards(); native_history_menus_and_search(); native_cut_history_and_preview(); native_cut_guards_and_input();
+        native_commands_and_guards(); native_history_menus_and_search(); native_cut_history_and_preview(); native_cut_guards_and_input(); native_cleanup_history();
 #endif
     } catch (const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
-    std::cout<<"Cage edge selection, cut/slide and lineage regression checks passed\n";
+    std::cout<<"Cage selection, cut/slide, dissolve and cleanup regression checks passed\n";
 }

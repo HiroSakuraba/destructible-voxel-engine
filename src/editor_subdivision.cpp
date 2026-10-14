@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <optional>
 #include <tuple>
 namespace dve::editor {
 namespace {
@@ -321,6 +322,115 @@ std::set<std::uint64_t> subdivision_control_edges(const CookedPolygonAsset& mesh
         const auto a=cage.points[face.vertices[i]],b=cage.points[face.vertices[(i+1)%face.vertices.size()]];
         const auto key=edge(first.at(std::make_tuple(a.x,a.y,a.z)),first.at(std::make_tuple(b.x,b.y,b.z)));
         result.insert((std::uint64_t(key.first)<<32U)|key.second);
+    }
+    return result;
+}
+
+CageEdgeSelectionResult select_cage_edge_chain(const CookedPolygonAsset& mesh,
+    const SubdivisionSettings& settings, const std::set<std::uint64_t>& seeds,
+    CageEdgeTraversal traversal, std::size_t maximumEdges) {
+    CageEdgeSelectionResult result;
+    const auto fail=[&](std::string message) {
+        result.edges.clear(); result.stops.clear(); result.error=std::move(message); return result;
+    };
+    if (traversal!=CageEdgeTraversal::Loop && traversal!=CageEdgeTraversal::Ring)
+        return fail("Unknown cage edge traversal");
+    if (seeds.empty()) return fail("Select at least one control-cage edge");
+    if (maximumEdges==0 || mesh.indices.size()/3>kMaxSubdivisionControlTriangles ||
+        mesh.vertices.size()>100'000 || settings.controlFaces.size()>kMaxSubdivisionControlTriangles)
+        return fail("Edge selection exceeds its cage or selection budget");
+    std::size_t recorded=0;
+    if (settings.controlFaces.empty()) return fail("Edge loops/rings require saved control faces");
+    for (const auto& face : settings.controlFaces) {
+        if ((face.size()!=3 && face.size()!=6) || (recorded+=face.size())>mesh.indices.size())
+            return fail("Invalid saved control-face metadata");
+    }
+    if (const auto valid=validate_polygon_asset(mesh); !valid) return fail(valid.message);
+    auto cage=parse_cage(mesh,&settings,&result.error);
+    if (!result.error.empty()) return fail(result.error);
+    Topology graph;
+    if (!topology(cage,graph,{},false,result.error)) return fail(result.error);
+
+    // Match the existing component-selection key convention: first attribute vertex at
+    // each geometric position. This read-only operation does not create a new ID scheme.
+    std::map<std::tuple<float,float,float>,std::uint32_t> first;
+    for (std::uint32_t i=0;i<mesh.vertices.size();++i) {
+        const auto p=mesh.vertices[i].position; first.emplace(std::make_tuple(p.x,p.y,p.z),i);
+    }
+    std::vector<std::uint32_t> canonical;
+    for (auto p : cage.points) canonical.push_back(first.at(std::make_tuple(p.x,p.y,p.z)));
+    const auto sourceKey=[&](Edge key) {
+        const auto indices=edge(canonical[key.first],canonical[key.second]);
+        return (std::uint64_t(indices.first)<<32U)|indices.second;
+    };
+    std::map<std::uint64_t,Edge> lookup;
+    for (const auto& [key,data] : graph.edges) { (void)data; lookup.emplace(sourceKey(key),key); }
+    for (auto key : seeds) if (!lookup.contains(key))
+        return fail("Select control-cage edges; hidden diagonals and stale keys are not valid seeds");
+    maximumEdges=std::min(maximumEdges,kMaxSubdivisionControlTriangles*3);
+    const auto include=[&](Edge key) {
+        result.edges.insert(sourceKey(key)); return result.edges.size()<=maximumEdges;
+    };
+    if (traversal==CageEdgeTraversal::Ring) {
+        std::vector<Edge> pending;
+        std::set<Edge> seen;
+        for (auto key : seeds) pending.push_back(lookup.at(key));
+        while (!pending.empty()) {
+            const auto key=pending.back(); pending.pop_back();
+            if (!seen.insert(key).second) continue;
+            if (!include(key)) return fail("Edge selection budget exceeded; selection unchanged");
+            const auto& faces=graph.edges.at(key).faces;
+            if (faces.size()==1) result.stops.insert(CageEdgeStop::Boundary);
+            for (auto id : faces) {
+                const auto& face=cage.faces[id];
+                if (face.vertices.size()!=4) { result.stops.insert(CageEdgeStop::Triangle); continue; }
+                for (std::size_t i=0;i<4;++i) if (edge(face.vertices[i],face.vertices[(i+1)%4])==key)
+                    pending.push_back(edge(face.vertices[(i+2)%4],face.vertices[(i+3)%4]));
+            }
+        }
+    } else {
+        using Step=std::pair<Edge,std::uint32_t>;
+        std::vector<Step> pending;
+        std::set<Step> seen;
+        for (auto key : seeds) {
+            const auto e=lookup.at(key);
+            if (!include(e)) return fail("Edge selection budget exceeded; selection unchanged");
+            pending.push_back({e,e.first}); pending.push_back({e,e.second});
+        }
+        while (!pending.empty()) {
+            const auto [incoming,v]=pending.back(); pending.pop_back();
+            if (!seen.insert({incoming,v}).second) continue;
+            const auto& faces=graph.vertexFaces[v];
+            const auto& edges=graph.vertexEdges[v];
+            if (std::any_of(faces.begin(),faces.end(),[&](auto id){return cage.faces[id].vertices.size()!=4;})) {
+                result.stops.insert(CageEdgeStop::Triangle); continue;
+            }
+            std::vector<Edge> boundary;
+            for (auto e : edges) if (graph.edges.at(e).faces.size()==1) boundary.push_back(e);
+            std::optional<Edge> outgoing;
+            if (!boundary.empty()) {
+                // Only a boundary chain has an unambiguous continuation at a regular
+                // valence-three boundary vertex. An interior chain ends at the boundary.
+                if (edges.size()==3 && faces.size()==2 && graph.edges.at(incoming).faces.size()==1)
+                    for (auto e : boundary) if (e!=incoming) outgoing=e;
+                if (!outgoing) { result.stops.insert(CageEdgeStop::Boundary); continue; }
+            } else {
+                if (edges.size()!=4 || faces.size()!=4) { result.stops.insert(CageEdgeStop::Pole); continue; }
+                for (auto e : edges) {
+                    if (e==incoming) continue;
+                    const auto& adjacent=graph.edges.at(e).faces;
+                    const auto& previous=graph.edges.at(incoming).faces;
+                    if (std::none_of(adjacent.begin(),adjacent.end(),[&](auto id){
+                            return std::find(previous.begin(),previous.end(),id)!=previous.end();})) {
+                        if (outgoing) return fail("Ambiguous cage loop continuation; repair topology");
+                        outgoing=e;
+                    }
+                }
+                if (!outgoing) return fail("Missing cage loop continuation; repair topology");
+            }
+            if (!include(*outgoing)) return fail("Edge selection budget exceeded; selection unchanged");
+            pending.push_back({*outgoing,outgoing->first==v?outgoing->second:outgoing->first});
+        }
     }
     return result;
 }

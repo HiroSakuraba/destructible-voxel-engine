@@ -311,7 +311,10 @@ std::vector<MenuAction> EditorMenuRegistry::search(std::string_view query, std::
                 score += best;
             }
             if (!matched) continue;
-            if (!action.enabled) score += 500;
+            // A relevant disabled command must remain discoverable with its reason.
+            // A large penalty let dozens of weak subsequence matches bury exact Copy.
+            // Keep enabled commands first at equal relevance, without hiding exact hits.
+            if (!action.enabled) score += tokens.empty() ? 500 : 24;
             if (action.visibility == MenuVisibility::Advanced) score += 12;
             if (action.visibility == MenuVisibility::PaletteOnly) score += 18;
             matches.push_back({score, index});
@@ -689,6 +692,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"subdiv.rotate","Subdivision","Rotate Cage / Object",""},
         {"subdiv.scale","Subdivision","Scale Cage / Object",""},
         {"subdiv.select_all","Subdivision","Select All Components",""},
+        {"subdiv.select_loop","Subdivision","Select Edge Loops",""},
+        {"subdiv.select_ring","Subdivision","Select Edge Rings",""},
         {"subdiv.select_grow","Subdivision","Grow Selection",""},
         {"subdiv.select_shrink","Subdivision","Shrink Selection",""},
         {"subdiv.select_connected","Subdivision","Select Connected",""},
@@ -763,6 +768,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"polygon.assign_material","Polygon","Assign Active Material to Faces",""},
         {"polygon.weld","Polygon","Weld by Distance",""},
         {"polygon.select_shell","Polygon","Select Connected Components",""},
+        {"polygon.select_loop","Polygon","Select Cage Edge Loops",""},
+        {"polygon.select_ring","Polygon","Select Cage Edge Rings",""},
         {"polygon.select_grow","Polygon","Grow Component Selection",""},
         {"polygon.select_shrink","Polygon","Shrink Component Selection",""},
         {"polygon.select_invert","Polygon","Invert Component Selection",""},
@@ -844,7 +851,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for(auto id:{"mesh.hull_fit","mesh.hull_edit","mesh.hull_remove"})configure(id,"Collision Hull",75);
     for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
     for(auto id:{"mesh.uv_editor","mesh.uv_mark_seam","mesh.uv_clear_seam","mesh.uv_toggle_pin","mesh.uv_reset_flags"})configure(id,"UV Editing",82);
-    for (auto id:{"polygon.assign_material","polygon.weld","polygon.select_shell","polygon.select_invert","polygon.select_none","polygon.extract",
+    for (auto id:{"polygon.assign_material","polygon.weld","polygon.select_shell","polygon.select_loop","polygon.select_ring","polygon.select_invert","polygon.select_none","polygon.extract",
                  "polygon.join","polygon.separate","polygon.slice","polygon.preview_apply","polygon.preview_cancel"}) configure(id,"Mesh Editing",80);
     for (std::string_view id : {"material.assign", "material.apply", "material.link", "material.create_instance",
                                 "material.create_master", "material.preview", "material.pin_preview"})
@@ -941,6 +948,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("subdiv.scale","Subdivision Transform",36,false);
     configure("subdiv.select_all","Subdivision Selection",37,false);
     configure("subdiv.select_grow","Subdivision Selection",38,false);
+    configure("subdiv.select_loop","Subdivision Selection",38,false);
+    configure("subdiv.select_ring","Subdivision Selection",38,false);
     configure("subdiv.select_shrink","Subdivision Selection",39,false);
     configure("subdiv.select_connected","Subdivision Selection",40,false);
     configure("subdiv.select_invert","Subdivision Selection",41,false);
@@ -1115,6 +1124,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("subdiv.scale","Scale Cage / Object through the shared control-cage transform workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_all","Select All Components through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_grow","Grow Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("subdiv.select_loop","Follow selected cage edges through regular quad vertices; stops at boundaries, poles and triangles.",{"subdivision","edge","loop"});
+    describe("subdiv.select_ring","Select opposite edges across saved control quads; stops at boundaries and triangles.",{"subdivision","edge","ring"});
+    describe("polygon.select_loop","Select loops on an authored subdivision control cage; convert an ordinary polygon mesh to subdivision first.",{"cage","edge","loop"});
+    describe("polygon.select_ring","Select rings on an authored subdivision control cage; convert an ordinary polygon mesh to subdivision first.",{"cage","edge","ring"});
     describe("subdiv.select_shrink","Shrink Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_connected","Select Connected through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_invert","Invert Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});

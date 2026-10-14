@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <optional>
 #include <tuple>
 namespace dve::editor {
 namespace {

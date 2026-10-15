@@ -1124,6 +1124,13 @@ private:
     EditorAssetDatabase assetDatabase_{};
     bool thumbnailBacklog_{};
     EditorAssetBrowserState assetBrowserState_{};
+    AssetDragState assetDrag_;
+    std::optional<Float3> pendingImportDrop_;   // a model drop waiting for its options to open
+    void begin_asset_drag(const EditorAssetRecord& asset, int x, int y);
+    void update_asset_drag(int x, int y);
+    void finish_asset_drag(int x, int y);
+    bool load_asset_drag_payload();
+    bool place_dragged_asset();
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};
@@ -1136,13 +1143,6 @@ private:
     EditorVoxelBooleanSession voxelBoolean_{};
     EditorVoxelJoinSession voxelJoin_{};
     bool floodFillArmed_{};
-    AssetDragState assetDrag_;
-    std::optional<Float3> pendingImportDrop_;   // a model drop waiting for its options to open
-    void begin_asset_drag(const EditorAssetRecord& asset, int x, int y);
-    void update_asset_drag(int x, int y);
-    void finish_asset_drag(int x, int y);
-    bool load_asset_drag_payload();
-    bool place_dragged_asset();
     SelectionDomain selectionDomain_{SelectionDomain::Objects};
     PolygonSelection polygonSelection_{};
     std::optional<CookedPolygonAsset> polygonDragBefore_;

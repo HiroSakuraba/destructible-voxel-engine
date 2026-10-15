@@ -23,22 +23,22 @@ int g_failures = 0;
 void check(bool condition, const std::string& message) {
     if (!condition) { std::printf("FAIL: %s\n", message.c_str()); ++g_failures; }
 }
-bool near(double a, double b, double tolerance = 1.0e-4) { return std::abs(a - b) <= tolerance; }
+bool approx(double a, double b, double tolerance = 1.0e-4) { return std::abs(a - b) <= tolerance; }
 const std::string kDash = "\xE2\x80\x94";
 
 void test_parser() {
     const auto m = [](std::string_view text, double current = 0.0) { return parse_number_field(text, NumberFieldUnit::Meters, current); };
     const auto d = [](std::string_view text, double current = 0.0) { return parse_number_field(text, NumberFieldUnit::Degrees, current); };
-    check(m("1.5").ok && near(m("1.5").value, 1.5), "plain meters");
-    check(near(m("150cm").value, 1.5) && near(m("150 cm").value, 1.5) && near(m("25mm").value, 0.025), "cm and mm");
-    check(near(m("2 ft").value, 0.6096) && near(m("6in").value, 0.1524) && near(m("1'6\"").value, 0.4572), "feet and inches");
-    check(near(m("2*0.25").value, 0.5) && near(m("(1+2)/4").value, 0.75) && near(m("-0.5").value, -0.5) && near(m("1e-2").value, 0.01),
+    check(m("1.5").ok && approx(m("1.5").value, 1.5), "plain meters");
+    check(approx(m("150cm").value, 1.5) && approx(m("150 cm").value, 1.5) && approx(m("25mm").value, 0.025), "cm and mm");
+    check(approx(m("2 ft").value, 0.6096) && approx(m("6in").value, 0.1524) && approx(m("1'6\"").value, 0.4572), "feet and inches");
+    check(approx(m("2*0.25").value, 0.5) && approx(m("(1+2)/4").value, 0.75) && approx(m("-0.5").value, -0.5) && approx(m("1e-2").value, 0.01),
           "arithmetic and exponents");
-    check(near(m("1m + 50cm").value, 1.5), "mixed units add");
-    check(near(m("+=0.5", 2.0).value, 2.5) && near(m("-=10cm", 1.0).value, 0.9) && near(m("*=2", 3.0).value, 6.0) &&
-              near(m("/=4", 2.0).value, 0.5),
+    check(approx(m("1m + 50cm").value, 1.5), "mixed units add");
+    check(approx(m("+=0.5", 2.0).value, 2.5) && approx(m("-=10cm", 1.0).value, 0.9) && approx(m("*=2", 3.0).value, 6.0) &&
+              approx(m("/=4", 2.0).value, 0.5),
           "relative edits");
-    check(near(d("90").value, 90.0) && near(d("0.25turn").value, 90.0) && near(d("(pi/2)rad").value, 90.0) && near(d("45deg").value, 45.0),
+    check(approx(d("90").value, 90.0) && approx(d("0.25turn").value, 90.0) && approx(d("(pi/2)rad").value, 90.0) && approx(d("45deg").value, 45.0),
           "angles");
     check(!m("10 deg").ok && m("10 deg").error.find("Angles") != std::string::npos, "an angle in a length field is refused");
     check(!d("2m").ok, "a length in an angle field is refused");
@@ -112,7 +112,7 @@ void test_typing_per_axis() {
     check(c.text_edit().kind == TextEditKind::Position && c.text_edit().axis == 1 && c.text_edit().buffer == "1",
           "clicking the Y box types into Y, starting from its value");
     type(c, "150cm");
-    check(near(object(c, 1).transform.position.y, 1.5) && near(object(c, 1).transform.position.x, 0.0), "Y = 150 cm; X untouched");
+    check(approx(object(c, 1).transform.position.y, 1.5) && approx(object(c, 1).transform.position.x, 0.0), "Y = 150 cm; X untouched");
     check(c.workspace().commands().can_undo() && std::string(c.workspace().commands().undo_label()).find("Position Y") != std::string::npos,
           "one undo step named for the axis");
 
@@ -127,14 +127,14 @@ void test_typing_per_axis() {
     click(c, find_rect(c, NumberFieldId::Position, 0)->box);
     check(c.text_edit().buffer.empty(), "a differing field starts empty");
     type(c, "5");
-    check(near(object(c, 1).transform.position.x, 5.0) && near(object(c, 2).transform.position.x, 5.0) &&
-              near(object(c, 2).transform.position.y, 1.0),
+    check(approx(object(c, 1).transform.position.x, 5.0) && approx(object(c, 2).transform.position.x, 5.0) &&
+              approx(object(c, 2).transform.position.y, 1.0),
           "X = 5 sets both; their Y is untouched");
-    check(c.workspace().commands().undo(c.workspace().document()).success && near(object(c, 2).transform.position.x, 4.0),
+    check(c.workspace().commands().undo(c.workspace().document()).success && approx(object(c, 2).transform.position.x, 4.0),
           "one undo restores both");
     click(c, find_rect(c, NumberFieldId::Position, 0)->box);
     type(c, "+=2");
-    check(near(object(c, 1).transform.position.x, 2.0) && near(object(c, 2).transform.position.x, 6.0), "+= offsets each one");
+    check(approx(object(c, 1).transform.position.x, 2.0) && approx(object(c, 2).transform.position.x, 6.0), "+= offsets each one");
 
     // Rotation, Tab and Shift+Tab.
     c.workspace().select_object(1);
@@ -142,7 +142,7 @@ void test_typing_per_axis() {
     type(c, "(pi/2)rad", "tab");
     check(c.text_edit().kind == TextEditKind::VoxelSize, "Tab from Rotation Z moves to Voxel size");
     const Float3 euler = multiply(quaternion_to_euler_xyz(object(c, 1).transform.rotation), 57.29578F);
-    check(near(euler.z, 90.0, 0.01), "Rotation Z = pi/2 rad is 90 degrees");
+    check(approx(euler.z, 90.0, 0.01), "Rotation Z = pi/2 rad is 90 degrees");
     c.key_down("tab", false, true, false);
     check(c.text_edit().kind == TextEditKind::Rotation && c.text_edit().axis == 2, "Shift+Tab goes back");
     c.key_down("escape", false, false, false);
@@ -155,7 +155,7 @@ void test_typing_per_axis() {
     c.workspace().document().find_object(1)->flags.locked = true;
     click(c, find_rect(c, NumberFieldId::Position, 0)->box);
     type(c, "3");
-    check(c.status().text.find("Unlock") != std::string::npos && near(object(c, 1).transform.position.x, 2.0), "a locked object is refused");
+    check(c.status().text.find("Unlock") != std::string::npos && approx(object(c, 1).transform.position.x, 2.0), "a locked object is refused");
 }
 
 void test_voxel_size() {
@@ -166,11 +166,11 @@ void test_voxel_size() {
     if (!size) return;
     click(c, size->box);
     type(c, "5cm");
-    check(near(object(c, 1).voxelSizeMeters, 0.05), "voxel size typed in cm");
-    check(c.workspace().commands().undo(c.workspace().document()).success && near(object(c, 1).voxelSizeMeters, 0.25), "one undo");
+    check(approx(object(c, 1).voxelSizeMeters, 0.05), "voxel size typed in cm");
+    check(c.workspace().commands().undo(c.workspace().document()).success && approx(object(c, 1).voxelSizeMeters, 0.25), "one undo");
     click(c, size->box);
     type(c, "0");
-    check(c.status().error && c.status().text.find("between 1 mm and 10 m") != std::string::npos && near(object(c, 1).voxelSizeMeters, 0.25),
+    check(c.status().error && c.status().text.find("between 1 mm and 10 m") != std::string::npos && approx(object(c, 1).voxelSizeMeters, 0.25),
           "an out-of-range size is refused");
     c.workspace().select_object(3);
     check(!find_rect(c, NumberFieldId::VoxelSize).has_value(), "an object without voxels has no Voxel size field");
@@ -185,19 +185,19 @@ void test_scrub() {
     c.pointer_move(lx, ly);
     c.pointer_down(PointerButton::Primary, lx, ly);
     c.pointer_move(lx + 50, ly);
-    check(c.number_scrub_active() && near(object(c, 1).transform.position.x, 0.5, 1e-3), "dragging the X letter scrubs live (0.01 m/px)");
+    check(c.number_scrub_active() && approx(object(c, 1).transform.position.x, 0.5, 1e-3), "dragging the X letter scrubs live (0.01 m/px)");
     check(!c.workspace().commands().can_undo(), "no undo step while scrubbing");
     c.pointer_up(PointerButton::Primary, lx + 50, ly);
-    check(near(object(c, 1).transform.position.x, 0.5, 1e-3) && c.workspace().commands().can_undo(), "release applies it as one undo step");
-    check(c.workspace().commands().undo(c.workspace().document()).success && near(object(c, 1).transform.position.x, 0.0), "undo");
+    check(approx(object(c, 1).transform.position.x, 0.5, 1e-3) && c.workspace().commands().can_undo(), "release applies it as one undo step");
+    check(c.workspace().commands().undo(c.workspace().document()).success && approx(object(c, 1).transform.position.x, 0.0), "undo");
 
     c.pointer_down(PointerButton::Primary, lx, ly);
     c.pointer_move(lx + 50, ly, 1U);  // Shift: fine
-    check(near(object(c, 1).transform.position.x, 0.05, 1e-3), "Shift scrubs ten times finer");
+    check(approx(object(c, 1).transform.position.x, 0.05, 1e-3), "Shift scrubs ten times finer");
     c.pointer_move(lx + 37, ly, 2U);  // Ctrl: snap to the move step (0.1 m)
-    check(near(object(c, 1).transform.position.x, 0.4, 1e-3), "Ctrl snaps to the move step");
+    check(approx(object(c, 1).transform.position.x, 0.4, 1e-3), "Ctrl snaps to the move step");
     c.key_down("escape", false, false, false);
-    check(!c.number_scrub_active() && near(object(c, 1).transform.position.x, 0.0) && !c.workspace().commands().can_undo(),
+    check(!c.number_scrub_active() && approx(object(c, 1).transform.position.x, 0.0) && !c.workspace().commands().can_undo(),
           "Esc cancels the scrub");
     c.pointer_up(PointerButton::Primary, lx + 37, ly);
 
@@ -214,8 +214,8 @@ void test_scrub() {
         c.pointer_move(size->label.x + 75, size->label.y + 9);
         const float live = object(c, 1).voxelSizeMeters;
         c.pointer_up(PointerButton::Primary, size->label.x + 75, size->label.y + 9);
-        check(live > 0.4F && near(object(c, 1).voxelSizeMeters, live), "voxel size scrubs up and applies");
-        check(c.workspace().commands().undo(c.workspace().document()).success && near(object(c, 1).voxelSizeMeters, 0.25), "undo");
+        check(live > 0.4F && approx(object(c, 1).voxelSizeMeters, live), "voxel size scrubs up and applies");
+        check(c.workspace().commands().undo(c.workspace().document()).success && approx(object(c, 1).voxelSizeMeters, 0.25), "undo");
     }
 }
 
@@ -226,18 +226,18 @@ void test_context_menu() {
     click(c, find_rect(c, NumberFieldId::Position, 0)->box, PointerButton::Secondary);
     check(c.context_menu().open && !c.context_menu().items.empty() && c.context_menu().items.front().label == "Reset X (0)",
           "right-click a field offers Reset");
-    check(c.dispatch_action("inspector.field.reset") && near(object(c, 1).transform.position.x, 0.0) && near(object(c, 1).transform.position.y, 2.0),
+    check(c.dispatch_action("inspector.field.reset") && approx(object(c, 1).transform.position.x, 0.0) && approx(object(c, 1).transform.position.y, 2.0),
           "Reset X");
     click(c, find_rect(c, NumberFieldId::Position, 1)->box, PointerButton::Secondary);
     check(c.dispatch_action("inspector.field.copy"), "Copy Y");
     click(c, find_rect(c, NumberFieldId::Position, 2)->box, PointerButton::Secondary);
     bool hasPaste = false;
     for (const auto& item : c.context_menu().items) hasPaste = hasPaste || item.label == "Paste 2";
-    check(hasPaste && c.dispatch_action("inspector.field.paste") && near(object(c, 1).transform.position.z, 2.0), "Paste onto Z");
-    check(c.dispatch_action("inspector.field.reset_row") && near(object(c, 1).transform.position.y, 0.0) &&
-              near(object(c, 1).transform.position.z, 0.0),
+    check(hasPaste && c.dispatch_action("inspector.field.paste") && approx(object(c, 1).transform.position.z, 2.0), "Paste onto Z");
+    check(c.dispatch_action("inspector.field.reset_row") && approx(object(c, 1).transform.position.y, 0.0) &&
+              approx(object(c, 1).transform.position.z, 0.0),
           "Reset Position X, Y, Z");
-    check(c.workspace().commands().undo(c.workspace().document()).success && near(object(c, 1).transform.position.z, 2.0),
+    check(c.workspace().commands().undo(c.workspace().document()).success && approx(object(c, 1).transform.position.z, 2.0),
           "the row reset is one undo step");
 }
 
@@ -274,6 +274,90 @@ void test_tool_strip() {
         check(c.dispatch_action("inspector.field.reset") && c.number_field_text(NumberFieldId::SurfaceOffset, 0) == "0", "Reset offset");
     }
 }
+
+std::size_t undo_depth(NativeEditorController& c) {
+    // Count undo steps by undoing everything and redoing it back.
+    std::size_t depth = 0;
+    while (c.workspace().commands().can_undo() && c.workspace().commands().undo(c.workspace().document()).success) ++depth;
+    for (std::size_t i = 0; i < depth; ++i) (void)c.workspace().commands().redo(c.workspace().document());
+    return depth;
+}
+
+void test_review_followups() {
+    auto owner = make_controller();
+    NativeEditorController& c = *owner;
+    // Retyping the shown value is a no-op: no undo step.
+    c.workspace().document().find_object(1)->transform.rotation =
+        normalize(quaternion_from_euler_xyz(multiply(Float3{10.0F, 20.0F, 30.0F}, 1.0F / 57.29578F)));
+    const RigidTransform before = object(c, 1).transform;
+    for (int axis = 0; axis < 3; ++axis) {
+        const std::string shown = c.number_field_text(NumberFieldId::Rotation, axis);
+        check(c.set_number_field(NumberFieldId::Rotation, axis, shown), "retype rotation " + shown);
+        const std::string pos = c.number_field_text(NumberFieldId::Position, axis);
+        check(c.set_number_field(NumberFieldId::Position, axis, pos), "retype position " + pos);
+    }
+    check(c.set_number_field(NumberFieldId::Position, 0, "0 1 0"), "retype the whole position");
+    check(c.set_number_field(NumberFieldId::VoxelSize, 0, "0.25"), "retype voxel size");
+    check(!c.workspace().commands().can_undo(), "retyping the same values adds no undo step");
+    check(object(c, 1).transform.rotation.x == before.rotation.x && object(c, 1).transform.rotation.w == before.rotation.w,
+          "the rotation is bit-for-bit unchanged");
+    click(c, find_rect(c, NumberFieldId::Position, 1)->box, PointerButton::Secondary);
+    c.workspace().document().find_object(1)->transform.position = {};
+    check(c.dispatch_action("inspector.field.reset_row") && !c.workspace().commands().can_undo(), "resetting an already-zero row adds no undo step");
+    c.workspace().document().find_object(1)->transform.position = {0.0F, 1.0F, 0.0F};
+
+    // A scrub dragged back to where it started adds no undo step.
+    const auto x = find_rect(c, NumberFieldId::Position, 0);
+    const int lx = x->label.x + 5, ly = x->label.y + 9;
+    c.pointer_move(lx, ly);
+    c.pointer_down(PointerButton::Primary, lx, ly);
+    c.pointer_move(lx + 40, ly);
+    c.pointer_move(lx, ly);
+    c.pointer_up(PointerButton::Primary, lx, ly);
+    check(!c.workspace().commands().can_undo() && approx(object(c, 1).transform.position.x, 0.0), "a scrub that ends where it began is a no-op");
+
+    // Partial and non-finite input is refused, with a reason, and changes nothing.
+    for (const char* bad : {"-", ".", "+", "1e", "1e400", "inf", "nan", "1e39", "1 2 1e39", "+=1e300"}) {
+        check(!c.set_number_field(NumberFieldId::Position, 0, bad) && c.status().error && approx(object(c, 1).transform.position.x, 0.0) &&
+                  std::isfinite(object(c, 1).transform.position.x),
+              std::string("refused: ") + bad);
+    }
+    check(!c.workspace().commands().can_undo(), "refused input adds no undo step");
+
+    // Hidden, isolated-out and prefab objects are refused with a reason.
+    c.workspace().document().find_object(1)->flags.visible = false;
+    check(!c.set_number_field(NumberFieldId::Position, 0, "3") && c.status().text.find("hidden") != std::string::npos, "hidden refused");
+    c.workspace().document().find_object(1)->flags.visible = true;
+    c.workspace().document().find_object(1)->prefabLink = EditorPrefabLink{};
+    check(!c.set_number_field(NumberFieldId::VoxelSize, 0, "0.5") && c.status().text.find("prefab") != std::string::npos &&
+              approx(object(c, 1).voxelSizeMeters, 0.25),
+          "a prefab member's voxel size is refused");
+    c.workspace().document().find_object(1)->prefabLink.reset();
+    // Scrubbing a hidden object's label is refused at the press.
+    c.workspace().document().find_object(1)->flags.visible = false;
+    c.pointer_down(PointerButton::Primary, lx, ly);
+    c.pointer_move(lx + 40, ly);
+    c.pointer_up(PointerButton::Primary, lx + 40, ly);
+    check(approx(object(c, 1).transform.position.x, 0.0) && !c.workspace().commands().can_undo(), "no scrub of a hidden object");
+    c.workspace().document().find_object(1)->flags.visible = true;
+
+    // Undo restores the exact values and the selection.
+    c.workspace().select_object(1);
+    c.workspace().add_to_selection(2);
+    const Float3 p1 = object(c, 1).transform.position, p2 = object(c, 2).transform.position;
+    check(c.set_number_field(NumberFieldId::Position, 1, "+=0.1"), "nudge Y on two");
+    check(undo_depth(c) == 1, "one edit is one undo step");
+    c.workspace().select_object(3);
+    check(c.dispatch_action("edit.undo"), "undo");
+    check(object(c, 1).transform.position.y == p1.y && object(c, 2).transform.position.y == p2.y, "exact values restored");
+    check(c.workspace().selected_objects().size() == 2, "undo restores the two-object selection");
+
+    // Play gating.
+    c.workspace().select_object(1);
+    std::string error;
+    check(c.workspace().set_mode(EditorMode::Simulate, &error), "enter Simulate: " + error);
+    check(!c.set_number_field(NumberFieldId::Position, 0, "7") && c.status().text.find("Stop Play") != std::string::npos, "Play gating");
+}
 }  // namespace
 
 int main() {
@@ -283,6 +367,7 @@ int main() {
     test_scrub();
     test_context_menu();
     test_tool_strip();
+    test_review_followups();
     if (g_failures == 0) std::printf("number field tests passed\n");
     return g_failures == 0 ? 0 : 1;
 }

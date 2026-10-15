@@ -4429,19 +4429,19 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             numberScrub_.axis = rect.axis;
             numberScrub_.startX = x;
             numberScrub_.startScalar = rect.field == NumberFieldId::BrushRadius ? static_cast<float>(voxelBrushRadius_) : placementOffsetMeters_;
-            bool locked = false;
+            const std::string refusal = rect.field == NumberFieldId::BrushRadius || rect.field == NumberFieldId::SurfaceOffset
+                ? std::string() : number_field_refusal(rect.field);
             for (const EditorObjectId id : number_field_objects(rect.field)) {
                 const EditorObject* object = workspace_.document().find_object(id);
                 if (!object) continue;
-                locked = locked || object->flags.locked;
                 if (rect.field == NumberFieldId::VoxelSize)
                     numberScrub_.sizes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, object->voxelSizeMeters,
                                                   std::nullopt, std::nullopt});
                 else numberScrub_.transforms.push_back({id, object->transform, object->transform});
             }
-            if (locked && rect.field != NumberFieldId::BrushRadius && rect.field != NumberFieldId::SurfaceOffset) {
+            if (!refusal.empty()) {
                 numberScrub_ = {};
-                set_status("Unlock the selected objects before editing them", true);
+                set_status(refusal, true);
             }
             focusRegion_ = rect.field == NumberFieldId::BrushRadius || rect.field == NumberFieldId::SurfaceOffset
                 ? EditorFocusRegion::Viewport : EditorFocusRegion::Inspector;
@@ -6058,6 +6058,10 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
     transformNumeric_.clear();
 }
 
+namespace {
+bool same_transform(const RigidTransform& a, const RigidTransform& b);  // numeric fields, below
+}  // namespace
+
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (longJob_ || importOptions_.open) {
         // Only the viewport shading modes leave the scene alone while a long job runs.
@@ -6093,18 +6097,23 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
             // One undo step for the three axes.
             const auto ids = number_field_objects(field);
             if (ids.empty()) { set_status("Nothing selected", true); return false; }
+            if (const std::string refusal = number_field_refusal(field); !refusal.empty()) { set_status(refusal, true); return false; }
             std::vector<ObjectTransformChange> changes;
+            bool changed = false;
             for (const EditorObjectId id : ids) {
                 const EditorObject* object = workspace_.document().find_object(id);
-                if (object->flags.locked) { set_status("Unlock " + object->name + " first", true); return false; }
                 ObjectTransformChange change{id, object->transform, object->transform};
                 if (field == NumberFieldId::Position) change.after.position = {};
                 else change.after.rotation = {};
+                changed = changed || !same_transform(change.before, change.after);
                 changes.push_back(change);
             }
             const std::string label = field == NumberFieldId::Position ? "Reset Position" : "Reset Rotation";
+            if (!changed) { set_status(label + ": already reset"); return true; }
+            const auto selection = capture_selection_snapshot();
             const CommandResult result = workspace_.commands().execute(workspace_.document(),
                 std::make_unique<TransformObjectsCommand>(std::move(changes), label));
+            if (result.success) workspace_.commands().set_last_selection_transition(selection, selection);
             set_status(result.success ? label : result.message, !result.success);
             return result.success;
         }
@@ -8483,6 +8492,13 @@ const char* number_field_name(NumberFieldId field) {
 float& axis_of(Float3& value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
 float axis_of(const Float3& value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
 const char* axis_name(int axis) { return axis == 0 ? "X" : axis == 1 ? "Y" : "Z"; }
+// Larger magnitudes lose all float precision (or overflow to inf when cast).
+constexpr double kNumberFieldTransformLimit = 1.0e6;
+constexpr const char* kNumberFieldLimitMessage = "values must be within \xC2\xB11,000,000";
+bool same_transform(const RigidTransform& a, const RigidTransform& b) {
+    return a.position.x == b.position.x && a.position.y == b.position.y && a.position.z == b.position.z &&
+           a.rotation.x == b.rotation.x && a.rotation.y == b.rotation.y && a.rotation.z == b.rotation.z && a.rotation.w == b.rotation.w;
+}
 bool plain_voxel_object(const EditorObject& object) {
     return object.voxels && !object.polygon && !object.text3d && !object.gaborVolume && object.voxels->occupied_voxel_count() > 0;
 }
@@ -8498,6 +8514,20 @@ std::vector<EditorObjectId> NativeEditorController::number_field_objects(NumberF
         result.push_back(id);
     }
     return result;
+}
+
+std::string NativeEditorController::number_field_refusal(NumberFieldId field) const {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play or Simulate before editing values";
+    if (longJob_) return long_job_busy_reason();
+    for (const EditorObjectId id : number_field_objects(field)) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object) continue;
+        if (object->flags.locked) return "Unlock " + object->name + " before editing its " + number_field_name(field);
+        if (!object->flags.visible || is_isolated_out(id)) return object->name + " is hidden or isolated out of view";
+        if (field == NumberFieldId::VoxelSize && object->prefabLink)
+            return object->name + " is part of a prefab instance; unpack it or edit the prefab";
+    }
+    return {};
 }
 
 bool NativeEditorController::number_field_available(NumberFieldId field) const {
@@ -8560,14 +8590,10 @@ bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std
         recompute_layout();
         return true;
     }
-    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before editing values", true); return false; }
     const auto ids = number_field_objects(field);
     if (ids.empty()) { set_status(std::string(number_field_name(field)) + ": nothing selected to edit", true); return false; }
-    for (const EditorObjectId id : ids)
-        if (const EditorObject* object = workspace_.document().find_object(id); object->flags.locked) {
-            set_status("Unlock " + object->name + " before editing its " + number_field_name(field), true);
-            return false;
-        }
+    if (const std::string refusal = number_field_refusal(field); !refusal.empty()) { set_status(refusal, true); return false; }
+    bool changed = false;
     std::unique_ptr<IEditorCommand> command;
     if (field == NumberFieldId::VoxelSize) {
         std::vector<ObjectVoxelSizeChange> changes;
@@ -8579,6 +8605,7 @@ bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std
                 set_status("Voxel size must be between 1 mm and 10 m", true);
                 return false;
             }
+            changed = changed || static_cast<float>(parsed.value) != object->voxelSizeMeters;
             changes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, static_cast<float>(parsed.value),
                                std::nullopt, std::nullopt});
         }
@@ -8603,27 +8630,57 @@ bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std
             if (triple) {
                 Float3 values = field == NumberFieldId::Position ? object->transform.position
                                                                  : multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian);
-                for (int a = 0; a < 3; ++a)
-                    axis_of(values, a) = static_cast<float>(parse_number_field(parts[static_cast<std::size_t>(a)], unit, axis_of(values, a)).value);
-                if (field == NumberFieldId::Position) change.after.position = values;
+                for (int a = 0; a < 3; ++a) {
+                    const NumberFieldParse parsed = parse_number_field(parts[static_cast<std::size_t>(a)], unit, axis_of(values, a));
+                    if (!parsed.ok || std::abs(parsed.value) > kNumberFieldTransformLimit) {
+                        set_status(std::string(number_field_name(field)) + " " + axis_name(a) + ": " +
+                                   (parsed.ok ? std::string(kNumberFieldLimitMessage) : parsed.error), true);
+                        return false;
+                    }
+                    axis_of(values, a) = static_cast<float>(parsed.value);
+                }
+                const Float3 old = field == NumberFieldId::Position ? object->transform.position
+                                                                    : multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian);
+                const bool same = std::abs(values.x - old.x) <= (field == NumberFieldId::Position ? 0.0F : 1.0e-4F) &&
+                                  std::abs(values.y - old.y) <= (field == NumberFieldId::Position ? 0.0F : 1.0e-4F) &&
+                                  std::abs(values.z - old.z) <= (field == NumberFieldId::Position ? 0.0F : 1.0e-4F);
+                if (same) {}
+                else if (field == NumberFieldId::Position) change.after.position = values;
                 else change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(values, 1.0F / kDegreesPerRadian)));
             } else if (field == NumberFieldId::Position) {
                 const NumberFieldParse parsed = parse_number_field(text, unit, axis_of(object->transform.position, axis));
-                if (!parsed.ok) { set_status("Position " + std::string(axis_name(axis)) + ": " + parsed.error, true); return false; }
+                if (!parsed.ok || std::abs(parsed.value) > kNumberFieldTransformLimit) {
+                    set_status("Position " + std::string(axis_name(axis)) + ": " + (parsed.ok ? std::string(kNumberFieldLimitMessage) : parsed.error), true);
+                    return false;
+                }
                 axis_of(change.after.position, axis) = static_cast<float>(parsed.value);
             } else {
                 Float3 euler = multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian);
                 const NumberFieldParse parsed = parse_number_field(text, unit, axis_of(euler, axis));
-                if (!parsed.ok) { set_status("Rotation " + std::string(axis_name(axis)) + ": " + parsed.error, true); return false; }
-                axis_of(euler, axis) = static_cast<float>(parsed.value);
-                change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(euler, 1.0F / kDegreesPerRadian)));
+                if (!parsed.ok || std::abs(parsed.value) > kNumberFieldTransformLimit) {
+                    set_status("Rotation " + std::string(axis_name(axis)) + ": " + (parsed.ok ? std::string(kNumberFieldLimitMessage) : parsed.error), true);
+                    return false;
+                }
+                // The Euler round trip is not exact: retyping the shown angle must stay a no-op.
+                if (std::abs(parsed.value - static_cast<double>(axis_of(euler, axis))) > 1.0e-4) {
+                    axis_of(euler, axis) = static_cast<float>(parsed.value);
+                    change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(euler, 1.0F / kDegreesPerRadian)));
+                }
             }
+            changed = changed || !same_transform(change.before, change.after);
             changes.push_back(change);
         }
         if (triple) label = std::string(verb) + " " + number_field_name(field);
         command = std::make_unique<TransformObjectsCommand>(std::move(changes), label);
     }
+    if (!changed) {
+        // The same value again: nothing to do and no undo step.
+        set_status(std::string(number_field_name(field)) + " unchanged");
+        return true;
+    }
+    const auto selection = capture_selection_snapshot();
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
+    if (result.success) workspace_.commands().set_last_selection_transition(selection, selection);  // undo restores it
     set_status(result.success ? label + (ids.size() > 1 ? " on " + std::to_string(ids.size()) + " objects" : std::string()) : result.message,
                !result.success);
     return result.success;
@@ -8724,8 +8781,15 @@ void NativeEditorController::finish_number_scrub(bool cancel) {
     case NumberFieldId::Rotation: {
         apply_transform_preview(scrub.transforms, false);
         if (cancel) { set_status("Scrub cancelled"); return; }
+        if (std::all_of(scrub.transforms.begin(), scrub.transforms.end(),
+                        [](const ObjectTransformChange& change) { return same_transform(change.before, change.after); })) {
+            set_status(label + ": unchanged");  // dragged back to where it started: no undo step
+            return;
+        }
+        const auto selection = capture_selection_snapshot();
         const CommandResult result = workspace_.commands().execute(workspace_.document(),
             std::make_unique<TransformObjectsCommand>(std::move(scrub.transforms), label));
+        if (result.success) workspace_.commands().set_last_selection_transition(selection, selection);
         set_status(result.success ? label : result.message, !result.success);
         return;
     }
@@ -8733,9 +8797,16 @@ void NativeEditorController::finish_number_scrub(bool cancel) {
         for (const ObjectVoxelSizeChange& change : scrub.sizes)
             if (EditorObject* object = workspace_.document().find_object(change.id)) object->voxelSizeMeters = change.beforeVoxelSize;
         if (cancel) { set_status("Scrub cancelled"); return; }
+        if (std::all_of(scrub.sizes.begin(), scrub.sizes.end(),
+                        [](const ObjectVoxelSizeChange& change) { return change.beforeVoxelSize == change.afterVoxelSize; })) {
+            set_status(label + ": unchanged");
+            return;
+        }
         {
+            const auto selection = capture_selection_snapshot();
             const CommandResult result = workspace_.commands().execute(workspace_.document(),
                 std::make_unique<ScaleVoxelSizeCommand>(std::move(scrub.sizes), label));
+            if (result.success) workspace_.commands().set_last_selection_transition(selection, selection);
             set_status(result.success ? label : result.message, !result.success);
         }
         return;

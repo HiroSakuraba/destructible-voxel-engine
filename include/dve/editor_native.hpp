@@ -1132,6 +1132,8 @@ private:
     void update_number_scrub(int x, std::uint32_t modifiers);
     void finish_number_scrub(bool cancel);
     [[nodiscard]] std::vector<EditorObjectId> number_field_objects(NumberFieldId field) const;
+    // Why the selected objects cannot take an edit to `field` ("" when they can).
+    [[nodiscard]] std::string number_field_refusal(NumberFieldId field) const;
     void open_context_menu(int x, int y, std::optional<EditorObjectId> target, bool fromHierarchy);
     void open_pick_list(int x, int y, const std::vector<EditorPickResult>& hits);
     void walk_selection(std::string_view direction);

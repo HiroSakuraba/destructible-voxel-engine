@@ -7,6 +7,7 @@
 #include "dve/editor_runtime_settings.hpp"
 #include "dve/editor_midi.hpp"
 #include "dve/editor_prefab.hpp"
+#include "dve/dvox.hpp"
 #include "dve/editor_ui_zoom.hpp"
 #include "dve/game_script.hpp"
 #include "dve/print_export.hpp"
@@ -3828,6 +3829,11 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     if(!longJob_ && textEdit_.kind==TextEditKind::Inactive && mesh_authoring_pointer_move(x,y,modifiers)){lastPointerX_=x;lastPointerY_=y;return;}
     hoverX_ = x;
     hoverY_ = y;
+    if (assetDrag_.armed) {
+        update_asset_drag(x, y);
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
+    }
     if (sliceDrag_) {
         update_slice_pointer(x, y, modifiers);
         lastPointerX_ = x; lastPointerY_ = y;
@@ -4674,6 +4680,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 if (layout_.assetRows[visible].contains(x, y)) {
                     assetBrowserState_.selectedId = entries[index]->id;
                     refresh_menu_state();
+                    if (button == PointerButton::Primary && !doubleClick) begin_asset_drag(*entries[index], x, y);
                     if (doubleClick && (entries[index]->relativePath.extension() == ".dverig" ||
                                         entries[index]->relativePath.extension() == ".dverigui")) {
                         (void)dispatch_action("asset.open");
@@ -4823,6 +4830,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
     if (polygonLoopCutDragging_ && button==PointerButton::Primary) {
         pointer_move(x,y,modifiers); polygonLoopCutDragging_=false; return;
+    }
+    if (assetDrag_.armed && button == PointerButton::Primary) {
+        finish_asset_drag(x, y);
+        dragButton_ = PointerButton::NoButton;
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
     }
     if(mesh_authoring_pointer_up(button,x,y,modifiers)){dragButton_=PointerButton::NoButton;refresh_menu_state();return;}
     if (button == PointerButton::Primary && sliceDrag_) {
@@ -8206,6 +8219,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     // Escape and focus traversal are intentionally invariant safety/navigation controls.
     // Every productive command below is profile-driven and can be rebound or removed.
     if (normalized == "escape") {
+        if (assetDrag_.armed) cancel_asset_drag("Drag cancelled");
         if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
         clear_navigation_input();
         close_top_level_menu();
@@ -10887,6 +10901,7 @@ bool NativeEditorController::open_import_options_for(const std::filesystem::path
         },
         [this, model, relativeSource, reimport, target, settings](LongJob&) mutable {
             if (!model->success) {
+                pendingImportDrop_.reset();
                 std::string reason = "the file could not be read";
                 for (const ImportDiagnostic& d : model->diagnostics)
                     if (d.severity == ImportDiagnostic::Severity::Error) { reason = d.message; break; }
@@ -10906,6 +10921,7 @@ bool NativeEditorController::open_import_options_for(const std::filesystem::path
                                     [&](const EditorImportNode& node) { return node.name == name; });
             });
             importOptions_.settings = std::move(settings);
+            importOptions_.dropPoint = reimport ? std::nullopt : std::exchange(pendingImportDrop_, std::nullopt);
             refresh_import_estimate();
             set_status(std::string(reimport ? "Reimport" : "Import") +
                        " options: Up/Down pick a row, Left/Right or type a value, Space toggles a mesh, Enter imports, Esc cancels",
@@ -11122,6 +11138,38 @@ bool NativeEditorController::reimport_selected_model() {
     return open_import_options_for(group->sourceAsset, true, root, std::move(settings));
 }
 
+namespace {
+std::string normalized_material_name(std::string_view name) {
+    std::string result;
+    for (const char c : name)
+        if (std::isalnum(static_cast<unsigned char>(c))) result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return result;
+}
+bool importable_model(const std::filesystem::path& path) {
+    std::string extension = path.extension().string();
+    for (char& c : extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return extension == ".obj" || extension == ".gltf" || extension == ".glb";
+}
+EditorObjectBounds union_bounds(EditorObjectBounds a, const EditorObjectBounds& b) {
+    if (!b.valid) return a;
+    if (!a.valid) return b;
+    a.minimum = {std::min(a.minimum.x, b.minimum.x), std::min(a.minimum.y, b.minimum.y), std::min(a.minimum.z, b.minimum.z)};
+    a.maximum = {std::max(a.maximum.x, b.maximum.x), std::max(a.maximum.y, b.maximum.y), std::max(a.maximum.z, b.maximum.z)};
+    return a;
+}
+// The offset that puts the bottom centre of `bounds` on `point`.
+Float3 bottom_centre_offset(const EditorObjectBounds& bounds, Float3 point) {
+    if (!bounds.valid) return point;
+    return {point.x - (bounds.minimum.x + bounds.maximum.x) * 0.5F, point.y - bounds.minimum.y,
+            point.z - (bounds.minimum.z + bounds.maximum.z) * 0.5F};
+}
+EditorObjectBounds offset_bounds(EditorObjectBounds bounds, Float3 offset) {
+    bounds.minimum = add(bounds.minimum, offset);
+    bounds.maximum = add(bounds.maximum, offset);
+    return bounds;
+}
+}  // namespace
+
 bool NativeEditorController::start_import_job(bool reimport) {
     const ImportOptionsState options = importOptions_;
     EditorDocument& document = workspace_.document();
@@ -11214,7 +11262,8 @@ bool NativeEditorController::start_import_job(bool reimport) {
             if (result->voxels > kMaxImportVoxels) result->error = "the model made more than " + format_thousands(kMaxImportVoxels) + " voxels";
             job.report(1.0F, "Done");
         },
-        [this, result, groupId, reimport, settings = options.settings, relativeSource, label, fileName](LongJob&) {
+        [this, result, groupId, reimport, settings = options.settings, relativeSource, label, fileName,
+         dropPoint = options.dropPoint](LongJob&) {
             if (!result->error.empty()) { set_status(label + " failed: " + result->error, true, 8.0F); return false; }
             if (result->parts.empty() || result->voxels == 0) { set_status(label + " failed: the model produced no voxels", true, 8.0F); return false; }
             EditorDocument& document = workspace_.document();
@@ -11235,6 +11284,15 @@ bool NativeEditorController::start_import_job(bool reimport) {
             } else {
                 EditorObject group(groupId, "Imported " + relativeSource.stem().string());
                 group.sourceAsset = relativeSource;
+                if (dropPoint) {
+                    // Dragged in from Assets: the model's bottom centre lands where it was dropped.
+                    // The group moves with its parts, so Reimport keeps the place.
+                    EditorObjectBounds bounds;
+                    for (const EditorObject& part : result->parts) bounds = union_bounds(bounds, object_world_bounds(part));
+                    const Float3 offset = bottom_centre_offset(bounds, *dropPoint);
+                    group.transform.position = offset;
+                    for (EditorObject& part : result->parts) part.transform.position = add(part.transform.position, offset);
+                }
                 group.components.push_back(make_import_settings_component(settings, 1));
                 command->add(std::make_unique<AddObjectCommand>(std::move(group), "Import group"));
             }
@@ -11254,7 +11312,7 @@ bool NativeEditorController::start_import_job(bool reimport) {
             for (const std::string& warning : result->warnings)
                 workspace_.log().add(EditorLogLevel::Warning, label + ": " + warning);
             workspace_.select_object(groupId);
-            if (!reimport) frame_selection();
+            if (!reimport && !dropPoint) frame_selection();
             recompute_layout();
             refresh_menu_state();
             const std::size_t warnings = result->warnings.size();
@@ -11264,6 +11322,225 @@ bool NativeEditorController::start_import_job(bool reimport) {
                        "; Undo " + (reimport ? "restores the previous parts" : "removes it"), warnings > 0, 10.0F);
             return true;
         });
+}
+
+// --- Drag assets from the Assets panel into the viewport (ART-076) -----------------------------
+
+
+void NativeEditorController::begin_asset_drag(const EditorAssetRecord& asset, int x, int y) {
+    assetDrag_ = {};
+    assetDrag_.armed = true;
+    assetDrag_.assetId = asset.id;
+    assetDrag_.assetName = asset.displayName.empty() ? asset.relativePath.filename().string() : asset.displayName;
+    assetDrag_.relativePath = asset.relativePath;
+    assetDrag_.kind = asset.kind;
+    assetDrag_.startX = x;
+    assetDrag_.startY = y;
+}
+
+void NativeEditorController::cancel_asset_drag(std::string reason) {
+    const bool wasActive = assetDrag_.active;
+    assetDrag_ = {};
+    if (wasActive && !reason.empty()) set_status(std::move(reason));
+}
+
+bool NativeEditorController::load_asset_drag_payload() {
+    AssetDragState& drag = assetDrag_;
+    const std::filesystem::path path = projectRoot_ / drag.relativePath;
+    switch (drag.kind) {
+    case EditorAssetKind::Prefab: {
+        std::string error;
+        auto prefab = load_editor_prefab(path, &error);
+        if (!prefab) { drag.message = "Cannot place " + drag.assetName + ": " + (error.empty() ? "the prefab did not load" : error); return false; }
+        for (const auto& [id, object] : prefab->templateDocument.objects())
+            if (object.flags.visible) drag.localBounds = union_bounds(drag.localBounds, object_world_bounds(object));
+        drag.prefab = std::make_shared<EditorPrefabAsset>(std::move(*prefab));
+        return true;
+    }
+    case EditorAssetKind::Voxel: {
+        if (path.extension() != ".dvox") { drag.message = drag.assetName + " is not a .dvox voxel asset"; return false; }
+        DvoxReadResult loaded = read_dvox(path);
+        if (!loaded.success) { drag.message = "Cannot place " + drag.assetName + ": " + loaded.error; return false; }
+        if (loaded.asset.object.occupied_voxel_count() == 0) { drag.message = drag.assetName + " has no voxels"; return false; }
+        auto object = std::make_shared<EditorObject>(EditorObjectId{1}, drag.relativePath.stem().string());
+        object->voxelSizeMeters = loaded.asset.voxelSizeMeters;
+        object->voxelScale = loaded.asset.voxelScale;
+        object->voxels = voxel_copy_with_id(loaded.asset.object, 1);
+        object->sourceAsset = drag.relativePath;
+        drag.localBounds = object_world_bounds(*object);
+        drag.voxelObject = std::move(object);
+        return true;
+    }
+    case EditorAssetKind::PolygonMesh:
+        if (!importable_model(drag.relativePath)) {
+            drag.message = "Only OBJ, glTF and GLB models import; " + drag.assetName + " cannot be placed";
+            return false;
+        }
+        return true;
+    case EditorAssetKind::Material: {
+        const std::string wanted = normalized_material_name(drag.relativePath.stem().string());
+        for (const EditorMaterialEntry& entry : materials_.entries())
+            if (normalized_material_name(entry.definition.name) == wanted) { drag.material = entry.id; return true; }
+        drag.message = "No material named \"" + drag.relativePath.stem().string() +
+                       "\" in this project's Material Library, so there is nothing to paint with";
+        return false;
+    }
+    default:
+        drag.message = "Drag prefabs, voxel assets (.dvox), models or materials into the viewport";
+        return false;
+    }
+}
+
+void NativeEditorController::update_asset_drag(int x, int y) {
+    AssetDragState& drag = assetDrag_;
+    if (!drag.active) {
+        const int dx = x - drag.startX, dy = y - drag.startY;
+        if (dx * dx + dy * dy < 36) return;
+        drag.active = true;
+        drag.refused = !load_asset_drag_payload();
+    }
+    drag.overViewport = layout_.viewport.contains(x, y);
+    drag.point.reset();
+    drag.target.reset();
+    drag.ghost = {};
+    if (drag.refused) { set_status(drag.message, true, 2.0F); return; }
+    if (!drag.overViewport) {
+        drag.message = "Drag " + drag.assetName + " into the viewport (Esc cancels)";
+        set_status(drag.message, false, 2.0F);
+        return;
+    }
+    const ViewportRay ray = make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y));
+    if (const auto hit = pick_editor_document(workspace_.document(), ray, 10000.0F, &viewportSettings_.isolatedObjects)) {
+        drag.point = hit->worldPosition;
+        drag.target = hit->objectId;
+    } else if (ray.direction.y < -1.0e-4F) {
+        // Nothing under the cursor: land on the ground plane (y = 0) in front of the camera.
+        const float t = -ray.origin.y / ray.direction.y;
+        if (t > 0.0F && t < 10000.0F) drag.point = add(ray.origin, multiply(ray.direction, t));
+    }
+    const EditorObject* target = drag.target ? workspace_.document().find_object(*drag.target) : nullptr;
+    if (drag.kind == EditorAssetKind::Material) {
+        if (!target) drag.message = "Drop " + drag.assetName + " on a voxel object to paint it";
+        else {
+            drag.ghost = object_world_bounds(*target);
+            const bool limited = !voxelSelection_.empty() && voxelSelectionObject_ == target->id;
+            drag.message = "Release to paint " + std::string(limited ? "the selected voxels of " : "") + target->name +
+                           " with " + drag.assetName + " (Esc cancels)";
+        }
+    } else if (!drag.point) {
+        drag.message = "Point at a surface or the ground to place " + drag.assetName;
+    } else {
+        if (drag.localBounds.valid) drag.ghost = offset_bounds(drag.localBounds, bottom_centre_offset(drag.localBounds, *drag.point));
+        drag.message = (drag.kind == EditorAssetKind::PolygonMesh ? "Release to import " : "Release to place ") + drag.assetName +
+                       (target ? " on " + target->name : std::string(" on the ground")) + " (Esc cancels)";
+    }
+    set_status(drag.message, false, 2.0F);
+}
+
+void NativeEditorController::finish_asset_drag(int x, int y) {
+    if (!assetDrag_.active) { assetDrag_ = {}; return; }
+    update_asset_drag(x, y);
+    if (!assetDrag_.overViewport) { cancel_asset_drag("Drag cancelled: released outside the viewport"); return; }
+    (void)place_dragged_asset();
+    assetDrag_ = {};
+}
+
+bool NativeEditorController::place_dragged_asset() {
+    AssetDragState& drag = assetDrag_;
+    if (drag.refused) { set_status(drag.message, true, 6.0F); return false; }
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
+        set_status("Stop Play or Simulate before placing assets", true);
+        return false;
+    }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
+    EditorDocument& document = workspace_.document();
+    const auto beforeSelection = capture_selection_snapshot();
+
+    if (drag.kind == EditorAssetKind::Material) {
+        const EditorObject* target = drag.target ? document.find_object(*drag.target) : nullptr;
+        if (!target) { set_status("Drop the material on a voxel object to paint it", true); return false; }
+        if (!target->voxels || target->polygon || target->text3d || target->gaborVolume || target->voxels->occupied_voxel_count() == 0) {
+            set_status(target->name + " has no voxels to paint (materials paint voxel objects)", true);
+            return false;
+        }
+        if (target->flags.locked) { set_status("Unlock " + target->name + " before painting it", true); return false; }
+        const MaterialId to = *drag.material;
+        prune_voxel_selection();
+        const bool limited = !voxelSelection_.empty() && voxelSelectionObject_ == target->id;
+        const std::set<Int3> cells = limited ? voxelSelection_ : all_occupied_voxels(*target->voxels);
+        if (cells.size() > kMaxFloodFillVoxels) {
+            set_status(target->name + " has more than 2,000,000 voxels; select a region (M) and drop on it", true, 6.0F);
+            return false;
+        }
+        std::vector<VoxelBooleanChange> changes;
+        for (const Int3 cell : cells) {
+            const MaterialId from = target->voxels->material_at(cell);
+            if (from != kAirMaterial && from != to) changes.push_back({cell, from, to});
+        }
+        if (changes.empty()) { set_status(target->name + " already uses " + drag.assetName, true); return false; }
+        const std::vector<Int3> anchors(target->anchors.begin(), target->anchors.end());
+        const std::size_t count = changes.size();
+        const std::string name = target->name;
+        const CommandResult executed = workspace_.commands().execute(document,
+            std::make_unique<ApplyVoxelBooleanCommand>(target->id, std::move(changes), anchors, anchors, "Paint with " + drag.assetName));
+        if (!executed.success) { set_status(executed.message, true); return false; }
+        set_status("Painted " + format_thousands(count) + " voxels of " + name + " with " + drag.assetName + "; Undo restores");
+        return true;
+    }
+
+    if (!drag.point) { set_status("Point at a surface or the ground to place " + drag.assetName, true); return false; }
+    const Float3 point = *drag.point;
+
+    if (drag.kind == EditorAssetKind::PolygonMesh) {
+        // Models go through the import options; the result lands with its bottom centre here.
+        assetBrowserState_.selectedId = drag.assetId;
+        refresh_menu_state();
+        pendingImportDrop_ = point;
+        if (!dispatch_action("file.import")) { pendingImportDrop_.reset(); return false; }
+        return true;
+    }
+
+    if (drag.kind == EditorAssetKind::Prefab && drag.prefab) {
+        const Float3 offset = bottom_centre_offset(drag.localBounds, point);
+        auto command = std::make_unique<InstantiateEditorPrefabCommand>(std::move(*drag.prefab), make_rigid_transform(offset, {}),
+                                                                        "Place " + drag.assetName);
+        drag.prefab.reset();
+        auto* placed = command.get();
+        const CommandResult executed = workspace_.commands().execute(document, std::move(command));
+        if (!executed.success) { set_status(executed.message, true); return false; }
+        workspace_.clear_selection();
+        for (const EditorObjectId root : placed->result().rootObjectIds) workspace_.add_to_selection(root);
+        if (!viewportSettings_.isolatedObjects.empty())
+            viewportSettings_.isolatedObjects.insert(placed->result().objectIds.begin(), placed->result().objectIds.end());
+        set_selection_domain(SelectionDomain::Objects);
+        workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
+        recompute_layout();
+        set_status("Placed " + drag.assetName + " (" + std::to_string(placed->result().objectIds.size()) + " objects); Undo removes it");
+        return true;
+    }
+
+    if (drag.kind == EditorAssetKind::Voxel && drag.voxelObject) {
+        const EditorObjectId id = document.allocate_object_id();
+        EditorObject object(id, drag.voxelObject->name);
+        object.voxelSizeMeters = drag.voxelObject->voxelSizeMeters;
+        object.voxelScale = drag.voxelObject->voxelScale;
+        object.voxels = voxel_copy_with_id(*drag.voxelObject->voxels, id);
+        object.sourceAsset = drag.voxelObject->sourceAsset;
+        object.transform = make_rigid_transform(bottom_centre_offset(drag.localBounds, point), {});
+        const std::string name = object.name;
+        const CommandResult executed = workspace_.commands().execute(document,
+            std::make_unique<AddObjectCommand>(std::move(object), "Place " + drag.assetName));
+        if (!executed.success) { set_status(executed.message, true); return false; }
+        set_selection_domain(SelectionDomain::Objects);
+        workspace_.select_object(id);
+        if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(id);
+        workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
+        recompute_layout();
+        set_status("Placed " + name + "; Undo removes it");
+        return true;
+    }
+    set_status("Nothing to place", true);
+    return false;
 }
 
 // --- Long jobs ---------------------------------------------------------------------------------

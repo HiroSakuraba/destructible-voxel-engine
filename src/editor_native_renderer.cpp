@@ -3732,6 +3732,27 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
     if (const auto bounds = controller.scale_preview_bounds())
         draw_world_box(viewportPainter, controller, *bounds, rgb(255,219,89));
+    if (controller.duplicate_special_active()) {
+        // Duplicate Special preview: an outline box for every copy (capped), brighter for the last.
+        const auto boxes = controller.duplicate_special_preview(1500);
+        for (std::size_t i = 0; i < boxes.size(); ++i) {
+            const auto& box = boxes[i];
+            std::array<ScreenPoint, 8> corners{};
+            bool visible = true;
+            for (std::size_t c = 0; c < 8; ++c) {
+                const Float3 local{((c & 1U) ? box.maximum.x : box.minimum.x) * box.scale, ((c & 2U) ? box.maximum.y : box.minimum.y) * box.scale,
+                                   ((c & 4U) ? box.maximum.z : box.minimum.z) * box.scale};
+                corners[c] = project_world_to_screen(controller.camera(), viewport, transform_point(box.pose, local));
+                visible = visible && corners[c].visible;
+            }
+            if (!visible) continue;
+            const EditorColor color = i + 1 == boxes.size() ? rgb(160,240,255) : rgb(70,170,200);
+            static constexpr std::array<std::pair<int, int>, 12> kEdges{{{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},{4,6},{5,7},{0,4},{1,5},{2,6},{3,7}}};
+            for (const auto& [a, b] : kEdges)
+                viewportPainter.line(static_cast<int>(corners[a].x), static_cast<int>(corners[a].y),
+                                     static_cast<int>(corners[b].x), static_cast<int>(corners[b].y), color, 1);
+        }
+    }
     if (const AssetDragState& drag = controller.asset_drag(); drag.active && drag.overViewport) {
         // Asset drag (ART-076): a box where the asset will land (or the object a material will
         // paint), a cross at the drop point and what releasing will do.
@@ -4651,7 +4672,70 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             }
             inspectorPainter.text(x,y+extra,elide_text_to_width(inspectorPainter,value,available),color);
         };
-        if (!layout.scatterSettingRows.empty()) {
+        if (controller.duplicate_special_active()) {
+            // Duplicate Special panel: the numbers are NumberFieldRects; choices and buttons below.
+            const DuplicatePanelLayout panel = controller.duplicate_panel_layout();
+            const DuplicateSpecialSettings& v = controller.duplicate_special_settings();
+            inspectorPainter.text(layout.inspector.x + 12, panel.titleY, "Duplicate Special", text);
+            const auto& edit = controller.text_edit();
+            for (const auto& [field, rect] : panel.rowNames) {
+                const char* name = field == NumberFieldId::DuplicateCopies ? "Copies" : field == NumberFieldId::DuplicateOffset ? "Offset"
+                    : field == NumberFieldId::DuplicateRotation ? "Turn" : field == NumberFieldId::DuplicateScale ? "Scale" : "Point";
+                const bool single = field == NumberFieldId::DuplicateCopies || field == NumberFieldId::DuplicateScale;
+                const bool hovered = single && rect.contains(controller.hover_x(), controller.hover_y());
+                inspectorPainter.text(rect.x, rect.y + 14, name, hovered ? text : muted);
+            }
+            for (const NumberFieldRect& rect : panel.fields) {
+                const bool editing = edit.kind == TextEditKind::DuplicateSetting && static_cast<NumberFieldId>(edit.objectId) == rect.field &&
+                                     edit.axis == rect.axis;
+                const bool hovered = rect.box.contains(controller.hover_x(), controller.hover_y());
+                inspectorPainter.fill(rect.box, editing ? rgb(40,54,74) : hovered ? rgb(44,52,64) : rgb(30,36,46));
+                if (editing) inspectorPainter.outline(rect.box, accent);
+                const bool axisRow = rect.field == NumberFieldId::DuplicateOffset || rect.field == NumberFieldId::DuplicateRotation ||
+                                     rect.field == NumberFieldId::DuplicatePoint;
+                if (axisRow) {
+                    const EditorColor axisColor = rect.axis == 0 ? rgb(236,96,88) : rect.axis == 1 ? rgb(120,210,110) : rgb(96,150,240);
+                    inspectorPainter.text(rect.label.x + 3, rect.label.y + 14, rect.axis == 0 ? "X" : rect.axis == 1 ? "Y" : "Z", axisColor);
+                }
+                std::string value = editing ? edit.buffer + "_" : controller.number_field_text(rect.field, rect.axis);
+                if (!editing && rect.field == NumberFieldId::DuplicateScale) value = "x" + value;
+                inspectorPainter.text(rect.box.x + 4, rect.box.y + 14, elide_text_to_width(inspectorPainter, value, std::max(0, rect.box.width - 6)),
+                                      editing ? accent : text);
+            }
+            const auto chip = [&](UiRect rect, const std::string& label, bool on) {
+                if (rect.width <= 0) return;
+                const bool hovered = rect.contains(controller.hover_x(), controller.hover_y());
+                inspectorPainter.fill(rect, on ? rgb(36,74,112) : hovered ? rgb(44,52,64) : rgb(30,36,46));
+                inspectorPainter.outline(rect, on ? accent : border);
+                inspectorPainter.text(rect.x + 5, rect.y + 13, elide_text_to_width(inspectorPainter, label, rect.width - 8), on ? text : muted);
+            };
+            const int nameX = layout.inspector.x + 12;
+            inspectorPainter.text(nameX, panel.pivotEach.y + 13, "Pivot", muted);
+            chip(panel.pivotEach, "Each copy", v.pivot == DuplicatePivot::EachCopy);
+            chip(panel.pivotPoint, "Around point", v.pivot == DuplicatePivot::Point);
+            if (v.pivot == DuplicatePivot::Point) {
+                inspectorPainter.text(nameX, panel.pointOrigin.y + 13, "Set point", muted);
+                chip(panel.pointOrigin, "Origin", false);
+                chip(panel.pointSelection, "Selection", false);
+            } else {
+                inspectorPainter.text(nameX, panel.spaceLocal.y + 13, "Offset in", muted);
+                chip(panel.spaceLocal, "Local", v.space == DuplicateSpace::Local);
+                chip(panel.spaceWorld, "World", v.space == DuplicateSpace::World);
+            }
+            chip(panel.group, std::string(v.group ? "[x]" : "[ ]") + " Put copies in one group", v.group);
+            chip(panel.apply, "Apply (Enter)", true);
+            chip(panel.cancel, "Cancel (Esc)", false);
+            int noteY = panel.noteY;
+            const auto note = [&](const std::string& line, EditorColor color) {
+                inspectorPainter.text(layout.inspector.x + 12, noteY, elide_text_to_width(inspectorPainter, line, layout.inspector.width - 24), color);
+                noteY += 18;
+            };
+            const std::string summary = controller.duplicate_special_summary();
+            const bool problem = summary.find("Enter applies") == std::string::npos;
+            note(problem ? summary : summary.substr(0, summary.find(';')), problem ? rgb(255,130,110) : text);
+            note("Drag a name or letter to scrub", muted);
+            note("Units: 3in, 5deg, 10cm; Tab moves on", muted);
+        } else if (!layout.scatterSettingRows.empty()) {
             // Scatter settings replace the object details while scattering (fill preview or brush).
             const bool brushing = controller.active_tool() == EditorToolId::ScatterBrush;
             inspectorPainter.text(layout.inspector.x + 12, layout.inspector.y + 48,

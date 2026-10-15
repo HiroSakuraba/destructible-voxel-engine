@@ -3331,7 +3331,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                 : prefix + object->name +
                       // Skip the count when the name already ends with it ("Scatter (40)").
                       (children != 0U && !object->name.ends_with("(" + std::to_string(children) + ")")
-                           ? "  (" + std::to_string(children) + ")" : std::string());
+                           ? "  (" + std::to_string(children) + ")" : std::string()) +
+                      (controller.is_group_open(object->id) ? "  [open]" : std::string());
             const int indent = depth * 12;
             const EditorColor rowColor = renaming ? accent
                 : (object->flags.locked || controller.is_isolated_out(object->id)) ? muted : text;
@@ -3753,6 +3754,49 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         if (const EditorObject* selected = controller.workspace().document().find_object(selectedId)) {
             if (controller.viewport_settings().showObjectBounds)
                 draw_world_box(viewportPainter, controller, object_world_bounds(*selected), rgb(100,188,255));
+        }
+    }
+    {
+        // Groups (ART-035/036): a selected closed group shows one box around all its pieces and
+        // its name; an open group shows a dim box so it is clear clicks reach inside it.
+        const EditorDocument& document = controller.workspace().document();
+        const auto label_box = [&](const EditorObjectBounds& bounds, const std::string& label, EditorColor color) {
+            const ScreenPoint corner = project_world_to_screen(controller.camera(), viewport,
+                {bounds.minimum.x, bounds.maximum.y, bounds.minimum.z});
+            if (!corner.visible) return;
+            const int x = static_cast<int>(corner.x), y = static_cast<int>(corner.y) - 6;
+            const int w = viewportPainter.text_width(label) + 8;
+            viewportPainter.fill({x - 2, y - 13, w, 17}, rgb(16,20,26));
+            viewportPainter.outline({x - 2, y - 13, w, 17}, color);
+            viewportPainter.text(x + 2, y, label, color);
+        };
+        for (const EditorObjectId id : controller.open_groups()) {
+            const EditorObject* group = document.find_object(id);
+            const EditorObjectBounds bounds = controller.group_bounds(id);
+            if (!group || !bounds.valid) continue;
+            draw_world_box(viewportPainter, controller, bounds, rgb(92,120,128));
+            label_box(bounds, group->name + " (open)", rgb(140,170,178));
+        }
+        for (const EditorObjectId id : controller.workspace().selected_objects()) {
+            if (!controller.is_group(id)) continue;
+            const EditorObject* group = document.find_object(id);
+            const EditorObjectBounds bounds = controller.group_bounds(id);
+            if (!group || !bounds.valid) continue;
+            draw_world_box(viewportPainter, controller, bounds, rgb(64,214,196));
+            if (!controller.is_group_open(id))
+                label_box(bounds, group->name + "  (group: double-click to open)", rgb(64,214,196));
+            // The pivot: a small diamond; amber while it is being edited.
+            const ScreenPoint pivot = project_world_to_screen(controller.camera(), viewport, group->transform.position);
+            if (pivot.visible) {
+                const int px = static_cast<int>(pivot.x), py = static_cast<int>(pivot.y);
+                const EditorColor color = controller.pivot_editing() ? rgb(255,190,64) : rgb(64,214,196);
+                viewportPainter.line(px - 6, py, px, py - 6, color, 2);
+                viewportPainter.line(px, py - 6, px + 6, py, color, 2);
+                viewportPainter.line(px + 6, py, px, py + 6, color, 2);
+                viewportPainter.line(px, py + 6, px - 6, py, color, 2);
+                if (controller.pivot_editing())
+                    viewportPainter.text(px + 10, py - 8, "Editing pivot (Esc finishes)", color);
+            }
         }
     }
     if (controller.hover_pick()) {

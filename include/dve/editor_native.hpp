@@ -1025,6 +1025,24 @@ public:
     // one, previewed; off-grid objects need R (resample) or G (group instead) every time.
     // Separate Islands: split each selected voxel object into its connected pieces; the largest
     // stays. See editor_voxel_join.hpp.
+    // Groups (ART-035/036). A group is an object with children and no geometry of its own
+    // (Edit > Group, Scatter and Import make them). Groups are closed by default: a viewport click
+    // or box on any piece selects the outermost closed group, which moves as a unit. Open Group
+    // (or double-click) lets clicks reach the pieces inside until Close Group. Open/closed is
+    // editor view state, not saved. A group's pivot is its own transform: new groups put it at
+    // the bottom centre; Edit Pivot moves it with the Move tool without moving the pieces.
+    [[nodiscard]] bool is_group(EditorObjectId id) const;
+    [[nodiscard]] bool is_group_open(EditorObjectId id) const { return openGroups_.contains(id); }
+    [[nodiscard]] const std::set<EditorObjectId>& open_groups() const noexcept { return openGroups_; }
+    // What a viewport click on `id` selects: the outermost closed group around it, or itself.
+    [[nodiscard]] EditorObjectId viewport_selection_target(EditorObjectId id) const;
+    [[nodiscard]] EditorObjectBounds group_bounds(EditorObjectId id) const;
+    bool open_selected_groups();
+    bool close_groups_around_selection();
+    void close_all_groups();
+    [[nodiscard]] bool pivot_editing() const noexcept { return pivotEditing_; }
+    bool toggle_pivot_editing();
+    bool set_group_pivot(bool bottomCentre);
     // Voxel selection (Edit > Selection Domain, M). See editor_voxel_selection.hpp.
     [[nodiscard]] SelectionDomain selection_domain() const noexcept { return selectionDomain_; }
     void set_selection_domain(SelectionDomain domain);
@@ -1150,7 +1168,9 @@ private:
     [[nodiscard]] Float3 gizmo_axis_world(int axis) const noexcept;
     [[nodiscard]] Float3 selection_pivot() const noexcept;
     [[nodiscard]] EditorObjectBounds selection_bounds() const noexcept;
-    [[nodiscard]] std::vector<ObjectTransformChange> selection_transform_snapshot() const;
+    // With includeGroupMembers, selected groups bring their (unattached) descendants, so a group
+    // moves and turns as one unit; pivot editing and the Scale tool move the group alone.
+    [[nodiscard]] std::vector<ObjectTransformChange> selection_transform_snapshot(bool includeGroupMembers = true) const;
     void apply_transform_preview(const std::vector<ObjectTransformChange>& changes, bool after);
     [[nodiscard]] std::optional<std::string> menu_name_at(int x) const;
     void open_top_level_menu(std::string menuName);
@@ -1238,6 +1258,10 @@ private:
     EditorVoxelBooleanSession voxelBoolean_{};
     EditorVoxelJoinSession voxelJoin_{};
     bool floodFillArmed_{};
+    std::set<EditorObjectId> openGroups_;
+    bool pivotEditing_{};
+    [[nodiscard]] bool has_own_geometry(const EditorObject& object) const;
+    void prune_groups();
     SelectionDomain selectionDomain_{SelectionDomain::Objects};
     PolygonSelection polygonSelection_{};
     std::optional<CookedPolygonAsset> polygonDragBefore_;

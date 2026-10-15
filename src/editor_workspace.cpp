@@ -469,6 +469,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"edit.duplicate","Edit","Duplicate","Ctrl+D"}, {"edit.rename","Edit","Rename","F2"},
         {"edit.duplicate_special","Edit","Duplicate Special...","Ctrl+Shift+D"},
         {"edit.group","Edit","Group Selected","Ctrl+G"}, {"edit.ungroup","Edit","Ungroup","Ctrl+Shift+G"},
+        {"edit.open_group","Edit","Open Group",""},
+        {"edit.close_group","Edit","Close Group","Ctrl+Alt+G"},
+        {"edit.close_all_groups","Edit","Close All Groups",""},
+        {"edit.edit_pivot","Edit","Edit Group Pivot",""},
+        {"edit.pivot_bottom_center","Edit","Group Pivot to Bottom Centre",""},
+        {"edit.pivot_center","Edit","Group Pivot to Centre",""},
         {"select.parent","Edit","Select Parent",""},
         {"select.children","Edit","Select Children",""},
         {"select.siblings","Edit","Select Siblings",""},
@@ -929,6 +935,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
     configure("select.domain_voxels", "Selection Domain", 31, true, "select.domain");
     configure("select.domain_toggle", "Selection Domain", 32);
+    for (std::string_view id : {"edit.open_group", "edit.close_group", "edit.close_all_groups"})
+        configure(id, "Groups", 26);
+    configure("edit.edit_pivot", "Groups", 27, true);
+    for (std::string_view id : {"edit.pivot_bottom_center", "edit.pivot_center"}) configure(id, "Groups", 27);
     for (std::string_view id : {"voxel.select_all", "voxel.select_none", "voxel.select_grow", "voxel.select_shrink",
                                 "voxel.select_invert", "voxel.extract_selection"})
         configure(id, "Voxel Selection", 50);
@@ -1148,6 +1158,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     };
     describe("edit.duplicate_special", "Make many copies, each offset, turned and scaled from the last, around its own pivot or a point (fans, rings, spirals). Preview, then Apply as one undo step.",
              {"array", "copies", "repeat", "radial", "instance", "duplicate"});
+    describe("edit.open_group", "Let viewport clicks reach the pieces inside the selected group. Double-clicking a piece does the same.", {"group", "enter", "isolate"});
+    describe("edit.close_group", "Close the open group around the selection and select the whole group again.", {"group", "exit"});
+    describe("edit.close_all_groups", "Close every open group so clicks select whole groups.", {"group", "exit"});
+    describe("edit.edit_pivot", "Move or rotate the selected group's pivot without moving its pieces.", {"group", "pivot", "origin"});
+    describe("edit.pivot_bottom_center", "Put the selected group's pivot at the bottom centre of its pieces.", {"group", "pivot", "origin"});
+    describe("edit.pivot_center", "Put the selected group's pivot at the centre of its pieces.", {"group", "pivot", "origin"});
     describe("subdiv.vertex_mode","Vertex Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.edge_mode","Edge Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.face_mode","Face Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});

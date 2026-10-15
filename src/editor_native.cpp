@@ -48,6 +48,14 @@ constexpr std::string_view kDocsUnavailable =
     "Not in this editor yet: the documentation is in the engine's docs/ folder";
 constexpr std::string_view kRebuildBrickmapsUnavailable =
     "Nothing to rebuild: this viewport draws voxels directly (brickmaps are built by the runtime renderer)";
+constexpr std::string_view kImportedPivotFixed =
+    "An imported model's pivot stays at the model origin so Reimport lands in place";
+// Reimport places new parts relative to the import group's transform, so its pivot must stay at
+// the model origin.
+bool imported_group(const EditorObject& group) {
+    return std::any_of(group.components.begin(), group.components.end(),
+                       [](const Component& c) { return c.type == kImportSettingsComponent; });
+}
 } // namespace
 
 namespace {
@@ -264,6 +272,7 @@ bool NativeEditorController::start_play_session(EditorMode mode) {
     cancel_scatter("Scatter preview closed: Play or Simulate started");
     cancel_voxel_join("Join preview closed: Play or Simulate started");
     floodFillArmed_ = false;  // an armed Flood Fill must not edit the scene from a Play click
+    pivotEditing_ = false;
     close_context_menu();
     close_top_level_menu();
     activePointerCommand_.clear();
@@ -1928,6 +1937,32 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("edit.duplicate_special", (hasSelection || duplicateSpecial_.active) && !playActive &&
                 selectionDomain_ == SelectionDomain::Objects,
             playActive ? "Stop Play first." : "Select the objects to copy first.");
+    {
+        bool canOpen = false, canClose = false;
+        for (const EditorObjectId id : workspace_.selected_objects()) {
+            const EditorObjectId target = is_group(id) ? id : viewport_selection_target(id);
+            if (is_group(target) && !openGroups_.contains(target)) canOpen = true;
+            if (openGroups_.contains(id)) canClose = true;
+            for (const EditorObject* object = workspace_.document().find_object(id); !canClose && object && object->parent;) {
+                if (openGroups_.contains(*object->parent)) canClose = true;
+                object = workspace_.document().find_object(*object->parent);
+            }
+        }
+        if (!hasSelection && !openGroups_.empty()) canClose = true;
+        const auto active = workspace_.selected_object();
+        const bool singleGroup = singleSelection && active && is_group(*active);
+        const EditorObject* activeGroup = singleGroup ? workspace_.document().find_object(*active) : nullptr;
+        const bool pivotFixed = activeGroup && imported_group(*activeGroup);
+        enabled("edit.open_group", canOpen && !playActive, "Select a closed group (or double-click a piece in one).");
+        enabled("edit.close_group", canClose && !playActive, "Select something inside an open group first.");
+        enabled("edit.close_all_groups", !openGroups_.empty(), "No groups are open.");
+        enabled("edit.edit_pivot", ((singleGroup && !pivotFixed) || pivotEditing_) && !playActive,
+                pivotFixed ? kImportedPivotFixed : std::string_view("Select one group to edit its pivot."));
+        checked("edit.edit_pivot", pivotEditing_);
+        for (std::string_view id : {"edit.pivot_bottom_center", "edit.pivot_center"})
+            enabled(id, singleGroup && !pivotFixed && !playActive,
+                    pivotFixed ? kImportedPivotFixed : std::string_view("Select one group first."));
+    }
     const auto hierarchyPrimary = workspace_.selected_object();
     const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;
     const bool hierarchySelectionReady = !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
@@ -2870,6 +2905,7 @@ void NativeEditorController::update(float elapsedSeconds) {
         for (const EditorObjectId id : duplicateSpecial_.roots) gone = gone || !workspace_.document().find_object(id);
         if (gone) cancel_duplicate_special("Duplicate Special closed: the objects or mode changed");
     }
+    prune_groups();
     if (followSelection_) {
         // Keep the camera's offset to the selection: move eye and target by how far it moved.
         if (workspace_.selected_objects().empty() || playSession_.active()) {
@@ -3103,6 +3139,7 @@ void NativeEditorController::create_new_project_now() {
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();
+    openGroups_.clear(); pivotEditing_ = false;  // ids restart per scene
     if (!workspace_.document().objects().empty()) {
         workspace_.select_object(workspace_.document().objects().begin()->first);
         frame_selection();
@@ -3116,6 +3153,7 @@ void NativeEditorController::create_new_scene_now() {
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();
+    openGroups_.clear(); pivotEditing_ = false;  // ids restart per scene
     if (!workspace_.document().objects().empty()) {
         workspace_.select_object(workspace_.document().objects().begin()->first);
         frame_selection();
@@ -4649,6 +4687,31 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     const int clickDy = y - lastClickY_;
     const bool doubleClick = button == lastClickButton_ && lastClickTime_.time_since_epoch().count() != 0 &&
         now - lastClickTime_ <= doubleMs && clickDx * clickDx + clickDy * clickDy <= doubleDistance * doubleDistance;
+    // Double-clicking a piece of a closed group opens that group (one level per double-click) and
+    // selects the next level down.
+    if (doubleClick && button == PointerButton::Primary && modifiers == 0U && layout_.viewport.contains(x, y) &&
+        workspace_.mode() == EditorMode::Edit && selectionDomain_ == SelectionDomain::Objects &&
+        (activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
+         activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale) &&
+        !(activeTool_ != EditorToolId::Select && hit_test_gizmo_axis(x, y) != 0)) {
+        update_hover(x, y);
+        if (hoverPick_) {
+            const EditorObjectId piece = hoverPick_->objectId;
+            const EditorObjectId group = viewport_selection_target(piece);
+            if (group != piece) {
+                openGroups_.insert(group);
+                workspace_.clear_selection();
+                workspace_.add_to_selection(viewport_selection_target(piece));
+                const EditorObject* object = workspace_.document().find_object(group);
+                set_status("Opened " + (object ? object->name : std::string("group")) +
+                           ": click its pieces; Edit > Close Group (Ctrl+Alt+G) closes it");
+                refresh_menu_state();
+                lastClickButton_ = PointerButton::NoButton;
+                doubleClickConsumed_ = true;
+                return;
+            }
+        }
+    }
     if (doubleClick && !((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
                           activeTool_ == EditorToolId::Scale) && layout_.viewport.contains(x,y) &&
                          hit_test_gizmo_axis(x,y) != 0)) {
@@ -5228,10 +5291,18 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
             if (distanceSquared <= 25) {
                 if (marquee_.clickObject) {
                     if ((modifiers & 7U) == 0U || (modifiers & 4U) != 0U) {
-                        const auto depthHits = pick_editor_document_all(workspace_.document(),
+                        const auto rawHits = pick_editor_document_all(workspace_.document(),
                             make_viewport_ray(camera_, layout_.viewport,
                                 static_cast<float>(marquee_.startX), static_cast<float>(marquee_.startY)),
                             10000.0F, &viewportSettings_.isolatedObjects);
+                        // Pieces of a closed group answer for the group: one entry per target.
+                        std::vector<EditorPickResult> targets;
+                        std::set<EditorObjectId> seenTargets;
+                        for (EditorPickResult hit : rawHits) {
+                            hit.objectId = viewport_selection_target(hit.objectId);
+                            if (seenTargets.insert(hit.objectId).second) targets.push_back(hit);
+                        }
+                        const auto& depthHits = targets;
                         if ((modifiers & 4U) != 0U && (modifiers & 3U) == 0U && depthHits.size() > 1U) {
                             open_pick_list(x, y, depthHits);
                             marquee_ = {};
@@ -5247,8 +5318,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                             lastPickTime_ = now;
                             lastPickX_ = x; lastPickY_ = y;
                             hits.insert(depthHits[pickCycleIndex_].objectId);
-                        } else hits.insert(*marquee_.clickObject);
-                    } else hits.insert(*marquee_.clickObject);
+                        } else hits.insert(viewport_selection_target(*marquee_.clickObject));
+                    } else hits.insert(viewport_selection_target(*marquee_.clickObject));
                 }
             } else {
                 const int left = std::min(marquee_.startX, x);
@@ -5257,13 +5328,23 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 const int bottom = std::max(marquee_.startY, y);
                 const bool contain = x >= marquee_.startX;
                 const UiRect rectangle{left, top, right - left + 1, bottom - top + 1};
+                // Pieces inside a closed group count for the group: a crossing box takes the group if
+                // any piece is touched, a window box only if every piece with geometry is inside.
+                std::map<EditorObjectId, std::pair<std::size_t, std::size_t>> groupPieces;  // matched, total
                 for (const auto& [id, object] : workspace_.document().objects()) {
                     // Box selection only takes what is on screen: isolated-out objects are skipped
                     // (object_matches_screen_rect already skips hidden ones).
                     if (is_isolated_out(id)) continue;
-                    if (object_matches_screen_rect(object, camera_, layout_.viewport, rectangle, contain))
-                        hits.insert(id);
+                    const EditorObjectId target = viewport_selection_target(id);
+                    const bool matched = object_matches_screen_rect(object, camera_, layout_.viewport, rectangle, contain);
+                    if (target == id) { if (matched) hits.insert(id); continue; }
+                    if (!has_own_geometry(object) || !object.flags.visible) continue;
+                    auto& [matchedCount, total] = groupPieces[target];
+                    ++total;
+                    if (matched) ++matchedCount;
                 }
+                for (const auto& [group, counts] : groupPieces)
+                    if (contain ? counts.first == counts.second && counts.second > 0 : counts.first > 0) hits.insert(group);
             }
             workspace_.apply_selection(hits, marquee_.operation);
             marquee_ = {};
@@ -5427,7 +5508,7 @@ void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint3
 
 const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
     static constexpr std::array<EditorToolInfo, static_cast<std::size_t>(EditorToolId::ScatterBrush) + 1U> kTools{{
-        {"Select", "Sel", "transform.select", "Click an object to select it; drag empty space to box-select.",
+        {"Select", "Sel", "transform.select", "Click an object to select it (a piece of a group selects the group; double-click opens it); drag empty space to box-select.",
          "Objects"},
         {"Move", "Mov", "transform.translate", "Drag a gizmo axis to move the selection.", "Selected objects"},
         {"Add", "Add", "voxel.brush", "Click a voxel face to add voxels of the active material; [ / ] radius, Voxel > Brush Shape cube or sphere; green cells show what a click adds.",
@@ -5668,7 +5749,7 @@ EditorObjectBounds NativeEditorController::selection_bounds() const noexcept {
     for (EditorObjectId id : workspace_.selected_objects()) {
         const EditorObject* object = workspace_.document().find_object(id);
         if (!object || !object->flags.visible) continue;
-        const EditorObjectBounds bounds = object_world_bounds(*object);
+        const EditorObjectBounds bounds = is_group(id) ? group_bounds(id) : object_world_bounds(*object);
         if (!bounds.valid) continue;
         if (!combined.valid) combined = bounds;
         else {
@@ -5685,10 +5766,193 @@ EditorObjectBounds NativeEditorController::selection_bounds() const noexcept {
     return combined;
 }
 
+// --- Groups: closed by default, open to edit inside, editable pivot (ART-035/036) --------------
+
+void NativeEditorController::prune_groups() {
+    // Undo, delete or ungroup can remove a group or give it geometry; forget those.
+    for (auto it = openGroups_.begin(); it != openGroups_.end();)
+        it = is_group(*it) ? std::next(it) : openGroups_.erase(it);
+    if (pivotEditing_) {
+        const auto active = workspace_.selected_object();
+        if (workspace_.selection_count() != 1 || !active || !is_group(*active)) {
+            pivotEditing_ = false;
+            refresh_menu_state();
+        }
+    }
+}
+
+bool NativeEditorController::has_own_geometry(const EditorObject& object) const {
+    return (object.voxels && object.voxels->occupied_voxel_count() > 0) || object.polygon || object.subdivision ||
+           object.text3d || object.gaborVolume;
+}
+
+bool NativeEditorController::is_group(EditorObjectId id) const {
+    const EditorObject* object = workspace_.document().find_object(id);
+    return object && !has_own_geometry(*object) && !workspace_.document().children_of(id).empty();
+}
+
+EditorObjectId NativeEditorController::viewport_selection_target(EditorObjectId id) const {
+    // Walk from the root down: the first group on the way that is closed takes the click.
+    std::vector<EditorObjectId> chain;
+    const EditorDocument& document = workspace_.document();
+    for (const EditorObject* object = document.find_object(id); object && object->parent && chain.size() < 4096;) {
+        chain.push_back(*object->parent);
+        object = document.find_object(*object->parent);
+    }
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+        if (is_group(*it) && !openGroups_.contains(*it)) return *it;
+    return id;
+}
+
+EditorObjectBounds NativeEditorController::group_bounds(EditorObjectId id) const {
+    EditorObjectBounds combined;
+    const EditorDocument& document = workspace_.document();
+    for (const EditorObjectId member : collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{id})) {
+        const EditorObject* object = document.find_object(member);
+        if (!object || !object->flags.visible) continue;
+        const EditorObjectBounds bounds = object_world_bounds(*object);
+        if (!bounds.valid) continue;
+        if (!combined.valid) { combined = bounds; continue; }
+        combined.minimum = {std::min(combined.minimum.x, bounds.minimum.x), std::min(combined.minimum.y, bounds.minimum.y),
+                            std::min(combined.minimum.z, bounds.minimum.z)};
+        combined.maximum = {std::max(combined.maximum.x, bounds.maximum.x), std::max(combined.maximum.y, bounds.maximum.y),
+                            std::max(combined.maximum.z, bounds.maximum.z)};
+    }
+    return combined;
+}
+
+bool NativeEditorController::open_selected_groups() {
+    std::size_t opened = 0;
+    for (const EditorObjectId id : workspace_.selected_objects()) {
+        // A selected piece inside a closed group opens that group too.
+        const EditorObjectId target = is_group(id) ? id : viewport_selection_target(id);
+        if (is_group(target) && openGroups_.insert(target).second) ++opened;
+    }
+    if (opened == 0) {
+        set_status("Select a group to open (or double-click a piece in it)", true);
+        return false;
+    }
+    refresh_menu_state();
+    set_status("Opened " + std::to_string(opened) + " group(s): clicks now reach the pieces inside (Close Group returns)");
+    return true;
+}
+
+bool NativeEditorController::close_groups_around_selection() {
+    // Close the nearest open group around each selected object (or the selected open group), and
+    // select it.
+    std::set<EditorObjectId> closed;
+    const EditorDocument& document = workspace_.document();
+    for (const EditorObjectId id : workspace_.selected_objects()) {
+        std::optional<EditorObjectId> target;
+        if (openGroups_.contains(id)) target = id;
+        for (const EditorObject* object = document.find_object(id); !target && object && object->parent;) {
+            if (openGroups_.contains(*object->parent)) target = *object->parent;
+            object = document.find_object(*object->parent);
+        }
+        if (target) closed.insert(*target);
+    }
+    if (closed.empty() && !openGroups_.empty() && workspace_.selected_objects().empty()) {
+        close_all_groups();
+        return true;
+    }
+    if (closed.empty()) { set_status("Nothing to close: the selection is not inside an open group", true); return false; }
+    for (const EditorObjectId id : closed) {
+        // Closing a group also closes the groups inside it.
+        for (const EditorObjectId member : collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{id}))
+            openGroups_.erase(member);
+    }
+    workspace_.clear_selection();
+    for (const EditorObjectId id : closed) workspace_.add_to_selection(viewport_selection_target(id));
+    pivotEditing_ = false;
+    refresh_menu_state();
+    set_status("Closed " + std::to_string(closed.size()) + " group(s)");
+    return true;
+}
+
+void NativeEditorController::close_all_groups() {
+    openGroups_.clear();
+    pivotEditing_ = false;
+    refresh_menu_state();
+    set_status("Closed every group");
+}
+
+bool NativeEditorController::toggle_pivot_editing() {
+    if (pivotEditing_) {
+        pivotEditing_ = false;
+        refresh_menu_state();
+        set_status("Pivot editing finished");
+        return true;
+    }
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before editing a pivot", true); return false; }
+    const auto active = workspace_.selected_object();
+    if (workspace_.selection_count() != 1 || !active || !is_group(*active)) {
+        set_status("Select one group to edit its pivot", true);
+        return false;
+    }
+    if (const EditorObject* group = workspace_.document().find_object(*active); group && group->flags.locked) {
+        set_status("Unlock " + group->name + " before editing its pivot", true);
+        return false;
+    }
+    for (const EditorObjectId child : workspace_.document().children_of(*active))
+        if (const EditorObject* object = workspace_.document().find_object(child); object && object->attachment) {
+            set_status("Edit Pivot needs pieces that are not socket-attached (" + object->name + " is)", true);
+            return false;
+        }
+    if (const EditorObject* group = workspace_.document().find_object(*active); group && imported_group(*group)) {
+        set_status(std::string(kImportedPivotFixed), true);
+        return false;
+    }
+    pivotEditing_ = true;
+    if (activeTool_ != EditorToolId::Translate && activeTool_ != EditorToolId::Rotate) set_active_tool(EditorToolId::Translate);
+    refresh_menu_state();
+    set_status("Editing the pivot: Move or Rotate moves the pivot only; Edit Pivot again (or Esc) finishes");
+    return true;
+}
+
+bool NativeEditorController::set_group_pivot(bool bottomCentre) {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before editing a pivot", true); return false; }
+    const auto active = workspace_.selected_object();
+    if (workspace_.selection_count() != 1 || !active || !is_group(*active)) { set_status("Select one group first", true); return false; }
+    const EditorObject* group = workspace_.document().find_object(*active);
+    if (imported_group(*group)) {
+        set_status(std::string(kImportedPivotFixed), true);
+        return false;
+    }
+    if (group->flags.locked) { set_status("Unlock " + group->name + " before moving its pivot", true); return false; }
+    const EditorObjectBounds bounds = group_bounds(*active);
+    if (!bounds.valid) { set_status("The group has no visible pieces to measure", true); return false; }
+    RigidTransform after = group->transform;
+    after.position = {(bounds.minimum.x + bounds.maximum.x) * 0.5F,
+                      bottomCentre ? bounds.minimum.y : (bounds.minimum.y + bounds.maximum.y) * 0.5F,
+                      (bounds.minimum.z + bounds.maximum.z) * 0.5F};
+    if (after.position.x == group->transform.position.x && after.position.y == group->transform.position.y &&
+        after.position.z == group->transform.position.z) {
+        // Already there: no undo step for an edit that changes nothing.
+        set_status(std::string("The pivot is already at the group's ") + (bottomCentre ? "bottom centre" : "centre"));
+        return false;
+    }
+    std::vector<ObjectTransformChange> changes{{group->id, group->transform, after}};
+    // Socket-attached children would follow their parent: hold them where they are.
+    for (const EditorObjectId child : workspace_.document().children_of(group->id))
+        if (const EditorObject* object = workspace_.document().find_object(child); object && object->attachment) {
+            const RigidTransform world = workspace_.document().world_transform(child).value_or(object->transform);
+            changes.push_back({child, world, world});
+        }
+    const CommandResult result = workspace_.commands().execute(workspace_.document(),
+        std::make_unique<TransformObjectsCommand>(std::move(changes), bottomCentre ? "Pivot to bottom centre" : "Pivot to centre"));
+    set_status(result.success ? (bottomCentre ? "Pivot moved to the group's bottom centre" : "Pivot moved to the group's centre")
+                              : result.message, !result.success);
+    return result.success;
+}
+
 Float3 NativeEditorController::selection_pivot() const noexcept {
     if (selectionDomain_ == SelectionDomain::Polygons) return polygon_selection_centre();
     if (pivotMode_ == PivotMode::WorldOrigin) return {};
     if (pivotMode_ == PivotMode::Custom) return customPivot_;
+    // A single selected group turns and moves about its own pivot.
+    if (workspace_.selection_count() == 1 && workspace_.selected_object() && is_group(*workspace_.selected_object()))
+        if (const EditorObject* group = workspace_.document().find_object(*workspace_.selected_object()))
+            return group->transform.position;
     if (pivotMode_ == PivotMode::ActiveObject && workspace_.selected_object()) {
         if (const EditorObject* object = workspace_.document().find_object(*workspace_.selected_object()))
             return object->transform.position;
@@ -5712,13 +5976,25 @@ Float3 NativeEditorController::gizmo_axis_world(int axis) const noexcept {
     return normalize(direction);
 }
 
-std::vector<ObjectTransformChange> NativeEditorController::selection_transform_snapshot() const {
+std::vector<ObjectTransformChange> NativeEditorController::selection_transform_snapshot(bool includeGroupMembers) const {
     std::vector<ObjectTransformChange> changes;
     changes.reserve(workspace_.selection_count());
+    std::set<EditorObjectId> seen;
     for (EditorObjectId id : workspace_.selected_objects()) {
         const EditorObject* object = workspace_.document().find_object(id);
-        if (!object) continue;
+        if (!object || !seen.insert(id).second) continue;
         changes.push_back({id, object->transform, object->transform});
+    }
+    if (!includeGroupMembers || pivotEditing_) return changes;
+    // A selected group moves as a unit: its unattached descendants come along (attached ones
+    // already follow their parent). Groups come first so parents update before their pieces.
+    for (EditorObjectId id : workspace_.selected_objects()) {
+        if (!is_group(id)) continue;
+        for (const EditorObjectId member : collect_editor_object_subtree_ids(workspace_.document(), std::vector<EditorObjectId>{id})) {
+            const EditorObject* object = workspace_.document().find_object(member);
+            if (!object || object->attachment || !seen.insert(member).second) continue;
+            changes.push_back({member, object->transform, object->transform});
+        }
     }
     return changes;
 }
@@ -5958,6 +6234,19 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
             set_status("Unlock all selected objects before transforming them", true);
             gizmoAxis_ = 0;
             return;
+        }
+        if (activeTool_ == EditorToolId::Scale && is_group(id)) {
+            set_status("Scale works on pieces: double-click the group (or Edit > Open Group) and select them", true);
+            gizmoAxis_ = 0;
+            return;
+        }
+        if (is_group(id) && !pivotEditing_) {
+            for (const EditorObjectId member : collect_editor_object_subtree_ids(workspace_.document(), std::vector<EditorObjectId>{id}))
+                if (const EditorObject* piece = workspace_.document().find_object(member); piece && piece->flags.locked) {
+                    set_status("Unlock " + piece->name + " (in " + object->name + ") before moving the group", true);
+                    gizmoAxis_ = 0;
+                    return;
+                }
         }
         if (activeTool_ == EditorToolId::Scale && ((!object->polygon && (!object->voxels || object->voxels->brick_count() == 0)) ||
             object->text3d || object->gaborVolume || !std::isfinite(object->voxelSizeMeters) ||
@@ -7828,6 +8117,23 @@ camera_menu_dispatch_complete:
             else if (commonParent != object->parent) commonParent.reset();
         }
         centroid = multiply(centroid, 1.0F / static_cast<float>(roots.size()));
+        // The pivot starts at the bottom centre of what is grouped, so the group sits on surfaces
+        // and turns about its footprint (Edit Group Pivot changes it).
+        {
+            EditorObjectBounds combined;
+            for (const EditorObjectId id : roots) {
+                const EditorObjectBounds bounds = group_bounds(id);
+                if (!bounds.valid) continue;
+                if (!combined.valid) { combined = bounds; continue; }
+                combined.minimum = {std::min(combined.minimum.x, bounds.minimum.x), std::min(combined.minimum.y, bounds.minimum.y),
+                                    std::min(combined.minimum.z, bounds.minimum.z)};
+                combined.maximum = {std::max(combined.maximum.x, bounds.maximum.x), std::max(combined.maximum.y, bounds.maximum.y),
+                                    std::max(combined.maximum.z, bounds.maximum.z)};
+            }
+            if (combined.valid)
+                centroid = {(combined.minimum.x + combined.maximum.x) * 0.5F, combined.minimum.y,
+                            (combined.minimum.z + combined.maximum.z) * 0.5F};
+        }
 
         std::set<std::string> names;
         for (const auto& [id, object] : workspace_.document().objects()) {
@@ -7863,6 +8169,16 @@ camera_menu_dispatch_complete:
         set_status(result.success ? "Grouped selection" : result.message, !result.success);
         return result.success;
     }
+    if (actionId == "edit.open_group") return open_selected_groups();
+    if (actionId == "edit.close_group") return close_groups_around_selection();
+    if (actionId == "edit.close_all_groups") {
+        if (openGroups_.empty()) { set_status("No groups are open", true); return false; }
+        close_all_groups();
+        return true;
+    }
+    if (actionId == "edit.edit_pivot") return toggle_pivot_editing();
+    if (actionId == "edit.pivot_bottom_center" || actionId == "edit.pivot_center")
+        return set_group_pivot(actionId == "edit.pivot_bottom_center");
     if (actionId == "edit.ungroup") {
         const auto beforeSelection = capture_selection_snapshot();
         std::vector<EditorObjectId> groupsToDissolve;
@@ -8597,6 +8913,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         close_top_level_menu();
         close_context_menu();
         if (gizmoDragging_) finish_gizmo_drag(true);
+        else if (pivotEditing_) { pivotEditing_ = false; refresh_menu_state(); set_status("Pivot editing finished"); }
         finish_voxel_stroke();
         if (floodFillArmed_) { floodFillArmed_ = false; set_status("Flood Fill cancelled"); }
         if (voxelMoveAxis_ != 0) { voxelMoveAxis_ = 0; voxelMoveSteps_ = 0; set_status("Voxel move cancelled"); }
@@ -11795,6 +12112,7 @@ bool NativeEditorController::open_scene_now(const std::filesystem::path& path) {
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();  // ids restart per scene: never carry cells to another object
+    openGroups_.clear(); pivotEditing_ = false;  // ids restart per scene
     viewportSettings_.isolatedObjects.clear();
     collisionProxyCache_.clear();
     (void)dispatch_action("view.frame_all");

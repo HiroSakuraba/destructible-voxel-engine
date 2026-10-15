@@ -368,6 +368,19 @@ struct NativeImportOptionsLayout {
     UiRect cancelButton{};
     UiRect hintBar{};
 };
+// What a click of the Add, Remove or Paint brush would change under the cursor (ART-044).
+struct VoxelBrushPreview {
+    EditorObjectId objectId{};
+    Int3 center{};
+    std::int32_t radius{};
+    BrushShape shape{BrushShape::Cube};
+    VoxelToolOperation operation{VoxelToolOperation::Add};
+    std::vector<Int3> cells;                    // cells that would change (at most kMaxBrushPreviewCells)
+    std::size_t count{};                        // every cell that would change
+    bool limitedToSelection{};                  // Remove/Paint inside a voxel selection
+    bool locked{};                              // the object is locked: nothing would change
+};
+inline constexpr std::size_t kMaxBrushPreviewCells = 20000;
 
 struct NativeCommandPaletteLayout {
     UiRect panel{};
@@ -543,6 +556,9 @@ public:
     // "? Shortcuts" control.
     [[nodiscard]] std::vector<std::string> viewport_tool_gestures() const;
     [[nodiscard]] MaterialId active_material() const noexcept { return activeMaterial_; }
+    [[nodiscard]] std::optional<VoxelBrushPreview> voxel_brush_preview() const;
+    [[nodiscard]] BrushShape voxel_brush_shape() const noexcept { return voxelBrushShape_; }
+    [[nodiscard]] std::int32_t voxel_brush_radius() const noexcept { return voxelBrushRadius_; }
     [[nodiscard]] EditorTransformSpace transform_space() const noexcept { return transformSpace_; }
     [[nodiscard]] EditorFocusRegion focus_region() const noexcept { return focusRegion_; }
     [[nodiscard]] const NativeEditorLayout& layout() const noexcept { return layout_; }
@@ -1475,6 +1491,18 @@ private:
     float placementOffsetMeters_{};
     bool voxelStrokeActive_{};
     std::int32_t voxelBrushRadius_{};
+    BrushShape voxelBrushShape_{BrushShape::Cube};
+    // The brush preview is recomputed only when the cursor cell, brush, tool or object changes.
+    struct BrushPreviewKey {
+        EditorObjectId object{}; Int3 voxel{}; Int3 normal{}; std::int32_t radius{}; BrushShape shape{};
+        EditorToolId tool{}; MaterialId material{}; std::uint64_t revision{}; std::size_t selection{};
+        EditorObjectId selectionObject{}; bool locked{};
+        auto operator<=>(const BrushPreviewKey&) const = default;
+    };
+    mutable std::optional<BrushPreviewKey> brushPreviewKey_;
+    mutable std::optional<VoxelBrushPreview> brushPreview_;
+    [[nodiscard]] bool in_voxel_brush(Int3 cell, Int3 center) const noexcept;
+    [[nodiscard]] std::size_t selection_fingerprint() const noexcept;
     std::string activePointerCommand_;
     std::vector<ShortcutGesture> heldShortcutGestures_;
     std::optional<EditorCamera> previousCamera_;

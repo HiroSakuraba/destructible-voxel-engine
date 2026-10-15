@@ -9,6 +9,9 @@
 #include <iostream>
 #include <stdexcept>
 #include <limits>
+#include <map>
+#include <optional>
+#include <set>
 #include <filesystem>
 #ifndef DVE_EDGE_BEVEL_CORE_ONLY
 #include "dve/editor_native.hpp"
@@ -26,6 +29,26 @@ Fixture fold(bool concave,unsigned pieces=1,bool boundary=false){Fixture f;f.mes
     for(unsigned j=0;j<pieces;++j){auto a=j*stride,b=(j+1)*stride;std::vector<std::uint32_t> first{a,b,b+1,a,b+1,a+1};f.mesh.indices.insert(f.mesh.indices.end(),first.begin(),first.end());f.settings.controlFaces.push_back(first);
         if(!boundary){std::vector<std::uint32_t> second{b,a,a+2,b,a+2,b+2};f.mesh.indices.insert(f.mesh.indices.end(),second.begin(),second.end());f.settings.controlFaces.push_back(second);}f.selection.components.insert(key(a,b));}
     f.mesh.submeshes={{"Fold",0,std::uint32_t(f.mesh.indices.size()),0}};refresh_editor_polygon(f.mesh,true);return f;}
+Fixture segmented_cube(unsigned cuts=1){
+    auto f=cube();for(auto& v:f.mesh.vertices)v.texcoord1={2*v.texcoord.x+.3F,3*v.texcoord.y+.7F};refresh_editor_polygon(f.mesh);
+    for(unsigned i=0;i<cuts;++i){
+        const auto length=[&](std::uint64_t e){return length_squared(subtract(f.mesh.vertices[std::uint32_t(e>>32U)].position,f.mesh.vertices[std::uint32_t(e)].position));};
+        const auto seed=*std::max_element(f.selection.components.begin(),f.selection.components.end(),[&](auto a,auto b){return length(a)<length(b);});
+        auto cut=cut_cage_edge_ring(f.mesh,f.settings,seed,.5F);check(bool(cut),"segmented cube loop cut: "+cut.polygon.error);
+        std::set<std::uint64_t> next;for(auto e:f.selection.components){const auto& children=cut.lineage.edgeDescendants.at(e);next.insert(children.begin(),children.end());}
+        f.mesh=std::move(cut.polygon.mesh);f.settings=std::move(cut.subdivision);f.selection.components=std::move(next);
+    }
+    return f;
+}
+void no_t_junctions(const CookedPolygonAsset& mesh,const std::string& context={}){
+    const auto groups=polygon_geometric_vertices(mesh);std::map<std::uint32_t,Float3> points;
+    for(std::uint32_t i=0;i<groups.size();++i)points[groups[i]]=mesh.vertices[i].position;
+    for(auto e:polygon_all_components(mesh,PolygonSelectionMode::Edge)){
+        const auto a=std::uint32_t(e>>32U),b=std::uint32_t(e);const auto p=points.at(a),d=subtract(points.at(b),p);const auto dd=dot(d,d);
+        for(const auto& [g,point]:points)if(g!=a&&g!=b){const auto u=dot(subtract(point,p),d)/dd;
+            check(!(u>1e-5F&&u<1-1e-5F&&length_squared(subtract(point,add(p,multiply(d,u))))<1e-12F),"closed bevel has no T-junctions: "+context+" edge="+std::to_string(e)+" point="+std::to_string(g)+" u="+std::to_string(u)+" A="+std::to_string(p.x)+","+std::to_string(p.y)+","+std::to_string(p.z)+" B="+std::to_string(points.at(b).x)+","+std::to_string(points.at(b).y)+","+std::to_string(points.at(b).z)+" P="+std::to_string(point.x)+","+std::to_string(point.y)+","+std::to_string(point.z));}
+    }
+}
 // Deliberately unrelated UV channels and non-affine color fields. Every second
 // render triangle can have its own attribute copies across the hidden diagonal.
 Fixture domains(bool concave,unsigned pieces,bool boundary,bool split){
@@ -161,6 +184,98 @@ void run(Fixture f,bool closed){for(auto& vertex:f.mesh.vertices)vertex.texcoord
     }
 }
 
+void split_crease_chains(){
+    for(unsigned cuts:{1U,2U,3U})for(unsigned segments:{1U,4U,16U}){
+        auto f=segmented_cube(cuts);std::string error;f.settings.level=1;
+        float strength=1;for(auto e:f.selection.components)f.settings.edgeCreases[e]=strength++;
+        auto before=make_modeling_topology(f.mesh,&f.settings,{},&error);check(bool(before),error);
+        EdgeBevelSettings settings;settings.width=.1F;settings.offsetType=BevelOffsetType::Absolute;settings.worldSpace=false;settings.autoFit=false;settings.segments=segments;settings.depth=segments==1?0.F:1.F;
+        auto result=bevel_authored_editor_edges(f.mesh,f.selection,settings,{1,1,1},&f.settings);
+        check(bool(result),"full split crease cuts="+std::to_string(cuts)+" segments="+std::to_string(segments)+": "+result.polygon.error);
+        const auto diagnostic=diagnose_polygon_topology(result.polygon.mesh);check(!diagnostic.boundaries&&!diagnostic.nonmanifold&&!diagnostic.inconsistentWinding&&!diagnostic.degenerate,"segmented bevel is a closed valid solid");no_t_junctions(result.polygon.mesh,std::to_string(cuts)+"/"+std::to_string(segments));
+        if(segments==1)check(std::abs(volume(result.polygon.mesh)-.99)<1e-5,"chain chamfer cuts once and retains single-crease volume");
+        auto ids=advance_modeling_topology(f.mesh,result.polygon.mesh,&*result.subdivision,*before,result.lineage);check(bool(ids),ids.error);
+        std::set<std::uint64_t> claimed;PolygonUvAuthoring flags;flags.layoutHash=polygon_uv_layout_hash(f.mesh);
+        std::array<std::set<std::uint64_t>,2> expectedSeams;unsigned index=0;
+        const auto seed=*f.selection.components.begin();const auto origin=f.mesh.vertices[std::uint32_t(seed>>32U)].position;
+        const auto axis=normalize(subtract(f.mesh.vertices[std::uint32_t(seed)].position,origin));const auto parameter=[&](Float3 p){return dot(subtract(p,origin),axis);};
+        std::vector<std::pair<float,float>> ranges;
+        for(auto e:f.selection.components){
+            const auto x=parameter(f.mesh.vertices[std::uint32_t(e>>32U)].position),y=parameter(f.mesh.vertices[std::uint32_t(e)].position);const auto lo=(std::min)(x,y),hi=(std::max)(x,y);ranges.emplace_back(lo,hi);
+            const auto& descendants=result.lineage.edgeDescendants.at(e);check(!descendants.empty(),"each selected segment owns replacement rails");
+            const auto a=before->vertices[std::uint32_t(e>>32U)],b=before->vertices[std::uint32_t(e)];
+            const auto sourceEdge=before->edges.at(std::minmax(a,b));
+            check(resolve_modeling_selection(result.polygon.mesh,ids.topology,std::uint8_t(PolygonSelectionMode::Edge),ids.descendants.at(sourceEdge))==descendants,"persistent segment selections resolve to their own replacement rails");
+            for(auto next:descendants){
+                check(claimed.insert(next).second,"different source segments never claim the same rail");check(result.subdivision->edgeCreases.at(next)==f.settings.edgeCreases.at(e),"segment-specific crease strength stays on its own rails");
+                for(auto v:{std::uint32_t(next>>32U),std::uint32_t(next)}){const auto p=parameter(result.polygon.mesh.vertices[v].position);check(p>=lo-1e-5F&&p<=hi+1e-5F,"rail descendants stay inside their source segment interval");}
+            }
+            flags.seams[index%2].insert(e);expectedSeams[index%2].insert(descendants.begin(),descendants.end());++index;
+        }
+        for(auto t:result.polygon.selection.components){
+            float lo=INFINITY,hi=-INFINITY;for(unsigned j=0;j<3;++j){const auto p=parameter(result.polygon.mesh.vertices[result.polygon.mesh.indices[t*3+j]].position);lo=(std::min)(lo,p);hi=(std::max)(hi,p);}
+            check(std::any_of(ranges.begin(),ranges.end(),[&](auto r){return lo>=r.first-1e-5F&&hi<=r.second+1e-5F;}),"profile triangles respect original segment stations");
+        }
+        for(const auto& [old,next]:result.lineage.cornerDescendants)if(!next.empty()){flags.pins[0].insert(old);flags.pins[1].insert(old);}
+        auto mapped=remap_polygon_uv_authoring(flags,result.polygon.mesh,result.lineage,&error);check(mapped&&mapped->seams==expectedSeams,"independent seam channels preserve per-segment flags: "+error);
+        auto wider=settings;wider.width=.12F;auto changed=bevel_authored_editor_edges(f.mesh,f.selection,wider,{1,1,1},&f.settings);check(bool(changed),changed.polygon.error);
+        auto repeated=advance_modeling_topology(f.mesh,changed.polygon.mesh,&*changed.subdivision,*before,changed.lineage);check(bool(repeated)&&ids.topology==repeated.topology,"stable chain connectivity retains provisional IDs when width changes");
+        for(auto omitted:f.selection.components){auto partial=f.selection;partial.components.erase(omitted);auto rejected=bevel_authored_editor_edges(f.mesh,partial,settings,{1,1,1},&f.settings);
+            check(!rejected&&rejected.polygon.error.find("every segment")!=std::string::npos&&polygon_asset_content_hash(rejected.polygon.mesh)==polygon_asset_content_hash(f.mesh)&&rejected.lineage.afterVertexGroups.empty(),"incomplete chain refuses atomically with an explicit reason");}
+    }
+    // Shear makes loop-cut face boundaries oblique to the crease's axial stations.
+    // This exercises inserted rail points rather than only reusing existing cut vertices.
+    auto f=segmented_cube(3);
+    for(auto& v:f.mesh.vertices){const auto p=v.position;v.position={.13F+p.x+.2F*p.y+.1F*p.z,.27F+p.y+.15F*p.z,.39F+p.z};}
+    refresh_editor_polygon(f.mesh);f.settings.level=1;
+    EdgeBevelSettings settings;settings.offsetType=BevelOffsetType::Absolute;settings.autoFit=false;settings.width=.05F;settings.segments=4;
+    const Float3 scale{1.7F,.6F,2.3F};auto actual=bevel_authored_editor_edges(f.mesh,f.selection,settings,scale,&f.settings);
+    check(bool(actual),"sheared world chain: "+actual.polygon.error);no_t_junctions(actual.polygon.mesh,"world");
+    auto scaled=f;for(auto& v:scaled.mesh.vertices)v.position={v.position.x*scale.x,v.position.y*scale.y,v.position.z*scale.z};refresh_editor_polygon(scaled.mesh);settings.worldSpace=false;
+    auto reference=bevel_authored_editor_edges(scaled.mesh,scaled.selection,settings,{1,1,1},&scaled.settings);check(bool(reference),reference.polygon.error);
+    check(actual.polygon.mesh.indices==reference.polygon.mesh.indices,"world chain keeps scaled-reference connectivity");
+    for(std::size_t i=0;i<actual.polygon.mesh.vertices.size();++i){const auto& a=actual.polygon.mesh.vertices[i];const auto& b=reference.polygon.mesh.vertices[i];
+        check(length_squared(subtract(Float3{a.position.x*scale.x,a.position.y*scale.y,a.position.z*scale.z},b.position))<1e-10F&&std::abs(a.texcoord.x-b.texcoord.x)<1e-5F&&std::abs(a.texcoord1.y-b.texcoord1.y)<1e-5F,"world chain keeps source-side UV interpolation");}
+    auto plain=segmented_cube(2);auto ordinary=bevel_authored_editor_edges(plain.mesh,plain.selection,settings);
+    check(bool(ordinary),"ordinary polygon segmented crease: "+ordinary.polygon.error);no_t_junctions(ordinary.polygon.mesh,"ordinary");
+    // Interacting split chains need a separate corner-join reconstruction, and refuse atomically.
+    std::map<std::uint64_t,std::vector<Float3>> normals;const auto groups=polygon_geometric_vertices(plain.mesh);
+    for(std::uint32_t t=0;t<plain.mesh.indices.size()/3;++t){
+        const auto a=plain.mesh.vertices[plain.mesh.indices[t*3]].position,b=plain.mesh.vertices[plain.mesh.indices[t*3+1]].position,c=plain.mesh.vertices[plain.mesh.indices[t*3+2]].position;
+        const auto x=subtract(b,a),y=subtract(c,a);const auto n=normalize(Float3{x.y*y.z-x.z*y.y,x.z*y.x-x.x*y.z,x.x*y.y-x.y*y.x});
+        for(unsigned j=0;j<3;++j)normals[key(groups[plain.mesh.indices[t*3+j]],groups[plain.mesh.indices[t*3+(j+1)%3]])].push_back(n);
+    }
+    auto multi=plain.selection;multi.components.clear();for(const auto& [e,n]:normals)if(n.size()==2&&dot(n[0],n[1])<.99F)multi.components.insert(e);
+    auto corners=bevel_authored_editor_edges(plain.mesh,multi,settings,{1,1,1},&plain.settings);check(!corners&&corners.polygon.error.find("one split crease chain")!=std::string::npos&&polygon_asset_content_hash(corners.polygon.mesh)==polygon_asset_content_hash(plain.mesh)&&corners.lineage.afterVertexGroups.empty(),"meeting split chains refuse atomically with an explicit reason");
+    // An uninterrupted crease meeting a split chain's endpoint stays supported on its own,
+    // but combining it with that split chain refuses atomically without touching the source.
+    {auto mixed=segmented_cube(1);mixed.settings.level=1;const auto mixedGroups=polygon_geometric_vertices(mixed.mesh);std::map<std::uint64_t,std::vector<Float3>> creaseNormals;
+        for(std::uint32_t t=0;t<mixed.mesh.indices.size()/3;++t){const auto a=mixed.mesh.vertices[mixed.mesh.indices[t*3]].position,b=mixed.mesh.vertices[mixed.mesh.indices[t*3+1]].position,c=mixed.mesh.vertices[mixed.mesh.indices[t*3+2]].position;
+            const auto x=subtract(b,a),y=subtract(c,a);const auto n=normalize(Float3{x.y*y.z-x.z*y.y,x.z*y.x-x.x*y.z,x.x*y.y-x.y*y.x});
+            for(unsigned j=0;j<3;++j)creaseNormals[key(mixedGroups[mixed.mesh.indices[t*3+j]],mixedGroups[mixed.mesh.indices[t*3+(j+1)%3]])].push_back(n);}
+        std::set<std::uint32_t> chainVertices;for(auto e:mixed.selection.components){chainVertices.insert(std::uint32_t(e>>32U));chainVertices.insert(std::uint32_t(e));}
+        std::optional<std::uint64_t> other;for(const auto& [e,n]:creaseNormals)if(n.size()==2&&dot(n[0],n[1])<.99F&&!mixed.selection.components.contains(e)&&(chainVertices.contains(std::uint32_t(e>>32U))||chainVertices.contains(std::uint32_t(e)))){other=e;break;}
+        check(bool(other),"segmented cube has an uninterrupted crease at a chain endpoint");
+        auto single=mixed.selection;single.components={*other};auto alone=bevel_authored_editor_edges(mixed.mesh,single,settings,{1,1,1},&mixed.settings);check(bool(alone),"uninterrupted crease on a loop-cut cage remains supported: "+alone.polygon.error);
+        auto combined=mixed.selection;combined.components.insert(*other);auto refused=bevel_authored_editor_edges(mixed.mesh,combined,settings,{1,1,1},&mixed.settings);
+        check(!refused&&refused.polygon.error.find("one split crease chain")!=std::string::npos&&polygon_asset_content_hash(refused.polygon.mesh)==polygon_asset_content_hash(mixed.mesh)&&refused.lineage.afterVertexGroups.empty()&&!refused.subdivision,"split chain plus another crease refuses atomically");}
+    // Materials may change along a chain, while the two sides of each segment agree.
+    auto material=segmented_cube(2);material.mesh.materials.push_back(material.mesh.materials[0]);material.mesh.materials.back().name="Second interval";material.mesh.materialBindings.push_back(material.mesh.materialBindings[0]);
+    const auto seed=*material.selection.components.begin();const auto origin=material.mesh.vertices[std::uint32_t(seed>>32U)].position;const auto axis=normalize(subtract(material.mesh.vertices[std::uint32_t(seed)].position,origin));
+    const auto parameter=[&](Float3 p){return dot(subtract(p,origin),axis);};
+    std::vector<std::pair<float,float>> intervals;
+    for(auto e:material.selection.components){const auto a=parameter(material.mesh.vertices[std::uint32_t(e>>32U)].position),b=parameter(material.mesh.vertices[std::uint32_t(e)].position);intervals.emplace_back((std::min)(a,b),(std::max)(a,b));}
+    std::sort(intervals.begin(),intervals.end());const auto border=intervals[0].second;
+    material.mesh.submeshes.clear();
+    for(std::uint32_t t=0;t<material.mesh.indices.size()/3;++t){float centre=0;for(unsigned j=0;j<3;++j)centre+=parameter(material.mesh.vertices[material.mesh.indices[t*3+j]].position)/3;
+        material.mesh.submeshes.push_back({"Source interval",t*3,3,centre>border?1U:0U});}
+    refresh_editor_polygon(material.mesh);auto colored=bevel_authored_editor_edges(material.mesh,material.selection,settings,{1,1,1},&material.settings);check(bool(colored),"segment materials: "+colored.polygon.error);
+    for(const auto& sub:colored.polygon.mesh.submeshes)for(auto t=sub.firstIndex/3;t<(sub.firstIndex+sub.indexCount)/3;++t)if(colored.polygon.selection.components.contains(t)){
+        float centre=0;for(unsigned j=0;j<3;++j)centre+=parameter(colored.polygon.mesh.vertices[colored.polygon.mesh.indices[t*3+j]].position)/3;
+        check(sub.materialIndex==(centre>border?1U:0U),"profile slabs inherit their own source-segment material");}
+
+}
+
 void refusals_and_followup(){
     auto f=cube();EdgeBevelSettings settings;settings.width=.2F;std::string error;
     for(auto width:{0.F,-1.F,std::numeric_limits<float>::infinity()}){auto bad=settings;bad.width=width;auto result=bevel_authored_editor_edges(f.mesh,f.selection,bad,{1,1,1},&f.settings);check(!result&&polygon_asset_content_hash(result.polygon.mesh)==polygon_asset_content_hash(f.mesh)&&result.lineage.afterVertexGroups.empty(),"invalid width refuses atomically");}
@@ -199,7 +314,7 @@ void refusals_and_followup(){
     for(std::size_t i=0;i<reference.polygon.mesh.vertices.size();++i){auto p=reference.polygon.mesh.vertices[i].position;p={p.x/scale.x,p.y/scale.y,p.z/scale.z};check(length_squared(subtract(p,actual.polygon.mesh.vertices[i].position))<1e-10F,"world width handles nonuniform scale");}
 }
 #if defined(DVE_EDGE_BEVEL_COMMANDS) || !defined(DVE_EDGE_BEVEL_CORE_ONLY)
-void history(){for(auto f:{cube(),fold(true,2),fold(false,1,true),domains(true,2,false,true),domains(false,2,true,true)})for(bool identified:{false,true}){
+void history(){for(auto f:{cube(),fold(true,2),fold(false,1,true),domains(true,2,false,true),domains(false,2,true,true),segmented_cube(1),segmented_cube(3)})for(bool identified:{false,true}){
     std::string error;EditorDocument document("Bevel history");EditorObject object(1,"Source");object.polygon=f.mesh;object.subdivision=f.settings;if(identified)check(ensure_modeling_topology(object,&error),error);const auto before=object.modelingTopology;document.add_object(std::move(object));
     EdgeBevelSettings settings;auto result=bevel_authored_editor_edges(f.mesh,f.selection,settings,{1,1,1},&f.settings);check(bool(result),result.polygon.error);auto source=make_modeling_topology(f.mesh,&f.settings,{},&error);check(bool(source),error);auto ids=advance_modeling_topology(f.mesh,result.polygon.mesh,&*result.subdivision,identified?*before:*source,result.lineage);check(bool(ids),ids.error);
     PolygonUvAuthoring flags;flags.layoutHash=polygon_uv_layout_hash(f.mesh);flags.seams[0]=f.selection.components;flags.seams[1]=f.selection.components;auto save=make_polygon_uv_authoring_command(document,*document.find_object(1),flags,&error);check(save&&save->execute(document).success,"save bevel flags");
@@ -208,11 +323,11 @@ void history(){for(auto f:{cube(),fold(true,2),fold(false,1,true),domains(true,2
     check(stack.execute(document,std::move(command)).success,"actual compound bevel Apply");const auto floor=document.find_object(1)->modelingNextId;auto afterFlags=read_polygon_uv_authoring(*document.find_object(1),&error);check(afterFlags&&afterFlags->seams[0]==afterFlags->seams[1]&&document.find_object(1)->modelingTopology==ids.topology,"Apply stores prepared IDs and both flag channels");
     check(stack.undo(document).success&&document.find_object(1)->modelingTopology==before&&document.find_object(1)->modelingNextId>=floor&&polygon_asset_content_hash(*document.find_object(1)->polygon)==polygon_asset_content_hash(f.mesh),"Undo restores exact legacy/identified source while retaining issued floor");
     check(stack.redo(document).success&&document.find_object(1)->modelingTopology==ids.topology&&polygon_asset_content_hash(*document.find_object(1)->polygon)==polygon_asset_content_hash(result.polygon.mesh),"Redo restores exact bevel and IDs");
-    if(f.mesh.indices.size()==36&&!identified){const auto root=std::filesystem::temp_directory_path()/"dve-authored-bevel-roundtrip";std::filesystem::remove_all(root);const auto path=root/"bevel.dvescene";const auto saved=document.save_transactional(path);check(saved.success,saved.error);auto loaded=EditorDocument::load(path,&error);check(loaded&&loaded->find_object(1)->modelingTopology==ids.topology&&polygon_asset_content_hash(*loaded->find_object(1)->polygon)==polygon_asset_content_hash(result.polygon.mesh),"save/reopen retains the actual beveled mesh and prepared identity record");auto flagsAfter=read_polygon_uv_authoring(*loaded->find_object(1),&error);check(flagsAfter&&flagsAfter->seams==afterFlags->seams,"save/reopen retains bevel seam records");std::filesystem::remove_all(root);}
+    if((f.mesh.indices.size()==36||f.selection.components.size()>1)&&!identified){const auto root=std::filesystem::temp_directory_path()/"dve-authored-bevel-roundtrip";std::filesystem::remove_all(root);const auto path=root/"bevel.dvescene";const auto saved=document.save_transactional(path);check(saved.success,saved.error);auto loaded=EditorDocument::load(path,&error);check(loaded&&loaded->find_object(1)->modelingTopology==ids.topology&&polygon_asset_content_hash(*loaded->find_object(1)->polygon)==polygon_asset_content_hash(result.polygon.mesh),"save/reopen retains the actual beveled mesh and prepared identity record");auto flagsAfter=read_polygon_uv_authoring(*loaded->find_object(1),&error);check(flagsAfter&&flagsAfter->seams==afterFlags->seams,"save/reopen retains bevel seam records");std::filesystem::remove_all(root);}
 }}
 #endif
 #ifndef DVE_EDGE_BEVEL_CORE_ONLY
-void native(){for(auto f:{cube(),fold(true,2),fold(false,1,true),domains(true,2,false,true),domains(false,2,true,true)})for(bool identified:{false,true}){
+void native(){for(auto f:{cube(),fold(true,2),fold(false,1,true),domains(true,2,false,true),domains(false,2,true,true),segmented_cube(1),segmented_cube(3)})for(bool identified:{false,true}){
     EditorDocument document("Native bevel");EditorObject object(1,"Source");object.polygon=f.mesh;object.subdivision=f.settings;std::string error;if(identified)check(ensure_modeling_topology(object,&error),error);const auto before=object.modelingTopology;const auto floor=object.modelingNextId;document.add_object(std::move(object));
     auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(document)));auto& c=*owner;c.resize(1600,900);c.workspace().select_object(1);check(c.dispatch_action("subdiv.edge_mode"),"native edge mode");c.select_polygon_components(f.selection.components,SelectionOperation::Replace);const auto count=c.workspace().commands().size();
     {const auto* menu=c.workspace().menus().find("mesh.chamfer_edges");check(menu&&menu->enabled,"bevel menu enabled for selected edges");}
@@ -224,7 +339,7 @@ void native(){for(auto f:{cube(),fold(true,2),fold(false,1,true),domains(true,2,
 }}
 #endif
 }
-int main(){try{run(cube(),true);run(fold(false),false);run(fold(true),false);run(fold(true,2),false);run(fold(false,1,true),false);run(fold(false,2,true),false);refusals_and_followup();attribute_domains();
+int main(){try{run(cube(),true);run(fold(false),false);run(fold(true),false);run(fold(true,2),false);run(fold(false,1,true),false);run(fold(false,2,true),false);refusals_and_followup();attribute_domains();split_crease_chains();
 #if defined(DVE_EDGE_BEVEL_COMMANDS) || !defined(DVE_EDGE_BEVEL_CORE_ONLY)
 history();
 #endif

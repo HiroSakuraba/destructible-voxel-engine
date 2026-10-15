@@ -682,6 +682,7 @@ void native_history_menus_and_search() {
 }
 #endif
 }
+#ifndef DVE_CAGE_SELECTION_CORE_ONLY
 void native_face_tool_cancel_keeps_legacy_state() {
     auto f=grid();
     EditorDocument document("Face tool cancel"); EditorObject object(1,"Cage"); object.polygon=f.mesh; object.subdivision=f.settings;
@@ -713,6 +714,7 @@ void native_face_tool_cancel_keeps_legacy_state() {
     const auto* target=c.workspace().document().find_object(1);
     check(!target->modelingTopology&&polygon_asset_content_hash(*target->polygon)==before,"Undo removes migrated identities and restores geometry");
 }
+#endif
 
 int main() {
     try {

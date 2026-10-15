@@ -840,6 +840,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_polygon.cpp
         src/editor_native_mesh_authoring.cpp
         src/editor_mesh_boolean.cpp
+        src/editor_edge_bevel.cpp
         src/editor_exact_cad.cpp
         src/editor_topology.cpp
         src/editor_uv.cpp
@@ -2755,6 +2756,9 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_editor_subdivision_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_subdivision_tests COMMAND dve_editor_subdivision_tests)
         add_executable(dve_editor_modeling_topology_tests tests/test_editor_modeling_topology.cpp)
+        add_executable(dve_editor_edge_bevel_tests tests/test_editor_edge_bevel.cpp)
+        target_link_libraries(dve_editor_edge_bevel_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_edge_bevel_tests COMMAND dve_editor_edge_bevel_tests)
         target_link_libraries(dve_editor_modeling_topology_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_modeling_topology_tests COMMAND dve_editor_modeling_topology_tests)
         add_executable(dve_editor_cage_edge_selection_tests tests/test_editor_cage_edge_selection.cpp)

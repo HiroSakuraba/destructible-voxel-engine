@@ -16,6 +16,12 @@ struct NativeMeshAuthoringState {
     std::uint64_t operandStamp{};RigidTransform booleanPose{};Float3 booleanMetric{1,1,1};
     bool diagnostics{};EdgeBevelSettings bevel;
     PolygonSelection bevelSelection;
+    PolygonFaceEditResult bevelAuthored;
+    std::optional<ModelingTopology> bevelIdentities;
+    std::optional<std::string> bevelUvRecord;
+    std::uint64_t bevelSourceHash{};
+    std::optional<std::uint64_t> bevelSourceTopologyHash;
+    std::optional<SubdivisionSettings> bevelSourceSubdivision;
     int bevelField{};bool bevelReplaceTyped{true},bevelInputValid{true};
     std::uint32_t channel{},uvMode{};std::set<std::uint32_t> corners;Float2 center{.5F,.5F};float zoom{1};bool uvFocus{true},texture{};
     int tool{},axis{};bool dragging{},panning{},selecting{};int startX{},startY{},lastX{},lastY{};Float2 startUv{},pivot{},panStart{};
@@ -44,7 +50,24 @@ std::string bevel_value(const NativeMeshAuthoringState& state,int field) {
 }
 void update_bevel(NativeMeshAuthoringState& state,const EditorObject& object) {
     state.bevelInputValid=true;
-    state.result=bevel_convex_editor_edges(*object.polygon,state.bevelSelection,state.bevel,object.voxelScale);
+    state.bevelIdentities.reset();state.bevelUvRecord.reset();
+    const auto refuse=[&](std::string error){state.result={*object.polygon,state.bevelSelection,std::move(error)};};
+    const auto sourceIds=object.modelingTopology?std::optional{modeling_topology_hash(*object.modelingTopology)}:std::nullopt;
+    if(object.polygon->contentHash!=state.bevelSourceHash||object.subdivision!=state.bevelSourceSubdivision||sourceIds!=state.bevelSourceTopologyHash){refuse("Source geometry or topology changed; close and reopen the bevel preview");return;}
+    if(object.prefabLink){refuse("Edit the prefab source or detach this instance before changing topology");return;}
+    // Preview migration is local: Cancel never changes the source or its allocation floor.
+    EditorObject migration(object.id,"Bevel identity snapshot");migration.polygon=object.polygon;migration.subdivision=object.subdivision;
+    migration.modelingTopology=object.modelingTopology;migration.modelingNextId=object.modelingNextId;std::string error;
+    if(!ensure_modeling_topology(migration,&error)){refuse(error);return;}
+    if(!modeling_matches_legacy_partition(*object.polygon,*migration.modelingTopology)){refuse("Bevel does not support coincident independent vertices yet");return;}
+    state.bevelAuthored=bevel_authored_editor_edges(*object.polygon,state.bevelSelection,state.bevel,object.voxelScale,object.subdivision?&*object.subdivision:nullptr);
+    state.result=state.bevelAuthored.polygon;if(!state.result)return;
+    const auto changed=advance_modeling_topology(*object.polygon,state.result.mesh,state.bevelAuthored.subdivision?&*state.bevelAuthored.subdivision:nullptr,
+        *migration.modelingTopology,state.bevelAuthored.lineage,(std::max)(object.modelingNextId,migration.modelingTopology->nextId));
+    if(!changed){refuse(changed.error);return;}
+    const auto record=remap_polygon_uv_authoring_record(object,state.result.mesh,state.bevelAuthored.lineage,&error);
+    if(!record){refuse(error);return;}
+    state.bevelIdentities=changed.topology;state.bevelUvRecord=record;
 }
 UiRect uv_panel(UiRect view){int width=std::max(1,view.width/2);return {view.x+view.width-width,view.y,width,view.height};}
 UiRect uv_canvas(UiRect view){auto p=uv_panel(view);return {p.x+8,p.y+70,std::max(1,p.width-16),std::max(1,p.height-116)};}
@@ -161,8 +184,14 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
             prefab?"Edit the prefab source or detach this instance before changing topology":"Apply or close the active preview first";
         for(auto id:{"mesh.bridge","mesh.cap"})enabled(id,edges&&workspace_.selection_count()==1&&!prefab&&!busy,reason);
     }
-    for(auto id:{"mesh.bevel_edges","mesh.chamfer_edges","mesh.fillet_edges"})
-        enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&mesh_boolean_available(),"Select convex crease edges in a Manifold authoring build");
+    {
+        // Mirror the bevel dispatch refusals so the menu never offers a preview that cannot open.
+        const bool edges=components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&polygonSelection_.object==object->id;
+        const bool single=workspace_.selection_count()==1;const bool prefab=object&&object->prefabLink.has_value();
+        const std::string_view reason=!edges?"Select crease or open boundary edges in Edge mode first":
+            !single?"Select exactly one polygon mesh":"Edit the prefab source or detach this instance before changing topology";
+        for(auto id:{"mesh.bevel_edges","mesh.chamfer_edges","mesh.fillet_edges"})enabled(id,edges&&single&&!prefab,reason);
+    }
 }
 bool NativeEditorController::mesh_authoring_dragging() const noexcept {return meshAuthoring_&&(meshAuthoring_->uvBefore||meshAuthoring_->hullBefore);}
 void NativeEditorController::cancel_mesh_authoring_drag(){if(!meshAuthoring_)return;auto& s=*meshAuthoring_;if(s.uvBefore){if(auto* o=workspace_.document().find_object(s.object))o->polygon=*s.uvBefore;}s.uvBefore.reset();s.hullBefore.reset();s.hullPreview.clear();s.typed.clear();s.dragging=s.panning=s.selecting=false;}
@@ -273,8 +302,10 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
     }
     if(action=="mesh.bevel_edges" || action=="mesh.chamfer_edges" || action=="mesh.fillet_edges"){
         cancel_mesh_authoring_drag();close_previews_for_voxel_edit("edge bevel");
-        if(selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.object!=object->id || polygonSelection_.mode!=PolygonSelectionMode::Edge){set_status("Select convex crease edges in Edge mode first",true);return false;}
+        if(workspace_.selection_count()!=1||object->prefabLink||selectionDomain_!=SelectionDomain::Polygons || polygonSelection_.object!=object->id || polygonSelection_.mode!=PolygonSelectionMode::Edge){set_status("Select crease or open boundary edges on one owned mesh in Edge mode first",true);return false;}
         s.bevel=EdgeBevelSettings{};s.bevelSelection=polygonSelection_;
+        s.bevelSourceHash=object->polygon->contentHash;s.bevelSourceSubdivision=object->subdivision;
+        s.bevelSourceTopologyHash=object->modelingTopology?std::optional{modeling_topology_hash(*object->modelingTopology)}:std::nullopt;
         if(action=="mesh.chamfer_edges") {s.bevel.depth=0;s.bevel.segments=1;}
         if(action=="mesh.fillet_edges") {s.bevel.depth=1;s.bevel.segments=4;s.bevel.smoothingAngle=60;}
         update_bevel(s,*object);if(!s.result){set_status(s.result.error,true);return false;}
@@ -342,10 +373,24 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
     if(s.kind==NativeMeshAuthoringState::Kind::Topology){
         if(key=="escape"){s.kind=NativeMeshAuthoringState::Kind::None;refresh_menu_state();set_status("Bevel cancelled; source unchanged");return true;}
         if(key=="enter"||key=="return"){
+            if(workspace_.selection_count()!=1||workspace_.selected_object()!=s.object){set_status("Select the bevel source before applying its preview",true);return true;}
+            if(selectionDomain_!=SelectionDomain::Polygons||polygonSelection_.object!=s.object||polygonSelection_.mode!=PolygonSelectionMode::Edge||polygonSelection_.components!=s.bevelSelection.components){set_status("Return to the preview's original edge selection or close and reopen the bevel",true);return true;}
+            const auto topologyHash=object->modelingTopology?std::optional{modeling_topology_hash(*object->modelingTopology)}:std::nullopt;
+            if(object->polygon->contentHash!=s.bevelSourceHash||object->subdivision!=s.bevelSourceSubdivision||topologyHash!=s.bevelSourceTopologyHash){update_bevel(s,*object);set_status(s.result.error,true);return true;}
             if(!s.bevelInputValid){set_status(s.result.error,true);return true;}
             if(stamp(workspace_.document(),s.object,s.object)!=s.operandStamp){update_bevel(s,*object);s.operandStamp=stamp(workspace_.document(),s.object,s.object);set_status("Geometry changed: inspect updated bevel and press Enter again",!s.result);return true;}
-            if(!s.result){set_status(s.result.error,true);return true;}
-            auto before=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,s.result.mesh,"Bevel / chamfer / rounded fillet"));
+            // Recheck saved flags and settings at Apply, including inspector changes since the preview.
+            update_bevel(s,*object);
+            if(!s.result||!s.bevelIdentities){set_status(s.result.error,true);return true;}
+            auto command=std::make_unique<CompoundCommand>("Bevel / chamfer / rounded fillet");
+            command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,s.result.mesh,"Bevel authored edges",0,s.bevelAuthored.subdivision,false,s.bevelIdentities));
+            if(s.bevelUvRecord&&!s.bevelUvRecord->empty()) {
+                const auto* component=find_component_by_type(std::span<const Component>(object->components),kUvAuthoringComponent);
+                if(!component){set_status("Saved UV flags changed; recompute the bevel preview",true);return true;}
+                const auto at=component->properties.find("state");
+                command->add(std::make_unique<SetComponentPropertyCommand>(object->id,component->id,"state",at==component->properties.end()?std::optional<ComponentValue>{}:at->second,ComponentValue{*s.bevelUvRecord},"Preserve bevel UV seams and pins"));
+            }
+            auto before=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
             if(result.success){polygonSelection_=s.result.selection;workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());s.kind=NativeMeshAuthoringState::Kind::None;}
             set_status(result.success?"Applied edge bevel; Undo restores cage and selection":result.message,!result.success);refresh_menu_state();return true;
         }
@@ -560,7 +605,7 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
                     object->polygon->vertices[edge.b].position)),color(235,95,85),3);
     }
     if(s.kind==NativeMeshAuthoringState::Kind::Topology){
-        if(s.result){EditorDocument preview("Bevel preview");EditorObject o(s.object,"Result");o.polygon=s.result.mesh;o.subdivision=object->subdivision;if(o.subdivision)*o.subdivision=remap_subdivision_topology(*object->polygon,*o.polygon,*o.subdivision);o.transform=object->transform;o.voxelScale=object->voxelScale;preview.add_object(std::move(o));for(const auto& t:build_editor_polygon_draw_list(preview,camera_,viewport,{}, {},20000))for(unsigned j=0;j<3;++j)line(t.points[j],t.points[(j+1)%3],color(255,175,55),2);}
+        if(s.result){EditorDocument preview("Bevel preview");EditorObject o(s.object,"Result");o.polygon=s.result.mesh;o.subdivision=s.bevelAuthored.subdivision;o.transform=object->transform;o.voxelScale=object->voxelScale;preview.add_object(std::move(o));for(const auto& t:build_editor_polygon_draw_list(preview,camera_,viewport,{}, {},20000))for(unsigned j=0;j<3;++j)line(t.points[j],t.points[(j+1)%3],color(255,175,55),2);}
         const auto panel=bevel_panel(viewport);RectClipCanvas painter(canvas,panel);painter.fill(panel,color(23,32,43));
         const auto label=[&](UiRect rect,std::string text,EditorColor shade){painter.text(rect.x+5,rect.y+16,elide_text_to_width(painter,text,std::max(1,rect.width-10)),shade);};
         label({panel.x+8,panel.y+3,panel.width-16,22},"Edge Bevel / Chamfer / Rounded Fillet",color(255,210,140));

@@ -3732,6 +3732,28 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
     if (const auto bounds = controller.scale_preview_bounds())
         draw_world_box(viewportPainter, controller, *bounds, rgb(255,219,89));
+    if (const AssetDragState& drag = controller.asset_drag(); drag.active && drag.overViewport) {
+        // Asset drag (ART-076): a box where the asset will land (or the object a material will
+        // paint), a cross at the drop point and what releasing will do.
+        const EditorColor color = drag.refused ? rgb(255,110,96)
+            : drag.kind == EditorAssetKind::Material ? rgb(255,190,64) : rgb(96,226,255);
+        if (drag.ghost.valid) draw_world_box(viewportPainter, controller, drag.ghost, color);
+        if (drag.point && drag.kind != EditorAssetKind::Material) {
+            const ScreenPoint p = project_world_to_screen(controller.camera(), viewport, *drag.point);
+            if (p.visible) {
+                const int x = static_cast<int>(p.x), y = static_cast<int>(p.y);
+                viewportPainter.line(x - 8, y, x + 8, y, color, 2);
+                viewportPainter.line(x, y - 8, x, y + 8, color, 2);
+            }
+        }
+        const std::string label = drag.message;
+        const int w = viewportPainter.text_width(label) + 10;
+        const int lx = std::clamp(controller.hover_x() + 14, viewport.x + 4, std::max(viewport.x + 4, viewport.x + viewport.width - w - 4));
+        const int ly = std::clamp(controller.hover_y() + 22, viewport.y + 18, viewport.y + viewport.height - 6);
+        viewportPainter.fill({lx, ly - 14, w, 19}, rgb(16,20,26));
+        viewportPainter.outline({lx, ly - 14, w, 19}, color);
+        viewportPainter.text(lx + 5, ly, label, color);
+    }
     if (controller.voxel_join().active()) {
         // Join preview (ART-062): the target in blue, objects on its grid in green, objects that
         // must be resampled in orange; the panel names each mismatch and the choice it needs.

@@ -323,6 +323,28 @@ struct ImportOptionsState {
     std::string typed;                          // a number being typed into the selected row
     std::string message;
     bool messageIsError{};
+    std::optional<Float3> dropPoint;            // dragged from Assets: land the model here
+};
+struct EditorPrefabAsset;
+// Dragging an asset from the Assets panel into the viewport (ART-076).
+struct AssetDragState {
+    bool armed{};                               // pressed on an asset row
+    bool active{};                              // moved far enough to be a drag
+    std::string assetId;
+    std::string assetName;
+    std::filesystem::path relativePath;
+    EditorAssetKind kind{EditorAssetKind::Other};
+    int startX{}, startY{};
+    bool overViewport{};
+    std::optional<Float3> point;                // where it would land (surface hit or ground)
+    std::optional<EditorObjectId> target;       // the object under the cursor (material drops)
+    EditorObjectBounds ghost;                   // world box of what would be placed
+    std::string message;                        // what a release here would do, or why not
+    bool refused{};                             // a release here does nothing
+    std::shared_ptr<EditorPrefabAsset> prefab;  // loaded once when the drag starts
+    std::shared_ptr<EditorObject> voxelObject;  // a .dvox asset, built at the origin
+    EditorObjectBounds localBounds;             // bounds when placed with no offset
+    std::optional<MaterialId> material;
 };
 struct NativeImportOptionsLayout {
     UiRect panel{};
@@ -991,6 +1013,8 @@ public:
     // clicked voxel's face-connected same-material region with the active material (one undo).
     bool arm_flood_fill();
     [[nodiscard]] bool flood_fill_armed() const noexcept { return floodFillArmed_; }
+    [[nodiscard]] const AssetDragState& asset_drag() const noexcept { return assetDrag_; }
+    void cancel_asset_drag(std::string reason = {});
     [[nodiscard]] bool follow_selection() const noexcept { return followSelection_; }
     bool flood_fill_at(EditorObjectId object, Int3 voxel);
     // View > Drop Selection to Surface: drops each selected object straight down onto what is
@@ -1100,6 +1124,15 @@ private:
     EditorAssetDatabase assetDatabase_{};
     bool thumbnailBacklog_{};
     EditorAssetBrowserState assetBrowserState_{};
+    AssetDragState assetDrag_;
+    std::optional<Float3> pendingImportDrop_;   // a model drop waiting for its options to open
+    void begin_asset_drag(const EditorAssetRecord& asset, int x, int y);
+    void update_asset_drag(int x, int y);
+    void finish_asset_drag(int x, int y);
+    bool load_asset_drag_payload();
+    bool place_dragged_asset();
+    [[nodiscard]] std::string material_drop_refusal(const EditorObject& target) const;
+    [[nodiscard]] std::string asset_drop_blocked_reason() const;
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};

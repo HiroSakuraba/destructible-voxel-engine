@@ -3801,12 +3801,18 @@ bool NativeEditorController::mirror_selection(int axis, bool copy) {
                 mirrored.attachment->localTransform = relative_rigid_transform(poses.at(*source->parent).transform, pose.transform);
             if (source->polygon) {
                 mirrored.polygon->objectId = mirrored.id;  // before the refresh: the content hash covers it
+                const PolygonTopologyLineage lineage = mirror_polygon_lineage(*source->polygon, source->subdivision ? &*source->subdivision : nullptr);
                 if (!mirror_polygon_mesh(*mirrored.polygon, pose.localAxis, mirrored.subdivision ? &*mirrored.subdivision : nullptr,
                                          mirrored.modelingTopology ? &*mirrored.modelingTopology : nullptr, &error)) {
                     set_status("Mirror failed on " + source->name + ": " + error, true);
                     return false;
                 }
                 mirrored.subdivisionCache.reset();
+                const auto record = remap_polygon_uv_authoring_record(*source, *mirrored.polygon, lineage, &error);
+                if (!record) { set_status("Mirror refused on " + source->name + ": " + error, true); return false; }
+                if (!record->empty())
+                    if (Component* component = find_component_by_type(std::span<Component>(mirrored.components), kUvAuthoringComponent))
+                        component->properties["state"] = ComponentValue{*record};
             } else if (source->voxels && source->voxels->occupied_voxel_count() > 0) {
                 const VoxelObjectState state = mirror_voxel_state(capture_voxel_object_state(*source), pose.localAxis);
                 auto voxels = std::make_unique<VoxelObject>(mirrored.id);
@@ -3830,12 +3836,22 @@ bool NativeEditorController::mirror_selection(int axis, bool copy) {
                 CookedPolygonAsset mesh = *object->polygon;
                 std::optional<SubdivisionSettings> subdivision = object->subdivision;
                 std::optional<ModelingTopology> topology = object->modelingTopology;
+                const PolygonTopologyLineage lineage = mirror_polygon_lineage(mesh, subdivision ? &*subdivision : nullptr);
                 if (!mirror_polygon_mesh(mesh, e, subdivision ? &*subdivision : nullptr, topology ? &*topology : nullptr, &error)) {
                     set_status("Mirror failed on " + object->name + ": " + error, true);
                     return false;
                 }
+                // Saved UV seams and pins follow the swapped corners.
+                const auto record = remap_polygon_uv_authoring_record(*object, mesh, lineage, &error);
+                if (!record) { set_status("Mirror refused on " + object->name + ": " + error, true); return false; }
                 compound->add(std::make_unique<ReplacePolygonCommand>(id, *object->polygon, std::move(mesh), label, 0,
-                                                                      std::move(subdivision), true, std::move(topology)));
+                                                                      std::move(subdivision), false, std::move(topology)));
+                if (!record->empty())
+                    if (const Component* component = find_component_by_type(std::span<const Component>(object->components), kUvAuthoringComponent)) {
+                        const auto at = component->properties.find("state");
+                        compound->add(std::make_unique<SetComponentPropertyCommand>(id, component->id, "state",
+                            at == component->properties.end() ? std::optional<ComponentValue>{} : at->second, ComponentValue{*record}, label));
+                    }
             } else if (object->voxels && object->voxels->occupied_voxel_count() > 0) {
                 VoxelObjectState before = capture_voxel_object_state(*object);
                 VoxelObjectState after = mirror_voxel_state(before, e);

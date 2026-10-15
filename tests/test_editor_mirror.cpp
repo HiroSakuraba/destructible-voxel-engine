@@ -5,6 +5,7 @@
 #include "dve/editor_modeling_topology.hpp"
 #include "dve/editor_native.hpp"
 #include "dve/editor_polygon.hpp"
+#include "dve/editor_mesh_authoring.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <cmath>
@@ -192,6 +193,24 @@ void test_meshes() {
     check(validate_polygon_asset(*mirrored->polygon).code == PolygonAssetErrorCode::NoError, "the mesh is valid");
     check(c.workspace().commands().undo(doc).success && doc.find_object(1)->modelingTopology == topologyBefore,
           "undo restores the IDs");
+
+    // Saved UV seams and pins survive the mirror (pins follow the swapped corners).
+    {
+        PolygonUvAuthoring state;
+        state.layoutHash = polygon_uv_layout_hash(*doc.find_object(1)->polygon);
+        state.seams[0].insert(*polygon_all_components(*doc.find_object(1)->polygon, PolygonSelectionMode::Edge).begin());
+        state.pins[0] = {1U, 3U};
+        auto command = make_polygon_uv_authoring_command(doc, *doc.find_object(1), state, &error);
+        check(command && c.workspace().commands().execute(doc, std::move(command)).success, "save UV flags: " + error);
+        check(c.mirror_selection(0, false), "mirror with saved UV flags: " + c.status().text);
+        const auto after = read_polygon_uv_authoring(*doc.find_object(1), &error);
+        check(after && after->seams[0].size() == 1 && after->pins[0] == std::set<std::uint32_t>{2U, 3U},
+              "seams kept, pins on the swapped corners: " + error);
+        check(c.mirror_selection(0, true), "mirror copy with saved UV flags: " + c.status().text);
+        const auto copy = c.workspace().selected_object();
+        const auto copied = copy ? read_polygon_uv_authoring(*doc.find_object(*copy), &error) : std::nullopt;
+        check(copied && copied->pins[0] == std::set<std::uint32_t>{1U, 3U}, "the copy's record is valid too (mirrored twice): " + error);
+    }
 
     c.workspace().select_object(2);
     check(c.mirror_selection(2, true), "mirror copy of a subdivision cage: " + c.status().text);

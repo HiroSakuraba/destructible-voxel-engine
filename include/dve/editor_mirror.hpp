@@ -14,6 +14,7 @@
 
 #include "dve/editor_command.hpp"
 #include "dve/editor_modeling_topology.hpp"
+#include "dve/editor_polygon.hpp"
 #include "dve/polygon_asset.hpp"
 #include "dve/subdivision_surface.hpp"
 
@@ -37,5 +38,9 @@ struct MirroredPose {
 // tangents and the content hash are refreshed.
 [[nodiscard]] bool mirror_polygon_mesh(CookedPolygonAsset& mesh, int localAxis, SubdivisionSettings* subdivision,
                                        ModelingTopology* topology, std::string* error = nullptr);
+
+// Lineage for mirror_polygon_mesh: every element survives; the two swapped corners of each
+// triangle trade places. Used to carry persistent IDs and saved UV seams/pins.
+[[nodiscard]] PolygonTopologyLineage mirror_polygon_lineage(const CookedPolygonAsset& before, const SubdivisionSettings* subdivision);
 
 }  // namespace dve::editor

@@ -127,4 +127,13 @@ bool mirror_polygon_mesh(CookedPolygonAsset& mesh, int localAxis, SubdivisionSet
     return true;
 }
 
+PolygonTopologyLineage mirror_polygon_lineage(const CookedPolygonAsset& before, const SubdivisionSettings* subdivision) {
+    PolygonTopologyLineage lineage = identity_polygon_lineage(before, subdivision);
+    for (std::uint32_t i = 0; i + 2 < before.indices.size(); i += 3) {
+        lineage.cornerDescendants[i + 1] = {i + 2};
+        lineage.cornerDescendants[i + 2] = {i + 1};
+    }
+    return lineage;
+}
+
 }  // namespace dve::editor

@@ -1925,6 +1925,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
                 playActive ? "Stop Play first." : selectionDomain_ != SelectionDomain::Objects ? "Return to object selection first."
                                                                                                 : "Select the objects to mirror first.");
     enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
+    enabled("edit.duplicate_special", (hasSelection || duplicateSpecial_.active) && !playActive &&
+                selectionDomain_ == SelectionDomain::Objects,
+            playActive ? "Stop Play first." : "Select the objects to copy first.");
     const auto hierarchyPrimary = workspace_.selected_object();
     const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;
     const bool hierarchySelectionReady = !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
@@ -2168,6 +2171,8 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("view.xray", viewportSettings_.xraySelection);
     checked("view.follow_selection", followSelection_);
     checked("select.domain_objects", selectionDomain_ == SelectionDomain::Objects);
+    checked("voxel.brush_shape_cube", voxelBrushShape_ == BrushShape::Cube);
+    checked("voxel.brush_shape_sphere", voxelBrushShape_ == BrushShape::Sphere);
     checked("select.domain_voxels", selectionDomain_ == SelectionDomain::Voxels);
     {
         const SettingValue shadingValue = workspace_.settings().value("viewport.shading_mode");
@@ -2566,7 +2571,11 @@ void NativeEditorController::recompute_layout() {
     layout_.scatterSettingRows.clear();
     layout_.inspectorStackedFields = inspectorWidth > 0 && inspectorWidth < 320;
     layout_.inspectorFieldCount = 0;
-    if (inspectorWidth > 0 && scatter_settings_panel_active()) {
+    if (inspectorWidth > 0 && duplicateSpecial_.active) {
+        // Duplicate Special replaces the object details (see duplicate_panel_layout).
+        layout_.inspectorContentClipY = layout_.inspector.y + layout_.inspector.height - 6;
+        layout_.inspectorScroll = layout_.inspectorScrollMax = 0;
+    } else if (inspectorWidth > 0 && scatter_settings_panel_active()) {
         // The scatter settings replace the object details (and the flag toggles) while the fill
         // preview is open or the Scatter brush is the tool: one row per setting.
         const int rowStep = std::max(20, static_cast<int>(22.0F * scale));
@@ -2596,6 +2605,10 @@ void NativeEditorController::recompute_layout() {
                 layout_.inspectorFields.push_back({layout_.inspector.x + 12, contentY + 124 + field * 22,
                                                    inspectorWidth - 24, 18});
             }
+        } else {
+            // Voxel size (plain voxel objects; see number_field_rects). The row is kept for any
+            // other primary too, so a selection change never needs a relayout to show it.
+            layout_.inspectorFields.push_back({layout_.inspector.x + 12, contentY + 124, inspectorWidth - 24, 18});
         }
         layout_.inspectorFieldCount = static_cast<int>(layout_.inspectorFields.size());
         const int reflowExtra = layout_.inspectorStackedFields ? 22 * layout_.inspectorFieldCount : 0;
@@ -2852,6 +2865,11 @@ void NativeEditorController::update(float elapsedSeconds) {
     voxel_boolean_tick();
     prune_voxel_selection();
     prune_polygon_selection();
+    if (duplicateSpecial_.active) {
+        bool gone = playSession_.active() || selectionDomain_ != SelectionDomain::Objects;
+        for (const EditorObjectId id : duplicateSpecial_.roots) gone = gone || !workspace_.document().find_object(id);
+        if (gone) cancel_duplicate_special("Duplicate Special closed: the objects or mode changed");
+    }
     if (followSelection_) {
         // Keep the camera's offset to the selection: move eye and target by how far it moved.
         if (workspace_.selected_objects().empty() || playSession_.active()) {
@@ -3522,23 +3540,22 @@ void NativeEditorController::commit_text_edit() {
                 textEdit_ = {}; return;
             }
         }
-        if (kind == TextEditKind::Rotation && !sameVector(selection_pivot(), textEdit_.transformPivot)) stale = true;
         if (stale) {
             set_status("Selection or transform changed: reopen the field before applying a value", true, 8.0F);
             textEdit_ = {}; return;
         }
     }
-    const auto parsed = parse_float3_line(textEdit_.buffer);
-    if (!parsed) {
-        set_status("Could not parse three numbers", true);
-        textEdit_ = {};
-        return;
-    }
-    const CommandResult result = kind == TextEditKind::Position
-        ? set_primary_position(*parsed)
-        : set_primary_rotation_euler_degrees(*parsed);
-    if (!result.success) set_status(result.message, true);
+    // Numeric fields: one axis (or one value) at a time, with units and relative edits.
+    const NumberFieldId field = kind == TextEditKind::DuplicateSetting ? static_cast<NumberFieldId>(textEdit_.objectId)
+        : kind == TextEditKind::Position ? NumberFieldId::Position
+        : kind == TextEditKind::Rotation ? NumberFieldId::Rotation
+        : kind == TextEditKind::VoxelSize ? NumberFieldId::VoxelSize
+        : kind == TextEditKind::BrushRadius ? NumberFieldId::BrushRadius : NumberFieldId::SurfaceOffset;
+    const int axis = textEdit_.axis;
+    const std::string buffer = textEdit_.buffer;
+    const bool untouched = textEdit_.replaceOnNextInput;
     textEdit_ = {};
+    if (!untouched) (void)set_number_field(field, axis, buffer);
 }
 
 void NativeEditorController::cancel_text_edit() noexcept {
@@ -3968,6 +3985,12 @@ void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
 }
 
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
+    if (numberScrub_.armed) {
+        hoverX_ = x; hoverY_ = y;
+        update_number_scrub(x, modifiers);
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
+    }
     if (polygonLoopCutDragging_) {
         polygonPreviewTyped_.clear();
         polygonPreviewSettings_.amount=std::clamp(polygonLoopCutStartFraction_+
@@ -4556,6 +4579,65 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     }
     if (button == PointerButton::Primary && begin_slice_pointer(x, y, modifiers)) return;
 
+    if (button == PointerButton::Primary && workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
+        !openMenu_ && !contextMenu_.open && !commandPaletteOpen_ && !filePicker_.open && !layout_.menuBar.contains(x, y)) {
+        if (duplicateSpecial_.active && layout_.inspector.contains(x, y)) {
+            const DuplicatePanelLayout panel = duplicate_panel_layout();
+            DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+            const auto choose = [&](std::string message) {
+                if (textEdit_.kind != TextEditKind::Inactive) commit_text_edit();
+                recompute_layout();
+                set_status(std::move(message) + "; " + duplicate_special_summary());
+                focusRegion_ = EditorFocusRegion::Inspector;
+            };
+            if (panel.pivotEach.contains(x, y)) { v.pivot = DuplicatePivot::EachCopy; choose("Each copy turns about its own pivot"); return; }
+            if (panel.pivotPoint.contains(x, y)) { v.pivot = DuplicatePivot::Point; choose("Copies turn around the point"); return; }
+            if (panel.spaceLocal.contains(x, y)) { v.space = DuplicateSpace::Local; choose("Offsets follow each copy's turn"); return; }
+            if (panel.spaceWorld.contains(x, y)) { v.space = DuplicateSpace::World; choose("Offsets along world axes"); return; }
+            if (panel.pointOrigin.contains(x, y)) { v.point = {}; choose("Point: world origin"); return; }
+            if (panel.pointSelection.contains(x, y)) {
+                const EditorObjectBounds bounds = selection_bounds();
+                v.point = bounds.valid ? multiply(add(bounds.minimum, bounds.maximum), 0.5F) : selection_pivot();
+                choose("Point: selection centre");
+                return;
+            }
+            if (panel.group.contains(x, y)) { v.group = !v.group; choose(v.group ? "Copies go in one group" : "Copies stay loose"); return; }
+            if (panel.apply.contains(x, y)) { (void)apply_duplicate_special(); return; }
+            if (panel.cancel.contains(x, y)) { cancel_duplicate_special("Duplicate Special cancelled"); return; }
+        }
+        // Numeric fields: a click on a box types into it; a press on the label starts a scrub
+        // (a click on the label without dragging also types).
+        for (const NumberFieldRect& rect : number_field_rects()) {
+            if (rect.box.contains(x, y)) { begin_number_field_edit(rect.field, rect.axis); return; }
+            if (!rect.label.contains(x, y)) continue;
+            numberScrub_ = {};
+            numberScrub_.armed = true;
+            numberScrub_.field = rect.field;
+            numberScrub_.axis = rect.axis;
+            numberScrub_.startX = x;
+            numberScrub_.startScalar = rect.field == NumberFieldId::BrushRadius ? static_cast<float>(voxelBrushRadius_)
+                : rect.field == NumberFieldId::SurfaceOffset ? placementOffsetMeters_
+                : static_cast<float>(std::strtod(number_field_text(rect.field, rect.axis).c_str(), nullptr));
+            const std::string refusal = rect.field == NumberFieldId::BrushRadius || rect.field == NumberFieldId::SurfaceOffset
+                ? std::string() : number_field_refusal(rect.field);
+            for (const EditorObjectId id : number_field_objects(rect.field)) {
+                const EditorObject* object = workspace_.document().find_object(id);
+                if (!object) continue;
+                if (rect.field == NumberFieldId::VoxelSize)
+                    numberScrub_.sizes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, object->voxelSizeMeters,
+                                                  std::nullopt, std::nullopt});
+                else numberScrub_.transforms.push_back({id, object->transform, object->transform});
+            }
+            if (!refusal.empty()) {
+                numberScrub_ = {};
+                set_status(refusal, true);
+            }
+            focusRegion_ = rect.field == NumberFieldId::BrushRadius || rect.field == NumberFieldId::SurfaceOffset
+                ? EditorFocusRegion::Viewport : EditorFocusRegion::Inspector;
+            return;
+        }
+    }
+
     const auto now = std::chrono::steady_clock::now();
     const SettingValue doubleMsValue = workspace_.settings().value("input.double_click_ms");
     const SettingValue doubleDistanceValue = workspace_.settings().value("input.double_click_distance_px");
@@ -4582,6 +4664,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 
     // A click anywhere other than the field currently being edited commits it, the same way
     // losing focus commits a text field in most desktop UIs.
+    if (textEdit_.kind == TextEditKind::VoxelSize || textEdit_.kind == TextEditKind::BrushRadius ||
+        textEdit_.kind == TextEditKind::SurfaceOffset) {
+        bool onField = false;
+        for (const NumberFieldRect& rect : number_field_rects()) onField = onField || rect.box.contains(x, y);
+        if (!onField) commit_text_edit();
+    }
     if (textEdit_.kind == TextEditKind::HierarchyFilter && !layout_.hierarchyFilterBox.contains(x, y)) {
         commit_text_edit();
     } else if (textEdit_.kind == TextEditKind::AssetSearch && !layout_.assetSearchBox.contains(x, y)) {
@@ -4745,11 +4833,8 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                     }
                 } else break;
             } else {
-                constexpr float degreesPerRadian = 57.29577951308232F;
-                const std::string initial = index == 0
-                    ? format_float3_line(object->transform.position)
-                    : format_float3_line(multiply(quaternion_to_euler_xyz(object->transform.rotation), degreesPerRadian));
-                begin_text_edit(index == 0 ? TextEditKind::Position : TextEditKind::Rotation, *selected, initial);
+                // The row's name (outside the X/Y/Z boxes): type into X; Tab moves on.
+                begin_number_field_edit(index == 0 ? NumberFieldId::Position : NumberFieldId::Rotation, 0);
             }
             focusRegion_ = EditorFocusRegion::Inspector;
             return;
@@ -4976,6 +5061,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (numberScrub_.armed && button == PointerButton::Primary) {
+        update_number_scrub(x, modifiers);
+        finish_number_scrub(false);
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
+    }
     if (polygonLoopCutDragging_ && button==PointerButton::Primary) {
         pointer_move(x,y,modifiers); polygonLoopCutDragging_=false; return;
     }
@@ -5063,7 +5154,35 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
         if (distanceSquared <= 25) {
             // A right-click that didn't drag (didn't just orbit the camera): open a context
             // menu for whatever is under the cursor, in the viewport or the hierarchy.
-            if (layout_.viewport.contains(x, y)) {
+            std::optional<NumberFieldRect> fieldHit;
+            if (workspace_.mode() == EditorMode::Edit)
+                for (const NumberFieldRect& rect : number_field_rects())
+                    if (rect.label.contains(x, y) || rect.box.contains(x, y)) { fieldHit = rect; break; }
+            if (fieldHit) {
+                // Numeric field: reset, copy or paste this value.
+                contextNumberField_ = std::pair{fieldHit->field, fieldHit->axis};
+                const bool perAxis = fieldHit->field == NumberFieldId::Position || fieldHit->field == NumberFieldId::Rotation;
+                contextMenu_ = {};
+                contextMenu_.open = true;
+                const std::string what = perAxis ? std::string(fieldHit->axis == 0 ? "X" : fieldHit->axis == 1 ? "Y" : "Z")
+                                                 : std::string(fieldHit->field == NumberFieldId::VoxelSize ? "Voxel size"
+                                                               : fieldHit->field == NumberFieldId::BrushRadius ? "Brush radius" : "Surface offset");
+                contextMenu_.items.push_back({"inspector.field.reset", "Reset " + what +
+                    (fieldHit->field == NumberFieldId::VoxelSize ? " (0.1 m)" : " (0)")});
+                if (perAxis)
+                    contextMenu_.items.push_back({"inspector.field.reset_row",
+                        std::string("Reset ") + (fieldHit->field == NumberFieldId::Position ? "Position" : "Rotation") + " X, Y, Z"});
+                contextMenu_.items.push_back({"inspector.field.copy", "Copy " + what});
+                if (!numberFieldClipboard_.empty())
+                    contextMenu_.items.push_back({"inspector.field.paste", "Paste " + numberFieldClipboard_});
+                const int itemHeight = static_cast<int>(24.0F * kLogicalLayoutScale);
+                constexpr int popupWidth = 190;
+                const int popupHeight = itemHeight * static_cast<int>(contextMenu_.items.size());
+                contextMenu_.x = std::clamp(x, 0, std::max(0, width_ - popupWidth));
+                contextMenu_.y = std::clamp(y, layout_.menuBar.height, std::max(layout_.menuBar.height, height_ - popupHeight));
+                for (std::size_t i = 0; i < contextMenu_.items.size(); ++i)
+                    contextMenu_.itemRects.push_back({contextMenu_.x, contextMenu_.y + static_cast<int>(i) * itemHeight, popupWidth, itemHeight});
+            } else if (layout_.viewport.contains(x, y)) {
                 update_hover(x, y);
                 open_context_menu(x, y, hoverPick_ ? std::optional(hoverPick_->objectId) : std::nullopt, false);
             } else if (layout_.hierarchy.contains(x, y)) {
@@ -5311,10 +5430,10 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Select", "Sel", "transform.select", "Click an object to select it; drag empty space to box-select.",
          "Objects"},
         {"Move", "Mov", "transform.translate", "Drag a gizmo axis to move the selection.", "Selected objects"},
-        {"Add", "Add", "voxel.brush", "Click a voxel face to add voxels of the active material.",
+        {"Add", "Add", "voxel.brush", "Click a voxel face to add voxels of the active material; [ / ] radius, Voxel > Brush Shape cube or sphere; green cells show what a click adds.",
          "Voxel objects"},
-        {"Remove", "Rem", "voxel.erase", "Click voxels to remove them.", "Voxel objects"},
-        {"Paint", "Pnt", "voxel.paint_material", "Click voxels to repaint them with the active material.",
+        {"Remove", "Rem", "voxel.erase", "Click voxels to remove them; [ / ] radius, Voxel > Brush Shape; red cells show what a click removes.", "Voxel objects"},
+        {"Paint", "Pnt", "voxel.paint_material", "Click voxels to repaint them with the active material; [ / ] radius, Voxel > Brush Shape; outlined cells show what a click repaints.",
          "Voxel objects"},
         {"Box", "Box", "voxel.volume", "Click a voxel to add a 3x3x3 box around it.", "Voxel objects"},
         {"Beam", "Bm", "voxel.line", "Click a voxel to add a 5-voxel beam along +X.", "Voxel objects"},
@@ -5489,7 +5608,7 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
         command = make_anchor_brush_command(workspace_.document(), pick.objectId, pick.voxel, 0, addAnchor);
     } else {
         BrushSettings settings;
-        settings.shape = BrushShape::Cube;
+        settings.shape = voxelBrushShape_;
         settings.radius = voxelBrushRadius_;
         settings.material = activeMaterial_;
         settings.strokeId = strokeId_;
@@ -5507,9 +5626,11 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
                     // With a voxel selection, Paint and Remove only touch selected voxels.
                     std::vector<VoxelChange> changes;
                     for (const Int3 cell : voxels_in_cube(*object->voxels, pick.voxel, voxelBrushRadius_)) {
-                        if (!voxelSelection_.contains(cell)) continue;
+                        if (!voxelSelection_.contains(cell) || !in_voxel_brush(cell, pick.voxel)) continue;
                         const MaterialId before = object->voxels->material_at(cell);
-                        const MaterialId after = settings.operation == VoxelToolOperation::Remove ? kAirMaterial : activeMaterial_;
+                        // Same rule as the brush command: painting with air leaves the cell alone.
+                        const MaterialId after = settings.operation == VoxelToolOperation::Remove ? kAirMaterial
+                            : (before == kAirMaterial || activeMaterial_ == kAirMaterial ? before : activeMaterial_);
                         if (before != after) changes.push_back({cell, before, after});
                     }
                     if (changes.empty()) { set_status("Only selected voxels can change (clear the selection to edit freely)", false, 2.0F); return; }
@@ -5531,6 +5652,12 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
             default: return;
         }
         if (!command) command = make_brush_command(workspace_.document(), pick.objectId, center, settings);
+    }
+    if (const auto* edit = dynamic_cast<const VoxelEditCommand*>(command.get()); edit && edit->change_count() == 0) {
+        // A click that changes nothing adds no undo step.
+        set_status(object->flags.locked ? "Unlock " + object->name + " to edit its voxels" : std::string("Nothing to change here"),
+                   object->flags.locked, 1.5F);
+        return;
     }
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
     set_status(result.success ? "Voxel edit applied" : result.message, !result.success, 1.5F);
@@ -6128,6 +6255,10 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
     transformNumeric_.clear();
 }
 
+namespace {
+bool same_transform(const RigidTransform& a, const RigidTransform& b);  // numeric fields, below
+}  // namespace
+
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (longJob_ || importOptions_.open) {
         // Only the viewport shading modes leave the scene alone while a long job runs.
@@ -6154,6 +6285,46 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "voxel.authoring_cancel" || actionId == "subdiv.conversion_cancel") {
         if (!voxel_authoring_active()) { set_status("No voxel/conversion preview is open",true); return false; }
         cancel_voxel_authoring_preview(); refresh_menu_state(); set_status("Preview cancelled; scene unchanged"); return true;
+    }
+    if (actionId.starts_with("inspector.field.")) {
+        if (!contextNumberField_) { set_status("Right-click a value first", true); return false; }
+        const auto [field, axis] = *contextNumberField_;
+        if (actionId == "inspector.field.reset") return reset_number_field(field, axis);
+        if (actionId == "inspector.field.reset_row") {
+            // One undo step for the three axes.
+            const auto ids = number_field_objects(field);
+            if (ids.empty()) { set_status("Nothing selected", true); return false; }
+            if (const std::string refusal = number_field_refusal(field); !refusal.empty()) { set_status(refusal, true); return false; }
+            std::vector<ObjectTransformChange> changes;
+            bool changed = false;
+            for (const EditorObjectId id : ids) {
+                const EditorObject* object = workspace_.document().find_object(id);
+                ObjectTransformChange change{id, object->transform, object->transform};
+                if (field == NumberFieldId::Position) change.after.position = {};
+                else change.after.rotation = {};
+                changed = changed || !same_transform(change.before, change.after);
+                changes.push_back(change);
+            }
+            const std::string label = field == NumberFieldId::Position ? "Reset Position" : "Reset Rotation";
+            if (!changed) { set_status(label + ": already reset"); return true; }
+            const auto selection = capture_selection_snapshot();
+            const CommandResult result = workspace_.commands().execute(workspace_.document(),
+                std::make_unique<TransformObjectsCommand>(std::move(changes), label));
+            if (result.success) workspace_.commands().set_last_selection_transition(selection, selection);
+            set_status(result.success ? label : result.message, !result.success);
+            return result.success;
+        }
+        if (actionId == "inspector.field.copy") {
+            const std::string value = number_field_text(field, axis);
+            if (value.empty() || value == "\xE2\x80\x94") { set_status("The selected objects differ; select one to copy its value", true); return false; }
+            numberFieldClipboard_ = value;
+            set_status("Copied " + value);
+            return true;
+        }
+        if (actionId == "inspector.field.paste") {
+            if (numberFieldClipboard_.empty()) { set_status("Nothing copied yet", true); return false; }
+            return set_number_field(field, axis, numberFieldClipboard_, "Paste");
+        }
     }
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
@@ -6385,9 +6556,19 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         } else set_status("No voxel material under cursor");
         return true;
     }
+    if (actionId == "voxel.brush_shape_cube" || actionId == "voxel.brush_shape_sphere" || actionId == "voxel.brush_shape_toggle") {
+        voxelBrushShape_ = actionId == "voxel.brush_shape_cube" ? BrushShape::Cube
+            : actionId == "voxel.brush_shape_sphere" ? BrushShape::Sphere
+            : (voxelBrushShape_ == BrushShape::Cube ? BrushShape::Sphere : BrushShape::Cube);
+        refresh_menu_state();
+        set_status(std::string("Voxel brush shape: ") + (voxelBrushShape_ == BrushShape::Sphere ? "sphere" : "cube") +
+                   ", radius " + std::to_string(voxelBrushRadius_) + " ([ / ] change it)");
+        return true;
+    }
     if (actionId == "voxel.brush_increase" || actionId == "voxel.brush_decrease") {
         voxelBrushRadius_ = std::clamp(voxelBrushRadius_ + (actionId == "voxel.brush_increase" ? 1 : -1), 0, 32);
-        set_status("Voxel brush radius: " + std::to_string(voxelBrushRadius_));
+        set_status("Voxel brush radius: " + std::to_string(voxelBrushRadius_) +
+                   (voxelBrushShape_ == BrushShape::Sphere ? " (sphere)" : " (cube)"));
         return true;
     }
     if (actionId == "voxel.fill") return arm_flood_fill();
@@ -7557,6 +7738,7 @@ camera_menu_dispatch_complete:
         set_status(visible ? "Inspector shown" : "Inspector hidden");
         return true;
     }
+    if (actionId == "edit.duplicate_special") return duplicateSpecial_.active ? apply_duplicate_special() : open_duplicate_special();
     if (actionId == "edit.duplicate") {
         if (workspace_.selection_count() == 0) {
             set_status("Nothing selected to duplicate", true);
@@ -8171,6 +8353,40 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     if (spriteAuthoringPanel_.open() && spriteAuthoringPanel_.key_down(normalized, control, shift, alt)) return;
     if (controlRigPanel_.open() && controlRigPanel_.key_down(normalized, control, shift, alt)) return;
     if (textEdit_.kind != TextEditKind::Inactive) {
+        if (normalized == "tab" && !control && !alt && textEdit_.kind == TextEditKind::DuplicateSetting) {
+            // Duplicate Special: Copies, Offset X/Y/Z, Turn X/Y/Z, Scale, Point X/Y/Z.
+            std::vector<std::pair<NumberFieldId, int>> order{{NumberFieldId::DuplicateCopies, 0}};
+            for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::DuplicateOffset, axis});
+            for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::DuplicateRotation, axis});
+            order.push_back({NumberFieldId::DuplicateScale, 0});
+            if (number_field_available(NumberFieldId::DuplicatePoint))
+                for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::DuplicatePoint, axis});
+            const auto here = std::find(order.begin(), order.end(),
+                                        std::pair{static_cast<NumberFieldId>(textEdit_.objectId), textEdit_.axis});
+            const std::size_t index = here == order.end() ? 0U : static_cast<std::size_t>(here - order.begin());
+            const auto next = order[(index + (shift ? order.size() - 1U : 1U)) % order.size()];
+            commit_text_edit();
+            begin_number_field_edit(next.first, next.second);
+            return;
+        }
+        if (normalized == "tab" && !control && !alt &&
+            (textEdit_.kind == TextEditKind::Position || textEdit_.kind == TextEditKind::Rotation ||
+             textEdit_.kind == TextEditKind::VoxelSize)) {
+            // Tab / Shift+Tab: apply this box and move to the next one (X, Y, Z of Position, then
+            // Rotation, then Voxel size when shown).
+            std::vector<std::pair<NumberFieldId, int>> order;
+            for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::Position, axis});
+            for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::Rotation, axis});
+            if (number_field_available(NumberFieldId::VoxelSize)) order.push_back({NumberFieldId::VoxelSize, 0});
+            const NumberFieldId current = textEdit_.kind == TextEditKind::Position ? NumberFieldId::Position
+                : textEdit_.kind == TextEditKind::Rotation ? NumberFieldId::Rotation : NumberFieldId::VoxelSize;
+            const auto here = std::find(order.begin(), order.end(), std::pair{current, textEdit_.axis});
+            const std::size_t index = here == order.end() ? 0U : static_cast<std::size_t>(here - order.begin());
+            const auto next = order[(index + (shift ? order.size() - 1U : 1U)) % order.size()];
+            commit_text_edit();
+            if (number_field_available(next.first)) begin_number_field_edit(next.first, next.second);
+            return;
+        }
         if (normalized == "escape") { cancel_text_edit(); return; }
         if (normalized == "return" || normalized == "enter") { commit_text_edit(); return; }
         if (normalized == "backspace") {
@@ -8195,6 +8411,10 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             return;
         }
         return;
+    }
+    if (duplicateSpecial_.active && !control && !alt) {
+        if (normalized == "escape") { cancel_duplicate_special("Duplicate Special cancelled"); return; }
+        if (normalized == "return" || normalized == "enter") { (void)apply_duplicate_special(); return; }
     }
     if (chiptunePanel_.open() && chiptunePanel_.key_down(normalized, control, shift, alt, audioMixer_)) return;
     if (audioEventPanel_.open() && audioEventPanel_.key_down(normalized, control, shift, alt)) return;
@@ -8373,6 +8593,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         if (assetDrag_.armed) cancel_asset_drag("Drag cancelled");
         if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
         clear_navigation_input();
+        if (numberScrub_.armed) { finish_number_scrub(true); return; }
         close_top_level_menu();
         close_context_menu();
         if (gizmoDragging_) finish_gizmo_drag(true);
@@ -8475,6 +8696,712 @@ CommandResult NativeEditorController::nudge_selection(Float3 worldDelta) {
     return result;
 }
 
+// --- Numeric fields: Position / Rotation per axis, Voxel size, Brush radius, Surface offset ----
+// (ART-084/085). Typing sets each selected object's value (relative edits apply per object);
+// dragging a field's label scrubs it with a live preview and one undo; right-click resets,
+// copies or pastes.
+
+namespace {
+constexpr float kDegreesPerRadian = 57.29577951308232F;
+NumberFieldUnit number_field_unit(NumberFieldId field) {
+    switch (field) {
+    case NumberFieldId::Rotation:
+    case NumberFieldId::DuplicateRotation: return NumberFieldUnit::Degrees;
+    case NumberFieldId::BrushRadius:
+    case NumberFieldId::DuplicateCopies:
+    case NumberFieldId::DuplicateScale: return NumberFieldUnit::Count;
+    default: return NumberFieldUnit::Meters;
+    }
+}
+const char* number_field_name(NumberFieldId field) {
+    switch (field) {
+    case NumberFieldId::Position: return "Position";
+    case NumberFieldId::Rotation: return "Rotation";
+    case NumberFieldId::VoxelSize: return "Voxel size";
+    case NumberFieldId::BrushRadius: return "Brush radius";
+    case NumberFieldId::SurfaceOffset: return "Surface offset";
+    case NumberFieldId::DuplicateCopies: return "Copies";
+    case NumberFieldId::DuplicateOffset: return "Offset";
+    case NumberFieldId::DuplicateRotation: return "Turn";
+    case NumberFieldId::DuplicateScale: return "Scale";
+    case NumberFieldId::DuplicatePoint: return "Point";
+    }
+    return "";
+}
+float& axis_of(Float3& value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
+float axis_of(const Float3& value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
+const char* axis_name(int axis) { return axis == 0 ? "X" : axis == 1 ? "Y" : "Z"; }
+bool per_axis(NumberFieldId field) {
+    return field == NumberFieldId::Position || field == NumberFieldId::Rotation || field == NumberFieldId::DuplicateOffset ||
+           field == NumberFieldId::DuplicateRotation || field == NumberFieldId::DuplicatePoint;
+}
+bool duplicate_field(NumberFieldId field) {
+    return field == NumberFieldId::DuplicateCopies || field == NumberFieldId::DuplicateOffset || field == NumberFieldId::DuplicateRotation ||
+           field == NumberFieldId::DuplicateScale || field == NumberFieldId::DuplicatePoint;
+}
+// Larger magnitudes lose all float precision (or overflow to inf when cast).
+constexpr double kNumberFieldTransformLimit = 1.0e6;
+constexpr const char* kNumberFieldLimitMessage = "values must be within \xC2\xB11,000,000";
+bool same_transform(const RigidTransform& a, const RigidTransform& b) {
+    return a.position.x == b.position.x && a.position.y == b.position.y && a.position.z == b.position.z &&
+           a.rotation.x == b.rotation.x && a.rotation.y == b.rotation.y && a.rotation.z == b.rotation.z && a.rotation.w == b.rotation.w;
+}
+bool plain_voxel_object(const EditorObject& object) {
+    return object.voxels && !object.polygon && !object.text3d && !object.gaborVolume && object.voxels->occupied_voxel_count() > 0;
+}
+}  // namespace
+
+std::vector<EditorObjectId> NativeEditorController::number_field_objects(NumberFieldId field) const {
+    std::vector<EditorObjectId> result;
+    std::set<EditorObjectId> seen;
+    for (const EditorObjectId id : workspace_.selected_objects()) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object || !seen.insert(id).second) continue;
+        if (field == NumberFieldId::VoxelSize && !plain_voxel_object(*object)) continue;
+        result.push_back(id);
+    }
+    return result;
+}
+
+std::string NativeEditorController::number_field_refusal(NumberFieldId field) const {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play or Simulate before editing values";
+    if (longJob_) return long_job_busy_reason();
+    if (duplicate_field(field)) return {};  // panel settings, not the objects
+    for (const EditorObjectId id : number_field_objects(field)) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object) continue;
+        if (object->flags.locked) return "Unlock " + object->name + " before editing its " + number_field_name(field);
+        if (!object->flags.visible || is_isolated_out(id)) return object->name + " is hidden or isolated out of view";
+        if (field == NumberFieldId::VoxelSize && object->prefabLink)
+            return object->name + " is part of a prefab instance; unpack it or edit the prefab";
+    }
+    return {};
+}
+
+bool NativeEditorController::number_field_available(NumberFieldId field) const {
+    if (duplicate_field(field))
+        return duplicateSpecial_.active && (field != NumberFieldId::DuplicatePoint || duplicateSpecial_.settings.pivot == DuplicatePivot::Point);
+    if (duplicateSpecial_.active && (field == NumberFieldId::Position || field == NumberFieldId::Rotation || field == NumberFieldId::VoxelSize))
+        return false;  // the panel replaces the object details
+    switch (field) {
+    case NumberFieldId::Position:
+    case NumberFieldId::Rotation: return !number_field_objects(field).empty();
+    case NumberFieldId::VoxelSize: {
+        // Shown for a plain voxel primary (the row sits where the Text/Gabor rows go for those).
+        const auto primary = workspace_.selected_object();
+        const EditorObject* object = primary ? workspace_.document().find_object(*primary) : nullptr;
+        return object && plain_voxel_object(*object);
+    }
+    case NumberFieldId::BrushRadius:
+        return activeTool_ == EditorToolId::AddVoxel || activeTool_ == EditorToolId::RemoveVoxel ||
+               activeTool_ == EditorToolId::PaintMaterial ||
+               (activeTool_ == EditorToolId::Select && selectionDomain_ == SelectionDomain::Voxels && voxelSelectionBrushEnabled_);
+    default: break;
+    case NumberFieldId::SurfaceOffset:
+        return placementMode_ != PlacementTarget::NoTarget ||
+               ((activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate) &&
+                selectionDomain_ == SelectionDomain::Objects);
+    }
+    return false;
+}
+
+std::string NativeEditorController::number_field_text(NumberFieldId field, int axis) const {
+    if (field == NumberFieldId::BrushRadius) return std::to_string(voxelBrushRadius_);
+    if (field == NumberFieldId::SurfaceOffset) return format_number_field(placementOffsetMeters_, NumberFieldUnit::Meters);
+    if (duplicate_field(field)) {
+        const DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+        switch (field) {
+        case NumberFieldId::DuplicateCopies: return std::to_string(v.copies);
+        case NumberFieldId::DuplicateOffset: return format_number_field(axis_of(v.offset, axis), NumberFieldUnit::Meters);
+        case NumberFieldId::DuplicateRotation: return format_number_field(axis_of(v.rotationDegrees, axis), NumberFieldUnit::Degrees);
+        case NumberFieldId::DuplicatePoint: return format_number_field(axis_of(v.point, axis), NumberFieldUnit::Meters);
+        default: {
+            char buffer[32];
+            std::snprintf(buffer, sizeof buffer, "%.4g", static_cast<double>(v.scale));
+            return buffer;
+        }
+        }
+    }
+    const auto ids = number_field_objects(field);
+    if (ids.empty()) return {};
+    std::optional<float> shared;
+    for (const EditorObjectId id : ids) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        float value = 0.0F;
+        if (field == NumberFieldId::Position) value = axis_of(object->transform.position, axis);
+        else if (field == NumberFieldId::Rotation)
+            value = axis_of(multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian), axis);
+        else value = object->voxelSizeMeters;
+        if (!shared) shared = value;
+        else if (std::abs(*shared - value) > 1.0e-5F) return "\xE2\x80\x94";  // em dash: the objects differ
+    }
+    return format_number_field(*shared, number_field_unit(field));
+}
+
+bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std::string_view text, std::string_view verb) {
+    const NumberFieldUnit unit = number_field_unit(field);
+    std::string label = std::string(verb) + " " + number_field_name(field) +
+        (field == NumberFieldId::Position || field == NumberFieldId::Rotation ? std::string(" ") + axis_name(axis) : std::string());
+    if (duplicate_field(field)) {
+        DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+        const double current = field == NumberFieldId::DuplicateCopies ? v.copies
+            : field == NumberFieldId::DuplicateScale ? v.scale
+            : field == NumberFieldId::DuplicateOffset ? axis_of(v.offset, axis)
+            : field == NumberFieldId::DuplicateRotation ? axis_of(v.rotationDegrees, axis) : axis_of(v.point, axis);
+        const NumberFieldParse parsed = parse_number_field(text, unit, current);
+        const std::string name = std::string(number_field_name(field)) + (per_axis(field) ? std::string(" ") + axis_name(axis) : std::string());
+        if (!parsed.ok) { set_status(name + ": " + parsed.error, true); return false; }
+        if (field == NumberFieldId::DuplicateCopies) {
+            const long long copies = std::llround(parsed.value);
+            if (copies < 1 || copies > static_cast<long long>(kMaxDuplicateCopies)) {
+                set_status("Copies: 1 to " + std::to_string(kMaxDuplicateCopies), true);
+                return false;
+            }
+            v.copies = static_cast<std::uint32_t>(copies);
+        } else if (field == NumberFieldId::DuplicateScale) {
+            if (!(parsed.value > 0.0)) { set_status("Scale must be above 0 (1 keeps the size)", true); return false; }
+            v.scale = static_cast<float>(parsed.value);
+        } else {
+            Float3& target = field == NumberFieldId::DuplicateOffset ? v.offset : field == NumberFieldId::DuplicateRotation ? v.rotationDegrees : v.point;
+            axis_of(target, axis) = static_cast<float>(parsed.value);
+        }
+        set_status(duplicate_special_summary());
+        return true;
+    }
+    if (field == NumberFieldId::BrushRadius || field == NumberFieldId::SurfaceOffset) {
+        const double current = field == NumberFieldId::BrushRadius ? voxelBrushRadius_ : placementOffsetMeters_;
+        const NumberFieldParse parsed = parse_number_field(text, unit, current);
+        if (!parsed.ok) { set_status(std::string(number_field_name(field)) + ": " + parsed.error, true); return false; }
+        if (field == NumberFieldId::BrushRadius) {
+            voxelBrushRadius_ = static_cast<std::int32_t>(std::clamp<long long>(std::llround(parsed.value), 0, 32));
+            set_status("Voxel brush radius: " + std::to_string(voxelBrushRadius_) + (parsed.value > 32.0 ? " (most is 32)" : ""));
+        } else {
+            placementOffsetMeters_ = static_cast<float>(std::clamp(parsed.value, -10.0, 10.0));
+            set_status("Surface offset: " + format_number_field(placementOffsetMeters_, unit) + " m" +
+                       (std::abs(parsed.value) > 10.0 ? " (limit is 10 m)" : ""));
+        }
+        recompute_layout();
+        return true;
+    }
+    const auto ids = number_field_objects(field);
+    if (ids.empty()) { set_status(std::string(number_field_name(field)) + ": nothing selected to edit", true); return false; }
+    if (const std::string refusal = number_field_refusal(field); !refusal.empty()) { set_status(refusal, true); return false; }
+    bool changed = false;
+    std::unique_ptr<IEditorCommand> command;
+    if (field == NumberFieldId::VoxelSize) {
+        std::vector<ObjectVoxelSizeChange> changes;
+        for (const EditorObjectId id : ids) {
+            const EditorObject* object = workspace_.document().find_object(id);
+            const NumberFieldParse parsed = parse_number_field(text, unit, object->voxelSizeMeters);
+            if (!parsed.ok) { set_status("Voxel size: " + parsed.error, true); return false; }
+            if (!(parsed.value >= 0.001 && parsed.value <= 10.0)) {
+                set_status("Voxel size must be between 1 mm and 10 m", true);
+                return false;
+            }
+            changed = changed || static_cast<float>(parsed.value) != object->voxelSizeMeters;
+            changes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, static_cast<float>(parsed.value),
+                               std::nullopt, std::nullopt});
+        }
+        command = std::make_unique<ScaleVoxelSizeCommand>(std::move(changes), label);
+    } else {
+        // "x y z" (three values, spaces or commas) sets all three axes at once.
+        std::vector<std::string> parts;
+        {
+            std::string current;
+            for (const char c : text) {
+                if (c == ' ' || c == ',' || c == '\t') { if (!current.empty()) parts.push_back(std::move(current)); current.clear(); }
+                else current.push_back(c);
+            }
+            if (!current.empty()) parts.push_back(std::move(current));
+        }
+        bool triple = parts.size() == 3;
+        for (const std::string& part : parts) triple = triple && parse_number_field(part, unit, 0.0).ok;
+        std::vector<ObjectTransformChange> changes;
+        for (const EditorObjectId id : ids) {
+            const EditorObject* object = workspace_.document().find_object(id);
+            ObjectTransformChange change{id, object->transform, object->transform};
+            if (triple) {
+                Float3 values = field == NumberFieldId::Position ? object->transform.position
+                                                                 : multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian);
+                for (int a = 0; a < 3; ++a) {
+                    const NumberFieldParse parsed = parse_number_field(parts[static_cast<std::size_t>(a)], unit, axis_of(values, a));
+                    if (!parsed.ok || std::abs(parsed.value) > kNumberFieldTransformLimit) {
+                        set_status(std::string(number_field_name(field)) + " " + axis_name(a) + ": " +
+                                   (parsed.ok ? std::string(kNumberFieldLimitMessage) : parsed.error), true);
+                        return false;
+                    }
+                    axis_of(values, a) = static_cast<float>(parsed.value);
+                }
+                const Float3 old = field == NumberFieldId::Position ? object->transform.position
+                                                                    : multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian);
+                const bool same = std::abs(values.x - old.x) <= (field == NumberFieldId::Position ? 0.0F : 1.0e-4F) &&
+                                  std::abs(values.y - old.y) <= (field == NumberFieldId::Position ? 0.0F : 1.0e-4F) &&
+                                  std::abs(values.z - old.z) <= (field == NumberFieldId::Position ? 0.0F : 1.0e-4F);
+                if (same) {}
+                else if (field == NumberFieldId::Position) change.after.position = values;
+                else change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(values, 1.0F / kDegreesPerRadian)));
+            } else if (field == NumberFieldId::Position) {
+                const NumberFieldParse parsed = parse_number_field(text, unit, axis_of(object->transform.position, axis));
+                if (!parsed.ok || std::abs(parsed.value) > kNumberFieldTransformLimit) {
+                    set_status("Position " + std::string(axis_name(axis)) + ": " + (parsed.ok ? std::string(kNumberFieldLimitMessage) : parsed.error), true);
+                    return false;
+                }
+                axis_of(change.after.position, axis) = static_cast<float>(parsed.value);
+            } else {
+                Float3 euler = multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian);
+                const NumberFieldParse parsed = parse_number_field(text, unit, axis_of(euler, axis));
+                if (!parsed.ok || std::abs(parsed.value) > kNumberFieldTransformLimit) {
+                    set_status("Rotation " + std::string(axis_name(axis)) + ": " + (parsed.ok ? std::string(kNumberFieldLimitMessage) : parsed.error), true);
+                    return false;
+                }
+                // The Euler round trip is not exact: retyping the shown angle must stay a no-op.
+                if (std::abs(parsed.value - static_cast<double>(axis_of(euler, axis))) > 1.0e-4) {
+                    axis_of(euler, axis) = static_cast<float>(parsed.value);
+                    change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(euler, 1.0F / kDegreesPerRadian)));
+                }
+            }
+            changed = changed || !same_transform(change.before, change.after);
+            changes.push_back(change);
+        }
+        if (triple) label = std::string(verb) + " " + number_field_name(field);
+        command = std::make_unique<TransformObjectsCommand>(std::move(changes), label);
+    }
+    if (!changed) {
+        // The same value again: nothing to do and no undo step.
+        set_status(std::string(number_field_name(field)) + " unchanged");
+        return true;
+    }
+    const auto selection = capture_selection_snapshot();
+    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
+    if (result.success) workspace_.commands().set_last_selection_transition(selection, selection);  // undo restores it
+    set_status(result.success ? label + (ids.size() > 1 ? " on " + std::to_string(ids.size()) + " objects" : std::string()) : result.message,
+               !result.success);
+    return result.success;
+}
+
+bool NativeEditorController::reset_number_field(NumberFieldId field, int axis) {
+    return set_number_field(field, axis, field == NumberFieldId::VoxelSize ? "0.1" : "0", "Reset");
+}
+
+void NativeEditorController::begin_number_field_edit(NumberFieldId field, int axis) {
+    const TextEditKind kind = duplicate_field(field) ? TextEditKind::DuplicateSetting
+        : field == NumberFieldId::Position ? TextEditKind::Position
+        : field == NumberFieldId::Rotation ? TextEditKind::Rotation
+        : field == NumberFieldId::VoxelSize ? TextEditKind::VoxelSize
+        : field == NumberFieldId::BrushRadius ? TextEditKind::BrushRadius : TextEditKind::SurfaceOffset;
+    std::string initial = number_field_text(field, axis);
+    if (initial == "\xE2\x80\x94") initial.clear();
+    const auto primary = workspace_.selected_object();
+    begin_text_edit(kind, duplicate_field(field) ? static_cast<EditorObjectId>(field) : primary.value_or(EditorObjectId{}), std::move(initial));
+    textEdit_.axis = axis;
+    focusRegion_ = field == NumberFieldId::BrushRadius || field == NumberFieldId::SurfaceOffset ? EditorFocusRegion::Viewport
+                                                                                                 : EditorFocusRegion::Inspector;
+    const NumberFieldUnit unit = number_field_unit(field);
+    set_status(std::string("Type ") + number_field_name(field) + (per_axis(field) ? std::string(" ") + axis_name(axis) : std::string()) +
+               (unit == NumberFieldUnit::Degrees ? " in degrees (rad, turn)" : unit == NumberFieldUnit::Count ? ""
+                                                                                                       : " in meters (cm, mm, ft, in)") +
+               "; +=, -=, *=, /= change it; Tab moves on, Enter applies, Esc cancels", false, 8.0F);
+}
+
+void NativeEditorController::update_number_scrub(int x, std::uint32_t modifiers) {
+    NumberScrubState& scrub = numberScrub_;
+    const int dx = x - scrub.startX;
+    if (!scrub.moved) {
+        if (std::abs(dx) < 3) return;
+        scrub.moved = true;
+        if (textEdit_.kind != TextEditKind::Inactive) commit_text_edit();
+    }
+    const bool fine = (modifiers & 1U) != 0U;
+    const bool snap = (modifiers & 2U) != 0U;
+    const EditorPreferences& preferences = workspace_.preferences();
+    switch (scrub.field) {
+    case NumberFieldId::Position:
+    case NumberFieldId::Rotation: {
+        const bool rotation = scrub.field == NumberFieldId::Rotation;
+        const float perPixel = (rotation ? 0.5F : 0.01F) * (fine ? 0.1F : 1.0F);
+        const float step = rotation ? preferences.rotateSnapDegrees : preferences.translateSnapMeters;
+        for (ObjectTransformChange& change : scrub.transforms) {
+            change.after = change.before;
+            if (!rotation) {
+                float value = axis_of(change.before.position, scrub.axis) + static_cast<float>(dx) * perPixel;
+                if (snap && step > 0.0F) value = std::round(value / step) * step;
+                axis_of(change.after.position, scrub.axis) = value;
+            } else {
+                Float3 euler = multiply(quaternion_to_euler_xyz(change.before.rotation), kDegreesPerRadian);
+                float value = axis_of(euler, scrub.axis) + static_cast<float>(dx) * perPixel;
+                if (snap && step > 0.0F) value = std::round(value / step) * step;
+                axis_of(euler, scrub.axis) = value;
+                change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(euler, 1.0F / kDegreesPerRadian)));
+            }
+        }
+        apply_transform_preview(scrub.transforms, true);
+        break;
+    }
+    case NumberFieldId::VoxelSize:
+        for (ObjectVoxelSizeChange& change : scrub.sizes) {
+            float value = change.beforeVoxelSize * std::pow(fine ? 1.001F : 1.01F, static_cast<float>(dx));
+            if (snap) value = std::round(value / 0.005F) * 0.005F;
+            change.afterVoxelSize = std::clamp(value, 0.001F, 10.0F);
+            if (EditorObject* object = workspace_.document().find_object(change.id)) object->voxelSizeMeters = change.afterVoxelSize;
+        }
+        break;
+    case NumberFieldId::BrushRadius:
+        voxelBrushRadius_ = std::clamp(static_cast<std::int32_t>(std::lround(scrub.startScalar + static_cast<float>(dx) / (fine ? 24.0F : 8.0F))), 0, 32);
+        break;
+    case NumberFieldId::SurfaceOffset: {
+        float value = scrub.startScalar + static_cast<float>(dx) * (fine ? 0.001F : 0.01F);
+        if (snap) value = std::round(value / 0.05F) * 0.05F;
+        placementOffsetMeters_ = std::clamp(value, -10.0F, 10.0F);
+        break;
+    }
+    case NumberFieldId::DuplicateCopies:
+        duplicateSpecial_.settings.copies = static_cast<std::uint32_t>(std::clamp<long>(
+            std::lround(scrub.startScalar + static_cast<float>(dx) / (fine ? 24.0F : 6.0F)), 1L, static_cast<long>(kMaxDuplicateCopies)));
+        break;
+    case NumberFieldId::DuplicateScale:
+        duplicateSpecial_.settings.scale = std::clamp(scrub.startScalar * std::pow(fine ? 1.0002F : 1.002F, static_cast<float>(dx)), 0.01F, 100.0F);
+        if (snap) duplicateSpecial_.settings.scale = std::max(0.01F, std::round(duplicateSpecial_.settings.scale / 0.01F) * 0.01F);
+        break;
+    case NumberFieldId::DuplicateOffset:
+    case NumberFieldId::DuplicatePoint:
+    case NumberFieldId::DuplicateRotation: {
+        const bool turn = scrub.field == NumberFieldId::DuplicateRotation;
+        float value = scrub.startScalar + static_cast<float>(dx) * (turn ? 0.5F : 0.01F) * (fine ? 0.1F : 1.0F);
+        const float step = turn ? preferences.rotateSnapDegrees : preferences.translateSnapMeters;
+        if (snap && step > 0.0F) value = std::round(value / step) * step;
+        DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+        axis_of(scrub.field == NumberFieldId::DuplicateOffset ? v.offset : turn ? v.rotationDegrees : v.point, scrub.axis) = value;
+        break;
+    }
+    default: break;
+    }
+    set_status(std::string("Scrubbing ") + number_field_name(scrub.field) + (per_axis(scrub.field) ? std::string(" ") + axis_name(scrub.axis) : std::string()) +
+               ": " + number_field_text(scrub.field, scrub.axis) + "  (Shift fine, Ctrl snap, Esc cancels)", false, 2.0F);
+}
+
+void NativeEditorController::finish_number_scrub(bool cancel) {
+    NumberScrubState scrub = std::move(numberScrub_);
+    numberScrub_ = {};
+    if (!scrub.moved) {
+        // A click on the label without dragging: type into that field.
+        if (!cancel) begin_number_field_edit(scrub.field, scrub.axis);
+        return;
+    }
+    const std::string label = std::string("Scrub ") + number_field_name(scrub.field) +
+        (scrub.field == NumberFieldId::Position || scrub.field == NumberFieldId::Rotation ? std::string(" ") + axis_name(scrub.axis) : std::string());
+    switch (scrub.field) {
+    case NumberFieldId::Position:
+    case NumberFieldId::Rotation: {
+        apply_transform_preview(scrub.transforms, false);
+        if (cancel) { set_status("Scrub cancelled"); return; }
+        if (std::all_of(scrub.transforms.begin(), scrub.transforms.end(),
+                        [](const ObjectTransformChange& change) { return same_transform(change.before, change.after); })) {
+            set_status(label + ": unchanged");  // dragged back to where it started: no undo step
+            return;
+        }
+        const auto selection = capture_selection_snapshot();
+        const CommandResult result = workspace_.commands().execute(workspace_.document(),
+            std::make_unique<TransformObjectsCommand>(std::move(scrub.transforms), label));
+        if (result.success) workspace_.commands().set_last_selection_transition(selection, selection);
+        set_status(result.success ? label : result.message, !result.success);
+        return;
+    }
+    case NumberFieldId::VoxelSize:
+        for (const ObjectVoxelSizeChange& change : scrub.sizes)
+            if (EditorObject* object = workspace_.document().find_object(change.id)) object->voxelSizeMeters = change.beforeVoxelSize;
+        if (cancel) { set_status("Scrub cancelled"); return; }
+        if (std::all_of(scrub.sizes.begin(), scrub.sizes.end(),
+                        [](const ObjectVoxelSizeChange& change) { return change.beforeVoxelSize == change.afterVoxelSize; })) {
+            set_status(label + ": unchanged");
+            return;
+        }
+        {
+            const auto selection = capture_selection_snapshot();
+            const CommandResult result = workspace_.commands().execute(workspace_.document(),
+                std::make_unique<ScaleVoxelSizeCommand>(std::move(scrub.sizes), label));
+            if (result.success) workspace_.commands().set_last_selection_transition(selection, selection);
+            set_status(result.success ? label : result.message, !result.success);
+        }
+        return;
+    case NumberFieldId::BrushRadius:
+        if (cancel) voxelBrushRadius_ = static_cast<std::int32_t>(scrub.startScalar);
+        set_status(cancel ? "Scrub cancelled" : "Voxel brush radius: " + std::to_string(voxelBrushRadius_));
+        return;
+    case NumberFieldId::SurfaceOffset:
+        if (cancel) placementOffsetMeters_ = scrub.startScalar;
+        set_status(cancel ? "Scrub cancelled" : "Surface offset: " + format_number_field(placementOffsetMeters_, NumberFieldUnit::Meters) + " m");
+        return;
+    default:
+        if (cancel) (void)set_number_field(scrub.field, scrub.axis, std::to_string(scrub.startScalar));
+        set_status(cancel ? "Scrub cancelled" : duplicate_special_summary());
+        return;
+    }
+}
+
+// --- Duplicate Special: N copies, each offset / turned / scaled from the last -----------------
+
+std::size_t NativeEditorController::duplicate_objects_per_copy() const {
+    return collect_editor_object_subtree_ids(workspace_.document(), duplicateSpecial_.roots).size();
+}
+
+std::string NativeEditorController::duplicate_special_summary() const {
+    const DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+    const std::string problem = duplicate_special_problem(v, duplicate_objects_per_copy());
+    if (!problem.empty()) return problem;
+    return std::to_string(v.copies) + (v.copies == 1 ? " copy" : " copies") + " (" +
+           std::to_string(v.copies * duplicate_objects_per_copy()) + " objects); Enter applies, Esc cancels";
+}
+
+bool NativeEditorController::open_duplicate_special() {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before duplicating", true); return false; }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
+    if (selectionDomain_ != SelectionDomain::Objects) { set_status("Duplicate Special copies objects: press M to return to objects", true); return false; }
+    // Roots only: a selected child of a selected parent comes along with its parent.
+    const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    std::vector<EditorObjectId> roots;
+    for (const EditorObjectId id : workspace_.selected_objects()) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object) continue;
+        bool ancestorSelected = false;
+        for (auto parent = object->parent; parent && !ancestorSelected;) {
+            ancestorSelected = selected.contains(*parent);
+            const EditorObject* ancestor = workspace_.document().find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+        if (!ancestorSelected && std::find(roots.begin(), roots.end(), id) == roots.end()) roots.push_back(id);
+    }
+    if (roots.empty()) { set_status("Select the objects to duplicate first", true); return false; }
+    for (const EditorObjectId id : roots) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object->flags.visible || is_isolated_out(id)) { set_status(object->name + " is hidden or isolated out of view", true); return false; }
+    }
+    if (textEdit_.kind != TextEditKind::Inactive) commit_text_edit();
+    close_previews_for_voxel_edit("Duplicate Special");
+    duplicateSpecial_.active = true;
+    duplicateSpecial_.roots = std::move(roots);
+    recompute_layout();
+    refresh_menu_state();
+    set_status("Duplicate Special: " + duplicate_special_summary());
+    return true;
+}
+
+void NativeEditorController::cancel_duplicate_special(std::string reason) {
+    if (!duplicateSpecial_.active) return;
+    if (textEdit_.kind == TextEditKind::DuplicateSetting) cancel_text_edit();
+    duplicateSpecial_.active = false;
+    duplicateSpecial_.roots.clear();
+    recompute_layout();
+    refresh_menu_state();
+    if (!reason.empty()) set_status(std::move(reason));
+}
+
+std::vector<NativeEditorController::DuplicatePreviewBox> NativeEditorController::duplicate_special_preview(std::size_t limit) const {
+    std::vector<DuplicatePreviewBox> boxes;
+    if (!duplicateSpecial_.active) return boxes;
+    const DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+    if (!duplicate_special_problem(v, duplicate_objects_per_copy()).empty()) return boxes;
+    const EditorDocument& document = workspace_.document();
+    for (const EditorObjectId root : duplicateSpecial_.roots) {
+        const EditorObject* rootObject = document.find_object(root);
+        if (!rootObject) continue;
+        const RigidTransform rootWorld = document.world_transform(root).value_or(rootObject->transform);
+        const auto poses = duplicate_special_poses(rootWorld, v);
+        for (const EditorObjectId id : collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{root})) {
+            const EditorObject* object = document.find_object(id);
+            if (!object || !object->flags.visible) continue;
+            const EditorObjectBounds local = object_world_bounds(*object, RigidTransform{});
+            if (!local.valid) continue;
+            const RigidTransform inRoot = relative_rigid_transform(rootWorld, document.world_transform(id).value_or(object->transform));
+            for (const DuplicateCopyPose& pose : poses) {
+                if (boxes.size() >= limit) return boxes;
+                const RigidTransform scaledInRoot = make_rigid_transform(multiply(inRoot.position, pose.scale), inRoot.rotation);
+                boxes.push_back({compose_rigid_transforms(pose.transform, scaledInRoot), local.minimum, local.maximum, pose.scale});
+            }
+        }
+    }
+    return boxes;
+}
+
+bool NativeEditorController::apply_duplicate_special() {
+    if (!duplicateSpecial_.active) { set_status("Open Edit > Duplicate Special first", true); return false; }
+    if (textEdit_.kind == TextEditKind::DuplicateSetting) commit_text_edit();
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before duplicating", true); return false; }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
+    const DuplicateSpecialSettings v = duplicateSpecial_.settings;
+    const std::size_t perCopy = duplicate_objects_per_copy();
+    if (const std::string problem = duplicate_special_problem(v, perCopy); !problem.empty()) { set_status(problem, true); return false; }
+    EditorDocument& document = workspace_.document();
+    const auto beforeSelection = capture_selection_snapshot();
+    const EditorObject* first = document.find_object(duplicateSpecial_.roots.front());
+    if (!first) { cancel_duplicate_special("The objects to duplicate are gone"); return false; }
+
+    auto compound = std::make_unique<CompoundCommand>("Duplicate Special");
+    std::optional<EditorObjectId> groupId;
+    if (v.group) {
+        std::set<std::string> names;
+        for (const auto& [id, object] : document.objects()) { (void)id; names.insert(object.name); }
+        std::string name = first->name + " x" + std::to_string(v.copies);
+        for (unsigned suffix = 2; names.contains(name); ++suffix) name = first->name + " x" + std::to_string(v.copies) + " (" + std::to_string(suffix) + ")";
+        EditorObject group(document.allocate_object_id(), name);
+        group.parent = first->parent;
+        group.transform = make_rigid_transform(document.world_transform(first->id).value_or(first->transform).position, {});
+        group.flags.structural = false;
+        group.flags.collisionEnabled = false;
+        group.flags.decorative = true;
+        groupId = group.id;
+        compound->add(std::make_unique<AddObjectCommand>(std::move(group), "Duplicate Special group"));
+    }
+    std::vector<EditorObjectId> added;
+    if (groupId) added.push_back(*groupId);
+    std::vector<EditorObjectId> rootCopies;
+    const int digits = v.copies >= 1000 ? 4 : v.copies >= 100 ? 3 : 2;
+    for (const EditorObjectId root : duplicateSpecial_.roots) {
+        const EditorObject* rootObject = document.find_object(root);
+        if (!rootObject) { cancel_duplicate_special("The objects to duplicate changed"); return false; }
+        const RigidTransform rootWorld = document.world_transform(root).value_or(rootObject->transform);
+        const auto poses = duplicate_special_poses(rootWorld, v);
+        const std::vector<EditorObjectId> subtree = collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{root});
+        for (std::size_t k = 0; k < poses.size(); ++k) {
+            const DuplicateCopyPose& pose = poses[k];
+            std::map<EditorObjectId, EditorObjectId> idMap;
+            for (const EditorObjectId id : subtree) idMap.emplace(id, document.allocate_object_id());
+            for (const EditorObjectId id : subtree) {
+                const EditorObject* source = document.find_object(id);
+                EditorObject copy = clone_editor_object(*source);
+                copy.id = idMap.at(id);
+                if (id == root) {
+                    char number[16];
+                    std::snprintf(number, sizeof number, " %0*zu", digits, k + 1);
+                    copy.name = source->name + number;
+                    copy.parent = groupId ? groupId : source->parent;
+                    rootCopies.push_back(copy.id);
+                } else {
+                    copy.parent = source->parent && idMap.contains(*source->parent) ? std::optional(idMap.at(*source->parent)) : source->parent;
+                }
+                const RigidTransform inRoot = relative_rigid_transform(rootWorld, document.world_transform(id).value_or(source->transform));
+                copy.transform = compose_rigid_transforms(pose.transform, make_rigid_transform(multiply(inRoot.position, pose.scale), inRoot.rotation));
+                if (copy.attachment) copy.attachment->localTransform.position = multiply(copy.attachment->localTransform.position, pose.scale);
+                if (pose.scale != 1.0F) {
+                    // Size: voxel objects by voxel size, polygon / subdivision meshes by their axis scale.
+                    if (copy.polygon || copy.subdivision) copy.voxelScale = multiply(copy.voxelScale, pose.scale);
+                    else if (copy.voxels && !copy.text3d && !copy.gaborVolume) copy.voxelSizeMeters *= pose.scale;
+                }
+                added.push_back(copy.id);
+                compound->add(std::make_unique<AddObjectCommand>(std::move(copy), "Duplicate Special copy"));
+            }
+        }
+    }
+    const CommandResult result = workspace_.commands().execute(document, std::move(compound));
+    if (!result.success) { set_status(result.message, true); return false; }
+    if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(added.begin(), added.end());
+    const std::string sourceName = first->name;
+    duplicateSpecial_.active = false;
+    duplicateSpecial_.roots.clear();
+    workspace_.clear_selection();
+    if (groupId) workspace_.select_object(*groupId);
+    else for (const EditorObjectId id : rootCopies) workspace_.add_to_selection(id);
+    workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
+    recompute_layout();
+    refresh_menu_state();
+    set_status("Made " + std::to_string(v.copies) + (v.copies == 1 ? " copy of " : " copies of ") + sourceName +
+               (groupId ? " in one group" : "") + "; Undo removes them");
+    return true;
+}
+
+DuplicatePanelLayout NativeEditorController::duplicate_panel_layout() const {
+    DuplicatePanelLayout panel;
+    if (!duplicateSpecial_.active || layout_.inspector.width <= 0) return panel;
+    const UiRect& inspector = layout_.inspector;
+    panel.panel = {inspector.x + 1, inspector.y + kInspectorHeaderHeight, inspector.width - 2, inspector.height - kInspectorHeaderHeight};
+    const int left = inspector.x + 12;
+    const int width = inspector.width - 24;
+    int y = inspector.y + kInspectorHeaderHeight + 8;
+    panel.titleY = y + 12;
+    y += 26;
+    constexpr int row = 24;
+    const int nameWidth = 66;
+    const auto single = [&](NumberFieldId field, int boxWidth) {
+        panel.rowNames.push_back({field, {left, y, nameWidth, 18}});
+        panel.fields.push_back({field, 0, {left, y, nameWidth, 18}, {left + nameWidth, y, std::min(boxWidth, width - nameWidth), 18}});
+        y += row;
+    };
+    const auto triple = [&](NumberFieldId field) {
+        panel.rowNames.push_back({field, {left, y, nameWidth, 18}});
+        const int each = (width - nameWidth) / 3;
+        for (int axis = 0; axis < 3; ++axis) {
+            const int x0 = left + nameWidth + axis * each;
+            panel.fields.push_back({field, axis, {x0, y, 14, 18}, {x0 + 14, y, std::max(10, each - 18), 18}});
+        }
+        y += row;
+    };
+    single(NumberFieldId::DuplicateCopies, 70);
+    triple(NumberFieldId::DuplicateOffset);
+    triple(NumberFieldId::DuplicateRotation);
+    single(NumberFieldId::DuplicateScale, 70);
+    const int half = (width - nameWidth - 4) / 2;
+    panel.pivotEach = {left + nameWidth, y, half, 18};
+    panel.pivotPoint = {left + nameWidth + half + 4, y, half, 18};
+    y += row;
+    if (duplicateSpecial_.settings.pivot == DuplicatePivot::Point) {
+        triple(NumberFieldId::DuplicatePoint);
+        panel.pointOrigin = {left + nameWidth, y, half, 18};
+        panel.pointSelection = {left + nameWidth + half + 4, y, half, 18};
+    } else {
+        panel.spaceLocal = {left + nameWidth, y, half, 18};
+        panel.spaceWorld = {left + nameWidth + half + 4, y, half, 18};
+    }
+    y += row;
+    panel.group = {left, y, width, 18};
+    y += row + 4;
+    const int buttonWidth = (width - 6) / 2;
+    panel.apply = {left, y, buttonWidth, 22};
+    panel.cancel = {left + buttonWidth + 6, y, buttonWidth, 22};
+    panel.noteY = y + 44;
+    return panel;
+}
+
+std::vector<NumberFieldRect> NativeEditorController::number_field_rects() const {
+    std::vector<NumberFieldRect> rects;
+    if (duplicateSpecial_.active) rects = duplicate_panel_layout().fields;
+    const bool stacked = layout_.inspectorStackedFields;
+    const auto axis_row = [&](NumberFieldId field, const UiRect& row) {
+        if (row.width <= 0 || row.height < 14 || !number_field_available(field)) return;
+        // Name at the left (or on the line above when stacked), then X / Y / Z: a draggable letter and a box.
+        const int nameWidth = stacked ? 0 : 66;
+        const int top = stacked ? row.y + 15 : row.y - 3;  // value baselines line up with the row name
+        const int each = (row.width - nameWidth) / 3;
+        for (int axis = 0; axis < 3; ++axis) {
+            const int x0 = row.x + nameWidth + axis * each;
+            rects.push_back({field, axis, {x0, top, 14, 18}, {x0 + 14, top, std::max(10, each - 18), 18}});
+        }
+    };
+    if (layout_.inspectorFields.size() >= 2 && !scatter_settings_panel_active()) {
+        axis_row(NumberFieldId::Position, layout_.inspectorFields[0]);
+        axis_row(NumberFieldId::Rotation, layout_.inspectorFields[1]);
+        if (layout_.inspectorFields.size() >= 3 && number_field_available(NumberFieldId::VoxelSize)) {
+            const UiRect row = layout_.inspectorFields[2];
+            if (row.width > 0 && row.height >= 14) {
+                const int top = stacked ? row.y + 15 : row.y - 3;  // value baselines line up with the row name
+                const UiRect name{row.x, row.y, stacked ? row.width : 80, stacked ? 18 : row.height};
+                const int boxX = stacked ? row.x + 14 : row.x + 80;
+                rects.push_back({NumberFieldId::VoxelSize, 0, name, {boxX, top, std::min(110, row.x + row.width - boxX), 18}});
+            }
+        }
+    }
+    // Tool strip: the brush radius or surface offset for the active tool, under the viewport hint.
+    if (layout_.viewport.width > 260 && workspace_.mode() == EditorMode::Edit) {
+        int x = layout_.viewport.x + 8;
+        const int y = layout_.viewport.y + 24;
+        for (const NumberFieldId field : {NumberFieldId::BrushRadius, NumberFieldId::SurfaceOffset}) {
+            if (!number_field_available(field)) continue;
+            const int nameWidth = field == NumberFieldId::BrushRadius ? 92 : 106;
+            const int boxWidth = field == NumberFieldId::BrushRadius ? 44 : 72;
+            rects.push_back({field, 0, {x, y, nameWidth, 18}, {x + nameWidth, y, boxWidth, 18}});
+            x += nameWidth + boxWidth + 12;
+        }
+    }
+    return rects;
+}
 InspectorSelectionSummary NativeEditorController::inspector_selection_summary() const {
     InspectorSelectionSummary summary;
     const EditorObject* first = nullptr;
@@ -12234,6 +13161,75 @@ std::optional<Int3> NativeEditorController::voxel_move_preview() const noexcept 
                 voxelMoveAxis_ == 3 ? voxelMoveSteps_ : 0};
 }
 
+std::size_t NativeEditorController::selection_fingerprint() const noexcept {
+    // Order-independent hash of the voxel selection, so a different selection of the same size
+    // does not reuse a stale brush preview.
+    std::uint64_t h = voxelSelection_.size() * 0x9E3779B97F4A7C15ULL;
+    for (const Int3& c : voxelSelection_) {
+        std::uint64_t v = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x)) * 0x100000001B3ULL) ^
+                          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)) << 21) ^
+                          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.z)) << 42);
+        v ^= v >> 33; v *= 0xFF51AFD7ED558CCDULL; v ^= v >> 33;
+        h += v;
+    }
+    return static_cast<std::size_t>(h);
+}
+
+bool NativeEditorController::in_voxel_brush(Int3 cell, Int3 center) const noexcept {
+    const std::int64_t dx = cell.x - center.x, dy = cell.y - center.y, dz = cell.z - center.z;
+    const std::int64_t r = voxelBrushRadius_;
+    if (std::abs(dx) > r || std::abs(dy) > r || std::abs(dz) > r) return false;
+    return voxelBrushShape_ == BrushShape::Cube || dx * dx + dy * dy + dz * dz <= r * r;
+}
+
+std::optional<VoxelBrushPreview> NativeEditorController::voxel_brush_preview() const {
+    const bool brushTool = activeTool_ == EditorToolId::AddVoxel || activeTool_ == EditorToolId::RemoveVoxel ||
+                           activeTool_ == EditorToolId::PaintMaterial;
+    if (!brushTool || !hoverPick_ || workspace_.mode() != EditorMode::Edit || playSession_.active() || gizmoDragging_)
+        return std::nullopt;
+    const EditorObject* object = workspace_.document().find_object(hoverPick_->objectId);
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume) return std::nullopt;
+    const bool limited = activeTool_ != EditorToolId::AddVoxel && !voxelSelection_.empty() && voxelSelectionObject_ == object->id;
+    const BrushPreviewKey key{object->id, hoverPick_->voxel, hoverPick_->normal, voxelBrushRadius_, voxelBrushShape_,
+                              activeTool_, activeMaterial_, object->voxels->revision(), limited ? selection_fingerprint() : 0U,
+                              limited ? voxelSelectionObject_ : EditorObjectId{}, object->flags.locked};
+    if (brushPreviewKey_ == key) return brushPreview_;
+    VoxelBrushPreview preview;
+    preview.objectId = object->id;
+    preview.radius = voxelBrushRadius_;
+    preview.shape = voxelBrushShape_;
+    preview.limitedToSelection = limited;
+    preview.locked = object->flags.locked;
+    preview.operation = activeTool_ == EditorToolId::AddVoxel ? VoxelToolOperation::Add
+        : activeTool_ == EditorToolId::RemoveVoxel ? VoxelToolOperation::Remove : VoxelToolOperation::Paint;
+    preview.center = preview.operation == VoxelToolOperation::Add ? add_int3(hoverPick_->voxel, hoverPick_->normal) : hoverPick_->voxel;
+    if (!preview.locked) {
+        // The same rule as the brush command: Add fills empty cells, Remove empties occupied ones,
+        // Paint changes occupied cells of another material; with a selection only selected cells.
+        const auto shapeCells = voxelBrushShape_ == BrushShape::Sphere ? sphere_brush_voxels(preview.center, voxelBrushRadius_)
+                                                                       : cube_brush_voxels(preview.center, voxelBrushRadius_);
+        for (const Int3 cell : shapeCells) {
+            const MaterialId before = object->voxels->material_at(cell);
+            bool changes = false;
+            // Mirrors changes_for(): Add writes the active material (or 1 for air) into every cell,
+            // replacing other materials too; Paint with air changes nothing.
+            const MaterialId addMaterial = activeMaterial_ == kAirMaterial ? MaterialId{1} : activeMaterial_;
+            switch (preview.operation) {
+            case VoxelToolOperation::Add: changes = before != addMaterial; break;
+            case VoxelToolOperation::Remove: changes = before != kAirMaterial; break;
+            case VoxelToolOperation::Paint: changes = before != kAirMaterial && activeMaterial_ != kAirMaterial && before != activeMaterial_; break;
+            }
+            if (changes && limited && !voxelSelection_.contains(cell)) changes = false;
+            if (!changes) continue;
+            ++preview.count;
+            if (preview.cells.size() < kMaxBrushPreviewCells) preview.cells.push_back(cell);
+        }
+    }
+    brushPreviewKey_ = key;
+    brushPreview_ = std::move(preview);
+    return brushPreview_;
+}
+
 void NativeEditorController::voxel_brush_select_at(int x, int y) {
     update_hover(x, y);
     if (!hoverPick_) return;
@@ -12241,6 +13237,7 @@ void NativeEditorController::voxel_brush_select_at(int x, int y) {
     if (!object || !object->voxels) return;
     if (hoverPick_->objectId != voxelSelectionObject_ && voxelBrushOperation_ == SelectionOperation::Subtract) return;
     auto cells = voxels_in_cube(*object->voxels,hoverPick_->voxel,voxelBrushRadius_);
+    std::erase_if(cells, [&](const Int3& cell) { return !in_voxel_brush(cell, hoverPick_->voxel); });
     if (!viewportSettings_.xraySelection) {
         std::size_t budget = kMaxVoxelSelectionRays;
         for (auto at = cells.begin(); at != cells.end();) {

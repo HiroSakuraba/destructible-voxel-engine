@@ -50,6 +50,8 @@
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
+#include "dve/editor_number_field.hpp"
+#include "dve/editor_duplicate_special.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -146,7 +148,9 @@ enum class TextEditKind : std::uint8_t {
     Text3DLetterSpacing, Text3DFaceMaterial, Text3DSideMaterial, Text3DFontPath,
     Text3DAlignment, Text3DFillRule, GaborDensity, GaborTint, GaborEmission,
     GaborAnisotropy, GaborShadowStrength, GaborLodBias, HierarchyFilter, AssetSearch,
-    AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal
+    AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal,
+    VoxelSize, BrushRadius, SurfaceOffset,  // numeric fields (see NumberFieldId)
+    DuplicateSetting                        // Duplicate Special panel; objectId holds the NumberFieldId
 };
 
 struct TextEditState {
@@ -160,11 +164,39 @@ struct TextEditState {
     // convention is the only usable behavior; without this, typing would append after the
     // pre-filled text instead of replacing it.
     bool replaceOnNextInput{true};
+    int axis{};                     // Position / Rotation: 0 = X, 1 = Y, 2 = Z
     std::set<EditorObjectId> transformSelection;
     std::vector<ObjectTransformChange> transformSnapshot;
     Float3 transformPivot{};
 };
 
+// Numeric fields (ART-084/085): inspector Position / Rotation (per axis) and Voxel size; the
+// viewport tool strip's Brush radius and Surface offset. Each can be typed (units, arithmetic,
+// += -= *= /=), scrubbed by dragging its label, and reset/copied/pasted with a right-click.
+enum class NumberFieldId : std::uint8_t {
+    Position, Rotation, VoxelSize, BrushRadius, SurfaceOffset,
+    // Duplicate Special panel (Edit > Duplicate Special)
+    DuplicateCopies, DuplicateOffset, DuplicateRotation, DuplicateScale, DuplicatePoint
+};
+struct NumberFieldRect {
+    NumberFieldId field{};
+    int axis{};          // 0..2 for Position / Rotation, else 0
+    UiRect label{};      // drag to scrub ("X", "Y", "Z" or the row name)
+    UiRect box{};        // click to type
+};
+// Duplicate Special panel: clickable choices and buttons (the numbers are NumberFieldRects).
+struct DuplicatePanelLayout {
+    UiRect panel{};
+    int titleY{};
+    UiRect pivotEach{}, pivotPoint{};       // Pivot: Each copy | Around a point
+    UiRect spaceLocal{}, spaceWorld{};      // Offset in: Local | World (Each copy)
+    UiRect pointOrigin{}, pointSelection{}; // Set the point: world origin | selection centre
+    UiRect group{};                         // Put copies in a group
+    UiRect apply{}, cancel{};
+    int noteY{};
+    std::vector<std::pair<NumberFieldId, UiRect>> rowNames;  // row label positions
+    std::vector<NumberFieldRect> fields;                     // the number boxes
+};
 enum class InspectorFlagState : std::uint8_t { Off, On, Mixed };
 struct InspectorSelectionSummary {
     std::size_t count{};
@@ -356,6 +388,19 @@ struct NativeImportOptionsLayout {
     UiRect cancelButton{};
     UiRect hintBar{};
 };
+// What a click of the Add, Remove or Paint brush would change under the cursor (ART-044).
+struct VoxelBrushPreview {
+    EditorObjectId objectId{};
+    Int3 center{};
+    std::int32_t radius{};
+    BrushShape shape{BrushShape::Cube};
+    VoxelToolOperation operation{VoxelToolOperation::Add};
+    std::vector<Int3> cells;                    // cells that would change (at most kMaxBrushPreviewCells)
+    std::size_t count{};                        // every cell that would change
+    bool limitedToSelection{};                  // Remove/Paint inside a voxel selection
+    bool locked{};                              // the object is locked: nothing would change
+};
+inline constexpr std::size_t kMaxBrushPreviewCells = 20000;
 
 struct NativeCommandPaletteLayout {
     UiRect panel{};
@@ -531,6 +576,9 @@ public:
     // "? Shortcuts" control.
     [[nodiscard]] std::vector<std::string> viewport_tool_gestures() const;
     [[nodiscard]] MaterialId active_material() const noexcept { return activeMaterial_; }
+    [[nodiscard]] std::optional<VoxelBrushPreview> voxel_brush_preview() const;
+    [[nodiscard]] BrushShape voxel_brush_shape() const noexcept { return voxelBrushShape_; }
+    [[nodiscard]] std::int32_t voxel_brush_radius() const noexcept { return voxelBrushRadius_; }
     [[nodiscard]] EditorTransformSpace transform_space() const noexcept { return transformSpace_; }
     [[nodiscard]] EditorFocusRegion focus_region() const noexcept { return focusRegion_; }
     [[nodiscard]] const NativeEditorLayout& layout() const noexcept { return layout_; }
@@ -832,6 +880,28 @@ public:
     bool mirror_selection(int axis, bool copy);
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
     [[nodiscard]] InspectorSelectionSummary inspector_selection_summary() const;
+    // Numeric fields: the shown value ("" when the field does not apply, "—" when the selected
+    // objects differ), typing a value (units, arithmetic, += -= *= /=), reset and scrub state.
+    [[nodiscard]] bool number_field_available(NumberFieldId field) const;
+    [[nodiscard]] std::string number_field_text(NumberFieldId field, int axis) const;
+    bool set_number_field(NumberFieldId field, int axis, std::string_view text, std::string_view verb = "Set");
+    bool reset_number_field(NumberFieldId field, int axis);
+    [[nodiscard]] bool number_scrub_active() const noexcept { return numberScrub_.armed && numberScrub_.moved; }
+    // Where the fields are now: per-axis boxes on the inspector's Position / Rotation rows, Voxel
+    // size on the next row, and the viewport tool strip (Brush radius / Surface offset).
+    [[nodiscard]] std::vector<NumberFieldRect> number_field_rects() const;
+    // Duplicate Special (Edit > Duplicate Special, Ctrl+Shift+D): N copies, each offset, turned and
+    // scaled from the last; a ghost preview until Apply (one undo), Esc cancels.
+    struct DuplicatePreviewBox { RigidTransform pose; Float3 minimum; Float3 maximum; float scale{1.0F}; };
+    bool open_duplicate_special();
+    bool apply_duplicate_special();
+    void cancel_duplicate_special(std::string reason = {});
+    [[nodiscard]] bool duplicate_special_active() const noexcept { return duplicateSpecial_.active; }
+    [[nodiscard]] DuplicateSpecialSettings& duplicate_special_settings() noexcept { return duplicateSpecial_.settings; }
+    [[nodiscard]] const DuplicateSpecialSettings& duplicate_special_settings() const noexcept { return duplicateSpecial_.settings; }
+    [[nodiscard]] std::vector<DuplicatePreviewBox> duplicate_special_preview(std::size_t limit = 2000) const;
+    [[nodiscard]] DuplicatePanelLayout duplicate_panel_layout() const;
+    [[nodiscard]] std::string duplicate_special_summary() const;
     [[nodiscard]] CommandResult toggle_inspector_flag(std::size_t index);
     [[nodiscard]] CommandResult set_primary_rotation_euler_degrees(Float3 degrees);
     [[nodiscard]] CommandResult rescale_primary_voxel_object(Float3 scale);
@@ -1096,6 +1166,25 @@ private:
     void begin_text_edit(TextEditKind kind, EditorObjectId objectId, std::string initialBuffer);
     void commit_text_edit();
     void cancel_text_edit() noexcept;
+    struct NumberScrubState {
+        bool armed{};                 // pressed on a field label
+        bool moved{};                 // dragged far enough to be a scrub (else it was a click)
+        NumberFieldId field{};
+        int axis{};
+        int startX{};
+        std::vector<ObjectTransformChange> transforms;
+        std::vector<ObjectVoxelSizeChange> sizes;
+        float startScalar{};          // brush radius / surface offset at the press
+    };
+    NumberScrubState numberScrub_;
+    std::optional<std::pair<NumberFieldId, int>> contextNumberField_;
+    std::string numberFieldClipboard_;
+    void begin_number_field_edit(NumberFieldId field, int axis);
+    void update_number_scrub(int x, std::uint32_t modifiers);
+    void finish_number_scrub(bool cancel);
+    [[nodiscard]] std::vector<EditorObjectId> number_field_objects(NumberFieldId field) const;
+    // Why the selected objects cannot take an edit to `field` ("" when they can).
+    [[nodiscard]] std::string number_field_refusal(NumberFieldId field) const;
     void open_context_menu(int x, int y, std::optional<EditorObjectId> target, bool fromHierarchy);
     void open_pick_list(int x, int y, const std::vector<EditorPickResult>& hits);
     void walk_selection(std::string_view direction);
@@ -1269,6 +1358,13 @@ private:
     mutable std::map<EditorObjectId, CachedCollisionProxy> collisionProxyCache_;
     bool handle_voxel_join_key(std::string_view normalized, bool control, bool shift, bool alt);
     bool scatterActive_{};
+    struct DuplicateSpecialState {
+        bool active{};
+        std::vector<EditorObjectId> roots;  // the selected roots when the panel opened
+        DuplicateSpecialSettings settings;  // kept between uses
+    };
+    DuplicateSpecialState duplicateSpecial_;
+    [[nodiscard]] std::size_t duplicate_objects_per_copy() const;
     std::vector<EditorObjectId> scatterTargets_;
     std::vector<EditorObjectId> scatterSourceRoots_;
     std::vector<EditorObjectId> pinnedScatterRoots_;
@@ -1437,6 +1533,18 @@ private:
     float placementOffsetMeters_{};
     bool voxelStrokeActive_{};
     std::int32_t voxelBrushRadius_{};
+    BrushShape voxelBrushShape_{BrushShape::Cube};
+    // The brush preview is recomputed only when the cursor cell, brush, tool or object changes.
+    struct BrushPreviewKey {
+        EditorObjectId object{}; Int3 voxel{}; Int3 normal{}; std::int32_t radius{}; BrushShape shape{};
+        EditorToolId tool{}; MaterialId material{}; std::uint64_t revision{}; std::size_t selection{};
+        EditorObjectId selectionObject{}; bool locked{};
+        auto operator<=>(const BrushPreviewKey&) const = default;
+    };
+    mutable std::optional<BrushPreviewKey> brushPreviewKey_;
+    mutable std::optional<VoxelBrushPreview> brushPreview_;
+    [[nodiscard]] bool in_voxel_brush(Int3 cell, Int3 center) const noexcept;
+    [[nodiscard]] std::size_t selection_fingerprint() const noexcept;
     std::string activePointerCommand_;
     std::vector<ShortcutGesture> heldShortcutGestures_;
     std::optional<EditorCamera> previousCamera_;

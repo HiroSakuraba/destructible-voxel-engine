@@ -467,6 +467,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"transform.scale_voxel_size_up","Edit","Scale Voxel Size x2",""},
         {"transform.scale_voxel_size_down","Edit","Scale Voxel Size x0.5",""},
         {"edit.duplicate","Edit","Duplicate","Ctrl+D"}, {"edit.rename","Edit","Rename","F2"},
+        {"edit.duplicate_special","Edit","Duplicate Special...","Ctrl+Shift+D"},
         {"edit.group","Edit","Group Selected","Ctrl+G"}, {"edit.ungroup","Edit","Ungroup","Ctrl+Shift+G"},
         {"select.parent","Edit","Select Parent",""},
         {"select.children","Edit","Select Children",""},
@@ -614,6 +615,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.select_shrink","Voxel","Shrink Voxel Selection",""},
         {"voxel.select_invert","Voxel","Invert Voxel Selection",""},
         {"voxel.selection_brush","Voxel","Selection Brush",""},
+        {"voxel.brush_shape_cube","Voxel","Brush Shape: Cube",""},
+        {"voxel.brush_shape_sphere","Voxel","Brush Shape: Sphere",""},
+        {"voxel.brush_shape_toggle","Voxel","Toggle Brush Shape (Cube / Sphere)",""},
         {"polygon.convert_to_voxels","Polygon","Convert Selected Mesh to Voxels",""},
         {"voxel.convert_to_polygon","Voxel","Convert Selected Voxels to Polygon",""},
         {"voxel.authoring_apply","Voxel","Apply Voxel / Conversion Preview",""},
@@ -1014,6 +1018,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("subdiv.delete","Subdivision Modeling",68,false);
     configure("subdiv.duplicate","Subdivision Modeling",69,false);
     configure("voxel.selection_brush", "Voxel Selection", 51, true);
+    configure("voxel.brush_shape_cube", "Brush", 45, true, "voxel.brush_shape");
+    configure("voxel.brush_shape_sphere", "Brush", 46, true, "voxel.brush_shape");
+    configure("voxel.brush_shape_toggle", "Brush", 47);
     configure("voxel.select_cells", "Voxel Selection", 48, true, "voxel.click_selection");
     configure("voxel.select_connected", "Voxel Selection", 49, true, "voxel.click_selection");
     configure("polygon.convert_to_voxels", "Geometry Conversion", 60);
@@ -1139,6 +1146,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             for (const char* keyword : keywords) action->keywords.emplace_back(keyword);
         }
     };
+    describe("edit.duplicate_special", "Make many copies, each offset, turned and scaled from the last, around its own pivot or a point (fans, rings, spirals). Preview, then Apply as one undo step.",
+             {"array", "copies", "repeat", "radial", "instance", "duplicate"});
     describe("subdiv.vertex_mode","Vertex Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.edge_mode","Edge Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.face_mode","Face Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});

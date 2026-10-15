@@ -106,7 +106,9 @@ void native_tests() {
     render_native_editor(canvas, c, 1280, 720);
     CHECK(canvas.position && canvas.rotation && canvas.valueBelow);
     const auto field = c.layout().inspectorFields[0];
+    // Pressing the axis letter starts a scrub; releasing without dragging types into that axis.
     c.pointer_down(PointerButton::Primary, field.x + 5, field.y + 29);
+    c.pointer_up(PointerButton::Primary, field.x + 5, field.y + 29);
     CHECK(c.text_edit().kind == TextEditKind::Position);
     c.key_down("escape", false, false, false);
     CHECK(c.text_edit().kind == TextEditKind::Inactive);

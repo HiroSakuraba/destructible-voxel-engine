@@ -5595,9 +5595,14 @@ bool NativeEditorController::toggle_pivot_editing() {
         set_status("Pivot editing finished");
         return true;
     }
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before editing a pivot", true); return false; }
     const auto active = workspace_.selected_object();
     if (workspace_.selection_count() != 1 || !active || !is_group(*active)) {
         set_status("Select one group to edit its pivot", true);
+        return false;
+    }
+    if (const EditorObject* group = workspace_.document().find_object(*active); group && group->flags.locked) {
+        set_status("Unlock " + group->name + " before editing its pivot", true);
         return false;
     }
     for (const EditorObjectId child : workspace_.document().children_of(*active))
@@ -5617,19 +5622,27 @@ bool NativeEditorController::toggle_pivot_editing() {
 }
 
 bool NativeEditorController::set_group_pivot(bool bottomCentre) {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before editing a pivot", true); return false; }
     const auto active = workspace_.selected_object();
-    if (!active || !is_group(*active)) { set_status("Select a group first", true); return false; }
+    if (workspace_.selection_count() != 1 || !active || !is_group(*active)) { set_status("Select one group first", true); return false; }
     const EditorObject* group = workspace_.document().find_object(*active);
     if (imported_group(*group)) {
         set_status(std::string(kImportedPivotFixed), true);
         return false;
     }
+    if (group->flags.locked) { set_status("Unlock " + group->name + " before moving its pivot", true); return false; }
     const EditorObjectBounds bounds = group_bounds(*active);
     if (!bounds.valid) { set_status("The group has no visible pieces to measure", true); return false; }
     RigidTransform after = group->transform;
     after.position = {(bounds.minimum.x + bounds.maximum.x) * 0.5F,
                       bottomCentre ? bounds.minimum.y : (bounds.minimum.y + bounds.maximum.y) * 0.5F,
                       (bounds.minimum.z + bounds.maximum.z) * 0.5F};
+    if (after.position.x == group->transform.position.x && after.position.y == group->transform.position.y &&
+        after.position.z == group->transform.position.z) {
+        // Already there: no undo step for an edit that changes nothing.
+        set_status(std::string("The pivot is already at the group's ") + (bottomCentre ? "bottom centre" : "centre"));
+        return false;
+    }
     std::vector<ObjectTransformChange> changes{{group->id, group->transform, after}};
     // Socket-attached children would follow their parent: hold them where they are.
     for (const EditorObjectId child : workspace_.document().children_of(group->id))

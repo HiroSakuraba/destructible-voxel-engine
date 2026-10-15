@@ -288,6 +288,30 @@ void test_pivot() {
     check(!controller.pivot_editing(), "selecting something else ends pivot editing");
 }
 
+// Review fixes: a pivot move that changes nothing adds no undo step; locked groups and Play refuse.
+void test_pivot_refusals() {
+    auto owner = make_controller();
+    NativeEditorController& controller = *owner;
+    EditorDocument& document = controller.workspace().document();
+    controller.workspace().select_object(10);
+    check(controller.dispatch_action("edit.pivot_bottom_center"), "first Pivot to Bottom Centre");
+    const std::size_t steps = controller.workspace().commands().size();
+    check(!controller.dispatch_action("edit.pivot_bottom_center") && controller.workspace().commands().size() == steps,
+          "again: already there, no undo step");
+    document.find_object(10)->flags.locked = true;
+    const Float3 before = document.find_object(10)->transform.position;
+    check(!controller.dispatch_action("edit.pivot_center") && near(document.find_object(10)->transform.position.y, before.y),
+          "a locked group's pivot is refused");
+    check(!controller.dispatch_action("edit.edit_pivot") && !controller.pivot_editing(), "Edit Pivot refuses a locked group");
+    check(controller.status().text.find("Unlock Chair") != std::string::npos, "and says why: " + controller.status().text);
+    document.find_object(10)->flags.locked = false;
+    std::string error;
+    check(controller.workspace().set_mode(EditorMode::Simulate, &error), "enter Simulate");
+    check(!controller.dispatch_action("edit.pivot_center") && controller.workspace().commands().size() == steps,
+          "no pivot edit during Simulate");
+    check(controller.workspace().set_mode(EditorMode::Edit, &error), "back to Edit");
+}
+
 void test_new_group_pivot() {
     auto owner = make_controller();
     NativeEditorController& controller = *owner;
@@ -347,6 +371,7 @@ void test_pruning() {
 }  // namespace
 
 int main() {
+    test_pivot_refusals();
     test_click_selects_outermost_group();
     test_double_click_opens_one_level();
     test_box_rules();

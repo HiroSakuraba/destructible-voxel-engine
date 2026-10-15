@@ -10892,6 +10892,8 @@ bool NativeEditorController::open_import_options_for(const std::filesystem::path
     const std::uint64_t bytes = std::filesystem::file_size(source, ec);
     auto model = std::make_shared<ImportedModelResult>();
     const std::string fileName = source.filename().string();
+    // Take a pending Assets drop now so a cancelled read cannot leak it into a later Import Model.
+    const std::optional<Float3> dropPoint = reimport ? std::nullopt : std::exchange(pendingImportDrop_, std::nullopt);
     return start_long_job(
         LongJobKind::ReadModel, "Read " + fileName, ec ? 0 : bytes / 4,
         [model, source, fileName](LongJob& job) {
@@ -10899,9 +10901,8 @@ bool NativeEditorController::open_import_options_for(const std::filesystem::path
             *model = import_model(source);
             job.report(1.0F, "Read " + fileName);
         },
-        [this, model, relativeSource, reimport, target, settings](LongJob&) mutable {
+        [this, model, relativeSource, reimport, target, settings, dropPoint](LongJob&) mutable {
             if (!model->success) {
-                pendingImportDrop_.reset();
                 std::string reason = "the file could not be read";
                 for (const ImportDiagnostic& d : model->diagnostics)
                     if (d.severity == ImportDiagnostic::Severity::Error) { reason = d.message; break; }
@@ -10921,7 +10922,7 @@ bool NativeEditorController::open_import_options_for(const std::filesystem::path
                                     [&](const EditorImportNode& node) { return node.name == name; });
             });
             importOptions_.settings = std::move(settings);
-            importOptions_.dropPoint = reimport ? std::nullopt : std::exchange(pendingImportDrop_, std::nullopt);
+            importOptions_.dropPoint = dropPoint;
             refresh_import_estimate();
             set_status(std::string(reimport ? "Reimport" : "Import") +
                        " options: Up/Down pick a row, Left/Right or type a value, Space toggles a mesh, Enter imports, Esc cancels",
@@ -11391,6 +11392,21 @@ bool NativeEditorController::load_asset_drag_payload() {
     }
 }
 
+std::string NativeEditorController::material_drop_refusal(const EditorObject& target) const {
+    if (!target.voxels || target.polygon || target.text3d || target.gaborVolume || target.voxels->occupied_voxel_count() == 0)
+        return target.name + " has no voxels to paint (materials paint voxel objects)";
+    if (!target.flags.visible || is_isolated_out(target.id)) return target.name + " is hidden or isolated out of view";
+    if (target.flags.locked) return "Unlock " + target.name + " before painting it";
+    if (target.prefabLink) return target.name + " is part of a prefab instance; unpack it or edit the prefab";
+    return {};
+}
+
+std::string NativeEditorController::asset_drop_blocked_reason() const {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play or Simulate before placing assets";
+    if (longJob_) return long_job_busy_reason();
+    return {};
+}
+
 void NativeEditorController::update_asset_drag(int x, int y) {
     AssetDragState& drag = assetDrag_;
     if (!drag.active) {
@@ -11419,8 +11435,15 @@ void NativeEditorController::update_asset_drag(int x, int y) {
         if (t > 0.0F && t < 10000.0F) drag.point = add(ray.origin, multiply(ray.direction, t));
     }
     const EditorObject* target = drag.target ? workspace_.document().find_object(*drag.target) : nullptr;
+    if (const std::string blocked = asset_drop_blocked_reason(); !blocked.empty()) {
+        drag.message = blocked;  // a release here would do nothing: never show a ghost that cannot apply
+        drag.ghost = {};
+        set_status(drag.message, true, 2.0F);
+        return;
+    }
     if (drag.kind == EditorAssetKind::Material) {
         if (!target) drag.message = "Drop " + drag.assetName + " on a voxel object to paint it";
+        else if (const std::string refusal = material_drop_refusal(*target); !refusal.empty()) drag.message = "Cannot paint: " + refusal;
         else {
             drag.ghost = object_world_bounds(*target);
             const bool limited = !voxelSelection_.empty() && voxelSelectionObject_ == target->id;
@@ -11448,22 +11471,14 @@ void NativeEditorController::finish_asset_drag(int x, int y) {
 bool NativeEditorController::place_dragged_asset() {
     AssetDragState& drag = assetDrag_;
     if (drag.refused) { set_status(drag.message, true, 6.0F); return false; }
-    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) {
-        set_status("Stop Play or Simulate before placing assets", true);
-        return false;
-    }
-    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
+    if (const std::string blocked = asset_drop_blocked_reason(); !blocked.empty()) { set_status(blocked, true); return false; }
     EditorDocument& document = workspace_.document();
     const auto beforeSelection = capture_selection_snapshot();
 
     if (drag.kind == EditorAssetKind::Material) {
         const EditorObject* target = drag.target ? document.find_object(*drag.target) : nullptr;
         if (!target) { set_status("Drop the material on a voxel object to paint it", true); return false; }
-        if (!target->voxels || target->polygon || target->text3d || target->gaborVolume || target->voxels->occupied_voxel_count() == 0) {
-            set_status(target->name + " has no voxels to paint (materials paint voxel objects)", true);
-            return false;
-        }
-        if (target->flags.locked) { set_status("Unlock " + target->name + " before painting it", true); return false; }
+        if (const std::string refusal = material_drop_refusal(*target); !refusal.empty()) { set_status(refusal, true); return false; }
         const MaterialId to = *drag.material;
         prune_voxel_selection();
         const bool limited = !voxelSelection_.empty() && voxelSelectionObject_ == target->id;

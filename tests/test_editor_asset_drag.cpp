@@ -256,6 +256,39 @@ void test_material_drop() {
     (void)controller.dispatch_action("select.domain_objects");
     check(drag_asset(controller, "assets/brick_red.dmat", {2.5F, 1.0F, 1.0F}), "drag onto a locked wall");
     check(controller.status().text.find("Unlock Wall") != std::string::npos, "a locked object is refused");
+
+    // Review fixes: hidden and prefab-instance objects are refused, with a reason in the preview.
+    document.find_object(2)->flags.locked = false;
+    const MaterialId wallBefore = document.find_object(2)->voxels->material_at({1, 3, 1});
+    const std::size_t undoBefore = controller.workspace().commands().size();
+    document.find_object(2)->prefabLink = EditorPrefabLink{};
+    document.find_object(2)->prefabLink->prefabAsset = "assets/crate.dveprefab"; document.find_object(2)->prefabLink->instanceId = 1;
+    check(drag_asset(controller, "assets/brick_red.dmat", {2.5F, 1.0F, 1.0F}, false), "drag onto a prefab-instance wall");
+    check(controller.asset_drag().message.find("prefab instance") != std::string::npos,
+          "the preview says why a prefab instance cannot be painted: " + controller.asset_drag().message);
+    controller.pointer_up(PointerButton::Primary, controller.hover_x(), controller.hover_y());
+    check(document.find_object(2)->voxels->material_at({1, 3, 1}) == wallBefore &&
+              controller.workspace().commands().size() == undoBefore,
+          "a prefab instance is refused with no undo step");
+    document.find_object(2)->prefabLink.reset();
+    document.find_object(2)->flags.visible = false;
+    (void)drag_asset(controller, "assets/brick_red.dmat", {2.5F, 1.0F, 1.0F});
+    check(document.find_object(2)->voxels->material_at({1, 3, 1}) == wallBefore, "a hidden object is never painted");
+    document.find_object(2)->flags.visible = true;
+}
+
+void test_play_gating() {
+    auto owner = make_controller();
+    NativeEditorController& controller = *owner;
+    const std::size_t before = controller.workspace().document().objects().size();
+    std::string error;
+    check(controller.workspace().set_mode(EditorMode::Simulate, &error), "enter Simulate: " + error);
+    check(drag_asset(controller, "assets/block.dvox", {0.0F, 0.0F, 2.0F}, false), "drag during Simulate");
+    check(!controller.asset_drag().ghost.valid && controller.asset_drag().message.find("Stop Play") != std::string::npos,
+          "no ghost that cannot apply; the label says why: " + controller.asset_drag().message);
+    controller.pointer_up(PointerButton::Primary, controller.hover_x(), controller.hover_y());
+    check(controller.workspace().document().objects().size() == before, "nothing is placed during Simulate");
+    check(controller.workspace().set_mode(EditorMode::Edit, &error), "back to Edit: " + error);
 }
 
 void test_model_drop() {
@@ -290,6 +323,7 @@ int main() {
     test_prefab_and_voxel_asset();
     test_ghost_and_cancel();
     test_material_drop();
+    test_play_gating();
     test_model_drop();
     std::filesystem::remove_all(kRoot);
     if (g_failures == 0) std::printf("asset drag tests passed\n");

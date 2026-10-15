@@ -1131,6 +1131,8 @@ private:
     void finish_asset_drag(int x, int y);
     bool load_asset_drag_payload();
     bool place_dragged_asset();
+    [[nodiscard]] std::string material_drop_refusal(const EditorObject& target) const;
+    [[nodiscard]] std::string asset_drop_blocked_reason() const;
     EditorPlaySession playSession_{};
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};

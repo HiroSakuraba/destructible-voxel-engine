@@ -4512,6 +4512,25 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             hint = candidate;
         }
         if (!hint.empty()) viewportPainter.text(hintX, viewport.y + 20, hint, muted);
+        // Tool strip (ART-085): the active tool's Brush radius / Surface offset as editable fields.
+        if (!controller.play_session().active()) {
+            for (const NumberFieldRect& rect : controller.number_field_rects()) {
+                if (rect.field != NumberFieldId::BrushRadius && rect.field != NumberFieldId::SurfaceOffset) continue;
+                const auto& edit = controller.text_edit();
+                const bool editing = edit.kind == (rect.field == NumberFieldId::BrushRadius ? TextEditKind::BrushRadius : TextEditKind::SurfaceOffset);
+                const bool hovered = rect.box.contains(controller.hover_x(), controller.hover_y()) ||
+                                     rect.label.contains(controller.hover_x(), controller.hover_y());
+                viewportPainter.fill({rect.label.x, rect.label.y, rect.label.width + rect.box.width, rect.label.height}, rgb(20,25,33));
+                viewportPainter.text(rect.label.x + 4, rect.label.y + 14,
+                                     rect.field == NumberFieldId::BrushRadius ? "Brush radius" : "Surface offset", hovered ? text : muted);
+                viewportPainter.fill(rect.box, editing ? rgb(40,54,74) : hovered ? rgb(44,52,64) : rgb(30,36,46));
+                viewportPainter.outline(rect.box, editing ? accent : border);
+                const std::string value = editing ? edit.buffer + "_"
+                    : controller.number_field_text(rect.field, 0) + (rect.field == NumberFieldId::SurfaceOffset ? " m" : "");
+                viewportPainter.text(rect.box.x + 4, rect.box.y + 14,
+                                     elide_text_to_width(viewportPainter, value, std::max(0, rect.box.width - 6)), editing ? accent : text);
+            }
+        }
         if (!controller.isolated_objects().empty()) {
             // Always say when the view is filtered, and how to undo it.
             const int bannerRight = layout.viewportHelpButton.width > 0 ? layout.viewportHelpButton.x - 10
@@ -4661,27 +4680,37 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                  : (multiple ? std::to_string(selectionSummary.count) + " selected; primary " : "") + object->name,
                              renamingHere ? accent : text);
                 drawInspectorText(layout.inspector.x + 12, inspectorTop + 69,
-                             multiple ? "Group edits from primary (m / deg)"
-                                 : "ID " + std::to_string(object->id) + "   Voxels " + std::to_string(object->voxels->occupied_voxel_count()), muted);
-                const bool editingPosition = controller.text_edit().kind == TextEditKind::Position;
-                if (editingPosition) inspectorPainter.fill(layout.inspectorFields.empty() ? UiRect{} : layout.inspectorFields[0], rgb(40,54,74));
-                drawInspectorText(layout.inspector.x + 12, inspectorTop + 91,
-                             editingPosition
-                                 ? "Position  " + controller.text_edit().buffer + "_"
-                                 : "Position  " + (selectionSummary.positionMixed ? std::string("Mixed; primary ") : std::string()) + std::to_string(object->transform.position.x).substr(0,5) + "  " +
-                                       std::to_string(object->transform.position.y).substr(0,5) + "  " +
-                                       std::to_string(object->transform.position.z).substr(0,5),
-                             editingPosition ? accent : muted);
-                constexpr float degreesPerRadian = 57.29577951308232F;
-                const Float3 euler = multiply(quaternion_to_euler_xyz(object->transform.rotation), degreesPerRadian);
-                const bool editingRotation = controller.text_edit().kind == TextEditKind::Rotation;
-                if (editingRotation) inspectorPainter.fill(layout.inspectorFields.size() < 2 ? UiRect{} : layout.inspectorFields[1], rgb(40,54,74));
-                drawInspectorText(layout.inspector.x + 12, inspectorTop + 113,
-                             editingRotation
-                                 ? "Rotation  " + controller.text_edit().buffer + "_"
-                                 : "Rotation  " + (selectionSummary.rotationMixed ? std::string("Mixed; primary ") : std::string()) + std::to_string(euler.x).substr(0,6) + "  " +
-                                       std::to_string(euler.y).substr(0,6) + "  " + std::to_string(euler.z).substr(0,6),
-                             editingRotation ? accent : muted);
+                             multiple ? "Edits set each object"
+                                 : "ID " + std::to_string(object->id) + "   Voxels " + std::to_string(object->voxels->occupied_voxel_count()) +
+                                   "   Axes " + (controller.transform_space() == EditorTransformSpace::World ? "World" : "Local"), muted);
+                // Numeric fields (ART-084/085): per-axis boxes; drag a letter to scrub, right-click to reset.
+                const auto fieldRects = controller.number_field_rects();
+                const auto drawNumberBoxes = [&](NumberFieldId field) {
+                    for (const NumberFieldRect& rect : fieldRects) {
+                        if (rect.field != field) continue;
+                        const auto& edit = controller.text_edit();
+                        const TextEditKind kind = field == NumberFieldId::Position ? TextEditKind::Position
+                            : field == NumberFieldId::Rotation ? TextEditKind::Rotation : TextEditKind::VoxelSize;
+                        const bool editing = edit.kind == kind && edit.axis == rect.axis;
+                        const bool hovered = rect.box.contains(controller.hover_x(), controller.hover_y()) ||
+                                             rect.label.contains(controller.hover_x(), controller.hover_y());
+                        inspectorPainter.fill(rect.box, editing ? rgb(40,54,74) : hovered ? rgb(44,52,64) : rgb(30,36,46));
+                        if (editing) inspectorPainter.outline(rect.box, accent);
+                        if (field != NumberFieldId::VoxelSize) {
+                            const EditorColor axisColor = rect.axis == 0 ? rgb(236,96,88) : rect.axis == 1 ? rgb(120,210,110) : rgb(96,150,240);
+                            inspectorPainter.text(rect.label.x + 3, rect.label.y + 14, rect.axis == 0 ? "X" : rect.axis == 1 ? "Y" : "Z", axisColor);
+                        }
+                        std::string value = editing ? edit.buffer + "_" : controller.number_field_text(field, rect.axis);
+                        if (!editing && field == NumberFieldId::VoxelSize) value += " m";
+                        inspectorPainter.text(rect.box.x + 4, rect.box.y + 14,
+                                              elide_text_to_width(inspectorPainter, value, std::max(0, rect.box.width - 6)),
+                                              editing ? accent : value == "\xE2\x80\x94" ? muted : text);
+                    }
+                };
+                drawInspectorText(layout.inspector.x + 12, inspectorTop + 91, "Position", muted);
+                drawNumberBoxes(NumberFieldId::Position);
+                drawInspectorText(layout.inspector.x + 12, inspectorTop + 113, "Rotation", muted);
+                drawNumberBoxes(NumberFieldId::Rotation);
                 if (object->text3d) {
                     const auto& asset = *object->text3d;
                     const auto drawTextField = [&](std::size_t fieldIndex, TextEditKind kind,
@@ -4760,9 +4789,14 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                     drawInspectorText(layout.inspector.x + 12, inspectorTop + 311,
                                  "Hash " + std::to_string(asset.contentHash), muted);
                 } else {
-                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 135,
-                                 "Selection " + std::to_string(controller.workspace().selection_count()) +
-                                 "   Axes " + (controller.transform_space() == EditorTransformSpace::World ? "World" : "Local"), text);
+                    if (controller.number_field_available(NumberFieldId::VoxelSize)) {
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 135, "Voxel size", muted);
+                        drawNumberBoxes(NumberFieldId::VoxelSize);
+                    } else {
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 135,
+                                     "Selection " + std::to_string(controller.workspace().selection_count()) +
+                                     "   Axes " + (controller.transform_space() == EditorTransformSpace::World ? "World" : "Local"), text);
+                    }
                     const EditorSelectionDiagnostics& diagnostics = controller.selection_diagnostics();
                     drawInspectorText(layout.inspector.x + 12, inspectorTop + 157,
                                  "Mass " + std::to_string(diagnostics.massKilograms).substr(0,8) + " kg", muted);

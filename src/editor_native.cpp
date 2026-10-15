@@ -2591,6 +2591,10 @@ void NativeEditorController::recompute_layout() {
                 layout_.inspectorFields.push_back({layout_.inspector.x + 12, contentY + 124 + field * 22,
                                                    inspectorWidth - 24, 18});
             }
+        } else {
+            // Voxel size (plain voxel objects; see number_field_rects). The row is kept for any
+            // other primary too, so a selection change never needs a relayout to show it.
+            layout_.inspectorFields.push_back({layout_.inspector.x + 12, contentY + 124, inspectorWidth - 24, 18});
         }
         layout_.inspectorFieldCount = static_cast<int>(layout_.inspectorFields.size());
         const int reflowExtra = layout_.inspectorStackedFields ? 22 * layout_.inspectorFieldCount : 0;
@@ -3517,23 +3521,21 @@ void NativeEditorController::commit_text_edit() {
                 textEdit_ = {}; return;
             }
         }
-        if (kind == TextEditKind::Rotation && !sameVector(selection_pivot(), textEdit_.transformPivot)) stale = true;
         if (stale) {
             set_status("Selection or transform changed: reopen the field before applying a value", true, 8.0F);
             textEdit_ = {}; return;
         }
     }
-    const auto parsed = parse_float3_line(textEdit_.buffer);
-    if (!parsed) {
-        set_status("Could not parse three numbers", true);
-        textEdit_ = {};
-        return;
-    }
-    const CommandResult result = kind == TextEditKind::Position
-        ? set_primary_position(*parsed)
-        : set_primary_rotation_euler_degrees(*parsed);
-    if (!result.success) set_status(result.message, true);
+    // Numeric fields: one axis (or one value) at a time, with units and relative edits.
+    const NumberFieldId field = kind == TextEditKind::Position ? NumberFieldId::Position
+        : kind == TextEditKind::Rotation ? NumberFieldId::Rotation
+        : kind == TextEditKind::VoxelSize ? NumberFieldId::VoxelSize
+        : kind == TextEditKind::BrushRadius ? NumberFieldId::BrushRadius : NumberFieldId::SurfaceOffset;
+    const int axis = textEdit_.axis;
+    const std::string buffer = textEdit_.buffer;
+    const bool untouched = textEdit_.replaceOnNextInput;
     textEdit_ = {};
+    if (!untouched) (void)set_number_field(field, axis, buffer);
 }
 
 void NativeEditorController::cancel_text_edit() noexcept {
@@ -3828,6 +3830,11 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     if(!longJob_ && textEdit_.kind==TextEditKind::Inactive && mesh_authoring_pointer_move(x,y,modifiers)){lastPointerX_=x;lastPointerY_=y;return;}
     hoverX_ = x;
     hoverY_ = y;
+    if (numberScrub_.armed) {
+        update_number_scrub(x, modifiers);
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
+    }
     if (sliceDrag_) {
         update_slice_pointer(x, y, modifiers);
         lastPointerX_ = x; lastPointerY_ = y;
@@ -4413,7 +4420,11 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     const int clickDy = y - lastClickY_;
     const bool doubleClick = button == lastClickButton_ && lastClickTime_.time_since_epoch().count() != 0 &&
         now - lastClickTime_ <= doubleMs && clickDx * clickDx + clickDy * clickDy <= doubleDistance * doubleDistance;
-    if (doubleClick && !((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
+    bool overNumberField = false;
+    if (doubleClick)
+        for (const NumberFieldRect& rect : number_field_rects())
+            overNumberField = overNumberField || rect.box.contains(x, y) || rect.label.contains(x, y);
+    if (doubleClick && !overNumberField && !((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
                           activeTool_ == EditorToolId::Scale) && layout_.viewport.contains(x,y) &&
                          hit_test_gizmo_axis(x,y) != 0)) {
         const ShortcutGesture gesture = mouse_shortcut(pointer_input_name(button),
@@ -4428,6 +4439,12 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 
     // A click anywhere other than the field currently being edited commits it, the same way
     // losing focus commits a text field in most desktop UIs.
+    if (textEdit_.kind == TextEditKind::VoxelSize || textEdit_.kind == TextEditKind::BrushRadius ||
+        textEdit_.kind == TextEditKind::SurfaceOffset) {
+        bool onField = false;
+        for (const NumberFieldRect& rect : number_field_rects()) onField = onField || rect.box.contains(x, y);
+        if (!onField) commit_text_edit();
+    }
     if (textEdit_.kind == TextEditKind::HierarchyFilter && !layout_.hierarchyFilterBox.contains(x, y)) {
         commit_text_edit();
     } else if (textEdit_.kind == TextEditKind::AssetSearch && !layout_.assetSearchBox.contains(x, y)) {
@@ -4496,6 +4513,37 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             }
         }
         return;
+    }
+    if (button == PointerButton::Primary && workspace_.mode() == EditorMode::Edit && !playSession_.active()) {
+        // Numeric fields: a click on a box types into it; a press on the label starts a scrub
+        // (a click on the label without dragging also types).
+        for (const NumberFieldRect& rect : number_field_rects()) {
+            if (rect.box.contains(x, y)) { begin_number_field_edit(rect.field, rect.axis); return; }
+            if (!rect.label.contains(x, y)) continue;
+            numberScrub_ = {};
+            numberScrub_.armed = true;
+            numberScrub_.field = rect.field;
+            numberScrub_.axis = rect.axis;
+            numberScrub_.startX = x;
+            numberScrub_.startScalar = rect.field == NumberFieldId::BrushRadius ? static_cast<float>(voxelBrushRadius_) : placementOffsetMeters_;
+            bool locked = false;
+            for (const EditorObjectId id : number_field_objects(rect.field)) {
+                const EditorObject* object = workspace_.document().find_object(id);
+                if (!object) continue;
+                locked = locked || object->flags.locked;
+                if (rect.field == NumberFieldId::VoxelSize)
+                    numberScrub_.sizes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, object->voxelSizeMeters,
+                                                  std::nullopt, std::nullopt});
+                else numberScrub_.transforms.push_back({id, object->transform, object->transform});
+            }
+            if (locked && rect.field != NumberFieldId::BrushRadius && rect.field != NumberFieldId::SurfaceOffset) {
+                numberScrub_ = {};
+                set_status("Unlock the selected objects before editing them", true);
+            }
+            focusRegion_ = rect.field == NumberFieldId::BrushRadius || rect.field == NumberFieldId::SurfaceOffset
+                ? EditorFocusRegion::Viewport : EditorFocusRegion::Inspector;
+            return;
+        }
     }
     if (button == PointerButton::Primary) {
         if (layout_.viewportHelpButton.contains(x, y)) {
@@ -4591,11 +4639,8 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                     }
                 } else break;
             } else {
-                constexpr float degreesPerRadian = 57.29577951308232F;
-                const std::string initial = index == 0
-                    ? format_float3_line(object->transform.position)
-                    : format_float3_line(multiply(quaternion_to_euler_xyz(object->transform.rotation), degreesPerRadian));
-                begin_text_edit(index == 0 ? TextEditKind::Position : TextEditKind::Rotation, *selected, initial);
+                // The row's name (outside the X/Y/Z boxes): type into X; Tab moves on.
+                begin_number_field_edit(index == 0 ? NumberFieldId::Position : NumberFieldId::Rotation, 0);
             }
             focusRegion_ = EditorFocusRegion::Inspector;
             return;
@@ -4824,6 +4869,12 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
     if (polygonLoopCutDragging_ && button==PointerButton::Primary) {
         pointer_move(x,y,modifiers); polygonLoopCutDragging_=false; return;
     }
+    if (numberScrub_.armed && button == PointerButton::Primary) {
+        update_number_scrub(x, modifiers);
+        finish_number_scrub(false);
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
+    }
     if(mesh_authoring_pointer_up(button,x,y,modifiers)){dragButton_=PointerButton::NoButton;refresh_menu_state();return;}
     if (button == PointerButton::Primary && sliceDrag_) {
         update_slice_pointer(x, y, modifiers);
@@ -4902,7 +4953,35 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
         if (distanceSquared <= 25) {
             // A right-click that didn't drag (didn't just orbit the camera): open a context
             // menu for whatever is under the cursor, in the viewport or the hierarchy.
-            if (layout_.viewport.contains(x, y)) {
+            std::optional<NumberFieldRect> fieldHit;
+            if (workspace_.mode() == EditorMode::Edit)
+                for (const NumberFieldRect& rect : number_field_rects())
+                    if (rect.label.contains(x, y) || rect.box.contains(x, y)) { fieldHit = rect; break; }
+            if (fieldHit) {
+                // Numeric field: reset, copy or paste this value.
+                contextNumberField_ = std::pair{fieldHit->field, fieldHit->axis};
+                const bool perAxis = fieldHit->field == NumberFieldId::Position || fieldHit->field == NumberFieldId::Rotation;
+                contextMenu_ = {};
+                contextMenu_.open = true;
+                const std::string what = perAxis ? std::string(fieldHit->axis == 0 ? "X" : fieldHit->axis == 1 ? "Y" : "Z")
+                                                 : std::string(fieldHit->field == NumberFieldId::VoxelSize ? "Voxel size"
+                                                               : fieldHit->field == NumberFieldId::BrushRadius ? "Brush radius" : "Surface offset");
+                contextMenu_.items.push_back({"inspector.field.reset", "Reset " + what +
+                    (fieldHit->field == NumberFieldId::VoxelSize ? " (0.1 m)" : " (0)")});
+                if (perAxis)
+                    contextMenu_.items.push_back({"inspector.field.reset_row",
+                        std::string("Reset ") + (fieldHit->field == NumberFieldId::Position ? "Position" : "Rotation") + " X, Y, Z"});
+                contextMenu_.items.push_back({"inspector.field.copy", "Copy " + what});
+                if (!numberFieldClipboard_.empty())
+                    contextMenu_.items.push_back({"inspector.field.paste", "Paste " + numberFieldClipboard_});
+                const int itemHeight = static_cast<int>(24.0F * kLogicalLayoutScale);
+                constexpr int popupWidth = 190;
+                const int popupHeight = itemHeight * static_cast<int>(contextMenu_.items.size());
+                contextMenu_.x = std::clamp(x, 0, std::max(0, width_ - popupWidth));
+                contextMenu_.y = std::clamp(y, layout_.menuBar.height, std::max(layout_.menuBar.height, height_ - popupHeight));
+                for (std::size_t i = 0; i < contextMenu_.items.size(); ++i)
+                    contextMenu_.itemRects.push_back({contextMenu_.x, contextMenu_.y + static_cast<int>(i) * itemHeight, popupWidth, itemHeight});
+            } else if (layout_.viewport.contains(x, y)) {
                 update_hover(x, y);
                 open_context_menu(x, y, hoverPick_ ? std::optional(hoverPick_->objectId) : std::nullopt, false);
             } else if (layout_.hierarchy.contains(x, y)) {
@@ -5993,6 +6072,41 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "voxel.authoring_cancel" || actionId == "subdiv.conversion_cancel") {
         if (!voxel_authoring_active()) { set_status("No voxel/conversion preview is open",true); return false; }
         cancel_voxel_authoring_preview(); refresh_menu_state(); set_status("Preview cancelled; scene unchanged"); return true;
+    }
+    if (actionId.starts_with("inspector.field.")) {
+        if (!contextNumberField_) { set_status("Right-click a value first", true); return false; }
+        const auto [field, axis] = *contextNumberField_;
+        if (actionId == "inspector.field.reset") return reset_number_field(field, axis);
+        if (actionId == "inspector.field.reset_row") {
+            // One undo step for the three axes.
+            const auto ids = number_field_objects(field);
+            if (ids.empty()) { set_status("Nothing selected", true); return false; }
+            std::vector<ObjectTransformChange> changes;
+            for (const EditorObjectId id : ids) {
+                const EditorObject* object = workspace_.document().find_object(id);
+                if (object->flags.locked) { set_status("Unlock " + object->name + " first", true); return false; }
+                ObjectTransformChange change{id, object->transform, object->transform};
+                if (field == NumberFieldId::Position) change.after.position = {};
+                else change.after.rotation = {};
+                changes.push_back(change);
+            }
+            const std::string label = field == NumberFieldId::Position ? "Reset Position" : "Reset Rotation";
+            const CommandResult result = workspace_.commands().execute(workspace_.document(),
+                std::make_unique<TransformObjectsCommand>(std::move(changes), label));
+            set_status(result.success ? label : result.message, !result.success);
+            return result.success;
+        }
+        if (actionId == "inspector.field.copy") {
+            const std::string value = number_field_text(field, axis);
+            if (value.empty() || value == "\xE2\x80\x94") { set_status("The selected objects differ; select one to copy its value", true); return false; }
+            numberFieldClipboard_ = value;
+            set_status("Copied " + value);
+            return true;
+        }
+        if (actionId == "inspector.field.paste") {
+            if (numberFieldClipboard_.empty()) { set_status("Nothing copied yet", true); return false; }
+            return set_number_field(field, axis, numberFieldClipboard_, "Paste");
+        }
     }
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
@@ -8007,6 +8121,24 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     if (spriteAuthoringPanel_.open() && spriteAuthoringPanel_.key_down(normalized, control, shift, alt)) return;
     if (controlRigPanel_.open() && controlRigPanel_.key_down(normalized, control, shift, alt)) return;
     if (textEdit_.kind != TextEditKind::Inactive) {
+        if (normalized == "tab" && !control && !alt &&
+            (textEdit_.kind == TextEditKind::Position || textEdit_.kind == TextEditKind::Rotation ||
+             textEdit_.kind == TextEditKind::VoxelSize)) {
+            // Tab / Shift+Tab: apply this box and move to the next one (X, Y, Z of Position, then
+            // Rotation, then Voxel size when shown).
+            std::vector<std::pair<NumberFieldId, int>> order;
+            for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::Position, axis});
+            for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::Rotation, axis});
+            if (number_field_available(NumberFieldId::VoxelSize)) order.push_back({NumberFieldId::VoxelSize, 0});
+            const NumberFieldId current = textEdit_.kind == TextEditKind::Position ? NumberFieldId::Position
+                : textEdit_.kind == TextEditKind::Rotation ? NumberFieldId::Rotation : NumberFieldId::VoxelSize;
+            const auto here = std::find(order.begin(), order.end(), std::pair{current, textEdit_.axis});
+            const std::size_t index = here == order.end() ? 0U : static_cast<std::size_t>(here - order.begin());
+            const auto next = order[(index + (shift ? order.size() - 1U : 1U)) % order.size()];
+            commit_text_edit();
+            if (number_field_available(next.first)) begin_number_field_edit(next.first, next.second);
+            return;
+        }
         if (normalized == "escape") { cancel_text_edit(); return; }
         if (normalized == "return" || normalized == "enter") { commit_text_edit(); return; }
         if (normalized == "backspace") {
@@ -8206,6 +8338,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     // Escape and focus traversal are intentionally invariant safety/navigation controls.
     // Every productive command below is profile-driven and can be rebound or removed.
     if (normalized == "escape") {
+        if (numberScrub_.armed) { finish_number_scrub(true); return; }
         if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
         clear_navigation_input();
         close_top_level_menu();
@@ -8310,6 +8443,341 @@ CommandResult NativeEditorController::nudge_selection(Float3 worldDelta) {
     return result;
 }
 
+// --- Numeric fields: Position / Rotation per axis, Voxel size, Brush radius, Surface offset ----
+// (ART-084/085). Typing sets each selected object's value (relative edits apply per object);
+// dragging a field's label scrubs it with a live preview and one undo; right-click resets,
+// copies or pastes.
+
+namespace {
+constexpr float kDegreesPerRadian = 57.29577951308232F;
+NumberFieldUnit number_field_unit(NumberFieldId field) {
+    switch (field) {
+    case NumberFieldId::Rotation: return NumberFieldUnit::Degrees;
+    case NumberFieldId::BrushRadius: return NumberFieldUnit::Count;
+    default: return NumberFieldUnit::Meters;
+    }
+}
+const char* number_field_name(NumberFieldId field) {
+    switch (field) {
+    case NumberFieldId::Position: return "Position";
+    case NumberFieldId::Rotation: return "Rotation";
+    case NumberFieldId::VoxelSize: return "Voxel size";
+    case NumberFieldId::BrushRadius: return "Brush radius";
+    case NumberFieldId::SurfaceOffset: return "Surface offset";
+    }
+    return "";
+}
+float& axis_of(Float3& value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
+float axis_of(const Float3& value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
+const char* axis_name(int axis) { return axis == 0 ? "X" : axis == 1 ? "Y" : "Z"; }
+bool plain_voxel_object(const EditorObject& object) {
+    return object.voxels && !object.polygon && !object.text3d && !object.gaborVolume && object.voxels->occupied_voxel_count() > 0;
+}
+}  // namespace
+
+std::vector<EditorObjectId> NativeEditorController::number_field_objects(NumberFieldId field) const {
+    std::vector<EditorObjectId> result;
+    std::set<EditorObjectId> seen;
+    for (const EditorObjectId id : workspace_.selected_objects()) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object || !seen.insert(id).second) continue;
+        if (field == NumberFieldId::VoxelSize && !plain_voxel_object(*object)) continue;
+        result.push_back(id);
+    }
+    return result;
+}
+
+bool NativeEditorController::number_field_available(NumberFieldId field) const {
+    switch (field) {
+    case NumberFieldId::Position:
+    case NumberFieldId::Rotation: return !number_field_objects(field).empty();
+    case NumberFieldId::VoxelSize: {
+        // Shown for a plain voxel primary (the row sits where the Text/Gabor rows go for those).
+        const auto primary = workspace_.selected_object();
+        const EditorObject* object = primary ? workspace_.document().find_object(*primary) : nullptr;
+        return object && plain_voxel_object(*object);
+    }
+    case NumberFieldId::BrushRadius:
+        return activeTool_ == EditorToolId::AddVoxel || activeTool_ == EditorToolId::RemoveVoxel ||
+               activeTool_ == EditorToolId::PaintMaterial ||
+               (activeTool_ == EditorToolId::Select && selectionDomain_ == SelectionDomain::Voxels && voxelSelectionBrushEnabled_);
+    case NumberFieldId::SurfaceOffset:
+        return placementMode_ != PlacementTarget::NoTarget ||
+               ((activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate) &&
+                selectionDomain_ == SelectionDomain::Objects);
+    }
+    return false;
+}
+
+std::string NativeEditorController::number_field_text(NumberFieldId field, int axis) const {
+    if (field == NumberFieldId::BrushRadius) return std::to_string(voxelBrushRadius_);
+    if (field == NumberFieldId::SurfaceOffset) return format_number_field(placementOffsetMeters_, NumberFieldUnit::Meters);
+    const auto ids = number_field_objects(field);
+    if (ids.empty()) return {};
+    std::optional<float> shared;
+    for (const EditorObjectId id : ids) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        float value = 0.0F;
+        if (field == NumberFieldId::Position) value = axis_of(object->transform.position, axis);
+        else if (field == NumberFieldId::Rotation)
+            value = axis_of(multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian), axis);
+        else value = object->voxelSizeMeters;
+        if (!shared) shared = value;
+        else if (std::abs(*shared - value) > 1.0e-5F) return "\xE2\x80\x94";  // em dash: the objects differ
+    }
+    return format_number_field(*shared, number_field_unit(field));
+}
+
+bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std::string_view text, std::string_view verb) {
+    const NumberFieldUnit unit = number_field_unit(field);
+    std::string label = std::string(verb) + " " + number_field_name(field) +
+        (field == NumberFieldId::Position || field == NumberFieldId::Rotation ? std::string(" ") + axis_name(axis) : std::string());
+    if (field == NumberFieldId::BrushRadius || field == NumberFieldId::SurfaceOffset) {
+        const double current = field == NumberFieldId::BrushRadius ? voxelBrushRadius_ : placementOffsetMeters_;
+        const NumberFieldParse parsed = parse_number_field(text, unit, current);
+        if (!parsed.ok) { set_status(std::string(number_field_name(field)) + ": " + parsed.error, true); return false; }
+        if (field == NumberFieldId::BrushRadius) {
+            voxelBrushRadius_ = static_cast<std::int32_t>(std::clamp<long long>(std::llround(parsed.value), 0, 32));
+            set_status("Voxel brush radius: " + std::to_string(voxelBrushRadius_) + (parsed.value > 32.0 ? " (most is 32)" : ""));
+        } else {
+            placementOffsetMeters_ = static_cast<float>(std::clamp(parsed.value, -10.0, 10.0));
+            set_status("Surface offset: " + format_number_field(placementOffsetMeters_, unit) + " m" +
+                       (std::abs(parsed.value) > 10.0 ? " (limit is 10 m)" : ""));
+        }
+        recompute_layout();
+        return true;
+    }
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before editing values", true); return false; }
+    const auto ids = number_field_objects(field);
+    if (ids.empty()) { set_status(std::string(number_field_name(field)) + ": nothing selected to edit", true); return false; }
+    for (const EditorObjectId id : ids)
+        if (const EditorObject* object = workspace_.document().find_object(id); object->flags.locked) {
+            set_status("Unlock " + object->name + " before editing its " + number_field_name(field), true);
+            return false;
+        }
+    std::unique_ptr<IEditorCommand> command;
+    if (field == NumberFieldId::VoxelSize) {
+        std::vector<ObjectVoxelSizeChange> changes;
+        for (const EditorObjectId id : ids) {
+            const EditorObject* object = workspace_.document().find_object(id);
+            const NumberFieldParse parsed = parse_number_field(text, unit, object->voxelSizeMeters);
+            if (!parsed.ok) { set_status("Voxel size: " + parsed.error, true); return false; }
+            if (!(parsed.value >= 0.001 && parsed.value <= 10.0)) {
+                set_status("Voxel size must be between 1 mm and 10 m", true);
+                return false;
+            }
+            changes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, static_cast<float>(parsed.value),
+                               std::nullopt, std::nullopt});
+        }
+        command = std::make_unique<ScaleVoxelSizeCommand>(std::move(changes), label);
+    } else {
+        // "x y z" (three values, spaces or commas) sets all three axes at once.
+        std::vector<std::string> parts;
+        {
+            std::string current;
+            for (const char c : text) {
+                if (c == ' ' || c == ',' || c == '\t') { if (!current.empty()) parts.push_back(std::move(current)); current.clear(); }
+                else current.push_back(c);
+            }
+            if (!current.empty()) parts.push_back(std::move(current));
+        }
+        bool triple = parts.size() == 3;
+        for (const std::string& part : parts) triple = triple && parse_number_field(part, unit, 0.0).ok;
+        std::vector<ObjectTransformChange> changes;
+        for (const EditorObjectId id : ids) {
+            const EditorObject* object = workspace_.document().find_object(id);
+            ObjectTransformChange change{id, object->transform, object->transform};
+            if (triple) {
+                Float3 values = field == NumberFieldId::Position ? object->transform.position
+                                                                 : multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian);
+                for (int a = 0; a < 3; ++a)
+                    axis_of(values, a) = static_cast<float>(parse_number_field(parts[static_cast<std::size_t>(a)], unit, axis_of(values, a)).value);
+                if (field == NumberFieldId::Position) change.after.position = values;
+                else change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(values, 1.0F / kDegreesPerRadian)));
+            } else if (field == NumberFieldId::Position) {
+                const NumberFieldParse parsed = parse_number_field(text, unit, axis_of(object->transform.position, axis));
+                if (!parsed.ok) { set_status("Position " + std::string(axis_name(axis)) + ": " + parsed.error, true); return false; }
+                axis_of(change.after.position, axis) = static_cast<float>(parsed.value);
+            } else {
+                Float3 euler = multiply(quaternion_to_euler_xyz(object->transform.rotation), kDegreesPerRadian);
+                const NumberFieldParse parsed = parse_number_field(text, unit, axis_of(euler, axis));
+                if (!parsed.ok) { set_status("Rotation " + std::string(axis_name(axis)) + ": " + parsed.error, true); return false; }
+                axis_of(euler, axis) = static_cast<float>(parsed.value);
+                change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(euler, 1.0F / kDegreesPerRadian)));
+            }
+            changes.push_back(change);
+        }
+        if (triple) label = std::string(verb) + " " + number_field_name(field);
+        command = std::make_unique<TransformObjectsCommand>(std::move(changes), label);
+    }
+    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
+    set_status(result.success ? label + (ids.size() > 1 ? " on " + std::to_string(ids.size()) + " objects" : std::string()) : result.message,
+               !result.success);
+    return result.success;
+}
+
+bool NativeEditorController::reset_number_field(NumberFieldId field, int axis) {
+    return set_number_field(field, axis, field == NumberFieldId::VoxelSize ? "0.1" : "0", "Reset");
+}
+
+void NativeEditorController::begin_number_field_edit(NumberFieldId field, int axis) {
+    const TextEditKind kind = field == NumberFieldId::Position ? TextEditKind::Position
+        : field == NumberFieldId::Rotation ? TextEditKind::Rotation
+        : field == NumberFieldId::VoxelSize ? TextEditKind::VoxelSize
+        : field == NumberFieldId::BrushRadius ? TextEditKind::BrushRadius : TextEditKind::SurfaceOffset;
+    std::string initial = number_field_text(field, axis);
+    if (initial == "\xE2\x80\x94") initial.clear();
+    const auto primary = workspace_.selected_object();
+    begin_text_edit(kind, primary.value_or(EditorObjectId{}), std::move(initial));
+    textEdit_.axis = axis;
+    focusRegion_ = field == NumberFieldId::BrushRadius || field == NumberFieldId::SurfaceOffset ? EditorFocusRegion::Viewport
+                                                                                                 : EditorFocusRegion::Inspector;
+    set_status(std::string("Type ") + number_field_name(field) +
+               (field == NumberFieldId::Position || field == NumberFieldId::Rotation ? std::string(" ") + axis_name(axis) : std::string()) +
+               (field == NumberFieldId::Rotation ? " in degrees (rad, turn)" : field == NumberFieldId::BrushRadius ? " in voxels"
+                                                                                                                 : " in meters (cm, mm, ft, in)") +
+               "; +=, -=, *=, /= change it; Tab moves on, Enter applies, Esc cancels", false, 8.0F);
+}
+
+void NativeEditorController::update_number_scrub(int x, std::uint32_t modifiers) {
+    NumberScrubState& scrub = numberScrub_;
+    const int dx = x - scrub.startX;
+    if (!scrub.moved) {
+        if (std::abs(dx) < 3) return;
+        scrub.moved = true;
+        if (textEdit_.kind != TextEditKind::Inactive) commit_text_edit();
+    }
+    const bool fine = (modifiers & 1U) != 0U;
+    const bool snap = (modifiers & 2U) != 0U;
+    const EditorPreferences& preferences = workspace_.preferences();
+    switch (scrub.field) {
+    case NumberFieldId::Position:
+    case NumberFieldId::Rotation: {
+        const bool rotation = scrub.field == NumberFieldId::Rotation;
+        const float perPixel = (rotation ? 0.5F : 0.01F) * (fine ? 0.1F : 1.0F);
+        const float step = rotation ? preferences.rotateSnapDegrees : preferences.translateSnapMeters;
+        for (ObjectTransformChange& change : scrub.transforms) {
+            change.after = change.before;
+            if (!rotation) {
+                float value = axis_of(change.before.position, scrub.axis) + static_cast<float>(dx) * perPixel;
+                if (snap && step > 0.0F) value = std::round(value / step) * step;
+                axis_of(change.after.position, scrub.axis) = value;
+            } else {
+                Float3 euler = multiply(quaternion_to_euler_xyz(change.before.rotation), kDegreesPerRadian);
+                float value = axis_of(euler, scrub.axis) + static_cast<float>(dx) * perPixel;
+                if (snap && step > 0.0F) value = std::round(value / step) * step;
+                axis_of(euler, scrub.axis) = value;
+                change.after.rotation = normalize(quaternion_from_euler_xyz(multiply(euler, 1.0F / kDegreesPerRadian)));
+            }
+        }
+        apply_transform_preview(scrub.transforms, true);
+        break;
+    }
+    case NumberFieldId::VoxelSize:
+        for (ObjectVoxelSizeChange& change : scrub.sizes) {
+            float value = change.beforeVoxelSize * std::pow(fine ? 1.001F : 1.01F, static_cast<float>(dx));
+            if (snap) value = std::round(value / 0.005F) * 0.005F;
+            change.afterVoxelSize = std::clamp(value, 0.001F, 10.0F);
+            if (EditorObject* object = workspace_.document().find_object(change.id)) object->voxelSizeMeters = change.afterVoxelSize;
+        }
+        break;
+    case NumberFieldId::BrushRadius:
+        voxelBrushRadius_ = std::clamp(static_cast<std::int32_t>(std::lround(scrub.startScalar + static_cast<float>(dx) / (fine ? 24.0F : 8.0F))), 0, 32);
+        break;
+    case NumberFieldId::SurfaceOffset: {
+        float value = scrub.startScalar + static_cast<float>(dx) * (fine ? 0.001F : 0.01F);
+        if (snap) value = std::round(value / 0.05F) * 0.05F;
+        placementOffsetMeters_ = std::clamp(value, -10.0F, 10.0F);
+        break;
+    }
+    }
+    set_status(std::string("Scrubbing ") + number_field_name(scrub.field) +
+               (scrub.field == NumberFieldId::Position || scrub.field == NumberFieldId::Rotation ? std::string(" ") + axis_name(scrub.axis) : std::string()) +
+               ": " + number_field_text(scrub.field, scrub.axis) + "  (Shift fine, Ctrl snap, Esc cancels)", false, 2.0F);
+}
+
+void NativeEditorController::finish_number_scrub(bool cancel) {
+    NumberScrubState scrub = std::move(numberScrub_);
+    numberScrub_ = {};
+    if (!scrub.moved) {
+        // A click on the label without dragging: type into that field.
+        if (!cancel) begin_number_field_edit(scrub.field, scrub.axis);
+        return;
+    }
+    const std::string label = std::string("Scrub ") + number_field_name(scrub.field) +
+        (scrub.field == NumberFieldId::Position || scrub.field == NumberFieldId::Rotation ? std::string(" ") + axis_name(scrub.axis) : std::string());
+    switch (scrub.field) {
+    case NumberFieldId::Position:
+    case NumberFieldId::Rotation: {
+        apply_transform_preview(scrub.transforms, false);
+        if (cancel) { set_status("Scrub cancelled"); return; }
+        const CommandResult result = workspace_.commands().execute(workspace_.document(),
+            std::make_unique<TransformObjectsCommand>(std::move(scrub.transforms), label));
+        set_status(result.success ? label : result.message, !result.success);
+        return;
+    }
+    case NumberFieldId::VoxelSize:
+        for (const ObjectVoxelSizeChange& change : scrub.sizes)
+            if (EditorObject* object = workspace_.document().find_object(change.id)) object->voxelSizeMeters = change.beforeVoxelSize;
+        if (cancel) { set_status("Scrub cancelled"); return; }
+        {
+            const CommandResult result = workspace_.commands().execute(workspace_.document(),
+                std::make_unique<ScaleVoxelSizeCommand>(std::move(scrub.sizes), label));
+            set_status(result.success ? label : result.message, !result.success);
+        }
+        return;
+    case NumberFieldId::BrushRadius:
+        if (cancel) voxelBrushRadius_ = static_cast<std::int32_t>(scrub.startScalar);
+        set_status(cancel ? "Scrub cancelled" : "Voxel brush radius: " + std::to_string(voxelBrushRadius_));
+        return;
+    case NumberFieldId::SurfaceOffset:
+        if (cancel) placementOffsetMeters_ = scrub.startScalar;
+        set_status(cancel ? "Scrub cancelled" : "Surface offset: " + format_number_field(placementOffsetMeters_, NumberFieldUnit::Meters) + " m");
+        return;
+    }
+}
+
+std::vector<NumberFieldRect> NativeEditorController::number_field_rects() const {
+    std::vector<NumberFieldRect> rects;
+    const bool stacked = layout_.inspectorStackedFields;
+    const auto axis_row = [&](NumberFieldId field, const UiRect& row) {
+        if (row.width <= 0 || row.height < 14 || !number_field_available(field)) return;
+        // Name at the left (or on the line above when stacked), then X / Y / Z: a draggable letter and a box.
+        const int nameWidth = stacked ? 0 : 66;
+        const int top = stacked ? row.y + 15 : row.y - 3;  // value baselines line up with the row name
+        const int each = (row.width - nameWidth) / 3;
+        for (int axis = 0; axis < 3; ++axis) {
+            const int x0 = row.x + nameWidth + axis * each;
+            rects.push_back({field, axis, {x0, top, 14, 18}, {x0 + 14, top, std::max(10, each - 18), 18}});
+        }
+    };
+    if (layout_.inspectorFields.size() >= 2 && !scatter_settings_panel_active()) {
+        axis_row(NumberFieldId::Position, layout_.inspectorFields[0]);
+        axis_row(NumberFieldId::Rotation, layout_.inspectorFields[1]);
+        if (layout_.inspectorFields.size() >= 3 && number_field_available(NumberFieldId::VoxelSize)) {
+            const UiRect row = layout_.inspectorFields[2];
+            if (row.width > 0 && row.height >= 14) {
+                const int top = stacked ? row.y + 15 : row.y - 3;  // value baselines line up with the row name
+                const UiRect name{row.x, row.y, stacked ? row.width : 80, stacked ? 18 : row.height};
+                const int boxX = stacked ? row.x + 14 : row.x + 80;
+                rects.push_back({NumberFieldId::VoxelSize, 0, name, {boxX, top, std::min(110, row.x + row.width - boxX), 18}});
+            }
+        }
+    }
+    // Tool strip: the brush radius or surface offset for the active tool, under the viewport hint.
+    if (layout_.viewport.width > 260 && workspace_.mode() == EditorMode::Edit) {
+        int x = layout_.viewport.x + 8;
+        const int y = layout_.viewport.y + 24;
+        for (const NumberFieldId field : {NumberFieldId::BrushRadius, NumberFieldId::SurfaceOffset}) {
+            if (!number_field_available(field)) continue;
+            const int nameWidth = field == NumberFieldId::BrushRadius ? 92 : 106;
+            const int boxWidth = field == NumberFieldId::BrushRadius ? 44 : 72;
+            rects.push_back({field, 0, {x, y, nameWidth, 18}, {x + nameWidth, y, boxWidth, 18}});
+            x += nameWidth + boxWidth + 12;
+        }
+    }
+    return rects;
+}
 InspectorSelectionSummary NativeEditorController::inspector_selection_summary() const {
     InspectorSelectionSummary summary;
     const EditorObject* first = nullptr;

@@ -27,7 +27,8 @@ struct EdgeBevelSettings {
     float smoothingAngle{30.0F};
 };
 // Explicit reconstruction and provenance: closed convex solids, straight open crease chains,
-// and straight open boundary chains. Unsupported endpoint/corner joins refuse atomically.
+// and straight open boundary chains. One complete collinear split crease is supported per
+// closed-convex edit. Partial chains and unsupported endpoint/corner joins refuse atomically.
 [[nodiscard]] PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset&,const PolygonSelection&,
     const EdgeBevelSettings&,Float3 objectScale={1,1,1},const SubdivisionSettings* authored=nullptr);
 [[nodiscard]] PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset&,const PolygonSelection&,

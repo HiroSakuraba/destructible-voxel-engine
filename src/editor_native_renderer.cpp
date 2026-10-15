@@ -3602,6 +3602,45 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             }
         }
     }
+    // Voxel brush preview (ART-044): the cells a click of Add (green), Remove (red) or Paint (the
+    // active material's colour) would change, plus a count at the cursor.
+    if (const auto preview = controller.voxel_brush_preview()) {
+        if (const EditorObject* object = shadingDocument.find_object(preview->objectId)) {
+            const Float4 paint = editor_material_display_color(controller.materials(), controller.active_material());
+            const auto channel = [](float v) { return static_cast<std::uint8_t>(std::clamp(v, 0.0F, 1.0F) * 255.0F); };
+            const EditorColor color = preview->locked ? rgb(150,150,150)
+                : preview->operation == VoxelToolOperation::Add ? rgb(110,232,128)
+                : preview->operation == VoxelToolOperation::Remove ? rgb(255,92,78)
+                : rgb(channel(paint.x * 0.8F + 0.2F), channel(paint.y * 0.8F + 0.2F), channel(paint.z * 0.8F + 0.2F));
+            const Float3 voxel = multiply(object->voxelScale, object->voxelSizeMeters);
+            for (const Int3 cell : preview->cells) {
+                const ScreenPoint a = project_world_to_screen(controller.camera(), viewport, voxel_to_world(object->transform, voxel,
+                    {float(cell.x), float(cell.y), float(cell.z)}));
+                const ScreenPoint b = project_world_to_screen(controller.camera(), viewport, voxel_to_world(object->transform, voxel,
+                    {float(cell.x) + 1.0F, float(cell.y) + 1.0F, float(cell.z) + 1.0F}));
+                if (!a.visible || !b.visible) continue;
+                const int half = std::clamp(static_cast<int>(std::max(std::abs(b.x - a.x), std::abs(b.y - a.y)) * 0.35F), 1, 40);
+                const int cx = static_cast<int>((a.x + b.x) * 0.5F), cy = static_cast<int>((a.y + b.y) * 0.5F);
+                viewportPainter.outline({cx - half, cy - half, half * 2 + 1, half * 2 + 1}, color);
+            }
+            if (preview->shape == BrushShape::Cube && preview->radius > 0) {
+                const Int3 c = preview->center;
+                const int r = preview->radius;
+                draw_voxel_box(viewportPainter, controller, *object, VoxelBox{{c.x - r, c.y - r, c.z - r}, {c.x + r + 1, c.y + r + 1, c.z + r + 1}},
+                               rgb(90,110,130));
+            }
+            const std::string verb = preview->locked ? "Locked" : preview->operation == VoxelToolOperation::Add ? "+"
+                : preview->operation == VoxelToolOperation::Remove ? "-" : "paint ";
+            const std::string label = preview->locked ? "Locked: unlock " + object->name + " to edit"
+                : verb + std::to_string(preview->count) + (preview->shape == BrushShape::Sphere ? "  sphere r" : "  cube r") +
+                  std::to_string(preview->radius) + (preview->limitedToSelection ? "  (selection only)" : "");
+            const int w = viewportPainter.text_width(label) + 8;
+            const int lx = std::clamp(controller.hover_x() + 16, viewport.x + 4, std::max(viewport.x + 4, viewport.x + viewport.width - w - 4));
+            const int ly = std::clamp(controller.hover_y() + 24, viewport.y + 18, viewport.y + viewport.height - 6);
+            viewportPainter.fill({lx, ly - 14, w, 18}, rgb(16,20,26));
+            viewportPainter.text(lx + 4, ly, label, color);
+        }
+    }
     // Collision: View > Collision Shapes draws the selected objects' merged box proxies (the boxes
     // Play uses); the Collision shading mode draws every visible object's.
     if (controller.viewport_settings().showCollision || shading == ShadingMode::Collision) {

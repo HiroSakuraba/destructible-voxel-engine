@@ -2163,6 +2163,8 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("view.xray", viewportSettings_.xraySelection);
     checked("view.follow_selection", followSelection_);
     checked("select.domain_objects", selectionDomain_ == SelectionDomain::Objects);
+    checked("voxel.brush_shape_cube", voxelBrushShape_ == BrushShape::Cube);
+    checked("voxel.brush_shape_sphere", voxelBrushShape_ == BrushShape::Sphere);
     checked("select.domain_voxels", selectionDomain_ == SelectionDomain::Voxels);
     {
         const SettingValue shadingValue = workspace_.settings().value("viewport.shading_mode");
@@ -5150,10 +5152,10 @@ const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept {
         {"Select", "Sel", "transform.select", "Click an object to select it; drag empty space to box-select.",
          "Objects"},
         {"Move", "Mov", "transform.translate", "Drag a gizmo axis to move the selection.", "Selected objects"},
-        {"Add", "Add", "voxel.brush", "Click a voxel face to add voxels of the active material.",
+        {"Add", "Add", "voxel.brush", "Click a voxel face to add voxels of the active material; [ / ] radius, Voxel > Brush Shape cube or sphere; green cells show what a click adds.",
          "Voxel objects"},
-        {"Remove", "Rem", "voxel.erase", "Click voxels to remove them.", "Voxel objects"},
-        {"Paint", "Pnt", "voxel.paint_material", "Click voxels to repaint them with the active material.",
+        {"Remove", "Rem", "voxel.erase", "Click voxels to remove them; [ / ] radius, Voxel > Brush Shape; red cells show what a click removes.", "Voxel objects"},
+        {"Paint", "Pnt", "voxel.paint_material", "Click voxels to repaint them with the active material; [ / ] radius, Voxel > Brush Shape; outlined cells show what a click repaints.",
          "Voxel objects"},
         {"Box", "Box", "voxel.volume", "Click a voxel to add a 3x3x3 box around it.", "Voxel objects"},
         {"Beam", "Bm", "voxel.line", "Click a voxel to add a 5-voxel beam along +X.", "Voxel objects"},
@@ -5328,7 +5330,7 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
         command = make_anchor_brush_command(workspace_.document(), pick.objectId, pick.voxel, 0, addAnchor);
     } else {
         BrushSettings settings;
-        settings.shape = BrushShape::Cube;
+        settings.shape = voxelBrushShape_;
         settings.radius = voxelBrushRadius_;
         settings.material = activeMaterial_;
         settings.strokeId = strokeId_;
@@ -5346,7 +5348,7 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
                     // With a voxel selection, Paint and Remove only touch selected voxels.
                     std::vector<VoxelChange> changes;
                     for (const Int3 cell : voxels_in_cube(*object->voxels, pick.voxel, voxelBrushRadius_)) {
-                        if (!voxelSelection_.contains(cell)) continue;
+                        if (!voxelSelection_.contains(cell) || !in_voxel_brush(cell, pick.voxel)) continue;
                         const MaterialId before = object->voxels->material_at(cell);
                         const MaterialId after = settings.operation == VoxelToolOperation::Remove ? kAirMaterial : activeMaterial_;
                         if (before != after) changes.push_back({cell, before, after});
@@ -6224,9 +6226,19 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         } else set_status("No voxel material under cursor");
         return true;
     }
+    if (actionId == "voxel.brush_shape_cube" || actionId == "voxel.brush_shape_sphere" || actionId == "voxel.brush_shape_toggle") {
+        voxelBrushShape_ = actionId == "voxel.brush_shape_cube" ? BrushShape::Cube
+            : actionId == "voxel.brush_shape_sphere" ? BrushShape::Sphere
+            : (voxelBrushShape_ == BrushShape::Cube ? BrushShape::Sphere : BrushShape::Cube);
+        refresh_menu_state();
+        set_status(std::string("Voxel brush shape: ") + (voxelBrushShape_ == BrushShape::Sphere ? "sphere" : "cube") +
+                   ", radius " + std::to_string(voxelBrushRadius_) + " ([ / ] change it)");
+        return true;
+    }
     if (actionId == "voxel.brush_increase" || actionId == "voxel.brush_decrease") {
         voxelBrushRadius_ = std::clamp(voxelBrushRadius_ + (actionId == "voxel.brush_increase" ? 1 : -1), 0, 32);
-        set_status("Voxel brush radius: " + std::to_string(voxelBrushRadius_));
+        set_status("Voxel brush radius: " + std::to_string(voxelBrushRadius_) +
+                   (voxelBrushShape_ == BrushShape::Sphere ? " (sphere)" : " (cube)"));
         return true;
     }
     if (actionId == "voxel.fill") return arm_flood_fill();
@@ -11791,6 +11803,58 @@ std::optional<Int3> NativeEditorController::voxel_move_preview() const noexcept 
                 voxelMoveAxis_ == 3 ? voxelMoveSteps_ : 0};
 }
 
+bool NativeEditorController::in_voxel_brush(Int3 cell, Int3 center) const noexcept {
+    const std::int64_t dx = cell.x - center.x, dy = cell.y - center.y, dz = cell.z - center.z;
+    const std::int64_t r = voxelBrushRadius_;
+    if (std::abs(dx) > r || std::abs(dy) > r || std::abs(dz) > r) return false;
+    return voxelBrushShape_ == BrushShape::Cube || dx * dx + dy * dy + dz * dz <= r * r;
+}
+
+std::optional<VoxelBrushPreview> NativeEditorController::voxel_brush_preview() const {
+    const bool brushTool = activeTool_ == EditorToolId::AddVoxel || activeTool_ == EditorToolId::RemoveVoxel ||
+                           activeTool_ == EditorToolId::PaintMaterial;
+    if (!brushTool || !hoverPick_ || workspace_.mode() != EditorMode::Edit || playSession_.active() || gizmoDragging_)
+        return std::nullopt;
+    const EditorObject* object = workspace_.document().find_object(hoverPick_->objectId);
+    if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume) return std::nullopt;
+    const bool limited = activeTool_ != EditorToolId::AddVoxel && !voxelSelection_.empty() && voxelSelectionObject_ == object->id;
+    const BrushPreviewKey key{object->id, hoverPick_->voxel, hoverPick_->normal, voxelBrushRadius_, voxelBrushShape_,
+                              activeTool_, activeMaterial_, object->voxels->revision(), limited ? voxelSelection_.size() : 0U,
+                              limited ? voxelSelectionObject_ : EditorObjectId{}, object->flags.locked};
+    if (brushPreviewKey_ == key) return brushPreview_;
+    VoxelBrushPreview preview;
+    preview.objectId = object->id;
+    preview.radius = voxelBrushRadius_;
+    preview.shape = voxelBrushShape_;
+    preview.limitedToSelection = limited;
+    preview.locked = object->flags.locked;
+    preview.operation = activeTool_ == EditorToolId::AddVoxel ? VoxelToolOperation::Add
+        : activeTool_ == EditorToolId::RemoveVoxel ? VoxelToolOperation::Remove : VoxelToolOperation::Paint;
+    preview.center = preview.operation == VoxelToolOperation::Add ? add_int3(hoverPick_->voxel, hoverPick_->normal) : hoverPick_->voxel;
+    if (!preview.locked) {
+        // The same rule as the brush command: Add fills empty cells, Remove empties occupied ones,
+        // Paint changes occupied cells of another material; with a selection only selected cells.
+        const auto shapeCells = voxelBrushShape_ == BrushShape::Sphere ? sphere_brush_voxels(preview.center, voxelBrushRadius_)
+                                                                       : cube_brush_voxels(preview.center, voxelBrushRadius_);
+        for (const Int3 cell : shapeCells) {
+            const MaterialId before = object->voxels->material_at(cell);
+            bool changes = false;
+            switch (preview.operation) {
+            case VoxelToolOperation::Add: changes = before == kAirMaterial; break;
+            case VoxelToolOperation::Remove: changes = before != kAirMaterial; break;
+            case VoxelToolOperation::Paint: changes = before != kAirMaterial && before != activeMaterial_; break;
+            }
+            if (changes && limited && !voxelSelection_.contains(cell)) changes = false;
+            if (!changes) continue;
+            ++preview.count;
+            if (preview.cells.size() < kMaxBrushPreviewCells) preview.cells.push_back(cell);
+        }
+    }
+    brushPreviewKey_ = key;
+    brushPreview_ = std::move(preview);
+    return brushPreview_;
+}
+
 void NativeEditorController::voxel_brush_select_at(int x, int y) {
     update_hover(x, y);
     if (!hoverPick_) return;
@@ -11798,6 +11862,7 @@ void NativeEditorController::voxel_brush_select_at(int x, int y) {
     if (!object || !object->voxels) return;
     if (hoverPick_->objectId != voxelSelectionObject_ && voxelBrushOperation_ == SelectionOperation::Subtract) return;
     auto cells = voxels_in_cube(*object->voxels,hoverPick_->voxel,voxelBrushRadius_);
+    std::erase_if(cells, [&](const Int3& cell) { return !in_voxel_brush(cell, hoverPick_->voxel); });
     if (!viewportSettings_.xraySelection) {
         std::size_t budget = kMaxVoxelSelectionRays;
         for (auto at = cells.begin(); at != cells.end();) {

@@ -3821,6 +3821,12 @@ void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
 }
 
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
+    if (numberScrub_.armed) {
+        hoverX_ = x; hoverY_ = y;
+        update_number_scrub(x, modifiers);
+        lastPointerX_ = x; lastPointerY_ = y;
+        return;
+    }
     if (polygonLoopCutDragging_) {
         polygonPreviewTyped_.clear();
         polygonPreviewSettings_.amount=std::clamp(polygonLoopCutStartFraction_+
@@ -3830,11 +3836,6 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     if(!longJob_ && textEdit_.kind==TextEditKind::Inactive && mesh_authoring_pointer_move(x,y,modifiers)){lastPointerX_=x;lastPointerY_=y;return;}
     hoverX_ = x;
     hoverY_ = y;
-    if (numberScrub_.armed) {
-        update_number_scrub(x, modifiers);
-        lastPointerX_ = x; lastPointerY_ = y;
-        return;
-    }
     if (sliceDrag_) {
         update_slice_pointer(x, y, modifiers);
         lastPointerX_ = x; lastPointerY_ = y;
@@ -4409,6 +4410,39 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     }
     if (button == PointerButton::Primary && begin_slice_pointer(x, y, modifiers)) return;
 
+    if (button == PointerButton::Primary && workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
+        !openMenu_ && !contextMenu_.open && !commandPaletteOpen_ && !filePicker_.open && !layout_.menuBar.contains(x, y)) {
+        // Numeric fields: a click on a box types into it; a press on the label starts a scrub
+        // (a click on the label without dragging also types).
+        for (const NumberFieldRect& rect : number_field_rects()) {
+            if (rect.box.contains(x, y)) { begin_number_field_edit(rect.field, rect.axis); return; }
+            if (!rect.label.contains(x, y)) continue;
+            numberScrub_ = {};
+            numberScrub_.armed = true;
+            numberScrub_.field = rect.field;
+            numberScrub_.axis = rect.axis;
+            numberScrub_.startX = x;
+            numberScrub_.startScalar = rect.field == NumberFieldId::BrushRadius ? static_cast<float>(voxelBrushRadius_) : placementOffsetMeters_;
+            bool locked = false;
+            for (const EditorObjectId id : number_field_objects(rect.field)) {
+                const EditorObject* object = workspace_.document().find_object(id);
+                if (!object) continue;
+                locked = locked || object->flags.locked;
+                if (rect.field == NumberFieldId::VoxelSize)
+                    numberScrub_.sizes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, object->voxelSizeMeters,
+                                                  std::nullopt, std::nullopt});
+                else numberScrub_.transforms.push_back({id, object->transform, object->transform});
+            }
+            if (locked && rect.field != NumberFieldId::BrushRadius && rect.field != NumberFieldId::SurfaceOffset) {
+                numberScrub_ = {};
+                set_status("Unlock the selected objects before editing them", true);
+            }
+            focusRegion_ = rect.field == NumberFieldId::BrushRadius || rect.field == NumberFieldId::SurfaceOffset
+                ? EditorFocusRegion::Viewport : EditorFocusRegion::Inspector;
+            return;
+        }
+    }
+
     const auto now = std::chrono::steady_clock::now();
     const SettingValue doubleMsValue = workspace_.settings().value("input.double_click_ms");
     const SettingValue doubleDistanceValue = workspace_.settings().value("input.double_click_distance_px");
@@ -4420,11 +4454,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
     const int clickDy = y - lastClickY_;
     const bool doubleClick = button == lastClickButton_ && lastClickTime_.time_since_epoch().count() != 0 &&
         now - lastClickTime_ <= doubleMs && clickDx * clickDx + clickDy * clickDy <= doubleDistance * doubleDistance;
-    bool overNumberField = false;
-    if (doubleClick)
-        for (const NumberFieldRect& rect : number_field_rects())
-            overNumberField = overNumberField || rect.box.contains(x, y) || rect.label.contains(x, y);
-    if (doubleClick && !overNumberField && !((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
+    if (doubleClick && !((activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
                           activeTool_ == EditorToolId::Scale) && layout_.viewport.contains(x,y) &&
                          hit_test_gizmo_axis(x,y) != 0)) {
         const ShortcutGesture gesture = mouse_shortcut(pointer_input_name(button),
@@ -4513,37 +4543,6 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             }
         }
         return;
-    }
-    if (button == PointerButton::Primary && workspace_.mode() == EditorMode::Edit && !playSession_.active()) {
-        // Numeric fields: a click on a box types into it; a press on the label starts a scrub
-        // (a click on the label without dragging also types).
-        for (const NumberFieldRect& rect : number_field_rects()) {
-            if (rect.box.contains(x, y)) { begin_number_field_edit(rect.field, rect.axis); return; }
-            if (!rect.label.contains(x, y)) continue;
-            numberScrub_ = {};
-            numberScrub_.armed = true;
-            numberScrub_.field = rect.field;
-            numberScrub_.axis = rect.axis;
-            numberScrub_.startX = x;
-            numberScrub_.startScalar = rect.field == NumberFieldId::BrushRadius ? static_cast<float>(voxelBrushRadius_) : placementOffsetMeters_;
-            bool locked = false;
-            for (const EditorObjectId id : number_field_objects(rect.field)) {
-                const EditorObject* object = workspace_.document().find_object(id);
-                if (!object) continue;
-                locked = locked || object->flags.locked;
-                if (rect.field == NumberFieldId::VoxelSize)
-                    numberScrub_.sizes.push_back({id, object->transform, object->transform, object->voxelSizeMeters, object->voxelSizeMeters,
-                                                  std::nullopt, std::nullopt});
-                else numberScrub_.transforms.push_back({id, object->transform, object->transform});
-            }
-            if (locked && rect.field != NumberFieldId::BrushRadius && rect.field != NumberFieldId::SurfaceOffset) {
-                numberScrub_ = {};
-                set_status("Unlock the selected objects before editing them", true);
-            }
-            focusRegion_ = rect.field == NumberFieldId::BrushRadius || rect.field == NumberFieldId::SurfaceOffset
-                ? EditorFocusRegion::Viewport : EditorFocusRegion::Inspector;
-            return;
-        }
     }
     if (button == PointerButton::Primary) {
         if (layout_.viewportHelpButton.contains(x, y)) {
@@ -4866,14 +4865,14 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
-    if (polygonLoopCutDragging_ && button==PointerButton::Primary) {
-        pointer_move(x,y,modifiers); polygonLoopCutDragging_=false; return;
-    }
     if (numberScrub_.armed && button == PointerButton::Primary) {
         update_number_scrub(x, modifiers);
         finish_number_scrub(false);
         lastPointerX_ = x; lastPointerY_ = y;
         return;
+    }
+    if (polygonLoopCutDragging_ && button==PointerButton::Primary) {
+        pointer_move(x,y,modifiers); polygonLoopCutDragging_=false; return;
     }
     if(mesh_authoring_pointer_up(button,x,y,modifiers)){dragButton_=PointerButton::NoButton;refresh_menu_state();return;}
     if (button == PointerButton::Primary && sliceDrag_) {
@@ -8338,9 +8337,9 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     // Escape and focus traversal are intentionally invariant safety/navigation controls.
     // Every productive command below is profile-driven and can be rebound or removed.
     if (normalized == "escape") {
-        if (numberScrub_.armed) { finish_number_scrub(true); return; }
         if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
         clear_navigation_input();
+        if (numberScrub_.armed) { finish_number_scrub(true); return; }
         close_top_level_menu();
         close_context_menu();
         if (gizmoDragging_) finish_gizmo_drag(true);

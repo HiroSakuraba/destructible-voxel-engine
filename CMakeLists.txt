@@ -832,9 +832,12 @@ if(DVE_BUILD_EDITOR)
         src/editor_slice_interaction.cpp
         src/editor_voxel_boolean.cpp
         src/editor_voxel_join.cpp
+        src/editor_number_field.cpp
+        src/editor_duplicate_special.cpp
         src/editor_voxel_selection.cpp
         src/editor_scatter.cpp
         src/editor_polygon.cpp
+        src/editor_mirror.cpp
         src/editor_modeling_topology.cpp
         src/editor_subdivision.cpp
         src/editor_native_polygon.cpp
@@ -2687,9 +2690,15 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_slice_interaction_tests tests/test_editor_slice_interaction.cpp)
         target_link_libraries(dve_editor_slice_interaction_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_slice_interaction_tests COMMAND dve_editor_slice_interaction_tests)
+        add_executable(dve_editor_brush_preview_tests tests/test_editor_brush_preview.cpp)
+        target_link_libraries(dve_editor_brush_preview_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_brush_preview_tests COMMAND dve_editor_brush_preview_tests)
         add_executable(dve_editor_voxel_selection_tests tests/test_editor_voxel_selection.cpp)
         target_link_libraries(dve_editor_voxel_selection_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_selection_tests COMMAND dve_editor_voxel_selection_tests)
+        add_executable(dve_editor_asset_drag_tests tests/test_editor_asset_drag.cpp)
+        target_link_libraries(dve_editor_asset_drag_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_asset_drag_tests COMMAND dve_editor_asset_drag_tests)
         add_executable(dve_editor_hierarchy_navigation_tests tests/test_editor_hierarchy_navigation.cpp)
         target_link_libraries(dve_editor_hierarchy_navigation_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_hierarchy_navigation_tests COMMAND dve_editor_hierarchy_navigation_tests)
@@ -2714,6 +2723,12 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_inspector_selection_tests tests/test_editor_inspector_selection.cpp)
         target_link_libraries(dve_editor_inspector_selection_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_inspector_selection_tests COMMAND dve_editor_inspector_selection_tests)
+        add_executable(dve_editor_number_fields_tests tests/test_editor_number_fields.cpp)
+        target_link_libraries(dve_editor_number_fields_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_number_fields_tests COMMAND dve_editor_number_fields_tests)
+        add_executable(dve_editor_duplicate_special_tests tests/test_editor_duplicate_special.cpp)
+        target_link_libraries(dve_editor_duplicate_special_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_duplicate_special_tests COMMAND dve_editor_duplicate_special_tests)
         target_link_libraries(dve_editor_honest_commands_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_honest_commands_tests COMMAND dve_editor_honest_commands_tests)
         target_link_libraries(dve_editor_closed_groups_tests PRIVATE dve::editor)
@@ -2724,6 +2739,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_voxel_join_tests tests/test_editor_voxel_join.cpp)
         target_link_libraries(dve_editor_voxel_join_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_join_tests COMMAND dve_editor_voxel_join_tests)
+        add_executable(dve_editor_mirror_tests tests/test_editor_mirror.cpp)
+        target_link_libraries(dve_editor_mirror_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_mirror_tests COMMAND dve_editor_mirror_tests)
         add_executable(dve_editor_voxel_boolean_tests tests/test_editor_voxel_boolean.cpp)
         target_link_libraries(dve_editor_voxel_boolean_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_boolean_tests COMMAND dve_editor_voxel_boolean_tests)

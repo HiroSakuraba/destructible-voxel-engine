@@ -467,6 +467,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"transform.scale_voxel_size_up","Edit","Scale Voxel Size x2",""},
         {"transform.scale_voxel_size_down","Edit","Scale Voxel Size x0.5",""},
         {"edit.duplicate","Edit","Duplicate","Ctrl+D"}, {"edit.rename","Edit","Rename","F2"},
+        {"edit.duplicate_special","Edit","Duplicate Special...","Ctrl+Shift+D"},
         {"edit.group","Edit","Group Selected","Ctrl+G"}, {"edit.ungroup","Edit","Ungroup","Ctrl+Shift+G"},
         {"edit.open_group","Edit","Open Group",""},
         {"edit.close_group","Edit","Close Group","Ctrl+Alt+G"},
@@ -477,6 +478,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"select.parent","Edit","Select Parent",""},
         {"select.children","Edit","Select Children",""},
         {"select.siblings","Edit","Select Siblings",""},
+        {"edit.mirror_copy_x","Edit","Mirror Copy X",""},
+        {"edit.mirror_copy_y","Edit","Mirror Copy Y",""},
+        {"edit.mirror_copy_z","Edit","Mirror Copy Z",""},
+        {"edit.mirror_x","Edit","Mirror X (in place)",""},
+        {"edit.mirror_y","Edit","Mirror Y (in place)",""},
+        {"edit.mirror_z","Edit","Mirror Z (in place)",""},
         {"edit.preferences","Edit","Editor Preferences","Ctrl+,"},
         {"edit.project_settings","Edit","Project Settings",""},
         {"window.toggle_hierarchy","Window","Scene Hierarchy","Ctrl+1"},
@@ -614,6 +621,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.select_shrink","Voxel","Shrink Voxel Selection",""},
         {"voxel.select_invert","Voxel","Invert Voxel Selection",""},
         {"voxel.selection_brush","Voxel","Selection Brush",""},
+        {"voxel.brush_shape_cube","Voxel","Brush Shape: Cube",""},
+        {"voxel.brush_shape_sphere","Voxel","Brush Shape: Sphere",""},
+        {"voxel.brush_shape_toggle","Voxel","Toggle Brush Shape (Cube / Sphere)",""},
         {"polygon.convert_to_voxels","Polygon","Convert Selected Mesh to Voxels",""},
         {"voxel.convert_to_polygon","Voxel","Convert Selected Voxels to Polygon",""},
         {"voxel.authoring_apply","Voxel","Apply Voxel / Conversion Preview",""},
@@ -920,6 +930,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("camera.load_bookmark_2", "Bookmarks", 63);
     configure("camera.settings", "Settings", 90);
     configure("voxel.settings", "Settings", 90);
+    for (std::string_view id : {"edit.mirror_copy_x", "edit.mirror_copy_y", "edit.mirror_copy_z", "edit.mirror_x", "edit.mirror_y", "edit.mirror_z"})
+        configure(id, "Mirror", 24);
     configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
     configure("select.domain_voxels", "Selection Domain", 31, true, "select.domain");
     configure("select.domain_toggle", "Selection Domain", 32);
@@ -1016,6 +1028,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("subdiv.delete","Subdivision Modeling",68,false);
     configure("subdiv.duplicate","Subdivision Modeling",69,false);
     configure("voxel.selection_brush", "Voxel Selection", 51, true);
+    configure("voxel.brush_shape_cube", "Brush", 45, true, "voxel.brush_shape");
+    configure("voxel.brush_shape_sphere", "Brush", 46, true, "voxel.brush_shape");
+    configure("voxel.brush_shape_toggle", "Brush", 47);
     configure("voxel.select_cells", "Voxel Selection", 48, true, "voxel.click_selection");
     configure("voxel.select_connected", "Voxel Selection", 49, true, "voxel.click_selection");
     configure("polygon.convert_to_voxels", "Geometry Conversion", 60);
@@ -1141,6 +1156,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             for (const char* keyword : keywords) action->keywords.emplace_back(keyword);
         }
     };
+    describe("edit.duplicate_special", "Make many copies, each offset, turned and scaled from the last, around its own pivot or a point (fans, rings, spirals). Preview, then Apply as one undo step.",
+             {"array", "copies", "repeat", "radial", "instance", "duplicate"});
     describe("edit.open_group", "Let viewport clicks reach the pieces inside the selected group. Double-clicking a piece does the same.", {"group", "enter", "isolate"});
     describe("edit.close_group", "Close the open group around the selection and select the whole group again.", {"group", "exit"});
     describe("edit.close_all_groups", "Close every open group so clicks select whole groups.", {"group", "exit"});
@@ -1156,6 +1173,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("subdiv.scale","Scale Cage / Object through the shared control-cage transform workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_all","Select All Components through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_grow","Grow Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    for (const char* axis : {"x", "y", "z"}) {
+        describe(std::string("edit.mirror_copy_") + axis, "Make a mirrored copy of the selection across the world plane through the pivot (voxels and meshes really flip).",
+                 {"mirror", "symmetry", "flip", "reflect", "copy"});
+        describe(std::string("edit.mirror_") + axis, "Mirror the selection in place across the world plane through the pivot (voxels and meshes really flip).",
+                 {"mirror", "symmetry", "flip", "reflect"});
+    }
     describe("subdiv.select_loop","Follow selected cage edges through regular quad vertices; stops at boundaries, poles and triangles.",{"subdivision","edge","loop"});
     describe("subdiv.select_ring","Select opposite edges across saved control quads; stops at boundaries and triangles.",{"subdivision","edge","ring"});
     describe("polygon.select_loop","Select loops on an authored subdivision control cage; convert an ordinary polygon mesh to subdivision first.",{"cage","edge","loop"});

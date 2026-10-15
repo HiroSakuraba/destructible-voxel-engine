@@ -45,6 +45,7 @@
 #include "dve/collision_proxy.hpp"
 #include "dve/editor_scatter.hpp"
 #include "dve/editor_polygon.hpp"
+#include "dve/editor_mirror.hpp"
 #include "dve/editor_subdivision.hpp"
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
@@ -874,6 +875,9 @@ public:
     void reset_camera_navigation() noexcept;
     [[nodiscard]] bool apply_audio_settings_to_runtime() noexcept;
     [[nodiscard]] CommandResult nudge_selection(Float3 worldDelta);
+    // Mirror the selected objects (with their children) across the world plane through the
+    // current pivot whose normal is axis 0/1/2 (X/Y/Z); as copies or in place. One undo step.
+    bool mirror_selection(int axis, bool copy);
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
     [[nodiscard]] InspectorSelectionSummary inspector_selection_summary() const;
     // Numeric fields: the shown value ("" when the field does not apply, "—" when the selected

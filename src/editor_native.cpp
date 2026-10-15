@@ -9058,7 +9058,7 @@ bool duplicate_field(NumberFieldId field) {
 }
 // Larger magnitudes lose all float precision (or overflow to inf when cast).
 constexpr double kNumberFieldTransformLimit = 1.0e6;
-constexpr const char* kNumberFieldLimitMessage = "values must be within \xC2\xB11,000,000";
+constexpr const char* kNumberFieldLimitMessage = "values must be within \xC2\xB1" "1,000,000";
 bool same_transform(const RigidTransform& a, const RigidTransform& b) {
     return a.position.x == b.position.x && a.position.y == b.position.y && a.position.z == b.position.z &&
            a.rotation.x == b.rotation.x && a.rotation.y == b.rotation.y && a.rotation.z == b.rotation.z && a.rotation.w == b.rotation.w;

@@ -1921,6 +1921,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
     enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
+    for (std::string_view id : {"edit.mirror_x", "edit.mirror_y", "edit.mirror_z", "edit.mirror_copy_x", "edit.mirror_copy_y", "edit.mirror_copy_z"})
+        enabled(id, hasSelection && !playActive && selectionDomain_ == SelectionDomain::Objects,
+                playActive ? "Stop Play first." : selectionDomain_ != SelectionDomain::Objects ? "Return to object selection first."
+                                                                                                : "Select the objects to mirror first.");
     const auto hierarchyPrimary = workspace_.selected_object();
     const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;
     const bool hierarchySelectionReady = !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
@@ -3727,6 +3731,134 @@ std::optional<EditorObjectId> NativeEditorController::hierarchy_row_object_at(in
         if (layout_.hierarchyRows[index].contains(x, y)) return order[index];
     }
     return std::nullopt;
+}
+
+bool NativeEditorController::mirror_selection(int axis, bool copy) {
+    const char* axisName = axis == 0 ? "X" : axis == 1 ? "Y" : "Z";
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before mirroring", true); return false; }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
+    if (selectionDomain_ != SelectionDomain::Objects) {
+        set_status(selectionDomain_ == SelectionDomain::Voxels ? "Mirror works on whole objects: press M to return to objects"
+                                                               : "Mirror works on whole objects here; return to object selection first", true);
+        return false;
+    }
+    EditorDocument& document = workspace_.document();
+    // Roots only: a selected child of a selected parent mirrors with its parent.
+    const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    std::vector<EditorObjectId> roots;
+    for (const EditorObjectId id : workspace_.selected_objects()) {
+        const EditorObject* object = document.find_object(id);
+        if (!object) continue;
+        bool ancestorSelected = false;
+        for (auto parent = object->parent; parent && !ancestorSelected;) {
+            ancestorSelected = selected.contains(*parent);
+            const EditorObject* ancestor = document.find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+        if (!ancestorSelected && std::find(roots.begin(), roots.end(), id) == roots.end()) roots.push_back(id);
+    }
+    if (roots.empty()) { set_status("Select the objects to mirror first", true); return false; }
+    const std::vector<EditorObjectId> subtree = collect_editor_object_subtree_ids(document, roots);
+    for (const EditorObjectId id : roots) {
+        const EditorObject* object = document.find_object(id);
+        if (!object->flags.visible || is_isolated_out(id)) { set_status(object->name + " is hidden or isolated out of view", true); return false; }
+    }
+    for (const EditorObjectId id : subtree) {
+        const EditorObject* object = document.find_object(id);
+        if (object->text3d || object->gaborVolume) {
+            set_status("Mirror does not flip " + std::string(object->text3d ? "3D text" : "Gabor volumes") + " (" + object->name + ")", true);
+            return false;
+        }
+        if (object->prefabLink) { set_status(object->name + " is part of a prefab instance; unpack it or mirror the prefab", true); return false; }
+        if (!copy && object->flags.locked) { set_status("Unlock " + object->name + " before mirroring it", true); return false; }
+    }
+    close_previews_for_voxel_edit("Mirror");
+    const Float3 point = selection_pivot();
+    const auto beforeSelection = capture_selection_snapshot();
+    // Mirrored pose of every object first, so children can be placed relative to their mirrored parent.
+    std::map<EditorObjectId, MirroredPose> poses;
+    for (const EditorObjectId id : subtree) {
+        const EditorObject* object = document.find_object(id);
+        poses.emplace(id, mirror_pose(document.world_transform(id).value_or(object->transform), axis, point));
+    }
+    std::string error;
+    const std::string label = std::string(copy ? "Mirror copy " : "Mirror ") + axisName;
+    auto compound = std::make_unique<CompoundCommand>(label);
+    std::vector<EditorObjectId> rootCopies;
+    if (copy) {
+        std::map<EditorObjectId, EditorObjectId> idMap;
+        for (const EditorObjectId id : subtree) idMap.emplace(id, document.allocate_object_id());
+        for (const EditorObjectId id : subtree) {
+            const EditorObject* source = document.find_object(id);
+            const MirroredPose& pose = poses.at(id);
+            EditorObject mirrored = clone_editor_object(*source);
+            mirrored.id = idMap.at(id);
+            const bool root = std::find(roots.begin(), roots.end(), id) != roots.end();
+            if (root) { mirrored.name = source->name + " (mirror)"; rootCopies.push_back(mirrored.id); }
+            mirrored.parent = source->parent && idMap.contains(*source->parent) ? std::optional(idMap.at(*source->parent)) : source->parent;
+            mirrored.transform = pose.transform;
+            if (mirrored.attachment && source->parent && poses.contains(*source->parent))
+                mirrored.attachment->localTransform = relative_rigid_transform(poses.at(*source->parent).transform, pose.transform);
+            if (source->polygon) {
+                mirrored.polygon->objectId = mirrored.id;  // before the refresh: the content hash covers it
+                if (!mirror_polygon_mesh(*mirrored.polygon, pose.localAxis, mirrored.subdivision ? &*mirrored.subdivision : nullptr,
+                                         mirrored.modelingTopology ? &*mirrored.modelingTopology : nullptr, &error)) {
+                    set_status("Mirror failed on " + source->name + ": " + error, true);
+                    return false;
+                }
+                mirrored.subdivisionCache.reset();
+            } else if (source->voxels && source->voxels->occupied_voxel_count() > 0) {
+                const VoxelObjectState state = mirror_voxel_state(capture_voxel_object_state(*source), pose.localAxis);
+                auto voxels = std::make_unique<VoxelObject>(mirrored.id);
+                for (const SparseVoxelStateEntry& entry : state.voxels) (void)voxels->set_voxel(entry.voxel, entry.material);
+                mirrored.voxels = std::move(voxels);
+                mirrored.anchors = std::set<Int3>(state.anchors.begin(), state.anchors.end());
+            }
+            compound->add(std::make_unique<AddObjectCommand>(std::move(mirrored), label));
+        }
+    } else {
+        std::vector<ObjectTransformChange> transforms;
+        for (const EditorObjectId id : subtree) {
+            const EditorObject* object = document.find_object(id);
+            transforms.push_back({id, document.world_transform(id).value_or(object->transform), poses.at(id).transform});
+        }
+        compound->add(std::make_unique<TransformObjectsCommand>(std::move(transforms), label));
+        for (const EditorObjectId id : subtree) {
+            const EditorObject* object = document.find_object(id);
+            const int e = poses.at(id).localAxis;
+            if (object->polygon) {
+                CookedPolygonAsset mesh = *object->polygon;
+                std::optional<SubdivisionSettings> subdivision = object->subdivision;
+                std::optional<ModelingTopology> topology = object->modelingTopology;
+                if (!mirror_polygon_mesh(mesh, e, subdivision ? &*subdivision : nullptr, topology ? &*topology : nullptr, &error)) {
+                    set_status("Mirror failed on " + object->name + ": " + error, true);
+                    return false;
+                }
+                compound->add(std::make_unique<ReplacePolygonCommand>(id, *object->polygon, std::move(mesh), label, 0,
+                                                                      std::move(subdivision), true, std::move(topology)));
+            } else if (object->voxels && object->voxels->occupied_voxel_count() > 0) {
+                VoxelObjectState before = capture_voxel_object_state(*object);
+                VoxelObjectState after = mirror_voxel_state(before, e);
+                compound->add(std::make_unique<ReplaceVoxelObjectStateCommand>(id, std::move(before), std::move(after), label));
+            }
+        }
+    }
+    const CommandResult result = workspace_.commands().execute(document, std::move(compound));
+    if (!result.success) { set_status(label + " failed: " + result.message, true); return false; }
+    if (copy) {
+        workspace_.clear_selection();
+        for (const EditorObjectId id : rootCopies) workspace_.add_to_selection(id);
+        if (!viewportSettings_.isolatedObjects.empty())
+            for (const auto& [id, object] : document.objects()) { (void)object; if (!poses.contains(id)) viewportSettings_.isolatedObjects.insert(id); }
+        workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
+    }
+    recompute_layout();
+    refresh_menu_state();
+    char where[96];
+    std::snprintf(where, sizeof where, "%s = %.3g", axisName, static_cast<double>(axis == 0 ? point.x : axis == 1 ? point.y : point.z));
+    set_status(std::string(copy ? "Mirrored copy of " : "Mirrored ") + std::to_string(subtree.size()) +
+               (subtree.size() == 1 ? " object" : " objects") + " across " + where + " (the pivot); Undo restores");
+    return true;
 }
 
 CommandResult NativeEditorController::duplicate_objects(const std::vector<EditorObjectId>& ids, Float3 offset) {
@@ -7409,6 +7541,9 @@ camera_menu_dispatch_complete:
         set_status(visible ? "Inspector shown" : "Inspector hidden");
         return true;
     }
+    if (actionId == "edit.mirror_x" || actionId == "edit.mirror_y" || actionId == "edit.mirror_z" ||
+        actionId == "edit.mirror_copy_x" || actionId == "edit.mirror_copy_y" || actionId == "edit.mirror_copy_z")
+        return mirror_selection(actionId.back() == 'x' ? 0 : actionId.back() == 'y' ? 1 : 2, actionId.find("copy") != std::string_view::npos);
     if (actionId == "edit.duplicate") {
         if (workspace_.selection_count() == 0) {
             set_status("Nothing selected to duplicate", true);

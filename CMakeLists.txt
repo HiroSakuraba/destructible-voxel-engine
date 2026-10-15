@@ -832,6 +832,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_slice_interaction.cpp
         src/editor_voxel_boolean.cpp
         src/editor_voxel_join.cpp
+        src/editor_mirror.cpp
         src/editor_voxel_selection.cpp
         src/editor_scatter.cpp
         src/editor_polygon.cpp
@@ -2718,6 +2719,9 @@ if(DVE_BUILD_TESTS)
         add_test(NAME dve_editor_inspector_selection_tests COMMAND dve_editor_inspector_selection_tests)
         target_link_libraries(dve_editor_honest_commands_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_honest_commands_tests COMMAND dve_editor_honest_commands_tests)
+        add_executable(dve_editor_mirror_tests tests/test_editor_mirror.cpp)
+        target_link_libraries(dve_editor_mirror_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_mirror_tests COMMAND dve_editor_mirror_tests)
         add_executable(dve_editor_honest_followups_tests tests/test_editor_honest_followups.cpp)
         target_link_libraries(dve_editor_honest_followups_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_honest_followups_tests COMMAND dve_editor_honest_followups_tests)

@@ -116,13 +116,48 @@ PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset& sour
         const auto material_hash=[&](Index material){CookedPolygonAsset m;m.materials={source.materials[material]};m.materialBindings={source.materialBindings[material]};return polygon_asset_content_hash(m);};
         for(auto e:selection.components){const auto& h=halves.at(e);selectedMaterial[e]=materials[h[0].triangle];if(h.size()==2&&material_hash(materials[h[0].triangle])!=material_hash(materials[h[1].triangle]))return fail("Resolve conflicting materials on the selected crease before beveling");}
         if(convex){
-            for(auto selected:selection.components){const auto& h=halves.at(selected);const auto direction=normalize(subtract(positions.at(h[0].b),positions.at(h[0].a)));
-                for(auto endpoint:{h[0].a,h[0].b})for(auto next:tags.at(endpoint))if(next!=selected){const auto& adjacent=halves.at(next);if(adjacent.size()!=2||dot(adjacent[0].normal,adjacent[1].normal)>.99999F)continue;
-                    const auto tangent=normalize(subtract(positions.at(Index(next)),positions.at(Index(next>>32U))));
-                    if(std::abs(dot(direction,tangent))>.99999F)return fail("Collinear split crease segments need consolidation before global convex bevel; choose an uninterrupted crease");}
+            struct CreaseChain {std::vector<Edge> edges;std::vector<Index> vertices;};
+            std::vector<CreaseChain> chains;std::set<Edge> grouped;
+            for(auto seed:selection.components)if(!grouped.contains(seed)){
+                const auto& reference=halves.at(seed);
+                const auto direction=normalize(subtract(positions.at(reference[0].b),positions.at(reference[0].a)));
+                const auto base=positions.at(reference[0].a);
+                std::set<Edge> component;std::queue<Edge> pending;pending.push(seed);
+                std::map<Index,std::set<Edge>> incident;
+                while(!pending.empty()){
+                    const auto selected=pending.front();pending.pop();if(!component.insert(selected).second)continue;
+                    for(auto endpoint:{Index(selected>>32U),Index(selected)}){
+                        incident[endpoint].insert(selected);
+                        for(auto next:tags.at(endpoint))if(next!=selected&&authoredEdges.contains(next)){
+                            const auto& adjacent=halves.at(next);
+                            if(adjacent.size()!=2||dot(adjacent[0].normal,adjacent[1].normal)>.99999F)continue;
+                            const auto tangent=normalize(subtract(positions.at(Index(next)),positions.at(Index(next>>32U))));
+                            if(std::abs(dot(direction,tangent))<=.99999F)continue;
+                            if(!selection.components.contains(next))return fail("Select every segment of a straight split crease; partial-chain endpoint joins are not supported");
+                            for(auto v:{Index(next>>32U),Index(next)})if(length(cross(subtract(positions.at(v),base),direction))>tolerance*2)
+                                return fail("Split crease is bent; straight-chain bevel requires one supporting line");
+                            const auto matches=[&](Index i,Index j){return dot(reference[i].normal,adjacent[j].normal)>.99999F;};
+                            if(!((matches(0,0)&&matches(1,1))||(matches(0,1)&&matches(1,0))))return fail("Straight split crease changes face planes; bevel its endpoint joins separately");
+                            if(!component.contains(next))pending.push(next);
+                        }
+                    }
+                }
+                std::vector<Index> ends;
+                for(const auto& [v,edges]:incident){if(edges.size()>2)return fail("Straight crease chains cannot branch");if(edges.size()==1)ends.push_back(v);}
+                if(ends.size()!=2)return fail("Straight crease chain needs two distinct endpoints");
+                CreaseChain chain;auto current=ends.front();chain.vertices.push_back(current);
+                while(chain.edges.size()<component.size()){
+                    std::optional<Edge> next;for(auto e:incident.at(current))if(chain.edges.empty()||e!=chain.edges.back()){next=e;break;}
+                    if(!next)return fail("Straight crease chain lost its continuation");
+                    chain.edges.push_back(*next);current=Index(*next>>32U)==current?Index(*next):Index(*next>>32U);chain.vertices.push_back(current);
+                }
+                grouped.insert(component.begin(),component.end());chains.push_back(std::move(chain));
             }
+            if(chains.size()>1&&std::any_of(chains.begin(),chains.end(),[](const auto& chain){return chain.edges.size()>1;}))
+                return fail("Bevel one split crease chain at a time; joins between multiple crease chains need separate corner reconstruction");
+            // Each physical crease is cut once; selected segments label separate axial slabs.
             // Symbolic edge/plane intersections share geometry without matching old positions.
-            for(auto selected:selection.components){const auto& h=halves.at(selected);const auto n0=h[0].normal,n1=h[1].normal;
+            for(const auto& chain:chains){const auto selected=chain.edges.front();const auto& h=halves.at(selected);const auto n0=h[0].normal,n1=h[1].normal;
                 const auto axis=normalize(subtract(positions.at(h[0].b),positions.at(h[0].a)));const auto d0=normalize(cross(n0,axis)),d1=normalize(cross(n1,multiply(axis,-1)));
                 const auto sine=std::sqrt((1-std::clamp(dot(n0,n1),-1.F,1.F))*.5F);const auto profile=profile_points(d0,d1,width/sine,settings);const auto base=positions.at(h[0].a);
                 for(Index step=1;step<profile.size();++step){auto normal=normalize(cross(axis,subtract(profile[step],profile[step-1])));if(dot(normal,add(n0,n1))<0)normal=multiply(normal,-1);
@@ -130,9 +165,11 @@ PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset& sour
                     for(const auto& patch:patches){Patch out=patch;out.vertices.clear();
                         for(std::size_t j=0;j<patch.vertices.size();++j){const auto& a=patch.vertices[j];const auto& b=patch.vertices[(j+1)%patch.vertices.size()];const auto da=dot(normal,a.attribute.position)-distance,db=dot(normal,b.attribute.position)-distance;const bool insideA=da<=tolerance,insideB=db<=tolerance;
                             if(insideA)out.vertices.push_back(a);else removed=true;
-                            if(insideA!=insideB){const auto fraction=std::clamp(da/(da-db),0.F,1.F);const auto key=edge(a.group,b.group);Index group;
-                                if(fraction<=1e-6F)group=a.group;else if(fraction>=1-1e-6F)group=b.group;else {auto [it,created]=intersections.emplace(key,nextGroup);if(created){group=nextGroup++;positions[group]=add(a.attribute.position,multiply(subtract(b.attribute.position,a.attribute.position),fraction));std::set_intersection(tags[a.group].begin(),tags[a.group].end(),tags[b.group].begin(),tags[b.group].end(),std::inserter(tags[group],tags[group].end()));}group=it->second;}
-                                auto intersection=interpolate(a,b,fraction,group,positions.at(group));const auto& retired=insideA?b:a;if(retired.geometricParent)intersection.geometricParent=retired.geometricParent;else if(retired.original)intersection.geometricParent=canonical[*retired.original];out.vertices.push_back(std::move(intersection));}}
+                            if(insideA!=insideB){auto fraction=std::clamp(da/(da-db),0.F,1.F);const auto key=edge(a.group,b.group);Index group;
+                                // Adjacent profile planes can meet exactly on a render diagonal.
+                                // Reuse an endpoint already on the plane instead of making a near-duplicate.
+                                if(std::abs(da)<=tolerance||fraction<=1e-6F){fraction=0;group=a.group;}else if(std::abs(db)<=tolerance||fraction>=1-1e-6F){fraction=1;group=b.group;}else {auto [it,created]=intersections.emplace(key,nextGroup);if(created){group=nextGroup++;positions[group]=add(a.attribute.position,multiply(subtract(b.attribute.position,a.attribute.position),fraction));std::set_intersection(tags[a.group].begin(),tags[a.group].end(),tags[b.group].begin(),tags[b.group].end(),std::inserter(tags[group],tags[group].end()));}group=it->second;}
+                                auto intersection=fraction==0?a:fraction==1?b:interpolate(a,b,fraction,group,positions.at(group));const auto& retired=insideA?b:a;if(retired.geometricParent)intersection.geometricParent=retired.geometricParent;else if(retired.original)intersection.geometricParent=canonical[*retired.original];out.vertices.push_back(std::move(intersection));}}
                         std::vector<Vertex> unique;for(const auto& v:out.vertices)if(unique.empty()||unique.back().group!=v.group)unique.push_back(v);if(unique.size()>1&&unique.front().group==unique.back().group)unique.pop_back();out.vertices=std::move(unique);if(out.vertices.size()>=3)clipped.push_back(std::move(out));}
                     if(!removed)return fail("Bevel profile did not cut the source; increase width");
                     std::map<Edge,std::vector<std::pair<Vertex,Vertex>>> cut;
@@ -141,7 +178,56 @@ PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset& sour
                     for(const auto& [e,segments]:cut)if(segments.size()==1){if(!next.emplace(segments[0].first.group,segments[0]).second)return fail("Bevel cut branches at a corner");}else if(segments.size()!=2)return fail("Bevel cut has ambiguous incidence");
                     if(next.empty())return fail("Bevel cut lost its boundary");Patch cap;cap.bevelEdge=selected;cap.material=selectedMaterial.at(selected);const auto start=next.begin()->first;auto current=start;
                     do{auto at=next.find(current);if(at==next.end())return fail("Bevel cut has an open corner join");auto v=at->second.first;current=at->second.second.group;v.original.reset();v.corner.reset();v.attribute.normal=world?normalize(multiply_components(normal,objectScale)):normal;cap.vertices.push_back(v);next.erase(at);}while(current!=start&&cap.vertices.size()<=4096);
-                    if(!next.empty()||current!=start||cap.vertices.size()<3||cap.vertices.size()>512)return fail("Bevel supports one convex cut contour of at most 512 vertices per profile plane");clipped.push_back(std::move(cap));patches=std::move(clipped);
+                    if(!next.empty()||current!=start||cap.vertices.size()<3||cap.vertices.size()>512)return fail("Bevel supports one convex cut contour of at most 512 vertices per profile plane");
+                    if(chain.edges.size()==1)clipped.push_back(std::move(cap));
+                    else {
+                        const auto chainOrigin=positions.at(chain.vertices.front());
+                        const auto chainAxis=normalize(subtract(positions.at(chain.vertices.back()),chainOrigin));
+                        struct BoundarySplit {Index group,parent;float fraction;};
+                        std::map<Edge,std::vector<BoundarySplit>> boundarySplits;
+                        const auto spliceBoundary=[&](){
+                            // A slab boundary may split a rail between existing cage vertices.
+                            // Insert the same geometric groups into its neighboring source patch,
+                            // interpolating that patch's own fields rather than sharing attributes.
+                            for(auto& patch:clipped){
+                                std::vector<Vertex> split;
+                                for(std::size_t j=0;j<patch.vertices.size();++j){
+                                    const auto& a=patch.vertices[j];const auto& b=patch.vertices[(j+1)%patch.vertices.size()];split.push_back(a);
+                                    if(auto at=boundarySplits.find(edge(a.group,b.group));at!=boundarySplits.end()){
+                                        auto points=at->second;std::sort(points.begin(),points.end(),[&](const auto& x,const auto& y){return a.group<b.group?x.fraction<y.fraction:x.fraction>y.fraction;});
+                                        for(const auto& point:points){const auto fraction=a.group<b.group?point.fraction:1-point.fraction;
+                                            auto v=interpolate(a,b,fraction,point.group,positions.at(point.group));v.geometricParent=point.parent;split.push_back(std::move(v));}
+                                    }
+                                }
+                                patch.vertices=std::move(split);
+                            }
+                        };
+                        std::vector<Patch> strips;
+                        auto remaining=std::move(cap);
+                        for(std::size_t part=0;part+1<chain.edges.size();++part){
+                            const auto joint=chain.vertices[part+1];const auto station=dot(subtract(positions.at(joint),chainOrigin),chainAxis);
+                            Patch lower=remaining,upper=remaining;lower.vertices.clear();upper.vertices.clear();
+                            for(std::size_t j=0;j<remaining.vertices.size();++j){
+                                const auto& a=remaining.vertices[j];const auto& b=remaining.vertices[(j+1)%remaining.vertices.size()];
+                                const auto da=dot(subtract(a.attribute.position,chainOrigin),chainAxis)-station;
+                                const auto db=dot(subtract(b.attribute.position,chainOrigin),chainAxis)-station;
+                                if(da<=tolerance)lower.vertices.push_back(a);if(da>=-tolerance)upper.vertices.push_back(a);
+                                if((da < -tolerance&&db > tolerance)||(db < -tolerance&&da > tolerance)){
+                                    const auto fraction=da/(da-db);const auto group=nextGroup++;
+                                    const auto point=add(a.attribute.position,multiply(subtract(b.attribute.position,a.attribute.position),fraction));positions[group]=point;
+                                    std::set_intersection(tags[a.group].begin(),tags[a.group].end(),tags[b.group].begin(),tags[b.group].end(),std::inserter(tags[group],tags[group].end()));
+                                    auto v=interpolate(a,b,fraction,group,point);v.geometricParent=joint;
+                                    lower.vertices.push_back(v);upper.vertices.push_back(std::move(v));
+                                    boundarySplits[edge(a.group,b.group)].push_back({group,joint,a.group<b.group?fraction:1-fraction});
+                                }
+                            }
+                            if(lower.vertices.size()>=3){lower.bevelEdge=chain.edges[part];lower.material=selectedMaterial.at(chain.edges[part]);strips.push_back(std::move(lower));}
+                            spliceBoundary();boundarySplits.clear();remaining=std::move(upper);
+                        }
+                        if(remaining.vertices.size()>=3){remaining.bevelEdge=chain.edges.back();remaining.material=selectedMaterial.at(chain.edges.back());strips.push_back(std::move(remaining));}
+                        clipped.insert(clipped.end(),std::make_move_iterator(strips.begin()),std::make_move_iterator(strips.end()));
+                    }
+                    patches=std::move(clipped);
                     if(patches.size()>50000||nextGroup>150000)return fail("Bevel reconstruction exceeds its modeling budget");
                 }
             }
@@ -328,13 +414,18 @@ PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset& sour
             if(v.geometricParent)lineage.geometricVertexCopies[*v.geometricParent].insert(i);return i;};
         for(const auto& patch:patches){std::vector<Index> indices;for(auto v:patch.vertices){if(patch.bevelEdge){v.original.reset();v.corner.reset();}indices.push_back(appendVertex(v,patch.bevelEdge.has_value()));}
             const auto first=Index(mesh.indices.size()/3);std::vector<Index> rendered;
-            const auto normal=patch_normal(patch);std::vector<std::array<Index,3>> triangulation;std::vector<Index> ring;for(Index j=0;j<indices.size();++j)ring.push_back(j);
+            const auto normal=patch_normal(patch);
+            // Rail subdivisions can differ from exact collinearity by a few float ULPs.
+            // Keep those vertices in larger ears instead of leaving a collapsing sliver.
+            float patchExtent=0;for(const auto& v:patch.vertices)patchExtent=(std::max)(patchExtent,length_squared(subtract(v.attribute.position,patch.vertices[0].attribute.position)));
+            const auto areaTolerance=patchExtent*1e-7F;std::vector<std::array<Index,3>> triangulation;std::vector<Index> ring;for(Index j=0;j<indices.size();++j)ring.push_back(j);
             while(ring.size()>3){bool found=false;for(std::size_t j=0;j<ring.size();++j){const auto a=ring[(j+ring.size()-1)%ring.size()],b=ring[j],c=ring[(j+1)%ring.size()];const auto pa=patch.vertices[a].attribute.position,pb=patch.vertices[b].attribute.position,pc=patch.vertices[c].attribute.position;
-                const auto orient=[&](Float3 x,Float3 y,Float3 z){return dot(cross(subtract(y,x),subtract(z,x)),normal);};if(orient(pa,pb,pc)<=extent*1e-10F)continue;bool inside=false;
-                for(auto other:ring)if(other!=a&&other!=b&&other!=c){const auto p=patch.vertices[other].attribute.position;if(orient(pa,pb,p)>=-extent*1e-10F&&orient(pb,pc,p)>=-extent*1e-10F&&orient(pc,pa,p)>=-extent*1e-10F){inside=true;break;}}
+                const auto orient=[&](Float3 x,Float3 y,Float3 z){return dot(cross(subtract(y,x),subtract(z,x)),normal);};if(orient(pa,pb,pc)<=areaTolerance)continue;bool inside=false;
+                for(auto other:ring)if(other!=a&&other!=b&&other!=c){const auto p=patch.vertices[other].attribute.position;if(orient(pa,pb,p)>=-areaTolerance&&orient(pb,pc,p)>=-areaTolerance&&orient(pc,pa,p)>=-areaTolerance){inside=true;break;}}
                 if(inside)continue;triangulation.push_back({a,b,c});ring.erase(ring.begin()+std::ptrdiff_t(j));found=true;break;}if(!found)return fail("Bevel patch cannot be triangulated without degenerate faces");}
+            if(dot(cross(subtract(patch.vertices[ring[1]].attribute.position,patch.vertices[ring[0]].attribute.position),subtract(patch.vertices[ring[2]].attribute.position,patch.vertices[ring[0]].attribute.position)),normal)<=areaTolerance)return fail("Bevel patch leaves a numerically degenerate final triangle");
             triangulation.push_back({ring[0],ring[1],ring[2]});
-            bool quad=indices.size()==4;for(Index j=0;quad&&j<4;++j)quad=dot(cross(subtract(patch.vertices[(j+1)%4].attribute.position,patch.vertices[j].attribute.position),subtract(patch.vertices[(j+2)%4].attribute.position,patch.vertices[(j+1)%4].attribute.position)),normal)>extent*1e-9F;
+            bool quad=indices.size()==4;for(Index j=0;quad&&j<4;++j)quad=dot(cross(subtract(patch.vertices[(j+1)%4].attribute.position,patch.vertices[j].attribute.position),subtract(patch.vertices[(j+2)%4].attribute.position,patch.vertices[(j+1)%4].attribute.position)),normal)>areaTolerance;
             for(const auto& corners:triangulation){if(mesh.indices.size()+3>150000)throw std::runtime_error("Bevel output exceeds its triangle budget");const auto triangle=Index(mesh.indices.size()/3);for(auto corner:corners){const auto outputCorner=Index(mesh.indices.size());mesh.indices.push_back(indices[corner]);rendered.push_back(indices[corner]);if(patch.vertices[corner].corner&&!patch.bevelEdge)lineage.cornerDescendants[*patch.vertices[corner].corner].insert(outputCorner);if(patch.face&&!patch.triangle&&!patch.bevelEdge&&patch.vertices[corner].original)for(auto old:faces[*patch.face])for(Index j=0;j<3;++j)if(source.indices[old*3+j]==*patch.vertices[corner].original)lineage.cornerDescendants[old*3+j].insert(outputCorner);}
                 if(patch.triangle)lineage.triangleDescendants[*patch.triangle].insert(triangle);else if(patch.face)for(auto old:faces[*patch.face])lineage.triangleDescendants[old].insert(triangle);
                 if(patch.bevelEdge)result.polygon.selection.components.insert(triangle);triangleBevel.push_back(patch.bevelEdge);triangleFace.push_back(patch.face);
@@ -368,8 +459,8 @@ PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset& sour
         const auto after=diagnose_polygon_topology(mesh);if(after.nonmanifold||after.inconsistentWinding||after.degenerate||(convex&&after.boundaries))return fail("Bevel produces invalid topology or unsupported corner joins");
         auto check=updated;check.level=0;const auto selectable=subdivision_control_edges(mesh,&updated);
         if(authored)for(const auto& [old,strength]:authored->edgeCreases){const auto& next=lineage.edgeDescendants.at(old);if(next.empty())return fail("Bevel retires an authored crease without supported descendants");for(auto e:next){if(!selectable.contains(e))return fail("Bevel crease maps onto a hidden diagonal");if(auto at=updated.edgeCreases.find(e);at!=updated.edgeCreases.end()&&at->second!=strength)return fail("Bevel combines conflicting crease strengths");updated.edgeCreases[e]=strength;}}
-        check.edgeCreases=updated.edgeCreases;if(const auto evaluated=evaluate_subdivision(mesh,check);!evaluated.mesh)return fail(evaluated.error);
-        if(authored&&updated.level!=0)if(const auto evaluated=evaluate_subdivision(mesh,updated);!evaluated.mesh)return fail(evaluated.error);
+        check.edgeCreases=updated.edgeCreases;if(const auto evaluated=evaluate_subdivision(mesh,check);!evaluated.mesh)return fail("Control cage: "+evaluated.error);
+        if(authored&&updated.level!=0)if(const auto evaluated=evaluate_subdivision(mesh,updated);!evaluated.mesh)return fail("Evaluated bevel: "+evaluated.error);
         if(!make_modeling_topology(mesh,authored?&updated:nullptr,lineage.afterVertexGroups,&error))return fail(error);
         if(result.polygon.selection.components.empty())return fail("Bevel has no generated profile faces");
         if(authored)result.subdivision=std::move(updated);return result;

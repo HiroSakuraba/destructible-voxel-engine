@@ -28,7 +28,8 @@ struct EdgeBevelSettings {
 };
 // Explicit reconstruction and provenance: closed convex solids, straight open crease chains,
 // and straight open boundary chains. Open quad domains retain non-affine UV/color fields
-// and split triangle attributes. Unsupported endpoint/corner joins refuse atomically.
+// and split triangle attributes. One complete collinear split crease is supported per
+// closed-convex edit. Partial chains and unsupported endpoint/corner joins refuse atomically.
 [[nodiscard]] PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset&,const PolygonSelection&,
     const EdgeBevelSettings&,Float3 objectScale={1,1,1},const SubdivisionSettings* authored=nullptr);
 [[nodiscard]] PolygonEditResult bevel_convex_editor_edges(const CookedPolygonAsset&,const PolygonSelection&,

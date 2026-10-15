@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <limits>
 #include <iterator>
@@ -103,7 +104,7 @@ PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset& sour
         for(auto e:authoredEdges)shortest=(std::min)(shortest,length(subtract(positions.at(Index(e>>32U)),positions.at(Index(e)))));
         const auto safe=shortest*.49F*minSine;if(!std::isfinite(safe)||safe<=0)return fail("Cannot determine a safe bevel width");
         float width=settings.offsetType==BevelOffsetType::Fractional?settings.width*safe:settings.width;if(settings.autoFit)width=(std::min)(width,safe);
-        if(width<=std::sqrt(extent)*1e-7F)return fail("Bevel width is too small to change this mesh");
+        if(width<=tolerance*8)return fail("Bevel width is too small to change this mesh");
         bool convex=diagnostic.boundaries==0;
         if(convex){std::set<std::tuple<float,float,float,float>> planes;
             for(const auto& patch:patches){const auto n=patch_normal(patch);planes.emplace(n.x,n.y,n.z,dot(n,patch.vertices[0].attribute.position));}

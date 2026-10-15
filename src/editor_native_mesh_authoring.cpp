@@ -184,8 +184,14 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
             prefab?"Edit the prefab source or detach this instance before changing topology":"Apply or close the active preview first";
         for(auto id:{"mesh.bridge","mesh.cap"})enabled(id,edges&&workspace_.selection_count()==1&&!prefab&&!busy,reason);
     }
-    for(auto id:{"mesh.bevel_edges","mesh.chamfer_edges","mesh.fillet_edges"})
-        enabled(id,components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&workspace_.selection_count()==1&&!object->prefabLink,"Select crease or open boundary edges on one owned mesh");
+    {
+        // Mirror the bevel dispatch refusals so the menu never offers a preview that cannot open.
+        const bool edges=components&&polygonSelection_.mode==PolygonSelectionMode::Edge&&polygonSelection_.object==object->id;
+        const bool single=workspace_.selection_count()==1;const bool prefab=object&&object->prefabLink.has_value();
+        const std::string_view reason=!edges?"Select crease or open boundary edges in Edge mode first":
+            !single?"Select exactly one polygon mesh":"Edit the prefab source or detach this instance before changing topology";
+        for(auto id:{"mesh.bevel_edges","mesh.chamfer_edges","mesh.fillet_edges"})enabled(id,edges&&single&&!prefab,reason);
+    }
 }
 bool NativeEditorController::mesh_authoring_dragging() const noexcept {return meshAuthoring_&&(meshAuthoring_->uvBefore||meshAuthoring_->hullBefore);}
 void NativeEditorController::cancel_mesh_authoring_drag(){if(!meshAuthoring_)return;auto& s=*meshAuthoring_;if(s.uvBefore){if(auto* o=workspace_.document().find_object(s.object))o->polygon=*s.uvBefore;}s.uvBefore.reset();s.hullBefore.reset();s.hullPreview.clear();s.typed.clear();s.dragging=s.panning=s.selecting=false;}

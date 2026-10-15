@@ -8,6 +8,9 @@
 #include <iostream>
 #include <stdexcept>
 #include <limits>
+#include <map>
+#include <optional>
+#include <set>
 #include <filesystem>
 #ifndef DVE_EDGE_BEVEL_CORE_ONLY
 #include "dve/editor_native.hpp"
@@ -126,6 +129,18 @@ void split_crease_chains(){
     }
     auto multi=plain.selection;multi.components.clear();for(const auto& [e,n]:normals)if(n.size()==2&&dot(n[0],n[1])<.99F)multi.components.insert(e);
     auto corners=bevel_authored_editor_edges(plain.mesh,multi,settings,{1,1,1},&plain.settings);check(!corners&&corners.polygon.error.find("one split crease chain")!=std::string::npos&&polygon_asset_content_hash(corners.polygon.mesh)==polygon_asset_content_hash(plain.mesh)&&corners.lineage.afterVertexGroups.empty(),"meeting split chains refuse atomically with an explicit reason");
+    // An uninterrupted crease meeting a split chain's endpoint stays supported on its own,
+    // but combining it with that split chain refuses atomically without touching the source.
+    {auto mixed=segmented_cube(1);mixed.settings.level=1;const auto mixedGroups=polygon_geometric_vertices(mixed.mesh);std::map<std::uint64_t,std::vector<Float3>> creaseNormals;
+        for(std::uint32_t t=0;t<mixed.mesh.indices.size()/3;++t){const auto a=mixed.mesh.vertices[mixed.mesh.indices[t*3]].position,b=mixed.mesh.vertices[mixed.mesh.indices[t*3+1]].position,c=mixed.mesh.vertices[mixed.mesh.indices[t*3+2]].position;
+            const auto x=subtract(b,a),y=subtract(c,a);const auto n=normalize(Float3{x.y*y.z-x.z*y.y,x.z*y.x-x.x*y.z,x.x*y.y-x.y*y.x});
+            for(unsigned j=0;j<3;++j)creaseNormals[key(mixedGroups[mixed.mesh.indices[t*3+j]],mixedGroups[mixed.mesh.indices[t*3+(j+1)%3]])].push_back(n);}
+        std::set<std::uint32_t> chainVertices;for(auto e:mixed.selection.components){chainVertices.insert(std::uint32_t(e>>32U));chainVertices.insert(std::uint32_t(e));}
+        std::optional<std::uint64_t> other;for(const auto& [e,n]:creaseNormals)if(n.size()==2&&dot(n[0],n[1])<.99F&&!mixed.selection.components.contains(e)&&(chainVertices.contains(std::uint32_t(e>>32U))||chainVertices.contains(std::uint32_t(e)))){other=e;break;}
+        check(bool(other),"segmented cube has an uninterrupted crease at a chain endpoint");
+        auto single=mixed.selection;single.components={*other};auto alone=bevel_authored_editor_edges(mixed.mesh,single,settings,{1,1,1},&mixed.settings);check(bool(alone),"uninterrupted crease on a loop-cut cage remains supported: "+alone.polygon.error);
+        auto combined=mixed.selection;combined.components.insert(*other);auto refused=bevel_authored_editor_edges(mixed.mesh,combined,settings,{1,1,1},&mixed.settings);
+        check(!refused&&refused.polygon.error.find("one split crease chain")!=std::string::npos&&polygon_asset_content_hash(refused.polygon.mesh)==polygon_asset_content_hash(mixed.mesh)&&refused.lineage.afterVertexGroups.empty()&&!refused.subdivision,"split chain plus another crease refuses atomically");}
     // Materials may change along a chain, while the two sides of each segment agree.
     auto material=segmented_cube(2);material.mesh.materials.push_back(material.mesh.materials[0]);material.mesh.materials.back().name="Second interval";material.mesh.materialBindings.push_back(material.mesh.materialBindings[0]);
     const auto seed=*material.selection.components.begin();const auto origin=material.mesh.vertices[std::uint32_t(seed>>32U)].position;const auto axis=normalize(subtract(material.mesh.vertices[std::uint32_t(seed)].position,origin));

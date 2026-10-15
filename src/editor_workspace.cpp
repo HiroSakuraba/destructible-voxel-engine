@@ -609,6 +609,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.select_shrink","Voxel","Shrink Voxel Selection",""},
         {"voxel.select_invert","Voxel","Invert Voxel Selection",""},
         {"voxel.selection_brush","Voxel","Selection Brush",""},
+        {"voxel.brush_shape_cube","Voxel","Brush Shape: Cube",""},
+        {"voxel.brush_shape_sphere","Voxel","Brush Shape: Sphere",""},
+        {"voxel.brush_shape_toggle","Voxel","Toggle Brush Shape (Cube / Sphere)",""},
         {"polygon.convert_to_voxels","Polygon","Convert Selected Mesh to Voxels",""},
         {"voxel.convert_to_polygon","Voxel","Convert Selected Voxels to Polygon",""},
         {"voxel.authoring_apply","Voxel","Apply Voxel / Conversion Preview",""},
@@ -1007,6 +1010,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("subdiv.delete","Subdivision Modeling",68,false);
     configure("subdiv.duplicate","Subdivision Modeling",69,false);
     configure("voxel.selection_brush", "Voxel Selection", 51, true);
+    configure("voxel.brush_shape_cube", "Brush", 45, true, "voxel.brush_shape");
+    configure("voxel.brush_shape_sphere", "Brush", 46, true, "voxel.brush_shape");
+    configure("voxel.brush_shape_toggle", "Brush", 47);
     configure("voxel.select_cells", "Voxel Selection", 48, true, "voxel.click_selection");
     configure("voxel.select_connected", "Voxel Selection", 49, true, "voxel.click_selection");
     configure("polygon.convert_to_voxels", "Geometry Conversion", 60);

@@ -70,22 +70,28 @@ void test_summary_and_rendering() {
         bool has(std::string_view part) const { return std::any_of(labels.begin(),labels.end(),[&](const auto& s){return s.find(part)!=std::string::npos;}); }
     } canvas;
     render_native_editor(canvas,c,1280,720);
-    require(canvas.has("2 selected; primary") && canvas.has("Group edits from primary"),"render identifies batch and primary scope");
-    require(canvas.has("Mixed; primary") && canvas.has("Visible (Mixed)") && canvas.has("-"),"mixed transforms and flags are visible");
+    require(canvas.has("2 selected; primary") && canvas.has("Edits set each object"),"render identifies batch scope");
+    require(canvas.has("\xE2\x80\x94") && canvas.has("Visible (Mixed)") && canvas.has("-"),"differing axes read as a dash; mixed flags are visible");
 }
-void test_relative_transforms_and_noop() {
+void test_set_each_and_noop() {
     auto owner = make_controller(); auto& c = *owner;
     edit(c,0); key(c,"enter"); require(!c.workspace().commands().can_undo(),"unmodified Enter adds no undo");
+    // ART-084: a typed value sets every selected object (three values set all three axes).
     edit(c,0,"10 1 0"); key(c,"enter");
     const auto& doc = c.workspace().document();
-    require(near(doc.find_object(1)->transform.position.x,10) && near(doc.find_object(2)->transform.position.x,14),"typed primary position preserves relative offset");
+    require(near(doc.find_object(1)->transform.position.x,10) && near(doc.find_object(2)->transform.position.x,10),"typed position sets each object");
     require(c.workspace().commands().undo(c.workspace().document()).success,"single undo restores all positions");
     require(near(doc.find_object(1)->transform.position.x,0) && near(doc.find_object(2)->transform.position.x,4),"exact positions restored");
+    // += offsets each object by the same amount, keeping their spacing.
+    edit(c,0,"+=1"); key(c,"enter");
+    require(near(doc.find_object(1)->transform.position.x,1) && near(doc.find_object(2)->transform.position.x,5),"+= offsets each");
+    require(c.workspace().commands().undo(c.workspace().document()).success,"undo the offset");
     edit(c,1,"0 90 0"); key(c,"enter");
     const auto delta = subtract(doc.find_object(2)->transform.position,doc.find_object(1)->transform.position);
-    require(near(length(delta),4) && near(delta.x,0),"rotation keeps group spacing");
-    require(c.workspace().commands().undo(c.workspace().document()).success,"one undo restores group rotation");
-    require(near(doc.find_object(2)->transform.position.x,4),"rotation undo restores position");
+    require(near(delta.x,4) && near(delta.z,0),"each object turns in place");
+    const Float3 euler = multiply(quaternion_to_euler_xyz(doc.find_object(1)->transform.rotation),57.29578F);
+    require(std::abs(euler.y-90.0F) < 0.01F,"rotation Y is 90 degrees");
+    require(c.workspace().commands().undo(c.workspace().document()).success,"one undo restores rotation");
 }
 void test_stale_and_refusals() {
     auto owner = make_controller(); auto& c = *owner;
@@ -101,8 +107,9 @@ void test_stale_and_refusals() {
     edit(c,0,"10 0 0"); c.workspace().document().find_object(2)->flags.locked = true; key(c,"enter");
     require(!c.workspace().commands().can_undo() && c.status().text.find("Unlock") != std::string::npos,"locked member refuses batch with route");
     c.workspace().document().find_object(2)->flags.locked = false;
+    // Each object turns about its own origin, so a pivot change during the edit does not matter.
     edit(c,1,"0 30 0"); require(c.dispatch_action("transform.pivot_origin"),"change pivot during edit"); key(c,"enter");
-    require(!c.workspace().commands().can_undo() && c.status().text.find("reopen") != std::string::npos,"changed rotation pivot refuses stale edit");
+    require(c.workspace().commands().can_undo() && c.workspace().commands().undo(c.workspace().document()).success,"rotation applies regardless of pivot");
     edit(c,0,"nan 0 0"); key(c,"enter"); require(!c.workspace().commands().can_undo(),"nonfinite input refused");
     edit(c,0,"10 0 0"); key(c,"escape"); require(!c.workspace().commands().can_undo(),"Esc cancels without undo");
     edit(c,1,"0 30 0"); require(c.workspace().document().remove_object(2),"delete member"); key(c,"enter");
@@ -110,7 +117,7 @@ void test_stale_and_refusals() {
 }
 }
 int main() {
-    try { test_mixed_flags(); test_summary_and_rendering(); test_relative_transforms_and_noop(); test_stale_and_refusals(); }
+    try { test_mixed_flags(); test_summary_and_rendering(); test_set_each_and_noop(); test_stale_and_refusals(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "Inspector selection passed\n";
 }

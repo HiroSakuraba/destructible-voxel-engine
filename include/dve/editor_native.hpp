@@ -49,6 +49,7 @@
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
+#include "dve/editor_number_field.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -145,7 +146,8 @@ enum class TextEditKind : std::uint8_t {
     Text3DLetterSpacing, Text3DFaceMaterial, Text3DSideMaterial, Text3DFontPath,
     Text3DAlignment, Text3DFillRule, GaborDensity, GaborTint, GaborEmission,
     GaborAnisotropy, GaborShadowStrength, GaborLodBias, HierarchyFilter, AssetSearch,
-    AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal
+    AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal,
+    VoxelSize, BrushRadius, SurfaceOffset   // numeric fields (see NumberFieldId)
 };
 
 struct TextEditState {
@@ -159,11 +161,22 @@ struct TextEditState {
     // convention is the only usable behavior; without this, typing would append after the
     // pre-filled text instead of replacing it.
     bool replaceOnNextInput{true};
+    int axis{};                     // Position / Rotation: 0 = X, 1 = Y, 2 = Z
     std::set<EditorObjectId> transformSelection;
     std::vector<ObjectTransformChange> transformSnapshot;
     Float3 transformPivot{};
 };
 
+// Numeric fields (ART-084/085): inspector Position / Rotation (per axis) and Voxel size; the
+// viewport tool strip's Brush radius and Surface offset. Each can be typed (units, arithmetic,
+// += -= *= /=), scrubbed by dragging its label, and reset/copied/pasted with a right-click.
+enum class NumberFieldId : std::uint8_t { Position, Rotation, VoxelSize, BrushRadius, SurfaceOffset };
+struct NumberFieldRect {
+    NumberFieldId field{};
+    int axis{};          // 0..2 for Position / Rotation, else 0
+    UiRect label{};      // drag to scrub ("X", "Y", "Z" or the row name)
+    UiRect box{};        // click to type
+};
 enum class InspectorFlagState : std::uint8_t { Off, On, Mixed };
 struct InspectorSelectionSummary {
     std::size_t count{};
@@ -844,6 +857,16 @@ public:
     [[nodiscard]] CommandResult nudge_selection(Float3 worldDelta);
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
     [[nodiscard]] InspectorSelectionSummary inspector_selection_summary() const;
+    // Numeric fields: the shown value ("" when the field does not apply, "—" when the selected
+    // objects differ), typing a value (units, arithmetic, += -= *= /=), reset and scrub state.
+    [[nodiscard]] bool number_field_available(NumberFieldId field) const;
+    [[nodiscard]] std::string number_field_text(NumberFieldId field, int axis) const;
+    bool set_number_field(NumberFieldId field, int axis, std::string_view text, std::string_view verb = "Set");
+    bool reset_number_field(NumberFieldId field, int axis);
+    [[nodiscard]] bool number_scrub_active() const noexcept { return numberScrub_.armed && numberScrub_.moved; }
+    // Where the fields are now: per-axis boxes on the inspector's Position / Rotation rows, Voxel
+    // size on the next row, and the viewport tool strip (Brush radius / Surface offset).
+    [[nodiscard]] std::vector<NumberFieldRect> number_field_rects() const;
     [[nodiscard]] CommandResult toggle_inspector_flag(std::size_t index);
     [[nodiscard]] CommandResult set_primary_rotation_euler_degrees(Float3 degrees);
     [[nodiscard]] CommandResult rescale_primary_voxel_object(Float3 scale);
@@ -1108,6 +1131,25 @@ private:
     void begin_text_edit(TextEditKind kind, EditorObjectId objectId, std::string initialBuffer);
     void commit_text_edit();
     void cancel_text_edit() noexcept;
+    struct NumberScrubState {
+        bool armed{};                 // pressed on a field label
+        bool moved{};                 // dragged far enough to be a scrub (else it was a click)
+        NumberFieldId field{};
+        int axis{};
+        int startX{};
+        std::vector<ObjectTransformChange> transforms;
+        std::vector<ObjectVoxelSizeChange> sizes;
+        float startScalar{};          // brush radius / surface offset at the press
+    };
+    NumberScrubState numberScrub_;
+    std::optional<std::pair<NumberFieldId, int>> contextNumberField_;
+    std::string numberFieldClipboard_;
+    void begin_number_field_edit(NumberFieldId field, int axis);
+    void update_number_scrub(int x, std::uint32_t modifiers);
+    void finish_number_scrub(bool cancel);
+    [[nodiscard]] std::vector<EditorObjectId> number_field_objects(NumberFieldId field) const;
+    // Why the selected objects cannot take an edit to `field` ("" when they can).
+    [[nodiscard]] std::string number_field_refusal(NumberFieldId field) const;
     void open_context_menu(int x, int y, std::optional<EditorObjectId> target, bool fromHierarchy);
     void open_pick_list(int x, int y, const std::vector<EditorPickResult>& hits);
     void walk_selection(std::string_view direction);

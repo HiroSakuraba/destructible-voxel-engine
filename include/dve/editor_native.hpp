@@ -45,11 +45,11 @@
 #include "dve/collision_proxy.hpp"
 #include "dve/editor_scatter.hpp"
 #include "dve/editor_polygon.hpp"
+#include "dve/editor_mirror.hpp"
 #include "dve/editor_subdivision.hpp"
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
-#include "dve/editor_mirror.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -827,11 +827,11 @@ public:
     void reset_camera_navigation() noexcept;
     [[nodiscard]] bool apply_audio_settings_to_runtime() noexcept;
     [[nodiscard]] CommandResult nudge_selection(Float3 worldDelta);
-    [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
-    [[nodiscard]] InspectorSelectionSummary inspector_selection_summary() const;
     // Mirror the selected objects (with their children) across the world plane through the
     // current pivot whose normal is axis 0/1/2 (X/Y/Z); as copies or in place. One undo step.
     bool mirror_selection(int axis, bool copy);
+    [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
+    [[nodiscard]] InspectorSelectionSummary inspector_selection_summary() const;
     [[nodiscard]] CommandResult toggle_inspector_flag(std::size_t index);
     [[nodiscard]] CommandResult set_primary_rotation_euler_degrees(Float3 degrees);
     [[nodiscard]] CommandResult rescale_primary_voxel_object(Float3 scale);

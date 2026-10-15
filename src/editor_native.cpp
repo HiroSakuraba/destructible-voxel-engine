@@ -1920,11 +1920,11 @@ void NativeEditorController::refresh_menu_state() noexcept {
     }
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
-    enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
     for (std::string_view id : {"edit.mirror_x", "edit.mirror_y", "edit.mirror_z", "edit.mirror_copy_x", "edit.mirror_copy_y", "edit.mirror_copy_z"})
         enabled(id, hasSelection && !playActive && selectionDomain_ == SelectionDomain::Objects,
                 playActive ? "Stop Play first." : selectionDomain_ != SelectionDomain::Objects ? "Return to object selection first."
                                                                                                 : "Select the objects to mirror first.");
+    enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
     const auto hierarchyPrimary = workspace_.selected_object();
     const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;
     const bool hierarchySelectionReady = !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
@@ -7541,9 +7541,6 @@ camera_menu_dispatch_complete:
         set_status(visible ? "Inspector shown" : "Inspector hidden");
         return true;
     }
-    if (actionId == "edit.mirror_x" || actionId == "edit.mirror_y" || actionId == "edit.mirror_z" ||
-        actionId == "edit.mirror_copy_x" || actionId == "edit.mirror_copy_y" || actionId == "edit.mirror_copy_z")
-        return mirror_selection(actionId.back() == 'x' ? 0 : actionId.back() == 'y' ? 1 : 2, actionId.find("copy") != std::string_view::npos);
     if (actionId == "edit.duplicate") {
         if (workspace_.selection_count() == 0) {
             set_status("Nothing selected to duplicate", true);
@@ -7557,6 +7554,9 @@ camera_menu_dispatch_complete:
                    !result.success);
         return result.success;
     }
+    if (actionId == "edit.mirror_x" || actionId == "edit.mirror_y" || actionId == "edit.mirror_z" ||
+        actionId == "edit.mirror_copy_x" || actionId == "edit.mirror_copy_y" || actionId == "edit.mirror_copy_z")
+        return mirror_selection(actionId.back() == 'x' ? 0 : actionId.back() == 'y' ? 1 : 2, actionId.find("copy") != std::string_view::npos);
     if (actionId == "edit.rename") {
         const auto id = workspace_.selected_object();
         if (!id) {

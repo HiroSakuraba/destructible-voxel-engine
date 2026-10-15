@@ -147,7 +147,7 @@ PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset& sour
             }
         }else {
             if(!diagnostic.boundaries)return fail("Closed concave endpoint joins are not supported; use a straight open crease chain");
-            // Open reconstruction operates on planar affine quad domains, with explicit open ends.
+            // Open reconstruction retains source triangle domains where their fields are not affine.
             std::map<Index,std::set<Edge>> selectedAt;std::set<Index> touched;
             for(auto e:selection.components){const auto& h=halves.at(e);selectedAt[Index(e>>32U)].insert(e);selectedAt[Index(e)].insert(e);for(const auto& half:h)touched.insert(half.face);}
             const auto boundary=halves.at(*selection.components.begin()).size()==1;
@@ -158,44 +158,159 @@ PolygonFaceEditResult bevel_authored_editor_edges(const CookedPolygonAsset& sour
             const auto& first=halves.at(*selection.components.begin()).front();const auto axis=normalize(subtract(positions.at(first.b),positions.at(first.a)));
             for(auto e:selection.components){const auto direction=normalize(subtract(positions.at(Index(e)),positions.at(Index(e>>32U))));if(std::abs(dot(axis,direction))<.99999F)return fail("Initial open bevel supports straight chains only; bent-chain miters are separate work");}
             for(const auto& [v,edges]:selectedAt)for(auto e:tags.at(v))for(const auto& half:halves.at(e))if(!touched.contains(half.face))return fail("Bevel chain endpoints or corners meet unsupported additional faces");
-            std::map<Index,std::vector<Vertex>> quads;std::map<Index,Edge> faceEdge;
+            std::map<Index,std::vector<Vertex>> quads;std::map<Index,Edge> faceEdge;std::set<Index> exactFaces;
             for(auto e:selection.components)for(const auto& half:halves.at(e)){if(!faceEdge.emplace(half.face,e).second)return fail("A face cannot contain multiple selected bevel edges");}
             for(auto f:touched){if(faces[f].size()!=2)return fail("Open bevel requires explicit planar quad face domains");std::map<Index,Vertex> attributes;std::map<Edge,std::vector<std::pair<Index,Index>>> faceEdges;
-                for(auto t:faces[f])for(Index j=0;j<3;++j){const auto a=source.indices[t*3+j],b=source.indices[t*3+(j+1)%3];Vertex v;v.attribute=input.vertices[a];v.original=a;v.group=canonical[a];v.attributeParents={a};if(auto at=attributes.find(v.group);at!=attributes.end()&&at->second.original!=v.original)return fail("Resolve internal split attributes before local open bevel");attributes.emplace(v.group,v);faceEdges[edge(canonical[a],canonical[b])].push_back({canonical[a],canonical[b]});}
+                for(auto t:faces[f])for(Index j=0;j<3;++j){const auto a=source.indices[t*3+j],b=source.indices[t*3+(j+1)%3];Vertex v;v.attribute=input.vertices[a];v.original=a;v.group=canonical[a];v.attributeParents={a};if(auto at=attributes.find(v.group);at!=attributes.end()&&at->second.original!=v.original)exactFaces.insert(f);attributes.emplace(v.group,v);faceEdges[edge(canonical[a],canonical[b])].push_back({canonical[a],canonical[b]});}
                 std::map<Index,Index> next;for(const auto& [e,h]:faceEdges)if(h.size()==1)next[h[0].first]=h[0].second;if(next.size()!=4)return fail("Open bevel requires simple quad boundaries");auto start=next.begin()->first,current=start;do{quads[f].push_back(attributes.at(current));current=next.at(current);}while(current!=start&&quads[f].size()<5);if(quads[f].size()!=4)return fail("Invalid open face domain");
                 const auto& q=quads[f];const auto n=normalize(cross(subtract(q[1].attribute.position,q[0].attribute.position),subtract(q[2].attribute.position,q[0].attribute.position)));
                 if(std::abs(dot(n,subtract(q[3].attribute.position,q[0].attribute.position)))>tolerance)return fail("Open bevel requires planar quads");
-                // Check affine UV/color domains before replacing a face's hidden triangulation.
+                // Affine, unsplit fields can keep a single quad; other fields retain the actual triangles.
                 const auto x=subtract(q[1].attribute.position,q[0].attribute.position),y=subtract(q[2].attribute.position,q[0].attribute.position),p=subtract(q[3].attribute.position,q[0].attribute.position);const auto xx=dot(x,x),xy=dot(x,y),yy=dot(y,y),den=xx*yy-xy*xy;
                 if(den<=extent*extent*1e-12F)return fail("Open face domain is degenerate");const auto u=(dot(p,x)*yy-dot(p,y)*xy)/den,v=(dot(p,y)*xx-dot(p,x)*xy)/den;
                 const auto test=[&](float a,float b,float c,float actual){return std::abs(a+u*(b-a)+v*(c-a)-actual)<=1e-5F*(std::max)({1.F,std::abs(a),std::abs(b),std::abs(c),std::abs(actual)});};
                 const auto& a=q[0].attribute;const auto& b=q[1].attribute;const auto& c=q[2].attribute;const auto& d=q[3].attribute;
-                if(!test(a.texcoord.x,b.texcoord.x,c.texcoord.x,d.texcoord.x)||!test(a.texcoord.y,b.texcoord.y,c.texcoord.y,d.texcoord.y)||!test(a.texcoord1.x,b.texcoord1.x,c.texcoord1.x,d.texcoord1.x)||!test(a.texcoord1.y,b.texcoord1.y,c.texcoord1.y,d.texcoord1.y)||!test(a.color.x,b.color.x,c.color.x,d.color.x)||!test(a.color.y,b.color.y,c.color.y,d.color.y)||!test(a.color.z,b.color.z,c.color.z,d.color.z)||!test(a.color.w,b.color.w,c.color.w,d.color.w))return fail("Resolve non-affine UV/color quad domains before local open bevel");
+                if(!test(a.texcoord.x,b.texcoord.x,c.texcoord.x,d.texcoord.x)||!test(a.texcoord.y,b.texcoord.y,c.texcoord.y,d.texcoord.y)||!test(a.texcoord1.x,b.texcoord1.x,c.texcoord1.x,d.texcoord1.x)||!test(a.texcoord1.y,b.texcoord1.y,c.texcoord1.y,d.texcoord1.y)||!test(a.color.x,b.color.x,c.color.x,d.color.x)||!test(a.color.y,b.color.y,c.color.y,d.color.y)||!test(a.color.z,b.color.z,c.color.z,d.color.z)||!test(a.color.w,b.color.w,c.color.w,d.color.w))exactFaces.insert(f);
             }
             // A face-side component is determined by adjacency, never by matching moved positions.
             std::map<Index,Index> side;
             std::map<Index,std::set<Index>> adjacency;for(const auto& [e,h]:halves)if(!selection.components.contains(e)&&h.size()==2&&h[0].face!=h[1].face&&dot(h[0].normal,h[1].normal)>.99999F){adjacency[h[0].face].insert(h[1].face);adjacency[h[1].face].insert(h[0].face);}
             for(auto seed:touched)if(!side.contains(seed)){side[seed]=seed;std::queue<Index> pending;pending.push(seed);while(!pending.empty()){auto f=pending.front();pending.pop();for(auto next:adjacency[f])if(touched.contains(next)&&!side.contains(next)){side[next]=seed;pending.push(next);}}}
             std::set<Index> sides;for(auto [f,s]:side)sides.insert(s);if(sides.size()!=(boundary?1U:2U))return fail("Open chain does not have consistent planar face sides");
-            std::map<std::pair<Index,Index>,Vertex> rails;std::map<Index,Patch> trimmed;
+            std::map<std::pair<Index,Index>,Vertex> rails,faceRails;std::map<Index,Patch> trimmed;
+            std::map<Index,Float3> inwardByFace;std::map<Index,float> setbackByFace;
             for(auto f:touched){const auto e=faceEdge.at(f);const auto& h=*std::find_if(halves.at(e).begin(),halves.at(e).end(),[&](const auto& h){return h.face==f;});const auto direction=normalize(subtract(positions.at(h.b),positions.at(h.a)));const auto inward=normalize(cross(h.normal,direction));const auto sine=boundary?1.F:std::sqrt((1-dot(halves.at(e)[0].normal,halves.at(e)[1].normal))*.5F);const auto setback=width/sine;
+                inwardByFace[f]=inward;setbackByFace[f]=setback;
                 auto q=quads.at(f);const auto originalQuad=q;for(std::size_t j=0;j<4;++j)if(originalQuad[j].group==h.a||originalQuad[j].group==h.b){const auto k=originalQuad[(j+1)%4].group==h.a||originalQuad[(j+1)%4].group==h.b?(j+3)%4:(j+1)%4;const auto delta=subtract(originalQuad[k].attribute.position,originalQuad[j].attribute.position);const auto length=dot(delta,inward);if(length<=setback+tolerance||std::abs(dot(normalize(delta),direction))>1e-5F||dot(normalize(delta),inward)<.99999F)return fail("Open bevel needs perpendicular end rails and room for its setback");
                     const auto key=std::pair{originalQuad[j].group,side.at(f)};auto found=rails.find(key);Vertex rail;
                     if(found==rails.end()){const auto point=add(originalQuad[j].attribute.position,multiply(inward,setback));rail=interpolate(originalQuad[j],originalQuad[k],setback/length,nextGroup++,point);rail.geometricParent=originalQuad[j].group;positions[rail.group]=point;tags[rail.group]={edge(originalQuad[j].group,originalQuad[k].group)};rails.emplace(key,rail);}else{rail=interpolate(originalQuad[j],originalQuad[k],setback/length,found->second.group,found->second.attribute.position);rail.geometricParent=originalQuad[j].group;}
-                    q[j]=std::move(rail);}
+                    faceRails[{f,originalQuad[j].group}]=rail;q[j]=std::move(rail);}
                 Patch patch;patch.vertices=q;patch.face=f;patch.material=materials[faces[f][0]];trimmed[f]=std::move(patch);}
-            std::vector<Patch> local;for(auto patch:patches)if(!touched.contains(*patch.face))local.push_back(std::move(patch));for(auto& [f,p]:trimmed)local.push_back(std::move(p));
-            std::map<std::pair<Index,Index>,Index> profileGroups;
-            for(auto e:selection.components){auto h=halves.at(e);std::sort(h.begin(),h.end(),[&](const auto& a,const auto& b){return side.at(a.face)<side.at(b.face);});const auto a=h[0].a,b=h[0].b;const auto d0=normalize(cross(h[0].normal,normalize(subtract(positions.at(b),positions.at(a)))));
+            // Each edge owns axial columns shared by both face sides and every profile row.
+            // Retaining a render diagonal can add a rail intersection; mirror that column on the
+            // opposite side so neither the source surface nor the profile acquires a T-junction.
+            std::vector<Patch> local;
+            for(auto patch:patches)if(!touched.contains(*patch.face))local.push_back(std::move(patch));
+            std::map<std::pair<Index,Index>,Index> endpointProfileGroups;
+            for(auto e:selection.components){
+                auto h=halves.at(e);
+                std::sort(h.begin(),h.end(),[&](const auto& a,const auto& b){return side.at(a.face)<side.at(b.face);});
+                const auto a=h[0].a,b=h[0].b;
+                const auto base=positions.at(a),delta=subtract(positions.at(b),base);
+                const auto axisLengthSquared=dot(delta,delta);
+                const auto parameter=[&](Float3 p){return dot(subtract(p,base),delta)/axisLengthSquared;};
+                bool exact=false;for(const auto& half:h)exact=exact||exactFaces.contains(half.face);
+                std::vector<float> columns{0,1};
+                if(exact)for(const auto& half:h){
+                    const auto inward=inwardByFace.at(half.face);const auto setback=setbackByFace.at(half.face);
+                    for(auto t:faces[half.face])for(Index j=0;j<3;++j){
+                        const auto p=input.vertices[input.indices[t*3+j]].position;
+                        const auto q=input.vertices[input.indices[t*3+(j+1)%3]].position;
+                        const auto dp=dot(subtract(p,base),inward)-setback,dq=dot(subtract(q,base),inward)-setback;
+                        if((dp<0)!=(dq<0))columns.push_back(std::clamp(parameter(add(p,multiply(subtract(q,p),dp/(dp-dq)))),0.F,1.F));
+                    }
+                }
+                std::sort(columns.begin(),columns.end());
+                columns.erase(std::unique(columns.begin(),columns.end(),[](float x,float y){return std::abs(x-y)<1e-6F;}),columns.end());
+                columns.front()=0;columns.back()=1;
+                const auto columnCount=Index(columns.size());
+                std::map<Index,std::vector<Index>> railGroups;
+                std::map<Index,std::vector<std::pair<Vertex,Vertex>>> intervalRails;
+                for(const auto& half:h){
+                    const auto f=half.face;const auto inward=inwardByFace.at(f);const auto setback=setbackByFace.at(f);
+                    auto& groups=railGroups[f];
+                    for(Index col=0;col<columnCount;++col){
+                        const auto group=col==0?faceRails.at({f,a}).group:col+1==columnCount?faceRails.at({f,b}).group:nextGroup++;
+                        groups.push_back(group);
+                        if(col>0&&col+1<columnCount)positions[group]=add(add(base,multiply(delta,columns[col])),multiply(inward,setback));
+                    }
+                    auto& intervals=intervalRails[f];intervals.resize(columnCount-1);
+                    if(!exact){
+                        intervals[0]={faceRails.at({f,a}),faceRails.at({f,b})};
+                        local.push_back(std::move(trimmed.at(f)));continue;
+                    }
+                    std::map<Index,Index> groupColumn;for(Index col=0;col<columnCount;++col)groupColumn[groups[col]]=col;
+                    std::vector<bool> assigned(columnCount-1);
+                    for(auto t:faces[f]){
+                        const auto& original=patches[t];Patch clipped=original;clipped.vertices.clear();
+                        for(Index j=0;j<3;++j){
+                            const auto& p=original.vertices[j];const auto& q=original.vertices[(j+1)%3];
+                            const auto dp=dot(subtract(p.attribute.position,base),inward)-setback;
+                            const auto dq=dot(subtract(q.attribute.position,base),inward)-setback;
+                            if(dp>=0)clipped.vertices.push_back(p);
+                            if((dp<0)!=(dq<0)){
+                                const auto fraction=dp/(dp-dq);const auto point=add(p.attribute.position,multiply(subtract(q.attribute.position,p.attribute.position),fraction));
+                                const auto u=parameter(point);Index col=0;
+                                for(Index k=1;k<columnCount;++k)if(std::abs(columns[k]-u)<std::abs(columns[col]-u))col=k;
+                                if(std::abs(columns[col]-u)>2e-6F)return fail("Open bevel lost a source-domain rail intersection");
+                                const auto group=groups[col];auto v=interpolate(p,q,fraction,group,positions.at(group));
+                                if(col==0)v.geometricParent=a;else if(col+1==columnCount)v.geometricParent=b;
+                                tags[group].insert(edge(p.group,q.group));clipped.vertices.push_back(std::move(v));
+                            }
+                        }
+                        if(clipped.vertices.size()<3)continue;
+                        std::vector<Vertex> split;
+                        for(std::size_t j=0;j<clipped.vertices.size();++j){
+                            const auto& p=clipped.vertices[j];const auto& q=clipped.vertices[(j+1)%clipped.vertices.size()];split.push_back(p);
+                            const auto cp=groupColumn.find(p.group),cq=groupColumn.find(q.group);
+                            if(cp==groupColumn.end()||cq==groupColumn.end())continue;
+                            const auto first=cp->second,last=cq->second;
+                            if(first==last)return fail("Open bevel collapses a source-domain rail interval");
+                            const auto direction=last>first?1:-1;
+                            for(auto col=int(first)+direction;col!=int(last);col+=direction){
+                                const auto u=(columns[col]-columns[first])/(columns[last]-columns[first]);
+                                split.push_back(interpolate(p,q,u,groups[col],positions.at(groups[col])));
+                            }
+                        }
+                        clipped.vertices=std::move(split);
+                        for(std::size_t j=0;j<clipped.vertices.size();++j){
+                            const auto& p=clipped.vertices[j];const auto& q=clipped.vertices[(j+1)%clipped.vertices.size()];
+                            const auto cp=groupColumn.find(p.group),cq=groupColumn.find(q.group);
+                            if(cp==groupColumn.end()||cq==groupColumn.end())continue;
+                            const auto col=(std::min)(cp->second,cq->second);
+                            if((std::max)(cp->second,cq->second)!=col+1||assigned[col])return fail("Open bevel has ambiguous source-domain rails");
+                            assigned[col]=true;intervals[col]=cp->second<cq->second?std::pair{p,q}:std::pair{q,p};
+                        }
+                        local.push_back(std::move(clipped));
+                    }
+                    if(std::find(assigned.begin(),assigned.end(),false)!=assigned.end())return fail("Open bevel lost a source-domain rail interval");
+                }
+                const auto d0=normalize(cross(h[0].normal,normalize(delta)));
                 const auto d1=boundary?multiply(h[0].normal,-1):normalize(cross(h[1].normal,normalize(subtract(positions.at(h[1].b),positions.at(h[1].a)))));
-                const auto sine=boundary?1.F:std::sqrt((1-dot(h[0].normal,h[1].normal))*.5F);const auto profile=profile_points(d0,d1,width/sine,settings);const auto count=Index(profile.size()-1);
-                std::array<std::vector<Vertex>,2> ends;
-                for(Index endpoint=0;endpoint<2;++endpoint){const auto old=endpoint?b:a;const auto r0=rails.at({old,side.at(h[0].face)});Vertex r1;
-                    if(!boundary)r1=rails.at({old,side.at(h[1].face)});else{r1=r0;r1.original.reset();r1.corner.reset();const auto attribute=endpoint?h[0].vb:h[0].va;r1.attribute=input.vertices[attribute];r1.attributeParents={attribute};r1.attribute.position=add(positions.at(old),profile.back());r1.geometricParent=old;}
-                    for(Index step=0;step<=count;++step){auto v=interpolate(r0,r1,float(step)/float(count),0,add(positions.at(old),profile[step]));v.geometricParent=old;
-                        if(step==0)v.group=r0.group;else if(step==count&&!boundary)v.group=r1.group;else{const auto key=std::pair{old,step};auto [it,created]=profileGroups.emplace(key,nextGroup);if(created)++nextGroup;v.group=it->second;}
-                        positions[v.group]=v.attribute.position;if(boundary&&step==count)tags[v.group].insert(e);ends[endpoint].push_back(std::move(v));}}
-                for(Index step=0;step<count;++step){Patch strip;strip.bevelEdge=e;strip.material=selectedMaterial.at(e);strip.vertices={ends[1][step],ends[0][step],ends[0][step+1],ends[1][step+1]};local.push_back(std::move(strip));}
+                const auto sine=boundary?1.F:std::sqrt((1-dot(h[0].normal,h[1].normal))*.5F);
+                const auto profile=profile_points(d0,d1,width/sine,settings);const auto count=Index(profile.size()-1);
+                std::map<std::pair<Index,Index>,Index> interiorProfileGroups;
+                for(Index col=0;col+1<columnCount;++col){
+                    std::array<std::vector<Vertex>,2> ends;
+                    for(Index endpoint=0;endpoint<2;++endpoint){
+                        const auto column=col+endpoint;const auto r0=endpoint?intervalRails.at(h[0].face)[col].second:intervalRails.at(h[0].face)[col].first;
+                        Vertex r1;
+                        if(!boundary)r1=endpoint?intervalRails.at(h[1].face)[col].second:intervalRails.at(h[1].face)[col].first;
+                        else {
+                            Vertex p,q;p.attribute=input.vertices[h[0].va];p.attributeParents={h[0].va};q.attribute=input.vertices[h[0].vb];q.attributeParents={h[0].vb};
+                            r1=interpolate(p,q,columns[column],0,{});
+                        }
+                        const auto centre=add(base,multiply(delta,columns[column]));
+                        for(Index step=0;step<=count;++step){
+                            auto v=interpolate(r0,r1,float(step)/float(count),0,add(centre,profile[step]));
+                            if(column==0)v.geometricParent=a;else if(column+1==columnCount)v.geometricParent=b;
+                            if(step==0)v.group=railGroups.at(h[0].face)[column];
+                            else if(step==count&&!boundary)v.group=railGroups.at(h[1].face)[column];
+                            else {
+                                const auto endpointColumn=column==0||column+1==columnCount;
+                                auto& groups=endpointColumn?endpointProfileGroups:interiorProfileGroups;
+                                const auto key=std::pair{endpointColumn?(column==0?a:b):column,step};
+                                auto [it,created]=groups.emplace(key,nextGroup);if(created)++nextGroup;v.group=it->second;
+                            }
+                            // Use the shared rail point exactly, including at adjacent chain segments.
+                            if(step==0||(!boundary&&step==count))v.attribute.position=positions.at(v.group);
+                            positions[v.group]=v.attribute.position;if(boundary&&step==count)tags[v.group].insert(e);
+                            ends[endpoint].push_back(std::move(v));
+                        }
+                    }
+                    for(Index step=0;step<count;++step){Patch strip;strip.bevelEdge=e;strip.material=selectedMaterial.at(e);
+                        strip.vertices={ends[1][step],ends[0][step],ends[0][step+1],ends[1][step+1]};local.push_back(std::move(strip));}
+                }
             }
             patches=std::move(local);
         }

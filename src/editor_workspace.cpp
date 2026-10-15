@@ -467,6 +467,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"transform.scale_voxel_size_up","Edit","Scale Voxel Size x2",""},
         {"transform.scale_voxel_size_down","Edit","Scale Voxel Size x0.5",""},
         {"edit.duplicate","Edit","Duplicate","Ctrl+D"}, {"edit.rename","Edit","Rename","F2"},
+        {"edit.duplicate_special","Edit","Duplicate Special...","Ctrl+Shift+D"},
         {"edit.group","Edit","Group Selected","Ctrl+G"}, {"edit.ungroup","Edit","Ungroup","Ctrl+Shift+G"},
         {"select.parent","Edit","Select Parent",""},
         {"select.children","Edit","Select Children",""},
@@ -1137,6 +1138,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             for (const char* keyword : keywords) action->keywords.emplace_back(keyword);
         }
     };
+    describe("edit.duplicate_special", "Make many copies, each offset, turned and scaled from the last, around its own pivot or a point (fans, rings, spirals). Preview, then Apply as one undo step.",
+             {"array", "copies", "repeat", "radial", "instance", "duplicate"});
     describe("subdiv.vertex_mode","Vertex Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.edge_mode","Edge Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.face_mode","Face Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});

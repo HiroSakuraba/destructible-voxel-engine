@@ -1921,6 +1921,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
     enabled("edit.ungroup", hasSelection, "Select a grouped object first.");
+    enabled("edit.duplicate_special", (hasSelection || duplicateSpecial_.active) && !playActive &&
+                selectionDomain_ == SelectionDomain::Objects,
+            playActive ? "Stop Play first." : "Select the objects to copy first.");
     const auto hierarchyPrimary = workspace_.selected_object();
     const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;
     const bool hierarchySelectionReady = !polygonPreviewBefore_ && !mesh_authoring_dragging() &&
@@ -2564,7 +2567,11 @@ void NativeEditorController::recompute_layout() {
     layout_.scatterSettingRows.clear();
     layout_.inspectorStackedFields = inspectorWidth > 0 && inspectorWidth < 320;
     layout_.inspectorFieldCount = 0;
-    if (inspectorWidth > 0 && scatter_settings_panel_active()) {
+    if (inspectorWidth > 0 && duplicateSpecial_.active) {
+        // Duplicate Special replaces the object details (see duplicate_panel_layout).
+        layout_.inspectorContentClipY = layout_.inspector.y + layout_.inspector.height - 6;
+        layout_.inspectorScroll = layout_.inspectorScrollMax = 0;
+    } else if (inspectorWidth > 0 && scatter_settings_panel_active()) {
         // The scatter settings replace the object details (and the flag toggles) while the fill
         // preview is open or the Scatter brush is the tool: one row per setting.
         const int rowStep = std::max(20, static_cast<int>(22.0F * scale));
@@ -2854,6 +2861,11 @@ void NativeEditorController::update(float elapsedSeconds) {
     voxel_boolean_tick();
     prune_voxel_selection();
     prune_polygon_selection();
+    if (duplicateSpecial_.active) {
+        bool gone = playSession_.active() || selectionDomain_ != SelectionDomain::Objects;
+        for (const EditorObjectId id : duplicateSpecial_.roots) gone = gone || !workspace_.document().find_object(id);
+        if (gone) cancel_duplicate_special("Duplicate Special closed: the objects or mode changed");
+    }
     if (followSelection_) {
         // Keep the camera's offset to the selection: move eye and target by how far it moved.
         if (workspace_.selected_objects().empty() || playSession_.active()) {
@@ -3530,7 +3542,8 @@ void NativeEditorController::commit_text_edit() {
         }
     }
     // Numeric fields: one axis (or one value) at a time, with units and relative edits.
-    const NumberFieldId field = kind == TextEditKind::Position ? NumberFieldId::Position
+    const NumberFieldId field = kind == TextEditKind::DuplicateSetting ? static_cast<NumberFieldId>(textEdit_.objectId)
+        : kind == TextEditKind::Position ? NumberFieldId::Position
         : kind == TextEditKind::Rotation ? NumberFieldId::Rotation
         : kind == TextEditKind::VoxelSize ? NumberFieldId::VoxelSize
         : kind == TextEditKind::BrushRadius ? NumberFieldId::BrushRadius : NumberFieldId::SurfaceOffset;
@@ -4420,6 +4433,30 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 
     if (button == PointerButton::Primary && workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
         !openMenu_ && !contextMenu_.open && !commandPaletteOpen_ && !filePicker_.open && !layout_.menuBar.contains(x, y)) {
+        if (duplicateSpecial_.active && layout_.inspector.contains(x, y)) {
+            const DuplicatePanelLayout panel = duplicate_panel_layout();
+            DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+            const auto choose = [&](std::string message) {
+                if (textEdit_.kind != TextEditKind::Inactive) commit_text_edit();
+                recompute_layout();
+                set_status(std::move(message) + "; " + duplicate_special_summary());
+                focusRegion_ = EditorFocusRegion::Inspector;
+            };
+            if (panel.pivotEach.contains(x, y)) { v.pivot = DuplicatePivot::EachCopy; choose("Each copy turns about its own pivot"); return; }
+            if (panel.pivotPoint.contains(x, y)) { v.pivot = DuplicatePivot::Point; choose("Copies turn around the point"); return; }
+            if (panel.spaceLocal.contains(x, y)) { v.space = DuplicateSpace::Local; choose("Offsets follow each copy's turn"); return; }
+            if (panel.spaceWorld.contains(x, y)) { v.space = DuplicateSpace::World; choose("Offsets along world axes"); return; }
+            if (panel.pointOrigin.contains(x, y)) { v.point = {}; choose("Point: world origin"); return; }
+            if (panel.pointSelection.contains(x, y)) {
+                const EditorObjectBounds bounds = selection_bounds();
+                v.point = bounds.valid ? multiply(add(bounds.minimum, bounds.maximum), 0.5F) : selection_pivot();
+                choose("Point: selection centre");
+                return;
+            }
+            if (panel.group.contains(x, y)) { v.group = !v.group; choose(v.group ? "Copies go in one group" : "Copies stay loose"); return; }
+            if (panel.apply.contains(x, y)) { (void)apply_duplicate_special(); return; }
+            if (panel.cancel.contains(x, y)) { cancel_duplicate_special("Duplicate Special cancelled"); return; }
+        }
         // Numeric fields: a click on a box types into it; a press on the label starts a scrub
         // (a click on the label without dragging also types).
         for (const NumberFieldRect& rect : number_field_rects()) {
@@ -4430,7 +4467,9 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             numberScrub_.field = rect.field;
             numberScrub_.axis = rect.axis;
             numberScrub_.startX = x;
-            numberScrub_.startScalar = rect.field == NumberFieldId::BrushRadius ? static_cast<float>(voxelBrushRadius_) : placementOffsetMeters_;
+            numberScrub_.startScalar = rect.field == NumberFieldId::BrushRadius ? static_cast<float>(voxelBrushRadius_)
+                : rect.field == NumberFieldId::SurfaceOffset ? placementOffsetMeters_
+                : static_cast<float>(std::strtod(number_field_text(rect.field, rect.axis).c_str(), nullptr));
             const std::string refusal = rect.field == NumberFieldId::BrushRadius || rect.field == NumberFieldId::SurfaceOffset
                 ? std::string() : number_field_refusal(rect.field);
             for (const EditorObjectId id : number_field_objects(rect.field)) {
@@ -7551,6 +7590,7 @@ camera_menu_dispatch_complete:
         set_status(visible ? "Inspector shown" : "Inspector hidden");
         return true;
     }
+    if (actionId == "edit.duplicate_special") return duplicateSpecial_.active ? apply_duplicate_special() : open_duplicate_special();
     if (actionId == "edit.duplicate") {
         if (workspace_.selection_count() == 0) {
             set_status("Nothing selected to duplicate", true);
@@ -8162,6 +8202,22 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     if (spriteAuthoringPanel_.open() && spriteAuthoringPanel_.key_down(normalized, control, shift, alt)) return;
     if (controlRigPanel_.open() && controlRigPanel_.key_down(normalized, control, shift, alt)) return;
     if (textEdit_.kind != TextEditKind::Inactive) {
+        if (normalized == "tab" && !control && !alt && textEdit_.kind == TextEditKind::DuplicateSetting) {
+            // Duplicate Special: Copies, Offset X/Y/Z, Turn X/Y/Z, Scale, Point X/Y/Z.
+            std::vector<std::pair<NumberFieldId, int>> order{{NumberFieldId::DuplicateCopies, 0}};
+            for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::DuplicateOffset, axis});
+            for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::DuplicateRotation, axis});
+            order.push_back({NumberFieldId::DuplicateScale, 0});
+            if (number_field_available(NumberFieldId::DuplicatePoint))
+                for (int axis = 0; axis < 3; ++axis) order.push_back({NumberFieldId::DuplicatePoint, axis});
+            const auto here = std::find(order.begin(), order.end(),
+                                        std::pair{static_cast<NumberFieldId>(textEdit_.objectId), textEdit_.axis});
+            const std::size_t index = here == order.end() ? 0U : static_cast<std::size_t>(here - order.begin());
+            const auto next = order[(index + (shift ? order.size() - 1U : 1U)) % order.size()];
+            commit_text_edit();
+            begin_number_field_edit(next.first, next.second);
+            return;
+        }
         if (normalized == "tab" && !control && !alt &&
             (textEdit_.kind == TextEditKind::Position || textEdit_.kind == TextEditKind::Rotation ||
              textEdit_.kind == TextEditKind::VoxelSize)) {
@@ -8204,6 +8260,10 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             return;
         }
         return;
+    }
+    if (duplicateSpecial_.active && !control && !alt) {
+        if (normalized == "escape") { cancel_duplicate_special("Duplicate Special cancelled"); return; }
+        if (normalized == "return" || normalized == "enter") { (void)apply_duplicate_special(); return; }
     }
     if (chiptunePanel_.open() && chiptunePanel_.key_down(normalized, control, shift, alt, audioMixer_)) return;
     if (audioEventPanel_.open() && audioEventPanel_.key_down(normalized, control, shift, alt)) return;
@@ -8494,8 +8554,11 @@ namespace {
 constexpr float kDegreesPerRadian = 57.29577951308232F;
 NumberFieldUnit number_field_unit(NumberFieldId field) {
     switch (field) {
-    case NumberFieldId::Rotation: return NumberFieldUnit::Degrees;
-    case NumberFieldId::BrushRadius: return NumberFieldUnit::Count;
+    case NumberFieldId::Rotation:
+    case NumberFieldId::DuplicateRotation: return NumberFieldUnit::Degrees;
+    case NumberFieldId::BrushRadius:
+    case NumberFieldId::DuplicateCopies:
+    case NumberFieldId::DuplicateScale: return NumberFieldUnit::Count;
     default: return NumberFieldUnit::Meters;
     }
 }
@@ -8506,12 +8569,25 @@ const char* number_field_name(NumberFieldId field) {
     case NumberFieldId::VoxelSize: return "Voxel size";
     case NumberFieldId::BrushRadius: return "Brush radius";
     case NumberFieldId::SurfaceOffset: return "Surface offset";
+    case NumberFieldId::DuplicateCopies: return "Copies";
+    case NumberFieldId::DuplicateOffset: return "Offset";
+    case NumberFieldId::DuplicateRotation: return "Turn";
+    case NumberFieldId::DuplicateScale: return "Scale";
+    case NumberFieldId::DuplicatePoint: return "Point";
     }
     return "";
 }
 float& axis_of(Float3& value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
 float axis_of(const Float3& value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
 const char* axis_name(int axis) { return axis == 0 ? "X" : axis == 1 ? "Y" : "Z"; }
+bool per_axis(NumberFieldId field) {
+    return field == NumberFieldId::Position || field == NumberFieldId::Rotation || field == NumberFieldId::DuplicateOffset ||
+           field == NumberFieldId::DuplicateRotation || field == NumberFieldId::DuplicatePoint;
+}
+bool duplicate_field(NumberFieldId field) {
+    return field == NumberFieldId::DuplicateCopies || field == NumberFieldId::DuplicateOffset || field == NumberFieldId::DuplicateRotation ||
+           field == NumberFieldId::DuplicateScale || field == NumberFieldId::DuplicatePoint;
+}
 // Larger magnitudes lose all float precision (or overflow to inf when cast).
 constexpr double kNumberFieldTransformLimit = 1.0e6;
 constexpr const char* kNumberFieldLimitMessage = "values must be within \xC2\xB11,000,000";
@@ -8539,6 +8615,7 @@ std::vector<EditorObjectId> NativeEditorController::number_field_objects(NumberF
 std::string NativeEditorController::number_field_refusal(NumberFieldId field) const {
     if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play or Simulate before editing values";
     if (longJob_) return long_job_busy_reason();
+    if (duplicate_field(field)) return {};  // panel settings, not the objects
     for (const EditorObjectId id : number_field_objects(field)) {
         const EditorObject* object = workspace_.document().find_object(id);
         if (!object) continue;
@@ -8551,6 +8628,10 @@ std::string NativeEditorController::number_field_refusal(NumberFieldId field) co
 }
 
 bool NativeEditorController::number_field_available(NumberFieldId field) const {
+    if (duplicate_field(field))
+        return duplicateSpecial_.active && (field != NumberFieldId::DuplicatePoint || duplicateSpecial_.settings.pivot == DuplicatePivot::Point);
+    if (duplicateSpecial_.active && (field == NumberFieldId::Position || field == NumberFieldId::Rotation || field == NumberFieldId::VoxelSize))
+        return false;  // the panel replaces the object details
     switch (field) {
     case NumberFieldId::Position:
     case NumberFieldId::Rotation: return !number_field_objects(field).empty();
@@ -8564,6 +8645,7 @@ bool NativeEditorController::number_field_available(NumberFieldId field) const {
         return activeTool_ == EditorToolId::AddVoxel || activeTool_ == EditorToolId::RemoveVoxel ||
                activeTool_ == EditorToolId::PaintMaterial ||
                (activeTool_ == EditorToolId::Select && selectionDomain_ == SelectionDomain::Voxels && voxelSelectionBrushEnabled_);
+    default: break;
     case NumberFieldId::SurfaceOffset:
         return placementMode_ != PlacementTarget::NoTarget ||
                ((activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate) &&
@@ -8575,6 +8657,20 @@ bool NativeEditorController::number_field_available(NumberFieldId field) const {
 std::string NativeEditorController::number_field_text(NumberFieldId field, int axis) const {
     if (field == NumberFieldId::BrushRadius) return std::to_string(voxelBrushRadius_);
     if (field == NumberFieldId::SurfaceOffset) return format_number_field(placementOffsetMeters_, NumberFieldUnit::Meters);
+    if (duplicate_field(field)) {
+        const DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+        switch (field) {
+        case NumberFieldId::DuplicateCopies: return std::to_string(v.copies);
+        case NumberFieldId::DuplicateOffset: return format_number_field(axis_of(v.offset, axis), NumberFieldUnit::Meters);
+        case NumberFieldId::DuplicateRotation: return format_number_field(axis_of(v.rotationDegrees, axis), NumberFieldUnit::Degrees);
+        case NumberFieldId::DuplicatePoint: return format_number_field(axis_of(v.point, axis), NumberFieldUnit::Meters);
+        default: {
+            char buffer[32];
+            std::snprintf(buffer, sizeof buffer, "%.4g", static_cast<double>(v.scale));
+            return buffer;
+        }
+        }
+    }
     const auto ids = number_field_objects(field);
     if (ids.empty()) return {};
     std::optional<float> shared;
@@ -8595,6 +8691,32 @@ bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std
     const NumberFieldUnit unit = number_field_unit(field);
     std::string label = std::string(verb) + " " + number_field_name(field) +
         (field == NumberFieldId::Position || field == NumberFieldId::Rotation ? std::string(" ") + axis_name(axis) : std::string());
+    if (duplicate_field(field)) {
+        DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+        const double current = field == NumberFieldId::DuplicateCopies ? v.copies
+            : field == NumberFieldId::DuplicateScale ? v.scale
+            : field == NumberFieldId::DuplicateOffset ? axis_of(v.offset, axis)
+            : field == NumberFieldId::DuplicateRotation ? axis_of(v.rotationDegrees, axis) : axis_of(v.point, axis);
+        const NumberFieldParse parsed = parse_number_field(text, unit, current);
+        const std::string name = std::string(number_field_name(field)) + (per_axis(field) ? std::string(" ") + axis_name(axis) : std::string());
+        if (!parsed.ok) { set_status(name + ": " + parsed.error, true); return false; }
+        if (field == NumberFieldId::DuplicateCopies) {
+            const long long copies = std::llround(parsed.value);
+            if (copies < 1 || copies > static_cast<long long>(kMaxDuplicateCopies)) {
+                set_status("Copies: 1 to " + std::to_string(kMaxDuplicateCopies), true);
+                return false;
+            }
+            v.copies = static_cast<std::uint32_t>(copies);
+        } else if (field == NumberFieldId::DuplicateScale) {
+            if (!(parsed.value > 0.0)) { set_status("Scale must be above 0 (1 keeps the size)", true); return false; }
+            v.scale = static_cast<float>(parsed.value);
+        } else {
+            Float3& target = field == NumberFieldId::DuplicateOffset ? v.offset : field == NumberFieldId::DuplicateRotation ? v.rotationDegrees : v.point;
+            axis_of(target, axis) = static_cast<float>(parsed.value);
+        }
+        set_status(duplicate_special_summary());
+        return true;
+    }
     if (field == NumberFieldId::BrushRadius || field == NumberFieldId::SurfaceOffset) {
         const double current = field == NumberFieldId::BrushRadius ? voxelBrushRadius_ : placementOffsetMeters_;
         const NumberFieldParse parsed = parse_number_field(text, unit, current);
@@ -8711,21 +8833,22 @@ bool NativeEditorController::reset_number_field(NumberFieldId field, int axis) {
 }
 
 void NativeEditorController::begin_number_field_edit(NumberFieldId field, int axis) {
-    const TextEditKind kind = field == NumberFieldId::Position ? TextEditKind::Position
+    const TextEditKind kind = duplicate_field(field) ? TextEditKind::DuplicateSetting
+        : field == NumberFieldId::Position ? TextEditKind::Position
         : field == NumberFieldId::Rotation ? TextEditKind::Rotation
         : field == NumberFieldId::VoxelSize ? TextEditKind::VoxelSize
         : field == NumberFieldId::BrushRadius ? TextEditKind::BrushRadius : TextEditKind::SurfaceOffset;
     std::string initial = number_field_text(field, axis);
     if (initial == "\xE2\x80\x94") initial.clear();
     const auto primary = workspace_.selected_object();
-    begin_text_edit(kind, primary.value_or(EditorObjectId{}), std::move(initial));
+    begin_text_edit(kind, duplicate_field(field) ? static_cast<EditorObjectId>(field) : primary.value_or(EditorObjectId{}), std::move(initial));
     textEdit_.axis = axis;
     focusRegion_ = field == NumberFieldId::BrushRadius || field == NumberFieldId::SurfaceOffset ? EditorFocusRegion::Viewport
                                                                                                  : EditorFocusRegion::Inspector;
-    set_status(std::string("Type ") + number_field_name(field) +
-               (field == NumberFieldId::Position || field == NumberFieldId::Rotation ? std::string(" ") + axis_name(axis) : std::string()) +
-               (field == NumberFieldId::Rotation ? " in degrees (rad, turn)" : field == NumberFieldId::BrushRadius ? " in voxels"
-                                                                                                                 : " in meters (cm, mm, ft, in)") +
+    const NumberFieldUnit unit = number_field_unit(field);
+    set_status(std::string("Type ") + number_field_name(field) + (per_axis(field) ? std::string(" ") + axis_name(axis) : std::string()) +
+               (unit == NumberFieldUnit::Degrees ? " in degrees (rad, turn)" : unit == NumberFieldUnit::Count ? ""
+                                                                                                       : " in meters (cm, mm, ft, in)") +
                "; +=, -=, *=, /= change it; Tab moves on, Enter applies, Esc cancels", false, 8.0F);
 }
 
@@ -8780,9 +8903,28 @@ void NativeEditorController::update_number_scrub(int x, std::uint32_t modifiers)
         placementOffsetMeters_ = std::clamp(value, -10.0F, 10.0F);
         break;
     }
+    case NumberFieldId::DuplicateCopies:
+        duplicateSpecial_.settings.copies = static_cast<std::uint32_t>(std::clamp<long>(
+            std::lround(scrub.startScalar + static_cast<float>(dx) / (fine ? 24.0F : 6.0F)), 1L, static_cast<long>(kMaxDuplicateCopies)));
+        break;
+    case NumberFieldId::DuplicateScale:
+        duplicateSpecial_.settings.scale = std::clamp(scrub.startScalar * std::pow(fine ? 1.0002F : 1.002F, static_cast<float>(dx)), 0.01F, 100.0F);
+        if (snap) duplicateSpecial_.settings.scale = std::max(0.01F, std::round(duplicateSpecial_.settings.scale / 0.01F) * 0.01F);
+        break;
+    case NumberFieldId::DuplicateOffset:
+    case NumberFieldId::DuplicatePoint:
+    case NumberFieldId::DuplicateRotation: {
+        const bool turn = scrub.field == NumberFieldId::DuplicateRotation;
+        float value = scrub.startScalar + static_cast<float>(dx) * (turn ? 0.5F : 0.01F) * (fine ? 0.1F : 1.0F);
+        const float step = turn ? preferences.rotateSnapDegrees : preferences.translateSnapMeters;
+        if (snap && step > 0.0F) value = std::round(value / step) * step;
+        DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+        axis_of(scrub.field == NumberFieldId::DuplicateOffset ? v.offset : turn ? v.rotationDegrees : v.point, scrub.axis) = value;
+        break;
     }
-    set_status(std::string("Scrubbing ") + number_field_name(scrub.field) +
-               (scrub.field == NumberFieldId::Position || scrub.field == NumberFieldId::Rotation ? std::string(" ") + axis_name(scrub.axis) : std::string()) +
+    default: break;
+    }
+    set_status(std::string("Scrubbing ") + number_field_name(scrub.field) + (per_axis(scrub.field) ? std::string(" ") + axis_name(scrub.axis) : std::string()) +
                ": " + number_field_text(scrub.field, scrub.axis) + "  (Shift fine, Ctrl snap, Esc cancels)", false, 2.0F);
 }
 
@@ -8838,11 +8980,238 @@ void NativeEditorController::finish_number_scrub(bool cancel) {
         if (cancel) placementOffsetMeters_ = scrub.startScalar;
         set_status(cancel ? "Scrub cancelled" : "Surface offset: " + format_number_field(placementOffsetMeters_, NumberFieldUnit::Meters) + " m");
         return;
+    default:
+        if (cancel) (void)set_number_field(scrub.field, scrub.axis, std::to_string(scrub.startScalar));
+        set_status(cancel ? "Scrub cancelled" : duplicate_special_summary());
+        return;
     }
+}
+
+// --- Duplicate Special: N copies, each offset / turned / scaled from the last -----------------
+
+std::size_t NativeEditorController::duplicate_objects_per_copy() const {
+    return collect_editor_object_subtree_ids(workspace_.document(), duplicateSpecial_.roots).size();
+}
+
+std::string NativeEditorController::duplicate_special_summary() const {
+    const DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+    const std::string problem = duplicate_special_problem(v, duplicate_objects_per_copy());
+    if (!problem.empty()) return problem;
+    return std::to_string(v.copies) + (v.copies == 1 ? " copy" : " copies") + " (" +
+           std::to_string(v.copies * duplicate_objects_per_copy()) + " objects); Enter applies, Esc cancels";
+}
+
+bool NativeEditorController::open_duplicate_special() {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before duplicating", true); return false; }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
+    if (selectionDomain_ != SelectionDomain::Objects) { set_status("Duplicate Special copies objects: press M to return to objects", true); return false; }
+    // Roots only: a selected child of a selected parent comes along with its parent.
+    const std::set<EditorObjectId> selected(workspace_.selected_objects().begin(), workspace_.selected_objects().end());
+    std::vector<EditorObjectId> roots;
+    for (const EditorObjectId id : workspace_.selected_objects()) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object) continue;
+        bool ancestorSelected = false;
+        for (auto parent = object->parent; parent && !ancestorSelected;) {
+            ancestorSelected = selected.contains(*parent);
+            const EditorObject* ancestor = workspace_.document().find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+        if (!ancestorSelected && std::find(roots.begin(), roots.end(), id) == roots.end()) roots.push_back(id);
+    }
+    if (roots.empty()) { set_status("Select the objects to duplicate first", true); return false; }
+    for (const EditorObjectId id : roots) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (!object->flags.visible || is_isolated_out(id)) { set_status(object->name + " is hidden or isolated out of view", true); return false; }
+    }
+    if (textEdit_.kind != TextEditKind::Inactive) commit_text_edit();
+    close_previews_for_voxel_edit("Duplicate Special");
+    duplicateSpecial_.active = true;
+    duplicateSpecial_.roots = std::move(roots);
+    recompute_layout();
+    refresh_menu_state();
+    set_status("Duplicate Special: " + duplicate_special_summary());
+    return true;
+}
+
+void NativeEditorController::cancel_duplicate_special(std::string reason) {
+    if (!duplicateSpecial_.active) return;
+    if (textEdit_.kind == TextEditKind::DuplicateSetting) cancel_text_edit();
+    duplicateSpecial_.active = false;
+    duplicateSpecial_.roots.clear();
+    recompute_layout();
+    refresh_menu_state();
+    if (!reason.empty()) set_status(std::move(reason));
+}
+
+std::vector<NativeEditorController::DuplicatePreviewBox> NativeEditorController::duplicate_special_preview(std::size_t limit) const {
+    std::vector<DuplicatePreviewBox> boxes;
+    if (!duplicateSpecial_.active) return boxes;
+    const DuplicateSpecialSettings& v = duplicateSpecial_.settings;
+    if (!duplicate_special_problem(v, duplicate_objects_per_copy()).empty()) return boxes;
+    const EditorDocument& document = workspace_.document();
+    for (const EditorObjectId root : duplicateSpecial_.roots) {
+        const EditorObject* rootObject = document.find_object(root);
+        if (!rootObject) continue;
+        const RigidTransform rootWorld = document.world_transform(root).value_or(rootObject->transform);
+        const auto poses = duplicate_special_poses(rootWorld, v);
+        for (const EditorObjectId id : collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{root})) {
+            const EditorObject* object = document.find_object(id);
+            if (!object || !object->flags.visible) continue;
+            const EditorObjectBounds local = object_world_bounds(*object, RigidTransform{});
+            if (!local.valid) continue;
+            const RigidTransform inRoot = relative_rigid_transform(rootWorld, document.world_transform(id).value_or(object->transform));
+            for (const DuplicateCopyPose& pose : poses) {
+                if (boxes.size() >= limit) return boxes;
+                const RigidTransform scaledInRoot = make_rigid_transform(multiply(inRoot.position, pose.scale), inRoot.rotation);
+                boxes.push_back({compose_rigid_transforms(pose.transform, scaledInRoot), local.minimum, local.maximum, pose.scale});
+            }
+        }
+    }
+    return boxes;
+}
+
+bool NativeEditorController::apply_duplicate_special() {
+    if (!duplicateSpecial_.active) { set_status("Open Edit > Duplicate Special first", true); return false; }
+    if (textEdit_.kind == TextEditKind::DuplicateSetting) commit_text_edit();
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before duplicating", true); return false; }
+    if (longJob_) { set_status(long_job_busy_reason(), true); return false; }
+    const DuplicateSpecialSettings v = duplicateSpecial_.settings;
+    const std::size_t perCopy = duplicate_objects_per_copy();
+    if (const std::string problem = duplicate_special_problem(v, perCopy); !problem.empty()) { set_status(problem, true); return false; }
+    EditorDocument& document = workspace_.document();
+    const auto beforeSelection = capture_selection_snapshot();
+    const EditorObject* first = document.find_object(duplicateSpecial_.roots.front());
+    if (!first) { cancel_duplicate_special("The objects to duplicate are gone"); return false; }
+
+    auto compound = std::make_unique<CompoundCommand>("Duplicate Special");
+    std::optional<EditorObjectId> groupId;
+    if (v.group) {
+        std::set<std::string> names;
+        for (const auto& [id, object] : document.objects()) { (void)id; names.insert(object.name); }
+        std::string name = first->name + " x" + std::to_string(v.copies);
+        for (unsigned suffix = 2; names.contains(name); ++suffix) name = first->name + " x" + std::to_string(v.copies) + " (" + std::to_string(suffix) + ")";
+        EditorObject group(document.allocate_object_id(), name);
+        group.parent = first->parent;
+        group.transform = make_rigid_transform(document.world_transform(first->id).value_or(first->transform).position, {});
+        group.flags.structural = false;
+        group.flags.collisionEnabled = false;
+        group.flags.decorative = true;
+        groupId = group.id;
+        compound->add(std::make_unique<AddObjectCommand>(std::move(group), "Duplicate Special group"));
+    }
+    std::vector<EditorObjectId> added;
+    if (groupId) added.push_back(*groupId);
+    std::vector<EditorObjectId> rootCopies;
+    const int digits = v.copies >= 1000 ? 4 : v.copies >= 100 ? 3 : 2;
+    for (const EditorObjectId root : duplicateSpecial_.roots) {
+        const EditorObject* rootObject = document.find_object(root);
+        if (!rootObject) { cancel_duplicate_special("The objects to duplicate changed"); return false; }
+        const RigidTransform rootWorld = document.world_transform(root).value_or(rootObject->transform);
+        const auto poses = duplicate_special_poses(rootWorld, v);
+        const std::vector<EditorObjectId> subtree = collect_editor_object_subtree_ids(document, std::vector<EditorObjectId>{root});
+        for (std::size_t k = 0; k < poses.size(); ++k) {
+            const DuplicateCopyPose& pose = poses[k];
+            std::map<EditorObjectId, EditorObjectId> idMap;
+            for (const EditorObjectId id : subtree) idMap.emplace(id, document.allocate_object_id());
+            for (const EditorObjectId id : subtree) {
+                const EditorObject* source = document.find_object(id);
+                EditorObject copy = clone_editor_object(*source);
+                copy.id = idMap.at(id);
+                if (id == root) {
+                    char number[16];
+                    std::snprintf(number, sizeof number, " %0*zu", digits, k + 1);
+                    copy.name = source->name + number;
+                    copy.parent = groupId ? groupId : source->parent;
+                    rootCopies.push_back(copy.id);
+                } else {
+                    copy.parent = source->parent && idMap.contains(*source->parent) ? std::optional(idMap.at(*source->parent)) : source->parent;
+                }
+                const RigidTransform inRoot = relative_rigid_transform(rootWorld, document.world_transform(id).value_or(source->transform));
+                copy.transform = compose_rigid_transforms(pose.transform, make_rigid_transform(multiply(inRoot.position, pose.scale), inRoot.rotation));
+                if (copy.attachment) copy.attachment->localTransform.position = multiply(copy.attachment->localTransform.position, pose.scale);
+                if (pose.scale != 1.0F) {
+                    // Size: voxel objects by voxel size, polygon / subdivision meshes by their axis scale.
+                    if (copy.polygon || copy.subdivision) copy.voxelScale = multiply(copy.voxelScale, pose.scale);
+                    else if (copy.voxels && !copy.text3d && !copy.gaborVolume) copy.voxelSizeMeters *= pose.scale;
+                }
+                added.push_back(copy.id);
+                compound->add(std::make_unique<AddObjectCommand>(std::move(copy), "Duplicate Special copy"));
+            }
+        }
+    }
+    const CommandResult result = workspace_.commands().execute(document, std::move(compound));
+    if (!result.success) { set_status(result.message, true); return false; }
+    if (!viewportSettings_.isolatedObjects.empty()) viewportSettings_.isolatedObjects.insert(added.begin(), added.end());
+    const std::string sourceName = first->name;
+    duplicateSpecial_.active = false;
+    duplicateSpecial_.roots.clear();
+    workspace_.clear_selection();
+    if (groupId) workspace_.select_object(*groupId);
+    else for (const EditorObjectId id : rootCopies) workspace_.add_to_selection(id);
+    workspace_.commands().set_last_selection_transition(beforeSelection, capture_selection_snapshot());
+    recompute_layout();
+    refresh_menu_state();
+    set_status("Made " + std::to_string(v.copies) + (v.copies == 1 ? " copy of " : " copies of ") + sourceName +
+               (groupId ? " in one group" : "") + "; Undo removes them");
+    return true;
+}
+
+DuplicatePanelLayout NativeEditorController::duplicate_panel_layout() const {
+    DuplicatePanelLayout panel;
+    if (!duplicateSpecial_.active || layout_.inspector.width <= 0) return panel;
+    const UiRect& inspector = layout_.inspector;
+    panel.panel = {inspector.x + 1, inspector.y + kInspectorHeaderHeight, inspector.width - 2, inspector.height - kInspectorHeaderHeight};
+    const int left = inspector.x + 12;
+    const int width = inspector.width - 24;
+    int y = inspector.y + kInspectorHeaderHeight + 8;
+    panel.titleY = y + 12;
+    y += 26;
+    constexpr int row = 24;
+    const int nameWidth = 66;
+    const auto single = [&](NumberFieldId field, int boxWidth) {
+        panel.rowNames.push_back({field, {left, y, nameWidth, 18}});
+        panel.fields.push_back({field, 0, {left, y, nameWidth, 18}, {left + nameWidth, y, std::min(boxWidth, width - nameWidth), 18}});
+        y += row;
+    };
+    const auto triple = [&](NumberFieldId field) {
+        panel.rowNames.push_back({field, {left, y, nameWidth, 18}});
+        const int each = (width - nameWidth) / 3;
+        for (int axis = 0; axis < 3; ++axis) {
+            const int x0 = left + nameWidth + axis * each;
+            panel.fields.push_back({field, axis, {x0, y, 14, 18}, {x0 + 14, y, std::max(10, each - 18), 18}});
+        }
+        y += row;
+    };
+    single(NumberFieldId::DuplicateCopies, 70);
+    triple(NumberFieldId::DuplicateOffset);
+    triple(NumberFieldId::DuplicateRotation);
+    single(NumberFieldId::DuplicateScale, 70);
+    const int half = (width - nameWidth - 4) / 2;
+    panel.pivotEach = {left + nameWidth, y, half, 18};
+    panel.pivotPoint = {left + nameWidth + half + 4, y, half, 18};
+    y += row;
+    if (duplicateSpecial_.settings.pivot == DuplicatePivot::Point) {
+        triple(NumberFieldId::DuplicatePoint);
+        panel.pointOrigin = {left + nameWidth, y, half, 18};
+        panel.pointSelection = {left + nameWidth + half + 4, y, half, 18};
+    } else {
+        panel.spaceLocal = {left + nameWidth, y, half, 18};
+        panel.spaceWorld = {left + nameWidth + half + 4, y, half, 18};
+    }
+    y += row;
+    panel.group = {left, y, width, 18};
+    y += row + 4;
+    const int buttonWidth = (width - 6) / 2;
+    panel.apply = {left, y, buttonWidth, 22};
+    panel.cancel = {left + buttonWidth + 6, y, buttonWidth, 22};
+    panel.noteY = y + 44;
+    return panel;
 }
 
 std::vector<NumberFieldRect> NativeEditorController::number_field_rects() const {
     std::vector<NumberFieldRect> rects;
+    if (duplicateSpecial_.active) rects = duplicate_panel_layout().fields;
     const bool stacked = layout_.inspectorStackedFields;
     const auto axis_row = [&](NumberFieldId field, const UiRect& row) {
         if (row.width <= 0 || row.height < 14 || !number_field_available(field)) return;

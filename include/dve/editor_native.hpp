@@ -50,6 +50,7 @@
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
 #include "dve/editor_number_field.hpp"
+#include "dve/editor_duplicate_special.hpp"
 #include "dve/editor_text3d.hpp"
 #include "dve/editor_tools.hpp"
 #include "dve/editor_viewport.hpp"
@@ -147,7 +148,8 @@ enum class TextEditKind : std::uint8_t {
     Text3DAlignment, Text3DFillRule, GaborDensity, GaborTint, GaborEmission,
     GaborAnisotropy, GaborShadowStrength, GaborLodBias, HierarchyFilter, AssetSearch,
     AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal,
-    VoxelSize, BrushRadius, SurfaceOffset   // numeric fields (see NumberFieldId)
+    VoxelSize, BrushRadius, SurfaceOffset,  // numeric fields (see NumberFieldId)
+    DuplicateSetting                        // Duplicate Special panel; objectId holds the NumberFieldId
 };
 
 struct TextEditState {
@@ -170,12 +172,29 @@ struct TextEditState {
 // Numeric fields (ART-084/085): inspector Position / Rotation (per axis) and Voxel size; the
 // viewport tool strip's Brush radius and Surface offset. Each can be typed (units, arithmetic,
 // += -= *= /=), scrubbed by dragging its label, and reset/copied/pasted with a right-click.
-enum class NumberFieldId : std::uint8_t { Position, Rotation, VoxelSize, BrushRadius, SurfaceOffset };
+enum class NumberFieldId : std::uint8_t {
+    Position, Rotation, VoxelSize, BrushRadius, SurfaceOffset,
+    // Duplicate Special panel (Edit > Duplicate Special)
+    DuplicateCopies, DuplicateOffset, DuplicateRotation, DuplicateScale, DuplicatePoint
+};
 struct NumberFieldRect {
     NumberFieldId field{};
     int axis{};          // 0..2 for Position / Rotation, else 0
     UiRect label{};      // drag to scrub ("X", "Y", "Z" or the row name)
     UiRect box{};        // click to type
+};
+// Duplicate Special panel: clickable choices and buttons (the numbers are NumberFieldRects).
+struct DuplicatePanelLayout {
+    UiRect panel{};
+    int titleY{};
+    UiRect pivotEach{}, pivotPoint{};       // Pivot: Each copy | Around a point
+    UiRect spaceLocal{}, spaceWorld{};      // Offset in: Local | World (Each copy)
+    UiRect pointOrigin{}, pointSelection{}; // Set the point: world origin | selection centre
+    UiRect group{};                         // Put copies in a group
+    UiRect apply{}, cancel{};
+    int noteY{};
+    std::vector<std::pair<NumberFieldId, UiRect>> rowNames;  // row label positions
+    std::vector<NumberFieldRect> fields;                     // the number boxes
 };
 enum class InspectorFlagState : std::uint8_t { Off, On, Mixed };
 struct InspectorSelectionSummary {
@@ -867,6 +886,18 @@ public:
     // Where the fields are now: per-axis boxes on the inspector's Position / Rotation rows, Voxel
     // size on the next row, and the viewport tool strip (Brush radius / Surface offset).
     [[nodiscard]] std::vector<NumberFieldRect> number_field_rects() const;
+    // Duplicate Special (Edit > Duplicate Special, Ctrl+Shift+D): N copies, each offset, turned and
+    // scaled from the last; a ghost preview until Apply (one undo), Esc cancels.
+    struct DuplicatePreviewBox { RigidTransform pose; Float3 minimum; Float3 maximum; float scale{1.0F}; };
+    bool open_duplicate_special();
+    bool apply_duplicate_special();
+    void cancel_duplicate_special(std::string reason = {});
+    [[nodiscard]] bool duplicate_special_active() const noexcept { return duplicateSpecial_.active; }
+    [[nodiscard]] DuplicateSpecialSettings& duplicate_special_settings() noexcept { return duplicateSpecial_.settings; }
+    [[nodiscard]] const DuplicateSpecialSettings& duplicate_special_settings() const noexcept { return duplicateSpecial_.settings; }
+    [[nodiscard]] std::vector<DuplicatePreviewBox> duplicate_special_preview(std::size_t limit = 2000) const;
+    [[nodiscard]] DuplicatePanelLayout duplicate_panel_layout() const;
+    [[nodiscard]] std::string duplicate_special_summary() const;
     [[nodiscard]] CommandResult toggle_inspector_flag(std::size_t index);
     [[nodiscard]] CommandResult set_primary_rotation_euler_degrees(Float3 degrees);
     [[nodiscard]] CommandResult rescale_primary_voxel_object(Float3 scale);
@@ -1323,6 +1354,13 @@ private:
     mutable std::map<EditorObjectId, CachedCollisionProxy> collisionProxyCache_;
     bool handle_voxel_join_key(std::string_view normalized, bool control, bool shift, bool alt);
     bool scatterActive_{};
+    struct DuplicateSpecialState {
+        bool active{};
+        std::vector<EditorObjectId> roots;  // the selected roots when the panel opened
+        DuplicateSpecialSettings settings;  // kept between uses
+    };
+    DuplicateSpecialState duplicateSpecial_;
+    [[nodiscard]] std::size_t duplicate_objects_per_copy() const;
     std::vector<EditorObjectId> scatterTargets_;
     std::vector<EditorObjectId> scatterSourceRoots_;
     std::vector<EditorObjectId> pinnedScatterRoots_;

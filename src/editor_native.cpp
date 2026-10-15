@@ -5350,7 +5350,9 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
                     for (const Int3 cell : voxels_in_cube(*object->voxels, pick.voxel, voxelBrushRadius_)) {
                         if (!voxelSelection_.contains(cell) || !in_voxel_brush(cell, pick.voxel)) continue;
                         const MaterialId before = object->voxels->material_at(cell);
-                        const MaterialId after = settings.operation == VoxelToolOperation::Remove ? kAirMaterial : activeMaterial_;
+                        // Same rule as the brush command: painting with air leaves the cell alone.
+                        const MaterialId after = settings.operation == VoxelToolOperation::Remove ? kAirMaterial
+                            : (before == kAirMaterial || activeMaterial_ == kAirMaterial ? before : activeMaterial_);
                         if (before != after) changes.push_back({cell, before, after});
                     }
                     if (changes.empty()) { set_status("Only selected voxels can change (clear the selection to edit freely)", false, 2.0F); return; }
@@ -5372,6 +5374,12 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
             default: return;
         }
         if (!command) command = make_brush_command(workspace_.document(), pick.objectId, center, settings);
+    }
+    if (const auto* edit = dynamic_cast<const VoxelEditCommand*>(command.get()); edit && edit->change_count() == 0) {
+        // A click that changes nothing adds no undo step.
+        set_status(object->flags.locked ? "Unlock " + object->name + " to edit its voxels" : std::string("Nothing to change here"),
+                   object->flags.locked, 1.5F);
+        return;
     }
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
     set_status(result.success ? "Voxel edit applied" : result.message, !result.success, 1.5F);
@@ -11803,6 +11811,20 @@ std::optional<Int3> NativeEditorController::voxel_move_preview() const noexcept 
                 voxelMoveAxis_ == 3 ? voxelMoveSteps_ : 0};
 }
 
+std::size_t NativeEditorController::selection_fingerprint() const noexcept {
+    // Order-independent hash of the voxel selection, so a different selection of the same size
+    // does not reuse a stale brush preview.
+    std::uint64_t h = voxelSelection_.size() * 0x9E3779B97F4A7C15ULL;
+    for (const Int3& c : voxelSelection_) {
+        std::uint64_t v = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.x)) * 0x100000001B3ULL) ^
+                          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.y)) << 21) ^
+                          (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.z)) << 42);
+        v ^= v >> 33; v *= 0xFF51AFD7ED558CCDULL; v ^= v >> 33;
+        h += v;
+    }
+    return static_cast<std::size_t>(h);
+}
+
 bool NativeEditorController::in_voxel_brush(Int3 cell, Int3 center) const noexcept {
     const std::int64_t dx = cell.x - center.x, dy = cell.y - center.y, dz = cell.z - center.z;
     const std::int64_t r = voxelBrushRadius_;
@@ -11819,7 +11841,7 @@ std::optional<VoxelBrushPreview> NativeEditorController::voxel_brush_preview() c
     if (!object || !object->voxels || object->polygon || object->text3d || object->gaborVolume) return std::nullopt;
     const bool limited = activeTool_ != EditorToolId::AddVoxel && !voxelSelection_.empty() && voxelSelectionObject_ == object->id;
     const BrushPreviewKey key{object->id, hoverPick_->voxel, hoverPick_->normal, voxelBrushRadius_, voxelBrushShape_,
-                              activeTool_, activeMaterial_, object->voxels->revision(), limited ? voxelSelection_.size() : 0U,
+                              activeTool_, activeMaterial_, object->voxels->revision(), limited ? selection_fingerprint() : 0U,
                               limited ? voxelSelectionObject_ : EditorObjectId{}, object->flags.locked};
     if (brushPreviewKey_ == key) return brushPreview_;
     VoxelBrushPreview preview;
@@ -11839,10 +11861,13 @@ std::optional<VoxelBrushPreview> NativeEditorController::voxel_brush_preview() c
         for (const Int3 cell : shapeCells) {
             const MaterialId before = object->voxels->material_at(cell);
             bool changes = false;
+            // Mirrors changes_for(): Add writes the active material (or 1 for air) into every cell,
+            // replacing other materials too; Paint with air changes nothing.
+            const MaterialId addMaterial = activeMaterial_ == kAirMaterial ? MaterialId{1} : activeMaterial_;
             switch (preview.operation) {
-            case VoxelToolOperation::Add: changes = before == kAirMaterial; break;
+            case VoxelToolOperation::Add: changes = before != addMaterial; break;
             case VoxelToolOperation::Remove: changes = before != kAirMaterial; break;
-            case VoxelToolOperation::Paint: changes = before != kAirMaterial && before != activeMaterial_; break;
+            case VoxelToolOperation::Paint: changes = before != kAirMaterial && activeMaterial_ != kAirMaterial && before != activeMaterial_; break;
             }
             if (changes && limited && !voxelSelection_.contains(cell)) changes = false;
             if (!changes) continue;

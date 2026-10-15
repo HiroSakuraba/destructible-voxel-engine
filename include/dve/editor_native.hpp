@@ -1427,6 +1427,7 @@ private:
     mutable std::optional<BrushPreviewKey> brushPreviewKey_;
     mutable std::optional<VoxelBrushPreview> brushPreview_;
     [[nodiscard]] bool in_voxel_brush(Int3 cell, Int3 center) const noexcept;
+    [[nodiscard]] std::size_t selection_fingerprint() const noexcept;
     std::string activePointerCommand_;
     std::vector<ShortcutGesture> heldShortcutGestures_;
     std::optional<EditorCamera> previousCamera_;

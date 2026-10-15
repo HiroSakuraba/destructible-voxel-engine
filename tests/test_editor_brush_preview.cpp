@@ -86,6 +86,7 @@ void set_radius(NativeEditorController& controller, int radius) {
 void test_add_preview_matches_click() {
     auto owner = make_controller();
     NativeEditorController& controller = *owner;
+    controller.set_active_material(1);  // the block's own material: only the 18 empty cells change
     controller.set_active_tool(EditorToolId::AddVoxel);
     set_radius(controller, 1);
     const auto at = hover_top(controller);
@@ -187,9 +188,48 @@ void test_selection_brush_sphere() {
     }
     check(insideSphere && !selection.contains({12, 5, 12}), "with the sphere it takes no cube corners");
 }
+
+// Review fixes: the preview mirrors the command exactly, a no-op click adds no undo step, and a
+// different selection of the same size refreshes the preview.
+void test_review_fixes() {
+    auto owner = make_controller();
+    NativeEditorController& controller = *owner;
+    controller.set_active_material(2);
+    controller.set_active_tool(EditorToolId::AddVoxel);
+    set_radius(controller, 1);
+    const auto at = hover_top(controller);
+    const auto preview = controller.voxel_brush_preview();
+    // Add with another material also rewrites the 9 top-layer cells the cube overlaps.
+    check(preview && preview->count == 27, "Add with material 2 previews 27 cells: " + std::to_string(preview ? preview->count : 0));
+    click(controller, at);
+    std::size_t painted = 0;
+    const EditorObject* block = controller.workspace().document().find_object(1);
+    for (int x = 9; x <= 11; ++x) for (int y = 5; y <= 7; ++y) for (int z = 9; z <= 11; ++z)
+        painted += block->voxels->material_at({x, y, z}) == 2 ? 1U : 0U;
+    check(painted == 27, "the click changes exactly the 27 previewed cells: " + std::to_string(painted));
+    (void)controller.dispatch_action("edit.undo");
+
+    controller.set_active_tool(EditorToolId::PaintMaterial);
+    controller.set_active_material(1);
+    hover_top(controller);
+    const std::size_t steps = controller.workspace().commands().size();
+    const bool couldUndo = controller.workspace().commands().can_undo();
+    click(controller, at);
+    check(controller.workspace().commands().size() == steps && controller.workspace().commands().can_undo() == couldUndo,
+          "painting cells that already have the material adds no undo step");
+
+    controller.set_active_material(2);
+    controller.select_voxels(1, {Int3{10, 5, 10}}, SelectionOperation::Replace);
+    hover_top(controller);
+    const auto one = controller.voxel_brush_preview();
+    controller.select_voxels(1, {Int3{0, 0, 0}}, SelectionOperation::Replace);
+    const auto other = controller.voxel_brush_preview();
+    check(one && one->count == 1 && other && other->count == 0, "a different selection of the same size refreshes the preview");
+}
 }  // namespace
 
 int main() {
+    test_review_fixes();
     test_add_preview_matches_click();
     test_sphere();
     test_paint_selection_and_lock();

@@ -18,6 +18,8 @@ using ComponentId = std::uint64_t;
 inline constexpr ComponentId kInvalidComponentId = 0U;
 // Scene-only polygon UV authoring metadata; stripped from runtime publication.
 inline constexpr std::string_view kUvAuthoringComponent = "dve.uv_authoring";
+// Editor-only: show a mesh mirrored across a local axis until Polygon > Apply Live Mirror bakes it.
+inline constexpr std::string_view kLiveMirrorComponent = "dve.live_mirror";
 
 using ComponentValue = std::variant<bool, std::int64_t, double, std::string, Float3, Quaternion>;
 

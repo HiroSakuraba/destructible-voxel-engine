@@ -478,6 +478,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"select.parent","Edit","Select Parent",""},
         {"select.children","Edit","Select Children",""},
         {"select.siblings","Edit","Select Siblings",""},
+        {"select.walk_up","Edit","Pick Walk Up (parent / grow)",""},
+        {"select.walk_down","Edit","Pick Walk Down (first child / shrink)",""},
+        {"select.walk_left","Edit","Pick Walk Left (previous sibling)",""},
+        {"select.walk_right","Edit","Pick Walk Right (next sibling)",""},
         {"edit.mirror_copy_x","Edit","Mirror Copy X",""},
         {"edit.mirror_copy_y","Edit","Mirror Copy Y",""},
         {"edit.mirror_copy_z","Edit","Mirror Copy Z",""},
@@ -1173,6 +1177,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("subdiv.scale","Scale Cage / Object through the shared control-cage transform workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_all","Select All Components through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.select_grow","Grow Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
+    describe("select.walk_up", "Select the parent (mesh components and voxels: grow by one ring). The camera stays put.", {"pickwalk", "parent", "hierarchy", "grow"});
+    describe("select.walk_down", "Select the first child (mesh components and voxels: shrink by one ring).", {"pickwalk", "child", "hierarchy", "shrink"});
+    describe("select.walk_left", "Select the previous sibling (mesh components: the neighbour to the left).", {"pickwalk", "sibling", "previous"});
+    describe("select.walk_right", "Select the next sibling (mesh components: the neighbour to the right).", {"pickwalk", "sibling", "next"});
     for (const char* axis : {"x", "y", "z"}) {
         describe(std::string("edit.mirror_copy_") + axis, "Make a mirrored copy of the selection across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect", "copy"});
@@ -1280,7 +1288,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("voxel.slice", "Preview a cell-centre plane cut; keep front, back, or both as separate objects.", {"slice", "cut", "plane"});
     describe("select.domain_objects", "Select and Move work on whole objects.", {"object mode", "selection mode", "domain"});
     describe("select.domain_voxels",
-             "Select cells of one voxel object: left-to-right box contains, right-to-left crosses; Shift adds, Ctrl toggles, Ctrl+Shift intersects. Selection Brush is a separate mode.",
+             "Select cells of one voxel object: left-to-right box contains, right-to-left crosses; Shift adds, Ctrl removes, Ctrl+Shift intersects. Selection Brush is a separate mode.",
              {"voxel mode", "voxel select", "region", "selection mode", "domain", "cells"});
     describe("voxel.extract_selection", "Move the selected voxels into a new object in place (Separate Selected).",
              {"extract", "separate", "split", "detach", "new object", "voxels"});

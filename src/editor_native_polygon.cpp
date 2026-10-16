@@ -48,7 +48,7 @@ bool NativeEditorController::set_polygon_mode(PolygonSelectionMode mode) {
     focusRegion_ = EditorFocusRegion::Viewport;
     set_active_tool(EditorToolId::Select);
     prune_polygon_selection();
-    set_status(std::string(object->subdivision ? "Selecting subdivision cage " : "Selecting polygon ") + mode_name(mode) + ": click/box (left to right: window; right to left: crossing); Shift add, Ctrl toggle, Ctrl+Shift intersect");
+    set_status(std::string(object->subdivision ? "Selecting subdivision cage " : "Selecting polygon ") + mode_name(mode) + ": click/box (left to right: window; right to left: crossing); Shift add, Ctrl remove, Ctrl+Shift intersect");
     refresh_menu_state(); return true;
 }
 
@@ -138,7 +138,12 @@ void NativeEditorController::finish_polygon_marquee(int x, int y) {
         for (const auto& face : subdivision_control_face_triangles(*object->polygon,&*object->subdivision))
             if (!std::all_of(face.begin(),face.end(),[&](auto id){return hits.contains(id);}))
                 for (auto id : face) hits.erase(id);
-    select_polygon_components(hits,marquee.operation);
+    SelectionOperation operation = marquee.operation;
+    // Shift+click on a selected component takes it out again.
+    if (click && operation==SelectionOperation::Add && !hits.empty() &&
+        std::all_of(hits.begin(),hits.end(),[&](auto id){return polygonSelection_.components.contains(id);}))
+        operation=SelectionOperation::Subtract;
+    select_polygon_components(hits,operation);
 }
 
 Float3 NativeEditorController::polygon_selection_centre() const {
@@ -1194,6 +1199,59 @@ void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,U
         detail="Selected crease range "+std::to_string(minimum)+".."+std::to_string(maximum)+" | purple = authored";
     }
     painter.text(caption.x+8,caption.y+34,elide_text_to_width(painter,detail,caption.width-16),0xe0e9f5);
+}
+
+bool NativeEditorController::polygon_walk(WalkDirection direction) {
+    prune_polygon_selection();
+    auto* object = workspace_.document().find_object(polygonSelection_.object);
+    if (!editable(object) || polygonSelection_.components.empty()) { set_status("Select a mesh component to walk from", true); return false; }
+    const CookedPolygonAsset& mesh = *object->polygon;
+    if (direction == WalkDirection::Up || direction == WalkDirection::Down) {
+        auto hits = edit_polygon_selection(mesh, polygonSelection_, direction == WalkDirection::Up ? PolygonSelectionEdit::Grow : PolygonSelectionEdit::Shrink);
+        if (object->subdivision && direction == WalkDirection::Down && polygonSelection_.mode == PolygonSelectionMode::Face)
+            for (const auto& face : subdivision_control_face_triangles(mesh, &*object->subdivision))
+                if (!std::all_of(face.begin(), face.end(), [&](auto id) { return hits.contains(id); }))
+                    for (auto id : face) hits.erase(id);
+        if (hits.empty() || hits == polygonSelection_.components) {
+            set_status(direction == WalkDirection::Up ? "Nothing more to grow into" : "Cannot shrink further (Left/Right walk instead)", true);
+            return false;
+        }
+        select_polygon_components(hits, SelectionOperation::Replace);
+        polygonWalkCurrent_.reset();
+        set_status(std::string(direction == WalkDirection::Up ? "Grew" : "Shrank") + " the selection by one ring (" +
+                   std::to_string(polygonSelection_.components.size()) + ")");
+        return true;
+    }
+    // Left/Right: from the current element (the only one selected, or the last one walked to),
+    // step to the neighbour that lies furthest that way on screen.
+    std::uint64_t current = *polygonSelection_.components.begin();
+    if (polygonWalkCurrent_ && polygonSelection_.components.contains(*polygonWalkCurrent_)) current = *polygonWalkCurrent_;
+    else if (polygonSelection_.components.size() != 1) { set_status("Select one element to walk Left/Right (Up/Down grow and shrink)", true); return false; }
+    PolygonSelection single{object->id, polygonSelection_.mode, {current}};
+    auto neighbours = edit_polygon_selection(mesh, single, PolygonSelectionEdit::Grow);
+    neighbours.erase(current);
+    const auto screen_of = [&](std::uint64_t id) {
+        return project_world_to_screen(camera_, layout_.viewport,
+                                       voxel_to_world(object->transform, object->voxelScale, component_point(mesh, polygonSelection_.mode, id)));
+    };
+    const ScreenPoint from = screen_of(current);
+    std::optional<std::uint64_t> best;
+    float bestScore = 0.0F;
+    for (const std::uint64_t id : neighbours) {
+        const ScreenPoint to = screen_of(id);
+        if (!to.visible || !from.visible) continue;
+        const float dx = (to.x - from.x) * (direction == WalkDirection::Right ? 1.0F : -1.0F);
+        const float dy = to.y - from.y;
+        const float distance = std::sqrt(dx * dx + dy * dy);
+        if (dx <= 0.0F || distance < 1e-3F) continue;
+        const float score = dx / distance;  // straightest step that way
+        if (!best || score > bestScore + 1e-4F || (std::abs(score - bestScore) <= 1e-4F && id < *best)) { best = id; bestScore = score; }
+    }
+    if (!best) { set_status(std::string("Nothing further ") + (direction == WalkDirection::Right ? "right" : "left") + " from here", true); return false; }
+    select_polygon_components({*best}, SelectionOperation::Replace);
+    polygonWalkCurrent_ = *best;
+    set_status("Walked to the next element (Left/Right step, Up/Down grow and shrink)");
+    return true;
 }
 
 } // namespace dve::editor

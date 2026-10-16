@@ -791,6 +791,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.chamfer_edges","Polygon","Chamfer Edges (Convex)",""},
         {"mesh.fillet_edges","Polygon","Rounded Fillet Edges (Convex)",""},
         {"mesh.subdivide","Polygon","Subdivide Selected Faces",""},
+        {"mirror.live_x","Polygon","Live Mirror X",""}, {"mirror.live_y","Polygon","Live Mirror Y",""},
+        {"mirror.live_z","Polygon","Live Mirror Z",""}, {"mirror.apply_live","Polygon","Apply Live Mirror (weld seam)",""},
+        {"mirror.mesh_x","Polygon","Mirror Mesh X (weld seam)",""}, {"mirror.mesh_y","Polygon","Mirror Mesh Y (weld seam)",""},
+        {"mirror.mesh_z","Polygon","Mirror Mesh Z (weld seam)",""},
+        {"mirror.faces_x","Polygon","Mirror Selected Faces X",""}, {"mirror.faces_y","Polygon","Mirror Selected Faces Y",""},
+        {"mirror.faces_z","Polygon","Mirror Selected Faces Z",""},
         {"mesh.split_edges","Polygon","Split Selected Edges",""},
         {"mesh.flip_diagonal","Polygon","Flip Triangle Diagonal",""},
         {"mesh.bridge","Polygon","Bridge Boundary Loops",""},
@@ -948,6 +954,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("camera.load_bookmark_2", "Bookmarks", 63);
     configure("camera.settings", "Settings", 90);
     configure("voxel.settings", "Settings", 90);
+    for (std::string_view id : {"mirror.live_x", "mirror.live_y", "mirror.live_z"}) configure(id, "Symmetry", 78, true, "mirror.live");
+    for (std::string_view id : {"mirror.apply_live", "mirror.mesh_x", "mirror.mesh_y", "mirror.mesh_z", "mirror.faces_x", "mirror.faces_y", "mirror.faces_z"})
+        configure(id, "Symmetry", 79);
     for (std::string_view id : {"edit.mirror_copy_x", "edit.mirror_copy_y", "edit.mirror_copy_z", "edit.mirror_x", "edit.mirror_y", "edit.mirror_z"})
         configure(id, "Mirror", 24);
     configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
@@ -1203,6 +1212,14 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("select.walk_down", "Select the first child (mesh components and voxels: shrink by one ring).", {"pickwalk", "child", "hierarchy", "shrink"});
     describe("select.walk_left", "Select the previous sibling (mesh components: the neighbour to the left).", {"pickwalk", "sibling", "previous"});
     describe("select.walk_right", "Select the next sibling (mesh components: the neighbour to the right).", {"pickwalk", "sibling", "next"});
+    for (const char* axis : {"x", "y", "z"}) {
+        describe(std::string("mirror.live_") + axis, "Show the mesh mirrored across its own axis while you model one half; Apply Live Mirror welds it.",
+                 {"symmetry", "mirror", "half", "modifier"});
+        describe(std::string("mirror.mesh_") + axis, "Mirror the whole mesh across its own axis (through its origin) and weld the centre seam.",
+                 {"symmetry", "mirror", "half", "weld"});
+        describe(std::string("mirror.faces_") + axis, "Add a mirrored duplicate of the selected faces across the mesh's own axis, welded where they touch the plane.",
+                 {"symmetry", "mirror", "faces"});
+    }
     for (const char* axis : {"x", "y", "z"}) {
         describe(std::string("edit.mirror_copy_") + axis, "Make a mirrored copy of the selection across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect", "copy"});

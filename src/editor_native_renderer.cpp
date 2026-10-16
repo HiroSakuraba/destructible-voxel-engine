@@ -5294,6 +5294,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         const int w = std::abs(marquee.currentX - marquee.startX);
         const int h = std::abs(marquee.currentY - marquee.startY);
         painter.outline({left, top, w, h}, accent);
+        // Say which box rule applies: window/crossing, visible only or X-ray, skipped masks.
+        if (w > 12 && h > 12) {
+            const std::string label = controller.marquee_label();
+            if (!label.empty()) painter.text(left + 4, top + h + 15, label, muted);
+        }
     }
 
     if (controller.context_menu().open) {

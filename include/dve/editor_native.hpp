@@ -232,6 +232,15 @@ struct ContextMenuState {
 // What Select and Move act on (M toggles): whole objects or voxel cells of one object.
 enum class SelectionDomain : std::uint8_t { Objects, Voxels, Polygons };
 enum class VoxelClickSelection : std::uint8_t { Cell, ConnectedPiece };
+// What viewport clicks, boxes, Select All, Invert and Select Similar may pick up (ART-015).
+// Masked-out objects are transparent to clicks: the click reaches whatever is behind them.
+// The hierarchy panel still selects anything, so masked objects stay reachable.
+struct SelectionMask {
+    bool locked{true};   // locked objects
+    bool helpers{true};  // objects without geometry or children: cameras, lights, spawns, emitters
+    bool prefabs{true};  // prefab instances
+    [[nodiscard]] bool everything() const noexcept { return locked && helpers && prefabs; }
+};
 
 struct MarqueeState {
     bool active{};
@@ -690,6 +699,11 @@ public:
 
     [[nodiscard]] const TextEditState& text_edit() const noexcept { return textEdit_; }
     [[nodiscard]] const ContextMenuState& context_menu() const noexcept { return contextMenu_; }
+    [[nodiscard]] const SelectionMask& selection_mask() const noexcept { return selectionMask_; }
+    // Whether the selection mask lets viewport selection take this object (or group).
+    [[nodiscard]] bool object_selectable(EditorObjectId id) const;
+    // Short text drawn under a selection box: window/crossing, visible-only/X-ray, active masks.
+    [[nodiscard]] std::string marquee_label() const;
     [[nodiscard]] const MarqueeState& marquee() const noexcept { return marquee_; }
     [[nodiscard]] std::optional<Float3> placement_target() const noexcept { return placementPoint_; }
     [[nodiscard]] std::optional<EditorObjectBounds> scale_preview_bounds() const noexcept { return scalePreviewBounds_; }
@@ -1565,6 +1579,12 @@ private:
     std::size_t pickCycleIndex_{};
     // Where an Alt+click orbit started: released without moving, it opens the pick list (ART-013).
     std::optional<std::pair<int, int>> orbitPress_;
+    SelectionMask selectionMask_;
+    // Selection targets under a viewport point, nearest first, closed groups folded, masks applied.
+    [[nodiscard]] std::vector<EditorPickResult> selectable_targets_at(int x, int y) const;
+    // Of `candidates`, the selection targets with a visible (unoccluded) part inside `rect`.
+    [[nodiscard]] std::set<EditorObjectId> targets_seen_in_rect(UiRect rect, const std::set<EditorObjectId>& candidates) const;
+    bool dispatch_selection_filter_action(std::string_view action);
     std::chrono::steady_clock::time_point lastPickTime_{};
     PlacementTarget placementMode_{PlacementTarget::NoTarget};
     std::optional<Float3> placementPoint_;

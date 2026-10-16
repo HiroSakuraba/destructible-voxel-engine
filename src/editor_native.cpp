@@ -1929,6 +1929,23 @@ void NativeEditorController::refresh_menu_state() noexcept {
     }
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
+    {
+        // Half-model mirroring: the primary polygon mesh (or the mesh being edited in the polygon domain).
+        const bool components = selectionDomain_ == SelectionDomain::Polygons;
+        const auto meshId = components ? std::optional(polygonSelection_.object) : workspace_.selected_object();
+        const EditorObject* mesh = meshId ? workspace_.document().find_object(*meshId) : nullptr;
+        const bool meshReady = mesh && mesh->polygon && !playActive;
+        const bool facesReady = meshReady && components && !polygonSelection_.components.empty();
+        const auto liveAxis = meshId ? live_mirror_axis(*meshId) : std::nullopt;
+        for (const char axis : {'x', 'y', 'z'}) {
+            const int index = axis - 'x';
+            enabled(std::string("mirror.mesh_") + axis, meshReady, "Select a polygon mesh or subdivision cage.");
+            enabled(std::string("mirror.faces_") + axis, facesReady, "Select faces of a mesh in the polygon selection mode.");
+            enabled(std::string("mirror.live_") + axis, meshReady, "Select a polygon mesh or subdivision cage.");
+            checked(std::string("mirror.live_") + axis, liveAxis == index);
+        }
+        enabled("mirror.apply_live", meshReady && liveAxis.has_value(), "The selected mesh has no live mirror.");
+    }
     for (std::string_view id : {"edit.mirror_x", "edit.mirror_y", "edit.mirror_z", "edit.mirror_copy_x", "edit.mirror_copy_y", "edit.mirror_copy_z"})
         enabled(id, hasSelection && !playActive && selectionDomain_ == SelectionDomain::Objects,
                 playActive ? "Stop Play first." : selectionDomain_ != SelectionDomain::Objects ? "Return to object selection first."
@@ -2208,6 +2225,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("select.mask_locked", selectionMask_.locked);
     checked("select.mask_helpers", selectionMask_.helpers);
     checked("select.mask_prefabs", selectionMask_.prefabs);
+    checked("select.shape_box", selectionShape_ == SelectionShape::Box);
+    checked("select.shape_lasso", selectionShape_ == SelectionShape::Lasso);
+    checked("select.shape_paint", selectionShape_ == SelectionShape::Paint);
     checked("select.domain_objects", selectionDomain_ == SelectionDomain::Objects);
     checked("voxel.brush_shape_cube", voxelBrushShape_ == BrushShape::Cube);
     checked("voxel.brush_shape_sphere", voxelBrushShape_ == BrushShape::Sphere);
@@ -4200,11 +4220,14 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
                        std::string(voxelMoveAxis_ == 1 ? "X" : voxelMoveAxis_ == 2 ? "Y" : "Z") + " (release applies, Esc cancels)", false, 2.0F);
             break;
         }
+    } else if (paintSelecting_) {
+        paint_select_at(x, y);
     } else if (voxelBrushSelecting_) {
         voxel_brush_select_at(x, y);
     } else if (marquee_.active) {
         marquee_.currentX = x;
         marquee_.currentY = y;
+        if (!lassoPath_.empty()) extend_lasso(x, y);
     } else if (navigation_pointer_active()) {
         navigate_pointer(static_cast<float>(deltaX), static_cast<float>(deltaY));
     } else if (gizmoDragging_) {
@@ -5086,6 +5109,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         update_hover(x, y);
         const bool selectLikeTool = activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                                     activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale;
+        if (activeTool_ == EditorToolId::Select && begin_shape_selection(x, y, modifiers)) return;
         if (selectionDomain_ == SelectionDomain::Polygons && selectLikeTool) {
             prune_polygon_selection();
             if (!polygonSelection_.components.empty() && activeTool_ != EditorToolId::Select && hit_test_gizmo_axis(x,y)) {
@@ -5241,7 +5265,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 
     const int completedClickDistance = (x - pointerDownX_) * (x - pointerDownX_) +
                                        (y - pointerDownY_) * (y - pointerDownY_);
-    if (!doubleClickConsumed_ && completedClickDistance <= 25) {
+    // A closed lasso ends where it started but is a drag, not a click.
+    if (!doubleClickConsumed_ && completedClickDistance <= 25 && lassoPath_.size() < 3U) {
         lastClickButton_ = button;
         lastClickX_ = x;
         lastClickY_ = y;
@@ -5314,6 +5339,9 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 
     if (button == PointerButton::Primary) {
         if (voxelBrushSelecting_) voxelBrushSelecting_ = false;
+        if (paintSelecting_) { paintSelecting_ = false; lastPaintDab_.reset(); }
+        if (marquee_.active && !lassoPath_.empty() && finish_lasso_selection(x, y)) marquee_ = {};
+        lassoPath_.clear();
         if (voxelMoveAxis_ != 0) {
             const auto offset = voxel_move_preview();
             voxelMoveAxis_ = 0;
@@ -6915,6 +6943,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
                    (voxelBrushShape_ == BrushShape::Sphere ? " (sphere)" : " (cube)"));
         return true;
     }
+    if (actionId.starts_with("select.shape_") || actionId.starts_with("select.paint_radius"))
+        return dispatch_selection_shape_action(actionId);
     if (actionId.starts_with("select.mask_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
         actionId == "edit.select_shrink" || actionId == "edit.select_connected")
         return dispatch_selection_filter_action(actionId);
@@ -6928,6 +6958,13 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId.starts_with("subdiv.") || actionId=="create.subdivision")
         return dispatch_subdivision_action(actionId=="create.subdivision" ? "subdiv.create_cube" : actionId);
+    if (actionId.starts_with("mirror.")) {
+        const int axis = actionId.back() == 'x' ? 0 : actionId.back() == 'y' ? 1 : 2;
+        if (actionId == "mirror.apply_live") return apply_live_mirror();
+        if (actionId.starts_with("mirror.mesh_")) return mirror_mesh(axis, false);
+        if (actionId.starts_with("mirror.faces_")) return mirror_mesh(axis, true);
+        if (actionId.starts_with("mirror.live_")) return toggle_live_mirror(axis);
+    }
     if (actionId.starts_with("mesh.")) return dispatch_mesh_authoring_action(actionId);
     if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.import_exact" &&
         actionId != "polygon.create_plane" &&
@@ -6963,6 +7000,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "voxel.select_cells" || actionId == "voxel.select_connected") {
         set_selection_domain(SelectionDomain::Voxels); set_active_tool(EditorToolId::Select);
         voxelSelectionBrushEnabled_ = false;
+        if (selectionShape_ == SelectionShape::Paint) selectionShape_ = SelectionShape::Box;
         voxelClickSelection_ = actionId == "voxel.select_cells" ? VoxelClickSelection::Cell : VoxelClickSelection::ConnectedPiece;
         refresh_menu_state();
         set_status(voxelClickSelection_ == VoxelClickSelection::Cell ? "Click selects one voxel cell; box modifiers are unchanged"
@@ -6975,6 +7013,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_selection_domain(SelectionDomain::Voxels);
         set_active_tool(EditorToolId::Select);
         voxelSelectionBrushEnabled_ = enable;
+        if (enable) selectionShape_ = SelectionShape::Paint;
+        else if (selectionShape_ == SelectionShape::Paint) selectionShape_ = SelectionShape::Box;
         voxelBrushSelecting_ = false;
         marquee_ = {};
         refresh_menu_state();
@@ -10068,6 +10108,33 @@ std::vector<EditorPolygonDrawTriangle> NativeEditorController::polygon_draw_item
         item.selected = item.object == polygonSelection_.object && polygonSelection_.mode == PolygonSelectionMode::Face &&
             polygonSelection_.components.contains(item.face);
         if (item.selected) item.color={1.0F,.55F,.15F,1};
+    }
+    {
+        // Live mirror: the other half of each mirrored mesh, drawn from the authored half every frame
+        // (preview only; Polygon > Apply Live Mirror makes it real geometry with a welded seam).
+        EditorDocument preview("Live mirror preview");
+        for (const auto& [id, object] : workspace_.document().objects()) {
+            if (!object.polygon || !object.flags.visible || is_isolated_out(id) || hidden.contains(id)) continue;
+            const auto axis = live_mirror_axis(id);
+            if (!axis) continue;
+            EditorObject half(id, object.name);
+            half.polygon = *object.polygon;
+            half.subdivision = object.subdivision;
+            if (!mirror_polygon_mesh(*half.polygon, *axis, half.subdivision ? &*half.subdivision : nullptr, nullptr)) continue;
+            half.transform = workspace_.document().world_transform(id).value_or(object.transform);
+            half.voxelScale = object.voxelScale;
+            preview.add_object(std::move(half));
+        }
+        if (!preview.objects().empty()) {
+            auto mirrorItems = build_editor_polygon_draw_list(preview, camera_, layout_.viewport, {}, {}, 100000);
+            for (auto& item : mirrorItems) {
+                item.color = {item.color.x * 0.55F + 0.25F, item.color.y * 0.55F + 0.3F, item.color.z * 0.55F + 0.4F, item.color.w};
+                item.selected = false;
+                item.face = std::numeric_limits<std::uint32_t>::max();  // not pickable as a real face
+            }
+            items.insert(items.end(), mirrorItems.begin(), mirrorItems.end());
+            std::stable_sort(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.depth > b.depth; });
+        }
     }
     if (polygonSlicePreview_ && polygonSliceBack_) {
         const auto* source=workspace_.document().find_object(polygonPreviewSelection_.object);
@@ -13318,10 +13385,15 @@ void NativeEditorController::set_selection_domain(SelectionDomain domain) {
     if (selectionDomain_ == domain) return;
     cancel_polygon_preview();
     if (gizmoDragging_) finish_gizmo_drag(true);
-    if (domain == SelectionDomain::Polygons) { (void)set_polygon_mode(PolygonSelectionMode::Face); return; }
+    if (domain == SelectionDomain::Polygons) {
+        voxelSelectionBrushEnabled_ = false;
+        (void)set_polygon_mode(PolygonSelectionMode::Face);
+        return;
+    }
     selectionDomain_ = domain;
     voxelBrushSelecting_ = false;
-    voxelSelectionBrushEnabled_ = false;
+    // The voxel Selection Brush is the voxel domain's Paint shape: keep the two in step.
+    voxelSelectionBrushEnabled_ = domain == SelectionDomain::Voxels && selectionShape_ == SelectionShape::Paint;
     voxelMoveAxis_ = 0;
     marquee_ = {};
     if (domain == SelectionDomain::Voxels) {
@@ -13488,7 +13560,7 @@ void NativeEditorController::reset_voxel_selection_state() {
     voxelSelectionObject_ = 0;
     voxelSelectionRevision_ = 0;
     voxelBrushSelecting_ = false;
-    voxelSelectionBrushEnabled_ = false;
+    voxelSelectionBrushEnabled_ = selectionDomain_ == SelectionDomain::Voxels && selectionShape_ == SelectionShape::Paint;
     voxelRegionRotationPivot_.reset();
     voxelRegionRotationObject_ = 0;
     voxelRegionRotationSerial_ = 0;

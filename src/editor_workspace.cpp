@@ -633,6 +633,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"select.mask_helpers","Edit","Selectable: Helpers (cameras, lights, emitters)",""},
         {"select.mask_prefabs","Edit","Selectable: Prefab Instances",""},
         {"select.mask_all","Edit","Make Everything Selectable",""},
+        {"select.shape_box","Edit","Selection Shape: Box",""},
+        {"select.shape_lasso","Edit","Selection Shape: Lasso",""},
+        {"select.shape_paint","Edit","Selection Shape: Paint",""},
+        {"select.shape_cycle","Edit","Next Selection Shape",""},
+        {"select.paint_radius_increase","Edit","Larger Paint Selection Brush",""},
+        {"select.paint_radius_decrease","Edit","Smaller Paint Selection Brush",""},
         {"voxel.select_all","Voxel","Select All Voxels",""},
         {"voxel.select_none","Voxel","Deselect Voxels",""},
         {"voxel.select_grow","Voxel","Grow Voxel Selection",""},
@@ -791,6 +797,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.chamfer_edges","Polygon","Chamfer Edges (Convex)",""},
         {"mesh.fillet_edges","Polygon","Rounded Fillet Edges (Convex)",""},
         {"mesh.subdivide","Polygon","Subdivide Selected Faces",""},
+        {"mirror.live_x","Polygon","Live Mirror X",""}, {"mirror.live_y","Polygon","Live Mirror Y",""},
+        {"mirror.live_z","Polygon","Live Mirror Z",""}, {"mirror.apply_live","Polygon","Apply Live Mirror (weld seam)",""},
+        {"mirror.mesh_x","Polygon","Mirror Mesh X (weld seam)",""}, {"mirror.mesh_y","Polygon","Mirror Mesh Y (weld seam)",""},
+        {"mirror.mesh_z","Polygon","Mirror Mesh Z (weld seam)",""},
+        {"mirror.faces_x","Polygon","Mirror Selected Faces X",""}, {"mirror.faces_y","Polygon","Mirror Selected Faces Y",""},
+        {"mirror.faces_z","Polygon","Mirror Selected Faces Z",""},
         {"mesh.split_edges","Polygon","Split Selected Edges",""},
         {"mesh.flip_diagonal","Polygon","Flip Triangle Diagonal",""},
         {"mesh.bridge","Polygon","Bridge Boundary Loops",""},
@@ -948,6 +960,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("camera.load_bookmark_2", "Bookmarks", 63);
     configure("camera.settings", "Settings", 90);
     configure("voxel.settings", "Settings", 90);
+    for (std::string_view id : {"mirror.live_x", "mirror.live_y", "mirror.live_z"}) configure(id, "Symmetry", 78, true, "mirror.live");
+    for (std::string_view id : {"mirror.apply_live", "mirror.mesh_x", "mirror.mesh_y", "mirror.mesh_z", "mirror.faces_x", "mirror.faces_y", "mirror.faces_z"})
+        configure(id, "Symmetry", 79);
     for (std::string_view id : {"edit.mirror_copy_x", "edit.mirror_copy_y", "edit.mirror_copy_z", "edit.mirror_x", "edit.mirror_y", "edit.mirror_z"})
         configure(id, "Mirror", 24);
     configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
@@ -960,6 +975,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         configure(id, "Select", 33);
     for (std::string_view id : {"select.mask_locked", "select.mask_helpers", "select.mask_prefabs"}) configure(id, "Selection Mask", 34, true);
     configure("select.mask_all", "Selection Mask", 35);
+    for (std::string_view id : {"select.shape_box", "select.shape_lasso", "select.shape_paint"})
+        configure(id, "Selection Shape", 36, true, "select.shape");
+    for (std::string_view id : {"select.shape_cycle", "select.paint_radius_increase", "select.paint_radius_decrease"})
+        configure(id, "Selection Shape", 37);
     for (std::string_view id : {"edit.open_group", "edit.close_group", "edit.close_all_groups"})
         configure(id, "Groups", 26);
     configure("edit.edit_pivot", "Groups", 27, true);
@@ -1203,6 +1222,14 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("select.walk_left", "Select the previous sibling (mesh components: the neighbour to the left).", {"pickwalk", "sibling", "previous"});
     describe("select.walk_right", "Select the next sibling (mesh components: the neighbour to the right).", {"pickwalk", "sibling", "next"});
     for (const char* axis : {"x", "y", "z"}) {
+        describe(std::string("mirror.live_") + axis, "Show the mesh mirrored across its own axis while you model one half; Apply Live Mirror welds it.",
+                 {"symmetry", "mirror", "half", "modifier"});
+        describe(std::string("mirror.mesh_") + axis, "Mirror the whole mesh across its own axis (through its origin) and weld the centre seam.",
+                 {"symmetry", "mirror", "half", "weld"});
+        describe(std::string("mirror.faces_") + axis, "Add a mirrored duplicate of the selected faces across the mesh's own axis, welded where they touch the plane.",
+                 {"symmetry", "mirror", "faces"});
+    }
+    for (const char* axis : {"x", "y", "z"}) {
         describe(std::string("edit.mirror_copy_") + axis, "Make a mirrored copy of the selection across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect", "copy"});
         describe(std::string("edit.mirror_") + axis, "Mirror the selection in place across the world plane through the pivot (voxels and meshes really flip).",
@@ -1222,6 +1249,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("select.mask_helpers", "Let viewport clicks and boxes pick up helpers: objects without geometry such as cameras, lights and emitters.", {"mask", "filter", "helper", "camera", "light"});
     describe("select.mask_prefabs", "Let viewport clicks and boxes pick up prefab instances.", {"mask", "filter", "prefab"});
     describe("select.mask_all", "Turn every selection mask back on.", {"mask", "filter", "reset"});
+    describe("select.shape_box", "Select-tool drags draw a box: left to right contains, right to left crosses.", {"marquee", "rectangle", "box"});
+    describe("select.shape_lasso", "Select-tool drags draw a freehand loop; everything inside it is selected (visible only unless X-Ray).", {"lasso", "freehand", "loop"});
+    describe("select.shape_paint", "Select-tool drags paint the selection with a round brush; Ctrl-drag removes. Voxels use the Selection Brush.", {"paint", "brush", "radius"});
+    describe("select.shape_cycle", "Switch Box, Lasso and Paint selection in turn.", {"lasso", "paint", "box", "shape"});
+    describe("select.paint_radius_increase", "Make the paint selection brush larger.", {"paint", "brush", "radius", "size"});
+    describe("select.paint_radius_decrease", "Make the paint selection brush smaller.", {"paint", "brush", "radius", "size"});
     describe("subdiv.select_loop","Follow selected cage edges through regular quad vertices; stops at boundaries, poles and triangles.",{"subdivision","edge","loop"});
     describe("subdiv.select_ring","Select opposite edges across saved control quads; stops at boundaries and triangles.",{"subdivision","edge","ring"});
     describe("polygon.select_loop","Select loops on an authored subdivision control cage; convert an ordinary polygon mesh to subdivision first.",{"cage","edge","loop"});

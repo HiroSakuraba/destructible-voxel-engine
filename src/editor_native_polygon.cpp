@@ -1148,59 +1148,6 @@ bool NativeEditorController::dispatch_subdivision_action(std::string_view action
     set_status("Unknown subdivision command",true);
     return false;
 }
-void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,UiRect viewport) const {
-    if (workspace_.mode()!=EditorMode::Edit || playSession_.active()) return;
-    const auto primary=workspace_.selected_object();const auto* object=primary?workspace_.document().find_object(*primary):nullptr;
-    if (!object || !object->subdivision || !object->polygon || !object->flags.visible || is_isolated_out(object->id)) return;
-    if (subdivisionCageDrawHash_!=object->polygon->contentHash || subdivisionCageDrawObject_!=object->id ||
-        subdivisionCageDrawSettings_!=*object->subdivision) {
-        subdivisionCageDrawEdges_.clear();
-        const auto allowed=subdivision_control_edges(*object->polygon,&*object->subdivision);
-        for (auto edge : polygon_edges(*object->polygon)) if (allowed.contains(edge.key())) subdivisionCageDrawEdges_.push_back(edge);
-        subdivisionCageDrawHash_=object->polygon->contentHash;subdivisionCageDrawObject_=object->id;subdivisionCageDrawSettings_=*object->subdivision;
-    }
-    if (subdivisionCageVisible_) {
-        std::size_t drawn=0;
-        for (const auto edge : subdivisionCageDrawEdges_) {
-            if (++drawn>12000) break;
-            const auto a=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[edge.a].position));
-            const auto b=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[edge.b].position));
-            if (a.depth<=camera_.nearPlane || b.depth<=camera_.nearPlane || !std::isfinite(a.x) || !std::isfinite(a.y) ||
-                !std::isfinite(b.x) || !std::isfinite(b.y)) continue;
-            const auto bounded=[](float v){return int(std::clamp(v,-100000.0F,100000.0F));};
-            const bool selected=selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge &&
-                polygonSelection_.components.contains(edge.key());
-            const auto crease=object->subdivision->edgeCreases.find(edge.key());
-            const bool creased=crease!=object->subdivision->edgeCreases.end();
-            canvas.line(bounded(a.x),bounded(a.y),bounded(b.x),bounded(b.y),selected?0xffb75a:creased?0xdb7cf2:0x66d8e8,selected||creased?2:1);
-        }
-        if (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Vertex)
-            for (const auto id : polygon_all_components(*object->polygon,PolygonSelectionMode::Vertex)) {
-                const auto p=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[std::size_t(id)].position));
-                if (p.visible) canvas.fill({int(p.x)-3,int(p.y)-3,7,7},polygonSelection_.components.contains(id)?0xffb75a:0x66d8e8);
-            }
-    }
-    const UiRect caption{viewport.x+10,viewport.y+10,std::max(1,std::min(490,viewport.width-20)),42};
-    RectClipCanvas painter(canvas,caption);painter.fill(caption,0x17202b);
-    const std::string text="SUBDIVISION | level "+std::to_string(object->subdivision->level)+
-        (subdivisionCageOnly_?" | cage preview":" | smooth surface")+
-        (subdivisionCageXray_?" | cage X-ray":" | visible cage selection");
-    painter.text(caption.x+8,caption.y+16,elide_text_to_width(painter,text,caption.width-16),0x66d8e8);
-    std::string detail=object->subdivisionCache && !object->subdivisionCache->mesh ?
-        object->subdivisionCache->error : "Purple = authored creases | strengths 0.5..4 | Undo supported";
-    if (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge &&
-        !polygonSelection_.components.empty()) {
-        float minimum=4,maximum=0;
-        for (auto edge : polygonSelection_.components) {
-            const auto at=object->subdivision->edgeCreases.find(edge);
-            const float strength=at==object->subdivision->edgeCreases.end()?0:at->second;
-            minimum=std::min(minimum,strength);maximum=std::max(maximum,strength);
-        }
-        detail="Selected crease range "+std::to_string(minimum)+".."+std::to_string(maximum)+" | purple = authored";
-    }
-    painter.text(caption.x+8,caption.y+34,elide_text_to_width(painter,detail,caption.width-16),0xe0e9f5);
-}
-
 bool NativeEditorController::polygon_walk(WalkDirection direction) {
     prune_polygon_selection();
     auto* object = workspace_.document().find_object(polygonSelection_.object);
@@ -1252,6 +1199,59 @@ bool NativeEditorController::polygon_walk(WalkDirection direction) {
     polygonWalkCurrent_ = *best;
     set_status("Walked to the next element (Left/Right step, Up/Down grow and shrink)");
     return true;
+}
+
+void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,UiRect viewport) const {
+    if (workspace_.mode()!=EditorMode::Edit || playSession_.active()) return;
+    const auto primary=workspace_.selected_object();const auto* object=primary?workspace_.document().find_object(*primary):nullptr;
+    if (!object || !object->subdivision || !object->polygon || !object->flags.visible || is_isolated_out(object->id)) return;
+    if (subdivisionCageDrawHash_!=object->polygon->contentHash || subdivisionCageDrawObject_!=object->id ||
+        subdivisionCageDrawSettings_!=*object->subdivision) {
+        subdivisionCageDrawEdges_.clear();
+        const auto allowed=subdivision_control_edges(*object->polygon,&*object->subdivision);
+        for (auto edge : polygon_edges(*object->polygon)) if (allowed.contains(edge.key())) subdivisionCageDrawEdges_.push_back(edge);
+        subdivisionCageDrawHash_=object->polygon->contentHash;subdivisionCageDrawObject_=object->id;subdivisionCageDrawSettings_=*object->subdivision;
+    }
+    if (subdivisionCageVisible_) {
+        std::size_t drawn=0;
+        for (const auto edge : subdivisionCageDrawEdges_) {
+            if (++drawn>12000) break;
+            const auto a=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[edge.a].position));
+            const auto b=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[edge.b].position));
+            if (a.depth<=camera_.nearPlane || b.depth<=camera_.nearPlane || !std::isfinite(a.x) || !std::isfinite(a.y) ||
+                !std::isfinite(b.x) || !std::isfinite(b.y)) continue;
+            const auto bounded=[](float v){return int(std::clamp(v,-100000.0F,100000.0F));};
+            const bool selected=selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge &&
+                polygonSelection_.components.contains(edge.key());
+            const auto crease=object->subdivision->edgeCreases.find(edge.key());
+            const bool creased=crease!=object->subdivision->edgeCreases.end();
+            canvas.line(bounded(a.x),bounded(a.y),bounded(b.x),bounded(b.y),selected?0xffb75a:creased?0xdb7cf2:0x66d8e8,selected||creased?2:1);
+        }
+        if (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Vertex)
+            for (const auto id : polygon_all_components(*object->polygon,PolygonSelectionMode::Vertex)) {
+                const auto p=project_world_to_screen(camera_,viewport,voxel_to_world(object->transform,object->voxelScale,object->polygon->vertices[std::size_t(id)].position));
+                if (p.visible) canvas.fill({int(p.x)-3,int(p.y)-3,7,7},polygonSelection_.components.contains(id)?0xffb75a:0x66d8e8);
+            }
+    }
+    const UiRect caption{viewport.x+10,viewport.y+10,std::max(1,std::min(490,viewport.width-20)),42};
+    RectClipCanvas painter(canvas,caption);painter.fill(caption,0x17202b);
+    const std::string text="SUBDIVISION | level "+std::to_string(object->subdivision->level)+
+        (subdivisionCageOnly_?" | cage preview":" | smooth surface")+
+        (subdivisionCageXray_?" | cage X-ray":" | visible cage selection");
+    painter.text(caption.x+8,caption.y+16,elide_text_to_width(painter,text,caption.width-16),0x66d8e8);
+    std::string detail=object->subdivisionCache && !object->subdivisionCache->mesh ?
+        object->subdivisionCache->error : "Purple = authored creases | strengths 0.5..4 | Undo supported";
+    if (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Edge &&
+        !polygonSelection_.components.empty()) {
+        float minimum=4,maximum=0;
+        for (auto edge : polygonSelection_.components) {
+            const auto at=object->subdivision->edgeCreases.find(edge);
+            const float strength=at==object->subdivision->edgeCreases.end()?0:at->second;
+            minimum=std::min(minimum,strength);maximum=std::max(maximum,strength);
+        }
+        detail="Selected crease range "+std::to_string(minimum)+".."+std::to_string(maximum)+" | purple = authored";
+    }
+    painter.text(caption.x+8,caption.y+34,elide_text_to_width(painter,detail,caption.width-16),0xe0e9f5);
 }
 
 } // namespace dve::editor

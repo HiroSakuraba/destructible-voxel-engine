@@ -791,6 +791,11 @@ public:
     void pointer_relative(float deltaX, float deltaY);
     [[nodiscard]] bool navigation_pointer_active() const noexcept;
     [[nodiscard]] bool raw_mouse_requested() const noexcept { return rawMouseRequested_; }
+    // Pick walking (arrow keys, ART-014): objects go to parent / first child / previous / next
+    // sibling; mesh components step to the neighbour in that screen direction (Left/Right) or
+    // grow / shrink by one ring (Up/Down); voxel selections grow / shrink. The camera never moves.
+    enum class WalkDirection : std::uint8_t { Up, Down, Left, Right };
+    bool pick_walk(WalkDirection direction);
     void pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers = 0);
     void pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers = 0);
     void pointer_wheel(float steps, int x, int y, std::uint32_t modifiers = 0);
@@ -887,11 +892,6 @@ public:
     // Mirror the selected objects (with their children) across the world plane through the
     // current pivot whose normal is axis 0/1/2 (X/Y/Z); as copies or in place. One undo step.
     bool mirror_selection(int axis, bool copy);
-    // Pick walking (arrow keys, ART-014): objects go to parent / first child / previous / next
-    // sibling; mesh components step to the neighbour in that screen direction (Left/Right) or
-    // grow / shrink by one ring (Up/Down); voxel selections grow / shrink. The camera never moves.
-    enum class WalkDirection : std::uint8_t { Up, Down, Left, Right };
-    bool pick_walk(WalkDirection direction);
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
     [[nodiscard]] InspectorSelectionSummary inspector_selection_summary() const;
     // Numeric fields: the shown value ("" when the field does not apply, "—" when the selected

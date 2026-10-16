@@ -236,6 +236,39 @@ void test_paint_objects_and_voxels() {
     check(!c.voxel_selection().empty(), "paint in the voxel domain uses the Selection Brush: " + c.status().text);
     (void)during;
 }
+
+// Codex review: Paint chosen outside the voxel domain stays Paint when switching to voxels (and
+// back again), and Ctrl+[ / Ctrl+] size the voxel Selection Brush there.
+void test_paint_survives_domain_switch() {
+    auto owner = make_controller();
+    NativeEditorController& c = *owner;
+    c.workspace().select_object(1);
+    const auto brushChecked = [&] {
+        const MenuAction* item = std::as_const(c.workspace().menus()).find("voxel.selection_brush");
+        return item && item->checked;
+    };
+    check(c.dispatch_action("select.shape_paint"), "Paint in the object domain");
+    check(!brushChecked(), "no voxel brush while selecting objects");
+    (void)c.dispatch_action("select.domain_voxels");
+    check(c.selection_domain() == SelectionDomain::Voxels, "now selecting voxels");
+    check(c.selection_shape() == SelectionShape::Paint && brushChecked(), "Paint carries into the voxel domain as the Selection Brush");
+    const int radius = c.voxel_brush_radius();
+    const int pixels = c.selection_paint_radius();
+    c.key_down("]", true, false, false);
+    check(c.voxel_brush_radius() == radius + 1, "Ctrl+] grows the voxel Selection Brush: " + c.status().text);
+    check(c.selection_paint_radius() == pixels, "and leaves the pixel brush alone");
+    c.key_down("[", true, false, false);
+    check(c.voxel_brush_radius() == radius, "Ctrl+[ shrinks it again");
+    (void)c.dispatch_action("select.domain_objects");
+    check(!brushChecked(), "leaving voxels turns the brush off");
+    (void)c.dispatch_action("select.domain_voxels");
+    check(brushChecked(), "and returning turns it back on");
+    // Switching the brush off from the Voxel menu is honest about the shape too.
+    (void)c.dispatch_action("voxel.selection_brush");
+    check(!brushChecked() && c.selection_shape() == SelectionShape::Box, "brush off -> Box shape");
+    (void)c.dispatch_action("voxel.selection_brush");
+    check(brushChecked() && c.selection_shape() == SelectionShape::Paint, "brush on -> Paint shape");
+}
 }  // namespace
 
 int main() {
@@ -244,6 +277,7 @@ int main() {
     test_lasso_voxels();
     test_lasso_polygons();
     test_paint_objects_and_voxels();
+    test_paint_survives_domain_switch();
     if (g_failures == 0) std::printf("selection shape tests passed\n");
     return g_failures == 0 ? 0 : 1;
 }

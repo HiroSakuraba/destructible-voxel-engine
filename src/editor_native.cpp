@@ -6967,6 +6967,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "voxel.select_cells" || actionId == "voxel.select_connected") {
         set_selection_domain(SelectionDomain::Voxels); set_active_tool(EditorToolId::Select);
         voxelSelectionBrushEnabled_ = false;
+        if (selectionShape_ == SelectionShape::Paint) selectionShape_ = SelectionShape::Box;
         voxelClickSelection_ = actionId == "voxel.select_cells" ? VoxelClickSelection::Cell : VoxelClickSelection::ConnectedPiece;
         refresh_menu_state();
         set_status(voxelClickSelection_ == VoxelClickSelection::Cell ? "Click selects one voxel cell; box modifiers are unchanged"
@@ -6979,6 +6980,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_selection_domain(SelectionDomain::Voxels);
         set_active_tool(EditorToolId::Select);
         voxelSelectionBrushEnabled_ = enable;
+        if (enable) selectionShape_ = SelectionShape::Paint;
+        else if (selectionShape_ == SelectionShape::Paint) selectionShape_ = SelectionShape::Box;
         voxelBrushSelecting_ = false;
         marquee_ = {};
         refresh_menu_state();
@@ -13325,10 +13328,15 @@ void NativeEditorController::set_selection_domain(SelectionDomain domain) {
     if (selectionDomain_ == domain) return;
     cancel_polygon_preview();
     if (gizmoDragging_) finish_gizmo_drag(true);
-    if (domain == SelectionDomain::Polygons) { (void)set_polygon_mode(PolygonSelectionMode::Face); return; }
+    if (domain == SelectionDomain::Polygons) {
+        voxelSelectionBrushEnabled_ = false;
+        (void)set_polygon_mode(PolygonSelectionMode::Face);
+        return;
+    }
     selectionDomain_ = domain;
     voxelBrushSelecting_ = false;
-    voxelSelectionBrushEnabled_ = false;
+    // The voxel Selection Brush is the voxel domain's Paint shape: keep the two in step.
+    voxelSelectionBrushEnabled_ = domain == SelectionDomain::Voxels && selectionShape_ == SelectionShape::Paint;
     voxelMoveAxis_ = 0;
     marquee_ = {};
     if (domain == SelectionDomain::Voxels) {
@@ -13495,7 +13503,7 @@ void NativeEditorController::reset_voxel_selection_state() {
     voxelSelectionObject_ = 0;
     voxelSelectionRevision_ = 0;
     voxelBrushSelecting_ = false;
-    voxelSelectionBrushEnabled_ = false;
+    voxelSelectionBrushEnabled_ = selectionDomain_ == SelectionDomain::Voxels && selectionShape_ == SelectionShape::Paint;
     voxelRegionRotationPivot_.reset();
     voxelRegionRotationObject_ = 0;
     voxelRegionRotationSerial_ = 0;

@@ -48,6 +48,9 @@ const char* shape_name(SelectionShape shape) {
 
 bool NativeEditorController::dispatch_selection_shape_action(std::string_view action) {
     if (action == "select.paint_radius_increase" || action == "select.paint_radius_decrease") {
+        // In the voxel domain Paint is the voxel Selection Brush, which is sized in cells.
+        if (selectionDomain_ == SelectionDomain::Voxels)
+            return dispatch_action(action == "select.paint_radius_increase" ? "voxel.brush_increase" : "voxel.brush_decrease");
         const int step = std::max(2, selectionPaintRadius_ / 5);
         selectionPaintRadius_ = std::clamp(selectionPaintRadius_ + (action == "select.paint_radius_increase" ? step : -step), 4, 400);
         set_status("Paint selection radius: " + std::to_string(selectionPaintRadius_) + " px");

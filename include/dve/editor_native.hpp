@@ -906,6 +906,13 @@ public:
     // Mirror the selected objects (with their children) across the world plane through the
     // current pivot whose normal is axis 0/1/2 (X/Y/Z); as copies or in place. One undo step.
     bool mirror_selection(int axis, bool copy);
+    // Half-model mirroring of the selected polygon mesh / subdivision cage across its own plane
+    // (local axis through the local origin): bake the whole mesh with a welded seam, or copy just
+    // the selected faces. Live Mirror shows the other half until Apply bakes it.
+    bool mirror_mesh(int axis, bool selectedFaces);
+    bool toggle_live_mirror(int axis);
+    bool apply_live_mirror();
+    [[nodiscard]] std::optional<int> live_mirror_axis(EditorObjectId id) const;
     [[nodiscard]] CommandResult set_primary_position(Float3 worldPosition);
     [[nodiscard]] InspectorSelectionSummary inspector_selection_summary() const;
     // Numeric fields: the shown value ("" when the field does not apply, "—" when the selected

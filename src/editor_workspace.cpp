@@ -627,6 +627,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"select.mask_helpers","Edit","Selectable: Helpers (cameras, lights, emitters)",""},
         {"select.mask_prefabs","Edit","Selectable: Prefab Instances",""},
         {"select.mask_all","Edit","Make Everything Selectable",""},
+        {"select.shape_box","Edit","Selection Shape: Box",""},
+        {"select.shape_lasso","Edit","Selection Shape: Lasso",""},
+        {"select.shape_paint","Edit","Selection Shape: Paint",""},
+        {"select.shape_cycle","Edit","Next Selection Shape",""},
+        {"select.paint_radius_increase","Edit","Larger Paint Selection Brush",""},
+        {"select.paint_radius_decrease","Edit","Smaller Paint Selection Brush",""},
         {"voxel.select_all","Voxel","Select All Voxels",""},
         {"voxel.select_none","Voxel","Deselect Voxels",""},
         {"voxel.select_grow","Voxel","Grow Voxel Selection",""},
@@ -951,6 +957,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         configure(id, "Select", 33);
     for (std::string_view id : {"select.mask_locked", "select.mask_helpers", "select.mask_prefabs"}) configure(id, "Selection Mask", 34, true);
     configure("select.mask_all", "Selection Mask", 35);
+    for (std::string_view id : {"select.shape_box", "select.shape_lasso", "select.shape_paint"})
+        configure(id, "Selection Shape", 36, true, "select.shape");
+    for (std::string_view id : {"select.shape_cycle", "select.paint_radius_increase", "select.paint_radius_decrease"})
+        configure(id, "Selection Shape", 37);
     for (std::string_view id : {"edit.open_group", "edit.close_group", "edit.close_all_groups"})
         configure(id, "Groups", 26);
     configure("edit.edit_pivot", "Groups", 27, true);
@@ -1207,6 +1217,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("select.mask_helpers", "Let viewport clicks and boxes pick up helpers: objects without geometry such as cameras, lights and emitters.", {"mask", "filter", "helper", "camera", "light"});
     describe("select.mask_prefabs", "Let viewport clicks and boxes pick up prefab instances.", {"mask", "filter", "prefab"});
     describe("select.mask_all", "Turn every selection mask back on.", {"mask", "filter", "reset"});
+    describe("select.shape_box", "Select-tool drags draw a box: left to right contains, right to left crosses.", {"marquee", "rectangle", "box"});
+    describe("select.shape_lasso", "Select-tool drags draw a freehand loop; everything inside it is selected (visible only unless X-Ray).", {"lasso", "freehand", "loop"});
+    describe("select.shape_paint", "Select-tool drags paint the selection with a round brush; Ctrl-drag removes. Voxels use the Selection Brush.", {"paint", "brush", "radius"});
+    describe("select.shape_cycle", "Switch Box, Lasso and Paint selection in turn.", {"lasso", "paint", "box", "shape"});
+    describe("select.paint_radius_increase", "Make the paint selection brush larger.", {"paint", "brush", "radius", "size"});
+    describe("select.paint_radius_decrease", "Make the paint selection brush smaller.", {"paint", "brush", "radius", "size"});
     describe("subdiv.select_loop","Follow selected cage edges through regular quad vertices; stops at boundaries, poles and triangles.",{"subdivision","edge","loop"});
     describe("subdiv.select_ring","Select opposite edges across saved control quads; stops at boundaries and triangles.",{"subdivision","edge","ring"});
     describe("polygon.select_loop","Select loops on an authored subdivision control cage; convert an ordinary polygon mesh to subdivision first.",{"cage","edge","loop"});

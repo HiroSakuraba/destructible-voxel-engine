@@ -69,7 +69,7 @@ std::set<EditorObjectId> NativeEditorController::targets_seen_in_rect(UiRect rec
 
 std::string NativeEditorController::marquee_label() const {
     if (!marquee_.active) return {};
-    std::string label = marquee_.currentX >= marquee_.startX ? "Window" : "Crossing";
+    std::string label = !lassoPath_.empty() ? "Lasso" : marquee_.currentX >= marquee_.startX ? "Window" : "Crossing";
     label += viewportSettings_.xraySelection ? " \xC2\xB7 X-Ray (through)" : " \xC2\xB7 visible only";
     if (selectionDomain_ == SelectionDomain::Objects && !selectionMask_.everything()) {
         std::string off;

@@ -2208,6 +2208,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("select.mask_locked", selectionMask_.locked);
     checked("select.mask_helpers", selectionMask_.helpers);
     checked("select.mask_prefabs", selectionMask_.prefabs);
+    checked("select.shape_box", selectionShape_ == SelectionShape::Box);
+    checked("select.shape_lasso", selectionShape_ == SelectionShape::Lasso);
+    checked("select.shape_paint", selectionShape_ == SelectionShape::Paint);
     checked("select.domain_objects", selectionDomain_ == SelectionDomain::Objects);
     checked("voxel.brush_shape_cube", voxelBrushShape_ == BrushShape::Cube);
     checked("voxel.brush_shape_sphere", voxelBrushShape_ == BrushShape::Sphere);
@@ -4197,11 +4200,14 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
                        std::string(voxelMoveAxis_ == 1 ? "X" : voxelMoveAxis_ == 2 ? "Y" : "Z") + " (release applies, Esc cancels)", false, 2.0F);
             break;
         }
+    } else if (paintSelecting_) {
+        paint_select_at(x, y);
     } else if (voxelBrushSelecting_) {
         voxel_brush_select_at(x, y);
     } else if (marquee_.active) {
         marquee_.currentX = x;
         marquee_.currentY = y;
+        if (!lassoPath_.empty()) extend_lasso(x, y);
     } else if (navigation_pointer_active()) {
         navigate_pointer(static_cast<float>(deltaX), static_cast<float>(deltaY));
     } else if (gizmoDragging_) {
@@ -5083,6 +5089,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         update_hover(x, y);
         const bool selectLikeTool = activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                                     activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale;
+        if (activeTool_ == EditorToolId::Select && begin_shape_selection(x, y, modifiers)) return;
         if (selectionDomain_ == SelectionDomain::Polygons && selectLikeTool) {
             prune_polygon_selection();
             if (!polygonSelection_.components.empty() && activeTool_ != EditorToolId::Select && hit_test_gizmo_axis(x,y)) {
@@ -5311,6 +5318,9 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 
     if (button == PointerButton::Primary) {
         if (voxelBrushSelecting_) voxelBrushSelecting_ = false;
+        if (paintSelecting_) { paintSelecting_ = false; lastPaintDab_.reset(); }
+        if (marquee_.active && !lassoPath_.empty() && finish_lasso_selection(x, y)) marquee_ = {};
+        lassoPath_.clear();
         if (voxelMoveAxis_ != 0) {
             const auto offset = voxel_move_preview();
             voxelMoveAxis_ = 0;
@@ -6907,6 +6917,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
                    (voxelBrushShape_ == BrushShape::Sphere ? " (sphere)" : " (cube)"));
         return true;
     }
+    if (actionId.starts_with("select.shape_") || actionId.starts_with("select.paint_radius"))
+        return dispatch_selection_shape_action(actionId);
     if (actionId.starts_with("select.mask_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
         actionId == "edit.select_shrink" || actionId == "edit.select_connected")
         return dispatch_selection_filter_action(actionId);

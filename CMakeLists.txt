@@ -843,6 +843,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_polygon.cpp
         src/editor_native_mesh_authoring.cpp
         src/editor_native_selection_filters.cpp
+        src/editor_native_selection_shapes.cpp
         src/editor_mesh_boolean.cpp
         src/editor_edge_bevel.cpp
         src/editor_exact_cad.cpp

@@ -3728,7 +3728,7 @@ void NativeEditorController::open_pick_list(int x, int y, const std::vector<Edit
     contextMenu_ = {};
     contextMenu_.open = true;
     const int itemHeight = static_cast<int>(24.0F * kLogicalLayoutScale);
-    const int popupWidth = 290;
+    const int popupWidth = 380;
     contextMenu_.width = popupWidth;
     const std::size_t count = std::min<std::size_t>(hits.size(), 16U);
     contextMenu_.x = std::clamp(x, 0, std::max(0, width_ - popupWidth));
@@ -3738,45 +3738,27 @@ void NativeEditorController::open_pick_list(int x, int y, const std::vector<Edit
         const EditorObjectId id = hits[index].objectId;
         const EditorObject* object = workspace_.document().find_object(id);
         if (!object) continue;
-        std::string label = object->name;
+        // "Name  (kind)  Parent / Name", nearest first: enough to tell stacked objects apart.
+        std::string path;
         for (auto parent = object->parent; parent;) {
             const EditorObject* ancestor = workspace_.document().find_object(*parent);
             if (!ancestor) break;
-            label = ancestor->name + "/" + label;
+            path = ancestor->name + " / " + path;
             parent = ancestor->parent;
         }
+        std::string kind;
+        if (object->text3d) kind = "3D text";
+        else if (object->gaborVolume) kind = "Gabor volume";
+        else if (object->subdivision && object->polygon) kind = "subdivision, " + std::to_string(object->polygon->indices.size() / 3) + " tris";
+        else if (object->polygon) kind = "mesh, " + std::to_string(object->polygon->indices.size() / 3) + " tris";
+        else if (object->voxels && object->voxels->occupied_voxel_count() > 0) kind = "voxels, " + std::to_string(object->voxels->occupied_voxel_count());
+        else kind = "group";
+        std::string label = object->name + "  (" + kind + ")";
+        if (!path.empty()) label += "  " + path + object->name;
         contextMenu_.items.push_back({"selection.pick." + std::to_string(id), std::move(label)});
         contextMenu_.itemRects.push_back({contextMenu_.x,
             contextMenu_.y + static_cast<int>(contextMenu_.itemRects.size()) * itemHeight,
             popupWidth, itemHeight});
-    }
-}
-
-void NativeEditorController::walk_selection(std::string_view direction) {
-    const auto current = workspace_.selected_object();
-    if (!current) return;
-    const EditorObject* object = workspace_.document().find_object(*current);
-    if (!object) return;
-    std::optional<EditorObjectId> next;
-    if (direction == "up") next = object->parent;
-    else if (direction == "down") {
-        for (const auto& [id, candidate] : workspace_.document().objects()) {
-            if (candidate.parent == current && candidate.flags.visible) { next = id; break; }
-        }
-    } else {
-        std::vector<EditorObjectId> siblings;
-        for (const auto& [id, candidate] : workspace_.document().objects())
-            if (candidate.parent == object->parent && candidate.flags.visible) siblings.push_back(id);
-        const auto it = std::find(siblings.begin(), siblings.end(), *current);
-        if (it != siblings.end() && siblings.size() > 1U) {
-            const std::size_t index = static_cast<std::size_t>(it - siblings.begin());
-            next = siblings[(index + (direction == "left" ? siblings.size() - 1U : 1U)) % siblings.size()];
-        }
-    }
-    if (next) {
-        workspace_.select_object(next);
-        if (const EditorObject* selected = workspace_.document().find_object(*next))
-            set_status("Selected " + selected->name);
     }
 }
 
@@ -3786,6 +3768,58 @@ std::optional<EditorObjectId> NativeEditorController::hierarchy_row_object_at(in
         if (layout_.hierarchyRows[index].contains(x, y)) return order[index];
     }
     return std::nullopt;
+}
+
+bool NativeEditorController::pick_walk(WalkDirection direction) {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play before changing the selection", true); return false; }
+    if (gizmoDragging_ || longJob_) { set_status("Finish the active edit first", true); return false; }
+    if (selectionDomain_ == SelectionDomain::Polygons) return polygon_walk(direction);
+    if (selectionDomain_ == SelectionDomain::Voxels) {
+        if (direction == WalkDirection::Up) return dispatch_action("voxel.select_grow");
+        if (direction == WalkDirection::Down) return dispatch_action("voxel.select_shrink");
+        set_status("Voxels: Up grows and Down shrinks the selection; Left/Right walk objects (press M)", true);
+        return false;
+    }
+    const EditorDocument& document = workspace_.document();
+    const auto primary = workspace_.selected_object();
+    if (!primary || !document.find_object(*primary)) { set_status("Select an object to walk from", true); return false; }
+    const auto walkable = [&](EditorObjectId id) {
+        const EditorObject* object = document.find_object(id);
+        return object && object->flags.visible && !is_isolated_out(id);
+    };
+    std::optional<EditorObjectId> target;
+    const EditorObject* current = document.find_object(*primary);
+    switch (direction) {
+    case WalkDirection::Up:
+        for (auto parent = current->parent; parent && !target;) {
+            if (walkable(*parent)) target = *parent;
+            const EditorObject* ancestor = document.find_object(*parent);
+            parent = ancestor ? ancestor->parent : std::nullopt;
+        }
+        if (!target) { set_status(current->name + " has no parent", true); return false; }
+        break;
+    case WalkDirection::Down:
+        for (const EditorObjectId child : document.children_of(*primary))
+            if (walkable(child)) { target = child; break; }
+        if (!target) { set_status(current->name + " has no children", true); return false; }
+        break;
+    case WalkDirection::Left:
+    case WalkDirection::Right: {
+        std::vector<EditorObjectId> siblings = current->parent ? document.children_of(*current->parent) : document.root_objects();
+        std::erase_if(siblings, [&](EditorObjectId id) { return id != *primary && !walkable(id); });
+        const auto at = std::find(siblings.begin(), siblings.end(), *primary);
+        if (siblings.size() < 2 || at == siblings.end()) { set_status(current->name + " has no siblings", true); return false; }
+        const std::size_t index = static_cast<std::size_t>(at - siblings.begin());
+        target = siblings[(index + (direction == WalkDirection::Right ? 1U : siblings.size() - 1U)) % siblings.size()];
+        break;
+    }
+    }
+    workspace_.select_object(*target);
+    recompute_layout();
+    refresh_menu_state();
+    const EditorObject* reached = document.find_object(*target);
+    set_status("Selected " + reached->name + "  (arrows walk: Up parent, Down child, Left/Right siblings)");
+    return true;
 }
 
 bool NativeEditorController::mirror_selection(int axis, bool copy) {
@@ -4829,7 +4863,9 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                     (void)set_hierarchy_expanded(order[index], hierarchy_collapsed(order[index]));
                     return;
                 }
-                if ((modifiers & 1U) != 0U) workspace_.toggle_selection(order[index]);
+                // Same rule as the viewport: Shift adds (or takes out a selected row), Ctrl removes.
+                if ((modifiers & 2U) != 0U) workspace_.apply_selection({order[index]}, SelectionOperation::Subtract);
+                else if ((modifiers & 1U) != 0U) workspace_.toggle_selection(order[index]);
                 else workspace_.select_object(order[index]);
                 focusRegion_ = EditorFocusRegion::SceneHierarchy;
                 // Armed as a pending drag source; pointer_move promotes it to an active drag
@@ -5022,6 +5058,9 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         remember_camera_position();
         activePointerCommand_ = navigation->actionId;
         dragButton_ = button;
+        orbitPress_.reset();
+        if (navigation->actionId == "viewport.orbit" && button == PointerButton::Primary && (modifiers & 4U) != 0U)
+            orbitPress_ = std::pair{x, y};
         return;
     }
     dragButton_ = button;
@@ -5047,9 +5086,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 begin_gizmo_drag(x,y,modifiers); return;
             }
             marquee_.active = true;
-            marquee_.operation = (modifiers & 3U) == 3U ? SelectionOperation::Intersect
-                : (modifiers & 4U) ? SelectionOperation::Subtract : (modifiers & 2U) ? SelectionOperation::Toggle
-                : (modifiers & 1U) ? SelectionOperation::Add : SelectionOperation::Replace;
+            marquee_.operation = selection_operation_for_modifiers(modifiers);
             marquee_.startX = marquee_.currentX = x; marquee_.startY = marquee_.currentY = y;
             return;
         }
@@ -5073,10 +5110,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
                 voxel_brush_select_at(x, y);
                 return;
             }
-            const SelectionOperation operation = (modifiers & 3U) == 3U ? SelectionOperation::Intersect
-                : (modifiers & 4U) ? SelectionOperation::Subtract
-                : (modifiers & 2U) ? SelectionOperation::Toggle
-                : (modifiers & 1U) ? SelectionOperation::Add : SelectionOperation::Replace;
+            const SelectionOperation operation = selection_operation_for_modifiers(modifiers);
             marquee_.active = true;
             marquee_.clickObject.reset();
             marquee_.clickVoxel = hoverPick_;
@@ -5092,13 +5126,10 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         } else if (activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                    activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale) {
             // Defer selection until release so a box can start over geometry. Shift adds,
-            // Ctrl toggles, Alt subtracts, and Shift+Ctrl intersects the current set.
+            // Ctrl removes, Shift+Ctrl intersects the current set (selection_operation_for_modifiers).
             marquee_.active = true;
             marquee_.clickObject = hoverPick_ ? std::optional<EditorObjectId>(hoverPick_->objectId) : std::nullopt;
-            marquee_.operation = (modifiers & 3U) == 3U ? SelectionOperation::Intersect
-                : (modifiers & 4U) ? SelectionOperation::Subtract
-                : (modifiers & 2U) ? SelectionOperation::Toggle
-                : (modifiers & 1U) ? SelectionOperation::Add : SelectionOperation::Replace;
+            marquee_.operation = selection_operation_for_modifiers(modifiers);
             marquee_.startX = marquee_.currentX = x;
             marquee_.startY = marquee_.currentY = y;
         } else if (activeTool_ == EditorToolId::ScatterBrush) {
@@ -5346,13 +5377,38 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 for (const auto& [group, counts] : groupPieces)
                     if (contain ? counts.first == counts.second && counts.second > 0 : counts.first > 0) hits.insert(group);
             }
-            workspace_.apply_selection(hits, marquee_.operation);
+            SelectionOperation operation = marquee_.operation;
+            // Shift+click on something already selected takes it out again.
+            if (distanceSquared <= 25 && operation == SelectionOperation::Add && !hits.empty() &&
+                std::all_of(hits.begin(), hits.end(), [&](EditorObjectId id) { return workspace_.is_selected(id); }))
+                operation = SelectionOperation::Subtract;
+            workspace_.apply_selection(hits, operation);
             marquee_ = {};
         }
         if (gizmoDragging_) finish_gizmo_drag(false);
         finish_voxel_stroke();
         brushResizing_ = false;
         if (brushStroking_) finish_brush_stroke(false);
+    }
+    if (dragButton_ == button && orbitPress_ && activePointerCommand_ == "viewport.orbit") {
+        // Alt+click without dragging (an orbit that never moved) opens the depth-sorted pick list
+        // of everything under the cursor, so it is reachable while Alt+drag orbits.
+        const int dx = x - orbitPress_->first, dy = y - orbitPress_->second;
+        const bool stationary = dx * dx + dy * dy <= 25;
+        orbitPress_.reset();
+        if (stationary && workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
+            selectionDomain_ == SelectionDomain::Objects && layout_.viewport.contains(x, y)) {
+            const auto rawHits = pick_editor_document_all(workspace_.document(),
+                make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
+                10000.0F, &viewportSettings_.isolatedObjects);
+            std::vector<EditorPickResult> targets;
+            std::set<EditorObjectId> seenTargets;
+            for (EditorPickResult hit : rawHits) {
+                hit.objectId = viewport_selection_target(hit.objectId);
+                if (seenTargets.insert(hit.objectId).second) targets.push_back(hit);
+            }
+            if (targets.size() > 1U) open_pick_list(x, y, targets);
+        }
     }
     if (dragButton_ == button) {
         dragButton_ = PointerButton::NoButton;
@@ -5560,7 +5616,7 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
         return gestures;
     }
     if (selectionDomain_==SelectionDomain::Polygons) {
-        add("Polygon: click / box; Shift add, Ctrl toggle");
+        add("Polygon: click / box; Shift add, Ctrl remove");
         add("1 vertices  2 edges  3 faces  4 objects");
         if (activeTool_==EditorToolId::Translate||activeTool_==EditorToolId::Rotate||activeTool_==EditorToolId::Scale)
             add("Drag axis/ring; type value; Enter apply, Esc cancel");
@@ -5581,7 +5637,7 @@ std::vector<std::string> NativeEditorController::viewport_tool_gestures() const 
             add("Drag axis: move voxels");
         add(voxelClickSelection_ == VoxelClickSelection::Cell ? "Voxels: click one cell" : "Voxels: click piece");
         add("Box: rightward contains, leftward crosses");
-        add("Shift add  Ctrl toggle  Ctrl+Shift intersect");
+        add("Shift add  Ctrl remove  Ctrl+Shift intersect");
         return gestures;
     }
     const bool transformTool = activeTool_ == EditorToolId::Translate || activeTool_ == EditorToolId::Rotate ||
@@ -6920,7 +6976,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         marquee_ = {};
         refresh_menu_state();
         set_status(enable ? "Selection Brush: drag adds, Ctrl-drag removes; [ / ] changes radius; choose Selection Brush again for boxes"
-                          : "Box selection: left-to-right contains, right-to-left crosses; Shift adds, Ctrl toggles, Ctrl+Shift intersects");
+                          : "Box selection: left-to-right contains, right-to-left crosses; Shift adds, Ctrl removes, Ctrl+Shift intersects");
         return true;
     }
     if (actionId == "voxel.region_extrude_x_positive") return begin_voxel_region_preview(VoxelRegionEdit::Extrude, {0,1});
@@ -8055,6 +8111,10 @@ camera_menu_dispatch_complete:
         begin_text_edit(TextEditKind::ObjectName, *id, object->name);
         return true;
     }
+    if (actionId == "select.walk_up") return pick_walk(WalkDirection::Up);
+    if (actionId == "select.walk_down") return pick_walk(WalkDirection::Down);
+    if (actionId == "select.walk_left") return pick_walk(WalkDirection::Left);
+    if (actionId == "select.walk_right") return pick_walk(WalkDirection::Right);
     if (actionId == "select.parent" || actionId == "select.children" || actionId == "select.siblings") {
         if (gizmoDragging_) { set_status("Finish the active transform first",true); return false; }
         std::set<EditorObjectId> hits;
@@ -8938,7 +8998,9 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         navigate_hierarchy(normalized)) return;
     if (focusRegion_ == EditorFocusRegion::Viewport && alt && !control &&
         (normalized == "up" || normalized == "down" || normalized == "left" || normalized == "right")) {
-        walk_selection(normalized);
+        // Alt+arrows: the same pick walk as the bare arrows (kept for existing habits).
+        (void)pick_walk(normalized == "up" ? WalkDirection::Up : normalized == "down" ? WalkDirection::Down
+                        : normalized == "left" ? WalkDirection::Left : WalkDirection::Right);
         return;
     }
 
@@ -13274,7 +13336,7 @@ void NativeEditorController::set_selection_domain(SelectionDomain domain) {
             voxelSelectionRevision_ = object->voxels->revision();
         }
         set_status("Selecting voxels" + (object ? " of " + object->name : std::string()) +
-                   ": click a piece; left-to-right box contains, right-to-left crosses; Shift adds, Ctrl toggles, Ctrl+Shift intersects (M returns to objects)");
+                   ": click a piece; left-to-right box contains, right-to-left crosses; Shift adds, Ctrl removes, Ctrl+Shift intersects (M returns to objects)");
     } else {
         set_status("Selecting objects");
     }
@@ -13580,7 +13642,12 @@ void NativeEditorController::finish_voxel_marquee(int x, int y) {
                 const auto cells = voxelClickSelection_ == VoxelClickSelection::Cell ?
                     std::set<Int3>{marquee.clickVoxel->voxel} :
                     voxel_connected_piece(*object->voxels,marquee.clickVoxel->voxel,kMaxVoxelSelection);
-                select_voxels(object->id,cells,marquee.operation);
+                SelectionOperation operation = marquee.operation;
+                // Shift+click on a selected piece takes it out again.
+                if (operation == SelectionOperation::Add && object->id == voxelSelectionObject_ && !cells.empty() &&
+                    std::all_of(cells.begin(), cells.end(), [&](const Int3& cell) { return voxelSelection_.contains(cell); }))
+                    operation = SelectionOperation::Subtract;
+                select_voxels(object->id,cells,operation);
             }
         } else if (marquee.operation == SelectionOperation::Replace) {
             clear_voxel_selection();

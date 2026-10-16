@@ -6,7 +6,7 @@
 //
 //   gestures (Voxel domain, Select or Move tool): click = the clicked face-connected piece,
 //   left-to-right drag = window (whole cells), right-to-left = crossing (touching cells).
-//   Shift adds, Ctrl toggles, Ctrl+Shift intersects; X-Ray includes buried cells.
+//   Shift adds, Ctrl removes, Ctrl+Shift intersects; X-Ray includes buried cells.
 //   Selection Brush is an explicit mode (the voxel brush size, [ ]); drag adds, Ctrl removes.
 //   Alt subtracts from boxes when not bound to navigation.
 //   edits: Delete, Extract to New Object, Copy/Cut/Paste (as a new object in place), Move with

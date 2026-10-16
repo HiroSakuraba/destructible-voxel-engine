@@ -703,6 +703,10 @@ void EditorShortcutRegistry::install_builtin_commands() {
     add("view.drop_to_surface", "Drop Selection to Surface", "Viewport", {ShortcutContext::Viewport});
     add("view.follow_selection", "Follow Selection", "Viewport", {ShortcutContext::Viewport, ShortcutContext::Camera});
     add("select.domain_toggle", "Toggle Selection Domain (Objects / Voxels)", "Edit", {ShortcutContext::Viewport});
+    add("select.walk_up", "Pick Walk Up (parent / grow)", "Edit", {ShortcutContext::Viewport});
+    add("select.walk_down", "Pick Walk Down (first child / shrink)", "Edit", {ShortcutContext::Viewport});
+    add("select.walk_left", "Pick Walk Left (previous sibling)", "Edit", {ShortcutContext::Viewport});
+    add("select.walk_right", "Pick Walk Right (next sibling)", "Edit", {ShortcutContext::Viewport});
     add("view.game_view", "Toggle Game View", "Viewport", {ShortcutContext::Viewport});
     add("view.realtime", "Toggle Realtime Viewport", "Viewport", {ShortcutContext::Viewport});
     add("view.immersive", "Toggle Immersive Viewport", "Viewport", {ShortcutContext::Viewport});
@@ -920,6 +924,11 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     // 1 / 2 are camera bookmark recall in the Camera context (which overlaps Viewport), so the
     // selection domain toggles on M ("mode") instead.
     bind(dve, "select.domain_toggle", ShortcutContext::Viewport, keyboard_shortcut("m"));
+    // Pick walking (Maya-style): arrows move the selection, never the camera.
+    bind(dve, "select.walk_up", ShortcutContext::Viewport, keyboard_shortcut("up"));
+    bind(dve, "select.walk_down", ShortcutContext::Viewport, keyboard_shortcut("down"));
+    bind(dve, "select.walk_left", ShortcutContext::Viewport, keyboard_shortcut("left"));
+    bind(dve, "select.walk_right", ShortcutContext::Viewport, keyboard_shortcut("right"));
     bind(dve, "transform.space", ShortcutContext::Viewport, keyboard_shortcut("space"));
     bind(dve, "view.frame", ShortcutContext::Viewport, keyboard_shortcut("f"),
          mouse_shortcut("mouse1", false, false, false, ShortcutActivation::DoubleClick));

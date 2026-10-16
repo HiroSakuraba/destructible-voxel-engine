@@ -560,7 +560,7 @@ bool NativeEditorController::mesh_authoring_pointer_down(PointerButton button,in
         cancel_mesh_authoring_drag();s.uvBefore=*object->polygon;s.dragging=true;s.pivot={};std::set<std::uint32_t> vertices;for(auto c:s.corners)if(c<object->polygon->indices.size())vertices.insert(object->polygon->indices[c]);
         if(vertices.empty()){cancel_mesh_authoring_drag();return true;}for(auto v:vertices){auto p=texcoord(object->polygon->vertices[v],s.channel);s.pivot.x+=p.x;s.pivot.y+=p.y;}s.pivot.x/=float(vertices.size());s.pivot.y/=float(vertices.size());return true;
     }
-    s.selecting=true;s.selectionOperation=(modifiers&3U)==3U?SelectionOperation::Intersect:(modifiers&2U)?SelectionOperation::Toggle:(modifiers&1U)?SelectionOperation::Add:SelectionOperation::Replace;return true;
+    s.selecting=true;s.selectionOperation=selection_operation_for_modifiers(modifiers);return true;
 }
 bool NativeEditorController::mesh_authoring_pointer_move(int x,int y,std::uint32_t modifiers){
     if(!meshAuthoring_||meshAuthoring_->kind!=NativeMeshAuthoringState::Kind::Uv)return false;auto& s=*meshAuthoring_;if(!s.dragging&&!s.panning&&!s.selecting)return false;
@@ -581,7 +581,7 @@ bool NativeEditorController::mesh_authoring_pointer_up(PointerButton button,int 
     if(std::hypot(float(x-s.startX),float(y-s.startY))<=5)hits=uv_click(*object->polygon,s,layout_.viewport,x,y);
     else{UiRect rect{std::min(x,s.startX),std::min(y,s.startY),std::abs(x-s.startX)+1,std::abs(y-s.startY)+1};for(std::uint32_t c=0;c<object->polygon->indices.size();++c){auto p=screen_uv(texcoord(object->polygon->vertices[object->polygon->indices[c]],s.channel),s,layout_.viewport);if(rect.contains(int(p.x),int(p.y)))hits.insert(c);}
         if(s.uvMode>=2){std::set<std::uint32_t> faces;for(auto c:hits)faces.insert(c/3);if(s.uvMode==3)for(auto island:polygon_uv_islands(*object->polygon,s.channel,s.uvFlags.enabled?s.uvFlags.seams[s.channel]:std::set<std::uint64_t>{})){bool selected=std::any_of(island.begin(),island.end(),[&](auto f){return faces.contains(f);});if(selected)faces.insert(island.begin(),island.end());}hits.clear();for(auto f:faces)for(unsigned j=0;j<3;++j)hits.insert(f*3+j);}}
-    if(s.selectionOperation==SelectionOperation::Replace)s.corners.clear();if(s.selectionOperation==SelectionOperation::Intersect)std::erase_if(s.corners,[&](auto c){return !hits.contains(c);});else for(auto c:hits){if(s.selectionOperation==SelectionOperation::Toggle&&s.corners.contains(c))s.corners.erase(c);else s.corners.insert(c);}
+    if(s.selectionOperation==SelectionOperation::Replace)s.corners.clear();if(s.selectionOperation==SelectionOperation::Intersect)std::erase_if(s.corners,[&](auto c){return !hits.contains(c);});else for(auto c:hits){if(s.selectionOperation==SelectionOperation::Subtract||(s.selectionOperation==SelectionOperation::Toggle&&s.corners.contains(c)))s.corners.erase(c);else s.corners.insert(c);}
     polygonSelection_={s.object,PolygonSelectionMode::Face,{}};for(auto c:s.corners)polygonSelection_.components.insert(c/3);selectionDomain_=SelectionDomain::Polygons;return true;
 }
 

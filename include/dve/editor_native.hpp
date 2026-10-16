@@ -197,6 +197,15 @@ struct DuplicatePanelLayout {
     std::vector<std::pair<NumberFieldId, UiRect>> rowNames;  // row label positions
     std::vector<NumberFieldRect> fields;                     // the number boxes
 };
+// One selection rule everywhere (objects, hierarchy, voxels, mesh components): Shift adds,
+// Ctrl removes, Ctrl+Shift intersects; Alt also removes where navigation does not use it.
+// A Shift+click on something already selected removes it (see click handling).
+[[nodiscard]] inline SelectionOperation selection_operation_for_modifiers(std::uint32_t modifiers) noexcept {
+    if ((modifiers & 3U) == 3U) return SelectionOperation::Intersect;
+    if ((modifiers & 2U) != 0U || (modifiers & 4U) != 0U) return SelectionOperation::Subtract;
+    if ((modifiers & 1U) != 0U) return SelectionOperation::Add;
+    return SelectionOperation::Replace;
+}
 enum class InspectorFlagState : std::uint8_t { Off, On, Mixed };
 struct InspectorSelectionSummary {
     std::size_t count{};
@@ -782,6 +791,11 @@ public:
     void pointer_relative(float deltaX, float deltaY);
     [[nodiscard]] bool navigation_pointer_active() const noexcept;
     [[nodiscard]] bool raw_mouse_requested() const noexcept { return rawMouseRequested_; }
+    // Pick walking (arrow keys, ART-014): objects go to parent / first child / previous / next
+    // sibling; mesh components step to the neighbour in that screen direction (Left/Right) or
+    // grow / shrink by one ring (Up/Down); voxel selections grow / shrink. The camera never moves.
+    enum class WalkDirection : std::uint8_t { Up, Down, Left, Right };
+    bool pick_walk(WalkDirection direction);
     void pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers = 0);
     void pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers = 0);
     void pointer_wheel(float steps, int x, int y, std::uint32_t modifiers = 0);
@@ -1206,6 +1220,8 @@ private:
     NumberScrubState numberScrub_;
     std::optional<std::pair<NumberFieldId, int>> contextNumberField_;
     std::string numberFieldClipboard_;
+    std::optional<std::uint64_t> polygonWalkCurrent_;  // the component the last Left/Right step reached
+    bool polygon_walk(WalkDirection direction);
     void begin_number_field_edit(NumberFieldId field, int axis);
     void update_number_scrub(int x, std::uint32_t modifiers);
     void finish_number_scrub(bool cancel);
@@ -1214,7 +1230,6 @@ private:
     [[nodiscard]] std::string number_field_refusal(NumberFieldId field) const;
     void open_context_menu(int x, int y, std::optional<EditorObjectId> target, bool fromHierarchy);
     void open_pick_list(int x, int y, const std::vector<EditorPickResult>& hits);
-    void walk_selection(std::string_view direction);
     void update_placement_preview(int x, int y);
     void finish_placement(bool cancel);
     void close_context_menu() noexcept;
@@ -1555,6 +1570,8 @@ private:
     int lastPickX_{};
     int lastPickY_{};
     std::size_t pickCycleIndex_{};
+    // Where an Alt+click orbit started: released without moving, it opens the pick list (ART-013).
+    std::optional<std::pair<int, int>> orbitPress_;
     std::chrono::steady_clock::time_point lastPickTime_{};
     PlacementTarget placementMode_{PlacementTarget::NoTarget};
     std::optional<Float3> placementPoint_;

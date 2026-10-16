@@ -29,7 +29,43 @@ std::vector<EditorPickResult> NativeEditorController::selectable_targets_at(int 
         if (!seen.insert(hit.objectId).second || !object_selectable(hit.objectId)) continue;
         targets.push_back(hit);
     }
+    if (selectionMask_.helpers) {
+        constexpr float kMarkerRadius = 8.0F;
+        bool added = false;
+        for (const HelperMarker& marker : helper_markers()) {
+            const float dx = marker.x - static_cast<float>(x), dy = marker.y - static_cast<float>(y);
+            if (dx * dx + dy * dy > kMarkerRadius * kMarkerRadius || !object_selectable(marker.id) || !seen.insert(marker.id).second) continue;
+            EditorPickResult hit;
+            hit.objectId = marker.id;
+            hit.worldPosition = marker.world;
+            hit.worldDistance = marker.distance;
+            targets.push_back(hit);
+            added = true;
+        }
+        if (added)
+            std::stable_sort(targets.begin(), targets.end(),
+                             [](const EditorPickResult& a, const EditorPickResult& b) { return a.worldDistance < b.worldDistance; });
+    }
     return targets;
+}
+
+std::vector<NativeEditorController::HelperMarker> NativeEditorController::helper_markers() const {
+    std::vector<HelperMarker> markers;
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active() || selectionDomain_ != SelectionDomain::Objects) return markers;
+    const EditorDocument& document = workspace_.document();
+    for (const auto& [id, object] : document.objects()) {
+        if (has_own_geometry(object) || !document.children_of(id).empty() || !object.flags.visible || is_isolated_out(id) ||
+            viewport_selection_target(id) != id)
+            continue;
+        const auto world = document.world_transform(id);
+        if (!world) continue;
+        const ScreenPoint point = project_world_to_screen(camera_, layout_.viewport, world->position);
+        if (!point.visible || !layout_.viewport.contains(static_cast<int>(point.x), static_cast<int>(point.y))) continue;
+        const float dx = world->position.x - camera_.position.x, dy = world->position.y - camera_.position.y,
+                    dz = world->position.z - camera_.position.z;
+        markers.push_back({id, point.x, point.y, std::sqrt(dx * dx + dy * dy + dz * dz), world->position});
+    }
+    return markers;
 }
 
 std::set<EditorObjectId> NativeEditorController::targets_seen_in_rect(UiRect rect, const std::set<EditorObjectId>& candidates) const {
@@ -69,7 +105,7 @@ std::set<EditorObjectId> NativeEditorController::targets_seen_in_rect(UiRect rec
 
 std::string NativeEditorController::marquee_label() const {
     if (!marquee_.active) return {};
-    std::string label = marquee_.currentX >= marquee_.startX ? "Window" : "Crossing";
+    std::string label = !lassoPath_.empty() ? "Lasso" : marquee_.currentX >= marquee_.startX ? "Window" : "Crossing";
     label += viewportSettings_.xraySelection ? " \xC2\xB7 X-Ray (through)" : " \xC2\xB7 visible only";
     if (selectionDomain_ == SelectionDomain::Objects && !selectionMask_.everything()) {
         std::string off;

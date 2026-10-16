@@ -5287,17 +5287,50 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     for (const ChromeTooltip& tip : tooltips)
         draw_chrome_tooltip(painter, tip, {0, 0, width, height}, rgb(16,22,31), border, text, muted);
 
+    // Geometry-free helpers: a small diamond at each origin (clicks and boxes pick it).
+    if (controller.selection_mask().helpers)
+        for (const auto& marker : controller.helper_markers()) {
+            const int hx = static_cast<int>(marker.x), hy = static_cast<int>(marker.y);
+            const EditorColor helperColour = controller.workspace().is_selected(marker.id) ? accent : muted;
+            painter.line(hx - 5, hy, hx, hy - 5, helperColour, 1);
+            painter.line(hx, hy - 5, hx + 5, hy, helperColour, 1);
+            painter.line(hx + 5, hy, hx, hy + 5, helperColour, 1);
+            painter.line(hx, hy + 5, hx - 5, hy, helperColour, 1);
+        }
+
     if (controller.marquee().active) {
         const MarqueeState& marquee = controller.marquee();
         const int left = std::min(marquee.startX, marquee.currentX);
         const int top = std::min(marquee.startY, marquee.currentY);
         const int w = std::abs(marquee.currentX - marquee.startX);
         const int h = std::abs(marquee.currentY - marquee.startY);
-        painter.outline({left, top, w, h}, accent);
+        const auto& lasso = controller.lasso_path();
+        if (lasso.size() >= 2U) {
+            // The freehand loop, closed back to its start.
+            for (std::size_t i = 1; i < lasso.size(); ++i)
+                painter.line(lasso[i - 1].first, lasso[i - 1].second, lasso[i].first, lasso[i].second, accent, 2);
+            painter.line(lasso.back().first, lasso.back().second, lasso.front().first, lasso.front().second, muted, 1);
+        } else painter.outline({left, top, w, h}, accent);
         // Say which box rule applies: window/crossing, visible only or X-ray, skipped masks.
         if (w > 12 && h > 12) {
             const std::string label = controller.marquee_label();
             if (!label.empty()) painter.text(left + 4, top + h + 15, label, muted);
+        }
+    }
+
+    // Paint selection brush outline at the cursor (the voxel domain draws its own brush).
+    if (controller.selection_shape() == SelectionShape::Paint && controller.active_tool() == EditorToolId::Select &&
+        controller.selection_domain() != SelectionDomain::Voxels && !controller.context_menu().open) {
+        const auto [px, py] = controller.pointer_position();
+        if (controller.layout().viewport.contains(px, py)) {
+            const float r = static_cast<float>(controller.selection_paint_radius());
+            constexpr int segments = 32;
+            for (int i = 0; i < segments; ++i) {
+                const float a0 = 6.2831853F * static_cast<float>(i) / segments, a1 = 6.2831853F * static_cast<float>(i + 1) / segments;
+                painter.line(px + static_cast<int>(std::lround(r * std::cos(a0))), py + static_cast<int>(std::lround(r * std::sin(a0))),
+                             px + static_cast<int>(std::lround(r * std::cos(a1))), py + static_cast<int>(std::lround(r * std::sin(a1))),
+                             controller.paint_selecting() ? accent : muted, 1);
+            }
         }
     }
 

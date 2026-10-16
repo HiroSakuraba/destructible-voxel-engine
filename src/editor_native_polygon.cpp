@@ -1257,4 +1257,131 @@ void NativeEditorController::draw_subdivision_cage(const IEditorCanvas& canvas,U
     painter.text(caption.x+8,caption.y+34,elide_text_to_width(painter,detail,caption.width-16),0xe0e9f5);
 }
 
+// --- Half-model mirroring (Polygon > Mirror Mesh / Mirror Selected Faces / Live Mirror) -------
+
+std::optional<int> NativeEditorController::live_mirror_axis(EditorObjectId id) const {
+    const EditorObject* object = workspace_.document().find_object(id);
+    if (!object) return std::nullopt;
+    const Component* component = find_component_by_type(std::span<const Component>(object->components), kLiveMirrorComponent);
+    if (!component) return std::nullopt;
+    const auto at = component->properties.find("axis");
+    const auto* axis = at == component->properties.end() ? nullptr : std::get_if<std::int64_t>(&at->second);
+    if (!axis || *axis < 0 || *axis > 2) return std::nullopt;
+    return static_cast<int>(*axis);
+}
+
+bool NativeEditorController::mirror_mesh(int axis, bool selectedFaces) {
+    const char* axisName = axis == 0 ? "X" : axis == 1 ? "Y" : "Z";
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before mirroring", true); return false; }
+    if (longJob_ || polygonPreviewBefore_ || gizmoDragging_ || mesh_authoring_dragging() || voxel_authoring_active()) {
+        set_status("Finish the active edit or preview first", true);
+        return false;
+    }
+    prune_polygon_selection();
+    const bool components = selectionDomain_ == SelectionDomain::Polygons;
+    const auto primary = components ? std::optional(polygonSelection_.object) : workspace_.selected_object();
+    EditorObject* object = primary ? workspace_.document().find_object(*primary) : nullptr;
+    if (!object || !object->polygon) { set_status("Select a polygon mesh or subdivision cage to mirror", true); return false; }
+    if (!editable(object) || is_isolated_out(object->id)) { set_status("Show and unlock " + object->name + " before mirroring it", true); return false; }
+    std::set<std::uint32_t> faces;
+    if (selectedFaces) {
+        if (!components || polygonSelection_.object != object->id || polygonSelection_.components.empty()) {
+            set_status("Select faces in the polygon selection mode to mirror them", true);
+            return false;
+        }
+        faces = polygon_selected_faces(*object->polygon, polygonSelection_);
+        if (faces.empty()) { set_status("The selection covers no whole triangles: select faces", true); return false; }
+    }
+    const PolygonBounds& bounds = object->polygon->bounds;
+    const float extent = std::max({bounds.maximum.x - bounds.minimum.x, bounds.maximum.y - bounds.minimum.y, bounds.maximum.z - bounds.minimum.z, 1e-3F});
+    const float tolerance = std::max(1e-6F, extent * 1e-4F);
+    auto mirrored = mirror_polygon_half(*object->polygon, object->subdivision ? &*object->subdivision : nullptr, axis,
+                                        selectedFaces ? &faces : nullptr, tolerance);
+    if (!mirrored) { set_status(mirrored.error, true); return false; }
+    mirrored.mesh.objectId = object->id;
+    refresh_editor_polygon(mirrored.mesh, false);
+    if (!validate_polygon_asset(mirrored.mesh)) { set_status("Mirror produced an invalid mesh", true); return false; }
+    std::string error;
+    std::optional<ModelingTopology> topology;
+    if (object->modelingTopology) {
+        const auto identities = advance_modeling_topology(*object->polygon, mirrored.mesh, mirrored.subdivision ? &*mirrored.subdivision : nullptr,
+                                                          *object->modelingTopology, mirrored.lineage, object->modelingNextId);
+        if (!identities) { set_status("Mirror cannot keep the mesh's element IDs: " + identities.error, true); return false; }
+        topology = identities.topology;
+    }
+    const auto record = remap_polygon_uv_authoring_record(*object, mirrored.mesh, mirrored.lineage, &error);
+    if (!record) { set_status("Mirror refused: " + error, true); return false; }
+    const std::string label = std::string(selectedFaces ? "Mirror faces " : "Mirror mesh ") + axisName;
+    auto compound = std::make_unique<CompoundCommand>(label);
+    compound->add(std::make_unique<ReplacePolygonCommand>(object->id, *object->polygon, mirrored.mesh, label, 0,
+                                                          object->subdivision ? mirrored.subdivision : std::nullopt, false, topology));
+    if (!record->empty())
+        if (const Component* component = find_component_by_type(std::span<const Component>(object->components), kUvAuthoringComponent)) {
+            const auto at = component->properties.find("state");
+            compound->add(std::make_unique<SetComponentPropertyCommand>(object->id, component->id, "state",
+                at == component->properties.end() ? std::optional<ComponentValue>{} : at->second, ComponentValue{*record}, label));
+        }
+    // Baking the whole mesh across the live-mirror axis replaces the live preview.
+    if (!selectedFaces && live_mirror_axis(object->id) == axis)
+        if (const Component* live = find_component_by_type(std::span<const Component>(object->components), kLiveMirrorComponent))
+            compound->add(std::make_unique<RemoveComponentCommand>(object->id, live->id, label));
+    close_previews_for_voxel_edit("mirror");
+    const auto before = capture_selection_snapshot();
+    const auto id = object->id;
+    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(compound));
+    if (!result.success) { set_status(label + " failed: " + result.message, true); return false; }
+    if (components) {
+        polygonSelection_ = {id, PolygonSelectionMode::Face, {}};
+        if (selectedFaces) for (const std::uint32_t f : mirrored.newFaces) polygonSelection_.components.insert(f);
+    }
+    workspace_.commands().set_last_selection_transition(before, capture_selection_snapshot());
+    recompute_layout();
+    refresh_menu_state();
+    set_status(std::string(selectedFaces ? "Mirrored " + std::to_string(mirrored.newFaces.size()) + " faces" : std::string("Mirrored the mesh")) +
+               " across local " + axisName + " = 0; " + std::to_string(mirrored.welded) + " seam vertices welded" +
+               (mirrored.removed ? ", " + std::to_string(mirrored.removed) + " faces on the plane removed" : std::string()) + "; Undo restores");
+    return true;
+}
+
+bool NativeEditorController::toggle_live_mirror(int axis) {
+    const char* axisName = axis == 0 ? "X" : axis == 1 ? "Y" : "Z";
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate first", true); return false; }
+    const bool components = selectionDomain_ == SelectionDomain::Polygons;
+    const auto primary = components ? std::optional(polygonSelection_.object) : workspace_.selected_object();
+    EditorObject* object = primary ? workspace_.document().find_object(*primary) : nullptr;
+    if (!object || !object->polygon) { set_status("Select a polygon mesh or subdivision cage first", true); return false; }
+    if (object->flags.locked) { set_status("Unlock " + object->name + " first", true); return false; }
+    const Component* live = find_component_by_type(std::span<const Component>(object->components), kLiveMirrorComponent);
+    const auto current = live_mirror_axis(object->id);
+    CommandResult result;
+    const bool turningOff = live && current == axis;
+    if (turningOff) {
+        result = workspace_.commands().execute(workspace_.document(), std::make_unique<RemoveComponentCommand>(object->id, live->id, "Live mirror off"));
+    } else if (live) {
+        const auto at = live->properties.find("axis");
+        result = workspace_.commands().execute(workspace_.document(), std::make_unique<SetComponentPropertyCommand>(
+            object->id, live->id, "axis", at == live->properties.end() ? std::optional<ComponentValue>{} : at->second,
+            ComponentValue{std::int64_t{axis}}, std::string("Live mirror ") + axisName));
+    } else {
+        Component component;
+        component.type = std::string(kLiveMirrorComponent);
+        component.properties["axis"] = std::int64_t{axis};
+        result = workspace_.commands().execute(workspace_.document(),
+            std::make_unique<AddComponentCommand>(object->id, std::move(component), std::string("Live mirror ") + axisName));
+    }
+    if (!result.success) set_status(result.message, true);
+    else if (turningOff) set_status("Live mirror off");
+    else set_status(std::string("Live mirror ") + axisName + ": model one half; the other side follows (Polygon > Apply Live Mirror welds it)");
+    refresh_menu_state();
+    return result.success;
+}
+
+bool NativeEditorController::apply_live_mirror() {
+    const bool components = selectionDomain_ == SelectionDomain::Polygons;
+    const auto primary = components ? std::optional(polygonSelection_.object) : workspace_.selected_object();
+    const auto axis = primary ? live_mirror_axis(*primary) : std::nullopt;
+    if (!axis) { set_status("The selected mesh has no live mirror (Polygon > Live Mirror X/Y/Z)", true); return false; }
+    return mirror_mesh(*axis, false);
+}
+
 } // namespace dve::editor

@@ -35,7 +35,7 @@ void selection_and_visibility() {
     check(c.dispatch_action("polygon.vertex_mode"),"restore vertex mode");
     click(c,{0,0,1}); check(c.polygon_selection().components.size()==1,"click corner");
     click(c,{1,0,1},1); check(c.polygon_selection().components.size()==2,"shift adds");
-    click(c,{1,0,1},2); check(c.polygon_selection().components.size()==1,"ctrl toggles");
+    click(c,{1,0,1},2); check(c.polygon_selection().components.size()==1,"ctrl removes");
     check(c.dispatch_action("edit.select_all"),"select all vertices");
     check(c.polygon_selection().components.size()==8,"eight geometric corners across seams");
     check(c.dispatch_action("polygon.select_invert")&&c.polygon_selection().components.empty(),"invert all clears");

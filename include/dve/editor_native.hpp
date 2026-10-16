@@ -1563,6 +1563,8 @@ private:
     int lastPickX_{};
     int lastPickY_{};
     std::size_t pickCycleIndex_{};
+    // Where an Alt+click orbit started: released without moving, it opens the pick list (ART-013).
+    std::optional<std::pair<int, int>> orbitPress_;
     std::chrono::steady_clock::time_point lastPickTime_{};
     PlacementTarget placementMode_{PlacementTarget::NoTarget};
     std::optional<Float3> placementPoint_;

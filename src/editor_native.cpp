@@ -5058,6 +5058,9 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         remember_camera_position();
         activePointerCommand_ = navigation->actionId;
         dragButton_ = button;
+        orbitPress_.reset();
+        if (navigation->actionId == "viewport.orbit" && button == PointerButton::Primary && (modifiers & 4U) != 0U)
+            orbitPress_ = std::pair{x, y};
         return;
     }
     dragButton_ = button;
@@ -5386,6 +5389,26 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
         finish_voxel_stroke();
         brushResizing_ = false;
         if (brushStroking_) finish_brush_stroke(false);
+    }
+    if (dragButton_ == button && orbitPress_ && activePointerCommand_ == "viewport.orbit") {
+        // Alt+click without dragging (an orbit that never moved) opens the depth-sorted pick list
+        // of everything under the cursor, so it is reachable while Alt+drag orbits.
+        const int dx = x - orbitPress_->first, dy = y - orbitPress_->second;
+        const bool stationary = dx * dx + dy * dy <= 25;
+        orbitPress_.reset();
+        if (stationary && workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
+            selectionDomain_ == SelectionDomain::Objects && layout_.viewport.contains(x, y)) {
+            const auto rawHits = pick_editor_document_all(workspace_.document(),
+                make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
+                10000.0F, &viewportSettings_.isolatedObjects);
+            std::vector<EditorPickResult> targets;
+            std::set<EditorObjectId> seenTargets;
+            for (EditorPickResult hit : rawHits) {
+                hit.objectId = viewport_selection_target(hit.objectId);
+                if (seenTargets.insert(hit.objectId).second) targets.push_back(hit);
+            }
+            if (targets.size() > 1U) open_pick_list(x, y, targets);
+        }
     }
     if (dragButton_ == button) {
         dragButton_ = PointerButton::NoButton;

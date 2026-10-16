@@ -5245,7 +5245,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 
     const int completedClickDistance = (x - pointerDownX_) * (x - pointerDownX_) +
                                        (y - pointerDownY_) * (y - pointerDownY_);
-    if (!doubleClickConsumed_ && completedClickDistance <= 25) {
+    // A closed lasso ends where it started but is a drag, not a click.
+    if (!doubleClickConsumed_ && completedClickDistance <= 25 && lassoPath_.size() < 3U) {
         lastClickButton_ = button;
         lastClickX_ = x;
         lastClickY_ = y;

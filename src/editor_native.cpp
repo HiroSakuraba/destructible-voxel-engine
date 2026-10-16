@@ -2225,6 +2225,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("select.mask_locked", selectionMask_.locked);
     checked("select.mask_helpers", selectionMask_.helpers);
     checked("select.mask_prefabs", selectionMask_.prefabs);
+    checked("select.shape_box", selectionShape_ == SelectionShape::Box);
+    checked("select.shape_lasso", selectionShape_ == SelectionShape::Lasso);
+    checked("select.shape_paint", selectionShape_ == SelectionShape::Paint);
     checked("select.domain_objects", selectionDomain_ == SelectionDomain::Objects);
     checked("voxel.brush_shape_cube", voxelBrushShape_ == BrushShape::Cube);
     checked("voxel.brush_shape_sphere", voxelBrushShape_ == BrushShape::Sphere);
@@ -4214,11 +4217,14 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
                        std::string(voxelMoveAxis_ == 1 ? "X" : voxelMoveAxis_ == 2 ? "Y" : "Z") + " (release applies, Esc cancels)", false, 2.0F);
             break;
         }
+    } else if (paintSelecting_) {
+        paint_select_at(x, y);
     } else if (voxelBrushSelecting_) {
         voxel_brush_select_at(x, y);
     } else if (marquee_.active) {
         marquee_.currentX = x;
         marquee_.currentY = y;
+        if (!lassoPath_.empty()) extend_lasso(x, y);
     } else if (navigation_pointer_active()) {
         navigate_pointer(static_cast<float>(deltaX), static_cast<float>(deltaY));
     } else if (gizmoDragging_) {
@@ -5100,6 +5106,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
         update_hover(x, y);
         const bool selectLikeTool = activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                                     activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale;
+        if (activeTool_ == EditorToolId::Select && begin_shape_selection(x, y, modifiers)) return;
         if (selectionDomain_ == SelectionDomain::Polygons && selectLikeTool) {
             prune_polygon_selection();
             if (!polygonSelection_.components.empty() && activeTool_ != EditorToolId::Select && hit_test_gizmo_axis(x,y)) {
@@ -5255,7 +5262,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 
     const int completedClickDistance = (x - pointerDownX_) * (x - pointerDownX_) +
                                        (y - pointerDownY_) * (y - pointerDownY_);
-    if (!doubleClickConsumed_ && completedClickDistance <= 25) {
+    // A closed lasso ends where it started but is a drag, not a click.
+    if (!doubleClickConsumed_ && completedClickDistance <= 25 && lassoPath_.size() < 3U) {
         lastClickButton_ = button;
         lastClickX_ = x;
         lastClickY_ = y;
@@ -5328,6 +5336,9 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 
     if (button == PointerButton::Primary) {
         if (voxelBrushSelecting_) voxelBrushSelecting_ = false;
+        if (paintSelecting_) { paintSelecting_ = false; lastPaintDab_.reset(); }
+        if (marquee_.active && !lassoPath_.empty() && finish_lasso_selection(x, y)) marquee_ = {};
+        lassoPath_.clear();
         if (voxelMoveAxis_ != 0) {
             const auto offset = voxel_move_preview();
             voxelMoveAxis_ = 0;
@@ -6924,6 +6935,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
                    (voxelBrushShape_ == BrushShape::Sphere ? " (sphere)" : " (cube)"));
         return true;
     }
+    if (actionId.starts_with("select.shape_") || actionId.starts_with("select.paint_radius"))
+        return dispatch_selection_shape_action(actionId);
     if (actionId.starts_with("select.mask_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
         actionId == "edit.select_shrink" || actionId == "edit.select_connected")
         return dispatch_selection_filter_action(actionId);
@@ -6978,6 +6991,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "voxel.select_cells" || actionId == "voxel.select_connected") {
         set_selection_domain(SelectionDomain::Voxels); set_active_tool(EditorToolId::Select);
         voxelSelectionBrushEnabled_ = false;
+        if (selectionShape_ == SelectionShape::Paint) selectionShape_ = SelectionShape::Box;
         voxelClickSelection_ = actionId == "voxel.select_cells" ? VoxelClickSelection::Cell : VoxelClickSelection::ConnectedPiece;
         refresh_menu_state();
         set_status(voxelClickSelection_ == VoxelClickSelection::Cell ? "Click selects one voxel cell; box modifiers are unchanged"
@@ -6990,6 +7004,8 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_selection_domain(SelectionDomain::Voxels);
         set_active_tool(EditorToolId::Select);
         voxelSelectionBrushEnabled_ = enable;
+        if (enable) selectionShape_ = SelectionShape::Paint;
+        else if (selectionShape_ == SelectionShape::Paint) selectionShape_ = SelectionShape::Box;
         voxelBrushSelecting_ = false;
         marquee_ = {};
         refresh_menu_state();
@@ -13363,10 +13379,15 @@ void NativeEditorController::set_selection_domain(SelectionDomain domain) {
     if (selectionDomain_ == domain) return;
     cancel_polygon_preview();
     if (gizmoDragging_) finish_gizmo_drag(true);
-    if (domain == SelectionDomain::Polygons) { (void)set_polygon_mode(PolygonSelectionMode::Face); return; }
+    if (domain == SelectionDomain::Polygons) {
+        voxelSelectionBrushEnabled_ = false;
+        (void)set_polygon_mode(PolygonSelectionMode::Face);
+        return;
+    }
     selectionDomain_ = domain;
     voxelBrushSelecting_ = false;
-    voxelSelectionBrushEnabled_ = false;
+    // The voxel Selection Brush is the voxel domain's Paint shape: keep the two in step.
+    voxelSelectionBrushEnabled_ = domain == SelectionDomain::Voxels && selectionShape_ == SelectionShape::Paint;
     voxelMoveAxis_ = 0;
     marquee_ = {};
     if (domain == SelectionDomain::Voxels) {
@@ -13533,7 +13554,7 @@ void NativeEditorController::reset_voxel_selection_state() {
     voxelSelectionObject_ = 0;
     voxelSelectionRevision_ = 0;
     voxelBrushSelecting_ = false;
-    voxelSelectionBrushEnabled_ = false;
+    voxelSelectionBrushEnabled_ = selectionDomain_ == SelectionDomain::Voxels && selectionShape_ == SelectionShape::Paint;
     voxelRegionRotationPivot_.reset();
     voxelRegionRotationObject_ = 0;
     voxelRegionRotationSerial_ = 0;

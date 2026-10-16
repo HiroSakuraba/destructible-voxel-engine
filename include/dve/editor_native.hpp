@@ -235,6 +235,10 @@ enum class VoxelClickSelection : std::uint8_t { Cell, ConnectedPiece };
 // What viewport clicks, boxes, Select All, Invert and Select Similar may pick up (ART-015).
 // Masked-out objects are transparent to clicks: the click reaches whatever is behind them.
 // The hierarchy panel still selects anything, so masked objects stay reachable.
+// How a Select-tool drag picks things (ART-018): a box, a freehand lasso, or painting with a
+// round screen brush. Edit > Selection Shape; Shift+Q cycles.
+enum class SelectionShape : std::uint8_t { Box, Lasso, Paint };
+
 struct SelectionMask {
     bool locked{true};   // locked objects
     bool helpers{true};  // objects without geometry or children: cameras, lights, spawns, emitters
@@ -698,6 +702,13 @@ public:
     }
 
     [[nodiscard]] const TextEditState& text_edit() const noexcept { return textEdit_; }
+    [[nodiscard]] SelectionShape selection_shape() const noexcept { return selectionShape_; }
+    // The lasso being drawn (screen points), empty when none.
+    [[nodiscard]] const std::vector<std::pair<int, int>>& lasso_path() const noexcept { return lassoPath_; }
+    // Screen radius of the paint-selection brush in pixels (Ctrl+[ / Ctrl+] change it).
+    [[nodiscard]] int selection_paint_radius() const noexcept { return selectionPaintRadius_; }
+    [[nodiscard]] bool paint_selecting() const noexcept { return paintSelecting_; }
+    [[nodiscard]] std::pair<int, int> pointer_position() const noexcept { return {lastPointerX_, lastPointerY_}; }
     [[nodiscard]] const ContextMenuState& context_menu() const noexcept { return contextMenu_; }
     [[nodiscard]] const SelectionMask& selection_mask() const noexcept { return selectionMask_; }
     // Whether the selection mask lets viewport selection take this object (or group).
@@ -1592,6 +1603,21 @@ private:
     // Of `candidates`, the selection targets with a visible (unoccluded) part inside `rect`.
     [[nodiscard]] std::set<EditorObjectId> targets_seen_in_rect(UiRect rect, const std::set<EditorObjectId>& candidates) const;
     bool dispatch_selection_filter_action(std::string_view action);
+    SelectionShape selectionShape_{SelectionShape::Box};
+    std::vector<std::pair<int, int>> lassoPath_;
+    int selectionPaintRadius_{30};
+    bool paintSelecting_{};
+    SelectionOperation paintOperation_{SelectionOperation::Add};
+    std::optional<std::pair<int, int>> lastPaintDab_;
+    bool dispatch_selection_shape_action(std::string_view action);
+    // Select tool pointer-down hook: starts a paint stroke (true: consumed) or records the lasso
+    // start alongside the ordinary marquee (false).
+    bool begin_shape_selection(int x, int y, std::uint32_t modifiers);
+    void extend_lasso(int x, int y);
+    // Pointer-up for a lasso drag: selects inside the path in the active domain (true: handled).
+    bool finish_lasso_selection(int x, int y);
+    void paint_select_at(int x, int y);
+    void paint_select_dab(int x, int y);
     std::chrono::steady_clock::time_point lastPickTime_{};
     PlacementTarget placementMode_{PlacementTarget::NoTarget};
     std::optional<Float3> placementPoint_;

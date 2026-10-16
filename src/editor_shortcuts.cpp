@@ -715,6 +715,12 @@ void EditorShortcutRegistry::install_builtin_commands() {
     add("select.mask_helpers", "Selectable: Helpers", "Edit", {ShortcutContext::Viewport});
     add("select.mask_prefabs", "Selectable: Prefab Instances", "Edit", {ShortcutContext::Viewport});
     add("select.mask_all", "Make Everything Selectable", "Edit", {ShortcutContext::Viewport});
+    add("select.shape_box", "Selection Shape: Box", "Edit", {ShortcutContext::Viewport});
+    add("select.shape_lasso", "Selection Shape: Lasso", "Edit", {ShortcutContext::Viewport});
+    add("select.shape_paint", "Selection Shape: Paint", "Edit", {ShortcutContext::Viewport});
+    add("select.shape_cycle", "Next Selection Shape", "Edit", {ShortcutContext::Viewport});
+    add("select.paint_radius_increase", "Larger Paint Selection Brush", "Edit", {ShortcutContext::Viewport});
+    add("select.paint_radius_decrease", "Smaller Paint Selection Brush", "Edit", {ShortcutContext::Viewport});
     add("view.game_view", "Toggle Game View", "Viewport", {ShortcutContext::Viewport});
     add("view.realtime", "Toggle Realtime Viewport", "Viewport", {ShortcutContext::Viewport});
     add("view.immersive", "Toggle Immersive Viewport", "Viewport", {ShortcutContext::Viewport});
@@ -940,6 +946,9 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "edit.select_invert", ShortcutContext::Global, keyboard_shortcut("i", true, true));
     bind(dve, "edit.select_grow", ShortcutContext::Viewport, keyboard_shortcut("."));
     bind(dve, "edit.select_shrink", ShortcutContext::Viewport, keyboard_shortcut(","));
+    bind(dve, "select.shape_cycle", ShortcutContext::Viewport, keyboard_shortcut("q", false, true));
+    bind(dve, "select.paint_radius_increase", ShortcutContext::Viewport, keyboard_shortcut("]", true));
+    bind(dve, "select.paint_radius_decrease", ShortcutContext::Viewport, keyboard_shortcut("[", true));
     bind(dve, "transform.space", ShortcutContext::Viewport, keyboard_shortcut("space"));
     bind(dve, "view.frame", ShortcutContext::Viewport, keyboard_shortcut("f"),
          mouse_shortcut("mouse1", false, false, false, ShortcutActivation::DoubleClick));

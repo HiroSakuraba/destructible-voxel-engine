@@ -6910,11 +6910,11 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
                    (voxelBrushShape_ == BrushShape::Sphere ? " (sphere)" : " (cube)"));
         return true;
     }
-    if (actionId == "select.matching" || actionId.starts_with("select.similar_")) return dispatch_select_by_property_action(actionId);
     if (actionId.starts_with("select.mask_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
         actionId == "edit.select_shrink" || actionId == "edit.select_connected")
         return dispatch_selection_filter_action(actionId);
     if (actionId == "voxel.fill") return arm_flood_fill();
+    if (actionId == "select.matching" || actionId.starts_with("select.similar_")) return dispatch_select_by_property_action(actionId);
     if (actionId == "select.domain_objects") { set_selection_domain(SelectionDomain::Objects); return true; }
     if (actionId == "select.domain_voxels") { set_selection_domain(SelectionDomain::Voxels); return true; }
     if (actionId == "select.domain_toggle") {

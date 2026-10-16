@@ -131,6 +131,8 @@ ComponentTypeRegistry ComponentTypeRegistry::make_default() {
     std::string ignored;
     (void)registry.register_type({std::string(kUvAuthoringComponent),"UV Seams and Pins",false,
         {{"state",std::string{},true,false,"UV authoring state"}}}, &ignored);
+    (void)registry.register_type({std::string(kLiveMirrorComponent),"Live Mirror (editor preview)",false,
+        {{"axis",std::int64_t{0},true,false,"Local mirror axis: 0 X, 1 Y, 2 Z"}}}, &ignored);
     (void)registry.register_type({"dve.collision_hull","Authored Collision Hull",false,
         {{"points",std::string{},true,false,"Hull control points"}}}, &ignored);
     // Exact CAD source of a polygon object (editor_exact_cad.hpp): authoring-only.

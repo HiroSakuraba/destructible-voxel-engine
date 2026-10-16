@@ -1929,6 +1929,23 @@ void NativeEditorController::refresh_menu_state() noexcept {
     }
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
+    {
+        // Half-model mirroring: the primary polygon mesh (or the mesh being edited in the polygon domain).
+        const bool components = selectionDomain_ == SelectionDomain::Polygons;
+        const auto meshId = components ? std::optional(polygonSelection_.object) : workspace_.selected_object();
+        const EditorObject* mesh = meshId ? workspace_.document().find_object(*meshId) : nullptr;
+        const bool meshReady = mesh && mesh->polygon && !playActive;
+        const bool facesReady = meshReady && components && !polygonSelection_.components.empty();
+        const auto liveAxis = meshId ? live_mirror_axis(*meshId) : std::nullopt;
+        for (const char axis : {'x', 'y', 'z'}) {
+            const int index = axis - 'x';
+            enabled(std::string("mirror.mesh_") + axis, meshReady, "Select a polygon mesh or subdivision cage.");
+            enabled(std::string("mirror.faces_") + axis, facesReady, "Select faces of a mesh in the polygon selection mode.");
+            enabled(std::string("mirror.live_") + axis, meshReady, "Select a polygon mesh or subdivision cage.");
+            checked(std::string("mirror.live_") + axis, liveAxis == index);
+        }
+        enabled("mirror.apply_live", meshReady && liveAxis.has_value(), "The selected mesh has no live mirror.");
+    }
     for (std::string_view id : {"edit.mirror_x", "edit.mirror_y", "edit.mirror_z", "edit.mirror_copy_x", "edit.mirror_copy_y", "edit.mirror_copy_z"})
         enabled(id, hasSelection && !playActive && selectionDomain_ == SelectionDomain::Objects,
                 playActive ? "Stop Play first." : selectionDomain_ != SelectionDomain::Objects ? "Return to object selection first."
@@ -6925,6 +6942,13 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId.starts_with("subdiv.") || actionId=="create.subdivision")
         return dispatch_subdivision_action(actionId=="create.subdivision" ? "subdiv.create_cube" : actionId);
+    if (actionId.starts_with("mirror.")) {
+        const int axis = actionId.back() == 'x' ? 0 : actionId.back() == 'y' ? 1 : 2;
+        if (actionId == "mirror.apply_live") return apply_live_mirror();
+        if (actionId.starts_with("mirror.mesh_")) return mirror_mesh(axis, false);
+        if (actionId.starts_with("mirror.faces_")) return mirror_mesh(axis, true);
+        if (actionId.starts_with("mirror.live_")) return toggle_live_mirror(axis);
+    }
     if (actionId.starts_with("mesh.")) return dispatch_mesh_authoring_action(actionId);
     if (actionId.starts_with("polygon.") && actionId != "polygon.import" && actionId != "polygon.import_exact" &&
         actionId != "polygon.create_plane" &&
@@ -10065,6 +10089,33 @@ std::vector<EditorPolygonDrawTriangle> NativeEditorController::polygon_draw_item
         item.selected = item.object == polygonSelection_.object && polygonSelection_.mode == PolygonSelectionMode::Face &&
             polygonSelection_.components.contains(item.face);
         if (item.selected) item.color={1.0F,.55F,.15F,1};
+    }
+    {
+        // Live mirror: the other half of each mirrored mesh, drawn from the authored half every frame
+        // (preview only; Polygon > Apply Live Mirror makes it real geometry with a welded seam).
+        EditorDocument preview("Live mirror preview");
+        for (const auto& [id, object] : workspace_.document().objects()) {
+            if (!object.polygon || !object.flags.visible || is_isolated_out(id) || hidden.contains(id)) continue;
+            const auto axis = live_mirror_axis(id);
+            if (!axis) continue;
+            EditorObject half(id, object.name);
+            half.polygon = *object.polygon;
+            half.subdivision = object.subdivision;
+            if (!mirror_polygon_mesh(*half.polygon, *axis, half.subdivision ? &*half.subdivision : nullptr, nullptr)) continue;
+            half.transform = workspace_.document().world_transform(id).value_or(object.transform);
+            half.voxelScale = object.voxelScale;
+            preview.add_object(std::move(half));
+        }
+        if (!preview.objects().empty()) {
+            auto mirrorItems = build_editor_polygon_draw_list(preview, camera_, layout_.viewport, {}, {}, 100000);
+            for (auto& item : mirrorItems) {
+                item.color = {item.color.x * 0.55F + 0.25F, item.color.y * 0.55F + 0.3F, item.color.z * 0.55F + 0.4F, item.color.w};
+                item.selected = false;
+                item.face = std::numeric_limits<std::uint32_t>::max();  // not pickable as a real face
+            }
+            items.insert(items.end(), mirrorItems.begin(), mirrorItems.end());
+            std::stable_sort(items.begin(), items.end(), [](const auto& a, const auto& b) { return a.depth > b.depth; });
+        }
     }
     if (polygonSlicePreview_ && polygonSliceBack_) {
         const auto* source=workspace_.document().find_object(polygonPreviewSelection_.object);

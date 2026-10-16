@@ -50,6 +50,7 @@
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
+#include "dve/editor_selection_query.hpp"
 #include "dve/editor_number_field.hpp"
 #include "dve/editor_duplicate_special.hpp"
 #include "dve/editor_text3d.hpp"
@@ -713,6 +714,16 @@ public:
     [[nodiscard]] const SelectionMask& selection_mask() const noexcept { return selectionMask_; }
     // Whether the selection mask lets viewport selection take this object (or group).
     [[nodiscard]] bool object_selectable(EditorObjectId id) const;
+    // Geometry-free helpers (cameras, lights, spawns, emitters) have no mesh to hit, so the viewport
+    // draws a small marker at each one's origin and clicks / boxes pick that marker instead.
+    struct HelperMarker {
+        EditorObjectId id{};
+        float x{};
+        float y{};
+        float distance{};
+        Float3 world{};
+    };
+    [[nodiscard]] std::vector<HelperMarker> helper_markers() const;
     // Short text drawn under a selection box: window/crossing, visible-only/X-ray, active masks.
     [[nodiscard]] std::string marquee_label() const;
     [[nodiscard]] const MarqueeState& marquee() const noexcept { return marquee_; }
@@ -722,6 +733,11 @@ public:
     [[nodiscard]] const HierarchyDragState& hierarchy_drag() const noexcept { return hierarchyDrag_; }
     [[nodiscard]] BottomPanelTab bottom_tab() const noexcept { return bottomTab_; }
     [[nodiscard]] std::string_view hierarchy_filter() const noexcept { return hierarchyFilter_; }
+    // Objects matching a hierarchy-filter text: plain words match names (case-insensitive);
+    // key:value terms filter by property (see editor_selection_query.hpp). An invalid query
+    // matches nothing and reports why.
+    [[nodiscard]] std::vector<EditorObjectId> objects_matching_filter(std::string_view text, std::string* error = nullptr) const;
+    void set_hierarchy_filter(std::string text);
     // Mutable access first finishes a background asset scan (see start_asset_scan), so callers
     // that edit or inspect the database after a refresh see its result. Const access returns
     // the current records without waiting; they are replaced when a scan completes.
@@ -1686,6 +1702,7 @@ private:
     HierarchyDragState hierarchyDrag_;
     BottomPanelTab bottomTab_{BottomPanelTab::Console};
     std::string hierarchyFilter_;
+    bool dispatch_select_by_property_action(std::string_view action);
     audio::AudioMixer audioMixer_{};
     std::uint64_t appliedSettingsRevision_{};
     bool systemThemeLight_{};

@@ -707,6 +707,12 @@ void EditorShortcutRegistry::install_builtin_commands() {
     add("select.walk_down", "Pick Walk Down (first child / shrink)", "Edit", {ShortcutContext::Viewport});
     add("select.walk_left", "Pick Walk Left (previous sibling)", "Edit", {ShortcutContext::Viewport});
     add("select.walk_right", "Pick Walk Right (next sibling)", "Edit", {ShortcutContext::Viewport});
+    add("select.matching", "Select Matching Filter", "Edit", {ShortcutContext::Global});
+    add("select.similar_type", "Select Similar: Same Type", "Edit", {ShortcutContext::Viewport});
+    add("select.similar_material", "Select Similar: Same Material", "Edit", {ShortcutContext::Viewport});
+    add("select.similar_tag", "Select Similar: Same Tag", "Edit", {ShortcutContext::Viewport});
+    add("select.similar_layer", "Select Similar: Same Layer", "Edit", {ShortcutContext::Viewport});
+    add("select.similar_prefab", "Select Similar: Same Prefab", "Edit", {ShortcutContext::Viewport});
     add("edit.select_invert", "Invert Selection", "Edit", {ShortcutContext::Global});
     add("edit.select_grow", "Grow Selection", "Edit", {ShortcutContext::Viewport});
     add("edit.select_shrink", "Shrink Selection", "Edit", {ShortcutContext::Viewport});

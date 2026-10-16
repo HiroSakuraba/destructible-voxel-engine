@@ -5287,6 +5287,17 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     for (const ChromeTooltip& tip : tooltips)
         draw_chrome_tooltip(painter, tip, {0, 0, width, height}, rgb(16,22,31), border, text, muted);
 
+    // Geometry-free helpers: a small diamond at each origin (clicks and boxes pick it).
+    if (controller.selection_mask().helpers)
+        for (const auto& marker : controller.helper_markers()) {
+            const int hx = static_cast<int>(marker.x), hy = static_cast<int>(marker.y);
+            const EditorColor helperColour = controller.workspace().is_selected(marker.id) ? accent : muted;
+            painter.line(hx - 5, hy, hx, hy - 5, helperColour, 1);
+            painter.line(hx, hy - 5, hx + 5, hy, helperColour, 1);
+            painter.line(hx + 5, hy, hx, hy + 5, helperColour, 1);
+            painter.line(hx, hy + 5, hx - 5, hy, helperColour, 1);
+        }
+
     if (controller.marquee().active) {
         const MarqueeState& marquee = controller.marquee();
         const int left = std::min(marquee.startX, marquee.currentX);

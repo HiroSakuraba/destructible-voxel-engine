@@ -3698,6 +3698,9 @@ void NativeEditorController::text_input(std::string_view text) {
     if (textEdit_.kind == TextEditKind::HierarchyFilter) {
         hierarchyFilter_ = textEdit_.buffer;
         hierarchyScroll_ = 0;
+        if (std::string error; !hierarchyFilter_.ends_with(':') && looks_like_selection_query(hierarchyFilter_) &&
+                               !parse_selection_query(hierarchyFilter_, &error))
+            set_status(error, true);
         recompute_layout();
     } else if (textEdit_.kind == TextEditKind::AssetSearch) {
         assetBrowserState_.query.text = textEdit_.buffer;
@@ -5353,7 +5356,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
             if (distanceSquared <= 25) {
                 // Pieces of a closed group answer for the group; masked-out objects are skipped so
                 // the click reaches whatever is behind them.
-                const auto clickTargets = marquee_.clickObject ? selectable_targets_at(marquee_.startX, marquee_.startY)
+                const auto clickTargets = marquee_.clickObject || (selectionMask_.helpers && selectionDomain_ == SelectionDomain::Objects) ? selectable_targets_at(marquee_.startX, marquee_.startY)
                                                                : std::vector<EditorPickResult>{};
                 if (!clickTargets.empty()) {
                     if ((modifiers & 7U) == 0U || (modifiers & 4U) != 0U) {
@@ -5403,6 +5406,11 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 std::erase_if(hits, [&](EditorObjectId id) { return !object_selectable(id); });
                 // Front-only unless X-Ray Selection: keep what actually shows inside the box.
                 if (!viewportSettings_.xraySelection && !hits.empty()) hits = targets_seen_in_rect(rectangle, hits);
+                // Helpers are drawn as markers over the scene, so a box takes any marker inside it.
+                if (selectionMask_.helpers)
+                    for (const HelperMarker& marker : helper_markers())
+                        if (rectangle.contains(static_cast<int>(marker.x), static_cast<int>(marker.y)) && object_selectable(marker.id))
+                            hits.insert(marker.id);
             }
             SelectionOperation operation = marquee_.operation;
             // Shift+click on something already selected takes it out again.
@@ -6941,6 +6949,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         actionId == "edit.select_shrink" || actionId == "edit.select_connected")
         return dispatch_selection_filter_action(actionId);
     if (actionId == "voxel.fill") return arm_flood_fill();
+    if (actionId == "select.matching" || actionId.starts_with("select.similar_")) return dispatch_select_by_property_action(actionId);
     if (actionId == "select.domain_objects") { set_selection_domain(SelectionDomain::Objects); return true; }
     if (actionId == "select.domain_voxels") { set_selection_domain(SelectionDomain::Voxels); return true; }
     if (actionId == "select.domain_toggle") {
@@ -10213,11 +10222,8 @@ std::vector<EditorObjectId> NativeEditorController::hierarchy_order() const {
     const auto order = document.hierarchy_preorder();
     std::set<EditorObjectId> included;
     if (!hierarchyFilter_.empty()) {
-        const std::string needle = lowercase(hierarchyFilter_);
-        for (const auto id : order) {
-            const auto* object = document.find_object(id);
-            if (object && lowercase(object->name).find(needle) != std::string::npos) included.insert(id);
-        }
+        // Plain text matches names; key:value terms (type:mesh tag:rock ...) filter by property.
+        for (const auto id : objects_matching_filter(hierarchyFilter_)) included.insert(id);
         // Children precede their parents in this pass, so each ancestor is visited once.
         // Filtering temporarily exposes matching paths without modifying collapsed state.
         for (auto it = order.rbegin(); it != order.rend(); ++it) {

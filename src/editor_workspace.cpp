@@ -623,6 +623,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"edit.select_grow","Edit","Grow Selection",""},
         {"edit.select_shrink","Edit","Shrink Selection",""},
         {"edit.select_connected","Edit","Select Connected",""},
+        {"select.matching","Edit","Select Matching Filter",""},
+        {"select.similar_type","Edit","Select Similar: Same Type",""},
+        {"select.similar_material","Edit","Select Similar: Same Material",""},
+        {"select.similar_tag","Edit","Select Similar: Same Tag",""},
+        {"select.similar_layer","Edit","Select Similar: Same Layer",""},
+        {"select.similar_prefab","Edit","Select Similar: Same Prefab",""},
         {"select.mask_locked","Edit","Selectable: Locked Objects",""},
         {"select.mask_helpers","Edit","Selectable: Helpers (cameras, lights, emitters)",""},
         {"select.mask_prefabs","Edit","Selectable: Prefab Instances",""},
@@ -962,6 +968,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
     configure("select.domain_voxels", "Selection Domain", 31, true, "select.domain");
     configure("select.domain_toggle", "Selection Domain", 32);
+    for (std::string_view id : {"select.matching", "select.similar_type", "select.similar_material", "select.similar_tag",
+                                "select.similar_layer", "select.similar_prefab"})
+        configure(id, "Select By", 38);
     for (std::string_view id : {"edit.select_invert", "edit.select_grow", "edit.select_shrink", "edit.select_connected"})
         configure(id, "Select", 33);
     for (std::string_view id : {"select.mask_locked", "select.mask_helpers", "select.mask_prefabs"}) configure(id, "Selection Mask", 34, true);
@@ -1226,6 +1235,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         describe(std::string("edit.mirror_") + axis, "Mirror the selection in place across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect"});
     }
+    describe("select.matching", "Select every object the hierarchy filter matches: a name, or terms like type:mesh tag:rock layer:2 material:stone locked:no (-tag:x excludes).", {"query", "filter", "search", "property"});
+    describe("select.similar_type", "Add every visible selectable object of the same kind (voxels, mesh, subdivision, text, helper, group).", {"similar", "same", "kind", "type"});
+    describe("select.similar_material", "Add every visible selectable object that uses one of the selection's materials.", {"similar", "same", "material"});
+    describe("select.similar_tag", "Add every visible selectable object sharing a tag with the selection.", {"similar", "same", "tag"});
+    describe("select.similar_layer", "Add every visible selectable object on the selection's layers.", {"similar", "same", "layer"});
+    describe("select.similar_prefab", "Add every visible selectable instance of the selection's prefabs.", {"similar", "same", "prefab", "instance"});
     describe("edit.select_invert", "Swap selected and unselected in the active domain: objects, voxel cells or mesh components.", {"inverse", "invert", "deselect"});
     describe("edit.select_grow", "Grow the selection in the active domain: neighbouring cells or components; for objects, add their children.", {"expand", "grow", "more"});
     describe("edit.select_shrink", "Shrink the selection in the active domain: drop the outer ring; for objects, drop children whose parent is selected.", {"contract", "shrink", "less"});

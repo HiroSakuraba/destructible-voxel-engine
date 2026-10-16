@@ -619,6 +619,14 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"select.domain_objects","Edit","Select Objects",""},
         {"select.domain_voxels","Edit","Select Voxels",""},
         {"select.domain_toggle","Edit","Toggle Objects / Voxels",""},
+        {"edit.select_invert","Edit","Invert Selection",""},
+        {"edit.select_grow","Edit","Grow Selection",""},
+        {"edit.select_shrink","Edit","Shrink Selection",""},
+        {"edit.select_connected","Edit","Select Connected",""},
+        {"select.mask_locked","Edit","Selectable: Locked Objects",""},
+        {"select.mask_helpers","Edit","Selectable: Helpers (cameras, lights, emitters)",""},
+        {"select.mask_prefabs","Edit","Selectable: Prefab Instances",""},
+        {"select.mask_all","Edit","Make Everything Selectable",""},
         {"voxel.select_all","Voxel","Select All Voxels",""},
         {"voxel.select_none","Voxel","Deselect Voxels",""},
         {"voxel.select_grow","Voxel","Grow Voxel Selection",""},
@@ -948,6 +956,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
     configure("select.domain_voxels", "Selection Domain", 31, true, "select.domain");
     configure("select.domain_toggle", "Selection Domain", 32);
+    for (std::string_view id : {"edit.select_invert", "edit.select_grow", "edit.select_shrink", "edit.select_connected"})
+        configure(id, "Select", 33);
+    for (std::string_view id : {"select.mask_locked", "select.mask_helpers", "select.mask_prefabs"}) configure(id, "Selection Mask", 34, true);
+    configure("select.mask_all", "Selection Mask", 35);
     for (std::string_view id : {"edit.open_group", "edit.close_group", "edit.close_all_groups"})
         configure(id, "Groups", 26);
     configure("edit.edit_pivot", "Groups", 27, true);
@@ -1204,6 +1216,14 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         describe(std::string("edit.mirror_") + axis, "Mirror the selection in place across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect"});
     }
+    describe("edit.select_invert", "Swap selected and unselected in the active domain: objects, voxel cells or mesh components.", {"inverse", "invert", "deselect"});
+    describe("edit.select_grow", "Grow the selection in the active domain: neighbouring cells or components; for objects, add their children.", {"expand", "grow", "more"});
+    describe("edit.select_shrink", "Shrink the selection in the active domain: drop the outer ring; for objects, drop children whose parent is selected.", {"contract", "shrink", "less"});
+    describe("edit.select_connected", "Select everything connected: the voxel pieces or mesh shells touched, or the whole hierarchy of each object.", {"island", "shell", "piece", "hierarchy"});
+    describe("select.mask_locked", "Let viewport clicks and boxes pick up locked objects. Off: they are skipped (the hierarchy still selects them).", {"mask", "filter", "locked"});
+    describe("select.mask_helpers", "Let viewport clicks and boxes pick up helpers: objects without geometry such as cameras, lights and emitters.", {"mask", "filter", "helper", "camera", "light"});
+    describe("select.mask_prefabs", "Let viewport clicks and boxes pick up prefab instances.", {"mask", "filter", "prefab"});
+    describe("select.mask_all", "Turn every selection mask back on.", {"mask", "filter", "reset"});
     describe("subdiv.select_loop","Follow selected cage edges through regular quad vertices; stops at boundaries, poles and triangles.",{"subdivision","edge","loop"});
     describe("subdiv.select_ring","Select opposite edges across saved control quads; stops at boundaries and triangles.",{"subdivision","edge","ring"});
     describe("polygon.select_loop","Select loops on an authored subdivision control cage; convert an ordinary polygon mesh to subdivision first.",{"cage","edge","loop"});

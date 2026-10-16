@@ -2222,6 +2222,9 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("view.bounds", viewportSettings_.showObjectBounds);
     checked("view.xray", viewportSettings_.xraySelection);
     checked("view.follow_selection", followSelection_);
+    checked("select.mask_locked", selectionMask_.locked);
+    checked("select.mask_helpers", selectionMask_.helpers);
+    checked("select.mask_prefabs", selectionMask_.prefabs);
     checked("select.domain_objects", selectionDomain_ == SelectionDomain::Objects);
     checked("voxel.brush_shape_cube", voxelBrushShape_ == BrushShape::Cube);
     checked("voxel.brush_shape_sphere", voxelBrushShape_ == BrushShape::Sphere);
@@ -5337,20 +5340,13 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
             const int distanceSquared = (x - marquee_.startX) * (x - marquee_.startX) + (y - marquee_.startY) * (y - marquee_.startY);
             std::set<EditorObjectId> hits;
             if (distanceSquared <= 25) {
-                if (marquee_.clickObject) {
+                // Pieces of a closed group answer for the group; masked-out objects are skipped so
+                // the click reaches whatever is behind them.
+                const auto clickTargets = marquee_.clickObject ? selectable_targets_at(marquee_.startX, marquee_.startY)
+                                                               : std::vector<EditorPickResult>{};
+                if (!clickTargets.empty()) {
                     if ((modifiers & 7U) == 0U || (modifiers & 4U) != 0U) {
-                        const auto rawHits = pick_editor_document_all(workspace_.document(),
-                            make_viewport_ray(camera_, layout_.viewport,
-                                static_cast<float>(marquee_.startX), static_cast<float>(marquee_.startY)),
-                            10000.0F, &viewportSettings_.isolatedObjects);
-                        // Pieces of a closed group answer for the group: one entry per target.
-                        std::vector<EditorPickResult> targets;
-                        std::set<EditorObjectId> seenTargets;
-                        for (EditorPickResult hit : rawHits) {
-                            hit.objectId = viewport_selection_target(hit.objectId);
-                            if (seenTargets.insert(hit.objectId).second) targets.push_back(hit);
-                        }
-                        const auto& depthHits = targets;
+                        const auto& depthHits = clickTargets;
                         if ((modifiers & 4U) != 0U && (modifiers & 3U) == 0U && depthHits.size() > 1U) {
                             open_pick_list(x, y, depthHits);
                             marquee_ = {};
@@ -5366,8 +5362,8 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                             lastPickTime_ = now;
                             lastPickX_ = x; lastPickY_ = y;
                             hits.insert(depthHits[pickCycleIndex_].objectId);
-                        } else hits.insert(viewport_selection_target(*marquee_.clickObject));
-                    } else hits.insert(viewport_selection_target(*marquee_.clickObject));
+                        } else hits.insert(depthHits.front().objectId);
+                    } else hits.insert(clickTargets.front().objectId);
                 }
             } else {
                 const int left = std::min(marquee_.startX, x);
@@ -5393,6 +5389,9 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 }
                 for (const auto& [group, counts] : groupPieces)
                     if (contain ? counts.first == counts.second && counts.second > 0 : counts.first > 0) hits.insert(group);
+                std::erase_if(hits, [&](EditorObjectId id) { return !object_selectable(id); });
+                // Front-only unless X-Ray Selection: keep what actually shows inside the box.
+                if (!viewportSettings_.xraySelection && !hits.empty()) hits = targets_seen_in_rect(rectangle, hits);
             }
             SelectionOperation operation = marquee_.operation;
             // Shift+click on something already selected takes it out again.
@@ -5415,15 +5414,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
         orbitPress_.reset();
         if (stationary && workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
             selectionDomain_ == SelectionDomain::Objects && layout_.viewport.contains(x, y)) {
-            const auto rawHits = pick_editor_document_all(workspace_.document(),
-                make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
-                10000.0F, &viewportSettings_.isolatedObjects);
-            std::vector<EditorPickResult> targets;
-            std::set<EditorObjectId> seenTargets;
-            for (EditorPickResult hit : rawHits) {
-                hit.objectId = viewport_selection_target(hit.objectId);
-                if (seenTargets.insert(hit.objectId).second) targets.push_back(hit);
-            }
+            const auto targets = selectable_targets_at(x, y);
             if (targets.size() > 1U) open_pick_list(x, y, targets);
         }
     }
@@ -6933,6 +6924,9 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
                    (voxelBrushShape_ == BrushShape::Sphere ? " (sphere)" : " (cube)"));
         return true;
     }
+    if (actionId.starts_with("select.mask_") || actionId == "edit.select_invert" || actionId == "edit.select_grow" ||
+        actionId == "edit.select_shrink" || actionId == "edit.select_connected")
+        return dispatch_selection_filter_action(actionId);
     if (actionId == "voxel.fill") return arm_flood_fill();
     if (actionId == "select.domain_objects") { set_selection_domain(SelectionDomain::Objects); return true; }
     if (actionId == "select.domain_voxels") { set_selection_domain(SelectionDomain::Voxels); return true; }

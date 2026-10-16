@@ -707,6 +707,14 @@ void EditorShortcutRegistry::install_builtin_commands() {
     add("select.walk_down", "Pick Walk Down (first child / shrink)", "Edit", {ShortcutContext::Viewport});
     add("select.walk_left", "Pick Walk Left (previous sibling)", "Edit", {ShortcutContext::Viewport});
     add("select.walk_right", "Pick Walk Right (next sibling)", "Edit", {ShortcutContext::Viewport});
+    add("edit.select_invert", "Invert Selection", "Edit", {ShortcutContext::Global});
+    add("edit.select_grow", "Grow Selection", "Edit", {ShortcutContext::Viewport});
+    add("edit.select_shrink", "Shrink Selection", "Edit", {ShortcutContext::Viewport});
+    add("edit.select_connected", "Select Connected", "Edit", {ShortcutContext::Viewport});
+    add("select.mask_locked", "Selectable: Locked Objects", "Edit", {ShortcutContext::Viewport});
+    add("select.mask_helpers", "Selectable: Helpers", "Edit", {ShortcutContext::Viewport});
+    add("select.mask_prefabs", "Selectable: Prefab Instances", "Edit", {ShortcutContext::Viewport});
+    add("select.mask_all", "Make Everything Selectable", "Edit", {ShortcutContext::Viewport});
     add("view.game_view", "Toggle Game View", "Viewport", {ShortcutContext::Viewport});
     add("view.realtime", "Toggle Realtime Viewport", "Viewport", {ShortcutContext::Viewport});
     add("view.immersive", "Toggle Immersive Viewport", "Viewport", {ShortcutContext::Viewport});
@@ -929,6 +937,9 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "select.walk_down", ShortcutContext::Viewport, keyboard_shortcut("down"));
     bind(dve, "select.walk_left", ShortcutContext::Viewport, keyboard_shortcut("left"));
     bind(dve, "select.walk_right", ShortcutContext::Viewport, keyboard_shortcut("right"));
+    bind(dve, "edit.select_invert", ShortcutContext::Global, keyboard_shortcut("i", true, true));
+    bind(dve, "edit.select_grow", ShortcutContext::Viewport, keyboard_shortcut("."));
+    bind(dve, "edit.select_shrink", ShortcutContext::Viewport, keyboard_shortcut(","));
     bind(dve, "transform.space", ShortcutContext::Viewport, keyboard_shortcut("space"));
     bind(dve, "view.frame", ShortcutContext::Viewport, keyboard_shortcut("f"),
          mouse_shortcut("mouse1", false, false, false, ShortcutActivation::DoubleClick));

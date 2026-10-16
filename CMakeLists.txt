@@ -842,6 +842,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_subdivision.cpp
         src/editor_native_polygon.cpp
         src/editor_native_mesh_authoring.cpp
+        src/editor_native_selection_filters.cpp
         src/editor_mesh_boolean.cpp
         src/editor_edge_bevel.cpp
         src/editor_exact_cad.cpp
@@ -2690,6 +2691,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_slice_interaction_tests tests/test_editor_slice_interaction.cpp)
         target_link_libraries(dve_editor_slice_interaction_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_slice_interaction_tests COMMAND dve_editor_slice_interaction_tests)
+        add_executable(dve_editor_selection_filters_tests tests/test_editor_selection_filters.cpp)
+        target_link_libraries(dve_editor_selection_filters_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_selection_filters_tests COMMAND dve_editor_selection_filters_tests)
         add_executable(dve_editor_brush_preview_tests tests/test_editor_brush_preview.cpp)
         target_link_libraries(dve_editor_brush_preview_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_brush_preview_tests COMMAND dve_editor_brush_preview_tests)

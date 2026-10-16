@@ -123,11 +123,25 @@ EditorDocument clone_editor_document(const EditorDocument& source) {
     copy.path_ = source.path_;
     copy.revision_ = source.revision_;
     copy.nextPrefabInstanceId_ = source.nextPrefabInstanceId_;
+    copy.selectionSets_ = source.selectionSets_;
+    copy.selectionLineage_ = source.selectionLineage_;
     copy.dirty_ = source.dirty_;
     return copy;
 }
 
 EditorDocument::EditorDocument(std::string name) : name_(std::move(name)) {}
+
+void EditorDocument::record_selection_lineage(EditorObjectId mesh, const std::map<ModelingId, std::set<ModelingId>>& descendants) {
+    auto& lineage = selectionLineage_[mesh];
+    for (const auto& [id, next] : descendants) {
+        if (next.size() == 1U && *next.begin() == id) continue;
+        // Retirement is recorded explicitly (ID 0 is never allocated): inserting nothing would
+        // leave successors from an undone, abandoned branch looking like the whole story.
+        if (next.empty()) lineage[id].insert(kRetiredSelectionLineageId);
+        else lineage[id].insert(next.begin(), next.end());
+    }
+    if (lineage.empty()) selectionLineage_.erase(mesh);
+}
 void EditorDocument::set_name(std::string name) { name_ = std::move(name); dirty_ = true; }
 EditorObjectId EditorDocument::allocate_object_id() noexcept {
     while (objects_.contains(nextObjectId_) || nextObjectId_ == 0) ++nextObjectId_;
@@ -426,7 +440,8 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             [](const auto& entry) {return entry.second.subdivision.has_value();});
         const bool hasModeling=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
         const bool hasRetiredModeling=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return !entry.second.modelingTopology&&entry.second.modelingNextId>1;});
-        output << "DVE_EDITOR_SCENE " << (hasRetiredModeling ? 12 : hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
+        const bool hasSelectionSets = !selectionSets_.empty() || !selectionLineage_.empty();
+        output << "DVE_EDITOR_SCENE " << (hasSelectionSets ? 13 : hasRetiredModeling ? 12 : hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -501,7 +516,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             }
         }
         output << "next_prefab_instance " << nextPrefabInstanceId_ << "\n";
-        if (hasVoxelPalettes || hasSubdivisions || hasModeling || hasRetiredModeling) {
+        if (hasVoxelPalettes || hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets) {
             const auto count = std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
             output << "voxel_palettes " << count << "\n";
@@ -514,7 +529,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output << "\n";
             }
         }
-        if (hasSubdivisions || hasModeling || hasRetiredModeling) {
+        if (hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) {return entry.second.subdivision.has_value();});
             output << "subdivisions " << count << "\n";
@@ -532,7 +547,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                     output << "edge_crease " << edge << ' ' << strength << "\n";
             }
         }
-        if(hasModeling || hasRetiredModeling) {
+        if(hasModeling || hasRetiredModeling || hasSelectionSets) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
             output<<"modeling_topologies "<<count<<"\n";
             for(const auto& [id,object]:objects_)if(object.modelingTopology) {
@@ -540,10 +555,30 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output<<"modeling_object "<<id<<"\n";write_modeling_topology(output,topology);
             }
         }
-        if(hasRetiredModeling) {
+        if(hasRetiredModeling || hasSelectionSets) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return !entry.second.modelingTopology&&entry.second.modelingNextId>1;});
             output<<"modeling_floors "<<count<<"\n";
             for(const auto& [id,object]:objects_)if(!object.modelingTopology&&object.modelingNextId>1)output<<"modeling_floor "<<id<<' '<<object.modelingNextId<<"\n";
+        }
+        if (hasSelectionSets) {
+            output << "selection_sets " << selectionSets_.size() << "\n";
+            for (const EditorSelectionSet& set : selectionSets_) {
+                output << "selection_set " << unsigned(set.kind) << ' ' << set.mesh << ' ' << std::quoted(set.name) << ' '
+                       << std::quoted(set.query) << ' ' << set.objects.size();
+                for (const EditorObjectId id : set.objects) output << ' ' << id;
+                output << ' ' << set.elements.size();
+                for (const ModelingId id : set.elements) output << ' ' << id;
+                output << "\n";
+            }
+            std::size_t entries = 0;
+            for (const auto& [mesh, lineage] : selectionLineage_) entries += lineage.size();
+            output << "selection_lineage " << entries << "\n";
+            for (const auto& [mesh, lineage] : selectionLineage_)
+                for (const auto& [id, next] : lineage) {
+                    output << "selection_descendants " << mesh << ' ' << id << ' ' << next.size();
+                    for (const ModelingId n : next) output << ' ' << n;
+                    output << "\n";
+                }
         }
         output.flush();
         if (!output) throw std::runtime_error("failed to write scene manifest");
@@ -567,7 +602,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -803,6 +838,40 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
                 EditorObjectId id{};ModelingId floor{};input>>key>>id>>floor;auto* object=document.find_object(id);
                 if(!input||key!="modeling_floor"||!object||object->modelingTopology||floor<=1||!seen.insert(id).second)throw std::runtime_error("Invalid retired modeling namespace record");
                 object->modelingNextId=floor;
+            }
+        }
+        if (version >= 13) {
+            // Named selection sets. Members of deleted objects are kept (they show as missing).
+            constexpr std::size_t kMaxRecords = 1U << 22U;
+            std::size_t count{};
+            input >> key >> count;
+            if (!input || key != "selection_sets" || count > 65536U) throw std::runtime_error("invalid selection set section");
+            for (std::size_t i = 0; i < count; ++i) {
+                EditorSelectionSet set;
+                unsigned kind{};
+                std::size_t objectCount{}, elementCount{};
+                input >> key >> kind >> set.mesh >> std::quoted(set.name) >> std::quoted(set.query) >> objectCount;
+                if (!input || key != "selection_set" || kind > unsigned(SelectionSetKind::Query) || objectCount > kMaxRecords)
+                    throw std::runtime_error("invalid selection set record");
+                set.kind = static_cast<SelectionSetKind>(kind);
+                for (std::size_t j = 0; j < objectCount; ++j) { EditorObjectId id{}; input >> id; set.objects.insert(id); }
+                input >> elementCount;
+                if (!input || elementCount > kMaxRecords) throw std::runtime_error("invalid selection set members");
+                for (std::size_t j = 0; j < elementCount; ++j) { ModelingId id{}; input >> id; set.elements.insert(id); }
+                if (!input) throw std::runtime_error("invalid selection set members");
+                document.selectionSets_.push_back(std::move(set));
+            }
+            input >> key >> count;
+            if (!input || key != "selection_lineage" || count > kMaxRecords) throw std::runtime_error("invalid selection lineage section");
+            for (std::size_t i = 0; i < count; ++i) {
+                EditorObjectId mesh{};
+                ModelingId id{};
+                std::size_t next{};
+                input >> key >> mesh >> id >> next;
+                if (!input || key != "selection_descendants" || next > kMaxRecords) throw std::runtime_error("invalid selection lineage record");
+                auto& descendants = document.selectionLineage_[mesh][id];
+                for (std::size_t j = 0; j < next; ++j) { ModelingId n{}; input >> n; descendants.insert(n); }
+                if (!input) throw std::runtime_error("invalid selection lineage record");
             }
         }
         document.path_ = manifestPath;

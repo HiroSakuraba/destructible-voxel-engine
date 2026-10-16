@@ -96,6 +96,25 @@ struct EditorSceneSaveResult {
     std::string error;
 };
 
+// A named selection set (ART-021), saved with the scene. Object sets list object IDs; component
+// sets name one mesh and its persistent modeling IDs (vertices, edges or faces) so membership
+// survives topology edits; query sets keep a hierarchy-filter query and are re-evaluated on recall.
+enum class SelectionSetKind : std::uint8_t { Objects, Vertices, Edges, Faces, Query };
+struct EditorSelectionSet {
+    std::string name;
+    SelectionSetKind kind{SelectionSetKind::Objects};
+    std::set<EditorObjectId> objects;
+    EditorObjectId mesh{};
+    std::set<ModelingId> elements;
+    std::string query;
+    bool operator==(const EditorSelectionSet&) const = default;
+};
+// For each mesh referenced by a component set: modeling IDs that a topology edit replaced, and
+// the IDs that replaced them (empty: retired). Only grows, so Undo and Redo both still resolve.
+// Marks "retired here" inside a successor set (modeling IDs start at 1, so 0 is free).
+inline constexpr ModelingId kRetiredSelectionLineageId = 0;
+using EditorSelectionLineage = std::map<EditorObjectId, std::map<ModelingId, std::set<ModelingId>>>;
+
 class EditorDocument {
 public:
     explicit EditorDocument(std::string name = "Untitled");
@@ -152,6 +171,11 @@ public:
     // is O(n^2) because every children_of() call scans all objects.
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_preorder() const;
     [[nodiscard]] const std::map<EditorObjectId, EditorObject>& objects() const noexcept { return objects_; }
+    [[nodiscard]] const std::vector<EditorSelectionSet>& selection_sets() const noexcept { return selectionSets_; }
+    void set_selection_sets(std::vector<EditorSelectionSet> sets) { selectionSets_ = std::move(sets); dirty_ = true; }
+    [[nodiscard]] const EditorSelectionLineage& selection_lineage() const noexcept { return selectionLineage_; }
+    // Remember which IDs replaced which on `mesh` (entries mapping an ID to itself are skipped).
+    void record_selection_lineage(EditorObjectId mesh, const std::map<ModelingId, std::set<ModelingId>>& descendants);
 
     void mark_dirty() noexcept { dirty_ = true; }
     void mark_clean() noexcept { dirty_ = false; }
@@ -171,6 +195,8 @@ private:
     std::uint64_t revision_{};
     std::uint64_t nextPrefabInstanceId_{1U};
     bool dirty_{};
+    std::vector<EditorSelectionSet> selectionSets_;
+    EditorSelectionLineage selectionLineage_;
 };
 
 } // namespace dve::editor

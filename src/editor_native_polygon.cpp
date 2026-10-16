@@ -272,6 +272,7 @@ bool NativeEditorController::clean_unused_polygon_vertices() {
     const auto identities=advance_modeling_topology(*object->polygon,cleanup.polygon.mesh,authoredAfter?&*authoredAfter:nullptr,
         *object->modelingTopology,cleanup.lineage,object->modelingNextId);
     if(!identities) return refuse(identities.error);
+    note_selection_lineage(object->id,identities.descendants);
     object->modelingNextId=(std::max)(object->modelingNextId,identities.topology.nextId);
     if(migrated)object->modelingTopology.reset();
     const auto record=remap_polygon_uv_authoring_record(*object,cleanup.polygon.mesh,cleanup.lineage,&error);
@@ -320,6 +321,7 @@ bool NativeEditorController::update_modeling_identity_preview(const CookedPolygo
         *polygonPreviewModelingBefore_,lineage,polygonPreviewModelingFloor_);
     if(!changed){set_status(changed.error,true);return false;}
     polygonPreviewModelingAfter_=changed.topology;
+    note_selection_lineage(polygonPreviewSelection_.object,changed.descendants);
     if(auto* object=workspace_.document().find_object(polygonPreviewSelection_.object))object->modelingNextId=(std::max)(object->modelingNextId,changed.topology.nextId);
     return true;
 }
@@ -486,6 +488,7 @@ void NativeEditorController::update_polygon_preview() {
             *polygonPreviewModelingBefore_,polygonPreviewModelingFloor_);
         if(!changed){set_status(changed.error,true);refresh_menu_state();return;}
         polygonPreviewModelingAfter_=changed.topology;object->modelingTopology=changed.topology;
+        note_selection_lineage(object->id,changed.descendants);
         object->modelingNextId=(std::max)(object->modelingNextId,changed.topology.nextId);
         object->subdivision=dissolved.subdivision;object->subdivisionCache.reset();polygonSelection_=dissolved.selection;
         polygonPreviewValid_=true;refresh_menu_state();return;

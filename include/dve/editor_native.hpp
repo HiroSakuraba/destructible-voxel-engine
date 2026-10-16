@@ -151,7 +151,8 @@ enum class TextEditKind : std::uint8_t {
     GaborAnisotropy, GaborShadowStrength, GaborLodBias, HierarchyFilter, AssetSearch,
     AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal,
     VoxelSize, BrushRadius, SurfaceOffset,  // numeric fields (see NumberFieldId)
-    DuplicateSetting                        // Duplicate Special panel; objectId holds the NumberFieldId
+    DuplicateSetting,                       // Duplicate Special panel; objectId holds the NumberFieldId
+    SelectionSetName                        // naming a selection set; objectId holds the set index
 };
 
 struct TextEditState {
@@ -1703,6 +1704,19 @@ private:
     BottomPanelTab bottomTab_{BottomPanelTab::Console};
     std::string hierarchyFilter_;
     bool dispatch_select_by_property_action(std::string_view action);
+    // Named selection sets (editor_native_selection_sets.cpp).
+    bool dispatch_selection_set_action(std::string_view action);
+    bool change_selection_sets(std::vector<EditorSelectionSet> after, std::string label);
+    // Lists up to kSelectionSetPage sets from `first`; a last "More sets" row pages on (and wraps).
+    void open_selection_set_list(std::string_view verb, std::size_t first = 0);
+    [[nodiscard]] std::optional<EditorSelectionSet> selection_as_set();
+    bool recall_selection_set(std::size_t index);
+    bool commit_selection_set_name();
+    // True while the naming field opened by Save is the one being edited; only that first name
+    // folds into the save's undo step (a later rename, after Esc, is its own step).
+    bool selectionSetNamingAfterSave_{};
+    // Topology edits call this so component sets on `mesh` follow split and replaced elements.
+    void note_selection_lineage(EditorObjectId mesh, const std::map<ModelingId, std::set<ModelingId>>& descendants);
     audio::AudioMixer audioMixer_{};
     std::uint64_t appliedSettingsRevision_{};
     bool systemThemeLight_{};

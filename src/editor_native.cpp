@@ -3422,6 +3422,10 @@ void NativeEditorController::commit_text_edit() {
         textEdit_ = {};
         return;
     }
+    if (kind == TextEditKind::SelectionSetName) {
+        (void)commit_selection_set_name();
+        return;
+    }
     if (kind == TextEditKind::AiPrompt) {
         const std::string prompt = textEdit_.buffer;
         textEdit_ = {};
@@ -6665,6 +6669,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
             return set_number_field(field, axis, numberFieldClipboard_, "Paste");
         }
     }
+    if (actionId.starts_with("selection.set.") || actionId.starts_with("select.set_")) return dispatch_selection_set_action(actionId);
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
         const auto value = actionId.substr(std::string_view("selection.pick.").size());

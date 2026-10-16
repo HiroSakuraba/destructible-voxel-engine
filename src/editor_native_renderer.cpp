@@ -5314,6 +5314,19 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
     }
 
+    // Naming a selection set: a small field at the top of the viewport.
+    if (controller.text_edit().kind == TextEditKind::SelectionSetName) {
+        const UiRect viewport = controller.layout().viewport;
+        const int fieldWidth = std::min(420, std::max(160, viewport.width - 32));
+        const UiRect field{viewport.x + (viewport.width - fieldWidth) / 2, viewport.y + 12, fieldWidth, 30};
+        painter.fill(field, panel2);
+        painter.outline(field, accent);
+        const std::string label = "Set name: ";
+        painter.text(field.x + 10, field.y + 20, label, muted);
+        const int labelWidth = painter.text_width(label);
+        painter.text(field.x + 10 + labelWidth, field.y + 20,
+                     elide_text_to_width(painter, controller.text_edit().buffer + "|", field.width - 20 - labelWidth), text);
+    }
     render_synth_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_chiptune_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_audio_panel(painter, controller, panel, panel2, border, text, muted, accent);

@@ -707,6 +707,12 @@ void EditorShortcutRegistry::install_builtin_commands() {
     add("select.walk_down", "Pick Walk Down (first child / shrink)", "Edit", {ShortcutContext::Viewport});
     add("select.walk_left", "Pick Walk Left (previous sibling)", "Edit", {ShortcutContext::Viewport});
     add("select.walk_right", "Pick Walk Right (next sibling)", "Edit", {ShortcutContext::Viewport});
+    add("select.set_save", "Save Selection as Set", "Edit", {ShortcutContext::Global});
+    add("select.set_save_query", "Save Filter as Smart Set", "Edit", {ShortcutContext::Global});
+    add("select.set_recall", "Recall Selection Set", "Edit", {ShortcutContext::Global});
+    add("select.set_add", "Add Selection to Set", "Edit", {ShortcutContext::Global});
+    add("select.set_rename", "Rename Selection Set", "Edit", {ShortcutContext::Global});
+    add("select.set_delete", "Delete Selection Set", "Edit", {ShortcutContext::Global});
     add("select.matching", "Select Matching Filter", "Edit", {ShortcutContext::Global});
     add("select.similar_type", "Select Similar: Same Type", "Edit", {ShortcutContext::Viewport});
     add("select.similar_material", "Select Similar: Same Material", "Edit", {ShortcutContext::Viewport});
@@ -943,6 +949,8 @@ void EditorShortcutRegistry::install_builtin_profiles() {
     bind(dve, "select.walk_down", ShortcutContext::Viewport, keyboard_shortcut("down"));
     bind(dve, "select.walk_left", ShortcutContext::Viewport, keyboard_shortcut("left"));
     bind(dve, "select.walk_right", ShortcutContext::Viewport, keyboard_shortcut("right"));
+    bind(dve, "select.set_save", ShortcutContext::Global, keyboard_shortcut("g", true, true));
+    bind(dve, "select.set_recall", ShortcutContext::Global, keyboard_shortcut("g", true, false, true));
     bind(dve, "edit.select_invert", ShortcutContext::Global, keyboard_shortcut("i", true, true));
     bind(dve, "edit.select_grow", ShortcutContext::Viewport, keyboard_shortcut("."));
     bind(dve, "edit.select_shrink", ShortcutContext::Viewport, keyboard_shortcut(","));

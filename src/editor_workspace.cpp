@@ -623,6 +623,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"edit.select_grow","Edit","Grow Selection",""},
         {"edit.select_shrink","Edit","Shrink Selection",""},
         {"edit.select_connected","Edit","Select Connected",""},
+        {"select.set_save","Edit","Save Selection as Set",""},
+        {"select.set_save_query","Edit","Save Filter as Smart Set",""},
+        {"select.set_recall","Edit","Recall Selection Set...",""},
+        {"select.set_add","Edit","Add Selection to Set...",""},
+        {"select.set_rename","Edit","Rename Selection Set...",""},
+        {"select.set_delete","Edit","Delete Selection Set...",""},
         {"select.matching","Edit","Select Matching Filter",""},
         {"select.similar_type","Edit","Select Similar: Same Type",""},
         {"select.similar_material","Edit","Select Similar: Same Material",""},
@@ -953,6 +959,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     configure("select.domain_objects", "Selection Domain", 30, true, "select.domain");
     configure("select.domain_voxels", "Selection Domain", 31, true, "select.domain");
     configure("select.domain_toggle", "Selection Domain", 32);
+    for (std::string_view id : {"select.set_save", "select.set_save_query", "select.set_recall", "select.set_add",
+                                "select.set_rename", "select.set_delete"})
+        configure(id, "Selection Sets", 39);
     for (std::string_view id : {"select.matching", "select.similar_type", "select.similar_material", "select.similar_tag",
                                 "select.similar_layer", "select.similar_prefab"})
         configure(id, "Select By", 38);
@@ -1208,6 +1217,12 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         describe(std::string("edit.mirror_") + axis, "Mirror the selection in place across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect"});
     }
+    describe("select.set_save", "Save the selected objects, or the selected vertices, edges or faces of a mesh, as a named set saved with the scene.", {"selection set", "named", "save", "store"});
+    describe("select.set_save_query", "Save the hierarchy filter (a name or a query such as type:mesh tag:rock) as a smart set that is re-evaluated each time.", {"selection set", "smart", "query", "saved search"});
+    describe("select.set_recall", "Pick a selection set to select again; shows how many members are missing or retired.", {"selection set", "recall", "restore"});
+    describe("select.set_add", "Pick a selection set and add the current selection to it.", {"selection set", "add", "update"});
+    describe("select.set_rename", "Pick a selection set and give it a new name.", {"selection set", "rename"});
+    describe("select.set_delete", "Pick a selection set to delete (Undo restores it).", {"selection set", "delete", "remove"});
     describe("select.matching", "Select every object the hierarchy filter matches: a name, or terms like type:mesh tag:rock layer:2 material:stone locked:no (-tag:x excludes).", {"query", "filter", "search", "property"});
     describe("select.similar_type", "Add every visible selectable object of the same kind (voxels, mesh, subdivision, text, helper, group).", {"similar", "same", "kind", "type"});
     describe("select.similar_material", "Add every visible selectable object that uses one of the selection's materials.", {"similar", "same", "material"});

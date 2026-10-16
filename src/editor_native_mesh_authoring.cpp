@@ -18,6 +18,7 @@ struct NativeMeshAuthoringState {
     PolygonSelection bevelSelection;
     PolygonFaceEditResult bevelAuthored;
     std::optional<ModelingTopology> bevelIdentities;
+    std::map<ModelingId,std::set<ModelingId>> bevelDescendants;  // for named selection sets
     std::optional<std::string> bevelUvRecord;
     std::uint64_t bevelSourceHash{};
     std::optional<std::uint64_t> bevelSourceTopologyHash;
@@ -67,7 +68,7 @@ void update_bevel(NativeMeshAuthoringState& state,const EditorObject& object) {
     if(!changed){refuse(changed.error);return;}
     const auto record=remap_polygon_uv_authoring_record(object,state.result.mesh,state.bevelAuthored.lineage,&error);
     if(!record){refuse(error);return;}
-    state.bevelIdentities=changed.topology;state.bevelUvRecord=record;
+    state.bevelIdentities=changed.topology;state.bevelUvRecord=record;state.bevelDescendants=changed.descendants;
 }
 UiRect uv_panel(UiRect view){int width=std::max(1,view.width/2);return {view.x+view.width-width,view.y,width,view.height};}
 UiRect uv_canvas(UiRect view){auto p=uv_panel(view);return {p.x+8,p.y+70,std::max(1,p.width-16),std::max(1,p.height-116)};}
@@ -382,6 +383,7 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
             // Recheck saved flags and settings at Apply, including inspector changes since the preview.
             update_bevel(s,*object);
             if(!s.result||!s.bevelIdentities){set_status(s.result.error,true);return true;}
+            note_selection_lineage(object->id,s.bevelDescendants);
             auto command=std::make_unique<CompoundCommand>("Bevel / chamfer / rounded fillet");
             command->add(std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,s.result.mesh,"Bevel authored edges",0,s.bevelAuthored.subdivision,false,s.bevelIdentities));
             if(s.bevelUvRecord&&!s.bevelUvRecord->empty()) {

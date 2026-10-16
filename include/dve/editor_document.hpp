@@ -111,6 +111,8 @@ struct EditorSelectionSet {
 };
 // For each mesh referenced by a component set: modeling IDs that a topology edit replaced, and
 // the IDs that replaced them (empty: retired). Only grows, so Undo and Redo both still resolve.
+// Marks "retired here" inside a successor set (modeling IDs start at 1, so 0 is free).
+inline constexpr ModelingId kRetiredSelectionLineageId = 0;
 using EditorSelectionLineage = std::map<EditorObjectId, std::map<ModelingId, std::set<ModelingId>>>;
 
 class EditorDocument {

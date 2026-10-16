@@ -267,6 +267,69 @@ void test_save_and_load() {
     check(plainSaved.success, "plain save");
     std::filesystem::remove_all(directory);
 }
+
+// Codex review: Esc on the naming field ends the pending merge; a later rename is its own step.
+void test_cancelled_naming_does_not_merge_later_rename() {
+    auto owner = make_controller();
+    NativeEditorController& c = *owner;
+    c.workspace().select_object(1);
+    const std::size_t steps = c.workspace().commands().size();
+    check(c.dispatch_action("select.set_save"), "save a set");
+    c.key_down("escape", false, false, false);
+    check(c.text_edit().kind != TextEditKind::SelectionSetName, "Esc closes the naming field");
+    check(c.dispatch_action("selection.set.rename.0") && c.text_edit().kind == TextEditKind::SelectionSetName, "rename later");
+    type_name(c, "Later");
+    check(c.workspace().document().selection_sets().size() == 1 && c.workspace().document().selection_sets()[0].name == "Later", "renamed");
+    check(c.workspace().commands().size() == steps + 2, "save and the later rename are two undo steps");
+    check(c.dispatch_action("edit.undo") && c.workspace().document().selection_sets().size() == 1 &&
+          c.workspace().document().selection_sets()[0].name == "Objects 1", "Undo reverts only the rename");
+    check(c.dispatch_action("edit.undo") && c.workspace().document().selection_sets().empty(), "a second Undo removes the set");
+}
+
+// Codex review: retiring an ID after an abandoned split still reads as retired.
+void test_retirement_after_abandoned_branch() {
+    EditorDocument document = make_document();
+    EditorObject* mesh = document.find_object(4);
+    check(ensure_modeling_topology(*mesh), "topology");
+    EditorSelectionSet set;
+    set.kind = SelectionSetKind::Faces;
+    set.mesh = 4;
+    set.elements = {444444U};
+    document.record_selection_lineage(4, {{444444U, {333333U}}});  // split, later undone: 333333 is not live
+    document.record_selection_lineage(4, {{444444U, {}}});         // a different edit retires it
+    const SelectionSetResolution resolved = resolve_selection_set(document, set);
+    check(resolved.retired == 1 && resolved.missing == 0, "the member is retired, not missing");
+    const auto directory = std::filesystem::temp_directory_path() / "dve_selection_sets_retired_test";
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    check(document.save_transactional(directory / "scene.dvescene").success, "save");
+    std::string error;
+    const auto loaded = EditorDocument::load(directory / "scene.dvescene", &error);
+    check(loaded && resolve_selection_set(*loaded, set).retired == 1, "and stays retired after saving: " + error);
+    std::filesystem::remove_all(directory);
+}
+
+// Codex review: more sets than one list holds stay reachable through a "More sets" row.
+void test_many_sets_are_reachable() {
+    auto owner = make_controller();
+    NativeEditorController& c = *owner;
+    std::vector<EditorSelectionSet> sets;
+    for (int i = 0; i < 25; ++i) {
+        EditorSelectionSet set;
+        set.name = "Set " + std::to_string(i);
+        set.objects = {1};
+        sets.push_back(set);
+    }
+    c.workspace().document().set_selection_sets(sets);
+    check(c.dispatch_action("select.set_recall") && c.context_menu().items.size() == 20U, "the first page plus a More row");
+    if (c.context_menu().items.size() != 20U) return;
+    check(c.context_menu().items.back().actionId == "selection.set.recall.more.19", "More pages on: " + c.context_menu().items.back().actionId);
+    check(c.dispatch_action("selection.set.recall.more.19") && c.context_menu().items.size() == 7U &&
+          c.context_menu().items.front().actionId == "selection.set.recall.19", "the second page lists the rest");
+    check(c.context_menu().items.back().actionId == "selection.set.recall.more.0", "and wraps back");
+    c.workspace().clear_selection();
+    check(c.dispatch_action("selection.set.recall.24") && c.workspace().selected_objects() == std::set<EditorObjectId>{1}, "the last set recalls");
+}
 }  // namespace
 
 int main() {
@@ -276,6 +339,9 @@ int main() {
     test_retired_and_unit_resolution();
     test_loop_cut_split();
     test_save_and_load();
+    test_cancelled_naming_does_not_merge_later_rename();
+    test_retirement_after_abandoned_branch();
+    test_many_sets_are_reachable();
     if (g_failures == 0) std::printf("selection set tests passed\n");
     return g_failures == 0 ? 0 : 1;
 }

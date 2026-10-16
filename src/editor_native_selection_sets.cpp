@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <utility>
 
 namespace dve::editor {
 namespace {
@@ -47,7 +48,11 @@ bool NativeEditorController::change_selection_sets(std::vector<EditorSelectionSe
     return true;
 }
 
-void NativeEditorController::open_selection_set_list(std::string_view verb) {
+namespace {
+constexpr std::size_t kSelectionSetPage = 19;  // plus a "More sets" row: 20 rows, as before
+}  // namespace
+
+void NativeEditorController::open_selection_set_list(std::string_view verb, std::size_t first) {
     const auto& sets = workspace_.document().selection_sets();
     if (sets.empty()) { set_status("No selection sets yet: Edit > Selection Sets > Save Selection as Set", true); return; }
     contextMenu_ = {};
@@ -55,18 +60,35 @@ void NativeEditorController::open_selection_set_list(std::string_view verb) {
     const int itemHeight = 24;  // as the pick list (kLogicalLayoutScale is 1)
     const int popupWidth = 420;
     contextMenu_.width = popupWidth;
-    const std::size_t count = std::min<std::size_t>(sets.size(), 20U);
+    if (first >= sets.size()) first = 0;
+    const std::size_t shown = std::min<std::size_t>(sets.size() - first, kSelectionSetPage);
+    const bool paged = sets.size() > kSelectionSetPage;
+    const std::size_t count = shown + (paged ? 1U : 0U);
     const UiRect viewport = layout_.viewport;
     contextMenu_.x = std::clamp(viewport.x + viewport.width / 2 - popupWidth / 2, 0, std::max(0, width_ - popupWidth));
     contextMenu_.y = std::clamp(viewport.y + 40, layout_.menuBar.height,
                                 std::max(layout_.menuBar.height, height_ - itemHeight * static_cast<int>(count)));
-    for (std::size_t index = 0; index < count; ++index) {
+    for (std::size_t row = 0; row < shown; ++row) {
+        const std::size_t index = first + row;
         contextMenu_.items.push_back({"selection.set." + std::string(verb) + "." + std::to_string(index),
                                       describe_selection_set(workspace_.document(), sets[index])});
-        contextMenu_.itemRects.push_back({contextMenu_.x, contextMenu_.y + static_cast<int>(index) * itemHeight, popupWidth, itemHeight});
+        contextMenu_.itemRects.push_back({contextMenu_.x, contextMenu_.y + static_cast<int>(row) * itemHeight, popupWidth, itemHeight});
     }
-    set_status(verb == "recall" ? "Recall which set?" : verb == "add" ? "Add the selection to which set?"
-               : verb == "rename" ? "Rename which set?" : "Delete which set?");
+    if (paged) {
+        // Every set stays reachable: the last row pages on, wrapping back to the first page.
+        const std::size_t next = first + shown < sets.size() ? first + shown : 0U;
+        contextMenu_.items.push_back({"selection.set." + std::string(verb) + ".more." + std::to_string(next),
+                                      next == 0 ? std::string("Back to the first sets...")
+                                                : "More sets (" + std::to_string(next + 1) + "-" +
+                                                      std::to_string(std::min(sets.size(), next + kSelectionSetPage)) + " of " +
+                                                      std::to_string(sets.size()) + ")..."});
+        contextMenu_.itemRects.push_back({contextMenu_.x, contextMenu_.y + static_cast<int>(shown) * itemHeight, popupWidth, itemHeight});
+    }
+    const std::string page = paged ? " (" + std::to_string(first + 1) + "-" + std::to_string(first + shown) + " of " +
+                                         std::to_string(sets.size()) + ")"
+                                   : std::string();
+    set_status(std::string(verb == "recall" ? "Recall which set?" : verb == "add" ? "Add the selection to which set?"
+               : verb == "rename" ? "Rename which set?" : "Delete which set?") + page);
 }
 
 std::optional<EditorSelectionSet> NativeEditorController::selection_as_set() {
@@ -141,6 +163,7 @@ bool NativeEditorController::dispatch_selection_set_action(std::string_view acti
         if (!change_selection_sets(std::move(sets), "Save selection set")) return false;
         // Offer a name straight away; Enter keeps the typed one, Esc keeps the default.
         begin_text_edit(TextEditKind::SelectionSetName, static_cast<EditorObjectId>(workspace_.document().selection_sets().size() - 1U), name);
+        selectionSetNamingAfterSave_ = true;
         set_status("Saved \"" + name + "\"; type a name and press Enter (Esc keeps it)");
         return true;
     }
@@ -157,6 +180,7 @@ bool NativeEditorController::dispatch_selection_set_action(std::string_view acti
         sets.push_back(std::move(set));
         if (!change_selection_sets(std::move(sets), "Save smart selection set")) return false;
         begin_text_edit(TextEditKind::SelectionSetName, static_cast<EditorObjectId>(workspace_.document().selection_sets().size() - 1U), name);
+        selectionSetNamingAfterSave_ = true;
         set_status("Saved \"" + name + "\" (" + hierarchyFilter_ + "); type a name and press Enter");
         return true;
     }
@@ -171,6 +195,13 @@ bool NativeEditorController::dispatch_selection_set_action(std::string_view acti
     const std::size_t dot = rest.find('.');
     if (dot == std::string_view::npos) return false;
     const std::string_view verb = rest.substr(0, dot);
+    if (const std::string_view tail = rest.substr(dot + 1); tail.starts_with("more.")) {
+        if (verb != "recall" && verb != "add" && verb != "rename" && verb != "delete") return false;
+        const auto first = parse_index(tail.substr(5));
+        if (!first || sets.empty()) { set_status("No selection sets yet", true); return false; }
+        open_selection_set_list(verb, *first);
+        return true;
+    }
     const auto index = parse_index(rest.substr(dot + 1));
     if (!index || *index >= sets.size()) { set_status("That selection set no longer exists", true); return false; }
     if (verb == "recall") return recall_selection_set(*index);
@@ -182,6 +213,7 @@ bool NativeEditorController::dispatch_selection_set_action(std::string_view acti
         return true;
     }
     if (verb == "rename") {
+        selectionSetNamingAfterSave_ = false;
         begin_text_edit(TextEditKind::SelectionSetName, static_cast<EditorObjectId>(*index), sets[*index].name);
         set_status("Rename \"" + sets[*index].name + "\": type a name and press Enter");
         return true;
@@ -213,6 +245,7 @@ bool NativeEditorController::commit_selection_set_name() {
     const std::size_t index = static_cast<std::size_t>(textEdit_.objectId);
     std::string name = textEdit_.buffer;
     textEdit_ = {};
+    const bool initialName = std::exchange(selectionSetNamingAfterSave_, false);
     while (!name.empty() && name.front() == ' ') name.erase(name.begin());
     while (!name.empty() && name.back() == ' ') name.pop_back();
     std::vector<EditorSelectionSet> sets = workspace_.document().selection_sets();
@@ -223,7 +256,7 @@ bool NativeEditorController::commit_selection_set_name() {
     }
     const std::string old = sets[index].name;
     sets[index].name = name;
-    if (!change_selection_sets(std::move(sets), "Rename selection set")) return false;
+    if (!change_selection_sets(std::move(sets), initialName ? "Name selection set" : "Rename selection set")) return false;
     set_status("Renamed \"" + old + "\" to \"" + name + "\"");
     return true;
 }

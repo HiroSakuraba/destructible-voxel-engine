@@ -135,7 +135,10 @@ void EditorDocument::record_selection_lineage(EditorObjectId mesh, const std::ma
     auto& lineage = selectionLineage_[mesh];
     for (const auto& [id, next] : descendants) {
         if (next.size() == 1U && *next.begin() == id) continue;
-        lineage[id].insert(next.begin(), next.end());
+        // Retirement is recorded explicitly (ID 0 is never allocated): inserting nothing would
+        // leave successors from an undone, abandoned branch looking like the whole story.
+        if (next.empty()) lineage[id].insert(kRetiredSelectionLineageId);
+        else lineage[id].insert(next.begin(), next.end());
     }
     if (lineage.empty()) selectionLineage_.erase(mesh);
 }

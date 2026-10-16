@@ -86,8 +86,11 @@ SelectionSetResolution resolve_selection_set(const EditorDocument& document, con
             if (!lineage) continue;
             const auto next = lineage->find(id);
             if (next == lineage->end()) continue;
-            if (next->second.empty()) retiredOnTheWay = true;
-            for (const ModelingId n : next->second) stack.push_back(n);
+            if (next->second.empty()) retiredOnTheWay = true;  // older scenes
+            for (const ModelingId n : next->second) {
+                if (n == kRetiredSelectionLineageId) retiredOnTheWay = true;
+                else stack.push_back(n);
+            }
         }
         if (reached.empty()) { retiredOnTheWay ? ++result.retired : ++result.missing; continue; }
         result.modelingIds.insert(reached.begin(), reached.end());
@@ -120,7 +123,7 @@ ReplaceSelectionSetsCommand::ReplaceSelectionSetsCommand(std::vector<EditorSelec
 
 bool ReplaceSelectionSetsCommand::merge_with(const IEditorCommand& other) {
     const auto* next = dynamic_cast<const ReplaceSelectionSetsCommand*>(&other);
-    if (!next || !namingPending_ || next->label_ != "Rename selection set" || next->before_ != after_) return false;
+    if (!next || !namingPending_ || next->label_ != "Name selection set" || next->before_ != after_) return false;
     after_ = next->after_;
     namingPending_ = false;
     return true;

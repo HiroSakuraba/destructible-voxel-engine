@@ -5328,7 +5328,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
             if (distanceSquared <= 25) {
                 // Pieces of a closed group answer for the group; masked-out objects are skipped so
                 // the click reaches whatever is behind them.
-                const auto clickTargets = marquee_.clickObject ? selectable_targets_at(marquee_.startX, marquee_.startY)
+                const auto clickTargets = marquee_.clickObject || (selectionMask_.helpers && selectionDomain_ == SelectionDomain::Objects) ? selectable_targets_at(marquee_.startX, marquee_.startY)
                                                                : std::vector<EditorPickResult>{};
                 if (!clickTargets.empty()) {
                     if ((modifiers & 7U) == 0U || (modifiers & 4U) != 0U) {
@@ -5378,6 +5378,11 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
                 std::erase_if(hits, [&](EditorObjectId id) { return !object_selectable(id); });
                 // Front-only unless X-Ray Selection: keep what actually shows inside the box.
                 if (!viewportSettings_.xraySelection && !hits.empty()) hits = targets_seen_in_rect(rectangle, hits);
+                // Helpers are drawn as markers over the scene, so a box takes any marker inside it.
+                if (selectionMask_.helpers)
+                    for (const HelperMarker& marker : helper_markers())
+                        if (rectangle.contains(static_cast<int>(marker.x), static_cast<int>(marker.y)) && object_selectable(marker.id))
+                            hits.insert(marker.id);
             }
             SelectionOperation operation = marquee_.operation;
             // Shift+click on something already selected takes it out again.

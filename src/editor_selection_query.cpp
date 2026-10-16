@@ -109,9 +109,13 @@ std::set<std::string> selection_object_materials(const EditorObject& object) {
                 materials.insert(lower(it->second.name));
         }
     }
+    // A mesh's material list is a library that can keep unused entries (face extraction keeps the
+    // source's); only materials that a non-empty submesh draws with count.
     if (object.polygon)
-        for (const auto& material : object.polygon->materials)
-            if (!material.name.empty()) materials.insert(lower(material.name));
+        for (const auto& submesh : object.polygon->submeshes)
+            if (submesh.indexCount > 0 && submesh.materialIndex < object.polygon->materials.size())
+                if (const auto& material = object.polygon->materials[submesh.materialIndex]; !material.name.empty())
+                    materials.insert(lower(material.name));
     return materials;
 }
 

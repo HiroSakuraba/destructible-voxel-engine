@@ -131,7 +131,15 @@ void test_editor_actions() {
     (void)c.dispatch_action("select.similar_type");
     check(!c.workspace().is_selected(3), "Same Type respects the selection masks");
     c.workspace().select_object(2);
-    check(c.dispatch_action("select.similar_tag") && c.workspace().selected_objects() == std::set<EditorObjectId>{1, 2}, "Same Tag");
+    // Codex review: Rock A sits inside the closed group Cliff, which the viewport cannot reach.
+    check(c.dispatch_action("select.similar_tag") && c.workspace().selected_objects() == std::set<EditorObjectId>{2},
+          "Same Tag skips pieces of a closed group: " + list(c.workspace().selected_objects()));
+    check(c.status().text.find("closed group") != std::string::npos, "and says so: " + c.status().text);
+    c.workspace().select_object(5);
+    check(c.dispatch_action("edit.open_group"), "open Cliff");
+    c.workspace().select_object(2);
+    check(c.dispatch_action("select.similar_tag") && c.workspace().selected_objects() == std::set<EditorObjectId>{1, 2},
+          "Same Tag reaches inside an open group: " + list(c.workspace().selected_objects()));
     c.workspace().select_object(1);
     check(c.dispatch_action("select.similar_layer") && c.workspace().selected_objects() == std::set<EditorObjectId>{1}, "Same Layer");
     c.workspace().select_object(7);
@@ -142,11 +150,66 @@ void test_editor_actions() {
     c.workspace().clear_selection();
     check(!c.dispatch_action("select.similar_type"), "Select Similar needs a selection");
 }
+
+// Codex review: a mesh's material library can keep unused entries; only drawn ones count.
+void test_polygon_materials_used() {
+    EditorDocument document("Materials");
+    EditorObject pipe(1, "Pipe");
+    pipe.polygon = make_editor_polygon_cube(1);
+    check(!pipe.polygon->materials.empty() && !pipe.polygon->submeshes.empty(), "the cube has a material and a submesh");
+    pipe.polygon->materials[0].name = "Steel";
+    for (auto& submesh : pipe.polygon->submeshes) submesh.materialIndex = 0;
+    auto stale = pipe.polygon->materials[0];
+    stale.name = "Stale";
+    pipe.polygon->materials.push_back(stale);
+    document.add_object(std::move(pipe));
+    check(query(document, "material:steel") == std::set<EditorObjectId>{1}, "the drawn material matches");
+    check(query(document, "material:stale").empty(), "an unused library entry does not");
+    const auto used = selection_object_materials(*document.find_object(1));
+    check(used == std::set<std::string>{"steel"}, "Same Material compares only drawn materials");
+}
+
+// Codex review: helpers have no geometry, so they get a viewport marker that clicks and boxes pick.
+void test_helper_markers() {
+    EditorDocument document("Helpers");
+    EditorObject spawn(1, "Spawn");
+    spawn.transform.position = {2.0F, 1.0F, 0.0F};
+    document.add_object(std::move(spawn));
+    auto owner = std::make_unique<NativeEditorController>(EditorWorkspace(std::move(document)));
+    NativeEditorController& c = *owner;
+    c.resize(1280, 720);
+    c.camera().position = {2.0F, 1.0F, 12.0F};
+    c.camera().target = {2.0F, 1.0F, 0.0F};
+    const auto markers = c.helper_markers();
+    check(markers.size() == 1U && markers.front().id == 1, "the helper has a marker");
+    if (markers.empty()) return;
+    const int x = static_cast<int>(markers.front().x), y = static_cast<int>(markers.front().y);
+    c.pointer_move(x + 2, y + 1);
+    c.pointer_down(PointerButton::Primary, x + 2, y + 1);
+    c.pointer_up(PointerButton::Primary, x + 2, y + 1);
+    check(c.workspace().selected_objects() == std::set<EditorObjectId>{1}, "a click on the marker selects the helper: " + c.status().text);
+    c.workspace().clear_selection();
+    c.pointer_down(PointerButton::Primary, x - 40, y - 40);
+    c.pointer_move(x + 40, y + 40);
+    c.pointer_up(PointerButton::Primary, x + 40, y + 40);
+    check(c.workspace().selected_objects() == std::set<EditorObjectId>{1}, "a box around the marker selects it");
+    c.workspace().clear_selection();
+    (void)c.dispatch_action("select.mask_helpers");
+    c.pointer_down(PointerButton::Primary, x, y);
+    c.pointer_up(PointerButton::Primary, x, y);
+    check(c.workspace().selected_objects().empty(), "with helpers masked out the click skips it");
+    c.pointer_down(PointerButton::Primary, x - 40, y - 40);
+    c.pointer_move(x + 40, y + 40);
+    c.pointer_up(PointerButton::Primary, x + 40, y + 40);
+    check(c.workspace().selected_objects().empty(), "and so does a box");
+}
 }  // namespace
 
 int main() {
     test_query_language();
     test_editor_actions();
+    test_polygon_materials_used();
+    test_helper_markers();
     if (g_failures == 0) std::printf("select by property tests passed\n");
     return g_failures == 0 ? 0 : 1;
 }

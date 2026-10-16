@@ -703,6 +703,16 @@ public:
     [[nodiscard]] const SelectionMask& selection_mask() const noexcept { return selectionMask_; }
     // Whether the selection mask lets viewport selection take this object (or group).
     [[nodiscard]] bool object_selectable(EditorObjectId id) const;
+    // Geometry-free helpers (cameras, lights, spawns, emitters) have no mesh to hit, so the viewport
+    // draws a small marker at each one's origin and clicks / boxes pick that marker instead.
+    struct HelperMarker {
+        EditorObjectId id{};
+        float x{};
+        float y{};
+        float distance{};
+        Float3 world{};
+    };
+    [[nodiscard]] std::vector<HelperMarker> helper_markers() const;
     // Short text drawn under a selection box: window/crossing, visible-only/X-ray, active masks.
     [[nodiscard]] std::string marquee_label() const;
     [[nodiscard]] const MarqueeState& marquee() const noexcept { return marquee_; }

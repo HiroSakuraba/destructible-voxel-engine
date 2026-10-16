@@ -80,8 +80,10 @@ bool NativeEditorController::dispatch_select_by_property_action(std::string_view
     if (action == "select.similar_tag" && tags.empty()) { set_status("The selection has no tags", true); return false; }
     if (action == "select.similar_prefab" && prefabs.empty()) { set_status("The selection holds no prefab instances", true); return false; }
     std::set<EditorObjectId> matches;
+    std::size_t insideClosedGroups = 0;
     for (const auto& [id, object] : document.objects()) {
         if (!object.flags.visible || is_isolated_out(id) || !object_selectable(id)) continue;
+        // Pieces inside a closed group are not reachable from the viewport; open the group first.
         bool hit = false;
         if (action == "select.similar_type") hit = kinds.contains(selection_object_kind(document, object));
         else if (action == "select.similar_material") {
@@ -91,12 +93,16 @@ bool NativeEditorController::dispatch_select_by_property_action(std::string_view
             hit = std::any_of(object.tags.begin(), object.tags.end(), [&](const std::string& tag) { return tags.contains(lower_text(tag)); });
         else if (action == "select.similar_layer") hit = layers.contains(object.layer);
         else hit = object.prefabLink && prefabs.contains(object.prefabLink->prefabAsset.generic_string());
-        if (hit) matches.insert(id);
+        if (!hit) continue;
+        if (viewport_selection_target(id) != id) { if (!selected.contains(id)) ++insideClosedGroups; }
+        else matches.insert(id);
     }
     matches.insert(selected.begin(), selected.end());
     workspace_.apply_selection(matches, SelectionOperation::Replace);
     refresh_menu_state();
-    set_status("Selected " + std::to_string(workspace_.selection_count()) + " objects with the same " + what);
+    set_status("Selected " + std::to_string(workspace_.selection_count()) + " objects with the same " + what +
+               (insideClosedGroups == 0 ? std::string()
+                                        : " (" + std::to_string(insideClosedGroups) + " inside closed groups skipped; Open Group to include them)"));
     return true;
 }
 

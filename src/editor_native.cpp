@@ -1973,16 +1973,21 @@ void NativeEditorController::refresh_menu_state() noexcept {
         enabled("edit.open_group", canOpen && !playActive, "Select a closed group (or double-click a piece in one).");
         enabled("edit.close_group", canClose && !playActive, "Select something inside an open group first.");
         enabled("edit.close_all_groups", !openGroups_.empty(), "No groups are open.");
-        const bool singleOriginObject = singleSelection && active && !singleGroup && origin_edit_refusal(*active).empty();
+        // Why the primary object's pivot cannot move, as the reason the commands are greyed out.
+        const std::string originRefusal = active && !singleGroup ? origin_edit_refusal(*active) : std::string();
+        const bool singleOriginObject = singleSelection && active && !singleGroup && originRefusal.empty();
         enabled("edit.edit_pivot", ((singleGroup && !pivotFixed) || singleOriginObject || pivotEditing_) && !playActive,
-                pivotFixed ? kImportedPivotFixed : std::string_view("Select one object or group to edit its pivot."));
+                pivotFixed ? std::string(kImportedPivotFixed)
+                : !originRefusal.empty() && singleSelection ? originRefusal : std::string("Select one object or group to edit its pivot."));
         checked("edit.edit_pivot", pivotEditing_);
         bool anyOriginObject = false;
         for (const EditorObjectId id : workspace_.selected_objects()) anyOriginObject = anyOriginObject || (!is_group(id) && origin_edit_refusal(id).empty());
         for (std::string_view id : {"edit.pivot_bottom_center", "edit.pivot_center"})
             enabled(id, ((singleGroup && !pivotFixed) || anyOriginObject) && !playActive,
-                    pivotFixed ? kImportedPivotFixed : std::string_view("Select a group, voxel object or mesh first."));
-        enabled("edit.pivot_to_cursor", anyOriginObject && !playActive, "Select a voxel object or mesh first.");
+                    pivotFixed ? std::string(kImportedPivotFixed)
+                    : !originRefusal.empty() ? originRefusal : std::string("Select a group, voxel object or mesh first."));
+        enabled("edit.pivot_to_cursor", anyOriginObject && !playActive,
+                !originRefusal.empty() ? originRefusal : std::string("Select a voxel object or mesh first."));
     }
     const auto hierarchyPrimary = workspace_.selected_object();
     const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;

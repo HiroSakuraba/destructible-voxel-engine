@@ -58,8 +58,13 @@ std::unique_ptr<IEditorCommand> NativeEditorController::make_move_origin_command
     } else {
         // Whole cells only: the origin lands on the nearest voxel corner.
         const float size = object->voxelSizeMeters;
-        const Int3 cells{static_cast<int>(std::lround(local.x / size)), static_cast<int>(std::lround(local.y / size)),
-                         static_cast<int>(std::lround(local.z / size))};
+        // Nearest corner; on an exact tie keep the smaller step, so asking again changes nothing.
+        const auto step = [&](float value) {
+            const float cellsAway = value / size;
+            if (std::abs(std::abs(cellsAway - std::trunc(cellsAway)) - 0.5F) < 1.0e-4F) return static_cast<int>(std::trunc(cellsAway));
+            return static_cast<int>(std::lround(cellsAway));
+        };
+        const Int3 cells{step(local.x), step(local.y), step(local.z)};
         shift = {static_cast<float>(cells.x) * size, static_cast<float>(cells.y) * size, static_cast<float>(cells.z) * size};
         if (cells.x == 0 && cells.y == 0 && cells.z == 0) { if (error) *error = "The pivot is already on that voxel corner"; return nullptr; }
         const VoxelObjectState before = capture_voxel_object_state(*object);

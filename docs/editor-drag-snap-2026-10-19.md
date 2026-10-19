@@ -22,13 +22,23 @@ started from, and a line between them. The status line names the target and its 
 
 Release V to go back to the axis; Enter or releasing the mouse commits one undo step; Esc puts
 everything back. It works for whole objects and for moving mesh components (snapping to other
-objects). Selected objects are never targets.
+objects). What moves is never a target: the selected objects, the pieces of a selected (closed)
+group and children attached to a selected object; hidden objects are not targets, and while
+objects are isolated only they are. While V is held the status bar's snap summary reads
+`Move point (V): vertex` (the target kind) instead of the grid step, because the grid step does not
+apply. A drag (or a placement click) that ends where it started adds no undo step.
+
+V is only taken where it snaps: the Move tool, in Edit (not Play or Simulate), outside the voxel
+selection domain and outside panels that use V themselves (sprite rig, tile world editor, settings,
+shortcut capture).
 
 ## Placement modes
 
 Edit gains **Snap to Mesh Vertex**, **Snap to Mesh Edge Midpoint** and **Snap to Mesh Face
 Centre**, next to the existing voxel, bounds and collision-box modes: move over a target and
-click to place. Placement modes now draw their target too.
+click to place. Placement modes now draw their target too. With nothing selected, or during Play
+or Simulate, the placement entries are disabled with the reason. Placement never lands on the
+pieces of a selected group either.
 
 ## Already in place
 
@@ -39,5 +49,7 @@ during a drag, and showing the target before committing.
 ## Tests
 
 `tests/test_editor_drag_snap.cpp`: vertex, edge midpoint, voxel face centre and corner during a
-drag, the drawn label, releasing V, commit as one undo step, Esc, surface snapping, and the mesh
-placement modes.
+drag, the drawn label, releasing V, commit as one undo step, Esc, surface snapping, the mesh
+placement modes, an unmoved drag adding no undo step, the snap summary, multi-select with exact
+undo (including a surface-normal turn) and an attached child, closed groups not snapping to their
+own pieces, V gating, the disabled placement menu reason, and hidden objects.

@@ -5219,9 +5219,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const EditorPreferences& snapPreferences = controller.workspace().preferences();
     const auto snapValue = [](bool enabled, std::string value) { return enabled ? value : std::string("off"); };
     const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
-        "  Move " + snapValue(snapPreferences.translateSnapEnabled,
-                              std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
-                                  (snapPreferences.absoluteGridSnap ? " grid" : "")) +
+        // Held V replaces the grid step with point snapping while it is held: say so.
+        "  Move " + (controller.drag_snap_held() && controller.active_tool() == EditorToolId::Translate
+                         ? std::string("point (V)") +
+                               (controller.drag_snap_target() ? std::string(": ") + snap_target_name(controller.drag_snap_target()->kind) : std::string())
+                         : snapValue(snapPreferences.translateSnapEnabled,
+                                     std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
+                                         (snapPreferences.absoluteGridSnap ? " grid" : ""))) +
         "  Rotate " + snapValue(snapPreferences.rotateSnapEnabled,
                                 std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "\u00B0") +
         "  Scale " + snapValue(snapPreferences.scaleSnapEnabled,
@@ -5344,6 +5348,43 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             if (menu.hoveredItem && *menu.hoveredItem == i) painter.fill(menu.itemRects[i], rgb(48,88,142));
             painter.text(popup.x + 10, popup.y + static_cast<int>(i) * itemHeight + itemHeight - 7,
                          elide_text_to_width(painter, menu.items[i].label, popup.width - 20), text);
+        }
+    }
+
+    // Point snapping: source pivot, target and the line between (held-V Move drags and the
+    // placement modes), so the precise alignment is visible before it is committed.
+    {
+        std::optional<Float3> target;
+        std::optional<Float3> source;
+        std::string label;
+        if (const auto snap = controller.drag_snap_target()) {
+            target = snap->point;
+            source = controller.drag_snap_source();
+            label = std::string("snap: ") + snap_target_name(snap->kind);
+        } else if (const auto placed = controller.placement_target()) {
+            target = placed;
+            label = "place here (click)";
+        }
+        if (target) {
+            const UiRect viewport = controller.layout().viewport;
+            const ScreenPoint t = project_world_to_screen(controller.camera(), viewport, *target);
+            if (t.visible) {
+                const int tx = static_cast<int>(std::lround(t.x)), ty = static_cast<int>(std::lround(t.y));
+                const EditorColor snapColor = rgb(255, 214, 92);
+                painter.line(tx - 7, ty, tx, ty - 7, snapColor, 2);
+                painter.line(tx, ty - 7, tx + 7, ty, snapColor, 2);
+                painter.line(tx + 7, ty, tx, ty + 7, snapColor, 2);
+                painter.line(tx, ty + 7, tx - 7, ty, snapColor, 2);
+                painter.text(tx + 11, ty - 9, label, snapColor);
+                if (source) {
+                    const ScreenPoint s = project_world_to_screen(controller.camera(), viewport, *source);
+                    if (s.visible) {
+                        const int sx = static_cast<int>(std::lround(s.x)), sy = static_cast<int>(std::lround(s.y));
+                        painter.outline({sx - 4, sy - 4, 9, 9}, snapColor);
+                        if (std::abs(sx - tx) + std::abs(sy - ty) > 3) painter.line(sx, sy, tx, ty, muted, 1);
+                    }
+                }
+            }
         }
     }
 

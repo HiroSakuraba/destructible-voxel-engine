@@ -842,6 +842,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_select_by_property.cpp
         src/editor_selection_sets.cpp
         src/editor_native_selection_sets.cpp
+        src/editor_native_snap_targets.cpp
         src/editor_modeling_topology.cpp
         src/editor_subdivision.cpp
         src/editor_native_polygon.cpp
@@ -2714,6 +2715,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_selection_sets_tests tests/test_editor_selection_sets.cpp)
         target_link_libraries(dve_editor_selection_sets_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_selection_sets_tests COMMAND dve_editor_selection_sets_tests)
+        add_executable(dve_editor_drag_snap_tests tests/test_editor_drag_snap.cpp)
+        target_link_libraries(dve_editor_drag_snap_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_drag_snap_tests COMMAND dve_editor_drag_snap_tests)
         add_executable(dve_editor_voxel_selection_tests tests/test_editor_voxel_selection.cpp)
         target_link_libraries(dve_editor_voxel_selection_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_selection_tests COMMAND dve_editor_voxel_selection_tests)

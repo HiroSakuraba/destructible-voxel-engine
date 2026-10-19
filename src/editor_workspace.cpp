@@ -459,6 +459,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"transform.place_voxel_face","Edit","Snap to Voxel Face",""},
         {"transform.place_bounds_vertex","Edit","Snap to Bounds Vertex",""},
         {"transform.place_collision_vertex","Edit","Snap to Collision Box Vertex",""},
+        {"transform.place_mesh_vertex","Edit","Snap to Mesh Vertex",""},
+        {"transform.place_mesh_edge","Edit","Snap to Mesh Edge Midpoint",""},
+        {"transform.place_mesh_face","Edit","Snap to Mesh Face Centre",""},
         {"transform.align_surface","Edit","Align Up to Surface Normal",""},
         {"transform.surface_offset_more","Edit","Increase Surface Offset",""},
         {"transform.surface_offset_less","Edit","Decrease Surface Offset",""},
@@ -1209,6 +1212,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             for (const char* keyword : keywords) action->keywords.emplace_back(keyword);
         }
     };
+    describe("transform.place_mesh_vertex", "Move the selection so its pivot lands on the mesh vertex under the cursor; click to place. Or hold V while dragging the Move gizmo.", {"snap", "vertex", "point", "align"});
+    describe("transform.place_mesh_edge", "Move the selection so its pivot lands on the middle of the mesh edge under the cursor; click to place.", {"snap", "edge", "midpoint", "align"});
+    describe("transform.place_mesh_face", "Move the selection so its pivot lands on the centre of the mesh face under the cursor; click to place.", {"snap", "face", "centre", "center", "align"});
     describe("edit.duplicate_special", "Make many copies, each offset, turned and scaled from the last, around its own pivot or a point (fans, rings, spirals). Preview, then Apply as one undo step.",
              {"array", "copies", "repeat", "radial", "instance", "duplicate"});
     describe("edit.open_group", "Let viewport clicks reach the pieces inside the selected group. Double-clicking a piece does the same.", {"group", "enter", "isolate"});

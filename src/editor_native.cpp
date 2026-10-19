@@ -3641,6 +3641,10 @@ void NativeEditorController::cancel_text_edit() noexcept {
 void NativeEditorController::key_up(std::string_view key, bool control, bool, bool alt) {
     if (!control && !alt && synthPanel_.open()) (void)synthPanel_.key_up(key, audioMixer_.synthesizer());
     const std::string released = lowercase(key);
+    if (released == "v" && dragSnapHeld_) {
+        dragSnapHeld_ = false;
+        if (gizmoDragging_) update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);
+    }
     if (spriteLevelPlaying_ && !control && !alt) {
         if ((released == "left" || released == "a") && spriteLevelInput_.moveX < 0.0F)
             spriteLevelInput_.moveX = 0.0F;
@@ -6128,6 +6132,21 @@ void NativeEditorController::update_placement_preview(int x, int y) {
     if (placementMode_ == PlacementTarget::NoTarget) return;
     apply_transform_preview(placementChanges_, false);
     placementPoint_.reset();
+    if (placementMode_ == PlacementTarget::MeshVertex || placementMode_ == PlacementTarget::MeshEdge ||
+        placementMode_ == PlacementTarget::MeshFace) {
+        const auto snap = find_snap_target(x, y, placementMode_ == PlacementTarget::MeshVertex ? SnapTargetKind::Vertex
+                                                 : placementMode_ == PlacementTarget::MeshEdge ? SnapTargetKind::EdgeMidpoint
+                                                                                               : SnapTargetKind::FaceCenter);
+        if (!snap) return;
+        placementPoint_ = snap->point;
+        const Float3 delta = subtract(snap->point, placementPivot_);
+        for (ObjectTransformChange& change : placementChanges_) {
+            change.after = change.before;
+            change.after.position = add(change.before.position, delta);
+        }
+        apply_transform_preview(placementChanges_, true);
+        return;
+    }
     const auto hits = pick_editor_document_all(workspace_.document(),
         make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
         10000.0F, &viewportSettings_.isolatedObjects);
@@ -6359,6 +6378,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
     gizmoStartX_ = x;
     gizmoStartY_ = y;
     gizmoLastX_ = x; gizmoLastY_ = y; gizmoLastModifiers_ = modifiers;
+    dragSnapTarget_.reset();
     gizmoPivot_ = selection_pivot();
     gizmoChanges_ = selection_transform_snapshot();
     gizmoSizeChanges_.clear();
@@ -6420,6 +6440,8 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
         const float parsed = std::strtof(transformNumeric_.c_str(), &end);
         if (end && *end == '\0' && std::isfinite(parsed)) numeric = parsed;
     }
+    // Held V: snap the pivot onto the nearest target under the cursor instead of following an axis.
+    if (!numeric && apply_drag_snap(x, y)) return;
     if (polygonDragBefore_) {
         auto* object=workspace_.document().find_object(polygonSelection_.object);
         if (!object || !object->polygon) { finish_gizmo_drag(true); return; }
@@ -7623,7 +7645,8 @@ camera_menu_dispatch_complete:
     }
     if (actionId == "transform.place_surface" || actionId == "transform.place_voxel_corner" ||
         actionId == "transform.place_voxel_edge" || actionId == "transform.place_voxel_face" ||
-        actionId == "transform.place_bounds_vertex" || actionId == "transform.place_collision_vertex") {
+        actionId == "transform.place_bounds_vertex" || actionId == "transform.place_collision_vertex" ||
+        actionId == "transform.place_mesh_vertex" || actionId == "transform.place_mesh_edge" || actionId == "transform.place_mesh_face") {
         if (workspace_.selected_objects().empty()) { set_status("Select an object to place", true); return false; }
         if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
         for (EditorObjectId id : workspace_.selected_objects()) {
@@ -7637,6 +7660,9 @@ camera_menu_dispatch_complete:
             : actionId == "transform.place_voxel_edge" ? PlacementTarget::VoxelEdge
             : actionId == "transform.place_voxel_face" ? PlacementTarget::VoxelFace
             : actionId == "transform.place_collision_vertex" ? PlacementTarget::CollisionBoxVertex
+            : actionId == "transform.place_mesh_vertex" ? PlacementTarget::MeshVertex
+            : actionId == "transform.place_mesh_edge" ? PlacementTarget::MeshEdge
+            : actionId == "transform.place_mesh_face" ? PlacementTarget::MeshFace
             : PlacementTarget::BoundsVertex;
         placementChanges_ = selection_transform_snapshot();
         placementPivot_ = selection_pivot();
@@ -8541,6 +8567,16 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     }
     if (importOptions_.open) { (void)handle_import_options_key(normalized); return; }
     if (filePicker_.open) { (void)handle_file_picker_key(normalized); return; }
+    // Hold V to snap a Move drag to vertices, edges, faces, corners or surfaces (ART-026).
+    if (normalized == "v" && !control && !alt && textEdit_.kind == TextEditKind::Inactive && !commandPaletteOpen_ &&
+        activeTool_ == EditorToolId::Translate && (gizmoDragging_ || focusRegion_ == EditorFocusRegion::Viewport)) {
+        if (!dragSnapHeld_) {
+            dragSnapHeld_ = true;
+            if (gizmoDragging_) update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);
+            else set_status("Snap on while V is held: drag the Move gizmo onto a vertex, edge, face or surface", false, 2.0F);
+        }
+        return;
+    }
     if (gizmoDragging_ && !control) {
         if (normalized == "enter" || normalized == "return") { finish_gizmo_drag(false); return; }
         if (normalized == "escape") { finish_gizmo_drag(true); return; }

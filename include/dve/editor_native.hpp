@@ -118,8 +118,18 @@ struct EditorToolInfo {
 [[nodiscard]] const EditorToolInfo& editor_tool_info(EditorToolId tool) noexcept;
 
 enum class EditorTransformSpace : std::uint8_t { World, Local };
-enum class PlacementTarget : std::uint8_t { NoTarget, Surface, VoxelCorner, VoxelEdge, VoxelFace, BoundsVertex, CollisionBoxVertex };
+enum class PlacementTarget : std::uint8_t { NoTarget, Surface, VoxelCorner, VoxelEdge, VoxelFace, BoundsVertex, CollisionBoxVertex,
+                                            MeshVertex, MeshEdge, MeshFace };
 enum class PivotMode : std::uint8_t { BoundsCenter, ActiveObject, WorldOrigin, Custom };
+// Point snapping (ART-025/026): what a held-V Move drag or a placement mode snaps to.
+enum class SnapTargetKind : std::uint8_t { Vertex, EdgeMidpoint, FaceCenter, VoxelCorner, CollisionVertex, BoundsVertex, Surface };
+struct SnapTarget {
+    Float3 point{};
+    Float3 normal{0.0F, 1.0F, 0.0F};
+    SnapTargetKind kind{SnapTargetKind::Surface};
+    EditorObjectId object{};
+};
+[[nodiscard]] const char* snap_target_name(SnapTargetKind kind) noexcept;
 
 enum class PointerButton : std::uint8_t { NoButton, Primary, Auxiliary, Secondary, Extra1 };
 
@@ -729,6 +739,15 @@ public:
     [[nodiscard]] std::string marquee_label() const;
     [[nodiscard]] const MarqueeState& marquee() const noexcept { return marquee_; }
     [[nodiscard]] std::optional<Float3> placement_target() const noexcept { return placementPoint_; }
+    // The nearest snap target under a viewport point (selected objects excluded, and the mesh
+    // being edited when moving components): vertices, then edge midpoints, face centres, voxel and
+    // collision-box corners, bounds corners, and finally the surface itself.
+    // `only` limits the search to one kind (placement modes such as Snap to Mesh Vertex).
+    [[nodiscard]] std::optional<SnapTarget> find_snap_target(int x, int y, std::optional<SnapTargetKind> only = std::nullopt) const;
+    // While a Move drag snaps (V held): the target it snapped to, and the point it moved from.
+    [[nodiscard]] std::optional<SnapTarget> drag_snap_target() const noexcept { return gizmoDragging_ ? dragSnapTarget_ : std::nullopt; }
+    [[nodiscard]] bool drag_snap_held() const noexcept { return dragSnapHeld_; }
+    [[nodiscard]] Float3 drag_snap_source() const noexcept { return gizmoPivot_; }
     [[nodiscard]] std::optional<EditorObjectBounds> scale_preview_bounds() const noexcept { return scalePreviewBounds_; }
     [[nodiscard]] Float3 current_pivot() const noexcept { return selection_pivot(); }
     [[nodiscard]] const HierarchyDragState& hierarchy_drag() const noexcept { return hierarchyDrag_; }
@@ -1638,6 +1657,11 @@ private:
     std::chrono::steady_clock::time_point lastPickTime_{};
     PlacementTarget placementMode_{PlacementTarget::NoTarget};
     std::optional<Float3> placementPoint_;
+    bool dragSnapHeld_{};
+    std::optional<SnapTarget> dragSnapTarget_;
+    std::optional<SnapTargetKind> placementSnapKind_;  // placement modes that snap to mesh features
+    // Held-V snapping inside update_gizmo_drag (true: the drag was handled).
+    bool apply_drag_snap(int x, int y);
     std::vector<ObjectTransformChange> placementChanges_;
     Float3 placementPivot_{};
     bool alignToSurfaceNormal_{};

@@ -5347,6 +5347,43 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
     }
 
+    // Point snapping: source pivot, target and the line between (held-V Move drags and the
+    // placement modes), so the precise alignment is visible before it is committed.
+    {
+        std::optional<Float3> target;
+        std::optional<Float3> source;
+        std::string label;
+        if (const auto snap = controller.drag_snap_target()) {
+            target = snap->point;
+            source = controller.drag_snap_source();
+            label = std::string("snap: ") + snap_target_name(snap->kind);
+        } else if (const auto placed = controller.placement_target()) {
+            target = placed;
+            label = "place here (click)";
+        }
+        if (target) {
+            const UiRect viewport = controller.layout().viewport;
+            const ScreenPoint t = project_world_to_screen(controller.camera(), viewport, *target);
+            if (t.visible) {
+                const int tx = static_cast<int>(std::lround(t.x)), ty = static_cast<int>(std::lround(t.y));
+                const EditorColor snapColor = rgb(255, 214, 92);
+                painter.line(tx - 7, ty, tx, ty - 7, snapColor, 2);
+                painter.line(tx, ty - 7, tx + 7, ty, snapColor, 2);
+                painter.line(tx + 7, ty, tx, ty + 7, snapColor, 2);
+                painter.line(tx, ty + 7, tx - 7, ty, snapColor, 2);
+                painter.text(tx + 11, ty - 9, label, snapColor);
+                if (source) {
+                    const ScreenPoint s = project_world_to_screen(controller.camera(), viewport, *source);
+                    if (s.visible) {
+                        const int sx = static_cast<int>(std::lround(s.x)), sy = static_cast<int>(std::lround(s.y));
+                        painter.outline({sx - 4, sy - 4, 9, 9}, snapColor);
+                        if (std::abs(sx - tx) + std::abs(sy - ty) > 3) painter.line(sx, sy, tx, ty, muted, 1);
+                    }
+                }
+            }
+        }
+    }
+
     // Naming a selection set: a small field at the top of the viewport.
     if (controller.text_edit().kind == TextEditKind::SelectionSetName) {
         const UiRect viewport = controller.layout().viewport;

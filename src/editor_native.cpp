@@ -2724,7 +2724,8 @@ void NativeEditorController::recompute_layout() {
             // Scrolled out of view -> not clickable.
             const int top = std::max(rect.y, detailTop);
             const int bottom = std::min(rect.y + rect.height, layout_.inspectorContentClipY);
-            if (bottom <= top) rect = {};
+            // Partly under the toggle block: not clickable either (its boxes would cover a toggle).
+            if (bottom <= top || rect.y + rect.height > layout_.inspectorContentClipY) rect = {};
             else { rect.y = top; rect.height = bottom - top; }
         }
     } else {

@@ -63,9 +63,11 @@ const char* snap_target_name(SnapTargetKind kind) noexcept {
     return "surface";
 }
 
-std::optional<SnapTarget> NativeEditorController::find_snap_target(int x, int y, std::optional<SnapTargetKind> only) const {
+std::optional<SnapTarget> NativeEditorController::find_snap_target(int x, int y, std::optional<SnapTargetKind> only,
+                                                                   bool includeSelection) const {
     const EditorDocument& document = workspace_.document();
     const auto excluded = [&](EditorObjectId id) {
+        if (includeSelection) return false;
         if (selectionDomain_ == SelectionDomain::Polygons) return id == polygonSelection_.object;
         return workspace_.is_selected(id);
     };
@@ -174,7 +176,8 @@ std::optional<SnapTarget> NativeEditorController::find_snap_target(int x, int y,
 
 bool NativeEditorController::apply_drag_snap(int x, int y) {
     if (!dragSnapHeld_ || activeTool_ != EditorToolId::Translate) { dragSnapTarget_.reset(); return false; }
-    const auto target = find_snap_target(x, y);
+    // Editing a pivot may snap it to the object's own vertices and corners.
+    const auto target = find_snap_target(x, y, std::nullopt, origin_drag());
     if (!target) {
         dragSnapTarget_.reset();
         set_status("Snap (V): move over something to snap to", false, 1.0F);
@@ -204,7 +207,8 @@ bool NativeEditorController::apply_drag_snap(int x, int y) {
             change.after.rotation = turned;
         }
     }
-    apply_transform_preview(gizmoChanges_, true);
+    if (origin_drag()) originDragPoint_ = gizmoChanges_.front().after.position;  // Edit Pivot: the marker only
+    else apply_transform_preview(gizmoChanges_, true);
     set_status(std::string("Snapped to ") + snap_target_name(target->kind) + where +
                (align ? " (aligned to the normal)" : "") + " (release V for axis moves)", false, 1.0F);
     return true;

@@ -7,6 +7,8 @@
 
 #include <cmath>
 
+#include "dve/editor_number_field.hpp"
+
 namespace dve::editor {
 
 bool NativeEditorController::resample_voxels_to_scale() {
@@ -58,6 +60,19 @@ bool NativeEditorController::resample_voxels_to_scale() {
                                     " to their scale (voxels rebuilt, Scale back to 1; Undo restores)"
                               : result.message, !result.success);
     return result.success;
+}
+
+std::string NativeEditorController::transform_numeric_label() const {
+    if (!gizmoDragging_ || transformNumeric_.empty()) return {};
+    const bool rotate = activeTool_ == EditorToolId::Rotate, scale = activeTool_ == EditorToolId::Scale;
+    const NumberFieldUnit unit = rotate ? NumberFieldUnit::Degrees : scale ? NumberFieldUnit::Count : NumberFieldUnit::Meters;
+    std::string label = std::string(rotate ? "Rotate " : scale ? "Scale " : "Move ") +
+                        (gizmoAxis_ == 1 ? "X" : gizmoAxis_ == 2 ? "Y" : gizmoAxis_ == 3 ? "Z" : "XYZ") + ": " + transformNumeric_;
+    const NumberFieldParse parsed = parse_number_field(transformNumeric_, unit, 0.0);
+    if (!parsed.ok) return label + "\xE2\x80\xA6";  // still typing
+    const std::string shown = format_number_field(parsed.value, unit) + (rotate ? "\xC2\xB0" : scale ? "\xC3\x97" : " m");
+    if (shown.rfind(transformNumeric_, 0) != 0) label += " = " + shown;
+    return label + "   (X/Y/Z axis, Enter applies, Esc cancels)";
 }
 
 }  // namespace dve::editor

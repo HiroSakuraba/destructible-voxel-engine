@@ -6455,11 +6455,14 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
     const Float3 worldAxis = gizmo_axis_world(gizmoAxis_);
     const EditorPreferences& preferences = workspace_.preferences();
     const bool temporaryOverride = (modifiers & 1U) != 0U;
+    // A typed value (ART-029): meters for Move (cm, mm, ft, in...), degrees for Rotate (rad,
+    // turn), a factor for Scale. Unfinished text ("1.", "2c") simply waits for more.
     std::optional<float> numeric;
     if (!transformNumeric_.empty() && transformNumeric_ != "-" && transformNumeric_ != ".") {
-        char* end = nullptr;
-        const float parsed = std::strtof(transformNumeric_.c_str(), &end);
-        if (end && *end == '\0' && std::isfinite(parsed)) numeric = parsed;
+        const NumberFieldParse parsed = parse_number_field(transformNumeric_,
+            activeTool_ == EditorToolId::Rotate ? NumberFieldUnit::Degrees
+            : activeTool_ == EditorToolId::Scale ? NumberFieldUnit::Count : NumberFieldUnit::Meters, 0.0);
+        if (parsed.ok && std::isfinite(parsed.value) && std::abs(parsed.value) <= 1.0e6) numeric = static_cast<float>(parsed.value);
     }
     // Held V: snap the pivot onto the nearest target under the cursor instead of following an axis.
     if (!numeric && apply_drag_snap(x, y)) return;
@@ -8608,6 +8611,32 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             return;
         }
         const char digit = normalized.size() == 1U ? normalized.front() : '\0';
+        // X / Y / Z switch the axis while dragging (also from the uniform Scale handle).
+        if ((digit == 'x' || digit == 'y' || digit == 'z') && !alt && gizmoAxis_ != 0) {
+            const int axis = digit == 'x' ? 1 : digit == 'y' ? 2 : 3;
+            if (axis != gizmoAxis_) {
+                gizmoAxis_ = axis;
+                if (activeTool_ == EditorToolId::Rotate) {
+                    // Measure the turn around the new axis from here on.
+                    const Float3 axisWorld = gizmo_axis_world(gizmoAxis_);
+                    gizmo_ring_basis(axisWorld, gizmoDragBasisU_, gizmoDragBasisV_);
+                    float angle = 0.0F;
+                    gizmoDragPlane_ = gizmo_pointer_ring_angle(camera_, layout_.viewport, gizmoPivot_, axisWorld, gizmoDragBasisU_,
+                                                               gizmoDragBasisV_, gizmoLastX_, gizmoLastY_, angle);
+                    gizmoDragWorldAngle_ = angle;
+                    gizmoDragWorldAccum_ = 0.0F;
+                }
+                update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);
+            }
+            return;
+        }
+        // Unit letters after a number: m, cm, mm, km, ft, in for Move; deg, rad, turn for Rotate.
+        if (normalized.size() == 1U && std::string_view("cmkftinradegu").find(digit) != std::string_view::npos &&
+            !transformNumeric_.empty() && activeTool_ != EditorToolId::Scale && transformNumeric_.size() < 16U) {
+            transformNumeric_.push_back(digit);
+            update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);
+            return;
+        }
         if ((digit >= '0' && digit <= '9') ||
             ((digit == '.' || normalized == "period") && transformNumeric_.find('.') == std::string::npos) ||
             ((digit == '-' || normalized == "minus") && transformNumeric_.empty())) {
@@ -8616,6 +8645,9 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);
             return;
         }
+        // While a value is being typed, other letters are not shortcuts (a stray key must not
+        // switch tools in the middle of the drag).
+        if (!transformNumeric_.empty() && normalized.size() == 1U) return;
     }
     // UI zoom hotkeys work in every panel (accessibility), except while a shortcut is being captured.
     if (!shortcutPanel_.capturing && !(settingsPanel_.open && settingsPanel_.valueEditing)) {

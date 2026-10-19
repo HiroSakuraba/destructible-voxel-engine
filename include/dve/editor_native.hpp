@@ -752,6 +752,9 @@ public:
     // Voxel > Resample Voxels to Scale: rebuild the selected voxel objects' cells at their current
     // per-axis scale and set the scale back to 1 (one undo step; the explicit destructive step).
     bool resample_voxels_to_scale();
+    // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
+    [[nodiscard]] std::string transform_numeric_label() const;
+    [[nodiscard]] const std::string& transform_numeric_text() const noexcept { return transformNumeric_; }
     [[nodiscard]] Float3 drag_snap_source() const noexcept { return gizmoPivot_; }
     [[nodiscard]] std::optional<EditorObjectBounds> scale_preview_bounds() const noexcept { return scalePreviewBounds_; }
     [[nodiscard]] Float3 current_pivot() const noexcept { return selection_pivot(); }

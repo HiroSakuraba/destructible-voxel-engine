@@ -5945,10 +5945,20 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
 
     if (controller.pending_destructive_confirmation()) {
         painter.fill({0, 0, width, height}, rgb(0,0,0));
-        const UiRect box{width/2 - 300, height/2 - 50, 600, 100};
+        // Messages may run to two lines ("\n"); the box widens to fit them.
+        const std::string message(controller.pending_confirmation_message());
+        const std::size_t split = message.find('\n');
+        const int longest = split == std::string::npos ? painter.text_width(message)
+                                                       : std::max(painter.text_width(message.substr(0, split)), painter.text_width(message.substr(split + 1)));
+        const int boxWidth = std::min(width - 40, std::max(600, longest + 32));
+        const UiRect box{width/2 - boxWidth/2, height/2 - 50, boxWidth, 100};
         painter.fill(box, panel2);
         painter.outline(box, rgb(255,190,80));
-        painter.text(box.x + 16, box.y + 42, std::string(controller.pending_confirmation_message()), text);
+        if (split == std::string::npos) painter.text(box.x + 16, box.y + 42, message, text);
+        else {
+            painter.text(box.x + 16, box.y + 30, message.substr(0, split), text);
+            painter.text(box.x + 16, box.y + 56, message.substr(split + 1), text);
+        }
     }
 }
 

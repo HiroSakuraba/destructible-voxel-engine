@@ -195,6 +195,7 @@ bool NativeEditorController::transform_polygon_components(Float3 translation, Qu
         !std::isfinite(rotation.z)||!std::isfinite(rotation.w)) return false;
     if (length_squared(translation)==0 && scale.x==1 && scale.y==1 && scale.z==1 &&
         rotation.x==0 && rotation.y==0 && rotation.z==0 && std::abs(rotation.w)==1) return true;
+    if (ask_before_cad_mesh_edit("transform")) return false;  // CAD objects: ask first (editor_native_cad_guard.cpp)
     const auto before = capture_selection_snapshot();
     auto mesh = *object->polygon;
     const auto vertices = polygon_selected_vertices(mesh,polygonSelection_);
@@ -213,6 +214,7 @@ bool NativeEditorController::transform_polygon_components(Float3 translation, Qu
         std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),"Transform polygon components"));
     if (result.success) workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
     set_status(result.success ? "Transformed polygon components" : result.message,!result.success);
+    settle_cad_link_drop();  // a confirmed CAD link drop joins this edit as one undo step
     return result.success;
 }
 

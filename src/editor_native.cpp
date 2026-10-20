@@ -2935,6 +2935,7 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
 }
 
 void NativeEditorController::update(float elapsedSeconds) {
+    settle_cad_link_drop();  // a confirmed CAD link drop waits for its edit (editor_native_cad_guard.cpp)
     if (appliedSettingsRevision_ != workspace_.settings().revision()) apply_settings_to_runtime();
     else if (audioSettingsPending_) {
         audioSettingsPending_ = !apply_audio_settings_to_runtime();
@@ -3169,6 +3170,8 @@ std::string_view NativeEditorController::pending_confirmation_message() const no
             return "Unsaved changes will be lost. Enter to open the other scene, Escape to cancel.";
         case PendingDestructiveAction::OpenProject:
             return "Unsaved changes will be lost. Enter to open the other project, Escape to cancel.";
+        case PendingDestructiveAction::DropCadLink:
+            return pendingCadMessage_;
         case PendingDestructiveAction::Inactive:
             break;
     }
@@ -3229,12 +3232,20 @@ void NativeEditorController::confirm_pending_destructive_action() {
         const std::filesystem::path path = std::exchange(pendingOpenPath_, {});
         if (action == PendingDestructiveAction::OpenScene) (void)open_scene_now(path);
         else (void)open_project_now(path);
+    } else if (action == PendingDestructiveAction::DropCadLink) {
+        drop_cad_link_and_continue();
     }
 }
 
 void NativeEditorController::cancel_pending_destructive_action() {
     if (pendingDestructiveAction_ == PendingDestructiveAction::Inactive) return;
+    const bool cad = pendingDestructiveAction_ == PendingDestructiveAction::DropCadLink;
     pendingDestructiveAction_ = PendingDestructiveAction::Inactive;
+    if (cad) {
+        pendingCadAction_.clear(); pendingCadObjects_.clear();
+        set_status("Cancelled: the CAD link is kept");
+        return;
+    }
     set_status("Destructive action cancelled");
 }
 
@@ -6454,6 +6465,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
             return;
         }
     }
+    if (selectionDomain_ == SelectionDomain::Polygons && ask_before_cad_mesh_edit("gizmo")) { gizmoAxis_ = 0; return; }
     if (selectionDomain_ == SelectionDomain::Polygons) {
         close_previews_for_voxel_edit("polygon transform");
         const auto* object=workspace_.document().find_object(polygonSelection_.object);
@@ -6822,6 +6834,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         actionId != "subdiv.conversion_apply" && actionId != "subdiv.conversion_cancel") {
         set_status("Apply or cancel the voxel/conversion preview first",true); return false;
     }
+    if (ask_before_cad_mesh_edit(actionId)) return std::exchange(cadReplayRan_, false);
     if (actionId == "voxel.authoring_apply" || actionId == "subdiv.conversion_apply") return apply_voxel_authoring_preview();
     if (actionId == "voxel.authoring_cancel" || actionId == "subdiv.conversion_cancel") {
         if (!voxel_authoring_active()) { set_status("No voxel/conversion preview is open",true); return false; }

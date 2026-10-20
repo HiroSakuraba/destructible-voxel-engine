@@ -2006,6 +2006,8 @@ void NativeEditorController::refresh_menu_state() noexcept {
         const std::string voxelSizeReason = voxel_size_scale_disabled_reason();
         for (std::string_view id : {"transform.scale_voxel_size_up", "transform.scale_voxel_size_down"})
             enabled(id, voxelSizeReason.empty(), voxelSizeReason);
+        const std::string resampleReason = resample_to_scale_disabled_reason();
+        enabled("voxel.resample_to_scale", resampleReason.empty(), resampleReason);
     }
     enabled("edit.paste", !clipboard_.empty() || (voxelClipboard_ && !voxelClipboard_->cells.empty()),
             "Copy or cut an object (or voxels) before pasting.");
@@ -2049,8 +2051,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
             enabled("polygon.import_exact", asset && is_exact_cad_source(asset->relativePath) && !playActive,
                     playActive ? "Stop Play or Simulate before importing."
                                : "Select a STEP, BREP or OpenUSD B-rep (.usda) file in the Assets panel first.");
-            enabled("polygon.cad_detail", !selected_exact_objects().empty() && !playActive,
-                    playActive ? "Stop Play or Simulate first." : "Select a CAD object (imported with Import Exact CAD) first.");
+            {
+                const std::string cadReason = cad_detail_disabled_reason();
+                enabled("polygon.cad_detail", cadReason.empty(), cadReason);
+            }
             for (std::string_view id : {"file.import"})
                 enabled(id, model && !playActive, playActive ? "Stop Play or Simulate before importing."
                                                              : "Select an OBJ, glTF or GLB model in the Assets panel first.");
@@ -2225,6 +2229,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
         checked("polygon.face_mode",selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Face);
     }
     refresh_mesh_authoring_menu_state();
+    refresh_nurbs_menu_state();
     refresh_subdivision_menu_state();
     enabled("text3d.cancel", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     // Cook, Package and Documentation have no handler in this editor build: say so up front.
@@ -3425,6 +3430,7 @@ void NativeEditorController::begin_text_edit(TextEditKind kind, EditorObjectId o
 void NativeEditorController::commit_text_edit() {
     const TextEditKind kind = textEdit_.kind;
     if (kind == TextEditKind::Inactive) return;
+    if (kind == TextEditKind::NurbsControl) { commit_nurbs_field(); return; }
     if (kind == TextEditKind::SlicePoint || kind == TextEditKind::SliceNormal) {
         if (!voxelSlice_.active() || voxelSlice_.target() != textEdit_.objectId ||
             workspace_.selected_object() != textEdit_.objectId) { cancel_text_edit(); return; }
@@ -4304,6 +4310,8 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
+        !settingsPanel_.open && !commandPaletteOpen_ && nurbs_pointer_down(button,x,y)) {refresh_menu_state();return;}
     if (!longJob_ && voxel_authoring_pointer_down(button,x,y,modifiers)) return;
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers)){refresh_menu_state();return;}
@@ -6034,6 +6042,8 @@ bool NativeEditorController::toggle_pivot_editing() {
     if (workspace_.selection_count() == 1 && active && !is_group(*active)) {
         // One voxel object or mesh: Move drags only its origin; the geometry stays put.
         if (const std::string refusal = origin_edit_refusal(*active); !refusal.empty()) { set_status(refusal, true); return false; }
+        // Component or cell selections would take the drag; the pivot belongs to the object.
+        if (selectionDomain_ != SelectionDomain::Objects) set_selection_domain(SelectionDomain::Objects);
         pivotEditing_ = true;
         pivotEditTarget_ = *active;
         set_active_tool(EditorToolId::Translate);
@@ -6533,13 +6543,10 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
     const bool temporaryOverride = (modifiers & 1U) != 0U;
     // A typed value (ART-029): meters for Move (cm, mm, ft, in...), degrees for Rotate (rad,
     // turn), a factor for Scale. Unfinished text ("1.", "2c") simply waits for more.
-    std::optional<float> numeric;
-    if (!transformNumeric_.empty() && transformNumeric_ != "-" && transformNumeric_ != ".") {
-        const NumberFieldParse parsed = parse_number_field(transformNumeric_,
-            activeTool_ == EditorToolId::Rotate ? NumberFieldUnit::Degrees
-            : activeTool_ == EditorToolId::Scale ? NumberFieldUnit::Count : NumberFieldUnit::Meters, 0.0);
-        if (parsed.ok && std::isfinite(parsed.value) && std::abs(parsed.value) <= 1.0e6) numeric = static_cast<float>(parsed.value);
-    }
+    const std::optional<float> numeric = transform_numeric_value();
+    // Typed text that does not parse yet ("2c" on the way to "2cm", "-", "."): keep the last
+    // preview rather than falling back to the pointer, so Enter never commits an unrelated value.
+    if (!transformNumeric_.empty() && !numeric) return;
     // Held V: snap the pivot onto the nearest target under the cursor instead of following an axis.
     if (!numeric && apply_drag_snap(x, y)) return;
     if (polygonDragBefore_) {
@@ -6754,10 +6761,17 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
                 if (originDragPoint_) {
                     std::string error;
                     Float3 placed{};
-                    auto command = make_move_origin_command(gizmoChanges_.front().id, *originDragPoint_, &placed, &error);
+                    Int3 cells{};
+                    const EditorObjectId target = gizmoChanges_.front().id;
+                    auto command = make_move_origin_command(target, *originDragPoint_, &placed, &error, &cells);
                     if (!command) set_status(error, true);
                     else {
+                        const auto selection = capture_selection_snapshot();
                         const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
+                        if (result.success) {
+                            if (target == voxelSelectionObject_) remap_voxel_selection(cells);
+                            workspace_.commands().set_last_selection_transition(selection, capture_selection_snapshot());
+                        }
                         set_status(result.success ? "Moved the pivot (geometry stays put)" : result.message, !result.success);
                     }
                 }
@@ -6815,6 +6829,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         if (actionId == "inspector.field.reset") return reset_number_field(field, axis);
         if (actionId == "inspector.field.reset_row") {
             // One undo step for the three axes.
+            if (field == NumberFieldId::Scale) return set_number_field(field, axis, "1 1 1", "Reset");
             const auto ids = number_field_objects(field);
             if (ids.empty()) { set_status("Nothing selected", true); return false; }
             if (const std::string refusal = number_field_refusal(field); !refusal.empty()) { set_status(refusal, true); return false; }
@@ -7111,6 +7126,13 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_selection_domain(selectionDomain_ == SelectionDomain::Objects ? SelectionDomain::Voxels : SelectionDomain::Objects);
         return true;
     }
+    if (actionId.starts_with("mesh.") || actionId.starts_with("mirror.") ||
+        (actionId.starts_with("polygon.") && actionId!="polygon.create_plane" && actionId!="polygon.import" && actionId!="polygon.import_exact") || actionId=="subdiv.from_polygon") {
+        for(auto id:workspace_.selected_objects()) { const auto* object=workspace_.document().find_object(id);
+            if(object && object->is_nurbs()) {set_status("Use NURBS controls or Bake to New Polygon before polygon editing",true);return false;}
+        }
+    }
+    if (actionId.starts_with("nurbs.")) return dispatch_nurbs_action(actionId);
     if (actionId.starts_with("subdiv.") || actionId=="create.subdivision")
         return dispatch_subdivision_action(actionId=="create.subdivision" ? "subdiv.create_cube" : actionId);
     if (actionId.starts_with("mirror.")) {
@@ -8719,7 +8741,14 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         return;
     }
     if (gizmoDragging_ && !control) {
-        if (normalized == "enter" || normalized == "return") { finish_gizmo_drag(false); return; }
+        if (normalized == "enter" || normalized == "return") {
+            if (!transformNumeric_.empty() && !transform_numeric_value()) {
+                set_status("\"" + transformNumeric_ + "\" is not a value yet; finish it, Backspace, or Esc to cancel", true);
+                return;
+            }
+            finish_gizmo_drag(false);
+            return;
+        }
         if (normalized == "escape") { finish_gizmo_drag(true); return; }
         if (normalized == "backspace") {
             if (!transformNumeric_.empty()) transformNumeric_.pop_back();
@@ -9488,7 +9517,8 @@ std::string NativeEditorController::number_field_text(NumberFieldId field, int a
         if (!shared) shared = value;
         else if (std::abs(*shared - value) > 1.0e-5F) return "\xE2\x80\x94";  // em dash: the objects differ
     }
-    return format_number_field(*shared, number_field_unit(field));
+    // Scale is unitless but fractional: show it with the 4-decimal precision, not as a count.
+    return format_number_field(*shared, field == NumberFieldId::Scale ? NumberFieldUnit::Meters : number_field_unit(field));
 }
 
 bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std::string_view text, std::string_view verb) {

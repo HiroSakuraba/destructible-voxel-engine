@@ -89,6 +89,7 @@ std::optional<SelectionQuery> parse_selection_query(std::string_view text, std::
 std::string selection_object_kind(const EditorDocument& document, const EditorObject& object) {
     if (object.text3d) return "text";
     if (object.gaborVolume) return "gabor";
+    if (object.is_nurbs()) return "nurbs";
     if (object.subdivision) return "subdivision";
     if (object.polygon) return "mesh";
     if (object.voxels && object.voxels->occupied_voxel_count() > 0) return "voxels";
@@ -127,7 +128,7 @@ bool selection_query_matches(const EditorDocument& document, const EditorObject&
             bool hit = false;
             if (term.key.empty()) hit = contains_text(object.name, value);
             else if (term.key == "type") hit = selection_object_kind(document, object) == value ||
-                                               (value == "polygon" && object.polygon && !object.subdivision);
+                                               (value == "polygon" && object.is_polygon());
             else if (term.key == "tag") hit = std::any_of(object.tags.begin(), object.tags.end(), [&](const std::string& tag) { return lower(tag) == value; });
             else if (term.key == "layer") {
                 std::uint32_t layer{};

@@ -6473,13 +6473,10 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
     const bool temporaryOverride = (modifiers & 1U) != 0U;
     // A typed value (ART-029): meters for Move (cm, mm, ft, in...), degrees for Rotate (rad,
     // turn), a factor for Scale. Unfinished text ("1.", "2c") simply waits for more.
-    std::optional<float> numeric;
-    if (!transformNumeric_.empty() && transformNumeric_ != "-" && transformNumeric_ != ".") {
-        const NumberFieldParse parsed = parse_number_field(transformNumeric_,
-            activeTool_ == EditorToolId::Rotate ? NumberFieldUnit::Degrees
-            : activeTool_ == EditorToolId::Scale ? NumberFieldUnit::Count : NumberFieldUnit::Meters, 0.0);
-        if (parsed.ok && std::isfinite(parsed.value) && std::abs(parsed.value) <= 1.0e6) numeric = static_cast<float>(parsed.value);
-    }
+    const std::optional<float> numeric = transform_numeric_value();
+    // Typed text that does not parse yet ("2c" on the way to "2cm", "-", "."): keep the last
+    // preview rather than falling back to the pointer, so Enter never commits an unrelated value.
+    if (!transformNumeric_.empty() && !numeric) return;
     // Held V: snap the pivot onto the nearest target under the cursor instead of following an axis.
     if (!numeric && apply_drag_snap(x, y)) return;
     if (polygonDragBefore_) {
@@ -8633,7 +8630,14 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         return;
     }
     if (gizmoDragging_ && !control) {
-        if (normalized == "enter" || normalized == "return") { finish_gizmo_drag(false); return; }
+        if (normalized == "enter" || normalized == "return") {
+            if (!transformNumeric_.empty() && !transform_numeric_value()) {
+                set_status("\"" + transformNumeric_ + "\" is not a value yet; finish it, Backspace, or Esc to cancel", true);
+                return;
+            }
+            finish_gizmo_drag(false);
+            return;
+        }
         if (normalized == "escape") { finish_gizmo_drag(true); return; }
         if (normalized == "backspace") {
             if (!transformNumeric_.empty()) transformNumeric_.pop_back();

@@ -754,6 +754,8 @@ public:
     bool resample_voxels_to_scale();
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
     [[nodiscard]] std::string transform_numeric_label() const;
+    // The typed value parsed in the active tool's unit, or nothing while it is empty or unfinished.
+    [[nodiscard]] std::optional<float> transform_numeric_value() const;
     [[nodiscard]] const std::string& transform_numeric_text() const noexcept { return transformNumeric_; }
     [[nodiscard]] Float3 drag_snap_source() const noexcept { return gizmoPivot_; }
     [[nodiscard]] std::optional<EditorObjectBounds> scale_preview_bounds() const noexcept { return scalePreviewBounds_; }

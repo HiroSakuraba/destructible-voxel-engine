@@ -4687,6 +4687,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
 
     controller.draw_mesh_authoring(viewportPainter,viewport);
+    controller.draw_nurbs(viewportPainter,viewport);
     if (controller.play_session().active()) {
         const EditorPlaySession& session = controller.play_session();
         const EditorPlaySessionTelemetry& telemetry = session.telemetry();

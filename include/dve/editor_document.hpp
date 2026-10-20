@@ -72,7 +72,8 @@ struct EditorObject {
     std::uint32_t layer{};
     std::optional<EditorPrefabLink> prefabLink;
 
-    [[nodiscard]] bool is_polygon() const noexcept { return polygon.has_value() && !subdivision; }
+    [[nodiscard]] bool is_nurbs() const noexcept { return find_component_by_type(components,"dve.nurbs")!=nullptr; }
+    [[nodiscard]] bool is_polygon() const noexcept { return polygon.has_value() && !subdivision && !is_nurbs(); }
     [[nodiscard]] bool is_subdivision() const noexcept { return subdivision.has_value(); }
     [[nodiscard]] bool is_text3d() const noexcept { return text3d.has_value(); }
     [[nodiscard]] bool is_gabor_volume() const noexcept { return gaborVolume.has_value(); }

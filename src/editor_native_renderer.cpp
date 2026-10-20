@@ -4272,8 +4272,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         if (!gizmoAxes.empty() && gizmoAxes.front().start.visible) {
             const int px = static_cast<int>(gizmoAxes.front().start.x);
             const int py = static_cast<int>(gizmoAxes.front().start.y);
-            viewportPainter.fill({px - 4, py - 4, 9, 9}, rgb(240, 242, 245));
-            viewportPainter.outline({px - 4, py - 4, 9, 9}, underlay);
+            // Scale: the centre square is the uniform-scale handle, so it is larger and lights up.
+            const int half = scaleMode ? (activeAxis == 4 ? 7 : 6) : 4;
+            viewportPainter.fill({px - half, py - half, half * 2 + 1, half * 2 + 1},
+                                 scaleMode && activeAxis == 4 ? rgb(255, 230, 120) : rgb(240, 242, 245));
+            viewportPainter.outline({px - half, py - half, half * 2 + 1, half * 2 + 1}, underlay);
         }
     }
 
@@ -4880,7 +4883,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         if (rect.field != field) continue;
                         const auto& edit = controller.text_edit();
                         const TextEditKind kind = field == NumberFieldId::Position ? TextEditKind::Position
-                            : field == NumberFieldId::Rotation ? TextEditKind::Rotation : TextEditKind::VoxelSize;
+                            : field == NumberFieldId::Rotation ? TextEditKind::Rotation
+                            : field == NumberFieldId::Scale ? TextEditKind::Scale : TextEditKind::VoxelSize;
                         const bool editing = edit.kind == kind && edit.axis == rect.axis;
                         const bool hovered = rect.box.contains(controller.hover_x(), controller.hover_y()) ||
                                              rect.label.contains(controller.hover_x(), controller.hover_y());
@@ -4892,6 +4896,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                         }
                         std::string value = editing ? edit.buffer + "_" : controller.number_field_text(field, rect.axis);
                         if (!editing && field == NumberFieldId::VoxelSize) value += " m";
+                        if (!editing && field == NumberFieldId::Scale && value != "\xE2\x80\x94") value += "\xC3\x97";  // ×
                         inspectorPainter.text(rect.box.x + 4, rect.box.y + 14,
                                               elide_text_to_width(inspectorPainter, value, std::max(0, rect.box.width - 6)),
                                               editing ? accent : value == "\xE2\x80\x94" ? muted : text);
@@ -4988,10 +4993,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                      "   Axes " + (controller.transform_space() == EditorTransformSpace::World ? "World" : "Local"), text);
                     }
                     const EditorSelectionDiagnostics& diagnostics = controller.selection_diagnostics();
-                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 157,
-                                 "Mass " + std::to_string(diagnostics.massKilograms).substr(0,8) + " kg", muted);
+                    if (controller.number_field_available(NumberFieldId::Scale)) {
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 157, "Scale", muted);
+                        drawNumberBoxes(NumberFieldId::Scale);
+                    }
                     drawInspectorText(layout.inspector.x + 12, inspectorTop + 179,
-                                 "Components " + std::to_string(diagnostics.connectedComponents) +
+                                 "Mass " + std::to_string(diagnostics.massKilograms).substr(0,6) + " kg   Parts " +
+                                 std::to_string(diagnostics.connectedComponents) +
                                  "   Detached " + std::to_string(diagnostics.detachedComponents), muted);
                     drawInspectorText(layout.inspector.x + 12, inspectorTop + 201,
                                  "Collision boxes " + std::to_string(diagnostics.collisionBoxes), muted);

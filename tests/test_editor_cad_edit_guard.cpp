@@ -94,11 +94,11 @@ void test_whole_object_edit() {
     // An edit that does not happen after Enter (refused, or its preview cancelled) keeps the link
     // and leaves no undo step.
     {
-        const std::size_t before = c.workspace().commands().size();
+        const std::size_t before = c.workspace().commands().position();
         doc.find_object(id)->flags.visible = false;  // the edit refuses hidden objects
         if (!c.dispatch_action("mirror.mesh_y") && c.pending_destructive_confirmation()) c.key_down("enter", false, false, false);
         c.update(0.016F);
-        check(linked(c, id) && c.workspace().commands().size() == before && !c.workspace().commands().can_redo(),
+        check(linked(c, id) && c.workspace().commands().position() == before && c.workspace().commands().size() == before,
               "a refused edit keeps the link: " + c.status().text);
         doc.find_object(id)->flags.visible = true;
     }

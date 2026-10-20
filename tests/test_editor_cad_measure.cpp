@@ -170,6 +170,14 @@ void test_plain_only() {
     check(has(c->measure_readout(), "Distance 2.828 m") && !has(c->measure_readout(), "mm"), "plain distance in metres: " + c->measure_readout());
     c->key_down("escape", false, false, false);
     check(!c->measuring(), "Esc ends Measure");
+
+    // A new scene ends Measure: a point from the old scene is never measured against the new one.
+    c->set_measuring(true);
+    check(c->measure_at(a.first, a.second) && c->measure_points().size() == 1, "one point picked");
+    c->workspace().preferences().confirmDestructiveActions = false;
+    (void)c->dispatch_action("file.new_scene");
+    if (c->pending_destructive_confirmation()) c->key_down("enter", false, false, false);
+    check(!c->measuring() && c->measure_points().empty(), "New Scene ends Measure");
 }
 
 void test_real(const fs::path& root) {

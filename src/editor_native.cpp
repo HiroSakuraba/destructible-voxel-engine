@@ -3186,6 +3186,7 @@ void NativeEditorController::request_quit() {
 void NativeEditorController::create_new_project_now() {
     reset_hierarchy_view();
     workspace_.document() = make_new_project_document();
+    end_measure_for_new_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();
@@ -3200,6 +3201,7 @@ void NativeEditorController::create_new_project_now() {
 void NativeEditorController::create_new_scene_now() {
     reset_hierarchy_view();
     workspace_.document() = make_new_scene_document();
+    end_measure_for_new_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();
@@ -8691,8 +8693,10 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         const bool modifier = normalized.starts_with("shift") || normalized.starts_with("control") ||
                               normalized.starts_with("alt") || normalized.starts_with("super") ||
                               normalized.starts_with("meta") || normalized == "caps_lock";
-        if (normalized == "escape") (void)cancel_long_job();
-        else if (!modifier) set_status(long_job_busy_reason(), true, 3.0F);
+        if (normalized == "escape") {
+            (void)cancel_long_job();
+            if (measureActive_) set_measuring(false);  // Esc also ends Measure (its surface query was the job)
+        } else if (!modifier) set_status(long_job_busy_reason(), true, 3.0F);
         return;
     }
     if (importOptions_.open) { (void)handle_import_options_key(normalized); return; }
@@ -12513,6 +12517,7 @@ bool NativeEditorController::open_scene_now(const std::filesystem::path& path) {
     followAnchor_.reset();
     reset_hierarchy_view();
     workspace_.document() = std::move(*loaded);
+    end_measure_for_new_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();  // ids restart per scene: never carry cells to another object

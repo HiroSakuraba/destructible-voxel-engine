@@ -171,6 +171,8 @@ inline EditorPlaySessionConfig play_session_settings(const EditorSettingsRegistr
     config.physicsWorld.subStepCount = s.integer("physics.substeps");
     config.physicsWorld.velocityIterations = s.integer("physics.velocity_iterations");
     config.physicsWorld.positionIterations = s.integer("physics.position_iterations");
+    config.physicsWorld.speculativeContactDistanceMeters = static_cast<float>(s.number("physics.contact_distance"));
+    config.physicsWorld.penetrationSlopMeters = static_cast<float>(s.number("physics.penetration_slop"));
     config.physicsWorld.deterministicSimulation = s.get<bool>("physics.deterministic");
     config.physicsWorld.allowSleeping = s.get<bool>("physics.allow_sleeping");
     config.physicsWorld.continuousCollision = s.get<bool>("physics.continuous_collision");

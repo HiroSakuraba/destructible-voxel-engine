@@ -280,7 +280,8 @@ void test_pivot() {
           "afterwards the group moves its pieces again");
 
     controller.workspace().select_object(11);
-    check(!controller.dispatch_action("edit.edit_pivot"), "Edit Group Pivot needs a group");
+    check(controller.dispatch_action("edit.edit_pivot") && controller.pivot_editing(), "Edit Pivot also works on a single piece");
+    check(controller.dispatch_action("edit.edit_pivot") && !controller.pivot_editing(), "and toggles off");
     controller.workspace().select_object(10);
     (void)controller.dispatch_action("edit.edit_pivot");
     controller.workspace().select_object(21);

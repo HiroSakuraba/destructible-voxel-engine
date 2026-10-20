@@ -185,6 +185,7 @@ add_library(dve_core
     src/hybrid_geometry_world.cpp
     src/polygon_collision.cpp
     src/collision_hull.cpp
+    src/collision_convex_set.cpp
     src/polygon_bvh.cpp
     src/hybrid_scene_manifest.cpp
     src/runtime_scene.cpp
@@ -846,6 +847,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_selection_sets.cpp
         src/editor_native_snap_targets.cpp
         src/editor_native_real_scale.cpp
+        src/editor_native_pivot_edit.cpp
         src/editor_modeling_topology.cpp
         src/editor_nurbs.cpp
         src/editor_native_nurbs.cpp
@@ -997,6 +999,9 @@ if(DVE_BUILD_EDITOR)
 endif()
 
 if(DVE_BUILD_TESTS)
+    add_executable(dve_collision_convex_set_tests tests/test_collision_convex_set.cpp)
+    target_link_libraries(dve_collision_convex_set_tests PRIVATE dve::core)
+    add_test(NAME dve_collision_convex_set_tests COMMAND dve_collision_convex_set_tests)
     add_executable(dve_v235_foundations_tests tests/test_v235_foundations.cpp)
     target_link_libraries(dve_v235_foundations_tests PRIVATE dve::core)
     add_test(NAME dve_v235_foundations_tests COMMAND dve_v235_foundations_tests)
@@ -2731,6 +2736,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_drag_numeric_tests tests/test_editor_drag_numeric.cpp)
         target_link_libraries(dve_editor_drag_numeric_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_drag_numeric_tests COMMAND dve_editor_drag_numeric_tests)
+        add_executable(dve_editor_pivot_edit_tests tests/test_editor_pivot_edit.cpp)
+        target_link_libraries(dve_editor_pivot_edit_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_pivot_edit_tests COMMAND dve_editor_pivot_edit_tests)
         add_executable(dve_editor_voxel_selection_tests tests/test_editor_voxel_selection.cpp)
         target_link_libraries(dve_editor_voxel_selection_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_selection_tests COMMAND dve_editor_voxel_selection_tests)

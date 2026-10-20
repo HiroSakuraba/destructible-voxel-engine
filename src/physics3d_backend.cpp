@@ -86,6 +86,9 @@ std::unique_ptr<IRigidBodyWorld> create_physics3d_world(
         if (config.subStepCount != 0U) jolt.collisionSteps = config.subStepCount;
         if (config.velocityIterations != 0U) jolt.velocityIterations = config.velocityIterations;
         if (config.positionIterations != 0U) jolt.positionIterations = config.positionIterations;
+        if (config.speculativeContactDistanceMeters > 0.0F)
+            jolt.speculativeContactDistanceMeters = config.speculativeContactDistanceMeters;
+        if (config.penetrationSlopMeters > 0.0F) jolt.penetrationSlopMeters = config.penetrationSlopMeters;
         jolt.deterministicSimulation = config.deterministicSimulation;
         jolt.allowSleeping = config.allowSleeping;
         jolt.continuousCollision = config.continuousCollision;

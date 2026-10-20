@@ -221,7 +221,7 @@ int main() {
     const fs::path glb = dir.path / "cube.glb";
     write_cube_glb(glb);
     test_placement();
-    test_library(dir.path, glb);
+    if (fake_brepkernel_runs()) test_library(dir.path, glb);
     if (fake_brepkernel_runs()) test_native(dir.path);
     else std::printf("SKIP native: the fake brepkernel needs /bin/sh\n");
     test_real(dir.path);

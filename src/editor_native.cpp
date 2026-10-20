@@ -390,6 +390,7 @@ void NativeEditorController::set_gamepad_axes(std::array<float, 2> move, std::ar
 }
 
 void NativeEditorController::clear_navigation_input() {
+    nurbsBoxActive_=false;
     cancel_voxel_authoring_preview();
     finish_slice_pointer(true);
     cancel_polygon_preview();
@@ -4100,6 +4101,7 @@ void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
 }
 
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
+    if(nurbs_pointer_move(x,y))return;
     if (numberScrub_.armed) {
         hoverX_ = x; hoverY_ = y;
         update_number_scrub(x, modifiers);
@@ -4269,7 +4271,7 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
     if (!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
-        !settingsPanel_.open && !commandPaletteOpen_ && nurbs_pointer_down(button,x,y)) {refresh_menu_state();return;}
+        !settingsPanel_.open && !commandPaletteOpen_ && nurbs_pointer_down(button,x,y,modifiers)) {refresh_menu_state();return;}
     if (!longJob_ && voxel_authoring_pointer_down(button,x,y,modifiers)) return;
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers)){refresh_menu_state();return;}
@@ -5204,6 +5206,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if(nurbs_pointer_up(button,x,y))return;
     if (numberScrub_.armed && button == PointerButton::Primary) {
         update_number_scrub(x, modifiers);
         finish_number_scrub(false);
@@ -5847,6 +5850,7 @@ void NativeEditorController::apply_voxel_tool(const EditorPickResult& pick) {
 }
 
 EditorObjectBounds NativeEditorController::selection_bounds() const noexcept {
+    if(nurbs_control_mode())return nurbs_control_bounds();
     EditorObjectBounds combined;
     for (EditorObjectId id : workspace_.selected_objects()) {
         const EditorObject* object = workspace_.document().find_object(id);
@@ -6048,6 +6052,9 @@ bool NativeEditorController::set_group_pivot(bool bottomCentre) {
 }
 
 Float3 NativeEditorController::selection_pivot() const noexcept {
+    if(nurbs_control_mode() && pivotMode_!=PivotMode::Custom && pivotMode_!=PivotMode::WorldOrigin) {
+        auto bounds=nurbs_control_bounds();if(bounds.valid)return multiply(add(bounds.minimum,bounds.maximum),.5F);
+    }
     if (selectionDomain_ == SelectionDomain::Polygons) return polygon_selection_centre();
     if (pivotMode_ == PivotMode::WorldOrigin) return {};
     if (pivotMode_ == PivotMode::Custom) return customPivot_;
@@ -6269,6 +6276,7 @@ void NativeEditorController::finish_placement(bool cancel) {
 }
 
 std::vector<GizmoScreenAxis> NativeEditorController::gizmo_axes() const {
+    if(nurbs_control_mode()&&nurbsSelected_.empty())return {};
     std::vector<GizmoScreenAxis> axes;
     if (voxelSlice_.active() || (selectionDomain_==SelectionDomain::Polygons && polygonSelection_.components.empty())) return axes;
     if (selectionDomain_ == SelectionDomain::Voxels) {
@@ -6394,6 +6402,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
         if (!object || !object->polygon) return;
         polygonDragBefore_=*object->polygon;
     }
+    if(nurbs_control_mode() && !begin_nurbs_gizmo()){gizmoAxis_=0;return;}
     gizmoDragging_ = true;
     gizmoStartX_ = x;
     gizmoStartY_ = y;
@@ -6462,10 +6471,12 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
     }
     // Held V: snap the pivot onto the nearest target under the cursor instead of following an axis.
     if (!numeric && apply_drag_snap(x, y)) return;
-    if (polygonDragBefore_) {
-        auto* object=workspace_.document().find_object(polygonSelection_.object);
-        if (!object || !object->polygon) { finish_gizmo_drag(true); return; }
-        *object->polygon=*polygonDragBefore_;
+    if (polygonDragBefore_ || nurbsDragBefore_) {
+        if(polygonDragBefore_) {
+            auto* object=workspace_.document().find_object(polygonSelection_.object);
+            if (!object || !object->polygon) { finish_gizmo_drag(true); return; }
+            *object->polygon=*polygonDragBefore_;
+        }
         Float3 translation{}, scale{1,1,1}; Quaternion rotation{};
         if (activeTool_==EditorToolId::Scale) {
             float factor=std::clamp(numeric.value_or(1.0F+projectedDelta*.01F),.1F,10.0F);
@@ -6487,7 +6498,8 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
             }
             translation=multiply(worldAxis,delta);
         }
-        (void)transform_polygon_components(translation,rotation,scale,gizmoPivot_);
+        if(nurbsDragBefore_)(void)preview_nurbs_transform(translation,rotation,scale,gizmoPivot_);
+        else (void)transform_polygon_components(translation,rotation,scale,gizmoPivot_);
         return;
     }
     if (activeTool_ == EditorToolId::Scale) {
@@ -6584,6 +6596,7 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
 
 void NativeEditorController::finish_gizmo_drag(bool cancel) {
     if (!gizmoDragging_) return;
+    if(nurbsDragBefore_){finish_nurbs_gizmo(cancel);return;}
     if (polygonDragBefore_) {
         auto* object=workspace_.document().find_object(polygonSelection_.object);
         if (object && object->polygon) {
@@ -6694,6 +6707,17 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         const bool safe = std::find(kSafeWhileBusy.begin(), kSafeWhileBusy.end(), actionId) != kSafeWhileBusy.end();
         if (longJob_ && !safe) { set_status(long_job_busy_reason(), true, 4.0F); return false; }
         if (importOptions_.open && !safe) close_import_options();
+    }
+    if(nurbs_control_mode()) {
+        if(actionId=="edit.select_all")return dispatch_nurbs_action("nurbs.select_all");
+        if(actionId=="edit.select_invert")return dispatch_nurbs_action("nurbs.select_invert");
+        if(actionId=="edit.select_grow")return dispatch_nurbs_action("nurbs.select_grow");
+        if(actionId=="edit.select_shrink")return dispatch_nurbs_action("nurbs.select_shrink");
+        if(actionId=="edit.select_connected")return dispatch_nurbs_action("nurbs.select_connected");
+        if(actionId=="edit.copy"||actionId=="edit.cut"||actionId=="edit.delete"||actionId=="edit.duplicate"||
+           actionId.starts_with("select.set_")||actionId.starts_with("selection.set.")) {
+            set_status("Finish NURBS control editing before object clipboard, delete or saved-set commands",true);return false;
+        }
     }
     if (polygonPreviewBefore_ && !actionId.starts_with("view.") && actionId != "polygon.preview_apply" && actionId != "polygon.preview_cancel" &&
         actionId != "subdiv.preview_apply" && actionId != "subdiv.preview_cancel") {
@@ -8581,6 +8605,7 @@ camera_menu_dispatch_complete:
 
 void NativeEditorController::key_down(std::string_view key, bool control, bool shift, bool alt) {
     const std::string normalized = lowercase(key);
+    if(nurbsBoxActive_ && normalized=="escape"){nurbsBoxActive_=false;return;}
     if (!longJob_ && voxel_authoring_key(normalized,control,shift,alt)) { refresh_menu_state(); return; }
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_key(normalized,control,shift,alt)){refresh_menu_state();return;}
@@ -13603,6 +13628,7 @@ EditorSelectionSnapshot NativeEditorController::capture_selection_snapshot() con
     if(snapshot.polygonDomain && object && object->polygon && object->modelingTopology) {
         snapshot.polygonPersistent=true;snapshot.polygonIdentities=modeling_selection_ids(*object->polygon,*object->modelingTopology,polygonSelection_);
     }
+    capture_nurbs_selection(snapshot);
     return snapshot;
 }
 
@@ -13622,6 +13648,7 @@ void NativeEditorController::restore_selection_snapshot(const EditorSelectionSna
         if(object&&object->polygon&&object->modelingTopology)polygonSelection_.components=resolve_modeling_selection(
             *object->polygon,*object->modelingTopology,snapshot.polygonMode,snapshot.polygonIdentities);
     }
+    restore_nurbs_selection(snapshot);
     if (snapshot.polygonDomain) prune_polygon_selection();
     if (snapshot.voxelDomain) {
         const auto* object = workspace_.document().find_object(snapshot.voxelObject);

@@ -847,6 +847,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_modeling_topology.cpp
         src/editor_nurbs.cpp
         src/editor_native_nurbs.cpp
+        src/editor_native_nurbs_transform.cpp
         src/editor_subdivision.cpp
         src/editor_native_polygon.cpp
         src/editor_native_mesh_authoring.cpp
@@ -2804,6 +2805,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_mesh_authoring_tests tests/test_editor_mesh_authoring.cpp)
         target_link_libraries(dve_editor_mesh_authoring_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_mesh_authoring_tests COMMAND dve_editor_mesh_authoring_tests)
+        add_executable(dve_editor_nurbs_tools_tests tests/test_editor_nurbs_tools.cpp)
+        target_link_libraries(dve_editor_nurbs_tools_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_nurbs_tools_tests COMMAND dve_editor_nurbs_tools_tests)
         add_executable(dve_editor_nurbs_tests tests/test_editor_nurbs.cpp)
         target_link_libraries(dve_editor_nurbs_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_tests COMMAND dve_editor_nurbs_tests)

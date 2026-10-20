@@ -1145,7 +1145,18 @@ public:
     void refresh_nurbs_menu_state();
     bool begin_nurbs_field(unsigned);
     void commit_nurbs_field();
-    bool nurbs_pointer_down(PointerButton,int,int);
+    bool nurbs_pointer_down(PointerButton,int,int,std::uint32_t);
+    bool nurbs_pointer_move(int,int);
+    bool nurbs_pointer_up(PointerButton,int,int);
+    bool nurbs_control_mode() const;
+    bool select_nurbs_controls(const std::set<std::size_t>&,SelectionOperation);
+    [[nodiscard]] const std::set<std::size_t>& selected_nurbs_controls() const {return nurbsSelected_;}
+    EditorObjectBounds nurbs_control_bounds() const;
+    bool begin_nurbs_gizmo();
+    bool preview_nurbs_transform(Float3,Quaternion,Float3,Float3);
+    void finish_nurbs_gizmo(bool);
+    void capture_nurbs_selection(EditorSelectionSnapshot&) const;
+    void restore_nurbs_selection(const EditorSelectionSnapshot&);
     void draw_nurbs(const IEditorCanvas&,UiRect) const;
     bool dispatch_mesh_authoring_action(std::string_view);
     bool start_exact_boolean(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
@@ -1342,6 +1353,13 @@ private:
     EditorObjectId nurbsEditingObject_{};
     std::size_t nurbsControl_{},nurbsFieldControl_{};
     std::optional<NurbsSource> nurbsFieldBefore_;
+    std::set<std::size_t> nurbsSelected_;
+    std::optional<NurbsSource> nurbsDragBefore_,nurbsDragPreview_;
+    std::optional<CookedPolygonAsset> nurbsDragMeshBefore_;
+    EditorSelectionSnapshot nurbsDragSelection_;
+    bool nurbsDragValid_{},nurbsBoxActive_{};
+    int nurbsBoxX_{},nurbsBoxY_{},nurbsBoxEndX_{},nurbsBoxEndY_{};
+    SelectionOperation nurbsBoxOperation_{SelectionOperation::Replace};
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};
     bool sliceSnap_{true};

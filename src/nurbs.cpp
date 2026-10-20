@@ -151,6 +151,40 @@ std::optional<NurbsSource> revolve_nurbs(const NurbsSource& c,double angle,std::
     if(!validate_nurbs(s,e))return {};
     return s;
 }
+std::optional<NurbsSource> insert_nurbs_knot(const NurbsSource& source,bool alongV,double t,std::string* e){
+    if(!validate_nurbs(source,e))return {};
+    if(alongV&&source.is_curve()){fail(e,"A curve has no V knot axis");return {};}
+    const auto& axis=alongV?source.v:source.u;
+    const unsigned count=alongV?source.rows:source.columns,p=axis.degree;
+    if(!std::isfinite(t)||!(t>axis.knots[p]&&t<axis.knots[count])){
+        fail(e,"Insert knots strictly inside the parameter domain");return {};
+    }
+    const unsigned multiplicity=unsigned(std::count(axis.knots.begin(),axis.knots.end(),t));
+    if(multiplicity>=p){fail(e,"Knot multiplicity already equals the degree");return {};}
+    const unsigned span=unsigned(std::upper_bound(axis.knots.begin(),axis.knots.end(),t)-axis.knots.begin()-1);
+    auto out=source;
+    if(alongV)++out.rows;else ++out.columns;
+    if(std::uint64_t(out.rows)*out.columns>4096){fail(e,"Knot insertion exceeds control budget");return {};}
+    auto& nextAxis=alongV?out.v:out.u;
+    nextAxis.knots.insert(nextAxis.knots.begin()+span+1,t);
+    out.controls.resize(std::size_t(out.rows)*out.columns);
+    const unsigned strips=alongV?source.columns:source.rows;
+    for(unsigned strip=0;strip<strips;++strip){
+        auto get=[&](unsigned i){return source.controls[alongV?i*source.columns+strip:strip*source.columns+i];};
+        auto put=[&](unsigned i,NurbsPoint point){out.controls[alongV?i*out.columns+strip:strip*out.columns+i]=point;};
+        for(unsigned i=0;i<=span-p;++i)put(i,get(i));
+        for(unsigned i=span-multiplicity;i<count;++i)put(i+1,get(i));
+        for(unsigned i=span-p+1;i<=span-multiplicity;++i){
+            const double alpha=(t-axis.knots[i])/(axis.knots[i+p]-axis.knots[i]);
+            const auto a=get(i-1),b=get(i);
+            const double scale=(std::max)(a.weight,b.weight),wa=(1-alpha)*(a.weight/scale),wb=alpha*(b.weight/scale),sum=wa+wb;
+            if(!(sum>0)||!std::isfinite(sum)){fail(e,"Ill-conditioned knot insertion");return {};}
+            put(i,{(wa*a.x+wb*b.x)/sum,(wa*a.y+wb*b.y)/sum,(wa*a.z+wb*b.z)/sum,std::lerp(a.weight,b.weight,alpha)});
+        }
+    }
+    if(!validate_nurbs(out,e))return {};
+    return out;
+}
 std::string encode_nurbs(const NurbsSource& s){
     std::string error;if(!validate_nurbs(s,&error))return {};
     std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17)<<"DVE_NURBS 1 "<<s.columns<<' '<<s.rows<<' '<<s.samplesPerSpan<<' ';

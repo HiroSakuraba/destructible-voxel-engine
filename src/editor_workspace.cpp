@@ -540,6 +540,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"view.decrease_angle_snap","View","Decrease Angle Snap","Shift+["},
         {"view.collision","View","Collision Shapes","Ctrl+Alt+C"}, {"view.anchors","View","Anchors","Ctrl+Alt+A"},
         {"view.bounds","View","Object Bounds",""}, {"view.xray","View","X-Ray Selection",""},
+        {"view.measure","View","Measure",""},
         {"view.statistics","View","Viewport Statistics",""}, {"view.safe_frames","View","Safe Frames",""},
         {"camera.inspector","Camera","Cinematic Camera Inspector",""},
         {"camera.sequencer","Camera","Camera Sequencer",""},
@@ -942,6 +943,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (std::string_view id : {"view.grid","view.collision","view.anchors","view.bounds","view.xray","view.statistics","view.safe_frames"})
         configure(id, "Overlays", 50, true);
     configure("view.isolate_selection", "Visibility", 45, true);
+    configure("view.measure", "Overlays", 51, true);
     for (std::string_view id : {"view.toggle_move_snap", "view.toggle_angle_snap",
                                 "view.toggle_scale_snap", "view.toggle_absolute_grid"})
         configure(id, "Snapping", 30, true);
@@ -1255,6 +1257,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         describe(std::string("edit.mirror_") + axis, "Mirror the selection in place across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect"});
     }
+    describe("view.measure", "Click two points for the distance between them; snaps to vertices, edge midpoints and, on CAD objects, exact corners and circle centres. CAD points read in millimetres and clicking a CAD face names it (Hole \xC3\x98 12.000 mm). Esc ends.", {"measure", "distance", "ruler", "dimension", "diameter", "radius", "cad"});
     describe("polygon.cad_detail", "Re-mesh CAD objects from their exact source so the triangles stay within a chosen distance of the true surface (1 mm to 0.005 mm, or typed). The exact source does not change.", {"cad", "accuracy", "tessellation", "deflection", "detail", "exact"});
     describe("select.set_save", "Save the selected objects, or the selected vertices, edges or faces of a mesh, as a named set saved with the scene.", {"selection set", "named", "save", "store"});
     describe("select.set_save_query", "Save the hierarchy filter (a name or a query such as type:mesh tag:rock) as a smart set that is re-evaluated each time.", {"selection set", "smart", "query", "saved search"});

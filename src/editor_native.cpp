@@ -2240,6 +2240,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("view.anchors", viewportSettings_.showAnchors);
     checked("view.bounds", viewportSettings_.showObjectBounds);
     checked("view.xray", viewportSettings_.xraySelection);
+    checked("view.measure", measureActive_);
     checked("view.follow_selection", followSelection_);
     checked("select.mask_locked", selectionMask_.locked);
     checked("select.mask_helpers", selectionMask_.helpers);
@@ -2942,6 +2943,7 @@ void NativeEditorController::update(float elapsedSeconds) {
     }
     autosave_tick(elapsedSeconds);
     poll_long_job();
+    poll_cad_descriptions();
     voxel_boolean_tick();
     prune_voxel_selection();
     prune_polygon_selection();
@@ -4243,6 +4245,8 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     const int deltaY = y - lastPointerY_;
     if (placementMode_ != PlacementTarget::NoTarget && layout_.viewport.contains(x, y)) {
         update_placement_preview(x, y);
+    } else if (measureActive_ && layout_.viewport.contains(x, y) && dragButton_ == PointerButton::NoButton) {
+        update_measure_hover(x, y);
     } else if (hierarchyDrag_.sourceId != 0) {
         // Promote a pending hierarchy-row press into an active drag once the pointer has
         // moved enough that this clearly isn't just a click.
@@ -5156,6 +5160,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             if (placementPoint_) finish_placement(false);
             return;
         }
+        if (measureActive_) { (void)measure_at(x, y); return; }
         update_hover(x, y);
         const bool selectLikeTool = activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                                     activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale;
@@ -6841,6 +6846,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         }
     }
     if (actionId == "polygon.cad_detail" || actionId.starts_with("cad.detail.")) return dispatch_cad_detail_action(actionId);
+    if (actionId == "view.measure") { set_measuring(!measureActive_); return true; }
     if (actionId.starts_with("selection.set.") || actionId.starts_with("select.set_")) return dispatch_selection_set_action(actionId);
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
@@ -9212,6 +9218,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     if (normalized == "escape") {
         if (assetDrag_.armed) cancel_asset_drag("Drag cancelled");
         if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
+        if (measureActive_) set_measuring(false);
         clear_navigation_input();
         if (numberScrub_.armed) { finish_number_scrub(true); return; }
         close_top_level_menu();

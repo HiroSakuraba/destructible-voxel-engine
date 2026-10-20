@@ -146,4 +146,61 @@ struct ExactCadRemeshResult {
 // (the recorded deflection times its largest axis scale); nullopt when not recorded.
 [[nodiscard]] std::optional<double> exact_mesh_world_error(const EditorObject& object);
 
+// Exact answers for measuring and snapping (brepkernel `describe` / `query`), in the mesh-local
+// frame (metres, +Y up, before voxelScale). `unsupported` is set when the installed brepkernel
+// predates these commands, so the editor can say "update brepkernel" instead of a raw error.
+using ExactPoint = std::array<double, 3>;
+struct ExactCadFace {
+    int index{-1};                 // mesh / describe order
+    std::string type;              // plane, cylinder, cone, sphere, torus, bspline, bezier, other
+    double area{};
+    ExactPoint origin{}, normal{};                 // plane
+    ExactPoint axisOrigin{}, axis{}, centre{};     // cylinder / cone / sphere / torus
+    double radius{}, majorRadius{}, minorRadius{}, halfAngle{};
+    bool hole{};                   // cylinder whose material is outside (a bore)
+};
+struct ExactCadEdge {
+    std::string type;              // line, circle, curve
+    ExactPoint start{}, end{}, mid{};
+    double length{};
+};
+struct ExactCadCircle {
+    ExactPoint centre{}, axis{};
+    double radius{};
+    bool full{};
+};
+struct ExactCadDescription {
+    std::vector<ExactCadFace> faces;
+    std::vector<ExactPoint> vertices;
+    std::vector<ExactCadEdge> edges;
+    std::vector<ExactCadCircle> circles;
+    double volume{}, area{};
+    std::string error;
+    bool unsupported{};
+    [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
+};
+[[nodiscard]] ExactCadDescription describe_exact_cad(
+    const std::filesystem::path& projectRoot, const ExactBrepSource& source,
+    const ExactCadSettings& settings = ExactCadSettings::from_environment(), const ExactCadRunner& runner = {});
+
+struct ExactCadQueryHit {
+    bool found{};
+    ExactPoint closest{}, normal{};
+    double distance{};
+    int face{-1};
+};
+struct ExactCadQueryResult {
+    std::vector<ExactCadQueryHit> hits;   // one per point, same order
+    std::string error;
+    bool unsupported{};
+    [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
+};
+[[nodiscard]] ExactCadQueryResult query_exact_cad(
+    const std::filesystem::path& projectRoot, const ExactBrepSource& source, const std::vector<ExactPoint>& points,
+    const ExactCadSettings& settings = ExactCadSettings::from_environment(), const ExactCadRunner& runner = {});
+
+// "Hole Ø 12.000 mm", "Cylinder Ø 6.000 mm", "Plane", "Sphere Ø 20.000 mm", ... in millimetres;
+// `scale` multiplies lengths (an object's uniform world scale; 1 in the mesh frame).
+[[nodiscard]] std::string describe_exact_face(const ExactCadFace& face, double scale = 1.0);
+
 } // namespace dve::editor

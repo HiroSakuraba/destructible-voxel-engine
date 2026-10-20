@@ -4,7 +4,9 @@
 // cursor: a mesh vertex, an edge midpoint, a face centre, a voxel or collision-box corner, an
 // object's bounds corner, or the surface itself (with the surface offset, and turned to the normal
 // when Align Up to Surface Normal is on). The viewport draws the source pivot, the target and a
-// line between them. The same search backs the Snap to Mesh Vertex / Edge / Face placement modes.
+// line between them. The same search backs the Snap to Mesh Vertex / Edge / Face placement modes
+// and View > Measure. CAD objects whose exact shape has been read (brepkernel describe) snap to
+// their exact corners, edge midpoints and circle centres instead of their triangles.
 #include "dve/editor_native.hpp"
 
 #include <algorithm>
@@ -17,6 +19,7 @@
 #include <vector>
 
 #include "dve/collision_proxy.hpp"
+#include "dve/editor_exact_cad.hpp"
 #include "dve/voxel_metric.hpp"
 
 namespace dve::editor {
@@ -32,6 +35,7 @@ int rank(SnapTargetKind kind) {
         case SnapTargetKind::FaceCenter: return 3;
         case SnapTargetKind::BoundsVertex: return 4;
         case SnapTargetKind::Surface: return 5;
+        case SnapTargetKind::CircleCentre: return 1;
     }
     return 5;
 }
@@ -61,6 +65,7 @@ const char* snap_target_name(SnapTargetKind kind) noexcept {
         case SnapTargetKind::CollisionVertex: return "collision corner";
         case SnapTargetKind::BoundsVertex: return "bounds corner";
         case SnapTargetKind::Surface: return "surface";
+        case SnapTargetKind::CircleCentre: return "circle centre";
     }
     return "surface";
 }
@@ -129,7 +134,20 @@ std::optional<SnapTarget> NativeEditorController::find_snap_target(int x, int y,
         const EditorObject* target = document.find_object(hit.objectId);
         if (!target) continue;
         const bool atCursor = centreHit && &hit == &probes.front();
-        if (target->polygon) {
+        const auto exact = target->polygon ? exact_cad_description(target->id) : nullptr;
+        if (exact) {
+            // A CAD object with its exact shape read: snap to the true corners, edge midpoints and
+            // circle centres, not to the triangles (whose extra points lie along curved edges).
+            const auto world = [&](const ExactPoint& p) {
+                return voxel_to_world(target->transform, target->voxelScale, Float3{float(p[0]), float(p[1]), float(p[2])});
+            };
+            if (meshesDone.insert(target->id).second) {
+                for (const ExactPoint& v : exact->vertices) consider(world(v), hit.worldNormal, SnapTargetKind::Vertex, target->id, radius);
+                for (const ExactCadEdge& e : exact->edges) consider(world(e.mid), hit.worldNormal, SnapTargetKind::EdgeMidpoint, target->id, radius);
+                for (const ExactCadCircle& c : exact->circles)
+                    consider(world(c.centre), hit.worldNormal, SnapTargetKind::CircleCentre, target->id, radius * 2.0F);
+            }
+        } else if (target->polygon) {
             const CookedPolygonAsset& mesh = *target->polygon;
             const auto world = [&](std::uint32_t index) { return voxel_to_world(target->transform, target->voxelScale, mesh.vertices[index].position); };
             if (meshesDone.insert(target->id).second) {

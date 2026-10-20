@@ -5417,6 +5417,36 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
     }
 
+    // View > Measure: the hovered snap target, the picked points and the line between them.
+    if (controller.measuring()) {
+        const UiRect viewport = controller.layout().viewport;
+        const EditorColor measureColor = rgb(120, 220, 255);
+        const auto marker = [&](Float3 world, bool filled) -> std::optional<std::pair<int, int>> {
+            const ScreenPoint p = project_world_to_screen(controller.camera(), viewport, world);
+            if (!p.visible) return std::nullopt;
+            const int px = static_cast<int>(std::lround(p.x)), py = static_cast<int>(std::lround(p.y));
+            if (filled) painter.fill({px - 3, py - 3, 7, 7}, measureColor);
+            painter.outline({px - 5, py - 5, 11, 11}, measureColor);
+            return std::pair{px, py};
+        };
+        if (const auto hover = controller.measure_hover()) {
+            if (const auto at = marker(hover->point, false))
+                painter.text(at->first + 10, at->second - 9, snap_target_name(hover->kind), measureColor);
+        }
+        std::vector<std::pair<int, int>> shown;
+        for (const NativeMeasurePoint& point : controller.measure_points())
+            if (const auto at = marker(point.world, true)) {
+                shown.push_back(*at);
+                painter.text(at->first + 10, at->second + 6, point.what, measureColor);
+            }
+        if (shown.size() == 2) {
+            painter.line(shown[0].first, shown[0].second, shown[1].first, shown[1].second, measureColor, 2);
+            const std::string readout = controller.measure_readout();
+            const std::string distance = readout.substr(0, readout.find("  "));
+            painter.text((shown[0].first + shown[1].first) / 2 + 8, (shown[0].second + shown[1].second) / 2 - 14, distance, measureColor);
+        }
+    }
+
     // A value typed during a transform drag, next to the cursor.
     if (const std::string typed = controller.transform_numeric_label(); !typed.empty()) {
         const int width = painter.text_width(typed) + 16;

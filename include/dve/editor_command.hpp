@@ -44,6 +44,10 @@ struct EditorSelectionSnapshot {
     std::set<std::uint64_t> polygonComponents;
     bool polygonPersistent{};
     std::set<ModelingId> polygonIdentities;
+    EditorObjectId nurbsObject{};
+    std::set<std::size_t> nurbsControls;
+    std::size_t nurbsActive{};
+    std::uint64_t nurbsSourceStamp{};
 };
 
 class EditorCommandStack {

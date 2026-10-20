@@ -48,6 +48,8 @@
 #include "dve/editor_mirror.hpp"
 #include "dve/editor_subdivision.hpp"
 #include "dve/editor_nurbs.hpp"
+#include "dve/nurbs_construction.hpp"
+#include "dve/nurbs_topology.hpp"
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
@@ -1208,11 +1210,27 @@ public:
     void cancel_polygon_preview();
     bool dispatch_nurbs_action(std::string_view);
     bool create_nurbs_source(const NurbsSource&,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement=std::nullopt);
+    bool dispatch_nurbs_construction(std::string_view);
+    bool dispatch_nurbs_topology(std::string_view);
+    void commit_nurbs_construction_field();
+    bool nurbs_construction_pointer(PointerButton,int,int);
+    void draw_nurbs_construction(const IEditorCanvas&,UiRect) const;
     bool edit_nurbs_control(std::size_t,NurbsPoint);
     void refresh_nurbs_menu_state();
     bool begin_nurbs_field(unsigned);
     void commit_nurbs_field();
-    bool nurbs_pointer_down(PointerButton,int,int);
+    bool nurbs_pointer_down(PointerButton,int,int,std::uint32_t);
+    bool nurbs_pointer_move(int,int);
+    bool nurbs_pointer_up(PointerButton,int,int);
+    bool nurbs_control_mode() const;
+    bool select_nurbs_controls(const std::set<std::size_t>&,SelectionOperation);
+    [[nodiscard]] const std::set<std::size_t>& selected_nurbs_controls() const {return nurbsSelected_;}
+    EditorObjectBounds nurbs_control_bounds() const;
+    bool begin_nurbs_gizmo();
+    bool preview_nurbs_transform(Float3,Quaternion,Float3,Float3);
+    void finish_nurbs_gizmo(bool);
+    void capture_nurbs_selection(EditorSelectionSnapshot&) const;
+    void restore_nurbs_selection(const EditorSelectionSnapshot&);
     void draw_nurbs(const IEditorCanvas&,UiRect) const;
     bool dispatch_mesh_authoring_action(std::string_view);
     bool start_exact_boolean(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
@@ -1407,9 +1425,26 @@ private:
     [[nodiscard]] std::string material_drop_refusal(const EditorObject& target) const;
     [[nodiscard]] std::string asset_drop_blocked_reason() const;
     EditorPlaySession playSession_{};
+    struct NurbsConstructionInput { NurbsSource source; std::array<double,3> origin; std::string name; };
+    std::vector<NurbsConstructionInput> nurbsConstructionInputs_;
+    Float3 nurbsConstructionOrigin_{};
+    NurbsSweepOptions nurbsSweepOptions_;
+    double nurbsOperationParameter_{.5};
+    unsigned nurbsDisplaySamples_{8};
+    // CV selection parked while the density settings panel is open (only one panel at a time).
+    EditorObjectId nurbsParkedObject_{};std::set<std::size_t> nurbsParkedSelection_;std::size_t nurbsParkedControl_{};
+    void restore_parked_nurbs_controls();
+    bool nurbsConstructionPanel_{};
     EditorObjectId nurbsEditingObject_{};
     std::size_t nurbsControl_{},nurbsFieldControl_{};
     std::optional<NurbsSource> nurbsFieldBefore_;
+    std::set<std::size_t> nurbsSelected_;
+    std::optional<NurbsSource> nurbsDragBefore_,nurbsDragPreview_;
+    std::optional<CookedPolygonAsset> nurbsDragMeshBefore_;
+    EditorSelectionSnapshot nurbsDragSelection_;
+    bool nurbsDragValid_{},nurbsBoxActive_{};
+    int nurbsBoxX_{},nurbsBoxY_{},nurbsBoxEndX_{},nurbsBoxEndY_{};
+    SelectionOperation nurbsBoxOperation_{SelectionOperation::Replace};
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};
     bool sliceSnap_{true};

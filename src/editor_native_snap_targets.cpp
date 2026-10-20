@@ -221,6 +221,10 @@ bool NativeEditorController::apply_drag_snap(int x, int y) {
     // Name what the artist sees: a piece of a closed group reads as the group.
     const EditorObject* targetObject = workspace_.document().find_object(viewport_selection_target(target->object));
     const std::string where = targetObject ? " of " + targetObject->name : std::string();
+    if(nurbsDragBefore_) {
+        (void)preview_nurbs_transform(delta,Quaternion{},{1,1,1},gizmoPivot_);
+        set_status("NURBS controls snapped to target",false,1);return true;
+    }
     if (polygonDragBefore_) {
         auto* object = workspace_.document().find_object(polygonSelection_.object);
         if (!object || !object->polygon) return false;

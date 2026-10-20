@@ -3,6 +3,10 @@
 This adds scene-owned NURBS source data with a derived polygon display/runtime
 bake. It is an initial untrimmed curve/surface workflow, not Maya/Softimage parity.
 
+The next controls/refinement batch is documented in
+[nurbs-controls-refinement-2026-10-19.md](nurbs-controls-refinement-2026-10-19.md).
+The limits below describe this initial slice.
+
 ## Artist workflow
 
 Use the new **NURBS** menu:

@@ -786,3 +786,145 @@ ExactCadProcessResult run_exact_cad_process(const std::vector<std::string>& argv
 #endif
 
 } // namespace dve::editor
+
+namespace dve::editor {
+namespace {
+ExactPoint json_point(const JsonValue* node) {
+    ExactPoint p{};
+    if (!node || !node->is_array()) return p;
+    const auto& a = node->as_array();
+    for (std::size_t i = 0; i < 3 && i < a.size(); ++i) p[i] = a[i].as_number(0.0);
+    return p;
+}
+double field(const JsonValue& node, std::string_view key) {
+    const JsonValue* v = node.find(key);
+    return v ? v->as_number(0.0) : 0.0;
+}
+std::string inspect_error(const std::string& command, const ToolRun& run, bool& unsupported) {
+    if (run.error.find("invalid choice") != std::string::npos) {
+        unsupported = true;
+        return "The installed brepkernel has no `" + command + "` command: update brepkernel for exact measuring, snapping and STEP export";
+    }
+    if (!run.report) return run.error;
+    const auto message = json_string(*run.report, {"error"});
+    return "brepkernel " + command + " failed: " + (message.empty() ? "exit code " + std::to_string(run.exitCode) : message);
+}
+bool source_file(const std::filesystem::path& root, const ExactBrepSource& source, std::filesystem::path& out, std::string& error) {
+    if (!contained_relative(source.relativePath)) { error = "The exact source path is not inside the project"; return false; }
+    out = root / source.relativePath;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(out, ec)) { error = "The exact source is missing: " + utf8(source.relativePath); return false; }
+    return true;
+}
+}  // namespace
+
+ExactCadDescription describe_exact_cad(const std::filesystem::path& projectRoot, const ExactBrepSource& source,
+                                       const ExactCadSettings& settings, const ExactCadRunner& runner) {
+    ExactCadDescription result;
+    std::filesystem::path brep;
+    if (!source_file(projectRoot, source, brep, result.error)) return result;
+    TemporaryDirectory temp;
+    if (!temp.ok()) { result.error = "Cannot create a temporary folder"; return result; }
+    const auto run = run_tool(settings, runner, {"describe", utf8(brep)}, temp.path() / "report.json");
+    const JsonValue* d = run.report && run.exitCode == 0 ? run.report->find("description") : nullptr;
+    if (!d || !d->is_object()) { result.error = inspect_error("describe", run, result.unsupported); return result; }
+    result.volume = field(*d, "volume");
+    result.area = field(*d, "area");
+    if (const JsonValue* faces = d->find("faces"); faces && faces->is_array())
+        for (const JsonValue& f : faces->as_array()) {
+            ExactCadFace face;
+            face.index = static_cast<int>(field(f, "index"));
+            if (const JsonValue* t = f.find("type")) face.type = std::string(t->as_string());
+            face.area = field(f, "area");
+            face.origin = json_point(f.find("origin"));
+            face.normal = json_point(f.find("normal"));
+            face.axisOrigin = json_point(f.find("axis_origin"));
+            face.axis = json_point(f.find("axis"));
+            face.centre = json_point(f.find("centre"));
+            face.radius = field(f, "radius");
+            face.majorRadius = field(f, "major_radius");
+            face.minorRadius = field(f, "minor_radius");
+            face.halfAngle = field(f, "half_angle");
+            if (const JsonValue* h = f.find("hole")) face.hole = h->as_bool(false);
+            result.faces.push_back(std::move(face));
+        }
+    if (const JsonValue* vertices = d->find("vertices"); vertices && vertices->is_array())
+        for (const JsonValue& v : vertices->as_array()) result.vertices.push_back(json_point(&v));
+    if (const JsonValue* edges = d->find("edges"); edges && edges->is_array())   // newer brepkernel only
+        for (const JsonValue& e : edges->as_array()) {
+            ExactCadEdge edge;
+            if (const JsonValue* t = e.find("type")) edge.type = std::string(t->as_string());
+            edge.start = json_point(e.find("start"));
+            edge.end = json_point(e.find("end"));
+            edge.mid = json_point(e.find("mid"));
+            edge.length = field(e, "length");
+            result.edges.push_back(std::move(edge));
+        }
+    if (const JsonValue* circles = d->find("circles"); circles && circles->is_array())
+        for (const JsonValue& c : circles->as_array()) {
+            ExactCadCircle circle;
+            circle.centre = json_point(c.find("centre"));
+            circle.axis = json_point(c.find("axis"));
+            circle.radius = field(c, "radius");
+            if (const JsonValue* full = c.find("full")) circle.full = full->as_bool(false);
+            result.circles.push_back(circle);
+        }
+    return result;
+}
+
+ExactCadQueryResult query_exact_cad(const std::filesystem::path& projectRoot, const ExactBrepSource& source,
+                                    const std::vector<ExactPoint>& points, const ExactCadSettings& settings,
+                                    const ExactCadRunner& runner) {
+    ExactCadQueryResult result;
+    std::filesystem::path brep;
+    if (!source_file(projectRoot, source, brep, result.error)) return result;
+    if (points.empty()) { result.error = "No points to look up"; return result; }
+    TemporaryDirectory temp;
+    if (!temp.ok()) { result.error = "Cannot create a temporary folder"; return result; }
+    std::vector<std::string> args{"query", utf8(brep)};
+    for (const ExactPoint& p : points) {
+        if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) { result.error = "A point is not finite"; return result; }
+        args.insert(args.end(), {"--point", format_double(p[0]), format_double(p[1]), format_double(p[2])});
+    }
+    const auto run = run_tool(settings, runner, std::move(args), temp.path() / "report.json");
+    const JsonValue* hits = run.report && run.exitCode == 0 ? run.report->find("results") : nullptr;
+    if (!hits || !hits->is_array() || hits->as_array().size() != points.size()) {
+        result.error = run.report && run.exitCode == 0 ? "brepkernel query returned the wrong number of results"
+                                                       : inspect_error("query", run, result.unsupported);
+        return result;
+    }
+    for (const JsonValue& h : hits->as_array()) {
+        ExactCadQueryHit hit;
+        if (const JsonValue* found = h.find("found")) hit.found = found->as_bool(false);
+        hit.closest = json_point(h.find("closest"));
+        hit.normal = json_point(h.find("normal"));
+        hit.distance = field(h, "distance");
+        hit.face = h.find("face") && h.find("face")->is_number() ? static_cast<int>(field(h, "face")) : -1;
+        result.hits.push_back(hit);
+    }
+    return result;
+}
+
+std::string describe_exact_face(const ExactCadFace& face, double scale) {
+    char buffer[96];
+    const auto mm = [&](double metres) { return metres * scale * 1000.0; };
+    if (face.type == "plane") return "Plane";
+    if (face.type == "cylinder") {
+        std::snprintf(buffer, sizeof buffer, "%s \xC3\x98 %.3f mm", face.hole ? "Hole" : "Cylinder", mm(2.0 * face.radius));
+        return buffer;
+    }
+    if (face.type == "sphere") { std::snprintf(buffer, sizeof buffer, "Sphere \xC3\x98 %.3f mm", mm(2.0 * face.radius)); return buffer; }
+    if (face.type == "cone") {
+        std::snprintf(buffer, sizeof buffer, "Cone %.2f\xC2\xB0 (included %.2f\xC2\xB0)", face.halfAngle * 57.29577951308232,
+                      2.0 * face.halfAngle * 57.29577951308232);
+        return buffer;
+    }
+    if (face.type == "torus") {
+        std::snprintf(buffer, sizeof buffer, "Torus R %.3f mm, r %.3f mm", mm(face.majorRadius), mm(face.minorRadius));
+        return buffer;
+    }
+    if (face.type == "bspline" || face.type == "bezier") return "Freeform surface (NURBS)";
+    return "Surface";
+}
+
+}  // namespace dve::editor

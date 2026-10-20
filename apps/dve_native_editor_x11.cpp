@@ -550,6 +550,9 @@ int main(int argc, char** argv) {
         };
         const auto logical = [&](int physical) { return ui_zoom_to_logical(physical, zoom); };
         sync_zoom(initialWidth, initialHeight);
+        // Replayed input sees what an artist sees a moment after opening: exact CAD shapes read
+        // (exact snapping) before the first click.
+        if (!startupInput.empty()) { controller.update(0.0F); (void)controller.wait_for_cad_descriptions(60.0); }
         for (const auto& [kind, value] : startupInput) {
             if (kind == "key") { controller.key_down(value, false, false, false); continue; }
             if (kind == "type") { controller.text_input(value); continue; }

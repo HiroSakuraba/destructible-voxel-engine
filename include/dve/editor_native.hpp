@@ -125,7 +125,8 @@ enum class PlacementTarget : std::uint8_t { NoTarget, Surface, VoxelCorner, Voxe
                                             MeshVertex, MeshEdge, MeshFace };
 enum class PivotMode : std::uint8_t { BoundsCenter, ActiveObject, WorldOrigin, Custom };
 // Point snapping (ART-025/026): what a held-V Move drag or a placement mode snaps to.
-enum class SnapTargetKind : std::uint8_t { Vertex, EdgeMidpoint, FaceCenter, VoxelCorner, CollisionVertex, BoundsVertex, Surface };
+enum class SnapTargetKind : std::uint8_t { Vertex, EdgeMidpoint, FaceCenter, VoxelCorner, CollisionVertex, BoundsVertex, Surface,
+                                           CircleCentre };  // exact CAD: centre of a circular edge (holes, bosses)
 struct SnapTarget {
     Float3 point{};
     Float3 normal{0.0F, 1.0F, 0.0F};
@@ -133,6 +134,19 @@ struct SnapTarget {
     EditorObjectId object{};
 };
 [[nodiscard]] const char* snap_target_name(SnapTargetKind kind) noexcept;
+
+// View > Measure: one picked point. `what` says what was hit ("hole centre Ø 12.000 mm",
+// "Plane", "vertex"); `exact` when the point comes from a CAD object's exact shape rather than
+// its triangles.
+struct NativeMeasurePoint {
+    Float3 world{};
+    EditorObjectId object{};
+    SnapTargetKind kind{SnapTargetKind::Surface};
+    std::string what;
+    bool cad{};
+    bool exact{};
+};
+struct ExactCadDescription;
 
 enum class PointerButton : std::uint8_t { NoButton, Primary, Auxiliary, Secondary, Extra1 };
 
@@ -772,6 +786,19 @@ public:
     [[nodiscard]] std::vector<EditorObjectId> cad_mesh_edit_targets() const;
     // True once the object's exact CAD link was dropped by editing its triangles (undo restores it).
     [[nodiscard]] bool cad_link_dropped(EditorObjectId id) const;
+    // View > Measure: click two points for a distance (CAD points in millimetres, exact where the
+    // object has an exact shape); clicking a CAD face names it ("Hole Ø 12.000 mm").
+    void set_measuring(bool on);
+    [[nodiscard]] bool measuring() const noexcept { return measureActive_; }
+    bool measure_at(int x, int y);
+    [[nodiscard]] const std::vector<NativeMeasurePoint>& measure_points() const noexcept { return measurePoints_; }
+    [[nodiscard]] std::optional<SnapTarget> measure_hover() const noexcept { return measureActive_ ? measureHover_ : std::nullopt; }
+    [[nodiscard]] std::string measure_readout() const;
+    // Exact shape facts of a CAD object (brepkernel describe), read in the background once per
+    // source; nullptr until read. Exact snapping and Measure use them.
+    [[nodiscard]] std::shared_ptr<const ExactCadDescription> exact_cad_description(EditorObjectId id) const;
+    // Tests: wait until no exact description is being read.
+    bool wait_for_cad_descriptions(double seconds);
     [[nodiscard]] std::string cad_detail_disabled_reason() const;
     [[nodiscard]] std::string resample_to_scale_disabled_reason() const;
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
@@ -1434,6 +1461,9 @@ private:
     bool ask_before_cad_mesh_edit(std::string_view actionId);
     void drop_cad_link_and_continue();
     bool drop_cad_link(const std::vector<EditorObjectId>& objects);  // one undo step
+    void poll_cad_descriptions();
+    void update_measure_hover(int x, int y);
+    void end_measure_for_new_document();
     std::optional<Float3> originDragPoint_;
     EditorObjectId pivotEditTarget_{};  // the object or group whose pivot is being edited  // Edit Pivot on an object: where the dragged origin is
     [[nodiscard]] bool origin_drag() const;
@@ -1703,6 +1733,14 @@ private:
     std::vector<EditorObjectId> pendingCadObjects_;
     std::string pendingCadMessage_;
     bool cadEditConfirmed_{false};
+    // Measure and exact CAD descriptions (editor_native_cad_measure.cpp).
+    bool measureActive_{false};
+    std::vector<NativeMeasurePoint> measurePoints_;
+    std::optional<SnapTarget> measureHover_;
+    struct CadDescribeTask;
+    std::map<std::string, std::shared_ptr<const ExactCadDescription>> cadDescriptions_;  // by sha256
+    std::map<std::string, std::string> cadDescriptionErrors_;
+    std::shared_ptr<CadDescribeTask> cadDescribeTask_;
     // After Enter: the drop step waits for the edit it was for (see settle_cad_link_drop).
     struct CadDropAwait {
         std::size_t mark{};          // history size before the drop

@@ -2247,6 +2247,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
     checked("view.anchors", viewportSettings_.showAnchors);
     checked("view.bounds", viewportSettings_.showObjectBounds);
     checked("view.xray", viewportSettings_.xraySelection);
+    checked("view.measure", measureActive_);
     checked("view.follow_selection", followSelection_);
     checked("select.mask_locked", selectionMask_.locked);
     checked("select.mask_helpers", selectionMask_.helpers);
@@ -2950,6 +2951,7 @@ void NativeEditorController::update(float elapsedSeconds) {
     }
     autosave_tick(elapsedSeconds);
     poll_long_job();
+    poll_cad_descriptions();
     voxel_boolean_tick();
     prune_voxel_selection();
     prune_polygon_selection();
@@ -3191,6 +3193,7 @@ void NativeEditorController::request_quit() {
 void NativeEditorController::create_new_project_now() {
     reset_hierarchy_view();
     workspace_.document() = make_new_project_document();
+    end_measure_for_new_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();
@@ -3205,6 +3208,7 @@ void NativeEditorController::create_new_project_now() {
 void NativeEditorController::create_new_scene_now() {
     reset_hierarchy_view();
     workspace_.document() = make_new_scene_document();
+    end_measure_for_new_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();
@@ -4253,6 +4257,8 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
     const int deltaY = y - lastPointerY_;
     if (placementMode_ != PlacementTarget::NoTarget && layout_.viewport.contains(x, y)) {
         update_placement_preview(x, y);
+    } else if (measureActive_ && layout_.viewport.contains(x, y) && dragButton_ == PointerButton::NoButton) {
+        update_measure_hover(x, y);
     } else if (hierarchyDrag_.sourceId != 0) {
         // Promote a pending hierarchy-row press into an active drag once the pointer has
         // moved enough that this clearly isn't just a click.
@@ -5168,6 +5174,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
             if (placementPoint_) finish_placement(false);
             return;
         }
+        if (measureActive_) { (void)measure_at(x, y); return; }
         update_hover(x, y);
         const bool selectLikeTool = activeTool_ == EditorToolId::Select || activeTool_ == EditorToolId::Translate ||
                                     activeTool_ == EditorToolId::Rotate || activeTool_ == EditorToolId::Scale;
@@ -6882,6 +6889,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         }
     }
     if (actionId == "polygon.cad_detail" || actionId.starts_with("cad.detail.")) return dispatch_cad_detail_action(actionId);
+    if (actionId == "view.measure") { set_measuring(!measureActive_); return true; }
     if (actionId.starts_with("selection.set.") || actionId.starts_with("select.set_")) return dispatch_selection_set_action(actionId);
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
@@ -8732,8 +8740,10 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
         const bool modifier = normalized.starts_with("shift") || normalized.starts_with("control") ||
                               normalized.starts_with("alt") || normalized.starts_with("super") ||
                               normalized.starts_with("meta") || normalized == "caps_lock";
-        if (normalized == "escape") (void)cancel_long_job();
-        else if (!modifier) set_status(long_job_busy_reason(), true, 3.0F);
+        if (normalized == "escape") {
+            (void)cancel_long_job();
+            if (measureActive_) set_measuring(false);  // Esc also ends Measure (its surface query was the job)
+        } else if (!modifier) set_status(long_job_busy_reason(), true, 3.0F);
         return;
     }
     if (importOptions_.open) { (void)handle_import_options_key(normalized); return; }
@@ -9268,6 +9278,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     if (normalized == "escape") {
         if (assetDrag_.armed) cancel_asset_drag("Drag cancelled");
         if (placementMode_ != PlacementTarget::NoTarget) finish_placement(true);
+        if (measureActive_) set_measuring(false);
         clear_navigation_input();
         if (numberScrub_.armed) { finish_number_scrub(true); return; }
         close_top_level_menu();
@@ -12561,6 +12572,7 @@ bool NativeEditorController::open_scene_now(const std::filesystem::path& path) {
     followAnchor_.reset();
     reset_hierarchy_view();
     workspace_.document() = std::move(*loaded);
+    end_measure_for_new_document();
     workspace_.commands().clear();
     workspace_.clear_selection();
     reset_voxel_selection_state();  // ids restart per scene: never carry cells to another object

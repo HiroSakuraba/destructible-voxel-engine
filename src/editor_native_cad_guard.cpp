@@ -75,9 +75,9 @@ bool NativeEditorController::ask_before_cad_mesh_edit(std::string_view actionId)
         if (actionId == "gizmo" || actionId == "transform") {
             // The caller goes on with the edit; it joins the drop when it commits.
             pendingCadAction_.clear();
-            const std::size_t mark = workspace_.commands().size();
+            const std::size_t mark = workspace_.commands().position();
             if (!drop_cad_link(std::exchange(pendingCadObjects_, {}))) return true;
-            if (workspace_.commands().size() == mark + 1) cadDropAwait_ = CadDropAwait{mark, true, polygonSelection_.object};
+            if (workspace_.commands().position() == mark + 1) cadDropAwait_ = CadDropAwait{mark, true, polygonSelection_.object};
             return false;
         }
         drop_cad_link_and_continue();
@@ -111,9 +111,9 @@ bool NativeEditorController::drop_cad_link(const std::vector<EditorObjectId>& ob
 
 void NativeEditorController::drop_cad_link_and_continue() {
     const std::string action = std::exchange(pendingCadAction_, {});
-    const std::size_t mark = workspace_.commands().size();
+    const std::size_t mark = workspace_.commands().position();
     if (!drop_cad_link(std::exchange(pendingCadObjects_, {}))) return;
-    if (workspace_.commands().size() != mark + 1) return;  // nothing needed dropping
+    if (workspace_.commands().position() != mark + 1) return;  // nothing needed dropping
     cadDropAwait_ = CadDropAwait{mark, action == "gizmo" || action == "transform", polygonSelection_.object};
     if (cadDropAwait_->untilNextEdit) {
         set_status("Now a plain mesh: drag again to edit (if you do not, the CAD link stays)", false, 4.0F);

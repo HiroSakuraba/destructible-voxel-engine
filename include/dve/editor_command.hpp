@@ -58,6 +58,8 @@ public:
     [[nodiscard]] std::string_view undo_label() const noexcept;
     [[nodiscard]] std::string_view redo_label() const noexcept;
     [[nodiscard]] std::size_t size() const noexcept { return history_.size(); }
+    // Steps currently applied (size() less the undone ones waiting for redo).
+    [[nodiscard]] std::size_t position() const noexcept { return cursor_; }
     void set_last_selection_transition(EditorSelectionSnapshot before, EditorSelectionSnapshot after);
     [[nodiscard]] const EditorSelectionSnapshot* undo_selection() const noexcept;
     [[nodiscard]] const EditorSelectionSnapshot* redo_selection() const noexcept;

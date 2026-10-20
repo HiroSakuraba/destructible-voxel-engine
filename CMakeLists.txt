@@ -852,6 +852,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_cad_detail.cpp
         src/editor_native_cad_guard.cpp
         src/editor_native_cad_measure.cpp
+        src/editor_native_cad_step.cpp
         src/editor_modeling_topology.cpp
         src/editor_nurbs.cpp
         src/editor_native_nurbs.cpp
@@ -2753,6 +2754,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_cad_measure_tests tests/test_editor_cad_measure.cpp)
         target_link_libraries(dve_editor_cad_measure_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_cad_measure_tests COMMAND dve_editor_cad_measure_tests)
+        add_executable(dve_editor_cad_step_export_tests tests/test_editor_cad_step_export.cpp)
+        target_link_libraries(dve_editor_cad_step_export_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_cad_step_export_tests COMMAND dve_editor_cad_step_export_tests)
         add_executable(dve_editor_voxel_selection_tests tests/test_editor_voxel_selection.cpp)
         target_link_libraries(dve_editor_voxel_selection_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_selection_tests COMMAND dve_editor_voxel_selection_tests)

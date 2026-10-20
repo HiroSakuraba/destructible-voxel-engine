@@ -1932,6 +1932,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
     }
     enabled("edit.rename", singleSelection, "Select exactly one scene object to rename.");
     enabled("file.export_print_stl", singleSelection, "Select exactly one voxel object to export for printing.");
+    enabled("file.export_exact_step", !step_export_objects().empty(), "Select CAD objects (Import Exact CAD or exact Booleans) to export as STEP.");
     {
         // Half-model mirroring: the primary polygon mesh (or the mesh being edited in the polygon domain).
         const bool components = selectionDomain_ == SelectionDomain::Polygons;
@@ -6890,6 +6891,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     }
     if (actionId == "polygon.cad_detail" || actionId.starts_with("cad.detail.")) return dispatch_cad_detail_action(actionId);
     if (actionId == "view.measure") { set_measuring(!measureActive_); return true; }
+    if (actionId == "file.export_exact_step" || actionId.starts_with("cad.step.")) return dispatch_step_export_action(actionId);
     if (actionId.starts_with("selection.set.") || actionId.starts_with("select.set_")) return dispatch_selection_set_action(actionId);
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};

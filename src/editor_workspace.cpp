@@ -441,6 +441,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"file.new_scene","File","New Scene","Ctrl+N"}, {"file.open_scene","File","Open Scene","Ctrl+O"},
         {"file.save","File","Save","Ctrl+S"}, {"file.save_as","File","Save As","Ctrl+Shift+S"},
         {"file.import","File","Import Model","Ctrl+I"}, {"file.reimport","File","Reimport Model",""}, {"file.export_print_stl","File","Export for Printing (STL)",""},
+        {"file.export_exact_step","File","Export Exact CAD (STEP)...",""},
         {"file.exit","File","Exit","Alt+F4"},
         {"edit.undo","Edit","Undo","Ctrl+Z"}, {"edit.redo","Edit","Redo","Ctrl+Y"},
         {"edit.cut","Edit","Cut","Ctrl+X"}, {"edit.copy","Edit","Copy","Ctrl+C"},
@@ -1298,6 +1299,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         describe(std::string("edit.mirror_") + axis, "Mirror the selection in place across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect"});
     }
+    describe("file.export_exact_step", "Write the selected CAD objects into one STEP file in exports/, each a named solid placed where it is in the scene, from its exact source. Choose millimetres or metres, Z or Y up. The file is read back and checked; nothing is written if that fails. Stretched objects are exported converted and named.", {"step", "stp", "export", "cad", "brep", "exact", "solid", "mechanical"});
     describe("view.measure", "Click two points for the distance between them; snaps to vertices, edge midpoints and, on CAD objects, exact corners and circle centres. CAD points read in millimetres and clicking a CAD face names it (Hole \xC3\x98 12.000 mm). Esc ends.", {"measure", "distance", "ruler", "dimension", "diameter", "radius", "cad"});
     describe("polygon.cad_detail", "Re-mesh CAD objects from their exact source so the triangles stay within a chosen distance of the true surface (1 mm to 0.005 mm, or typed). The exact source does not change.", {"cad", "accuracy", "tessellation", "deflection", "detail", "exact"});
     describe("select.set_save", "Save the selected objects, or the selected vertices, edges or faces of a mesh, as a named set saved with the scene.", {"selection set", "named", "save", "store"});

@@ -95,4 +95,38 @@ std::optional<NurbsSource> sweep_nurbs(const NurbsSource& profile,const NurbsSou
     if(!validate_nurbs(out,e))return std::nullopt;
     return out;
 }
+std::optional<NurbsSource> join_nurbs_curves(std::span<const NurbsSource> curves,std::string* e){
+    if(curves.size()<2||curves.size()>64)return fail(e,"Join requires 2..64 ordered curve snapshots");
+    std::size_t controls=1;const auto degree=curves.front().u.degree;
+    for(std::size_t i=0;i<curves.size();++i){
+        const auto& s=curves[i];
+        if(!curve(s,e))return {};
+        if(s.u.degree!=degree)return fail(e,"Joined curves must have equal degrees; degree elevation is not available");
+        controls+=s.columns-1;
+        if(i){const auto a=curves[i-1].controls.back(),b=s.controls.front();
+            if(a.x!=b.x||a.y!=b.y||a.z!=b.z)return fail(e,"Curve endpoints must match exactly; position and orient sources before taking snapshots");
+        }
+    }
+    if(controls>4096)return fail(e,"Joined curve exceeds the 4096-control budget");
+    NurbsSource out;out.columns=unsigned(controls);out.u.degree=degree;out.u.knots.assign(degree+1,0);out.samplesPerSpan=1;
+    std::vector<double> logWeights;logWeights.reserve(controls);out.controls.reserve(controls);
+    double startLog=0;
+    for(std::size_t i=0;i<curves.size();++i){
+        const auto& s=curves[i];const double firstWeight=s.controls.front().weight;
+        const double lo=s.u.knots[degree],hi=s.u.knots[s.columns];
+        for(unsigned k=degree+1;k<s.columns;++k)out.u.knots.push_back(double(i)+(s.u.knots[k]-lo)/(hi-lo));
+        out.u.knots.insert(out.u.knots.end(),i+1==curves.size()?degree+1:degree,double(i+1));
+        for(unsigned k=i?1:0;k<s.columns;++k){
+            out.controls.push_back(s.controls[k]);logWeights.push_back(std::log(s.controls[k].weight/firstWeight)+startLog);
+        }
+        startLog=std::log(s.controls.back().weight/firstWeight)+startLog;
+        out.samplesPerSpan=std::max(out.samplesPerSpan,s.samplesPerSpan);
+    }
+    const auto [minLog,maxLog]=std::minmax_element(logWeights.begin(),logWeights.end());
+    if(*maxLog-*minLog> -std::log(1e-12))return fail(e,"Combined curve weights exceed the supported conditioning range");
+    for(std::size_t i=0;i<out.controls.size();++i)out.controls[i].weight=std::exp(logWeights[i]-*maxLog);
+    if(!validate_nurbs(out,e))return {};
+    return out;
+}
+
 }

@@ -10,6 +10,7 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     }
     std::string error;auto source=editor_nurbs_source(*object,&error);
     if(!source||!validate_editor_nurbs(*object,&error)){set_status(error,true);return false;}
+    const bool boundaries=action=="nurbs.source_boundaries";
     const bool quality=action=="nurbs.source_quality",resetUv=action=="nurbs.source_reset_uv";
     const bool v=action.ends_with("_v");
     const bool reverse=action.starts_with("nurbs.source_reverse_");
@@ -17,7 +18,7 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     const bool insert=action.starts_with("nurbs.source_insert_");
     const bool split=action.starts_with("nurbs.source_split_");
     const bool iso=action.starts_with("nurbs.source_iso_");
-    if(!reverse&&!transpose&&!insert&&!split&&!iso&&!quality&&!resetUv)return false;
+    if(!reverse&&!transpose&&!insert&&!split&&!iso&&!quality&&!resetUv&&!boundaries)return false;
     if(v&&source->is_curve()){set_status("A NURBS curve has no V axis",true);return false;}
     const auto& axis=v?source->v:source->u;const auto count=v?source->rows:source->columns;
     const double t=std::lerp(axis.knots[axis.degree],axis.knots[count],nurbsOperationParameter_);
@@ -33,18 +34,20 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
         set_status(result.success?(quality?"NURBS display rebuilt with crease normals and selected density":resetUv?"NURBS texture ranges reset to 0..1":"NURBS parameterization updated; reselect controls (single-axis reversal / U-V swap flips the surface normal)"):result.message,!result.success);return result.success;
     }
     std::vector<NurbsSource> results;
-    if(split){auto pieces=split_nurbs(*source,v,t,&error);if(pieces){results.push_back(std::move(pieces->first));results.push_back(std::move(pieces->second));}}
+    if(boundaries){auto edges=extract_nurbs_boundaries(*source,&error);if(edges)for(auto& edge:*edges)results.push_back(std::move(edge));}
+    else if(split){auto pieces=split_nurbs(*source,v,t,&error);if(pieces){results.push_back(std::move(pieces->first));results.push_back(std::move(pieces->second));}}
     else {auto curve=extract_nurbs_isocurve(*source,v,t,&error);if(curve)results.push_back(std::move(*curve));}
     if(results.empty()){set_status(error,true);return false;}
-    // Prepare every source and bake before publishing either half to the scene.
-    auto command=std::make_unique<CompoundCommand>(split?"Split NURBS (keep source)":"Extract NURBS isocurve");
+    // Prepare every source and bake before publishing any result to the scene.
+    auto command=std::make_unique<CompoundCommand>(boundaries?"Extract NURBS boundaries":split?"Split NURBS (keep source)":"Extract NURBS isocurve");
     std::vector<EditorObjectId> created;
     for(std::size_t i=0;i<results.size();++i){
         const auto newId=doc.allocate_object_id();auto result=make_editor_nurbs(newId,results[i],&error);
         if(!result){set_status(error,true);return false;}
-        result->name=object->name+(split?(i==0?" (Split A)":" (Split B)"):(v?" (Fixed V curve)":" (Fixed U curve)"));
+        constexpr const char* edgeNames[]={" (Boundary V-min)"," (Boundary U-max)"," (Boundary V-max reversed)"," (Boundary U-min reversed)"};
+        result->name=object->name+(boundaries?edgeNames[i]:(split?(i==0?" (Split A)":" (Split B)"):(v?" (Fixed V curve)":" (Fixed U curve)")));
         result->transform=object->transform;result->voxelScale=object->voxelScale;result->voxelSizeMeters=object->voxelSizeMeters;
-        result->flags=object->flags;if(iso)result->flags.collisionEnabled=false;
+        result->flags=object->flags;if(iso||boundaries)result->flags.collisionEnabled=false;
         result->tags=object->tags;result->groups=object->groups;result->layer=object->layer;
         auto& mesh=*result->polygon;const auto& old=*object->polygon;
         mesh.materials=old.materials;mesh.materialBindings=old.materialBindings;mesh.images=old.images;mesh.samplers=old.samplers;mesh.textures=old.textures;
@@ -59,6 +62,6 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     workspace_.select_object(created.front());selectionDomain_=SelectionDomain::Objects;
     nurbsEditingObject_=0;nurbsSelected_.clear();nurbsControl_=0;nurbsConstructionPanel_=false;
     workspace_.commands().set_last_selection_transition(selection,capture_selection_snapshot());
-    set_status(split?"Two editable NURBS pieces added in one undo step; original retained":"Editable rational isocurve added; original surface retained");return true;
+    set_status(boundaries?"Four editable parameter-boundary curves added in one undo step; surface retained":split?"Two editable NURBS pieces added in one undo step; original retained":"Editable rational isocurve added; original surface retained");return true;
 }
 }

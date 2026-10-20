@@ -4,6 +4,9 @@ Builds on [split/isocurve tools](nurbs-split-isoparms-2026-10-20.md). This batch
 fixes display shading at potential creases, exposes display density and retains
 surface texture coordinates when splitting.
 
+The next boundary/join batch is documented in
+[nurbs-boundaries-join-2026-10-20.md](nurbs-boundaries-join-2026-10-20.md).
+
 ## Artist workflow
 
 1. Select a native NURBS source. Open **Construction and Split/Isocurve Settings**.

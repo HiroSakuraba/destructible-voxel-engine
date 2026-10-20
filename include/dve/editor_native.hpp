@@ -768,6 +768,7 @@ public:
     [[nodiscard]] std::vector<EditorObjectId> cad_mesh_edit_targets() const;
     // True once the object's exact CAD link was dropped by editing its triangles (undo restores it).
     [[nodiscard]] bool cad_link_dropped(EditorObjectId id) const;
+    [[nodiscard]] std::string cad_detail_disabled_reason() const;
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
     [[nodiscard]] std::string transform_numeric_label() const;
     [[nodiscard]] const std::string& transform_numeric_text() const noexcept { return transformNumeric_; }
@@ -1385,7 +1386,8 @@ private:
     EditorObjectId pivotEditTarget_{};  // the object or group whose pivot is being edited  // Edit Pivot on an object: where the dragged origin is
     [[nodiscard]] bool origin_drag() const;
     [[nodiscard]] std::unique_ptr<IEditorCommand> make_move_origin_command(EditorObjectId id, Float3 worldPoint, Float3* placed,
-                                                                          std::string* error) const;
+                                                                          std::string* error, Int3* cellShift = nullptr) const;
+    void remap_voxel_selection(Int3 cells);
     [[nodiscard]] bool has_own_geometry(const EditorObject& object) const;
     void prune_groups();
     SelectionDomain selectionDomain_{SelectionDomain::Objects};

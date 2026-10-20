@@ -2048,8 +2048,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
             enabled("polygon.import_exact", asset && is_exact_cad_source(asset->relativePath) && !playActive,
                     playActive ? "Stop Play or Simulate before importing."
                                : "Select a STEP, BREP or OpenUSD B-rep (.usda) file in the Assets panel first.");
-            enabled("polygon.cad_detail", !selected_exact_objects().empty() && !playActive,
-                    playActive ? "Stop Play or Simulate first." : "Select a CAD object (imported with Import Exact CAD) first.");
+            {
+                const std::string cadReason = cad_detail_disabled_reason();
+                enabled("polygon.cad_detail", cadReason.empty(), cadReason);
+            }
             for (std::string_view id : {"file.import"})
                 enabled(id, model && !playActive, playActive ? "Stop Play or Simulate before importing."
                                                              : "Select an OBJ, glTF or GLB model in the Assets panel first.");
@@ -6026,6 +6028,8 @@ bool NativeEditorController::toggle_pivot_editing() {
     if (workspace_.selection_count() == 1 && active && !is_group(*active)) {
         // One voxel object or mesh: Move drags only its origin; the geometry stays put.
         if (const std::string refusal = origin_edit_refusal(*active); !refusal.empty()) { set_status(refusal, true); return false; }
+        // Component or cell selections would take the drag; the pivot belongs to the object.
+        if (selectionDomain_ != SelectionDomain::Objects) set_selection_domain(SelectionDomain::Objects);
         pivotEditing_ = true;
         pivotEditTarget_ = *active;
         set_active_tool(EditorToolId::Translate);
@@ -6746,10 +6750,17 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
                 if (originDragPoint_) {
                     std::string error;
                     Float3 placed{};
-                    auto command = make_move_origin_command(gizmoChanges_.front().id, *originDragPoint_, &placed, &error);
+                    Int3 cells{};
+                    const EditorObjectId target = gizmoChanges_.front().id;
+                    auto command = make_move_origin_command(target, *originDragPoint_, &placed, &error, &cells);
                     if (!command) set_status(error, true);
                     else {
+                        const auto selection = capture_selection_snapshot();
                         const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
+                        if (result.success) {
+                            if (target == voxelSelectionObject_) remap_voxel_selection(cells);
+                            workspace_.commands().set_last_selection_transition(selection, capture_selection_snapshot());
+                        }
                         set_status(result.success ? "Moved the pivot (geometry stays put)" : result.message, !result.success);
                     }
                 }

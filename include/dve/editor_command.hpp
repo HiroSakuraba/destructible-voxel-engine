@@ -61,6 +61,12 @@ public:
     void set_last_selection_transition(EditorSelectionSnapshot before, EditorSelectionSnapshot after);
     [[nodiscard]] const EditorSelectionSnapshot* undo_selection() const noexcept;
     [[nodiscard]] const EditorSelectionSnapshot* redo_selection() const noexcept;
+    // Folds the newest `count` entries (all at the top of the history, none undone) into one undo
+    // step called `label`; the selection runs from the first one's before to the last one's after.
+    bool join_last(std::size_t count, std::string label);
+    // Undoes the newest entry and forgets it (no redo record): for a step that turned out to
+    // belong to an edit that never happened.
+    CommandResult discard_last(EditorDocument& document);
 
 private:
     struct Entry {

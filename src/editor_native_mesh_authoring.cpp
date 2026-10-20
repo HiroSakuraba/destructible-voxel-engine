@@ -194,6 +194,7 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
         for(auto id:{"mesh.bevel_edges","mesh.chamfer_edges","mesh.fillet_edges"})enabled(id,edges&&single&&!prefab,reason);
     }
 }
+bool NativeEditorController::mesh_authoring_preview_open() const noexcept {return meshAuthoring_&&meshAuthoring_->kind!=NativeMeshAuthoringState::Kind::None;}
 bool NativeEditorController::mesh_authoring_dragging() const noexcept {return meshAuthoring_&&(meshAuthoring_->uvBefore||meshAuthoring_->hullBefore);}
 void NativeEditorController::cancel_mesh_authoring_drag(){if(!meshAuthoring_)return;auto& s=*meshAuthoring_;if(s.uvBefore){if(auto* o=workspace_.document().find_object(s.object))o->polygon=*s.uvBefore;}s.uvBefore.reset();s.hullBefore.reset();s.hullPreview.clear();s.typed.clear();s.dragging=s.panning=s.selecting=false;}
 
@@ -438,6 +439,7 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
         if(update||apply){const auto current=stamp(workspace_.document(),s.object,s.operand);if(update||current!=s.operandStamp){s.result=boolean_editor_polygons(workspace_.document(),s.object,s.operand,s.boolean);s.operandStamp=current;s.booleanPose=workspace_.document().world_transform(s.object).value_or(object->transform);s.booleanMetric=object->voxelScale;
                 if(!s.result)set_status(s.result.error,true);else if(apply)set_status("Operands changed: inspect updated preview and press Enter again");return true;}}
         if(apply){if(!s.result){set_status(s.result.error,true);return true;}const auto before=capture_selection_snapshot();std::unique_ptr<IEditorCommand> command;EditorObjectId id=s.object;
+            if(s.replace&&exact_brep_source(*object)){set_status(object->name+" is a CAD object: replacing it would break its exact link. Press R for a new result object, or use Exact Boolean",true);return true;}
             if(s.replace)command=std::make_unique<ReplacePolygonCommand>(id,*object->polygon,s.result.mesh,"Mesh Boolean");
             else {id=workspace_.document().allocate_object_id();EditorObject result(id,object->name+" (Boolean)");result.polygon=s.result.mesh;result.polygon->objectId=id;refresh_editor_polygon(*result.polygon);result.transform=s.booleanPose;result.voxelScale=s.booleanMetric;result.flags=object->flags;result.parent=object->parent;command=std::make_unique<AddObjectCommand>(std::move(result),"Create mesh Boolean result");}
             auto result=workspace_.commands().execute(workspace_.document(),std::move(command));if(result.success){if(!viewportSettings_.isolatedObjects.empty())viewportSettings_.isolatedObjects.insert(id);workspace_.select_object(id);selectionDomain_=SelectionDomain::Objects;workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());s.kind=NativeMeshAuthoringState::Kind::None;recompute_layout();}set_status(result.success?"Applied mesh Boolean":result.message,!result.success);return true;}

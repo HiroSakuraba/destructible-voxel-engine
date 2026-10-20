@@ -161,6 +161,46 @@ void test_refusals() {
     check(!c.dispatch_action("edit.pivot_center") && c.status().text.find("socket-attached") != std::string::npos,
           "socket-attached children are refused: " + c.status().text);
 }
+
+void test_more_refusals_and_selection() {
+    auto owner = make_controller();
+    NativeEditorController& c = *owner;
+    // Hidden objects and authored collision hulls keep their pivot.
+    c.workspace().document().find_object(2)->flags.visible = false;
+    c.workspace().select_object(2);
+    std::size_t steps = c.workspace().commands().size();
+    check(!c.dispatch_action("edit.pivot_center") && c.workspace().commands().size() == steps, "hidden: refused: " + c.status().text);
+    c.workspace().document().find_object(2)->flags.visible = true;
+    Component hull;
+    hull.id = 77;
+    hull.type = "dve.collision_hull";
+    c.workspace().document().find_object(2)->components.push_back(hull);
+    check(!c.dispatch_action("edit.pivot_center") && c.status().text.find("collision hull") != std::string::npos &&
+          c.workspace().commands().size() == steps, "collision hull: refused: " + c.status().text);
+    c.workspace().document().find_object(2)->components.clear();
+
+    // A voxel selection follows the rebased cells, and Undo maps it back.
+    c.workspace().select_object(1);
+    c.set_selection_domain(SelectionDomain::Voxels);
+    c.select_voxels(1, {Int3{0, 0, 0}}, SelectionOperation::Replace);
+    check(c.voxel_selection().size() == 1, "one cell selected");
+    check(c.dispatch_action("edit.pivot_center"), "Pivot to Centre with a voxel selection: " + c.status().text);
+    const auto& object = *c.workspace().document().find_object(1);
+    const Int3 cell = *c.voxel_selection().begin();
+    const Float3 o = origin(c, 1);
+    // The selected cell is still the world cell at (4, 0, 0).
+    check(near({o.x + static_cast<float>(cell.x) * 0.5F, o.y + static_cast<float>(cell.y) * 0.5F, o.z + static_cast<float>(cell.z) * 0.5F},
+               {4.0F, 0.0F, 0.0F}) && object.voxels->occupied_at(cell), "the selection still names the same voxel");
+    check(c.dispatch_action("edit.undo") && c.voxel_selection().size() == 1 && *c.voxel_selection().begin() == Int3{0, 0, 0},
+          "Undo restores the selection");
+
+    // Edit Pivot from component mode leaves it, so the drag moves the pivot, not the components.
+    c.set_selection_domain(SelectionDomain::Objects);
+    c.workspace().select_object(2);
+    (void)c.set_polygon_mode(PolygonSelectionMode::Vertex);
+    check(c.dispatch_action("edit.edit_pivot") && c.pivot_editing() && c.selection_domain() == SelectionDomain::Objects,
+          "Edit Pivot returns to object selection");
+}
 }  // namespace
 
 int main() {
@@ -168,6 +208,7 @@ int main() {
     test_point_under_cursor();
     test_edit_pivot_mode();
     test_refusals();
+    test_more_refusals_and_selection();
     if (g_failures == 0) std::printf("pivot edit tests passed\n");
     return g_failures == 0 ? 0 : 1;
 }

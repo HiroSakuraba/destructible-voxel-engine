@@ -15,6 +15,30 @@
 #include <vector>
 
 namespace exact_cad_test {
+// Portable environment edits for tests (MSVC has no setenv), and whether the /bin/sh fake
+// brepkernel can run here (not on Windows).
+inline void set_test_env(const char* key, const char* value) {
+#ifdef _WIN32
+    (void)_putenv_s(key, value);
+#else
+    (void)setenv(key, value, 1);
+#endif
+}
+inline void unset_test_env(const char* key) {
+#ifdef _WIN32
+    (void)_putenv_s(key, "");
+#else
+    (void)unsetenv(key);
+#endif
+}
+inline bool fake_brepkernel_runs() {
+#ifdef _WIN32
+    return false;
+#else
+    return true;
+#endif
+}
+
 namespace fs = std::filesystem;
 
 struct TempDir {

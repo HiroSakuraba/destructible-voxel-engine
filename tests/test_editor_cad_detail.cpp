@@ -102,7 +102,7 @@ std::unique_ptr<NativeEditorController> make_controller(const fs::path& root) {
 void test_native(const fs::path& root, const fs::path& glb) {
     const fs::path script = write_fake_brepkernel(root, glb);
     const std::string command = "/bin/sh " + script.string();
-    setenv("DVE_BREPKERNEL", command.c_str(), 1);
+    set_test_env("DVE_BREPKERNEL", command.c_str());
     auto owner = make_controller(root);
     NativeEditorController& c = *owner;
     const EditorObjectId id = *c.workspace().selected_object();
@@ -174,7 +174,7 @@ void test_native(const fs::path& root, const fs::path& glb) {
     action = std::as_const(c.workspace().menus()).find("polygon.cad_detail");
     check(action && !action->enabled && action->disabledReason.find("CAD object") != std::string::npos, "plain meshes: disabled with a reason");
     check(c.cad_detail_summary(plainId).empty(), "no CAD line for plain meshes");
-    unsetenv("DVE_BREPKERNEL");
+    unset_test_env("DVE_BREPKERNEL");
 }
 
 // With brepkernel installed: a cylinder re-meshed to 0.01 mm has more triangles than the default.
@@ -217,7 +217,8 @@ int main() {
     const fs::path glb = dir.path / "cube.glb";
     write_cube_glb(glb);
     test_library(dir.path, glb);
-    test_native(dir.path, glb);
+    if (fake_brepkernel_runs()) test_native(dir.path, glb);
+    else std::printf("SKIP native CAD Detail: the fake brepkernel needs /bin/sh\n");
     test_real(dir.path);
     if (g_failures == 0) std::printf("cad detail tests passed\n");
     return g_failures == 0 ? 0 : 1;

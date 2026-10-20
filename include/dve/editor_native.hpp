@@ -1362,6 +1362,7 @@ private:
     Float3 nurbsConstructionOrigin_{};
     NurbsSweepOptions nurbsSweepOptions_;
     double nurbsOperationParameter_{.5};
+    unsigned nurbsDisplaySamples_{8};
     bool nurbsConstructionPanel_{};
     EditorObjectId nurbsEditingObject_{};
     std::size_t nurbsControl_{},nurbsFieldControl_{};

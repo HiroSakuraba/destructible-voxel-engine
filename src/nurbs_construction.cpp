@@ -63,7 +63,7 @@ std::optional<NurbsSource> loft_nurbs(std::span<const NurbsSource> profiles,std:
         auto count=unsigned(std::count(s.u.knots.begin(),s.u.knots.end(),t));
         for(;count<n;++count){auto r=insert_nurbs_knot(s,false,t,e);if(!r)return std::nullopt;s=std::move(*r);}
     }
-    NurbsSource out=curves.front();out.rows=unsigned(curves.size());out.v=linear_axis(out.rows);out.controls.clear();
+    NurbsSource out=curves.front();out.rows=unsigned(curves.size());out.creaseNormals=true;out.textureV={0,1};out.v=linear_axis(out.rows);out.controls.clear();
     for(auto& s:curves){out.samplesPerSpan=std::max(out.samplesPerSpan,s.samplesPerSpan);out.controls.insert(out.controls.end(),s.controls.begin(),s.controls.end());}
     if(!validate_nurbs(out,e))return std::nullopt;
     return out;
@@ -81,7 +81,7 @@ std::optional<NurbsSource> sweep_nurbs(const NurbsSource& profile,const NurbsSou
     const double speed=norm(start->du);if(speed<=1e-12)return fail(e,"Sweep rail has a stationary start tangent");
     V previous=mul(start->du,1/speed);std::vector<V> offsets;
     for(auto p:profile.controls){auto q=sub(pos(p),o.profileOrigin);if(std::abs(dot(q,previous))>1e-6*std::max(1.0,norm(q)))return fail(e,"Profile must lie in a plane normal to the rail start tangent through its object origin");offsets.push_back(q);}
-    NurbsSource out=profile;out.rows=o.sections;out.v=linear_axis(o.sections);out.controls.clear();
+    NurbsSource out=profile;out.rows=o.sections;out.creaseNormals=true;out.textureV={0,1};out.v=linear_axis(o.sections);out.controls.clear();
     for(unsigned j=0;j<o.sections;++j){
         const double f=double(j)/(o.sections-1);auto sample=evaluate_nurbs(rail,std::lerp(a,b,f));
         if(!sample||norm(sample->du)<=1e-12)return fail(e,"Sweep rail has a stationary sampled tangent");

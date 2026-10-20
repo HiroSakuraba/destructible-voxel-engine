@@ -27,7 +27,7 @@ std::optional<NurbsSource> reverse_nurbs_axis(const NurbsSource& s,bool v,std::s
 }
 std::optional<NurbsSource> transpose_nurbs(const NurbsSource& s,std::string* e){
     if(!axis_ready(s,true,e))return {};
-    auto out=s;std::swap(out.columns,out.rows);std::swap(out.u,out.v);
+    auto out=s;std::swap(out.columns,out.rows);std::swap(out.u,out.v);std::swap(out.textureU,out.textureV);
     for(unsigned j=0;j<s.rows;++j)for(unsigned i=0;i<s.columns;++i)out.controls[i*out.columns+j]=s.controls[j*s.columns+i];
     if(!validate_nurbs(out,e))return {};
     return out;
@@ -51,6 +51,11 @@ std::optional<std::pair<NurbsSource,NurbsSource>> split_nurbs(const NurbsSource&
             out.controls.push_back(refined->controls[(j+(v?offset:0))*refined->columns+i+(v?0:offset)]);
     };
     copy(left,0);copy(right,seam);
+    const auto range=v?s.textureV:s.textureU;
+    const double fraction=(t-axis.knots[axis.degree])/(axis.knots[n]-axis.knots[axis.degree]);
+    const double texture=std::lerp(range[0],range[1],fraction);
+    (v?left.textureV:left.textureU)=std::array<double,2>{range[0],texture};
+    (v?right.textureV:right.textureU)=std::array<double,2>{texture,range[1]};
     if(!validate_nurbs(left,e)||!validate_nurbs(right,e))return {};
     return std::pair{std::move(left),std::move(right)};
 }
@@ -65,7 +70,7 @@ std::optional<NurbsSource> extract_nurbs_isocurve(const NurbsSource& s,bool v,do
     unsigned index=0;
     if(t==hi)index=(v?refined->rows:refined->columns)-1;
     else if(t!=lo)index=unsigned(std::upper_bound(knots.begin(),knots.end(),t)-knots.begin()-1)-axis.degree;
-    NurbsSource out;out.columns=v?refined->columns:refined->rows;out.u=v?refined->u:refined->v;out.samplesPerSpan=s.samplesPerSpan;
+    NurbsSource out;out.columns=v?refined->columns:refined->rows;out.u=v?refined->u:refined->v;out.samplesPerSpan=s.samplesPerSpan;out.creaseNormals=s.creaseNormals;out.textureU=v?s.textureU:s.textureV;
     for(unsigned i=0;i<out.columns;++i)out.controls.push_back(refined->controls[v?index*refined->columns+i:i*refined->columns+index]);
     if(!validate_nurbs(out,e))return {};
     return out;

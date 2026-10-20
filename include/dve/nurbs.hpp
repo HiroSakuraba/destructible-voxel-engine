@@ -24,6 +24,9 @@ struct NurbsSource {
     NurbsAxis u, v{0,{0,1}};
     std::vector<NurbsPoint> controls;
     unsigned samplesPerSpan{8};
+    // Display metadata; v1 sources decode with legacy shared crease vertices.
+    bool creaseNormals{true};
+    std::array<double,2> textureU{0,1},textureV{0,1};
     bool operator==(const NurbsSource&) const = default;
     [[nodiscard]] bool is_curve() const noexcept { return rows==1; }
 };

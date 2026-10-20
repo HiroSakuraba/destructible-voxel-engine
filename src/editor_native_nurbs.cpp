@@ -10,7 +10,7 @@
 #include <sstream>
 namespace dve::editor {
 namespace {
-constexpr std::string_view actions[]={"nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
+constexpr std::string_view actions[]={"nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
 UiRect panel(UiRect v){return {v.x+8,v.y+8,std::min(330,std::max(1,v.width-16)),std::min(238,std::max(1,v.height-16))};}
 UiRect field(UiRect v,int i){auto p=panel(v);return {p.x+8,p.y+62+i*32,p.width-16,28};}
 std::string number(double x){std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(12)<<x;return o.str();}
@@ -32,7 +32,7 @@ void NativeEditorController::refresh_nurbs_menu_state(){
     std::string error;auto source=ready?editor_nurbs_source(*o,&error):std::nullopt;
     for(auto action:actions) {
         bool enabled=editing;
-        if(action.starts_with("nurbs.source_"))enabled=bool(source)&&(!source->is_curve()||action=="nurbs.source_split_u"||action=="nurbs.source_reverse_u"||action=="nurbs.source_insert_u");
+        if(action.starts_with("nurbs.source_"))enabled=bool(source)&&(!source->is_curve()||action=="nurbs.source_split_u"||action=="nurbs.source_reverse_u"||action=="nurbs.source_insert_u"||action=="nurbs.source_quality"||action=="nurbs.source_reset_uv");
         else if(action=="nurbs.construct_add")enabled=source&&source->is_curve()&&nurbsConstructionInputs_.size()<64;
         else if(action=="nurbs.construct_loft")enabled=editing&&nurbsConstructionInputs_.size()>=2;
         else if(action=="nurbs.construct_sweep")enabled=editing&&nurbsConstructionInputs_.size()==2;

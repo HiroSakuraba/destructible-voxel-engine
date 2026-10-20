@@ -845,6 +845,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_snap_targets.cpp
         src/editor_native_real_scale.cpp
         src/editor_native_pivot_edit.cpp
+        src/editor_native_cad_detail.cpp
         src/editor_modeling_topology.cpp
         src/editor_subdivision.cpp
         src/editor_native_polygon.cpp

@@ -65,6 +65,11 @@ struct ExactBrepSource {
     std::filesystem::path relativePath;   // project-relative, generic separators
     std::string sha256;
     std::string origin;                   // where it came from (CAD file or Boolean), informational
+    // How finely the object's triangles follow the exact surface: brepkernel's chord deflection
+    // in the mesh-local frame (metres, before voxelScale) and angular deflection. 0 = not recorded
+    // (meshes from before this was stored used brepkernel's default, 1/500 of the part's size).
+    double deflectionMeters{0.0};
+    double angularRadians{0.0};
 };
 [[nodiscard]] std::optional<ExactBrepSource> exact_brep_source(const EditorObject& object);
 [[nodiscard]] Component make_exact_brep_component(const ExactBrepSource& source);
@@ -123,5 +128,22 @@ struct ExactBooleanRequest {
     const ExactCadRunner& runner = {});
 
 [[nodiscard]] bool is_exact_cad_source(const std::filesystem::path& path);
+
+// Re-mesh an exact source at a chosen accuracy (CAD Detail): brepkernel `mesh` with the given chord
+// deflection (mesh-local metres; 0 = brepkernel's default). The source itself does not change.
+struct ExactCadRemeshResult {
+    CookedPolygonAsset mesh;
+    double deflectionMeters{};   // what brepkernel actually used
+    double angularRadians{};
+    std::uint64_t triangles{};
+    std::string error;
+    [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
+};
+[[nodiscard]] ExactCadRemeshResult remesh_exact_cad(
+    const std::filesystem::path& projectRoot, const ExactBrepSource& source, EditorObjectId id, double deflectionMeters,
+    const ExactCadSettings& settings = ExactCadSettings::from_environment(), const ExactCadRunner& runner = {});
+// Largest distance, in world metres, between the triangles and the exact surface for this object
+// (the recorded deflection times its largest axis scale); nullopt when not recorded.
+[[nodiscard]] std::optional<double> exact_mesh_world_error(const EditorObject& object);
 
 } // namespace dve::editor

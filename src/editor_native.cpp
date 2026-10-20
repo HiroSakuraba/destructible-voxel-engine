@@ -1,4 +1,5 @@
 #include "dve/editor_native.hpp"
+#include "editor_native_long_job.hpp"
 #include "dve/editor_exact_cad.hpp"
 #include "dve/voxel_metric.hpp"
 #include "dve/asset_cooker.hpp"
@@ -2047,6 +2048,8 @@ void NativeEditorController::refresh_menu_state() noexcept {
             enabled("polygon.import_exact", asset && is_exact_cad_source(asset->relativePath) && !playActive,
                     playActive ? "Stop Play or Simulate before importing."
                                : "Select a STEP, BREP or OpenUSD B-rep (.usda) file in the Assets panel first.");
+            enabled("polygon.cad_detail", !selected_exact_objects().empty() && !playActive,
+                    playActive ? "Stop Play or Simulate first." : "Select a CAD object (imported with Import Exact CAD) first.");
             for (std::string_view id : {"file.import"})
                 enabled(id, model && !playActive, playActive ? "Stop Play or Simulate before importing."
                                                              : "Select an OBJ, glTF or GLB model in the Assets panel first.");
@@ -3459,6 +3462,10 @@ void NativeEditorController::commit_text_edit() {
             return;
         }
         textEdit_ = {};
+        return;
+    }
+    if (kind == TextEditKind::CadDetail) {
+        (void)commit_cad_detail_text();
         return;
     }
     if (kind == TextEditKind::SelectionSetName) {
@@ -6821,6 +6828,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
             return set_number_field(field, axis, numberFieldClipboard_, "Paste");
         }
     }
+    if (actionId == "polygon.cad_detail" || actionId.starts_with("cad.detail.")) return dispatch_cad_detail_action(actionId);
     if (actionId.starts_with("selection.set.") || actionId.starts_with("select.set_")) return dispatch_selection_set_action(actionId);
     if (actionId.starts_with("selection.pick.")) {
         EditorObjectId id{};
@@ -11770,24 +11778,8 @@ std::uint64_t scene_change_fingerprint(const EditorDocument& document, const Edi
 }
 } // namespace
 
-struct NativeEditorController::LongJob {
-    LongJobKind kind{LongJobKind::Idle};
-    std::string label;
-    std::atomic<bool> cancel{false};
-    std::atomic<bool> done{false};
-    std::atomic<float> progress{0.0F};
-    mutable std::mutex mutex;
-    std::string phase;
-    std::string error;
-    std::uint64_t documentRevision{};
-    std::function<bool(LongJob&)> commit;
-    void report(float value, std::string text) {
-        progress.store(std::clamp(value, 0.0F, 1.0F));
-        std::lock_guard lock(mutex);
-        phase = std::move(text);
-    }
-    [[nodiscard]] bool cancelled() const noexcept { return cancel.load(); }
-};
+// struct NativeEditorController::LongJob lives in editor_native_long_job.hpp (shared with the
+// feature files that start background jobs).
 
 NativeEditorController::LongJobCancelOnExit::~LongJobCancelOnExit() {
     if (job && *job) (*job)->cancel = true;

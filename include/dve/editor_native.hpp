@@ -163,7 +163,8 @@ enum class TextEditKind : std::uint8_t {
     VoxelSize, BrushRadius, SurfaceOffset,  // numeric fields (see NumberFieldId)
     DuplicateSetting,                       // Duplicate Special panel; objectId holds the NumberFieldId
     SelectionSetName,                       // naming a selection set; objectId holds the set index
-    Scale                                   // inspector Scale X/Y/Z (axis in TextEditState::axis)
+    Scale,                                  // inspector Scale X/Y/Z (axis in TextEditState::axis)
+    CadDetail                               // CAD Detail: typed mesh accuracy (mm)
 };
 
 struct TextEditState {
@@ -754,6 +755,12 @@ public:
     // Voxel > Resample Voxels to Scale: rebuild the selected voxel objects' cells at their current
     // per-axis scale and set the scale back to 1 (one undo step; the explicit destructive step).
     bool resample_voxels_to_scale();
+    // CAD Detail (exact CAD): re-mesh the selected CAD objects so the triangles stay within
+    // `worldToleranceMeters` of the exact surface (0 = brepkernel's default); one undo step.
+    bool set_cad_detail(double worldToleranceMeters);
+    // "Exact CAD: mesh within ±0.1 mm" for a CAD object, empty for anything else.
+    [[nodiscard]] std::string cad_detail_summary(EditorObjectId id) const;
+    [[nodiscard]] std::vector<EditorObjectId> selected_exact_objects() const;
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
     [[nodiscard]] std::string transform_numeric_label() const;
     [[nodiscard]] const std::string& transform_numeric_text() const noexcept { return transformNumeric_; }
@@ -1360,6 +1367,9 @@ private:
     bool floodFillArmed_{};
     std::set<EditorObjectId> openGroups_;
     bool pivotEditing_{};
+    bool open_cad_detail_menu();
+    bool dispatch_cad_detail_action(std::string_view action);
+    bool commit_cad_detail_text();
     std::optional<Float3> originDragPoint_;
     EditorObjectId pivotEditTarget_{};  // the object or group whose pivot is being edited  // Edit Pivot on an object: where the dragged origin is
     [[nodiscard]] bool origin_drag() const;

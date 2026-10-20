@@ -747,7 +747,9 @@ public:
     // being edited when moving components): vertices, then edge midpoints, face centres, voxel and
     // collision-box corners, bounds corners, and finally the surface itself.
     // `only` limits the search to one kind (placement modes such as Snap to Mesh Vertex).
-    [[nodiscard]] std::optional<SnapTarget> find_snap_target(int x, int y, std::optional<SnapTargetKind> only = std::nullopt) const;
+    // `includeSelection` also offers the selection's own vertices and corners (Pivot to Point).
+    [[nodiscard]] std::optional<SnapTarget> find_snap_target(int x, int y, std::optional<SnapTargetKind> only = std::nullopt,
+                                                             bool includeSelection = false) const;
     // While a Move drag snaps (V held): the target it snapped to, and the point it moved from.
     [[nodiscard]] std::optional<SnapTarget> drag_snap_target() const noexcept { return gizmoDragging_ ? dragSnapTarget_ : std::nullopt; }
     [[nodiscard]] bool drag_snap_held() const noexcept { return dragSnapHeld_; }
@@ -1138,6 +1140,13 @@ public:
     [[nodiscard]] bool pivot_editing() const noexcept { return pivotEditing_; }
     bool toggle_pivot_editing();
     bool set_group_pivot(bool bottomCentre);
+    // Pivot editing for voxel objects and meshes (ART-028): the origin moves, the geometry stays.
+    // `where` is "centre", "bottom" or "cursor" (the snap target under the cursor).
+    bool move_selected_origins(std::string_view where);
+    // Why this object's pivot cannot move (empty when it can).
+    [[nodiscard]] std::string origin_edit_refusal(EditorObjectId id) const;
+    // Where the edited pivot is drawn (Edit Pivot on), following a drag.
+    [[nodiscard]] std::optional<Float3> origin_marker() const;
     // Voxel selection (Edit > Selection Domain, M). See editor_voxel_selection.hpp.
     [[nodiscard]] SelectionDomain selection_domain() const noexcept { return selectionDomain_; }
     void set_selection_domain(SelectionDomain domain);
@@ -1367,6 +1376,12 @@ private:
     bool floodFillArmed_{};
     std::set<EditorObjectId> openGroups_;
     bool pivotEditing_{};
+    std::optional<Float3> originDragPoint_;
+    EditorObjectId pivotEditTarget_{};  // the object or group whose pivot is being edited  // Edit Pivot on an object: where the dragged origin is
+    [[nodiscard]] bool origin_drag() const;
+    [[nodiscard]] std::unique_ptr<IEditorCommand> make_move_origin_command(EditorObjectId id, Float3 worldPoint, Float3* placed,
+                                                                          std::string* error, Int3* cellShift = nullptr) const;
+    void remap_voxel_selection(Int3 cells);
     [[nodiscard]] bool has_own_geometry(const EditorObject& object) const;
     void prune_groups();
     SelectionDomain selectionDomain_{SelectionDomain::Objects};

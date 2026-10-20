@@ -1973,12 +1973,21 @@ void NativeEditorController::refresh_menu_state() noexcept {
         enabled("edit.open_group", canOpen && !playActive, "Select a closed group (or double-click a piece in one).");
         enabled("edit.close_group", canClose && !playActive, "Select something inside an open group first.");
         enabled("edit.close_all_groups", !openGroups_.empty(), "No groups are open.");
-        enabled("edit.edit_pivot", ((singleGroup && !pivotFixed) || pivotEditing_) && !playActive,
-                pivotFixed ? kImportedPivotFixed : std::string_view("Select one group to edit its pivot."));
+        // Why the primary object's pivot cannot move, as the reason the commands are greyed out.
+        const std::string originRefusal = active && !singleGroup ? origin_edit_refusal(*active) : std::string();
+        const bool singleOriginObject = singleSelection && active && !singleGroup && originRefusal.empty();
+        enabled("edit.edit_pivot", ((singleGroup && !pivotFixed) || singleOriginObject || pivotEditing_) && !playActive,
+                pivotFixed ? std::string(kImportedPivotFixed)
+                : !originRefusal.empty() && singleSelection ? originRefusal : std::string("Select one object or group to edit its pivot."));
         checked("edit.edit_pivot", pivotEditing_);
+        bool anyOriginObject = false;
+        for (const EditorObjectId id : workspace_.selected_objects()) anyOriginObject = anyOriginObject || (!is_group(id) && origin_edit_refusal(id).empty());
         for (std::string_view id : {"edit.pivot_bottom_center", "edit.pivot_center"})
-            enabled(id, singleGroup && !pivotFixed && !playActive,
-                    pivotFixed ? kImportedPivotFixed : std::string_view("Select one group first."));
+            enabled(id, ((singleGroup && !pivotFixed) || anyOriginObject) && !playActive,
+                    pivotFixed ? std::string(kImportedPivotFixed)
+                    : !originRefusal.empty() ? originRefusal : std::string("Select a group, voxel object or mesh first."));
+        enabled("edit.pivot_to_cursor", anyOriginObject && !playActive,
+                !originRefusal.empty() ? originRefusal : std::string("Select a voxel object or mesh first."));
     }
     const auto hierarchyPrimary = workspace_.selected_object();
     const auto* hierarchyObject = hierarchyPrimary ? workspace_.document().find_object(*hierarchyPrimary) : nullptr;
@@ -5889,7 +5898,9 @@ void NativeEditorController::prune_groups() {
         it = is_group(*it) ? std::next(it) : openGroups_.erase(it);
     if (pivotEditing_) {
         const auto active = workspace_.selected_object();
-        if (workspace_.selection_count() != 1 || !active || !is_group(*active)) {
+        // Selecting anything else ends pivot editing.
+        if (workspace_.selection_count() != 1 || !active || *active != pivotEditTarget_ ||
+            (!is_group(*active) && !origin_edit_refusal(*active).empty())) {
             pivotEditing_ = false;
             refresh_menu_state();
         }
@@ -6000,8 +6011,20 @@ bool NativeEditorController::toggle_pivot_editing() {
     }
     if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before editing a pivot", true); return false; }
     const auto active = workspace_.selected_object();
+    if (workspace_.selection_count() == 1 && active && !is_group(*active)) {
+        // One voxel object or mesh: Move drags only its origin; the geometry stays put.
+        if (const std::string refusal = origin_edit_refusal(*active); !refusal.empty()) { set_status(refusal, true); return false; }
+        // Component or cell selections would take the drag; the pivot belongs to the object.
+        if (selectionDomain_ != SelectionDomain::Objects) set_selection_domain(SelectionDomain::Objects);
+        pivotEditing_ = true;
+        pivotEditTarget_ = *active;
+        set_active_tool(EditorToolId::Translate);
+        refresh_menu_state();
+        set_status("Editing the pivot: Move drags the origin only (V snaps, type a value); the geometry stays. Edit Pivot again or Esc finishes");
+        return true;
+    }
     if (workspace_.selection_count() != 1 || !active || !is_group(*active)) {
-        set_status("Select one group to edit its pivot", true);
+        set_status("Select one object or group to edit its pivot", true);
         return false;
     }
     if (const EditorObject* group = workspace_.document().find_object(*active); group && group->flags.locked) {
@@ -6018,6 +6041,7 @@ bool NativeEditorController::toggle_pivot_editing() {
         return false;
     }
     pivotEditing_ = true;
+    pivotEditTarget_ = *active;
     if (activeTool_ != EditorToolId::Translate && activeTool_ != EditorToolId::Rotate) set_active_tool(EditorToolId::Translate);
     refresh_menu_state();
     set_status("Editing the pivot: Move or Rotate moves the pivot only; Edit Pivot again (or Esc) finishes");
@@ -6064,6 +6088,10 @@ Float3 NativeEditorController::selection_pivot() const noexcept {
     if (selectionDomain_ == SelectionDomain::Polygons) return polygon_selection_centre();
     if (pivotMode_ == PivotMode::WorldOrigin) return {};
     if (pivotMode_ == PivotMode::Custom) return customPivot_;
+    // Editing an object's pivot: the gizmo sits on its origin.
+    if (origin_drag())
+        if (const EditorObject* object = workspace_.document().find_object(*workspace_.selected_object()))
+            return object->transform.position;
     // A single selected group turns and moves about its own pivot.
     if (workspace_.selection_count() == 1 && workspace_.selected_object() && is_group(*workspace_.selected_object()))
         if (const EditorObject* group = workspace_.document().find_object(*workspace_.selected_object()))
@@ -6419,6 +6447,13 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
     gizmoStartY_ = y;
     gizmoLastX_ = x; gizmoLastY_ = y; gizmoLastModifiers_ = modifiers;
     dragSnapTarget_.reset();
+    originDragPoint_.reset();
+    if (origin_drag() && activeTool_ != EditorToolId::Translate) {
+        gizmoDragging_ = false;
+        gizmoAxis_ = 0;
+        set_status("While editing an object's pivot, use Move (the origin keeps the object's rotation)", true);
+        return;
+    }
     gizmoPivot_ = selection_pivot();
     gizmoChanges_ = selection_transform_snapshot();
     gizmoSizeChanges_.clear();
@@ -6602,6 +6637,8 @@ void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modif
             change.after.position = add(change.before.position, multiply(worldAxis, worldDelta));
         }
     }
+    // Edit Pivot on an object: only the origin marker moves until release.
+    if (origin_drag()) { originDragPoint_ = gizmoChanges_.front().after.position; return; }
     apply_transform_preview(gizmoChanges_, true);
 }
 
@@ -6690,10 +6727,31 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
             // Ended where it started (or snapped back onto its own pivot): no undo step.
             set_status(activeTool_ == EditorToolId::Rotate ? "Nothing rotated" : "Nothing moved", false, 1.5F);
         } else {
+            if (origin_drag()) {
+                // Edit Pivot: move the origin to where it was dragged; the geometry stays put.
+                if (originDragPoint_) {
+                    std::string error;
+                    Float3 placed{};
+                    Int3 cells{};
+                    const EditorObjectId target = gizmoChanges_.front().id;
+                    auto command = make_move_origin_command(target, *originDragPoint_, &placed, &error, &cells);
+                    if (!command) set_status(error, true);
+                    else {
+                        const auto selection = capture_selection_snapshot();
+                        const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
+                        if (result.success) {
+                            if (target == voxelSelectionObject_) remap_voxel_selection(cells);
+                            workspace_.commands().set_last_selection_transition(selection, capture_selection_snapshot());
+                        }
+                        set_status(result.success ? "Moved the pivot (geometry stays put)" : result.message, !result.success);
+                    }
+                }
+            } else {
             const std::string label = activeTool_ == EditorToolId::Rotate ? "Rotate objects" : "Move objects";
             const CommandResult result = workspace_.commands().execute(
                 workspace_.document(), std::make_unique<TransformObjectsCommand>(gizmoChanges_, label));
             set_status(result.success ? label : result.message, !result.success);
+            }
         }
     }
     gizmoDragging_ = false;
@@ -8371,8 +8429,12 @@ camera_menu_dispatch_complete:
         return true;
     }
     if (actionId == "edit.edit_pivot") return toggle_pivot_editing();
-    if (actionId == "edit.pivot_bottom_center" || actionId == "edit.pivot_center")
-        return set_group_pivot(actionId == "edit.pivot_bottom_center");
+    if (actionId == "edit.pivot_bottom_center" || actionId == "edit.pivot_center") {
+        const auto active = workspace_.selected_object();
+        if (workspace_.selection_count() == 1 && active && is_group(*active)) return set_group_pivot(actionId == "edit.pivot_bottom_center");
+        return move_selected_origins(actionId == "edit.pivot_bottom_center" ? "bottom" : "centre");
+    }
+    if (actionId == "edit.pivot_to_cursor") return move_selected_origins("cursor");
     if (actionId == "edit.ungroup") {
         const auto beforeSelection = capture_selection_snapshot();
         std::vector<EditorObjectId> groupsToDissolve;

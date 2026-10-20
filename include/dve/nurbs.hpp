@@ -24,6 +24,9 @@ struct NurbsSource {
     NurbsAxis u, v{0,{0,1}};
     std::vector<NurbsPoint> controls;
     unsigned samplesPerSpan{8};
+    // Display metadata; v1 sources decode with legacy shared crease vertices.
+    bool creaseNormals{true};
+    std::array<double,2> textureU{0,1},textureV{0,1};
     bool operator==(const NurbsSource&) const = default;
     [[nodiscard]] bool is_curve() const noexcept { return rows==1; }
 };
@@ -36,6 +39,8 @@ struct NurbsSample {
 [[nodiscard]] NurbsSource make_nurbs_arc(double radius=1,double angleRadians=6.283185307179586);
 [[nodiscard]] std::optional<NurbsSource> extrude_nurbs(const NurbsSource& curve,std::array<double,3> offset,std::string* error=nullptr);
 [[nodiscard]] std::optional<NurbsSource> revolve_nurbs(const NurbsSource& curve,double angleRadians=6.283185307179586,std::string* error=nullptr);
+// Shape-preserving refinement in homogeneous coordinates (floating-point arithmetic).
+[[nodiscard]] std::optional<NurbsSource> insert_nurbs_knot(const NurbsSource&,bool alongV,double parameter,std::string* error=nullptr);
 [[nodiscard]] std::string encode_nurbs(const NurbsSource&);
 [[nodiscard]] std::optional<NurbsSource> decode_nurbs(std::string_view,std::string* error=nullptr);
 // Fixed per-span tessellation, not a certified chord-error bound.

@@ -164,7 +164,9 @@ enum class TextEditKind : std::uint8_t {
     AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal,
     VoxelSize, BrushRadius, SurfaceOffset,  // numeric fields (see NumberFieldId)
     DuplicateSetting,                       // Duplicate Special panel; objectId holds the NumberFieldId
-    NurbsControl, SelectionSetName                        // naming a selection set; objectId holds the set index
+    NurbsControl,                           // NURBS control point field
+    SelectionSetName,                       // naming a selection set; objectId holds the set index
+    Scale                                   // inspector Scale X/Y/Z (axis in TextEditState::axis)
 };
 
 struct TextEditState {
@@ -190,7 +192,8 @@ struct TextEditState {
 enum class NumberFieldId : std::uint8_t {
     Position, Rotation, VoxelSize, BrushRadius, SurfaceOffset,
     // Duplicate Special panel (Edit > Duplicate Special)
-    DuplicateCopies, DuplicateOffset, DuplicateRotation, DuplicateScale, DuplicatePoint
+    DuplicateCopies, DuplicateOffset, DuplicateRotation, DuplicateScale, DuplicatePoint,
+    Scale  // per-axis object scale (voxelScale): stretches without resampling (ART-027)
 };
 struct NumberFieldRect {
     NumberFieldId field{};
@@ -749,6 +752,10 @@ public:
     // While a Move drag snaps (V held): the target it snapped to, and the point it moved from.
     [[nodiscard]] std::optional<SnapTarget> drag_snap_target() const noexcept { return gizmoDragging_ ? dragSnapTarget_ : std::nullopt; }
     [[nodiscard]] bool drag_snap_held() const noexcept { return dragSnapHeld_; }
+    // Voxel > Resample Voxels to Scale: rebuild the selected voxel objects' cells at their current
+    // per-axis scale and set the scale back to 1 (one undo step; the explicit destructive step).
+    bool resample_voxels_to_scale();
+    [[nodiscard]] std::string resample_to_scale_disabled_reason() const;
     [[nodiscard]] Float3 drag_snap_source() const noexcept { return gizmoPivot_; }
     [[nodiscard]] std::optional<EditorObjectBounds> scale_preview_bounds() const noexcept { return scalePreviewBounds_; }
     [[nodiscard]] Float3 current_pivot() const noexcept { return selection_pivot(); }

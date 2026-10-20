@@ -158,11 +158,13 @@
       "name": "linux-gcc-asan",
       "inherits": "linux-gcc-release",
       "displayName": "Linux GCC Release + AddressSanitizer/UBSan",
-      "description": "Optimized build with ASan and UBSan for running the full test suite in CI; -g1 keeps line numbers in reports without full debug info.",
+      "description": "-O1 build with ASan and UBSan for running the full test suite in CI; -g1 keeps line numbers in reports without full debug info.",
       "cacheVariables": {
         "DVE_ENABLE_SANITIZERS": "ON",
         "CMAKE_C_FLAGS": "-g1",
-        "CMAKE_CXX_FLAGS": "-g1"
+        "CMAKE_CXX_FLAGS": "-g1",
+        "CMAKE_C_FLAGS_RELEASE": "-O1 -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O1 -DNDEBUG"
       }
     },
     {

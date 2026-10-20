@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, "codex/**"]
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
 
 permissions:
   contents: read

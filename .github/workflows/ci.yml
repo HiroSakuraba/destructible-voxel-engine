@@ -7,7 +7,15 @@ name: CI
 on:
   push:
     branches: [main, "codex/**"]
+  # Docs-only pull requests skip CI. Pushes to main are not filtered, so main always gets the
+  # full run (including the ASan leg and the source-manifest check, which hashes docs too).
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  # Nightly ASan run (06:17 UTC); scheduled runs only execute the ASan leg and the manifest check.
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -35,6 +43,7 @@ env:
   CCACHE_COMPRESS: "true"
   # Each Linux ccache directory is saved as its own Actions cache entry; keep them small so the
   # repository stays under GitHub's 10 GB cache quota (ccache evicts least recently used objects).
+  # linux-gcc-asan overrides this (its objects are ~22x larger), see the ctest job.
   CCACHE_MAXSIZE: 400M
   CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
 
@@ -51,11 +60,20 @@ jobs:
     # linux-gcc-asan builds and runs the same suite under AddressSanitizer and UBSan, which is
     # roughly two to three times slower than a plain Release run.
     timeout-minutes: ${{ matrix.preset == 'linux-gcc-asan' && 300 || 180 }}
+    # linux-gcc-asan (40-50 min) does not run on pull requests: it runs on pushes to main, nightly
+    # (schedule) and on workflow_dispatch. Scheduled runs only build the ASan leg.
     strategy:
       fail-fast: false
       matrix:
-        preset: [linux-gcc-release, linux-gcc-lua-release, linux-gcc-player-release, linux-gcc-asan]
+        preset: >-
+          ${{ fromJSON(
+            github.event_name == 'pull_request' && '["linux-gcc-release","linux-gcc-lua-release","linux-gcc-player-release"]'
+            || github.event_name == 'schedule' && '["linux-gcc-asan"]'
+            || '["linux-gcc-release","linux-gcc-lua-release","linux-gcc-player-release","linux-gcc-asan"]'
+          ) }}
     env:
+      # ASan objects are ~22x larger than Release ones; 400M made ccache evict nearly everything.
+      CCACHE_MAXSIZE: ${{ matrix.preset == 'linux-gcc-asan' && '2500M' || '400M' }}
       # Only sanitizer builds read these. Any UBSan finding fails its test instead of only being
       # printed, and a leak at exit fails it too. LSAN_OPTIONS (set below, it needs the
       # in-container workspace path) points LeakSanitizer at tests/sanitizers/lsan.supp,
@@ -103,12 +121,12 @@ jobs:
       # Only pushes to main save the cache: pull requests (and other branches) restore main's
       # entries, so PR runs no longer add a large per-run cache entry each.
       - name: Trim ccache to CCACHE_MAXSIZE before saving
-        if: always() && steps.cache.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: always() && steps.cache.outcome == 'success' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         run: |
           ccache --cleanup
           ccache --show-stats
       - name: Save ccache and fetched content (main only, also when tests fail)
-        if: always() && steps.cache.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: always() && steps.cache.outcome == 'success' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -145,6 +163,7 @@ jobs:
           retention-days: 14
 
   packaging:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # Mirrored from Debian trixie by ci-image-mirror.yml; pulled with credentials, not anonymously.
     container:
@@ -227,6 +246,7 @@ jobs:
     # compiles files in parallel across targets. --config Release / -C Release stay harmless.
     # sccache cannot cache /Zi (shared PDB) or precompiled-header compiles, so Jolt's /Zi
     # (GENERATE_DEBUG_SYMBOLS) and all PCH use (Jolt, SDL) are turned off for this build only.
+    if: github.event_name != 'schedule'
     runs-on: windows-latest
     timeout-minutes: 150
     env:
@@ -365,7 +385,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Runs only on main (push, nightly, dispatch), not on pull requests: PRs no longer have to commit
+  # a regenerated SOURCE_MANIFEST.sha256. After merging, run scripts/update_source_manifest.sh on
+  # main and commit the result; until then this job fails on main with an error annotation.
   source-manifest:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -378,6 +402,6 @@ jobs:
             exit 0
           fi
           git diff --stat -- SOURCE_MANIFEST.sha256
-          echo "::warning file=SOURCE_MANIFEST.sha256::stale; run scripts/update_source_manifest.sh and commit the result"
+          echo "::error file=SOURCE_MANIFEST.sha256::SOURCE_MANIFEST.sha256 is stale on main; run scripts/update_source_manifest.sh and commit the result"
           git diff -U0 -- SOURCE_MANIFEST.sha256 | grep -E '^[+-][0-9a-f]{64} ' | sed -E 's/^([+-])[0-9a-f]{64}  /\1 /' | sort -k2 | head -100
           exit 1

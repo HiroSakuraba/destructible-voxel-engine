@@ -38,13 +38,14 @@ bool linked(const NativeEditorController& c, EditorObjectId id) {
 }
 
 void test_classifier() {
-    for (const char* a : {"polygon.bevel", "polygon.extrude", "polygon.flip_normals", "polygon.weld", "polygon.join",
-                          "mesh.boolean_union", "mesh.subdivide", "mesh.fillet_edges", "mirror.mesh_x", "mirror.faces_y",
+    for (const char* a : {"polygon.bevel", "polygon.extrude", "polygon.flip_normals", "polygon.weld",
+                          "mesh.subdivide", "mesh.fillet_edges", "mirror.mesh_x", "mirror.faces_y",
                           "mirror.live_z", "subdiv.from_polygon"})
         check(NativeEditorController::is_cad_mesh_edit(a, false), std::string("asks: ") + a);
     for (const char* a : {"mesh.exact_boolean_union", "polygon.assign_material", "polygon.cad_detail", "polygon.face_mode",
                           "polygon.select_grow", "mesh.uv_mark_seam", "mesh.hull_fit", "polygon.convert_to_voxels",
-                          "transform.reset", "edit.delete", "edit.undo", "gizmo"})
+                          "transform.reset", "edit.delete", "edit.undo", "gizmo",
+                          "mesh.boolean_union", "polygon.join", "polygon.separate"})
         check(!NativeEditorController::is_cad_mesh_edit(a, false), std::string("does not ask (objects): ") + a);
     for (const char* a : {"edit.delete", "edit.cut", "edit.duplicate", "gizmo", "transform"})
         check(NativeEditorController::is_cad_mesh_edit(a, true), std::string("asks on components: ") + a);
@@ -70,23 +71,37 @@ void test_whole_object_edit() {
           "Escape: link kept, mesh unchanged, no undo step");
     check(c.status().text.find("kept") != std::string::npos, "says the link is kept: " + c.status().text);
 
-    // Enter: link dropped as one step, then the edit as another.
+    // Enter: the link drop and the edit are one undo step.
     check(!c.dispatch_action("mirror.mesh_x") && c.pending_destructive_confirmation(), "asks again");
     c.key_down("enter", false, false, false);
     check(!c.pending_destructive_confirmation(), "answered");
     check(!linked(c, id) && c.cad_link_dropped(id), "the exact link is dropped");
     check(doc.find_object(id)->polygon->indices.size() / 3 > 12, "the mirror ran: " + c.status().text);
-    check(c.workspace().commands().size() == steps + 2, "two undo steps: drop + edit");
+    check(c.workspace().commands().size() == steps + 1, "one undo step: drop + edit");
     check(c.cad_detail_summary(id).find("Was CAD") != std::string::npos, "inspector: " + c.cad_detail_summary(id));
     check(c.status().text.find("plain mesh") != std::string::npos, "status says plain mesh: " + c.status().text);
 
     // Now a plain mesh: further edits do not ask.
     check(c.dispatch_action("mirror.mesh_z") && !c.pending_destructive_confirmation(), "plain meshes are not asked about");
-    check(c.dispatch_action("edit.undo") && c.dispatch_action("edit.undo") && !linked(c, id) &&
-              doc.find_object(id)->polygon->indices.size() == 36,
-          "undo the edits: still unlinked");
-    check(c.dispatch_action("edit.undo") && linked(c, id) && c.cad_detail_summary(id).find("Exact CAD") != std::string::npos,
-          "one more undo restores the link");
+    check(c.dispatch_action("edit.undo") && !linked(c, id) && doc.find_object(id)->polygon->indices.size() / 3 > 12,
+          "undo the plain-mesh edit: still unlinked");
+    check(c.dispatch_action("edit.undo") && linked(c, id) && doc.find_object(id)->polygon->indices.size() == 36 &&
+              c.cad_detail_summary(id).find("Exact CAD") != std::string::npos,
+          "one more undo restores the mesh and the link together");
+    check(c.dispatch_action("edit.redo") && !linked(c, id) && doc.find_object(id)->polygon->indices.size() / 3 > 12, "redo as one step");
+    check(c.dispatch_action("edit.undo") && linked(c, id), "and undo again");
+
+    // An edit that does not happen after Enter (refused, or its preview cancelled) keeps the link
+    // and leaves no undo step.
+    {
+        const std::size_t before = c.workspace().commands().size();
+        doc.find_object(id)->flags.visible = false;  // the edit refuses hidden objects
+        if (!c.dispatch_action("mirror.mesh_y") && c.pending_destructive_confirmation()) c.key_down("enter", false, false, false);
+        c.update(0.016F);
+        check(linked(c, id) && c.workspace().commands().size() == before && !c.workspace().commands().can_redo(),
+              "a refused edit keeps the link: " + c.status().text);
+        doc.find_object(id)->flags.visible = true;
+    }
 
     // Edits that keep the triangles exact never ask.
     check(c.dispatch_action("polygon.cad_detail") || true, "CAD Detail");
@@ -99,10 +114,11 @@ void test_whole_object_edit() {
     check(!c.dispatch_action("mirror.mesh_x") && !c.pending_destructive_confirmation() && linked(c, id), "locked: no prompt");
     doc.find_object(id)->flags.locked = false;
 
-    // Confirmations switched off: the link drops and the edit runs straight away.
+    // Confirmations switched off: the link drops and the edit runs straight away, as one step.
     c.workspace().preferences().confirmDestructiveActions = false;
+    const std::size_t offSteps = c.workspace().commands().size();
     check(c.dispatch_action("mirror.mesh_x") && !c.pending_destructive_confirmation() && !linked(c, id) &&
-              doc.find_object(id)->polygon->indices.size() / 3 > 12,
+              doc.find_object(id)->polygon->indices.size() / 3 > 12 && c.workspace().commands().size() == offSteps + 1,
           "no prompt when confirmations are off: " + c.status().text);
 }
 
@@ -123,9 +139,14 @@ void test_component_edits() {
 
     // Moving vertices directly (typed / nudged component moves; gizmo drags use the same check).
     check(!c.nudge_selection({0.0F, 0.1F, 0.0F}).success && c.pending_destructive_confirmation(), "a component move asks");
+    const std::size_t steps = c.workspace().commands().size();
     c.key_down("enter", false, false, false);
     check(!linked(c, id) && c.status().text.find("again") != std::string::npos, "dropped; drag again: " + c.status().text);
     check(c.nudge_selection({0.0F, 0.1F, 0.0F}).success && !c.pending_destructive_confirmation(), "the move now runs");
+    c.update(0.016F);
+    check(c.workspace().commands().size() == steps + 1, "drop + move are one undo step");
+    check(c.dispatch_action("edit.undo") && linked(c, id) && doc.find_object(id)->polygon->contentHash == before.contentHash,
+          "one undo restores the vertices and the link");
 
     // Delete on components asks; Delete on the whole object does not.
     EditorObjectId other{};

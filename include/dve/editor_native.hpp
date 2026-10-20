@@ -1649,6 +1649,16 @@ private:
     std::vector<EditorObjectId> pendingCadObjects_;
     std::string pendingCadMessage_;
     bool cadEditConfirmed_{false};
+    // After Enter: the drop step waits for the edit it was for (see settle_cad_link_drop).
+    struct CadDropAwait {
+        std::size_t mark{};          // history size before the drop
+        bool untilNextEdit{};        // direct component edit: wait for the next drag or move
+        EditorObjectId object{};     // the mesh being edited (component edits)
+    };
+    std::optional<CadDropAwait> cadDropAwait_;
+    bool cadReplayRan_{};  // whether the edit replayed after the drop ran (confirmations off)
+    void settle_cad_link_drop();
+    [[nodiscard]] bool mesh_authoring_preview_open() const noexcept;
     bool open_scene_now(const std::filesystem::path& path);
     bool open_project_now(const std::filesystem::path& root);
     void remember_recent_scene(const std::filesystem::path& path);

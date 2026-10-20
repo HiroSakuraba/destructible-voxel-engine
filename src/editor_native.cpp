@@ -2928,6 +2928,7 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
 }
 
 void NativeEditorController::update(float elapsedSeconds) {
+    settle_cad_link_drop();  // a confirmed CAD link drop waits for its edit (editor_native_cad_guard.cpp)
     if (appliedSettingsRevision_ != workspace_.settings().revision()) apply_settings_to_runtime();
     else if (audioSettingsPending_) {
         audioSettingsPending_ = !apply_audio_settings_to_runtime();
@@ -6794,7 +6795,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         actionId != "subdiv.conversion_apply" && actionId != "subdiv.conversion_cancel") {
         set_status("Apply or cancel the voxel/conversion preview first",true); return false;
     }
-    if (ask_before_cad_mesh_edit(actionId)) return false;
+    if (ask_before_cad_mesh_edit(actionId)) return std::exchange(cadReplayRan_, false);
     if (actionId == "voxel.authoring_apply" || actionId == "subdiv.conversion_apply") return apply_voxel_authoring_preview();
     if (actionId == "voxel.authoring_cancel" || actionId == "subdiv.conversion_cancel") {
         if (!voxel_authoring_active()) { set_status("No voxel/conversion preview is open",true); return false; }

@@ -12,22 +12,26 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "dve/editor_exact_cad.hpp"
 
 namespace dve::editor {
 
 bool NativeEditorController::is_cad_mesh_edit(std::string_view a, bool polygonsDomain) {
-    static constexpr std::array<std::string_view, 14> kPolygon{
+    static constexpr std::array<std::string_view, 12> kPolygon{
         "polygon.bevel", "polygon.extrude", "polygon.inset", "polygon.recalculate_normals", "polygon.flip_normals",
         "polygon.weld", "polygon.dissolve_vertices", "polygon.loop_cut", "polygon.dissolve_edges", "polygon.clean_unused",
-        "polygon.extract", "polygon.slice", "polygon.join", "polygon.separate"};
+        "polygon.extract", "polygon.slice"};
     static constexpr std::array<std::string_view, 11> kMesh{
         "mesh.bevel_edges", "mesh.chamfer_edges", "mesh.fillet_edges", "mesh.subdivide", "mesh.split_edges",
         "mesh.flip_diagonal", "mesh.bridge", "mesh.cap", "mesh.hard_normals", "mesh.smooth_normals", "subdiv.from_polygon"};
     const auto in = [&](const auto& list) { return std::find(list.begin(), list.end(), a) != list.end(); };
     if (in(kPolygon) || in(kMesh)) return true;
-    if (a.starts_with("mesh.boolean_")) return true;  // Manifold Booleans; mesh.exact_boolean_* stay exact
+    // Not asked about: Manifold Booleans (mesh.boolean_*) make a new object by default and refuse to
+    // replace a CAD operand at apply; Join / Separate refuse objects with components on their own.
     if (a.starts_with("mirror.mesh_") || a.starts_with("mirror.faces_") || a.starts_with("mirror.live_")) return true;
     if (polygonsDomain && (a == "edit.delete" || a == "edit.cut" || a == "edit.duplicate")) return true;
     // Direct component edits (gizmo drags, typed or snapped moves of vertices/edges/faces).
@@ -54,7 +58,7 @@ bool NativeEditorController::cad_link_dropped(EditorObjectId id) const {
 
 bool NativeEditorController::ask_before_cad_mesh_edit(std::string_view actionId) {
     if (cadEditConfirmed_) return false;
-    if (pendingDestructiveAction_ == PendingDestructiveAction::DropCadLink) return true;  // already asking
+    if (pendingDestructiveAction_ == PendingDestructiveAction::DropCadLink) { cadReplayRan_ = false; return true; }  // already asking
     const bool polygons = selectionDomain_ == SelectionDomain::Polygons;
     if (!is_cad_mesh_edit(actionId, polygons)) return false;
     std::vector<EditorObjectId> targets = cad_mesh_edit_targets();
@@ -65,10 +69,19 @@ bool NativeEditorController::ask_before_cad_mesh_edit(std::string_view actionId)
         if (const EditorObject* object = workspace_.document().find_object(id); object && object->flags.locked) return false;
     pendingCadAction_ = std::string(actionId);
     pendingCadObjects_ = std::move(targets);
+    cadReplayRan_ = false;
     if (!workspace_.preferences().confirmDestructiveActions) {
-        // Confirmations switched off: drop the link and let the edit run now.
-        pendingCadAction_.clear();
-        return !drop_cad_link(std::exchange(pendingCadObjects_, {}));
+        // Confirmations switched off: drop the link and run the edit now, as one undo step.
+        if (actionId == "gizmo" || actionId == "transform") {
+            // The caller goes on with the edit; it joins the drop when it commits.
+            pendingCadAction_.clear();
+            const std::size_t mark = workspace_.commands().size();
+            if (!drop_cad_link(std::exchange(pendingCadObjects_, {}))) return true;
+            if (workspace_.commands().size() == mark + 1) cadDropAwait_ = CadDropAwait{mark, true, polygonSelection_.object};
+            return false;
+        }
+        drop_cad_link_and_continue();
+        return true;
     }
     const EditorObject* first = workspace_.document().find_object(pendingCadObjects_.front());
     const std::string who = pendingCadObjects_.size() == 1 && first ? first->name
@@ -98,15 +111,49 @@ bool NativeEditorController::drop_cad_link(const std::vector<EditorObjectId>& ob
 
 void NativeEditorController::drop_cad_link_and_continue() {
     const std::string action = std::exchange(pendingCadAction_, {});
+    const std::size_t mark = workspace_.commands().size();
     if (!drop_cad_link(std::exchange(pendingCadObjects_, {}))) return;
-    if (action == "gizmo" || action == "transform") {
-        set_status("Now a plain mesh (Undo restores the CAD link): drag again to edit", false, 4.0F);
+    if (workspace_.commands().size() != mark + 1) return;  // nothing needed dropping
+    cadDropAwait_ = CadDropAwait{mark, action == "gizmo" || action == "transform", polygonSelection_.object};
+    if (cadDropAwait_->untilNextEdit) {
+        set_status("Now a plain mesh: drag again to edit (if you do not, the CAD link stays)", false, 4.0F);
         return;
     }
     cadEditConfirmed_ = true;
     const bool ran = dispatch_action(action);
     cadEditConfirmed_ = false;
-    if (ran && !status_.error) set_status(status_.text + " (now a plain mesh; Undo twice restores the CAD link)", false, 4.0F);
+    settle_cad_link_drop();
+    cadReplayRan_ = ran && !status_.error;
+}
+
+// The drop and the edit it was for are one undo step; an edit that never happens (refused, a
+// no-op, or a preview that is cancelled) leaves the link and the history as they were.
+void NativeEditorController::settle_cad_link_drop() {
+    if (!cadDropAwait_) return;
+    auto& commands = workspace_.commands();
+    const CadDropAwait wait = *cadDropAwait_;
+    if (commands.can_redo() || commands.size() <= wait.mark) { cadDropAwait_.reset(); return; }  // undone meanwhile
+    if (commands.size() > wait.mark + 1) {
+        const std::size_t count = commands.size() - wait.mark;
+        std::string label(commands.undo_label());
+        (void)commands.join_last(count, label + " (drops the exact CAD link)");
+        cadDropAwait_.reset();
+        refresh_menu_state();
+        if (!status_.error) set_status(status_.text + " (now a plain mesh; Undo restores the CAD link)", false, 4.0F);
+        return;
+    }
+    // Only the drop so far: wait while a preview for the edit is open (or, for a direct component
+    // edit, while the same mesh is still being edited); otherwise take the drop back.
+    const bool previewOpen = polygonPreviewBefore_.has_value() || mesh_authoring_preview_open() || voxel_authoring_active();
+    const bool stillEditing = wait.untilNextEdit && selectionDomain_ == SelectionDomain::Polygons && polygonSelection_.object == wait.object;
+    if (previewOpen || stillEditing) return;
+    cadDropAwait_.reset();
+    const bool error = status_.error;
+    const std::string message = status_.text;
+    if (commands.discard_last(workspace_.document()).success) {
+        refresh_menu_state();
+        set_status((message.empty() ? std::string("Nothing was edited") : message) + " (the CAD link is kept)", error);
+    }
 }
 
 }  // namespace dve::editor

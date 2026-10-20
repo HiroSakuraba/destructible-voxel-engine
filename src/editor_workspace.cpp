@@ -475,9 +475,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"edit.open_group","Edit","Open Group",""},
         {"edit.close_group","Edit","Close Group","Ctrl+Alt+G"},
         {"edit.close_all_groups","Edit","Close All Groups",""},
-        {"edit.edit_pivot","Edit","Edit Group Pivot",""},
-        {"edit.pivot_bottom_center","Edit","Group Pivot to Bottom Centre",""},
-        {"edit.pivot_center","Edit","Group Pivot to Centre",""},
+        {"edit.edit_pivot","Edit","Edit Pivot",""},
+        {"edit.pivot_bottom_center","Edit","Pivot to Bottom Centre",""},
+        {"edit.pivot_center","Edit","Pivot to Centre",""},
+        {"edit.pivot_to_cursor","Edit","Pivot to Point Under Cursor",""},
         {"select.parent","Edit","Select Parent",""},
         {"select.children","Edit","Select Children",""},
         {"select.siblings","Edit","Select Siblings",""},
@@ -838,6 +839,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.exact_boolean_difference","Polygon","Exact Boolean A minus B (CAD)",""},
         {"mesh.exact_boolean_reverse","Polygon","Exact Boolean B minus A (CAD)",""},
         {"mesh.exact_boolean_intersection","Polygon","Exact Boolean Intersection (CAD)",""},
+        {"mesh.exact_collision","Polygon","Build Exact Convex Collision (CAD)",""},
         {"mesh.hull_fit","Polygon","Fit Convex Collision Hull",""},
         {"mesh.hull_edit","Polygon","Edit Collision Hull Points",""},
         {"mesh.hull_remove","Polygon","Remove Authored Collision Hull",""},
@@ -949,7 +951,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (auto id:{"polygon.vertex_mode","polygon.edge_mode","polygon.face_mode","polygon.object_mode"})
         configure(id,"Mesh Editing",80,true,"polygon.selection");
     for(auto id:{"mesh.boolean_union","mesh.boolean_difference","mesh.boolean_reverse","mesh.boolean_intersection"})configure(id,"Mesh Booleans",70);
-    for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection"})configure(id,"Exact CAD Booleans",71);
+    for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection","mesh.exact_collision"})configure(id,"Exact CAD Booleans",71);
     for(auto id:{"mesh.hull_fit","mesh.hull_edit","mesh.hull_remove"})configure(id,"Collision Hull",75);
     for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
     for(auto id:{"mesh.uv_editor","mesh.uv_mark_seam","mesh.uv_clear_seam","mesh.uv_toggle_pin","mesh.uv_reset_flags"})configure(id,"UV Editing",82);
@@ -1033,7 +1035,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (std::string_view id : {"edit.open_group", "edit.close_group", "edit.close_all_groups"})
         configure(id, "Groups", 26);
     configure("edit.edit_pivot", "Groups", 27, true);
-    for (std::string_view id : {"edit.pivot_bottom_center", "edit.pivot_center"}) configure(id, "Groups", 27);
+    for (std::string_view id : {"edit.pivot_bottom_center", "edit.pivot_center", "edit.pivot_to_cursor"}) configure(id, "Groups", 27);
     for (std::string_view id : {"voxel.select_all", "voxel.select_none", "voxel.select_grow", "voxel.select_shrink",
                                 "voxel.select_invert", "voxel.extract_selection"})
         configure(id, "Voxel Selection", 50);
@@ -1261,8 +1263,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     describe("edit.close_group", "Close the open group around the selection and select the whole group again.", {"group", "exit"});
     describe("edit.close_all_groups", "Close every open group so clicks select whole groups.", {"group", "exit"});
     describe("edit.edit_pivot", "Move or rotate the selected group's pivot without moving its pieces.", {"group", "pivot", "origin"});
-    describe("edit.pivot_bottom_center", "Put the selected group's pivot at the bottom centre of its pieces.", {"group", "pivot", "origin"});
-    describe("edit.pivot_center", "Put the selected group's pivot at the centre of its pieces.", {"group", "pivot", "origin"});
+    describe("edit.pivot_bottom_center", "Put the pivot of the selected group, voxel objects or meshes at the bottom centre of their geometry; nothing moves in the world.", {"group", "pivot", "origin"});
+    describe("edit.pivot_center", "Put the pivot of the selected group, voxel objects or meshes at the centre of their geometry; nothing moves in the world.", {"group", "pivot", "origin"});
+    describe("edit.pivot_to_cursor", "Put the selected objects' pivot on the vertex, edge, face or surface under the cursor (their own included); nothing moves in the world.", {"pivot", "origin", "snap", "cursor"});
     describe("subdiv.vertex_mode","Vertex Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.edge_mode","Edge Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});
     describe("subdiv.face_mode","Face Selection through the shared control-cage selection workflow; retains subdivision settings when editing the existing cage.",{"subdivision","subdiv","cage"});

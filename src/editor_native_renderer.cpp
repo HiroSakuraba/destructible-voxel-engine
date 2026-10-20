@@ -5025,8 +5025,11 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                  "Material " + std::to_string(controller.active_material()) + "  " +
                                  (controller.materials().find(controller.active_material()) ?
                                   controller.materials().find(controller.active_material())->definition.name : "Unknown"), text);
-                    drawInspectorText(layout.inspector.x + 12, inspectorTop + 245,
-                                 "Object components " + std::to_string(object->components.size()), muted);
+                    if (const std::string cad = controller.cad_detail_summary(object->id); !cad.empty())
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 245, cad, rgb(150,200,255));
+                    else
+                        drawInspectorText(layout.inspector.x + 12, inspectorTop + 245,
+                                     "Object components " + std::to_string(object->components.size()), muted);
                     if (object->attachment && object->parent) {
                         const std::string socket = object->attachment->socket.empty()
                             ? std::string("default") : object->attachment->socket;
@@ -5427,13 +5430,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     }
 
     // Naming a selection set: a small field at the top of the viewport.
-    if (controller.text_edit().kind == TextEditKind::SelectionSetName) {
+    if (controller.text_edit().kind == TextEditKind::SelectionSetName || controller.text_edit().kind == TextEditKind::CadDetail) {
         const UiRect viewport = controller.layout().viewport;
         const int fieldWidth = std::min(420, std::max(160, viewport.width - 32));
         const UiRect field{viewport.x + (viewport.width - fieldWidth) / 2, viewport.y + 12, fieldWidth, 30};
         painter.fill(field, panel2);
         painter.outline(field, accent);
-        const std::string label = "Set name: ";
+        const std::string label = controller.text_edit().kind == TextEditKind::CadDetail ? "Mesh accuracy (mm): " : "Set name: ";
         painter.text(field.x + 10, field.y + 20, label, muted);
         const int labelWidth = painter.text_width(label);
         painter.text(field.x + 10 + labelWidth, field.y + 20,

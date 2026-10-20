@@ -849,6 +849,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_snap_targets.cpp
         src/editor_native_real_scale.cpp
         src/editor_native_pivot_edit.cpp
+        src/editor_native_cad_detail.cpp
         src/editor_modeling_topology.cpp
         src/editor_nurbs.cpp
         src/editor_native_nurbs.cpp
@@ -2741,6 +2742,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_pivot_edit_tests tests/test_editor_pivot_edit.cpp)
         target_link_libraries(dve_editor_pivot_edit_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_pivot_edit_tests COMMAND dve_editor_pivot_edit_tests)
+        add_executable(dve_editor_cad_detail_tests tests/test_editor_cad_detail.cpp)
+        target_link_libraries(dve_editor_cad_detail_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_cad_detail_tests COMMAND dve_editor_cad_detail_tests)
         add_executable(dve_editor_voxel_selection_tests tests/test_editor_voxel_selection.cpp)
         target_link_libraries(dve_editor_voxel_selection_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_voxel_selection_tests COMMAND dve_editor_voxel_selection_tests)

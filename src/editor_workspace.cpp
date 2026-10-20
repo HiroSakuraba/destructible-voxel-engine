@@ -870,6 +870,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"polygon.assign_material","Polygon","Assign Active Material to Faces",""},
         {"polygon.weld","Polygon","Merge Vertices by Distance",""},
         {"polygon.dissolve_vertices","Polygon","Dissolve Redundant Vertices",""},
+        {"polygon.cad_detail","Polygon","CAD Detail...",""},
         {"polygon.select_shell","Polygon","Select Connected Components",""},
         {"polygon.select_loop","Polygon","Select Cage Edge Loops",""},
         {"polygon.select_ring","Polygon","Select Cage Edge Rings",""},
@@ -1295,6 +1296,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         describe(std::string("edit.mirror_") + axis, "Mirror the selection in place across the world plane through the pivot (voxels and meshes really flip).",
                  {"mirror", "symmetry", "flip", "reflect"});
     }
+    describe("polygon.cad_detail", "Re-mesh CAD objects from their exact source so the triangles stay within a chosen distance of the true surface (1 mm to 0.005 mm, or typed). The exact source does not change.", {"cad", "accuracy", "tessellation", "deflection", "detail", "exact"});
     describe("select.set_save", "Save the selected objects, or the selected vertices, edges or faces of a mesh, as a named set saved with the scene.", {"selection set", "named", "save", "store"});
     describe("select.set_save_query", "Save the hierarchy filter (a name or a query such as type:mesh tag:rock) as a smart set that is re-evaluated each time.", {"selection set", "smart", "query", "saved search"});
     describe("select.set_recall", "Pick a selection set to select again; shows how many members are missing or retired.", {"selection set", "recall", "restore"});

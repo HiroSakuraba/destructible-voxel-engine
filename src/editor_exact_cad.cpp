@@ -296,7 +296,13 @@ std::optional<ExactBrepSource> exact_brep_source(const EditorObject& object) {
             if (const auto* text = std::get_if<std::string>(&it->second)) return *text;
             return {};
         };
-        ExactBrepSource source{get("source"), get("sha256"), get("origin")};
+        const auto number = [&](std::string_view key) -> double {
+            const auto it = component.properties.find(key);
+            if (it == component.properties.end()) return 0.0;
+            if (const auto* value = std::get_if<double>(&it->second)) return std::isfinite(*value) && *value > 0.0 ? *value : 0.0;
+            return 0.0;
+        };
+        ExactBrepSource source{get("source"), get("sha256"), get("origin"), number("deflection"), number("angular")};
         if (source.relativePath.empty()) return std::nullopt;
         return source;
     }
@@ -309,6 +315,8 @@ Component make_exact_brep_component(const ExactBrepSource& source) {
     component.properties["source"] = source.relativePath.generic_string();
     component.properties["sha256"] = source.sha256;
     component.properties["origin"] = source.origin;
+    if (source.deflectionMeters > 0.0) component.properties["deflection"] = source.deflectionMeters;
+    if (source.angularRadians > 0.0) component.properties["angular"] = source.angularRadians;
     return component;
 }
 
@@ -433,6 +441,8 @@ ExactCadImportResult import_exact_cad(const std::filesystem::path& projectRoot, 
     if (!source) { result.error = error; return result; }
     result.mesh = std::move(*mesh);
     result.source = std::move(*source);
+    result.source.deflectionMeters = json_number(report, {"mesh", "linear_deflection"});
+    result.source.angularRadians = json_number(report, {"mesh", "angular_deflection"});
     if (settings.exactCollision) result.collision = exact_convex_collision(projectRoot, result.source, settings, runner);
     std::ostringstream summary;
     summary.imbue(std::locale::classic());
@@ -442,6 +452,47 @@ ExactCadImportResult import_exact_cad(const std::filesystem::path& projectRoot, 
     if (!result.collision.note.empty()) summary << "; " << result.collision.note;
     result.summary = summary.str();
     return result;
+}
+
+ExactCadRemeshResult remesh_exact_cad(const std::filesystem::path& projectRoot, const ExactBrepSource& source, EditorObjectId id,
+                                      double deflectionMeters, const ExactCadSettings& settings, const ExactCadRunner& runner) {
+    ExactCadRemeshResult result;
+    if (!contained_relative(source.relativePath)) { result.error = "The exact source path is not inside the project"; return result; }
+    const auto brep = projectRoot / source.relativePath;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(brep, ec)) { result.error = "The exact source is missing: " + utf8(source.relativePath); return result; }
+    if (!(deflectionMeters >= 0.0) || !std::isfinite(deflectionMeters)) { result.error = "The mesh accuracy must be a positive length"; return result; }
+    TemporaryDirectory temp;
+    if (!temp.ok()) { result.error = "Cannot create a temporary folder"; return result; }
+    const auto glb = temp.path() / "detail.glb";
+    ExactCadSettings detail = settings;
+    detail.deflectionMeters = deflectionMeters;
+    std::vector<std::string> args{"mesh", utf8(brep), "-o", utf8(glb)};
+    mesh_options(detail, args);
+    auto run = run_tool(detail, runner, std::move(args), temp.path() / "report.json");
+    if (!run.report) { result.error = run.error; return result; }
+    const auto& report = *run.report;
+    if (run.exitCode != 0) {
+        const auto message = json_string(report, {"error"});
+        result.error = "Re-meshing failed: " + (message.empty() ? "exit code " + std::to_string(run.exitCode) : message);
+        return result;
+    }
+    std::string error;
+    auto mesh = cook_glb(glb, id, &error);
+    if (!mesh) { result.error = error; return result; }
+    result.mesh = std::move(*mesh);
+    result.deflectionMeters = json_number(report, {"mesh", "linear_deflection"}, deflectionMeters);
+    result.angularRadians = json_number(report, {"mesh", "angular_deflection"}, settings.angularRadians);
+    result.triangles = static_cast<std::uint64_t>(json_number(report, {"mesh", "triangles"}, double(result.mesh.indices.size() / 3)));
+    return result;
+}
+
+std::optional<double> exact_mesh_world_error(const EditorObject& object) {
+    const auto source = exact_brep_source(object);
+    if (!source || !(source->deflectionMeters > 0.0)) return std::nullopt;
+    const double scale = std::max({std::abs(double(object.voxelScale.x)), std::abs(double(object.voxelScale.y)),
+                                   std::abs(double(object.voxelScale.z))});
+    return source->deflectionMeters * scale;
 }
 
 std::uint64_t exact_operand_stamp(const EditorDocument& document, EditorObjectId a, EditorObjectId b) {
@@ -573,6 +624,8 @@ ExactBooleanResult run_exact_boolean(const std::filesystem::path& projectRoot, c
     result.edit.mesh = std::move(*mesh);
     result.edit.selection = {request.a, PolygonSelectionMode::Face, {}};
     result.source = std::move(*source);
+    result.source.deflectionMeters = json_number(report, {"mesh", "linear_deflection"});
+    result.source.angularRadians = json_number(report, {"mesh", "angular_deflection"});
     if (settings.exactCollision) result.collision = exact_convex_collision(projectRoot, result.source, settings, runner);
     std::ostringstream summary;
     summary.imbue(std::locale::classic());

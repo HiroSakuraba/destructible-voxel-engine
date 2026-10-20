@@ -5227,9 +5227,13 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     const EditorPreferences& snapPreferences = controller.workspace().preferences();
     const auto snapValue = [](bool enabled, std::string value) { return enabled ? value : std::string("off"); };
     const std::string scale = "UI " + format_ui_zoom_percent(controller.effective_ui_zoom()) +
-        "  Move " + snapValue(snapPreferences.translateSnapEnabled,
-                              std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
-                                  (snapPreferences.absoluteGridSnap ? " grid" : "")) +
+        // Held V replaces the grid step with point snapping while it is held: say so.
+        "  Move " + (controller.drag_snap_held() && controller.active_tool() == EditorToolId::Translate
+                         ? std::string("point (V)") +
+                               (controller.drag_snap_target() ? std::string(": ") + snap_target_name(controller.drag_snap_target()->kind) : std::string())
+                         : snapValue(snapPreferences.translateSnapEnabled,
+                                     std::to_string(snapPreferences.translateSnapMeters).substr(0,4) + "m" +
+                                         (snapPreferences.absoluteGridSnap ? " grid" : ""))) +
         "  Rotate " + snapValue(snapPreferences.rotateSnapEnabled,
                                 std::to_string(static_cast<int>(std::lround(snapPreferences.rotateSnapDegrees))) + "\u00B0") +
         "  Scale " + snapValue(snapPreferences.scaleSnapEnabled,

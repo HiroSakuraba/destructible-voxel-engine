@@ -1,0 +1,51 @@
+name: CI image mirror
+
+# Copies the Debian trixie base image used by the Linux CI container jobs into this repository's
+# GHCR (ghcr.io/hirosakuraba/dve-ci-debian:trixie), so ci.yml pulls it with GITHUB_TOKEN instead
+# of anonymously from public.ecr.aws (which keeps failing with "toomanyrequests: Data limit
+# exceeded"). No extra secrets: GITHUB_TOKEN with packages: write is enough.
+# The upstream pull tries Docker Hub first, then public ECR, with retries and backoff.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"   # weekly refresh (security updates in the base image)
+  push:
+    paths:
+      - .github/workflows/ci-image-mirror.yml
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ci-image-mirror
+  cancel-in-progress: false
+
+env:
+  TARGET: ghcr.io/hirosakuraba/dve-ci-debian:trixie
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Pull trixie from upstream (Docker Hub, then public ECR; retry with backoff)
+        run: |
+          for attempt in 1 2 3 4 5; do
+            for src in docker.io/library/debian:trixie public.ecr.aws/debian/debian:trixie; do
+              if docker pull "$src"; then
+                echo "SRC=$src" >> "$GITHUB_ENV"; exit 0
+              fi
+            done
+            sleep $((attempt * 60))
+          done
+          echo "::error::could not pull debian:trixie from any upstream"; exit 1
+      - name: Push to GHCR
+        run: |
+          printf 'FROM %s\nLABEL org.opencontainers.image.source=https://github.com/${{ github.repository }}\n' "$SRC" > Dockerfile.mirror
+          docker build -t "$TARGET" -f Dockerfile.mirror .
+          docker push "$TARGET"
+          docker image inspect "$TARGET" --format '{{.Id}} {{.Created}}'

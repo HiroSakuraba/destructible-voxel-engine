@@ -1717,6 +1717,7 @@ private:
         std::size_t mark{};          // history size before the drop
         bool untilNextEdit{};        // direct component edit: wait for the next drag or move
         EditorObjectId object{};     // the mesh being edited (component edits)
+    };
     std::optional<CadDropAwait> cadDropAwait_;
     bool cadReplayRan_{};  // whether the edit replayed after the drop ran (confirmations off)
     void settle_cad_link_drop();

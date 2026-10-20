@@ -36,6 +36,8 @@ struct NurbsSample {
 [[nodiscard]] NurbsSource make_nurbs_arc(double radius=1,double angleRadians=6.283185307179586);
 [[nodiscard]] std::optional<NurbsSource> extrude_nurbs(const NurbsSource& curve,std::array<double,3> offset,std::string* error=nullptr);
 [[nodiscard]] std::optional<NurbsSource> revolve_nurbs(const NurbsSource& curve,double angleRadians=6.283185307179586,std::string* error=nullptr);
+// Shape-preserving refinement in homogeneous coordinates (floating-point arithmetic).
+[[nodiscard]] std::optional<NurbsSource> insert_nurbs_knot(const NurbsSource&,bool alongV,double parameter,std::string* error=nullptr);
 [[nodiscard]] std::string encode_nurbs(const NurbsSource&);
 [[nodiscard]] std::optional<NurbsSource> decode_nurbs(std::string_view,std::string* error=nullptr);
 // Fixed per-span tessellation, not a certified chord-error bound.

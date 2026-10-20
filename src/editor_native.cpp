@@ -2048,8 +2048,10 @@ void NativeEditorController::refresh_menu_state() noexcept {
             enabled("polygon.import_exact", asset && is_exact_cad_source(asset->relativePath) && !playActive,
                     playActive ? "Stop Play or Simulate before importing."
                                : "Select a STEP, BREP or OpenUSD B-rep (.usda) file in the Assets panel first.");
-            enabled("polygon.cad_detail", !selected_exact_objects().empty() && !playActive,
-                    playActive ? "Stop Play or Simulate first." : "Select a CAD object (imported with Import Exact CAD) first.");
+            {
+                const std::string cadReason = cad_detail_disabled_reason();
+                enabled("polygon.cad_detail", cadReason.empty(), cadReason);
+            }
             for (std::string_view id : {"file.import"})
                 enabled(id, model && !playActive, playActive ? "Stop Play or Simulate before importing."
                                                              : "Select an OBJ, glTF or GLB model in the Assets panel first.");

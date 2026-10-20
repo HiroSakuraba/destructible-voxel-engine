@@ -8,9 +8,17 @@
 // "Exact CAD: mesh within ±0.1 mm".
 #include "dve/editor_native.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <memory>
+#include <set>
+#include <string>
+#include <variant>
+#include <vector>
 
 #include "dve/editor_exact_cad.hpp"
 #include "dve/editor_number_field.hpp"
@@ -55,6 +63,21 @@ std::vector<EditorObjectId> NativeEditorController::selected_exact_objects() con
     return ids;
 }
 
+// Why CAD Detail cannot run now (empty when it can); the menu shows it and the commands refuse with it.
+std::string NativeEditorController::cad_detail_disabled_reason() const {
+    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) return "Stop Play or Simulate before re-meshing.";
+    if (longJob_) return long_job_busy_reason();
+    const auto ids = selected_exact_objects();
+    if (ids.empty()) return "Select a CAD object (imported with Import Exact CAD) first.";
+    for (const EditorObjectId id : ids) {
+        const EditorObject* object = workspace_.document().find_object(id);
+        if (object->flags.locked) return "Unlock " + object->name + " before changing its detail.";
+        if (!object->flags.visible || is_isolated_out(id)) return object->name + " is hidden or isolated out of view.";
+        if (object->prefabLink) return object->name + " is part of a prefab instance; unpack it or edit the prefab.";
+    }
+    return {};
+}
+
 std::string NativeEditorController::cad_detail_summary(EditorObjectId id) const {
     const EditorObject* object = workspace_.document().find_object(id);
     if (!object || !exact_brep_source(*object)) return {};
@@ -64,7 +87,7 @@ std::string NativeEditorController::cad_detail_summary(EditorObjectId id) const 
 }
 
 bool NativeEditorController::open_cad_detail_menu() {
-    if (selected_exact_objects().empty()) { set_status("Select a CAD object (imported with Import Exact CAD) first", true); return false; }
+    if (const std::string reason = cad_detail_disabled_reason(); !reason.empty()) { set_status(reason, true); return false; }
     contextMenu_ = {};
     contextMenu_.open = true;
     const int itemHeight = 24;
@@ -92,7 +115,7 @@ bool NativeEditorController::open_cad_detail_menu() {
 bool NativeEditorController::dispatch_cad_detail_action(std::string_view action) {
     if (action == "polygon.cad_detail") return open_cad_detail_menu();
     if (action == "cad.detail.custom") {
-        if (selected_exact_objects().empty()) { set_status("Select a CAD object first", true); return false; }
+        if (const std::string reason = cad_detail_disabled_reason(); !reason.empty()) { set_status(reason, true); return false; }
         begin_text_edit(TextEditKind::CadDetail, 0, "0.05");
         set_status("Type the largest gap allowed between triangles and the exact surface, in mm (or with a unit: 20um, 0.1mm), then Enter");
         return true;
@@ -113,12 +136,15 @@ bool NativeEditorController::commit_cad_detail_text() {
     bool hasUnit = false;
     for (const char c : text) hasUnit = hasUnit || std::isalpha(static_cast<unsigned char>(c));
     // Plain numbers are millimetres here; "um" and "µm" mean micrometres.
+    // The unit must end the text and the number must fill the rest ("20um", not "20dummy").
     for (const std::string_view micro : {"um", "\xC2\xB5m"})
-        if (const auto at = text.find(micro); at != std::string::npos) {
-            char* end = nullptr;
-            const double value = std::strtod(text.substr(0, at).c_str(), &end);
-            if (!(value > 0.0)) { set_status("Accuracy must be above 0", true); return false; }
-            return set_cad_detail(value / 1.0e6);
+        if (text.size() > micro.size() && text.ends_with(micro)) {
+            std::string number = text.substr(0, text.size() - micro.size());
+            while (!number.empty() && number.back() == ' ') number.pop_back();
+            const NumberFieldParse value = parse_number_field(number, NumberFieldUnit::Count, 0.0);
+            if (!value.ok) { set_status("CAD Detail: " + value.error, true); return false; }
+            if (!(value.value > 0.0)) { set_status("Accuracy must be above 0", true); return false; }
+            return set_cad_detail(value.value / 1.0e6);
         }
     const NumberFieldParse parsed = parse_number_field(hasUnit ? text : text + "mm", NumberFieldUnit::Meters, 0.0);
     if (!parsed.ok || !(parsed.value > 0.0)) { set_status("CAD Detail: " + (parsed.ok ? std::string("accuracy must be above 0") : parsed.error), true); return false; }
@@ -126,9 +152,8 @@ bool NativeEditorController::commit_cad_detail_text() {
 }
 
 bool NativeEditorController::set_cad_detail(double worldToleranceMeters) {
-    if (workspace_.mode() != EditorMode::Edit || playSession_.active()) { set_status("Stop Play or Simulate before re-meshing", true); return false; }
+    if (const std::string reason = cad_detail_disabled_reason(); !reason.empty()) { set_status(reason, true); return false; }
     const auto ids = selected_exact_objects();
-    if (ids.empty()) { set_status("Select a CAD object (imported with Import Exact CAD) first", true); return false; }
     if (worldToleranceMeters > 0.0 && (worldToleranceMeters < 1.0e-7 || worldToleranceMeters > 1.0)) {
         set_status("Choose an accuracy between 0.0001 mm and 1 m", true);
         return false;
@@ -142,8 +167,6 @@ bool NativeEditorController::set_cad_detail(double worldToleranceMeters) {
     std::vector<Request> requests;
     for (const EditorObjectId id : ids) {
         const EditorObject* object = workspace_.document().find_object(id);
-        if (object->flags.locked) { set_status("Unlock " + object->name + " before changing its detail", true); return false; }
-        if (object->prefabLink) { set_status(object->name + " is part of a prefab instance; unpack it or edit the prefab", true); return false; }
         const double scale = std::max({std::abs(double(object->voxelScale.x)), std::abs(double(object->voxelScale.y)),
                                        std::abs(double(object->voxelScale.z)), 1.0e-12});
         requests.push_back({id, *exact_brep_source(*object), worldToleranceMeters / scale, object->polygon->contentHash});
@@ -166,6 +189,7 @@ bool NativeEditorController::set_cad_detail(double worldToleranceMeters) {
             auto& document = workspace_.document();
             auto compound = std::make_unique<CompoundCommand>("CAD Detail");
             std::uint64_t triangles = 0;
+            std::size_t changedObjects = 0;
             for (std::size_t i = 0; i < requests.size(); ++i) {
                 auto& result = (*results)[i];
                 const Request& request = requests[i];
@@ -187,6 +211,22 @@ bool NativeEditorController::set_cad_detail(double worldToleranceMeters) {
                     for (auto& submesh : mesh.submeshes) submesh.materialIndex = 0;
                 }
                 refresh_editor_polygon(mesh);
+                // The same triangles at the same recorded accuracy as now: no step for it.
+                if (mesh.contentHash == object->polygon->contentHash) {
+                    bool sameAccuracy = false;
+                    for (const Component& component : object->components) {
+                        if (component.type != kExactBrepComponent) continue;
+                        const auto recorded = [&](const char* key) {
+                            const auto it = component.properties.find(key);
+                            const double* value = it == component.properties.end() ? nullptr : std::get_if<double>(&it->second);
+                            return value ? *value : -1.0;
+                        };
+                        sameAccuracy = recorded("deflection") == result.deflectionMeters && recorded("angular") == result.angularRadians;
+                        break;
+                    }
+                    if (sameAccuracy) continue;
+                }
+                ++changedObjects;
                 std::optional<ModelingTopology> topology;
                 if (object->modelingTopology) {
                     topology = renumbered_topology(mesh, std::max(object->modelingNextId, object->modelingTopology->nextId));
@@ -212,6 +252,10 @@ bool NativeEditorController::set_cad_detail(double worldToleranceMeters) {
                 for (const Component& component : object->components)
                     if (component.type == kUvAuthoringComponent)
                         compound->add(std::make_unique<RemoveComponentCommand>(request.id, component.id, "CAD Detail"));
+            }
+            if (changedObjects == 0) {
+                set_status("CAD Detail: the mesh is already at that accuracy; nothing changed", false, 6.0F);
+                return true;
             }
             const auto before = capture_selection_snapshot();
             if (selectionDomain_ == SelectionDomain::Polygons) set_selection_domain(SelectionDomain::Objects);

@@ -761,6 +761,7 @@ public:
     // "Exact CAD: mesh within ±0.1 mm" for a CAD object, empty for anything else.
     [[nodiscard]] std::string cad_detail_summary(EditorObjectId id) const;
     [[nodiscard]] std::vector<EditorObjectId> selected_exact_objects() const;
+    [[nodiscard]] std::string cad_detail_disabled_reason() const;
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
     [[nodiscard]] std::string transform_numeric_label() const;
     [[nodiscard]] const std::string& transform_numeric_text() const noexcept { return transformNumeric_; }

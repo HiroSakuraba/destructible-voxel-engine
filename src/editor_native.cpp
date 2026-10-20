@@ -1,6 +1,7 @@
 #include "dve/editor_native.hpp"
 #include "editor_native_long_job.hpp"
 #include "dve/editor_exact_cad.hpp"
+#include "dve/collision_convex_set.hpp"
 #include "dve/voxel_metric.hpp"
 #include "dve/asset_cooker.hpp"
 #include "dve/editor_import_workflow.hpp"
@@ -13491,6 +13492,7 @@ bool NativeEditorController::start_exact_boolean(EditorObjectId a,EditorObjectId
             result.transform=objectA->transform;result.parent=objectA->parent;result.voxelScale=objectA->voxelScale;
             result.voxelSizeMeters=objectA->voxelSizeMeters;result.flags=objectA->flags;
             Component exact=make_exact_brep_component(r.source);exact.id=1;result.components.push_back(std::move(exact));
+            if(r.collision.component){Component pieces=*r.collision.component;pieces.id=2;result.components.push_back(std::move(pieces));}
             auto added=workspace_.commands().execute(document,std::make_unique<AddObjectCommand>(std::move(result),"Create exact Boolean result"));
             if(!added.success){set_status(added.message,true);return false;}
             if(!viewportSettings_.isolatedObjects.empty())viewportSettings_.isolatedObjects.insert(id);
@@ -13499,6 +13501,42 @@ bool NativeEditorController::start_exact_boolean(EditorObjectId a,EditorObjectId
             recompute_layout();refresh_menu_state();
             set_status(r.summary+"; the operands are unchanged");
             return true;
+        });
+}
+
+// Rebuilds the certified convex collision pieces of an object with an exact source (for
+// objects imported before convex collision existed, or after changing the polygon error).
+bool NativeEditorController::start_exact_collision(EditorObjectId id){
+    const auto* object=workspace_.document().find_object(id);
+    const auto source=object?exact_brep_source(*object):std::nullopt;
+    if(!source){set_status("Select a polygon object with an exact CAD source (Polygon > Import Exact CAD)",true);return false;}
+    auto output=std::make_shared<std::optional<ExactCollisionResult>>();
+    const auto root=projectRoot_;const auto settings=ExactCadSettings::from_environment();const auto src=*source;
+    return start_long_job(LongJobKind::ImportModel,"Exact convex collision for "+object->name,longJobThreshold_+1,
+        [output,root,settings,src](LongJob& job){
+            if(job.cancelled())return;
+            job.report(.1F,"brepkernel is cutting the part into certified convex pieces");
+            auto r=exact_convex_collision(root,src,settings);
+            if(job.cancelled())return;
+            *output=std::move(r);
+            job.report(1.F,"Convex pieces ready");
+        },
+        [this,output,id,src](LongJob& job){
+            if(!*output){set_status(job.label+" produced no result",true,8.F);return false;}
+            auto& r=**output;
+            auto& document=workspace_.document();
+            auto* object=document.find_object(id);
+            const auto now=object?exact_brep_source(*object):std::nullopt;
+            if(!now||now->relativePath!=src.relativePath){set_status(job.label+" was not applied: the object or its exact source changed",true,8.F);return false;}
+            if(!r.component){set_status(r.note,true,10.F);return false;}
+            auto command=std::make_unique<CompoundCommand>("Build exact convex collision");
+            for(const auto& c:object->components)if(c.type==kConvexSetComponent)command->add(std::make_unique<RemoveComponentCommand>(id,c.id,"Remove convex collision"));
+            Component pieces=*r.component;pieces.id=document.allocate_component_id(id);
+            command->add(std::make_unique<AddComponentCommand>(id,std::move(pieces),"Add convex collision"));
+            const auto result=workspace_.commands().execute(document,std::move(command));
+            set_status(result.success?r.note:result.message,!result.success);
+            refresh_menu_state();
+            return result.success;
         });
 }
 
@@ -13545,6 +13583,11 @@ bool NativeEditorController::import_exact_cad_model(const std::filesystem::path&
             Component exact = make_exact_brep_component(result.source);
             exact.id = 1;                    // component ids are per object; this is the first
             object.components.push_back(std::move(exact));
+            if (result.collision.component) {  // certified convex pieces: holes stay holes in physics
+                Component pieces = *result.collision.component;
+                pieces.id = 2;
+                object.components.push_back(std::move(pieces));
+            }
             const auto added = workspace_.commands().execute(
                 workspace_.document(), std::make_unique<AddObjectCommand>(std::move(object), "Import exact CAD"));
             if (!added.success) { set_status(added.message, true); return false; }

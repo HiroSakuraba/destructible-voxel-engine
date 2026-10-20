@@ -1,5 +1,6 @@
 #include "dve/component.hpp"
 #include "dve/collision_hull.hpp"
+#include "dve/collision_convex_set.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -112,6 +113,7 @@ bool ComponentTypeRegistry::validate(const Component& component, std::string* er
         if (!component_value_is_finite(value)) return fail("component property is not finite");
     }
     if(component.type==kCollisionHullComponent && !collision_hull_component_points(component))return fail("invalid collision hull control points");
+    if(component.type==kConvexSetComponent && !convex_set_component_pieces(component))return fail("invalid convex collision pieces");
     const ComponentTypeSchema* schema = find(component.type);
     if (!schema) return true; // Open composition: unregistered components remain valid and serializable.
     for (const ComponentPropertySchema& property : schema->properties) {
@@ -137,6 +139,12 @@ ComponentTypeRegistry ComponentTypeRegistry::make_default() {
         {{"points",std::string{},true,false,"Hull control points"}}}, &ignored);
     (void)registry.register_type({"dve.nurbs","Native NURBS Source",false,
         {{"source",std::string{},true,false,"NURBS source (edit with NURBS tools)"}}}, &ignored);
+    // Exact convex collision (collision_convex_set.hpp): convex prisms whose union is the part.
+    (void)registry.register_type({std::string(kConvexSetComponent),"Exact Convex Collision",false,
+        {{"pieces",std::string{},true,false,"Convex prisms"},
+         {"source_sha256",std::string{},false,false,"Exact source SHA-256"},
+         {"max_error",0.0,false,false,"Polygon error for arcs (m)"},
+         {"summary",std::string{},false,false,"Certificate"}}}, &ignored);
     // Exact CAD source of a polygon object (editor_exact_cad.hpp): authoring-only.
     (void)registry.register_type({"dve.exact_brep","Exact CAD Source",false,
         {{"source",std::string{},true,true,"Exact B-rep (.brep)"},
@@ -386,6 +394,7 @@ bool validate_components(
             return fail("duplicate or invalid component id");
         if (!component_type_name_is_valid(component.type)) return fail("invalid component type name");
         if(component.type==kCollisionHullComponent && !collision_hull_component_points(component))return fail("invalid collision hull control points");
+        if(component.type==kConvexSetComponent && !convex_set_component_pieces(component))return fail("invalid convex collision pieces");
         for (const auto& [name, value] : component.properties) {
             if (!component_property_name_is_valid(name)) return fail("invalid component property name");
             if (!component_value_is_finite(value)) return fail("component property is not finite");

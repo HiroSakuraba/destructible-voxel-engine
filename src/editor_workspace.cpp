@@ -812,6 +812,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.exact_boolean_difference","Polygon","Exact Boolean A minus B (CAD)",""},
         {"mesh.exact_boolean_reverse","Polygon","Exact Boolean B minus A (CAD)",""},
         {"mesh.exact_boolean_intersection","Polygon","Exact Boolean Intersection (CAD)",""},
+        {"mesh.exact_collision","Polygon","Build Exact Convex Collision (CAD)",""},
         {"mesh.hull_fit","Polygon","Fit Convex Collision Hull",""},
         {"mesh.hull_edit","Polygon","Edit Collision Hull Points",""},
         {"mesh.hull_remove","Polygon","Remove Authored Collision Hull",""},
@@ -923,7 +924,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for (auto id:{"polygon.vertex_mode","polygon.edge_mode","polygon.face_mode","polygon.object_mode"})
         configure(id,"Mesh Editing",80,true,"polygon.selection");
     for(auto id:{"mesh.boolean_union","mesh.boolean_difference","mesh.boolean_reverse","mesh.boolean_intersection"})configure(id,"Mesh Booleans",70);
-    for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection"})configure(id,"Exact CAD Booleans",71);
+    for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection","mesh.exact_collision"})configure(id,"Exact CAD Booleans",71);
     for(auto id:{"mesh.hull_fit","mesh.hull_edit","mesh.hull_remove"})configure(id,"Collision Hull",75);
     for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
     for(auto id:{"mesh.uv_editor","mesh.uv_mark_seam","mesh.uv_clear_seam","mesh.uv_toggle_pin","mesh.uv_reset_flags"})configure(id,"UV Editing",82);

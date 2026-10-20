@@ -397,7 +397,7 @@ Box3DRigidBodyWorld::Box3DRigidBodyWorld(const Box3DWorldConfig& config)
 Box3DRigidBodyWorld::~Box3DRigidBodyWorld() = default;
 
 RigidBodyHandle Box3DRigidBodyWorld::create_body(const RigidBodyCreateDesc& desc) {
-    if(!desc.convexHullPoints.empty())return kInvalidRigidBodyHandle;
+    if(!desc.convexHullPoints.empty()||!desc.convexPieces.empty())return kInvalidRigidBodyHandle;
     const RigidBodyValidationResult validation = validate_rigid_body_desc(desc);
     if (!validation) return kInvalidRigidBodyHandle;
 
@@ -452,7 +452,7 @@ std::vector<RigidBodyHandle> Box3DRigidBodyWorld::create_bodies(
 
 RigidBodyHandle Box3DRigidBodyWorld::create_static_body(
     const StaticRigidBodyCreateDesc& desc) {
-    if(!desc.convexHullPoints.empty())return kInvalidRigidBodyHandle;
+    if(!desc.convexHullPoints.empty()||!desc.convexPieces.empty())return kInvalidRigidBodyHandle;
     if (!validate_static_rigid_body_desc(desc)) return kInvalidRigidBodyHandle;
     const RigidTransform transform = make_rigid_transform(desc.transform.position, desc.transform.rotation);
     const RigidBodyHandle handle = impl_->allocate_handle();

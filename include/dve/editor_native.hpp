@@ -1161,6 +1161,7 @@ public:
     void draw_nurbs(const IEditorCanvas&,UiRect) const;
     bool dispatch_mesh_authoring_action(std::string_view);
     bool start_exact_boolean(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
+    bool start_exact_collision(EditorObjectId object);
     bool open_mesh_boolean_preview(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
     bool mesh_authoring_key(std::string_view,bool control,bool shift,bool alt);
     bool mesh_authoring_pointer_down(PointerButton,int,int,std::uint32_t);

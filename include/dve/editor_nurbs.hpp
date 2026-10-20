@@ -7,10 +7,12 @@ inline constexpr std::string_view kNurbsComponent="dve.nurbs";
 [[nodiscard]] std::optional<NurbsSource> editor_nurbs_source(const EditorObject&,std::string* error=nullptr);
 [[nodiscard]] bool validate_editor_nurbs(const EditorObject&,std::string* error=nullptr);
 [[nodiscard]] std::optional<EditorObject> make_editor_nurbs(EditorObjectId,const NurbsSource&,std::string* error=nullptr);
+[[nodiscard]] bool replace_editor_nurbs_source(EditorObject&,const NurbsSource&,std::string* error=nullptr);
+[[nodiscard]] std::uint64_t nurbs_source_stamp(const NurbsSource&);
 class EditNurbsCommand final:public IEditorCommand {
 public:
     EditNurbsCommand(EditorObjectId,NurbsSource before,NurbsSource after);
-    std::string_view label() const noexcept override{return "Edit NURBS control";}
+    std::string_view label() const noexcept override{return "Edit NURBS source";}
     CommandResult execute(EditorDocument&) override;
     CommandResult undo(EditorDocument&) override;
 private:

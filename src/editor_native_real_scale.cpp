@@ -9,6 +9,8 @@
 #include <cmath>
 #include <string>
 
+#include "dve/editor_number_field.hpp"
+
 namespace dve::editor {
 
 namespace {
@@ -81,6 +83,29 @@ bool NativeEditorController::resample_voxels_to_scale() {
                                     " to their scale (voxels rebuilt, Scale back to 1; Undo restores)"
                               : result.message, !result.success);
     return result.success;
+}
+
+std::optional<float> NativeEditorController::transform_numeric_value() const {
+    if (transformNumeric_.empty() || transformNumeric_ == "-" || transformNumeric_ == ".") return std::nullopt;
+    const NumberFieldParse parsed = parse_number_field(transformNumeric_,
+        activeTool_ == EditorToolId::Rotate ? NumberFieldUnit::Degrees
+        : activeTool_ == EditorToolId::Scale ? NumberFieldUnit::Count : NumberFieldUnit::Meters, 0.0);
+    if (!parsed.ok || !std::isfinite(parsed.value) || std::abs(parsed.value) > 1.0e6) return std::nullopt;
+    return static_cast<float>(parsed.value);
+}
+
+std::string NativeEditorController::transform_numeric_label() const {
+    if (!gizmoDragging_ || transformNumeric_.empty()) return {};
+    const bool rotate = activeTool_ == EditorToolId::Rotate, scale = activeTool_ == EditorToolId::Scale;
+    const NumberFieldUnit unit = rotate ? NumberFieldUnit::Degrees : scale ? NumberFieldUnit::Count : NumberFieldUnit::Meters;
+    std::string label = std::string(rotate ? "Rotate " : scale ? "Scale " : "Move ") +
+                        (gizmoAxis_ == 1 ? "X" : gizmoAxis_ == 2 ? "Y" : gizmoAxis_ == 3 ? "Z" : "XYZ") + ": " + transformNumeric_;
+    const NumberFieldParse parsed = parse_number_field(transformNumeric_, unit, 0.0);
+    if (!parsed.ok) return label + "\xE2\x80\xA6";  // still typing
+    // A scale factor is fractional: format it with decimals, not as a whole count.
+    const std::string shown = format_number_field(parsed.value, scale ? NumberFieldUnit::Meters : unit) + (rotate ? "\xC2\xB0" : scale ? "\xC3\x97" : " m");
+    if (shown.rfind(transformNumeric_, 0) != 0) label += " = " + shown;
+    return label + "   (X/Y/Z axis, Enter applies, Esc cancels)";
 }
 
 }  // namespace dve::editor

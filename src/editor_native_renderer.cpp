@@ -5397,6 +5397,17 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
         }
     }
 
+    // A value typed during a transform drag, next to the cursor.
+    if (const std::string typed = controller.transform_numeric_label(); !typed.empty()) {
+        const int width = painter.text_width(typed) + 16;
+        const UiRect viewport = controller.layout().viewport;
+        const int bx = std::clamp(controller.hover_x() + 18, viewport.x + 4, std::max(viewport.x + 4, viewport.x + viewport.width - width - 4));
+        const int by = std::clamp(controller.hover_y() + 18, viewport.y + 4, std::max(viewport.y + 4, viewport.y + viewport.height - 28));
+        painter.fill({bx, by, width, 24}, panel2);
+        painter.outline({bx, by, width, 24}, accent);
+        painter.text(bx + 8, by + 17, typed, text);
+    }
+
     // Naming a selection set: a small field at the top of the viewport.
     if (controller.text_edit().kind == TextEditKind::SelectionSetName) {
         const UiRect viewport = controller.layout().viewport;

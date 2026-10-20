@@ -108,7 +108,10 @@ public:
     CommandResult execute(EditorDocument&) override;
     CommandResult undo(EditorDocument&) override;
     [[nodiscard]] bool merge_with(const IEditorCommand&) override;
+    // CAD Detail re-meshes from the exact source itself, so it may replace a CAD object's bake.
+    void allow_exact_source_rebake() noexcept { exactRebake_ = true; }
 private:
+    bool exactRebake_{};
     CommandResult apply(EditorDocument&,const CookedPolygonAsset&,const std::optional<SubdivisionSettings>&,bool refresh,const std::optional<ModelingTopology>&);
     EditorObjectId id_{};
     std::uint64_t stroke_{};

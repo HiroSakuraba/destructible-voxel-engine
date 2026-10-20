@@ -233,8 +233,10 @@ bool NativeEditorController::set_cad_detail(double worldToleranceMeters) {
                     if (!topology) { set_status("The re-meshed object could not get element identities", true); return false; }
                 }
                 triangles += mesh.indices.size() / 3;
-                compound->add(std::make_unique<ReplacePolygonCommand>(request.id, *object->polygon, std::move(mesh), "CAD Detail", 0,
-                                                                      std::nullopt, true, topology));
+                auto replace = std::make_unique<ReplacePolygonCommand>(request.id, *object->polygon, std::move(mesh), "CAD Detail", 0,
+                                                                       std::nullopt, true, topology);
+                replace->allow_exact_source_rebake();  // the new triangles come from the exact source
+                compound->add(std::move(replace));
                 // Remember the accuracy on the exact source component.
                 for (const Component& component : object->components) {
                     if (component.type != kExactBrepComponent) continue;

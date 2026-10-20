@@ -111,7 +111,8 @@ void test_capability_search_and_panel_staging() {
 
 void test_menu_and_native_controller_integration() {
     EditorMenuRegistry menus = EditorMenuRegistry::make_default();
-    require(kMenuBarNames.size() == 9U, "top-level menu bar was not simplified");
+    require(kMenuBarNames.size() == 10U, "top-level menu bar was not simplified");
+    require(kMenuBarNames[5] == "NURBS" && kCompactMenuBarNames[5] == "NURBS", "NURBS menu missing from the menu bar");
     require(std::as_const(menus).find("camera.mode_orbit") != nullptr, "camera menu action missing");
     require(std::as_const(menus).find("camera.mode_orbit")->menu == "View", "camera commands were not grouped under View");
     require(std::as_const(menus).find("physics.settings")->menu == "Tools", "physics commands were not grouped under Tools");

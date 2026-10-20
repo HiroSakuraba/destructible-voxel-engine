@@ -135,6 +135,8 @@ ComponentTypeRegistry ComponentTypeRegistry::make_default() {
         {{"axis",std::int64_t{0},true,false,"Local mirror axis: 0 X, 1 Y, 2 Z"}}}, &ignored);
     (void)registry.register_type({"dve.collision_hull","Authored Collision Hull",false,
         {{"points",std::string{},true,false,"Hull control points"}}}, &ignored);
+    (void)registry.register_type({"dve.nurbs","Native NURBS Source",false,
+        {{"source",std::string{},true,false,"NURBS source (edit with NURBS tools)"}}}, &ignored);
     // Exact CAD source of a polygon object (editor_exact_cad.hpp): authoring-only.
     (void)registry.register_type({"dve.exact_brep","Exact CAD Source",false,
         {{"source",std::string{},true,true,"Exact B-rep (.brep)"},

@@ -284,6 +284,7 @@ bool EditorDocument::set_component_property(
         if (error) *error = "component does not exist";
         return false;
     }
+    if (component->type=="dve.nurbs") { if(error)*error="Edit NURBS through its source commands";return false; }
     if (!component_property_name_is_valid(property) || !component_value_is_finite(value)) {
         if (error) *error = "invalid component property";
         return false;
@@ -298,6 +299,7 @@ bool EditorDocument::set_component_property(
 bool EditorDocument::set_component_enabled(EditorObjectId objectId, ComponentId componentId, bool enabled) {
     Component* component = find_component(objectId, componentId);
     if (!component) return false;
+    if(component->type=="dve.nurbs" && !enabled)return false;
     if (component->enabled == enabled) return true;
     component->enabled = enabled;
     dirty_ = true;

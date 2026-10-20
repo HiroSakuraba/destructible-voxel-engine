@@ -61,6 +61,7 @@ std::vector<ComponentInspectorSection> build_component_inspector(
                 row.displayName = property.displayName.empty()
                     ? title_from_identifier(property.name) : property.displayName;
                 row.value = it == component.properties.end() ? property.defaultValue : it->second;
+                if(component.type=="dve.nurbs" && property.name=="source") {row.displayName="Controls";row.value=std::string("NURBS menu > Edit Control Points");}
                 row.required = property.required;
                 row.assetReference = property.assetReference;
                 row.schemaBacked = true;

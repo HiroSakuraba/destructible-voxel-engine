@@ -131,11 +131,46 @@ void test_inspector_field() {
     }
 }
 
+void test_scale_field_precision_and_reset_row() {
+    auto owner = make_controller();
+    NativeEditorController& c = *owner;
+    check(c.set_number_field(NumberFieldId::Scale, 0, "1.5"), "set Scale X 1.5");
+    check(c.number_field_text(NumberFieldId::Scale, 0) == "1.5", "fractional scale is shown as typed: " + c.number_field_text(NumberFieldId::Scale, 0));
+    const RigidTransform before = c.workspace().document().find_object(1)->transform;
+    for (const NumberFieldRect& r : c.number_field_rects())
+        if (r.field == NumberFieldId::Scale && r.axis == 1) {
+            c.pointer_move(r.box.x + 4, r.box.y + 8);
+            c.pointer_down(PointerButton::Secondary, r.box.x + 4, r.box.y + 8);
+            c.pointer_up(PointerButton::Secondary, r.box.x + 4, r.box.y + 8);
+            break;
+        }
+    const std::size_t steps = c.workspace().commands().size();
+    check(c.dispatch_action("inspector.field.reset_row"), "Reset Scale X, Y, Z: " + c.status().text);
+    check(near(scale_of(c, 1).x, 1.0F) && c.workspace().commands().size() == steps + 1, "the row resets the scale in one step");
+    const RigidTransform after = c.workspace().document().find_object(1)->transform;
+    check(after.rotation.x == before.rotation.x && after.rotation.y == before.rotation.y && after.rotation.z == before.rotation.z &&
+          after.rotation.w == before.rotation.w, "rotation is untouched");
+    check(c.dispatch_action("inspector.field.reset_row") && c.workspace().commands().size() == steps + 1, "a second reset is a no-op");
+}
+
 void test_resample() {
     auto owner = make_controller();
     NativeEditorController& c = *owner;
     check(!c.dispatch_action("voxel.resample_to_scale"), "nothing to resample at scale 1");
+    const auto menu_disabled = [&] {
+        const MenuAction* action = std::as_const(c.workspace().menus()).find("voxel.resample_to_scale");
+        return action && !action->enabled && !action->disabledReason.empty();
+    };
+    check(menu_disabled(), "the menu entry is disabled with a reason at scale 1");
     (void)c.set_number_field(NumberFieldId::Scale, 0, "2");
+    {
+        const std::size_t steps = c.workspace().commands().size();
+        c.workspace().document().find_object(1)->flags.locked = true;
+        check(!c.dispatch_action("voxel.resample_to_scale") && cells(c) == 64 && c.workspace().commands().size() == steps,
+              "a locked object is refused without an undo step");
+        check(menu_disabled(), "and the menu says why");
+        c.workspace().document().find_object(1)->flags.locked = false;
+    }
     const EditorObjectBounds before = object_world_bounds(*c.workspace().document().find_object(1));
     check(c.dispatch_action("voxel.resample_to_scale"), "Resample Voxels to Scale: " + c.status().text);
     check(near(scale_of(c, 1).x, 1.0F) && cells(c) == 128, "cells rebuilt and Scale back to 1: " + std::to_string(cells(c)));
@@ -149,6 +184,7 @@ void test_resample() {
 int main() {
     test_gizmo();
     test_inspector_field();
+    test_scale_field_precision_and_reset_row();
     test_resample();
     if (g_failures == 0) std::printf("real scale tests passed\n");
     return g_failures == 0 ? 0 : 1;

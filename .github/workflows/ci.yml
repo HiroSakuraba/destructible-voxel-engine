@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -41,7 +42,12 @@ jobs:
   ctest:
     name: ctest (${{ matrix.preset }})
     runs-on: ubuntu-latest
-    container: public.ecr.aws/debian/debian:trixie
+    # Mirrored from Debian trixie by ci-image-mirror.yml; pulled with credentials, not anonymously.
+    container:
+      image: ghcr.io/hirosakuraba/dve-ci-debian:trixie
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     # linux-gcc-asan builds and runs the same suite under AddressSanitizer and UBSan, which is
     # roughly two to three times slower than a plain Release run.
     timeout-minutes: ${{ matrix.preset == 'linux-gcc-asan' && 300 || 180 }}
@@ -140,7 +146,12 @@ jobs:
 
   packaging:
     runs-on: ubuntu-latest
-    container: public.ecr.aws/debian/debian:trixie
+    # Mirrored from Debian trixie by ci-image-mirror.yml; pulled with credentials, not anonymously.
+    container:
+      image: ghcr.io/hirosakuraba/dve-ci-debian:trixie
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 150
     env:
       PRESET: linux-gcc-player-release

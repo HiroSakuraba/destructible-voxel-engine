@@ -3,6 +3,9 @@
 This batch extends the native sources and control editing from
 [nurbs-controls-refinement-2026-10-19.md](nurbs-controls-refinement-2026-10-19.md).
 
+The next source operations are documented in
+[nurbs-split-isoparms-2026-10-20.md](nurbs-split-isoparms-2026-10-20.md).
+
 ## Artist workflow
 
 1. Select a native NURBS curve and choose **NURBS > Append Selected Curve Snapshot**.

@@ -49,6 +49,7 @@
 #include "dve/editor_subdivision.hpp"
 #include "dve/editor_nurbs.hpp"
 #include "dve/nurbs_construction.hpp"
+#include "dve/nurbs_topology.hpp"
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
@@ -1143,6 +1144,7 @@ public:
     bool dispatch_nurbs_action(std::string_view);
     bool create_nurbs_source(const NurbsSource&,std::string name,std::optional<Float3> position=std::nullopt);
     bool dispatch_nurbs_construction(std::string_view);
+    bool dispatch_nurbs_topology(std::string_view);
     void commit_nurbs_construction_field();
     bool nurbs_construction_pointer(PointerButton,int,int);
     void draw_nurbs_construction(const IEditorCanvas&,UiRect) const;
@@ -1359,6 +1361,7 @@ private:
     std::vector<NurbsConstructionInput> nurbsConstructionInputs_;
     Float3 nurbsConstructionOrigin_{};
     NurbsSweepOptions nurbsSweepOptions_;
+    double nurbsOperationParameter_{.5};
     bool nurbsConstructionPanel_{};
     EditorObjectId nurbsEditingObject_{};
     std::size_t nurbsControl_{},nurbsFieldControl_{};

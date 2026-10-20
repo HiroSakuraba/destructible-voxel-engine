@@ -75,4 +75,21 @@ std::optional<NurbsSource> extract_nurbs_isocurve(const NurbsSource& s,bool v,do
     if(!validate_nurbs(out,e))return {};
     return out;
 }
+std::optional<std::array<NurbsSource,4>> extract_nurbs_boundaries(const NurbsSource& s,std::string* e){
+    if(!validate_nurbs(s,e))return {};
+    if(s.is_curve()){refuse(e,"Boundary extraction requires a NURBS surface");return {};}
+    const std::array<std::pair<bool,double>,4> edges{{
+        {true,s.v.knots[s.v.degree]},{false,s.u.knots[s.columns]},
+        {true,s.v.knots[s.rows]},{false,s.u.knots[s.u.degree]}}};
+    std::array<NurbsSource,4> out;
+    for(unsigned i=0;i<4;++i){
+        auto edge=extract_nurbs_isocurve(s,edges[i].first,edges[i].second,e);
+        if(!edge)return {};
+        if(i>=2)edge=reverse_nurbs_axis(*edge,false,e);
+        if(!edge)return {};
+        out[i]=std::move(*edge);
+    }
+    return out;
+}
+
 }

@@ -8,6 +8,11 @@ namespace dve {
 [[nodiscard]] std::optional<NurbsSource> reverse_nurbs_curve(const NurbsSource&,std::string* error=nullptr);
 // Exact cyclic reindexing for closed, uniform, piecewise-Bezier curves only.
 [[nodiscard]] std::optional<NurbsSource> shift_nurbs_seam(const NurbsSource&,std::string* error=nullptr);
+// Ordered 2..64 equal-degree clamped curves, with exactly matching endpoint
+// positions. Each original domain maps to one unit interval. Homogeneous weight
+// rescaling and a degree-multiplicity join retain shape within floating-point
+// arithmetic. No gap snapping, smoothing, degree elevation or UV continuity.
+[[nodiscard]] std::optional<NurbsSource> join_nurbs_curves(std::span<const NurbsSource>,std::string* error=nullptr);
 struct NurbsSweepOptions {
     unsigned sections{16}; // 2..64; uniform rail parameter, not arc length
     double twistRadians{};

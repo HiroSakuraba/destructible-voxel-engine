@@ -165,9 +165,18 @@ bool inertia_is_positive_definite(const SolverInertiaTensor& inertia) noexcept {
     return leading1 > 0.0 && leading2 > 0.0 && determinant > 0.0;
 }
 
+namespace {
+bool valid_pieces(const std::vector<std::vector<Float3>>& pieces) noexcept {
+    for (const auto& piece : pieces)
+        if (!validate_collision_hull_points(piece)) return false;
+    return true;
+}
+} // namespace
+
 RigidBodyValidationResult validate_rigid_body_desc(const RigidBodyCreateDesc& desc) noexcept {
     RigidBodyValidationResult result;
-    if (desc.boxes.empty() || (!desc.convexHullPoints.empty() && !validate_collision_hull_points(desc.convexHullPoints))) {
+    if (desc.boxes.empty() || (!desc.convexHullPoints.empty() && !validate_collision_hull_points(desc.convexHullPoints)) ||
+        !valid_pieces(desc.convexPieces)) {
         result.error = RigidBodyValidationError::EmptyCollisionShape;
         return result;
     }
@@ -297,7 +306,8 @@ bool validate_rigid_body_constraint_desc(const RigidBodyConstraintDesc& desc) no
 
 
 bool validate_static_rigid_body_desc(const StaticRigidBodyCreateDesc& desc) noexcept {
-    if (desc.boxes.empty() || !finite(desc.transform) || (!desc.convexHullPoints.empty() && !validate_collision_hull_points(desc.convexHullPoints))) return false;
+    if (desc.boxes.empty() || !finite(desc.transform) || (!desc.convexHullPoints.empty() && !validate_collision_hull_points(desc.convexHullPoints)) ||
+        !valid_pieces(desc.convexPieces)) return false;
     const double rotationNormSquared =
         static_cast<double>(desc.transform.rotation.x) * desc.transform.rotation.x +
         static_cast<double>(desc.transform.rotation.y) * desc.transform.rotation.y +
@@ -798,6 +808,8 @@ std::uint64_t ReferenceRigidBodyWorld::solver_state_hash() const noexcept {
         value(boxes.size()); for (const auto& box:boxes) { vector(box.center); vector(box.halfExtents); }
         const auto& points=body.isStatic?body.staticDesc.convexHullPoints:desc.convexHullPoints;
         value(points.size());for(auto point:points)vector(point);
+        const auto& pieces=body.isStatic?body.staticDesc.convexPieces:desc.convexPieces;
+        value(pieces.size());for(const auto& piece:pieces){value(piece.size());for(auto point:piece)vector(point);}
     }
     value(freeHandles_.size()); for(const auto h:freeHandles_) value(h);
     value(constraints_.size());

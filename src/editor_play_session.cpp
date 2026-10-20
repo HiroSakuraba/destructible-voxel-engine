@@ -1,3 +1,4 @@
+#include "dve/collision_convex_set.hpp"
 #include "dve/simulation_clock.hpp"
 #include "dve/editor_polygon.hpp"
 #include "dve/collision_hull.hpp"
@@ -149,7 +150,7 @@ public:
                     if (component.type==kUvAuthoringComponent || component.type=="dve.nurbs" || component.type=="dve.exact_brep") continue;
                     hasMembership = hasMembership || component.type == "dve.membership";
                     std::string componentError;
-                    if (!world_->add_component(runtimeId, object.polygon ? bake_collision_hull_component(component,object.voxelScale) : component, &componentError)) {
+                    if (!world_->add_component(runtimeId, object.polygon ? bake_convex_set_component(bake_collision_hull_component(component,object.voxelScale),object.voxelScale) : component, &componentError)) {
                         if (error) *error = "could not publish component on '" + object.name + "': " + componentError;
                         stop();
                         return false;

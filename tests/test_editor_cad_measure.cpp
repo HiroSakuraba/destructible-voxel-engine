@@ -100,7 +100,7 @@ std::pair<int, int> screen(const NativeEditorController& c, Float3 world) {
 }
 
 void test_native(const fs::path& root) {
-    setenv("DVE_BREPKERNEL", ("/bin/sh " + (root / "fake_brepkernel.sh").string()).c_str(), 1);
+    set_test_env("DVE_BREPKERNEL", ("/bin/sh " + (root / "fake_brepkernel.sh").string()).c_str());
     EditorObjectId cad{}, plain{};
     auto owner = make_controller(root, cad, plain);
     NativeEditorController& c = *owner;
@@ -151,7 +151,7 @@ void test_native(const fs::path& root) {
     check(c.measure_points().empty(), "points cleared");
     (void)c.measure_at(vx, vy);
     check(c.measure_points().empty(), "clicks do nothing when not measuring");
-    unsetenv("DVE_BREPKERNEL");
+    unset_test_env("DVE_BREPKERNEL");
 }
 
 void test_plain_only() {
@@ -213,7 +213,7 @@ void test_real(const fs::path& root) {
     std::printf("real brepkernel: %zu faces, %zu edges, %zu circles\n", d.faces.size(), d.edges.size(), d.circles.size());
 
     // In the editor: the shape is read in the background and Measure snaps to the top circle centre.
-    unsetenv("DVE_BREPKERNEL");
+    unset_test_env("DVE_BREPKERNEL");
     auto c = std::make_unique<NativeEditorController>();
     c->configure_ai_assistant(root);
     c->resize(1600, 900);
@@ -247,7 +247,8 @@ int main() {
     const fs::path glb = dir.path / "cube.glb";
     write_cube_glb(glb);
     test_library(dir.path, glb);
-    test_native(dir.path);
+    if (fake_brepkernel_runs()) test_native(dir.path);
+    else std::printf("SKIP native: the fake brepkernel needs /bin/sh\n");
     test_plain_only();
     test_real(dir.path);
     if (g_failures == 0) std::printf("cad measure tests passed\n");

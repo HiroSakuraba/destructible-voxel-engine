@@ -4,10 +4,16 @@
 #include "dve/voxel_metric.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cmath>
 #include <iomanip>
 #include <locale>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace dve {
 

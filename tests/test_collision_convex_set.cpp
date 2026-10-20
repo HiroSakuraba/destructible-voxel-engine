@@ -33,7 +33,7 @@ namespace {
 void check(bool value, const std::string& message) {
     if (!value) throw std::runtime_error(message);
 }
-bool near(double a, double b, double tol) { return std::abs(a - b) <= tol; }
+bool approx_equal(double a, double b, double tol) { return std::abs(a - b) <= tol; }
 
 // Axis-aligned box [x0,x1] x [y0,y1] x [z0,z1] as a prism along y.
 ConvexPrism box(float x0, float x1, float y0, float y1, float z0, float z1) {
@@ -80,7 +80,7 @@ void codec_and_bake() {
     c.type = std::string(kConvexSetComponent);
     c.properties["pieces"] = text;
     const auto baked = convex_set_component_pieces(bake_convex_set_component(c, {2, 1, 0.5F}));
-    check(baked && near(baked->at(1).top[2].x, 0.05, 1e-7) && near(baked->at(1).top[2].z, 0.0125, 1e-7),
+    check(baked && approx_equal(baked->at(1).top[2].x, 0.05, 1e-7) && approx_equal(baked->at(1).top[2].z, 0.0125, 1e-7),
           "bake multiplies by voxel scale");
     std::vector<Component> list{c};
     check(active_convex_set(list).size() == 4, "active set");
@@ -92,31 +92,31 @@ void mass_properties() {
     // one box 1 x 2 x 3 at an offset: volume 6, center, inertia m/12 (b^2 + c^2)
     const std::vector<ConvexPrism> one{box(1, 2, 10, 12, -1, 2)};
     const auto p = convex_set_mass_properties(one);
-    check(p && near(p->volumeCubicMeters, 6, 1e-9), "box volume");
-    check(near(p->centerOfMass.x, 1.5, 1e-6) && near(p->centerOfMass.y, 11, 1e-6) && near(p->centerOfMass.z, 0.5, 1e-6),
+    check(p && approx_equal(p->volumeCubicMeters, 6, 1e-9), "box volume");
+    check(approx_equal(p->centerOfMass.x, 1.5, 1e-6) && approx_equal(p->centerOfMass.y, 11, 1e-6) && approx_equal(p->centerOfMass.z, 0.5, 1e-6),
           "box center");
     const auto& i = p->inertiaPerDensity;
-    check(near(i.xx, 6.0 / 12 * (4 + 9), 1e-6) && near(i.yy, 6.0 / 12 * (1 + 9), 1e-6) &&
-              near(i.zz, 6.0 / 12 * (1 + 4), 1e-6) && near(i.xy, 0, 1e-6),
+    check(approx_equal(i.xx, 6.0 / 12 * (4 + 9), 1e-6) && approx_equal(i.yy, 6.0 / 12 * (1 + 9), 1e-6) &&
+              approx_equal(i.zz, 6.0 / 12 * (1 + 4), 1e-6) && approx_equal(i.xy, 0, 1e-6),
           "box inertia");
     // the frame (plate minus hole) equals the full plate minus the hole block
     const auto f = convex_set_mass_properties(frame(0.025F, 0.01F, 0.01F));
     const double full = 0.05 * 0.05 * 0.01, hole = 0.02 * 0.02 * 0.01;
-    check(f && near(f->volumeCubicMeters, full - hole, 1e-12), "frame volume");
+    check(f && approx_equal(f->volumeCubicMeters, full - hole, 1e-12), "frame volume");
     const double ixx = full / 12 * (0.01 * 0.01 + 0.05 * 0.05) - hole / 12 * (0.01 * 0.01 + 0.02 * 0.02);
-    check(near(f->inertiaPerDensity.xx, ixx, 1e-12) && near(f->centerOfMass.y, 0.005, 1e-7), "frame inertia");
+    check(approx_equal(f->inertiaPerDensity.xx, ixx, 1e-12) && approx_equal(f->centerOfMass.y, 0.005, 1e-7), "frame inertia");
     // reversed ring order gives the same solid
     auto rev = one;
     std::reverse(rev[0].bottom.begin(), rev[0].bottom.end());
     std::reverse(rev[0].top.begin(), rev[0].top.end());
-    check(near(convex_set_mass_properties(rev)->volumeCubicMeters, 6, 1e-9), "ring orientation does not matter");
+    check(approx_equal(convex_set_mass_properties(rev)->volumeCubicMeters, 6, 1e-9), "ring orientation does not matter");
     // a product of inertia: an L of two boxes
     const std::vector<ConvexPrism> el{box(0, 2, 0, 1, 0, 1), box(0, 1, 0, 1, 1, 2)};
     const auto l = convex_set_mass_properties(el);
     // closed form by parallel axis: centers (1, .5, .5) mass 2 and (.5, .5, 1.5) mass 1
     const double gx = (2 * 1 + 1 * 0.5) / 3, gz = (2 * 0.5 + 1 * 1.5) / 3;
     const double ixz = -(2 * (1 - gx) * (0.5 - gz) + 1 * (0.5 - gx) * (1.5 - gz));
-    check(l && near(l->inertiaPerDensity.xz, ixz, 1e-9), "product of inertia sign and value");
+    check(l && approx_equal(l->inertiaPerDensity.xz, ixz, 1e-9), "product of inertia sign and value");
 }
 
 void descriptors() {
@@ -130,9 +130,9 @@ void descriptors() {
     options.densityKilogramsPerCubicMeter = 2000;
     Float3 com{};
     const auto dyn = make_polygon_dynamic_body_desc(asset, {}, options, &com);
-    check(dyn && near(dyn->massKilograms, 2000 * (0.05 * 0.05 * 0.01 - 0.02 * 0.02 * 0.01), 1e-9),
+    check(dyn && approx_equal(dyn->massKilograms, 2000 * (0.05 * 0.05 * 0.01 - 0.02 * 0.02 * 0.01), 1e-9),
           "mass from the pieces, not the bounds");
-    check(near(com.y, 0.005, 1e-7) && near(dyn->transform.position.y, 0.005, 1e-7), "center of mass");
+    check(approx_equal(com.y, 0.005, 1e-7) && approx_equal(dyn->transform.position.y, 0.005, 1e-7), "center of mass");
     for (const auto& piece : dyn->convexPieces)
         for (auto q : piece) check(q.y >= -0.0050001F && q.y <= 0.0050001F, "pieces are relative to the center");
 }
@@ -165,7 +165,7 @@ void game_world_precedence() {
     check(world.add_component(id, again, &error) == nullptr, "only one convex set per object");
     check(world.set_component_enabled(id, 7, false), "disable");
     const auto mass2 = mass_of(world, id);
-    check(mass2 && near(*mass2, *mass0, 1e-6 * *mass0), "disabled set falls back to the bounds box");
+    check(mass2 && approx_equal(*mass2, *mass0, 1e-6 * *mass0), "disabled set falls back to the bounds box");
     check(world.set_component_enabled(id, 7, true) && world.remove_component(id, 7), "enable and remove");
     Component bad = set;
     bad.id = 9;

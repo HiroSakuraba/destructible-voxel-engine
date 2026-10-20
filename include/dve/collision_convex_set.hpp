@@ -11,6 +11,7 @@
 // Pieces are in the object's mesh-local frame in the editor (meters, before
 // voxelScale) and baked by voxelScale for runtime scenes and Play, like hulls.
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>

@@ -2051,6 +2051,13 @@ void NativeEditorController::refresh_menu_state() noexcept {
         enabled("view.drop_to_surface", hasSelection && !playActive && workspace_.mode() == EditorMode::Edit,
                 playActive || workspace_.mode() != EditorMode::Edit ? "Stop Play or Simulate before moving objects."
                                                                     : "Select the objects to drop first.");
+        // Placement and point-snap modes move the selection: say why they cannot start.
+        for (std::string_view id : {"transform.place_surface", "transform.place_voxel_corner", "transform.place_voxel_edge",
+                                    "transform.place_voxel_face", "transform.place_bounds_vertex", "transform.place_collision_vertex",
+                                    "transform.place_mesh_vertex", "transform.place_mesh_edge", "transform.place_mesh_face"})
+            enabled(id, hasSelection && !playActive && workspace_.mode() == EditorMode::Edit,
+                    playActive || workspace_.mode() != EditorMode::Edit ? "Stop Play or Simulate before moving objects."
+                                                                        : "Select the objects to place first.");
         enabled("view.follow_selection", followSelection_ || hasSelection, "Select something to follow first.");
         // Not implemented in this editor build: disabled with the reason, so the menu and the
         // Command Center say so before the command is tried.
@@ -6161,8 +6168,10 @@ void NativeEditorController::update_placement_preview(int x, int y) {
     const auto hits = pick_editor_document_all(workspace_.document(),
         make_viewport_ray(camera_, layout_.viewport, static_cast<float>(x), static_cast<float>(y)),
         10000.0F, &viewportSettings_.isolatedObjects);
+    // Never place onto what is being moved (pieces of a selected group, attached children too).
+    const std::set<EditorObjectId> moving = snap_excluded_objects();
     const auto it = std::find_if(hits.begin(), hits.end(), [&](const EditorPickResult& hit) {
-        return !workspace_.is_selected(hit.objectId);
+        return !moving.contains(hit.objectId);
     });
     if (it == hits.end()) return;
     const EditorObject* target = workspace_.document().find_object(it->objectId);
@@ -6249,7 +6258,14 @@ void NativeEditorController::update_placement_preview(int x, int y) {
 void NativeEditorController::finish_placement(bool cancel) {
     if (placementMode_ == PlacementTarget::NoTarget) return;
     apply_transform_preview(placementChanges_, false);
-    if (!cancel && placementPoint_) {
+    const bool unmoved = std::all_of(placementChanges_.begin(), placementChanges_.end(), [](const ObjectTransformChange& change) {
+        return change.after.position.x == change.before.position.x && change.after.position.y == change.before.position.y &&
+               change.after.position.z == change.before.position.z && change.after.rotation.x == change.before.rotation.x &&
+               change.after.rotation.y == change.before.rotation.y && change.after.rotation.z == change.before.rotation.z &&
+               change.after.rotation.w == change.before.rotation.w;
+    });
+    if (!cancel && placementPoint_ && unmoved) set_status("Already there: nothing moved", false, 2.0F);
+    else if (!cancel && placementPoint_) {
         const CommandResult result = workspace_.commands().execute(workspace_.document(),
             std::make_unique<TransformObjectsCommand>(placementChanges_, "Place objects"));
         set_status(result.success ? "Placed selection" : result.message, !result.success);
@@ -6659,6 +6675,14 @@ void NativeEditorController::finish_gizmo_drag(bool cancel) {
                     } else set_status("Voxel resample exceeds the supported range", true);
                 }
             }
+        } else if (std::all_of(gizmoChanges_.begin(), gizmoChanges_.end(), [](const ObjectTransformChange& change) {
+                       return change.after.position.x == change.before.position.x && change.after.position.y == change.before.position.y &&
+                              change.after.position.z == change.before.position.z && change.after.rotation.x == change.before.rotation.x &&
+                              change.after.rotation.y == change.before.rotation.y && change.after.rotation.z == change.before.rotation.z &&
+                              change.after.rotation.w == change.before.rotation.w;
+                   })) {
+            // Ended where it started (or snapped back onto its own pivot): no undo step.
+            set_status(activeTool_ == EditorToolId::Rotate ? "Nothing rotated" : "Nothing moved", false, 1.5F);
         } else {
             const std::string label = activeTool_ == EditorToolId::Rotate ? "Rotate objects" : "Move objects";
             const CommandResult result = workspace_.commands().execute(
@@ -8590,8 +8614,14 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
     if (importOptions_.open) { (void)handle_import_options_key(normalized); return; }
     if (filePicker_.open) { (void)handle_file_picker_key(normalized); return; }
     // Hold V to snap a Move drag to vertices, edges, faces, corners or surfaces (ART-026).
+    // Only where it means snapping: a Move drag of objects or mesh components in Edit, never in
+    // Play, the voxel domain (cell moves have their own steps) or a panel that uses V itself.
+    const bool snapKeyPanelFree = !settingsPanel_.open && !shortcutPanel_.open && !cinematicCameraPanel_.is_open() &&
+        !spritePixelArtOpen_ && !spriteRig2DOpen_ && !tileWorldEditorOpen_ && !spriteAnimationGraphOpen_;
     if (normalized == "v" && !control && !alt && textEdit_.kind == TextEditKind::Inactive && !commandPaletteOpen_ &&
-        activeTool_ == EditorToolId::Translate && (gizmoDragging_ || focusRegion_ == EditorFocusRegion::Viewport)) {
+        activeTool_ == EditorToolId::Translate && selectionDomain_ != SelectionDomain::Voxels &&
+        workspace_.mode() == EditorMode::Edit && !playSession_.active() &&
+        (gizmoDragging_ || (focusRegion_ == EditorFocusRegion::Viewport && snapKeyPanelFree))) {
         if (!dragSnapHeld_) {
             dragSnapHeld_ = true;
             if (gizmoDragging_) update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);

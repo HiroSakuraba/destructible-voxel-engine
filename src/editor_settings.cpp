@@ -330,12 +330,14 @@ SettingAvailability EditorSettingsRegistry::availability(std::string_view id,std
     if(!capabilities_match(*definition,capabilities)) return {false,"This option is unavailable in the current build profile."};
     if (id == "physics.worker_threads" || id == "physics.substeps" ||
         id == "physics.velocity_iterations" || id == "physics.position_iterations" ||
+        id == "physics.contact_distance" || id == "physics.penetration_slop" ||
         id == "physics.deterministic" || id == "physics.continuous_collision") {
         const auto requested = std::get<std::string>(value("physics.backend"));
         const std::string_view backend = requested == "automatic" ? automatic_physics_choice() : requested;
         if (!physics_choice_compiled(backend)) return {false, "The selected physics backend is not compiled in this build."};
         if (backend == "reference") return {false, "The reference adapter does not expose solver tuning, workers, CCD or a determinism toggle."};
-        if (backend == "box3d" && (id == "physics.velocity_iterations" || id == "physics.position_iterations" || id == "physics.deterministic"))
+        if (backend == "box3d" && (id == "physics.velocity_iterations" || id == "physics.position_iterations" ||
+                                   id == "physics.contact_distance" || id == "physics.penetration_slop" || id == "physics.deterministic"))
             return {false, "This tuning control is supported by the Jolt adapter; Box3D does not expose it."};
     }
     for(const SettingDependency& dependency:definition->dependencies){
@@ -764,6 +766,8 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         integer_setting("physics.substeps","Physics","Solver","Collision Substeps",1,1,8,1,"Collision solver substeps per fixed update.",SettingCapabilityNone),
         integer_setting("physics.velocity_iterations","Physics","Jolt","Velocity Iterations",10,2,64,1,"Jolt velocity-constraint iterations.",SettingCapabilityJolt),
         integer_setting("physics.position_iterations","Physics","Jolt","Position Iterations",2,1,32,1,"Jolt position-correction iterations.",SettingCapabilityJolt),
+        float_setting("physics.contact_distance","Physics","Jolt","Speculative Contact Distance",0.02,0.00005,0.1,0.00005,"How close bodies get before Jolt adds contacts (m). For fits with sub-millimeter clearance, keep it within a few clearances (0.5 mm for 0.1 mm), or a peg catches on the rim of its hole.",SettingCapabilityJolt),
+        float_setting("physics.penetration_slop","Physics","Jolt","Penetration Slop",0.02,0.00001,0.1,0.00001,"Overlap Jolt allows before pushing bodies apart (m). Lower it for small precise parts.",SettingCapabilityJolt),
         boolean_setting("physics.deterministic","Physics","Solver","Deterministic Simulation",true,"Use deterministic solver ordering where supported."),
         boolean_setting("physics.allow_sleeping","Physics","Solver","Allow Sleeping",true,"Allow settled rigid bodies to sleep."),
 
@@ -831,6 +835,7 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         if (definition.id == "physics.backend" || definition.id == "physics.worker_threads" ||
             definition.id == "physics.substeps" || definition.id == "physics.velocity_iterations" ||
             definition.id == "physics.position_iterations" || definition.id == "physics.deterministic" ||
+            definition.id == "physics.contact_distance" || definition.id == "physics.penetration_slop" ||
             definition.id == "physics.continuous_collision" || definition.id == "physics.allow_sleeping" ||
             definition.id == "scripting.lua") {
             definition.applyPolicy = SettingApplyPolicy::OnApply;

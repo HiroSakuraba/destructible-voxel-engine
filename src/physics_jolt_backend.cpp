@@ -582,9 +582,32 @@ struct JoltRigidBodyWorld::Impl final : public JPH::BodyActivationListener, publ
         return handle != kInvalidRigidBodyHandle ? slots[handle].contactMaterial : 0U;
     }
 
+    // Compound of convex hulls for parts with holes. Each hull keeps its points to a
+    // micrometer (Jolt's default hull tolerance of 1 mm would shrink small parts and
+    // open their clearances) and has no convex radius, so faces stay where they are.
+    [[nodiscard]] static JPH::RefConst<JPH::Shape> build_convex_pieces(
+        const std::vector<std::vector<Float3>>& pieces) {
+        JPH::StaticCompoundShapeSettings compound;
+        for (const auto& piece : pieces) {
+            JPH::Array<JPH::Vec3> points;
+            for (auto p : piece) points.push_back(to_jolt_vec3(p));
+            JPH::ConvexHullShapeSettings settings(points, 0.0F);
+            settings.mHullTolerance = 1.0e-6F;
+            const auto result = settings.Create();
+            if (result.HasError()) return {};
+            compound.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), result.Get());
+        }
+        const auto result = compound.Create();
+        if (result.HasError()) return {};
+        return result.Get();
+    }
+
     [[nodiscard]] JPH::RefConst<JPH::Shape> build_shape(const RigidBodyCreateDesc& desc) const {
         JPH::RefConst<JPH::Shape> shape;
-        if (!desc.convexHullPoints.empty()) {
+        if (!desc.convexPieces.empty()) {
+            shape = build_convex_pieces(desc.convexPieces);
+            if (shape == nullptr) return {};
+        } else if (!desc.convexHullPoints.empty()) {
             JPH::Array<JPH::Vec3> points;for(auto p:desc.convexHullPoints)points.push_back(to_jolt_vec3(p));
             JPH::ConvexHullShapeSettings settings(points,0.0F);const auto result=settings.Create();
             if(result.HasError())return {};shape=result.Get();
@@ -622,6 +645,7 @@ struct JoltRigidBodyWorld::Impl final : public JPH::BodyActivationListener, publ
     [[nodiscard]] JPH::RefConst<JPH::Shape> build_static_shape(
         const StaticRigidBodyCreateDesc& desc) const {
         if (!validate_static_rigid_body_desc(desc)) return {};
+        if (!desc.convexPieces.empty()) return build_convex_pieces(desc.convexPieces);
         if (!desc.convexHullPoints.empty()) {
             JPH::Array<JPH::Vec3> points;for(auto p:desc.convexHullPoints)points.push_back(to_jolt_vec3(p));
             JPH::ConvexHullShapeSettings settings(points,0.0F);const auto result=settings.Create();

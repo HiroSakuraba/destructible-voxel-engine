@@ -80,9 +80,11 @@ std::set<EditorObjectId> NativeEditorController::snap_excluded_objects() const {
     return moving;
 }
 
-std::optional<SnapTarget> NativeEditorController::find_snap_target(int x, int y, std::optional<SnapTargetKind> only) const {
+std::optional<SnapTarget> NativeEditorController::find_snap_target(int x, int y, std::optional<SnapTargetKind> only,
+                                                                   bool includeSelection) const {
     const EditorDocument& document = workspace_.document();
-    const std::set<EditorObjectId> moving = snap_excluded_objects();
+    // Pivot to Point / Edit Pivot snap onto the object itself, so nothing is excluded there.
+    const std::set<EditorObjectId> moving = includeSelection ? std::set<EditorObjectId>{} : snap_excluded_objects();
     const auto excluded = [&](EditorObjectId id) { return moving.contains(id); };
     const float cx = static_cast<float>(x), cy = static_cast<float>(y);
     const float radius = kSnapRadiusPixels;
@@ -189,7 +191,8 @@ std::optional<SnapTarget> NativeEditorController::find_snap_target(int x, int y,
 
 bool NativeEditorController::apply_drag_snap(int x, int y) {
     if (!dragSnapHeld_ || activeTool_ != EditorToolId::Translate) { dragSnapTarget_.reset(); return false; }
-    const auto target = find_snap_target(x, y);
+    // Editing a pivot may snap it to the object's own vertices and corners.
+    const auto target = find_snap_target(x, y, std::nullopt, origin_drag());
     if (!target) {
         dragSnapTarget_.reset();
         set_status("Snap (V): move over something to snap to", false, 1.0F);
@@ -224,7 +227,8 @@ bool NativeEditorController::apply_drag_snap(int x, int y) {
             change.after.rotation = turned;
         }
     }
-    apply_transform_preview(gizmoChanges_, true);
+    if (origin_drag()) originDragPoint_ = gizmoChanges_.front().after.position;  // Edit Pivot: the marker only
+    else apply_transform_preview(gizmoChanges_, true);
     set_status(std::string("Snapped to ") + snap_target_name(target->kind) + where +
                (align ? " (aligned to the normal)" : "") + " (release V for axis moves)", false, 1.0F);
     return true;

@@ -671,7 +671,9 @@ private:
     std::map<GameObjectId, RigidTransform> presentationPrevious_;
 
     struct Object;
-    bool rebuild_authored_polygon_hull(Object&,const Component*,std::string* error=nullptr);
+    // Rebuilds a polygon body from the collision components it would have: an enabled
+    // convex set wins, then an enabled authored hull, then the bounding box.
+    bool rebuild_polygon_collision(Object&,std::span<const Component> components,std::string* error=nullptr);
     struct Timer;
     struct Pool;
 

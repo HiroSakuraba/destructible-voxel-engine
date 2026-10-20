@@ -4,6 +4,7 @@
 #include "dve/simulation_clock.hpp"
 #include "dve/game_world.hpp"
 #include "dve/collision_hull.hpp"
+#include "dve/collision_convex_set.hpp"
 #include "dve/animation.hpp"
 #include "dve/animation_controller.hpp"
 #include "dve/control_rig.hpp"
@@ -806,23 +807,36 @@ GameObjectId GameWorld::spawn_cooked_polygon_asset(
     return id;
 }
 
-bool GameWorld::rebuild_authored_polygon_hull(Object& object,const Component* component,std::string* error) {
+bool GameWorld::rebuild_polygon_collision(Object& object,std::span<const Component> components,std::string* error) {
     auto fail=[&](std::string text){if(error)*error=std::move(text);return false;};
     std::vector<Float3> points;
-    if(component && component->enabled){auto decoded=collision_hull_component_points(*component);if(!decoded)return fail("Collision hull control points are invalid");points=std::move(*decoded);}
-    if(!object.polygon)return fail("Authored convex hulls require polygon geometry");
+    for(const auto& c:components)if(c.enabled&&c.type==kCollisionHullComponent){auto decoded=collision_hull_component_points(c);if(!decoded)return fail("Collision hull control points are invalid");points=std::move(*decoded);break;}
+    std::vector<ConvexPrism> pieces;
+    for(const auto& c:components)if(c.enabled&&c.type==kConvexSetComponent){auto decoded=convex_set_component_pieces(c);if(!decoded)return fail("Convex collision pieces are invalid");pieces=std::move(*decoded);break;}
+    if(!object.polygon)return fail("Authored collision shapes require polygon geometry");
     if(!object.hasBody)return true; // A visual-only object must stay collision-free.
-    if(inTick_)return fail("Replace collision hulls between simulation ticks");
+    if(inTick_)return fail("Replace collision shapes between simulation ticks");
     const auto pose=transform(object.id).value_or(object.authoredTransform);
     const auto old=physics_->state(object.bodyHandle);Float3 center{};RigidBodyHandle replacement=kInvalidRigidBodyHandle;
-    if(object.dynamic){PolygonCollisionOptions options;options.hullPoints=points;options.structural=object.structural;options.densityKilogramsPerCubicMeter=polygon_density(*object.polygon);
-        auto desc=make_polygon_dynamic_body_desc(*object.polygon,pose,options,&center);if(!desc)return fail("Could not build collision hull descriptor");
+    if(object.dynamic){PolygonCollisionOptions options;options.hullPoints=points;options.convexPieces=pieces;options.structural=object.structural;options.densityKilogramsPerCubicMeter=polygon_density(*object.polygon);
+        auto desc=make_polygon_dynamic_body_desc(*object.polygon,pose,options,&center);if(!desc)return fail("Could not build collision shape descriptor");
         if(old){desc->angularVelocity=old->angularVelocity;desc->linearVelocity=inherited_child_center_of_mass_velocity(old->linearVelocity,old->angularVelocity,old->currentTransform.position,desc->transform.position);}
         replacement=physics_->create_body(*desc);
-    }else{auto desc=make_polygon_static_body_desc(*object.polygon,pose,points);if(!desc)return fail("Could not build static collision hull descriptor");replacement=physics_->create_static_body(*desc);}
-    if(replacement==kInvalidRigidBodyHandle)return fail("Physics backend rejected authored hull (Jolt supports convex hulls; Box3D currently does not)");
+    }else{auto desc=make_polygon_static_body_desc(*object.polygon,pose,points,pieces);if(!desc)return fail("Could not build static collision shape descriptor");replacement=physics_->create_static_body(*desc);}
+    if(replacement==kInvalidRigidBodyHandle)return fail("Physics backend rejected the collision shape (Jolt supports convex hulls and convex sets; Box3D currently does not)");
     if(!physics_->destroy_body(object.bodyHandle)){(void)physics_->destroy_body(replacement);return fail("Could not replace old collision body");}
     object.bodyHandle=replacement;object.localCenterOfMassMeters=center;object.authoredTransform=pose;return true;
+}
+
+namespace {
+bool shapes_collision(std::string_view type){return type==kCollisionHullComponent||type==kConvexSetComponent;}
+// The object's components with one changed (replaced, added, or removed when `remove`).
+std::vector<Component> with_change(const std::vector<Component>& components,const Component& changed,bool remove=false){
+    std::vector<Component> out;bool found=false;
+    for(const auto& c:components){if(c.id==changed.id){found=true;if(!remove)out.push_back(changed);}else out.push_back(c);}
+    if(!found&&!remove)out.push_back(changed);
+    return out;
+}
 }
 
 std::optional<GameGeometryKind> GameWorld::geometry_kind(GameObjectId id) const noexcept {
@@ -1001,9 +1015,9 @@ Component* GameWorld::add_component(GameObjectId id, Component componentValue, s
         if (error) *error = std::move(validationError);
         return nullptr;
     }
-    if(componentValue.type==kCollisionHullComponent){
-        if(find_component_by_type(std::span<const Component>(object.components),kCollisionHullComponent)){if(error)*error="Object already has an authored collision hull";return nullptr;}
-        if(!rebuild_authored_polygon_hull(object,&componentValue,error))return nullptr;
+    if(shapes_collision(componentValue.type)){
+        if(find_component_by_type(std::span<const Component>(object.components),componentValue.type)){if(error)*error=componentValue.type==kConvexSetComponent?"Object already has convex collision pieces":"Object already has an authored collision hull";return nullptr;}
+        if(!rebuild_polygon_collision(object,with_change(object.components,componentValue),error))return nullptr;
     }
     object.components.push_back(std::move(componentValue));
     Component& added = object.components.back();
@@ -1028,7 +1042,7 @@ bool GameWorld::remove_component(GameObjectId id, ComponentId componentId) {
     if (found == it->second.components.end()) return false;
     const std::string type = found->type;
     if (type == "dve.membership") return false; // first-class membership cannot disappear.
-    if(type==kCollisionHullComponent && !rebuild_authored_polygon_hull(it->second,nullptr))return false;
+    if(shapes_collision(type) && !rebuild_polygon_collision(it->second,with_change(it->second.components,*found,true)))return false;
     it->second.components.erase(found);
     dispatch_lifecycle({GameLifecycleEventKind::ComponentRemoved, id, kInvalidGameObjectId, componentId, type});
     return true;
@@ -1045,10 +1059,11 @@ bool GameWorld::set_component_property(
         if (error) *error = "invalid component property";
         return false;
     }
-    if(componentValue->type==kCollisionHullComponent){
+    if(shapes_collision(componentValue->type)){
         Component candidate=*componentValue;candidate.properties[property]=value;
-        if(!collision_hull_component_points(candidate)){if(error)*error="Collision hull control points are invalid";return false;}
-        if(!rebuild_authored_polygon_hull(it->second,&candidate,error))return false;
+        if(candidate.type==kCollisionHullComponent&&!collision_hull_component_points(candidate)){if(error)*error="Collision hull control points are invalid";return false;}
+        if(candidate.type==kConvexSetComponent&&!convex_set_component_pieces(candidate)){if(error)*error="Convex collision pieces are invalid";return false;}
+        if(!rebuild_polygon_collision(it->second,with_change(it->second.components,candidate),error))return false;
     }
     const std::string propertyName = property;
     componentValue->properties[std::move(property)] = std::move(value);
@@ -1072,7 +1087,7 @@ bool GameWorld::set_component_enabled(GameObjectId id, ComponentId componentId, 
     Component* componentValue = dve::find_component(std::span<Component>(it->second.components), componentId);
     if (!componentValue) return false;
     if (componentValue->enabled == enabled) return true;
-    if(componentValue->type==kCollisionHullComponent){Component candidate=*componentValue;candidate.enabled=enabled;if(!rebuild_authored_polygon_hull(it->second,&candidate))return false;}
+    if(shapes_collision(componentValue->type)){Component candidate=*componentValue;candidate.enabled=enabled;if(!rebuild_polygon_collision(it->second,with_change(it->second.components,candidate)))return false;}
     componentValue->enabled = enabled;
     dispatch_lifecycle({enabled ? GameLifecycleEventKind::ComponentEnabled : GameLifecycleEventKind::ComponentDisabled,
                         id, kInvalidGameObjectId, componentId, componentValue->type});
@@ -2876,6 +2891,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
                     options.densityKilogramsPerCubicMeter = polygon_density(*object.polygon);
                     options.structural = object.structural;
                     options.hullPoints=active_collision_hull_points(object.components);
+                    options.convexPieces=active_convex_set(object.components);
                     entry.dynamicDesc = make_polygon_dynamic_body_desc(*object.polygon, origin, options, &localCom);
                     if (!entry.dynamicDesc) buildError = "could not build polygon collision proxy";
                 }
@@ -2892,7 +2908,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
                 if (boxes.empty() || !validate_static_rigid_body_desc(desc)) return fail(label + " has no valid static collision");
                 entry.staticDesc = std::move(desc);
             } else {
-                entry.staticDesc = make_polygon_static_body_desc(*object.polygon, object.authoredTransform,active_collision_hull_points(object.components));
+                entry.staticDesc = make_polygon_static_body_desc(*object.polygon, object.authoredTransform,active_collision_hull_points(object.components),active_convex_set(object.components));
                 if (!entry.staticDesc) return fail(label + ": could not build polygon static collision proxy");
             }
         }

@@ -43,6 +43,10 @@ struct ExactCadSettings {
     bool advisory{true};               // attach second opinions when a Boolean is refused
     std::chrono::seconds timeout{300};
     std::uint64_t maximumOutputBytes{1U << 20U};
+    // Exact convex collision (dve.collision_convex_set) built with each import and exact
+    // Boolean, for extruded parts; other parts keep the single hull or bounding box.
+    bool exactCollision{true};
+    double collisionMaxError{1e-4};    // polygon error for arcs, meters (pieces stay inside the part)
 
     [[nodiscard]] static ExactCadSettings from_environment();
 };
@@ -74,9 +78,20 @@ struct ExactBrepSource {
 [[nodiscard]] std::optional<std::array<double, 12>> exact_relative_placement(
     const EditorDocument& document, EditorObjectId a, EditorObjectId b);
 
+// Certified convex pieces for an exact source, as a dve.collision_convex_set component.
+struct ExactCollisionResult {
+    std::optional<Component> component;   // id unset: the caller assigns one
+    std::string note;                      // what happened, for the status line
+    bool refused{};                        // brepkernel refused (not an extrusion, ...)
+};
+[[nodiscard]] ExactCollisionResult exact_convex_collision(
+    const std::filesystem::path& projectRoot, const ExactBrepSource& source,
+    const ExactCadSettings& settings = ExactCadSettings::from_environment(), const ExactCadRunner& runner = {});
+
 struct ExactCadImportResult {
     CookedPolygonAsset mesh;
     ExactBrepSource source;
+    ExactCollisionResult collision;
     std::string summary;
     std::string error;
     [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
@@ -88,6 +103,7 @@ struct ExactCadImportResult {
 struct ExactBooleanResult {
     PolygonEditResult edit;            // mesh in A's mesh-local frame, A's materials
     ExactBrepSource source;            // project-owned .brep of the certified result
+    ExactCollisionResult collision;    // convex pieces of the result, when it is an extrusion
     bool refused{};
     bool empty{};                      // certified, but no material left
     std::string refusalKind;

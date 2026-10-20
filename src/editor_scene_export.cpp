@@ -1,3 +1,4 @@
+#include "dve/collision_convex_set.hpp"
 #include "dve/editor_scene_export.hpp"
 #include "dve/editor_polygon.hpp"
 #include "dve/collision_hull.hpp"
@@ -453,7 +454,7 @@ EditorSceneExportResult export_editor_scene(
             continue;
         }
         item.components = exportable_components(object, registry, warn, label(object));
-        if(object.polygon)for(auto& component:item.components)component=bake_collision_hull_component(std::move(component),object.voxelScale);
+        if(object.polygon)for(auto& component:item.components)component=bake_convex_set_component(bake_collision_hull_component(std::move(component),object.voxelScale),object.voxelScale);
         if (object.prefabLink) {
             warn(label(object) + ": prefab link flattened (the current voxels are exported)");
         }

@@ -1364,7 +1364,8 @@ private:
     EditorObjectId pivotEditTarget_{};  // the object or group whose pivot is being edited  // Edit Pivot on an object: where the dragged origin is
     [[nodiscard]] bool origin_drag() const;
     [[nodiscard]] std::unique_ptr<IEditorCommand> make_move_origin_command(EditorObjectId id, Float3 worldPoint, Float3* placed,
-                                                                          std::string* error) const;
+                                                                          std::string* error, Int3* cellShift = nullptr) const;
+    void remap_voxel_selection(Int3 cells);
     [[nodiscard]] bool has_own_geometry(const EditorObject& object) const;
     void prune_groups();
     SelectionDomain selectionDomain_{SelectionDomain::Objects};

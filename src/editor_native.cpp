@@ -2214,6 +2214,7 @@ void NativeEditorController::refresh_menu_state() noexcept {
         checked("polygon.face_mode",selectionDomain_==SelectionDomain::Polygons && polygonSelection_.mode==PolygonSelectionMode::Face);
     }
     refresh_mesh_authoring_menu_state();
+    refresh_nurbs_menu_state();
     refresh_subdivision_menu_state();
     enabled("text3d.cancel", text3dAuthoring_.active(), "No 3D text authoring session is active.");
     // Cook, Package and Documentation have no handler in this editor build: say so up front.
@@ -3399,6 +3400,7 @@ void NativeEditorController::begin_text_edit(TextEditKind kind, EditorObjectId o
 void NativeEditorController::commit_text_edit() {
     const TextEditKind kind = textEdit_.kind;
     if (kind == TextEditKind::Inactive) return;
+    if (kind == TextEditKind::NurbsControl) { commit_nurbs_field(); return; }
     if (kind == TextEditKind::SlicePoint || kind == TextEditKind::SliceNormal) {
         if (!voxelSlice_.active() || voxelSlice_.target() != textEdit_.objectId ||
             workspace_.selected_object() != textEdit_.objectId) { cancel_text_edit(); return; }
@@ -4272,6 +4274,8 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if (!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
+        !settingsPanel_.open && !commandPaletteOpen_ && nurbs_pointer_down(button,x,y)) {refresh_menu_state();return;}
     if (!longJob_ && voxel_authoring_pointer_down(button,x,y,modifiers)) return;
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_pointer_down(button,x,y,modifiers)){refresh_menu_state();return;}
@@ -7031,6 +7035,13 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         set_selection_domain(selectionDomain_ == SelectionDomain::Objects ? SelectionDomain::Voxels : SelectionDomain::Objects);
         return true;
     }
+    if (actionId.starts_with("mesh.") || actionId.starts_with("mirror.") ||
+        (actionId.starts_with("polygon.") && actionId!="polygon.create_plane" && actionId!="polygon.import" && actionId!="polygon.import_exact") || actionId=="subdiv.from_polygon") {
+        for(auto id:workspace_.selected_objects()) { const auto* object=workspace_.document().find_object(id);
+            if(object && object->is_nurbs()) {set_status("Use NURBS controls or Bake to New Polygon before polygon editing",true);return false;}
+        }
+    }
+    if (actionId.starts_with("nurbs.")) return dispatch_nurbs_action(actionId);
     if (actionId.starts_with("subdiv.") || actionId=="create.subdivision")
         return dispatch_subdivision_action(actionId=="create.subdivision" ? "subdiv.create_cube" : actionId);
     if (actionId.starts_with("mirror.")) {

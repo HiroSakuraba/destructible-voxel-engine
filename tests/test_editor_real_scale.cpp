@@ -136,7 +136,7 @@ void test_scale_field_precision_and_reset_row() {
     NativeEditorController& c = *owner;
     check(c.set_number_field(NumberFieldId::Scale, 0, "1.5"), "set Scale X 1.5");
     check(c.number_field_text(NumberFieldId::Scale, 0) == "1.5", "fractional scale is shown as typed: " + c.number_field_text(NumberFieldId::Scale, 0));
-    const Transform before = c.workspace().document().find_object(1)->transform;
+    const RigidTransform before = c.workspace().document().find_object(1)->transform;
     for (const NumberFieldRect& r : c.number_field_rects())
         if (r.field == NumberFieldId::Scale && r.axis == 1) {
             c.pointer_move(r.box.x + 4, r.box.y + 8);
@@ -147,7 +147,7 @@ void test_scale_field_precision_and_reset_row() {
     const std::size_t steps = c.workspace().commands().size();
     check(c.dispatch_action("inspector.field.reset_row"), "Reset Scale X, Y, Z: " + c.status().text);
     check(near(scale_of(c, 1).x, 1.0F) && c.workspace().commands().size() == steps + 1, "the row resets the scale in one step");
-    const Transform after = c.workspace().document().find_object(1)->transform;
+    const RigidTransform after = c.workspace().document().find_object(1)->transform;
     check(after.rotation.x == before.rotation.x && after.rotation.y == before.rotation.y && after.rotation.z == before.rotation.z &&
           after.rotation.w == before.rotation.w, "rotation is untouched");
     check(c.dispatch_action("inspector.field.reset_row") && c.workspace().commands().size() == steps + 1, "a second reset is a no-op");

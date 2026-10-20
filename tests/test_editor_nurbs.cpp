@@ -59,6 +59,13 @@ void math(){
     auto mesh=tessellate_nurbs(patch,7,&e);check(mesh&&validate_polygon_asset(*mesh),"valid patch bake: "+e);
     close_to(mesh->vertices.front().normal.y,1,1e-6);
     check(tessellate_nurbs(full,8).has_value(),"curve ribbon");
+    {   // Ribbon offset must stay continuous where the tangent crosses |t.y| = 0.9 (Codex P2).
+        NurbsSource steep;steep.columns=3;steep.u={2,{0,0,0,1,1,1}};steep.controls={{0,0,0,1},{1,0,0,1},{1,3,0,1}};
+        auto rm=tessellate_nurbs(steep,10,&e);check(bool(rm),"steep curve ribbon: "+e);
+        const std::size_t n=rm->vertices.size()/2;
+        for(std::size_t i=1;i<n;++i){auto o0=subtract(rm->vertices[n+i-1].position,rm->vertices[i-1].position),o1=subtract(rm->vertices[n+i].position,rm->vertices[i].position);
+            const float c=(o0.x*o1.x+o0.y*o1.y+o0.z*o1.z)/(length(o0)*length(o1));check(c>.8F,"ribbon frame jumped between samples");}
+    }
     check(tessellate_nurbs(*rev,9).has_value(),"revolution bake");
     bad=patch;for(auto& v:bad.controls)v.x=v.y=v.z=0;
     check(!tessellate_nurbs(bad,1),"singular patch rejected");
@@ -122,6 +129,7 @@ void native(){
     auto prior=editor_nurbs_source(*o);
     c.pointer_down(PointerButton::Primary,v.x+30,v.y+8+62+3*32+12,0);c.text_input("0");c.key_down("enter",false,false,false);check(editor_nurbs_source(*o)==prior,"invalid weight untouched");c.key_down("escape",false,false,false);
     check(!c.dispatch_action("polygon.extrude"),"polygon edits refuse native source");
+    {auto added=c.add_component_to_primary("dve.nurbs");check(!added.success,"generic empty NURBS source refused");check(c.workspace().document().validate(),"doc valid after refused add");}
     check(!c.dispatch_action("subdiv.from_polygon"),"subdivision conversion refuses native source");
     check(c.dispatch_action("nurbs.bake_polygon"),"native bake");
     auto bakedId=*c.workspace().selected_object();check(bakedId!=id&&c.workspace().document().find_object(bakedId)->is_polygon(),"baked output distinct");
@@ -130,8 +138,20 @@ void native(){
     check(c.dispatch_action("edit.redo"),"redo bake");
     check(c.dispatch_action("nurbs.create_circle"),"create circle");
     auto curveId=*c.workspace().selected_object();
+    c.workspace().document().find_object(curveId)->transform.position={3.0F,1.0F,-2.0F};
+    const auto undoDepth=c.workspace().commands().size();
     check(c.dispatch_action("nurbs.extrude"),"extrude selected curve");
+    check(c.workspace().commands().size()==undoDepth+1,"extrude is one undo step");
+    auto extrudedId=*c.workspace().selected_object();
+    check(c.workspace().document().find_object(extrudedId)->transform.position.x==3.0F,"extrusion inherits curve pose");
+    check(c.dispatch_action("edit.undo")&&!c.workspace().document().find_object(extrudedId),"undo extrusion");
+    check(c.workspace().selected_object()==curveId,"undo extrusion restores selection");
+    check(c.dispatch_action("edit.redo"),"redo extrusion");
+    check(c.workspace().document().find_object(extrudedId)&&c.workspace().document().find_object(extrudedId)->transform.position.x==3.0F,"redo keeps pose and id");
     check(c.workspace().document().find_object(curveId)->is_nurbs(),"curve retained");
+    {const auto depth=c.workspace().commands().size();auto* cur=c.workspace().document().find_object(*c.workspace().selected_object());
+     if(cur&&cur->is_nurbs()){check(c.dispatch_action("nurbs.edit"),"edit controls");auto q=editor_nurbs_source(*cur)->controls[0];
+      check(c.edit_nurbs_control(0,q),"no-op control edit");check(c.workspace().commands().size()==depth,"no-op adds no undo step");}}
     check(c.dispatch_action("nurbs.create_profile"),"create profile");
     check(c.dispatch_action("nurbs.revolve"),"revolve selected profile");
     check(c.dispatch_action("nurbs.create_revolve"),"default revolve");

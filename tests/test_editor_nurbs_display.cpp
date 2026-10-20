@@ -60,7 +60,16 @@ void native(){
     check(c.dispatch_action("edit.undo")&&!editor_nurbs_source(*o)->creaseNormals&&o->polygon->contentHash==hash,"undo restores legacy bake");check(c.dispatch_action("edit.redo"),"redo upgrade");
     auto history=c.workspace().commands().size();check(c.dispatch_action("nurbs.source_quality")&&c.workspace().commands().size()==history,"no-op quality has no history");
     check(c.dispatch_action("nurbs.construct_settings"),"quality settings");auto v=c.layout().viewport;c.pointer_down(PointerButton::Primary,v.x+25,v.y+8+125+4*32+12,0);check(c.text_edit().axis==8,"density field opens");c.text_input("5");c.key_down("enter",false,false,false);check(c.dispatch_action("nurbs.source_quality")&&editor_nurbs_source(*o)->samplesPerSpan==5,"density field applies");
-    check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*o)->samplesPerSpan==8,"undo density");check(c.dispatch_action("edit.redo"),"redo density");
+    check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*o)->samplesPerSpan==8,"undo density");
+    {   // Codex P2: opening the density panel from control mode keeps the CV selection for Apply.
+        check(c.dispatch_action("nurbs.edit")&&c.select_nurbs_controls({2,3},SelectionOperation::Replace),"select before settings");
+        check(c.dispatch_action("nurbs.construct_settings"),"settings from control mode");
+        c.pointer_down(PointerButton::Primary,v.x+25,v.y+8+125+4*32+12,0);c.text_input("6");c.key_down("enter",false,false,false);
+        check(c.dispatch_action("nurbs.source_quality")&&editor_nurbs_source(*o)->samplesPerSpan==6,"density via panel");
+        check(c.selected_nurbs_controls()==std::set<std::size_t>{2,3},"settings panel preserved CV selection");
+        check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*o)->samplesPerSpan==8,"undo panel density");
+        check(c.dispatch_action("edit.redo")&&c.dispatch_action("edit.undo"),"redo/undo panel density");
+    }check(c.dispatch_action("edit.redo"),"redo density");
     check(c.dispatch_action("nurbs.source_split_u"),"native texture-preserving split");auto id=*c.workspace().selected_object();auto* half=c.workspace().document().find_object(id);auto s=editor_nurbs_source(*half);check(s&&s->textureU==std::array<double,2>{0,.5},"native split stores texture subrange");
     check(c.dispatch_action("nurbs.source_reset_uv")&&editor_nurbs_source(*half)->textureU==std::array<double,2>{0,1},"explicit texture reset");check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*half)==s,"undo UV reset");
     auto savedUv=half->polygon->vertices[0].texcoord;half->polygon->vertices[0].texcoord.x+=.1F;check(!validate_editor_nurbs(*half),"source protects cached UVs");half->polygon->vertices[0].texcoord=savedUv;

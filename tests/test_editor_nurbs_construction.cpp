@@ -42,6 +42,15 @@ void geometry(){
     wrong.assign(64,dense);check(!loft_nurbs(wrong),"loft control budget");
     auto tinyDomain=line();tinyDomain.u.knots={0,0,std::numeric_limits<double>::denorm_min(),std::numeric_limits<double>::denorm_min()};
     check(!sweep_nurbs(a,tinyDomain),"unevaluable rail endpoints refuse without dereference");
+    {   // Codex P1: equal knots from different domains must coalesce (no artificial near-zero span).
+        auto p0=*insert_nurbs_knot(make_nurbs_arc(1),false,.1);auto p1=p0;for(auto& k:p1.u.knots)k=k==.1?1.2:1+2*k;for(auto& p:p1.controls)p.y=2;
+        const std::vector<NurbsSource> pair{p0,p1};auto coalesced=loft_nurbs(pair,&e);check(bool(coalesced),e);
+        check(coalesced->columns==p0.columns,"loft inserted an artificial near-duplicate knot");
+        check(tessellate_nurbs(*coalesced,4,&e).has_value(),e);
+    }
+    {   // Codex P2: a valid rail over a huge knot domain is not stationary.
+        auto wide=line();for(auto& k:wide.u.knots)k*=1e13;auto ok=sweep_nurbs(make_nurbs_arc(1),wide,{},&e);check(bool(ok),"large-domain rail refused: "+e);
+    }
     auto reversal=line();reversal.columns=3;reversal.u={1,{0,0,.5,1,1}};reversal.controls={{0,0,0,1},{0,2,0,1},{0,1,0,1}};options={};options.sections=3;check(!sweep_nurbs(a,reversal,options),"antiparallel tangent refuses");
 }
 void native(){

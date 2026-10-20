@@ -7,13 +7,22 @@
 #include <sstream>
 namespace dve::editor {
 namespace {
-UiRect construction_panel(UiRect v){return {v.x+8,v.y+8,std::min(430,std::max(1,v.width-16)),std::min(404,std::max(1,v.height-16))};}
+UiRect construction_panel(UiRect v){return {v.x+8,v.y+8,(std::min)(430,(std::max)(1,v.width-16)),(std::min)(404,(std::max)(1,v.height-16))};}
 UiRect construction_field(UiRect v,int i){auto r=construction_panel(v);return {r.x+8,r.y+125+32*i,r.width-16,28};}
 std::string number(double x){std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(10)<<x;return out.str();}
 }
+void NativeEditorController::restore_parked_nurbs_controls(){
+    const auto id=nurbsParkedObject_;nurbsParkedObject_=0;
+    if(!id||workspace_.selected_object()!=id||workspace_.selection_count()!=1)return;
+    const auto* o=workspace_.document().find_object(id);auto s=o?editor_nurbs_source(*o):std::nullopt;
+    if(!s||nurbsParkedControl_>=s->controls.size()||std::any_of(nurbsParkedSelection_.begin(),nurbsParkedSelection_.end(),[&](auto i){return i>=s->controls.size();}))return;
+    nurbsConstructionPanel_=false;nurbsEditingObject_=id;nurbsSelected_=nurbsParkedSelection_;nurbsControl_=nurbsParkedControl_;
+}
 bool NativeEditorController::dispatch_nurbs_construction(std::string_view action){
     if(textEdit_.kind==TextEditKind::NurbsControl)cancel_text_edit();
-    if(action=="nurbs.construct_close"){nurbsConstructionPanel_=false;if(textEdit_.kind==TextEditKind::NurbsControl)cancel_text_edit();return true;}
+    if(action=="nurbs.construct_close"){nurbsConstructionPanel_=false;if(textEdit_.kind==TextEditKind::NurbsControl)cancel_text_edit();restore_parked_nurbs_controls();return true;}
+    if(action=="nurbs.construct_settings"&&nurbs_control_mode()){nurbsParkedObject_=nurbsEditingObject_;nurbsParkedSelection_=nurbsSelected_;nurbsParkedControl_=nurbsControl_;}
+    else if(action!="nurbs.construct_settings")nurbsParkedObject_=0;
     nurbsConstructionPanel_=true;nurbsEditingObject_=0;nurbsSelected_.clear();
     if(action=="nurbs.construct_settings"){
         auto id=workspace_.selected_object();const auto* object=id?workspace_.document().find_object(*id):nullptr;
@@ -52,7 +61,7 @@ bool NativeEditorController::dispatch_nurbs_construction(std::string_view action
         result=sweep_nurbs(nurbsConstructionInputs_[0].source,nurbsConstructionInputs_[1].source,options,&error);
     }else return false;
     if(!result){set_status(error,true);return false;}
-    if(!create_nurbs_source(*result,action=="nurbs.construct_join"?"NURBS Joined Curve":action=="nurbs.construct_loft"?"NURBS Ruled Loft":"NURBS Sampled Sweep",nurbsConstructionOrigin_))return false;
+    if(!create_nurbs_source(*result,action=="nurbs.construct_join"?"NURBS Joined Curve":action=="nurbs.construct_loft"?"NURBS Ruled Loft":"NURBS Sampled Sweep",std::pair{RigidTransform{nurbsConstructionOrigin_,Quaternion{}},Float3{1,1,1}}))return false;
     nurbsConstructionPanel_=false;
     set_status(action=="nurbs.construct_join"?"Joined NURBS curve created; input snapshots retained (no gap snapping or smoothing)":action=="nurbs.construct_loft"?"Ruled NURBS loft created; input snapshots retained":"Sampled NURBS sweep created (approximate between stations); input snapshots retained");return true;
 }

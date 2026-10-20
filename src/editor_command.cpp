@@ -567,6 +567,9 @@ CommandResult AddComponentCommand::execute(EditorDocument& document) {
     EditorObject* object = document.find_object(objectId_);
     if (!object) return CommandResult::fail("component owner no longer exists");
     if (object->flags.locked) return CommandResult::fail("component owner is locked");
+    // A NURBS source must be authored with its geometry cache (NURBS menu); a generic empty source
+    // would turn the object into an invalid, unsaveable NURBS object.
+    if (component_.type == "dve.nurbs") return CommandResult::fail("Create NURBS objects from the NURBS menu");
     if (component_.id == kInvalidComponentId) component_.id = document.allocate_component_id(objectId_);
     std::string error;
     if (!document.add_component(objectId_, component_, &error))

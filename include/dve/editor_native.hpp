@@ -1140,7 +1140,7 @@ public:
     [[nodiscard]] std::vector<std::string> polygon_preview_lines() const;
     void cancel_polygon_preview();
     bool dispatch_nurbs_action(std::string_view);
-    bool create_nurbs_source(const NurbsSource&,std::string name);
+    bool create_nurbs_source(const NurbsSource&,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement=std::nullopt);
     bool edit_nurbs_control(std::size_t,NurbsPoint);
     void refresh_nurbs_menu_state();
     bool begin_nurbs_field(unsigned);

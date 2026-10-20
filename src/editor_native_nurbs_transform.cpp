@@ -39,8 +39,8 @@ EditorObjectBounds NativeEditorController::nurbs_control_bounds() const{
     for(auto i:nurbsSelected_)if(i<source->controls.size()){
         const auto& p=source->controls[i];auto v=voxel_to_world(o->transform,o->voxelScale,{float(p.x),float(p.y),float(p.z)});
         if(!bounds.valid){bounds.minimum=bounds.maximum=v;bounds.valid=true;}
-        else {bounds.minimum={std::min(bounds.minimum.x,v.x),std::min(bounds.minimum.y,v.y),std::min(bounds.minimum.z,v.z)};
-            bounds.maximum={std::max(bounds.maximum.x,v.x),std::max(bounds.maximum.y,v.y),std::max(bounds.maximum.z,v.z)};}
+        else {bounds.minimum={(std::min)(bounds.minimum.x,v.x),(std::min)(bounds.minimum.y,v.y),(std::min)(bounds.minimum.z,v.z)};
+            bounds.maximum={(std::max)(bounds.maximum.x,v.x),(std::max)(bounds.maximum.y,v.y),(std::max)(bounds.maximum.z,v.z)};}
     }
     return bounds;
 }
@@ -116,7 +116,7 @@ bool NativeEditorController::nurbs_pointer_up(PointerButton button,int x,int y){
     nurbsBoxActive_=false;dragButton_=PointerButton::NoButton;lastPointerX_=x;lastPointerY_=y;
     if(!nurbs_control_mode())return true;
     const auto* o=workspace_.document().find_object(nurbsEditingObject_);auto s=editor_nurbs_source(*o);if(!s)return true;
-    const int loX=std::min(x,nurbsBoxX_),hiX=std::max(x,nurbsBoxX_),loY=std::min(y,nurbsBoxY_),hiY=std::max(y,nurbsBoxY_);
+    const int loX=(std::min)(x,nurbsBoxX_),hiX=(std::max)(x,nurbsBoxX_),loY=(std::min)(y,nurbsBoxY_),hiY=(std::max)(y,nurbsBoxY_);
     std::set<std::size_t> hits;
     for(std::size_t i=0;i<s->controls.size();++i){
         const auto& c=s->controls[i];auto p=project_world_to_screen(camera_,layout_.viewport,voxel_to_world(o->transform,o->voxelScale,{float(c.x),float(c.y),float(c.z)}));

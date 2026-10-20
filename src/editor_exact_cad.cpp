@@ -1,4 +1,5 @@
 #include "dve/editor_exact_cad.hpp"
+#include "dve/collision_convex_set.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <thread>
 
@@ -349,6 +351,71 @@ std::optional<std::array<double, 12>> exact_relative_placement(const EditorDocum
     return m;
 }
 
+ExactCollisionResult exact_convex_collision(const std::filesystem::path& projectRoot, const ExactBrepSource& source,
+                                            const ExactCadSettings& settings, const ExactCadRunner& runner) {
+    ExactCollisionResult result;
+    TemporaryDirectory temp;
+    if (!temp.ok()) { result.note = "no convex collision: cannot create a temporary folder"; return result; }
+    const auto pieces = temp.path() / "pieces.json";
+    std::vector<std::string> args{"convex-pieces", utf8(projectRoot / source.relativePath), "-o", utf8(pieces),
+                                  "--max-error", format_double(settings.collisionMaxError)};
+    auto run = run_tool(settings, runner, std::move(args), temp.path() / "report.json");
+    if (!run.report) { result.note = "no convex collision: " + run.error; return result; }
+    const auto& report = *run.report;
+    if (run.exitCode == 2) {
+        result.refused = true;
+        const auto message = json_string(report, {"certificate", "refusal", "message"});
+        result.note = "collision stays one hull: " + (message.empty() ? std::string("brepkernel refused") : message);
+        return result;
+    }
+    if (run.exitCode != 0) {
+        result.note = "no convex collision: " + json_string(report, {"error"});
+        return result;
+    }
+    std::ifstream in(pieces, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto parsed = dve::ai::parse_json(text);
+    const JsonValue* list = parsed.value ? parsed.value->find("pieces") : nullptr;
+    if (!list || !list->is_array()) { result.note = "no convex collision: unreadable pieces file"; return result; }
+    std::vector<ConvexPrism> prisms;
+    const auto ring = [](const JsonValue* value, std::vector<Float3>& out) {
+        if (!value || !value->is_array()) return false;
+        for (const auto& p : value->as_array()) {
+            if (!p.is_array() || p.as_array().size() != 3) return false;
+            const auto& c = p.as_array();
+            out.push_back({float(c[0].as_number()), float(c[1].as_number()), float(c[2].as_number())});
+        }
+        return true;
+    };
+    for (const auto& item : list->as_array()) {
+        ConvexPrism prism;
+        if (!item.is_object() || !ring(item.find("bottom"), prism.bottom) || !ring(item.find("top"), prism.top)) {
+            result.note = "no convex collision: malformed piece";
+            return result;
+        }
+        prisms.push_back(std::move(prism));
+    }
+    if (!validate_convex_set(prisms)) { result.note = "no convex collision: pieces failed validation"; return result; }
+    Component component;
+    component.type = std::string(kConvexSetComponent);
+    component.properties["pieces"] = encode_convex_set(prisms);
+    component.properties["source_sha256"] = source.sha256;
+    component.properties["max_error"] = settings.collisionMaxError;
+    std::ostringstream summary;
+    summary.imbue(std::locale::classic());
+    double worst = 0;
+    if (const auto* slabs = report.find("certificate") ? report.find("certificate")->find("slabs") : nullptr;
+        slabs && slabs->is_array())
+        for (const auto& slab : slabs->as_array())
+            worst = std::max(worst, json_number(slab, {"deviation", "reference_outside_sim"}));
+    summary << "certified " << prisms.size() << " convex pieces (inside the part, at most "
+            << display_number(worst) << " m short of it)";
+    component.properties["summary"] = summary.str();
+    result.note = "exact collision: " + summary.str();
+    result.component = std::move(component);
+    return result;
+}
+
 ExactCadImportResult import_exact_cad(const std::filesystem::path& projectRoot, const std::filesystem::path& cadFile,
                                       EditorObjectId id, const ExactCadSettings& settings, const ExactCadRunner& runner) {
     ExactCadImportResult result;
@@ -377,11 +444,13 @@ ExactCadImportResult import_exact_cad(const std::filesystem::path& projectRoot, 
     result.source = std::move(*source);
     result.source.deflectionMeters = json_number(report, {"mesh", "linear_deflection"});
     result.source.angularRadians = json_number(report, {"mesh", "angular_deflection"});
+    if (settings.exactCollision) result.collision = exact_convex_collision(projectRoot, result.source, settings, runner);
     std::ostringstream summary;
     summary.imbue(std::locale::classic());
     summary << "Imported exact " << json_string(report, {"input", "format"}) << " (scale "
             << json_number(report, {"frame", "scale"}, 1.0) << ", " << json_string(report, {"frame", "up"}) << "-up -> Y-up), "
             << static_cast<std::uint64_t>(json_number(report, {"mesh", "triangles"})) << " triangles";
+    if (!result.collision.note.empty()) summary << "; " << result.collision.note;
     result.summary = summary.str();
     return result;
 }
@@ -558,12 +627,14 @@ ExactBooleanResult run_exact_boolean(const std::filesystem::path& projectRoot, c
     result.source = std::move(*source);
     result.source.deflectionMeters = json_number(report, {"mesh", "linear_deflection"});
     result.source.angularRadians = json_number(report, {"mesh", "angular_deflection"});
+    if (settings.exactCollision) result.collision = exact_convex_collision(projectRoot, result.source, settings, runner);
     std::ostringstream summary;
     summary.imbue(std::locale::classic());
     summary.precision(9);
     summary << "Certified exact Boolean: volume " << json_number(report, {"result", "volume"}) * request.worldVolumeScale
             << " m3 (exact, world scale), "
             << static_cast<std::uint64_t>(json_number(report, {"mesh", "triangles"})) << " triangles";
+    if (!result.collision.note.empty()) summary << "; " << result.collision.note;
     result.summary = summary.str();
     return result;
 }

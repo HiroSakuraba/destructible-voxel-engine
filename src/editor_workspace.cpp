@@ -648,6 +648,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"select.shape_cycle","Edit","Next Selection Shape",""},
         {"select.paint_radius_increase","Edit","Larger Paint Selection Brush",""},
         {"select.paint_radius_decrease","Edit","Smaller Paint Selection Brush",""},
+        {"voxel.resample_to_scale","Voxel","Resample Voxels to Scale",""},
         {"voxel.select_all","Voxel","Select All Voxels",""},
         {"voxel.select_none","Voxel","Deselect Voxels",""},
         {"voxel.select_grow","Voxel","Grow Voxel Selection",""},
@@ -1252,6 +1253,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             for (const char* keyword : keywords) action->keywords.emplace_back(keyword);
         }
     };
+    describe("voxel.resample_to_scale", "Rebuild the selected voxel objects' cells at their current Scale, then set Scale back to 1. Scaling itself keeps the voxels; this is the step that changes them.", {"resample", "bake", "scale", "voxels", "destructive"});
     describe("transform.place_mesh_vertex", "Move the selection so its pivot lands on the mesh vertex under the cursor; click to place. Or hold V while dragging the Move gizmo.", {"snap", "vertex", "point", "align"});
     describe("transform.place_mesh_edge", "Move the selection so its pivot lands on the middle of the mesh edge under the cursor; click to place.", {"snap", "edge", "midpoint", "align"});
     describe("transform.place_mesh_face", "Move the selection so its pivot lands on the centre of the mesh face under the cursor; click to place.", {"snap", "face", "centre", "center", "align"});

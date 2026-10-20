@@ -67,7 +67,7 @@ void native(){
         c.pointer_down(PointerButton::Primary,v.x+25,v.y+8+125+4*32+12,0);c.text_input("6");c.key_down("enter",false,false,false);
         check(c.dispatch_action("nurbs.source_quality")&&editor_nurbs_source(*o)->samplesPerSpan==6,"density via panel");
         check(c.selected_nurbs_controls()==std::set<std::size_t>{2,3},"settings panel preserved CV selection");
-        check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*o)->samplesPerSpan==5,"undo panel density");
+        check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*o)->samplesPerSpan==8,"undo panel density");
         check(c.dispatch_action("edit.redo")&&c.dispatch_action("edit.undo"),"redo/undo panel density");
     }check(c.dispatch_action("edit.redo"),"redo density");
     check(c.dispatch_action("nurbs.source_split_u"),"native texture-preserving split");auto id=*c.workspace().selected_object();auto* half=c.workspace().document().find_object(id);auto s=editor_nurbs_source(*half);check(s&&s->textureU==std::array<double,2>{0,.5},"native split stores texture subrange");

@@ -147,7 +147,7 @@ enum class EditorFocusRegion : std::uint8_t {
 // them actually showed anything. Assets is a fifth tab rather than a separate toggleable
 // panel: it reuses this already-tabbed region instead of inventing a new layout slot.
 enum class BottomPanelTab : std::uint8_t { Problems, Tasks, Console, Profiler, Assets, Assistant };
-enum class PendingDestructiveAction : std::uint8_t { Inactive, Quit, NewProject, NewScene, OpenScene, OpenProject };
+enum class PendingDestructiveAction : std::uint8_t { Inactive, Quit, NewProject, NewScene, OpenScene, OpenProject, DropCadLink };
 
 // What a click-to-edit text field is currently bound to, if any. Position and Rotation each
 // edit all three components as one space-separated line (matching how they are already
@@ -761,6 +761,13 @@ public:
     // "Exact CAD: mesh within ±0.1 mm" for a CAD object, empty for anything else.
     [[nodiscard]] std::string cad_detail_summary(EditorObjectId id) const;
     [[nodiscard]] std::vector<EditorObjectId> selected_exact_objects() const;
+    // CAD edit guard: true when `actionId` would change the triangles of a CAD object (the
+    // triangles would no longer match the exact source), so the editor asks before it runs.
+    [[nodiscard]] static bool is_cad_mesh_edit(std::string_view actionId, bool polygonsDomain);
+    // The CAD objects a mesh edit would change right now (polygon selection or selected objects).
+    [[nodiscard]] std::vector<EditorObjectId> cad_mesh_edit_targets() const;
+    // True once the object's exact CAD link was dropped by editing its triangles (undo restores it).
+    [[nodiscard]] bool cad_link_dropped(EditorObjectId id) const;
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
     [[nodiscard]] std::string transform_numeric_label() const;
     [[nodiscard]] const std::string& transform_numeric_text() const noexcept { return transformNumeric_; }
@@ -1370,6 +1377,10 @@ private:
     bool open_cad_detail_menu();
     bool dispatch_cad_detail_action(std::string_view action);
     bool commit_cad_detail_text();
+    // Asks before a mesh edit on CAD objects; true when the edit is held for the answer.
+    bool ask_before_cad_mesh_edit(std::string_view actionId);
+    void drop_cad_link_and_continue();
+    bool drop_cad_link(const std::vector<EditorObjectId>& objects);  // one undo step
     std::optional<Float3> originDragPoint_;
     EditorObjectId pivotEditTarget_{};  // the object or group whose pivot is being edited  // Edit Pivot on an object: where the dragged origin is
     [[nodiscard]] bool origin_drag() const;
@@ -1632,6 +1643,12 @@ private:
     void poll_long_job();
     void finish_long_job();
     std::filesystem::path pendingOpenPath_;
+    // CAD edit guard: the held action ("gizmo" / "nudge" for direct edits), its objects and the
+    // prompt; cadEditConfirmed_ lets the replayed action through.
+    std::string pendingCadAction_;
+    std::vector<EditorObjectId> pendingCadObjects_;
+    std::string pendingCadMessage_;
+    bool cadEditConfirmed_{false};
     bool open_scene_now(const std::filesystem::path& path);
     bool open_project_now(const std::filesystem::path& root);
     void remember_recent_scene(const std::filesystem::path& path);

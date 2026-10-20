@@ -57,6 +57,7 @@ std::vector<EditorObjectId> NativeEditorController::selected_exact_objects() con
 
 std::string NativeEditorController::cad_detail_summary(EditorObjectId id) const {
     const EditorObject* object = workspace_.document().find_object(id);
+    if (object && cad_link_dropped(id)) return "Was CAD: exact link dropped (Undo restores it)";
     if (!object || !exact_brep_source(*object)) return {};
     if (const auto error = exact_mesh_world_error(*object))
         return "Exact CAD: mesh within \xC2\xB1" + format_millimetres(*error);

@@ -253,7 +253,7 @@ std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource& s,std::uin
     if(s.is_curve()){
         Float3 previous{};
         for(unsigned i=0;i<columns;++i){
-            auto q=eval(s,us[i],0,e,scale);if(!q)return {};
+            auto q=eval(s,us[i].t,0,e,scale,us[i].fromLeft,false);if(!q)return {};
             const auto t=unit(vec(q->du));Float3 n{};
             if(i==0)n=unit(cross3(t,std::abs(t.y)<.9F?Float3{0,1,0}:Float3{0,0,1}));
             else{const float d=previous.x*t.x+previous.y*t.y+previous.z*t.z;n=unit(subtract(previous,multiply(t,d)));

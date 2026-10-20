@@ -99,7 +99,7 @@ void test_library(const fs::path& root, const fs::path& glb) {
 }
 
 void test_native(const fs::path& root) {
-    setenv("DVE_BREPKERNEL", ("/bin/sh " + (root / "fake_brepkernel.sh").string()).c_str(), 1);
+    set_test_env("DVE_BREPKERNEL", ("/bin/sh " + (root / "fake_brepkernel.sh").string()).c_str());
     auto owner = std::make_unique<NativeEditorController>();
     NativeEditorController& c = *owner;
     c.configure_ai_assistant(root);
@@ -172,7 +172,7 @@ void test_native(const fs::path& root) {
     (void)c.wait_for_long_job(60.0);
     check(has(c.status().text, "no file written") && has(c.status().text, "read-back check failed"), "failure reported: " + c.status().text);
     check(!fs::exists(root / "exports/Bracket.step"), "no file after a failure");
-    unsetenv("DVE_BREPKERNEL");
+    unset_test_env("DVE_BREPKERNEL");
 }
 
 void test_real(const fs::path& root) {
@@ -222,7 +222,8 @@ int main() {
     write_cube_glb(glb);
     test_placement();
     test_library(dir.path, glb);
-    test_native(dir.path);
+    if (fake_brepkernel_runs()) test_native(dir.path);
+    else std::printf("SKIP native: the fake brepkernel needs /bin/sh\n");
     test_real(dir.path);
     if (g_failures == 0) std::printf("cad step export tests passed\n");
     return g_failures == 0 ? 0 : 1;

@@ -104,7 +104,7 @@ bool NativeEditorController::dispatch_cad_detail_action(std::string_view action)
     char* end = nullptr;
     const double value = std::strtod(micrometres.c_str(), &end);
     if (!end || *end != '\0' || !(value > 0.0)) return false;
-    return set_cad_detail(value * 1.0e-6);
+    return set_cad_detail(value / 1.0e6);
 }
 
 bool NativeEditorController::commit_cad_detail_text() {
@@ -118,7 +118,7 @@ bool NativeEditorController::commit_cad_detail_text() {
             char* end = nullptr;
             const double value = std::strtod(text.substr(0, at).c_str(), &end);
             if (!(value > 0.0)) { set_status("Accuracy must be above 0", true); return false; }
-            return set_cad_detail(value * 1.0e-6);
+            return set_cad_detail(value / 1.0e6);
         }
     const NumberFieldParse parsed = parse_number_field(hasUnit ? text : text + "mm", NumberFieldUnit::Meters, 0.0);
     if (!parsed.ok || !(parsed.value > 0.0)) { set_status("CAD Detail: " + (parsed.ok ? std::string("accuracy must be above 0") : parsed.error), true); return false; }

@@ -15,6 +15,7 @@
 #include "dve/dvox.hpp"
 #include "dve/editor_materials.hpp"
 #include "dve/editor_subdivision.hpp"
+#include "dve/editor_nurbs.hpp"
 
 namespace dve::editor {
 namespace {
@@ -322,6 +323,7 @@ bool EditorDocument::validate(std::string* error) const {
                     return fail("invalid voxel palette: "+materialError);
             }
         }
+        if (!validate_editor_nurbs(object,error)) return false;
         if (object.subdivision) {
             if (!object.polygon) return fail("subdivision object has no control cage");
             if (object.polygon->indices.size()/3>kMaxSubdivisionControlTriangles || object.polygon->vertices.size()>100000)

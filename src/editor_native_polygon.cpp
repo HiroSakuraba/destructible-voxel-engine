@@ -14,7 +14,7 @@ const char* mode_name(PolygonSelectionMode mode) {
     return mode == PolygonSelectionMode::Vertex ? "vertices" : mode == PolygonSelectionMode::Edge ? "edges" : "triangle faces";
 }
 bool editable(const EditorObject* object) {
-    return object && object->polygon && object->flags.visible && !object->flags.locked;
+    return object && object->polygon && !object->is_nurbs() && object->flags.visible && !object->flags.locked;
 }
 Float3 component_point(const CookedPolygonAsset& mesh, PolygonSelectionMode mode, std::uint64_t id) {
     if (mode == PolygonSelectionMode::Vertex) return mesh.vertices.at(std::size_t(id)).position;

@@ -47,6 +47,7 @@
 #include "dve/editor_polygon.hpp"
 #include "dve/editor_mirror.hpp"
 #include "dve/editor_subdivision.hpp"
+#include "dve/editor_nurbs.hpp"
 #include "dve/editor_model_import.hpp"
 #include "dve/editor_voxel_join.hpp"
 #include "dve/editor_voxel_selection.hpp"
@@ -70,12 +71,12 @@ namespace dve::editor {
 // duplication that silently drifts (add a menu in one place, forget the other, and clicks hit
 // the wrong menu). "Window" mirrors Unreal Editor's placement (right after Edit) and is what
 // toggles the Scene Hierarchy / Inspector panels and the bottom panel's Assets tab.
-inline constexpr std::array<std::string_view, 9> kMenuBarNames{
-    "File", "Edit", "Create", "View", "Subdivision", "Tools", "Build", "Window", "Help"};
+inline constexpr std::array<std::string_view, 10> kMenuBarNames{
+    "File", "Edit", "Create", "View", "Subdivision", "NURBS", "Tools", "Build", "Window", "Help"};
 // Short titles, index-aligned with kMenuBarNames, drawn when a full title does not fit its menu
 // bar slot (narrow windows; "Subdivision" is wider than the 71 px slot at 640 px).
 inline constexpr std::array<std::string_view, kMenuBarNames.size()> kCompactMenuBarNames{
-    "File", "Edit", "New", "View", "Subdiv", "Tools", "Build", "Win", "Help"};
+    "File", "Edit", "New", "View", "Subdiv", "NURBS", "Tools", "Build", "Win", "Help"};
 
 struct EditorPrefabAsset;
 
@@ -162,7 +163,7 @@ enum class TextEditKind : std::uint8_t {
     AssetRename, AiPrompt, ScatterSetting, SlicePoint, SliceNormal,
     VoxelSize, BrushRadius, SurfaceOffset,  // numeric fields (see NumberFieldId)
     DuplicateSetting,                       // Duplicate Special panel; objectId holds the NumberFieldId
-    SelectionSetName                        // naming a selection set; objectId holds the set index
+    NurbsControl, SelectionSetName                        // naming a selection set; objectId holds the set index
 };
 
 struct TextEditState {
@@ -1138,6 +1139,14 @@ public:
     bool extract_selected_polygon();
     [[nodiscard]] std::vector<std::string> polygon_preview_lines() const;
     void cancel_polygon_preview();
+    bool dispatch_nurbs_action(std::string_view);
+    bool create_nurbs_source(const NurbsSource&,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement=std::nullopt);
+    bool edit_nurbs_control(std::size_t,NurbsPoint);
+    void refresh_nurbs_menu_state();
+    bool begin_nurbs_field(unsigned);
+    void commit_nurbs_field();
+    bool nurbs_pointer_down(PointerButton,int,int);
+    void draw_nurbs(const IEditorCanvas&,UiRect) const;
     bool dispatch_mesh_authoring_action(std::string_view);
     bool start_exact_boolean(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
     bool open_mesh_boolean_preview(EditorObjectId a, EditorObjectId b, MeshBoolean operation);
@@ -1330,6 +1339,9 @@ private:
     [[nodiscard]] std::string material_drop_refusal(const EditorObject& target) const;
     [[nodiscard]] std::string asset_drop_blocked_reason() const;
     EditorPlaySession playSession_{};
+    EditorObjectId nurbsEditingObject_{};
+    std::size_t nurbsControl_{},nurbsFieldControl_{};
+    std::optional<NurbsSource> nurbsFieldBefore_;
     EditorText3DAuthoringSession text3dAuthoring_{};
     EditorVoxelSliceSession voxelSlice_{};
     bool sliceSnap_{true};

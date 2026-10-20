@@ -3799,6 +3799,24 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             }
         }
     }
+    // Edit Pivot on a voxel object or mesh: the origin, amber, following a drag before release.
+    if (const auto origin = controller.origin_marker(); origin && controller.workspace().selected_object() &&
+        !controller.is_group(*controller.workspace().selected_object())) {
+        const ScreenPoint pivot = project_world_to_screen(controller.camera(), viewport, *origin);
+        if (pivot.visible) {
+            const int px = static_cast<int>(pivot.x), py = static_cast<int>(pivot.y);
+            const EditorColor color = rgb(255,190,64);
+            viewportPainter.line(px - 6, py, px, py - 6, color, 2);
+            viewportPainter.line(px, py - 6, px + 6, py, color, 2);
+            viewportPainter.line(px + 6, py, px, py + 6, color, 2);
+            viewportPainter.line(px, py + 6, px - 6, py, color, 2);
+            viewportPainter.line(px - 11, py, px - 7, py, color, 1);
+            viewportPainter.line(px + 7, py, px + 11, py, color, 1);
+            viewportPainter.line(px, py - 11, px, py - 7, color, 1);
+            viewportPainter.line(px, py + 7, px, py + 11, color, 1);
+            viewportPainter.text(px + 12, py - 8, "Editing pivot: the geometry stays (Esc finishes)", color);
+        }
+    }
     if (controller.hover_pick()) {
         const ScreenPoint hover = project_world_to_screen(controller.camera(), viewport, controller.hover_pick()->worldPosition);
         if (hover.visible) {

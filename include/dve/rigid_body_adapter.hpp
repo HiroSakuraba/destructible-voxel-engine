@@ -38,6 +38,9 @@ struct StaticRigidBodyCreateDesc {
     // Optional convex point cloud replaces the box shape in supported production backends.
     // Boxes retain its bounds for the reference solver's approximate queries.
     std::vector<Float3> convexHullPoints;
+    // Optional set of convex point clouds (a compound of hulls) for parts with holes;
+    // takes precedence over convexHullPoints in supported production backends.
+    std::vector<std::vector<Float3>> convexPieces;
 };
 
 struct RigidBodyCreateDesc {
@@ -54,6 +57,9 @@ struct RigidBodyCreateDesc {
     // Optional convex point cloud replaces the box shape in supported production backends.
     // Boxes retain its bounds for the reference solver's approximate queries.
     std::vector<Float3> convexHullPoints;
+    // Optional compound of convex point clouds, relative to the center of mass; takes
+    // precedence over convexHullPoints in supported production backends.
+    std::vector<std::vector<Float3>> convexPieces;
 };
 
 struct RigidBodyState {

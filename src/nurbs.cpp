@@ -213,10 +213,23 @@ std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource& s,std::uin
     m.materialBindings.resize(1);m.materialBindings[0].doubleSided=true;
     double scale=0;for(const auto& p:s.controls)scale=(std::max)(scale,p.weight);
     const unsigned columns=unsigned(us.size()),rows=s.is_curve()?2:unsigned(vs.size());
+    // Curve ribbons use a parallel-transported frame so the offset never jumps between samples.
+    std::vector<Float3> ribbon;
+    if(s.is_curve()){
+        Float3 previous{};
+        for(unsigned i=0;i<columns;++i){
+            auto q=eval(s,us[i],0,e,scale);if(!q)return {};
+            const auto t=unit(vec(q->du));Float3 n{};
+            if(i==0)n=unit(cross3(t,std::abs(t.y)<.9F?Float3{0,1,0}:Float3{0,0,1}));
+            else{const float d=previous.x*t.x+previous.y*t.y+previous.z*t.z;n=unit(subtract(previous,multiply(t,d)));
+                if(length(n)<.5F)n=unit(cross3(t,std::abs(t.y)<.9F?Float3{0,1,0}:Float3{0,0,1}));}
+            ribbon.push_back(n);previous=n;
+        }
+    }
     for(unsigned j=0;j<rows;++j)for(unsigned i=0;i<columns;++i){
         auto q=eval(s,us[i],s.is_curve()?0:vs[j],e,scale);if(!q)return {};
         PolygonVertex v;v.position=vec(q->position);auto tangent=unit(vec(q->du));
-        auto n=s.is_curve()?unit(cross3(tangent,std::abs(tangent.y)<.9F?Float3{0,1,0}:Float3{0,0,1})):unit(cross3(vec(q->du),vec(q->dv)));
+        auto n=s.is_curve()?ribbon[i]:unit(cross3(vec(q->du),vec(q->dv)));
         if(length(n)<.5F){fail(e,"Singular NURBS sample; move controls away from a collapsed span");return {};}
         if(s.is_curve())v.position=add(v.position,multiply(n,j?.015F:-.015F));
         v.normal=s.is_curve()?unit(cross3(tangent,n)):n;
@@ -235,7 +248,7 @@ std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource& s,std::uin
     m.submeshes.push_back({"NURBS",0,unsigned(m.indices.size()),0});
     // Asset hash and bounds use the normal production polygon pipeline.
     m.bounds.minimum=m.bounds.maximum=m.vertices.front().position;
-    for(const auto& v:m.vertices){auto p=v.position;m.bounds.minimum={std::min(m.bounds.minimum.x,p.x),std::min(m.bounds.minimum.y,p.y),std::min(m.bounds.minimum.z,p.z)};m.bounds.maximum={std::max(m.bounds.maximum.x,p.x),std::max(m.bounds.maximum.y,p.y),std::max(m.bounds.maximum.z,p.z)};}
+    for(const auto& v:m.vertices){auto p=v.position;m.bounds.minimum={(std::min)(m.bounds.minimum.x,p.x),(std::min)(m.bounds.minimum.y,p.y),(std::min)(m.bounds.minimum.z,p.z)};m.bounds.maximum={(std::max)(m.bounds.maximum.x,p.x),(std::max)(m.bounds.maximum.y,p.y),(std::max)(m.bounds.maximum.z,p.z)};}
     m.contentHash=polygon_asset_content_hash(m);
     auto valid=validate_polygon_asset(m);if(!valid){if(e)*e=valid.message;return {};}return m;
 }

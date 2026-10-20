@@ -7,7 +7,7 @@
 #include <sstream>
 namespace dve::editor {
 namespace {
-UiRect construction_panel(UiRect v){return {v.x+8,v.y+8,std::min(430,std::max(1,v.width-16)),std::min(372,std::max(1,v.height-16))};}
+UiRect construction_panel(UiRect v){return {v.x+8,v.y+8,(std::min)(430,(std::max)(1,v.width-16)),(std::min)(372,(std::max)(1,v.height-16))};}
 UiRect construction_field(UiRect v,int i){auto r=construction_panel(v);return {r.x+8,r.y+125+32*i,r.width-16,28};}
 std::string number(double x){std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(10)<<x;return out.str();}
 }
@@ -47,7 +47,7 @@ bool NativeEditorController::dispatch_nurbs_construction(std::string_view action
         result=sweep_nurbs(nurbsConstructionInputs_[0].source,nurbsConstructionInputs_[1].source,options,&error);
     }else return false;
     if(!result){set_status(error,true);return false;}
-    if(!create_nurbs_source(*result,action=="nurbs.construct_loft"?"NURBS Ruled Loft":"NURBS Sampled Sweep",nurbsConstructionOrigin_))return false;
+    if(!create_nurbs_source(*result,action=="nurbs.construct_loft"?"NURBS Ruled Loft":"NURBS Sampled Sweep",std::pair{RigidTransform{nurbsConstructionOrigin_,Quaternion{}},Float3{1,1,1}}))return false;
     nurbsConstructionPanel_=false;
     set_status(action=="nurbs.construct_loft"?"Ruled NURBS loft created; input snapshots retained":"Sampled NURBS sweep created (approximate between stations); input snapshots retained");return true;
 }

@@ -12,6 +12,7 @@
 // a missing tool a failure.
 
 #include "dve/editor_exact_cad.hpp"
+#include "dve/collision_convex_set.hpp"
 #include "dve/editor_native.hpp"
 #include "dve/editor_scene_export.hpp"
 #include "dve/runtime_scene.hpp"
@@ -26,6 +27,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -133,6 +135,9 @@ struct Fake {
     Mode mode{Mode::Ok};
     std::vector<std::string> argv;
     int calls{};
+    bool piecesRefuse{};                  // convex-pieces answers "not an extrusion"
+    std::vector<std::string> piecesArgv;
+    int pieceCalls{};
 
     static std::string option(const std::vector<std::string>& argv, std::string_view name) {
         for (std::size_t i = 0; i + 1 < argv.size(); ++i)
@@ -147,13 +152,44 @@ struct Fake {
 
     ExactCadRunner runner() {
         return [this](const std::vector<std::string>& args, std::chrono::seconds, std::uint64_t) {
-            argv = args;
-            ++calls;
+            if (std::find(args.begin(), args.end(), "convex-pieces") == args.end()) {
+                argv = args;                  // convex-pieces calls are recorded on their own
+                ++calls;
+            }
             ExactCadProcessResult result;
             if (mode == Mode::NoLaunch) { result.error = "No such file or directory"; return result; }
             result.launched = true;
             if (mode == Mode::Timeout) { result.timedOut = true; return result; }
             const auto report = option(args, "--report");
+            if (std::find(args.begin(), args.end(), "convex-pieces") != args.end()) {
+                piecesArgv = args;
+                ++pieceCalls;
+                if (piecesRefuse) {
+                    write_text(report, R"({"schema":"brepkernel.cli/1","status":"refused","certificate":{"status":"refused",)"
+                                       R"("refusal":{"kind":"NotAnExtrusion","message":"the part is not a straight extrusion"}}})");
+                    result.exitCode = 2;
+                    return result;
+                }
+                // a 1 x 1 plate (y in [0, 0.1]) with a 0.4 x 0.4 square hole: four prisms
+                std::string pieces = R"({"schema":"brepkernel.convex_pieces/1","units":"meters","pieces":[)";
+                const double boxes[4][4] = {{0, 0.3, 0, 1}, {0.7, 1, 0, 1}, {0.3, 0.7, 0, 0.3}, {0.3, 0.7, 0.7, 1}};
+                for (int k = 0; k < 4; ++k) {
+                    const auto [x0, x1, z0, z1] = boxes[k];
+                    std::ostringstream ring;
+                    ring.imbue(std::locale::classic());
+                    for (double y : {0.0, 0.1}) {
+                        ring << (y == 0.0 ? R"("bottom":[)" : R"(],"top":[)");
+                        ring << "[" << x0 << "," << y << "," << z0 << "],[" << x1 << "," << y << "," << z0 << "],["
+                             << x1 << "," << y << "," << z1 << "],[" << x0 << "," << y << "," << z1 << "]";
+                    }
+                    pieces += std::string(k ? "," : "") + "{" + ring.str() + "]}";
+                }
+                write_text(option(args, "-o"), pieces + "]}");
+                write_text(report, R"({"schema":"brepkernel.cli/1","status":"certified","certificate":{"status":"certified",)"
+                                   R"("slabs":[{"deviation":{"reference_outside_sim":4.7e-05}}]}})");
+                result.exitCode = 0;
+                return result;
+            }
             const bool boolean = std::find(args.begin(), args.end(), "boolean") != args.end();
             const std::string schema = mode == Mode::BadSchema ? "something/else" : "brepkernel.cli/1";
             if (mode == Mode::Error) {
@@ -275,6 +311,25 @@ void fake_import() {
     check(result.mesh.objectId == 7 && result.mesh.indices.size() == 36, "mesh cooked for the new object");
     check(std::abs(mesh_volume(result.mesh) - 1.0) < 1e-6, "cooked mesh volume");
     check(result.summary.find("step") != std::string::npos, "summary names the format");
+    check(fake.pieceCalls == 1, "convex pieces built on import (" + std::to_string(fake.pieceCalls) + " calls)");
+    check(std::stod(Fake::option(fake.piecesArgv, "--max-error")) == 1e-4 &&
+              Fake::option(fake.piecesArgv, "-o").ends_with("pieces.json"), "convex-pieces argv");
+    check(result.collision.component && result.collision.component->type == kConvexSetComponent, "convex set component");
+    const auto prisms = convex_set_component_pieces(*result.collision.component);
+    check(prisms && prisms->size() == 4, "four pieces decoded");
+    check(result.collision.note.find("certified 4 convex pieces") != std::string::npos &&
+              result.summary.find("certified 4 convex pieces") != std::string::npos, "the summary reports the pieces");
+    fake.piecesRefuse = true;
+    auto noPieces = import_exact_cad(dir.path, dir.path / "Bracket.step", 7, fake_settings(), fake.runner());
+    check(bool(noPieces) && !noPieces.collision.component && noPieces.collision.refused &&
+              noPieces.collision.note.find("collision stays one hull") != std::string::npos,
+          "a part that is not an extrusion imports with a note and no pieces");
+    fake.piecesRefuse = false;
+    auto off = fake_settings();
+    off.exactCollision = false;
+    const int before = fake.pieceCalls;
+    check(bool(import_exact_cad(dir.path, dir.path / "Bracket.step", 7, off, fake.runner())) && fake.pieceCalls == before,
+          "convex collision can be switched off");
 
     check(!import_exact_cad(dir.path, dir.path / "crate.obj", 7, fake_settings(), fake.runner()), "non-CAD refused");
     fake.mode = Fake::Mode::NoLaunch;
@@ -324,6 +379,7 @@ void fake_boolean() {
     check(result.edit.mesh.materials.size() == 1 && result.edit.mesh.materials[0].name == "Steel", "A's materials carried over");
     check(result.source.origin == "boolean:reverse_difference", "origin records the operation");
     check(fs::exists(dir.path / result.source.relativePath), "result brep stored in the project");
+    check(result.collision.component.has_value(), "the exact Boolean result gets convex pieces");
     check(result.summary.find("Certified exact Boolean: volume 2 m3 (exact, world scale)") == 0, "certified summary in world scale: " + result.summary);
 
     fake.mode = Fake::Mode::Refuse;
@@ -484,6 +540,19 @@ void native_commands(const fs::path& root) {
     const auto result = *controller.workspace().selected_object();
     check(document.find_object(result)->name.find("(Exact Boolean)") != std::string::npos, "result named");
     check(exact_brep_source(*document.find_object(result)).has_value(), "result carries its exact source");
+    const auto pieces = active_convex_set(document.find_object(result)->components);
+    check(pieces.size() > 4, "the plate-with-hole result carries certified convex pieces (" + std::to_string(pieces.size()) + ")");
+    // rebuild them with the command (one undo step, replaces the set)
+    controller.workspace().select_object(result);
+    controller.refresh_menu_state();
+    const auto* rebuild = controller.workspace().menus().find("mesh.exact_collision");
+    check(rebuild && rebuild->enabled, "Build Exact Convex Collision is enabled for an exact object");
+    check(controller.dispatch_action("mesh.exact_collision"), "rebuild starts");
+    (void)controller.wait_for_long_job(300.0);
+    std::size_t sets = 0;
+    for (const auto& c : document.find_object(result)->components) sets += c.type == kConvexSetComponent;
+    check(sets == 1, "rebuilding replaces the set: " + controller.status().text);
+    check(controller.dispatch_action("edit.undo"), "undo the rebuild");
     check(controller.dispatch_action("edit.undo") && document.objects().size() == objectsBefore, "one undo step removes it");
 
     // A refusal changes nothing; with Manifold built in, its uncertified preview opens instead.

@@ -67,6 +67,12 @@ Intersection (CAD), grouped as "Exact CAD Booleans" next to the Manifold
   as a mesh-only result (no exact source), Escape closes it. Nothing is applied
   automatically.
 
+## Exact convex collision
+
+Imports and exact Booleans of extruded parts also get certified convex
+collision pieces (`dve.collision_convex_set`), so holes stay holes in physics.
+See [Exact convex collision](exact-convex-collision-2026-10-19.md).
+
 ## Limits
 
 - The result uses A's material palette and the whole result is in A's first

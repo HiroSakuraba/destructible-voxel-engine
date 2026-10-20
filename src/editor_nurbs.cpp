@@ -37,6 +37,23 @@ std::optional<EditorObject> make_editor_nurbs(EditorObjectId id,const NurbsSourc
     Component c;c.id=1;c.type=std::string(kNurbsComponent);c.properties["source"]=encode_nurbs(s);
     o.components.push_back(std::move(c));return o;
 }
+bool replace_editor_nurbs_source(EditorObject& o,const NurbsSource& value,std::string* error){
+    if(!o.polygon||!has_nurbs_source(o)){if(error)*error="Missing native NURBS source";return false;}
+    auto mesh=tessellate_nurbs(value,o.id,error);if(!mesh)return false;
+    // Keep object material and texture resources. The initial source has one
+    // patch/material domain; tessellation output always references material 0.
+    mesh->materials=o.polygon->materials;mesh->materialBindings=o.polygon->materialBindings;
+    mesh->images=o.polygon->images;mesh->samplers=o.polygon->samplers;mesh->textures=o.polygon->textures;
+    mesh->contentHash=polygon_asset_content_hash(*mesh);
+    auto valid=validate_polygon_asset(*mesh);if(!valid){if(error)*error=valid.message;return false;};
+    find_component_by_type(std::span<Component>(o.components),kNurbsComponent)->properties["source"]=encode_nurbs(value);
+    o.polygon=std::move(*mesh);return true;
+}
+std::uint64_t nurbs_source_stamp(const NurbsSource& source){
+    std::uint64_t hash=14695981039346656037ULL;
+    for(unsigned char c:encode_nurbs(source)){hash^=c;hash*=1099511628211ULL;}
+    return hash;
+}
 EditNurbsCommand::EditNurbsCommand(EditorObjectId id,NurbsSource b,NurbsSource a):id_(id),before_(std::move(b)),after_(std::move(a)){}
 CommandResult EditNurbsCommand::apply(EditorDocument& d,const NurbsSource& expected,const NurbsSource& value){
     auto* o=d.find_object(id_);std::string error;
@@ -45,15 +62,8 @@ CommandResult EditNurbsCommand::apply(EditorDocument& d,const NurbsSource& expec
     auto current=editor_nurbs_source(*o,&error);
     if(!current||*current!=expected)return CommandResult::fail("NURBS source changed; reopen the edit");
     if(!validate_editor_nurbs(*o,&error))return CommandResult::fail(error);
-    auto mesh=tessellate_nurbs(value,id_,&error);if(!mesh)return CommandResult::fail(error);
-    // Keep object material and texture resources. The initial source has one
-    // patch/material domain; tessellation output always references material 0.
-    mesh->materials=o->polygon->materials;mesh->materialBindings=o->polygon->materialBindings;
-    mesh->images=o->polygon->images;mesh->samplers=o->polygon->samplers;mesh->textures=o->polygon->textures;
-    mesh->contentHash=polygon_asset_content_hash(*mesh);
-    auto valid=validate_polygon_asset(*mesh);if(!valid)return CommandResult::fail(valid.message);
-    find_component_by_type(std::span<Component>(o->components),kNurbsComponent)->properties["source"]=encode_nurbs(value);
-    o->polygon=std::move(*mesh);d.mark_dirty();return CommandResult::ok();
+    if(!replace_editor_nurbs_source(*o,value,&error))return CommandResult::fail(error);
+    d.mark_dirty();return CommandResult::ok();
 }
 CommandResult EditNurbsCommand::execute(EditorDocument& d){return apply(d,before_,after_);}
 CommandResult EditNurbsCommand::undo(EditorDocument& d){return apply(d,after_,before_);}

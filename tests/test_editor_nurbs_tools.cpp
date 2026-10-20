@@ -92,6 +92,10 @@ void native(){
     auto point2=project_world_to_screen(c.camera(),c.layout().viewport,voxel_to_world(o->transform,o->voxelScale,{float(original.controls[14].x),0,float(original.controls[14].z)}));
     c.pointer_down(PointerButton::Primary,int(point2.x),int(point2.y),1);
     check(c.selected_nurbs_controls()==std::set<std::size_t>{14,15},"Shift adds control");
+    c.pointer_down(PointerButton::Primary,int(point2.x),int(point2.y),1);
+    check(c.selected_nurbs_controls()==std::set<std::size_t>{15},"Shift-click on a selected control removes it");
+    c.pointer_down(PointerButton::Primary,int(point2.x),int(point2.y),1);
+    check(c.selected_nurbs_controls()==std::set<std::size_t>{14,15},"Shift re-adds control");
     check(c.dispatch_action("nurbs.select_none"),"clear before box");
     const auto viewport=c.layout().viewport;
     c.pointer_down(PointerButton::Primary,viewport.x+viewport.width-5,viewport.y+5,0);

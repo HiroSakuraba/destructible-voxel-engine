@@ -11,7 +11,7 @@
 namespace dve::editor {
 namespace {
 constexpr std::string_view actions[]={"nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
-UiRect panel(UiRect v){return {v.x+8,v.y+8,std::min(330,std::max(1,v.width-16)),std::min(238,std::max(1,v.height-16))};}
+UiRect panel(UiRect v){return {v.x+8,v.y+8,(std::min)(330,(std::max)(1,v.width-16)),(std::min)(238,(std::max)(1,v.height-16))};}
 UiRect field(UiRect v,int i){auto p=panel(v);return {p.x+8,p.y+62+i*32,p.width-16,28};}
 std::string number(double x){std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(12)<<x;return o.str();}
 NurbsSource profile(){NurbsSource s;s.columns=4;s.u.knots={0,0,0,0,1,1,1,1};s.controls={{1,0,0,1},{1.5,1,0,1},{.8,2,0,1},{1,3,0,1}};return s;}
@@ -45,12 +45,14 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         (void)workspace_.menus().set_enabled(action,enabled,enabled?"":"Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)");
     }
 }
-bool NativeEditorController::create_nurbs_source(const NurbsSource& source,std::string name,std::optional<Float3> position){
+bool NativeEditorController::create_nurbs_source(const NurbsSource& source,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement){
     if(workspace_.mode()!=EditorMode::Edit||playSession_.active()||longJob_)return false;
     close_previews_for_voxel_edit("NURBS creation");
     auto& doc=workspace_.document();auto id=doc.allocate_object_id();std::string error;
     auto object=make_editor_nurbs(id,source,&error);if(!object){set_status(error,true);return false;}
-    object->name=std::move(name);object->transform.position=position.value_or(camera_.target);
+    object->name=std::move(name);
+    // Derived surfaces inherit the source pose inside the single Add command, so undo/redo replays it exactly.
+    if(placement){object->transform=placement->first;object->voxelScale=placement->second;}else object->transform.position=camera_.target;
     const auto before=capture_selection_snapshot();
     auto result=workspace_.commands().execute(doc,std::make_unique<AddObjectCommand>(std::move(*object),"Create native NURBS"));
     if(!result.success){set_status(result.message,true);return false;}
@@ -123,9 +125,7 @@ bool NativeEditorController::dispatch_nurbs_action(std::string_view action){
     if(action=="nurbs.extrude"||action=="nurbs.revolve"){
         auto result=action=="nurbs.extrude"?extrude_nurbs(*s,{0,2,0},&error):revolve_nurbs(*s,6.283185307179586,&error);
         if(!result){set_status(error,true);return false;}
-        auto pose=o->transform;auto metric=o->voxelScale;
-        if(!create_nurbs_source(*result,action=="nurbs.extrude"?"NURBS Extrusion":"NURBS Revolution"))return false;
-        auto* created=workspace_.document().find_object(*workspace_.selected_object());created->transform=pose;created->voxelScale=metric;return true;
+                return create_nurbs_source(*result,action=="nurbs.extrude"?"NURBS Extrusion":"NURBS Revolution",std::pair{o->transform,o->voxelScale});
     }
     if(action=="nurbs.bake_polygon"){
         auto before=capture_selection_snapshot();auto newId=workspace_.document().allocate_object_id();
@@ -185,7 +185,10 @@ bool NativeEditorController::nurbs_pointer_down(PointerButton button,int x,int y
         float d=(screen.x-float(x))*(screen.x-float(x))+(screen.y-float(y))*(screen.y-float(y));
         if(screen.visible&&d<=best){best=d;hit=i;}
     }
-    if(hit){const bool ok=select_nurbs_controls({*hit},selection_operation_for_modifiers(modifiers));if(ok&&nurbsSelected_.contains(*hit))nurbsControl_=*hit;return ok;}
+    if(hit){auto operation=selection_operation_for_modifiers(modifiers);
+        // Shift-click on an already selected control removes it, matching object/polygon/voxel clicks.
+        if(operation==SelectionOperation::Add&&nurbsSelected_.contains(*hit))operation=SelectionOperation::Subtract;
+        const bool ok=select_nurbs_controls({*hit},operation);if(ok&&nurbsSelected_.contains(*hit))nurbsControl_=*hit;return ok;}
     nurbsBoxActive_=true;nurbsBoxX_=nurbsBoxEndX_=x;nurbsBoxY_=nurbsBoxEndY_=y;
     nurbsBoxOperation_=selection_operation_for_modifiers(modifiers);return true;
 }
@@ -205,7 +208,7 @@ void NativeEditorController::draw_nurbs(const IEditorCanvas& canvas,UiRect viewp
         if(j+1<s->rows)line(k+s->columns);
         if(a.visible)canvas.fill({int(a.x)-3,int(a.y)-3,7,7},nurbsSelected_.contains(k)?bright:cyan);
     }
-    if(nurbsBoxActive_)canvas.outline({std::min(nurbsBoxX_,nurbsBoxEndX_),std::min(nurbsBoxY_,nurbsBoxEndY_),std::abs(nurbsBoxEndX_-nurbsBoxX_)+1,std::abs(nurbsBoxEndY_-nurbsBoxY_)+1},bright);
+    if(nurbsBoxActive_)canvas.outline({(std::min)(nurbsBoxX_,nurbsBoxEndX_),(std::min)(nurbsBoxY_,nurbsBoxEndY_),std::abs(nurbsBoxEndX_-nurbsBoxX_)+1,std::abs(nurbsBoxEndY_-nurbsBoxY_)+1},bright);
     auto rect=panel(viewport);RectClipCanvas painter(canvas,rect);painter.fill(rect,bg);
     painter.text(rect.x+8,rect.y+20,"NURBS controls (X-ray): "+std::to_string(nurbsSelected_.size())+" selected",white);
     painter.text(rect.x+8,rect.y+43,"CV "+std::to_string(nurbsControl_+1)+" / "+std::to_string(s->controls.size())+"   Enter applies; Esc cancels",white);

@@ -1142,7 +1142,7 @@ public:
     [[nodiscard]] std::vector<std::string> polygon_preview_lines() const;
     void cancel_polygon_preview();
     bool dispatch_nurbs_action(std::string_view);
-    bool create_nurbs_source(const NurbsSource&,std::string name,std::optional<Float3> position=std::nullopt);
+    bool create_nurbs_source(const NurbsSource&,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement=std::nullopt);
     bool dispatch_nurbs_construction(std::string_view);
     bool dispatch_nurbs_topology(std::string_view);
     void commit_nurbs_construction_field();
@@ -1363,6 +1363,9 @@ private:
     NurbsSweepOptions nurbsSweepOptions_;
     double nurbsOperationParameter_{.5};
     unsigned nurbsDisplaySamples_{8};
+    // CV selection parked while the density settings panel is open (only one panel at a time).
+    EditorObjectId nurbsParkedObject_{};std::set<std::size_t> nurbsParkedSelection_;std::size_t nurbsParkedControl_{};
+    void restore_parked_nurbs_controls();
     bool nurbsConstructionPanel_{};
     EditorObjectId nurbsEditingObject_{};
     std::size_t nurbsControl_{},nurbsFieldControl_{};

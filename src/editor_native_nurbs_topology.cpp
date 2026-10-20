@@ -21,6 +21,8 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     if(v&&source->is_curve()){set_status("A NURBS curve has no V axis",true);return false;}
     const auto& axis=v?source->v:source->u;const auto count=v?source->rows:source->columns;
     const double t=std::lerp(axis.knots[axis.degree],axis.knots[count],nurbsOperationParameter_);
+    if(quality||resetUv)restore_parked_nurbs_controls(); // keep the CV selection the settings panel parked
+    else nurbsParkedObject_=0;
     const auto selection=capture_selection_snapshot();
     if(reverse||transpose||insert||quality||resetUv){
         auto after=(quality||resetUv)?source:transpose?transpose_nurbs(*source,&error):reverse?reverse_nurbs_axis(*source,v,&error):insert_nurbs_knot(*source,v,t,&error);

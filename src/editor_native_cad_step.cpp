@@ -10,7 +10,12 @@
 #include "dve/editor_native.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <memory>
+#include <string>
+#include <system_error>
+#include <vector>
 
 #include "dve/editor_exact_cad.hpp"
 #include "editor_native_long_job.hpp"
@@ -94,18 +99,35 @@ bool NativeEditorController::export_exact_step(bool millimetres, bool zUp) {
     const std::string stem = file_stem(ids.size() == 1 ? parts.front().name : first ? first->name : "cad-parts");
     const std::filesystem::path relative = std::filesystem::path("exports") / (stem + ".step");
     const std::filesystem::path output = projectRoot_ / relative;
+    // brepkernel writes a staged file next to the target; the commit step moves it into place.
+    const std::filesystem::path staged = projectRoot_ / "exports" / (stem + ".partial-export.step");
     const auto settings = ExactCadSettings::from_environment();
     const auto root = projectRoot_;
     auto result = std::make_shared<ExactStepExportResult>();
     const std::string format = std::string(millimetres ? "mm" : "m") + ", " + (zUp ? "Z" : "Y") + " up";
     return start_long_job(LongJobKind::ImportModel, "Export Exact CAD (STEP)", longJobThreshold_ + 1,
-        [result, parts, output, millimetres, zUp, settings, root](LongJob& job) {
+        [result, parts, staged, millimetres, zUp, settings, root](LongJob& job) {
             job.report(0.1F, "brepkernel is writing and checking the STEP file");
-            *result = export_exact_cad_step(root, parts, output, millimetres, zUp, settings);
+            *result = export_exact_cad_step(root, parts, staged, millimetres, zUp, settings);
+            // Cancelled meanwhile: the staged file is never promoted; tidy it away.
+            if (job.cancelled()) { std::error_code ignored; std::filesystem::remove(staged, ignored); return; }
             job.report(1.0F, "Done");
         },
-        [this, result, relative, skipped, format](LongJob&) {
-            if (!*result) { set_status("STEP export failed, no file written: " + result->error, true, 12.0F); return false; }
+        [this, result, relative, skipped, format, staged, output](LongJob&) {
+            std::error_code ec;
+            if (!*result) {
+                std::filesystem::remove(staged, ec);
+                set_status("STEP export failed, no file written: " + result->error, true, 12.0F);
+                return false;
+            }
+            // Only a finished, checked export replaces the file (a cancelled one never does).
+            std::filesystem::rename(staged, output, ec);
+            if (ec) {
+                std::error_code ignored;
+                std::filesystem::remove(staged, ignored);
+                set_status("STEP export failed, could not replace " + relative.generic_string() + ": " + ec.message(), true, 12.0F);
+                return false;
+            }
             std::vector<std::string> converted;
             for (const ExactStepPartReport& part : result->parts) if (!part.exact) converted.push_back(part.name);
             std::string text = "Exported " + std::to_string(result->parts.size()) + (result->parts.size() == 1 ? " CAD part" : " CAD parts") +

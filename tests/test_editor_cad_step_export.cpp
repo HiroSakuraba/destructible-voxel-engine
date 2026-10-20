@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <chrono>
+#include <thread>
 #include <string>
 
 #include "exact_cad_test_support.hpp"
@@ -144,6 +146,23 @@ void test_native(const fs::path& root) {
     check(manifest.value && manifest.value->find("parts")->as_array().size() == 2 &&
               manifest.value->find("parts")->as_array()[1].find("transform")->as_array()[0].as_number() == 2.0,
           "the stretched object's world scale goes to brepkernel");
+
+    // Cancelled while brepkernel runs: the existing file is never replaced.
+    {
+        const std::string fake = read_text(root / "fake_brepkernel.sh");
+        const auto shebang = fake.find('\n');
+        write_text(root / "fake_brepkernel.sh", fake.substr(0, shebang + 1) + "sleep 1\n" + fake.substr(shebang + 1));
+        c.workspace().select_object(bracket);
+        write_text(root / "exports/Bracket.step", "OLD");
+        check(c.dispatch_action("cad.step.mm_z"), "export to cancel starts");
+        c.key_down("escape", false, false, false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        c.update(0.016F);
+        check(read_text(root / "exports/Bracket.step") == "OLD", "a cancelled export leaves the old file");
+        check(!fs::exists(root / "exports/Bracket.partial-export.step"), "and no staged file");
+        write_text(root / "fake_brepkernel.sh", fake);
+        fs::remove(root / "exports/Bracket.step");
+    }
 
     // Failure: no file.
     write_text(root / "fake_brepkernel.sh", "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in --report) report=\"$2\"; shift;; esac; shift; done\n"

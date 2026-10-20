@@ -1222,7 +1222,11 @@ CommandResult ReplacePolygonCommand::apply(EditorDocument& document,const Cooked
     if(!object||!object->polygon) return CommandResult::fail("Polygon target no longer exists");
     if(object->flags.locked) return CommandResult::fail("Polygon target is locked");
     if(object->is_nurbs()) return CommandResult::fail("Use NURBS controls or bake to a new polygon before editing triangles");
-    if(find_component_by_type(std::span<const Component>(object->components),"dve.exact_brep")) return CommandResult::fail("Remove the Exact CAD Source component explicitly before editing its polygon bake");
+    // An enabled exact source owns the triangles: only a re-bake from that source may replace them.
+    // A disabled one (the link dropped by a confirmed edit, see the CAD edit guard) does not.
+    if(!exactRebake_)
+        if(const Component* exact=find_component_by_type(std::span<const Component>(object->components),"dve.exact_brep"); exact&&exact->enabled)
+            return CommandResult::fail("Remove the Exact CAD Source component explicitly before editing its polygon bake");
     const auto valid=validate_polygon_asset(mesh); if(!valid) return CommandResult::fail(valid.message);
     if (settings) {
         const auto evaluated=evaluate_subdivision(mesh,*settings);

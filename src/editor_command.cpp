@@ -67,6 +67,68 @@ const EditorSelectionSnapshot* EditorCommandStack::redo_selection() const noexce
     return &history_[cursor_].selection->second;
 }
 
+namespace {
+// Steps that were applied one by one and are now undone and redone as one.
+class JoinedCommands final : public IEditorCommand {
+public:
+    JoinedCommands(std::string label, std::vector<std::unique_ptr<IEditorCommand>> commands)
+        : label_(std::move(label)), commands_(std::move(commands)) {}
+    [[nodiscard]] std::string_view label() const noexcept override { return label_; }
+    CommandResult execute(EditorDocument& document) override { return redo(document); }
+    CommandResult undo(EditorDocument& document) override {
+        for (std::size_t i = commands_.size(); i > 0; --i) {
+            const CommandResult result = commands_[i - 1]->undo(document);
+            if (!result.success) {
+                for (std::size_t restored = i; restored < commands_.size(); ++restored) (void)commands_[restored]->redo(document);
+                return result;
+            }
+        }
+        return CommandResult::ok();
+    }
+    CommandResult redo(EditorDocument& document) override {
+        for (std::size_t i = 0; i < commands_.size(); ++i) {
+            const CommandResult result = commands_[i]->redo(document);
+            if (!result.success) {
+                while (i > 0) { --i; (void)commands_[i]->undo(document); }
+                return result;
+            }
+        }
+        return CommandResult::ok();
+    }
+private:
+    std::string label_;
+    std::vector<std::unique_ptr<IEditorCommand>> commands_;
+};
+}  // namespace
+
+bool EditorCommandStack::join_last(std::size_t count, std::string label) {
+    if (count < 2 || cursor_ != history_.size() || count > history_.size()) return count == 1 && cursor_ == history_.size();
+    const std::size_t first = history_.size() - count;
+    std::vector<std::unique_ptr<IEditorCommand>> commands;
+    std::optional<EditorSelectionSnapshot> before, after;
+    for (std::size_t i = first; i < history_.size(); ++i) {
+        if (history_[i].selection) {
+            if (!before) before = history_[i].selection->first;
+            after = history_[i].selection->second;
+        }
+        commands.push_back(std::move(history_[i].command));
+    }
+    history_.erase(history_.begin() + static_cast<std::ptrdiff_t>(first), history_.end());
+    history_.push_back({std::make_unique<JoinedCommands>(std::move(label), std::move(commands)), std::nullopt});
+    if (before && after) history_.back().selection.emplace(std::move(*before), std::move(*after));
+    cursor_ = history_.size();
+    return true;
+}
+
+CommandResult EditorCommandStack::discard_last(EditorDocument& document) {
+    if (cursor_ == 0 || cursor_ != history_.size()) return CommandResult::fail("nothing to discard");
+    CommandResult result = history_.back().command->undo(document);
+    if (!result.success) return result;
+    history_.pop_back();
+    cursor_ = history_.size();
+    return result;
+}
+
 void EditorCommandStack::clear() noexcept { history_.clear(); cursor_ = 0; }
 bool EditorCommandStack::can_undo() const noexcept { return cursor_ > 0; }
 bool EditorCommandStack::can_redo() const noexcept { return cursor_ < history_.size(); }

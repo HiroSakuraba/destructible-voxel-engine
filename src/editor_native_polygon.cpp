@@ -214,6 +214,7 @@ bool NativeEditorController::transform_polygon_components(Float3 translation, Qu
         std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,std::move(mesh),"Transform polygon components"));
     if (result.success) workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());
     set_status(result.success ? "Transformed polygon components" : result.message,!result.success);
+    settle_cad_link_drop();  // a confirmed CAD link drop joins this edit as one undo step
     return result.success;
 }
 

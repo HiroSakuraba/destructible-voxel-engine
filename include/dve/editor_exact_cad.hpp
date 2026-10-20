@@ -203,4 +203,34 @@ struct ExactCadQueryResult {
 // `scale` multiplies lengths (an object's uniform world scale; 1 in the mesh frame).
 [[nodiscard]] std::string describe_exact_face(const ExactCadFace& face, double scale = 1.0);
 
+// File > Export Exact CAD (STEP): CAD objects' exact sources, placed in the world, into one named
+// STEP file (brepkernel `export`). brepkernel checks every placed part and reads the file back
+// before it replaces `output`, so a failed export leaves no file (and an existing file untouched).
+// A stretched object is exported through a general affine map: still a valid solid, but its
+// cylinders become freeform surfaces, so it is reported as converted rather than exact.
+struct ExactStepPart {
+    ExactBrepSource source;
+    std::string name;
+    std::array<double, 12> placement{};   // mesh-local -> world, 3x4 row-major, metres, +Y up
+};
+struct ExactStepPartReport {
+    std::string name;
+    std::string placement;   // identity, rigid, similarity, general_affine (brepkernel's words)
+    bool exact{};
+    double volumeMm3{};
+};
+struct ExactStepExportResult {
+    std::vector<ExactStepPartReport> parts;
+    double readbackRelativeError{};
+    std::string error;
+    bool unsupported{};
+    [[nodiscard]] explicit operator bool() const noexcept { return error.empty(); }
+};
+[[nodiscard]] ExactStepExportResult export_exact_cad_step(
+    const std::filesystem::path& projectRoot, const std::vector<ExactStepPart>& parts, const std::filesystem::path& output,
+    bool millimetres = true, bool zUp = true, const ExactCadSettings& settings = ExactCadSettings::from_environment(),
+    const ExactCadRunner& runner = {});
+// An object's mesh-local -> world map (pose with attachments, and voxelScale), in double precision.
+[[nodiscard]] std::optional<std::array<double, 12>> exact_world_placement(const EditorDocument& document, EditorObjectId id);
+
 } // namespace dve::editor

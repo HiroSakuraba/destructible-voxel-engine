@@ -33,6 +33,7 @@ namespace dve::editor {
 namespace {
 
 using dve::ai::JsonValue;
+using dve::ai::stringify_json;
 
 std::string lower(std::string text) {
     for (auto& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -830,6 +831,81 @@ ExactCadQueryResult query_exact_cad(const std::filesystem::path& projectRoot, co
         hit.distance = field(h, "distance");
         hit.face = h.find("face") && h.find("face")->is_number() ? static_cast<int>(field(h, "face")) : -1;
         result.hits.push_back(hit);
+    }
+    return result;
+}
+
+std::optional<std::array<double, 12>> exact_world_placement(const EditorDocument& document, EditorObjectId id) {
+    const auto* object = document.find_object(id);
+    if (!object) return std::nullopt;
+    const auto pose = document.world_transform(id).value_or(object->transform);
+    const Float3 s = object->voxelScale;
+    if (!(s.x != 0 && s.y != 0 && s.z != 0)) return std::nullopt;
+    const auto R = rotation_matrix(pose.rotation);
+    const double scale[3] = {s.x, s.y, s.z};
+    const double t[3] = {pose.position.x, pose.position.y, pose.position.z};
+    std::array<double, 12> m{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) m[std::size_t(i * 4 + j)] = R.m[i][j] * scale[j];
+        m[std::size_t(i * 4 + 3)] = t[i];
+    }
+    for (const double v : m) if (!std::isfinite(v)) return std::nullopt;
+    return m;
+}
+
+ExactStepExportResult export_exact_cad_step(const std::filesystem::path& projectRoot, const std::vector<ExactStepPart>& parts,
+                                            const std::filesystem::path& output, bool millimetres, bool zUp,
+                                            const ExactCadSettings& settings, const ExactCadRunner& runner) {
+    ExactStepExportResult result;
+    if (parts.empty()) { result.error = "Select one or more CAD objects to export"; return result; }
+    const auto extension = lower(utf8(output.extension()));
+    if (extension != ".step" && extension != ".stp") { result.error = "STEP files end in .step or .stp"; return result; }
+    TemporaryDirectory temp;
+    if (!temp.ok()) { result.error = "Cannot create a temporary folder"; return result; }
+    JsonValue::Array list;
+    for (const ExactStepPart& part : parts) {
+        std::filesystem::path brep;
+        if (!source_file(projectRoot, part.source, brep, result.error)) { result.error = part.name + ": " + result.error; return result; }
+        JsonValue::Array transform;
+        for (const double v : part.placement) {
+            if (!std::isfinite(v)) { result.error = part.name + ": its placement is not finite"; return result; }
+            transform.emplace_back(v);
+        }
+        JsonValue::Object entry;
+        entry["path"] = utf8(brep);
+        entry["name"] = part.name;
+        entry["transform"] = JsonValue(std::move(transform));
+        list.emplace_back(std::move(entry));
+    }
+    JsonValue::Object manifest;
+    manifest["parts"] = JsonValue(std::move(list));
+    const auto manifestPath = temp.path() / "parts.json";
+    {
+        std::ofstream out(manifestPath, std::ios::binary);
+        out << stringify_json(JsonValue(std::move(manifest)));
+        if (!out) { result.error = "Cannot write the parts list"; return result; }
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(output.parent_path(), ec);
+    const auto run = run_tool(settings, runner,
+                              {"export", "--parts", utf8(manifestPath), "-o", utf8(output), "--units", millimetres ? "mm" : "m",
+                               "--up", zUp ? "z" : "y"},
+                              temp.path() / "report.json");
+    const JsonValue* report = run.report && run.exitCode == 0 ? run.report->find("export") : nullptr;
+    if (!report || !report->is_object()) { result.error = inspect_error("export", run, result.unsupported); return result; }
+    if (const JsonValue* list = report->find("parts"); list && list->is_array())
+        for (const JsonValue& p : list->as_array()) {
+            ExactStepPartReport part;
+            if (const JsonValue* name = p.find("name")) part.name = std::string(name->as_string());
+            if (const JsonValue* placement = p.find("placement")) part.placement = std::string(placement->as_string());
+            if (const JsonValue* exact = p.find("exact")) part.exact = exact->as_bool(false);
+            part.volumeMm3 = field(p, "volume_mm3");
+            result.parts.push_back(std::move(part));
+        }
+    if (const JsonValue* readback = report->find("readback")) result.readbackRelativeError = field(*readback, "relative_error");
+    if (result.parts.size() != parts.size()) {
+        result.error = "brepkernel export reported " + std::to_string(result.parts.size()) + " parts for " + std::to_string(parts.size());
+        result.parts.clear();
     }
     return result;
 }

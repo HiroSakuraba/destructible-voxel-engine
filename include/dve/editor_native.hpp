@@ -795,6 +795,10 @@ public:
     [[nodiscard]] std::shared_ptr<const ExactCadDescription> exact_cad_description(EditorObjectId id) const;
     // Tests: wait until no exact description is being read.
     bool wait_for_cad_descriptions(double seconds);
+    // File > Export Exact CAD (STEP): the selected CAD objects (and CAD pieces of selected groups)
+    // into exports/<name>.step from their exact sources, as a background job; no file on failure.
+    bool export_exact_step(bool millimetres, bool zUp);
+    [[nodiscard]] const std::filesystem::path& last_step_export() const noexcept { return lastStepExport_; }
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
     [[nodiscard]] std::string transform_numeric_label() const;
     [[nodiscard]] const std::string& transform_numeric_text() const noexcept { return transformNumeric_; }
@@ -1410,6 +1414,8 @@ private:
     bool drop_cad_link(const std::vector<EditorObjectId>& objects);  // one undo step
     void poll_cad_descriptions();
     void update_measure_hover(int x, int y);
+    [[nodiscard]] std::vector<EditorObjectId> step_export_objects(std::vector<std::string>* skipped = nullptr) const;
+    bool dispatch_step_export_action(std::string_view action);
     std::optional<Float3> originDragPoint_;
     EditorObjectId pivotEditTarget_{};  // the object or group whose pivot is being edited  // Edit Pivot on an object: where the dragged origin is
     [[nodiscard]] bool origin_drag() const;
@@ -1686,6 +1692,7 @@ private:
     std::map<std::string, std::shared_ptr<const ExactCadDescription>> cadDescriptions_;  // by sha256
     std::map<std::string, std::string> cadDescriptionErrors_;
     std::shared_ptr<CadDescribeTask> cadDescribeTask_;
+    std::filesystem::path lastStepExport_;   // project-relative, after a successful STEP export
     bool open_scene_now(const std::filesystem::path& path);
     bool open_project_now(const std::filesystem::path& root);
     void remember_recent_scene(const std::filesystem::path& path);

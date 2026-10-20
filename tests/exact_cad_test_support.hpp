@@ -104,7 +104,7 @@ inline fs::path write_fake_brepkernel(const fs::path& dir, const fs::path& templ
     write_text(script, "#!/bin/sh\n"
         "echo \"$@\" >> '" + (dir / "log.txt").string() + "'\n"
         "cmd=\"$1\"; shift; out=''; report=''; defl='0.002'\n"
-        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift;; --report) report=\"$2\"; shift;; --deflection) defl=\"$2\"; shift;; esac; shift; done\n"
+        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift;; --report) report=\"$2\"; shift;; --deflection) defl=\"$2\"; shift;; --parts) cp \"$2\" '" + (dir / "parts_seen.json").string() + "'; shift;; esac; shift; done\n"
         "case \"$cmd\" in\n"
         "mesh) cp '" + templateGlb.string() + "' \"$out\"; printf '{\"schema\":\"brepkernel.cli/1\",\"status\":\"ok\",\"mesh\":{\"linear_deflection\":%s,\"angular_deflection\":0.35,\"triangles\":12}}' \"$defl\" > \"$report\";;\n"
         "describe) printf '{\"schema\":\"brepkernel.cli/1\",\"status\":\"ok\",\"description\":' > \"$report\"; cat '" + (dir / "describe.json").string() + "' >> \"$report\"; printf '}' >> \"$report\";;\n"

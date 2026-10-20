@@ -99,6 +99,36 @@ void test_move_with_units() {
     check(near(position(c).z, 0.0F) && near(position(c).y, -0.4572F), "Esc restores the start");
 }
 
+void test_unfinished_unit_keeps_preview() {
+    auto owner = make_controller();
+    NativeEditorController& c = *owner;
+    c.set_active_tool(EditorToolId::Translate);
+    check(grab(c, 1), "grab Move X");
+    type(c, "2c");
+    c.pointer_move(900, 700);
+    check(near(position(c).x, 2.0F), "an unfinished unit keeps the last typed preview: " + text(position(c)));
+    const std::size_t steps = c.workspace().commands().size();
+    c.key_down("enter", false, false, false);
+    check(c.gizmo_dragging() && c.workspace().commands().size() == steps && c.status().error, "Enter refuses an unfinished value");
+    type(c, "m");
+    check(near(position(c).x, 0.02F), "2cm: " + text(position(c)));
+    c.key_down("enter", false, false, false);
+    check(!c.gizmo_dragging() && c.workspace().commands().size() == steps + 1, "then commits one step");
+}
+
+void test_scale_label_is_fractional() {
+    auto owner = make_controller();
+    NativeEditorController& c = *owner;
+    c.set_active_tool(EditorToolId::Scale);
+    check(grab(c, 1), "grab Scale X");
+    type(c, "0.5");
+    check(c.transform_numeric_label().find("0.5\xC3\x97") != std::string::npos ||
+          c.transform_numeric_label().rfind("Scale X: 0.5", 0) == 0, "the label: " + c.transform_numeric_label());
+    check(c.transform_numeric_label().find("= 0\xC3\x97") == std::string::npos &&
+          c.transform_numeric_label().find("= 1\xC3\x97") == std::string::npos, "not rounded: " + c.transform_numeric_label());
+    c.key_down("escape", false, false, false);
+}
+
 void test_rotate_and_scale() {
     auto owner = make_controller();
     NativeEditorController& c = *owner;
@@ -132,6 +162,8 @@ void test_rotate_and_scale() {
 
 int main() {
     test_move_with_units();
+    test_unfinished_unit_keeps_preview();
+    test_scale_label_is_fractional();
     test_rotate_and_scale();
     if (g_failures == 0) std::printf("drag numeric tests passed\n");
     return g_failures == 0 ? 0 : 1;

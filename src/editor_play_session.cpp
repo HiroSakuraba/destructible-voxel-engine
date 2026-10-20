@@ -124,7 +124,7 @@ public:
                 desc.groups = object.groups;
                 desc.layer = object.layer;
                 desc.components = object.components;
-                std::erase_if(desc.components,[](const Component& component) { return component.type==kUvAuthoringComponent||component.type=="dve.exact_brep"; });
+                std::erase_if(desc.components,[](const Component& component) { return component.type==kUvAuthoringComponent||component.type=="dve.exact_brep"||component.type=="dve.nurbs"; });
                 desc.enabled = object.flags.visible;
                 desc.transform = document.world_transform(editorId).value_or(object.transform);
                 desc.voxelSizeMeters = object.voxelSizeMeters;
@@ -146,7 +146,7 @@ public:
             if (object.polygon || extension == ".dmesh" || extension == ".DMESH") {
                 bool hasMembership = false;
                 for (const Component& component : object.components) {
-                    if (component.type==kUvAuthoringComponent) continue;
+                    if (component.type==kUvAuthoringComponent || component.type=="dve.nurbs" || component.type=="dve.exact_brep") continue;
                     hasMembership = hasMembership || component.type == "dve.membership";
                     std::string componentError;
                     if (!world_->add_component(runtimeId, object.polygon ? bake_collision_hull_component(component,object.voxelScale) : component, &componentError)) {

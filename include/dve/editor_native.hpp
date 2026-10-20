@@ -1684,6 +1684,9 @@ private:
     std::optional<SnapTargetKind> placementSnapKind_;  // placement modes that snap to mesh features
     // Held-V snapping inside update_gizmo_drag (true: the drag was handled).
     bool apply_drag_snap(int x, int y);
+    // Objects that move with the selection (selected, pieces of selected groups, attached
+    // children; the edited mesh for component moves): never snap or placement targets.
+    [[nodiscard]] std::set<EditorObjectId> snap_excluded_objects() const;
     std::vector<ObjectTransformChange> placementChanges_;
     Float3 placementPivot_{};
     bool alignToSurfaceNormal_{};

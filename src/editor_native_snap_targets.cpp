@@ -10,7 +10,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <optional>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -63,14 +65,27 @@ const char* snap_target_name(SnapTargetKind kind) noexcept {
     return "surface";
 }
 
+std::set<EditorObjectId> NativeEditorController::snap_excluded_objects() const {
+    const EditorDocument& document = workspace_.document();
+    // What moves is never a target: the selection, the pieces of selected (closed) groups and
+    // children attached to a selected object; when moving mesh components, the mesh being edited.
+    std::set<EditorObjectId> moving;
+    if (selectionDomain_ == SelectionDomain::Polygons) moving.insert(polygonSelection_.object);
+    for (const ObjectTransformChange& change : selection_transform_snapshot()) moving.insert(change.id);
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (const auto& [id, object] : document.objects())
+            if (object.attachment && object.parent && moving.contains(*object.parent) && moving.insert(id).second) grew = true;
+    }
+    return moving;
+}
+
 std::optional<SnapTarget> NativeEditorController::find_snap_target(int x, int y, std::optional<SnapTargetKind> only,
                                                                    bool includeSelection) const {
     const EditorDocument& document = workspace_.document();
-    const auto excluded = [&](EditorObjectId id) {
-        if (includeSelection) return false;
-        if (selectionDomain_ == SelectionDomain::Polygons) return id == polygonSelection_.object;
-        return workspace_.is_selected(id);
-    };
+    // Pivot to Point / Edit Pivot snap onto the object itself, so nothing is excluded there.
+    const std::set<EditorObjectId> moving = includeSelection ? std::set<EditorObjectId>{} : snap_excluded_objects();
+    const auto excluded = [&](EditorObjectId id) { return moving.contains(id); };
     const float cx = static_cast<float>(x), cy = static_cast<float>(y);
     const float radius = kSnapRadiusPixels;
     // Probe rays: the cursor, plus a ring inside the snap radius so corners on an object's
@@ -185,7 +200,8 @@ bool NativeEditorController::apply_drag_snap(int x, int y) {
     }
     dragSnapTarget_ = target;
     const Float3 delta = subtract(target->point, gizmoPivot_);
-    const EditorObject* targetObject = workspace_.document().find_object(target->object);
+    // Name what the artist sees: a piece of a closed group reads as the group.
+    const EditorObject* targetObject = workspace_.document().find_object(viewport_selection_target(target->object));
     const std::string where = targetObject ? " of " + targetObject->name : std::string();
     if (polygonDragBefore_) {
         auto* object = workspace_.document().find_object(polygonSelection_.object);

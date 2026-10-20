@@ -3,6 +3,9 @@
 Builds on [loft and sweep](nurbs-loft-sweep-2026-10-20.md). This batch adds
 source-preserving rational operations to the native NURBS menu.
 
+The next display-quality batch is documented in
+[nurbs-display-quality-2026-10-20.md](nurbs-display-quality-2026-10-20.md).
+
 ## Workflow
 
 Open **NURBS > Construction and Split/Isocurve Settings**. The fourth numeric
@@ -54,9 +57,9 @@ Reversal reflects the knot axis and reverses the corresponding controls.
 Swapping U/V transposes both axes and the net. The geometric locus is unchanged,
 but reversing one axis or swapping U/V reverses the oriented surface normal.
 UV coordinates follow the new parameterization, so texture orientation changes.
-Each split piece regenerates display UVs over its own normalized domain; texture
-mapping therefore restarts on each piece rather than preserving cross-split UV
-continuity. Material and texture resources are retained.
+The original split batch restarted display UVs on each piece. The subsequent
+[display-quality batch](nurbs-display-quality-2026-10-20.md) stores texture
+subranges to preserve continuity across surface splits.
 These are parameterization tools, not normal-only overrides.
 
 Both split bakes are prepared and validated before either object is published.
@@ -69,7 +72,8 @@ weight-conditioning, degree and coordinate limits still apply.
 
 This batch does not add trimming, surface-surface intersection, arbitrary
 cutting curves, patch joining/stitching, degree elevation, knot removal,
-periodic forms, adaptive tessellation or general C0 crease-normal splitting.
+periodic forms or adaptive tessellation. Crease-normal splitting is addressed
+by the subsequent display-quality batch.
 
 ## Validation
 

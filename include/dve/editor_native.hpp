@@ -1392,6 +1392,10 @@ private:
     Float3 nurbsConstructionOrigin_{};
     NurbsSweepOptions nurbsSweepOptions_;
     double nurbsOperationParameter_{.5};
+    unsigned nurbsDisplaySamples_{8};
+    // CV selection parked while the density settings panel is open (only one panel at a time).
+    EditorObjectId nurbsParkedObject_{};std::set<std::size_t> nurbsParkedSelection_;std::size_t nurbsParkedControl_{};
+    void restore_parked_nurbs_controls();
     bool nurbsConstructionPanel_{};
     EditorObjectId nurbsEditingObject_{};
     std::size_t nurbsControl_{},nurbsFieldControl_{};

@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "exact_cad_test_support.hpp"
 
@@ -135,9 +136,34 @@ void test_native(const fs::path& root, const fs::path& glb) {
     (void)c.wait_for_long_job(60.0);
     check(c.cad_detail_summary(id) == "Exact CAD: mesh within \xC2\xB1" "0.5 mm", "plain numbers are millimetres: " + c.cad_detail_summary(id));
 
+    // Asking for the accuracy it already has adds no undo step.
+    {
+        const std::size_t before = c.workspace().commands().size();
+        check(c.dispatch_action("cad.detail.custom"), "custom once more");
+        c.text_input("0.5");
+        c.key_down("enter", false, false, false);
+        (void)c.wait_for_long_job(60.0);
+        check(c.workspace().commands().size() == before, "the same accuracy again is a no-op: " + c.status().text);
+    }
+    // Trailing text around a micrometre value is an error, not a silent 20 µm.
+    for (const char* bad : {"20dummy", "0.1mm+20um", "abcum"}) {
+        const std::size_t before = c.workspace().commands().size();
+        check(c.dispatch_action("cad.detail.custom"), "custom");
+        c.text_input(bad);
+        c.key_down("enter", false, false, false);
+        (void)c.wait_for_long_job(60.0);
+        check(c.status().error && c.workspace().commands().size() == before &&
+              c.cad_detail_summary(id) == "Exact CAD: mesh within \xC2\xB1" "0.5 mm", std::string("refused: ") + bad + ": " + c.status().text);
+    }
+
     // Refusals.
     c.workspace().document().find_object(id)->flags.locked = true;
     check(!c.dispatch_action("cad.detail.100") && c.status().text.find("Unlock") != std::string::npos, "locked objects are refused");
+    c.refresh_menu_state();
+    {
+        const MenuAction* action = std::as_const(c.workspace().menus()).find("polygon.cad_detail");
+        check(action && !action->enabled && action->disabledReason.find("Unlock") != std::string::npos, "the menu says why");
+    }
     c.workspace().document().find_object(id)->flags.locked = false;
     EditorObject plain(c.workspace().document().allocate_object_id(), "Plain");
     plain.polygon = make_editor_polygon_cube(plain.id);

@@ -47,7 +47,7 @@ bool NativeEditorController::dispatch_nurbs_construction(std::string_view action
         result=sweep_nurbs(nurbsConstructionInputs_[0].source,nurbsConstructionInputs_[1].source,options,&error);
     }else return false;
     if(!result){set_status(error,true);return false;}
-    if(!create_nurbs_source(*result,action=="nurbs.construct_loft"?"NURBS Ruled Loft":"NURBS Sampled Sweep",nurbsConstructionOrigin_))return false;
+    if(!create_nurbs_source(*result,action=="nurbs.construct_loft"?"NURBS Ruled Loft":"NURBS Sampled Sweep",std::pair{RigidTransform{nurbsConstructionOrigin_,Quaternion{}},Float3{1,1,1}}))return false;
     nurbsConstructionPanel_=false;
     set_status(action=="nurbs.construct_loft"?"Ruled NURBS loft created; input snapshots retained":"Sampled NURBS sweep created (approximate between stations); input snapshots retained");return true;
 }

@@ -112,6 +112,15 @@ void NativeEditorController::set_measuring(bool on) {
     refresh_menu_state();
 }
 
+// A different document: points from the old scene must not be measured against the new one.
+void NativeEditorController::end_measure_for_new_document() {
+    if (!measureActive_ && measurePoints_.empty()) return;
+    measureActive_ = false;
+    measurePoints_.clear();
+    measureHover_.reset();
+    refresh_menu_state();
+}
+
 void NativeEditorController::update_measure_hover(int x, int y) {
     measureHover_ = find_snap_target(x, y, std::nullopt, true);
 }

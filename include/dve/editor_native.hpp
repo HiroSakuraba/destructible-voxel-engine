@@ -1410,6 +1410,7 @@ private:
     bool drop_cad_link(const std::vector<EditorObjectId>& objects);  // one undo step
     void poll_cad_descriptions();
     void update_measure_hover(int x, int y);
+    void end_measure_for_new_document();
     std::optional<Float3> originDragPoint_;
     EditorObjectId pivotEditTarget_{};  // the object or group whose pivot is being edited  // Edit Pivot on an object: where the dragged origin is
     [[nodiscard]] bool origin_drag() const;

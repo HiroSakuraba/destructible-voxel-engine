@@ -1,4 +1,5 @@
 #include "dve/editor_command.hpp"
+#include "dve/editor_nurbs.hpp"
 #include "dve/editor_subdivision.hpp"
 #include "dve/voxel_metric.hpp"
 
@@ -466,6 +467,7 @@ AddObjectCommand::AddObjectCommand(EditorObject object, std::string label)
 
 CommandResult AddObjectCommand::execute(EditorDocument& document) {
     if (!pending_) return CommandResult::fail("object was already added");
+    std::string nurbsError;if(!validate_editor_nurbs(*pending_,&nurbsError))return CommandResult::fail(nurbsError);
     if (document.find_object(id_)) return CommandResult::fail("an object with this identifier already exists");
     if (pending_->subdivision) {
         if (!pending_->polygon) return CommandResult::fail("Subdivision object has no cage");
@@ -627,6 +629,9 @@ CommandResult AddComponentCommand::execute(EditorDocument& document) {
     EditorObject* object = document.find_object(objectId_);
     if (!object) return CommandResult::fail("component owner no longer exists");
     if (object->flags.locked) return CommandResult::fail("component owner is locked");
+    // A NURBS source must be authored with its geometry cache (NURBS menu); a generic empty source
+    // would turn the object into an invalid, unsaveable NURBS object.
+    if (component_.type == "dve.nurbs") return CommandResult::fail("Create NURBS objects from the NURBS menu");
     if (component_.id == kInvalidComponentId) component_.id = document.allocate_component_id(objectId_);
     std::string error;
     if (!document.add_component(objectId_, component_, &error))
@@ -680,6 +685,7 @@ CommandResult SetComponentPropertyCommand::apply(
     if (object->flags.locked) return CommandResult::fail("component owner is locked");
     Component* component = document.find_component(objectId_, componentId_);
     if (!component) return CommandResult::fail("component no longer exists");
+    if(component->type=="dve.nurbs")return CommandResult::fail("Use NURBS source commands");
     if (!component_property_name_is_valid(property_))
         return CommandResult::fail("invalid component property name");
     if (value) {

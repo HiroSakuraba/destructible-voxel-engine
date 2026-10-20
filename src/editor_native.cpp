@@ -1995,6 +1995,8 @@ void NativeEditorController::refresh_menu_state() noexcept {
         const std::string voxelSizeReason = voxel_size_scale_disabled_reason();
         for (std::string_view id : {"transform.scale_voxel_size_up", "transform.scale_voxel_size_down"})
             enabled(id, voxelSizeReason.empty(), voxelSizeReason);
+        const std::string resampleReason = resample_to_scale_disabled_reason();
+        enabled("voxel.resample_to_scale", resampleReason.empty(), resampleReason);
     }
     enabled("edit.paste", !clipboard_.empty() || (voxelClipboard_ && !voxelClipboard_->cells.empty()),
             "Copy or cut an object (or voxels) before pasting.");
@@ -6735,6 +6737,7 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
         if (actionId == "inspector.field.reset") return reset_number_field(field, axis);
         if (actionId == "inspector.field.reset_row") {
             // One undo step for the three axes.
+            if (field == NumberFieldId::Scale) return set_number_field(field, axis, "1 1 1", "Reset");
             const auto ids = number_field_objects(field);
             if (ids.empty()) { set_status("Nothing selected", true); return false; }
             if (const std::string refusal = number_field_refusal(field); !refusal.empty()) { set_status(refusal, true); return false; }
@@ -9405,7 +9408,8 @@ std::string NativeEditorController::number_field_text(NumberFieldId field, int a
         if (!shared) shared = value;
         else if (std::abs(*shared - value) > 1.0e-5F) return "\xE2\x80\x94";  // em dash: the objects differ
     }
-    return format_number_field(*shared, number_field_unit(field));
+    // Scale is unitless but fractional: show it with the 4-decimal precision, not as a count.
+    return format_number_field(*shared, field == NumberFieldId::Scale ? NumberFieldUnit::Meters : number_field_unit(field));
 }
 
 bool NativeEditorController::set_number_field(NumberFieldId field, int axis, std::string_view text, std::string_view verb) {

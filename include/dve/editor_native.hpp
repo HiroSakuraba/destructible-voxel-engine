@@ -752,6 +752,7 @@ public:
     // Voxel > Resample Voxels to Scale: rebuild the selected voxel objects' cells at their current
     // per-axis scale and set the scale back to 1 (one undo step; the explicit destructive step).
     bool resample_voxels_to_scale();
+    [[nodiscard]] std::string resample_to_scale_disabled_reason() const;
     // While a transform drag has a typed value: "Move X: 25cm = 0.25 m" (empty otherwise).
     [[nodiscard]] std::string transform_numeric_label() const;
     // The typed value parsed in the active tool's unit, or nothing while it is empty or unfinished.

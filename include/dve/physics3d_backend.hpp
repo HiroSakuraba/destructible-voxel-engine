@@ -23,6 +23,9 @@ struct Physics3DWorldConfig {
     std::uint32_t subStepCount{};
     std::uint32_t velocityIterations{};
     std::uint32_t positionIterations{};
+    // Jolt contact tolerances in meters; zero keeps the backend default (2 cm each).
+    float speculativeContactDistanceMeters{};
+    float penetrationSlopMeters{};
     bool deterministicSimulation{true};
     bool allowSleeping{true};
     bool continuousCollision{true};

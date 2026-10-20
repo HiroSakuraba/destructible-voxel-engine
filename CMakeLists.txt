@@ -184,6 +184,7 @@ add_library(dve_core
     src/hybrid_geometry_world.cpp
     src/polygon_collision.cpp
     src/collision_hull.cpp
+    src/collision_convex_set.cpp
     src/polygon_bvh.cpp
     src/hybrid_scene_manifest.cpp
     src/runtime_scene.cpp
@@ -998,6 +999,9 @@ if(DVE_BUILD_EDITOR)
 endif()
 
 if(DVE_BUILD_TESTS)
+    add_executable(dve_collision_convex_set_tests tests/test_collision_convex_set.cpp)
+    target_link_libraries(dve_collision_convex_set_tests PRIVATE dve::core)
+    add_test(NAME dve_collision_convex_set_tests COMMAND dve_collision_convex_set_tests)
     add_executable(dve_v235_foundations_tests tests/test_v235_foundations.cpp)
     target_link_libraries(dve_v235_foundations_tests PRIVATE dve::core)
     add_test(NAME dve_v235_foundations_tests COMMAND dve_v235_foundations_tests)

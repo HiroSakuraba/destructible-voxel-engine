@@ -92,7 +92,7 @@ void NativeEditorController::draw_nurbs_construction(const IEditorCanvas& canvas
     p.text(r.x+8,r.y+20,"NURBS construction and source operations",white);
     p.text(r.x+8,r.y+40,"Inputs: "+std::to_string(nurbsConstructionInputs_.size())+" (append order; sweep: profile, rail)",white);
     for(std::size_t i=0;i<std::min<std::size_t>(3,nurbsConstructionInputs_.size());++i){auto index=nurbsConstructionInputs_.size()>3?nurbsConstructionInputs_.size()-3+i:i;p.text(r.x+8,r.y+62+int(i)*19,elide_text_to_width(p,std::to_string(index+1)+": "+nurbsConstructionInputs_[index].name,r.width-16),white);}
-    const char* names[]={"Sections / rebuild CVs / projection samples","Sweep twist (degrees)","Sweep end scale","Parameter / length fraction (0..1)","Display samples per span (1..64)"};
+    const char* names[]={"Sections / rebuild CVs / projection samples","Sweep twist (degrees)","Sweep end scale","Parameter / length fraction (0..1)","Fixed display samples per span (1..64)"};
     double values[]={double(nurbsSweepOptions_.sections),nurbsSweepOptions_.twistRadians*180/3.141592653589793,nurbsSweepOptions_.endScale,nurbsOperationParameter_,double(nurbsDisplaySamples_)};
     for(int i=0;i<5;++i){auto f=construction_field(viewport,i);p.outline(f,cyan);auto value=textEdit_.kind==TextEditKind::NurbsControl&&textEdit_.axis==i+4?textEdit_.buffer:number(values[i]);p.text(f.x+5,f.y+18,elide_text_to_width(p,std::string(names[i])+": "+value,f.width-10),white);}
     p.text(r.x+8,r.y+308,"Enter applies; Esc cancels. Build from NURBS menu.",white);

@@ -27,6 +27,10 @@ struct NurbsSource {
     // Display metadata; v1 sources decode with legacy shared crease vertices.
     bool creaseNormals{true};
     std::array<double,2> textureU{0,1},textureV{0,1};
+    // v3 display policy. Surface tolerances use source-local units/radians;
+    // adaptive subdivision uses sampled tests, not certified interval bounds.
+    bool adaptiveDisplay{};
+    double chordTolerance{.01},normalAngle{.15};
     bool operator==(const NurbsSource&) const = default;
     [[nodiscard]] bool is_curve() const noexcept { return rows==1; }
 };
@@ -43,7 +47,7 @@ struct NurbsSample {
 [[nodiscard]] std::optional<NurbsSource> insert_nurbs_knot(const NurbsSource&,bool alongV,double parameter,std::string* error=nullptr);
 [[nodiscard]] std::string encode_nurbs(const NurbsSource&);
 [[nodiscard]] std::optional<NurbsSource> decode_nurbs(std::string_view,std::string* error=nullptr);
-// Fixed per-span tessellation, not a certified chord-error bound.
+// Uses the persisted fixed/adaptive display policy; neither is error-certified.
 // Curves use a narrow two-sided guide ribbon (no implied thickness/volume).
 [[nodiscard]] std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource&,std::uint64_t objectId,std::string* error=nullptr);
 }

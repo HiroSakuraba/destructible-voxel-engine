@@ -67,6 +67,7 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     const bool elevate=action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v";
     const bool boundaries=action=="nurbs.source_boundaries";
     const bool quality=action=="nurbs.source_quality",resetUv=action=="nurbs.source_reset_uv";
+    const bool adaptiveSettings=action=="nurbs.source_display_coarse"||action=="nurbs.source_display_standard"||action=="nurbs.source_display_fine";
     const bool v=action.ends_with("_v");
     const bool reverse=action.starts_with("nurbs.source_reverse_");
     const bool transpose=action=="nurbs.source_swap_uv";
@@ -74,7 +75,7 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     const bool lengthSplit=action=="nurbs.source_split_length";
     const bool split=action.starts_with("nurbs.source_split_");
     const bool iso=action.starts_with("nurbs.source_iso_");
-    if(!reverse&&!transpose&&!insert&&!split&&!iso&&!quality&&!resetUv&&!boundaries&&!elevate)return false;
+    if(!reverse&&!transpose&&!insert&&!split&&!iso&&!quality&&!resetUv&&!boundaries&&!elevate&&!adaptiveSettings)return false;
     if(v&&source->is_curve()){set_status("A NURBS curve has no V axis",true);return false;}
     const auto& axis=v?source->v:source->u;const auto count=v?source->rows:source->columns;
     double t=std::lerp(axis.knots[axis.degree],axis.knots[count],nurbsOperationParameter_);
@@ -85,18 +86,20 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
         if(!parameter){set_status(error,true);return false;}
         t=parameter->parameter;
     }
-    if(quality||resetUv||lengthSplit)restore_parked_nurbs_controls(); // retain the selection parked by settings for undo
+    if(quality||resetUv||adaptiveSettings||lengthSplit)restore_parked_nurbs_controls(); // retain the selection parked by settings for undo
     else nurbsParkedObject_=0;
     const auto selection=capture_selection_snapshot();
-    if(reverse||transpose||insert||quality||resetUv||elevate){
-        auto after=(quality||resetUv)?source:elevate?elevate_nurbs_degree(*source,v,&error):transpose?transpose_nurbs(*source,&error):reverse?reverse_nurbs_axis(*source,v,&error):insert_nurbs_knot(*source,v,t,&error);
+    if(reverse||transpose||insert||quality||resetUv||elevate||adaptiveSettings){
+        auto after=(quality||resetUv||adaptiveSettings)?source:elevate?elevate_nurbs_degree(*source,v,&error):transpose?transpose_nurbs(*source,&error):reverse?reverse_nurbs_axis(*source,v,&error):insert_nurbs_knot(*source,v,t,&error);
         if(!after){set_status(error,true);return false;}
-        if(quality){after->samplesPerSpan=nurbsDisplaySamples_;after->creaseNormals=true;}
+        if(quality){after->samplesPerSpan=nurbsDisplaySamples_;after->creaseNormals=true;after->adaptiveDisplay=false;}
+        if(adaptiveSettings){if(source->is_curve()){set_status("Adaptive display requires a surface",true);return false;}after->adaptiveDisplay=true;after->creaseNormals=true;after->chordTolerance=action=="nurbs.source_display_coarse"?.05:action=="nurbs.source_display_fine"?.0025:.01;after->normalAngle=action=="nurbs.source_display_coarse"?.3:action=="nurbs.source_display_fine"?.075:.15;}
         if(resetUv){after->textureU={0,1};after->textureV={0,1};}
         if(*after==*source){set_status("NURBS settings already match; no history added");return true;}
         auto result=workspace_.commands().execute(doc,std::make_unique<EditNurbsCommand>(*id,*source,*after));
-        if(result.success){nurbsConstructionPanel_=false;if(!quality&&!resetUv){nurbsSelected_.clear();nurbsControl_=0;}workspace_.commands().set_last_selection_transition(selection,capture_selection_snapshot());}
-        set_status(result.success?(elevate?"NURBS degree elevated without refitting; reselect controls":quality?"NURBS display rebuilt with crease normals and selected density":resetUv?"NURBS texture ranges reset to 0..1":"NURBS parameterization updated; reselect controls (single-axis reversal / U-V swap flips the surface normal)"):result.message,!result.success);return result.success;
+        if(result.success){nurbsConstructionPanel_=false;if(!quality&&!resetUv&&!adaptiveSettings){nurbsSelected_.clear();nurbsControl_=0;}workspace_.commands().set_last_selection_transition(selection,capture_selection_snapshot());}
+        if(result.success)refresh_nurbs_menu_state();
+        set_status(result.success?(elevate?"NURBS degree elevated without refitting; reselect controls":adaptiveSettings?"Adaptive surface display saved and rebuilt; sampled local tolerances, synchronous updates":quality?"Fixed NURBS display rebuilt with crease normals and selected density":resetUv?"NURBS texture ranges reset to 0..1":"NURBS parameterization updated; reselect controls (single-axis reversal / U-V swap flips the surface normal)"):result.message,!result.success);return result.success;
     }
     std::vector<NurbsSource> results;
     if(boundaries){auto edges=extract_nurbs_boundaries(*source,&error);if(edges)for(auto& edge:*edges)results.push_back(std::move(edge));}

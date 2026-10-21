@@ -30,7 +30,7 @@ bool validate_editor_nurbs(const EditorObject& o,std::string* e){
         const auto same3=[](Float3 a,Float3 b){return a.x==b.x&&a.y==b.y&&a.z==b.z;};
         const auto same4=[](Float4 a,Float4 b){return a.x==b.x&&a.y==b.y&&a.z==b.z&&a.w==b.w;};
         if(!same2(expected.texcoord,cached.texcoord)||!same2(expected.texcoord1,cached.texcoord1)||
-           (s->creaseNormals&&(!same3(expected.normal,cached.normal)||!same4(expected.tangent,cached.tangent)))){
+           ((s->creaseNormals||s->adaptiveDisplay)&&(!same3(expected.normal,cached.normal)||!same4(expected.tangent,cached.tangent)))){
             if(e)*e="NURBS display normals or UVs diverged from source";
             return false;
         }

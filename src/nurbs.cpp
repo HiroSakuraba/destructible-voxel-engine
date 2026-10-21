@@ -1,4 +1,5 @@
 #include "dve/nurbs.hpp"
+#include "dve/nurbs_modeling.hpp"
 #include "nurbs_evaluation_internal.hpp"
 #include "dve/transform.hpp"
 #include <algorithm>
@@ -121,6 +122,9 @@ bool validate_nurbs(const NurbsSource& s,std::string* e) {
        s.controls.size()!=std::uint64_t(s.columns)*s.rows||s.samplesPerSpan<1||s.samplesPerSpan>maxSamples)
         return fail(e,"NURBS control/sample budget exceeded or inconsistent net");
     if(!axis_valid(s.u,s.columns,false,e)||!axis_valid(s.v,s.rows,s.is_curve(),e))return false;
+    if(!std::isfinite(s.chordTolerance)||s.chordTolerance<1e-8||s.chordTolerance>1e4||
+       !std::isfinite(s.normalAngle)||s.normalAngle<1e-4||s.normalAngle>3.141592653589793||
+       (s.adaptiveDisplay&&s.is_curve()))return fail(e,"Invalid adaptive surface display policy or tolerances");
     for(const auto& range:{s.textureU,s.textureV})
         if(!std::isfinite(range[0])||!std::isfinite(range[1])||std::abs(range[0])>1e6||std::abs(range[1])>1e6||!(range[1]>range[0]))
             return fail(e,"NURBS texture ranges must be finite, increasing and bounded to +/-1000000");
@@ -131,6 +135,7 @@ bool validate_nurbs(const NurbsSource& s,std::string* e) {
         minW=(std::min)(minW,p.weight);maxW=(std::max)(maxW,p.weight);
     }
     if(minW/maxW<1e-12)return fail(e,"NURBS weight ratio is ill-conditioned");
+    if(s.adaptiveDisplay)return true; // Adaptive baking enforces its own vertex/work limits.
     auto a=sample_count(s.u,s.columns,s.samplesPerSpan),b=sample_count(s.v,s.rows,s.samplesPerSpan);
     if(a>65536||b>65536||a*b>65536)return fail(e,"NURBS tessellation exceeds 65536 sample budget");
     if(s.creaseNormals){
@@ -220,7 +225,7 @@ std::optional<NurbsSource> insert_nurbs_knot(const NurbsSource& source,bool alon
 }
 std::string encode_nurbs(const NurbsSource& s){
     std::string error;if(!validate_nurbs(s,&error))return {};
-    std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17)<<"DVE_NURBS 2 "<<s.columns<<' '<<s.rows<<' '<<s.samplesPerSpan<<' '<<unsigned(s.creaseNormals)<<' '<<s.textureU[0]<<' '<<s.textureU[1]<<' '<<s.textureV[0]<<' '<<s.textureV[1]<<' ';
+    std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17)<<"DVE_NURBS 3 "<<s.columns<<' '<<s.rows<<' '<<s.samplesPerSpan<<' '<<unsigned(s.creaseNormals)<<' '<<s.textureU[0]<<' '<<s.textureU[1]<<' '<<s.textureV[0]<<' '<<s.textureV[1]<<' '<<unsigned(s.adaptiveDisplay)<<' '<<s.chordTolerance<<' '<<s.normalAngle<<' ';
     for(const auto* a:{&s.u,&s.v}){o<<a->degree<<' '<<a->knots.size()<<' ';for(auto k:a->knots)o<<k<<' ';}
     for(auto p:s.controls)o<<p.x<<' '<<p.y<<' '<<p.z<<' '<<p.weight<<' ';
     return o.str();
@@ -228,13 +233,18 @@ std::string encode_nurbs(const NurbsSource& s){
 std::optional<NurbsSource> decode_nurbs(std::string_view text,std::string* e){
     if(text.size()>1024*1024){fail(e,"NURBS source exceeds codec byte budget");return {};}
     std::istringstream in{std::string(text)};in.imbue(std::locale::classic());std::string magic;unsigned version;NurbsSource s;
-    if(!(in>>magic>>version>>s.columns>>s.rows>>s.samplesPerSpan)||magic!="DVE_NURBS"||(version!=1&&version!=2)||
+    if(!(in>>magic>>version>>s.columns>>s.rows>>s.samplesPerSpan)||magic!="DVE_NURBS"||(version!=1&&version!=2&&version!=3)||
        s.columns>maxControls||s.rows>maxControls||s.rows<1||std::uint64_t(s.columns)*s.rows>maxControls){fail(e,"Invalid NURBS source header");return {};}
     if(version==1)s.creaseNormals=false;
     else {
         unsigned creases;
         if(!(in>>creases>>s.textureU[0]>>s.textureU[1]>>s.textureV[0]>>s.textureV[1])||creases>1){fail(e,"Invalid NURBS display metadata");return {};}
         s.creaseNormals=creases!=0;
+    }
+    if(version==3){
+        unsigned adaptive;
+        if(!(in>>adaptive>>s.chordTolerance>>s.normalAngle)||adaptive>1){fail(e,"Invalid adaptive display metadata");return {};}
+        s.adaptiveDisplay=adaptive!=0;
     }
     for(auto* a:{&s.u,&s.v}){
         std::size_t count;if(!(in>>a->degree>>count)||count>maxControls+maxDegree+1){fail(e,"Invalid NURBS axis header");return {};}
@@ -246,6 +256,7 @@ std::optional<NurbsSource> decode_nurbs(std::string_view text,std::string* e){
 }
 std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource& s,std::uint64_t id,std::string* e){
     if(!validate_nurbs(s,e))return {};
+    if(s.adaptiveDisplay)return tessellate_nurbs_adaptive(s,id,s.chordTolerance,s.normalAngle,e);
     auto us=display_samples(s.u,s.columns,s.samplesPerSpan,s.creaseNormals),vs=display_samples(s.v,s.rows,s.samplesPerSpan,s.creaseNormals);
     CookedPolygonAsset m;m.objectId=id;
     VoxelMaterialDefinition material;material.name="NURBS";m.materials.push_back(material);

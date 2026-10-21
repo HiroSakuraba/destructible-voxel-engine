@@ -22,8 +22,11 @@ permissions:
   contents: read
   packages: read
 
+# Pull requests: one run per PR, superseded runs are cancelled. Pushes to main / schedule /
+# dispatch: every run gets its own group, so a push no longer queues behind the 40+ min ASan leg
+# of the previous run. The ASan leg serializes itself with a job-level group (see ctest).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name != 'pull_request' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -36,15 +39,16 @@ env:
     libx11-dev libxext-dev libxft-dev libfreetype-dev libfontconfig-dev
     libwayland-dev libxkbcommon-dev libasound2-dev libpulse-dev libjack-dev
     libflac-dev libogg-dev libvorbis-dev libopus-dev
-    ffmpeg glslang-tools xvfb xauth
+    ffmpeg glslang-tools xvfb xauth mold
   # Headless SDL for every test that does not pick its own driver; X11-only tests get xvfb-run.
   SDL_VIDEO_DRIVER: offscreen
   SDL_AUDIO_DRIVER: dummy
   CCACHE_COMPRESS: "true"
-  # Each Linux ccache directory is saved as its own Actions cache entry; keep them small so the
-  # repository stays under GitHub's 10 GB cache quota (ccache evicts least recently used objects).
-  # linux-gcc-asan overrides this (its objects are ~22x larger), see the ctest job.
-  CCACHE_MAXSIZE: 400M
+  # Each Linux ccache directory is saved as its own Actions cache entry. At 400M the release-type
+  # presets were full and thrashed. Budget against GitHub's 10 GB repo quota: 3 release-type
+  # presets x 1.2G + ASan 2.5G (overridden in the ctest job) + Windows (~0.6G) ~= 6.7G, with
+  # prune-caches keeping only the newest main entry per prefix.
+  CCACHE_MAXSIZE: 1200M
   CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
 
 jobs:
@@ -53,13 +57,18 @@ jobs:
     runs-on: ubuntu-latest
     # Mirrored from Debian trixie by ci-image-mirror.yml; pulled with credentials, not anonymously.
     container:
-      image: ghcr.io/hirosakuraba/dve-ci-debian:trixie
+      image: ghcr.io/hirosakuraba/dve-ci-debian:trixie-build
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     # linux-gcc-asan builds and runs the same suite under AddressSanitizer and UBSan, which is
     # roughly two to three times slower than a plain Release run.
     timeout-minutes: ${{ matrix.preset == 'linux-gcc-asan' && 300 || 180 }}
+    # Only the ASan leg on main serializes (one running + one pending, never cancelled); every other
+    # leg gets a unique group, i.e. no job-level limit.
+    concurrency:
+      group: ${{ matrix.preset == 'linux-gcc-asan' && github.event_name != 'pull_request' && format('ci-asan-{0}', github.ref) || format('ci-{0}-{1}-{2}', github.run_id, github.run_attempt, matrix.preset) }}
+      cancel-in-progress: false
     # linux-gcc-asan (40-50 min) does not run on pull requests: it runs on pushes to main, nightly
     # (schedule) and on workflow_dispatch. Scheduled runs only build the ASan leg.
     strategy:
@@ -73,7 +82,7 @@ jobs:
           ) }}
     env:
       # ASan objects are ~22x larger than Release ones; 400M made ccache evict nearly everything.
-      CCACHE_MAXSIZE: ${{ matrix.preset == 'linux-gcc-asan' && '2500M' || '400M' }}
+      CCACHE_MAXSIZE: ${{ matrix.preset == 'linux-gcc-asan' && '2500M' || '1200M' }}
       # Only sanitizer builds read these. Any UBSan finding fails its test instead of only being
       # printed, and a leak at exit fails it too. LSAN_OPTIONS (set below, it needs the
       # in-container workspace path) points LeakSanitizer at tests/sanitizers/lsan.supp,
@@ -83,6 +92,9 @@ jobs:
     steps:
       - name: Install build and test dependencies
         run: |
+          # The trixie-build image (ci-image-mirror.yml) already has these; only a stale image
+          # pays for apt here.
+          if dpkg -s $DVE_APT_PACKAGES >/dev/null 2>&1; then echo "all packages preinstalled"; exit 0; fi
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DVE_APT_PACKAGES
       - uses: actions/checkout@v4
@@ -111,6 +123,7 @@ jobs:
           cmake --preset ${{ matrix.preset }}
           -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_LINKER_TYPE=MOLD
           -DFETCHCONTENT_BASE_DIR=$GITHUB_WORKSPACE/.cache/fetchcontent/${{ matrix.preset }}
       - name: Build
         run: |
@@ -167,7 +180,7 @@ jobs:
     runs-on: ubuntu-latest
     # Mirrored from Debian trixie by ci-image-mirror.yml; pulled with credentials, not anonymously.
     container:
-      image: ghcr.io/hirosakuraba/dve-ci-debian:trixie
+      image: ghcr.io/hirosakuraba/dve-ci-debian:trixie-build
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -177,6 +190,9 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
+          # The trixie-build image (ci-image-mirror.yml) already has these; only a stale image
+          # pays for apt here.
+          if dpkg -s $DVE_APT_PACKAGES >/dev/null 2>&1; then echo "all packages preinstalled"; exit 0; fi
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DVE_APT_PACKAGES
       - uses: actions/checkout@v4
@@ -203,6 +219,7 @@ jobs:
           cmake --preset $PRESET
           -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_LINKER_TYPE=MOLD
           -DFETCHCONTENT_BASE_DIR=$GITHUB_WORKSPACE/.cache/fetchcontent/$PRESET
       - name: Build
         run: |
@@ -311,10 +328,12 @@ jobs:
       - name: Configure
         run: |
           ninja --version
+          command -v lld-link && lld-link --version
           sccache="$(cygpath -m "$SCCACHE_PATH")"
           cmake --preset $PRESET -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl \
+            -DCMAKE_LINKER_TYPE=LLD \
             "-DCMAKE_C_COMPILER_LAUNCHER=$sccache" "-DCMAKE_CXX_COMPILER_LAUNCHER=$sccache" \
             -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
             -DGENERATE_DEBUG_SYMBOLS=OFF \
@@ -405,3 +424,29 @@ jobs:
           echo "::error file=SOURCE_MANIFEST.sha256::SOURCE_MANIFEST.sha256 is stale on main; run scripts/update_source_manifest.sh and commit the result"
           git diff -U0 -- SOURCE_MANIFEST.sha256 | grep -E '^[+-][0-9a-f]{64} ' | sed -E 's/^([+-])[0-9a-f]{64}  /\1 /' | sort -k2 | head -100
           exit 1
+
+  # Every save on main creates a new Actions cache entry (keys carry the run id), so old entries
+  # piled up (6 x 0.5 GB per preset) and pushed the repository over the 10 GB quota, which makes
+  # GitHub evict entries least-recently-used first. Keep only the newest main entry per prefix.
+  prune-caches:
+    if: always() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [ctest, windows-msvc]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Delete superseded ccache / fetchcontent entries on main
+        run: |
+          gh api --paginate "repos/$GH_REPO/actions/caches?ref=refs/heads/main&per_page=100" \
+            -q '.actions_caches[] | select(.key | startswith("dve-")) | [.id, .key, .created_at, .size_in_bytes] | @tsv' > caches.tsv
+          # prefix = key without the trailing -<run id>-<attempt>
+          sort -t$'\t' -k3,3r caches.tsv | awk -F'\t' '{p=$2; sub(/-[0-9]+-[0-9]+$/,"",p); sub(/-[0-9a-f]{64}$/,"",p); if (seen[p]++) print $1"\t"$2"\t"$4}' > stale.tsv
+          echo "stale entries: $(wc -l < stale.tsv), $(awk -F'\t' '{s+=$3} END {printf "%.0f MiB", s/1048576}' stale.tsv)"
+          while IFS=$'\t' read -r id key size; do
+            echo "delete $key"; gh api -X DELETE "repos/$GH_REPO/actions/caches/$id" || true
+          done < stale.tsv
+          gh api "repos/$GH_REPO/actions/cache/usage"

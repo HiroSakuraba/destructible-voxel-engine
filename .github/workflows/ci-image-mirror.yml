@@ -13,6 +13,7 @@ on:
   push:
     paths:
       - .github/workflows/ci-image-mirror.yml
+      - .github/ci-image/**
 
 permissions:
   contents: read
@@ -24,12 +25,16 @@ concurrency:
 
 env:
   TARGET: ghcr.io/hirosakuraba/dve-ci-debian:trixie
+  # Same base plus every package ci.yml needs (DVE_APT_PACKAGES, mold), so the Linux CI jobs skip
+  # the ~40-80 s apt-get step. ci.yml still installs anything missing if this image is stale.
+  BUILD_TARGET: ghcr.io/hirosakuraba/dve-ci-debian:trixie-build
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Pull trixie from upstream (Docker Hub, then public ECR; retry with backoff)
@@ -49,3 +54,10 @@ jobs:
           docker build -t "$TARGET" -f Dockerfile.mirror .
           docker push "$TARGET"
           docker image inspect "$TARGET" --format '{{.Id}} {{.Created}}'
+      - name: Build and push the CI build image (packages baked in)
+        run: |
+          docker build -t "$BUILD_TARGET" --build-arg BASE="$TARGET" \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            -f .github/ci-image/Dockerfile .github/ci-image
+          docker run --rm "$BUILD_TARGET" sh -c 'gcc --version | head -1; cmake --version | head -1; mold --version; ccache --version | head -1'
+          docker push "$BUILD_TARGET"

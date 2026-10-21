@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/editor_nurbs.hpp"
+#include "dve/editor_nurbs_seam.hpp"
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -16,15 +17,17 @@ public:
         std::uint64_t generation{};
         NurbsSource source;
         std::unique_ptr<EditNurbsCommand> command;
+        std::unique_ptr<PreparedNurbsSeamEdit> seamCommand;
         std::string error;
     };
     NurbsTessellationQueue();
     ~NurbsTessellationQueue();
     std::uint64_t submit(std::shared_ptr<const EditorObject>,NurbsSource);
+    std::uint64_t submit(std::shared_ptr<const NurbsSeamDragSnapshot>,EditorObjectId,NurbsSource);
     void cancel();
     [[nodiscard]] std::optional<Result> poll();
 private:
-    struct Request { std::uint64_t generation;std::shared_ptr<const EditorObject> object;NurbsSource source;std::stop_source stop; };
+    struct Request { std::uint64_t generation;std::shared_ptr<const EditorObject> object;NurbsSource source;std::stop_source stop;std::shared_ptr<const NurbsSeamDragSnapshot> seam;EditorObjectId edited{}; };
     void run(std::stop_token);
     std::mutex mutex_;
     std::condition_variable_any ready_;

@@ -53,14 +53,24 @@ EditorObjectBounds NativeEditorController::nurbs_control_bounds() const{
 bool NativeEditorController::begin_nurbs_gizmo(){
     if(!nurbs_control_mode()||nurbsSelected_.empty())return false;
     const auto* o=workspace_.document().find_object(nurbsEditingObject_);std::string error;
-    if(has_nurbs_seam(*o)){set_status("Linked seam controls use numeric CV edits; unlink before gizmo dragging",true);return false;}
     auto s=editor_nurbs_source(*o,&error);
     if(!s||!o->polygon||o->subdivision||o->modelingTopology||find_component_by_type(o->components,"dve.exact_brep")||
-       (!s->adaptiveDisplay&&!validate_editor_nurbs(*o,&error))||std::any_of(nurbsSelected_.begin(),nurbsSelected_.end(),[&](auto i){return i>=s->controls.size();})){
+       (!s->adaptiveDisplay&&!has_nurbs_seam(*o)&&!validate_editor_nurbs(*o,&error))||std::any_of(nurbsSelected_.begin(),nurbsSelected_.end(),[&](auto i){return i>=s->controls.size();})){
         set_status(error.empty()?"Select valid NURBS controls":error,true);return false;
     }
+    nurbsSeamDragSnapshot_.reset();nurbsPreparedSeamEdit_.reset();
+    if(has_nurbs_seam(*o)){
+        auto seam=editor_nurbs_seam(*o,&error);
+        const auto partner=seam?(o->id==seam->reference?seam->moving:seam->reference):0;
+        if(!seam||is_isolated_out(partner)){set_status("Both linked patches must be available in the current isolation",true);return false;}
+        if(nurbs_seam_controls_driven(*o,nurbsSelected_)){
+            set_status("Selected boundary/tangent controls are driven by the reference; select free controls or edit the reference",true);return false;
+        }
+        nurbsSeamDragSnapshot_=capture_nurbs_seam_drag(workspace_.document(),o->id,&error);
+        if(!nurbsSeamDragSnapshot_){set_status(error,true);return false;}
+    }
     nurbsDragSelection_=capture_selection_snapshot();nurbsDragBefore_=s;nurbsDragPreview_=s;
-    if(s->adaptiveDisplay){
+    if(s->adaptiveDisplay||nurbsSeamDragSnapshot_){
         CookedPolygonAsset geometry;geometry.objectId=o->polygon->objectId;
         geometry.vertices=o->polygon->vertices;geometry.indices=o->polygon->indices;
         geometry.submeshes=o->polygon->submeshes;geometry.bounds=o->polygon->bounds;
@@ -70,7 +80,7 @@ bool NativeEditorController::begin_nurbs_gizmo(){
     nurbsPreparedGeneration_=0;
     nurbsDragRevision_=workspace_.document().revision();nurbsDragPose_=o->transform;nurbsDragMetric_=o->voxelScale;
     nurbsFinishPending_=false;nurbsDragRequested_.reset();nurbsPreparedEdit_.reset();
-    if(s->adaptiveDisplay){
+    if(s->adaptiveDisplay||nurbsSeamDragSnapshot_){
         if(!nurbsTessellation_)nurbsTessellation_=std::make_shared<NurbsTessellationQueue>();
         nurbsDragSnapshot_=std::make_shared<EditorObject>(clone_editor_object(*o));
     }
@@ -96,11 +106,11 @@ bool NativeEditorController::preview_nurbs_transform(Float3 translation,Quaterni
         local=rotate_double(conjugate(o->transform.rotation),world);
         p.x=local[0]/o->voxelScale.x;p.y=local[1]/o->voxelScale.y;p.z=local[2]/o->voxelScale.z;
     }
-    if(nurbsDragBefore_->adaptiveDisplay){
+    if(nurbsDragBefore_->adaptiveDisplay||nurbsSeamDragSnapshot_){
         if(!validate_nurbs(after,&error)){nurbsDragValid_=false;set_status(error,true);return false;}
         if(nurbsDragValid_&&nurbsDragRequested_&&*nurbsDragRequested_==after)return true;
         // All requests derive from the same immutable, pre-drag source/cache.
-        nurbsTessellationGeneration_=nurbsTessellation_->submit(nurbsDragSnapshot_,after);
+        nurbsTessellationGeneration_=nurbsSeamDragSnapshot_?nurbsTessellation_->submit(nurbsSeamDragSnapshot_,nurbsEditingObject_,after):nurbsTessellation_->submit(nurbsDragSnapshot_,after);
         nurbsDragRequested_=std::move(after);nurbsDragValid_=true;
         set_status("Updating NURBS display; Escape cancels");return true;
     }
@@ -114,8 +124,36 @@ void NativeEditorController::poll_nurbs_tessellation(){
     if(!nurbs_control_mode()||!source||!nurbsDragPreview_||*source!=*nurbsDragPreview_||
        workspace_.document().revision()!=nurbsDragRevision_||!same_placement(*object,nurbsDragPose_,nurbsDragMetric_)||
        object->subdivision||object->modelingTopology||find_component_by_type(std::span<const Component>(object->components),"dve.exact_brep")||
-       !object->polygon||!nurbs_display_geometry_matches(nurbsPreparedEdit_?*nurbsPreparedEdit_->prepared_mesh():*nurbsDragMeshBefore_,*object->polygon)){
+       !object->polygon||!nurbs_display_geometry_matches(nurbsPreparedSeamEdit_?*nurbsPreparedSeamEdit_->edited_object(nurbsEditingObject_).polygon:nurbsPreparedEdit_?*nurbsPreparedEdit_->prepared_mesh():*nurbsDragMeshBefore_,*object->polygon)){
         finish_nurbs_gizmo(true);return;
+    }
+    if(nurbsSeamDragSnapshot_){
+        const auto& snapshot=*nurbsSeamDragSnapshot_;
+        const auto* a=workspace_.document().find_object(snapshot.reference.id);
+        const auto* b=workspace_.document().find_object(snapshot.moving.id);
+        const auto other=nurbsEditingObject_==snapshot.reference.id?snapshot.moving.id:snapshot.reference.id;
+        // Check both endpoints even while the worker is still running.
+        const auto baselineMatches=[&](const EditorObject* live,const EditorObject& saved){
+            if(!live||!live->polygon||live->flags.locked||!live->flags.visible||live->prefabLink||
+               live->subdivision||live->modelingTopology||find_component_by_type(live->components,"dve.exact_brep")||
+               !nurbs_seam_same_frame(*live,saved)||editor_nurbs_source(*live)!=editor_nurbs_source(saved)||
+               !nurbs_display_geometry_matches(*live->polygon,*saved.polygon))return false;
+            const auto* lc=find_component_by_type(live->components,kNurbsComponent);
+            const auto* sc=find_component_by_type(saved.components,kNurbsComponent);
+            auto it=lc->properties.find("seam");
+            const auto* text=it==lc->properties.end()?nullptr:std::get_if<std::string>(&it->second);
+            return text&&*text==std::get<std::string>(sc->properties.at("seam"));
+        };
+        if(is_isolated_out(other)||!(nurbsPreparedSeamEdit_?nurbsPreparedSeamEdit_->matches(workspace_.document(),true):
+            baselineMatches(a,snapshot.reference)&&baselineMatches(b,snapshot.moving))){finish_nurbs_gizmo(true);return;}
+        auto result=nurbsTessellation_->poll();if(!result||result->generation!=nurbsTessellationGeneration_)return;
+        if(!result->seamCommand){nurbsDragValid_=false;set_status(result->error.empty()?"Linked NURBS display failed":result->error,true);if(nurbsFinishPending_)finish_nurbs_gizmo(true);return;}
+        std::string error;
+        if(!result->seamCommand->publish_preview(workspace_.document(),nurbsPreparedSeamEdit_.get(),&error)){set_status(error,true);finish_nurbs_gizmo(true);return;}
+        nurbsDragPreview_=editor_nurbs_source(result->seamCommand->edited_object(nurbsEditingObject_));
+        nurbsPreparedGeneration_=result->generation;nurbsPreparedSeamEdit_=std::move(result->seamCommand);
+        if(nurbsFinishPending_)finish_nurbs_gizmo(false);else set_status("Linked NURBS displays updated; release to apply or Escape to cancel");
+        return;
     }
     auto result=nurbsTessellation_->poll();if(!result||result->generation!=nurbsTessellationGeneration_)return;
     if(!result->command){
@@ -140,14 +178,29 @@ void NativeEditorController::finish_nurbs_gizmo(bool cancel){
     const auto* target=workspace_.document().find_object(nurbsEditingObject_);
     cancel=cancel||workspace_.document().revision()!=nurbsDragRevision_||
         (target&&!same_placement(*target,nurbsDragPose_,nurbsDragMetric_));
-    if(!cancel&&nurbsDragRequested_&&nurbsDragValid_&&(!nurbsPreparedEdit_||nurbsPreparedGeneration_!=nurbsTessellationGeneration_)){
+    if(!cancel&&nurbsDragRequested_&&nurbsDragValid_&&((!nurbsPreparedEdit_&&!nurbsPreparedSeamEdit_)||nurbsPreparedGeneration_!=nurbsTessellationGeneration_)){
         nurbsFinishPending_=true;set_status("Finishing NURBS display; Escape cancels");return;
     }
     if(nurbsTessellation_)nurbsTessellation_->cancel();
+    if(nurbsSeamDragSnapshot_){
+        std::string error;
+        if(nurbsPreparedSeamEdit_){
+            cancel=cancel||!nurbs_control_mode()||!nurbsPreparedSeamEdit_->matches(workspace_.document(),true);
+            const bool changed=editor_nurbs_source(nurbsPreparedSeamEdit_->edited_object(nurbsEditingObject_))!=nurbsDragBefore_;
+            if(nurbsPreparedSeamEdit_->restore_preview(workspace_.document(),&error)){
+                if(!cancel&&nurbsDragValid_&&changed){
+                    auto result=workspace_.commands().execute(workspace_.document(),std::move(nurbsPreparedSeamEdit_));
+                    if(result.success)workspace_.commands().set_last_selection_transition(nurbsDragSelection_,capture_selection_snapshot());
+                    set_status(result.success?"Transformed linked NURBS controls":result.message,!result.success);
+                }
+            }else set_status(error,true);
+        }
+        nurbsPreparedSeamEdit_.reset();nurbsSeamDragSnapshot_.reset();
+    }else {
     auto* o=workspace_.document().find_object(nurbsEditingObject_);std::string error;
     auto current=o?editor_nurbs_source(*o,&error):std::nullopt;
     if(current&&nurbsDragPreview_&&*current==*nurbsDragPreview_&&nurbsDragBefore_&&nurbsDragMeshBefore_&&
-       (!nurbsDragRequested_||(o->polygon&&nurbs_display_geometry_matches(nurbsPreparedEdit_?*nurbsPreparedEdit_->prepared_mesh():*nurbsDragMeshBefore_,*o->polygon)))){
+       (!nurbsDragRequested_||(o->polygon&&nurbs_display_geometry_matches(nurbsPreparedSeamEdit_?*nurbsPreparedSeamEdit_->edited_object(nurbsEditingObject_).polygon:nurbsPreparedEdit_?*nurbsPreparedEdit_->prepared_mesh():*nurbsDragMeshBefore_,*o->polygon)))){
         auto after=*current;
         find_component_by_type(std::span<Component>(o->components),kNurbsComponent)->properties["source"]=encode_nurbs(*nurbsDragBefore_);
         auto restored=*nurbsDragMeshBefore_;
@@ -163,6 +216,7 @@ void NativeEditorController::finish_nurbs_gizmo(bool cancel){
             set_status(result.success?"Transformed selected NURBS controls":result.message,!result.success);
         } else if(!cancel&&!nurbsDragValid_)set_status("Invalid NURBS preview cancelled",true);
     } else set_status("NURBS source changed; external source preserved",true);
+    }
     nurbsDragRequested_.reset();nurbsPreparedEdit_.reset();nurbsDragSnapshot_.reset();nurbsFinishPending_=false;
     nurbsDragBefore_.reset();nurbsDragPreview_.reset();nurbsDragMeshBefore_.reset();
     gizmoDragging_=false;gizmoAxis_=0;gizmoChanges_.clear();gizmoSizeChanges_.clear();transformNumeric_.clear();

@@ -2,6 +2,7 @@
 #include "dve/nurbs.hpp"
 #include <optional>
 #include <string>
+#include <stop_token>
 namespace dve {
 enum class NurbsBoundary { UMin, UMax, VMin, VMax };
 struct NurbsAttachmentOptions {
@@ -25,5 +26,5 @@ struct NurbsAttachment {
 // Returns independent patches; no sewing, live adjacency, G2/C2 or blend strip.
 [[nodiscard]] std::optional<NurbsAttachment> attach_nurbs_boundaries(
     const NurbsSource& reference,const NurbsSource& moving,
-    NurbsAttachmentOptions options={},std::string* error=nullptr);
+    NurbsAttachmentOptions options={},std::string* error=nullptr,std::stop_token stop={});
 }

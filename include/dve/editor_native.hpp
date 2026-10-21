@@ -1451,6 +1451,8 @@ private:
     std::shared_ptr<NurbsTessellationQueue> nurbsTessellation_;
     std::shared_ptr<const EditorObject> nurbsDragSnapshot_;
     std::unique_ptr<EditNurbsCommand> nurbsPreparedEdit_;
+    std::shared_ptr<const NurbsSeamDragSnapshot> nurbsSeamDragSnapshot_;
+    std::unique_ptr<PreparedNurbsSeamEdit> nurbsPreparedSeamEdit_;
     std::optional<NurbsSource> nurbsDragRequested_;
     std::uint64_t nurbsTessellationGeneration_{},nurbsPreparedGeneration_{};
     bool nurbsFinishPending_{};

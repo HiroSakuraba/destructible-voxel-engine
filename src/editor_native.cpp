@@ -6440,8 +6440,8 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
     if (selectionDomain_ == SelectionDomain::Polygons && polygonSelection_.components.empty()) return;
     gizmoAxis_ = hit_test_gizmo_axis(x, y);
     if (gizmoAxis_ == 0) return;
-    for(auto id:workspace_.selected_objects()){const auto* object=workspace_.document().find_object(id);if(object&&has_nurbs_seam(*object)){
-        set_status("Linked NURBS seams use numeric CV edits; unlink before patch gizmo transforms",true);gizmoAxis_=0;return;
+    for(auto id:workspace_.selected_objects()){const auto* object=workspace_.document().find_object(id);if(object&&has_nurbs_seam(*object)&&!nurbs_control_mode()){
+        set_status("Unlink NURBS seams before patch gizmo transforms",true);gizmoAxis_=0;return;
     }}
     for (EditorObjectId id : workspace_.selected_objects()) {
         const EditorObject* object = workspace_.document().find_object(id);

@@ -33,27 +33,28 @@ void appearance(CookedPolygonAsset& mesh,const CookedPolygonAsset& old){mesh.mat
 void set_source(EditorObject& object,const NurbsSource& source){find_component_by_type(std::span<Component>(object.components),kNurbsComponent)->properties["source"]=encode_nurbs(source);}
 void set_seam(EditorObject& object,const NurbsSeam& seam){find_component_by_type(std::span<Component>(object.components),kNurbsComponent)->properties[std::string(kNurbsSeamProperty)]=encode(seam);}
 void clear_seam(EditorObject& object){find_component_by_type(std::span<Component>(object.components),kNurbsComponent)->properties.erase(std::string(kNurbsSeamProperty));}
-bool continuity(const NurbsSource& a,const NurbsSource& b,const NurbsSeam& seam,std::string* error){
+bool continuity(const NurbsSource& a,const NurbsSource& b,const NurbsSeam& seam,std::string* error,std::stop_token stop={}){
     std::vector<double> fractions=seam.fractions;
     for(std::size_t i=1;i<seam.fractions.size();++i)fractions.push_back(std::midpoint(seam.fractions[i-1],seam.fractions[i]));
     auto pa=parameters(a,seam.options.referenceBoundary,fractions,false),pb=parameters(b,seam.options.movingBoundary,fractions,seam.options.reverseBoundary);
     if(pa.size()!=fractions.size()||pb.size()!=fractions.size())return fail(error,"Seam continuity sample parameters lost precision");
     const auto& ca=v_edge(seam.options.referenceBoundary)?a.v:a.u;const auto& cb=v_edge(seam.options.movingBoundary)?b.v:b.u;
     const double scaleA=(min_edge(seam.options.referenceBoundary)?-1.:1.)*(ca.knots.back()-ca.knots.front()),scaleB=(min_edge(seam.options.movingBoundary)?1.:-1.)*(cb.knots.back()-cb.knots.front());
-    for(std::size_t i=0;i<pa.size();++i){auto x=boundary(a,seam.options.referenceBoundary,pa[i]),y=boundary(b,seam.options.movingBoundary,pb[i]);if(!x||!y)return fail(error,"Linked seam boundary evaluation failed");
+    for(std::size_t i=0;i<pa.size();++i){if(stop.stop_requested())return fail(error,"NURBS seam cancelled");auto x=boundary(a,seam.options.referenceBoundary,pa[i]),y=boundary(b,seam.options.movingBoundary,pb[i]);if(!x||!y)return fail(error,"Linked seam boundary evaluation failed");
         const auto da=v_edge(seam.options.referenceBoundary)?x->dv:x->du,db=v_edge(seam.options.movingBoundary)?y->dv:y->du;
         for(unsigned k=0;k<3;++k){if(std::abs(x->position[k]-y->position[k])>1e-8*(1+std::abs(x->position[k])))return fail(error,"Linked seam C0 continuity is stale");
             if(seam.options.c1&&std::abs(da[k]*scaleA-db[k]*scaleB)>1e-7*(1+std::abs(da[k]*scaleA)))return fail(error,"Linked seam C1 continuity is stale");}
     }
     return true;
 }
-bool prepare_pair(EditorObject& a,EditorObject& b,NurbsAttachmentOptions options,std::string* error){
+bool prepare_pair(EditorObject& a,EditorObject& b,NurbsAttachmentOptions options,std::string* error,std::stop_token stop={}){
+    if(stop.stop_requested())return fail(error,"NURBS seam cancelled");
     if(!same_frame(a,b))return fail(error,"Linked patches require the same parent, pose and axis scale, without socket attachment; match boundaries first or unlink before independent transforms");
     auto sa=editor_nurbs_source(a,error),sb=editor_nurbs_source(b,error);if(!sa||!sb)return false;
-    options.preserveWeightGauge=true;auto matched=attach_nurbs_boundaries(*sa,*sb,options,error);if(!matched)return false;
+    options.preserveWeightGauge=true;auto matched=attach_nurbs_boundaries(*sa,*sb,options,error,stop);if(!matched)return false;
     // Publish the prepared reference too: both sources then share the exact compatible basis.
     sa=std::move(matched->reference);sb=std::move(matched->moving);
-    auto ga=nurbs_display_grid(*sa,nullptr,error),gb=nurbs_display_grid(*sb,nullptr,error);if(!ga||!gb)return false;
+    auto ga=nurbs_display_grid(*sa,nullptr,error,stop),gb=nurbs_display_grid(*sb,nullptr,error,stop);if(!ga||!gb)return false;
     std::vector<double> fractions;
     auto collect=[&](const NurbsSource& source,const NurbsDisplayGrid& grid,NurbsBoundary edge,bool reverse,const std::vector<double>& previous){
         const auto& axis=v_edge(edge)?source.u:source.v;const auto& values=v_edge(edge)?grid.u:grid.v;auto old=parameters(source,edge,previous,reverse);
@@ -79,13 +80,14 @@ bool prepare_pair(EditorObject& a,EditorObject& b,NurbsAttachmentOptions options
     };
     bool settled=false;
     for(unsigned round=0;round<12;++round){
+        if(stop.stop_requested())return fail(error,"NURBS seam cancelled");
         auto previous=fractions;collect(*sa,*ga,options.referenceBoundary,false,previous);collect(*sb,*gb,options.movingBoundary,options.reverseBoundary,previous);
         if(!canonicalize())return fail(error,"Shared seam exceeds its sample budget");
         auto as=parameters(*sa,options.referenceBoundary,fractions,false),bs=parameters(*sb,options.movingBoundary,fractions,options.reverseBoundary);
         if(as.size()!=fractions.size()||bs.size()!=fractions.size())return fail(error,"Shared seam parameter mapping lost precision");
         auto seedA=*ga,seedB=*gb;(v_edge(options.referenceBoundary)?seedA.u:seedA.v)=as;auto sortedB=bs;std::sort(sortedB.begin(),sortedB.end());(v_edge(options.movingBoundary)?seedB.u:seedB.v)=std::move(sortedB);
         if(!validate_nurbs_display_grid(*sa,seedA,error)||!validate_nurbs_display_grid(*sb,seedB,error))return false;
-        auto nextA=nurbs_display_grid(*sa,&seedA,error),nextB=nurbs_display_grid(*sb,&seedB,error);if(!nextA||!nextB)return false;
+        auto nextA=nurbs_display_grid(*sa,&seedA,error,stop),nextB=nurbs_display_grid(*sb,&seedB,error,stop);if(!nextA||!nextB)return false;
         previous=fractions;collect(*sa,*nextA,options.referenceBoundary,false,previous);collect(*sb,*nextB,options.movingBoundary,options.reverseBoundary,previous);
         if(!canonicalize())return fail(error,"Shared seam exceeds its sample budget");
         as=parameters(*sa,options.referenceBoundary,fractions,false);bs=parameters(*sb,options.movingBoundary,fractions,options.reverseBoundary);
@@ -97,10 +99,10 @@ bool prepare_pair(EditorObject& a,EditorObject& b,NurbsAttachmentOptions options
     }
     if(!settled)return fail(error,"Shared adaptive seam did not stabilize within 12 rounds");
     NurbsSeam seam;seam.reference=a.id;seam.moving=b.id;seam.options=options;seam.referenceStamp=nurbs_source_stamp(*sa);seam.movingStamp=nurbs_source_stamp(*sb);seam.fractions=std::move(fractions);
-    if(!continuity(*sa,*sb,seam,error))return false;
+    if(!continuity(*sa,*sb,seam,error,stop))return false;
     auto positions=parameters(*sa,options.referenceBoundary,seam.fractions,false);for(double t:positions){auto p=boundary(*sa,options.referenceBoundary,t);if(!p)return fail(error,"Shared seam evaluation failed");seam.anchors.push_back({float(p->position[0]),float(p->position[1]),float(p->position[2])});}
     set_source(a,*sa);set_source(b,*sb);seam.grid=*ga;set_seam(a,seam);seam.grid=*gb;set_seam(b,seam);
-    auto ma=tessellate_editor_nurbs_display(a,*sa,error),mb=tessellate_editor_nurbs_display(b,*sb,error);if(!ma||!mb)return false;
+    auto ma=tessellate_editor_nurbs_display(a,*sa,error,stop),mb=tessellate_editor_nurbs_display(b,*sb,error,stop);if(!ma||!mb)return false;
     appearance(*ma,*a.polygon);appearance(*mb,*b.polygon);if(!validate_polygon_asset(*ma)||!validate_polygon_asset(*mb))return fail(error,"Shared NURBS material/cache validation failed");a.polygon=std::move(ma);b.polygon=std::move(mb);return true;
 }
 class SeamCommand final:public IEditorCommand {
@@ -166,11 +168,11 @@ std::optional<CookedPolygonAsset> tessellate_editor_nurbs_display(const EditorOb
     const auto edge=reference?seam->options.referenceBoundary:seam->options.movingBoundary;auto params=parameters(source,edge,seam->fractions,!reference&&seam->options.reverseBoundary);const auto& values=v_edge(edge)?seam->grid.u:seam->grid.v;
     if(params.size()!=values.size()){fail(error,"Shared seam schedule is incomplete");return {};}
     for(double p:params)if(std::find(values.begin(),values.end(),p)==values.end()){fail(error,"Shared seam schedule lost a parameter");return {};}
-    for(std::size_t i=0;i<params.size();++i){auto p=boundary(source,edge,params[i]);if(!p)return {};auto a=seam->anchors[i];if(reference&&(float(p->position[0])!=a.x||float(p->position[1])!=a.y||float(p->position[2])!=a.z)){fail(error,"Reference seam anchors are stale");return {};}for(unsigned k=0;k<3;++k){double x=p->position[k],y=k==0?a.x:k==1?a.y:a.z;if(std::abs(x-y)>8*std::numeric_limits<float>::epsilon()*(1+std::abs(x))){fail(error,"Shared seam anchor diverged from its NURBS boundary");return {};}}}
+    for(std::size_t i=0;i<params.size();++i){if(stop.stop_requested())return {};auto p=boundary(source,edge,params[i]);if(!p)return {};auto a=seam->anchors[i];if(reference&&(float(p->position[0])!=a.x||float(p->position[1])!=a.y||float(p->position[2])!=a.z)){fail(error,"Reference seam anchors are stale");return {};}for(unsigned k=0;k<3;++k){double x=p->position[k],y=k==0?a.x:k==1?a.y:a.z;if(std::abs(x-y)>8*std::numeric_limits<float>::epsilon()*(1+std::abs(x))){fail(error,"Shared seam anchor diverged from its NURBS boundary");return {};}}}
     const auto columns=seam->grid.u.size()-1;
     for(std::size_t j=0;j+1<seam->grid.v.size();++j)for(std::size_t i=0;i+1<seam->grid.u.size();++i)for(unsigned k=0;k<4;++k){const auto u=i+(k==1||k==2),v=j+(k>=2);const bool on=v_edge(edge)?(min_edge(edge)?v==0:v+1==seam->grid.v.size()):(min_edge(edge)?u==0:u+1==seam->grid.u.size());if(!on)continue;
         const double t=v_edge(edge)?seam->grid.u[u]:seam->grid.v[v];auto it=std::find(params.begin(),params.end(),t);if(it==params.end()){fail(error,"Shared seam vertex is not scheduled");return {};}mesh->vertices[(j*columns+i)*4+k].position=seam->anchors[std::size_t(it-params.begin())];}
-    for(std::size_t i=0;i<mesh->indices.size();i+=3){auto a=mesh->vertices[mesh->indices[i]].position,b=mesh->vertices[mesh->indices[i+1]].position,c=mesh->vertices[mesh->indices[i+2]].position;const double x=(double(b.y)-a.y)*(double(c.z)-a.z)-(double(b.z)-a.z)*(double(c.y)-a.y),y=(double(b.z)-a.z)*(double(c.x)-a.x)-(double(b.x)-a.x)*(double(c.z)-a.z),z=(double(b.x)-a.x)*(double(c.y)-a.y)-(double(b.y)-a.y)*(double(c.x)-a.x);if(!(std::hypot(x,y,z)>0)){fail(error,"Shared seam triangles collapse at float precision");return {};}}
+    for(std::size_t i=0;i<mesh->indices.size();i+=3){if(stop.stop_requested())return {};auto a=mesh->vertices[mesh->indices[i]].position,b=mesh->vertices[mesh->indices[i+1]].position,c=mesh->vertices[mesh->indices[i+2]].position;const double x=(double(b.y)-a.y)*(double(c.z)-a.z)-(double(b.z)-a.z)*(double(c.y)-a.y),y=(double(b.z)-a.z)*(double(c.x)-a.x)-(double(b.x)-a.x)*(double(c.z)-a.z),z=(double(b.x)-a.x)*(double(c.y)-a.y)-(double(b.y)-a.y)*(double(c.x)-a.x);if(!(std::hypot(x,y,z)>0)){fail(error,"Shared seam triangles collapse at float precision");return {};}}
     mesh->bounds.minimum=mesh->bounds.maximum=mesh->vertices.front().position;for(const auto& v:mesh->vertices){auto p=v.position;mesh->bounds.minimum={(std::min)(mesh->bounds.minimum.x,p.x),(std::min)(mesh->bounds.minimum.y,p.y),(std::min)(mesh->bounds.minimum.z,p.z)};mesh->bounds.maximum={(std::max)(mesh->bounds.maximum.x,p.x),(std::max)(mesh->bounds.maximum.y,p.y),(std::max)(mesh->bounds.maximum.z,p.z)};}mesh->contentHash=polygon_asset_content_hash(*mesh);return mesh;
 }
 bool validate_editor_nurbs_seams(const EditorDocument& document,std::string* error){
@@ -189,4 +191,101 @@ std::unique_ptr<IEditorCommand> link_nurbs_seam_command(EditorObjectId a,EditorO
 std::unique_ptr<IEditorCommand> unlink_nurbs_seam_command(EditorObjectId id){return std::make_unique<SeamCommand>(SeamCommand::Mode::Unlink,id);}
 std::unique_ptr<IEditorCommand> refresh_nurbs_seam_command(EditorObjectId id){return std::make_unique<SeamCommand>(SeamCommand::Mode::Refresh,id);}
 std::unique_ptr<IEditorCommand> edit_nurbs_seam_command(EditorObjectId id,const NurbsSource& before,const NurbsSource& after){return std::make_unique<SeamCommand>(SeamCommand::Mode::Edit,id,0,NurbsAttachmentOptions{},before,after);}
+namespace {
+bool pair_state_matches(const EditorDocument& document,const NurbsSeamDragSnapshot& pair,bool editable){
+    for(const auto* saved:{&pair.reference,&pair.moving}){
+        const auto* current=document.find_object(saved->id);
+        if(!current||!current->polygon||current->subdivision||current->modelingTopology||
+           find_component_by_type(current->components,"dve.exact_brep")||!encoded(*current)||!encoded(*saved)||
+           *encoded(*current)!=*encoded(*saved)||editor_nurbs_source(*current)!=editor_nurbs_source(*saved)||
+           !nurbs_display_geometry_matches(*current->polygon,*saved->polygon))return false;
+        if(editable&&(current->flags.locked||!current->flags.visible||current->prefabLink||!same_frame(*current,*saved)))return false;
+    }
+    return true;
+}
+bool publish_pair(EditorDocument& document,const NurbsSeamDragSnapshot& pair,std::string* error){
+    // Allocate/validate both replacements before touching either live object.
+    std::vector<CookedPolygonAsset> meshes;
+    std::vector<std::map<std::string,ComponentValue,std::less<>>> properties;
+    for(const auto* saved:{&pair.reference,&pair.moving}){
+        auto* current=document.find_object(saved->id);
+        if(!current||!current->polygon||!find_component_by_type(std::span<const Component>(current->components),kNurbsComponent))return fail(error,"Linked patch disappeared");
+        auto mesh=*saved->polygon;appearance(mesh,*current->polygon);
+        auto valid=validate_polygon_asset(mesh);if(!valid)return fail(error,valid.message);
+        auto props=find_component_by_type(std::span<const Component>(current->components),kNurbsComponent)->properties;
+        const auto& savedProps=find_component_by_type(saved->components,kNurbsComponent)->properties;
+        props["source"]=savedProps.at("source");props[std::string(kNurbsSeamProperty)]=savedProps.at("seam");
+        meshes.push_back(std::move(mesh));properties.push_back(std::move(props));
+    }
+    unsigned i=0;
+    for(const auto* saved:{&pair.reference,&pair.moving}){
+        auto* current=document.find_object(saved->id);current->polygon=std::move(meshes[i]);
+        find_component_by_type(std::span<Component>(current->components),kNurbsComponent)->properties=std::move(properties[i++]);
+    }
+    return true;
+}
+}
+namespace {
+bool driven_control(const NurbsSource& source,const NurbsSeam& seam,EditorObjectId id,std::size_t index){
+    if(index>=source.controls.size())return true;
+    if(id==seam.reference)return false;
+    const bool v=v_edge(seam.options.movingBoundary),minimum=min_edge(seam.options.movingBoundary);
+    const auto cross=v?unsigned(index/source.columns):unsigned(index%source.columns);
+    const auto count=v?source.rows:source.columns;
+    return (minimum?cross:count-1-cross)<=(seam.options.c1?1U:0U);
+}
+}
+bool nurbs_seam_controls_driven(const EditorObject& object,const std::set<std::size_t>& indices){
+    if(!has_nurbs_seam(object))return false;
+    auto seam=editor_nurbs_seam(object);auto source=editor_nurbs_source(object);
+    if(!seam||!source)return true;
+    return std::any_of(indices.begin(),indices.end(),[&](auto i){return driven_control(*source,*seam,object.id,i);});
+}
+std::shared_ptr<const NurbsSeamDragSnapshot> capture_nurbs_seam_drag(const EditorDocument& document,EditorObjectId id,std::string* error){
+    const auto* object=document.find_object(id);if(!object)return {};
+    auto seam=editor_nurbs_seam(*object,error);if(!seam||!validate_editor_nurbs_seams(document,error))return {};
+    auto* a=document.find_object(seam->reference);auto* b=document.find_object(seam->moving);
+    if(!a||!b)return {};
+    auto pair=std::make_shared<NurbsSeamDragSnapshot>();
+    pair->reference=clone_editor_object(*a);pair->moving=clone_editor_object(*b);
+    if(!pair_state_matches(document,*pair,true)){fail(error,"Both linked patches must be visible, unlocked, owned and valid");return {};}
+    return pair;
+}
+std::unique_ptr<PreparedNurbsSeamEdit> PreparedNurbsSeamEdit::prepare(std::shared_ptr<const NurbsSeamDragSnapshot> snapshot,EditorObjectId id,const NurbsSource& source,std::string* error,std::stop_token stop){
+    if(stop.stop_requested()||!snapshot)return {};
+    if(id!=snapshot->reference.id&&id!=snapshot->moving.id){fail(error,"Edited patch is outside the seam snapshot");return {};}
+    const auto& selected=id==snapshot->reference.id?snapshot->reference:snapshot->moving;
+    auto before=editor_nurbs_source(selected,error);auto seam=editor_nurbs_seam(snapshot->reference,error);
+    if(!before||!seam||!validate_nurbs(source,error)||
+       !validate_editor_nurbs(snapshot->reference,error,stop)||!validate_editor_nurbs(snapshot->moving,error,stop))return {};
+    if(before->u!=source.u||before->v!=source.v||before->columns!=source.columns||before->rows!=source.rows){fail(error,"Unlink before changing linked parameterization");return {};}
+    for(std::size_t i=0;i<source.controls.size();++i)if(source.controls[i]!=before->controls[i]&&driven_control(*before,*seam,id,i)){fail(error,"This boundary/tangent row is driven by the reference; select free controls or edit the reference");return {};}
+    auto edit=std::make_unique<PreparedNurbsSeamEdit>();edit->before_=std::move(snapshot);
+    edit->after_.reference=clone_editor_object(edit->before_->reference);edit->after_.moving=clone_editor_object(edit->before_->moving);
+    if(source==*before)return edit; // Exact identity: do not renormalize weights or resample.
+    set_source(id==edit->after_.reference.id?edit->after_.reference:edit->after_.moving,source);
+    if(!prepare_pair(edit->after_.reference,edit->after_.moving,seam->options,error,stop)||stop.stop_requested())return {};
+    return edit;
+}
+bool PreparedNurbsSeamEdit::matches(const EditorDocument& document,bool after,bool editable) const{return before_&&pair_state_matches(document,after?after_:*before_,editable);}
+bool PreparedNurbsSeamEdit::publish(EditorDocument& document,bool after,std::string* error){return publish_pair(document,after?after_:*before_,error);}
+bool PreparedNurbsSeamEdit::publish_preview(EditorDocument& document,const PreparedNurbsSeamEdit* previous,std::string* error){
+    if(!(previous?previous->matches(document,true):matches(document,false)))return fail(error,"Linked source, placement or display changed during drag");
+    return publish(document,true,error);
+}
+bool PreparedNurbsSeamEdit::restore_preview(EditorDocument& document,std::string* error){
+    // A changed lock/placement cancels the drag but need not prevent restoring its geometry.
+    // External source, metadata or cache changes are never overwritten.
+    if(!matches(document,true,false))return fail(error,"Linked source or display changed; external edits preserved");
+    return publish(document,false,error);
+}
+CommandResult PreparedNurbsSeamEdit::execute(EditorDocument& document){
+    std::string error;if(!matches(document,false)||!publish(document,true,&error))return CommandResult::fail(error.empty()?"Linked source, placement or display changed; history was not applied":error);
+    document.mark_dirty();return CommandResult::ok();
+}
+CommandResult PreparedNurbsSeamEdit::undo(EditorDocument& document){
+    std::string error;if(!matches(document,true)||!publish(document,false,&error))return CommandResult::fail(error.empty()?"Linked source, placement or display changed; history was not applied":error);
+    document.mark_dirty();return CommandResult::ok();
+}
+
 }

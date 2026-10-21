@@ -86,6 +86,12 @@ void review_fixes(){
     c.set_active_tool(EditorToolId::Translate);auto axis=c.gizmo_axes()[0];c.pointer_down(PointerButton::Primary,int(axis.end.x),int(axis.end.y),0);check(c.gizmo_dragging(),"Drag starts");c.key_down("1",false,false,false);
     until([&]{c.update(0);return editor_nurbs_source(*d.find_object(1))!=sourceA;});check(d.remove_object(2),"Remove partner after preview");c.update(0);
     check(!c.gizmo_dragging()&&editor_nurbs_source(*d.find_object(1))==sourceA&&c.workspace().commands().size()==history,"Partner deletion after preview restores the survivor and adds no history");
+    // Paired history must not deep-copy texture pixels; live appearance is retained on publish.
+    {EditorDocument g("Textured pair");pair(g,false);for(EditorObjectId id:{1,2}){auto& mesh=*g.find_object(id)->polygon;mesh.images.push_back({"big","image/png",256,256,std::vector<std::uint8_t>(256*256*4,7)});mesh.contentHash=polygon_asset_content_hash(mesh);}
+        auto snapshot=capture_nurbs_seam_drag(g,1);check(bool(snapshot)&&snapshot->reference.polygon->images.back().rgba8.size()==4&&snapshot->moving.polygon->images.back().rgba8.size()==4,"Snapshot keeps only image placeholders");
+        auto after=*editor_nurbs_source(snapshot->reference);after.controls[7].y+=.03;std::string error;auto edit=PreparedNurbsSeamEdit::prepare(snapshot,1,after,&error);check(bool(edit),error);
+        check(edit->execute(g).success&&g.find_object(1)->polygon->images.back().rgba8.size()==256*256*4&&g.find_object(2)->polygon->images.back().rgba8.size()==256*256*4,"Live textures retained after paired edit");shared(g);
+        check(edit->undo(g).success&&g.find_object(2)->polygon->images.back().rgba8.size()==256*256*4,"Live textures retained after paired undo");shared(g);}
     // Hiding the partner mid-preview restores both patches.
     EditorDocument fresh("Hidden partner");pair(fresh,false);auto owner2=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(fresh)));auto& e=*owner2;e.resize(1600,1000);auto& f=e.workspace().document();e.workspace().select_object(1);
     check(e.dispatch_action("nurbs.edit")&&e.select_nurbs_controls({7},SelectionOperation::Replace),"Controls 2");const auto a0=*editor_nurbs_source(*f.find_object(1)),b0=*editor_nurbs_source(*f.find_object(2));

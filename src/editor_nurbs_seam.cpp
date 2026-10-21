@@ -252,6 +252,9 @@ std::shared_ptr<const NurbsSeamDragSnapshot> capture_nurbs_seam_drag(const Edito
     auto pair=std::make_shared<NurbsSeamDragSnapshot>();
     pair->reference=clone_editor_object(*a);pair->moving=clone_editor_object(*b);
     if(!pair_state_matches(document,*pair,true)){fail(error,"Both linked patches must be visible, unlocked, owned and valid");return {};}
+    // History keeps before/after pairs; publication always takes appearance from the
+    // live objects, so retain only 1x1 image placeholders (indices stay valid).
+    for(auto* object:{&pair->reference,&pair->moving})for(auto& image:object->polygon->images){image.width=image.height=1;image.rgba8.assign(4,255);image.rgba8.shrink_to_fit();}
     return pair;
 }
 std::unique_ptr<PreparedNurbsSeamEdit> PreparedNurbsSeamEdit::prepare(std::shared_ptr<const NurbsSeamDragSnapshot> snapshot,EditorObjectId id,const NurbsSource& source,std::string* error,std::stop_token stop){

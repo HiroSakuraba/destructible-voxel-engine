@@ -2,9 +2,11 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <numeric>
 namespace dve {
-std::optional<NurbsLength> measure_nurbs_curve(const NurbsSource& s,double begin,double end,double tolerance,std::array<double,3> scale,std::string* error){
+namespace {
+std::optional<NurbsLength> measure_curve(const NurbsSource& s,double begin,double end,double tolerance,std::array<double,3> scale,unsigned& remaining,std::string* error){
     auto fail=[&](const char* message)->std::optional<NurbsLength>{if(error)*error=message;return {};};
     if(!validate_nurbs(s,error))return {};
     if(!s.is_curve())return fail("Length measurement requires a NURBS curve");
@@ -16,7 +18,8 @@ std::optional<NurbsLength> measure_nurbs_curve(const NurbsSource& s,double begin
     bool exhausted=false;
     // Each span is evaluated independently, including one-sided knot limits.
     auto speed=[&](double t,double lo,double hi){
-        if(++result.evaluations>200000){exhausted=true;return 0.0;}
+        if(remaining==0){exhausted=true;return 0.0;}
+        --remaining;++result.evaluations;
         t=std::clamp(t,std::nextafter(lo,hi),std::nextafter(hi,lo));
         auto sample=evaluate_nurbs(s,t,0,error);
         if(!sample){exhausted=true;return 0.0;}
@@ -54,5 +57,42 @@ std::optional<NurbsLength> measure_nurbs_curve(const NurbsSource& s,double begin
     if(!std::isfinite(result.length)||result.length<0)return fail("Non-finite NURBS length");
     if(error)error->clear();
     return result;
+}
+}
+std::optional<NurbsLength> measure_nurbs_curve(const NurbsSource& s,double begin,double end,double tolerance,std::array<double,3> scale,std::string* error){
+    unsigned remaining=200000;
+    return measure_curve(s,begin,end,tolerance,scale,remaining,error);
+}
+std::optional<NurbsLengthParameter> nurbs_parameter_at_length_fraction(const NurbsSource& s,double fraction,double tolerance,std::array<double,3> scale,std::string* error){
+    auto fail=[&](const char* message)->std::optional<NurbsLengthParameter>{if(error)*error=message;return {};};
+    if(!validate_nurbs(s,error))return {};
+    if(!s.is_curve())return fail("Length inversion requires a NURBS curve");
+    if(!std::isfinite(fraction)||fraction<0||fraction>1)return fail("Length fraction must be finite and inside 0..1");
+    if(!std::isfinite(tolerance)||tolerance<=0||tolerance/16==0)return fail("Length inversion tolerance must be finite, positive and representable");
+    const double begin=s.u.knots[s.u.degree],end=s.u.knots[s.columns];
+    unsigned remaining=200000;
+    auto total=measure_curve(s,begin,end,tolerance/16,scale,remaining,error);if(!total)return {};
+    if(total->length<=0)return fail("A zero-length curve has no unique length parameter");
+    const double rounding=16*std::numeric_limits<double>::epsilon()*total->length;
+    if(tolerance<rounding)return fail("Length inversion tolerance is below numerical resolution for this metric");
+    NurbsLengthParameter result;result.total=*total;
+    if(fraction==0||fraction==1){
+        result.parameter=fraction==0?begin:end;result.lengthBefore=fraction*total->length;
+        result.evaluations=200000-remaining;if(error)error->clear();return result;
+    }
+    const double target=fraction*total->length;
+    double lo=begin,hi=end,t=std::lerp(begin,end,fraction);
+    for(unsigned iteration=0;iteration<64;++iteration){
+        if(!(t>lo&&t<hi))return fail("Length inversion exhausted representable parameter resolution");
+        auto prefix=measure_curve(s,begin,t,tolerance/16,scale,remaining,error);if(!prefix)return {};
+        const double residual=prefix->length-target;
+        result.parameter=t;result.lengthBefore=prefix->length;
+        result.estimatedResidual=std::abs(residual)+prefix->estimatedError+fraction*total->estimatedError+rounding;
+        result.evaluations=200000-remaining;
+        if(result.estimatedResidual<=tolerance){if(error)error->clear();return result;}
+        if(residual<0)lo=t;else hi=t;
+        t=std::midpoint(lo,hi);
+    }
+    return fail("Length inversion did not converge within 64 iterations");
 }
 }

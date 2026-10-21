@@ -29,13 +29,21 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     const bool reverse=action.starts_with("nurbs.source_reverse_");
     const bool transpose=action=="nurbs.source_swap_uv";
     const bool insert=action.starts_with("nurbs.source_insert_");
+    const bool lengthSplit=action=="nurbs.source_split_length";
     const bool split=action.starts_with("nurbs.source_split_");
     const bool iso=action.starts_with("nurbs.source_iso_");
     if(!reverse&&!transpose&&!insert&&!split&&!iso&&!quality&&!resetUv&&!boundaries&&!elevate)return false;
     if(v&&source->is_curve()){set_status("A NURBS curve has no V axis",true);return false;}
     const auto& axis=v?source->v:source->u;const auto count=v?source->rows:source->columns;
-    const double t=std::lerp(axis.knots[axis.degree],axis.knots[count],nurbsOperationParameter_);
-    if(quality||resetUv)restore_parked_nurbs_controls(); // keep the CV selection the settings panel parked
+    double t=std::lerp(axis.knots[axis.degree],axis.knots[count],nurbsOperationParameter_);
+    if(lengthSplit){
+        if(nurbsOperationParameter_<=0||nurbsOperationParameter_>=1){set_status("A length split requires an interior fraction between 0 and 1",true);return false;}
+        auto parameter=nurbs_parameter_at_length_fraction(*source,nurbsOperationParameter_,1e-6,
+            {double(object->voxelScale.x),double(object->voxelScale.y),double(object->voxelScale.z)},&error);
+        if(!parameter){set_status(error,true);return false;}
+        t=parameter->parameter;
+    }
+    if(quality||resetUv||lengthSplit)restore_parked_nurbs_controls(); // retain the selection parked by settings for undo
     else nurbsParkedObject_=0;
     const auto selection=capture_selection_snapshot();
     if(reverse||transpose||insert||quality||resetUv||elevate){
@@ -77,6 +85,6 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     workspace_.select_object(created.front());selectionDomain_=SelectionDomain::Objects;
     nurbsEditingObject_=0;nurbsSelected_.clear();nurbsControl_=0;nurbsConstructionPanel_=false;
     workspace_.commands().set_last_selection_transition(selection,capture_selection_snapshot());
-    set_status(boundaries?"Four editable parameter-boundary curves added in one undo step; surface retained":split?"Two editable NURBS pieces added in one undo step; original retained":"Editable rational isocurve added; original surface retained");return true;
+    set_status(boundaries?"Four editable parameter-boundary curves added in one undo step; surface retained":lengthSplit?"Curve split by world-length fraction in one undo step; source retained (numerical estimate, not certified)":split?"Two editable NURBS pieces added in one undo step; original retained":"Editable rational isocurve added; original surface retained");return true;
 }
 }

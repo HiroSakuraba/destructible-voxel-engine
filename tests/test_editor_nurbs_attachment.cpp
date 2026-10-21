@@ -92,6 +92,9 @@ void native(){
     const auto root=std::filesystem::temp_directory_path()/"dve_boundary_attachment_test";std::filesystem::remove_all(root);std::filesystem::create_directories(root);auto saved=c.workspace().document().save_transactional(root/"scene.dvescene");check(saved.success,saved.error);std::string error;auto loaded=EditorDocument::load(root/"scene.dvescene",&error);check(loaded&&loaded->validate(),"Generated patches save/reopen");std::filesystem::remove_all(root);
 }
 void review_fixes(){
+    {auto coarse=*insert_nurbs_knot(make_nurbs_patch(2),true,.5);for(auto& k:coarse.v.knots)k=1e16+8*k;
+        auto fine=*insert_nurbs_knot(make_nurbs_patch(2),true,.5+1e-9);for(auto& p:fine.controls)p.x+=3;std::string error;
+        check(!attach_nurbs_boundaries(coarse,fine,{},&error)&&error.find("collapse")!=std::string::npos,"Knots collapsing on domain restore refuse: "+error);}
     auto unclamped=make_nurbs_patch(2);for(std::size_t i=0;i<unclamped.u.knots.size();++i)unclamped.u.knots[i]=double(i);
     check(!attach_nurbs_boundaries(unclamped,low())&&!attach_nurbs_boundaries(high(),unclamped),"Unclamped reference/moving refuses");
     auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(EditorDocument("Boundary review")));auto& c=*owner;c.resize(1600,1000);

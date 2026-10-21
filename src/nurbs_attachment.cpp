@@ -34,8 +34,13 @@ std::optional<NurbsSource> restore(NurbsSource source,const NurbsSource& origina
     if(reverse){auto next=reverse_nurbs_axis(source,true,error);if(!next)return {};source=std::move(*next);}
     if(minimum(edge)==reference){auto next=reverse_nurbs_axis(source,false,error);if(!next)return {};source=std::move(*next);}
     if(along_v(edge)){auto next=transpose_nurbs(source,error);if(!next)return {};source=std::move(*next);}
-    auto map=[](NurbsAxis& axis,const NurbsAxis& input){for(auto& knot:axis.knots)knot=std::lerp(input.knots.front(),input.knots.back(),knot);};
-    map(source.u,original.u);map(source.v,original.v);
+    // Distinct compatibility knots must stay distinct in the original domain;
+    // a silent merge would lose the exact boundary basis match.
+    auto map=[](NurbsAxis& axis,const NurbsAxis& input){const auto normalized=axis.knots;
+        for(std::size_t i=0;i<axis.knots.size();++i){axis.knots[i]=std::lerp(input.knots.front(),input.knots.back(),normalized[i]);
+            if(!std::isfinite(axis.knots[i])||(i&&normalized[i]>normalized[i-1]&&!(axis.knots[i]>axis.knots[i-1])))return false;}
+        return true;};
+    if(!map(source.u,original.u)||!map(source.v,original.v)){if(error)*error="Compatible knots collapse in the original parameter domain; rescale the source domain";return {};}
     source.textureU=original.textureU;source.textureV=original.textureV;
     if(!validate_nurbs(source,error))return {};
     return source;

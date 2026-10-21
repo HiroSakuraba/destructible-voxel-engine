@@ -1,5 +1,9 @@
 #include "dve/editor_native.hpp"
 #include <cmath>
+#include <iomanip>
+#include <locale>
+#include <sstream>
+#include "dve/nurbs_queries.hpp"
 namespace dve::editor {
 bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     if(workspace_.mode()!=EditorMode::Edit||playSession_.active()||longJob_||gizmoDragging_||nurbsBoxActive_)return false;
@@ -10,6 +14,14 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     }
     std::string error;auto source=editor_nurbs_source(*object,&error);
     if(!source||!validate_editor_nurbs(*object,&error)){set_status(error,true);return false;}
+    if(action=="nurbs.source_length"){
+        auto length=measure_nurbs_curve(*source,source->u.knots[source->u.degree],source->u.knots[source->columns],1e-6,
+            {double(object->voxelScale.x),double(object->voxelScale.y),double(object->voxelScale.z)},&error);
+        if(!length){set_status(error,true);return false;}
+        std::ostringstream message;message.imbue(std::locale::classic());
+        message<<std::setprecision(10)<<"NURBS curve length: "<<length->length<<" world units (numerical error estimate "<<length->estimatedError<<"; not certified)";
+        set_status(message.str(),false,15.0F);return true;
+    }
     const bool elevate=action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v";
     const bool boundaries=action=="nurbs.source_boundaries";
     const bool quality=action=="nurbs.source_quality",resetUv=action=="nurbs.source_reset_uv";

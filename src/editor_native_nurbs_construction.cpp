@@ -1,5 +1,6 @@
 #include "dve/editor_native.hpp"
 #include "dve/editor_native_renderer.hpp"
+#include "dve/nurbs_modeling.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -52,18 +53,18 @@ bool NativeEditorController::dispatch_nurbs_construction(std::string_view action
         if(!r){set_status(error,true);return false;}input.source=std::move(*r);input.name+=action=="nurbs.construct_reverse"?" [reversed]":" [seam +1]";set_status("Changed last snapshot only; scene source retained");return true;
     }
     std::optional<NurbsSource> result;
-    if(action=="nurbs.construct_loft"||action=="nurbs.construct_join"){
+    if(action=="nurbs.construct_loft"||action=="nurbs.construct_smooth_loft"||action=="nurbs.construct_join"){
         std::vector<NurbsSource> profiles;for(const auto& input:nurbsConstructionInputs_)profiles.push_back(input.source);
-        result=action=="nurbs.construct_join"?join_nurbs_curves(profiles,&error):loft_nurbs(profiles,&error);
+        result=action=="nurbs.construct_join"?join_nurbs_curves(profiles,&error):action=="nurbs.construct_smooth_loft"?smooth_loft_nurbs(profiles,&error):loft_nurbs(profiles,&error);
     }else if(action=="nurbs.construct_sweep"){
         if(nurbsConstructionInputs_.size()!=2){set_status("Sweep needs exactly two snapshots: profile, then rail",true);return false;}
         auto options=nurbsSweepOptions_;options.profileOrigin=nurbsConstructionInputs_[0].origin;
         result=sweep_nurbs(nurbsConstructionInputs_[0].source,nurbsConstructionInputs_[1].source,options,&error);
     }else return false;
     if(!result){set_status(error,true);return false;}
-    if(!create_nurbs_source(*result,action=="nurbs.construct_join"?"NURBS Joined Curve":action=="nurbs.construct_loft"?"NURBS Ruled Loft":"NURBS Sampled Sweep",std::pair{RigidTransform{nurbsConstructionOrigin_,Quaternion{}},Float3{1,1,1}}))return false;
+    if(!create_nurbs_source(*result,action=="nurbs.construct_join"?"NURBS Joined Curve":action=="nurbs.construct_smooth_loft"?"NURBS Smooth Loft":action=="nurbs.construct_loft"?"NURBS Ruled Loft":"NURBS Sampled Sweep",std::pair{RigidTransform{nurbsConstructionOrigin_,Quaternion{}},Float3{1,1,1}}))return false;
     nurbsConstructionPanel_=false;
-    set_status(action=="nurbs.construct_join"?"Joined NURBS curve created; input snapshots retained (no gap snapping or smoothing)":action=="nurbs.construct_loft"?"Ruled NURBS loft created; input snapshots retained":"Sampled NURBS sweep created (approximate between stations); input snapshots retained");return true;
+    set_status(action=="nurbs.construct_join"?"Joined NURBS curve created; input snapshots retained (no gap snapping or smoothing)":action=="nurbs.construct_smooth_loft"?"Smooth homogeneous cubic loft created; section snapshots retained":action=="nurbs.construct_loft"?"Ruled NURBS loft created; input snapshots retained":"Sampled NURBS sweep created (approximate between stations); input snapshots retained");return true;
 }
 void NativeEditorController::commit_nurbs_construction_field(){
     std::istringstream in(textEdit_.buffer);in.imbue(std::locale::classic());double value;
@@ -91,7 +92,7 @@ void NativeEditorController::draw_nurbs_construction(const IEditorCanvas& canvas
     p.text(r.x+8,r.y+20,"NURBS construction and source operations",white);
     p.text(r.x+8,r.y+40,"Inputs: "+std::to_string(nurbsConstructionInputs_.size())+" (append order; sweep: profile, rail)",white);
     for(std::size_t i=0;i<std::min<std::size_t>(3,nurbsConstructionInputs_.size());++i){auto index=nurbsConstructionInputs_.size()>3?nurbsConstructionInputs_.size()-3+i:i;p.text(r.x+8,r.y+62+int(i)*19,elide_text_to_width(p,std::to_string(index+1)+": "+nurbsConstructionInputs_[index].name,r.width-16),white);}
-    const char* names[]={"Sweep sections (uniform parameter)","Sweep twist (degrees)","Sweep end scale","Parameter / length fraction (0..1)","Display samples per span (1..64)"};
+    const char* names[]={"Sections / rebuild CVs / projection samples","Sweep twist (degrees)","Sweep end scale","Parameter / length fraction (0..1)","Display samples per span (1..64)"};
     double values[]={double(nurbsSweepOptions_.sections),nurbsSweepOptions_.twistRadians*180/3.141592653589793,nurbsSweepOptions_.endScale,nurbsOperationParameter_,double(nurbsDisplaySamples_)};
     for(int i=0;i<5;++i){auto f=construction_field(viewport,i);p.outline(f,cyan);auto value=textEdit_.kind==TextEditKind::NurbsControl&&textEdit_.axis==i+4?textEdit_.buffer:number(values[i]);p.text(f.x+5,f.y+18,elide_text_to_width(p,std::string(names[i])+": "+value,f.width-10),white);}
     p.text(r.x+8,r.y+308,"Enter applies; Esc cancels. Build from NURBS menu.",white);

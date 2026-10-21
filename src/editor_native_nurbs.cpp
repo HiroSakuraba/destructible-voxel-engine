@@ -10,7 +10,7 @@
 #include <sstream>
 namespace dve::editor {
 namespace {
-constexpr std::string_view actions[]={"nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
+constexpr std::string_view actions[]={"nurbs.source_rebuild","nurbs.source_adaptive","nurbs.source_attach_c0","nurbs.source_attach_c1","nurbs.source_project","nurbs.source_intersect_planes","nurbs.source_crop","nurbs.source_fillet_corner","nurbs.construct_smooth_loft","nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
 UiRect panel(UiRect v){return {v.x+8,v.y+8,(std::min)(330,(std::max)(1,v.width-16)),(std::min)(238,(std::max)(1,v.height-16))};}
 UiRect field(UiRect v,int i){auto p=panel(v);return {p.x+8,p.y+62+i*32,p.width-16,28};}
 std::string number(double x){std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(12)<<x;return o.str();}
@@ -34,7 +34,7 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         bool enabled=editing;
         if(action.starts_with("nurbs.source_"))enabled=bool(source)&&(!source->is_curve()||action=="nurbs.source_split_u"||action=="nurbs.source_reverse_u"||action=="nurbs.source_insert_u"||action=="nurbs.source_elevate_u"||action=="nurbs.source_quality"||action=="nurbs.source_reset_uv");
         else if(action=="nurbs.construct_add")enabled=source&&source->is_curve()&&nurbsConstructionInputs_.size()<64;
-        else if(action=="nurbs.construct_loft"||action=="nurbs.construct_join")enabled=editing&&nurbsConstructionInputs_.size()>=2;
+        else if(action=="nurbs.construct_loft"||action=="nurbs.construct_smooth_loft"||action=="nurbs.construct_join")enabled=editing&&nurbsConstructionInputs_.size()>=2;
         else if(action=="nurbs.construct_sweep")enabled=editing&&nurbsConstructionInputs_.size()==2;
         else if(action=="nurbs.construct_reverse"||action=="nurbs.construct_seam"||action=="nurbs.construct_clear")enabled=editing&&!nurbsConstructionInputs_.empty();
         else if(action=="nurbs.extrude"||action=="nurbs.revolve")enabled=source&&source->is_curve();
@@ -42,6 +42,13 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         else if(action.starts_with("nurbs.select_"))enabled=ready&&nurbsEditingObject_==o->id;
         else if(action=="nurbs.edit"||action=="nurbs.bake_polygon")enabled=bool(source);
         else if(action=="nurbs.finish"||action=="nurbs.previous"||action=="nurbs.next")enabled=ready&&nurbsEditingObject_==o->id;
+        if(action=="nurbs.source_rebuild")enabled=source&&source->is_curve();
+        if(action=="nurbs.source_adaptive"||action=="nurbs.source_crop")enabled=source&&!source->is_curve();
+        if(action=="nurbs.source_fillet_corner")enabled=source&&source->is_curve()&&source->columns==3&&source->u.degree==1;
+        if(action=="nurbs.source_attach_c0"||action=="nurbs.source_attach_c1"||action=="nurbs.source_project"||action=="nurbs.source_intersect_planes"){
+            enabled=editing&&workspace_.selection_count()==2;
+            for(auto selected:workspace_.selected_objects()){auto* candidate=workspace_.document().find_object(selected);enabled=enabled&&candidate&&candidate->is_nurbs()&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(selected);}
+        }
         if(action=="nurbs.source_length"||action=="nurbs.source_split_length")enabled=source&&source->is_curve();
         if(source&&action=="nurbs.source_elevate_u")enabled=enabled&&source->u.degree<7;
         if(source&&action=="nurbs.source_elevate_v")enabled=enabled&&!source->is_curve()&&source->v.degree<7;

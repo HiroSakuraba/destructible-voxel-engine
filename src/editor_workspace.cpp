@@ -741,7 +741,10 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.source_elevate_v","NURBS","Elevate V Degree (Keep Shape)",""},
         {"nurbs.source_boundaries","NURBS","Extract Four Boundary Curves (Keep Surface)",""},
         {"nurbs.construct_join","NURBS","Join Ordered Curve Snapshots (Matching Ends)",""},
-        {"nurbs.source_quality","NURBS","Apply Display Density and Crease Normals",""},
+        {"nurbs.source_quality","NURBS","Use Fixed Display Density and Crease Normals",""},
+        {"nurbs.source_display_coarse","NURBS","Adaptive Surface Display: Coarse (0.05 Local)",""},
+        {"nurbs.source_display_standard","NURBS","Adaptive Surface Display: Standard (0.01 Local)",""},
+        {"nurbs.source_display_fine","NURBS","Adaptive Surface Display: Fine (0.0025 Local)",""},
         {"nurbs.source_reset_uv","NURBS","Reset Surface Texture Ranges to 0..1",""},
         {"nurbs.source_split_length","NURBS","Split Curve at Length Fraction (Keep Source)",""},
         {"nurbs.source_split_u","NURBS","Split U at Parameter (Keep Source)",""},
@@ -958,6 +961,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             action->radioGroup = std::move(radioGroup);
         }
     };
+    for(auto id:{"nurbs.source_quality","nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine"})configure(id,"Surface Display",60,true,"nurbs.display");
     for (std::string_view id : {"view.lit", "view.unlit", "view.wireframe", "view.material_ids", "view.normals",
                                 "view.lighting_only", "view.overdraw", "view.voxel_debug"})
         configure(id, "Shading", 40, true, "viewport.shading");

@@ -11,7 +11,7 @@
 #include <string>
 namespace dve::editor {
 namespace {
-constexpr std::string_view actions[]={"nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
+constexpr std::string_view actions[]={"nurbs.source_rebuild","nurbs.source_adaptive","nurbs.source_attach_c0","nurbs.source_attach_c1","nurbs.source_project","nurbs.source_intersect_planes","nurbs.source_crop","nurbs.source_fillet_corner","nurbs.construct_smooth_loft","nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
 UiRect panel(UiRect v){return {v.x+8,v.y+8,(std::min)(330,(std::max)(1,v.width-16)),(std::min)(238,(std::max)(1,v.height-16))};}
 UiRect field(UiRect v,int i){auto p=panel(v);return {p.x+8,p.y+62+i*32,p.width-16,28};}
 std::string number(double x){std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(12)<<x;return o.str();}
@@ -35,7 +35,7 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         bool enabled=editing;
         if(action.starts_with("nurbs.source_"))enabled=bool(source)&&(!source->is_curve()||action=="nurbs.source_split_u"||action=="nurbs.source_reverse_u"||action=="nurbs.source_insert_u"||action=="nurbs.source_elevate_u"||action=="nurbs.source_quality"||action=="nurbs.source_reset_uv");
         else if(action=="nurbs.construct_add")enabled=source&&source->is_curve()&&nurbsConstructionInputs_.size()<64;
-        else if(action=="nurbs.construct_loft"||action=="nurbs.construct_join")enabled=editing&&nurbsConstructionInputs_.size()>=2;
+        else if(action=="nurbs.construct_loft"||action=="nurbs.construct_smooth_loft"||action=="nurbs.construct_join")enabled=editing&&nurbsConstructionInputs_.size()>=2;
         else if(action=="nurbs.construct_sweep")enabled=editing&&nurbsConstructionInputs_.size()==2;
         else if(action=="nurbs.construct_reverse"||action=="nurbs.construct_seam"||action=="nurbs.construct_clear")enabled=editing&&!nurbsConstructionInputs_.empty();
         else if(action=="nurbs.extrude"||action=="nurbs.revolve")enabled=source&&source->is_curve();
@@ -43,6 +43,27 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         else if(action.starts_with("nurbs.select_"))enabled=ready&&nurbsEditingObject_==o->id;
         else if(action=="nurbs.edit"||action=="nurbs.bake_polygon")enabled=bool(source);
         else if(action=="nurbs.finish"||action=="nurbs.previous"||action=="nurbs.next")enabled=ready&&nurbsEditingObject_==o->id;
+        if(action=="nurbs.source_rebuild")enabled=source&&source->is_curve();
+        if(action=="nurbs.source_adaptive"||action=="nurbs.source_crop")enabled=source&&!source->is_curve();
+        if(action=="nurbs.source_fillet_corner")enabled=source&&source->is_curve()&&source->columns==3&&source->u.degree==1;
+        std::string pairReason;
+        if(action=="nurbs.source_attach_c0"||action=="nurbs.source_attach_c1"||action=="nurbs.source_project"||action=="nurbs.source_intersect_planes"){
+            enabled=editing&&workspace_.selection_count()==2;if(editing&&!enabled)pairReason="Select exactly two native NURBS sources; the active one is the reference/target";
+            const auto active=workspace_.selected_object();std::optional<bool> activeCurve,otherCurve;
+            for(auto selected:workspace_.selected_objects()){
+                auto* candidate=workspace_.document().find_object(selected);
+                const bool usable=candidate&&candidate->is_nurbs()&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(selected);
+                if(enabled&&!usable)pairReason="Both sources must be visible, unlocked, not isolated out and not prefab instances";
+                enabled=enabled&&usable;
+                if(!enabled)continue;
+                std::string ignored;auto s=editor_nurbs_source(*candidate,&ignored);if(!s){enabled=false;pairReason=ignored;continue;}
+                (active&&selected==*active?activeCurve:otherCurve)=s->is_curve();
+            }
+            if(enabled&&activeCurve&&otherCurve){
+                if(action=="nurbs.source_project"&&(*activeCurve||!*otherCurve)){enabled=false;pairReason="Projection needs the active source to be a surface and the other a curve";}
+                else if(action!="nurbs.source_project"&&(*activeCurve||*otherCurve)){enabled=false;pairReason=action=="nurbs.source_intersect_planes"?"Intersection needs two planar surface patches":"Attach needs two surfaces";}
+            }
+        }
         if(action=="nurbs.source_length"||action=="nurbs.source_split_length")enabled=source&&source->is_curve();
         std::string reason="Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)";
         if(source&&(action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v")){
@@ -51,6 +72,10 @@ void NativeEditorController::refresh_nurbs_menu_state(){
             else if((alongV?source->v.degree:source->u.degree)>=7){enabled=false;reason=std::string(alongV?"V":"U")+" degree is already at the supported maximum of 7";}
         }
         if(source&&(action=="nurbs.source_length"||action=="nurbs.source_split_length")&&!source->is_curve())reason="Length measurement and length splits work on NURBS curves only; extract an isocurve or boundary from a surface first";
+        if(source&&action=="nurbs.source_rebuild"&&!source->is_curve())reason="Rebuild works on NURBS curves only";
+        if(source&&(action=="nurbs.source_adaptive"||action=="nurbs.source_crop")&&source->is_curve())reason="Adaptive bake and crop work on NURBS surfaces only";
+        if(source&&action=="nurbs.source_fillet_corner"&&!enabled)reason="Corner fillet needs a three-control degree-one corner curve";
+        if(!pairReason.empty())reason=pairReason;
         (void)workspace_.menus().set_enabled(action,enabled,enabled?"":reason);
     }
 }

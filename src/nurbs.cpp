@@ -1,4 +1,5 @@
 #include "dve/nurbs.hpp"
+#include "nurbs_evaluation_internal.hpp"
 #include "dve/transform.hpp"
 #include <algorithm>
 #include <cmath>
@@ -142,6 +143,9 @@ bool validate_nurbs(const NurbsSource& s,std::string* e) {
 std::optional<NurbsSample> evaluate_nurbs(const NurbsSource& s,double u,double v,std::string* e){
     if(!validate_nurbs(s,e))return {};
     return eval(s,u,v,e);
+}
+std::optional<NurbsSample> detail::evaluate_validated_nurbs(const NurbsSource& s,double u,double v,double scale,std::string* e){
+    return eval(s,u,v,e,scale);
 }
 NurbsSource make_nurbs_patch(double size) {
     NurbsSource s;s.columns=s.rows=4;s.u.knots={0,0,0,0,1,1,1,1};s.v=s.u;

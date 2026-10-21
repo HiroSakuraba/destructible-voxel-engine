@@ -2,7 +2,37 @@
 #include "dve/editor_nurbs.hpp"
 #include "dve/nurbs_attachment.hpp"
 #include "dve/nurbs_tessellation.hpp"
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <stop_token>
+#include <string>
+#include <vector>
 namespace dve::editor {
+// Immutable pair snapshot; workers never retain a document or controller pointer.
+struct NurbsSeamDragSnapshot {
+    EditorObject reference, moving;
+};
+[[nodiscard]] bool nurbs_seam_controls_driven(const EditorObject&,const std::set<std::size_t>&);
+[[nodiscard]] std::shared_ptr<const NurbsSeamDragSnapshot> capture_nurbs_seam_drag(
+    const EditorDocument&,EditorObjectId,std::string* error=nullptr);
+class PreparedNurbsSeamEdit final : public IEditorCommand {
+public:
+    static std::unique_ptr<PreparedNurbsSeamEdit> prepare(
+        std::shared_ptr<const NurbsSeamDragSnapshot>,EditorObjectId,const NurbsSource&,
+        std::string* error=nullptr,std::stop_token={});
+    std::string_view label() const noexcept override { return "Transform linked NURBS controls"; }
+    CommandResult execute(EditorDocument&) override;
+    CommandResult undo(EditorDocument&) override;
+    [[nodiscard]] bool matches(const EditorDocument&,bool after,bool editable=true) const;
+    [[nodiscard]] bool publish_preview(EditorDocument&,const PreparedNurbsSeamEdit* previous,std::string* error);
+    [[nodiscard]] bool restore_preview(EditorDocument&,std::string* error);
+    [[nodiscard]] const EditorObject& edited_object(EditorObjectId id) const { return id==after_.reference.id?after_.reference:after_.moving; }
+private:
+    bool publish(EditorDocument&,bool after,std::string* error);
+    std::shared_ptr<const NurbsSeamDragSnapshot> before_;
+    NurbsSeamDragSnapshot after_;
+};
 inline constexpr std::string_view kNurbsSeamProperty="seam";
 struct NurbsSeam {
     EditorObjectId reference{},moving{};

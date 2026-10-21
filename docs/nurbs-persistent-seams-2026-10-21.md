@@ -1,5 +1,7 @@
 # Persistent paired NURBS seams and shared display samples
 
+Follow-up: [paired CV gizmos and background display](nurbs-paired-cv-drags-2026-10-21.md) supersedes the linked-gizmo and synchronous-drag restrictions below. The remaining placement, parameterization, copy/prefab and multiple-seam limits still apply.
+
 This follow-up builds on the boundary-matching batch in PR #170. It adds an explicitly limited persistent constraint: one linked seam per patch, connecting two untrimmed native surfaces in the same parent/pose/axis-scale frame, without socket attachments. These are independent scene objects, not a sewn solid or a general patch graph.
 
 ## Artist workflow

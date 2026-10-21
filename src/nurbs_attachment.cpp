@@ -46,9 +46,10 @@ std::optional<NurbsSource> restore(NurbsSource source,const NurbsSource& origina
     return source;
 }
 }
-std::optional<NurbsAttachment> attach_nurbs_boundaries(const NurbsSource& reference,const NurbsSource& moving,NurbsAttachmentOptions options,std::string* error){
+std::optional<NurbsAttachment> attach_nurbs_boundaries(const NurbsSource& reference,const NurbsSource& moving,NurbsAttachmentOptions options,std::string* error,std::stop_token stop){
     std::string reason;
     auto fail=[&](const std::string& message)->std::optional<NurbsAttachment>{if(error)*error="Boundary attachment: "+message;return {};};
+    if(stop.stop_requested())return fail("Cancelled");
     if(!valid_edge(options.referenceBoundary)||!valid_edge(options.movingBoundary))return fail("Choose a U-min, U-max, V-min or V-max boundary");
     if(!validate_nurbs(reference,&reason)||!validate_nurbs(moving,&reason))return fail(reason);
     if(reference.is_curve()||moving.is_curve())return fail("Select two untrimmed NURBS surfaces");
@@ -59,6 +60,7 @@ std::optional<NurbsAttachment> attach_nurbs_boundaries(const NurbsSource& refere
     a=std::move(*ar);b=std::move(*br);
     const auto degree=(std::max)(a.v.degree,b.v.degree);
     for(auto* source:{&a,&b})while(source->v.degree<degree){
+        if(stop.stop_requested())return fail("Cancelled");
         auto next=elevate_nurbs_degree(*source,true,&reason);if(!next)return fail(reason);*source=std::move(*next);
     }
     // Exact multiplicity union. Nearby distinct knots remain distinct.
@@ -70,7 +72,7 @@ std::optional<NurbsAttachment> attach_nurbs_boundaries(const NurbsSource& refere
     for(auto* source:{&a,&b})for(auto [knot,count]:knots){
         if(knot==0||knot==1)continue;
         auto existing=unsigned(std::count(source->v.knots.begin(),source->v.knots.end(),knot));
-        while(existing++<count){auto next=insert_nurbs_knot(*source,true,knot,&reason);if(!next)return fail(reason);*source=std::move(*next);}
+        while(existing++<count){if(stop.stop_requested())return fail("Cancelled");auto next=insert_nurbs_knot(*source,true,knot,&reason);if(!next)return fail(reason);*source=std::move(*next);}
     }
     // A linear two-column patch needs a free tangent row to keep its far edge.
     if(options.c1&&b.columns<3){auto next=elevate_nurbs_degree(b,false,&reason);if(!next)return fail(reason);b=std::move(*next);}
@@ -81,7 +83,7 @@ std::optional<NurbsAttachment> attach_nurbs_boundaries(const NurbsSource& refere
         const double anchor=a.controls[a.columns-1].weight/referenceScale,movingAnchor=b.controls.front().weight;
         for(auto& p:out.controls)p.weight=(p.weight/movingAnchor)*anchor;
         const double ratio=double(a.u.degree)*(b.u.knots[b.u.degree+1]-b.u.knots.front())/(double(b.u.degree)*(a.u.knots.back()-a.u.knots[a.columns-1]));
-        for(unsigned j=0;j<out.rows;++j){auto edge=a.controls[j*a.columns+a.columns-1],previous=a.controls[j*a.columns+a.columns-2];edge.weight/=referenceScale;previous.weight/=referenceScale;out.controls[j*out.columns]=edge;
+        for(unsigned j=0;j<out.rows;++j){if(stop.stop_requested())return fail("Cancelled");auto edge=a.controls[j*a.columns+a.columns-1],previous=a.controls[j*a.columns+a.columns-2];edge.weight/=referenceScale;previous.weight/=referenceScale;out.controls[j*out.columns]=edge;
             if(options.c1){const double w=edge.weight+ratio*(edge.weight-previous.weight);if(!(w>0)||!std::isfinite(w))return fail("C1 attachment produced nonpositive homogeneous weights");
                 auto coordinate=[&](double e,double p){return (edge.weight*e+ratio*(edge.weight*e-previous.weight*p))/w;};
                 out.controls[j*out.columns+1]={coordinate(edge.x,previous.x),coordinate(edge.y,previous.y),coordinate(edge.z,previous.z),w};}

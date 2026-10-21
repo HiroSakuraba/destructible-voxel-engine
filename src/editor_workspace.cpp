@@ -734,6 +734,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.construct_join","NURBS","Join Ordered Curve Snapshots (Matching Ends)",""},
         {"nurbs.source_quality","NURBS","Apply Display Density and Crease Normals",""},
         {"nurbs.source_reset_uv","NURBS","Reset Surface Texture Ranges to 0..1",""},
+        {"nurbs.source_split_length","NURBS","Split Curve at Length Fraction (Keep Source)",""},
         {"nurbs.source_split_u","NURBS","Split U at Parameter (Keep Source)",""},
         {"nurbs.source_split_v","NURBS","Split V at Parameter (Keep Source)",""},
         {"nurbs.source_iso_u","NURBS","Extract Isocurve at Fixed U",""},

@@ -11,7 +11,7 @@
 #include <string>
 namespace dve::editor {
 namespace {
-constexpr std::string_view actions[]={"nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
+constexpr std::string_view actions[]={"nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
 UiRect panel(UiRect v){return {v.x+8,v.y+8,(std::min)(330,(std::max)(1,v.width-16)),(std::min)(238,(std::max)(1,v.height-16))};}
 UiRect field(UiRect v,int i){auto p=panel(v);return {p.x+8,p.y+62+i*32,p.width-16,28};}
 std::string number(double x){std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(12)<<x;return o.str();}
@@ -43,12 +43,14 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         else if(action.starts_with("nurbs.select_"))enabled=ready&&nurbsEditingObject_==o->id;
         else if(action=="nurbs.edit"||action=="nurbs.bake_polygon")enabled=bool(source);
         else if(action=="nurbs.finish"||action=="nurbs.previous"||action=="nurbs.next")enabled=ready&&nurbsEditingObject_==o->id;
+        if(action=="nurbs.source_length")enabled=source&&source->is_curve();
         std::string reason="Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)";
         if(source&&(action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v")){
             const bool alongV=action=="nurbs.source_elevate_v";
             if(alongV&&source->is_curve())reason="A NURBS curve has no V degree";
             else if((alongV?source->v.degree:source->u.degree)>=7){enabled=false;reason=std::string(alongV?"V":"U")+" degree is already at the supported maximum of 7";}
         }
+        if(source&&action=="nurbs.source_length"&&!source->is_curve())reason="Curve length measures NURBS curves only; extract an isocurve or boundary from a surface first";
         (void)workspace_.menus().set_enabled(action,enabled,enabled?"":reason);
     }
 }

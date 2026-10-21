@@ -727,6 +727,8 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.select_invert","NURBS","Invert Control Selection",""},
         {"nurbs.select_row","NURBS","Select U Row through Active Control",""},
         {"nurbs.select_column","NURBS","Select V Column through Active Control",""},
+        {"nurbs.source_elevate_u","NURBS","Elevate U Degree (Keep Shape)",""},
+        {"nurbs.source_elevate_v","NURBS","Elevate V Degree (Keep Shape)",""},
         {"nurbs.source_boundaries","NURBS","Extract Four Boundary Curves (Keep Surface)",""},
         {"nurbs.construct_join","NURBS","Join Ordered Curve Snapshots (Matching Ends)",""},
         {"nurbs.source_quality","NURBS","Apply Display Density and Crease Normals",""},

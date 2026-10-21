@@ -8,6 +8,7 @@
 #include <locale>
 #include <numeric>
 #include <sstream>
+#include <string>
 namespace dve::editor {
 namespace {
 constexpr std::string_view actions[]={"nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine","nurbs.source_rebuild","nurbs.source_adaptive","nurbs.source_attach_c0","nurbs.source_attach_c1","nurbs.source_project","nurbs.source_intersect_planes","nurbs.source_crop","nurbs.source_fillet_corner","nurbs.construct_smooth_loft","nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
@@ -45,20 +46,44 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         if(action=="nurbs.source_rebuild")enabled=source&&source->is_curve();
         if(action=="nurbs.source_adaptive"||action=="nurbs.source_crop")enabled=source&&!source->is_curve();
         if(action=="nurbs.source_fillet_corner")enabled=source&&source->is_curve()&&source->columns==3&&source->u.degree==1;
+        std::string pairReason;
         if(action=="nurbs.source_attach_c0"||action=="nurbs.source_attach_c1"||action=="nurbs.source_project"||action=="nurbs.source_intersect_planes"){
-            enabled=editing&&workspace_.selection_count()==2;
-            for(auto selected:workspace_.selected_objects()){auto* candidate=workspace_.document().find_object(selected);enabled=enabled&&candidate&&candidate->is_nurbs()&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(selected);}
+            enabled=editing&&workspace_.selection_count()==2;if(editing&&!enabled)pairReason="Select exactly two native NURBS sources; the active one is the reference/target";
+            const auto active=workspace_.selected_object();std::optional<bool> activeCurve,otherCurve;
+            for(auto selected:workspace_.selected_objects()){
+                auto* candidate=workspace_.document().find_object(selected);
+                const bool usable=candidate&&candidate->is_nurbs()&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(selected);
+                if(enabled&&!usable)pairReason="Both sources must be visible, unlocked, not isolated out and not prefab instances";
+                enabled=enabled&&usable;
+                if(!enabled)continue;
+                std::string ignored;auto s=editor_nurbs_source(*candidate,&ignored);if(!s){enabled=false;pairReason=ignored;continue;}
+                (active&&selected==*active?activeCurve:otherCurve)=s->is_curve();
+            }
+            if(enabled&&activeCurve&&otherCurve){
+                if(action=="nurbs.source_project"&&(*activeCurve||!*otherCurve)){enabled=false;pairReason="Projection needs the active source to be a surface and the other a curve";}
+                else if(action!="nurbs.source_project"&&(*activeCurve||*otherCurve)){enabled=false;pairReason=action=="nurbs.source_intersect_planes"?"Intersection needs two planar surface patches":"Attach needs two surfaces";}
+            }
         }
         if(action=="nurbs.source_length"||action=="nurbs.source_split_length")enabled=source&&source->is_curve();
-        if(source&&action=="nurbs.source_elevate_u")enabled=enabled&&source->u.degree<7;
-        if(source&&action=="nurbs.source_elevate_v")enabled=enabled&&!source->is_curve()&&source->v.degree<7;
         if(action=="nurbs.source_quality") (void)workspace_.menus().set_checked(action,source&&!source->adaptiveDisplay);
         if(action.starts_with("nurbs.source_display_")){
             const double chord=action=="nurbs.source_display_coarse"?.05:action=="nurbs.source_display_fine"?.0025:.01;
             const double angle=action=="nurbs.source_display_coarse"?.3:action=="nurbs.source_display_fine"?.075:.15;
             (void)workspace_.menus().set_checked(action,source&&source->adaptiveDisplay&&source->chordTolerance==chord&&source->normalAngle==angle);
         }
-        (void)workspace_.menus().set_enabled(action,enabled,enabled?"":"Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)");
+        std::string reason="Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)";
+        if(source&&(action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v")){
+            const bool alongV=action=="nurbs.source_elevate_v";
+            if(alongV&&source->is_curve())reason="A NURBS curve has no V degree";
+            else if((alongV?source->v.degree:source->u.degree)>=7){enabled=false;reason=std::string(alongV?"V":"U")+" degree is already at the supported maximum of 7";}
+        }
+        if(source&&(action=="nurbs.source_length"||action=="nurbs.source_split_length")&&!source->is_curve())reason="Length measurement and length splits work on NURBS curves only; extract an isocurve or boundary from a surface first";
+        if(source&&action=="nurbs.source_rebuild"&&!source->is_curve())reason="Rebuild works on NURBS curves only";
+        if(source&&(action=="nurbs.source_adaptive"||action=="nurbs.source_crop")&&source->is_curve())reason="Adaptive bake and crop work on NURBS surfaces only";
+        if(source&&action=="nurbs.source_fillet_corner"&&!enabled)reason="Corner fillet needs a three-control degree-one corner curve";
+        if(source&&action.starts_with("nurbs.source_display_")&&source->is_curve())reason="Adaptive surface display works on NURBS surfaces only; curves use fixed guide ribbons";
+        if(!pairReason.empty())reason=pairReason;
+        (void)workspace_.menus().set_enabled(action,enabled,enabled?"":reason);
     }
 }
 bool NativeEditorController::create_nurbs_source(const NurbsSource& source,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement){

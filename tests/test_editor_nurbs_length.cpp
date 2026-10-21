@@ -3,7 +3,10 @@
 #include <cmath>
 #include <iostream>
 #include <numbers>
+#include <set>
 #include <stdexcept>
+#include <string>
+#include <utility>
 using namespace dve;
 using namespace dve::editor;
 namespace {
@@ -42,6 +45,11 @@ void native(){
     check(c.dispatch_action("nurbs.source_length"),"Native measurement");check(!c.status().error&&c.status().text.find("6.32455532")!=std::string::npos,"Scaled length status");
     check(c.workspace().commands().size()==history&&editor_nurbs_source(*o)==before&&o->polygon->contentHash==hash&&c.selected_nurbs_controls()==std::set<std::size_t>{0},"Read-only source/cache/history/selection");
     o->flags.locked=true;check(!c.dispatch_action("nurbs.source_length"),"Locked source refuses");o->flags.locked=false;
+    o->flags.visible=false;check(!c.dispatch_action("nurbs.source_length")&&c.workspace().commands().size()==history,"Hidden source refuses");o->flags.visible=true;
+    o->prefabLink=EditorPrefabLink{};check(!c.dispatch_action("nurbs.source_length")&&c.workspace().commands().size()==history,"Prefab source refuses");o->prefabLink.reset();
+    auto patch=make_editor_nurbs(2,make_nurbs_patch());check(bool(patch),"Native patch");c.workspace().document().add_object(std::move(*patch));c.workspace().select_object(2);c.refresh_menu_state();
+    auto* item=std::as_const(c.workspace().menus()).find("nurbs.source_length");check(item&&!item->enabled&&item->disabledReason.find("curves only")!=std::string::npos,"Surface menu says why");
+    check(!c.dispatch_action("nurbs.source_length")&&c.workspace().commands().size()==history,"Surface refuses without history");auto* splitItem=std::as_const(c.workspace().menus()).find("nurbs.source_split_length");check(splitItem&&!splitItem->enabled&&splitItem->disabledReason.find("curves only")!=std::string::npos,"Surface length-split menu says why");c.workspace().select_object(1);
     o->polygon->vertices[0].position.x+=1;check(!c.dispatch_action("nurbs.source_length"),"Stale source cache refuses");
 }
 NurbsSource corner(){auto s=line();s.columns=3;s.u={1,{2,2,3,5,5}};s.controls={{0,0,0,1},{3,0,0,1},{3,4,0,1}};return s;}

@@ -2,6 +2,12 @@
 #include "dve/nurbs_topology.hpp"
 #include "nurbs_evaluation_internal.hpp"
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -50,7 +56,7 @@ std::optional<NurbsSource> smooth_loft_nurbs(std::span<const NurbsSource> profil
 std::optional<NurbsFit> fit_nurbs_curve(std::span<const V> samples,unsigned count,double tolerance,std::string* e){
     if(count<2||count>64||samples.size()<count||samples.size()>513||!tolerance_ok(tolerance))return fail<NurbsFit>(e,"Fit requires 2..64 controls, control-count..513 samples and positive finite tolerance");
     for(auto p:samples)for(double x:p)if(!std::isfinite(x)||std::abs(x)>1e8)return fail<NurbsFit>(e,"Fit points must be finite and bounded");
-    NurbsSource out;out.columns=count;out.u=uniform_axis(count,std::min(3U,count-1));out.controls.resize(count);
+    NurbsSource out;out.columns=count;out.u=uniform_axis(count,(std::min)(3U,count-1));out.controls.resize(count);
     auto put=[&](unsigned i,V p){out.controls[i]={p[0],p[1],p[2],1};};put(0,samples.front());put(count-1,samples.back());
     const unsigned unknown=count-2,rows=unsigned(samples.size());
     std::vector<std::vector<double>> q(unknown,std::vector<double>(rows)),r(unknown,std::vector<double>(unknown));std::vector<V> rhs(rows);
@@ -63,7 +69,7 @@ std::optional<NurbsFit> fit_nurbs_curve(std::span<const V> samples,unsigned coun
     std::vector<V> solution(unknown);
     for(unsigned i=unknown;i-->0;){V b{};for(unsigned j=0;j<rows;++j)b=add(b,mul(rhs[j],q[i][j]));for(unsigned k=i+1;k<unknown;++k)b=sub(b,mul(solution[k],r[i][k]));solution[i]=mul(b,1/r[i][i]);put(i+1,solution[i]);}
     if(!validate_nurbs(out,e))return {};
-    double error=0;for(unsigned j=0;j<rows;++j){auto p=evaluate_nurbs(out,double(j)/(rows-1));if(!p)return fail<NurbsFit>(e,"Fit evaluation failed");error=std::max(error,norm(sub(p->position,samples[j])));}
+    double error=0;for(unsigned j=0;j<rows;++j){auto p=evaluate_nurbs(out,double(j)/(rows-1));if(!p)return fail<NurbsFit>(e,"Fit evaluation failed");error=(std::max)(error,norm(sub(p->position,samples[j])));}
     if(error>tolerance)return fail<NurbsFit>(e,"Fit exceeds the requested sampled error tolerance; increase controls or tolerance");
     return NurbsFit{std::move(out),error};
 }
@@ -73,14 +79,15 @@ std::optional<NurbsFit> rebuild_nurbs_curve(const NurbsSource& source,unsigned c
     for(unsigned i=0;i<257;++i){auto p=evaluate_nurbs(source,std::lerp(lo,hi,double(i)/256),0,e);if(!p)return {};samples.push_back(p->position);}
     auto fit=fit_nurbs_curve(samples,count,tolerance,e);if(!fit)return {};
     auto& out=fit->source;for(auto& t:out.u.knots)t=std::lerp(lo,hi,t);out.textureU=source.textureU;out.textureV=source.textureV;out.samplesPerSpan=source.samplesPerSpan;out.creaseNormals=source.creaseNormals;
-    for(unsigned i=0;i<513;++i){const double t=std::lerp(lo,hi,double(i)/512);auto a=evaluate_nurbs(source,t),b=evaluate_nurbs(out,t);if(!a||!b)return fail<NurbsFit>(e,"Rebuild validation evaluation failed");fit->maxSampledError=std::max(fit->maxSampledError,norm(sub(a->position,b->position)));}
+    for(unsigned i=0;i<513;++i){const double t=std::lerp(lo,hi,double(i)/512);auto a=evaluate_nurbs(source,t),b=evaluate_nurbs(out,t);if(!a||!b)return fail<NurbsFit>(e,"Rebuild validation evaluation failed");fit->maxSampledError=(std::max)(fit->maxSampledError,norm(sub(a->position,b->position)));}
     if(fit->maxSampledError>tolerance)return fail<NurbsFit>(e,"Rebuild exceeds independent sampled error tolerance");return fit;
 }
 std::optional<NurbsSource> attach_nurbs_u(const NurbsSource& reference,const NurbsSource& moving,bool c1,std::string* e){
     if(!validate_nurbs(reference,e)||!validate_nurbs(moving,e))return {};
     if(reference.is_curve()||moving.is_curve()||reference.rows!=moving.rows||reference.v!=moving.v)return fail<NurbsSource>(e,"Attach requires surfaces with identical V degree, knots and row count; orient/refine first");
+    if(c1&&moving.columns<3)return fail<NurbsSource>(e,"C1 attachment needs at least three U controls on the moving patch so its far edge is kept; elevate or insert a U knot first");
     auto out=moving;const double ratio=double(reference.u.degree)*(moving.u.knots[moving.u.degree+1]-moving.u.knots.front())/(double(moving.u.degree)*(reference.u.knots.back()-reference.u.knots[reference.columns-1]));
-    double referenceScale=0,movingScale=0;for(auto p:reference.controls)referenceScale=std::max(referenceScale,p.weight);for(auto p:moving.controls)movingScale=std::max(movingScale,p.weight);
+    double referenceScale=0,movingScale=0;for(auto p:reference.controls)referenceScale=(std::max)(referenceScale,p.weight);for(auto p:moving.controls)movingScale=(std::max)(movingScale,p.weight);
     for(auto& p:out.controls)p.weight/=movingScale;
     for(unsigned j=0;j<out.rows;++j){auto edge=reference.controls[j*reference.columns+reference.columns-1],prev=reference.controls[j*reference.columns+reference.columns-2];edge.weight/=referenceScale;prev.weight/=referenceScale;out.controls[j*out.columns]=edge;
         if(c1){const double w=edge.weight+ratio*(edge.weight-prev.weight);if(!(w>0)||!std::isfinite(w))return fail<NurbsSource>(e,"C1 attachment produced nonpositive homogeneous weights");V q=mul(sub(mul(point(edge),1+ratio),mul(point(prev),ratio*prev.weight/edge.weight)),edge.weight/w);out.controls[j*out.columns+1]={q[0],q[1],q[2],w};}
@@ -90,7 +97,7 @@ std::optional<NurbsSource> attach_nurbs_u(const NurbsSource& reference,const Nur
 std::optional<NurbsProjection> project_nurbs_point(const NurbsSource& s,V target,double tolerance,std::string* e){
     if(!validate_nurbs(s,e))return {};if(s.is_curve()||!tolerance_ok(tolerance))return fail<NurbsProjection>(e,"Projection requires a surface and positive tolerance");
     for(double x:target)if(!std::isfinite(x)||std::abs(x)>1e8)return fail<NurbsProjection>(e,"Projection point is nonfinite or out of bounds");
-    double weightScale=0;for(auto p:s.controls)weightScale=std::max(weightScale,p.weight);
+    double weightScale=0;for(auto p:s.controls)weightScale=(std::max)(weightScale,p.weight);
     auto evaluate=[&](double u,double v){return detail::evaluate_validated_nurbs(s,u,v,weightScale);};
     const double u0=s.u.knots.front(),u1=s.u.knots.back(),v0=s.v.knots.front(),v1=s.v.knots.back();
     struct Seed{double u,v,d;};std::vector<Seed> seeds;
@@ -130,7 +137,7 @@ std::optional<NurbsSource> intersect_nurbs_planes(const NurbsSource& a,const Nur
     auto p=affine_plane(a,tolerance),q=affine_plane(b,tolerance);if(!p||!q)return fail<NurbsSource>(e,"This intersection tool supports affine planar patches only");
     auto d=cross(p->n,q->n);const double dd=dot(d,d);if(dd<=1e-20*dot(p->n,p->n)*dot(q->n,q->n))return fail<NurbsSource>(e,"Parallel or coplanar patches have no unique segment intersection");
     auto origin=mul(add(mul(cross(q->n,d),dot(p->n,p->origin)),mul(cross(d,p->n),dot(q->n,q->origin))),1/dd);d=mul(d,1/std::sqrt(dd));double lo=-std::numeric_limits<double>::infinity(),hi=-lo;
-    for(auto plane:{*p,*q}){auto uv=plane_uv(plane,origin),next=plane_uv(plane,add(origin,d));for(unsigned k=0;k<2;++k){const double direction=next[k]-uv[k];if(std::abs(direction)<1e-14){if(uv[k]<0||uv[k]>1)return fail<NurbsSource>(e,"Planar patches do not intersect");continue;}double x=-uv[k]/direction,y=(1-uv[k])/direction;if(x>y)std::swap(x,y);lo=std::max(lo,x);hi=std::min(hi,y);}}
+    for(auto plane:{*p,*q}){auto uv=plane_uv(plane,origin),next=plane_uv(plane,add(origin,d));for(unsigned k=0;k<2;++k){const double direction=next[k]-uv[k];if(std::abs(direction)<1e-14){if(uv[k]<0||uv[k]>1)return fail<NurbsSource>(e,"Planar patches do not intersect");continue;}double x=-uv[k]/direction,y=(1-uv[k])/direction;if(x>y)std::swap(x,y);lo=(std::max)(lo,x);hi=(std::min)(hi,y);}}
     if(!std::isfinite(lo)||!std::isfinite(hi)||hi-lo<=tolerance)return fail<NurbsSource>(e,"No nondegenerate intersection segment inside both patches");
     auto x=add(origin,mul(d,lo)),y=add(origin,mul(d,hi));NurbsSource out;out.columns=2;out.u=uniform_axis(2,1);out.controls={{x[0],x[1],x[2],1},{y[0],y[1],y[2],1}};if(!validate_nurbs(out,e))return {};return out;
 }
@@ -142,12 +149,12 @@ std::optional<NurbsSource> crop_nurbs_surface(const NurbsSource& s,double u0,dou
 std::optional<NurbsSource> fillet_nurbs_corner(const NurbsSource& s,double radius,std::string* e){
     if(!validate_nurbs(s,e))return {};if(!s.is_curve()||s.columns!=3||s.u.degree!=1||!tolerance_ok(radius))return fail<NurbsSource>(e,"Corner fillet requires a three-control degree-one curve and positive radius");
     auto b=point(s.controls[1]),a=sub(point(s.controls[0]),b),c=sub(point(s.controls[2]),b);const double la=norm(a),lc=norm(c);if(la<=1e-12||lc<=1e-12)return fail<NurbsSource>(e,"Corner has a degenerate leg");a=mul(a,1/la);c=mul(c,1/lc);const double theta=std::acos(std::clamp(dot(a,c),-1.0,1.0));if(theta<=1e-6||theta>=3.141592653589793-1e-6)return fail<NurbsSource>(e,"Corner is straight or reversing");
-    const double distance=radius/std::tan(theta/2);if(distance>=std::min(la,lc))return fail<NurbsSource>(e,"Fillet radius consumes an entire leg; reduce radius");auto x=add(b,mul(a,distance)),y=add(b,mul(c,distance));NurbsSource out;out.columns=3;out.u=uniform_axis(3,2);out.controls={{x[0],x[1],x[2],1},{b[0],b[1],b[2],std::sin(theta/2)},{y[0],y[1],y[2],1}};if(!validate_nurbs(out,e))return {};return out;
+    const double distance=radius/std::tan(theta/2);if(distance>=(std::min)(la,lc))return fail<NurbsSource>(e,"Fillet radius consumes an entire leg; reduce radius");auto x=add(b,mul(a,distance)),y=add(b,mul(c,distance));NurbsSource out;out.columns=3;out.u=uniform_axis(3,2);out.controls={{x[0],x[1],x[2],1},{b[0],b[1],b[2],std::sin(theta/2)},{y[0],y[1],y[2],1}};if(!validate_nurbs(out,e))return {};return out;
 }
 std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s,std::uint64_t id,double tolerance,double angle,std::string* e){
     if(!validate_nurbs(s,e))return {};if(s.is_curve()||!tolerance_ok(tolerance)||!std::isfinite(angle)||angle<=0||angle>3.141592653589793)return fail<CookedPolygonAsset>(e,"Adaptive surface bake needs positive chord tolerance and normal angle in (0,pi]");
     std::vector<double> us,vs;for(double t:s.u.knots)if(us.empty()||t!=us.back())us.push_back(t);for(double t:s.v.knots)if(vs.empty()||t!=vs.back())vs.push_back(t);
-    double weightScale=0;for(auto p:s.controls)weightScale=std::max(weightScale,p.weight);
+    double weightScale=0;for(auto p:s.controls)weightScale=(std::max)(weightScale,p.weight);
     unsigned evaluations=0;
     auto sample=[&](double u,double v)->std::optional<NurbsSample>{if(++evaluations>250000)return {};return detail::evaluate_validated_nurbs(s,u,v,weightScale);};
     auto normal=[](const NurbsSample& p){auto n=cross(p.du,p.dv);const double l=norm(n);return l>1e-14?mul(n,1/l):V{};};
@@ -161,7 +168,7 @@ std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s
             std::array<std::array<double,2>,9> uv{{{a,c},{b,c},{b,d},{a,d},{u,c},{b,v},{u,d},{a,v},{u,v}}};std::array<NurbsSample,9> p;
             for(unsigned k=0;k<9;++k){auto q=sample(uv[k][0],uv[k][1]);if(!q)return fail<CookedPolygonAsset>(e,"Adaptive bake evaluation failed or exceeded work budget");p[k]=*q;}
             double error=norm(sub(p[8].position,mul(add(p[0].position,p[2].position),.5)));
-            for(unsigned k=0;k<4;++k)error=std::max(error,norm(sub(p[4+k].position,mul(add(p[k].position,p[(k+1)%4].position),.5))));
+            for(unsigned k=0;k<4;++k)error=(std::max)(error,norm(sub(p[4+k].position,mul(add(p[k].position,p[(k+1)%4].position),.5))));
             auto centreNormal=normal(p[8]);if(norm(centreNormal)<.5)return fail<CookedPolygonAsset>(e,"Adaptive bake encountered a singular surface");bool refine=error>tolerance;
             for(unsigned k=0;k<4;++k){auto q=sample(std::clamp(uv[k][0],std::nextafter(a,b),std::nextafter(b,a)),std::clamp(uv[k][1],std::nextafter(c,d),std::nextafter(d,c)));if(!q)return fail<CookedPolygonAsset>(e,"Adaptive bake exceeded derivative work budget");auto n=normal(*q);if(norm(n)<.5)return fail<CookedPolygonAsset>(e,"Adaptive bake encountered a singular corner");refine|=dot(n,centreNormal)<std::cos(angle);}
             if(refine){addU.push_back(u);addV.push_back(v);}
@@ -182,7 +189,7 @@ std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s
     }
     for(std::size_t i=0;i<mesh.indices.size();i+=3){auto a=mesh.vertices[mesh.indices[i]].position,b=mesh.vertices[mesh.indices[i+1]].position,c=mesh.vertices[mesh.indices[i+2]].position;if(norm(cross({double(b.x)-a.x,double(b.y)-a.y,double(b.z)-a.z},{double(c.x)-a.x,double(c.y)-a.y,double(c.z)-a.z}))<=0)return fail<CookedPolygonAsset>(e,"Adaptive bake collapsed at float precision");}
     mesh.submeshes.push_back({"Adaptive NURBS",0,unsigned(mesh.indices.size()),0});mesh.bounds.minimum=mesh.bounds.maximum=mesh.vertices.front().position;
-    for(auto& v:mesh.vertices){auto p=v.position;mesh.bounds.minimum={std::min(mesh.bounds.minimum.x,p.x),std::min(mesh.bounds.minimum.y,p.y),std::min(mesh.bounds.minimum.z,p.z)};mesh.bounds.maximum={std::max(mesh.bounds.maximum.x,p.x),std::max(mesh.bounds.maximum.y,p.y),std::max(mesh.bounds.maximum.z,p.z)};}
+    for(auto& v:mesh.vertices){auto p=v.position;mesh.bounds.minimum={(std::min)(mesh.bounds.minimum.x,p.x),(std::min)(mesh.bounds.minimum.y,p.y),(std::min)(mesh.bounds.minimum.z,p.z)};mesh.bounds.maximum={(std::max)(mesh.bounds.maximum.x,p.x),(std::max)(mesh.bounds.maximum.y,p.y),(std::max)(mesh.bounds.maximum.z,p.z)};}
     mesh.contentHash=polygon_asset_content_hash(mesh);auto valid=validate_polygon_asset(mesh);if(!valid){if(e)*e=valid.message;return {};}return mesh;
 }
 }

@@ -225,7 +225,12 @@ std::optional<NurbsSource> insert_nurbs_knot(const NurbsSource& source,bool alon
 }
 std::string encode_nurbs(const NurbsSource& s){
     std::string error;if(!validate_nurbs(s,&error))return {};
-    std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17)<<"DVE_NURBS 3 "<<s.columns<<' '<<s.rows<<' '<<s.samplesPerSpan<<' '<<unsigned(s.creaseNormals)<<' '<<s.textureU[0]<<' '<<s.textureU[1]<<' '<<s.textureV[0]<<' '<<s.textureV[1]<<' '<<unsigned(s.adaptiveDisplay)<<' '<<s.chordTolerance<<' '<<s.normalAngle<<' ';
+    std::ostringstream o;o.imbue(std::locale::classic());// Only sources that use the v3 display policy are written as v3, so fixed-display
+    // sources stay readable by older builds that understand v2.
+    const NurbsSource defaults;
+    const bool v3=s.adaptiveDisplay||s.chordTolerance!=defaults.chordTolerance||s.normalAngle!=defaults.normalAngle;
+    o<<std::setprecision(17)<<(v3?"DVE_NURBS 3 ":"DVE_NURBS 2 ")<<s.columns<<' '<<s.rows<<' '<<s.samplesPerSpan<<' '<<unsigned(s.creaseNormals)<<' '<<s.textureU[0]<<' '<<s.textureU[1]<<' '<<s.textureV[0]<<' '<<s.textureV[1]<<' ';
+    if(v3)o<<unsigned(s.adaptiveDisplay)<<' '<<s.chordTolerance<<' '<<s.normalAngle<<' ';
     for(const auto* a:{&s.u,&s.v}){o<<a->degree<<' '<<a->knots.size()<<' ';for(auto k:a->knots)o<<k<<' ';}
     for(auto p:s.controls)o<<p.x<<' '<<p.y<<' '<<p.z<<' '<<p.weight<<' ';
     return o.str();

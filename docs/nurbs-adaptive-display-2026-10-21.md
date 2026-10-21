@@ -45,12 +45,14 @@ without changing the current adaptive source/cache.
 
 ## Persistence and compatibility
 
-New or edited source strings use **DVE_NURBS 3**. The v3 header adds the adaptive
+Sources whose display policy differs from the default (adaptive display, or
+non-default tolerances) are written as **DVE_NURBS 3**; fixed-display sources
+with default tolerances are still written as v2, so older builds keep reading them. The v3 header adds the adaptive
 flag, chord tolerance and normal angle after the v2 texture ranges. Readers
 continue to accept v1 and v2; these default to fixed display and retain their
 legacy crease/UV semantics. Unchanged legacy component strings need not be
 rewritten merely because a scene is saved. Older engine versions cannot read
-new v3 source strings.
+v3 source strings (only adaptive or tuned sources).
 
 The policy validates finite chord tolerances in [1e-8,1e4] and normal angles in
 [1e-4,pi]. Invalid flags, values and adaptive-curve sources are rejected before

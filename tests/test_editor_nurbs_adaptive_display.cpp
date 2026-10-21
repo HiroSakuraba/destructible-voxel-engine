@@ -1,7 +1,10 @@
 #include "dve/editor_native.hpp"
 #include "dve/nurbs_modeling.hpp"
 #include <cmath>
+#include <set>
+#include <string>
 #include <utility>
+#include <vector>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -14,7 +17,9 @@ void codec_geometry(){
     auto s=make_nurbs_patch(2);s.adaptiveDisplay=true;s.chordTolerance=.0025;s.normalAngle=.075;s.textureU={2,5};
     auto encoded=encode_nurbs(s);check(encoded.starts_with("DVE_NURBS 3 ")&&decode_nurbs(encoded)==s,"v3 adaptive roundtrip");
     auto old=decode_nurbs(legacy);check(old&&!old->adaptiveDisplay&&!old->creaseNormals,"v1 legacy default policy");check(decode_nurbs(encode_nurbs(*old))==old,"v1 upgrade preserves legacy display");
-    auto fixed=make_nurbs_patch(2);std::istringstream in(encode_nurbs(fixed));std::vector<std::string> tokens;for(std::string t;in>>t;)tokens.push_back(t);tokens[1]="2";tokens.erase(tokens.begin()+10,tokens.begin()+13);std::string v2;for(auto t:tokens)v2+=t+' ';check(decode_nurbs(v2)==fixed,"v2 legacy default policy");
+    auto fixed=make_nurbs_patch(2);auto v2=encode_nurbs(fixed);check(v2.starts_with("DVE_NURBS 2 ")&&decode_nurbs(v2)==fixed,"Fixed default policy still writes readable v2");
+    auto tuned=fixed;tuned.chordTolerance=.02;auto v3=encode_nurbs(tuned);check(v3.starts_with("DVE_NURBS 3 ")&&decode_nurbs(v3)==tuned,"Non-default tolerances use v3");
+    {std::istringstream in(encode_nurbs(s));std::vector<std::string> tokens;for(std::string t;in>>t;)tokens.push_back(t);tokens[1]="2";tokens.erase(tokens.begin()+10,tokens.begin()+13);std::string downgraded;for(auto t:tokens)downgraded+=t+' ';auto back=decode_nurbs(downgraded);check(back&&!back->adaptiveDisplay,"v2 reads as fixed default policy");}
     std::string error;auto mesh=tessellate_nurbs(s,1,&error),direct=tessellate_nurbs_adaptive(s,1,s.chordTolerance,s.normalAngle,&error);check(mesh&&direct,error);check(mesh->contentHash==direct->contentHash&&mesh->vertices.size()==4,"Display dispatcher uses persisted adaptive policy");
     auto curved=s;curved.controls[5].y=.5;auto a=tessellate_nurbs(curved,1,&error);check(bool(a),error);check(a->vertices.size()>4,"Source changes drive adaptive refinement");
     auto split=split_nurbs(curved,false,.3,&error);check(bool(split),error);check(split->first.adaptiveDisplay&&split->first.chordTolerance==s.chordTolerance,"Splits retain adaptive policy");check(tessellate_nurbs(split->first,2,&error).has_value(),error);
@@ -35,6 +40,7 @@ void native(){
     auto point=source->controls[5];point.y=.25;check(c.edit_nurbs_control(5,point),"CV edit rebuilds adaptive display");check(o->polygon->vertices.size()>4&&editor_nurbs_source(*o)->adaptiveDisplay,"Adaptive cache responds to edit");check(c.dispatch_action("edit.undo")&&o->polygon->vertices.size()==4,"Undo control and adaptive cache");
     check(c.dispatch_action("nurbs.source_display_coarse"),"Coarse preset");check(editor_nurbs_source(*o)->chordTolerance==.05,"Coarse settings");check(c.dispatch_action("nurbs.source_display_fine"),"Fine preset");auto fine=editor_nurbs_source(*o);check(fine->chordTolerance==.0025&&fine->normalAngle==.075,"Fine settings");history=c.workspace().commands().size();check(c.dispatch_action("nurbs.source_display_fine")&&c.workspace().commands().size()==history,"No-op preset adds no history");
     const auto before=editor_nurbs_source(*o);const auto hash=o->polygon->contentHash;point=before->controls[5];point.y=1e7;check(!c.edit_nurbs_control(5,point)&&editor_nurbs_source(*o)==before&&o->polygon->contentHash==hash&&c.workspace().commands().size()==history,"Budget failure retains source/cache/history");
+    {auto curveObject=make_editor_nurbs(9,make_nurbs_arc());check(bool(curveObject),"Curve fixture");c.workspace().document().add_object(std::move(*curveObject));c.workspace().select_object(9);c.refresh_menu_state();auto* item=std::as_const(c.workspace().menus()).find("nurbs.source_display_fine");check(item&&!item->enabled&&item->disabledReason.find("surfaces only")!=std::string::npos,"Curve adaptive display menu says why");c.workspace().select_object(1);}
     check(c.dispatch_action("nurbs.source_quality")&&!editor_nurbs_source(*o)->adaptiveDisplay&&o->polygon->vertices.size()>4,"Switch to fixed density");check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*o)==fine,"Undo fixed switch");
     const auto root=std::filesystem::temp_directory_path()/"dve_adaptive_display_test";std::filesystem::remove_all(root);std::filesystem::create_directories(root);auto save=c.workspace().document().save_transactional(root/"scene.dvescene");check(save.success,save.error);std::string error;auto loaded=EditorDocument::load(root/"scene.dvescene",&error);check(bool(loaded),error);check(editor_nurbs_source(*loaded->find_object(1))==fine&&loaded->find_object(1)->polygon->contentHash==o->polygon->contentHash&&loaded->validate(),"Reopen adaptive source/cache");std::filesystem::remove_all(root);
     o->flags.locked=true;history=c.workspace().commands().size();check(!c.dispatch_action("nurbs.source_display_standard")&&c.workspace().commands().size()==history,"Locked adaptive edit refuses");o->flags.locked=false;o->polygon->vertices[0].position.x+=.1F;check(!c.dispatch_action("nurbs.source_display_standard")&&c.workspace().commands().size()==history,"Stale cache refuses display change");

@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 using namespace dve;
 using namespace dve::editor;
 namespace {
@@ -30,5 +32,25 @@ void native(){
     const auto root=std::filesystem::temp_directory_path()/"dve_nurbs_degree_regression";std::filesystem::remove_all(root);std::filesystem::create_directories(root);std::string error;auto save=c.workspace().document().save_transactional(root/"scene.dvescene");check(save.success,save.error);auto loaded=EditorDocument::load(root/"scene.dvescene",&error);check(bool(loaded),error);check(editor_nurbs_source(*loaded->find_object(1))==editor_nurbs_source(*o),"reopened elevated source");std::filesystem::remove_all(root);
     o->flags.locked=true;auto history=c.workspace().commands().size();check(!c.dispatch_action("nurbs.source_elevate_u")&&c.workspace().commands().size()==history,"locked elevation refuses atomically");o->flags.locked=false;check(c.workspace().document().validate(),"final native cache valid");
 }
+void honesty(){
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(EditorDocument("Degree menus")));auto& c=*owner;c.resize(1600,1100);
+    NurbsSource curve;curve.columns=8;curve.u.degree=7;curve.u.knots.assign(8,0);curve.u.knots.insert(curve.u.knots.end(),8,1);for(unsigned i=0;i<8;++i)curve.controls.push_back({double(i),0,0,1});
+    auto object=make_editor_nurbs(1,curve);check(bool(object),"make degree-7 curve");c.workspace().document().add_object(std::move(*object));c.workspace().select_object(1);c.refresh_menu_state();
+    const auto& menus=std::as_const(c.workspace().menus());
+    auto* u=menus.find("nurbs.source_elevate_u");check(u&&!u->enabled&&u->disabledReason.find("maximum of 7")!=std::string::npos,"max degree menu says why");
+    auto* v=menus.find("nurbs.source_elevate_v");check(v&&!v->enabled&&v->disabledReason.find("no V degree")!=std::string::npos,"curve V menu says why");
+    auto history=c.workspace().commands().size();check(!c.dispatch_action("nurbs.source_elevate_u")&&c.workspace().commands().size()==history,"max degree adds no history");
+    check(!c.dispatch_action("nurbs.source_elevate_v")&&c.workspace().commands().size()==history,"curve V adds no history");
+    auto* o=c.workspace().document().find_object(1);const auto before=editor_nurbs_source(*o);
+    auto quad=make_nurbs_arc();auto second=make_editor_nurbs(2,quad);check(bool(second),"make arc");c.workspace().document().add_object(std::move(*second));c.workspace().select_object(2);
+    auto* arc=c.workspace().document().find_object(2);
+    arc->flags.visible=false;c.refresh_menu_state();check(!menus.find("nurbs.source_elevate_u")->enabled,"hidden menu disabled");check(!c.dispatch_action("nurbs.source_elevate_u")&&c.workspace().commands().size()==history,"hidden refuses");arc->flags.visible=true;
+    arc->prefabLink=EditorPrefabLink{};c.refresh_menu_state();check(!menus.find("nurbs.source_elevate_u")->enabled,"prefab menu disabled");check(!c.dispatch_action("nurbs.source_elevate_u")&&c.workspace().commands().size()==history,"prefab refuses");arc->prefabLink.reset();
+    c.workspace().select_object(1);check(c.dispatch_action("view.isolate_selection"),"isolate curve");c.workspace().select_object(2);c.refresh_menu_state();
+    check(!menus.find("nurbs.source_elevate_u")->enabled,"isolated-out menu disabled");check(!c.dispatch_action("nurbs.source_elevate_u")&&c.workspace().commands().size()==history,"isolated-out refuses");
+    c.workspace().select_object(1);check(c.dispatch_action("view.isolate_selection"),"clear isolation");c.workspace().select_object(2);c.refresh_menu_state();
+    check(menus.find("nurbs.source_elevate_u")->enabled&&c.dispatch_action("nurbs.source_elevate_u")&&c.workspace().commands().size()==history+1,"one elevation is one undo step");
+    check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*arc)==quad&&c.workspace().document().find_object(2)&&editor_nurbs_source(*o)==before,"undo restores exact arc knots/weights and keeps ids");
 }
-int main(){try{geometry();native();std::cout<<"NURBS degree elevation tests passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+}
+int main(){try{geometry();native();honesty();std::cout<<"NURBS degree elevation tests passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -39,7 +39,7 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
         else{
             if(!(nurbsOperationParameter_>0&&nurbsOperationParameter_<1)){set_status("Corner leg fraction must lie strictly between 0 and 1",true);return false;}
             if(!source->is_curve()||source->columns!=3||source->u.degree!=1){set_status("Select a three-control degree-one corner curve",true);return false;}
-            const auto a=source->controls[0],b=source->controls[1],c=source->controls[2];const double la=std::hypot(a.x-b.x,a.y-b.y,a.z-b.z),lc=std::hypot(c.x-b.x,c.y-b.y,c.z-b.z);const double cosine=la>0&&lc>0?((a.x-b.x)*(c.x-b.x)+(a.y-b.y)*(c.y-b.y)+(a.z-b.z)*(c.z-b.z))/(la*lc):1;const double theta=std::acos(std::clamp(cosine,-1.0,1.0));output=fillet_nurbs_corner(*source,nurbsOperationParameter_*std::min(la,lc)*std::tan(theta/2),&error);label="Corner Fillet Arc";status="Rational circular corner arc added; trim/join legs separately; original retained";
+            const auto a=source->controls[0],b=source->controls[1],c=source->controls[2];const double la=std::hypot(a.x-b.x,a.y-b.y,a.z-b.z),lc=std::hypot(c.x-b.x,c.y-b.y,c.z-b.z);const double cosine=la>0&&lc>0?((a.x-b.x)*(c.x-b.x)+(a.y-b.y)*(c.y-b.y)+(a.z-b.z)*(c.z-b.z))/(la*lc):1;const double theta=std::acos(std::clamp(cosine,-1.0,1.0));output=fillet_nurbs_corner(*source,nurbsOperationParameter_*(std::min)(la,lc)*std::tan(theta/2),&error);label="Corner Fillet Arc";status="Rational circular corner arc added; trim/join legs separately; original retained";
         }
         if(!mesh&&!output){set_status(error,true);return false;}
         std::optional<EditorObject> made;

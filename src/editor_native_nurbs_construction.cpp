@@ -97,8 +97,11 @@ void NativeEditorController::draw_nurbs_construction(const IEditorCanvas& canvas
     for(int i=0;i<5;++i){auto f=construction_field(viewport,i);p.outline(f,cyan);auto value=textEdit_.kind==TextEditKind::NurbsControl&&textEdit_.axis==i+4?textEdit_.buffer:number(values[i]);p.text(f.x+5,f.y+18,elide_text_to_width(p,std::string(names[i])+": "+value,f.width-10),white);}
     p.text(r.x+8,r.y+308,"Enter applies; Esc cancels. Build from NURBS menu.",white);
     p.text(r.x+8,r.y+329,"Loft: ruled V; equal degrees, explicit direction/seams.",white);
-    p.text(r.x+8,r.y+350,"Sweep: planar section normal to rail start tangent.",white);
-    p.text(r.x+8,r.y+371,"Sweep approximates rail; no closed rails or live links.",white);
+    constexpr const char* edges[]={"U-min","U-max","V-min","V-max"};
+    auto attachment=std::string("Match: active ")+edges[static_cast<unsigned>(nurbsAttachmentOptions_.referenceBoundary)]+" / other "+edges[static_cast<unsigned>(nurbsAttachmentOptions_.movingBoundary)]+
+        (nurbsAttachmentOptions_.reverseBoundary?"; reversed":"; same direction");
+    p.text(r.x+8,r.y+350,elide_text_to_width(p,attachment,r.width-16),white);
+    p.text(r.x+8,r.y+371,"Boundary choices and Match C0/C1: NURBS menu.",white);
     p.text(r.x+8,r.y+392,"NURBS > Close Construction Settings hides this panel.",white);
 }
 }

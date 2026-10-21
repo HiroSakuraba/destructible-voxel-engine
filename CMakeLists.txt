@@ -178,6 +178,7 @@ add_library(dve_core
     src/nurbs_construction.cpp
     src/nurbs_topology.cpp
     src/nurbs_modeling.cpp
+    src/nurbs_attachment.cpp
     src/nurbs_queries.cpp
     src/nurbs_degree.cpp
     src/polygon_asset.cpp
@@ -2844,6 +2845,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_mesh_authoring_tests tests/test_editor_mesh_authoring.cpp)
         target_link_libraries(dve_editor_mesh_authoring_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_mesh_authoring_tests COMMAND dve_editor_mesh_authoring_tests)
+        add_executable(dve_editor_nurbs_attachment_tests tests/test_editor_nurbs_attachment.cpp)
+        target_link_libraries(dve_editor_nurbs_attachment_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_nurbs_attachment_tests COMMAND dve_editor_nurbs_attachment_tests)
         add_executable(dve_editor_nurbs_background_tests tests/test_editor_nurbs_background.cpp)
         target_link_libraries(dve_editor_nurbs_background_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_background_tests COMMAND dve_editor_nurbs_background_tests)

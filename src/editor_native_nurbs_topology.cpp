@@ -32,7 +32,14 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
         const auto newId=document.allocate_object_id();
         if(rebuild){auto fit=rebuild_nurbs_curve(*source,nurbsSweepOptions_.sections,.01,&error);if(fit){output=std::move(fit->source);status="Curve rebuilt; max sampled local error "+std::to_string(fit->maxSampledError)+" (not certified)";}label="Rebuilt Curve";}
         else if(adaptive){mesh=tessellate_nurbs_adaptive(*source,newId,.01,.15,&error);label="Adaptive Polygon";status="Adaptive surface polygon added; sampled local tolerance 0.01, angle 0.15 rad; source retained";}
-        else if(attach){output=attach_nurbs_u(*source,*other,action=="nurbs.source_attach_c1",&error);label="Attached Patch";status="Separate patch boundary matched to active U-max; originals retained (not sewn topology)";}
+        else if(attach){
+            auto options=nurbsAttachmentOptions_;options.c1=action=="nurbs.source_attach_c1";
+            auto attached=attach_nurbs_boundaries(*source,*other,options,&error);
+            if(attached){output=std::move(attached->moving);const bool v=options.movingBoundary==NurbsBoundary::UMin||options.movingBoundary==NurbsBoundary::UMax;
+                status="Boundary matched with compatible degree "+std::to_string(v?output->v.degree:output->u.degree)+
+                    "; "+(options.c1?"C1 in normalized cross-boundary domains":"C0 position")+"; originals retained, separate patches";}
+            label="Boundary Matched Patch";
+        }
         else if(project){output=project_nurbs_curve(*other,*source,nurbsSweepOptions_.sections,&error);label="Projected Sample Guide";status="Projected sample guide added; connecting segments are approximate; originals retained";}
         else if(intersect){output=intersect_nurbs_planes(*source,*other,1e-8,&error);label="Planar Intersection";status="Affine patch intersection segment added; both surfaces retained";}
         else if(crop){const double f=nurbsOperationParameter_;if(!(f>0&&f<.5)){set_status("Set parameter / length fraction to a crop margin strictly between 0 and 0.5",true);return false;}output=crop_nurbs_surface(*source,std::lerp(source->u.knots.front(),source->u.knots.back(),f),std::lerp(source->u.knots.front(),source->u.knots.back(),1-f),std::lerp(source->v.knots.front(),source->v.knots.back(),f),std::lerp(source->v.knots.front(),source->v.knots.back(),1-f),&error);label="Rectangle Crop";status="Exact rectangular subpatch added; original retained; no arbitrary trim loops";}

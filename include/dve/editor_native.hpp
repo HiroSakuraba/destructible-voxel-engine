@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/simulation_clock.hpp"
+#include "dve/nurbs_attachment.hpp"
 #include "dve/editor_nurbs_tessellation.hpp"
 
 #include <array>
@@ -1432,6 +1433,7 @@ private:
     Float3 nurbsConstructionOrigin_{};
     NurbsSweepOptions nurbsSweepOptions_;
     double nurbsOperationParameter_{.5};
+    NurbsAttachmentOptions nurbsAttachmentOptions_;
     unsigned nurbsDisplaySamples_{8};
     // CV selection parked while the density settings panel is open (only one panel at a time).
     EditorObjectId nurbsParkedObject_{};std::set<std::size_t> nurbsParkedSelection_;std::size_t nurbsParkedControl_{};

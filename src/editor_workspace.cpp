@@ -730,8 +730,17 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.construct_smooth_loft","NURBS","Smooth Interpolating Loft from Snapshots",""},
         {"nurbs.source_rebuild","NURBS","Rebuild Curve (0.01 Local Sample Error)",""},
         {"nurbs.source_adaptive","NURBS","Bake Adaptive Surface Polygon (0.01 Local)",""},
-        {"nurbs.source_attach_c0","NURBS","Attach Other U-min to Active U-max (C0)",""},
-        {"nurbs.source_attach_c1","NURBS","Attach Other U-min to Active U-max (C1)",""},
+        {"nurbs.attach_reference_umin","NURBS","Active reference boundary: U minimum",""},
+        {"nurbs.attach_reference_umax","NURBS","Active reference boundary: U maximum",""},
+        {"nurbs.attach_reference_vmin","NURBS","Active reference boundary: V minimum",""},
+        {"nurbs.attach_reference_vmax","NURBS","Active reference boundary: V maximum",""},
+        {"nurbs.attach_moving_umin","NURBS","Other moving boundary: U minimum",""},
+        {"nurbs.attach_moving_umax","NURBS","Other moving boundary: U maximum",""},
+        {"nurbs.attach_moving_vmin","NURBS","Other moving boundary: V minimum",""},
+        {"nurbs.attach_moving_vmax","NURBS","Other moving boundary: V maximum",""},
+        {"nurbs.attach_reverse","NURBS","Reverse Boundary Correspondence (Twist)",""},
+        {"nurbs.source_attach_c0","NURBS","Match Other Boundary to Active (C0)",""},
+        {"nurbs.source_attach_c1","NURBS","Match Other Boundary to Active (C1)",""},
         {"nurbs.source_project","NURBS","Project Other Curve Samples onto Active Surface",""},
         {"nurbs.source_intersect_planes","NURBS","Intersect Two Affine Planar Patches",""},
         {"nurbs.source_crop","NURBS","Crop Central Surface by Parameter Margin",""},
@@ -961,6 +970,9 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
             action->radioGroup = std::move(radioGroup);
         }
     };
+    for(auto id:{"nurbs.attach_reference_umin","nurbs.attach_reference_umax","nurbs.attach_reference_vmin","nurbs.attach_reference_vmax"})configure(id,"Attachment Reference Boundary",55,true,"nurbs.attach.reference");
+    for(auto id:{"nurbs.attach_moving_umin","nurbs.attach_moving_umax","nurbs.attach_moving_vmin","nurbs.attach_moving_vmax"})configure(id,"Attachment Moving Boundary",55,true,"nurbs.attach.moving");
+    configure("nurbs.attach_reverse","Attachment Correspondence",56,true);
     for(auto id:{"nurbs.source_quality","nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine"})configure(id,"Surface Display",60,true,"nurbs.display");
     for (std::string_view id : {"view.lit", "view.unlit", "view.wireframe", "view.material_ids", "view.normals",
                                 "view.lighting_only", "view.overdraw", "view.voxel_debug"})

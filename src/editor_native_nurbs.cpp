@@ -11,7 +11,7 @@
 #include <string>
 namespace dve::editor {
 namespace {
-constexpr std::string_view actions[]={"nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine","nurbs.source_rebuild","nurbs.source_adaptive","nurbs.source_attach_c0","nurbs.source_attach_c1","nurbs.source_project","nurbs.source_intersect_planes","nurbs.source_crop","nurbs.source_fillet_corner","nurbs.construct_smooth_loft","nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
+constexpr std::string_view actions[]={"nurbs.attach_reference_umin","nurbs.attach_reference_umax","nurbs.attach_reference_vmin","nurbs.attach_reference_vmax","nurbs.attach_moving_umin","nurbs.attach_moving_umax","nurbs.attach_moving_vmin","nurbs.attach_moving_vmax","nurbs.attach_reverse","nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine","nurbs.source_rebuild","nurbs.source_adaptive","nurbs.source_attach_c0","nurbs.source_attach_c1","nurbs.source_project","nurbs.source_intersect_planes","nurbs.source_crop","nurbs.source_fillet_corner","nurbs.construct_smooth_loft","nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
 UiRect panel(UiRect v){return {v.x+8,v.y+8,(std::min)(330,(std::max)(1,v.width-16)),(std::min)(238,(std::max)(1,v.height-16))};}
 UiRect field(UiRect v,int i){auto p=panel(v);return {p.x+8,p.y+62+i*32,p.width-16,28};}
 std::string number(double x){std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(12)<<x;return o.str();}
@@ -71,6 +71,15 @@ void NativeEditorController::refresh_nurbs_menu_state(){
             const double angle=action=="nurbs.source_display_coarse"?.3:action=="nurbs.source_display_fine"?.075:.15;
             (void)workspace_.menus().set_checked(action,source&&source->adaptiveDisplay&&source->chordTolerance==chord&&source->normalAngle==angle);
         }
+        if(action.starts_with("nurbs.attach_")){
+            constexpr std::string_view edges[]={"umin","umax","vmin","vmax"};
+            bool checked=action=="nurbs.attach_reverse"&&nurbsAttachmentOptions_.reverseBoundary;
+            for(unsigned i=0;i<4;++i){
+                if(action==std::string("nurbs.attach_reference_")+std::string(edges[i]))checked=nurbsAttachmentOptions_.referenceBoundary==static_cast<NurbsBoundary>(i);
+                if(action==std::string("nurbs.attach_moving_")+std::string(edges[i]))checked=nurbsAttachmentOptions_.movingBoundary==static_cast<NurbsBoundary>(i);
+            }
+            enabled=editing;(void)workspace_.menus().set_checked(action,checked);
+        }
         std::string reason="Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)";
         if(source&&(action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v")){
             const bool alongV=action=="nurbs.source_elevate_v";
@@ -118,6 +127,20 @@ bool NativeEditorController::edit_nurbs_control(std::size_t index,NurbsPoint val
 }
 bool NativeEditorController::dispatch_nurbs_action(std::string_view action){
     if(workspace_.mode()!=EditorMode::Edit||playSession_.active()||longJob_||gizmoDragging_||nurbsBoxActive_){set_status("Finish the active drag and stop Play before NURBS authoring",true);return false;}
+    if(action.starts_with("nurbs.attach_")){
+        constexpr std::string_view edges[]={"umin","umax","vmin","vmax"};bool recognized=false;
+        if(action=="nurbs.attach_reverse"){nurbsAttachmentOptions_.reverseBoundary=!nurbsAttachmentOptions_.reverseBoundary;recognized=true;}
+        for(unsigned i=0;i<4;++i){
+            if(action==std::string("nurbs.attach_reference_")+std::string(edges[i])){nurbsAttachmentOptions_.referenceBoundary=static_cast<NurbsBoundary>(i);recognized=true;}
+            if(action==std::string("nurbs.attach_moving_")+std::string(edges[i])){nurbsAttachmentOptions_.movingBoundary=static_cast<NurbsBoundary>(i);recognized=true;}
+        }
+        if(!recognized)return false;
+        refresh_nurbs_menu_state();
+        constexpr const char* names[]={"U-min","U-max","V-min","V-max"};
+        set_status(std::string("Boundary match: active ")+names[static_cast<unsigned>(nurbsAttachmentOptions_.referenceBoundary)]+" to other "+names[static_cast<unsigned>(nurbsAttachmentOptions_.movingBoundary)]+
+            (nurbsAttachmentOptions_.reverseBoundary?"; reversed correspondence":"; same-direction correspondence")+". Select two surfaces, then Match C0 or C1.",false,12);
+        return true;
+    }
     if(action.starts_with("nurbs.source_"))return dispatch_nurbs_topology(action);
     if(action.starts_with("nurbs.construct_"))return dispatch_nurbs_construction(action);
     if(action=="nurbs.create_patch")return create_nurbs_source(make_nurbs_patch(),"NURBS Patch");

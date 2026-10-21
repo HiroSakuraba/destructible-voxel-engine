@@ -9,6 +9,8 @@ struct NurbsAttachmentOptions {
     NurbsBoundary movingBoundary{NurbsBoundary::UMin};
     bool reverseBoundary{};
     bool c1{};
+    // Keep a stable boundary weight gauge when maintaining a persistent seam.
+    bool preserveWeightGauge{};
 };
 struct NurbsAttachment {
     // Shape-preserving compatible reference; the input itself is never modified.

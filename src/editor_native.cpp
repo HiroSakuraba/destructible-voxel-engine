@@ -6440,6 +6440,9 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
     if (selectionDomain_ == SelectionDomain::Polygons && polygonSelection_.components.empty()) return;
     gizmoAxis_ = hit_test_gizmo_axis(x, y);
     if (gizmoAxis_ == 0) return;
+    for(auto id:workspace_.selected_objects()){const auto* object=workspace_.document().find_object(id);if(object&&has_nurbs_seam(*object)){
+        set_status("Linked NURBS seams use numeric CV edits; unlink before patch gizmo transforms",true);gizmoAxis_=0;return;
+    }}
     for (EditorObjectId id : workspace_.selected_objects()) {
         const EditorObject* object = workspace_.document().find_object(id);
         if (!object || object->flags.locked) {
@@ -6811,6 +6814,11 @@ bool same_transform(const RigidTransform& a, const RigidTransform& b);  // numer
 }  // namespace
 
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
+    if(actionId=="create.prefab_from_selection"||actionId=="edit.copy"||actionId=="edit.cut"||actionId=="edit.duplicate"){
+        for(auto id:workspace_.selected_objects()){for(auto child:collect_editor_object_subtree_ids(workspace_.document(),std::vector<EditorObjectId>{id})){
+            const auto* object=workspace_.document().find_object(child);if(object&&has_nurbs_seam(*object)){set_status("Unlink NURBS seams before copying, duplicating or creating a prefab; Bake to Polygon is also available",true);return false;}
+        }}
+    }
     if(nurbsDragRequested_&&!actionId.starts_with("view.")){
         // Undo during an in-flight adaptive transform cancels that transform only;
         // it must not also undo the previous, unrelated history step.

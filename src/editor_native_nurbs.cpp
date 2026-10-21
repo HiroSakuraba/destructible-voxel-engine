@@ -11,7 +11,7 @@
 #include <string>
 namespace dve::editor {
 namespace {
-constexpr std::string_view actions[]={"nurbs.attach_reference_umin","nurbs.attach_reference_umax","nurbs.attach_reference_vmin","nurbs.attach_reference_vmax","nurbs.attach_moving_umin","nurbs.attach_moving_umax","nurbs.attach_moving_vmin","nurbs.attach_moving_vmax","nurbs.attach_reverse","nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine","nurbs.source_rebuild","nurbs.source_adaptive","nurbs.source_attach_c0","nurbs.source_attach_c1","nurbs.source_project","nurbs.source_intersect_planes","nurbs.source_crop","nurbs.source_fillet_corner","nurbs.construct_smooth_loft","nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
+constexpr std::string_view actions[]={"nurbs.seam_link_c0","nurbs.seam_link_c1","nurbs.seam_refresh","nurbs.seam_unlink","nurbs.attach_reference_umin","nurbs.attach_reference_umax","nurbs.attach_reference_vmin","nurbs.attach_reference_vmax","nurbs.attach_moving_umin","nurbs.attach_moving_umax","nurbs.attach_moving_vmin","nurbs.attach_moving_vmax","nurbs.attach_reverse","nurbs.source_display_coarse","nurbs.source_display_standard","nurbs.source_display_fine","nurbs.source_rebuild","nurbs.source_adaptive","nurbs.source_attach_c0","nurbs.source_attach_c1","nurbs.source_project","nurbs.source_intersect_planes","nurbs.source_crop","nurbs.source_fillet_corner","nurbs.construct_smooth_loft","nurbs.source_split_length","nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
 UiRect panel(UiRect v){return {v.x+8,v.y+8,(std::min)(330,(std::max)(1,v.width-16)),(std::min)(238,(std::max)(1,v.height-16))};}
 UiRect field(UiRect v,int i){auto p=panel(v);return {p.x+8,p.y+62+i*32,p.width-16,28};}
 std::string number(double x){std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(12)<<x;return o.str();}
@@ -80,6 +80,17 @@ void NativeEditorController::refresh_nurbs_menu_state(){
             }
             enabled=editing;(void)workspace_.menus().set_checked(action,checked);
         }
+        if(action.starts_with("nurbs.seam_")){
+            const bool link=action=="nurbs.seam_link_c0"||action=="nurbs.seam_link_c1";
+            enabled=editing&&(link?workspace_.selection_count()==2:workspace_.selection_count()==1)&&o&&o->is_nurbs();
+            if(link){for(auto id:workspace_.selected_objects()){const auto* candidate=workspace_.document().find_object(id);auto source=candidate?editor_nurbs_source(*candidate):std::nullopt;
+                enabled=enabled&&candidate&&source&&!source->is_curve()&&!has_nurbs_seam(*candidate)&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(id);}
+                if(enabled){const auto& ids=workspace_.selected_objects();const auto* first=workspace_.document().find_object(*ids.begin());const auto* second=workspace_.document().find_object(*std::next(ids.begin()));
+                    if(!nurbs_seam_same_frame(*first,*second)){enabled=false;pairReason="Linked patches need the same parent, pose and axis scale without socket attachment; align the objects first";}}}
+            else {enabled=enabled&&has_nurbs_seam(*o);auto seam=o?editor_nurbs_seam(*o):std::nullopt;
+                if(seam){for(auto id:{seam->reference,seam->moving}){const auto* partner=workspace_.document().find_object(id);enabled=enabled&&partner&&partner->flags.visible&&!partner->flags.locked&&!partner->prefabLink&&!is_isolated_out(id);}}else enabled=false;
+            }
+        }
         std::string reason="Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)";
         if(source&&(action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v")){
             const bool alongV=action=="nurbs.source_elevate_v";
@@ -91,6 +102,8 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         if(source&&(action=="nurbs.source_adaptive"||action=="nurbs.source_crop")&&source->is_curve())reason="Adaptive bake and crop work on NURBS surfaces only";
         if(source&&action=="nurbs.source_fillet_corner"&&!enabled)reason="Corner fillet needs a three-control degree-one corner curve";
         if(source&&action.starts_with("nurbs.source_display_")&&source->is_curve())reason="Adaptive surface display works on NURBS surfaces only; curves use fixed guide ribbons";
+        if(o&&has_nurbs_seam(*o)&&(action.starts_with("nurbs.source_reverse_")||action=="nurbs.source_swap_uv"||action.starts_with("nurbs.source_insert_")||action.starts_with("nurbs.source_elevate_")||action=="nurbs.insert_u"||action=="nurbs.insert_v")){enabled=false;reason="Unlink the NURBS seam before changing parameterization";}
+        if(action.starts_with("nurbs.seam_")&&!enabled)reason="Link: select two unlinked owned surfaces in the same frame. Rebuild/unlink: select one linked patch; show and unlock both partners";
         if(action.starts_with("nurbs.attach_"))reason="Stop Play and finish the active drag or box selection to change boundary-match choices";
         if(!pairReason.empty())reason=pairReason;
         (void)workspace_.menus().set_enabled(action,enabled,enabled?"":reason);
@@ -117,6 +130,7 @@ bool NativeEditorController::edit_nurbs_control(std::size_t index,NurbsPoint val
     if(workspace_.mode()!=EditorMode::Edit||playSession_.active()||longJob_||gizmoDragging_||nurbsBoxActive_||workspace_.selection_count()!=1)return false;
     auto id=workspace_.selected_object();auto* o=id?workspace_.document().find_object(*id):nullptr;
     if(!o||is_isolated_out(o->id))return false;
+    if(has_nurbs_seam(*o)){auto seam=editor_nurbs_seam(*o);if(!seam||is_isolated_out(seam->reference)||is_isolated_out(seam->moving)){set_status("Show both linked patches before editing",true);return false;}}
     std::string error;auto before=editor_nurbs_source(*o,&error);
     if(!before||index>=before->controls.size()){set_status("Select a valid native NURBS control",true);return false;}
     if(before->controls[index]==value)return true;
@@ -128,6 +142,23 @@ bool NativeEditorController::edit_nurbs_control(std::size_t index,NurbsPoint val
 }
 bool NativeEditorController::dispatch_nurbs_action(std::string_view action){
     if(workspace_.mode()!=EditorMode::Edit||playSession_.active()||longJob_||gizmoDragging_||nurbsBoxActive_){set_status("Finish the active drag and stop Play before NURBS authoring",true);return false;}
+    for(auto id:workspace_.selected_objects()){const auto* object=workspace_.document().find_object(id);if(object&&has_nurbs_seam(*object)){
+        auto seam=editor_nurbs_seam(*object);if(!seam||is_isolated_out(seam->reference)||is_isolated_out(seam->moving)){set_status("Show both linked NURBS patches before coordinated edits",true);return false;}
+    }}
+    if(action.starts_with("nurbs.seam_")){
+        auto id=workspace_.selected_object();if(!id)return false;std::unique_ptr<IEditorCommand> command;
+        if(action=="nurbs.seam_link_c0"||action=="nurbs.seam_link_c1"){
+            if(workspace_.selection_count()!=2){set_status("Select two patches in the same frame; the active one drives the linked boundary",true);return false;}
+            auto options=nurbsAttachmentOptions_;options.c1=action=="nurbs.seam_link_c1";EditorObjectId moving=0;
+            for(auto selected:workspace_.selected_objects()){if(is_isolated_out(selected)){set_status("Show both patches before linking",true);return false;}if(selected!=*id)moving=selected;}
+            command=link_nurbs_seam_command(*id,moving,options);
+        }else if(action=="nurbs.seam_unlink")command=unlink_nurbs_seam_command(*id);
+        else if(action=="nurbs.seam_refresh")command=refresh_nurbs_seam_command(*id);
+        else return false;
+        const auto selection=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
+        if(result.success){workspace_.commands().set_last_selection_transition(selection,capture_selection_snapshot());nurbsSelected_.clear();nurbsControl_=0;refresh_nurbs_menu_state();}
+        set_status(result.success?(action=="nurbs.seam_unlink"?"NURBS seam unlinked; matched geometry retained":"Linked NURBS pair rebuilt with shared seam samples; reference drives continuity; one undo step"):result.message,!result.success);return result.success;
+    }
     if(action.starts_with("nurbs.attach_")){
         constexpr std::string_view edges[]={"umin","umax","vmin","vmax"};bool recognized=false;
         if(action=="nurbs.attach_reverse"){nurbsAttachmentOptions_.reverseBoundary=!nurbsAttachmentOptions_.reverseBoundary;recognized=true;}

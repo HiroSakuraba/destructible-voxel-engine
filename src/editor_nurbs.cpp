@@ -1,4 +1,5 @@
 #include "dve/editor_nurbs.hpp"
+#include "dve/editor_nurbs_seam.hpp"
 #include <algorithm>
 namespace dve::editor {
 bool has_nurbs_source(const EditorObject& o) noexcept {return find_component_by_type(o.components,kNurbsComponent)!=nullptr;}
@@ -16,7 +17,7 @@ bool validate_editor_nurbs(const EditorObject& o,std::string* e,std::stop_token 
         if(e&&e->empty())*e="NURBS object has conflicting source geometry";
         return false;
     }
-    auto m=tessellate_nurbs(*s,o.id,e,stop);
+    auto m=tessellate_editor_nurbs_display(o,*s,e,stop);
     if(!m)return false;
     // Cache geometry must match source. Material edits are separate; geometric
     // bake mutations cannot be accepted as changes to a NURBS source.
@@ -30,7 +31,7 @@ bool validate_editor_nurbs(const EditorObject& o,std::string* e,std::stop_token 
         const auto same3=[](Float3 a,Float3 b){return a.x==b.x&&a.y==b.y&&a.z==b.z;};
         const auto same4=[](Float4 a,Float4 b){return a.x==b.x&&a.y==b.y&&a.z==b.z&&a.w==b.w;};
         if(!same2(expected.texcoord,cached.texcoord)||!same2(expected.texcoord1,cached.texcoord1)||
-           ((s->creaseNormals||s->adaptiveDisplay)&&(!same3(expected.normal,cached.normal)||!same4(expected.tangent,cached.tangent)))){
+           ((s->creaseNormals||s->adaptiveDisplay||has_nurbs_seam(o))&&(!same3(expected.normal,cached.normal)||!same4(expected.tangent,cached.tangent)))){
             if(e)*e="NURBS display normals or UVs diverged from source";
             return false;
         }
@@ -47,6 +48,7 @@ std::optional<EditorObject> make_editor_nurbs(EditorObjectId id,const NurbsSourc
     o.components.push_back(std::move(c));return o;
 }
 bool replace_editor_nurbs_source(EditorObject& o,const NurbsSource& value,std::string* error){
+    if(has_nurbs_seam(o)){if(error)*error="Use coordinated linked-seam edits or unlink first";return false;}
     if(!o.polygon||!has_nurbs_source(o)){if(error)*error="Missing native NURBS source";return false;}
     auto mesh=tessellate_nurbs(value,o.id,error);if(!mesh)return false;
     // Keep object material and texture resources. The initial source has one
@@ -106,6 +108,7 @@ CommandResult EditNurbsCommand::apply(EditorDocument& d,const NurbsSource& expec
 }
 std::unique_ptr<EditNurbsCommand> EditNurbsCommand::prepare(const EditorObject& object,const NurbsSource& after,std::string* error,std::stop_token stop){
     if(stop.stop_requested())return {};
+    if(has_nurbs_seam(object)){if(error)*error="Linked seams require a coordinated edit";return {};}
     auto before=editor_nurbs_source(object,error);
     if(!before||!object.polygon)return {};
     auto valid=validate_polygon_asset(*object.polygon);
@@ -124,7 +127,11 @@ bool EditNurbsCommand::matches_before(const EditorObject& o) const{
     const auto source=editor_nurbs_source(o);if(!source||*source!=before_)return false;
     return nurbs_display_geometry_matches(*beforeMesh_,*o.polygon);
 }
-CommandResult EditNurbsCommand::execute(EditorDocument& d){return apply(d,before_,after_);}
-CommandResult EditNurbsCommand::undo(EditorDocument& d){return apply(d,after_,before_);}
+CommandResult EditNurbsCommand::execute(EditorDocument& d){
+    auto* object=d.find_object(id_);
+    if(!seamEdit_&&object&&has_nurbs_seam(*object))seamEdit_=edit_nurbs_seam_command(id_,before_,after_);
+    return seamEdit_?seamEdit_->execute(d):apply(d,before_,after_);
+}
+CommandResult EditNurbsCommand::undo(EditorDocument& d){return seamEdit_?seamEdit_->undo(d):apply(d,after_,before_);}
 }
 

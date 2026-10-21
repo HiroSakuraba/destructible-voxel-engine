@@ -151,10 +151,16 @@ std::optional<NurbsSource> fillet_nurbs_corner(const NurbsSource& s,double radiu
     auto b=point(s.controls[1]),a=sub(point(s.controls[0]),b),c=sub(point(s.controls[2]),b);const double la=norm(a),lc=norm(c);if(la<=1e-12||lc<=1e-12)return fail<NurbsSource>(e,"Corner has a degenerate leg");a=mul(a,1/la);c=mul(c,1/lc);const double theta=std::acos(std::clamp(dot(a,c),-1.0,1.0));if(theta<=1e-6||theta>=3.141592653589793-1e-6)return fail<NurbsSource>(e,"Corner is straight or reversing");
     const double distance=radius/std::tan(theta/2);if(distance>=(std::min)(la,lc))return fail<NurbsSource>(e,"Fillet radius consumes an entire leg; reduce radius");auto x=add(b,mul(a,distance)),y=add(b,mul(c,distance));NurbsSource out;out.columns=3;out.u=uniform_axis(3,2);out.controls={{x[0],x[1],x[2],1},{b[0],b[1],b[2],std::sin(theta/2)},{y[0],y[1],y[2],1}};if(!validate_nurbs(out,e))return {};return out;
 }
-std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s,std::uint64_t id,double tolerance,double angle,std::string* e,std::stop_token stop){
+std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s,std::uint64_t id,double tolerance,double angle,std::string* e,std::stop_token stop,NurbsDisplayGrid* grid,const NurbsDisplayGrid* seed){
     if(stop.stop_requested())return fail<CookedPolygonAsset>(e,"NURBS tessellation cancelled");
     if(!validate_nurbs(s,e))return {};if(s.is_curve()||!tolerance_ok(tolerance)||!std::isfinite(angle)||angle<=0||angle>3.141592653589793)return fail<CookedPolygonAsset>(e,"Adaptive surface bake needs positive chord tolerance and normal angle in (0,pi]");
     std::vector<double> us,vs;for(double t:s.u.knots)if(us.empty()||t!=us.back())us.push_back(t);for(double t:s.v.knots)if(vs.empty()||t!=vs.back())vs.push_back(t);
+    if(seed){
+        if(!validate_nurbs_display_grid(s,*seed,e))return {};
+        us.insert(us.end(),seed->u.begin(),seed->u.end());vs.insert(vs.end(),seed->v.begin(),seed->v.end());
+        std::sort(us.begin(),us.end());us.erase(std::unique(us.begin(),us.end()),us.end());std::sort(vs.begin(),vs.end());vs.erase(std::unique(vs.begin(),vs.end()),vs.end());
+        if(!validate_nurbs_display_grid(s,{us,vs},e))return {};
+    }
     double weightScale=0;for(auto p:s.controls)weightScale=(std::max)(weightScale,p.weight);
     unsigned evaluations=0;
     auto sample=[&](double u,double v)->std::optional<NurbsSample>{if(stop.stop_requested()||++evaluations>250000)return {};return detail::evaluate_validated_nurbs(s,u,v,weightScale);};
@@ -179,6 +185,7 @@ std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s
         us.insert(us.end(),addU.begin(),addU.end());vs.insert(vs.end(),addV.begin(),addV.end());std::sort(us.begin(),us.end());std::sort(vs.begin(),vs.end());us.erase(std::unique(us.begin(),us.end()),us.end());vs.erase(std::unique(vs.begin(),vs.end()),vs.end());
     }
     if(!finished)return fail<CookedPolygonAsset>(e,"Adaptive bake did not meet sampled tolerances within subdivision limits");
+    if(grid)*grid={us,vs};
     CookedPolygonAsset mesh;mesh.objectId=id;VoxelMaterialDefinition material;material.name="Adaptive NURBS";mesh.materials.push_back(material);mesh.materialBindings.resize(1);mesh.materialBindings[0].doubleSided=true;
     for(std::size_t j=0;j+1<vs.size();++j)for(std::size_t i=0;i+1<us.size();++i){
         const double a=us[i],b=us[i+1],c=vs[j],d=vs[j+1];const unsigned first=unsigned(mesh.vertices.size());

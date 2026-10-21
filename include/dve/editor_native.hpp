@@ -1,6 +1,7 @@
 #pragma once
 #include "dve/simulation_clock.hpp"
 #include "dve/nurbs_attachment.hpp"
+#include "dve/editor_nurbs_seam.hpp"
 #include "dve/editor_nurbs_tessellation.hpp"
 
 #include <array>

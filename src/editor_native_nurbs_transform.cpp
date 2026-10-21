@@ -53,6 +53,7 @@ EditorObjectBounds NativeEditorController::nurbs_control_bounds() const{
 bool NativeEditorController::begin_nurbs_gizmo(){
     if(!nurbs_control_mode()||nurbsSelected_.empty())return false;
     const auto* o=workspace_.document().find_object(nurbsEditingObject_);std::string error;
+    if(has_nurbs_seam(*o)){set_status("Linked seam controls use numeric CV edits; unlink before gizmo dragging",true);return false;}
     auto s=editor_nurbs_source(*o,&error);
     if(!s||!o->polygon||o->subdivision||o->modelingTopology||find_component_by_type(o->components,"dve.exact_brep")||
        (!s->adaptiveDisplay&&!validate_editor_nurbs(*o,&error))||std::any_of(nurbsSelected_.begin(),nurbsSelected_.end(),[&](auto i){return i>=s->controls.size();})){

@@ -75,7 +75,20 @@ std::optional<NurbsAttachment> attach_nurbs_boundaries(const NurbsSource& refere
     // A linear two-column patch needs a free tangent row to keep its far edge.
     if(options.c1&&b.columns<3){auto next=elevate_nurbs_degree(b,false,&reason);if(!next)return fail(reason);b=std::move(*next);}
     if(a.v!=b.v||a.rows!=b.rows)return fail("Boundary knot compatibility could not be represented exactly");
-    auto matched=attach_nurbs_u(a,b,options.c1,&reason);if(!matched)return fail(reason);
+    auto matched=std::optional<NurbsSource>{};
+    if(options.preserveWeightGauge){
+        auto out=b;double referenceScale=0;for(auto p:a.controls)referenceScale=(std::max)(referenceScale,p.weight);
+        const double anchor=a.controls[a.columns-1].weight/referenceScale,movingAnchor=b.controls.front().weight;
+        for(auto& p:out.controls)p.weight=(p.weight/movingAnchor)*anchor;
+        const double ratio=double(a.u.degree)*(b.u.knots[b.u.degree+1]-b.u.knots.front())/(double(b.u.degree)*(a.u.knots.back()-a.u.knots[a.columns-1]));
+        for(unsigned j=0;j<out.rows;++j){auto edge=a.controls[j*a.columns+a.columns-1],previous=a.controls[j*a.columns+a.columns-2];edge.weight/=referenceScale;previous.weight/=referenceScale;out.controls[j*out.columns]=edge;
+            if(options.c1){const double w=edge.weight+ratio*(edge.weight-previous.weight);if(!(w>0)||!std::isfinite(w))return fail("C1 attachment produced nonpositive homogeneous weights");
+                auto coordinate=[&](double e,double p){return (edge.weight*e+ratio*(edge.weight*e-previous.weight*p))/w;};
+                out.controls[j*out.columns+1]={coordinate(edge.x,previous.x),coordinate(edge.y,previous.y),coordinate(edge.z,previous.z),w};}
+        }
+        if(!validate_nurbs(out,&reason))return fail(reason);matched=std::move(out);
+    }else matched=attach_nurbs_u(a,b,options.c1,&reason);
+    if(!matched)return fail(reason);
     auto prepared=restore(std::move(a),reference,options.referenceBoundary,true,false,&reason);
     auto result=restore(std::move(*matched),moving,options.movingBoundary,false,options.reverseBoundary,&reason);
     if(!prepared||!result)return fail(reason);

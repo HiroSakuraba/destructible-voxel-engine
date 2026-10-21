@@ -96,6 +96,7 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     if(quality||resetUv||adaptiveSettings||lengthSplit)restore_parked_nurbs_controls(); // retain the selection parked by settings for undo
     else nurbsParkedObject_=0;
     const auto selection=capture_selection_snapshot();
+    if(has_nurbs_seam(*object)&&(reverse||transpose||insert||elevate)){set_status("Unlink the NURBS seam before changing degree, knots or parameter directions",true);return false;}
     if(reverse||transpose||insert||quality||resetUv||elevate||adaptiveSettings){
         auto after=(quality||resetUv||adaptiveSettings)?source:elevate?elevate_nurbs_degree(*source,v,&error):transpose?transpose_nurbs(*source,&error):reverse?reverse_nurbs_axis(*source,v,&error):insert_nurbs_knot(*source,v,t,&error);
         if(!after){set_status(error,true);return false;}

@@ -28,6 +28,7 @@ private:
     CommandResult apply(EditorDocument&,const NurbsSource& expected,const NurbsSource& value);
     EditorObjectId id_;NurbsSource before_,after_;
     std::optional<CookedPolygonAsset> beforeMesh_,afterMesh_;
+    std::unique_ptr<IEditorCommand> seamEdit_;
 };
 }
 

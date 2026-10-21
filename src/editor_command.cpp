@@ -1,5 +1,6 @@
 #include "dve/editor_command.hpp"
 #include "dve/editor_nurbs.hpp"
+#include "dve/editor_nurbs_seam.hpp"
 #include "dve/editor_subdivision.hpp"
 #include "dve/voxel_metric.hpp"
 
@@ -241,6 +242,7 @@ CommandResult TransformObjectsCommand::apply(EditorDocument& document, bool forw
         EditorObject* object = document.find_object(change.id);
         if (!object) return CommandResult::fail("transform target no longer exists");
         if (object->flags.locked) return CommandResult::fail("transform target is locked");
+        if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before changing object placement");
         const RigidTransform& target = forward ? change.after : change.before;
         if (!valid_transform(target)) return CommandResult::fail("transform is not finite or has an invalid rotation");
     }
@@ -266,6 +268,7 @@ CommandResult ScaleVoxelSizeCommand::apply(EditorDocument& document, bool forwar
         const EditorObject* object = document.find_object(change.id);
         if (!object) return CommandResult::fail("scale target no longer exists");
         if (object->flags.locked) return CommandResult::fail("scale target is locked");
+        if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before changing object placement");
         const float size = forward ? change.afterVoxelSize : change.beforeVoxelSize;
         if (!std::isfinite(size) || !(size > 0.0F)) return CommandResult::fail("scaled voxel size is invalid");
         if (change.beforeAxisScale.has_value()!=change.afterAxisScale.has_value())
@@ -296,6 +299,7 @@ CommandResult TransformObjectCommand::apply(EditorDocument& document, const Rigi
     EditorObject* object = document.find_object(id_);
     if (!object) return CommandResult::fail("transform target no longer exists");
     if (object->flags.locked) return CommandResult::fail("transform target is locked");
+        if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before changing object placement");
     if (!document.set_world_transform(id_, transform))
         return CommandResult::fail("failed to apply object transform");
     return CommandResult::ok();
@@ -467,6 +471,7 @@ AddObjectCommand::AddObjectCommand(EditorObject object, std::string label)
 
 CommandResult AddObjectCommand::execute(EditorDocument& document) {
     if (!pending_) return CommandResult::fail("object was already added");
+    if(has_nurbs_seam(*pending_))return CommandResult::fail("Unlink the NURBS seam before duplicating or instantiating this patch");
     std::string nurbsError;if(!validate_editor_nurbs(*pending_,&nurbsError))return CommandResult::fail(nurbsError);
     if (document.find_object(id_)) return CommandResult::fail("an object with this identifier already exists");
     if (pending_->subdivision) {
@@ -483,6 +488,7 @@ CommandResult AddObjectCommand::execute(EditorDocument& document) {
 CommandResult AddObjectCommand::undo(EditorDocument& document) {
     const EditorObject* object = document.find_object(id_);
     if (!object) return CommandResult::fail("object no longer exists to remove");
+    if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before removing one patch");
     pending_ = clone_editor_object(*object);
     if (!document.remove_object(id_)) return CommandResult::fail("failed to remove object");
     document.mark_dirty();
@@ -507,6 +513,10 @@ CommandResult RemoveObjectsCommand::execute(EditorDocument& document) {
 
     const std::set<EditorObjectId> resolvedSet(resolvedIds_.begin(), resolvedIds_.end());
     removalRoots_.clear();
+    for(const auto id:resolvedIds_){const auto* object=document.find_object(id);if(object&&has_nurbs_seam(*object)){
+        std::string error;auto seam=editor_nurbs_seam(*object,&error);if(!seam)return CommandResult::fail(error);
+        if(!resolvedSet.contains(seam->reference)||!resolvedSet.contains(seam->moving))return CommandResult::fail("Delete both linked patches together or unlink the NURBS seam first");
+    }}
     for (const EditorObjectId id : resolvedIds_) {
         const EditorObject* object = document.find_object(id);
         if (!object) return CommandResult::fail("delete target no longer exists");
@@ -595,6 +605,7 @@ CommandResult SetObjectAttachmentCommand::apply(
     EditorObject* object = document.find_object(id_);
     if (!object) return CommandResult::fail("attachment target no longer exists");
     if (object->flags.locked) return CommandResult::fail("attachment target is locked");
+        if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before changing object placement");
     if (state.parent.has_value() != state.attachment.has_value())
         return CommandResult::fail("attachment state must contain both parent and attachment");
     if (state.attachment) {
@@ -656,6 +667,7 @@ CommandResult RemoveComponentCommand::execute(EditorDocument& document) {
     if (object->flags.locked) return CommandResult::fail("component owner is locked");
     const Component* component = document.find_component(objectId_, componentId_);
     if (!component) return CommandResult::fail("component no longer exists");
+    if(component->type==kNurbsComponent&&has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before removing its source component");
     removed_ = *component;
     if (!document.remove_component(objectId_, componentId_))
         return CommandResult::fail("failed to remove component");
@@ -714,6 +726,7 @@ CommandResult ReparentObjectsCommand::apply(EditorDocument& document, bool forwa
         const EditorObject* object = document.find_object(change.id);
         if (!object) return CommandResult::fail("reparent target no longer exists");
         if (object->flags.locked) return CommandResult::fail("reparent target is locked");
+        if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before changing object placement");
         original.push_back({object->parent,object->attachment,object->transform});
     }
     if (capturedStates_) {
@@ -787,6 +800,8 @@ CommandResult SetComponentEnabledCommand::apply(EditorDocument& document, bool e
     EditorObject* object = document.find_object(objectId_);
     if (!object) return CommandResult::fail("component owner no longer exists");
     if (object->flags.locked) return CommandResult::fail("component owner is locked");
+    const auto* component=document.find_component(objectId_,componentId_);
+    if(component&&component->type==kNurbsComponent&&has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before disabling its source component");
     if (!document.set_component_enabled(objectId_, componentId_, enabled))
         return CommandResult::fail("component no longer exists");
     return CommandResult::ok();

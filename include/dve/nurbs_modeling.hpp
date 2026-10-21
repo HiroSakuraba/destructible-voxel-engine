@@ -1,5 +1,11 @@
 #pragma once
 #include "dve/nurbs_construction.hpp"
+#include "dve/polygon_asset.hpp"
+#include <array>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <string>
 namespace dve {
 // Natural cubic interpolation of compatible sections in homogeneous coordinates.
 // Interpolates profiles at V=0,1,...; refuses nonpositive spline weights.

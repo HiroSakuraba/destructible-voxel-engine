@@ -1,6 +1,9 @@
 #include "dve/nurbs_topology.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
 namespace dve {
 std::optional<NurbsSource> elevate_nurbs_degree(const NurbsSource& source,bool v,std::string* error){
     auto fail=[&](const char* text)->std::optional<NurbsSource>{if(error)*error=text;return {};};
@@ -31,7 +34,7 @@ std::optional<NurbsSource> elevate_nurbs_degree(const NurbsSource& source,bool v
             if(span&&k==0)continue;
             if(k==0){put(span*q,get(span*p));continue;}
             if(k==q){put(span*q+k,get(span*p+p));continue;}
-            const auto a=get(span*p+k-1),b=get(span*p+k);const double alpha=double(k)/q,scale=std::max(a.weight,b.weight);
+            const auto a=get(span*p+k-1),b=get(span*p+k);const double alpha=double(k)/q,scale=(std::max)(a.weight,b.weight);
             const double wa=alpha*(a.weight/scale),wb=(1-alpha)*(b.weight/scale),sum=wa+wb;
             if(!(sum>0)||!std::isfinite(sum))return fail("Ill-conditioned homogeneous degree elevation");
             put(span*q+k,{(wa*a.x+wb*b.x)/sum,(wa*a.y+wb*b.y)/sum,(wa*a.z+wb*b.z)/sum,std::lerp(b.weight,a.weight,alpha)});

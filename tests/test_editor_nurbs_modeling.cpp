@@ -4,7 +4,11 @@
 #include <filesystem>
 #include <iostream>
 #include <numbers>
+#include <set>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 using namespace dve;using namespace dve::editor;
 namespace {
 void check(bool b,const std::string& message){if(!b)throw std::runtime_error(message);}
@@ -66,5 +70,32 @@ void native(){
     check(editor_nurbs_source(*source)==plane&&c.workspace().document().validate(),"Originals/cache valid");
     const auto root=std::filesystem::temp_directory_path()/"dve_surface_modeling_test";std::filesystem::remove_all(root);std::filesystem::create_directories(root);auto save=c.workspace().document().save_transactional(root/"scene.dvescene");check(save.success,save.error);std::string error;auto loaded=EditorDocument::load(root/"scene.dvescene",&error);check(bool(loaded),error);check(loaded->validate(),"Reopened modeling scene");std::filesystem::remove_all(root);
 }
+void review_fixes(){
+    // C1 attach must not overwrite the far edge of a two-column moving patch.
+    auto ref=make_nurbs_patch(2);NurbsSource two;two.columns=2;two.rows=ref.rows;two.u={1,{0,0,1,1}};two.v=ref.v;
+    for(unsigned j=0;j<two.rows;++j)for(unsigned i=0;i<2;++i)two.controls.push_back({3.0+i,0,double(j),1});
+    std::string error;check(!attach_nurbs_u(ref,two,true,&error)&&error.find("three U controls")!=std::string::npos,"Two-column C1 attach refuses");
+    auto c0=attach_nurbs_u(ref,two,false,&error);check(bool(c0)&&c0->controls[1].x==4,"Two-column C0 attach keeps far edge");
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(EditorDocument("Modeling menus")));auto& c=*owner;c.resize(1600,1000);
+    auto add=[&](EditorObjectId id,const NurbsSource& s){auto o=make_editor_nurbs(id,s);check(bool(o),"Menu fixture");c.workspace().document().add_object(std::move(*o));};
+    auto plane=make_nurbs_patch(2);add(1,plane);auto vertical=plane;for(auto& p:vertical.controls){p.y=p.z;p.z=0;}add(2,vertical);add(3,line(2));
+    const auto& menus=std::as_const(c.workspace().menus());
+    auto reason=[&](const char* id){auto* a=menus.find(id);check(a!=nullptr,"menu action exists");return a->enabled?std::string{}:a->disabledReason;};
+    c.workspace().select_object(1);c.workspace().add_to_selection(3);c.refresh_menu_state();
+    check(reason("nurbs.source_attach_c0").find("two surfaces")!=std::string::npos,"Attach with a curve says why");
+    check(reason("nurbs.source_intersect_planes").find("planar surface")!=std::string::npos,"Intersect with a curve says why");
+    c.workspace().select_object(1);c.workspace().add_to_selection(2);c.refresh_menu_state();
+    check(reason("nurbs.source_project").find("Projection needs")!=std::string::npos,"Project with two surfaces says why");
+    check(reason("nurbs.source_attach_c0").empty(),"Two surfaces enable attach");
+    c.workspace().document().find_object(2)->flags.locked=true;c.refresh_menu_state();
+    check(reason("nurbs.source_attach_c0").find("unlocked")!=std::string::npos,"Locked pair member says why");c.workspace().document().find_object(2)->flags.locked=false;
+    c.workspace().select_object(1);c.refresh_menu_state();
+    check(reason("nurbs.source_attach_c0").find("exactly two")!=std::string::npos,"Single selection pair action says why");
+    check(reason("nurbs.source_rebuild").find("curves only")!=std::string::npos,"Rebuild on surface says why");
+    check(reason("nurbs.source_fillet_corner").find("three-control")!=std::string::npos,"Fillet on surface says why");
+    c.workspace().select_object(3);c.refresh_menu_state();
+    check(reason("nurbs.source_adaptive").find("surfaces only")!=std::string::npos&&reason("nurbs.source_crop").find("surfaces only")!=std::string::npos,"Surface-only tools on a curve say why");
+    const auto history=c.workspace().commands().size();check(!c.dispatch_action("nurbs.source_adaptive")&&c.workspace().commands().size()==history,"Refused adaptive adds no history");
 }
-int main(){try{loft_fit();attachment_crop_fillet();projection_intersection_adaptive();native();std::cout<<"NURBS surface modeling tests passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+}
+int main(){try{loft_fit();attachment_crop_fillet();projection_intersection_adaptive();native();review_fixes();std::cout<<"NURBS surface modeling tests passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

@@ -345,7 +345,7 @@ jobs:
       - name: Build
         run: |
           sccache --zero-stats
-          cmake --build $BUILD_DIR --config Release --parallel 8 2>&1 | tee build.log
+          cmake --build $BUILD_DIR --config Release --parallel 4 2>&1 | tee build.log
           status=${PIPESTATUS[0]}
           sccache --show-stats
           grep -E ' error (C|LNK)[0-9]+' build.log | sort | uniq | head -200 > build-errors.txt || true

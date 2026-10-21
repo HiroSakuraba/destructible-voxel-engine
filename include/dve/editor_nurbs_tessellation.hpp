@@ -1,7 +1,12 @@
 #pragma once
 #include "dve/editor_nurbs.hpp"
 #include <condition_variable>
+#include <cstdint>
+#include <memory>
 #include <mutex>
+#include <optional>
+#include <stop_token>
+#include <string>
 #include <thread>
 namespace dve::editor {
 // One worker, one running snapshot, one newest pending snapshot. Never owns UI/document pointers.

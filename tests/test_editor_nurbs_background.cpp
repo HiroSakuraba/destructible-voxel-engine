@@ -5,7 +5,10 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <set>
+#include <string>
 #include <thread>
+#include <utility>
 using namespace dve;using namespace dve::editor;
 namespace {
 void check(bool value,const std::string& message){if(!value)throw std::runtime_error(message);}
@@ -85,5 +88,33 @@ void native(){
     auto saved=controller.workspace().document().save_transactional(root/"scene.dvescene");check(saved.success,saved.error);std::string error;auto loaded=EditorDocument::load(root/"scene.dvescene",&error);check(loaded&&validate_editor_nurbs(*loaded->find_object(1)),"Saved scene has no transient job state");std::filesystem::remove_all(root);
     start();check(controller.workspace().document().remove_object(1),"Delete fixture");controller.update(0);check(!controller.gizmo_dragging(),"Deletion cancels without touching freed object");
 }
+void review_fixes(){
+    // Cancellation really stops heavy work: destroying a queue mid-job joins promptly.
+    NurbsSource heavy;heavy.columns=heavy.rows=32;heavy.adaptiveDisplay=true;heavy.chordTolerance=1e-8;heavy.normalAngle=1e-4;heavy.u={3,{0,0,0,0}};heavy.v=heavy.u;
+    for(unsigned i=1;i<29;++i){heavy.u.knots.push_back(i);heavy.v.knots.push_back(i);}heavy.u.knots.insert(heavy.u.knots.end(),4,29);heavy.v.knots.insert(heavy.v.knots.end(),4,29);
+    for(unsigned j=0;j<32;++j)for(unsigned i=0;i<32;++i)heavy.controls.push_back({double(i),std::sin(i*.7)*std::cos(j*.9),double(j),1});
+    std::string error;check(validate_nurbs(heavy,&error),error);
+    auto base=surface();auto object=make_editor_nurbs(1,base,&error);check(bool(object),error);
+    auto snapshot=std::make_shared<const EditorObject>(clone_editor_object(*object));
+    for(unsigned round=0;round<3;++round){
+        auto started=std::chrono::steady_clock::now();
+        {NurbsTessellationQueue queue;queue.submit(snapshot,heavy);std::this_thread::sleep_for(std::chrono::milliseconds(20));queue.cancel();check(!queue.poll(),"Cancelled heavy job delivers nothing");}
+        check(std::chrono::steady_clock::now()-started<std::chrono::seconds(5),"Cancel plus join returns promptly");
+    }
+    // Undo during an adaptive drag cancels the drag only and keeps earlier history.
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(EditorDocument("Undo during drag")));auto& c=*owner;c.resize(1600,1000);
+    c.workspace().document().add_object(clone_editor_object(*object));c.workspace().select_object(1);
+    check(c.dispatch_action("nurbs.source_display_fine"),"Earlier history step");auto* current=c.workspace().document().find_object(1);const auto earlier=editor_nurbs_source(*current);const auto history=c.workspace().commands().size();
+    check(c.dispatch_action("nurbs.edit")&&c.select_nurbs_controls({5},SelectionOperation::Replace),"Controls");
+    c.set_active_tool(EditorToolId::Translate);auto axis=c.gizmo_axes()[0];c.pointer_down(PointerButton::Primary,int(axis.end.x),int(axis.end.y),0);check(c.gizmo_dragging(),"Drag");c.key_down("1",false,false,false);
+    until([&]{c.update(0);return editor_nurbs_source(*current)!=earlier;});
+    check(c.dispatch_action("edit.undo"),"Undo cancels drag");
+    check(!c.gizmo_dragging()&&editor_nurbs_source(*current)==earlier&&c.workspace().commands().size()==history&&validate_editor_nurbs(*current),"Undo during drag keeps the earlier step");
+    check(c.dispatch_action("edit.undo")&&editor_nurbs_source(*current)==base,"Next undo reverts the earlier step");
+    // Destroying the controller while a job is in flight shuts down cleanly.
+    check(c.dispatch_action("edit.redo"),"Redo display");c.workspace().select_object(1);check(c.dispatch_action("nurbs.edit")&&c.select_nurbs_controls({5},SelectionOperation::Replace),"Controls again");
+    c.set_active_tool(EditorToolId::Translate);axis=c.gizmo_axes()[0];c.pointer_down(PointerButton::Primary,int(axis.end.x),int(axis.end.y),0);c.key_down("2",false,false,false);
+    auto started=std::chrono::steady_clock::now();owner.reset();check(std::chrono::steady_clock::now()-started<std::chrono::seconds(5),"Controller shutdown joins worker");
 }
-int main(){try{queue_and_commands();native();std::cout<<"Background NURBS tests passed\n";return 0;}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
+}
+int main(){try{queue_and_commands();native();review_fixes();std::cout<<"Background NURBS tests passed\n";return 0;}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

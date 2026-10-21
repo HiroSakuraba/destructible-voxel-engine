@@ -6812,8 +6812,10 @@ bool same_transform(const RigidTransform& a, const RigidTransform& b);  // numer
 
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if(nurbsDragRequested_&&!actionId.starts_with("view.")){
-        if(actionId=="edit.undo")finish_nurbs_gizmo(true);
-        else {set_status("Finish the NURBS transform or press Escape to cancel",true);return false;}
+        // Undo during an in-flight adaptive transform cancels that transform only;
+        // it must not also undo the previous, unrelated history step.
+        if(actionId=="edit.undo"){finish_nurbs_gizmo(true);set_status("NURBS transform cancelled");return true;}
+        set_status("Finish the NURBS transform or press Escape to cancel",true);return false;
     }
     if (longJob_ || importOptions_.open) {
         // Only the viewport shading modes leave the scene alone while a long job runs.

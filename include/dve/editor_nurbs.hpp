@@ -2,6 +2,7 @@
 #include "dve/nurbs.hpp"
 #include "dve/editor_command.hpp"
 #include <memory>
+#include <stop_token>
 namespace dve::editor {
 inline constexpr std::string_view kNurbsComponent="dve.nurbs";
 [[nodiscard]] bool has_nurbs_source(const EditorObject&) noexcept;

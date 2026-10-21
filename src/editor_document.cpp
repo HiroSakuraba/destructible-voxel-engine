@@ -1,5 +1,6 @@
 #include "dve/voxel_metric.hpp"
 #include "dve/editor_document.hpp"
+#include "dve/editor_nurbs_seam.hpp"
 
 #include <unordered_map>
 
@@ -359,7 +360,7 @@ bool EditorDocument::validate(std::string* error) const {
             cursor = parent ? parent->parent : std::nullopt;
         }
     }
-    return true;
+    return validate_editor_nurbs_seams(*this,error);
 }
 
 EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::path& manifestPath) {

@@ -1,3 +1,4 @@
+#include "dve/editor_nurbs_seam.hpp"
 #include "dve/editor_prefab.hpp"
 #include "dve/editor_subdivision.hpp"
 #include "dve/voxel_metric.hpp"
@@ -422,6 +423,7 @@ EditorPrefabCaptureResult capture_editor_prefab(
         for (const EditorObjectId sourceId : closure) {
             const EditorObject* source = document.find_object(sourceId);
             if (!source) throw std::runtime_error("prefab source object disappeared during capture");
+            if(has_nurbs_seam(*source))throw std::runtime_error("Unlink NURBS seams or bake polygons before prefab capture");
             const auto sourceWorld = document.world_transform(sourceId);
             if (!sourceWorld) throw std::runtime_error("prefab source transform could not be resolved");
             EditorObject object = clone_editor_object(*source);
@@ -509,6 +511,7 @@ EditorPrefabInstantiationResult instantiate_editor_prefab(
     EditorPrefabInstantiationResult result;
     try {
         std::string validationError;
+        for(const auto& [id,object]:prefab.templateDocument.objects())if(has_nurbs_seam(object))throw std::runtime_error("Linked NURBS seams cannot be instantiated as prefabs; unlink or bake first");
         if (!prefab.templateDocument.validate(&validationError))
             throw std::runtime_error("invalid prefab template: " + validationError);
         if (prefab.rootTemplateObjectIds.empty()) throw std::runtime_error("prefab has no root objects");

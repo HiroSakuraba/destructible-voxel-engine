@@ -104,6 +104,7 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         if(source&&action.starts_with("nurbs.source_display_")&&source->is_curve())reason="Adaptive surface display works on NURBS surfaces only; curves use fixed guide ribbons";
         if(o&&has_nurbs_seam(*o)&&(action.starts_with("nurbs.source_reverse_")||action=="nurbs.source_swap_uv"||action.starts_with("nurbs.source_insert_")||action.starts_with("nurbs.source_elevate_")||action=="nurbs.insert_u"||action=="nurbs.insert_v")){enabled=false;reason="Unlink the NURBS seam before changing parameterization";}
         if(action.starts_with("nurbs.seam_")&&!enabled)reason="Link: select two unlinked owned surfaces in the same frame. Rebuild/unlink: select one linked patch; show and unlock both partners";
+        if(action.starts_with("nurbs.attach_"))reason="Stop Play and finish the active drag or box selection to change boundary-match choices";
         if(!pairReason.empty())reason=pairReason;
         (void)workspace_.menus().set_enabled(action,enabled,enabled?"":reason);
     }

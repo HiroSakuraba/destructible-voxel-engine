@@ -1,5 +1,9 @@
 #include "dve/editor_native.hpp"
+#include <array>
 #include <cmath>
+#include <set>
+#include <string>
+#include <utility>
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
@@ -87,5 +91,28 @@ void native(){
     select();c.workspace().document().find_object(2)->flags.locked=true;auto count=c.workspace().document().objects().size(),size=c.workspace().commands().size();c.refresh_menu_state();check(!menus.find("nurbs.source_attach_c0")->enabled&&!c.dispatch_action("nurbs.source_attach_c0")&&c.workspace().commands().size()==size&&c.workspace().document().objects().size()==count,"Locked input refuses atomically");c.workspace().document().find_object(2)->flags.locked=false;
     const auto root=std::filesystem::temp_directory_path()/"dve_boundary_attachment_test";std::filesystem::remove_all(root);std::filesystem::create_directories(root);auto saved=c.workspace().document().save_transactional(root/"scene.dvescene");check(saved.success,saved.error);std::string error;auto loaded=EditorDocument::load(root/"scene.dvescene",&error);check(loaded&&loaded->validate(),"Generated patches save/reopen");std::filesystem::remove_all(root);
 }
+void review_fixes(){
+    {auto coarse=*insert_nurbs_knot(make_nurbs_patch(2),true,.5);for(auto& k:coarse.v.knots)k=1e16+8*k;
+        auto fine=*insert_nurbs_knot(make_nurbs_patch(2),true,.5+1e-9);for(auto& p:fine.controls)p.x+=3;std::string error;
+        check(!attach_nurbs_boundaries(coarse,fine,{},&error)&&error.find("collapse")!=std::string::npos,"Knots collapsing on domain restore refuse: "+error);}
+    auto unclamped=make_nurbs_patch(2);for(std::size_t i=0;i<unclamped.u.knots.size();++i)unclamped.u.knots[i]=double(i);
+    check(!attach_nurbs_boundaries(unclamped,low())&&!attach_nurbs_boundaries(high(),unclamped),"Unclamped reference/moving refuses");
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(EditorDocument("Boundary review")));auto& c=*owner;c.resize(1600,1000);
+    auto add=[&](EditorObjectId id,const NurbsSource& source){auto object=make_editor_nurbs(id,source);check(bool(object),"Fixture");c.workspace().document().add_object(std::move(*object));};
+    auto moving=*transpose_nurbs(low());for(auto& p:moving.controls)p.z+=4;add(1,make_nurbs_patch(2));add(2,moving);add(3,make_nurbs_arc());
+    const auto& menus=std::as_const(c.workspace().menus());const auto history=c.workspace().commands().size();const auto count=c.workspace().document().objects().size();
+    c.workspace().select_object(1);c.refresh_menu_state();
+    check(!menus.find("nurbs.source_attach_c0")->enabled&&!c.dispatch_action("nurbs.source_attach_c0")&&c.workspace().commands().size()==history,"Single selection / same object refuses");
+    c.workspace().select_object(3);c.workspace().add_to_selection(1);c.refresh_menu_state();
+    check(!menus.find("nurbs.source_attach_c1")->enabled&&menus.find("nurbs.source_attach_c1")->disabledReason.find("two surfaces")!=std::string::npos&&!c.dispatch_action("nurbs.source_attach_c1")&&c.workspace().commands().size()==history,"Curve input honest reason");
+    c.workspace().select_object(2);c.workspace().add_to_selection(1);c.workspace().document().find_object(2)->flags.visible=false;c.refresh_menu_state();
+    check(!c.dispatch_action("nurbs.source_attach_c0")&&c.workspace().commands().size()==history&&c.workspace().document().objects().size()==count,"Hidden input refuses atomically");
+    c.workspace().document().find_object(2)->flags.visible=true;
+    check(c.dispatch_action("nurbs.attach_moving_umin")&&c.workspace().commands().size()==history,"Option change adds no history");
+    c.workspace().select_object(2);c.workspace().add_to_selection(1);
+    const auto a=encode_nurbs(*editor_nurbs_source(*c.workspace().document().find_object(1))),b=encode_nurbs(*editor_nurbs_source(*c.workspace().document().find_object(2)));
+    check(c.dispatch_action("nurbs.source_attach_c0")&&c.workspace().commands().size()==history+1&&c.workspace().document().objects().size()==count+1,"Match is one undo step");
+    check(c.dispatch_action("edit.undo")&&c.workspace().document().objects().size()==count&&encode_nurbs(*editor_nurbs_source(*c.workspace().document().find_object(1)))==a&&encode_nurbs(*editor_nurbs_source(*c.workspace().document().find_object(2)))==b,"Undo restores exactly");
 }
-int main(){try{geometry();native();std::cout<<"NURBS boundary attachment tests passed\n";return 0;}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
+}
+int main(){try{geometry();native();review_fixes();std::cout<<"NURBS boundary attachment tests passed\n";return 0;}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

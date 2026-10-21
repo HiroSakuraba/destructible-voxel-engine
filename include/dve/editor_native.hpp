@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/simulation_clock.hpp"
+#include "dve/editor_nurbs_tessellation.hpp"
 
 #include <array>
 #include <chrono>
@@ -1229,6 +1230,7 @@ public:
     bool begin_nurbs_gizmo();
     bool preview_nurbs_transform(Float3,Quaternion,Float3,Float3);
     void finish_nurbs_gizmo(bool);
+    void poll_nurbs_tessellation();
     void capture_nurbs_selection(EditorSelectionSnapshot&) const;
     void restore_nurbs_selection(const EditorSelectionSnapshot&);
     void draw_nurbs(const IEditorCanvas&,UiRect) const;
@@ -1443,6 +1445,15 @@ private:
     std::optional<CookedPolygonAsset> nurbsDragMeshBefore_;
     EditorSelectionSnapshot nurbsDragSelection_;
     bool nurbsDragValid_{},nurbsBoxActive_{};
+    std::shared_ptr<NurbsTessellationQueue> nurbsTessellation_;
+    std::shared_ptr<const EditorObject> nurbsDragSnapshot_;
+    std::unique_ptr<EditNurbsCommand> nurbsPreparedEdit_;
+    std::optional<NurbsSource> nurbsDragRequested_;
+    std::uint64_t nurbsTessellationGeneration_{},nurbsPreparedGeneration_{};
+    bool nurbsFinishPending_{};
+    std::uint64_t nurbsDragRevision_{};
+    RigidTransform nurbsDragPose_;
+    Float3 nurbsDragMetric_{};
     int nurbsBoxX_{},nurbsBoxY_{},nurbsBoxEndX_{},nurbsBoxEndY_{};
     SelectionOperation nurbsBoxOperation_{SelectionOperation::Replace};
     EditorText3DAuthoringSession text3dAuthoring_{};

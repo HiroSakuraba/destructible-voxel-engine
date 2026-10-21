@@ -151,12 +151,13 @@ std::optional<NurbsSource> fillet_nurbs_corner(const NurbsSource& s,double radiu
     auto b=point(s.controls[1]),a=sub(point(s.controls[0]),b),c=sub(point(s.controls[2]),b);const double la=norm(a),lc=norm(c);if(la<=1e-12||lc<=1e-12)return fail<NurbsSource>(e,"Corner has a degenerate leg");a=mul(a,1/la);c=mul(c,1/lc);const double theta=std::acos(std::clamp(dot(a,c),-1.0,1.0));if(theta<=1e-6||theta>=3.141592653589793-1e-6)return fail<NurbsSource>(e,"Corner is straight or reversing");
     const double distance=radius/std::tan(theta/2);if(distance>=(std::min)(la,lc))return fail<NurbsSource>(e,"Fillet radius consumes an entire leg; reduce radius");auto x=add(b,mul(a,distance)),y=add(b,mul(c,distance));NurbsSource out;out.columns=3;out.u=uniform_axis(3,2);out.controls={{x[0],x[1],x[2],1},{b[0],b[1],b[2],std::sin(theta/2)},{y[0],y[1],y[2],1}};if(!validate_nurbs(out,e))return {};return out;
 }
-std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s,std::uint64_t id,double tolerance,double angle,std::string* e){
+std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource& s,std::uint64_t id,double tolerance,double angle,std::string* e,std::stop_token stop){
+    if(stop.stop_requested())return fail<CookedPolygonAsset>(e,"NURBS tessellation cancelled");
     if(!validate_nurbs(s,e))return {};if(s.is_curve()||!tolerance_ok(tolerance)||!std::isfinite(angle)||angle<=0||angle>3.141592653589793)return fail<CookedPolygonAsset>(e,"Adaptive surface bake needs positive chord tolerance and normal angle in (0,pi]");
     std::vector<double> us,vs;for(double t:s.u.knots)if(us.empty()||t!=us.back())us.push_back(t);for(double t:s.v.knots)if(vs.empty()||t!=vs.back())vs.push_back(t);
     double weightScale=0;for(auto p:s.controls)weightScale=(std::max)(weightScale,p.weight);
     unsigned evaluations=0;
-    auto sample=[&](double u,double v)->std::optional<NurbsSample>{if(++evaluations>250000)return {};return detail::evaluate_validated_nurbs(s,u,v,weightScale);};
+    auto sample=[&](double u,double v)->std::optional<NurbsSample>{if(stop.stop_requested()||++evaluations>250000)return {};return detail::evaluate_validated_nurbs(s,u,v,weightScale);};
     auto normal=[](const NurbsSample& p){auto n=cross(p.du,p.dv);const double l=norm(n);return l>1e-14?mul(n,1/l):V{};};
     bool finished=false;
     for(unsigned round=0;round<11;++round){

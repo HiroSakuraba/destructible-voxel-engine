@@ -259,9 +259,10 @@ std::optional<NurbsSource> decode_nurbs(std::string_view text,std::string* e){
     for(auto& p:s.controls)if(!(in>>p.x>>p.y>>p.z>>p.weight)){fail(e,"Truncated NURBS controls");return {};}
     in>>std::ws;if(!in.eof()||!validate_nurbs(s,e)){if(e&&e->empty())*e="Trailing NURBS source data";return {};}return s;
 }
-std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource& s,std::uint64_t id,std::string* e){
+std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource& s,std::uint64_t id,std::string* e,std::stop_token stop){
+    if(stop.stop_requested()){fail(e,"NURBS tessellation cancelled");return {};}
     if(!validate_nurbs(s,e))return {};
-    if(s.adaptiveDisplay)return tessellate_nurbs_adaptive(s,id,s.chordTolerance,s.normalAngle,e);
+    if(s.adaptiveDisplay)return tessellate_nurbs_adaptive(s,id,s.chordTolerance,s.normalAngle,e,stop);
     auto us=display_samples(s.u,s.columns,s.samplesPerSpan,s.creaseNormals),vs=display_samples(s.v,s.rows,s.samplesPerSpan,s.creaseNormals);
     CookedPolygonAsset m;m.objectId=id;
     VoxelMaterialDefinition material;material.name="NURBS";m.materials.push_back(material);
@@ -273,6 +274,7 @@ std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource& s,std::uin
     if(s.is_curve()){
         Float3 previous{};
         for(unsigned i=0;i<columns;++i){
+            if(stop.stop_requested()){fail(e,"NURBS tessellation cancelled");return {};}
             auto q=eval(s,us[i].t,0,e,scale,us[i].fromLeft,false);if(!q)return {};
             const auto t=unit(vec(q->du));Float3 n{};
             if(i==0)n=unit(cross3(t,std::abs(t.y)<.9F?Float3{0,1,0}:Float3{0,0,1}));
@@ -282,6 +284,7 @@ std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource& s,std::uin
         }
     }
     for(unsigned j=0;j<rows;++j)for(unsigned i=0;i<columns;++i){
+        if(stop.stop_requested()){fail(e,"NURBS tessellation cancelled");return {};}
         auto q=eval(s,us[i].t,s.is_curve()?0:vs[j].t,e,scale,us[i].fromLeft,!s.is_curve()&&vs[j].fromLeft);if(!q)return {};
         PolygonVertex v;v.position=vec(q->position);auto tangent=unit(vec(q->du));
         auto n=s.is_curve()?ribbon[i]:unit(cross3(vec(q->du),vec(q->dv)));

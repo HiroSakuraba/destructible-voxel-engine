@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <stop_token>
 #include <vector>
 
 namespace dve {
@@ -49,6 +50,6 @@ struct NurbsSample {
 [[nodiscard]] std::optional<NurbsSource> decode_nurbs(std::string_view,std::string* error=nullptr);
 // Uses the persisted fixed/adaptive display policy; neither is error-certified.
 // Curves use a narrow two-sided guide ribbon (no implied thickness/volume).
-[[nodiscard]] std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource&,std::uint64_t objectId,std::string* error=nullptr);
+[[nodiscard]] std::optional<CookedPolygonAsset> tessellate_nurbs(const NurbsSource&,std::uint64_t objectId,std::string* error=nullptr,std::stop_token stop={});
 }
 

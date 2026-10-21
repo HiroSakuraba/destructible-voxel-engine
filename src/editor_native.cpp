@@ -2885,7 +2885,7 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
     const SettingValue minutesValue = workspace_.settings().value("editor.autosave_minutes");
     const std::int64_t minutes = std::clamp<std::int64_t>(
         std::get_if<std::int64_t>(&minutesValue) ? std::get<std::int64_t>(minutesValue) : 5, 1, 120);
-    if (polygonPreviewBefore_ || polygonDragBefore_ || mesh_authoring_dragging()) return;
+    if (polygonPreviewBefore_ || polygonDragBefore_ || nurbsDragBefore_ || mesh_authoring_dragging()) return;
     if (autosaveInFlight_ || autosaveElapsedSeconds_ < static_cast<double>(minutes) * 60.0) return;
     autosaveElapsedSeconds_ = 0.0;
 
@@ -2950,6 +2950,7 @@ void NativeEditorController::update(float elapsedSeconds) {
         clear_navigation_input();
         navigationShortcutProfile_ = workspace_.shortcuts().active_profile();
     }
+    poll_nurbs_tessellation();
     autosave_tick(elapsedSeconds);
     poll_long_job();
     poll_cad_descriptions();
@@ -6522,7 +6523,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
 }
 
 void NativeEditorController::update_gizmo_drag(int x, int y, std::uint32_t modifiers) {
-    if (!gizmoDragging_ || gizmoChanges_.empty()) return;
+    if (!gizmoDragging_ || nurbsFinishPending_ || gizmoChanges_.empty()) return;
     gizmoLastX_ = x;
     gizmoLastY_ = y;
     gizmoLastModifiers_ = modifiers;
@@ -6810,6 +6811,10 @@ bool same_transform(const RigidTransform& a, const RigidTransform& b);  // numer
 }  // namespace
 
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
+    if(nurbsDragRequested_&&!actionId.starts_with("view.")){
+        if(actionId=="edit.undo")finish_nurbs_gizmo(true);
+        else {set_status("Finish the NURBS transform or press Escape to cancel",true);return false;}
+    }
     if (longJob_ || importOptions_.open) {
         // Only the viewport shading modes leave the scene alone while a long job runs.
         static constexpr std::array<std::string_view, 8> kSafeWhileBusy{
@@ -8776,6 +8781,7 @@ void NativeEditorController::key_down(std::string_view key, bool control, bool s
             return;
         }
         if (normalized == "escape") { finish_gizmo_drag(true); return; }
+        if (nurbsFinishPending_) { set_status("Finishing NURBS display; Escape cancels"); return; }
         if (normalized == "backspace") {
             if (!transformNumeric_.empty()) transformNumeric_.pop_back();
             update_gizmo_drag(gizmoLastX_, gizmoLastY_, gizmoLastModifiers_);

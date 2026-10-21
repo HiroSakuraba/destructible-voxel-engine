@@ -8,6 +8,7 @@
 #include <locale>
 #include <numeric>
 #include <sstream>
+#include <string>
 namespace dve::editor {
 namespace {
 constexpr std::string_view actions[]={"nurbs.source_length","nurbs.source_elevate_u","nurbs.source_elevate_v","nurbs.source_boundaries","nurbs.construct_join","nurbs.source_quality","nurbs.source_reset_uv","nurbs.source_split_u","nurbs.source_split_v","nurbs.source_iso_u","nurbs.source_iso_v","nurbs.source_reverse_u","nurbs.source_reverse_v","nurbs.source_swap_uv","nurbs.source_insert_u","nurbs.source_insert_v","nurbs.construct_add","nurbs.construct_clear","nurbs.construct_reverse","nurbs.construct_seam","nurbs.construct_loft","nurbs.construct_sweep","nurbs.construct_settings","nurbs.construct_close", "nurbs.create_patch","nurbs.create_circle","nurbs.create_arc","nurbs.create_profile","nurbs.create_revolve","nurbs.extrude","nurbs.revolve","nurbs.edit","nurbs.bake_polygon","nurbs.finish","nurbs.previous","nurbs.next","nurbs.select_all","nurbs.select_none","nurbs.select_invert","nurbs.select_row","nurbs.select_column","nurbs.insert_u","nurbs.insert_v"};
@@ -43,9 +44,14 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         else if(action=="nurbs.edit"||action=="nurbs.bake_polygon")enabled=bool(source);
         else if(action=="nurbs.finish"||action=="nurbs.previous"||action=="nurbs.next")enabled=ready&&nurbsEditingObject_==o->id;
         if(action=="nurbs.source_length")enabled=source&&source->is_curve();
-        if(source&&action=="nurbs.source_elevate_u")enabled=enabled&&source->u.degree<7;
-        if(source&&action=="nurbs.source_elevate_v")enabled=enabled&&!source->is_curve()&&source->v.degree<7;
-        (void)workspace_.menus().set_enabled(action,enabled,enabled?"":"Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)");
+        std::string reason="Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)";
+        if(source&&(action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v")){
+            const bool alongV=action=="nurbs.source_elevate_v";
+            if(alongV&&source->is_curve())reason="A NURBS curve has no V degree";
+            else if((alongV?source->v.degree:source->u.degree)>=7){enabled=false;reason=std::string(alongV?"V":"U")+" degree is already at the supported maximum of 7";}
+        }
+        if(source&&action=="nurbs.source_length"&&!source->is_curve())reason="Curve length measures NURBS curves only; extract an isocurve or boundary from a surface first";
+        (void)workspace_.menus().set_enabled(action,enabled,enabled?"":reason);
     }
 }
 bool NativeEditorController::create_nurbs_source(const NurbsSource& source,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement){

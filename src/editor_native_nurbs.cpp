@@ -91,6 +91,7 @@ void NativeEditorController::refresh_nurbs_menu_state(){
         if(source&&(action=="nurbs.source_adaptive"||action=="nurbs.source_crop")&&source->is_curve())reason="Adaptive bake and crop work on NURBS surfaces only";
         if(source&&action=="nurbs.source_fillet_corner"&&!enabled)reason="Corner fillet needs a three-control degree-one corner curve";
         if(source&&action.starts_with("nurbs.source_display_")&&source->is_curve())reason="Adaptive surface display works on NURBS surfaces only; curves use fixed guide ribbons";
+        if(action.starts_with("nurbs.attach_"))reason="Stop Play and finish the active drag or box selection to change boundary-match choices";
         if(!pairReason.empty())reason=pairReason;
         (void)workspace_.menus().set_enabled(action,enabled,enabled?"":reason);
     }

@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
+#include <string>
+#include <vector>
 namespace dve {
 namespace {
 bool valid_edge(NurbsBoundary edge){return edge==NurbsBoundary::UMin||edge==NurbsBoundary::UMax||edge==NurbsBoundary::VMin||edge==NurbsBoundary::VMax;}

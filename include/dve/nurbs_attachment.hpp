@@ -1,5 +1,7 @@
 #pragma once
 #include "dve/nurbs.hpp"
+#include <optional>
+#include <string>
 namespace dve {
 enum class NurbsBoundary { UMin, UMax, VMin, VMax };
 struct NurbsAttachmentOptions {

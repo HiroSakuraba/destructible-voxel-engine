@@ -6,6 +6,12 @@
 namespace dve::editor {
 namespace {
 using D3=std::array<double,3>;
+bool same_placement(const EditorObject& object,const RigidTransform& pose,Float3 metric){
+    const auto& p=object.transform;const auto m=object.voxelScale;
+    return p.position.x==pose.position.x&&p.position.y==pose.position.y&&p.position.z==pose.position.z&&
+        p.rotation.x==pose.rotation.x&&p.rotation.y==pose.rotation.y&&p.rotation.z==pose.rotation.z&&p.rotation.w==pose.rotation.w&&
+        m.x==metric.x&&m.y==metric.y&&m.z==metric.z;
+}
 D3 rotate_double(Quaternion q,D3 v){
     const double x=q.x,y=q.y,z=q.z,w=q.w,n=x*x+y*y+z*z+w*w;
     // Matches normalized quaternion rotation while retaining control precision.
@@ -48,17 +54,32 @@ bool NativeEditorController::begin_nurbs_gizmo(){
     if(!nurbs_control_mode()||nurbsSelected_.empty())return false;
     const auto* o=workspace_.document().find_object(nurbsEditingObject_);std::string error;
     auto s=editor_nurbs_source(*o,&error);
-    if(!s||!validate_editor_nurbs(*o,&error)||std::any_of(nurbsSelected_.begin(),nurbsSelected_.end(),[&](auto i){return i>=s->controls.size();})){
+    if(!s||!o->polygon||o->subdivision||o->modelingTopology||find_component_by_type(o->components,"dve.exact_brep")||
+       (!s->adaptiveDisplay&&!validate_editor_nurbs(*o,&error))||std::any_of(nurbsSelected_.begin(),nurbsSelected_.end(),[&](auto i){return i>=s->controls.size();})){
         set_status(error.empty()?"Select valid NURBS controls":error,true);return false;
     }
     nurbsDragSelection_=capture_selection_snapshot();nurbsDragBefore_=s;nurbsDragPreview_=s;
-    nurbsDragMeshBefore_=*o->polygon;nurbsDragValid_=true;return true;
+    if(s->adaptiveDisplay){
+        CookedPolygonAsset geometry;geometry.objectId=o->polygon->objectId;
+        geometry.vertices=o->polygon->vertices;geometry.indices=o->polygon->indices;
+        geometry.submeshes=o->polygon->submeshes;geometry.bounds=o->polygon->bounds;
+        nurbsDragMeshBefore_=std::move(geometry);
+    }else nurbsDragMeshBefore_=*o->polygon;
+    nurbsDragValid_=true;
+    nurbsPreparedGeneration_=0;
+    nurbsDragRevision_=workspace_.document().revision();nurbsDragPose_=o->transform;nurbsDragMetric_=o->voxelScale;
+    nurbsFinishPending_=false;nurbsDragRequested_.reset();nurbsPreparedEdit_.reset();
+    if(s->adaptiveDisplay){
+        if(!nurbsTessellation_)nurbsTessellation_=std::make_shared<NurbsTessellationQueue>();
+        nurbsDragSnapshot_=std::make_shared<EditorObject>(clone_editor_object(*o));
+    }
+    return true;
 }
 bool NativeEditorController::preview_nurbs_transform(Float3 translation,Quaternion rotation,Float3 scale,Float3 pivot){
-    if(!nurbsDragBefore_||!nurbsDragPreview_)return false;
+    if(!nurbsDragBefore_||!nurbsDragPreview_||nurbsFinishPending_)return false;
     auto* o=workspace_.document().find_object(nurbsEditingObject_);std::string error;
     auto current=o?editor_nurbs_source(*o,&error):std::nullopt;
-    if(!current||*current!=*nurbsDragPreview_){nurbsDragValid_=false;set_status("NURBS source changed during drag; cancel and reopen",true);return false;}
+    if(!current||*current!=*nurbsDragPreview_||!same_placement(*o,nurbsDragPose_,nurbsDragMetric_)){nurbsDragValid_=false;set_status("NURBS source changed during drag; cancel and reopen",true);return false;}
     auto after=*nurbsDragBefore_;
     const bool identity=translation.x==0&&translation.y==0&&translation.z==0&&scale.x==1&&scale.y==1&&scale.z==1&&
         rotation.x==0&&rotation.y==0&&rotation.z==0&&std::abs(rotation.w)==1;
@@ -74,22 +95,74 @@ bool NativeEditorController::preview_nurbs_transform(Float3 translation,Quaterni
         local=rotate_double(conjugate(o->transform.rotation),world);
         p.x=local[0]/o->voxelScale.x;p.y=local[1]/o->voxelScale.y;p.z=local[2]/o->voxelScale.z;
     }
+    if(nurbsDragBefore_->adaptiveDisplay){
+        if(!validate_nurbs(after,&error)){nurbsDragValid_=false;set_status(error,true);return false;}
+        if(nurbsDragValid_&&nurbsDragRequested_&&*nurbsDragRequested_==after)return true;
+        // All requests derive from the same immutable, pre-drag source/cache.
+        nurbsTessellationGeneration_=nurbsTessellation_->submit(nurbsDragSnapshot_,after);
+        nurbsDragRequested_=std::move(after);nurbsDragValid_=true;
+        set_status("Updating NURBS display; Escape cancels");return true;
+    }
     if(!replace_editor_nurbs_source(*o,after,&error)){nurbsDragValid_=false;set_status(error,true);return false;}
     nurbsDragValid_=true;nurbsDragPreview_=std::move(after);return true;
 }
+void NativeEditorController::poll_nurbs_tessellation(){
+    if(!nurbsDragRequested_||!nurbsTessellation_)return;
+    auto* object=workspace_.document().find_object(nurbsEditingObject_);
+    const auto source=object?editor_nurbs_source(*object):std::nullopt;
+    if(!nurbs_control_mode()||!source||!nurbsDragPreview_||*source!=*nurbsDragPreview_||
+       workspace_.document().revision()!=nurbsDragRevision_||!same_placement(*object,nurbsDragPose_,nurbsDragMetric_)||
+       object->subdivision||object->modelingTopology||find_component_by_type(std::span<const Component>(object->components),"dve.exact_brep")||
+       !object->polygon||!nurbs_display_geometry_matches(nurbsPreparedEdit_?*nurbsPreparedEdit_->prepared_mesh():*nurbsDragMeshBefore_,*object->polygon)){
+        finish_nurbs_gizmo(true);return;
+    }
+    auto result=nurbsTessellation_->poll();if(!result||result->generation!=nurbsTessellationGeneration_)return;
+    if(!result->command){
+        nurbsDragValid_=false;set_status(result->error.empty()?"NURBS display failed":result->error,true);
+        if(nurbsFinishPending_)finish_nurbs_gizmo(true);return;
+    }
+    auto mesh=*result->command->prepared_mesh();
+    mesh.materials=object->polygon->materials;mesh.materialBindings=object->polygon->materialBindings;
+    mesh.images=object->polygon->images;mesh.samplers=object->polygon->samplers;mesh.textures=object->polygon->textures;
+    mesh.contentHash=polygon_asset_content_hash(mesh);
+    auto valid=validate_polygon_asset(mesh);
+    if(!valid){nurbsDragValid_=false;set_status(valid.message,true);finish_nurbs_gizmo(true);return;}
+    auto encoded=encode_nurbs(result->source);
+    find_component_by_type(std::span<Component>(object->components),kNurbsComponent)->properties["source"]=std::move(encoded);
+    object->polygon=std::move(mesh);
+    nurbsDragPreview_=std::move(result->source);nurbsPreparedGeneration_=result->generation;
+    nurbsPreparedEdit_=std::move(result->command);
+    if(nurbsFinishPending_)finish_nurbs_gizmo(false);
+    else set_status("NURBS display updated; release to apply or Escape to cancel");
+}
 void NativeEditorController::finish_nurbs_gizmo(bool cancel){
+    const auto* target=workspace_.document().find_object(nurbsEditingObject_);
+    cancel=cancel||workspace_.document().revision()!=nurbsDragRevision_||
+        (target&&!same_placement(*target,nurbsDragPose_,nurbsDragMetric_));
+    if(!cancel&&nurbsDragRequested_&&nurbsDragValid_&&(!nurbsPreparedEdit_||nurbsPreparedGeneration_!=nurbsTessellationGeneration_)){
+        nurbsFinishPending_=true;set_status("Finishing NURBS display; Escape cancels");return;
+    }
+    if(nurbsTessellation_)nurbsTessellation_->cancel();
     auto* o=workspace_.document().find_object(nurbsEditingObject_);std::string error;
     auto current=o?editor_nurbs_source(*o,&error):std::nullopt;
-    if(current&&nurbsDragPreview_&&*current==*nurbsDragPreview_&&nurbsDragBefore_&&nurbsDragMeshBefore_){
+    if(current&&nurbsDragPreview_&&*current==*nurbsDragPreview_&&nurbsDragBefore_&&nurbsDragMeshBefore_&&
+       (!nurbsDragRequested_||(o->polygon&&nurbs_display_geometry_matches(nurbsPreparedEdit_?*nurbsPreparedEdit_->prepared_mesh():*nurbsDragMeshBefore_,*o->polygon)))){
         auto after=*current;
         find_component_by_type(std::span<Component>(o->components),kNurbsComponent)->properties["source"]=encode_nurbs(*nurbsDragBefore_);
-        o->polygon=*nurbsDragMeshBefore_;
+        auto restored=*nurbsDragMeshBefore_;
+        if(nurbsDragSnapshot_){
+            restored.materials=o->polygon->materials;restored.materialBindings=o->polygon->materialBindings;
+            restored.images=o->polygon->images;restored.samplers=o->polygon->samplers;restored.textures=o->polygon->textures;
+            restored.contentHash=polygon_asset_content_hash(restored);
+        }
+        o->polygon=std::move(restored);
         if(!cancel&&nurbsDragValid_&&after!=*nurbsDragBefore_){
-            auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<EditNurbsCommand>(o->id,*nurbsDragBefore_,std::move(after)));
+            auto result=workspace_.commands().execute(workspace_.document(),nurbsPreparedEdit_?std::move(nurbsPreparedEdit_):std::make_unique<EditNurbsCommand>(o->id,*nurbsDragBefore_,std::move(after)));
             if(result.success)workspace_.commands().set_last_selection_transition(nurbsDragSelection_,capture_selection_snapshot());
             set_status(result.success?"Transformed selected NURBS controls":result.message,!result.success);
         } else if(!cancel&&!nurbsDragValid_)set_status("Invalid NURBS preview cancelled",true);
     } else set_status("NURBS source changed; external source preserved",true);
+    nurbsDragRequested_.reset();nurbsPreparedEdit_.reset();nurbsDragSnapshot_.reset();nurbsFinishPending_=false;
     nurbsDragBefore_.reset();nurbsDragPreview_.reset();nurbsDragMeshBefore_.reset();
     gizmoDragging_=false;gizmoAxis_=0;gizmoChanges_.clear();gizmoSizeChanges_.clear();transformNumeric_.clear();
     dragSnapTarget_.reset();scalePreviewBounds_.reset();nurbsDragValid_=false;

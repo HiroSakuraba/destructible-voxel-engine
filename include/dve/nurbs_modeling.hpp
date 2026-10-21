@@ -33,5 +33,5 @@ struct NurbsProjection { double u{},v{},distance{}; std::array<double,3> positio
 // Crack-free tensor grid within one patch, refined by sampled chord/normal tests.
 // Duplicated cell corners preserve knot-side normals. No certified error bound
 // or cross-object edge synchronization. Bounded evaluations and 65536 vertices.
-[[nodiscard]] std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource&,std::uint64_t id,double chordTolerance=.01,double normalAngle=.15,std::string* error=nullptr);
+[[nodiscard]] std::optional<CookedPolygonAsset> tessellate_nurbs_adaptive(const NurbsSource&,std::uint64_t id,double chordTolerance=.01,double normalAngle=.15,std::string* error=nullptr,std::stop_token stop={});
 }

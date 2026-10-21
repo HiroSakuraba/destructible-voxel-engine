@@ -151,6 +151,35 @@ jobs:
           xvfb-run -a ctest --test-dir out/build/${{ matrix.preset }}
           --output-on-failure --no-tests=error -j4 --timeout 1800
           --output-junit ctest-junit.xml
+      # Packaging (formerly its own job; same preset and ccache key as this leg).
+      - name: Build the sample game package (tgz, verified)
+        if: matrix.preset == 'linux-gcc-player-release'
+        run: cmake --build out/build/${{ matrix.preset }} --target dve_sample_game_package
+      - name: CPack DEB and TGZ
+        if: matrix.preset == 'linux-gcc-player-release'
+        run: |
+          cpack --config out/build/${{ matrix.preset }}/CPackConfig.cmake -G "DEB;TGZ" -B out/packages
+          mkdir -p out/artifacts
+          cp out/packages/dve-runtime*.deb out/artifacts/
+          cp out/build/${{ matrix.preset }}/game_packages/*.tar.gz out/artifacts/
+          for deb in out/packages/*.deb; do echo "== $deb"; dpkg-deb -f "$deb"; done
+          ls -l out/packages out/artifacts
+          tar -tzf out/artifacts/*.tar.gz | head -50
+          dpkg-deb -c out/artifacts/dve-runtime*.deb
+      - name: Upload sample game tgz
+        if: matrix.preset == 'linux-gcc-player-release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dve-sample-game-linux-x86_64
+          path: out/artifacts/*.tar.gz
+          if-no-files-found: error
+      - name: Upload runtime deb
+        if: matrix.preset == 'linux-gcc-player-release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dve-runtime-deb
+          path: out/artifacts/*.deb
+          if-no-files-found: error
       - name: Collapse benchmark (report only, never gates)
         if: matrix.preset == 'linux-gcc-release'
         continue-on-error: true
@@ -174,82 +203,6 @@ jobs:
             out/build/${{ matrix.preset }}/Testing/Temporary/LastTest*.log
           if-no-files-found: ignore
           retention-days: 14
-
-  packaging:
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    # Mirrored from Debian trixie by ci-image-mirror.yml; pulled with credentials, not anonymously.
-    container:
-      image: ghcr.io/hirosakuraba/dve-ci-debian:trixie-build
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    timeout-minutes: 150
-    env:
-      PRESET: linux-gcc-player-release
-    steps:
-      - name: Install build dependencies
-        run: |
-          # The trixie-build image (ci-image-mirror.yml) already has these; only a stale image
-          # pays for apt here.
-          if dpkg -s $DVE_APT_PACKAGES >/dev/null 2>&1; then echo "all packages preinstalled"; exit 0; fi
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DVE_APT_PACKAGES
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Mark workspace safe for git and point ccache at it
-        # github.workspace is the host path in container jobs; use the in-container path.
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.cache/ccache" >> "$GITHUB_ENV"
-      - name: Restore ccache and fetched content (shared with the player ctest leg)
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            .cache/ccache
-            .cache/fetchcontent/linux-gcc-player-release
-          key: dve-linux-gcc-player-release-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            dve-linux-gcc-player-release-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'CMakePresets.json') }}-
-            dve-linux-gcc-player-release-
-      - name: Configure
-        run: >-
-          cmake --preset $PRESET
-          -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
-          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -DCMAKE_LINKER_TYPE=MOLD
-          -DFETCHCONTENT_BASE_DIR=$GITHUB_WORKSPACE/.cache/fetchcontent/$PRESET
-      - name: Build
-        run: |
-          ccache --zero-stats
-          cmake --build out/build/$PRESET --parallel 4
-          ccache --show-stats
-      - name: Build the sample game package (tgz, verified)
-        run: cmake --build out/build/$PRESET --target dve_sample_game_package
-      - name: CPack DEB and TGZ
-        run: |
-          cpack --config out/build/$PRESET/CPackConfig.cmake -G "DEB;TGZ" -B out/packages
-          mkdir -p out/artifacts
-          cp out/packages/dve-runtime*.deb out/artifacts/
-          cp out/build/$PRESET/game_packages/*.tar.gz out/artifacts/
-          for deb in out/packages/*.deb; do echo "== $deb"; dpkg-deb -f "$deb"; done
-          ls -l out/packages out/artifacts
-          tar -tzf out/artifacts/*.tar.gz | head -50
-          dpkg-deb -c out/artifacts/dve-runtime*.deb
-      - name: Upload sample game tgz
-        uses: actions/upload-artifact@v4
-        with:
-          name: dve-sample-game-linux-x86_64
-          path: out/artifacts/*.tar.gz
-          if-no-files-found: error
-      - name: Upload runtime deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: dve-runtime-deb
-          path: out/artifacts/*.deb
-          if-no-files-found: error
 
   windows-msvc:
     # Windows build of the player preset (MSVC, static SDL 3.4.12, Lua 5.4.9, Jolt 5.6.0;

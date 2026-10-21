@@ -18,7 +18,7 @@ std::string encode(const NurbsSeam& seam){
     for(const auto* axis:{&seam.grid.u,&seam.grid.v,&seam.fractions}){out<<axis->size()<<' ';for(double x:*axis)out<<x<<' ';}
     for(auto p:seam.anchors)out<<p.x<<' '<<p.y<<' '<<p.z<<' ';return out.str();
 }
-bool same_frame(const EditorObject& a,const EditorObject& b){auto x=a.transform,y=b.transform;return a.parent==b.parent&&!a.attachment&&!b.attachment&&x.position.x==y.position.x&&x.position.y==y.position.y&&x.position.z==y.position.z&&x.rotation.x==y.rotation.x&&x.rotation.y==y.rotation.y&&x.rotation.z==y.rotation.z&&x.rotation.w==y.rotation.w&&a.voxelScale.x==b.voxelScale.x&&a.voxelScale.y==b.voxelScale.y&&a.voxelScale.z==b.voxelScale.z;}
+bool same_frame(const EditorObject& a,const EditorObject& b){return nurbs_seam_same_frame(a,b);}
 std::optional<NurbsSample> boundary(const NurbsSource& source,NurbsBoundary edge,double parameter){const auto& cross=v_edge(edge)?source.v:source.u;const double fixed=min_edge(edge)?cross.knots.front():cross.knots.back();return evaluate_nurbs(source,v_edge(edge)?parameter:fixed,v_edge(edge)?fixed:parameter);}
 bool near_parameter(double a,double b){return std::abs(a-b)<=8*std::numeric_limits<double>::epsilon()*(std::max)({std::abs(a),std::abs(b),1e-300});}
 std::vector<double> parameters(const NurbsSource& source,NurbsBoundary edge,const std::vector<double>& fractions,bool reverse){
@@ -149,6 +149,7 @@ private:
     Mode mode_;EditorObjectId id_,moving_;NurbsAttachmentOptions options_;std::optional<NurbsSource> expected_,value_;std::vector<EditorObject> before_,after_;
 };
 }
+bool nurbs_seam_same_frame(const EditorObject& a,const EditorObject& b){auto x=a.transform,y=b.transform;return a.parent==b.parent&&!a.attachment&&!b.attachment&&x.position.x==y.position.x&&x.position.y==y.position.y&&x.position.z==y.position.z&&x.rotation.x==y.rotation.x&&x.rotation.y==y.rotation.y&&x.rotation.z==y.rotation.z&&x.rotation.w==y.rotation.w&&a.voxelScale.x==b.voxelScale.x&&a.voxelScale.y==b.voxelScale.y&&a.voxelScale.z==b.voxelScale.z;}
 bool has_nurbs_seam(const EditorObject& object) noexcept{const auto* c=find_component_by_type(object.components,kNurbsComponent);return c&&c->properties.contains(kNurbsSeamProperty);}
 std::optional<NurbsSeam> editor_nurbs_seam(const EditorObject& object,std::string* error){
     auto invalid=[&]()->std::optional<NurbsSeam>{fail(error,"Invalid or unsupported NURBS seam metadata");return {};};const auto* text=encoded(object);if(!text||text->size()>1024*1024)return invalid();

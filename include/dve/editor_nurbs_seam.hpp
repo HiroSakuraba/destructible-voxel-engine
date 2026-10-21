@@ -12,6 +12,8 @@ struct NurbsSeam {
     std::vector<double> fractions;
     std::vector<Float3> anchors;
 };
+// Same parent, local pose and axis scale, with no socket attachment.
+[[nodiscard]] bool nurbs_seam_same_frame(const EditorObject&,const EditorObject&);
 [[nodiscard]] bool has_nurbs_seam(const EditorObject&) noexcept;
 [[nodiscard]] std::optional<NurbsSeam> editor_nurbs_seam(const EditorObject&,std::string* error=nullptr);
 [[nodiscard]] bool validate_editor_nurbs_seams(const EditorDocument&,std::string* error=nullptr);

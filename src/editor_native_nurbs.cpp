@@ -84,7 +84,9 @@ void NativeEditorController::refresh_nurbs_menu_state(){
             const bool link=action=="nurbs.seam_link_c0"||action=="nurbs.seam_link_c1";
             enabled=editing&&(link?workspace_.selection_count()==2:workspace_.selection_count()==1)&&o&&o->is_nurbs();
             if(link){for(auto id:workspace_.selected_objects()){const auto* candidate=workspace_.document().find_object(id);auto source=candidate?editor_nurbs_source(*candidate):std::nullopt;
-                enabled=enabled&&candidate&&source&&!source->is_curve()&&!has_nurbs_seam(*candidate)&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(id);}}
+                enabled=enabled&&candidate&&source&&!source->is_curve()&&!has_nurbs_seam(*candidate)&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(id);}
+                if(enabled){const auto& ids=workspace_.selected_objects();const auto* first=workspace_.document().find_object(*ids.begin());const auto* second=workspace_.document().find_object(*std::next(ids.begin()));
+                    if(!nurbs_seam_same_frame(*first,*second)){enabled=false;pairReason="Linked patches need the same parent, pose and axis scale without socket attachment; align the objects first";}}}
             else {enabled=enabled&&has_nurbs_seam(*o);auto seam=o?editor_nurbs_seam(*o):std::nullopt;
                 if(seam){for(auto id:{seam->reference,seam->moving}){const auto* partner=workspace_.document().find_object(id);enabled=enabled&&partner&&partner->flags.visible&&!partner->flags.locked&&!partner->prefabLink&&!is_isolated_out(id);}}else enabled=false;
             }

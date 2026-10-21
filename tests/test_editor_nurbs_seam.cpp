@@ -90,5 +90,18 @@ void native(){
     check(c.dispatch_action("nurbs.seam_unlink"),c.status().text);check(!has_nurbs_seam(*c.workspace().document().find_object(2))&&c.workspace().document().validate(),"Native unlink both");check(c.dispatch_action("edit.undo"),"Native unlink undo");shared(c.workspace().document());
     c.workspace().document().find_object(2)->flags.visible=false;auto before=editor_nurbs_source(*c.workspace().document().find_object(1));point=before->controls[7];point.y+=.05;check(!c.edit_nurbs_control(7,point)&&editor_nurbs_source(*c.workspace().document().find_object(1))==before,"Hidden partner edit refuses");
 }
+void review_fixes(){
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(EditorDocument("Seam menu")));auto& c=*owner;c.resize(1600,1000);add(c.workspace().document(),1,fixture(false));add(c.workspace().document(),2,fixture(true));
+    c.workspace().document().find_object(2)->transform.position.x=1;c.workspace().select_object(2);c.workspace().add_to_selection(1);c.refresh_menu_state();
+    const auto& menus=std::as_const(c.workspace().menus());const auto history=c.workspace().commands().size();
+    check(!menus.find("nurbs.seam_link_c0")->enabled&&menus.find("nurbs.seam_link_c0")->disabledReason.find("same parent")!=std::string::npos,"Different-frame link menu is disabled with an honest reason");
+    check(!c.dispatch_action("nurbs.seam_link_c0")&&c.workspace().commands().size()==history&&!has_nurbs_seam(*c.workspace().document().find_object(1)),"Different-frame link adds no history");
+    c.workspace().document().find_object(2)->transform.position.x=0;c.refresh_menu_state();check(menus.find("nurbs.seam_link_c0")->enabled,"Same-frame link menu enabled");
+    check(c.dispatch_action("nurbs.seam_link_c0")&&c.workspace().commands().size()==history+1,"Link is one undo step");c.refresh_menu_state();
+    check(!menus.find("nurbs.seam_link_c1")->enabled,"Already-linked pair cannot link again");
+    c.workspace().select_object(1);c.refresh_menu_state();check(menus.find("nurbs.seam_unlink")->enabled&&menus.find("nurbs.seam_refresh")->enabled,"Linked patch offers unlink/rebuild");
+    c.workspace().document().find_object(2)->flags.locked=true;c.refresh_menu_state();check(!menus.find("nurbs.seam_unlink")->enabled&&!c.dispatch_action("nurbs.seam_unlink")&&has_nurbs_seam(*c.workspace().document().find_object(2))&&c.workspace().commands().size()==history+1,"Locked partner blocks unlink atomically");
+    c.workspace().document().find_object(2)->flags.locked=false;check(c.dispatch_action("edit.undo")&&!has_nurbs_seam(*c.workspace().document().find_object(1))&&!has_nurbs_seam(*c.workspace().document().find_object(2))&&c.workspace().document().validate(),"Link undo restores unlinked pair");
 }
-int main(){try{grids_and_orientations();edits_history_and_storage();refusals();native();std::cout<<"Persistent NURBS seam tests passed\n";return 0;}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}
+}
+int main(){try{grids_and_orientations();edits_history_and_storage();refusals();native();review_fixes();std::cout<<"Persistent NURBS seam tests passed\n";return 0;}catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

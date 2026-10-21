@@ -192,9 +192,10 @@ std::unique_ptr<IEditorCommand> unlink_nurbs_seam_command(EditorObjectId id){ret
 std::unique_ptr<IEditorCommand> refresh_nurbs_seam_command(EditorObjectId id){return std::make_unique<SeamCommand>(SeamCommand::Mode::Refresh,id);}
 std::unique_ptr<IEditorCommand> edit_nurbs_seam_command(EditorObjectId id,const NurbsSource& before,const NurbsSource& after){return std::make_unique<SeamCommand>(SeamCommand::Mode::Edit,id,0,NurbsAttachmentOptions{},before,after);}
 namespace {
-bool pair_state_matches(const EditorDocument& document,const NurbsSeamDragSnapshot& pair,bool editable){
+bool pair_state_matches(const EditorDocument& document,const NurbsSeamDragSnapshot& pair,bool editable,bool allowMissing=false){
     for(const auto* saved:{&pair.reference,&pair.moving}){
         const auto* current=document.find_object(saved->id);
+        if(!current&&allowMissing)continue;
         if(!current||!current->polygon||current->subdivision||current->modelingTopology||
            find_component_by_type(current->components,"dve.exact_brep")||!encoded(*current)||!encoded(*saved)||
            *encoded(*current)!=*encoded(*saved)||editor_nurbs_source(*current)!=editor_nurbs_source(*saved)||
@@ -203,12 +204,15 @@ bool pair_state_matches(const EditorDocument& document,const NurbsSeamDragSnapsh
     }
     return true;
 }
-bool publish_pair(EditorDocument& document,const NurbsSeamDragSnapshot& pair,std::string* error){
+bool publish_pair(EditorDocument& document,const NurbsSeamDragSnapshot& pair,std::string* error,bool allowMissing=false){
     // Allocate/validate both replacements before touching either live object.
     std::vector<CookedPolygonAsset> meshes;
     std::vector<std::map<std::string,ComponentValue,std::less<>>> properties;
+    std::vector<EditorObjectId> ids;
     for(const auto* saved:{&pair.reference,&pair.moving}){
         auto* current=document.find_object(saved->id);
+        if(!current&&allowMissing)continue;
+        ids.push_back(saved->id);
         if(!current||!current->polygon||!find_component_by_type(std::span<const Component>(current->components),kNurbsComponent))return fail(error,"Linked patch disappeared");
         auto mesh=*saved->polygon;appearance(mesh,*current->polygon);
         auto valid=validate_polygon_asset(mesh);if(!valid)return fail(error,valid.message);
@@ -217,10 +221,9 @@ bool publish_pair(EditorDocument& document,const NurbsSeamDragSnapshot& pair,std
         props["source"]=savedProps.at("source");props[std::string(kNurbsSeamProperty)]=savedProps.at("seam");
         meshes.push_back(std::move(mesh));properties.push_back(std::move(props));
     }
-    unsigned i=0;
-    for(const auto* saved:{&pair.reference,&pair.moving}){
-        auto* current=document.find_object(saved->id);current->polygon=std::move(meshes[i]);
-        find_component_by_type(std::span<Component>(current->components),kNurbsComponent)->properties=std::move(properties[i++]);
+    for(std::size_t i=0;i<ids.size();++i){
+        auto* current=document.find_object(ids[i]);current->polygon=std::move(meshes[i]);
+        find_component_by_type(std::span<Component>(current->components),kNurbsComponent)->properties=std::move(properties[i]);
     }
     return true;
 }
@@ -276,8 +279,9 @@ bool PreparedNurbsSeamEdit::publish_preview(EditorDocument& document,const Prepa
 bool PreparedNurbsSeamEdit::restore_preview(EditorDocument& document,std::string* error){
     // A changed lock/placement cancels the drag but need not prevent restoring its geometry.
     // External source, metadata or cache changes are never overwritten.
-    if(!matches(document,true,false))return fail(error,"Linked source or display changed; external edits preserved");
-    return publish(document,false,error);
+    // A partner removed mid-drag must not strand the survivor in its unapplied preview.
+    if(!before_||!pair_state_matches(document,after_,false,true))return fail(error,"Linked source or display changed; external edits preserved");
+    return publish_pair(document,*before_,error,true);
 }
 CommandResult PreparedNurbsSeamEdit::execute(EditorDocument& document){
     std::string error;if(!matches(document,false)||!publish(document,true,&error))return CommandResult::fail(error.empty()?"Linked source, placement or display changed; history was not applied":error);

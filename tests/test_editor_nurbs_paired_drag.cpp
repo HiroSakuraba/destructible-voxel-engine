@@ -80,5 +80,18 @@ void stale_and_lifetime(){
     c.workspace().select_object(1);check(c.dispatch_action("nurbs.edit")&&c.select_nurbs_controls({7},SelectionOperation::Replace),"Reopen");start();check(d.remove_object(2),"Remove partner fixture");c.update(0);check(!c.gizmo_dragging()&&editor_nurbs_source(*d.find_object(1))==sourceA,"Partner deletion cancels safely");d.add_object(clone_editor_object(original));
     start();auto begin=std::chrono::steady_clock::now();owner.reset();check(std::chrono::steady_clock::now()-begin<std::chrono::seconds(5),"Controller destruction joins paired worker");
 }
+void review_fixes(){
+    auto owner=std::make_unique<NativeEditorController>(EditorWorkspace(EditorDocument("Partner removed after preview")));auto& c=*owner;c.resize(1600,1000);auto& d=c.workspace().document();pair(d,true);c.workspace().select_object(1);
+    check(c.dispatch_action("nurbs.edit")&&c.select_nurbs_controls({7},SelectionOperation::Replace),"Controls");const auto sourceA=*editor_nurbs_source(*d.find_object(1));const auto history=c.workspace().commands().size();
+    c.set_active_tool(EditorToolId::Translate);auto axis=c.gizmo_axes()[0];c.pointer_down(PointerButton::Primary,int(axis.end.x),int(axis.end.y),0);check(c.gizmo_dragging(),"Drag starts");c.key_down("1",false,false,false);
+    until([&]{c.update(0);return editor_nurbs_source(*d.find_object(1))!=sourceA;});check(d.remove_object(2),"Remove partner after preview");c.update(0);
+    check(!c.gizmo_dragging()&&editor_nurbs_source(*d.find_object(1))==sourceA&&c.workspace().commands().size()==history,"Partner deletion after preview restores the survivor and adds no history");
+    // Hiding the partner mid-preview restores both patches.
+    EditorDocument fresh("Hidden partner");pair(fresh,false);auto owner2=std::make_unique<NativeEditorController>(EditorWorkspace(std::move(fresh)));auto& e=*owner2;e.resize(1600,1000);auto& f=e.workspace().document();e.workspace().select_object(1);
+    check(e.dispatch_action("nurbs.edit")&&e.select_nurbs_controls({7},SelectionOperation::Replace),"Controls 2");const auto a0=*editor_nurbs_source(*f.find_object(1)),b0=*editor_nurbs_source(*f.find_object(2));
+    e.set_active_tool(EditorToolId::Translate);axis=e.gizmo_axes()[0];e.pointer_down(PointerButton::Primary,int(axis.end.x),int(axis.end.y),0);check(e.gizmo_dragging(),"Drag 2 starts");e.key_down("1",false,false,false);
+    until([&]{e.update(0);return editor_nurbs_source(*f.find_object(1))!=a0;});f.find_object(2)->flags.visible=false;e.update(0);
+    check(!e.gizmo_dragging()&&editor_nurbs_source(*f.find_object(1))==a0&&editor_nurbs_source(*f.find_object(2))==b0,"Hiding partner mid-drag restores both");f.find_object(2)->flags.visible=true;shared(f);
 }
-int main(){try{matrix_and_queue();for(bool adaptive:{false,true})for(bool reverse:{false,true})for(bool c1:{false,true})native(adaptive,reverse,c1);stale_and_lifetime();std::cout<<"Paired NURBS drag tests passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+}
+int main(){try{matrix_and_queue();for(bool adaptive:{false,true})for(bool reverse:{false,true})for(bool c1:{false,true})native(adaptive,reverse,c1);stale_and_lifetime();review_fixes();std::cout<<"Paired NURBS drag tests passed\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

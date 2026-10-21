@@ -2,6 +2,12 @@
 #include "dve/editor_nurbs.hpp"
 #include "dve/nurbs_attachment.hpp"
 #include "dve/nurbs_tessellation.hpp"
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <stop_token>
+#include <string>
+#include <vector>
 namespace dve::editor {
 // Immutable pair snapshot; workers never retain a document or controller pointer.
 struct NurbsSeamDragSnapshot {

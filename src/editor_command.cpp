@@ -514,8 +514,8 @@ CommandResult RemoveObjectsCommand::execute(EditorDocument& document) {
     const std::set<EditorObjectId> resolvedSet(resolvedIds_.begin(), resolvedIds_.end());
     removalRoots_.clear();
     for(const auto id:resolvedIds_){const auto* object=document.find_object(id);if(object&&has_nurbs_seam(*object)){
-        std::string error;auto seam=editor_nurbs_seam(*object,&error);if(!seam)return CommandResult::fail(error);
-        if(!resolvedSet.contains(seam->reference)||!resolvedSet.contains(seam->moving))return CommandResult::fail("Delete both linked patches together or unlink the NURBS seam first");
+        std::string error;auto ids=nurbs_seam_network_ids(document,id,&error);if(ids.empty())return CommandResult::fail(error);
+        for(auto next:ids)if(!resolvedSet.contains(next))return CommandResult::fail("Delete the entire linked NURBS network together or unlink the selected patches first");
     }}
     for (const EditorObjectId id : resolvedIds_) {
         const EditorObject* object = document.find_object(id);

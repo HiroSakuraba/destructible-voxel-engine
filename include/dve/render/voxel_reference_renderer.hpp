@@ -42,6 +42,10 @@ struct VoxelReferenceRenderStats {
     // GlobalIlluminationMode::RadianceCascades only: interval rays traced by the CPU SPWI solve
     // (including bilinear-fix and fallback rays).
     std::uint64_t radianceCascadeIntervalRays{};
+    // Subsurface translucency: marches from shaded-side Subsurface hits toward the sun, and how
+    // many of them reached an open sunlit side within the subsurface max distance.
+    std::uint64_t subsurfaceMarches{};
+    std::uint64_t subsurfaceExits{};
 };
 
 // CPU screen-probe / world-space-interval (SPWI) radiance cascades. See

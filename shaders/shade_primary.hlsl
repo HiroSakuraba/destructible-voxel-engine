@@ -117,19 +117,33 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     }
     float3 radiance = direct + indirect + emissive;
 
-    if (material.shadingModel == kShadingModelSubsurface && material.subsurfaceScatterDistanceMeters > 0.0F) {
+    // Subsurface translucency on the side facing away from the sun. The near side's shadow
+    // visibility is not used: for a backlit point the object shadows itself. Instead the sun's
+    // visibility is traced from where the light enters, on the far side.
+    if (material.shadingModel == kShadingModelSubsurface && material.subsurfaceScatterDistanceMeters > 0.0F &&
+        gSubsurfaceMaxDistanceMeters > 0.0F && dot(geometricNormal, gSunDirection) < 0.0F) {
         float interiorBiasVoxels = max(1.0e-3F, MetersToVoxelUnits(0.001F));
         float3 hitPoint = TraceHitPosition(gPrimaryRays[pixelIndex], hit) -
                           geometricNormal * interiorBiasVoxels;
-        float maximumThicknessMeters = min(
-            gSubsurfaceMaxDistanceMeters, material.subsurfaceScatterDistanceMeters * 8.0F);
-        float thicknessVoxels = MarchSubsurfaceThicknessVoxels(
-            hitPoint, -geometricNormal, hit.material,
-            MetersToVoxelUnits(maximumThicknessMeters), 32u);
-        float thicknessMeters = VoxelUnitsToMeters(thicknessVoxels);
-        radiance += ShadeSubsurfaceTransmission(
-            thicknessMeters, material.subsurfaceScatterDistanceMeters, MaterialSubsurfaceColorRGB(material),
-            geometricNormal, gSunDirection, sunRadiance);
+        SubsurfaceMarch march = MarchSubsurfaceThicknessVoxels(
+            hitPoint, gSunDirection, hit.material,
+            MetersToVoxelUnits(gSubsurfaceMaxDistanceMeters), 64u);
+        if (march.exited) {
+            float farVisibility = 1.0F;
+            if (gShadowMode != kShadowOff) {
+                TraceRay farRay;
+                farRay.origin = march.exitPoint + march.exitNormal * max(1.0e-3F, MetersToVoxelUnits(gShadowBiasMeters));
+                farRay.maxDistance = MetersToVoxelUnits(gShadowMaxDistanceMeters);
+                farRay.direction = gSunDirection;
+                farRay.rayId = pixelIndex;
+                if (TraceVoxelRay(farRay).hit != 0u) farVisibility = saturate(1.0F - gShadowStrength);
+            }
+            float thicknessVoxels = march.thicknessVoxels;
+            float thicknessMeters = VoxelUnitsToMeters(thicknessVoxels);
+            radiance += ShadeSubsurfaceTransmission(
+                thicknessMeters, material.subsurfaceScatterDistanceMeters, MaterialSubsurfaceColorRGB(material),
+                march.exitNormal, gSunDirection, gSunColor * gSunIntensity * farVisibility);
+        }
     }
 
     gRadiance[pixelIndex] = float4(radiance, material.baseColorA);

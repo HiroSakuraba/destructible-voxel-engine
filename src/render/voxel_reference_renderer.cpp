@@ -15,6 +15,7 @@
 #include "dve/render/caustic_map.hpp"
 #include "dve/render/radiance_cascades_spwi.hpp"
 #include "dve/render/ray_lighting_reference.hpp"
+#include "dve/render/subsurface.hpp"
 
 namespace dve::render {
 namespace {
@@ -195,6 +196,26 @@ float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
     return weighted(visible);
 }
 
+// Sunlight scattered through a Subsurface material to its shaded side (see subsurface.hpp):
+// march toward the sun through the same material to where the light enters, then that point's
+// own sun visibility (the far side can be shadowed too) and the Burley transmittance.
+Float3 subsurface_light(const spwi::VoxelSceneTracer& tracer, const VoxelReferenceInstance& instance, MaterialId id,
+                        const VoxelMaterialDefinition& material, Float3 point, Float3 normal,
+                        const RenderEnvironment& environment, const VoxelLightingDistances& distances,
+                        std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats, const SunExtras* extras) {
+    if (!material_has_subsurface(material) || !(distances.subsurfaceMaxDistance > 0.0F)) return {};
+    const Float3 sun = normalize(environment.sunDirection);
+    if (!(dot(normal, sun) < 0.0F)) return {};   // sunlit side: the ordinary diffuse term
+    ++stats.subsurfaceMarches;
+    const Float3 start = add(point, multiply(normal, -1.0e-3F));
+    const SubsurfaceExit exit = march_voxel_subsurface(instance, id, start, sun, distances.subsurfaceMaxDistance);
+    if (!exit.found || !exit.open) return {};
+    ++stats.subsurfaceExits;
+    const float visibility = shadow_visibility(tracer, exit.position, exit.normal, environment, distances,
+                                               pixelSeed ^ 0x9E3779B9U, stats, extras);
+    return subsurface_transmitted_radiance(material, exit, sun, distances.metersPerVoxel, visibility, environment);
+}
+
 Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                            Float3 normal, const RenderEnvironment& environment,
                            const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
@@ -227,7 +248,7 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
 
 Float4 shade_voxel(const VoxelMaterialDefinition& material, Float3 worldNormal,
                    const RenderEnvironment& environment, float visibility,
-                   Float3 indirect, Float3 caustic = {}) noexcept {
+                   Float3 indirect, Float3 caustic = {}, Float3 transmitted = {}) noexcept {
     if (material.shadingModel == MaterialShadingModel::Unlit) return material.baseColor;
     const Float3 light = normalize(environment.sunDirection);
     const float ndotl = std::max(0.0F, dot(worldNormal, light));
@@ -236,6 +257,8 @@ Float4 shade_voxel(const VoxelMaterialDefinition& material, Float3 worldNormal,
                                multiply3(environment.sunColor, multiply(caustic, environment.sunIntensity)));
     const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
     Float3 lit = multiply3(base, add3(direct, multiply(indirect, 1.0F - material.metallic)));
+    // Subsurface transmission already carries the material's subsurface colour as its albedo.
+    lit = add3(lit, transmitted);
     lit = add3(lit, material.emissive);
     if (material.shadingModel == MaterialShadingModel::Emissive)
         lit = add3(base, material.emissive);
@@ -334,8 +357,10 @@ VoxelReferenceRenderStats render_radiance_cascades(
         const float visibility = shadow_visibility(tracer, texel.position, texel.normal,
                                                    environment, distances, seed, stats, &extras);
         const Float3 caustic = extras.caustics ? extras.caustics->irradiance(texel.position, texel.normal) : Float3{};
+        const Float3 transmitted = subsurface_light(tracer, instance, texel.material, material, texel.position,
+                                                    texel.normal, environment, distances, seed, stats, &extras);
         target.hdrColor[index] = shade_voxel(material, texel.normal, environment, visibility,
-                                             gi.indirect[index], caustic);
+                                             gi.indirect[index], caustic, transmitted);
         target.depth[index] = texel.normalizedDepth;
         target.objectId[index] = instance.objectId != 0U ? instance.objectId : instance.object->id();
         target.materialIndex[index] = texel.material;
@@ -419,8 +444,11 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     const Float3 indirect = global_illumination(tracer, hit->worldPosition,
                                                                  hit->worldNormal, environment, distances,
                                                                  seed, local);
+                    const Float3 transmitted = subsurface_light(
+                        tracer, instance, hit->objectHit.material, material, hit->worldPosition, hit->worldNormal,
+                        environment, distances, seed, local, &extras);
                     target.hdrColor[index] = shade_voxel(material, hit->worldNormal,
-                                                         environment, visibility, indirect, caustic);
+                                                         environment, visibility, indirect, caustic, transmitted);
                     target.depth[index] = normalizedDepth;
                     target.objectId[index] = instance.objectId != 0U
                         ? instance.objectId : instance.object->id();
@@ -454,6 +482,8 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         stats.globalIlluminationHits += local.globalIlluminationHits;
         stats.globalIlluminationSunRays += local.globalIlluminationSunRays;
         stats.radianceCascadeIntervalRays += local.radianceCascadeIntervalRays;
+        stats.subsurfaceMarches += local.subsurfaceMarches;
+        stats.subsurfaceExits += local.subsurfaceExits;
     }
     return stats;
 }
@@ -475,6 +505,7 @@ HybridReferenceRenderStats render_hybrid_reference(
     stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
     PolygonRenderOptions options = polygonOptions;
     options.preserveExistingDepth = true;
+    options.metersPerUnit = metersPerVoxel;
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);
     return stats;
 }

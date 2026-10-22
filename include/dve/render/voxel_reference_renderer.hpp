@@ -1,17 +1,25 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <span>
+#include <utility>
+#include <vector>
 #include <string>
 
 #include "dve/asset_cooker.hpp"
+#include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/transform.hpp"
 #include "dve/voxel_object.hpp"
 
+namespace dve { class PolygonBvh; }
+
 namespace dve::render {
 
 class CausticMap;
+namespace spwi { class VoxelSceneTracer; }
 
 // CPU reference path for validating the shared voxel/polygon camera-depth contract. It traces
 // authoritative VoxelObject occupancy directly and writes the same HDR/depth/ID target used by
@@ -48,6 +56,8 @@ struct VoxelReferenceRenderStats {
     std::uint64_t subsurfaceExits{};
     // Subsurface diffusion: probe rays placing profile samples on the surface.
     std::uint64_t subsurfaceDiffusionProbes{};
+    // Ambient-occlusion rays (AmbientHemisphere ambient only).
+    std::uint64_t ambientOcclusionRays{};
 };
 
 // CPU screen-probe / world-space-interval (SPWI) radiance cascades. See
@@ -123,6 +133,9 @@ public:
     // see subsurface.hpp): samples per Subsurface pixel. 0 = off (the sun term at the point
     // only). Off as well when the environment's subsurface max distance is 0.
     std::uint32_t subsurfaceDiffusionSamples{16};
+    // Polygons that ambient-occlusion rays see, besides the voxels and sunOccluders (the hybrid
+    // reference and the CPU player pass their polygons here). Must outlive render().
+    std::span<const PolygonRenderInstance> occlusionPolygons{};
 
     [[nodiscard]] VoxelReferenceRenderStats render(
         std::span<const VoxelReferenceInstance> instances,
@@ -142,6 +155,23 @@ public:
     std::span<const VoxelReferenceInstance> instances, Float3 point, Float3 normal,
     const RenderEnvironment& environment, float metersPerVoxel = kDefaultMetersPerVoxel,
     std::uint32_t seed = 0U);
+
+// Nearest hits over voxel instances and polygon meshes together, for the ambient-occlusion rays
+// of a hybrid image (voxels and polygons occlude each other). Both spans must outlive it.
+class HybridOcclusionScene {
+public:
+    HybridOcclusionScene(std::span<const VoxelReferenceInstance> voxels, std::span<const PolygonRenderInstance> polygons);
+    ~HybridOcclusionScene();
+    HybridOcclusionScene(const HybridOcclusionScene&) = delete;
+    HybridOcclusionScene& operator=(const HybridOcclusionScene&) = delete;
+    [[nodiscard]] std::optional<float> nearest(Float3 origin, Float3 direction, float maximumDistance) const;
+    // For PolygonRenderOptions::occlusionRay; valid while this scene lives.
+    [[nodiscard]] AmbientOcclusionRay ray() const;
+
+private:
+    std::unique_ptr<spwi::VoxelSceneTracer> tracer_;
+    std::vector<std::pair<std::shared_ptr<const PolygonBvh>, RigidTransform>> polygons_;
+};
 
 // Direct hybrid reference composition. Voxel occupancy is traced into the shared target first;
 // polygons then depth-test and alpha-blend against that target. This validates polygon-in-front,

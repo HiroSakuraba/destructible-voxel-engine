@@ -74,6 +74,8 @@ VoxelLightingDistances voxel_lighting_distances(
     distances.shadowBias = meters_to_voxel_units(environment.shadowBiasMeters, scale);
     distances.subsurfaceMaxDistance =
         meters_to_voxel_units(environment.subsurfaceMaxDistanceMeters, scale);
+    distances.ambientOcclusionMaxDistance =
+        meters_to_voxel_units(environment.ambientOcclusionMaxDistanceMeters, scale);
     return distances;
 }
 
@@ -113,6 +115,33 @@ Float2 concentric_square_to_disk(Float2 square) noexcept {
         theta = 1.5707963267948966F - 0.7853981633974483F * (ox / oy);
     }
     return {radius * std::cos(theta), radius * std::sin(theta)};
+}
+
+std::uint32_t pcg_hash_32(std::uint32_t input) noexcept {
+    const std::uint32_t state = input * 747796405U + 2891336453U;
+    const std::uint32_t word = ((state >> ((state >> 28U) + 4U)) ^ state) * 277803737U;
+    return (word >> 22U) ^ word;
+}
+
+Float2 hash_2d(std::uint32_t seed) noexcept {
+    const std::uint32_t a = pcg_hash_32(seed);
+    const std::uint32_t b = pcg_hash_32(a);
+    return {static_cast<float>(a) / 4294967295.0F, static_cast<float>(b) / 4294967295.0F};
+}
+
+Float3 cosine_weighted_hemisphere_sample(Float3 normal, Float2 uniformRandom) noexcept {
+    const float radius = std::sqrt(uniformRandom.x);
+    const float theta = 6.283185307179586F * uniformRandom.y;
+    const float x = radius * std::cos(theta);
+    const float y = radius * std::sin(theta);
+    const float z = std::sqrt(std::max(0.0F, 1.0F - uniformRandom.x));
+    // Duff et al.'s branchless orthonormal basis (BuildOrthonormalBasis).
+    const float sign = normal.z >= 0.0F ? 1.0F : -1.0F;
+    const float a = -1.0F / (sign + normal.z);
+    const float b = normal.x * normal.y * a;
+    const Float3 tangent{1.0F + sign * normal.x * normal.x * a, sign * b, -sign * normal.x};
+    const Float3 bitangent{b, sign + normal.y * normal.y * a, -normal.y};
+    return normalize(add(add(scale(tangent, x), scale(bitangent, y)), scale(normal, z)));
 }
 
 Float3 one_bounce_diffuse_radiance(

@@ -11,6 +11,7 @@
 #include "dve/material_decal.hpp"
 #include "dve/polygon_asset.hpp"
 #include "dve/render_environment.hpp"
+#include "dve/render/ambient_occlusion.hpp"
 #include "dve/transform.hpp"
 
 namespace dve {
@@ -95,6 +96,11 @@ struct PolygonRenderOptions {
     // Subsurface diffusion samples per Subsurface fragment (front-lit light spreading under the
     // surface with Burley's profile). 0 = off. Off as well when the subsurface max distance is 0.
     std::uint32_t subsurfaceDiffusionSamples{16};
+    // Ambient occlusion of the polygon ambient (RenderEnvironment::ambientOcclusionSamples, same
+    // rays and weighting as the voxel reference and the GPU passes). Rays go to occlusionRay
+    // when set (world units; the hybrid reference and the CPU player trace voxels and polygons
+    // together), otherwise to the polygons being rendered.
+    AmbientOcclusionRay occlusionRay{};
 };
 
 struct PolygonRenderStats {
@@ -130,6 +136,7 @@ struct PolygonRenderStats {
     std::uint64_t subsurfaceMarches{};
     std::uint64_t subsurfaceExits{};
     std::uint64_t subsurfaceDiffusionProbes{};
+    std::uint64_t ambientOcclusionRays{};
 };
 
 struct PolygonTextureMip {

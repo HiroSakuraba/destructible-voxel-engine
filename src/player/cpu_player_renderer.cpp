@@ -147,6 +147,7 @@ public:
                 voxelRenderer.sunOccluders = polygons_;
             }
         }
+        voxelRenderer.occlusionPolygons = polygons_;   // AO rays see voxels and polygons alike
         const auto voxelStats = voxelRenderer.render(voxels_, camera, environment, target_, true);
         stats_.tracedRays = voxelStats.tracedRays;
         stats_.hitRays = voxelStats.hitRays;
@@ -157,6 +158,11 @@ public:
             polygonOptions.lodBias = view.polygonLodBias;
             polygonOptions.cache = &polygonRenderCache_;
             polygonOptions.metersPerUnit = voxelSize;
+            std::optional<render::HybridOcclusionScene> occlusion;
+            if (environment.ambientOcclusionSamples > 0U && environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
+                occlusion.emplace(voxels_, polygons_);
+                polygonOptions.occlusionRay = occlusion->ray();
+            }
             stats_.polygons = render::ReferencePolygonRenderer{}.render(polygons_, camera, environment, target_, polygonOptions);
         } else {
             polygonRenderCache_.clear();

@@ -48,6 +48,10 @@ bool RenderEnvironment::validate(std::string* error) const noexcept {
         return fail("globalIlluminationMaxDistanceMeters must be finite and positive");
     if (globalIlluminationSamples == 0U || globalIlluminationSamples > 16U)
         return fail("globalIlluminationSamples must be in [1,16]");
+    if (ambientOcclusionSamples > kMaximumAmbientOcclusionSamples)
+        return fail("ambientOcclusionSamples must be in [0,64]");
+    if (!std::isfinite(ambientOcclusionMaxDistanceMeters) || ambientOcclusionMaxDistanceMeters < 0.0F)
+        return fail("ambientOcclusionMaxDistanceMeters must be finite and non-negative");
     if (!std::isfinite(shadowStrength) || shadowStrength < 0.0F || shadowStrength > 1.0F)
         return fail("shadowStrength must be finite and in [0,1]");
     if (!std::isfinite(shadowSoftnessRadians) || shadowSoftnessRadians < 0.0F || shadowSoftnessRadians > 0.25F)

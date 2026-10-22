@@ -106,7 +106,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
         indirect = ShadeAmbient(ambientNormal, gSkyColor, gGroundColor, ao) *
                    baseColor * (1.0F - material.metallic) * gGlobalIlluminationIntensity;
     } else if (gGlobalIlluminationMode == kGlobalIlluminationVoxelOneBounce) {
-        indirect = gIndirectDiffuse[pixelIndex].rgb * ao * baseColor * (1.0F - material.metallic);
+        // Traced GI already sees occluders through its own rays: AO would darken twice.
+        indirect = gIndirectDiffuse[pixelIndex].rgb * baseColor * (1.0F - material.metallic);
     }
     if (gEnvironmentLightingEnabled != 0u) {
         indirect += EvaluateImageBasedLighting(

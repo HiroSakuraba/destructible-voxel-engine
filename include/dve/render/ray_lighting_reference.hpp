@@ -47,6 +47,7 @@ struct VoxelLightingDistances {
     float contactShadowDistance{};
     float shadowBias{};
     float subsurfaceMaxDistance{};
+    float ambientOcclusionMaxDistance{};
 };
 [[nodiscard]] VoxelLightingDistances voxel_lighting_distances(
     const RenderEnvironment& environment, float metersPerVoxel = kDefaultMetersPerVoxel) noexcept;
@@ -62,6 +63,14 @@ struct VoxelLightingDistances {
 // Shirley-Chiu concentric map, unit square -> unit disc (mirror of ConcentricSquareToDisk in
 // random_sampling.hlsli): equal-area and stratification-preserving. Used for sun-disc samples.
 [[nodiscard]] Float2 concentric_square_to_disk(Float2 square) noexcept;
+// CPU mirrors of random_sampling.hlsli: PcgHash, Hash2, CosineWeightedHemisphereSample (with
+// BuildOrthonormalBasis). Bit-for-bit the same arithmetic in the same order.
+[[nodiscard]] std::uint32_t pcg_hash_32(std::uint32_t input) noexcept;
+[[nodiscard]] Float2 hash_2d(std::uint32_t seed) noexcept;
+[[nodiscard]] Float3 cosine_weighted_hemisphere_sample(Float3 normal, Float2 uniformRandom) noexcept;
+
+// Ambient occlusion: see dve/render/ambient_occlusion.hpp.
+
 [[nodiscard]] Float3 one_bounce_diffuse_radiance(
     Float3 baseColor, float metallic, Float3 emissive, Float3 ambientRadiance,
     Float3 sunColor, float sunIntensity, Float3 bounceNormal,

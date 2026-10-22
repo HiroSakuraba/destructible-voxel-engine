@@ -15,6 +15,7 @@ namespace dve {
 // voxelSizeMeters = 0.1 m); callers with a different uniform voxel size pass their own
 // (e.g. RuntimeScene::uniform_voxel_size_meters()).
 inline constexpr float kDefaultMetersPerVoxel = 0.10F;
+inline constexpr std::uint32_t kMaximumAmbientOcclusionSamples = 64U;
 
 // Returns metersPerVoxel when finite and positive, otherwise kDefaultMetersPerVoxel.
 [[nodiscard]] constexpr float resolve_meters_per_voxel(float metersPerVoxel) noexcept {
@@ -84,6 +85,16 @@ struct RenderEnvironment {
     float shadowMaxDistanceMeters{2500.0F};
     float contactShadowDistanceMeters{2.0F};
     float shadowBiasMeters{0.015F};
+
+    // Ambient occlusion: how much of the sky a surface point sees, from cosine-weighted rays out
+    // to ambientOcclusionMaxDistanceMeters. A ray that hits at distance d occludes
+    // (1 - d / max)^2: near geometry counts fully and farther geometry fades out, so open ground
+    // beside a wall is not darkened by a cliff a mile away. It scales the ambient light wherever
+    // nothing traced already accounts for occlusion: the AmbientHemisphere ambient on voxels and
+    // the polygon ambient (traced GI modes see occluders through their own rays). 0 samples =
+    // off. The GPU passes (generate_ao_rays, resolve_ao) use the same rays and weighting.
+    std::uint32_t ambientOcclusionSamples{8};
+    float ambientOcclusionMaxDistanceMeters{1.0F};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
 };

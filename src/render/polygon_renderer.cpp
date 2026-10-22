@@ -1,6 +1,7 @@
 #include "dve/render/polygon_renderer.hpp"
 
 #include "dve/polygon_bvh.hpp"
+#include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/subsurface.hpp"
 
 #include <algorithm>
@@ -266,7 +267,7 @@ MaterialSurfaceSample sample_layer_surface(
 
 Float4 shade(const VoxelMaterialDefinition& material,Float4 base,Float3 normal,
              const RenderEnvironment& environment,bool frontFacing,Float3 transmitted={},
-             float diffusedSun=-1.0F) noexcept {
+             float diffusedSun=-1.0F,float ambientOcclusion=1.0F) noexcept {
     normal=normalize(normal);
     if(material.shadingModel==MaterialShadingModel::TwoSidedFoliage&&!frontFacing)normal=multiply(normal,-1.0F);
     const Float3 light=normalize(environment.sunDirection);
@@ -281,7 +282,7 @@ Float4 shade(const VoxelMaterialDefinition& material,Float4 base,Float3 normal,
         ambient={environment.skyColor.x+environment.groundColor.x,
                  environment.skyColor.y+environment.groundColor.y,
                  environment.skyColor.z+environment.groundColor.z};
-        ambient=multiply(ambient,0.5F*environment.globalIlluminationIntensity);
+        ambient=multiply(ambient,0.5F*environment.globalIlluminationIntensity*ambientOcclusion);
     }
     Float3 rgb={base.x,base.y,base.z};
     if(material.shadingModel==MaterialShadingModel::Unlit)return {rgb.x,rgb.y,rgb.z,base.w};
@@ -481,6 +482,20 @@ float polygon_diffused_sun(const DeferredTriangle& tri,const VoxelMaterialDefini
         sum+=std::max(0.0F,dot(qn,sun));
     }
     return valid>0U?sum/static_cast<float>(valid):0.0F;
+}
+
+bool polygon_ambient_occlusion_active(const RenderEnvironment& environment) noexcept {
+    return environment.globalIlluminationMode!=GlobalIlluminationMode::Off&&environment.ambientOcclusionSamples>0U&&
+           environment.ambientOcclusionMaxDistanceMeters>0.0F;
+}
+
+// The ambient's occlusion at a fragment (reference_ambient_occlusion: the GPU passes' rays).
+float polygon_ambient_occlusion(Float3 worldPosition,Float3 normal,const RenderEnvironment& environment,
+                                const PolygonRenderOptions& options,std::size_t pixel,PolygonRenderStats& stats){
+    if(!options.occlusionRay||!polygon_ambient_occlusion_active(environment))return 1.0F;
+    const float metersPerUnit=options.metersPerUnit>0.0F&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
+    return reference_ambient_occlusion(worldPosition,normalize(normal),static_cast<std::uint32_t>(pixel),0U,environment,metersPerUnit,
+        [&](Float3 origin,Float3 direction,float maximum){++stats.ambientOcclusionRays;return options.occlusionRay(origin,direction,maximum);});
 }
 
 void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,const RenderEnvironment& environment,
@@ -710,7 +725,8 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             : shade(effective,base,normal,environment,tri.frontFacing,
                     polygon_subsurface_light(tri,effective,worldPosition,normal,environment,options,stats),
                     tri.subsurfaceBvh&&material_has_subsurface(effective)&&options.subsurfaceDiffusionSamples>0U
-                        ? polygon_diffused_sun(tri,effective,worldPosition,normal,environment,options,index,stats) : -1.0F);
+                        ? polygon_diffused_sun(tri,effective,worldPosition,normal,environment,options,index,stats) : -1.0F,
+                    polygon_ambient_occlusion(worldPosition,normal,environment,options,index,stats));
         if(!debugView&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
             const float alpha=std::clamp(shaded.w,0.0F,1.0F);const Float4 old=target.hdrColor[index];
             target.hdrColor[index]={shaded.x*alpha+old.x*(1-alpha),shaded.y*alpha+old.y*(1-alpha),shaded.z*alpha+old.z*(1-alpha),1};
@@ -892,6 +908,31 @@ PolygonRenderStats ReferencePolygonRenderer::render(
     const float bias=std::isfinite(options.lodBias) ? std::clamp(options.lodBias,-4.0F,4.0F) : 0.0F;
     const float hysteresis=std::isfinite(options.lodHysteresis) ? std::clamp(options.lodHysteresis,0.0F,0.49F) : 0.0F;
     std::vector<DeferredTriangle> transparent;
+    // Ambient occlusion: without a caller's tracer, AO rays see the polygons being rendered.
+    PolygonRenderOptions frameOptions = options;
+    std::vector<std::pair<std::shared_ptr<const PolygonBvh>, RigidTransform>> aoScene;
+    if (!options.occlusionRay && polygon_ambient_occlusion_active(environment) &&
+        options.materialDebugView == PolygonMaterialDebugView::Lit) {
+        std::unordered_map<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>> bvhs;
+        for (const PolygonRenderInstance& instance : instances) {
+            if (!instance.visible || !instance.asset || !prepare(instance.asset).valid) continue;
+            auto& bvh = bvhs[instance.asset];
+            if (!bvh) {
+                auto fresh = std::make_shared<PolygonBvh>();
+                if (!fresh->build(*instance.asset)) continue;
+                bvh = std::move(fresh);
+            }
+            aoScene.emplace_back(bvh, instance.transform);
+        }
+        frameOptions.occlusionRay = [&aoScene](Float3 origin, Float3 direction, float maximum) -> std::optional<float> {
+            std::optional<float> best;
+            for (const auto& [bvh, pose] : aoScene)
+                if (const auto hit = bvh->raycast(inverse_transform_point(pose, origin), inverse_transform_vector(pose, direction),
+                                                  best ? *best : maximum))
+                    best = hit->distance;
+            return best;
+        };
+    }
     // BVHs for meshes with a Subsurface material, built once per asset per render.
     std::unordered_map<const CookedPolygonAsset*, std::unique_ptr<PolygonBvh>> subsurfaceBvhs;
     const auto subsurface_bvh = [&](const CookedPolygonAsset& asset) -> const PolygonBvh* {
@@ -994,7 +1035,7 @@ PolygonRenderStats ReferencePolygonRenderer::render(
                     material.baseColor.w < 0.999F) {
                     transparent.push_back(std::move(triangle));
                 } else {
-                    raster_triangle(triangle, target, environment, options, false, stats);
+                    raster_triangle(triangle, target, environment, frameOptions, false, stats);
                 }
             }
         }
@@ -1007,7 +1048,7 @@ PolygonRenderStats ReferencePolygonRenderer::render(
                   });
     }
     for (const DeferredTriangle& triangle : transparent) {
-        raster_triangle(triangle, target, environment, options, true, stats);
+        raster_triangle(triangle, target, environment, frameOptions, true, stats);
     }
     for(auto it=cache.lods_.begin();it!=cache.lods_.end();){
         it=it->second.lastUse==cache.frame_ ? std::next(it) : cache.lods_.erase(it);

@@ -14,6 +14,7 @@
 #include "dve/query.hpp"
 #include "dve/render/caustic_map.hpp"
 #include "dve/render/radiance_cascades_spwi.hpp"
+#include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/ray_lighting_reference.hpp"
 #include "dve/render/subsurface.hpp"
 
@@ -162,12 +163,24 @@ struct SunExtras {
         std::shared_ptr<const std::vector<PolygonTextureMipChain>> maskedMips;
     };
     std::vector<Occluder> occluders;
+    // Polygons that ambient-occlusion rays see (sunOccluders and occlusionPolygons).
+    std::vector<Occluder> aoOccluders;
     const CausticMap* caustics{};
     [[nodiscard]] bool polygon_occluded(Float3 origin, Float3 direction, float maximumDistance) const {
-        for (const Occluder& o : occluders) {
+        return nearest(occluders, origin, direction, maximumDistance, true).has_value();
+    }
+    [[nodiscard]] std::optional<float> ao_nearest(Float3 origin, Float3 direction, float maximumDistance) const {
+        return nearest(aoOccluders, origin, direction, maximumDistance, false);
+    }
+    // Nearest polygon hit (world distance along the unit direction); `any` stops at the first.
+    [[nodiscard]] static std::optional<float> nearest(const std::vector<Occluder>& list, Float3 origin, Float3 direction,
+                                                      float maximumDistance, bool any) {
+        std::optional<float> best;
+        for (const Occluder& o : list) {
             Float3 localOrigin = inverse_transform_point(o.transform, origin);
             const Float3 localDirection = normalize(inverse_transform_vector(o.transform, direction));
-            float remaining = maximumDistance;
+            float remaining = best ? *best : maximumDistance;
+            float travelled = 0.0F;
             // Masked surfaces block only where they pass the alpha test, as the rasterizer draws
             // them; through their holes the ray goes on.
             for (int crossing = 0; crossing < 64; ++crossing) {
@@ -183,14 +196,17 @@ struct SunExtras {
                         const float step = hit->distance + 1.0e-4F;
                         localOrigin = add(localOrigin, multiply(localDirection, step));
                         remaining -= step;
+                        travelled += step;
                         if (!(remaining > 0.0F)) break;
                         continue;
                     }
                 }
-                return true;
+                best = travelled + hit->distance;
+                if (any) return best;
+                break;
             }
         }
-        return false;
+        return best;
     }
 };
 
@@ -317,12 +333,41 @@ float diffused_sun_term(const spwi::VoxelSceneTracer& tracer, std::size_t instan
     return valid > 0U ? sum / static_cast<float>(valid) : 0.0F;
 }
 
+// Ambient occlusion is applied where nothing traced already sees occluders: the
+// AmbientHemisphere ambient (traced one-bounce GI and radiance cascades see them through their
+// own rays).
+bool ambient_occlusion_active(const RenderEnvironment& environment, const VoxelLightingDistances& distances) noexcept {
+    return environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere &&
+           environment.ambientOcclusionSamples > 0U && distances.ambientOcclusionMaxDistance > 0.0F;
+}
+
+// reference_ambient_occlusion (ray_lighting_reference.hpp, the GPU passes' mirror) against the
+// voxels and the AO polygons.
+float voxel_ambient_occlusion(const spwi::VoxelSceneTracer& tracer, const SunExtras* extras, Float3 point, Float3 normal,
+                              std::uint32_t pixelIndex, const RenderEnvironment& environment,
+                              const VoxelLightingDistances& distances, VoxelReferenceRenderStats& stats) {
+    return reference_ambient_occlusion(point, normal, pixelIndex, 0U, environment, distances.metersPerVoxel,
+        [&](Float3 origin, Float3 direction, float maximum) -> std::optional<float> {
+            ++stats.ambientOcclusionRays;
+            std::optional<float> best;
+            if (const auto hit = tracer.trace(origin, direction, maximum)) best = hit->objectHit.distance;
+            if (extras)
+                if (const auto polygon = extras->ao_nearest(origin, direction, best ? *best : maximum))
+                    if (!best || *polygon < *best) best = polygon;
+            return best;
+        });
+}
+
 Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                            Float3 normal, const RenderEnvironment& environment,
-                           const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
+                           const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats,
+                           std::uint32_t pixelIndex = 0U, const SunExtras* extras = nullptr) {
     if (environment.globalIlluminationMode == GlobalIlluminationMode::Off) return {};
-    if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere)
-        return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity);
+    if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere) {
+        const float ao = ambient_occlusion_active(environment, distances)
+            ? voxel_ambient_occlusion(tracer, extras, point, normal, pixelIndex, environment, distances, stats) : 1.0F;
+        return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity * ao);
+    }
 
     const std::uint32_t samples = std::clamp(environment.globalIlluminationSamples, 1U, 16U);
     const Float3 origin = add(point, multiply(normal, distances.shadowBias));
@@ -500,13 +545,13 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     {
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>>> built;
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const std::vector<PolygonTextureMipChain>>>> maskedMips;
-        for (const PolygonRenderInstance& polygon : sunOccluders) {
-            if (!polygon.visible || !polygon.asset) continue;
+        const auto make_occluder = [&](const PolygonRenderInstance& polygon) -> std::optional<SunExtras::Occluder> {
+            if (!polygon.visible || !polygon.asset) return std::nullopt;
             std::shared_ptr<const PolygonBvh> bvh;
             for (const auto& [asset, existing] : built) if (asset == polygon.asset) bvh = existing;
             if (!bvh) {
                 auto fresh = std::make_shared<PolygonBvh>();
-                if (!fresh->build(*polygon.asset)) continue;
+                if (!fresh->build(*polygon.asset)) return std::nullopt;
                 bvh = fresh;
                 built.emplace_back(polygon.asset, bvh);
             }
@@ -521,8 +566,16 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     maskedMips.emplace_back(polygon.asset, chains);
                 }
             }
-            extras.occluders.push_back(std::move(occluder));
-        }
+            return occluder;
+        };
+        for (const PolygonRenderInstance& polygon : sunOccluders)
+            if (auto occluder = make_occluder(polygon)) {
+                extras.occluders.push_back(*occluder);
+                extras.aoOccluders.push_back(std::move(*occluder));
+            }
+        if (ambient_occlusion_active(environment, distances))
+            for (const PolygonRenderInstance& polygon : occlusionPolygons)
+                if (auto occluder = make_occluder(polygon)) extras.aoOccluders.push_back(std::move(*occluder));
     }
     if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades)
         return render_radiance_cascades(radianceCascades, tracer, instances, camera, environment,
@@ -569,7 +622,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                         ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal, instance.objectId) : Float3{};
                     const Float3 indirect = global_illumination(tracer, hit->worldPosition,
                                                                  hit->worldNormal, environment, distances,
-                                                                 seed, local);
+                                                                 seed, local, static_cast<std::uint32_t>(index), &extras);
                     const Float3 transmitted = subsurface_light(
                         tracer, instance, hit->objectHit.material, material, hit->worldPosition, hit->worldNormal,
                         environment, distances, seed, local, &extras);
@@ -615,6 +668,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         stats.subsurfaceMarches += local.subsurfaceMarches;
         stats.subsurfaceExits += local.subsurfaceExits;
         stats.subsurfaceDiffusionProbes += local.subsurfaceDiffusionProbes;
+        stats.ambientOcclusionRays += local.ambientOcclusionRays;
     }
     return stats;
 }
@@ -625,6 +679,40 @@ float reference_sun_visibility(std::span<const VoxelReferenceInstance> instances
     const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
     VoxelReferenceRenderStats stats;
     return shadow_visibility(tracer, point, normal, environment, distances, seed, stats);
+}
+
+HybridOcclusionScene::HybridOcclusionScene(std::span<const VoxelReferenceInstance> voxels,
+                                           std::span<const PolygonRenderInstance> polygons)
+    : tracer_(std::make_unique<spwi::VoxelSceneTracer>(voxels)) {
+    std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>>> built;
+    for (const PolygonRenderInstance& polygon : polygons) {
+        if (!polygon.visible || !polygon.asset) continue;
+        std::shared_ptr<const PolygonBvh> bvh;
+        for (const auto& [asset, existing] : built) if (asset == polygon.asset) bvh = existing;
+        if (!bvh) {
+            auto fresh = std::make_shared<PolygonBvh>();
+            if (!fresh->build(*polygon.asset)) continue;
+            bvh = fresh;
+            built.emplace_back(polygon.asset, bvh);
+        }
+        polygons_.emplace_back(bvh, polygon.transform);
+    }
+}
+
+HybridOcclusionScene::~HybridOcclusionScene() = default;
+
+std::optional<float> HybridOcclusionScene::nearest(Float3 origin, Float3 direction, float maximumDistance) const {
+    std::optional<float> best;
+    if (const auto hit = tracer_->trace(origin, direction, maximumDistance)) best = hit->objectHit.distance;
+    for (const auto& [bvh, pose] : polygons_)
+        if (const auto hit = bvh->raycast(inverse_transform_point(pose, origin), inverse_transform_vector(pose, direction),
+                                          best ? *best : maximumDistance))
+            if (!best || hit->distance < *best) best = hit->distance;
+    return best;
+}
+
+AmbientOcclusionRay HybridOcclusionScene::ray() const {
+    return [this](Float3 origin, Float3 direction, float maximumDistance) { return nearest(origin, direction, maximumDistance); };
 }
 
 HybridReferenceRenderStats render_hybrid_reference(
@@ -641,10 +729,18 @@ HybridReferenceRenderStats render_hybrid_reference(
     voxelRenderer.metersPerVoxel = metersPerVoxel;
     voxelRenderer.threadCount = voxelThreadCount;
     voxelRenderer.radianceCascades.threadCount = voxelThreadCount;
+    voxelRenderer.occlusionPolygons = polygons;   // voxels' AO rays see the polygons too
     stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
     PolygonRenderOptions options = polygonOptions;
     options.preserveExistingDepth = true;
     options.metersPerUnit = metersPerVoxel;
+    // Polygons' AO rays see the voxels too.
+    std::optional<HybridOcclusionScene> occlusion;
+    if (!options.occlusionRay && environment.ambientOcclusionSamples > 0U &&
+        environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
+        occlusion.emplace(voxels, polygons);
+        options.occlusionRay = occlusion->ray();
+    }
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);
     return stats;
 }

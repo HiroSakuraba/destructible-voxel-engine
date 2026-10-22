@@ -1399,6 +1399,8 @@ int l_set_environment_scalar(lua_State* L) {
     else if (name == "ShadowMaxDistanceMeters") environment.shadowMaxDistanceMeters = value;
     else if (name == "ContactShadowDistanceMeters") environment.contactShadowDistanceMeters = value;
     else if (name == "ShadowBiasMeters") environment.shadowBiasMeters = value;
+    else if (name == "AmbientOcclusionSamples") environment.ambientOcclusionSamples = static_cast<std::uint32_t>(std::max(0.0F, std::round(value)));
+    else if (name == "AmbientOcclusionMaxDistanceMeters") environment.ambientOcclusionMaxDistanceMeters = value;
     else known = false;
     if (!known) {
         lua_pushboolean(L, 0);
@@ -1523,6 +1525,8 @@ int l_get_environment(lua_State* L) {
     lua_pushnumber(L, environment.shadowStrength); lua_setfield(L, -2, "shadow_strength");
     lua_pushnumber(L, environment.shadowSoftnessRadians); lua_setfield(L, -2, "shadow_softness_radians");
     lua_pushinteger(L, environment.shadowSamples); lua_setfield(L, -2, "shadow_samples");
+    lua_pushinteger(L, environment.ambientOcclusionSamples); lua_setfield(L, -2, "ambient_occlusion_samples");
+    lua_pushnumber(L, environment.ambientOcclusionMaxDistanceMeters); lua_setfield(L, -2, "ambient_occlusion_max_distance_meters");
     lua_pushnumber(L, environment.shadowMaxDistanceMeters); lua_setfield(L, -2, "shadow_max_distance_meters");
     lua_pushnumber(L, environment.contactShadowDistanceMeters); lua_setfield(L, -2, "contact_shadow_distance_meters");
     lua_pushnumber(L, environment.shadowBiasMeters); lua_setfield(L, -2, "shadow_bias_meters");
@@ -2009,7 +2013,9 @@ void write_environment(ScriptStateWriter& w, const RenderEnvironment& e) {
         e.groundColor.y, e.groundColor.z, e.globalTint.x, e.globalTint.y, e.globalTint.z, e.bloomThreshold,
         e.bloomIntensity, e.bloomRadius, e.globalIlluminationIntensity, e.globalIlluminationMaxDistanceMeters,
         e.shadowStrength, e.shadowSoftnessRadians, e.shadowMaxDistanceMeters, e.contactShadowDistanceMeters,
-        e.shadowBiasMeters, 0.0F, 0.0F};
+        e.shadowBiasMeters, e.ambientOcclusionMaxDistanceMeters,
+        // Samples + 1, so the zero that older states wrote here reads as "not stored".
+        std::bit_cast<float>(e.ambientOcclusionSamples + 1U)};
     for (const float value : floats) w.u32(std::bit_cast<std::uint32_t>(value));
     w.u32(static_cast<std::uint32_t>(e.tonemapOperator));
     w.u32(static_cast<std::uint32_t>(e.globalIlluminationMode));
@@ -2036,6 +2042,13 @@ bool read_environment(ScriptStateReader& r, RenderEnvironment& e) {
     e.globalIlluminationIntensity = f[i++]; e.globalIlluminationMaxDistanceMeters = f[i++];
     e.shadowStrength = f[i++]; e.shadowSoftnessRadians = f[i++]; e.shadowMaxDistanceMeters = f[i++];
     e.contactShadowDistanceMeters = f[i++]; e.shadowBiasMeters = f[i++];
+    // Older states wrote zeros in these two slots (the samples slot is stored + 1, so never
+    // zero once written): keep the defaults then.
+    if (raw[i + 1U] != 0U) {
+        e.ambientOcclusionMaxDistanceMeters = f[i];
+        e.ambientOcclusionSamples = raw[i + 1U] - 1U;
+    }
+    i += 2U;
     std::uint32_t tonemap{}, gi{}, shadow{};
     if (!(r.u32(tonemap) && r.u32(gi) && r.u32(e.globalIlluminationSamples) && r.u32(shadow) && r.u32(e.shadowSamples)))
         return false;

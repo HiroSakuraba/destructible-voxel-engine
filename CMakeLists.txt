@@ -715,6 +715,8 @@ if(DVE_BUILD_RHI)
         src/render/multi_surface_presenter.cpp
         src/render/voxel_lighting_plan.cpp
         src/render/cascaded_shadow_map.cpp
+        src/render/optical_scene.cpp
+        src/render/caustic_photons.cpp
         src/render/cascaded_shadow_atlas.cpp
         src/render/environment_lighting_gpu.cpp
         src/render/ray_lighting_reference.cpp
@@ -3149,6 +3151,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_cascaded_shadow_map_tests tests/test_cascaded_shadow_map.cpp)
     target_link_libraries(dve_cascaded_shadow_map_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_cascaded_shadow_map_tests COMMAND dve_cascaded_shadow_map_tests)
+    add_executable(dve_caustic_photons_tests tests/test_caustic_photons.cpp)
+    target_link_libraries(dve_caustic_photons_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_caustic_photons_tests COMMAND dve_caustic_photons_tests)
 
     add_executable(dve_production_environment_lighting_tests tests/test_production_environment_lighting.cpp)
     target_link_libraries(dve_production_environment_lighting_tests PRIVATE dve::render_bridge)

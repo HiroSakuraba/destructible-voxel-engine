@@ -11,6 +11,8 @@
 
 namespace dve::render {
 
+class CausticMap;
+
 // CPU reference path for validating the shared voxel/polygon camera-depth contract. It traces
 // authoritative VoxelObject occupancy directly and writes the same HDR/depth/ID target used by
 // ReferencePolygonRenderer. This is validation and editor-preview code, not the production GPU
@@ -105,6 +107,12 @@ public:
     // Worker threads for the primary/shadow/GI pass (rows are split across threads).
     // 0 = std::thread::hardware_concurrency() (capped at 16). Output is identical for any count.
     std::uint32_t threadCount{0};
+    // Caustics (optional, see caustic_map.hpp): sunlight focused by glass and water, added to the
+    // sun term of every voxel it reaches. Must outlive render().
+    const CausticMap* caustics{};
+    // Polygons that block the sun on voxels (otherwise only voxels cast shadows here). Glass and
+    // water block it too: the light they let through arrives as caustics.
+    std::span<const PolygonRenderInstance> sunOccluders{};
 
     [[nodiscard]] VoxelReferenceRenderStats render(
         std::span<const VoxelReferenceInstance> instances,

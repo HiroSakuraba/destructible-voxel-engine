@@ -727,6 +727,7 @@ if(DVE_BUILD_RHI)
         src/render/radiance_cascades_spwi.cpp
         src/render/optical_scene.cpp
         src/render/caustic_photons.cpp
+        src/render/caustic_map.cpp
         src/render/radiance_cascade_gpu_probes.cpp
         src/render/simulation_gpu.cpp)
     if(DVE_ENABLE_CPU_HAIR)
@@ -3149,6 +3150,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_caustic_photons_tests tests/test_caustic_photons.cpp)
     target_link_libraries(dve_caustic_photons_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_caustic_photons_tests COMMAND dve_caustic_photons_tests)
+    add_executable(dve_caustic_map_tests tests/test_caustic_map.cpp)
+    target_link_libraries(dve_caustic_map_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_caustic_map_tests COMMAND dve_caustic_map_tests)
     # The tests use two worker threads; reserve them so ctest -jN leaves cores for the
     # timing-sensitive audio acceptance tests.
     set_tests_properties(dve_rc_spwi_tests PROPERTIES PROCESSORS 2)

@@ -1,12 +1,14 @@
 #include "dve/player/player_renderer.hpp"
 
 #include "dve/polygon_asset.hpp"
+#include "dve/render/caustic_map.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -125,6 +127,26 @@ public:
         voxelRenderer.metersPerVoxel = voxelSize;
         voxelRenderer.threadCount = options_.threadCount;
         voxelRenderer.radianceCascades.threadCount = options_.threadCount;
+        // Caustics: only at Reference quality and only when something lets light through.
+        std::optional<render::CausticMap> caustics;
+        std::vector<render::OpticalPolygonInstance> optical;
+        if (options_.quality == CpuRenderQuality::Reference && options_.causticResolution > 0U) {
+            bool refractive = false;
+            for (const auto& v : voxels_)
+                for (const auto& m : v.materials) refractive = refractive || material_is_refractive(m);
+            for (const auto& p : polygons_)
+                if (p.asset) for (const auto& m : p.asset->materials) refractive = refractive || material_is_refractive(m);
+            if (refractive) {
+                for (const auto& p : polygons_) optical.push_back({p.objectId, p.asset, p.transform, p.visible});
+                const render::OpticalScene opticalScene(voxels_, optical, voxelSize);
+                render::CausticMapSettings causticSettings;
+                causticSettings.resolution = options_.causticResolution;
+                caustics = render::build_caustic_map(
+                    opticalScene, {normalize(environment.sunDirection), environment.shadowSoftnessRadians}, causticSettings);
+                voxelRenderer.caustics = &*caustics;
+                voxelRenderer.sunOccluders = polygons_;
+            }
+        }
         const auto voxelStats = voxelRenderer.render(voxels_, camera, environment, target_, true);
         stats_.tracedRays = voxelStats.tracedRays;
         stats_.hitRays = voxelStats.hitRays;

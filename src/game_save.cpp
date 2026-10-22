@@ -899,6 +899,10 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
 
     SourceCache sources(sources_, limits_);
     Writer meta(limits_), objects(limits_), voxels(limits_), physics(limits_);
+    std::set<GameObjectId> inlineMaterials;   // objects whose material table is written inline
+    // A from-source table with optics needs its v1.4 DVOX source, which pre-optics builds cannot
+    // read: such a save stays at version 5 even with no optics section.
+    bool sourceOptics = false;
 
     meta.string(kVersionString);
     meta.string(data.metadata.gameName);
@@ -990,8 +994,11 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
             decoded && decoded->voxel ? &decoded->voxel->materials : nullptr;
         if (object.kind == GameGeometryKind::Voxel && sourceMaterials &&
             material_bytes(*sourceMaterials) == material_bytes(object.materials)) {
-            objects.u8(kMaterialsFromSource);
+            objects.u8(kMaterialsFromSource);   // optics included: restored from the source
+            sourceOptics = sourceOptics || std::any_of(object.materials.begin(), object.materials.end(),
+                                                       [](const VoxelMaterialDefinition& m) { return material_has_optics(m); });
         } else {
+            inlineMaterials.insert(object.id);
             objects.u8(kMaterialsInline);
             objects.count(object.materials.size(), limits_.maximumMaterialsPerObject, "material");
             for (const auto& material : object.materials) write_material(objects, material);
@@ -1087,20 +1094,25 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
     if (axes.failed()) return fail(error,axes.failure()),std::nullopt;
     document.sections.emplace(std::string(kAxisSection),std::move(axes.bytes()));
     {
-        // Inline materials with optics (from-source tables carry theirs in the source asset).
+        // Inline materials with optics. From-source tables carry theirs in the source asset, so
+        // they get no entries (many copies of one source would otherwise repeat them all).
         std::vector<std::tuple<GameObjectId, std::uint32_t, const VoxelMaterialDefinition*>> optics;
-        for (const auto& object : world.objects)
+        for (const auto& object : world.objects) {
+            if (!inlineMaterials.contains(object.id)) continue;
             for (std::size_t i = 0; i < object.materials.size(); ++i)
                 if (material_has_optics(object.materials[i])) {
                     if (!material_optics_valid(object.materials[i])) return fail(error, "invalid material optics"), std::nullopt;
                     optics.emplace_back(object.id, static_cast<std::uint32_t>(i), &object.materials[i]);
                 }
+        }
         if (!optics.empty()) {
             Writer w(limits_);
             w.count(optics.size(), limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material optics");
             for (const auto& [id, index, material] : optics) { w.u64(id); w.u32(index); write_material_optics(w, *material); }
             if (w.failed()) return fail(error, w.failure()), std::nullopt;
             document.sections.emplace(std::string(kMaterialOpticsSection), std::move(w.bytes()));
+        } else if (!sourceOptics) {
+            document.schemaVersion = kGameSaveSchemaVersionWithoutOptics;   // readable by older builds
         }
     }
     {
@@ -1214,7 +1226,10 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
 }
 
 std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument& document, std::string* error) const {
-    if (document.schemaVersion != kGameSaveSchemaVersion)
+    // Version 4 is version 5 without the optional optics section (see to_document).
+    const bool withoutOptics = document.schemaVersion == kGameSaveSchemaVersionWithoutOptics &&
+                               !document.sections.contains(kMaterialOpticsSection);
+    if (document.schemaVersion != kGameSaveSchemaVersion && !withoutOptics)
         return fail(error, "save document is schema version " + std::to_string(document.schemaVersion) +
                                ", expected " + std::to_string(kGameSaveSchemaVersion)), std::nullopt;
     const auto section = [&](std::string_view name) -> const std::vector<std::byte>* {
@@ -1673,7 +1688,7 @@ bool GameSaveCodec::write_file(
     auto document = to_document(data, &local, error);
     if (!document) return false;
     std::uint64_t written = 0U;
-    if (!store_.write_atomic(path, std::move(*document), error, &written)) return false;
+    if (!store_.write_atomic(path, std::move(*document), error, &written, true)) return false;
     local.fileBytes = written;
     if (stats) *stats = std::move(local);
     return true;

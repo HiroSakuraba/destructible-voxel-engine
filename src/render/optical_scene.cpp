@@ -11,6 +11,10 @@
 
 namespace dve::render {
 namespace {
+// The id the reference renderer gives an instance: objectId, else the object's own id.
+std::uint64_t effective_object_id(const VoxelReferenceInstance& v) noexcept {
+    return v.objectId != 0U ? v.objectId : (v.object ? v.object->id() : 0U);
+}
 Float3 scale3(Float3 v, float s) noexcept { return {v.x * s, v.y * s, v.z * s}; }
 Float3 add3(Float3 a, Float3 b) noexcept { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 Float3 sub3(Float3 a, Float3 b) noexcept { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -100,7 +104,7 @@ std::optional<OpticalHit> OpticalScene::trace(Float3 origin, Float3 direction, f
         h.geometricNormal = unit3(hit->worldNormal);
         h.shadingNormal = h.geometricNormal;
         h.material = &tracer_->material(hit->instance, hit->objectHit.material);
-        h.objectId = voxels_[hit->instance].objectId;
+        h.objectId = effective_object_id(voxels_[hit->instance]);
         h.voxelInstance = static_cast<std::int32_t>(hit->instance);
         h.voxel = hit->objectHit.voxel;
         h.materialId = hit->objectHit.material;
@@ -205,7 +209,7 @@ std::optional<OpticalHit> OpticalScene::trace_inside_voxels(const OpticalHit& in
                                                    static_cast<float>(localNormal.z)});
         h.shadingNormal = h.geometricNormal;
         h.material = beyond == kAirMaterial ? nullptr : &tracer_->material(static_cast<std::uint32_t>(k), beyond);
-        h.objectId = instance.objectId;
+        h.objectId = effective_object_id(instance);
         h.voxelInstance = static_cast<std::int32_t>(k);
         h.voxel = cell;
         h.materialId = beyond;
@@ -224,7 +228,7 @@ std::optional<OpticalHit> OpticalScene::trace_inside_voxels(const OpticalHit& in
         h.geometricNormal = unit3(hit->worldNormal);
         h.shadingNormal = h.geometricNormal;
         h.material = &tracer_->material(static_cast<std::uint32_t>(j), hit->objectHit.material);
-        h.objectId = voxels_[j].objectId;
+        h.objectId = effective_object_id(voxels_[j]);
         h.voxelInstance = static_cast<std::int32_t>(j);
         h.voxel = hit->objectHit.voxel;
         h.materialId = hit->objectHit.material;

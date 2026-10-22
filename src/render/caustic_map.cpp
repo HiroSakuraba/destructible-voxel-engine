@@ -51,27 +51,6 @@ float clipped_area(std::vector<Float2> subject, const Float2* clip, int clipCoun
     return 0.5F * std::abs(area);
 }
 constexpr int kFilterSides = 16;
-// Closest point on triangle abc to p (Ericson, Real-Time Collision Detection 5.1.5).
-Float3 closest_on_triangle(Float3 p, Float3 a, Float3 b, Float3 c) noexcept {
-    const Float3 ab = sub3(b, a), ac = sub3(c, a), ap = sub3(p, a);
-    const float d1 = dot3(ab, ap), d2 = dot3(ac, ap);
-    if (d1 <= 0.0F && d2 <= 0.0F) return a;
-    const Float3 bp = sub3(p, b);
-    const float d3 = dot3(ab, bp), d4 = dot3(ac, bp);
-    if (d3 >= 0.0F && d4 <= d3) return b;
-    const float vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0F && d1 >= 0.0F && d3 <= 0.0F) return add3(a, scale3(ab, d1 / (d1 - d3)));
-    const Float3 cp = sub3(p, c);
-    const float d5 = dot3(ab, cp), d6 = dot3(ac, cp);
-    if (d6 >= 0.0F && d5 <= d6) return c;
-    const float vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0F && d2 >= 0.0F && d6 <= 0.0F) return add3(a, scale3(ac, d2 / (d2 - d6)));
-    const float va = d3 * d6 - d5 * d4;
-    if (va <= 0.0F && (d4 - d3) >= 0.0F && (d5 - d6) >= 0.0F)
-        return add3(b, scale3(sub3(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6))));
-    const float denom = 1.0F / (va + vb + vc);
-    return add3(a, add3(scale3(ab, vb * denom), scale3(ac, vc * denom)));
-}
 }  // namespace
 
 CausticMap build_caustic_map(const OpticalScene& scene, const SunLight& sun, const CausticMapSettings& settings) {

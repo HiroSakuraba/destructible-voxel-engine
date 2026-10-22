@@ -81,11 +81,18 @@ void NativeEditorController::poll_cad_descriptions() {
     for (const std::uint64_t part : {static_cast<std::uint64_t>(document.objects().size()), static_cast<std::uint64_t>(commands.size()),
                                      static_cast<std::uint64_t>(commands.can_undo()) | (static_cast<std::uint64_t>(commands.can_redo()) << 1U),
                                      static_cast<std::uint64_t>(std::hash<std::string_view>{}(commands.undo_label())),
+                                     static_cast<std::uint64_t>(commands.position()),
+                                     static_cast<std::uint64_t>(std::hash<std::string_view>{}(commands.redo_label())),
+                                     static_cast<std::uint64_t>(std::hash<std::string>{}(projectRoot_.generic_string())),
+                                     static_cast<std::uint64_t>(std::hash<std::string>{}(document.path().generic_string())),
                                      static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&document))}) {
         key ^= part;
         key *= 1099511628211ULL;
     }
-    if (cadDescribeScanDone_ && key == cadDescribeScanKey_) return;
+    // The key cannot see every edit (a full undo history taking a step with the same label, a
+    // document replaced in place), so rescan anyway every 256 polls: a few seconds' delay at worst.
+    if (cadDescribeScanDone_ && key == cadDescribeScanKey_ && ++cadDescribeIdlePolls_ < 256U) return;
+    cadDescribeIdlePolls_ = 0;
     cadDescribeScanKey_ = key;
     cadDescribeScanDone_ = true;
     // One source at a time, visible CAD objects only.

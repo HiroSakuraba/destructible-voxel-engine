@@ -1767,6 +1767,7 @@ private:
     // over all objects only runs again once this changes (it used to run every frame).
     std::uint64_t cadDescribeScanKey_{0};
     bool cadDescribeScanDone_{false};
+    std::uint32_t cadDescribeIdlePolls_{0};
     std::filesystem::path lastStepExport_;   // project-relative, after a successful STEP export
     // After Enter: the drop step waits for the edit it was for (see settle_cad_link_drop).
     struct CadDropAwait {

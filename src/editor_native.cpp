@@ -4080,7 +4080,7 @@ CommandResult NativeEditorController::duplicate_objects(const std::vector<Editor
         copies.push_back(std::move(duplicate));
     }
     std::unique_ptr<IEditorCommand> command;
-    if(linked){for(auto& copy:copies){copy.prefabLink.reset();std::erase_if(copy.components,[](const auto& c){return c.type=="dve.prefab_instance";});}command=add_nurbs_network_objects_command(std::move(copies),"Duplicate NURBS network");}
+    if(linked){for(auto& copy:copies){if(!has_nurbs_seam(copy))continue;copy.prefabLink.reset();std::erase_if(copy.components,[](const auto& c){return c.type=="dve.prefab_instance";});}command=add_nurbs_network_objects_command(std::move(copies),"Duplicate NURBS network");}
     else {for(auto& copy:copies)compound->add(std::make_unique<AddObjectCommand>(std::move(copy),"Duplicate object"));command=std::move(compound);}
     const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
     if (result.success) {
@@ -8107,7 +8107,7 @@ camera_menu_dispatch_complete:
             linked=linked||has_nurbs_seam(pasted);if(!remap_nurbs_seam_ids(pasted,source.id,idMap,&error)){set_status(error,true);return false;}copies.push_back(std::move(pasted));
         }
         std::unique_ptr<IEditorCommand> command;
-        if(linked){for(auto& copy:copies){copy.prefabLink.reset();std::erase_if(copy.components,[](const auto& c){return c.type=="dve.prefab_instance";});}command=add_nurbs_network_objects_command(std::move(copies),"Paste NURBS network");}
+        if(linked){for(auto& copy:copies){if(!has_nurbs_seam(copy))continue;copy.prefabLink.reset();std::erase_if(copy.components,[](const auto& c){return c.type=="dve.prefab_instance";});}command=add_nurbs_network_objects_command(std::move(copies),"Paste NURBS network");}
         else {for(auto& copy:copies)compound->add(std::make_unique<AddObjectCommand>(std::move(copy),"Paste object"));command=std::move(compound);}
         const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
         if (!result.success) {

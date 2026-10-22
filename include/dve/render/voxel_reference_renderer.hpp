@@ -126,6 +126,17 @@ public:
         bool preserveExistingDepth = false) const;
 };
 
+// The reference path's sun visibility at one surface point: the function every reference pixel
+// uses (hard, contact, soft-area or hybrid per RenderEnvironment::shadowMode, then
+// shadowStrength). Soft shadows send shadowSamples rays to points spread over the sun disc, so the
+// result is the visible fraction of the disc and overlapping penumbrae merge as the union of what
+// each occluder hides. `seed` rotates the sample pattern (each pixel uses its own); `point` and
+// `normal` are in the reference's world units (voxel index units of rigid instances).
+[[nodiscard]] float reference_sun_visibility(
+    std::span<const VoxelReferenceInstance> instances, Float3 point, Float3 normal,
+    const RenderEnvironment& environment, float metersPerVoxel = kDefaultMetersPerVoxel,
+    std::uint32_t seed = 0U);
+
 // Direct hybrid reference composition. Voxel occupancy is traced into the shared target first;
 // polygons then depth-test and alpha-blend against that target. This validates polygon-in-front,
 // voxel-in-front, and translucent-over-voxel behavior without a synthetic voxel layer.

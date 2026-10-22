@@ -60,4 +60,14 @@ struct NurbsSeam {
 [[nodiscard]] std::unique_ptr<IEditorCommand> unlink_nurbs_seam_command(EditorObjectId);
 [[nodiscard]] std::unique_ptr<IEditorCommand> refresh_nurbs_seam_command(EditorObjectId);
 [[nodiscard]] std::unique_ptr<IEditorCommand> edit_nurbs_seam_command(EditorObjectId,const NurbsSource& before,const NurbsSource& after);
+// Complete-component placement/reuse preflights used by native and generic commands.
+[[nodiscard]] bool nurbs_network_selection_complete(const EditorDocument&,const std::set<EditorObjectId>&,std::string* error=nullptr);
+[[nodiscard]] bool validate_nurbs_network_placement(const EditorDocument&,
+    const std::map<EditorObjectId,RigidTransform>&,
+    const std::map<EditorObjectId,Float3>& = {},
+    const std::map<EditorObjectId,std::optional<EditorObjectId>>& = {},std::string* error=nullptr);
+[[nodiscard]] bool remap_nurbs_seam_ids(EditorObject&,EditorObjectId originalId,const std::map<EditorObjectId,EditorObjectId>&,std::string* error=nullptr);
+[[nodiscard]] bool canonicalize_nurbs_network_corners(EditorDocument&,const std::set<EditorObjectId>&,std::string* error=nullptr);
+[[nodiscard]] std::unique_ptr<IEditorCommand> add_nurbs_network_objects_command(std::vector<EditorObject>,std::string label);
+
 }

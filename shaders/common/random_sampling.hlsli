@@ -32,6 +32,25 @@ float2 Hammersley2D(uint sampleIndex, uint sampleCount) {
                   RadicalInverseBase2(sampleIndex));
 }
 
+// Shirley-Chiu concentric map from the unit square to the unit disc. It is equal-area and keeps
+// neighbouring square cells neighbours on the disc, so a stratified square set stays evenly spread
+// over the sun disc (the polar map sqrt(u), 2*pi*v stretches strata into thin rings and wedges).
+// Mirrored by dve::render::concentric_square_to_disk.
+float2 ConcentricSquareToDisk(float2 u) {
+    float2 o = 2.0F * u - 1.0F;
+    if (o.x == 0.0F && o.y == 0.0F) return float2(0.0F, 0.0F);
+    float radius;
+    float theta;
+    if (abs(o.x) > abs(o.y)) {
+        radius = o.x;
+        theta = 0.7853981633974483F * (o.y / o.x);
+    } else {
+        radius = o.y;
+        theta = 1.5707963267948966F - 0.7853981633974483F * (o.x / o.y);
+    }
+    return radius * float2(cos(theta), sin(theta));
+}
+
 // A per-pixel Cranley-Patterson rotation keeps the low-discrepancy samples stratified inside
 // one frame while decorrelating pixels and frames for temporal accumulation.
 float2 RotatedHammersley2D(uint sampleIndex, uint sampleCount, uint seed) {

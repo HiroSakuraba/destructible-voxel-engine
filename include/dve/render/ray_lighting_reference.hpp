@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
+#include <vector>
 
 #include "dve/render_environment.hpp"
 #include "dve/types.hpp"
@@ -57,6 +59,9 @@ struct VoxelLightingDistances {
 [[nodiscard]] Float2 rotated_hammersley_2d(
     std::uint32_t sampleIndex, std::uint32_t sampleCount,
     Float2 rotation) noexcept;
+// Shirley-Chiu concentric map, unit square -> unit disc (mirror of ConcentricSquareToDisk in
+// random_sampling.hlsli): equal-area and stratification-preserving. Used for sun-disc samples.
+[[nodiscard]] Float2 concentric_square_to_disk(Float2 square) noexcept;
 [[nodiscard]] Float3 one_bounce_diffuse_radiance(
     Float3 baseColor, float metallic, Float3 emissive, Float3 ambientRadiance,
     Float3 sunColor, float sunIntensity, Float3 bounceNormal,
@@ -67,5 +72,27 @@ struct VoxelLightingDistances {
 [[nodiscard]] LightingTemporalSample accumulate_lighting_history(
     const LightingTemporalSample& current, const LightingTemporalSample& history,
     const LightingTemporalSettings& settings, bool resetHistory = false) noexcept;
+
+// Penumbra width at a receiver (metres): 2 tan(sun angular radius) x the mean distance to the
+// occluders the soft shadow rays hit (resolve_shadows.hlsl). 0 when nothing was hit.
+[[nodiscard]] float shadow_penumbra_width_meters(float sunAngularRadius, float meanBlockerDistanceMeters) noexcept;
+
+// The shadow channel of spatial_lighting_denoise.hlsl on a CPU image (row-major, width x height):
+// a cross-bilateral Gaussian whose sigma is a quarter of the widest penumbra under the filter, in
+// pixels at the centre's depth, clamped to [0.25, spatialSigma]. radiansPerPixel <= 0 keeps the
+// fixed sigma (the old filter).
+struct ShadowDenoiseSettings {
+    std::uint32_t radius{2};
+    float spatialSigma{1.5F};
+    float depthSigmaMeters{0.1F};
+    float normalPower{8.0F};
+    float radiansPerPixel{0.0F};
+};
+// gDenoiseRadiansPerPixel for a perspective view: the angle one pixel covers at the centre.
+[[nodiscard]] float denoise_radians_per_pixel(float verticalFovRadians, std::uint32_t heightPixels) noexcept;
+[[nodiscard]] std::vector<float> denoise_shadow_visibility(
+    std::uint32_t width, std::uint32_t height, std::span<const float> visibility,
+    std::span<const float> penumbraMeters, std::span<const float> depthMeters,
+    std::span<const Float3> normals, const ShadowDenoiseSettings& settings);
 
 } // namespace dve::render

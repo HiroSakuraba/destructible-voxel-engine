@@ -265,12 +265,14 @@ MaterialSurfaceSample sample_layer_surface(
 }
 
 Float4 shade(const VoxelMaterialDefinition& material,Float4 base,Float3 normal,
-             const RenderEnvironment& environment,bool frontFacing,Float3 transmitted={}) noexcept {
+             const RenderEnvironment& environment,bool frontFacing,Float3 transmitted={},
+             float diffusedSun=-1.0F) noexcept {
     normal=normalize(normal);
     if(material.shadingModel==MaterialShadingModel::TwoSidedFoliage&&!frontFacing)normal=multiply(normal,-1.0F);
     const Float3 light=normalize(environment.sunDirection);
     const float ndotl=dot(normal,light);
-    const float direct=std::max(0.0F,ndotl)*environment.sunIntensity;
+    // diffusedSun >= 0: the subsurface-diffused cos(normal, sun) average replaces the point's own.
+    const float direct=(diffusedSun>=0.0F?diffusedSun:std::max(0.0F,ndotl))*environment.sunIntensity;
     Float3 ambient{};
     if (environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
         // The CPU polygon oracle has no scene acceleration structure for secondary rays, so
@@ -441,6 +443,44 @@ Float3 polygon_subsurface_light(const DeferredTriangle& tri,const VoxelMaterialD
     if(!exit.found)return {};
     ++stats.subsurfaceExits;
     return subsurface_transmitted_radiance(material,exit,sun,metersPerUnit,1.0F,environment);
+}
+
+// Front-lit subsurface diffusion (see subsurface.hpp and the voxel reference's
+// diffused_sun_term): cos(normal, sun) averaged over the mesh around the point with Burley's
+// profile. Samples are projected onto the mesh along the normal; samples landing on another
+// material or on nothing are left out. No sun shadows here, as for the rest of the polygon path.
+float polygon_diffused_sun(const DeferredTriangle& tri,const VoxelMaterialDefinition& material,Float3 worldPosition,
+                           Float3 normal,const RenderEnvironment& environment,const PolygonRenderOptions& options,
+                           std::size_t pixel,PolygonRenderStats& stats){
+    const float metersPerUnit=options.metersPerUnit>0.0F&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
+    const float d=material.subsurfaceScatterDistanceMeters/metersPerUnit;
+    const Float3 sun=normalize(environment.sunDirection);
+    normal=normalize(normal);
+    const Float3 helper=std::abs(normal.y)<0.9F?Float3{0.0F,1.0F,0.0F}:Float3{1.0F,0.0F,0.0F};
+    const Float3 tangent=normalize(cross3(helper,normal)),bitangent=cross3(normal,tangent);
+    const std::uint32_t samples=options.subsurfaceDiffusionSamples;
+    const std::uint32_t seed=static_cast<std::uint32_t>(pixel)*747796405U+2891336453U;
+    const float rotation=static_cast<float>(seed>>8U)*(1.0F/16777216.0F);
+    float sum=0.0F;std::uint32_t valid=0;
+    for(std::uint32_t i=0;i<samples;++i){
+        const float u=(static_cast<float>(i)+0.5F)/static_cast<float>(samples);
+        const float v=std::fmod(static_cast<float>(i)*0.6180339887F+rotation,1.0F);
+        const float r=burley_sample_radius(u,d);
+        Float3 qn=normal;
+        if(r>1.0e-4F){
+            const float angle=6.2831853F*v;
+            const Float3 offset=add(multiply(tangent,r*std::cos(angle)),multiply(bitangent,r*std::sin(angle)));
+            const float h=std::max(r,1.0e-2F);
+            ++stats.subsurfaceDiffusionProbes;
+            const auto hit=probe_polygon_surface(*tri.subsurfaceBvh,*tri.asset,tri.transform,
+                                                 add(add(worldPosition,offset),multiply(normal,h)),multiply(normal,-1.0F),2.0F*h);
+            if(!hit||hit->materialIndex!=tri.submesh->materialIndex)continue;
+            qn=hit->normal;
+        }
+        ++valid;
+        sum+=std::max(0.0F,dot(qn,sun));
+    }
+    return valid>0U?sum/static_cast<float>(valid):0.0F;
 }
 
 void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,const RenderEnvironment& environment,
@@ -668,7 +708,9 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                                     worldPosition, objectPosition, tri.binding->mapping, detailFade,
                                     fragmentParallaxSamples, layerDebugMask, layerDebugCoverage)
             : shade(effective,base,normal,environment,tri.frontFacing,
-                    polygon_subsurface_light(tri,effective,worldPosition,normal,environment,options,stats));
+                    polygon_subsurface_light(tri,effective,worldPosition,normal,environment,options,stats),
+                    tri.subsurfaceBvh&&material_has_subsurface(effective)&&options.subsurfaceDiffusionSamples>0U
+                        ? polygon_diffused_sun(tri,effective,worldPosition,normal,environment,options,index,stats) : -1.0F);
         if(!debugView&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
             const float alpha=std::clamp(shaded.w,0.0F,1.0F);const Float4 old=target.hdrColor[index];
             target.hdrColor[index]={shaded.x*alpha+old.x*(1-alpha),shaded.y*alpha+old.y*(1-alpha),shaded.z*alpha+old.z*(1-alpha),1};

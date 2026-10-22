@@ -2,6 +2,7 @@
 #define DVE_SUBSURFACE_HLSLI
 
 #include "brick_trace_common.hlsli"
+#include "subsurface_transmission_table.hlsli"
 
 // Genuinely voxel-specific, unlike pbr_lighting.hlsli: thickness here is measured by marching
 // through the voxel grid itself (how many consecutive voxels share the entry material) rather
@@ -85,23 +86,57 @@ SubsurfaceMarch MarchSubsurfaceThicknessVoxels(
     return march;   // never left within the step budget: treat as fully thick
 }
 
-// Burley's normalized-diffusion transmittance through a thickness d, for scatter distance s:
-// the diffusion profile integrated over the plane at depth d (Burley 2015). T(0) = 1.
-float BurleyTransmittance(float thicknessMeters, float scatterDistanceMeters) {
-    if (!(scatterDistanceMeters > 0.0F)) return 0.0F;
-    float x = max(thicknessMeters, 0.0F) / scatterDistanceMeters;
-    return 0.25F * exp(-x) + 0.75F * exp(-x / 3.0F);
+// The share of light arriving at cosine mu that scatters through a slab x = t / d thick, for
+// albedo A: the random-walk table (CPU: subsurface_slab_transmission in
+// src/render/subsurface_transmission.cpp). Grid mu = 0.2..1 (9), A = 0..1 (21),
+// x = 16 (k/32)^2 (33); trilinear in (mu, A, sqrt(x)); exponential continuation past x = 16.
+float SubsurfaceTransmissionAt(float fm, float fa, uint k) {
+    uint m0 = min(uint(fm), 7u);
+    uint a0 = min(uint(fa), 19u);
+    float tm = fm - float(m0);
+    float ta = fa - float(a0);
+    float v00 = kSubsurfaceTransmissionTable[(m0 * 21u + a0) * 33u + k];
+    float v01 = kSubsurfaceTransmissionTable[(m0 * 21u + a0 + 1u) * 33u + k];
+    float v10 = kSubsurfaceTransmissionTable[((m0 + 1u) * 21u + a0) * 33u + k];
+    float v11 = kSubsurfaceTransmissionTable[((m0 + 1u) * 21u + a0 + 1u) * 33u + k];
+    float low = v00 + (v01 - v00) * ta;
+    float high = v10 + (v11 - v10) * ta;
+    return low + (high - low) * tm;
 }
 
-// Sunlight transmitted to the shaded side: the subsurface colour (the albedo of this light),
-// the sun arriving at the sunlit face (its cosine there, and that face's own sun visibility in
-// lightRadiance), and the Burley transmittance through the thickness.
+float SubsurfaceSlabTransmission(float albedo, float x, float mu) {
+    if (!(x > 0.0F) || !(albedo > 0.0F)) return 0.0F;
+    float fm = (clamp(mu, 0.2F, 1.0F) - 0.2F) * 10.0F;
+    float fa = saturate(albedo) * 20.0F;
+    if (x <= 16.0F) {
+        float fu = sqrt(x / 16.0F) * 32.0F;
+        uint k0 = min(uint(fu), 31u);
+        float tk = fu - float(k0);
+        float a = SubsurfaceTransmissionAt(fm, fa, k0);
+        float b = SubsurfaceTransmissionAt(fm, fa, k0 + 1u);
+        return max(0.0F, a + (b - a) * tk);
+    }
+    float v16 = SubsurfaceTransmissionAt(fm, fa, 32u);
+    float v15 = SubsurfaceTransmissionAt(fm, fa, 31u);
+    if (!(v16 > 0.0F)) return 0.0F;
+    float decay = v15 > v16 ? log(v15 / v16) / (16.0F - 15.015625F) : 0.25F;
+    return v16 * exp(-decay * (x - 16.0F));
+}
+
+// Sunlight transmitted to the shaded side: the sun arriving at the sunlit face (its cosine there,
+// and that face's own sun visibility in lightRadiance) times, per channel, the share that
+// scatters through (the subsurface colour is the albedo of that table lookup).
 float3 ShadeSubsurfaceTransmission(
     float thicknessMeters, float scatterDistanceMeters, float3 subsurfaceColor,
     float3 exitNormal, float3 lightDirection, float3 lightRadiance) {
     float cosEntry = saturate(dot(exitNormal, lightDirection));
-    return subsurfaceColor * lightRadiance * cosEntry *
-           BurleyTransmittance(thicknessMeters, scatterDistanceMeters);
+    if (!(cosEntry > 0.0F) || !(scatterDistanceMeters > 0.0F)) return float3(0.0F, 0.0F, 0.0F);
+    float x = thicknessMeters / scatterDistanceMeters;
+    float3 transmitted = float3(
+        SubsurfaceSlabTransmission(subsurfaceColor.r, x, cosEntry),
+        SubsurfaceSlabTransmission(subsurfaceColor.g, x, cosEntry),
+        SubsurfaceSlabTransmission(subsurfaceColor.b, x, cosEntry));
+    return lightRadiance * cosEntry * transmitted;
 }
 
 #endif // DVE_SUBSURFACE_HLSLI

@@ -13,6 +13,9 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <functional>
+#include <string_view>
 #include <cstdio>
 #include <future>
 #include <memory>
@@ -67,10 +70,26 @@ void NativeEditorController::poll_cad_descriptions() {
         cadDescribeTask_.reset();
         if (description) cadDescriptions_[sha] = std::make_shared<const ExactCadDescription>(std::move(description));
         else cadDescriptionErrors_[sha] = description.error;
+        cadDescribeScanDone_ = false;   // more sources may be waiting
     }
     if (projectRoot_.empty()) return;
+    // Scanning every object each frame cost ~100 us with 10,000 objects: scan only when the scene
+    // may have changed (object count, undo history, document) since the last scan found nothing.
+    const EditorDocument& document = workspace_.document();
+    const auto& commands = workspace_.commands();
+    std::uint64_t key = 1469598103934665603ULL;
+    for (const std::uint64_t part : {static_cast<std::uint64_t>(document.objects().size()), static_cast<std::uint64_t>(commands.size()),
+                                     static_cast<std::uint64_t>(commands.can_undo()) | (static_cast<std::uint64_t>(commands.can_redo()) << 1U),
+                                     static_cast<std::uint64_t>(std::hash<std::string_view>{}(commands.undo_label())),
+                                     static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&document))}) {
+        key ^= part;
+        key *= 1099511628211ULL;
+    }
+    if (cadDescribeScanDone_ && key == cadDescribeScanKey_) return;
+    cadDescribeScanKey_ = key;
+    cadDescribeScanDone_ = true;
     // One source at a time, visible CAD objects only.
-    for (const auto& [id, object] : workspace_.document().objects()) {
+    for (const auto& [id, object] : document.objects()) {
         if (!object.polygon || !object.flags.visible) continue;
         const auto source = exact_brep_source(object);
         if (!source || source->sha256.empty() || cadDescriptions_.contains(source->sha256) || cadDescriptionErrors_.contains(source->sha256))
@@ -81,12 +100,14 @@ void NativeEditorController::poll_cad_descriptions() {
             return describe_exact_cad(root, source, settings);
         });
         cadDescribeTask_ = std::move(task);
+        cadDescribeScanDone_ = false;
         return;
     }
 }
 
 bool NativeEditorController::wait_for_cad_descriptions(double seconds) {
     const auto until = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    cadDescribeScanDone_ = false;   // objects may have been added or changed directly
     do {
         poll_cad_descriptions();
         if (!cadDescribeTask_) return true;

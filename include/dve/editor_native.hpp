@@ -1763,6 +1763,10 @@ private:
     std::map<std::string, std::shared_ptr<const ExactCadDescription>> cadDescriptions_;  // by sha256
     std::map<std::string, std::string> cadDescriptionErrors_;
     std::shared_ptr<CadDescribeTask> cadDescribeTask_;
+    // What the scene looked like when poll_cad_descriptions last found nothing to read; the scan
+    // over all objects only runs again once this changes (it used to run every frame).
+    std::uint64_t cadDescribeScanKey_{0};
+    bool cadDescribeScanDone_{false};
     std::filesystem::path lastStepExport_;   // project-relative, after a successful STEP export
     // After Enter: the drop step waits for the edit it was for (see settle_cad_link_drop).
     struct CadDropAwait {

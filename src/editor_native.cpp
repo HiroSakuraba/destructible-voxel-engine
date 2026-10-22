@@ -4057,6 +4057,8 @@ CommandResult NativeEditorController::duplicate_objects(const std::vector<Editor
     const std::vector<EditorObjectId> closure = collect_editor_object_subtree_ids(workspace_.document(), ids);
     if (closure.empty()) return CommandResult::fail("selected objects no longer exist");
 
+    std::string error;if(!nurbs_network_selection_complete(workspace_.document(),{closure.begin(),closure.end()},&error))return CommandResult::fail(error);
+    std::vector<EditorObject> copies;bool linked=false;
     std::map<EditorObjectId, EditorObjectId> idMap;
     for (const EditorObjectId oldId : closure) idMap.emplace(oldId, workspace_.document().allocate_object_id());
 
@@ -4073,9 +4075,14 @@ CommandResult NativeEditorController::duplicate_objects(const std::vector<Editor
             : source->parent;
         duplicate.transform.position = add(duplicate.transform.position, offset);
         newIds.push_back(duplicate.id);
-        compound->add(std::make_unique<AddObjectCommand>(std::move(duplicate), "Duplicate object"));
+        linked=linked||has_nurbs_seam(duplicate);
+        if(!remap_nurbs_seam_ids(duplicate,oldId,idMap,&error))return CommandResult::fail(error);
+        copies.push_back(std::move(duplicate));
     }
-    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(compound));
+    std::unique_ptr<IEditorCommand> command;
+    if(linked){for(auto& copy:copies){if(!has_nurbs_seam(copy))continue;copy.prefabLink.reset();std::erase_if(copy.components,[](const auto& c){return c.type=="dve.prefab_instance";});}command=add_nurbs_network_objects_command(std::move(copies),"Duplicate NURBS network");}
+    else {for(auto& copy:copies)compound->add(std::make_unique<AddObjectCommand>(std::move(copy),"Duplicate object"));command=std::move(compound);}
+    const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
     if (result.success) {
         workspace_.clear_selection();
         for (const EditorObjectId oldRoot : ids) {
@@ -6440,9 +6447,10 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
     if (selectionDomain_ == SelectionDomain::Polygons && polygonSelection_.components.empty()) return;
     gizmoAxis_ = hit_test_gizmo_axis(x, y);
     if (gizmoAxis_ == 0) return;
-    for(auto id:workspace_.selected_objects()){const auto* object=workspace_.document().find_object(id);if(object&&has_nurbs_seam(*object)&&!nurbs_control_mode()){
-        set_status("Unlink NURBS seams before patch gizmo transforms",true);gizmoAxis_=0;return;
-    }}
+    if(!nurbs_control_mode()){
+        auto ids=collect_editor_object_subtree_ids(workspace_.document(),std::vector<EditorObjectId>(workspace_.selected_objects().begin(),workspace_.selected_objects().end()));std::string error;
+        if(!nurbs_network_selection_complete(workspace_.document(),{ids.begin(),ids.end()},&error)){set_status(error,true);gizmoAxis_=0;return;}
+    }
     for (EditorObjectId id : workspace_.selected_objects()) {
         const EditorObject* object = workspace_.document().find_object(id);
         if (!object || object->flags.locked) {
@@ -6450,7 +6458,9 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
             gizmoAxis_ = 0;
             return;
         }
-        if (activeTool_ == EditorToolId::Scale && is_group(id)) {
+        bool networkGroup=false;
+        if(is_group(id)){networkGroup=true;bool linked=false;for(auto child:collect_editor_object_subtree_ids(workspace_.document(),std::vector<EditorObjectId>{id})){const auto* member=workspace_.document().find_object(child);if(is_group(child))continue;linked=linked||has_nurbs_seam(*member);if(!has_nurbs_seam(*member))networkGroup=false;}networkGroup=networkGroup&&linked;}
+        if (activeTool_ == EditorToolId::Scale && is_group(id)&&!networkGroup) {
             set_status("Scale works on pieces: double-click the group (or Edit > Open Group) and select them", true);
             gizmoAxis_ = 0;
             return;
@@ -6463,7 +6473,7 @@ void NativeEditorController::begin_gizmo_drag(int x, int y, std::uint32_t modifi
                     return;
                 }
         }
-        if (activeTool_ == EditorToolId::Scale && ((!object->polygon && (!object->voxels || object->voxels->brick_count() == 0)) ||
+        if (activeTool_ == EditorToolId::Scale && !networkGroup && ((!object->polygon && (!object->voxels || object->voxels->brick_count() == 0)) ||
             object->text3d || object->gaborVolume || !std::isfinite(object->voxelSizeMeters) ||
             object->voxelSizeMeters < 0.001F || object->voxelSizeMeters > 10.0F || !valid_voxel_metric(object->voxelScale))) {
             set_status("Scale requires polygon or occupied voxel geometry", true);
@@ -6815,9 +6825,8 @@ bool same_transform(const RigidTransform& a, const RigidTransform& b);  // numer
 
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if(actionId=="create.prefab_from_selection"||actionId=="edit.copy"||actionId=="edit.cut"||actionId=="edit.duplicate"){
-        for(auto id:workspace_.selected_objects()){for(auto child:collect_editor_object_subtree_ids(workspace_.document(),std::vector<EditorObjectId>{id})){
-            const auto* object=workspace_.document().find_object(child);if(object&&has_nurbs_seam(*object)){set_status("Unlink NURBS seams before copying, duplicating or creating a prefab; Bake to Polygon is also available",true);return false;}
-        }}
+        auto ids=collect_editor_object_subtree_ids(workspace_.document(),std::vector<EditorObjectId>(workspace_.selected_objects().begin(),workspace_.selected_objects().end()));std::string error;
+        if(!nurbs_network_selection_complete(workspace_.document(),{ids.begin(),ids.end()},&error)){set_status(error,true);return false;}
     }
     if(nurbsDragRequested_&&!actionId.starts_with("view.")){
         // Undo during an in-flight adaptive transform cancels that transform only;
@@ -8082,7 +8091,7 @@ camera_menu_dispatch_complete:
 
         auto compound = std::make_unique<CompoundCommand>(
             clipboard_.size() == 1 ? "Paste object" : "Paste objects");
-        std::vector<EditorObjectId> pastedRootIds;
+        std::vector<EditorObjectId> pastedRootIds;std::vector<EditorObject> copies;bool linked=false;std::string error;
         for (const EditorObject& source : clipboard_) {
             EditorObject pasted = clone_editor_object(source);
             pasted.id = idMap.at(source.id);
@@ -8095,9 +8104,12 @@ camera_menu_dispatch_complete:
             }
             pasted.transform.position = add(pasted.transform.position, kPasteOffset);
             if (!source.parent || !idMap.contains(*source.parent)) pastedRootIds.push_back(pasted.id);
-            compound->add(std::make_unique<AddObjectCommand>(std::move(pasted), "Paste object"));
+            linked=linked||has_nurbs_seam(pasted);if(!remap_nurbs_seam_ids(pasted,source.id,idMap,&error)){set_status(error,true);return false;}copies.push_back(std::move(pasted));
         }
-        const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(compound));
+        std::unique_ptr<IEditorCommand> command;
+        if(linked){for(auto& copy:copies){if(!has_nurbs_seam(copy))continue;copy.prefabLink.reset();std::erase_if(copy.components,[](const auto& c){return c.type=="dve.prefab_instance";});}command=add_nurbs_network_objects_command(std::move(copies),"Paste NURBS network");}
+        else {for(auto& copy:copies)compound->add(std::make_unique<AddObjectCommand>(std::move(copy),"Paste object"));command=std::move(compound);}
+        const CommandResult result = workspace_.commands().execute(workspace_.document(), std::move(command));
         if (!result.success) {
             set_status(result.message, true);
             return false;

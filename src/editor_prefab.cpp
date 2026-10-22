@@ -406,6 +406,7 @@ EditorPrefabCaptureResult capture_editor_prefab(
         if (prefabPath.extension() != ".dveprefab") throw std::runtime_error("prefab path must use .dveprefab");
         const std::vector<EditorObjectId> closure = collect_editor_object_subtree_ids(document, roots);
         if (closure.empty()) throw std::runtime_error("prefab roots do not exist");
+        std::string networkError;if(!nurbs_network_selection_complete(document,{closure.begin(),closure.end()},&networkError))throw std::runtime_error(networkError);
         for (const EditorObjectId root : roots) {
             if (!document.find_object(root)) throw std::runtime_error("prefab root does not exist");
         }
@@ -423,7 +424,6 @@ EditorPrefabCaptureResult capture_editor_prefab(
         for (const EditorObjectId sourceId : closure) {
             const EditorObject* source = document.find_object(sourceId);
             if (!source) throw std::runtime_error("prefab source object disappeared during capture");
-            if(has_nurbs_seam(*source))throw std::runtime_error("Unlink NURBS seams or bake polygons before prefab capture");
             const auto sourceWorld = document.world_transform(sourceId);
             if (!sourceWorld) throw std::runtime_error("prefab source transform could not be resolved");
             EditorObject object = clone_editor_object(*source);
@@ -446,9 +446,12 @@ EditorPrefabCaptureResult capture_editor_prefab(
                 object.transform = relative_rigid_transform(*origin, *sourceWorld);
                 prefab.rootTemplateObjectIds.push_back(object.id);
             }
+            if(has_nurbs_seam(object)){object.attachment.reset();if(!remap_nurbs_seam_ids(object,sourceId,remap,&networkError))throw std::runtime_error(networkError);}
             prefab.templateDocument.add_object(std::move(object));
         }
         prefab.templateDocument.refresh_attachment_world_transforms();
+        std::set<EditorObjectId> networkIds;for(const auto& [id,o]:prefab.templateDocument.objects())networkIds.insert(id);
+        if(!canonicalize_nurbs_network_corners(prefab.templateDocument,networkIds,&networkError))throw std::runtime_error(networkError);
         std::string writeError;
         if (!write_prefab_asset(prefab, prefabPath, &writeError)) throw std::runtime_error(writeError);
         result.templateScenePath = template_scene_path(prefabPath);
@@ -511,7 +514,6 @@ EditorPrefabInstantiationResult instantiate_editor_prefab(
     EditorPrefabInstantiationResult result;
     try {
         std::string validationError;
-        for(const auto& [id,object]:prefab.templateDocument.objects())if(has_nurbs_seam(object))throw std::runtime_error("Linked NURBS seams cannot be instantiated as prefabs; unlink or bake first");
         if (!prefab.templateDocument.validate(&validationError))
             throw std::runtime_error("invalid prefab template: " + validationError);
         if (prefab.rootTemplateObjectIds.empty()) throw std::runtime_error("prefab has no root objects");
@@ -527,6 +529,7 @@ EditorPrefabInstantiationResult instantiate_editor_prefab(
             EditorObject object = clone_editor_object(source);
             object.id = remap.at(templateId);
             remap_embedded_object_id(object, object.id);
+            if(!remap_nurbs_seam_ids(object,templateId,remap,&validationError))throw std::runtime_error(validationError);
             object.voxels = clone_voxel_object(*source.voxels);
             object.prefabLink = EditorPrefabLink{
                 prefabReference, instanceId, templateId, rootSet.contains(templateId), prefab.contentHash, {}};
@@ -543,6 +546,7 @@ EditorPrefabInstantiationResult instantiate_editor_prefab(
             if (rootSet.contains(templateId)) result.rootObjectIds.push_back(inserted.id);
         }
         document.refresh_attachment_world_transforms();
+        if(!canonicalize_nurbs_network_corners(document,{result.objectIds.begin(),result.objectIds.end()},&validationError))throw std::runtime_error(validationError);
         for (const EditorObjectId rootId : result.rootObjectIds) {
             EditorObject* root = document.find_object(rootId);
             if (!root) continue;
@@ -718,6 +722,8 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
                 if (!object_has_override(*target, "transform.position") && !object_has_override(*target, "transform.rotation"))
                     target->transform = compose_rigid_transforms(instanceTransform, source.transform);
             } else target->transform = compose_rigid_transforms(instanceTransform, source.transform);
+            if(auto* component=find_component_by_type(std::span<Component>(target->components),kNurbsComponent);component&&!has_nurbs_seam(source))component->properties.erase(std::string(kNurbsSeamProperty));
+            std::string networkError;if(!remap_nurbs_seam_ids(*target,templateId,templateToInstance,&networkError))throw std::runtime_error(networkError);
             target->prefabLink->sourceContentHash = prefab.contentHash;
         }
         // Remove source-deleted objects only when they have no overrides, unless conflicts were accepted.
@@ -727,6 +733,8 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
             if (!object->prefabLink->overrides.empty() && !allowConflicts) continue;
             (void)document.remove_object(id);
         }
+        std::set<EditorObjectId> networkIds;for(const auto& [templateId,id]:templateToInstance)networkIds.insert(id);std::string networkError;
+        if(!canonicalize_nurbs_network_corners(document,networkIds,&networkError))throw std::runtime_error(networkError);
         document.refresh_attachment_world_transforms();
         document.mark_dirty();
         preview.success = true;

@@ -315,7 +315,8 @@ bool validate_editor_nurbs_seams(const EditorDocument& document,std::string* err
     for(const auto& [id,object]:document.objects())if(has_nurbs_seam(object)){
         auto seams=editor_nurbs_seams(object,error);if(!seams)return false;std::map<unsigned,Float3> corners;
         for(const auto& seam:*seams){const auto* a=document.find_object(seam.reference);const auto* b=document.find_object(seam.moving);
-            if(!a||!b||!same_frame(*a,*b)||a->prefabLink||b->prefabLink)return fail(error,"NURBS seam partner/frame is missing or changed; unlink before independent placement or prefab operations");
+            if(!a||!b||!same_frame(*a,*b))return fail(error,"NURBS seam partner/frame is missing or changed; unlink before independent placement or prefab operations");
+            if(bool(a->prefabLink)!=bool(b->prefabLink)||(a->prefabLink&&(a->prefabLink->instanceId!=b->prefabLink->instanceId||a->prefabLink->prefabAsset!=b->prefabLink->prefabAsset)))return fail(error,"Linked patches must share the same prefab instance or both be owned");
             auto partners=editor_nurbs_seams(id==a->id?*b:*a,error);if(!partners)return false;
             auto it=std::find_if(partners->begin(),partners->end(),[&](const auto& s){return seam_key(s)==seam_key(seam);});
             if(it==partners->end()||it->options.reverseBoundary!=seam.options.reverseBoundary||it->options.c1!=seam.options.c1||it->referenceStamp!=seam.referenceStamp||it->movingStamp!=seam.movingStamp||it->fractions!=seam.fractions||it->anchors.size()!=seam.anchors.size())return fail(error,"NURBS seam relationship is not reciprocal");
@@ -458,6 +459,27 @@ CommandResult PreparedNurbsSeamEdit::execute(EditorDocument& document){
 CommandResult PreparedNurbsSeamEdit::undo(EditorDocument& document){
     std::string error;if(!matches(document,true)||!publish(document,false,&error))return CommandResult::fail(error.empty()?"Linked source, placement or display changed; history was not applied":error);
     document.mark_dirty();return CommandResult::ok();
+}
+
+bool remap_nurbs_seam_ids(EditorObject& object,EditorObjectId originalId,const std::map<EditorObjectId,EditorObjectId>& ids,std::string* error){
+    if(!has_nurbs_seam(object))return true;
+    EditorObject old(originalId);old.components.push_back(*find_component_by_type(std::span<const Component>(object.components),kNurbsComponent));auto seams=editor_nurbs_seams(old,error);if(!seams)return false;
+    for(auto& seam:*seams){auto a=ids.find(seam.reference),b=ids.find(seam.moving);if(a==ids.end()||b==ids.end())return fail(error,"Copy the complete NURBS network so every seam endpoint can be remapped");seam.reference=a->second;seam.moving=b->second;}
+    set_seams(object,*seams);if(object.polygon){object.polygon->objectId=object.id;object.polygon->contentHash=polygon_asset_content_hash(*object.polygon);}return true;
+}
+bool canonicalize_nurbs_network_corners(EditorDocument& document,const std::set<EditorObjectId>& selected,std::string* error){
+    std::set<EditorObjectId> visited;
+    for(const auto& [id,object]:document.objects())if(has_nurbs_seam(object)&&selected.contains(id)&&!visited.contains(id)){
+        auto ids=nurbs_seam_network_ids(document,id,error);if(ids.empty())return false;std::vector<const EditorObject*> nodes;std::map<EditorObjectId,NurbsSource> sources;
+        for(auto next:ids){visited.insert(next);nodes.push_back(document.find_object(next));auto source=editor_nurbs_source(*nodes.back(),error);if(!source)return false;sources[next]=std::move(*source);}
+        auto edges=network_edges(nodes,error);if(!edges)return false;auto junctions=junction_positions(sources,*edges);if(!junctions)return fail(error,"Remapped junction evaluation failed");
+        for(auto next:ids){auto* target=document.find_object(next);auto seams=editor_nurbs_seams(*target,error);if(!seams)return false;
+            for(auto& seam:*seams){seam.anchors.front()=junctions->at({seam.reference,corner(seam.options.referenceBoundary,false)});seam.anchors.back()=junctions->at({seam.reference,corner(seam.options.referenceBoundary,true)});}
+            set_seams(*target,*seams);
+        }
+        for(auto next:ids){auto* target=document.find_object(next);auto mesh=tessellate_editor_nurbs_display(*target,sources.at(next),error);if(!mesh)return false;appearance(*mesh,*target->polygon);target->polygon=std::move(mesh);}
+    }
+    return validate_editor_nurbs_seams(document,error);
 }
 
 }

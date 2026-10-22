@@ -7,6 +7,7 @@ StructuredBuffer<float4> gCascadedShadowCoordinates : register(t23);
 StructuredBuffer<float> gCascadedShadowViewDepth : register(t24);
 RWStructuredBuffer<float> gCascadedShadowVisibility : register(u18);
 
+// Mirrored by dve::render::GpuCascadedShadowConstants (cascaded_shadow_map.hpp).
 cbuffer CascadedShadowConstants : register(b9) {
     float4 gCascadeSplitFarMeters;
     float4 gCascadeBlendStartMeters;
@@ -14,9 +15,27 @@ cbuffer CascadedShadowConstants : register(b9) {
     uint gCascadeCount;
     uint gCascadePcfRadius;
     uint gCascadedShadowElementCount;
-    uint gCascadedShadowPad0;
-    uint gCascadedShadowPad1;
-    uint gCascadedShadowPad2;
+    // 0: PCF (fixed kernel, darker of the two layers). 1: bitmask soft shadows (sun-disc union).
+    uint gCascadeSoftShadowFilter;
+    uint gCascadeSoftShadowSearchTexels;
+    float gCascadeTanSunAngularRadius;
+    float4 gCascadeTexelMeters;        // per cascade
+    float4 gCascadeDepthRangeMeters;   // per cascade: maximum - minimum light depth
+}
+
+float CascadeVisibility(float3 coordinate, uint cascade) {
+    if (gCascadeSoftShadowFilter == 1u)
+        return SampleCascadedShadowBitmask(
+            gCascadedShadowStaticDepth, gCascadedShadowDynamicDepth, coordinate, cascade, gCascadeCount,
+            gCascadeTexelSize, gCascadeTexelMeters[cascade], gCascadeDepthRangeMeters[cascade],
+            gCascadeTanSunAngularRadius, gCascadeSoftShadowSearchTexels);
+    float staticVisibility = SampleCascadedShadowPcf(
+        gCascadedShadowStaticDepth, gCascadedShadowSampler, coordinate, cascade,
+        gCascadeCount, gCascadeTexelSize, gCascadePcfRadius);
+    float dynamicVisibility = SampleCascadedShadowPcf(
+        gCascadedShadowDynamicDepth, gCascadedShadowSampler, coordinate, cascade,
+        gCascadeCount, gCascadeTexelSize, gCascadePcfRadius);
+    return min(staticVisibility, dynamicVisibility);
 }
 
 [numthreads(64, 1, 1)]
@@ -26,13 +45,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
     float depth = gCascadedShadowViewDepth[i];
     uint cascade = min(SelectShadowCascade(depth, gCascadeSplitFarMeters), max(gCascadeCount, 1u) - 1u);
     float3 coordinate = gCascadedShadowCoordinates[i * kMaximumShadowCascades + cascade].xyz;
-    float staticVisibility = SampleCascadedShadowPcf(
-        gCascadedShadowStaticDepth, gCascadedShadowSampler, coordinate, cascade,
-        gCascadeCount, gCascadeTexelSize, gCascadePcfRadius);
-    float dynamicVisibility = SampleCascadedShadowPcf(
-        gCascadedShadowDynamicDepth, gCascadedShadowSampler, coordinate, cascade,
-        gCascadeCount, gCascadeTexelSize, gCascadePcfRadius);
-    float visibility = min(staticVisibility, dynamicVisibility);
+    float visibility = CascadeVisibility(coordinate, cascade);
     if (cascade + 1u < gCascadeCount) {
         float blendStart = gCascadeBlendStartMeters[cascade];
         float splitFar = gCascadeSplitFarMeters[cascade];
@@ -40,14 +53,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
         if (blend > 0.0F) {
             float3 nextCoordinate = gCascadedShadowCoordinates[
                 i * kMaximumShadowCascades + cascade + 1u].xyz;
-            float nextStaticVisibility = SampleCascadedShadowPcf(
-                gCascadedShadowStaticDepth, gCascadedShadowSampler, nextCoordinate, cascade + 1u,
-                gCascadeCount, gCascadeTexelSize, gCascadePcfRadius);
-            float nextDynamicVisibility = SampleCascadedShadowPcf(
-                gCascadedShadowDynamicDepth, gCascadedShadowSampler, nextCoordinate, cascade + 1u,
-                gCascadeCount, gCascadeTexelSize, gCascadePcfRadius);
-            float nextVisibility = min(nextStaticVisibility, nextDynamicVisibility);
-            visibility = lerp(visibility, nextVisibility, blend);
+            visibility = lerp(visibility, CascadeVisibility(nextCoordinate, cascade + 1u), blend);
         }
     }
     gCascadedShadowVisibility[i] = visibility;

@@ -1,5 +1,8 @@
 #include "dve/render/polygon_renderer.hpp"
 
+#include "dve/polygon_bvh.hpp"
+#include "dve/render/subsurface.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -262,12 +265,14 @@ MaterialSurfaceSample sample_layer_surface(
 }
 
 Float4 shade(const VoxelMaterialDefinition& material,Float4 base,Float3 normal,
-             const RenderEnvironment& environment,bool frontFacing) noexcept {
+             const RenderEnvironment& environment,bool frontFacing,Float3 transmitted={},
+             float diffusedSun=-1.0F) noexcept {
     normal=normalize(normal);
     if(material.shadingModel==MaterialShadingModel::TwoSidedFoliage&&!frontFacing)normal=multiply(normal,-1.0F);
     const Float3 light=normalize(environment.sunDirection);
     const float ndotl=dot(normal,light);
-    const float direct=std::max(0.0F,ndotl)*environment.sunIntensity;
+    // diffusedSun >= 0: the subsurface-diffused cos(normal, sun) average replaces the point's own.
+    const float direct=(diffusedSun>=0.0F?diffusedSun:std::max(0.0F,ndotl))*environment.sunIntensity;
     Float3 ambient{};
     if (environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
         // The CPU polygon oracle has no scene acceleration structure for secondary rays, so
@@ -290,6 +295,7 @@ Float4 shade(const VoxelMaterialDefinition& material,Float4 base,Float3 normal,
         const float highlight=std::pow(std::max(0.0F,dot(normal,halfVector)),std::max(2.0F,256.0F*(1.0F-material.clearCoatRoughness)));
         lit=add(lit,multiply(environment.sunColor,highlight*material.clearCoat));
     }
+    lit=add(lit,transmitted);   // subsurface translucency (carries its own subsurface colour)
     lit=add(lit,material.emissive);
     if(material.shadingModel==MaterialShadingModel::Emissive)lit=add(rgb,material.emissive);
     return {lit.x,lit.y,lit.z,base.w};
@@ -357,6 +363,8 @@ struct DeferredTriangle {
     const VoxelMaterialDefinition* material{};std::array<ScreenVertex,3> v{};std::uint64_t objectId{};Float4 tint{};
     Float3 cameraPosition{};
     float sortDepth{};bool frontFacing{};std::shared_ptr<const std::vector<PolygonTextureMipChain>> mips;
+    // Subsurface translucency: the mesh's BVH (only for assets with a Subsurface material) and pose.
+    const PolygonBvh* subsurfaceBvh{};RigidTransform transform{};
 };
 
 float projected_diameter(const PolygonBounds& bounds,const RigidTransform& transform,
@@ -414,6 +422,65 @@ bool outside_frustum(const PolygonBounds& bounds,const RigidTransform& transform
     return outside(basis.forward,-camera.nearPlane) || outside(multiply(basis.forward,-1),camera.farPlane) ||
         outside(add(horizontal,basis.right),0) || outside(subtract(horizontal,basis.right),0) ||
         outside(add(vertical,basis.up),0) || outside(subtract(vertical,basis.up),0);
+}
+
+// Sunlight scattered through a Subsurface mesh to its shaded side (see subsurface.hpp). The
+// polygon reference has no sun shadows, so the sunlit far side is taken as unshadowed, as the
+// near side's direct term is.
+Float3 polygon_subsurface_light(const DeferredTriangle& tri,const VoxelMaterialDefinition& material,Float3 worldPosition,
+                                Float3 normal,const RenderEnvironment& environment,const PolygonRenderOptions& options,
+                                PolygonRenderStats& stats){
+    if(!tri.subsurfaceBvh||!material_has_subsurface(material))return {};
+    const float metersPerUnit=options.metersPerUnit>0.0F&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
+    const float maximum=environment.subsurfaceMaxDistanceMeters/metersPerUnit;
+    if(!(maximum>0.0F))return {};
+    const Float3 sun=normalize(environment.sunDirection);
+    normal=normalize(normal);
+    if(!(dot(normal,sun)<0.0F))return {};
+    ++stats.subsurfaceMarches;
+    const SubsurfaceExit exit=march_polygon_subsurface(*tri.subsurfaceBvh,*tri.asset,tri.transform,
+                                                       add(worldPosition,multiply(normal,-1.0e-3F)),sun,maximum);
+    if(!exit.found)return {};
+    ++stats.subsurfaceExits;
+    return subsurface_transmitted_radiance(material,exit,sun,metersPerUnit,1.0F,environment);
+}
+
+// Front-lit subsurface diffusion (see subsurface.hpp and the voxel reference's
+// diffused_sun_term): cos(normal, sun) averaged over the mesh around the point with Burley's
+// profile. Samples are projected onto the mesh along the normal; samples landing on another
+// material or on nothing are left out. No sun shadows here, as for the rest of the polygon path.
+float polygon_diffused_sun(const DeferredTriangle& tri,const VoxelMaterialDefinition& material,Float3 worldPosition,
+                           Float3 normal,const RenderEnvironment& environment,const PolygonRenderOptions& options,
+                           std::size_t pixel,PolygonRenderStats& stats){
+    const float metersPerUnit=options.metersPerUnit>0.0F&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
+    const float d=material.subsurfaceScatterDistanceMeters/metersPerUnit;
+    const Float3 sun=normalize(environment.sunDirection);
+    normal=normalize(normal);
+    const Float3 helper=std::abs(normal.y)<0.9F?Float3{0.0F,1.0F,0.0F}:Float3{1.0F,0.0F,0.0F};
+    const Float3 tangent=normalize(cross3(helper,normal)),bitangent=cross3(normal,tangent);
+    const std::uint32_t samples=options.subsurfaceDiffusionSamples;
+    const std::uint32_t seed=static_cast<std::uint32_t>(pixel)*747796405U+2891336453U;
+    const float rotation=static_cast<float>(seed>>8U)*(1.0F/16777216.0F);
+    float sum=0.0F;std::uint32_t valid=0;
+    for(std::uint32_t i=0;i<samples;++i){
+        const float u=(static_cast<float>(i)+0.5F)/static_cast<float>(samples);
+        const float v=std::fmod(static_cast<float>(i)*0.6180339887F+rotation,1.0F);
+        const float r=burley_sample_radius(u,d);
+        Float3 qn=normal;
+        if(r>1.0e-4F){
+            const float angle=6.2831853F*v;
+            const Float3 offset=add(multiply(tangent,r*std::cos(angle)),multiply(bitangent,r*std::sin(angle)));
+            const float h=std::max(r,1.0e-2F);
+            ++stats.subsurfaceDiffusionProbes;
+            const auto hit=probe_polygon_surface(*tri.subsurfaceBvh,*tri.asset,tri.transform,
+                                                 add(add(worldPosition,offset),multiply(normal,h)),multiply(normal,-1.0F),2.0F*h);
+            if(!hit||hit->materialIndex!=tri.submesh->materialIndex)continue;
+            qn=hit->normal;
+        }
+        ++valid;
+        sum+=std::max(0.0F,dot(qn,sun));
+    }
+    return valid>0U?sum/static_cast<float>(valid):0.0F;
 }
 
 void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,const RenderEnvironment& environment,
@@ -640,7 +707,10 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             ? material_debug_output(options.materialDebugView, base, normal, effective, uv, uv1,
                                     worldPosition, objectPosition, tri.binding->mapping, detailFade,
                                     fragmentParallaxSamples, layerDebugMask, layerDebugCoverage)
-            : shade(effective,base,normal,environment,tri.frontFacing);
+            : shade(effective,base,normal,environment,tri.frontFacing,
+                    polygon_subsurface_light(tri,effective,worldPosition,normal,environment,options,stats),
+                    tri.subsurfaceBvh&&material_has_subsurface(effective)&&options.subsurfaceDiffusionSamples>0U
+                        ? polygon_diffused_sun(tri,effective,worldPosition,normal,environment,options,index,stats) : -1.0F);
         if(!debugView&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
             const float alpha=std::clamp(shaded.w,0.0F,1.0F);const Float4 old=target.hdrColor[index];
             target.hdrColor[index]={shaded.x*alpha+old.x*(1-alpha),shaded.y*alpha+old.y*(1-alpha),shaded.z*alpha+old.z*(1-alpha),1};
@@ -788,6 +858,19 @@ PolygonRenderStats ReferencePolygonRenderer::render(
     const float bias=std::isfinite(options.lodBias) ? std::clamp(options.lodBias,-4.0F,4.0F) : 0.0F;
     const float hysteresis=std::isfinite(options.lodHysteresis) ? std::clamp(options.lodHysteresis,0.0F,0.49F) : 0.0F;
     std::vector<DeferredTriangle> transparent;
+    // BVHs for meshes with a Subsurface material, built once per asset per render.
+    std::unordered_map<const CookedPolygonAsset*, std::unique_ptr<PolygonBvh>> subsurfaceBvhs;
+    const auto subsurface_bvh = [&](const CookedPolygonAsset& asset) -> const PolygonBvh* {
+        if (!(environment.subsurfaceMaxDistanceMeters > 0.0F) ||
+            options.materialDebugView != PolygonMaterialDebugView::Lit) return nullptr;
+        auto [it, inserted] = subsurfaceBvhs.try_emplace(&asset);
+        if (inserted && std::any_of(asset.materials.begin(), asset.materials.end(),
+                                    [](const VoxelMaterialDefinition& m) { return material_has_subsurface(m); })) {
+            auto bvh = std::make_unique<PolygonBvh>();
+            if (bvh->build(asset)) it->second = std::move(bvh);
+        }
+        return it->second.get();
+    };
     for (const PolygonRenderInstance& instance : instances) {
         ++stats.submittedInstances;
         if (!instance.visible || instance.asset == nullptr) {
@@ -826,6 +909,7 @@ PolygonRenderStats ReferencePolygonRenderer::render(
         }
         if(asset!=instance.asset)++stats.lodSelections;
         const auto mips=texture_mips(*asset,selected);
+        const PolygonBvh* subsurfaceBvh=subsurface_bvh(*asset);
 
         for (const PolygonSubmesh& submesh : asset->submeshes) {
             if (submesh.materialIndex >= asset->materials.size()) {
@@ -869,7 +953,9 @@ PolygonRenderStats ReferencePolygonRenderer::render(
                     camera.position,
                     (vertices[0].cameraZ + vertices[1].cameraZ + vertices[2].cameraZ) / 3.0F,
                     frontFacing,
-                    mips};
+                    mips,
+                    subsurfaceBvh,
+                    instance.transform};
                 if (material.blendMode == MaterialBlendMode::Translucent ||
                     material.baseColor.w < 0.999F) {
                     transparent.push_back(std::move(triangle));

@@ -181,6 +181,7 @@ add_library(dve_core
     src/nurbs_modeling.cpp
     src/nurbs_attachment.cpp
     src/nurbs_tessellation.cpp
+    src/nurbs_trimming.cpp
     src/nurbs_queries.cpp
     src/nurbs_degree.cpp
     src/polygon_asset.cpp
@@ -871,6 +872,8 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_cad_step.cpp
         src/editor_modeling_topology.cpp
         src/editor_nurbs.cpp
+        src/editor_nurbs_surface.cpp
+        src/editor_native_nurbs_surface.cpp
         src/editor_native_nurbs.cpp
         src/editor_native_nurbs_construction.cpp
         src/editor_native_nurbs_topology.cpp
@@ -2912,6 +2915,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_nurbs_tools_tests tests/test_editor_nurbs_tools.cpp)
         target_link_libraries(dve_editor_nurbs_tools_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_tools_tests COMMAND dve_editor_nurbs_tools_tests)
+        add_executable(dve_editor_nurbs_surface_batch_tests tests/test_editor_nurbs_surface_batch.cpp)
+        target_link_libraries(dve_editor_nurbs_surface_batch_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_nurbs_surface_batch_tests COMMAND dve_editor_nurbs_surface_batch_tests)
         add_executable(dve_editor_nurbs_tests tests/test_editor_nurbs.cpp)
         target_link_libraries(dve_editor_nurbs_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_tests COMMAND dve_editor_nurbs_tests)
@@ -3072,6 +3078,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_material_authoring_tests tests/test_material_authoring.cpp)
     target_link_libraries(dve_material_authoring_tests PRIVATE dve::core)
     add_test(NAME dve_material_authoring_tests COMMAND dve_material_authoring_tests)
+
+    add_executable(dve_nurbs_trimming_tests tests/test_nurbs_trimming.cpp)
+    target_link_libraries(dve_nurbs_trimming_tests PRIVATE dve::core)
+    add_test(NAME dve_nurbs_trimming_tests COMMAND dve_nurbs_trimming_tests)
 
     add_executable(dve_material_mapping_tests tests/test_material_mapping.cpp)
     target_link_libraries(dve_material_mapping_tests PRIVATE dve::core)

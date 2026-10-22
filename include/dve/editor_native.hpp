@@ -1091,6 +1091,7 @@ public:
         return {drawListCache_.rebuild_count(), previewDrawListCache_.rebuild_count(), selectionDiagnosticsRebuilds_};
     }
     [[nodiscard]] std::vector<EditorText3DDrawItem> text3d_draw_items() const;
+    bool edit_nurbs_surface_uv_control(EditorObjectId,std::uint64_t,std::size_t,std::array<double,2>);
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
     [[nodiscard]] bool hierarchy_collapsed(EditorObjectId id) const noexcept { return collapsedHierarchy_.contains(id); }
@@ -1215,6 +1216,7 @@ public:
     bool create_nurbs_source(const NurbsSource&,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement=std::nullopt);
     bool dispatch_nurbs_construction(std::string_view);
     bool dispatch_nurbs_topology(std::string_view);
+    bool dispatch_nurbs_surface(std::string_view);
     void commit_nurbs_construction_field();
     bool nurbs_construction_pointer(PointerButton,int,int);
     void draw_nurbs_construction(const IEditorCanvas&,UiRect) const;

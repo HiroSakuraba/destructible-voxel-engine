@@ -9,6 +9,7 @@
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/caustic_map.hpp"
 #include "dve/render/caustic_photons.hpp"
+#include "dve/render/subsurface.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 
 #include <array>
@@ -133,6 +134,14 @@ void test_mixed_material_exit_and_submesh_order() {
     }
     std::printf("shuffled submeshes: worst 1 - cos(normal error) %.6f\n", worst);
     check(worst < 1e-3F, "normals come from the triangle that was hit, whatever the submesh order");
+    // The subsurface march (and its diffusion probes) read the same triangles (Codex on #182).
+    PolygonBvh bvh;
+    check(bvh.build(ball), "ball BVH");
+    const SubsurfaceExit pole = march_polygon_subsurface(bvh, ball, {}, {0.0F, -1.999F, 0.0F}, {0, 1, 0}, 10.0F);
+    check(pole.found && pole.normal.y > 0.999F && std::abs(pole.thickness - 3.998F) < 0.02F,
+          "subsurface march through the shuffled ball: out at the top pole with the right normal");
+    const auto probe = probe_polygon_surface(bvh, ball, {}, {0.5F, 10.0F, 0.3F}, {0, -1, 0}, 20.0F);
+    check(probe && dot(probe->normal, normalize(probe->position)) > 0.999F, "subsurface probe normal");
 }
 
 void test_sun_direction_and_sparse_bounds() {

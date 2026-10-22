@@ -17,6 +17,8 @@ is fixed and tested in `tests/test_caustics_review.cpp`.
   submeshes start past 0 or are out of order. Hits now carry `firstIndex`, the triangle's
   index-buffer offset; `triangleIndex` keeps its meaning for picking and physics.
   - Test: a ball whose lower half comes first in the buffer has exact sphere normals.
+  - The subsurface march and diffusion probes (now on main) made the same assumption (Codex on
+    #182) and use `firstIndex` too.
 
 ## Photons (`caustic_photons.cpp`)
 

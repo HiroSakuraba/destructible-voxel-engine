@@ -4,12 +4,15 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <functional>
 #include <thread>
 #include <vector>
 
+#include "dve/polygon_bvh.hpp"
 #include "dve/query.hpp"
+#include "dve/render/caustic_map.hpp"
 #include "dve/render/radiance_cascades_spwi.hpp"
 #include "dve/render/ray_lighting_reference.hpp"
 
@@ -133,10 +136,25 @@ Float3 sample_sun_disk(Float3 sunDirection, float angularRadius, std::uint32_t s
 
 // Secondary rays go through spwi::VoxelSceneTracer, whose hits are bit-identical to
 // raycast_voxels_transformed over the same instances (tested in dve_rc_spwi_tests).
+// Extra sun inputs: polygon occluders and caustic light.
+struct SunExtras {
+    struct Occluder { std::shared_ptr<const PolygonBvh> bvh; RigidTransform transform; };
+    std::vector<Occluder> occluders;
+    const CausticMap* caustics{};
+    [[nodiscard]] bool polygon_occluded(Float3 origin, Float3 direction, float maximumDistance) const {
+        for (const Occluder& o : occluders)
+            if (o.bvh->raycast(inverse_transform_point(o.transform, origin), inverse_transform_vector(o.transform, direction),
+                               maximumDistance)) return true;
+        return false;
+    }
+};
+
 float hard_visibility(const spwi::VoxelSceneTracer& tracer, Float3 origin,
-                      Float3 direction, float maximumDistance, VoxelReferenceRenderStats& stats) {
+                      Float3 direction, float maximumDistance, VoxelReferenceRenderStats& stats,
+                      const SunExtras* extras = nullptr) {
     ++stats.shadowRays;
-    if (tracer.occluded(origin, direction, maximumDistance)) {
+    if (tracer.occluded(origin, direction, maximumDistance) ||
+        (extras && extras->polygon_occluded(origin, direction, maximumDistance))) {
         ++stats.shadowBlockedRays;
         return 0.0F;
     }
@@ -145,7 +163,8 @@ float hard_visibility(const spwi::VoxelSceneTracer& tracer, Float3 origin,
 
 float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
                         Float3 normal, const RenderEnvironment& environment,
-                        const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
+                        const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats,
+                        const SunExtras* extras = nullptr) {
     if (environment.shadowMode == ShadowMode::Off) return 1.0F;
     const Float3 sun = normalize(environment.sunDirection);
     const Float3 origin = add(point, multiply(normal, distances.shadowBias));
@@ -154,10 +173,10 @@ float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
     };
     if (environment.shadowMode == ShadowMode::Hard)
         return weighted(hard_visibility(tracer, origin, sun,
-                                        distances.shadowMaxDistance, stats));
+                                        distances.shadowMaxDistance, stats, extras));
     if (environment.shadowMode == ShadowMode::Contact)
         return weighted(hard_visibility(tracer, origin, sun,
-                                        distances.contactShadowDistance, stats));
+                                        distances.contactShadowDistance, stats, extras));
 
     const std::uint32_t samples = std::clamp(environment.shadowSamples, 1U, 16U);
     float visible = 0.0F;
@@ -165,12 +184,12 @@ float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
         const Float3 direction = sample_sun_disk(sun, environment.shadowSoftnessRadians,
                                                  sample, samples, pixelSeed);
         visible += hard_visibility(tracer, origin, direction,
-                                   distances.shadowMaxDistance, stats);
+                                   distances.shadowMaxDistance, stats, extras);
     }
     visible /= static_cast<float>(samples);
     if (environment.shadowMode == ShadowMode::Hybrid) {
         const float contact = hard_visibility(tracer, origin, sun,
-                                              distances.contactShadowDistance, stats);
+                                              distances.contactShadowDistance, stats, extras);
         visible = std::min(visible, contact);
     }
     return weighted(visible);
@@ -208,12 +227,13 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
 
 Float4 shade_voxel(const VoxelMaterialDefinition& material, Float3 worldNormal,
                    const RenderEnvironment& environment, float visibility,
-                   Float3 indirect) noexcept {
+                   Float3 indirect, Float3 caustic = {}) noexcept {
     if (material.shadingModel == MaterialShadingModel::Unlit) return material.baseColor;
     const Float3 light = normalize(environment.sunDirection);
     const float ndotl = std::max(0.0F, dot(worldNormal, light));
-    const Float3 direct = multiply(environment.sunColor,
-                                   environment.sunIntensity * ndotl * visibility);
+    // Caustic irradiance is already relative to full sun head on (it carries its own cosine).
+    const Float3 direct = add3(multiply(environment.sunColor, environment.sunIntensity * ndotl * visibility),
+                               multiply3(environment.sunColor, multiply(caustic, environment.sunIntensity)));
     const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
     Float3 lit = multiply3(base, add3(direct, multiply(indirect, 1.0F - material.metallic)));
     lit = add3(lit, material.emissive);
@@ -289,7 +309,7 @@ VoxelReferenceRenderStats render_radiance_cascades(
     const RadianceCascadeSettings& settings, const spwi::VoxelSceneTracer& tracer,
     std::span<const VoxelReferenceInstance> instances, const PolygonCamera& camera,
     const RenderEnvironment& environment, const VoxelLightingDistances& distances,
-    PolygonRenderTarget& target) {
+    PolygonRenderTarget& target, const SunExtras& extras) {
     VoxelReferenceRenderStats stats;
     for (const VoxelReferenceInstance& instance : instances) {
         ++stats.submittedInstances;
@@ -312,9 +332,10 @@ VoxelReferenceRenderStats render_radiance_cascades(
         if (fallback) ++stats.materialFallbacks;
         const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
         const float visibility = shadow_visibility(tracer, texel.position, texel.normal,
-                                                   environment, distances, seed, stats);
+                                                   environment, distances, seed, stats, &extras);
+        const Float3 caustic = extras.caustics ? extras.caustics->irradiance(texel.position, texel.normal) : Float3{};
         target.hdrColor[index] = shade_voxel(material, texel.normal, environment, visibility,
-                                             gi.indirect[index]);
+                                             gi.indirect[index], caustic);
         target.depth[index] = texel.normalizedDepth;
         target.objectId[index] = instance.objectId != 0U ? instance.objectId : instance.object->id();
         target.materialIndex[index] = texel.material;
@@ -338,9 +359,26 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     const spwi::VoxelSceneTracer tracer(instances);
     // Metre-authored distances -> voxel units, once per frame (GPU: MetersToVoxelUnits).
     const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
+    SunExtras extras;
+    extras.caustics = caustics;
+    {
+        std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>>> built;
+        for (const PolygonRenderInstance& polygon : sunOccluders) {
+            if (!polygon.visible || !polygon.asset) continue;
+            std::shared_ptr<const PolygonBvh> bvh;
+            for (const auto& [asset, existing] : built) if (asset == polygon.asset) bvh = existing;
+            if (!bvh) {
+                auto fresh = std::make_shared<PolygonBvh>();
+                if (!fresh->build(*polygon.asset)) continue;
+                bvh = fresh;
+                built.emplace_back(polygon.asset, bvh);
+            }
+            extras.occluders.push_back({bvh, polygon.transform});
+        }
+    }
     if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades)
         return render_radiance_cascades(radianceCascades, tracer, instances, camera, environment,
-                                        distances, target);
+                                        distances, target, extras);
 
     const CameraBasis basis = make_basis(camera, target);
     const float maximumDistance = camera.farPlane * 1.5F;
@@ -375,12 +413,14 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
                     const float visibility = shadow_visibility(tracer, hit->worldPosition,
                                                                hit->worldNormal, environment, distances,
-                                                               seed, local);
+                                                               seed, local, &extras);
+                    const Float3 caustic = extras.caustics
+                        ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal) : Float3{};
                     const Float3 indirect = global_illumination(tracer, hit->worldPosition,
                                                                  hit->worldNormal, environment, distances,
                                                                  seed, local);
                     target.hdrColor[index] = shade_voxel(material, hit->worldNormal,
-                                                         environment, visibility, indirect);
+                                                         environment, visibility, indirect, caustic);
                     target.depth[index] = normalizedDepth;
                     target.objectId[index] = instance.objectId != 0U
                         ? instance.objectId : instance.object->id();

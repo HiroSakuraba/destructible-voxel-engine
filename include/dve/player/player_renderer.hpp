@@ -93,6 +93,9 @@ struct CpuPlayerRendererOptions {
     float exposure{1.0F};
     // Fill the background with a sky gradient derived from RenderEnvironment::skyColor.
     bool skyGradient{true};
+    // Reference quality, scenes with glass or water (transmission > 0): sunlight grid cells per side
+    // of the caustic map (caustic_map.hpp); polygons then also cast sun shadows on voxels. 0 = off.
+    std::uint32_t causticResolution{256};
 };
 
 // `blitter` may be null (headless: render + readback only). It must outlive the renderer.

@@ -49,6 +49,16 @@ enum class ShadowMode : std::uint32_t {
     Hybrid = 4,
 };
 
+// Where the sky light comes from. Colors: the hand-set skyColor / groundColor blend and a sun of
+// fixed sunColor (the original behaviour). Physical: an Earth-like atmosphere (Rayleigh, Mie and
+// ozone; render/atmosphere.hpp) lit by the sun drives the background sky, the sun's colour at the
+// ground (orange at sunset, gone below the horizon), the sky light on surfaces and in their
+// reflections, and aerial perspective; skyColor / groundColor are then unused.
+enum class SkyMode : std::uint32_t {
+    Colors = 0,
+    Physical = 1,
+};
+
 // The Godot-"Environment"-resource-shaped settings object: lighting, global illumination,
 // shadows, exposure, tonemap, and bloom live in one validated place. CPU reference rendering,
 // GPU constant packing, scripts, and editor settings all consume the same defaults. Distances
@@ -102,6 +112,24 @@ struct RenderEnvironment {
     float fogDensityPerMeter{0.0F};
     float fogStartMeters{0.0F};
     Float3 fogColor{0.62F, 0.68F, 0.76F};
+
+    // Physical sky (skyMode Physical). sunColor x sunIntensity is then the sunlight arriving at the
+    // top of the atmosphere; the air in between colours and dims it. The scales multiply the
+    // Earth densities (Bruneton / Hillaire values): Rayleigh air (blue sky, red sunsets), Mie
+    // aerosols (haze, the bright halo around the sun; 1 = a clear day, 5-20 = hazy) and ozone
+    // (the deep blue of twilight). mieAnisotropy is the Cornette-Shanks g (forward scattering).
+    // World y = 0 sits at observerAltitudeMeters. Real aerial perspective is faint over the few
+    // hundred metres of a game scene; aerialPerspectiveScale multiplies the distances it sees
+    // (1 = physical). sunDisc scales the drawn solar disc (0 = none).
+    SkyMode skyMode{SkyMode::Colors};
+    float atmosphereRayleighScale{1.0F};
+    float atmosphereMieScale{1.0F};
+    float atmosphereOzoneScale{1.0F};
+    float atmosphereMieAnisotropy{0.8F};
+    float atmosphereGroundAlbedo{0.3F};
+    float observerAltitudeMeters{0.0F};
+    float aerialPerspectiveScale{1.0F};
+    float sunDisc{1.0F};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
 };

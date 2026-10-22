@@ -1403,6 +1403,14 @@ int l_set_environment_scalar(lua_State* L) {
     else if (name == "AmbientOcclusionMaxDistanceMeters") environment.ambientOcclusionMaxDistanceMeters = value;
     else if (name == "FogDensityPerMeter") environment.fogDensityPerMeter = value;
     else if (name == "FogStartMeters") environment.fogStartMeters = value;
+    else if (name == "AtmosphereRayleighScale") environment.atmosphereRayleighScale = value;
+    else if (name == "AtmosphereMieScale") environment.atmosphereMieScale = value;
+    else if (name == "AtmosphereOzoneScale") environment.atmosphereOzoneScale = value;
+    else if (name == "AtmosphereMieAnisotropy") environment.atmosphereMieAnisotropy = value;
+    else if (name == "AtmosphereGroundAlbedo") environment.atmosphereGroundAlbedo = value;
+    else if (name == "ObserverAltitudeMeters") environment.observerAltitudeMeters = value;
+    else if (name == "AerialPerspectiveScale") environment.aerialPerspectiveScale = value;
+    else if (name == "SunDisc") environment.sunDisc = value;
     else known = false;
     if (!known) {
         lua_pushboolean(L, 0);
@@ -1498,6 +1506,20 @@ int l_set_environment_shadow_mode(lua_State* L) {
     return 1;
 }
 
+int l_set_environment_sky_mode(lua_State* L) {
+    const std::string name = luaL_checkstring(L, 1);
+    RenderEnvironment& environment = impl_from_state(L)->environment;
+    if (name == "colors") environment.skyMode = SkyMode::Colors;
+    else if (name == "physical") environment.skyMode = SkyMode::Physical;
+    else {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "sky mode must be \"colors\" or \"physical\"");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 int l_get_environment(lua_State* L) {
     const RenderEnvironment& environment = impl_from_state(L)->environment;
     lua_newtable(L);
@@ -1533,6 +1555,15 @@ int l_get_environment(lua_State* L) {
     lua_pushnumber(L, environment.fogDensityPerMeter); lua_setfield(L, -2, "fog_density_per_meter");
     lua_pushnumber(L, environment.fogStartMeters); lua_setfield(L, -2, "fog_start_meters");
     push_float3_table(L, environment.fogColor); lua_setfield(L, -2, "fog_color");
+    lua_pushstring(L, environment.skyMode == SkyMode::Physical ? "physical" : "colors"); lua_setfield(L, -2, "sky_mode");
+    lua_pushnumber(L, environment.atmosphereRayleighScale); lua_setfield(L, -2, "atmosphere_rayleigh_scale");
+    lua_pushnumber(L, environment.atmosphereMieScale); lua_setfield(L, -2, "atmosphere_mie_scale");
+    lua_pushnumber(L, environment.atmosphereOzoneScale); lua_setfield(L, -2, "atmosphere_ozone_scale");
+    lua_pushnumber(L, environment.atmosphereMieAnisotropy); lua_setfield(L, -2, "atmosphere_mie_anisotropy");
+    lua_pushnumber(L, environment.atmosphereGroundAlbedo); lua_setfield(L, -2, "atmosphere_ground_albedo");
+    lua_pushnumber(L, environment.observerAltitudeMeters); lua_setfield(L, -2, "observer_altitude_meters");
+    lua_pushnumber(L, environment.aerialPerspectiveScale); lua_setfield(L, -2, "aerial_perspective_scale");
+    lua_pushnumber(L, environment.sunDisc); lua_setfield(L, -2, "sun_disc");
     lua_pushnumber(L, environment.shadowMaxDistanceMeters); lua_setfield(L, -2, "shadow_max_distance_meters");
     lua_pushnumber(L, environment.contactShadowDistanceMeters); lua_setfield(L, -2, "contact_shadow_distance_meters");
     lua_pushnumber(L, environment.shadowBiasMeters); lua_setfield(L, -2, "shadow_bias_meters");
@@ -1746,7 +1777,7 @@ int l_camera_load_runtime_state(lua_State* L) {
 // --- Save games: world.on_save / on_load, save_game / load_game -----------------------------
 
 constexpr std::uint32_t kScriptStateMagic = 0x534C5644U;   // "DVLS"
-constexpr std::uint32_t kScriptStateVersion = 3U;   // 2 adds environment, HUD, material overrides, named timers; 3 fog
+constexpr std::uint32_t kScriptStateVersion = 4U;   // 2 adds environment, HUD, material overrides, named timers; 3 fog; 4 sky
 constexpr int kScriptStateMaximumDepth = 32;
 constexpr std::uint32_t kScriptStateMaximumEntries = 1U << 20U;
 constexpr std::size_t kScriptStateMaximumBytes = 16U * 1024U * 1024U;
@@ -2080,6 +2111,27 @@ bool read_environment_fog(ScriptStateReader& r, RenderEnvironment& e) {
     return true;
 }
 
+// Version 4: the sky mode and the atmosphere after the fog.
+void write_environment_sky(ScriptStateWriter& w, const RenderEnvironment& e) {
+    w.u32(static_cast<std::uint32_t>(e.skyMode));
+    for (const float value : {e.atmosphereRayleighScale, e.atmosphereMieScale, e.atmosphereOzoneScale, e.atmosphereMieAnisotropy,
+                              e.atmosphereGroundAlbedo, e.observerAltitudeMeters, e.aerialPerspectiveScale, e.sunDisc})
+        w.u32(std::bit_cast<std::uint32_t>(value));
+}
+
+bool read_environment_sky(ScriptStateReader& r, RenderEnvironment& e) {
+    std::uint32_t mode{};
+    std::uint32_t raw[8]{};
+    if (!r.u32(mode)) return false;
+    for (std::uint32_t& value : raw) if (!r.u32(value)) return false;
+    if (mode > 1U) return r.bad("script state has an invalid sky mode");
+    e.skyMode = static_cast<SkyMode>(mode);
+    float* fields[8] = {&e.atmosphereRayleighScale, &e.atmosphereMieScale, &e.atmosphereOzoneScale, &e.atmosphereMieAnisotropy,
+                        &e.atmosphereGroundAlbedo, &e.observerAltitudeMeters, &e.aerialPerspectiveScale, &e.sunDisc};
+    for (int i = 0; i < 8; ++i) *fields[i] = std::bit_cast<float>(raw[i]);
+    return true;
+}
+
 bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& contents, std::string* error) {
     ScriptStateReader r{bytes, 0U, {}};
     const auto failWith = [&]() {
@@ -2089,7 +2141,7 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
     std::uint32_t magic{}, version{}, count{};
     if (!r.u32(magic) || !r.u32(version)) return failWith();
     if (magic != kScriptStateMagic) return r.bad("not a DVE script state blob"), failWith();
-    if (version != 1U && version != 2U && version != kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
+    if (version < 1U || version > kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
     contents.version = version;
     if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid global count"), failWith();
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -2118,6 +2170,7 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
         RenderEnvironment environment;
         if (!read_environment(r, environment)) return failWith();
         if (version >= 3U && !read_environment_fog(r, environment)) return failWith();
+        if (version >= 4U && !read_environment_sky(r, environment)) return failWith();
         contents.environment = environment;
         if (!r.text(contents.hudPrompt) || !r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid HUD state"), failWith();
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -2310,6 +2363,7 @@ constexpr luaL_Reg kWorldFunctions[] = {
     {"set_environment_tonemap_operator", l_set_environment_tonemap_operator},
     {"set_environment_gi_mode", l_set_environment_gi_mode},
     {"set_environment_shadow_mode", l_set_environment_shadow_mode},
+    {"set_environment_sky_mode", l_set_environment_sky_mode},
     {"get_environment", l_get_environment},
     {"camera_force_live", l_camera_force_live},
     {"camera_clear_forced_live", l_camera_clear_forced_live},
@@ -2595,6 +2649,7 @@ std::optional<std::vector<std::byte>> GameScriptHost::save_state(std::string* er
     }
     write_environment(w, impl_->environment);
     write_environment_fog(w, impl_->environment);
+    write_environment_sky(w, impl_->environment);
     w.bytes(impl_->hud.interaction_prompt().data(), impl_->hud.interaction_prompt().size());
     w.u32(static_cast<std::uint32_t>(impl_->hud.tools().size()));
     for (const ui::ToolWheelEntry& tool : impl_->hud.tools()) {

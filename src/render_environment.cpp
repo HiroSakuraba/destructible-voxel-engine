@@ -55,6 +55,15 @@ bool RenderEnvironment::validate(std::string* error) const noexcept {
     if (!std::isfinite(fogDensityPerMeter) || fogDensityPerMeter < 0.0F || fogDensityPerMeter > 10.0F)
         return fail("fogDensityPerMeter must be finite and in [0,10]");
     if (!std::isfinite(fogStartMeters) || fogStartMeters < 0.0F) return fail("fogStartMeters must be finite and non-negative");
+    if (skyMode != SkyMode::Colors && skyMode != SkyMode::Physical) return fail("skyMode must be Colors or Physical");
+    const auto in = [](float v, float lo, float hi) { return v >= lo && v <= hi; };   // false for NaN
+    if (!in(atmosphereRayleighScale, 0.0F, 100.0F) || !in(atmosphereMieScale, 0.0F, 100.0F) || !in(atmosphereOzoneScale, 0.0F, 100.0F))
+        return fail("atmosphere density scales must be in [0,100]");
+    if (!in(atmosphereMieAnisotropy, -0.99F, 0.99F)) return fail("atmosphereMieAnisotropy must be in [-0.99,0.99]");
+    if (!in(atmosphereGroundAlbedo, 0.0F, 1.0F)) return fail("atmosphereGroundAlbedo must be in [0,1]");
+    if (!in(observerAltitudeMeters, 0.0F, 90000.0F)) return fail("observerAltitudeMeters must be in [0,90000]");
+    if (!in(aerialPerspectiveScale, 0.0F, 1.0e6F)) return fail("aerialPerspectiveScale must be in [0,1e6]");
+    if (!in(sunDisc, 0.0F, 100.0F)) return fail("sunDisc must be in [0,100]");
     if (!std::isfinite(fogColor.x) || !std::isfinite(fogColor.y) || !std::isfinite(fogColor.z) || fogColor.x < 0.0F ||
         fogColor.y < 0.0F || fogColor.z < 0.0F)
         return fail("fogColor must be finite and non-negative");

@@ -18,6 +18,7 @@
 #include "dve/render/ray_lighting_reference.hpp"
 #include "dve/render/subsurface.hpp"
 #include "dve/render/surface_shading.hpp"
+#include "dve/render/atmosphere.hpp"
 #include "dve/voxel_normal_map.hpp"
 
 namespace dve::render {
@@ -375,7 +376,7 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
         ? voxel_ambient_occlusion(tracer, extras, point, normal, pixelIndex, environment, distances, stats) : 1.0F;
     if (aoOut) *aoOut = ao;
     if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere)
-        return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity * ao);
+        return multiply(sky_irradiance(environment, normal), environment.globalIlluminationIntensity * ao);
 
     const std::uint32_t samples = std::clamp(environment.globalIlluminationSamples, 1U, 16U);
     const Float3 origin = add(point, multiply(normal, distances.shadowBias));
@@ -424,7 +425,7 @@ LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnv
     if (material.shadingModel == MaterialShadingModel::Unlit) { out.emission = base; return out; }
     if (material.shadingModel == MaterialShadingModel::Emissive) { out.emission = add3(base, material.emissive); return out; }
     const Float3 sun = normalize(environment.sunDirection);
-    const Float3 sunIrradiance = multiply(environment.sunColor, environment.sunIntensity);
+    const Float3 sunIrradiance = sun_irradiance(environment);
     const Float3 v = in.viewDirection;
     // Diffuse: base x (1 - metallic) x (1 - F) x sun x sunTerm (Lambert, as shade_direct_light's
     // diffuse lobe x pi, but with the subsurface-diffused sun term where there is one).
@@ -843,6 +844,7 @@ HybridReferenceRenderStats render_hybrid_reference(
     voxelRenderer.radianceCascades.threadCount = voxelThreadCount;
     voxelRenderer.occlusionPolygons = polygons;   // voxels' AO rays see the polygons too
     stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
+    (void)paint_sky_background(target, camera, environment);   // before polygons, so glass blends over it
     PolygonRenderOptions options = polygonOptions;
     options.preserveExistingDepth = true;
     options.metersPerUnit = metersPerVoxel;
@@ -854,6 +856,7 @@ HybridReferenceRenderStats render_hybrid_reference(
         options.occlusionRay = occlusion->ray();
     }
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);
+    (void)apply_aerial_perspective(target, camera, environment, metersPerVoxel);
     (void)apply_distance_fog(target, camera, environment, metersPerVoxel);
     return stats;
 }

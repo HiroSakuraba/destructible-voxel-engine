@@ -122,7 +122,7 @@ public:
         camera.farPlane *= toUnits;
 
         const RenderEnvironment environment = apply_cpu_render_quality(view.environment, options_.quality);
-        clear_background(environment);
+        clear_background(environment, camera);
         render::ReferenceVoxelRenderer voxelRenderer;
         voxelRenderer.metersPerVoxel = voxelSize;
         voxelRenderer.threadCount = options_.threadCount;
@@ -167,6 +167,7 @@ public:
         } else {
             polygonRenderCache_.clear();
         }
+        (void)render::apply_aerial_perspective(target_, camera, environment, voxelSize);
         (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
         stats_.renderMilliseconds = milliseconds_since(start);
 
@@ -228,8 +229,9 @@ private:
             it=it->second.lastFrame==polygonFrame_ ? std::next(it) : polygonLods_.erase(it);
     }
 
-    void clear_background(const RenderEnvironment& environment) {
+    void clear_background(const RenderEnvironment& environment, const render::PolygonCamera& camera) {
         target_.clear({environment.skyColor.x, environment.skyColor.y, environment.skyColor.z, 1.0F}, 1.0F);
+        if (render::paint_sky_background(target_, camera, environment) > 0U) return;   // Physical sky
         if (!options_.skyGradient) return;
         for (std::uint32_t y = 0; y < target_.height; ++y) {
             const float t = static_cast<float>(y) / static_cast<float>(std::max(1U, target_.height - 1U));

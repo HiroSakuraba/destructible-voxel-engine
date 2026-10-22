@@ -1,4 +1,5 @@
 #include "dve/render/radiance_cascades_spwi.hpp"
+#include "dve/render/atmosphere.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <algorithm>
@@ -499,10 +500,10 @@ std::optional<VoxelTraceHit> VoxelSceneTracer::trace(Float3 origin, Float3 direc
 
 // ---- Radiance model ------------------------------------------------------------------------
 
+// The sky along a direction (render::sky_radiance: the sky/ground blend in Colors mode, the
+// physical atmosphere in Physical mode).
 Float3 environment_radiance(const RenderEnvironment& environment, Float3 direction) noexcept {
-    const Float3 normalized = normalize(direction);
-    const float t = std::clamp(0.5F + 0.5F * normalized.y, 0.0F, 1.0F);
-    return add3(multiply(environment.groundColor, 1.0F - t), multiply(environment.skyColor, t));
+    return render::sky_radiance(environment, direction);
 }
 
 namespace {
@@ -522,9 +523,13 @@ Float3 hit_radiance(const VoxelSceneTracer& tracer, const VoxelTraceHit& hit,
         sunVisibility =
             tracer.occluded(origin, sun, lighting.distances.shadowMaxDistance) ? 0.0F : 1.0F;
     }
+    // Colors mode passes colour and intensity as before (bit-identical); Physical mode the sun
+    // through the air.
+    const bool physical = environment.skyMode == SkyMode::Physical;
     return one_bounce_diffuse_radiance(base, material.metallic, material.emissive,
-                                       environment_radiance(environment, normal),
-                                       environment.sunColor, environment.sunIntensity, normal,
+                                       render::sky_irradiance(environment, normal),
+                                       physical ? render::sun_irradiance(environment) : environment.sunColor,
+                                       physical ? 1.0F : environment.sunIntensity, normal,
                                        environment.sunDirection, sunVisibility);
 }
 } // namespace

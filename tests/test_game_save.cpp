@@ -1155,6 +1155,9 @@ void test_script_state_v2() {
             world.set_environment_scalar("FogDensityPerMeter", 0.02)
             world.set_environment_scalar("FogStartMeters", 4)
             world.set_environment_vector("FogColor", 0.5, 0.6, 0.7)
+            world.set_environment_sky_mode("physical")
+            world.set_environment_scalar("AtmosphereMieScale", 6)
+            world.set_environment_scalar("AerialPerspectiveScale", 40)
             world.hud_set_interaction_prompt("Press E")
             world.hud_set_tools({ {id="pick", label="Pickaxe"}, {id="bomb", label="Bomb"}, {id="off", label="Off", enabled=false} })
             world.hud_select_next_tool()
@@ -1207,6 +1210,7 @@ void test_script_state_v2() {
     const RenderEnvironment& env = b.environment();
     CHECK(env.sunIntensity == 5.5F && env.skyColor.z == 0.9F && env.shadowMode == ShadowMode::Hard);
     CHECK(env.fogDensityPerMeter == 0.02F && env.fogStartMeters == 4.0F && env.fogColor.y == 0.6F);   // v3
+    CHECK(env.skyMode == SkyMode::Physical && env.atmosphereMieScale == 6.0F && env.aerialPerspectiveScale == 40.0F);   // v4
     CHECK(b.hud_model().interaction_prompt() == "Press E");
     CHECK(b.hud_model().tools().size() == 3U && b.hud_model().selected_tool() && b.hud_model().selected_tool()->id == "bomb");
     CHECK(b.material_library().runtime_scalar(7, "Roughness") == 0.2F);
@@ -1252,9 +1256,9 @@ void test_script_state_v2() {
     auto v1Blob = v1.save_state(&error);
     CHECK(v1Blob.has_value());
     if (v1Blob) {
-        // Strip the v2/v3 tail: environment (30*4 + 5*4), fog (5*4), empty prompt (4), no tools
-        // (4), selection (8), no materials (4), no named timers (4); then mark it version 1.
-        v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 4U + 4U + 8U + 4U + 4U));
+        // Strip the v2-v4 tail: environment (30*4 + 5*4), fog (5*4), sky (9*4), empty prompt (4),
+        // no tools (4), selection (8), no materials (4), no named timers (4); then mark it version 1.
+        v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 36U + 4U + 4U + 8U + 4U + 4U));
         (*v1Blob)[4] = std::byte{1};
         GameWorld worldV1b(std::make_unique<ReferenceRigidBodyWorld>());
         GameScriptHost v1b(worldV1b);

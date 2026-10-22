@@ -3,6 +3,7 @@
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/surface_shading.hpp"
+#include "dve/render/atmosphere.hpp"
 #include "dve/render/subsurface.hpp"
 
 #include <algorithm>
@@ -268,12 +269,6 @@ MaterialSurfaceSample sample_layer_surface(
     return sample;
 }
 
-// The sky/ground hemisphere around a direction (spwi::environment_radiance, ShadeAmbient).
-Float3 hemisphere_light(const RenderEnvironment& environment,Float3 direction) noexcept {
-    const float t=std::clamp(0.5F+0.5F*normalize(direction).y,0.0F,1.0F);
-    return add(multiply(environment.groundColor,1.0F-t),multiply(environment.skyColor,t));
-}
-
 Float4 beauty(const LightPasses& light,float alpha) noexcept{const Float3 s=light.sum();return {s.x,s.y,s.z,alpha};}
 
 // The polygon reference's shading as light passes (surface_shading.hpp; the same model as the
@@ -292,7 +287,7 @@ LightPasses shade(const VoxelMaterialDefinition& material,Float4 base,Float3 nor
     view=normalize(view);
     const Float3 light=normalize(environment.sunDirection);
     const float ndotl=dot(normal,light);
-    const Float3 sunIrradiance=multiply(environment.sunColor,environment.sunIntensity);
+    const Float3 sunIrradiance=sun_irradiance(environment);
     // Diffuse: base x (1 - metallic) x (1 - F) x sun x cos (or its subsurface-diffused average).
     const Float3 f0=specular_f0(rgb,material.metallic,material.specular);
     const Float3 halfVector=normalize(add(view,light));
@@ -314,9 +309,9 @@ LightPasses shade(const VoxelMaterialDefinition& material,Float4 base,Float3 nor
     if(environment.globalIlluminationMode!=GlobalIlluminationMode::Off){
         // No secondary rays here beyond AO: the sky hemisphere around the normal, occluded.
         const float intensity=environment.globalIlluminationIntensity;
-        const Float3 irradiance=multiply(hemisphere_light(environment,normal),intensity*ambientOcclusion);
+        const Float3 irradiance=multiply(sky_irradiance(environment,normal),intensity*ambientOcclusion);
         const Float3 reflection=subtract(multiply(normal,2.0F*dot(normal,view)),view);
-        const ShadingLobes ambient=shade_ambient_light(normal,view,irradiance,multiply(hemisphere_light(environment,reflection),intensity),
+        const ShadingLobes ambient=shade_ambient_light(normal,view,irradiance,multiply(sky_radiance(environment,reflection),intensity),
                                                        rgb,material.metallic,material.roughness,material.specular,ambientOcclusion);
         out.indirectDiffuse=ambient.diffuse;out.indirectSpecular=ambient.specular;
     }
@@ -902,6 +897,84 @@ std::uint64_t apply_distance_fog(PolygonRenderTarget& target,const PolygonCamera
         }
     }
     return fogged;
+}
+
+namespace {
+struct PixelRays {
+    Float3 forward{}, right{}, up{};
+    float tanHalf{}, aspect{};
+    [[nodiscard]] Float3 direction(std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h) const noexcept {
+        const float nx = (2.0F * ((static_cast<float>(x) + 0.5F) / static_cast<float>(w)) - 1.0F) * tanHalf * aspect;
+        const float ny = (1.0F - 2.0F * ((static_cast<float>(y) + 0.5F) / static_cast<float>(h))) * tanHalf;
+        return normalize(add(forward, add(multiply(right, nx), multiply(up, ny))));
+    }
+    // Distance along the pixel's ray per unit of camera-space depth.
+    [[nodiscard]] float stretch(std::uint32_t x, std::uint32_t y, std::uint32_t w, std::uint32_t h) const noexcept {
+        const float nx = (2.0F * ((static_cast<float>(x) + 0.5F) / static_cast<float>(w)) - 1.0F) * tanHalf * aspect;
+        const float ny = (1.0F - 2.0F * ((static_cast<float>(y) + 0.5F) / static_cast<float>(h))) * tanHalf;
+        return std::sqrt(1.0F + nx * nx + ny * ny);
+    }
+};
+PixelRays pixel_rays(const PolygonCamera& camera, const PolygonRenderTarget& target) noexcept {
+    PixelRays rays;
+    rays.forward = normalize(subtract(camera.target, camera.position));
+    rays.right = normalize(cross3(rays.forward, camera.up));
+    if (length_squared(rays.right) < 1.0e-12F) rays.right = {1.0F, 0.0F, 0.0F};
+    rays.up = normalize(cross3(rays.right, rays.forward));
+    rays.tanHalf = std::tan(camera.verticalFieldOfViewRadians * 0.5F);
+    rays.aspect = static_cast<float>(target.width) / static_cast<float>(target.height);
+    return rays;
+}
+} // namespace
+
+std::uint64_t paint_sky_background(PolygonRenderTarget& target, const PolygonCamera& camera, const RenderEnvironment& environment) {
+    if (environment.skyMode != SkyMode::Physical || !target.valid()) return 0U;
+    const PixelRays rays = pixel_rays(camera, target);
+    std::uint64_t painted = 0U;
+    for (std::uint32_t y = 0; y < target.height; ++y)
+        for (std::uint32_t x = 0; x < target.width; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * target.width + x;
+            if (target.depth[i] < 1.0F) continue;
+            const Float3 sky = background_radiance(environment, rays.direction(x, y, target.width, target.height));
+            target.hdrColor[i] = {sky.x, sky.y, sky.z, 1.0F};
+            if (target.passes.enabled) target.passes.background[i] = sky;
+            ++painted;
+        }
+    return painted;
+}
+
+std::uint64_t apply_aerial_perspective(PolygonRenderTarget& target, const PolygonCamera& camera, const RenderEnvironment& environment,
+                                       float metersPerUnit) {
+    if (environment.skyMode != SkyMode::Physical || !(environment.aerialPerspectiveScale > 0.0F) || !target.valid() ||
+        !(camera.farPlane > camera.nearPlane))
+        return 0U;
+    const auto model = atmosphere_model(environment);
+    metersPerUnit = metersPerUnit > 0.0F && std::isfinite(metersPerUnit) ? metersPerUnit : kDefaultMetersPerVoxel;
+    const PixelRays rays = pixel_rays(camera, target);
+    const float altitude = environment.observerAltitudeMeters + camera.position.y * metersPerUnit;
+    const Float3 sunTop = multiply(environment.sunColor, environment.sunIntensity * 3.14159265358979323846F);
+    RenderPassBuffers& p = target.passes;
+    std::uint64_t changed = 0U;
+    for (std::uint32_t y = 0; y < target.height; ++y)
+        for (std::uint32_t x = 0; x < target.width; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * target.width + x;
+            if (!(target.depth[i] < 1.0F)) continue;
+            const float cameraZ = camera.nearPlane + target.depth[i] * (camera.farPlane - camera.nearPlane);
+            const float meters = cameraZ * rays.stretch(x, y, target.width, target.height) * metersPerUnit * environment.aerialPerspectiveScale;
+            const AtmosphereModel::Segment air = model->segment(altitude, rays.direction(x, y, target.width, target.height), meters, 12U);
+            const Float3 t = air.transmittance;
+            const Float3 added{air.inscattered.x * sunTop.x, air.inscattered.y * sunTop.y, air.inscattered.z * sunTop.z};
+            Float4& c = target.hdrColor[i];
+            c = {c.x * t.x + added.x, c.y * t.y + added.y, c.z * t.z + added.z, c.w};
+            if (p.enabled) {
+                for (std::vector<Float3>* pass : {&p.directDiffuse, &p.directSpecular, &p.indirectDiffuse, &p.indirectSpecular,
+                                                  &p.emission, &p.transmission, &p.background, &p.fog})
+                    (*pass)[i] = {(*pass)[i].x * t.x, (*pass)[i].y * t.y, (*pass)[i].z * t.z};
+                p.fog[i] = add(p.fog[i], added);
+            }
+            ++changed;
+        }
+    return changed;
 }
 
 namespace {

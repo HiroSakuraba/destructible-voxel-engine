@@ -722,6 +722,7 @@ if(DVE_BUILD_RHI)
         src/render/ray_lighting_reference.cpp
         src/render/ambient_occlusion.cpp
         src/render/surface_shading.cpp
+        src/render/atmosphere.cpp
         src/render/ambient_occlusion_gpu.cpp
         src/render/live_environment_renderer.cpp
         src/render/material_resource_residency.cpp
@@ -3172,6 +3173,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_render_passes_tests tests/test_render_passes.cpp)
     target_link_libraries(dve_render_passes_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_render_passes_tests COMMAND dve_render_passes_tests)
+    add_executable(dve_atmosphere_tests tests/test_atmosphere.cpp)
+    target_link_libraries(dve_atmosphere_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_atmosphere_tests COMMAND dve_atmosphere_tests)
     if(TARGET dve_asset_pipeline)
         add_executable(dve_voxel_normal_maps_tests tests/test_voxel_normal_maps.cpp)
         target_link_libraries(dve_voxel_normal_maps_tests PRIVATE dve::render_bridge dve::asset_pipeline)

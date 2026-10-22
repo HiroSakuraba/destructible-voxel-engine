@@ -1,5 +1,6 @@
 // Subsurface translucency in the CPU reference (subsurface.hpp):
-//   - Burley's transmittance is the diffusion profile integrated over a plane at depth d;
+//   - Burley's transmittance is the diffusion profile integrated over a plane at depth d (kept for
+//     comparison; shading uses the random-walk table, subsurface_transmission.hpp);
 //   - the march toward the sun finds the sunlit face and the slab's true thickness at any angle;
 //   - the voxel and polygon renderers give the exact expected light on the shaded side of a slab,
 //     the same number for both, and nothing when the far side is shadowed, blocked by another
@@ -7,6 +8,7 @@
 //   - the GPU shader follows the same model.
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/subsurface.hpp"
+#include "dve/render/subsurface_transmission.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 
 #include <array>
@@ -123,12 +125,14 @@ PolygonCamera camera_below() {
 
 Float4 centre(const PolygonRenderTarget& t) { return t.hdrColor[(t.height / 2U) * t.width + t.width / 2U]; }
 
-// Expected light on the underside: subsurface colour x sun x cos(sun at the top) x T(0.3 m).
+// Expected light on the underside: sun x cos(sun at the top) x, per channel, the share that
+// scatters through 0.3 m = 1.5 scatter distances for that channel's subsurface colour.
 Float3 expected_underside(const RenderEnvironment& environment, float shadow = 1.0F) {
     const float cosTop = environment.sunDirection.y / length(environment.sunDirection);
-    const float k = environment.sunIntensity * cosTop * shadow * burley_transmittance(0.3F, 0.2F);
+    const float k = environment.sunIntensity * cosTop * shadow;
     const Float3 c = wax().subsurfaceColor;
-    return {c.x * environment.sunColor.x * k, c.y * environment.sunColor.y * k, c.z * environment.sunColor.z * k};
+    const auto t = [&](float a) { return subsurface_slab_transmission(a, 0.3F / 0.2F, cosTop); };
+    return {environment.sunColor.x * k * t(c.x), environment.sunColor.y * k * t(c.y), environment.sunColor.z * k * t(c.z)};
 }
 
 Float4 render_voxels(const SlabScene& scene, const RenderEnvironment& environment, VoxelReferenceRenderStats* stats = nullptr) {
@@ -271,7 +275,9 @@ void test_gpu_shader_follows() {
     const std::filesystem::path root = DVE_SOURCE_DIR;
     const std::string subsurface = read_text(root / "shaders/common/subsurface.hlsli");
     const std::string primary = read_text(root / "shaders/shade_primary.hlsl");
-    check(subsurface.find("0.25F * exp(-x) + 0.75F * exp(-x / 3.0F)") != std::string::npos, "GPU: Burley transmittance");
+    check(subsurface.find("SubsurfaceSlabTransmission(subsurfaceColor.r, x, cosEntry)") != std::string::npos,
+          "GPU: the random-walk transmission table, per channel");
+    check(subsurface.find("#include \"subsurface_transmission_table.hlsli\"") != std::string::npos, "GPU: the same table");
     check(subsurface.find("march.exited = material == 0u") != std::string::npos, "GPU: only empty space lets the sun in");
     check(subsurface.find("dot(march.exitPoint - startPoint, march.exitNormal)") != std::string::npos,
           "GPU: thickness to the sunlit face's plane");

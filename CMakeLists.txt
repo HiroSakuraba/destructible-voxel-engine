@@ -729,6 +729,7 @@ if(DVE_BUILD_RHI)
         src/render/caustic_map.cpp
         src/render/subsurface.cpp
         src/render/subsurface_random_walk.cpp
+        src/render/subsurface_transmission.cpp
         src/render/radiance_cascade_gpu_probes.cpp
         src/render/simulation_gpu.cpp)
     if(DVE_ENABLE_CPU_HAIR)
@@ -3151,6 +3152,13 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_subsurface_random_walk_tests tests/test_subsurface_random_walk.cpp)
     target_link_libraries(dve_subsurface_random_walk_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_subsurface_random_walk_tests COMMAND dve_subsurface_random_walk_tests)
+    add_executable(dve_subsurface_diffusion_tests tests/test_subsurface_diffusion.cpp)
+    target_link_libraries(dve_subsurface_diffusion_tests PRIVATE dve::render_bridge)
+    target_compile_definitions(dve_subsurface_diffusion_tests PRIVATE
+        DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_subsurface_diffusion_tests COMMAND dve_subsurface_diffusion_tests)
+    add_executable(dve_bake_subsurface_transmission apps/dve_bake_subsurface_transmission.cpp)
+    target_link_libraries(dve_bake_subsurface_transmission PRIVATE dve::render_bridge)
     # The tests use two worker threads; reserve them so ctest -jN leaves cores for the
     # timing-sensitive audio acceptance tests.
     set_tests_properties(dve_rc_spwi_tests PROPERTIES PROCESSORS 2)

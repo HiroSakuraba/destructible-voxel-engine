@@ -46,6 +46,8 @@ struct VoxelReferenceRenderStats {
     // many of them reached an open sunlit side within the subsurface max distance.
     std::uint64_t subsurfaceMarches{};
     std::uint64_t subsurfaceExits{};
+    // Subsurface diffusion: probe rays placing profile samples on the surface.
+    std::uint64_t subsurfaceDiffusionProbes{};
 };
 
 // CPU screen-probe / world-space-interval (SPWI) radiance cascades. See
@@ -117,6 +119,10 @@ public:
     // Polygons that block the sun on voxels (otherwise only voxels cast shadows here). Glass and
     // water block it too: the light they let through arrives as caustics.
     std::span<const PolygonRenderInstance> sunOccluders{};
+    // Subsurface diffusion (front-lit light spreading under the surface with Burley's profile,
+    // see subsurface.hpp): samples per Subsurface pixel. 0 = off (the sun term at the point
+    // only). Off as well when the environment's subsurface max distance is 0.
+    std::uint32_t subsurfaceDiffusionSamples{16};
 
     [[nodiscard]] VoxelReferenceRenderStats render(
         std::span<const VoxelReferenceInstance> instances,

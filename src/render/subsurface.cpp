@@ -5,6 +5,7 @@
 #include <limits>
 
 #include "dve/polygon_bvh.hpp"
+#include "dve/render/subsurface_transmission.hpp"
 #include "dve/voxel_metric.hpp"
 
 namespace dve::render {
@@ -71,31 +72,35 @@ SubsurfaceExit march_voxel_subsurface(const VoxelReferenceInstance& instance, Ma
     return exit;
 }
 
+namespace {
+// The hit's interpolated vertex normal (local space), or its face normal.
+Float3 interpolated_normal(const CookedPolygonAsset& asset, const PolygonBvhHit& hit) noexcept {
+    Float3 normal = hit.normal;
+    const std::size_t t = static_cast<std::size_t>(hit.triangleIndex) * 3U;
+    if (t + 2U >= asset.indices.size()) return normal;
+    const PolygonVertex& a = asset.vertices[asset.indices[t]];
+    const PolygonVertex& b = asset.vertices[asset.indices[t + 1U]];
+    const PolygonVertex& c = asset.vertices[asset.indices[t + 2U]];
+    const Float3 e1 = sub3(b.position, a.position), e2 = sub3(c.position, a.position);
+    const Float3 q = sub3(hit.position, a.position);
+    const float d00 = dot3(e1, e1), d01 = dot3(e1, e2), d11 = dot3(e2, e2), d20 = dot3(q, e1), d21 = dot3(q, e2);
+    const float denominator = d00 * d11 - d01 * d01;
+    if (!(std::abs(denominator) > 1.0e-20F)) return normal;
+    const float v = (d11 * d20 - d01 * d21) / denominator, w = (d00 * d21 - d01 * d20) / denominator;
+    const float u = 1.0F - v - w;
+    return unit3(add3(add3(scale3(a.normal, u), scale3(b.normal, v)), scale3(c.normal, w)), normal);
+}
+}  // namespace
+
 SubsurfaceExit march_polygon_subsurface(const PolygonBvh& bvh, const CookedPolygonAsset& asset, const RigidTransform& transform,
                                         Float3 point, Float3 direction, float maximumDistance) {
     SubsurfaceExit exit;
     if (!(maximumDistance > 0.0F)) return exit;
     direction = unit3(direction, {0.0F, 1.0F, 0.0F});
-    const auto hit = bvh.raycast(inverse_transform_point(transform, point), inverse_transform_vector(transform, direction),
-                                 maximumDistance);
-    if (!hit) return exit;
     const Float3 localDirection = inverse_transform_vector(transform, direction);
-    Float3 normal = hit->normal;
-    const std::size_t t = static_cast<std::size_t>(hit->triangleIndex) * 3U;
-    if (t + 2U < asset.indices.size()) {
-        const PolygonVertex& a = asset.vertices[asset.indices[t]];
-        const PolygonVertex& b = asset.vertices[asset.indices[t + 1U]];
-        const PolygonVertex& c = asset.vertices[asset.indices[t + 2U]];
-        const Float3 e1 = sub3(b.position, a.position), e2 = sub3(c.position, a.position);
-        const Float3 q = sub3(hit->position, a.position);
-        const float d00 = dot3(e1, e1), d01 = dot3(e1, e2), d11 = dot3(e2, e2), d20 = dot3(q, e1), d21 = dot3(q, e2);
-        const float denominator = d00 * d11 - d01 * d01;
-        if (std::abs(denominator) > 1.0e-20F) {
-            const float v = (d11 * d20 - d01 * d21) / denominator, w = (d00 * d21 - d01 * d20) / denominator;
-            const float u = 1.0F - v - w;
-            normal = unit3(add3(add3(scale3(a.normal, u), scale3(b.normal, v)), scale3(c.normal, w)), normal);
-        }
-    }
+    const auto hit = bvh.raycast(inverse_transform_point(transform, point), localDirection, maximumDistance);
+    if (!hit) return exit;
+    Float3 normal = interpolated_normal(asset, *hit);
     // Leaving the mesh: the outward normal points along the march.
     if (dot3(normal, localDirection) < 0.0F) normal = scale3(normal, -1.0F);
     exit.found = true;
@@ -107,16 +112,57 @@ SubsurfaceExit march_polygon_subsurface(const PolygonBvh& bvh, const CookedPolyg
     return exit;
 }
 
+std::optional<SubsurfaceSurfacePoint> probe_polygon_surface(const PolygonBvh& bvh, const CookedPolygonAsset& asset,
+                                                            const RigidTransform& transform, Float3 origin, Float3 direction,
+                                                            float maximumDistance) {
+    direction = unit3(direction, {0.0F, -1.0F, 0.0F});
+    const auto hit = bvh.raycast(inverse_transform_point(transform, origin), inverse_transform_vector(transform, direction),
+                                 maximumDistance);
+    if (!hit) return std::nullopt;
+    SubsurfaceSurfacePoint point;
+    point.position = add3(origin, scale3(direction, hit->distance));
+    point.normal = unit3(transform_vector(transform, interpolated_normal(asset, *hit)), scale3(direction, -1.0F));
+    point.materialIndex = hit->materialIndex;
+    return point;
+}
+
+float burley_sample_radius(float u, float d) noexcept {
+    u = std::clamp(u, 0.0F, 0.9999999F);
+    return u < 0.25F ? -d * std::log(1.0F - u / 0.25F) : -3.0F * d * std::log(1.0F - (u - 0.25F) / 0.75F);
+}
+
+float burley_half_plane_share(float x, float d) noexcept {
+    if (!(d > 0.0F)) return x > 0.0F ? 0.0F : 1.0F;
+    if (x < 0.0F) return 1.0F - burley_half_plane_share(-x, d);
+    // Share beyond the line = Int over r of (profile mass on the ring) x (the ring's share beyond
+    // the line, acos(x / r) / pi for r > x). Each exponential: substitute r = x + scale y.
+    const auto component = [&](float scale) {
+        double sum = 0.0;
+        const int n = 4096;
+        for (int i = 0; i < n; ++i) {
+            const double y = (i + 0.5) / n * 40.0;   // up to 40 scale lengths past the line
+            const double r = x + scale * y;
+            sum += std::exp(-(r) / scale) / scale * std::acos(std::min(1.0, x / r)) / 3.14159265358979323846 *
+                   (40.0 / n) * scale;
+        }
+        return sum;
+    };
+    return static_cast<float>(0.25 * component(d) + 0.75 * component(3.0F * d));
+}
+
 Float3 subsurface_transmitted_radiance(const VoxelMaterialDefinition& material, const SubsurfaceExit& exit,
                                        Float3 towardSun, float metersPerUnit, float sunVisibility,
                                        const RenderEnvironment& environment) noexcept {
     if (!material_has_subsurface(material) || !exit.found || !exit.open || !(sunVisibility > 0.0F)) return {};
     const float cosEntry = std::max(0.0F, dot3(exit.normal, unit3(towardSun, {0.0F, 1.0F, 0.0F})));
-    const float transmittance =
-        burley_transmittance(exit.thickness * metersPerUnit, material.subsurfaceScatterDistanceMeters);
-    const float k = environment.sunIntensity * cosEntry * sunVisibility * transmittance;
-    return {material.subsurfaceColor.x * environment.sunColor.x * k, material.subsurfaceColor.y * environment.sunColor.y * k,
-            material.subsurfaceColor.z * environment.sunColor.z * k};
+    if (!(cosEntry > 0.0F)) return {};
+    // Per channel: the share of light scattered through a slab of this thickness, from the
+    // random-walk ground truth (subsurface_transmission.hpp), for that channel's albedo.
+    const float x = exit.thickness * metersPerUnit / material.subsurfaceScatterDistanceMeters;
+    const float k = environment.sunIntensity * cosEntry * sunVisibility;
+    return {environment.sunColor.x * k * subsurface_slab_transmission(material.subsurfaceColor.x, x, cosEntry),
+            environment.sunColor.y * k * subsurface_slab_transmission(material.subsurfaceColor.y, x, cosEntry),
+            environment.sunColor.z * k * subsurface_slab_transmission(material.subsurfaceColor.z, x, cosEntry)};
 }
 
 } // namespace dve::render

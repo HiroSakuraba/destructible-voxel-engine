@@ -31,10 +31,13 @@ float VisibilitySmithGGXCorrelated(float NdotV, float NdotL, float roughness) {
     return 0.5F / max(lambdaV + lambdaL, 1.0e-9F);
 }
 
+// The grazing term is scaled by saturate(50 x F0.g): no real material reflects less than 2% head
+// on, so smaller F0 (specular below 0.25) means "no specular" and fades the grazing reflection out
+// too; specular = 0 is then exactly Lambert. Unchanged for F0 >= 0.02.
 float3 FresnelSchlick(float cosTheta, float3 f0) {
     float m = saturate(1.0F - cosTheta);
     float m2 = m * m;
-    return f0 + (1.0F.xxx - f0) * (m2 * m2 * m);
+    return f0 + (saturate(50.0F * f0.g).xxx - f0) * (m2 * m2 * m);
 }
 
 // Direct lighting from a single light with the given (already normalized) direction *to* the

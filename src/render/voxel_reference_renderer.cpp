@@ -17,6 +17,7 @@
 #include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/ray_lighting_reference.hpp"
 #include "dve/render/subsurface.hpp"
+#include "dve/render/surface_shading.hpp"
 
 namespace dve::render {
 namespace {
@@ -340,6 +341,12 @@ bool ambient_occlusion_active(const RenderEnvironment& environment, const VoxelL
     return environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere &&
            environment.ambientOcclusionSamples > 0U && distances.ambientOcclusionMaxDistance > 0.0F;
 }
+// The specular reflection of the sky is occluded by AO in every ambient mode (traced GI traces
+// diffuse light only).
+bool specular_occlusion_active(const RenderEnvironment& environment, const VoxelLightingDistances& distances) noexcept {
+    return environment.globalIlluminationMode != GlobalIlluminationMode::Off &&
+           environment.ambientOcclusionSamples > 0U && distances.ambientOcclusionMaxDistance > 0.0F;
+}
 
 // reference_ambient_occlusion (ray_lighting_reference.hpp, the GPU passes' mirror) against the
 // voxels and the AO polygons.
@@ -361,13 +368,13 @@ float voxel_ambient_occlusion(const spwi::VoxelSceneTracer& tracer, const SunExt
 Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                            Float3 normal, const RenderEnvironment& environment,
                            const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats,
-                           std::uint32_t pixelIndex = 0U, const SunExtras* extras = nullptr) {
+                           std::uint32_t pixelIndex = 0U, const SunExtras* extras = nullptr, float* aoOut = nullptr) {
     if (environment.globalIlluminationMode == GlobalIlluminationMode::Off) return {};
-    if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere) {
-        const float ao = ambient_occlusion_active(environment, distances)
-            ? voxel_ambient_occlusion(tracer, extras, point, normal, pixelIndex, environment, distances, stats) : 1.0F;
+    const float ao = specular_occlusion_active(environment, distances)
+        ? voxel_ambient_occlusion(tracer, extras, point, normal, pixelIndex, environment, distances, stats) : 1.0F;
+    if (aoOut) *aoOut = ao;
+    if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere)
         return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity * ao);
-    }
 
     const std::uint32_t samples = std::clamp(environment.globalIlluminationSamples, 1U, 16U);
     const Float3 origin = add(point, multiply(normal, distances.shadowBias));
@@ -392,26 +399,77 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                     environment.globalIlluminationIntensity / static_cast<float>(samples));
 }
 
-// sunTerm: cos(normal, sun) x visibility (sun_term), or its subsurface-diffused average.
-Float4 shade_voxel(const VoxelMaterialDefinition& material, const RenderEnvironment& environment, float sunTerm,
-                   Float3 indirect, Float3 caustic = {}, Float3 transmitted = {}) noexcept {
-    if (material.shadingModel == MaterialShadingModel::Unlit) return material.baseColor;
-    // Caustic irradiance is already relative to full sun head on (it carries its own cosine). It
-    // is the light glass and water let through in place of what their shadow removed, so it
-    // follows the shadow: shadowStrength of it, none with shadows off (all the direct sun is
-    // already there).
+// Everything one voxel surface point needs for shading, in the CPU convention (light values are
+// what a white diffuse surface facing them would draw).
+struct VoxelSurfaceInput {
+    Float3 normal{};
+    Float3 viewDirection{};       // toward the camera
+    float visibility{1.0F};       // the point's own sun visibility (shadow strength applied)
+    float sunTerm{};              // cos(normal, sun) x visibility, or its subsurface-diffused average
+    Float3 ambient{};             // ambient light arriving around the normal, already occluded
+    float ambientOcclusion{1.0F}; // for the specular reflection
+    Float3 caustic{};             // caustic irradiance, x full sun
+    Float3 transmitted{};         // subsurface translucency
+};
+
+// The shading split into its light passes (surface_shading.hpp): direct diffuse and specular from
+// the sun (caustic light is direct sunlight that came through glass, diffuse only), ambient
+// diffuse and its specular reflection of the sky, emission, and light transmitted through
+// Subsurface materials. Their sum is the image.
+LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnvironment& environment,
+                        const VoxelSurfaceInput& in) noexcept {
+    LightPasses out;
+    const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
+    if (material.shadingModel == MaterialShadingModel::Unlit) { out.emission = base; return out; }
+    if (material.shadingModel == MaterialShadingModel::Emissive) { out.emission = add3(base, material.emissive); return out; }
+    const Float3 sun = normalize(environment.sunDirection);
+    const Float3 sunIrradiance = multiply(environment.sunColor, environment.sunIntensity);
+    const Float3 v = in.viewDirection;
+    // Diffuse: base x (1 - metallic) x (1 - F) x sun x sunTerm (Lambert, as shade_direct_light's
+    // diffuse lobe x pi, but with the subsurface-diffused sun term where there is one).
+    const Float3 f0 = specular_f0(base, material.metallic, material.specular);
+    const Float3 half = normalize(add(v, sun));
+    const Float3 fresnel = fresnel_schlick(std::clamp(dot(v, half), 0.0F, 1.0F), f0);
+    const Float3 diffuseColor = multiply3(multiply(base, 1.0F - material.metallic),
+                                          Float3{1.0F - fresnel.x, 1.0F - fresnel.y, 1.0F - fresnel.z});
+    out.directDiffuse = multiply(multiply3(diffuseColor, sunIrradiance), in.sunTerm);
+    // Caustic irradiance is relative to full sun head on (it carries its own cosine). It is the
+    // light glass and water let through in place of what their shadow removed, so it follows the
+    // shadow: shadowStrength of it, none with shadows off (all the direct sun is already there).
     const float causticShare = environment.shadowMode == ShadowMode::Off ? 0.0F
                                                                          : std::clamp(environment.shadowStrength, 0.0F, 1.0F);
-    const Float3 direct = add3(multiply(environment.sunColor, environment.sunIntensity * sunTerm),
-                               multiply3(environment.sunColor, multiply(caustic, environment.sunIntensity * causticShare)));
-    const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
-    Float3 lit = multiply3(base, add3(direct, multiply(indirect, 1.0F - material.metallic)));
-    // Subsurface transmission already carries the material's subsurface colour as its albedo.
-    lit = add3(lit, transmitted);
-    lit = add3(lit, material.emissive);
-    if (material.shadingModel == MaterialShadingModel::Emissive)
-        lit = add3(base, material.emissive);
-    return {lit.x, lit.y, lit.z, material.baseColor.w};
+    out.directDiffuse = add3(out.directDiffuse,
+                             multiply(multiply3(base, multiply3(sunIrradiance, in.caustic)), causticShare * (1.0F - material.metallic)));
+    // Specular from the sun at this point (its own visibility).
+    const ShadingLobes lobes = material.shadingModel == MaterialShadingModel::ClearCoat
+        ? shade_clear_coat_direct(in.normal, v, sun, sunIrradiance, base, material.metallic, material.roughness,
+                                  material.specular, material.clearCoat, material.clearCoatRoughness)
+        : shade_direct_light(in.normal, v, sun, sunIrradiance, base, material.metallic, material.roughness, material.specular);
+    out.directSpecular = multiply(lobes.specular, kCpuRadianceScale * in.visibility);
+    if (material.shadingModel == MaterialShadingModel::ClearCoat && material.clearCoat > 0.0F) {
+        // The coat's Fresnel dims the base lobe on the way in and again on the way out.
+        const Float3 coat = fresnel_schlick(std::clamp(dot(v, half), 0.0F, 1.0F), {0.04F, 0.04F, 0.04F});
+        const float c = std::clamp(material.clearCoat, 0.0F, 1.0F);
+        const Float3 through{1.0F - c * coat.x, 1.0F - c * coat.y, 1.0F - c * coat.z};
+        out.directDiffuse = multiply3(out.directDiffuse, multiply3(through, through));
+    }
+    // Ambient: diffuse, and the sky reflected along the mirror direction.
+    if (environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
+        const Float3 reflection = subtract(multiply(in.normal, 2.0F * dot(in.normal, v)), v);
+        const Float3 reflected = multiply(environment_radiance(environment, reflection), environment.globalIlluminationIntensity);
+        const ShadingLobes ambient = shade_ambient_light(in.normal, v, in.ambient, reflected, base, material.metallic,
+                                                         material.roughness, material.specular, in.ambientOcclusion);
+        out.indirectDiffuse = ambient.diffuse;
+        out.indirectSpecular = ambient.specular;
+    }
+    out.transmission = in.transmitted;   // carries the subsurface colour as its albedo
+    out.emission = material.emissive;
+    return out;
+}
+
+Float4 beauty(const LightPasses& light, float alpha) noexcept {
+    const Float3 sum = light.sum();
+    return {sum.x, sum.y, sum.z, alpha};
 }
 } // namespace
 
@@ -516,7 +574,12 @@ VoxelReferenceRenderStats render_radiance_cascades(
             ? diffused_sun_term(tracer, texel.instance, texel.material, material, texel.position, texel.normal, environment,
                                 distances, diffusionSamples, seed, stats, &extras)
             : sun_term(texel.normal, environment, visibility);
-        target.hdrColor[index] = shade_voxel(material, environment, sunShare, gi.indirect[index], caustic, transmitted);
+        const float ao = specular_occlusion_active(environment, distances)
+            ? voxel_ambient_occlusion(tracer, &extras, texel.position, texel.normal, static_cast<std::uint32_t>(index),
+                                      environment, distances, stats) : 1.0F;
+        const VoxelSurfaceInput surface{texel.normal, normalize(subtract(gbuffer.cameraPosition, texel.position)), visibility,
+                                        sunShare, gi.indirect[index], ao, caustic, transmitted};
+        target.hdrColor[index] = beauty(shade_voxel(material, environment, surface), material.baseColor.w);
         target.depth[index] = texel.normalizedDepth;
         target.objectId[index] = instance.objectId != 0U ? instance.objectId : instance.object->id();
         target.materialIndex[index] = texel.material;
@@ -620,9 +683,10 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                                                seed, local, &extras);
                     const Float3 caustic = extras.caustics
                         ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal, instance.objectId) : Float3{};
+                    float ao = 1.0F;
                     const Float3 indirect = global_illumination(tracer, hit->worldPosition,
                                                                  hit->worldNormal, environment, distances,
-                                                                 seed, local, static_cast<std::uint32_t>(index), &extras);
+                                                                 seed, local, static_cast<std::uint32_t>(index), &extras, &ao);
                     const Float3 transmitted = subsurface_light(
                         tracer, instance, hit->objectHit.material, material, hit->worldPosition, hit->worldNormal,
                         environment, distances, seed, local, &extras);
@@ -631,7 +695,9 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                             hit->worldNormal, environment, distances, subsurfaceDiffusionSamples, seed,
                                             local, &extras)
                         : sun_term(hit->worldNormal, environment, visibility);
-                    target.hdrColor[index] = shade_voxel(material, environment, sunShare, indirect, caustic, transmitted);
+                    const VoxelSurfaceInput surface{hit->worldNormal, normalize(subtract(camera.position, hit->worldPosition)),
+                                                    visibility, sunShare, indirect, ao, caustic, transmitted};
+                    target.hdrColor[index] = beauty(shade_voxel(material, environment, surface), material.baseColor.w);
                     target.depth[index] = normalizedDepth;
                     target.objectId[index] = instance.objectId != 0U
                         ? instance.objectId : instance.object->id();

@@ -2,6 +2,7 @@
 
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/ambient_occlusion.hpp"
+#include "dve/render/surface_shading.hpp"
 #include "dve/render/subsurface.hpp"
 
 #include <algorithm>
@@ -265,41 +266,65 @@ MaterialSurfaceSample sample_layer_surface(
     return sample;
 }
 
-Float4 shade(const VoxelMaterialDefinition& material,Float4 base,Float3 normal,
-             const RenderEnvironment& environment,bool frontFacing,Float3 transmitted={},
-             float diffusedSun=-1.0F,float ambientOcclusion=1.0F) noexcept {
+// The sky/ground hemisphere around a direction (spwi::environment_radiance, ShadeAmbient).
+Float3 hemisphere_light(const RenderEnvironment& environment,Float3 direction) noexcept {
+    const float t=std::clamp(0.5F+0.5F*normalize(direction).y,0.0F,1.0F);
+    return add(multiply(environment.groundColor,1.0F-t),multiply(environment.skyColor,t));
+}
+
+Float4 beauty(const LightPasses& light,float alpha) noexcept{const Float3 s=light.sum();return {s.x,s.y,s.z,alpha};}
+
+// The polygon reference's shading as light passes (surface_shading.hpp; the same model as the
+// voxel reference): the sun's diffuse and specular lobes (no sun shadows on polygons), the sky
+// hemisphere's diffuse light and specular reflection (AO-occluded), foliage and subsurface
+// transmission, and emission. Their sum is the image.
+LightPasses shade(const VoxelMaterialDefinition& material,Float4 base,Float3 normal,Float3 view,
+                  const RenderEnvironment& environment,bool frontFacing,Float3 transmitted={},
+                  float diffusedSun=-1.0F,float ambientOcclusion=1.0F) noexcept {
+    LightPasses out;
+    const Float3 rgb={base.x,base.y,base.z};
+    if(material.shadingModel==MaterialShadingModel::Unlit){out.emission=rgb;return out;}
+    if(material.shadingModel==MaterialShadingModel::Emissive){out.emission=add(rgb,material.emissive);return out;}
     normal=normalize(normal);
     if(material.shadingModel==MaterialShadingModel::TwoSidedFoliage&&!frontFacing)normal=multiply(normal,-1.0F);
+    view=normalize(view);
     const Float3 light=normalize(environment.sunDirection);
     const float ndotl=dot(normal,light);
-    // diffusedSun >= 0: the subsurface-diffused cos(normal, sun) average replaces the point's own.
-    const float direct=(diffusedSun>=0.0F?diffusedSun:std::max(0.0F,ndotl))*environment.sunIntensity;
-    Float3 ambient{};
-    if (environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
-        // The CPU polygon oracle has no scene acceleration structure for secondary rays, so
-        // VoxelOneBounce intentionally falls back to the shared hemisphere term here. The
-        // production voxel path and hybrid shader contract perform the bounded scene trace.
-        ambient={environment.skyColor.x+environment.groundColor.x,
-                 environment.skyColor.y+environment.groundColor.y,
-                 environment.skyColor.z+environment.groundColor.z};
-        ambient=multiply(ambient,0.5F*environment.globalIlluminationIntensity*ambientOcclusion);
+    const Float3 sunIrradiance=multiply(environment.sunColor,environment.sunIntensity);
+    // Diffuse: base x (1 - metallic) x (1 - F) x sun x cos (or its subsurface-diffused average).
+    const Float3 f0=specular_f0(rgb,material.metallic,material.specular);
+    const Float3 halfVector=normalize(add(view,light));
+    const Float3 fresnel=fresnel_schlick(std::clamp(dot(view,halfVector),0.0F,1.0F),f0);
+    const Float3 diffuseColor=mul3(multiply(rgb,1.0F-material.metallic),Float3{1.0F-fresnel.x,1.0F-fresnel.y,1.0F-fresnel.z});
+    const float sunTerm=diffusedSun>=0.0F?diffusedSun:std::max(0.0F,ndotl);
+    out.directDiffuse=multiply(mul3(diffuseColor,sunIrradiance),sunTerm);
+    const ShadingLobes lobes=material.shadingModel==MaterialShadingModel::ClearCoat
+        ? shade_clear_coat_direct(normal,view,light,sunIrradiance,rgb,material.metallic,material.roughness,material.specular,
+                                  material.clearCoat,material.clearCoatRoughness)
+        : shade_direct_light(normal,view,light,sunIrradiance,rgb,material.metallic,material.roughness,material.specular);
+    out.directSpecular=multiply(lobes.specular,kCpuRadianceScale);
+    if(material.shadingModel==MaterialShadingModel::ClearCoat&&material.clearCoat>0.0F){
+        const Float3 coat=fresnel_schlick(std::clamp(dot(view,halfVector),0.0F,1.0F),{0.04F,0.04F,0.04F});
+        const float c=std::clamp(material.clearCoat,0.0F,1.0F);
+        const Float3 through{1.0F-c*coat.x,1.0F-c*coat.y,1.0F-c*coat.z};
+        out.directDiffuse=mul3(out.directDiffuse,mul3(through,through));
     }
-    Float3 rgb={base.x,base.y,base.z};
-    if(material.shadingModel==MaterialShadingModel::Unlit)return {rgb.x,rgb.y,rgb.z,base.w};
-    Float3 lit=mul3(rgb,add(ambient,multiply(environment.sunColor,direct)));
+    if(environment.globalIlluminationMode!=GlobalIlluminationMode::Off){
+        // No secondary rays here beyond AO: the sky hemisphere around the normal, occluded.
+        const float intensity=environment.globalIlluminationIntensity;
+        const Float3 irradiance=multiply(hemisphere_light(environment,normal),intensity*ambientOcclusion);
+        const Float3 reflection=subtract(multiply(normal,2.0F*dot(normal,view)),view);
+        const ShadingLobes ambient=shade_ambient_light(normal,view,irradiance,multiply(hemisphere_light(environment,reflection),intensity),
+                                                       rgb,material.metallic,material.roughness,material.specular,ambientOcclusion);
+        out.indirectDiffuse=ambient.diffuse;out.indirectSpecular=ambient.specular;
+    }
     if(material.shadingModel==MaterialShadingModel::TwoSidedFoliage){
         const float wrap=std::clamp(((-ndotl)+material.foliageWrap)/(1.0F+material.foliageWrap),0.0F,1.0F);
-        lit=add(lit,multiply(mul3(material.foliageColor,environment.sunColor),wrap*material.foliageTransmittance*environment.sunIntensity));
+        out.transmission=multiply(mul3(material.foliageColor,sunIrradiance),wrap*material.foliageTransmittance);
     }
-    if(material.shadingModel==MaterialShadingModel::ClearCoat&&material.clearCoat>0.0F){
-        const Float3 view={0,0,1};const Float3 halfVector=normalize(add(light,view));
-        const float highlight=std::pow(std::max(0.0F,dot(normal,halfVector)),std::max(2.0F,256.0F*(1.0F-material.clearCoatRoughness)));
-        lit=add(lit,multiply(environment.sunColor,highlight*material.clearCoat));
-    }
-    lit=add(lit,transmitted);   // subsurface translucency (carries its own subsurface colour)
-    lit=add(lit,material.emissive);
-    if(material.shadingModel==MaterialShadingModel::Emissive)lit=add(rgb,material.emissive);
-    return {lit.x,lit.y,lit.z,base.w};
+    out.transmission=add(out.transmission,transmitted);   // subsurface translucency (its own colour)
+    out.emission=material.emissive;
+    return out;
 }
 
 Float4 material_debug_output(PolygonMaterialDebugView view, Float4 base, Float3 normal,
@@ -722,11 +747,11 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             ? material_debug_output(options.materialDebugView, base, normal, effective, uv, uv1,
                                     worldPosition, objectPosition, tri.binding->mapping, detailFade,
                                     fragmentParallaxSamples, layerDebugMask, layerDebugCoverage)
-            : shade(effective,base,normal,environment,tri.frontFacing,
+            : beauty(shade(effective,base,normal,viewWorld,environment,tri.frontFacing,
                     polygon_subsurface_light(tri,effective,worldPosition,normal,environment,options,stats),
                     tri.subsurfaceBvh&&material_has_subsurface(effective)&&options.subsurfaceDiffusionSamples>0U
                         ? polygon_diffused_sun(tri,effective,worldPosition,normal,environment,options,index,stats) : -1.0F,
-                    polygon_ambient_occlusion(worldPosition,normal,environment,options,index,stats));
+                    polygon_ambient_occlusion(worldPosition,normal,environment,options,index,stats)),base.w);
         if(!debugView&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
             const float alpha=std::clamp(shaded.w,0.0F,1.0F);const Float4 old=target.hdrColor[index];
             target.hdrColor[index]={shaded.x*alpha+old.x*(1-alpha),shaded.y*alpha+old.y*(1-alpha),shaded.z*alpha+old.z*(1-alpha),1};

@@ -39,7 +39,11 @@ float3 EvaluateImageBasedLighting(
         saturate(roughness) * maximumSpecularLod).rgb;
     float2 brdf = brdfLut.SampleLevel(environmentSampler,
         float2(NdotV, saturate(roughness)), 0.0F);
-    float3 specularLighting = prefiltered * (F0 * brdf.x + brdf.y);
+    // Directional albedo of the specular lobe (with FresnelSchlick's grazing fade below F0 0.02).
+    float3 specularAlbedo = F0 * brdf.x + brdf.y * saturate(50.0F * F0.g);
+    float3 specularLighting = prefiltered * specularAlbedo;
+    // Energy conservation: light the specular lobe reflects is not also scattered diffusely.
+    diffuse *= saturate(1.0F.xxx - specularAlbedo);
     float ao = saturate(ambientOcclusion);
     // Diffuse AO is not a valid specular visibility term. Lagarde's inexpensive approximation
     // preserves narrow reflections while still occluding rough reflections in cavities.

@@ -123,6 +123,7 @@ VoxelMaterialDefinition marble(float scatterMeters) {
     m.shadingModel = MaterialShadingModel::Subsurface;
     m.subsurfaceScatterDistanceMeters = scatterMeters;
     m.subsurfaceColor = {0.8F, 0.8F, 0.8F};
+    m.specular = 0.0F;   // Lambert: the expected values are base x irradiance
     return m;
 }
 

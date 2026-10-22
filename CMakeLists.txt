@@ -720,6 +720,7 @@ if(DVE_BUILD_RHI)
         src/render/environment_lighting_gpu.cpp
         src/render/ray_lighting_reference.cpp
         src/render/ambient_occlusion.cpp
+        src/render/surface_shading.cpp
         src/render/ambient_occlusion_gpu.cpp
         src/render/live_environment_renderer.cpp
         src/render/material_resource_residency.cpp
@@ -3164,6 +3165,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_ambient_occlusion_tests tests/test_ambient_occlusion.cpp)
     target_link_libraries(dve_ambient_occlusion_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_ambient_occlusion_tests COMMAND dve_ambient_occlusion_tests)
+    add_executable(dve_specular_shading_tests tests/test_specular_shading.cpp)
+    target_link_libraries(dve_specular_shading_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_specular_shading_tests COMMAND dve_specular_shading_tests)
     add_executable(dve_ambient_occlusion_gpu_tests tests/test_ambient_occlusion_gpu.cpp)
     target_link_libraries(dve_ambient_occlusion_gpu_tests PRIVATE dve::render_bridge)
     target_compile_definitions(dve_ambient_occlusion_gpu_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

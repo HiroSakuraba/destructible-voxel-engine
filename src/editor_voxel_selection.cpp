@@ -566,6 +566,10 @@ GeometryConversionBuild polygon_to_voxels(const EditorObject& source, EditorObje
             imported.emissiveFactor = material.emissive;
             imported.metallicFactor = material.metallic;
             imported.roughnessFactor = material.roughness;
+            imported.transmissionFactor = material.transmission;
+            imported.ior = material.indexOfRefraction;
+            imported.attenuationColor = material.attenuationColor;
+            imported.attenuationDistance = material.attenuationDistanceMeters;
             imported.alphaMode = material.blendMode == MaterialBlendMode::Masked ? ImportedAlphaMode::Mask :
                 material.blendMode == MaterialBlendMode::Translucent || material.transparent ? ImportedAlphaMode::Blend :
                 ImportedAlphaMode::Opaque;

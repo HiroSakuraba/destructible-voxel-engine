@@ -1043,6 +1043,28 @@ void update_world_transform(ImportedScene& scene, std::uint32_t nodeIndex, const
                     const std::vector<float> values = json_float_array(emissive, 3);
                     material.emissiveFactor = {values[0], values[1], values[2]};
                 }
+                // Glass, water and gems: KHR_materials_transmission, KHR_materials_ior and
+                // KHR_materials_volume (texture inputs of these extensions are not used yet).
+                if (const JsonValue* extensions = materialValue.find("extensions"); extensions && extensions->is_object()) {
+                    if (const JsonValue* t = extensions->find("KHR_materials_transmission"); t && t->is_object())
+                        material.transmissionFactor = std::clamp(json_float(t->find("transmissionFactor"), 0.0F), 0.0F, 1.0F);
+                    if (const JsonValue* i = extensions->find("KHR_materials_ior"); i && i->is_object()) {
+                        const float ior = json_float(i->find("ior"), 1.5F);
+                        // glTF allows 0 for "no refraction"; DVE has no such state, so 0 keeps 1.5.
+                        if (ior >= 1.0F) material.ior = std::min(ior, 3.0F);
+                    }
+                    if (const JsonValue* v = extensions->find("KHR_materials_volume"); v && v->is_object()) {
+                        if (const JsonValue* color = v->find("attenuationColor")) {
+                            const std::vector<float> values = json_float_array(color, 3);
+                            material.attenuationColor = {std::clamp(values[0], 0.0F, 1.0F), std::clamp(values[1], 0.0F, 1.0F),
+                                                         std::clamp(values[2], 0.0F, 1.0F)};
+                        }
+                        if (const JsonValue* distance = v->find("attenuationDistance")) {
+                            const float d = json_float(distance, 0.0F);
+                            material.attenuationDistance = d > 0.0F ? d : 0.0F;
+                        }
+                    }
+                }
                 const auto parse_material_texture = [&](const JsonValue* texture, const char* label,
                                                         std::optional<std::uint32_t>& destination,
                                                         std::uint32_t& texcoord) {
@@ -2050,6 +2072,10 @@ void thicken_shell(DenseCookGrid& grid, std::uint32_t radius) {
     material.metallic = std::clamp(imported.metallicFactor, 0.0F, 1.0F);
     material.roughness = std::clamp(imported.roughnessFactor, 0.0F, 1.0F);
     material.transparent = imported.alphaMode == ImportedAlphaMode::Blend || imported.baseColorFactor.w < 0.999F;
+    material.transmission = imported.transmissionFactor;
+    material.indexOfRefraction = imported.ior;
+    material.attenuationColor = imported.attenuationColor;
+    material.attenuationDistanceMeters = imported.attenuationDistance;
     material.densityKilogramsPerCubicMeter = material.metallic > 0.5F ? 7800.0F : 1000.0F;
     material.structuralStrength = material.metallic > 0.5F ? 4.0F : 1.0F;
     material.fractureResistance = material.metallic > 0.5F ? 3.0F : 1.0F;
@@ -2902,3 +2928,4 @@ const char* to_string(ImportDiagnostic::Severity severity) noexcept {
 }
 
 } // namespace dve
+

@@ -215,6 +215,51 @@ bool restore(Scene& scene, const GameSaveData& data, GameWorldRestoreReport* rep
     return ok;
 }
 
+// v5: optics (glass, water) of inline materials travel in the optional dve.material_optics
+// section; saves without optics do not get the section.
+void test_material_optics() {
+    const Assets assets = make_assets();
+    GameSaveCodec codec(file_reader());
+    int fires = 0;
+    Scene a = boot(assets, Physics3DBackend::Reference, &fires);
+    GameSaveData saved = capture(a);
+    std::string error;
+    const auto plain = codec.encode(saved, nullptr, &error);
+    CHECK(plain.has_value());
+    if (plain) {
+        const auto document = decode_save_game_document(*plain, {}, &error);
+        CHECK(document && !document->sections.contains("dve.material_optics"));
+    }
+    GameWorldObjectState* glassObject = nullptr;
+    for (auto& object : saved.world.objects)
+        if (object.materials.size() > 1) { glassObject = &object; break; }   // even one from a source asset
+    CHECK(glassObject != nullptr);
+    if (!glassObject) return;
+    VoxelMaterialDefinition& glass = glassObject->materials.back();
+    glass.transmission = 0.9F;
+    glass.indexOfRefraction = 1.33F;
+    glass.attenuationColor = {0.4F, 0.8F, 0.9F};
+    glass.attenuationDistanceMeters = 3.0F;
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) { std::cerr << "optics encode: " << error << '\n'; return; }
+    const auto document = decode_save_game_document(*bytes, {}, &error);
+    CHECK(document && document->sections.contains("dve.material_optics"));
+    const auto decoded = codec.decode(*bytes, nullptr, &error);
+    CHECK(decoded.has_value());
+    if (!decoded) { std::cerr << "optics decode: " << error << '\n'; return; }
+    bool found = false;
+    for (const auto& object : decoded->world.objects)
+        if (object.id == glassObject->id) {
+            const auto& m = object.materials.back();
+            found = m.transmission == 0.9F && m.indexOfRefraction == 1.33F && m.attenuationColor.y == 0.8F &&
+                    m.attenuationDistanceMeters == 3.0F;
+        }
+    CHECK(found);
+    const auto again = codec.encode(*decoded, nullptr, &error);
+    CHECK(again && *again == *bytes);
+}
+
 void test_round_trip(Physics3DBackend backend, const char* label) {
     const Assets assets = make_assets();
     GameSaveCodec codec(file_reader());
@@ -482,7 +527,7 @@ void test_migration() {
     const auto migrated = migrating.decode(v0Bytes, &report, &error);
     CHECK(migrated.has_value());
     if (!migrated) std::cerr << "migration: " << error << '\n';
-    CHECK(report.storedSchemaVersion == 0U && report.migrationsApplied == 4U);   // game v0->1, engine v1->2->3->4
+    CHECK(report.storedSchemaVersion == 0U && report.migrationsApplied == 5U);   // game v0->1, engine v1->2->3->4->5
     int firesB = 0;
     Scene b = boot(assets, Physics3DBackend::Reference, &firesB);
     if (migrated) CHECK(restore(b, *migrated));
@@ -885,7 +930,7 @@ void test_v1_to_v2_migration() {
     const auto migrated = codec.decode(v1Bytes, &report, &error);
     CHECK(migrated.has_value());
     if (!migrated) { std::cerr << "v1 decode: " << error << '\n'; return; }
-    CHECK(report.storedSchemaVersion == 1U && report.migrationsApplied == 3U);
+    CHECK(report.storedSchemaVersion == 1U && report.migrationsApplied == 4U);
     CHECK(!migrated->runtimes.gameplay && !migrated->runtimes.cameras && !migrated->runtimes.animation &&
           !migrated->runtimes.ragdolls);
     Scene b = boot(assets, Physics3DBackend::Reference, &firesB);
@@ -1162,6 +1207,7 @@ void test_script_state_v2() {
 } // namespace
 
 int main() {
+    test_material_optics();
     test_round_trip(Physics3DBackend::Reference, "reference");
     test_destruction(Physics3DBackend::Reference, "reference");
     {

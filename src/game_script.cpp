@@ -1333,6 +1333,10 @@ int l_get_material_parameter(lua_State* L) {
         if (field == kClearCoatRoughnessParam) { lua_pushnumber(L, resolved->clearCoatRoughness); return 1; }
         if (field == kFoliageTransmittanceParam) { lua_pushnumber(L, resolved->foliageTransmittance); return 1; }
         if (field == kFoliageWrapParam) { lua_pushnumber(L, resolved->foliageWrap); return 1; }
+        if (field == kTransmissionParam) { lua_pushnumber(L, resolved->transmission); return 1; }
+        if (field == kIndexOfRefractionParam) { lua_pushnumber(L, resolved->indexOfRefraction); return 1; }
+        if (field == kAttenuationDistanceParam) { lua_pushnumber(L, resolved->attenuationDistanceMeters); return 1; }
+        if (field == kAttenuationColorParam) { push_float3_table(L, resolved->attenuationColor); return 1; }
         if (field == kBaseColorParam) { push_float4_table(L, resolved->baseColor); return 1; }
         if (field == kEmissiveParam) { push_float3_table(L, resolved->emissive); return 1; }
         if (field == kSubsurfaceColorParam) { push_float3_table(L, resolved->subsurfaceColor); return 1; }

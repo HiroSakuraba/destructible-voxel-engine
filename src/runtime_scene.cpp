@@ -839,7 +839,7 @@ namespace {
         if (!finite(layer.weight) || layer.weight < 0.0F || layer.weight > 1.0F ||
             static_cast<unsigned>(layer.blendMode) > static_cast<unsigned>(MaterialLayerBlendMode::Additive)) return false;
     }
-    return true;
+    return material_optics_valid(material);
 }
 
 [[nodiscard]] bool validate_material_references(const CookedVoxelAsset& asset) {
@@ -957,6 +957,14 @@ void hash_transform(std::uint64_t& hash, const RigidTransform& transform) noexce
             hash_value(hash, std::bit_cast<std::uint32_t>(layer.weight));
             hash_value(hash, layer.blendMode);
             hash_value(hash, layer.enabled);
+        }
+        if (material_has_optics(material)) {   // only then, so older hashes stay the same
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.transmission));
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.indexOfRefraction));
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.attenuationColor.x));
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.attenuationColor.y));
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.attenuationColor.z));
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.attenuationDistanceMeters));
         }
         hash_value(hash, std::bit_cast<std::uint32_t>(material.densityKilogramsPerCubicMeter));
         hash_value(hash, std::bit_cast<std::uint32_t>(material.structuralStrength));

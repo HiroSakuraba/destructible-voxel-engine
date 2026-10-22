@@ -37,9 +37,16 @@ struct GpuMaterialRecord {
     float foliageColorB{0.35F};
     float foliageTransmittance{0.5F};
     float foliageWrap{0.35F};
+    // Refraction and caustics (VoxelMaterialDefinition optics).
+    float transmission{0.0F};
+    float indexOfRefraction{1.5F};
+    float attenuationColorR{1.0F};
+    float attenuationColorG{1.0F};
+    float attenuationColorB{1.0F};
+    float attenuationDistanceMeters{0.0F};
 };
 
-static_assert(sizeof(GpuMaterialRecord) == 23 * sizeof(std::uint32_t));
+static_assert(sizeof(GpuMaterialRecord) == 29 * sizeof(std::uint32_t));
 static_assert(alignof(GpuMaterialRecord) == 4);
 
 using GpuMaterialTable = std::array<GpuMaterialRecord, 256>;

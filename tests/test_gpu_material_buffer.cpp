@@ -23,7 +23,7 @@ int failures = 0;
 using namespace dve;
 
 void test_record_size_and_field_count() {
-    CHECK(sizeof(GpuMaterialRecord) == 92);
+    CHECK(sizeof(GpuMaterialRecord) == 116);
     CHECK(sizeof(GpuMaterialRecord) % 4 == 0);
 }
 
@@ -85,6 +85,18 @@ void test_pack_field_values_and_order() {
     CHECK(offsetof(GpuMaterialRecord, foliageColorB) == 80);
     CHECK(offsetof(GpuMaterialRecord, foliageTransmittance) == 84);
     CHECK(offsetof(GpuMaterialRecord, foliageWrap) == 88);
+    CHECK(offsetof(GpuMaterialRecord, transmission) == 92);
+    CHECK(offsetof(GpuMaterialRecord, indexOfRefraction) == 96);
+    CHECK(offsetof(GpuMaterialRecord, attenuationColorR) == 100);
+    CHECK(offsetof(GpuMaterialRecord, attenuationDistanceMeters) == 112);
+    VoxelMaterialDefinition glass;
+    glass.transmission = 0.95F;
+    glass.indexOfRefraction = 1.52F;
+    glass.attenuationColor = {0.8F, 0.9F, 0.85F};
+    glass.attenuationDistanceMeters = 0.25F;
+    const GpuMaterialRecord packed = pack_gpu_material_record(glass);
+    CHECK(packed.transmission == 0.95F && packed.indexOfRefraction == 1.52F && packed.attenuationColorG == 0.9F &&
+          packed.attenuationDistanceMeters == 0.25F);
 }
 
 void test_shading_model_and_blend_mode_encoding() {

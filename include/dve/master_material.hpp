@@ -32,6 +32,10 @@ inline constexpr std::string_view kClearCoatRoughnessParam = "ClearCoatRoughness
 inline constexpr std::string_view kFoliageColorParam = "FoliageColor";
 inline constexpr std::string_view kFoliageTransmittanceParam = "FoliageTransmittance";
 inline constexpr std::string_view kFoliageWrapParam = "FoliageWrap";
+inline constexpr std::string_view kTransmissionParam = "Transmission";
+inline constexpr std::string_view kIndexOfRefractionParam = "IndexOfRefraction";
+inline constexpr std::string_view kAttenuationColorParam = "AttenuationColor";
+inline constexpr std::string_view kAttenuationDistanceParam = "AttenuationDistanceMeters";
 inline constexpr std::string_view kStandardSurfaceMasterName = "Engine/Materials/StandardSurface";
 inline constexpr float kStandardSurfaceRoughness = 0.62F;
 // Specular follows the engine's Unreal-style convention: 0.25 produces about 2% dielectric F0.

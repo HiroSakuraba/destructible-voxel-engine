@@ -31,6 +31,9 @@ constexpr std::string_view kHairSection = "dve.hair";
 constexpr std::string_view kAxisSection = "dve.voxel_axes";
 constexpr std::string_view kClockSection = "dve.clock";
 constexpr std::string_view kRootMotionSection = "dve.root-motion";
+// v5: optics (transmission, IOR, attenuation) of inline materials that have them. Optional, so
+// v4 documents and materials without optics keep their bytes.
+constexpr std::string_view kMaterialOpticsSection = "dve.material_optics";
 constexpr std::string_view kReservedPrefix = "dve.";
 
 constexpr std::uint8_t kFlagDynamic = 1U << 0U;
@@ -224,12 +227,20 @@ bool read_material(Reader& r, VoxelMaterialDefinition& m) {
            r.f32(m.flammability) && r.f32(m.thermalConductivity) && r.boolean(m.transparent) && r.boolean(m.structural);
 }
 
+void write_material_optics(Writer& w, const VoxelMaterialDefinition& m) {
+    w.f32(m.transmission); w.f32(m.indexOfRefraction); w.float3(m.attenuationColor); w.f32(m.attenuationDistanceMeters);
+}
+
 std::vector<std::byte> material_bytes(const std::vector<VoxelMaterialDefinition>& materials) {
     GameSaveLimits unlimited;
     unlimited.maximumStringBytes = 0xFFFFFFFFU;
     Writer w(unlimited);
     w.u32(static_cast<std::uint32_t>(materials.size()));
-    for (const auto& m : materials) write_material(w, m);
+    for (const auto& m : materials) {
+        write_material(w, m);
+        // Only for the "same as the source" comparison: optics count too.
+        if (material_has_optics(m)) write_material_optics(w, m);
+    }
     return std::move(w.bytes());
 }
 
@@ -852,6 +863,11 @@ GameSaveCodec::GameSaveCodec(GameSaveSourceReader sources, GameSaveLimits limits
         // Legacy grids have unit axes; the new optional section is absent.
         document.schemaVersion=4U; return true;
     }, &ignored);
+    (void)store_.register_migration(4U, [](SaveGameDocument& document, std::string*) {
+        // Materials before v5 have no optics; the optional dve.material_optics section is absent.
+        document.schemaVersion = 5U;
+        return true;
+    }, &ignored);
 }
 
 bool GameSaveCodec::register_migration(std::uint32_t fromVersion, SaveGameMigration migration, std::string* error) {
@@ -1065,6 +1081,23 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
     }
     if (axes.failed()) return fail(error,axes.failure()),std::nullopt;
     document.sections.emplace(std::string(kAxisSection),std::move(axes.bytes()));
+    {
+        // Inline materials with optics (from-source tables carry theirs in the source asset).
+        std::vector<std::tuple<GameObjectId, std::uint32_t, const VoxelMaterialDefinition*>> optics;
+        for (const auto& object : world.objects)
+            for (std::size_t i = 0; i < object.materials.size(); ++i)
+                if (material_has_optics(object.materials[i])) {
+                    if (!material_optics_valid(object.materials[i])) return fail(error, "invalid material optics"), std::nullopt;
+                    optics.emplace_back(object.id, static_cast<std::uint32_t>(i), &object.materials[i]);
+                }
+        if (!optics.empty()) {
+            Writer w(limits_);
+            w.count(optics.size(), limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material optics");
+            for (const auto& [id, index, material] : optics) { w.u64(id); w.u32(index); write_material_optics(w, *material); }
+            if (w.failed()) return fail(error, w.failure()), std::nullopt;
+            document.sections.emplace(std::string(kMaterialOpticsSection), std::move(w.bytes()));
+        }
+    }
     if (world.integerClock) {
         Writer clock(limits_);
         clock.u64(world.tickCount); clock.f32(world.fixedDeltaSeconds);
@@ -1372,6 +1405,29 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         }
     }
 
+    if (const auto* bytes = section(kMaterialOpticsSection)) {
+        Reader r(*bytes, kMaterialOpticsSection, limits_);
+        std::uint32_t count{};
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material optics")) return corrupt(r);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            GameObjectId id{};
+            std::uint32_t materialIndex{};
+            VoxelMaterialDefinition optics;
+            if (!(r.u64(id) && r.u32(materialIndex) && r.f32(optics.transmission) && r.f32(optics.indexOfRefraction) &&
+                  r.float3(optics.attenuationColor) && r.f32(optics.attenuationDistanceMeters))) return corrupt(r);
+            const auto found = indexById.find(id);
+            if (found == indexById.end() || materialIndex >= world.objects[found->second].materials.size() ||
+                !material_optics_valid(optics))
+                return fail(error, "invalid material optics entry"), std::nullopt;
+            VoxelMaterialDefinition& material = world.objects[found->second].materials[materialIndex];
+            material.transmission = optics.transmission;
+            material.indexOfRefraction = optics.indexOfRefraction;
+            material.attenuationColor = optics.attenuationColor;
+            material.attenuationDistanceMeters = optics.attenuationDistanceMeters;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
+
     {
         Reader r(*section(kVoxelSection), kVoxelSection, limits_);
         std::uint32_t count{};
@@ -1511,7 +1567,8 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (name.starts_with(kReservedPrefix)) {
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
-                name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection)
+                name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection &&
+                name != kMaterialOpticsSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;
         }

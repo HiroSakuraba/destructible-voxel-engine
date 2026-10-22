@@ -25,6 +25,12 @@ struct MaterialRecord {
     float foliageColorB;
     float foliageTransmittance;
     float foliageWrap;
+    float transmission;
+    float indexOfRefraction;
+    float attenuationColorR;
+    float attenuationColorG;
+    float attenuationColorB;
+    float attenuationDistanceMeters;
 };
 
 static const uint kShadingModelStandardPBR = 0u;

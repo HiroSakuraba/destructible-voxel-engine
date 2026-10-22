@@ -59,6 +59,8 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
         value.foliageColor.z < 0.0F || !finite(value.foliageTransmittance) || value.foliageTransmittance < 0.0F ||
         value.foliageTransmittance > 1.0F || !finite(value.foliageWrap) || value.foliageWrap < 0.0F || value.foliageWrap > 1.0F)
         return fail("foliage values must be finite, non-negative, and normalized where required");
+    if (!material_optics_valid(value))
+        return fail("transmission must be in [0,1], IOR in [1,3], attenuation colour in [0,1] and distance >= 0");
     if (value.layers.size() > kMaximumVoxelMaterialLayers) return fail("material exceeds four layers");
     for (const VoxelMaterialLayer& layer : value.layers) {
         if (!finite(layer.weight) || layer.weight < 0.0F || layer.weight > 1.0F ||
@@ -194,7 +196,7 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
         const std::filesystem::path temporary = path.string() + ".tmp";
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) throw std::runtime_error("could not open material library for writing");
-        output << "DVE_EDITOR_MATERIALS 3\n" << entries_.size() << "\n" << std::setprecision(9);
+        output << "DVE_EDITOR_MATERIALS 4\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -215,6 +217,8 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
                 output << ' ' << static_cast<unsigned>(layer.sourceMaterial) << ' ' << layer.weight << ' '
                        << static_cast<unsigned>(layer.blendMode) << ' ' << layer.enabled;
             }
+            output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
+                   << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
             output << '\n';
         }
         output.close();
@@ -237,7 +241,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::file
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version != 1 && version != 2 && version != 3) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 4) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -282,6 +286,9 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::file
                                         static_cast<MaterialLayerBlendMode>(blend), enabled});
                 }
             }
+            if (version >= 4)
+                input >> m.transmission >> m.indexOfRefraction >> m.attenuationColor.x >> m.attenuationColor.y >>
+                    m.attenuationColor.z >> m.attenuationDistanceMeters;
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");
             entry.id = static_cast<MaterialId>(rawId);

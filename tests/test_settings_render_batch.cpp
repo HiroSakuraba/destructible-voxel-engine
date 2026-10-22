@@ -152,6 +152,12 @@ void test_environment_completion_resolver() {
             "subsurface off must zero the transmission distance");
     require(render_environment_settings(registry).validate(nullptr),
             "resolved environment must validate");
+    // AO quality picks the ambient-occlusion ray count; off turns it off.
+    require(render_environment_settings(registry).ambientOcclusionSamples == 8U, "AO medium by default: 8 rays");
+    set(registry, "render.ao_quality", std::string("off"));
+    require(render_environment_settings(registry).ambientOcclusionSamples == 0U, "AO off: no rays");
+    set(registry, "render.ao_quality", std::string("ultra"));
+    require(render_environment_settings(registry).ambientOcclusionSamples == 32U, "AO ultra: 32 rays");
 }
 
 double reference_aces(double x) {

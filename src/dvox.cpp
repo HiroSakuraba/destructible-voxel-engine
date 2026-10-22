@@ -1,5 +1,6 @@
 #include "dve/voxel_metric.hpp"
 #include "dve/dvox.hpp"
+#include "dve/voxel_normal_map.hpp"
 
 #include <algorithm>
 #include <array>
@@ -337,6 +338,22 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
         writer.write_float(material.attenuationColor.z);
         writer.write_float(material.attenuationDistanceMeters);
     }
+    // v1.5 normal-map extension: written only when some material has a normal map.
+    if (minor >= 5U) {
+        const VoxelNormalMap* map = material.normalMap.get();
+        writer.write_u8(map ? 1U : 0U);
+        if (map) {
+            if (map->name.size() > std::numeric_limits<std::uint16_t>::max()) throw std::runtime_error("normal map name is too long");
+            writer.write_u16(static_cast<std::uint16_t>(map->name.size()));
+            writer.write_bytes(map->name.data(), map->name.size());
+            writer.write_u32(map->width);
+            writer.write_u32(map->height);
+            writer.write_float(material.normalMapTileMeters);
+            writer.write_float(material.normalMapStrength);
+            writer.write_float(material.normalMapSharpness);
+            writer.write_bytes(map->rgba8.data(), map->rgba8.size());
+        }
+    }
 }
 
 [[nodiscard]] VoxelMaterialDefinition read_material(ByteReader& reader, std::uint16_t minor) {
@@ -396,6 +413,19 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
             material.attenuationDistanceMeters = reader.read_float();
             if (!material_optics_valid(material)) throw std::runtime_error("invalid DVOX material optics");
         }
+        if (minor >= 5U && reader.read_u8() != 0U) {
+            std::string name = reader.read_string(reader.read_u16());
+            const std::uint32_t width = reader.read_u32(), height = reader.read_u32();
+            material.normalMapTileMeters = reader.read_float();
+            material.normalMapStrength = reader.read_float();
+            material.normalMapSharpness = reader.read_float();
+            if (width == 0U || height == 0U || width > kMaximumVoxelNormalMapDimension || height > kMaximumVoxelNormalMapDimension)
+                throw std::runtime_error("invalid DVOX normal map size");
+            std::vector<std::uint8_t> texels(static_cast<std::size_t>(width) * height * 4U);
+            reader.read_bytes(texels.data(), texels.size());
+            material.normalMap = make_voxel_normal_map(std::move(name), width, height, std::move(texels));
+            if (!material_normal_map_valid(material)) throw std::runtime_error("invalid DVOX material normal map");
+        }
     }
     return material;
 }
@@ -420,11 +450,14 @@ bool write_dvox(
         if (!valid_voxel_metric(asset.voxelScale)) throw std::runtime_error("invalid DVOX axis scale");
         const bool optics = std::any_of(asset.materials.begin(), asset.materials.end(),
                                         [](const VoxelMaterialDefinition& m) { return material_has_optics(m); });
-        const std::uint16_t versionMinor = optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const bool normalMaps = std::any_of(asset.materials.begin(), asset.materials.end(),
+                                            [](const VoxelMaterialDefinition& m) { return material_has_normal_map(m); });
+        const std::uint16_t versionMinor = normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) {
             if (!material_optics_valid(material)) throw std::runtime_error("invalid DVOX material optics");
+            if (!material_normal_map_valid(material)) throw std::runtime_error("invalid DVOX material normal map");
             write_material(materials, material, versionMinor);
         }
 
@@ -510,7 +543,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 4) {
+        if (major != kVersionMajor || minor > 5) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

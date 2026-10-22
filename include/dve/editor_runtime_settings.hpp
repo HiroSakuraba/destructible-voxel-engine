@@ -46,7 +46,8 @@ inline ui::GameSettings polygon_game_settings(const EditorSettingsRegistry& regi
 // count from the published preset table (low 1, medium 2, high 4, ultra 8);
 // shadow strength and the sun's angular radius map to the same-named fields.
 // GI quality likewise selects the one-bounce sample count (low 1, medium 4,
-// high 8, ultra 16) and never touches intensity or distance. The two boolean
+// high 8, ultra 16) and never touches intensity or distance. AO quality sets the ambient-
+// occlusion ray count (off 0, low 4, medium 8, high 16, ultra 32). The two boolean
 // switches encode off through the fields they gate: bloom off zeroes the
 // composite intensity (the extraction threshold stays as authored), and
 // subsurface off zeroes the maximum transmission distance, which leaves the
@@ -83,6 +84,11 @@ inline RenderEnvironment render_environment_settings(const EditorSettingsRegistr
     environment.bloomThreshold = s.number("render.bloom_threshold");
     if (!s.get<bool>("render.bloom")) environment.bloomIntensity = 0.0F;
     if (!s.get<bool>("material.subsurface")) environment.subsurfaceMaxDistanceMeters = 0.0F;
+    const auto aoQuality = s.get<std::string>("render.ao_quality");
+    environment.ambientOcclusionSamples = aoQuality == "off" ? 0U
+        : aoQuality == "low" ? 4U
+        : aoQuality == "high" ? 16U
+        : aoQuality == "ultra" ? 32U : 8U;
     return environment;
 }
 

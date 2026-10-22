@@ -1,4 +1,5 @@
 #include "dve/asset_cooker.hpp"
+#include "dve/voxel_normal_map.hpp"
 #include "dve/dvox.hpp"
 
 #include <algorithm>
@@ -2283,6 +2284,29 @@ struct BuiltPalette {
 }
 
 } // namespace
+
+std::shared_ptr<const VoxelNormalMap> decode_voxel_normal_map(std::span<const std::byte> bytes, std::string name,
+                                                              std::string* error) {
+    try {
+        ModelImportOptions options;
+        options.maximumImageDimension = kMaximumVoxelNormalMapDimension;
+        ImportedImage image = decode_image_rgba(bytes, {}, name, options);
+        return make_voxel_normal_map(std::move(name), image.width, image.height, std::move(image.rgba8), error);
+    } catch (const std::exception& exception) {
+        if (error) *error = exception.what();
+        return nullptr;
+    }
+}
+
+std::shared_ptr<const VoxelNormalMap> import_voxel_normal_map(const std::filesystem::path& path, std::string* error) {
+    try {
+        const std::vector<std::byte> bytes = read_binary_file(path);
+        return decode_voxel_normal_map(bytes, path.stem().string(), error);
+    } catch (const std::exception& exception) {
+        if (error) *error = exception.what();
+        return nullptr;
+    }
+}
 
 ImportedModelResult import_model(const std::filesystem::path& sourcePath, const ModelImportOptions& options) {
     const std::string extension = sourcePath.extension().string();

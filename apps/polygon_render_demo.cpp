@@ -141,6 +141,10 @@ int main(int argc, char** argv) {
 
     render::PolygonRenderTarget combined;
     combined.resize(640, 400);
+    // Optional 4th argument: a directory for the render passes (PFM; beauty, light passes,
+    // shadow, normal, sun visibility, depth in metres).
+    const bool savePasses = argc > 4;
+    if (savePasses) combined.enable_passes();
     const auto hybridStats = render::render_hybrid_reference(
         std::span<const render::VoxelReferenceInstance>(&voxelInstance, 1U),
         instances, camera, environment, combined,
@@ -148,6 +152,10 @@ int main(int argc, char** argv) {
     const auto& stats = hybridStats.polygons;
     std::string error;
     if (!render::write_polygon_render_ppm(output, combined, 1.1F, &error)) {
+        std::cerr << error << '\n';
+        return 1;
+    }
+    if (savePasses && !render::write_render_passes_pfm(combined, argv[4], "", camera.farPlane * 0.1F, &error)) {
         std::cerr << error << '\n';
         return 1;
     }

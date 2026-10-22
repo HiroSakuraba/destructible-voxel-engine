@@ -484,6 +484,8 @@ void test_mode_switch() {
           rcPlan.activeGlobalIlluminationRayCount == obPlan.activeGlobalIlluminationRayCount);
 
     Fixture fixture(sp::SyntheticScene::Courtyard, 64, 36);
+    // Lambert surfaces (specular 0: no sky reflection), so the indirect term is exactly base x GI.
+    for (VoxelMaterialDefinition& material : fixture.setup.materials) material.specular = 0.0F;
     RenderEnvironment rcEnvironment = fixture.setup.environment;
     rcEnvironment.globalIlluminationMode = GlobalIlluminationMode::RadianceCascades;
     RenderEnvironment obEnvironment = fixture.setup.environment;
@@ -552,6 +554,7 @@ void test_meters_are_converted_with_voxel_size() {
         }
     std::array<VoxelMaterialDefinition, 2> materials{};
     materials[1].baseColor = {0.5F, 0.5F, 0.5F, 1.0F};
+    materials[1].specular = 0.0F;   // Lambert: the sun is straight behind the camera (no highlight)
     const VoxelReferenceInstance instance{503U, &object, {}, materials, true};
     PolygonCamera camera;
     camera.position = {0.5F, 8.0F, 0.5F};

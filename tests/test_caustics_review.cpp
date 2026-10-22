@@ -40,6 +40,7 @@ VoxelMaterialDefinition floor_material() {
     VoxelMaterialDefinition m;
     m.name = "Floor";
     m.baseColor = {0.5F, 0.5F, 0.5F, 1.0F};
+    m.specular = 0.0F;   // Lambert: the expected values are base x irradiance
     return m;
 }
 void add_face(CookedPolygonAsset& a, std::vector<std::uint32_t>& indices, Float3 n, std::array<Float3, 4> p,

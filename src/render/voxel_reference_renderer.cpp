@@ -14,8 +14,11 @@
 #include "dve/query.hpp"
 #include "dve/render/caustic_map.hpp"
 #include "dve/render/radiance_cascades_spwi.hpp"
+#include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/ray_lighting_reference.hpp"
 #include "dve/render/subsurface.hpp"
+#include "dve/render/surface_shading.hpp"
+#include "dve/voxel_normal_map.hpp"
 
 namespace dve::render {
 namespace {
@@ -162,12 +165,24 @@ struct SunExtras {
         std::shared_ptr<const std::vector<PolygonTextureMipChain>> maskedMips;
     };
     std::vector<Occluder> occluders;
+    // Polygons that ambient-occlusion rays see (sunOccluders and occlusionPolygons).
+    std::vector<Occluder> aoOccluders;
     const CausticMap* caustics{};
     [[nodiscard]] bool polygon_occluded(Float3 origin, Float3 direction, float maximumDistance) const {
-        for (const Occluder& o : occluders) {
+        return nearest(occluders, origin, direction, maximumDistance, true).has_value();
+    }
+    [[nodiscard]] std::optional<float> ao_nearest(Float3 origin, Float3 direction, float maximumDistance) const {
+        return nearest(aoOccluders, origin, direction, maximumDistance, false);
+    }
+    // Nearest polygon hit (world distance along the unit direction); `any` stops at the first.
+    [[nodiscard]] static std::optional<float> nearest(const std::vector<Occluder>& list, Float3 origin, Float3 direction,
+                                                      float maximumDistance, bool any) {
+        std::optional<float> best;
+        for (const Occluder& o : list) {
             Float3 localOrigin = inverse_transform_point(o.transform, origin);
             const Float3 localDirection = normalize(inverse_transform_vector(o.transform, direction));
-            float remaining = maximumDistance;
+            float remaining = best ? *best : maximumDistance;
+            float travelled = 0.0F;
             // Masked surfaces block only where they pass the alpha test, as the rasterizer draws
             // them; through their holes the ray goes on.
             for (int crossing = 0; crossing < 64; ++crossing) {
@@ -183,14 +198,17 @@ struct SunExtras {
                         const float step = hit->distance + 1.0e-4F;
                         localOrigin = add(localOrigin, multiply(localDirection, step));
                         remaining -= step;
+                        travelled += step;
                         if (!(remaining > 0.0F)) break;
                         continue;
                     }
                 }
-                return true;
+                best = travelled + hit->distance;
+                if (any) return best;
+                break;
             }
         }
-        return false;
+        return best;
     }
 };
 
@@ -286,16 +304,9 @@ float diffused_sun_term(const spwi::VoxelSceneTracer& tracer, std::size_t instan
                                                                        : distances.shadowMaxDistance;
     float sum = 0.0F;
     std::uint32_t valid = 0;
-    // Radii: one per stratum of [0, 1), at a per-pixel offset within the strata. Each sample is
-    // then uniform in its stratum, so every sample count keeps Burley's 1/4 : 3/4 mixture (fixed
-    // midpoints would, for 1 or 2 samples, never pick the short exponential).
-    const float jitter = static_cast<float>(pcg_hash(pixelSeed ^ 0x51ED270BU) >> 8U) * (1.0F / 16777216.0F);
-    // Angles: a golden-ratio sequence turned by a hashed per-pixel rotation. (Bit-reversing the
-    // pixel seed itself kept neighbouring rows of a column within one narrow slice of angles.)
-    const float rotation = static_cast<float>(pcg_hash(pixelSeed ^ 0x2C1B3C6DU) >> 8U) * (1.0F / 16777216.0F);
     for (std::uint32_t i = 0; i < samples; ++i) {
-        const float u = (static_cast<float>(i) + jitter) / static_cast<float>(samples);
-        const float v = std::fmod(static_cast<float>(i) * 0.6180339887F + rotation, 1.0F);
+        const float u = (static_cast<float>(i) + 0.5F) / static_cast<float>(samples);
+        const float v = std::fmod(radical_inverse(i ^ pixelSeed) + radical_inverse(pixelSeed), 1.0F);
         const float r = burley_sample_radius(u, d);
         const float angle = 2.0F * kPi * v;
         Float3 q = point, qn = normal;
@@ -324,12 +335,47 @@ float diffused_sun_term(const spwi::VoxelSceneTracer& tracer, std::size_t instan
     return valid > 0U ? sum / static_cast<float>(valid) : 0.0F;
 }
 
+// Ambient occlusion is applied where nothing traced already sees occluders: the
+// AmbientHemisphere ambient (traced one-bounce GI and radiance cascades see them through their
+// own rays).
+bool ambient_occlusion_active(const RenderEnvironment& environment, const VoxelLightingDistances& distances) noexcept {
+    return environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere &&
+           environment.ambientOcclusionSamples > 0U && distances.ambientOcclusionMaxDistance > 0.0F;
+}
+// The specular reflection of the sky is occluded by AO in every ambient mode (traced GI traces
+// diffuse light only).
+bool specular_occlusion_active(const RenderEnvironment& environment, const VoxelLightingDistances& distances) noexcept {
+    return environment.globalIlluminationMode != GlobalIlluminationMode::Off &&
+           environment.ambientOcclusionSamples > 0U && distances.ambientOcclusionMaxDistance > 0.0F;
+}
+
+// reference_ambient_occlusion (ray_lighting_reference.hpp, the GPU passes' mirror) against the
+// voxels and the AO polygons.
+float voxel_ambient_occlusion(const spwi::VoxelSceneTracer& tracer, const SunExtras* extras, Float3 point, Float3 normal,
+                              std::uint32_t pixelIndex, const RenderEnvironment& environment,
+                              const VoxelLightingDistances& distances, VoxelReferenceRenderStats& stats) {
+    return reference_ambient_occlusion(point, normal, pixelIndex, 0U, environment, distances.metersPerVoxel,
+        [&](Float3 origin, Float3 direction, float maximum) -> std::optional<float> {
+            ++stats.ambientOcclusionRays;
+            std::optional<float> best;
+            if (const auto hit = tracer.trace(origin, direction, maximum)) best = hit->objectHit.distance;
+            if (extras)
+                if (const auto polygon = extras->ao_nearest(origin, direction, best ? *best : maximum))
+                    if (!best || *polygon < *best) best = polygon;
+            return best;
+        });
+}
+
 Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                            Float3 normal, const RenderEnvironment& environment,
-                           const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
+                           const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats,
+                           std::uint32_t pixelIndex = 0U, const SunExtras* extras = nullptr, float* aoOut = nullptr) {
     if (environment.globalIlluminationMode == GlobalIlluminationMode::Off) return {};
+    const float ao = specular_occlusion_active(environment, distances)
+        ? voxel_ambient_occlusion(tracer, extras, point, normal, pixelIndex, environment, distances, stats) : 1.0F;
+    if (aoOut) *aoOut = ao;
     if (environment.globalIlluminationMode == GlobalIlluminationMode::AmbientHemisphere)
-        return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity);
+        return multiply(environment_radiance(environment, normal), environment.globalIlluminationIntensity * ao);
 
     const std::uint32_t samples = std::clamp(environment.globalIlluminationSamples, 1U, 16U);
     const Float3 origin = add(point, multiply(normal, distances.shadowBias));
@@ -354,26 +400,113 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                     environment.globalIlluminationIntensity / static_cast<float>(samples));
 }
 
-// sunTerm: cos(normal, sun) x visibility (sun_term), or its subsurface-diffused average.
-Float4 shade_voxel(const VoxelMaterialDefinition& material, const RenderEnvironment& environment, float sunTerm,
-                   Float3 indirect, Float3 caustic = {}, Float3 transmitted = {}) noexcept {
-    if (material.shadingModel == MaterialShadingModel::Unlit) return material.baseColor;
-    // Caustic irradiance is already relative to full sun head on (it carries its own cosine). It
-    // is the light glass and water let through in place of what their shadow removed, so it
-    // follows the shadow: shadowStrength of it, none with shadows off (all the direct sun is
-    // already there).
+// Everything one voxel surface point needs for shading, in the CPU convention (light values are
+// what a white diffuse surface facing them would draw).
+struct VoxelSurfaceInput {
+    Float3 normal{};
+    Float3 viewDirection{};       // toward the camera
+    float visibility{1.0F};       // the point's own sun visibility (shadow strength applied)
+    float sunTerm{};              // cos(normal, sun) x visibility, or its subsurface-diffused average
+    Float3 ambient{};             // ambient light arriving around the normal, already occluded
+    float ambientOcclusion{1.0F}; // for the specular reflection
+    Float3 caustic{};             // caustic irradiance, x full sun
+    Float3 transmitted{};         // subsurface translucency
+};
+
+// The shading split into its light passes (surface_shading.hpp): direct diffuse and specular from
+// the sun (caustic light is direct sunlight that came through glass, diffuse only), ambient
+// diffuse and its specular reflection of the sky, emission, and light transmitted through
+// Subsurface materials. Their sum is the image.
+LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnvironment& environment,
+                        const VoxelSurfaceInput& in) noexcept {
+    LightPasses out;
+    const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
+    if (material.shadingModel == MaterialShadingModel::Unlit) { out.emission = base; return out; }
+    if (material.shadingModel == MaterialShadingModel::Emissive) { out.emission = add3(base, material.emissive); return out; }
+    const Float3 sun = normalize(environment.sunDirection);
+    const Float3 sunIrradiance = multiply(environment.sunColor, environment.sunIntensity);
+    const Float3 v = in.viewDirection;
+    // Diffuse: base x (1 - metallic) x (1 - F) x sun x sunTerm (Lambert, as shade_direct_light's
+    // diffuse lobe x pi, but with the subsurface-diffused sun term where there is one).
+    const Float3 f0 = specular_f0(base, material.metallic, material.specular);
+    const Float3 half = normalize(add(v, sun));
+    const Float3 fresnel = fresnel_schlick(std::clamp(dot(v, half), 0.0F, 1.0F), f0);
+    const Float3 diffuseColor = multiply3(multiply(base, 1.0F - material.metallic),
+                                          Float3{1.0F - fresnel.x, 1.0F - fresnel.y, 1.0F - fresnel.z});
+    out.directDiffuse = multiply(multiply3(diffuseColor, sunIrradiance), in.sunTerm);
+    // Caustic irradiance is relative to full sun head on (it carries its own cosine). It is the
+    // light glass and water let through in place of what their shadow removed, so it follows the
+    // shadow: shadowStrength of it, none with shadows off (all the direct sun is already there).
     const float causticShare = environment.shadowMode == ShadowMode::Off ? 0.0F
                                                                          : std::clamp(environment.shadowStrength, 0.0F, 1.0F);
-    const Float3 direct = add3(multiply(environment.sunColor, environment.sunIntensity * sunTerm),
-                               multiply3(environment.sunColor, multiply(caustic, environment.sunIntensity * causticShare)));
-    const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
-    Float3 lit = multiply3(base, add3(direct, multiply(indirect, 1.0F - material.metallic)));
-    // Subsurface transmission already carries the material's subsurface colour as its albedo.
-    lit = add3(lit, transmitted);
-    lit = add3(lit, material.emissive);
-    if (material.shadingModel == MaterialShadingModel::Emissive)
-        lit = add3(base, material.emissive);
-    return {lit.x, lit.y, lit.z, material.baseColor.w};
+    out.directDiffuse = add3(out.directDiffuse,
+                             multiply(multiply3(base, multiply3(sunIrradiance, in.caustic)), causticShare * (1.0F - material.metallic)));
+    // Specular from the sun at this point (its own visibility).
+    const ShadingLobes lobes = material.shadingModel == MaterialShadingModel::ClearCoat
+        ? shade_clear_coat_direct(in.normal, v, sun, sunIrradiance, base, material.metallic, material.roughness,
+                                  material.specular, material.clearCoat, material.clearCoatRoughness)
+        : shade_direct_light(in.normal, v, sun, sunIrradiance, base, material.metallic, material.roughness, material.specular);
+    out.directSpecular = multiply(lobes.specular, kCpuRadianceScale * in.visibility);
+    if (material.shadingModel == MaterialShadingModel::ClearCoat && material.clearCoat > 0.0F) {
+        // The coat's Fresnel dims the base lobe on the way in and again on the way out.
+        const Float3 coat = fresnel_schlick(std::clamp(dot(v, half), 0.0F, 1.0F), {0.04F, 0.04F, 0.04F});
+        const float c = std::clamp(material.clearCoat, 0.0F, 1.0F);
+        const Float3 through{1.0F - c * coat.x, 1.0F - c * coat.y, 1.0F - c * coat.z};
+        out.directDiffuse = multiply3(out.directDiffuse, multiply3(through, through));
+    }
+    // Ambient: diffuse, and the sky reflected along the mirror direction.
+    if (environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
+        const Float3 reflection = subtract(multiply(in.normal, 2.0F * dot(in.normal, v)), v);
+        const Float3 reflected = multiply(environment_radiance(environment, reflection), environment.globalIlluminationIntensity);
+        const ShadingLobes ambient = shade_ambient_light(in.normal, v, in.ambient, reflected, base, material.metallic,
+                                                         material.roughness, material.specular, in.ambientOcclusion);
+        out.indirectDiffuse = ambient.diffuse;
+        out.indirectSpecular = ambient.specular;
+    }
+    out.transmission = in.transmitted;   // carries the subsurface colour as its albedo
+    out.emission = material.emissive;
+    return out;
+}
+
+// The material's normal map bends the shading normal (dve/voxel_normal_map.hpp, projected in the
+// instance's own space so it moves with the object). Shadow, AO and GI rays keep the geometric
+// normal; the sun's cosine follows the bent one (the subsurface-diffused sun term is an average
+// over the surface around the point and is left as it is).
+void apply_voxel_normal_map(const VoxelReferenceInstance& instance, const VoxelMaterialDefinition& material,
+                            const RenderEnvironment& environment, Float3 worldPosition, bool diffused, float metersPerVoxel,
+                            VoxelSurfaceInput& surface) noexcept {
+    if (!material_has_normal_map(material)) return;
+    const Float3 local = inverse_transform_point(instance.transform, worldPosition);
+    const Float3 localNormal = normalize(inverse_transform_vector(instance.transform, surface.normal));
+    const Float3 bent = normalize(transform_vector(
+        instance.transform, voxel_normal_map_normal(material, multiply(local, resolve_meters_per_voxel(metersPerVoxel)), localNormal)));
+    if (!diffused) surface.sunTerm = sun_term(bent, environment, surface.visibility);
+    surface.normal = bent;
+}
+
+// Writes the pixel's render passes (polygon_renderer.hpp) when the target has them. The shadow pass
+// is the direct light the point would get with its own sun visibility 1, less what it gets (for
+// subsurface-diffused sun the point's own share is unshadowed, its neighbours' are not).
+void write_voxel_passes(PolygonRenderTarget& target, std::size_t index, const VoxelMaterialDefinition& material,
+                        const RenderEnvironment& environment, const VoxelSurfaceInput& surface, const LightPasses& light,
+                        float cameraZ, float metersPerVoxel) {
+    if (!target.passes.enabled) return;
+    RenderPassSample sample{light, {}, surface.visibility, surface.normal, cameraZ * resolve_meters_per_voxel(metersPerVoxel)};
+    if (surface.visibility < 1.0F) {
+        VoxelSurfaceInput open = surface;
+        const float cosine = sun_term(surface.normal, environment, 1.0F);
+        open.sunTerm = surface.sunTerm + cosine - sun_term(surface.normal, environment, surface.visibility);
+        open.visibility = 1.0F;
+        const LightPasses lit = shade_voxel(material, environment, open);
+        const Float3 removed = subtract(add3(lit.directDiffuse, lit.directSpecular), add3(light.directDiffuse, light.directSpecular));
+        sample.shadow = {std::max(0.0F, removed.x), std::max(0.0F, removed.y), std::max(0.0F, removed.z)};
+    }
+    target.write_passes(index, sample, 1.0F, true);
+}
+
+Float4 beauty(const LightPasses& light, float alpha) noexcept {
+    const Float3 sum = light.sum();
+    return {sum.x, sum.y, sum.z, alpha};
 }
 } // namespace
 
@@ -479,8 +612,18 @@ VoxelReferenceRenderStats render_radiance_cascades(
             ? diffused_sun_term(tracer, texel.instance, texel.material, material, texel.position, texel.normal, environment,
                                 distances, diffusionSamples, seed, stats, &extras)
             : sun_term(texel.normal, environment, visibility);
-        target.hdrColor[index] = shade_voxel(material, environment, sunShare, gi.indirect[index], caustic, transmitted);
+        const float ao = specular_occlusion_active(environment, distances)
+            ? voxel_ambient_occlusion(tracer, &extras, texel.position, texel.normal, static_cast<std::uint32_t>(index),
+                                      environment, distances, stats) : 1.0F;
+        VoxelSurfaceInput surface{texel.normal, normalize(subtract(gbuffer.cameraPosition, texel.position)), visibility,
+                                  sunShare, gi.indirect[index], ao, caustic, transmitted};
+        apply_voxel_normal_map(instance, material, environment, texel.position, diffuses(material, distances),
+                               distances.metersPerVoxel, surface);
+        const LightPasses light = shade_voxel(material, environment, surface);
+        target.hdrColor[index] = beauty(light, material.baseColor.w);
         target.depth[index] = texel.normalizedDepth;
+        write_voxel_passes(target, index, material, environment, surface, light,
+                           camera.nearPlane + texel.normalizedDepth * (camera.farPlane - camera.nearPlane), distances.metersPerVoxel);
         target.objectId[index] = instance.objectId != 0U ? instance.objectId : instance.object->id();
         target.materialIndex[index] = texel.material;
         ++stats.hitRays;
@@ -508,13 +651,13 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     {
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>>> built;
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const std::vector<PolygonTextureMipChain>>>> maskedMips;
-        for (const PolygonRenderInstance& polygon : sunOccluders) {
-            if (!polygon.visible || !polygon.asset) continue;
+        const auto make_occluder = [&](const PolygonRenderInstance& polygon) -> std::optional<SunExtras::Occluder> {
+            if (!polygon.visible || !polygon.asset) return std::nullopt;
             std::shared_ptr<const PolygonBvh> bvh;
             for (const auto& [asset, existing] : built) if (asset == polygon.asset) bvh = existing;
             if (!bvh) {
                 auto fresh = std::make_shared<PolygonBvh>();
-                if (!fresh->build(*polygon.asset)) continue;
+                if (!fresh->build(*polygon.asset)) return std::nullopt;
                 bvh = fresh;
                 built.emplace_back(polygon.asset, bvh);
             }
@@ -529,8 +672,16 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     maskedMips.emplace_back(polygon.asset, chains);
                 }
             }
-            extras.occluders.push_back(std::move(occluder));
-        }
+            return occluder;
+        };
+        for (const PolygonRenderInstance& polygon : sunOccluders)
+            if (auto occluder = make_occluder(polygon)) {
+                extras.occluders.push_back(*occluder);
+                extras.aoOccluders.push_back(std::move(*occluder));
+            }
+        if (ambient_occlusion_active(environment, distances))
+            for (const PolygonRenderInstance& polygon : occlusionPolygons)
+                if (auto occluder = make_occluder(polygon)) extras.aoOccluders.push_back(std::move(*occluder));
     }
     if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades)
         return render_radiance_cascades(radianceCascades, tracer, instances, camera, environment,
@@ -576,9 +727,10 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     const Float3 caustic = extras.caustics
                         ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal,
                                                 instance.objectId != 0U ? instance.objectId : instance.object->id()) : Float3{};
+                    float ao = 1.0F;
                     const Float3 indirect = global_illumination(tracer, hit->worldPosition,
                                                                  hit->worldNormal, environment, distances,
-                                                                 seed, local);
+                                                                 seed, local, static_cast<std::uint32_t>(index), &extras, &ao);
                     const Float3 transmitted = subsurface_light(
                         tracer, instance, hit->objectHit.material, material, hit->worldPosition, hit->worldNormal,
                         environment, distances, seed, local, &extras);
@@ -587,8 +739,14 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                             hit->worldNormal, environment, distances, subsurfaceDiffusionSamples, seed,
                                             local, &extras)
                         : sun_term(hit->worldNormal, environment, visibility);
-                    target.hdrColor[index] = shade_voxel(material, environment, sunShare, indirect, caustic, transmitted);
+                    VoxelSurfaceInput surface{hit->worldNormal, normalize(subtract(camera.position, hit->worldPosition)),
+                                              visibility, sunShare, indirect, ao, caustic, transmitted};
+                    apply_voxel_normal_map(instance, material, environment, hit->worldPosition, diffuses(material, distances),
+                                           distances.metersPerVoxel, surface);
+                    const LightPasses light = shade_voxel(material, environment, surface);
+                    target.hdrColor[index] = beauty(light, material.baseColor.w);
                     target.depth[index] = normalizedDepth;
+                    write_voxel_passes(target, index, material, environment, surface, light, cameraZ, distances.metersPerVoxel);
                     target.objectId[index] = instance.objectId != 0U
                         ? instance.objectId : instance.object->id();
                     target.materialIndex[index] = hit->objectHit.material;
@@ -624,6 +782,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         stats.subsurfaceMarches += local.subsurfaceMarches;
         stats.subsurfaceExits += local.subsurfaceExits;
         stats.subsurfaceDiffusionProbes += local.subsurfaceDiffusionProbes;
+        stats.ambientOcclusionRays += local.ambientOcclusionRays;
     }
     return stats;
 }
@@ -634,6 +793,40 @@ float reference_sun_visibility(std::span<const VoxelReferenceInstance> instances
     const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
     VoxelReferenceRenderStats stats;
     return shadow_visibility(tracer, point, normal, environment, distances, seed, stats);
+}
+
+HybridOcclusionScene::HybridOcclusionScene(std::span<const VoxelReferenceInstance> voxels,
+                                           std::span<const PolygonRenderInstance> polygons)
+    : tracer_(std::make_unique<spwi::VoxelSceneTracer>(voxels)) {
+    std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>>> built;
+    for (const PolygonRenderInstance& polygon : polygons) {
+        if (!polygon.visible || !polygon.asset) continue;
+        std::shared_ptr<const PolygonBvh> bvh;
+        for (const auto& [asset, existing] : built) if (asset == polygon.asset) bvh = existing;
+        if (!bvh) {
+            auto fresh = std::make_shared<PolygonBvh>();
+            if (!fresh->build(*polygon.asset)) continue;
+            bvh = fresh;
+            built.emplace_back(polygon.asset, bvh);
+        }
+        polygons_.emplace_back(bvh, polygon.transform);
+    }
+}
+
+HybridOcclusionScene::~HybridOcclusionScene() = default;
+
+std::optional<float> HybridOcclusionScene::nearest(Float3 origin, Float3 direction, float maximumDistance) const {
+    std::optional<float> best;
+    if (const auto hit = tracer_->trace(origin, direction, maximumDistance)) best = hit->objectHit.distance;
+    for (const auto& [bvh, pose] : polygons_)
+        if (const auto hit = bvh->raycast(inverse_transform_point(pose, origin), inverse_transform_vector(pose, direction),
+                                          best ? *best : maximumDistance))
+            if (!best || hit->distance < *best) best = hit->distance;
+    return best;
+}
+
+AmbientOcclusionRay HybridOcclusionScene::ray() const {
+    return [this](Float3 origin, Float3 direction, float maximumDistance) { return nearest(origin, direction, maximumDistance); };
 }
 
 HybridReferenceRenderStats render_hybrid_reference(
@@ -650,13 +843,20 @@ HybridReferenceRenderStats render_hybrid_reference(
     voxelRenderer.metersPerVoxel = metersPerVoxel;
     voxelRenderer.threadCount = voxelThreadCount;
     voxelRenderer.radianceCascades.threadCount = voxelThreadCount;
-    // One diffusion setting for the whole hybrid image (the polygon options carry it).
-    voxelRenderer.subsurfaceDiffusionSamples = polygonOptions.subsurfaceDiffusionSamples;
+    voxelRenderer.occlusionPolygons = polygons;   // voxels' AO rays see the polygons too
     stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
     PolygonRenderOptions options = polygonOptions;
     options.preserveExistingDepth = true;
     options.metersPerUnit = metersPerVoxel;
+    // Polygons' AO rays see the voxels too.
+    std::optional<HybridOcclusionScene> occlusion;
+    if (!options.occlusionRay && environment.ambientOcclusionSamples > 0U &&
+        environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
+        occlusion.emplace(voxels, polygons);
+        options.occlusionRay = occlusion->ray();
+    }
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);
+    (void)apply_distance_fog(target, camera, environment, metersPerVoxel);
     return stats;
 }
 

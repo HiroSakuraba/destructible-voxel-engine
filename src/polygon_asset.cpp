@@ -100,6 +100,7 @@ void hash_material(std::uint64_t& h, const VoxelMaterialDefinition& m) noexcept 
     for(const auto& l:m.layers){hash_scalar(h,l.sourceMaterial);hash_scalar(h,l.weight);hash_scalar(h,static_cast<std::uint8_t>(l.blendMode));hash_scalar(h,l.enabled);}
     // Optics only when present, so the hashes of every material without them are unchanged.
     if(material_has_optics(m)){hash_scalar(h,m.transmission);hash_scalar(h,m.indexOfRefraction);hash_float3(h,m.attenuationColor);hash_scalar(h,m.attenuationDistanceMeters);}
+    if(material_has_normal_map(m)){hash_scalar(h,m.normalMap->contentHash);hash_scalar(h,m.normalMapTileMeters);hash_scalar(h,m.normalMapStrength);hash_scalar(h,m.normalMapSharpness);}
 }
 
 class Writer {

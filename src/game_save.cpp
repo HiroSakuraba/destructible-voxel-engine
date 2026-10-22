@@ -1,4 +1,5 @@
 #include "dve/game_save.hpp"
+#include "dve/voxel_normal_map.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <algorithm>
@@ -34,6 +35,7 @@ constexpr std::string_view kRootMotionSection = "dve.root-motion";
 // v5: optics (transmission, IOR, attenuation) of inline materials that have them. Optional, so
 // v4 documents and materials without optics keep their bytes.
 constexpr std::string_view kMaterialOpticsSection = "dve.material_optics";
+constexpr std::string_view kMaterialNormalMapSection = "dve.material_normal_maps";
 constexpr std::string_view kReservedPrefix = "dve.";
 
 constexpr std::uint8_t kFlagDynamic = 1U << 0U;
@@ -238,8 +240,11 @@ std::vector<std::byte> material_bytes(const std::vector<VoxelMaterialDefinition>
     w.u32(static_cast<std::uint32_t>(materials.size()));
     for (const auto& m : materials) {
         write_material(w, m);
-        // Only for the "same as the source" comparison: optics count too.
+        // Only for the "same as the source" comparison: optics and normal maps count too.
         if (material_has_optics(m)) write_material_optics(w, m);
+        if (material_has_normal_map(m)) {
+            w.u64(m.normalMap->contentHash); w.f32(m.normalMapTileMeters); w.f32(m.normalMapStrength); w.f32(m.normalMapSharpness);
+        }
     }
     return std::move(w.bytes());
 }
@@ -1110,6 +1115,39 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
             document.schemaVersion = kGameSaveSchemaVersionWithoutOptics;   // readable by older builds
         }
     }
+    {
+        // Inline materials with normal maps: each distinct image once, then the references.
+        std::vector<const VoxelNormalMap*> images;
+        std::vector<std::tuple<GameObjectId, std::uint32_t, std::uint32_t, const VoxelMaterialDefinition*>> uses;
+        for (const auto& object : world.objects)
+            for (std::size_t i = 0; i < object.materials.size(); ++i) {
+                const VoxelMaterialDefinition& m = object.materials[i];
+                if (!material_has_normal_map(m)) continue;
+                if (!material_normal_map_valid(m)) return fail(error, "invalid material normal map"), std::nullopt;
+                std::uint32_t image = 0U;
+                while (image < images.size() && images[image] != m.normalMap.get() &&
+                       (images[image]->contentHash != m.normalMap->contentHash || images[image]->rgba8 != m.normalMap->rgba8 ||
+                        images[image]->width != m.normalMap->width))
+                    ++image;
+                if (image == images.size()) images.push_back(m.normalMap.get());
+                uses.emplace_back(object.id, static_cast<std::uint32_t>(i), image, &m);
+            }
+        if (!uses.empty()) {
+            Writer w(limits_);
+            w.count(images.size(), limits_.maximumObjects * limits_.maximumMaterialsPerObject, "normal map image");
+            for (const VoxelNormalMap* map : images) {
+                w.string(map->name); w.u32(map->width); w.u32(map->height);
+                for (const std::uint8_t b : map->rgba8) w.u8(b);
+            }
+            w.count(uses.size(), limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material normal map");
+            for (const auto& [id, index, image, material] : uses) {
+                w.u64(id); w.u32(index); w.u32(image);
+                w.f32(material->normalMapTileMeters); w.f32(material->normalMapStrength); w.f32(material->normalMapSharpness);
+            }
+            if (w.failed()) return fail(error, w.failure()), std::nullopt;
+            document.sections.emplace(std::string(kMaterialNormalMapSection), std::move(w.bytes()));
+        }
+    }
     if (world.integerClock) {
         Writer clock(limits_);
         clock.u64(world.tickCount); clock.f32(world.fixedDeltaSeconds);
@@ -1443,6 +1481,44 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (!r.finish()) return corrupt(r);
     }
 
+    if (const auto* bytes = section(kMaterialNormalMapSection)) {
+        Reader r(*bytes, kMaterialNormalMapSection, limits_);
+        std::uint32_t count{};
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "normal map image")) return corrupt(r);
+        std::vector<std::shared_ptr<const VoxelNormalMap>> images;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::string name;
+            std::uint32_t width{}, height{};
+            if (!(r.string(name) && r.u32(width) && r.u32(height))) return corrupt(r);
+            if (width == 0U || height == 0U || width > kMaximumVoxelNormalMapDimension || height > kMaximumVoxelNormalMapDimension)
+                return fail(error, "invalid material normal map size"), std::nullopt;
+            std::span<const std::byte> texels;
+            if (!r.raw(texels, static_cast<std::size_t>(width) * height * 4U)) return corrupt(r);
+            std::vector<std::uint8_t> rgba(texels.size());
+            for (std::size_t b = 0; b < texels.size(); ++b) rgba[b] = std::to_integer<std::uint8_t>(texels[b]);
+            images.push_back(make_voxel_normal_map(std::move(name), width, height, std::move(rgba)));
+        }
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material normal map")) return corrupt(r);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            GameObjectId id{};
+            std::uint32_t materialIndex{}, image{};
+            VoxelMaterialDefinition use;
+            if (!(r.u64(id) && r.u32(materialIndex) && r.u32(image) && r.f32(use.normalMapTileMeters) &&
+                  r.f32(use.normalMapStrength) && r.f32(use.normalMapSharpness))) return corrupt(r);
+            const auto found = indexById.find(id);
+            if (found == indexById.end() || materialIndex >= world.objects[found->second].materials.size() || image >= images.size())
+                return fail(error, "invalid material normal map entry"), std::nullopt;
+            use.normalMap = images[image];
+            if (!material_normal_map_valid(use)) return fail(error, "invalid material normal map entry"), std::nullopt;
+            VoxelMaterialDefinition& material = world.objects[found->second].materials[materialIndex];
+            material.normalMap = use.normalMap;
+            material.normalMapTileMeters = use.normalMapTileMeters;
+            material.normalMapStrength = use.normalMapStrength;
+            material.normalMapSharpness = use.normalMapSharpness;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
+
     {
         Reader r(*section(kVoxelSection), kVoxelSection, limits_);
         std::uint32_t count{};
@@ -1583,7 +1659,7 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
                 name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection &&
-                name != kMaterialOpticsSection)
+                name != kMaterialOpticsSection && name != kMaterialNormalMapSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;
         }

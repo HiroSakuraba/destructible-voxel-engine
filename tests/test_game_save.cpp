@@ -1,5 +1,6 @@
 // Save games (dve/game_save.hpp): GameWorld capture/restore round trips, destruction deltas,
 // the DVESAVE1 container's corruption handling, schema migrations and (with Lua) script state.
+#include "dve/voxel_normal_map.hpp"
 #include "dve/camera_runtime.hpp"
 #include "dve/dvox.hpp"
 #include "dve/game_save.hpp"
@@ -262,6 +263,61 @@ void test_material_optics() {
             const auto& m = object.materials.back();
             found = m.transmission == 0.9F && m.indexOfRefraction == 1.33F && m.attenuationColor.y == 0.8F &&
                     m.attenuationDistanceMeters == 3.0F;
+        }
+    CHECK(found);
+    const auto again = codec.encode(*decoded, nullptr, &error);
+    CHECK(again && *again == *bytes);
+}
+
+// Normal maps on inline materials: one image stored once for two materials, parameters and texels
+// back, and the same bytes when re-encoded.
+void test_material_normal_maps() {
+    const Assets assets = make_assets();
+    GameSaveCodec codec(file_reader());
+    int fires = 0;
+    Scene a = boot(assets, Physics3DBackend::Reference, &fires);
+    GameSaveData saved = capture(a);
+    std::string error;
+    GameWorldObjectState* object = nullptr;
+    for (auto& candidate : saved.world.objects)
+        if (candidate.materials.size() > 1) { object = &candidate; break; }
+    CHECK(object != nullptr);
+    if (!object) return;
+    std::vector<std::uint8_t> texels(4U * 3U * 4U);
+    for (std::size_t i = 0; i < texels.size(); ++i) texels[i] = static_cast<std::uint8_t>(i * 37U + 11U);
+    const auto map = make_voxel_normal_map("bricks", 4U, 3U, texels);
+    CHECK(map != nullptr);
+    for (VoxelMaterialDefinition& m : object->materials) {
+        m.normalMap = map;
+        m.normalMapTileMeters = 0.5F;
+        m.normalMapStrength = 1.5F;
+        m.normalMapSharpness = 8.0F;
+    }
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) { std::cerr << "normal map encode: " << error << '\n'; return; }
+    const auto document = decode_save_game_document(*bytes, {}, &error);
+    CHECK(document && document->sections.contains("dve.material_normal_maps"));
+    if (document && document->sections.contains("dve.material_normal_maps")) {
+        // The image is stored once however many materials use it.
+        const auto& section = document->sections.at("dve.material_normal_maps");
+        std::size_t copies = 0;
+        for (std::size_t at = 0; at + texels.size() <= section.size(); ++at)
+            copies += std::equal(texels.begin(), texels.end(), section.begin() + static_cast<std::ptrdiff_t>(at),
+                                 [](std::uint8_t a, std::byte b) { return a == std::to_integer<std::uint8_t>(b); }) ? 1U : 0U;
+        CHECK(copies == 1U);
+    }
+    const auto decoded = codec.decode(*bytes, nullptr, &error);
+    CHECK(decoded.has_value());
+    if (!decoded) { std::cerr << "normal map decode: " << error << '\n'; return; }
+    bool found = false;
+    for (const auto& o : decoded->world.objects)
+        if (o.id == object->id) {
+            found = true;
+            for (const auto& m : o.materials)
+                found = found && m.normalMap && m.normalMap->rgba8 == texels && m.normalMap->name == "bricks" &&
+                        m.normalMap->contentHash == map->contentHash && m.normalMapTileMeters == 0.5F &&
+                        m.normalMapStrength == 1.5F && m.normalMapSharpness == 8.0F;
         }
     CHECK(found);
     const auto again = codec.encode(*decoded, nullptr, &error);
@@ -1149,6 +1205,9 @@ void test_script_state_v2() {
             world.set_environment_scalar("SunIntensity", 5.5)
             world.set_environment_vector("SkyColor", 0.1, 0.2, 0.9)
             world.set_environment_shadow_mode("hard")
+            world.set_environment_scalar("FogDensityPerMeter", 0.02)
+            world.set_environment_scalar("FogStartMeters", 4)
+            world.set_environment_vector("FogColor", 0.5, 0.6, 0.7)
             world.hud_set_interaction_prompt("Press E")
             world.hud_set_tools({ {id="pick", label="Pickaxe"}, {id="bomb", label="Bomb"}, {id="off", label="Off", enabled=false} })
             world.hud_select_next_tool()
@@ -1200,6 +1259,7 @@ void test_script_state_v2() {
 
     const RenderEnvironment& env = b.environment();
     CHECK(env.sunIntensity == 5.5F && env.skyColor.z == 0.9F && env.shadowMode == ShadowMode::Hard);
+    CHECK(env.fogDensityPerMeter == 0.02F && env.fogStartMeters == 4.0F && env.fogColor.y == 0.6F);   // v3
     CHECK(b.hud_model().interaction_prompt() == "Press E");
     CHECK(b.hud_model().tools().size() == 3U && b.hud_model().selected_tool() && b.hud_model().selected_tool()->id == "bomb");
     CHECK(b.material_library().runtime_scalar(7, "Roughness") == 0.2F);
@@ -1245,9 +1305,9 @@ void test_script_state_v2() {
     auto v1Blob = v1.save_state(&error);
     CHECK(v1Blob.has_value());
     if (v1Blob) {
-        // Strip the v2 tail: environment (30*4 + 5*4), empty prompt (4), no tools (4),
-        // selection (8), no materials (4), no named timers (4); then mark it version 1.
-        v1Blob->resize(v1Blob->size() - (120U + 20U + 4U + 4U + 8U + 4U + 4U));
+        // Strip the v2/v3 tail: environment (30*4 + 5*4), fog (5*4), empty prompt (4), no tools
+        // (4), selection (8), no materials (4), no named timers (4); then mark it version 1.
+        v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 4U + 4U + 8U + 4U + 4U));
         (*v1Blob)[4] = std::byte{1};
         GameWorld worldV1b(std::make_unique<ReferenceRigidBodyWorld>());
         GameScriptHost v1b(worldV1b);
@@ -1261,6 +1321,7 @@ void test_script_state_v2() {
 
 int main() {
     test_material_optics();
+    test_material_normal_maps();
     test_source_backed_optics();
     test_round_trip(Physics3DBackend::Reference, "reference");
     test_destruction(Physics3DBackend::Reference, "reference");

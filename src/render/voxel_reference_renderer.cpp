@@ -119,19 +119,33 @@ Float3 cosine_hemisphere(Float3 normal, std::uint32_t sample, std::uint32_t coun
     return normalize(add3(add3(multiply(tangent, x), multiply(bitangent, y)), multiply(normal, z)));
 }
 
+// PcgHash / Hash2 from random_sampling.hlsli.
+std::uint32_t pcg_hash(std::uint32_t input) noexcept {
+    const std::uint32_t state = input * 747796405U + 2891336453U;
+    const std::uint32_t word = ((state >> ((state >> 28U) + 4U)) ^ state) * 277803737U;
+    return (word >> 22U) ^ word;
+}
+Float2 hash2(std::uint32_t seed) noexcept {
+    const std::uint32_t a = pcg_hash(seed);
+    const std::uint32_t b = pcg_hash(a);
+    return {static_cast<float>(a) / 4294967295.0F, static_cast<float>(b) / 4294967295.0F};
+}
+
 Float3 sample_sun_disk(Float3 sunDirection, float angularRadius, std::uint32_t sample,
                        std::uint32_t count, std::uint32_t rotationSeed) noexcept {
     if (!(angularRadius > 0.0F)) return sunDirection;
-    const float u = (static_cast<float>(sample) + 0.5F) / static_cast<float>(count);
-    const float v = std::fmod(radical_inverse(sample ^ rotationSeed) +
-                              radical_inverse(rotationSeed), 1.0F);
-    const float radius = std::sqrt(u) * std::tan(angularRadius);
-    const float angle = 2.0F * kPi * v;
+    // Even spread over the sun disc (concentric map, as generate_shadow_rays.hlsl): the fraction
+    // of rays that get through is the visible part of the disc, so overlapping penumbrae combine
+    // as the union of what each occluder hides (the shadow blister).
+    // Same pattern as the GPU: Hammersley points with a per-pixel Cranley-Patterson rotation of
+    // both coordinates (RotatedHammersley2D with Hash2(seed)), so every seed shifts the whole set.
+    const Float2 square = rotated_hammersley_2d(sample, count, hash2(rotationSeed));
+    const Float2 disk = concentric_square_to_disk(square);
+    const float scale = std::tan(angularRadius);
     Float3 tangent{}, bitangent{};
     make_basis(sunDirection, tangent, bitangent);
     return normalize(add3(sunDirection,
-        add3(multiply(tangent, radius * std::cos(angle)),
-             multiply(bitangent, radius * std::sin(angle)))));
+        add3(multiply(tangent, disk.x * scale), multiply(bitangent, disk.y * scale))));
 }
 
 // Secondary rays go through spwi::VoxelSceneTracer, whose hits are bit-identical to
@@ -456,6 +470,14 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         stats.radianceCascadeIntervalRays += local.radianceCascadeIntervalRays;
     }
     return stats;
+}
+
+float reference_sun_visibility(std::span<const VoxelReferenceInstance> instances, Float3 point, Float3 normal,
+                               const RenderEnvironment& environment, float metersPerVoxel, std::uint32_t seed) {
+    const spwi::VoxelSceneTracer tracer(instances);
+    const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
+    VoxelReferenceRenderStats stats;
+    return shadow_visibility(tracer, point, normal, environment, distances, seed, stats);
 }
 
 HybridReferenceRenderStats render_hybrid_reference(

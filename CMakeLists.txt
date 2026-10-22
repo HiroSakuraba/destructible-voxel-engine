@@ -715,6 +715,7 @@ if(DVE_BUILD_RHI)
         src/render/multi_surface_presenter.cpp
         src/render/voxel_lighting_plan.cpp
         src/render/cascaded_shadow_map.cpp
+        src/render/bitmask_soft_shadow.cpp
         src/render/cascaded_shadow_atlas.cpp
         src/render/environment_lighting_gpu.cpp
         src/render/ray_lighting_reference.cpp
@@ -869,6 +870,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_nurbs_transform.cpp
         src/editor_nurbs_tessellation.cpp
         src/editor_nurbs_seam.cpp
+        src/editor_nurbs_reuse.cpp
         src/editor_subdivision.cpp
         src/editor_native_polygon.cpp
         src/editor_native_mesh_authoring.cpp
@@ -1990,9 +1992,11 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_gpu_material_buffer_tests PRIVATE dve::core)
     target_compile_definitions(dve_gpu_material_buffer_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME dve_gpu_material_buffer_tests COMMAND dve_gpu_material_buffer_tests)
-    add_executable(dve_material_optics_tests tests/test_material_optics.cpp)
-    target_link_libraries(dve_material_optics_tests PRIVATE dve::editor)
-    add_test(NAME dve_material_optics_tests COMMAND dve_material_optics_tests)
+    if(DVE_BUILD_EDITOR)
+        add_executable(dve_material_optics_tests tests/test_material_optics.cpp)
+        target_link_libraries(dve_material_optics_tests PRIVATE dve::editor)
+        add_test(NAME dve_material_optics_tests COMMAND dve_material_optics_tests)
+    endif()
 
     add_executable(dve_render_environment_tests tests/test_render_environment.cpp)
     target_link_libraries(dve_render_environment_tests PRIVATE dve::core)
@@ -2853,6 +2857,10 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_mesh_authoring_tests tests/test_editor_mesh_authoring.cpp)
         target_link_libraries(dve_editor_mesh_authoring_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_mesh_authoring_tests COMMAND dve_editor_mesh_authoring_tests)
+        add_executable(dve_editor_nurbs_reuse_tests tests/test_editor_nurbs_reuse.cpp)
+        target_link_libraries(dve_editor_nurbs_reuse_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_nurbs_reuse_tests COMMAND dve_editor_nurbs_reuse_tests)
+
         add_executable(dve_editor_nurbs_network_tests tests/test_editor_nurbs_network.cpp)
         target_link_libraries(dve_editor_nurbs_network_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_network_tests COMMAND dve_editor_nurbs_network_tests)
@@ -3132,6 +3140,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_hybrid_reference_rendering_tests tests/test_hybrid_reference_rendering.cpp)
     target_link_libraries(dve_hybrid_reference_rendering_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_hybrid_reference_rendering_tests COMMAND dve_hybrid_reference_rendering_tests)
+    add_executable(dve_shadow_blister_tests tests/test_shadow_blister.cpp)
+    target_link_libraries(dve_shadow_blister_tests PRIVATE dve::render_bridge)
+    target_compile_definitions(dve_shadow_blister_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_shadow_blister_tests COMMAND dve_shadow_blister_tests)
     add_executable(dve_rc_spwi_tests tests/test_radiance_cascades_spwi.cpp)
     target_link_libraries(dve_rc_spwi_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_rc_spwi_tests COMMAND dve_rc_spwi_tests)
@@ -3158,6 +3170,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_cascaded_shadow_map_tests tests/test_cascaded_shadow_map.cpp)
     target_link_libraries(dve_cascaded_shadow_map_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_cascaded_shadow_map_tests COMMAND dve_cascaded_shadow_map_tests)
+    add_executable(dve_bitmask_soft_shadow_tests tests/test_bitmask_soft_shadow.cpp)
+    target_link_libraries(dve_bitmask_soft_shadow_tests PRIVATE dve::render_bridge)
+    target_compile_definitions(dve_bitmask_soft_shadow_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_bitmask_soft_shadow_tests COMMAND dve_bitmask_soft_shadow_tests)
 
     add_executable(dve_production_environment_lighting_tests tests/test_production_environment_lighting.cpp)
     target_link_libraries(dve_production_environment_lighting_tests PRIVATE dve::render_bridge)

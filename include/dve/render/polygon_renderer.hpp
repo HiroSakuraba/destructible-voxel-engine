@@ -13,6 +13,10 @@
 #include "dve/render_environment.hpp"
 #include "dve/transform.hpp"
 
+namespace dve {
+struct PolygonBvhHit;
+}
+
 namespace dve::render {
 
 class PolygonRenderCache;
@@ -171,6 +175,15 @@ private:
 };
 
 [[nodiscard]] PolygonTextureMipChain generate_texture_mips(const PolygonImage& image);
+
+// Opacity of a polygon surface at a BVH ray hit, as the reference rasterizer computes it for its
+// alpha test: material alpha x vertex colour alpha x base-colour texture alpha x opacity texture
+// x tint alpha, at the hit's interpolated texture coordinates (finest mip; triplanar mappings at
+// the hit's object/world position). `mips` holds one chain per asset image
+// (generate_texture_mips). For shadow rays through Masked surfaces.
+[[nodiscard]] float polygon_hit_opacity(const CookedPolygonAsset& asset, const PolygonBvhHit& hit, Float3 worldPosition,
+                                        Float3 worldNormal, const std::vector<PolygonTextureMipChain>& mips,
+                                        float tintAlpha = 1.0F) noexcept;
 
 class ReferencePolygonRenderer {
 public:

@@ -76,7 +76,7 @@ namespace {
 // The hit's interpolated vertex normal (local space), or its face normal.
 Float3 interpolated_normal(const CookedPolygonAsset& asset, const PolygonBvhHit& hit) noexcept {
     Float3 normal = hit.normal;
-    const std::size_t t = static_cast<std::size_t>(hit.triangleIndex) * 3U;
+    const std::size_t t = hit.firstIndex;   // the triangle's place in the index buffer
     if (t + 2U >= asset.indices.size()) return normal;
     const PolygonVertex& a = asset.vertices[asset.indices[t]];
     const PolygonVertex& b = asset.vertices[asset.indices[t + 1U]];

@@ -153,13 +153,43 @@ Float3 sample_sun_disk(Float3 sunDirection, float angularRadius, std::uint32_t s
 // raycast_voxels_transformed over the same instances (tested in dve_rc_spwi_tests).
 // Extra sun inputs: polygon occluders and caustic light.
 struct SunExtras {
-    struct Occluder { std::shared_ptr<const PolygonBvh> bvh; RigidTransform transform; };
+    struct Occluder {
+        std::shared_ptr<const PolygonBvh> bvh;
+        RigidTransform transform;
+        const CookedPolygonAsset* asset{};
+        float tintAlpha{1.0F};
+        // Set when the asset has a Masked material: its textures, for the alpha test.
+        std::shared_ptr<const std::vector<PolygonTextureMipChain>> maskedMips;
+    };
     std::vector<Occluder> occluders;
     const CausticMap* caustics{};
     [[nodiscard]] bool polygon_occluded(Float3 origin, Float3 direction, float maximumDistance) const {
-        for (const Occluder& o : occluders)
-            if (o.bvh->raycast(inverse_transform_point(o.transform, origin), inverse_transform_vector(o.transform, direction),
-                               maximumDistance)) return true;
+        for (const Occluder& o : occluders) {
+            Float3 localOrigin = inverse_transform_point(o.transform, origin);
+            const Float3 localDirection = normalize(inverse_transform_vector(o.transform, direction));
+            float remaining = maximumDistance;
+            // Masked surfaces block only where they pass the alpha test, as the rasterizer draws
+            // them; through their holes the ray goes on.
+            for (int crossing = 0; crossing < 64; ++crossing) {
+                const auto hit = o.bvh->raycast(localOrigin, localDirection, remaining);
+                if (!hit) break;
+                if (o.maskedMips && hit->materialIndex < o.asset->materials.size() &&
+                    o.asset->materials[hit->materialIndex].blendMode == MaterialBlendMode::Masked &&
+                    hit->materialIndex < o.asset->materialBindings.size()) {
+                    const float opacity = polygon_hit_opacity(
+                        *o.asset, *hit, transform_point(o.transform, hit->position),
+                        normalize(transform_vector(o.transform, hit->normal)), *o.maskedMips, o.tintAlpha);
+                    if (opacity < o.asset->materialBindings[hit->materialIndex].alphaCutoff) {
+                        const float step = hit->distance + 1.0e-4F;
+                        localOrigin = add(localOrigin, multiply(localDirection, step));
+                        remaining -= step;
+                        if (!(remaining > 0.0F)) break;
+                        continue;
+                    }
+                }
+                return true;
+            }
+        }
         return false;
     }
 };
@@ -328,9 +358,14 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
 Float4 shade_voxel(const VoxelMaterialDefinition& material, const RenderEnvironment& environment, float sunTerm,
                    Float3 indirect, Float3 caustic = {}, Float3 transmitted = {}) noexcept {
     if (material.shadingModel == MaterialShadingModel::Unlit) return material.baseColor;
-    // Caustic irradiance is already relative to full sun head on (it carries its own cosine).
+    // Caustic irradiance is already relative to full sun head on (it carries its own cosine). It
+    // is the light glass and water let through in place of what their shadow removed, so it
+    // follows the shadow: shadowStrength of it, none with shadows off (all the direct sun is
+    // already there).
+    const float causticShare = environment.shadowMode == ShadowMode::Off ? 0.0F
+                                                                         : std::clamp(environment.shadowStrength, 0.0F, 1.0F);
     const Float3 direct = add3(multiply(environment.sunColor, environment.sunIntensity * sunTerm),
-                               multiply3(environment.sunColor, multiply(caustic, environment.sunIntensity)));
+                               multiply3(environment.sunColor, multiply(caustic, environment.sunIntensity * causticShare)));
     const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
     Float3 lit = multiply3(base, add3(direct, multiply(indirect, 1.0F - material.metallic)));
     // Subsurface transmission already carries the material's subsurface colour as its albedo.
@@ -435,7 +470,9 @@ VoxelReferenceRenderStats render_radiance_cascades(
         const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
         const float visibility = shadow_visibility(tracer, texel.position, texel.normal,
                                                    environment, distances, seed, stats, &extras);
-        const Float3 caustic = extras.caustics ? extras.caustics->irradiance(texel.position, texel.normal) : Float3{};
+        const Float3 caustic = extras.caustics ? extras.caustics->irradiance(texel.position, texel.normal,
+                                                                     instance.objectId != 0U ? instance.objectId : instance.object->id())
+                                               : Float3{};
         const Float3 transmitted = subsurface_light(tracer, instance, texel.material, material, texel.position,
                                                     texel.normal, environment, distances, seed, stats, &extras);
         const float sunShare = diffuses(material, distances)
@@ -470,6 +507,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     extras.caustics = caustics;
     {
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>>> built;
+        std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const std::vector<PolygonTextureMipChain>>>> maskedMips;
         for (const PolygonRenderInstance& polygon : sunOccluders) {
             if (!polygon.visible || !polygon.asset) continue;
             std::shared_ptr<const PolygonBvh> bvh;
@@ -480,7 +518,18 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                 bvh = fresh;
                 built.emplace_back(polygon.asset, bvh);
             }
-            extras.occluders.push_back({bvh, polygon.transform});
+            SunExtras::Occluder occluder{bvh, polygon.transform, polygon.asset, polygon.tint.w, nullptr};
+            if (std::any_of(polygon.asset->materials.begin(), polygon.asset->materials.end(),
+                            [](const VoxelMaterialDefinition& m) { return m.blendMode == MaterialBlendMode::Masked; })) {
+                for (const auto& [asset, mips] : maskedMips) if (asset == polygon.asset) occluder.maskedMips = mips;
+                if (!occluder.maskedMips) {
+                    auto chains = std::make_shared<std::vector<PolygonTextureMipChain>>();
+                    for (const PolygonImage& image : polygon.asset->images) chains->push_back(generate_texture_mips(image));
+                    occluder.maskedMips = chains;
+                    maskedMips.emplace_back(polygon.asset, chains);
+                }
+            }
+            extras.occluders.push_back(std::move(occluder));
         }
     }
     if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades)
@@ -525,7 +574,8 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                                                hit->worldNormal, environment, distances,
                                                                seed, local, &extras);
                     const Float3 caustic = extras.caustics
-                        ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal) : Float3{};
+                        ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal,
+                                                instance.objectId != 0U ? instance.objectId : instance.object->id()) : Float3{};
                     const Float3 indirect = global_illumination(tracer, hit->worldPosition,
                                                                  hit->worldNormal, environment, distances,
                                                                  seed, local);

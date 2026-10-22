@@ -55,8 +55,12 @@ struct CausticMapStats {
 class CausticMap {
 public:
     CausticMap() = default;
-    // Caustic irradiance at a point on a surface with the given normal (RGB, x full sun).
-    [[nodiscard]] Float3 irradiance(Float3 point, Float3 normal) const;
+    // Caustic irradiance at a point on a surface with the given normal (RGB, x full sun). With a
+    // receiver object id, light that landed on another object counts only where the two surfaces
+    // are in the same plane (a seam, across which the sun-size blur spreads it): a surface just
+    // behind or below the one that caught the light gets none of it.
+    static constexpr std::uint64_t kAnyReceiver = ~std::uint64_t{0};
+    [[nodiscard]] Float3 irradiance(Float3 point, Float3 normal, std::uint64_t receiver = kAnyReceiver) const;
     [[nodiscard]] const std::vector<CausticTriangle>& triangles() const noexcept { return triangles_; }
     [[nodiscard]] const CausticMapStats& stats() const noexcept { return stats_; }
     [[nodiscard]] bool empty() const noexcept { return triangles_.empty(); }

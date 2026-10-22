@@ -15,8 +15,11 @@ struct PolygonBvhHit {
     float distance{};
     Float3 position{};
     Float3 normal{};
-    std::uint32_t triangleIndex{};
+    std::uint32_t triangleIndex{};   // in submesh traversal order (picking, physics)
     std::uint32_t materialIndex{};
+    // Index-buffer offset of the triangle's first corner (indices[firstIndex .. firstIndex + 2]).
+    // Not triangleIndex * 3 when submeshes start past 0 or are stored out of order.
+    std::uint32_t firstIndex{};
 };
 
 
@@ -73,6 +76,7 @@ private:
         Float3 centroid{};
         std::uint32_t triangleIndex{};
         std::uint32_t materialIndex{};
+        std::uint32_t firstIndex{};
     };
     struct Node {
         PolygonBounds bounds{};

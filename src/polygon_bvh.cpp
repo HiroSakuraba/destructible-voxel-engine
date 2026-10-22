@@ -274,7 +274,7 @@ bool PolygonBvh::build(const CookedPolygonAsset& asset, std::string* error) {
             const Float3 maximum = max3(a, max3(b, c));
             triangles_.push_back({a, b, c, {minimum, maximum},
                                   multiply(add(add(a, b), c), 1.0F / 3.0F),
-                                  triangleIndex++, submesh.materialIndex});
+                                  triangleIndex++, submesh.materialIndex, base});
         }
     }
     if (triangles_.empty()) {
@@ -351,7 +351,7 @@ std::optional<PolygonBvhHit> PolygonBvh::raycast(
                     (!best || distance < best->distance)) {
                     best = PolygonBvhHit{distance, add(origin, multiply(direction, distance)),
                                          normal, triangle.triangleIndex,
-                                         triangle.materialIndex};
+                                         triangle.materialIndex, triangle.firstIndex};
                 }
             }
         } else {

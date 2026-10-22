@@ -439,7 +439,17 @@ bool PreparedNurbsSeamEdit::restore_preview(EditorDocument& document,std::string
     // External source, metadata or cache changes are never overwritten.
     // A partner removed mid-drag must not strand the survivor in its unapplied preview.
     if(!before_||!pair_state_matches(document,after_,false,true))return fail(error,"Linked source or display changed; external edits preserved");
-    return publish_pair(document,*before_,error,true);
+    if(!publish_pair(document,*before_,error,true))return false;
+    // A network member that vanished mid-drag leaves survivors with records naming it.
+    // Detach the whole surviving network (geometry retained) so the scene stays valid.
+    std::vector<EditorObject*> survivors;bool missing=false;
+    for(const auto* saved:before_->objects()){auto* current=document.find_object(saved->id);if(current)survivors.push_back(current);else missing=true;}
+    if(!missing)return true;
+    std::vector<CookedPolygonAsset> meshes;
+    for(auto* object:survivors){auto source=editor_nurbs_source(*object,error);if(!source)return false;auto mesh=tessellate_nurbs(*source,object->id,error);if(!mesh)return false;
+        appearance(*mesh,*object->polygon);auto valid=validate_polygon_asset(*mesh);if(!valid)return fail(error,valid.message);meshes.push_back(std::move(*mesh));}
+    for(std::size_t i=0;i<survivors.size();++i){clear_seam(*survivors[i]);survivors[i]->polygon=std::move(meshes[i]);}
+    document.mark_dirty();return true;
 }
 CommandResult PreparedNurbsSeamEdit::execute(EditorDocument& document){
     std::string error;if(!matches(document,false)||!publish(document,true,&error))return CommandResult::fail(error.empty()?"Linked source, placement or display changed; history was not applied":error);

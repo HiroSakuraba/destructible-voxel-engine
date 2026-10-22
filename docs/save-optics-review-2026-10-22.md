@@ -13,7 +13,7 @@ save over its size limit. Now it lists only the objects whose material tables ar
 
 ## Saves without optics stay at version 4
 
-Version 5 differs from version 4 only by the optional optics section. A save with no optics is now
+Version 5 differs from version 4 only by the optional optics section. A save with no optics (inline or in a source-backed material table) is now
 written as version 4, so builds from before optics can still open it. Saves that carry optics are
 written as version 5. Loading is unchanged: version 4 goes through the existing no-op step to 5.
 
@@ -30,3 +30,7 @@ written as version 5. Loading is unchanged: version 4 goes through the existing 
 - A save with a glass material is version 5 with the section.
 - Twenty copies of a glass DVOX: no optics section, and all twenty get their optics back from the
   source.
+
+A save whose only optics are in source-backed material tables also stays at version 5. Its DVOX
+sources are v1.4, which pre-optics builds cannot read, so labelling it version 4 would let those
+builds accept the header and then fail on the source.

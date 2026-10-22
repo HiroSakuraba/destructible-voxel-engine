@@ -895,6 +895,9 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
     SourceCache sources(sources_, limits_);
     Writer meta(limits_), objects(limits_), voxels(limits_), physics(limits_);
     std::set<GameObjectId> inlineMaterials;   // objects whose material table is written inline
+    // A from-source table with optics needs its v1.4 DVOX source, which pre-optics builds cannot
+    // read: such a save stays at version 5 even with no optics section.
+    bool sourceOptics = false;
 
     meta.string(kVersionString);
     meta.string(data.metadata.gameName);
@@ -987,6 +990,8 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
         if (object.kind == GameGeometryKind::Voxel && sourceMaterials &&
             material_bytes(*sourceMaterials) == material_bytes(object.materials)) {
             objects.u8(kMaterialsFromSource);   // optics included: restored from the source
+            sourceOptics = sourceOptics || std::any_of(object.materials.begin(), object.materials.end(),
+                                                       [](const VoxelMaterialDefinition& m) { return material_has_optics(m); });
         } else {
             inlineMaterials.insert(object.id);
             objects.u8(kMaterialsInline);
@@ -1101,7 +1106,7 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
             for (const auto& [id, index, material] : optics) { w.u64(id); w.u32(index); write_material_optics(w, *material); }
             if (w.failed()) return fail(error, w.failure()), std::nullopt;
             document.sections.emplace(std::string(kMaterialOpticsSection), std::move(w.bytes()));
-        } else {
+        } else if (!sourceOptics) {
             document.schemaVersion = kGameSaveSchemaVersionWithoutOptics;   // readable by older builds
         }
     }

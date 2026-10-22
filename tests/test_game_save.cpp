@@ -298,6 +298,8 @@ void test_source_backed_optics() {
     CHECK(document.has_value());
     if (!document) { std::cerr << "source-backed optics: " << error << '\n'; return; }
     CHECK(!document->sections.contains("dve.material_optics"));
+    // The source is a v1.4 (optics) DVOX that pre-optics builds cannot read: stay at version 5.
+    CHECK(document->schemaVersion == kGameSaveSchemaVersion);
     const auto bytes = codec.encode(saved, nullptr, &error);
     const auto decoded = bytes ? codec.decode(*bytes, nullptr, &error) : std::nullopt;
     CHECK(decoded.has_value());

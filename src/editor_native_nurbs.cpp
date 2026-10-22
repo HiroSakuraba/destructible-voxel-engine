@@ -84,12 +84,15 @@ void NativeEditorController::refresh_nurbs_menu_state(){
             const bool link=action=="nurbs.seam_link_c0"||action=="nurbs.seam_link_c1";
             enabled=editing&&(link?workspace_.selection_count()==2:workspace_.selection_count()==1)&&o&&o->is_nurbs();
             if(link){for(auto id:workspace_.selected_objects()){const auto* candidate=workspace_.document().find_object(id);auto source=candidate?editor_nurbs_source(*candidate):std::nullopt;
-                enabled=enabled&&candidate&&source&&!source->is_curve()&&!has_nurbs_seam(*candidate)&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(id);}
-                if(enabled){const auto& ids=workspace_.selected_objects();const auto* first=workspace_.document().find_object(*ids.begin());const auto* second=workspace_.document().find_object(*std::next(ids.begin()));
-                    if(!nurbs_seam_same_frame(*first,*second)){enabled=false;pairReason="Linked patches need the same parent, pose and axis scale without socket attachment; align the objects first";}}}
-            else {enabled=enabled&&has_nurbs_seam(*o);auto seam=o?editor_nurbs_seam(*o):std::nullopt;
-                if(seam){for(auto id:{seam->reference,seam->moving}){const auto* partner=workspace_.document().find_object(id);enabled=enabled&&partner&&partner->flags.visible&&!partner->flags.locked&&!partner->prefabLink&&!is_isolated_out(id);}}else enabled=false;
-            }
+                enabled=enabled&&candidate&&source&&!source->is_curve()&&candidate->flags.visible&&!candidate->flags.locked&&!candidate->prefabLink&&!is_isolated_out(id);}
+                if(enabled){auto active=*workspace_.selected_object();EditorObjectId other=0;for(auto id:workspace_.selected_objects())if(id!=active)other=id;
+                    auto options=nurbsAttachmentOptions_;options.c1=action=="nurbs.seam_link_c1";
+                    enabled=can_link_nurbs_seams(workspace_.document(),active,other,options,&pairReason);
+                }
+            }else enabled=enabled&&has_nurbs_seam(*o);
+            if(enabled){for(auto selected:workspace_.selected_objects()){auto ids=nurbs_seam_network_ids(workspace_.document(),selected,&pairReason);if(ids.empty())enabled=false;
+                for(auto id:ids){const auto* node=workspace_.document().find_object(id);enabled=enabled&&node&&node->flags.visible&&!node->flags.locked&&!node->prefabLink&&!is_isolated_out(id);}
+            }}
         }
         std::string reason="Stop Play; select one visible unlocked native NURBS source (a curve for extrusion/revolve)";
         if(source&&(action=="nurbs.source_elevate_u"||action=="nurbs.source_elevate_v")){
@@ -130,7 +133,7 @@ bool NativeEditorController::edit_nurbs_control(std::size_t index,NurbsPoint val
     if(workspace_.mode()!=EditorMode::Edit||playSession_.active()||longJob_||gizmoDragging_||nurbsBoxActive_||workspace_.selection_count()!=1)return false;
     auto id=workspace_.selected_object();auto* o=id?workspace_.document().find_object(*id):nullptr;
     if(!o||is_isolated_out(o->id))return false;
-    if(has_nurbs_seam(*o)){auto seam=editor_nurbs_seam(*o);if(!seam||is_isolated_out(seam->reference)||is_isolated_out(seam->moving)){set_status("Show both linked patches before editing",true);return false;}}
+    if(has_nurbs_seam(*o)){auto ids=nurbs_seam_network_ids(workspace_.document(),o->id);if(ids.empty()||std::any_of(ids.begin(),ids.end(),[&](auto id){return is_isolated_out(id);})){set_status("Show the entire NURBS network before editing",true);return false;}}
     std::string error;auto before=editor_nurbs_source(*o,&error);
     if(!before||index>=before->controls.size()){set_status("Select a valid native NURBS control",true);return false;}
     if(before->controls[index]==value)return true;
@@ -143,7 +146,7 @@ bool NativeEditorController::edit_nurbs_control(std::size_t index,NurbsPoint val
 bool NativeEditorController::dispatch_nurbs_action(std::string_view action){
     if(workspace_.mode()!=EditorMode::Edit||playSession_.active()||longJob_||gizmoDragging_||nurbsBoxActive_){set_status("Finish the active drag and stop Play before NURBS authoring",true);return false;}
     for(auto id:workspace_.selected_objects()){const auto* object=workspace_.document().find_object(id);if(object&&has_nurbs_seam(*object)){
-        auto seam=editor_nurbs_seam(*object);if(!seam||is_isolated_out(seam->reference)||is_isolated_out(seam->moving)){set_status("Show both linked NURBS patches before coordinated edits",true);return false;}
+        auto ids=nurbs_seam_network_ids(workspace_.document(),object->id);if(ids.empty()||std::any_of(ids.begin(),ids.end(),[&](auto id){return is_isolated_out(id);})){set_status("Show the entire linked NURBS network before coordinated edits",true);return false;}
     }}
     if(action.starts_with("nurbs.seam_")){
         auto id=workspace_.selected_object();if(!id)return false;std::unique_ptr<IEditorCommand> command;
@@ -157,7 +160,7 @@ bool NativeEditorController::dispatch_nurbs_action(std::string_view action){
         else return false;
         const auto selection=capture_selection_snapshot();auto result=workspace_.commands().execute(workspace_.document(),std::move(command));
         if(result.success){workspace_.commands().set_last_selection_transition(selection,capture_selection_snapshot());nurbsSelected_.clear();nurbsControl_=0;refresh_nurbs_menu_state();}
-        set_status(result.success?(action=="nurbs.seam_unlink"?"NURBS seam unlinked; matched geometry retained":"Linked NURBS pair rebuilt with shared seam samples; reference drives continuity; one undo step"):result.message,!result.success);return result.success;
+        set_status(result.success?(action=="nurbs.seam_unlink"?"Selected patch seams unlinked; matched geometry retained":"Linked NURBS network rebuilt with shared seam samples; reference drives continuity; one undo step"):result.message,!result.success);return result.success;
     }
     if(action.starts_with("nurbs.attach_")){
         constexpr std::string_view edges[]={"umin","umax","vmin","vmax"};bool recognized=false;

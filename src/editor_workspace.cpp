@@ -741,7 +741,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.attach_reverse","NURBS","Reverse Boundary Correspondence (Twist)",""},
         {"nurbs.seam_link_c0","NURBS","Link Selected Boundaries (C0, Shared Samples)",""},
         {"nurbs.seam_link_c1","NURBS","Link Selected Boundaries (C1, Shared Samples)",""},
-        {"nurbs.seam_refresh","NURBS","Rebuild Linked Seam Pair",""},
+        {"nurbs.seam_refresh","NURBS","Rebuild Seam Network",""},
         {"nurbs.seam_unlink","NURBS","Unlink Seam (Keep Matched Geometry)",""},
         {"nurbs.source_attach_c0","NURBS","Match Other Boundary to Active (C0)",""},
         {"nurbs.source_attach_c1","NURBS","Match Other Boundary to Active (C1)",""},

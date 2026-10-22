@@ -60,9 +60,8 @@ bool NativeEditorController::begin_nurbs_gizmo(){
     }
     nurbsSeamDragSnapshot_.reset();nurbsPreparedSeamEdit_.reset();
     if(has_nurbs_seam(*o)){
-        auto seam=editor_nurbs_seam(*o,&error);
-        const auto partner=seam?(o->id==seam->reference?seam->moving:seam->reference):0;
-        if(!seam||is_isolated_out(partner)){set_status("Both linked patches must be available in the current isolation",true);return false;}
+        auto ids=nurbs_seam_network_ids(workspace_.document(),o->id,&error);
+        if(ids.empty()||std::any_of(ids.begin(),ids.end(),[&](auto id){return is_isolated_out(id);})){set_status("Show the entire linked NURBS network before dragging",true);return false;}
         if(nurbs_seam_controls_driven(*o,nurbsSelected_)){
             set_status("Selected boundary/tangent controls are driven by the reference; select free controls or edit the reference",true);return false;
         }
@@ -82,7 +81,7 @@ bool NativeEditorController::begin_nurbs_gizmo(){
     nurbsFinishPending_=false;nurbsDragRequested_.reset();nurbsPreparedEdit_.reset();
     if(s->adaptiveDisplay||nurbsSeamDragSnapshot_){
         if(!nurbsTessellation_)nurbsTessellation_=std::make_shared<NurbsTessellationQueue>();
-        nurbsDragSnapshot_=std::make_shared<EditorObject>(clone_editor_object(*o));
+        if(!nurbsSeamDragSnapshot_)nurbsDragSnapshot_=std::make_shared<EditorObject>(clone_editor_object(*o));
     }
     return true;
 }
@@ -128,24 +127,10 @@ void NativeEditorController::poll_nurbs_tessellation(){
         finish_nurbs_gizmo(true);return;
     }
     if(nurbsSeamDragSnapshot_){
-        const auto& snapshot=*nurbsSeamDragSnapshot_;
-        const auto* a=workspace_.document().find_object(snapshot.reference.id);
-        const auto* b=workspace_.document().find_object(snapshot.moving.id);
-        const auto other=nurbsEditingObject_==snapshot.reference.id?snapshot.moving.id:snapshot.reference.id;
-        // Check both endpoints even while the worker is still running.
-        const auto baselineMatches=[&](const EditorObject* live,const EditorObject& saved){
-            if(!live||!live->polygon||live->flags.locked||!live->flags.visible||live->prefabLink||
-               live->subdivision||live->modelingTopology||find_component_by_type(live->components,"dve.exact_brep")||
-               !nurbs_seam_same_frame(*live,saved)||editor_nurbs_source(*live)!=editor_nurbs_source(saved)||
-               !nurbs_display_geometry_matches(*live->polygon,*saved.polygon))return false;
-            const auto* lc=find_component_by_type(live->components,kNurbsComponent);
-            const auto* sc=find_component_by_type(saved.components,kNurbsComponent);
-            auto it=lc->properties.find("seam");
-            const auto* text=it==lc->properties.end()?nullptr:std::get_if<std::string>(&it->second);
-            return text&&*text==std::get<std::string>(sc->properties.at("seam"));
-        };
-        if(is_isolated_out(other)||!(nurbsPreparedSeamEdit_?nurbsPreparedSeamEdit_->matches(workspace_.document(),true):
-            baselineMatches(a,snapshot.reference)&&baselineMatches(b,snapshot.moving))){finish_nurbs_gizmo(true);return;}
+        const auto& snapshot=*nurbsSeamDragSnapshot_;bool isolated=false;
+        for(const auto* node:snapshot.objects())isolated=isolated||is_isolated_out(node->id);
+        if(isolated||!(nurbsPreparedSeamEdit_?nurbsPreparedSeamEdit_->matches(workspace_.document(),true):
+            nurbs_seam_snapshot_matches(workspace_.document(),snapshot))){finish_nurbs_gizmo(true);return;}
         auto result=nurbsTessellation_->poll();if(!result||result->generation!=nurbsTessellationGeneration_)return;
         if(!result->seamCommand){nurbsDragValid_=false;set_status(result->error.empty()?"Linked NURBS display failed":result->error,true);if(nurbsFinishPending_)finish_nurbs_gizmo(true);return;}
         std::string error;

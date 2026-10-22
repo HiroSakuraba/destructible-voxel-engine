@@ -48,6 +48,9 @@
 namespace dve {
 
 inline constexpr std::uint32_t kGameSaveSchemaVersion = 5U;
+// Saves with no material optics are written as version 4 (the same layout without the optional
+// dve.material_optics section), so builds from before optics can still open them.
+inline constexpr std::uint32_t kGameSaveSchemaVersionWithoutOptics = 4U;
 inline constexpr std::string_view kGameSaveExtension = ".dvesave";
 
 struct GameSaveLimits {

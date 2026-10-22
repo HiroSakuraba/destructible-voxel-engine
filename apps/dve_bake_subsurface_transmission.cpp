@@ -11,6 +11,7 @@
 // Usage: dve_bake_subsurface_transmission <repository root> [walks per entry, default 200000]
 #include "dve/render/subsurface_random_walk.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>

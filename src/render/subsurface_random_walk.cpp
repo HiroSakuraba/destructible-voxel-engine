@@ -81,7 +81,11 @@ RandomWalkResult random_walk_impl(const SubsurfaceDomain& domain, const Subsurfa
     Float3 dir = unit3(direction);
     const float eta = medium.boundaryIndex > 0.0F ? medium.boundaryIndex : 1.0F;
     const auto random = [&] { return std::min(uniform(state), 0.99999994F); };
-    for (std::uint32_t step = 0; step < settings.maximumEvents; ++step) {
+    // maximumEvents counts scattering events only; boundary reflections have their own cap so a
+    // trapped path (total internal reflection) still ends.
+    std::uint64_t boundaryBounces = 0;
+    const std::uint64_t maximumBounces = 4ULL * settings.maximumEvents + 64ULL;
+    while (result.events < settings.maximumEvents) {
         const float flight = -std::log(1.0F - random()) / std::max(medium.extinction, 1.0e-12F);
         const SubsurfaceExit exit = domain.march(position, dir, flight);
         if (exit.found) {
@@ -95,6 +99,7 @@ RandomWalkResult random_walk_impl(const SubsurfaceDomain& domain, const Subsurfa
                 if (!out || random() < fresnel) {
                     dir = reflect_direction(dir, scale3(n, -1.0F));
                     position = add3(exit.position, scale3(n, -settings.surfaceOffset));
+                    if (++boundaryBounces > maximumBounces) break;
                     continue;
                 }
             }

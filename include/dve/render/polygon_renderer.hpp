@@ -89,6 +89,9 @@ struct PolygonRenderOptions {
     // Optional persistent cache, owned by one viewport/render thread. Without it,
     // shared assets still reuse preparation within this render call.
     PolygonRenderCache* cache{};
+    // World units to metres, for metre-authored material distances (subsurface scatter
+    // distance). The hybrid reference passes its metres per voxel.
+    float metersPerUnit{kDefaultMetersPerVoxel};
 };
 
 struct PolygonRenderStats {
@@ -119,6 +122,10 @@ struct PolygonRenderStats {
     std::uint64_t mipCacheHits{};
     std::uint64_t mipCacheMisses{};
     std::uint64_t mipCacheBytes{};
+    // Subsurface translucency marches from shaded-side fragments, and those that left the mesh
+    // within the subsurface max distance.
+    std::uint64_t subsurfaceMarches{};
+    std::uint64_t subsurfaceExits{};
 };
 
 struct PolygonTextureMip {

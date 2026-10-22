@@ -156,6 +156,7 @@ public:
             polygonOptions.enableFrustumCulling = view.polygonFrustumCulling;
             polygonOptions.lodBias = view.polygonLodBias;
             polygonOptions.cache = &polygonRenderCache_;
+            polygonOptions.metersPerUnit = voxelSize;
             stats_.polygons = render::ReferencePolygonRenderer{}.render(polygons_, camera, environment, target_, polygonOptions);
         } else {
             polygonRenderCache_.clear();

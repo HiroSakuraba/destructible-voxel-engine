@@ -58,11 +58,11 @@ void physics_test() {
     GameWorld restored(std::make_unique<ReferenceRigidBodyWorld>());
     check(restored.restore_save_state(loaded->world,nullptr,&error),error.c_str());
     check(restored.state_hash()==world.state_hash(),"scaled runtime state round trip");
-    auto legacy=codec.to_document(data,nullptr,&error); legacy->schemaVersion=3;
+    auto legacy=codec.to_document(data,nullptr,&error); legacy->schemaVersion=3;   // v3 -> v4 (axes) -> v5 (optics)
     legacy->sections.erase("dve.voxel_axes");
     SaveGameReadReport report;
     auto old=codec.decode(encode_save_game_document(*legacy),&report,&error);
-    check(old && report.migrationsApplied==1 && unit_voxel_scale(old->world.objects[0].voxelScale),"legacy migration defaults unit axes");
+    check(old && report.migrationsApplied==2 && unit_voxel_scale(old->world.objects[0].voxelScale),"legacy migration defaults unit axes");
     auto corrupt=codec.to_document(data,nullptr,&error);
     corrupt->sections["dve.voxel_axes"][12]=std::byte{0};
     corrupt->sections["dve.voxel_axes"][13]=std::byte{0};

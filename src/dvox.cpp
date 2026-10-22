@@ -279,7 +279,7 @@ void write_occupancy(ByteWriter& writer, const Bitset512& occupancy) {
     return encoded;
 }
 
-void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material) {
+void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material, std::uint16_t minor) {
     if (material.name.size() > std::numeric_limits<std::uint16_t>::max()) throw std::runtime_error("material name is too long");
     if (material.layers.size() > kMaximumVoxelMaterialLayers) throw std::runtime_error("material has too many layers");
     writer.write_u16(static_cast<std::uint16_t>(material.name.size()));
@@ -326,6 +326,16 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material)
         writer.write_u8(layer.enabled ? 1U : 0U);
         writer.write_u8(0);
         writer.write_float(layer.weight);
+    }
+    // v1.4 optics extension (glass, water): written only when some material has optics, so
+    // files without them keep their v1.2/v1.3 bytes.
+    if (minor >= 4U) {
+        writer.write_float(material.transmission);
+        writer.write_float(material.indexOfRefraction);
+        writer.write_float(material.attenuationColor.x);
+        writer.write_float(material.attenuationColor.y);
+        writer.write_float(material.attenuationColor.z);
+        writer.write_float(material.attenuationDistanceMeters);
     }
 }
 
@@ -379,6 +389,13 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material)
             layer.blendMode = static_cast<MaterialLayerBlendMode>(mode);
             material.layers.push_back(layer);
         }
+        if (minor >= 4U) {
+            material.transmission = reader.read_float();
+            material.indexOfRefraction = reader.read_float();
+            material.attenuationColor = {reader.read_float(), reader.read_float(), reader.read_float()};
+            material.attenuationDistanceMeters = reader.read_float();
+            if (!material_optics_valid(material)) throw std::runtime_error("invalid DVOX material optics");
+        }
     }
     return material;
 }
@@ -401,10 +418,15 @@ bool write_dvox(
         if (asset.materials.size() > 256) throw std::runtime_error("DVOX supports at most 256 materials");
 
         if (!valid_voxel_metric(asset.voxelScale)) throw std::runtime_error("invalid DVOX axis scale");
-        const std::uint16_t versionMinor=unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const bool optics = std::any_of(asset.materials.begin(), asset.materials.end(),
+                                        [](const VoxelMaterialDefinition& m) { return material_has_optics(m); });
+        const std::uint16_t versionMinor = optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
-        for (const VoxelMaterialDefinition& material : asset.materials) write_material(materials, material);
+        for (const VoxelMaterialDefinition& material : asset.materials) {
+            if (!material_optics_valid(material)) throw std::runtime_error("invalid DVOX material optics");
+            write_material(materials, material, versionMinor);
+        }
 
         std::vector<EncodedBrick> bricks;
         for (BrickKey key : asset.object.bricks().sorted_keys()) {
@@ -488,7 +510,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 3) {
+        if (major != kVersionMajor || minor > 4) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

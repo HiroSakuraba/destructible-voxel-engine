@@ -47,7 +47,7 @@
 
 namespace dve {
 
-inline constexpr std::uint32_t kGameSaveSchemaVersion = 4U;
+inline constexpr std::uint32_t kGameSaveSchemaVersion = 5U;
 inline constexpr std::string_view kGameSaveExtension = ".dvesave";
 
 struct GameSaveLimits {

@@ -2574,6 +2574,10 @@ void state_hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& m) 
         state_hash_value(hash, layer.sourceMaterial); state_hash_value(hash, layer.weight);
         state_hash_value(hash, layer.blendMode); state_hash_value(hash, layer.enabled);
     }
+    if (material_has_optics(m)) {   // only then, so older state hashes stay the same
+        state_hash_value(hash, m.transmission); state_hash_value(hash, m.indexOfRefraction);
+        state_hash_float3(hash, m.attenuationColor); state_hash_value(hash, m.attenuationDistanceMeters);
+    }
     state_hash_value(hash, m.densityKilogramsPerCubicMeter); state_hash_value(hash, m.structuralStrength);
     state_hash_value(hash, m.fractureResistance); state_hash_value(hash, m.flammability);
     state_hash_value(hash, m.thermalConductivity); state_hash_value(hash, m.transparent);

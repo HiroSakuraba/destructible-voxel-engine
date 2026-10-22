@@ -48,6 +48,12 @@ GpuMaterialRecord pack_gpu_material_record(const VoxelMaterialDefinition& defini
     record.foliageColorB = definition.foliageColor.z;
     record.foliageTransmittance = definition.foliageTransmittance;
     record.foliageWrap = definition.foliageWrap;
+    record.transmission = definition.transmission;
+    record.indexOfRefraction = definition.indexOfRefraction;
+    record.attenuationColorR = definition.attenuationColor.x;
+    record.attenuationColorG = definition.attenuationColor.y;
+    record.attenuationColorB = definition.attenuationColor.z;
+    record.attenuationDistanceMeters = definition.attenuationDistanceMeters;
     return record;
 }
 

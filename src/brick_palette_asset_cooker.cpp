@@ -59,6 +59,14 @@ void hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& material)
     hash_float(hash, material.clearCoat);
     hash_float(hash, material.clearCoatRoughness);
     hash_byte(hash, material.transparent ? 1U : 0U);
+    if (material_has_optics(material)) {   // only then, so older palette hashes stay the same
+        hash_float(hash, material.transmission);
+        hash_float(hash, material.indexOfRefraction);
+        hash_float(hash, material.attenuationColor.x);
+        hash_float(hash, material.attenuationColor.y);
+        hash_float(hash, material.attenuationColor.z);
+        hash_float(hash, material.attenuationDistanceMeters);
+    }
 }
 
 [[nodiscard]] std::uint64_t brick_id(std::uint64_t objectId, BrickKey key) noexcept {

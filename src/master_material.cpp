@@ -97,6 +97,14 @@ void map_reserved_parameters(MaterialResolveResult& result, const MaterialInstan
         result.definition.foliageTransmittance = it->second;
     if (const auto it = result.resolvedScalars.find(std::string(kFoliageWrapParam)); it != result.resolvedScalars.end())
         result.definition.foliageWrap = it->second;
+    if (const auto it = result.resolvedScalars.find(std::string(kTransmissionParam)); it != result.resolvedScalars.end())
+        result.definition.transmission = it->second;
+    if (const auto it = result.resolvedScalars.find(std::string(kIndexOfRefractionParam)); it != result.resolvedScalars.end())
+        result.definition.indexOfRefraction = it->second;
+    if (const auto it = result.resolvedVectors.find(std::string(kAttenuationColorParam)); it != result.resolvedVectors.end())
+        result.definition.attenuationColor = {it->second.x, it->second.y, it->second.z};
+    if (const auto it = result.resolvedScalars.find(std::string(kAttenuationDistanceParam)); it != result.resolvedScalars.end())
+        result.definition.attenuationDistanceMeters = it->second;
     result.definition.layers = leaf.layers;
     result.definition.densityKilogramsPerCubicMeter = leaf.densityKilogramsPerCubicMeter;
     result.definition.structuralStrength = leaf.structuralStrength;
@@ -315,6 +323,10 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.foliageColor = lerp(base.foliageColor, layer.foliageColor, t);
         out.foliageTransmittance = lerp(base.foliageTransmittance, layer.foliageTransmittance, t);
         out.foliageWrap = lerp(base.foliageWrap, layer.foliageWrap, t);
+        out.transmission = lerp(base.transmission, layer.transmission, t);
+        out.indexOfRefraction = lerp(base.indexOfRefraction, layer.indexOfRefraction, t);
+        out.attenuationColor = lerp(base.attenuationColor, layer.attenuationColor, t);
+        out.attenuationDistanceMeters = lerp(base.attenuationDistanceMeters, layer.attenuationDistanceMeters, t);
         break;
     case MaterialLayerBlendMode::Multiply:
         out.baseColor = multiply_layer(base.baseColor, layer.baseColor, t);
@@ -330,6 +342,8 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.foliageTransmittance = saturate(lerp(base.foliageTransmittance,
                                                  base.foliageTransmittance * layer.foliageTransmittance, t));
         out.foliageWrap = saturate(lerp(base.foliageWrap, base.foliageWrap * layer.foliageWrap, t));
+        out.transmission = saturate(lerp(base.transmission, base.transmission * layer.transmission, t));
+        out.attenuationColor = multiply_layer(base.attenuationColor, layer.attenuationColor, t);
         break;
     case MaterialLayerBlendMode::Additive:
         out.baseColor = add(base.baseColor, layer.baseColor, t);
@@ -345,6 +359,7 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.foliageColor = add(base.foliageColor, layer.foliageColor, t);
         out.foliageTransmittance = saturate(base.foliageTransmittance + layer.foliageTransmittance * t);
         out.foliageWrap = saturate(base.foliageWrap + layer.foliageWrap * t);
+        out.transmission = saturate(base.transmission + layer.transmission * t);
         break;
     }
     // The target layer stack owns these semantic/physical properties.
@@ -528,6 +543,9 @@ void MaterialLibrary::apply_runtime_overrides(MaterialId materialId, VoxelMateri
             else if (name == kClearCoatRoughnessParam) definition.clearCoatRoughness = value;
             else if (name == kFoliageTransmittanceParam) definition.foliageTransmittance = value;
             else if (name == kFoliageWrapParam) definition.foliageWrap = value;
+            else if (name == kTransmissionParam) definition.transmission = std::clamp(value, 0.0F, 1.0F);
+            else if (name == kIndexOfRefractionParam) definition.indexOfRefraction = std::clamp(value, 1.0F, 3.0F);
+            else if (name == kAttenuationDistanceParam) definition.attenuationDistanceMeters = std::max(value, 0.0F);
         }
     }
     if (const auto it = runtimeVectors_.find(materialId); it != runtimeVectors_.end()) {
@@ -536,6 +554,9 @@ void MaterialLibrary::apply_runtime_overrides(MaterialId materialId, VoxelMateri
             else if (name == kEmissiveParam) definition.emissive = {value.x, value.y, value.z};
             else if (name == kSubsurfaceColorParam) definition.subsurfaceColor = {value.x, value.y, value.z};
             else if (name == kFoliageColorParam) definition.foliageColor = {value.x, value.y, value.z};
+            else if (name == kAttenuationColorParam)
+                definition.attenuationColor = {std::clamp(value.x, 0.0F, 1.0F), std::clamp(value.y, 0.0F, 1.0F),
+                                               std::clamp(value.z, 0.0F, 1.0F)};
         }
     }
 }

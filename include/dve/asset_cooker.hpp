@@ -122,6 +122,11 @@ struct ImportedMaterial {
     // imported formats and DVE-authored materials that provide a dedicated mask.
     std::optional<std::uint32_t> opacityTexture;
     std::uint32_t opacityTexcoord{};
+    // KHR_materials_transmission / _ior / _volume (attenuationDistance: 0 = infinite = clear).
+    float transmissionFactor{0.0F};
+    float ior{1.5F};
+    Float3 attenuationColor{1.0F, 1.0F, 1.0F};
+    float attenuationDistance{0.0F};
 };
 
 struct ImportedMesh {
@@ -183,6 +188,15 @@ struct VoxelMaterialDefinition {
     // effective material record before upload; the stack remains here for persistence and
     // live weight editing.
     std::vector<VoxelMaterialLayer> layers;
+    // Light passing through the material: glass, water, gems (glTF KHR_materials_transmission,
+    // KHR_materials_ior and KHR_materials_volume). transmission 0, the default, keeps every older
+    // behaviour; above 0 the surface refracts (Snell, Fresnel from indexOfRefraction) and bends
+    // sunlight into caustics. Light inside is tinted toward attenuationColor, reached after
+    // attenuationDistanceMeters of travel (Beer-Lambert); 0 there means clear.
+    float transmission{0.0F};               // 0..1
+    float indexOfRefraction{1.5F};          // 1..3 (water 1.33, glass 1.5, diamond 2.42)
+    Float3 attenuationColor{1.0F, 1.0F, 1.0F};
+    float attenuationDistanceMeters{0.0F};  // 0 = no absorption
     float densityKilogramsPerCubicMeter{1000.0F};
     float structuralStrength{1.0F};
     float fractureResistance{1.0F};
@@ -191,6 +205,24 @@ struct VoxelMaterialDefinition {
     bool transparent{};
     bool structural{true};
 };
+
+// True when any optical field differs from its default (formats write the optics block, hashes
+// include it, only then, so materials without optics keep their old bytes and hashes).
+[[nodiscard]] inline bool material_has_optics(const VoxelMaterialDefinition& m) noexcept {
+    return m.transmission != 0.0F || m.indexOfRefraction != 1.5F || m.attenuationColor.x != 1.0F ||
+           m.attenuationColor.y != 1.0F || m.attenuationColor.z != 1.0F || m.attenuationDistanceMeters != 0.0F;
+}
+// Light enters the material (refraction, caustics).
+[[nodiscard]] inline bool material_is_refractive(const VoxelMaterialDefinition& m) noexcept {
+    return m.transmission > 0.0F;
+}
+// Optical fields in range: transmission 0..1, IOR 1..3, colour 0..1, distance >= 0, all finite.
+[[nodiscard]] inline bool material_optics_valid(const VoxelMaterialDefinition& m) noexcept {
+    const auto in = [](float v, float lo, float hi) { return v >= lo && v <= hi; };   // false for NaN
+    return in(m.transmission, 0.0F, 1.0F) && in(m.indexOfRefraction, 1.0F, 3.0F) && in(m.attenuationColor.x, 0.0F, 1.0F) &&
+           in(m.attenuationColor.y, 0.0F, 1.0F) && in(m.attenuationColor.z, 0.0F, 1.0F) &&
+           in(m.attenuationDistanceMeters, 0.0F, 3.4e38F);
+}
 
 struct ModelImportOptions {
     bool strict{true};

@@ -1,5 +1,7 @@
 # Linked NURBS control gizmos and paired background display
 
+Follow-up: [connected seam networks](nurbs-seam-networks-2026-10-21.md) extends this paired worker/history path to multiple incident seams and acyclic junctions. The one-seam limit described below records the original batch.
+
 Linked reference controls and free moving controls now use the same translate, rotate and scale gizmos as independent NURBS sources. A selection containing any driven moving boundary control, or the adjacent tangent row for C1, refuses the entire drag with an explanation. Both linked objects must be visible, unlocked, owned and available in the current isolation. Object-level transforms still require unlinking.
 
 The existing single-worker tessellation queue accepts immutable two-patch snapshots for both fixed and adaptive display. Every input request derives from the exact pre-drag pair. New requests cancel the running generation and replace the pending generation. The worker checks the baseline caches, maintains C0/C1, regenerates the common seam schedule and prepares both complete displays. Stop tokens reach attachment preparation, adaptive refinement, explicit grid tessellation, continuity checking and seam-cache validation. No worker holds live document or controller pointers.

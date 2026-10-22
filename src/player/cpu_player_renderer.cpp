@@ -167,6 +167,7 @@ public:
         } else {
             polygonRenderCache_.clear();
         }
+        (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
         stats_.renderMilliseconds = milliseconds_since(start);
 
         const auto resolveStart = Clock::now();
@@ -238,6 +239,7 @@ private:
             std::fill_n(target_.hdrColor.begin() + static_cast<std::ptrdiff_t>(y) * target_.width,
                         target_.width, color);
         }
+        target_.sync_background_pass();
     }
 
     IFrameBlitter* blitter_{};

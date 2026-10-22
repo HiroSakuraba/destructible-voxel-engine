@@ -12,6 +12,7 @@
 #include "dve/polygon_asset.hpp"
 #include "dve/render_environment.hpp"
 #include "dve/render/ambient_occlusion.hpp"
+#include "dve/render/surface_shading.hpp"
 #include "dve/transform.hpp"
 
 namespace dve {
@@ -31,6 +32,48 @@ struct PolygonCamera {
     float farPlane{1000.0F};
 };
 
+// Render passes (AOVs), filled by both reference renderers when enabled on the target.
+//
+// Light passes: at every pixel they sum to hdrColor (rgb), so a compositor can grade, tint or
+// drop any of them and rebuild the image. Translucent surfaces blend every light pass by their
+// alpha, exactly as they blend hdrColor; background is what the target was cleared to (the sky)
+// and fog what apply_distance_fog added.
+//
+// Data passes (not part of the sum), from the nearest opaque surface:
+//   shadow        - the direct sun light the shadows removed: image + shadow = unshadowed image
+//                   (tint it to colour shadows). Zero on polygons (the polygon reference casts no
+//                   sun shadows) and where nothing was drawn.
+//   sunVisibility - 1 lit .. 0 fully shadowed (shadow strength applied); 1 where nothing was drawn.
+//   normal        - world-space shading normal; zero where nothing was drawn.
+//   depthMeters   - camera-space Z in metres; +infinity where nothing was drawn.
+struct RenderPassBuffers {
+    bool enabled{};
+    std::vector<Float3> directDiffuse;
+    std::vector<Float3> directSpecular;
+    std::vector<Float3> indirectDiffuse;
+    std::vector<Float3> indirectSpecular;
+    std::vector<Float3> emission;
+    std::vector<Float3> transmission;
+    std::vector<Float3> background;
+    std::vector<Float3> fog;
+    std::vector<Float3> shadow;
+    std::vector<float> sunVisibility;
+    std::vector<Float3> normal;
+    std::vector<float> depthMeters;
+
+    // The light passes summed (equals hdrColor.rgb).
+    [[nodiscard]] Float3 light_sum(std::size_t index) const noexcept;
+};
+
+// What one surface sample contributes to the passes.
+struct RenderPassSample {
+    LightPasses light{};
+    Float3 shadow{};
+    float sunVisibility{1.0F};
+    Float3 normal{};
+    float depthMeters{};
+};
+
 struct PolygonRenderTarget {
     std::uint32_t width{};
     std::uint32_t height{};
@@ -38,11 +81,35 @@ struct PolygonRenderTarget {
     std::vector<float> depth;
     std::vector<std::uint64_t> objectId;
     std::vector<std::uint32_t> materialIndex;
+    RenderPassBuffers passes;   // empty unless enable_passes()
 
     void resize(std::uint32_t newWidth, std::uint32_t newHeight);
     void clear(Float4 color = {0.02F, 0.03F, 0.05F, 1.0F}, float depthValue = 1.0F);
+    // Allocates (or frees) the render passes; cleared to an empty frame.
+    void enable_passes(bool enabled = true);
+    // After writing hdrColor directly for the background (a sky gradient): the background pass
+    // takes hdrColor wherever nothing was drawn.
+    void sync_background_pass();
     [[nodiscard]] bool valid() const noexcept;
+    // Writes a surface's passes at a pixel: opaque replaces them, alpha < 1 blends the light
+    // passes over what is there (data passes are left to the opaque surface behind).
+    void write_passes(std::size_t index, const RenderPassSample& sample, float alpha, bool opaque) noexcept;
 };
+
+// Exponential distance fog (RenderEnvironment::fogDensityPerMeter), applied after the frame is
+// drawn, from its depth: every drawn pixel keeps T = exp(-density x max(0, distance - start))
+// of its light and gains fogColor x (1 - T), distance being metres along the view ray. Light
+// passes are scaled by T and the fog pass gets the rest, so they still sum to the image. The
+// background (nothing drawn) is left alone. Returns the pixels fogged.
+std::uint64_t apply_distance_fog(PolygonRenderTarget& target, const PolygonCamera& camera,
+                                 const RenderEnvironment& environment, float metersPerUnit);
+
+// Writes beauty and every pass as PFM images (32-bit float, little-endian): beauty, the light
+// passes, shadow, normal (rgb), sun_visibility and depth (greyscale, metres; empty pixels hold
+// the far plane in metres as PFM has no infinity convention). File names are
+// <prefix><pass>.pfm. Fails when passes are not enabled.
+[[nodiscard]] bool write_render_passes_pfm(const PolygonRenderTarget& target, const std::filesystem::path& directory,
+                                           const std::string& prefix, float farPlaneMeters, std::string* error = nullptr);
 
 using PolygonLodLevel = dve::PolygonLodLevel;
 

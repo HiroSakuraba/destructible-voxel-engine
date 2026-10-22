@@ -6,6 +6,8 @@
 #include "dve/render/subsurface.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <functional>
 #include <array>
 #include <cmath>
 #include <fstream>
@@ -743,21 +745,34 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             ++stats.alphaRejectedFragments;continue;
         }
         const bool debugView = options.materialDebugView != PolygonMaterialDebugView::Lit;
-        const Float4 shaded = debugView
-            ? material_debug_output(options.materialDebugView, base, normal, effective, uv, uv1,
-                                    worldPosition, objectPosition, tri.binding->mapping, detailFade,
-                                    fragmentParallaxSamples, layerDebugMask, layerDebugCoverage)
-            : beauty(shade(effective,base,normal,viewWorld,environment,tri.frontFacing,
+        RenderPassSample passes;
+        Float4 shaded{};
+        if(debugView){
+            shaded=material_debug_output(options.materialDebugView, base, normal, effective, uv, uv1,
+                                         worldPosition, objectPosition, tri.binding->mapping, detailFade,
+                                         fragmentParallaxSamples, layerDebugMask, layerDebugCoverage);
+            passes.light.emission={shaded.x,shaded.y,shaded.z};   // debug colours: all in one pass
+        }else{
+            passes.light=shade(effective,base,normal,viewWorld,environment,tri.frontFacing,
                     polygon_subsurface_light(tri,effective,worldPosition,normal,environment,options,stats),
                     tri.subsurfaceBvh&&material_has_subsurface(effective)&&options.subsurfaceDiffusionSamples>0U
                         ? polygon_diffused_sun(tri,effective,worldPosition,normal,environment,options,index,stats) : -1.0F,
-                    polygon_ambient_occlusion(worldPosition,normal,environment,options,index,stats)),base.w);
+                    polygon_ambient_occlusion(worldPosition,normal,environment,options,index,stats));
+            shaded=beauty(passes.light,base.w);
+        }
+        if(target.passes.enabled){
+            passes.normal=normal;
+            const float cameraZ=w0*tri.v[0].cameraZ+w1*tri.v[1].cameraZ+w2*tri.v[2].cameraZ;
+            passes.depthMeters=cameraZ*(options.metersPerUnit>0.0F?options.metersPerUnit:kDefaultMetersPerVoxel);
+        }
         if(!debugView&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
             const float alpha=std::clamp(shaded.w,0.0F,1.0F);const Float4 old=target.hdrColor[index];
             target.hdrColor[index]={shaded.x*alpha+old.x*(1-alpha),shaded.y*alpha+old.y*(1-alpha),shaded.z*alpha+old.z*(1-alpha),1};
+            target.write_passes(index,passes,alpha,false);
             ++stats.transparentFragments;
         }else{
             target.hdrColor[index]=shaded;target.depth[index]=depth;
+            target.write_passes(index,passes,1.0F,true);
             if(options.writeObjectIds){target.objectId[index]=tri.objectId;target.materialIndex[index]=tri.submesh->materialIndex;}
         }
         ++stats.shadedFragments;
@@ -776,12 +791,164 @@ float tonemap_curve(float x, TonemapOperator op) noexcept {
 std::uint8_t srgb(float linear) noexcept {linear=std::clamp(linear,0.0F,1.0F);const float encoded=linear<=0.0031308F?12.92F*linear:1.055F*std::pow(linear,1.0F/2.4F)-0.055F;return static_cast<std::uint8_t>(std::clamp(encoded*255.0F+0.5F,0.0F,255.0F));}
 }
 
+namespace {
+template <class T> void size_pass(std::vector<T>& pass, bool enabled, std::size_t count, T value) {
+    if (enabled) pass.assign(count, value); else std::vector<T>().swap(pass);
+}
+void reset_passes(RenderPassBuffers& p, std::size_t count, Float3 background) {
+    const bool on = p.enabled;
+    for (std::vector<Float3>* light : {&p.directDiffuse, &p.directSpecular, &p.indirectDiffuse, &p.indirectSpecular,
+                                       &p.emission, &p.transmission, &p.fog, &p.shadow, &p.normal})
+        size_pass(*light, on, count, Float3{});
+    size_pass(p.background, on, count, background);
+    size_pass(p.sunVisibility, on, count, 1.0F);
+    size_pass(p.depthMeters, on, count, std::numeric_limits<float>::infinity());
+}
+Float3 lerp_pass(Float3 over, Float3 under, float alpha) noexcept {
+    return {over.x * alpha + under.x * (1.0F - alpha), over.y * alpha + under.y * (1.0F - alpha),
+            over.z * alpha + under.z * (1.0F - alpha)};
+}
+} // namespace
+
+Float3 RenderPassBuffers::light_sum(std::size_t i) const noexcept {
+    Float3 sum{};
+    for (const std::vector<Float3>* pass : {&directDiffuse, &directSpecular, &indirectDiffuse, &indirectSpecular, &emission,
+                                            &transmission, &background, &fog})
+        sum = add(sum, (*pass)[i]);
+    return sum;
+}
+
 void PolygonRenderTarget::resize(std::uint32_t newWidth,std::uint32_t newHeight){
     width=newWidth;height=newHeight;const std::size_t count=static_cast<std::size_t>(width)*height;
     hdrColor.assign(count,{});depth.assign(count,1.0F);objectId.assign(count,0U);materialIndex.assign(count,0U);
+    reset_passes(passes,count,{});
 }
-void PolygonRenderTarget::clear(Float4 color,float depthValue){std::fill(hdrColor.begin(),hdrColor.end(),color);std::fill(depth.begin(),depth.end(),depthValue);std::fill(objectId.begin(),objectId.end(),0U);std::fill(materialIndex.begin(),materialIndex.end(),0U);}
-bool PolygonRenderTarget::valid() const noexcept{const std::size_t count=static_cast<std::size_t>(width)*height;return width>0&&height>0&&hdrColor.size()==count&&depth.size()==count&&objectId.size()==count&&materialIndex.size()==count;}
+void PolygonRenderTarget::clear(Float4 color,float depthValue){
+    std::fill(hdrColor.begin(),hdrColor.end(),color);std::fill(depth.begin(),depth.end(),depthValue);
+    std::fill(objectId.begin(),objectId.end(),0U);std::fill(materialIndex.begin(),materialIndex.end(),0U);
+    reset_passes(passes,hdrColor.size(),{color.x,color.y,color.z});
+}
+void PolygonRenderTarget::enable_passes(bool enabled){
+    passes.enabled=enabled;
+    reset_passes(passes,hdrColor.size(),{});
+    if(enabled)sync_background_pass();
+}
+void PolygonRenderTarget::sync_background_pass(){
+    if(!passes.enabled)return;
+    for(std::size_t i=0;i<hdrColor.size()&&i<passes.background.size();++i)
+        if(!(depth[i]<1.0F))passes.background[i]={hdrColor[i].x,hdrColor[i].y,hdrColor[i].z};
+}
+bool PolygonRenderTarget::valid() const noexcept{
+    const std::size_t count=static_cast<std::size_t>(width)*height;
+    if(!(width>0&&height>0&&hdrColor.size()==count&&depth.size()==count&&objectId.size()==count&&materialIndex.size()==count))return false;
+    if(!passes.enabled)return true;
+    const auto sized=[count](const auto& v){return v.size()==count;};
+    return sized(passes.directDiffuse)&&sized(passes.directSpecular)&&sized(passes.indirectDiffuse)&&sized(passes.indirectSpecular)&&
+           sized(passes.emission)&&sized(passes.transmission)&&sized(passes.background)&&sized(passes.fog)&&sized(passes.shadow)&&
+           sized(passes.sunVisibility)&&sized(passes.normal)&&sized(passes.depthMeters);
+}
+void PolygonRenderTarget::write_passes(std::size_t i,const RenderPassSample& sample,float alpha,bool opaque) noexcept{
+    if(!passes.enabled||i>=passes.directDiffuse.size())return;
+    RenderPassBuffers& p=passes;
+    const LightPasses& l=sample.light;
+    if(opaque){
+        p.directDiffuse[i]=l.directDiffuse;p.directSpecular[i]=l.directSpecular;p.indirectDiffuse[i]=l.indirectDiffuse;
+        p.indirectSpecular[i]=l.indirectSpecular;p.emission[i]=l.emission;p.transmission[i]=l.transmission;
+        p.background[i]={};p.fog[i]={};p.shadow[i]=sample.shadow;p.sunVisibility[i]=sample.sunVisibility;
+        p.normal[i]=sample.normal;p.depthMeters[i]=sample.depthMeters;
+        return;
+    }
+    alpha=std::clamp(alpha,0.0F,1.0F);
+    p.directDiffuse[i]=lerp_pass(l.directDiffuse,p.directDiffuse[i],alpha);
+    p.directSpecular[i]=lerp_pass(l.directSpecular,p.directSpecular[i],alpha);
+    p.indirectDiffuse[i]=lerp_pass(l.indirectDiffuse,p.indirectDiffuse[i],alpha);
+    p.indirectSpecular[i]=lerp_pass(l.indirectSpecular,p.indirectSpecular[i],alpha);
+    p.emission[i]=lerp_pass(l.emission,p.emission[i],alpha);
+    p.transmission[i]=lerp_pass(l.transmission,p.transmission[i],alpha);
+    p.background[i]=lerp_pass({},p.background[i],alpha);
+    p.fog[i]=lerp_pass({},p.fog[i],alpha);
+    p.shadow[i]=lerp_pass(sample.shadow,p.shadow[i],alpha);
+}
+
+std::uint64_t apply_distance_fog(PolygonRenderTarget& target,const PolygonCamera& camera,const RenderEnvironment& environment,
+                                 float metersPerUnit){
+    const float density=environment.fogDensityPerMeter;
+    if(!(density>0.0F)||!target.valid()||!(camera.farPlane>camera.nearPlane))return 0U;
+    metersPerUnit=metersPerUnit>0.0F&&std::isfinite(metersPerUnit)?metersPerUnit:kDefaultMetersPerVoxel;
+    const float tanHalf=std::tan(camera.verticalFieldOfViewRadians*0.5F);
+    const float aspect=static_cast<float>(target.width)/static_cast<float>(target.height);
+    const Float3 fogColor=environment.fogColor;
+    std::uint64_t fogged=0U;
+    RenderPassBuffers& p=target.passes;
+    for(std::uint32_t y=0;y<target.height;++y){
+        const float ndcY=(1.0F-2.0F*((static_cast<float>(y)+0.5F)/static_cast<float>(target.height)))*tanHalf;
+        for(std::uint32_t x=0;x<target.width;++x){
+            const std::size_t i=static_cast<std::size_t>(y)*target.width+x;
+            if(!(target.depth[i]<1.0F))continue;
+            const float ndcX=(2.0F*((static_cast<float>(x)+0.5F)/static_cast<float>(target.width))-1.0F)*tanHalf*aspect;
+            const float cameraZ=camera.nearPlane+target.depth[i]*(camera.farPlane-camera.nearPlane);
+            const float meters=cameraZ*std::sqrt(1.0F+ndcX*ndcX+ndcY*ndcY)*metersPerUnit;
+            const float t=std::exp(-density*std::max(0.0F,meters-environment.fogStartMeters));
+            const Float3 add_fog=multiply(fogColor,1.0F-t);
+            Float4& c=target.hdrColor[i];
+            c={c.x*t+add_fog.x,c.y*t+add_fog.y,c.z*t+add_fog.z,c.w};
+            if(p.enabled){
+                for(std::vector<Float3>* pass:{&p.directDiffuse,&p.directSpecular,&p.indirectDiffuse,&p.indirectSpecular,
+                                               &p.emission,&p.transmission,&p.background,&p.fog})
+                    (*pass)[i]=multiply((*pass)[i],t);
+                p.fog[i]=add(p.fog[i],add_fog);
+            }
+            ++fogged;
+        }
+    }
+    return fogged;
+}
+
+namespace {
+bool write_pfm(const std::filesystem::path& path,std::uint32_t width,std::uint32_t height,int channels,
+               const std::function<float(std::size_t,int)>& value,std::string* error){
+    std::ofstream out(path,std::ios::binary);
+    if(!out){if(error)*error="cannot write "+path.string();return false;}
+    out<<(channels==3?"PF":"Pf")<<"\n"<<width<<" "<<height<<"\n-1.0\n";   // negative scale: little-endian
+    std::vector<float> row(static_cast<std::size_t>(width)*channels);
+    for(std::uint32_t y=height;y-->0;){   // PFM rows run bottom to top
+        for(std::uint32_t x=0;x<width;++x)
+            for(int c=0;c<channels;++c)row[static_cast<std::size_t>(x)*channels+c]=value(static_cast<std::size_t>(y)*width+x,c);
+        for(const float f:row){
+            const auto bits=std::bit_cast<std::uint32_t>(f);
+            const char bytes[4]{static_cast<char>(bits&0xFFU),static_cast<char>((bits>>8U)&0xFFU),
+                                static_cast<char>((bits>>16U)&0xFFU),static_cast<char>((bits>>24U)&0xFFU)};
+            out.write(bytes,4);
+        }
+    }
+    if(!out){if(error)*error="failed writing "+path.string();return false;}
+    return true;
+}
+float component(Float3 v,int c) noexcept{return c==0?v.x:c==1?v.y:v.z;}
+} // namespace
+
+bool write_render_passes_pfm(const PolygonRenderTarget& target,const std::filesystem::path& directory,const std::string& prefix,
+                             float farPlaneMeters,std::string* error){
+    if(!target.valid()||!target.passes.enabled){if(error)*error="render passes are not enabled on this target";return false;}
+    std::error_code ec;
+    std::filesystem::create_directories(directory,ec);
+    const RenderPassBuffers& p=target.passes;
+    const auto colour=[&](const char* name,const std::vector<Float3>& pass){
+        return write_pfm(directory/(prefix+name+".pfm"),target.width,target.height,3,
+                         [&](std::size_t i,int c){return component(pass[i],c);},error);
+    };
+    if(!write_pfm(directory/(prefix+"beauty.pfm"),target.width,target.height,3,
+                  [&](std::size_t i,int c){const Float4& v=target.hdrColor[i];return c==0?v.x:c==1?v.y:v.z;},error))return false;
+    const std::pair<const char*,const std::vector<Float3>*> light[]{
+        {"direct_diffuse",&p.directDiffuse},{"direct_specular",&p.directSpecular},{"indirect_diffuse",&p.indirectDiffuse},
+        {"indirect_specular",&p.indirectSpecular},{"emission",&p.emission},{"transmission",&p.transmission},
+        {"background",&p.background},{"fog",&p.fog},{"shadow",&p.shadow},{"normal",&p.normal}};
+    for(const auto& [name,pass]:light)if(!colour(name,*pass))return false;
+    if(!write_pfm(directory/(prefix+"sun_visibility.pfm"),target.width,target.height,1,
+                  [&](std::size_t i,int){return p.sunVisibility[i];},error))return false;
+    return write_pfm(directory/(prefix+"depth.pfm"),target.width,target.height,1,
+                     [&](std::size_t i,int){return std::isfinite(p.depthMeters[i])?p.depthMeters[i]:farPlaneMeters;},error);
+}
 
 float polygon_hit_opacity(const CookedPolygonAsset& asset, const PolygonBvhHit& hit, Float3 worldPosition,
                           Float3 worldNormal, const std::vector<PolygonTextureMipChain>& mips, float tintAlpha) noexcept {
@@ -1082,7 +1249,19 @@ PolygonRenderStats ReferencePolygonRenderer::render(
     return stats;
 }
 
-bool composite_hybrid_layers(const PolygonRenderTarget& voxelLayer,const PolygonRenderTarget& polygonLayer,PolygonRenderTarget& output,std::string* error){if(!voxelLayer.valid()||!polygonLayer.valid()||voxelLayer.width!=polygonLayer.width||voxelLayer.height!=polygonLayer.height){if(error)*error="hybrid layers must be valid and have identical dimensions";return false;}output.resize(voxelLayer.width,voxelLayer.height);for(std::size_t i=0;i<output.depth.size();++i){const bool polygon=polygonLayer.depth[i]<voxelLayer.depth[i];output.depth[i]=polygon?polygonLayer.depth[i]:voxelLayer.depth[i];output.hdrColor[i]=polygon?polygonLayer.hdrColor[i]:voxelLayer.hdrColor[i];output.objectId[i]=polygon?polygonLayer.objectId[i]:voxelLayer.objectId[i];output.materialIndex[i]=polygon?polygonLayer.materialIndex[i]:voxelLayer.materialIndex[i];}return true;}
+bool composite_hybrid_layers(const PolygonRenderTarget& voxelLayer,const PolygonRenderTarget& polygonLayer,PolygonRenderTarget& output,std::string* error){if(!voxelLayer.valid()||!polygonLayer.valid()||voxelLayer.width!=polygonLayer.width||voxelLayer.height!=polygonLayer.height){if(error)*error="hybrid layers must be valid and have identical dimensions";return false;}output.resize(voxelLayer.width,voxelLayer.height);for(std::size_t i=0;i<output.depth.size();++i){const bool polygon=polygonLayer.depth[i]<voxelLayer.depth[i];output.depth[i]=polygon?polygonLayer.depth[i]:voxelLayer.depth[i];output.hdrColor[i]=polygon?polygonLayer.hdrColor[i]:voxelLayer.hdrColor[i];output.objectId[i]=polygon?polygonLayer.objectId[i]:voxelLayer.objectId[i];output.materialIndex[i]=polygon?polygonLayer.materialIndex[i]:voxelLayer.materialIndex[i];}
+    // Render passes follow the layer that owns each pixel (when both layers have them).
+    if(output.passes.enabled&&voxelLayer.passes.enabled&&polygonLayer.passes.enabled){
+        auto pick=[&](auto member){
+            for(std::size_t i=0;i<output.depth.size();++i)
+                (output.passes.*member)[i]=((polygonLayer.depth[i]<voxelLayer.depth[i]?polygonLayer.passes:voxelLayer.passes).*member)[i];
+        };
+        pick(&RenderPassBuffers::directDiffuse);pick(&RenderPassBuffers::directSpecular);pick(&RenderPassBuffers::indirectDiffuse);
+        pick(&RenderPassBuffers::indirectSpecular);pick(&RenderPassBuffers::emission);pick(&RenderPassBuffers::transmission);
+        pick(&RenderPassBuffers::background);pick(&RenderPassBuffers::fog);pick(&RenderPassBuffers::shadow);
+        pick(&RenderPassBuffers::sunVisibility);pick(&RenderPassBuffers::normal);pick(&RenderPassBuffers::depthMeters);
+    }
+    return true;}
 
 bool resolve_polygon_render_rgba8(const PolygonRenderTarget& target, float exposure,
                                   std::vector<std::uint8_t>& rgba, std::string* error) {

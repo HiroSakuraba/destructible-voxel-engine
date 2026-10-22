@@ -52,6 +52,12 @@ bool RenderEnvironment::validate(std::string* error) const noexcept {
         return fail("ambientOcclusionSamples must be in [0,64]");
     if (!std::isfinite(ambientOcclusionMaxDistanceMeters) || ambientOcclusionMaxDistanceMeters < 0.0F)
         return fail("ambientOcclusionMaxDistanceMeters must be finite and non-negative");
+    if (!std::isfinite(fogDensityPerMeter) || fogDensityPerMeter < 0.0F || fogDensityPerMeter > 10.0F)
+        return fail("fogDensityPerMeter must be finite and in [0,10]");
+    if (!std::isfinite(fogStartMeters) || fogStartMeters < 0.0F) return fail("fogStartMeters must be finite and non-negative");
+    if (!std::isfinite(fogColor.x) || !std::isfinite(fogColor.y) || !std::isfinite(fogColor.z) || fogColor.x < 0.0F ||
+        fogColor.y < 0.0F || fogColor.z < 0.0F)
+        return fail("fogColor must be finite and non-negative");
     if (!std::isfinite(shadowStrength) || shadowStrength < 0.0F || shadowStrength > 1.0F)
         return fail("shadowStrength must be finite and in [0,1]");
     if (!std::isfinite(shadowSoftnessRadians) || shadowSoftnessRadians < 0.0F || shadowSoftnessRadians > 0.25F)

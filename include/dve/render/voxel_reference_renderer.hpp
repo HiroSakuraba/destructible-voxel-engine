@@ -175,7 +175,9 @@ private:
 
 // Direct hybrid reference composition. Voxel occupancy is traced into the shared target first;
 // polygons then depth-test and alpha-blend against that target. This validates polygon-in-front,
-// voxel-in-front, and translucent-over-voxel behavior without a synthetic voxel layer.
+// voxel-in-front, and translucent-over-voxel behavior without a synthetic voxel layer. The
+// environment's distance fog is applied last (apply_distance_fog). Render passes are filled when
+// the target has them enabled.
 struct HybridReferenceRenderStats {
     VoxelReferenceRenderStats voxels{};
     PolygonRenderStats polygons{};

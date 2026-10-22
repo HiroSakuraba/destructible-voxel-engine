@@ -467,6 +467,26 @@ LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnv
     return out;
 }
 
+// Writes the pixel's render passes (polygon_renderer.hpp) when the target has them. The shadow pass
+// is the direct light the point would get with its own sun visibility 1, less what it gets (for
+// subsurface-diffused sun the point's own share is unshadowed, its neighbours' are not).
+void write_voxel_passes(PolygonRenderTarget& target, std::size_t index, const VoxelMaterialDefinition& material,
+                        const RenderEnvironment& environment, const VoxelSurfaceInput& surface, const LightPasses& light,
+                        float cameraZ, float metersPerVoxel) {
+    if (!target.passes.enabled) return;
+    RenderPassSample sample{light, {}, surface.visibility, surface.normal, cameraZ * resolve_meters_per_voxel(metersPerVoxel)};
+    if (surface.visibility < 1.0F) {
+        VoxelSurfaceInput open = surface;
+        const float cosine = sun_term(surface.normal, environment, 1.0F);
+        open.sunTerm = surface.sunTerm + cosine - sun_term(surface.normal, environment, surface.visibility);
+        open.visibility = 1.0F;
+        const LightPasses lit = shade_voxel(material, environment, open);
+        const Float3 removed = subtract(add3(lit.directDiffuse, lit.directSpecular), add3(light.directDiffuse, light.directSpecular));
+        sample.shadow = {std::max(0.0F, removed.x), std::max(0.0F, removed.y), std::max(0.0F, removed.z)};
+    }
+    target.write_passes(index, sample, 1.0F, true);
+}
+
 Float4 beauty(const LightPasses& light, float alpha) noexcept {
     const Float3 sum = light.sum();
     return {sum.x, sum.y, sum.z, alpha};
@@ -579,8 +599,11 @@ VoxelReferenceRenderStats render_radiance_cascades(
                                       environment, distances, stats) : 1.0F;
         const VoxelSurfaceInput surface{texel.normal, normalize(subtract(gbuffer.cameraPosition, texel.position)), visibility,
                                         sunShare, gi.indirect[index], ao, caustic, transmitted};
-        target.hdrColor[index] = beauty(shade_voxel(material, environment, surface), material.baseColor.w);
+        const LightPasses light = shade_voxel(material, environment, surface);
+        target.hdrColor[index] = beauty(light, material.baseColor.w);
         target.depth[index] = texel.normalizedDepth;
+        write_voxel_passes(target, index, material, environment, surface, light,
+                           camera.nearPlane + texel.normalizedDepth * (camera.farPlane - camera.nearPlane), distances.metersPerVoxel);
         target.objectId[index] = instance.objectId != 0U ? instance.objectId : instance.object->id();
         target.materialIndex[index] = texel.material;
         ++stats.hitRays;
@@ -697,8 +720,10 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                         : sun_term(hit->worldNormal, environment, visibility);
                     const VoxelSurfaceInput surface{hit->worldNormal, normalize(subtract(camera.position, hit->worldPosition)),
                                                     visibility, sunShare, indirect, ao, caustic, transmitted};
-                    target.hdrColor[index] = beauty(shade_voxel(material, environment, surface), material.baseColor.w);
+                    const LightPasses light = shade_voxel(material, environment, surface);
+                    target.hdrColor[index] = beauty(light, material.baseColor.w);
                     target.depth[index] = normalizedDepth;
+                    write_voxel_passes(target, index, material, environment, surface, light, cameraZ, distances.metersPerVoxel);
                     target.objectId[index] = instance.objectId != 0U
                         ? instance.objectId : instance.object->id();
                     target.materialIndex[index] = hit->objectHit.material;
@@ -808,6 +833,7 @@ HybridReferenceRenderStats render_hybrid_reference(
         options.occlusionRay = occlusion->ray();
     }
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);
+    (void)apply_distance_fog(target, camera, environment, metersPerVoxel);
     return stats;
 }
 

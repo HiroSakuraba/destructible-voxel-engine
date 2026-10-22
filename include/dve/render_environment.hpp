@@ -96,6 +96,13 @@ struct RenderEnvironment {
     std::uint32_t ambientOcclusionSamples{8};
     float ambientOcclusionMaxDistanceMeters{1.0F};
 
+    // Distance fog, from the frame's depth (render::apply_distance_fog): a surface d metres away
+    // along the view ray keeps exp(-density x max(0, d - start)) of its light and the rest becomes
+    // fogColor (radiance, like skyColor). 0 density = off.
+    float fogDensityPerMeter{0.0F};
+    float fogStartMeters{0.0F};
+    Float3 fogColor{0.62F, 0.68F, 0.76F};
+
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
 };
 

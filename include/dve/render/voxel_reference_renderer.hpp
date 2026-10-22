@@ -146,6 +146,7 @@ public:
 // Direct hybrid reference composition. Voxel occupancy is traced into the shared target first;
 // polygons then depth-test and alpha-blend against that target. This validates polygon-in-front,
 // voxel-in-front, and translucent-over-voxel behavior without a synthetic voxel layer.
+// polygonOptions.subsurfaceDiffusionSamples applies to the voxels as well.
 struct HybridReferenceRenderStats {
     VoxelReferenceRenderStats voxels{};
     PolygonRenderStats polygons{};

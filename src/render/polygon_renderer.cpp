@@ -460,10 +460,15 @@ float polygon_diffused_sun(const DeferredTriangle& tri,const VoxelMaterialDefini
     const Float3 tangent=normalize(cross3(helper,normal)),bitangent=cross3(normal,tangent);
     const std::uint32_t samples=options.subsurfaceDiffusionSamples;
     const std::uint32_t seed=static_cast<std::uint32_t>(pixel)*747796405U+2891336453U;
-    const float rotation=static_cast<float>(seed>>8U)*(1.0F/16777216.0F);
+    std::uint32_t turn=(seed^0x2C1B3C6DU)*2654435761U;turn^=turn>>16U;turn*=2246822519U;turn^=turn>>13U;
+    const float rotation=static_cast<float>(turn>>8U)*(1.0F/16777216.0F);
+    // Radii: one per stratum at a per-pixel offset, so any sample count keeps the 1/4 : 3/4
+    // mixture (see the voxel reference's diffused_sun_term).
+    std::uint32_t mix=seed*2654435761U;mix^=mix>>16U;mix*=2246822519U;mix^=mix>>13U;
+    const float jitter=static_cast<float>(mix>>8U)*(1.0F/16777216.0F);
     float sum=0.0F;std::uint32_t valid=0;
     for(std::uint32_t i=0;i<samples;++i){
-        const float u=(static_cast<float>(i)+0.5F)/static_cast<float>(samples);
+        const float u=(static_cast<float>(i)+jitter)/static_cast<float>(samples);
         const float v=std::fmod(static_cast<float>(i)*0.6180339887F+rotation,1.0F);
         const float r=burley_sample_radius(u,d);
         Float3 qn=normal;

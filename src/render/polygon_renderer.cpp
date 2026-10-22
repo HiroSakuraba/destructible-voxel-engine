@@ -773,7 +773,65 @@ float polygon_hit_opacity(const CookedPolygonAsset& asset, const PolygonBvhHit& 
     if (binding.opacity.texture)
         opacity *= sample_mapped_binding(asset, binding.opacity, mips, binding.mapping, mapped, worldPosition, hit.position,
                                          worldNormal, binding.mapping.baseTransform, 1.0F, 0.0F, ignored, {1, 1, 1, 1}).x;
-    return opacity;
+    if (material.layers.empty()) return opacity;
+    // Material layers composite into the opacity before the rasterizer's alpha test (Lerp,
+    // Multiply, Maximum or Replace opacity policies), so the shadow test applies them too.
+    const Float3 n = normalize(worldNormal);
+    const Float3 helper = std::abs(n.y) < 0.9F ? Float3{0.0F, 1.0F, 0.0F} : Float3{1.0F, 0.0F, 0.0F};
+    const Float3 layerTangent = normalize(cross3(helper, n));
+    const Float3 layerBitangent = cross3(n, layerTangent);
+    MaterialSurfaceSample surface;
+    surface.baseColor = {material.baseColor.x * texture.x, material.baseColor.y * texture.y, material.baseColor.z * texture.z, opacity};
+    surface.normal = n;
+    surface.metallic = material.metallic;
+    surface.roughness = material.roughness;
+    surface.emissive = material.emissive;
+    surface.opacity = opacity;
+    surface.height = binding.height.texture
+        ? sample_mapped_binding(asset, binding.height, mips, binding.mapping, mapped, worldPosition, hit.position, n,
+                                binding.mapping.baseTransform, 1.0F, 0.0F, ignored, {0.5F, 0.5F, 0.5F, 1.0F}).x
+        : 0.5F;
+    const std::size_t layerCount = std::min<std::size_t>(material.layers.size(), kMaximumVoxelMaterialLayers);
+    for (std::size_t layerIndex = 0U; layerIndex < layerCount; ++layerIndex) {
+        const VoxelMaterialLayer& authored = material.layers[layerIndex];
+        if (!authored.enabled || authored.weight <= 0.0F || authored.sourceMaterial == kAirMaterial ||
+            authored.sourceMaterial >= asset.materials.size()) continue;
+        MaterialLayerSample layer;
+        layer.surface = sample_layer_surface(asset, authored.sourceMaterial, mips, uv0, uv1, worldPosition, hit.position, n,
+                                             layerTangent, layerBitangent, 0.0F, true, ignored);
+        layer.baseColorBlend = authored.blendMode;
+        layer.authoredWeight = std::clamp(authored.weight, 0.0F, 1.0F);
+        layer.mask = 1.0F;
+        layer.heightBlendStrength = 0.0F;
+        if (layerIndex < binding.layers.size()) {
+            const PolygonMaterialLayerBinding& layerBinding = binding.layers[layerIndex];
+            if (!layerBinding.enabled) continue;
+            layer.semantic = layerBinding.semantic;
+            layer.opacityPolicy = layerBinding.opacityPolicy;
+            layer.heightBlendStrength = layerBinding.heightBlendStrength;
+            layer.heightBlendBias = layerBinding.heightBlendBias;
+            layer.heightBlendTransition = layerBinding.heightBlendTransition;
+            if (layerBinding.mask.texture) {
+                const Float2 maskUv = transform_texture_coordinates(select_uv(layerBinding.mask, uv0, uv1), binding.mapping.baseTransform);
+                const Float4 mask = sample_mapped_binding(asset, layerBinding.mask, mips, binding.mapping, maskUv, worldPosition,
+                                                          hit.position, n, binding.mapping.baseTransform, 1.0F, 0.0F, ignored, {1, 1, 1, 1});
+                layer.mask = std::clamp(mask.x * layerBinding.maskScale + layerBinding.maskBias, 0.0F, 1.0F);
+            } else {
+                layer.mask = std::clamp(layerBinding.maskScale + layerBinding.maskBias, 0.0F, 1.0F);
+            }
+            if (layerBinding.height.texture) {
+                const Float2 heightUv = transform_texture_coordinates(select_uv(layerBinding.height, uv0, uv1), binding.mapping.baseTransform);
+                layer.surface.height = sample_mapped_binding(asset, layerBinding.height, mips, binding.mapping, heightUv, worldPosition,
+                                                             hit.position, n, binding.mapping.baseTransform, 1.0F, 0.0F, ignored,
+                                                             {0.5F, 0.5F, 0.5F, 1.0F}).x;
+            }
+        }
+        layer.surface.normal = {0.0F, 0.0F, 1.0F};
+        float ignoredCoverage{};
+        surface = blend_material_surface_layer(surface, layer, &ignoredCoverage);
+        surface.normal = n;
+    }
+    return surface.opacity;
 }
 
 PolygonTextureMipChain generate_texture_mips(const PolygonImage& image) {

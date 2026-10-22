@@ -463,7 +463,8 @@ VoxelReferenceRenderStats render_radiance_cascades(
         const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
         const float visibility = shadow_visibility(tracer, texel.position, texel.normal,
                                                    environment, distances, seed, stats, &extras);
-        const Float3 caustic = extras.caustics ? extras.caustics->irradiance(texel.position, texel.normal, instance.objectId)
+        const Float3 caustic = extras.caustics ? extras.caustics->irradiance(texel.position, texel.normal,
+                                                                     instance.objectId != 0U ? instance.objectId : instance.object->id())
                                                : Float3{};
         const Float3 transmitted = subsurface_light(tracer, instance, texel.material, material, texel.position,
                                                     texel.normal, environment, distances, seed, stats, &extras);
@@ -566,7 +567,8 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                                                hit->worldNormal, environment, distances,
                                                                seed, local, &extras);
                     const Float3 caustic = extras.caustics
-                        ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal, instance.objectId) : Float3{};
+                        ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal,
+                                                instance.objectId != 0U ? instance.objectId : instance.object->id()) : Float3{};
                     const Float3 indirect = global_illumination(tracer, hit->worldPosition,
                                                                  hit->worldNormal, environment, distances,
                                                                  seed, local);

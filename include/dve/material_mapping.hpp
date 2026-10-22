@@ -62,6 +62,19 @@ struct ParallaxMappingResult {
     Float2 uv{};
     std::uint32_t samples{};
     bool valid{true};
+    bool hit{};
+    float layerDepth{}; // 0..1 depth below the top of the height shell
+};
+
+struct ParallaxTraceOptions {
+    std::uint32_t maximumSteps{128};
+    float pixelFootprintUv{}; // conservative largest UV derivative, 0 = no screen-size fade
+    Float2 heightBounds{0,1}; // conservative bounds, e.g. cooked min/max red channel
+};
+
+struct HeightShadowResult {
+    float visibility{1};
+    std::uint32_t samples{};
 };
 
 using HeightSampleFunction = std::function<float(Float2)>;
@@ -89,7 +102,16 @@ using HeightSampleFunction = std::function<float(Float2)>;
     Float3 tangentSpaceViewDirection,
     float cameraDistanceMeters,
     const MaterialMappingSettings& settings,
+    const HeightSampleFunction& sampleHeight,
+    const ParallaxTraceOptions& options = {});
+
+// Texture values are depths below the shell top. Positive U/V depth gradients
+// tilt the normal toward positive U/V. deltaUv is one mip-filtered texel.
+[[nodiscard]] Float3 height_bump_normal(Float2 uv, Float2 deltaUv, float strength,
     const HeightSampleFunction& sampleHeight);
+[[nodiscard]] HeightShadowResult parallax_height_shadow(Float2 hitUv, float hitDepth,
+    Float3 tangentSpaceLightDirection, const MaterialMappingSettings& settings,
+    const HeightSampleFunction& sampleHeight, std::uint32_t maximumSteps = 16);
 
 [[nodiscard]] Float3 blend_detail_normal(
     Float3 baseNormal,

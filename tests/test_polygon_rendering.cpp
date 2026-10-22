@@ -209,6 +209,7 @@ void test_material_debug_views() {
 
     render::PolygonRenderOptions options;
     options.preserveExistingDepth = false;
+    options.metersPerUnit = 1.0F; // This fixture places its camera three metres away.
     options.materialDebugView = render::PolygonMaterialDebugView::Roughness;
     CHECK(renderer.render(std::span(&instance, 1), camera, environment, target, options).shadedFragments > 0U);
     CHECK(std::abs(target.hdrColor[center].x - 0.3F) < 0.02F);

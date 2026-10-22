@@ -157,6 +157,7 @@ public:
             polygonOptions.enableFrustumCulling = view.polygonFrustumCulling;
             polygonOptions.lodBias = view.polygonLodBias;
             polygonOptions.cache = &polygonRenderCache_;
+            polygonOptions.surfaceDetail=view.surfaceDetail;
             polygonOptions.metersPerUnit = voxelSize;
             std::optional<render::HybridOcclusionScene> occlusion;
             if (environment.ambientOcclusionSamples > 0U && environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
@@ -167,7 +168,32 @@ public:
         } else {
             polygonRenderCache_.clear();
         }
-        (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
+        if(view.fogVolumes.empty()) {
+            (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
+        } else {
+            // Assets stay in metre space. Camera/depth are converted back from
+            // the voxel-unit surface pass for this shared HDR integration pass.
+            std::vector<render::CpuFogVolume> fogVolumes(view.fogVolumes.begin(),view.fogVolumes.end());
+            for(auto& v:fogVolumes){
+                v.transform.position=multiply(v.transform.position,toUnits);
+                v.scale=multiply(v.scale,toUnits);
+            }
+            auto fogSettings=view.fogSettings;
+            if(!fogSettings.densityCache)fogSettings.densityCache=&fogDensityCache_;
+            if(!fogSettings.lightingCache)fogSettings.lightingCache=&fogLightingCache_;
+            std::vector<render::CpuFogLight> lights(fogSettings.lights.begin(),fogSettings.lights.end());
+            for(auto& light:lights)light.position=multiply(light.position,toUnits);
+            fogSettings.lights=lights;
+            std::optional<render::HybridOcclusionScene> fogOcclusion;
+            if(fogSettings.scattering&&!fogSettings.sceneVisibility){
+                fogOcclusion.emplace(voxels_,polygons_);
+                fogSettings.sceneVisibility=[&](Float3 p,Float3 d,float maximum){
+                    return fogOcclusion->nearest(add(p,multiply(d,0.001F*toUnits)),d,maximum)?0.0F:1.0F;
+                };
+            }
+            if(!render::apply_cpu_fog(target_,camera,environment,voxelSize,fogVolumes,
+                                     fogSettings,&stats_.fog,error))return false;
+        }
         stats_.renderMilliseconds = milliseconds_since(start);
 
         const auto resolveStart = Clock::now();
@@ -194,6 +220,8 @@ public:
     [[nodiscard]] PlayerRenderStats last_stats() const noexcept override { return stats_; }
 
 private:
+    render::CpuFogDensityCache fogDensityCache_;
+    render::CpuFogLightingCache fogLightingCache_;
     struct ScaledPolygon {
         CookedPolygonAsset asset;
         std::uint64_t lastFrame{};

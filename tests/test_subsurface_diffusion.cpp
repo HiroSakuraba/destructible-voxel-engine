@@ -254,6 +254,71 @@ void test_shadow_edge() {
     check(most < 1e-5F, "flat, fully lit surface: diffusion keeps the light exactly");
 }
 
+// Codex on #184: with 1 or 2 samples, fixed stratum midpoints never picked the short
+// exponential, so the profile itself was wrong, not just noisy. With a per-pixel offset within
+// the strata, any count averages to the exact edge; and the hybrid reference's one diffusion
+// setting reaches the voxels.
+void test_small_counts_and_hybrid() {
+    VoxelObject block(1U), roof(2U);
+    for (int x = -48; x < 48; ++x)
+        for (int z = -100; z < 100; ++z) {
+            for (int y = 0; y < 30; ++y) block.set_voxel({x, y, z}, 1);
+            if (x < 0) roof.set_voxel({x, 60, z}, 1);
+        }
+    std::array<VoxelMaterialDefinition, 2> materials{VoxelMaterialDefinition{}, marble(0.2F)};
+    std::array<VoxelMaterialDefinition, 2> roofMaterials{VoxelMaterialDefinition{}, VoxelMaterialDefinition{}};
+    const std::vector<VoxelReferenceInstance> voxels{{1U, &block, {}, materials, true, {1, 1, 1}},
+                                                     {2U, &roof, {}, roofMaterials, true, {1, 1, 1}}};
+    RenderEnvironment environment;
+    environment.sunDirection = {0.0F, 1.0F, 0.0F};
+    environment.shadowMode = ShadowMode::Hard;
+    environment.shadowStrength = 1.0F;
+    environment.globalIlluminationMode = GlobalIlluminationMode::Off;
+    environment.sunColor = {1, 1, 1};
+    environment.sunIntensity = 1.0F;
+    PolygonCamera camera;
+    camera.position = {0.0F, 55.0F, 0.0F};
+    camera.target = {0.0F, 30.0F, 0.0F};
+    camera.up = {0.0F, 0.0F, -1.0F};
+    camera.verticalFieldOfViewRadians = 0.6F;
+    camera.nearPlane = 0.5F;
+    // Tall image: columns are one x each; average many pixels per column.
+    const std::uint32_t w = 48, h = 960;   // x within about +-3 d of the edge, z within +-80
+    PolygonCamera tall = camera;
+    tall.verticalFieldOfViewRadians = 2.0F * std::atan(3.2F);
+    const Basis b = basis_of(tall, w, h);
+    for (const std::uint32_t samples : {1U, 2U, 3U}) {
+        ReferenceVoxelRenderer renderer;
+        renderer.subsurfaceDiffusionSamples = samples;
+        PolygonRenderTarget target;
+        target.resize(w, h);
+        (void)renderer.render(voxels, tall, environment, target);
+        double worst = 0.0;
+        for (std::uint32_t px = 2; px < w - 2U; px += 4) {
+            const float x = pixel_x(tall, b, px, h / 2U, w, h, 30.0F) / 2.0F;
+            double mean = 0.0;
+            for (std::uint32_t py = 0; py < h; ++py) mean += target.hdrColor[py * w + px].x / h;
+            worst = std::max(worst, std::abs(mean - (1.0 - burley_half_plane_share(x, 1.0F))));
+        }
+        std::printf("%u diffusion sample(s) per pixel: worst column mean vs the exact edge %.4f\n", samples, worst);
+        check(worst < 0.05, "few samples: noisy, but the right profile on average");
+    }
+
+    // Hybrid: polygon options' 0 turns voxel diffusion off as well (a sharp edge).
+    PolygonRenderTarget hybrid, plain;
+    hybrid.resize(64, 16);
+    plain.resize(64, 16);
+    PolygonRenderOptions options;
+    options.subsurfaceDiffusionSamples = 0;
+    (void)render_hybrid_reference(voxels, {}, camera, environment, hybrid, options);
+    ReferenceVoxelRenderer sharp;
+    sharp.subsurfaceDiffusionSamples = 0;
+    (void)sharp.render(voxels, camera, environment, plain);
+    float most = 0.0F;
+    for (std::size_t i = 0; i < hybrid.hdrColor.size(); ++i) most = std::max(most, std::abs(hybrid.hdrColor[i].x - plain.hdrColor[i].x));
+    check(most < 1e-6F, "the hybrid reference passes its diffusion setting to the voxels");
+}
+
 CookedPolygonAsset sphere(float r, const VoxelMaterialDefinition& material) {
     CookedPolygonAsset a;
     a.objectId = 61;
@@ -319,6 +384,7 @@ int main() {
     test_table();
     test_profile_sampling();
     test_shadow_edge();
+    test_small_counts_and_hybrid();
     test_polygon_terminator();
     if (g_failures == 0) std::printf("dve_subsurface_diffusion_tests: PASS\n");
     return g_failures == 0 ? 0 : 1;

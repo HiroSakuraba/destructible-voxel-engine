@@ -286,9 +286,16 @@ float diffused_sun_term(const spwi::VoxelSceneTracer& tracer, std::size_t instan
                                                                        : distances.shadowMaxDistance;
     float sum = 0.0F;
     std::uint32_t valid = 0;
+    // Radii: one per stratum of [0, 1), at a per-pixel offset within the strata. Each sample is
+    // then uniform in its stratum, so every sample count keeps Burley's 1/4 : 3/4 mixture (fixed
+    // midpoints would, for 1 or 2 samples, never pick the short exponential).
+    const float jitter = static_cast<float>(pcg_hash(pixelSeed ^ 0x51ED270BU) >> 8U) * (1.0F / 16777216.0F);
+    // Angles: a golden-ratio sequence turned by a hashed per-pixel rotation. (Bit-reversing the
+    // pixel seed itself kept neighbouring rows of a column within one narrow slice of angles.)
+    const float rotation = static_cast<float>(pcg_hash(pixelSeed ^ 0x2C1B3C6DU) >> 8U) * (1.0F / 16777216.0F);
     for (std::uint32_t i = 0; i < samples; ++i) {
-        const float u = (static_cast<float>(i) + 0.5F) / static_cast<float>(samples);
-        const float v = std::fmod(radical_inverse(i ^ pixelSeed) + radical_inverse(pixelSeed), 1.0F);
+        const float u = (static_cast<float>(i) + jitter) / static_cast<float>(samples);
+        const float v = std::fmod(static_cast<float>(i) * 0.6180339887F + rotation, 1.0F);
         const float r = burley_sample_radius(u, d);
         const float angle = 2.0F * kPi * v;
         Float3 q = point, qn = normal;
@@ -643,6 +650,8 @@ HybridReferenceRenderStats render_hybrid_reference(
     voxelRenderer.metersPerVoxel = metersPerVoxel;
     voxelRenderer.threadCount = voxelThreadCount;
     voxelRenderer.radianceCascades.threadCount = voxelThreadCount;
+    // One diffusion setting for the whole hybrid image (the polygon options carry it).
+    voxelRenderer.subsurfaceDiffusionSamples = polygonOptions.subsurfaceDiffusionSamples;
     stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
     PolygonRenderOptions options = polygonOptions;
     options.preserveExistingDepth = true;

@@ -71,7 +71,7 @@ void edits_history_and_storage(){
     auto* a=document.find_object(1);auto pose=a->transform;pose.position.x+=1;TransformObjectCommand transform(1,a->transform,pose);check(!transform.execute(document).success,"Independent transform refuses");
     ReparentObjectsCommand reparent({{1,a->parent,std::nullopt}});check(!reparent.execute(document).success,"Independent reparent refuses");
     auto component=find_component_by_type(std::span<const Component>(a->components),kNurbsComponent);RemoveComponentCommand removeSource(1,component->id);SetComponentEnabledCommand disable(1,component->id,true,false);check(!removeSource.execute(document).success&&!disable.execute(document).success,"Source component cannot orphan its partner");
-    auto prefab=capture_editor_prefab(document,std::vector<EditorObjectId>{1,2},root/"pair.dveprefab","Pair");check(!prefab.success,"Prefab capture requires unlink");shared(document);std::filesystem::remove_all(root);
+    auto prefab=capture_editor_prefab(document,std::vector<EditorObjectId>{1,2},root/"pair.dveprefab","Pair");check(prefab.success,prefab.error);shared(document);std::filesystem::remove_all(root);
 }
 void refusals(){
     EditorDocument document("Seam refusals");add(document,1,fixture(false));add(document,2,fixture(true));document.find_object(2)->transform.position.x=1;auto result=link_nurbs_seam_command(1,2,{})->execute(document);check(!result.success&&!has_nurbs_seam(*document.find_object(1)),"Different frames refuse before publication");

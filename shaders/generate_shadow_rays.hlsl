@@ -26,13 +26,15 @@ uint ActiveShadowSampleCount() {
 }
 
 float3 SampleSunDisk(uint pixelIndex, uint sampleIndex, uint sampleCount) {
+    // Rays to points spread evenly over the sun disc: the fraction that gets through is the part of
+    // the disc this point can see, so overlapping penumbrae combine as the union of what each
+    // occluder hides (the shadow blister) instead of the darker or the product of the two.
     float2 randomPair = RotatedHammersley2D(
         sampleIndex, sampleCount, PcgHash(pixelIndex ^ gShadowFrameSeed));
-    float radius = sqrt(randomPair.x) * tan(gShadowSoftnessRadians);
-    float angle = 6.283185307179586F * randomPair.y;
+    float2 disk = ConcentricSquareToDisk(randomPair) * tan(gShadowSoftnessRadians);
     float3 tangent, bitangent;
     BuildOrthonormalBasis(normalize(gSunDirection), tangent, bitangent);
-    return normalize(gSunDirection + tangent * (radius * cos(angle)) + bitangent * (radius * sin(angle)));
+    return normalize(gSunDirection + tangent * disk.x + bitangent * disk.y);
 }
 
 [numthreads(64, 1, 1)]

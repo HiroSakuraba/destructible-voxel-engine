@@ -866,6 +866,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_nurbs_transform.cpp
         src/editor_nurbs_tessellation.cpp
         src/editor_nurbs_seam.cpp
+        src/editor_nurbs_reuse.cpp
         src/editor_subdivision.cpp
         src/editor_native_polygon.cpp
         src/editor_native_mesh_authoring.cpp
@@ -2847,6 +2848,10 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_mesh_authoring_tests tests/test_editor_mesh_authoring.cpp)
         target_link_libraries(dve_editor_mesh_authoring_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_mesh_authoring_tests COMMAND dve_editor_mesh_authoring_tests)
+        add_executable(dve_editor_nurbs_reuse_tests tests/test_editor_nurbs_reuse.cpp)
+        target_link_libraries(dve_editor_nurbs_reuse_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_nurbs_reuse_tests COMMAND dve_editor_nurbs_reuse_tests)
+
         add_executable(dve_editor_nurbs_network_tests tests/test_editor_nurbs_network.cpp)
         target_link_libraries(dve_editor_nurbs_network_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_network_tests COMMAND dve_editor_nurbs_network_tests)

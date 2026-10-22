@@ -242,10 +242,11 @@ CommandResult TransformObjectsCommand::apply(EditorDocument& document, bool forw
         EditorObject* object = document.find_object(change.id);
         if (!object) return CommandResult::fail("transform target no longer exists");
         if (object->flags.locked) return CommandResult::fail("transform target is locked");
-        if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before changing object placement");
         const RigidTransform& target = forward ? change.after : change.before;
         if (!valid_transform(target)) return CommandResult::fail("transform is not finite or has an invalid rotation");
     }
+    std::map<EditorObjectId,RigidTransform> poses;for(const auto& change:changes_)poses[change.id]=forward?change.after:change.before;std::string error;
+    if(!validate_nurbs_network_placement(document,poses,{},{},&error))return CommandResult::fail(error);
     for (const ObjectTransformChange& change : changes_) {
         const RigidTransform& target = forward ? change.after : change.before;
         if (!document.set_world_transform(change.id, target))
@@ -268,7 +269,6 @@ CommandResult ScaleVoxelSizeCommand::apply(EditorDocument& document, bool forwar
         const EditorObject* object = document.find_object(change.id);
         if (!object) return CommandResult::fail("scale target no longer exists");
         if (object->flags.locked) return CommandResult::fail("scale target is locked");
-        if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before changing object placement");
         const float size = forward ? change.afterVoxelSize : change.beforeVoxelSize;
         if (!std::isfinite(size) || !(size > 0.0F)) return CommandResult::fail("scaled voxel size is invalid");
         if (change.beforeAxisScale.has_value()!=change.afterAxisScale.has_value())
@@ -278,6 +278,9 @@ CommandResult ScaleVoxelSizeCommand::apply(EditorDocument& document, bool forwar
         if (!valid_transform(forward ? change.after : change.before))
             return CommandResult::fail("transform is not finite or has an invalid rotation");
     }
+    std::map<EditorObjectId,RigidTransform> poses;std::map<EditorObjectId,Float3> scales;
+    for(const auto& change:changes_){poses[change.id]=forward?change.after:change.before;auto scale=forward?change.afterAxisScale:change.beforeAxisScale;if(scale)scales[change.id]=*scale;}std::string error;
+    if(!validate_nurbs_network_placement(document,poses,scales,{},&error))return CommandResult::fail(error);
     for (const ObjectVoxelSizeChange& change : changes_) {
         EditorObject* object = document.find_object(change.id);
         object->voxelSizeMeters = forward ? change.afterVoxelSize : change.beforeVoxelSize;
@@ -726,9 +729,10 @@ CommandResult ReparentObjectsCommand::apply(EditorDocument& document, bool forwa
         const EditorObject* object = document.find_object(change.id);
         if (!object) return CommandResult::fail("reparent target no longer exists");
         if (object->flags.locked) return CommandResult::fail("reparent target is locked");
-        if(has_nurbs_seam(*object))return CommandResult::fail("Unlink the NURBS seam before changing object placement");
         original.push_back({object->parent,object->attachment,object->transform});
     }
+    std::map<EditorObjectId,std::optional<EditorObjectId>> proposedParents;for(const auto& change:changes_)proposedParents[change.id]=forward?change.after:change.before;std::string error;
+    if(!validate_nurbs_network_placement(document,{},{},proposedParents,&error))return CommandResult::fail(error);
     if (capturedStates_) {
         const auto& target = forward ? afterStates_ : beforeStates_;
         std::map<EditorObjectId,std::optional<EditorObjectId>> parents;

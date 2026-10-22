@@ -131,6 +131,22 @@ struct RenderEnvironment {
     float aerialPerspectiveScale{1.0F};
     float sunDisc{1.0F};
 
+    // Volumetric fog (render/volumetric_fog.hpp): a height fog that scatters sunlight, ray-marched
+    // per pixel with a shadow ray toward the sun at every sample, so shadowed air stays dark and
+    // lit air glows: light shafts. Extinction is volumetricFogDensityPerMeter up to
+    // volumetricFogBaseHeightMeters (world y in metres) and falls off as
+    // exp(-falloff x height above it) (0 = uniform). Albedo is the scattered share (colour);
+    // anisotropy the Henyey-Greenstein g (forward scattering: bright toward the sun). The march
+    // covers volumetricFogMaxDistanceMeters from the camera in volumetricFogSamples steps.
+    // 0 density = off.
+    float volumetricFogDensityPerMeter{0.0F};
+    float volumetricFogHeightFalloffPerMeter{0.05F};
+    float volumetricFogBaseHeightMeters{0.0F};
+    Float3 volumetricFogAlbedo{0.9F, 0.9F, 0.9F};
+    float volumetricFogAnisotropy{0.6F};
+    float volumetricFogMaxDistanceMeters{100.0F};
+    std::uint32_t volumetricFogSamples{32};
+
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
 };
 

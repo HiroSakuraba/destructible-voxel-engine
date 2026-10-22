@@ -9,6 +9,7 @@
 #include <string>
 
 #include "dve/asset_cooker.hpp"
+#include "dve/render/volumetric_fog.hpp"
 #include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/transform.hpp"
@@ -177,12 +178,14 @@ private:
 // polygons then depth-test and alpha-blend against that target. This validates polygon-in-front,
 // voxel-in-front, and translucent-over-voxel behavior without a synthetic voxel layer. In
 // Physical sky mode the sky is painted behind the voxels before the polygons are drawn
-// (paint_sky_background) and aerial perspective is added after; the environment's distance fog
-// is applied last (apply_distance_fog). Render passes are filled when
+// (paint_sky_background) and aerial perspective is added after; then volumetric fog
+// (apply_volumetric_fog, shadow rays through voxels and polygons); the environment's distance
+// fog is applied last (apply_distance_fog). Render passes are filled when
 // the target has them enabled.
 struct HybridReferenceRenderStats {
     VoxelReferenceRenderStats voxels{};
     PolygonRenderStats polygons{};
+    VolumetricFogStats volumetricFog{};
 };
 
 [[nodiscard]] HybridReferenceRenderStats render_hybrid_reference(

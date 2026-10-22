@@ -1411,6 +1411,12 @@ int l_set_environment_scalar(lua_State* L) {
     else if (name == "ObserverAltitudeMeters") environment.observerAltitudeMeters = value;
     else if (name == "AerialPerspectiveScale") environment.aerialPerspectiveScale = value;
     else if (name == "SunDisc") environment.sunDisc = value;
+    else if (name == "VolumetricFogDensityPerMeter") environment.volumetricFogDensityPerMeter = value;
+    else if (name == "VolumetricFogHeightFalloffPerMeter") environment.volumetricFogHeightFalloffPerMeter = value;
+    else if (name == "VolumetricFogBaseHeightMeters") environment.volumetricFogBaseHeightMeters = value;
+    else if (name == "VolumetricFogAnisotropy") environment.volumetricFogAnisotropy = value;
+    else if (name == "VolumetricFogMaxDistanceMeters") environment.volumetricFogMaxDistanceMeters = value;
+    else if (name == "VolumetricFogSamples") environment.volumetricFogSamples = static_cast<std::uint32_t>(std::max(0.0F, std::round(value)));
     else known = false;
     if (!known) {
         lua_pushboolean(L, 0);
@@ -1441,6 +1447,7 @@ int l_set_environment_vector(lua_State* L) {
     else if (name == "GroundColor") environment.groundColor = value;
     else if (name == "GlobalTint") environment.globalTint = value;
     else if (name == "FogColor") environment.fogColor = value;
+    else if (name == "VolumetricFogAlbedo") environment.volumetricFogAlbedo = value;
     else known = false;
     if (!known) {
         lua_pushboolean(L, 0);
@@ -1564,6 +1571,13 @@ int l_get_environment(lua_State* L) {
     lua_pushnumber(L, environment.observerAltitudeMeters); lua_setfield(L, -2, "observer_altitude_meters");
     lua_pushnumber(L, environment.aerialPerspectiveScale); lua_setfield(L, -2, "aerial_perspective_scale");
     lua_pushnumber(L, environment.sunDisc); lua_setfield(L, -2, "sun_disc");
+    lua_pushnumber(L, environment.volumetricFogDensityPerMeter); lua_setfield(L, -2, "volumetric_fog_density_per_meter");
+    lua_pushnumber(L, environment.volumetricFogHeightFalloffPerMeter); lua_setfield(L, -2, "volumetric_fog_height_falloff_per_meter");
+    lua_pushnumber(L, environment.volumetricFogBaseHeightMeters); lua_setfield(L, -2, "volumetric_fog_base_height_meters");
+    push_float3_table(L, environment.volumetricFogAlbedo); lua_setfield(L, -2, "volumetric_fog_albedo");
+    lua_pushnumber(L, environment.volumetricFogAnisotropy); lua_setfield(L, -2, "volumetric_fog_anisotropy");
+    lua_pushnumber(L, environment.volumetricFogMaxDistanceMeters); lua_setfield(L, -2, "volumetric_fog_max_distance_meters");
+    lua_pushinteger(L, environment.volumetricFogSamples); lua_setfield(L, -2, "volumetric_fog_samples");
     lua_pushnumber(L, environment.shadowMaxDistanceMeters); lua_setfield(L, -2, "shadow_max_distance_meters");
     lua_pushnumber(L, environment.contactShadowDistanceMeters); lua_setfield(L, -2, "contact_shadow_distance_meters");
     lua_pushnumber(L, environment.shadowBiasMeters); lua_setfield(L, -2, "shadow_bias_meters");
@@ -1777,7 +1791,7 @@ int l_camera_load_runtime_state(lua_State* L) {
 // --- Save games: world.on_save / on_load, save_game / load_game -----------------------------
 
 constexpr std::uint32_t kScriptStateMagic = 0x534C5644U;   // "DVLS"
-constexpr std::uint32_t kScriptStateVersion = 4U;   // 2 adds environment, HUD, material overrides, named timers; 3 fog; 4 sky
+constexpr std::uint32_t kScriptStateVersion = 5U;   // 2 adds environment, HUD, material overrides, named timers; 3 fog; 4 sky; 5 volumetric fog
 constexpr int kScriptStateMaximumDepth = 32;
 constexpr std::uint32_t kScriptStateMaximumEntries = 1U << 20U;
 constexpr std::size_t kScriptStateMaximumBytes = 16U * 1024U * 1024U;
@@ -2132,6 +2146,26 @@ bool read_environment_sky(ScriptStateReader& r, RenderEnvironment& e) {
     return true;
 }
 
+// Version 5: volumetric fog after the sky.
+void write_environment_volumetric_fog(ScriptStateWriter& w, const RenderEnvironment& e) {
+    for (const float value : {e.volumetricFogDensityPerMeter, e.volumetricFogHeightFalloffPerMeter, e.volumetricFogBaseHeightMeters,
+                              e.volumetricFogAlbedo.x, e.volumetricFogAlbedo.y, e.volumetricFogAlbedo.z, e.volumetricFogAnisotropy,
+                              e.volumetricFogMaxDistanceMeters})
+        w.u32(std::bit_cast<std::uint32_t>(value));
+    w.u32(e.volumetricFogSamples);
+}
+
+bool read_environment_volumetric_fog(ScriptStateReader& r, RenderEnvironment& e) {
+    std::uint32_t raw[8]{};
+    for (std::uint32_t& value : raw) if (!r.u32(value)) return false;
+    if (!r.u32(e.volumetricFogSamples)) return false;
+    float* fields[8] = {&e.volumetricFogDensityPerMeter, &e.volumetricFogHeightFalloffPerMeter, &e.volumetricFogBaseHeightMeters,
+                        &e.volumetricFogAlbedo.x, &e.volumetricFogAlbedo.y, &e.volumetricFogAlbedo.z, &e.volumetricFogAnisotropy,
+                        &e.volumetricFogMaxDistanceMeters};
+    for (int i = 0; i < 8; ++i) *fields[i] = std::bit_cast<float>(raw[i]);
+    return true;
+}
+
 bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& contents, std::string* error) {
     ScriptStateReader r{bytes, 0U, {}};
     const auto failWith = [&]() {
@@ -2171,6 +2205,7 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
         if (!read_environment(r, environment)) return failWith();
         if (version >= 3U && !read_environment_fog(r, environment)) return failWith();
         if (version >= 4U && !read_environment_sky(r, environment)) return failWith();
+        if (version >= 5U && !read_environment_volumetric_fog(r, environment)) return failWith();
         contents.environment = environment;
         if (!r.text(contents.hudPrompt) || !r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid HUD state"), failWith();
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -2650,6 +2685,7 @@ std::optional<std::vector<std::byte>> GameScriptHost::save_state(std::string* er
     write_environment(w, impl_->environment);
     write_environment_fog(w, impl_->environment);
     write_environment_sky(w, impl_->environment);
+    write_environment_volumetric_fog(w, impl_->environment);
     w.bytes(impl_->hud.interaction_prompt().data(), impl_->hud.interaction_prompt().size());
     w.u32(static_cast<std::uint32_t>(impl_->hud.tools().size()));
     for (const ui::ToolWheelEntry& tool : impl_->hud.tools()) {

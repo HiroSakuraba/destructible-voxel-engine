@@ -19,6 +19,7 @@
 #include "dve/render/subsurface.hpp"
 #include "dve/render/surface_shading.hpp"
 #include "dve/render/atmosphere.hpp"
+#include "dve/render/volumetric_fog.hpp"
 #include "dve/voxel_normal_map.hpp"
 
 namespace dve::render {
@@ -857,6 +858,13 @@ HybridReferenceRenderStats render_hybrid_reference(
     }
     stats.polygons = ReferencePolygonRenderer{}.render(polygons, camera, environment, target, options);
     (void)apply_aerial_perspective(target, camera, environment, metersPerVoxel);
+    if (environment.volumetricFogDensityPerMeter > 0.0F) {
+        // Light shafts: the fog's shadow rays see voxels and polygons alike.
+        const HybridOcclusionScene* scene = occlusion ? &*occlusion : nullptr;
+        std::optional<HybridOcclusionScene> own;
+        if (!scene) scene = &own.emplace(voxels, polygons);
+        stats.volumetricFog = apply_volumetric_fog(target, camera, environment, metersPerVoxel, scene->ray(), 0U, voxelThreadCount);
+    }
     (void)apply_distance_fog(target, camera, environment, metersPerVoxel);
     return stats;
 }

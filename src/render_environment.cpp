@@ -64,6 +64,14 @@ bool RenderEnvironment::validate(std::string* error) const noexcept {
     if (!in(observerAltitudeMeters, 0.0F, 90000.0F)) return fail("observerAltitudeMeters must be in [0,90000]");
     if (!in(aerialPerspectiveScale, 0.0F, 1.0e6F)) return fail("aerialPerspectiveScale must be in [0,1e6]");
     if (!in(sunDisc, 0.0F, 100.0F)) return fail("sunDisc must be in [0,100]");
+    if (!in(volumetricFogDensityPerMeter, 0.0F, 10.0F)) return fail("volumetricFogDensityPerMeter must be in [0,10]");
+    if (!in(volumetricFogHeightFalloffPerMeter, 0.0F, 10.0F)) return fail("volumetricFogHeightFalloffPerMeter must be in [0,10]");
+    if (!in(volumetricFogBaseHeightMeters, -1.0e5F, 1.0e5F)) return fail("volumetricFogBaseHeightMeters must be finite");
+    if (!in(volumetricFogAlbedo.x, 0.0F, 1.0F) || !in(volumetricFogAlbedo.y, 0.0F, 1.0F) || !in(volumetricFogAlbedo.z, 0.0F, 1.0F))
+        return fail("volumetricFogAlbedo must be in [0,1]");
+    if (!in(volumetricFogAnisotropy, -0.95F, 0.95F)) return fail("volumetricFogAnisotropy must be in [-0.95,0.95]");
+    if (!in(volumetricFogMaxDistanceMeters, 0.01F, 1.0e5F)) return fail("volumetricFogMaxDistanceMeters must be in [0.01,1e5]");
+    if (volumetricFogSamples < 1U || volumetricFogSamples > 256U) return fail("volumetricFogSamples must be in [1,256]");
     if (!std::isfinite(fogColor.x) || !std::isfinite(fogColor.y) || !std::isfinite(fogColor.z) || fogColor.x < 0.0F ||
         fogColor.y < 0.0F || fogColor.z < 0.0F)
         return fail("fogColor must be finite and non-negative");

@@ -168,6 +168,11 @@ public:
             polygonRenderCache_.clear();
         }
         (void)render::apply_aerial_perspective(target_, camera, environment, voxelSize);
+        if (environment.volumetricFogDensityPerMeter > 0.0F) {
+            const render::HybridOcclusionScene fogShadows(voxels_, polygons_);   // light shafts see everything
+            (void)render::apply_volumetric_fog(target_, camera, environment, voxelSize, fogShadows.ray(),
+                                               static_cast<std::uint32_t>(frameIndex_++), options_.threadCount);
+        }
         (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
         stats_.renderMilliseconds = milliseconds_since(start);
 
@@ -247,6 +252,7 @@ private:
     IFrameBlitter* blitter_{};
     CpuPlayerRendererOptions options_{};
     render::PolygonRenderTarget target_;
+    std::uint64_t frameIndex_{};   // volumetric fog jitter changes every frame
     Rgba8Image frame_;
     bool rendered_{};
     PlayerRenderStats stats_{};

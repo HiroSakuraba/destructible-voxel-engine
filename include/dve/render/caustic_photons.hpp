@@ -56,6 +56,8 @@ struct CausticPhotonResult {
     std::uint64_t emitted{};
     std::uint64_t direct{};     // landed without touching a refractive object (not stored)
     std::uint64_t lost{};       // left the scene or ran out of interactions
+    // The region does not face sun.towardSun (built for another direction): nothing traced.
+    bool regionMismatch{};
 };
 
 [[nodiscard]] CausticPhotonResult trace_caustic_photons(const OpticalScene& scene, const SunLight& sun,

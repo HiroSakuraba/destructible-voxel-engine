@@ -1,5 +1,7 @@
 #include "dve/render/polygon_renderer.hpp"
 
+#include "dve/polygon_bvh.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -671,6 +673,40 @@ void PolygonRenderTarget::resize(std::uint32_t newWidth,std::uint32_t newHeight)
 }
 void PolygonRenderTarget::clear(Float4 color,float depthValue){std::fill(hdrColor.begin(),hdrColor.end(),color);std::fill(depth.begin(),depth.end(),depthValue);std::fill(objectId.begin(),objectId.end(),0U);std::fill(materialIndex.begin(),materialIndex.end(),0U);}
 bool PolygonRenderTarget::valid() const noexcept{const std::size_t count=static_cast<std::size_t>(width)*height;return width>0&&height>0&&hdrColor.size()==count&&depth.size()==count&&objectId.size()==count&&materialIndex.size()==count;}
+
+float polygon_hit_opacity(const CookedPolygonAsset& asset, const PolygonBvhHit& hit, Float3 worldPosition,
+                          Float3 worldNormal, const std::vector<PolygonTextureMipChain>& mips, float tintAlpha) noexcept {
+    if (hit.materialIndex >= asset.materials.size() || hit.materialIndex >= asset.materialBindings.size()) return 1.0F;
+    const VoxelMaterialDefinition& material = asset.materials[hit.materialIndex];
+    const PolygonMaterialBinding& binding = asset.materialBindings[hit.materialIndex];
+    const std::size_t t = hit.firstIndex;
+    if (t + 2U >= asset.indices.size()) return material.baseColor.w * tintAlpha;
+    const PolygonVertex& a = asset.vertices[asset.indices[t]];
+    const PolygonVertex& b = asset.vertices[asset.indices[t + 1U]];
+    const PolygonVertex& c = asset.vertices[asset.indices[t + 2U]];
+    // Barycentric weights of the hit in the triangle (object space).
+    const Float3 e1 = subtract(b.position, a.position), e2 = subtract(c.position, a.position), q = subtract(hit.position, a.position);
+    const float d00 = dot(e1, e1), d01 = dot(e1, e2), d11 = dot(e2, e2), d20 = dot(q, e1), d21 = dot(q, e2);
+    const float denominator = d00 * d11 - d01 * d01;
+    float w1 = 0.0F, w2 = 0.0F;
+    if (std::abs(denominator) > 1.0e-20F) { w1 = (d11 * d20 - d01 * d21) / denominator; w2 = (d00 * d21 - d01 * d20) / denominator; }
+    const float w0 = 1.0F - w1 - w2;
+    const Float2 uv0{a.texcoord.x * w0 + b.texcoord.x * w1 + c.texcoord.x * w2, a.texcoord.y * w0 + b.texcoord.y * w1 + c.texcoord.y * w2};
+    const Float2 uv1{a.texcoord1.x * w0 + b.texcoord1.x * w1 + c.texcoord1.x * w2,
+                     a.texcoord1.y * w0 + b.texcoord1.y * w1 + c.texcoord1.y * w2};
+    const float vertexAlpha = a.color.w * w0 + b.color.w * w1 + c.color.w * w2;
+    const Float2 selected = binding.mapping.mappingMode == MaterialMappingMode::UV1 ? uv1 : uv0;
+    const Float2 mapped = transform_texture_coordinates(selected, binding.mapping.baseTransform);
+    PolygonRenderStats ignored;
+    const Float4 texture = sample_mapped_binding(asset, binding.baseColor, mips, binding.mapping, mapped, worldPosition,
+                                                 hit.position, worldNormal, binding.mapping.baseTransform, 1.0F, 0.0F,
+                                                 ignored, {1, 1, 1, 1});
+    float opacity = material.baseColor.w * vertexAlpha * texture.w * tintAlpha;
+    if (binding.opacity.texture)
+        opacity *= sample_mapped_binding(asset, binding.opacity, mips, binding.mapping, mapped, worldPosition, hit.position,
+                                         worldNormal, binding.mapping.baseTransform, 1.0F, 0.0F, ignored, {1, 1, 1, 1}).x;
+    return opacity;
+}
 
 PolygonTextureMipChain generate_texture_mips(const PolygonImage& image) {
     PolygonTextureMipChain chain;

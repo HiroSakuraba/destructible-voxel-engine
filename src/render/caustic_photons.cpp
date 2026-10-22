@@ -77,6 +77,10 @@ CausticPhotonResult trace_caustic_photons(const OpticalScene& scene, const SunLi
                                           const CausticPhotonSettings& settings) {
     CausticPhotonResult result;
     if (!region.valid() || settings.photonCount == 0U) return result;
+    // Photons travel along the sun's direction; the region must have been built for it
+    // (caustic_light_region with the same direction), or it would not cover what that sun lights.
+    const Float3 towardSun = unit3(sun.towardSun);
+    if (dot3(towardSun, unit3(region.towardSun)) < 0.9999F) { result.regionMismatch = true; return result; }
     std::mt19937_64 rng(settings.seed);
     std::uniform_real_distribution<float> uniform01(0.0F, 1.0F);
     auto random = [&]() -> double { return uniform01(rng); };
@@ -84,9 +88,9 @@ CausticPhotonResult trace_caustic_photons(const OpticalScene& scene, const SunLi
     const auto side = static_cast<std::uint64_t>(std::ceil(std::sqrt(static_cast<double>(settings.photonCount))));
     const std::uint64_t count = side * side;
     const float power = region.area() / static_cast<float>(count);
-    const Float3 down = scale3(unit3(region.towardSun), -1.0F);
+    const Float3 down = scale3(towardSun, -1.0F);
     Float3 du{}, dv{};
-    basis(unit3(region.towardSun), du, dv);
+    basis(towardSun, du, dv);
     const float tanRadius = std::tan(std::max(sun.angularRadius, 0.0F));
     for (std::uint64_t j = 0; j < side; ++j)
         for (std::uint64_t i = 0; i < side; ++i) {

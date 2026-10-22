@@ -121,7 +121,7 @@ std::optional<OpticalHit> OpticalScene::trace_polygons(Float3 origin, Float3 dir
         const auto hit = p.bvh->raycast(inverse_transform_point(pose, origin), inverse_transform_vector(pose, direction), limit);
         if (!hit || (best && hit->distance >= best->distance)) continue;
         const CookedPolygonAsset& asset = *p.instance->asset;
-        const std::size_t t = static_cast<std::size_t>(hit->triangleIndex) * 3U;
+        const std::size_t t = hit->firstIndex;   // the triangle's place in the index buffer
         Float3 shading = hit->normal;
         Float3 geometric = hit->normal;
         if (t + 2U < asset.indices.size()) {
@@ -268,20 +268,20 @@ bool OpticalScene::refractive_bounds(Float3& minimum, Float3& maximum) const {
         bool hasRefractive = false;
         for (std::size_t m = 0; m < v.materials.size(); ++m) hasRefractive = hasRefractive || material_is_refractive(v.materials[m]);
         if (!hasRefractive) continue;
-        const auto b = v.object->occupied_bounds();
-        if (!b.valid) continue;
-        for (std::int32_t z = b.minimum.z; z <= b.maximum.z; ++z)
-            for (std::int32_t y = b.minimum.y; y <= b.maximum.y; ++y)
-                for (std::int32_t x = b.minimum.x; x <= b.maximum.x; ++x) {
-                    const MaterialId id = v.object->material_at({x, y, z});
-                    if (id == kAirMaterial || id >= v.materials.size() || !material_is_refractive(v.materials[id])) continue;
-                    for (int c = 0; c < 8; ++c)
-                        grow(minimum, maximum, voxel_to_world(v.transform, v.spacing,
-                                                              {static_cast<float>(x + ((c & 1) ? 1 : 0)),
-                                                               static_cast<float>(y + ((c & 2) ? 1 : 0)),
-                                                               static_cast<float>(z + ((c & 4) ? 1 : 0))}));
-                    any = true;
-                }
+        // Occupied cells only, brick by brick: a sparse object's bounding box can be enormous.
+        for (const auto& [key, brick] : v.object->bricks()) {
+            brick.occupancy().for_each_set([&](std::uint16_t index) {
+                const MaterialId id = brick.material(index);
+                if (id == kAirMaterial || id >= v.materials.size() || !material_is_refractive(v.materials[id])) return;
+                const Int3 cell = global_from_local(key, local_from_index_unchecked(index));
+                for (int c = 0; c < 8; ++c)
+                    grow(minimum, maximum, voxel_to_world(v.transform, v.spacing,
+                                                          {static_cast<float>(cell.x + ((c & 1) ? 1 : 0)),
+                                                           static_cast<float>(cell.y + ((c & 2) ? 1 : 0)),
+                                                           static_cast<float>(cell.z + ((c & 4) ? 1 : 0))}));
+                any = true;
+            });
+        }
     }
     for (const PolygonData& p : polygons_)
         if (p.refractive) { grow(minimum, maximum, p.minimum); grow(minimum, maximum, p.maximum); any = true; }
@@ -323,8 +323,11 @@ LightPathResult follow_light_impl(const OpticalScene& scene, Float3 origin, Floa
             else if (material_is_refractive(*hit->material)) { kind = Kind::Enter; next = hit->material; }
             else kind = Kind::Receiver;
         } else if (!media.empty() && hit->polygonInstance >= 0 && hit->polygonInstance == media.back().entry.polygonInstance &&
-                   hit->material == media.back().material) {
-            kind = Kind::Exit;   // leaving a polygon medium through its own surface
+                   hit->material && material_is_refractive(*hit->material)) {
+            // Leaving a polygon medium through its own surface. Decided by the mesh, not the
+            // material slot: a closed mesh may use different refractive materials on different
+            // faces. (An opaque face of the same mesh is a receiver.)
+            kind = Kind::Exit;
         } else if (hit->material && material_is_refractive(*hit->material)) {
             kind = Kind::Enter;
             next = hit->material;

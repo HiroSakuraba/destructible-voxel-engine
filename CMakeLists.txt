@@ -3153,6 +3153,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_caustic_map_tests tests/test_caustic_map.cpp)
     target_link_libraries(dve_caustic_map_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_caustic_map_tests COMMAND dve_caustic_map_tests)
+    add_executable(dve_caustics_review_tests tests/test_caustics_review.cpp)
+    target_link_libraries(dve_caustics_review_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_caustics_review_tests COMMAND dve_caustics_review_tests)
     # The tests use two worker threads; reserve them so ctest -jN leaves cores for the
     # timing-sensitive audio acceptance tests.
     set_tests_properties(dve_rc_spwi_tests PROPERTIES PROCESSORS 2)

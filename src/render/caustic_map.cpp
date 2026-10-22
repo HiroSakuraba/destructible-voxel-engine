@@ -78,13 +78,17 @@ CausticMap build_caustic_map(const OpticalScene& scene, const SunLight& sun, con
         for (const auto* p : v) caustic += p->landed && p->refractions > 0U ? 1 : 0;
         if (caustic == 0) return;
         if (caustic < 3) { ++map.stats_.splitTriangles; return; }
-        for (const auto* p : v)
-            if (p->receiverObject != p0.receiverObject || p->refractions != p0.refractions || p->reflections != p0.reflections ||
-                dot3(p->normal, p0.normal) < settings.sameSurfaceCosine ||
-                std::abs(dot3(sub3(p->position, p0.position), p0.normal)) > settings.planeToleranceCells * cellSize) {
+        for (const auto* p : v) {
+            // Corners on different objects stay together only across a seam in one plane (two
+            // floors side by side); otherwise the triangle spans a step or an edge.
+            const float gap = std::abs(dot3(sub3(p->position, p0.position), p0.normal));
+            if (p->refractions != p0.refractions || p->reflections != p0.reflections ||
+                dot3(p->normal, p0.normal) < settings.sameSurfaceCosine || gap > settings.planeToleranceCells * cellSize ||
+                (p->receiverObject != p0.receiverObject && gap > 0.02F * cellSize)) {
                 ++map.stats_.splitTriangles;
                 return;
             }
+        }
         CausticTriangle t;
         t.normal = unit3(add3(add3(p0.normal, p1.normal), p2.normal));
         for (int k = 0; k < 3; ++k)   // onto the receiver's plane through the first vertex
@@ -141,7 +145,7 @@ void CausticMap::index() {
     for (std::size_t i = 0; i < pairs.size(); ++i) { keys_[i] = pairs[i].first; entries_[i] = pairs[i].second; }
 }
 
-Float3 CausticMap::irradiance(Float3 point, Float3 normal) const {
+Float3 CausticMap::irradiance(Float3 point, Float3 normal, std::uint64_t receiver) const {
     if (triangles_.empty()) return {};
     const Float3 n = unit3(normal);
     Float3 sum{};
@@ -157,6 +161,10 @@ Float3 CausticMap::irradiance(Float3 point, Float3 normal) const {
             if (dot3(t.normal, n) < 0.9F || !(t.area > 0.0F)) continue;
             const float plane = dot3(sub3(point, t.points[0]), t.normal);
             if (std::abs(plane) > 0.5F * cell_) continue;
+            // Light that landed on another object reaches this one only across a seam in the same
+            // plane (the sun-size blur spreads it there); a surface just behind or below the
+            // receiver gets none of it.
+            if (receiver != kAnyReceiver && t.receiver != receiver && std::abs(plane) > 0.02F * cell_) continue;
             // 2D frame in the receiver's plane, centred on the point.
             const Float3 helper = std::abs(t.normal.y) < 0.9F ? Float3{0.0F, 1.0F, 0.0F} : Float3{1.0F, 0.0F, 0.0F};
             const Float3 u = unit3(cross3(helper, t.normal)), v = cross3(t.normal, u);

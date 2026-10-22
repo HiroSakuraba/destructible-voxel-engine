@@ -1123,8 +1123,10 @@ bool SaveGameStore::migrate(SaveGameDocument& document, std::uint32_t* migration
 }
 
 bool SaveGameStore::write_atomic(const std::filesystem::path& slot, SaveGameDocument document, std::string* error,
-                                 std::uint64_t* writtenBytes) const {
-    document.schemaVersion = currentVersion_;
+                                 std::uint64_t* writtenBytes, bool keepSchemaVersion) const {
+    if (!keepSchemaVersion) document.schemaVersion = currentVersion_;
+    else if (document.schemaVersion == 0U || document.schemaVersion > currentVersion_)
+        return fail(error, "save schema version " + std::to_string(document.schemaVersion) + " cannot be written by this build");
     for (const auto& [name, bytes] : document.sections) {
         if (name.empty() || name.size() > limits_.maximumSectionNameBytes || bytes.size() > limits_.maximumSectionBytes)
             return fail(error, "save section '" + name + "' exceeds the save limits");

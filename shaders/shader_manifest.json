@@ -2336,6 +2336,12 @@
           "kind": "storage_buffer",
           "access": "read_write",
           "register": "u2"
+        },
+        {
+          "name": "gShadowPenumbraMeters",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u3"
         }
       ]
     },
@@ -2544,6 +2550,12 @@
           "kind": "storage_buffer",
           "access": "read",
           "register": "t4"
+        },
+        {
+          "name": "gDenoiseShadowPenumbraMeters",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t5"
         },
         {
           "name": "gFilteredIndirectDiffuse",

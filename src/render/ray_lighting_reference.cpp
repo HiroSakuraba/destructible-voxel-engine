@@ -99,6 +99,22 @@ Float2 rotated_hammersley_2d(
     return {fract(sample.x + rotation.x), fract(sample.y + rotation.y)};
 }
 
+Float2 concentric_square_to_disk(Float2 square) noexcept {
+    const float ox = 2.0F * square.x - 1.0F;
+    const float oy = 2.0F * square.y - 1.0F;
+    if (ox == 0.0F && oy == 0.0F) return {0.0F, 0.0F};
+    float radius = 0.0F;
+    float theta = 0.0F;
+    if (std::abs(ox) > std::abs(oy)) {
+        radius = ox;
+        theta = 0.7853981633974483F * (oy / ox);
+    } else {
+        radius = oy;
+        theta = 1.5707963267948966F - 0.7853981633974483F * (ox / oy);
+    }
+    return {radius * std::cos(theta), radius * std::sin(theta)};
+}
+
 Float3 one_bounce_diffuse_radiance(
     Float3 baseColor, float metallic, Float3 emissive, Float3 ambientRadiance,
     Float3 sunColor, float sunIntensity, Float3 bounceNormal,
@@ -142,6 +158,66 @@ LightingTemporalSample accumulate_lighting_history(
         std::clamp(current.shadowVisibility, 0.0F, 1.0F),
         std::clamp(history.shadowVisibility, 0.0F, 1.0F), weight);
     return result;
+}
+
+float shadow_penumbra_width_meters(float sunAngularRadius, float meanBlockerDistanceMeters) noexcept {
+    if (!(sunAngularRadius > 0.0F) || !(meanBlockerDistanceMeters > 0.0F)) return 0.0F;
+    return 2.0F * std::tan(sunAngularRadius) * meanBlockerDistanceMeters;
+}
+
+float denoise_radians_per_pixel(float verticalFovRadians, std::uint32_t heightPixels) noexcept {
+    if (heightPixels == 0U || !(verticalFovRadians > 0.0F) || !(verticalFovRadians < 3.14159F)) return 0.0F;
+    return 2.0F * std::tan(0.5F * verticalFovRadians) / static_cast<float>(heightPixels);
+}
+
+std::vector<float> denoise_shadow_visibility(
+    std::uint32_t width, std::uint32_t height, std::span<const float> visibility,
+    std::span<const float> penumbraMeters, std::span<const float> depthMeters,
+    std::span<const Float3> normals, const ShadowDenoiseSettings& settings) {
+    const std::size_t count = static_cast<std::size_t>(width) * height;
+    std::vector<float> out(visibility.begin(), visibility.end());
+    if (count == 0U || visibility.size() < count || penumbraMeters.size() < count ||
+        depthMeters.size() < count || normals.size() < count) return out;
+    const int radius = static_cast<int>(std::min(settings.radius, 2U));
+    const float spatialSigma = std::max(settings.spatialSigma, 0.25F);
+    const float depthSigma = std::max(settings.depthSigmaMeters, 1.0e-4F);
+    const auto index = [&](int x, int y) {
+        x = std::clamp(x, 0, static_cast<int>(width) - 1);
+        y = std::clamp(y, 0, static_cast<int>(height) - 1);
+        return static_cast<std::size_t>(y) * width + static_cast<std::size_t>(x);
+    };
+    const auto unit = [](Float3 n) {
+        const float l = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        return l > 0.0F ? Float3{n.x / l, n.y / l, n.z / l} : Float3{0.0F, 1.0F, 0.0F};
+    };
+    for (int py = 0; py < static_cast<int>(height); ++py)
+        for (int px = 0; px < static_cast<int>(width); ++px) {
+            const std::size_t centre = index(px, py);
+            const float centreDepth = depthMeters[centre];
+            const Float3 centreNormal = unit(normals[centre]);
+            float sigma = spatialSigma;
+            if (settings.radiansPerPixel > 0.0F) {
+                float penumbra = 0.0F;
+                for (int y = -radius; y <= radius; ++y)
+                    for (int x = -radius; x <= radius; ++x) penumbra = std::max(penumbra, penumbraMeters[index(px + x, py + y)]);
+                const float pixelMeters = std::max(centreDepth, 1.0e-3F) * settings.radiansPerPixel;
+                sigma = std::clamp(0.25F * penumbra / pixelMeters, 0.25F, spatialSigma);
+            }
+            float sum = 0.0F, weights = 0.0F;
+            for (int y = -radius; y <= radius; ++y)
+                for (int x = -radius; x <= radius; ++x) {
+                    const std::size_t tap = index(px + x, py + y);
+                    const Float3 n = unit(normals[tap]);
+                    const float d = n.x * centreNormal.x + n.y * centreNormal.y + n.z * centreNormal.z;
+                    const float w = std::exp(-static_cast<float>(x * x + y * y) / (2.0F * sigma * sigma)) *
+                                    std::exp(-std::abs(depthMeters[tap] - centreDepth) / depthSigma) *
+                                    std::pow(std::clamp(d, 0.0F, 1.0F), std::max(settings.normalPower, 1.0F));
+                    sum += std::clamp(visibility[tap], 0.0F, 1.0F) * w;
+                    weights += w;
+                }
+            out[centre] = sum / std::max(weights, 1.0e-6F);
+        }
+    return out;
 }
 
 } // namespace dve::render

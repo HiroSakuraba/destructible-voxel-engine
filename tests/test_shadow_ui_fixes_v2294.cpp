@@ -101,8 +101,11 @@ void test_shadow_shader_contracts() {
     require(resolve.find("gCascadedShadowStaticDepth") != std::string::npos &&
             resolve.find("gCascadedShadowDynamicDepth") != std::string::npos,
             "resolve does not declare both shadow layers");
+    // Both layers count for both cascades of a blend: PCF takes the darker layer, the bitmask
+    // filter ORs both layers' occlusion (SampleCascadedShadowBitmask reads both atlases).
     require(resolve.find("min(staticVisibility, dynamicVisibility)") != std::string::npos &&
-            resolve.find("min(nextStaticVisibility, nextDynamicVisibility)") != std::string::npos,
+            resolve.find("CascadeVisibility(nextCoordinate, cascade + 1u)") != std::string::npos &&
+            resolve.find("gCascadedShadowStaticDepth, gCascadedShadowDynamicDepth, coordinate") != std::string::npos,
             "resolve does not combine both layers conservatively");
 }
 

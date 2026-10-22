@@ -715,6 +715,7 @@ if(DVE_BUILD_RHI)
         src/render/multi_surface_presenter.cpp
         src/render/voxel_lighting_plan.cpp
         src/render/cascaded_shadow_map.cpp
+        src/render/bitmask_soft_shadow.cpp
         src/render/cascaded_shadow_atlas.cpp
         src/render/environment_lighting_gpu.cpp
         src/render/ray_lighting_reference.cpp
@@ -3131,6 +3132,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_hybrid_reference_rendering_tests tests/test_hybrid_reference_rendering.cpp)
     target_link_libraries(dve_hybrid_reference_rendering_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_hybrid_reference_rendering_tests COMMAND dve_hybrid_reference_rendering_tests)
+    add_executable(dve_shadow_blister_tests tests/test_shadow_blister.cpp)
+    target_link_libraries(dve_shadow_blister_tests PRIVATE dve::render_bridge)
+    target_compile_definitions(dve_shadow_blister_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_shadow_blister_tests COMMAND dve_shadow_blister_tests)
     add_executable(dve_rc_spwi_tests tests/test_radiance_cascades_spwi.cpp)
     target_link_libraries(dve_rc_spwi_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_rc_spwi_tests COMMAND dve_rc_spwi_tests)
@@ -3151,6 +3156,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_cascaded_shadow_map_tests tests/test_cascaded_shadow_map.cpp)
     target_link_libraries(dve_cascaded_shadow_map_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_cascaded_shadow_map_tests COMMAND dve_cascaded_shadow_map_tests)
+    add_executable(dve_bitmask_soft_shadow_tests tests/test_bitmask_soft_shadow.cpp)
+    target_link_libraries(dve_bitmask_soft_shadow_tests PRIVATE dve::render_bridge)
+    target_compile_definitions(dve_bitmask_soft_shadow_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME dve_bitmask_soft_shadow_tests COMMAND dve_bitmask_soft_shadow_tests)
 
     add_executable(dve_production_environment_lighting_tests tests/test_production_environment_lighting.cpp)
     target_link_libraries(dve_production_environment_lighting_tests PRIVATE dve::render_bridge)

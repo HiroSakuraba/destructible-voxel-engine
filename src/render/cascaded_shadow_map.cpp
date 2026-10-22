@@ -96,6 +96,10 @@ bool CascadedShadowSettings::validate(std::string* error) const noexcept {
         !std::isfinite(receiverBiasMeters) || receiverBiasMeters < 0.0F ||
         !std::isfinite(normalBiasMeters) || normalBiasMeters < 0.0F || pcfRadius > 4U)
         return fail("invalid cascaded shadow settings");
+    if (softShadowFilter != CascadedSoftShadowFilter::Pcf && softShadowFilter != CascadedSoftShadowFilter::Bitmask)
+        return fail("unknown soft shadow filter");
+    if (softShadowSearchTexels == 0U || softShadowSearchTexels > 16U)
+        return fail("soft shadow search must be 1..16 texels");
     return true;
 }
 
@@ -275,6 +279,33 @@ Float3 cascaded_shadow_caster_clip_coordinate(
     return {dot3(delta, cascade.lightRight) / radius,
             -dot3(delta, cascade.lightUp) / radius,
             std::max(depth, 0.0F)};
+}
+
+GpuCascadedShadowConstants make_gpu_cascaded_shadow_constants(const CascadedShadowPlan& plan,
+                                                              std::uint32_t elementCount,
+                                                              float sunAngularRadius) noexcept {
+    GpuCascadedShadowConstants out;
+    const std::size_t count = std::min<std::size_t>(plan.cascades.size(), kMaximumShadowCascades);
+    for (std::size_t i = 0; i < kMaximumShadowCascades; ++i) {
+        // Unused slots repeat the last cascade so SelectShadowCascade never runs past it.
+        const std::size_t source = count == 0U ? 0U : std::min(i, count - 1U);
+        if (count == 0U) break;
+        const auto& cascade = plan.cascades[source];
+        out.cascadeSplitFarMeters[i] = cascade.splitFarMeters;
+        out.cascadeBlendStartMeters[i] = cascade.blendStartMeters;
+        out.cascadeTexelMeters[i] = cascade.texelSizeMeters;
+        out.cascadeDepthRangeMeters[i] = std::max(0.0F, cascade.maximumLightDepth - cascade.minimumLightDepth);
+    }
+    out.cascadeTexelSize[0] = plan.atlasWidth ? 1.0F / static_cast<float>(plan.atlasWidth) : 0.0F;
+    out.cascadeTexelSize[1] = plan.atlasHeight ? 1.0F / static_cast<float>(plan.atlasHeight) : 0.0F;
+    out.cascadeCount = static_cast<std::uint32_t>(count);
+    out.cascadePcfRadius = plan.settings.pcfRadius;
+    out.cascadedShadowElementCount = elementCount;
+    out.cascadeSoftShadowFilter = static_cast<std::uint32_t>(plan.settings.softShadowFilter);
+    out.cascadeSoftShadowSearchTexels = plan.settings.softShadowSearchTexels;
+    out.cascadeTanSunAngularRadius =
+        std::isfinite(sunAngularRadius) && sunAngularRadius > 0.0F ? std::tan(sunAngularRadius) : 0.0F;
+    return out;
 }
 
 ShadowAtlasUvBounds cascaded_shadow_atlas_uv_bounds(const CascadedShadowPlan& plan,

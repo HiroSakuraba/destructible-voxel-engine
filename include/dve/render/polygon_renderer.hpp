@@ -88,6 +88,9 @@ struct PolygonRenderOptions {
     // World units to metres, for metre-authored material distances (subsurface scatter
     // distance). The hybrid reference passes its metres per voxel.
     float metersPerUnit{kDefaultMetersPerVoxel};
+    // Subsurface diffusion samples per Subsurface fragment (front-lit light spreading under the
+    // surface with Burley's profile). 0 = off. Off as well when the subsurface max distance is 0.
+    std::uint32_t subsurfaceDiffusionSamples{16};
 };
 
 struct PolygonRenderStats {
@@ -122,6 +125,7 @@ struct PolygonRenderStats {
     // within the subsurface max distance.
     std::uint64_t subsurfaceMarches{};
     std::uint64_t subsurfaceExits{};
+    std::uint64_t subsurfaceDiffusionProbes{};
 };
 
 struct PolygonTextureMip {

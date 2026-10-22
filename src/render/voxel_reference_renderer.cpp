@@ -230,6 +230,63 @@ Float3 subsurface_light(const spwi::VoxelSceneTracer& tracer, const VoxelReferen
     return subsurface_transmitted_radiance(material, exit, sun, distances.metersPerVoxel, visibility, environment);
 }
 
+// The sun's share at a point: cos(normal, sun) x visibility.
+float sun_term(Float3 normal, const RenderEnvironment& environment, float visibility) noexcept {
+    return std::max(0.0F, dot(normal, normalize(environment.sunDirection))) * visibility;
+}
+
+// Front-lit subsurface diffusion: the sun term averaged over the surface around the point with
+// Burley's profile (subsurface.hpp), so light spreads under the surface into shadow edges and
+// past the terminator. Sample radii follow the profile exactly (its two exponentials, chosen with
+// weights 1/4 and 3/4), so the estimate is a plain average. Each disc point is projected onto the
+// surface along the normal (a probe ray onto the same instance and material); points with no such
+// surface there are left out and the rest renormalised. One sun ray per sample, across the sun
+// disc for soft shadows.
+float diffused_sun_term(const spwi::VoxelSceneTracer& tracer, std::size_t instanceIndex, MaterialId id,
+                        const VoxelMaterialDefinition& material, Float3 point, Float3 normal,
+                        const RenderEnvironment& environment, const VoxelLightingDistances& distances,
+                        std::uint32_t samples, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats,
+                        const SunExtras* extras) {
+    const float d = material.subsurfaceScatterDistanceMeters / distances.metersPerVoxel;
+    const Float3 sun = normalize(environment.sunDirection);
+    Float3 tangent{}, bitangent{};
+    make_basis(normal, tangent, bitangent);
+    const bool shadows = environment.shadowMode != ShadowMode::Off;
+    const float reach = environment.shadowMode == ShadowMode::Contact ? distances.contactShadowDistance
+                                                                       : distances.shadowMaxDistance;
+    float sum = 0.0F;
+    std::uint32_t valid = 0;
+    for (std::uint32_t i = 0; i < samples; ++i) {
+        const float u = (static_cast<float>(i) + 0.5F) / static_cast<float>(samples);
+        const float v = std::fmod(radical_inverse(i ^ pixelSeed) + radical_inverse(pixelSeed), 1.0F);
+        const float r = burley_sample_radius(u, d);
+        const float angle = 2.0F * kPi * v;
+        Float3 q = point, qn = normal;
+        if (r > 1.0e-3F) {
+            const Float3 offset = add3(multiply(tangent, r * std::cos(angle)), multiply(bitangent, r * std::sin(angle)));
+            const float h = std::max(r, 1.0F);
+            ++stats.subsurfaceDiffusionProbes;
+            const auto hit = tracer.trace_instance(instanceIndex, add3(add3(point, offset), multiply(normal, h)),
+                                                   multiply(normal, -1.0F), 2.0F * h);
+            if (!hit || hit->objectHit.material != id) continue;
+            q = hit->worldPosition;
+            qn = hit->worldNormal;
+        }
+        ++valid;
+        const float cosine = std::max(0.0F, dot(qn, sun));
+        if (!(cosine > 0.0F)) continue;
+        float visibility = 1.0F;
+        if (shadows) {
+            const Float3 direction = environment.shadowMode == ShadowMode::Soft || environment.shadowMode == ShadowMode::Hybrid
+                ? sample_sun_disk(sun, environment.shadowSoftnessRadians, i, samples, pixelSeed) : sun;
+            const float raw = hard_visibility(tracer, add(q, multiply(qn, distances.shadowBias)), direction, reach, stats, extras);
+            visibility = std::clamp(1.0F - environment.shadowStrength * (1.0F - raw), 0.0F, 1.0F);
+        }
+        sum += cosine * visibility;
+    }
+    return valid > 0U ? sum / static_cast<float>(valid) : 0.0F;
+}
+
 Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                            Float3 normal, const RenderEnvironment& environment,
                            const VoxelLightingDistances& distances, std::uint32_t pixelSeed, VoxelReferenceRenderStats& stats) {
@@ -260,14 +317,12 @@ Float3 global_illumination(const spwi::VoxelSceneTracer& tracer, Float3 point,
                     environment.globalIlluminationIntensity / static_cast<float>(samples));
 }
 
-Float4 shade_voxel(const VoxelMaterialDefinition& material, Float3 worldNormal,
-                   const RenderEnvironment& environment, float visibility,
+// sunTerm: cos(normal, sun) x visibility (sun_term), or its subsurface-diffused average.
+Float4 shade_voxel(const VoxelMaterialDefinition& material, const RenderEnvironment& environment, float sunTerm,
                    Float3 indirect, Float3 caustic = {}, Float3 transmitted = {}) noexcept {
     if (material.shadingModel == MaterialShadingModel::Unlit) return material.baseColor;
-    const Float3 light = normalize(environment.sunDirection);
-    const float ndotl = std::max(0.0F, dot(worldNormal, light));
     // Caustic irradiance is already relative to full sun head on (it carries its own cosine).
-    const Float3 direct = add3(multiply(environment.sunColor, environment.sunIntensity * ndotl * visibility),
+    const Float3 direct = add3(multiply(environment.sunColor, environment.sunIntensity * sunTerm),
                                multiply3(environment.sunColor, multiply(caustic, environment.sunIntensity)));
     const Float3 base{material.baseColor.x, material.baseColor.y, material.baseColor.z};
     Float3 lit = multiply3(base, add3(direct, multiply(indirect, 1.0F - material.metallic)));
@@ -346,8 +401,11 @@ VoxelReferenceRenderStats render_radiance_cascades(
     const RadianceCascadeSettings& settings, const spwi::VoxelSceneTracer& tracer,
     std::span<const VoxelReferenceInstance> instances, const PolygonCamera& camera,
     const RenderEnvironment& environment, const VoxelLightingDistances& distances,
-    PolygonRenderTarget& target, const SunExtras& extras) {
+    PolygonRenderTarget& target, const SunExtras& extras, std::uint32_t diffusionSamples) {
     VoxelReferenceRenderStats stats;
+    const auto diffuses = [&](const VoxelMaterialDefinition& m, const VoxelLightingDistances& d) {
+        return diffusionSamples > 0U && material_has_subsurface(m) && d.subsurfaceMaxDistance > 0.0F;
+    };
     for (const VoxelReferenceInstance& instance : instances) {
         ++stats.submittedInstances;
         if (instance.visible && instance.object != nullptr)
@@ -373,8 +431,11 @@ VoxelReferenceRenderStats render_radiance_cascades(
         const Float3 caustic = extras.caustics ? extras.caustics->irradiance(texel.position, texel.normal) : Float3{};
         const Float3 transmitted = subsurface_light(tracer, instance, texel.material, material, texel.position,
                                                     texel.normal, environment, distances, seed, stats, &extras);
-        target.hdrColor[index] = shade_voxel(material, texel.normal, environment, visibility,
-                                             gi.indirect[index], caustic, transmitted);
+        const float sunShare = diffuses(material, distances)
+            ? diffused_sun_term(tracer, texel.instance, texel.material, material, texel.position, texel.normal, environment,
+                                distances, diffusionSamples, seed, stats, &extras)
+            : sun_term(texel.normal, environment, visibility);
+        target.hdrColor[index] = shade_voxel(material, environment, sunShare, gi.indirect[index], caustic, transmitted);
         target.depth[index] = texel.normalizedDepth;
         target.objectId[index] = instance.objectId != 0U ? instance.objectId : instance.object->id();
         target.materialIndex[index] = texel.material;
@@ -417,7 +478,10 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     }
     if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades)
         return render_radiance_cascades(radianceCascades, tracer, instances, camera, environment,
-                                        distances, target, extras);
+                                        distances, target, extras, subsurfaceDiffusionSamples);
+    const auto diffuses = [&](const VoxelMaterialDefinition& m, const VoxelLightingDistances& d) {
+        return subsurfaceDiffusionSamples > 0U && material_has_subsurface(m) && d.subsurfaceMaxDistance > 0.0F;
+    };
 
     const CameraBasis basis = make_basis(camera, target);
     const float maximumDistance = camera.farPlane * 1.5F;
@@ -461,8 +525,12 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     const Float3 transmitted = subsurface_light(
                         tracer, instance, hit->objectHit.material, material, hit->worldPosition, hit->worldNormal,
                         environment, distances, seed, local, &extras);
-                    target.hdrColor[index] = shade_voxel(material, hit->worldNormal,
-                                                         environment, visibility, indirect, caustic, transmitted);
+                    const float sunShare = diffuses(material, distances)
+                        ? diffused_sun_term(tracer, k, hit->objectHit.material, material, hit->worldPosition,
+                                            hit->worldNormal, environment, distances, subsurfaceDiffusionSamples, seed,
+                                            local, &extras)
+                        : sun_term(hit->worldNormal, environment, visibility);
+                    target.hdrColor[index] = shade_voxel(material, environment, sunShare, indirect, caustic, transmitted);
                     target.depth[index] = normalizedDepth;
                     target.objectId[index] = instance.objectId != 0U
                         ? instance.objectId : instance.object->id();
@@ -498,6 +566,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         stats.radianceCascadeIntervalRays += local.radianceCascadeIntervalRays;
         stats.subsurfaceMarches += local.subsurfaceMarches;
         stats.subsurfaceExits += local.subsurfaceExits;
+        stats.subsurfaceDiffusionProbes += local.subsurfaceDiffusionProbes;
     }
     return stats;
 }

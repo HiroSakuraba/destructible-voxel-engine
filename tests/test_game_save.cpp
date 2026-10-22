@@ -228,7 +228,15 @@ void test_material_optics() {
     CHECK(plain.has_value());
     if (plain) {
         const auto document = decode_save_game_document(*plain, {}, &error);
-        CHECK(document && !document->sections.contains("dve.material_optics"));
+        // No optics anywhere: written as version 4, so builds from before optics can open it.
+        CHECK(document && !document->sections.contains("dve.material_optics") &&
+              document->schemaVersion == kGameSaveSchemaVersionWithoutOptics);
+        const std::filesystem::path slot = assets.dir / "plain.dsave";
+        CHECK(codec.write_file(slot, saved, nullptr, &error));
+        const auto stored = decode_save_game_document(read_bytes(slot), {}, &error);
+        CHECK(stored && stored->schemaVersion == kGameSaveSchemaVersionWithoutOptics);
+        SaveGameReadReport report;
+        CHECK(codec.read_file(slot, {}, &report, &error).has_value() && report.storedSchemaVersion == 4U);
     }
     GameWorldObjectState* glassObject = nullptr;
     for (auto& object : saved.world.objects)
@@ -244,7 +252,7 @@ void test_material_optics() {
     CHECK(bytes.has_value());
     if (!bytes) { std::cerr << "optics encode: " << error << '\n'; return; }
     const auto document = decode_save_game_document(*bytes, {}, &error);
-    CHECK(document && document->sections.contains("dve.material_optics"));
+    CHECK(document && document->sections.contains("dve.material_optics") && document->schemaVersion == kGameSaveSchemaVersion);
     const auto decoded = codec.decode(*bytes, nullptr, &error);
     CHECK(decoded.has_value());
     if (!decoded) { std::cerr << "optics decode: " << error << '\n'; return; }
@@ -258,6 +266,47 @@ void test_material_optics() {
     CHECK(found);
     const auto again = codec.encode(*decoded, nullptr, &error);
     CHECK(again && *again == *bytes);
+}
+
+// Copies of a source asset whose materials have optics: the materials (optics included) come
+// back from the source, so the save carries no optics entries for them, however many copies.
+void test_source_backed_optics() {
+    const Assets assets = make_assets();
+    const std::filesystem::path glassPath = assets.dir / "glass.dvox";
+    {
+        CookedVoxelAsset asset(4003);
+        asset.voxelSizeMeters = 0.25F;
+        asset.materials.push_back(material("Air", 0.0F, {0, 0, 0, 0}));
+        VoxelMaterialDefinition glass = material("Glass", 2500.0F, {0.9F, 0.95F, 1.0F, 0.2F});
+        glass.transmission = 0.95F;
+        glass.indexOfRefraction = 1.5F;
+        asset.materials.push_back(glass);
+        for (int x = 0; x < 2; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 2; ++z) asset.object.set_voxel({x, y, z}, 1);
+        std::string error;
+        CHECK(write_dvox(glassPath, asset, {}, &error));
+    }
+    Scene scene;
+    scene.world = std::make_unique<GameWorld>(make_physics(Physics3DBackend::Reference));
+    for (int i = 0; i < 20; ++i)
+        (void)spawn_with_source(*scene.world, glassPath, "Glass", {static_cast<float>(i) * 2.0F, 0.0F, 0.0F}, false);
+    GameSaveCodec codec(file_reader());
+    std::string error;
+    const GameSaveData saved = capture(scene);
+    const auto document = codec.to_document(saved, nullptr, &error);
+    CHECK(document.has_value());
+    if (!document) { std::cerr << "source-backed optics: " << error << '\n'; return; }
+    CHECK(!document->sections.contains("dve.material_optics"));
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    const auto decoded = bytes ? codec.decode(*bytes, nullptr, &error) : std::nullopt;
+    CHECK(decoded.has_value());
+    std::size_t restored = 0;
+    if (decoded)
+        for (const auto& object : decoded->world.objects)
+            if (object.materials.size() > 1 && object.materials[1].transmission == 0.95F &&
+                object.materials[1].indexOfRefraction == 1.5F) ++restored;
+    CHECK(restored == 20U);
 }
 
 void test_round_trip(Physics3DBackend backend, const char* label) {
@@ -533,9 +582,11 @@ void test_migration() {
     if (migrated) CHECK(restore(b, *migrated));
     CHECK(b.world->state_hash() == a.world->state_hash());
 
-    // Current-version saves skip migrations.
+    // New saves skip migrations; one with no optics is written as version 4, so only the no-op
+    // 4 -> 5 step runs.
     const auto v1Bytes = migrating.encode(saved, nullptr, &error);
-    CHECK(v1Bytes && migrating.decode(*v1Bytes, &report, &error) && report.migrationsApplied == 0U);
+    CHECK(v1Bytes && migrating.decode(*v1Bytes, &report, &error) && report.storedSchemaVersion == 4U &&
+          report.migrationsApplied == 1U);
 
     // A failing migration reports its own message.
     GameSaveCodec failing(file_reader());
@@ -943,7 +994,7 @@ void test_v1_to_v2_migration() {
     CHECK(b.world->gameplay().has_character(ib.pawn));   // as booted
     // Re-saving writes v2.
     const auto resaved = codec.to_document(capture_all(b), nullptr, &error);
-    CHECK(resaved && resaved->schemaVersion == kGameSaveSchemaVersion && resaved->sections.contains("dve.gameplay"));
+    CHECK(resaved && resaved->schemaVersion == kGameSaveSchemaVersionWithoutOptics && resaved->sections.contains("dve.gameplay"));
 
     // A "v1" document carrying an engine section v1 never had is refused by the migration.
     SaveGameDocument mislabelled = v1;
@@ -1208,6 +1259,7 @@ void test_script_state_v2() {
 
 int main() {
     test_material_optics();
+    test_source_backed_optics();
     test_round_trip(Physics3DBackend::Reference, "reference");
     test_destruction(Physics3DBackend::Reference, "reference");
     {

@@ -1,6 +1,8 @@
 #include "dve/editor_materials.hpp"
 #include "dve/master_material.hpp"
+#include "dve/voxel_normal_map.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -61,6 +63,8 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
         return fail("foliage values must be finite, non-negative, and normalized where required");
     if (!material_optics_valid(value))
         return fail("transmission must be in [0,1], IOR in [1,3], attenuation colour in [0,1] and distance >= 0");
+    if (!material_normal_map_valid(value))
+        return fail("normal map must be 1..4096 per side with tile > 0, strength in [0,4] and sharpness in [1,64]");
     if (value.layers.size() > kMaximumVoxelMaterialLayers) return fail("material exceeds four layers");
     for (const VoxelMaterialLayer& layer : value.layers) {
         if (!finite(layer.weight) || layer.weight < 0.0F || layer.weight > 1.0F ||
@@ -196,7 +200,11 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
         const std::filesystem::path temporary = path.string() + ".tmp";
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) throw std::runtime_error("could not open material library for writing");
-        output << "DVE_EDITOR_MATERIALS 4\n" << entries_.size() << "\n" << std::setprecision(9);
+        // Version 5 (a normal-map record per material) only when some material has a map, so
+        // libraries without maps keep their version 4 bytes.
+        const bool normalMaps = std::any_of(entries_.begin(), entries_.end(),
+                                            [](const auto& e) { return material_has_normal_map(e.second.definition); });
+        output << "DVE_EDITOR_MATERIALS " << (normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -219,6 +227,18 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
+            if (normalMaps) {
+                if (const VoxelNormalMap* map = m.normalMap.get()) {
+                    static constexpr char kHex[] = "0123456789abcdef";
+                    std::string hex;
+                    hex.reserve(map->rgba8.size() * 2U);
+                    for (const std::uint8_t b : map->rgba8) { hex += kHex[b >> 4U]; hex += kHex[b & 15U]; }
+                    output << " 1 " << m.normalMapTileMeters << ' ' << m.normalMapStrength << ' ' << m.normalMapSharpness << ' '
+                           << map->width << ' ' << map->height << ' ' << std::quoted(map->name) << ' ' << hex;
+                } else {
+                    output << " 0";
+                }
+            }
             output << '\n';
         }
         output.close();
@@ -241,7 +261,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::file
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 4) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 5) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -289,6 +309,32 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::file
             if (version >= 4)
                 input >> m.transmission >> m.indexOfRefraction >> m.attenuationColor.x >> m.attenuationColor.y >>
                     m.attenuationColor.z >> m.attenuationDistanceMeters;
+            if (version >= 5) {
+                unsigned hasMap{};
+                input >> hasMap;
+                if (hasMap == 1U) {
+                    std::uint32_t width{}, height{};
+                    std::string name, hex;
+                    input >> m.normalMapTileMeters >> m.normalMapStrength >> m.normalMapSharpness >> width >> height >>
+                        std::quoted(name) >> hex;
+                    if (width == 0U || height == 0U || width > kMaximumVoxelNormalMapDimension ||
+                        height > kMaximumVoxelNormalMapDimension || hex.size() != static_cast<std::size_t>(width) * height * 8U)
+                        throw std::runtime_error("invalid material normal map record");
+                    std::vector<std::uint8_t> rgba(hex.size() / 2U);
+                    const auto nibble = [](char c) -> int {
+                        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+                    };
+                    for (std::size_t i = 0; i < rgba.size(); ++i) {
+                        const int hi = nibble(hex[2 * i]), lo = nibble(hex[2 * i + 1]);
+                        if (hi < 0 || lo < 0) throw std::runtime_error("invalid material normal map record");
+                        rgba[i] = static_cast<std::uint8_t>(hi * 16 + lo);
+                    }
+                    m.normalMap = make_voxel_normal_map(std::move(name), width, height, std::move(rgba));
+                    if (!material_normal_map_valid(m)) throw std::runtime_error("invalid material normal map record");
+                } else if (hasMap != 0U) {
+                    throw std::runtime_error("invalid material normal map record");
+                }
+            }
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");
             entry.id = static_cast<MaterialId>(rawId);

@@ -67,6 +67,12 @@ void hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& material)
         hash_float(hash, material.attenuationColor.z);
         hash_float(hash, material.attenuationDistanceMeters);
     }
+    if (material_has_normal_map(material)) {   // likewise
+        hash_integer(hash, material.normalMap->contentHash);
+        hash_float(hash, material.normalMapTileMeters);
+        hash_float(hash, material.normalMapStrength);
+        hash_float(hash, material.normalMapSharpness);
+    }
 }
 
 [[nodiscard]] std::uint64_t brick_id(std::uint64_t objectId, BrickKey key) noexcept {

@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <map>
 #include <optional>
+#include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -163,6 +165,18 @@ enum class VoxelizationMode : std::uint8_t {
     SurfaceOnly,
 };
 
+// A tangent-space normal map for voxel materials (dve/voxel_normal_map.hpp). Immutable once made
+// with make_voxel_normal_map and shared between material copies. Texels are RGBA8, top row first;
+// xyz = 2 x rgb - 1 with +y up (the OpenGL / glTF convention). contentHash covers the size and
+// texels, so material hashes do not rehash the image.
+struct VoxelNormalMap {
+    std::string name;
+    std::uint32_t width{};
+    std::uint32_t height{};
+    std::vector<std::uint8_t> rgba8;
+    std::uint64_t contentHash{};
+};
+
 struct VoxelMaterialDefinition {
     std::string name;
     // Linear RGBA. Base-color image texels are decoded from sRGB before multiplication.
@@ -204,6 +218,14 @@ struct VoxelMaterialDefinition {
     float thermalConductivity{};
     bool transparent{};
     bool structural{true};
+    // Optional surface detail: a tangent-space normal map projected triplanar in object space
+    // (no UVs on voxels). One repeat spans normalMapTileMeters; strength scales the tilt (0 = flat,
+    // 1 = as authored, up to 4); sharpness is the triplanar blend exponent (1 soft .. 64 hard).
+    // Written by formats and hashed only when a map is present, so older bytes are unchanged.
+    std::shared_ptr<const VoxelNormalMap> normalMap;
+    float normalMapTileMeters{1.0F};
+    float normalMapStrength{1.0F};
+    float normalMapSharpness{4.0F};
 };
 
 // True when any optical field differs from its default (formats write the optics block, hashes
@@ -211,6 +233,21 @@ struct VoxelMaterialDefinition {
 [[nodiscard]] inline bool material_has_optics(const VoxelMaterialDefinition& m) noexcept {
     return m.transmission != 0.0F || m.indexOfRefraction != 1.5F || m.attenuationColor.x != 1.0F ||
            m.attenuationColor.y != 1.0F || m.attenuationColor.z != 1.0F || m.attenuationDistanceMeters != 0.0F;
+}
+// A normal map is attached.
+[[nodiscard]] inline bool material_has_normal_map(const VoxelMaterialDefinition& m) noexcept {
+    return m.normalMap != nullptr;
+}
+inline constexpr std::uint32_t kMaximumVoxelNormalMapDimension = 4096U;
+// No map, or a well-formed one with parameters in range.
+[[nodiscard]] inline bool material_normal_map_valid(const VoxelMaterialDefinition& m) noexcept {
+    if (!m.normalMap) return true;
+    const VoxelNormalMap& map = *m.normalMap;
+    const auto in = [](float v, float lo, float hi) { return v >= lo && v <= hi; };   // false for NaN
+    return map.width >= 1U && map.height >= 1U && map.width <= kMaximumVoxelNormalMapDimension &&
+           map.height <= kMaximumVoxelNormalMapDimension &&
+           map.rgba8.size() == static_cast<std::size_t>(map.width) * map.height * 4U && in(m.normalMapTileMeters, 1.0e-4F, 1.0e4F) &&
+           in(m.normalMapStrength, 0.0F, 4.0F) && in(m.normalMapSharpness, 1.0F, 64.0F);
 }
 // Light enters the material (refraction, caustics).
 [[nodiscard]] inline bool material_is_refractive(const VoxelMaterialDefinition& m) noexcept {
@@ -338,6 +375,14 @@ struct CookedVoxelScene {
 [[nodiscard]] ImportedModelResult import_model(
     const std::filesystem::path& sourcePath,
     const ModelImportOptions& options = {});
+
+// Normal maps for voxel materials (VoxelMaterialDefinition::normalMap): a PNG or JPEG decoded
+// with no colour conversion (normal maps are data, not sRGB colour). Null, with *error, when the
+// image cannot be decoded or is larger than kMaximumVoxelNormalMapDimension.
+[[nodiscard]] std::shared_ptr<const VoxelNormalMap> import_voxel_normal_map(const std::filesystem::path& path,
+                                                                            std::string* error = nullptr);
+[[nodiscard]] std::shared_ptr<const VoxelNormalMap> decode_voxel_normal_map(std::span<const std::byte> bytes, std::string name,
+                                                                            std::string* error = nullptr);
 
 [[nodiscard]] CookedVoxelAsset voxelize_scene(
     const ImportedScene& scene,

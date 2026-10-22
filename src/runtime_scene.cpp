@@ -966,6 +966,12 @@ void hash_transform(std::uint64_t& hash, const RigidTransform& transform) noexce
             hash_value(hash, std::bit_cast<std::uint32_t>(material.attenuationColor.z));
             hash_value(hash, std::bit_cast<std::uint32_t>(material.attenuationDistanceMeters));
         }
+        if (material_has_normal_map(material)) {   // likewise
+            hash_value(hash, material.normalMap->contentHash);
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.normalMapTileMeters));
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.normalMapStrength));
+            hash_value(hash, std::bit_cast<std::uint32_t>(material.normalMapSharpness));
+        }
         hash_value(hash, std::bit_cast<std::uint32_t>(material.densityKilogramsPerCubicMeter));
         hash_value(hash, std::bit_cast<std::uint32_t>(material.structuralStrength));
         hash_value(hash, std::bit_cast<std::uint32_t>(material.fractureResistance));

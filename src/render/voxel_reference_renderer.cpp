@@ -18,6 +18,7 @@
 #include "dve/render/ray_lighting_reference.hpp"
 #include "dve/render/subsurface.hpp"
 #include "dve/render/surface_shading.hpp"
+#include "dve/voxel_normal_map.hpp"
 
 namespace dve::render {
 namespace {
@@ -467,6 +468,22 @@ LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnv
     return out;
 }
 
+// The material's normal map bends the shading normal (dve/voxel_normal_map.hpp, projected in the
+// instance's own space so it moves with the object). Shadow, AO and GI rays keep the geometric
+// normal; the sun's cosine follows the bent one (the subsurface-diffused sun term is an average
+// over the surface around the point and is left as it is).
+void apply_voxel_normal_map(const VoxelReferenceInstance& instance, const VoxelMaterialDefinition& material,
+                            const RenderEnvironment& environment, Float3 worldPosition, bool diffused, float metersPerVoxel,
+                            VoxelSurfaceInput& surface) noexcept {
+    if (!material_has_normal_map(material)) return;
+    const Float3 local = inverse_transform_point(instance.transform, worldPosition);
+    const Float3 localNormal = normalize(inverse_transform_vector(instance.transform, surface.normal));
+    const Float3 bent = normalize(transform_vector(
+        instance.transform, voxel_normal_map_normal(material, multiply(local, resolve_meters_per_voxel(metersPerVoxel)), localNormal)));
+    if (!diffused) surface.sunTerm = sun_term(bent, environment, surface.visibility);
+    surface.normal = bent;
+}
+
 // Writes the pixel's render passes (polygon_renderer.hpp) when the target has them. The shadow pass
 // is the direct light the point would get with its own sun visibility 1, less what it gets (for
 // subsurface-diffused sun the point's own share is unshadowed, its neighbours' are not).
@@ -597,8 +614,10 @@ VoxelReferenceRenderStats render_radiance_cascades(
         const float ao = specular_occlusion_active(environment, distances)
             ? voxel_ambient_occlusion(tracer, &extras, texel.position, texel.normal, static_cast<std::uint32_t>(index),
                                       environment, distances, stats) : 1.0F;
-        const VoxelSurfaceInput surface{texel.normal, normalize(subtract(gbuffer.cameraPosition, texel.position)), visibility,
-                                        sunShare, gi.indirect[index], ao, caustic, transmitted};
+        VoxelSurfaceInput surface{texel.normal, normalize(subtract(gbuffer.cameraPosition, texel.position)), visibility,
+                                  sunShare, gi.indirect[index], ao, caustic, transmitted};
+        apply_voxel_normal_map(instance, material, environment, texel.position, diffuses(material, distances),
+                               distances.metersPerVoxel, surface);
         const LightPasses light = shade_voxel(material, environment, surface);
         target.hdrColor[index] = beauty(light, material.baseColor.w);
         target.depth[index] = texel.normalizedDepth;
@@ -718,8 +737,10 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                             hit->worldNormal, environment, distances, subsurfaceDiffusionSamples, seed,
                                             local, &extras)
                         : sun_term(hit->worldNormal, environment, visibility);
-                    const VoxelSurfaceInput surface{hit->worldNormal, normalize(subtract(camera.position, hit->worldPosition)),
-                                                    visibility, sunShare, indirect, ao, caustic, transmitted};
+                    VoxelSurfaceInput surface{hit->worldNormal, normalize(subtract(camera.position, hit->worldPosition)),
+                                              visibility, sunShare, indirect, ao, caustic, transmitted};
+                    apply_voxel_normal_map(instance, material, environment, hit->worldPosition, diffuses(material, distances),
+                                           distances.metersPerVoxel, surface);
                     const LightPasses light = shade_voxel(material, environment, surface);
                     target.hdrColor[index] = beauty(light, material.baseColor.w);
                     target.depth[index] = normalizedDepth;

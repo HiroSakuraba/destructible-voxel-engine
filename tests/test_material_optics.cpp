@@ -3,6 +3,7 @@
 // Defaults change nothing (no optics block, old versions and hashes); materials with optics
 // round-trip through DVOX v1.4, DMESH v1.4 and the editor library v4; out-of-range values are
 // refused; glTF KHR_materials_transmission / _ior / _volume import; layers blend the optics.
+#include "dve/voxel_normal_map.hpp"
 #include "dve/asset_cooker.hpp"
 #include "dve/dvox.hpp"
 #include "dve/editor_materials.hpp"
@@ -149,6 +150,37 @@ void test_editor_library(const fs::path& dir) {
     }
     water.indexOfRefraction = 5.0F;
     check(!library.upsert({id, water, false}, &error), "library refuses bad optics");
+
+    // Normal maps: version 5 only when a material has one; texels and parameters round-trip.
+    {
+        std::ifstream in(dir / "materials.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 4U, "a library without normal maps stays version 4");
+    }
+    VoxelMaterialDefinition brick;
+    brick.name = "Brick";
+    brick.normalMap = make_voxel_normal_map("brick normal", 2U, 2U, {10, 20, 250, 255, 128, 128, 255, 255, 200, 90, 230, 255, 0, 255, 128, 7});
+    brick.normalMapTileMeters = 0.25F;
+    brick.normalMapStrength = 2.0F;
+    brick.normalMapSharpness = 16.0F;
+    const MaterialId brickId = library.next_available_id();
+    check(library.upsert({brickId, brick, false}, &error), "library add normal-mapped material: " + error);
+    check(library.save(dir / "materials5.txt", &error), "library save v5: " + error);
+    const auto five = EditorMaterialLibrary::load(dir / "materials5.txt", &error);
+    check(five.has_value(), "library v5 load: " + error);
+    if (five) {
+        const auto* entry = five->find(brickId);
+        check(entry && entry->definition.normalMap && entry->definition.normalMap->rgba8 == brick.normalMap->rgba8 &&
+                  entry->definition.normalMap->name == "brick normal" && entry->definition.normalMapTileMeters == 0.25F &&
+                  entry->definition.normalMapStrength == 2.0F && entry->definition.normalMapSharpness == 16.0F,
+              "library normal map round-trip");
+        const auto* plainEntry = five->find(id);
+        check(plainEntry && !plainEntry->definition.normalMap, "materials without maps stay without");
+    }
+    brick.normalMapStrength = 9.0F;
+    check(!library.upsert({brickId, brick, false}, &error), "library refuses a strength above 4");
 }
 
 void test_gltf_import(const fs::path& dir) {

@@ -157,6 +157,7 @@ add_library(dve_core
     src/game_ui_localization.cpp
     src/material_parameter_collection.cpp
     src/material_mapping.cpp
+    src/voxel_normal_map.cpp
     src/dashr_surface.cpp
     src/dashr_seam_map.cpp
     src/material_layers.cpp
@@ -3171,6 +3172,11 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_render_passes_tests tests/test_render_passes.cpp)
     target_link_libraries(dve_render_passes_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_render_passes_tests COMMAND dve_render_passes_tests)
+    if(TARGET dve_asset_pipeline)
+        add_executable(dve_voxel_normal_maps_tests tests/test_voxel_normal_maps.cpp)
+        target_link_libraries(dve_voxel_normal_maps_tests PRIVATE dve::render_bridge dve::asset_pipeline)
+        add_test(NAME dve_voxel_normal_maps_tests COMMAND dve_voxel_normal_maps_tests)
+    endif()
     add_executable(dve_ambient_occlusion_gpu_tests tests/test_ambient_occlusion_gpu.cpp)
     target_link_libraries(dve_ambient_occlusion_gpu_tests PRIVATE dve::render_bridge)
     target_compile_definitions(dve_ambient_occlusion_gpu_tests PRIVATE DVE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

@@ -157,7 +157,7 @@ public:
     [[nodiscard]] render::PolygonCamera camera(float aspect) const;
     // Script/default environment plus enabled dve.light components in current
     // world frames. Candle time follows the saved simulation clock.
-    [[nodiscard]] RenderEnvironment environment() const;
+    [[nodiscard]] RenderEnvironment environment(float interpolationAlpha = 1.0F) const;
     // View for a renderer. `objects` must stay alive (and the world unmodified) while the
     // view is in use; pass the storage in so no allocation happens per frame.
     [[nodiscard]] PlayerRenderView render_view(std::vector<GameRenderObject>& objects, float aspect, float interpolationAlpha = 1.0F) const;

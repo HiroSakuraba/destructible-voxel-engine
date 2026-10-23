@@ -51,7 +51,7 @@ bool SceneLight::validate(std::string *error) const noexcept {
 
 bool RenderEnvironment::validate(std::string* error) const noexcept {
     auto fail = [&](const char* message) { if (error) *error = message; return false; };
-    if (lights.size() > 4096 || localLightSamples < 1 ||
+    if (lights.size() > kMaximumSceneLights || localLightSamples < 1 ||
         localLightSamples > 64 || pathTraceBounces > 64 ||
         pathTraceSamples < 1 || pathTraceSamples > 256 ||
         !std::isfinite(lightingTimeSeconds))

@@ -22,7 +22,7 @@ Float3 unit(Float3 a) {
   float l = std::sqrt(dot3(a, a));
   return l > 1e-12F ? mul(a, 1 / l) : Float3{0, 1, 0};
 }
-float peak(Float3 a) { return std::max({a.x, a.y, a.z}); }
+float peak(Float3 a) { return (std::max)({a.x, a.y, a.z}); }
 float luminance(Float3 a) { return .2126F * a.x + .7152F * a.y + .0722F * a.z; }
 Float3 base(const VoxelMaterialDefinition &m) {
   return {m.baseColor.x, m.baseColor.y, m.baseColor.z};
@@ -45,7 +45,7 @@ struct Rng {
 };
 Float3 cosine(Float3 n, Rng &r) {
   const float z = std::sqrt(r.next()), a = 2 * pi * r.next();
-  const float q = std::sqrt(std::max(0.F, 1 - z * z));
+  const float q = std::sqrt((std::max)(0.F, 1 - z * z));
   const auto t =
       unit(cross(std::abs(n.y) < .9F ? Float3{0, 1, 0} : Float3{1, 0, 0}, n));
   return sum3(mul(n, z),
@@ -134,7 +134,7 @@ struct SceneLighting::Impl {
        std::span<const PolygonRenderInstance> polygons,
        const RenderEnvironment &e, float s)
       : env(e), scale(resolve_meters_per_voxel(s)),
-        bias(std::max(1e-5F, e.shadowBiasMeters / scale)),
+        bias((std::max)(1e-5F, e.shadowBiasMeters / scale)),
         maximum(e.globalIlluminationMaxDistanceMeters / scale), tracer(voxels) {
     std::string error;
     if (!env.validate(&error))
@@ -185,12 +185,12 @@ struct SceneLighting::Impl {
           continue;
         for (std::size_t k = sm.firstIndex;
              k + 2 <
-             std::min<std::size_t>(i.asset->indices.size(),
+             (std::min<std::size_t>)(i.asset->indices.size(),
                                    std::size_t(sm.firstIndex) + sm.indexCount);
              k += 3) {
           const auto ia = i.asset->indices[k], ib = i.asset->indices[k + 1],
                      ic = i.asset->indices[k + 2];
-          if (std::max({ia, ib, ic}) >= i.asset->vertices.size())
+          if ((std::max)({ia, ib, ic}) >= i.asset->vertices.size())
             continue;
           const auto a = transform_point(i.transform,
                                          i.asset->vertices[ia].position),
@@ -207,7 +207,13 @@ struct SceneLighting::Impl {
           light.u = sub(b, a);
           light.v = sub(c, a);
           light.area = -1;
-          light.radiance = product(le, {i.tint.x, i.tint.y, i.tint.z});
+          // Match the beauty pass: instance tint scales base colour only, never
+          // material.emissive.
+          light.radiance =
+              material.shadingModel == MaterialShadingModel::Emissive
+                  ? sum3(product(base(material), {i.tint.x, i.tint.y, i.tint.z}),
+                         material.emissive)
+                  : material.emissive;
           light.twoSided = true;
           append(light);
         }
@@ -321,7 +327,7 @@ struct SceneLighting::Impl {
         continue;
       if (auto t = intersect(e, from, dir);
           t &&
-          std::abs(*t - h.distance) < std::max(1e-4F, h.distance * 1e-4F)) {
+          std::abs(*t - h.distance) < (std::max)(1e-4F, h.distance * 1e-4F)) {
         const float c = dot3(e.n, mul(dir, -1));
         if (e.twoSided ? std::abs(c) > 1e-7F : c > 1e-7F)
           pdf += e.weight / power * d2 / (e.area * std::abs(c));
@@ -379,7 +385,7 @@ struct SceneLighting::Impl {
           continue;
         pdf *= d2 / (e.area * std::abs(c));
         factor = useMis
-                     ? mis(float(count) * pdf, std::max(0.F, dot3(n, d)) / pi)
+                     ? mis(float(count) * pdf, (std::max)(0.F, dot3(n, d)) / pi)
                      : 1.F;
       }
       if (e.kind == Emitter::Spot) {
@@ -392,7 +398,7 @@ struct SceneLighting::Impl {
       }
       if (factor <= 0 ||
           trace(origin, d,
-                std::max(0.F, distance - std::max(1e-5F, distance * 1e-5F))))
+                (std::max)(0.F, distance - (std::max)(1e-5F, distance * 1e-5F))))
         continue;
       const auto li = mul(e.radiance, factor / pdf / float(count));
       const auto l =
@@ -486,12 +492,12 @@ struct SceneLighting::Impl {
                 : (c >= e.outer ? 1.F : 0.F);
         factor *= t * t * (3 - 2 * t);
       }
-      if (trace(p, d, distance - std::max(1e-5F, distance * 1e-5F)))
+      if (trace(p, d, distance - (std::max)(1e-5F, distance * 1e-5F)))
         continue;
       if (transmission)
         factor *= std::clamp(transmission(d, distance), 0.F, 1.F);
       const float denominator =
-          std::max(1e-6F, 1 + g * g - 2 * g * dot3(unit(ray), d));
+          (std::max)(1e-6F, 1 + g * g - 2 * g * dot3(unit(ray), d));
       factor *= (1 - g * g) / (4 * pi * denominator * std::sqrt(denominator));
       result = sum3(
           result, mul(e.radiance, factor / pdf / float(env.localLightSamples)));
@@ -509,7 +515,7 @@ struct SceneLighting::Impl {
       auto position = p, normal = n, v = view;
       for (unsigned depth = 0; depth < env.pathTraceBounces; ++depth) {
         const auto d = cosine(normal, rng);
-        const float cosTheta = std::max(0.F, dot3(normal, d));
+        const float cosTheta = (std::max)(0.F, dot3(normal, d));
         if (cosTheta <= 0)
           break;
         // Cosine sampling covers the entire hemisphere: diffuse and rough
@@ -641,8 +647,8 @@ bool apply_cpu_bloom(PolygonRenderTarget &target, const RenderEnvironment &e) {
     return false;
   if (e.bloomIntensity == 0 || e.bloomRadius == 0)
     return true;
-  const int radius = int(std::min(64.F, std::ceil(e.bloomRadius)));
-  const float sigma = std::max(.5F, float(radius) * .5F);
+  const int radius = int((std::min)(64.F, std::ceil(e.bloomRadius)));
+  const float sigma = (std::max)(.5F, float(radius) * .5F);
   std::vector<float> kernel(2 * radius + 1);
   float total = 0;
   for (int j = -radius; j <= radius; ++j) {
@@ -659,7 +665,7 @@ bool apply_cpu_bloom(PolygonRenderTarget &target, const RenderEnvironment &e) {
       return false;
     float l = luminance({c.x, c.y, c.z});
     source[i] = mul({c.x, c.y, c.z},
-                    l > 0 ? std::max(0.F, l - e.bloomThreshold) / l : 0);
+                    l > 0 ? (std::max)(0.F, l - e.bloomThreshold) / l : 0);
   }
   for (int axis = 0; axis < 2; ++axis) {
     for (unsigned y = 0; y < target.height; ++y)

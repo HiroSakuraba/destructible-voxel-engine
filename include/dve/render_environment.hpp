@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -54,6 +55,7 @@ enum class ShadowMode : std::uint32_t {
 // Positions and emitter edges are authored in metres; intensity is RGB radiant
 // intensity for point/spot/candle, emitted radiance for area lights. Direction
 // points out of the light.
+inline constexpr std::size_t kMaximumSceneLights = 4096U;
 enum class SceneLightKind : std::uint32_t { Point, Spot, Quad, Disc, Candle };
 struct SceneLight {
   SceneLightKind kind{SceneLightKind::Point};

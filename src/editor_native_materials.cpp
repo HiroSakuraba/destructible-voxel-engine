@@ -102,6 +102,14 @@ void NativeEditorController::open_material_panel(){
     if(playSession_.active()){set_status("Stop Play before editing material assignments",true);return;}
     clear_navigation_input();close_top_level_menu();close_context_menu();
     const auto customDir=(projectRoot_.empty()?userSettingsPath_.parent_path():projectRoot_)/"Materials"/"Presets";
+    if(materialPanel_.catalogDirectory!=customDir){
+        // User presets belong to one project: drop the previous project's entries (and their
+        // thumbnails) so its IDs neither leak into nor shadow presets of the new project.
+        materialPanel_.catalog=MaterialPresetCatalog::starter();materialPanel_.thumbnailCache.clear();materialPanel_.thumbnailPending.clear();
+        if(materialPanel_.thumbnails)materialPanel_.thumbnails->cancel();
+        materialPanel_.catalogDirectory=customDir;
+        if(!materialPanel_.catalog.find(materialPanel_.selected))materialPanel_.selected="dve.glass.clear";
+    }
     std::error_code ec;
     if(std::filesystem::is_directory(customDir,ec)) {unsigned count=0;for(const auto& item:std::filesystem::directory_iterator(customDir,ec)){
         if(ec||++count>256)break;

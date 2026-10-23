@@ -99,6 +99,16 @@ void undo_redo_exact(){
     require(w.commands().redo(d).success,"redo");require(snapshot(d)+library_text(n)==applied,"redo reproduces the applied state exactly");require(n.active_material()==activeAfter,"redo restores applied active material");
     require(w.commands().undo(d).success&&snapshot(d)+library_text(n)==original,"second undo is exact");n.close_material_panel();
 }
+// Custom presets are per project: switching projects must not leak or shadow them.
+void project_switch_rebuilds_catalog(){
+    const auto a=root/"project-a",b=root/"project-b";std::filesystem::create_directories(a);std::filesystem::create_directories(b);
+    NativeEditorController n{EditorWorkspace(scene()),root/"switch.settings"};n.resize(1280,800);n.configure_ai_assistant(a);
+    n.open_material_panel();n.material_panel_select("dve.paint.satin");require(n.save_material_panel_preset(),n.material_panel().message);
+    const auto id=n.material_panel().selected;require(std::filesystem::exists(a/"Materials"/"Presets"/(id+".dvepreset")),"preset saved in project A");n.close_material_panel();
+    n.configure_ai_assistant(b);n.open_material_panel();require(!n.material_panel().catalog.find(id),"project A preset does not leak into project B");
+    n.material_panel_select("dve.paint.satin");require(n.save_material_panel_preset(),n.material_panel().message);
+    require(std::filesystem::exists(b/"Materials"/"Presets"/(id+".dvepreset")),"same preset is really written into project B");n.close_material_panel();
+}
 void preview_jobs(){
     auto c=MaterialPresetCatalog::starter();MaterialPreviewWorker worker;worker.request(c.find("dve.glass.frosted")->defaults,MaterialPreviewShape::Sphere);worker.request(c.find("dve.metal.copper")->defaults,MaterialPreviewShape::Wedge);
     const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(30);
@@ -113,4 +123,4 @@ void preview_jobs(){
     require(!worker.image(),"cancelled job never commits later");
 }
 }
-int main(){try{root=std::filesystem::temp_directory_path()/"dve-material-presets-batch1";std::filesystem::remove_all(root);std::filesystem::create_directories(root);const auto previous=std::filesystem::current_path();std::filesystem::current_path(root);catalog_and_files();native_workflow();component_domains();undo_redo_exact();preview_jobs();std::filesystem::current_path(previous);std::filesystem::remove_all(root);std::cout<<"Material preset catalog, persistence, native workflow and asynchronous preview checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{root=std::filesystem::temp_directory_path()/"dve-material-presets-batch1";std::filesystem::remove_all(root);std::filesystem::create_directories(root);const auto previous=std::filesystem::current_path();std::filesystem::current_path(root);catalog_and_files();native_workflow();component_domains();undo_redo_exact();project_switch_rebuilds_catalog();preview_jobs();std::filesystem::current_path(previous);std::filesystem::remove_all(root);std::cout<<"Material preset catalog, persistence, native workflow and asynchronous preview checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

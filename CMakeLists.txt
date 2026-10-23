@@ -917,6 +917,9 @@ if(DVE_BUILD_EDITOR)
         src/editor_import_preview.cpp
         src/editor_project.cpp
         src/editor_file_workflow.cpp
+        src/editor_material_presets.cpp
+        src/editor_material_preview.cpp
+        src/editor_native_materials.cpp
         src/editor_materials.cpp
         src/editor_text3d.cpp
         src/editor_viewport.cpp
@@ -933,6 +936,10 @@ if(DVE_BUILD_EDITOR)
         src/editor_audio_workspace.cpp
         src/editor_audio_event.cpp
         src/editor_platform_bridge.cpp)
+    if(TARGET dve_render_bridge)
+        target_link_libraries(dve_editor PUBLIC dve::render_bridge)
+        target_compile_definitions(dve_editor PRIVATE DVE_EDITOR_MATERIAL_PREVIEW_RENDERER=1)
+    endif()
     add_library(dve::editor ALIAS dve_editor)
     target_include_directories(dve_editor PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_editor PUBLIC cxx_std_23)
@@ -948,6 +955,10 @@ if(DVE_BUILD_EDITOR)
     if(DVE_ENABLE_SANITIZERS AND NOT MSVC)
         target_compile_options(dve_editor PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(dve_editor PUBLIC -fsanitize=address,undefined)
+    endif()
+    if(TARGET dve_render_bridge)
+        add_executable(dve_material_preset_gallery apps/material_preset_gallery.cpp)
+        target_link_libraries(dve_material_preset_gallery PRIVATE dve::editor)
     endif()
     add_executable(dve_editor_demo apps/dve_editor_demo.cpp)
     target_link_libraries(dve_editor_demo PRIVATE dve::editor)
@@ -2648,6 +2659,11 @@ if(DVE_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_pack_autosave_exclusion.cmake)
 
     if(DVE_BUILD_EDITOR)
+        if(TARGET dve_render_bridge)
+            add_executable(dve_editor_material_presets_tests tests/test_editor_material_presets.cpp)
+            target_link_libraries(dve_editor_material_presets_tests PRIVATE dve::editor)
+            add_test(NAME dve_editor_material_presets_tests COMMAND dve_editor_material_presets_tests)
+        endif()
         add_executable(dve_editor_tests tests/test_editor.cpp)
         target_link_libraries(dve_editor_tests PRIVATE dve::editor)
         target_compile_definitions(dve_editor_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

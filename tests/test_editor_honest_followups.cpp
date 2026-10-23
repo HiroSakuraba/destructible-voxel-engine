@@ -446,9 +446,7 @@ void test_context_only_commands_listed() {
     const auto& menus = std::as_const(controller.workspace().menus());
     for (const char* id : {"material.assign", "material.apply", "material.create_instance", "material.preview"}) {
         const MenuAction* action = menus.find(id);
-        check(action && !action->enabled && action->disabledReason.find("Not in this editor yet") != std::string::npos,
-              std::string(id) + " is a menu item, disabled with its reason");
-        check(action && action->shortcut.empty(), std::string(id) + " shows no viewport-looking key (M is the selection domain)");
+        check(action && action->enabled, std::string(id) + " exposes the implemented material preset workflow");
     }
     const auto inTools = [&] {
         for (const MenuAction& action : controller.menu_actions("Tools")) if (action.id == "polygon.extrude") return true;

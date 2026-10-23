@@ -43,6 +43,7 @@
 #include "dve/editor_audio.hpp"
 #include "dve/editor_audio_event.hpp"
 #include "dve/editor_materials.hpp"
+#include "dve/editor_material_panel.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/editor_runtime_settings.hpp"
 #include "dve/collision_proxy.hpp"
@@ -633,6 +634,23 @@ public:
     // most important first. The viewport shows as many as fit; the full list is behind the
     // "? Shortcuts" control.
     [[nodiscard]] std::vector<std::string> viewport_tool_gestures() const;
+    [[nodiscard]] MaterialPanelState& material_panel() noexcept { return materialPanel_; }
+    [[nodiscard]] const MaterialPanelState& material_panel() const noexcept { return materialPanel_; }
+    [[nodiscard]] MaterialPanelLayout material_panel_layout() const;
+    [[nodiscard]] std::vector<const MaterialPresetAsset*> material_panel_entries() const;
+    [[nodiscard]] std::vector<MaterialPresetControl> material_panel_controls() const;
+    void open_material_panel();
+    void close_material_panel();
+    bool apply_material_panel(bool editSlot = false);
+    bool load_material_panel_slot();
+    bool material_panel_key(std::string_view,bool control,bool shift,bool alt);
+    bool material_panel_pointer(int x,int y);
+    void material_panel_text(std::string_view);
+    void material_panel_select(std::string_view);
+    void material_panel_preview();
+    void material_panel_tick();
+    void save_material_panel_preferences();
+    bool save_material_panel_preset();
     [[nodiscard]] MaterialId active_material() const noexcept { return activeMaterial_; }
     [[nodiscard]] std::optional<VoxelBrushPreview> voxel_brush_preview() const;
     [[nodiscard]] BrushShape voxel_brush_shape() const noexcept { return voxelBrushShape_; }
@@ -1418,6 +1436,7 @@ private:
 
     EditorWorkspace workspace_;
     EditorMaterialLibrary materials_;
+    MaterialPanelState materialPanel_;
     EditorAssetDatabase assetDatabase_{};
     bool thumbnailBacklog_{};
     EditorAssetBrowserState assetBrowserState_{};

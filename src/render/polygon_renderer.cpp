@@ -1,5 +1,6 @@
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/render/scene_lighting.hpp"
+#include "dve/voxel_normal_map.hpp"
 
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/ambient_occlusion.hpp"
@@ -806,6 +807,10 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             effective.metallic=surface.metallic;effective.roughness=surface.roughness;
             effective.emissive=surface.emissive;normal=surface.normal;
         }
+        if(effective.normalMap){
+            const float units=options.metersPerUnit>0&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
+            normal=normalize(transform_vector(tri.transform,voxel_normal_map_normal(effective,multiply(objectPosition,units),inverse_transform_vector(tri.transform,normal))));
+        }
         if(!options.decals.empty()){
             MaterialSurfaceSample decalSurface;
             decalSurface.baseColor=base;decalSurface.normal=normal;
@@ -877,15 +882,18 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             if (options.sceneLighting && material_uses_camera_transport(effective)) {
                 const float cameraZ = w0*tri.v[0].cameraZ + w1*tri.v[1].cameraZ + w2*tri.v[2].cameraZ;
                 const float rayLimit = tri.farPlane * cameraDistance / (std::max)(1e-6F, cameraZ);
-                // The camera path re-traces from the eye, so this fragment's normal is
-                // only valid for the first optical hit. A fragment whose normal faces away
-                // from the camera (a far side of a closed mesh, e.g. inverted winding culled
-                // the near side) must not override the near surface normal: doing so bends
-                // the refracted ray wrongly and traps it in total internal reflection.
-                const Float3 primaryNormal = dot(normal, viewWorld) > 0.0F ? normal : Float3{};
+                // The camera path re-traces from the eye, so this fragment's mapped normal
+                // is only valid if the fragment *is* the traced first hit. Pass the raster
+                // surface distance along the ray; camera_transport uses the fragment normal
+                // (flipped to face the ray, so genuine back faces of double-sided sheets or a
+                // camera inside glass keep their mapped normal) only when the traced hit lies
+                // at that distance. A different surface (e.g. the far side of an inward-wound
+                // closed mesh) falls back to the traced normal instead of bending the
+                // refracted ray into total internal reflection.
                 passes.light = options.sceneLighting->camera_transport(
                     tri.cameraPosition, normalize(subtract(worldPosition, tri.cameraPosition)),
-                    rayLimit, static_cast<std::uint32_t>(index), &effective, primaryNormal);
+                    rayLimit, static_cast<std::uint32_t>(index), &effective, normal,
+                    cameraDistance);
             }
             shaded=beauty(passes.light,base.w);
         }

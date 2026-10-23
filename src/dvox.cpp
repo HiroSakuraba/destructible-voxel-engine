@@ -354,6 +354,13 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
             writer.write_bytes(map->rgba8.data(), map->rgba8.size());
         }
     }
+    if(minor>=6U){
+        if(material.preset.id.size()>128)throw std::runtime_error("preset ID too long");
+        writer.write_u16(static_cast<std::uint16_t>(material.preset.id.size()));
+        writer.write_bytes(material.preset.id.data(),material.preset.id.size());
+        writer.write_u32(material.preset.revision);writer.write_u64(material.preset.overrides);
+    }
+
 }
 
 [[nodiscard]] VoxelMaterialDefinition read_material(ByteReader& reader, std::uint16_t minor) {
@@ -427,6 +434,12 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
             if (!material_normal_map_valid(material)) throw std::runtime_error("invalid DVOX material normal map");
         }
     }
+    if(minor>=6U){
+        const auto length=reader.read_u16();if(length>128)throw std::runtime_error("preset ID too long");
+        material.preset.id=reader.read_string(length);material.preset.revision=reader.read_u32();material.preset.overrides=reader.read_u64();
+        if(material.preset.id.empty() ? material.preset.revision!=0 || material.preset.overrides!=0 : material.preset.revision==0)
+            throw std::runtime_error("invalid preset origin");
+    }
     return material;
 }
 
@@ -446,13 +459,18 @@ bool write_dvox(
     try {
         if (!asset.object.validate()) throw std::runtime_error("cannot serialize invalid VoxelObject");
         if (asset.materials.size() > 256) throw std::runtime_error("DVOX supports at most 256 materials");
+        for(const auto& m:asset.materials){
+            if(m.preset.id.size()>128 || (m.preset.id.empty() ? m.preset.revision!=0 || m.preset.overrides!=0 : m.preset.revision==0))throw std::runtime_error("invalid preset origin");
+            if(!material_normal_map_valid(m))throw std::runtime_error("invalid material normal map");
+        }
 
         if (!valid_voxel_metric(asset.voxelScale)) throw std::runtime_error("invalid DVOX axis scale");
         const bool optics = std::any_of(asset.materials.begin(), asset.materials.end(),
                                         [](const VoxelMaterialDefinition& m) { return material_has_optics(m); });
         const bool normalMaps = std::any_of(asset.materials.begin(), asset.materials.end(),
                                             [](const VoxelMaterialDefinition& m) { return material_has_normal_map(m); });
-        const std::uint16_t versionMinor = normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const bool origins=std::any_of(asset.materials.begin(),asset.materials.end(),[](const auto& m){return !m.preset.id.empty();});
+        const std::uint16_t versionMinor = origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) {
@@ -543,7 +561,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 5) {
+        if (major != kVersionMajor || minor > 6) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

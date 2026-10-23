@@ -7,6 +7,7 @@
 #include "dve/render/live_environment_renderer.hpp"
 #include "dve/rhi/vulkan_device.hpp"
 #include "dve/transform.hpp"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>

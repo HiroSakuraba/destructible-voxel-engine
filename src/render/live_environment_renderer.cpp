@@ -57,6 +57,8 @@ GpuLiveObjectConstants make_object_constants(const LivePolygonDraw& draw,
     if (binding.doubleSided) result.flags |= kLiveObjectFlagDoubleSided;
     if (baseColorTexture) result.flags |= kLiveObjectFlagBaseColorTexturePresent;
     if (opacityTexture) result.flags |= kLiveObjectFlagOpacityTexturePresent;
+    if (binding.mapping.mappingMode == MaterialMappingMode::UV1 || binding.baseColor.texcoord == 1U)
+        result.flags |= kLiveObjectFlagMaskUsesUv1;
     result.alphaCutoff = binding.alphaCutoff;
     result.baseAlpha = material.baseColor.w;
     result.normalScale = binding.normalScale;

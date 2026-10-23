@@ -10,6 +10,7 @@
 #include "dve/render/subsurface_transmission.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -195,7 +196,7 @@ void test_shadow_edge() {
     const auto detailedSoft=render(512);
     float detailDifference=0;
     for(std::size_t i=0;i<soft.hdrColor.size();++i)
-        detailDifference=std::max(detailDifference,std::abs(soft.hdrColor[i].x-detailedSoft.hdrColor[i].x));
+        detailDifference=(std::max)(detailDifference,std::abs(soft.hdrColor[i].x-detailedSoft.hdrColor[i].x));
     check(detailDifference<1e-6F,"neutral surface detail preserves diffused subsurface shadows");
     materials[1].surfaceDetail.pattern=SurfacePattern::NoPattern;
     const Basis b = basis_of(camera, w, h);

@@ -61,6 +61,8 @@ inline constexpr std::uint32_t kLiveObjectFlagAlphaTexturePresent = 1U << 1U;
 inline constexpr std::uint32_t kLiveObjectFlagDoubleSided = 1U << 2U;
 inline constexpr std::uint32_t kLiveObjectFlagBaseColorTexturePresent = 1U << 3U;
 inline constexpr std::uint32_t kLiveObjectFlagOpacityTexturePresent = 1U << 4U;
+// Alpha/opacity masks use UV1 (UV1 mapping mode or base-color texcoord 1); the shadow caster must match.
+inline constexpr std::uint32_t kLiveObjectFlagMaskUsesUv1 = 1U << 5U;
 
 struct LiveEnvironmentRendererResources {
     struct RetiredGroups {

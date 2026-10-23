@@ -4,6 +4,9 @@
 #include "dve/rhi/null_device.hpp"
 
 #include <iostream>
+#include <array>
+#include <span>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -24,10 +27,65 @@ dve::CookedPolygonAsset make_asset() {
     asset.materialBindings[0].opacity.texture = 1U;
     return asset;
 }
+void test_typed_mip_residency() {
+    using namespace dve;using namespace dve::render;
+    rhi::NullDevice device;MaterialResourceResidency residency(device);std::string error;
+    auto asset=make_asset();asset.images.clear();
+    PolygonImage checker{"checker","image/raw",4,4,{}};
+    PolygonImage normals{"normals","image/raw",4,4,{}};
+    for(unsigned y=0;y<4;++y)for(unsigned x=0;x<4;++x){
+        const auto v=static_cast<std::uint8_t>((x+y)%2?255:0);
+        checker.rgba8.insert(checker.rgba8.end(),{v,v,v,v});
+        normals.rgba8.insert(normals.rgba8.end(),{static_cast<std::uint8_t>(x%2?218:37),128,218,255});
+    }
+    PolygonImage odd{"odd","image/raw",5,3,{}};
+    for(unsigned i=0;i<15;++i){auto v=static_cast<std::uint8_t>(i%5==4?255:0);odd.rgba8.insert(odd.rgba8.end(),{v,v,v,255});}
+    asset.images={checker,normals,odd};asset.contentHash=polygon_asset_content_hash(asset);
+    CHECK(residency.retain_asset(asset.contentHash,&error));
+    rhi::TextureViewHandle linear,srgb,normal,normalMap,npot;
+    CHECK(residency.ensure_image(asset,0,linear,&error,MaterialImageInterpretation::LinearData));
+    CHECK(residency.ensure_image(asset,0,srgb,&error,MaterialImageInterpretation::SrgbColor));
+    CHECK(residency.ensure_image(asset,0,normal,&error,MaterialImageInterpretation::Normal));
+    CHECK(linear!=srgb&&linear!=normal&&srgb!=normal);
+    CHECK(residency.ensure_image(asset,1,normalMap,&error,MaterialImageInterpretation::Normal));
+    CHECK(residency.ensure_image(asset,2,npot,&error));
+    const auto read=[&](unsigned image,MaterialImageInterpretation interpretation){
+        const auto* info=residency.find_image(asset.contentHash,image,interpretation);
+        CHECK(info&&info->mipLevels==3);std::array<std::byte,4> value{};
+        CHECK(device.read_texture(info->texture,2,0,value,4,&error));return value;
+    };
+    const auto color=read(0,MaterialImageInterpretation::SrgbColor);
+    const auto data=read(0,MaterialImageInterpretation::LinearData);
+    CHECK(std::to_integer<unsigned>(color[0])==188U);
+    CHECK(std::to_integer<unsigned>(color[3])==128U);
+    CHECK(std::to_integer<unsigned>(data[0])==128U);
+    const auto n=read(1,MaterialImageInterpretation::Normal);
+    CHECK(std::to_integer<unsigned>(n[0])>=127&&std::to_integer<unsigned>(n[0])<=129);
+    CHECK(std::to_integer<unsigned>(n[2])>=254);
+    CHECK(std::to_integer<unsigned>(read(2,MaterialImageInterpretation::LinearData)[0])==51U);
+    CHECK(residency.find_image(asset.contentHash,0,MaterialImageInterpretation::SrgbColor)->format==rhi::TextureFormat::RGBA8Srgb);
+    rhi::TextureViewHandle cached;CHECK(residency.ensure_image(asset,0,cached,&error,MaterialImageInterpretation::SrgbColor));CHECK(cached==srgb);
+    CHECK(residency.stats().imagesUploaded==5&&residency.stats().mipLevelsUploaded==15);
+    CHECK(residency.stats().residentImageBytes==408&&residency.stats().imageBytesUploaded==408);
+    rhi::SamplerHandle sampler;CHECK(residency.ensure_sampler(asset,{},sampler,&error));
+    CHECK(!residency.ensure_sampler(asset,std::numeric_limits<std::uint32_t>::max(),sampler,&error));error.clear();
+    auto edited=asset;edited.images[0].rgba8.assign(64,255);edited.contentHash=polygon_asset_content_hash(edited);
+    CHECK(edited.contentHash!=asset.contentHash&&residency.retain_asset(edited.contentHash,&error));
+    CHECK(residency.ensure_image(edited,0,cached,&error,MaterialImageInterpretation::SrgbColor));CHECK(cached!=srgb);
+    std::array<std::byte,4> fresh{};const auto* info=residency.find_image(edited.contentHash,0,MaterialImageInterpretation::SrgbColor);
+    CHECK(device.read_texture(info->texture,2,0,fresh,4,&error)&&fresh[0]==std::byte{255});
+    CHECK(residency.release_asset(edited.contentHash,&error));
+    CHECK(residency.release_asset(asset.contentHash,&error));
+    CHECK(residency.stats().residentImageBytes==0&&residency.stats().imageResourceCount==0);
+    CHECK(device.statistics().texturesCreated==device.statistics().texturesDestroyed);
+    CHECK(device.statistics().textureViewsCreated==device.statistics().textureViewsDestroyed);
+}
+
 }
 
 int main() {
     try {
+        test_typed_mip_residency();
         dve::rhi::NullDevice device;
         dve::render::MaterialResourceResidency residency(device);
         dve::render::MainMaterialDescriptorTable mainTable(device, residency);

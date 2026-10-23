@@ -68,7 +68,8 @@ struct GpuPolygonMaterialMappingRecord {
 
     float detailNormalScale{1.0F};
     float alphaCutoff{0.5F};
-    std::uint32_t reserved1{};
+    // UV1 bits: metallic/roughness, emissive, opacity, detail normal, detail roughness.
+    std::uint32_t additionalTexcoords{};
     std::uint32_t reserved2{};
 };
 

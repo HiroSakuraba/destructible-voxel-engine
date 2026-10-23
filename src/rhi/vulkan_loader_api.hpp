@@ -190,6 +190,7 @@ inline constexpr ImageCreateFlags ImageCreateCubeCompatibleBit = 0x00000010U;
 inline constexpr ImageAspectFlags ImageAspectColorBit = 0x00000001U;
 inline constexpr ImageAspectFlags ImageAspectDepthBit = 0x00000002U;
 inline constexpr Format FormatR8G8B8A8Unorm = 37;
+inline constexpr Format FormatR8G8B8A8Srgb = 43;
 inline constexpr Format FormatB8G8R8A8Unorm = 44;
 inline constexpr Format FormatR16G16Uint = 81;
 inline constexpr Format FormatR16G16B16A16Sfloat = 97;

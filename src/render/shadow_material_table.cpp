@@ -1,4 +1,6 @@
 #include "dve/render/shadow_material_table.hpp"
+#include "dve/gpu_material_mapping.hpp"
+#include <span>
 
 #include <array>
 #include <utility>
@@ -7,6 +9,18 @@ namespace dve::render {
 namespace {
 void set_error(std::string* error, std::string message) {
     if (error) *error = std::move(message);
+}
+rhi::BufferHandle mapping_buffer(rhi::IDevice& device,const PolygonMaterialBinding& binding,std::string* error) {
+    rhi::BufferDesc desc;desc.bytes=sizeof(GpuPolygonMaterialMappingRecord);
+    desc.usage=rhi::BufferUsage::Storage | rhi::BufferUsage::CopyDestination;
+    desc.memory=rhi::MemoryDomain::Upload;desc.initialState=rhi::ResourceState::ShaderRead;
+    desc.debugName="Masked shadow material mapping";
+    auto buffer=device.create_buffer(desc,error);if(!buffer)return {};
+    const auto record=pack_gpu_polygon_material_mapping(binding);
+    if(!device.write_buffer(buffer,0U,std::as_bytes(std::span(&record,1U)),error)){
+        (void)device.destroy_buffer(buffer,nullptr);return {};
+    }
+    return buffer;
 }
 } // namespace
 
@@ -23,7 +37,7 @@ ShadowMaterialDescriptorTable::~ShadowMaterialDescriptorTable() { clear(); }
 
 bool ShadowMaterialDescriptorTable::valid() const noexcept {
     return residency_ && layout_ && fallbackTexture_ && fallbackView_ &&
-           fallbackSampler_ && fallbackGroup_;
+           fallbackSampler_ && fallbackGroup_ && fallbackMappingBuffer_;
 }
 
 bool ShadowMaterialDescriptorTable::initialize(std::string* error) {
@@ -35,6 +49,7 @@ bool ShadowMaterialDescriptorTable::initialize(std::string* error) {
     layout.bindings = {
         {0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
         {1U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
+        {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
     };
     layout_ = device_.create_bind_group_layout(layout, &local);
     if (!layout_) { set_error(error, local); clear(); return false; }
@@ -67,12 +82,15 @@ bool ShadowMaterialDescriptorTable::initialize(std::string* error) {
     fallbackSampler_ = device_.create_sampler(sampler, &local);
     if (!fallbackSampler_) { set_error(error, local); clear(); return false; }
 
+    fallbackMappingBuffer_=mapping_buffer(device_,{},&local);
+    if(!fallbackMappingBuffer_){set_error(error,local);clear();return false;}
     rhi::BindGroupDesc group;
     group.layout = layout_;
     group.debugName = "Shadow caster fallback material";
     group.entries = {
         {0U, {}, fallbackView_, 0U, 0U, fallbackSampler_},
         {1U, {}, fallbackView_, 0U, 0U, fallbackSampler_},
+        {2U,fallbackMappingBuffer_,{},0U,sizeof(GpuPolygonMaterialMappingRecord),{}},
     };
     fallbackGroup_ = device_.create_bind_group(group, &local);
     if (!fallbackGroup_) { set_error(error, local); clear(); return false; }
@@ -109,7 +127,8 @@ bool ShadowMaterialDescriptorTable::resolve_binding(
         set_error(error, "shadow material texture index is out of range"); return false;
     }
     const auto& texture = asset.textures[*binding.texture];
-    return residency_->ensure_image(asset, texture.imageIndex, view, error) &&
+    return residency_->ensure_image(asset, texture.imageIndex, view, error,
+               binding.colorSpace==PolygonTextureColorSpace::Srgb?MaterialImageInterpretation::SrgbColor:MaterialImageInterpretation::LinearData) &&
            residency_->ensure_sampler(asset, texture.samplerIndex, sampler, error);
 }
 
@@ -130,30 +149,35 @@ bool ShadowMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& as
     rhi::SamplerHandle baseSampler, opacitySampler;
     bool basePresent{}, opacityPresent{};
     if (!resolve_binding(asset, binding.baseColor, baseView, baseSampler, basePresent, error) ||
-        !resolve_binding(asset, binding.opacity, opacityView, opacitySampler, opacityPresent, error)) {
+        !resolve_binding(asset, PolygonTextureBinding{binding.opacity.texture,binding.opacity.texcoord,PolygonTextureColorSpace::Linear}, opacityView, opacitySampler, opacityPresent, error)) {
         rollback_asset_retain(asset.contentHash, retainedNow);
         return false;
     }
+    std::string local;
+    const auto mapping=mapping_buffer(device_,binding,&local);
+    if(!mapping){set_error(error,local);rollback_asset_retain(asset.contentHash,retainedNow);return false;}
     rhi::BindGroupDesc group;
     group.layout = layout_;
     group.debugName = "Shadow caster material descriptor";
     group.entries = {
         {0U, {}, baseView, 0U, 0U, baseSampler},
         {1U, {}, opacityView, 0U, 0U, opacitySampler},
+        {2U,mapping,{},0U,sizeof(GpuPolygonMaterialMappingRecord),{}},
     };
-    std::string local;
     const auto handle = device_.create_bind_group(group, &local);
     if (!handle) {
+        (void)device_.destroy_buffer(mapping,nullptr);
         set_error(error, local);
         rollback_asset_retain(asset.contentHash, retainedNow);
         return false;
     }
     MaterialResource resource;
-    resource.descriptor = {handle, basePresent, opacityPresent, asset.contentHash, materialIndex};
+    resource.descriptor = {handle, basePresent, opacityPresent, asset.contentHash, materialIndex, mapping};
     const auto [it, inserted] = materials_.emplace(key, resource);
     (void)it;
     if (!inserted) {
         (void)device_.destroy_bind_group(handle, nullptr);
+        (void)device_.destroy_buffer(mapping,nullptr);
         rollback_asset_retain(asset.contentHash, retainedNow);
         set_error(error, "shadow material descriptor publication collided");
         return false;
@@ -180,6 +204,7 @@ bool ShadowMaterialDescriptorTable::invalidate_asset(std::uint64_t assetContentH
                 ok = false; if (error && error->empty()) *error = local;
                 local.clear();
             }
+            if(it->second.descriptor.mappingBuffer)(void)device_.destroy_buffer(it->second.descriptor.mappingBuffer,nullptr);
             it = materials_.erase(it);
         } else ++it;
     }
@@ -197,12 +222,15 @@ void ShadowMaterialDescriptorTable::clear() noexcept {
         (void)key;
         if (resource.descriptor.bindGroup)
             (void)device_.destroy_bind_group(resource.descriptor.bindGroup, nullptr);
+        if(resource.descriptor.mappingBuffer)(void)device_.destroy_buffer(resource.descriptor.mappingBuffer,nullptr);
     }
     materials_.clear();
     for (const auto assetContentHash : retainedAssets_)
         (void)residency_->release_asset(assetContentHash, nullptr);
     retainedAssets_.clear();
     if (fallbackGroup_) (void)device_.destroy_bind_group(fallbackGroup_, nullptr);
+    if(fallbackMappingBuffer_)(void)device_.destroy_buffer(fallbackMappingBuffer_,nullptr);
+    fallbackMappingBuffer_={};
     if (fallbackView_) (void)device_.destroy_texture_view(fallbackView_, nullptr);
     if (fallbackSampler_) (void)device_.destroy_sampler(fallbackSampler_, nullptr);
     if (fallbackTexture_) (void)device_.destroy_texture(fallbackTexture_, nullptr);

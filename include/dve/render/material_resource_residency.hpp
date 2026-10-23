@@ -11,11 +11,25 @@
 
 namespace dve::render {
 
+enum class MaterialImageInterpretation : std::uint8_t { LinearData, SrgbColor, Normal };
+
+// Non-owning diagnostic view; valid until this asset is evicted or the pool is cleared.
+struct MaterialResidentImage {
+    rhi::TextureHandle texture;
+    rhi::TextureViewHandle view;
+    std::size_t bytes{};
+    std::uint32_t mipLevels{};
+    rhi::TextureFormat format{rhi::TextureFormat::RGBA8Unorm};
+};
+
 struct MaterialResourceResidencyStats {
     std::uint64_t assetRetainCalls{};
     std::uint64_t assetReleaseCalls{};
     std::uint64_t assetEvictions{};
     std::uint64_t imagesUploaded{};
+    std::uint64_t mipLevelsUploaded{};
+    std::uint64_t imageBytesUploaded{};
+    std::size_t residentImageBytes{};
     std::uint64_t imageCacheHits{};
     std::uint64_t samplersCreated{};
     std::uint64_t samplerCacheHits{};
@@ -64,10 +78,13 @@ public:
     bool retain_asset(std::uint64_t assetContentHash, std::string* error = nullptr);
     bool release_asset(std::uint64_t assetContentHash, std::string* error = nullptr);
     bool ensure_image(const CookedPolygonAsset& asset, std::uint32_t imageIndex,
-                      rhi::TextureViewHandle& view, std::string* error = nullptr);
+                      rhi::TextureViewHandle& view, std::string* error = nullptr,
+                      MaterialImageInterpretation interpretation = MaterialImageInterpretation::LinearData);
     bool ensure_sampler(const CookedPolygonAsset& asset,
                         std::optional<std::uint32_t> samplerIndex,
                         rhi::SamplerHandle& sampler, std::string* error = nullptr);
+    [[nodiscard]] const MaterialResidentImage* find_image(std::uint64_t assetContentHash,
+        std::uint32_t imageIndex, MaterialImageInterpretation interpretation) const noexcept;
     [[nodiscard]] bool is_retained(std::uint64_t assetContentHash) const noexcept;
     [[nodiscard]] std::uint32_t reference_count(std::uint64_t assetContentHash) const noexcept;
     [[nodiscard]] MaterialResourceResidencyStats stats() const noexcept;
@@ -77,6 +94,7 @@ private:
     struct ImageKey {
         std::uint64_t assetHash{};
         std::uint32_t imageIndex{};
+        MaterialImageInterpretation interpretation{};
         friend bool operator==(const ImageKey&, const ImageKey&) = default;
     };
     struct SamplerKey {
@@ -91,16 +109,15 @@ private:
             if constexpr (requires { key.imageIndex; }) index = key.imageIndex;
             else index = key.encodedIndex;
             std::uint64_t value = key.assetHash ^ (static_cast<std::uint64_t>(index) << 32U);
+            if constexpr (requires { key.interpretation; })
+                value ^= static_cast<std::uint64_t>(key.interpretation)*0x9e3779b97f4a7c15ULL;
             value ^= value >> 33U; value *= 0xff51afd7ed558ccdULL;
             value ^= value >> 33U; value *= 0xc4ceb9fe1a85ec53ULL;
             value ^= value >> 33U;
             return static_cast<std::size_t>(value);
         }
     };
-    struct ImageResource {
-        rhi::TextureHandle texture;
-        rhi::TextureViewHandle view;
-    };
+    using ImageResource = MaterialResidentImage;
 
     bool destroy_asset_resources(std::uint64_t assetContentHash,
                                  std::string* error) noexcept;

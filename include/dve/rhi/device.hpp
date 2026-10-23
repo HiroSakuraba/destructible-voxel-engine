@@ -91,7 +91,9 @@ enum class TextureFormat : std::uint8_t {
     BC3RGBAUnorm,
     BC3RGBASrgb,
     BC5RGUnorm,
-    D32Float
+    D32Float,
+    // RGB is decoded before filtering; alpha remains linear.
+    RGBA8Srgb
 };
 
 [[nodiscard]] constexpr bool is_block_compressed(TextureFormat format) noexcept {

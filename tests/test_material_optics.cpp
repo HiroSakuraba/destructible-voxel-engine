@@ -135,6 +135,10 @@ void test_dmesh(const fs::path& dir) {
 
 void test_editor_library(const fs::path& dir) {
     EditorMaterialLibrary library;
+    const auto* clearGlass=library.find(5);
+    check(clearGlass&&clearGlass->definition.transmission==1.0F&&clearGlass->definition.baseColor.w==1.0F&&
+          clearGlass->definition.indexOfRefraction==1.5F&&clearGlass->definition.roughness==0.0F,
+          "default glass is a covered dielectric, not alpha paint");
     VoxelMaterialDefinition water = glass();
     water.name = "Water";
     water.indexOfRefraction = 1.33F;

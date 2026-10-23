@@ -237,6 +237,25 @@ def validate_material_abi(root: Path) -> list[str]:
     if not uv1_flag or f"& {1 << int(uv1_flag.group(1))}U" not in caster_vs or "input.uv1" not in caster_vs:
         errors.append("Masked shadow caster must select UV1 with kLiveObjectFlagMaskUsesUv1 like the material pass")
 
+    # Triplanar normal maps: the CPU reference and the live GPU shader must use the same
+    # whiteout blend, so a neutral map keeps the geometric normal on both (Codex 4364355458).
+    def whiteout_axes(text, normal):
+        compact = re.sub(r"\s+", "", text).replace("std::", "")
+        axes = {}
+        for axis in "xyz":
+            m = re.search(r"w" + axis + r"(?:=float3\(|\{)([^;]*?)(?:\)|\});", compact)
+            if m:
+                axes[axis] = m.group(1).replace(normal + ".", "N.")
+        return axes
+    cpu_whiteout = whiteout_axes((root / "src/render/polygon_renderer.cpp").read_text(encoding="utf-8")
+                                 .split("Float3 triplanar_whiteout_normal(", 1)[-1].split("\n}\n", 1)[0], "n")
+    gpu_whiteout = whiteout_axes((root / "shaders/live_ibl_material_ps.hlsl").read_text(encoding="utf-8")
+                                 .split("float3 SampleLiveNormal(", 1)[-1].split("\n}\n", 1)[0], "sn")
+    expected_whiteout = {"x": "abs(tx.z)*N.x,tx.y+N.y,tx.x+N.z", "y": "ty.x+N.x,abs(ty.z)*N.y,ty.y+N.z",
+                         "z": "tz.x+N.x,tz.y+N.y,abs(tz.z)*N.z"}
+    if cpu_whiteout != expected_whiteout or gpu_whiteout != expected_whiteout:
+        errors.append(f"Triplanar whiteout normal blend drift: CPU={cpu_whiteout}, GPU={gpu_whiteout}")
+
     cpp_values = dict(re.findall(
         r"MaterialShadingModel::(\w+)\)\s*==\s*(\d+)",
         (root / "src/gpu_material_buffer.cpp").read_text(encoding="utf-8")))

@@ -192,6 +192,22 @@ TextureLod normal_triplanar_lod(TextureLod lod,const MaterialMappingSettings& ma
     return lod.transformed(mapping.baseTransform);
 }
 
+// Whiteout (UDN-style) triplanar normal blend. Each projection's tangent-space sample is
+// added to the geometric normal swizzled into that projection's (u, v, axis) frame, then
+// swizzled back to world space and blended by the triplanar weights. A neutral sample
+// ((0.5, 0.5, 1) -> (0, 0, 1)) reproduces the geometric normal exactly on every axis, so a
+// flat normal map leaves shading unchanged. Mirrors SampleLiveNormal in
+// shaders/live_ibl_material_ps.hlsl; keep the two in lockstep (CPU/GPU parity).
+Float3 triplanar_whiteout_normal(Float3 n,Float4 sx,Float4 sy,Float4 sz,float normalScale,Float3 weights) {
+    const auto decode=[&](Float4 s){return Float3{(s.x*2.0F-1.0F)*normalScale,(s.y*2.0F-1.0F)*normalScale,s.z*2.0F-1.0F};};
+    const Float3 tx=decode(sx),ty=decode(sy),tz=decode(sz);
+    // X projection: u = z, v = y.  Y projection: u = x, v = z.  Z projection: u = x, v = y.
+    const Float3 wx{std::abs(tx.z)*n.x,tx.y+n.y,tx.x+n.z};
+    const Float3 wy{ty.x+n.x,std::abs(ty.z)*n.y,ty.y+n.z};
+    const Float3 wz{tz.x+n.x,tz.y+n.y,std::abs(tz.z)*n.z};
+    return normalize(add(add(multiply(wx,weights.x),multiply(wy,weights.y)),multiply(wz,weights.z)));
+}
+
 Float4 sample_triplanar_binding(const CookedPolygonAsset& asset,const PolygonTextureBinding& binding,
                                 const std::vector<PolygonTextureMipChain>& chains,
                                 Float3 position,Float3 normal,const TextureTransform2D& transform,
@@ -301,10 +317,7 @@ MaterialSurfaceSample sample_layer_surface(
                 transform_texture_coordinates(tc.yProjection,binding.mapping.baseTransform),normal_triplanar_lod(lod,binding.mapping,1),stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float4 sz=sample_binding_uv(asset,binding.normal,chains,
                 transform_texture_coordinates(tc.zProjection,binding.mapping.baseTransform),normal_triplanar_lod(lod,binding.mapping,2),stats,{0.5F,0.5F,1.0F,1.0F},true);
-            const Float3 nx=normalize(Float3{(sx.z*2.0F-1.0F)*(geometricNormal.x<0?-1.0F:1.0F),(sx.y*2.0F-1.0F)*binding.normalScale,(sx.x*2.0F-1.0F)*binding.normalScale});
-            const Float3 ny=normalize(Float3{(sy.x*2.0F-1.0F)*binding.normalScale,(sy.z*2.0F-1.0F)*(geometricNormal.y<0?-1.0F:1.0F),(sy.y*2.0F-1.0F)*binding.normalScale});
-            const Float3 nz=normalize(Float3{(sz.x*2.0F-1.0F)*binding.normalScale,(sz.y*2.0F-1.0F)*binding.normalScale,(sz.z*2.0F-1.0F)*(geometricNormal.z<0?-1.0F:1.0F)});
-            const Float3 worldLayer=normalize(add(add(multiply(nx,tc.weights.x),multiply(ny,tc.weights.y)),multiply(nz,tc.weights.z)));
+            const Float3 worldLayer=triplanar_whiteout_normal(geometricNormal,sx,sy,sz,binding.normalScale,tc.weights);
             sample.normal={dot(worldLayer,tangent),dot(worldLayer,bitangent),dot(worldLayer,geometricNormal)};
             stats.triplanarSamples+=3U;
         } else {
@@ -714,10 +727,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                 const Float4 sx=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.xProjection,tri.binding->mapping.baseTransform),normal_triplanar_lod(textureLod,tri.binding->mapping,0),stats,{0.5F,0.5F,1.0F,1.0F},true);
                 const Float4 sy=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.yProjection,tri.binding->mapping.baseTransform),normal_triplanar_lod(textureLod,tri.binding->mapping,1),stats,{0.5F,0.5F,1.0F,1.0F},true);
                 const Float4 sz=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.zProjection,tri.binding->mapping.baseTransform),normal_triplanar_lod(textureLod,tri.binding->mapping,2),stats,{0.5F,0.5F,1.0F,1.0F},true);
-                const Float3 nx=normalize(Float3{(sx.z*2.0F-1.0F)*(normal.x<0?-1.0F:1.0F),(sx.y*2.0F-1.0F)*tri.binding->normalScale,(sx.x*2.0F-1.0F)*tri.binding->normalScale});
-                const Float3 ny=normalize(Float3{(sy.x*2.0F-1.0F)*tri.binding->normalScale,(sy.z*2.0F-1.0F)*(normal.y<0?-1.0F:1.0F),(sy.y*2.0F-1.0F)*tri.binding->normalScale});
-                const Float3 nz=normalize(Float3{(sz.x*2.0F-1.0F)*tri.binding->normalScale,(sz.y*2.0F-1.0F)*tri.binding->normalScale,(sz.z*2.0F-1.0F)*(normal.z<0?-1.0F:1.0F)});
-                normal=normalize(add(add(multiply(nx,tc.weights.x),multiply(ny,tc.weights.y)),multiply(nz,tc.weights.z)));stats.triplanarSamples+=3U;
+                normal=triplanar_whiteout_normal(normal,sx,sy,sz,tri.binding->normalScale,tc.weights);stats.triplanarSamples+=3U;
             }else{
                 const Float4 nm=sample_binding_uv(*tri.asset,tri.binding->normal,chains,mappedUv,textureLod.transformed(tri.binding->mapping.baseTransform),stats,{0.5F,0.5F,1.0F,1.0F},true);
                 const Float3 mapNormal=normalize(Float3{(nm.x*2.0F-1.0F)*tri.binding->normalScale,(nm.y*2.0F-1.0F)*tri.binding->normalScale,nm.z*2.0F-1.0F});

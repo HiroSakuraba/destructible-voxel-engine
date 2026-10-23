@@ -1,5 +1,6 @@
 #include "dve/polygon_asset.hpp"
 #include "dve/master_material.hpp"
+#include "dve/voxel_normal_map.hpp"
 #include "dve/transform.hpp"
 
 #include <algorithm>
@@ -22,7 +23,7 @@ namespace {
 
 constexpr std::array<char, 8> kMagic{'D','V','E','M','E','S','H','1'};
 constexpr std::uint16_t kMajor = 1;
-constexpr std::uint16_t kMinor = 4;
+constexpr std::uint16_t kMinor = 5;
 // Files without material optics are still written as v1.3 (byte-identical to before).
 constexpr std::uint16_t kMinorWithoutOptics = 3;
 constexpr std::uint64_t kFnvOffset = 1469598103934665603ULL;
@@ -100,6 +101,7 @@ void hash_material(std::uint64_t& h, const VoxelMaterialDefinition& m) noexcept 
     for(const auto& l:m.layers){hash_scalar(h,l.sourceMaterial);hash_scalar(h,l.weight);hash_scalar(h,static_cast<std::uint8_t>(l.blendMode));hash_scalar(h,l.enabled);}
     // Optics only when present, so the hashes of every material without them are unchanged.
     if(material_has_optics(m)){hash_scalar(h,m.transmission);hash_scalar(h,m.indexOfRefraction);hash_float3(h,m.attenuationColor);hash_scalar(h,m.attenuationDistanceMeters);}
+    if(!m.preset.id.empty()){hash_string(h,m.preset.id);hash_scalar(h,m.preset.revision);hash_scalar(h,m.preset.overrides);}
     if(material_has_normal_map(m)){hash_scalar(h,m.normalMap->contentHash);hash_scalar(h,m.normalMapTileMeters);hash_scalar(h,m.normalMapStrength);hash_scalar(h,m.normalMapSharpness);}
 }
 
@@ -162,6 +164,12 @@ void write_material(Writer& w,const VoxelMaterialDefinition& m,std::uint16_t min
     w.u8(m.transparent?1U:0U);w.u8(m.structural?1U:0U);w.u8(static_cast<std::uint8_t>(m.layers.size()));w.u8(0);
     for(const auto& l:m.layers){w.u8(l.sourceMaterial);w.u8(static_cast<std::uint8_t>(l.blendMode));w.u8(l.enabled?1U:0U);w.u8(0);w.f32(l.weight);}
     if(minor>=4U){w.f32(m.transmission);w.f32(m.indexOfRefraction);w.f32(m.attenuationColor.x);w.f32(m.attenuationColor.y);w.f32(m.attenuationColor.z);w.f32(m.attenuationDistanceMeters);}
+    if(minor>=5U){
+        w.string(m.preset.id);w.u32(m.preset.revision);w.u64(m.preset.overrides);
+        w.u8(m.normalMap?1:0);
+        if(m.normalMap){w.string(m.normalMap->name);w.u32(m.normalMap->width);w.u32(m.normalMap->height);w.f32(m.normalMapTileMeters);w.f32(m.normalMapStrength);w.f32(m.normalMapSharpness);w.bytes(m.normalMap->rgba8.data(),m.normalMap->rgba8.size());}
+    }
+
 }
 VoxelMaterialDefinition read_material(Reader& r,std::uint16_t minor){
     VoxelMaterialDefinition m;m.name=r.string();m.baseColor={r.f32(),r.f32(),r.f32(),r.f32()};m.emissive={r.f32(),r.f32(),r.f32()};m.metallic=r.f32();m.roughness=r.f32();m.specular=r.f32();
@@ -173,6 +181,15 @@ VoxelMaterialDefinition read_material(Reader& r,std::uint16_t minor){
     if(layers>kMaximumVoxelMaterialLayers)throw std::runtime_error("DMESH material layer limit exceeded");
     for(std::uint8_t i=0;i<layers;++i){VoxelMaterialLayer l;l.sourceMaterial=r.u8();const auto mode=r.u8();l.enabled=r.u8()!=0;(void)r.u8();l.weight=r.f32();if(mode>static_cast<std::uint8_t>(MaterialLayerBlendMode::Additive))throw std::runtime_error("DMESH layer mode invalid");l.blendMode=static_cast<MaterialLayerBlendMode>(mode);m.layers.push_back(l);}
     if(minor>=4U){m.transmission=r.f32();m.indexOfRefraction=r.f32();m.attenuationColor={r.f32(),r.f32(),r.f32()};m.attenuationDistanceMeters=r.f32();if(!material_optics_valid(m))throw std::runtime_error("DMESH material optics invalid");}
+    if(minor>=5U){
+        m.preset.id=r.string();m.preset.revision=r.u32();m.preset.overrides=r.u64();
+        if(m.preset.id.size()>128 || (m.preset.id.empty() ? m.preset.revision!=0 || m.preset.overrides!=0 : m.preset.revision==0))throw std::runtime_error("invalid preset origin");
+        const auto has=r.u8();if(has>1)throw std::runtime_error("invalid normal map flag");
+        if(has){auto name=r.string();const auto width=r.u32(),height=r.u32();m.normalMapTileMeters=r.f32();m.normalMapStrength=r.f32();m.normalMapSharpness=r.f32();
+            if(width==0||height==0||width>kMaximumVoxelNormalMapDimension||height>kMaximumVoxelNormalMapDimension)throw std::runtime_error("invalid normal map dimensions");
+            const auto bytes=std::size_t(width)*height*4;r.require(bytes);std::vector<std::uint8_t> pixels(bytes);r.bytes(pixels.data(),bytes);
+            m.normalMap=make_voxel_normal_map(std::move(name),width,height,std::move(pixels));if(!material_normal_map_valid(m))throw std::runtime_error("invalid normal map");}
+    }
     return m;
 }
 
@@ -366,6 +383,10 @@ PolygonAssetValidationResult validate_polygon_asset(const CookedPolygonAsset& a)
     if(a.vertices.empty()||a.indices.empty()||a.submeshes.empty())return fail(PolygonAssetErrorCode::Empty,"polygon asset has no renderable geometry");
     if(a.vertices.size()>kMaximumFileVertices||a.indices.size()>kMaximumFileIndices||a.materials.empty()||a.materials.size()>kMaximumFileMaterials)return fail(PolygonAssetErrorCode::LimitExceeded,"polygon asset exceeds count limits");
     if(a.materialBindings.size()!=a.materials.size())return fail(PolygonAssetErrorCode::InvalidMaterial,"material binding count does not match material count");
+    for(const auto& m:a.materials){
+        if(!material_normal_map_valid(m))return fail(PolygonAssetErrorCode::InvalidMaterial,"material normal map is invalid");
+        if(m.preset.id.size()>128 || (m.preset.id.empty() ? m.preset.revision!=0 || m.preset.overrides!=0 : m.preset.revision==0))return fail(PolygonAssetErrorCode::InvalidMaterial,"material preset origin is invalid");
+    }
     for(const auto& m:a.materials)if(!material_optics_valid(m))return fail(PolygonAssetErrorCode::InvalidMaterial,"material optics are out of range (transmission 0..1, IOR 1..3)");
     std::string layerError;if(!resolve_voxel_material_layers(a.materials,&layerError))return fail(PolygonAssetErrorCode::InvalidMaterial,"material layers are invalid: "+layerError);
     for(const auto& v:a.vertices)if(!finite(v.position)||!finite(v.normal)||!finite(v.tangent)||!finite(v.texcoord)||!finite(v.texcoord1)||!finite(v.color))return fail(PolygonAssetErrorCode::InvalidVertex,"polygon vertex contains a non-finite value");
@@ -455,7 +476,7 @@ CookedPolygonAsset cook_polygon_scene(const ImportedScene& scene,const PolygonCo
 }
 
 bool write_dmesh(const std::filesystem::path& path,const CookedPolygonAsset& input,std::string* error){
-    try{CookedPolygonAsset a=input;a.contentHash=polygon_asset_content_hash(a);const auto valid=validate_polygon_asset(a);if(!valid)throw std::runtime_error(valid.message);const std::uint16_t minor=std::any_of(a.materials.begin(),a.materials.end(),[](const VoxelMaterialDefinition& m){return material_has_optics(m);})?kMinor:kMinorWithoutOptics;Writer w;w.bytes(kMagic.data(),kMagic.size());w.u16(kMajor);w.u16(minor);w.u64(a.objectId);w.u64(a.contentHash);w.u32(static_cast<std::uint32_t>(a.materials.size()));w.u32(static_cast<std::uint32_t>(a.images.size()));w.u32(static_cast<std::uint32_t>(a.samplers.size()));w.u32(static_cast<std::uint32_t>(a.textures.size()));w.u64(a.vertices.size());w.u64(a.indices.size());w.u32(static_cast<std::uint32_t>(a.submeshes.size()));w.u32(0);
+    try{CookedPolygonAsset a=input;a.contentHash=polygon_asset_content_hash(a);const auto valid=validate_polygon_asset(a);if(!valid)throw std::runtime_error(valid.message);const bool extended=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return !m.preset.id.empty() || material_has_normal_map(m);});const std::uint16_t minor=extended?5:std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_optics(m);})?4:kMinorWithoutOptics;Writer w;w.bytes(kMagic.data(),kMagic.size());w.u16(kMajor);w.u16(minor);w.u64(a.objectId);w.u64(a.contentHash);w.u32(static_cast<std::uint32_t>(a.materials.size()));w.u32(static_cast<std::uint32_t>(a.images.size()));w.u32(static_cast<std::uint32_t>(a.samplers.size()));w.u32(static_cast<std::uint32_t>(a.textures.size()));w.u64(a.vertices.size());w.u64(a.indices.size());w.u32(static_cast<std::uint32_t>(a.submeshes.size()));w.u32(0);
         for(std::size_t i=0;i<a.materials.size();++i){
             write_material(w,a.materials[i],minor);const auto& b=a.materialBindings[i];
             w.u8(b.doubleSided?1U:0U);w.u8(0);w.u16(0);w.f32(b.alphaCutoff);w.f32(b.normalScale);

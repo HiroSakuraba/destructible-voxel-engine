@@ -5,6 +5,12 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -61,6 +67,8 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
         value.foliageColor.z < 0.0F || !finite(value.foliageTransmittance) || value.foliageTransmittance < 0.0F ||
         value.foliageTransmittance > 1.0F || !finite(value.foliageWrap) || value.foliageWrap < 0.0F || value.foliageWrap > 1.0F)
         return fail("foliage values must be finite, non-negative, and normalized where required");
+    if (value.preset.id.size()>128 || (value.preset.id.empty() ? value.preset.revision!=0 || value.preset.overrides!=0 : value.preset.revision==0))
+        return fail("invalid preset origin");
     if (!material_optics_valid(value))
         return fail("transmission must be in [0,1], IOR in [1,3], attenuation colour in [0,1] and distance >= 0");
     if (!material_normal_map_valid(value))
@@ -94,6 +102,11 @@ EditorMaterialLibrary::EditorMaterialLibrary(bool populateDefaults) {
     *this = make_default();
 }
 
+EditorMaterialLibrary EditorMaterialLibrary::make_minimal(){
+    EditorMaterialLibrary result(false);
+    result.entries_.emplace(0,EditorMaterialEntry{0,make_material("Air",{0,0,0,0},0,0,0,1,0,true,false),true});
+    return result;
+}
 EditorMaterialLibrary EditorMaterialLibrary::make_default() {
     EditorMaterialLibrary result(false);
     auto add = [&](MaterialId id, VoxelMaterialDefinition definition) {
@@ -200,19 +213,14 @@ bool EditorMaterialLibrary::validate(std::string* error) const {
     return true;
 }
 
-bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string* error) const {
-    try {
-        std::string validation;
-        if (!validate(&validation)) throw std::runtime_error(validation);
-        std::filesystem::create_directories(path.parent_path().empty() ? "." : path.parent_path());
-        const std::filesystem::path temporary = path.string() + ".tmp";
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        if (!output) throw std::runtime_error("could not open material library for writing");
+bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error)const {
+    if(!validate(error))return false;
         // Version 5 (a normal-map record per material) only when some material has a map, so
         // libraries without maps keep their version 4 bytes.
         const bool normalMaps = std::any_of(entries_.begin(), entries_.end(),
                                             [](const auto& e) { return material_has_normal_map(e.second.definition); });
-        output << "DVE_EDITOR_MATERIALS " << (normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
+        const bool origins = std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return !e.second.definition.preset.id.empty();});
+        output << "DVE_EDITOR_MATERIALS " << (origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -235,7 +243,7 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
-            if (normalMaps) {
+            if (normalMaps || origins) {
                 if (const VoxelNormalMap* map = m.normalMap.get()) {
                     static constexpr char kHex[] = "0123456789abcdef";
                     std::string hex;
@@ -247,13 +255,28 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
                     output << " 0";
                 }
             }
+            if(origins) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
             output << '\n';
         }
+    if(!output){if(error)*error="Failed to write material stream";return false;}return true;
+}
+
+bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string* error) const {
+    try {
+        std::string validation;
+        if (!validate(&validation)) throw std::runtime_error(validation);
+        std::filesystem::create_directories(path.parent_path().empty() ? "." : path.parent_path());
+        const std::filesystem::path temporary = path.string() + ".tmp";
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) throw std::runtime_error("could not open material library for writing");
+        if(!write_stream(output,error)) return false;
         output.close();
         if (!output) throw std::runtime_error("failed to write material library");
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
+#if defined(_WIN32)
+        if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("could not replace material library");
+#else
         std::filesystem::rename(temporary, path);
+#endif
         return true;
     } catch (const std::exception& exception) {
         if (error) *error = exception.what();
@@ -261,15 +284,16 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
     }
 }
 
-std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::filesystem::path& path, std::string* error) {
+std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::filesystem::path& path,std::string* error){
+    std::ifstream input(path,std::ios::binary);if(!input){if(error)*error="could not open material library";return std::nullopt;}return read_stream(input,error);
+}
+std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::istream& input,std::string* error){
     try {
-        std::ifstream input(path, std::ios::binary);
-        if (!input) throw std::runtime_error("could not open material library");
         std::string magic;
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 5) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 6) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -343,6 +367,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::file
                     throw std::runtime_error("invalid material normal map record");
                 }
             }
+            if(version>=6) input >> std::quoted(m.preset.id) >> m.preset.revision >> m.preset.overrides;
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");
             entry.id = static_cast<MaterialId>(rawId);
@@ -403,7 +428,7 @@ std::string editor_material_badge(const VoxelMaterialDefinition& definition) {
 
 std::vector<std::string> editor_material_warnings(const VoxelMaterialDefinition& definition) {
     std::vector<std::string> warnings;
-    if (definition.transparent && definition.blendMode == MaterialBlendMode::Opaque)
+    if (definition.transparent && definition.blendMode == MaterialBlendMode::Opaque && definition.transmission==0)
         warnings.emplace_back("transparent flag is set while blend mode is opaque");
     if (!definition.transparent && definition.blendMode == MaterialBlendMode::Translucent)
         warnings.emplace_back("translucent blend mode is set while transparent flag is disabled");

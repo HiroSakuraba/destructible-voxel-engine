@@ -21,6 +21,7 @@
 #include <vector>
 
 namespace dve::editor {
+void render_material_panel(const IEditorCanvas&,NativeEditorController&);
 EditorColor rgb(unsigned r, unsigned g, unsigned b) noexcept {
     return ((r & 255U) << 16U) | ((g & 255U) << 8U) | (b & 255U);
 }
@@ -5490,6 +5491,7 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
     render_audio_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_audio_event_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_sprite_authoring_panel(painter, controller, panel, panel2, border, text, muted, accent);
+    render_material_panel(painter,controller);
     render_sprite_pixel_art_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_sprite_rig2d_panel(painter, controller, panel, panel2, border, text, muted, accent);
     render_control_rig_panel(painter, controller, panel, panel2, border, text, muted, accent);

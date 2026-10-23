@@ -1,4 +1,5 @@
 #pragma once
+#include "dve/material_preset_origin.hpp"
 
 #include <array>
 #include <cstddef>
@@ -178,6 +179,7 @@ struct VoxelNormalMap {
 };
 
 struct VoxelMaterialDefinition {
+    MaterialPresetOrigin preset;
     std::string name;
     // Linear RGBA. Base-color image texels are decoded from sRGB before multiplication.
     Float4 baseColor{1.0F, 1.0F, 1.0F, 1.0F};

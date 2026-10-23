@@ -1,4 +1,5 @@
 #include "dve/render/scene_lighting.hpp"
+#include "dve/voxel_normal_map.hpp"
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/material_bsdf.hpp"
 #include "dve/render/optical_scene.hpp"
@@ -414,9 +415,19 @@ struct SceneLighting::Impl {
           h->voxelInstance >= 0 &&
           (!h->material || material_is_refractive(*h->material)))
         material = media.back().material;
+      Float3 detailedNormal=h->shadingNormal;
+      if(material.normalMap){
+        if(h->polygonInstance>=0 && std::size_t(h->polygonInstance)<meshes.size()){
+          const auto& pose=meshes[h->polygonInstance].instance->transform;
+          detailedNormal=unit(transform_vector(pose,voxel_normal_map_normal(material,mul(inverse_transform_point(pose,h->position),scale),inverse_transform_vector(pose,detailedNormal))));
+        }else if(h->voxelInstance>=0 && std::size_t(h->voxelInstance)<tracer.instances().size()){
+          const auto& pose=tracer.instances()[h->voxelInstance].transform;
+          detailedNormal=unit(transform_vector(pose,voxel_normal_map_normal(material,mul(inverse_transform_point(pose,h->position),scale),inverse_transform_vector(pose,detailedNormal))));
+        }
+      }
       result = Hit{h->distance,
                    h->position,
-                   h->shadingNormal,
+                   detailedNormal,
                    material,
                    h->geometricNormal,
                    *h,

@@ -1,0 +1,9 @@
+DVE_MATERIAL_PRESET 1 1 1
+"dve.metal.steel" "Steel" "Metal" "Metal Steel"
+"Artistic linear RGB metallic reflectance; no measured complex-IOR fit or anisotropy." "DVE original artistic defaults; not measured material fits" "meters"
+1 0
+0
+DVE_EDITOR_MATERIALS 4
+2
+0 "Air" 0 0 0 0 0 0 0 0 1 0.5 0 2 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 0 0 0 0 0 1 0 1 0 0 1.5 1 1 1 0
+10 "Steel" 0.560000002 0.569999993 0.579999983 1 0 0 0 1 0.239999995 0.5 0 0 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 1000 1 1 0 0 0 1 0 0 0 1.5 1 1 1 0

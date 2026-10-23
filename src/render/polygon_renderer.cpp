@@ -1,5 +1,6 @@
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/render/scene_lighting.hpp"
+#include "dve/voxel_normal_map.hpp"
 
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/ambient_occlusion.hpp"
@@ -805,6 +806,10 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             base=surface.baseColor;base.w=surface.opacity;
             effective.metallic=surface.metallic;effective.roughness=surface.roughness;
             effective.emissive=surface.emissive;normal=surface.normal;
+        }
+        if(effective.normalMap){
+            const float units=options.metersPerUnit>0&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
+            normal=normalize(transform_vector(tri.transform,voxel_normal_map_normal(effective,multiply(objectPosition,units),inverse_transform_vector(tri.transform,normal))));
         }
         if(!options.decals.empty()){
             MaterialSurfaceSample decalSurface;

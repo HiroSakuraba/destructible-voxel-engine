@@ -1,13 +1,14 @@
-cbuffer LiveEnvironmentFrameConstants : register(b8) {
+#include "common/live_bindings.hlsli"
+DVE_LIVE_BIND(0,0) cbuffer LiveEnvironmentFrameConstants : register(b8) {
     float4x4 gViewProjection;
     float4 gEnvironmentParameters;
 };
-cbuffer LiveObjectConstants : register(b9) {
+DVE_LIVE_BIND(0,1) cbuffer LiveObjectConstants : register(b9) {
     float4x4 gObjectToWorld;
     uint4 gObjectIdentityAndFlags;
     float4 gObjectMaterialParameters;
 };
-cbuffer LiveCascadeConstants : register(b10) {
+DVE_LIVE_BIND(0,2) cbuffer LiveCascadeConstants : register(b10) {
     float4 gCascadeCenterRadius;
     float4 gCascadeRight;
     float4 gCascadeUp;
@@ -15,7 +16,7 @@ cbuffer LiveCascadeConstants : register(b10) {
     float4 gCascadeDepthAndIndex;
     float4 gCascadeAtlasScaleOffset;
 };
-struct ShadowVertexInput { float3 position : POSITION; float2 uv : TEXCOORD0; float4 color : COLOR0; };
+struct ShadowVertexInput { DVE_LIVE_LOCATION(0) float3 position : POSITION; DVE_LIVE_LOCATION(3) float2 uv : TEXCOORD0; DVE_LIVE_LOCATION(4) float4 color : COLOR0; DVE_LIVE_LOCATION(5) float2 uv1 : TEXCOORD1; };
 struct ShadowVertexOutput { float4 position : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1; };
 ShadowVertexOutput main(ShadowVertexInput input) {
     ShadowVertexOutput output;
@@ -32,7 +33,8 @@ ShadowVertexOutput main(ShadowVertexInput input) {
                              -dot(relative, gCascadeUp.xyz) / radius,
                              max(depth, 0.0F), // depth pancaking keeps near-extruding casters alive
                              1.0F);
-    output.uv = input.uv;
+    // Match the material pass: masks sampled from UV1 must cut the shadow with UV1 too.
+    output.uv = (gObjectIdentityAndFlags.w & 32U) != 0U ? input.uv1 : input.uv;
     output.alpha = input.color.a * gObjectMaterialParameters.y;
     return output;
 }

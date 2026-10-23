@@ -22,7 +22,7 @@ def expected_kind(binding: dict[str, Any]) -> str:
     kind = binding["kind"]
     if kind == "constant_buffer":
         return "uniform_buffer"
-    if kind in {"structured_buffer", "byte_address_buffer"}:
+    if kind in {"storage_buffer", "structured_buffer", "byte_address_buffer"}:
         return "storage_buffer"
     if kind == "storage_texture":
         return "storage_image"
@@ -59,7 +59,7 @@ def reflected_records(reflection: dict[str, Any]) -> list[dict[str, Any]]:
     for key, kind in categories.items():
         for resource in reflection.get(key, []) or []:
             output.append({
-                "name": resource.get("name", ""),
+                "name": resource.get("name", "").removeprefix("type.") if key == "ubos" else resource.get("name", ""),
                 "kind": kind,
                 "set": int(resource.get("set", 0)),
                 "binding": int(resource.get("binding", -1)),
@@ -68,7 +68,18 @@ def reflected_records(reflection: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def compare(manifest_record: dict[str, Any], reflection: dict[str, Any]) -> dict[str, Any]:
-    expected = [expected_record(binding) for binding in manifest_record.get("bindings", [])]
+    # Explicit backend ABI for live passes: DXC combined image/sampler bindings
+    # intentionally differ from HLSL register numbers. Keep source bindings separate.
+    if "vulkan_bindings" in manifest_record:
+        expected = manifest_record["vulkan_bindings"]
+        allowed={"uniform_buffer","storage_buffer","storage_image","sampled_image","sampler","combined_image_sampler"}
+        for binding in expected:
+            if set(binding)!={"name","kind","set","binding"} or binding["kind"] not in allowed or min(binding["set"],binding["binding"])<0:
+                raise ValueError("invalid explicit Vulkan binding contract")
+        if len({(b["set"],b["binding"]) for b in expected})!=len(expected):
+            raise ValueError("duplicate explicit Vulkan descriptor location")
+    else:
+        expected = [expected_record(binding) for binding in manifest_record.get("bindings", [])]
     actual = reflected_records(reflection)
     failures: list[str] = []
     matched: list[dict[str, Any]] = []
@@ -125,6 +136,16 @@ def self_test() -> int:
     if failed["status"] != "failed":
         print("reflection self-test failed to reject binding drift", file=sys.stderr)
         return 1
+    combined={"name":"combined_fixture","vulkan_bindings":[
+        {"name":"Frame","kind":"uniform_buffer","set":0,"binding":0},
+        {"name":"Albedo","kind":"combined_image_sampler","set":3,"binding":2}]}
+    compiled={"ubos":[{"name":"type.Frame","set":0,"binding":0}],
+              "textures":[{"name":"Albedo","set":3,"binding":2}]}
+    if compare(combined,compiled)["status"]!="passed":
+        print("combined descriptor contract rejected",file=sys.stderr);return 1
+    compiled["textures"][0]["binding"]=3
+    if compare(combined,compiled)["status"]!="failed":
+        print("combined descriptor drift was accepted",file=sys.stderr);return 1
     spaced = {
         "name": "spaced_fixture",
         "bindings": [

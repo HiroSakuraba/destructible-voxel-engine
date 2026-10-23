@@ -57,6 +57,8 @@ GpuLiveObjectConstants make_object_constants(const LivePolygonDraw& draw,
     if (binding.doubleSided) result.flags |= kLiveObjectFlagDoubleSided;
     if (baseColorTexture) result.flags |= kLiveObjectFlagBaseColorTexturePresent;
     if (opacityTexture) result.flags |= kLiveObjectFlagOpacityTexturePresent;
+    if (binding.mapping.mappingMode == MaterialMappingMode::UV1 || binding.baseColor.texcoord == 1U)
+        result.flags |= kLiveObjectFlagMaskUsesUv1;
     result.alphaCutoff = binding.alphaCutoff;
     result.baseAlpha = material.baseColor.w;
     result.normalScale = binding.normalScale;
@@ -227,7 +229,7 @@ bool create_live_environment_renderer(rhi::IDevice& device,
                                       MaterialSamplerPolicy samplerPolicy,
                                       bool emitDebugLabels) {
     if (!lighting.valid() || !shadowAtlas.valid() || !bytecode.valid() ||
-        maximumFrameConstantBytes == 0U || colorFormat == rhi::TextureFormat::D32Float) {
+        maximumFrameConstantBytes < 96U || colorFormat == rhi::TextureFormat::D32Float) {
         set_error(error, "live environment renderer creation arguments are invalid");
         return false;
     }
@@ -322,7 +324,14 @@ bool create_live_environment_renderer(rhi::IDevice& device,
                              std::optional<rhi::TextureFormat> pipelineColor,
                              bool depthTest, bool depthWrite, rhi::CullMode cull) {
         rhi::GraphicsPipelineDesc desc;
+        const bool meshPipeline=name!="Live environment skybox";
         desc.debugName = std::move(name);
+        if(meshPipeline){
+            desc.vertexBuffer=rhi::VertexBufferLayoutDesc{sizeof(GpuPolygonVertex),false};
+            desc.vertexAttributes={{0U,rhi::VertexFormat::Float3,0U},{1U,rhi::VertexFormat::Float3,12U},
+                {2U,rhi::VertexFormat::Float4,24U},{3U,rhi::VertexFormat::Float2,40U},
+                {4U,rhi::VertexFormat::Float4,48U},{5U,rhi::VertexFormat::Float2,64U}};
+        }
         desc.vertexBytecode = vs;
         desc.fragmentBytecode = ps;
         if (ps.empty()) desc.fragmentEntryPoint.clear();
@@ -390,6 +399,8 @@ bool record_live_environment_frame(rhi::IDevice& device,
         renderer.retiredGroups.clear();
     }
     if (!device.write_buffer(renderer.frameConstants, 0U, frame.frameConstants, error)) return false;
+    const std::array<float,4> cameraPosition{frame.cameraWorldPosition.x,frame.cameraWorldPosition.y,frame.cameraWorldPosition.z,1};
+    if(!device.write_buffer(renderer.frameConstants,80U,std::as_bytes(std::span(cameraPosition)),error))return false;
 
     std::vector<PreparedSubmesh> prepared;
     std::unordered_set<DashrLiveSurfaceInstance*> usedDashrInstances;
@@ -452,6 +463,18 @@ bool record_live_environment_frame(rhi::IDevice& device,
                     set_error(error, "DASHR submesh index is selected more than once");
                     return fail();
                 }
+        }
+        // CPU metric recipes accept rigid poses. Reject unapplied instance scale/shear
+        // rather than silently changing the physical grain/bump size on this GPU path.
+        if(std::any_of(draw.asset->materials.begin(),draw.asset->materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::NoPattern;})){
+            const auto& m=draw.objectToWorld;
+            const Float3 x{m[0],m[1],m[2]},y{m[4],m[5],m[6]},z{m[8],m[9],m[10]};
+            const float determinant=x.x*(y.y*z.z-y.z*z.y)-y.x*(x.y*z.z-x.z*z.y)+z.x*(x.y*y.z-x.z*y.y);
+            if(!std::all_of(m.begin(),m.end(),[](float v){return std::isfinite(v);})||!std::isfinite(determinant)||std::abs(m[3])+std::abs(m[7])+std::abs(m[11])+std::abs(m[15]-1)>1e-4F||std::abs(dot(x,x)-1)>1e-4F||std::abs(dot(y,y)-1)>1e-4F||
+               std::abs(dot(z,z)-1)>1e-4F||std::abs(dot(x,y))>1e-4F||std::abs(dot(x,z))>1e-4F||std::abs(dot(y,z))>1e-4F||determinant<.9999F){
+                set_error(error,"GPU surface detail requires a rigid pose; bake object scale into mesh positions first");
+                return fail();
+            }
         }
         for (std::uint32_t submeshIndex = 0U; submeshIndex < draw.asset->submeshes.size();
              ++submeshIndex) {

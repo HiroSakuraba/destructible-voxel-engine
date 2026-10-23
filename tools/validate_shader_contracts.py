@@ -221,6 +221,46 @@ def validate_material_abi(root: Path) -> list[str]:
     if cpp_fields != hlsl_fields:
         errors.append(f"GpuMaterialRecord/MaterialRecord field drift: C++={cpp_fields}, HLSL={hlsl_fields}")
 
+    surface_cpp = (root / "include/dve/gpu_material_surface_detail.hpp").read_text(encoding="utf-8")
+    surface_hlsl = (root / "shaders/common/material_surface_detail.hlsli").read_text(encoding="utf-8")
+    surface_cpp = re.search(r"struct GpuMaterialSurfaceDetail \{(.*?)^\};", surface_cpp, re.S | re.M).group(1)
+    surface_hlsl = surface_hlsl.split("struct SurfaceDetailRecord {", 1)[1].split("};", 1)[0]
+    surface_fields = [("uint" if t == "std::uint32_t" else t, n)
+                      for t, n in re.findall(r"\b(float|std::uint32_t)\s+(\w+)\s*(?:\{[^;]*\})?\s*;", surface_cpp)]
+    surface_shader_fields = re.findall(r"\b(float|uint)\s+(\w+)\s*;", surface_hlsl)
+    if surface_fields != surface_shader_fields or len(surface_fields) != 16:
+        errors.append(f"Surface detail ABI drift: C++={surface_fields}, HLSL={surface_shader_fields}")
+
+    live_header = (root / "include/dve/render/live_environment_renderer.hpp").read_text(encoding="utf-8")
+    uv1_flag = re.search(r"kLiveObjectFlagMaskUsesUv1\s*=\s*1U\s*<<\s*(\d+)U", live_header)
+    caster_vs = (root / "shaders/live_csm_caster_vs.hlsl").read_text(encoding="utf-8")
+    if not uv1_flag or f"& {1 << int(uv1_flag.group(1))}U" not in caster_vs or "input.uv1" not in caster_vs:
+        errors.append("Masked shadow caster must select UV1 with kLiveObjectFlagMaskUsesUv1 like the material pass")
+
+    # Triplanar normal maps: the CPU reference and the live GPU shader must use the same
+    # whiteout blend, so a neutral map keeps the geometric normal on both (Codex 4364355458).
+    def whiteout_axes(text, normal):
+        compact = re.sub(r"\s+", "", text).replace("std::", "")
+        axes = {}
+        for axis in "xyz":
+            m = re.search(r"w" + axis + r"(?:=float3\(|\{)([^;]*?)(?:\)|\});", compact)
+            if m:
+                axes[axis] = m.group(1).replace(normal + ".", "N.")
+        return axes
+    # Shared by the polygon renderer and voxel normal maps (both must call it).
+    cpu_whiteout = whiteout_axes((root / "include/dve/triplanar_normal.hpp").read_text(encoding="utf-8")
+                                 .split("triplanar_whiteout_normal(", 1)[-1].split("\n}\n", 1)[0], "n")
+    for user in ("src/render/polygon_renderer.cpp", "src/voxel_normal_map.cpp"):
+        text = (root / user).read_text(encoding="utf-8")
+        if '#include "dve/triplanar_normal.hpp"' not in text or "triplanar_whiteout_normal(" not in text:
+            errors.append(f"{user} must use the shared triplanar_whiteout_normal blend")
+    gpu_whiteout = whiteout_axes((root / "shaders/live_ibl_material_ps.hlsl").read_text(encoding="utf-8")
+                                 .split("float3 SampleLiveNormal(", 1)[-1].split("\n}\n", 1)[0], "sn")
+    expected_whiteout = {"x": "abs(tx.z)*N.x,tx.y+N.y,tx.x+N.z", "y": "ty.x+N.x,abs(ty.z)*N.y,ty.y+N.z",
+                         "z": "tz.x+N.x,tz.y+N.y,abs(tz.z)*N.z"}
+    if cpu_whiteout != expected_whiteout or gpu_whiteout != expected_whiteout:
+        errors.append(f"Triplanar whiteout normal blend drift: CPU={cpu_whiteout}, GPU={gpu_whiteout}")
+
     cpp_values = dict(re.findall(
         r"MaterialShadingModel::(\w+)\)\s*==\s*(\d+)",
         (root / "src/gpu_material_buffer.cpp").read_text(encoding="utf-8")))

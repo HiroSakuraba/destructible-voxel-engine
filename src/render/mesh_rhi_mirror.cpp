@@ -23,7 +23,7 @@ std::vector<GpuPolygonVertex> pack_vertices(const CookedPolygonAsset& asset) {
                           v.normal.x,v.normal.y,v.normal.z,
                           v.tangent.x,v.tangent.y,v.tangent.z,v.tangent.w,
                           v.texcoord.x,v.texcoord.y,
-                          v.color.x,v.color.y,v.color.z,v.color.w});
+                          v.color.x,v.color.y,v.color.z,v.color.w,v.texcoord1.x,v.texcoord1.y});
     }
     return result;
 }

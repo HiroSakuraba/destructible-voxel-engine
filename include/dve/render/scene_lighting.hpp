@@ -15,6 +15,14 @@ public:
   ~SceneLighting();
   SceneLighting(const SceneLighting &) = delete;
   SceneLighting &operator=(const SceneLighting &) = delete;
+  // Camera-visible dielectric / delta-metal transport, including both medium
+  // interfaces. Intended for primary refractive surfaces; returns
+  // compositing-ready light passes.
+  [[nodiscard]] LightPasses
+  camera_transport(Float3 origin, Float3 direction, float maximumDistance,
+                   std::uint32_t seed,
+                   const VoxelMaterialDefinition *primaryMaterial = nullptr,
+                   Float3 primaryNormal = {}) const;
   [[nodiscard]] float sun_visibility(Float3 point, Float3 normal,
                                      std::uint32_t seed) const;
   [[nodiscard]] ShadingLobes direct(Float3 point, Float3 normal, Float3 view,
@@ -41,6 +49,14 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
+// Camera transport activates for refractive materials and smooth full metals
+// even with zero GI bounces, so authored glass cannot silently fall back to
+// opaque diffuse shading.
+[[nodiscard]] bool material_uses_camera_transport(
+    const VoxelMaterialDefinition &material) noexcept;
+[[nodiscard]] bool scene_uses_camera_transport(
+    std::span<const VoxelReferenceInstance> voxels,
+    std::span<const PolygonRenderInstance> polygons) noexcept;
 [[nodiscard]] float candle_light_multiplier(const SceneLight &light,
                                             double timeSeconds) noexcept;
 // Finite-radius separable HDR bloom, applied once before exposure/tonemap.

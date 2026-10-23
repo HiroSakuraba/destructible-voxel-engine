@@ -25,6 +25,38 @@ Float3 unit3(Float3 v, Float3 fallback = {0.0F, 1.0F, 0.0F}) noexcept {
     const float l = std::sqrt(dot3(v, v));
     return l > 1.0e-20F ? scale3(v, 1.0F / l) : fallback;
 }
+// DDA accumulates float tMax over potentially hundreds of empty cells. Recover
+// the actual plane of the reported voxel face before spawning optical rays;
+// otherwise a small optical offset can start behind that face and self-occlude.
+void refine_voxel_hit(OpticalHit &h, const VoxelReferenceInstance &instance, Float3 origin, Float3 direction,
+                      bool exiting = false) {
+    const auto localOrigin = world_to_voxel(instance.transform, instance.spacing, origin);
+    const auto localDirection =
+        divide_components(inverse_transform_vector(instance.transform, unit3(direction)), instance.spacing);
+    const auto n = inverse_transform_vector(instance.transform, h.geometricNormal);
+    const int axis = std::abs(n.x) > 0.9F ? 0 : std::abs(n.y) > 0.9F ? 1 : std::abs(n.z) > 0.9F ? 2 : -1;
+    if (axis < 0)
+        return;
+    const float sign = axis == 0 ? n.x : axis == 1 ? n.y : n.z;
+    const int cell = axis == 0 ? h.voxel.x : axis == 1 ? h.voxel.y : h.voxel.z;
+    const double boundary = double(cell) + (exiting ? (sign < 0 ? 1 : 0) : (sign > 0 ? 1 : 0));
+    const double o = axis == 0 ? localOrigin.x : axis == 1 ? localOrigin.y : localOrigin.z;
+    const double d = axis == 0 ? localDirection.x : axis == 1 ? localDirection.y : localDirection.z;
+    if (d == 0)
+        return;
+    const double distance = (boundary - o) / d;
+    if (distance < 0 || !std::isfinite(distance))
+        return;
+    auto p = add3(localOrigin, scale3(localDirection, static_cast<float>(distance)));
+    if (axis == 0)
+        p.x = static_cast<float>(boundary);
+    else if (axis == 1)
+        p.y = static_cast<float>(boundary);
+    else
+        p.z = static_cast<float>(boundary);
+    h.position = voxel_to_world(instance.transform, instance.spacing, p);
+    h.distance = static_cast<float>(distance);
+}
 void grow(Float3& lo, Float3& hi, Float3 p) noexcept {
     lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
     hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
@@ -108,6 +140,8 @@ std::optional<OpticalHit> OpticalScene::trace(Float3 origin, Float3 direction, f
         h.voxelInstance = static_cast<std::int32_t>(hit->instance);
         h.voxel = hit->objectHit.voxel;
         h.materialId = hit->objectHit.material;
+        if (hit->objectHit.normal != Int3{})
+            refine_voxel_hit(h, voxels_[hit->instance], origin, direction);
         best = h;
     }
     if (auto polygon = trace_polygons(origin, direction, best ? best->distance : maximumDistance);
@@ -153,6 +187,8 @@ std::optional<OpticalHit> OpticalScene::trace_polygons(Float3 origin, Float3 dir
         h.material = hit->materialIndex < asset.materials.size() ? &asset.materials[hit->materialIndex] : nullptr;
         h.objectId = p.instance->objectId;
         h.polygonInstance = static_cast<std::int32_t>(i);
+        h.firstIndex = hit->firstIndex;
+        h.materialIndex = hit->materialIndex;
         best = h;
     }
     return best;
@@ -213,6 +249,7 @@ std::optional<OpticalHit> OpticalScene::trace_inside_voxels(const OpticalHit& in
         h.voxelInstance = static_cast<std::int32_t>(k);
         h.voxel = cell;
         h.materialId = beyond;
+        refine_voxel_hit(h,instance,origin,direction,true);
         boundary = h;
     }
     // Anything else (another instance, a polygon) in the medium before its boundary.
@@ -232,6 +269,8 @@ std::optional<OpticalHit> OpticalScene::trace_inside_voxels(const OpticalHit& in
         h.voxelInstance = static_cast<std::int32_t>(j);
         h.voxel = hit->objectHit.voxel;
         h.materialId = hit->objectHit.material;
+        if (hit->objectHit.normal != Int3{})
+            refine_voxel_hit(h, voxels_[j], origin, direction);
         other = h;
     }
     if (auto polygon = trace_polygons(origin, direction, other ? other->distance : limit);

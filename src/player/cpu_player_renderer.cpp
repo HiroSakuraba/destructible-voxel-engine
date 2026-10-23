@@ -127,7 +127,7 @@ public:
           return false;
         clear_background(environment);
         std::unique_ptr<render::SceneLighting> sceneLighting;
-        if (!environment.lights.empty() || environment.pathTraceBounces > 0)
+        if (!environment.lights.empty() || environment.pathTraceBounces > 0 || render::scene_uses_camera_transport(voxels_,polygons_))
           sceneLighting = std::make_unique<render::SceneLighting>(
               voxels_, polygons_, environment, voxelSize);
         render::ReferenceVoxelRenderer voxelRenderer;

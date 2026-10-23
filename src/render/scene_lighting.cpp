@@ -1,5 +1,7 @@
 #include "dve/render/scene_lighting.hpp"
 #include "dve/polygon_bvh.hpp"
+#include "dve/render/material_bsdf.hpp"
+#include "dve/render/optical_scene.hpp"
 #include "dve/render/radiance_cascades_spwi.hpp"
 #include <algorithm>
 #include <cmath>
@@ -43,14 +45,7 @@ struct Rng {
     return float(v >> 8) * 0x1p-24F;
   }
 };
-Float3 cosine(Float3 n, Rng &r) {
-  const float z = std::sqrt(r.next()), a = 2 * pi * r.next();
-  const float q = std::sqrt((std::max)(0.F, 1 - z * z));
-  const auto t =
-      unit(cross(std::abs(n.y) < .9F ? Float3{0, 1, 0} : Float3{1, 0, 0}, n));
-  return sum3(mul(n, z),
-              sum3(mul(t, q * std::cos(a)), mul(cross(n, t), q * std::sin(a))));
-}
+
 float mis(float a, float b) {
   const double x = a, y = b;
   return float(x * x / (x * x + y * y));
@@ -66,6 +61,10 @@ struct Hit {
   float distance{};
   Float3 p{}, n{};
   VoxelMaterialDefinition material;
+  Float3 geometricNormal{};
+  OpticalHit optical{};
+  bool geometric{};
+  float alphaCutoff{.5F};
 };
 std::optional<float> intersect(const Emitter &e, Float3 o, Float3 d) {
   if (e.area <= 0)
@@ -88,6 +87,24 @@ std::optional<float> intersect(const Emitter &e, Float3 o, Float3 d) {
   return inside ? std::optional<float>(t) : std::nullopt;
 }
 } // namespace
+bool material_uses_camera_transport(const VoxelMaterialDefinition &m) noexcept {
+  return m.transmission > 0 || (m.metallic >= 1 && m.roughness <= .001F);
+}
+bool scene_uses_camera_transport(
+    std::span<const VoxelReferenceInstance> voxels,
+    std::span<const PolygonRenderInstance> polygons) noexcept {
+  for (const auto &v : voxels)
+    if (v.visible && v.object &&
+        std::any_of(v.materials.begin(), v.materials.end(),
+                    material_uses_camera_transport))
+      return true;
+  for (const auto &p : polygons)
+    if (p.visible && p.asset &&
+        std::any_of(p.asset->materials.begin(), p.asset->materials.end(),
+                    material_uses_camera_transport))
+      return true;
+  return false;
+}
 float candle_light_multiplier(const SceneLight &light, double time) noexcept {
   if (light.kind != SceneLightKind::Candle || !std::isfinite(time))
     return 1;
@@ -106,8 +123,17 @@ struct SceneLighting::Impl {
   struct Mesh {
     const PolygonRenderInstance *instance;
     std::shared_ptr<PolygonBvh> bvh;
+    std::vector<PolygonTextureMipChain> opacityMips;
   };
   std::vector<Mesh> meshes;
+  std::vector<OpticalPolygonInstance> opticalInstances;
+  std::unique_ptr<OpticalScene> opticalScene;
+  struct Medium {
+    VoxelMaterialDefinition material;
+    OpticalHit entry;
+    bool coverageOnly{};
+  };
+  using Media = std::vector<Medium>;
   std::vector<Emitter> emitters;
   std::size_t authoredCount{};
   double power{};
@@ -175,7 +201,14 @@ struct SceneLighting::Impl {
         if (!bvh->build(*i.asset))
           continue;
       }
-      meshes.push_back({&i, bvh});
+      Mesh mesh{&i, bvh, {}};
+      if (std::any_of(i.asset->materials.begin(), i.asset->materials.end(),
+                      [](const auto &m) {
+                        return m.blendMode != MaterialBlendMode::Opaque;
+                      }))
+        for (const auto &image : i.asset->images)
+          mesh.opacityMips.push_back(generate_texture_mips(image));
+      meshes.push_back(std::move(mesh));
       for (const auto &sm : i.asset->submeshes) {
         if (sm.materialIndex >= i.asset->materials.size())
           continue;
@@ -184,9 +217,9 @@ struct SceneLighting::Impl {
         if (peak(le) <= 0 || material.blendMode != MaterialBlendMode::Opaque)
           continue;
         for (std::size_t k = sm.firstIndex;
-             k + 2 <
-             (std::min<std::size_t>)(i.asset->indices.size(),
-                                   std::size_t(sm.firstIndex) + sm.indexCount);
+             k + 2 < (std::min<std::size_t>)(i.asset->indices.size(),
+                                             std::size_t(sm.firstIndex) +
+                                                 sm.indexCount);
              k += 3) {
           const auto ia = i.asset->indices[k], ib = i.asset->indices[k + 1],
                      ic = i.asset->indices[k + 2];
@@ -211,8 +244,9 @@ struct SceneLighting::Impl {
           // material.emissive.
           light.radiance =
               material.shadingModel == MaterialShadingModel::Emissive
-                  ? sum3(product(base(material), {i.tint.x, i.tint.y, i.tint.z}),
-                         material.emissive)
+                  ? sum3(
+                        product(base(material), {i.tint.x, i.tint.y, i.tint.z}),
+                        material.emissive)
                   : material.emissive;
           light.twoSided = true;
           append(light);
@@ -276,6 +310,13 @@ struct SceneLighting::Impl {
             }
       }
     }
+
+    for (const auto &mesh : meshes) {
+      const auto &i = *mesh.instance;
+      opticalInstances.push_back({i.objectId, i.asset, i.transform, true});
+    }
+    opticalScene =
+        std::make_unique<OpticalScene>(voxels, opticalInstances, scale);
   }
   std::optional<Hit> trace(Float3 p, Float3 d, float max) const {
     std::optional<Hit> best;
@@ -317,6 +358,235 @@ struct SceneLighting::Impl {
     }
     return best;
   }
+  Float3 spawn(Float3 p, Float3 geometricNormal, Float3 direction) const {
+    const float numerical =
+        (std::max)(1e-5F,
+                   (std::max)({std::abs(p.x), std::abs(p.y), std::abs(p.z)}) *
+                       2e-7F);
+    const float epsilon =
+        (std::max)(numerical, (std::min)(bias, 1e-4F / scale));
+    return sum3(
+        p, mul(geometricNormal, dp_sign(geometricNormal, direction) * epsilon));
+  }
+  static float dp_sign(Float3 n, Float3 d) {
+    return dot3(n, d) < 0 ? -1.F : 1.F;
+  }
+  std::optional<Hit> transport_trace(Float3 p, Float3 d, float limit,
+                                     const Media &media) const {
+    const auto h =
+        !media.empty() && media.back().entry.voxelInstance >= 0
+            ? opticalScene->trace_inside_voxels(media.back().entry, p, d, limit)
+            : opticalScene->trace(p, d, limit);
+    std::optional<Hit> result;
+    if (h) {
+      VoxelMaterialDefinition material;
+      if (h->material)
+        material = *h->material;
+      else if (!media.empty())
+        material = media.back().material;
+      float cutoff = .5F;
+      if (h->polygonInstance >= 0 &&
+          std::size_t(h->polygonInstance) < meshes.size()) {
+        const auto &mesh = meshes[h->polygonInstance];
+        const auto &i = *mesh.instance;
+        if (material.blendMode != MaterialBlendMode::Opaque) {
+          PolygonBvhHit coverage;
+          coverage.position = inverse_transform_point(i.transform, h->position);
+          coverage.normal =
+              inverse_transform_vector(i.transform, h->shadingNormal);
+          coverage.firstIndex = h->firstIndex;
+          coverage.materialIndex = h->materialIndex;
+          material.baseColor.w =
+              polygon_hit_opacity(*i.asset, coverage, h->position,
+                                  h->shadingNormal, mesh.opacityMips, 1);
+        }
+        if (h->materialIndex < i.asset->materialBindings.size())
+          cutoff = i.asset->materialBindings[h->materialIndex].alphaCutoff;
+        material.baseColor.x *= i.tint.x;
+        material.baseColor.y *= i.tint.y;
+        material.baseColor.z *= i.tint.z;
+        material.baseColor.w *= i.tint.w;
+      }
+      // An exiting voxel boundary reports what is beyond. Its interface is the
+      // current medium.
+      if (!media.empty() && !media.back().coverageOnly &&
+          h->voxelInstance == media.back().entry.voxelInstance &&
+          h->voxelInstance >= 0 &&
+          (!h->material || material_is_refractive(*h->material)))
+        material = media.back().material;
+      result = Hit{h->distance,
+                   h->position,
+                   h->shadingNormal,
+                   material,
+                   h->geometricNormal,
+                   *h,
+                   true,
+                   cutoff};
+      limit = h->distance;
+    }
+    for (std::size_t k = 0; k < authoredCount; ++k) {
+      const auto &e = emitters[k];
+      if (auto t = intersect(e, p, d); t && *t < limit) {
+        VoxelMaterialDefinition m;
+        m.baseColor = {0, 0, 0, 1};
+        m.shadingModel = MaterialShadingModel::Emissive;
+        m.emissive = e.twoSided || dot3(e.n, d) < 0 ? e.radiance : Float3{};
+        result = Hit{*t, sum3(p, mul(d, *t)), e.n, m, e.n, {}, false};
+        limit = *t;
+      }
+    }
+    return result;
+  }
+  Media initial_media(Float3 position) const {
+    Media result;
+    const auto instances = tracer.instances();
+    for (std::size_t k = 0; k < instances.size(); ++k) {
+      const auto &i = instances[k];
+      if (!i.visible || !i.object)
+        continue;
+      auto p = inverse_transform_point(i.transform, position);
+      p = {p.x / i.spacing.x, p.y / i.spacing.y, p.z / i.spacing.z};
+      if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+          (std::max)({std::abs(p.x), std::abs(p.y), std::abs(p.z)}) > 2e9F)
+        continue;
+      Int3 cell{int(std::floor(p.x)), int(std::floor(p.y)),
+                int(std::floor(p.z))};
+      auto id = i.object->material_at(cell);
+      if (id == kAirMaterial || id >= i.materials.size() ||
+          !material_is_refractive(i.materials[id]))
+        continue;
+      OpticalHit entry;
+      entry.voxelInstance = static_cast<int>(k);
+      entry.materialId = id;
+      entry.objectId = i.objectId;
+      entry.voxel = cell;
+      entry.material = &i.materials[id];
+      result.push_back({i.materials[id], entry});
+    }
+    return result;
+  }
+  // Coverage-transparent voxel cells are skipped as one contiguous material
+  // region. Pushing a temporary record lets the exact DDA find its far
+  // boundary, without repeatedly intersecting the occupied entry cell at
+  // distance zero.
+  bool end_coverage(std::optional<Hit> &hit, Media &media, Float3 &origin,
+                    Float3 direction) const {
+    if (!hit || media.empty() || !media.back().coverageOnly ||
+        hit->optical.voxelInstance != media.back().entry.voxelInstance)
+      return false;
+    const bool air = hit->optical.material == nullptr;
+    media.pop_back();
+    if (air) {
+      origin = spawn(hit->p, hit->geometricNormal, direction);
+      return true;
+    }
+    hit->geometricNormal = mul(hit->geometricNormal, -1);
+    hit->n = mul(hit->n, -1);
+    return false;
+  }
+  struct Interface {
+    float incident{1}, transmitted{1};
+    bool exiting{}, swap{}, inferredInside{};
+  };
+  Interface interface(const Hit &hit, Float3 direction,
+                      const Media &media) const {
+    Interface i;
+    i.incident = media.empty() ? 1 : media.back().material.indexOfRefraction;
+    const auto &h = hit.optical;
+    const bool same =
+        !media.empty() &&
+        ((h.voxelInstance >= 0 &&
+          h.voxelInstance == media.back().entry.voxelInstance) ||
+         (h.polygonInstance >= 0 &&
+          h.polygonInstance == media.back().entry.polygonInstance));
+    if (same) {
+      i.exiting = true;
+      i.transmitted = media.size() > 1
+                          ? media[media.size() - 2].material.indexOfRefraction
+                          : 1;
+      if (h.voxelInstance >= 0 && h.material &&
+          material_is_refractive(*h.material)) {
+        i.swap = true;
+        i.transmitted = h.material->indexOfRefraction;
+      }
+    } else if (material_is_refractive(hit.material)) {
+      if (media.empty() && dot3(direction, hit.geometricNormal) > 0) {
+        i.incident = hit.material.indexOfRefraction;
+        i.transmitted = 1;
+        i.exiting = true;
+        i.inferredInside = true;
+      } else
+        i.transmitted = hit.material.indexOfRefraction;
+    }
+    return i;
+  }
+  void cross_interface(const Hit &hit, const Interface &i, Media &media) const {
+    if (i.exiting) {
+      if (!media.empty())
+        media.pop_back();
+      if (i.swap && hit.optical.material)
+        media.push_back({*hit.optical.material, hit.optical});
+    } else
+      media.push_back({hit.material, hit.optical});
+  }
+  // Straight shadow transmission is a visibility approximation: camera paths
+  // refract; caustics still require the separate photon solver. Closed volumes
+  // receive both Fresnel factors and Beer-Lambert absorption, rather than
+  // looking like opaque blockers.
+  Float3 shadow_transmission(Float3 origin, Float3 d, float limit) const {
+    Float3 weight{1, 1, 1};
+    Media media = initial_media(origin);
+    float remaining = limit;
+    for (unsigned layer = 0; layer < 64; ++layer) {
+      auto hit = transport_trace(origin, d, remaining, media);
+      if (!hit)
+        return !media.empty() && !media.back().coverageOnly
+                   ? product(weight, medium_transmittance(media.back().material,
+                                                          remaining, scale))
+                   : weight;
+      const float distance = hit->distance;
+      if (end_coverage(hit, media, origin, d)) {
+        remaining -= distance;
+        if (remaining <= 0)
+          return weight;
+        continue;
+      }
+      const auto &m = hit->material;
+      if (!media.empty() && !media.back().coverageOnly)
+        weight = product(weight, medium_transmittance(media.back().material,
+                                                      hit->distance, scale));
+      if (!material_is_refractive(m)) {
+        const float opacity = std::clamp(m.baseColor.w, 0.F, 1.F);
+        if (m.blendMode == MaterialBlendMode::Masked &&
+            opacity < hit->alphaCutoff) {
+        } else if (m.blendMode == MaterialBlendMode::Translucent)
+          weight = mul(weight, 1 - opacity);
+        else
+          return {};
+        if (hit->optical.voxelInstance >= 0 &&
+            dot3(hit->geometricNormal, d) < 0)
+          media.push_back({m, hit->optical, true});
+      } else {
+        const auto i = interface(*hit, d, media);
+        const float f = dielectric_fresnel(std::abs(dot3(unit(hit->n), d)),
+                                           i.incident, i.transmitted);
+        weight = mul(weight, (1 - f) * m.transmission);
+        if (i.inferredInside)
+          weight =
+              product(weight, medium_transmittance(m, hit->distance, scale));
+        cross_interface(*hit, i, media);
+      }
+      if (peak(weight) < 1e-6F)
+        return {};
+      const auto next = spawn(hit->p, hit->geometricNormal, d);
+      remaining -=
+          hit->distance + std::sqrt(dot3(sub(next, hit->p), sub(next, hit->p)));
+      if (remaining <= 0)
+        return weight;
+      origin = next;
+    }
+    return {};
+  }
   float light_pdf(Float3 from, const Hit &h) const {
     const auto delta = sub(h.p, from);
     const float d2 = dot3(delta, delta);
@@ -326,8 +596,8 @@ struct SceneLighting::Impl {
       if (e.area <= 0)
         continue;
       if (auto t = intersect(e, from, dir);
-          t &&
-          std::abs(*t - h.distance) < (std::max)(1e-4F, h.distance * 1e-4F)) {
+          t && std::abs(*t - std::sqrt(d2)) <
+                   (std::max)(1e-4F, std::sqrt(d2) * 1e-4F)) {
         const float c = dot3(e.n, mul(dir, -1));
         if (e.twoSided ? std::abs(c) > 1e-7F : c > 1e-7F)
           pdf += e.weight / power * d2 / (e.area * std::abs(c));
@@ -336,12 +606,12 @@ struct SceneLighting::Impl {
     return float(pdf);
   }
   ShadingLobes direct(Float3 p, Float3 n, Float3 view,
-                      const VoxelMaterialDefinition &m, Rng &rng,
-                      bool useMis) const {
+                      const VoxelMaterialDefinition &m, Rng &rng, bool useMis,
+                      float etaI = 1, float etaT = 1.5F) const {
     ShadingLobes out;
     if (power <= 0)
       return out;
-    const auto origin = sum3(p, mul(n, bias));
+    const auto origin = p;
     const unsigned count = env.localLightSamples;
     for (unsigned sample = 0; sample < count; ++sample) {
       const double r = rng.next() * power;
@@ -374,8 +644,7 @@ struct SceneLighting::Impl {
         continue;
       const float distance = std::sqrt(d2);
       const auto d = mul(delta, 1 / distance);
-      if (dot3(n, d) <= 0)
-        continue;
+
       const float c = dot3(e.n, mul(d, -1));
       if (e.area > 0 && (!e.twoSided && c <= 0))
         continue;
@@ -384,9 +653,10 @@ struct SceneLighting::Impl {
         if (std::abs(c) < 1e-7F)
           continue;
         pdf *= d2 / (e.area * std::abs(c));
-        factor = useMis
-                     ? mis(float(count) * pdf, (std::max)(0.F, dot3(n, d)) / pi)
-                     : 1.F;
+        factor =
+            useMis ? mis(float(count) * pdf,
+                         evaluate_material_bsdf(m, n, view, d, etaI, etaT).pdf)
+                   : 1.F;
       }
       if (e.kind == Emitter::Spot) {
         const float angle = dot3(e.n, mul(d, -1));
@@ -396,18 +666,20 @@ struct SceneLighting::Impl {
                 : (angle >= e.outer ? 1.F : 0.F);
         factor *= t * t * (3 - 2 * t);
       }
-      if (factor <= 0 ||
-          trace(origin, d,
-                (std::max)(0.F, distance - (std::max)(1e-5F, distance * 1e-5F))))
+      if (factor <= 0)
         continue;
-      const auto li = mul(e.radiance, factor / pdf / float(count));
-      const auto l =
-          m.shadingModel == MaterialShadingModel::ClearCoat
-              ? shade_clear_coat_direct(n, view, d, li, base(m), m.metallic,
-                                        m.roughness, m.specular, m.clearCoat,
-                                        m.clearCoatRoughness)
-              : shade_direct_light(n, view, d, li, base(m), m.metallic,
-                                   m.roughness, m.specular);
+      const auto shadowOrigin = spawn(origin, n, d);
+      const auto shadowDelta = sub(q, shadowOrigin);
+      const float shadowDistance = std::sqrt(dot3(shadowDelta, shadowDelta));
+      const auto visibility = shadow_transmission(
+          shadowOrigin, unit(shadowDelta),
+          (std::max)(0.F, shadowDistance -
+                              (std::max)(1e-5F, shadowDistance * 1e-5F)));
+      const auto li =
+          product(mul(e.radiance, factor / pdf / float(count)), visibility);
+      auto l = evaluate_material_bsdf(m, n, view, d, etaI, etaT).value;
+      l.diffuse = product(l.diffuse, li);
+      l.specular = product(l.specular, li);
       out.diffuse = sum3(out.diffuse, l.diffuse);
       out.specular = sum3(out.specular, l.specular);
     }
@@ -504,91 +776,182 @@ struct SceneLighting::Impl {
     }
     return result;
   }
+  struct PathValue {
+    Float3 radiance{};
+    bool firstTransmission{}, firstSpecular{};
+  };
+  PathValue path(Float3 origin, Float3 direction, float rayMaximum, Rng &rng,
+                 unsigned depthLimit, float previousPdf = 0,
+                 bool previousDelta = true, bool suppressFirstEmitter = false,
+                 const VoxelMaterialDefinition *primaryOverride = nullptr,
+                 Float3 primaryNormal = {}) const {
+    PathValue out;
+    Float3 throughput{1, 1, 1};
+    Media media = initial_media(origin);
+    Float3 previousPoint = origin;
+    float etaScale = 1;
+    unsigned depth = 0, skips = 0;
+    while (depth <= depthLimit && skips < 128) {
+      auto hit = transport_trace(origin, direction, rayMaximum, media);
+      if (hit && depth == 0 && skips == 0 && primaryOverride) {
+        hit->material = *primaryOverride;
+        if (dot3(primaryNormal, primaryNormal) > 0)
+          hit->n = unit(primaryNormal);
+      }
+      if (!hit) {
+        out.radiance = sum3(
+            out.radiance,
+            product(throughput, spwi::environment_radiance(env, direction)));
+        break;
+      }
+      if (end_coverage(hit, media, origin, direction)) {
+        ++skips;
+        continue;
+      }
+      const auto &m = hit->material;
+      if (!media.empty() && !media.back().coverageOnly)
+        throughput =
+            product(throughput, medium_transmittance(media.back().material,
+                                                     hit->distance, scale));
+      const float opacity = std::clamp(m.baseColor.w, 0.F, 1.F);
+      const bool skip = (m.blendMode == MaterialBlendMode::Masked &&
+                         opacity < hit->alphaCutoff) ||
+                        (m.blendMode == MaterialBlendMode::Translucent &&
+                         rng.next() >= opacity);
+      if (skip) {
+        if (hit->optical.voxelInstance >= 0 &&
+            dot3(hit->geometricNormal, direction) < 0)
+          media.push_back({m, hit->optical, true});
+        origin = spawn(hit->p, hit->geometricNormal, direction);
+        ++skips;
+        continue;
+      }
+      auto normal = unit(hit->n), geometric = unit(hit->geometricNormal);
+      if (dot3(normal, direction) > 0)
+        normal = mul(normal, -1);
+      const auto info = interface(*hit, direction, media);
+      if (info.inferredInside)
+        throughput =
+            product(throughput, medium_transmittance(m, hit->distance, scale));
+      auto le =
+          m.shadingModel == MaterialShadingModel::Unlit ? base(m) : emission(m);
+      const float lightPdf = light_pdf(previousPoint, *hit);
+      if (lightPdf > 0 && !previousDelta)
+        le = mul(le, (depth == 0 && suppressFirstEmitter)
+                         ? 0
+                         : mis(previousPdf,
+                               float(env.localLightSamples) * lightPdf));
+      out.radiance = sum3(out.radiance, product(throughput, le));
+      if (m.shadingModel == MaterialShadingModel::Emissive ||
+          m.shadingModel == MaterialShadingModel::Unlit)
+        break;
+      const auto view = mul(direction, -1);
+      const bool continuing = depth < depthLimit;
+      const auto local = direct(hit->p, normal, view, m, rng, continuing,
+                                info.incident, info.transmitted);
+      auto lit = sum3(local.diffuse, local.specular);
+      if (env.sunIntensity > 0) {
+        const auto sun = unit(env.sunDirection);
+        const auto value =
+            evaluate_material_bsdf(m, normal, view, sun, info.incident,
+                                   info.transmitted)
+                .value;
+        const auto visibility =
+            shadow_transmission(spawn(hit->p, geometric, sun), sun,
+                                env.shadowMaxDistanceMeters / scale);
+        lit =
+            sum3(lit, product(sum3(value.diffuse, value.specular),
+                              product(mul(env.sunColor, env.sunIntensity * pi),
+                                      visibility)));
+      }
+      out.radiance = sum3(out.radiance, product(throughput, lit));
+      if (!continuing)
+        break;
+      const auto sampled =
+          sample_material_bsdf(m, normal, view, info.incident, info.transmitted,
+                               rng.next(), rng.next(), rng.next(), rng.next());
+      if (!sampled.valid)
+        break;
+      // Shading normals must not send a ray to the wrong geometric side.
+      const float sideBefore = dot3(geometric, view),
+                  sideAfter = dot3(geometric, sampled.direction);
+      if (sampled.transmitted ? sideBefore * sideAfter >= 0
+                              : sideBefore * sideAfter <= 0)
+        break;
+      if (depth == 0) {
+        out.firstTransmission = sampled.transmitted;
+        out.firstSpecular = sampled.delta || peak(sampled.diffuseShare) < .5F;
+      }
+      throughput = product(throughput, sampled.weight);
+      if (sampled.transmitted) {
+        cross_interface(*hit, info, media);
+        etaScale *= info.transmitted * info.transmitted /
+                    (info.incident * info.incident);
+      }
+      previousPoint = hit->p;
+      previousPdf = sampled.pdf;
+      previousDelta = sampled.delta;
+      direction = sampled.direction;
+      origin = spawn(hit->p, geometric, direction);
+      rayMaximum = maximum;
+      ++depth;
+      if (env.pathTraceRoulette && depth >= 3) {
+        const float survival =
+            std::clamp(peak(throughput) * etaScale, .05F, .95F);
+        if (rng.next() >= survival)
+          break;
+        throughput = mul(throughput, 1 / survival);
+      }
+      if (peak(throughput) <= 0)
+        break;
+    }
+    return out;
+  }
   ShadingLobes indirect(Float3 p, Float3 n, Float3 view,
                         const VoxelMaterialDefinition &primary,
                         Rng &rng) const {
     ShadingLobes sum;
     for (unsigned sample = 0; sample < env.pathTraceSamples; ++sample) {
-      Float3 diffuseShare{};
-      Float3 throughput{1, 1, 1}, result{};
-      auto m = primary;
-      auto position = p, normal = n, v = view;
-      for (unsigned depth = 0; depth < env.pathTraceBounces; ++depth) {
-        const auto d = cosine(normal, rng);
-        const float cosTheta = (std::max)(0.F, dot3(normal, d));
-        if (cosTheta <= 0)
-          break;
-        // Cosine sampling covers the entire hemisphere: diffuse and rough
-        // GGX/coat are unbiased, though glossy paths can have high variance.
-        const auto lobes =
-            m.shadingModel == MaterialShadingModel::ClearCoat
-                ? shade_clear_coat_direct(normal, v, d, {1, 1, 1}, base(m),
-                                          m.metallic, m.roughness, m.specular,
-                                          m.clearCoat, m.clearCoatRoughness)
-                : shade_direct_light(normal, v, d, {1, 1, 1}, base(m),
-                                     m.metallic, m.roughness, m.specular);
-        if (depth == 0) {
-          const auto total = sum3(lobes.diffuse, lobes.specular);
-          diffuseShare = {total.x > 0 ? lobes.diffuse.x / total.x : 0,
-                          total.y > 0 ? lobes.diffuse.y / total.y : 0,
-                          total.z > 0 ? lobes.diffuse.z / total.z : 0};
-        }
-        throughput =
-            product(throughput,
-                    mul(sum3(lobes.diffuse, lobes.specular), pi / cosTheta));
-        if (peak(throughput) <= 0)
-          break;
-        const auto origin = sum3(position, mul(normal, bias));
-        const auto hit = trace(origin, d, maximum);
-        if (!hit) {
-          result = sum3(
-              result, product(throughput, spwi::environment_radiance(env, d)));
-          break;
-        }
-        auto le = emission(hit->material);
-        const float lp = light_pdf(origin, *hit);
-        if (lp > 0)
-          le = depth == 0 ? Float3{}
-                          : mul(le, mis(cosTheta / pi,
-                                        float(env.localLightSamples) * lp));
-        result = sum3(result, product(throughput, le));
-        if (hit->material.shadingModel == MaterialShadingModel::Emissive ||
-            hit->material.shadingModel == MaterialShadingModel::Unlit)
-          break;
-        m = hit->material;
-        position = hit->p;
-        normal = unit(hit->n);
-        if (dot3(normal, d) > 0)
-          normal = mul(normal, -1);
-        v = mul(d, -1);
-        // At the terminal vertex there is no competing continuation sample.
-        const bool continuation = depth + 1 < env.pathTraceBounces;
-        const auto local = direct(position, normal, v, m, rng, continuation);
-        Float3 lighting = sum3(local.diffuse, local.specular);
-        const auto sun = unit(env.sunDirection);
-        if (env.sunIntensity > 0 && dot3(normal, sun) > 0) {
-          const auto l = shade_direct_light(
-              normal, v, sun,
-              mul(env.sunColor, env.sunIntensity * pi *
-                                    sun_visibility(position, normal, rng)),
-              base(m), m.metallic, m.roughness, m.specular);
-          lighting = sum3(lighting, sum3(l.diffuse, l.specular));
-        }
-        result = sum3(result, product(throughput, lighting));
-        if (env.pathTraceRoulette && depth >= 2) {
-          const float survival = std::clamp(peak(throughput), .05F, .95F);
-          if (rng.next() >= survival)
-            break;
-          throughput = mul(throughput, 1 / survival);
-        }
-      }
-      const auto diffuse = product(result, diffuseShare);
+      const auto sampled =
+          sample_material_bsdf(primary, n, view, 1, primary.indexOfRefraction,
+                               rng.next(), rng.next(), rng.next(), rng.next());
+      if (!sampled.valid)
+        continue;
+      auto value = path(spawn(p, n, sampled.direction), sampled.direction,
+                        maximum, rng, env.pathTraceBounces - 1, sampled.pdf,
+                        sampled.delta, !sampled.delta)
+                       .radiance;
+      value = product(value, sampled.weight);
+      const auto diffuse = product(value, sampled.diffuseShare);
       sum.diffuse = sum3(sum.diffuse, diffuse);
-      sum.specular = sum3(sum.specular, sub(result, diffuse));
+      sum.specular = sum3(sum.specular, sub(value, diffuse));
     }
     const float gain =
         env.globalIlluminationIntensity / float(env.pathTraceSamples);
     return {mul(sum.diffuse, gain), mul(sum.specular, gain)};
+  }
+  LightPasses camera(Float3 origin, Float3 direction, float maximumDistance,
+                     Rng &rng, const VoxelMaterialDefinition *primaryMaterial,
+                     Float3 primaryNormal) const {
+    LightPasses out;
+    const unsigned depth =
+        env.pathTraceBounces > 0 ? (std::max)(env.pathTraceBounces, 4U) : 12U;
+    for (unsigned sample = 0; sample < env.pathTraceSamples; ++sample) {
+      const auto value =
+          path(origin, unit(direction), maximumDistance, rng, depth, 0, true,
+               false, primaryMaterial, primaryNormal);
+      if (value.firstTransmission)
+        out.transmission = sum3(out.transmission, value.radiance);
+      else if (value.firstSpecular)
+        out.indirectSpecular = sum3(out.indirectSpecular, value.radiance);
+      else
+        out.directDiffuse = sum3(out.directDiffuse, value.radiance);
+    }
+    const float gain = 1 / float(env.pathTraceSamples);
+    out.transmission = mul(out.transmission, gain);
+    out.indirectSpecular = mul(out.indirectSpecular, gain);
+    out.directDiffuse = mul(out.directDiffuse, gain);
+    return out;
   }
 };
 SceneLighting::SceneLighting(std::span<const VoxelReferenceInstance> v,
@@ -598,6 +961,12 @@ SceneLighting::SceneLighting(std::span<const VoxelReferenceInstance> v,
 SceneLighting::~SceneLighting() = default;
 std::size_t SceneLighting::emitter_count() const noexcept {
   return impl_->emitters.size();
+}
+LightPasses SceneLighting::camera_transport(
+    Float3 origin, Float3 direction, float limit, std::uint32_t seed,
+    const VoxelMaterialDefinition *material, Float3 normal) const {
+  Rng rng{seed ^ 0x245fa213U};
+  return impl_->camera(origin, direction, limit, rng, material, normal);
 }
 float SceneLighting::sun_visibility(Float3 p, Float3 n,
                                     std::uint32_t seed) const {

@@ -106,6 +106,14 @@ EditorMaterialLibrary EditorMaterialLibrary::make_default() {
     result.entries_[3].definition.flammability = 0.8F;
     add(4, make_material("Steel", {0.38F,0.43F,0.48F,1}, 7850.0F, 14.0F, 12.0F, 0.35F, 0.9F));
     add(5, make_material("Glass", {0.34F,0.70F,0.82F,0.38F}, 2500.0F, 1.2F, 0.6F, 0.08F, 0.0F, true, false));
+    // Alpha is coverage, not solid glass transmission. Use a fully covered dielectric
+    // and let the renderer evaluate both Fresnel interfaces and volume absorption.
+    auto& glass = result.entries_[5].definition;
+    glass.baseColor = {1,1,1,1};
+    glass.blendMode = MaterialBlendMode::Opaque;
+    glass.transmission = 1;
+    glass.indexOfRefraction = 1.5F;
+    glass.roughness = 0;
     add(6, make_material("Plaster", {0.82F,0.81F,0.76F,1}, 900.0F, 1.1F, 1.0F, 0.92F, 0.0F));
     add(7, make_material("Soil", {0.28F,0.19F,0.10F,1}, 1450.0F, 0.8F, 0.7F, 1.0F, 0.0F, false, false));
     add(8, make_material("Rubber", {0.05F,0.06F,0.07F,1}, 1100.0F, 1.5F, 3.0F, 0.96F, 0.0F, false, false));

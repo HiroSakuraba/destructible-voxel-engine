@@ -1,3 +1,4 @@
+#include "dve/voxel_metric.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 #include "dve/render/scene_lighting.hpp"
 
@@ -668,7 +669,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     std::unique_ptr<SceneLighting> ownedLighting;
     const SceneLighting *lighting = sceneLighting;
     if (!lighting &&
-        (!environment.lights.empty() || environment.pathTraceBounces > 0)) {
+        (!environment.lights.empty() || environment.pathTraceBounces > 0 || scene_uses_camera_transport(instances,occlusionPolygons.empty()?sunOccluders:occlusionPolygons))) {
       ownedLighting = std::make_unique<SceneLighting>(
           instances,
           occlusionPolygons.empty() ? sunOccluders : occlusionPolygons,
@@ -715,7 +716,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                 if (auto occluder = make_occluder(polygon)) extras.aoOccluders.push_back(std::move(*occluder));
     }
     if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades &&
-        environment.pathTraceBounces == 0 && environment.lights.empty())
+        environment.pathTraceBounces == 0 && environment.lights.empty() && !scene_uses_camera_transport(instances,occlusionPolygons.empty()?sunOccluders:occlusionPolygons))
         return render_radiance_cascades(radianceCascades, tracer, instances, camera, environment,
                                         distances, target, extras, subsurfaceDiffusionSamples);
     const auto diffuses = [&](const VoxelMaterialDefinition& m, const VoxelLightingDistances& d) {
@@ -779,8 +780,23 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     apply_voxel_normal_map(instance, material, environment, hit->worldPosition, diffuses(material, distances),
                                            distances.metersPerVoxel, surface);
                     LightPasses light = shade_voxel(material, environment, surface);
-                    apply_scene_lighting(light, lighting, hit->worldPosition,
+                    Float3 lightingPoint = hit->worldPosition;
+                    if (lighting) {
+                        auto p = world_to_voxel(instance.transform, instance.spacing, lightingPoint);
+                        const auto face = hit->objectHit.normal, cell = hit->objectHit.voxel;
+                        if (face.x) p.x = float(cell.x + (face.x > 0));
+                        if (face.y) p.y = float(cell.y + (face.y > 0));
+                        if (face.z) p.z = float(cell.z + (face.z > 0));
+                        lightingPoint = voxel_to_world(instance.transform, instance.spacing, p);
+                    }
+                    apply_scene_lighting(light, lighting, lightingPoint,
                                          material, surface, environment, seed);
+                    if (lighting && material_uses_camera_transport(material)) {
+                        const float rayLimit = camera.farPlane * hit->objectHit.distance / (std::max)(cameraZ, 1e-6F);
+                        light = lighting->camera_transport(camera.position,
+                            normalize(subtract(hit->worldPosition, camera.position)), rayLimit,
+                            seed, &material, surface.normal);
+                    }
                     target.hdrColor[index] = beauty(light, material.baseColor.w);
                     target.depth[index] = normalizedDepth;
                     write_voxel_passes(target, index, material, environment, surface, light, cameraZ, distances.metersPerVoxel);
@@ -877,7 +893,7 @@ HybridReferenceRenderStats render_hybrid_reference(
     std::uint32_t voxelThreadCount) {
     HybridReferenceRenderStats stats;
     std::unique_ptr<SceneLighting> lighting;
-    if (!environment.lights.empty() || environment.pathTraceBounces > 0)
+    if (!environment.lights.empty() || environment.pathTraceBounces > 0 || scene_uses_camera_transport(voxels,polygons))
       lighting = std::make_unique<SceneLighting>(voxels, polygons, environment,
                                                  metersPerVoxel);
     ReferenceVoxelRenderer voxelRenderer;

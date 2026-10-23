@@ -48,6 +48,7 @@ struct OpticalHit {
     std::int32_t polygonInstance{-1};
     Int3 voxel{};                     // the cell hit (voxel instances)
     MaterialId materialId{};          // voxel instances
+    std::uint32_t firstIndex{}, materialIndex{}; // polygon hit for material/coverage sampling
 };
 
 // Exact unpolarised dielectric Fresnel reflectance for light going from index n1 into n2 at

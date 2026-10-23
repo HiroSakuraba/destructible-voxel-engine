@@ -874,6 +874,13 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                 passes.light.indirectSpecular = bounce.specular;
               }
             }
+            if (options.sceneLighting && material_uses_camera_transport(effective)) {
+                const float cameraZ = w0*tri.v[0].cameraZ + w1*tri.v[1].cameraZ + w2*tri.v[2].cameraZ;
+                const float rayLimit = tri.farPlane * cameraDistance / (std::max)(1e-6F, cameraZ);
+                passes.light = options.sceneLighting->camera_transport(
+                    tri.cameraPosition, normalize(subtract(worldPosition, tri.cameraPosition)),
+                    rayLimit, static_cast<std::uint32_t>(index), &effective, normal);
+            }
             shaded=beauty(passes.light,base.w);
         }
         if(target.passes.enabled){
@@ -881,7 +888,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             const float cameraZ=w0*tri.v[0].cameraZ+w1*tri.v[1].cameraZ+w2*tri.v[2].cameraZ;
             passes.depthMeters=cameraZ*(1+reliefOffset/std::max(cameraDistance,1e-6F))*resolve_meters_per_voxel(options.metersPerUnit);
         }
-        if(!debugView&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
+        if(!debugView&&!material_uses_camera_transport(effective)&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
             const float alpha=std::clamp(shaded.w,0.0F,1.0F);const Float4 old=target.hdrColor[index];
             target.hdrColor[index]={shaded.x*alpha+old.x*(1-alpha),shaded.y*alpha+old.y*(1-alpha),shaded.z*alpha+old.z*(1-alpha),1};
             target.write_passes(index,passes,alpha,false);
@@ -1334,7 +1341,7 @@ PolygonRenderStats ReferencePolygonRenderer::render(
     PolygonRenderOptions frameOptions = options;
     std::unique_ptr<SceneLighting> ownedLighting;
     if (!frameOptions.sceneLighting &&
-        (!environment.lights.empty() || environment.pathTraceBounces > 0)) {
+        (!environment.lights.empty() || environment.pathTraceBounces > 0 || scene_uses_camera_transport({},instances))) {
       ownedLighting = std::make_unique<SceneLighting>(
           std::span<const VoxelReferenceInstance>{}, instances, environment,
           options.metersPerUnit);

@@ -726,6 +726,7 @@ if(DVE_BUILD_RHI)
         src/render/ambient_occlusion.cpp
         src/render/surface_shading.cpp
         src/render/scene_lighting.cpp
+        src/render/material_bsdf.cpp
         src/render/ambient_occlusion_gpu.cpp
         src/render/live_environment_renderer.cpp
         src/render/material_resource_residency.cpp
@@ -3181,6 +3182,14 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_ambient_occlusion_tests tests/test_ambient_occlusion.cpp)
     target_link_libraries(dve_ambient_occlusion_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_ambient_occlusion_tests COMMAND dve_ambient_occlusion_tests)
+    add_executable(dve_cornell_material_preview apps/cornell_material_preview.cpp)
+    target_link_libraries(dve_cornell_material_preview PRIVATE dve::render_bridge)
+    add_test(NAME dve_cornell_material_smoke COMMAND dve_cornell_material_preview
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/cornell_glass_lights.scene"
+        "${CMAKE_CURRENT_BINARY_DIR}/cornell_glass_material.ppm" 32 2 glass)
+    add_executable(dve_material_transport_tests tests/test_material_transport.cpp)
+    target_link_libraries(dve_material_transport_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_material_transport_tests COMMAND dve_material_transport_tests)
     add_executable(dve_scene_lighting_tests tests/test_scene_lighting.cpp)
     target_link_libraries(dve_scene_lighting_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_scene_lighting_tests COMMAND dve_scene_lighting_tests)

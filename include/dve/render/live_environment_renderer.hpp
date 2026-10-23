@@ -32,6 +32,8 @@ struct LiveEnvironmentShaderBytecode {
 };
 
 struct alignas(16) GpuLiveObjectConstants {
+    // Live shading coordinates are metres. Surface recipes require a rigid pose; bake
+    // authored scale into vertex positions so physical detail remains consistent.
     std::array<float, 16> objectToWorld{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     std::uint32_t objectIdLow{};
     std::uint32_t objectIdHigh{};
@@ -98,6 +100,8 @@ struct LivePolygonDraw {
     const MeshRhiMirror* mirror{};
     const CookedPolygonAsset* asset{};
     std::uint32_t instanceCount{1U};
+    // Live shading coordinates are metres. Surface recipes require a rigid pose; bake
+    // authored scale into vertex positions so physical detail remains consistent.
     std::array<float, 16> objectToWorld{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool castsShadow{true};
     bool staticShadowCaster{false};
@@ -113,6 +117,8 @@ struct LiveEnvironmentFrameDesc {
     rhi::TextureHandle depthTarget;
     std::uint32_t width{};
     std::uint32_t height{};
+    // View-projection at byte 0; environment rotation/intensity/exposure/max-mip at 64.
+    // The renderer writes cameraWorldPosition as a float4 at byte 80 (96-byte capacity).
     std::span<const std::byte> frameConstants;
     std::span<const LivePolygonDraw> polygonDraws;
     // Required when any submesh selects DASHR. The current scene integration

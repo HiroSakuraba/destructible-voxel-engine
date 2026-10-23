@@ -1,7 +1,8 @@
+#include "common/live_bindings.hlsli"
 #include "common/environment_ibl.hlsli"
-TextureCube<float4> gSkyEnvironment : register(t18);
-SamplerState gEnvironmentSampler : register(s1);
-cbuffer LiveEnvironmentFrameConstants : register(b8) {
+DVE_LIVE_IMAGE(0,1) TextureCube<float4> gSkyEnvironment : register(t18);
+DVE_LIVE_IMAGE(0,1) SamplerState gEnvironmentSampler : register(s1);
+DVE_LIVE_BIND(0,0) cbuffer LiveEnvironmentFrameConstants : register(b8) {
     float4x4 gInverseViewProjection;
     float4 gEnvironmentParameters;
 };

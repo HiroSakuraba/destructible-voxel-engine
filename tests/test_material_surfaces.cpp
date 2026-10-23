@@ -110,10 +110,17 @@ void reflected_and_refracted_maps(){
     const auto bounce=reflected.camera_transport({0,0,2},{0,0,-1},20,23).sum();
     check(bounce.y>.5F&&bounce.x<1e-5F,"reflected continuation samples green emissive texture");
 }
+void voxel_uv_assets(){
+    CookedVoxelAsset asset(99);asset.materials.resize(2);asset.object.set_voxel({0,0,0},1);
+    auto& detail=asset.materials[1].surfaceDetail;detail.pattern=SurfacePattern::Wood;detail.space=SurfaceDetailSpace::UV0;
+    std::string error;check(!write_dvox(dir/"bad-uv.dvox",asset,{},&error),"cooker rejects UV recipe on voxel assets");
+    detail.space=SurfaceDetailSpace::UV1;check(!write_dvox(dir/"bad-uv.dvox",asset,{},&error),"cooker rejects secondary UV recipe on voxel assets");
+    detail.space=SurfaceDetailSpace::World;check(write_dvox(dir/"world.dvox",asset,{},&error),error);
+}
 void assignment(){
     EditorDocument d("UV refusal");EditorObject object(1,"Voxel");object.voxels->set_voxel({0,0,0},1);d.add_object(std::move(object));NativeEditorController n{EditorWorkspace(std::move(d))};n.workspace().select_object(1);n.open_material_panel();n.material_panel_select("dve.wood.raw");
     n.material_panel().draft.surfaceDetail.space=SurfaceDetailSpace::UV0;const auto count=n.workspace().commands().size();check(!n.apply_material_panel()&&n.workspace().commands().size()==count,"UV detail on voxels refuses atomically");
     n.material_panel().draft.surfaceDetail.space=SurfaceDetailSpace::Object;check(n.apply_material_panel(),n.material_panel().message);const auto& o=*n.workspace().document().find_object(1);const auto slot=o.voxels->material_at({0,0,0});check(o.voxelMaterials.at(slot).surfaceDetail.pattern==SurfacePattern::Wood,"voxel assignment retains recipe");n.close_material_panel();
 }
 }
-int main(){try{dir=std::filesystem::temp_directory_path()/"dve-material-surfaces";std::filesystem::remove_all(dir);std::filesystem::create_directories(dir);gradients_and_filtering();metric_mapping();persistence();ray_hit_maps();reflected_and_refracted_maps();assignment();std::filesystem::remove_all(dir);std::cout<<"Surface maps, filtering, persistence and ray-hit checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{dir=std::filesystem::temp_directory_path()/"dve-material-surfaces";std::filesystem::remove_all(dir);std::filesystem::create_directories(dir);gradients_and_filtering();metric_mapping();persistence();ray_hit_maps();reflected_and_refracted_maps();voxel_uv_assets();assignment();std::filesystem::remove_all(dir);std::cout<<"Surface maps, filtering, persistence and ray-hit checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

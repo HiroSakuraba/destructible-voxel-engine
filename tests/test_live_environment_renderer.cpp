@@ -74,6 +74,14 @@ int main() {
         auto residencyStats=renderer.materialResidency->stats(); CHECK(residencyStats.imagesUploaded==2U); CHECK(residencyStats.samplersCreated==1U); CHECK(residencyStats.retainedAssetCount==1U); CHECK(residencyStats.assetReferenceCount==2U);
         const auto recorded=device.statistics(); CHECK(recorded.renderPassesExecuted==3U); CHECK(recorded.indexedDrawsExecuted==6U);
         CHECK(stats.debugLabelsEmitted==0U);
+        // Non-rigid instance transforms must not silently stretch metric recipes.
+        auto detailed=triangle;detailed.materials[0].surfaceDetail.pattern=dve::SurfacePattern::Wood;
+        detailed.contentHash=dve::polygon_asset_content_hash(detailed);
+        auto scaledDraw=draw;scaledDraw.asset=&detailed;scaledDraw.objectToWorld[0]=2;
+        frame.polygonDraws=std::span(&scaledDraw,1U);
+        CHECK(!dve::render::record_live_environment_frame(device,lighting,shadowPlan,atlas,renderer,frame,stats,&fence,&error));
+        CHECK(error.find("rigid pose")!=std::string::npos);error.clear();
+        frame.polygonDraws=std::span(&draw,1U);
         CHECK(!device.capabilities().debugLabels);
 
         // GPU debug markers (diagnostics.gpu_markers): a renderer created

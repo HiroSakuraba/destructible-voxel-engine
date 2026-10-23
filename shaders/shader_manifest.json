@@ -1862,6 +1862,26 @@
           "access": "read",
           "register": "t24"
         }
+      ],
+      "vulkan_bindings": [
+        {
+          "name": "LiveObjectConstants",
+          "kind": "uniform_buffer",
+          "set": 1,
+          "binding": 0
+        },
+        {
+          "name": "gShadowBaseColor",
+          "kind": "combined_image_sampler",
+          "set": 3,
+          "binding": 0
+        },
+        {
+          "name": "gShadowOpacity",
+          "kind": "combined_image_sampler",
+          "set": 3,
+          "binding": 1
+        }
       ]
     },
     {
@@ -1888,6 +1908,20 @@
           "kind": "constant_buffer",
           "access": "read",
           "register": "b10"
+        }
+      ],
+      "vulkan_bindings": [
+        {
+          "name": "LiveObjectConstants",
+          "kind": "uniform_buffer",
+          "set": 1,
+          "binding": 0
+        },
+        {
+          "name": "LiveCascadeConstants",
+          "kind": "uniform_buffer",
+          "set": 2,
+          "binding": 0
         }
       ]
     },
@@ -1916,6 +1950,20 @@
           "access": "read",
           "register": "t18"
         }
+      ],
+      "vulkan_bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "uniform_buffer",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "gSkyEnvironment",
+          "kind": "combined_image_sampler",
+          "set": 1,
+          "binding": 0
+        }
       ]
     },
     {
@@ -1930,6 +1978,14 @@
           "kind": "constant_buffer",
           "access": "read",
           "register": "b8"
+        }
+      ],
+      "vulkan_bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "uniform_buffer",
+          "set": 0,
+          "binding": 0
         }
       ]
     },
@@ -2035,6 +2091,140 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t32"
+        },
+        {
+          "name": "gLiveSurfaceDetails",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t33"
+        },
+        {
+          "name": "gSpecularSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gBrdfSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
+          "name": "gDynamicShadowSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s7"
+        },
+        {
+          "name": "gBaseColorSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s8"
+        },
+        {
+          "name": "gMetallicRoughnessSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s9"
+        },
+        {
+          "name": "gNormalSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s10"
+        },
+        {
+          "name": "gEmissiveSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s11"
+        },
+        {
+          "name": "gOpacitySampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s12"
+        }
+      ],
+      "vulkan_bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "uniform_buffer",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "LiveObjectConstants",
+          "kind": "uniform_buffer",
+          "set": 1,
+          "binding": 0
+        },
+        {
+          "name": "gDiffuseIrradiance",
+          "kind": "combined_image_sampler",
+          "set": 2,
+          "binding": 0
+        },
+        {
+          "name": "gSpecularPrefilter",
+          "kind": "combined_image_sampler",
+          "set": 2,
+          "binding": 1
+        },
+        {
+          "name": "gEnvironmentBrdfLut",
+          "kind": "combined_image_sampler",
+          "set": 2,
+          "binding": 2
+        },
+        {
+          "name": "gLiveMaterialRecords",
+          "kind": "storage_buffer",
+          "set": 3,
+          "binding": 0
+        },
+        {
+          "name": "gLiveMaterialMappings",
+          "kind": "storage_buffer",
+          "set": 3,
+          "binding": 1
+        },
+        {
+          "name": "gLiveBaseColorTexture",
+          "kind": "combined_image_sampler",
+          "set": 3,
+          "binding": 2
+        },
+        {
+          "name": "gLiveMetallicRoughnessTexture",
+          "kind": "combined_image_sampler",
+          "set": 3,
+          "binding": 3
+        },
+        {
+          "name": "gLiveNormalTexture",
+          "kind": "combined_image_sampler",
+          "set": 3,
+          "binding": 4
+        },
+        {
+          "name": "gLiveEmissiveTexture",
+          "kind": "combined_image_sampler",
+          "set": 3,
+          "binding": 5
+        },
+        {
+          "name": "gLiveOpacityTexture",
+          "kind": "combined_image_sampler",
+          "set": 3,
+          "binding": 6
+        },
+        {
+          "name": "gLiveSurfaceDetails",
+          "kind": "storage_buffer",
+          "set": 3,
+          "binding": 13
         }
       ]
     },
@@ -2056,6 +2246,20 @@
           "kind": "constant_buffer",
           "access": "read",
           "register": "b9"
+        }
+      ],
+      "vulkan_bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "uniform_buffer",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "LiveObjectConstants",
+          "kind": "uniform_buffer",
+          "set": 1,
+          "binding": 0
         }
       ]
     },
@@ -2887,11 +3091,82 @@
       "stage": "compute",
       "entry": "main",
       "profile": "cs_6_0",
-      "threads": [64, 1, 1],
+      "threads": [
+        64,
+        1,
+        1
+      ],
       "bindings": [
-        {"name": "gPrimarySamples", "kind": "storage_buffer", "access": "read", "register": "t0"},
-        {"name": "gRcProbes", "kind": "storage_buffer", "access": "read_write", "register": "u1"},
-        {"name": "RcProbeConstants", "kind": "constant_buffer", "access": "read", "register": "b2"}
+        {
+          "name": "gPrimarySamples",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gRcProbes",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u1"
+        },
+        {
+          "name": "RcProbeConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b2"
+        }
+      ]
+    },
+    {
+      "name": "material_surface_detail_reference",
+      "source": "material_surface_detail_reference.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "gSurfaceRecords",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t34"
+        },
+        {
+          "name": "gSurfacePositions",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t35"
+        },
+        {
+          "name": "gSurfaceResults",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u15"
+        }
+      ],
+      "vulkan_bindings": [
+        {
+          "name": "gSurfaceRecords",
+          "kind": "storage_buffer",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "gSurfacePositions",
+          "kind": "storage_buffer",
+          "set": 0,
+          "binding": 1
+        },
+        {
+          "name": "gSurfaceResults",
+          "kind": "storage_buffer",
+          "set": 0,
+          "binding": 2
+        }
       ]
     }
   ]

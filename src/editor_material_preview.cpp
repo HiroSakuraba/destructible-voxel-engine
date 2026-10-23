@@ -7,7 +7,13 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <exception>
+#include <map>
+#include <memory>
+#include <optional>
 namespace dve::editor {
 CookedPolygonAsset material_preview_fixture(const VoxelMaterialDefinition& material,MaterialPreviewShape shape){
     CookedPolygonAsset a;a.objectId=1;a.materials={material};a.materialBindings.resize(1);
@@ -77,7 +83,7 @@ struct MaterialPreviewWorker::Impl {
                     const float px=(2*(float(x)+.5F)/float(image->size)-1)*.31F,py=(1-2*(float(y)+.5F)/float(image->size))*.31F;
                     const Float3 dir{px,py*inv-tilt*inv,-inv-py*tilt*inv};
                     auto c=lighting.camera_transport(origin,dir,5,y*image->size+x+1).sum();
-                    const auto tone=[](float v){v=std::max(0.F,v);v=v/(1+v);return std::uint32_t(std::clamp(std::pow(v,1/2.2F)*255,0.F,255.F));};
+                    const auto tone=[](float v){v=(std::max)(0.F,v);v=v/(1+v);return std::uint32_t(std::clamp(std::pow(v,1/2.2F)*255,0.F,255.F));};
                     image->rgb[y*image->size+x]=(tone(c.x)<<16)|(tone(c.y)<<8)|tone(c.z);
                 }
 #else

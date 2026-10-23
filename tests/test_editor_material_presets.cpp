@@ -7,6 +7,8 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
+#include <string>
 #include <thread>
 using namespace dve;using namespace dve::editor;
 namespace {
@@ -75,6 +77,28 @@ void component_domains(){
     const auto slot=d.find_object(1)->voxels->material_at({0,0,0});const auto save=d.save_transactional(root/"missing-origin.dvescene");require(save.success,save.error);auto loaded=EditorDocument::load(root/"missing-origin.dvescene");
     require(loaded&&loaded->find_object(1)->voxelMaterials.at(slot).roughness==.4F,"missing preset falls back to saved resolved values");n.close_material_panel();
 }
+// Undo/redo must restore the document and active material exactly, not just the touched fields.
+// Voxel brick generation counters are monotonic cache stamps and intentionally keep advancing,
+// so voxel state is compared by content (cells and every material definition) instead of DVOX bytes.
+std::string file_bytes(const std::filesystem::path& path){std::ifstream in(path,std::ios::binary);return std::string((std::istreambuf_iterator<char>(in)),{});}
+std::string snapshot(EditorDocument& d){
+    std::string out;std::string e;
+    for(EditorObjectId id:{EditorObjectId(1),EditorObjectId(2)}){const auto* o=d.find_object(id);require(o!=nullptr,"object exists");
+        auto lib=EditorMaterialLibrary::make_minimal();for(const auto& [slot,m]:o->voxelMaterials)if(slot!=0)ok(lib.upsert({slot,m,false},&e),e);
+        std::ostringstream s;ok(lib.write_stream(s,&e),e);out+=s.str();
+        if(o->voxels)for(int x=0;x<2;++x)out+=std::to_string(o->voxels->material_at({x,0,0}))+",";
+        if(o->polygon){auto mesh=*o->polygon;const auto path=root/"snapshot.dmesh";ok(write_dmesh(path,mesh,&e),e);out+=file_bytes(path);}}
+    return out;}
+std::string library_text(const NativeEditorController& n){std::ostringstream s;std::string e;ok(n.materials().write_stream(s,&e),e);return s.str();}
+void undo_redo_exact(){
+    NativeEditorController n{EditorWorkspace(scene()),root/"user.settings"};n.resize(1280,800);auto& w=n.workspace();auto& d=w.document();w.select_object(1);w.add_to_selection(2);
+    const auto original=snapshot(d)+library_text(n);const auto activeBefore=n.active_material();
+    require(n.dispatch_action("material.library"),"browser opens");n.material_panel_select("dve.mineral.plaster");require(n.apply_material_panel(),n.material_panel().message);
+    const auto applied=snapshot(d)+library_text(n);require(applied!=original,"apply changes the scene");const auto activeAfter=n.active_material();
+    require(w.commands().undo(d).success,"undo");require(snapshot(d)+library_text(n)==original,"undo restores materials, cells and meshes exactly");require(n.active_material()==activeBefore,"undo restores active material");
+    require(w.commands().redo(d).success,"redo");require(snapshot(d)+library_text(n)==applied,"redo reproduces the applied state exactly");require(n.active_material()==activeAfter,"redo restores applied active material");
+    require(w.commands().undo(d).success&&snapshot(d)+library_text(n)==original,"second undo is exact");n.close_material_panel();
+}
 void preview_jobs(){
     auto c=MaterialPresetCatalog::starter();MaterialPreviewWorker worker;worker.request(c.find("dve.glass.frosted")->defaults,MaterialPreviewShape::Sphere);worker.request(c.find("dve.metal.copper")->defaults,MaterialPreviewShape::Wedge);
     const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(30);
@@ -89,4 +113,4 @@ void preview_jobs(){
     require(!worker.image(),"cancelled job never commits later");
 }
 }
-int main(){try{root=std::filesystem::temp_directory_path()/"dve-material-presets-batch1";std::filesystem::remove_all(root);std::filesystem::create_directories(root);const auto previous=std::filesystem::current_path();std::filesystem::current_path(root);catalog_and_files();native_workflow();component_domains();preview_jobs();std::filesystem::current_path(previous);std::filesystem::remove_all(root);std::cout<<"Material preset catalog, persistence, native workflow and asynchronous preview checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{root=std::filesystem::temp_directory_path()/"dve-material-presets-batch1";std::filesystem::remove_all(root);std::filesystem::create_directories(root);const auto previous=std::filesystem::current_path();std::filesystem::current_path(root);catalog_and_files();native_workflow();component_domains();undo_redo_exact();preview_jobs();std::filesystem::current_path(previous);std::filesystem::remove_all(root);std::cout<<"Material preset catalog, persistence, native workflow and asynchronous preview checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

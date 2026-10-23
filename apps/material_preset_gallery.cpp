@@ -38,7 +38,7 @@ int main(int argc,char** argv){try{
         html<<"<article><h2>"<<escape(a.name)<<"</h2><img src='"<<a.id<<".bmp' alt='"<<escape(a.name)<<"'><p>"<<escape(a.description)<<"</p><small>"<<escape(a.provenance)<<"</small></article>";
     }html<<"</main>";
     NativeEditorController controller;controller.resize(1280,800);controller.open_material_panel();controller.material_panel_select("dve.glass.frosted");wait(*controller.material_panel().preview);
-    const auto count=std::min(controller.material_panel_layout().rows.size(),controller.material_panel_entries().size());
+    const auto count=(std::min)(controller.material_panel_layout().rows.size(),controller.material_panel_entries().size());
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
     while(controller.material_panel().thumbnailCache.size()<count&&std::chrono::steady_clock::now()<deadline){controller.material_panel_tick();std::this_thread::sleep_for(std::chrono::milliseconds(5));}
     SvgCanvas svg;render_material_panel(svg,controller);std::ofstream screenshot(dir/"material-panel.svg");screenshot<<"<svg xmlns='http://www.w3.org/2000/svg' width='1280' height='800'><rect width='1280' height='800' fill='#0b0d12'/>"<<svg.svg.str()<<"</svg>";

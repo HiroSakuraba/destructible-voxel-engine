@@ -6,7 +6,12 @@
 #include <charconv>
 #include <fstream>
 #include <iomanip>
+#include <filesystem>
+#include <map>
+#include <optional>
 #include <sstream>
+#include <string>
+#include <vector>
 namespace dve::editor {
 namespace {
 struct ObjectMaterialChange {
@@ -42,21 +47,21 @@ std::filesystem::path preference_path(const std::filesystem::path& settings){ret
 std::string value_text(float v){std::ostringstream s;s<<std::setprecision(6)<<v;return s.str();}
 }
 MaterialPanelLayout NativeEditorController::material_panel_layout()const{
-    MaterialPanelLayout l;const int w=std::max(300,std::min(1100,width_-32)),h=std::max(240,std::min(650,height_-64));
+    MaterialPanelLayout l;const int w=(std::max)(300,(std::min)(1100,width_-32)),h=(std::max)(240,(std::min)(650,height_-64));
     l.panel={(width_-w)/2,(height_-h)/2,w,h};const int x=l.panel.x,y=l.panel.y;
     l.close={x+w-34,y+8,24,24};l.search={x+12,y+38,w-24,26};
     const int bw=(w-30)/5;
     l.family={x+12,y+70,bw,26};l.favorites={x+15+bw,y+70,bw,26};l.recent={x+18+2*bw,y+70,bw,26};l.backend={x+21+3*bw,y+70,bw,26};l.supported={x+24+4*bw,y+70,bw-6,26};
-    const int left=std::max(100,w*28/100),right=std::max(130,w*32/100),center=w-left-right-40;
-    const int count=std::max(1,(h-202)/32);
+    const int left=(std::max)(100,w*28/100),right=(std::max)(130,w*32/100),center=w-left-right-40;
+    const int count=(std::max)(1,(h-202)/32);
     for(int i=0;i<count;++i)l.rows.push_back({x+12,y+104+i*32,left,30});
     l.previous={x+12,y+h-90,44,24};l.next={x+60,y+h-90,44,24};
-    const int size=std::max(32,std::min(center,h-330));l.preview={x+left+22,y+112,size,size};
-    l.shape={l.preview.x,l.preview.y+size+12,std::max(16,center/2-3),26};
-    l.savePreset={l.preview.x+center/2+3,l.shape.y,std::max(16,center/2-3),26};
+    const int size=(std::max)(32,(std::min)(center,h-330));l.preview={x+left+22,y+112,size,size};
+    l.shape={l.preview.x,l.preview.y+size+12,(std::max)(16,center/2-3),26};
+    l.savePreset={l.preview.x+center/2+3,l.shape.y,(std::max)(16,center/2-3),26};
     const int rx=x+w-right-12;
     l.loadSlot={rx,y+104,right,26};l.advanced={rx,y+136,right,26};
-    for(int i=0;i<std::max(1,(h-272)/28);++i){l.fields.push_back({rx,y+170+i*28,right-30,26});l.resets.push_back({rx+right-27,y+170+i*28,27,26});}
+    for(int i=0;i<(std::max)(1,(h-272)/28);++i){l.fields.push_back({rx,y+170+i*28,right-30,26});l.resets.push_back({rx+right-27,y+170+i*28,27,26});}
     l.reset={rx,y+h-90,right/2-2,24};l.update={rx+right/2+2,y+h-90,right/2-2,24};
     l.apply={x+12,y+h-56,(w-30)/2,28};l.editSlot={x+18+(w-30)/2,y+h-56,(w-30)/2,28};return l;
 }
@@ -238,12 +243,12 @@ bool NativeEditorController::material_panel_key(std::string_view key,bool contro
             p.editing.reset();p.message="Draft changed; Apply commits it";material_panel_preview();return true;}
         if(key=="backspace"){if(p.replaceText){p.typed.clear();p.replaceText=false;}else if(!p.typed.empty())p.typed.pop_back();}return true;
     }
-    if(key=="["){if(p.slot>0)--p.slot;return true;}if(key=="]"){p.slot=std::min(255U,p.slot+1);return true;}
+    if(key=="["){if(p.slot>0)--p.slot;return true;}if(key=="]"){p.slot=(std::min)(255U,p.slot+1);return true;}
     if(key=="backspace"&&p.searchFocus){if(!p.query.empty())p.query.pop_back();p.first=0;return true;}
     auto entries=material_panel_entries();auto it=std::find_if(entries.begin(),entries.end(),[&](auto* a){return a->id==p.selected;});
-    if(key=="up"||key=="down"){if(!entries.empty()){auto index=it==entries.end()?0:std::size_t(it-entries.begin());index=key=="up"?(index?index-1:0):std::min(index+1,entries.size()-1);material_panel_select(entries[index]->id);const auto count=material_panel_layout().rows.size();if(index<p.first)p.first=index;else if(index>=p.first+count)p.first=index-count+1;}return true;}
+    if(key=="up"||key=="down"){if(!entries.empty()){auto index=it==entries.end()?0:std::size_t(it-entries.begin());index=key=="up"?(index?index-1:0):(std::min)(index+1,entries.size()-1);material_panel_select(entries[index]->id);const auto count=material_panel_layout().rows.size();if(index<p.first)p.first=index;else if(index>=p.first+count)p.first=index-count+1;}return true;}
     if(key=="f"&&control){if(p.favorites.contains(p.selected))p.favorites.erase(p.selected);else p.favorites.insert(p.selected);save_material_panel_preferences();return true;}
-    if(key=="tab"){auto fields=material_panel_controls();if(!fields.empty()){p.searchFocus=false;p.editing=fields[std::min(p.controlFirst,fields.size()-1)].property;p.typed=value_text(material_preset_value(p.draft,*p.editing));p.replaceText=true;}return true;}
+    if(key=="tab"){auto fields=material_panel_controls();if(!fields.empty()){p.searchFocus=false;p.editing=fields[(std::min)(p.controlFirst,fields.size()-1)].property;p.typed=value_text(material_preset_value(p.draft,*p.editing));p.replaceText=true;}return true;}
     if(key=="enter"||key=="return")return apply_material_panel(shift);
     if(key=="pageup"||key=="pagedown"){auto count=material_panel_layout().rows.size();if(key=="pageup")p.first=p.first>count?p.first-count:0;else if(p.first+count<entries.size())p.first+=count;return true;}
     return true;

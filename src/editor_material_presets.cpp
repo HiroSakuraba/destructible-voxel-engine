@@ -1,7 +1,13 @@
 #include "dve/editor_material_presets.hpp"
 #include "dve/voxel_normal_map.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
+#include <vector>
 #include <cctype>
 #include <stdexcept>
 #include <fstream>

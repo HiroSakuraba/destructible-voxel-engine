@@ -795,7 +795,8 @@ struct SceneLighting::Impl {
                  unsigned depthLimit, float previousPdf = 0,
                  bool previousDelta = true, bool suppressFirstEmitter = false,
                  const VoxelMaterialDefinition *primaryOverride = nullptr,
-                 Float3 primaryNormal = {}) const {
+                 Float3 primaryNormal = {},
+                 float primaryDistance = -1.0F) const {
     PathValue out;
     Float3 throughput{1, 1, 1};
     Media media = initial_media(origin);
@@ -806,7 +807,14 @@ struct SceneLighting::Impl {
       auto hit = transport_trace(origin, direction, rayMaximum, media);
       if (hit && depth == 0 && skips == 0 && primaryOverride) {
         hit->material = *primaryOverride;
-        if (dot3(primaryNormal, primaryNormal) > 0)
+        // Only trust the caller's (e.g. normal-mapped raster) normal when it
+        // belongs to the surface actually hit first. Facing is irrelevant: the
+        // normal is flipped toward the incoming ray below.
+        const bool sameSurface =
+            primaryDistance < 0 ||
+            std::abs(hit->distance - primaryDistance) <=
+                (std::max)(1e-4F, primaryDistance * 1e-3F);
+        if (sameSurface && dot3(primaryNormal, primaryNormal) > 0)
           hit->n = unit(primaryNormal);
       }
       if (!hit) {
@@ -943,14 +951,14 @@ struct SceneLighting::Impl {
   }
   LightPasses camera(Float3 origin, Float3 direction, float maximumDistance,
                      Rng &rng, const VoxelMaterialDefinition *primaryMaterial,
-                     Float3 primaryNormal) const {
+                     Float3 primaryNormal, float primaryDistance) const {
     LightPasses out;
     const unsigned depth =
         env.pathTraceBounces > 0 ? (std::max)(env.pathTraceBounces, 4U) : 12U;
     for (unsigned sample = 0; sample < env.pathTraceSamples; ++sample) {
       const auto value =
           path(origin, unit(direction), maximumDistance, rng, depth, 0, true,
-               false, primaryMaterial, primaryNormal);
+               false, primaryMaterial, primaryNormal, primaryDistance);
       if (value.firstTransmission)
         out.transmission = sum3(out.transmission, value.radiance);
       else if (value.firstSpecular)
@@ -975,9 +983,11 @@ std::size_t SceneLighting::emitter_count() const noexcept {
 }
 LightPasses SceneLighting::camera_transport(
     Float3 origin, Float3 direction, float limit, std::uint32_t seed,
-    const VoxelMaterialDefinition *material, Float3 normal) const {
+    const VoxelMaterialDefinition *material, Float3 normal,
+    float distance) const {
   Rng rng{seed ^ 0x245fa213U};
-  return impl_->camera(origin, direction, limit, rng, material, normal);
+  return impl_->camera(origin, direction, limit, rng, material, normal,
+                       distance);
 }
 float SceneLighting::sun_visibility(Float3 p, Float3 n,
                                     std::uint32_t seed) const {

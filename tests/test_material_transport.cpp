@@ -340,6 +340,52 @@ void raster_sphere_edge_not_black() {
     }
 }
 
+// A double-sided, normal-mapped transmissive sheet seen from behind: the raster
+// fragment faces away from the camera but *is* the traced first hit, so its
+// mapped normal must be preserved (flipped toward the ray), not replaced by the
+// flat traced normal. A normal from a different surface (distance mismatch)
+// must still fall back to the traced normal.
+CookedPolygonAsset sheet(float z, VoxelMaterialDefinition material) {
+    CookedPolygonAsset a;
+    a.materials = {material};
+    a.materialBindings.resize(1);
+    a.materialBindings[0].doubleSided = true;
+    const float w = 10;
+    for (Float3 p : {Float3{-w, -w, z}, Float3{-w, w, z}, Float3{w, w, z}, Float3{w, -w, z}}) {
+        PolygonVertex v;
+        v.position = p;
+        v.normal = {0, 0, -1};
+        a.vertices.push_back(v);
+    }
+    a.indices = {0, 1, 2, 0, 2, 3};
+    a.submeshes = {{"sheet", 0, 6, 0}};
+    a.bounds = {{-w, -w, z}, {w, w, z}};
+    return a;
+}
+void backface_sheet_keeps_mapped_normal() {
+    auto glassSheet = sheet(0, glass());
+    VoxelMaterialDefinition light;
+    light.shadingModel = MaterialShadingModel::Emissive;
+    light.baseColor = {0, 0, 0, 1};
+    light.emissive = {1, 1, 1};
+    auto background = slab(-3.1F, -3, light);
+    std::array<PolygonRenderInstance, 2> instances{{{1, &glassSheet}, {2, &background}}};
+    auto e = environment();
+    e.pathTraceBounces = 0;
+    e.globalIlluminationMode = GlobalIlluminationMode::Off;
+    e.pathTraceSamples = 64;
+    SceneLighting scene({}, instances, e, 1);
+    const auto material = glass();
+    const Float3 eye{0, 0, 2}, dir{0, 0, -1};
+    // Mapped normal tilted 45 degrees and facing away from the camera (sheet front is -z).
+    const Float3 mapped{.70710678F, 0, -.70710678F};
+    const float flat = scene.camera_transport(eye, dir, 100, 7, &material, {}).sum().x;
+    const float kept = scene.camera_transport(eye, dir, 100, 7, &material, mapped, 2).sum().x;
+    const float other = scene.camera_transport(eye, dir, 100, 7, &material, mapped, 1.5F).sum().x;
+    check(std::abs(kept - flat) > .05F, "back-facing mapped normal of the first hit is preserved");
+    near(other, flat, 1e-6F, "normal from a different surface falls back to the traced normal");
+}
+
 } // namespace
 int main() {
     try {
@@ -352,6 +398,7 @@ int main() {
         transmitted_shadow();
         raster_glass_without_gi();
         raster_sphere_edge_not_black();
+        backface_sheet_keeps_mapped_normal();
         std::cout << "material transport tests passed\n";
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

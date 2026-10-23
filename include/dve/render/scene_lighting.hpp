@@ -17,12 +17,16 @@ public:
   SceneLighting &operator=(const SceneLighting &) = delete;
   // Camera-visible dielectric / delta-metal transport, including both medium
   // interfaces. Intended for primary refractive surfaces; returns
-  // compositing-ready light passes.
+  // compositing-ready light passes. primaryNormal overrides the first hit's
+  // shading normal; when primaryDistance >= 0 it is applied only if the traced
+  // first hit lies at that distance along the ray (same surface as the raster
+  // fragment), otherwise the traced normal is kept.
   [[nodiscard]] LightPasses
   camera_transport(Float3 origin, Float3 direction, float maximumDistance,
                    std::uint32_t seed,
                    const VoxelMaterialDefinition *primaryMaterial = nullptr,
-                   Float3 primaryNormal = {}) const;
+                   Float3 primaryNormal = {},
+                   float primaryDistance = -1.0F) const;
   [[nodiscard]] float sun_visibility(Float3 point, Float3 normal,
                                      std::uint32_t seed) const;
   [[nodiscard]] ShadingLobes direct(Float3 point, Float3 normal, Float3 view,

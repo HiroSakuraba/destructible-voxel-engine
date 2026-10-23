@@ -401,11 +401,29 @@ render::PolygonCamera PlayerApp::camera(float aspect) const {
     return camera;
 }
 
-RenderEnvironment PlayerApp::environment() const {
+RenderEnvironment PlayerApp::environment(float interpolationAlpha) const {
+  RenderEnvironment result;
 #if defined(DVE_HAVE_LUA)
-    if (impl_->session.script) return impl_->session.script->environment();
+    if (impl_->session.script)
+    result = impl_->session.script->environment();
 #endif
-    return RenderEnvironment{};
+  if (impl_->session.world) {
+    for (auto id :
+         impl_->session.world->find_by_component(kSceneLightComponent)) {
+      const auto *components = impl_->session.world->components(id);
+      const auto frame =
+          impl_->session.world->presentation_transform(id, interpolationAlpha);
+      if (!components || !frame)
+        continue;
+      for (const auto &c : *components)
+        if (result.lights.size() >= kMaximumSceneLights)
+          break;
+        else if (auto light = scene_light_from_component(c, *frame))
+          result.lights.push_back(*light);
+    }
+    result.lightingTimeSeconds = impl_->session.world->elapsed_seconds();
+  }
+  return result;
 }
 
 void PlayerApp::update_presentation(float frameDeltaSeconds,float interpolationAlpha) {
@@ -418,7 +436,9 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
     PlayerRenderView view;
     view.objects = objects;
     view.camera = camera(aspect);
-    view.environment = environment();
+    view.environment = environment(interpolationAlpha);
+    view.environment.lightingTimeSeconds =
+        impl_->session.world->elapsed_seconds();
     view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
     view.polygonLodBias = impl_->settings.polygonLodBias;
     return view;

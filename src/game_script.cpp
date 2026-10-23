@@ -1390,7 +1390,25 @@ int l_set_environment_scalar(lua_State* L) {
     else if (name == "BloomThreshold") environment.bloomThreshold = value;
     else if (name == "BloomIntensity") environment.bloomIntensity = value;
     else if (name == "BloomRadius") environment.bloomRadius = value;
-    else if (name == "GlobalIlluminationIntensity") environment.globalIlluminationIntensity = value;
+    else if (name == "LightingTimeSeconds")
+      environment.lightingTimeSeconds = value;
+    else if (name == "PathTraceRoulette")
+      environment.pathTraceRoulette = value != 0;
+    else if (name == "PathTraceBounces" || name == "PathTraceSamples" ||
+             name == "LocalLightSamples") {
+      if (!std::isfinite(value) || value < 0 || value > 256 ||
+          std::floor(value) != value) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "lighting budget must be a bounded integer");
+        return 2;
+      }
+      if (name == "PathTraceBounces")
+        environment.pathTraceBounces = static_cast<std::uint32_t>(value);
+      else if (name == "PathTraceSamples")
+        environment.pathTraceSamples = static_cast<std::uint32_t>(value);
+      else
+        environment.localLightSamples = static_cast<std::uint32_t>(value);
+    } else if (name == "GlobalIlluminationIntensity") environment.globalIlluminationIntensity = value;
     else if (name == "GlobalIlluminationMaxDistanceMeters") environment.globalIlluminationMaxDistanceMeters = value;
     else if (name == "GlobalIlluminationSamples") environment.globalIlluminationSamples = static_cast<std::uint32_t>(std::max(0.0F, std::round(value)));
     else if (name == "ShadowStrength") environment.shadowStrength = value;
@@ -1500,9 +1518,123 @@ int l_set_environment_shadow_mode(lua_State* L) {
     return 1;
 }
 
+// Replace/append a one-based scene light. nil removes it; index == count+1
+// appends.
+int l_set_scene_light(lua_State *L) {
+  auto &env = impl_from_state(L)->environment;
+  const auto index = luaL_checkinteger(L, 1);
+  if (index < 1 || static_cast<std::size_t>(index) > env.lights.size() + 1 ||
+      index > 4096) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  auto next = env;
+  if (lua_isnil(L, 2)) {
+    if (static_cast<std::size_t>(index) > next.lights.size()) {
+      lua_pushboolean(L, 0);
+      return 1;
+    }
+    next.lights.erase(next.lights.begin() + index - 1);
+  } else {
+    luaL_checktype(L, 2, LUA_TTABLE);
+    SceneLight light;
+    const auto number = [&](const char *key, float &value) {
+      lua_getfield(L, 2, key);
+      if (!lua_isnil(L, -1))
+        value = static_cast<float>(luaL_checknumber(L, -1));
+      lua_pop(L, 1);
+    };
+    const auto vector = [&](const char *key, Float3 &value) {
+      lua_getfield(L, 2, key);
+      if (!lua_isnil(L, -1)) {
+        luaL_checktype(L, -1, LUA_TTABLE);
+        lua_getfield(L, -1, "x");
+        value.x = static_cast<float>(luaL_checknumber(L, -1));
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "y");
+        value.y = static_cast<float>(luaL_checknumber(L, -1));
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "z");
+        value.z = static_cast<float>(luaL_checknumber(L, -1));
+        lua_pop(L, 1);
+      }
+      lua_pop(L, 1);
+    };
+    lua_getfield(L, 2, "kind");
+    if (!lua_isnil(L, -1)) {
+      const std::string kind = luaL_checkstring(L, -1);
+      if (kind == "point")
+        light.kind = SceneLightKind::Point;
+      else if (kind == "spot")
+        light.kind = SceneLightKind::Spot;
+      else if (kind == "quad")
+        light.kind = SceneLightKind::Quad;
+      else if (kind == "disc")
+        light.kind = SceneLightKind::Disc;
+      else if (kind == "candle")
+        light.kind = SceneLightKind::Candle;
+      else {
+        lua_pop(L, 1);
+        lua_pushboolean(L, 0);
+        return 1;
+      }
+    }
+    lua_pop(L, 1);
+    vector("position", light.positionMeters);
+    vector("direction", light.direction);
+    vector("edge_u", light.edgeU);
+    vector("edge_v", light.edgeV);
+    vector("color", light.color);
+    number("intensity", light.intensity);
+    number("inner_cone", light.innerConeRadians);
+    number("outer_cone", light.outerConeRadians);
+    number("flicker_amount", light.flickerAmount);
+    number("flicker_frequency", light.flickerFrequencyHz);
+    lua_getfield(L, 2, "seed");
+    if (!lua_isnil(L, -1)) {
+      auto seed = luaL_checkinteger(L, -1);
+      if (seed < 0 || static_cast<unsigned long long>(seed) > 0xffffffffULL) {
+        lua_pop(L, 1);
+        lua_pushboolean(L, 0);
+        return 1;
+      }
+      light.seed = static_cast<std::uint32_t>(seed);
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, 2, "two_sided");
+    light.twoSided = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+    if (static_cast<std::size_t>(index) > next.lights.size())
+      next.lights.push_back(light);
+    else
+      next.lights[index - 1] = light;
+  }
+  std::string error;
+  if (!next.validate(&error)) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, error.c_str());
+    return 2;
+  }
+  env = std::move(next);
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
 int l_get_environment(lua_State* L) {
     const RenderEnvironment& environment = impl_from_state(L)->environment;
     lua_newtable(L);
+    lua_pushinteger(L, environment.pathTraceBounces);
+    lua_setfield(L, -2, "path_trace_bounces");
+    lua_pushinteger(L, environment.pathTraceSamples);
+    lua_setfield(L, -2, "path_trace_samples");
+    lua_pushinteger(L, environment.localLightSamples);
+    lua_setfield(L, -2, "local_light_samples");
+    lua_pushinteger(L, static_cast<lua_Integer>(environment.lights.size()));
+    lua_setfield(L, -2, "scene_light_count");
+    lua_pushboolean(L, environment.pathTraceRoulette);
+    lua_setfield(L, -2, "path_trace_roulette");
+    lua_pushnumber(L, environment.lightingTimeSeconds);
+    lua_setfield(L, -2, "lighting_time_seconds");
     push_float3_table(L, environment.sunDirection); lua_setfield(L, -2, "sun_direction");
     lua_pushnumber(L, environment.sunIntensity); lua_setfield(L, -2, "sun_intensity");
     push_float3_table(L, environment.sunColor); lua_setfield(L, -2, "sun_color");
@@ -1750,7 +1882,9 @@ int l_camera_load_runtime_state(lua_State* L) {
 // --- Save games: world.on_save / on_load, save_game / load_game -----------------------------
 
 constexpr std::uint32_t kScriptStateMagic = 0x534C5644U;   // "DVLS"
-constexpr std::uint32_t kScriptStateVersion = 4U;   // 2 adds environment, HUD, material overrides, named timers; 3 fog; 4 fog height falloff
+constexpr std::uint32_t kScriptStateVersion =
+    5U; // 2 environment/HUD/materials/timers; 3 fog; 4 fog height; 5 scene
+        // lights and path budgets
 constexpr int kScriptStateMaximumDepth = 32;
 constexpr std::uint32_t kScriptStateMaximumEntries = 1U << 20U;
 constexpr std::size_t kScriptStateMaximumBytes = 16U * 1024U * 1024U;
@@ -2108,7 +2242,8 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
     std::uint32_t magic{}, version{}, count{};
     if (!r.u32(magic) || !r.u32(version)) return failWith();
     if (magic != kScriptStateMagic) return r.bad("not a DVE script state blob"), failWith();
-    if (version != 1U && version != 2U && version != 3U && version != kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
+    if (version != 1U && version != 2U && version != 3U && version != 4U &&
+        version != kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
     contents.version = version;
     if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid global count"), failWith();
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -2138,6 +2273,12 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
         if (!read_environment(r, environment)) return failWith();
         if (version >= 3U && !read_environment_fog(r, environment)) return failWith();
         if (version >= 4U && !read_environment_fog_height(r, environment)) return failWith();
+        if (version >= 5U) {
+          std::string extension;
+          if (!r.text(extension) ||
+              !decode_scene_lighting(extension, environment))
+            return r.bad("invalid scene lighting in script state"), failWith();
+        }
         contents.environment = environment;
         if (!r.text(contents.hudPrompt) || !r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid HUD state"), failWith();
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -2325,6 +2466,7 @@ constexpr luaL_Reg kWorldFunctions[] = {
     {"clear_material_parameters", l_clear_material_parameters},
     {"set_material_layer_weight", l_set_material_layer_weight},
     {"get_material_layer_weight", l_get_material_layer_weight},
+    {"set_scene_light", l_set_scene_light},
     {"set_environment_scalar", l_set_environment_scalar},
     {"set_environment_vector", l_set_environment_vector},
     {"set_environment_tonemap_operator", l_set_environment_tonemap_operator},
@@ -2616,6 +2758,8 @@ std::optional<std::vector<std::byte>> GameScriptHost::save_state(std::string* er
     write_environment(w, impl_->environment);
     write_environment_fog(w, impl_->environment);
     write_environment_fog_height(w, impl_->environment);
+    const auto lighting = encode_scene_lighting(impl_->environment);
+    w.bytes(lighting.data(), lighting.size());
     w.bytes(impl_->hud.interaction_prompt().data(), impl_->hud.interaction_prompt().size());
     w.u32(static_cast<std::uint32_t>(impl_->hud.tools().size()));
     for (const ui::ToolWheelEntry& tool : impl_->hud.tools()) {

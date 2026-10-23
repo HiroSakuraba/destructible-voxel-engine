@@ -1,4 +1,5 @@
 #include "dve/player/player_renderer.hpp"
+#include "dve/render/scene_lighting.hpp"
 
 #include "dve/polygon_asset.hpp"
 #include "dve/render/caustic_map.hpp"
@@ -122,8 +123,15 @@ public:
         camera.farPlane *= toUnits;
 
         const RenderEnvironment environment = apply_cpu_render_quality(view.environment, options_.quality);
+        if (!environment.validate(error))
+          return false;
         clear_background(environment);
+        std::unique_ptr<render::SceneLighting> sceneLighting;
+        if (!environment.lights.empty() || environment.pathTraceBounces > 0)
+          sceneLighting = std::make_unique<render::SceneLighting>(
+              voxels_, polygons_, environment, voxelSize);
         render::ReferenceVoxelRenderer voxelRenderer;
+        voxelRenderer.sceneLighting = sceneLighting.get();
         voxelRenderer.metersPerVoxel = voxelSize;
         voxelRenderer.threadCount = options_.threadCount;
         voxelRenderer.radianceCascades.threadCount = options_.threadCount;
@@ -147,12 +155,16 @@ public:
                 voxelRenderer.sunOccluders = polygons_;
             }
         }
+        // Cross-geometry sun visibility is part of the new lighting path; legacy
+        // scenes (no lights, no path budget) keep their exact previous frames.
+        if (sceneLighting) voxelRenderer.sunOccluders = polygons_;
         voxelRenderer.occlusionPolygons = polygons_;   // AO rays see voxels and polygons alike
         const auto voxelStats = voxelRenderer.render(voxels_, camera, environment, target_, true);
         stats_.tracedRays = voxelStats.tracedRays;
         stats_.hitRays = voxelStats.hitRays;
         if (!polygons_.empty()) {
             render::PolygonRenderOptions polygonOptions;
+            polygonOptions.sceneLighting = sceneLighting.get();
             polygonOptions.preserveExistingDepth = true;
             polygonOptions.enableFrustumCulling = view.polygonFrustumCulling;
             polygonOptions.lodBias = view.polygonLodBias;
@@ -179,6 +191,7 @@ public:
                 v.scale=multiply(v.scale,toUnits);
             }
             auto fogSettings=view.fogSettings;
+            fogSettings.sceneLighting = sceneLighting.get();
             if(!fogSettings.densityCache)fogSettings.densityCache=&fogDensityCache_;
             if(!fogSettings.lightingCache)fogSettings.lightingCache=&fogLightingCache_;
             std::vector<render::CpuFogLight> lights(fogSettings.lights.begin(),fogSettings.lights.end());
@@ -194,6 +207,7 @@ public:
             if(!render::apply_cpu_fog(target_,camera,environment,voxelSize,fogVolumes,
                                      fogSettings,&stats_.fog,error))return false;
         }
+        if (sceneLighting) (void)render::apply_cpu_bloom(target_, environment);
         stats_.renderMilliseconds = milliseconds_since(start);
 
         const auto resolveStart = Clock::now();
@@ -260,7 +274,7 @@ private:
         target_.clear({environment.skyColor.x, environment.skyColor.y, environment.skyColor.z, 1.0F}, 1.0F);
         if (!options_.skyGradient) return;
         for (std::uint32_t y = 0; y < target_.height; ++y) {
-            const float t = static_cast<float>(y) / static_cast<float>(std::max(1U, target_.height - 1U));
+            const float t = static_cast<float>(y) / static_cast<float>((std::max)(1U, target_.height - 1U));
             const float zenith = 1.6F - 0.9F * t; // brighter toward the top
             const Float4 color{environment.skyColor.x * zenith, environment.skyColor.y * zenith,
                                environment.skyColor.z * (zenith + 0.15F), 1.0F};
@@ -312,10 +326,19 @@ RenderEnvironment apply_cpu_render_quality(RenderEnvironment environment, CpuRen
     if (quality == CpuRenderQuality::Reference) return environment;
     if (environment.shadowMode != ShadowMode::Off) environment.shadowMode = ShadowMode::Hard;
     if (quality == CpuRenderQuality::Fast) {
-        if (environment.globalIlluminationMode != GlobalIlluminationMode::Off)
+      environment.pathTraceBounces = 0;
+      environment.localLightSamples =
+          (std::min)(environment.localLightSamples, 2U);
+      if (environment.globalIlluminationMode != GlobalIlluminationMode::Off)
             environment.globalIlluminationMode = GlobalIlluminationMode::AmbientHemisphere;
     } else {
-        environment.globalIlluminationSamples = std::min(environment.globalIlluminationSamples, 2U);
+        environment.globalIlluminationSamples = (std::min)(environment.globalIlluminationSamples, 2U);
+        environment.pathTraceBounces =
+            (std::min)(environment.pathTraceBounces, 2U);
+        environment.pathTraceSamples =
+            (std::min)(environment.pathTraceSamples, 2U);
+        environment.localLightSamples =
+            (std::min)(environment.localLightSamples, 2U);
     }
     return environment;
 }

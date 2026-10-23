@@ -75,6 +75,11 @@ class ContentSource;
 //   world.on_damage(function(objectId, center, radius, removedCount, destroyed, fragmentIds) ... end)
 //   world.on_destroyed(function(objectId) ... end)
 //   world.on_lifecycle(function(kind, objectId, otherId, componentId, componentType, poolName) ... end)
+//   world.set_scene_light(index, {kind="point"|"spot"|"quad"|"disc"|"candle",
+//     position={x,y,z}, direction={x,y,z}, edge_u={x,y,z}, edge_v={x,y,z},
+//     color={x,y,z}, intensity=, inner_cone=, outer_cone=, two_sided=,
+//     flicker_amount=, flicker_frequency=, seed=}) -> bool,error
+//     One-based replacement or append at count+1; nil removes. Position/edges use metres.
 //   world.set_global(key, number) -> true or false,errorString
 //     mirrors canonical or explicitly material-bound names into the Material Parameter Collection;
 //     unrelated gameplay globals remain in the ordinary script dictionary

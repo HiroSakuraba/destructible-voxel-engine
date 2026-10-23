@@ -12,6 +12,7 @@
 #include "dve/render/polygon_renderer.hpp"
 
 namespace dve::render {
+class SceneLighting;
 
 // Borrowed immutable assets; positions and dimensions use the target's world units.
 // Density and integration lengths are always per metre/metres.
@@ -72,6 +73,8 @@ struct CpuFogSettings {
     float historyWeight{}; // 0..0.95, stationary-camera accumulation only
     std::uint64_t sceneRevision{}; // caller changes this when shadow casters/lights move
     bool scattering{};
+    const SceneLighting
+        *sceneLighting{}; // optional shared emitter sampler; outlives the pass
     bool volumeShadows{};
     std::uint32_t shadowSteps{8};
     float shadowDistanceMeters{32};

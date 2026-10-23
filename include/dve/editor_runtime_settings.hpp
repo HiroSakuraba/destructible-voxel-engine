@@ -81,6 +81,12 @@ inline RenderEnvironment render_environment_settings(const EditorSettingsRegistr
         : giQuality == "ultra" ? 16U : 4U;
     environment.globalIlluminationIntensity = s.number("render.gi_intensity");
     environment.globalIlluminationMaxDistanceMeters = s.number("render.gi_distance");
+    environment.pathTraceBounces = s.integer("render.path_bounces");
+    environment.pathTraceSamples = s.integer("render.path_samples");
+    environment.localLightSamples = s.integer("render.local_light_samples");
+    environment.pathTraceRoulette = s.get<bool>("render.path_roulette");
+    environment.bloomIntensity = s.number("render.bloom_intensity");
+    environment.bloomRadius = s.number("render.bloom_radius");
     environment.bloomThreshold = s.number("render.bloom_threshold");
     if (!s.get<bool>("render.bloom")) environment.bloomIntensity = 0.0F;
     if (!s.get<bool>("material.subsurface")) environment.subsurfaceMaxDistanceMeters = 0.0F;

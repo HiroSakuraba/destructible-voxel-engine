@@ -231,6 +231,50 @@ void test_fixed_step_clock() {
     CHECK(clock.advance(-1.0) == 0U);
 }
 
+void test_scene_light_components_and_quality() {
+  std::string error;
+  PlayerBootOptions options;
+  options.enableScripts = false;
+  auto app = PlayerApp::boot(LooseContentSource::open(kSample, &error), options,
+                             &error);
+  CHECK(app != nullptr);
+  if (!app)
+    return;
+  GameObjectDesc desc;
+  desc.name = "light holder";
+  desc.transform.position = {1, 2, 3};
+  const auto id = app->world().create_object(std::move(desc), &error);
+  CHECK(id != kInvalidGameObjectId);
+  Component c;
+  c.id = 1;
+  c.type = kSceneLightComponent;
+  c.properties = {{"kind", std::string("candle")},
+                  {"position", Float3{.5F, 0, 0}},
+                  {"intensity", 2.0}};
+  CHECK(app->world().add_component(id, c, &error) != nullptr);
+  CHECK(app->environment().lights.size() == 1);
+  if (app->environment().lights.empty())
+    return;
+  CHECK(app->environment().lights[0].positionMeters.x == 1.5F);
+  CHECK(app->world().set_position(id, {4, 2, 3}));
+  CHECK(app->environment().lights[0].positionMeters.x == 4.5F);
+  app->tick(.05F);
+  CHECK(app->environment().lightingTimeSeconds > 0);
+  RenderEnvironment env;
+  env.pathTraceBounces = 16;
+  env.pathTraceSamples = 64;
+  env.localLightSamples = 32;
+  const auto fast = apply_cpu_render_quality(env, CpuRenderQuality::Fast),
+             balanced =
+                 apply_cpu_render_quality(env, CpuRenderQuality::Balanced),
+             reference =
+                 apply_cpu_render_quality(env, CpuRenderQuality::Reference);
+  CHECK(fast.pathTraceBounces == 0 && fast.localLightSamples == 2);
+  CHECK(balanced.pathTraceBounces == 2 && balanced.pathTraceSamples == 2 &&
+        balanced.localLightSamples == 2);
+  CHECK(reference.pathTraceBounces == 16 && reference.pathTraceSamples == 64);
+}
+
 struct Run {
     std::string hash;
     std::size_t objects{};
@@ -692,6 +736,7 @@ int main(int argc, char** argv) {
     test_frame_image();
     test_input_bindings();
     test_fixed_step_clock();
+    test_scene_light_components_and_quality();
     test_sample_boot_loose_and_pak();
     test_scripts_disabled_and_polygon_seam();
     test_cpu_renderer_draws_polygons();

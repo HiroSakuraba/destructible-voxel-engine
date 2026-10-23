@@ -20,6 +20,7 @@ struct PolygonBvhHit;
 }
 
 namespace dve::render {
+class SceneLighting;
 
 class PolygonRenderCache;
 
@@ -150,6 +151,7 @@ struct CpuSurfaceDetailSettings {
 };
 
 struct PolygonRenderOptions {
+    const SceneLighting* sceneLighting{}; // shared frame integrator; outlives render
     bool enableTextures{true};
     bool enableMipSelection{true};
     bool enableTransparentSorting{true};

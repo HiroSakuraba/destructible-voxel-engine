@@ -58,6 +58,9 @@ bool RenderEnvironment::validate(std::string* error) const noexcept {
     if (!std::isfinite(fogColor.x) || !std::isfinite(fogColor.y) || !std::isfinite(fogColor.z) || fogColor.x < 0.0F ||
         fogColor.y < 0.0F || fogColor.z < 0.0F)
         return fail("fogColor must be finite and non-negative");
+    if (!std::isfinite(fogHeightFalloffPerMeter) || fogHeightFalloffPerMeter < 0.0F || fogHeightFalloffPerMeter > 10.0F)
+        return fail("fogHeightFalloffPerMeter must be finite and in [0,10]");
+    if (!std::isfinite(fogBaseHeightMeters)) return fail("fogBaseHeightMeters must be finite");
     if (!std::isfinite(shadowStrength) || shadowStrength < 0.0F || shadowStrength > 1.0F)
         return fail("shadowStrength must be finite and in [0,1]");
     if (!std::isfinite(shadowSoftnessRadians) || shadowSoftnessRadians < 0.0F || shadowSoftnessRadians > 0.25F)

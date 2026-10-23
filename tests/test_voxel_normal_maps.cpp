@@ -282,6 +282,30 @@ void test_png_import(const fs::path& dir) {
     if (map)
         check(map->width == 3U && map->height == 2U && map->rgba8 == rgba && map->name == "stone_normal",
               "PNG texels come through unchanged (no sRGB conversion)");
+    // DirectX-style sources (green = down) convert at import: the flip inverts the green
+    // channel only, before the map and its content hash are built.
+    const auto flipped = import_voxel_normal_map(dir / "stone_normal.png", &error, true);
+    check(flipped != nullptr, "flipped PNG import: " + error);
+    if (map && flipped) {
+        std::vector<std::uint8_t> want = rgba;
+        for (std::size_t i = 1; i < want.size(); i += 4) want[i] = static_cast<std::uint8_t>(255U - want[i]);
+        check(flipped->rgba8 == want, "flip inverts the green channel only (R/B/A untouched)");
+        check(flipped->contentHash != map->contentHash, "the content hash covers the flipped texels");
+        const auto decoded = decode_voxel_normal_map(bytes, "stone_normal", &error, true);
+        check(decoded && decoded->rgba8 == flipped->rgba8 && decoded->contentHash == flipped->contentHash,
+              "decode with flip matches import with flip");
+        // The OpenGL twin of the same surface (green already up) imports to the identical map.
+        std::vector<std::uint8_t> twin = rgba;
+        for (std::size_t i = 1; i < twin.size(); i += 4) twin[i] = static_cast<std::uint8_t>(255U - twin[i]);
+        const auto twinBytes = png_rgba(3U, 2U, twin);
+        {
+            std::ofstream out(dir / "stone_normal_gl.png", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(twinBytes.data()), static_cast<std::streamsize>(twinBytes.size()));
+        }
+        const auto gl = import_voxel_normal_map(dir / "stone_normal_gl.png", &error);
+        check(gl && gl->rgba8 == flipped->rgba8 && gl->contentHash == flipped->contentHash,
+              "a flipped DirectX map is identical to its OpenGL twin");
+    }
     check(!import_voxel_normal_map(dir / "missing.png", &error) && !error.empty(), "a missing file is an error");
     const std::vector<std::byte> junk(16, std::byte{7});
     check(!decode_voxel_normal_map(junk, "junk", &error), "undecodable bytes are an error");

@@ -1403,6 +1403,8 @@ int l_set_environment_scalar(lua_State* L) {
     else if (name == "AmbientOcclusionMaxDistanceMeters") environment.ambientOcclusionMaxDistanceMeters = value;
     else if (name == "FogDensityPerMeter") environment.fogDensityPerMeter = value;
     else if (name == "FogStartMeters") environment.fogStartMeters = value;
+    else if (name == "FogHeightFalloffPerMeter") environment.fogHeightFalloffPerMeter = value;
+    else if (name == "FogBaseHeightMeters") environment.fogBaseHeightMeters = value;
     else known = false;
     if (!known) {
         lua_pushboolean(L, 0);
@@ -1532,6 +1534,8 @@ int l_get_environment(lua_State* L) {
     lua_pushnumber(L, environment.ambientOcclusionMaxDistanceMeters); lua_setfield(L, -2, "ambient_occlusion_max_distance_meters");
     lua_pushnumber(L, environment.fogDensityPerMeter); lua_setfield(L, -2, "fog_density_per_meter");
     lua_pushnumber(L, environment.fogStartMeters); lua_setfield(L, -2, "fog_start_meters");
+    lua_pushnumber(L, environment.fogHeightFalloffPerMeter); lua_setfield(L, -2, "fog_height_falloff_per_meter");
+    lua_pushnumber(L, environment.fogBaseHeightMeters); lua_setfield(L, -2, "fog_base_height_meters");
     push_float3_table(L, environment.fogColor); lua_setfield(L, -2, "fog_color");
     lua_pushnumber(L, environment.shadowMaxDistanceMeters); lua_setfield(L, -2, "shadow_max_distance_meters");
     lua_pushnumber(L, environment.contactShadowDistanceMeters); lua_setfield(L, -2, "contact_shadow_distance_meters");
@@ -1746,7 +1750,7 @@ int l_camera_load_runtime_state(lua_State* L) {
 // --- Save games: world.on_save / on_load, save_game / load_game -----------------------------
 
 constexpr std::uint32_t kScriptStateMagic = 0x534C5644U;   // "DVLS"
-constexpr std::uint32_t kScriptStateVersion = 3U;   // 2 adds environment, HUD, material overrides, named timers; 3 fog
+constexpr std::uint32_t kScriptStateVersion = 4U;   // 2 adds environment, HUD, material overrides, named timers; 3 fog; 4 fog height falloff
 constexpr int kScriptStateMaximumDepth = 32;
 constexpr std::uint32_t kScriptStateMaximumEntries = 1U << 20U;
 constexpr std::size_t kScriptStateMaximumBytes = 16U * 1024U * 1024U;
@@ -2065,6 +2069,21 @@ bool read_environment(ScriptStateReader& r, RenderEnvironment& e) {
     return true;
 }
 
+// Version 4: fog height falloff after the version 3 fog block. Version 3 states load with
+// the falloff at its default (0 = uniform fog), exactly what they rendered when written.
+void write_environment_fog_height(ScriptStateWriter& w, const RenderEnvironment& e) {
+    for (const float value : {e.fogHeightFalloffPerMeter, e.fogBaseHeightMeters})
+        w.u32(std::bit_cast<std::uint32_t>(value));
+}
+
+bool read_environment_fog_height(ScriptStateReader& r, RenderEnvironment& e) {
+    std::uint32_t raw[2]{};
+    for (std::uint32_t& value : raw) if (!r.u32(value)) return false;
+    e.fogHeightFalloffPerMeter = std::bit_cast<float>(raw[0]);
+    e.fogBaseHeightMeters = std::bit_cast<float>(raw[1]);
+    return true;
+}
+
 // Version 3: distance fog after the environment block.
 void write_environment_fog(ScriptStateWriter& w, const RenderEnvironment& e) {
     for (const float value : {e.fogDensityPerMeter, e.fogStartMeters, e.fogColor.x, e.fogColor.y, e.fogColor.z})
@@ -2089,7 +2108,7 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
     std::uint32_t magic{}, version{}, count{};
     if (!r.u32(magic) || !r.u32(version)) return failWith();
     if (magic != kScriptStateMagic) return r.bad("not a DVE script state blob"), failWith();
-    if (version != 1U && version != 2U && version != kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
+    if (version != 1U && version != 2U && version != 3U && version != kScriptStateVersion) return r.bad("unsupported script state version " + std::to_string(version)), failWith();
     contents.version = version;
     if (!r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid global count"), failWith();
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -2118,6 +2137,7 @@ bool parse_script_state(std::span<const std::byte> bytes, ScriptStateContents& c
         RenderEnvironment environment;
         if (!read_environment(r, environment)) return failWith();
         if (version >= 3U && !read_environment_fog(r, environment)) return failWith();
+        if (version >= 4U && !read_environment_fog_height(r, environment)) return failWith();
         contents.environment = environment;
         if (!r.text(contents.hudPrompt) || !r.u32(count) || count > kScriptStateMaximumEntries) return r.bad("invalid HUD state"), failWith();
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -2595,6 +2615,7 @@ std::optional<std::vector<std::byte>> GameScriptHost::save_state(std::string* er
     }
     write_environment(w, impl_->environment);
     write_environment_fog(w, impl_->environment);
+    write_environment_fog_height(w, impl_->environment);
     w.bytes(impl_->hud.interaction_prompt().data(), impl_->hud.interaction_prompt().size());
     w.u32(static_cast<std::uint32_t>(impl_->hud.tools().size()));
     for (const ui::ToolWheelEntry& tool : impl_->hud.tools()) {

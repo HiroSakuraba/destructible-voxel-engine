@@ -397,6 +397,20 @@ void test_scripts_disabled_and_polygon_seam() {
 
 // Polygon objects must reach the framebuffer. The renderer rescales them to voxel units and
 // used to keep the source content hash, so validation culled every polygon instance.
+void test_cpu_renderer_fog() {
+    auto renderer=make_cpu_player_renderer(nullptr);
+    std::string error;CHECK(renderer->resize(33,25,&error));
+    PlayerRenderView view;view.camera.position={0,0,0};view.camera.target={0,0,4};view.camera.farPlane=12;
+    CHECK(renderer->render(view,&error));const auto clearHash=hash_image(*renderer->readback());
+    GaborVolumeAsset asset;GaborVolumePrimitive primitive;primitive.scale={0.4F,0.5F,0.6F};primitive.opacity=3;
+    asset.primitives.push_back(primitive);asset.material.albedoTint={0.7F,0.3F,0.1F};asset.recompute_bounds_and_hash();
+    render::CpuFogVolume volume{&asset,{{0,0,4},{}}};view.fogVolumes=std::span(&volume,1);
+    view.fogSettings.scattering=true;view.fogSettings.threadCount=2;
+    CHECK(renderer->render(view,&error));CHECK(hash_image(*renderer->readback())!=clearHash);
+    CHECK(renderer->last_stats().fog.steps>0);CHECK(renderer->last_stats().fog.primitiveEvaluations>0);
+    view.fogSettings.enabled=false;CHECK(renderer->render(view,&error));CHECK(hash_image(*renderer->readback())==clearHash);
+}
+
 void test_cpu_renderer_draws_polygons() {
     std::string error;
     PlayerBootOptions options;
@@ -681,6 +695,7 @@ int main(int argc, char** argv) {
     test_sample_boot_loose_and_pak();
     test_scripts_disabled_and_polygon_seam();
     test_cpu_renderer_draws_polygons();
+    test_cpu_renderer_fog();
     test_save_directories();
     test_save_load();
     if (failures == 0) std::cout << "dve_player_runtime_tests: PASS\n";

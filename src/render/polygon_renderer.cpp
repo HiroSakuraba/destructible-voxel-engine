@@ -124,23 +124,55 @@ Float2 select_uv(const PolygonTextureBinding& binding, Float2 uv0, Float2 uv1) n
     return binding.texcoord == 1U ? uv1 : uv0;
 }
 
+// Perspective-correct per-fragment gradients; constant LOD remains available to
+// ray-based callers which do not have a pixel footprint.
+struct TextureLod {
+    float value{};
+    Float2 dx{},dy{};
+    Float3 worldDx{},worldDy{},objectDx{},objectDy{};
+    bool gradients{};
+    TextureLod(float v=0):value(v){}
+    TextureLod transformed(const TextureTransform2D& t) const {
+        auto out=*this;auto linear=t;linear.offset={};
+        out.dx=transform_texture_coordinates(dx,linear);out.dy=transform_texture_coordinates(dy,linear);
+        return out;
+    }
+};
 Float4 sample_binding_uv(const CookedPolygonAsset& asset,const PolygonTextureBinding& binding,
                          const std::vector<PolygonTextureMipChain>& chains,Float2 uv,
-                         float lod,PolygonRenderStats& stats,Float4 fallback) noexcept {
+                         TextureLod lod,PolygonRenderStats& stats,Float4 fallback,bool normalMap=false) noexcept {
     if(!binding.texture||*binding.texture>=asset.textures.size())return fallback;
     const PolygonTexture& texture=asset.textures[*binding.texture];
     if(texture.imageIndex>=chains.size()||chains[texture.imageIndex].levels.empty())return fallback;
     const PolygonSampler fallbackSampler{};
     const PolygonSampler& sampler=texture.samplerIndex&&*texture.samplerIndex<asset.samplers.size()?asset.samplers[*texture.samplerIndex]:fallbackSampler;
-    const auto& levels=chains[texture.imageIndex].levels;
-    const std::size_t level=std::min<std::size_t>(static_cast<std::size_t>(std::max(0.0F,std::floor(lod+0.5F))),levels.size()-1U);
+    const auto& chain=chains[texture.imageIndex];
+    const auto& levels=normalMap&&!chain.normalLevels.empty()?chain.normalLevels:
+        (binding.colorSpace==PolygonTextureColorSpace::Srgb&&!chain.srgbLevels.empty()?chain.srgbLevels:chain.levels);
+    float levelValue=lod.value;
+    if(lod.gradients){
+        const float w=static_cast<float>(levels[0].width),h=static_cast<float>(levels[0].height);
+        const float a=lod.dx.x*lod.dx.x*w*w+lod.dx.y*lod.dx.y*h*h;
+        const float b=lod.dy.x*lod.dy.x*w*w+lod.dy.y*lod.dy.y*h*h;
+        levelValue=std::log2(std::max(1.0F,std::sqrt(std::max(a,b))));
+    }
+    levelValue=std::clamp(levelValue,0.0F,static_cast<float>(levels.size()-1U));
+    const auto level=static_cast<std::size_t>(std::floor(levelValue));
     ++stats.textureSamples;
-    return sample_mip(levels[level],sampler,uv,binding.colorSpace);
+    const auto colorSpace=normalMap?PolygonTextureColorSpace::Linear:binding.colorSpace;
+    PolygonSampler filtered=sampler;
+    filtered.magFilter=levelValue>0?sampler.minFilter:sampler.magFilter;
+    const Float4 a=sample_mip(levels[level],filtered,uv,colorSpace);
+    if(sampler.minFilter==ImportedTextureFilter::Nearest||level+1U>=levels.size())return a;
+    const float fraction=levelValue-static_cast<float>(level);
+    if(fraction<=0)return a;
+    ++stats.textureSamples;
+    return add4(scale4(a,1-fraction),scale4(sample_mip(levels[level+1],filtered,uv,colorSpace),fraction));
 }
 
 Float4 sample_binding(const CookedPolygonAsset& asset,const PolygonTextureBinding& binding,
                       const std::vector<PolygonTextureMipChain>& chains,Float2 uv0,Float2 uv1,
-                      float lod,PolygonRenderStats& stats,Float4 fallback) noexcept {
+                      TextureLod lod,PolygonRenderStats& stats,Float4 fallback) noexcept {
     return sample_binding_uv(asset,binding,chains,select_uv(binding,uv0,uv1),lod,stats,fallback);
 }
 
@@ -154,13 +186,19 @@ Float4 weighted4(Float4 a,Float4 b,Float4 c,Float3 weights) noexcept {
 Float4 sample_triplanar_binding(const CookedPolygonAsset& asset,const PolygonTextureBinding& binding,
                                 const std::vector<PolygonTextureMipChain>& chains,
                                 Float3 position,Float3 normal,const TextureTransform2D& transform,
-                                float scale,float sharpness,float lod,PolygonRenderStats& stats,
-                                Float4 fallback) noexcept {
+                                float scale,float sharpness,TextureLod lod,PolygonRenderStats& stats,
+                                Float4 fallback,bool normalMap=false) noexcept {
     if(!binding.texture)return fallback;
     const TriplanarCoordinates coordinates=make_triplanar_coordinates(position,normal,scale,sharpness);
-    const Float4 x=sample_binding_uv(asset,binding,chains,transform_texture_coordinates(coordinates.xProjection,transform),lod,stats,fallback);
-    const Float4 y=sample_binding_uv(asset,binding,chains,transform_texture_coordinates(coordinates.yProjection,transform),lod,stats,fallback);
-    const Float4 z=sample_binding_uv(asset,binding,chains,transform_texture_coordinates(coordinates.zProjection,transform),lod,stats,fallback);
+    const auto plane=[&](int axis){
+        auto out=lod;
+        const auto uv=[&](Float3 v){return axis==0?Float2{v.z*scale,v.y*scale}:
+            (axis==1?Float2{v.x*scale,v.z*scale}:Float2{v.x*scale,v.y*scale});};
+        out.dx=uv(lod.worldDx);out.dy=uv(lod.worldDy);return out.transformed(transform);
+    };
+    const Float4 x=sample_binding_uv(asset,binding,chains,transform_texture_coordinates(coordinates.xProjection,transform),plane(0),stats,fallback,normalMap);
+    const Float4 y=sample_binding_uv(asset,binding,chains,transform_texture_coordinates(coordinates.yProjection,transform),plane(1),stats,fallback,normalMap);
+    const Float4 z=sample_binding_uv(asset,binding,chains,transform_texture_coordinates(coordinates.zProjection,transform),plane(2),stats,fallback,normalMap);
     stats.triplanarSamples+=3U;
     return weighted4(x,y,z,coordinates.weights);
 }
@@ -169,15 +207,17 @@ Float4 sample_mapped_binding(const CookedPolygonAsset& asset,const PolygonTextur
                              const std::vector<PolygonTextureMipChain>& chains,
                              const MaterialMappingSettings& mapping,Float2 mappedUv,
                              Float3 worldPosition,Float3 objectPosition,Float3 normal,
-                             const TextureTransform2D& transform,float scaleMultiplier,float lod,
-                             PolygonRenderStats& stats,Float4 fallback) noexcept {
+                             const TextureTransform2D& transform,float scaleMultiplier,TextureLod lod,
+                             PolygonRenderStats& stats,Float4 fallback,bool normalMap=false) noexcept {
     if(mapping.mappingMode==MaterialMappingMode::WorldTriplanar)
         return sample_triplanar_binding(asset,binding,chains,worldPosition,normal,transform,
-            mapping.triplanarScale*scaleMultiplier,mapping.triplanarBlendSharpness,lod,stats,fallback);
-    if(mapping.mappingMode==MaterialMappingMode::ObjectTriplanar)
+            mapping.triplanarScale*scaleMultiplier,mapping.triplanarBlendSharpness,lod,stats,fallback,normalMap);
+    if(mapping.mappingMode==MaterialMappingMode::ObjectTriplanar){
+        lod.worldDx=lod.objectDx;lod.worldDy=lod.objectDy;
         return sample_triplanar_binding(asset,binding,chains,objectPosition,normal,transform,
-            mapping.triplanarScale*scaleMultiplier,mapping.triplanarBlendSharpness,lod,stats,fallback);
-    return sample_binding_uv(asset,binding,chains,mappedUv,lod,stats,fallback);
+            mapping.triplanarScale*scaleMultiplier,mapping.triplanarBlendSharpness,lod,stats,fallback,normalMap);
+    }
+    return sample_binding_uv(asset,binding,chains,mappedUv,lod.transformed(transform),stats,fallback,normalMap);
 }
 
 MaterialSurfaceSample sample_layer_surface(
@@ -191,7 +231,7 @@ MaterialSurfaceSample sample_layer_surface(
     Float3 geometricNormal,
     Float3 tangent,
     Float3 bitangent,
-    float lod,
+    TextureLod lod,
     bool enableTextures,
     PolygonRenderStats& stats) noexcept {
     MaterialSurfaceSample sample;
@@ -247,11 +287,11 @@ MaterialSurfaceSample sample_layer_surface(
                 position,geometricNormal,binding.mapping.triplanarScale,
                 binding.mapping.triplanarBlendSharpness);
             const Float4 sx=sample_binding_uv(asset,binding.normal,chains,
-                transform_texture_coordinates(tc.xProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F});
+                transform_texture_coordinates(tc.xProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float4 sy=sample_binding_uv(asset,binding.normal,chains,
-                transform_texture_coordinates(tc.yProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F});
+                transform_texture_coordinates(tc.yProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float4 sz=sample_binding_uv(asset,binding.normal,chains,
-                transform_texture_coordinates(tc.zProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F});
+                transform_texture_coordinates(tc.zProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float3 nx=normalize(Float3{(sx.z*2.0F-1.0F)*(geometricNormal.x<0?-1.0F:1.0F),(sx.y*2.0F-1.0F)*binding.normalScale,(sx.x*2.0F-1.0F)*binding.normalScale});
             const Float3 ny=normalize(Float3{(sy.x*2.0F-1.0F)*binding.normalScale,(sy.z*2.0F-1.0F)*(geometricNormal.y<0?-1.0F:1.0F),(sy.y*2.0F-1.0F)*binding.normalScale});
             const Float3 nz=normalize(Float3{(sz.x*2.0F-1.0F)*binding.normalScale,(sz.y*2.0F-1.0F)*binding.normalScale,(sz.z*2.0F-1.0F)*(geometricNormal.z<0?-1.0F:1.0F)});
@@ -259,7 +299,7 @@ MaterialSurfaceSample sample_layer_surface(
             sample.normal={dot(worldLayer,tangent),dot(worldLayer,bitangent),dot(worldLayer,geometricNormal)};
             stats.triplanarSamples+=3U;
         } else {
-            const Float4 nm=sample_binding_uv(asset,binding.normal,chains,mapped,lod,stats,{0.5F,0.5F,1.0F,1.0F});
+            const Float4 nm=sample_binding_uv(asset,binding.normal,chains,mapped,lod,stats,{0.5F,0.5F,1.0F,1.0F},true);
             sample.normal=normalize(Float3{(nm.x*2.0F-1.0F)*binding.normalScale,
                                            (nm.y*2.0F-1.0F)*binding.normalScale,
                                            nm.z*2.0F-1.0F});
@@ -369,9 +409,9 @@ Float4 material_debug_output(PolygonMaterialDebugView view, Float4 base, Float3 
             return {detailFade, detailFade, detailFade, 1.0F};
         case PolygonMaterialDebugView::ParallaxSampleCount: {
             const std::uint32_t maximum = mapping.heightMode == HeightMappingMode::ParallaxOcclusion
-                ? mapping.maximumHeightSteps + mapping.refinementSteps
+                ? mapping.maximumHeightSteps + 1U + mapping.refinementSteps
                 : (mapping.heightMode == HeightMappingMode::SteepParallax
-                    ? mapping.maximumHeightSteps
+                    ? mapping.maximumHeightSteps + 1U
                     : (mapping.heightMode == HeightMappingMode::OffsetParallax ? 1U : 0U));
             const float normalized = maximum == 0U ? 0.0F
                 : std::clamp(static_cast<float>(parallaxSamples) / static_cast<float>(maximum),
@@ -390,6 +430,7 @@ struct DeferredTriangle {
     const CookedPolygonAsset* asset{};const PolygonSubmesh* submesh{};const PolygonMaterialBinding* binding{};
     const VoxelMaterialDefinition* material{};std::array<ScreenVertex,3> v{};std::uint64_t objectId{};Float4 tint{};
     Float3 cameraPosition{};
+    float nearPlane{},farPlane{};
     float sortDepth{};bool frontFacing{};std::shared_ptr<const std::vector<PolygonTextureMipChain>> mips;
     // Subsurface translucency: the mesh's BVH (only for assets with a Subsurface material) and pose.
     const PolygonBvh* subsurfaceBvh{};RigidTransform transform{};
@@ -540,31 +581,14 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
     if(minX>maxX||minY>maxY)return;
     ++stats.rasterizedTriangles;
 
-    float textureLod = 0.0F;
-    const std::array<const PolygonTextureBinding*,9> textureBindings{{
-        &tri.binding->baseColor,&tri.binding->metallicRoughness,&tri.binding->normal,
-        &tri.binding->emissive,&tri.binding->opacity,&tri.binding->height,
-        &tri.binding->detailBaseColor,&tri.binding->detailNormal,&tri.binding->detailRoughness}};
-    const auto accumulate_texture_lod = [&](const PolygonTextureBinding& textureBinding) {
-        if(!textureBinding.texture||*textureBinding.texture>=tri.asset->textures.size())return;
-        const PolygonTexture& texture=tri.asset->textures[*textureBinding.texture];
-        if(texture.imageIndex>=tri.asset->images.size())return;
-        const PolygonImage& image=tri.asset->images[texture.imageIndex];
-        const Float2 uvA=textureBinding.texcoord==1U?tri.v[0].uv1:tri.v[0].uv;
-        const Float2 uvB=textureBinding.texcoord==1U?tri.v[1].uv1:tri.v[1].uv;
-        const Float2 uvC=textureBinding.texcoord==1U?tri.v[2].uv1:tri.v[2].uv;
-        const float uvArea=std::abs((uvB.x-uvA.x)*(uvC.y-uvA.y)-(uvB.y-uvA.y)*(uvC.x-uvA.x));
-        const float screenArea=std::abs(area);
-        if(screenArea>kEpsilon&&uvArea>0.0F){
-            const float coveredTexels=uvArea*static_cast<float>(image.width)*static_cast<float>(image.height);
-            textureLod=std::max(textureLod,std::log2(std::max(1.0F,std::sqrt(coveredTexels/screenArea))));
-        }
+    const float dwDx[3]{(tri.v[2].y-tri.v[1].y)/area,(tri.v[0].y-tri.v[2].y)/area,(tri.v[1].y-tri.v[0].y)/area};
+    const float dwDy[3]{-(tri.v[2].x-tri.v[1].x)/area,-(tri.v[0].x-tri.v[2].x)/area,-(tri.v[1].x-tri.v[0].x)/area};
+    const auto gradient=[&](const float* dw,Float3 value,Float3 a,Float3 b,Float3 c,float invZ){
+        Float3 numerator{};float denominator=0;
+        const Float3 values[]{a,b,c};
+        for(int i=0;i<3;++i){const float w=dw[i]*tri.v[i].invZ;numerator=add(numerator,multiply(values[i],w));denominator+=w;}
+        return multiply(subtract(numerator,multiply(value,denominator)),1/invZ);
     };
-    for(const PolygonTextureBinding* textureBinding:textureBindings) accumulate_texture_lod(*textureBinding);
-    for(const PolygonMaterialLayerBinding& layerBinding:tri.binding->layers){
-        accumulate_texture_lod(layerBinding.mask);
-        accumulate_texture_lod(layerBinding.height);
-    }
 
     for(int y=minY;y<=maxY;++y)for(int x=minX;x<=maxX;++x){
         const float px=static_cast<float>(x)+0.5F,py=static_cast<float>(y)+0.5F;
@@ -573,14 +597,17 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         float w2=1.0F-w0-w1;if(w0<-kEpsilon||w1<-kEpsilon||w2<-kEpsilon)continue;
         const float invZ=w0*tri.v[0].invZ+w1*tri.v[1].invZ+w2*tri.v[2].invZ;if(invZ<=0)continue;
         w0=w0*tri.v[0].invZ/invZ;w1=w1*tri.v[1].invZ/invZ;w2=1.0F-w0-w1;
-        const float depth=w0*tri.v[0].depth+w1*tri.v[1].depth+w2*tri.v[2].depth;
+        float depth=w0*tri.v[0].depth+w1*tri.v[1].depth+w2*tri.v[2].depth;
         const std::size_t index=static_cast<std::size_t>(y)*target.width+static_cast<std::size_t>(x);
-        if(depth>=target.depth[index]){++stats.depthRejectedFragments;continue;}
+        const bool relief=options.surfaceDetail.reliefDepthMeters>0&&options.enableTextures&&tri.binding->height.texture&&
+            tri.binding->mapping.heightMode!=HeightMappingMode::Off&&
+            (tri.binding->mapping.mappingMode==MaterialMappingMode::UV0||tri.binding->mapping.mappingMode==MaterialMappingMode::UV1);
+        if(!relief&&depth>=target.depth[index]){++stats.depthRejectedFragments;continue;}
         Float2 uv{w0*tri.v[0].uv.x+w1*tri.v[1].uv.x+w2*tri.v[2].uv.x,
                   w0*tri.v[0].uv.y+w1*tri.v[1].uv.y+w2*tri.v[2].uv.y};
         Float2 uv1{w0*tri.v[0].uv1.x+w1*tri.v[1].uv1.x+w2*tri.v[2].uv1.x,
                    w0*tri.v[0].uv1.y+w1*tri.v[1].uv1.y+w2*tri.v[2].uv1.y};
-        const Float3 worldPosition{
+        Float3 worldPosition{
             w0*tri.v[0].worldPosition.x+w1*tri.v[1].worldPosition.x+w2*tri.v[2].worldPosition.x,
             w0*tri.v[0].worldPosition.y+w1*tri.v[1].worldPosition.y+w2*tri.v[2].worldPosition.y,
             w0*tri.v[0].worldPosition.z+w1*tri.v[1].worldPosition.z+w2*tri.v[2].worldPosition.z};
@@ -588,6 +615,18 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             w0*tri.v[0].objectPosition.x+w1*tri.v[1].objectPosition.x+w2*tri.v[2].objectPosition.x,
             w0*tri.v[0].objectPosition.y+w1*tri.v[1].objectPosition.y+w2*tri.v[2].objectPosition.y,
             w0*tri.v[0].objectPosition.z+w1*tri.v[1].objectPosition.z+w2*tri.v[2].objectPosition.z};
+        TextureLod textureLod;
+        textureLod.gradients=options.enableMipSelection;
+        const bool secondUv=tri.binding->mapping.mappingMode==MaterialMappingMode::UV1;
+        const Float2 chosen=secondUv?uv1:uv;
+        const auto uv3=[](Float2 q){return Float3{q.x,q.y,0};};
+        const Float3 ua=uv3(secondUv?tri.v[0].uv1:tri.v[0].uv),ub=uv3(secondUv?tri.v[1].uv1:tri.v[1].uv),uc=uv3(secondUv?tri.v[2].uv1:tri.v[2].uv);
+        const Float3 gx=gradient(dwDx,uv3(chosen),ua,ub,uc,invZ),gy=gradient(dwDy,uv3(chosen),ua,ub,uc,invZ);
+        textureLod.dx={gx.x,gx.y};textureLod.dy={gy.x,gy.y};
+        textureLod.worldDx=gradient(dwDx,worldPosition,tri.v[0].worldPosition,tri.v[1].worldPosition,tri.v[2].worldPosition,invZ);
+        textureLod.worldDy=gradient(dwDy,worldPosition,tri.v[0].worldPosition,tri.v[1].worldPosition,tri.v[2].worldPosition,invZ);
+        textureLod.objectDx=gradient(dwDx,objectPosition,tri.v[0].objectPosition,tri.v[1].objectPosition,tri.v[2].objectPosition,invZ);
+        textureLod.objectDy=gradient(dwDy,objectPosition,tri.v[0].objectPosition,tri.v[1].objectPosition,tri.v[2].objectPosition,invZ);
         Float4 vertexColor{w0*tri.v[0].color.x+w1*tri.v[1].color.x+w2*tri.v[2].color.x,
                            w0*tri.v[0].color.y+w1*tri.v[1].color.y+w2*tri.v[2].color.y,
                            w0*tri.v[0].color.z+w1*tri.v[1].color.z+w2*tri.v[2].color.z,
@@ -610,11 +649,36 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         Float2 selectedUv=tri.binding->mapping.mappingMode==MaterialMappingMode::UV1?uv1:uv;
         Float2 mappedUv=transform_texture_coordinates(selectedUv,tri.binding->mapping.baseTransform);
         std::uint32_t fragmentParallaxSamples = 0U;
+        float fragmentHeight=tri.binding->mapping.heightReferencePlane;
+        bool heightHit=false;
+        float reliefOffset=0;
+        const auto heightSampler=[&](Float2 sampleUv){return sample_binding_uv(*tri.asset,tri.binding->height,chains,sampleUv,textureLod.transformed(tri.binding->mapping.baseTransform),stats,{0.5F,0.5F,0.5F,1.0F}).x;};
         if(options.enableTextures&&tri.binding->height.texture&&tri.binding->mapping.heightMode!=HeightMappingMode::Off){
-            const auto heightSampler=[&](Float2 sampleUv){return sample_binding_uv(*tri.asset,tri.binding->height,chains,sampleUv,textureLod,stats,{0.5F,0.5F,0.5F,1.0F}).x;};
-            const ParallaxMappingResult parallax=apply_parallax_mapping(mappedUv,viewTangent,cameraDistance,tri.binding->mapping,heightSampler);
-            mappedUv=parallax.uv;fragmentParallaxSamples=parallax.samples;stats.parallaxSamples+=parallax.samples;
+            const auto mappedLod=textureLod.transformed(tri.binding->mapping.baseTransform);
+            const float footprint=options.enableMipSelection?std::max(std::hypot(mappedLod.dx.x,mappedLod.dx.y),std::hypot(mappedLod.dy.x,mappedLod.dy.y)):0;
+            const auto& heightTexture=tri.asset->textures[*tri.binding->height.texture];
+            Float2 heightBounds=chains[heightTexture.imageIndex].heightBounds;
+            if(tri.binding->height.colorSpace==PolygonTextureColorSpace::Srgb)heightBounds={srgb_to_linear(heightBounds.x),srgb_to_linear(heightBounds.y)};
+            const ParallaxMappingResult parallax=apply_parallax_mapping(mappedUv,viewTangent,cameraDistance*resolve_meters_per_voxel(options.metersPerUnit),
+                tri.binding->mapping,heightSampler,{std::clamp(options.surfaceDetail.maximumParallaxSteps,1U,128U),footprint,heightBounds});
+            if(parallax.valid){mappedUv=parallax.uv;heightHit=parallax.hit;fragmentHeight=parallax.layerDepth;}
+            if(!parallax.valid||!parallax.hit)++stats.parallaxFallbacks;
+            fragmentParallaxSamples=parallax.samples;stats.parallaxSamples+=parallax.samples;
+            if(relief&&heightHit&&viewTangent.z>0.08F){
+                const float fade=std::clamp(1-cameraDistance*resolve_meters_per_voxel(options.metersPerUnit)/tri.binding->mapping.maximumParallaxDistanceMeters,0.0F,1.0F);
+                reliefOffset=(fragmentHeight-tri.binding->mapping.heightReferencePlane)*options.surfaceDetail.reliefDepthMeters*fade/
+                    (resolve_meters_per_voxel(options.metersPerUnit)*viewTangent.z);
+                // depth is affine in camera-space Z; scale the original camera Z
+                // by the ray-distance ratio. Near/far and surface occlusion use
+                // the corrected value before any colour/AOV is written.
+                const float cameraZ=w0*tri.v[0].cameraZ+w1*tri.v[1].cameraZ+w2*tri.v[2].cameraZ;
+                const float correctedZ=cameraZ*(1+reliefOffset/std::max(cameraDistance,1e-6F));
+                // The camera near/far span is retained in DeferredTriangle.
+                depth=(correctedZ-tri.nearPlane)/(tri.farPlane-tri.nearPlane);
+                worldPosition=subtract(worldPosition,multiply(viewWorld,reliefOffset));
+            }
         }
+        if(depth<0||depth>=1||depth>=target.depth[index]){++stats.depthRejectedFragments;continue;}
         const Float4 textureColor=options.enableTextures?sample_mapped_binding(*tri.asset,tri.binding->baseColor,chains,tri.binding->mapping,mappedUv,worldPosition,objectPosition,normal,tri.binding->mapping.baseTransform,1.0F,textureLod,stats,{1,1,1,1}):Float4{1,1,1,1};
         const Float4 mr=options.enableTextures?sample_mapped_binding(*tri.asset,tri.binding->metallicRoughness,chains,tri.binding->mapping,mappedUv,worldPosition,objectPosition,normal,tri.binding->mapping.baseTransform,1.0F,textureLod,stats,{1,1,1,1}):Float4{1,1,1,1};
         const Float4 emissiveMap=options.enableTextures?sample_mapped_binding(*tri.asset,tri.binding->emissive,chains,tri.binding->mapping,mappedUv,worldPosition,objectPosition,normal,tri.binding->mapping.baseTransform,1.0F,textureLod,stats,{1,1,1,1}):Float4{1,1,1,1};
@@ -624,7 +688,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         VoxelMaterialDefinition effective=*tri.material;
         if(tri.binding->metallicRoughness.texture){effective.roughness=std::clamp(effective.roughness*mr.y,0.0F,1.0F);effective.metallic=std::clamp(effective.metallic*mr.z,0.0F,1.0F);}
         if(tri.binding->emissive.texture)effective.emissive=mul3(effective.emissive,{emissiveMap.x,emissiveMap.y,emissiveMap.z});
-        const float detailFade=material_detail_fade(cameraDistance,tri.binding->mapping);
+        const float detailFade=material_detail_fade(cameraDistance*resolve_meters_per_voxel(options.metersPerUnit),tri.binding->mapping);
         Float2 detailUv=transform_texture_coordinates(selectedUv,tri.binding->mapping.detailTransform);
         if(options.enableTextures&&detailFade>0.0F&&tri.binding->detailBaseColor.texture){
             const Float4 detail=sample_mapped_binding(*tri.asset,tri.binding->detailBaseColor,chains,tri.binding->mapping,detailUv,worldPosition,objectPosition,normal,tri.binding->mapping.detailTransform,8.0F,textureLod,stats,{0.5F,0.5F,0.5F,1.0F});
@@ -638,24 +702,37 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             if(tri.binding->mapping.mappingMode==MaterialMappingMode::WorldTriplanar||tri.binding->mapping.mappingMode==MaterialMappingMode::ObjectTriplanar){
                 const Float3 position=tri.binding->mapping.mappingMode==MaterialMappingMode::WorldTriplanar?worldPosition:objectPosition;
                 const TriplanarCoordinates tc=make_triplanar_coordinates(position,normal,tri.binding->mapping.triplanarScale,tri.binding->mapping.triplanarBlendSharpness);
-                const Float4 sx=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.xProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F});
-                const Float4 sy=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.yProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F});
-                const Float4 sz=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.zProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F});
+                const Float4 sx=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.xProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F},true);
+                const Float4 sy=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.yProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F},true);
+                const Float4 sz=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.zProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F},true);
                 const Float3 nx=normalize(Float3{(sx.z*2.0F-1.0F)*(normal.x<0?-1.0F:1.0F),(sx.y*2.0F-1.0F)*tri.binding->normalScale,(sx.x*2.0F-1.0F)*tri.binding->normalScale});
                 const Float3 ny=normalize(Float3{(sy.x*2.0F-1.0F)*tri.binding->normalScale,(sy.z*2.0F-1.0F)*(normal.y<0?-1.0F:1.0F),(sy.y*2.0F-1.0F)*tri.binding->normalScale});
                 const Float3 nz=normalize(Float3{(sz.x*2.0F-1.0F)*tri.binding->normalScale,(sz.y*2.0F-1.0F)*tri.binding->normalScale,(sz.z*2.0F-1.0F)*(normal.z<0?-1.0F:1.0F)});
                 normal=normalize(add(add(multiply(nx,tc.weights.x),multiply(ny,tc.weights.y)),multiply(nz,tc.weights.z)));stats.triplanarSamples+=3U;
             }else{
-                const Float4 nm=sample_binding_uv(*tri.asset,tri.binding->normal,chains,mappedUv,textureLod,stats,{0.5F,0.5F,1.0F,1.0F});
+                const Float4 nm=sample_binding_uv(*tri.asset,tri.binding->normal,chains,mappedUv,textureLod.transformed(tri.binding->mapping.baseTransform),stats,{0.5F,0.5F,1.0F,1.0F},true);
                 const Float3 mapNormal=normalize(Float3{(nm.x*2.0F-1.0F)*tri.binding->normalScale,(nm.y*2.0F-1.0F)*tri.binding->normalScale,nm.z*2.0F-1.0F});
                 normal=normalize(add(add(multiply(tangent,mapNormal.x),multiply(bitangent,mapNormal.y)),multiply(normal,mapNormal.z)));
             }
         }
+        if(options.enableTextures&&tri.binding->height.texture&&options.surfaceDetail.heightBumpStrength!=0&&
+           (tri.binding->mapping.mappingMode==MaterialMappingMode::UV0||tri.binding->mapping.mappingMode==MaterialMappingMode::UV1)){
+            const auto& texture=tri.asset->textures[*tri.binding->height.texture];
+            const auto& image=tri.asset->images[texture.imageIndex];
+            const Float2 texelSize{1.0F/static_cast<float>(image.width),1.0F/static_cast<float>(image.height)};
+            const auto bump=height_bump_normal(mappedUv,texelSize,options.surfaceDetail.heightBumpStrength,heightSampler);stats.bumpSamples+=4;
+            const auto gn=normalize(interpolatedNormal);
+            const Float3 baseTangent{dot(normal,tangent),dot(normal,bitangent),dot(normal,gn)};
+            const auto combined=blend_detail_normal(baseTangent,bump,1);
+            normal=normalize(add(add(multiply(tangent,combined.x),multiply(bitangent,combined.y)),multiply(gn,combined.z)));
+        }
         if(options.enableTextures&&detailFade>0.0F&&tri.binding->detailNormal.texture){
-            const Float4 dn=sample_mapped_binding(*tri.asset,tri.binding->detailNormal,chains,tri.binding->mapping,detailUv,worldPosition,objectPosition,normal,tri.binding->mapping.detailTransform,8.0F,textureLod,stats,{0.5F,0.5F,1.0F,1.0F});
+            const Float4 dn=sample_mapped_binding(*tri.asset,tri.binding->detailNormal,chains,tri.binding->mapping,detailUv,worldPosition,objectPosition,normal,tri.binding->mapping.detailTransform,8.0F,textureLod,stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float3 detailTangent=normalize(Float3{(dn.x*2.0F-1.0F)*tri.binding->detailNormalScale,(dn.y*2.0F-1.0F)*tri.binding->detailNormalScale,dn.z*2.0F-1.0F});
-            const Float3 detailWorld=normalize(add(add(multiply(tangent,detailTangent.x),multiply(bitangent,detailTangent.y)),multiply(normal,detailTangent.z)));
-            normal=blend_detail_normal(normal,detailWorld,tri.binding->mapping.detailNormalStrength*detailFade);++stats.detailSamples;
+            const Float3 geometricNormal=normalize(interpolatedNormal);
+            const Float3 baseTangent{dot(normal,tangent),dot(normal,bitangent),dot(normal,geometricNormal)};
+            const Float3 combined=blend_detail_normal(baseTangent,detailTangent,tri.binding->mapping.detailNormalStrength*detailFade);
+            normal=normalize(add(add(multiply(tangent,combined.x),multiply(bitangent,combined.y)),multiply(geometricNormal,combined.z)));++stats.detailSamples;
         }
 
         float layerDebugMask=0.0F;
@@ -758,12 +835,21 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                     tri.subsurfaceBvh&&material_has_subsurface(effective)&&options.subsurfaceDiffusionSamples>0U
                         ? polygon_diffused_sun(tri,effective,worldPosition,normal,environment,options,index,stats) : -1.0F,
                     polygon_ambient_occlusion(worldPosition,normal,environment,options,index,stats));
+            if(options.surfaceDetail.parallaxSelfShadow&&heightHit&&tri.binding->height.texture){
+                const auto sun=normalize(environment.sunDirection);
+                const Float3 tangentSun{dot(sun,tangent),dot(sun,bitangent),dot(sun,normalize(interpolatedNormal))};
+                const auto shadow=parallax_height_shadow(mappedUv,fragmentHeight,tangentSun,tri.binding->mapping,heightSampler,
+                    std::clamp(options.surfaceDetail.shadowSteps,1U,64U));
+                stats.parallaxShadowSamples+=shadow.samples;
+                passes.light.directDiffuse=multiply(passes.light.directDiffuse,shadow.visibility);
+                passes.light.directSpecular=multiply(passes.light.directSpecular,shadow.visibility);
+            }
             shaded=beauty(passes.light,base.w);
         }
         if(target.passes.enabled){
             passes.normal=normal;
             const float cameraZ=w0*tri.v[0].cameraZ+w1*tri.v[1].cameraZ+w2*tri.v[2].cameraZ;
-            passes.depthMeters=cameraZ*(options.metersPerUnit>0.0F?options.metersPerUnit:kDefaultMetersPerVoxel);
+            passes.depthMeters=cameraZ*(1+reliefOffset/std::max(cameraDistance,1e-6F))*resolve_meters_per_voxel(options.metersPerUnit);
         }
         if(!debugView&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
             const float alpha=std::clamp(shaded.w,0.0F,1.0F);const Float4 old=target.hdrColor[index];
@@ -772,6 +858,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             ++stats.transparentFragments;
         }else{
             target.hdrColor[index]=shaded;target.depth[index]=depth;
+            if(relief&&heightHit)++stats.reliefDepthWrites;
             target.write_passes(index,passes,1.0F,true);
             if(options.writeObjectIds){target.objectId[index]=tri.objectId;target.materialIndex[index]=tri.submesh->materialIndex;}
         }
@@ -1088,7 +1175,7 @@ float polygon_hit_opacity(const CookedPolygonAsset& asset, const PolygonBvhHit& 
     return surface.opacity;
 }
 
-PolygonTextureMipChain generate_texture_mips(const PolygonImage& image) {
+PolygonTextureMipChain generate_texture_mips(const PolygonImage& image,bool normalMap,bool srgb) {
     PolygonTextureMipChain chain;
     const std::size_t requiredBytes =
         static_cast<std::size_t>(image.width) * image.height * 4U;
@@ -1096,6 +1183,9 @@ PolygonTextureMipChain generate_texture_mips(const PolygonImage& image) {
         return chain;
     }
 
+    chain.heightBounds={1,0};
+    for(std::size_t i=0;i<image.rgba8.size();i+=4){const float h=static_cast<float>(image.rgba8[i])/255;
+        chain.heightBounds.x=std::min(chain.heightBounds.x,h);chain.heightBounds.y=std::max(chain.heightBounds.y,h);}
     chain.levels.push_back({image.width, image.height, image.rgba8});
     while (chain.levels.back().width > 1U || chain.levels.back().height > 1U) {
         const auto& source = chain.levels.back();
@@ -1104,28 +1194,22 @@ PolygonTextureMipChain generate_texture_mips(const PolygonImage& image) {
         next.height = std::max(1U, source.height / 2U);
         next.rgba8.resize(static_cast<std::size_t>(next.width) * next.height * 4U);
 
-        for (std::uint32_t y = 0; y < next.height; ++y) {
-            for (std::uint32_t x = 0; x < next.width; ++x) {
-                for (std::uint32_t channel = 0; channel < 4U; ++channel) {
-                    std::uint32_t sum = 0;
-                    std::uint32_t sampleCount = 0;
-                    for (std::uint32_t offsetY = 0; offsetY < 2U; ++offsetY) {
-                        for (std::uint32_t offsetX = 0; offsetX < 2U; ++offsetX) {
-                            const std::uint32_t sourceX =
-                                std::min(source.width - 1U, x * 2U + offsetX);
-                            const std::uint32_t sourceY =
-                                std::min(source.height - 1U, y * 2U + offsetY);
-                            sum += source.rgba8[
-                                (static_cast<std::size_t>(sourceY) * source.width + sourceX) * 4U +
-                                channel];
-                            ++sampleCount;
-                        }
-                    }
-                    next.rgba8[
-                        (static_cast<std::size_t>(y) * next.width + x) * 4U + channel] =
-                        static_cast<std::uint8_t>((sum + sampleCount / 2U) / sampleCount);
-                }
+        for(std::uint32_t y=0;y<next.height;++y)for(std::uint32_t x=0;x<next.width;++x){
+            Float4 sum{};std::uint32_t count=0;
+            // Cover odd-sized edges as well as power-of-two textures.
+            const auto xEnd=(x+1)*source.width/next.width,yEnd=(y+1)*source.height/next.height;
+            for(auto sy=y*source.height/next.height;sy<yEnd;++sy)for(auto sx=x*source.width/next.width;sx<xEnd;++sx){
+                const auto t=texel(source,sx,sy,srgb?PolygonTextureColorSpace::Srgb:PolygonTextureColorSpace::Linear);
+                sum=add4(sum,t);++count;
             }
+            Float4 v=scale4(sum,1.0F/static_cast<float>(count));
+            if(normalMap){const auto n=normalize(Float3{v.x*2-1,v.y*2-1,v.z*2-1});v.x=n.x*0.5F+0.5F;v.y=n.y*0.5F+0.5F;v.z=n.z*0.5F+0.5F;}
+            const auto encode=[&](float value,bool color){
+                if(color)value=value<=0.0031308F?value*12.92F:1.055F*std::pow(value,1/2.4F)-0.055F;
+                return static_cast<std::uint8_t>(std::lround(std::clamp(value,0.0F,1.0F)*255));
+            };
+            const std::size_t o=(static_cast<std::size_t>(y)*next.width+x)*4;
+            next.rgba8[o]=encode(v.x,srgb);next.rgba8[o+1]=encode(v.y,srgb);next.rgba8[o+2]=encode(v.z,srgb);next.rgba8[o+3]=encode(v.w,false);
         }
         chain.levels.push_back(std::move(next));
     }
@@ -1188,6 +1272,18 @@ PolygonRenderStats ReferencePolygonRenderer::render(
         std::size_t bytes=0;
         for(const auto& image:asset.images){
             chains->push_back(generate_texture_mips(image)); ++stats.mipChainsBuilt;
+            auto& chain=chains->back();
+            const auto imageIndex=static_cast<std::size_t>(&image-asset.images.data());
+            bool normalUse=false,srgbUse=false;
+            const auto uses=[&](const PolygonTextureBinding& binding){return binding.texture&&*binding.texture<asset.textures.size()&&asset.textures[*binding.texture].imageIndex==imageIndex;};
+            for(const auto& b:asset.materialBindings){
+                normalUse=normalUse||uses(b.normal)||uses(b.detailNormal);
+                for(const auto* slot:{&b.baseColor,&b.emissive,&b.detailBaseColor})srgbUse=srgbUse||(uses(*slot)&&slot->colorSpace==PolygonTextureColorSpace::Srgb);
+            }
+            // Variant level sets live inside the image's one chain; mipChainsBuilt counts
+            // chains (one per image per cache miss), not variants.
+            if(normalUse){chain.normalLevels=generate_texture_mips(image,true).levels;for(const auto& m:chain.normalLevels)bytes+=m.rgba8.size();}
+            if(srgbUse){chain.srgbLevels=generate_texture_mips(image,false,true).levels;for(const auto& m:chain.srgbLevels)bytes+=m.rgba8.size();}
             for(const auto& mip:chains->back().levels)bytes+=mip.rgba8.size();
         }
         frameAsset.mips=chains;
@@ -1322,6 +1418,7 @@ PolygonRenderStats ReferencePolygonRenderer::render(
                     instance.objectId,
                     instance.tint,
                     camera.position,
+                    camera.nearPlane,camera.farPlane,
                     (vertices[0].cameraZ + vertices[1].cameraZ + vertices[2].cameraZ) / 3.0F,
                     frontFacing,
                     mips,

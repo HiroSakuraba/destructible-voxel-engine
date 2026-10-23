@@ -708,6 +708,8 @@ if(DVE_BUILD_RHI)
         src/render/dashr_live_surface.cpp
         src/render/mesh_heap.cpp
         src/render/polygon_renderer.cpp
+        src/render/cpu_fog.cpp
+        src/render/cpu_fog_cache.cpp
         src/render/sprite_renderer.cpp
         src/render/texture_residency.cpp
         src/render/texture_preview.cpp
@@ -742,6 +744,8 @@ if(DVE_BUILD_RHI)
         target_sources(dve_render_bridge PRIVATE src/render/cpu_hair_renderer.cpp)
     endif()
     add_library(dve::render_bridge ALIAS dve_render_bridge)
+    add_executable(dve_cpu_fog_bench apps/cpu_fog_bench.cpp)
+    target_link_libraries(dve_cpu_fog_bench PRIVATE dve::render_bridge)
     target_include_directories(dve_render_bridge PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_render_bridge PUBLIC cxx_std_23)
     target_link_libraries(dve_render_bridge PUBLIC dve::core dve::rhi)
@@ -3179,6 +3183,16 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_specular_shading_tests tests/test_specular_shading.cpp)
     target_link_libraries(dve_specular_shading_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_specular_shading_tests COMMAND dve_specular_shading_tests)
+    add_executable(dve_cpu_fog_quality_tests tests/test_cpu_fog_quality.cpp)
+    target_link_libraries(dve_cpu_fog_quality_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_cpu_fog_quality_tests COMMAND dve_cpu_fog_quality_tests)
+    add_executable(dve_cpu_surface_detail_tests tests/test_cpu_surface_detail.cpp)
+    target_link_libraries(dve_cpu_surface_detail_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_cpu_surface_detail_tests COMMAND dve_cpu_surface_detail_tests)
+    add_executable(dve_cpu_fog_tests tests/test_cpu_fog.cpp)
+    target_link_libraries(dve_cpu_fog_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_cpu_fog_tests COMMAND dve_cpu_fog_tests)
+
     add_executable(dve_render_passes_tests tests/test_render_passes.cpp)
     target_link_libraries(dve_render_passes_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_render_passes_tests COMMAND dve_render_passes_tests)

@@ -146,77 +146,97 @@ ParallaxMappingResult apply_parallax_mapping(
     Float3 tangentSpaceViewDirection,
     float cameraDistanceMeters,
     const MaterialMappingSettings& settings,
-    const HeightSampleFunction& sampleHeight) {
+    const HeightSampleFunction& sampleHeight, const ParallaxTraceOptions& options) {
     ParallaxMappingResult result{uv, 0U, true};
     if (settings.heightMode == HeightMappingMode::Off || settings.heightScale <= 0.0F ||
         cameraDistanceMeters >= settings.maximumParallaxDistanceMeters) {
         return result;
     }
 
+    if (!validate_material_mapping_settings(settings) || options.maximumSteps==0 || options.maximumSteps>128 ||
+        !finite(options.pixelFootprintUv) || options.pixelFootprintUv<0 || !finite(options.heightBounds) ||
+        options.heightBounds.x<0 || options.heightBounds.y>1 || options.heightBounds.x>options.heightBounds.y || !finite(uv) ||
+        !finite(cameraDistanceMeters) || cameraDistanceMeters < 0.0F || !sampleHeight ||
+        !std::isfinite(tangentSpaceViewDirection.x) || !std::isfinite(tangentSpaceViewDirection.y) ||
+        !std::isfinite(tangentSpaceViewDirection.z)) {
+        result.valid = false;
+        return result;
+    }
     const Float3 view = normalize3(tangentSpaceViewDirection);
-    const float viewZ = std::max(std::abs(view.z), 0.08F);
+    if (view.z <= 0.0F) return result;
+    const float viewZ = std::max(view.z, 0.08F);
     const float distanceFade = saturate(1.0F - cameraDistanceMeters /
         settings.maximumParallaxDistanceMeters);
-    const Float2 direction{
-        (view.x / viewZ) * settings.heightScale * distanceFade,
-        (view.y / viewZ) * settings.heightScale * distanceFade,
-    };
-
+    const float grazingFade = saturate(view.z / 0.08F);
+    const float projectedFade=options.pixelFootprintUv>0?saturate(settings.heightScale/options.pixelFootprintUv):1.0F;
+    const Float2 direction{view.x / viewZ * settings.heightScale * distanceFade * grazingFade * projectedFade,
+                           view.y / viewZ * settings.heightScale * distanceFade * grazingFade * projectedFade};
     if (settings.heightMode == HeightMappingMode::OffsetParallax) {
         const float height = sanitized_height(sampleHeight, uv);
-        result.uv = {
-            uv.x - direction.x * (height - settings.heightReferencePlane),
-            uv.y - direction.y * (height - settings.heightReferencePlane),
-        };
+        result.uv = {uv.x - direction.x * (height - settings.heightReferencePlane),
+                     uv.y - direction.y * (height - settings.heightReferencePlane)};
         result.samples = 1U;
+        result.hit = true;
+        result.layerDepth = height;
         return result;
     }
-
-    const std::uint32_t steps = step_count(view, settings);
-    const float layerDepth = 1.0F / static_cast<float>(steps);
-    const Float2 delta{direction.x / static_cast<float>(steps),
-                       direction.y / static_cast<float>(steps)};
-    Float2 currentUv = uv;
-    Float2 previousUv = uv;
-    float currentLayerDepth = 0.0F;
-    float previousLayerDepth = 0.0F;
-    float currentHeight = sanitized_height(sampleHeight, currentUv);
+    // Height textures store depth below the shell top, matching the existing DVE
+    // convention. At depth == referencePlane the UV must equal the original UV.
+    const auto at = [&](float depth) {
+        return Float2{uv.x - direction.x * (depth - settings.heightReferencePlane),
+                      uv.y - direction.y * (depth - settings.heightReferencePlane)};
+    };
+    const std::uint32_t desired = std::min(step_count(view, settings),options.maximumSteps);
+    const auto steps=std::max(1U,static_cast<std::uint32_t>(std::ceil(static_cast<float>(desired)*projectedFade)));
+    float lo = options.heightBounds.x, hi = lo;
+    float height = sanitized_height(sampleHeight, at(hi));
     result.samples = 1U;
-
-    while (currentLayerDepth < currentHeight && result.samples < steps) {
-        previousUv = currentUv;
-        previousLayerDepth = currentLayerDepth;
-        currentUv = {currentUv.x - delta.x, currentUv.y - delta.y};
-        currentLayerDepth += layerDepth;
-        currentHeight = sanitized_height(sampleHeight, currentUv);
+    bool crossing = hi >= height;
+    // Include depth 1: the old sample budget stopped one interval short and then
+    // refined even when it had no bracket (e.g. a constant-one texture).
+    for (std::uint32_t i = 1U; i <= steps && !crossing; ++i) {
+        lo = hi;
+        hi = options.heightBounds.x+(options.heightBounds.y-options.heightBounds.x)*static_cast<float>(i) / static_cast<float>(steps);
+        height = sanitized_height(sampleHeight, at(hi));
         ++result.samples;
+        crossing = hi >= height;
     }
-
-    if (settings.heightMode == HeightMappingMode::SteepParallax) {
-        result.uv = currentUv;
-        return result;
-    }
-
-    Float2 lowerUv = previousUv;
-    Float2 upperUv = currentUv;
-    float lowerDepth = previousLayerDepth;
-    float upperDepth = currentLayerDepth;
-    for (std::uint32_t iteration = 0; iteration < settings.refinementSteps; ++iteration) {
-        const Float2 middleUv{(lowerUv.x + upperUv.x) * 0.5F,
-                              (lowerUv.y + upperUv.y) * 0.5F};
-        const float middleDepth = (lowerDepth + upperDepth) * 0.5F;
-        const float middleHeight = sanitized_height(sampleHeight, middleUv);
-        ++result.samples;
-        if (middleDepth < middleHeight) {
-            lowerUv = middleUv;
-            lowerDepth = middleDepth;
-        } else {
-            upperUv = middleUv;
-            upperDepth = middleDepth;
+    if (!crossing) { result.valid = false; return result; }
+    if (settings.heightMode == HeightMappingMode::ParallaxOcclusion) {
+        for (std::uint32_t i = 0; i < settings.refinementSteps && hi > lo; ++i) {
+            const float mid = (lo + hi) * 0.5F;
+            const float h = sanitized_height(sampleHeight, at(mid));
+            ++result.samples;
+            if (mid < h) lo = mid; else hi = mid;
         }
     }
-    result.uv = {(lowerUv.x + upperUv.x) * 0.5F,
-                 (lowerUv.y + upperUv.y) * 0.5F};
+    result.hit = true;
+    result.layerDepth = (settings.heightMode == HeightMappingMode::SteepParallax) ? hi : (lo + hi) * 0.5F;
+    result.uv = at(result.layerDepth);
+    return result;
+}
+
+Float3 height_bump_normal(Float2 uv,Float2 deltaUv,float strength,const HeightSampleFunction& sampleHeight){
+    if(!sampleHeight||!finite(uv)||!finite(deltaUv)||deltaUv.x<=0||deltaUv.y<=0||!finite(strength))return {0,0,1};
+    const float du=(sanitized_height(sampleHeight,{uv.x+deltaUv.x,uv.y})-sanitized_height(sampleHeight,{uv.x-deltaUv.x,uv.y}))/(2*deltaUv.x);
+    const float dv=(sanitized_height(sampleHeight,{uv.x,uv.y+deltaUv.y})-sanitized_height(sampleHeight,{uv.x,uv.y-deltaUv.y}))/(2*deltaUv.y);
+    return normalize3({du*strength,dv*strength,1});
+}
+
+HeightShadowResult parallax_height_shadow(Float2 uv,float depth,Float3 light,const MaterialMappingSettings& settings,
+    const HeightSampleFunction& sampleHeight,std::uint32_t maximumSteps){
+    HeightShadowResult result;
+    if(!sampleHeight||!finite(uv)||!finite(depth)||depth<0||depth>1||maximumSteps==0||maximumSteps>64||
+       !finite(light.x)||!finite(light.y)||!finite(light.z)||!validate_material_mapping_settings(settings))return result;
+    light=normalize3(light);
+    if(light.z<=0){result.visibility=0;return result;}
+    for(std::uint32_t i=1;i<=maximumSteps;++i){
+        const float t=depth*static_cast<float>(i)/static_cast<float>(maximumSteps);
+        const Float2 q{uv.x+light.x/std::max(light.z,0.08F)*settings.heightScale*t,
+                       uv.y+light.y/std::max(light.z,0.08F)*settings.heightScale*t};
+        const float h=sanitized_height(sampleHeight,q);++result.samples;
+        if(depth-t>h+1e-3F){result.visibility=0;break;}
+    }
     return result;
 }
 
@@ -229,7 +249,7 @@ Float3 blend_detail_normal(Float3 baseNormal, Float3 detailNormal, float strengt
     const Float3 combined{
         base.x + detail.x * amount,
         base.y + detail.y * amount,
-        base.z * std::max(0.0F, detail.z),
+        base.z * (1.0F + (std::max(0.0F, detail.z) - 1.0F) * amount),
     };
     return normalize3(combined);
 }

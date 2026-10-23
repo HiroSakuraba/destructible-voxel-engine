@@ -21,6 +21,7 @@
 #include "dve/game_world.hpp"
 #include "dve/player/frame_image.hpp"
 #include "dve/render/polygon_renderer.hpp"
+#include "dve/render/cpu_fog.hpp"
 #include "dve/render_environment.hpp"
 
 namespace dve::player {
@@ -31,6 +32,10 @@ struct PlayerRenderView {
     RenderEnvironment environment;
     bool polygonFrustumCulling{true};
     float polygonLodBias{};
+    // Optional local media supplied by the scene owner, in metre space.
+    std::span<const render::CpuFogVolume> fogVolumes{};
+    render::CpuFogSettings fogSettings{};
+    render::CpuSurfaceDetailSettings surfaceDetail{};
 };
 
 struct PlayerRenderStats {
@@ -43,6 +48,7 @@ struct PlayerRenderStats {
     std::uint64_t tracedRays{};
     std::uint64_t hitRays{};
     render::PolygonRenderStats polygons;
+    render::CpuFogStats fog;
     std::uint64_t scaledPolygonAssets{};
     std::uint64_t scaledPolygonCopies{};
 };

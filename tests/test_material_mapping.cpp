@@ -56,7 +56,7 @@ void test_parallax_modes() {
 
     settings.heightMode = dve::HeightMappingMode::SteepParallax;
     auto steep = dve::apply_parallax_mapping({0.5F, 0.5F}, {0.4F, 0.0F, 1.0F}, 1.0F, settings, ramp);
-    CHECK(steep.samples >= settings.minimumHeightSteps);
+    CHECK(steep.hit);
     CHECK(steep.uv.x < 0.5F);
 
     settings.heightMode = dve::HeightMappingMode::ParallaxOcclusion;
@@ -66,6 +66,21 @@ void test_parallax_modes() {
     CHECK(std::isfinite(pom.uv.x) && std::isfinite(pom.uv.y));
 }
 
+
+void test_parallax_reference_plane() {
+    dve::MaterialMappingSettings s;s.heightReferencePlane=0.25F;s.maximumParallaxDistanceMeters=100;
+    for(auto mode:{dve::HeightMappingMode::OffsetParallax,dve::HeightMappingMode::SteepParallax,dve::HeightMappingMode::ParallaxOcclusion}){
+        s.heightMode=mode;s.minimumHeightSteps=16;s.maximumHeightSteps=16;s.refinementSteps=12;
+        auto r=dve::apply_parallax_mapping({0.4F,0.5F},{0.5F,0,1},0,s,[](dve::Float2){return 0.25F;});
+        CHECK(r.hit&&r.valid&&close(r.uv.x,0.4F));
+        r=dve::apply_parallax_mapping({0.4F,0.5F},{0.5F,0,1},0,s,[](dve::Float2){return 1.0F;});
+        CHECK(r.hit&&r.valid&&r.uv.x<0.4F);
+        CHECK(r.samples<=18U+s.refinementSteps);
+    }
+    CHECK(!dve::apply_parallax_mapping({}, {0,0,-1},0,s,[](dve::Float2){return 0.5F;}).hit);
+    const auto flat=dve::blend_detail_normal({0.4F,0.1F,0.91F},{0,0,1},1);
+    CHECK(close(flat.x,0.4F/std::sqrt(0.4F*0.4F+0.1F*0.1F+0.91F*0.91F)));
+}
 
 void test_gpu_mapping_record() {
     dve::PolygonMaterialBinding material;
@@ -122,6 +137,7 @@ int main() {
         test_validation_and_uv_transform();
         test_triplanar_weights();
         test_parallax_modes();
+        test_parallax_reference_plane();
         test_detail_blending();
         test_gpu_mapping_record();
         std::cout << "dve_material_mapping_tests: PASS\n";

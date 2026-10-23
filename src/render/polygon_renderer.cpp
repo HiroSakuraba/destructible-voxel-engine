@@ -1234,8 +1234,10 @@ PolygonRenderStats ReferencePolygonRenderer::render(
                 normalUse=normalUse||uses(b.normal)||uses(b.detailNormal);
                 for(const auto* slot:{&b.baseColor,&b.emissive,&b.detailBaseColor})srgbUse=srgbUse||(uses(*slot)&&slot->colorSpace==PolygonTextureColorSpace::Srgb);
             }
-            if(normalUse){chain.normalLevels=generate_texture_mips(image,true).levels;for(const auto& m:chain.normalLevels)bytes+=m.rgba8.size();++stats.mipChainsBuilt;}
-            if(srgbUse){chain.srgbLevels=generate_texture_mips(image,false,true).levels;for(const auto& m:chain.srgbLevels)bytes+=m.rgba8.size();++stats.mipChainsBuilt;}
+            // Variant level sets live inside the image's one chain; mipChainsBuilt counts
+            // chains (one per image per cache miss), not variants.
+            if(normalUse){chain.normalLevels=generate_texture_mips(image,true).levels;for(const auto& m:chain.normalLevels)bytes+=m.rgba8.size();}
+            if(srgbUse){chain.srgbLevels=generate_texture_mips(image,false,true).levels;for(const auto& m:chain.srgbLevels)bytes+=m.rgba8.size();}
             for(const auto& mip:chains->back().levels)bytes+=mip.rgba8.size();
         }
         frameAsset.mips=chains;

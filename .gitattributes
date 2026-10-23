@@ -17,3 +17,9 @@
 *.dvesample binary
 *.dvepixel binary
 *.dfluoddity binary
+
+# Shader sources are hashed byte-for-byte by tests (shaders/compiled/ao/SOURCES.sha256) and are
+# compiled from the checkout: pin them to LF so a Windows checkout hashes and builds the same
+# bytes as every other platform.
+*.hlsl text eol=lf
+*.hlsli text eol=lf

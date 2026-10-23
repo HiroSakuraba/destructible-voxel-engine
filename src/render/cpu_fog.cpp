@@ -1,4 +1,5 @@
 #include "dve/render/cpu_fog.hpp"
+#include "dve/render/scene_lighting.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -110,6 +111,21 @@ Float3 illumination(Float3 p,Float3 ray,float g,float metersPerUnit,
         const float falloff=std::pow(1-metres/l.rangeMeters,2.0F)/std::max(metres*metres,0.01F);
         const float v=light_visibility(p,toward,distance,metersPerUnit,volumes,settings,stats,lightId);
         light=add(light,multiply(l.color,l.intensity*falloff*phase(dot(ray,toward),g)*v));
+    }
+    if (settings.sceneLighting) {
+      auto medium = settings;
+      medium.lightingCache = nullptr;
+      medium.sceneVisibility = {};
+      const auto seed =
+          settings.frameIndex ^ std::bit_cast<std::uint32_t>(p.x) ^
+          std::bit_cast<std::uint32_t>(p.y) ^ std::bit_cast<std::uint32_t>(p.z);
+      light =
+          add(light, settings.sceneLighting->scattering(
+                         p, ray, g, seed, [&](Float3 toward, float distance) {
+                           return light_visibility(p, toward, distance,
+                                                   metersPerUnit, volumes,
+                                                   medium, stats, 0);
+                         }));
     }
     return light;
 }
@@ -269,6 +285,10 @@ bool apply_cpu_fog(PolygonRenderTarget& target,const PolygonCamera& camera,const
     hf(environment.fogDensityPerMeter);hf(environment.fogStartMeters);hv(environment.fogColor);
     hash(settings.maximumSteps);hf(settings.stepMeters);hf(settings.minimumTransmittance);hash(settings.resolutionDivisor);hash(settings.jitter);hash(settings.adaptiveSampling);hash(settings.scattering);hash(settings.volumeShadows);hash(settings.shadowSteps);hf(settings.shadowDistanceMeters);hf(settings.lightCacheCellMeters);hash(static_cast<bool>(settings.sceneVisibility));
     hv(environment.sunDirection);hv(environment.sunColor);hf(environment.sunIntensity);hv(environment.skyColor);
+    hash(settings.sceneLighting != nullptr);
+    if (settings.sceneLighting)
+      for (unsigned char c : encode_scene_lighting(environment))
+        hash(c);
     for(const auto& l:settings.lights){hv(l.position);hv(l.color);hf(l.intensity);hf(l.rangeMeters);}
     for(const auto& v:volumes){hash(v.visible);if(!v.visible)continue;hash(v.asset->contentHash);if(v.asset->contentHash==0)hash(settings.frameIndex);hv(v.transform.position);hv(v.scale);
         hf(v.sampleStepMeters);hf(v.transform.rotation.x);hf(v.transform.rotation.y);hf(v.transform.rotation.z);hf(v.transform.rotation.w);}

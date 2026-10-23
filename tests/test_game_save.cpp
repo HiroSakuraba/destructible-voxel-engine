@@ -1308,10 +1308,12 @@ void test_script_state_v2() {
     auto v1Blob = v1.save_state(&error);
     CHECK(v1Blob.has_value());
     if (v1Blob) {
-        // Strip the v2/v3/v4 tail: environment (30*4 + 5*4), fog (5*4), fog height (2*4),
-        // empty prompt (4), no tools (4), selection (8), no materials (4), no named timers
-        // (4); then mark it version 1.
-        v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 8U + 4U + 4U + 8U + 4U + 4U));
+      // Strip the v2/v3/v4/v5 tail (including the length-prefixed lighting
+      // extension): environment (30*4 + 5*4), fog (5*4), fog height (2*4),
+      // empty prompt (4), no tools (4), selection (8), no materials (4), no
+      // named timers (4); then mark it version 1.
+      v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 8U + 4U +
+                      encode_scene_lighting(v1.environment()).size() + 4U + 4U + 8U + 4U + 4U));
         (*v1Blob)[4] = std::byte{1};
         GameWorld worldV1b(std::make_unique<ReferenceRigidBodyWorld>());
         GameScriptHost v1b(worldV1b);
@@ -1334,10 +1336,11 @@ void test_script_state_v3_fog_height() {
     const auto blob = a.save_state(&error);
     CHECK(blob.has_value());
     if (!blob) { std::cerr << "v3 fog height save: " << error << '\n'; return; }
-    // After the falloff block the tail is: empty prompt (4), no tools (4), selection (8),
-    // no materials (4), no named timers (4) -- 24 bytes; the block itself is 8.
+    // After the falloff block the tail is: empty prompt (4), no tools (4),
+    // selection (8), no materials (4), no named timers (4) -- 24 bytes; remove
+    // the v5 lighting extension as well as the 8-byte height block.
     CHECK(blob->size() > 32U);
-    std::vector<std::byte> v3(blob->begin(), blob->end() - 32);
+    std::vector<std::byte> v3(blob->begin(), blob->end() - 32 - 4 - encode_scene_lighting(a.environment()).size());
     v3.insert(v3.end(), blob->end() - 24, blob->end());
     v3[4] = std::byte{3};
     GameWorld worldB(std::make_unique<ReferenceRigidBodyWorld>());

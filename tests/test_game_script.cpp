@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -907,6 +908,55 @@ void test_membership_lifecycle_and_pooling_from_lua() {
     CHECK(host.global_number("pool_name_ok") == 1.0);
 }
 
+void test_scene_lights_and_saved_bounces() {
+  GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
+  GameScriptHost host(world);
+  CHECK(run_ok(host, R"(
+        assert(world.set_scene_light(1,{kind="candle",position={x=1,y=2,z=3},color={x=1,y=.4,z=.1},intensity=2,seed=9}))
+        assert(world.set_scene_light(2,{kind="quad",position={x=0,y=3,z=0},intensity=5}))
+        assert(not world.set_scene_light(2,{kind="quad",edge_v={x=1,y=0,z=0}}))
+        assert(not world.set_environment_scalar("PathTraceBounces",65))
+        assert(world.set_environment_scalar("PathTraceBounces",6))
+        assert(world.set_environment_scalar("PathTraceSamples",32))
+        assert(world.set_environment_scalar("LightingTimeSeconds",123.5))
+        assert(world.get_environment().scene_light_count==2)
+    )",
+               "scene_lights"));
+  CHECK(host.environment().pathTraceBounces == 6 &&
+        host.environment().lights.size() == 2);
+  std::string error;
+  const auto saved = host.save_state(&error);
+  CHECK(saved.has_value());
+  if (!saved)
+    return;
+  GameWorld nextWorld(std::make_unique<ReferenceRigidBodyWorld>());
+  GameScriptHost next(nextWorld);
+  CHECK(next.load_state(*saved, &error));
+  CHECK(encode_scene_lighting(next.environment()) ==
+        encode_scene_lighting(host.environment()));
+  CHECK(run_ok(next,
+               "assert(world.set_scene_light(1,nil)) "
+               "assert(world.get_environment().scene_light_count==1)",
+               "remove_light"));
+  CHECK(next.environment().lights.front().kind == SceneLightKind::Quad);
+  // Version 4 had no lighting extension. Remove just its length-prefixed block.
+  auto old = *saved;
+  const auto extension = encode_scene_lighting(host.environment());
+  const auto first = std::search(
+      old.begin(), old.end(),
+      reinterpret_cast<const std::byte *>(extension.data()),
+      reinterpret_cast<const std::byte *>(extension.data() + extension.size()));
+  CHECK(first != old.end());
+  if (first != old.end()) {
+    auto offset = first - old.begin();
+    old.erase(old.begin() + offset - 4,
+              old.begin() + offset + extension.size());
+    old[4] = std::byte{4};
+    CHECK(next.load_state(old, &error));
+    CHECK(next.environment().lights.empty() &&
+          next.environment().pathTraceBounces == 0);
+  }
+}
 
 } // namespace
 
@@ -933,6 +983,7 @@ int main() {
     test_material_error_paths_from_lua();
     test_unreal_style_material_globals_layers_and_shading_from_lua();
     test_environment_bindings_from_lua();
+    test_scene_lights_and_saved_bounces();
     test_camera_runtime_bindings_from_lua();
     test_environment_validation_rejects_and_rolls_back_from_lua();
     test_playable_runtime_bindings_from_lua();

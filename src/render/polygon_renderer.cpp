@@ -1,4 +1,5 @@
 #include "dve/render/polygon_renderer.hpp"
+#include "dve/render/scene_lighting.hpp"
 
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/ambient_occlusion.hpp"
@@ -844,6 +845,35 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                 passes.light.directDiffuse=multiply(passes.light.directDiffuse,shadow.visibility);
                 passes.light.directSpecular=multiply(passes.light.directSpecular,shadow.visibility);
             }
+            if (options.sceneLighting) {
+              const float visibility = options.sceneLighting->sun_visibility(
+                  worldPosition, normal, static_cast<std::uint32_t>(index));
+              passes.sunVisibility = visibility;
+              passes.shadow = multiply(
+                  add(passes.light.directDiffuse, passes.light.directSpecular),
+                  1 - visibility);
+              passes.light.directDiffuse =
+                  multiply(passes.light.directDiffuse, visibility);
+              passes.light.directSpecular =
+                  multiply(passes.light.directSpecular, visibility);
+              effective.baseColor = base;
+              const auto local = options.sceneLighting->direct(
+                  worldPosition, normal, viewWorld, effective,
+                  static_cast<std::uint32_t>(index));
+              passes.light.directDiffuse =
+                  add(passes.light.directDiffuse, local.diffuse);
+              passes.light.directSpecular =
+                  add(passes.light.directSpecular, local.specular);
+              if (environment.pathTraceBounces > 0 &&
+                  environment.globalIlluminationMode !=
+                      GlobalIlluminationMode::Off) {
+                const auto bounce = options.sceneLighting->indirect_lobes(
+                    worldPosition, normal, viewWorld, effective,
+                    static_cast<std::uint32_t>(index));
+                passes.light.indirectDiffuse = bounce.diffuse;
+                passes.light.indirectSpecular = bounce.specular;
+              }
+            }
             shaded=beauty(passes.light,base.w);
         }
         if(target.passes.enabled){
@@ -1302,6 +1332,14 @@ PolygonRenderStats ReferencePolygonRenderer::render(
     std::vector<DeferredTriangle> transparent;
     // Ambient occlusion: without a caller's tracer, AO rays see the polygons being rendered.
     PolygonRenderOptions frameOptions = options;
+    std::unique_ptr<SceneLighting> ownedLighting;
+    if (!frameOptions.sceneLighting &&
+        (!environment.lights.empty() || environment.pathTraceBounces > 0)) {
+      ownedLighting = std::make_unique<SceneLighting>(
+          std::span<const VoxelReferenceInstance>{}, instances, environment,
+          options.metersPerUnit);
+      frameOptions.sceneLighting = ownedLighting.get();
+    }
     std::vector<std::pair<std::shared_ptr<const PolygonBvh>, RigidTransform>> aoScene;
     if (!options.occlusionRay && polygon_ambient_occlusion_active(environment) &&
         options.materialDebugView == PolygonMaterialDebugView::Lit) {

@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <optional>
 
 #include "dve/types.hpp"
 
@@ -49,12 +51,38 @@ enum class ShadowMode : std::uint32_t {
     Hybrid = 4,
 };
 
+// Positions and emitter edges are authored in metres; intensity is RGB radiant
+// intensity for point/spot/candle, emitted radiance for area lights. Direction
+// points out of the light.
+enum class SceneLightKind : std::uint32_t { Point, Spot, Quad, Disc, Candle };
+struct SceneLight {
+  SceneLightKind kind{SceneLightKind::Point};
+  Float3 positionMeters{};
+  Float3 direction{0, -1, 0};
+  Float3 edgeU{1, 0, 0}, edgeV{0, 0, 1}; // full quad edges; disc radius vectors
+  Float3 color{1, 1, 1};
+  float intensity{1};
+  float innerConeRadians{0.35F}, outerConeRadians{0.6F};
+  bool twoSided{};
+  float flickerAmount{0.15F}, flickerFrequencyHz{8};
+  std::uint32_t seed{1};
+  [[nodiscard]] bool validate(std::string *error = nullptr) const noexcept;
+};
+
 // The Godot-"Environment"-resource-shaped settings object: lighting, global illumination,
 // shadows, exposure, tonemap, and bloom live in one validated place. CPU reference rendering,
 // GPU constant packing, scripts, and editor settings all consume the same defaults. Distances
 // named `*Meters` are metres on the CPU and GPU alike (see kDefaultMetersPerVoxel); the defaults
 // below were chosen as metres for the GPU path.
 struct RenderEnvironment {
+    std::vector<SceneLight> lights; // maximum 4096; empty preserves legacy scenes
+    std::uint32_t localLightSamples{4}; // power-weighted samples per hit, 1..64
+    // Zero preserves legacy GI; 1..64 enables the hybrid diffuse/glossy path solver.
+    std::uint32_t pathTraceBounces{0};
+    std::uint32_t pathTraceSamples{4}; // 1..256
+    bool pathTraceRoulette{true};
+    double lightingTimeSeconds{}; // simulation time; no wall-clock randomness
+
     Float3 sunDirection{0.45F, 0.80F, 0.35F}; // toward the sun; normalized when packed
     float sunIntensity{2.4F};
     Float3 sunColor{1.0F, 0.98F, 0.95F};
@@ -112,4 +140,19 @@ struct RenderEnvironment {
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
 };
 
+struct Component;
+struct RigidTransform;
+inline constexpr const char *kSceneLightComponent = "dve.light";
+[[nodiscard]] std::optional<SceneLight>
+scene_light_from_component(const Component &component,
+                           const RigidTransform &worldTransform,
+                           std::string *error = nullptr);
+// Portable, versioned lighting extension for scenes/settings and script saves.
+// Decode is atomic and leaves unrelated environment fields alone. Classic
+// locale, round-trip precision.
+[[nodiscard]] std::string
+encode_scene_lighting(const RenderEnvironment &environment);
+[[nodiscard]] bool decode_scene_lighting(const std::string &text,
+                                         RenderEnvironment &environment,
+                                         std::string *error = nullptr);
 } // namespace dve

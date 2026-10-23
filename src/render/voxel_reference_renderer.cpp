@@ -1,4 +1,5 @@
 #include "dve/render/voxel_reference_renderer.hpp"
+#include "dve/render/scene_lighting.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -472,6 +473,25 @@ LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnv
 // instance's own space so it moves with the object). Shadow, AO and GI rays keep the geometric
 // normal; the sun's cosine follows the bent one (the subsurface-diffused sun term is an average
 // over the surface around the point and is left as it is).
+void apply_scene_lighting(LightPasses &light, const SceneLighting *scene,
+                          Float3 point, const VoxelMaterialDefinition &material,
+                          const VoxelSurfaceInput &surface,
+                          const RenderEnvironment &env, std::uint32_t seed) {
+  if (!scene)
+    return;
+  const auto local = scene->direct(point, surface.normal, surface.viewDirection,
+                                   material, seed);
+  light.directDiffuse = add3(light.directDiffuse, local.diffuse);
+  light.directSpecular = add3(light.directSpecular, local.specular);
+  if (env.pathTraceBounces > 0 &&
+      env.globalIlluminationMode != GlobalIlluminationMode::Off) {
+    const auto bounce = scene->indirect_lobes(
+        point, surface.normal, surface.viewDirection, material, seed);
+    light.indirectDiffuse = bounce.diffuse;
+    light.indirectSpecular = bounce.specular;
+  }
+}
+
 void apply_voxel_normal_map(const VoxelReferenceInstance& instance, const VoxelMaterialDefinition& material,
                             const RenderEnvironment& environment, Float3 worldPosition, bool diffused, float metersPerVoxel,
                             VoxelSurfaceInput& surface) noexcept {
@@ -498,7 +518,8 @@ void write_voxel_passes(PolygonRenderTarget& target, std::size_t index, const Vo
         open.sunTerm = surface.sunTerm + cosine - sun_term(surface.normal, environment, surface.visibility);
         open.visibility = 1.0F;
         const LightPasses lit = shade_voxel(material, environment, open);
-        const Float3 removed = subtract(add3(lit.directDiffuse, lit.directSpecular), add3(light.directDiffuse, light.directSpecular));
+        const auto own = shade_voxel(material, environment, surface);
+        const Float3 removed = subtract(add3(lit.directDiffuse, lit.directSpecular), add3(own.directDiffuse, own.directSpecular));
         sample.shadow = {std::max(0.0F, removed.x), std::max(0.0F, removed.y), std::max(0.0F, removed.z)};
     }
     target.write_passes(index, sample, 1.0F, true);
@@ -644,6 +665,16 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     if (!preserveExistingDepth) target.clear();
 
     const spwi::VoxelSceneTracer tracer(instances);
+    std::unique_ptr<SceneLighting> ownedLighting;
+    const SceneLighting *lighting = sceneLighting;
+    if (!lighting &&
+        (!environment.lights.empty() || environment.pathTraceBounces > 0)) {
+      ownedLighting = std::make_unique<SceneLighting>(
+          instances,
+          occlusionPolygons.empty() ? sunOccluders : occlusionPolygons,
+          environment, metersPerVoxel);
+      lighting = ownedLighting.get();
+    }
     // Metre-authored distances -> voxel units, once per frame (GPU: MetersToVoxelUnits).
     const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
     SunExtras extras;
@@ -683,7 +714,8 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
             for (const PolygonRenderInstance& polygon : occlusionPolygons)
                 if (auto occluder = make_occluder(polygon)) extras.aoOccluders.push_back(std::move(*occluder));
     }
-    if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades)
+    if (environment.globalIlluminationMode == GlobalIlluminationMode::RadianceCascades &&
+        environment.pathTraceBounces == 0 && environment.lights.empty())
         return render_radiance_cascades(radianceCascades, tracer, instances, camera, environment,
                                         distances, target, extras, subsurfaceDiffusionSamples);
     const auto diffuses = [&](const VoxelMaterialDefinition& m, const VoxelLightingDistances& d) {
@@ -728,7 +760,10 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                         ? extras.caustics->irradiance(hit->worldPosition, hit->worldNormal,
                                                 instance.objectId != 0U ? instance.objectId : instance.object->id()) : Float3{};
                     float ao = 1.0F;
-                    const Float3 indirect = global_illumination(tracer, hit->worldPosition,
+                    const Float3 indirect =
+                        environment.pathTraceBounces > 0
+                            ? Float3{}
+                            : global_illumination(tracer, hit->worldPosition,
                                                                  hit->worldNormal, environment, distances,
                                                                  seed, local, static_cast<std::uint32_t>(index), &extras, &ao);
                     const Float3 transmitted = subsurface_light(
@@ -743,7 +778,9 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                               visibility, sunShare, indirect, ao, caustic, transmitted};
                     apply_voxel_normal_map(instance, material, environment, hit->worldPosition, diffuses(material, distances),
                                            distances.metersPerVoxel, surface);
-                    const LightPasses light = shade_voxel(material, environment, surface);
+                    LightPasses light = shade_voxel(material, environment, surface);
+                    apply_scene_lighting(light, lighting, hit->worldPosition,
+                                         material, surface, environment, seed);
                     target.hdrColor[index] = beauty(light, material.baseColor.w);
                     target.depth[index] = normalizedDepth;
                     write_voxel_passes(target, index, material, environment, surface, light, cameraZ, distances.metersPerVoxel);
@@ -839,13 +876,20 @@ HybridReferenceRenderStats render_hybrid_reference(
     float metersPerVoxel,
     std::uint32_t voxelThreadCount) {
     HybridReferenceRenderStats stats;
+    std::unique_ptr<SceneLighting> lighting;
+    if (!environment.lights.empty() || environment.pathTraceBounces > 0)
+      lighting = std::make_unique<SceneLighting>(voxels, polygons, environment,
+                                                 metersPerVoxel);
     ReferenceVoxelRenderer voxelRenderer;
+    voxelRenderer.sceneLighting = lighting.get();
     voxelRenderer.metersPerVoxel = metersPerVoxel;
     voxelRenderer.threadCount = voxelThreadCount;
     voxelRenderer.radianceCascades.threadCount = voxelThreadCount;
+    voxelRenderer.sunOccluders = polygons;
     voxelRenderer.occlusionPolygons = polygons;   // voxels' AO rays see the polygons too
     stats.voxels = voxelRenderer.render(voxels, camera, environment, target, false);
     PolygonRenderOptions options = polygonOptions;
+    options.sceneLighting = lighting.get();
     options.preserveExistingDepth = true;
     options.metersPerUnit = metersPerVoxel;
     // Polygons' AO rays see the voxels too.

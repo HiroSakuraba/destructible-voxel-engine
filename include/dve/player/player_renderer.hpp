@@ -76,9 +76,9 @@ public:
 // Lighting cost of the CPU renderer. The reference tracer is a validation path (one DDA per
 // instance per ray), so the default trades soft shadows and traced GI for real-time frame rates.
 enum class CpuRenderQuality : std::uint32_t {
-    // Hard sun shadows (1 ray/pixel), hemisphere ambient instead of traced GI.
+    // Hard sun shadows, hemisphere ambient; path tracing off, 2 emitter samples.
     Fast = 0,
-    // Hard shadows plus the environment's GI mode, capped at 2 samples.
+    // Hard shadows; GI capped at 2 samples / 2 path bounces, 2 emitter samples.
     Balanced = 1,
     // RenderEnvironment exactly as the scene/script set it (engine default: soft shadows,
     // 4-sample one-bounce GI). Offline/screenshot use.

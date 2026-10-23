@@ -155,7 +155,8 @@ public:
     // Camera for the given aspect (width / height): the script override if set, else the
     // manifest camera, else a default. Horizontal FOV from ui::GameSettings::fieldOfViewDegrees.
     [[nodiscard]] render::PolygonCamera camera(float aspect) const;
-    // The Lua host's environment (scripts can change it) or the engine default.
+    // Script/default environment plus enabled dve.light components in current
+    // world frames. Candle time follows the saved simulation clock.
     [[nodiscard]] RenderEnvironment environment() const;
     // View for a renderer. `objects` must stay alive (and the world unmodified) while the
     // view is in use; pass the storage in so no allocation happens per frame.

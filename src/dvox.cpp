@@ -361,6 +361,8 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
         writer.write_u32(material.preset.revision);writer.write_u64(material.preset.overrides);
     }
 
+    if(minor>=7U){writer.write_u8(static_cast<std::uint8_t>(material.surfaceDetail.pattern));writer.write_u8(static_cast<std::uint8_t>(material.surfaceDetail.space));writer.write_u32(material.surfaceDetail.seed);for(float v:surface_detail_values(material.surfaceDetail))writer.write_float(v);}
+
 }
 
 [[nodiscard]] VoxelMaterialDefinition read_material(ByteReader& reader, std::uint16_t minor) {
@@ -440,6 +442,10 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
         if(material.preset.id.empty() ? material.preset.revision!=0 || material.preset.overrides!=0 : material.preset.revision==0)
             throw std::runtime_error("invalid preset origin");
     }
+    if(minor>=7U){const auto pattern=reader.read_u8(),space=reader.read_u8();material.surfaceDetail.pattern=SurfacePattern(pattern);material.surfaceDetail.space=SurfaceDetailSpace(space);material.surfaceDetail.seed=reader.read_u32();
+        std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)v=reader.read_float();set_surface_detail_values(material.surfaceDetail,values);
+        if(!material_surface_detail_valid(material.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");
+        if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && (material.surfaceDetail.space==SurfaceDetailSpace::UV0 || material.surfaceDetail.space==SurfaceDetailSpace::UV1))throw std::runtime_error("voxel materials cannot use UV-space surface detail");}
     return material;
 }
 
@@ -461,6 +467,8 @@ bool write_dvox(
         if (asset.materials.size() > 256) throw std::runtime_error("DVOX supports at most 256 materials");
         for(const auto& m:asset.materials){
             if(m.preset.id.size()>128 || (m.preset.id.empty() ? m.preset.revision!=0 || m.preset.overrides!=0 : m.preset.revision==0))throw std::runtime_error("invalid preset origin");
+            if(!material_surface_detail_valid(m.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");
+            if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern && (m.surfaceDetail.space==SurfaceDetailSpace::UV0 || m.surfaceDetail.space==SurfaceDetailSpace::UV1))throw std::runtime_error("voxel materials cannot use UV-space surface detail");
             if(!material_normal_map_valid(m))throw std::runtime_error("invalid material normal map");
         }
 
@@ -470,7 +478,8 @@ bool write_dvox(
         const bool normalMaps = std::any_of(asset.materials.begin(), asset.materials.end(),
                                             [](const VoxelMaterialDefinition& m) { return material_has_normal_map(m); });
         const bool origins=std::any_of(asset.materials.begin(),asset.materials.end(),[](const auto& m){return !m.preset.id.empty();});
-        const std::uint16_t versionMinor = origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const bool details=std::any_of(asset.materials.begin(),asset.materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::NoPattern;});
+        const std::uint16_t versionMinor = details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) {
@@ -561,7 +570,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 6) {
+        if (major != kVersionMajor || minor > 7) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

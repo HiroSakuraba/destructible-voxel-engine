@@ -28,7 +28,7 @@ CookedPolygonAsset material_preview_fixture(const VoxelMaterialDefinition& mater
         a.submeshes={{"Sphere",0,unsigned(a.indices.size()),0}};refresh_editor_polygon(a);
     }else{
         a=make_editor_polygon_cube(1,1);
-        for(auto& v:a.vertices){v.position.y+=.55F;
+        for(auto& v:a.vertices){v.position.x-=.5F;v.position.y+=.05F;v.position.z-=.5F;
             if(shape==MaterialPreviewShape::Patch)v.position.z*=.04F;
             else if(shape==MaterialPreviewShape::Wedge)v.position.z*=.05F+.7F*(v.position.x+.5F);
         }

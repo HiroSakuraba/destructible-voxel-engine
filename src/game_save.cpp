@@ -35,6 +35,7 @@ constexpr std::string_view kRootMotionSection = "dve.root-motion";
 // v5: optics (transmission, IOR, attenuation) of inline materials that have them. Optional, so
 // v4 documents and materials without optics keep their bytes.
 constexpr std::string_view kMaterialOpticsSection = "dve.material_optics";
+constexpr std::string_view kMaterialSurfaceDetailSection = "dve.material_surface_detail";
 constexpr std::string_view kMaterialNormalMapSection = "dve.material_normal_maps";
 constexpr std::string_view kReservedPrefix = "dve.";
 
@@ -240,6 +241,7 @@ std::vector<std::byte> material_bytes(const std::vector<VoxelMaterialDefinition>
     w.u32(static_cast<std::uint32_t>(materials.size()));
     for (const auto& m : materials) {
         write_material(w, m);
+        if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)w.u64(material_surface_detail_hash(m.surfaceDetail));
         // Only for the "same as the source" comparison: optics and normal maps count too.
         if (material_has_optics(m)) write_material_optics(w, m);
         if (material_has_normal_map(m)) {
@@ -1148,6 +1150,16 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
             document.sections.emplace(std::string(kMaterialNormalMapSection), std::move(w.bytes()));
         }
     }
+    {
+        Writer w(limits_);std::uint32_t count=0;
+        for(const auto& object:world.objects)for(const auto& m:object.materials)if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)++count;
+        if(count){w.u32(count);for(const auto& object:world.objects)for(std::size_t i=0;i<object.materials.size();++i){const auto& d=object.materials[i].surfaceDetail;if(d.pattern==SurfacePattern::NoPattern)continue;
+            if(!material_surface_detail_valid(d))return fail(error,"invalid surface-detail settings"),std::nullopt;
+            w.u64(object.id);w.u32(static_cast<std::uint32_t>(i));w.u8(static_cast<std::uint8_t>(d.pattern));w.u8(static_cast<std::uint8_t>(d.space));w.u32(d.seed);for(float v:surface_detail_values(d))w.f32(v);}
+            if(w.failed())return fail(error,w.failure()),std::nullopt;
+            document.sections.emplace(std::string(kMaterialSurfaceDetailSection),std::move(w.bytes()));
+        }
+    }
     if (world.integerClock) {
         Writer clock(limits_);
         clock.u64(world.tickCount); clock.f32(world.fixedDeltaSeconds);
@@ -1519,6 +1531,18 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (!r.finish()) return corrupt(r);
     }
 
+    if(const auto* bytes=section(kMaterialSurfaceDetailSection)){
+        Reader r(*bytes,kMaterialSurfaceDetailSection,limits_);std::uint32_t count{};
+        if(!r.count(count,limits_.maximumObjects*limits_.maximumMaterialsPerObject,"surface-detail entry"))return corrupt(r);
+        std::set<std::pair<GameObjectId,std::uint32_t>> seen;
+        for(std::uint32_t i=0;i<count;++i){GameObjectId id{};std::uint32_t index{};std::uint8_t pattern{},space{};MaterialSurfaceDetail d;
+            if(!(r.u64(id)&&r.u32(index)&&r.u8(pattern)&&r.u8(space)&&r.u32(d.seed)))return corrupt(r);
+            d.pattern=SurfacePattern(pattern);d.space=SurfaceDetailSpace(space);std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)if(!r.f32(v))return corrupt(r);set_surface_detail_values(d,values);
+            const auto it=indexById.find(id);if(it==indexById.end()||index>=world.objects[it->second].materials.size()||!seen.emplace(id,index).second||!material_surface_detail_valid(d))return fail(error,"invalid surface-detail entry"),std::nullopt;
+            world.objects[it->second].materials[index].surfaceDetail=d;
+        }if(!r.finish())return corrupt(r);
+    }
+
     {
         Reader r(*section(kVoxelSection), kVoxelSection, limits_);
         std::uint32_t count{};
@@ -1659,7 +1683,7 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
                 name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection &&
-                name != kMaterialOpticsSection && name != kMaterialNormalMapSection)
+                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialSurfaceDetailSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;
         }

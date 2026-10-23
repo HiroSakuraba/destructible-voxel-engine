@@ -1,0 +1,9 @@
+DVE_MATERIAL_PRESET 1 1 1
+"dve.liquid.water" "Clear water" "Liquid" "Liquid Clear water refractive transparent dielectric"
+"Closed-volume dielectric. Full coverage; distance-based absorption. Water requires a closed volume; this is not an open water-plane shader." "DVE original artistic defaults; not measured material fits" "meters"
+1 1
+0
+DVE_EDITOR_MATERIALS 4
+2
+0 "Air" 0 0 0 0 0 0 0 0 1 0.5 0 2 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 0 0 0 0 0 1 0 1 0 0 1.5 1 1 1 0
+10 "Clear water" 1 1 1 1 0 0 0 0 0 0.5 0 0 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 1000 1 1 0 0 1 1 0 0 1 1.33299994 0.800000012 0.949999988 0.980000019 5

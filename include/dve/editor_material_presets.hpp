@@ -4,14 +4,16 @@
 #include <set>
 #include <span>
 namespace dve::editor {
-enum class MaterialPresetFeature : unsigned { Opaque, SolidTransmission, RoughTransmission, ClearCoat, NormalDetail };
+enum class MaterialPresetFeature : unsigned { Opaque, SolidTransmission, RoughTransmission, ClearCoat, NormalDetail, SurfaceDetail };
 enum class MaterialPresetBackend : unsigned { CpuReference, CpuPlayer, NativePreview, Gpu };
 enum class MaterialPresetSupport : unsigned { Supported, Approximate, Unavailable };
 struct MaterialPresetCapability { MaterialPresetSupport support; std::string reason; };
 enum class MaterialPresetProperty : unsigned {
     ColorR, ColorG, ColorB, Roughness, Metallic, Specular, Coverage, Transmission, Ior,
     AbsorptionR, AbsorptionG, AbsorptionB, AbsorptionDistance, Coat, CoatRoughness,
-    DetailScale, DetailStrength, Count
+    DetailScale, DetailStrength, Pattern, DetailSpace, PatternScale,
+    PatternRotationX, PatternRotationY, PatternRotationZ, GrainStretch, ColorVariation,
+    RoughnessVariation, BumpHeight, PatternSeed, UvTileMeters, Count
 };
 struct MaterialPresetControl {
     MaterialPresetProperty property;

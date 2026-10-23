@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/material_preset_origin.hpp"
+#include "dve/material_surface_detail.hpp"
 
 #include <array>
 #include <cstddef>
@@ -17,11 +18,6 @@
 #include "dve/voxel_object.hpp"
 
 namespace dve {
-
-struct Float2 {
-    float x{};
-    float y{};
-};
 
 struct Float4 {
     float x{};
@@ -180,6 +176,7 @@ struct VoxelNormalMap {
 
 struct VoxelMaterialDefinition {
     MaterialPresetOrigin preset;
+    MaterialSurfaceDetail surfaceDetail;
     std::string name;
     // Linear RGBA. Base-color image texels are decoded from sRGB before multiplication.
     Float4 baseColor{1.0F, 1.0F, 1.0F, 1.0F};

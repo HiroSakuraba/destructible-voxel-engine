@@ -98,6 +98,11 @@ void test_gpu_mapping_record() {
     material.baseColor.colorSpace = dve::PolygonTextureColorSpace::Srgb;
     material.emissive.colorSpace = dve::PolygonTextureColorSpace::Linear;
     material.detailBaseColor.colorSpace = dve::PolygonTextureColorSpace::Srgb;
+    material.metallicRoughness.texcoord=1;
+    material.emissive.texcoord=0;
+    material.opacity.texcoord=1;
+    material.detailNormal.texcoord=1;
+    material.detailRoughness.texcoord=0;
     const auto gpu = dve::pack_gpu_polygon_material_mapping(material);
     CHECK(gpu.mappingMode == 3U);
     CHECK(gpu.baseColorTexture == 3U);
@@ -110,6 +115,8 @@ void test_gpu_mapping_record() {
     CHECK(close(gpu.normalScale, 0.8F));
     CHECK(close(gpu.detailNormalScale, 0.6F));
     CHECK(close(gpu.alphaCutoff, 0.37F));
+    CHECK(gpu.additionalTexcoords == 13U);
+    CHECK(sizeof(gpu)==176U);
     CHECK((gpu.mappingFlags & dve::kGpuMaterialMappingDoubleSided) != 0U);
     CHECK((gpu.mappingFlags & dve::kGpuMaterialMappingBaseColorSrgb) != 0U);
     CHECK((gpu.mappingFlags & dve::kGpuMaterialMappingEmissiveSrgb) == 0U);

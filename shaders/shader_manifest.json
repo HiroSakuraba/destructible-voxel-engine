@@ -1861,6 +1861,12 @@
           "kind": "sampled_texture",
           "access": "read",
           "register": "t24"
+        },
+        {
+          "name": "gShadowMapping",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t36"
         }
       ],
       "vulkan_bindings": [
@@ -1881,6 +1887,12 @@
           "kind": "combined_image_sampler",
           "set": 3,
           "binding": 1
+        },
+        {
+          "name": "gShadowMapping",
+          "kind": "storage_buffer",
+          "set": 3,
+          "binding": 2
         }
       ]
     },

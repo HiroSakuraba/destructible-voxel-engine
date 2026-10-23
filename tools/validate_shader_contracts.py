@@ -231,11 +231,14 @@ def validate_material_abi(root: Path) -> list[str]:
     if surface_fields != surface_shader_fields or len(surface_fields) != 16:
         errors.append(f"Surface detail ABI drift: C++={surface_fields}, HLSL={surface_shader_fields}")
 
-    live_header = (root / "include/dve/render/live_environment_renderer.hpp").read_text(encoding="utf-8")
-    uv1_flag = re.search(r"kLiveObjectFlagMaskUsesUv1\s*=\s*1U\s*<<\s*(\d+)U", live_header)
     caster_vs = (root / "shaders/live_csm_caster_vs.hlsl").read_text(encoding="utf-8")
-    if not uv1_flag or f"& {1 << int(uv1_flag.group(1))}U" not in caster_vs or "input.uv1" not in caster_vs:
-        errors.append("Masked shadow caster must select UV1 with kLiveObjectFlagMaskUsesUv1 like the material pass")
+    caster_ps = (root / "shaders/live_csm_caster_ps.hlsl").read_text(encoding="utf-8")
+    material_ps = (root / "shaders/live_ibl_material_ps.hlsl").read_text(encoding="utf-8")
+    if ("output.uv1=input.uv1" not in caster_vs or "output.uv = input.uv" not in caster_vs or
+            "gShadowMapping[0]" not in caster_ps or "mapping.additionalTexcoords" not in caster_ps or
+            any('"common/live_material_sampling.hlsli"' not in source
+                for source in (caster_ps, material_ps))):
+        errors.append("Masked shadow and material passes must share mapping with independent UV0/UV1")
 
     cpp_values = dict(re.findall(
         r"MaterialShadingModel::(\w+)\)\s*==\s*(\d+)",

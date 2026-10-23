@@ -1322,46 +1322,6 @@ float polygon_hit_opacity(const CookedPolygonAsset& asset, const PolygonBvhHit& 
     return surface.opacity;
 }
 
-PolygonTextureMipChain generate_texture_mips(const PolygonImage& image,bool normalMap,bool srgb) {
-    PolygonTextureMipChain chain;
-    const std::size_t requiredBytes =
-        static_cast<std::size_t>(image.width) * image.height * 4U;
-    if (image.width == 0 || image.height == 0 || image.rgba8.size() != requiredBytes) {
-        return chain;
-    }
-
-    chain.heightBounds={1,0};
-    for(std::size_t i=0;i<image.rgba8.size();i+=4){const float h=static_cast<float>(image.rgba8[i])/255;
-        chain.heightBounds.x=(std::min)(chain.heightBounds.x,h);chain.heightBounds.y=(std::max)(chain.heightBounds.y,h);}
-    chain.levels.push_back({image.width, image.height, image.rgba8});
-    while (chain.levels.back().width > 1U || chain.levels.back().height > 1U) {
-        const auto& source = chain.levels.back();
-        PolygonTextureMip next;
-        next.width = (std::max)(1U, source.width / 2U);
-        next.height = (std::max)(1U, source.height / 2U);
-        next.rgba8.resize(static_cast<std::size_t>(next.width) * next.height * 4U);
-
-        for(std::uint32_t y=0;y<next.height;++y)for(std::uint32_t x=0;x<next.width;++x){
-            Float4 sum{};std::uint32_t count=0;
-            // Cover odd-sized edges as well as power-of-two textures.
-            const auto xEnd=(x+1)*source.width/next.width,yEnd=(y+1)*source.height/next.height;
-            for(auto sy=y*source.height/next.height;sy<yEnd;++sy)for(auto sx=x*source.width/next.width;sx<xEnd;++sx){
-                const auto t=texel(source,sx,sy,srgb?PolygonTextureColorSpace::Srgb:PolygonTextureColorSpace::Linear);
-                sum=add4(sum,t);++count;
-            }
-            Float4 v=scale4(sum,1.0F/static_cast<float>(count));
-            if(normalMap){const auto n=normalize(Float3{v.x*2-1,v.y*2-1,v.z*2-1});v.x=n.x*0.5F+0.5F;v.y=n.y*0.5F+0.5F;v.z=n.z*0.5F+0.5F;}
-            const auto encode=[&](float value,bool color){
-                if(color)value=value<=0.0031308F?value*12.92F:1.055F*std::pow(value,1/2.4F)-0.055F;
-                return static_cast<std::uint8_t>(std::lround(std::clamp(value,0.0F,1.0F)*255));
-            };
-            const std::size_t o=(static_cast<std::size_t>(y)*next.width+x)*4;
-            next.rgba8[o]=encode(v.x,srgb);next.rgba8[o+1]=encode(v.y,srgb);next.rgba8[o+2]=encode(v.z,srgb);next.rgba8[o+3]=encode(v.w,false);
-        }
-        chain.levels.push_back(std::move(next));
-    }
-    return chain;
-}
 
 void PolygonRenderCache::clear() noexcept {
     mips_.clear(); lods_.clear(); residentMipBytes_=0; frame_=0;

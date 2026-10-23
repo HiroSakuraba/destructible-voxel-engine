@@ -16,8 +16,8 @@ DVE_LIVE_BIND(0,2) cbuffer LiveCascadeConstants : register(b10) {
     float4 gCascadeDepthAndIndex;
     float4 gCascadeAtlasScaleOffset;
 };
-struct ShadowVertexInput { DVE_LIVE_LOCATION(0) float3 position : POSITION; DVE_LIVE_LOCATION(3) float2 uv : TEXCOORD0; DVE_LIVE_LOCATION(4) float4 color : COLOR0; DVE_LIVE_LOCATION(5) float2 uv1 : TEXCOORD1; };
-struct ShadowVertexOutput { float4 position : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1; };
+struct ShadowVertexInput { DVE_LIVE_LOCATION(0) float3 position : POSITION; DVE_LIVE_LOCATION(1) float3 normal : NORMAL; DVE_LIVE_LOCATION(3) float2 uv : TEXCOORD0; DVE_LIVE_LOCATION(5) float2 uv1 : TEXCOORD1; DVE_LIVE_LOCATION(4) float4 color : COLOR0; };
+struct ShadowVertexOutput { float4 position : SV_Position; float2 uv : TEXCOORD0; float alpha : TEXCOORD1; float2 uv1 : TEXCOORD2; float3 worldPosition : TEXCOORD3; float3 objectPosition : TEXCOORD4; float3 normal : TEXCOORD5; };
 ShadowVertexOutput main(ShadowVertexInput input) {
     ShadowVertexOutput output;
     float3 world = mul(gObjectToWorld, float4(input.position, 1.0F)).xyz;
@@ -33,8 +33,8 @@ ShadowVertexOutput main(ShadowVertexInput input) {
                              -dot(relative, gCascadeUp.xyz) / radius,
                              max(depth, 0.0F), // depth pancaking keeps near-extruding casters alive
                              1.0F);
-    // Match the material pass: masks sampled from UV1 must cut the shadow with UV1 too.
-    output.uv = (gObjectIdentityAndFlags.w & 32U) != 0U ? input.uv1 : input.uv;
+    output.uv = input.uv;output.uv1=input.uv1;output.worldPosition=world;
+    output.objectPosition=input.position;output.normal=normalize(mul((float3x3)gObjectToWorld,input.normal));
     output.alpha = input.color.a * gObjectMaterialParameters.y;
     return output;
 }

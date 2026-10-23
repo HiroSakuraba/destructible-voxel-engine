@@ -5,6 +5,7 @@
 
 #include "common/live_bindings.hlsli"
 #include "common/material_surface_detail.hlsli"
+#include "common/live_material_sampling.hlsli"
 DVE_LIVE_IMAGE(0,2) TextureCube<float4> gDiffuseIrradiance : register(t18);
 DVE_LIVE_IMAGE(1,2) TextureCube<float4> gSpecularPrefilter : register(t19);
 DVE_LIVE_IMAGE(2,2) Texture2D<float2> gEnvironmentBrdfLut : register(t20);
@@ -35,83 +36,6 @@ DVE_LIVE_BIND(0,1) cbuffer LiveObjectConstants : register(b9) {
     float4x4 gObjectToWorld;uint4 gObjectIdentityAndFlags;float4 gObjectMaterialParameters;
 };
 
-float SrgbChannelToLinear(float value) {
-    const float clamped = saturate(value);
-    return clamped <= 0.04045F ? clamped / 12.92F
-                              : pow((clamped + 0.055F) / 1.055F, 2.4F);
-}
-
-float3 DecodeMaterialColor(float3 encoded, bool srgb) {
-    if (!srgb) return encoded;
-    return float3(SrgbChannelToLinear(encoded.r), SrgbChannelToLinear(encoded.g),
-                  SrgbChannelToLinear(encoded.b));
-}
-
-float3 ApplyDerivativeNormalMap(float3 geometricNormal, float3 worldPosition, float2 mappedUv,
-                                float3 encodedNormal, float normalScale) {
-    const float3 N = normalize(geometricNormal);
-    float3 tangentNormal = encodedNormal * 2.0F - 1.0F;
-    tangentNormal.xy *= max(normalScale, 0.0F);
-    tangentNormal = normalize(tangentNormal);
-
-    const float3 dpdx = ddx(worldPosition);
-    const float3 dpdy = ddy(worldPosition);
-    const float2 duvdx = ddx(mappedUv);
-    const float2 duvdy = ddy(mappedUv);
-    const float determinant = duvdx.x * duvdy.y - duvdx.y * duvdy.x;
-    if (abs(determinant) <= 1.0e-8F) return N;
-
-    const float inverseDeterminant = rcp(determinant);
-    float3 tangent = (dpdx * duvdy.y - dpdy * duvdx.y) * inverseDeterminant;
-    float3 bitangent = (dpdy * duvdx.x - dpdx * duvdy.x) * inverseDeterminant;
-    tangent -= N * dot(N, tangent);
-    const float tangentLengthSquared = dot(tangent, tangent);
-    if (tangentLengthSquared <= 1.0e-12F) return N;
-    tangent *= rsqrt(tangentLengthSquared);
-    const float handedness = dot(cross(N, tangent), bitangent) < 0.0F ? -1.0F : 1.0F;
-    bitangent = normalize(cross(N, tangent)) * handedness;
-    return normalize(tangent * tangentNormal.x + bitangent * tangentNormal.y +
-                     N * tangentNormal.z);
-}
-
-float2 LiveUv(float2 uv,float2 uv1,PolygonMaterialMappingRecord m,uint channel){
-    float2 selected=(m.mappingMode==kMaterialMappingUV1||channel==1)?uv1:uv;
-    return TransformMaterialUV(selected,float2(m.baseScaleX,m.baseScaleY),float2(m.baseOffsetX,m.baseOffsetY),m.baseRotationRadians);
-}
-float4 SampleLiveMap(Texture2D<float4> textureMap,SamplerState textureSampler,PolygonMaterialMappingRecord m,
-                     float2 mappedUv,float3 worldPosition,float3 objectPosition,float3 worldNormal){
-    if(m.mappingMode<kMaterialMappingWorldTriplanar)return textureMap.Sample(textureSampler,mappedUv);
-    bool local=m.mappingMode==kMaterialMappingObjectTriplanar;
-    float3 p=local?objectPosition:worldPosition;
-    float3 N=local?mul(transpose((float3x3)gObjectToWorld),worldNormal):worldNormal;
-    float3 weights=MaterialTriplanarWeights(N,m.triplanarBlendSharpness);
-    float2 x,y,z;MaterialTriplanarCoordinates(p,m.triplanarScale,x,y,z);
-    float2 scale=float2(m.baseScaleX,m.baseScaleY),offset=float2(m.baseOffsetX,m.baseOffsetY);
-    x=TransformMaterialUV(x,scale,offset,m.baseRotationRadians);y=TransformMaterialUV(y,scale,offset,m.baseRotationRadians);z=TransformMaterialUV(z,scale,offset,m.baseRotationRadians);
-    // Derivatives originate in the selected position space, never an unused UV channel.
-    return textureMap.SampleGrad(textureSampler,x,ddx(x),ddy(x))*weights.x+
-           textureMap.SampleGrad(textureSampler,y,ddx(y),ddy(y))*weights.y+
-           textureMap.SampleGrad(textureSampler,z,ddx(z),ddy(z))*weights.z;
-}
-float3 SampleLiveNormal(PolygonMaterialMappingRecord m,float2 mappedUv,float3 worldPosition,float3 objectPosition,float3 N){
-    if(m.mappingMode<kMaterialMappingWorldTriplanar)return ApplyDerivativeNormalMap(N,worldPosition,mappedUv,gLiveNormalTexture.Sample(gNormalSampler,mappedUv).xyz,m.normalScale);
-    bool local=m.mappingMode==kMaterialMappingObjectTriplanar;
-    float3 p=local?objectPosition:worldPosition;
-    float3 sourceNormal=local?mul(transpose((float3x3)gObjectToWorld),N):N;
-    float3 weights=MaterialTriplanarWeights(sourceNormal,m.triplanarBlendSharpness);
-    float2 x,y,z;MaterialTriplanarCoordinates(p,m.triplanarScale,x,y,z);
-    float2 scale=float2(m.baseScaleX,m.baseScaleY),offset=float2(m.baseOffsetX,m.baseOffsetY);
-    x=TransformMaterialUV(x,scale,offset,m.baseRotationRadians);y=TransformMaterialUV(y,scale,offset,m.baseRotationRadians);z=TransformMaterialUV(z,scale,offset,m.baseRotationRadians);
-    float3 nx=gLiveNormalTexture.SampleGrad(gNormalSampler,x,ddx(x),ddy(x)).xyz*2-1;
-    float3 ny=gLiveNormalTexture.SampleGrad(gNormalSampler,y,ddx(y),ddy(y)).xyz*2-1;
-    float3 nz=gLiveNormalTexture.SampleGrad(gNormalSampler,z,ddx(z),ddy(z)).xyz*2-1;
-    nx=normalize(float3(nx.z*(sourceNormal.x<0?-1:1),nx.y*m.normalScale,nx.x*m.normalScale));
-    ny=normalize(float3(ny.x*m.normalScale,ny.z*(sourceNormal.y<0?-1:1),ny.y*m.normalScale));
-    nz=normalize(float3(nz.x*m.normalScale,nz.y*m.normalScale,nz.z*(sourceNormal.z<0?-1:1)));
-    float3 normal=normalize(nx*weights.x+ny*weights.y+nz*weights.z);
-    return local?normalize(mul((float3x3)gObjectToWorld,normal)):normal;
-}
-
 float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
             float3 normal : TEXCOORD1, float2 uv : TEXCOORD2,
             float4 color : COLOR0, float3 objectPosition : TEXCOORD3,
@@ -130,29 +54,37 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
     const bool hasOpacity = mapping.opacityTexture != kNoMaterialTexture;
 
     const float4 baseColorSample = hasBaseColor
-        ? SampleLiveMap(gLiveBaseColorTexture,gBaseColorSampler,mapping,mappedUv,worldPosition,objectPosition,normal) : 1.0F.xxxx;
+        ? SampleLiveMaterialMap(gLiveBaseColorTexture,gBaseColorSampler,mapping,uv,uv1,mapping.baseTexcoord,worldPosition,objectPosition,normal,(float3x3)gObjectToWorld) : 1.0F.xxxx;
     const float4 metallicRoughnessSample = hasMetallicRoughness
-        ? SampleLiveMap(gLiveMetallicRoughnessTexture,gMetallicRoughnessSampler,mapping,mappedUv,worldPosition,objectPosition,normal) : 1.0F.xxxx;
+        ? SampleLiveMaterialMap(gLiveMetallicRoughnessTexture,gMetallicRoughnessSampler,mapping,uv,uv1,mapping.additionalTexcoords & 1U,worldPosition,objectPosition,normal,(float3x3)gObjectToWorld) : 1.0F.xxxx;
     const float4 emissiveSample = hasEmissive
-        ? SampleLiveMap(gLiveEmissiveTexture,gEmissiveSampler,mapping,mappedUv,worldPosition,objectPosition,normal) : 1.0F.xxxx;
+        ? SampleLiveMaterialMap(gLiveEmissiveTexture,gEmissiveSampler,mapping,uv,uv1,(mapping.additionalTexcoords >> 1U) & 1U,worldPosition,objectPosition,normal,(float3x3)gObjectToWorld) : 1.0F.xxxx;
     const float opacitySample = hasOpacity
-        ? SampleLiveMap(gLiveOpacityTexture,gOpacitySampler,mapping,mappedUv,worldPosition,objectPosition,normal).r : 1.0F;
+        ? SampleLiveMaterialMap(gLiveOpacityTexture,gOpacitySampler,mapping,uv,uv1,(mapping.additionalTexcoords >> 2U) & 1U,worldPosition,objectPosition,normal,(float3x3)gObjectToWorld).r : 1.0F;
 
-    const bool baseColorSrgb =
-        (mapping.mappingFlags & kMaterialFlagBaseColorSrgb) != 0U;
-    const bool emissiveSrgb =
-        (mapping.mappingFlags & kMaterialFlagEmissiveSrgb) != 0U;
-    const float3 textureBaseColor = DecodeMaterialColor(baseColorSample.rgb, baseColorSrgb);
+    // Color residency uses sRGB image formats: decode happens before GPU filtering.
+    const float3 textureBaseColor = baseColorSample.rgb;
     float3 baseColor = max(
         MaterialBaseColorRGB(material) * color.rgb * textureBaseColor, 0.0F.xxx);
     const float metallic = saturate(material.metallic * metallicRoughnessSample.b);
     float roughness = saturate(material.roughness * metallicRoughnessSample.g);
 
     float3 shadingNormal = normalize(normal);
-    if(hasNormal)shadingNormal=SampleLiveNormal(mapping,LiveUv(uv,uv1,mapping,mapping.normalTexcoord),worldPosition,objectPosition,shadingNormal);
+    if(hasNormal)shadingNormal=SampleLiveMaterialNormal(gLiveNormalTexture,gNormalSampler,mapping,uv,uv1,worldPosition,objectPosition,shadingNormal,(float3x3)gObjectToWorld);
 
     ApplySurfaceDetail(gLiveSurfaceDetails[0],objectPosition,worldPosition,uv,uv1,
         (float3x3)gObjectToWorld,worldTangent,baseColor,roughness,shadingNormal);
+    const float alpha = saturate(color.a * material.baseColorA * baseColorSample.a * opacitySample) *
+                        finiteMappingUse;
+    if (material.blendMode == kBlendModeMasked) clip(alpha - mapping.alphaCutoff);
+    float3 emissive = MaterialEmissiveRGB(material);
+    if (hasEmissive) emissive *= emissiveSample.rgb;
+#ifdef DVE_SURFACE_DEBUG_EMISSION
+    return float4(emissive,alpha);
+#endif
+#ifdef DVE_SURFACE_DEBUG_CHANNELS
+    return float4(metallic,roughness,alpha,1);
+#endif
 #ifdef DVE_SURFACE_DEBUG_COLOR
     return float4(baseColor,roughness);
 #endif
@@ -176,10 +108,5 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
     // This pass currently evaluates IBL; applying one fixed CSM texel blackened the
     // material whenever the atlas was uninitialized or that unrelated texel was shaded.
 
-    float3 emissive = MaterialEmissiveRGB(material);
-    if (hasEmissive) emissive *= DecodeMaterialColor(emissiveSample.rgb, emissiveSrgb);
-    const float alpha = saturate(color.a * material.baseColorA * baseColorSample.a * opacitySample) *
-                        finiteMappingUse;
-    if (material.blendMode == kBlendModeMasked) clip(alpha - mapping.alphaCutoff);
     return float4((ibl + emissive) * exp2(clamp(gEnvironmentParameters.z,-32.0F,32.0F)) * finiteMappingUse, alpha);
 }

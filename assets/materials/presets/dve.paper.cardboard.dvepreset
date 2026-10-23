@@ -1,0 +1,9 @@
+DVE_MATERIAL_PRESET 1 1 1
+"dve.paper.cardboard" "Cardboard" "Paper & board" "Paper & board Cardboard"
+"Opaque fiber surface. Backlit thin-sheet transmission is not implemented; corrugated cut edges require geometry." "DVE original artistic defaults; not measured material fits" "meters"
+2 0 5
+0
+DVE_EDITOR_MATERIALS 7
+2
+0 "Air" 0 0 0 0 0 0 0 0 1 0.5 0 2 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 0 0 0 0 0 1 0 1 0 0 1.5 1 1 1 0 0 "" 0 0 0 0 1 0.0199999996 0 0 0 20 0.25 0.150000006 1.99999995e-05 1
+10 "Cardboard" 0.449999988 0.289999992 0.129999995 1 0 0 0 0 0.879999995 0.5 0 0 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 1000 1 1 0 0 0 1 0 0 0 1.5 1 1 1 0 0 "" 0 0 3 0 1 0.00249999994 0 0 0 20 0.200000003 0.150000006 7.0000001e-06 1

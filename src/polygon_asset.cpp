@@ -23,7 +23,7 @@ namespace {
 
 constexpr std::array<char, 8> kMagic{'D','V','E','M','E','S','H','1'};
 constexpr std::uint16_t kMajor = 1;
-constexpr std::uint16_t kMinor = 5;
+constexpr std::uint16_t kMinor = 6;
 // Files without material optics are still written as v1.3 (byte-identical to before).
 constexpr std::uint16_t kMinorWithoutOptics = 3;
 constexpr std::uint64_t kFnvOffset = 1469598103934665603ULL;
@@ -101,6 +101,7 @@ void hash_material(std::uint64_t& h, const VoxelMaterialDefinition& m) noexcept 
     for(const auto& l:m.layers){hash_scalar(h,l.sourceMaterial);hash_scalar(h,l.weight);hash_scalar(h,static_cast<std::uint8_t>(l.blendMode));hash_scalar(h,l.enabled);}
     // Optics only when present, so the hashes of every material without them are unchanged.
     if(material_has_optics(m)){hash_scalar(h,m.transmission);hash_scalar(h,m.indexOfRefraction);hash_float3(h,m.attenuationColor);hash_scalar(h,m.attenuationDistanceMeters);}
+    if(m.surfaceDetail.pattern!=SurfacePattern::None)hash_scalar(h,material_surface_detail_hash(m.surfaceDetail));
     if(!m.preset.id.empty()){hash_string(h,m.preset.id);hash_scalar(h,m.preset.revision);hash_scalar(h,m.preset.overrides);}
     if(material_has_normal_map(m)){hash_scalar(h,m.normalMap->contentHash);hash_scalar(h,m.normalMapTileMeters);hash_scalar(h,m.normalMapStrength);hash_scalar(h,m.normalMapSharpness);}
 }
@@ -170,6 +171,8 @@ void write_material(Writer& w,const VoxelMaterialDefinition& m,std::uint16_t min
         if(m.normalMap){w.string(m.normalMap->name);w.u32(m.normalMap->width);w.u32(m.normalMap->height);w.f32(m.normalMapTileMeters);w.f32(m.normalMapStrength);w.f32(m.normalMapSharpness);w.bytes(m.normalMap->rgba8.data(),m.normalMap->rgba8.size());}
     }
 
+    if(minor>=6U){w.u8(static_cast<std::uint8_t>(m.surfaceDetail.pattern));w.u8(static_cast<std::uint8_t>(m.surfaceDetail.space));w.u32(m.surfaceDetail.seed);for(float v:surface_detail_values(m.surfaceDetail))w.f32(v);}
+
 }
 VoxelMaterialDefinition read_material(Reader& r,std::uint16_t minor){
     VoxelMaterialDefinition m;m.name=r.string();m.baseColor={r.f32(),r.f32(),r.f32(),r.f32()};m.emissive={r.f32(),r.f32(),r.f32()};m.metallic=r.f32();m.roughness=r.f32();m.specular=r.f32();
@@ -190,6 +193,8 @@ VoxelMaterialDefinition read_material(Reader& r,std::uint16_t minor){
             const auto bytes=std::size_t(width)*height*4;r.require(bytes);std::vector<std::uint8_t> pixels(bytes);r.bytes(pixels.data(),bytes);
             m.normalMap=make_voxel_normal_map(std::move(name),width,height,std::move(pixels));if(!material_normal_map_valid(m))throw std::runtime_error("invalid normal map");}
     }
+    if(minor>=6U){m.surfaceDetail.pattern=SurfacePattern(r.u8());m.surfaceDetail.space=SurfaceDetailSpace(r.u8());m.surfaceDetail.seed=r.u32();
+        std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)v=r.f32();set_surface_detail_values(m.surfaceDetail,values);if(!material_surface_detail_valid(m.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");}
     return m;
 }
 
@@ -384,6 +389,7 @@ PolygonAssetValidationResult validate_polygon_asset(const CookedPolygonAsset& a)
     if(a.vertices.size()>kMaximumFileVertices||a.indices.size()>kMaximumFileIndices||a.materials.empty()||a.materials.size()>kMaximumFileMaterials)return fail(PolygonAssetErrorCode::LimitExceeded,"polygon asset exceeds count limits");
     if(a.materialBindings.size()!=a.materials.size())return fail(PolygonAssetErrorCode::InvalidMaterial,"material binding count does not match material count");
     for(const auto& m:a.materials){
+        if(!material_surface_detail_valid(m.surfaceDetail))return fail(PolygonAssetErrorCode::InvalidMaterial,"invalid surface-detail settings");
         if(!material_normal_map_valid(m))return fail(PolygonAssetErrorCode::InvalidMaterial,"material normal map is invalid");
         if(m.preset.id.size()>128 || (m.preset.id.empty() ? m.preset.revision!=0 || m.preset.overrides!=0 : m.preset.revision==0))return fail(PolygonAssetErrorCode::InvalidMaterial,"material preset origin is invalid");
     }
@@ -476,7 +482,7 @@ CookedPolygonAsset cook_polygon_scene(const ImportedScene& scene,const PolygonCo
 }
 
 bool write_dmesh(const std::filesystem::path& path,const CookedPolygonAsset& input,std::string* error){
-    try{CookedPolygonAsset a=input;a.contentHash=polygon_asset_content_hash(a);const auto valid=validate_polygon_asset(a);if(!valid)throw std::runtime_error(valid.message);const bool extended=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return !m.preset.id.empty() || material_has_normal_map(m);});const std::uint16_t minor=extended?5:std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_optics(m);})?4:kMinorWithoutOptics;Writer w;w.bytes(kMagic.data(),kMagic.size());w.u16(kMajor);w.u16(minor);w.u64(a.objectId);w.u64(a.contentHash);w.u32(static_cast<std::uint32_t>(a.materials.size()));w.u32(static_cast<std::uint32_t>(a.images.size()));w.u32(static_cast<std::uint32_t>(a.samplers.size()));w.u32(static_cast<std::uint32_t>(a.textures.size()));w.u64(a.vertices.size());w.u64(a.indices.size());w.u32(static_cast<std::uint32_t>(a.submeshes.size()));w.u32(0);
+    try{CookedPolygonAsset a=input;a.contentHash=polygon_asset_content_hash(a);const auto valid=validate_polygon_asset(a);if(!valid)throw std::runtime_error(valid.message);const bool extended=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return !m.preset.id.empty() || material_has_normal_map(m);});const bool details=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::None;});const std::uint16_t minor=details?6:extended?5:std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_optics(m);})?4:kMinorWithoutOptics;Writer w;w.bytes(kMagic.data(),kMagic.size());w.u16(kMajor);w.u16(minor);w.u64(a.objectId);w.u64(a.contentHash);w.u32(static_cast<std::uint32_t>(a.materials.size()));w.u32(static_cast<std::uint32_t>(a.images.size()));w.u32(static_cast<std::uint32_t>(a.samplers.size()));w.u32(static_cast<std::uint32_t>(a.textures.size()));w.u64(a.vertices.size());w.u64(a.indices.size());w.u32(static_cast<std::uint32_t>(a.submeshes.size()));w.u32(0);
         for(std::size_t i=0;i<a.materials.size();++i){
             write_material(w,a.materials[i],minor);const auto& b=a.materialBindings[i];
             w.u8(b.doubleSided?1U:0U);w.u8(0);w.u16(0);w.f32(b.alphaCutoff);w.f32(b.normalScale);

@@ -95,6 +95,7 @@ endif()
 message(STATUS "DVE geometry profile: ${DVE_GEOMETRY_MODE_NORMALIZED}")
 
 add_library(dve_core
+    src/material_surface_detail.cpp
     src/compressed_texture.cpp
     src/brick.cpp
     src/voxel_object.cpp
@@ -2660,6 +2661,9 @@ if(DVE_BUILD_TESTS)
 
     if(DVE_BUILD_EDITOR)
         if(TARGET dve_render_bridge)
+            add_executable(dve_material_surfaces_tests tests/test_material_surfaces.cpp)
+            target_link_libraries(dve_material_surfaces_tests PRIVATE dve::editor)
+            add_test(NAME dve_material_surfaces_tests COMMAND dve_material_surfaces_tests)
             add_executable(dve_editor_material_presets_tests tests/test_editor_material_presets.cpp)
             target_link_libraries(dve_editor_material_presets_tests PRIVATE dve::editor)
             add_test(NAME dve_editor_material_presets_tests COMMAND dve_editor_material_presets_tests)

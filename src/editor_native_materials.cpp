@@ -77,6 +77,7 @@ std::vector<MaterialPresetControl> NativeEditorController::material_panel_contro
     std::vector<MaterialPresetControl> r;const auto& m=materialPanel_.draft;
     for(auto c:material_preset_controls()){
         if(c.advanced&&!materialPanel_.advanced)continue;
+        if(!materialPanel_.advanced && unsigned(c.property)>=unsigned(MaterialPresetProperty::DetailSpace) && m.surfaceDetail.pattern==SurfacePattern::None)continue;
         if(!materialPanel_.advanced){
             if(m.transmission==0&&(c.property==MaterialPresetProperty::Ior||c.property==MaterialPresetProperty::AbsorptionDistance))continue;
             if(m.clearCoat==0&&c.property==MaterialPresetProperty::CoatRoughness)continue;
@@ -134,6 +135,7 @@ bool NativeEditorController::save_material_panel_preset(){
     a.tags="custom user "+p.draft.name;a.revision=1;a.defaults.name=a.name;
     a.requirements={p.draft.transmission>0?MaterialPresetFeature::SolidTransmission:MaterialPresetFeature::Opaque};
     if(p.draft.transmission>0&&p.draft.roughness>0)a.requirements.push_back(MaterialPresetFeature::RoughTransmission);
+    if(p.draft.surfaceDetail.pattern!=SurfacePattern::None)a.requirements.push_back(MaterialPresetFeature::SurfaceDetail);
     if(p.draft.clearCoat>0)a.requirements.push_back(MaterialPresetFeature::ClearCoat);
     a.dependencies.clear();if(p.draft.normalMap){a.requirements.push_back(MaterialPresetFeature::NormalDetail);a.dependencies={"embedded:normal"};}
     if(p.catalog.find(a.id)){p.message="This draft is already saved as a user preset";return true;}
@@ -172,6 +174,7 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
     if(!validation.upsert({10,p.draft,false},&draftError))return fail(draftError);
     // Derive requirements from edited values rather than the name of the selected preset.
     MaterialPresetAsset requested;requested.defaults=p.draft;
+    if(p.draft.surfaceDetail.pattern!=SurfacePattern::None)requested.requirements.push_back(MaterialPresetFeature::SurfaceDetail);
     if(p.draft.transmission>0)requested.requirements.push_back(MaterialPresetFeature::SolidTransmission);
     const auto capability=material_preset_capability(requested,p.backend);
     if(capability.support==MaterialPresetSupport::Unavailable)return fail(capability.reason);
@@ -212,6 +215,7 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
             mesh.contentHash=polygon_asset_content_hash(mesh);const auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);c.afterMesh=std::move(mesh);
         }else{
             if(!o->voxels)return fail(o->name+": no assignable surface");
+            if(p.draft.surfaceDetail.pattern!=SurfacePattern::None&&unsigned(p.draft.surfaceDetail.space)>=unsigned(SurfaceDetailSpace::UV0))return fail(o->name+": voxel surfaces have no UV set; choose object or world mapping");
             std::map<MaterialId,MaterialId> remap;
             auto cells=selectionDomain_==SelectionDomain::Voxels&&voxelSelectionObject_==id?voxelSelection_:all_occupied_voxels(*o->voxels);
             if(cells.empty())return fail(o->name+": no occupied target cells");
@@ -321,7 +325,7 @@ const auto support=material_preset_capability(*a,p.backend).support;
         const bool overridden=(p.draft.preset.overrides&(std::uint64_t(1)<<unsigned(c.property)))!=0;btn(l.fields[i],std::string(c.label)+(overridden?"* ":" ")+value+" "+std::string(c.unit),p.editing==c.property);btn(l.resets[i],"R");}
     btn(l.reset,"Reset draft");btn(l.update,"Update draft");
     btn(l.apply,"Apply Copy / Make Unique");btn(l.editSlot,"Apply to Slot (shared faces/cells)");
-    auto asset=p.catalog.find(p.draft.preset.id);MaterialPresetAsset requested;if(asset)requested=*asset;if(p.draft.transmission>0)requested.requirements.push_back(MaterialPresetFeature::SolidTransmission);
+    auto asset=p.catalog.find(p.draft.preset.id);MaterialPresetAsset requested;if(asset)requested=*asset;if(p.draft.surfaceDetail.pattern!=SurfacePattern::None)requested.requirements.push_back(MaterialPresetFeature::SurfaceDetail);if(p.draft.transmission>0)requested.requirements.push_back(MaterialPresetFeature::SolidTransmission);
     const auto cap=material_preset_capability(requested,p.backend);const int y=l.panel.y+l.panel.height-118;
     text({l.preview.x,y,l.loadSlot.x-l.preview.x-12,24},std::string(material_preset_support_label(cap.support))+": "+cap.reason);
     painter.text(l.panel.x+12,l.panel.y+l.panel.height-8,elide_text_to_width(painter,p.message.empty()?"Arrows: presets | Ctrl+F: favorite | [ ]: slot | Wheel: list/controls | Enter: Apply Copy":p.message,l.panel.width-24),muted);

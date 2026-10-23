@@ -69,6 +69,7 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
         return fail("foliage values must be finite, non-negative, and normalized where required");
     if (value.preset.id.size()>128 || (value.preset.id.empty() ? value.preset.revision!=0 || value.preset.overrides!=0 : value.preset.revision==0))
         return fail("invalid preset origin");
+    if (!material_surface_detail_valid(value.surfaceDetail)) return fail("invalid metric surface-detail settings");
     if (!material_optics_valid(value))
         return fail("transmission must be in [0,1], IOR in [1,3], attenuation colour in [0,1] and distance >= 0");
     if (!material_normal_map_valid(value))
@@ -220,7 +221,8 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
         const bool normalMaps = std::any_of(entries_.begin(), entries_.end(),
                                             [](const auto& e) { return material_has_normal_map(e.second.definition); });
         const bool origins = std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return !e.second.definition.preset.id.empty();});
-        output << "DVE_EDITOR_MATERIALS " << (origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
+        const bool details=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return e.second.definition.surfaceDetail.pattern!=SurfacePattern::None;});
+        output << "DVE_EDITOR_MATERIALS " << (details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -243,7 +245,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
-            if (normalMaps || origins) {
+            if (normalMaps || origins || details) {
                 if (const VoxelNormalMap* map = m.normalMap.get()) {
                     static constexpr char kHex[] = "0123456789abcdef";
                     std::string hex;
@@ -255,7 +257,8 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     output << " 0";
                 }
             }
-            if(origins) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
+            if(origins || details) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
+            if(details){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
             output << '\n';
         }
     if(!output){if(error)*error="Failed to write material stream";return false;}return true;
@@ -293,7 +296,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 6) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 7) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -368,6 +371,11 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
                 }
             }
             if(version>=6) input >> std::quoted(m.preset.id) >> m.preset.revision >> m.preset.overrides;
+            if(version>=7){unsigned pattern{},space{};std::array<float,kSurfaceDetailFloatCount> values{};
+                input>>pattern>>space>>m.surfaceDetail.seed;
+                if(pattern>unsigned(SurfacePattern::Paint)||space>unsigned(SurfaceDetailSpace::UV1))throw std::runtime_error("invalid surface-detail model or space");
+                m.surfaceDetail.pattern=SurfacePattern(pattern);m.surfaceDetail.space=SurfaceDetailSpace(space);
+                for(float& v:values)input>>v;set_surface_detail_values(m.surfaceDetail,values);}
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");
             entry.id = static_cast<MaterialId>(rawId);

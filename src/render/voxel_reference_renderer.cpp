@@ -620,7 +620,7 @@ VoxelReferenceRenderStats render_radiance_cascades(
         if (!texel.valid) continue;
         const VoxelReferenceInstance& instance = instances[texel.instance];
         bool fallback = false;
-        const VoxelMaterialDefinition& material = material_for(instance, texel.material, &fallback);
+        VoxelMaterialDefinition material = material_for(instance, texel.material, &fallback);
         if (fallback) ++stats.materialFallbacks;
         const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
         const float visibility = shadow_visibility(tracer, texel.position, texel.normal,
@@ -641,6 +641,9 @@ VoxelReferenceRenderStats render_radiance_cascades(
                                   sunShare, gi.indirect[index], ao, caustic, transmitted};
         apply_voxel_normal_map(instance, material, environment, texel.position, diffuses(material, distances),
                                distances.metersPerVoxel, surface);
+        const float footprint=length(subtract(gbuffer.cameraPosition,texel.position))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
+        apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,texel.position),distances.metersPerVoxel),multiply(texel.position,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
+        if(material.surfaceDetail.pattern!=SurfacePattern::None)surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
         const LightPasses light = shade_voxel(material, environment, surface);
         target.hdrColor[index] = beauty(light, material.baseColor.w);
         target.depth[index] = texel.normalizedDepth;
@@ -750,7 +753,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     if (!(normalizedDepth < target.depth[index])) continue;
 
                     bool fallback = false;
-                    const VoxelMaterialDefinition& material =
+                    VoxelMaterialDefinition material =
                         material_for(instance, hit->objectHit.material, &fallback);
                     if (fallback) ++local.materialFallbacks;
                     const std::uint32_t seed = static_cast<std::uint32_t>(index) * 747796405U + 2891336453U;
@@ -779,6 +782,9 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                               visibility, sunShare, indirect, ao, caustic, transmitted};
                     apply_voxel_normal_map(instance, material, environment, hit->worldPosition, diffuses(material, distances),
                                            distances.metersPerVoxel, surface);
+                    const float footprint=length(subtract(camera.position,hit->worldPosition))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
+                    apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,hit->worldPosition),distances.metersPerVoxel),multiply(hit->worldPosition,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
+                    if(material.surfaceDetail.pattern!=SurfacePattern::None)surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
                     LightPasses light = shade_voxel(material, environment, surface);
                     Float3 lightingPoint = hit->worldPosition;
                     if (lighting) {

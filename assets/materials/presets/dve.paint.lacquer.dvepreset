@@ -1,0 +1,9 @@
+DVE_MATERIAL_PRESET 1 1 1
+"dve.paint.lacquer" "Lacquer" "Paint" "Paint Lacquer"
+"Original bundled procedural color, roughness and physical-scale bump; object-attached by default. No geometric displacement." "DVE original artistic defaults; not measured material fits" "meters"
+3 0 5 3
+0
+DVE_EDITOR_MATERIALS 7
+2
+0 "Air" 0 0 0 0 0 0 0 0 1 0.5 0 2 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 0 0 0 0 0 1 0 1 0 0 1.5 1 1 1 0 0 "" 0 0 0 0 1 0.0199999996 0 0 0 20 0.25 0.150000006 1.99999995e-05 1
+10 "Lacquer" 0.180000007 0.0199999996 0.00999999978 1 0 0 0 0 0.25 0.5 5 0 0 1 1 1 1 0.0500000007 0.5 0.800000012 0.349999994 0.5 0.349999994 1000 1 1 0 0 0 1 0 0 0 1.5 1 1 1 0 0 "" 0 0 5 0 1 0.00200000009 0 0 0 20 0.0199999996 0.150000006 1.99999999e-06 1

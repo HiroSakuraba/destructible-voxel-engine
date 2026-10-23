@@ -38,10 +38,27 @@ struct Int3 {
     auto operator<=>(const Int3&) const = default;
 };
 
+struct Float2 {
+    float x{};
+    float y{};
+};
+
 struct Float3 {
     float x{};
     float y{};
     float z{};
+};
+
+struct Quaternion {
+    float x{};
+    float y{};
+    float z{};
+    float w{1.0F};
+};
+
+struct RigidTransform {
+    Float3 position{};
+    Quaternion rotation{};
 };
 
 struct BrickKey {

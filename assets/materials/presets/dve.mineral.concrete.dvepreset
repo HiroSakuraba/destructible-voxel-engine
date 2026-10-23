@@ -1,0 +1,9 @@
+DVE_MATERIAL_PRESET 1 1 1
+"dve.mineral.concrete" "Concrete surface" "Mineral" "Mineral Concrete surface"
+"Original bundled procedural color, roughness and physical-scale bump; object-attached by default. No geometric displacement." "DVE original artistic defaults; not measured material fits" "meters"
+2 0 5
+0
+DVE_EDITOR_MATERIALS 7
+2
+0 "Air" 0 0 0 0 0 0 0 0 1 0.5 0 2 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 0 0 0 0 0 1 0 1 0 0 1.5 1 1 1 0 0 "" 0 0 0 0 1 0.0199999996 0 0 0 20 0.25 0.150000006 1.99999995e-05 1
+10 "Concrete surface" 0.349999994 0.360000014 0.370000005 1 0 0 0 0 0.870000005 0.5 0 0 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 1000 1 1 0 0 0 1 0 0 0 1.5 1 1 1 0 0 "" 0 0 4 0 1 0.00999999978 0 0 0 20 0.25 0.150000006 0.000150000007 1

@@ -6,6 +6,8 @@
 #include "dve/render/radiance_cascades_spwi.hpp"
 #include <algorithm>
 #include <cmath>
+#include <mutex>
+#include <deque>
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
@@ -57,7 +59,31 @@ struct Emitter {
   float area{}, inner{}, outer{};
   bool twoSided{};
   double cumulative{}, weight{};
+  int polygon{-1};
+  std::uint32_t firstIndex{},materialIndex{};
 };
+std::shared_ptr<const std::vector<PolygonTextureMipChain>> surface_mips(const CookedPolygonAsset& asset) {
+    using Chains=std::vector<PolygonTextureMipChain>;
+    struct Cache {std::mutex mutex;std::unordered_map<std::uint64_t,std::shared_ptr<const Chains>> entries;std::deque<std::pair<std::uint64_t,std::size_t>> order;std::size_t bytes{};};
+    static Cache cache;const auto key=asset.contentHash?asset.contentHash:polygon_asset_content_hash(asset);
+    {std::lock_guard lock(cache.mutex);if(auto it=cache.entries.find(key);it!=cache.entries.end())return it->second;}
+    auto result=std::make_shared<Chains>();std::size_t bytes=0;
+    for(std::size_t image=0;image<asset.images.size();++image){bool normals=false,srgb=false;
+        const auto uses=[&](const PolygonTextureBinding& b){return b.texture&&*b.texture<asset.textures.size()&&asset.textures[*b.texture].imageIndex==image;};
+        for(const auto& b:asset.materialBindings){normals=normals||uses(b.normal)||uses(b.detailNormal);srgb=srgb||(uses(b.baseColor)&&b.baseColor.colorSpace==PolygonTextureColorSpace::Srgb)||(uses(b.emissive)&&b.emissive.colorSpace==PolygonTextureColorSpace::Srgb)||(uses(b.detailBaseColor)&&b.detailBaseColor.colorSpace==PolygonTextureColorSpace::Srgb);}
+        auto chain=generate_texture_mips(asset.images[image]);
+        if(normals)chain.normalLevels=generate_texture_mips(asset.images[image],true,false).levels;
+        if(srgb)chain.srgbLevels=generate_texture_mips(asset.images[image],false,true).levels;
+        for(const auto* levels:{&chain.levels,&chain.normalLevels,&chain.srgbLevels})
+            for(const auto& mip:*levels)bytes+=mip.rgba8.size();
+        result->push_back(std::move(chain));
+    }
+    constexpr std::size_t budget=64U*1024U*1024U;
+    if(bytes<=budget){std::lock_guard lock(cache.mutex);if(auto it=cache.entries.find(key);it!=cache.entries.end())return it->second;
+        while(cache.bytes+bytes>budget&&!cache.order.empty()){cache.bytes-=cache.order.front().second;cache.entries.erase(cache.order.front().first);cache.order.pop_front();}
+        cache.entries.emplace(key,result);cache.order.emplace_back(key,bytes);cache.bytes+=bytes;}
+    return result;
+}
 struct Hit {
   float distance{};
   Float3 p{}, n{};
@@ -124,7 +150,7 @@ struct SceneLighting::Impl {
   struct Mesh {
     const PolygonRenderInstance *instance;
     std::shared_ptr<PolygonBvh> bvh;
-    std::vector<PolygonTextureMipChain> opacityMips;
+    std::shared_ptr<const std::vector<PolygonTextureMipChain>> opacityMips;
   };
   std::vector<Mesh> meshes;
   std::vector<OpticalPolygonInstance> opticalInstances;
@@ -203,12 +229,7 @@ struct SceneLighting::Impl {
           continue;
       }
       Mesh mesh{&i, bvh, {}};
-      if (std::any_of(i.asset->materials.begin(), i.asset->materials.end(),
-                      [](const auto &m) {
-                        return m.blendMode != MaterialBlendMode::Opaque;
-                      }))
-        for (const auto &image : i.asset->images)
-          mesh.opacityMips.push_back(generate_texture_mips(image));
+      mesh.opacityMips=surface_mips(*i.asset);
       meshes.push_back(std::move(mesh));
       for (const auto &sm : i.asset->submeshes) {
         if (sm.materialIndex >= i.asset->materials.size())
@@ -237,6 +258,7 @@ struct SceneLighting::Impl {
             continue;
           Emitter light;
           light.kind = Emitter::Triangle;
+          light.polygon=static_cast<int>(meshes.size()-1);light.firstIndex=static_cast<std::uint32_t>(k);light.materialIndex=sm.materialIndex;
           light.p = a;
           light.u = sub(b, a);
           light.v = sub(c, a);
@@ -386,21 +408,14 @@ struct SceneLighting::Impl {
       else if (!media.empty())
         material = media.back().material;
       float cutoff = .5F;
+      Float3 detailedNormal=h->shadingNormal;
       if (h->polygonInstance >= 0 &&
           std::size_t(h->polygonInstance) < meshes.size()) {
         const auto &mesh = meshes[h->polygonInstance];
         const auto &i = *mesh.instance;
-        if (material.blendMode != MaterialBlendMode::Opaque) {
-          PolygonBvhHit coverage;
-          coverage.position = inverse_transform_point(i.transform, h->position);
-          coverage.normal =
-              inverse_transform_vector(i.transform, h->shadingNormal);
-          coverage.firstIndex = h->firstIndex;
-          coverage.materialIndex = h->materialIndex;
-          material.baseColor.w =
-              polygon_hit_opacity(*i.asset, coverage, h->position,
-                                  h->shadingNormal, mesh.opacityMips, 1);
-        }
+        PolygonBvhHit coverage;coverage.position=inverse_transform_point(i.transform,h->position);coverage.normal=inverse_transform_vector(i.transform,h->shadingNormal);coverage.firstIndex=h->firstIndex;coverage.materialIndex=h->materialIndex;
+        const auto evaluated=sample_polygon_hit_material(*i.asset,coverage,i.transform,h->shadingNormal,*mesh.opacityMips,scale,h->distance*scale*.006F,h->distance*scale);
+        material=evaluated.material;detailedNormal=evaluated.normal;
         if (h->materialIndex < i.asset->materialBindings.size())
           cutoff = i.asset->materialBindings[h->materialIndex].alphaCutoff;
         material.baseColor.x *= i.tint.x;
@@ -415,15 +430,10 @@ struct SceneLighting::Impl {
           h->voxelInstance >= 0 &&
           (!h->material || material_is_refractive(*h->material)))
         material = media.back().material;
-      Float3 detailedNormal=h->shadingNormal;
-      if(material.normalMap){
-        if(h->polygonInstance>=0 && std::size_t(h->polygonInstance)<meshes.size()){
-          const auto& pose=meshes[h->polygonInstance].instance->transform;
-          detailedNormal=unit(transform_vector(pose,voxel_normal_map_normal(material,mul(inverse_transform_point(pose,h->position),scale),inverse_transform_vector(pose,detailedNormal))));
-        }else if(h->voxelInstance>=0 && std::size_t(h->voxelInstance)<tracer.instances().size()){
-          const auto& pose=tracer.instances()[h->voxelInstance].transform;
-          detailedNormal=unit(transform_vector(pose,voxel_normal_map_normal(material,mul(inverse_transform_point(pose,h->position),scale),inverse_transform_vector(pose,detailedNormal))));
-        }
+      if(h->voxelInstance>=0 && std::size_t(h->voxelInstance)<tracer.instances().size()){
+        const auto& pose=tracer.instances()[h->voxelInstance].transform;
+        if(material.normalMap)detailedNormal=unit(transform_vector(pose,voxel_normal_map_normal(material,mul(inverse_transform_point(pose,h->position),scale),inverse_transform_vector(pose,detailedNormal))));
+        apply_material_surface_detail(material,detailedNormal,{mul(inverse_transform_point(pose,h->position),scale),mul(h->position,scale),{},{},false,pose,{1,0,0},{0,1,0},h->distance*scale*.006F});
       }
       result = Hit{h->distance,
                    h->position,
@@ -686,8 +696,15 @@ struct SceneLighting::Impl {
           shadowOrigin, unit(shadowDelta),
           (std::max)(0.F, shadowDistance -
                               (std::max)(1e-5F, shadowDistance * 1e-5F)));
-      const auto li =
-          product(mul(e.radiance, factor / pdf / float(count)), visibility);
+      auto radiance=e.radiance;
+      if(e.polygon>=0 && std::size_t(e.polygon)<meshes.size()){
+        const auto& mesh=meshes[e.polygon];const auto& instance=*mesh.instance;
+        PolygonBvhHit hit;hit.position=inverse_transform_point(instance.transform,q);hit.firstIndex=e.firstIndex;hit.materialIndex=e.materialIndex;
+        auto value=sample_polygon_hit_material(*instance.asset,hit,instance.transform,e.n,*mesh.opacityMips,scale,0,distance*scale).material;
+        value.baseColor.x*=instance.tint.x;value.baseColor.y*=instance.tint.y;value.baseColor.z*=instance.tint.z;
+        radiance=emission(value);
+      }
+      const auto li = product(mul(radiance, factor / pdf / float(count)), visibility);
       auto l = evaluate_material_bsdf(m, n, view, d, etaI, etaT).value;
       l.diffuse = product(l.diffuse, li);
       l.specular = product(l.specular, li);

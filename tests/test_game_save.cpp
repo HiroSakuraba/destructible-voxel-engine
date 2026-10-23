@@ -322,6 +322,38 @@ void test_material_normal_maps() {
     CHECK(found);
     const auto again = codec.encode(*decoded, nullptr, &error);
     CHECK(again && *again == *bytes);
+    CHECK(restore(a, saved));const auto normalHash=a.world->state_hash();
+    object->materials.front().normalMapStrength+=.25F;
+    CHECK(restore(a, saved));CHECK(a.world->state_hash()!=normalHash);
+}
+
+void test_material_surface_detail() {
+    const auto assets = make_assets();
+    int fires = 0;
+    auto scene = boot(assets, Physics3DBackend::Reference, &fires);
+    auto saved = capture(scene);
+    auto& material = saved.world.objects.front().materials.emplace_back();
+    material.surfaceDetail.pattern = SurfacePattern::Wood;
+    material.surfaceDetail.rotationRadians = {.1F, .2F, .3F};
+    material.surfaceDetail.seed = 42;
+    const auto hash = material_surface_detail_hash(material.surfaceDetail);
+    GameSaveCodec codec(file_reader()); std::string error;
+    const auto bytes = codec.encode(saved, nullptr, &error); CHECK(bytes);
+    if (!bytes) return;
+    const auto decoded = codec.decode(*bytes, nullptr, &error); CHECK(decoded);
+    if (!decoded) return;
+    CHECK(material_surface_detail_hash(decoded->world.objects.front().materials.back().surfaceDetail) == hash);
+    const auto again = codec.encode(*decoded, nullptr, &error); CHECK(again && *again == *bytes);
+    auto document = decode_save_game_document(*bytes, {}, &error); CHECK(document);
+    if(document){
+        auto& section=document->sections.at("dve.material_surface_detail");
+        const auto entry=std::vector<std::byte>(section.begin()+4,section.end());
+        section[0]=std::byte{2};section.insert(section.end(),entry.begin(),entry.end());
+        CHECK(!codec.decode(encode_save_game_document(*document), nullptr, &error));
+    }
+    CHECK(restore(scene, saved)); const auto first = scene.world->state_hash();
+    ++material.surfaceDetail.seed;
+    CHECK(restore(scene, saved)); CHECK(scene.world->state_hash() != first);
 }
 
 // Copies of a source asset whose materials have optics: the materials (optics included) come
@@ -1358,6 +1390,7 @@ void test_script_state_v3_fog_height() {
 int main() {
     test_material_optics();
     test_material_normal_maps();
+    test_material_surface_detail();
     test_source_backed_optics();
     test_round_trip(Physics3DBackend::Reference, "reference");
     test_destruction(Physics3DBackend::Reference, "reference");

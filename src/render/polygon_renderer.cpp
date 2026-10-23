@@ -185,6 +185,13 @@ Float4 weighted4(Float4 a,Float4 b,Float4 c,Float3 weights) noexcept {
             a.w*weights.x+b.w*weights.y+c.w*weights.z};
 }
 
+TextureLod normal_triplanar_lod(TextureLod lod,const MaterialMappingSettings& mapping,int axis) {
+    const auto project=[&](Float3 p){const float scale=mapping.triplanarScale;return axis==0?Float2{p.z*scale,p.y*scale}:axis==1?Float2{p.x*scale,p.z*scale}:Float2{p.x*scale,p.y*scale};};
+    lod.dx=project(mapping.mappingMode==MaterialMappingMode::ObjectTriplanar?lod.objectDx:lod.worldDx);
+    lod.dy=project(mapping.mappingMode==MaterialMappingMode::ObjectTriplanar?lod.objectDy:lod.worldDy);
+    return lod.transformed(mapping.baseTransform);
+}
+
 Float4 sample_triplanar_binding(const CookedPolygonAsset& asset,const PolygonTextureBinding& binding,
                                 const std::vector<PolygonTextureMipChain>& chains,
                                 Float3 position,Float3 normal,const TextureTransform2D& transform,
@@ -289,11 +296,11 @@ MaterialSurfaceSample sample_layer_surface(
                 position,geometricNormal,binding.mapping.triplanarScale,
                 binding.mapping.triplanarBlendSharpness);
             const Float4 sx=sample_binding_uv(asset,binding.normal,chains,
-                transform_texture_coordinates(tc.xProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F},true);
+                transform_texture_coordinates(tc.xProjection,binding.mapping.baseTransform),normal_triplanar_lod(lod,binding.mapping,0),stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float4 sy=sample_binding_uv(asset,binding.normal,chains,
-                transform_texture_coordinates(tc.yProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F},true);
+                transform_texture_coordinates(tc.yProjection,binding.mapping.baseTransform),normal_triplanar_lod(lod,binding.mapping,1),stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float4 sz=sample_binding_uv(asset,binding.normal,chains,
-                transform_texture_coordinates(tc.zProjection,binding.mapping.baseTransform),lod,stats,{0.5F,0.5F,1.0F,1.0F},true);
+                transform_texture_coordinates(tc.zProjection,binding.mapping.baseTransform),normal_triplanar_lod(lod,binding.mapping,2),stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float3 nx=normalize(Float3{(sx.z*2.0F-1.0F)*(geometricNormal.x<0?-1.0F:1.0F),(sx.y*2.0F-1.0F)*binding.normalScale,(sx.x*2.0F-1.0F)*binding.normalScale});
             const Float3 ny=normalize(Float3{(sy.x*2.0F-1.0F)*binding.normalScale,(sy.z*2.0F-1.0F)*(geometricNormal.y<0?-1.0F:1.0F),(sy.y*2.0F-1.0F)*binding.normalScale});
             const Float3 nz=normalize(Float3{(sz.x*2.0F-1.0F)*binding.normalScale,(sz.y*2.0F-1.0F)*binding.normalScale,(sz.z*2.0F-1.0F)*(geometricNormal.z<0?-1.0F:1.0F)});
@@ -301,7 +308,7 @@ MaterialSurfaceSample sample_layer_surface(
             sample.normal={dot(worldLayer,tangent),dot(worldLayer,bitangent),dot(worldLayer,geometricNormal)};
             stats.triplanarSamples+=3U;
         } else {
-            const Float4 nm=sample_binding_uv(asset,binding.normal,chains,mapped,lod,stats,{0.5F,0.5F,1.0F,1.0F},true);
+            const Float4 nm=sample_binding_uv(asset,binding.normal,chains,mapped,lod.transformed(binding.mapping.baseTransform),stats,{0.5F,0.5F,1.0F,1.0F},true);
             sample.normal=normalize(Float3{(nm.x*2.0F-1.0F)*binding.normalScale,
                                            (nm.y*2.0F-1.0F)*binding.normalScale,
                                            nm.z*2.0F-1.0F});
@@ -704,9 +711,9 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             if(tri.binding->mapping.mappingMode==MaterialMappingMode::WorldTriplanar||tri.binding->mapping.mappingMode==MaterialMappingMode::ObjectTriplanar){
                 const Float3 position=tri.binding->mapping.mappingMode==MaterialMappingMode::WorldTriplanar?worldPosition:objectPosition;
                 const TriplanarCoordinates tc=make_triplanar_coordinates(position,normal,tri.binding->mapping.triplanarScale,tri.binding->mapping.triplanarBlendSharpness);
-                const Float4 sx=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.xProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F},true);
-                const Float4 sy=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.yProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F},true);
-                const Float4 sz=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.zProjection,tri.binding->mapping.baseTransform),textureLod,stats,{0.5F,0.5F,1.0F,1.0F},true);
+                const Float4 sx=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.xProjection,tri.binding->mapping.baseTransform),normal_triplanar_lod(textureLod,tri.binding->mapping,0),stats,{0.5F,0.5F,1.0F,1.0F},true);
+                const Float4 sy=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.yProjection,tri.binding->mapping.baseTransform),normal_triplanar_lod(textureLod,tri.binding->mapping,1),stats,{0.5F,0.5F,1.0F,1.0F},true);
+                const Float4 sz=sample_binding_uv(*tri.asset,tri.binding->normal,chains,transform_texture_coordinates(tc.zProjection,tri.binding->mapping.baseTransform),normal_triplanar_lod(textureLod,tri.binding->mapping,2),stats,{0.5F,0.5F,1.0F,1.0F},true);
                 const Float3 nx=normalize(Float3{(sx.z*2.0F-1.0F)*(normal.x<0?-1.0F:1.0F),(sx.y*2.0F-1.0F)*tri.binding->normalScale,(sx.x*2.0F-1.0F)*tri.binding->normalScale});
                 const Float3 ny=normalize(Float3{(sy.x*2.0F-1.0F)*tri.binding->normalScale,(sy.z*2.0F-1.0F)*(normal.y<0?-1.0F:1.0F),(sy.y*2.0F-1.0F)*tri.binding->normalScale});
                 const Float3 nz=normalize(Float3{(sz.x*2.0F-1.0F)*tri.binding->normalScale,(sz.y*2.0F-1.0F)*tri.binding->normalScale,(sz.z*2.0F-1.0F)*(normal.z<0?-1.0F:1.0F)});
@@ -810,6 +817,19 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         if(effective.normalMap){
             const float units=options.metersPerUnit>0&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
             normal=normalize(transform_vector(tri.transform,voxel_normal_map_normal(effective,multiply(objectPosition,units),inverse_transform_vector(tri.transform,normal))));
+        }
+        if(effective.surfaceDetail.pattern!=SurfacePattern::None){
+            const float units=resolve_meters_per_voxel(options.metersPerUnit);
+            float footprint=std::max(length(textureLod.worldDx),length(textureLod.worldDy))*units;
+            if(effective.surfaceDetail.space==SurfaceDetailSpace::UV0||effective.surfaceDetail.space==SurfaceDetailSpace::UV1){
+                const bool uvSecond=effective.surfaceDetail.space==SurfaceDetailSpace::UV1;
+                const auto dx=gradient(dwDx,uv3(uvSecond?uv1:uv),uv3(uvSecond?tri.v[0].uv1:tri.v[0].uv),uv3(uvSecond?tri.v[1].uv1:tri.v[1].uv),uv3(uvSecond?tri.v[2].uv1:tri.v[2].uv),invZ);
+                const auto dy=gradient(dwDy,uv3(uvSecond?uv1:uv),uv3(uvSecond?tri.v[0].uv1:tri.v[0].uv),uv3(uvSecond?tri.v[1].uv1:tri.v[1].uv),uv3(uvSecond?tri.v[2].uv1:tri.v[2].uv),invZ);
+                footprint=std::max(length(dx),length(dy))*effective.surfaceDetail.uvTileMeters;
+            }
+            effective.baseColor=base;
+            apply_material_surface_detail(effective,normal,{multiply(objectPosition,units),multiply(worldPosition,units),uv,uv1,true,tri.transform,tangent,bitangent,footprint});
+            base=effective.baseColor;
         }
         if(!options.decals.empty()){
             MaterialSurfaceSample decalSurface;
@@ -1132,6 +1152,82 @@ bool write_render_passes_pfm(const PolygonRenderTarget& target,const std::filesy
                   [&](std::size_t i,int){return p.sunVisibility[i];},error))return false;
     return write_pfm(directory/(prefix+"depth.pfm"),target.width,target.height,1,
                      [&](std::size_t i,int){return std::isfinite(p.depthMeters[i])?p.depthMeters[i]:farPlaneMeters;},error);
+}
+
+PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset& asset,const PolygonBvhHit& hit,
+    const RigidTransform& pose,Float3 normal,const std::vector<PolygonTextureMipChain>& chains,
+    float metersPerUnit,float footprintMeters,float viewDistanceMeters) noexcept {
+    PolygonHitSurface out;out.normal=normalize(normal);
+    if(hit.materialIndex>=asset.materials.size()||hit.materialIndex>=asset.materialBindings.size()||std::uint64_t(hit.firstIndex)+2>=asset.indices.size())return out;
+    out.material=asset.materials[hit.materialIndex];auto& material=out.material;
+    const auto& binding=asset.materialBindings[hit.materialIndex];
+    const auto ia=asset.indices[hit.firstIndex],ib=asset.indices[hit.firstIndex+1],ic=asset.indices[hit.firstIndex+2];
+    if(ia>=asset.vertices.size()||ib>=asset.vertices.size()||ic>=asset.vertices.size())return out;
+    const auto& a=asset.vertices[ia];const auto& b=asset.vertices[ib];const auto& c=asset.vertices[ic];
+    const auto e1=subtract(b.position,a.position),e2=subtract(c.position,a.position),q=subtract(hit.position,a.position);
+    const float d00=dot(e1,e1),d01=dot(e1,e2),d11=dot(e2,e2),det=d00*d11-d01*d01;
+    float w1=0,w2=0;if(std::abs(det)>1e-20F){w1=(d11*dot(q,e1)-d01*dot(q,e2))/det;w2=(d00*dot(q,e2)-d01*dot(q,e1))/det;}const float w0=1-w1-w2;
+    const Float2 uv{a.texcoord.x*w0+b.texcoord.x*w1+c.texcoord.x*w2,a.texcoord.y*w0+b.texcoord.y*w1+c.texcoord.y*w2};
+    const Float2 uv1{a.texcoord1.x*w0+b.texcoord1.x*w1+c.texcoord1.x*w2,a.texcoord1.y*w0+b.texcoord1.y*w1+c.texcoord1.y*w2};
+    Float3 tangent=transform_vector(pose,{a.tangent.x*w0+b.tangent.x*w1+c.tangent.x*w2,a.tangent.y*w0+b.tangent.y*w1+c.tangent.y*w2,a.tangent.z*w0+b.tangent.z*w1+c.tangent.z*w2});
+    tangent=subtract(tangent,multiply(out.normal,dot(out.normal,tangent)));
+    if(length(tangent)<1e-6F)tangent=cross3(std::abs(out.normal.y)<.9F?Float3{0,1,0}:Float3{1,0,0},out.normal);
+    tangent=normalize(tangent);const float handed=a.tangent.w*w0+b.tangent.w*w1+c.tangent.w*w2<0?-1.F:1.F;
+    const auto bitangent=multiply(cross3(out.normal,tangent),handed);const auto world=transform_point(pose,hit.position);
+    TextureLod lod;lod.gradients=true;
+    const float units=metersPerUnit>0&&std::isfinite(metersPerUnit)?metersPerUnit:1;
+    const float footprint=std::isfinite(footprintMeters)?std::max(0.F,footprintMeters)/units:0;
+    lod.worldDx=multiply(tangent,footprint);lod.worldDy=multiply(bitangent,footprint);
+    lod.objectDx=inverse_transform_vector(pose,lod.worldDx);lod.objectDy=inverse_transform_vector(pose,lod.worldDy);
+    const auto selectedA=binding.mapping.mappingMode==MaterialMappingMode::UV1?a.texcoord1:a.texcoord;
+    const auto selectedB=binding.mapping.mappingMode==MaterialMappingMode::UV1?b.texcoord1:b.texcoord;
+    const auto selectedC=binding.mapping.mappingMode==MaterialMappingMode::UV1?c.texcoord1:c.texcoord;
+    if(std::abs(det)>1e-20F){
+        const auto gradient=[&](float v1,float v2){return add(multiply(e1,(d11*v1-d01*v2)/det),multiply(e2,(d00*v2-d01*v1)/det));};
+        const auto gu=gradient(selectedB.x-selectedA.x,selectedC.x-selectedA.x),gv=gradient(selectedB.y-selectedA.y,selectedC.y-selectedA.y);
+        lod.dx={dot(gu,lod.objectDx),dot(gv,lod.objectDx)};lod.dy={dot(gu,lod.objectDy),dot(gv,lod.objectDy)};
+    }
+    PolygonRenderStats stats;
+    auto surface=sample_layer_surface(asset,hit.materialIndex,chains,uv,uv1,world,hit.position,out.normal,tangent,bitangent,lod,true,stats);
+    const Float4 vertex{a.color.x*w0+b.color.x*w1+c.color.x*w2,a.color.y*w0+b.color.y*w1+c.color.y*w2,a.color.z*w0+b.color.z*w1+c.color.z*w2,a.color.w*w0+b.color.w*w1+c.color.w*w2};
+    surface.baseColor=mul4(surface.baseColor,vertex);surface.opacity*=vertex.w;
+    const Float2 selected=binding.mapping.mappingMode==MaterialMappingMode::UV1?uv1:uv;
+    const Float2 detailUv=transform_texture_coordinates(selected,binding.mapping.detailTransform);
+    const float fade=material_detail_fade(viewDistanceMeters,binding.mapping);
+    const auto map=[&](const PolygonTextureBinding& texture,const TextureTransform2D& transform,Float2 at,float multiplier,Float4 fallback,bool isNormal=false){return sample_mapped_binding(asset,texture,chains,binding.mapping,at,world,hit.position,out.normal,transform,multiplier,lod,stats,fallback,isNormal);};
+    if(binding.detailBaseColor.texture)surface.baseColor=blend_detail_color(surface.baseColor,map(binding.detailBaseColor,binding.mapping.detailTransform,detailUv,8,{.5F,.5F,.5F,1}),binding.mapping.detailColorStrength*fade);
+    if(binding.detailRoughness.texture)surface.roughness=blend_detail_roughness(surface.roughness,map(binding.detailRoughness,binding.mapping.detailTransform,detailUv,8,{.5F,.5F,.5F,1}).x,binding.mapping.detailRoughnessStrength*fade);
+    out.normal=normalize(add(add(multiply(tangent,surface.normal.x),multiply(bitangent,surface.normal.y)),multiply(out.normal,surface.normal.z)));
+    surface.normal=out.normal;
+    if(binding.detailNormal.texture){const auto v=map(binding.detailNormal,binding.mapping.detailTransform,detailUv,8,{.5F,.5F,1,1},true);
+        out.normal=apply_reoriented_tangent_material_normal(out.normal,tangent,bitangent,normalize(Float3{(2*v.x-1)*binding.detailNormalScale,(2*v.y-1)*binding.detailNormalScale,2*v.z-1}),binding.mapping.detailNormalStrength*fade);surface.normal=out.normal;}
+    for(std::size_t index=0;index<material.layers.size();++index){const auto& authored=material.layers[index];
+        if(!authored.enabled||authored.weight<=0||authored.sourceMaterial==kAirMaterial||authored.sourceMaterial>=asset.materials.size())continue;
+        MaterialLayerSample layer;layer.surface=sample_layer_surface(asset,authored.sourceMaterial,chains,uv,uv1,world,hit.position,out.normal,tangent,bitangent,lod,true,stats);
+        layer.baseColorBlend=authored.blendMode;layer.authoredWeight=authored.weight;layer.mask=1;layer.heightBlendStrength=0;
+        if(index<binding.layers.size()){const auto& l=binding.layers[index];if(!l.enabled)continue;layer.semantic=l.semantic;layer.opacityPolicy=l.opacityPolicy;layer.heightBlendStrength=l.heightBlendStrength;layer.heightBlendBias=l.heightBlendBias;layer.heightBlendTransition=l.heightBlendTransition;
+            const auto at=transform_texture_coordinates(select_uv(l.mask,uv,uv1),binding.mapping.baseTransform);
+            layer.mask=std::clamp((l.mask.texture?map(l.mask,binding.mapping.baseTransform,at,1,{1,1,1,1}).x:1)*l.maskScale+l.maskBias,0.F,1.F);
+            if(l.height.texture){const auto heightUv=transform_texture_coordinates(select_uv(l.height,uv,uv1),binding.mapping.baseTransform);layer.surface.height=map(l.height,binding.mapping.baseTransform,heightUv,1,{.5F,.5F,.5F,1}).x;}}
+        const auto layerNormal=layer.surface.normal;layer.surface.normal={0,0,1};const float coverage=height_aware_material_layer_coverage(surface.height,layer);
+        surface=blend_material_surface_layer(surface,layer);out.normal=apply_reoriented_tangent_material_normal(out.normal,tangent,bitangent,layerNormal,coverage);surface.normal=out.normal;
+    }
+    material.baseColor=surface.baseColor;material.baseColor.w=surface.opacity;material.roughness=surface.roughness;material.metallic=surface.metallic;material.emissive=surface.emissive;
+    if(material.normalMap)out.normal=normalize(transform_vector(pose,voxel_normal_map_normal(material,multiply(hit.position,units),inverse_transform_vector(pose,out.normal))));
+    float recipeFootprint=std::max(0.F,footprintMeters);
+    if(material.surfaceDetail.space==SurfaceDetailSpace::UV0||material.surfaceDetail.space==SurfaceDetailSpace::UV1){
+        recipeFootprint=0;
+        if(std::abs(det)>1e-20F){
+            const bool second=material.surfaceDetail.space==SurfaceDetailSpace::UV1;
+            const auto ua=second?a.texcoord1:a.texcoord,ub=second?b.texcoord1:b.texcoord,uc=second?c.texcoord1:c.texcoord;
+            const auto gradient=[&](float v1,float v2){return add(multiply(e1,(d11*v1-d01*v2)/det),multiply(e2,(d00*v2-d01*v1)/det));};
+            const auto gu=gradient(ub.x-ua.x,uc.x-ua.x),gv=gradient(ub.y-ua.y,uc.y-ua.y);
+            const auto width=[&](Float3 d){return std::hypot(dot(gu,d),dot(gv,d));};
+            recipeFootprint=std::max(width(lod.objectDx),width(lod.objectDy))*material.surfaceDetail.uvTileMeters;
+        }
+    }
+    apply_material_surface_detail(material,out.normal,{multiply(hit.position,units),multiply(world,units),uv,uv1,true,pose,tangent,bitangent,recipeFootprint});
+    return out;
 }
 
 float polygon_hit_opacity(const CookedPolygonAsset& asset, const PolygonBvhHit& hit, Float3 worldPosition,

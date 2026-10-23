@@ -204,7 +204,7 @@ bool EditorMaterialLibrary::validate(std::string* error) const {
     }
     std::vector<VoxelMaterialDefinition> indexed(256);
     std::size_t highest = 0;
-    for (const auto& [id, entry] : entries_) { indexed[id] = entry.definition; highest = std::max(highest, static_cast<std::size_t>(id)); }
+    for (const auto& [id, entry] : entries_) { indexed[id] = entry.definition; highest = (std::max)(highest, static_cast<std::size_t>(id)); }
     indexed.resize(highest + 1);
     std::string layerError;
     if (!resolve_voxel_material_layers(indexed, &layerError)) {

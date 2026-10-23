@@ -255,7 +255,7 @@ float shadow_visibility(const spwi::VoxelSceneTracer& tracer, Float3 point,
     if (environment.shadowMode == ShadowMode::Hybrid) {
         const float contact = hard_visibility(tracer, origin, sun,
                                               distances.contactShadowDistance, stats, extras);
-        visible = std::min(visible, contact);
+        visible = (std::min)(visible, contact);
     }
     return weighted(visible);
 }
@@ -282,7 +282,7 @@ Float3 subsurface_light(const spwi::VoxelSceneTracer& tracer, const VoxelReferen
 
 // The sun's share at a point: cos(normal, sun) x visibility.
 float sun_term(Float3 normal, const RenderEnvironment& environment, float visibility) noexcept {
-    return std::max(0.0F, dot(normal, normalize(environment.sunDirection))) * visibility;
+    return (std::max)(0.0F, dot(normal, normalize(environment.sunDirection))) * visibility;
 }
 
 // Front-lit subsurface diffusion: the sun term averaged over the surface around the point with
@@ -314,7 +314,7 @@ float diffused_sun_term(const spwi::VoxelSceneTracer& tracer, std::size_t instan
         Float3 q = point, qn = normal;
         if (r > 1.0e-3F) {
             const Float3 offset = add3(multiply(tangent, r * std::cos(angle)), multiply(bitangent, r * std::sin(angle)));
-            const float h = std::max(r, 1.0F);
+            const float h = (std::max)(r, 1.0F);
             ++stats.subsurfaceDiffusionProbes;
             const auto hit = tracer.trace_instance(instanceIndex, add3(add3(point, offset), multiply(normal, h)),
                                                    multiply(normal, -1.0F), 2.0F * h);
@@ -323,7 +323,7 @@ float diffused_sun_term(const spwi::VoxelSceneTracer& tracer, std::size_t instan
             qn = hit->worldNormal;
         }
         ++valid;
-        const float cosine = std::max(0.0F, dot(qn, sun));
+        const float cosine = (std::max)(0.0F, dot(qn, sun));
         if (!(cosine > 0.0F)) continue;
         float visibility = 1.0F;
         if (shadows) {
@@ -521,7 +521,7 @@ void write_voxel_passes(PolygonRenderTarget& target, std::size_t index, const Vo
         const LightPasses lit = shade_voxel(material, environment, open);
         const auto own = shade_voxel(material, environment, surface);
         const Float3 removed = subtract(add3(lit.directDiffuse, lit.directSpecular), add3(own.directDiffuse, own.directSpecular));
-        sample.shadow = {std::max(0.0F, removed.x), std::max(0.0F, removed.y), std::max(0.0F, removed.z)};
+        sample.shadow = {(std::max)(0.0F, removed.x), (std::max)(0.0F, removed.y), (std::max)(0.0F, removed.z)};
     }
     target.write_passes(index, sample, 1.0F, true);
 }
@@ -578,9 +578,9 @@ VoxelGBuffer build_voxel_gbuffer(const VoxelSceneTracer& tracer, const PolygonCa
             }
         }
     };
-    std::uint32_t threads = threadCount == 0U ? std::max(1U, std::thread::hardware_concurrency())
+    std::uint32_t threads = threadCount == 0U ? (std::max)(1U, std::thread::hardware_concurrency())
                                               : threadCount;
-    threads = std::clamp(threads, 1U, std::min(16U, height));
+    threads = std::clamp(threads, 1U, (std::min)(16U, height));
     if (threads == 1U) {
         rows(0U, height);
     } else {
@@ -814,9 +814,9 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
             }
         }
     };
-    std::uint32_t threads = threadCount == 0U ? std::max(1U, std::thread::hardware_concurrency())
+    std::uint32_t threads = threadCount == 0U ? (std::max)(1U, std::thread::hardware_concurrency())
                                               : threadCount;
-    threads = std::clamp(threads, 1U, std::min(16U, target.height));
+    threads = std::clamp(threads, 1U, (std::min)(16U, target.height));
     std::vector<VoxelReferenceRenderStats> partial(threads);
     if (threads == 1U) {
         rows(0U, target.height, partial[0]);

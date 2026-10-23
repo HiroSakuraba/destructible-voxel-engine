@@ -54,9 +54,9 @@ SurfacePatternSample sample_surface_pattern(const MaterialSurfaceDetail& d,Float
     if(!std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z))return {};
     const auto rotation=quaternion_from_euler_xyz(d.rotationRadians);
     const auto q=multiply(rotate(conjugate(rotation),p),1/d.periodMeters);
-    if(!std::isfinite(q.x)||!std::isfinite(q.y)||!std::isfinite(q.z)||std::max({std::abs(q.x),std::abs(q.y),std::abs(q.z)})>1e8F)return {};
+    if(!std::isfinite(q.x)||!std::isfinite(q.y)||!std::isfinite(q.z)||(std::max)({std::abs(q.x),std::abs(q.y),std::abs(q.z)})>1e8F)return {};
     const double phase=double(d.seed%65521)*.61803398875;
-    const float width=std::max(0.F,footprint)/d.periodMeters;
+    const float width=(std::max)(0.F,footprint)/d.periodMeters;
     SurfacePatternSample result;
     // Each band is attenuated with its physical footprint, including its derivatives.
     const auto wave=[&](double argument,Float3 derivative,float frequencyBound,float weight){

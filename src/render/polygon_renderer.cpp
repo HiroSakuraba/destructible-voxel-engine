@@ -98,7 +98,7 @@ float srgb_to_linear(float encoded) noexcept {
 
 Float4 texel(const PolygonTextureMip& mip,std::uint32_t x,std::uint32_t y,
              PolygonTextureColorSpace colorSpace) noexcept {
-    x=std::min(x,mip.width-1U);y=std::min(y,mip.height-1U);
+    x=(std::min)(x,mip.width-1U);y=(std::min)(y,mip.height-1U);
     const std::size_t o=(static_cast<std::size_t>(y)*mip.width+x)*4U;
     const float red = static_cast<float>(mip.rgba8[o]) / 255.0F;
     const float green = static_cast<float>(mip.rgba8[o + 1U]) / 255.0F;
@@ -115,7 +115,7 @@ Float4 sample_mip(const PolygonTextureMip& mip,const PolygonSampler& sampler,Flo
     const float x=u*static_cast<float>(mip.width-1U),y=v*static_cast<float>(mip.height-1U);
     if(sampler.magFilter==ImportedTextureFilter::Nearest){return texel(mip,static_cast<std::uint32_t>(std::round(x)),static_cast<std::uint32_t>(std::round(y)),colorSpace);}
     const auto x0=static_cast<std::uint32_t>(std::floor(x)),y0=static_cast<std::uint32_t>(std::floor(y));
-    const auto x1=std::min(x0+1U,mip.width-1U),y1=std::min(y0+1U,mip.height-1U);
+    const auto x1=(std::min)(x0+1U,mip.width-1U),y1=(std::min)(y0+1U,mip.height-1U);
     const float tx=x-static_cast<float>(x0),ty=y-static_cast<float>(y0);
     const Float4 a=add4(scale4(texel(mip,x0,y0,colorSpace),1.0F-tx),scale4(texel(mip,x1,y0,colorSpace),tx));
     const Float4 b=add4(scale4(texel(mip,x0,y1,colorSpace),1.0F-tx),scale4(texel(mip,x1,y1,colorSpace),tx));
@@ -347,7 +347,7 @@ LightPasses shade(const VoxelMaterialDefinition& material,Float4 base,Float3 nor
     const Float3 halfVector=normalize(add(view,light));
     const Float3 fresnel=fresnel_schlick(std::clamp(dot(view,halfVector),0.0F,1.0F),f0);
     const Float3 diffuseColor=mul3(multiply(rgb,1.0F-material.metallic),Float3{1.0F-fresnel.x,1.0F-fresnel.y,1.0F-fresnel.z});
-    const float sunTerm=diffusedSun>=0.0F?diffusedSun:std::max(0.0F,ndotl);
+    const float sunTerm=diffusedSun>=0.0F?diffusedSun:(std::max)(0.0F,ndotl);
     out.directDiffuse=multiply(mul3(diffuseColor,sunIrradiance),sunTerm);
     const ShadingLobes lobes=material.shadingModel==MaterialShadingModel::ClearCoat
         ? shade_clear_coat_direct(normal,view,light,sunIrradiance,rgb,material.metallic,material.roughness,material.specular,
@@ -476,8 +476,8 @@ LodChoice select_lod(const PolygonRenderInstance& instance,float diameter) noexc
 PolygonBounds vertex_bounds(const CookedPolygonAsset& asset) noexcept {
     PolygonBounds bounds{asset.vertices.front().position,asset.vertices.front().position};
     for(const auto& v:asset.vertices){
-        bounds.minimum={std::min(bounds.minimum.x,v.position.x),std::min(bounds.minimum.y,v.position.y),std::min(bounds.minimum.z,v.position.z)};
-        bounds.maximum={std::max(bounds.maximum.x,v.position.x),std::max(bounds.maximum.y,v.position.y),std::max(bounds.maximum.z,v.position.z)};
+        bounds.minimum={(std::min)(bounds.minimum.x,v.position.x),(std::min)(bounds.minimum.y,v.position.y),(std::min)(bounds.minimum.z,v.position.z)};
+        bounds.maximum={(std::max)(bounds.maximum.x,v.position.x),(std::max)(bounds.maximum.y,v.position.y),(std::max)(bounds.maximum.z,v.position.z)};
     }
     return bounds;
 }
@@ -548,7 +548,7 @@ float polygon_diffused_sun(const DeferredTriangle& tri,const VoxelMaterialDefini
         if(r>1.0e-4F){
             const float angle=6.2831853F*v;
             const Float3 offset=add(multiply(tangent,r*std::cos(angle)),multiply(bitangent,r*std::sin(angle)));
-            const float h=std::max(r,1.0e-2F);
+            const float h=(std::max)(r,1.0e-2F);
             ++stats.subsurfaceDiffusionProbes;
             const auto hit=probe_polygon_surface(*tri.subsurfaceBvh,*tri.asset,tri.transform,
                                                  add(add(worldPosition,offset),multiply(normal,h)),multiply(normal,-1.0F),2.0F*h);
@@ -556,7 +556,7 @@ float polygon_diffused_sun(const DeferredTriangle& tri,const VoxelMaterialDefini
             qn=hit->normal;
         }
         ++valid;
-        sum+=std::max(0.0F,dot(qn,sun));
+        sum+=(std::max)(0.0F,dot(qn,sun));
     }
     return valid>0U?sum/static_cast<float>(valid):0.0F;
 }
@@ -664,7 +664,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         const auto heightSampler=[&](Float2 sampleUv){return sample_binding_uv(*tri.asset,tri.binding->height,chains,sampleUv,textureLod.transformed(tri.binding->mapping.baseTransform),stats,{0.5F,0.5F,0.5F,1.0F}).x;};
         if(options.enableTextures&&tri.binding->height.texture&&tri.binding->mapping.heightMode!=HeightMappingMode::Off){
             const auto mappedLod=textureLod.transformed(tri.binding->mapping.baseTransform);
-            const float footprint=options.enableMipSelection?std::max(std::hypot(mappedLod.dx.x,mappedLod.dx.y),std::hypot(mappedLod.dy.x,mappedLod.dy.y)):0;
+            const float footprint=options.enableMipSelection?(std::max)(std::hypot(mappedLod.dx.x,mappedLod.dx.y),std::hypot(mappedLod.dy.x,mappedLod.dy.y)):0;
             const auto& heightTexture=tri.asset->textures[*tri.binding->height.texture];
             Float2 heightBounds=chains[heightTexture.imageIndex].heightBounds;
             if(tri.binding->height.colorSpace==PolygonTextureColorSpace::Srgb)heightBounds={srgb_to_linear(heightBounds.x),srgb_to_linear(heightBounds.y)};
@@ -681,7 +681,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                 // by the ray-distance ratio. Near/far and surface occlusion use
                 // the corrected value before any colour/AOV is written.
                 const float cameraZ=w0*tri.v[0].cameraZ+w1*tri.v[1].cameraZ+w2*tri.v[2].cameraZ;
-                const float correctedZ=cameraZ*(1+reliefOffset/std::max(cameraDistance,1e-6F));
+                const float correctedZ=cameraZ*(1+reliefOffset/(std::max)(cameraDistance,1e-6F));
                 // The camera near/far span is retained in DeferredTriangle.
                 depth=(correctedZ-tri.nearPlane)/(tri.farPlane-tri.nearPlane);
                 worldPosition=subtract(worldPosition,multiply(viewWorld,reliefOffset));
@@ -820,12 +820,12 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         }
         if(effective.surfaceDetail.pattern!=SurfacePattern::None){
             const float units=resolve_meters_per_voxel(options.metersPerUnit);
-            float footprint=std::max(length(textureLod.worldDx),length(textureLod.worldDy))*units;
+            float footprint=(std::max)(length(textureLod.worldDx),length(textureLod.worldDy))*units;
             if(effective.surfaceDetail.space==SurfaceDetailSpace::UV0||effective.surfaceDetail.space==SurfaceDetailSpace::UV1){
                 const bool uvSecond=effective.surfaceDetail.space==SurfaceDetailSpace::UV1;
                 const auto dx=gradient(dwDx,uv3(uvSecond?uv1:uv),uv3(uvSecond?tri.v[0].uv1:tri.v[0].uv),uv3(uvSecond?tri.v[1].uv1:tri.v[1].uv),uv3(uvSecond?tri.v[2].uv1:tri.v[2].uv),invZ);
                 const auto dy=gradient(dwDy,uv3(uvSecond?uv1:uv),uv3(uvSecond?tri.v[0].uv1:tri.v[0].uv),uv3(uvSecond?tri.v[1].uv1:tri.v[1].uv),uv3(uvSecond?tri.v[2].uv1:tri.v[2].uv),invZ);
-                footprint=std::max(length(dx),length(dy))*effective.surfaceDetail.uvTileMeters;
+                footprint=(std::max)(length(dx),length(dy))*effective.surfaceDetail.uvTileMeters;
             }
             effective.baseColor=base;
             apply_material_surface_detail(effective,normal,{multiply(objectPosition,units),multiply(worldPosition,units),uv,uv1,true,tri.transform,tangent,bitangent,footprint});
@@ -920,7 +920,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         if(target.passes.enabled){
             passes.normal=normal;
             const float cameraZ=w0*tri.v[0].cameraZ+w1*tri.v[1].cameraZ+w2*tri.v[2].cameraZ;
-            passes.depthMeters=cameraZ*(1+reliefOffset/std::max(cameraDistance,1e-6F))*resolve_meters_per_voxel(options.metersPerUnit);
+            passes.depthMeters=cameraZ*(1+reliefOffset/(std::max)(cameraDistance,1e-6F))*resolve_meters_per_voxel(options.metersPerUnit);
         }
         if(!debugView&&!material_uses_camera_transport(effective)&&(transparent||tri.material->blendMode==MaterialBlendMode::Translucent||base.w<0.999F)){
             const float alpha=std::clamp(shaded.w,0.0F,1.0F);const Float4 old=target.hdrColor[index];
@@ -1085,7 +1085,7 @@ std::uint64_t apply_distance_fog(PolygonRenderTarget& target,const PolygonCamera
             const float meters=cameraZ*std::sqrt(1.0F+ndcX*ndcX+ndcY*ndcY)*metersPerUnit;
             float t;
             if(!heightFog){
-                t=std::exp(-density*std::max(0.0F,meters-environment.fogStartMeters));
+                t=std::exp(-density*(std::max)(0.0F,meters-environment.fogStartMeters));
             }else{
                 const double invLength=1.0/std::sqrt(1.0+static_cast<double>(ndcX)*ndcX+static_cast<double>(ndcY)*ndcY);
                 const double slope=(basisF.y+basisR.y*ndcX+basisU.y*ndcY)*invLength;   // d(height)/d(ray metre)
@@ -1176,7 +1176,7 @@ PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset& asset,co
     const auto bitangent=multiply(cross3(out.normal,tangent),handed);const auto world=transform_point(pose,hit.position);
     TextureLod lod;lod.gradients=true;
     const float units=metersPerUnit>0&&std::isfinite(metersPerUnit)?metersPerUnit:1;
-    const float footprint=std::isfinite(footprintMeters)?std::max(0.F,footprintMeters)/units:0;
+    const float footprint=std::isfinite(footprintMeters)?(std::max)(0.F,footprintMeters)/units:0;
     lod.worldDx=multiply(tangent,footprint);lod.worldDy=multiply(bitangent,footprint);
     lod.objectDx=inverse_transform_vector(pose,lod.worldDx);lod.objectDy=inverse_transform_vector(pose,lod.worldDy);
     const auto selectedA=binding.mapping.mappingMode==MaterialMappingMode::UV1?a.texcoord1:a.texcoord;
@@ -1214,7 +1214,7 @@ PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset& asset,co
     }
     material.baseColor=surface.baseColor;material.baseColor.w=surface.opacity;material.roughness=surface.roughness;material.metallic=surface.metallic;material.emissive=surface.emissive;
     if(material.normalMap)out.normal=normalize(transform_vector(pose,voxel_normal_map_normal(material,multiply(hit.position,units),inverse_transform_vector(pose,out.normal))));
-    float recipeFootprint=std::max(0.F,footprintMeters);
+    float recipeFootprint=(std::max)(0.F,footprintMeters);
     if(material.surfaceDetail.space==SurfaceDetailSpace::UV0||material.surfaceDetail.space==SurfaceDetailSpace::UV1){
         recipeFootprint=0;
         if(std::abs(det)>1e-20F){
@@ -1223,7 +1223,7 @@ PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset& asset,co
             const auto gradient=[&](float v1,float v2){return add(multiply(e1,(d11*v1-d01*v2)/det),multiply(e2,(d00*v2-d01*v1)/det));};
             const auto gu=gradient(ub.x-ua.x,uc.x-ua.x),gv=gradient(ub.y-ua.y,uc.y-ua.y);
             const auto width=[&](Float3 d){return std::hypot(dot(gu,d),dot(gv,d));};
-            recipeFootprint=std::max(width(lod.objectDx),width(lod.objectDy))*material.surfaceDetail.uvTileMeters;
+            recipeFootprint=(std::max)(width(lod.objectDx),width(lod.objectDy))*material.surfaceDetail.uvTileMeters;
         }
     }
     apply_material_surface_detail(material,out.normal,{multiply(hit.position,units),multiply(world,units),uv,uv1,true,pose,tangent,bitangent,recipeFootprint});
@@ -1332,13 +1332,13 @@ PolygonTextureMipChain generate_texture_mips(const PolygonImage& image,bool norm
 
     chain.heightBounds={1,0};
     for(std::size_t i=0;i<image.rgba8.size();i+=4){const float h=static_cast<float>(image.rgba8[i])/255;
-        chain.heightBounds.x=std::min(chain.heightBounds.x,h);chain.heightBounds.y=std::max(chain.heightBounds.y,h);}
+        chain.heightBounds.x=(std::min)(chain.heightBounds.x,h);chain.heightBounds.y=(std::max)(chain.heightBounds.y,h);}
     chain.levels.push_back({image.width, image.height, image.rgba8});
     while (chain.levels.back().width > 1U || chain.levels.back().height > 1U) {
         const auto& source = chain.levels.back();
         PolygonTextureMip next;
-        next.width = std::max(1U, source.width / 2U);
-        next.height = std::max(1U, source.height / 2U);
+        next.width = (std::max)(1U, source.width / 2U);
+        next.height = (std::max)(1U, source.height / 2U);
         next.rgba8.resize(static_cast<std::size_t>(next.width) * next.height * 4U);
 
         for(std::uint32_t y=0;y<next.height;++y)for(std::uint32_t x=0;x<next.width;++x){

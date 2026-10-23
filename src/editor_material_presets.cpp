@@ -186,7 +186,7 @@ MaterialPresetCapability material_preset_capability(const MaterialPresetAsset& a
     if(b==MaterialPresetBackend::CpuReference)return {MaterialPresetSupport::Supported,"CPU reference transport; artistic RGB defaults"};
     if(b==MaterialPresetBackend::CpuPlayer)return {MaterialPresetSupport::Approximate,"CPU reference transport exists; player dispatch and scene parity require acceptance"};
     if(b==MaterialPresetBackend::NativePreview)return {MaterialPresetSupport::Approximate,"Viewport uses color markers; inspect the CPU material preview for shading"};
-    for(auto f:a.requirements)if(f==MaterialPresetFeature::SurfaceDetail)return {MaterialPresetSupport::Unavailable,"Metric procedural color/roughness/bump evaluation is currently CPU-only"};
+    for(auto f:a.requirements)if(f==MaterialPresetFeature::SurfaceDetail)return {MaterialPresetSupport::Approximate,"Live GPU polygon pass supports metric color/roughness/bump; voxel and native viewport parity remain unverified"};
     for(auto f:a.requirements)if(f==MaterialPresetFeature::SolidTransmission||f==MaterialPresetFeature::RoughTransmission)
         return {MaterialPresetSupport::Unavailable,"Solid/rough glass camera transport is not wired to the GPU path"};
     return {MaterialPresetSupport::Approximate,"GPU PBR foundations exist; this preset has not passed backend acceptance"};

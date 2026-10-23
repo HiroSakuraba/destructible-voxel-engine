@@ -221,6 +221,22 @@ def validate_material_abi(root: Path) -> list[str]:
     if cpp_fields != hlsl_fields:
         errors.append(f"GpuMaterialRecord/MaterialRecord field drift: C++={cpp_fields}, HLSL={hlsl_fields}")
 
+    surface_cpp = (root / "include/dve/gpu_material_surface_detail.hpp").read_text(encoding="utf-8")
+    surface_hlsl = (root / "shaders/common/material_surface_detail.hlsli").read_text(encoding="utf-8")
+    surface_cpp = re.search(r"struct GpuMaterialSurfaceDetail \{(.*?)^\};", surface_cpp, re.S | re.M).group(1)
+    surface_hlsl = surface_hlsl.split("struct SurfaceDetailRecord {", 1)[1].split("};", 1)[0]
+    surface_fields = [("uint" if t == "std::uint32_t" else t, n)
+                      for t, n in re.findall(r"\b(float|std::uint32_t)\s+(\w+)\s*(?:\{[^;]*\})?\s*;", surface_cpp)]
+    surface_shader_fields = re.findall(r"\b(float|uint)\s+(\w+)\s*;", surface_hlsl)
+    if surface_fields != surface_shader_fields or len(surface_fields) != 16:
+        errors.append(f"Surface detail ABI drift: C++={surface_fields}, HLSL={surface_shader_fields}")
+
+    live_header = (root / "include/dve/render/live_environment_renderer.hpp").read_text(encoding="utf-8")
+    uv1_flag = re.search(r"kLiveObjectFlagMaskUsesUv1\s*=\s*1U\s*<<\s*(\d+)U", live_header)
+    caster_vs = (root / "shaders/live_csm_caster_vs.hlsl").read_text(encoding="utf-8")
+    if not uv1_flag or f"& {1 << int(uv1_flag.group(1))}U" not in caster_vs or "input.uv1" not in caster_vs:
+        errors.append("Masked shadow caster must select UV1 with kLiveObjectFlagMaskUsesUv1 like the material pass")
+
     cpp_values = dict(re.findall(
         r"MaterialShadingModel::(\w+)\)\s*==\s*(\d+)",
         (root / "src/gpu_material_buffer.cpp").read_text(encoding="utf-8")))

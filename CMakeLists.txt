@@ -171,6 +171,7 @@ add_library(dve_core
     src/gpu_material_parameter_collection.cpp
     src/master_material.cpp
     src/gpu_material_buffer.cpp
+    src/gpu_material_surface_detail.cpp
     src/gpu_material_mapping.cpp
     src/render_environment.cpp
     src/gpu_render_environment.cpp
@@ -1958,6 +1959,64 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_vulkan_camera_outputs_tests PRIVATE dve::render_bridge dve::rhi_vulkan)
         add_test(NAME dve_vulkan_camera_outputs_tests COMMAND dve_vulkan_camera_outputs_tests)
 
+        if(TARGET dve_editor)
+            add_executable(dve_gpu_material_surfaces_tests tests/test_gpu_material_surfaces.cpp)
+            target_link_libraries(dve_gpu_material_surfaces_tests PRIVATE dve::rhi_vulkan dve::editor)
+            find_program(DVE_DXC_EXECUTABLE NAMES dxc)
+            set(_dve_dxc_spirv OFF)
+            if(DVE_DXC_EXECUTABLE)
+                # Some DXC builds (e.g. the Windows SDK copy) lack SPIR-V codegen; probe before using it.
+                set(_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/dxc-spirv-probe")
+                file(MAKE_DIRECTORY "${_probe_dir}")
+                file(WRITE "${_probe_dir}/probe.hlsl" "float4 main() : SV_Target { return 0; }\n")
+                execute_process(COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -T ps_6_0 -E main
+                        -Fo "${_probe_dir}/probe.spv" "${_probe_dir}/probe.hlsl"
+                    RESULT_VARIABLE _probe_result OUTPUT_QUIET ERROR_QUIET)
+                if(_probe_result EQUAL 0 AND EXISTS "${_probe_dir}/probe.spv")
+                    set(_dve_dxc_spirv ON)
+                else()
+                    message(STATUS "DXC at ${DVE_DXC_EXECUTABLE} has no SPIR-V codegen; GPU surface shader test will skip")
+                endif()
+            endif()
+            if(_dve_dxc_spirv)
+                set(_surface_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/surface-shaders")
+                file(GLOB _surface_shader_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/*.hlsli")
+                set(_surface_shader_outputs)
+                foreach(_shader IN ITEMS live_ibl_material_vs live_ibl_material_ps live_csm_caster_vs live_csm_caster_ps live_environment_skybox_vs live_environment_skybox_ps material_surface_detail_reference)
+                    if(_shader MATCHES "_vs$")
+                        set(_profile vs_6_0)
+                    elseif(_shader MATCHES "_ps$")
+                        set(_profile ps_6_0)
+                    else()
+                        set(_profile cs_6_0)
+                    endif()
+                    set(_spv "${_surface_shader_dir}/${_shader}.spv")
+                    add_custom_command(OUTPUT "${_spv}"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${_surface_shader_dir}"
+                        COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                            -T ${_profile} -E main -Fo "${_spv}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}.hlsl"
+                        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}.hlsl" ${_surface_shader_headers}
+                        VERBATIM)
+                    list(APPEND _surface_shader_outputs "${_spv}")
+                endforeach()
+                foreach(_mode IN ITEMS COLOR NORMAL)
+                    string(TOLOWER "${_mode}" _mode_lower)
+                    set(_spv "${_surface_shader_dir}/live_ibl_material_ps_${_mode_lower}.spv")
+                    add_custom_command(OUTPUT "${_spv}"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${_surface_shader_dir}"
+                        COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                            -T ps_6_0 -E main -D DVE_SURFACE_DEBUG_${_mode}=1 -Fo "${_spv}"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/live_ibl_material_ps.hlsl"
+                        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/live_ibl_material_ps.hlsl" ${_surface_shader_headers}
+                        VERBATIM)
+                    list(APPEND _surface_shader_outputs "${_spv}")
+                endforeach()
+                add_custom_target(dve_surface_test_shaders DEPENDS ${_surface_shader_outputs})
+                add_dependencies(dve_gpu_material_surfaces_tests dve_surface_test_shaders)
+                target_compile_definitions(dve_gpu_material_surfaces_tests PRIVATE DVE_SURFACE_SHADER_DIR="${_surface_shader_dir}")
+            endif()
+            add_test(NAME dve_gpu_material_surfaces_tests COMMAND dve_gpu_material_surfaces_tests)
+        endif()
         add_executable(dve_vulkan_environment_lighting_tests tests/test_vulkan_environment_lighting.cpp)
         target_link_libraries(dve_vulkan_environment_lighting_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_environment_lighting_tests COMMAND dve_vulkan_environment_lighting_tests)

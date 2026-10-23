@@ -8,14 +8,14 @@ This implements the requested lighting families in the CPU reference renderers a
 |---|---|
 | Point | Inverse-square RGB radiant intensity, metric positions, opaque visibility rays. |
 | Spot | Point emission with a smooth inner/outer cone, power weighted by its integrated cone distribution. |
-| Area | Quad and elliptical disc emitters, uniformly sampled area, solid-angle conversion, one/two-sided emission and soft shadows. Quad edges are full edges; disc edges are radius vectors. The cross product of the edges determines the emitting normal. |
+| Area | Quad and elliptical disc emitters, uniformly sampled area, solid-angle conversion, one/two-sided emission and soft shadows. `positionMeters` is the emitter **centre**; quad edges are full edges spanning ±½ edge around it; disc edges are radius vectors. The cross product of the edges determines the emitting normal. |
 | Emissive geometry | Constant material emission on mesh triangles and exposed voxel faces enters the sampled light list. Internal voxel faces are excluded. Emissive materials include their base color as the existing beauty renderer does. |
 | Candle | A point emitter with bounded, seeded, continuous flicker. Position, color, intensity, frequency and amplitude remain editable. The player uses saved simulation time, so pausing stops flicker. A warm color is authored explicitly. This does not generate flame geometry. |
 | Glow | Separable HDR bloom before exposure and tone mapping in the CPU player. Threshold, intensity and a bounded pixel radius are editable. Bloom is optical appearance; it does not inject indirect energy into the scene. |
 | GI / multiple bounces | Iterative diffuse/rough-GGX/clear-coat transport, throughput weighting, next-event estimation, escaped environment and shadowed sun. Optional survival-reweighted Russian roulette starts after three secondary vertices. |
 | Fog | The same scene emitters feed single scattering in local CPU fog. Both geometry visibility and optional volume shadow transmission are included. |
 
-Voxel and polygon surfaces use the same frame integrator in hybrid rendering and CPU Play, including cross-geometry local-light shadows and bounce hits. The new path solver splits indirect diffuse/specular by the first scattering lobe, retaining the existing AOV decomposition. Sun shadows on polygons are evaluated when this integrator is active. The hybrid/player voxel sun pass also receives polygon sun occluders.
+Voxel and polygon surfaces use the same frame integrator in hybrid rendering and CPU Play, including cross-geometry local-light shadows and bounce hits. The new path solver splits indirect diffuse/specular by the first scattering lobe, retaining the existing AOV decomposition. Sun shadows on polygons are evaluated when this integrator is active. When the integrator is active (any explicit light or a positive path budget), the hybrid/player voxel sun pass also receives polygon sun occluders and the CPU player applies bloom; legacy scenes keep their previous player frames bit-for-bit.
 
 ## Authoring and persistence
 
@@ -56,11 +56,11 @@ Editor project settings expose `render.path_bounces`, `render.path_samples`, `re
 - Russian roulette changes variance/cost and reweights survivors. The depth cap, per-segment GI distance and ray-origin bias remain finite preview approximations; this is not an infinite-depth unbiased claim. The GI intensity scales the indirect contribution once, rather than at every bounce.
 - `Fast` player quality disables path continuation and uses up to two emitter samples. `Balanced` caps paths and bounce count at two, and emitter samples at two. `Reference` preserves authored budgets. Budgets are requests per shading sample, not a guaranteed frame-time limit.
 - The integrator is rebuilt per render and reused by voxel, polygon and fog passes. Instance arrays, material storage and geometry must remain alive and immutable during queries. Queries have no mutable random state and produce identical voxel images across worker counts.
-- Bloom is applied once by the CPU player, after fog. Standalone/hybrid linear reference callers explicitly invoke `apply_cpu_bloom` when desired. Its glow is added to the emission AOV, preserving the light-pass sum; shadow-removal comparisons should use the pre-bloom linear image.
+- Bloom is applied once by the CPU player, after fog, when the integrator is active. Standalone/hybrid linear reference callers explicitly invoke `apply_cpu_bloom` when desired. Its glow is added to the emission AOV, preserving the light-pass sum; shadow-removal comparisons should use the pre-bloom linear image.
 
 ## Limits and remaining acceptance
 
-The new secondary tracer and local-light visibility treat surfaces as opaque. Texture/vertex-varying secondary materials, alpha-cutout visibility, transmissive shadows, refraction and emitter-fed caustic photons remain work. Mesh emitter sampling uses constant material emission and instance tint; it does not importance sample emissive textures. The existing sun-fed caustic/subsurface paths remain separate. Surface and volumetric multiple scattering are different problems: this change adds multiple surface bounces and single fog scattering.
+The new secondary tracer and local-light visibility treat surfaces as opaque. Texture/vertex-varying secondary materials, alpha-cutout visibility, transmissive shadows, refraction and emitter-fed caustic photons remain work. Mesh emitter sampling uses constant material emission, with the instance tint applied to the base-colour part only (matching the beauty pass); it does not importance sample emissive textures. The existing sun-fed caustic/subsurface paths remain separate. Surface and volumetric multiple scattering are different problems: this change adds multiple surface bounces and single fog scattering.
 
 Explicit area lights appear in secondary rays and shadows. To draw a visible area-light shape in the primary raster image, author an emissive mesh; do not duplicate its energy with an overlapping explicit area source. Additive light components and script lights are also separate authored sources.
 

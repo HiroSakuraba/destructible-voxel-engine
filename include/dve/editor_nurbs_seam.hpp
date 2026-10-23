@@ -60,6 +60,9 @@ struct NurbsSeam {
 [[nodiscard]] std::unique_ptr<IEditorCommand> unlink_nurbs_seam_command(EditorObjectId);
 [[nodiscard]] std::unique_ptr<IEditorCommand> refresh_nurbs_seam_command(EditorObjectId);
 [[nodiscard]] std::unique_ptr<IEditorCommand> edit_nurbs_seam_command(EditorObjectId,const NurbsSource& before,const NurbsSource& after);
+// Trusted shape-preserving network refinement; null knot requests degree elevation.
+[[nodiscard]] std::unique_ptr<IEditorCommand> refine_nurbs_network_command(
+    EditorObjectId,bool alongV,std::optional<double> knot=std::nullopt);
 // Complete-component placement/reuse preflights used by native and generic commands.
 [[nodiscard]] bool nurbs_network_selection_complete(const EditorDocument&,const std::set<EditorObjectId>&,std::string* error=nullptr);
 [[nodiscard]] bool validate_nurbs_network_placement(const EditorDocument&,

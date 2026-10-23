@@ -1,4 +1,5 @@
 #include "dve/editor_native_renderer.hpp"
+#include "dve/editor_nurbs_surface.hpp"
 #include "dve/voxel_metric.hpp"
 #include "dve/editor_midi.hpp"
 #include "dve/editor_ui_zoom.hpp"
@@ -3723,6 +3724,18 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
             viewportPainter.text(item.screenBounds.x + 4, item.screenBounds.y + 12,
                                  "Slug M" + std::to_string(item.faceMaterialId) + "/" +
                                  std::to_string(item.sideMaterialId), rgb(220,235,255));
+        }
+    }
+
+    // Surface guides are evaluated from normalized UV on the current source;
+    // control edits, refinements and object transforms cannot leave stale ribbons.
+    for(auto id:controller.workspace().selected_objects()){
+        const auto* object=controller.workspace().document().find_object(id);
+        if(!object||!object->flags.visible||!has_nurbs_source(*object)||(!controller.viewport_settings().isolatedObjects.empty()&&!controller.viewport_settings().isolatedObjects.contains(id)))continue;
+        auto features=editor_nurbs_surface_features(*object);if(!features)continue;
+        for(const auto& curve:features->curves){auto guide=evaluate_editor_nurbs_surface_curve(controller.workspace().document(),id,curve.id);if(!guide)continue;
+            for(std::size_t i=1;i<guide->size();++i){auto a=project_world_to_screen(controller.camera(),viewport,(*guide)[i-1]),b=project_world_to_screen(controller.camera(),viewport,(*guide)[i]);
+                if(a.visible&&b.visible)viewportPainter.line(int(a.x),int(a.y),int(b.x),int(b.y),rgb(100,230,220));}
         }
     }
 

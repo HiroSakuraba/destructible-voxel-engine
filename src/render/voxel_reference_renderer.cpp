@@ -643,7 +643,7 @@ VoxelReferenceRenderStats render_radiance_cascades(
                                distances.metersPerVoxel, surface);
         const float footprint=length(subtract(gbuffer.cameraPosition,texel.position))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
         apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,texel.position),distances.metersPerVoxel),multiply(texel.position,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
-        if(material.surfaceDetail.pattern!=SurfacePattern::None && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
+        if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
         const LightPasses light = shade_voxel(material, environment, surface);
         target.hdrColor[index] = beauty(light, material.baseColor.w);
         target.depth[index] = texel.normalizedDepth;
@@ -784,7 +784,7 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                            distances.metersPerVoxel, surface);
                     const float footprint=length(subtract(camera.position,hit->worldPosition))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
                     apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,hit->worldPosition),distances.metersPerVoxel),multiply(hit->worldPosition,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
-                    if(material.surfaceDetail.pattern!=SurfacePattern::None && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
+                    if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
                     LightPasses light = shade_voxel(material, environment, surface);
                     Float3 lightingPoint = hit->worldPosition;
                     if (lighting) {

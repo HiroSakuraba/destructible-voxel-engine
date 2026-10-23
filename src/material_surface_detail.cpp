@@ -20,7 +20,7 @@ bool material_surface_detail_valid(const MaterialSurfaceDetail& d) noexcept {
         d.bumpHeightMeters>=0&&d.bumpHeightMeters<=d.periodMeters*.25F && d.uvTileMeters>=.00001F&&d.uvTileMeters<=10000;
 }
 std::uint64_t material_surface_detail_hash(const MaterialSurfaceDetail& d) noexcept {
-    if(d.pattern==SurfacePattern::None)return 0; // legacy hashes/bytes stay unchanged
+    if(d.pattern==SurfacePattern::NoPattern)return 0; // legacy hashes/bytes stay unchanged
     std::uint64_t h=1469598103934665603ULL;
     const auto add=[&](std::uint32_t value){for(unsigned i=0;i<32;i+=8)h=(h^((value>>i)&255U))*1099511628211ULL;};
     add(unsigned(d.pattern));add(unsigned(d.space));add(d.seed);for(float v:surface_detail_values(d))add(std::bit_cast<std::uint32_t>(v));return h;
@@ -50,7 +50,7 @@ SurfacePatternSample lattice_noise(Float3 p,std::uint32_t seed) noexcept {
 }
 }
 SurfacePatternSample sample_surface_pattern(const MaterialSurfaceDetail& d,Float3 p,float footprint) noexcept {
-    if(d.pattern==SurfacePattern::None||!material_surface_detail_valid(d)||!std::isfinite(footprint))return {};
+    if(d.pattern==SurfacePattern::NoPattern||!material_surface_detail_valid(d)||!std::isfinite(footprint))return {};
     if(!std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z))return {};
     const auto rotation=quaternion_from_euler_xyz(d.rotationRadians);
     const auto q=multiply(rotate(conjugate(rotation),p),1/d.periodMeters);
@@ -93,7 +93,7 @@ SurfacePatternSample sample_surface_pattern(const MaterialSurfaceDetail& d,Float
     return result;
 }
 void apply_material_surface_detail(VoxelMaterialDefinition& m,Float3& normal,const MaterialSurfaceContext& c) noexcept {
-    const auto& d=m.surfaceDetail;if(d.pattern==SurfacePattern::None||!material_surface_detail_valid(d))return;
+    const auto& d=m.surfaceDetail;if(d.pattern==SurfacePattern::NoPattern||!material_surface_detail_valid(d))return;
     const bool uv=d.space==SurfaceDetailSpace::UV0||d.space==SurfaceDetailSpace::UV1;
     if(uv&&!c.hasUv)return; // authoring rejects unsupported voxel UV recipes
     Float3 p=d.space==SurfaceDetailSpace::World?c.worldPositionMeters:c.objectPositionMeters;

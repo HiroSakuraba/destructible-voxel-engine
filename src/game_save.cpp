@@ -241,7 +241,7 @@ std::vector<std::byte> material_bytes(const std::vector<VoxelMaterialDefinition>
     w.u32(static_cast<std::uint32_t>(materials.size()));
     for (const auto& m : materials) {
         write_material(w, m);
-        if(m.surfaceDetail.pattern!=SurfacePattern::None)w.u64(material_surface_detail_hash(m.surfaceDetail));
+        if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)w.u64(material_surface_detail_hash(m.surfaceDetail));
         // Only for the "same as the source" comparison: optics and normal maps count too.
         if (material_has_optics(m)) write_material_optics(w, m);
         if (material_has_normal_map(m)) {
@@ -1152,8 +1152,8 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
     }
     {
         Writer w(limits_);std::uint32_t count=0;
-        for(const auto& object:world.objects)for(const auto& m:object.materials)if(m.surfaceDetail.pattern!=SurfacePattern::None)++count;
-        if(count){w.u32(count);for(const auto& object:world.objects)for(std::size_t i=0;i<object.materials.size();++i){const auto& d=object.materials[i].surfaceDetail;if(d.pattern==SurfacePattern::None)continue;
+        for(const auto& object:world.objects)for(const auto& m:object.materials)if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)++count;
+        if(count){w.u32(count);for(const auto& object:world.objects)for(std::size_t i=0;i<object.materials.size();++i){const auto& d=object.materials[i].surfaceDetail;if(d.pattern==SurfacePattern::NoPattern)continue;
             if(!material_surface_detail_valid(d))return fail(error,"invalid surface-detail settings"),std::nullopt;
             w.u64(object.id);w.u32(static_cast<std::uint32_t>(i));w.u8(static_cast<std::uint8_t>(d.pattern));w.u8(static_cast<std::uint8_t>(d.space));w.u32(d.seed);for(float v:surface_detail_values(d))w.f32(v);}
             if(w.failed())return fail(error,w.failure()),std::nullopt;

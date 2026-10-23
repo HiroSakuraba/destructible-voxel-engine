@@ -5,10 +5,10 @@
 namespace dve {
 // Original, self-contained procedural maps. Distances are metres; UV modes explicitly
 // declare the metric size of one UV tile. No external texture/provenance dependency.
-enum class SurfacePattern : std::uint8_t { None, Wood, Leather, Paper, Mineral, Paint };
+enum class SurfacePattern : std::uint8_t { NoPattern, Wood, Leather, Paper, Mineral, Paint };
 enum class SurfaceDetailSpace : std::uint8_t { Object, World, UV0, UV1 };
 struct MaterialSurfaceDetail {
-    SurfacePattern pattern{SurfacePattern::None};
+    SurfacePattern pattern{SurfacePattern::NoPattern};
     SurfaceDetailSpace space{SurfaceDetailSpace::Object};
     std::uint32_t seed{1};
     float periodMeters{.02F};

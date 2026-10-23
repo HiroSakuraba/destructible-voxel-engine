@@ -127,7 +127,7 @@ bool validate_material_preset(const MaterialPresetAsset& a,std::string* e){
     if(copy.transmission>0&&!has(MaterialPresetFeature::SolidTransmission))return fail(e,"Transmission capability is undeclared");
     if(copy.transmission>0&&copy.roughness>0&&!has(MaterialPresetFeature::RoughTransmission))return fail(e,"Rough transmission capability is undeclared");
     if(copy.clearCoat>0&&!has(MaterialPresetFeature::ClearCoat))return fail(e,"Coat capability is undeclared");
-    if(copy.surfaceDetail.pattern!=SurfacePattern::None&&!has(MaterialPresetFeature::SurfaceDetail))return fail(e,"Surface-detail capability is undeclared");
+    if(copy.surfaceDetail.pattern!=SurfacePattern::NoPattern&&!has(MaterialPresetFeature::SurfaceDetail))return fail(e,"Surface-detail capability is undeclared");
     if(copy.normalMap&&!has(MaterialPresetFeature::NormalDetail))return fail(e,"Normal-detail capability is undeclared");
     return true;
 }

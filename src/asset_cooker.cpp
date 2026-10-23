@@ -2286,11 +2286,17 @@ struct BuiltPalette {
 } // namespace
 
 std::shared_ptr<const VoxelNormalMap> decode_voxel_normal_map(std::span<const std::byte> bytes, std::string name,
-                                                              std::string* error) {
+                                                              std::string* error, bool flipGreenChannel) {
     try {
         ModelImportOptions options;
         options.maximumImageDimension = kMaximumVoxelNormalMapDimension;
         ImportedImage image = decode_image_rgba(bytes, {}, name, options);
+        if (flipGreenChannel) {
+            // DirectX (Y-) to OpenGL (Y+): invert green before the map is built, so the
+            // stored texels and the content hash are the converted ones.
+            for (std::size_t i = 1; i < image.rgba8.size(); i += 4)
+                image.rgba8[i] = static_cast<std::uint8_t>(255U - image.rgba8[i]);
+        }
         return make_voxel_normal_map(std::move(name), image.width, image.height, std::move(image.rgba8), error);
     } catch (const std::exception& exception) {
         if (error) *error = exception.what();
@@ -2298,10 +2304,11 @@ std::shared_ptr<const VoxelNormalMap> decode_voxel_normal_map(std::span<const st
     }
 }
 
-std::shared_ptr<const VoxelNormalMap> import_voxel_normal_map(const std::filesystem::path& path, std::string* error) {
+std::shared_ptr<const VoxelNormalMap> import_voxel_normal_map(const std::filesystem::path& path, std::string* error,
+                                                              bool flipGreenChannel) {
     try {
         const std::vector<std::byte> bytes = read_binary_file(path);
-        return decode_voxel_normal_map(bytes, path.stem().string(), error);
+        return decode_voxel_normal_map(bytes, path.stem().string(), error, flipGreenChannel);
     } catch (const std::exception& exception) {
         if (error) *error = exception.what();
         return nullptr;

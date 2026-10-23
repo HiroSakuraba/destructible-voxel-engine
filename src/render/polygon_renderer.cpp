@@ -870,6 +870,33 @@ void PolygonRenderTarget::write_passes(std::size_t i,const RenderPassSample& sam
     p.shadow[i]=lerp_pass(sample.shadow,p.shadow[i],alpha);
 }
 
+namespace {
+// Optical depth of height-falloff fog along one ray: the integral of
+// density x exp(-falloff x max(0, height - base)) over ray metres [from, to], where the
+// height varies linearly as height0 + slope x m (both in metres). Closed form, in double:
+// at or below the base height the density is the full density; above it the integrand is
+// an exponential in m. The above-base integral is factored as
+// exp(-falloff x h) x length x (1 - exp(-z)) / z with z = falloff x slope x length, which
+// stays accurate as z -> 0 (the ratio tends to 1).
+double fog_optical_depth(double from, double to, double height0, double slope, double density,
+                         double falloff, double base) {
+    if (!(to > from)) return 0.0;
+    const double hFrom = height0 + slope * from - base;
+    const double hTo = height0 + slope * to - base;
+    if (hFrom <= 0.0 && hTo <= 0.0) return density * (to - from);
+    const auto above = [&](double a, double b, double ha) {
+        const double length = b - a;
+        const double z = falloff * slope * length;
+        const double ratio = z == 0.0 ? 1.0 : -std::expm1(-z) / z;
+        return density * std::exp(-falloff * ha) * length * ratio;
+    };
+    if (hFrom >= 0.0 && hTo >= 0.0) return above(from, to, hFrom);
+    const double cross = from - hFrom / slope;   // height == base here; slope != 0 (signs differ)
+    if (slope > 0.0) return density * (cross - from) + above(cross, to, 0.0);
+    return above(from, cross, hFrom) + density * (to - cross);
+}
+} // namespace
+
 std::uint64_t apply_distance_fog(PolygonRenderTarget& target,const PolygonCamera& camera,const RenderEnvironment& environment,
                                  float metersPerUnit){
     const float density=environment.fogDensityPerMeter;
@@ -878,6 +905,16 @@ std::uint64_t apply_distance_fog(PolygonRenderTarget& target,const PolygonCamera
     const float tanHalf=std::tan(camera.verticalFieldOfViewRadians*0.5F);
     const float aspect=static_cast<float>(target.width)/static_cast<float>(target.height);
     const Float3 fogColor=environment.fogColor;
+    // Height falloff (opt-in): the world height along each pixel's ray, from the camera basis.
+    const bool heightFog=environment.fogHeightFalloffPerMeter>0.0F;
+    Float3 basisF{},basisR{},basisU{};
+    double cameraHeightMeters=0.0;
+    if(heightFog){
+        basisF=normalize(subtract(camera.target,camera.position));
+        basisR=normalize(cross3(basisF,camera.up));
+        basisU=cross3(basisR,basisF);
+        cameraHeightMeters=static_cast<double>(camera.position.y)*metersPerUnit;
+    }
     std::uint64_t fogged=0U;
     RenderPassBuffers& p=target.passes;
     for(std::uint32_t y=0;y<target.height;++y){
@@ -888,7 +925,16 @@ std::uint64_t apply_distance_fog(PolygonRenderTarget& target,const PolygonCamera
             const float ndcX=(2.0F*((static_cast<float>(x)+0.5F)/static_cast<float>(target.width))-1.0F)*tanHalf*aspect;
             const float cameraZ=camera.nearPlane+target.depth[i]*(camera.farPlane-camera.nearPlane);
             const float meters=cameraZ*std::sqrt(1.0F+ndcX*ndcX+ndcY*ndcY)*metersPerUnit;
-            const float t=std::exp(-density*std::max(0.0F,meters-environment.fogStartMeters));
+            float t;
+            if(!heightFog){
+                t=std::exp(-density*std::max(0.0F,meters-environment.fogStartMeters));
+            }else{
+                const double invLength=1.0/std::sqrt(1.0+static_cast<double>(ndcX)*ndcX+static_cast<double>(ndcY)*ndcY);
+                const double slope=(basisF.y+basisR.y*ndcX+basisU.y*ndcY)*invLength;   // d(height)/d(ray metre)
+                const double tau=fog_optical_depth(environment.fogStartMeters,meters,cameraHeightMeters,slope,
+                                                   density,environment.fogHeightFalloffPerMeter,environment.fogBaseHeightMeters);
+                t=static_cast<float>(std::exp(-tau));
+            }
             const Float3 add_fog=multiply(fogColor,1.0F-t);
             Float4& c=target.hdrColor[i];
             c={c.x*t+add_fog.x,c.y*t+add_fog.y,c.z*t+add_fog.z,c.w};

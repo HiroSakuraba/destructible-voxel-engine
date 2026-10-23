@@ -1207,6 +1207,8 @@ void test_script_state_v2() {
             world.set_environment_shadow_mode("hard")
             world.set_environment_scalar("FogDensityPerMeter", 0.02)
             world.set_environment_scalar("FogStartMeters", 4)
+            world.set_environment_scalar("FogHeightFalloffPerMeter", 0.05)
+            world.set_environment_scalar("FogBaseHeightMeters", 3)
             world.set_environment_vector("FogColor", 0.5, 0.6, 0.7)
             world.hud_set_interaction_prompt("Press E")
             world.hud_set_tools({ {id="pick", label="Pickaxe"}, {id="bomb", label="Bomb"}, {id="off", label="Off", enabled=false} })
@@ -1260,6 +1262,7 @@ void test_script_state_v2() {
     const RenderEnvironment& env = b.environment();
     CHECK(env.sunIntensity == 5.5F && env.skyColor.z == 0.9F && env.shadowMode == ShadowMode::Hard);
     CHECK(env.fogDensityPerMeter == 0.02F && env.fogStartMeters == 4.0F && env.fogColor.y == 0.6F);   // v3
+    CHECK(env.fogHeightFalloffPerMeter == 0.05F && env.fogBaseHeightMeters == 3.0F);   // v4
     CHECK(b.hud_model().interaction_prompt() == "Press E");
     CHECK(b.hud_model().tools().size() == 3U && b.hud_model().selected_tool() && b.hud_model().selected_tool()->id == "bomb");
     CHECK(b.material_library().runtime_scalar(7, "Roughness") == 0.2F);
@@ -1305,15 +1308,45 @@ void test_script_state_v2() {
     auto v1Blob = v1.save_state(&error);
     CHECK(v1Blob.has_value());
     if (v1Blob) {
-        // Strip the v2/v3 tail: environment (30*4 + 5*4), fog (5*4), empty prompt (4), no tools
-        // (4), selection (8), no materials (4), no named timers (4); then mark it version 1.
-        v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 4U + 4U + 8U + 4U + 4U));
+        // Strip the v2/v3/v4 tail: environment (30*4 + 5*4), fog (5*4), fog height (2*4),
+        // empty prompt (4), no tools (4), selection (8), no materials (4), no named timers
+        // (4); then mark it version 1.
+        v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 8U + 4U + 4U + 8U + 4U + 4U));
         (*v1Blob)[4] = std::byte{1};
         GameWorld worldV1b(std::make_unique<ReferenceRigidBodyWorld>());
         GameScriptHost v1b(worldV1b);
         CHECK(v1b.load_state(*v1Blob, &error));
         CHECK(v1b.global_number("score") == 5.0);
     }
+}
+
+// Script state v4 appends the fog height falloff (2 floats) after the v3 fog block.
+// A v3 blob -- the v4 blob with those 8 bytes excised and the version patched -- still
+// loads, with the falloff at its default (off): that is what the v3 build rendered.
+void test_script_state_v3_fog_height() {
+    std::string error;
+    GameWorld worldA(std::make_unique<ReferenceRigidBodyWorld>());
+    GameScriptHost a(worldA);
+    CHECK(a.run_string("world.set_environment_scalar(\"FogDensityPerMeter\", 0.02)\n"
+                       "world.set_environment_scalar(\"FogHeightFalloffPerMeter\", 0.05)\n"
+                       "world.set_environment_scalar(\"FogBaseHeightMeters\", 3)\n",
+                       "fog", &error));
+    const auto blob = a.save_state(&error);
+    CHECK(blob.has_value());
+    if (!blob) { std::cerr << "v3 fog height save: " << error << '\n'; return; }
+    // After the falloff block the tail is: empty prompt (4), no tools (4), selection (8),
+    // no materials (4), no named timers (4) -- 24 bytes; the block itself is 8.
+    CHECK(blob->size() > 32U);
+    std::vector<std::byte> v3(blob->begin(), blob->end() - 32);
+    v3.insert(v3.end(), blob->end() - 24, blob->end());
+    v3[4] = std::byte{3};
+    GameWorld worldB(std::make_unique<ReferenceRigidBodyWorld>());
+    GameScriptHost b(worldB);
+    CHECK(b.load_state(v3, &error));
+    if (!error.empty()) std::cerr << "v3 fog height load: " << error << '\n';
+    const RenderEnvironment& env = b.environment();
+    CHECK(env.fogDensityPerMeter == 0.02F);   // the v3 fog block still loads
+    CHECK(env.fogHeightFalloffPerMeter == 0.0F && env.fogBaseHeightMeters == 0.0F);   // v4 fields default
 }
 #endif
 
@@ -1343,6 +1376,7 @@ int main() {
 #if defined(DVE_HAVE_LUA)
     test_script_state();
     test_script_state_v2();
+    test_script_state_v3_fog_height();
 #endif
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";

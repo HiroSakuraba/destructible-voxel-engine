@@ -379,10 +379,15 @@ struct CookedVoxelScene {
 // Normal maps for voxel materials (VoxelMaterialDefinition::normalMap): a PNG or JPEG decoded
 // with no colour conversion (normal maps are data, not sRGB colour). Null, with *error, when the
 // image cannot be decoded or is larger than kMaximumVoxelNormalMapDimension.
+// flipGreenChannel converts a DirectX-style map (Y-, green = down) to the engine's OpenGL
+// convention (Y+, green = up) by inverting the green channel BEFORE the map (and its content
+// hash) is built, so a flipped import is indistinguishable from an OpenGL-authored original.
 [[nodiscard]] std::shared_ptr<const VoxelNormalMap> import_voxel_normal_map(const std::filesystem::path& path,
-                                                                            std::string* error = nullptr);
+                                                                            std::string* error = nullptr,
+                                                                            bool flipGreenChannel = false);
 [[nodiscard]] std::shared_ptr<const VoxelNormalMap> decode_voxel_normal_map(std::span<const std::byte> bytes, std::string name,
-                                                                            std::string* error = nullptr);
+                                                                            std::string* error = nullptr,
+                                                                            bool flipGreenChannel = false);
 
 [[nodiscard]] CookedVoxelAsset voxelize_scene(
     const ImportedScene& scene,

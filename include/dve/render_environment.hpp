@@ -102,6 +102,12 @@ struct RenderEnvironment {
     float fogDensityPerMeter{0.0F};
     float fogStartMeters{0.0F};
     Float3 fogColor{0.62F, 0.68F, 0.76F};
+    // Height falloff for the distance fog: above fogBaseHeightMeters the density scales by
+    // exp(-fogHeightFalloffPerMeter x (height - base)), so fog thins with altitude (valley fog
+    // under clear hilltops). At and below the base height the density is fogDensityPerMeter.
+    // 0 falloff (the default) = uniform density at every height, the pre-falloff behaviour.
+    float fogHeightFalloffPerMeter{0.0F};
+    float fogBaseHeightMeters{0.0F};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
 };

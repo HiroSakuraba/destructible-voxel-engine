@@ -127,6 +127,26 @@ void live_pixels(VulkanDevice& d,const std::filesystem::path& root,const std::fi
         check(renderer.mainMaterials->invalidate_asset(mapped.contentHash,&error),"Mapped invalidation");
     }
     mappedMirror.reset();
+    // Codex 4364355458 (#202): a flat normal map under triplanar mapping must reproduce the
+    // geometric normal (renderer still holds the normal-debug fragment shader from above).
+    for(const auto mode:{MaterialMappingMode::WorldTriplanar,MaterialMappingMode::ObjectTriplanar}){
+        const Float3 tilted=normalize(Float3{.45F,-.55F,.7F});
+        auto neutral=panel(mappedMaterial);neutral.images={{"normal","image/raw",1,1,{128,128,255,255}}};
+        neutral.textures.push_back({"map",0,{}});neutral.materialBindings[0].normal.texture=0;neutral.materialBindings[0].normalScale=1.5F;
+        neutral.materialBindings[0].mapping.mappingMode=mode;neutral.materialBindings[0].mapping.triplanarBlendSharpness=4;
+        for(auto& v:neutral.vertices)v.normal=tilted;neutral.contentHash=polygon_asset_content_hash(neutral);
+        MeshRhiMirror neutralMirror(d);check(neutralMirror.upload(neutral,&error),"Neutral fixture upload");
+        LivePolygonDraw neutralDraw{&neutralMirror,&neutral,1};mappedFrame.polygonDraws=std::span(&neutralDraw,1);
+        LiveEnvironmentFrameStats stats;FenceHandle fence;
+        check(record_live_environment_frame(d,lighting,plan,atlas,renderer,mappedFrame,stats,&fence,&error),"Neutral frame");
+        check(fence&&d.fence_complete(fence),"Neutral fence");
+        std::vector<std::byte> pixels(width*width*4);check(d.read_texture(target,0,0,pixels,width*4,&error),"Neutral readback");
+        const std::array<float,3> expected{tilted.x*.5F+.5F,tilted.y*.5F+.5F,tilted.z*.5F+.5F};
+        for(unsigned c=0;c<3;++c){const float actual=std::to_integer<unsigned>(pixels[(24*width+24)*4+c])/255.F;
+            check(std::abs(actual-expected[c])<.012F,"Neutral triplanar normal map perturbed the GPU normal, channel "+std::to_string(c)+" actual "+std::to_string(actual)+" expected "+std::to_string(expected[c]));}
+        check(renderer.mainMaterials->invalidate_asset(neutral.contentHash,&error),"Neutral invalidation");neutralMirror.reset();
+    }
+    std::cout<<"Neutral triplanar normal maps keep the geometric normal\n";
     std::cout<<"Sampled sRGB color, linear roughness and raw normal channels passed\n";
     std::cout<<checks<<" live shaded CPU/GPU pixel comparisons\n";
     check(d.destroy_texture(target,&error)&&d.destroy_texture(depth,&error),"Targets cleanup");check(destroy_live_environment_renderer(d,renderer,&error),"Renderer cleanup");check(destroy_cascaded_shadow_atlas(d,atlas,&error),"Atlas cleanup");check(destroy_environment_lighting(d,lighting,&error),"IBL cleanup");

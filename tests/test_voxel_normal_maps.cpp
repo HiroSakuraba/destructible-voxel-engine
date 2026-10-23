@@ -12,6 +12,7 @@
 #include "dve/render/voxel_reference_renderer.hpp"
 #include "dve/voxel_normal_map.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -144,6 +145,28 @@ void test_flat_and_tilted() {
     for (std::size_t i = 0; i < image.hdrColor.size(); ++i)
         spread = std::max(spread, std::abs(static_cast<double>(image.hdrColor[i].x - image.hdrColor[centre].x)));
     check(spread < 1e-4, "a constant map is constant over the floor");
+}
+
+// A flat map keeps the geometric normal where projections overlap too (tilted normals,
+// blended weights), as without a map: the whiteout blend shared with the polygon renderer.
+void test_flat_blended_projections() {
+    VoxelMaterialDefinition flat = matte();
+    flat.normalMap = constant_map(128, 128, 255);   // decodes to (0.0039, 0.0039, 1)
+    flat.normalMapStrength = 1.5F;
+    VoxelMaterialDefinition none = matte();
+    double worst = 0.0;
+    for (const Float3 raw : {Float3{0.45F, -0.55F, 0.7F}, Float3{-0.6F, 0.6F, -0.5F}, Float3{1.0F, 1.0F, 1.0F}, Float3{0.2F, -0.9F, 0.4F}}) {
+        const Float3 n = normalize(raw);
+        for (const float sharpness : {1.0F, 4.0F, 16.0F}) {
+            flat.normalMapSharpness = sharpness;
+            const Float3 p{0.37F, -1.21F, 2.05F};
+            const Float3 plain = voxel_normal_map_normal(none, p, n);
+            check(plain.x == n.x && plain.y == n.y && plain.z == n.z, "no map returns the normal unchanged");
+            worst = std::max(worst, static_cast<double>(length(subtract(voxel_normal_map_normal(flat, p, n), plain))));
+        }
+    }
+    std::printf("flat map on blended projections: worst normal difference %.5f\n", worst);
+    check(worst < 0.012, "a flat map leaves a tilted normal as it is (blended projections)");
 }
 
 void test_tiling_and_motion() {
@@ -319,6 +342,7 @@ int main() {
     const fs::path dir = fs::temp_directory_path() / "dve_voxel_normal_maps_test";
     fs::create_directories(dir);
     test_flat_and_tilted();
+    test_flat_blended_projections();
     test_tiling_and_motion();
     test_dvox(dir);
     test_png_import(dir);

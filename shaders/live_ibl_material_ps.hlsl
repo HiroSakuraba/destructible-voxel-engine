@@ -102,13 +102,17 @@ float3 SampleLiveNormal(PolygonMaterialMappingRecord m,float2 mappedUv,float3 wo
     float2 x,y,z;MaterialTriplanarCoordinates(p,m.triplanarScale,x,y,z);
     float2 scale=float2(m.baseScaleX,m.baseScaleY),offset=float2(m.baseOffsetX,m.baseOffsetY);
     x=TransformMaterialUV(x,scale,offset,m.baseRotationRadians);y=TransformMaterialUV(y,scale,offset,m.baseRotationRadians);z=TransformMaterialUV(z,scale,offset,m.baseRotationRadians);
-    float3 nx=gLiveNormalTexture.SampleGrad(gNormalSampler,x,ddx(x),ddy(x)).xyz*2-1;
-    float3 ny=gLiveNormalTexture.SampleGrad(gNormalSampler,y,ddx(y),ddy(y)).xyz*2-1;
-    float3 nz=gLiveNormalTexture.SampleGrad(gNormalSampler,z,ddx(z),ddy(z)).xyz*2-1;
-    nx=normalize(float3(nx.z*(sourceNormal.x<0?-1:1),nx.y*m.normalScale,nx.x*m.normalScale));
-    ny=normalize(float3(ny.x*m.normalScale,ny.z*(sourceNormal.y<0?-1:1),ny.y*m.normalScale));
-    nz=normalize(float3(nz.x*m.normalScale,nz.y*m.normalScale,nz.z*(sourceNormal.z<0?-1:1)));
-    float3 normal=normalize(nx*weights.x+ny*weights.y+nz*weights.z);
+    float3 tx=gLiveNormalTexture.SampleGrad(gNormalSampler,x,ddx(x),ddy(x)).xyz*2-1;
+    float3 ty=gLiveNormalTexture.SampleGrad(gNormalSampler,y,ddx(y),ddy(y)).xyz*2-1;
+    float3 tz=gLiveNormalTexture.SampleGrad(gNormalSampler,z,ddx(z),ddy(z)).xyz*2-1;
+    tx.xy*=m.normalScale;ty.xy*=m.normalScale;tz.xy*=m.normalScale;
+    // Whiteout triplanar blend (matches triplanar_whiteout_normal in polygon_renderer.cpp):
+    // a neutral (0,0,1) sample reproduces sourceNormal exactly on every projection.
+    float3 sn=normalize(sourceNormal);
+    float3 wx=float3(abs(tx.z)*sn.x,tx.y+sn.y,tx.x+sn.z);
+    float3 wy=float3(ty.x+sn.x,abs(ty.z)*sn.y,ty.y+sn.z);
+    float3 wz=float3(tz.x+sn.x,tz.y+sn.y,abs(tz.z)*sn.z);
+    float3 normal=normalize(wx*weights.x+wy*weights.y+wz*weights.z);
     return local?normalize(mul((float3x3)gObjectToWorld,normal)):normal;
 }
 

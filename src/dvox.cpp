@@ -444,7 +444,8 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
     }
     if(minor>=7U){const auto pattern=reader.read_u8(),space=reader.read_u8();material.surfaceDetail.pattern=SurfacePattern(pattern);material.surfaceDetail.space=SurfaceDetailSpace(space);material.surfaceDetail.seed=reader.read_u32();
         std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)v=reader.read_float();set_surface_detail_values(material.surfaceDetail,values);
-        if(!material_surface_detail_valid(material.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");}
+        if(!material_surface_detail_valid(material.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");
+        if(material.surfaceDetail.pattern!=SurfacePattern::None && (material.surfaceDetail.space==SurfaceDetailSpace::UV0 || material.surfaceDetail.space==SurfaceDetailSpace::UV1))throw std::runtime_error("voxel materials cannot use UV-space surface detail");}
     return material;
 }
 
@@ -467,6 +468,7 @@ bool write_dvox(
         for(const auto& m:asset.materials){
             if(m.preset.id.size()>128 || (m.preset.id.empty() ? m.preset.revision!=0 || m.preset.overrides!=0 : m.preset.revision==0))throw std::runtime_error("invalid preset origin");
             if(!material_surface_detail_valid(m.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");
+            if(m.surfaceDetail.pattern!=SurfacePattern::None && (m.surfaceDetail.space==SurfaceDetailSpace::UV0 || m.surfaceDetail.space==SurfaceDetailSpace::UV1))throw std::runtime_error("voxel materials cannot use UV-space surface detail");
             if(!material_normal_map_valid(m))throw std::runtime_error("invalid material normal map");
         }
 

@@ -4,9 +4,10 @@
 //
 // Voxels have no UVs, so the map is projected triplanar in object space: each axis projects the
 // object-space position (metres / normalMapTileMeters) onto the plane across it, the three samples
-// are swizzled from tangent space onto that axis (the same swizzle as the polygon renderer's
-// triplanar normal maps) and blended by |normal|^sharpness. On an axis-aligned voxel face only
-// the face's own projection contributes. A flat texel (128, 128, 255) leaves the normal as it is.
+// are combined with the geometric normal by the whiteout triplanar blend shared with the polygon
+// renderer (dve/triplanar_normal.hpp), weighted by |normal|^sharpness. On an axis-aligned voxel
+// face only the face's own projection contributes. A flat texel leaves the normal as it is, even
+// where projections overlap.
 
 #include <cstdint>
 #include <memory>

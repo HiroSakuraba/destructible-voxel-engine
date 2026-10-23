@@ -247,8 +247,13 @@ def validate_material_abi(root: Path) -> list[str]:
             if m:
                 axes[axis] = m.group(1).replace(normal + ".", "N.")
         return axes
-    cpu_whiteout = whiteout_axes((root / "src/render/polygon_renderer.cpp").read_text(encoding="utf-8")
-                                 .split("Float3 triplanar_whiteout_normal(", 1)[-1].split("\n}\n", 1)[0], "n")
+    # Shared by the polygon renderer and voxel normal maps (both must call it).
+    cpu_whiteout = whiteout_axes((root / "include/dve/triplanar_normal.hpp").read_text(encoding="utf-8")
+                                 .split("triplanar_whiteout_normal(", 1)[-1].split("\n}\n", 1)[0], "n")
+    for user in ("src/render/polygon_renderer.cpp", "src/voxel_normal_map.cpp"):
+        text = (root / user).read_text(encoding="utf-8")
+        if '#include "dve/triplanar_normal.hpp"' not in text or "triplanar_whiteout_normal(" not in text:
+            errors.append(f"{user} must use the shared triplanar_whiteout_normal blend")
     gpu_whiteout = whiteout_axes((root / "shaders/live_ibl_material_ps.hlsl").read_text(encoding="utf-8")
                                  .split("float3 SampleLiveNormal(", 1)[-1].split("\n}\n", 1)[0], "sn")
     expected_whiteout = {"x": "abs(tx.z)*N.x,tx.y+N.y,tx.x+N.z", "y": "ty.x+N.x,abs(ty.z)*N.y,ty.y+N.z",

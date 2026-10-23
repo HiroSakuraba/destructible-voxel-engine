@@ -1,6 +1,7 @@
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/render/scene_lighting.hpp"
 #include "dve/voxel_normal_map.hpp"
+#include "dve/triplanar_normal.hpp"
 
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/ambient_occlusion.hpp"
@@ -192,20 +193,12 @@ TextureLod normal_triplanar_lod(TextureLod lod,const MaterialMappingSettings& ma
     return lod.transformed(mapping.baseTransform);
 }
 
-// Whiteout (UDN-style) triplanar normal blend. Each projection's tangent-space sample is
-// added to the geometric normal swizzled into that projection's (u, v, axis) frame, then
-// swizzled back to world space and blended by the triplanar weights. A neutral sample
-// ((0.5, 0.5, 1) -> (0, 0, 1)) reproduces the geometric normal exactly on every axis, so a
-// flat normal map leaves shading unchanged. Mirrors SampleLiveNormal in
-// shaders/live_ibl_material_ps.hlsl; keep the two in lockstep (CPU/GPU parity).
+// Triplanar normal maps decode each projection's sample and blend with the shared whiteout
+// helper (dve/triplanar_normal.hpp), so a neutral map keeps the geometric normal. Mirrors
+// SampleLiveNormal in shaders/live_ibl_material_ps.hlsl (CPU/GPU parity).
 Float3 triplanar_whiteout_normal(Float3 n,Float4 sx,Float4 sy,Float4 sz,float normalScale,Float3 weights) {
     const auto decode=[&](Float4 s){return Float3{(s.x*2.0F-1.0F)*normalScale,(s.y*2.0F-1.0F)*normalScale,s.z*2.0F-1.0F};};
-    const Float3 tx=decode(sx),ty=decode(sy),tz=decode(sz);
-    // X projection: u = z, v = y.  Y projection: u = x, v = z.  Z projection: u = x, v = y.
-    const Float3 wx{std::abs(tx.z)*n.x,tx.y+n.y,tx.x+n.z};
-    const Float3 wy{ty.x+n.x,std::abs(ty.z)*n.y,ty.y+n.z};
-    const Float3 wz{tz.x+n.x,tz.y+n.y,std::abs(tz.z)*n.z};
-    return normalize(add(add(multiply(wx,weights.x),multiply(wy,weights.y)),multiply(wz,weights.z)));
+    return dve::triplanar_whiteout_normal(n,decode(sx),decode(sy),decode(sz),weights);
 }
 
 Float4 sample_triplanar_binding(const CookedPolygonAsset& asset,const PolygonTextureBinding& binding,

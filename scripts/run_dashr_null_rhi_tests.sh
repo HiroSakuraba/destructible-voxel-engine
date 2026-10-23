@@ -38,6 +38,7 @@ c++ -std=c++23 -ffunction-sections -fdata-sections -Wl,--gc-sections \
     "$repo_dir/src/render/shadow_material_table.cpp" \
     "$repo_dir/src/render/main_material_table.cpp" \
     "$repo_dir/src/render/material_resource_residency.cpp" \
+    "$repo_dir/src/render/texture_mips.cpp" \
     "$repo_dir/src/render/environment_lighting_gpu.cpp" \
     "$repo_dir/src/render/cascaded_shadow_atlas.cpp" \
     "$repo_dir/src/render/cascaded_shadow_map.cpp" \

@@ -1,8 +1,8 @@
 #pragma once
 
 // Whiteout (UDN-style) triplanar normal blend shared by the polygon renderer's triplanar normal
-// maps and voxel normal maps (VoxelMaterialDefinition::normalMap). Mirrored by SampleLiveNormal in
-// shaders/live_ibl_material_ps.hlsl; tools/validate_shader_contracts.py keeps the swizzles equal.
+// maps and voxel normal maps (VoxelMaterialDefinition::normalMap). Mirrored by SampleLiveMaterialNormal in
+// shaders/common/live_material_sampling.hlsli; tools/validate_shader_contracts.py keeps the swizzles equal.
 //
 // tx, ty, tz are the decoded tangent-space samples of the X (u = z, v = y), Y (u = x, v = z) and
 // Z (u = x, v = y) projections with their u/v components already scaled by the normal strength.

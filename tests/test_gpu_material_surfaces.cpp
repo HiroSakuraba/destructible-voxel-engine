@@ -151,6 +151,147 @@ void live_pixels(VulkanDevice& d,const std::filesystem::path& root,const std::fi
     std::cout<<checks<<" live shaded CPU/GPU pixel comparisons\n";
     check(d.destroy_texture(target,&error)&&d.destroy_texture(depth,&error),"Targets cleanup");check(destroy_live_environment_renderer(d,renderer,&error),"Renderer cleanup");check(destroy_cascaded_shadow_atlas(d,atlas,&error),"Atlas cleanup");check(destroy_environment_lighting(d,lighting,&error),"IBL cleanup");
 }
+// Canonical live pipelines, real sampled textures and depth readback. Constant UV
+// probes isolate channel/wrap/filter selection; varying UV probes exercise implicit LOD.
+void texture_pixels(VulkanDevice& d,const std::filesystem::path& root,const std::filesystem::path& output){
+    IblBakeSettings settings;settings.irradianceResolution=4;settings.specularResolution=8;
+    settings.specularMipLevels=4;settings.sampleCount=16;settings.brdfResolution=8;
+    EnvironmentLightingGpuResources lighting;
+    check(upload_environment_lighting(d,make_default_environment_lighting_asset(settings),lighting,&error),"Texture IBL");
+    camera::CameraPose camera;camera.position={0,0,1};camera.target={0,0,0};camera.lens.farPlaneMeters=10;
+    CascadedShadowSettings shadows;shadows.cascadeCount=1;shadows.cascadeResolution=64;shadows.maximumDistanceMeters=5;
+    auto plan=make_cascaded_shadow_plan(camera,{0,0,1},shadows);
+    auto& cascade=plan.cascades[0];cascade.snappedCenter={0,0,.2F};cascade.radiusMeters=.012F;
+    cascade.texelSizeMeters=.024F/64;cascade.lightRight={1,0,0};cascade.lightUp={0,1,0};cascade.lightForward={0,0,1};
+    cascade.minimumLightDepth=0;cascade.maximumLightDepth=1;
+    CascadedShadowAtlasResources atlas;check(create_cascaded_shadow_atlas(d,plan,atlas,&error),"Texture atlas");
+    LiveEnvironmentShaderBytecode code;code.materialVertex=load(root/"live_ibl_material_vs.spv");
+    code.skyboxVertex=load(root/"live_environment_skybox_vs.spv");code.skyboxFragment=load(root/"live_environment_skybox_ps.spv");
+    code.shadowVertex=load(root/"live_csm_caster_vs.spv");code.shadowFragment=load(root/"live_csm_caster_ps.spv");
+    LiveEnvironmentRendererResources renderer;std::string activeMode;
+    constexpr unsigned width=64;
+    TextureDesc desc;desc.width=desc.height=width;desc.usage=TextureUsage::RenderTarget|TextureUsage::CopySource;desc.initialState=ResourceState::RenderTarget;
+    auto target=d.create_texture(desc,&error);desc.format=TextureFormat::D32Float;desc.usage=TextureUsage::DepthStencil;desc.initialState=ResourceState::DepthWrite;
+    auto depth=d.create_texture(desc,&error);check(target&&depth,"Texture targets");
+    std::array<float,64> constants{};constants[0]=constants[5]=1/.012F;constants[10]=constants[15]=1;
+    unsigned cases=0,shadowPixels=0;
+    auto render=[&](CookedPolygonAsset asset,const std::string& mode,bool caster=false){
+        if(activeMode!=mode){if(!activeMode.empty())check(destroy_live_environment_renderer(d,renderer,&error),"Texture pipeline cleanup");
+            code.materialFragment=load(root/("live_ibl_material_ps_"+mode+".spv"));
+            check(create_live_environment_renderer(d,lighting,atlas,code,256,TextureFormat::RGBA8Unorm,renderer,&error),"Texture pipeline");activeMode=mode;}
+        asset.contentHash=polygon_asset_content_hash(asset);MeshRhiMirror mirror(d);check(mirror.upload(asset,&error),"Texture mesh");LivePolygonDraw draw{&mirror,&asset,1};
+        LiveEnvironmentFrameDesc frame;frame.colorTarget=target;frame.depthTarget=depth;frame.width=frame.height=width;
+        frame.frameConstants=std::as_bytes(std::span(constants));frame.polygonDraws=std::span(&draw,1);frame.drawSkybox=false;frame.drawShadowCasters=caster;
+        LiveEnvironmentFrameStats stats;FenceHandle fence;
+        check(record_live_environment_frame(d,lighting,plan,atlas,renderer,frame,stats,&fence,&error),"Texture frame");check(fence&&d.fence_complete(fence),"Texture fence");
+        std::vector<std::byte> pixels(width*width*4);check(d.read_texture(target,0,0,pixels,width*4,&error),"Texture readback");
+        if(caster){std::vector<float> shadow(width*width);check(d.read_texture(atlas.dynamicDepthAtlas,0,0,std::as_writable_bytes(std::span(shadow)),width*sizeof(float),&error),"Cutout depth readback");
+            unsigned lit=0,holes=0;
+            for(unsigned y=2;y<width-2;++y)for(unsigned x=2;x<width-2;++x){
+                const bool visible=std::to_integer<unsigned>(pixels[(y*width+x)*4])>0;
+                const bool casts=shadow[((width-1-y)*width+x)]<.9F;
+                check(visible==casts,"Main/shadow cutout coverage differs at "+std::to_string(x)+","+std::to_string(y));
+                visible?++lit:++holes;++shadowPixels;}
+            check(lit>100&&holes>100,"Cutout fixture must contain visible and discarded pixels");
+            if(!output.empty()){std::filesystem::create_directories(output);
+                for(unsigned kind=0;kind<3;++kind){std::ofstream ppm(output/("cutout-"+std::to_string(cases)+(kind==0?".main.ppm":kind==1?".shadow.ppm":".diff.ppm")),std::ios::binary);ppm<<"P6\n64 64\n255\n";
+                    for(unsigned y=0;y<width;++y)for(unsigned x=0;x<width;++x){const bool visible=std::to_integer<unsigned>(pixels[(y*width+x)*4])>0,casts=shadow[(width-1-y)*width+x]<.9F;
+                        const unsigned char v=(kind==0?visible:kind==1?casts:visible!=casts)?255:0;for(unsigned c=0;c<3;++c)ppm.write(reinterpret_cast<const char*>(&v),1);}}}
+        }
+        check(renderer.mainMaterials->invalidate_asset(asset.contentHash,&error)&&renderer.shadowMaterials->invalidate_asset(asset.contentHash,&error),"Texture invalidation");
+        ++cases;return pixels;
+    };
+    auto probe=[&](const std::vector<std::byte>& pixels,std::array<float,4> expected,const std::string& name,float tolerance=.009F){
+        for(unsigned c=0;c<4;++c){const float actual=std::to_integer<unsigned>(pixels[(32*width+32)*4+c])/255.F;
+            check(std::abs(actual-expected[c])<tolerance,name+" channel "+std::to_string(c)+" actual "+std::to_string(actual)+" expected "+std::to_string(expected[c]));}
+    };
+    VoxelMaterialDefinition material;material.baseColor={1,1,1,1};material.roughness=1;material.metallic=1;material.emissive={1,1,1};
+    auto split=panel(material);split.images={{"split","image/raw",2,1,{64,64,64,255,192,192,192,255}}};
+    split.samplers={{ImportedWrapMode::Repeat,ImportedWrapMode::Repeat,ImportedTextureFilter::Nearest,ImportedTextureFilter::Nearest}};
+    split.textures={{"split",0,0}};
+    for(auto& v:split.vertices){v.texcoord={.25F,.5F};v.texcoord1={.75F,.5F};}
+    for(unsigned channel=0;channel<2;++channel){auto a=split;auto& b=a.materialBindings[0];
+        b.baseColor={0,channel,PolygonTextureColorSpace::Linear};b.metallicRoughness={0,1-channel};b.emissive={0,channel,PolygonTextureColorSpace::Linear};b.opacity={0,channel};
+        const float base=(channel?192.F:64.F)/255,other=(channel?64.F:192.F)/255;
+        probe(render(a,"color"),{base,base,base,other},"Independent base/MR UV");
+        probe(render(a,"emission"),{base,base,base,base},"Independent emissive/opacity UV");
+        probe(render(a,"channels"),{other,other,base,1},"Independent data UV");}
+    {auto a=split;a.materialBindings[0].baseColor={0,0,PolygonTextureColorSpace::Linear};a.materialBindings[0].mapping.mappingMode=MaterialMappingMode::UV1;
+        probe(render(a,"color"),{192.F/255,192.F/255,192.F/255,1},"Global UV1 override");}
+    for(unsigned channel=0;channel<2;++channel){auto a=split;
+        a.images[0].rgba8={200,128,230,255,55,128,230,255};a.materialBindings[0].normal={0,channel};
+        for(auto& v:a.vertices){const float u=(v.position.x+.012F)/.024F,vv=(v.position.y+.012F)/.024F;
+            v.texcoord={.25F+(u-.5F)*.05F,vv};v.texcoord1={.75F+(u-.5F)*.05F,vv};}
+        const auto n=normalize(Float3{(channel?55.F:200.F)/255*2-1,128.F/255*2-1,230.F/255*2-1});
+        probe(render(a,"normal"),{n.x*.5F+.5F,n.y*.5F+.5F,n.z*.5F+.5F,1},"Independent normal UV");}
+    {MaterialSamplerPolicy policy;policy.overrideFiltering=true;policy.anisotropy=true;policy.requestedMaxAnisotropy=128;
+        MaterialResourceResidency pool(d,policy);check(pool.retain_asset(split.contentHash,&error),"Anisotropy retain");
+        SamplerHandle sampler;check(pool.ensure_sampler(split,0,sampler,&error),"Actual Vulkan anisotropic sampler");
+        check(pool.effective_max_anisotropy()<=(std::max)(1.F,d.capabilities().maxSamplerAnisotropy),"Anisotropy device clamp");
+        check(pool.release_asset(split.contentHash,&error),"Anisotropy release");}
+    for(auto wrap:{ImportedWrapMode::Repeat,ImportedWrapMode::ClampToEdge,ImportedWrapMode::MirroredRepeat}){
+        auto a=split;a.samplers[0].wrapS=wrap;a.materialBindings[0].baseColor={0,0,PolygonTextureColorSpace::Linear};
+        for(auto& v:a.vertices)v.texcoord={1.25F,.5F};
+        const float expected=(wrap==ImportedWrapMode::Repeat?64.F:192.F)/255;
+        probe(render(a,"color"),{expected,expected,expected,1},"Authored wrap mode");}
+    // Decode must precede bilinear filtering: black/white at the boundary is 0.5 linear.
+    {auto a=split;a.images[0].rgba8={0,0,0,255,255,255,255,255};a.samplers[0].magFilter=ImportedTextureFilter::Linear;
+        for(auto& v:a.vertices)v.texcoord={.5F,.5F};a.materialBindings[0].baseColor.texture=0;
+        probe(render(a,"color"),{.5F,.5F,.5F,1},"sRGB decode before bilinear");
+        a.samplers[0].magFilter=ImportedTextureFilter::Nearest;
+        for(auto& v:a.vertices)v.texcoord={.49F,.5F};probe(render(a,"color"),{0,0,0,1},"Nearest magnification");}
+    // A highly minified checker reaches the 1x1 level. All color mips average in
+    // linear light, while the same source image bound as MR remains raw data.
+    std::vector<std::byte> mipEvidence;
+    {auto a=panel(material);PolygonImage image{"checker","image/raw",64,64,{}};
+        for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x){const auto v=static_cast<std::uint8_t>((x+y)%2?255:0);image.rgba8.insert(image.rgba8.end(),{v,v,v,v});}
+        a.images={image};a.textures={{"checker",0,{}}};auto& b=a.materialBindings[0];b.baseColor.texture=0;b.metallicRoughness.texture=0;
+        for(auto& v:a.vertices){v.texcoord.x*=128;v.texcoord.y*=128;}
+        mipEvidence=render(a,"color");probe(mipEvidence,{.503F,.503F,.503F,128.F/255},"Full typed mip chain");
+        probe(render(a,"channels"),{128.F/255,128.F/255,128.F/255,1},"Linear alpha mip average");
+        // World projection footprint must ignore huge unused UV derivatives.
+        b.mapping.mappingMode=MaterialMappingMode::WorldTriplanar;b.mapping.triplanarScale=1;
+        a.images[0].rgba8=split.images[0].rgba8;a.images[0].width=2;a.images[0].height=1;
+        for(auto& v:a.vertices){v.texcoord.x*=1e4F;v.texcoord.y*=1e4F;}
+        b.baseColor.colorSpace=PolygonTextureColorSpace::Linear;b.mapping.baseTransform.offset={.25F,.5F};
+        probe(render(a,"color"),{64.F/255,64.F/255,64.F/255,64.F/255},"Triplanar position derivatives",.015F);}
+    {auto a=panel(material);a.images={{"LOD stripes","image/raw",4,1,{0,0,0,255,255,255,255,255,0,0,0,255,255,255,255,255}}};
+        a.textures={{"stripes",0,{}}};a.materialBindings[0].baseColor={0,0,PolygonTextureColorSpace::Linear};
+        for(auto& v:a.vertices)v.texcoord={.125F+(v.texcoord.x-32.5F/64)*64*std::sqrt(2.F)/4,.5F};
+        probe(render(a,"color"),{.251F,.251F,.251F,1},"Fractional trilinear LOD",.015F);}
+    {auto a=panel(material);PolygonImage n{"normal checker","image/raw",64,64,{}};
+        for(unsigned y=0;y<64;++y)for(unsigned x=0;x<64;++x)n.rgba8.insert(n.rgba8.end(),{static_cast<std::uint8_t>(x%2?218:37),128,218,255});
+        a.images={n};a.textures={{"normals",0,{}}};a.materialBindings[0].normal.texture=0;
+        for(auto& v:a.vertices){v.texcoord.x*=128;v.texcoord.y*=128;}
+        probe(render(a,"normal"),{.5F,.5F,1,1},"Normalized GPU normal mips");}
+    for(auto mapping:{MaterialMappingMode::WorldTriplanar,MaterialMappingMode::ObjectTriplanar})for(float strength:{0.F,1.F}){
+        auto a=panel(material);const auto N=normalize(Float3{.3F,.4F,.8660254F});for(auto& v:a.vertices)v.normal=N;
+        a.images={{"neutral normal","image/raw",1,1,{128,128,255,255}}};a.textures={{"normal",0,{}}};
+        auto& b=a.materialBindings[0];b.normal.texture=0;b.normalScale=strength;b.mapping.mappingMode=mapping;b.mapping.triplanarBlendSharpness=8;
+        probe(render(a,"normal"),{N.x*.5F+.5F,N.y*.5F+.5F,N.z*.5F+.5F,1},"Neutral triplanar normal");}
+    // Compare actual main-pass discard and dynamic atlas depth for distinct UVs,
+    // transformed UVs, and world/object triplanar projection. No beauty-image proxy.
+    for(unsigned mode=0;mode<5;++mode){auto a=panel(material);a.materials[0].blendMode=MaterialBlendMode::Masked;
+        a.images={{"cutout","image/raw",2,1,{255,255,255,0,255,255,255,255}},
+                  {"opacity","image/raw",2,1,{0,0,0,255,255,255,255,255}}};
+        a.samplers={{ImportedWrapMode::Repeat,ImportedWrapMode::Repeat,ImportedTextureFilter::Nearest,ImportedTextureFilter::Nearest}};
+        a.textures={{"cutout",0,0},{"opacity",1,0}};auto& b=a.materialBindings[0];
+        b.baseColor.texture=0;b.baseColor.texcoord=1;b.opacity.texture=1;b.opacity.texcoord=0;
+        for(auto& v:a.vertices){v.texcoord={.75F,.5F};v.texcoord1={(v.position.x+.012F)/.024F,(v.position.y+.012F)/.024F};}
+        if(mode==1){b.mapping.baseTransform.scale={-1,1};b.mapping.baseTransform.offset={.2F,0};b.opacity.texture.reset();}
+        if(mode==4){b.baseColor.texture.reset();b.opacity.texcoord=1;}
+        if(mode==2||mode==3){b.mapping.mappingMode=mode==2?MaterialMappingMode::WorldTriplanar:MaterialMappingMode::ObjectTriplanar;b.mapping.triplanarScale=1/.024F;b.opacity.texture.reset();}
+        render(a,"color",true);}
+    if(!output.empty()){
+        std::filesystem::create_directories(output);
+        for(unsigned kind=0;kind<3;++kind){std::ofstream ppm(output/(kind==0?"texture-mip.gpu.ppm":kind==1?"texture-mip.reference.ppm":"texture-mip.diff.ppm"),std::ios::binary);ppm<<"P6\n64 64\n255\n";
+            for(unsigned i=0;i<width*width;++i)for(unsigned c=0;c<3;++c){const unsigned actual=std::to_integer<unsigned>(mipEvidence[i*4+c]);const unsigned char value=static_cast<unsigned char>(kind==0?actual:kind==1?128:std::abs(int(actual)-128)*16);ppm.write(reinterpret_cast<const char*>(&value),1);}}
+    }
+    std::cout<<cases<<" GPU texture/mapping/filter cases; "<<shadowPixels<<" main/shadow coverage comparisons\n";
+    check(destroy_live_environment_renderer(d,renderer,&error)&&d.destroy_texture(target,&error)&&d.destroy_texture(depth,&error),"Texture cleanup");
+    check(destroy_cascaded_shadow_atlas(d,atlas,&error)&&destroy_environment_lighting(d,lighting,&error),"Texture lighting cleanup");
+}
+
 }
 int main(int argc,char** argv){try{
 #ifndef DVE_SURFACE_SHADER_DIR
@@ -160,5 +301,5 @@ int main(int argc,char** argv){try{
     const std::filesystem::path root=argc>1?argv[1]:DVE_SURFACE_SHADER_DIR;
 #endif
     VulkanDevice d;if(d.status()!=DeviceStatus::Ready){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(std::string(d.device_loss_reason()));std::cout<<"SKIP: Vulkan unavailable\n";return 0;}
-    analytic_conformance(d,root);live_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});std::cout<<"GPU surface recipes passed\n";
+    analytic_conformance(d,root);live_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});texture_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});std::cout<<"GPU surface recipes passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

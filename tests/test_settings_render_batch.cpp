@@ -320,8 +320,7 @@ void test_sampler_policy() {
                 "default policy must not grant anisotropy");
         residency.clear();
     }
-    {   // Registry defaults (trilinear): mipmap request meets single-level
-        // images, so the explicit fallback engages; anisotropy stays off.
+    {   // Registry defaults retain trilinear sampling; residency supplies mip chains.
         auto registry = EditorSettingsRegistry::make_default();
         const auto policy = material_sampler_policy(registry);
         require(policy.overrideFiltering && !policy.anisotropy, "trilinear policy shape wrong");
@@ -331,8 +330,8 @@ void test_sampler_policy() {
         rhi::SamplerHandle sampler;
         require(residency.ensure_sampler(asset, 0U, sampler, &error), error.c_str());
         const auto stats = residency.stats();
-        require(stats.mipmapFallbackSamplersCreated == 1U,
-                "single-level images did not trigger the explicit mipmap fallback");
+        require(stats.mipmapFallbackSamplersCreated == 0U,
+                "mip-capable residency unexpectedly downgraded trilinear filtering");
         require(stats.anisotropicSamplersCreated == 0U, "trilinear must not enable anisotropy");
         residency.clear();
     }

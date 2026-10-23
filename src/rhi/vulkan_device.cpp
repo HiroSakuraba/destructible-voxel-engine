@@ -128,6 +128,7 @@ vk::BufferUsageFlags vulkan_buffer_usage(BufferUsage usage) noexcept {
 vk::Format vulkan_format(TextureFormat format) noexcept {
     switch (format) {
     case TextureFormat::RGBA8Unorm: return vk::FormatR8G8B8A8Unorm;
+    case TextureFormat::RGBA8Srgb: return vk::FormatR8G8B8A8Srgb;
     case TextureFormat::BGRA8Unorm: return vk::FormatB8G8R8A8Unorm;
     case TextureFormat::R32Uint: return vk::FormatR32Uint;
     case TextureFormat::R32Sint: return vk::FormatR32Sint;
@@ -195,6 +196,7 @@ std::size_t texture_pixel_bytes(TextureFormat format) noexcept {
     case TextureFormat::BC3RGBASrgb:
     case TextureFormat::BC5RGUnorm: return 0U;
     case TextureFormat::RGBA8Unorm:
+    case TextureFormat::RGBA8Srgb:
     case TextureFormat::BGRA8Unorm:
     case TextureFormat::R32Uint:
     case TextureFormat::R32Sint:

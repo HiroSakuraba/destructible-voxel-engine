@@ -31,6 +31,9 @@ GpuPolygonMaterialMappingRecord pack_gpu_polygon_material_mapping(
     record.detailRoughnessTexture = texture_index(material.detailRoughness);
     record.baseTexcoord = material.baseColor.texcoord;
     record.normalTexcoord = material.normal.texcoord;
+    record.additionalTexcoords=(material.metallicRoughness.texcoord & 1U) |
+        ((material.emissive.texcoord & 1U)<<1U) | ((material.opacity.texcoord & 1U)<<2U) |
+        ((material.detailNormal.texcoord & 1U)<<3U) | ((material.detailRoughness.texcoord & 1U)<<4U);
     record.heightTexcoord = material.height.texcoord;
     record.detailTexcoord = material.detailBaseColor.texture
         ? material.detailBaseColor.texcoord

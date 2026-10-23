@@ -710,6 +710,7 @@ if(DVE_BUILD_RHI)
         src/render/dashr_live_surface.cpp
         src/render/mesh_heap.cpp
         src/render/polygon_renderer.cpp
+        src/render/texture_mips.cpp
         src/render/cpu_fog.cpp
         src/render/cpu_fog_cache.cpp
         src/render/sprite_renderer.cpp
@@ -2000,7 +2001,7 @@ if(DVE_BUILD_TESTS)
                         VERBATIM)
                     list(APPEND _surface_shader_outputs "${_spv}")
                 endforeach()
-                foreach(_mode IN ITEMS COLOR NORMAL)
+                foreach(_mode IN ITEMS COLOR NORMAL EMISSION CHANNELS)
                     string(TOLOWER "${_mode}" _mode_lower)
                     set(_spv "${_surface_shader_dir}/live_ibl_material_ps_${_mode_lower}.spv")
                     add_custom_command(OUTPUT "${_spv}"

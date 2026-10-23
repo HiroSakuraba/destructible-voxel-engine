@@ -288,7 +288,11 @@ bool MainMaterialDescriptorTable::resolve_binding(
         set_error(error, "main material texture index is out of range"); return false;
     }
     const auto& texture = asset.textures[*binding.texture];
-    return residency_->ensure_image(asset, texture.imageIndex, view, error) &&
+    const bool normal = channel==MainMaterialTextureChannel::Normal || channel==MainMaterialTextureChannel::DetailNormal;
+    const bool color = channel==MainMaterialTextureChannel::BaseColor || channel==MainMaterialTextureChannel::Emissive || channel==MainMaterialTextureChannel::DetailBaseColor;
+    const auto interpretation=normal?MaterialImageInterpretation::Normal:
+        color && binding.colorSpace==PolygonTextureColorSpace::Srgb?MaterialImageInterpretation::SrgbColor:MaterialImageInterpretation::LinearData;
+    return residency_->ensure_image(asset, texture.imageIndex, view, error, interpretation) &&
            residency_->ensure_sampler(asset, texture.samplerIndex, sampler, error);
 }
 

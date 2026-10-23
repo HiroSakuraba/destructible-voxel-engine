@@ -61,14 +61,17 @@ float3 SampleLiveMaterialNormal(Texture2D<float4> image,SamplerState samplerStat
     const float3 sourceN=local?mul(transpose(objectRotation),N):N;
     const float3 weights=MaterialTriplanarWeights(sourceN,m.triplanarBlendSharpness);
     float2 x,y,z;LiveMaterialProjections(m,local?objectPosition:worldPosition,x,y,z);
-    // Reorient each perturbation around N. A neutral map (or zero strength) must
-    // preserve N, independently of projection weights and blend sharpness.
-    const float3 nx=ApplyLiveDerivativeNormal(N,worldPosition,x,
-        image.SampleGrad(samplerState,x,ddx(x),ddy(x)).xyz,m.normalScale);
-    const float3 ny=ApplyLiveDerivativeNormal(N,worldPosition,y,
-        image.SampleGrad(samplerState,y,ddx(y),ddy(y)).xyz,m.normalScale);
-    const float3 nz=ApplyLiveDerivativeNormal(N,worldPosition,z,
-        image.SampleGrad(samplerState,z,ddx(z),ddy(z)).xyz,m.normalScale);
-    return normalize(nx*weights.x+ny*weights.y+nz*weights.z);
+    float3 tx=image.SampleGrad(samplerState,x,ddx(x),ddy(x)).xyz*2-1;
+    float3 ty=image.SampleGrad(samplerState,y,ddx(y),ddy(y)).xyz*2-1;
+    float3 tz=image.SampleGrad(samplerState,z,ddx(z),ddy(z)).xyz*2-1;
+    tx.xy*=m.normalScale;ty.xy*=m.normalScale;tz.xy*=m.normalScale;
+    // Whiteout triplanar blend (matches dve::triplanar_whiteout_normal in
+    // include/dve/triplanar_normal.hpp): a neutral (0,0,1) sample reproduces sn exactly.
+    const float3 sn=normalize(sourceN);
+    const float3 wx=float3(abs(tx.z)*sn.x,tx.y+sn.y,tx.x+sn.z);
+    const float3 wy=float3(ty.x+sn.x,abs(ty.z)*sn.y,ty.y+sn.z);
+    const float3 wz=float3(tz.x+sn.x,tz.y+sn.y,abs(tz.z)*sn.z);
+    const float3 normal=normalize(wx*weights.x+wy*weights.y+wz*weights.z);
+    return local?normalize(mul(objectRotation,normal)):normal;
 }
 #endif

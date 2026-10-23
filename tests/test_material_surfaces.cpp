@@ -4,7 +4,10 @@
 #include "dve/dvox.hpp"
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/scene_lighting.hpp"
+#include "dve/render/polygon_renderer.hpp"
+#include <algorithm>
 #include <cmath>
+#include <span>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -87,6 +90,37 @@ void ray_hit_maps(){
     for(auto& v:a.vertices){v.texcoord.x*=100000;v.texcoord.y*=100000;}a.contentHash=polygon_asset_content_hash(a);
     auto after=sample_polygon_hit_material(a,*hit,{}, {0,0,1},mips(a),1,.2F,2);near(length(subtract(before.normal,after.normal)),0,1e-6F,"triplanar normal filtering is independent of unused UVs");
 }
+// Codex 4364355458 (#202): a flat normal map ((0.5, 0.5, 1) texels) must leave the geometric
+// normal unchanged under triplanar mapping, on the ray-hit path and in the reference
+// rasterizer, for normals that blend several projections (sharpness 4 on a tilted normal).
+void neutral_triplanar_normal(){
+    const Float3 tilted=normalize(Float3{.45F,-.55F,.7F});
+    for(const auto mode:{MaterialMappingMode::WorldTriplanar,MaterialMappingMode::ObjectTriplanar}){
+        auto a=textured_plane();a.images[2]={"normal","raw",1,1,{128,128,255,255}};
+        a.materialBindings[0].mapping.mappingMode=mode;a.materialBindings[0].mapping.triplanarBlendSharpness=4;
+        a.materialBindings[0].normalScale=1.5F;
+        for(auto& v:a.vertices){v.normal=tilted;const Float3 t=normalize(subtract(Float3{1,0,0},multiply(tilted,tilted.x)));v.tangent={t.x,t.y,t.z,1};}
+        refresh_editor_polygon(a);a.contentHash=polygon_asset_content_hash(a);
+        auto flat=a;flat.materialBindings[0].normal.texture.reset();flat.contentHash=polygon_asset_content_hash(flat);
+        PolygonBvh bvh;check(bvh.build(a),"neutral fixture BVH");const auto hit=bvh.raycast({.1F,.2F,2},{0,0,-1},5);check(bool(hit),"neutral fixture hit");
+        const auto mapped=sample_polygon_hit_material(a,*hit,{},tilted,mips(a),1,.001F,2);
+        const auto plain=sample_polygon_hit_material(flat,*hit,{},tilted,mips(flat),1,.001F,2);
+        // 8-bit 128 decodes to 0.0039 rather than 0, scaled by normalScale.
+        near(length(subtract(mapped.normal,plain.normal)),0,.012F,"neutral triplanar normal map keeps the hit normal");
+        PolygonCamera camera;camera.position={0,0,3};camera.target={0,0,0};
+        RenderEnvironment e;e.sunDirection={.4F,.5F,1};e.sunIntensity=2;
+        PolygonRenderTarget withMap,without;withMap.resize(48,48);without.resize(48,48);withMap.clear();without.clear();
+        PolygonRenderInstance mi{1,&a,{},{},{1,1,1,1},true},fi{1,&flat,{},{},{1,1,1,1},true};
+        (void)ReferencePolygonRenderer{}.render(std::span(&mi,1),camera,e,withMap,{.preserveExistingDepth=false});
+        (void)ReferencePolygonRenderer{}.render(std::span(&fi,1),camera,e,without,{.preserveExistingDepth=false});
+        float worst=0;unsigned covered=0;
+        for(std::size_t i=0;i<withMap.hdrColor.size();++i){if(withMap.objectId[i]!=1U)continue;++covered;
+            const auto x=withMap.hdrColor[i],y=without.hdrColor[i];
+            worst=(std::max)(worst,(std::max)({std::abs(x.x-y.x)/(std::max)(y.x,.05F),std::abs(x.y-y.y)/(std::max)(y.y,.05F),std::abs(x.z-y.z)/(std::max)(y.z,.05F)}));}
+        check(covered>500U,"neutral fixture covers the target");
+        near(worst,0,.03F,"neutral triplanar normal map matches unmapped shading");
+    }
+}
 void reflected_and_refracted_maps(){
     auto background=textured_plane();
     background.materialBindings[0].normal.texture.reset();
@@ -123,4 +157,4 @@ void assignment(){
     n.material_panel().draft.surfaceDetail.space=SurfaceDetailSpace::Object;check(n.apply_material_panel(),n.material_panel().message);const auto& o=*n.workspace().document().find_object(1);const auto slot=o.voxels->material_at({0,0,0});check(o.voxelMaterials.at(slot).surfaceDetail.pattern==SurfacePattern::Wood,"voxel assignment retains recipe");n.close_material_panel();
 }
 }
-int main(){try{dir=std::filesystem::temp_directory_path()/"dve-material-surfaces";std::filesystem::remove_all(dir);std::filesystem::create_directories(dir);gradients_and_filtering();metric_mapping();persistence();ray_hit_maps();reflected_and_refracted_maps();voxel_uv_assets();assignment();std::filesystem::remove_all(dir);std::cout<<"Surface maps, filtering, persistence and ray-hit checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{dir=std::filesystem::temp_directory_path()/"dve-material-surfaces";std::filesystem::remove_all(dir);std::filesystem::create_directories(dir);gradients_and_filtering();metric_mapping();persistence();ray_hit_maps();neutral_triplanar_normal();reflected_and_refracted_maps();voxel_uv_assets();assignment();std::filesystem::remove_all(dir);std::cout<<"Surface maps, filtering, persistence and ray-hit checks passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

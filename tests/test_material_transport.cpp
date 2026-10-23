@@ -279,6 +279,67 @@ void distant_voxel_surface() {
           "offset ray leaves wall without self occlusion");
 }
 
+// A closed glass mesh whose triangles wind inward (vertex normals still point
+// outward) makes the rasterizer keep the far hemisphere. That fragment's normal
+// must not override the near surface hit by the re-traced camera path; doing so
+// refracted edge rays into a permanent total internal reflection loop (black ring).
+CookedPolygonAsset inward_sphere(float r, VoxelMaterialDefinition material) {
+    CookedPolygonAsset a;
+    a.materials = {material};
+    a.materialBindings.resize(1);
+    const int slices = 48, stacks = 24;
+    for (int j = 0; j <= stacks; ++j)
+        for (int i = 0; i <= slices; ++i) {
+            const float phi = pi * float(j) / float(stacks), th = 2 * pi * float(i) / float(slices);
+            const Float3 n{std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th)};
+            PolygonVertex v;
+            v.position = {n.x * r, n.y * r, n.z * r};
+            v.normal = n;
+            a.vertices.push_back(v);
+        }
+    for (int j = 0; j < stacks; ++j)
+        for (int i = 0; i < slices; ++i) {
+            const auto p = static_cast<unsigned>(j * (slices + 1) + i), q = p + static_cast<unsigned>(slices + 1);
+            for (auto k : {p, q, p + 1, p + 1, q, q + 1})
+                a.indices.push_back(k);
+        }
+    a.submeshes = {{"ball", 0, static_cast<unsigned>(a.indices.size()), 0}};
+    a.bounds = {{-r, -r, -r}, {r, r, r}};
+    return a;
+}
+void raster_sphere_edge_not_black() {
+    auto ball = inward_sphere(1, glass());
+    VoxelMaterialDefinition light;
+    light.shadingModel = MaterialShadingModel::Emissive;
+    light.baseColor = {0, 0, 0, 1};
+    light.emissive = {1, 1, 1};
+    auto background = slab(3, 3.1F, light);
+    std::array<PolygonRenderInstance, 2> instances{{{1, &ball}, {2, &background}}};
+    auto e = environment();
+    e.pathTraceBounces = 0;
+    e.globalIlluminationMode = GlobalIlluminationMode::Off;
+    e.pathTraceSamples = 4;
+    PolygonCamera camera;
+    camera.position = {0, 0, -4};
+    camera.target = {0, 0, 0};
+    camera.nearPlane = .01F;
+    camera.verticalFieldOfViewRadians = .6F;
+    PolygonRenderTarget target;
+    target.resize(32, 32);
+    (void)render_hybrid_reference({}, instances, camera, e, target, {}, 1, 1);
+    unsigned glassPixels = 0, black = 0;
+    for (std::size_t k = 0; k < target.hdrColor.size(); ++k)
+        if (target.objectId[k] == 1) {
+            ++glassPixels;
+            black += target.hdrColor[k].x < .05F ? 1U : 0U;
+        }
+    check(glassPixels > 50, "inward wound sphere is rasterized");
+    if (black > glassPixels / 20) {
+        std::cerr << black << " of " << glassPixels << " glass pixels black\n";
+        throw std::runtime_error("glass sphere edge does not trap camera paths in TIR");
+    }
+}
+
 } // namespace
 int main() {
     try {
@@ -290,6 +351,7 @@ int main() {
         nested_media();
         transmitted_shadow();
         raster_glass_without_gi();
+        raster_sphere_edge_not_black();
         std::cout << "material transport tests passed\n";
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

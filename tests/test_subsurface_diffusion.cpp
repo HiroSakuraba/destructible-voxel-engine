@@ -197,7 +197,7 @@ void test_shadow_edge() {
     for(std::size_t i=0;i<soft.hdrColor.size();++i)
         detailDifference=std::max(detailDifference,std::abs(soft.hdrColor[i].x-detailedSoft.hdrColor[i].x));
     check(detailDifference<1e-6F,"neutral surface detail preserves diffused subsurface shadows");
-    materials[1].surfaceDetail.pattern=SurfacePattern::None;
+    materials[1].surfaceDetail.pattern=SurfacePattern::NoPattern;
     const Basis b = basis_of(camera, w, h);
     // Average each pixel column (one world x).
     std::printf("\nshadow edge on marble (x in scatter distances): sharp / diffused / exact Burley\n");

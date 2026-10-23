@@ -464,7 +464,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
         }
         // CPU metric recipes accept rigid poses. Reject unapplied instance scale/shear
         // rather than silently changing the physical grain/bump size on this GPU path.
-        if(std::any_of(draw.asset->materials.begin(),draw.asset->materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::None;})){
+        if(std::any_of(draw.asset->materials.begin(),draw.asset->materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::NoPattern;})){
             const auto& m=draw.objectToWorld;
             const Float3 x{m[0],m[1],m[2]},y{m[4],m[5],m[6]},z{m[8],m[9],m[10]};
             const float determinant=x.x*(y.y*z.z-y.z*z.y)-y.x*(x.y*z.z-x.z*z.y)+z.x*(x.y*y.z-x.z*y.y);

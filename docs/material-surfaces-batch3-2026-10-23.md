@@ -84,7 +84,7 @@ with this batch.
 Batch 2's latest fixes are included in the base: DVOX refuses UV-space recipes, and procedural
 bump preserves subsurface-diffused sunlight. Batch 3 extends coverage to UV1 cooker rejection
 and a neutral recipe on a diffused shadow edge. The base also retains its MSVC min/max fixes
-and DASHR test-runner link fix. The standalone DASHR runner also links the new GPU recipe
+and DASHR test-runner link fix. The subsequent X11-safe `NoPattern` enum rename is retained. The standalone DASHR runner also links the new GPU recipe
 packer in this batch. Prior merged reviews informed raw normal decoding (#191),
 position-derived triplanar sampling (#192), and keeping instance tint out of emission (#196).
 

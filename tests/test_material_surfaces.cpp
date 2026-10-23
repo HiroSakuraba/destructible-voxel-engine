@@ -53,7 +53,7 @@ void metric_mapping(){
 }
 void persistence(){
     auto catalog=MaterialPresetCatalog::starter();std::string error;
-    for(const auto& a:catalog.entries())if(a.defaults.surfaceDetail.pattern!=SurfacePattern::None){
+    for(const auto& a:catalog.entries())if(a.defaults.surfaceDetail.pattern!=SurfacePattern::NoPattern){
         auto m=instantiate_material_preset(a,{});const auto hash=material_surface_detail_hash(m.surfaceDetail);
         check(write_material_preset(dir/"detail.dvepreset",a,&error),error);const auto preset=read_material_preset(dir/"detail.dvepreset",&error);check(preset&&material_surface_detail_hash(preset->defaults.surfaceDetail)==hash,"preset retains all procedural settings");
         auto mesh=make_editor_polygon_cube(1);mesh.materials[0]=m;mesh.contentHash=polygon_asset_content_hash(mesh);check(write_dmesh(dir/"detail.dmesh",mesh,&error),error);auto read=read_dmesh(dir/"detail.dmesh");check(bool(read),read.error);check(material_surface_detail_hash(read.asset.materials[0].surfaceDetail)==hash,"DMESH retains detail");

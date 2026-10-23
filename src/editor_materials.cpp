@@ -221,7 +221,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
         const bool normalMaps = std::any_of(entries_.begin(), entries_.end(),
                                             [](const auto& e) { return material_has_normal_map(e.second.definition); });
         const bool origins = std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return !e.second.definition.preset.id.empty();});
-        const bool details=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return e.second.definition.surfaceDetail.pattern!=SurfacePattern::None;});
+        const bool details=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return e.second.definition.surfaceDetail.pattern!=SurfacePattern::NoPattern;});
         output << "DVE_EDITOR_MATERIALS " << (details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;

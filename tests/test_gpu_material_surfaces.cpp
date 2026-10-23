@@ -59,7 +59,7 @@ void live_pixels(VulkanDevice& d,const std::filesystem::path& root,const std::fi
         code.materialFragment=load(root/(pass==1?"live_ibl_material_ps_normal.spv":"live_ibl_material_ps.spv"));
         check(create_live_environment_renderer(d,lighting,atlas,code,256,TextureFormat::RGBA8Unorm,renderer,&error),"Switch live pipeline");}
 
-    for(const auto& preset:catalog.entries())if(preset.defaults.surfaceDetail.pattern!=SurfacePattern::None){
+    for(const auto& preset:catalog.entries())if(preset.defaults.surfaceDetail.pattern!=SurfacePattern::NoPattern){
       for(unsigned variant=0;variant<(pass==2?1U:5U);++variant){auto material=preset.defaults;material.surfaceDetail.space=SurfaceDetailSpace(variant<4?variant:0);if(variant==4){material.surfaceDetail.periodMeters=.0001F;material.surfaceDetail.bumpHeightMeters=(std::min)(material.surfaceDetail.bumpHeightMeters,.000025F);}
         auto asset=panel(material);MeshRhiMirror mirror(d);check(mirror.upload(asset,&error),"Mesh upload");LivePolygonDraw draw{&mirror,&asset,1};RigidTransform pose;if(variant==1){pose.position={.013F,.021F,0};pose.rotation=quaternion_from_axis_angle({0,0,1},.4F);draw.objectToWorld=rigid_matrix(pose);}
         // Cancel the object pose in the camera so the same pixels sample the same local positions.

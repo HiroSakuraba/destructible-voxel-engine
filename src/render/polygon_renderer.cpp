@@ -818,7 +818,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             const float units=options.metersPerUnit>0&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
             normal=normalize(transform_vector(tri.transform,voxel_normal_map_normal(effective,multiply(objectPosition,units),inverse_transform_vector(tri.transform,normal))));
         }
-        if(effective.surfaceDetail.pattern!=SurfacePattern::None){
+        if(effective.surfaceDetail.pattern!=SurfacePattern::NoPattern){
             const float units=resolve_meters_per_voxel(options.metersPerUnit);
             float footprint=(std::max)(length(textureLod.worldDx),length(textureLod.worldDy))*units;
             if(effective.surfaceDetail.space==SurfaceDetailSpace::UV0||effective.surfaceDetail.space==SurfaceDetailSpace::UV1){

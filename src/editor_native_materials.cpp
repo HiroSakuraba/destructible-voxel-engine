@@ -2,6 +2,8 @@
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_polygon.hpp"
 #include "dve/editor_subdivision.hpp"
+#include "dve/editor_voxel_selection.hpp"
+#include "dve/editor_runtime_settings.hpp"
 #include "dve/render/layered_surface.hpp"
 #include "editor_native_long_job.hpp"
 #include <chrono>
@@ -74,6 +76,29 @@ public:
     }
 };
 #if defined(DVE_EDITOR_MATERIAL_PREVIEW_RENDERER)
+// Geometry and rig capture happen on the UI thread; workers own immutable copies.
+bool capture_bake_scene(const EditorDocument& document,const EditorMaterialLibrary& materials,EditorObjectId target,
+    render::MaterialBakeScene& scene,std::string& error){
+    std::uint64_t bytes=0,triangles=0;
+    for(const auto& [id,o]:document.objects()){
+        if(id==target||!o.flags.visible)continue;
+        const auto* mirror=find_component_by_type(std::span<const Component>(o.components),kLiveMirrorComponent);
+        if(mirror&&mirror->enabled){error="Apply neighbouring Live Mirror before capturing lighting";return false;}
+        const CookedPolygonAsset* mesh=o.materialBake&&!o.materialBake->showingSource?&o.materialBake->source:editor_surface_mesh(o);std::optional<EditorObject> converted;
+        if(!mesh&&o.voxels&&o.voxels->occupied_voxel_count()>0){auto result=voxels_to_polygon(o,id,materials);if(!result.object){error=result.error;return false;}converted=std::move(result.object);mesh=converted->polygon?&*converted->polygon:nullptr;}
+        if(!mesh){if(o.text3d||o.gaborVolume){error="Convert visible text/volume geometry to polygons before scene baking";return false;}continue;}
+        triangles+=mesh->indices.size()/3;bytes+=mesh->vertices.size()*sizeof(PolygonVertex)+mesh->indices.size()*4;for(const auto& image:mesh->images)bytes+=image.rgba8.size()*8ULL;
+        if(scene.size()>=4096||triangles>250000||bytes>256ULL*1024*1024){error="Neighbour scene capture exceeds 250,000 triangles or 256 MiB";return false;}
+        const auto scale=converted?converted->voxelScale:o.voxelScale;
+        if(scale.x<=0||scale.y<=0||scale.z<=0){error="Scene bake requires positive object scales";return false;}
+        scene.push_back({render::material_bake_scaled_mesh(*mesh,scale),document.world_transform(id).value_or(o.transform)});
+    }return true;
+}
+RenderEnvironment capture_bake_lights(EditorWorkspace& workspace,unsigned bounces){
+    auto e=render_environment_settings(workspace.settings());e.pathTraceBounces=bounces;e.pathTraceSamples=1;e.localLightSamples=(std::min)(16U,e.localLightSamples);e.lightingTimeSeconds=0;
+    for(const auto& [id,o]:workspace.document().objects())if(o.flags.visible)for(const auto& c:o.components)if(c.enabled&&c.type==kSceneLightComponent){if(auto light=scene_light_from_component(c,workspace.document().world_transform(id).value_or(o.transform)))e.lights.push_back(*light);else e.sunIntensity=std::numeric_limits<float>::quiet_NaN();}
+    return e;
+}
 std::optional<ModelingTopology> bake_topology(const CookedPolygonAsset& source,const CookedPolygonAsset& derived,
     const std::optional<ModelingTopology>& original,ModelingId floor,std::string* error){
     if(!original)return {};
@@ -83,7 +108,8 @@ std::optional<ModelingTopology> bake_topology(const CookedPolygonAsset& source,c
         if(topology.nextId==(std::numeric_limits<ModelingId>::max)()){if(error)*error="Modeling identity space exhausted";return {};}
         topology.vertices[destination]=original->vertices[source.indices[corner]];topology.attributes[destination]=topology.nextId++;
     }
-    if(!validate_modeling_topology(derived,nullptr,topology,error))return {};return topology;
+    if(!validate_modeling_topology(derived,nullptr,topology,error))return {};
+    return topology;
 }
 #endif
 std::filesystem::path preference_path(const std::filesystem::path& settings){return settings.empty()?std::filesystem::path{}:std::filesystem::path(settings.string()+".material-browser");}
@@ -149,7 +175,7 @@ void NativeEditorController::material_panel_preview(){
     if(materialPanel_.inspection){for(auto id:workspace_.selected_objects())if(const auto* object=workspace_.document().find_object(id);object&&object->polygon&&object->materialBake){
         const auto* mirror=find_component_by_type(std::span<const Component>(object->components),kLiveMirrorComponent);
         if(object->subdivision||object->is_nurbs()||(mirror&&mirror->enabled)){materialPanel_.preview->cancel();materialPanel_.message="Apply modifiers before comparing the baked surface";return;}
-        const auto& recipe=*object->materialBake;auto settings=recipe.settings;settings.pose=workspace_.document().world_transform(id).value_or(object->transform);
+        const auto& recipe=*object->materialBake;auto settings=recipe.settings;settings.lightingRange=recipe.bakedSettings.lightingRange;settings.pose=workspace_.document().world_transform(id).value_or(object->transform);settings.scale=object->voxelScale;
         const auto& source=recipe.showingSource?*object->polygon:recipe.source;const auto& baked=recipe.showingSource?recipe.baked:*object->polygon;
         materialPanel_.preview->request_inspection(source,baked,settings,materialPanel_.inspectionChannel,materialPanel_.inspectionView);return;
     }}
@@ -161,7 +187,7 @@ void NativeEditorController::material_panel_tick(){
     const auto now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if(now>=p.nextBakeStatusTime){p.nextBakeStatusTime=now+.5;bool found=false;
         if(workspace_.selected_objects().size()==1)for(auto id:workspace_.selected_objects())if(const auto* o=workspace_.document().find_object(id);o&&o->materialBake){
-            found=true;p.bake=o->materialBake->settings;const auto status=material_bake_status(*o,workspace_.document().world_transform(id).value_or(o->transform));p.bakeStatus=status.reason;
+            found=true;p.bake=o->materialBake->settings;const auto status=material_bake_status(*o,workspace_.document().world_transform(id).value_or(o->transform));p.bakeStatus=status.reason;if(!status.stale&&(o->materialBake->settings.maps&96U))p.bakeStatus+=" (click to check scene)";
             if(p.bakeStatusObject!=id){p.bake=o->materialBake->settings;p.bakeStatusObject=id;p.slot=o->materialBake->showingSource?p.bake.materialIndex:unsigned(o->materialBake->baked.materials.size()-1);}
             if(p.inspection&&p.inspectionKey!=status.key){p.inspectionKey=status.key;material_panel_preview();}
         }
@@ -397,6 +423,16 @@ std::vector<std::pair<std::string,std::string>> NativeEditorController::material
     const auto& p=materialPanel_;auto bake=p.bake;
     for(auto id:workspace_.selected_objects())if(const auto* o=workspace_.document().find_object(id);o&&o->materialBake){bake=o->materialBake->settings;break;}
     std::vector<std::pair<std::string,std::string>> rows{
+        {"bakeAtlas",bake.generateAtlas?"Bake UVs: generate separate UV1 atlas":"Bake UVs: use existing charts"},
+        {"bakeSlots",bake.allAssignedSlots?"Bake slots: all assigned":"Bake slots: current / saved subset"},
+        {"bakeDensity","Minimum texels/m: "+value_text(bake.texelsPerMeter)+" (0 = fit size)"},
+        {"bakeAo",(bake.maps&32U)?"AO: on (separate visibility map)":"AO: off"},
+        {"bakeLighting",(bake.maps&64U)?"Lighting: on (separate RGBM map)":"Lighting: off"},
+        {"bakeRays","AO / light samples: "+std::to_string(bake.raySamples)},
+        {"bakeAoDistance","AO distance: "+value_text(bake.aoDistanceMeters)+" m"},
+        {"bakeBounces","Lighting bounces: "+std::to_string(bake.lighting.pathTraceBounces)},
+        {"bakeRange","Lighting RGBM range: "+value_text(bake.lightingRange)},
+        {"bakeQueueReport","Queue report: "+std::to_string(p.bakeQueueReport.size())+" objects"},
         {"bakeSlot","Bake source slot: "+std::to_string(bake.materialIndex)},
         {"bakeUv","Bake target: UV"+std::to_string(bake.targetUv)},
         {"bakeResolution","Bake size: "+std::to_string(bake.resolution)},
@@ -448,18 +484,37 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
     auto& p=materialPanel_;auto& document=workspace_.document();
     auto fail=[&](std::string message){p.message=std::move(message);return false;};
     if(playSession_.active()||longJob_!=nullptr)return fail("Finish simulation/background edits first");
-    if(action=="bakeStatus"){p.message=p.bakeStatus;return true;}
+    if(action=="bakeStatus"){
+#if defined(DVE_EDITOR_MATERIAL_PREVIEW_RENDERER)
+        if(workspace_.selected_objects().size()==1){const auto id=*workspace_.selected_objects().begin();const auto* o=document.find_object(id);if(o&&o->materialBake&&(o->materialBake->settings.maps&96U)){
+            render::MaterialBakeScene scene;std::string error;auto e=capture_bake_lights(workspace_,o->materialBake->settings.lighting.pathTraceBounces);
+            if(!capture_bake_scene(document,materials_,id,scene,error))p.bakeStatus=error;
+            else p.bakeStatus=material_bake_status(*o,document.world_transform(id).value_or(o->transform),&scene,(o->materialBake->settings.maps&64U)?&e:nullptr).reason;
+        }}
+#endif
+        p.message=p.bakeStatus;return true;
+    }
     if(action=="bakeSource"||action=="bakeResult")return material_panel_bake_source(action=="bakeSource");
     if(action=="bakeInspect"){p.inspection=!p.inspection;material_panel_preview();return true;}
-    if(action=="inspectChannel"){p.inspection=true;p.inspectionChannel=MaterialInspectionChannel((unsigned(p.inspectionChannel)+1)%8);material_panel_preview();return true;}
+    if(action=="inspectChannel"){p.inspection=true;p.inspectionChannel=MaterialInspectionChannel((unsigned(p.inspectionChannel)+1)%10);material_panel_preview();return true;}
     if(action=="inspectView"){p.inspection=true;p.inspectionView=MaterialInspectionView((unsigned(p.inspectionView)+1)%3);material_panel_preview();return true;}
+    if(action=="bakeQueueReport"){p.message.clear();for(const auto& line:p.bakeQueueReport)p.message+=line+"; ";return true;}
     if(action=="bakeRebake")return material_panel_bake(true);
-    if(action=="bakeSlot"||action=="bakeUv"||action=="bakeResolution"||action=="bakeSamples"||action=="bakePadding"||action=="bakeOpacity"){
+    if(action=="bakeAtlas"||action=="bakeSlots"||action=="bakeDensity"||action=="bakeAo"||action=="bakeLighting"||action=="bakeRays"||action=="bakeAoDistance"||action=="bakeBounces"||action=="bakeRange"||action=="bakeSlot"||action=="bakeUv"||action=="bakeResolution"||action=="bakeSamples"||action=="bakePadding"||action=="bakeOpacity"){
         const EditorObject* target=nullptr;if(workspace_.selected_objects().size()==1)target=document.find_object(*workspace_.selected_objects().begin());
         if(target&&(target->flags.locked||!target->flags.visible||is_isolated_out(target->id)))return fail("Unlock and show the bake target before editing its recipe");
         if(target&&target->materialBake)p.bake=target->materialBake->settings;
         if(action=="bakeSlot"){const auto* mesh=target&&target->materialBake?&(target->materialBake->showingSource?*target->polygon:target->materialBake->source):target&&target->polygon?&*target->polygon:nullptr;if(!mesh)return fail("Select a polygon bake source");p.bake.materialIndex=(p.bake.materialIndex+1)%unsigned(mesh->materials.size());if(!target->materialBake||target->materialBake->showingSource)p.slot=p.bake.materialIndex;}
-        if(action=="bakeUv")p.bake.targetUv=1-p.bake.targetUv;
+        if(action=="bakeUv"){p.bake.targetUv=1-p.bake.targetUv;p.bake.generateAtlas=false;p.bake.texelsPerMeter=0;}
+        if(action=="bakeAtlas"){p.bake.generateAtlas=!p.bake.generateAtlas;if(p.bake.generateAtlas)p.bake.targetUv=1;else p.bake.texelsPerMeter=0;}
+        if(action=="bakeSlots"){p.bake.allAssignedSlots=!p.bake.allAssignedSlots;p.bake.materialSlots.clear();}
+        if(action=="bakeDensity"){p.bake.generateAtlas=true;p.bake.targetUv=1;p.bake.texelsPerMeter=p.bake.texelsPerMeter==0?64:p.bake.texelsPerMeter>=512?0:p.bake.texelsPerMeter*2;}
+        if(action=="bakeAo")p.bake.maps^=32U;
+        if(action=="bakeLighting")p.bake.maps^=64U;
+        if(action=="bakeRays")p.bake.raySamples=p.bake.raySamples>=64?4:p.bake.raySamples*2;
+        if(action=="bakeAoDistance")p.bake.aoDistanceMeters=p.bake.aoDistanceMeters>=8?.25F:p.bake.aoDistanceMeters*2;
+        if(action=="bakeBounces")p.bake.lighting.pathTraceBounces=(p.bake.lighting.pathTraceBounces+1)%5;
+        if(action=="bakeRange")p.bake.lightingRange=p.bake.lightingRange>=256?4:p.bake.lightingRange*2;
         if(action=="bakeResolution")p.bake.resolution=p.bake.resolution>=2048?256:p.bake.resolution*2;
         if(action=="bakeSamples")p.bake.samplesPerAxis=p.bake.samplesPerAxis%4+1;
         if(action=="bakePadding")p.bake.paddingPixels=p.bake.paddingPixels>=32?2:p.bake.paddingPixels*2;
@@ -474,12 +529,12 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
         const auto targets=workspace_.selected_objects();if(targets.size()!=1)return fail("Select one static polygon object to bake");
         const auto* o=document.find_object(*targets.begin());if(!o||!o->polygon||o->subdivision||o->is_nurbs())return fail("Bake requires an evaluated static polygon mesh; apply subdivision first");
         if(const auto* mirror=find_component_by_type(std::span<const Component>(o->components),kLiveMirrorComponent);mirror&&mirror->enabled)return fail("Apply Live Mirror before baking the visible surface");
-        auto settings=o->materialBake?o->materialBake->settings:p.bake;if(!o->materialBake)settings.materialIndex=p.slot;settings.pose=document.world_transform(o->id).value_or(o->transform);
+        auto settings=o->materialBake?o->materialBake->settings:p.bake;if(!o->materialBake)settings.materialIndex=p.slot;settings.pose=document.world_transform(o->id).value_or(o->transform);settings.scale=o->voxelScale;
         auto source=std::make_shared<CookedPolygonAsset>(o->materialBake&&!o->materialBake->showingSource?o->materialBake->source:*o->polygon);auto validation=std::make_shared<render::MaterialBakeValidation>();
         p.message="Validating bake target; Esc cancels";
         return start_long_job(LongJobKind::BakeMaterial,"Validate material bake",longJobThreshold_+1,
             [source,settings,validation](LongJob& job){*validation=render::validate_material_bake(*source,settings,{&job.cancel,{}});},
-            [this,validation](LongJob&){materialPanel_.message=validation->valid?"Bake preflight passed; raster/gutter checks run during baking. Budget estimate: "+std::to_string(validation->estimatedBytes/1048576)+" MiB":validation->error;set_status(materialPanel_.message,!validation->valid);return validation->valid;});
+            [this,validation](LongJob&){materialPanel_.message=validation->valid?"Bake preflight passed; raster/gutter checks run during baking. Budget estimate: "+std::to_string(validation->estimatedBytes/1048576)+" MiB; size "+std::to_string(validation->resolution)+"; atlas use "+value_text(validation->utilization*100)+"%; min texels/m "+value_text(validation->minimumTexelsPerMeter)+(validation->warnings.empty()?"":"; "+validation->warnings.front()):validation->error;set_status(materialPanel_.message,!validation->valid);return validation->valid;});
 #else
         return fail("Texture baking requires a renderer-enabled editor build");
 #endif
@@ -576,67 +631,98 @@ bool NativeEditorController::material_panel_bake_source(bool showSource){
     recipe.showingSource=showSource;auto mesh=showSource?recipe.source:recipe.baked;auto topology=showSource?recipe.sourceTopology:recipe.bakedTopology;
     const auto slot=showSource?recipe.settings.materialIndex:unsigned(recipe.baked.materials.size()-1);
     auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<MaterialBakeCommand>(*object,std::move(recipe),showSource?"Restore editable bake source":"Show baked material",std::move(mesh),std::move(topology)));
-    if(!result.success)return fail(result.message);materialPanel_.slot=slot;materialPanel_.nextBakeStatusTime=0;material_panel_preview();return true;
+    if(!result.success)return fail(result.message);
+    materialPanel_.slot=slot;materialPanel_.nextBakeStatusTime=0;material_panel_preview();return true;
 }
 bool NativeEditorController::material_panel_bake(bool apply,const std::filesystem::path& outputDirectory){
 #if !defined(DVE_EDITOR_MATERIAL_PREVIEW_RENDERER)
-    (void)apply;(void)outputDirectory;
-    materialPanel_.message="Texture baking requires a renderer-enabled editor build";
-    set_status(materialPanel_.message,true);return false;
+    (void)apply;(void)outputDirectory;materialPanel_.message="Texture baking requires a renderer-enabled editor build";set_status(materialPanel_.message,true);return false;
 #else
     auto fail=[&](std::string message){materialPanel_.message=message;set_status(message,true);return false;};
     if(playSession_.active()||longJob_)return fail("Finish simulation/background edits first");
-    const auto targets=workspace_.selected_objects();if(targets.size()!=1)return fail("Select one static polygon object to bake");
-    const auto id=*targets.begin();const auto* object=workspace_.document().find_object(id);
-    if(!object||!object->polygon||object->subdivision||object->is_nurbs())return fail("Bake requires an evaluated static polygon mesh; apply subdivision first");
-    if(object->flags.locked||!object->flags.visible||is_isolated_out(id))return fail("Unlock and show the bake target first");
-    if(const auto* mirror=find_component_by_type(std::span<const Component>(object->components),kLiveMirrorComponent);mirror&&mirror->enabled)return fail("Apply Live Mirror before baking the visible surface");
-    if(apply){const auto* exact=find_component_by_type(std::span<const Component>(object->components),"dve.exact_brep");if(exact&&exact->enabled)return fail("Export a new mesh or remove the Exact CAD Source before applying a material bake");}
-    auto settings=object->materialBake?object->materialBake->settings:materialPanel_.bake;if(!object->materialBake)settings.materialIndex=materialPanel_.slot;
-    settings.pose=workspace_.document().world_transform(id).value_or(object->transform);
-    // Full UV preflight stays on the worker. The scene snapshot is immutable there.
-    auto source=std::make_shared<CookedPolygonAsset>(object->materialBake&&!object->materialBake->showingSource?object->materialBake->source:*object->polygon);
-    const auto workingTopology=object->materialBake&&!object->materialBake->showingSource?object->materialBake->sourceTopology:object->modelingTopology;
-    source->objectId=id;source->contentHash=polygon_asset_content_hash(*source);
-    const auto targetHash=polygon_asset_content_hash(*object->polygon);
-    auto result=std::make_shared<render::MaterialTextureBakeResult>();
-    auto derived=std::make_shared<std::optional<CookedPolygonAsset>>();
-    std::filesystem::path directory=outputDirectory;
-    if(directory.empty()){
-        if(projectRoot_.empty())return fail("Open a project before exporting a bake bundle");
-        const auto stamp=std::chrono::system_clock::now().time_since_epoch().count();
-        directory=projectRoot_/"Materials"/"Bakes"/("object-"+std::to_string(id)+"-slot-"+std::to_string(settings.materialIndex)+"-"+std::to_string(stamp));
+    const auto targets=workspace_.selected_objects();if(targets.empty()||targets.size()>64)return fail("Select 1..64 static polygon bake objects");
+    if(outputDirectory.empty()&&projectRoot_.empty())return fail("Open a project before exporting bake bundles");
+    struct Item {
+        EditorObjectId id{};render::MaterialTextureBakeSettings settings;CookedPolygonAsset source;
+        std::optional<ModelingTopology> topology;render::MaterialBakeScene scene;
+        std::uint64_t targetHash{};std::filesystem::path directory;std::string error;
+        render::MaterialTextureBakeResult result;std::optional<CookedPolygonAsset> derived;
+    };
+    auto items=std::make_shared<std::vector<Item>>();items->reserve(targets.size());
+    const auto stamp=std::chrono::system_clock::now().time_since_epoch().count();
+    std::filesystem::path root=outputDirectory.empty()?projectRoot_/"Materials"/"Bakes"/("queue-"+std::to_string(stamp)):outputDirectory;
+    std::uint64_t snapshotBytes=0;
+    for(auto id:targets){
+        Item item;item.id=id;const auto* object=workspace_.document().find_object(id);
+        if(!object||!object->polygon||object->subdivision||object->is_nurbs())item.error="Apply modifiers to a static polygon target first";
+        else if(object->flags.locked||!object->flags.visible||is_isolated_out(id))item.error="Unlock and show the target first";
+        else if(const auto* mirror=find_component_by_type(std::span<const Component>(object->components),kLiveMirrorComponent);mirror&&mirror->enabled)item.error="Apply Live Mirror first";
+        else if(const auto* exact=find_component_by_type(std::span<const Component>(object->components),"dve.exact_brep");apply&&exact&&exact->enabled)item.error="Export a new mesh or remove the Exact CAD Source before applying";
+        if(item.error.empty()){
+            item.settings=object->materialBake?object->materialBake->settings:materialPanel_.bake;if(!object->materialBake)item.settings.materialIndex=materialPanel_.slot;
+            auto& settings=item.settings;settings.pose=workspace_.document().world_transform(id).value_or(object->transform);settings.scale=object->voxelScale;
+            if((settings.maps&64U)!=0)settings.lighting=capture_bake_lights(workspace_,settings.lighting.pathTraceBounces);
+            if(!render::valid_material_bake_settings(settings))item.error="Invalid bake settings or unsupported lighting sample/bounce limits";
+            const auto& source=object->materialBake&&!object->materialBake->showingSource?object->materialBake->source:*object->polygon;
+            snapshotBytes+=source.vertices.size()*sizeof(PolygonVertex)+source.indices.size()*4;for(const auto& image:source.images)snapshotBytes+=image.rgba8.size()*8ULL;
+            if(snapshotBytes>256ULL*1024*1024)return fail("Selected source snapshots exceed 256 MiB; split the queue");
+            item.source=source;item.source.objectId=id;item.source.contentHash=polygon_asset_content_hash(item.source);item.targetHash=polygon_asset_content_hash(*object->polygon);
+            item.topology=object->materialBake&&!object->materialBake->showingSource?object->materialBake->sourceTopology:object->modelingTopology;
+            if((settings.maps&96U)&&item.error.empty())(void)capture_bake_scene(workspace_.document(),materials_,id,item.scene,item.error);
+            // Queued recipes retain their own neighbours; cap combined snapshot ownership too.
+            for(const auto& m:item.scene){snapshotBytes+=m.asset.vertices.size()*sizeof(PolygonVertex)+m.asset.indices.size()*4;for(const auto& image:m.asset.images)snapshotBytes+=image.rgba8.size()*8ULL;}
+            if(snapshotBytes>512ULL*1024*1024)return fail("Queued source and lighting snapshots exceed 512 MiB; split the selection");
+        }
+        item.directory=targets.size()==1?root:root/("object-"+std::to_string(id));items->push_back(std::move(item));
     }
-    materialPanel_.message="Baking material; Esc cancels. Output: "+directory.string();
-    return start_long_job(LongJobKind::BakeMaterial,"Bake material textures",longJobThreshold_+1,
-        [source,result,derived,settings,directory,apply](LongJob& job){
-            render::MaterialBakeControl control{&job.cancel,[&](float value,std::string_view phase){job.report(value*.9F,std::string(phase));}};
-            *result=render::bake_material_textures(*source,settings,control);
-            if(!result->success){if(!job.cancelled())job.error=result->error;return;}
-            if(apply||(settings.maps&render::kMaterialBakeDefaultMaps)==render::kMaterialBakeDefaultMaps){*derived=render::make_baked_material_asset(*source,*result,&job.error);if(!*derived)return;}
-            job.report(.95F,"Writing new source, maps and provenance bundle");
-            // Export is independent of scene application. A stale scene never receives the copy.
-            if(!render::write_material_bake_bundle(directory,*source,*result,control,&job.error))return;
-            job.report(1,"Bundle exported");
-        },
-        [this,id,apply,source,derived,directory,workingTopology,targetHash,settings,result](LongJob&){
-            const auto* target=workspace_.document().find_object(id);
-            if(!target||!target->polygon||polygon_asset_content_hash(*target->polygon)!=targetHash)return false;
-            if(*derived&&(apply||!target->materialBake)){
-                std::string error;auto topology=bake_topology(*source,**derived,workingTopology,target->modelingNextId,&error);
-                if(workingTopology&&!topology){materialPanel_.message=error;set_status(error,true);return false;}
-                MaterialBakeRecipe recipe;recipe.showingSource=!apply;recipe.source=*source;recipe.baked=**derived;recipe.sourceTopology=workingTopology;recipe.bakedTopology=topology;
-                recipe.settings=recipe.bakedSettings=settings;recipe.bakedSourceHash=result->sourceHash;recipe.bakedAssetHash=polygon_asset_content_hash(**derived);
-                recipe.outputDirectory=directory;const auto relative=directory.lexically_relative(projectRoot_);if(!projectRoot_.empty()&&!relative.empty()&&*relative.begin()!="..")recipe.outputDirectory=relative;
-                auto committed=workspace_.commands().execute(workspace_.document(),std::make_unique<MaterialBakeCommand>(*target,std::move(recipe),apply?"Apply baked material and recipe":"Save material bake recipe",apply?std::optional<CookedPolygonAsset>{std::move(**derived)}:std::nullopt,apply?std::move(topology):target->modelingTopology));
-                if(!committed.success){materialPanel_.message=committed.message;set_status(committed.message,true);return false;}
-                materialPanel_.slot=apply?unsigned(workspace_.document().find_object(id)->polygon->materials.size()-1):settings.materialIndex;
-                materialPanel_.bake=settings;materialPanel_.bakeStatusObject=id;materialPanel_.nextBakeStatusTime=0;materialPanel_.inspectionKey=0;material_panel_preview();
+    if(items->size()==1&&!items->front().error.empty())return fail(items->front().error);
+    materialPanel_.bakeQueueReport.clear();materialPanel_.message="Baking "+std::to_string(items->size())+" objects; Esc cancels. AO/light maps are separate exports.";
+    return start_long_job(LongJobKind::BakeMaterial,"Bake selected materials, AO and lighting",longJobThreshold_+1,
+        [items,apply,snapshotBytes](LongJob& job){
+            std::uint64_t retainedBytes=0;
+            for(std::size_t n=0;n<items->size();++n){auto& item=(*items)[n];if(job.cancelled())return;if(!item.error.empty())continue;
+                render::MaterialBakeControl control{&job.cancel,[&](float value,std::string_view phase){job.report((float(n)+value*.9F)/float(items->size()),"Object "+std::to_string(item.id)+": "+std::string(phase));}};
+                const auto preflight=render::validate_material_bake(item.source,item.settings,control);
+                if(!preflight.valid){item.error=preflight.error;continue;}
+                const std::uint64_t derivedEstimate=std::uint64_t(preflight.resolution)*preflight.resolution*4*(4+bool(item.settings.maps&32U)+bool(item.settings.maps&64U));
+                if(snapshotBytes+retainedBytes+preflight.estimatedBytes+derivedEstimate>512ULL*1024*1024){item.error="Queue snapshots, pending results and current bake exceed 512 MiB; split the queue or reduce size";continue;}
+                item.result=render::bake_material_textures(item.source,item.settings,control,item.scene);
+                if(!item.result.success){item.error=item.result.error;item.result.targetUvs.clear();continue;}item.settings=item.result.settings;
+                if(apply||(item.settings.maps&render::kMaterialBakeDefaultMaps)==render::kMaterialBakeDefaultMaps){item.derived=render::make_baked_material_asset(item.source,item.result,&item.error);if(!item.derived){item.result.images.clear();item.result.targetUvs.clear();continue;}}
+                if(!render::write_material_bake_bundle(item.directory,item.source,item.result,control,&item.error,item.scene)){item.derived.reset();item.result.images.clear();item.result.targetUvs.clear();continue;}
+                item.result.images.clear();item.result.targetUvs.clear();
+                if(item.derived){retainedBytes+=item.derived->vertices.size()*sizeof(PolygonVertex)+item.derived->indices.size()*4;for(const auto& image:item.derived->images)retainedBytes+=image.rgba8.size();}
             }
-            materialPanel_.lastBakeDirectory=directory;
-            const auto* completed=workspace_.document().find_object(id);
-            materialPanel_.message="Bake saved: "+directory.string()+(completed&&completed->materialBake?"; editable source and recipe are saved with the scene":"; map subset exported");
-            set_status(materialPanel_.message);return true;
+            job.report(1,"Queue exports finished");
+        },
+        [this,items,apply](LongJob&){
+            unsigned success=0;materialPanel_.bakeQueueReport.clear();
+            for(auto& item:*items)if(item.error.empty()&&(item.settings.maps&96U)){
+                render::MaterialBakeScene current;std::string error;
+                if(!capture_bake_scene(workspace_.document(),materials_,item.id,current,error)||render::material_bake_scene_hash(current)!=render::material_bake_scene_hash(item.scene))item.error="Scene changed; exported lighting was not applied";
+                if(item.error.empty()&&(item.settings.maps&64U)){auto settings=item.settings;settings.lighting=capture_bake_lights(workspace_,settings.lighting.pathTraceBounces);if(render::encode_material_bake_settings(settings)!=render::encode_material_bake_settings(item.settings))item.error="Light rig changed; exported lighting was not applied";}
+            }
+            for(auto& item:*items){
+                auto error=item.error;const auto* target=workspace_.document().find_object(item.id);
+                if(error.empty()&&(!target||!target->polygon||polygon_asset_content_hash(*target->polygon)!=item.targetHash))error="Target changed; exported bundle was not applied";
+                if(error.empty()&&item.derived&&(apply||!target->materialBake)){
+                    auto topology=bake_topology(item.source,*item.derived,item.topology,target->modelingNextId,&error);
+                    if(item.topology&&!topology){if(error.empty())error="Could not preserve modeling identities";}
+                    if(error.empty()){
+                        MaterialBakeRecipe recipe;recipe.showingSource=!apply;recipe.source=item.source;recipe.baked=*item.derived;recipe.sourceTopology=item.topology;recipe.bakedTopology=topology;
+                        recipe.settings=recipe.bakedSettings=item.settings;recipe.scene=item.scene;recipe.bakedSourceHash=item.result.sourceHash;recipe.bakedAssetHash=polygon_asset_content_hash(*item.derived);
+                        recipe.outputDirectory=item.directory;const auto relative=item.directory.lexically_relative(projectRoot_);if(!projectRoot_.empty()&&!relative.empty()&&*relative.begin()!="..")recipe.outputDirectory=relative;
+                        auto committed=workspace_.commands().execute(workspace_.document(),std::make_unique<MaterialBakeCommand>(*target,std::move(recipe),apply?"Apply baked material and recipe":"Save material bake recipe",apply?std::optional<CookedPolygonAsset>{std::move(*item.derived)}:std::nullopt,apply?std::move(topology):target->modelingTopology));
+                        if(!committed.success)error=committed.message;
+                    }
+                }
+                if(error.empty()){++success;materialPanel_.lastBakeDirectory=item.directory;materialPanel_.bake=item.settings;}
+                materialPanel_.bakeQueueReport.push_back("Object "+std::to_string(item.id)+": "+(error.empty()?"saved "+item.directory.string():error));
+            }
+            if(items->size()==1&&success){auto* target=workspace_.document().find_object(items->front().id);materialPanel_.slot=apply?unsigned(target->polygon->materials.size()-1):items->front().settings.materialIndex;}
+            materialPanel_.nextBakeStatusTime=0;materialPanel_.inspectionKey=0;material_panel_preview();
+            materialPanel_.message="Bake queue: "+std::to_string(success)+" / "+std::to_string(items->size())+" saved; "+(items->size()==1?materialPanel_.bakeQueueReport.front():"open Queue report for object results. One undo step per applied object.");
+            set_status(materialPanel_.message,success!=items->size());return success>0;
         });
 #endif
 }
@@ -676,7 +762,7 @@ const auto support=material_preset_capability(*a,p.backend).support;
     btn(l.apply,p.layerMode?"Undo stack edit (Ctrl+Z)":"Apply Copy / Make Unique");btn(l.editSlot,p.layerMode?"Redo stack edit (Ctrl+Y)":"Apply to Slot (shared faces/cells)");
     auto asset=p.catalog.find(p.draft.preset.id);MaterialPresetAsset requested;if(asset)requested=*asset;if(p.draft.surfaceDetail.pattern!=SurfacePattern::NoPattern)requested.requirements.push_back(MaterialPresetFeature::SurfaceDetail);if(p.draft.transmission>0)requested.requirements.push_back(MaterialPresetFeature::SolidTransmission);
     const auto cap=material_preset_capability(requested,p.backend);const int y=l.panel.y+l.panel.height-118;
-    text({l.preview.x,y,l.loadSlot.x-l.preview.x-12,24},p.inspection?(p.inspectionChannel==MaterialInspectionChannel::UvCoverage?"Cyan: coverage | Gray: padding | Red: overlaps (schematic)":"Fixed lighting/camera | World normals | Linear scalar channels"):(p.layerMode?"Layered Surface | Opaque / masked polygons":std::string(material_preset_support_label(cap.support))+": "+cap.reason));
+    text({l.preview.x,y,l.loadSlot.x-l.preview.x-12,24},p.inspection?(p.inspectionChannel==MaterialInspectionChannel::UvCoverage?"Cyan: coverage | Gray: padding | Red: overlaps (schematic)":(unsigned(p.inspectionChannel)>=8?"UV output map | AO: linear | Lighting: RGBM decoded + display curve":"Fixed lighting/camera | World normals | Linear scalar channels")):(p.layerMode?"Layered Surface | Opaque / masked polygons":std::string(material_preset_support_label(cap.support))+": "+cap.reason));
     painter.text(l.panel.x+12,l.panel.y+l.panel.height-8,elide_text_to_width(painter,p.message.empty()?"Arrows: presets | Ctrl+F: favorite | [ ]: slot | Wheel: list/controls | Enter: Apply Copy":p.message,l.panel.width-24),muted);
 }
 }

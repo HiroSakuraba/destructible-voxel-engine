@@ -9,13 +9,13 @@
 #include <vector>
 namespace dve::editor {
 const char* material_inspection_channel_label(MaterialInspectionChannel c) noexcept {
-    constexpr const char* labels[]{"Beauty","Base color","World normal","Roughness","Metallic","Emission (LDR)","Opacity","UV coverage / padding"};
-    return unsigned(c)<8?labels[unsigned(c)]:"Invalid channel";
+    constexpr const char* labels[]{"Beauty","Base color","World normal","Roughness","Metallic","Emission (LDR)","Opacity","UV coverage / padding","AO output map","Diffuse lighting output map"};
+    return unsigned(c)<10?labels[unsigned(c)]:"Invalid channel";
 }
 MaterialPreviewImage render_material_inspection(const CookedPolygonAsset& source,const CookedPolygonAsset& baked,
     const render::MaterialTextureBakeSettings& settings,MaterialInspectionChannel channel,MaterialInspectionView view,const std::function<bool()>& cancelled){
     MaterialPreviewImage out;out.rgb.resize(out.size*out.size);
-    if(unsigned(channel)>7||unsigned(view)>2){out.error="Invalid inspection mode";return out;}
+    if(unsigned(channel)>9||unsigned(view)>2){out.error="Invalid inspection mode";return out;}
 #if !defined(DVE_EDITOR_MATERIAL_PREVIEW_RENDERER)
     (void)source;(void)baked;(void)settings;(void)cancelled;out.error="Inspection requires a renderer-enabled editor build";return out;
 #else
@@ -25,14 +25,26 @@ MaterialPreviewImage render_material_inspection(const CookedPolygonAsset& source
     if(source.indices.size()>300000||baked.indices.size()>300000){out.error="Inspection exceeds 100,000 triangles";return out;}
     if(!validate_polygon_asset(source)||!validate_polygon_asset(baked)||source.indices.empty()){out.error="Invalid inspection snapshots";return out;}
     auto stopped=[&]{return cancelled&&cancelled();};
+    if(unsigned(channel)>=8){
+        const auto name=channel==MaterialInspectionChannel::AmbientOcclusion?"ambient-occlusion":"diffuse-lighting-rgbm";
+        auto found=std::find_if(baked.images.rbegin(),baked.images.rend(),[&](const PolygonImage& image){return image.name==name;});
+        if(found==baked.images.rend()){out.error="No saved output map; enable this map and rebake";return out;}
+        const auto& image=*found;
+        for(unsigned y=0;y<out.size;++y){if(stopped()){out.error="Inspection cancelled";return out;}for(unsigned x=0;x<out.size;++x){
+            auto& pixel=out.rgb[y*out.size+x];if(view==MaterialInspectionView::Source||(view==MaterialInspectionView::Split&&x<out.size/2)){pixel=((x/8+y/8)%2)?0x293447:0x172133;continue;}
+            const auto at=(std::size_t(y)*image.height/out.size*image.width+std::size_t(x)*image.width/out.size)*4;unsigned rgb=0;
+            for(unsigned c=0;c<3;++c){float value=image.rgba8[at+c]/255.F;if(channel==MaterialInspectionChannel::DiffuseLighting){value*=image.rgba8[at+3]/255.F*settings.lightingRange;value=value/(1+value);value=value<=.0031308F?value*12.92F:1.055F*std::pow(value,1/2.4F)-.055F;}rgb=(rgb<<8)|unsigned(std::lround(std::clamp(value,0.F,1.F)*255));}pixel=rgb;
+            if(view==MaterialInspectionView::Split&&x==out.size/2)pixel=0xffffff;
+        }}return out;
+    }
     const auto center=multiply(add(source.bounds.minimum,source.bounds.maximum),.5F);const float radius=(std::max)(length(subtract(source.bounds.maximum,source.bounds.minimum))*.5F,.001F);
     auto normal=normalize(source.vertices[source.indices[0]].normal);auto axis=std::abs(normal.y)<.9F?Float3{0,1,0}:Float3{0,0,1};
     render::PolygonCamera camera;camera.target=transform_point(settings.pose,center);camera.position=transform_point(settings.pose,add(center,multiply(normal,radius*2.5F)));camera.up=transform_vector(settings.pose,axis);camera.nearPlane=radius*.01F;camera.farPlane=radius*10;
-    auto one=[&](const CookedPolygonAsset& asset,unsigned slot){
+    auto one=[&](const CookedPolygonAsset& asset){
         std::vector<std::uint32_t> rgb(out.size*out.size,0x172133);
         if(channel==MaterialInspectionChannel::UvCoverage){
             std::vector<unsigned> counts(rgb.size());std::vector<unsigned> distance(rgb.size(),~0U),queue;
-            for(const auto& sub:asset.submeshes)if(sub.materialIndex==slot)for(unsigned first=sub.firstIndex;first<sub.firstIndex+sub.indexCount;first+=3){
+            for(const auto& sub:asset.submeshes)if(( &asset==&source?render::material_bake_selects(settings,sub.materialIndex):sub.materialIndex>=source.materials.size()))for(unsigned first=sub.firstIndex;first<sub.firstIndex+sub.indexCount;first+=3){
                 if(stopped())return rgb;
                 std::array<Float2,3> uv;bool finite=true;for(unsigned n=0;n<3;++n){const auto& v=asset.vertices[asset.indices[first+n]];uv[n]=settings.targetUv?v.texcoord1:v.texcoord;finite=finite&&std::isfinite(uv[n].x)&&std::isfinite(uv[n].y);if(!finite)break;uv[n].x=std::clamp(uv[n].x,-1.F,2.F)*float(out.size);uv[n].y=std::clamp(uv[n].y,-1.F,2.F)*float(out.size);}
                 if(!finite)continue; // NaN/Inf UVs would make the float-to-int bounds below undefined
@@ -58,8 +70,8 @@ MaterialPreviewImage render_material_inspection(const CookedPolygonAsset& source
         return rgb;
     };
     if(stopped()){out.error="Inspection cancelled";return out;}
-    auto left=one(view==MaterialInspectionView::Baked?baked:source,view==MaterialInspectionView::Baked?unsigned(baked.materials.size()-1):settings.materialIndex);
-    if(view==MaterialInspectionView::Split){auto right=one(baked,unsigned(baked.materials.size()-1));for(unsigned y=0;y<out.size;++y)for(unsigned x=out.size/2;x<out.size;++x)left[y*out.size+x]=right[y*out.size+x];for(unsigned y=0;y<out.size;++y)left[y*out.size+out.size/2]=0xffffff;}
+    auto left=one(view==MaterialInspectionView::Baked?baked:source);
+    if(view==MaterialInspectionView::Split){auto right=one(baked);for(unsigned y=0;y<out.size;++y)for(unsigned x=out.size/2;x<out.size;++x)left[y*out.size+x]=right[y*out.size+x];for(unsigned y=0;y<out.size;++y)left[y*out.size+out.size/2]=0xffffff;}
     out.rgb=std::move(left);if(stopped())out.error="Inspection cancelled";return out;
 #endif
 }

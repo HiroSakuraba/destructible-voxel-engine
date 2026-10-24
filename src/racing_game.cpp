@@ -50,8 +50,8 @@ bool validate_racing_scene(std::span<const PrototypeObjectView> objects,std::str
   std::string reason;if(!registry.validate(c,&reason))return fail(o.name+": "+reason);
   const auto key=get(c,"key",std::string{});if(key.empty()||key.size()>64||key.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")!=std::string::npos||!keys.insert(key).second)return fail("Missing, invalid or duplicate racing key");
   auto number=[&](const char* n,double lo,double hi){const auto v=get(c,n,std::numeric_limits<double>::quiet_NaN());return std::isfinite(v)&&v>=lo&&v<=hi;};
-  if(c.type==carType){++cars;if(o.marker)return fail("Race car requires visible geometry with collision disabled");if(!number("top_speed",1,100)||!number("acceleration",.1,100)||!number("braking",.1,200)||!number("grip",.1,30)||!number("wheelbase",.5,10)||!number("steer_angle",.05,1)||!number("camera_smoothing",1,30))return fail("Invalid race car tuning");
-   const auto profile=get(c,"handling_profile",std::string{});
+  if(c.type==carType){++cars;if(o.marker)return fail("Race car requires visible geometry with collision disabled");if(!number("top_speed",1,100)||!number("acceleration",.1,100)||!number("braking",.1,200)||!number("grip",.1,30)||!number("wheelbase",.5,10)||!number("steer_angle",.05,1)||!std::isfinite(get(c,"camera_smoothing",8.0))||get(c,"camera_smoothing",8.0)<1||get(c,"camera_smoothing",8.0)>30)return fail("Invalid race car tuning");
+   const auto profile=get(c,"handling_profile",std::string{"street"});
    if(profile!="street"&&profile!="arcade"&&profile!="drift"&&profile!="offroad"&&profile!="track")return fail("Invalid handling profile");}
   if(c.type==rulesType){++rules;if(!o.marker)return fail("Race Rules must be a bodyless marker");const auto laps=get(c,"laps",std::int64_t{0});if(laps<1||laps>100||!number("countdown",0,30)||!number("kill_z",-1000000,1000000))return fail("Invalid race rules");}
   if(c.type==gateType){const auto n=get(c,"order",std::int64_t{-1});if(n<0||n>=128||!gates.insert(n).second||!number("half_width",1,100)||!number("half_height",.5,100))return fail("Duplicate/invalid gate order or size");}

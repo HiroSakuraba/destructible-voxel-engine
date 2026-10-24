@@ -238,6 +238,9 @@ bool NativeEditorController::save_material_panel_preset(){
     if(p.draft.transmission>0&&p.draft.roughness>0)a.requirements.push_back(MaterialPresetFeature::RoughTransmission);
     if(p.draft.surfaceDetail.pattern!=SurfacePattern::NoPattern)a.requirements.push_back(MaterialPresetFeature::SurfaceDetail);
     if(p.draft.clearCoat>0)a.requirements.push_back(MaterialPresetFeature::ClearCoat);
+    if(p.draft.shadingModel==MaterialShadingModel::Subsurface)a.requirements.push_back(MaterialPresetFeature::Subsurface);
+    if(material_has_sheen(p.draft))a.requirements.push_back(MaterialPresetFeature::Sheen);
+    if(material_has_iridescence(p.draft))a.requirements.push_back(MaterialPresetFeature::Iridescence);
     a.dependencies.clear();if(p.draft.normalMap){a.requirements.push_back(MaterialPresetFeature::NormalDetail);a.dependencies={"embedded:normal"};}
     if(p.catalog.find(a.id)){p.message="This draft is already saved as a user preset";return true;}
     const auto base=projectRoot_.empty()?userSettingsPath_.parent_path():projectRoot_;

@@ -35,6 +35,13 @@ constexpr std::string_view kRootMotionSection = "dve.root-motion";
 // v5: optics (transmission, IOR, attenuation) of inline materials that have them. Optional, so
 // v4 documents and materials without optics keep their bytes.
 constexpr std::string_view kMaterialOpticsSection = "dve.material_optics";
+// Sheen (KHR_materials_sheen) of inline materials that have it. An optional section like the
+// normal-map and surface-detail ones: documents without it are unaffected, so the schema
+// version does not move (a reader predating the section refuses saves that carry it, exactly
+// as with those two).
+constexpr std::string_view kMaterialSheenSection = "dve.material_sheen";
+// Iridescence (KHR_materials_iridescence) of inline materials: another optional section.
+constexpr std::string_view kMaterialIridescenceSection = "dve.material_iridescence";
 constexpr std::string_view kMaterialSurfaceDetailSection = "dve.material_surface_detail";
 constexpr std::string_view kMaterialNormalMapSection = "dve.material_normal_maps";
 constexpr std::string_view kReservedPrefix = "dve.";
@@ -244,6 +251,8 @@ std::vector<std::byte> material_bytes(const std::vector<VoxelMaterialDefinition>
         if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)w.u64(material_surface_detail_hash(m.surfaceDetail));
         // Only for the "same as the source" comparison: optics and normal maps count too.
         if (material_has_optics(m)) write_material_optics(w, m);
+        if (material_has_sheen(m)) { w.float3(m.sheenColor); w.f32(m.sheenRoughness); }
+        if (material_has_iridescence(m)) { w.f32(m.iridescence); w.f32(m.iridescenceIor); w.f32(m.iridescenceThicknessNm); }
         if (material_has_normal_map(m)) {
             w.u64(m.normalMap->contentHash); w.f32(m.normalMapTileMeters); w.f32(m.normalMapStrength); w.f32(m.normalMapSharpness);
         }
@@ -1118,6 +1127,44 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
         }
     }
     {
+        // Inline materials with sheen. From-source tables carry theirs in the source asset.
+        std::vector<std::tuple<GameObjectId, std::uint32_t, const VoxelMaterialDefinition*>> sheen;
+        for (const auto& object : world.objects) {
+            if (!inlineMaterials.contains(object.id)) continue;
+            for (std::size_t i = 0; i < object.materials.size(); ++i)
+                if (material_has_sheen(object.materials[i])) {
+                    if (!material_sheen_valid(object.materials[i])) return fail(error, "invalid material sheen"), std::nullopt;
+                    sheen.emplace_back(object.id, static_cast<std::uint32_t>(i), &object.materials[i]);
+                }
+        }
+        if (!sheen.empty()) {
+            Writer w(limits_);
+            w.count(sheen.size(), limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material sheen");
+            for (const auto& [id, index, material] : sheen) { w.u64(id); w.u32(index); w.float3(material->sheenColor); w.f32(material->sheenRoughness); }
+            if (w.failed()) return fail(error, w.failure()), std::nullopt;
+            document.sections.emplace(std::string(kMaterialSheenSection), std::move(w.bytes()));
+        }
+    }
+    {
+        // Inline materials with iridescence. From-source tables carry theirs in the source asset.
+        std::vector<std::tuple<GameObjectId, std::uint32_t, const VoxelMaterialDefinition*>> iridescent;
+        for (const auto& object : world.objects) {
+            if (!inlineMaterials.contains(object.id)) continue;
+            for (std::size_t i = 0; i < object.materials.size(); ++i)
+                if (material_has_iridescence(object.materials[i])) {
+                    if (!material_iridescence_valid(object.materials[i])) return fail(error, "invalid material iridescence"), std::nullopt;
+                    iridescent.emplace_back(object.id, static_cast<std::uint32_t>(i), &object.materials[i]);
+                }
+        }
+        if (!iridescent.empty()) {
+            Writer w(limits_);
+            w.count(iridescent.size(), limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material iridescence");
+            for (const auto& [id, index, material] : iridescent) { w.u64(id); w.u32(index); w.f32(material->iridescence); w.f32(material->iridescenceIor); w.f32(material->iridescenceThicknessNm); }
+            if (w.failed()) return fail(error, w.failure()), std::nullopt;
+            document.sections.emplace(std::string(kMaterialIridescenceSection), std::move(w.bytes()));
+        }
+    }
+    {
         // Inline materials with normal maps: each distinct image once, then the references.
         std::vector<const VoxelNormalMap*> images;
         std::vector<std::tuple<GameObjectId, std::uint32_t, std::uint32_t, const VoxelMaterialDefinition*>> uses;
@@ -1493,6 +1540,50 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (!r.finish()) return corrupt(r);
     }
 
+    if (const auto* bytes = section(kMaterialSheenSection)) {
+        Reader r(*bytes, kMaterialSheenSection, limits_);
+        std::uint32_t count{};
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material sheen")) return corrupt(r);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            GameObjectId id{};
+            std::uint32_t materialIndex{};
+            VoxelMaterialDefinition sheen;
+            if (!(r.u64(id) && r.u32(materialIndex) && r.float3(sheen.sheenColor) && r.f32(sheen.sheenRoughness)))
+                return corrupt(r);
+            const auto found = indexById.find(id);
+            if (found == indexById.end() || materialIndex >= world.objects[found->second].materials.size() ||
+                !material_sheen_valid(sheen))
+                return fail(error, "invalid material sheen entry"), std::nullopt;
+            VoxelMaterialDefinition& material = world.objects[found->second].materials[materialIndex];
+            material.sheenColor = sheen.sheenColor;
+            material.sheenRoughness = sheen.sheenRoughness;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
+
+    if (const auto* bytes = section(kMaterialIridescenceSection)) {
+        Reader r(*bytes, kMaterialIridescenceSection, limits_);
+        std::uint32_t count{};
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material iridescence")) return corrupt(r);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            GameObjectId id{};
+            std::uint32_t materialIndex{};
+            VoxelMaterialDefinition film;
+            if (!(r.u64(id) && r.u32(materialIndex) && r.f32(film.iridescence) && r.f32(film.iridescenceIor) &&
+                  r.f32(film.iridescenceThicknessNm)))
+                return corrupt(r);
+            const auto found = indexById.find(id);
+            if (found == indexById.end() || materialIndex >= world.objects[found->second].materials.size() ||
+                !material_iridescence_valid(film))
+                return fail(error, "invalid material iridescence entry"), std::nullopt;
+            VoxelMaterialDefinition& material = world.objects[found->second].materials[materialIndex];
+            material.iridescence = film.iridescence;
+            material.iridescenceIor = film.iridescenceIor;
+            material.iridescenceThicknessNm = film.iridescenceThicknessNm;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
+
     if (const auto* bytes = section(kMaterialNormalMapSection)) {
         Reader r(*bytes, kMaterialNormalMapSection, limits_);
         std::uint32_t count{};
@@ -1683,7 +1774,8 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
                 name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection &&
-                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialSurfaceDetailSection)
+                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialSurfaceDetailSection &&
+                name != kMaterialSheenSection && name != kMaterialIridescenceSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;
         }

@@ -2578,6 +2578,13 @@ void state_hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& m) 
         state_hash_value(hash, m.transmission); state_hash_value(hash, m.indexOfRefraction);
         state_hash_float3(hash, m.attenuationColor); state_hash_value(hash, m.attenuationDistanceMeters);
     }
+    if (material_has_sheen(m)) {   // likewise
+        state_hash_float3(hash, m.sheenColor); state_hash_value(hash, m.sheenRoughness);
+    }
+    if (material_has_iridescence(m)) {   // likewise
+        state_hash_value(hash, m.iridescence); state_hash_value(hash, m.iridescenceIor);
+        state_hash_value(hash, m.iridescenceThicknessNm);
+    }
     if(material_has_normal_map(m)){state_hash_value(hash,m.normalMap->contentHash);state_hash_value(hash,m.normalMapTileMeters);state_hash_value(hash,m.normalMapStrength);state_hash_value(hash,m.normalMapSharpness);}
     if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)state_hash_value(hash,material_surface_detail_hash(m.surfaceDetail));
     state_hash_value(hash, m.densityKilogramsPerCubicMeter); state_hash_value(hash, m.structuralStrength);

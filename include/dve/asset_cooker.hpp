@@ -192,6 +192,20 @@ struct VoxelMaterialDefinition {
     // Clear-coat is a second dielectric lobe layered above the base BRDF.
     float clearCoat{0.0F};
     float clearCoatRoughness{0.1F};
+    // Sheen (glTF KHR_materials_sheen): a retroreflective velvet layer over the base BRDF —
+    // cloth, fabric, peach fuzz. Black, the default, disables it entirely; formats and hashes
+    // include it only when present (material_has_sheen), so sheen-free materials keep their
+    // old bytes and hashes.
+    Float3 sheenColor{0.0F, 0.0F, 0.0F};
+    float sheenRoughness{0.0F};
+    // Iridescence (glTF KHR_materials_iridescence): a thin film over the base whose
+    // interference colours modulate the specular reflection. The factor 0, the default,
+    // disables it; formats and hashes include it only when present
+    // (material_has_iridescence), so film-free materials keep their old bytes and hashes.
+    // Thickness is the film thickness in nanometres (DVE artistic default: 100).
+    float iridescence{0.0F};
+    float iridescenceIor{1.3F};
+    float iridescenceThicknessNm{100.0F};
     // Two-sided foliage uses a view-facing normal for the front lobe and a back-light
     // transmission term colored independently from the ordinary base color.
     Float3 foliageColor{0.5F, 0.8F, 0.35F};
@@ -232,6 +246,26 @@ struct VoxelMaterialDefinition {
 [[nodiscard]] inline bool material_has_optics(const VoxelMaterialDefinition& m) noexcept {
     return m.transmission != 0.0F || m.indexOfRefraction != 1.5F || m.attenuationColor.x != 1.0F ||
            m.attenuationColor.y != 1.0F || m.attenuationColor.z != 1.0F || m.attenuationDistanceMeters != 0.0F;
+}
+// Sheen is present (any non-black sheen colour). Written and hashed only then.
+[[nodiscard]] inline bool material_has_sheen(const VoxelMaterialDefinition& m) noexcept {
+    return m.sheenColor.x != 0.0F || m.sheenColor.y != 0.0F || m.sheenColor.z != 0.0F;
+}
+// Sheen fields in range: colour components 0..1, roughness 0..1, all finite (NaN fails the range test).
+[[nodiscard]] inline bool material_sheen_valid(const VoxelMaterialDefinition& m) noexcept {
+    const auto in = [](float v, float lo, float hi) { return v >= lo && v <= hi; };
+    return in(m.sheenColor.x, 0.0F, 1.0F) && in(m.sheenColor.y, 0.0F, 1.0F) && in(m.sheenColor.z, 0.0F, 1.0F) &&
+           in(m.sheenRoughness, 0.0F, 1.0F);
+}
+// Iridescence is present (a non-zero factor). Written and hashed only then.
+[[nodiscard]] inline bool material_has_iridescence(const VoxelMaterialDefinition& m) noexcept {
+    return m.iridescence != 0.0F;
+}
+// Iridescence fields in range: factor 0..1, film IOR 1..3, thickness 0..100000 nm, all finite.
+[[nodiscard]] inline bool material_iridescence_valid(const VoxelMaterialDefinition& m) noexcept {
+    const auto in = [](float v, float lo, float hi) { return v >= lo && v <= hi; };
+    return in(m.iridescence, 0.0F, 1.0F) && in(m.iridescenceIor, 1.0F, 3.0F) &&
+           in(m.iridescenceThicknessNm, 0.0F, 100000.0F);
 }
 // A normal map is attached.
 [[nodiscard]] inline bool material_has_normal_map(const VoxelMaterialDefinition& m) noexcept {

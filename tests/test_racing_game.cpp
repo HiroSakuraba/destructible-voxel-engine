@@ -31,7 +31,14 @@ struct Fixture {
  void tap(const char* key){world.set_action_pressed(key,true);tick();world.set_action_pressed(key,false);tick();}
 };
 void gate_rules(){RigidTransform p;check(racing_gate_crossed({0,-2,0},{0,2,0},p,3,2),"forward gate crossing");check(!racing_gate_crossed({0,2,0},{0,-2,0},p,3,2),"reverse gate ignored");check(!racing_gate_crossed({4,-2,0},{4,2,0},p,3,2),"wide shortcut ignored");check(!racing_gate_crossed({0,-2,3},{0,2,3},p,3,2),"over-gate shortcut ignored");
- auto d=make_racing_starter();std::string error;check(validate_editor_prototype(d,&error),error);for(const auto& [id,o]:d.objects()){(void)o;if(auto* c=find_component_by_type(std::span<Component>{d.find_object(id)->components},"dve.prototype.race_gate")){if(std::get<std::int64_t>(c->properties.at("order"))==0)continue;c->properties["order"]=std::int64_t{0};break;}}
+ auto d=make_racing_starter();std::string error;check(validate_editor_prototype(d,&error),error);
+ auto legacy=make_racing_starter();
+ for(const auto& [id,o]:legacy.objects()){(void)o;auto* object=legacy.find_object(id);
+   if(auto* car=find_component_by_type(std::span<Component>{object->components},"dve.prototype.race_car")){
+     car->properties.erase("handling_profile");car->properties.erase("camera_smoothing");break;
+   }
+ }
+ check(validate_editor_prototype(legacy,&error),"pre-profile racing scenes must remain valid: "+error);for(const auto& [id,o]:d.objects()){(void)o;if(auto* c=find_component_by_type(std::span<Component>{d.find_object(id)->components},"dve.prototype.race_gate")){if(std::get<std::int64_t>(c->properties.at("order"))==0)continue;c->properties["order"]=std::int64_t{0};break;}}
  check(!validate_editor_prototype(d,&error),"duplicate gate orders refused");
 }
 void driving(){Fixture a,b;a.world.set_axis("move_y",1);b.world.set_axis("move_y",1);a.tick(120);b.tick(240,1.F/120);

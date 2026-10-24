@@ -737,9 +737,12 @@ bool record_live_environment_frame(rhi::IDevice& device,
             !device.bind_graphics_bind_group(commands, 0U, renderer.frameGroup, error) ||
             !device.bind_graphics_bind_group(commands, 2U, lighting.bindGroup, error)) return fail();
         auto activePipeline=renderer.materialPipeline;
+        const bool cameraInMedium=hasGlass&&renderer.opticalScene&&renderer.opticalScene->data().settings.mediumCount>0;
         for (const auto& item : prepared) {
             if (item.dashr) continue;
-            const bool glass=item.draw->asset->materials[item.submesh->materialIndex].transmission>0;
+            // A camera inside a dielectric must attenuate every primary hit, including opaque
+            // receivers, so all draws then use the optical transport pipeline.
+            const bool glass=item.draw->asset->materials[item.submesh->materialIndex].transmission>0||cameraInMedium;
             const auto pipeline=glass?renderer.clearGlassPipeline:renderer.materialPipeline;
             if(pipeline!=activePipeline){
                 if(!device.bind_graphics_pipeline(commands,pipeline,error)||

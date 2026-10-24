@@ -74,6 +74,19 @@ void builder_checks(){
         if(bad==7){invalid.materials[0].transmission=0;invalid.materials[0].shadingModel=MaterialShadingModel::Unlit;}
         finish(invalid);instance.asset=&invalid;if(bad==5)instance.objectToWorld[0]=2;
         check(!build_live_optical_scene(std::span(&instance,1),scene,&error),"Unsupported optical scene refused");instance.objectToWorld[0]=1;error.clear();}
+    {   // Disjoint components of one material: nesting must follow the component containing the camera.
+        auto inner=box(glass(1.333F),{0,0,0},{.2F,.2F,.2F});const auto remote=box(glass(1.333F),{20,0,0},{3,3,3});
+        const auto base=static_cast<std::uint32_t>(inner.vertices.size()),first=static_cast<std::uint32_t>(inner.indices.size());
+        inner.vertices.insert(inner.vertices.end(),remote.vertices.begin(),remote.vertices.end());
+        for(auto i:remote.indices)inner.indices.push_back(base+i);inner.submeshes[0].indexCount=first+static_cast<std::uint32_t>(remote.indices.size());
+        inner.bounds={{-.2F,-3,-3},{23,3,3}};finish(inner);
+        auto outer=box(glass(1.5F),{0,0,0},{1,1,1});
+        std::array<LiveOpticalInstance,2> nested{{{&inner},{&outer}}};
+        check(build_live_optical_scene(nested,scene,&error)&&scene.volumes.size()==3,"Per-component dielectric volumes");
+        check(set_live_optical_camera(scene,{0,0,0},&error)&&scene.settings.mediumCount==2&&scene.settings.media[0]==2&&scene.settings.media[1]==1,"Initial media ordered by containing component");
+        check(set_live_optical_camera(scene,{.5F,0,0},&error)&&scene.settings.mediumCount==1&&scene.settings.media[0]==2,"Camera only in enclosing component");
+        check(set_live_optical_camera(scene,{20,0,0},&error)&&scene.settings.mediumCount==1&&scene.settings.media[0]==1,"Camera in remote component");
+    }
     std::cout<<"Optical scene closure, containment, cache/edit/lifetime and refusal checks passed\n";
 }
 std::vector<std::byte> load(const std::filesystem::path& p){std::ifstream in(p,std::ios::binary|std::ios::ate);check(bool(in),"Missing shader "+p.string());const auto size=in.tellg();std::vector<std::byte> bytes(static_cast<std::size_t>(size));in.seekg(0);in.read(reinterpret_cast<char*>(bytes.data()),size);check(bool(in),"Shader read");return bytes;}
@@ -124,7 +137,7 @@ void live_images(VulkanDevice& d,const std::filesystem::path& root,const std::fi
     LiveEnvironmentRendererResources renderer;check(create_live_environment_renderer(d,lighting,atlas,code,256,TextureFormat::RGBA8Unorm,renderer,&error),"Glass renderer");
     constexpr unsigned width=64;TextureDesc td;td.width=td.height=width;td.usage=TextureUsage::RenderTarget|TextureUsage::CopySource;td.initialState=ResourceState::RenderTarget;auto target=d.create_texture(td,&error);td.format=TextureFormat::D32Float;td.usage=TextureUsage::DepthStencil;td.initialState=ResourceState::DepthWrite;auto depth=d.create_texture(td,&error);check(target&&depth,"Glass targets");
     unsigned comparisons=0;float maximum=0;
-    for(unsigned variant=0;variant<8;++variant){std::vector<CookedPolygonAsset> assets;std::vector<unsigned> initial;Float3 eye{0,0,2};
+    for(unsigned variant=0;variant<9;++variant){std::vector<CookedPolygonAsset> assets;std::vector<unsigned> initial;Float3 eye{0,0,2};
         auto material=glass(variant==2?1.333F:1.5F,variant==1?Float3{.18F,.65F,.25F}:Float3{1,1,1},variant==1?.4F:0);
         if(variant<3)assets.push_back(sphere(material,{0,0,.5F},.35F));
         if(variant==3)assets.push_back(box(material,{0,0,.5F},{.45F,.45F,.15F}));
@@ -132,6 +145,9 @@ void live_images(VulkanDevice& d,const std::filesystem::path& root,const std::fi
         if(variant==5){assets.push_back(box(material,{0,0,.5F},{.5F,.47F,.4F}));assets.push_back(box(glass(1.333F),{0,0,.5F},{.3F,.28F,.2F}));}
         if(variant==6){assets.push_back(box(glass(1.5F),{0,0,2},{.5F,.48F,.5F}));assets.push_back(box(glass(1.333F,{.4F,.7F,.9F},.5F),{0,0,2},{.25F,.23F,.25F}));initial={0,1};}
         if(variant==7)assets.push_back(box(material,{0,0,.5F},{.45F,.43F,.15F}));
+        if(variant==8){ // Camera inside absorbing glass with an opaque receiver before the exit surface.
+            assets.push_back(box(glass(1.5F,{.5F,.8F,.3F},.5F),{0,0,2},{1,1,1}));initial={0};
+            VoxelMaterialDefinition receiver;receiver.baseColor={0,0,0,1};receiver.emissive={.9F,.6F,.3F};assets.push_back(box(receiver,{0,0,1.4F},{.3F,.3F,.1F}));}
         if(variant<7)assets.push_back(checker(-.6F,variant>=3));if(variant<3)assets.push_back(checker(2.6F));
         std::vector<std::unique_ptr<MeshRhiMirror>> mirrors;std::vector<LivePolygonDraw> draws;std::vector<OpticalPolygonInstance> instances;
         for(unsigned i=0;i<assets.size();++i){assets[i].objectId=i+1;finish(assets[i]);mirrors.push_back(std::make_unique<MeshRhiMirror>(d));check(mirrors.back()->upload(assets[i],&error),"Glass fixture upload");draws.push_back({mirrors.back().get(),&assets[i],1});instances.push_back({i+1,&assets[i],{},true});}
@@ -139,14 +155,15 @@ void live_images(VulkanDevice& d,const std::filesystem::path& root,const std::fi
         std::array<float,64> constants{};const float f=2.41421356F,far=10,near=.01F;
         constants[0]=constants[5]=f;constants[10]=-far/(far-near);constants[11]=-1;constants[14]=far*(eye.z-near)/(far-near);constants[15]=eye.z;constants[19]=3;if(variant==7){constants[17]=.7F;constants[18]=1;}
         LiveEnvironmentFrameDesc frame;frame.colorTarget=target;frame.depthTarget=depth;frame.width=frame.height=width;frame.frameConstants=std::as_bytes(std::span(constants));frame.polygonDraws=draws;frame.cameraWorldPosition=eye;frame.drawSkybox=false;frame.drawShadowCasters=true;
-        LiveEnvironmentFrameStats stats;FenceHandle fence;check(record_live_environment_frame(d,lighting,plan,atlas,renderer,frame,stats,&fence,&error),"Clear glass live frame");check(fence&&d.fence_complete(fence),"Glass fence");check(stats.clearGlassDraws==(variant==7?1:assets.size()-1-(variant<3?1:0))&&stats.opticalSceneBuilds==1,"Automatic optical draw dispatch");
+        LiveEnvironmentFrameStats stats;FenceHandle fence;check(record_live_environment_frame(d,lighting,plan,atlas,renderer,frame,stats,&fence,&error),"Clear glass live frame");check(fence&&d.fence_complete(fence),"Glass fence");std::uint64_t submeshes=0;for(const auto& asset:assets)submeshes+=asset.submeshes.size();
+        check(stats.clearGlassDraws==(!initial.empty()?submeshes:variant==7?1:assets.size()-1-(variant<3?1:0))&&stats.opticalSceneBuilds==1,"Automatic optical draw dispatch");
         std::uint64_t opaqueTriangles=0;
         for(const auto& asset:assets)for(const auto& submesh:asset.submeshes)
             if(asset.materials[submesh.materialIndex].transmission<=0)opaqueTriangles+=submesh.indexCount/3;
         check(stats.shadowTriangles==opaqueTriangles,"Clear glass must not become an opaque shadow caster");
         std::vector<std::byte> pixels(width*width*4);check(d.read_texture(target,0,0,pixels,width*4,&error),"Glass readback");std::vector<unsigned char> expected(width*width*3),diff(expected.size());unsigned checked=0;float worst=0;
         for(unsigned y=0;y<width;++y)for(unsigned x=0;x<width;++x){const auto direction=normalize(Float3{(2*(float(x)+.5F)/width-1)/f,(2*(float(y)+.5F)/width-1)/f,-1});
-            const auto primary=cpu.trace(eye,direction,1000);const bool optical=primary&&primary->material->transmission>0;
+            const auto primary=cpu.trace(eye,direction,1000);const bool optical=primary&&(primary->material->transmission>0||!initial.empty());
             auto value=optical?reference(cpu,assets,eye,direction,initial,variant==7?Float3{.28F,.42F,.56F}:Float3{}):primary?primary->material->emissive:Float3{};
             const std::array<float,3> channels{value.x,value.y,value.z};
             for(unsigned c=0;c<3;++c){const float actual=std::to_integer<unsigned>(pixels[(y*width+x)*4+c])/255.F,ref=std::clamp(channels[c],0.F,1.F),delta=std::abs(actual-ref);expected[(y*width+x)*3+c]=static_cast<unsigned char>(std::lround(ref*255));diff[(y*width+x)*3+c]=static_cast<unsigned char>((std::min)(255.F,delta*255*8));
@@ -158,7 +175,7 @@ void live_images(VulkanDevice& d,const std::filesystem::path& root,const std::fi
         if(!output.empty()){std::filesystem::create_directories(output);for(unsigned kind=0;kind<3;++kind){std::ofstream ppm(output/("glass-"+std::to_string(variant)+(kind==0?".gpu.ppm":kind==1?".cpu.ppm":".diff.ppm")),std::ios::binary);ppm<<"P6\n64 64\n255\n";for(unsigned i=0;i<width*width;++i)for(unsigned c=0;c<3;++c){const unsigned char v=kind==0?std::to_integer<unsigned char>(pixels[i*4+c]):kind==1?expected[i*3+c]:diff[i*3+c];ppm.write(reinterpret_cast<const char*>(&v),1);}}}
         for(const auto& a:assets)check(renderer.mainMaterials->invalidate_asset(a.contentHash,&error)&&renderer.shadowMaterials->invalidate_asset(a.contentHash,&error),"Glass material invalidation");
     }
-    std::cout<<"8 live glass scenes; "<<comparisons<<" independent CPU/GPU channel comparisons; max error "<<maximum<<'\n';
+    std::cout<<"9 live glass scenes; "<<comparisons<<" independent CPU/GPU channel comparisons; max error "<<maximum<<'\n';
     check(destroy_live_environment_renderer(d,renderer,&error)&&d.destroy_texture(target,&error)&&d.destroy_texture(depth,&error),"Glass renderer cleanup");check(destroy_cascaded_shadow_atlas(d,atlas,&error)&&destroy_environment_lighting(d,lighting,&error),"Glass lighting cleanup");
 }
 }

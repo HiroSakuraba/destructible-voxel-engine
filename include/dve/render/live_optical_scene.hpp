@@ -35,7 +35,9 @@ struct LiveOpticalInstance {
     const CookedPolygonAsset* asset{};
     std::array<float,16> objectToWorld{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
 };
-struct LiveOpticalVolume { std::uint32_t material{}; double volume{}; };
+// One closed connected component of a dielectric material. Camera containment and
+// initial-medium nesting are decided per component, never by a material's aggregate volume.
+struct LiveOpticalVolume { std::uint32_t material{}; double volume{}; std::vector<GpuOpticalTriangle> triangles; };
 struct LiveOpticalSceneData {
     std::vector<GpuOpticalNode> nodes;
     std::vector<GpuOpticalTriangle> triangles;

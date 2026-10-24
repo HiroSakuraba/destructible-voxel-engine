@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 #include <tuple>
+#include <utility>
 
 namespace dve::render {
 namespace {
@@ -57,8 +58,29 @@ bool closed_volume(std::span<const GpuOpticalTriangle> triangles,double& volume)
 }
 }
 
+namespace {
+// Splits triangles into connected components by shared welded positions.
+std::vector<std::vector<GpuOpticalTriangle>> connected_components(std::span<const GpuOpticalTriangle> triangles){
+    Float3 lo=triangles[0].p0,hi=lo;
+    for(const auto& t:triangles)for(auto p:{t.p0,t.p1,t.p2})bounds(lo,hi,p);
+    const auto extent=sub(hi,lo);const double span=(std::max)({double(extent.x),double(extent.y),double(extent.z),1e-30});
+    const double step=span*1e-6;
+    using Position=std::array<long long,3>;
+    const auto weld=[&](Float3 p)->Position{return {std::llround((double(p.x)-lo.x)/step),std::llround((double(p.y)-lo.y)/step),std::llround((double(p.z)-lo.z)/step)};};
+    std::vector<std::size_t> parent(triangles.size());for(std::size_t i=0;i<parent.size();++i)parent[i]=i;
+    const auto find=[&](std::size_t x){while(parent[x]!=x){parent[x]=parent[parent[x]];x=parent[x];}return x;};
+    std::map<Position,std::size_t> owner;
+    for(std::size_t i=0;i<triangles.size();++i)for(auto p:{triangles[i].p0,triangles[i].p1,triangles[i].p2}){
+        const auto [it,inserted]=owner.emplace(weld(p),i);if(!inserted)parent[find(i)]=find(it->second);}
+    std::map<std::size_t,std::size_t> slot;std::vector<std::vector<GpuOpticalTriangle>> out;
+    for(std::size_t i=0;i<triangles.size();++i){const auto r=find(i);const auto [it,inserted]=slot.emplace(r,out.size());
+        if(inserted)out.emplace_back();out[it->second].push_back(triangles[i]);}
+    return out;
+}
+}
+
 bool build_live_optical_scene(std::span<const LiveOpticalInstance> instances,LiveOpticalSceneData& out,std::string* error){
-    LiveOpticalSceneData scene;
+    LiveOpticalSceneData scene;std::size_t dielectricMaterials{};
     for(const auto& instance:instances){
         if(!instance.asset||!rigid(instance.objectToWorld))return fail(error,"GPU clear glass requires rigid polygon poses; bake scale into geometry");
         const auto& a=*instance.asset;
@@ -95,10 +117,15 @@ bool build_live_optical_scene(std::span<const LiveOpticalInstance> instances,Liv
                 if(!std::isfinite(areaSquared)||areaSquared<1e-20F)return fail(error,"GPU optical scene contains a degenerate or out-of-range triangle");
                 scene.triangles.push_back(t);
             }
-            if(m.transmission>0){double volume{};
-                if(!closed_volume(std::span(scene.triangles).subspan(first),volume))return fail(error,"GPU solid glass requires closed, consistently outward-wound geometry");
-                scene.volumes.push_back({materialOffset+mi,volume});
-                if(scene.volumes.size()>8)return fail(error,"GPU optical scene supports at most eight dielectric media");
+            if(m.transmission>0){
+                const auto mine=std::span<const GpuOpticalTriangle>(scene.triangles).subspan(first);
+                double total{};
+                if(!closed_volume(mine,total))return fail(error,"GPU solid glass requires closed, consistently outward-wound geometry");
+                for(auto& component:connected_components(mine)){double volume{};
+                    if(!closed_volume(component,volume))return fail(error,"GPU solid glass requires each connected component to be closed and outward-wound");
+                    scene.volumes.push_back({materialOffset+mi,volume,std::move(component)});}
+                ++dielectricMaterials;
+                if(dielectricMaterials>8)return fail(error,"GPU optical scene supports at most eight dielectric media");
             }
         }
     }
@@ -122,12 +149,21 @@ bool build_live_optical_scene(std::span<const LiveOpticalInstance> instances,Liv
 bool set_live_optical_camera(LiveOpticalSceneData& scene,Float3 camera,std::string* error){
     if(!std::isfinite(camera.x)||!std::isfinite(camera.y)||!std::isfinite(camera.z))return fail(error,"GPU optical camera must be finite");
     const auto d=normalize(Float3{.317F,.713F,.991F});
-    std::vector<double> nearest(scene.materials.size(),std::numeric_limits<double>::infinity());std::vector<bool> inside(scene.materials.size());
-    for(const auto& t:scene.triangles){if(scene.materials[t.material].transmission<=0)continue;const double hit=intersect(t,camera,d);
-        if(hit>1e-7 && hit<nearest[t.material]){nearest[t.material]=hit;inside[t.material]=dot(d,cross3(sub(t.p1,t.p0),sub(t.p2,t.p0)))>0;}}
-    auto volumes=scene.volumes;std::sort(volumes.begin(),volumes.end(),[](const auto& a,const auto& b){return a.volume>b.volume;});
+    // Containment is decided per closed connected component; nesting order uses the
+    // volume of the component that actually contains the camera.
+    std::vector<double> containing(scene.materials.size(),-1);
+    for(const auto& v:scene.volumes){double nearest=std::numeric_limits<double>::infinity();bool inside{};
+        for(const auto& t:v.triangles){const double hit=intersect(t,camera,d);
+            if(hit>1e-7&&hit<nearest){nearest=hit;inside=dot(d,cross3(sub(t.p1,t.p0),sub(t.p2,t.p0)))>0;}}
+        if(!inside)continue;
+        if(containing[v.material]>=0)return fail(error,"GPU optical camera lies inside nested components of the same dielectric material; this topology is not supported");
+        containing[v.material]=v.volume;}
+    std::vector<std::pair<double,std::uint32_t>> order;
+    for(std::uint32_t m=0;m<containing.size();++m)if(containing[m]>=0)order.push_back({containing[m],m});
+    std::sort(order.begin(),order.end(),[](const auto& a,const auto& b){return a.first!=b.first?a.first>b.first:a.second<b.second;});
+    if(order.size()>scene.settings.media.size())return fail(error,"GPU optical camera is inside too many dielectric media");
     scene.settings.mediumCount=0;scene.settings.media.fill(0);
-    for(const auto& v:volumes)if(inside[v.material])scene.settings.media[scene.settings.mediumCount++]=v.material+1;
+    for(const auto& o:order)scene.settings.media[scene.settings.mediumCount++]=o.second+1;
     return true;
 }
 

@@ -14,6 +14,7 @@
 #include "dve/render/environment_lighting_gpu.hpp"
 #include "dve/render/mesh_rhi_mirror.hpp"
 #include "dve/render/main_material_table.hpp"
+#include "dve/render/live_optical_scene.hpp"
 #include "dve/render/material_resource_residency.hpp"
 #include "dve/render/shadow_material_table.hpp"
 #include "dve/rhi/device.hpp"
@@ -28,6 +29,8 @@ struct LiveEnvironmentShaderBytecode {
     std::vector<std::byte> shadowVertex;
     // Optional for opaque depth-only casters, required by the alpha-masked caster pipeline.
     std::vector<std::byte> shadowFragment;
+    // Optional clear-solid scene transport, required for draws with transmission > 0.
+    std::vector<std::byte> clearGlassFragment;
     [[nodiscard]] bool valid() const noexcept;
 };
 
@@ -78,6 +81,8 @@ struct LiveEnvironmentRendererResources {
     rhi::BindGroupHandle frameGroup;
     rhi::GraphicsPipelineHandle skyboxPipeline;
     rhi::GraphicsPipelineHandle materialPipeline;
+    rhi::GraphicsPipelineHandle clearGlassPipeline;
+    std::unique_ptr<LiveOpticalSceneGpu> opticalScene;
     rhi::GraphicsPipelineHandle shadowOpaquePipeline;
     rhi::GraphicsPipelineHandle shadowMaskedPipeline;
     rhi::BufferHandle skyboxVertices;
@@ -142,6 +147,9 @@ struct LiveEnvironmentFrameDesc {
 struct LiveEnvironmentFrameStats {
     std::uint64_t skyboxDraws{};
     std::uint64_t materialDraws{};
+    std::uint64_t clearGlassDraws{};
+    std::uint64_t opticalSceneBuilds{};
+    std::uint64_t opticalSceneTriangles{};
     std::uint64_t dashrDraws{};
     std::uint64_t dashrTriangles{};
     std::uint64_t shadowDraws{};

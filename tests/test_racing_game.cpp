@@ -1,4 +1,5 @@
 #include "dve/racing_game.hpp"
+#include <algorithm>
 #include "dve/editor_native.hpp"
 #include "dve/editor_prototype.hpp"
 #include "dve/editor_component_inspector.hpp"
@@ -18,11 +19,12 @@ void check(bool ok,const std::string& message){if(!ok)throw std::runtime_error(m
 Component comp(const char* role,std::string key){auto c=make_component_from_schema(std::string("dve.prototype.")+role,1);check(bool(c),"component schema");c->properties["key"]=std::move(key);return *c;}
 struct Fixture {
  GameWorld world{create_physics3d_world(Physics3DBackend::Reference)};std::unique_ptr<RacingGame> game;GameObjectId car{},rules{};
- explicit Fixture(bool barrier=false,double grip=7){std::string error;auto floor=make_editor_polygon_cube(1);for(auto& v:floor.vertices)v.position={(v.position.x-.5F)*200,(v.position.y-.5F)*200,(v.position.z-1)*.5F};refresh_editor_polygon(floor,true);check(world.spawn_cooked_polygon_asset(std::move(floor),"Floor",{},false)!=0,"floor");
- auto mesh=make_editor_polygon_cube(2);car=world.spawn_visual_polygon_asset(std::move(mesh),"Car",make_rigid_transform({0,0,.04F},{}));auto carConfig=comp("race_car","car");carConfig.properties["grip"]=grip;check(bool(world.add_component(car,std::move(carConfig),&error)),error);
+ explicit Fixture(bool barrier=false,double grip=7,bool sideBarrier=false,std::string profile="street"){std::string error;auto floor=make_editor_polygon_cube(1);for(auto& v:floor.vertices)v.position={(v.position.x-.5F)*200,(v.position.y-.5F)*200,(v.position.z-1)*.5F};refresh_editor_polygon(floor,true);check(world.spawn_cooked_polygon_asset(std::move(floor),"Floor",{},false)!=0,"floor");
+ auto mesh=make_editor_polygon_cube(2);car=world.spawn_visual_polygon_asset(std::move(mesh),"Car",make_rigid_transform({0,0,.04F},{}));auto carConfig=comp("race_car","car");carConfig.properties["grip"]=grip;carConfig.properties["handling_profile"]=std::move(profile);check(bool(world.add_component(car,std::move(carConfig),&error)),error);
  GameObjectDesc d;d.name="Rules";auto c=comp("race_rules","rules");c.properties["countdown"]=0.0;c.properties["laps"]=std::int64_t{2};d.components={c};rules=world.create_object(std::move(d));
  for(unsigned n=0;n<4;++n){GameObjectDesc gate;gate.name="Gate "+std::to_string(n);gate.transform.position={0,n?float(n)*10:40,0};auto g=comp("race_gate","gate"+std::to_string(n));g.properties["order"]=std::int64_t(n);gate.components={g};check(world.create_object(std::move(gate))!=0,"gate");}
  if(barrier){auto wall=make_editor_polygon_cube(10);for(auto& v:wall.vertices)v.position={(v.position.x-.5F)*20,v.position.y*.1F+6,v.position.z*4};refresh_editor_polygon(wall,true);check(world.spawn_cooked_polygon_asset(std::move(wall),"Wall",{},false)!=0,"wall");}
+ if(sideBarrier){auto side=make_editor_polygon_cube(11);for(auto& v:side.vertices)v.position={(v.position.x-.5F)*.1F+.962F,(v.position.y-.5F)*40,v.position.z*4};refresh_editor_polygon(side,true);check(world.spawn_cooked_polygon_asset(std::move(side),"Side Wall",{},false)!=0,"side wall");}
  game=std::make_unique<RacingGame>(world);check(game->start(&error),error);
  }
  void tick(unsigned count=1,float dt=1.F/60){for(unsigned n=0;n<count;++n)game->step(dt);}
@@ -43,6 +45,22 @@ void driving(){Fixture a,b;a.world.set_axis("move_y",1);b.world.set_axis("move_y
  Fixture blocked(true);blocked.world.set_axis("move_y",1);blocked.tick(300);check(blocked.world.position(blocked.car)->y<5,"swept collision stops car at thin wall");
  Fixture low(false,.2),high(false,20);for(auto* fixture:{&low,&high}){fixture->world.set_axis("move_y",1);fixture->world.set_axis("move_x",.8F);fixture->tick(120);}check(length(subtract(*low.world.position(low.car),*high.world.position(high.car)))>.1F,"grip tuning changes cornering trajectory");
  Fixture reverse;reverse.world.set_axis("move_y",-1);reverse.tick(90);check(reverse.world.position(reverse.car)->y< -1,"reverse drives backwards");
+ Fixture service;service.world.set_axis("move_y",1);service.tick(60);const float serviceSpeed=service.game->status().speedMetersPerSecond;
+ service.world.set_axis("race_brake",1);service.tick(40);
+ check(service.game->status().speedMetersPerSecond<serviceSpeed*.5F,"dedicated service brake overrides throttle");
+ check(service.game->telemetry().longitudinalAccelerationMetersPerSecondSquared<=0,"service brake reports deceleration");
+ Fixture standard(false,7,false,"street"),drift(false,7,false,"drift");
+ for(auto* fixture:{&standard,&drift}){fixture->world.set_axis("move_y",1);fixture->world.set_axis("move_x",.8F);fixture->tick(120);}
+ check(length(subtract(*standard.world.position(standard.car),*drift.world.position(drift.car)))>.1F,"handling profiles alter trajectories");
+ check(standard.game->telemetry().grounded,"grounded telemetry");
+ check(std::isfinite(drift.game->telemetry().lateralSlipMetersPerSecond)&&std::abs(drift.game->telemetry().yawRateRadiansPerSecond)>.001F,"slip/yaw telemetry");
+ Fixture wall(false,7,true);wall.world.set_axis("move_y",1);wall.tick(24);const auto yBefore=wall.world.position(wall.car)->y;
+ wall.world.set_axis("move_x",1);wall.tick(25);wall.world.set_axis("move_x",-1);wall.tick(40);
+ check(wall.world.position(wall.car)->y>yBefore+.15F,"steering near parallel barrier must not trap car");
+ check(wall.game->telemetry().collisionCount<500U,"bounded collision reporting");
+ auto chase=wall.game->camera();check(std::isfinite(chase.position.x)&&std::isfinite(chase.position.y),"smooth camera finite");
+ auto bad=comp("race_car","invalid");bad.properties["handling_profile"]=std::string{"hovercraft"};
+ check(!validate_racing_scene(std::vector<PrototypeObjectView>{{0,"Bad car",std::span<const Component>(&bad,1),false}},nullptr),"invalid profile rejected");
 }
 void race_and_restore(){Fixture f;f.world.set_axis("move_y",1);
  // Crossing finish before all checkpoints cannot complete a lap.

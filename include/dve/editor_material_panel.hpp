@@ -24,6 +24,7 @@ struct MaterialPanelState {
     MaterialInspectionChannel inspectionChannel{MaterialInspectionChannel::Beauty};
     MaterialInspectionView inspectionView{MaterialInspectionView::Split};
     std::string bakeStatus;
+    std::vector<std::string> bakeQueueReport;
     std::uint64_t bakeStatusObject{},inspectionKey{};
     double nextBakeStatusTime{};
     render::MaterialTextureBakeSettings bake;

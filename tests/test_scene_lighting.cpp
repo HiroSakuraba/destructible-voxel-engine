@@ -1,5 +1,6 @@
 #include "dve/component.hpp"
 #include "dve/render/cpu_fog.hpp"
+#include "dve/render/ray_offset.hpp"
 #include "dve/render/scene_lighting.hpp"
 #include <cmath>
 #include <iostream>
@@ -368,9 +369,27 @@ void integrated_render() {
   }
   check(lit, "local lights reach polygon render");
 }
+void ray_offset() {
+  // One ULP of 65536 is 0.0078, so a 1e-5 offset vanishes in a plain float
+  // addition — the failure mode the ULP nudge exists to prevent.
+  const float above = std::nextafter(65536.0F, std::numeric_limits<float>::infinity());
+  const float below = std::nextafter(65536.0F, -std::numeric_limits<float>::infinity());
+  check(65536.0F + 1e-5F == 65536.0F, "test premise: plain addition must round back");
+  const Float3 o = offset_ray_origin({65536, 0, 0}, {1, 0, 0}, 1e-5F);
+  check(o.x == above && o.y == 0 && o.z == 0, "offset must step exactly one ULP out");
+  const Float3 back = offset_ray_origin({65536, 0, 0}, {-1, 0, 0}, 1e-5F);
+  check(back.x == below, "negative offset must step one ULP down");
+  const Float3 same = offset_ray_origin({65536, 0, 0}, {0, 0, 0}, 0.0F);
+  check(same.x == 65536.0F && same.y == 0 && same.z == 0, "zero offset must be identity");
+  // Ordinary coordinates: p + n * distance, plus at most the single ULP.
+  const Float3 q = offset_ray_origin({1, 2, 3}, {0, 1, 0}, 0.001F);
+  near(q.y, 2.001F, 1e-6F, "offset distance at small coordinates");
+  check(q.x == 1 && q.z == 3, "offset must not move other components");
+}
 } // namespace
 int main() {
   try {
+    ray_offset();
     analytic_lights();
     shadows_and_emission();
     furnace();

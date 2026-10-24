@@ -49,6 +49,19 @@ public:
     CommandResult undo(EditorDocument& d)override{return apply(d,false);}
 };
 std::filesystem::path preference_path(const std::filesystem::path& settings){return settings.empty()?std::filesystem::path{}:std::filesystem::path(settings.string()+".material-browser");}
+// A slot edit can break another material's stack that uses the slot as an overlay source
+// (for example by turning the source into a nested stack). Reject any stack that was valid
+// before the edit and is not valid after it; already-invalid imported stacks do not block edits.
+bool dependent_stacks_valid(const CookedPolygonAsset& before,const CookedPolygonAsset& after,std::string* error){
+    for(std::size_t i=0;i<after.materials.size();++i){
+        if(after.materials[i].layers.empty())continue;
+        std::string reason;if(render::validate_layered_surface(after,std::uint32_t(i),&reason))continue;
+        if(i<before.materials.size()&&before.materials.size()==before.materialBindings.size()&&!render::validate_layered_surface(before,std::uint32_t(i),nullptr))continue;
+        if(error)*error="Material slot "+std::to_string(i)+" layer stack would become invalid: "+reason;
+        return false;
+    }
+    return true;
+}
 std::string value_text(float v){std::ostringstream s;s<<std::setprecision(6)<<v;return s.str();}
 }
 MaterialPanelLayout NativeEditorController::material_panel_layout()const{
@@ -202,6 +215,8 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
         if(o->polygon){c.beforeMesh=*o->polygon;auto mesh=*o->polygon;
             if(editSlot||o->is_nurbs()){
                 const auto slot=o->is_nurbs()?0:p.slot;if(slot>=mesh.materials.size())return fail(o->name+": slot does not exist");
+                // The draft can predate a stack edit; never silently drop an assigned stack and its maps.
+                if(!mesh.materials[slot].layers.empty())return fail(o->name+": slot "+std::to_string(slot)+" has a layer stack; edit it in Layers mode");
                 mesh.materials[slot]=withPhysical(mesh.materials[slot]);mesh.materialBindings[slot]={};
             }else{
                 if(mesh.materials.size()>=256)return fail(o->name+": all material slots are occupied");
@@ -221,6 +236,7 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
                     if(!result)return fail(result.error);
                     mesh=std::move(result.mesh);}
             }
+            {std::string stackError;if(!dependent_stacks_valid(*o->polygon,mesh,&stackError))return fail(o->name+": "+stackError);}
             mesh.contentHash=polygon_asset_content_hash(mesh);const auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);c.afterMesh=std::move(mesh);
         }else{
             if(!o->voxels)return fail(o->name+": no assignable surface");
@@ -375,6 +391,7 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
     if(action=="bakeOpacity"){p.bake.maps^=16;return true;}
     if(action=="bakeExport"||action=="bakeApply")return material_panel_bake(action=="bakeApply");
     if(action=="bakeValidate"){
+#if defined(DVE_EDITOR_MATERIAL_PREVIEW_RENDERER)
         const auto targets=workspace_.selected_objects();if(targets.size()!=1)return fail("Select one static polygon object to bake");
         const auto* o=document.find_object(*targets.begin());if(!o||!o->polygon||o->subdivision||o->is_nurbs())return fail("Bake requires an evaluated static polygon mesh; apply subdivision first");
         if(const auto* mirror=find_component_by_type(std::span<const Component>(o->components),kLiveMirrorComponent);mirror&&mirror->enabled)return fail("Apply Live Mirror before baking the visible surface");
@@ -384,6 +401,9 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
         return start_long_job(LongJobKind::BakeMaterial,"Validate material bake",longJobThreshold_+1,
             [source,settings,validation](LongJob& job){*validation=render::validate_material_bake(*source,settings,{&job.cancel,{}});},
             [this,validation](LongJob&){materialPanel_.message=validation->valid?"Bake preflight passed; raster/gutter checks run during baking. Budget estimate: "+std::to_string(validation->estimatedBytes/1048576)+" MiB":validation->error;set_status(materialPanel_.message,!validation->valid);return validation->valid;});
+#else
+        return fail("Texture baking requires a renderer-enabled editor build");
+#endif
     }
     if(!std::isfinite(value))return fail("Layer values must be finite");
     const auto targets=workspace_.selected_objects();if(targets.empty())return fail("Select polygon objects first");
@@ -447,7 +467,9 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
             else if(action=="normalScale"){if(value<0||value>8)return fail("Normal strength must be in [0,8]");mesh.materialBindings[layer.sourceMaterial].normalScale=value;}
             else return fail("Unknown layer edit");
         }
-        std::string error;for(std::uint32_t slot=0;slot<mesh.materials.size();++slot)if(!render::validate_layered_surface(mesh,slot,&error))return fail("Slot "+std::to_string(slot)+": "+error);
+        std::string error;if(!render::validate_layered_surface(mesh,p.slot,&error))return fail(error);
+        // The edited slot may also be an overlay source of another stack (Codex review).
+        if(!dependent_stacks_valid(*object->polygon,mesh,&error))return fail(error);
         mesh.contentHash=polygon_asset_content_hash(mesh);const auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);
         ObjectMaterialChange change;change.id=id;change.beforePalette=change.afterPalette=object->voxelMaterials;change.beforeMesh=*object->polygon;change.afterMesh=std::move(mesh);changes.push_back(std::move(change));
     }
@@ -462,6 +484,11 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
     p.message="Layer stack changed; Ctrl+Z restores the complete edit";material_panel_preview();return true;
 }
 bool NativeEditorController::material_panel_bake(bool apply,const std::filesystem::path& outputDirectory){
+#if !defined(DVE_EDITOR_MATERIAL_PREVIEW_RENDERER)
+    (void)apply;(void)outputDirectory;
+    materialPanel_.message="Texture baking requires a renderer-enabled editor build";
+    set_status(materialPanel_.message,true);return false;
+#else
     auto fail=[&](std::string message){materialPanel_.message=message;set_status(message,true);return false;};
     if(playSession_.active()||longJob_)return fail("Finish simulation/background edits first");
     const auto targets=workspace_.selected_objects();if(targets.size()!=1)return fail("Select one static polygon object to bake");
@@ -523,6 +550,7 @@ bool NativeEditorController::material_panel_bake(bool apply,const std::filesyste
             materialPanel_.message="Bake saved: "+directory.string()+"; source.dmesh preserves the editable stack";
             set_status(materialPanel_.message);return true;
         });
+#endif
 }
 void render_material_panel(const IEditorCanvas& canvas,NativeEditorController& controller){
     auto& p=controller.material_panel();if(!p.open)return;const auto l=controller.material_panel_layout();RectClipCanvas painter(canvas,l.panel);

@@ -38,6 +38,8 @@ c++ -std=c++23 -ffunction-sections -fdata-sections -Wl,--gc-sections \
     "$repo_dir/src/render/mesh_rhi_mirror.cpp" \
     "$repo_dir/src/render/shadow_material_table.cpp" \
     "$repo_dir/src/render/main_material_table.cpp" \
+    "$repo_dir/src/render/layered_surface.cpp" \
+    "$repo_dir/src/material_layers.cpp" \
     "$repo_dir/src/render/material_resource_residency.cpp" \
     "$repo_dir/src/render/texture_mips.cpp" \
     "$repo_dir/src/render/environment_lighting_gpu.cpp" \

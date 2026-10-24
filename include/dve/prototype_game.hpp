@@ -13,6 +13,7 @@ enum class PrototypePhase : unsigned { Playing,Paused,Won,Lost };
 struct PrototypeHud {
     bool active{},debug{},racing{};
     std::string stats;
+    std::string vehicleTelemetry;
     PrototypePhase phase{PrototypePhase::Playing};
     float health{},maximumHealth{};
     unsigned collected{},required{};

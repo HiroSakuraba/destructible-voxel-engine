@@ -187,6 +187,8 @@ add_library(dve_core
     src/nurbs_queries.cpp
     src/nurbs_degree.cpp
     src/polygon_asset.cpp
+    src/polygon_tangents.cpp
+    third_party/mikktspace/mikktspace.c
     src/text3d.cpp
     src/gabor_volume.cpp
     src/runtime_mesh_world.cpp
@@ -224,6 +226,8 @@ add_library(dve_core
     src/runtime_replay.cpp
 )
 add_library(dve::core ALIAS dve_core)
+# mikktspace.c is ISO C in a CXX-only project; it compiles cleanly as C++.
+set_source_files_properties(third_party/mikktspace/mikktspace.c PROPERTIES LANGUAGE CXX)
 target_include_directories(dve_core PUBLIC $<BUILD_INTERFACE:${DVE_GENERATED_INCLUDE_DIR}>)
 if(DVE_ENABLE_FLUODDITY)
     target_sources(dve_core PRIVATE src/fluoddity.cpp src/fluoddity_solver.cpp src/runtime_fluoddity_world.cpp)
@@ -729,6 +733,7 @@ if(DVE_BUILD_RHI)
         src/render/ambient_occlusion.cpp
         src/render/surface_shading.cpp
         src/render/scene_lighting.cpp
+        src/render/ies_profile.cpp
         src/render/material_bsdf.cpp
         src/render/ambient_occlusion_gpu.cpp
         src/render/live_environment_renderer.cpp
@@ -2957,6 +2962,12 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_mesh_displacement_tests tests/test_mesh_displacement.cpp)
         target_link_libraries(dve_mesh_displacement_tests PRIVATE dve::editor)
         add_test(NAME dve_mesh_displacement_tests COMMAND dve_mesh_displacement_tests)
+        add_executable(dve_ies_profile_tests tests/test_ies_profile.cpp)
+        target_link_libraries(dve_ies_profile_tests PRIVATE dve::render_bridge)
+        add_test(NAME dve_ies_profile_tests COMMAND dve_ies_profile_tests)
+        add_executable(dve_polygon_tangents_tests tests/test_polygon_tangents.cpp)
+        target_link_libraries(dve_polygon_tangents_tests PRIVATE dve::core)
+        add_test(NAME dve_polygon_tangents_tests COMMAND dve_polygon_tangents_tests)
         add_executable(dve_editor_nurbs_reuse_tests tests/test_editor_nurbs_reuse.cpp)
         target_link_libraries(dve_editor_nurbs_reuse_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_reuse_tests COMMAND dve_editor_nurbs_reuse_tests)

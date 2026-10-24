@@ -1,4 +1,5 @@
 #include "dve/polygon_asset.hpp"
+#include "dve/polygon_tangents.hpp"
 #include "dve/master_material.hpp"
 #include "dve/voxel_normal_map.hpp"
 #include "dve/transform.hpp"
@@ -477,7 +478,8 @@ CookedPolygonAsset cook_polygon_scene(const ImportedScene& scene,const PolygonCo
         for(auto& [mat,idx]:groups){if(out.indices.size()+idx.size()>options.maximumIndices)throw std::runtime_error("polygon index limit exceeded");PolygonSubmesh sub;sub.name=(node.name.empty()?mesh.name:node.name)+"_material_"+std::to_string(mat);sub.firstIndex=static_cast<std::uint32_t>(out.indices.size());sub.indexCount=static_cast<std::uint32_t>(idx.size());sub.materialIndex=mat;out.indices.insert(out.indices.end(),idx.begin(),idx.end());out.submeshes.push_back(std::move(sub));}
     }
     if(options.generateMissingNormals){for(std::size_t i=0;i<out.vertices.size();++i)if(!suppliedNormal[i])out.vertices[i].normal=normalized(normalAccum[i]);}
-    for(std::size_t i=0;i<out.vertices.size();++i){out.vertices[i].normal=normalized(out.vertices[i].normal);if(options.generateTangents){Float3 t=sub3(tangentAccum[i],mul3(out.vertices[i].normal,dot3(out.vertices[i].normal,tangentAccum[i])));t=normalized(t,{1.0F,0.0F,0.0F});const float handed=dot3(cross3(out.vertices[i].normal,t),bitangentAccum[i])<0.0F?-1.0F:1.0F;out.vertices[i].tangent={t.x,t.y,t.z,handed};}}
+    for(std::size_t i=0;i<out.vertices.size();++i){out.vertices[i].normal=normalized(out.vertices[i].normal);}
+    if(options.generateTangents&&!compute_polygon_tangents_mikktspace(out)){for(std::size_t i=0;i<out.vertices.size();++i){Float3 t=sub3(tangentAccum[i],mul3(out.vertices[i].normal,dot3(out.vertices[i].normal,tangentAccum[i])));t=normalized(t,{1.0F,0.0F,0.0F});const float handed=dot3(cross3(out.vertices[i].normal,t),bitangentAccum[i])<0.0F?-1.0F:1.0F;out.vertices[i].tangent={t.x,t.y,t.z,handed};}}
     out.contentHash=polygon_asset_content_hash(out);const auto valid=validate_polygon_asset(out);if(!valid){if(diagnostics)diagnostics->push_back({ImportDiagnostic::Severity::Error,"POLYGON_ASSET_INVALID",valid.message});throw std::runtime_error(valid.message);}if(diagnostics)diagnostics->push_back({ImportDiagnostic::Severity::Info,"POLYGON_COOKED","Preserved polygon mesh with shared DVE materials, UVs, vertex colors, submeshes, and optional textures."});return out;
 }
 

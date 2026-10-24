@@ -1,4 +1,8 @@
 #include "dve/gpu_material_surface_detail.hpp"
+#include "dve/polygon_bvh.hpp"
+#include "dve/render/polygon_renderer.hpp"
+#include "dve/render/layered_surface.hpp"
+#include <chrono>
 #include "dve/editor_material_presets.hpp"
 #include "dve/editor_material_preview.hpp"
 #include "dve/environment_lighting.hpp"
@@ -224,6 +228,14 @@ void texture_pixels(VulkanDevice& d,const std::filesystem::path& root,const std:
             v.texcoord={.25F+(u-.5F)*.05F,vv};v.texcoord1={.75F+(u-.5F)*.05F,vv};}
         const auto n=normalize(Float3{(channel?55.F:200.F)/255*2-1,128.F/255*2-1,230.F/255*2-1});
         probe(render(a,"normal"),{n.x*.5F+.5F,n.y*.5F+.5F,n.z*.5F+.5F,1},"Independent normal UV");}
+    // Tangent orientation must survive small UV scales; an absolute determinant
+    // epsilon incorrectly drops normal maps on dense meshes and tiny ray cones.
+    for(bool layered:{false,true}){auto a=panel(material);
+        a.images={{"scaled normal","image/raw",1,1,{200,128,230,255}}};a.textures={{"scaled normal",0,{}}};
+        for(auto& v:a.vertices)v.texcoord1={v.texcoord.x*.0001F,v.texcoord.y*.0001F};
+        if(layered){a.materials.push_back(material);a.materialBindings.emplace_back();a.materials[0].layers={{1,1,MaterialLayerBlendMode::Lerp,true}};}
+        a.materialBindings[layered?1:0].normal={0,1};const auto n=normalize(Float3{200.F/255*2-1,128.F/255*2-1,230.F/255*2-1});
+        probe(render(a,"normal"),{n.x*.5F+.5F,n.y*.5F+.5F,n.z*.5F+.5F,1},"Scale-independent normal frame");}
     {MaterialSamplerPolicy policy;policy.overrideFiltering=true;policy.anisotropy=true;policy.requestedMaxAnisotropy=128;
         MaterialResourceResidency pool(d,policy);check(pool.retain_asset(split.contentHash,&error),"Anisotropy retain");
         SamplerHandle sampler;check(pool.ensure_sampler(split,0,sampler,&error),"Actual Vulkan anisotropic sampler");
@@ -269,6 +281,48 @@ void texture_pixels(VulkanDevice& d,const std::filesystem::path& root,const std:
         a.images={{"neutral normal","image/raw",1,1,{128,128,255,255}}};a.textures={{"normal",0,{}}};
         auto& b=a.materialBindings[0];b.normal.texture=0;b.normalScale=strength;b.mapping.mappingMode=mapping;b.mapping.triplanarBlendSharpness=8;
         probe(render(a,"normal"),{N.x*.5F+.5F,N.y*.5F+.5F,N.z*.5F+.5F,1},"Neutral triplanar normal");}
+    // The actual live fragment shader must evaluate source maps, masks, RNM and height
+    // rather than blending uniform material records before texture sampling.
+    unsigned layerProbes=0;float layerWorst=0;
+    for(const auto& mode:{std::string("color"),std::string("channels"),std::string("normal"),std::string("emission")})
+    for(unsigned count:{0U,1U,2U,4U})for(unsigned mappingMode=0;mappingMode<4;++mappingMode){
+        auto a=panel(material);a.materials[0].baseColor={.25F,.35F,.45F,1};a.materials[0].metallic=.8F;a.materials[0].roughness=.6F;a.materials[0].emissive={.02F,.03F,.04F};
+        a.images={{"layer color","image/raw",2,2,{32,128,200,255,200,64,32,255,80,170,64,255,190,90,180,255}},
+                  {"MR","image/raw",2,1,{255,80,200,255,255,200,20,255}},
+                  {"normal","image/raw",2,1,{150,128,250,255,100,145,245,255}},
+                  {"mask","image/raw",2,1,{40,40,40,255,230,230,230,255}}};
+        a.samplers={{ImportedWrapMode::MirroredRepeat,ImportedWrapMode::Repeat,ImportedTextureFilter::Linear,ImportedTextureFilter::Linear}};
+        for(unsigned j=0;j<a.images.size();++j)a.textures.push_back({"layer",j,0});
+        for(unsigned j=0;j<count;++j){VoxelMaterialDefinition source;source.baseColor={.8F,.6F,.5F,.7F};source.metallic=.25F;source.roughness=.4F;source.emissive={.01F,.02F,.03F};if(mappingMode==3&&j==0){source.surfaceDetail.pattern=SurfacePattern::Paint;source.surfaceDetail.periodMeters=.013F;}
+            a.materials.push_back(source);a.materialBindings.emplace_back();a.materials[0].layers.push_back({MaterialId(j+1),.2F+.1F*float(j),MaterialLayerBlendMode(j%3),true});
+            auto& b=a.materialBindings.back();b.baseColor.texture=0;b.baseColor.texcoord=1;b.metallicRoughness.texture=1;b.metallicRoughness.texcoord=0;b.normal.texture=2;b.normal.texcoord=j%2;
+            b.mapping.mappingMode=MaterialMappingMode(mappingMode);b.mapping.triplanarScale=35;b.mapping.baseTransform.rotationRadians=.2F;
+            PolygonMaterialLayerBinding lb;lb.mask.texture=3;lb.mask.texcoord=1;lb.heightBlendStrength=j==0?0:.2F;lb.heightBlendBias=.01F;lb.opacityPolicy=MaterialLayerOpacityPolicy::Lerp;
+            a.materialBindings[0].layers.push_back(lb);
+        }
+        a.contentHash=polygon_asset_content_hash(a);
+        std::vector<PolygonTextureMipChain> mips;for(const auto& image:a.images){auto chain=generate_texture_mips(image);chain.normalLevels=generate_texture_mips(image,true).levels;chain.srgbLevels=generate_texture_mips(image,false,true).levels;mips.push_back(std::move(chain));}
+        {
+            const auto begin=std::chrono::steady_clock::now();const auto pixels=render(a,mode);
+            if(mappingMode==0&&mode=="color"){auto payload=build_layered_surface_payload(a,0,&error);const auto cold=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();const auto warmBegin=std::chrono::steady_clock::now();(void)render(a,mode);std::cout<<count<<" overlays: "<<payload->words.size()*4<<" payload bytes; first "<<cold<<" ms, warm "<<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-warmBegin).count()<<" ms (software Vulkan, upload/readback included)\n";}
+            for(unsigned y=7;y<width-5;y+=13)for(unsigned x=6;x<width-5;x+=13){
+                PolygonBvhHit hit;hit.position={(2*(float(x)+.5F)/width-1)*.012F,(2*(float(y)+.5F)/width-1)*.012F,.2F};hit.normal={0,0,1};hit.firstIndex=hit.position.y<=hit.position.x?0:3;
+                const auto expected=sample_polygon_hit_material(a,hit,{},hit.normal,mips,1,.024F/width);const auto& m=expected.material;
+                const std::array<float,4> want=mode=="color"?std::array<float,4>{m.baseColor.x,m.baseColor.y,m.baseColor.z,m.roughness}:mode=="normal"?std::array<float,4>{expected.normal.x*.5F+.5F,expected.normal.y*.5F+.5F,expected.normal.z*.5F+.5F,m.roughness}:mode=="emission"?std::array<float,4>{m.emissive.x,m.emissive.y,m.emissive.z,m.baseColor.w}:std::array<float,4>{m.metallic,m.roughness,m.baseColor.w,1};
+                for(unsigned c=0;c<4;++c){const auto actual=std::to_integer<unsigned>(pixels[(y*width+x)*4+c])/255.F;const auto delta=std::abs(actual-want[c]);layerWorst=(std::max)(layerWorst,delta);check(delta<.012F,"Layer CPU/GPU mismatch "+std::to_string(count)+" overlays mapping "+std::to_string(mappingMode)+" "+mode+" channel "+std::to_string(c)+" got "+std::to_string(actual)+" want "+std::to_string(want[c]));++layerProbes;}
+            }
+        }
+    }
+    std::cout<<layerProbes<<" layered CPU/GPU channel probes; max error "<<layerWorst<<'\n';
+    for(auto policy:{MaterialLayerOpacityPolicy::Lerp,MaterialLayerOpacityPolicy::Multiply,MaterialLayerOpacityPolicy::Replace}){
+        auto a=panel(material);a.materials[0].blendMode=MaterialBlendMode::Masked;
+        VoxelMaterialDefinition source;source.baseColor={.7F,.4F,.2F,1};a.materials.push_back(source);a.materialBindings.emplace_back();a.materials[0].layers={{1,1,MaterialLayerBlendMode::Lerp,true}};
+        a.images={{"layer cutout","image/raw",2,1,{0,0,0,255,255,255,255,255}}};a.textures={{"layer opacity",0,0}};
+        a.samplers={{ImportedWrapMode::Repeat,ImportedWrapMode::Repeat,ImportedTextureFilter::Nearest,ImportedTextureFilter::Nearest}};
+        a.materialBindings[1].opacity.texture=0;a.materialBindings[1].opacity.texcoord=1;
+        PolygonMaterialLayerBinding lb;lb.heightBlendStrength=0;lb.opacityPolicy=policy;a.materialBindings[0].layers={lb};
+        render(a,"color",true);
+    }
     // Compare actual main-pass discard and dynamic atlas depth for distinct UVs,
     // transformed UVs, and world/object triplanar projection. No beauty-image proxy.
     for(unsigned mode=0;mode<5;++mode){auto a=panel(material);a.materials[0].blendMode=MaterialBlendMode::Masked;
@@ -301,5 +355,5 @@ int main(int argc,char** argv){try{
     const std::filesystem::path root=argc>1?argv[1]:DVE_SURFACE_SHADER_DIR;
 #endif
     VulkanDevice d;if(d.status()!=DeviceStatus::Ready){if(std::getenv("DVE_REQUIRE_VULKAN"))throw std::runtime_error(std::string(d.device_loss_reason()));std::cout<<"SKIP: Vulkan unavailable\n";return 0;}
-    analytic_conformance(d,root);live_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});texture_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});std::cout<<"GPU surface recipes passed\n";
+    if(argc<=3||std::string(argv[3])!="--textures-only"){analytic_conformance(d,root);live_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});}texture_pixels(d,root,argc>2?argv[2]:std::filesystem::path{});std::cout<<"GPU surface recipes passed\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

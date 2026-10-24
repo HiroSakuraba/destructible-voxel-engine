@@ -1867,6 +1867,12 @@
           "kind": "storage_buffer",
           "access": "read",
           "register": "t36"
+        },
+        {
+          "name": "gLayerData",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t37"
         }
       ],
       "vulkan_bindings": [
@@ -1893,6 +1899,12 @@
           "kind": "storage_buffer",
           "set": 3,
           "binding": 2
+        },
+        {
+          "name": "gLayerData",
+          "kind": "storage_buffer",
+          "set": 3,
+          "binding": 3
         }
       ]
     },
@@ -2157,6 +2169,12 @@
           "kind": "sampler",
           "access": "read",
           "register": "s12"
+        },
+        {
+          "name": "gLayerData",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t37"
         }
       ],
       "vulkan_bindings": [
@@ -2237,6 +2255,12 @@
           "kind": "storage_buffer",
           "set": 3,
           "binding": 13
+        },
+        {
+          "name": "gLayerData",
+          "kind": "storage_buffer",
+          "set": 3,
+          "binding": 14
         }
       ]
     },

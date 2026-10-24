@@ -33,6 +33,8 @@ enum class MainMaterialTextureChannel : std::uint32_t {
 
 struct MainMaterialDescriptor {
     rhi::BindGroupHandle bindGroup;
+    rhi::BufferHandle layerBuffer;
+    std::size_t layerPayloadBytes{};
     rhi::BufferHandle materialRecordBuffer;
     rhi::BufferHandle mappingRecordBuffer;
     rhi::BufferHandle surfaceRecordBuffer;
@@ -136,6 +138,7 @@ private:
     std::unique_ptr<MaterialResourceResidency> ownedResidency_;
     MaterialResourceResidency* residency_{};
     rhi::BindGroupLayoutHandle layout_;
+    rhi::BufferHandle fallbackLayerBuffer_;
     rhi::BufferHandle fallbackMaterialBuffer_;
     rhi::BufferHandle fallbackMappingBuffer_;
     rhi::BufferHandle fallbackSurfaceBuffer_;

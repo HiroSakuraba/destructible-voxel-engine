@@ -1,5 +1,6 @@
 #include "dve/render/shadow_material_table.hpp"
 #include "dve/gpu_material_mapping.hpp"
+#include "dve/render/layered_surface.hpp"
 #include <span>
 
 #include <array>
@@ -37,7 +38,7 @@ ShadowMaterialDescriptorTable::~ShadowMaterialDescriptorTable() { clear(); }
 
 bool ShadowMaterialDescriptorTable::valid() const noexcept {
     return residency_ && layout_ && fallbackTexture_ && fallbackView_ &&
-           fallbackSampler_ && fallbackGroup_ && fallbackMappingBuffer_;
+           fallbackSampler_ && fallbackGroup_ && fallbackMappingBuffer_ && fallbackLayerBuffer_;
 }
 
 bool ShadowMaterialDescriptorTable::initialize(std::string* error) {
@@ -50,6 +51,7 @@ bool ShadowMaterialDescriptorTable::initialize(std::string* error) {
         {0U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
         {1U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment},
         {2U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
+        {3U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment},
     };
     layout_ = device_.create_bind_group_layout(layout, &local);
     if (!layout_) { set_error(error, local); clear(); return false; }
@@ -92,6 +94,13 @@ bool ShadowMaterialDescriptorTable::initialize(std::string* error) {
         {1U, {}, fallbackView_, 0U, 0U, fallbackSampler_},
         {2U,fallbackMappingBuffer_,{},0U,sizeof(GpuPolygonMaterialMappingRecord),{}},
     };
+    rhi::BufferDesc layerDesc;layerDesc.bytes=32;
+    layerDesc.usage=rhi::BufferUsage::Storage|rhi::BufferUsage::CopyDestination;
+    layerDesc.memory=rhi::MemoryDomain::Upload;layerDesc.initialState=rhi::ResourceState::ShaderRead;
+    fallbackLayerBuffer_=device_.create_buffer(layerDesc,&local);
+    const std::array<std::uint32_t,8> empty{};
+    if(!fallbackLayerBuffer_||!device_.write_buffer(fallbackLayerBuffer_,0,std::as_bytes(std::span(empty)),&local)){set_error(error,local);clear();return false;}
+    group.entries.push_back({3U,fallbackLayerBuffer_,{},0U,32U,{}});
     fallbackGroup_ = device_.create_bind_group(group, &local);
     if (!fallbackGroup_) { set_error(error, local); clear(); return false; }
     return true;
@@ -142,6 +151,7 @@ bool ShadowMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& as
     const MaterialKey key{asset.contentHash, materialIndex};
     if (materials_.contains(key)) { ++stats_.descriptorCacheHits; return true; }
 
+    const auto layers=build_layered_surface_payload(asset,materialIndex,error);if(!layers)return false;
     bool retainedNow{};
     if (!retain_asset_once(asset.contentHash, retainedNow, error)) return false;
     const auto& binding = asset.materialBindings[materialIndex];
@@ -164,19 +174,30 @@ bool ShadowMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& as
         {1U, {}, opacityView, 0U, 0U, opacitySampler},
         {2U,mapping,{},0U,sizeof(GpuPolygonMaterialMappingRecord),{}},
     };
+    rhi::BufferDesc layerDesc;layerDesc.bytes=layers->words.size()*4;
+    layerDesc.usage=rhi::BufferUsage::Storage|rhi::BufferUsage::CopyDestination;
+    layerDesc.memory=rhi::MemoryDomain::Upload;layerDesc.initialState=rhi::ResourceState::ShaderRead;
+    auto layerBuffer=device_.create_buffer(layerDesc,&local);
+    if(!layerBuffer||!device_.write_buffer(layerBuffer,0,std::as_bytes(std::span(layers->words)),&local)){
+        if(layerBuffer)(void)device_.destroy_buffer(layerBuffer,nullptr);
+        (void)device_.destroy_buffer(mapping,nullptr);set_error(error,local);rollback_asset_retain(asset.contentHash,retainedNow);return false;
+    }
+    group.entries.push_back({3U,layerBuffer,{},0U,layerDesc.bytes,{}});
     const auto handle = device_.create_bind_group(group, &local);
     if (!handle) {
+        (void)device_.destroy_buffer(layerBuffer,nullptr);
         (void)device_.destroy_buffer(mapping,nullptr);
         set_error(error, local);
         rollback_asset_retain(asset.contentHash, retainedNow);
         return false;
     }
     MaterialResource resource;
-    resource.descriptor = {handle, basePresent, opacityPresent, asset.contentHash, materialIndex, mapping};
+    resource.descriptor = {handle, basePresent, opacityPresent, asset.contentHash, materialIndex, mapping,layerBuffer};
     const auto [it, inserted] = materials_.emplace(key, resource);
     (void)it;
     if (!inserted) {
         (void)device_.destroy_bind_group(handle, nullptr);
+        (void)device_.destroy_buffer(layerBuffer,nullptr);
         (void)device_.destroy_buffer(mapping,nullptr);
         rollback_asset_retain(asset.contentHash, retainedNow);
         set_error(error, "shadow material descriptor publication collided");
@@ -205,6 +226,7 @@ bool ShadowMaterialDescriptorTable::invalidate_asset(std::uint64_t assetContentH
                 local.clear();
             }
             if(it->second.descriptor.mappingBuffer)(void)device_.destroy_buffer(it->second.descriptor.mappingBuffer,nullptr);
+            if(it->second.descriptor.layerBuffer)(void)device_.destroy_buffer(it->second.descriptor.layerBuffer,nullptr);
             it = materials_.erase(it);
         } else ++it;
     }
@@ -224,11 +246,15 @@ void ShadowMaterialDescriptorTable::clear() noexcept {
             (void)device_.destroy_bind_group(resource.descriptor.bindGroup, nullptr);
         if(resource.descriptor.mappingBuffer)(void)device_.destroy_buffer(resource.descriptor.mappingBuffer,nullptr);
     }
+    for(auto& [key,resource]:materials_){(void)key;if(resource.descriptor.layerBuffer)(void)device_.destroy_buffer(resource.descriptor.layerBuffer,nullptr);}
     materials_.clear();
     for (const auto assetContentHash : retainedAssets_)
         (void)residency_->release_asset(assetContentHash, nullptr);
     retainedAssets_.clear();
     if (fallbackGroup_) (void)device_.destroy_bind_group(fallbackGroup_, nullptr);
+    if(fallbackLayerBuffer_)(void)device_.destroy_buffer(fallbackLayerBuffer_,nullptr);
+    fallbackLayerBuffer_={};
+
     if(fallbackMappingBuffer_)(void)device_.destroy_buffer(fallbackMappingBuffer_,nullptr);
     fallbackMappingBuffer_={};
     if (fallbackView_) (void)device_.destroy_texture_view(fallbackView_, nullptr);

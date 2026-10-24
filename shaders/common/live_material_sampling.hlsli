@@ -36,8 +36,11 @@ float3 ApplyLiveDerivativeNormal(float3 N,float3 worldPosition,float2 uv,float3 
     float3 n=encoded*2-1;n.xy*=strength;
     const float magnitude=dot(n,n);
     n=magnitude>1e-12F?n*rsqrt(magnitude):float3(0,0,1);
-    const float3 dx=ddx(worldPosition),dy=ddy(worldPosition);
-    const float2 ux=ddx(uv),uy=ddy(uv);
+    float2 ux=ddx(uv),uy=ddy(uv);
+    // A frame's orientation must not depend on texel density or screen/ray footprint.
+    const float basisScale=max(max(max(abs(ux.x),abs(ux.y)),max(abs(uy.x),abs(uy.y))),1e-30F);
+    ux/=basisScale;uy/=basisScale;
+    const float3 dx=ddx(worldPosition)/basisScale,dy=ddy(worldPosition)/basisScale;
     const float det=ux.x*uy.y-ux.y*uy.x;
     if(abs(det)<=1e-8F)return N;
     float3 T=(dx*uy.y-dy*ux.y)/det;

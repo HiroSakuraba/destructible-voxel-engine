@@ -397,7 +397,8 @@ std::optional<std::vector<VoxelMaterialDefinition>> resolve_voxel_material_layer
             if (error) *error = "material layer stack exceeds four layers";
             return false;
         }
-        for (const VoxelMaterialLayer& layer : composed.layers) {
+        // Replacing composed invalidates its owned layer vector; visit immutable authoring data.
+        for (const VoxelMaterialLayer& layer : materials[id].layers) {
             if (!layer.enabled || layer.weight <= 0.0F) continue;
             if (!std::isfinite(layer.weight) || layer.weight < 0.0F || layer.weight > 1.0F ||
                 layer.sourceMaterial >= materials.size()) {
@@ -603,7 +604,8 @@ bool MaterialLibrary::resolve_all(std::string* error) {
         if (baseIt == bases.end()) return false;
         state[materialId] = 1;
         VoxelMaterialDefinition composed = baseIt->second;
-        for (const VoxelMaterialLayer& layer : composed.layers) {
+        // Keep iteration independent of the object replaced by each blend.
+        for (const VoxelMaterialLayer& layer : baseIt->second.layers) {
             if (!layer.enabled || layer.weight <= 0.0F) continue;
             if (!std::isfinite(layer.weight) || layer.weight < 0.0F || layer.weight > 1.0F) {
                 const auto target = materialIdToInstance_.find(materialId);

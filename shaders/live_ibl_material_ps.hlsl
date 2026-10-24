@@ -6,6 +6,8 @@
 #include "common/live_bindings.hlsli"
 #include "common/material_surface_detail.hlsli"
 #include "common/live_material_sampling.hlsli"
+DVE_LIVE_BIND(14,3) StructuredBuffer<uint> gLayerData : register(t37);
+#include "common/layered_surface.hlsli"
 DVE_LIVE_IMAGE(0,2) TextureCube<float4> gDiffuseIrradiance : register(t18);
 DVE_LIVE_IMAGE(1,2) TextureCube<float4> gSpecularPrefilter : register(t19);
 DVE_LIVE_IMAGE(2,2) Texture2D<float2> gEnvironmentBrdfLut : register(t20);
@@ -66,19 +68,24 @@ float4 main(float4 position : SV_Position, float3 worldPosition : TEXCOORD0,
     const float3 textureBaseColor = baseColorSample.rgb;
     float3 baseColor = max(
         MaterialBaseColorRGB(material) * color.rgb * textureBaseColor, 0.0F.xxx);
-    const float metallic = saturate(material.metallic * metallicRoughnessSample.b);
+    float metallic = saturate(material.metallic * metallicRoughnessSample.b);
     float roughness = saturate(material.roughness * metallicRoughnessSample.g);
 
     float3 shadingNormal = normalize(normal);
     if(hasNormal)shadingNormal=SampleLiveMaterialNormal(gLiveNormalTexture,gNormalSampler,mapping,uv,uv1,worldPosition,objectPosition,shadingNormal,(float3x3)gObjectToWorld);
 
-    ApplySurfaceDetail(gLiveSurfaceDetails[0],objectPosition,worldPosition,uv,uv1,
-        (float3x3)gObjectToWorld,worldTangent,baseColor,roughness,shadingNormal);
-    const float alpha = saturate(color.a * material.baseColorA * baseColorSample.a * opacitySample) *
+
+    float alpha = saturate(color.a * material.baseColorA * baseColorSample.a * opacitySample) *
                         finiteMappingUse;
-    if (material.blendMode == kBlendModeMasked) clip(alpha - mapping.alphaCutoff);
+
     float3 emissive = MaterialEmissiveRGB(material);
     if (hasEmissive) emissive *= emissiveSample.rgb;
+    float layerCoverage;
+    ApplyLayeredSurface(uv,uv1,worldPosition,objectPosition,normalize(normal),worldTangent,
+        (float3x3)gObjectToWorld,baseColor,metallic,roughness,emissive,alpha,shadingNormal,layerCoverage);
+    ApplySurfaceDetail(gLiveSurfaceDetails[0],objectPosition,worldPosition,uv,uv1,
+        (float3x3)gObjectToWorld,worldTangent,baseColor,roughness,shadingNormal);
+    if(material.blendMode==kBlendModeMasked)clip(alpha-mapping.alphaCutoff);
 #ifdef DVE_SURFACE_DEBUG_EMISSION
     return float4(emissive,alpha);
 #endif

@@ -2,6 +2,8 @@
 #include "dve/editor_native_renderer.hpp"
 #include "dve/editor_polygon.hpp"
 #include "dve/editor_subdivision.hpp"
+#include "dve/render/layered_surface.hpp"
+#include <cmath>
 #include <algorithm>
 #include <charconv>
 #include <fstream>
@@ -44,6 +46,19 @@ public:
     CommandResult undo(EditorDocument& d)override{return apply(d,false);}
 };
 std::filesystem::path preference_path(const std::filesystem::path& settings){return settings.empty()?std::filesystem::path{}:std::filesystem::path(settings.string()+".material-browser");}
+// A slot edit can break another material's stack that uses the slot as an overlay source
+// (for example by turning the source into a nested stack). Reject any stack that was valid
+// before the edit and is not valid after it; already-invalid imported stacks do not block edits.
+bool dependent_stacks_valid(const CookedPolygonAsset& before,const CookedPolygonAsset& after,std::string* error){
+    for(std::size_t i=0;i<after.materials.size();++i){
+        if(after.materials[i].layers.empty())continue;
+        std::string reason;if(render::validate_layered_surface(after,std::uint32_t(i),&reason))continue;
+        if(i<before.materials.size()&&before.materials.size()==before.materialBindings.size()&&!render::validate_layered_surface(before,std::uint32_t(i),nullptr))continue;
+        if(error)*error="Material slot "+std::to_string(i)+" layer stack would become invalid: "+reason;
+        return false;
+    }
+    return true;
+}
 std::string value_text(float v){std::ostringstream s;s<<std::setprecision(6)<<v;return s.str();}
 }
 MaterialPanelLayout NativeEditorController::material_panel_layout()const{
@@ -60,7 +75,7 @@ MaterialPanelLayout NativeEditorController::material_panel_layout()const{
     l.shape={l.preview.x,l.preview.y+size+12,(std::max)(16,center/2-3),26};
     l.savePreset={l.preview.x+center/2+3,l.shape.y,(std::max)(16,center/2-3),26};
     const int rx=x+w-right-12;
-    l.loadSlot={rx,y+104,right,26};l.advanced={rx,y+136,right,26};
+    l.loadSlot={rx,y+104,right,26};l.advanced={rx,y+136,right/2-2,26};l.layered={rx+right/2+2,y+136,right/2-2,26};
     for(int i=0;i<(std::max)(1,(h-272)/28);++i){l.fields.push_back({rx,y+170+i*28,right-30,26});l.resets.push_back({rx+right-27,y+170+i*28,27,26});}
     l.reset={rx,y+h-90,right/2-2,24};l.update={rx+right/2+2,y+h-90,right/2-2,24};
     l.apply={x+12,y+h-56,(w-30)/2,28};l.editSlot={x+18+(w-30)/2,y+h-56,(w-30)/2,28};return l;
@@ -85,10 +100,12 @@ std::vector<MaterialPresetControl> NativeEditorController::material_panel_contro
     }return r;
 }
 void NativeEditorController::material_panel_select(std::string_view id){
+    if(materialPanel_.layerMode){materialPanel_.selected=std::string(id);materialPanel_.message="Preset selected for Add preset; the assigned stack is unchanged";return;}
     if(const auto* a=materialPanel_.catalog.find(id)){materialPanel_.selected=a->id;materialPanel_.draft=instantiate_material_preset(*a,{});materialPanel_.editing.reset();materialPanel_.controlFirst=0;materialPanel_.message=a->description;material_panel_preview();}
 }
 void NativeEditorController::material_panel_preview(){
     if(!materialPanel_.preview)materialPanel_.preview=std::make_unique<MaterialPreviewWorker>();
+    if(materialPanel_.layerMode){for(auto id:workspace_.selected_objects())if(const auto* object=workspace_.document().find_object(id);object&&object->polygon){materialPanel_.preview->request(*object->polygon,materialPanel_.slot,materialPanel_.shape);return;}}
     materialPanel_.preview->request(materialPanel_.draft,materialPanel_.shape);
 }
 void NativeEditorController::material_panel_tick(){
@@ -165,6 +182,8 @@ bool NativeEditorController::load_material_panel_slot(){
 }
 bool NativeEditorController::apply_material_panel(bool editSlot){
     auto& p=materialPanel_;auto& d=workspace_.document();
+    if(p.layerMode){p.message="Layer actions edit assigned slots immediately; use their controls or leave Layers mode";return false;}
+    if(!p.draft.layers.empty()){p.message="Edit this assigned stack in Layers mode; applying a leaf preset would replace its maps";return false;}
     auto fail=[&](std::string error){p.message=std::move(error);set_status(p.message,true);return false;};
     if(playSession_.active() || longJob_ != nullptr)return fail("Finish the active simulation or background edit before applying materials");
     if(p.slot>255)return fail("Material slot must be in [0,255]");
@@ -193,6 +212,8 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
         if(o->polygon){c.beforeMesh=*o->polygon;auto mesh=*o->polygon;
             if(editSlot||o->is_nurbs()){
                 const auto slot=o->is_nurbs()?0:p.slot;if(slot>=mesh.materials.size())return fail(o->name+": slot does not exist");
+                // The draft can predate a stack edit; never silently drop an assigned stack and its maps.
+                if(!mesh.materials[slot].layers.empty())return fail(o->name+": slot "+std::to_string(slot)+" has a layer stack; edit it in Layers mode");
                 mesh.materials[slot]=withPhysical(mesh.materials[slot]);mesh.materialBindings[slot]={};
             }else{
                 if(mesh.materials.size()>=256)return fail(o->name+": all material slots are occupied");
@@ -212,6 +233,7 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
                     if(!result)return fail(result.error);
                     mesh=std::move(result.mesh);}
             }
+            {std::string stackError;if(!dependent_stacks_valid(*o->polygon,mesh,&stackError))return fail(o->name+": "+stackError);}
             mesh.contentHash=polygon_asset_content_hash(mesh);const auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);c.afterMesh=std::move(mesh);
         }else{
             if(!o->voxels)return fail(o->name+": no assignable surface");
@@ -241,13 +263,23 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
     p.message="Applied to "+std::to_string(targets.size())+" objects; one Undo restores definitions, maps and assignments";set_status(p.message);return true;
 }
 void NativeEditorController::material_panel_text(std::string_view text){
-    auto& p=materialPanel_;if(p.editing){if(p.replaceText){p.typed.clear();p.replaceText=false;}if(p.typed.size()+text.size()<=64)p.typed+=text;}
+    auto& p=materialPanel_;if(p.editing||p.layerEditing){if(p.replaceText){p.typed.clear();p.replaceText=false;}if(p.typed.size()+text.size()<=64)p.typed+=text;}
     else if(p.searchFocus&&p.query.size()+text.size()<=128){p.query+=text;p.first=0;}
 }
 bool NativeEditorController::material_panel_key(std::string_view key,bool control,bool shift,bool alt){
     (void)alt;auto& p=materialPanel_;if(!p.open)return false;
+    if(p.layerEditing){
+        if(key=="escape"){p.layerEditing.reset();return true;}
+        if(key=="backspace"){if(p.replaceText){p.typed.clear();p.replaceText=false;}else if(!p.typed.empty())p.typed.pop_back();return true;}
+        if(key=="enter"||key=="return"||key=="tab"){
+            float value{};const auto parsed=std::from_chars(p.typed.data(),p.typed.data()+p.typed.size(),value);
+            if(parsed.ec!=std::errc{}||parsed.ptr!=p.typed.data()+p.typed.size()||!std::isfinite(value)){p.message="Enter a finite layer value";return false;}
+            auto action=*p.layerEditing;p.layerEditing.reset();return material_panel_layer_action(action,value);
+        }
+        return true;
+    }
     if(key=="escape"){if(p.editing)p.editing.reset();else close_material_panel();return true;}
-    if(control&&(key=="z"||key=="y")){auto result=key=="z"?workspace_.commands().undo(workspace_.document()):workspace_.commands().redo(workspace_.document());p.message=result.success?"Material history updated":result.message;return true;}
+    if(control&&(key=="z"||key=="y")){auto result=key=="z"?workspace_.commands().undo(workspace_.document()):workspace_.commands().redo(workspace_.document());p.message=result.success?"Material history updated":result.message;if(p.layerMode)material_panel_preview();return true;}
     if(p.editing){if(key=="enter"||key=="return"||key=="tab"){
             float value{};const auto parsed=std::from_chars(p.typed.data(),p.typed.data()+p.typed.size(),value);
             if(parsed.ec!=std::errc{}||parsed.ptr!=p.typed.data()+p.typed.size()){p.message="Enter a finite number in the displayed range";return false;}
@@ -260,6 +292,7 @@ bool NativeEditorController::material_panel_key(std::string_view key,bool contro
     auto entries=material_panel_entries();auto it=std::find_if(entries.begin(),entries.end(),[&](auto* a){return a->id==p.selected;});
     if(key=="up"||key=="down"){if(!entries.empty()){auto index=it==entries.end()?0:std::size_t(it-entries.begin());index=key=="up"?(index?index-1:0):(std::min)(index+1,entries.size()-1);material_panel_select(entries[index]->id);const auto count=material_panel_layout().rows.size();if(index<p.first)p.first=index;else if(index>=p.first+count)p.first=index-count+1;}return true;}
     if(key=="f"&&control){if(p.favorites.contains(p.selected))p.favorites.erase(p.selected);else p.favorites.insert(p.selected);save_material_panel_preferences();return true;}
+    if(key=="tab"&&p.layerMode)return true;
     if(key=="tab"){auto fields=material_panel_controls();if(!fields.empty()){p.searchFocus=false;p.editing=fields[(std::min)(p.controlFirst,fields.size()-1)].property;p.typed=value_text(material_preset_value(p.draft,*p.editing));p.replaceText=true;}return true;}
     if(key=="enter"||key=="return")return apply_material_panel(shift);
     if(key=="pageup"||key=="pagedown"){auto count=material_panel_layout().rows.size();if(key=="pageup")p.first=p.first>count?p.first-count:0;else if(p.first+count<entries.size())p.first+=count;return true;}
@@ -280,10 +313,18 @@ bool NativeEditorController::material_panel_pointer(int x,int y){
     else if(l.previous.contains(x,y))p.first=p.first>l.rows.size()?p.first-l.rows.size():0;
     else if(l.next.contains(x,y)&&p.first+l.rows.size()<entries.size())p.first+=l.rows.size();
     else if(l.shape.contains(x,y)){p.shape=MaterialPreviewShape((unsigned(p.shape)+1)%4);material_panel_preview();}
-    else if(l.savePreset.contains(x,y))return save_material_panel_preset();
-    else if(l.apply.contains(x,y))return apply_material_panel(false);
-    else if(l.editSlot.contains(x,y))return apply_material_panel(true);
+    else if(l.savePreset.contains(x,y)){if(p.layerMode){p.message="Layer stacks and maps are saved with the scene; leaf presets remain reusable";return true;}return save_material_panel_preset();}
+    else if(l.apply.contains(x,y)){if(p.layerMode){auto result=workspace_.commands().undo(workspace_.document());p.message=result.success?"Layer history undone":result.message;material_panel_preview();return true;}return apply_material_panel(false);}
+    else if(l.editSlot.contains(x,y)){if(p.layerMode){auto result=workspace_.commands().redo(workspace_.document());p.message=result.success?"Layer history redone":result.message;material_panel_preview();return true;}return apply_material_panel(true);}
     else if(l.loadSlot.contains(x,y)){if(x>l.loadSlot.x+l.loadSlot.width-30)p.slot=(p.slot+1)%256;else return load_material_panel_slot();}
+    else if(l.layered.contains(x,y)){p.layerMode=!p.layerMode;p.controlFirst=0;p.editing.reset();p.layerEditing.reset();p.message="Layers: edit the assigned polygon slot immediately; every action has Undo";material_panel_preview();}
+    else if(p.layerMode){auto controls=material_panel_layer_controls();for(std::size_t i=0;i<l.fields.size()&&p.controlFirst+i<controls.size();++i)if(l.fields[i].contains(x,y)){
+        auto action=controls[p.controlFirst+i].first;
+        if(action=="weight"||action=="maskScale"||action=="maskBias"||action=="heightStrength"||action=="heightBias"||action=="heightTransition"||action=="normalScale"||action=="sourceScale"||action=="sourceOffsetX"||action=="sourceOffsetY"||action=="sourceRotation"){
+            p.layerEditing=action;p.typed="";p.replaceText=true;p.searchFocus=false;p.message="Type a number, then Enter to commit one undo step";return true;
+        }
+        return material_panel_layer_action(action);
+    }return true;}
     else if(l.advanced.contains(x,y)){p.advanced=!p.advanced;p.controlFirst=0;p.editing.reset();}
     else if(l.reset.contains(x,y)){if(const auto* a=p.catalog.find(p.draft.preset.id)){if(a->revision!=p.draft.preset.revision)p.message="Original revision unavailable; use Update explicitly";else{p.draft=instantiate_material_preset(*a,p.draft);material_panel_preview();}}}
     else if(l.update.contains(x,y)){if(const auto* a=p.catalog.find(p.draft.preset.id)){if(update_material_preset(p.draft,*a,true,&p.message)){p.message="Updated draft to preset revision "+std::to_string(a->revision)+"; kept local overrides; Apply commits";material_panel_preview();}}else p.message="Origin preset missing; saved values remain usable";}
@@ -292,13 +333,130 @@ bool NativeEditorController::material_panel_pointer(int x,int y){
             if(l.fields[i].contains(x,y)){p.searchFocus=false;p.editing=c.property;p.typed=value_text(material_preset_value(p.draft,c.property));p.replaceText=true;p.message=std::string(c.help)+" ["+value_text(c.minimum)+", "+value_text(c.maximum)+"] "+std::string(c.unit);return true;}}}
     return true;
 }
+std::vector<std::pair<std::string,std::string>> NativeEditorController::material_panel_layer_controls()const{
+    const auto& p=materialPanel_;
+    std::vector<std::pair<std::string,std::string>> rows{{"add","Add selected preset"},{"recipeMetal","Recipe: paint / rust / metal"},{"recipeWood","Recipe: worn painted wood"},{"recipePlaster","Recipe: dirty / scorched plaster"}};
+    for(auto id:workspace_.selected_objects()){
+        const auto* object=workspace_.document().find_object(id);
+        if(!object||!object->polygon||p.slot>=object->polygon->materials.size())continue;
+        const auto& mesh=*object->polygon;const auto& material=mesh.materials[p.slot];
+        if(material.layers.empty())return rows;
+        const auto at=(std::min)(p.layerIndex,material.layers.size()-1);const auto& layer=material.layers[at];
+        const auto binding=at<mesh.materialBindings[p.slot].layers.size()?mesh.materialBindings[p.slot].layers[at]:PolygonMaterialLayerBinding{};
+        const auto name=layer.sourceMaterial<mesh.materials.size()?mesh.materials[layer.sourceMaterial].name:"missing source";
+        rows.insert(rows.begin(),{"select","Overlay "+std::to_string(at+1)+"/"+std::to_string(material.layers.size())+": "+name});
+        auto add=[&](std::string key,std::string text){rows.emplace_back(std::move(key),std::move(text));};
+        add("toggle",layer.enabled?"Mute overlay":"Enable overlay");add("solo","Solo overlay (Undo restores)");
+        add("up","Move toward base");add("down","Move toward top");add("duplicate","Duplicate overlay");add("remove","Remove overlay");
+        add("weight","Weight: "+value_text(layer.weight));add("source","Cycle source slot: "+std::to_string(layer.sourceMaterial));
+        constexpr const char* blends[]{"Lerp","Multiply","Additive"};add("blend",std::string("Color blend: ")+blends[unsigned(layer.blendMode)%3]);
+        add("semantic",std::string("Role: ")+material_layer_semantic_label(binding.semantic));
+        add("mask","Mask map: "+(binding.mask.texture?std::to_string(*binding.mask.texture):"none"));add("maskUv","Mask UV: "+std::to_string(binding.mask.texcoord));
+        add("maskScale","Mask scale: "+value_text(binding.maskScale));add("maskBias","Mask bias: "+value_text(binding.maskBias));
+        add("height","Height override: "+(binding.height.texture?std::to_string(*binding.height.texture):"source"));add("heightUv","Height UV: "+std::to_string(binding.height.texcoord));
+        add("heightStrength","Height strength: "+value_text(binding.heightBlendStrength));add("heightBias","Height bias: "+value_text(binding.heightBlendBias));add("heightTransition","Height transition: "+value_text(binding.heightBlendTransition));
+        add("opacity",std::string("Opacity: ")+material_layer_opacity_policy_label(binding.opacityPolicy));
+        if(layer.sourceMaterial<mesh.materialBindings.size()){
+            const auto& source=mesh.materialBindings[layer.sourceMaterial];
+            add("normalScale","Source normal strength: "+value_text(source.normalScale));
+            add("sourceMapping","Source mapping: "+std::to_string(unsigned(source.mapping.mappingMode)));
+            add("sourceScale","Source UV scale: "+value_text(source.mapping.baseTransform.scale.x));
+            add("sourceOffsetX","Source U offset: "+value_text(source.mapping.baseTransform.offset.x));add("sourceOffsetY","Source V offset: "+value_text(source.mapping.baseTransform.offset.y));
+            add("sourceRotation","Source rotation (rad): "+value_text(source.mapping.baseTransform.rotationRadians));
+        }
+        break;
+    }
+    return rows;
+}
+bool NativeEditorController::material_panel_layer_action(std::string_view action,float value){
+    auto& p=materialPanel_;auto& document=workspace_.document();
+    auto fail=[&](std::string message){p.message=std::move(message);return false;};
+    if(playSession_.active()||longJob_!=nullptr)return fail("Finish simulation/background edits first");
+    if(!std::isfinite(value))return fail("Layer values must be finite");
+    const auto targets=workspace_.selected_objects();if(targets.empty())return fail("Select polygon objects first");
+    if(action=="select"){++p.layerIndex;for(auto id:targets){const auto* o=document.find_object(id);if(o&&o->polygon&&p.slot<o->polygon->materials.size()){const auto count=o->polygon->materials[p.slot].layers.size();p.layerIndex=count?p.layerIndex%count:0;break;}}p.controlFirst=0;return true;}
+    std::vector<ObjectMaterialChange> changes;
+    for(auto id:targets){const auto* object=document.find_object(id);
+        if(!object||!object->polygon||object->is_nurbs())return fail("Layer editing requires polygon or subdivision objects");
+        if(object->flags.locked||!object->flags.visible||is_isolated_out(id))return fail("Unlock and show every selected target first");
+        auto mesh=*object->polygon;if(p.slot>=mesh.materials.size())return fail("Assigned material slot does not exist");
+        auto& material=mesh.materials[p.slot];auto& binding=mesh.materialBindings[p.slot];
+        while(binding.layers.size()<material.layers.size()){PolygonMaterialLayerBinding legacy;legacy.heightBlendStrength=0;binding.layers.push_back(legacy);}
+        if(action.starts_with("recipe")){
+            if(mesh.materials.size()+3>256)return fail("Recipe needs three free material slots");
+            const bool wood=action=="recipeWood",plaster=action=="recipePlaster";
+            auto base=material;base.layers.clear();base.transmission=0;base.blendMode=MaterialBlendMode::Opaque;base.shadingModel=MaterialShadingModel::StandardPBR;base.normalMap.reset();base.clearCoat=0;base.transparent=false;base.preset={};
+            base.baseColor=wood?Float4{.25F,.09F,.025F,1}:plaster?Float4{.72F,.7F,.66F,1}:Float4{.56F,.57F,.58F,1};base.metallic=wood||plaster?0:1;base.roughness=wood?.65F:plaster?.92F:.24F;
+            base.surfaceDetail.pattern=wood?SurfacePattern::Wood:plaster?SurfacePattern::Mineral:SurfacePattern::NoPattern;
+            mesh.materials[p.slot]=base;mesh.materialBindings[p.slot]={};
+            for(unsigned n=0;n<3;++n){VoxelMaterialDefinition source;source.name=plaster?(n==0?"Dirt":n==1?"Scorch":"Dust"):(n==0?"Paint":n==1?"Rust":"Dirt");
+                source.baseColor=plaster?(n==1?Float4{.025F,.02F,.015F,1}:Float4{.14F,.09F,.045F,1}):(n==0?Float4{.05F,.19F,.3F,1}:n==1?Float4{.28F,.065F,.018F,1}:Float4{.07F,.045F,.025F,1});
+                source.roughness=n==0&&!plaster?.4F:.9F;source.surfaceDetail.pattern=n==0&&!plaster?SurfacePattern::Paint:SurfacePattern::Mineral;
+                const auto sourceSlot=MaterialId(mesh.materials.size());mesh.materials.push_back(source);mesh.materialBindings.emplace_back();
+                PolygonImage mask;mask.name="Original layered recipe mask";mask.mimeType="image/raw";mask.width=mask.height=32;mask.rgba8.resize(32*32*4);
+                for(unsigned y=0;y<32;++y)for(unsigned x=0;x<32;++x){const float wave=.5F+.5F*std::sin(float(x)*float(n+1)*.37F+std::sin(float(y)*.43F));const auto byte=std::uint8_t(std::lround(std::clamp(wave,0.F,1.F)*255));const auto at=(y*32+x)*4;mask.rgba8[at]=mask.rgba8[at+1]=mask.rgba8[at+2]=byte;mask.rgba8[at+3]=255;}
+                const auto image=unsigned(mesh.images.size());mesh.images.push_back(std::move(mask));const auto texture=unsigned(mesh.textures.size());mesh.textures.push_back({"Recipe coverage",image,{}});
+                mesh.materials[p.slot].layers.push_back({sourceSlot,n==0?.85F:.45F,MaterialLayerBlendMode::Lerp,true});
+                PolygonMaterialLayerBinding lb;lb.heightBlendStrength=0;lb.semantic=plaster?(n==1?MaterialLayerSemantic::Scorch:MaterialLayerSemantic::Dirt):(n==0?MaterialLayerSemantic::Paint:n==1?MaterialLayerSemantic::Rust:MaterialLayerSemantic::Dirt);lb.mask.texture=texture;mesh.materialBindings[p.slot].layers.push_back(lb);
+            }
+        }else if(action=="add"){
+            if(material.layers.size()>=4||mesh.materials.size()>=256)return fail("Maximum four overlays and 256 material slots");
+            const auto* preset=p.catalog.find(p.selected);if(!preset)return fail("Select an overlay preset");
+            auto source=instantiate_material_preset(*preset,{});const auto slot=MaterialId(mesh.materials.size());
+            material.layers.push_back({slot,1,MaterialLayerBlendMode::Lerp,true});PolygonMaterialLayerBinding lb;lb.heightBlendStrength=0;binding.layers.push_back(lb);
+            mesh.materials.push_back(std::move(source));mesh.materialBindings.emplace_back();
+        }else{
+            if(material.layers.empty())return fail("Add an overlay first");
+            const auto at=(std::min)(p.layerIndex,material.layers.size()-1);auto& layer=material.layers[at];auto& lb=binding.layers[at];
+            if(action=="remove"){material.layers.erase(material.layers.begin()+std::ptrdiff_t(at));binding.layers.erase(binding.layers.begin()+std::ptrdiff_t(at));}
+            else if(action=="duplicate"){if(material.layers.size()>=4)return fail("Maximum four overlays");const auto copy=layer;const auto b=lb;material.layers.push_back(copy);binding.layers.push_back(b);}
+            else if(action=="up"||action=="down"){const auto other=action=="up"?(at?at-1:at):(std::min)(at+1,material.layers.size()-1);std::swap(material.layers[at],material.layers[other]);std::swap(binding.layers[at],binding.layers[other]);}
+            else if(action=="toggle")layer.enabled=!layer.enabled;
+            else if(action=="solo")for(std::size_t n=0;n<material.layers.size();++n)material.layers[n].enabled=n==at;
+            else if(action=="weight"){if(value<0||value>1)return fail("Weight must be in [0,1]");layer.weight=value;}
+            else if(action=="blend")layer.blendMode=MaterialLayerBlendMode((unsigned(layer.blendMode)+1)%3);
+            else if(action=="opacity")lb.opacityPolicy=MaterialLayerOpacityPolicy((unsigned(lb.opacityPolicy)+1)%5);
+            else if(action=="semantic")lb.semantic=MaterialLayerSemantic((unsigned(lb.semantic)+1)%8);
+            else if(action=="source"){bool found=false;for(unsigned step=1;step<=mesh.materials.size();++step){const auto next=(unsigned(layer.sourceMaterial)+step)%mesh.materials.size();if(next!=0&&next!=p.slot&&mesh.materials[next].layers.empty()){auto candidate=mesh;candidate.materials[p.slot].layers[at].sourceMaterial=MaterialId(next);if(render::validate_layered_surface(candidate,p.slot)){layer.sourceMaterial=MaterialId(next);found=true;break;}}}if(!found)return fail("No compatible leaf source slot");}
+            else if(action=="mask"||action=="height"){auto& map=action=="mask"?lb.mask:lb.height;if(mesh.textures.empty())return fail("Import a mesh with textures or start with a recipe mask");const auto next=map.texture?*map.texture+1:0;map.texture=next<mesh.textures.size()?std::optional<unsigned>(next):std::nullopt;}
+            else if(action=="maskUv")lb.mask.texcoord=1-lb.mask.texcoord;
+            else if(action=="heightUv")lb.height.texcoord=1-lb.height.texcoord;
+            else if(action=="maskScale")lb.maskScale=value;
+            else if(action=="maskBias")lb.maskBias=value;
+            else if(action=="heightBias")lb.heightBlendBias=value;
+            else if(action=="heightStrength"){if(value<0)return fail("Height strength must be nonnegative");lb.heightBlendStrength=value;}
+            else if(action=="heightTransition"){if(value<0)return fail("Height transition must be nonnegative");lb.heightBlendTransition=value;}
+            else if(action=="sourceMapping")mesh.materialBindings[layer.sourceMaterial].mapping.mappingMode=MaterialMappingMode((unsigned(mesh.materialBindings[layer.sourceMaterial].mapping.mappingMode)+1)%4);
+            else if(action=="sourceScale"){if(std::abs(value)<1e-6F||std::abs(value)>10000)return fail("Source scale magnitude must be in [0.000001,10000]");mesh.materialBindings[layer.sourceMaterial].mapping.baseTransform.scale={value,value};}
+            else if(action=="sourceOffsetX")mesh.materialBindings[layer.sourceMaterial].mapping.baseTransform.offset.x=value;
+            else if(action=="sourceOffsetY")mesh.materialBindings[layer.sourceMaterial].mapping.baseTransform.offset.y=value;
+            else if(action=="sourceRotation")mesh.materialBindings[layer.sourceMaterial].mapping.baseTransform.rotationRadians=value;
+            else if(action=="normalScale"){if(value<0||value>8)return fail("Normal strength must be in [0,8]");mesh.materialBindings[layer.sourceMaterial].normalScale=value;}
+            else return fail("Unknown layer edit");
+        }
+        std::string error;if(!render::validate_layered_surface(mesh,p.slot,&error))return fail(error);
+        // The edited slot may also be an overlay source of another stack (Codex review).
+        if(!dependent_stacks_valid(*object->polygon,mesh,&error))return fail(error);
+        mesh.contentHash=polygon_asset_content_hash(mesh);const auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);
+        ObjectMaterialChange change;change.id=id;change.beforePalette=change.afterPalette=object->voxelMaterials;change.beforeMesh=*object->polygon;change.afterMesh=std::move(mesh);changes.push_back(std::move(change));
+    }
+    auto result=workspace_.commands().execute(document,std::make_unique<ApplyMaterialPresetCommand>(materials_,activeMaterial_,activeMaterial_,materials_,std::move(changes),"Edit layered surface: "+std::string(action)));
+    if(!result.success)return fail(result.message);
+    for(auto id:targets)if(const auto* object=document.find_object(id);object&&object->polygon){
+        const auto count=object->polygon->materials[p.slot].layers.size();
+        if(action=="up"&&p.layerIndex>0)--p.layerIndex;
+        if(action=="down"&&p.layerIndex+1<count)++p.layerIndex;
+        p.layerIndex=count?(std::min)(p.layerIndex,count-1):0;break;
+    }
+    p.message="Layer stack changed; Ctrl+Z restores the complete edit";material_panel_preview();return true;
+}
 void render_material_panel(const IEditorCanvas& canvas,NativeEditorController& controller){
     auto& p=controller.material_panel();if(!p.open)return;const auto l=controller.material_panel_layout();RectClipCanvas painter(canvas,l.panel);
     constexpr std::uint32_t bg=0x172133,button=0x26374d,ink=0xe2e9f2,muted=0x9eafc3,accent=0x66cddd;
     painter.fill(l.panel,bg);painter.outline(l.panel,accent);
     auto text=[&](UiRect r,std::string s){painter.text(r.x+5,r.y+17,elide_text_to_width(painter,s,r.width-10),ink);};
     auto btn=[&](UiRect r,std::string s,bool on=false){painter.fill(r,on?0x355f70:button);text(r,s);};
-    painter.text(l.panel.x+12,l.panel.y+24,"Material presets | Draft preview | Apply is one undo step",ink);btn(l.close,"X");
+    painter.text(l.panel.x+12,l.panel.y+24,p.layerMode?"Layered Surface | Assigned slot | Each action is one undo step":"Material presets | Draft preview | Apply is one undo step",ink);btn(l.close,"X");
     btn(l.search,(p.searchFocus?"> ":"Search: ")+p.query);btn(l.family,p.family.empty()?"All families":p.family);
     btn(l.favorites,"Favorites",p.favoritesOnly);btn(l.recent,"Recent",p.recentOnly);
     constexpr std::array<const char*,4> backends{"CPU reference","CPU player","Native viewport","GPU"};btn(l.backend,backends[unsigned(p.backend)]);btn(l.supported,"Supported only",p.supportedOnly);
@@ -315,19 +473,20 @@ const auto support=material_preset_capability(*a,p.backend).support;
     btn(l.previous,"<");btn(l.next,">");
     if(p.preview){if(const auto image=p.preview->image()){if(!image->error.empty())text(l.preview,image->error);else for(unsigned y=0;y<image->size;++y)for(unsigned x=0;x<image->size;++x){const int x0=l.preview.x+int(x)*l.preview.width/int(image->size),y0=l.preview.y+int(y)*l.preview.height/int(image->size);const int x1=l.preview.x+int(x+1)*l.preview.width/int(image->size),y1=l.preview.y+int(y+1)*l.preview.height/int(image->size);painter.fill({x0,y0,x1-x0,y1-y0},image->rgb[y*image->size+x]);}}
         else text(l.preview,"Rendering CPU preview...");}
-    constexpr std::array<const char*,4> shapes{"Sphere","Flat patch","Rounded box","Thickness wedge"};btn(l.shape,shapes[unsigned(p.shape)]);btn(l.savePreset,"Save as Preset");
+    constexpr std::array<const char*,4> shapes{"Sphere","Flat patch","Rounded box","Thickness wedge"};btn(l.shape,shapes[unsigned(p.shape)]);btn(l.savePreset,p.layerMode?"Saved with scene":"Save as Preset");
     text({l.shape.x,l.shape.y+30,l.shape.width*2,24},"CPU studio | "+std::to_string(controller.workspace().selection_count())+" targets");
     const auto* origin=p.catalog.find(p.draft.preset.id);
     text({l.shape.x,l.shape.y+54,l.shape.width*2,24},p.draft.preset.id.empty()?"Saved material (no preset origin)":"Origin r"+std::to_string(p.draft.preset.revision)+(origin?" | library r"+std::to_string(origin->revision):" | preset missing"));
-    btn(l.loadSlot,"Load slot "+std::to_string(p.slot)+"  +");btn(l.advanced,p.advanced?"Advanced: on":"Advanced: off");
-    const auto fields=controller.material_panel_controls();
+    btn(l.loadSlot,"Load slot "+std::to_string(p.slot)+"  +");if(!p.layerMode)btn(l.advanced,p.advanced?"Advanced: on":"Advanced: off");btn(l.layered,"Layers",p.layerMode);
+    if(p.layerMode){const auto controls=controller.material_panel_layer_controls();for(std::size_t i=0;i<l.fields.size()&&p.controlFirst+i<controls.size();++i){const auto& c=controls[p.controlFirst+i];auto r=l.fields[i];r.width+=30;btn(r,p.layerEditing==c.first?c.second+": "+p.typed:c.second,p.layerEditing==c.first);}}
+    const auto fields=p.layerMode?std::vector<MaterialPresetControl>{}:controller.material_panel_controls();
     for(std::size_t i=0;i<l.fields.size()&&p.controlFirst+i<fields.size();++i){const auto c=fields[p.controlFirst+i];std::string value=p.editing==c.property?p.typed:value_text(material_preset_value(p.draft,c.property));
         const bool overridden=(p.draft.preset.overrides&(std::uint64_t(1)<<unsigned(c.property)))!=0;btn(l.fields[i],std::string(c.label)+(overridden?"* ":" ")+value+" "+std::string(c.unit),p.editing==c.property);btn(l.resets[i],"R");}
-    btn(l.reset,"Reset draft");btn(l.update,"Update draft");
-    btn(l.apply,"Apply Copy / Make Unique");btn(l.editSlot,"Apply to Slot (shared faces/cells)");
+    if(!p.layerMode){btn(l.reset,"Reset draft");btn(l.update,"Update draft");}
+    btn(l.apply,p.layerMode?"Undo stack edit (Ctrl+Z)":"Apply Copy / Make Unique");btn(l.editSlot,p.layerMode?"Redo stack edit (Ctrl+Y)":"Apply to Slot (shared faces/cells)");
     auto asset=p.catalog.find(p.draft.preset.id);MaterialPresetAsset requested;if(asset)requested=*asset;if(p.draft.surfaceDetail.pattern!=SurfacePattern::NoPattern)requested.requirements.push_back(MaterialPresetFeature::SurfaceDetail);if(p.draft.transmission>0)requested.requirements.push_back(MaterialPresetFeature::SolidTransmission);
     const auto cap=material_preset_capability(requested,p.backend);const int y=l.panel.y+l.panel.height-118;
-    text({l.preview.x,y,l.loadSlot.x-l.preview.x-12,24},std::string(material_preset_support_label(cap.support))+": "+cap.reason);
+    text({l.preview.x,y,l.loadSlot.x-l.preview.x-12,24},p.layerMode?"Layered Surface | Opaque / masked polygons":std::string(material_preset_support_label(cap.support))+": "+cap.reason);
     painter.text(l.panel.x+12,l.panel.y+l.panel.height-8,elide_text_to_width(painter,p.message.empty()?"Arrows: presets | Ctrl+F: favorite | [ ]: slot | Wheel: list/controls | Enter: Apply Copy":p.message,l.panel.width-24),muted);
 }
 }

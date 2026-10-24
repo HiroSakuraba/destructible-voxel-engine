@@ -231,6 +231,27 @@ def validate_material_abi(root: Path) -> list[str]:
     if surface_fields != surface_shader_fields or len(surface_fields) != 16:
         errors.append(f"Surface detail ABI drift: C++={surface_fields}, HLSL={surface_shader_fields}")
 
+    # Layer payloads embed the stable scalar records. Check every loader offset;
+    # aggregate size checks alone would miss a field reorder or a float/uint reinterpretation.
+    loaders = (root / "shaders/common/layer_record_load.hlsli").read_text(encoding="utf-8")
+    for header, name in (("material_record.hlsli", "MaterialRecord"),
+                         ("material_mapping.hlsli", "PolygonMaterialMappingRecord"),
+                         ("material_surface_detail.hlsli", "SurfaceDetailRecord")):
+        text = (root / "shaders/common" / header).read_text(encoding="utf-8")
+        body = re.search(r"struct " + name + r"\s*\{(.*?)\};", text, re.S).group(1)
+        fields = re.findall(r"\b(float|uint)\s+(\w+)\s*;", body)
+        loader = re.search(name + r" LoadLayer" + name + r"\(uint o\) \{(.*?)\n\}", loaders, re.S)
+        if not loader:
+            errors.append(f"Missing layer ABI loader for {name}")
+            continue
+        compact = re.sub(r"\s+", "", loader.group(1))
+        for index, (kind, field) in enumerate(fields):
+            value = f"gLayerData[o+{index}]"
+            if kind == "float":
+                value = "asfloat(" + value + ")"
+            if f"r.{field}={value};" not in compact:
+                errors.append(f"Layer ABI offset drift: {name}.{field}")
+
     caster_vs = (root / "shaders/live_csm_caster_vs.hlsl").read_text(encoding="utf-8")
     caster_ps = (root / "shaders/live_csm_caster_ps.hlsl").read_text(encoding="utf-8")
     material_ps = (root / "shaders/live_ibl_material_ps.hlsl").read_text(encoding="utf-8")

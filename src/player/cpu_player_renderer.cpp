@@ -103,13 +103,13 @@ void draw_racing_effects(std::span<const RacingVisualEffect> effects,
             if(!project_racing(c,fx.b,b))continue;
             const float ra=std::clamp(fx.radius*a.pixelsPerMetre*0.5F,0.65F,20.0F);
             const float rb=std::clamp(fx.radius*b.pixelsPerMetre*0.5F,0.65F,20.0F);
-            const float radius=std::max(ra,rb);
+            const float radius=(std::max)(ra,rb);
             const float dx=b.x-a.x,dy=b.y-a.y,length2=dx*dx+dy*dy;
             if(length2>1000000.0F)continue;
-            const int minX=std::max(0,int(std::floor(std::min(a.x,b.x)-radius-1)));
-            const int maxX=std::min(int(depth.width)-1,int(std::ceil(std::max(a.x,b.x)+radius+1)));
-            const int minY=std::max(0,int(std::floor(std::min(a.y,b.y)-radius-1)));
-            const int maxY=std::min(int(depth.height)-1,int(std::ceil(std::max(a.y,b.y)+radius+1)));
+            const int minX=(std::max)(0,int(std::floor(std::min(a.x,b.x)-radius-1)));
+            const int maxX=(std::min)(int(depth.width)-1,int(std::ceil(std::max(a.x,b.x)+radius+1)));
+            const int minY=(std::max)(0,int(std::floor(std::min(a.y,b.y)-radius-1)));
+            const int maxY=(std::min)(int(depth.height)-1,int(std::ceil(std::max(a.y,b.y)+radius+1)));
             for(int y=minY;y<=maxY;++y)for(int x=minX;x<=maxX;++x){
                 const float t=length2>1.e-5F?std::clamp(((x+0.5F-a.x)*dx+(y+0.5F-a.y)*dy)/length2,0.0F,1.0F):0.0F;
                 const float px=a.x+t*dx,py=a.y+t*dy;
@@ -121,10 +121,10 @@ void draw_racing_effects(std::span<const RacingVisualEffect> effects,
         }else{
             const float growing=fx.radius*(1.0F+fx.age*1.4F);
             const float radius=std::clamp(growing*a.pixelsPerMetre,1.0F,35.0F);
-            const int minX=std::max(0,int(std::floor(a.x-radius)));
-            const int maxX=std::min(int(depth.width)-1,int(std::ceil(a.x+radius)));
-            const int minY=std::max(0,int(std::floor(a.y-radius)));
-            const int maxY=std::min(int(depth.height)-1,int(std::ceil(a.y+radius)));
+            const int minX=(std::max)(0,int(std::floor(a.x-radius)));
+            const int maxX=(std::min)(int(depth.width)-1,int(std::ceil(a.x+radius)));
+            const int minY=(std::max)(0,int(std::floor(a.y-radius)));
+            const int maxY=(std::min)(int(depth.height)-1,int(std::ceil(a.y+radius)));
             const std::array<float,3> color=fx.kind==RacingVisualKind::Dust?
                std::array<float,3>{163,144,113}:std::array<float,3>{175,179,182};
             for(int y=minY;y<=maxY;++y)for(int x=minX;x<=maxX;++x){

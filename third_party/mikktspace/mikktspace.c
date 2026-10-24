@@ -19,6 +19,10 @@
  *  2. Altered source versions must be plainly marked as such, and must not be
  *     misrepresented as being the original software.
  *  3. This notice may not be removed or altered from any source distribution.
+ *
+ *  ALTERED SOURCE VERSION (DVE): the random-pivot rotates in QuickSort() and QuickSortEdges() are guarded so it
+ *  never shifts a 32-bit value by 32 (undefined behaviour). See
+ *  third_party/notices/MIKKTSPACE_NOTICE.md.
  */
 
 #include <assert.h>
@@ -1457,7 +1461,8 @@ static void QuickSort(int* pSortBuffer, int iLeft, int iRight, unsigned int uSee
 
 	// Random
 	unsigned int t=uSeed&31;
-	t=(uSeed<<t)|(uSeed>>(32-t));
+	// DVE patch: guard the rotate (see QuickSortEdges); a rotate by 0 is the identity.
+	t=t?((uSeed<<t)|(uSeed>>(32-t))):uSeed;
 	uSeed=uSeed+t+3;
 	// Random end
 
@@ -1664,7 +1669,10 @@ static void QuickSortEdges(SEdge * pSortBuffer, int iLeft, int iRight, const int
 
 	// Random
 	t=uSeed&31;
-	t=(uSeed<<t)|(uSeed>>(32-t));
+	// DVE patch: when t==0 the upstream rotate shifts a 32-bit value right by 32, which is
+	// undefined behaviour (UBSan: "shift exponent 32 is too large"). A rotate by 0 is the
+	// identity, which is also what x86 produced for the masked shift, so results are unchanged.
+	t=t?((uSeed<<t)|(uSeed>>(32-t))):uSeed;
 	uSeed=uSeed+t+3;
 	// Random end
 

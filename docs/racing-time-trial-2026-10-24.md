@@ -40,6 +40,16 @@ The versioned bounded `DVE_RACE 1` payload is attached to the runtime Rules comp
 
 The normal prototype exporter handles the racing project: editable scene, cooked polygon/marker assets, runtime manifest and input bindings. No new package or scene format is required. The generated README documents controls and `dve_pack` usage. The source manifest includes all changes.
 
+## Tire marks, dust and vehicle audio
+
+The portable racer now produces bounded world-space **skid-mark trails** from its two rear wheels, plus **dust** on loose surfaces and **tire smoke** during hard asphalt sliding. Effects are driven by the fixed 120 Hz physics state and are transient: no editor objects, collision proxies, meshes or permanent save payloads are created. At most 384 visual events exist at once, and age-based expiry removes old trails (14 s) and particles (0.65–1 s). The built-in CPU player renderer projects the segments and soft smoke puffs into the scene and tests against the polygon/voxel depth buffer. Camera, ground and effect coordinates remain in metres. Ramps and individual wheel contact are not simulated; effect spawn uses approximate rear-wheel positions.
+
+The optional SDL player audio path uses the existing `AudioMixer` and synthesizes three seamless tonal engine bands, one repeating filtered tire-noise sample and short collision transients into resident mixer samples. Per-frame gains follow speed, throttle, skid intensity and impact events, without allocations on the audio callback. Audio is muted when racing is paused, finished or in countdown, and disabled if built without player audio or launched with `--no-audio`. This is a procedural arcade approximation—not torque/RPM-based drivetrain synthesis—and does not yet use external vehicle sound assets or spatialized engine audio.
+
+Derived visual events and mixer voices deliberately do **not** enter `DVE_RACE 1` saves. They clear on restart, recovery and restore, retaining replayable car motion while avoiding save bloat. A pause freezes visual ages. Headless rendering exercises the same depth-composited visuals; engine/tire playback needs a live audio device for perceptual acceptance.
+
+The racing tests check that handbraking emits bounded visuals, and that injected dust/mark events change the actual CPU framebuffer. The surface module's high/low grip tests remain in place.
+
 ## Verification
 
 The new integration suite exercises authored ground-dependent grip and bounded skid feedback, independent service braking, handling profile differences, slip/yaw telemetry, wall-adjacent steering, directional and out-of-bounds gate rejection, duplicate orders, actual throttle/reverse/steering/braking, grip tuning, matching 60/120 Hz motion, thin-wall collision, ordered lap completion, pause/finish freezing, recovery penalties, restart/best behavior, state restore and malformed-state refusal. It also creates/undoes/redoes the native starter, exports and boots the project, checks countdown/input, runs editor Play/Stop, saves/loads through PlayerApp, renders a CPU framebuffer and boots a `.dvepak`.

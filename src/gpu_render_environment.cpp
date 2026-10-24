@@ -7,6 +7,8 @@ namespace {
 static_assert(static_cast<std::uint32_t>(TonemapOperator::ACES) == 0);
 static_assert(static_cast<std::uint32_t>(TonemapOperator::Reinhard) == 1);
 static_assert(static_cast<std::uint32_t>(TonemapOperator::Clamp) == 2);
+static_assert(static_cast<std::uint32_t>(TonemapOperator::AgX) == 3);
+static_assert(static_cast<std::uint32_t>(TonemapOperator::PBRNeutral) == 4);
 static_assert(static_cast<std::uint32_t>(GlobalIlluminationMode::Off) == 0);
 static_assert(static_cast<std::uint32_t>(GlobalIlluminationMode::AmbientHemisphere) == 1);
 static_assert(static_cast<std::uint32_t>(GlobalIlluminationMode::VoxelOneBounce) == 2);

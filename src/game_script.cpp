@@ -1476,9 +1476,11 @@ int l_set_environment_tonemap_operator(lua_State* L) {
     if (name == "aces") environment.tonemapOperator = TonemapOperator::ACES;
     else if (name == "reinhard") environment.tonemapOperator = TonemapOperator::Reinhard;
     else if (name == "clamp") environment.tonemapOperator = TonemapOperator::Clamp;
+    else if (name == "agx") environment.tonemapOperator = TonemapOperator::AgX;
+    else if (name == "pbr_neutral") environment.tonemapOperator = TonemapOperator::PBRNeutral;
     else {
         lua_pushboolean(L, 0);
-        lua_pushstring(L, "tonemap operator must be \"aces\", \"reinhard\", or \"clamp\"");
+        lua_pushstring(L, "tonemap operator must be \"aces\", \"reinhard\", \"clamp\", \"agx\", or \"pbr_neutral\"");
         return 2;
     }
     lua_pushboolean(L, 1);
@@ -1673,7 +1675,9 @@ int l_get_environment(lua_State* L) {
     lua_pushnumber(L, environment.contactShadowDistanceMeters); lua_setfield(L, -2, "contact_shadow_distance_meters");
     lua_pushnumber(L, environment.shadowBiasMeters); lua_setfield(L, -2, "shadow_bias_meters");
     const char* tonemapName = environment.tonemapOperator == TonemapOperator::ACES ? "aces"
-                              : environment.tonemapOperator == TonemapOperator::Reinhard ? "reinhard" : "clamp";
+                              : environment.tonemapOperator == TonemapOperator::Reinhard ? "reinhard"
+                              : environment.tonemapOperator == TonemapOperator::Clamp ? "clamp"
+                              : environment.tonemapOperator == TonemapOperator::AgX ? "agx" : "pbr_neutral";
     lua_pushstring(L, tonemapName); lua_setfield(L, -2, "tonemap_operator");
     return 1;
 }

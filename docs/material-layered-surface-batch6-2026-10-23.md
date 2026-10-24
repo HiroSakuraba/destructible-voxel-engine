@@ -1,8 +1,10 @@
 # Batch 6: Layered Surface
 
 Initially built on `162f4d8` (mesh-displacement PR #206), then integrated current
-main `20980a4`, including the merged Batch 5 glass PR #205. Texture baking remains
-Batch 7; the glass secondary-receiver restrictions remain explicit.
+main `20980a4`, including the merged Batch 5 glass PR #205, and subsequently
+`53cb2aa` (PR #207: tonemappers, ray offsets, IES profiles and MikkTSpace cooking
+tangents). Texture baking remains Batch 7; glass secondary-receiver restrictions
+remain explicit.
 
 ## Artist workflow
 
@@ -110,7 +112,14 @@ and tangent conventions; it must not bake illumination into base color.
 
 ## Validation
 
-Final verification completed on 24 October 2026 after integrating main `20980a4`.
+The full Batch 6 matrix completed on 24 October 2026 against main `20980a4`.
+After integrating `53cb2aa`, five affected targets were rebuilt and passed:
+`dve_layered_surface_tests`, `dve_polygon_tangents_tests`, `dve_ies_profile_tests`,
+`dve_settings_render_batch_tests` and `dve_scene_lighting_tests`. All 62 shaders
+were also recompiled for SPIR-V and DXIL and all nine explicit interfaces rechecked.
+The focused GPU run was repeated on `53cb2aa`: all 101 cases, 5,120 scalar
+comparisons (maximum error 0.00196081) and 28,800 shadow comparisons passed again.
+The source-manifest conflict was regenerated; code changes merged automatically.
 
 | Check | Result |
 | --- | --- |

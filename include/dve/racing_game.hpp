@@ -3,6 +3,16 @@
 namespace dve {
 // Portable Z-up arcade racer. Geometry is a visual-only car; the runtime owns its
 // conservative collision capsule and ground following, independently of Jolt.
+struct RacingTelemetry {
+    float forwardSpeedMetersPerSecond{};
+    float lateralSlipMetersPerSecond{};
+    float yawRateRadiansPerSecond{};
+    float longitudinalAccelerationMetersPerSecondSquared{};
+    float impactSpeedMetersPerSecond{};
+    std::uint64_t collisionCount{};
+    bool grounded{};
+};
+// Derived telemetry is transient and does not change the version-1 race save format.
 struct RacingStatus {
     double elapsed{},lapStarted{},lastLap{},bestLap{},countdown{3};
     unsigned completedLaps{},nextGate{1},targetLaps{3},gateCount{};
@@ -21,6 +31,7 @@ public:
     [[nodiscard]] const PrototypeHud& hud() const;
     [[nodiscard]] PrototypeCamera camera() const;
     [[nodiscard]] const RacingStatus& status() const;
+    [[nodiscard]] const RacingTelemetry& telemetry() const;
 private:struct Impl;std::unique_ptr<Impl> impl_;
 };
 }

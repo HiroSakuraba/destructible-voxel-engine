@@ -245,7 +245,8 @@ MaterialSurfaceSample sample_layer_surface(
     Float3 bitangent,
     TextureLod lod,
     bool enableTextures,
-    PolygonRenderStats& stats, const RigidTransform& pose = {},float units=1,bool normalOnly=false) noexcept {
+    PolygonRenderStats& stats, const RigidTransform& pose = {},float units=1,bool normalOnly=false,
+    Float2 normalUvOffset={0,0}) noexcept {
     MaterialSurfaceSample sample;
     if (materialIndex >= asset.materials.size() || materialIndex >= asset.materialBindings.size())
         return sample;
@@ -296,7 +297,8 @@ MaterialSurfaceSample sample_layer_surface(
             sample.normal={dot(worldLayer,tangent),dot(worldLayer,bitangent),dot(worldLayer,geometricNormal)};
             stats.triplanarSamples+=3U;
         } else {
-            const Float4 nm=sample_binding_uv(asset,binding.normal,chains,mappedUv(binding.normal),footprint(binding.normal).transformed(binding.mapping.baseTransform),stats,{0.5F,0.5F,1.0F,1.0F},true);
+            const auto normalUv=mappedUv(binding.normal);
+            const Float4 nm=sample_binding_uv(asset,binding.normal,chains,{normalUv.x+normalUvOffset.x,normalUv.y+normalUvOffset.y},footprint(binding.normal).transformed(binding.mapping.baseTransform),stats,{0.5F,0.5F,1.0F,1.0F},true);
             sample.normal=normalize(Float3{(nm.x*2.0F-1.0F)*binding.normalScale,
                                            (nm.y*2.0F-1.0F)*binding.normalScale,
                                            nm.z*2.0F-1.0F});
@@ -674,6 +676,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         const float cameraDistance=length(subtract(tri.cameraPosition,worldPosition));
         Float2 selectedUv=tri.binding->mapping.mappingMode==MaterialMappingMode::UV1?uv1:uv;
         Float2 mappedUv=transform_texture_coordinates(selectedUv,tri.binding->mapping.baseTransform);
+        const Float2 unshiftedMappedUv=mappedUv;
         std::uint32_t fragmentParallaxSamples = 0U;
         float fragmentHeight=tri.binding->mapping.heightReferencePlane;
         bool heightHit=false;
@@ -728,7 +731,8 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             const auto geometryNormal=normalize(interpolatedNormal);
             const auto root=sample_layer_surface(*tri.asset,tri.submesh->materialIndex,chains,
                 uv,uv1,worldPosition,objectPosition,geometryNormal,tangent,bitangent,textureLod,
-                true,stats,tri.transform,0,true);
+                true,stats,tri.transform,0,true,
+                {mappedUv.x-unshiftedMappedUv.x,mappedUv.y-unshiftedMappedUv.y});
             normal=normalize(add(add(multiply(tangent,root.normal.x),multiply(bitangent,root.normal.y)),multiply(geometryNormal,root.normal.z)));
         }
         if(options.enableTextures&&tri.binding->height.texture&&options.surfaceDetail.heightBumpStrength!=0&&

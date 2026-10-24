@@ -5,14 +5,19 @@
 #include "dve/polygon_bvh.hpp"
 #include "dve/transform.hpp"
 #include "dve/rgba8_png.hpp"
-#include <cmath>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <stdexcept>
+#include <string>
 #include <thread>
-#include <chrono>
+#include <vector>
 using namespace dve;using namespace dve::editor;using namespace dve::render;
 namespace {
 void check(bool value,const std::string& why){if(!value)throw std::runtime_error(why);}
@@ -87,6 +92,22 @@ void padding(){
     a.vertices[3].texcoord={.5F,.1F};a.vertices[4].texcoord={.85F,.1F};a.vertices[5].texcoord={.5F,.8F};
     auto failed=bake_material_textures(a,settings());check(!failed.success&&failed.error.find("padding")!=std::string::npos,"insufficient chart gutters rejected");
 }
+void parallax_normal_alignment(){
+    // Regression: the CPU rasterizer must sample the normal map at the parallax-displaced UV,
+    // exactly like the base-color/MR/emission channels, not at the undisplaced UV.
+    auto make=[&](HeightMappingMode mode){
+        auto a=plane();a.images={{"normal","image/raw",4,1,{140,128,255,255,170,128,255,255,200,128,255,255,230,128,255,255}},{"height","image/raw",1,1,{255,255,255,255}}};
+        a.textures={{"normal",0,{}},{"height",1,{}}};
+        a.materialBindings[0].normal={0,0,PolygonTextureColorSpace::Linear};a.materialBindings[0].height={1,0,PolygonTextureColorSpace::Linear};
+        a.materialBindings[0].mapping.heightMode=mode;a.materialBindings[0].mapping.heightScale=.3F;a.materialBindings[0].mapping.maximumParallaxDistanceMeters=1000;return a;};
+    auto render=[&](const CookedPolygonAsset& asset){
+        PolygonRenderTarget target;target.resize(32,32);target.enable_passes();target.clear();PolygonCamera camera;camera.position={0,1.4F,1.4F};camera.target={0,0,0};camera.up={1,0,0};
+        PolygonRenderInstance instance{1,&asset,{}, {}, {1,1,1,1},true};ReferencePolygonRenderer renderer;
+        const auto stats=renderer.render(std::span(&instance,1),camera,{},target,{.preserveExistingDepth=false});check(stats.shadedFragments>0,"parallax scene draws");
+        const auto center=16*32+16;check(target.objectId[center]==1,"parallax scene center covered");return target.passes.normal[center];};
+    const auto flat=render(make(HeightMappingMode::Off)),displaced=render(make(HeightMappingMode::OffsetParallax));
+    check(std::abs(flat.x-displaced.x)+std::abs(flat.z-displaced.z)>.01F,"normal map follows the parallax-displaced UV "+std::to_string(flat.x)+","+std::to_string(flat.y)+","+std::to_string(flat.z)+" vs "+std::to_string(displaced.x)+","+std::to_string(displaced.y)+","+std::to_string(displaced.z));
+}
 void files_and_editor(const std::filesystem::path& root,const char* cli){
     auto a=plane();std::string error;auto result=bake(a);const auto bundle=root/"bundle";
     check(write_material_bake_bundle(bundle,a,result,{},&error),error);check(!write_material_bake_bundle(bundle,a,result,{},&error),"never overwrite a bundle");
@@ -113,4 +134,4 @@ void files_and_editor(const std::filesystem::path& root,const char* cli){
     }
 }
 }
-int main(int argc,char** argv){const auto root=std::filesystem::temp_directory_path()/("dve-batch7-bake-tests-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));try{std::filesystem::create_directory(root);channels();uv_and_budget();normal_and_filtering();layers();padding();files_and_editor(root,argc>1?argv[1]:nullptr);std::filesystem::remove_all(root);std::cout<<"material texture baking: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';std::filesystem::remove_all(root);return 1;}}
+int main(int argc,char** argv){const auto root=std::filesystem::temp_directory_path()/("dve-batch7-bake-tests-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));try{std::filesystem::create_directory(root);channels();uv_and_budget();normal_and_filtering();layers();padding();parallax_normal_alignment();files_and_editor(root,argc>1?argv[1]:nullptr);std::filesystem::remove_all(root);std::cout<<"material texture baking: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';std::filesystem::remove_all(root);return 1;}}

@@ -81,14 +81,6 @@ float edge(float ax,float ay,float bx,float by,float px,float py) noexcept {
     return (px-ax)*(by-ay)-(py-ay)*(bx-ax);
 }
 
-float wrap_coordinate(float value,ImportedWrapMode mode) noexcept {
-    if(mode==ImportedWrapMode::ClampToEdge)return std::clamp(value,0.0F,1.0F);
-    if(mode==ImportedWrapMode::MirroredRepeat){
-        const float base=std::floor(value);const float local=value-base;
-        return (static_cast<long long>(base)&1LL)!=0LL?1.0F-local:local;
-    }
-    return fract(value);
-}
 
 float srgb_to_linear(float encoded) noexcept {
     encoded = std::clamp(encoded, 0.0F, 1.0F);
@@ -112,15 +104,20 @@ Float4 texel(const PolygonTextureMip& mip,std::uint32_t x,std::uint32_t y,
 
 Float4 sample_mip(const PolygonTextureMip& mip,const PolygonSampler& sampler,Float2 uv,
                   PolygonTextureColorSpace colorSpace) noexcept {
-    const float u=wrap_coordinate(uv.x,sampler.wrapS),v=wrap_coordinate(uv.y,sampler.wrapT);
-    const float x=u*static_cast<float>(mip.width-1U),y=v*static_cast<float>(mip.height-1U);
-    if(sampler.magFilter==ImportedTextureFilter::Nearest){return texel(mip,static_cast<std::uint32_t>(std::round(x)),static_cast<std::uint32_t>(std::round(y)),colorSpace);}
-    const auto x0=static_cast<std::uint32_t>(std::floor(x)),y0=static_cast<std::uint32_t>(std::floor(y));
-    const auto x1=(std::min)(x0+1U,mip.width-1U),y1=(std::min)(y0+1U,mip.height-1U);
-    const float tx=x-static_cast<float>(x0),ty=y-static_cast<float>(y0);
-    const Float4 a=add4(scale4(texel(mip,x0,y0,colorSpace),1.0F-tx),scale4(texel(mip,x1,y0,colorSpace),tx));
-    const Float4 b=add4(scale4(texel(mip,x0,y1,colorSpace),1.0F-tx),scale4(texel(mip,x1,y1,colorSpace),tx));
-    return add4(scale4(a,1.0F-ty),scale4(b,ty));
+    auto address=[](int v,int n,ImportedWrapMode mode){
+        if(mode==ImportedWrapMode::ClampToEdge)return std::clamp(v,0,n-1);
+        const int period=mode==ImportedWrapMode::MirroredRepeat?n*2:n;
+        const int q=(v%period+period)%period;return q>=n?period-1-q:q;
+    };
+    const float u=sampler.wrapS==ImportedWrapMode::ClampToEdge?std::clamp(uv.x,0.F,1.F):std::fmod(uv.x,2.F);
+    const float v=sampler.wrapT==ImportedWrapMode::ClampToEdge?std::clamp(uv.y,0.F,1.F):std::fmod(uv.y,2.F);
+    const float x=u*float(mip.width)-.5F,y=v*float(mip.height)-.5F;
+    auto at=[&](int px,int py){return texel(mip,unsigned(address(px,int(mip.width),sampler.wrapS)),unsigned(address(py,int(mip.height),sampler.wrapT)),colorSpace);};
+    if(sampler.magFilter==ImportedTextureFilter::Nearest)return at(int(std::floor(x+.5F)),int(std::floor(y+.5F)));
+    const int x0=int(std::floor(x)),y0=int(std::floor(y));const float tx=x-float(x0),ty=y-float(y0);
+    const auto a=add4(scale4(at(x0,y0),1-tx),scale4(at(x0+1,y0),tx));
+    const auto b=add4(scale4(at(x0,y0+1),1-tx),scale4(at(x0+1,y0+1),tx));
+    return add4(scale4(a,1-ty),scale4(b,ty));
 }
 
 Float2 select_uv(const PolygonTextureBinding& binding, Float2 uv0, Float2 uv1) noexcept {
@@ -133,7 +130,10 @@ struct TextureLod {
     float value{};
     Float2 dx{},dy{};
     Float3 worldDx{},worldDy{},objectDx{},objectDy{};
-    bool gradients{};
+    bool gradients{},hasUvSets{};
+    float recipeFootprintScale{1};
+    Float2 uv0Dx{},uv0Dy{},uv1Dx{},uv1Dy{};
+    TextureLod selected(bool second) const {auto out=*this;if(hasUvSets){out.dx=second?uv1Dx:uv0Dx;out.dy=second?uv1Dy:uv0Dy;}return out;}
     TextureLod(float v=0):value(v){}
     TextureLod transformed(const TextureTransform2D& t) const {
         auto out=*this;auto linear=t;linear.offset={};
@@ -160,7 +160,7 @@ Float4 sample_binding_uv(const CookedPolygonAsset& asset,const PolygonTextureBin
         levelValue=std::log2(std::max(1.0F,std::sqrt(std::max(a,b))));
     }
     levelValue=std::clamp(levelValue,0.0F,static_cast<float>(levels.size()-1U));
-    const auto level=static_cast<std::size_t>(std::floor(levelValue));
+    const auto level=static_cast<std::size_t>(std::floor(levelValue+(sampler.minFilter==ImportedTextureFilter::Nearest?.5F:0.F)));
     ++stats.textureSamples;
     const auto colorSpace=normalMap?PolygonTextureColorSpace::Linear:binding.colorSpace;
     PolygonSampler filtered=sampler;
@@ -251,35 +251,24 @@ MaterialSurfaceSample sample_layer_surface(
     Float3 bitangent,
     TextureLod lod,
     bool enableTextures,
-    PolygonRenderStats& stats) noexcept {
+    PolygonRenderStats& stats, const RigidTransform& pose = {},float units=1) noexcept {
     MaterialSurfaceSample sample;
     if (materialIndex >= asset.materials.size() || materialIndex >= asset.materialBindings.size())
         return sample;
     ++stats.layerSourceSamples;
     const VoxelMaterialDefinition& material = asset.materials[materialIndex];
     const PolygonMaterialBinding& binding = asset.materialBindings[materialIndex];
-    const Float2 selected = binding.mapping.mappingMode == MaterialMappingMode::UV1 ? uv1 : uv0;
-    const Float2 mapped = transform_texture_coordinates(selected, binding.mapping.baseTransform);
-    const Float4 baseMap = enableTextures
-        ? sample_mapped_binding(asset,binding.baseColor,chains,binding.mapping,mapped,
-                                worldPosition,objectPosition,geometricNormal,
-                                binding.mapping.baseTransform,1.0F,lod,stats,{1,1,1,1})
-        : Float4{1,1,1,1};
-    const Float4 mr = enableTextures
-        ? sample_mapped_binding(asset,binding.metallicRoughness,chains,binding.mapping,mapped,
-                                worldPosition,objectPosition,geometricNormal,
-                                binding.mapping.baseTransform,1.0F,lod,stats,{1,1,1,1})
-        : Float4{1,1,1,1};
-    const Float4 emissiveMap = enableTextures
-        ? sample_mapped_binding(asset,binding.emissive,chains,binding.mapping,mapped,
-                                worldPosition,objectPosition,geometricNormal,
-                                binding.mapping.baseTransform,1.0F,lod,stats,{1,1,1,1})
-        : Float4{1,1,1,1};
-    const Float4 opacityMap = enableTextures
-        ? sample_mapped_binding(asset,binding.opacity,chains,binding.mapping,mapped,
-                                worldPosition,objectPosition,geometricNormal,
-                                binding.mapping.baseTransform,1.0F,lod,stats,{1,1,1,1})
-        : Float4{1,1,1,1};
+    const auto mappedUv=[&](const PolygonTextureBinding& texture){return transform_texture_coordinates(
+        (binding.mapping.mappingMode==MaterialMappingMode::UV1||texture.texcoord==1)?uv1:uv0,binding.mapping.baseTransform);};
+    const auto footprint=[&](const PolygonTextureBinding& texture){return lod.selected(binding.mapping.mappingMode==MaterialMappingMode::UV1||texture.texcoord==1);};
+    const auto channel=[&](const PolygonTextureBinding& texture,Float4 fallback){return enableTextures?
+        sample_mapped_binding(asset,texture,chains,binding.mapping,mappedUv(texture),worldPosition,objectPosition,
+            binding.mapping.mappingMode==MaterialMappingMode::ObjectTriplanar?inverse_transform_vector(pose,geometricNormal):geometricNormal,
+            binding.mapping.baseTransform,1.F,footprint(texture),stats,fallback):fallback;};
+    const auto baseMap=channel(binding.baseColor,{1,1,1,1});
+    const auto mr=channel(binding.metallicRoughness,{1,1,1,1});
+    const auto emissiveMap=channel(binding.emissive,{1,1,1,1});
+    const auto opacityMap=channel(binding.opacity,{1,1,1,1});
     sample.baseColor = mul4(material.baseColor,baseMap);
     sample.opacity = sample.baseColor.w * (binding.opacity.texture ? opacityMap.x : 1.0F);
     sample.baseColor.w = sample.opacity;
@@ -290,11 +279,7 @@ MaterialSurfaceSample sample_layer_surface(
     sample.emissive = binding.emissive.texture
         ? mul3(material.emissive,{emissiveMap.x,emissiveMap.y,emissiveMap.z})
         : material.emissive;
-    sample.height = binding.height.texture && enableTextures
-        ? sample_mapped_binding(asset,binding.height,chains,binding.mapping,mapped,
-                                worldPosition,objectPosition,geometricNormal,
-                                binding.mapping.baseTransform,1.0F,lod,stats,{0.5F,0.5F,0.5F,1.0F}).x
-        : 0.5F;
+    sample.height=channel(binding.height,{.5F,.5F,.5F,1}).x;
     sample.normal = {0.0F,0.0F,1.0F};
     if (binding.normal.texture && enableTextures) {
         if (binding.mapping.mappingMode==MaterialMappingMode::WorldTriplanar ||
@@ -302,7 +287,7 @@ MaterialSurfaceSample sample_layer_surface(
             const Float3 position = binding.mapping.mappingMode==MaterialMappingMode::WorldTriplanar
                 ? worldPosition : objectPosition;
             const TriplanarCoordinates tc = make_triplanar_coordinates(
-                position,geometricNormal,binding.mapping.triplanarScale,
+                position,binding.mapping.mappingMode==MaterialMappingMode::ObjectTriplanar?inverse_transform_vector(pose,geometricNormal):geometricNormal,binding.mapping.triplanarScale,
                 binding.mapping.triplanarBlendSharpness);
             const Float4 sx=sample_binding_uv(asset,binding.normal,chains,
                 transform_texture_coordinates(tc.xProjection,binding.mapping.baseTransform),normal_triplanar_lod(lod,binding.mapping,0),stats,{0.5F,0.5F,1.0F,1.0F},true);
@@ -310,15 +295,41 @@ MaterialSurfaceSample sample_layer_surface(
                 transform_texture_coordinates(tc.yProjection,binding.mapping.baseTransform),normal_triplanar_lod(lod,binding.mapping,1),stats,{0.5F,0.5F,1.0F,1.0F},true);
             const Float4 sz=sample_binding_uv(asset,binding.normal,chains,
                 transform_texture_coordinates(tc.zProjection,binding.mapping.baseTransform),normal_triplanar_lod(lod,binding.mapping,2),stats,{0.5F,0.5F,1.0F,1.0F},true);
-            const Float3 worldLayer=triplanar_whiteout_normal(geometricNormal,sx,sy,sz,binding.normalScale,tc.weights);
+            Float3 worldLayer=triplanar_whiteout_normal(binding.mapping.mappingMode==MaterialMappingMode::ObjectTriplanar?inverse_transform_vector(pose,geometricNormal):geometricNormal,sx,sy,sz,binding.normalScale,tc.weights);
+            if(binding.mapping.mappingMode==MaterialMappingMode::ObjectTriplanar)worldLayer=transform_vector(pose,worldLayer);
             sample.normal={dot(worldLayer,tangent),dot(worldLayer,bitangent),dot(worldLayer,geometricNormal)};
             stats.triplanarSamples+=3U;
         } else {
-            const Float4 nm=sample_binding_uv(asset,binding.normal,chains,mapped,lod.transformed(binding.mapping.baseTransform),stats,{0.5F,0.5F,1.0F,1.0F},true);
+            const Float4 nm=sample_binding_uv(asset,binding.normal,chains,mappedUv(binding.normal),footprint(binding.normal).transformed(binding.mapping.baseTransform),stats,{0.5F,0.5F,1.0F,1.0F},true);
             sample.normal=normalize(Float3{(nm.x*2.0F-1.0F)*binding.normalScale,
                                            (nm.y*2.0F-1.0F)*binding.normalScale,
                                            nm.z*2.0F-1.0F});
+            auto gradients=footprint(binding.normal).transformed(binding.mapping.baseTransform);
+            const float basisScale=(std::max)({std::abs(gradients.dx.x),std::abs(gradients.dx.y),std::abs(gradients.dy.x),std::abs(gradients.dy.y),1e-30F});
+            gradients.dx={gradients.dx.x/basisScale,gradients.dx.y/basisScale};gradients.dy={gradients.dy.x/basisScale,gradients.dy.y/basisScale};
+            const auto basisDx=multiply(lod.worldDx,1/basisScale),basisDy=multiply(lod.worldDy,1/basisScale);
+            const float determinant=gradients.dx.x*gradients.dy.y-gradients.dx.y*gradients.dy.x;
+            if((gradients.gradients||gradients.hasUvSets)&&std::abs(determinant)>1e-8F){
+                auto t=multiply(subtract(multiply(basisDx,gradients.dy.y),multiply(basisDy,gradients.dx.y)),1/determinant);
+                const auto rawB=multiply(subtract(multiply(basisDy,gradients.dx.x),multiply(basisDx,gradients.dy.x)),1/determinant);
+                t=subtract(t,multiply(geometricNormal,dot(geometricNormal,t)));
+                if(length(t)>1e-6F){t=normalize(t);const auto b=multiply(cross3(geometricNormal,t),dot(cross3(geometricNormal,t),rawB)<0?-1.F:1.F);
+                    const auto world=normalize(add(add(multiply(t,sample.normal.x),multiply(b,sample.normal.y)),multiply(geometricNormal,sample.normal.z)));
+                    sample.normal={dot(world,tangent),dot(world,bitangent),dot(world,geometricNormal)};}
+            }
         }
+    }
+    if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && units>0){
+        auto evaluated=material;evaluated.baseColor=sample.baseColor;evaluated.roughness=sample.roughness;
+        auto world=normalize(add(add(multiply(tangent,sample.normal.x),multiply(bitangent,sample.normal.y)),multiply(geometricNormal,sample.normal.z)));
+        float width=(std::max)(length(lod.worldDx),length(lod.worldDy))*units*lod.recipeFootprintScale;
+        if(unsigned(material.surfaceDetail.space)>=unsigned(SurfaceDetailSpace::UV0)){
+            const auto gradients=lod.selected(material.surfaceDetail.space==SurfaceDetailSpace::UV1);
+            width=(std::max)(std::hypot(gradients.dx.x,gradients.dx.y),std::hypot(gradients.dy.x,gradients.dy.y))*material.surfaceDetail.uvTileMeters*lod.recipeFootprintScale;
+        }
+        apply_material_surface_detail(evaluated,world,{multiply(objectPosition,units),multiply(worldPosition,units),uv0,uv1,true,pose,tangent,bitangent,width});
+        sample.baseColor=evaluated.baseColor;sample.roughness=evaluated.roughness;
+        sample.normal={dot(world,tangent),dot(world,bitangent),dot(world,geometricNormal)};
     }
     return sample;
 }
@@ -638,6 +649,10 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         const Float3 ua=uv3(secondUv?tri.v[0].uv1:tri.v[0].uv),ub=uv3(secondUv?tri.v[1].uv1:tri.v[1].uv),uc=uv3(secondUv?tri.v[2].uv1:tri.v[2].uv);
         const Float3 gx=gradient(dwDx,uv3(chosen),ua,ub,uc,invZ),gy=gradient(dwDy,uv3(chosen),ua,ub,uc,invZ);
         textureLod.dx={gx.x,gx.y};textureLod.dy={gy.x,gy.y};
+        textureLod.hasUvSets=true;
+        const auto ux0=gradient(dwDx,uv3(uv),uv3(tri.v[0].uv),uv3(tri.v[1].uv),uv3(tri.v[2].uv),invZ),uy0=gradient(dwDy,uv3(uv),uv3(tri.v[0].uv),uv3(tri.v[1].uv),uv3(tri.v[2].uv),invZ);
+        const auto ux1=gradient(dwDx,uv3(uv1),uv3(tri.v[0].uv1),uv3(tri.v[1].uv1),uv3(tri.v[2].uv1),invZ),uy1=gradient(dwDy,uv3(uv1),uv3(tri.v[0].uv1),uv3(tri.v[1].uv1),uv3(tri.v[2].uv1),invZ);
+        textureLod.uv0Dx={ux0.x,ux0.y};textureLod.uv0Dy={uy0.x,uy0.y};textureLod.uv1Dx={ux1.x,ux1.y};textureLod.uv1Dy={uy1.x,uy1.y};
         textureLod.worldDx=gradient(dwDx,worldPosition,tri.v[0].worldPosition,tri.v[1].worldPosition,tri.v[2].worldPosition,invZ);
         textureLod.worldDy=gradient(dwDy,worldPosition,tri.v[0].worldPosition,tri.v[1].worldPosition,tri.v[2].worldPosition,invZ);
         textureLod.objectDx=gradient(dwDx,objectPosition,tri.v[0].objectPosition,tri.v[1].objectPosition,tri.v[2].objectPosition,invZ);
@@ -751,25 +766,27 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
         float layerDebugCoverage=0.0F;
         bool appliedMaterialLayer=false;
         if(!tri.material->layers.empty()){
-            const float baseHeight=(options.enableTextures&&tri.binding->height.texture)
-                ? sample_mapped_binding(*tri.asset,tri.binding->height,chains,tri.binding->mapping,mappedUv,
-                    worldPosition,objectPosition,normal,tri.binding->mapping.baseTransform,1.0F,
-                    textureLod,stats,{0.5F,0.5F,0.5F,1.0F}).x
-                : 0.5F;
+            // Layered CPU raster and ray/bake callers share the same root map evaluation.
+            const auto geometryNormal=normalize(interpolatedNormal);
+            const auto root=sample_layer_surface(*tri.asset,tri.submesh->materialIndex,chains,
+                uv,uv1,worldPosition,objectPosition,geometryNormal,tangent,bitangent,textureLod,
+                options.enableTextures,stats,tri.transform,0);
+            base=mul4(mul4(root.baseColor,vertexColor),tri.tint);
+            effective.metallic=root.metallic;effective.roughness=root.roughness;effective.emissive=root.emissive;
+            normal=normalize(add(add(multiply(tangent,root.normal.x),multiply(bitangent,root.normal.y)),multiply(geometryNormal,root.normal.z)));
+            const float baseHeight=root.height;
             MaterialSurfaceSample surface;
             surface.baseColor=base;surface.normal=normal;surface.metallic=effective.metallic;
             surface.roughness=effective.roughness;surface.emissive=effective.emissive;
             surface.opacity=base.w;surface.height=baseHeight;
-            const Float3 layerTangent=normalize(subtract(tangent,multiply(normal,dot(normal,tangent))));
-            const Float3 layerBitangent=multiply(cross3(normal,layerTangent),handed);
             const std::size_t layerCount=std::min<std::size_t>(tri.material->layers.size(),kMaximumVoxelMaterialLayers);
             for(std::size_t layerIndex=0U;layerIndex<layerCount;++layerIndex){
                 const VoxelMaterialLayer& authored=tri.material->layers[layerIndex];
                 if(!authored.enabled||authored.weight<=0.0F||authored.sourceMaterial==kAirMaterial||
                    authored.sourceMaterial>=tri.asset->materials.size())continue;
                 MaterialSurfaceSample source=sample_layer_surface(*tri.asset,authored.sourceMaterial,chains,
-                    uv,uv1,worldPosition,objectPosition,normal,layerTangent,layerBitangent,
-                    textureLod,options.enableTextures,stats);
+                    uv,uv1,worldPosition,objectPosition,normalize(interpolatedNormal),tangent,bitangent,
+                    textureLod,options.enableTextures,stats,tri.transform,resolve_meters_per_voxel(options.metersPerUnit));
                 MaterialLayerSample layer;
                 layer.surface=source;layer.baseColorBlend=authored.blendMode;
                 layer.authoredWeight=std::clamp(authored.weight,0.0F,1.0F);
@@ -782,20 +799,20 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                     layer.heightBlendBias=binding.heightBlendBias;
                     layer.heightBlendTransition=binding.heightBlendTransition;
                     if(options.enableTextures&&binding.mask.texture){
-                        const Float2 maskSelected=select_uv(binding.mask,uv,uv1);
+                        const Float2 maskSelected=(tri.binding->mapping.mappingMode==MaterialMappingMode::UV1||binding.mask.texcoord==1)?uv1:uv;
                         const Float2 maskUv=transform_texture_coordinates(maskSelected,tri.binding->mapping.baseTransform);
                         const Float4 mask=sample_mapped_binding(*tri.asset,binding.mask,chains,tri.binding->mapping,maskUv,
-                            worldPosition,objectPosition,normal,tri.binding->mapping.baseTransform,1.0F,textureLod,stats,{1,1,1,1});
+                            worldPosition,objectPosition,tri.binding->mapping.mappingMode==MaterialMappingMode::ObjectTriplanar?inverse_transform_vector(tri.transform,geometryNormal):geometryNormal,tri.binding->mapping.baseTransform,1.0F,textureLod.selected(tri.binding->mapping.mappingMode==MaterialMappingMode::UV1||binding.mask.texcoord==1),stats,{1,1,1,1});
                         layer.mask=std::clamp(mask.x*binding.maskScale+binding.maskBias,0.0F,1.0F);
                         ++stats.layerMaskSamples;
                     }else{
                         layer.mask=std::clamp(binding.maskScale+binding.maskBias,0.0F,1.0F);
                     }
                     if(options.enableTextures&&binding.height.texture){
-                        const Float2 heightSelected=select_uv(binding.height,uv,uv1);
+                        const Float2 heightSelected=(tri.binding->mapping.mappingMode==MaterialMappingMode::UV1||binding.height.texcoord==1)?uv1:uv;
                         const Float2 heightUv=transform_texture_coordinates(heightSelected,tri.binding->mapping.baseTransform);
                         layer.surface.height=sample_mapped_binding(*tri.asset,binding.height,chains,tri.binding->mapping,heightUv,
-                            worldPosition,objectPosition,normal,tri.binding->mapping.baseTransform,1.0F,textureLod,stats,{0.5F,0.5F,0.5F,1.0F}).x;
+                            worldPosition,objectPosition,tri.binding->mapping.mappingMode==MaterialMappingMode::ObjectTriplanar?inverse_transform_vector(tri.transform,geometryNormal):geometryNormal,tri.binding->mapping.baseTransform,1.0F,textureLod.selected(tri.binding->mapping.mappingMode==MaterialMappingMode::UV1||binding.height.texcoord==1),stats,{0.5F,0.5F,0.5F,1.0F}).x;
                     }
                 }
                 const Float3 tangentLayerNormal=layer.surface.normal;
@@ -803,8 +820,10 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                 const float coverage=height_aware_material_layer_coverage(surface.height,layer);
                 float ignoredCoverage{};
                 surface=blend_material_surface_layer(surface,layer,&ignoredCoverage);
-                surface.normal=apply_reoriented_tangent_material_normal(
-                    normal,layerTangent,layerBitangent,tangentLayerNormal,coverage);
+                const auto geom=normalize(interpolatedNormal);
+                const auto bn=Float3{dot(normal,tangent),dot(normal,bitangent),dot(normal,geom)};
+                const auto combined=blend_reoriented_material_normals(bn,tangentLayerNormal,coverage);
+                surface.normal=normalize(add(add(multiply(tangent,combined.x),multiply(bitangent,combined.y)),multiply(geom,combined.z)));
                 normal=surface.normal;
                 appliedMaterialLayer=appliedMaterialLayer||coverage>0.0F;
                 if(layerIndex==options.materialLayerDebugIndex){
@@ -1180,7 +1199,11 @@ PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset& asset,co
     TextureLod lod;lod.gradients=true;
     const float units=metersPerUnit>0&&std::isfinite(metersPerUnit)?metersPerUnit:1;
     const float footprint=std::isfinite(footprintMeters)?(std::max)(0.F,footprintMeters)/units:0;
-    lod.worldDx=multiply(tangent,footprint);lod.worldDy=multiply(bitangent,footprint);
+    // Retain a metric frame even for an infinitesimal ray cone. It defines mapped
+    // normal orientation without inventing a texture/procedural filtering footprint.
+    lod.gradients=footprint>0;lod.recipeFootprintScale=footprint>0?1.F:0.F;
+    const auto frameWidth=footprint>0?footprint:1.F;
+    lod.worldDx=multiply(tangent,frameWidth);lod.worldDy=multiply(bitangent,frameWidth);
     lod.objectDx=inverse_transform_vector(pose,lod.worldDx);lod.objectDy=inverse_transform_vector(pose,lod.worldDy);
     const auto selectedA=binding.mapping.mappingMode==MaterialMappingMode::UV1?a.texcoord1:a.texcoord;
     const auto selectedB=binding.mapping.mappingMode==MaterialMappingMode::UV1?b.texcoord1:b.texcoord;
@@ -1190,8 +1213,18 @@ PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset& asset,co
         const auto gu=gradient(selectedB.x-selectedA.x,selectedC.x-selectedA.x),gv=gradient(selectedB.y-selectedA.y,selectedC.y-selectedA.y);
         lod.dx={dot(gu,lod.objectDx),dot(gv,lod.objectDx)};lod.dy={dot(gu,lod.objectDy),dot(gv,lod.objectDy)};
     }
+    lod.hasUvSets=true;
+    if(std::abs(det)>1e-20F){
+        const auto gradients=[&](Float2 ua,Float2 ub,Float2 uc,Float2& dx,Float2& dy){
+            const auto gu=add(multiply(e1,(d11*(ub.x-ua.x)-d01*(uc.x-ua.x))/det),multiply(e2,(d00*(uc.x-ua.x)-d01*(ub.x-ua.x))/det));
+            const auto gv=add(multiply(e1,(d11*(ub.y-ua.y)-d01*(uc.y-ua.y))/det),multiply(e2,(d00*(uc.y-ua.y)-d01*(ub.y-ua.y))/det));
+            dx={dot(gu,lod.objectDx),dot(gv,lod.objectDx)};dy={dot(gu,lod.objectDy),dot(gv,lod.objectDy)};
+        };
+        gradients(a.texcoord,b.texcoord,c.texcoord,lod.uv0Dx,lod.uv0Dy);gradients(a.texcoord1,b.texcoord1,c.texcoord1,lod.uv1Dx,lod.uv1Dy);
+    }
+    const auto geometricNormal=out.normal;
     PolygonRenderStats stats;
-    auto surface=sample_layer_surface(asset,hit.materialIndex,chains,uv,uv1,world,hit.position,out.normal,tangent,bitangent,lod,true,stats);
+    auto surface=sample_layer_surface(asset,hit.materialIndex,chains,uv,uv1,world,hit.position,out.normal,tangent,bitangent,lod,true,stats,pose,0);
     const Float4 vertex{a.color.x*w0+b.color.x*w1+c.color.x*w2,a.color.y*w0+b.color.y*w1+c.color.y*w2,a.color.z*w0+b.color.z*w1+c.color.z*w2,a.color.w*w0+b.color.w*w1+c.color.w*w2};
     surface.baseColor=mul4(surface.baseColor,vertex);surface.opacity*=vertex.w;
     const Float2 selected=binding.mapping.mappingMode==MaterialMappingMode::UV1?uv1:uv;
@@ -1206,21 +1239,23 @@ PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset& asset,co
         out.normal=apply_reoriented_tangent_material_normal(out.normal,tangent,bitangent,normalize(Float3{(2*v.x-1)*binding.detailNormalScale,(2*v.y-1)*binding.detailNormalScale,2*v.z-1}),binding.mapping.detailNormalStrength*fade);surface.normal=out.normal;}
     for(std::size_t index=0;index<material.layers.size();++index){const auto& authored=material.layers[index];
         if(!authored.enabled||authored.weight<=0||authored.sourceMaterial==kAirMaterial||authored.sourceMaterial>=asset.materials.size())continue;
-        MaterialLayerSample layer;layer.surface=sample_layer_surface(asset,authored.sourceMaterial,chains,uv,uv1,world,hit.position,out.normal,tangent,bitangent,lod,true,stats);
+        MaterialLayerSample layer;layer.surface=sample_layer_surface(asset,authored.sourceMaterial,chains,uv,uv1,world,hit.position,geometricNormal,tangent,bitangent,lod,true,stats,pose,units);
         layer.baseColorBlend=authored.blendMode;layer.authoredWeight=authored.weight;layer.mask=1;layer.heightBlendStrength=0;
         if(index<binding.layers.size()){const auto& l=binding.layers[index];if(!l.enabled)continue;layer.semantic=l.semantic;layer.opacityPolicy=l.opacityPolicy;layer.heightBlendStrength=l.heightBlendStrength;layer.heightBlendBias=l.heightBlendBias;layer.heightBlendTransition=l.heightBlendTransition;
             const auto at=transform_texture_coordinates(select_uv(l.mask,uv,uv1),binding.mapping.baseTransform);
             layer.mask=std::clamp((l.mask.texture?map(l.mask,binding.mapping.baseTransform,at,1,{1,1,1,1}).x:1)*l.maskScale+l.maskBias,0.F,1.F);
             if(l.height.texture){const auto heightUv=transform_texture_coordinates(select_uv(l.height,uv,uv1),binding.mapping.baseTransform);layer.surface.height=map(l.height,binding.mapping.baseTransform,heightUv,1,{.5F,.5F,.5F,1}).x;}}
         const auto layerNormal=layer.surface.normal;layer.surface.normal={0,0,1};const float coverage=height_aware_material_layer_coverage(surface.height,layer);
-        surface=blend_material_surface_layer(surface,layer);out.normal=apply_reoriented_tangent_material_normal(out.normal,tangent,bitangent,layerNormal,coverage);surface.normal=out.normal;
+        surface=blend_material_surface_layer(surface,layer);
+        const auto combined=blend_reoriented_material_normals({dot(out.normal,tangent),dot(out.normal,bitangent),dot(out.normal,geometricNormal)},layerNormal,coverage);
+        out.normal=normalize(add(add(multiply(tangent,combined.x),multiply(bitangent,combined.y)),multiply(geometricNormal,combined.z)));surface.normal=out.normal;
     }
     material.baseColor=surface.baseColor;material.baseColor.w=surface.opacity;material.roughness=surface.roughness;material.metallic=surface.metallic;material.emissive=surface.emissive;
     if(material.normalMap)out.normal=normalize(transform_vector(pose,voxel_normal_map_normal(material,multiply(hit.position,units),inverse_transform_vector(pose,out.normal))));
     float recipeFootprint=(std::max)(0.F,footprintMeters);
     if(material.surfaceDetail.space==SurfaceDetailSpace::UV0||material.surfaceDetail.space==SurfaceDetailSpace::UV1){
         recipeFootprint=0;
-        if(std::abs(det)>1e-20F){
+        if(footprint>0&&std::abs(det)>1e-20F){
             const bool second=material.surfaceDetail.space==SurfaceDetailSpace::UV1;
             const auto ua=second?a.texcoord1:a.texcoord,ub=second?b.texcoord1:b.texcoord,uc=second?c.texcoord1:c.texcoord;
             const auto gradient=[&](float v1,float v2){return add(multiply(e1,(d11*v1-d01*v2)/det),multiply(e2,(d00*v2-d01*v1)/det));};

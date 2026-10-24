@@ -491,6 +491,17 @@ void test_material_layers_and_runtime_weight() {
     CHECK(library.clear_runtime_layer_weights(22));
     blended = library.resolved(22);
     CHECK(blended && std::fabs(blended->metallic - 0.5F) < 1.0e-6F);
+    // Every blend replaces the resolved definition; iteration must retain the authored stack.
+    const auto instanceId=library.find_instance_by_material_id(22);
+    CHECK(instanceId.has_value());
+    if(instanceId){
+        auto four=*library.find_instance(*instanceId);
+        four.layers.assign(4,{21,.5F,MaterialLayerBlendMode::Lerp,true});
+        CHECK(library.update_instance(four,&error));
+        blended=library.resolved(22);
+        CHECK(blended && std::fabs(blended->metallic-.0625F)<1e-6F);
+        CHECK(blended && std::fabs(blended->roughness-.95F)<1e-6F);
+    }
 }
 
 void test_material_layer_cycle_is_rejected() {

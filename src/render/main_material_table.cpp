@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "dve/master_material.hpp"
+#include "dve/render/layered_surface.hpp"
 
 namespace dve::render {
 namespace {
@@ -64,7 +65,7 @@ MainMaterialDescriptorTable::~MainMaterialDescriptorTable() { clear(); }
 
 bool MainMaterialDescriptorTable::valid() const noexcept {
     if (!residency_ || !layout_ || !fallbackMaterialBuffer_ || !fallbackMappingBuffer_ ||
-        !fallbackSurfaceBuffer_ || !fallbackSampler_ || !fallbackGroup_ || !staticShadowDepthView_ ||
+        !fallbackSurfaceBuffer_ || !fallbackLayerBuffer_ || !fallbackSampler_ || !fallbackGroup_ || !staticShadowDepthView_ ||
         !dynamicShadowDepthView_ || !shadowComparisonSampler_) return false;
     return std::ranges::all_of(fallbackTextures_, [](auto handle) { return static_cast<bool>(handle); }) &&
            std::ranges::all_of(fallbackViews_, [](auto handle) { return static_cast<bool>(handle); });
@@ -99,6 +100,7 @@ bool MainMaterialDescriptorTable::initialize(rhi::TextureViewHandle staticShadow
     layout.bindings.push_back({11U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment});
     layout.bindings.push_back({12U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment});
     layout.bindings.push_back({13U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment});
+    layout.bindings.push_back({14U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Fragment});
     layout_ = device_.create_bind_group_layout(layout, &local);
     if (!layout_) { set_error(error, local); clear(); return false; }
 
@@ -111,6 +113,9 @@ bool MainMaterialDescriptorTable::initialize(rhi::TextureViewHandle staticShadow
         desc.debugName = std::move(name);
         return device_.create_buffer(desc, &local);
     };
+    fallbackLayerBuffer_=make_buffer(32U,"Empty live layer stack");
+    const std::array<std::uint32_t,8> emptyLayers{};
+    if(!fallbackLayerBuffer_||!device_.write_buffer(fallbackLayerBuffer_,0U,std::as_bytes(std::span(emptyLayers)),&local)){set_error(error,local);clear();return false;}
     fallbackMaterialBuffer_ = make_buffer(sizeof(GpuMaterialRecord),
                                           "Fallback live GPU material record");
     if (!fallbackMaterialBuffer_) { set_error(error, local); clear(); return false; }
@@ -175,6 +180,7 @@ bool MainMaterialDescriptorTable::initialize(rhi::TextureViewHandle staticShadow
     group.entries.push_back({11U, {}, staticShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
     group.entries.push_back({12U, {}, dynamicShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
     group.entries.push_back({13U,fallbackSurfaceBuffer_,{},0U,sizeof(GpuMaterialSurfaceDetail),{}});
+    group.entries.push_back({14U,fallbackLayerBuffer_,{},0U,32U,{}});
     fallbackGroup_ = device_.create_bind_group(group, &local);
     if (!fallbackGroup_) { set_error(error, local); clear(); return false; }
     return true;
@@ -227,9 +233,9 @@ bool MainMaterialDescriptorTable::ensure_asset_records(const CookedPolygonAsset&
         (void)device_.destroy_buffer(created.materialRecords,nullptr);set_error(error,local);return false;
     }
     for (std::size_t index = 0U; index < asset.materials.size(); ++index) {
-        const auto materialRecord = pack_gpu_material_record((*resolved)[index]);
+        const auto materialRecord = pack_gpu_material_record(asset.materials[index]);
         const auto mappingRecord = pack_gpu_polygon_material_mapping(asset.materialBindings[index]);
-        const auto surfaceRecord=pack_gpu_material_surface_detail((*resolved)[index].surfaceDetail);
+        const auto surfaceRecord=pack_gpu_material_surface_detail(asset.materials[index].surfaceDetail);
         if (!device_.write_buffer(created.materialRecords, index * created.materialStride,
                                   std::as_bytes(std::span(&materialRecord, 1U)), &local) ||
             !device_.write_buffer(created.mappingRecords, index * created.mappingStride,
@@ -306,6 +312,8 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
     const MaterialKey key{asset.contentHash, materialIndex};
     if (materials_.contains(key)) { ++stats_.descriptorCacheHits; return true; }
 
+    const auto layers=build_layered_surface_payload(asset,materialIndex,error);
+    if(!layers)return false;
     bool retainedNow{};
     if (!retain_asset_once(asset.contentHash, retainedNow, error)) return false;
     AssetResource* assetResource{};
@@ -349,14 +357,26 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
     std::string local;
     const auto surfaceOffset=static_cast<std::size_t>(materialIndex)*assetResource->surfaceStride;
     group.entries.push_back({13U,assetResource->surfaceRecords,{},surfaceOffset,sizeof(GpuMaterialSurfaceDetail),{}});
+    rhi::BufferDesc layerDesc;layerDesc.bytes=layers->words.size()*4;
+    layerDesc.usage=rhi::BufferUsage::Storage|rhi::BufferUsage::CopyDestination;
+    layerDesc.memory=rhi::MemoryDomain::Upload;layerDesc.initialState=rhi::ResourceState::ShaderRead;
+    layerDesc.debugName="Live layered surface payload";
+    auto layerBuffer=device_.create_buffer(layerDesc,&local);
+    if(!layerBuffer||!device_.write_buffer(layerBuffer,0,std::as_bytes(std::span(layers->words)),&local)){
+        if(layerBuffer)(void)device_.destroy_buffer(layerBuffer,nullptr);
+        set_error(error,local);rollback_asset_retain(asset.contentHash,retainedNow);return false;
+    }
+    group.entries.push_back({14U,layerBuffer,{},0U,layerDesc.bytes,{}});
     const auto bindGroup = device_.create_bind_group(group, &local);
     if (!bindGroup) {
+        (void)device_.destroy_buffer(layerBuffer,nullptr);
         set_error(error, local);
         rollback_asset_retain(asset.contentHash, retainedNow);
         return false;
     }
     MaterialResource created;
     created.descriptor.bindGroup = bindGroup;
+    created.descriptor.layerBuffer=layerBuffer;created.descriptor.layerPayloadBytes=layerDesc.bytes;
     created.descriptor.materialRecordBuffer = assetResource->materialRecords;
     created.descriptor.mappingRecordBuffer = assetResource->mappingRecords;
     created.descriptor.surfaceRecordBuffer=assetResource->surfaceRecords;
@@ -372,6 +392,7 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
     (void)it;
     if (!inserted) {
         (void)device_.destroy_bind_group(bindGroup, nullptr);
+        (void)device_.destroy_buffer(layerBuffer,nullptr);
         rollback_asset_retain(asset.contentHash, retainedNow);
         set_error(error, "main material descriptor publication collided");
         return false;
@@ -397,6 +418,7 @@ bool MainMaterialDescriptorTable::invalidate_asset(std::uint64_t assetContentHas
                 ok = false; if (error && error->empty()) *error = local;
                 local.clear();
             }
+            if(it->second.descriptor.layerBuffer)(void)device_.destroy_buffer(it->second.descriptor.layerBuffer,nullptr);
             it = materials_.erase(it);
         } else ++it;
     }
@@ -421,6 +443,7 @@ void MainMaterialDescriptorTable::clear() noexcept {
         if (resource.descriptor.bindGroup)
             (void)device_.destroy_bind_group(resource.descriptor.bindGroup, nullptr);
     }
+    for(auto& [key,resource]:materials_){(void)key;if(resource.descriptor.layerBuffer)(void)device_.destroy_buffer(resource.descriptor.layerBuffer,nullptr);}
     materials_.clear();
     for (auto& [key, resource] : assets_) {
         (void)key;
@@ -433,6 +456,9 @@ void MainMaterialDescriptorTable::clear() noexcept {
         (void)residency_->release_asset(assetContentHash, nullptr);
     retainedAssets_.clear();
     if (fallbackGroup_) (void)device_.destroy_bind_group(fallbackGroup_, nullptr);
+    if(fallbackLayerBuffer_)(void)device_.destroy_buffer(fallbackLayerBuffer_,nullptr);
+    fallbackLayerBuffer_={};
+
     for (auto view : fallbackViews_) if (view) (void)device_.destroy_texture_view(view, nullptr);
     for (auto texture : fallbackTextures_) if (texture) (void)device_.destroy_texture(texture, nullptr);
     if (fallbackSampler_) (void)device_.destroy_sampler(fallbackSampler_, nullptr);

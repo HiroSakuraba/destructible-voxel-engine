@@ -16,6 +16,7 @@ public:
     MaterialPreviewWorker(const MaterialPreviewWorker&)=delete;
     MaterialPreviewWorker& operator=(const MaterialPreviewWorker&)=delete;
     void request(const VoxelMaterialDefinition&,MaterialPreviewShape);
+    void request(const CookedPolygonAsset&,std::uint32_t materialIndex,MaterialPreviewShape);
     void cancel();
     [[nodiscard]] std::shared_ptr<const MaterialPreviewImage> image() const;
     [[nodiscard]] bool busy() const;

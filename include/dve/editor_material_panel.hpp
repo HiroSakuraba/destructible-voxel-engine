@@ -10,12 +10,15 @@
 #include <vector>
 namespace dve::editor {
 struct MaterialPanelLayout {
-    UiRect panel,close,search,family,favorites,recent,backend,supported,previous,next,preview,shape,savePreset,apply,editSlot,loadSlot,reset,update,advanced;
+    UiRect panel,close,search,family,favorites,recent,backend,supported,previous,next,preview,shape,savePreset,apply,editSlot,loadSlot,reset,update,advanced,layered;
     std::vector<UiRect> rows,fields,resets;
 };
 struct MaterialPanelState {
     bool open{},advanced{},favoritesOnly{},recentOnly{},supportedOnly{},searchFocus{true};
     bool preferencesLoaded{};
+    bool layerMode{};
+    std::size_t layerIndex{};
+    std::optional<std::string> layerEditing;
     MaterialPresetBackend backend{MaterialPresetBackend::CpuReference};
     MaterialPreviewShape shape{MaterialPreviewShape::Sphere};
     MaterialPresetCatalog catalog{MaterialPresetCatalog::starter()};

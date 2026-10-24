@@ -5533,7 +5533,7 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint32_t modifiers) {
     if(materialPanel_.open){auto& p=materialPanel_;const auto l=material_panel_layout();
         auto& first=x>=l.loadSlot.x?p.controlFirst:p.first;
-        const auto total=x>=l.loadSlot.x?material_panel_controls().size():material_panel_entries().size();
+        const auto total=x>=l.loadSlot.x?(p.layerMode?material_panel_layer_controls().size():material_panel_controls().size()):material_panel_entries().size();
         if(steps>0){if(first>0)--first;}else if(first+1<total)++first;return;}
 
     if(!settingsPanel_.open && !longJob_ && mesh_authoring_wheel(steps,x,y))return;

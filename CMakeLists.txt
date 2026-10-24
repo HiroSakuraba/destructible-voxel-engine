@@ -711,6 +711,7 @@ if(DVE_BUILD_RHI)
         src/render/mesh_heap.cpp
         src/render/polygon_renderer.cpp
         src/render/texture_mips.cpp
+        src/render/layered_surface.cpp
         src/render/cpu_fog.cpp
         src/render/cpu_fog_cache.cpp
         src/render/sprite_renderer.cpp
@@ -2728,6 +2729,9 @@ if(DVE_BUILD_TESTS)
 
     if(DVE_BUILD_EDITOR)
         if(TARGET dve_render_bridge)
+            add_executable(dve_layered_surface_tests tests/test_layered_surface.cpp)
+            target_link_libraries(dve_layered_surface_tests PRIVATE dve::editor)
+            add_test(NAME dve_layered_surface_tests COMMAND dve_layered_surface_tests)
             add_executable(dve_material_surfaces_tests tests/test_material_surfaces.cpp)
             target_link_libraries(dve_material_surfaces_tests PRIVATE dve::editor)
             add_test(NAME dve_material_surfaces_tests COMMAND dve_material_surfaces_tests)

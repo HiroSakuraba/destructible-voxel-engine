@@ -21,6 +21,7 @@ CookedPolygonAsset material_preview_fixture(const VoxelMaterialDefinition& mater
         constexpr unsigned lat=20,lon=40;
         for(unsigned y=0;y<=lat;++y)for(unsigned x=0;x<=lon;++x){const float t=3.14159265F*float(y)/lat,p=6.2831853F*float(x)/lon;
             PolygonVertex v;v.normal={std::sin(t)*std::cos(p),std::cos(t),std::sin(t)*std::sin(p)};
+            v.texcoord={float(x)/lon,float(y)/lat};v.texcoord1=v.texcoord;v.tangent={-std::sin(p),0,std::cos(p),1};
             v.position={v.normal.x*.5F,v.normal.y*.5F+.55F,v.normal.z*.5F};a.vertices.push_back(v);}
         for(unsigned y=0;y<lat;++y)for(unsigned x=0;x<lon;++x){const unsigned i=y*(lon+1)+x,j=(y+1)*(lon+1)+x;
             if(y>0)a.indices.insert(a.indices.end(),{i,i+1,j});
@@ -40,7 +41,7 @@ CookedPolygonAsset material_preview_fixture(const VoxelMaterialDefinition& mater
                 for(unsigned y=0;y<=12;++y)for(unsigned x=0;x<=12;++x){float p[3]{};p[axis]=sign*.5F;p[(axis+1)%3]=float(x)/12-.5F;p[(axis+2)%3]=float(y)/12-.5F;
                     Float3 inner{std::clamp(p[0],-.36F,.36F),std::clamp(p[1],-.36F,.36F),std::clamp(p[2],-.36F,.36F)};
                     Float3 n{p[0]-inner.x,p[1]-inner.y,p[2]-inner.z};const float inv=1/std::sqrt(n.x*n.x+n.y*n.y+n.z*n.z);n={n.x*inv,n.y*inv,n.z*inv};
-                    PolygonVertex v;v.normal=n;v.position={inner.x+.14F*n.x,inner.y+.14F*n.y+.55F,inner.z+.14F*n.z};rounded.vertices.push_back(v);}
+                    PolygonVertex v;v.normal=n;v.texcoord={float(x)/12,float(y)/12};v.texcoord1=v.texcoord;v.position={inner.x+.14F*n.x,inner.y+.14F*n.y+.55F,inner.z+.14F*n.z};rounded.vertices.push_back(v);}
                 for(unsigned y=0;y<12;++y)for(unsigned x=0;x<12;++x){const unsigned i=start+y*13+x;
                     if(sign>0)rounded.indices.insert(rounded.indices.end(),{i,i+1,i+13,i+1,i+14,i+13});
                     else rounded.indices.insert(rounded.indices.end(),{i,i+13,i+1,i+1,i+13,i+14});}}
@@ -51,7 +52,7 @@ CookedPolygonAsset material_preview_fixture(const VoxelMaterialDefinition& mater
     a.contentHash=polygon_asset_content_hash(a);return a;
 }
 struct MaterialPreviewWorker::Impl {
-    struct Job{VoxelMaterialDefinition material;MaterialPreviewShape shape{};std::uint64_t key{},generation{};};
+    struct Job{CookedPolygonAsset asset;MaterialPreviewShape shape{};std::uint64_t key{},generation{};};
     mutable std::mutex mutex;std::condition_variable cv;std::optional<Job> pending;
     std::atomic<std::uint64_t> generation{0};std::atomic<bool> stop{false};
     bool working{};std::shared_ptr<const MaterialPreviewImage> current;
@@ -64,7 +65,7 @@ struct MaterialPreviewWorker::Impl {
             auto image=std::make_shared<MaterialPreviewImage>();image->rgb.resize(image->size*image->size);
             try{
 #if defined(DVE_EDITOR_MATERIAL_PREVIEW_RENDERER)
-                auto sample=material_preview_fixture(j.material,j.shape);
+                auto sample=j.asset;
                 auto floor=make_editor_polygon_plane(2,8);floor.materials[0].baseColor={.45F,.45F,.45F,1};
                 // A high contrast chart behind the sample makes refraction and frosting visible.
                 CookedPolygonAsset chart;chart.objectId=3;VoxelMaterialDefinition white,blue;white.baseColor={.8F,.8F,.8F,1};blue.baseColor={.025F,.1F,.25F,1};chart.materials={white,blue};chart.materialBindings.resize(2);
@@ -97,11 +98,20 @@ struct MaterialPreviewWorker::Impl {
 MaterialPreviewWorker::MaterialPreviewWorker():impl_(std::make_unique<Impl>()){}
 MaterialPreviewWorker::~MaterialPreviewWorker()=default;
 void MaterialPreviewWorker::request(const VoxelMaterialDefinition& m,MaterialPreviewShape shape){
-    auto fixture=material_preview_fixture(m,shape);const auto key=fixture.contentHash^std::uint64_t(unsigned(shape)+1)*0x7391eac51ULL; // renderer/studio revision 1
+    auto fixture=material_preview_fixture(m,shape);request(fixture,0,shape);
+}
+void MaterialPreviewWorker::request(const CookedPolygonAsset& asset,std::uint32_t slot,MaterialPreviewShape shape){
+    if(slot>=asset.materials.size()||slot>=asset.materialBindings.size()){cancel();return;}
+    auto fixture=material_preview_fixture(asset.materials[slot],shape);
+    fixture.materials=asset.materials;fixture.materialBindings=asset.materialBindings;
+    fixture.images=asset.images;fixture.textures=asset.textures;fixture.samplers=asset.samplers;
+    for(auto& sub:fixture.submeshes)sub.materialIndex=slot;
+    fixture.contentHash=polygon_asset_content_hash(fixture);
+    const auto key=fixture.contentHash^std::uint64_t(unsigned(shape)+1)*0x7391eac51ULL; // renderer/studio revision 1
     std::lock_guard lock(impl_->mutex);if(impl_->requestedKey==key)return;impl_->requestedKey=key;
     const auto generation=++impl_->generation;impl_->pending.reset();
     if(auto it=impl_->cache.find(key);it!=impl_->cache.end()){impl_->current=it->second;return;}
-    impl_->current.reset();impl_->pending=Impl::Job{m,shape,key,generation};impl_->cv.notify_one();
+    impl_->current.reset();impl_->pending=Impl::Job{std::move(fixture),shape,key,generation};impl_->cv.notify_one();
 }
 void MaterialPreviewWorker::cancel(){std::lock_guard lock(impl_->mutex);++impl_->generation;impl_->pending.reset();impl_->requestedKey.reset();impl_->current.reset();}
 std::shared_ptr<const MaterialPreviewImage> MaterialPreviewWorker::image()const{std::lock_guard lock(impl_->mutex);return impl_->current;}

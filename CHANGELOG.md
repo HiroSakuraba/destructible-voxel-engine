@@ -1,3 +1,16 @@
+# Unreleased — Layered Surface (material Batch 6)
+
+- Material-panel stack editing for a base plus four overlays, reusable leaf sources,
+  masks/height blends, mapping controls, exact numeric input and per-action undo/redo.
+- Original painted-metal, worn-painted-wood and dirty/scorched-plaster recipes;
+  immutable full-stack CPU previews and scene persistence.
+- Per-pixel live GPU layering and matching masked CSM coverage through a bounded
+  image/mip buffer with no additional hardware samplers. Unsupported nested,
+  transmissive, parallax and legacy-detail inputs are rejected explicitly.
+- Fix invalidated layer iteration in both material resolvers and align CPU layer
+  sampling/normal composition with GPU texture-coordinate conventions.
+- See docs/material-layered-surface-batch6-2026-10-23.md for supported limits and tests.
+
 # Unreleased — Windows support (player, game zip, CI)
 
 - New preset `windows-msvc-player-release` (MSVC, newest Visual Studio): static SDL 3.4.12,

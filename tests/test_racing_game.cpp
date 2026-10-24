@@ -19,7 +19,9 @@ void check(bool ok,const std::string& message){if(!ok)throw std::runtime_error(m
 Component comp(const char* role,std::string key){auto c=make_component_from_schema(std::string("dve.prototype.")+role,1);check(bool(c),"component schema");c->properties["key"]=std::move(key);return *c;}
 struct Fixture {
  GameWorld world{create_physics3d_world(Physics3DBackend::Reference)};std::unique_ptr<RacingGame> game;GameObjectId car{},rules{};
- explicit Fixture(bool barrier=false,double grip=7,bool sideBarrier=false,std::string profile="street"){std::string error;auto floor=make_editor_polygon_cube(1);for(auto& v:floor.vertices)v.position={(v.position.x-.5F)*200,(v.position.y-.5F)*200,(v.position.z-1)*.5F};refresh_editor_polygon(floor,true);check(world.spawn_cooked_polygon_asset(std::move(floor),"Floor",{},false)!=0,"floor");
+ explicit Fixture(bool barrier=false,double grip=7,bool sideBarrier=false,std::string profile="street",double floorGrip=1.0){std::string error;auto floor=make_editor_polygon_cube(1);for(auto& v:floor.vertices)v.position={(v.position.x-.5F)*200,(v.position.y-.5F)*200,(v.position.z-1)*.5F};refresh_editor_polygon(floor,true);const auto floorId=world.spawn_cooked_polygon_asset(std::move(floor),"Floor",{},false);check(floorId!=0,"floor");
+ auto surface=comp("race_surface","floor-surface");surface.properties["grip_multiplier"]=floorGrip;
+ check(bool(world.add_component(floorId,std::move(surface),&error)),error);
  auto mesh=make_editor_polygon_cube(2);car=world.spawn_visual_polygon_asset(std::move(mesh),"Car",make_rigid_transform({0,0,.04F},{}));auto carConfig=comp("race_car","car");carConfig.properties["grip"]=grip;carConfig.properties["handling_profile"]=std::move(profile);check(bool(world.add_component(car,std::move(carConfig),&error)),error);
  GameObjectDesc d;d.name="Rules";auto c=comp("race_rules","rules");c.properties["countdown"]=0.0;c.properties["laps"]=std::int64_t{2};d.components={c};rules=world.create_object(std::move(d));
  for(unsigned n=0;n<4;++n){GameObjectDesc gate;gate.name="Gate "+std::to_string(n);gate.transform.position={0,n?float(n)*10:40,0};auto g=comp("race_gate","gate"+std::to_string(n));g.properties["order"]=std::int64_t(n);gate.components={g};check(world.create_object(std::move(gate))!=0,"gate");}
@@ -60,6 +62,11 @@ void driving(){Fixture a,b;a.world.set_axis("move_y",1);b.world.set_axis("move_y
  for(auto* fixture:{&standard,&drift}){fixture->world.set_axis("move_y",1);fixture->world.set_axis("move_x",.8F);fixture->tick(120);}
  check(length(subtract(*standard.world.position(standard.car),*drift.world.position(drift.car)))>.1F,"handling profiles alter trajectories");
  check(standard.game->telemetry().grounded,"grounded telemetry");
+ Fixture paved(false,7,false,"street",1.0),loose(false,7,false,"street",0.25);
+ for(auto* fixture:{&paved,&loose}){fixture->world.set_axis("move_y",1);fixture->world.set_axis("move_x",.8F);fixture->tick(120);}
+ check(length(subtract(*paved.world.position(paved.car),*loose.world.position(loose.car)))>.1F,"surface grip changes handling");
+ check(std::abs(loose.game->telemetry().surfaceGripMultiplier-.25F)<1e-5F,"surface metadata reaches tire contact");
+ check(loose.game->telemetry().skidIntensity>=0&&loose.game->telemetry().skidIntensity<=1,"bounded skid feedback");
  check(std::isfinite(drift.game->telemetry().lateralSlipMetersPerSecond)&&std::abs(drift.game->telemetry().yawRateRadiansPerSecond)>.001F,"slip/yaw telemetry");
  Fixture wall(false,7,true);wall.world.set_axis("move_y",1);wall.tick(24);const auto yBefore=wall.world.position(wall.car)->y;
  wall.world.set_axis("move_x",1);wall.tick(25);wall.world.set_axis("move_x",-1);wall.tick(40);

@@ -162,6 +162,7 @@ add_library(dve_core
     src/dashr_surface.cpp
     src/dashr_seam_map.cpp
     src/material_layers.cpp
+    src/rgba8_png.cpp
     src/material_decal.cpp
     src/material_displacement.cpp
     src/procedural_noise.cpp
@@ -715,6 +716,7 @@ if(DVE_BUILD_RHI)
         src/render/mesh_heap.cpp
         src/render/polygon_renderer.cpp
         src/render/texture_mips.cpp
+        src/render/material_texture_bake.cpp
         src/render/layered_surface.cpp
         src/render/cpu_fog.cpp
         src/render/cpu_fog_cache.cpp
@@ -756,6 +758,9 @@ if(DVE_BUILD_RHI)
         target_sources(dve_render_bridge PRIVATE src/render/cpu_hair_renderer.cpp)
     endif()
     add_library(dve::render_bridge ALIAS dve_render_bridge)
+
+    add_executable(dve_bake_material apps/dve_bake_material.cpp)
+    target_link_libraries(dve_bake_material PRIVATE dve::render_bridge)
     add_executable(dve_cpu_fog_bench apps/cpu_fog_bench.cpp)
     target_link_libraries(dve_cpu_fog_bench PRIVATE dve::render_bridge)
     target_include_directories(dve_render_bridge PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
@@ -2734,6 +2739,10 @@ if(DVE_BUILD_TESTS)
 
     if(DVE_BUILD_EDITOR)
         if(TARGET dve_render_bridge)
+            add_executable(dve_material_texture_bake_tests tests/test_material_texture_bake.cpp)
+            target_link_libraries(dve_material_texture_bake_tests PRIVATE dve::editor)
+            add_dependencies(dve_material_texture_bake_tests dve_bake_material)
+            add_test(NAME dve_material_texture_bake_tests COMMAND dve_material_texture_bake_tests $<TARGET_FILE:dve_bake_material>)
             add_executable(dve_layered_surface_tests tests/test_layered_surface.cpp)
             target_link_libraries(dve_layered_surface_tests PRIVATE dve::editor)
             add_test(NAME dve_layered_surface_tests COMMAND dve_layered_surface_tests)

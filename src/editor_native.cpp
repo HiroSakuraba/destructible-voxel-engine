@@ -11893,6 +11893,7 @@ std::uint64_t scene_change_fingerprint(const EditorDocument& document, const Edi
         mix((object.flags.visible ? 1U : 0U) | (object.flags.locked ? 2U : 0U) | (object.flags.anchored ? 4U : 0U) |
             (object.flags.structural ? 8U : 0U) | (object.flags.collisionEnabled ? 16U : 0U) | (object.flags.decorative ? 32U : 0U));
         mix(object.components.size());
+        if(object.materialBake)mix(material_bake_recipe_hash(*object.materialBake));
     }
     return h;
 }

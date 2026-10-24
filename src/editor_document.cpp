@@ -103,6 +103,7 @@ EditorObject clone_editor_object(const EditorObject& source) {
     cloned.voxelMaterials = source.voxelMaterials;
     cloned.polygon = source.polygon;
     cloned.subdivision = source.subdivision;
+    cloned.materialBake = source.materialBake;
     cloned.modelingTopology = source.modelingTopology;cloned.modelingNextId=source.modelingNextId;
     cloned.voxels = clone_voxel_object(*source.voxels);
     cloned.text3d = source.text3d;
@@ -338,6 +339,7 @@ bool EditorDocument::validate(std::string* error) const {
                 (object.subdivisionCache && !object.subdivisionCache->mesh))
                 return fail(object.subdivisionCache ? object.subdivisionCache->error : "invalid subdivision level");
         }
+        if(object.materialBake&&(!object.polygon||!validate_material_bake_recipe(*object.materialBake,error)))return fail("Invalid material bake recipe");
         if (object.modelingTopology) {
             if(!object.polygon || object.modelingNextId<object.modelingTopology->nextId ||
                 !validate_modeling_topology(*object.polygon,object.subdivision?&*object.subdivision:nullptr,*object.modelingTopology,error)) return fail("Invalid persistent modeling topology");
@@ -384,6 +386,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 if (!write_dmesh(stagingPath/(std::to_string(id)+".dmesh"),mesh,&writeError)) throw std::runtime_error(writeError);
                 if (object.subdivision && !write_dmesh(stagingPath/(std::to_string(id)+".cage.dmesh"),*object.polygon,&writeError))
                     throw std::runtime_error(writeError);
+                if(object.materialBake&&!write_material_bake_recipe(stagingPath/(std::to_string(id)+".material-bake"),*object.materialBake,&writeError))throw std::runtime_error(writeError);
                 continue;
             }
             if (object.text3d) {
@@ -443,8 +446,9 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             [](const auto& entry) {return entry.second.subdivision.has_value();});
         const bool hasModeling=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
         const bool hasRetiredModeling=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return !entry.second.modelingTopology&&entry.second.modelingNextId>1;});
+        const bool hasBakes=std::any_of(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.materialBake.has_value();});
         const bool hasSelectionSets = !selectionSets_.empty() || !selectionLineage_.empty();
-        output << "DVE_EDITOR_SCENE " << (hasSelectionSets ? 13 : hasRetiredModeling ? 12 : hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
+        output << "DVE_EDITOR_SCENE " << (hasBakes ? 14 : hasSelectionSets ? 13 : hasRetiredModeling ? 12 : hasModeling ? 11 : hasSubdivisions ? 10 : hasVoxelPalettes ? 8 : hasPolygons ? 7 : 6) << "\n";
         output << "name " << quote_text(name_) << "\n";
         output << "revision " << newRevision << "\n";
         output << "revision_dir " << quote_text(revisionPath.filename().generic_string()) << "\n";
@@ -519,7 +523,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
             }
         }
         output << "next_prefab_instance " << nextPrefabInstanceId_ << "\n";
-        if (hasVoxelPalettes || hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets) {
+        if (hasVoxelPalettes || hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes) {
             const auto count = std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) { return !entry.second.voxelMaterials.empty(); });
             output << "voxel_palettes " << count << "\n";
@@ -532,7 +536,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output << "\n";
             }
         }
-        if (hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets) {
+        if (hasSubdivisions || hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),
                 [](const auto& entry) {return entry.second.subdivision.has_value();});
             output << "subdivisions " << count << "\n";
@@ -550,7 +554,7 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                     output << "edge_crease " << edge << ' ' << strength << "\n";
             }
         }
-        if(hasModeling || hasRetiredModeling || hasSelectionSets) {
+        if(hasModeling || hasRetiredModeling || hasSelectionSets || hasBakes) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return entry.second.modelingTopology.has_value();});
             output<<"modeling_topologies "<<count<<"\n";
             for(const auto& [id,object]:objects_)if(object.modelingTopology) {
@@ -558,12 +562,12 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                 output<<"modeling_object "<<id<<"\n";write_modeling_topology(output,topology);
             }
         }
-        if(hasRetiredModeling || hasSelectionSets) {
+        if(hasRetiredModeling || hasSelectionSets || hasBakes) {
             const auto count=std::count_if(objects_.begin(),objects_.end(),[](const auto& entry){return !entry.second.modelingTopology&&entry.second.modelingNextId>1;});
             output<<"modeling_floors "<<count<<"\n";
             for(const auto& [id,object]:objects_)if(!object.modelingTopology&&object.modelingNextId>1)output<<"modeling_floor "<<id<<' '<<object.modelingNextId<<"\n";
         }
-        if (hasSelectionSets) {
+        if (hasSelectionSets || hasBakes) {
             output << "selection_sets " << selectionSets_.size() << "\n";
             for (const EditorSelectionSet& set : selectionSets_) {
                 output << "selection_set " << unsigned(set.kind) << ' ' << set.mesh << ' ' << std::quoted(set.name) << ' '
@@ -582,6 +586,10 @@ EditorSceneSaveResult EditorDocument::save_transactional(const std::filesystem::
                     for (const ModelingId n : next) output << ' ' << n;
                     output << "\n";
                 }
+        }
+        if(hasBakes){
+            output<<"material_bakes "<<std::count_if(objects_.begin(),objects_.end(),[](const auto& item){return item.second.materialBake.has_value();})<<"\n";
+            for(const auto& [id,object]:objects_)if(object.materialBake)output<<"material_bake "<<id<<"\n";
         }
         output.flush();
         if (!output) throw std::runtime_error("failed to write scene manifest");
@@ -605,7 +613,7 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
         std::string magic;
         std::uint32_t version{};
         input >> magic >> version;
-        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13)) throw std::runtime_error("unsupported editor scene format");
+        if (magic != "DVE_EDITOR_SCENE" || (version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 && version != 7 && version != 8 && version != 9 && version != 10 && version != 11 && version != 12 && version != 13 && version != 14)) throw std::runtime_error("unsupported editor scene format");
         std::string key;
         std::string name;
         std::uint64_t revision{};
@@ -878,6 +886,15 @@ std::optional<EditorDocument> EditorDocument::load(const std::filesystem::path& 
             }
         }
         document.path_ = manifestPath;
+        if(version>=14){
+            std::size_t count{};input>>key>>count;if(!input||key!="material_bakes"||count>objectCount)throw std::runtime_error("Invalid material bake section");
+            std::set<EditorObjectId> seen;
+            for(std::size_t n=0;n<count;++n){EditorObjectId id{};input>>key>>id;auto* object=document.find_object(id);
+                if(!input||key!="material_bake"||!object||!object->polygon||!seen.insert(id).second)throw std::runtime_error("Invalid material bake association");
+                std::string reason;object->materialBake=read_material_bake_recipe(manifestPath.parent_path()/revisionDirectory/(std::to_string(id)+".material-bake"),&reason);
+                if(!object->materialBake)throw std::runtime_error(reason);
+            }
+        }
         document.revision_ = revision;
         document.dirty_ = false;
         std::string validationError;

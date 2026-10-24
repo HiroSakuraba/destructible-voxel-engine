@@ -259,6 +259,25 @@ void test_per_pixel_layers_and_decals() {
     CHECK(stats.decalFragments>0U&&target.hdrColor[center].x<0.05F);
 }
 
+void test_parallax_normal_alignment() {
+    for(unsigned uv=0;uv<2;++uv){
+        auto a=make_quad(1,false);a.materials[0].baseColor={1,1,1,1};
+        for(auto& v:a.vertices)v.texcoord1=v.texcoord;
+        PolygonImage normal;normal.width=64;normal.height=1;normal.name="Normal/color alignment";normal.mimeType="image/raw";
+        for(unsigned x=0;x<64;++x){const float nx=.7F*std::sin(float(x)*.65F),nz=std::sqrt(1-nx*nx);
+            normal.rgba8.insert(normal.rgba8.end(),{std::uint8_t(std::lround((nx*.5F+.5F)*255)),128,std::uint8_t(std::lround((nz*.5F+.5F)*255)),255});}
+        a.images={normal,{"Height","image/raw",1,1,{230,230,230,255}}};a.samplers={{ImportedWrapMode::Repeat,ImportedWrapMode::Repeat,ImportedTextureFilter::Nearest,ImportedTextureFilter::Nearest}};
+        a.textures={{"Normal",0,0},{"Height",1,0}};auto& b=a.materialBindings[0];b.baseColor={0,uv,PolygonTextureColorSpace::Linear};b.normal={0,uv,PolygonTextureColorSpace::Linear};b.height={1,uv,PolygonTextureColorSpace::Linear};
+        b.mapping.mappingMode=uv?MaterialMappingMode::UV1:MaterialMappingMode::UV0;b.mapping.heightMode=HeightMappingMode::OffsetParallax;b.mapping.heightScale=.3F;a.contentHash=polygon_asset_content_hash(a);
+        render::PolygonCamera camera;camera.position={1,0,2};camera.target={0,0,0};render::PolygonRenderInstance instance{1,&a};render::ReferencePolygonRenderer renderer;
+        render::PolygonRenderTarget color,normals;color.resize(96,64);normals.resize(96,64);render::PolygonRenderOptions options;options.preserveExistingDepth=false;options.enableMipSelection=false;
+        options.materialDebugView=render::PolygonMaterialDebugView::BaseColor;renderer.render(std::span(&instance,1),camera,{},color,options);
+        options.materialDebugView=render::PolygonMaterialDebugView::WorldNormal;renderer.render(std::span(&instance,1),camera,{},normals,options);
+        unsigned compared=0;for(std::size_t i=0;i<color.depth.size();++i)if(color.objectId[i]){auto c=color.hdrColor[i];auto n=normalize(Float3{c.x*2-1,c.y*2-1,c.z*2-1});
+            CHECK(std::abs((normals.hdrColor[i].x*2-1)-n.x)<.012F);CHECK(std::abs((normals.hdrColor[i].z*2-1)-n.z)<.012F);++compared;}CHECK(compared>500);
+    }
+}
+
 void test_mesh_heap_bvh_and_manifest() {
     CookedPolygonAsset a=make_quad(1,false),b=make_quad(2,false);b.materials[0].baseColor={0.8F,0.2F,0.1F,1};b.contentHash=polygon_asset_content_hash(b);
     rhi::NullDevice device;render::ImmutableMeshHeap heap(device);std::string error;const std::array<const CookedPolygonAsset*,3> assets{&a,&a,&b};CHECK(heap.rebuild(assets,&error));CHECK(heap.stats().sourceAssets==3U);CHECK(heap.stats().uniqueAssets==2U);CHECK(heap.stats().deduplicatedAssets==1U);
@@ -268,4 +287,4 @@ void test_mesh_heap_bvh_and_manifest() {
 }
 }
 
-int main(){try{test_null_graphics_contract_and_texture_io();test_reference_renderer_mips_lod_and_hybrid_depth();test_full_material_texture_channels();test_material_debug_views();test_per_pixel_layers_and_decals();test_mesh_heap_bvh_and_manifest();std::cout<<"polygon rendering tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){try{test_parallax_normal_alignment();test_null_graphics_contract_and_texture_io();test_reference_renderer_mips_lod_and_hybrid_depth();test_full_material_texture_channels();test_material_debug_views();test_per_pixel_layers_and_decals();test_mesh_heap_bvh_and_manifest();std::cout<<"polygon rendering tests: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

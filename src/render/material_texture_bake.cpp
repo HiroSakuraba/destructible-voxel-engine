@@ -291,7 +291,7 @@ MaterialTextureBakeResult bake_material_textures(const CookedPolygonAsset& origi
                             const auto sun=normalize(environment.sunDirection);const float ndotl=(std::max)(0.F,dot(geometric,sun));
                             if(environment.sunIntensity>0&&ndotl>0)value=add(value,multiply(environment.sunColor,environment.sunIntensity*ndotl*lighting->sun_visibility(world,geometric,seed)));
                             if(environment.pathTraceBounces>0)value=add(value,lighting->indirect_lobes(world,geometric,geometric,white,seed).diffuse);
-                            else if(!occlusion->nearest(origin,direction,environment.globalIlluminationMaxDistanceMeters/settings.metersPerUnit)){
+                            else if(environment.globalIlluminationMode!=GlobalIlluminationMode::Off&&!occlusion->nearest(origin,direction,environment.globalIlluminationMaxDistanceMeters/settings.metersPerUnit)){
                                 const float up=std::clamp(direction.y*.5F+.5F,0.F,1.F);value=add(value,multiply(add(multiply(environment.skyColor,up),multiply(environment.groundColor,1-up)),environment.globalIlluminationIntensity));
                             }
                             if(!finite(value)||value.x<0||value.y<0||value.z<0)return fail("Lighting evaluation produced invalid radiance");

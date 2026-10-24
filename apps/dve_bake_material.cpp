@@ -6,7 +6,10 @@
 #include <csignal>
 #include <cstdint>
 #include <iostream>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
+#include <vector>
 #include <sstream>
 #include <locale>
 #include <algorithm>

@@ -3,6 +3,11 @@
 #include <utility>
 #include <bit>
 #include <cmath>
+#include <cstdint>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
 #include <iomanip>
 #include <locale>
 #include <sstream>

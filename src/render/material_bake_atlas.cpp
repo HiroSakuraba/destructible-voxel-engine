@@ -4,6 +4,9 @@
 #include <utility>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
 #include <numeric>
 namespace dve::render {
 namespace {

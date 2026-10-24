@@ -450,6 +450,7 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
     view.environment.lightingTimeSeconds =
         impl_->session.world->elapsed_seconds();
     view.prototypeHud=prototype_hud();
+    if(impl_->session.prototype)view.racingEffects=impl_->session.prototype->racing_visual_effects();
     view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
     view.polygonLodBias = impl_->settings.polygonLodBias;
     return view;

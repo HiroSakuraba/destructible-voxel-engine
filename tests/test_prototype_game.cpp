@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <system_error>
 using namespace dve;using namespace dve::editor;using namespace dve::player;
 namespace {
 void check(bool v,const std::string& e){if(!v)throw std::runtime_error(e);}
@@ -59,4 +60,26 @@ void cycles_and_losses(const std::filesystem::path& root){
  auto normal=make_prototype_starter();for(const auto& [id,o]:normal.objects())if(o.name=="Game Rules")normal.find_object(id)->components[0].properties["auto_respawn"]=false;check(export_prototype_project(normal,EditorMaterialLibrary::make_default(),root/"loss",&e),e);auto loss=boot(root/"loss",root/"loss-saves");teleport(*loss,{0,0,-50});tick(*loss);check(loss->prototype_hud()->phase==PrototypePhase::Lost,"loss screen without automatic respawn");
 }
 }
-int main(){auto root=std::filesystem::temp_directory_path()/("dve-prototype-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));try{std::filesystem::create_directories(root);authoring(root);playable(root);cycles_and_losses(root);std::cout<<"Prototype kit: PASS "<<root<<'\n';return 0;}catch(const std::exception& e){std::cerr<<e.what()<<"; artifacts "<<root<<'\n';return 1;}}
+void regressions(const std::filesystem::path& root){
+ std::string e;auto library=EditorMaterialLibrary::make_default();
+ // Starter creation extends the open scene (keeps its name) and undo removes exactly the starter.
+ {NativeEditorController controller{EditorWorkspace(EditorDocument("My scene"))};controller.open_prototype_panel();check(controller.prototype_panel_action("starter"),controller.prototype_panel().message);
+  check(controller.workspace().document().name()=="My scene"&&controller.workspace().document().dirty(),"starter keeps the scene identity and marks it dirty");
+  check(controller.workspace().commands().undo(controller.workspace().document()).success&&controller.workspace().document().objects().empty()&&controller.workspace().document().name()=="My scene","starter undo leaves the scene empty");}
+ // A text edit started on one object must not be committed into another object after the selection changes.
+ {NativeEditorController controller{EditorWorkspace(EditorDocument("Empty"))};controller.open_prototype_panel();check(controller.prototype_panel_action("starter"),controller.prototype_panel().message);
+  auto& doc=controller.workspace().document();EditorObjectId button=0;for(const auto& [id,o]:doc.objects())if(o.name=="Switch")button=id;controller.workspace().select_object(button);
+  check(controller.prototype_panel_action("edit:1:key"),"begin key edit");controller.prototype_panel_text("hacked");check(controller.prototype_panel_action("marker"),"create marker while editing");
+  const auto marker=*controller.workspace().selected_object();check(marker!=button,"marker selected");check(controller.prototype_panel().editingProperty.empty(),"unrelated action abandons the edit");(void)controller.prototype_panel_key("enter");
+  check(std::get<std::string>(doc.find_component(marker,1)->properties.at("key")).starts_with("player_start-"),"stale edit did not touch the new marker");check(std::get<std::string>(doc.find_component(button,1)->properties.at("key"))=="button","original actor unchanged");}
+ // A .dmesh-backed object is polygon geometry, never a valid Player Start marker.
+ {auto d=make_prototype_starter();for(const auto& [id,o]:d.objects())if(o.name=="Player Start"){d.find_object(id)->sourceAsset="assets/player.dmesh";check(!prototype_object_is_marker(*d.find_object(id)),"dmesh source is not a marker");}
+  check(!validate_editor_prototype(d,&e),"Player Start backed by a .dmesh asset is rejected");}
+ // Tagging the Player Start synthesizes dve.membership: the exported marker ids stay unique and the scene boots.
+ {auto d=make_prototype_starter();for(const auto& [id,o]:d.objects())if(o.name=="Player Start")d.find_object(id)->tags={"hero"};check(export_prototype_project(d,library,root/"tagged",&e),e);
+  auto app=boot(root/"tagged",root/"tagged-saves");check(app->prototype_hud()&&app->world().geometry_kind(named(*app,"Player Start"))==GameGeometryKind::Marker,"tagged Player Start boots as a marker");
+  const auto* components=app->world().components(named(*app,"Player Start"));check(components&&find_component_by_type(*components,"dve.membership")&&find_component_by_type(*components,"dve.marker"),"membership and marker both exported");}
+ // A trailing separator names the same new folder.
+ {auto d=make_prototype_starter();check(export_prototype_project(d,library,(root/"slash").string()+"/",&e),e);check(std::filesystem::is_regular_file(root/"slash"/"game.dvegame"),"trailing-separator output written");}
+}
+int main(){auto root=std::filesystem::temp_directory_path()/("dve-prototype-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));try{std::filesystem::create_directories(root);authoring(root);playable(root);cycles_and_losses(root);regressions(root);std::error_code removed;std::filesystem::remove_all(root,removed);std::cout<<"Prototype kit: PASS\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<"; artifacts "<<root<<'\n';return 1;}}

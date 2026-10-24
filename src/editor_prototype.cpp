@@ -6,9 +6,13 @@
 #include "dve/game_manifest.hpp"
 #include "dve/prototype_game.hpp"
 #include <algorithm>
+#include <cctype>
 #include <fstream>
-#include <stdexcept>
 #include <span>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <vector>
 namespace dve::editor {
 namespace {
 Component component(std::string role,ComponentId id,std::string key){auto c=make_component_from_schema("dve.prototype."+role,id);
@@ -38,12 +42,19 @@ EditorDocument make_prototype_starter(){
  box("Jump block",{-2,5,.3F},{1,1,.6F},{.45F,.45F,.5F,1});
  return d;
 }
+bool prototype_object_is_marker(const EditorObject& o){
+ std::string extension=o.sourceAsset.extension().string();
+ std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+ return !o.polygon&&!o.text3d&&!o.gaborVolume&&extension!=".dmesh"&&o.voxels&&o.voxels->occupied_voxel_count()==0;}
 bool validate_editor_prototype(const EditorDocument& d,std::string* error){for(const auto& [id,o]:d.objects()){(void)id;
  if(!o.flags.visible&&!prototype_object_key(o.components).empty()){if(error)*error=o.name+": hidden prototype actors cannot be exported; disable the role or show the actor";
  return false;}}std::vector<PrototypeObjectView> views;
- for(const auto& [id,o]:d.objects())views.push_back({id,o.name,o.components,!o.polygon&&!o.text3d&&!o.gaborVolume&&(!o.voxels||o.voxels->occupied_voxel_count()==0)});
+ for(const auto& [id,o]:d.objects())views.push_back({id,o.name,o.components,prototype_object_is_marker(o)});
  return validate_prototype_scene(views,error);}
-bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrary& materials,const std::filesystem::path& root,std::string* error){
+bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrary& materials,const std::filesystem::path& requestedRoot,std::string* error){
+ // "out/" and "out" name the same new folder; a trailing separator must not read as an empty name.
+ std::filesystem::path root=requestedRoot.lexically_normal();
+ if(!root.empty()&&!root.has_filename())root=root.parent_path();
  auto fail=[&](std::string s){if(error)*error=std::move(s);
  return false;};
  std::string reason;

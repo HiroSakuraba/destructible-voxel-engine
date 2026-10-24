@@ -2,6 +2,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
 namespace dve {
 namespace {
 std::array<unsigned,7> glyph(char c){

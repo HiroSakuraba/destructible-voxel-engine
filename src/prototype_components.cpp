@@ -2,8 +2,13 @@
 #include "dve/gameplay_runtime.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <map>
 #include <set>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
 namespace dve {
 namespace {
 std::string type(std::string_view role){return std::string(kPrototypePrefix)+std::string(role);}

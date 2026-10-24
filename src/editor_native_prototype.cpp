@@ -5,6 +5,12 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
+#include <span>
+#include <string>
+#include <system_error>
+#include <variant>
+#include <vector>
 namespace dve::editor {
 namespace {
 class PrototypeComponentsCommand final:public IEditorCommand {
@@ -17,17 +23,23 @@ class PrototypeComponentsCommand final:public IEditorCommand {
 public:PrototypeComponentsCommand(const EditorObject& o,std::vector<Component> after):id_(o.id),before_(o.components),after_(std::move(after)){}
  std::string_view label()const noexcept override{return "Edit prototype component";}CommandResult execute(EditorDocument& d)override{return apply(d,true);}CommandResult undo(EditorDocument& d)override{return apply(d,false);}
 };
+// Adds the starter objects to the (empty) open scene instead of replacing the document, so the
+// scene keeps its name, file path, revision and selection sets, and Undo removes exactly them.
 class PrototypeStarterCommand final:public IEditorCommand {
- EditorDocument before_;
- bool captured_{};
+ std::vector<EditorObjectId> added_;
 public:std::string_view label()const noexcept override{return "Create prototype starter";}
  CommandResult execute(EditorDocument& d)override{if(!d.objects().empty())return CommandResult::fail("Use File > New Scene before creating the starter");
- auto next=make_prototype_starter();
- if(!captured_){before_=clone_editor_document(d);captured_=true;}d=std::move(next);
+ auto starter=make_prototype_starter();added_.clear();
+ for(const auto& entry:starter.objects()){auto copy=clone_editor_object(entry.second);added_.push_back(copy.id);d.add_object(std::move(copy));}
  return CommandResult::ok();}
- CommandResult undo(EditorDocument& d)override{auto copy=clone_editor_document(before_);d=std::move(copy);
+ CommandResult undo(EditorDocument& d)override{for(const auto id:added_)(void)d.remove_object(id);added_.clear();d.mark_dirty();
  return CommandResult::ok();}
 };
+// Property text of a component, or empty when the property is missing or not text.
+std::string text_property(const Component& c,std::string_view name){const auto it=c.properties.find(name);
+ if(it==c.properties.end())return {};
+ if(const auto* text=std::get_if<std::string>(&it->second))return *text;
+ return {};}
 const Component* selected_component(const EditorObject* o,std::size_t index){if(!o)return nullptr;
  std::size_t n=0;
  for(const auto& c:o->components)if(c.type.starts_with(kPrototypePrefix)&&c.type!="dve.prototype.state"){if(n++==index)return &c;}
@@ -66,10 +78,13 @@ bool NativeEditorController::prototype_panel_action(std::string_view id){
  if(playSession_.active()||longJob_)return fail("Stop Play and background work before authoring gameplay");
  auto& d=workspace_.document();
  auto* o=workspace_.selected_object()?d.find_object(*workspace_.selected_object()):nullptr;
+ // Editing/picking state belongs to one object: any unrelated action (including ones that change
+ // the selection) abandons it so a later Enter cannot write into a different object's component.
+ if(!id.starts_with("edit:")&&!id.starts_with("target:")&&id!="cancelpick"){p.picking=false;p.editingProperty.clear();p.editingComponent=0;p.editingObject=0;p.typed.clear();}
  auto result=[&](CommandResult r){p.message=r.success?"Gameplay edit saved in scene; Undo is available":r.message;
  if(!r.success)set_status(r.message,true);
  return r.success;};
- if(id=="cancelpick"){p.picking=false;
+ if(id=="cancelpick"){p.picking=false;p.editingProperty.clear();p.editingComponent=0;p.editingObject=0;
  p.first=0;
  return true;}
  if(id=="starter"){auto r=workspace_.commands().execute(d,std::make_unique<PrototypeStarterCommand>());
@@ -99,7 +114,7 @@ bool NativeEditorController::prototype_panel_action(std::string_view id){
  if(id=="addrole"){if(actor_component(o))return fail("This object already has a prototype role");
  auto roles=prototype_role_types();
  const auto& type=roles[p.role%roles.size()];
- if(type=="dve.prototype.player_start"&&(o->polygon||o->text3d||o->gaborVolume||o->voxels->occupied_voxel_count()))return fail("Use an empty Player Start marker");
+ if(type=="dve.prototype.player_start"&&!prototype_object_is_marker(*o))return fail("Use an empty Player Start marker");
  auto c=make_component_from_schema(type,d.allocate_component_id(o->id));
  c->properties["key"]=type.substr(kPrototypePrefix.size())+"-"+std::to_string(o->id);
  p.component=0;
@@ -130,11 +145,11 @@ bool NativeEditorController::prototype_panel_action(std::string_view id){
   const char* property=id=="event"?"event":"action";
   if(id=="event"){auto* role=actor_component(o);
  if(!role)return fail("Source role is disabled");
- choices=prototype_events(role->type);}else {auto target=std::get<std::string>(current->properties.at("target"));
+ choices=prototype_events(role->type);}else {auto target=text_property(*current,"target");
  for(const auto& [key,obj]:d.objects()){(void)key;
  if(prototype_object_key(obj.components)==target)if(auto* role=actor_component(&obj))choices=prototype_actions(role->type);}}
   if(choices.empty())return fail("Pick a target actor first");
- auto old=std::get<std::string>(current->properties.at(property));
+ auto old=text_property(*current,property);
  auto i=std::find(choices.begin(),choices.end(),old);
  auto n=i==choices.end()?0:(std::size_t(i-choices.begin())+1)%choices.size();
  return result(set_component_property_text_on_primary(current->id,property,choices[n]));
@@ -145,24 +160,26 @@ bool NativeEditorController::prototype_panel_action(std::string_view id){
  auto parsed=std::from_chars(s.data(),s.data()+s.size(),targetId);
  auto* target=d.find_object(targetId);
  if(parsed.ec!=std::errc{}||!target||!actor_component(target))return fail("Target no longer exists");
+ if(p.editingObject!=o->id)return fail("Selection changed; pick the connection target again");
  auto after=o->components;
  auto* c=find_component(std::span<Component>(after),p.editingComponent);
  if(!c)return fail("Connection no longer exists");
  c->properties["target"]=prototype_object_key(target->components);
  auto choices=prototype_actions(actor_component(target)->type);
- auto old=std::get<std::string>(c->properties.at("action"));
+ auto old=text_property(*c,"action");
+ if(choices.empty())return fail("Target has no actions");
  if(std::find(choices.begin(),choices.end(),old)==choices.end())c->properties["action"]=choices.front();
  p.picking=false;
  p.first=0;
  p.editingProperty.clear();
- p.editingComponent=0;
+ p.editingComponent=0;p.editingObject=0;
  return result(workspace_.commands().execute(d,std::make_unique<PrototypeComponentsCommand>(*o,std::move(after))));
  }
  if(id.starts_with("edit:")){auto start=id.find(':',5);ComponentId component{};
  auto s=id.substr(5,start-5);
  auto parsed=std::from_chars(s.data(),s.data()+s.size(),component);
  if(parsed.ec!=std::errc{}||start==id.npos)return false;
- p.editingComponent=component;
+ p.editingComponent=component;p.editingObject=o->id;
  p.editingProperty=std::string(id.substr(start+1));
  const auto* c=d.find_component(o->id,component);
  if(!c||!c->properties.contains(p.editingProperty))return false;
@@ -188,14 +205,16 @@ void NativeEditorController::prototype_panel_text(std::string_view text){auto& p
  if(p.typed.size()+text.size()<=256)p.typed+=text;}}
 bool NativeEditorController::prototype_panel_key(std::string_view key){auto& p=prototypePanel_;
  if(key=="escape"){if(!p.editingProperty.empty()){p.editingProperty.clear();
- p.editingComponent=0;}else if(p.picking){p.picking=false;
+ p.editingComponent=0;p.editingObject=0;p.picking=false;}else if(p.picking){p.picking=false;
  p.first=0;}else p.open=false;
  return true;}if(key=="backspace"&&!p.editingProperty.empty()){if(p.replaceText)p.typed.clear();else if(!p.typed.empty())p.typed.pop_back();
  p.replaceText=false;
- return true;}if((key=="enter"||key=="return")&&!p.editingProperty.empty()){auto r=set_component_property_text_on_primary(p.editingComponent,p.editingProperty,p.typed);
+ return true;}if((key=="enter"||key=="return")&&!p.editingProperty.empty()){
+ if(workspace_.selected_object()!=std::optional<EditorObjectId>(p.editingObject)){p.message="Selection changed; edit cancelled";p.editingProperty.clear();p.editingComponent=0;p.editingObject=0;return true;}
+ auto r=set_component_property_text_on_primary(p.editingComponent,p.editingProperty,p.typed);
  p.message=r.success?"Property updated":r.message;
  if(r.success){p.editingProperty.clear();
- p.editingComponent=0;}return true;}return true;}
+ p.editingComponent=0;p.editingObject=0;}return true;}return true;}
 void render_prototype_panel(const IEditorCanvas& canvas,NativeEditorController& controller){
  const auto& p=controller.prototype_panel();
  if(!p.open)return;

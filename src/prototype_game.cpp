@@ -7,11 +7,16 @@
 #include <deque>
 #include <iomanip>
 #include <locale>
+#include <cstdint>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
-#include <utility>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
+#include <vector>
 namespace dve {
 namespace {
 std::string role(std::string_view s){return std::string(kPrototypePrefix)+std::string(s);}

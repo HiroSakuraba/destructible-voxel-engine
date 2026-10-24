@@ -15,6 +15,7 @@ The HUD shows speed in kilometres per hour, lap progress, last lap, total time, 
 | Component | Settings |
 |---|---|
 | `dve.prototype.race_car` | Stable key, top speed (m/s), acceleration/braking (m/s²), lateral grip (1/s), wheelbase (m), steer angle (rad), handling profile (`street` / `arcade` / `drift` / `offroad` / `track`), camera smoothing (1/s) |
+| `dve.prototype.race_surface` | Stable key, grip multiplier (0.05–3), rolling-drag multiplier (0.1–8); attach to collision-enabled ground geometry |
 | `dve.prototype.race_rules` | Stable key, target laps, countdown (s), recovery kill Z (m) |
 | `dve.prototype.race_gate` | Stable key, contiguous zero-based order, half width/height (m) |
 | `dve.prototype.race_state` | Runtime-only versioned save payload |
@@ -29,7 +30,9 @@ The portable arcade controller is explicitly **not the optional Jolt wheeled-veh
 
 A 120 Hz accumulator makes handling independent of the host's ordinary 60/120 Hz steps. Calls with invalid, nonpositive or greater-than-250-ms deltas are refused; there are at most 31 microsteps per call. Each microstep drives the car, resolves up to three continuous capsule sweeps/slides, follows ground with a downward query, then ticks the shared GameWorld. The car is a movable visual object with no separate rigid body, avoiding double simulation and self-query collisions. The body capsule is fixed to this starter car (0.96 m radius, endpoints ±0.7 m along forward, centre 1.1 m above origin).
 
-This is intended for the supplied flat course. It has no wheel contact/suspension model, bank/roll alignment, reliable ramp/stair traversal, dynamic-body impulse exchange, animated wheels, drivetrain/gear simulation, terrain traction, AI racers, vehicle destruction or multiplayer authority. Car mesh resizing does not resize its collision capsule. The chase camera uses bounded exponential smoothing at the 120 Hz simulation step and sweeps a 25-cm-radius camera probe to avoid occluders. Camera filtering is presentation-only and snaps on view changes, recovery and save restore. Mouse look is unused while driving.
+This is intended for the supplied flat course. Surface grip and drag are sampled from the object under the car through `GameWorld::raycast`. This is an arcade approximation, not a per-wheel tire-force model. The included asphalt and collision-enabled grass have different surface settings. Physical surface metadata comes from the hit object rather than the material's visual roughness. Skid intensity is exposed as transient telemetry for future particles, decals and audio.
+
+It has no wheel contact/suspension model, bank/roll alignment, reliable ramp/stair traversal, dynamic-body impulse exchange, animated wheels, drivetrain/gear simulation, AI racers, vehicle destruction or multiplayer authority. Car mesh resizing does not resize its collision capsule. The chase camera uses bounded exponential smoothing at the 120 Hz simulation step and sweeps a 25-cm-radius camera probe to avoid occluders. Camera filtering is presentation-only and snaps on view changes, recovery and save restore. Mouse look is unused while driving.
 
 ## Save and export
 
@@ -39,7 +42,7 @@ The normal prototype exporter handles the racing project: editable scene, cooked
 
 ## Verification
 
-The new integration suite exercises independent service braking, handling profile differences, slip/yaw telemetry, wall-adjacent steering, directional and out-of-bounds gate rejection, duplicate orders, actual throttle/reverse/steering/braking, grip tuning, matching 60/120 Hz motion, thin-wall collision, ordered lap completion, pause/finish freezing, recovery penalties, restart/best behavior, state restore and malformed-state refusal. It also creates/undoes/redoes the native starter, exports and boots the project, checks countdown/input, runs editor Play/Stop, saves/loads through PlayerApp, renders a CPU framebuffer and boots a `.dvepak`.
+The new integration suite exercises authored ground-dependent grip and bounded skid feedback, independent service braking, handling profile differences, slip/yaw telemetry, wall-adjacent steering, directional and out-of-bounds gate rejection, duplicate orders, actual throttle/reverse/steering/braking, grip tuning, matching 60/120 Hz motion, thin-wall collision, ordered lap completion, pause/finish freezing, recovery penalties, restart/best behavior, state restore and malformed-state refusal. It also creates/undoes/redoes the native starter, exports and boots the project, checks countdown/input, runs editor Play/Stop, saves/loads through PlayerApp, renders a CPU framebuffer and boots a `.dvepak`.
 
 Windowed SDL driving and gamepad feel still require user acceptance; a headless screenshot/test run does not establish handling polish. The existing first-person starter remains covered by its own integration suite.
 

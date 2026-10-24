@@ -23,6 +23,8 @@ The starter is a three-lap single-car time trial on a flat four-gate circuit. Fo
 | R | Back | New attempt, retaining session best lap |
 | F3 | — | Runtime diagnostic toggle |
 
+Asphalt and grass now have independent `race_surface` grip/rolling-drag properties. Grass is a collision-enabled thin layer so the ground probe distinguishes it from the asphalt underneath. Skid intensity is available to downstream effects, but particles, tire marks and tire audio are not yet connected.
+
 Select a street, arcade, drift, offroad or track profile in the Race Car component. The F3 HUD shows lateral slip, yaw rate and contact counters. Presets apply gameplay multipliers to the existing grip, steering, acceleration and braking settings. Collision remains portable (without Jolt).
 
 The generated folder contains `project.dveproject`, `scenes/prototype.dvescene`, cooked scene/mesh assets and `game.dvegame` with bindings. Existing output folders are refused. Package with `dve_pack NEW_PROJECT_DIRECTORY racing.dvepak --all` and launch the package with `dve_player racing.dvepak`.

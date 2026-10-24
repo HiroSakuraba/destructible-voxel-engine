@@ -12,8 +12,12 @@ void append_box(CookedPolygonAsset& mesh,Float3 center,Float3 size,unsigned mate
 EditorDocument make_racing_starter(){
  EditorDocument d("Racing Time Trial");
  auto box=[&](std::string name,Float3 position,Float3 size,Float4 color,bool collision=true)->EditorObject&{EditorObject o(d.allocate_object_id(),std::move(name));o.flags.anchored=true;o.flags.collisionEnabled=collision;o.transform.position=position;o.polygon=make_editor_polygon_cube(o.id);for(auto& v:o.polygon->vertices)v.position={(v.position.x-.5F)*size.x,(v.position.y-.5F)*size.y,(v.position.z-.5F)*size.z};o.polygon->materials[0].baseColor=color;refresh_editor_polygon(*o.polygon,true);return d.add_object(std::move(o));};
- box("Asphalt",{0,0,-.25F},{100,96,.5F},{.13F,.15F,.18F,1});
- box("Infield grass",{0,0,.01F},{46,40,.02F},{.12F,.3F,.1F,1},false);
+ auto& asphalt=box("Asphalt",{0,0,-.25F},{100,96,.5F},{.13F,.15F,.18F,1});
+ asphalt.components.push_back(component("race_surface","asphalt"));
+ auto& grass=box("Infield grass",{0,0,.01F},{46,40,.02F},{.12F,.3F,.1F,1});
+ grass.components.push_back(component("race_surface","grass"));
+ grass.components.back().properties["grip_multiplier"]=0.48;
+ grass.components.back().properties["rolling_drag_multiplier"]=2.0;
  for(float x:{-24.F,24.F})box("Inner side barrier",{x,0,.7F},{.6F,42,1.4F},{.7F,.27F,.12F,1});
  for(float y:{-21.F,21.F})box("Inner end barrier",{0,y,.7F},{48,.6F,1.4F},{.7F,.27F,.12F,1});
  for(float x:{-46.F,46.F})box("Outer side barrier",{x,0,.8F},{.6F,88,1.6F},{.65F,.68F,.72F,1});

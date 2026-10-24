@@ -14,6 +14,7 @@ namespace {
 constexpr const char* carType="dve.prototype.race_car";
 constexpr const char* rulesType="dve.prototype.race_rules";
 constexpr const char* gateType="dve.prototype.race_gate";
+constexpr const char* surfaceType="dve.prototype.race_surface";
 constexpr const char* stateType="dve.prototype.race_state";
 constexpr double fixedStep=1.0/120;
 constexpr float kTwoPi=6.283185307F;
@@ -30,13 +31,14 @@ bool finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfini
 Float3 forward(float yaw){return {std::sin(yaw),std::cos(yaw),0};}
 float heading(Quaternion q){const auto f=rotate(q,{0,1,0});return std::atan2(f.x,f.y);}
 std::string time_text(double seconds){std::ostringstream s;s.imbue(std::locale::classic());s<<std::fixed<<std::setprecision(2)<<seconds;return s.str();}
-bool racing_type(std::string_view t){return t==carType||t==rulesType||t==gateType;}
+bool racing_type(std::string_view t){return t==carType||t==rulesType||t==gateType||t==surfaceType;}
 }
 bool scene_has_racing(std::span<const PrototypeObjectView> objects){for(const auto& o:objects)for(const auto& c:o.components)if(c.enabled&&racing_type(c.type))return true;return false;}
 void register_racing_components(ComponentTypeRegistry& registry){
  auto add=[&](const char* type,std::string title,std::vector<ComponentPropertySchema> p){std::string error;(void)registry.register_type({type,std::move(title),false,std::move(p)},&error);};
  add(carType,"Arcade Race Car (Z up)",{{"key",std::string{"car"},true,false,"Stable gameplay key"},{"top_speed",38.0,false,false,"Forward speed limit (m/s)"},{"acceleration",12.0,false,false,"Acceleration (m/s2)"},{"braking",30.0,false,false,"Service brake deceleration (m/s2)"},{"grip",7.0,false,false,"Lateral velocity damping (1/s)"},{"wheelbase",2.6,false,false,"Steering wheelbase (m)"},{"steer_angle",.55,false,false,"Maximum steering angle (rad)"},{"handling_profile",std::string{"street"},false,false,"street, arcade, drift, offroad or track"},{"camera_smoothing",8.0,false,false,"Chase camera response (1/s)"}});
  add(rulesType,"Race Time Trial Rules",{{"key",std::string{"race"},true,false,"Stable gameplay key"},{"laps",std::int64_t{3},false,false,"Laps to complete"},{"countdown",3.0,false,false,"Start countdown (s)"},{"kill_z",-15.0,false,false,"Recovery below this Z"}});
+ add(surfaceType,"Race Driving Surface",{{"key",std::string{"surface"},true,false,"Stable surface key"},{"grip_multiplier",1.0,false,false,"Tire traction multiplier (0.05..3)"},{"rolling_drag_multiplier",1.0,false,false,"Longitudinal rolling drag multiplier (0.1..8)"}});
  add(gateType,"Ordered Race Gate",{{"key",std::string{"gate"},true,false,"Stable gameplay key"},{"order",std::int64_t{0},false,false,"Contiguous order; gate 0 is finish"},{"half_width",10.0,false,false,"Gate half width (m)"},{"half_height",4.0,false,false,"Gate half height (m)"}});
  add(stateType,"Race Runtime State",{{"data",std::string{},false,false,"Runtime-only versioned save payload"}});
 }
@@ -54,6 +56,10 @@ bool validate_racing_scene(std::span<const PrototypeObjectView> objects,std::str
    const auto profile=get(c,"handling_profile",std::string{"street"});
    if(profile!="street"&&profile!="arcade"&&profile!="drift"&&profile!="offroad"&&profile!="track")return fail("Invalid handling profile");}
   if(c.type==rulesType){++rules;if(!o.marker)return fail("Race Rules must be a bodyless marker");const auto laps=get(c,"laps",std::int64_t{0});if(laps<1||laps>100||!number("countdown",0,30)||!number("kill_z",-1000000,1000000))return fail("Invalid race rules");}
+  if(c.type==surfaceType){
+    if(o.marker||!number("grip_multiplier",.05,3)||!number("rolling_drag_multiplier",.1,8))
+      return fail("Driving surfaces require geometry and valid grip/drag multipliers");
+  }
   if(c.type==gateType){const auto n=get(c,"order",std::int64_t{-1});if(n<0||n>=128||!gates.insert(n).second||!number("half_width",1,100)||!number("half_height",.5,100))return fail("Duplicate/invalid gate order or size");}
  }}
  if(cars!=1||rules!=1||gates.size()<2||gates.size()>128)return fail("Racing needs one car, one Rules marker and 2..128 ordered gates");
@@ -67,9 +73,11 @@ bool racing_gate_crossed(Float3 a,Float3 b,const RigidTransform& gate,float widt
 }
 struct RacingGame::Impl {
  struct Gate {GameObjectId id{};float width{},height{};};
+ struct DrivingSurface {float grip{1.0F},drag{1.0F};};
  GameWorld& world;PrototypeHud hud;RacingStatus race;RacingTelemetry telemetry;
  PrototypeCamera smoothCamera{};bool cameraReady{},lastCameraHood{};
  GameObjectId car{},rules{};ComponentId state{};Component config,ruleConfig;std::vector<Gate> gates;
+ std::map<GameObjectId,DrivingSurface> surfaces;
  std::string carKey,rulesKey;Float3 initial{},checkpoint{},velocity{};float yaw{},initialYaw{},checkpointYaw{},verticalSpeed{};double accumulator{};
  bool lastPause{},lastRestart{},lastRecovery{},lastView{},lastDebug{},hood{};
  explicit Impl(GameWorld& w):world(w){hud.racing=true;hud.health=hud.maximumHealth=100;}
@@ -114,6 +122,12 @@ struct RacingGame::Impl {
    }
    lastCameraHood=hood;
  }
+ DrivingSurface surface_at(Float3 pos)const{
+   const auto hit=world.raycast(add(pos,{0,0,1}),{0,0,-1},4);
+   if(!hit||hit->worldNormal.z<0.5F)return {};
+   const auto it=surfaces.find(hit->objectId);
+   return it==surfaces.end()?DrivingSurface{}:it->second;
+ }
  void drive(float dt){
   auto pos=world.position(car).value_or(initial);const auto old=pos;
   auto axis=[&](const char* name){const auto n=world.get_axis(name);return std::isfinite(n)?std::clamp(n,-1.F,1.F):0.F;};
@@ -121,6 +135,9 @@ struct RacingGame::Impl {
   const float serviceBrake=(std::max)(std::clamp(axis("race_brake"),0.0F,1.0F),
                                     world.is_action_pressed("race_brake")?1.0F:0.0F);
   const auto profile=profile_for(get(config,"handling_profile",std::string{"street"}));
+  const DrivingSurface surface=surface_at(pos);
+  telemetry.surfaceGripMultiplier=surface.grip;
+  telemetry.rollingDragMultiplier=surface.drag;
   auto f=forward(yaw);float speed=dot(velocity,f);const float oldSpeed=speed;
   auto lateral=subtract(velocity,multiply(f,speed));
   const float acceleration=float(get(config,"acceleration",12.0))*profile.accel;
@@ -129,7 +146,7 @@ struct RacingGame::Impl {
     const float decel=serviceBrake>0.001F?brake*serviceBrake:(handbrake?brake*0.65F:brake);
     speed=std::copysign((std::max)(0.F,std::abs(speed)-decel*dt),speed);
   }else speed+=throttle*acceleration*dt;
-  speed*=std::exp(-(std::abs(throttle)<.01F?.45F:.04F)*dt);speed=std::clamp(speed,-10.F,float(get(config,"top_speed",38.0)));
+  speed*=std::exp(-(std::abs(throttle)<.01F?.45F:.04F)*surface.drag*dt);speed=std::clamp(speed,-10.F,float(get(config,"top_speed",38.0)));
   const auto driven=add(multiply(f,speed),lateral);
   const float priorYaw=yaw;
   const float steerAngle=steering*float(get(config,"steer_angle",.55))*profile.steer;
@@ -149,7 +166,7 @@ struct RacingGame::Impl {
   }else yaw=desiredYaw;
   telemetry.yawRateRadiansPerSecond=std::remainder(yaw-priorYaw,kTwoPi)/dt;
   f=forward(yaw);speed=dot(driven,f);lateral=subtract(driven,multiply(f,speed));
-  lateral=multiply(lateral,std::exp(-float(get(config,"grip",7.0))*profile.grip*(handbrake?profile.handbrakeGrip:1.F)*dt));
+  lateral=multiply(lateral,std::exp(-float(get(config,"grip",7.0))*profile.grip*surface.grip*(handbrake?profile.handbrakeGrip:1.F)*dt));
   velocity=add(multiply(f,speed),lateral);const float maximum=float(get(config,"top_speed",38.0));if(length(velocity)>maximum)velocity=multiply(velocity,maximum/length(velocity));
   float remainingTime=dt;auto remaining=multiply(velocity,remainingTime);bool hitThisStep=false;
   for(unsigned n=0;n<3&&length(remaining)>.000001F;++n){auto hit=world.capsule_sweep(capsule(pos),remaining,car);if(!hit){pos=add(pos,remaining);break;}
@@ -170,6 +187,7 @@ struct RacingGame::Impl {
   telemetry.forwardSpeedMetersPerSecond=newSpeed;
   telemetry.lateralSlipMetersPerSecond=dot(velocity,Float3{newForward.y,-newForward.x,0});
   telemetry.longitudinalAccelerationMetersPerSecondSquared=(newSpeed-oldSpeed)/dt;
+  telemetry.skidIntensity=std::clamp(std::abs(telemetry.lateralSlipMetersPerSecond)/8.0F,0.0F,1.0F);
   place(pos,yaw);
   if(pos.z<float(get(ruleConfig,"kill_z",-15.0))){recover();return;}
   const auto& gate=gates[race.nextGate];const auto pose=world.transform(gate.id);
@@ -192,6 +210,7 @@ bool RacingGame::start(std::string* error){auto& s=*impl_;if(s.hud.active){if(er
   if(c.type==carType){s.car=o.id;s.config=c;s.carKey=get(c,"key",std::string{});}
   if(c.type==rulesType){s.rules=o.id;s.ruleConfig=c;s.rulesKey=get(c,"key",std::string{});}
   if(c.type==gateType)gates.emplace(unsigned(get(c,"order",std::int64_t{0})),Impl::Gate{o.id,float(get(c,"half_width",10.0)),float(get(c,"half_height",4.0))});
+  if(c.type==surfaceType)s.surfaces.emplace(o.id,Impl::DrivingSurface{float(get(c,"grip_multiplier",1.0)),float(get(c,"rolling_drag_multiplier",1.0))});
  }
  if(s.world.has_collision(s.car).value_or(true)){if(error)*error="Arcade race car must have collision disabled; runtime owns the swept capsule";return false;}
  if(!configure_physics3d_gravity(s.world.physics(),{0,0,-9.81F})){if(error)*error="Racer requires configurable Z-up gravity";return false;}
@@ -226,6 +245,10 @@ bool RacingGame::after_restore(std::string* error){auto& s=*impl_;auto fail=[&](
  for(double n:{race.elapsed,race.lapStarted,race.lastLap,race.bestLap,race.countdown})if(!std::isfinite(n)||n<0||n>1e9)return fail();
  if(race.lapStarted>race.elapsed||race.countdown>30||(phase==2&&race.completedLaps!=race.targetLaps)||(phase!=2&&race.completedLaps==race.targetLaps))return fail();
  in>>std::ws;if(!in.eof())return fail();
- s.car=car;s.rules=rules;s.state=c->id;s.gates.clear();for(const auto& [n,g]:gates){(void)n;s.gates.push_back(g);}s.race=race;s.velocity=velocity;s.yaw=yaw;s.verticalSpeed=vertical;s.checkpoint=checkpoint;s.checkpointYaw=checkpointYaw;s.hood=hood;s.hud.debug=debug;s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);s.telemetry={};s.update_camera(0,true);s.update_hud();return true;
+ s.car=car;s.rules=rules;s.state=c->id;s.surfaces.clear();
+ for(auto id:s.world.object_ids())for(const auto& component:*s.world.components(id))
+  if(component.enabled&&component.type==surfaceType)
+   s.surfaces.emplace(id,Impl::DrivingSurface{float(get(component,"grip_multiplier",1.0)),float(get(component,"rolling_drag_multiplier",1.0))});
+ s.gates.clear();for(const auto& [n,g]:gates){(void)n;s.gates.push_back(g);}s.race=race;s.velocity=velocity;s.yaw=yaw;s.verticalSpeed=vertical;s.checkpoint=checkpoint;s.checkpointYaw=checkpointYaw;s.hood=hood;s.hud.debug=debug;s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);s.telemetry={};s.update_camera(0,true);s.update_hud();return true;
 }
 }

@@ -9,6 +9,9 @@ struct RacingTelemetry {
     float yawRateRadiansPerSecond{};
     float longitudinalAccelerationMetersPerSecondSquared{};
     float impactSpeedMetersPerSecond{};
+    float surfaceGripMultiplier{1.0F};
+    float rollingDragMultiplier{1.0F};
+    float skidIntensity{};
     std::uint64_t collisionCount{};
     bool grounded{};
 };

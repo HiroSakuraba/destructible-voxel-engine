@@ -555,6 +555,7 @@ int run(int argc, char** argv) {
     };
     std::vector<platform::PlatformEvent> pendingHostEvents;
     const auto poll = [&]() {
+        if(host.has_window()&&!options.headless){const auto* hud=app->prototype_hud();bool wanted=hud&&hud->phase==PrototypePhase::Playing&&host.window_metrics().focused;if(host.relative_mouse_mode()!=wanted)(void)host.set_relative_mouse_mode(wanted);}
         platform::PlatformEvent event;
         while (host.has_window() && host.poll_event(event)) {
             if (options.headless) app->handle_event(event);

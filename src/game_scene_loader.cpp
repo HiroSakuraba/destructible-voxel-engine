@@ -105,6 +105,10 @@ GameSceneLoadResult load_scene_into_game_world(
             }
             item.asset.emplace(std::move(read.asset));
         }
+        if(const auto* marker=find_component_by_type(std::span<const Component>(metadata.components),"dve.marker");marker&&marker->enabled){
+            if(item.polygon||!item.asset||item.asset->object.occupied_voxel_count()!=0){result.error={RuntimeSceneErrorCode::InvalidManifest,"Runtime marker contains geometry",item.assetPath,metadata.id};return result;}
+            item.asset.reset();
+        }
         item.metadata = std::move(metadata);
         staged.push_back(std::move(item));
     }

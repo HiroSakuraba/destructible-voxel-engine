@@ -214,6 +214,7 @@ public:
         const float exposure = options_.exposure * (environment.exposure > 0.0F ? environment.exposure : 1.0F);
         if (!render::resolve_polygon_render_rgba8(target_, exposure, environment.tonemapOperator,
                                                   frame_.pixels, error)) return false;
+        if(view.prototypeHud)draw_prototype_hud(frame_.pixels,frame_.width,frame_.height,*view.prototypeHud);
         stats_.resolveMilliseconds = milliseconds_since(resolveStart);
         rendered_ = true;
         return true;

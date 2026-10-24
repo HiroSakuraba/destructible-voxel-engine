@@ -35,7 +35,7 @@ void EditorPlatformBridge::sync_pointer_capture() {
     if (!navigation && navigationWasActive_) controller_.clear_navigation_input();
     navigationWasActive_ = navigation;
     if (!host_) return;
-    const bool wanted = controller_.raw_mouse_requested() && navigation;
+    const bool wanted = (controller_.raw_mouse_requested()||(controller_.play_camera_possessed()&&controller_.play_session().hud().prototype)) && navigation;
     if (!wanted) {
         if (host_->relative_mouse_mode()) {
             (void)host_->set_relative_mouse_mode(false);

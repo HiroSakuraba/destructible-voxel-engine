@@ -44,6 +44,7 @@
 #include "dve/editor_audio.hpp"
 #include "dve/editor_audio_event.hpp"
 #include "dve/editor_materials.hpp"
+#include "dve/editor_prototype.hpp"
 #include "dve/editor_material_panel.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/editor_runtime_settings.hpp"
@@ -1086,6 +1087,15 @@ public:
     // Why Scale Voxel Size is unavailable for the current selection; empty when it can run.
     [[nodiscard]] std::string voxel_size_scale_disabled_reason() const;
     [[nodiscard]] std::vector<ComponentInspectorSection> primary_component_sections() const;
+    void open_prototype_panel();
+    [[nodiscard]] PrototypePanelState& prototype_panel()noexcept{return prototypePanel_;}
+    [[nodiscard]] const PrototypePanelState& prototype_panel()const noexcept{return prototypePanel_;}
+    [[nodiscard]] PrototypePanelLayout prototype_panel_layout()const;
+    [[nodiscard]] std::vector<std::pair<std::string,std::string>> prototype_panel_controls()const;
+    bool prototype_panel_action(std::string_view);
+    bool prototype_panel_pointer(int,int);
+    void prototype_panel_text(std::string_view);
+    bool prototype_panel_key(std::string_view);
     [[nodiscard]] CommandResult add_component_to_primary(std::string_view type);
     [[nodiscard]] CommandResult remove_component_from_primary(ComponentId componentId);
     [[nodiscard]] CommandResult set_component_enabled_on_primary(ComponentId componentId, bool enabled);
@@ -1441,6 +1451,7 @@ private:
     void voxel_boolean_tick();
 
     EditorWorkspace workspace_;
+    PrototypePanelState prototypePanel_;
     EditorMaterialLibrary materials_;
     MaterialPanelState materialPanel_;
     EditorAssetDatabase assetDatabase_{};

@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "dve/content_source.hpp"
+#include "dve/prototype_game.hpp"
 #include "dve/simulation_clock.hpp"
 #include "dve/game_manifest.hpp"
 #include "dve/game_save.hpp"
@@ -144,6 +145,7 @@ public:
 
     void handle_event(const platform::PlatformEvent& event);
     void queue_event(const platform::PlatformEvent& event, std::uint64_t targetTick);
+    [[nodiscard]] const PrototypeHud* prototype_hud()const noexcept;
     [[nodiscard]] bool quit_requested() const noexcept;
     void request_quit() noexcept;
 

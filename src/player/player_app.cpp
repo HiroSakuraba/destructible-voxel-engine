@@ -1,6 +1,7 @@
 #include "dve/player/player_app.hpp"
 
 #include "dve/game_scene_loader.hpp"
+#include "dve/prototype_game.hpp"
 
 #if defined(DVE_HAVE_LUA)
 #include "dve/game_script.hpp"
@@ -73,6 +74,7 @@ namespace {
 // reverse: the script host (which holds listeners into the world) goes before the world.
 struct PlayerSession {
     std::unique_ptr<GameWorld> world;
+    std::unique_ptr<PrototypeGame> prototype;
     std::string physicsBackend;
 #if defined(DVE_HAVE_LUA)
     std::unique_ptr<GameScriptHost> script;
@@ -89,6 +91,7 @@ struct PlayerSession {
         if (this != &other) {
             release();
             world = std::move(other.world);
+            prototype=std::move(other.prototype);
             physicsBackend = std::move(other.physicsBackend);
 #if defined(DVE_HAVE_LUA)
             script = std::move(other.script);
@@ -106,6 +109,7 @@ struct PlayerSession {
 #if defined(DVE_HAVE_LUA)
         script.reset();
 #endif
+        prototype.reset();
         world.reset();
     }
 };
@@ -206,6 +210,7 @@ bool PlayerApp::Impl::build_session(PlayerSession& out, const std::string& scene
 #else
     if (scriptPresent && logSteps) log("script: " + scriptPath + " skipped (built without Lua)");
 #endif
+    out.prototype=std::make_unique<PrototypeGame>(*out.world);if(!out.prototype->start(&stepError))return fail("prototype: "+stepError);
     return true;
 }
 
@@ -305,6 +310,7 @@ const std::string& PlayerApp::scene_name() const noexcept { return impl_->sessio
 std::size_t PlayerApp::scene_object_count() const noexcept { return impl_->session.sceneObjects; }
 
 void PlayerApp::handle_event(const platform::PlatformEvent& event) {
+    if(event.type==platform::EventType::PointerMove&&impl_->session.prototype)impl_->session.prototype->look(event.deltaX*impl_->settings.mouseSensitivity*.003F,event.deltaY*impl_->settings.mouseSensitivity*.003F);
     if (event.type == platform::EventType::QuitRequested) impl_->quit = true;
     impl_->input.handle_event(event);
 }
@@ -313,6 +319,8 @@ void PlayerApp::queue_event(const platform::PlatformEvent& event, std::uint64_t 
     if (event.type == platform::EventType::QuitRequested) impl_->quit = true;
     impl_->input.queue_event(event, targetTick);
 }
+
+const PrototypeHud* PlayerApp::prototype_hud()const noexcept{return impl_->session.prototype&&impl_->session.prototype->active()?&impl_->session.prototype->hud():nullptr;}
 
 bool PlayerApp::quit_requested() const noexcept { return impl_->quit; }
 void PlayerApp::request_quit() noexcept { impl_->quit = true; }
@@ -330,9 +338,10 @@ void PlayerApp::tick(float fixedDeltaSeconds) {
     impl.quicksaveHeld = quicksave;
     impl.quickloadHeld = quickload;
 
+    if(impl.session.prototype)for(const auto& e:impl.input.tick_events())if(e.event.type==platform::EventType::PointerMove)impl.session.prototype->look(e.event.deltaX*impl.settings.mouseSensitivity*.003F,e.event.deltaY*impl.settings.mouseSensitivity*.003F);
     impl.input.apply(*impl.session.world);
     impl.input.end_tick();  // presses shorter than a tick have now reached this tick
-    impl.session.world->tick(fixedDeltaSeconds);
+    if(impl.session.prototype&&impl.session.prototype->active())impl.session.prototype->step(fixedDeltaSeconds);else impl.session.world->tick(fixedDeltaSeconds);
     ++impl.ticks;
 
     std::vector<PendingSaveRequest> requests;
@@ -392,6 +401,7 @@ render::PolygonCamera PlayerApp::camera(float aspect) const {
             camera.target = {target->x, target->y, target->z};
     }
 #endif
+    if(impl_->session.prototype&&impl_->session.prototype->active()){const auto p=impl_->session.prototype->camera();camera.position=p.position;camera.target=p.target;camera.up=p.up;}
     // ui::GameSettings::fieldOfViewDegrees is horizontal (60..130); the camera wants vertical.
     const float safeAspect = aspect > 0.0F && std::isfinite(aspect) ? aspect : 16.0F / 9.0F;
     const float horizontal = impl_->settings.fieldOfViewDegrees * 0.017453292519943295F;
@@ -439,6 +449,7 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
     view.environment = environment(interpolationAlpha);
     view.environment.lightingTimeSeconds =
         impl_->session.world->elapsed_seconds();
+    view.prototypeHud=prototype_hud();
     view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
     view.polygonLodBias = impl_->settings.polygonLodBias;
     return view;
@@ -545,6 +556,7 @@ std::optional<PlayerLoadResult> PlayerApp::load_game(std::string_view slotOrPath
     if (result.timersDropped != 0U)
         impl.log(std::to_string(result.timersDropped) + " saved timer(s) had no callback after boot and were dropped");
 
+    if(fresh.prototype&&!fresh.prototype->after_restore(&stepError))return fail(stepError);
     fresh.world->set_frame_presentation(impl.session.world->frame_presentation());
     // Swap in the new world; the old session (script host first) is destroyed here.
     { PlayerSession old = std::move(impl.session); }

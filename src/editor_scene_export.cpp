@@ -211,6 +211,9 @@ struct ExportItem {
     bool collision{true};
     bool structural{true};
     bool anchored{};
+    // True only for an object exported as an empty voxel asset that carries components: the
+    // runtime keeps it as a bodyless actor through an explicit dve.marker component.
+    bool runtimeMarker{};
 };
 
 } // namespace
@@ -446,8 +449,12 @@ EditorSceneExportResult export_editor_scene(
                 if (!read) skip = "is a polygon object whose source " + source.generic_string() + " is invalid: " + read.error;
             }
         } else if (!object.voxels || object.voxels->occupied_voxel_count() == 0U) {
-            if(object.components.empty())skip = "has no voxels";
-            else {item.collision=false;item.anchored=true;}
+            if (object.components.empty() || !object.voxels) skip = "has no voxels";
+            else {
+                item.collision = false;
+                item.anchored = true;
+                item.runtimeMarker = true;
+            }
         }
         if (!skip.empty()) {
             warn(label(object) + " skipped: it " + skip);
@@ -455,7 +462,26 @@ EditorSceneExportResult export_editor_scene(
             continue;
         }
         item.components = exportable_components(object, registry, warn, label(object));
-        if(!object.polygon&&!object.text3d&&!object.gaborVolume&&object.voxels&&object.voxels->occupied_voxel_count()==0&&!object.components.empty()){Component marker;marker.id=document.allocate_component_id(object.id);marker.type="dve.marker";if(!find_component_by_type(std::span<const Component>(item.components),"dve.marker"))item.components.push_back(std::move(marker));}
+        if (!item.runtimeMarker) {
+            // dve.marker is only valid on bodyless actors: the runtime loader rejects it next to
+            // geometry, which would make a successful export unloadable.
+            const auto stray = std::remove_if(item.components.begin(), item.components.end(),
+                                              [](const Component& component) { return component.type == "dve.marker"; });
+            if (stray != item.components.end()) {
+                item.components.erase(stray, item.components.end());
+                warn(label(object) + ": dve.marker component dropped (the object exports geometry)");
+            }
+        }
+        if (item.runtimeMarker &&
+            !find_component_by_type(std::span<const Component>(item.components), "dve.marker")) {
+            // Allocate against the exported list: exportable_components may have synthesized a
+            // dve.membership component (tags/groups/layer) that the document does not know about.
+            Component marker;
+            marker.id = 1U;
+            for (const Component& existing : item.components) marker.id = (std::max)(marker.id, existing.id + 1U);
+            marker.type = "dve.marker";
+            item.components.push_back(std::move(marker));
+        }
         if(object.polygon)for(auto& component:item.components)component=bake_convex_set_component(bake_collision_hull_component(std::move(component),object.voxelScale),object.voxelScale);
         if (object.prefabLink) {
             warn(label(object) + ": prefab link flattened (the current voxels are exported)");

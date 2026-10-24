@@ -24,7 +24,7 @@ struct Fixture {
  GameObjectDesc d;d.name="Rules";auto c=comp("race_rules","rules");c.properties["countdown"]=0.0;c.properties["laps"]=std::int64_t{2};d.components={c};rules=world.create_object(std::move(d));
  for(unsigned n=0;n<4;++n){GameObjectDesc gate;gate.name="Gate "+std::to_string(n);gate.transform.position={0,n?float(n)*10:40,0};auto g=comp("race_gate","gate"+std::to_string(n));g.properties["order"]=std::int64_t(n);gate.components={g};check(world.create_object(std::move(gate))!=0,"gate");}
  if(barrier){auto wall=make_editor_polygon_cube(10);for(auto& v:wall.vertices)v.position={(v.position.x-.5F)*20,v.position.y*.1F+6,v.position.z*4};refresh_editor_polygon(wall,true);check(world.spawn_cooked_polygon_asset(std::move(wall),"Wall",{},false)!=0,"wall");}
- if(sideBarrier){auto side=make_editor_polygon_cube(11);for(auto& v:side.vertices)v.position={(v.position.x-.5F)*.1F+.962F,(v.position.y-.5F)*40,v.position.z*4};refresh_editor_polygon(side,true);check(world.spawn_cooked_polygon_asset(std::move(side),"Side Wall",{},false)!=0,"side wall");}
+ if(sideBarrier){auto side=make_editor_polygon_cube(11);for(auto& v:side.vertices)v.position={(v.position.x-.5F)*.1F+1.012F,(v.position.y-.5F)*40,v.position.z*4};refresh_editor_polygon(side,true);check(world.spawn_cooked_polygon_asset(std::move(side),"Side Wall",{},false)!=0,"side wall");}
  game=std::make_unique<RacingGame>(world);check(game->start(&error),error);
  }
  void tick(unsigned count=1,float dt=1.F/60){for(unsigned n=0;n<count;++n)game->step(dt);}

@@ -148,6 +148,7 @@ add_library(dve_core
     src/game_world.cpp
     src/gameplay_runtime.cpp
     src/prototype_components.cpp
+    src/racing_game.cpp
     src/prototype_game.cpp
     src/prototype_hud.cpp
     src/replication_contract.cpp
@@ -939,6 +940,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_project.cpp
         src/editor_file_workflow.cpp
         src/editor_material_presets.cpp
+        src/editor_racing.cpp
         src/editor_prototype.cpp
         src/editor_native_prototype.cpp
         src/editor_material_bake.cpp
@@ -966,6 +968,8 @@ if(DVE_BUILD_EDITOR)
         target_compile_definitions(dve_editor PRIVATE DVE_EDITOR_MATERIAL_PREVIEW_RENDERER=1)
     endif()
     add_library(dve::editor ALIAS dve_editor)
+    add_executable(dve_create_racing apps/dve_create_racing.cpp)
+    target_link_libraries(dve_create_racing PRIVATE dve::editor)
     add_executable(dve_create_prototype apps/dve_create_prototype.cpp)
     target_link_libraries(dve_create_prototype PRIVATE dve::editor)
     target_include_directories(dve_editor PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
@@ -2776,6 +2780,9 @@ if(DVE_BUILD_TESTS)
         add_test(NAME dve_editor_tests COMMAND dve_editor_tests)
 
         if(TARGET dve_player_runtime)
+            add_executable(dve_racing_game_tests tests/test_racing_game.cpp)
+            target_link_libraries(dve_racing_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_racing_game_tests COMMAND dve_racing_game_tests)
             add_executable(dve_prototype_game_tests tests/test_prototype_game.cpp)
             target_link_libraries(dve_prototype_game_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_prototype_game_tests COMMAND dve_prototype_game_tests)

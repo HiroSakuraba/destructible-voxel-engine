@@ -2034,7 +2034,7 @@ std::optional<GameRaycastHit> GameWorld::raycast(Float3 worldOrigin, Float3 worl
     const Float3 normalizedDirection = normalize(worldDirection);
 #endif
     for (const auto& [id, object] : objects_) {
-        if (object.visualOnly) continue; // no collision
+        if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
         if (const DeformableCollisionProxy* proxy = deformables_->collision_proxy(id)) {
             std::optional<DeformableRayHit> deformableHit;
@@ -2091,7 +2091,7 @@ std::vector<GameObjectId> GameWorld::sphere_overlap(Float3 worldCenter, float ra
     if (!(radius > 0.0F) || !std::isfinite(radius)) return result;
     const float radiusSquared = radius * radius;
     for (const auto& [id, object] : objects_) {
-        if (object.visualOnly) continue; // no collision
+        if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
         if (const DeformableCollisionProxy* proxy = deformables_->collision_proxy(id)) {
             bool overlaps{};
@@ -2141,7 +2141,7 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
         !std::isfinite(worldDisplacement.z)) return std::nullopt;
     std::optional<GameCapsuleHit> best;
     for (const auto& [id, object] : objects_) {
-        if (object.visualOnly) continue; // no collision
+        if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
         if (id == ignoreObject || (!object.voxels && !object.polygon)) continue;
         const RigidTransform current = resolve_transform(object);
         std::optional<CapsuleSweepHit> hit;
@@ -2163,7 +2163,7 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
 
 bool GameWorld::capsule_overlaps(const Capsule& worldCapsule, GameObjectId ignoreObject) const {
     for (const auto& [id, object] : objects_) {
-        if (object.visualOnly) continue; // no collision
+        if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
         if (id == ignoreObject) continue;
         const RigidTransform current = resolve_transform(object);
         if (object.voxels) {
@@ -2185,7 +2185,7 @@ GameCapsuleDepenetration GameWorld::depenetrate_capsule(
         bool found = false;
         GameObjectId bestObject = std::numeric_limits<GameObjectId>::max();
         for (const auto& [id, object] : objects_) {
-            if (object.visualOnly) continue; // no collision
+            if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
             if (id == ignoreObject || (!object.voxels && !object.polygon)) continue;
             const RigidTransform current = resolve_transform(object);
             Float3 correction{};

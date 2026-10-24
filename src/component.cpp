@@ -1,4 +1,5 @@
 #include "dve/component.hpp"
+#include "dve/prototype_game.hpp"
 #include "dve/collision_convex_set.hpp"
 #include "dve/collision_hull.hpp"
 #include "dve/render_environment.hpp"
@@ -337,6 +338,8 @@ ComponentTypeRegistry ComponentTypeRegistry::make_default() {
     (void)registry.register_type({
         "dve.prefab_instance", "Prefab Instance", false,
         {{"asset", std::string{}, true, true}, {"instance_id", std::int64_t{0}, true, false}}}, &ignored);
+    (void)registry.register_type({"dve.marker","Runtime Marker",false,{}},&ignored);
+    register_prototype_components(registry);
     return registry;
 }
 

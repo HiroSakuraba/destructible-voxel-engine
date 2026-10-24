@@ -35,6 +35,7 @@ public:
     [[nodiscard]] PrototypeCamera camera() const;
     [[nodiscard]] const RacingStatus& status() const;
     [[nodiscard]] const RacingTelemetry& telemetry() const;
+    [[nodiscard]] std::span<const RacingVisualEffect> visuals() const noexcept;
 private:struct Impl;std::unique_ptr<Impl> impl_;
 };
 }

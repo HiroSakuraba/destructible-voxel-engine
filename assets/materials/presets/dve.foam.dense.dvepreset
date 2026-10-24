@@ -1,0 +1,9 @@
+DVE_MATERIAL_PRESET 1 1 1
+"dve.foam.dense" "Dense white foam" "Foam" "Foam Dense white foam froth shaving porous scattering"
+"Opaque effective scattering material for dense foam, with metric surface breakup. Individual cells, silhouettes, wet froth and fluid motion require geometry or simulation." "DVE original artistic defaults; not measured material fits" "meters"
+3 0 6 5
+0
+DVE_EDITOR_MATERIALS 7
+2
+0 "Air" 0 0 0 0 0 0 0 0 1 0.5 0 2 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 0 0 0 0 0 1 0 1 0 0 1.5 1 1 1 0 0 "" 0 0 0 0 1 0.0199999996 0 0 0 20 0.25 0.150000006 1.99999995e-05 1
+10 "Dense white foam" 0.839999974 0.860000014 0.810000002 1 0 0 0 0 0.899999976 0.5 3 0 0.00200000009 0.939999998 0.949999988 0.910000026 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 1000 1 1 0 0 0 1 0 0 0 1.5 1 1 1 0 0 "" 0 0 4 0 1 0.00150000001 0 0 0 20 0.0599999987 0.0599999987 5.99999985e-05 1

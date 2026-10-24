@@ -67,17 +67,23 @@ float half_pdf(Float3 n, Float3 v, Float3 h, float a) {
     return nv > 0 ? distribution(dp(n, h), a) * g1(nv, a) * std::abs(dp(v, h)) / nv : 0;
 }
 struct Mixture {
-    float diffuse{}, specular{}, coat{};
+    float diffuse{}, specular{}, coat{}, sheen{};
 };
 Mixture mixture(const VoxelMaterialDefinition &m) {
     float d = (std::max)(0.F, lum(rgb(m)) * (1 - m.metallic)),
           s = (std::max)(0.F, lum(specular_f0(rgb(m), m.metallic, m.specular)));
     float c =
         m.shadingModel == MaterialShadingModel::ClearCoat ? .04F * std::clamp(m.clearCoat, 0.F, 1.F) : 0;
+    // Sheen's selection prior: half its strongest channel (a broad lobe; the exact directional
+    // albedo varies with angle, and the mixture only chooses which sampler runs — the pdf
+    // mixture in opaque_pdf keeps the estimator unbiased).
+    float sh = material_has_sheen(m)
+                   ? .5F * (std::max)({m.sheenColor.x, m.sheenColor.y, m.sheenColor.z})
+                   : 0;
     if (s > 0 && d > 0)
         s = (std::max)(s, .1F * d);
-    const float total = d + s + c;
-    return total > 0 ? Mixture{d / total, s / total, c / total} : Mixture{1, 0, 0};
+    const float total = d + s + c + sh;
+    return total > 0 ? Mixture{d / total, s / total, c / total, sh / total} : Mixture{1, 0, 0, 0};
 }
 float opaque_pdf(const VoxelMaterialDefinition &m, Float3 n, Float3 v, Float3 l) {
     const float nl = dp(n, l);
@@ -88,9 +94,12 @@ float opaque_pdf(const VoxelMaterialDefinition &m, Float3 n, Float3 v, Float3 l)
     const float vh = std::abs(dp(v, h));
     if (vh <= 0)
         return 0;
-    return q.diffuse * nl / pi +
-           q.specular * half_pdf(n, v, h, alpha((std::max)(m.roughness, .02F))) / (4 * vh) +
-           q.coat * half_pdf(n, v, h, alpha((std::max)(m.clearCoatRoughness, .02F))) / (4 * vh);
+    float pdf = q.diffuse * nl / pi +
+                q.specular * half_pdf(n, v, h, alpha((std::max)(m.roughness, .02F))) / (4 * vh) +
+                q.coat * half_pdf(n, v, h, alpha((std::max)(m.clearCoatRoughness, .02F))) / (4 * vh);
+    if (q.sheen > 0)
+        pdf += q.sheen * evaluate_sheen(n, v, l, m.sheenColor, m.sheenRoughness).pdf;
+    return pdf;
 }
 MaterialBsdfEvaluation dielectric_eval(const VoxelMaterialDefinition &m, Float3 n, Float3 v, Float3 l,
                                        float ni, float nt) {
@@ -109,7 +118,9 @@ MaterialBsdfEvaluation dielectric_eval(const VoxelMaterialDefinition &m, Float3 
     if (vh <= 0 || (reflection ? lh <= 0 : lh >= 0))
         return out;
     const float a = alpha(m.roughness), D = distribution(dp(n, h), a), G = g2(nv, nl, a),
-                F = dielectric_fresnel(vh, ni, nt), ph = half_pdf(n, v, h, a);
+                ph = half_pdf(n, v, h, a);
+    const auto reflectance=material_interface_reflectance(m,vh,ni,nt);
+    const float F=lum(reflectance);
     float value = 0;
     if (reflection) {
         value = F * D * G / (4 * nv);
@@ -121,10 +132,19 @@ MaterialBsdfEvaluation dielectric_eval(const VoxelMaterialDefinition &m, Float3 
         value = (1 - F) * D * G * std::abs(vh * lh) / (nv * den * den);
         out.pdf = ph * (1 - F) * std::abs(lh) * eta * eta / (den * den);
     }
-    out.value.specular = {value, value, value};
+    const float probability=reflection?F:1-F;
+    const auto energy=reflection?reflectance:Float3{1-reflectance.x,1-reflectance.y,1-reflectance.z};
+    out.value.specular = probability>0?times(energy,value/probability):Float3{};
     return out;
 }
 } // namespace
+Float3 material_interface_reflectance(const VoxelMaterialDefinition& m,float cosine,float ni,float nt) noexcept {
+    const float ordinary=dielectric_fresnel(std::clamp(cosine,0.F,1.F),ni,nt);
+    if(m.iridescence<=0 || ordinary>=1)return {ordinary,ordinary,ordinary};
+    const auto film=thin_film_fresnel(cosine,m.iridescenceThicknessNm,m.iridescenceIor,nt,ni);
+    const float w=std::clamp(m.iridescence,0.F,1.F);
+    return {ordinary+(film.x-ordinary)*w,ordinary+(film.y-ordinary)*w,ordinary+(film.z-ordinary)*w};
+}
 MaterialBsdfEvaluation evaluate_material_bsdf(const VoxelMaterialDefinition &m, Float3 n, Float3 v, Float3 l,
                                               float ni, float nt) noexcept {
     MaterialBsdfEvaluation out;
@@ -138,10 +158,16 @@ MaterialBsdfEvaluation evaluate_material_bsdf(const VoxelMaterialDefinition &m, 
         const auto opaque =
             m.shadingModel == MaterialShadingModel::ClearCoat
                 ? shade_clear_coat_direct(n, v, l, {1, 1, 1}, rgb(m), m.metallic, m.roughness, m.specular,
-                                          m.clearCoat, m.clearCoatRoughness)
-                : shade_direct_light(n, v, l, {1, 1, 1}, rgb(m), m.metallic, m.roughness, m.specular);
+                                          m.clearCoat, m.clearCoatRoughness, m.iridescence, m.iridescenceIor,
+                                          m.iridescenceThicknessNm, m.indexOfRefraction)
+                : shade_direct_light(n, v, l, {1, 1, 1}, rgb(m), m.metallic, m.roughness, m.specular,
+                                     m.iridescence, m.iridescenceIor, m.iridescenceThicknessNm,
+                                     m.indexOfRefraction);
         out.value.diffuse = times(opaque.diffuse, 1 - t);
         out.value.specular = times(opaque.specular, 1 - t);
+        if (material_has_sheen(m))
+            out.value.specular =
+                plus(out.value.specular, times(evaluate_sheen(n, v, l, m.sheenColor, m.sheenRoughness).brdf, 1 - t));
         out.pdf = (1 - t) * opaque_pdf(m, n, v, l);
     }
     if (t > 0) {
@@ -163,7 +189,8 @@ MaterialBsdfSample sample_material_bsdf(const VoxelMaterialDefinition &m, Float3
     if (glass) {
         const bool delta = smooth(m) || ni == nt;
         const auto h = delta ? n : visible_normal(n, v, alpha(m.roughness), u1, u2);
-        const float F = dielectric_fresnel(std::clamp(dp(v, h), 0.F, 1.F), ni, nt);
+        const auto reflectance=material_interface_reflectance(m,dp(v,h),ni,nt);
+        const float F=lum(reflectance);
         const auto refracted = refract_direction(times(v, -1), h, ni / nt);
         const bool reflect = !refracted || uc < F;
         out.direction = reflect ? reflect_direction(times(v, -1), h) : *refracted;
@@ -175,12 +202,22 @@ MaterialBsdfSample sample_material_bsdf(const VoxelMaterialDefinition &m, Float3
             out.valid = true;
             out.pdf = t * (reflect ? F : 1 - F);
             const float gain = reflect ? 1 : ni * ni / (nt * nt);
-            out.weight = {gain, gain, gain};
+            const float probability=reflect?F:1-F;
+            const auto energy=reflect?reflectance:Float3{1-reflectance.x,1-reflectance.y,1-reflectance.z};
+            out.weight = probability>0?times(energy,gain/probability):Float3{};
             return out;
         }
     } else if (smooth(m) && m.metallic >= 1) {
         out.direction = reflect_direction(times(v, -1), n);
         out.weight = fresnel_schlick(dp(n, v), specular_f0(rgb(m), m.metallic, m.specular));
+        if (m.iridescence > 0) {
+            // Mirror lobe: the film factor at NdotV == VdotH tints the reflection, as in eval.
+            const auto film = thin_film_fresnel(dp(n, v), m.iridescenceThicknessNm, m.iridescenceIor,
+                                                m.indexOfRefraction, 1.0F);
+            const float w = std::clamp(m.iridescence, 0.F, 1.F);
+            out.weight = {out.weight.x * (1 + (film.x - 1) * w), out.weight.y * (1 + (film.y - 1) * w),
+                          out.weight.z * (1 + (film.z - 1) * w)};
+        }
         out.pdf = 1 - t;
         out.delta = true;
         out.valid = true;
@@ -192,9 +229,23 @@ MaterialBsdfSample sample_material_bsdf(const VoxelMaterialDefinition &m, Float3
             const float radius = std::sqrt(std::clamp(u1, 0.F, .99999994F)), phi = 2 * pi * u2;
             out.direction = norm(Basis(n).world(
                 {radius * std::cos(phi), radius * std::sin(phi), std::sqrt((std::max)(0.F, 1 - u1))}));
-        } else {
+        } else if (r < q.diffuse + q.specular + q.coat) {
             const float rough = r < q.diffuse + q.specular ? m.roughness : m.clearCoatRoughness;
             const auto h = visible_normal(n, v, alpha((std::max)(rough, .02F)), u1, u2);
+            out.direction = reflect_direction(times(v, -1), h);
+            if (dp(n, out.direction) <= 0)
+                return {};
+        } else {
+            // Sheen: sample the Charlie distribution by inversion (nvshaders' hvd_sheen_sample):
+            // phi uniform, sin(theta_h) = (1 - u2)^(1 / (1/alpha + 2)). The resulting half-vector
+            // density is D x NdotH, so the directional pdf is D x NdotH / (4 VdotH) — exactly
+            // what evaluate_sheen reports.
+            const float rough = std::clamp(m.sheenRoughness, 0.F, 1.F);
+            const float invA = 1 / (std::max)(rough * rough, 1e-4F);
+            const float phi = 2 * pi * u1;
+            const float sinT = std::pow(1 - std::clamp(u2, 0.F, .99999994F), 1 / (invA + 2));
+            const float cosT = std::sqrt((std::max)(0.F, 1 - sinT * sinT));
+            const auto h = Basis(n).world({std::cos(phi) * sinT, std::sin(phi) * sinT, cosT});
             out.direction = reflect_direction(times(v, -1), h);
             if (dp(n, out.direction) <= 0)
                 return {};

@@ -16,7 +16,7 @@ void require(bool c,const std::string& message){if(!c)throw std::runtime_error(m
 void ok(bool c,std::string& e){require(c,e);e.clear();}
 std::filesystem::path root;
 void catalog_and_files(){
-    auto c=MaterialPresetCatalog::starter();require(c.entries().size()==33,"33 starter presets");std::string e;
+    auto c=MaterialPresetCatalog::starter();require(c.entries().size()==41,"41 starter presets");std::string e;
     require(c.search("REFRACTIVE").size()==6,"case-insensitive glass synonym");require(!c.search("car").empty(),"car paint search");
     require(!c.add(c.entries().front(),&e),"duplicate ID refused");auto bad=c.entries().front();bad.id="dve.invalid";bad.requirements.push_back(MaterialPresetFeature(100));require(!c.add(bad,&e),"unknown feature refused");
     bad=c.entries().front();bad.id="dve.invalid";bad.defaults.roughness=std::numeric_limits<float>::infinity();require(!c.add(bad,&e),"nonfinite refused");
@@ -36,6 +36,20 @@ void catalog_and_files(){
         for(unsigned shape=0;shape<4;++shape)require(bool(validate_polygon_asset(material_preview_fixture(resolved,MaterialPreviewShape(shape)))),"valid preview fixture");
     }
     const auto* glass=c.find("dve.glass.clear");require(material_preset_capability(*glass,MaterialPresetBackend::Gpu).support==MaterialPresetSupport::Approximate,"GPU clear glass approximate");
+    {   // Sheen round trips: DMESH minor 7 and DVOX minor 8 carry the lobe; values survive.
+        auto velvet=instantiate_material_preset(*c.find("dve.glass.clear"),{});
+        velvet.sheenColor={0.7F,0.25F,0.1F};velvet.sheenRoughness=0.5F;
+        velvet.iridescence=0.9F;velvet.iridescenceIor=1.29F;velvet.iridescenceThicknessNm=350.0F;
+        auto mesh=make_editor_polygon_cube(5);mesh.materials[0]=velvet;mesh.contentHash=polygon_asset_content_hash(mesh);
+        ok(write_dmesh(root/"sheen.dmesh",mesh,&e),e);auto readMesh=read_dmesh(root/"sheen.dmesh");require(bool(readMesh),readMesh.error);
+        require(readMesh.asset.materials[0].sheenColor.x==0.7F&&readMesh.asset.materials[0].sheenColor.y==0.25F&&readMesh.asset.materials[0].sheenRoughness==0.5F,"DMESH sheen round trip");
+        require(readMesh.asset.materials[0].iridescence==0.9F&&readMesh.asset.materials[0].iridescenceIor==1.29F&&readMesh.asset.materials[0].iridescenceThicknessNm==350.0F,"DMESH iridescence round trip");
+        require(readMesh.asset.contentHash==mesh.contentHash,"DMESH sheen content hash stable");
+        CookedVoxelAsset voxel(5);voxel.materials={VoxelMaterialDefinition{},velvet};voxel.object.set_voxel({0,0,0},1);
+        ok(write_dvox(root/"sheen.dvox",voxel,{},&e),e);auto readVoxel=read_dvox(root/"sheen.dvox");require(readVoxel.success,readVoxel.error);
+        require(readVoxel.asset.materials[1].sheenColor.z==0.1F&&readVoxel.asset.materials[1].sheenRoughness==0.5F,"DVOX sheen round trip");
+        require(readVoxel.asset.materials[1].iridescence==0.9F&&readVoxel.asset.materials[1].iridescenceThicknessNm==350.0F,"DVOX iridescence round trip");
+    }
 }
 EditorDocument scene(){EditorDocument d("Material batch 1");EditorObject v(1,"Mixed voxel profile");v.voxels->set_voxel({0,0,0},1);v.voxels->set_voxel({1,0,0},3);d.add_object(std::move(v));EditorObject p(2,"Polygon");p.polygon=make_editor_polygon_cube(2);p.polygon->materials[0].densityKilogramsPerCubicMeter=4321;d.add_object(std::move(p));return d;}
 void native_workflow(){

@@ -362,6 +362,19 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
     }
 
     if(minor>=7U){writer.write_u8(static_cast<std::uint8_t>(material.surfaceDetail.pattern));writer.write_u8(static_cast<std::uint8_t>(material.surfaceDetail.space));writer.write_u32(material.surfaceDetail.seed);for(float v:surface_detail_values(material.surfaceDetail))writer.write_float(v);}
+    // Sheen extension (minor 8, KHR_materials_sheen): written only when some material has sheen.
+    if (minor >= 8U) {
+        writer.write_float(material.sheenColor.x);
+        writer.write_float(material.sheenColor.y);
+        writer.write_float(material.sheenColor.z);
+        writer.write_float(material.sheenRoughness);
+    }
+    // Iridescence extension (minor 9, KHR_materials_iridescence): likewise.
+    if (minor >= 9U) {
+        writer.write_float(material.iridescence);
+        writer.write_float(material.iridescenceIor);
+        writer.write_float(material.iridescenceThicknessNm);
+    }
 
 }
 
@@ -446,6 +459,17 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
         std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)v=reader.read_float();set_surface_detail_values(material.surfaceDetail,values);
         if(!material_surface_detail_valid(material.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");
         if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && (material.surfaceDetail.space==SurfaceDetailSpace::UV0 || material.surfaceDetail.space==SurfaceDetailSpace::UV1))throw std::runtime_error("voxel materials cannot use UV-space surface detail");}
+    if(minor>=8U){
+        material.sheenColor={reader.read_float(),reader.read_float(),reader.read_float()};
+        material.sheenRoughness=reader.read_float();
+        if(!material_sheen_valid(material))throw std::runtime_error("invalid DVOX material sheen");
+    }
+    if(minor>=9U){
+        material.iridescence=reader.read_float();
+        material.iridescenceIor=reader.read_float();
+        material.iridescenceThicknessNm=reader.read_float();
+        if(!material_iridescence_valid(material))throw std::runtime_error("invalid DVOX material iridescence");
+    }
     return material;
 }
 
@@ -479,11 +503,17 @@ bool write_dvox(
                                             [](const VoxelMaterialDefinition& m) { return material_has_normal_map(m); });
         const bool origins=std::any_of(asset.materials.begin(),asset.materials.end(),[](const auto& m){return !m.preset.id.empty();});
         const bool details=std::any_of(asset.materials.begin(),asset.materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::NoPattern;});
-        const std::uint16_t versionMinor = details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const bool sheen = std::any_of(asset.materials.begin(), asset.materials.end(),
+                                       [](const VoxelMaterialDefinition& m) { return material_has_sheen(m); });
+        const bool iridescence = std::any_of(asset.materials.begin(), asset.materials.end(),
+                                       [](const VoxelMaterialDefinition& m) { return material_has_iridescence(m); });
+        const std::uint16_t versionMinor = iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) {
             if (!material_optics_valid(material)) throw std::runtime_error("invalid DVOX material optics");
+            if (!material_sheen_valid(material)) throw std::runtime_error("invalid DVOX material sheen");
+            if (!material_iridescence_valid(material)) throw std::runtime_error("invalid DVOX material iridescence");
             if (!material_normal_map_valid(material)) throw std::runtime_error("invalid DVOX material normal map");
             write_material(materials, material, versionMinor);
         }
@@ -570,7 +600,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 7) {
+        if (major != kVersionMajor || minor > 9) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

@@ -446,9 +446,16 @@ LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnv
     // Specular from the sun at this point (its own visibility).
     const ShadingLobes lobes = material.shadingModel == MaterialShadingModel::ClearCoat
         ? shade_clear_coat_direct(in.normal, v, sun, sunIrradiance, base, material.metallic, material.roughness,
-                                  material.specular, material.clearCoat, material.clearCoatRoughness)
-        : shade_direct_light(in.normal, v, sun, sunIrradiance, base, material.metallic, material.roughness, material.specular);
-    out.directSpecular = multiply(lobes.specular, kCpuRadianceScale * in.visibility);
+                                  material.specular, material.clearCoat, material.clearCoatRoughness, material.iridescence,
+                                  material.iridescenceIor, material.iridescenceThicknessNm, material.indexOfRefraction)
+        : shade_direct_light(in.normal, v, sun, sunIrradiance, base, material.metallic, material.roughness,
+                             material.specular, material.iridescence, material.iridescenceIor,
+                             material.iridescenceThicknessNm, material.indexOfRefraction);
+    Float3 specularSum = lobes.specular;
+    if (material_has_sheen(material))
+        specularSum = add3(specularSum, sheen_direct(in.normal, v, sun, sunIrradiance, material.sheenColor,
+                                                     material.sheenRoughness));
+    out.directSpecular = multiply(specularSum, kCpuRadianceScale * in.visibility);
     if (material.shadingModel == MaterialShadingModel::ClearCoat && material.clearCoat > 0.0F) {
         // The coat's Fresnel dims the base lobe on the way in and again on the way out.
         const Float3 coat = fresnel_schlick(std::clamp(dot(v, half), 0.0F, 1.0F), {0.04F, 0.04F, 0.04F});
@@ -461,7 +468,9 @@ LightPasses shade_voxel(const VoxelMaterialDefinition& material, const RenderEnv
         const Float3 reflection = subtract(multiply(in.normal, 2.0F * dot(in.normal, v)), v);
         const Float3 reflected = multiply(environment_radiance(environment, reflection), environment.globalIlluminationIntensity);
         const ShadingLobes ambient = shade_ambient_light(in.normal, v, in.ambient, reflected, base, material.metallic,
-                                                         material.roughness, material.specular, in.ambientOcclusion);
+                                                         material.roughness, material.specular, in.ambientOcclusion,
+                                                         material.iridescence, material.iridescenceIor,
+                                                         material.iridescenceThicknessNm, material.indexOfRefraction);
         out.indirectDiffuse = ambient.diffuse;
         out.indirectSpecular = ambient.specular;
     }

@@ -49,7 +49,18 @@ constexpr std::array<MaterialPresetControl, unsigned(MaterialPresetProperty::Cou
     {MaterialPresetProperty::RoughnessVariation,"Roughness variation","","Procedural roughness offset; coat roughness stays separate",0,1,.025F,false},
     {MaterialPresetProperty::BumpHeight,"Bump height","m","Physical height used for shading normals; no silhouette displacement",0,2500,.00001F,false},
     {MaterialPresetProperty::PatternSeed,"Pattern seed","","Deterministic integer seed; editor range uses exactly representable floats",0,16777215,1,true},
-    {MaterialPresetProperty::UvTileMeters,"UV tile size","m","Metric size assigned to one UV tile; UV mapping can stretch if UVs are stretched",.00001F,10000,.1F,true}
+    {MaterialPresetProperty::UvTileMeters,"UV tile size","m","Metric size assigned to one UV tile; UV mapping can stretch if UVs are stretched",.00001F,10000,.1F,true},
+    {MaterialPresetProperty::ScatterDistance,"Scatter distance","m","Scattering length in closed subsurface geometry",0,1,0.0005F,false},
+    {MaterialPresetProperty::ScatterR,"Scatter albedo R","linear","Red channel scattering albedo",0,1,0.025F,false},
+    {MaterialPresetProperty::ScatterG,"Scatter albedo G","linear","Green channel scattering albedo",0,1,0.025F,false},
+    {MaterialPresetProperty::ScatterB,"Scatter albedo B","linear","Blue channel scattering albedo",0,1,0.025F,false},
+    {MaterialPresetProperty::SheenR,"Sheen R","linear","Velvet or fine-fiber reflection color",0,1,0.025F,false},
+    {MaterialPresetProperty::SheenG,"Sheen G","linear","Velvet or fine-fiber reflection color",0,1,0.025F,false},
+    {MaterialPresetProperty::SheenB,"Sheen B","linear","Velvet or fine-fiber reflection color",0,1,0.025F,false},
+    {MaterialPresetProperty::SheenRoughness,"Sheen roughness","","Spread of the Charlie sheen lobe",0,1,0.025F,false},
+    {MaterialPresetProperty::Iridescence,"Thin-film weight","","Blend ordinary Fresnel with thin-film reflection",0,1,0.05F,false},
+    {MaterialPresetProperty::FilmIor,"Film IOR","","Refractive index of the film itself",1,3,0.025F,false},
+    {MaterialPresetProperty::FilmThickness,"Film thickness","nm","Physical thin-film thickness; zero removes the film",0,100000,10.0F,false}
 }};
 std::string lower(std::string_view s) { std::string r(s); for(char& c:r)c=char(std::tolower(static_cast<unsigned char>(c))); return r; }
 void physical(VoxelMaterialDefinition& to,const VoxelMaterialDefinition& from) {
@@ -74,6 +85,7 @@ float material_preset_value(const VoxelMaterialDefinition& m, MaterialPresetProp
     case MaterialPresetProperty::PatternSeed:return float(m.surfaceDetail.seed);
     VALUE(PatternScale,surfaceDetail.periodMeters) VALUE(PatternRotationX,surfaceDetail.rotationRadians.x) VALUE(PatternRotationY,surfaceDetail.rotationRadians.y) VALUE(PatternRotationZ,surfaceDetail.rotationRadians.z)
     VALUE(GrainStretch,surfaceDetail.grainStretch) VALUE(ColorVariation,surfaceDetail.colorVariation) VALUE(RoughnessVariation,surfaceDetail.roughnessVariation) VALUE(BumpHeight,surfaceDetail.bumpHeightMeters) VALUE(UvTileMeters,surfaceDetail.uvTileMeters)
+VALUE(ScatterDistance,subsurfaceScatterDistanceMeters) VALUE(ScatterR,subsurfaceColor.x) VALUE(ScatterG,subsurfaceColor.y) VALUE(ScatterB,subsurfaceColor.z) VALUE(SheenR,sheenColor.x) VALUE(SheenG,sheenColor.y) VALUE(SheenB,sheenColor.z) VALUE(SheenRoughness,sheenRoughness) VALUE(Iridescence,iridescence) VALUE(FilmIor,iridescenceIor) VALUE(FilmThickness,iridescenceThicknessNm)
 #undef VALUE
     default:return 0;
     }
@@ -97,6 +109,7 @@ bool set_material_preset_value(VoxelMaterialDefinition& m,MaterialPresetProperty
     case MaterialPresetProperty::PatternSeed:edited.surfaceDetail.seed=static_cast<std::uint32_t>(v);break;
     SET(PatternScale,surfaceDetail.periodMeters) SET(PatternRotationX,surfaceDetail.rotationRadians.x) SET(PatternRotationY,surfaceDetail.rotationRadians.y) SET(PatternRotationZ,surfaceDetail.rotationRadians.z)
     SET(GrainStretch,surfaceDetail.grainStretch) SET(ColorVariation,surfaceDetail.colorVariation) SET(RoughnessVariation,surfaceDetail.roughnessVariation) SET(BumpHeight,surfaceDetail.bumpHeightMeters) SET(UvTileMeters,surfaceDetail.uvTileMeters)
+SET(ScatterDistance,subsurfaceScatterDistanceMeters) SET(ScatterR,subsurfaceColor.x) SET(ScatterG,subsurfaceColor.y) SET(ScatterB,subsurfaceColor.z) SET(SheenR,sheenColor.x) SET(SheenG,sheenColor.y) SET(SheenB,sheenColor.z) SET(SheenRoughness,sheenRoughness) SET(Iridescence,iridescence) SET(FilmIor,iridescenceIor) SET(FilmThickness,iridescenceThicknessNm)
 #undef SET
     default:return false;
     }
@@ -104,6 +117,7 @@ bool set_material_preset_value(VoxelMaterialDefinition& m,MaterialPresetProperty
     m=std::move(edited);
     if(p==MaterialPresetProperty::Coverage)m.blendMode=v<1?MaterialBlendMode::Translucent:MaterialBlendMode::Opaque;
     if(p==MaterialPresetProperty::Coat)m.shadingModel=v>0?MaterialShadingModel::ClearCoat:MaterialShadingModel::StandardPBR;
+    if(p==MaterialPresetProperty::ScatterDistance)m.shadingModel=v>0?MaterialShadingModel::Subsurface:MaterialShadingModel::StandardPBR;
     m.transparent=m.transmission>0||m.blendMode==MaterialBlendMode::Translucent;
     if(!m.preset.id.empty())m.preset.overrides|=std::uint64_t(1)<<i;
     return true;
@@ -113,7 +127,7 @@ bool validate_material_preset(const MaterialPresetAsset& a,std::string* e){
         return fail(e,"Invalid preset identity, schema, revision, provenance or mapping units");
     if(a.id.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-_")!=std::string::npos)
         return fail(e,"Preset ID must be a stable lowercase identifier");
-    for(auto feature:a.requirements)if(unsigned(feature)>unsigned(MaterialPresetFeature::SurfaceDetail))return fail(e,"Unknown required shader feature");
+    for(auto feature:a.requirements)if(unsigned(feature)>unsigned(MaterialPresetFeature::Iridescence))return fail(e,"Unknown required shader feature");
     for(const auto& d:a.dependencies)if(d!="embedded:normal"||!a.defaults.normalMap)return fail(e,"Unresolved preset dependency");
     if(!a.defaults.preset.id.empty()||!a.defaults.layers.empty())return fail(e,"Preset defaults cannot reference instances or external material slots");
     auto copy=a.defaults; copy.name=a.name;
@@ -121,13 +135,16 @@ bool validate_material_preset(const MaterialPresetAsset& a,std::string* e){
     if(!check.upsert({10,copy,false},e))return false;
     for(unsigned i=0;i<7;++i){const float v=material_preset_value(copy,MaterialPresetProperty(i));if(!std::isfinite(v)||v<0||v>1)return fail(e,"Color or surface parameter outside [0,1]");}
     const auto has=[&](MaterialPresetFeature f){return std::find(a.requirements.begin(),a.requirements.end(),f)!=a.requirements.end();};
-    if(copy.shadingModel!=MaterialShadingModel::StandardPBR && copy.shadingModel!=MaterialShadingModel::ClearCoat)
-        return fail(e,"This preset schema release supports Standard PBR and Clear Coat models");
+    if(copy.shadingModel!=MaterialShadingModel::StandardPBR && copy.shadingModel!=MaterialShadingModel::ClearCoat && copy.shadingModel!=MaterialShadingModel::Subsurface)
+        return fail(e,"This preset schema supports Standard PBR, Clear Coat and Subsurface models");
     if(copy.transmission==0&&!has(MaterialPresetFeature::Opaque))return fail(e,"Opaque capability is undeclared");
     if(copy.transmission>0&&!has(MaterialPresetFeature::SolidTransmission))return fail(e,"Transmission capability is undeclared");
     if(copy.transmission>0&&copy.roughness>0&&!has(MaterialPresetFeature::RoughTransmission))return fail(e,"Rough transmission capability is undeclared");
     if(copy.clearCoat>0&&!has(MaterialPresetFeature::ClearCoat))return fail(e,"Coat capability is undeclared");
     if(copy.surfaceDetail.pattern!=SurfacePattern::NoPattern&&!has(MaterialPresetFeature::SurfaceDetail))return fail(e,"Surface-detail capability is undeclared");
+    if(copy.shadingModel==MaterialShadingModel::Subsurface&&(copy.subsurfaceScatterDistanceMeters<=0||!has(MaterialPresetFeature::Subsurface)))return fail(e,"Subsurface capability and a positive scattering distance are required");
+    if(material_has_sheen(copy)&&!has(MaterialPresetFeature::Sheen))return fail(e,"Sheen capability is undeclared");
+    if(material_has_iridescence(copy)&&!has(MaterialPresetFeature::Iridescence))return fail(e,"Thin-film capability is undeclared");
     if(copy.normalMap&&!has(MaterialPresetFeature::NormalDetail))return fail(e,"Normal-detail capability is undeclared");
     return true;
 }
@@ -186,6 +203,8 @@ MaterialPresetCapability material_preset_capability(const MaterialPresetAsset& a
     if(b==MaterialPresetBackend::CpuReference)return {MaterialPresetSupport::Supported,"CPU reference transport; artistic RGB defaults"};
     if(b==MaterialPresetBackend::CpuPlayer)return {MaterialPresetSupport::Approximate,"CPU reference transport exists; player dispatch and scene parity require acceptance"};
     if(b==MaterialPresetBackend::NativePreview)return {MaterialPresetSupport::Approximate,"Viewport uses color markers; inspect the CPU material preview for shading"};
+    if(a.defaults.shadingModel==MaterialShadingModel::Subsurface || material_has_sheen(a.defaults) || material_has_iridescence(a.defaults))
+        return {MaterialPresetSupport::Unavailable,"Subsurface, sheen and thin-film presets require CPU reference rendering; GPU parity is not implemented"};
     for(auto f:a.requirements)if(f==MaterialPresetFeature::RoughTransmission)
         return {MaterialPresetSupport::Unavailable,"GPU rough transmission is not implemented; use the CPU reference"};
     for(auto f:a.requirements)if(f==MaterialPresetFeature::SolidTransmission){
@@ -280,6 +299,36 @@ MaterialPresetCatalog MaterialPresetCatalog::starter(){
         a.tags+=" refractive transparent dielectric";a.defaults.transmission=1;a.defaults.transparent=true;a.defaults.indexOfRefraction=i==2?1.333F:1.5F;
         a.defaults.attenuationColor=i==0?Float3{.55F,.25F,.06F}:i==1?Float3{.3F,.3F,.3F}:Float3{.8F,.95F,.98F};a.defaults.attenuationDistanceMeters=i==2?5:.1F;
         a.requirements={MaterialPresetFeature::SolidTransmission};a.description="Closed-volume dielectric. Full coverage; distance-based absorption. Water requires a closed volume; this is not an open water-plane shader.";put(std::move(a));}
+    for(unsigned i=0;i<2;++i){
+        auto a=add(i?"wax.beeswax":"wax.paraffin",i?"Warm beeswax":"Ivory candle wax","Wax",i?Float3{.72F,.39F,.09F}:Float3{.82F,.77F,.62F},.32F);
+        a.defaults.shadingModel=MaterialShadingModel::Subsurface;a.defaults.subsurfaceScatterDistanceMeters=i?.004F:.008F;
+        a.defaults.subsurfaceColor=i?Float3{.9F,.65F,.24F}:Float3{.95F,.9F,.75F};a.requirements.push_back(MaterialPresetFeature::Subsurface);
+        a.tags+=" candle translucent scattering";a.description="Closed-volume wax: metric subsurface diffusion and thickness-dependent backlighting. Not a flame or melting simulation.";put(std::move(a));
+    }
+    for(unsigned i=0;i<3;++i){
+        const std::array<Float3,3> pigment{{{.56F,.26F,.16F},{.28F,.105F,.055F},{.085F,.028F,.015F}}};
+        const std::array<const char*,3> ids{"light","medium","deep"},names{"Light skin","Medium skin","Deep skin"};
+        auto a=add(std::string("skin.")+ids[i],names[i],"Skin",pigment[i],.46F);
+        a.defaults.shadingModel=MaterialShadingModel::Subsurface;a.defaults.subsurfaceScatterDistanceMeters=.0015F;
+        a.defaults.subsurfaceColor={.85F,.42F,.25F};a.defaults.surfaceDetail.pattern=SurfacePattern::Leather;
+        a.defaults.surfaceDetail.periodMeters=.0007F;a.defaults.surfaceDetail.bumpHeightMeters=.000003F;
+        a.defaults.surfaceDetail.colorVariation=.035F;a.defaults.surfaceDetail.roughnessVariation=.04F;
+        a.requirements.push_back(MaterialPresetFeature::Subsurface);a.requirements.push_back(MaterialPresetFeature::SurfaceDetail);
+        a.tags+=" organic pores flesh scattering";a.description="Artistic skin tone with metric pore detail and subsurface scattering. Single scattering-color model, not a measured multilayer skin fit.";put(std::move(a));
+    }
+    for(unsigned i=0;i<2;++i){
+        auto a=add(i?"bubble.soap-thick":"bubble.soap-thin",i?"Soap bubble 650 nm":"Soap bubble 350 nm","Bubble",{1,1,1},0);
+        a.defaults.transmission=1;a.defaults.transparent=true;a.defaults.indexOfRefraction=1;
+        a.defaults.iridescence=1;a.defaults.iridescenceIor=1.333F;a.defaults.iridescenceThicknessNm=i?650.F:350.F;
+        a.requirements={MaterialPresetFeature::SolidTransmission,MaterialPresetFeature::Iridescence};
+        a.tags+=" soap film interference transparent";a.description="Air interior, water film: colored Fresnel reflection and complementary transmission without glass-sphere bending. Each surface crossing represents one film; use a single closed shell. No drainage or bubble simulation.";put(std::move(a));
+    }
+    auto foam=add("foam.dense","Dense white foam","Foam",{.84F,.86F,.81F},.9F);
+    foam.defaults.shadingModel=MaterialShadingModel::Subsurface;foam.defaults.subsurfaceScatterDistanceMeters=.002F;foam.defaults.subsurfaceColor={.94F,.95F,.91F};
+    foam.defaults.surfaceDetail.pattern=SurfacePattern::Mineral;foam.defaults.surfaceDetail.periodMeters=.0015F;foam.defaults.surfaceDetail.bumpHeightMeters=.00006F;
+    foam.defaults.surfaceDetail.colorVariation=.06F;foam.defaults.surfaceDetail.roughnessVariation=.06F;
+    foam.requirements.push_back(MaterialPresetFeature::Subsurface);foam.requirements.push_back(MaterialPresetFeature::SurfaceDetail);
+    foam.tags+=" froth shaving porous scattering";foam.description="Opaque effective scattering material for dense foam, with metric surface breakup. Individual cells, silhouettes, wet froth and fluid motion require geometry or simulation.";put(std::move(foam));
     return c;
 }
 }

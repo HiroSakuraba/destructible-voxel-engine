@@ -327,6 +327,11 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.indexOfRefraction = lerp(base.indexOfRefraction, layer.indexOfRefraction, t);
         out.attenuationColor = lerp(base.attenuationColor, layer.attenuationColor, t);
         out.attenuationDistanceMeters = lerp(base.attenuationDistanceMeters, layer.attenuationDistanceMeters, t);
+        out.sheenColor = lerp(base.sheenColor, layer.sheenColor, t);
+        out.sheenRoughness = lerp(base.sheenRoughness, layer.sheenRoughness, t);
+        out.iridescence = lerp(base.iridescence, layer.iridescence, t);
+        out.iridescenceIor = lerp(base.iridescenceIor, layer.iridescenceIor, t);
+        out.iridescenceThicknessNm = lerp(base.iridescenceThicknessNm, layer.iridescenceThicknessNm, t);
         break;
     case MaterialLayerBlendMode::Multiply:
         out.baseColor = multiply_layer(base.baseColor, layer.baseColor, t);
@@ -344,6 +349,9 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.foliageWrap = saturate(lerp(base.foliageWrap, base.foliageWrap * layer.foliageWrap, t));
         out.transmission = saturate(lerp(base.transmission, base.transmission * layer.transmission, t));
         out.attenuationColor = multiply_layer(base.attenuationColor, layer.attenuationColor, t);
+        out.sheenColor = multiply_layer(base.sheenColor, layer.sheenColor, t);
+        out.sheenRoughness = saturate(lerp(base.sheenRoughness, base.sheenRoughness * layer.sheenRoughness, t));
+        out.iridescence = saturate(lerp(base.iridescence, base.iridescence * layer.iridescence, t));
         break;
     case MaterialLayerBlendMode::Additive:
         out.baseColor = add(base.baseColor, layer.baseColor, t);
@@ -360,6 +368,9 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.foliageTransmittance = saturate(base.foliageTransmittance + layer.foliageTransmittance * t);
         out.foliageWrap = saturate(base.foliageWrap + layer.foliageWrap * t);
         out.transmission = saturate(base.transmission + layer.transmission * t);
+        out.sheenColor = add(base.sheenColor, layer.sheenColor, t);
+        out.sheenRoughness = saturate(base.sheenRoughness + layer.sheenRoughness * t);
+        out.iridescence = saturate(base.iridescence + layer.iridescence * t);
         break;
     }
     // The target layer stack owns these semantic/physical properties.

@@ -1,5 +1,6 @@
 #include "dve/render/scene_lighting.hpp"
 #include "dve/render/ray_offset.hpp"
+#include "dve/render/subsurface_random_walk.hpp"
 #include "dve/voxel_normal_map.hpp"
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/material_bsdf.hpp"
@@ -592,9 +593,8 @@ struct SceneLighting::Impl {
           media.push_back({m, hit->optical, true});
       } else {
         const auto i = interface(*hit, d, media);
-        const float f = dielectric_fresnel(std::abs(dot3(unit(hit->n), d)),
-                                           i.incident, i.transmitted);
-        weight = mul(weight, (1 - f) * m.transmission);
+        const auto f = material_interface_reflectance(m,std::abs(dot3(unit(hit->n), d)),i.incident,i.transmitted);
+        weight = product(weight,mul({1-f.x,1-f.y,1-f.z},m.transmission));
         if (i.inferredInside)
           weight =
               product(weight, medium_transmittance(m, hit->distance, scale));
@@ -888,6 +888,66 @@ struct SceneLighting::Impl {
       if (m.shadingModel == MaterialShadingModel::Emissive ||
           m.shadingModel == MaterialShadingModel::Unlit)
         break;
+      // Camera/path rays through closed subsurface volumes use the existing bounded
+      // random-walk solver. Sample one RGB channel, reweight by three: absorption and
+      // scattering length remain spectral instead of tinting an opaque surface.
+      if (material_has_subsurface(m) && dot3(geometric,direction)<0 && depth<depthLimit) {
+        std::unique_ptr<SubsurfaceDomain> domain;
+        const auto& optical=hit->optical;
+        if(optical.polygonInstance>=0 && std::size_t(optical.polygonInstance)<meshes.size()) {
+          const auto& mesh=meshes[optical.polygonInstance];
+          domain=std::make_unique<PolygonSubsurfaceDomain>(*mesh.bvh,*mesh.instance->asset,mesh.instance->transform);
+        } else if(optical.voxelInstance>=0 && std::size_t(optical.voxelInstance)<tracer.instances().size()) {
+          domain=std::make_unique<VoxelSubsurfaceDomain>(tracer.instances()[optical.voxelInstance],optical.materialId);
+        }
+        if(domain) {
+          auto boundaryMaterial=m;boundaryMaterial.transmission=1;
+          const auto boundarySample=sample_material_bsdf(boundaryMaterial,geometric,mul(direction,-1),1,m.indexOfRefraction,0,rng.next(),rng.next(),rng.next());
+          if(!boundarySample.valid)break;
+          const bool reflected=!boundarySample.transmitted;
+          throughput=product(throughput,boundarySample.weight);
+          // The solver samples exit Fresnel in importance form; cancel the entry
+          // radiance eta factor for the complete outside-to-outside volume event.
+          if(!reflected)throughput=mul(throughput,m.indexOfRefraction*m.indexOfRefraction);
+          Float3 continuationPoint=hit->p;
+          float continuationPdf=1;
+          if(reflected) {
+            direction=boundarySample.direction;
+            origin=spawn(hit->p,geometric,direction);
+          } else {
+            const unsigned channel=(std::min)(2U,unsigned(rng.next()*3));
+            const float albedos[]{m.subsurfaceColor.x*m.baseColor.x,m.subsurfaceColor.y*m.baseColor.y,m.subsurfaceColor.z*m.baseColor.z};
+            auto medium=subsurface_medium_from_albedo(albedos[channel],m.subsurfaceScatterDistanceMeters,scale);
+            medium.boundaryIndex=m.indexOfRefraction;
+            RandomWalkSettings settings;settings.maximumEvents=256;settings.surfaceOffset=(std::max)(1e-7F,(std::min)(1e-5F/scale,m.subsurfaceScatterDistanceMeters*.001F/scale));
+            const auto walk=random_walk_subsurface(*domain,medium,hit->p,geometric,boundarySample.direction,[&]{return rng.next();},settings);
+            if(walk.end!=RandomWalkResult::End::Exited)break;
+            throughput=product(throughput,channel==0?Float3{3,0,0}:channel==1?Float3{0,3,0}:Float3{0,0,3});
+            // Diffuse exit approximation: use the sampled spatial endpoint, then
+            // Lambertian exit scattering. This admits next-event estimates for sun
+            // and finite emitters; it is not the solver's exact exit-angle law.
+            const auto exitNormal=unit(walk.normal);
+            VoxelMaterialDefinition exitMaterial;exitMaterial.baseColor={1,1,1,1};exitMaterial.specular=0;
+            const auto localExit=direct(walk.position,exitNormal,exitNormal,exitMaterial,rng,true);
+            auto exitLight=sum3(localExit.diffuse,localExit.specular);
+            if(env.sunIntensity>0) {
+              const auto sun=unit(env.sunDirection);
+              const auto visibility=shadow_transmission(spawn(walk.position,exitNormal,sun),sun,env.shadowMaxDistanceMeters/scale);
+              exitLight=sum3(exitLight,product(mul(env.sunColor,env.sunIntensity*(std::max)(0.F,dot3(exitNormal,sun))),visibility));
+            }
+            out.radiance=sum3(out.radiance,product(throughput,exitLight));
+            const float u=rng.next(),phi=2*pi*rng.next(),radius=std::sqrt(u);
+            const auto tangent=unit(cross(std::abs(exitNormal.y)<.9F?Float3{0,1,0}:Float3{1,0,0},exitNormal));
+            const auto bitangent=cross(exitNormal,tangent);
+            direction=unit(sum3(sum3(mul(tangent,radius*std::cos(phi)),mul(bitangent,radius*std::sin(phi))),mul(exitNormal,std::sqrt(1-u))));
+            origin=spawn(walk.position,exitNormal,direction);
+            continuationPoint=walk.position;continuationPdf=(std::max)(0.F,dot3(exitNormal,direction))/pi;
+          }
+          if(depth==0)out.firstSpecular=reflected;
+          previousPoint=continuationPoint;previousPdf=continuationPdf;previousDelta=reflected;
+          rayMaximum=maximum;++depth;continue;
+        }
+      }
       const auto view = mul(direction, -1);
       const bool continuing = depth < depthLimit;
       const auto local = direct(hit->p, normal, view, m, rng, continuing,

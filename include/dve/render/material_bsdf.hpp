@@ -19,6 +19,9 @@ struct MaterialBsdfSample {
     bool transmitted{};
     bool valid{};
 };
+// RGB energy reflectance of an ordinary or thin-film dielectric boundary.
+[[nodiscard]] Float3 material_interface_reflectance(const VoxelMaterialDefinition&, float cosTheta,
+                                                    float etaIncident, float etaTransmitted) noexcept;
 // Transmission mixes an exact dielectric interface with the existing opaque GGX/coat BSDF.
 // Rough dielectric reflection/transmission use GGX visible-normal sampling. Zero roughness
 // is a true delta interface; a smooth full metal is a delta conductor with authored RGB F0.

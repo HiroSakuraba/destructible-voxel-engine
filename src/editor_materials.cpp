@@ -55,6 +55,7 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
     if (!finite(value.baseColor) || !finite(value.emissive)) return fail("material color is non-finite");
     if (!finite(value.metallic) || value.metallic < 0.0F || value.metallic > 1.0F) return fail("metallic must be in [0,1]");
     if (!finite(value.roughness) || value.roughness < 0.0F || value.roughness > 1.0F) return fail("roughness must be in [0,1]");
+    if (!material_sheen_valid(value) || !material_iridescence_valid(value)) return fail("Invalid sheen or thin-film settings");
     if (!finite(value.specular) || value.specular < 0.0F || value.specular > 1.0F) return fail("specular must be in [0,1]");
     if (!finite(value.subsurfaceScatterDistanceMeters) || value.subsurfaceScatterDistanceMeters < 0.0F)
         return fail("subsurface scatter distance must be finite and non-negative");
@@ -222,7 +223,9 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                                             [](const auto& e) { return material_has_normal_map(e.second.definition); });
         const bool origins = std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return !e.second.definition.preset.id.empty();});
         const bool details=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return e.second.definition.surfaceDetail.pattern!=SurfacePattern::NoPattern;});
-        output << "DVE_EDITOR_MATERIALS " << (details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
+        const bool sheen=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_sheen(e.second.definition);});
+        const bool iridescence=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_iridescence(e.second.definition);});
+        output << "DVE_EDITOR_MATERIALS " << (iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -245,7 +248,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
-            if (normalMaps || origins || details) {
+            if (normalMaps || origins || details || sheen || iridescence) {
                 if (const VoxelNormalMap* map = m.normalMap.get()) {
                     static constexpr char kHex[] = "0123456789abcdef";
                     std::string hex;
@@ -257,8 +260,10 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     output << " 0";
                 }
             }
-            if(origins || details) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
-            if(details){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
+            if(origins || details || sheen || iridescence) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
+            if(details || sheen || iridescence){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
+            if(sheen || iridescence){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
+            if(iridescence){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
             output << '\n';
         }
     if(!output){if(error)*error="Failed to write material stream";return false;}return true;
@@ -296,7 +301,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 7) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 9) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -376,6 +381,10 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
                 if(pattern>unsigned(SurfacePattern::Paint)||space>unsigned(SurfaceDetailSpace::UV1))throw std::runtime_error("invalid surface-detail model or space");
                 m.surfaceDetail.pattern=SurfacePattern(pattern);m.surfaceDetail.space=SurfaceDetailSpace(space);
                 for(float& v:values)input>>v;set_surface_detail_values(m.surfaceDetail,values);}
+            if(version>=8){input >> m.sheenColor.x >> m.sheenColor.y >> m.sheenColor.z >> m.sheenRoughness;
+                if(!material_sheen_valid(m)) throw std::runtime_error("invalid material sheen record");}
+            if(version>=9){input >> m.iridescence >> m.iridescenceIor >> m.iridescenceThicknessNm;
+                if(!material_iridescence_valid(m)) throw std::runtime_error("invalid material iridescence record");}
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");
             entry.id = static_cast<MaterialId>(rawId);

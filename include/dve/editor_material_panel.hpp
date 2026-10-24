@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/editor_material_preview.hpp"
+#include "dve/render/material_texture_bake.hpp"
 #include "dve/editor_viewport.hpp"
 #include <filesystem>
 #include <map>
@@ -17,6 +18,8 @@ struct MaterialPanelState {
     bool open{},advanced{},favoritesOnly{},recentOnly{},supportedOnly{},searchFocus{true};
     bool preferencesLoaded{};
     bool layerMode{};
+    render::MaterialTextureBakeSettings bake;
+    std::filesystem::path lastBakeDirectory;
     std::size_t layerIndex{};
     std::optional<std::string> layerEditing;
     MaterialPresetBackend backend{MaterialPresetBackend::CpuReference};

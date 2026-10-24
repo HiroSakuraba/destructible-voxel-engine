@@ -270,10 +270,13 @@ private:
 
 // Shared ray-hit evaluation of the authored base/MR/normal/emissive/coverage/detail/layer
 // maps. Uses triangle metric derivatives and a ray-cone footprint for mip selection.
+// Exact destination-pixel differentials for UV baking; coordinates use world/asset units.
+struct PolygonSurfaceDifferentials { Float3 worldDx{},worldDy{}; };
 struct PolygonHitSurface { VoxelMaterialDefinition material; Float3 normal{0,0,1}; };
 [[nodiscard]] PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset&,const PolygonBvhHit&,
     const RigidTransform&,Float3 worldNormal,const std::vector<PolygonTextureMipChain>&,
-    float metersPerUnit=1,float footprintMeters=0,float viewDistanceMeters=0) noexcept;
+    float metersPerUnit=1,float footprintMeters=0,float viewDistanceMeters=0,
+    const PolygonSurfaceDifferentials* differentials=nullptr) noexcept;
 
 // Opacity of a polygon surface at a BVH ray hit, as the reference rasterizer computes it for its
 // alpha test: material alpha x vertex colour alpha x base-colour texture alpha x opacity texture

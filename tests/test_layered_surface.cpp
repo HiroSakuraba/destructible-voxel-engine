@@ -54,6 +54,10 @@ void editor_workflow(){
     auto action=[&](std::string_view name,float value=0){check(controller.material_panel_layer_action(name,value),panel.message);};
     action("recipeMetal");auto& d=workspace.document();auto mesh=[&]()->const CookedPolygonAsset&{return *d.find_object(1)->polygon;};
     check(mesh().materials[0].layers.size()==3&&mesh().materialBindings[0].layers.size()==3,"recipe material and bindings");
+    const auto initialHash=mesh().contentHash;const auto initialCount=workspace.commands().size();
+    panel.slot=mesh().materials[0].layers[0].sourceMaterial;
+    check(!controller.material_panel_layer_action("recipeMetal")&&mesh().contentHash==initialHash&&workspace.commands().size()==initialCount,"referenced leaf edit cannot introduce nesting in dependents");
+    panel.slot=0;
     const auto hash=mesh().contentHash;const auto count=workspace.commands().size();action("weight",.25F);
     check(workspace.commands().size()==count+1&&mesh().materials[0].layers[0].weight==.25F,"one action, one undo transaction");
     check(workspace.commands().undo(d).success&&mesh().contentHash==hash,"undo full mesh and dependencies");check(workspace.commands().redo(d).success,"redo layer edit");

@@ -385,7 +385,7 @@ struct NativeFilePickerLayout {
 // Esc (or the Cancel button) cancels. While one runs, edits are refused, so the scene cannot
 // change under it; the result is applied on the UI thread as one undo step (or not at all when
 // cancelled, or when the scene changed anyway).
-enum class LongJobKind : std::uint8_t { Idle, ReadModel, ImportModel, ReimportModel, FloodFill, ValidateProject, RebuildCollision };
+enum class LongJobKind : std::uint8_t { Idle, ReadModel, ImportModel, ReimportModel, FloodFill, ValidateProject, RebuildCollision, BakeMaterial };
 struct LongJobView {
     bool active{};
     LongJobKind kind{LongJobKind::Idle};
@@ -644,6 +644,7 @@ public:
     bool apply_material_panel(bool editSlot = false);
     bool load_material_panel_slot();
     // Layer edits affect assigned polygon slots immediately, one undo transaction each.
+    bool material_panel_bake(bool apply=true, const std::filesystem::path& outputDirectory={});
     bool material_panel_layer_action(std::string_view action,float value=0);
     [[nodiscard]] std::vector<std::pair<std::string,std::string>> material_panel_layer_controls() const;
     bool material_panel_key(std::string_view,bool control,bool shift,bool alt);

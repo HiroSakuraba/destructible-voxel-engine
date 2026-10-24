@@ -46,6 +46,19 @@ public:
     CommandResult undo(EditorDocument& d)override{return apply(d,false);}
 };
 std::filesystem::path preference_path(const std::filesystem::path& settings){return settings.empty()?std::filesystem::path{}:std::filesystem::path(settings.string()+".material-browser");}
+// A slot edit can break another material's stack that uses the slot as an overlay source
+// (for example by turning the source into a nested stack). Reject any stack that was valid
+// before the edit and is not valid after it; already-invalid imported stacks do not block edits.
+bool dependent_stacks_valid(const CookedPolygonAsset& before,const CookedPolygonAsset& after,std::string* error){
+    for(std::size_t i=0;i<after.materials.size();++i){
+        if(after.materials[i].layers.empty())continue;
+        std::string reason;if(render::validate_layered_surface(after,std::uint32_t(i),&reason))continue;
+        if(i<before.materials.size()&&before.materials.size()==before.materialBindings.size()&&!render::validate_layered_surface(before,std::uint32_t(i),nullptr))continue;
+        if(error)*error="Material slot "+std::to_string(i)+" layer stack would become invalid: "+reason;
+        return false;
+    }
+    return true;
+}
 std::string value_text(float v){std::ostringstream s;s<<std::setprecision(6)<<v;return s.str();}
 }
 MaterialPanelLayout NativeEditorController::material_panel_layout()const{
@@ -199,6 +212,8 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
         if(o->polygon){c.beforeMesh=*o->polygon;auto mesh=*o->polygon;
             if(editSlot||o->is_nurbs()){
                 const auto slot=o->is_nurbs()?0:p.slot;if(slot>=mesh.materials.size())return fail(o->name+": slot does not exist");
+                // The draft can predate a stack edit; never silently drop an assigned stack and its maps.
+                if(!mesh.materials[slot].layers.empty())return fail(o->name+": slot "+std::to_string(slot)+" has a layer stack; edit it in Layers mode");
                 mesh.materials[slot]=withPhysical(mesh.materials[slot]);mesh.materialBindings[slot]={};
             }else{
                 if(mesh.materials.size()>=256)return fail(o->name+": all material slots are occupied");
@@ -218,6 +233,7 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
                     if(!result)return fail(result.error);
                     mesh=std::move(result.mesh);}
             }
+            {std::string stackError;if(!dependent_stacks_valid(*o->polygon,mesh,&stackError))return fail(o->name+": "+stackError);}
             mesh.contentHash=polygon_asset_content_hash(mesh);const auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);c.afterMesh=std::move(mesh);
         }else{
             if(!o->voxels)return fail(o->name+": no assignable surface");
@@ -419,6 +435,8 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
             else return fail("Unknown layer edit");
         }
         std::string error;if(!render::validate_layered_surface(mesh,p.slot,&error))return fail(error);
+        // The edited slot may also be an overlay source of another stack (Codex review).
+        if(!dependent_stacks_valid(*object->polygon,mesh,&error))return fail(error);
         mesh.contentHash=polygon_asset_content_hash(mesh);const auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);
         ObjectMaterialChange change;change.id=id;change.beforePalette=change.afterPalette=object->voxelMaterials;change.beforeMesh=*object->polygon;change.afterMesh=std::move(mesh);changes.push_back(std::move(change));
     }

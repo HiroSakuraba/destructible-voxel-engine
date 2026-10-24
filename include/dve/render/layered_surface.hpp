@@ -1,6 +1,9 @@
 #pragma once
 #include "dve/polygon_asset.hpp"
+#include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace dve::render {

@@ -11,6 +11,8 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <vector>
 using namespace dve;using namespace dve::editor;using namespace dve::render;
 namespace {
 void check(bool b,const std::string& why){if(!b)throw std::runtime_error(why);}
@@ -68,6 +70,23 @@ void editor_workflow(){
     check(loaded->find_object(1)->polygon->contentHash==before,"scene stack, images and recipe round-trip");
     std::filesystem::remove_all(path);
     action("recipeWood");check(mesh().materials[0].surfaceDetail.pattern==SurfacePattern::Wood,"wood recipe");action("recipePlaster");check(mesh().materials[0].surfaceDetail.pattern==SurfacePattern::Mineral,"plaster recipe");
+    // A leaf that another stack uses as an overlay source must not become a nested stack
+    // (Codex review): the edit is rejected atomically and history is untouched.
+    {
+        action("recipeMetal");const auto sourceSlot=mesh().materials[0].layers[0].sourceMaterial;
+        std::string compatible;panel.slot=0;panel.layerIndex=0;
+        for(const auto& entry:panel.catalog.entries()){panel.selected=entry.id;
+            if(controller.material_panel_layer_action("add")){compatible=entry.id;check(workspace.commands().undo(d).success,"undo probe add");break;}}
+        check(!compatible.empty(),"a compatible leaf preset exists");
+        const auto stableHash=mesh().contentHash;const auto stableCount=workspace.commands().size();
+        panel.slot=sourceSlot;panel.selected=compatible;
+        check(!controller.material_panel_layer_action("add")&&mesh().contentHash==stableHash&&workspace.commands().size()==stableCount,"source slot cannot become a nested stack");
+        check(!controller.material_panel_layer_action("recipeWood")&&mesh().contentHash==stableHash&&workspace.commands().size()==stableCount,"recipe cannot nest a referenced source");
+        panel.slot=0;panel.layerMode=false;panel.draft=VoxelMaterialDefinition{};panel.draft.name="Leaf probe";
+        const bool applied=controller.apply_material_panel(true);
+        check(!applied&&mesh().contentHash==stableHash&&panel.message.find("layer stack")!=std::string::npos,"leaf Apply-to-Slot cannot silently drop an assigned stack: "+panel.message);
+        panel.layerMode=true;
+    }
     // Pointer + text entry exercises the artist control, not only its command helper.
     controller.resize(1280,800);panel.open=true;auto rows=controller.material_panel_layer_controls();
     auto it=std::find_if(rows.begin(),rows.end(),[](const auto& r){return r.first=="weight";});panel.controlFirst=std::size_t(it-rows.begin());

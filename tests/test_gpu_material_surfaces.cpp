@@ -309,7 +309,7 @@ void texture_pixels(VulkanDevice& d,const std::filesystem::path& root,const std:
                 PolygonBvhHit hit;hit.position={(2*(float(x)+.5F)/width-1)*.012F,(2*(float(y)+.5F)/width-1)*.012F,.2F};hit.normal={0,0,1};hit.firstIndex=hit.position.y<=hit.position.x?0:3;
                 const auto expected=sample_polygon_hit_material(a,hit,{},hit.normal,mips,1,.024F/width);const auto& m=expected.material;
                 const std::array<float,4> want=mode=="color"?std::array<float,4>{m.baseColor.x,m.baseColor.y,m.baseColor.z,m.roughness}:mode=="normal"?std::array<float,4>{expected.normal.x*.5F+.5F,expected.normal.y*.5F+.5F,expected.normal.z*.5F+.5F,m.roughness}:mode=="emission"?std::array<float,4>{m.emissive.x,m.emissive.y,m.emissive.z,m.baseColor.w}:std::array<float,4>{m.metallic,m.roughness,m.baseColor.w,1};
-                for(unsigned c=0;c<4;++c){const auto actual=std::to_integer<unsigned>(pixels[(y*width+x)*4+c])/255.F;const auto delta=std::abs(actual-want[c]);layerWorst=std::max(layerWorst,delta);check(delta<.012F,"Layer CPU/GPU mismatch "+std::to_string(count)+" overlays mapping "+std::to_string(mappingMode)+" "+mode+" channel "+std::to_string(c)+" got "+std::to_string(actual)+" want "+std::to_string(want[c]));++layerProbes;}
+                for(unsigned c=0;c<4;++c){const auto actual=std::to_integer<unsigned>(pixels[(y*width+x)*4+c])/255.F;const auto delta=std::abs(actual-want[c]);layerWorst=(std::max)(layerWorst,delta);check(delta<.012F,"Layer CPU/GPU mismatch "+std::to_string(count)+" overlays mapping "+std::to_string(mappingMode)+" "+mode+" channel "+std::to_string(c)+" got "+std::to_string(actual)+" want "+std::to_string(want[c]));++layerProbes;}
             }
         }
     }

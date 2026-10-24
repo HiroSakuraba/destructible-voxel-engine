@@ -27,6 +27,8 @@ Asphalt and grass now have independent `race_surface` grip/rolling-drag properti
 
 Select a street, arcade, drift, offroad or track profile in the Race Car component. The F3 HUD shows lateral slip, yaw rate and contact counters. Presets apply gameplay multipliers to the existing grip, steering, acceleration and braking settings. Collision remains portable (without Jolt).
 
+The CPU player now displays transient two-wheel skid marks, grey tire smoke and dusty puffs on loose ground, with depth-aware placement. The optional SDL audio mixer plays procedural engine bands, tire scrub and collision sounds. Use `--no-audio` to disable the audio device. Visual effects are bounded and do not persist across save/load; the underlying driving and lap state still does.
+
 The generated folder contains `project.dveproject`, `scenes/prototype.dvescene`, cooked scene/mesh assets and `game.dvegame` with bindings. Existing output folders are refused. Package with `dve_pack NEW_PROJECT_DIRECTORY racing.dvepak --all` and launch the package with `dve_player racing.dvepak`.
 
 This is a portable arcade controller with a swept body capsule and simple Z-up ground following. Wheel geometry is cosmetic; Jolt suspension, tire animation, realistic powertrain, slopes/ramps, AI opponents, damage and network racing are not part of this starter. Best lap survives restart within a session and save/load; it is not a separate permanent leaderboard.

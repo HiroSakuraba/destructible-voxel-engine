@@ -73,8 +73,12 @@ resources are destroyed after GPU idle. The existing live renderer serializes pe
 uniform reuse; this remains a correctness-first path, without an asynchronous performance
 claim. The owner releases buffers, descriptors and layout during renderer teardown.
 
-Initial camera containment uses an oblique oriented surface query for each dielectric.
-Containing volumes are ordered outside-to-inside; the shader pushes at entry and restores
+Initial camera containment uses an oblique oriented surface query for each closed connected
+component of each dielectric. Containing components are ordered outside-to-inside by their
+own volume (never a material's aggregate volume); a camera inside two nested components of
+the same material is refused. While the camera is inside any medium, every primary draw,
+including opaque receivers, uses the optical transport pipeline so camera-to-receiver
+absorption is applied; the shader pushes at entry and restores
 the enclosing IOR at exit. A mismatched exit is terminated rather than assigned a guessed
 medium. Absorption covers the segment from a camera already inside a medium to its first
 surface as well as subsequent internal segments. Cameras exactly on interfaces require an
@@ -96,11 +100,12 @@ there is no interface in that case. The GPU/CPU conformance probes include this 
 Release validation uses Mesa lavapipe with `DVE_REQUIRE_VULKAN=1`, so GPU tests execute instead
 of taking an unavailable-device skip.
 
-- Eight live scenes: clear sphere, green absorption, water sphere, slab, camera inside glass,
-  glass around water, camera inside both media, and constant-environment energy/intensity/
+- Nine live scenes: clear sphere, green absorption, water sphere, slab, camera inside glass,
+  glass around water, camera inside both media, camera inside absorbing glass with an opaque
+  receiver before the exit surface, and constant-environment energy/intensity/
   exposure. The final case expects RGB (0.28, 0.42, 0.56) from environment (0.2, 0.3, 0.4),
   intensity 0.7 and exposure +1 EV.
-- 1,212 sampled RGB channel comparisons against an independent reference using the existing
+- 1,455 sampled RGB channel comparisons against an independent reference using the existing
   CPU `OpticalScene`, Fresnel/refraction and absorption functions. That reference uses its
   existing polygon BVH, up to 24 interactions and 2,048 paths. Maximum observed sampled error
   is 0.00224715; tolerance is 0.025 including RGBA8 quantization and bounded path differences.

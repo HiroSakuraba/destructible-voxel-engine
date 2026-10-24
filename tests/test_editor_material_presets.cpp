@@ -109,17 +109,27 @@ void project_switch_rebuilds_catalog(){
     n.material_panel_select("dve.paint.satin");require(n.save_material_panel_preset(),n.material_panel().message);
     require(std::filesystem::exists(b/"Materials"/"Presets"/(id+".dvepreset")),"same preset is really written into project B");n.close_material_panel();
 }
+// Each CPU path-traced thumbnail takes seconds under ASan/UBSan on a loaded 4-vCPU runner, so every
+// wait gets its own generous deadline. A single shared 30 s deadline for all three waits expired
+// on slow sanitizer runs (CI linux-gcc-asan, test took 34 s) and reported the timeout as
+// "stale job cannot replace it" although no stale image was ever committed.
+template<class Done> bool wait_until(Done done,std::chrono::seconds limit=std::chrono::seconds(180)){
+    const auto until=std::chrono::steady_clock::now()+limit;
+    while(!done()){if(std::chrono::steady_clock::now()>=until)return false;std::this_thread::sleep_for(std::chrono::milliseconds(10));}
+    return true;
+}
 void preview_jobs(){
-    auto c=MaterialPresetCatalog::starter();MaterialPreviewWorker worker;worker.request(c.find("dve.glass.frosted")->defaults,MaterialPreviewShape::Sphere);worker.request(c.find("dve.metal.copper")->defaults,MaterialPreviewShape::Wedge);
-    const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(30);
-    while(!worker.image()&&std::chrono::steady_clock::now()<until)std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    auto c=MaterialPresetCatalog::starter();
+    MaterialPreviewWorker worker;worker.request(c.find("dve.glass.frosted")->defaults,MaterialPreviewShape::Sphere);worker.request(c.find("dve.metal.copper")->defaults,MaterialPreviewShape::Wedge);
+    require(wait_until([&]{return worker.image()!=nullptr;}),"thumbnail deadline");
     auto image=worker.image();require(image&&!image->rgb.empty()&&image->error.empty(),image?image->error:"thumbnail deadline");auto ready=image;
     MaterialPreviewWorker reference;reference.request(c.find("dve.metal.copper")->defaults,MaterialPreviewShape::Wedge);
-    while(!reference.image()&&std::chrono::steady_clock::now()<until)std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    require(reference.image()&&reference.image()->rgb==image->rgb,"latest result matches the requested shape/material; stale job cannot replace it");
+    require(wait_until([&]{return reference.image()!=nullptr;}),"reference thumbnail deadline");
+    require(reference.image()->error.empty(),reference.image()->error);
+    require(reference.image()->rgb==image->rgb,"latest result matches the requested shape/material; stale job cannot replace it");
     worker.request(c.find("dve.metal.copper")->defaults,MaterialPreviewShape::Wedge);require(worker.image()==ready,"identical request retains cached image");
     worker.request(c.find("dve.glass.clear")->defaults,MaterialPreviewShape::Sphere);worker.cancel();require(!worker.image(),"cancel clears stale image");
-    while(worker.busy()&&std::chrono::steady_clock::now()<until)std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    require(wait_until([&]{return !worker.busy();}),"cancelled job deadline");
     require(!worker.image(),"cancelled job never commits later");
 }
 }

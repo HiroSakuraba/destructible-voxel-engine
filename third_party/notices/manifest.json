@@ -159,6 +159,13 @@
       "texts": [{"repo": "third_party/meshoptimizer_v1_3/LICENSE.md"}]
     },
     {
+      "id": "mikktspace", "name": "MikkTSpace (vendored, with a DVE UB fix)", "upstream": "https://github.com/mmikk/MikkTSpace",
+      "kind": "vendored-subset", "license": "Zlib", "copyleft": "none",
+      "match": {"sources": ["third_party/mikktspace/mikktspace.c"]},
+      "texts": [{"repo": "third_party/notices/MIKKTSPACE_NOTICE.md"}],
+      "notes": "mikktspace.c is altered: QuickSort() and QuickSortEdges() guard a 32-bit rotate that shifted by 32 (undefined behaviour). The change is marked in the file header and described in the notice text."
+    },
+    {
       "id": "bs_cloth", "name": "BS-Cloth (adapted concepts)", "upstream": "https://github.com/Simulation-Intelligence/BS-Cloth", "kind": "adaptation",
       "license": "Apache-2.0", "copyleft": "none",
       "match": {"sources": ["src/bspline_cloth.cpp"]},

@@ -702,6 +702,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.boolean_operands_hide","Voxel","Boolean Operands: Hide",""},
         {"voxel.boolean_operands_delete","Voxel","Boolean Operands: Delete",""},
         {"voxel.boolean_operands_keep","Voxel","Boolean Operands: Keep",""},
+        {"prototype.kit","Tools","Gameplay Prototype Kit",""},
         {"create.subdivision","Create","Subdivision Surface",""},
         {"nurbs.create_patch","NURBS","Create Editable Patch",""},
         {"nurbs.create_circle","NURBS","Create Rational Circle",""},

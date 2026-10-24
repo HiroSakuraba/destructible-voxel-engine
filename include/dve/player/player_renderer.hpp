@@ -23,6 +23,7 @@
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/render/cpu_fog.hpp"
 #include "dve/render_environment.hpp"
+#include "dve/prototype_game.hpp"
 
 namespace dve::player {
 
@@ -36,6 +37,7 @@ struct PlayerRenderView {
     std::span<const render::CpuFogVolume> fogVolumes{};
     render::CpuFogSettings fogSettings{};
     render::CpuSurfaceDetailSettings surfaceDetail{};
+    const PrototypeHud* prototypeHud{};
 };
 
 struct PlayerRenderStats {

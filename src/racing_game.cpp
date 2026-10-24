@@ -118,7 +118,7 @@ struct RacingGame::Impl {
   auto pos=world.position(car).value_or(initial);const auto old=pos;
   auto axis=[&](const char* name){const auto n=world.get_axis(name);return std::isfinite(n)?std::clamp(n,-1.F,1.F):0.F;};
   const float throttle=axis("move_y"),steering=axis("move_x");const bool handbrake=world.is_action_pressed("jump");
-  const float serviceBrake=std::max(std::clamp(axis("race_brake"),0.0F,1.0F),
+  const float serviceBrake=(std::max)(std::clamp(axis("race_brake"),0.0F,1.0F),
                                     world.is_action_pressed("race_brake")?1.0F:0.0F);
   const auto profile=profile_for(get(config,"handling_profile",std::string{"street"}));
   auto f=forward(yaw);float speed=dot(velocity,f);const float oldSpeed=speed;

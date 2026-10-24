@@ -1,7 +1,9 @@
 #include "dve/editor_material_preview.hpp"
 #include "dve/editor_polygon.hpp"
+#include "dve/editor_material_inspection.hpp"
 #include "dve/render/scene_lighting.hpp"
 #include <atomic>
+#include <bit>
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
@@ -52,7 +54,7 @@ CookedPolygonAsset material_preview_fixture(const VoxelMaterialDefinition& mater
     a.contentHash=polygon_asset_content_hash(a);return a;
 }
 struct MaterialPreviewWorker::Impl {
-    struct Job{CookedPolygonAsset asset;MaterialPreviewShape shape{};std::uint64_t key{},generation{};};
+    struct Job{CookedPolygonAsset asset;MaterialPreviewShape shape{};std::uint64_t key{},generation{};std::optional<CookedPolygonAsset> baked;render::MaterialTextureBakeSettings settings;MaterialInspectionChannel channel{};MaterialInspectionView view{};};
     mutable std::mutex mutex;std::condition_variable cv;std::optional<Job> pending;
     std::atomic<std::uint64_t> generation{0};std::atomic<bool> stop{false};
     bool working{};std::shared_ptr<const MaterialPreviewImage> current;
@@ -64,6 +66,8 @@ struct MaterialPreviewWorker::Impl {
         while(!stop){Job j;{std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop||pending.has_value();});if(stop)return;j=std::move(*pending);pending.reset();working=true;}
             auto image=std::make_shared<MaterialPreviewImage>();image->rgb.resize(image->size*image->size);
             try{
+                if(j.baked)*image=render_material_inspection(j.asset,*j.baked,j.settings,j.channel,j.view,[&]{return generation!=j.generation||stop;});
+                else {
 #if defined(DVE_EDITOR_MATERIAL_PREVIEW_RENDERER)
                 auto sample=j.asset;
                 auto floor=make_editor_polygon_plane(2,8);floor.materials[0].baseColor={.45F,.45F,.45F,1};
@@ -90,6 +94,7 @@ struct MaterialPreviewWorker::Impl {
 #else
                 image->error="CPU studio unavailable: build with DVE_BUILD_RHI=ON";
 #endif
+                }
             }catch(const std::exception& ex){image->error=ex.what();}
             {std::lock_guard lock(mutex);working=false;if(generation==j.generation&&!stop){current=image;cache[j.key]=image;order.push_back(j.key);while(order.size()>64){cache.erase(order.front());order.pop_front();}}}
         }
@@ -111,7 +116,15 @@ void MaterialPreviewWorker::request(const CookedPolygonAsset& asset,std::uint32_
     std::lock_guard lock(impl_->mutex);if(impl_->requestedKey==key)return;impl_->requestedKey=key;
     const auto generation=++impl_->generation;impl_->pending.reset();
     if(auto it=impl_->cache.find(key);it!=impl_->cache.end()){impl_->current=it->second;return;}
-    impl_->current.reset();impl_->pending=Impl::Job{std::move(fixture),shape,key,generation};impl_->cv.notify_one();
+    impl_->current.reset();Impl::Job job;job.asset=std::move(fixture);job.shape=shape;job.key=key;job.generation=generation;impl_->pending=std::move(job);impl_->cv.notify_one();
+}
+void MaterialPreviewWorker::request_inspection(const CookedPolygonAsset& source,const CookedPolygonAsset& baked,const render::MaterialTextureBakeSettings& settings,MaterialInspectionChannel channel,MaterialInspectionView view){
+    auto key=polygon_asset_content_hash(source)^std::rotl(polygon_asset_content_hash(baked),17)^std::uint64_t(unsigned(channel)+1)*0x7391eac51ULL^std::uint64_t(unsigned(view)+1)*0x91eac5173ULL;
+    const float pose[]{settings.pose.position.x,settings.pose.position.y,settings.pose.position.z,settings.pose.rotation.x,settings.pose.rotation.y,settings.pose.rotation.z,settings.pose.rotation.w,settings.metersPerUnit};
+    for(float value:pose)key=(key^std::bit_cast<std::uint32_t>(value))*1099511628211ULL;
+    for(auto value:{settings.targetUv,settings.materialIndex,settings.paddingPixels,settings.resolution})key=(key^value)*1099511628211ULL;
+    std::lock_guard lock(impl_->mutex);if(impl_->requestedKey==key)return;impl_->requestedKey=key;const auto generation=++impl_->generation;impl_->pending.reset();impl_->current.reset();
+    Impl::Job job;job.asset=source;job.baked=baked;job.settings=settings;job.channel=channel;job.view=view;job.key=key;job.generation=generation;impl_->pending=std::move(job);impl_->cv.notify_one();
 }
 void MaterialPreviewWorker::cancel(){std::lock_guard lock(impl_->mutex);++impl_->generation;impl_->pending.reset();impl_->requestedKey.reset();impl_->current.reset();}
 std::shared_ptr<const MaterialPreviewImage> MaterialPreviewWorker::image()const{std::lock_guard lock(impl_->mutex);return impl_->current;}

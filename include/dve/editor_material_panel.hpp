@@ -1,7 +1,9 @@
 #pragma once
 #include "dve/editor_material_preview.hpp"
+#include "dve/editor_material_inspection.hpp"
 #include "dve/render/material_texture_bake.hpp"
 #include "dve/editor_viewport.hpp"
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -18,6 +20,12 @@ struct MaterialPanelState {
     bool open{},advanced{},favoritesOnly{},recentOnly{},supportedOnly{},searchFocus{true};
     bool preferencesLoaded{};
     bool layerMode{};
+    bool inspection{};
+    MaterialInspectionChannel inspectionChannel{MaterialInspectionChannel::Beauty};
+    MaterialInspectionView inspectionView{MaterialInspectionView::Split};
+    std::string bakeStatus;
+    std::uint64_t bakeStatusObject{},inspectionKey{};
+    double nextBakeStatusTime{};
     render::MaterialTextureBakeSettings bake;
     std::filesystem::path lastBakeDirectory;
     std::size_t layerIndex{};

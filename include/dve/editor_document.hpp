@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/editor_modeling_topology.hpp"
+#include "dve/editor_material_bake.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -57,6 +58,7 @@ struct EditorObject {
     // the editor paint palette, so painting with an existing editor material stays consistent.
     std::map<MaterialId, VoxelMaterialDefinition> voxelMaterials;
     std::optional<CookedPolygonAsset> polygon; // Control cage when subdivision is present
+    std::optional<MaterialBakeRecipe> materialBake;
     std::optional<SubdivisionSettings> subdivision;
     std::optional<ModelingTopology> modelingTopology;
     ModelingId modelingNextId{1}; // high-water mark; Undo and cancelled previews never lower it

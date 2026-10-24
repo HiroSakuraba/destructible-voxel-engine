@@ -934,6 +934,8 @@ if(DVE_BUILD_EDITOR)
         src/editor_project.cpp
         src/editor_file_workflow.cpp
         src/editor_material_presets.cpp
+        src/editor_material_bake.cpp
+        src/editor_material_inspection.cpp
         src/editor_material_preview.cpp
         src/editor_native_materials.cpp
         src/editor_materials.cpp
@@ -2739,6 +2741,9 @@ if(DVE_BUILD_TESTS)
 
     if(DVE_BUILD_EDITOR)
         if(TARGET dve_render_bridge)
+            add_executable(dve_material_bake_workflow_tests tests/test_material_bake_workflow.cpp)
+            target_link_libraries(dve_material_bake_workflow_tests PRIVATE dve::editor)
+            add_test(NAME dve_material_bake_workflow_tests COMMAND dve_material_bake_workflow_tests)
             add_executable(dve_material_texture_bake_tests tests/test_material_texture_bake.cpp)
             target_link_libraries(dve_material_texture_bake_tests PRIVATE dve::editor)
             add_dependencies(dve_material_texture_bake_tests dve_bake_material)

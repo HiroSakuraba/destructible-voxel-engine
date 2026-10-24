@@ -173,7 +173,7 @@ struct RacingGame::Impl {
    priorLeft=L;priorRight=R;previousTiresValid=telemetry.grounded;
    if(!telemetry.grounded||speed<3.0F){particleClock=0;return;}
    const bool loose=telemetry.surfaceGripMultiplier<0.85F;
-   const float amount=std::max(telemetry.skidIntensity,handbrake?0.35F:0.0F);
+   const float amount=(std::max)(telemetry.skidIntensity,handbrake?0.35F:0.0F);
    if(amount<0.12F&&!loose){particleClock=0;return;}
    particleClock+=dt;
    // Bounded emission, deterministic jitter; never use wall clock or global RNG.

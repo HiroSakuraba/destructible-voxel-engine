@@ -887,6 +887,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.chamfer_edges","Polygon","Chamfer Edges (Convex)",""},
         {"mesh.fillet_edges","Polygon","Rounded Fillet Edges (Convex)",""},
         {"mesh.subdivide","Polygon","Subdivide Selected Faces",""},
+        {"mesh.displace","Polygon","Displace from Height Texture (Bake)",""},
         {"mirror.live_x","Polygon","Live Mirror X",""}, {"mirror.live_y","Polygon","Live Mirror Y",""},
         {"mirror.live_z","Polygon","Live Mirror Z",""}, {"mirror.apply_live","Polygon","Apply Live Mirror (weld seam)",""},
         {"mirror.mesh_x","Polygon","Mirror Mesh X (weld seam)",""}, {"mirror.mesh_y","Polygon","Mirror Mesh Y (weld seam)",""},
@@ -998,7 +999,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for(auto id:{"mesh.boolean_union","mesh.boolean_difference","mesh.boolean_reverse","mesh.boolean_intersection"})configure(id,"Mesh Booleans",70);
     for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection","mesh.exact_collision"})configure(id,"Exact CAD Booleans",71);
     for(auto id:{"mesh.hull_fit","mesh.hull_edit","mesh.hull_remove"})configure(id,"Collision Hull",75);
-    for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
+    for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.displace","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
     for(auto id:{"mesh.uv_editor","mesh.uv_mark_seam","mesh.uv_clear_seam","mesh.uv_toggle_pin","mesh.uv_reset_flags"})configure(id,"UV Editing",82);
     for (auto id:{"polygon.assign_material","polygon.weld","polygon.select_shell","polygon.select_loop","polygon.select_ring","polygon.select_invert","polygon.select_none","polygon.extract",
                  "polygon.join","polygon.separate","polygon.slice","polygon.preview_apply","polygon.preview_cancel"}) configure(id,"Mesh Editing",80);

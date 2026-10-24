@@ -3180,6 +3180,171 @@
           "binding": 2
         }
       ]
+    },
+    {
+      "name": "live_clear_glass_ps",
+      "source": "live_clear_glass_ps.hlsl",
+      "stage": "pixel",
+      "entry": "main",
+      "profile": "ps_6_0",
+      "vulkan_bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "uniform_buffer",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "gDiffuseIrradiance",
+          "kind": "combined_image_sampler",
+          "set": 2,
+          "binding": 0
+        },
+        {
+          "name": "gSpecularPrefilter",
+          "kind": "combined_image_sampler",
+          "set": 2,
+          "binding": 1
+        },
+        {
+          "name": "gEnvironmentBrdfLut",
+          "kind": "combined_image_sampler",
+          "set": 2,
+          "binding": 2
+        },
+        {
+          "name": "gOpticalNodes",
+          "kind": "storage_buffer",
+          "set": 4,
+          "binding": 0
+        },
+        {
+          "name": "gOpticalTriangles",
+          "kind": "storage_buffer",
+          "set": 4,
+          "binding": 1
+        },
+        {
+          "name": "gOpticalMaterials",
+          "kind": "storage_buffer",
+          "set": 4,
+          "binding": 2
+        },
+        {
+          "name": "gOpticalSettings",
+          "kind": "storage_buffer",
+          "set": 4,
+          "binding": 3
+        }
+      ],
+      "bindings": [
+        {
+          "name": "LiveEnvironmentFrameConstants",
+          "kind": "constant_buffer",
+          "access": "read",
+          "register": "b8"
+        },
+        {
+          "name": "gEnvironmentSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s1"
+        },
+        {
+          "name": "gSpecularSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s5"
+        },
+        {
+          "name": "gBrdfSampler",
+          "kind": "sampler",
+          "access": "read",
+          "register": "s6"
+        },
+        {
+          "name": "gDiffuseIrradiance",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t18"
+        },
+        {
+          "name": "gSpecularPrefilter",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t19"
+        },
+        {
+          "name": "gEnvironmentBrdfLut",
+          "kind": "sampled_texture",
+          "access": "read",
+          "register": "t20"
+        },
+        {
+          "name": "gOpticalNodes",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t37"
+        },
+        {
+          "name": "gOpticalTriangles",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t38"
+        },
+        {
+          "name": "gOpticalMaterials",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t39"
+        },
+        {
+          "name": "gOpticalSettings",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t40"
+        }
+      ]
+    },
+    {
+      "name": "clear_glass_reference",
+      "source": "clear_glass_reference.hlsl",
+      "stage": "compute",
+      "entry": "main",
+      "profile": "cs_6_0",
+      "vulkan_bindings": [
+        {
+          "name": "gDielectricProbes",
+          "kind": "storage_buffer",
+          "set": 0,
+          "binding": 0
+        },
+        {
+          "name": "gDielectricResults",
+          "kind": "storage_buffer",
+          "set": 0,
+          "binding": 1
+        }
+      ],
+      "threads": [
+        64,
+        1,
+        1
+      ],
+      "bindings": [
+        {
+          "name": "gDielectricProbes",
+          "kind": "storage_buffer",
+          "access": "read",
+          "register": "t0"
+        },
+        {
+          "name": "gDielectricResults",
+          "kind": "storage_buffer",
+          "access": "read_write",
+          "register": "u0"
+        }
+      ]
     }
   ]
 }

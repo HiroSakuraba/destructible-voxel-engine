@@ -186,9 +186,15 @@ MaterialPresetCapability material_preset_capability(const MaterialPresetAsset& a
     if(b==MaterialPresetBackend::CpuReference)return {MaterialPresetSupport::Supported,"CPU reference transport; artistic RGB defaults"};
     if(b==MaterialPresetBackend::CpuPlayer)return {MaterialPresetSupport::Approximate,"CPU reference transport exists; player dispatch and scene parity require acceptance"};
     if(b==MaterialPresetBackend::NativePreview)return {MaterialPresetSupport::Approximate,"Viewport uses color markers; inspect the CPU material preview for shading"};
+    for(auto f:a.requirements)if(f==MaterialPresetFeature::RoughTransmission)
+        return {MaterialPresetSupport::Unavailable,"GPU rough transmission is not implemented; use the CPU reference"};
+    for(auto f:a.requirements)if(f==MaterialPresetFeature::SolidTransmission){
+        const auto& m=a.defaults;
+        if(m.transmission!=1||m.roughness!=0||m.metallic!=0||m.clearCoat!=0||m.emissive.x!=0||m.emissive.y!=0||m.emissive.z!=0||!m.layers.empty()||m.surfaceDetail.pattern!=SurfacePattern::NoPattern)
+            return {MaterialPresetSupport::Unavailable,"GPU glass requires a clear, unlayered dielectric with full transmission"};
+        return {MaterialPresetSupport::Approximate,"Live GPU clear polygon transport; closed geometry and untextured PBR receivers required; voxel/native viewport parity unverified"};
+    }
     for(auto f:a.requirements)if(f==MaterialPresetFeature::SurfaceDetail)return {MaterialPresetSupport::Approximate,"Live GPU polygon pass supports metric color/roughness/bump; voxel and native viewport parity remain unverified"};
-    for(auto f:a.requirements)if(f==MaterialPresetFeature::SolidTransmission||f==MaterialPresetFeature::RoughTransmission)
-        return {MaterialPresetSupport::Unavailable,"Solid/rough glass camera transport is not wired to the GPU path"};
     return {MaterialPresetSupport::Approximate,"GPU PBR foundations exist; this preset has not passed backend acceptance"};
 }
 VoxelMaterialDefinition instantiate_material_preset(const MaterialPresetAsset& a,const VoxelMaterialDefinition& from){

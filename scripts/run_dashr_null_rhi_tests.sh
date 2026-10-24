@@ -34,6 +34,7 @@ c++ -std=c++23 -ffunction-sections -fdata-sections -Wl,--gc-sections \
 c++ -std=c++23 -ffunction-sections -fdata-sections -Wl,--gc-sections \
     -I"$repo_dir/include" "$repo_dir/tests/test_live_environment_renderer.cpp" \
     "$repo_dir/src/render/live_environment_renderer.cpp" \
+    "$repo_dir/src/render/live_optical_scene.cpp" \
     "$repo_dir/src/render/mesh_rhi_mirror.cpp" \
     "$repo_dir/src/render/shadow_material_table.cpp" \
     "$repo_dir/src/render/main_material_table.cpp" \

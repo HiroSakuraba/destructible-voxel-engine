@@ -1,9 +1,14 @@
 #pragma once
 #include "dve/polygon_asset.hpp"
 #include <atomic>
+#include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
+#include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace dve::render {
 enum class MaterialBakeMap : std::uint32_t {

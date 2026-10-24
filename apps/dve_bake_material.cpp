@@ -1,11 +1,17 @@
 #include "dve/render/material_texture_bake.hpp"
 #include "dve/transform.hpp"
+#include <atomic>
 #include <charconv>
-#include <csignal>
-#include <iostream>
-#include <string>
-#include <thread>
 #include <chrono>
+#include <csignal>
+#include <cstdint>
+#include <iostream>
+#include <stdexcept>
+#include <stop_token>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <thread>
 using namespace dve;
 using namespace dve::render;
 namespace {volatile std::sig_atomic_t interrupted=0;void stop(int){interrupted=1;}}

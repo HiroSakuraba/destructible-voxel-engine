@@ -6,6 +6,7 @@
 #include "editor_native_long_job.hpp"
 #include <chrono>
 #include <limits>
+#include <memory>
 #include <cmath>
 #include <algorithm>
 #include <charconv>

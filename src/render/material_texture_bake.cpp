@@ -6,15 +6,25 @@
 #include "dve/transform.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
+#include <cerrno>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <numeric>
+#include <optional>
 #include <sstream>
+#include <string>
+#include <system_error>
 #include <tuple>
-#include <cerrno>
+#include <utility>
+#include <vector>
 #if defined(__linux__)
 #include <sys/syscall.h>
 #include <fcntl.h>
@@ -143,13 +153,13 @@ MaterialBakeValidation validate_material_bake(const CookedPolygonAsset& a,const 
         const auto& v0=a.vertices[a.indices[t.first]];const auto& v1=a.vertices[a.indices[t.first+1]];const auto& v2=a.vertices[a.indices[t.first+2]];
         if(length_squared(v0.normal)<1e-12F||length_squared(v1.normal)<1e-12F||length_squared(v2.normal)<1e-12F)return fail("Target normals must define a valid tangent frame",t.first/3);
         if(length_squared(cross(subtract(v1.position,v0.position),subtract(v2.position,v0.position)))<1e-20F)return fail("Target triangle has degenerate geometry",t.first/3);
-        const auto bounds=[&](bool y,bool maximum){double value=y?t.uv[0].y:t.uv[0].x;for(unsigned k=1;k<3;++k)value=maximum?std::max(value,y?t.uv[k].y:t.uv[k].x):std::min(value,y?t.uv[k].y:t.uv[k].x);return (std::min)(grid-1,unsigned(value*grid));};
+        const auto bounds=[&](bool y,bool maximum){double value=y?t.uv[0].y:t.uv[0].x;for(unsigned k=1;k<3;++k)value=maximum?(std::max)(value,y?t.uv[k].y:t.uv[k].x):(std::min)(value,y?t.uv[k].y:t.uv[k].x);return (std::min)(grid-1,unsigned(value*grid));};
         t.left=bounds(false,false);t.right=bounds(false,true);t.top=bounds(true,false);t.bottom=bounds(true,true);
         for(unsigned y=t.top;y<=t.bottom;++y)for(unsigned x=t.left;x<=t.right;++x){
             if(++references>1000000)return fail("UV validation cell-reference budget exceeded");
             auto& bin=bins[y*grid+x];for(unsigned previous:bin){
                 if(++pairs>8000000)return fail("UV validation pair budget exceeded; simplify the atlas");
-                const auto& b=ts[previous];if(x!=std::max(t.left,b.left)||y!=std::max(t.top,b.top))continue;
+                const auto& b=ts[previous];if(x!=(std::max)(t.left,b.left)||y!=(std::max)(t.top,b.top))continue;
                 if(intersection_area(t,b)>1e-13)return fail("Target UV triangles overlap (including mirrored or subpixel overlaps)",t.first/3,b.first/3);
             }
             bin.push_back(n);
@@ -187,8 +197,8 @@ MaterialTextureBakeResult bake_material_textures(const CookedPolygonAsset& a,con
         auto points=triangle.uv;for(auto& p:points){p.x*=size;p.y*=size;}
         std::array<unsigned,3> order{0,1,2};if(edge(points[0],points[1],points[2])<0)std::swap(order[1],order[2]);
         const auto pa=points[order[0]],pb=points[order[1]],pc=points[order[2]];const double area=edge(pa,pb,pc);
-        const int left=std::max(0,int(std::floor(std::min({pa.x,pb.x,pc.x})))),right=std::min(int(size)-1,int(std::ceil(std::max({pa.x,pb.x,pc.x}))));
-        const int top=std::max(0,int(std::floor(std::min({pa.y,pb.y,pc.y})))),bottom=std::min(int(size)-1,int(std::ceil(std::max({pa.y,pb.y,pc.y}))));
+        const int left=(std::max)(0,int(std::floor((std::min)({pa.x,pb.x,pc.x})))),right=(std::min)(int(size)-1,int(std::ceil((std::max)({pa.x,pb.x,pc.x}))));
+        const int top=(std::max)(0,int(std::floor((std::min)({pa.y,pb.y,pc.y})))),bottom=(std::min)(int(size)-1,int(std::ceil((std::max)({pa.y,pb.y,pc.y}))));
         bool any=false;
         for(int y=top;y<=bottom;++y){
             if(cancelled(control))return fail("Bake cancelled");

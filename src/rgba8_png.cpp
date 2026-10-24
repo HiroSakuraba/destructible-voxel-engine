@@ -1,7 +1,10 @@
 #include "dve/rgba8_png.hpp"
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <fstream>
+#include <string>
+#include <utility>
 #include <vector>
 namespace dve {
 namespace {
@@ -65,7 +68,7 @@ bool write_rgba8_png(const std::filesystem::path& path, std::uint32_t width, std
     }
     std::size_t offset = 0;
     do {
-        const std::size_t length = std::min<std::size_t>(65535U, raw.size() - offset);
+        const std::size_t length = (std::min<std::size_t>)(65535U, raw.size() - offset);
         const bool final = offset + length == raw.size();
         zlib.push_back(final ? 1U : 0U);
         zlib.push_back(static_cast<std::uint8_t>(length));

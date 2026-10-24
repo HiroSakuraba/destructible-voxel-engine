@@ -665,7 +665,7 @@ EditorSettingsRegistry EditorSettingsRegistry::make_default() {
         boolean_setting("render.spectator_window","Rendering","Multi-Window","Spectator Window",false,"Request an independent spectator or diagnostics presentation surface."),
         boolean_setting("render.hdr","Rendering","Color","HDR Output",false,"Use HDR presentation when supported.",SettingCapabilityNone,false,SettingApplyPolicy::RestartRequired),
         float_setting("render.exposure","Rendering","Color","Exposure",1.0,0.01,32.0,0.05,"Global linear exposure multiplier."),
-        enum_setting("render.tonemap","Rendering","Color","Tonemap","aces",{{"aces","ACES Fitted"},{"reinhard","Reinhard"},{"clamp","Clamp"}},"Display-referred tonemap operator."),
+        enum_setting("render.tonemap","Rendering","Color","Tonemap","aces",{{"aces","ACES Fitted"},{"reinhard","Reinhard"},{"clamp","Clamp"},{"agx","AgX"},{"pbr_neutral","Khronos PBR Neutral"}},"Display-referred tonemap operator."),
         boolean_setting("render.bloom","Rendering","Post Processing","Bloom",true,"Enable soft-knee HDR bloom."),
         float_setting("render.bloom_threshold","Rendering","Post Processing","Bloom Threshold",1.0,0.0,100.0,0.05,"Linear-light bloom threshold."),
         enum_setting("render.texture_filter","Rendering","Textures","Texture Filtering","trilinear",{{"nearest","Nearest"},{"bilinear","Bilinear"},{"trilinear","Trilinear"},{"anisotropic","Anisotropic"}},"Texture sampling filter."),

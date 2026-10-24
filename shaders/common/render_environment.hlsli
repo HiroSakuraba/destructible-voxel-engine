@@ -4,6 +4,8 @@
 static const uint kTonemapACES = 0u;
 static const uint kTonemapReinhard = 1u;
 static const uint kTonemapClamp = 2u;
+static const uint kTonemapAgX = 3u;
+static const uint kTonemapPBRNeutral = 4u;
 static const uint kGlobalIlluminationOff = 0u;
 static const uint kGlobalIlluminationAmbientHemisphere = 1u;
 static const uint kGlobalIlluminationVoxelOneBounce = 2u;

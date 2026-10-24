@@ -949,6 +949,69 @@ float tonemap_curve(float x, TonemapOperator op) noexcept {
         case TonemapOperator::ACES: default: return aces(x);
     }
 }
+// Vector tonemap operators (AgX and Khronos PBR Neutral mix channels, so they
+// cannot be expressed as per-channel curves). Formulas ported from NVIDIA's
+// nvpro_core2 nvshaders/tonemap_functions.h.slang (Apache-2.0), which adapts
+// the Khronos Group PBR Neutral reference and Benjamin Wrensch's minimal AgX
+// approximation of Troy Sobotka's AgX. The sRGB encode stays a separate step,
+// as elsewhere in this pipeline.
+Float3 agx_color(Float3 c) noexcept {
+    // mul(color, M): row vector times the row-listed matrix.
+    auto mul = [](Float3 v, const float (&m)[3][3]) noexcept {
+        return Float3{v.x * m[0][0] + v.y * m[1][0] + v.z * m[2][0],
+                      v.x * m[0][1] + v.y * m[1][1] + v.z * m[2][1],
+                      v.x * m[0][2] + v.y * m[1][2] + v.z * m[2][2]};
+    };
+    static constexpr float kInset[3][3] = {
+        {0.842479062253094F, 0.0423282422610123F, 0.0423756549057051F},
+        {0.0784335999999992F, 0.878468636469772F, 0.0784336F},
+        {0.0792237451477643F, 0.0791661274605434F, 0.879142973793104F}};
+    static constexpr float kOutset[3][3] = {
+        {1.19687900512017F, -0.0528968517574562F, -0.0529716355144438F},
+        {-0.0980208811401368F, 1.15190312990417F, -0.0980434501171241F},
+        {-0.0990297440797205F, -0.0989611768448433F, 1.15107367264116F}};
+    Float3 v = mul(c, kInset);
+    static constexpr float kMinEv = -12.47393F, kMaxEv = 4.026069F;
+    auto encode = [](float x) noexcept {
+        const float logged = std::log2((std::max)(x, 1.0e-10F));
+        return (std::clamp(logged, kMinEv, kMaxEv) - kMinEv) / (kMaxEv - kMinEv);
+    };
+    v = Float3{encode(v.x), encode(v.y), encode(v.z)};
+    auto sigmoid = [](float x) noexcept {
+        float r = 15.5F * x - 40.14F;
+        r = r * x + 31.96F; r = r * x - 6.868F; r = r * x + 0.4298F;
+        r = r * x + 0.1191F; r = r * x - 0.0023F;
+        return r;
+    };
+    v = Float3{sigmoid(v.x), sigmoid(v.y), sigmoid(v.z)};
+    return mul(v, kOutset);
+}
+Float3 pbr_neutral_color(Float3 c) noexcept {
+    constexpr float kStartCompression = 0.8F - 0.04F;
+    constexpr float kDesaturation = 0.15F;
+    const float x = (std::min)(c.x, (std::min)(c.y, c.z));
+    const float peak = (std::max)(c.x, (std::max)(c.y, c.z));
+    const float offset = x < 0.08F ? x * (-6.25F * x + 1.0F) : 0.04F;
+    Float3 out{c.x - offset, c.y - offset, c.z - offset};
+    if (peak >= kStartCompression) {
+        const float d = 1.0F - kStartCompression;
+        const float newPeak = 1.0F - d * d / (peak + d - kStartCompression);
+        const float scale = newPeak / peak;
+        out = Float3{out.x * scale, out.y * scale, out.z * scale};
+        const float g = 1.0F - 1.0F / (kDesaturation * (peak - newPeak) + 1.0F);
+        out = Float3{out.x + (newPeak - out.x) * g, out.y + (newPeak - out.y) * g,
+                     out.z + (newPeak - out.z) * g};
+    }
+    return out;
+}
+Float3 tonemap_color(Float3 c, TonemapOperator op) noexcept {
+    switch (op) {
+        case TonemapOperator::AgX: return agx_color(c);
+        case TonemapOperator::PBRNeutral: return pbr_neutral_color(c);
+        default:
+            return {tonemap_curve(c.x, op), tonemap_curve(c.y, op), tonemap_curve(c.z, op)};
+    }
+}
 std::uint8_t srgb(float linear) noexcept {linear=std::clamp(linear,0.0F,1.0F);const float encoded=linear<=0.0031308F?12.92F*linear:1.055F*std::pow(linear,1.0F/2.4F)-0.055F;return static_cast<std::uint8_t>(std::clamp(encoded*255.0F+0.5F,0.0F,255.0F));}
 }
 
@@ -1597,9 +1660,11 @@ bool resolve_polygon_render_rgba8(const PolygonRenderTarget& target, float expos
     rgba.resize(target.hdrColor.size() * 4U);
     std::uint8_t* out = rgba.data();
     for (const Float4& c : target.hdrColor) {
-        out[0] = srgb(tonemap_curve(c.x * exposure, tonemapOperator));
-        out[1] = srgb(tonemap_curve(c.y * exposure, tonemapOperator));
-        out[2] = srgb(tonemap_curve(c.z * exposure, tonemapOperator));
+        const Float3 mapped = tonemap_color({c.x * exposure, c.y * exposure, c.z * exposure},
+                                            tonemapOperator);
+        out[0] = srgb(mapped.x);
+        out[1] = srgb(mapped.y);
+        out[2] = srgb(mapped.z);
         out[3] = 255U;
         out += 4;
     }

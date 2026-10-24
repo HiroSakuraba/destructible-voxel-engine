@@ -11,7 +11,8 @@ class GameWorld;
 inline constexpr std::string_view kPrototypePrefix="dve.prototype.";
 enum class PrototypePhase : unsigned { Playing,Paused,Won,Lost };
 struct PrototypeHud {
-    bool active{},debug{};
+    bool active{},debug{},racing{};
+    std::string stats;
     PrototypePhase phase{PrototypePhase::Playing};
     float health{},maximumHealth{};
     unsigned collected{},required{};

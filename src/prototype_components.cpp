@@ -1,4 +1,5 @@
 #include "dve/prototype_game.hpp"
+#include "dve/racing_game.hpp"
 #include "dve/gameplay_runtime.hpp"
 #include <algorithm>
 #include <cmath>
@@ -18,7 +19,7 @@ template<class T> T value(const Component& c,std::string_view key,T fallback){au
  return fallback;}
 bool key_valid(std::string_view s){return !s.empty()&&s.size()<=64&&std::all_of(s.begin(),s.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.';});}
 }
-std::vector<std::string> prototype_role_types(){return {type("player_start"),type("rules"),type("switch"),type("door"),type("pickup"),type("checkpoint"),type("damage_volume"),type("goal")};}
+std::vector<std::string> prototype_role_types(){return {type("player_start"),type("rules"),type("switch"),type("door"),type("pickup"),type("checkpoint"),type("damage_volume"),type("goal"),type("race_car"),type("race_rules"),type("race_gate")};}
 std::vector<std::string> prototype_events(std::string_view r){
  if(r==type("player_start"))return {"died","respawned"};
  if(r==type("door"))return {"opened","closed"};
@@ -37,6 +38,7 @@ std::vector<std::string> prototype_actions(std::string_view r){if(r==type("door"
 std::string prototype_object_key(std::span<const Component> cs){for(const auto& c:cs)if(c.enabled&&c.type.starts_with(kPrototypePrefix)&&c.type!=type("link")&&c.type!=type("state"))return value(c,"key",std::string{});
  return {};}
 void register_prototype_components(ComponentTypeRegistry& r){
+ register_racing_components(r);
  auto add=[&](std::string role,std::string title,std::vector<ComponentPropertySchema> properties){properties.insert(properties.begin(),{"key",role,true,false,"Stable gameplay key"});
  std::string ignored;(void)r.register_type({type(role),std::move(title),false,std::move(properties)},&ignored);};
  add("player_start","Prototype Player Start (Z up)",{{"speed",5.5,false,false,"Run speed (m/s)"},{"jump_speed",7.0,false,false,"Jump speed (m/s)"},{"height",1.8,false,false,"Standing height (m)"},{"radius",.35,false,false,"Capsule radius (m)"},{"health",100.0,false,false,"Maximum health"},{"look_speed",2.2,false,false,"Look speed (rad/s)"}});
@@ -53,6 +55,7 @@ void register_prototype_components(ComponentTypeRegistry& r){
 bool validate_prototype_scene(std::span<const PrototypeObjectView> objects,std::string* error){
  auto fail=[&](std::string text){if(error)*error=std::move(text);
  return false;};
+ if(scene_has_racing(objects))return validate_racing_scene(objects,error);
  const auto roles=prototype_role_types();
  std::map<std::string,const Component*,std::less<>> keys;
  unsigned players=0,rules=0,links=0;

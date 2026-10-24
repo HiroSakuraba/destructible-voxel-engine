@@ -4748,8 +4748,8 @@ void render_native_editor(const IEditorCanvas& painter, NativeEditorController& 
                                  "   Runtime objects " + std::to_string(telemetry.runtimeObjectCount),
                              muted);
         if(session.hud().prototype){const auto& game=*session.hud().prototype;
-            viewportPainter.text(overlayRect.x+10,overlayRect.y+61,"Health "+std::to_string(int(game.health))+" / "+std::to_string(int(game.maximumHealth))+"   Items "+std::to_string(game.collected)+" / "+std::to_string(game.required),text);
-            viewportPainter.fill({overlayRect.x+10,overlayRect.y+67,260,6},rgb(60,70,85));viewportPainter.fill({overlayRect.x+10,overlayRect.y+67,int(260*std::clamp(game.health/game.maximumHealth,0.F,1.F)),6},rgb(85,205,145));
+            viewportPainter.text(overlayRect.x+10,overlayRect.y+61,game.racing?elide_text_to_width(viewportPainter,game.stats,260):"Health "+std::to_string(int(game.health))+" / "+std::to_string(int(game.maximumHealth))+"   Items "+std::to_string(game.collected)+" / "+std::to_string(game.required),text);
+            if(!game.racing){viewportPainter.fill({overlayRect.x+10,overlayRect.y+67,260,6},rgb(60,70,85));viewportPainter.fill({overlayRect.x+10,overlayRect.y+67,int(260*std::clamp(game.health/game.maximumHealth,0.F,1.F)),6},rgb(85,205,145));}
             const char* phase=game.phase==PrototypePhase::Playing?"PLAYING":game.phase==PrototypePhase::Paused?"PAUSED":game.phase==PrototypePhase::Won?"YOU WIN":"YOU LOST";
             viewportPainter.text(overlayRect.x+10,overlayRect.y+91,std::string(phase)+" | P pause | R restart",text);
             viewportPainter.text(overlayRect.x+10,overlayRect.y+111,elide_text_to_width(viewportPainter,game.prompt,260),text);

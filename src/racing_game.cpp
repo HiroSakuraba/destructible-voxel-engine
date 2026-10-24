@@ -75,6 +75,10 @@ struct RacingGame::Impl {
  struct Gate {GameObjectId id{};float width{},height{};};
  struct DrivingSurface {float grip{1.0F},drag{1.0F};};
  GameWorld& world;PrototypeHud hud;RacingStatus race;RacingTelemetry telemetry;
+ std::vector<RacingVisualEffect> visualEffects;
+ bool previousTiresValid{};Float3 priorLeft{},priorRight{};
+ float particleClock{};std::uint32_t visualSequence{};
+ float driveInput{};
  PrototypeCamera smoothCamera{};bool cameraReady{},lastCameraHood{};
  GameObjectId car{},rules{};ComponentId state{};Component config,ruleConfig;std::vector<Gate> gates;
  std::map<GameObjectId,DrivingSurface> surfaces;
@@ -84,6 +88,13 @@ struct RacingGame::Impl {
  void log(std::string s){if(hud.trace.size()>=64)hud.trace.erase(hud.trace.begin());hud.trace.push_back(std::move(s));}
  void update_hud(){
   race.speedMetersPerSecond=length(velocity);
+  hud.vehicleAudio.active=hud.phase==PrototypePhase::Playing&&race.countdown<=0;
+  hud.vehicleAudio.speedFraction=std::clamp(race.speedMetersPerSecond/
+    float(get(config,"top_speed",38.0)),0.0F,1.0F);
+  hud.vehicleAudio.throttle=std::abs(driveInput);
+  hud.vehicleAudio.skid=telemetry.skidIntensity;
+  hud.vehicleAudio.impactCount=telemetry.collisionCount;
+  hud.vehicleAudio.impactSpeed=telemetry.impactSpeedMetersPerSecond;
   hud.vehicleTelemetry="SLIP "+time_text(std::abs(telemetry.lateralSlipMetersPerSecond))+
        "  YAW "+time_text(telemetry.yawRateRadiansPerSecond)+"  HITS "+std::to_string(telemetry.collisionCount);
   hud.stats=std::to_string(int(race.speedMetersPerSecond*3.6F))+" KPH  LAP "+std::to_string((std::min)(race.completedLaps+1,race.targetLaps))+" / "+std::to_string(race.targetLaps)+" LAST "+time_text(race.lastLap);
@@ -95,8 +106,8 @@ struct RacingGame::Impl {
  void persist(){std::ostringstream s;s.imbue(std::locale::classic());s<<std::setprecision(17)<<"DVE_RACE 1 "<<unsigned(hud.phase)<<' '<<yaw<<' '<<velocity.x<<' '<<velocity.y<<' '<<verticalSpeed<<' '<<race.elapsed<<' '<<race.lapStarted<<' '<<race.lastLap<<' '<<race.bestLap<<' '<<race.countdown<<' '<<race.completedLaps<<' '<<race.nextGate<<' '<<checkpoint.x<<' '<<checkpoint.y<<' '<<checkpoint.z<<' '<<checkpointYaw<<' '<<hood<<' '<<hud.debug<<' '<<accumulator;
   (void)world.set_component_property(rules,state,"data",s.str());}
  void place(Float3 p,float angle){(void)world.set_position(car,p);(void)world.set_rotation(car,quaternion_from_axis_angle({0,0,1},-angle));}
- void recover(){place(checkpoint,checkpointYaw);yaw=checkpointYaw;velocity={};verticalSpeed=0;telemetry={};update_camera(0,true);if(race.countdown<=0)race.elapsed+=5;log("Recovered; five-second penalty");}
- void restart(){const double best=race.bestLap;race={};race.bestLap=best;race.targetLaps=unsigned(get(ruleConfig,"laps",std::int64_t{3}));race.gateCount=unsigned(gates.size());race.countdown=get(ruleConfig,"countdown",3.0);checkpoint=initial;checkpointYaw=yaw=initialYaw;velocity={};verticalSpeed=0;telemetry={};accumulator=0;hood=false;hud.phase=PrototypePhase::Playing;place(initial,initialYaw);update_camera(0,true);log("New attempt");}
+ void recover(){place(checkpoint,checkpointYaw);yaw=checkpointYaw;velocity={};verticalSpeed=0;telemetry={};visualEffects.clear();previousTiresValid=false;particleClock=0;update_camera(0,true);if(race.countdown<=0)race.elapsed+=5;log("Recovered; five-second penalty");}
+ void restart(){const double best=race.bestLap;race={};race.bestLap=best;race.targetLaps=unsigned(get(ruleConfig,"laps",std::int64_t{3}));race.gateCount=unsigned(gates.size());race.countdown=get(ruleConfig,"countdown",3.0);checkpoint=initial;checkpointYaw=yaw=initialYaw;velocity={};verticalSpeed=0;telemetry={};visualEffects.clear();previousTiresValid=false;particleClock=0;visualSequence=0;driveInput=0;accumulator=0;hood=false;hud.phase=PrototypePhase::Playing;place(initial,initialYaw);update_camera(0,true);log("New attempt");}
  Capsule capsule(Float3 p,float angle)const{const auto f=forward(angle);const auto center=add(p,{0,0,1.1F});return {subtract(center,multiply(f,.7F)),add(center,multiply(f,.7F)),.96F};}
  Capsule capsule(Float3 p)const{return capsule(p,yaw);}
  void update_camera(float dt,bool snap=false){
@@ -128,10 +139,60 @@ struct RacingGame::Impl {
    const auto it=surfaces.find(hit->objectId);
    return it==surfaces.end()?DrivingSurface{}:it->second;
  }
+ void advance_visuals(float dt){
+   for(auto& fx:visualEffects){
+     fx.age+=dt;
+     if(fx.kind!=RacingVisualKind::SkidMark){
+       fx.a=add(fx.a,multiply(fx.b,dt));
+       fx.a.z+=0.35F*dt;
+     }
+   }
+   std::erase_if(visualEffects,[](const RacingVisualEffect& fx){return fx.age>=fx.lifetime;});
+ }
+ void append_visual(RacingVisualEffect fx){
+   static constexpr std::size_t maxEffects=384U;
+   if(visualEffects.size()==maxEffects)visualEffects.erase(visualEffects.begin());
+   visualEffects.push_back(fx);
+ }
+ void emit_visuals(float dt,Float3 position,bool handbrake){
+   const auto f=forward(yaw);
+   const Float3 side{f.y,-f.x,0.0F};
+   const auto rear=add(position,multiply(f,-1.03F));
+   const auto L=add(add(rear,multiply(side,0.76F)),{0,0,0.035F});
+   const auto R=add(add(rear,multiply(side,-0.76F)),{0,0,0.035F});
+   const float speed=length(velocity);
+   const bool marking=telemetry.grounded&&speed>3.0F&&
+      (std::abs(telemetry.lateralSlipMetersPerSecond)>0.65F||handbrake);
+   if(marking&&previousTiresValid&&length(subtract(L,priorLeft))<0.9F){
+      const float strength=std::clamp(0.35F+telemetry.skidIntensity*0.65F,0.0F,0.85F);
+      if(length(subtract(L,priorLeft))>0.012F) {
+         append_visual({RacingVisualKind::SkidMark,priorLeft,L,0.15F,0,14.0F,strength});
+         append_visual({RacingVisualKind::SkidMark,priorRight,R,0.15F,0,14.0F,strength});
+      }
+   }
+   priorLeft=L;priorRight=R;previousTiresValid=telemetry.grounded;
+   if(!telemetry.grounded||speed<3.0F){particleClock=0;return;}
+   const bool loose=telemetry.surfaceGripMultiplier<0.85F;
+   const float amount=std::max(telemetry.skidIntensity,handbrake?0.35F:0.0F);
+   if(amount<0.12F&&!loose){particleClock=0;return;}
+   particleClock+=dt;
+   // Bounded emission, deterministic jitter; never use wall clock or global RNG.
+   unsigned emitted=0;
+   while(particleClock>=0.055F&&emitted++<2U){
+     particleClock-=0.055F;
+     const std::uint32_t seed=++visualSequence*747796405U+2891336453U;
+     const float noise=float((seed>>16)&1023U)/1023.0F-0.5F;
+     const auto spawn=add(rear,add(multiply(side,noise*0.9F),Float3{0,0,0.20F}));
+     append_visual({loose?RacingVisualKind::Dust:RacingVisualKind::TireSmoke,
+       spawn,add(multiply(velocity,0.08F),Float3{noise,0,0.25F}),
+       loose?0.23F:0.18F,0,loose?1.0F:0.65F,std::clamp(amount*0.7F+(loose?0.15F:0),0.0F,0.70F)});
+   }
+ }
  void drive(float dt){
   auto pos=world.position(car).value_or(initial);const auto old=pos;
   auto axis=[&](const char* name){const auto n=world.get_axis(name);return std::isfinite(n)?std::clamp(n,-1.F,1.F):0.F;};
   const float throttle=axis("move_y"),steering=axis("move_x");const bool handbrake=world.is_action_pressed("jump");
+  driveInput=throttle;
   const float serviceBrake=(std::max)(std::clamp(axis("race_brake"),0.0F,1.0F),
                                     world.is_action_pressed("race_brake")?1.0F:0.0F);
   const auto profile=profile_for(get(config,"handling_profile",std::string{"street"}));
@@ -188,6 +249,7 @@ struct RacingGame::Impl {
   telemetry.lateralSlipMetersPerSecond=dot(velocity,Float3{newForward.y,-newForward.x,0});
   telemetry.longitudinalAccelerationMetersPerSecondSquared=(newSpeed-oldSpeed)/dt;
   telemetry.skidIntensity=std::clamp(std::abs(telemetry.lateralSlipMetersPerSecond)/8.0F,0.0F,1.0F);
+  emit_visuals(dt,pos,handbrake);
   place(pos,yaw);
   if(pos.z<float(get(ruleConfig,"kill_z",-15.0))){recover();return;}
   const auto& gate=gates[race.nextGate];const auto pose=world.transform(gate.id);
@@ -203,6 +265,7 @@ struct RacingGame::Impl {
 RacingGame::RacingGame(GameWorld& w):impl_(std::make_unique<Impl>(w)){}RacingGame::~RacingGame()=default;
 const PrototypeHud& RacingGame::hud()const{return impl_->hud;}const RacingStatus& RacingGame::status()const{return impl_->race;}
 const RacingTelemetry& RacingGame::telemetry()const{return impl_->telemetry;}
+std::span<const RacingVisualEffect> RacingGame::visuals()const noexcept{return impl_->visualEffects;}
 bool RacingGame::start(std::string* error){auto& s=*impl_;if(s.hud.active){if(error)*error="Racing runtime already started";return false;}std::vector<PrototypeObjectView> views;for(auto id:s.world.object_ids())views.push_back({id,"Object "+std::to_string(id),*s.world.components(id),s.world.geometry_kind(id)==GameGeometryKind::Marker});if(!validate_racing_scene(views,error))return false;
  std::map<unsigned,Impl::Gate> gates;
  for(const auto& o:views)for(const auto& c:o.components)if(c.enabled&&racing_type(c.type)){
@@ -229,7 +292,7 @@ void RacingGame::step(float dt){auto& s=*impl_;if(!s.hud.active||!std::isfinite(
  s.accumulator+=dt;
  for(unsigned steps=0;s.accumulator+1e-9>=fixedStep&&steps<31;++steps){s.accumulator-=fixedStep;if(s.accumulator<0)s.accumulator=0;
   if(s.race.countdown>0)s.race.countdown=(std::max)(0.0,s.race.countdown-fixedStep);
-  else {s.race.elapsed+=fixedStep;s.drive(float(fixedStep));}
+  else {s.race.elapsed+=fixedStep;s.advance_visuals(float(fixedStep));s.drive(float(fixedStep));}
   s.world.tick(float(fixedStep));s.update_camera(float(fixedStep));if(s.hud.phase==PrototypePhase::Won){s.accumulator=0;break;}
  }
  s.update_hud();s.persist();
@@ -249,6 +312,6 @@ bool RacingGame::after_restore(std::string* error){auto& s=*impl_;auto fail=[&](
  for(auto id:s.world.object_ids())for(const auto& component:*s.world.components(id))
   if(component.enabled&&component.type==surfaceType)
    s.surfaces.emplace(id,Impl::DrivingSurface{float(get(component,"grip_multiplier",1.0)),float(get(component,"rolling_drag_multiplier",1.0))});
- s.gates.clear();for(const auto& [n,g]:gates){(void)n;s.gates.push_back(g);}s.race=race;s.velocity=velocity;s.yaw=yaw;s.verticalSpeed=vertical;s.checkpoint=checkpoint;s.checkpointYaw=checkpointYaw;s.hood=hood;s.hud.debug=debug;s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);s.telemetry={};s.update_camera(0,true);s.update_hud();return true;
+ s.gates.clear();for(const auto& [n,g]:gates){(void)n;s.gates.push_back(g);}s.race=race;s.velocity=velocity;s.yaw=yaw;s.verticalSpeed=vertical;s.checkpoint=checkpoint;s.checkpointYaw=checkpointYaw;s.hood=hood;s.hud.debug=debug;s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);s.telemetry={};s.visualEffects.clear();s.previousTiresValid=false;s.particleClock=0;s.driveInput=0;s.update_camera(0,true);s.update_hud();return true;
 }
 }

@@ -114,10 +114,20 @@ SET(ScatterDistance,subsurfaceScatterDistanceMeters) SET(ScatterR,subsurfaceColo
     default:return false;
     }
     if(!material_surface_detail_valid(edited.surfaceDetail))return fail(e,"Invalid detail settings: bump height must be at most a quarter of the repeat distance");
+    // Clear coat and subsurface are alternative shading models: refuse an edit that would silently
+    // replace the other one instead of dropping the preset's scattering (or the authored coat).
+    if(p==MaterialPresetProperty::Coat&&v>0&&m.shadingModel==MaterialShadingModel::Subsurface)
+        return fail(e,"Clear coat cannot be combined with subsurface scattering; set Scatter distance to 0 first");
+    if(p==MaterialPresetProperty::ScatterDistance&&v>0&&m.shadingModel==MaterialShadingModel::ClearCoat&&m.clearCoat>0)
+        return fail(e,"Subsurface scattering cannot be combined with a clear coat; set Coat to 0 first");
     m=std::move(edited);
     if(p==MaterialPresetProperty::Coverage)m.blendMode=v<1?MaterialBlendMode::Translucent:MaterialBlendMode::Opaque;
-    if(p==MaterialPresetProperty::Coat)m.shadingModel=v>0?MaterialShadingModel::ClearCoat:MaterialShadingModel::StandardPBR;
-    if(p==MaterialPresetProperty::ScatterDistance)m.shadingModel=v>0?MaterialShadingModel::Subsurface:MaterialShadingModel::StandardPBR;
+    if(p==MaterialPresetProperty::Coat&&m.shadingModel!=MaterialShadingModel::Subsurface)m.shadingModel=v>0?MaterialShadingModel::ClearCoat:MaterialShadingModel::StandardPBR;
+    // Only toggle between Standard PBR and Subsurface; never overwrite a coat or another model.
+    if(p==MaterialPresetProperty::ScatterDistance){
+        if(v>0&&(m.shadingModel==MaterialShadingModel::StandardPBR||(m.shadingModel==MaterialShadingModel::ClearCoat&&m.clearCoat<=0)))m.shadingModel=MaterialShadingModel::Subsurface;
+        else if(v<=0&&m.shadingModel==MaterialShadingModel::Subsurface)m.shadingModel=MaterialShadingModel::StandardPBR;
+    }
     m.transparent=m.transmission>0||m.blendMode==MaterialBlendMode::Translucent;
     if(!m.preset.id.empty())m.preset.overrides|=std::uint64_t(1)<<i;
     return true;

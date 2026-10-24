@@ -229,7 +229,7 @@ MaterialBsdfSample sample_material_bsdf(const VoxelMaterialDefinition &m, Float3
             const float radius = std::sqrt(std::clamp(u1, 0.F, .99999994F)), phi = 2 * pi * u2;
             out.direction = norm(Basis(n).world(
                 {radius * std::cos(phi), radius * std::sin(phi), std::sqrt((std::max)(0.F, 1 - u1))}));
-        } else if (r < q.diffuse + q.specular + q.coat) {
+        } else if (q.sheen <= 0 || r < q.diffuse + q.specular + q.coat) {   // no sheen lobe: rounding at r ~ 1 stays on the coat/specular lobes
             const float rough = r < q.diffuse + q.specular ? m.roughness : m.clearCoatRoughness;
             const auto h = visible_normal(n, v, alpha((std::max)(rough, .02F)), u1, u2);
             out.direction = reflect_direction(times(v, -1), h);

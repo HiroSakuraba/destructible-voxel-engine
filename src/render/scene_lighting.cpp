@@ -11,6 +11,7 @@
 #include <mutex>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <unordered_map>
 

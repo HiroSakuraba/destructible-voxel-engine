@@ -68,6 +68,17 @@ void persistence(const std::filesystem::path& root){
     check(m.preset.overrides&(std::uint64_t(1)<<unsigned(MaterialPresetProperty::FilmThickness)),"film override bit persisted");
     check(reset_material_preset_property(m,catalog,MaterialPresetProperty::FilmThickness,&error)&&m.iridescenceThicknessNm==350,"film reset restores origin value");
     check(!set_material_preset_value(m,MaterialPresetProperty::FilmIor,std::numeric_limits<float>::quiet_NaN(),&error),"NaN rejected before mutation");
+    {
+        // Coat and subsurface are alternative models: editing one must not silently drop the other.
+        auto wax=instantiate_material_preset(*catalog.find("dve.wax.paraffin"),{});
+        check(!set_material_preset_value(wax,MaterialPresetProperty::Coat,.5F,&error)&&wax.shadingModel==MaterialShadingModel::Subsurface&&wax.clearCoat==0,"coat refused on a subsurface preset without dropping scattering");
+        check(set_material_preset_value(wax,MaterialPresetProperty::Coat,0,&error)&&wax.shadingModel==MaterialShadingModel::Subsurface,"zero coat edit keeps subsurface");
+        check(reset_material_preset_property(wax,catalog,MaterialPresetProperty::Coat,&error)&&wax.shadingModel==MaterialShadingModel::Subsurface,"coat reset keeps subsurface");
+        check(set_material_preset_value(wax,MaterialPresetProperty::ScatterDistance,0,&error)&&wax.shadingModel==MaterialShadingModel::StandardPBR,"zero scatter returns to standard PBR");
+        check(set_material_preset_value(wax,MaterialPresetProperty::Coat,.5F,&error)&&wax.shadingModel==MaterialShadingModel::ClearCoat,"coat on a standard material");
+        check(set_material_preset_value(wax,MaterialPresetProperty::ScatterDistance,0,&error)&&wax.shadingModel==MaterialShadingModel::ClearCoat,"zero scatter keeps clear coat");
+        check(!set_material_preset_value(wax,MaterialPresetProperty::ScatterDistance,.01F,&error)&&wax.shadingModel==MaterialShadingModel::ClearCoat,"scatter refused over an authored coat");
+    }
     m.iridescence=-1;EditorMaterialLibrary lib;check(!lib.upsert({10,m,false},&error),"invalid film rejected by in-memory authoring, not only by reader");
 }
 Float3 scatter_image(VoxelMaterialDefinition m,float distance){

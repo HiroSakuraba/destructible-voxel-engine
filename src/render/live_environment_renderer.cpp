@@ -200,6 +200,8 @@ bool destroy_live_environment_renderer(rhi::IDevice& device,
     r.retiredGroups.clear();
     if (r.skyboxPipeline) destroy(device.destroy_graphics_pipeline(r.skyboxPipeline, &local));
     if (r.materialPipeline) destroy(device.destroy_graphics_pipeline(r.materialPipeline, &local));
+    if (r.clearGlassPipeline) destroy(device.destroy_graphics_pipeline(r.clearGlassPipeline, &local));
+    r.opticalScene.reset();
     if (r.shadowOpaquePipeline) destroy(device.destroy_graphics_pipeline(r.shadowOpaquePipeline, &local));
     if (r.shadowMaskedPipeline) destroy(device.destroy_graphics_pipeline(r.shadowMaskedPipeline, &local));
     r.shadowMaterials.reset();
@@ -353,6 +355,14 @@ bool create_live_environment_renderer(rhi::IDevice& device,
         {r.frameLayout, r.objectLayout, lighting.bindGroupLayout, r.mainMaterials->layout()},
         colorFormat, true, true, rhi::CullMode::Disabled);
     if (!r.materialPipeline) return fail(local);
+    if(!bytecode.clearGlassFragment.empty()){
+        r.opticalScene=std::make_unique<LiveOpticalSceneGpu>(device);
+        if(!r.opticalScene->initialize(&local))return fail(local);
+        r.clearGlassPipeline=make_pipeline("Live clear glass transport",bytecode.materialVertex,
+            bytecode.clearGlassFragment,{r.frameLayout,r.objectLayout,lighting.bindGroupLayout,
+                r.mainMaterials->layout(),r.opticalScene->layout()},colorFormat,true,true,rhi::CullMode::Disabled);
+        if(!r.clearGlassPipeline)return fail(local);
+    }
     r.shadowOpaquePipeline = make_pipeline("Live opaque depth-only shadow caster",
         bytecode.shadowVertex, {}, {r.frameLayout, r.objectLayout, r.cascadeLayout},
         std::nullopt, true, true, rhi::CullMode::Disabled);
@@ -398,6 +408,28 @@ bool record_live_environment_frame(rhi::IDevice& device,
         }
         renderer.retiredGroups.clear();
     }
+    const bool hasGlass=frame.drawMaterials&&std::any_of(frame.polygonDraws.begin(),frame.polygonDraws.end(),[](const auto& draw){
+        return draw.asset&&std::any_of(draw.asset->submeshes.begin(),draw.asset->submeshes.end(),[&](const auto& submesh){
+            return submesh.materialIndex<draw.asset->materials.size()&&draw.asset->materials[submesh.materialIndex].transmission>0;});});
+    if(hasGlass){
+        if(!renderer.clearGlassPipeline||!renderer.opticalScene){
+            set_error(error,"GPU transmission requires the live clear-glass shader; opaque substitution is disabled");return false;}
+        if(frame.frameConstants.size()<80){set_error(error,"GPU glass requires view-projection and environment frame constants");return false;}
+        std::array<float,16> projection{};std::memcpy(projection.data(),frame.frameConstants.data(),64);
+        if(std::abs(projection[3])+std::abs(projection[7])+std::abs(projection[11])<1e-8F){
+            set_error(error,"GPU clear glass currently requires a perspective camera");return false;}
+        std::vector<LiveOpticalInstance> opticalInstances;
+        for(const auto& draw:frame.polygonDraws){
+            if(!draw.asset||!draw.mirror||!draw.mirror->vertex_buffer()||!draw.mirror->index_buffer()||draw.instanceCount!=1||!draw.dashrSubmeshIndices.empty()){
+                set_error(error,"GPU clear glass currently requires one rigid polygon instance per draw without DASHR");return false;}
+            opticalInstances.push_back({draw.asset,draw.objectToWorld});
+        }
+        const auto before=renderer.opticalScene->builds();
+        if(!renderer.opticalScene->prepare(opticalInstances,frame.cameraWorldPosition,error))return false;
+        stats.opticalSceneBuilds=renderer.opticalScene->builds()-before;
+        stats.opticalSceneTriangles=renderer.opticalScene->data().triangles.size();
+    }
+
     if (!device.write_buffer(renderer.frameConstants, 0U, frame.frameConstants, error)) return false;
     const std::array<float,4> cameraPosition{frame.cameraWorldPosition.x,frame.cameraWorldPosition.y,frame.cameraWorldPosition.z,1};
     if(!device.write_buffer(renderer.frameConstants,80U,std::as_bytes(std::span(cameraPosition)),error))return false;
@@ -606,7 +638,7 @@ bool record_live_environment_frame(rhi::IDevice& device,
                     ++stats.shadowDepthRegionsCleared;
                 }
                 for (const auto& item : prepared) {
-                    if (item.dashr) continue;
+                    if (item.dashr || item.draw->asset->materials[item.submesh->materialIndex].transmission>0) continue;
                     if (!item.draw->castsShadow ||
                         item.draw->staticShadowCaster != renderStaticCasters) continue;
                     const auto pipeline = item.masked && renderer.shadowMaskedPipeline
@@ -704,8 +736,21 @@ bool record_live_environment_frame(rhi::IDevice& device,
         if (!device.bind_graphics_pipeline(commands, renderer.materialPipeline, error) ||
             !device.bind_graphics_bind_group(commands, 0U, renderer.frameGroup, error) ||
             !device.bind_graphics_bind_group(commands, 2U, lighting.bindGroup, error)) return fail();
+        auto activePipeline=renderer.materialPipeline;
+        const bool cameraInMedium=hasGlass&&renderer.opticalScene&&renderer.opticalScene->data().settings.mediumCount>0;
         for (const auto& item : prepared) {
             if (item.dashr) continue;
+            // A camera inside a dielectric must attenuate every primary hit, including opaque
+            // receivers, so all draws then use the optical transport pipeline.
+            const bool glass=item.draw->asset->materials[item.submesh->materialIndex].transmission>0||cameraInMedium;
+            const auto pipeline=glass?renderer.clearGlassPipeline:renderer.materialPipeline;
+            if(pipeline!=activePipeline){
+                if(!device.bind_graphics_pipeline(commands,pipeline,error)||
+                   !device.bind_graphics_bind_group(commands,0U,renderer.frameGroup,error)||
+                   !device.bind_graphics_bind_group(commands,2U,lighting.bindGroup,error))return fail();
+                activePipeline=pipeline;
+            }
+            if(glass){if(!device.bind_graphics_bind_group(commands,4U,renderer.opticalScene->group(),error))return fail();++stats.clearGlassDraws;}
             if (!device.bind_graphics_bind_group(commands, 1U, item.objectGroup, error) ||
                 !device.bind_graphics_bind_group(commands, 3U, item.mainMaterialGroup, error) ||
                 !bind_mesh(device, commands, *item.draw, error) ||

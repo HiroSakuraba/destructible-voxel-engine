@@ -64,6 +64,7 @@ void grow(Float3& lo, Float3& hi, Float3 p) noexcept {
 }  // namespace
 
 float dielectric_fresnel(float cosI, float n1, float n2) noexcept {
+    if (n1 == n2) return 0.0F; // No optical interface, including exact grazing incidence.
     cosI = std::clamp(cosI, 0.0F, 1.0F);
     const float eta = n1 / n2;
     const float sin2T = eta * eta * (1.0F - cosI * cosI);

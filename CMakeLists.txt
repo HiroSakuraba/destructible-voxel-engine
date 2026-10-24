@@ -737,6 +737,7 @@ if(DVE_BUILD_RHI)
         src/render/material_bsdf.cpp
         src/render/ambient_occlusion_gpu.cpp
         src/render/live_environment_renderer.cpp
+        src/render/live_optical_scene.cpp
         src/render/material_resource_residency.cpp
         src/render/main_material_table.cpp
         src/render/shadow_material_table.cpp
@@ -1969,6 +1970,9 @@ if(DVE_BUILD_TESTS)
         if(TARGET dve_editor)
             add_executable(dve_gpu_material_surfaces_tests tests/test_gpu_material_surfaces.cpp)
             target_link_libraries(dve_gpu_material_surfaces_tests PRIVATE dve::rhi_vulkan dve::editor)
+            add_executable(dve_gpu_clear_glass_tests tests/test_gpu_clear_glass.cpp)
+            target_link_libraries(dve_gpu_clear_glass_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
+            add_test(NAME dve_gpu_clear_glass_tests COMMAND dve_gpu_clear_glass_tests)
             find_program(DVE_DXC_EXECUTABLE NAMES dxc)
             set(_dve_dxc_spirv OFF)
             if(DVE_DXC_EXECUTABLE)
@@ -1989,7 +1993,7 @@ if(DVE_BUILD_TESTS)
                 set(_surface_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/surface-shaders")
                 file(GLOB _surface_shader_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/*.hlsli")
                 set(_surface_shader_outputs)
-                foreach(_shader IN ITEMS live_ibl_material_vs live_ibl_material_ps live_csm_caster_vs live_csm_caster_ps live_environment_skybox_vs live_environment_skybox_ps material_surface_detail_reference)
+                foreach(_shader IN ITEMS live_ibl_material_vs live_ibl_material_ps live_csm_caster_vs live_csm_caster_ps live_environment_skybox_vs live_environment_skybox_ps material_surface_detail_reference live_clear_glass_ps clear_glass_reference)
                     if(_shader MATCHES "_vs$")
                         set(_profile vs_6_0)
                     elseif(_shader MATCHES "_ps$")
@@ -2020,6 +2024,8 @@ if(DVE_BUILD_TESTS)
                 endforeach()
                 add_custom_target(dve_surface_test_shaders DEPENDS ${_surface_shader_outputs})
                 add_dependencies(dve_gpu_material_surfaces_tests dve_surface_test_shaders)
+                add_dependencies(dve_gpu_clear_glass_tests dve_surface_test_shaders)
+                target_compile_definitions(dve_gpu_clear_glass_tests PRIVATE DVE_SURFACE_SHADER_DIR="${_surface_shader_dir}")
                 target_compile_definitions(dve_gpu_material_surfaces_tests PRIVATE DVE_SURFACE_SHADER_DIR="${_surface_shader_dir}")
             endif()
             add_test(NAME dve_gpu_material_surfaces_tests COMMAND dve_gpu_material_surfaces_tests)

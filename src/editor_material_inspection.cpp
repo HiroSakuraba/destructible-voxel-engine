@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <utility>
+#include <vector>
 namespace dve::editor {
 const char* material_inspection_channel_label(MaterialInspectionChannel c) noexcept {
     constexpr const char* labels[]{"Beauty","Base color","World normal","Roughness","Metallic","Emission (LDR)","Opacity","UV coverage / padding"};
@@ -31,7 +34,8 @@ MaterialPreviewImage render_material_inspection(const CookedPolygonAsset& source
             std::vector<unsigned> counts(rgb.size());std::vector<unsigned> distance(rgb.size(),~0U),queue;
             for(const auto& sub:asset.submeshes)if(sub.materialIndex==slot)for(unsigned first=sub.firstIndex;first<sub.firstIndex+sub.indexCount;first+=3){
                 if(stopped())return rgb;
-                std::array<Float2,3> uv;for(unsigned n=0;n<3;++n){const auto& v=asset.vertices[asset.indices[first+n]];uv[n]=settings.targetUv?v.texcoord1:v.texcoord;uv[n].x=std::clamp(uv[n].x,-1.F,2.F)*float(out.size);uv[n].y=std::clamp(uv[n].y,-1.F,2.F)*float(out.size);}
+                std::array<Float2,3> uv;bool finite=true;for(unsigned n=0;n<3;++n){const auto& v=asset.vertices[asset.indices[first+n]];uv[n]=settings.targetUv?v.texcoord1:v.texcoord;finite=finite&&std::isfinite(uv[n].x)&&std::isfinite(uv[n].y);if(!finite)break;uv[n].x=std::clamp(uv[n].x,-1.F,2.F)*float(out.size);uv[n].y=std::clamp(uv[n].y,-1.F,2.F)*float(out.size);}
+                if(!finite)continue; // NaN/Inf UVs would make the float-to-int bounds below undefined
                 auto edge=[](Float2 a,Float2 b,Float2 p){return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);};
                 if(edge(uv[0],uv[1],uv[2])<0)std::swap(uv[1],uv[2]);
                 if(edge(uv[0],uv[1],uv[2])<1e-8F)continue;

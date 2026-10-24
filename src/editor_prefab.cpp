@@ -106,11 +106,7 @@ std::filesystem::path instance_prefab_reference(
 
 void remap_embedded_object_id(EditorObject& object, EditorObjectId id) {
     if (object.polygon) {object.polygon->objectId=id;object.polygon->contentHash=polygon_asset_content_hash(*object.polygon);}
-    if(object.materialBake){auto& r=*object.materialBake;const bool current=polygon_asset_content_hash(r.source)==r.bakedSourceHash;
-        r.source.objectId=id;r.source.contentHash=polygon_asset_content_hash(r.source);
-        r.baked.objectId=id;r.baked.contentHash=polygon_asset_content_hash(r.baked);r.bakedAssetHash=r.baked.contentHash;
-        if(current)r.bakedSourceHash=r.source.contentHash;
-    }
+    remap_material_bake_ownership(object,id);
     if (!object.text3d) return;
     object.text3d->objectId = id;
     object.text3d->sideMesh.objectId = id;
@@ -697,7 +693,10 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
                 target->polygon=source.polygon;
                 target->modelingTopology=source.modelingTopology;
                 target->modelingNextId=(std::max)(target->modelingNextId,source.modelingNextId);
+                // The recipe travels with the geometry it describes (or is cleared with it).
+                target->materialBake=source.materialBake;
                 if (target->polygon) {target->polygon->objectId=target->id;target->polygon->contentHash=polygon_asset_content_hash(*target->polygon);}
+                remap_material_bake_ownership(*target,target->id);
             }
             if (source.subdivision && target->subdivision) {
                 target->subdivision->level=object_has_override(*target,"subdivision.level") && previousSubdivision ?

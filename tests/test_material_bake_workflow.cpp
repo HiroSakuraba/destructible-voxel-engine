@@ -28,6 +28,27 @@ void inspection(const EditorObject& o,const std::filesystem::path& root){
     const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(10);while(worker.busy()&&std::chrono::steady_clock::now()<until)std::this_thread::sleep_for(std::chrono::milliseconds(2));auto image=worker.image();auto expected=render_material_inspection(r.source,r.baked,r.settings,MaterialInspectionChannel::Metallic,MaterialInspectionView::Baked);check(image&&image->error.empty()&&image->rgb==expected.rgb,"latest inspection generation wins");
     std::ofstream ppm(root/"inspection.ppm",std::ios::binary);ppm<<"P6\n512 64\n255\n";for(unsigned y=0;y<64;++y)for(const auto& panel:gallery)for(unsigned x=0;x<64;++x){auto c=panel.rgb[y*64+x];const char bytes[]{char(c>>16),char(c>>8),char(c)};ppm.write(bytes,3);}
 }
+void ownership(const EditorDocument& baked){
+    // Duplicate / paste: polygon hashes include the object id, so the snapshots must follow the copy.
+    auto scene=clone_editor_document(baked);EditorObject copy=clone_editor_object(*scene.find_object(1));copy.id=0;
+    const auto& added=scene.add_object(std::move(copy));
+    check(added.id!=1&&added.materialBake&&added.materialBake->source.objectId==added.id&&added.materialBake->baked.objectId==added.id,"duplicate recipe snapshots are owned by the duplicate");
+    check(!material_bake_status(added,added.transform).stale,"duplicate keeps a current bake");
+    std::string error;check(validate_material_bake_recipe(*added.materialBake,&error),error);
+    // Prefab instance update must carry the recipe with the geometry (absent -> present, then changed).
+    EditorDocument plain=clone_editor_document(baked);plain.find_object(1)->materialBake.reset();
+    EditorPrefabAsset oldPrefab("Plain");oldPrefab.templateDocument=std::move(plain);oldPrefab.rootTemplateObjectIds={1};oldPrefab.contentHash=editor_prefab_content_hash(oldPrefab);oldPrefab.assetPath="plain.dveprefab";
+    auto instances=clone_editor_document(baked);instances.remove_object(1);auto made=instantiate_editor_prefab(instances,oldPrefab);check(made.success,made.error);
+    const auto instanceId=made.instanceId;const auto objectId=made.rootObjectIds.front();check(!instances.find_object(objectId)->materialBake,"plain instance has no recipe");
+    EditorPrefabAsset newPrefab("Baked");newPrefab.templateDocument=clone_editor_document(baked);newPrefab.rootTemplateObjectIds={1};newPrefab.contentHash=editor_prefab_content_hash(newPrefab);newPrefab.assetPath="plain.dveprefab";
+    auto updated=apply_editor_prefab_instance_update(instances,instanceId,newPrefab,false);check(updated.success,updated.error);
+    const auto* target=instances.find_object(objectId);check(target&&target->materialBake&&target->materialBake->source.objectId==objectId&&target->materialBake->baked.objectId==objectId,"prefab update installs the recipe with remapped ownership");
+    check(polygon_asset_content_hash(*target->polygon)==target->materialBake->bakedAssetHash&&!material_bake_status(*target,target->transform).stale,"prefab update leaves a current recipe");
+    // Source of the template goes back to a plain mesh: the instance's recipe must be cleared too.
+    EditorDocument plainAgain=clone_editor_document(baked);plainAgain.find_object(1)->materialBake.reset();
+    EditorPrefabAsset third("Plain2");third.templateDocument=std::move(plainAgain);third.rootTemplateObjectIds={1};third.templateDocument.find_object(1)->materialBake.reset();third.templateDocument.find_object(1)->polygon->materials[0].roughness=.9F;third.templateDocument.find_object(1)->polygon->contentHash=polygon_asset_content_hash(*third.templateDocument.find_object(1)->polygon);third.contentHash=editor_prefab_content_hash(third);third.assetPath="plain.dveprefab";
+    updated=apply_editor_prefab_instance_update(instances,instanceId,third,false);check(updated.success,updated.error);check(!instances.find_object(objectId)->materialBake,"prefab update clears a recipe the template no longer has");
+}
 void export_only(const std::filesystem::path& root){
     auto d=document();d.find_object(1)->modelingTopology.reset();d.find_object(1)->modelingNextId=1;
     NativeEditorController controller{EditorWorkspace(std::move(d))};controller.workspace().select_object(1);controller.material_panel().bake.resolution=32;controller.material_panel().bake.paddingPixels=2;
@@ -42,6 +63,7 @@ void workflow(const std::filesystem::path& root){
     const auto bakedHash=polygon_asset_content_hash(*object->polygon);const auto firstSettings=object->materialBake->settings;
     EditorPrefabAsset prefab("Baked prefab");prefab.templateDocument=clone_editor_document(first.workspace().document());prefab.rootTemplateObjectIds={1};const auto prefabHash=editor_prefab_content_hash(prefab);prefab.contentHash=prefabHash;prefab.assetPath=root/"baked.dveprefab";
     auto instances=clone_editor_document(first.workspace().document());auto instance=instantiate_editor_prefab(instances,prefab);check(instance.success,instance.error);auto* instanced=instances.find_object(instance.rootObjectIds.front());check(instanced->materialBake->source.objectId==instanced->id&&!material_bake_status(*instanced,instanced->transform).stale,"prefab ownership remap retains fresh recipe");
+    ownership(first.workspace().document());
     prefab.templateDocument.find_object(1)->materialBake->settings.paddingPixels=3;check(editor_prefab_content_hash(prefab)!=prefabHash,"prefab integrity includes bake authoring metadata");
     auto cloned=clone_editor_document(first.workspace().document());check(cloned.find_object(1)->materialBake.has_value(),"cloning retains recipe");
     auto saved=first.workspace().document().save_transactional(root/"scene.dvescene");check(saved.success,saved.error);
@@ -50,7 +72,7 @@ void workflow(const std::filesystem::path& root){
     object=w.document().find_object(1);check(object->materialBake&&object->materialBake->settings.resolution==32&&!material_bake_status(*object,object->transform).stale,"reopen recipe without export directory");
     check(controller.material_panel_bake_source(true),controller.material_panel().message);object=w.document().find_object(1);check(polygon_asset_content_hash(*object->polygon)==original&&object->modelingTopology->faces==topology.faces,"restore source mesh and identities");
     check(w.commands().undo(w.document()).success&&!object->materialBake->showingSource&&polygon_asset_content_hash(*object->polygon)==bakedHash,"undo restore");check(w.commands().redo(w.document()).success,"redo restore");
-    object->polygon->materials[0].baseColor.x=.8F;rehash(*object);check(material_bake_status(*object,object->transform).stale,"source edit invalidates bake");
+    const auto keyBefore=material_bake_status(*object,object->transform).key;object->polygon->materials[0].baseColor.x=.8F;rehash(*object);check(material_bake_status(*object,object->transform).stale,"source edit invalidates bake");check(material_bake_status(*object,object->transform).key!=keyBefore,"editing the active source changes the inspection key");
     auto edited=polygon_asset_content_hash(*object->polygon);saved=w.document().save_transactional(root/"edited.dvescene");check(saved.success,saved.error);auto editing=EditorDocument::load(root/"edited.dvescene",&error);check(editing&&material_bake_status(*editing->find_object(1),{}).stale,"source edit survives restart");
     check(controller.material_panel_bake_source(false),controller.material_panel().message);check(object->materialBake->source.contentHash==edited&&material_bake_status(*object,object->transform).stale,"show baked keeps source edits");
     const auto count=w.commands().size();run_bake(controller,root/"rebaked");object=w.document().find_object(1);check(w.commands().size()==count+1&&!material_bake_status(*object,object->transform).stale,"rebake one transaction and clear stale status");check(object->materialBake->bakedSourceHash==edited,"rebake uses retained editable source");

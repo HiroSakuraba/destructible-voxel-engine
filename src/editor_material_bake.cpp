@@ -2,10 +2,17 @@
 #include "dve/editor_document.hpp"
 #include <bit>
 #include <cmath>
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <locale>
+#include <span>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 
 namespace dve::editor {
 namespace {
@@ -19,6 +26,9 @@ void settings_io(std::istream& in,render::MaterialTextureBakeSettings& s){
 }
 std::string signature(const render::MaterialTextureBakeSettings& s){std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(9);settings_io(out,s);return out.str();}
 std::uint64_t hash(std::string_view s){std::uint64_t h=14695981039346656037ULL;for(unsigned char c:s){h^=c;h*=1099511628211ULL;}return h;}
+// Ordered combination. XOR would cancel equal inputs (the source and the active mesh are the
+// same polygon while the source is being edited).
+std::uint64_t combine(std::uint64_t seed,std::uint64_t value){return seed^(value+0x9e3779b97f4a7c15ULL+(seed<<6)+(seed>>2));}
 bool valid_settings(const render::MaterialTextureBakeSettings& s){
     const auto q=s.pose.rotation;const float norm=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;
     return s.targetUv<2&&s.resolution>=8&&s.resolution<=4096&&s.samplesPerAxis>=1&&s.samplesPerAxis<=4&&s.paddingPixels<=64&&s.paddingPixels<s.resolution/2&&s.maps&&!(s.maps&~31U)&&s.memoryBudgetBytes>0&&
@@ -31,12 +41,20 @@ std::uint64_t material_bake_recipe_hash(const MaterialBakeRecipe& r){
     if(r.bakedTopology)out<<modeling_topology_hash(*r.bakedTopology);
     return hash(out.str());
 }
+void remap_material_bake_ownership(EditorObject& object,std::uint64_t id){
+    if(!object.materialBake)return;auto& r=*object.materialBake;
+    // Only a current source baseline follows the new id; a stale baseline must stay stale.
+    const bool current=polygon_asset_content_hash(r.source)==r.bakedSourceHash;
+    r.source.objectId=id;r.source.contentHash=polygon_asset_content_hash(r.source);
+    r.baked.objectId=id;r.baked.contentHash=polygon_asset_content_hash(r.baked);r.bakedAssetHash=r.baked.contentHash;
+    if(current)r.bakedSourceHash=r.source.contentHash;
+}
 MaterialBakeStatus material_bake_status(const EditorObject& object,const RigidTransform& pose){
     MaterialBakeStatus result;if(!object.materialBake||!object.polygon){result.reason="No saved bake recipe";return result;}
     const auto& r=*object.materialBake;auto settings=r.settings;settings.pose=pose;
     const auto sourceHash=polygon_asset_content_hash(r.showingSource?*object.polygon:r.source);
     const auto activeHash=polygon_asset_content_hash(*object.polygon);
-    result.key=sourceHash^activeHash^hash(signature(settings))^material_bake_recipe_hash(r);
+    result.key=combine(combine(combine(combine(0x6d62616b65ULL,sourceHash),activeHash),hash(signature(settings))),material_bake_recipe_hash(r));
     const auto* mirror=find_component_by_type(std::span<const Component>(object.components),kLiveMirrorComponent);
     if(object.subdivision||object.is_nurbs()||(mirror&&mirror->enabled))result.reason="Stale: apply geometry modifiers before rebaking";
     else if(sourceHash!=r.bakedSourceHash)result.reason="Stale: editable source changed";

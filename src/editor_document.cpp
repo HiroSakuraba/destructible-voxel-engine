@@ -171,6 +171,8 @@ EditorObject& EditorDocument::add_object(EditorObject object) {
         object.polygon->objectId=object.id;
         object.polygon->contentHash=polygon_asset_content_hash(*object.polygon);
     }
+    // Duplicate/paste/prefab copies arrive with the source object's id baked into the snapshots.
+    remap_material_bake_ownership(object,object.id);
     nextObjectId_ = std::max(nextObjectId_, object.id + 1);
     const auto [it, inserted] = objects_.emplace(object.id, std::move(object));
     if (!inserted) throw std::runtime_error("failed to insert editor object");

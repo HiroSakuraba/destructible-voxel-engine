@@ -86,7 +86,10 @@ are provenance labels and are project-relative when the output is inside the ope
 project.
 
 Cloning a document preserves recipes. Prefab integrity hashes include bake
-authoring metadata, and instantiation remaps snapshot ownership hashes. Runtime scene export continues to publish
+authoring metadata, and every path that gives an object a new id (duplicate, paste, prefab
+instantiation and prefab instance update) remaps both snapshots and their baseline hashes.
+Prefab instance updates copy or clear the recipe together with the geometry unless
+`polygon.geometry` is overridden. Runtime scene export continues to publish
 only the assigned polygon representation; editor recipe snapshots are not runtime
 components. Renderer-free editor builds retain recipe persistence/status and
 snapshot switching, with explicit inspection/baking availability messages.

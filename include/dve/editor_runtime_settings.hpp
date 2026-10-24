@@ -58,7 +58,9 @@ inline RenderEnvironment render_environment_settings(const EditorSettingsRegistr
     environment.exposure = s.number("render.exposure");
     const auto tonemap = s.get<std::string>("render.tonemap");
     environment.tonemapOperator = tonemap == "reinhard" ? TonemapOperator::Reinhard
-        : tonemap == "clamp" ? TonemapOperator::Clamp : TonemapOperator::ACES;
+        : tonemap == "clamp" ? TonemapOperator::Clamp
+        : tonemap == "agx" ? TonemapOperator::AgX
+        : tonemap == "pbr_neutral" ? TonemapOperator::PBRNeutral : TonemapOperator::ACES;
     const auto shadowMode = s.get<std::string>("render.shadow_mode");
     environment.shadowMode = shadowMode == "off" ? ShadowMode::Off
         : shadowMode == "hard" ? ShadowMode::Hard

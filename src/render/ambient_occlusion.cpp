@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "dve/render/ray_lighting_reference.hpp"
+#include "dve/render/ray_offset.hpp"
 #include "dve/transform.hpp"
 
 namespace dve::render {
@@ -24,7 +25,7 @@ float reference_ambient_occlusion(Float3 point, Float3 normal, std::uint32_t pix
     const float maximum = meters_to_voxel_units(environment.ambientOcclusionMaxDistanceMeters, metersPerVoxel);
     if (samples == 0U || !(maximum > 0.0F)) return 1.0F;
     const Float3 n = normalize(normal);
-    const Float3 origin = add(point, multiply(n, ambient_occlusion_origin_bias(environment, metersPerVoxel)));
+    const Float3 origin = offset_ray_origin(point, n, ambient_occlusion_origin_bias(environment, metersPerVoxel));
     float occlusion = 0.0F;
     for (std::uint32_t i = 0; i < samples; ++i) {
         const auto hit = nearest(origin, ambient_occlusion_ray_direction(n, i, samples, pixelIndex, frameSeed), maximum);

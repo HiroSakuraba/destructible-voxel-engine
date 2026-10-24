@@ -46,6 +46,13 @@ bool SceneLight::validate(std::string *error) const noexcept {
       !std::isfinite(flickerFrequencyHz) || flickerFrequencyHz < 0 ||
       flickerFrequencyHz > 1000)
     return fail("invalid candle flicker");
+  if (iesProfile) {
+    for (const float s : iesProfile->samples)
+      if (!std::isfinite(s) || s < 0)
+        return fail("IES profile samples must be finite and nonnegative");
+    if (iesProfile->empty())
+      return fail("IES profile has no positive samples");
+  }
   return true;
 }
 
@@ -195,7 +202,11 @@ std::string encode_scene_lighting(const RenderEnvironment &e) {
   std::ostringstream out;
   out.imbue(std::locale::classic());
   out << std::setprecision(std::numeric_limits<double>::max_digits10);
-  out << "DVE_LIGHTING 1 " << e.localLightSamples << ' ' << e.pathTraceBounces
+  // Version 2 adds an optional IES profile per light; files without any
+  // profile keep the version 1 layout byte-for-byte.
+  bool anyIes = false;
+  for (const auto &l : e.lights) anyIes = anyIes || static_cast<bool>(l.iesProfile);
+  out << "DVE_LIGHTING " << (anyIes ? 2 : 1) << ' ' << e.localLightSamples << ' ' << e.pathTraceBounces
       << ' ' << e.pathTraceSamples << ' ' << e.pathTraceRoulette << ' '
       << e.lightingTimeSeconds << ' ' << e.lights.size() << '\n';
   const auto v = [&](Float3 a) {
@@ -210,7 +221,13 @@ std::string encode_scene_lighting(const RenderEnvironment &e) {
     v(l.color);
     out << l.intensity << ' ' << l.innerConeRadians << ' ' << l.outerConeRadians
         << ' ' << l.twoSided << ' ' << l.flickerAmount << ' '
-        << l.flickerFrequencyHz << ' ' << l.seed << '\n';
+        << l.flickerFrequencyHz << ' ' << l.seed;
+    if (anyIes) {
+      out << ' ' << (l.iesProfile ? 1 : 0);
+      if (l.iesProfile)
+        for (const float s : l.iesProfile->samples) out << ' ' << s;
+    }
+    out << '\n';
   }
   return out.str();
 }
@@ -228,7 +245,7 @@ bool decode_scene_lighting(const std::string &text, RenderEnvironment &e,
   std::string magic;
   unsigned version, roulette, count;
   auto next = e;
-  if (!(in >> magic >> version) || magic != "DVE_LIGHTING" || version != 1 ||
+  if (!(in >> magic >> version) || magic != "DVE_LIGHTING" || (version != 1 && version != 2) ||
       !(in >> next.localLightSamples >> next.pathTraceBounces >>
         next.pathTraceSamples >> roulette >> next.lightingTimeSeconds >>
         count) ||
@@ -248,6 +265,18 @@ bool decode_scene_lighting(const std::string &text, RenderEnvironment &e,
       return fail();
     l.kind = static_cast<SceneLightKind>(kind);
     l.twoSided = two != 0;
+    if (version == 2) {
+      unsigned hasIes = 0;
+      if (!(in >> hasIes) || hasIes > 1)
+        return fail();
+      if (hasIes) {
+        auto profile = std::make_shared<render::IesProfile>();
+        for (float &s : profile->samples)
+          if (!(in >> s))
+            return fail();
+        l.iesProfile = std::move(profile);
+      }
+    }
   }
   in >> std::ws;
   if (!in.eof() || !next.validate(error))

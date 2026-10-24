@@ -2,10 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 #include <optional>
 
+#include "dve/render/ies_profile.hpp"
 #include "dve/types.hpp"
 
 namespace dve {
@@ -26,7 +28,7 @@ inline constexpr std::uint32_t kMaximumAmbientOcclusionSamples = 64U;
                                                                   : kDefaultMetersPerVoxel;
 }
 
-enum class TonemapOperator : std::uint32_t { ACES = 0, Reinhard = 1, Clamp = 2 };
+enum class TonemapOperator : std::uint32_t { ACES = 0, Reinhard = 1, Clamp = 2, AgX = 3, PBRNeutral = 4 };
 
 // Indirect-lighting policy. AmbientHemisphere is a cheap sky/ground fallback; VoxelOneBounce
 // traces a bounded diffuse bounce through the authoritative voxel scene. New projects use the
@@ -68,6 +70,9 @@ struct SceneLight {
   bool twoSided{};
   float flickerAmount{0.15F}, flickerFrequencyHz{8};
   std::uint32_t seed{1};
+  // Optional IES photometric profile (CPU lighting only; GPU packing ignores
+  // it). Reshapes a Point/Spot/Candle light's angular distribution.
+  std::shared_ptr<const render::IesProfile> iesProfile;
   [[nodiscard]] bool validate(std::string *error = nullptr) const noexcept;
 };
 

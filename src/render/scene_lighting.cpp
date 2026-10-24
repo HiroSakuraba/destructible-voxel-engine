@@ -1,4 +1,5 @@
 #include "dve/render/scene_lighting.hpp"
+#include "dve/render/ray_offset.hpp"
 #include "dve/voxel_normal_map.hpp"
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/material_bsdf.hpp"
@@ -61,6 +62,7 @@ struct Emitter {
   double cumulative{}, weight{};
   int polygon{-1};
   std::uint32_t firstIndex{},materialIndex{};
+  std::shared_ptr<const IesProfile> ies{};
 };
 std::shared_ptr<const std::vector<PolygonTextureMipChain>> surface_mips(const CookedPolygonAsset& asset) {
     using Chains=std::vector<PolygonTextureMipChain>;
@@ -211,6 +213,7 @@ struct SceneLighting::Impl {
         a.radiance = mul(a.radiance, 1 / (scale * scale));
       a.inner = std::cos(l.innerConeRadians);
       a.outer = std::cos(l.outerConeRadians);
+      a.ies = l.iesProfile;
       a.twoSided = l.twoSided;
       a.area =
           (a.kind == Emitter::Quad || a.kind == Emitter::Disc) ? -1.F : 0.F;
@@ -388,7 +391,7 @@ struct SceneLighting::Impl {
                        2e-7F);
     const float epsilon =
         (std::max)(numerical, (std::min)(bias, 1e-4F / scale));
-    return sum3(
+    return offset_ray_origin(
         p, mul(geometricNormal, dp_sign(geometricNormal, direction) * epsilon));
   }
   static float dp_sign(Float3 n, Float3 d) {
@@ -687,6 +690,8 @@ struct SceneLighting::Impl {
                 : (angle >= e.outer ? 1.F : 0.F);
         factor *= t * t * (3 - 2 * t);
       }
+      if (e.ies && e.area <= 0)
+        factor *= e.ies->sample(std::acos(std::clamp(c, -1.F, 1.F)));
       if (factor <= 0)
         continue;
       const auto shadowOrigin = spawn(origin, n, d);
@@ -792,6 +797,8 @@ struct SceneLighting::Impl {
                 : (c >= e.outer ? 1.F : 0.F);
         factor *= t * t * (3 - 2 * t);
       }
+      if (e.ies && e.area <= 0)
+        factor *= e.ies->sample(std::acos(std::clamp(c, -1.F, 1.F)));
       if (trace(p, d, distance - (std::max)(1e-5F, distance * 1e-5F)))
         continue;
       if (transmission)

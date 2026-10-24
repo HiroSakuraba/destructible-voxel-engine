@@ -46,6 +46,98 @@ const std::array<VoxelMaterialDefinition, 256>& default_palette() {
     return palette;
 }
 
+
+struct RacingProjected {
+    float x{},y{},depth{},pixelsPerMetre{};
+};
+struct RacingCamera {
+    Float3 eye{},right{},up{},forward{};
+    float tanHalf{},aspect{},nearPlane{},farPlane{};
+    std::uint32_t width{},height{};
+};
+RacingCamera racing_camera(const render::PolygonCamera& camera,std::uint32_t width,std::uint32_t height) {
+    RacingCamera c{};
+    c.eye=camera.position;c.forward=normalize(subtract(camera.target,camera.position));
+    c.right=normalize(cross_product(c.forward,camera.up));
+    if(length_squared(c.right)<1.e-8F)c.right={1,0,0};
+    c.up=normalize(cross_product(c.right,c.forward));
+    c.tanHalf=std::tan(camera.verticalFieldOfViewRadians*0.5F);
+    c.aspect=float(width)/float(height);c.nearPlane=camera.nearPlane;c.farPlane=camera.farPlane;
+    c.width=width;c.height=height;
+    return c;
+}
+bool project_racing(const RacingCamera& c,Float3 point,RacingProjected& p){
+    const Float3 rel=subtract(point,c.eye);
+    const float z=dot(rel,c.forward);
+    if(!(z>c.nearPlane&&z<c.farPlane)||!std::isfinite(z)||c.tanHalf<=0)return false;
+    p.x=(0.5F+0.5F*dot(rel,c.right)/(z*c.tanHalf*c.aspect))*float(c.width);
+    p.y=(0.5F-0.5F*dot(rel,c.up)/(z*c.tanHalf))*float(c.height);
+    p.depth=(z-c.nearPlane)/(c.farPlane-c.nearPlane);
+    p.pixelsPerMetre=float(c.height)/(2*c.tanHalf*z);
+    return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.depth);
+}
+void draw_racing_effects(std::span<const RacingVisualEffect> effects,
+                         const render::PolygonCamera& camera,
+                         const render::PolygonRenderTarget& depth,
+                         std::span<std::uint8_t> rgba){
+    if(effects.empty()||!depth.valid()||rgba.size()!=std::size_t(depth.width)*depth.height*4)return;
+    const auto c=racing_camera(camera,depth.width,depth.height);
+    auto paint=[&](int x,int y,float z,float alpha,std::array<float,3> rgb){
+        if(x<0||y<0||x>=int(depth.width)||y>=int(depth.height)||alpha<=0)return;
+        const std::size_t at=std::size_t(y)*depth.width+std::size_t(x);
+        // The depth buffer uses the same normalized linear camera-space z.
+        if(z>depth.depth[at]+0.00008F)return;
+        alpha=std::clamp(alpha,0.0F,0.85F);
+        for(std::size_t channel=0;channel<3;++channel){
+            const float mixed=float(rgba[at*4+channel])*(1-alpha)+rgb[channel]*alpha;
+            rgba[at*4+channel]=std::uint8_t(std::clamp(mixed,0.0F,255.0F));
+        }
+        rgba[at*4+3]=255;
+    };
+    for(const RacingVisualEffect& fx:effects){
+        if(fx.lifetime<=0||fx.age>=fx.lifetime||fx.opacity<=0)continue;
+        RacingProjected a{},b{};
+        if(!project_racing(c,fx.a,a))continue;
+        const float life=std::clamp(1.0F-fx.age/fx.lifetime,0.0F,1.0F);
+        if(fx.kind==RacingVisualKind::SkidMark){
+            if(!project_racing(c,fx.b,b))continue;
+            const float ra=std::clamp(fx.radius*a.pixelsPerMetre*0.5F,0.65F,20.0F);
+            const float rb=std::clamp(fx.radius*b.pixelsPerMetre*0.5F,0.65F,20.0F);
+            const float radius=std::max(ra,rb);
+            const float dx=b.x-a.x,dy=b.y-a.y,length2=dx*dx+dy*dy;
+            if(length2>1000000.0F)continue;
+            const int minX=std::max(0,int(std::floor(std::min(a.x,b.x)-radius-1)));
+            const int maxX=std::min(int(depth.width)-1,int(std::ceil(std::max(a.x,b.x)+radius+1)));
+            const int minY=std::max(0,int(std::floor(std::min(a.y,b.y)-radius-1)));
+            const int maxY=std::min(int(depth.height)-1,int(std::ceil(std::max(a.y,b.y)+radius+1)));
+            for(int y=minY;y<=maxY;++y)for(int x=minX;x<=maxX;++x){
+                const float t=length2>1.e-5F?std::clamp(((x+0.5F-a.x)*dx+(y+0.5F-a.y)*dy)/length2,0.0F,1.0F):0.0F;
+                const float px=a.x+t*dx,py=a.y+t*dy;
+                const float r=ra+t*(rb-ra);
+                const float d2=(x+0.5F-px)*(x+0.5F-px)+(y+0.5F-py)*(y+0.5F-py);
+                if(d2>r*r)continue;
+                paint(x,y,a.depth+t*(b.depth-a.depth),fx.opacity*life,{24,26,28});
+            }
+        }else{
+            const float growing=fx.radius*(1.0F+fx.age*1.4F);
+            const float radius=std::clamp(growing*a.pixelsPerMetre,1.0F,35.0F);
+            const int minX=std::max(0,int(std::floor(a.x-radius)));
+            const int maxX=std::min(int(depth.width)-1,int(std::ceil(a.x+radius)));
+            const int minY=std::max(0,int(std::floor(a.y-radius)));
+            const int maxY=std::min(int(depth.height)-1,int(std::ceil(a.y+radius)));
+            const std::array<float,3> color=fx.kind==RacingVisualKind::Dust?
+               std::array<float,3>{163,144,113}:std::array<float,3>{175,179,182};
+            for(int y=minY;y<=maxY;++y)for(int x=minX;x<=maxX;++x){
+                const float u=(x+0.5F-a.x)/radius,v=(y+0.5F-a.y)/radius;
+                const float rr=u*u+v*v;
+                if(rr>=1.0F)continue;
+                const float falloff=(1-rr)*(1-rr);
+                paint(x,y,a.depth,fx.opacity*life*falloff,color);
+            }
+        }
+    }
+}
+
 class CpuPlayerRenderer final : public IPlayerRenderer {
 public:
     CpuPlayerRenderer(IFrameBlitter* blitter, CpuPlayerRendererOptions options)
@@ -214,6 +306,7 @@ public:
         const float exposure = options_.exposure * (environment.exposure > 0.0F ? environment.exposure : 1.0F);
         if (!render::resolve_polygon_render_rgba8(target_, exposure, environment.tonemapOperator,
                                                   frame_.pixels, error)) return false;
+        draw_racing_effects(view.racingEffects,view.camera,target_,frame_.pixels);
         if(view.prototypeHud)draw_prototype_hud(frame_.pixels,frame_.width,frame_.height,*view.prototypeHud);
         stats_.resolveMilliseconds = milliseconds_since(resolveStart);
         rendered_ = true;

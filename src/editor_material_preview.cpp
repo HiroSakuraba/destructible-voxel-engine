@@ -80,6 +80,7 @@ struct MaterialPreviewWorker::Impl {
                 for(auto* mesh:{&sample,&floor,&chart}){for(auto& v:mesh->vertices){v.position.x*=.1F;v.position.y*=.1F;v.position.z*=.1F;}refresh_editor_polygon(*mesh);}
                 const std::array<render::PolygonRenderInstance,3> objects{{{1,&sample},{2,&floor},{3,&chart}}};
                 RenderEnvironment e;e.sunIntensity=0;e.pathTraceBounces=8;e.pathTraceSamples=32;e.localLightSamples=2;e.bloomIntensity=0;
+                if(std::any_of(sample.materials.begin(),sample.materials.end(),[](const auto& m){return m.shadingModel==MaterialShadingModel::Subsurface&&m.subsurfaceScatterDistanceMeters>0;}))e.pathTraceSamples=128;
                 e.skyColor={.4F,.4F,.4F};e.groundColor={.12F,.12F,.12F};
                 SceneLight key;key.kind=SceneLightKind::Quad;key.positionMeters={-.13F,.26F,.18F};key.direction={0,-.7F,-.7F};key.edgeU={.16F,0,0};key.edgeV={0,.08F,-.08F};key.intensity=5;key.twoSided=true;e.lights={key};
                 render::SceneLighting lighting({},objects,e,1);

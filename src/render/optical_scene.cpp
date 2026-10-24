@@ -1,3 +1,4 @@
+#include "dve/render/material_bsdf.hpp"
 #include "dve/render/optical_scene.hpp"
 
 #include <algorithm>
@@ -396,15 +397,19 @@ LightPathResult follow_light_impl(const OpticalScene& scene, Float3 origin, Floa
         Float3 normal = hit->shadingNormal;
         if (dot3(normal, dir) > 0.0F) normal = scale3(normal, -1.0F);
         const float cosI = std::clamp(-dot3(dir, normal), 0.0F, 1.0F);
-        const float fresnel = dielectric_fresnel(cosI, n1, n2);
+        const auto& boundary=kind==Kind::Enter?*next:*media.back().material;
+        const auto film=material_interface_reflectance(boundary,cosI,n1,n2);
+        const float fresnel=.2126F*film.x+.7152F*film.y+.0722F*film.z;
         const auto refracted = refract_direction(dir, normal, n1 / n2);
         bool reflect = !refracted.has_value();
         if (!reflect && sampled) reflect = uniform(state) < fresnel;
         if (reflect) {
+            if(sampled && fresnel>0)result.throughput=mul3(result.throughput,scale3(film,1/fresnel));
             dir = reflect_direction(dir, normal);
             ++result.reflections;
         } else {
-            if (!sampled) result.throughput = scale3(result.throughput, 1.0F - fresnel);
+            const Float3 transmit{1-film.x,1-film.y,1-film.z};
+            result.throughput=mul3(result.throughput,scale3(transmit,sampled&&fresnel<1?1/(1-fresnel):1));
             if (kind == Kind::Enter) {
                 result.throughput = scale3(result.throughput, next->transmission);
                 if (inVoxelMedium && hit->voxelInstance == media.back().entry.voxelInstance) media.pop_back();   // voxel media swap

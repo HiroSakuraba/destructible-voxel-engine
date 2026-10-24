@@ -56,14 +56,51 @@ struct ShadingLobes {
     Float3 specular{};
 };
 
-// ShadeDirectLight, as its two lobes (their sum is the HLSL result).
+// ShadeDirectLight, as its two lobes (their sum is the HLSL result). The trailing iridescence
+// parameters (factor 0 = off, the defaults) modulate the specular Fresnel by the thin-film
+// factor at VdotH, as NVIDIA's eval multiplies the lobe tint by lerp(1, film, factor); the
+// diffuse (1 - F) term keeps the un-filmed F, and metals get the same tint multiply (nvshaders
+// instead mixes a metal's tint toward a separate specular colour, which DVE's unified lobe
+// does not carry). baseIor is the material's index of refraction under the film.
 [[nodiscard]] ShadingLobes shade_direct_light(Float3 normal, Float3 viewDirection, Float3 lightDirection, Float3 lightRadiance,
-                                              Float3 baseColor, float metallic, float roughness, float specular) noexcept;
+                                              Float3 baseColor, float metallic, float roughness, float specular,
+                                              float iridescence = 0.0F, float iridescenceIor = 1.3F,
+                                              float iridescenceThicknessNm = 100.0F, float baseIor = 1.5F) noexcept;
 // ShadeClearCoatDirect: the base lobes attenuated by the coat's Fresnel on the way in and out,
-// the coat lobe added to specular.
+// the coat lobe added to specular. Iridescence (same trailing parameters) films the base lobes
+// and the coat lobe alike (the coat's base index under the film is its own 1.5).
 [[nodiscard]] ShadingLobes shade_clear_coat_direct(Float3 normal, Float3 viewDirection, Float3 lightDirection,
                                                    Float3 lightRadiance, Float3 baseColor, float metallic, float roughness,
-                                                   float specular, float clearCoat, float clearCoatRoughness) noexcept;
+                                                   float specular, float clearCoat, float clearCoatRoughness,
+                                                   float iridescence = 0.0F, float iridescenceIor = 1.3F,
+                                                   float iridescenceThicknessNm = 100.0F, float baseIor = 1.5F) noexcept;
+
+// Sheen (KHR_materials_sheen), the Conty-Kulla "Charlie" model as NVIDIA's nvshaders evaluate
+// it (Apache-2.0): a half-vector distribution concentrated at grazing half-angles, masked by
+// V-cavities instead of Smith. `brdf` is the lobe's f (colour included, no cosine, no light);
+// `pdf` is the directional density of the matching importance sampler (the Charlie inversion in
+// sample_material_bsdf), so eval and sampling agree exactly. Zero when the light or view is at
+// or behind the surface, or the sheen colour is black.
+struct SheenEvaluation {
+    Float3 brdf{};
+    float pdf{};
+};
+[[nodiscard]] SheenEvaluation evaluate_sheen(Float3 normal, Float3 viewDirection, Float3 lightDirection,
+                                             Float3 sheenColor, float sheenRoughness) noexcept;
+// The direct-light form, in shade_direct_light's convention: brdf x lightRadiance x NdotL.
+[[nodiscard]] Float3 sheen_direct(Float3 normal, Float3 viewDirection, Float3 lightDirection, Float3 lightRadiance,
+                                  Float3 sheenColor, float sheenRoughness) noexcept;
+
+// Iridescence (KHR_materials_iridescence): the thin-film Fresnel factor — the RGB reflectance
+// of a dielectric film of `filmThicknessNm` nanometres and index `filmIor` over a base of index
+// `baseIor`, seen from a medium of index `outsideIor` at cosine `cosTheta` (VdotH in the lobes).
+// Ported from NVIDIA nvshaders' thin_film_factor (Apache-2.0; the Born & Wolf film model from
+// MDL, not the KHR sample's spectral fit): both interfaces' polarised Fresnel terms with the
+// film's phase shift, integrated over 16 wavelength bands against the CIE colour matching
+// functions. A zero-thickness film, or film IOR equal to the base, returns the base's ordinary
+// Fresnel reflectance.
+[[nodiscard]] Float3 thin_film_fresnel(float cosTheta, float filmThicknessNm, float filmIor, float baseIor,
+                                       float outsideIor) noexcept;
 
 // The environment BRDF (A, B): the specular lobe's directional albedo is F0 x A + B. Tabulated
 // once (32 x 32, NdotV x roughness) by integrating the direct lobe's D x V over the hemisphere.
@@ -84,6 +121,7 @@ struct EnvironmentBrdf {
 // occludes the specular reflection here.
 [[nodiscard]] ShadingLobes shade_ambient_light(Float3 normal, Float3 viewDirection, Float3 irradiance, Float3 reflected,
                                                Float3 baseColor, float metallic, float roughness, float specular,
-                                               float ambientOcclusion) noexcept;
+                                               float ambientOcclusion, float iridescence = 0.0F, float iridescenceIor = 1.3F,
+                                               float iridescenceThicknessNm = 100.0F, float baseIor = 1.5F) noexcept;
 
 } // namespace dve::render

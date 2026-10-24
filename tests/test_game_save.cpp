@@ -269,6 +269,91 @@ void test_material_optics() {
     CHECK(again && *again == *bytes);
 }
 
+// Sheen (KHR_materials_sheen) of inline materials travels in the optional dve.material_sheen
+// section; saves without sheen do not get the section, and the schema version does not move.
+void test_material_sheen() {
+    const Assets assets = make_assets();
+    GameSaveCodec codec(file_reader());
+    int fires = 0;
+    Scene a = boot(assets, Physics3DBackend::Reference, &fires);
+    GameSaveData saved = capture(a);
+    std::string error;
+    const auto plain = codec.encode(saved, nullptr, &error);
+    CHECK(plain.has_value());
+    if (plain) {
+        const auto document = decode_save_game_document(*plain, {}, &error);
+        CHECK(document && !document->sections.contains("dve.material_sheen"));
+    }
+    GameWorldObjectState* object = nullptr;
+    for (auto& candidate : saved.world.objects)
+        if (candidate.materials.size() > 1) { object = &candidate; break; }
+    CHECK(object != nullptr);
+    if (!object) return;
+    VoxelMaterialDefinition& velvet = object->materials.back();
+    velvet.sheenColor = {0.7F, 0.3F, 0.2F};
+    velvet.sheenRoughness = 0.55F;
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) { std::cerr << "sheen encode: " << error << '\n'; return; }
+    const auto document = decode_save_game_document(*bytes, {}, &error);
+    CHECK(document && document->sections.contains("dve.material_sheen"));
+    const auto decoded = codec.decode(*bytes, nullptr, &error);
+    CHECK(decoded.has_value());
+    if (!decoded) { std::cerr << "sheen decode: " << error << '\n'; return; }
+    bool found = false;
+    for (const auto& candidate : decoded->world.objects)
+        if (candidate.id == object->id) {
+            const auto& m = candidate.materials.back();
+            found = m.sheenColor.x == 0.7F && m.sheenColor.y == 0.3F && m.sheenColor.z == 0.2F &&
+                    m.sheenRoughness == 0.55F;
+        }
+    CHECK(found);
+    const auto again = codec.encode(*decoded, nullptr, &error);
+    CHECK(again && *again == *bytes);
+}
+
+// Iridescence of inline materials travels in the optional dve.material_iridescence section.
+void test_material_iridescence() {
+    const Assets assets = make_assets();
+    GameSaveCodec codec(file_reader());
+    int fires = 0;
+    Scene a = boot(assets, Physics3DBackend::Reference, &fires);
+    GameSaveData saved = capture(a);
+    std::string error;
+    const auto plain = codec.encode(saved, nullptr, &error);
+    CHECK(plain.has_value());
+    if (plain) {
+        const auto document = decode_save_game_document(*plain, {}, &error);
+        CHECK(document && !document->sections.contains("dve.material_iridescence"));
+    }
+    GameWorldObjectState* object = nullptr;
+    for (auto& candidate : saved.world.objects)
+        if (candidate.materials.size() > 1) { object = &candidate; break; }
+    CHECK(object != nullptr);
+    if (!object) return;
+    VoxelMaterialDefinition& film = object->materials.back();
+    film.iridescence = 0.85F;
+    film.iridescenceIor = 1.32F;
+    film.iridescenceThicknessNm = 420.0F;
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) { std::cerr << "iridescence encode: " << error << '\n'; return; }
+    const auto document = decode_save_game_document(*bytes, {}, &error);
+    CHECK(document && document->sections.contains("dve.material_iridescence"));
+    const auto decoded = codec.decode(*bytes, nullptr, &error);
+    CHECK(decoded.has_value());
+    if (!decoded) { std::cerr << "iridescence decode: " << error << '\n'; return; }
+    bool found = false;
+    for (const auto& candidate : decoded->world.objects)
+        if (candidate.id == object->id) {
+            const auto& m = candidate.materials.back();
+            found = m.iridescence == 0.85F && m.iridescenceIor == 1.32F && m.iridescenceThicknessNm == 420.0F;
+        }
+    CHECK(found);
+    const auto again = codec.encode(*decoded, nullptr, &error);
+    CHECK(again && *again == *bytes);
+}
+
 // Normal maps on inline materials: one image stored once for two materials, parameters and texels
 // back, and the same bytes when re-encoded.
 void test_material_normal_maps() {
@@ -1389,6 +1474,8 @@ void test_script_state_v3_fog_height() {
 
 int main() {
     test_material_optics();
+    test_material_sheen();
+    test_material_iridescence();
     test_material_normal_maps();
     test_material_surface_detail();
     test_source_backed_optics();

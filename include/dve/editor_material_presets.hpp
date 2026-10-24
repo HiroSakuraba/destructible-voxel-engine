@@ -4,7 +4,7 @@
 #include <set>
 #include <span>
 namespace dve::editor {
-enum class MaterialPresetFeature : unsigned { Opaque, SolidTransmission, RoughTransmission, ClearCoat, NormalDetail, SurfaceDetail };
+enum class MaterialPresetFeature : unsigned { Opaque, SolidTransmission, RoughTransmission, ClearCoat, NormalDetail, SurfaceDetail, Subsurface, Sheen, Iridescence };
 enum class MaterialPresetBackend : unsigned { CpuReference, CpuPlayer, NativePreview, Gpu };
 enum class MaterialPresetSupport : unsigned { Supported, Approximate, Unavailable };
 struct MaterialPresetCapability { MaterialPresetSupport support; std::string reason; };
@@ -13,7 +13,7 @@ enum class MaterialPresetProperty : unsigned {
     AbsorptionR, AbsorptionG, AbsorptionB, AbsorptionDistance, Coat, CoatRoughness,
     DetailScale, DetailStrength, Pattern, DetailSpace, PatternScale,
     PatternRotationX, PatternRotationY, PatternRotationZ, GrainStretch, ColorVariation,
-    RoughnessVariation, BumpHeight, PatternSeed, UvTileMeters, Count
+    RoughnessVariation, BumpHeight, PatternSeed, UvTileMeters, ScatterDistance, ScatterR, ScatterG, ScatterB, SheenR, SheenG, SheenB, SheenRoughness, Iridescence, FilmIor, FilmThickness, Count
 };
 struct MaterialPresetControl {
     MaterialPresetProperty property;

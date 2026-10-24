@@ -366,9 +366,14 @@ LightPasses shade(const VoxelMaterialDefinition& material,Float4 base,Float3 nor
     out.directDiffuse=multiply(mul3(diffuseColor,sunIrradiance),sunTerm);
     const ShadingLobes lobes=material.shadingModel==MaterialShadingModel::ClearCoat
         ? shade_clear_coat_direct(normal,view,light,sunIrradiance,rgb,material.metallic,material.roughness,material.specular,
-                                  material.clearCoat,material.clearCoatRoughness)
-        : shade_direct_light(normal,view,light,sunIrradiance,rgb,material.metallic,material.roughness,material.specular);
-    out.directSpecular=multiply(lobes.specular,kCpuRadianceScale);
+                                  material.clearCoat,material.clearCoatRoughness,material.iridescence,material.iridescenceIor,
+                                  material.iridescenceThicknessNm,material.indexOfRefraction)
+        : shade_direct_light(normal,view,light,sunIrradiance,rgb,material.metallic,material.roughness,material.specular,
+                             material.iridescence,material.iridescenceIor,material.iridescenceThicknessNm,material.indexOfRefraction);
+    Float3 specularSum=lobes.specular;
+    if(material_has_sheen(material))
+        specularSum=add(specularSum,sheen_direct(normal,view,light,sunIrradiance,material.sheenColor,material.sheenRoughness));
+    out.directSpecular=multiply(specularSum,kCpuRadianceScale);
     if(material.shadingModel==MaterialShadingModel::ClearCoat&&material.clearCoat>0.0F){
         const Float3 coat=fresnel_schlick(std::clamp(dot(view,halfVector),0.0F,1.0F),{0.04F,0.04F,0.04F});
         const float c=std::clamp(material.clearCoat,0.0F,1.0F);
@@ -381,7 +386,8 @@ LightPasses shade(const VoxelMaterialDefinition& material,Float4 base,Float3 nor
         const Float3 irradiance=multiply(hemisphere_light(environment,normal),intensity*ambientOcclusion);
         const Float3 reflection=subtract(multiply(normal,2.0F*dot(normal,view)),view);
         const ShadingLobes ambient=shade_ambient_light(normal,view,irradiance,multiply(hemisphere_light(environment,reflection),intensity),
-                                                       rgb,material.metallic,material.roughness,material.specular,ambientOcclusion);
+                                                       rgb,material.metallic,material.roughness,material.specular,ambientOcclusion,
+                                                       material.iridescence,material.iridescenceIor,material.iridescenceThicknessNm,material.indexOfRefraction);
         out.indirectDiffuse=ambient.diffuse;out.indirectSpecular=ambient.specular;
     }
     if(material.shadingModel==MaterialShadingModel::TwoSidedFoliage){

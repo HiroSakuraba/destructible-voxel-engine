@@ -17,9 +17,11 @@ struct MaterialBakeRecipe {
     render::MaterialTextureBakeSettings settings,bakedSettings;
     std::uint64_t bakedSourceHash{},bakedAssetHash{};
     std::filesystem::path outputDirectory;
+    render::MaterialBakeScene scene; // frozen neighbouring geometry for reproducible AO/light rebakes
 };
 struct MaterialBakeStatus {bool stale{};std::string reason;std::uint64_t key{};};
-[[nodiscard]] MaterialBakeStatus material_bake_status(const EditorObject&,const RigidTransform& worldPose);
+[[nodiscard]] MaterialBakeStatus material_bake_status(const EditorObject&,const RigidTransform& worldPose,
+    const render::MaterialBakeScene* liveScene=nullptr,const RenderEnvironment* liveLighting=nullptr);
 [[nodiscard]] std::uint64_t material_bake_recipe_hash(const MaterialBakeRecipe&);
 // Rebinds both snapshots (and their baseline hashes) to a new owning object id. Polygon content
 // hashes include the object id, so duplicates, pastes and prefab instances must call this.

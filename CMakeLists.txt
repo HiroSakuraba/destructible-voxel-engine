@@ -178,6 +178,7 @@ add_library(dve_core
     src/gpu_material_surface_detail.cpp
     src/gpu_material_mapping.cpp
     src/render_environment.cpp
+    src/material_bake_options.cpp
     src/gpu_render_environment.cpp
     src/dvox.cpp
     src/matrix4.cpp
@@ -720,6 +721,7 @@ if(DVE_BUILD_RHI)
         src/render/polygon_renderer.cpp
         src/render/texture_mips.cpp
         src/render/material_texture_bake.cpp
+        src/render/material_bake_atlas.cpp
         src/render/layered_surface.cpp
         src/render/cpu_fog.cpp
         src/render/cpu_fog_cache.cpp
@@ -2748,6 +2750,9 @@ if(DVE_BUILD_TESTS)
 
     if(DVE_BUILD_EDITOR)
         if(TARGET dve_render_bridge)
+            add_executable(dve_material_bake_preparation_tests tests/test_material_bake_preparation.cpp)
+            target_link_libraries(dve_material_bake_preparation_tests PRIVATE dve::editor)
+            add_test(NAME dve_material_bake_preparation_tests COMMAND dve_material_bake_preparation_tests)
             add_executable(dve_material_bake_workflow_tests tests/test_material_bake_workflow.cpp)
             target_link_libraries(dve_material_bake_workflow_tests PRIVATE dve::editor)
             add_test(NAME dve_material_bake_workflow_tests COMMAND dve_material_bake_workflow_tests)

@@ -1,5 +1,6 @@
 #pragma once
 #include "dve/editor_polygon.hpp"
+#include "dve/material_displacement.hpp"
 #include <span>
 
 namespace dve::editor {
@@ -61,4 +62,25 @@ struct UvEditSettings { Float2 vector{}; Float2 pivot{.5F,.5F}; float angle{}; f
 // IDs identify triangle corners (face*3+corner), so shared vertex attributes never pull an
 // unselected face through a UV edit. UV0 and UV1 are independent.
 [[nodiscard]] PolygonEditResult edit_polygon_uv(const CookedPolygonAsset&,const std::set<std::uint32_t>& corners,UvEdit,const UvEditSettings& = {});
+// Authoring-time bake of material height displacement into the mesh itself:
+// the permanent counterpart of the runtime build_displaced_polygon_asset.
+// Whole-mesh operation. Every material is displaced from its bound height
+// texture through the runtime path's own conventions — red-channel bilinear
+// sampling with the binding's sampler and mapping transform, offset
+// (height - midpoint) * strengthMeters along the vertex normal, and
+// UV-preserving midpoint subdivision. Normals and tangents are rebuilt on
+// the result, so the baked mesh renders and voxelizes like authored geometry.
+struct MeshDisplacementBakeSettings {
+    float strengthMeters{0.02F};
+    float midpoint{0.5F};
+    std::uint32_t subdivisionLevels{2};
+    std::uint64_t maximumVertices{1000000};
+};
+struct MeshDisplacementBakeResult {
+    PolygonEditResult polygon;
+    PolygonDisplacementStats stats{};
+    [[nodiscard]] explicit operator bool() const noexcept { return bool(polygon); }
+};
+[[nodiscard]] MeshDisplacementBakeResult bake_editor_mesh_displacement(
+    const CookedPolygonAsset& source,const MeshDisplacementBakeSettings& settings);
 } // namespace dve::editor

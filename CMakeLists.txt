@@ -900,6 +900,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_edge_bevel.cpp
         src/editor_exact_cad.cpp
         src/editor_topology.cpp
+        src/editor_mesh_displacement.cpp
         src/editor_uv.cpp
         src/editor_model_import.cpp
         src/editor_tools.cpp
@@ -2959,6 +2960,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_mesh_authoring_tests tests/test_editor_mesh_authoring.cpp)
         target_link_libraries(dve_editor_mesh_authoring_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_mesh_authoring_tests COMMAND dve_editor_mesh_authoring_tests)
+        add_executable(dve_mesh_displacement_tests tests/test_mesh_displacement.cpp)
+        target_link_libraries(dve_mesh_displacement_tests PRIVATE dve::editor)
+        add_test(NAME dve_mesh_displacement_tests COMMAND dve_mesh_displacement_tests)
         add_executable(dve_editor_nurbs_reuse_tests tests/test_editor_nurbs_reuse.cpp)
         target_link_libraries(dve_editor_nurbs_reuse_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_reuse_tests COMMAND dve_editor_nurbs_reuse_tests)

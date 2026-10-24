@@ -11,7 +11,7 @@
 #include <map>
 namespace dve::editor {
 struct NativeMeshAuthoringState {
-    enum class Kind {None,Boolean,Topology,Uv,Hull};Kind kind{Kind::None};
+    enum class Kind {None,Boolean,Topology,Uv,Hull,Displace};Kind kind{Kind::None};
     EditorObjectId object{},operand{};MeshBoolean boolean{MeshBoolean::Union};bool replace{};PolygonEditResult result;
     std::uint64_t operandStamp{};RigidTransform booleanPose{};Float3 booleanMetric{1,1,1};
     bool diagnostics{};EdgeBevelSettings bevel;
@@ -24,6 +24,8 @@ struct NativeMeshAuthoringState {
     std::optional<std::uint64_t> bevelSourceTopologyHash;
     std::optional<SubdivisionSettings> bevelSourceSubdivision;
     int bevelField{};bool bevelReplaceTyped{true},bevelInputValid{true};
+    MeshDisplacementBakeSettings displace;PolygonDisplacementStats displaceStats{};
+    std::uint64_t displaceSourceHash{};int displaceField{};bool displaceReplaceTyped{true},displaceInputValid{true};
     std::uint32_t channel{},uvMode{};std::set<std::uint32_t> corners;Float2 center{.5F,.5F};float zoom{1};bool uvFocus{true},texture{};
     int tool{},axis{};bool dragging{},panning{},selecting{};int startX{},startY{},lastX{},lastY{};Float2 startUv{},pivot{},panStart{};
     PolygonUvAuthoring uvFlags;
@@ -69,6 +71,19 @@ void update_bevel(NativeMeshAuthoringState& state,const EditorObject& object) {
     const auto record=remap_polygon_uv_authoring_record(object,state.result.mesh,state.bevelAuthored.lineage,&error);
     if(!record){refuse(error);return;}
     state.bevelIdentities=changed.topology;state.bevelUvRecord=record;state.bevelDescendants=changed.descendants;
+}
+std::string displace_value(const NativeMeshAuthoringState& state,int field) {
+    if (field==1) return std::to_string(state.displace.subdivisionLevels);
+    return std::to_string(field==0?state.displace.strengthMeters:state.displace.midpoint);
+}
+void update_displace(NativeMeshAuthoringState& state,const EditorObject& object) {
+    state.displaceInputValid=true;
+    const auto refuse=[&](std::string error){state.result={*object.polygon,PolygonSelection{},std::move(error)};};
+    if(object.polygon->contentHash!=state.displaceSourceHash){refuse("Source geometry changed; close and reopen the displacement preview");return;}
+    if(object.prefabLink){refuse("Edit the prefab source or detach this instance before baking displacement");return;}
+    auto baked=bake_editor_mesh_displacement(*object.polygon,state.displace);
+    state.displaceStats=baked.stats;
+    state.result=std::move(baked.polygon);
 }
 UiRect uv_panel(UiRect view){int width=std::max(1,view.width/2);return {view.x+view.width-width,view.y,width,view.height};}
 UiRect uv_canvas(UiRect view){auto p=uv_panel(view);return {p.x+8,p.y+70,std::max(1,p.width-16),std::max(1,p.height-116)};}
@@ -135,7 +150,7 @@ std::set<std::uint32_t> uv_click(const CookedPolygonAsset& m,const NativeMeshAut
 std::set<EditorObjectId> NativeEditorController::mesh_authoring_hidden_objects() const{
 
     if(!meshAuthoring_||!meshAuthoring_->result)return {};const auto& s=*meshAuthoring_;
-    if(s.kind==NativeMeshAuthoringState::Kind::Boolean)return {s.object,s.operand};if(s.kind==NativeMeshAuthoringState::Kind::Topology && s.result)return {s.object};return {};
+    if(s.kind==NativeMeshAuthoringState::Kind::Boolean)return {s.object,s.operand};if(s.kind==NativeMeshAuthoringState::Kind::Topology && s.result)return {s.object};if(s.kind==NativeMeshAuthoringState::Kind::Displace && s.result)return {s.object};return {};
 }
 void NativeEditorController::refresh_mesh_authoring_menu_state(){
     auto primary=workspace_.selected_object();auto* object=primary?workspace_.document().find_object(*primary):nullptr;
@@ -153,6 +168,7 @@ void NativeEditorController::refresh_mesh_authoring_menu_state(){
     for(auto id:{"mesh.hull_fit","mesh.hull_edit"})enabled(id,mesh&&mesh_boolean_available(),"Select an unlocked polygon mesh in a build with Manifold authoring");
     enabled("mesh.hull_remove",mesh&&object&&find_component_by_type(std::span<const Component>(object->components),kCollisionHullComponent),"Select a polygon with an authored collision hull");
     for(auto id:{"mesh.uv_editor","mesh.diagnostics"})enabled(id,mesh,"Select an unlocked polygon mesh in Edit mode");
+    enabled("mesh.displace",mesh,"Select an unlocked polygon mesh in Edit mode");
     const bool uvWorkspace=mesh && meshAuthoring_ && meshAuthoring_->kind==NativeMeshAuthoringState::Kind::Uv &&
         meshAuthoring_->object==object->id;
     const bool flagPreview=polygonPreviewBefore_ || mesh_authoring_dragging() || gizmoDragging_ ||
@@ -343,6 +359,16 @@ bool NativeEditorController::dispatch_mesh_authoring_action(std::string_view act
         auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<RemoveComponentCommand>(object->id,c->id,"Remove collision hull"));s.kind=NativeMeshAuthoringState::Kind::None;set_status(result.success?"Removed authored hull; default collision proxy restored":result.message,!result.success);return result.success;
     }
     if(action=="mesh.diagnostics"){s.object=object->id;s.diagnostics=!s.diagnostics;auto d=diagnose_polygon_topology(*object->polygon);set_status("Topology: "+std::to_string(d.boundaries)+" boundary edges, "+std::to_string(d.nonmanifold)+" nonmanifold, "+std::to_string(d.inconsistentWinding)+" winding errors, "+std::to_string(d.degenerate)+" degenerate triangles");return true;}
+    if(action=="mesh.displace"){
+        if(s.kind==NativeMeshAuthoringState::Kind::Topology||s.kind==NativeMeshAuthoringState::Kind::Boolean) {
+            set_status("Apply or close the active mesh preview first",true);return false;
+        }
+        cancel_mesh_authoring_drag();close_previews_for_voxel_edit("mesh displacement");
+        s.displace=MeshDisplacementBakeSettings{};s.displaceSourceHash=object->polygon->contentHash;
+        s.kind=NativeMeshAuthoringState::Kind::Displace;s.object=object->id;s.displaceField=0;s.displaceReplaceTyped=true;s.typed.clear();
+        update_displace(s,*object);
+        set_status(s.result?"Displacement options: Strength (m), Subdivisions, Midpoint; Enter Apply, Esc Cancel":s.result.error,!s.result);return true;
+    }
     TopologyEdit op;
     if(action=="mesh.bridge"||action=="mesh.cap") {
         if(s.kind==NativeMeshAuthoringState::Kind::Topology||s.kind==NativeMeshAuthoringState::Kind::Boolean) {
@@ -431,6 +457,43 @@ bool NativeEditorController::mesh_authoring_key(std::string_view key,bool contro
         if(s.bevelField==0)s.bevel.width=value;else if(s.bevelField==1)s.bevel.segments=std::uint32_t(value);
         else if(s.bevelField==2)s.bevel.depth=value;else s.bevel.smoothingAngle=value;
         update_bevel(s,*object);return true;
+    }
+    if(s.kind==NativeMeshAuthoringState::Kind::Displace){
+        if(control)return false;
+        if(key=="escape"){s.kind=NativeMeshAuthoringState::Kind::None;refresh_menu_state();set_status("Displacement cancelled; source unchanged");return true;}
+        if(key=="enter"||key=="return"){
+            if(workspace_.selection_count()!=1||workspace_.selected_object()!=s.object){set_status("Select the displacement source before applying its preview",true);return true;}
+            if(object->polygon->contentHash!=s.displaceSourceHash){update_displace(s,*object);set_status(s.result.error,true);return true;}
+            if(!s.displaceInputValid){set_status(s.result.error,true);return true;}
+            update_displace(s,*object);
+            if(!s.result){set_status(s.result.error,true);return true;}
+            const auto before=capture_selection_snapshot();
+            auto result=workspace_.commands().execute(workspace_.document(),std::make_unique<ReplacePolygonCommand>(object->id,*object->polygon,s.result.mesh,"Displace from height texture"));
+            if(result.success){workspace_.commands().set_last_selection_transition(before,capture_selection_snapshot());s.kind=NativeMeshAuthoringState::Kind::None;}
+            set_status(result.success?"Baked height displacement into the mesh; Undo restores the original":result.message,!result.success);refresh_menu_state();return true;
+        }
+        bool update=false;
+        if(key=="tab") {s.displaceField=(s.displaceField+(shift?2:1))%3;s.typed.clear();s.displaceReplaceTyped=true;update=true;}
+        else if(key=="up"||key=="down"||key=="left"||key=="right") {
+            const float direction=key=="up"||key=="right"?1.0F:-1.0F;
+            if(s.displaceField==1)s.displace.subdivisionLevels=std::uint32_t(std::clamp(int(s.displace.subdivisionLevels)+int(direction),0,4));
+            else if(s.displaceField==2)s.displace.midpoint=std::clamp(s.displace.midpoint+direction*.05F,0.0F,1.0F);
+            else s.displace.strengthMeters=std::clamp(s.displace.strengthMeters*(direction>0?1.25F:0.8F),0.0001F,10.0F);
+            update=true;
+        }
+        if(update) {s.typed.clear();s.displaceReplaceTyped=true;update_displace(s,*object);return true;}
+        if(key=="backspace") {if(s.displaceReplaceTyped){s.typed.clear();s.displaceReplaceTyped=false;}else if(!s.typed.empty())s.typed.pop_back();}
+        else if((key.size()==1&&((key[0]>='0'&&key[0]<='9')||key[0]=='.'))||key=="period") {
+            if(s.displaceReplaceTyped){s.typed.clear();s.displaceReplaceTyped=false;}
+            if(s.typed.size()<16)s.typed+=key=="period"?".":std::string(key);
+        } else return true;
+        char* end{};const float value=std::strtof(s.typed.c_str(),&end);
+        if(s.typed.empty()||end!=s.typed.c_str()+s.typed.size()||!std::isfinite(value)) {s.displaceInputValid=false;s.result.error="Enter a finite number for the highlighted option";return true;}
+        const bool valid=s.displaceField==1?value>=0 && value<=4 && std::floor(value)==value:
+            s.displaceField==2?value>=0 && value<=1:value>0 && value<=10;
+        if(!valid){s.displaceInputValid=false;s.result.error="Strength >0 and <=10 m, Subdivisions 0..4, Midpoint 0..1";return true;}
+        if(s.displaceField==0)s.displace.strengthMeters=value;else if(s.displaceField==1)s.displace.subdivisionLevels=std::uint32_t(value);else s.displace.midpoint=value;
+        update_displace(s,*object);return true;
     }
     if(s.kind==NativeMeshAuthoringState::Kind::Boolean){
         if(control)return false;
@@ -546,6 +609,25 @@ bool NativeEditorController::mesh_authoring_pointer_down(PointerButton button,in
         else if(UiRect{panel.x+8+width,panel.y+191,width-3,23}.contains(x,y))(void)mesh_authoring_key("escape",false,false,false);
         return true; // Preview owns primary authoring input; Alt/non-primary camera gestures still work.
     }
+    if(s.kind==NativeMeshAuthoringState::Kind::Displace && button==PointerButton::Primary && layout_.viewport.contains(x,y)) {
+        if(!object->flags.visible||is_isolated_out(s.object)){cancel_mesh_authoring_drag();s.kind=NativeMeshAuthoringState::Kind::None;set_status("Displacement preview closed: object is hidden or isolated out",true);return true;}
+        const auto view=layout_.viewport;
+        const float strengths[]={0.005F,0.02F,0.08F};
+        for(int i=0;i<3;++i) if(bevel_button(view,0,i).contains(x,y)) {
+            s.displace.strengthMeters=strengths[i];s.typed.clear();s.displaceReplaceTyped=true;update_displace(s,*object);return true;
+        }
+        const std::uint32_t levels[]={0U,2U,4U};
+        for(int i=0;i<3;++i) if(bevel_button(view,1,i).contains(x,y)) {
+            s.displace.subdivisionLevels=levels[i];s.typed.clear();s.displaceReplaceTyped=true;update_displace(s,*object);return true;
+        }
+        for(int i=0;i<3;++i) if(bevel_field(view,i).contains(x,y)) {
+            s.displaceField=i;s.typed=displace_value(s,i);s.displaceReplaceTyped=true;update_displace(s,*object);return true;
+        }
+        const auto panel=bevel_panel(view);const int width=std::max(1,(panel.width-16)/2);
+        if(UiRect{panel.x+8,panel.y+191,width-3,23}.contains(x,y))(void)mesh_authoring_key("enter",false,false,false);
+        else if(UiRect{panel.x+8+width,panel.y+191,width-3,23}.contains(x,y))(void)mesh_authoring_key("escape",false,false,false);
+        return true; // Preview owns primary authoring input, like the bevel preview.
+    }
     if(s.kind==NativeMeshAuthoringState::Kind::Hull&&button==PointerButton::Primary&&layout_.viewport.contains(x,y)){
         auto points=hull_points(*object);float best=10;std::optional<std::uint32_t> chosen;for(std::uint32_t i=0;i<points.size();++i){auto p=project_world_to_screen(camera_,layout_.viewport,voxel_to_world(object->transform,object->voxelScale,points[i]));float distance=std::hypot(float(x)-p.x,float(y)-p.y);if(p.visible&&distance<best){best=distance;chosen=i;}}
         if(chosen){cancel_mesh_authoring_drag();if((modifiers&1U)==0)s.hullSelection.clear();if((modifiers&2U)&&s.hullSelection.contains(*chosen))s.hullSelection.erase(*chosen);else s.hullSelection.insert(*chosen);return true;}return false;
@@ -627,6 +709,23 @@ void NativeEditorController::draw_mesh_authoring(const IEditorCanvas& canvas,UiR
         const int width=std::max(1,(panel.width-16)/2);const UiRect apply{panel.x+8,panel.y+191,width-3,23},cancel{panel.x+8+width,panel.y+191,width-3,23};
         painter.fill(apply,s.result?color(40,92,64):color(68,44,44));painter.fill(cancel,color(55,64,78));label(apply,"Apply (Enter)",color(225,235,245));label(cancel,"Cancel (Esc)",color(225,235,245));
         label({panel.x+8,panel.y+215,panel.width-16,23},s.result?"Tab: field | Arrows: adjust | C: chamfer | R: round":s.result.error,s.result?color(185,200,220):color(255,145,130));return;
+    }
+    if(s.kind==NativeMeshAuthoringState::Kind::Displace){
+        if(s.result){EditorDocument preview("Displacement preview");EditorObject o(s.object,"Result");o.polygon=s.result.mesh;o.transform=object->transform;o.voxelScale=object->voxelScale;preview.add_object(std::move(o));for(const auto& t:build_editor_polygon_draw_list(preview,camera_,viewport,{}, {},20000))for(unsigned j=0;j<3;++j)line(t.points[j],t.points[(j+1)%3],color(255,175,55),2);}
+        const auto panel=bevel_panel(viewport);RectClipCanvas painter(canvas,panel);painter.fill(panel,color(23,32,43));
+        const auto label=[&](UiRect rect,std::string text,EditorColor shade){painter.text(rect.x+5,rect.y+16,elide_text_to_width(painter,text,std::max(1,rect.width-10)),shade);};
+        label({panel.x+8,panel.y+3,panel.width-16,22},"Displace from Height Texture (Bake)",color(255,210,140));
+        const char* presets[]={"Strength 5 mm","Strength 20 mm","Strength 80 mm"};
+        for(int i=0;i<3;++i){const auto button=bevel_button(viewport,0,i);painter.fill(button,color(38,48,64));label(button,presets[i],color(225,235,245));}
+        const char* levelPresets[]={"Subdivide 0","Subdivide 2","Subdivide 4"};
+        for(int i=0;i<3;++i){const auto button=bevel_button(viewport,1,i);painter.fill(button,color(38,48,64));label(button,levelPresets[i],color(225,235,245));}
+        const char* fields[]={"Strength (m)","Subdivisions","Midpoint"};
+        for(int i=0;i<3;++i){const auto field=bevel_field(viewport,i);painter.fill(field,s.displaceField==i?color(66,82,106):color(32,42,56));
+            label(field,std::string(fields[i])+": "+(s.displaceField==i&&!s.typed.empty()?s.typed:displace_value(s,i)),color(225,235,245));}
+        const int width=std::max(1,(panel.width-16)/2);const UiRect apply{panel.x+8,panel.y+191,width-3,23},cancel{panel.x+8+width,panel.y+191,width-3,23};
+        painter.fill(apply,s.result?color(40,92,64):color(68,44,44));painter.fill(cancel,color(55,64,78));label(apply,"Apply (Enter)",color(225,235,245));label(cancel,"Cancel (Esc)",color(225,235,245));
+        const std::string info=s.result?("Tab: field | Arrows: adjust | "+std::to_string(s.displaceStats.outputTriangles)+" tris | max "+std::to_string(s.displaceStats.maximumAbsoluteDisplacement)+" m"):s.result.error;
+        label({panel.x+8,panel.y+215,panel.width-16,23},info,s.result?color(185,200,220):color(255,145,130));return;
     }
     if(s.kind==NativeMeshAuthoringState::Kind::Boolean){
         if(s.result){EditorDocument preview("Boolean preview");EditorObject o(s.object,"Result");o.polygon=s.result.mesh;o.subdivision=s.replace?object->subdivision:std::optional<SubdivisionSettings>{};if(o.subdivision)*o.subdivision=remap_subdivision_topology(*object->polygon,*o.polygon,*o.subdivision);o.transform=s.booleanPose;o.voxelScale=s.booleanMetric;preview.add_object(std::move(o));for(const auto& triangle:build_editor_polygon_draw_list(preview,camera_,viewport,{}, {},20000))for(unsigned j=0;j<3;++j)line(triangle.points[j],triangle.points[(j+1)%3],color(255,175,55),2);}

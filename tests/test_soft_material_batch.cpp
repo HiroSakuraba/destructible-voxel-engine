@@ -90,6 +90,22 @@ Float3 scatter_image(VoxelMaterialDefinition m,float distance){
     RenderEnvironment env;env.sunIntensity=0;env.skyColor={1,1,1};env.groundColor={1,1,1};env.pathTraceSamples=256;env.pathTraceBounces=6;
     SceneLighting lighting({},objects,env,1);return lighting.camera_transport({0,0,1},{0,0,-1},5,1234).sum();
 }
+Float3 sun_image(VoxelMaterialDefinition m){
+    auto sample=make_editor_polygon_cube(1);sample.materials[0]=m;
+    for(auto& vertex:sample.vertices){vertex.position.x-=.5F;vertex.position.y-=.5F;vertex.position.z*=.02F;}
+    refresh_editor_polygon(sample);const std::array<PolygonRenderInstance,1> objects{{{1,&sample}}};
+    RenderEnvironment env;env.skyColor={0,0,0};env.groundColor={0,0,0};env.sunIntensity=1;env.sunDirection={0,0,1};env.pathTraceSamples=64;env.pathTraceBounces=4;
+    SceneLighting lighting({},objects,env,1);return lighting.camera_transport({0,0,1},{0,0,-1},5,99).sum();
+}
+void subsurface_boundary_highlight(){
+    // The rough entry boundary of a subsurface material reflects the sun (a directional light that a
+    // sampled reflection can never hit); a smooth boundary has no reflection lobe to evaluate.
+    auto wax=MaterialPresetCatalog::starter().find("dve.wax.paraffin")->defaults;
+    auto smooth=wax;smooth.roughness=0;
+    const float rough=brightness(sun_image(wax)),flat=brightness(sun_image(smooth));
+    check(std::isfinite(rough)&&std::isfinite(flat),"sun transport finite");
+    check(rough>flat+.05F,"rough subsurface boundary reflects the sun");
+}
 void subsurface_transport(){
     auto catalog=MaterialPresetCatalog::starter();auto wax=catalog.find("dve.wax.paraffin")->defaults;
     const auto a=scatter_image(wax,.001F),b=scatter_image(wax,.04F);
@@ -101,4 +117,4 @@ void subsurface_transport(){
     check(brightness(light)>brightness(deep),"skin pigment must affect volumetric transport");
 }
 }
-int main(){auto root=std::filesystem::temp_directory_path()/"dve-soft-material-batch";try{std::filesystem::create_directories(root);bubble_energy();persistence(root);subsurface_transport();std::filesystem::remove_all(root);std::cout<<"Soft material presets, film energy, persistence and subsurface transport passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}
+int main(){auto root=std::filesystem::temp_directory_path()/"dve-soft-material-batch";try{std::filesystem::create_directories(root);bubble_energy();persistence(root);subsurface_transport();subsurface_boundary_highlight();std::filesystem::remove_all(root);std::cout<<"Soft material presets, film energy, persistence and subsurface transport passed\n";}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

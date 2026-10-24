@@ -81,7 +81,9 @@ int main() {
     const auto ep = render::evaluate_material_bsdf(plain, n, v, l, 1.0F, 1.5F);
     const auto ev = render::evaluate_material_bsdf(velvet, n, v, l, 1.0F, 1.5F);
     check(ev.value.specular.x > ep.value.specular.x, "eval adds the sheen lobe");
-    check(near(ev.value.specular.x - ep.value.specular.x, 0.103896, 2e-4), "eval sheen amount matches reference brdf");
+    // MaterialBsdfEvaluation::value is f x abs(n.wi): the sheen lobe carries the incident cosine (l is at 70 deg).
+    const double cosL = 0.3420201;
+    check(near(ev.value.specular.x - ep.value.specular.x, 0.103896 * cosL, 2e-4), "eval sheen amount is the reference brdf times NdotL");
     // A black base with sheen only: the mixture is pure sheen, so the eval pdf is the Charlie
     // pdf itself and the specular value is the sheen brdf (adding a lobe dilutes the other
     // lobes' mixture shares, so a plain pdf comparison would be meaningless).
@@ -92,7 +94,7 @@ int main() {
     pure.sheenRoughness = 0.5F;
     const auto es = render::evaluate_material_bsdf(pure, n, v, l, 1.0F, 1.5F);
     check(near(es.pdf, 0.056235, 2e-4), "pure-sheen eval pdf is the Charlie pdf");
-    check(near3(es.value.specular, 0.103896, 0.051948, 0.025974, 2e-4), "pure-sheen eval value is the sheen brdf");
+    check(near3(es.value.specular, 0.103896 * cosL, 0.051948 * cosL, 0.025974 * cosL, 2e-4), "pure-sheen eval value is the sheen brdf times NdotL");
     check(near3(ev.value.diffuse, ep.value.diffuse.x, ep.value.diffuse.y, ep.value.diffuse.z, 1e-6),
           "diffuse untouched by sheen");
 
@@ -108,6 +110,8 @@ int main() {
               "sheen sample weight finite");
         const auto at = render::evaluate_material_bsdf(velvet, n, v, s.direction, 1.0F, 1.5F);
         check(near(s.pdf, at.pdf, 1e-4), "sample pdf matches eval mixture pdf");
+        check(near(s.weight.x * s.pdf, at.value.diffuse.x + at.value.specular.x, 1e-3),
+              "sample weight x pdf equals the eval value (f x NdotL)");
     }
     check(sampled, "sheen band sampling produced a valid sample");
 

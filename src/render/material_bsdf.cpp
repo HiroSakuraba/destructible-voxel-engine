@@ -165,9 +165,9 @@ MaterialBsdfEvaluation evaluate_material_bsdf(const VoxelMaterialDefinition &m, 
                                      m.indexOfRefraction);
         out.value.diffuse = times(opaque.diffuse, 1 - t);
         out.value.specular = times(opaque.specular, 1 - t);
-        if (material_has_sheen(m))
+        if (material_has_sheen(m))   // sheen_direct = brdf x NdotL: the value carries the incident cosine like the other lobes
             out.value.specular =
-                plus(out.value.specular, times(evaluate_sheen(n, v, l, m.sheenColor, m.sheenRoughness).brdf, 1 - t));
+                plus(out.value.specular, times(sheen_direct(n, v, l, {1, 1, 1}, m.sheenColor, m.sheenRoughness), 1 - t));
         out.pdf = (1 - t) * opaque_pdf(m, n, v, l);
     }
     if (t > 0) {

@@ -903,6 +903,24 @@ struct SceneLighting::Impl {
         }
         if(domain) {
           auto boundaryMaterial=m;boundaryMaterial.transmission=1;
+          // Direct light reflected by the (rough) entry boundary: a sampled reflection only finds
+          // area emitters and the sky, never the sun or zero-area lights, so evaluate the
+          // dielectric boundary's reflection against those explicitly (the volume event below
+          // supplies the transmitted/diffuse part). Same normal as the boundary sampler, so the
+          // MIS densities agree; a smooth boundary has no reflection lobe to evaluate here.
+          {
+            const auto boundaryView=mul(direction,-1);
+            const auto boundaryLocal=direct(hit->p,geometric,boundaryView,boundaryMaterial,rng,true,1,m.indexOfRefraction);
+            auto highlight=sum3(boundaryLocal.diffuse,boundaryLocal.specular);
+            if(env.sunIntensity>0) {
+              const auto sun=unit(env.sunDirection);
+              const auto value=evaluate_material_bsdf(boundaryMaterial,geometric,boundaryView,sun,1,m.indexOfRefraction).value;
+              const auto visibility=shadow_transmission(spawn(hit->p,geometric,sun),sun,env.shadowMaxDistanceMeters/scale);
+              highlight=sum3(highlight,product(sum3(value.diffuse,value.specular),
+                                               product(mul(env.sunColor,env.sunIntensity*pi),visibility)));
+            }
+            out.radiance=sum3(out.radiance,product(throughput,highlight));
+          }
           const auto boundarySample=sample_material_bsdf(boundaryMaterial,geometric,mul(direction,-1),1,m.indexOfRefraction,0,rng.next(),rng.next(),rng.next());
           if(!boundarySample.valid)break;
           const bool reflected=!boundarySample.transmitted;
@@ -945,7 +963,8 @@ struct SceneLighting::Impl {
             continuationPoint=walk.position;continuationPdf=(std::max)(0.F,dot3(exitNormal,direction))/pi;
           }
           if(depth==0)out.firstSpecular=reflected;
-          previousPoint=continuationPoint;previousPdf=continuationPdf;previousDelta=reflected;
+          if(reflected){continuationPdf=boundarySample.pdf;}
+          previousPoint=continuationPoint;previousPdf=continuationPdf;previousDelta=reflected&&boundarySample.delta;
           rayMaximum=maximum;++depth;continue;
         }
       }

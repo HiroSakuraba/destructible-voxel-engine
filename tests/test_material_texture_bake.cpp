@@ -130,7 +130,15 @@ void files_and_editor(const std::filesystem::path& root,const char* cli){
     check(controller.material_panel_key("escape",false,false,false)&&!controller.long_job_view().active,"Esc reaches background cancellation through material panel");check(w.commands().size()==count+1,"cancel has no apply command");
     if(cli){
         const auto command=std::string("\"")+cli+"\" \""+(bundle/"source.dmesh").string()+"\" \""+(root/"cli").string()+"\" --resolution 32 --padding 2";
-        check(std::system(command.c_str())==0,"CLI successful export");check(std::system((command+" --uv 3").c_str())!=0,"CLI rejects invalid UV");check(std::system(command.c_str())!=0,"CLI rejects existing output");
+        // cmd.exe /c strips the outer quotes of a command that starts with a quote, so wrap it once more on Windows.
+        const auto run=[](const std::string& line){
+#if defined(_WIN32)
+            return std::system(("\""+line+"\"").c_str());
+#else
+            return std::system(line.c_str());
+#endif
+        };
+        check(run(command)==0,"CLI successful export");check(run(command+" --uv 3")!=0,"CLI rejects invalid UV");check(run(command)!=0,"CLI rejects existing output");
     }
 }
 }

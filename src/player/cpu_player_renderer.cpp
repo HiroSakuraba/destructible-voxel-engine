@@ -144,6 +144,69 @@ void draw_racing_effects(std::span<const RacingVisualEffect> effects,
 }
 
 
+// Small deterministic suspended motes. Camera-centred *sampling*, not
+// camera-anchored particles: cell coordinates are stable in world metres.
+// Bounded at 9^3 candidates and only lit by actual underwater irradiance.
+void draw_underwater_motes_hdr(const PlayerRenderView& view,
+                               const RenderEnvironment& environment,
+                               render::PolygonRenderTarget& target) {
+    if(!view.ocean||!view.waterVolume||!target.valid())return;
+    const auto cam=racing_camera(view.camera,target.width,target.height);
+    if(cam.tanHalf<=0)return;
+    constexpr float grid=2.5F;
+    const int baseX=int(std::floor(cam.eye.x/grid)),baseY=int(std::floor(cam.eye.y/grid));
+    const int baseZ=int(std::floor(cam.eye.z/grid));
+    for(int dz=-4;dz<=4;++dz)for(int dy=-4;dy<=4;++dy)for(int dx=-4;dx<=4;++dx){
+        const int x=baseX+dx,y=baseY+dy,z=baseZ+dz;
+        std::uint32_t seed=std::uint32_t(x)*73856093U^
+            std::uint32_t(y)*19349663U^std::uint32_t(z)*83492791U;
+        seed^=seed>>15;seed*=2246822519U;seed^=seed>>13;
+        const auto unit=[](std::uint32_t h){return float(h&65535U)/65535.F;};
+        Float3 p={grid*(x+.15F+.7F*unit(seed)),
+                  grid*(y+.15F+.7F*unit(seed>>5)),
+                  grid*(z+.15F+.7F*unit(seed>>11))};
+        const auto w=sample_water_volume(*view.ocean,*view.waterVolume,p,view.oceanTime);
+        if(!w.submerged||p.z<w.seafloorHeight||unit(seed>>3)>w.particleDensity)return;
+        RacingProjected screen{};
+        if(!project_racing(cam,p,screen))continue;
+        if(screen.x<1||screen.y<1||screen.x>=target.width-1||
+           screen.y>=target.height-1)continue;
+        const int px=int(screen.x),py=int(screen.y);
+        const auto at=std::size_t(py)*target.width+std::size_t(px);
+        if(screen.depth>=target.depth[at]-.00001F)continue;
+        const auto along=subtract(p,cam.eye);
+        const auto ray=water_ray_segment(*view.ocean,cam.eye,
+                normalize(along),length(along),view.oceanTime);
+        if(ray.lengthMeters<=0)continue;
+        const auto transmission=water_transmittance(w,ray.lengthMeters);
+        const auto sun=underwater_daylight(w,w.depthBelowSurface);
+        Float3 sources={sun.x*environment.sunIntensity*.24F,
+                        sun.y*environment.sunIntensity*.24F,
+                        sun.z*environment.sunIntensity*.24F};
+        for(const auto& lamp:view.underwaterLamps)
+            sources=add(sources,evaluate_underwater_lamp(lamp,w,p));
+        constexpr float moteScale=.42F;
+        const Float3 sparkle={
+           sources.x*transmission.x*moteScale,
+           sources.y*transmission.y*moteScale,
+           sources.z*transmission.z*moteScale};
+        const float radius=std::clamp(screen.pixelsPerMetre*.022F,.6F,2.F);
+        for(int oy=-2;oy<=2;++oy)for(int ox=-2;ox<=2;++ox){
+            const int sx=px+ox,sy=py+oy;
+            if(sx<0||sy<0||sx>=int(target.width)||sy>=int(target.height))continue;
+            const float u=(sx+.5F-screen.x)/radius,v=(sy+.5F-screen.y)/radius;
+            const float falloff=std::max(0.F,1.F-u*u-v*v);
+            if(falloff<=0)continue;
+            const std::size_t idx=std::size_t(sy)*target.width+std::size_t(sx);
+            if(screen.depth>=target.depth[idx]-.00001F)continue;
+            auto& c=target.hdrColor[idx];
+            c.x=std::min(64.F,c.x+sparkle.x*falloff);
+            c.y=std::min(64.F,c.y+sparkle.y*falloff);
+            c.z=std::min(64.F,c.z+sparkle.z*falloff);
+        }
+    }
+}
+
 // HDR participating-medium pass. All distances below are world metres;
 // PolygonRenderTarget depth is normalized linear camera-forward depth, not
 // Euclidean distance and not voxel units.
@@ -459,6 +522,7 @@ public:
                                      fogSettings,&stats_.fog,error))return false;
         }
         apply_underwater_volume_hdr(view,environment,target_);
+        draw_underwater_motes_hdr(view,environment,target_);
         if (sceneLighting) (void)render::apply_cpu_bloom(target_, environment);
         stats_.renderMilliseconds = milliseconds_since(start);
 

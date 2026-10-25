@@ -133,6 +133,9 @@ PrototypeGame::~PrototypeGame()=default;
 bool PrototypeGame::active()const noexcept{return impl_->racing?impl_->racing->hud().active:impl_->hud.active;}
 const PrototypeHud& PrototypeGame::hud()const noexcept{return impl_->racing?impl_->racing->hud():impl_->hud;}
 PrototypeCamera PrototypeGame::camera()const{return impl_->racing?impl_->racing->camera():impl_->camera();}
+std::span<const RacingVisualEffect> PrototypeGame::racing_visual_effects()const noexcept {
+ return impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
+}
 void PrototypeGame::look(float x,float y){if(impl_->racing)return;if(std::isfinite(x)&&std::isfinite(y)&&impl_->hud.phase==PrototypePhase::Playing){impl_->lookYaw+=std::clamp(x,-1.F,1.F);impl_->lookPitch+=std::clamp(y,-1.F,1.F);}}
 bool PrototypeGame::start(std::string* error){
  auto& s=*impl_;

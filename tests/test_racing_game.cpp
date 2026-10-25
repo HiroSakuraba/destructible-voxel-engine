@@ -45,7 +45,9 @@ void gate_rules(){RigidTransform p;check(racing_gate_crossed({0,-2,0},{0,2,0},p,
 }
 void driving(){Fixture a,b;a.world.set_axis("move_y",1);b.world.set_axis("move_y",1);a.tick(120);b.tick(240,1.F/120);
  check(length(subtract(*a.world.position(a.car),*b.world.position(b.car)))<.001F,"fixed driving identical at 60 and 120 Hz");check(a.world.position(a.car)->y>15,"throttle actually drives");
- const auto speed=a.game->status().speedMetersPerSecond;a.world.set_action_pressed("jump",true);a.tick(30);check(a.game->status().speedMetersPerSecond<speed,"handbrake reduces speed");a.world.set_action_pressed("jump",false);
+ const auto speed=a.game->status().speedMetersPerSecond;a.world.set_action_pressed("jump",true);a.tick(30);check(a.game->status().speedMetersPerSecond<speed,"handbrake reduces speed");
+ check(!a.game->visuals().empty(),"handbrake produces bounded tire marks");
+ check(a.game->visuals().size()<=384U,"visual effects obey bounded capacity");a.world.set_action_pressed("jump",false);
  const auto before=a.world.transform(a.car)->rotation;a.world.set_axis("move_x",1);a.tick(30);const auto after=a.world.transform(a.car)->rotation;check(std::abs(before.z-after.z)>.01F,"steering rotates the car");
  auto time=a.world.elapsed_seconds();a.tap("pause");a.tick(10);check(a.game->hud().phase==PrototypePhase::Paused&&a.world.elapsed_seconds()==time,"pause freezes world and race timer");a.tap("pause");
  auto camera=a.game->camera();a.tap("interact");check(length(subtract(camera.position,a.game->camera().position))>1,"chase and hood camera differ");
@@ -91,7 +93,20 @@ void integration(const std::filesystem::path& root){
  EditorWorkspace workspace(clone_editor_document(document));EditorPlaySession session;EditorPlaySessionConfig config;config.physicsBackend=Physics3DBackend::Reference;check(session.start(workspace,materials,EditorMode::Play,config,{},&error),error);check(session.update(workspace,1.F/60,&error),error);check(session.hud().prototype&&session.hud().prototype->racing,"editor uses racing runtime");session.set_axis("move_y",1);for(unsigned n=0;n<250;++n)check(session.update(workspace,1.F/60,&error),error);check(session.prototype_camera()->up.z==1,"Z-up racing camera in editor");check(session.stop(workspace,&error),error);for(const auto& [id,original]:document.objects()){const auto* restored=workspace.document().find_object(id);check(restored&&length(subtract(restored->transform.position,original.transform.position))<.0001F,"Stop restores authored transforms");check(!find_component_by_type(restored->components,"dve.prototype.race_state"),"runtime state never leaks into authored scene");}
  auto app=boot(root/"project",root/"saves");check(app->prototype_hud()&&app->prototype_hud()->racing,"standalone racing HUD");const auto car=*app->world().find_by_name("Race Car");const auto start=*app->world().position(car);platform::PlatformEvent e;e.type=platform::EventType::KeyDown;e.key="w";app->handle_event(e);for(unsigned n=0;n<150;++n)app->tick(1.F/60);check(length(subtract(*app->world().position(car),start))<.001F,"countdown locks car");for(unsigned n=0;n<150;++n)app->tick(1.F/60);check(app->world().position(car)->x>start.x+10,"keyboard drives exported car");e.type=platform::EventType::KeyUp;app->handle_event(e);
  auto saved=app->save_game("race",&error);check(bool(saved),error);const auto hud=app->prototype_hud()->prompt;const auto position=*app->world().position(car);for(unsigned n=0;n<10;++n)app->tick(1.F/60);check(bool(app->load_game("race",&error)),error);check(app->prototype_hud()->prompt==hud&&length(subtract(*app->world().position(car),position))<.0001F,"standalone save restores race and car");
- auto renderer=make_cpu_player_renderer(nullptr);check(renderer->resize(480,270,&error),error);std::vector<GameRenderObject> objects;check(renderer->render(app->render_view(objects,16.F/9),&error),error);const auto* image=renderer->readback();check(image&&image->valid(),"racing framebuffer");std::ofstream ppm(root/"racing.ppm",std::ios::binary);ppm<<"P6\n"<<image->width<<' '<<image->height<<"\n255\n";for(std::size_t n=0;n<image->pixels.size();n+=4){ppm.put(char(image->pixels[n]));ppm.put(char(image->pixels[n+1]));ppm.put(char(image->pixels[n+2]));}
+ auto renderer=make_cpu_player_renderer(nullptr);check(renderer->resize(480,270,&error),error);std::vector<GameRenderObject> objects;check(renderer->render(app->render_view(objects,16.F/9),&error),error);const auto* image=renderer->readback();check(image&&image->valid(),"racing framebuffer");
+ const auto basePixels=image->pixels;
+ auto withFx=app->render_view(objects,16.F/9);
+ const auto front=normalize(subtract(withFx.camera.target,withFx.camera.position));
+ const auto centre=add(withFx.camera.position,multiply(front,2.0F));
+ const std::array<RacingVisualEffect,2> overlay{{
+   {RacingVisualKind::Dust,centre,{0,0,0},0.8F,0.01F,2.0F,0.8F},
+   {RacingVisualKind::SkidMark,add(centre,Float3{-0.4F,0,0}),add(centre,Float3{0.4F,0,0}),0.18F,0,3.0F,0.7F}
+ }};
+ withFx.racingEffects=overlay;
+ check(renderer->render(withFx,&error),error);
+ const auto* effectImage=renderer->readback();
+ check(effectImage&&effectImage->pixels!=basePixels,"world-space tire effects change actual rendered framebuffer");
+ check(effectImage->valid(),"tire effects preserve valid framebuffer");std::ofstream ppm(root/"racing.ppm",std::ios::binary);ppm<<"P6\n"<<image->width<<' '<<image->height<<"\n255\n";for(std::size_t n=0;n<image->pixels.size();n+=4){ppm.put(char(image->pixels[n]));ppm.put(char(image->pixels[n+1]));ppm.put(char(image->pixels[n+2]));}
  std::vector<std::filesystem::path> files;for(const auto& f:std::filesystem::recursive_directory_iterator(root/"project"))if(f.is_regular_file())files.push_back(std::filesystem::relative(f.path(),root/"project"));check(build_dvepak(root/"project",files,root/"racing.dvepak",{},nullptr,&error),error);auto packed=boot(root/"racing.dvepak",root/"packed-saves");check(packed->prototype_hud()->racing,"packaged racer boots same runtime");
 }
 }

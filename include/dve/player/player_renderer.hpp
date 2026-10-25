@@ -38,6 +38,7 @@ struct PlayerRenderView {
     render::CpuFogSettings fogSettings{};
     render::CpuSurfaceDetailSettings surfaceDetail{};
     const PrototypeHud* prototypeHud{};
+    std::span<const RacingVisualEffect> racingEffects{}; // metres; lifetime owned by PrototypeGame
 };
 
 struct PlayerRenderStats {

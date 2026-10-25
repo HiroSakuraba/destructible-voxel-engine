@@ -10,10 +10,29 @@ namespace dve {
 class GameWorld;
 inline constexpr std::string_view kPrototypePrefix="dve.prototype.";
 enum class PrototypePhase : unsigned { Playing,Paused,Won,Lost };
+enum class RacingVisualKind : std::uint8_t { SkidMark, Dust, TireSmoke };
+struct RacingVisualEffect {
+    RacingVisualKind kind{RacingVisualKind::SkidMark};
+    Float3 a{}; // world-space position or trail start, metres
+    Float3 b{}; // trail end or particle velocity, metres/s
+    float radius{0.16F};
+    float age{};
+    float lifetime{5.0F};
+    float opacity{0.5F};
+};
+struct RacingAudioState {
+    bool active{};
+    float speedFraction{};
+    float throttle{};
+    float skid{};
+    float impactSpeed{};
+    std::uint64_t impactCount{};
+};
 struct PrototypeHud {
     bool active{},debug{},racing{};
     std::string stats;
     std::string vehicleTelemetry;
+    RacingAudioState vehicleAudio{};
     PrototypePhase phase{PrototypePhase::Playing};
     float health{},maximumHealth{};
     unsigned collected{},required{};
@@ -40,6 +59,7 @@ public:
     [[nodiscard]] bool active() const noexcept;
     [[nodiscard]] PrototypeCamera camera() const;
     [[nodiscard]] const PrototypeHud& hud() const noexcept;
+    [[nodiscard]] std::span<const RacingVisualEffect> racing_visual_effects() const noexcept;
     // After a GameWorld save restore, recover kit state and rebind saved trigger IDs.
     [[nodiscard]] bool after_restore(std::string* error=nullptr);
 private: struct Impl;std::unique_ptr<Impl> impl_;

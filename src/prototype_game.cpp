@@ -1,5 +1,6 @@
 #include "dve/prototype_game.hpp"
 #include "dve/racing_game.hpp"
+#include "dve/flying_game.hpp"
 #include "dve/game_world.hpp"
 #include "dve/gameplay_runtime.hpp"
 #include "dve/physics3d_backend.hpp"
@@ -35,7 +36,7 @@ struct PrototypeGame::Impl {
  double nextDamage{};};
  struct Link {std::string source,event,target,action;
  float amount{};};
- GameWorld& world;PrototypeHud hud;std::unique_ptr<RacingGame> racing;
+ GameWorld& world;PrototypeHud hud;std::unique_ptr<RacingGame> racing;std::unique_ptr<FlyingGame> flying;
  std::map<std::string,Actor,std::less<>> actors;
  std::vector<Link> links;
  std::map<GameTriggerId,std::string> triggers;
@@ -130,13 +131,13 @@ struct PrototypeGame::Impl {
 };
 PrototypeGame::PrototypeGame(GameWorld& w):impl_(std::make_unique<Impl>(w)){}
 PrototypeGame::~PrototypeGame()=default;
-bool PrototypeGame::active()const noexcept{return impl_->racing?impl_->racing->hud().active:impl_->hud.active;}
-const PrototypeHud& PrototypeGame::hud()const noexcept{return impl_->racing?impl_->racing->hud():impl_->hud;}
-PrototypeCamera PrototypeGame::camera()const{return impl_->racing?impl_->racing->camera():impl_->camera();}
+bool PrototypeGame::active()const noexcept{return impl_->flying?impl_->flying->hud().active:impl_->racing?impl_->racing->hud().active:impl_->hud.active;}
+const PrototypeHud& PrototypeGame::hud()const noexcept{return impl_->flying?impl_->flying->hud():impl_->racing?impl_->racing->hud():impl_->hud;}
+PrototypeCamera PrototypeGame::camera()const{return impl_->flying?impl_->flying->camera():impl_->racing?impl_->racing->camera():impl_->camera();}
 std::span<const RacingVisualEffect> PrototypeGame::racing_visual_effects()const noexcept {
  return impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
 }
-void PrototypeGame::look(float x,float y){if(impl_->racing)return;if(std::isfinite(x)&&std::isfinite(y)&&impl_->hud.phase==PrototypePhase::Playing){impl_->lookYaw+=std::clamp(x,-1.F,1.F);impl_->lookPitch+=std::clamp(y,-1.F,1.F);}}
+void PrototypeGame::look(float x,float y){if(impl_->racing||impl_->flying)return;if(std::isfinite(x)&&std::isfinite(y)&&impl_->hud.phase==PrototypePhase::Playing){impl_->lookYaw+=std::clamp(x,-1.F,1.F);impl_->lookPitch+=std::clamp(y,-1.F,1.F);}}
 bool PrototypeGame::start(std::string* error){
  auto& s=*impl_;
  if(s.started){if(error)*error="Prototype runtime already started";
@@ -144,6 +145,7 @@ bool PrototypeGame::start(std::string* error){
  std::vector<PrototypeObjectView> views;
  for(auto id:s.world.object_ids())views.push_back({id,"Object "+std::to_string(id),*s.world.components(id),s.world.geometry_kind(id)==GameGeometryKind::Marker});
  if(!validate_prototype_scene(views,error))return false;
+ if(scene_has_flying(views)){s.flying=std::make_unique<FlyingGame>(s.world);if(!s.flying->start(error)){s.flying.reset();return false;}s.started=true;return true;}
  if(scene_has_racing(views)){s.racing=std::make_unique<RacingGame>(s.world);if(!s.racing->start(error)){s.racing.reset();return false;}s.started=true;return true;}
  for(const auto& o:views){const auto key=prototype_object_key(o.components);
  if(key.empty())continue;
@@ -191,6 +193,7 @@ bool PrototypeGame::start(std::string* error){
 }
 void PrototypeGame::step(float dt){
  auto& s=*impl_;
+ if(s.flying){s.flying->step(dt);return;}
  if(s.racing){s.racing->step(dt);return;}
  if(!s.hud.active){s.world.tick(dt);
  return;}if(!std::isfinite(dt)||dt<=0||dt>.25F)return;
@@ -240,6 +243,7 @@ void PrototypeGame::step(float dt){
 }
 bool PrototypeGame::after_restore(std::string* error){
  auto& s=*impl_;
+ if(s.flying)return s.flying->after_restore(error);
  if(s.racing)return s.racing->after_restore(error);
  if(!s.hud.active)return true;
  std::map<std::string,GameObjectId,std::less<>> restoredIds;

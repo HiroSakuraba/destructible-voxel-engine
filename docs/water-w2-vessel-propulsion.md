@@ -24,7 +24,7 @@ The `dve.prototype.water_ocean` marker adds `wind_x` and `wind_y`, in metres per
 
 ## Player controls
 
-W/S = throttle or sail exposure, A/D = helm, Q/E = sail trim, 1–5 select craft, E = next craft when used outside trim bindings? **Note:** W2 dedicates E to positive sail trim, so selection cycling should be remapped to a distinct action; direct keys 1–5 always work. P pause, R restart, F3 show propulsion/keel diagnostics.
+W/S = throttle or sail exposure, A/D = helm, Q/E = sail trim, 1–5 select craft, Tab = cycle craft (gamepad West). E is used only for sail trim, never for vessel cycling. P pause, R restart, F3 show propulsion/keel diagnostics.
 
 ## Save compatibility
 

@@ -27,6 +27,17 @@ void attenuation(){
  const auto muddy=sample_water_volume(sea,settings,{0,0,-12},0);
  check(water_transmittance(muddy,10).z<far.z,
       "turbidity drastically shortens underwater visibility");
+ settings.customOptics=true;
+ settings.absorptionRGB={.8F,.2F,.04F};
+ settings.scatteringRGB={.1F,.1F,.1F};
+ settings.diffuseKdRGB={.9F,.25F,.09F};
+ check(valid_water_volume_settings(settings),"positive custom spectral RGB profiles validate");
+ const auto custom=sample_water_volume(sea,settings,{0,0,-12},0);
+ check(std::abs(custom.absorptionRGB.x-.8F)<1.e-5F&&
+       std::abs(custom.diffuseKdRGB.y-.25F)<1.e-5F,
+       "custom absorption and diffuse attenuation are independent");
+ settings.scatteringRGB.x=-1;
+ check(!valid_water_volume_settings(settings),"negative measured coefficients rejected");
 }
 void color_and_lamps(){
  OceanField ocean;check(ocean.set_preset(OceanPreset::Calm),"calm");

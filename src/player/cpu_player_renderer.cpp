@@ -213,6 +213,7 @@ void draw_ocean_surface(const OceanField* ocean,double seconds,
             if(t<=camera.nearPlane||t>camera.farPlane)continue;
             const auto point=add(eye,multiply(dir,t));
             sample=ocean->sample(point.x,point.y,seconds);
+            if(sample.depth<=.01F)continue;
             if(std::abs(point.z-sample.height)>2.F)continue;
             const float z=dot(subtract(point,eye),forward);
             if(z<=camera.nearPlane||z>=camera.farPlane)continue;

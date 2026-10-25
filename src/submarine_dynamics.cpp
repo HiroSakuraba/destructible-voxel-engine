@@ -74,4 +74,24 @@ SubmarineLoads evaluate_submarine(const SubmarineConfig& c,SubmarineState& state
  out.batteryDraw=electrical;
  return out;
 }
+void step_submarine(WaterRigidState& s,const SubmarineConfig& c,
+  const SubmarineState& state,const SubmarineLoads& loads,float dt)noexcept{
+ if(!valid_submarine_config(c)||!std::isfinite(dt)||dt<=0||dt>1.F/30.F)return;
+ const float mass=c.dryMassKg+state.ballastKg;
+ s.linearVelocity=add(s.linearVelocity,multiply(loads.forceNewton,dt/mass));
+ const float v=length(s.linearVelocity);
+ if(v>35.F)s.linearVelocity=multiply(s.linearVelocity,35.F/v);
+ s.position=add(s.position,multiply(s.linearVelocity,dt));
+ const float ix=mass*(18.F+4.F)/12.F;
+ const float iy=mass*(5.F+4.F)/12.F;
+ const float iz=mass*(18.F+5.F)/12.F;
+ const Float3 local=rotate(conjugate(s.orientation),loads.torqueNewtonMetres);
+ s.angularVelocity=add(s.angularVelocity,multiply(rotate(s.orientation,
+   {local.x/ix,local.y/iy,local.z/iz}),dt));
+ const float rate=length(s.angularVelocity);
+ if(rate>2.F)s.angularVelocity=multiply(s.angularVelocity,2.F/rate);
+ const float speed=length(s.angularVelocity);
+ if(speed>1.e-6F)s.orientation=normalize(multiply(
+   quaternion_from_axis_angle(s.angularVelocity,speed*dt),s.orientation));
+}
 } // namespace dve

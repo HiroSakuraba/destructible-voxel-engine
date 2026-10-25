@@ -208,6 +208,8 @@ struct FlyingGame::Impl {
   const float climb=clampAxis(world.get_axis("flight_vertical"));
   const bool flap=world.is_action_pressed("jump");
   const bool airbrake=world.is_action_pressed("flight_airbrake");
+  // Throttle changes on the same 120 Hz grid as force integration.
+  throttle=std::clamp(throttle+clampAxis(world.get_axis("flight_throttle"))*dt*.55F,0.F,1.F);
   const auto old=position;
   float morphBlend=0;
   if(target!=mode){
@@ -396,9 +398,6 @@ void FlyingGame::step(float dt){
  if(previous)s.request(FlightMode((unsigned(s.target)+5)%6U));
  for(unsigned i=0;i<6;++i)if(s.world.is_action_pressed("flight_mode_"+std::to_string(i+1)))
   s.request(FlightMode(i));
- // Throttle is an integrator controlled with Shift/Ctrl or the right gamepad trigger.
- const float axis=clampAxis(s.world.get_axis("flight_throttle"));
- s.throttle=std::clamp(s.throttle+axis*dt*.55F,0.F,1.F);
  if(s.hud.phase==PrototypePhase::Playing){
   s.accumulator+=dt;
   for(unsigned n=0;n<31&&s.accumulator+1.e-7F>=stepSeconds;++n){

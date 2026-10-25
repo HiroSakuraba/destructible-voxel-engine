@@ -46,7 +46,7 @@ CookedPolygonAsset hull(EditorObjectId id,bool pirate){
 }
 }
 EditorDocument make_water_starter(){
- EditorDocument d("W1 Water Test Range");
+ EditorDocument d("W2 Sailing and Speedboat Range");
  auto cube=[&](std::string name,Float3 pos,Float3 size,Float4 color,bool collision){
    EditorObject o(d.allocate_object_id(),std::move(name));
    o.flags.anchored=true;o.flags.collisionEnabled=collision;o.transform.position=pos;
@@ -81,6 +81,11 @@ EditorDocument make_water_starter(){
      c.properties["probes_beam"]=std::int64_t{5};
      c.properties["thrust_newtons"]=22000.0;
      c.properties["rudder_torque"]=90000.0;
+     c.properties["craft_type"]=std::int64_t{2};
+     c.properties["thrust_newtons"]=0.0;
+     c.properties["sail_area_m2"]=420.0;
+     c.properties["keel_area_m2"]=14.0;
+     c.properties["mast_height_m"]=8.0;
    }else{
      c.properties["mass_kg"]=480.0;
      c.properties["displacement_m3"]=.56;
@@ -91,13 +96,57 @@ EditorDocument make_water_starter(){
      c.properties["probes_beam"]=std::int64_t{3};
      c.properties["thrust_newtons"]=1400.0;
      c.properties["rudder_torque"]=380.0;
+     c.properties["craft_type"]=std::int64_t{0};
    }
    o.components.push_back(std::move(c));d.add_object(std::move(o));
  };
  vessel(false);vessel(true);
+ auto more=[&](int kind,const char* name,std::string key,Float3 position){
+   EditorObject o(d.allocate_object_id(),name);
+   o.flags.anchored=true;o.flags.collisionEnabled=false;
+   o.transform.position=position;
+   CookedPolygonAsset mesh=hull(o.id,false);
+   Component c=role("water_vessel",std::move(key));
+   c.properties["craft_type"]=std::int64_t(kind);
+   if(kind==1){ // sailboat with working mast force, keel and heeling moment
+     part(mesh,{0,0,3.3F},{.16F,.16F,6.7F},3);
+     part(mesh,{0,.15F,3.5F},{.10F,3.8F,5.0F},2);
+     c.properties["mass_kg"]=1800.0;c.properties["displacement_m3"]=2.25;
+     c.properties["length_m"]=8.0;c.properties["beam_m"]=2.6;c.properties["draft_m"]=1.2;
+     c.properties["linear_damping"]=320.0;c.properties["angular_damping"]=1000.0;
+     c.properties["probes_length"]=std::int64_t{5};c.properties["probes_beam"]=std::int64_t{3};
+     c.properties["thrust_newtons"]=0.0;c.properties["rudder_torque"]=2600.0;
+     c.properties["sail_area_m2"]=29.0;c.properties["keel_area_m2"]=1.6;
+     c.properties["mast_height_m"]=4.2;
+   }else if(kind==3){ // speedboat, with large stern drive and hydrodynamic plane
+     part(mesh,{0,-.1F,.60F},{1.1F,2.1F,.6F},3);
+     part(mesh,{0,-1.95F,-.15F},{1.4F,.40F,.3F},1);
+     c.properties["mass_kg"]=2700.0;c.properties["displacement_m3"]=3.3;
+     c.properties["length_m"]=8.0;c.properties["beam_m"]=2.5;c.properties["draft_m"]=1.1;
+     c.properties["linear_damping"]=350.0;c.properties["angular_damping"]=1800.0;
+     c.properties["probes_length"]=std::int64_t{5};c.properties["probes_beam"]=std::int64_t{3};
+     c.properties["thrust_newtons"]=24000.0;c.properties["rudder_torque"]=1800.0;
+     c.properties["planing_factor"]=.06;
+   }else if(kind==4){ // wave runner: short, nimble and steerable pump jet
+     part(mesh,{0,-.6F,.55F},{.7F,1.3F,.55F},3);
+     part(mesh,{0,1.1F,.5F},{.65F,.35F,.35F},1);
+     c.properties["mass_kg"]=420.0;c.properties["displacement_m3"]=.53;
+     c.properties["length_m"]=3.1;c.properties["beam_m"]=1.35;c.properties["draft_m"]=.55;
+     c.properties["linear_damping"]=115.0;c.properties["angular_damping"]=220.0;
+     c.properties["probes_length"]=std::int64_t{3};c.properties["probes_beam"]=std::int64_t{3};
+     c.properties["thrust_newtons"]=5500.0;c.properties["rudder_torque"]=350.0;
+     c.properties["planing_factor"]=.085;
+   }
+   refresh_editor_polygon(mesh,true);o.polygon=std::move(mesh);
+   o.components.push_back(std::move(c));d.add_object(std::move(o));
+ };
+ more(1,"Sailboat","2-sailboat",{-55,-80,.28F});
+ more(3,"Speedboat","3-speedboat",{53,-80,.35F});
+ more(4,"Wave Runner","4-wave-runner",{0,-116,.18F});
  EditorObject ocean(d.allocate_object_id(),"Ocean Surface");
  ocean.flags.anchored=true;ocean.flags.collisionEnabled=false;
  auto w=role("water_ocean","ocean");w.properties["sea_state"]=std::int64_t{1};
+ w.properties["wind_x"]=5.0;w.properties["wind_y"]=8.0;
  ocean.components.push_back(std::move(w));d.add_object(std::move(ocean));
  EditorObject rules(d.allocate_object_id(),"Water Rules");
  rules.flags.anchored=true;rules.flags.collisionEnabled=false;

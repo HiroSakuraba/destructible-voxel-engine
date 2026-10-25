@@ -95,6 +95,15 @@ void gameplay_export(){
  check(app->prototype_hud()&&app->prototype_hud()->flying,"flight HUD in player");
  for(unsigned n=0;n<15;++n)app->tick(1.F/60);
  check(app->prototype_hud()->active,"flight updates in player");
+ const auto craft=app->world().find_by_name("Morphing Aircraft");
+ check(bool(craft),"exported craft named and loaded");
+ const auto initial=*app->world().position(*craft);
+ auto saved=app->save_game("flight",&error);
+ check(bool(saved),"flight save: "+error);
+ for(unsigned n=0;n<20;++n)app->tick(1.F/60);
+ check(bool(app->load_game("flight",&error)),"flight restore: "+error);
+ check(length(subtract(*app->world().position(*craft),initial))<.001F,
+       "flight save restores the same aircraft pose");
  std::filesystem::remove_all(root);
 }
 }

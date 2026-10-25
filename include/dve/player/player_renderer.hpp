@@ -24,6 +24,7 @@
 #include "dve/render/cpu_fog.hpp"
 #include "dve/render_environment.hpp"
 #include "dve/prototype_game.hpp"
+#include "dve/water_ocean.hpp"
 
 namespace dve::player {
 
@@ -38,7 +39,9 @@ struct PlayerRenderView {
     render::CpuFogSettings fogSettings{};
     render::CpuSurfaceDetailSettings surfaceDetail{};
     const PrototypeHud* prototypeHud{};
-    std::span<const RacingVisualEffect> racingEffects{}; // metres; lifetime owned by PrototypeGame
+    std::span<const RacingVisualEffect> racingEffects{};
+    const OceanField* ocean{}; // same deterministic waves used by hull physics
+    double oceanTime{}; // metres; lifetime owned by PrototypeGame
 };
 
 struct PlayerRenderStats {

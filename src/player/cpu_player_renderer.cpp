@@ -143,6 +143,69 @@ void draw_racing_effects(std::span<const RacingVisualEffect> effects,
     }
 }
 
+
+void draw_ocean_surface(const OceanField* ocean,double seconds,
+                       const render::PolygonCamera& camera,
+                       const render::PolygonRenderTarget& depth,
+                       std::span<std::uint8_t> rgba) {
+    if(!ocean||!depth.valid()||rgba.size()!=std::size_t(depth.width)*depth.height*4U)return;
+    const Float3 eye=camera.position;
+    const Float3 forward=normalize(subtract(camera.target,camera.position));
+    const Float3 right=normalize(cross_racing(forward,camera.up));
+    const Float3 up=normalize(cross_racing(right,forward));
+    const float tanHalf=std::tan(camera.verticalFieldOfViewRadians*.5F);
+    if(!std::isfinite(tanHalf)||tanHalf<=0)return;
+    const float aspect=float(depth.width)/float(depth.height);
+    const auto sun=normalize(Float3{-.32F,-.27F,.91F});
+    // Half-resolution shade, but scene-depth test every individual output pixel.
+    // This keeps the reference CPU player responsive without a GPU dependency.
+    for(unsigned py=0;py<depth.height;py+=2U){
+        for(unsigned px=0;px<depth.width;px+=2U){
+            const float x=2.F*(float(px)+1.F)/float(depth.width)-1.F;
+            const float y=1.F-2.F*(float(py)+1.F)/float(depth.height);
+            const auto dir=normalize(add(forward,add(multiply(right,x*tanHalf*aspect),multiply(up,y*tanHalf))));
+            if(dir.z>=-.005F)continue;
+            float t=-eye.z/dir.z;
+            if(!(t>0)||t>camera.farPlane+150.F)continue;
+            OceanSample sample{};
+            // Fixed-point waterline iteration; no separate shader wave field.
+            for(unsigned iteration=0;iteration<5;++iteration){
+                const Float3 point=add(eye,multiply(dir,t));
+                sample=ocean->sample(point.x,point.y,seconds);
+                const float candidate=(sample.height-eye.z)/dir.z;
+                if(!std::isfinite(candidate)||candidate<=0)break;
+                t=std::clamp(.5F*t+.5F*candidate,0.F,camera.farPlane+150.F);
+            }
+            if(t<=camera.nearPlane||t>camera.farPlane)continue;
+            const auto point=add(eye,multiply(dir,t));
+            sample=ocean->sample(point.x,point.y,seconds);
+            if(std::abs(point.z-sample.height)>2.F)continue;
+            const float z=dot(subtract(point,eye),forward);
+            if(z<=camera.nearPlane||z>=camera.farPlane)continue;
+            const float normalizedDepth=(z-camera.nearPlane)/(camera.farPlane-camera.nearPlane);
+            const float diffuse=std::clamp(dot(sample.normal,sun),0.F,1.F);
+            const float glint=std::pow(std::clamp(dot(sample.normal,normalize(subtract(sun,dir))),0.F,1.F),36.F);
+            const float fresnel=std::pow(1.F-std::clamp(-dot(dir,sample.normal),0.F,1.F),5.F);
+            const float foam=sample.foam;
+            const float color[3]={
+                std::clamp(12.F+48.F*diffuse+180.F*glint+115.F*foam,0.F,255.F),
+                std::clamp(65.F+55.F*diffuse+150.F*glint+120.F*foam,0.F,255.F),
+                std::clamp(100.F+55.F*diffuse+130.F*glint+112.F*foam,0.F,255.F)};
+            const float opacity=std::clamp(.90F-.20F*fresnel,0.F,1.F);
+            for(unsigned oy=0;oy<2U&&py+oy<depth.height;++oy)
+              for(unsigned ox=0;ox<2U&&px+ox<depth.width;++ox){
+                const std::size_t at=std::size_t(py+oy)*depth.width+(px+ox);
+                if(normalizedDepth>depth.depth[at]+.0001F)continue;
+                for(unsigned channel=0;channel<3;++channel){
+                    const float mixed=float(rgba[4*at+channel])*(1.F-opacity)+color[channel]*opacity;
+                    rgba[4*at+channel]=std::uint8_t(std::clamp(mixed,0.F,255.F));
+                }
+                rgba[4*at+3]=255;
+              }
+        }
+    }
+}
+
 class CpuPlayerRenderer final : public IPlayerRenderer {
 public:
     CpuPlayerRenderer(IFrameBlitter* blitter, CpuPlayerRendererOptions options)
@@ -311,6 +374,7 @@ public:
         const float exposure = options_.exposure * (environment.exposure > 0.0F ? environment.exposure : 1.0F);
         if (!render::resolve_polygon_render_rgba8(target_, exposure, environment.tonemapOperator,
                                                   frame_.pixels, error)) return false;
+        draw_ocean_surface(view.ocean,view.oceanTime,view.camera,target_,frame_.pixels);
         draw_racing_effects(view.racingEffects,view.camera,target_,frame_.pixels);
         if(view.prototypeHud)draw_prototype_hud(frame_.pixels,frame_.width,frame_.height,*view.prototypeHud);
         stats_.resolveMilliseconds = milliseconds_since(resolveStart);

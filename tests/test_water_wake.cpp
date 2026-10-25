@@ -50,7 +50,7 @@ void safety(){
  check(!f.emit(e),"reject invalid negative height");
  e=event();
  for(unsigned i=0;i<200;++i){e.bornSeconds=double(i)*.01;check(f.emit(e),"valid bounded emit");}
- check(f.events().size()==WaterWakeField::MaxEvents,"bounded event capacity");
+ check(f.events().size()==WaterWakeField::MaxEvents,"bounded event capacity within save payload budget");
  const std::vector<WaterWakeEvent> snapshot(f.events().begin(),f.events().end());
  WaterWakeField restored;
  check(restored.restore(snapshot,5.0),"snapshot reload exact active events");

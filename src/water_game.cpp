@@ -290,14 +290,21 @@ struct WaterGame::Impl {
  }
  void persist(){
   std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17);
-  o<<"DVE_WATER 2 "<<selected<<' '<<unsigned(hud.phase)<<' '<<elapsed<<' '<<accumulator<<' '<<boats.size();
+  o<<"DVE_WATER 3 "<<selected<<' '<<unsigned(hud.phase)<<' '<<elapsed<<' '<<accumulator<<' '<<boats.size();
   for(const auto& b:boats){
    const auto& s=b.state;
-   o<<' '<<b.key<<' '<<b.trim;
+   o<<' '<<b.key<<' '<<b.trim<<' '<<b.wakeCooldown;
    o<<' '<<s.position.x<<' '<<s.position.y<<' '<<s.position.z
     <<' '<<s.orientation.x<<' '<<s.orientation.y<<' '<<s.orientation.z<<' '<<s.orientation.w
     <<' '<<s.linearVelocity.x<<' '<<s.linearVelocity.y<<' '<<s.linearVelocity.z
     <<' '<<s.angularVelocity.x<<' '<<s.angularVelocity.y<<' '<<s.angularVelocity.z;
+  }
+  const auto wakes=field.wakes();
+  o<<' '<<wakes.size();
+  for(const auto& w:wakes){
+   o<<' '<<w.position.x<<' '<<w.position.y<<' '<<w.direction.x<<' '<<w.direction.y
+    <<' '<<w.bornSeconds<<' '<<w.amplitude<<' '<<w.wavelength<<' '<<w.width
+    <<' '<<w.speed<<' '<<w.lifetime;
   }
   (void)world.set_component_property(rules,stateComponent,"data",o.str());
  }
@@ -372,7 +379,7 @@ void WaterGame::step(float dt){
 }
 bool WaterGame::after_restore(std::string* error){
  auto& s=*impl_;
- const auto fail=[&](){if(error)*error="Invalid or incomplete DVE_WATER 1 state";return false;};
+ const auto fail=[&](){if(error)*error="Invalid or incomplete DVE_WATER 1/2/3 state";return false;};
  std::map<std::string,GameObjectId> vesselIds;GameObjectId rules=0;
  const Component* oceanConfig=nullptr;
  for(auto id:s.world.object_ids())if(const auto* cs=s.world.components(id)){
@@ -386,25 +393,27 @@ bool WaterGame::after_restore(std::string* error){
  const auto* c=find_component_by_type(*s.world.components(rules),stateType);
  if(!c)return fail();
  const auto data=get(*c,"data",std::string{});
- if(data.size()>4096)return fail();
+ if(data.size()>32768)return fail();
  std::istringstream in(data);in.imbue(std::locale::classic());
  std::string magic;unsigned version{},selected{},phase{};double elapsed{};
  float accumulator{};
  in>>magic>>version>>selected>>phase>>elapsed>>accumulator;
- if(!in||magic!="DVE_WATER"||(version!=1&&version!=2)||selected>=s.boats.size()||phase>1||
+ if(!in||magic!="DVE_WATER"||(version<1||version>3)||selected>=s.boats.size()||phase>1||
     !std::isfinite(elapsed)||elapsed<0||!std::isfinite(accumulator)||
     accumulator<0||accumulator>=stepDt)return fail();
  unsigned count=unsigned(s.boats.size());
- if(version==2){in>>count;if(!in||count!=s.boats.size())return fail();}
+ if(version>=2){in>>count;if(!in||count!=s.boats.size())return fail();}
  std::vector<WaterRigidState> restored(s.boats.size());
- std::vector<float> trims(s.boats.size(),.6F);
+ std::vector<float> trims(s.boats.size(),.6F),wakeTimers(s.boats.size(),0.F);
  for(unsigned i=0;i<restored.size();++i){
    auto& q=restored[i];
-   if(version==2){
-     std::string key;float trim{};
+   if(version>=2){
+     std::string key;float trim{},timer{};
      in>>key>>trim;
-     if(!in||key!=s.boats[i].key||!std::isfinite(trim)||std::abs(trim)>1.4F)return fail();
-     trims[i]=trim;
+     if(version==3)in>>timer;
+     if(!in||key!=s.boats[i].key||!std::isfinite(trim)||std::abs(trim)>1.4F||
+        !std::isfinite(timer)||timer<0||timer>.161F)return fail();
+     trims[i]=trim;wakeTimers[i]=timer;
    }
    in>>q.position.x>>q.position.y>>q.position.z>>q.orientation.x>>q.orientation.y
       >>q.orientation.z>>q.orientation.w>>q.linearVelocity.x>>q.linearVelocity.y
@@ -415,6 +424,20 @@ bool WaterGame::after_restore(std::string* error){
       !finite(q.angularVelocity)||std::abs(len-1.F)>.03F||
       length(q.position)>100000||length(q.linearVelocity)>120||length(q.angularVelocity)>4.1F)return fail();
  }
+ std::vector<WaterWakeEvent> wakeEvents;
+ if(version==3){
+   unsigned n=0;in>>n;
+   if(!in||n>WaterWakeField::MaxEvents)return fail();
+   for(unsigned i=0;i<n;++i){
+     WaterWakeEvent w;
+     in>>w.position.x>>w.position.y>>w.direction.x>>w.direction.y
+       >>w.bornSeconds>>w.amplitude>>w.wavelength>>w.width
+       >>w.speed>>w.lifetime;
+     if(!in||!valid_water_wake(w)||w.bornSeconds>elapsed+1.e-4||
+         elapsed-w.bornSeconds>=w.lifetime)return fail();
+     wakeEvents.push_back(w);
+   }
+ }
  in>>std::ws;if(!in.eof())return fail();
  const auto state=OceanPreset(get(*oceanConfig,"sea_state",std::int64_t{1}));
  if(!s.field.set_preset(state,{float(get(*oceanConfig,"current_x",0.0)),
@@ -423,9 +446,11 @@ bool WaterGame::after_restore(std::string* error){
   auto found=vesselIds.find(s.boats[i].key);
   if(found==vesselIds.end()||s.world.has_collision(found->second).value_or(true))return fail();
   s.boats[i].id=found->second;s.boats[i].state=restored[i];
-  s.boats[i].trim=trims[i];
+  s.boats[i].trim=trims[i];s.boats[i].wakeCooldown=wakeTimers[i];
  }
  s.wind={float(get(*oceanConfig,"wind_x",5.0)),float(get(*oceanConfig,"wind_y",8.0)),0};
+ if(!s.field.restore_wakes(wakeEvents,elapsed))return fail();
+ s.spray.clear();
  s.rules=rules;s.stateComponent=c->id;s.selected=selected;s.elapsed=elapsed;
  s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);
  s.update_camera(true);s.update_hud();return true;

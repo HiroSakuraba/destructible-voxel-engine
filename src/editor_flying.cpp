@@ -39,7 +39,8 @@ EditorDocument make_flying_starter(){
  }
  for(unsigned n=0;n<6;++n){
   const float y=55.F+100.F*float(n);
-  const float z=90.F+float(n)*12.F;
+  const std::array<float,6> gateHeight{{90.F,80.F,100.F,120.F,100.F,120.F}};
+  const float z=gateHeight[n];
   const std::array<Float4,6> colors{{{.65F,.84F,.96F,1},{.44F,.86F,.54F,1},{.99F,.72F,.30F,1},{.95F,.30F,.22F,1},{.66F,.52F,.90F,1},{.95F,.88F,.48F,1}}};
   auto& ring=box("Flight ring "+std::to_string(n+1),{0,y,z},{50,.3F,.8F},colors[n],false);
   ring.components.push_back(component("flight_gate","flight-gate-"+std::to_string(n)));

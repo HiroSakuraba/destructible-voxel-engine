@@ -217,7 +217,6 @@ void apply_underwater_volume_hdr(const PlayerRenderView& view,
        !valid_water_volume_settings(*view.waterVolume))return;
     const auto camera=racing_camera(view.camera,target.width,target.height);
     if(!(camera.tanHalf>0)||!std::isfinite(camera.tanHalf))return;
-    const auto eye=sample_water_volume(*view.ocean,*view.waterVolume,camera.eye,view.oceanTime);
     const Float3 sky={
        std::max(0.F,environment.skyColor.x*1.3F+environment.sunIntensity*.09F),
        std::max(0.F,environment.skyColor.y*1.3F+environment.sunIntensity*.09F),

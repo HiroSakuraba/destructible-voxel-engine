@@ -152,6 +152,7 @@ add_library(dve_core
     src/water_ocean.cpp
     src/water_hydrodynamics.cpp
     src/water_volume.cpp
+    src/underwater_optics.cpp
     src/submarine_dynamics.cpp
     src/water_vessel_dynamics.cpp
     src/water_game.cpp
@@ -2801,6 +2802,12 @@ if(DVE_BUILD_TESTS)
             add_executable(dve_submarine_game_tests tests/test_submarine_game.cpp)
             target_link_libraries(dve_submarine_game_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_submarine_game_tests COMMAND dve_submarine_game_tests)
+            add_executable(dve_underwater_optics_tests tests/test_underwater_optics.cpp)
+            target_link_libraries(dve_underwater_optics_tests PRIVATE dve::core)
+            add_test(NAME dve_underwater_optics_tests COMMAND dve_underwater_optics_tests)
+            add_executable(dve_underwater_render_tests tests/test_underwater_render.cpp)
+            target_link_libraries(dve_underwater_render_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_underwater_render_tests COMMAND dve_underwater_render_tests)
             add_executable(dve_submarine_tests tests/test_submarine.cpp)
             target_link_libraries(dve_submarine_tests PRIVATE dve::core)
             add_test(NAME dve_submarine_tests COMMAND dve_submarine_tests)

@@ -451,7 +451,9 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
         impl_->session.world->elapsed_seconds();
     view.prototypeHud=prototype_hud();
     if(impl_->session.prototype){view.racingEffects=impl_->session.prototype->racing_visual_effects();
-        view.ocean=impl_->session.prototype->ocean_field();view.oceanTime=impl_->session.prototype->ocean_time();}
+        view.ocean=impl_->session.prototype->ocean_field();view.oceanTime=impl_->session.prototype->ocean_time();
+        view.waterVolume=impl_->session.prototype->water_volume_settings();
+        view.underwaterLamps=impl_->session.prototype->underwater_lamps();}
     view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
     view.polygonLodBias = impl_->settings.polygonLodBias;
     return view;

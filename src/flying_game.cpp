@@ -399,9 +399,10 @@ struct FlyingGame::Impl {
   if(hud.phase==PrototypePhase::Won)hud.message="COURSE COMPLETE - R TO RESTART";
   if(telemetry.stalled&&hud.phase==PrototypePhase::Playing)hud.message="STALL: LOWER NOSE  "+hud.message;
   hud.vehicleTelemetry="AOA "+show(telemetry.angleOfAttack,2)+" BANK "+show(telemetry.bankAngle,2)+
-    " GLIDE "+show(telemetry.glideRatio,1)+" WIND "+show(telemetry.windVelocity.x)+","+
-    show(telemetry.windVelocity.y)+","+show(telemetry.windVelocity.z)+" TH "+
-    show(telemetry.thermalUpdraft)+" RIDGE "+show(telemetry.ridgeUpdraft);
+    " GLIDE "+show(telemetry.glideRatio,1)+" E "+show(telemetry.energyRatePerKilogram);
+   hud.flightWeather="WIND "+show(telemetry.windVelocity.x)+","+
+    show(telemetry.windVelocity.y)+","+show(telemetry.windVelocity.z)+
+    " THERM "+show(telemetry.thermalUpdraft)+" RIDGE "+show(telemetry.ridgeUpdraft);
  }
  void persist(){
   std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(17);

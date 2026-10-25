@@ -29,7 +29,7 @@ struct RacingAudioState {
     std::uint64_t impactCount{};
 };
 struct PrototypeHud {
-    bool active{},debug{},racing{};
+    bool active{},debug{},racing{},flying{};
     std::string stats;
     std::string vehicleTelemetry;
     RacingAudioState vehicleAudio{};

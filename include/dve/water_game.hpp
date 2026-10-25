@@ -3,6 +3,7 @@
 #include "dve/water_hydrodynamics.hpp"
 #include "dve/water_vessel_dynamics.hpp"
 #include "dve/submarine_dynamics.hpp"
+#include "dve/underwater_optics.hpp"
 #include <memory>
 namespace dve {
 [[nodiscard]] bool scene_has_water(std::span<const PrototypeObjectView>);
@@ -28,6 +29,8 @@ public:
     [[nodiscard]] PrototypeCamera camera()const noexcept;
     [[nodiscard]] const OceanField& ocean()const noexcept;
     [[nodiscard]] double ocean_time()const noexcept;
+    [[nodiscard]] const WaterVolumeSettings& volume_settings()const noexcept;
+    [[nodiscard]] std::span<const UnderwaterLamp> underwater_lamps()const noexcept;
     [[nodiscard]] const WaterGameTelemetry& telemetry()const noexcept;
 private:struct Impl;std::unique_ptr<Impl> impl_;
 };

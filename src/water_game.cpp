@@ -62,7 +62,11 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"wind_x",5.0,false,false,"Global ambient wind X (m/s)"},
   {"wind_y",8.0,false,false,"Global ambient wind Y (m/s)"},
   {"seafloor_z",-40.0,false,false,"Flat underwater physical floor Z (m)"},
-  {"water_clarity",std::int64_t{0},false,false,"0 clear ocean, 1 coastal, 2 turbid"}});
+  {"water_clarity",std::int64_t{0},false,false,"0 clear ocean, 1 coastal, 2 turbid"},
+  {"custom_optics",false,false,false,"Override default seawater optics with measured RGB coefficients"},
+  {"optical_absorption_rgb",Float3{.34F,.075F,.018F},false,false,"Linear RGB absorption a, 1/metre"},
+  {"optical_scattering_rgb",Float3{.018F,.015F,.012F},false,false,"Linear RGB scattering b, 1/metre"},
+  {"optical_kd_rgb",Float3{.38F,.10F,.045F},false,false,"Diffuse solar attenuation Kd, 1/metre"}});
  add(std::string(rulesType),"Water Prototype Rules (marker)",{
   {"key",std::string{"water-rules"},true,false,"Unique water rules key"}});
  add(std::string(vesselType),"Water Vessel (collision-free polygon)",{
@@ -116,6 +120,12 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
    if(c.type==oceanType){
     if(++ocean>1||!o.marker)return fail("Exactly one ocean marker is required");
     const float bottom=float(get(c,"seafloor_z",-40.0));
+    WaterVolumeSettings settings;
+    settings.customOptics=get(c,"custom_optics",false);
+    settings.absorptionRGB=get(c,"optical_absorption_rgb",Float3{.34F,.075F,.018F});
+    settings.scatteringRGB=get(c,"optical_scattering_rgb",Float3{.018F,.015F,.012F});
+    settings.diffuseKdRGB=get(c,"optical_kd_rgb",Float3{.38F,.10F,.045F});
+    if(!valid_water_volume_settings(settings))return fail("Invalid underwater absorption/scattering/Kd");
     const auto clarity=get(c,"water_clarity",std::int64_t{0});
     if(!std::isfinite(bottom)||bottom<-5000||bottom>-3||clarity<0||clarity>2)
       return fail("Invalid ocean seafloor/clarity");
@@ -372,6 +382,10 @@ bool WaterGame::start(std::string* error){
    s.wind={float(get(c,"wind_x",5.0)),float(get(c,"wind_y",8.0)),0};
    s.volumeSettings.floorZ=float(get(c,"seafloor_z",-40.0));
    s.volumeSettings.clarity=WaterClarity(get(c,"water_clarity",std::int64_t{0}));
+   s.volumeSettings.customOptics=get(c,"custom_optics",false);
+   s.volumeSettings.absorptionRGB=get(c,"optical_absorption_rgb",Float3{.34F,.075F,.018F});
+   s.volumeSettings.scatteringRGB=get(c,"optical_scattering_rgb",Float3{.018F,.015F,.012F});
+   s.volumeSettings.diffuseKdRGB=get(c,"optical_kd_rgb",Float3{.38F,.10F,.045F});
    if(!s.field.set_preset(OceanPreset(get(c,"sea_state",std::int64_t{1})),
           {float(get(c,"current_x",0.0)),float(get(c,"current_y",0.0)),0})){
     if(error)*error="Invalid ocean wave preset";return false;
@@ -508,6 +522,10 @@ bool WaterGame::after_restore(std::string* error){
  s.wind={float(get(*oceanConfig,"wind_x",5.0)),float(get(*oceanConfig,"wind_y",8.0)),0};
  s.volumeSettings.floorZ=float(get(*oceanConfig,"seafloor_z",-40.0));
  s.volumeSettings.clarity=WaterClarity(get(*oceanConfig,"water_clarity",std::int64_t{0}));
+ s.volumeSettings.customOptics=get(*oceanConfig,"custom_optics",false);
+ s.volumeSettings.absorptionRGB=get(*oceanConfig,"optical_absorption_rgb",Float3{.34F,.075F,.018F});
+ s.volumeSettings.scatteringRGB=get(*oceanConfig,"optical_scattering_rgb",Float3{.018F,.015F,.012F});
+ s.volumeSettings.diffuseKdRGB=get(*oceanConfig,"optical_kd_rgb",Float3{.38F,.10F,.045F});
  s.rules=rules;s.stateComponent=c->id;s.selected=selected;s.elapsed=elapsed;
  s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);
  s.refresh_lamps();s.update_camera(true);s.update_hud();return true;

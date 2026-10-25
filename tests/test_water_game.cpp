@@ -51,16 +51,17 @@ void integration(){
  const auto ship=app->world().find_by_name("Pirate Ship");
  check(bool(dinghy)&&bool(ship),"both vessels loaded into water game");
  const auto before=*app->world().position(*dinghy);
- app->world().set_axis("move_y",1.F);
+ platform::PlatformEvent input{};input.type=platform::EventType::KeyDown;input.key="w";
+ app->handle_event(input);
  for(unsigned i=0;i<90;++i)app->tick(1.F/60.F);
  const auto after=*app->world().position(*dinghy);
  check(length(subtract(after,before))>.4F,"dinghy actually moves under throttle and buoyancy");
  check(std::isfinite(after.z)&&std::abs(after.z)<15,"dinghy responds without instability");
  const auto oldText=app->prototype_hud()->stats;
- app->world().set_action_pressed("water_ship_2",true);app->tick(1.F/60.F);
- app->world().set_action_pressed("water_ship_2",false);
+ input.key="2";app->handle_event(input);app->tick(1.F/60.F);
+ input.type=platform::EventType::KeyUp;app->handle_event(input);
+ input.type=platform::EventType::KeyDown;input.key="w";app->handle_event(input);
  check(app->prototype_hud()->stats!=oldText,"switch to pirate ship updates active camera and HUD");
- app->world().set_axis("move_y",1);
  const auto shipBefore=*app->world().position(*ship);
  for(unsigned i=0;i<90;++i)app->tick(1.F/60.F);
  check(length(subtract(*app->world().position(*ship),shipBefore))>.2F,

@@ -46,7 +46,7 @@ CookedPolygonAsset hull(EditorObjectId id,bool pirate){
 }
 }
 EditorDocument make_water_starter(){
- EditorDocument d("W2 Sailing and Speedboat Range");
+ EditorDocument d("W4 Coastal Surf and Ships Range");
  auto cube=[&](std::string name,Float3 pos,Float3 size,Float4 color,bool collision){
    EditorObject o(d.allocate_object_id(),std::move(name));
    o.flags.anchored=true;o.flags.collisionEnabled=collision;o.transform.position=pos;
@@ -136,6 +136,17 @@ EditorDocument make_water_starter(){
      c.properties["probes_length"]=std::int64_t{3};c.properties["probes_beam"]=std::int64_t{3};
      c.properties["thrust_newtons"]=5500.0;c.properties["rudder_torque"]=350.0;
      c.properties["planing_factor"]=.085;
+   }else if(kind==5){ // hand-controlled surfboard with one rider silhouette
+     mesh.vertices.clear();mesh.indices.clear();mesh.submeshes.clear();
+     part(mesh,{0,0,-.04F},{.73F,2.2F,.12F},0);
+     part(mesh,{0,-.1F,.7F},{.32F,.38F,1.1F},2);
+     part(mesh,{0,-.1F,1.38F},{.28F,.28F,.3F},1);
+     c.properties["mass_kg"]=95.0;c.properties["displacement_m3"]=.12;
+     c.properties["length_m"]=2.2;c.properties["beam_m"]=.73;c.properties["draft_m"]=.24;
+     c.properties["linear_damping"]=80.0;c.properties["angular_damping"]=70.0;
+     c.properties["probes_length"]=std::int64_t{4};c.properties["probes_beam"]=std::int64_t{2};
+     c.properties["thrust_newtons"]=0.0;c.properties["rudder_torque"]=0.0;
+     c.properties["planing_factor"]=0.0;
    }
    refresh_editor_polygon(mesh,true);o.polygon=std::move(mesh);
    o.components.push_back(std::move(c));d.add_object(std::move(o));
@@ -143,6 +154,21 @@ EditorDocument make_water_starter(){
  more(1,"Sailboat","2-sailboat",{-55,-80,.28F});
  more(3,"Speedboat","3-speedboat",{53,-80,.35F});
  more(4,"Wave Runner","4-wave-runner",{0,-116,.18F});
+ more(5,"Surfboard","5-surfboard",{0,-330,.15F});
+ // Waterline at Y=-240. The model shoals offshore in -Y and becomes dry
+ // beneath the sand; game and water renderer use the same depth query.
+ cube("Surfing Beach",{0,-210,-.6F},{300,60,1.2F},{.78F,.69F,.47F,1},true);
+ EditorObject coast(d.allocate_object_id(),"Surf Beach Waves");
+ coast.flags.anchored=true;coast.flags.collisionEnabled=false;
+ coast.transform.position={0,-240,0};
+ auto surf=role("water_coast","coast-training");
+ surf.properties["half_width_m"]=150.0;
+ surf.properties["offshore_length_m"]=240.0;
+ surf.properties["beach_slope"]=.05;
+ surf.properties["swell_height_m"]=1.8;
+ surf.properties["period_s"]=9.0;
+ surf.properties["peel"]=.08;
+ coast.components.push_back(std::move(surf));d.add_object(std::move(coast));
  EditorObject ocean(d.allocate_object_id(),"Ocean Surface");
  ocean.flags.anchored=true;ocean.flags.collisionEnabled=false;
  auto w=role("water_ocean","ocean");w.properties["sea_state"]=std::int64_t{1};

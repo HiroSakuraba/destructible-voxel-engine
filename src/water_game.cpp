@@ -2,6 +2,8 @@
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
 #include "dve/water_vessel_dynamics.hpp"
+#include "dve/water_coast.hpp"
+#include "dve/water_surf.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -15,6 +17,7 @@ namespace {
 constexpr std::string_view rulesType="dve.prototype.water_rules";
 constexpr std::string_view oceanType="dve.prototype.water_ocean";
 constexpr std::string_view vesselType="dve.prototype.water_vessel";
+constexpr std::string_view coastType="dve.prototype.water_coast";
 constexpr std::string_view stateType="dve.prototype.water_state";
 constexpr float stepDt=1.F/120.F;
 template<class T>T get(const Component& c,std::string_view name,T fallback){
@@ -25,7 +28,7 @@ template<class T>T get(const Component& c,std::string_view name,T fallback){
 bool finite(Float3 p){return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z);}
 bool finite(Quaternion q){return std::isfinite(q.x)&&std::isfinite(q.y)&&std::isfinite(q.z)&&std::isfinite(q.w);}
 std::string fixed(float x){std::ostringstream out;out.imbue(std::locale::classic());out<<std::fixed<<std::setprecision(1)<<x;return out.str();}
-bool is_role(std::string_view name){return name==rulesType||name==oceanType||name==vesselType;}
+bool is_role(std::string_view name){return name==rulesType||name==oceanType||name==vesselType||name==coastType;}
 VesselDynamics propulsion_of(const Component& c){
  VesselDynamics v;
  v.type=WatercraftType(get(c,"craft_type",std::int64_t{0}));
@@ -59,6 +62,14 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"current_y",0.0,false,false,"Current Y (metres/second)"},
   {"wind_x",5.0,false,false,"Global ambient wind X (m/s)"},
   {"wind_y",8.0,false,false,"Global ambient wind Y (m/s)"}});
+ add(std::string(coastType),"Coastal Surf Zone (marker)",{
+  {"key",std::string{"surf-zone"},true,false,"Unique surf-zone key"},
+  {"half_width_m",150.0,false,false,"Surf zone half-width in metres"},
+  {"offshore_length_m",240.0,false,false,"Distance from shoreline to offshore transition"},
+  {"beach_slope",0.05,false,false,"Depth rise per metre toward shoreline"},
+  {"swell_height_m",1.4,false,false,"Offshore surf swell amplitude"},
+  {"period_s",9.0,false,false,"Approaching wave period in seconds"},
+  {"peel",0.08,false,false,"Breaking front lateral phase offset"}});
  add(std::string(rulesType),"Water Prototype Rules (marker)",{
   {"key",std::string{"water-rules"},true,false,"Unique water rules key"}});
  add(std::string(vesselType),"Water Vessel (collision-free polygon)",{
@@ -74,7 +85,7 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"probes_beam",std::int64_t{3},false,false,"Lateral buoyancy points"},
   {"thrust_newtons",1400.0,false,false,"W1 demonstration motor force"},
   {"rudder_torque",380.0,false,false,"Rudder force/torque authority"},
-  {"craft_type",std::int64_t{0},false,false,"0 dinghy, 1 sailboat, 2 pirate, 3 speedboat, 4 wave runner"},
+  {"craft_type",std::int64_t{0},false,false,"0 dinghy, 1 sailboat, 2 pirate, 3 speedboat, 4 wave runner, 5 surfboard"},
   {"sail_area_m2",0.0,false,false,"Unreefed sail area square metres"},
   {"keel_area_m2",0.0,false,false,"Keel/centerboard lateral projected area"},
   {"mast_height_m",0.0,false,false,"Sail center of effort above hull COM"},
@@ -89,7 +100,7 @@ bool scene_has_water(std::span<const PrototypeObjectView> objects){
 bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::string* error){
  const auto fail=[&](std::string reason){if(error)*error=std::move(reason);return false;};
  const auto registry=ComponentTypeRegistry::make_default();
- unsigned ocean=0,rules=0,vessels=0;
+ unsigned ocean=0,rules=0,vessels=0,coasts=0;
  std::set<std::string> keys;
  for(const auto& o:objects){
   unsigned count=0;
@@ -110,6 +121,16 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
      const auto v=get(c,n,0.0);if(!std::isfinite(v)||std::abs(v)>25)
       return fail("Ocean current must be finite and within 25 m/s");
     }
+    }else if(c.type==coastType){
+    if(++coasts>1||!o.marker)return fail("Coastal surf requires one marker");
+    WaterCoast coast;
+    coast.halfWidth=float(get(c,"half_width_m",150.0));
+    coast.offshoreLength=float(get(c,"offshore_length_m",240.0));
+    coast.slope=float(get(c,"beach_slope",.05));
+    coast.swellHeight=float(get(c,"swell_height_m",1.4));
+    coast.periodSeconds=float(get(c,"period_s",9.0));
+    coast.peel=float(get(c,"peel",.08));
+    if(!valid_water_coast(coast))return fail("Invalid coastal surf settings");
    }else if(c.type==rulesType){
     if(++rules>1||!o.marker)return fail("Exactly one water rules marker is required");
    }else if(c.type==vesselType){
@@ -133,6 +154,8 @@ struct WaterGame::Impl {
   float trim{0.6F},wakeCooldown{};
   WaterHydroLoads loads{};
   VesselDriveLoads propLoads{};
+  SurfLoads surfLoads{};
+  unsigned wipeouts{};float wipeoutCooldown{};
  };
  GameWorld& world;OceanField field{};
  Float3 wind{5,8,0};
@@ -141,7 +164,7 @@ struct WaterGame::Impl {
  std::vector<Boat> boats;
  std::vector<WaterSprayEffect> spray;
  GameObjectId rules{};ComponentId stateComponent{};
- std::string rulesKey,oceanKey;
+ std::string rulesKey,oceanKey,coastKey;
  unsigned selected{};
  double elapsed{};
  float accumulator{};
@@ -149,7 +172,7 @@ struct WaterGame::Impl {
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.health=hud.maximumHealth=100;hud.water=true;}
  void publish(Boat& b){(void)world.set_position(b.id,b.state.position);(void)world.set_rotation(b.id,b.state.orientation);}
  void reset(){
-  for(auto& b:boats){b.state=b.origin;b.trim=0.6F;b.wakeCooldown=0;publish(b);}
+  for(auto& b:boats){b.state=b.origin;b.trim=0.6F;b.wakeCooldown=0;b.wipeouts=0;b.wipeoutCooldown=0;publish(b);}
   field.clear_wakes();spray.clear();
   selected=0;elapsed=0;accumulator=0;hud.phase=PrototypePhase::Playing;
   update_camera(true);update_hud();
@@ -158,7 +181,8 @@ struct WaterGame::Impl {
   const auto& s=boats[selected].state;
   const Float3 forward=rotate(s.orientation,{0,1,0});
   const Float3 target=add(s.position,multiply(forward,4.F));
-  const float follow=(std::max)(14.F,boats[selected].hull.lengthMetres*1.6F);
+  const float follow=boats[selected].drive.type==WatercraftType::Surfboard?
+      9.F:(std::max)(14.F,boats[selected].hull.lengthMetres*1.6F);
   const Float3 wanted=add(add(s.position,multiply(forward,-follow)),Float3{0,0,follow*.48F});
   const float a=snap?1.F:1.F-std::exp(-8.F*stepDt);
   camera.position=add(camera.position,multiply(subtract(wanted,camera.position),a));
@@ -192,8 +216,22 @@ struct WaterGame::Impl {
    input.sailTrim=boat.trim;
    boat.propLoads=evaluate_vessel_dynamics(boat.drive,boat.hull,boat.state,waves,
                                                wind,input,boat.loads.immersionFraction);
-   step_water_hull(boat.state,boat.hull,boat.loads,dt,
-                   boat.propLoads.force,boat.propLoads.torque);
+   Float3 extraForce=boat.propLoads.force,extraTorque=boat.propLoads.torque;
+   if(boat.drive.type==WatercraftType::Surfboard){
+     boat.surfLoads=evaluate_surfboard(boat.hull,boat.state,waves,
+            SurfInput{input.helm,input.throttle},boat.loads.immersionFraction);
+     extraForce=add(extraForce,boat.surfLoads.force);
+     extraTorque=add(extraTorque,boat.surfLoads.torque);
+     boat.wipeoutCooldown=std::max(0.F,boat.wipeoutCooldown-dt);
+   }
+   step_water_hull(boat.state,boat.hull,boat.loads,dt,extraForce,extraTorque);
+   if(boat.drive.type==WatercraftType::Surfboard &&
+      boat.wipeoutCooldown<=0 &&
+      (boat.surfLoads.wipeout||boat.state.position.z< -5.F)){
+     ++boat.wipeouts;
+     boat.state=boat.origin;
+     boat.wipeoutCooldown=2.F;
+   }
    if(!finite(boat.state.position)||!finite(boat.state.linearVelocity)||
       !finite(boat.state.orientation)||length(boat.state.position)>100000.F){
      boat.state=boat.origin;
@@ -277,6 +315,10 @@ struct WaterGame::Impl {
   telemetry.planingLift=b.propLoads.planingLift;
   telemetry.lateralSlip=b.propLoads.lateralWaterSpeed;
   telemetry.sailTrim=b.trim;
+  telemetry.surfBreaking=b.surfLoads.breakIntensity;
+  telemetry.surfStability=b.surfLoads.stability;
+  telemetry.surfFaceDrive=b.surfLoads.faceDrive;
+  telemetry.surfWipeouts=b.wipeouts;
   telemetry.localFoam=water.foam;telemetry.activeWakes=unsigned(field.wakes().size());
   telemetry.wakeHeight=field.wakes().empty()?0.F:water.height;
   telemetry.type=b.drive.type;
@@ -286,11 +328,15 @@ struct WaterGame::Impl {
   hud.prompt="SPEED "+fixed(telemetry.speed)+" M/S ROLL "+fixed(e.y)+" PITCH "+fixed(e.x);
   hud.message="IMMERSION "+fixed(100*telemetry.immersion)+"% WATER "+fixed(water.height)+
     " M  1..5 BOATS  Q/E TRIM";
+  if(b.drive.type==WatercraftType::Surfboard)
+    hud.message="BREAK "+fixed(telemetry.surfBreaking)+" STABLE "+
+      fixed(telemetry.surfStability)+" WIPEOUTS "+std::to_string(telemetry.surfWipeouts)+
+      " W PADDLE A/D CARVE";
   if(hud.phase==PrototypePhase::Paused)hud.message="PAUSED - P RESUME";
   hud.vehicleTelemetry="WIND "+fixed(telemetry.apparentWind)+" SAIL "+fixed(telemetry.sailDrive)+
     " PLANING "+fixed(telemetry.planingLift)+" TRIM "+fixed(telemetry.sailTrim)+
     " SLIP "+fixed(telemetry.lateralSlip)+" WAKES "+std::to_string(telemetry.activeWakes)+
-    " FOAM "+fixed(telemetry.localFoam);
+    " FOAM "+fixed(telemetry.localFoam)+" SURF "+fixed(telemetry.surfFaceDrive);
  }
  void persist(){
   std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17);

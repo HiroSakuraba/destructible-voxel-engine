@@ -150,6 +150,8 @@ add_library(dve_core
     src/prototype_components.cpp
     src/racing_game.cpp
     src/flying_game.cpp
+    src/flight_wind.cpp
+    src/flight_aerodynamics.cpp
     src/prototype_game.cpp
     src/prototype_hud.cpp
     src/replication_contract.cpp
@@ -2784,6 +2786,9 @@ if(DVE_BUILD_TESTS)
         add_test(NAME dve_editor_tests COMMAND dve_editor_tests)
 
         if(TARGET dve_player_runtime)
+            add_executable(dve_flight_physics_tests tests/test_flight_physics.cpp)
+            target_link_libraries(dve_flight_physics_tests PRIVATE dve::core)
+            add_test(NAME dve_flight_physics_tests COMMAND dve_flight_physics_tests)
             add_executable(dve_flying_game_tests tests/test_flying_game.cpp)
             target_link_libraries(dve_flying_game_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_flying_game_tests COMMAND dve_flying_game_tests)

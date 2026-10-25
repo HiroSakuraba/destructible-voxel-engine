@@ -38,8 +38,9 @@ EditorDocument make_flying_starter(){
    box("Right canyon wall",{170.F,y,26.F},{16,64,52},{.36F,.32F,.29F,1});
  }
  for(unsigned n=0;n<6;++n){
-  const float y=55.F+100.F*float(n);
-  const std::array<float,6> gateHeight{{90.F,80.F,100.F,120.F,100.F,120.F}};
+  const std::array<float,6> gateY{{55.F,120.F,205.F,310.F,420.F,520.F}};
+  const float y=gateY[n];
+  const std::array<float,6> gateHeight{{90.F,65.F,85.F,105.F,95.F,110.F}};
   const float z=gateHeight[n];
   const std::array<Float4,6> colors{{{.65F,.84F,.96F,1},{.44F,.86F,.54F,1},{.99F,.72F,.30F,1},{.95F,.30F,.22F,1},{.66F,.52F,.90F,1},{.95F,.88F,.48F,1}}};
   auto& ring=box("Flight ring "+std::to_string(n+1),{0,y,z},{50,.3F,.8F},colors[n],false);
@@ -58,7 +59,7 @@ EditorDocument make_flying_starter(){
  EditorObject flyer(d.allocate_object_id(),"Morphing Aircraft");
  flyer.flags.anchored=true;flyer.flags.collisionEnabled=false;
  flyer.transform.position={0,0,90};
- flyer.components.push_back(component("flight_vehicle","flyer"));
+ flyer.components.push_back(component("flight_vehicle","flyer"));flyer.components.back().properties["wind_x"]=1.5;
  CookedPolygonAsset mesh;mesh.objectId=flyer.id;
  mesh.materials.resize(4);mesh.materialBindings.resize(4);
  mesh.materials[0].baseColor={.14F,.52F,.84F,1};

@@ -269,13 +269,14 @@ struct WaterGame::Impl {
   telemetry.sailTrim=b.trim;
   telemetry.type=b.drive.type;
   if(b.drive.type==WatercraftType::MiniSub){
-    telemetry.subDepth=b.subLoads.depth;
+    const auto volume=sample_water_volume(field,volumeSettings,b.state.position,elapsed);
+    telemetry.subDepth=volume.depthBelowSurface;
     telemetry.subTargetDepth=b.subState.targetDepthM;
     telemetry.subBallastKg=b.subState.ballastKg;
     telemetry.subBattery=b.subState.battery;
     telemetry.subDepthHold=b.subState.depthHold;
-    telemetry.subOverDepth=b.subLoads.ratedDepthExceeded;
-    telemetry.subPressurePa=b.subLoads.pressurePascal;
+    telemetry.subOverDepth=volume.depthBelowSurface>b.subConfig.depthRatingM;
+    telemetry.subPressurePa=volume.pressurePascal;
   }
   telemetry.activeVessel=selected;telemetry.vesselCount=unsigned(boats.size());
   hud.stats=std::string("WATER ")+watercraft_name(b.drive.type)+
@@ -285,8 +286,9 @@ struct WaterGame::Impl {
     hud.stats="DEEP EXPLORER MINI-SUB";
     hud.prompt="DEPTH "+fixed(telemetry.subDepth)+" M   BALLAST "+
        fixed(telemetry.subBallastKg)+" KG   BATT "+fixed(100*telemetry.subBattery)+"%";
-    hud.message=std::string(telemetry.subDepthHold?"DEPTH HOLD ":"MANUAL ")+
-       fixed(telemetry.subTargetDepth)+" M   "+(telemetry.subOverDepth?"DEPTH RATING EXCEEDED":"PRESSURE OK");
+    hud.message=hud.phase==PrototypePhase::Paused?"PAUSED - P RESUME":
+      std::string(telemetry.subDepthHold?"DEPTH HOLD ":"MANUAL ")+
+        fixed(telemetry.subTargetDepth)+" M   "+(telemetry.subOverDepth?"DEPTH RATING EXCEEDED":"PRESSURE OK");
     hud.vehicleTelemetry="PRESSURE "+fixed(telemetry.subPressurePa/100000.F)+
        " BAR   W/S THRUST  SPACE/CTRL VERTICAL  Z/X BALLAST  H HOLD";
     return;

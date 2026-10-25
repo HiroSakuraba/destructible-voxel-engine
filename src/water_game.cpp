@@ -226,8 +226,12 @@ struct WaterGame::Impl {
    if(boat.wakeCooldown<.16F)continue;
    boat.wakeCooldown-=.16F;
    WaterWakeEvent wake{};
-   wake.position={boat.state.position.x-forward.x*boat.hull.lengthMetres*.48F,
-                  boat.state.position.y-forward.y*boat.hull.lengthMetres*.48F};
+   // Start the propagating wake behind the stern. This avoids feeding the
+   // emitter's own stern probes an artificial buoyancy pulse every 0.16 s.
+   const float trailing=boat.hull.lengthMetres*.48F+
+                       std::clamp(boat.hull.beamMetres*1.6F,1.0F,12.0F);
+   wake.position={boat.state.position.x-forward.x*trailing,
+                  boat.state.position.y-forward.y*trailing};
    const float sign=forwardSpeed<0?-1.F:1.F;
    wake.direction={forward.x*sign,forward.y*sign};
    wake.bornSeconds=elapsed+dt;

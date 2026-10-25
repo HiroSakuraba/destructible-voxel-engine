@@ -53,7 +53,7 @@ bool gate_crossed(Float3 a,Float3 b,const RigidTransform& gate,float width,float
  return std::abs(p.x)<=width&&std::abs(p.z)<=height;
 }
 }
-const FlightProfile& flight_profile(FlightMode m)noexcept{return profiles[std::min(unsigned(m),5U)];}
+const FlightProfile& flight_profile(FlightMode m)noexcept{return profiles[(std::min)(unsigned(m),5U)];}
 const char* flight_mode_name(FlightMode m)noexcept{return flight_profile(m).name;}
 bool scene_has_flying(std::span<const PrototypeObjectView> objects){
  for(const auto& o:objects)for(const auto& c:o.components)if(c.enabled&&flight_role(c.type))return true;
@@ -159,7 +159,7 @@ struct FlyingGame::Impl {
  void recover(){
   ++crashes;crashed=false;position=checkpointPos;orientation=checkpointRotation;
   velocity={};angular={};morph=0;mode=target;spool=0;
-  battery=std::max(battery,.25F);elapsed+=5;publish();update_camera(true);
+  battery=(std::max)(battery,.25F);elapsed+=5;publish();update_camera(true);
  }
  void request(FlightMode m){
   if(m==target)return;
@@ -207,11 +207,10 @@ struct FlyingGame::Impl {
   const bool flap=world.is_action_pressed("jump");
   const bool airbrake=world.is_action_pressed("flight_airbrake");
   const auto old=position;
-  const FlightMode current=mode;
   float morphBlend=0;
   if(target!=mode){
    const float duration=flight_profile(target).transitionSeconds;
-   morph=std::min(1.F,morph+dt/duration);
+   morph=(std::min)(1.F,morph+dt/duration);
    morphBlend=morph*morph*(3.F-2.F*morph);
    if(morph>=1){mode=target;transitionFrom=target;morph=0;morphBlend=0;}
   }
@@ -223,9 +222,9 @@ struct FlyingGame::Impl {
   const Float3 f=rotate(orientation,{0,1,0}),up=rotate(orientation,{0,0,1}),right=rotate(orientation,{1,0,0});
   const float forwardSpeed=dot(air,f);
   const float verticalInBody=dot(air,up);
-  const float alpha=std::atan2(-verticalInBody,std::max(1.F,forwardSpeed));
+  const float alpha=std::atan2(-verticalInBody,(std::max)(1.F,forwardSpeed));
   const float critical=profile.stallAngle;
-  const float beyond=std::max(0.F,std::abs(alpha)-critical);
+  const float beyond=(std::max)(0.F,std::abs(alpha)-critical);
   float cl=std::clamp(.36F+profile.liftSlope*alpha,-profile.liftLimit,profile.liftLimit);
   const float attenuation=1.F/(1.F+10.F*beyond*beyond);
   cl*=attenuation;
@@ -245,13 +244,11 @@ struct FlyingGame::Impl {
   spool=std::clamp(spool,0.F,1.F);
   if(fuel>0&&profile.thrust>0) {
    force=add(force,multiply(f,profile.thrust*spool));
-   fuel=std::max(0.F,fuel-dt*spool*(mode==FlightMode::Jet?.004F:.002F));
+   fuel=(std::max)(0.F,fuel-dt*spool*(mode==FlightMode::Jet?.004F:.002F));
   }
-  const float hoverFraction=target!=mode?blend(FlightProfile{"",0,0,0,0,0,0,0,0,0,0,0},FlightProfile{"",0,0,0,0,0,0,0,0,0,0,0},0).wingArea:0;
-  (void)hoverFraction;
-  const float hoverMix=mode==FlightMode::Hover?1.F:
-   target==FlightMode::Hover?morphBlend:
-   transitionFrom==FlightMode::Hover&&target!=mode?1.F-morphBlend:0.F;
+  const float hoverMix=mode==FlightMode::Hover&&target==mode?1.F:
+   mode==FlightMode::Hover?1.F-morphBlend:
+   target==FlightMode::Hover?morphBlend:0.F;
   if(hoverMix>0&&battery>0){
     // Active rotor lift. Position control is limited by energy and acceleration, never teleports.
     const Float3 commanded={roll*8.F,pitch*12.F,climb*7.F};
@@ -260,18 +257,18 @@ struct FlyingGame::Impl {
     const float maxA=14.F;
     if(length(correction)>maxA)correction=multiply(correction,maxA/length(correction));
     force=add(force,multiply(add(Float3{0,0,gravity},correction),mass*hoverMix));
-    battery=std::max(0.F,battery-dt*.006F*hoverMix);
+    battery=(std::max)(0.F,battery-dt*.006F*hoverMix);
   }
   if((mode==FlightMode::Float||target==FlightMode::Float)&&battery>0&&std::abs(climb)>.01F){
     force.z+=mass*climb*1.5F;
-    battery=std::max(0.F,battery-dt*.0006F*std::abs(climb));
+    battery=(std::max)(0.F,battery-dt*.0006F*std::abs(climb));
   }
   if((mode==FlightMode::Bird||target==FlightMode::Bird)&&flap&&!lastFlap&&stamina>.12F){
     force=add(force,multiply(add(f,Float3{0,0,.75F}),mass*120.F));
-    stamina=std::max(0.F,stamina-.12F);
+    stamina=(std::max)(0.F,stamina-.12F);
   }
   lastFlap=flap;
-  stamina=std::min(1.F,stamina+dt*.03F);
+  stamina=(std::min)(1.F,stamina+dt*.03F);
   if(airbrake)force=subtract(force,multiply(air,3.5F*speed));
   const Float3 accel=multiply(force,1.F/mass);
   velocity=add(velocity,multiply(accel,dt));
@@ -298,7 +295,7 @@ struct FlyingGame::Impl {
     }
   }
   if(fraction<1.F){
-    position=add(position,multiply(move,std::max(0.F,fraction-.003F/(std::max)(length(move),.003F))));
+    position=add(position,multiply(move,(std::max)(0.F,fraction-.003F/(std::max)(length(move),.003F))));
     const float inward=dot(velocity,normal);
     if(inward<0){
       if(-inward>14.F){crashed=true;recover();return;}

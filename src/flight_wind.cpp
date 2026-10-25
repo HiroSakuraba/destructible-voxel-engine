@@ -90,7 +90,14 @@ FlightWindSample FlightWindField::sample(Float3 p,float seconds)const noexcept{
     result.backgroundVertical=result.velocity.z-result.ridgeVertical-result.thermalVertical;
     // Prevent stacked authoring zones from producing unbounded wind speeds.
     const float mag=length(result.velocity);
-    if(mag>150.0F)result.velocity=multiply(result.velocity,150.0F/mag);
+    if(mag>150.0F){
+        const float scale=150.0F/mag;
+        result.velocity=multiply(result.velocity,scale);
+        // The diagnostic components must describe the *actual* bounded airflow.
+        result.thermalVertical*=scale;
+        result.ridgeVertical*=scale;
+        result.backgroundVertical*=scale;
+    }
     return result;
 }
 } // namespace dve

@@ -1,6 +1,7 @@
 #include "dve/water_game.hpp"
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
+#include "dve/water_vessel_dynamics.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -25,6 +26,17 @@ bool finite(Float3 p){return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfini
 bool finite(Quaternion q){return std::isfinite(q.x)&&std::isfinite(q.y)&&std::isfinite(q.z)&&std::isfinite(q.w);}
 std::string fixed(float x){std::ostringstream out;out.imbue(std::locale::classic());out<<std::fixed<<std::setprecision(1)<<x;return out.str();}
 bool is_role(std::string_view name){return name==rulesType||name==oceanType||name==vesselType;}
+VesselDynamics propulsion_of(const Component& c){
+ VesselDynamics v;
+ v.type=WatercraftType(get(c,"craft_type",std::int64_t{0}));
+ v.sailArea=float(get(c,"sail_area_m2",0.0));
+ v.keelArea=float(get(c,"keel_area_m2",0.0));
+ v.mastHeight=float(get(c,"mast_height_m",0.0));
+ v.planingFactor=float(get(c,"planing_factor",0.0));
+ v.thrustNewtons=float(get(c,"thrust_newtons",1400.0));
+ v.rudderNewtons=float(get(c,"rudder_torque",380.0));
+ return v;
+}
 WaterHull hull_of(const Component& c){
  WaterHull h;
  h.massKg=float(get(c,"mass_kg",480.0));h.displacementCubicMetres=float(get(c,"displacement_m3",.55));
@@ -44,7 +56,9 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"key",std::string{"ocean"},true,false,"Unique ocean key"},
   {"sea_state",std::int64_t{1},false,false,"0 calm, 1 breeze, 2 storm"},
   {"current_x",0.0,false,false,"Current X (metres/second)"},
-  {"current_y",0.0,false,false,"Current Y (metres/second)"}});
+  {"current_y",0.0,false,false,"Current Y (metres/second)"},
+  {"wind_x",5.0,false,false,"Global ambient wind X (m/s)"},
+  {"wind_y",8.0,false,false,"Global ambient wind Y (m/s)"}});
  add(std::string(rulesType),"Water Prototype Rules (marker)",{
   {"key",std::string{"water-rules"},true,false,"Unique water rules key"}});
  add(std::string(vesselType),"Water Vessel (collision-free polygon)",{
@@ -59,7 +73,12 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"probes_length",std::int64_t{3},false,false,"Longitudinal buoyancy points"},
   {"probes_beam",std::int64_t{3},false,false,"Lateral buoyancy points"},
   {"thrust_newtons",1400.0,false,false,"W1 demonstration motor force"},
-  {"rudder_torque",380.0,false,false,"W1 demonstration rudder torque"}});
+  {"rudder_torque",380.0,false,false,"Rudder force/torque authority"},
+  {"craft_type",std::int64_t{0},false,false,"0 dinghy, 1 sailboat, 2 pirate, 3 speedboat, 4 wave runner"},
+  {"sail_area_m2",0.0,false,false,"Unreefed sail area square metres"},
+  {"keel_area_m2",0.0,false,false,"Keel/centerboard lateral projected area"},
+  {"mast_height_m",0.0,false,false,"Sail center of effort above hull COM"},
+  {"planing_factor",0.0,false,false,"Dynamic planing lift coefficient 0..2"}});
  add(std::string(stateType),"Water Runtime Save",{
   {"data",std::string{},false,false,"Versioned runtime-only state"}});
 }
@@ -87,15 +106,15 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
     if(++ocean>1||!o.marker)return fail("Exactly one ocean marker is required");
     const auto state=get(c,"sea_state",std::int64_t{1});
     if(state<0||state>2)return fail("Ocean sea state outside 0..2");
-    for(const char* n:{"current_x","current_y"}){
+    for(const char* n:{"current_x","current_y","wind_x","wind_y"}){
      const auto v=get(c,n,0.0);if(!std::isfinite(v)||std::abs(v)>25)
       return fail("Ocean current must be finite and within 25 m/s");
     }
    }else if(c.type==rulesType){
     if(++rules>1||!o.marker)return fail("Exactly one water rules marker is required");
    }else if(c.type==vesselType){
-    if(++vessels>2||o.marker)return fail("W1 supports exactly two visible vessels");
-    if(!valid_water_hull(hull_of(c)))return fail("Invalid vessel mass, dimensions, or probes");
+    if(++vessels>8||o.marker)return fail("W2 supports 1..8 visible vessels");
+    if(!valid_water_hull(hull_of(c))||!valid_vessel_dynamics(propulsion_of(c)))return fail("Invalid vessel mass, propulsion, sails, planing or probes");
     for(const auto* n:{"thrust_newtons","rudder_torque"}){
      const auto v=get(c,n,0.0);if(!std::isfinite(v)||v<0||v>1.e7)
       return fail("Invalid vessel thrust or rudder torque");
@@ -103,17 +122,20 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
    }
   }
  }
- if(ocean!=1||rules!=1||vessels!=2)return fail("Water starter requires one ocean, one rules marker and two vessels");
+ if(ocean!=1||rules!=1||vessels==0||vessels>8)return fail("Water prototype requires one ocean, one rules marker and 1..8 vessels");
  return true;
 }
 struct WaterGame::Impl {
  struct Boat {
   GameObjectId id{};std::string key;Component component{};
   WaterHull hull{};WaterRigidState state{},origin{};
-  float thrust{},rudder{};
+  VesselDynamics drive{};
+  float trim{0.6F};
   WaterHydroLoads loads{};
+  VesselDriveLoads propLoads{};
  };
  GameWorld& world;OceanField field{};
+ Float3 wind{5,8,0};
  PrototypeHud hud{};PrototypeCamera camera{};
  WaterGameTelemetry telemetry{};
  std::vector<Boat> boats;
@@ -126,7 +148,7 @@ struct WaterGame::Impl {
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.health=hud.maximumHealth=100;hud.water=true;}
  void publish(Boat& b){(void)world.set_position(b.id,b.state.position);(void)world.set_rotation(b.id,b.state.orientation);}
  void reset(){
-  for(auto& b:boats){b.state=b.origin;publish(b);}
+  for(auto& b:boats){b.state=b.origin;b.trim=0.6F;publish(b);}
   selected=0;elapsed=0;accumulator=0;hud.phase=PrototypePhase::Playing;
   update_camera(true);update_hud();
  }
@@ -134,7 +156,8 @@ struct WaterGame::Impl {
   const auto& s=boats[selected].state;
   const Float3 forward=rotate(s.orientation,{0,1,0});
   const Float3 target=add(s.position,multiply(forward,4.F));
-  const Float3 wanted=add(add(s.position,multiply(forward,-17.F)),Float3{0,0,8.F});
+  const float follow=(std::max)(14.F,boats[selected].hull.lengthMetres*1.6F);
+  const Float3 wanted=add(add(s.position,multiply(forward,-follow)),Float3{0,0,follow*.48F});
   const float a=snap?1.F:1.F-std::exp(-8.F*stepDt);
   camera.position=add(camera.position,multiply(subtract(wanted,camera.position),a));
   camera.target=add(camera.target,multiply(subtract(target,camera.target),a));

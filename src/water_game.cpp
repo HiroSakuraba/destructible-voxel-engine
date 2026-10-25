@@ -88,7 +88,8 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"sub_dry_mass_kg",2350.0,false,false,"Mini-sub dry mass (kg)"},
   {"sub_forward_thrust_n",2200.0,false,false,"Mini-sub forward thrust (N)"},
   {"sub_vertical_thrust_n",3200.0,false,false,"Mini-sub vertical thruster force (N)"},
-  {"sub_depth_rating_m",80.0,false,false,"Maximum safe operating depth"}});
+  {"sub_depth_rating_m",80.0,false,false,"Maximum safe operating depth"},
+  {"sub_lamp_intensity",12.0,false,false,"Underwater headlamp brightness (linear HDR)"}});
  add(std::string(stateType),"Water Runtime Save",{
   {"data",std::string{},false,false,"Versioned runtime-only state"}});
 }
@@ -139,7 +140,9 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
        cfg.depthRatingM=float(get(c,"sub_depth_rating_m",80.0));
        cfg.halfHeightM=float(get(c,"draft_m",1.8))*.5F;
        const float initial=float(get(c,"sub_ballast_kg",60.0));
-       if(!valid_submarine_config(cfg)||!std::isfinite(initial)||initial<0||
+       if(!valid_submarine_config(cfg)||!std::isfinite(float(get(c,"sub_lamp_intensity",12.0)))||
+          get(c,"sub_lamp_intensity",12.0)<0||get(c,"sub_lamp_intensity",12.0)>1000||
+          !std::isfinite(initial)||initial<0||
           initial>cfg.ballastCapacityKg)return fail("Invalid mini-sub displacement/ballast/drive");
     }
     for(const auto* n:{"thrust_newtons","rudder_torque"}){
@@ -165,6 +168,7 @@ struct WaterGame::Impl {
  };
  GameWorld& world;OceanField field{};
  WaterVolumeSettings volumeSettings{};
+ std::array<UnderwaterLamp,2> headlamps{};
  Float3 wind{5,8,0};
  PrototypeHud hud{};PrototypeCamera camera{};
  WaterGameTelemetry telemetry{};
@@ -177,12 +181,32 @@ struct WaterGame::Impl {
  bool active{},lastPause{},lastReset{},lastSwitch{},lastDebug{},lastHold{};
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.health=hud.maximumHealth=100;hud.water=true;}
  void publish(Boat& b){(void)world.set_position(b.id,b.state.position);(void)world.set_rotation(b.id,b.state.orientation);}
+ void refresh_lamps(){
+   if(boats.empty()||selected>=boats.size())return;
+   const auto& b=boats[selected];
+   if(b.drive.type!=WatercraftType::MiniSub)return;
+   const auto forward=rotate(b.state.orientation,{0,1,0});
+   const auto right=rotate(b.state.orientation,{1,0,0});
+   const auto intensity=float(get(b.component,"sub_lamp_intensity",12.0))*
+                        std::clamp(b.subState.battery*10.F,0.F,1.F);
+   for(int i=0;i<2;++i){
+      const Float3 side=multiply(right,(i==0?-1.F:1.F)*.55F);
+      auto& lamp=headlamps[unsigned(i)];
+      lamp.position=add(b.state.position,add(
+          multiply(forward,b.hull.lengthMetres*.48F),side));
+      lamp.direction=forward;
+      lamp.color={1,.94F,.80F};
+      lamp.intensity=intensity;
+      lamp.range=30.F;
+      lamp.innerCos=.96F;lamp.outerCos=.81F;
+   }
+ }
  void reset(){
   for(auto& b:boats){b.state=b.origin;b.trim=.6F;
    b.subState={};b.subState.ballastKg=float(get(b.component,"sub_ballast_kg",60.0));
    publish(b);}
   selected=0;elapsed=0;accumulator=0;hud.phase=PrototypePhase::Playing;
-  update_camera(true);update_hud();
+  refresh_lamps();update_camera(true);update_hud();
  }
  void update_camera(bool snap){
   const auto& s=boats[selected].state;
@@ -252,7 +276,7 @@ struct WaterGame::Impl {
    }
    publish(boat);
   }
-  elapsed+=dt;update_camera(false);
+  elapsed+=dt;refresh_lamps();update_camera(false);
  }
  void update_hud(){
   auto& b=boats[selected];
@@ -325,6 +349,15 @@ const PrototypeHud& WaterGame::hud()const noexcept{return impl_->hud;}
 PrototypeCamera WaterGame::camera()const noexcept{return impl_->camera;}
 const OceanField& WaterGame::ocean()const noexcept{return impl_->field;}
 double WaterGame::ocean_time()const noexcept{return impl_->elapsed;}
+const WaterVolumeSettings& WaterGame::volume_settings()const noexcept{
+ return impl_->volumeSettings;
+}
+std::span<const UnderwaterLamp> WaterGame::underwater_lamps()const noexcept{
+ const auto& s=*impl_;
+ if(s.boats.empty()||s.selected>=s.boats.size()||
+    s.boats[s.selected].drive.type!=WatercraftType::MiniSub)return {};
+ return s.headlamps;
+}
 const WaterGameTelemetry& WaterGame::telemetry()const noexcept{return impl_->telemetry;}
 bool WaterGame::start(std::string* error){
  auto& s=*impl_;if(s.active)return false;
@@ -394,7 +427,7 @@ void WaterGame::step(float dt){
  if(toggle)selection=(selection+1)%unsigned(s.boats.size());
  for(unsigned n=0;n<s.boats.size();++n)
    if(s.world.is_action_pressed("water_ship_"+std::to_string(n+1)))selection=n;
- if(selection!=s.selected){s.selected=selection;s.update_camera(true);}
+ if(selection!=s.selected){s.selected=selection;s.refresh_lamps();s.update_camera(true);}
  if(s.hud.phase==PrototypePhase::Playing){
   s.accumulator+=dt;
   for(unsigned i=0;i<31&&s.accumulator+1.e-7F>=stepDt;++i){
@@ -477,6 +510,6 @@ bool WaterGame::after_restore(std::string* error){
  s.volumeSettings.clarity=WaterClarity(get(*oceanConfig,"water_clarity",std::int64_t{0}));
  s.rules=rules;s.stateComponent=c->id;s.selected=selected;s.elapsed=elapsed;
  s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);
- s.update_camera(true);s.update_hud();return true;
+ s.refresh_lamps();s.update_camera(true);s.update_hud();return true;
 }
 }

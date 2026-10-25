@@ -70,7 +70,8 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
  bool keep{};~Cleanup(){if(!keep){std::error_code ec;
  std::filesystem::remove_all(path,ec);}}} cleanup{root};
  const bool racing=std::any_of(d.objects().begin(),d.objects().end(),[](const auto& p){return find_component_by_type(p.second.components,"dve.prototype.race_car")!=nullptr;});
- EditorProject project;project.name=racing?"Racing Time Trial":"First Person Prototype";project.root=root;project.recentScenes={"scenes/prototype.dvescene"};
+ const bool flying=std::any_of(d.objects().begin(),d.objects().end(),[](const auto& p){return find_component_by_type(p.second.components,"dve.prototype.flight_vehicle")!=nullptr;});
+ EditorProject project;project.name=flying?"Wind Garden Flight":racing?"Racing Time Trial":"First Person Prototype";project.root=root;project.recentScenes={"scenes/prototype.dvescene"};
  if(!project.initialize(&reason))return fail(reason);
  auto copy=clone_editor_document(d);
  auto saved=copy.save_transactional(root/"scenes"/"prototype.dvescene");
@@ -80,9 +81,26 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
  GameManifest manifest;manifest.name=project.name;manifest.version="0.1.0";manifest.entryScene="scenes/prototype.dvoxscene.json";
  manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},{"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},{"look_x","key:j/-1,key:l/+1,gamepad:rightx"},{"look_y","key:i/-1,key:k/+1,gamepad:righty"},{"jump","key:space,gamepad:south"},{"crouch","key:left ctrl,gamepad:east"},{"interact","key:e,gamepad:west"},{"pause","key:p,gamepad:start"},{"restart","key:r,gamepad:back"},{"prototype_debug","key:f3"}};
  if(racing)manifest.inputBindings["race_brake"]="key:b/+1,gamepad:lefttrigger";
+ if(flying){
+   manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},
+     {"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},
+     {"flight_yaw","key:q/-1,key:e/+1,gamepad:rightx"},
+     {"flight_vertical","key:up/+1,key:down/-1,gamepad:righty/-1"},
+     {"flight_throttle","key:left shift/+1,key:left ctrl/-1,gamepad:righttrigger,gamepad:lefttrigger/-1"},
+     {"flight_next","key:tab,gamepad:rightshoulder"},
+     {"flight_previous","key:backspace,gamepad:leftshoulder"},
+     {"flight_mode_1","key:1"},{"flight_mode_2","key:2"},{"flight_mode_3","key:3"},
+     {"flight_mode_4","key:4"},{"flight_mode_5","key:5"},{"flight_mode_6","key:6"},
+     {"jump","key:space,gamepad:south"},{"flight_airbrake","key:b,gamepad:east"},
+     {"crouch","key:x,gamepad:west"},{"interact","key:c,gamepad:north"},
+     {"pause","key:p,gamepad:start"},{"restart","key:r,gamepad:back"},
+     {"prototype_debug","key:f3"}};
+ }
  std::ofstream game(root/"game.dvegame",std::ios::binary);game<<manifest.serialize();game.close();
  if(!game)return fail("Cannot write game manifest");
- std::ofstream readme(root/"README.md");readme<<"# First-person prototype\n\nOpen project.dveproject and scenes/prototype.dvescene in the editor, or run dve_player with this directory.\n\nWASD: move; mouse or IJKL: look; Space: jump; Ctrl: crouch; E: use; P: pause; R: restart; F3: event trace. Gamepad sticks, South/East/West/Start/Back are bound too.\n\nCollect three yellow objects. Use the green switch to open the door. Reach the checkpoint, cross the red damage strip and enter the blue goal. Z is up. Lua is optional.\n\nPackage with dve_pack NEW_PROJECT NEW_GAME.dvepak --all, then launch dve_player NEW_GAME.dvepak.\n";if(racing){readme.close();readme.open(root/"README.md",std::ios::trunc);readme<<"# Racing time trial\n\nOpen project.dveproject and scenes/prototype.dvescene in the editor, or launch dve_player with this directory.\n\nW/S: throttle and reverse (opposite direction brakes). B / left trigger: independent service brake. A/D: steer. Space: handbrake. Ctrl: recover to last ordered gate (+5 seconds). E: chase/hood camera. P: pause. R: new attempt. Gamepad left stick drives, South is handbrake, East recovery, West camera, Start pause, Back restart.\n\nWait for the countdown, drive counterclockwise around the central barrier, and pass gates 1, 2, 3, then finish gate 0 in the arrow direction. Complete three laps. Shortcut and reverse crossings do not advance the lap. Best lap survives restart within the session and save/load. Z is up. This is portable arcade capsule collision, not Jolt suspension simulation.\n\nPackage with dve_pack NEW_PROJECT NEW_GAME.dvepak --all; launch dve_player NEW_GAME.dvepak.\n";}readme.close();
+ std::ofstream readme(root/"README.md");readme<<"# First-person prototype\n\nOpen project.dveproject and scenes/prototype.dvescene in the editor, or run dve_player with this directory.\n\nWASD: move; mouse or IJKL: look; Space: jump; Ctrl: crouch; E: use; P: pause; R: restart; F3: event trace. Gamepad sticks, South/East/West/Start/Back are bound too.\n\nCollect three yellow objects. Use the green switch to open the door. Reach the checkpoint, cross the red damage strip and enter the blue goal. Z is up. Lua is optional.\n\nPackage with dve_pack NEW_PROJECT NEW_GAME.dvepak --all, then launch dve_player NEW_GAME.dvepak.\n";if(racing){readme.close();readme.open(root/"README.md",std::ios::trunc);readme<<"# Racing time trial\n\nOpen project.dveproject and scenes/prototype.dvescene in the editor, or launch dve_player with this directory.\n\nW/S: throttle and reverse (opposite direction brakes). B / left trigger: independent service brake. A/D: steer. Space: handbrake. Ctrl: recover to last ordered gate (+5 seconds). E: chase/hood camera. P: pause. R: new attempt. Gamepad left stick drives, South is handbrake, East recovery, West camera, Start pause, Back restart.\n\nWait for the countdown, drive counterclockwise around the central barrier, and pass gates 1, 2, 3, then finish gate 0 in the arrow direction. Complete three laps. Shortcut and reverse crossings do not advance the lap. Best lap survives restart within the session and save/load. Z is up. This is portable arcade capsule collision, not Jolt suspension simulation.\n\nPackage with dve_pack NEW_PROJECT NEW_GAME.dvepak --all; launch dve_player NEW_GAME.dvepak.\n";}if(flying){readme.close();readme.open(root/"README.md",std::ios::trunc);
+ readme<<"# Wind Garden: Six Form Flight\n\nOpen project.dveproject in the editor or run dve_player with this project folder.\n\nW/S pitch or hover forward/back; A/D bank or hover strafe; Q/E rudder; Shift/Ctrl throttle; Arrow Up/Down hover climb; Space bird flap; B airbrake; Tab/Backspace mode cycle; 1..6 direct mode requests (Float, Glider, Biplane, Jet, Hover, Bird); C camera; X recovery; P pause; R restart; F3 flight diagnostics. Gamepad sticks, shoulders, triggers and face buttons are bound.\n\nPass the six colored sky gates in order, matching the form written in the HUD. Glide has no motor; Float is buoyant; Hover consumes battery. Fly through the orange updraft around X=50, Y=280 to soar. Transitions preserve position and momentum. Jet cannot instantly stop when changing to Hover.\n\nThis is a portable Z-up arcade aerodynamic prototype, not a certified or high-fidelity simulator. Deeper weather, vehicle morph meshes and flight audio are later batches. Package with dve_pack NEW_PROJECT NEW_GAME.dvepak --all.\n";
+ }readme.close();
  if(!readme)return fail("Cannot write starter guide");
  cleanup.keep=true;
  return true;

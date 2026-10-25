@@ -37,6 +37,20 @@ void wind_field_tests(){
  require(high.x>low.x,"altitude shear changes wind");
  FlightWindZone invalid=thermal;invalid.strengthMetersPerSecond=-1;
  require(!validate_flight_wind_zone(invalid),"invalid negative wind intensity refused");
+ // Many overlapping editor-authored sources must stay bounded, and F3 HUD
+ // thermal/ridge attribution must agree with the wind actually simulated.
+ std::vector<FlightWindZone> stack;
+ for(std::uint64_t i=1;i<=128;++i){
+   auto z=thermal;z.stableId=i;z.strengthMetersPerSecond=30.0F;
+   stack.push_back(z);
+ }
+ field.configure({0,0,0});
+ field.set_zones(std::move(stack));
+ const auto saturated=field.sample({0,0,100},0);
+ require(length(saturated.velocity)<=150.001F,"overlapping wind volumes stay bounded");
+ require(std::abs(saturated.velocity.z-saturated.thermalVertical-
+                  saturated.ridgeVertical-saturated.backgroundVertical)<.02F,
+         "bounded wind-vector value matches updraft instrumentation");
 }
 void ridge_tests(){
  FlightWindField field;
@@ -64,6 +78,15 @@ void aerodynamic_energy_tests(){
  require(baseline.airspeed>20&&baseline.dynamicPressure>0,"dynamic pressure from air-relative velocity");
  require(dot(baseline.forceNewton,Float3{0,20,-1})<=.0005F,
          "wind-relative aerodynamic force never creates energy");
+ // A rising air mass can transfer kinetic energy to a glider without
+ // constituting unpowered energy creation: the relevant rest frame is air.
+ const Float3 airRelative{0,22,-1};
+ const Float3 inUpdraft{0,22,7}; // air mass rises at 8 m/s
+ const auto liftFromAir=flight_aerodynamics(glider,airRelative,forward);
+ require(dot(liftFromAir.forceNewton,airRelative)<=.0005F,
+         "drag remains dissipative in the moving air frame");
+ require(dot(liftFromAir.forceNewton,inUpdraft)>0,
+         "rising atmosphere can legitimately supply energy to a glider");
  const auto windReferenced=flight_aerodynamics(glider,{0,10,-1},forward);
  require(windReferenced.dynamicPressure<baseline.dynamicPressure,"tailwind reduces airspeed at same groundspeed");
  const auto trim=flight_aerodynamics(glider,{0,20,-1},forward);

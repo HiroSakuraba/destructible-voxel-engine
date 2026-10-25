@@ -166,14 +166,21 @@ struct WaterGame::Impl {
  void advance(float dt){
   const float throttle=std::clamp(world.get_axis("move_y"),-1.F,1.F);
   const float steer=std::clamp(world.get_axis("move_x"),-1.F,1.F);
+  const float trimAxis=std::clamp(world.get_axis("water_trim"),-1.F,1.F);
   for(unsigned i=0;i<boats.size();++i){
    auto& boat=boats[i];const auto old=boat.state.position;
    const Float3 f=rotate(boat.state.orientation,{0,1,0});
-   const float signedThrust=i==selected?throttle*boat.thrust:0;
-   const float yawTorque=i==selected?(-steer*boat.rudder):0;
+   if(i==selected)boat.trim=std::clamp(boat.trim+trimAxis*dt*.65F,-1.4F,1.4F);
+   const auto waves=field.sample(boat.state.position.x,boat.state.position.y,elapsed);
    boat.loads=evaluate_water_hull(field,elapsed,boat.hull,boat.state);
+   VesselInput input;
+   input.throttle=i==selected?throttle:0;
+   input.helm=i==selected?steer:0;
+   input.sailTrim=boat.trim;
+   boat.propLoads=evaluate_vessel_dynamics(boat.drive,boat.hull,boat.state,waves,
+                                               wind,input,boat.loads.immersionFraction);
    step_water_hull(boat.state,boat.hull,boat.loads,dt,
-                   multiply(f,signedThrust),{0,0,yawTorque});
+                   boat.propLoads.force,boat.propLoads.torque);
    if(!finite(boat.state.position)||!finite(boat.state.linearVelocity)||
       !finite(boat.state.orientation)||length(boat.state.position)>100000.F){
      boat.state=boat.origin;
@@ -201,15 +208,22 @@ struct WaterGame::Impl {
   telemetry.immersion=b.loads.immersionFraction;
   telemetry.rollRadians=e.y;telemetry.pitchRadians=e.x;
   telemetry.impactRate=b.loads.impactRate;
+  telemetry.apparentWind=b.propLoads.apparentWind;
+  telemetry.sailDrive=b.propLoads.sailThrust;
+  telemetry.planingLift=b.propLoads.planingLift;
+  telemetry.lateralSlip=b.propLoads.lateralWaterSpeed;
+  telemetry.sailTrim=b.trim;
+  telemetry.type=b.drive.type;
   telemetry.activeVessel=selected;telemetry.vesselCount=unsigned(boats.size());
-  hud.stats=std::string("WATER ")+(selected?"PIRATE SHIP":"DINGHY")+
+  hud.stats=std::string("WATER ")+watercraft_name(b.drive.type)+
       " SEA "+(field.preset()==OceanPreset::Calm?"CALM":field.preset()==OceanPreset::Breeze?"BREEZE":"STORM");
   hud.prompt="SPEED "+fixed(telemetry.speed)+" M/S ROLL "+fixed(e.y)+" PITCH "+fixed(e.x);
   hud.message="IMMERSION "+fixed(100*telemetry.immersion)+"% WATER "+fixed(water.height)+
-    " M  1 DINGHY  2 SHIP";
+    " M  1..5 BOATS  Q/E TRIM";
   if(hud.phase==PrototypePhase::Paused)hud.message="PAUSED - P RESUME";
-  hud.vehicleTelemetry="IMPACT "+fixed(telemetry.impactRate)+" WATER V "+fixed(length(water.waterVelocity))+
-     " M/S  PROBES "+std::to_string(b.hull.longitudinalProbes*b.hull.lateralProbes);
+  hud.vehicleTelemetry="WIND "+fixed(telemetry.apparentWind)+" SAIL "+fixed(telemetry.sailDrive)+
+    " PLANING "+fixed(telemetry.planingLift)+" TRIM "+fixed(telemetry.sailTrim)+
+    " SLIP "+fixed(telemetry.lateralSlip);
  }
  void persist(){
   std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17);
@@ -241,6 +255,7 @@ bool WaterGame::start(std::string* error){
   if(!s.world.is_enabled(o.id)){if(error)*error="Water roles must be enabled";return false;}
   if(c.type==oceanType){
    s.oceanKey=get(c,"key",std::string{});
+   s.wind={float(get(c,"wind_x",5.0)),float(get(c,"wind_y",8.0)),0};
    if(!s.field.set_preset(OceanPreset(get(c,"sea_state",std::int64_t{1})),
           {float(get(c,"current_x",0.0)),float(get(c,"current_y",0.0)),0})){
     if(error)*error="Invalid ocean wave preset";return false;
@@ -251,8 +266,7 @@ bool WaterGame::start(std::string* error){
     if(error)*error="W1 vessels require visual-only geometry; water physics owns hull motion";return false;
    }
    Impl::Boat boat;boat.id=o.id;boat.key=get(c,"key",std::string{});boat.component=c;
-   boat.hull=hull_of(c);boat.thrust=float(get(c,"thrust_newtons",1400.0));
-   boat.rudder=float(get(c,"rudder_torque",380.0));
+   boat.hull=hull_of(c);boat.drive=propulsion_of(c);
    boat.origin.position=*s.world.position(o.id);boat.origin.orientation=s.world.transform(o.id)->rotation;
    boat.state=boat.origin;s.boats.push_back(boat);
   }
@@ -275,10 +289,11 @@ void WaterGame::step(float dt){
  if(edge("pause",s.lastPause))s.hud.phase=s.hud.phase==PrototypePhase::Paused?
      PrototypePhase::Playing:PrototypePhase::Paused;
  const bool toggle=edge("interact",s.lastSwitch);
- if(toggle||s.world.is_action_pressed("water_ship_1")||s.world.is_action_pressed("water_ship_2")){
-  unsigned next=toggle?1-s.selected:s.world.is_action_pressed("water_ship_2")?1:0;
-  if(next!=s.selected){s.selected=next;s.update_camera(true);}
- }
+ unsigned selection=s.selected;
+ if(toggle)selection=(selection+1)%unsigned(s.boats.size());
+ for(unsigned n=0;n<s.boats.size();++n)
+   if(s.world.is_action_pressed("water_ship_"+std::to_string(n+1)))selection=n;
+ if(selection!=s.selected){s.selected=selection;s.update_camera(true);}
  if(s.hud.phase==PrototypePhase::Playing){
   s.accumulator+=dt;
   for(unsigned i=0;i<31&&s.accumulator+1.e-7F>=stepDt;++i){

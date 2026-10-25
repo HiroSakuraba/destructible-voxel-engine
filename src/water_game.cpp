@@ -384,6 +384,19 @@ bool WaterGame::start(std::string* error){
           {float(get(c,"current_x",0.0)),float(get(c,"current_y",0.0)),0})){
     if(error)*error="Invalid ocean wave preset";return false;
    }
+  }else if(c.type==coastType){
+   s.coastKey=get(c,"key",std::string{});
+   const auto pose=s.world.transform(o.id);
+   if(!pose){if(error)*error="Surf zone transform missing";return false;}
+   WaterCoast coast;
+   coast.shoreline={pose->position.x,pose->position.y};
+   coast.halfWidth=float(get(c,"half_width_m",150.0));
+   coast.offshoreLength=float(get(c,"offshore_length_m",240.0));
+   coast.slope=float(get(c,"beach_slope",.05));
+   coast.swellHeight=float(get(c,"swell_height_m",1.4));
+   coast.periodSeconds=float(get(c,"period_s",9.0));
+   coast.peel=float(get(c,"peel",.08));
+   if(!s.field.set_coast(coast)){if(error)*error="Invalid surf zone configuration";return false;}
   }else if(c.type==rulesType){s.rules=o.id;s.rulesKey=get(c,"key",std::string{});}
   else if(c.type==vesselType){
    if(s.world.has_collision(o.id).value_or(true)){
@@ -432,14 +445,17 @@ bool WaterGame::after_restore(std::string* error){
  const auto fail=[&](){if(error)*error="Invalid or incomplete DVE_WATER 1/2/3 state";return false;};
  std::map<std::string,GameObjectId> vesselIds;GameObjectId rules=0;
  const Component* oceanConfig=nullptr;
+ const Component* coastConfig=nullptr;GameObjectId coastId{};
  for(auto id:s.world.object_ids())if(const auto* cs=s.world.components(id)){
   for(const auto& c:*cs)if(c.enabled){
    if(c.type==rulesType&&get(c,"key",std::string{})==s.rulesKey)rules=id;
    if(c.type==oceanType&&get(c,"key",std::string{})==s.oceanKey)oceanConfig=&c;
+   if(c.type==coastType&&get(c,"key",std::string{})==s.coastKey){coastConfig=&c;coastId=id;}
    if(c.type==vesselType)vesselIds[get(c,"key",std::string{})]=id;
   }
  }
- if(!rules||!oceanConfig||vesselIds.size()!=s.boats.size())return fail();
+ if(!rules||!oceanConfig||vesselIds.size()!=s.boats.size()||
+     (!s.coastKey.empty()&&!coastConfig))return fail();
  const auto* c=find_component_by_type(*s.world.components(rules),stateType);
  if(!c)return fail();
  const auto data=get(*c,"data",std::string{});
@@ -499,6 +515,19 @@ bool WaterGame::after_restore(std::string* error){
   s.boats[i].trim=trims[i];s.boats[i].wakeCooldown=wakeTimers[i];
  }
  s.wind={float(get(*oceanConfig,"wind_x",5.0)),float(get(*oceanConfig,"wind_y",8.0)),0};
+ s.field.clear_coast();
+ if(coastConfig){
+   const auto pose=s.world.transform(coastId);
+   if(!pose)return fail();
+   WaterCoast shore;shore.shoreline={pose->position.x,pose->position.y};
+   shore.halfWidth=float(get(*coastConfig,"half_width_m",150.0));
+   shore.offshoreLength=float(get(*coastConfig,"offshore_length_m",240.0));
+   shore.slope=float(get(*coastConfig,"beach_slope",.05));
+   shore.swellHeight=float(get(*coastConfig,"swell_height_m",1.4));
+   shore.periodSeconds=float(get(*coastConfig,"period_s",9.0));
+   shore.peel=float(get(*coastConfig,"peel",.08));
+   if(!s.field.set_coast(shore))return fail();
+ }
  if(!s.field.restore_wakes(wakeEvents,elapsed))return fail();
  s.spray.clear();
  s.rules=rules;s.stateComponent=c->id;s.selected=selected;s.elapsed=elapsed;

@@ -21,6 +21,9 @@ struct FlightTelemetry {
     float airspeed{},groundspeed{},verticalSpeed{},altitude{},angleOfAttack{},liftCoefficient{},dragCoefficient{};
     float fuel{1},battery{1},stamina{1},spool{},dynamicPressure{},morph{};
     float windSpeed{},stallMargin{};
+    Float3 windVelocity{};
+    float thermalUpdraft{},ridgeUpdraft{},variometer{},mechanicalEnergyPerKilogram{};
+    float energyRatePerKilogram{},glideRatio{},bankAngle{};
     unsigned nextGate{},gateCount{};
     bool stalled{},transitioning{},crashed{};
     FlightMode mode{FlightMode::Float},target{FlightMode::Float};

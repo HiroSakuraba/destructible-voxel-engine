@@ -20,7 +20,7 @@ template<class T> T value(const Component& c,std::string_view key,T fallback){au
  return fallback;}
 bool key_valid(std::string_view s){return !s.empty()&&s.size()<=64&&std::all_of(s.begin(),s.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.';});}
 }
-std::vector<std::string> prototype_role_types(){return {type("player_start"),type("rules"),type("switch"),type("door"),type("pickup"),type("checkpoint"),type("damage_volume"),type("goal"),type("race_car"),type("race_rules"),type("race_gate"),type("race_surface"),type("flight_vehicle"),type("flight_rules"),type("flight_gate")};}
+std::vector<std::string> prototype_role_types(){return {type("player_start"),type("rules"),type("switch"),type("door"),type("pickup"),type("checkpoint"),type("damage_volume"),type("goal"),type("race_car"),type("race_rules"),type("race_gate"),type("race_surface"),type("flight_vehicle"),type("flight_rules"),type("flight_gate"),type("flight_wind")};}
 std::vector<std::string> prototype_events(std::string_view r){
  if(r==type("player_start"))return {"died","respawned"};
  if(r==type("door"))return {"opened","closed"};

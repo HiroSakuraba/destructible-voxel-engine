@@ -32,6 +32,7 @@ struct PrototypeHud {
     bool active{},debug{},racing{},flying{};
     std::string stats;
     std::string vehicleTelemetry;
+    std::string flightWeather;
     RacingAudioState vehicleAudio{};
     PrototypePhase phase{PrototypePhase::Playing};
     float health{},maximumHealth{};

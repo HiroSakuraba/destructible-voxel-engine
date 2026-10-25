@@ -55,7 +55,25 @@ EditorDocument make_flying_starter(){
  }
  auto& pad=box("Launch pad",{0,-35,0.1F},{28,25,.2F},{.12F,.35F,.52F,1});
  (void)pad;
+ // Gameplay wind volumes are markers; their physics is sampled in airspace,
+ // not approximated by collision geometry or invisible upward impulses.
+ auto makeWind=[&](std::string name,std::string key,Float3 pos,std::int64_t kind,
+                   double radius,double height,double strength,double sink,float yaw=0.F){
+   EditorObject zone(d.allocate_object_id(),std::move(name));
+   zone.flags.anchored=true;zone.flags.collisionEnabled=false;
+   zone.transform.position=pos;
+   zone.transform.rotation=quaternion_from_axis_angle({0,0,1},yaw);
+   zone.components.push_back(component("flight_wind",std::move(key)));
+   auto& props=zone.components.back().properties;
+   props["kind"]=kind;props["radius"]=radius;props["height"]=height;
+   props["strength"]=strength;props["sink_fraction"]=sink;
+   d.add_object(std::move(zone));
+ };
+ makeWind("Training thermal","thermal-training",{50,280,0},0,85,300,7,0.27);
+ makeWind("Bird soaring thermal","thermal-bird",{20,520,0},0,95,300,7,0.25);
+ makeWind("Ridge windward lift","ridge-windward",{161,365,30},1,110,95,6,0.65,1.570796327F);
  box("Thermal marker", {50,280,8},{8,8,16},{.83F,.46F,.12F,1},false);
+ box("Bird thermal marker",{20,520,8},{8,8,16},{.85F,.76F,.17F,1},false);
  EditorObject flyer(d.allocate_object_id(),"Morphing Aircraft");
  flyer.flags.anchored=true;flyer.flags.collisionEnabled=false;
  flyer.transform.position={0,0,90};

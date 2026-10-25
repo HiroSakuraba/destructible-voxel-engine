@@ -1,6 +1,8 @@
 #include "dve/flying_game.hpp"
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
+#include "dve/flight_wind.hpp"
+#include "dve/flight_aerodynamics.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -20,6 +22,7 @@ constexpr float pi=3.14159265359F;
 constexpr std::string_view vehicleType="dve.prototype.flight_vehicle";
 constexpr std::string_view rulesType="dve.prototype.flight_rules";
 constexpr std::string_view gateType="dve.prototype.flight_gate";
+constexpr std::string_view windType="dve.prototype.flight_wind";
 constexpr std::string_view stateType="dve.prototype.flight_state";
 const std::array<FlightProfile,6> profiles{{
  {"FLOAT",0,0,0,.3F,.0F,0,0,.995F,9.0F,1.4F,1.8F},
@@ -43,7 +46,7 @@ FlightProfile blend(const FlightProfile& a,const FlightProfile& b,float t){
  m(a.thrust,b.thrust),m(a.buoyancyFraction,b.buoyancyFraction),m(a.bodyDrag,b.bodyDrag),
  m(a.response,b.response),m(a.transitionSeconds,b.transitionSeconds)};
 }
-bool flight_role(std::string_view s){return s==vehicleType||s==rulesType||s==gateType;}
+bool flight_role(std::string_view s){return s==vehicleType||s==rulesType||s==gateType||s==windType;}
 float clampAxis(float x){return std::isfinite(x)?std::clamp(x,-1.F,1.F):0.F;}
 std::string show(float value,unsigned precision=1){std::ostringstream o;o.imbue(std::locale::classic());o<<std::fixed<<std::setprecision(precision)<<value;return o.str();}
 bool gate_crossed(Float3 a,Float3 b,const RigidTransform& gate,float width,float height){
@@ -69,7 +72,9 @@ void register_flying_components(ComponentTypeRegistry& registry){
   {"wind_x",3.0,false,false,"Uniform ambient wind X (m/s)"},
   {"wind_y",0.0,false,false,"Uniform ambient wind Y (m/s)"},
   {"starting_mode",std::int64_t{0},false,false,"0 float; 1 glider; 2 biplane; 3 jet; 4 hover; 5 bird"},
-  {"assisted",true,false,false,"Flight stabilization and coordinated turns"}});
+  {"assisted",true,false,false,"Flight stabilization and coordinated turns"},
+  {"wind_shear",0.0,false,false,"Horizontal shear in m/s per log altitude"},
+  {"wind_gust",0.0,false,false,"Deterministic horizontal gust amplitude (m/s)"}});
  add(std::string(rulesType),"Flight Game Rules",{
   {"key",std::string{"flight"},true,false,"Stable key"},
   {"kill_z",-15.0,false,false,"Automatic recovery below this altitude"}});
@@ -79,12 +84,19 @@ void register_flying_components(ComponentTypeRegistry& registry){
   {"mode",std::int64_t{0},false,false,"Required mode: 0 float,1 glider,2 biplane,3 jet,4 hover,5 bird"},
   {"half_width",20.0,false,false,"Gate half width (m)"},
   {"half_height",18.0,false,false,"Gate half height (m)"}});
+ add(std::string(windType),"Flight Wind Volume (marker)",{
+  {"key",std::string{"wind-zone"},true,false,"Unique volume key"},
+  {"kind",std::int64_t{0},false,false,"0 thermal; 1 ridge windward/lee"},
+  {"radius",80.0,false,false,"Thermal radius or ridge half-length (m)"},
+  {"height",260.0,false,false,"Active height extent (m)"},
+  {"strength",6.0,false,false,"Maximum vertical airflow speed (m/s)"},
+  {"sink_fraction",0.25,false,false,"Thermal ring sink or ridge lee sink factor"}});
  add(std::string(stateType),"Flight Runtime State",{{"data",std::string{},false,false,"Versioned flight save data"}});
 }
 bool validate_flying_scene(std::span<const PrototypeObjectView> objects,std::string* error){
  auto fail=[&](std::string s){if(error)*error=std::move(s);return false;};
  auto registry=ComponentTypeRegistry::make_default();
- unsigned vehicles=0,rules=0;
+ unsigned vehicles=0,rules=0,winds=0;
  std::set<std::string> keys;std::set<std::int64_t> orders;
  for(const auto& o:objects){
   unsigned count=0;
@@ -102,6 +114,11 @@ bool validate_flying_scene(std::span<const PrototypeObjectView> objects,std::str
     const double mass=prop(c,"mass_kg",140.0);
     if(!std::isfinite(mass)||mass<10||mass>10000)return fail("Flight craft mass must be 10..10000 kg");
     for(const char* axis:{"wind_x","wind_y"}){const double w=prop(c,axis,0.0);if(!std::isfinite(w)||std::abs(w)>100)return fail("Invalid flight wind");}
+    for(const auto* field:{"wind_shear","wind_gust"}){
+      const double value=prop(c,field,0.0);
+      if(!std::isfinite(value)||(std::string_view(field)=="wind_gust"?(value<0||value>20):std::abs(value)>30))
+        return fail("Invalid flight shear/gust setting");
+    }
     const auto mode=prop(c,"starting_mode",std::int64_t{0});if(mode<0||mode>5)return fail("Invalid flight mode");
    }else if(c.type==rulesType){
     ++rules;if(!o.marker)return fail("Flight rules require a bodyless marker");
@@ -112,6 +129,18 @@ bool validate_flying_scene(std::span<const PrototypeObjectView> objects,std::str
     if(n<0||n>=128||!orders.insert(n).second||mode<0||mode>5||
        !std::isfinite(w)||!std::isfinite(h)||w<1||w>100||h<1||h>100)
       return fail("Invalid flight gate order, mode or dimensions");
+   }else if(c.type==windType){
+    if(!o.marker||++winds>128)return fail("Wind volumes must be markers; maximum 128");
+    const auto kind=prop(c,"kind",std::int64_t{-1});
+    FlightWindZone z;
+    z.stableId=o.id+1;
+    z.kind=kind==1?FlightWindKind::Ridge:FlightWindKind::Thermal;
+    z.radiusMeters=float(prop(c,"radius",80.0));
+    z.heightMeters=float(prop(c,"height",260.0));
+    z.strengthMetersPerSecond=float(prop(c,"strength",6.0));
+    z.sinkFraction=float(prop(c,"sink_fraction",0.25));
+    if(kind<0||kind>1||!validate_flight_wind_zone(z))
+     return fail("Invalid authored thermal or ridge settings");
    }
   }
  }
@@ -131,37 +160,54 @@ struct FlyingGame::Impl {
  Component config{},ruleConfig{};
  std::string craftKey,rulesKey;
  std::vector<Gate> gates;
- Float3 position{},velocity{},angular{},startPos{},checkpointPos{},wind{3,0,0};
+ FlightWindField windField;
+ Float3 position{},velocity{},angular{},startPos{},checkpointPos{};
  Quaternion orientation{},startOrientation{},checkpointRotation{};
  FlightMode mode{FlightMode::Float},target{FlightMode::Float},transitionFrom{FlightMode::Float};
  float morph{},fuel{1},battery{1},stamina{1},spool{};
  float throttle{.65F},elapsed{},cameraLag{};
  float accumulator{};
+ float lastSpecificEnergy{};bool energyReady{};
  unsigned nextGate{},crashes{};
  bool lastPause{},lastReset{},lastRecover{},lastView{},lastDebug{},lastNext{},lastPrev{};
  bool lastFlap{},cockpit{},crashed{},active{},finished{};
  explicit Impl(GameWorld& w):world(w){hud.health=hud.maximumHealth=100;hud.active=false;hud.flying=true;}
  void publish(){(void)world.set_position(craft,position);(void)world.set_rotation(craft,orientation);}
- Float3 air_velocity(Float3 at)const{
-  // F1 demonstration updraft, fixed in world space, not a separate magic lift force.
-  const float dx=at.x-50.F,dy=at.y-280.F;
-  const float h=std::clamp(1.F-(dx*dx+dy*dy)/(85.F*85.F),0.F,1.F);
-  const float bx=at.x-20.F,by=at.y-520.F;
-  const float bird=std::clamp(1.F-(bx*bx+by*by)/(100.F*100.F),0.F,1.F);
-  return add(wind,{0,0,6.F*h*h+7.F*bird*bird});
+ void rebuild_wind(){
+   windField.configure({float(prop(config,"wind_x",3.0)),float(prop(config,"wind_y",0.0)),0},
+       float(prop(config,"wind_shear",0.0)),float(prop(config,"wind_gust",0.0)));
+   std::vector<FlightWindZone> zones;
+   for(const auto id:world.object_ids()){
+     if(!world.is_enabled(id))continue;
+     const auto* cs=world.components(id);
+     if(!cs)continue;
+     for(const auto& c:*cs)if(c.enabled&&c.type==windType){
+       const auto pose=world.transform(id);
+       if(!pose)continue;
+       FlightWindZone zone;zone.stableId=id+1;
+       zone.kind=prop(c,"kind",std::int64_t{0})==1?FlightWindKind::Ridge:FlightWindKind::Thermal;
+       zone.transform=*pose;zone.radiusMeters=float(prop(c,"radius",80.0));
+       zone.heightMeters=float(prop(c,"height",260.0));
+       zone.strengthMetersPerSecond=float(prop(c,"strength",6.0));
+       zone.sinkFraction=float(prop(c,"sink_fraction",0.25));
+       if(validate_flight_wind_zone(zone))zones.push_back(zone);
+     }
+   }
+   windField.set_zones(std::move(zones));
  }
  void reset(){
   mode=target=transitionFrom=FlightMode(prop(config,"starting_mode",std::int64_t{0}));
   position=startPos;orientation=startOrientation;
   velocity={0,1,0};angular={};morph=0;fuel=battery=stamina=1;spool=0;throttle=.65F;
   elapsed=0;accumulator=0;nextGate=0;crashes=0;crashed=finished=false;
+  lastSpecificEnergy=0;energyReady=false;telemetry={};
   checkpointPos=startPos;checkpointRotation=startOrientation;
   hud.phase=PrototypePhase::Playing;publish();cameraLag=0;update_camera(true);
  }
  void recover(){
   ++crashes;crashed=false;position=checkpointPos;orientation=checkpointRotation;
   velocity={};angular={};morph=0;mode=target;spool=0;
-  battery=(std::max)(battery,.25F);elapsed+=5;publish();update_camera(true);
+  battery=(std::max)(battery,.25F);elapsed+=5;energyReady=false;publish();update_camera(true);
  }
  void request(FlightMode m){
   if(m==target)return;
@@ -223,29 +269,14 @@ struct FlyingGame::Impl {
   }
   const auto profile=target!=mode?blend(flight_profile(transitionFrom),flight_profile(target),morphBlend):flight_profile(mode);
   const float mass=float(prop(config,"mass_kg",140.0));
-  const float windSpeed=length(air_velocity(position));
-  const auto air=subtract(velocity,air_velocity(position));
-  const float speed=length(air);
-  const Float3 f=rotate(orientation,{0,1,0}),up=rotate(orientation,{0,0,1}),right=rotate(orientation,{1,0,0});
-  const float forwardSpeed=dot(air,f);
-  const float verticalInBody=dot(air,up);
-  const float alpha=std::atan2(-verticalInBody,(std::max)(1.F,forwardSpeed));
-  const float critical=profile.stallAngle;
-  const float beyond=(std::max)(0.F,std::abs(alpha)-critical);
-  float cl=std::clamp(.36F+profile.liftSlope*alpha,-profile.liftLimit,profile.liftLimit);
-  const float attenuation=1.F/(1.F+10.F*beyond*beyond);
-  cl*=attenuation;
-  const float cd=profile.parasiteDrag+profile.inducedDrag*cl*cl+2.2F*beyond*beyond;
-  const float q=.5F*1.225F*speed*speed;
-  const auto airDir=unit(air);
-  const Float3 liftPlane=subtract(up,multiply(airDir,dot(up,airDir)));
-  // A vertical airflow has no well-defined wing-lift direction; do not
-  // inject energy through the fallback of a zero-length projection.
-  const Float3 liftDir=length(liftPlane)>1.e-5F?unit(liftPlane):Float3{};
-  Float3 force={0,0,-mass*gravity};
-  force=add(force,multiply(liftDir,q*profile.wingArea*cl));
-  force=subtract(force,multiply(airDir,q*profile.wingArea*cd));
-  force=subtract(force,multiply(air,profile.bodyDrag*speed));
+  const auto windSample=windField.sample(position,elapsed);
+  const auto air=subtract(velocity,windSample.velocity);
+  const float density=1.225F*std::exp(-(std::max)(position.z,0.F)/8500.0F);
+  const auto aero=flight_aerodynamics(profile,air,orientation,density);
+  const float q=aero.dynamicPressure;
+  const float speed=aero.airspeed;
+  const Float3 f=rotate(orientation,{0,1,0});
+  Float3 force=add(Float3{0,0,-mass*gravity},aero.forceNewton);
   force.z+=mass*gravity*profile.buoyancyFraction;
   const float powered=mode==FlightMode::Biplane||mode==FlightMode::Jet||
     target==FlightMode::Biplane||target==FlightMode::Jet?1.F:0.F;
@@ -294,8 +325,16 @@ struct FlyingGame::Impl {
   // Only numerical protection against runaway non-finite states, not a mode-specific speed cap.
   if(!finite(velocity)||length(velocity)>350.F){crashed=true;recover();return;}
   const float authority=std::clamp(q/140.F,.05F,1.F);
-  const float response=profile.response*((mode==FlightMode::Hover||mode==FlightMode::Float)?1.F:authority);
-  const Float3 localTarget{pitch*1.15F,roll*1.35F,yaw*.90F};
+  const float assist=prop(config,"assisted",true)?1.0F:0.65F;
+  const float response=profile.response*assist*
+      ((mode==FlightMode::Hover||mode==FlightMode::Float)?1.F:authority);
+  // Assisted controls add a coordinated bank turn without instantly rotating the velocity.
+  const Float3 aircraftUp=rotate(orientation,{0,0,1});
+  const Float3 aircraftRight=rotate(orientation,{1,0,0});
+  const float bank=std::atan2(aircraftRight.z,aircraftUp.z);
+  const float yawAssist=(prop(config,"assisted",true)&&speed>6&&profile.wingArea>0)?
+      std::clamp(-gravity*std::tan(std::clamp(bank,-1.0F,1.0F))/(std::max)(speed,6.0F),-0.5F,0.5F):0.0F;
+  const Float3 localTarget{pitch*1.15F,roll*1.35F,yaw*.90F+yawAssist};
   const float blendInput=1.F-std::exp(-response*dt);
   angular=add(angular,multiply(subtract(localTarget,angular),blendInput));
   const auto rotatedX=rotate(orientation,{1,0,0});
@@ -331,23 +370,39 @@ struct FlyingGame::Impl {
   }
   elapsed+=dt;publish();update_camera(false);
   telemetry.airspeed=speed;telemetry.groundspeed=length(velocity);telemetry.verticalSpeed=velocity.z;
-  telemetry.altitude=position.z;telemetry.angleOfAttack=alpha;
-  telemetry.dynamicPressure=q;telemetry.liftCoefficient=cl;telemetry.dragCoefficient=cd;
-  telemetry.windSpeed=windSpeed;telemetry.stalled=std::abs(alpha)>critical&&profile.wingArea>1;
-  telemetry.stallMargin=critical-std::abs(alpha);telemetry.spool=spool;
+  telemetry.altitude=position.z;telemetry.angleOfAttack=aero.angleOfAttack;
+  telemetry.dynamicPressure=q;telemetry.liftCoefficient=aero.liftCoefficient;
+  telemetry.dragCoefficient=aero.dragCoefficient;
+  telemetry.windVelocity=windSample.velocity;telemetry.windSpeed=length(windSample.velocity);
+  telemetry.thermalUpdraft=windSample.thermalVertical;
+  telemetry.ridgeUpdraft=windSample.ridgeVertical;
+  telemetry.stalled=aero.stalled;telemetry.stallMargin=aero.stallMarginRadians;
+  telemetry.spool=spool;telemetry.bankAngle=bank;
+  const float specificEnergy=0.5F*dot(velocity,velocity)+gravity*position.z;
+  telemetry.energyRatePerKilogram=energyReady?(specificEnergy-lastSpecificEnergy)/dt:0;
+  telemetry.mechanicalEnergyPerKilogram=specificEnergy;
+  lastSpecificEnergy=specificEnergy;energyReady=true;
+  // Var: fixed-step low-pass vertical speed, stable at 60/120 fps.
+  telemetry.variometer+=std::clamp(1.0F-std::exp(-2.5F*dt),0.0F,1.0F)*
+     (velocity.z-telemetry.variometer);
+  const float horizontal=std::sqrt(velocity.x*velocity.x+velocity.y*velocity.y);
+  telemetry.glideRatio=velocity.z<-.3F?std::clamp(horizontal/-velocity.z,0.0F,200.F):0.0F;
   telemetry.fuel=fuel;telemetry.battery=battery;telemetry.stamina=stamina;
   telemetry.mode=mode;telemetry.target=target;telemetry.transitioning=target!=mode;
   telemetry.morph=morph;telemetry.nextGate=nextGate;telemetry.gateCount=unsigned(gates.size());
  }
  void hud_update(){
   hud.stats=std::string("FLIGHT ")+flight_mode_name(mode)+(mode!=target?std::string(" > ")+flight_mode_name(target)+" "+show(100.F*morph,0)+"%":"");
-  hud.prompt="AIR "+show(telemetry.airspeed)+" M/S  GND "+show(telemetry.groundspeed)+"  ALT "+show(position.z,0)+" M";
+  hud.prompt="IAS "+show(telemetry.airspeed)+" M/S  ALT "+show(position.z,0)+" M  VAR "+show(telemetry.variometer)+" M/S";
   hud.message="CLIMB "+show(velocity.z)+"  FUEL "+show(100.F*fuel,0)+"%  BAT "+show(100.F*battery,0)+"%  GATE "+std::to_string(nextGate)+"/"+std::to_string(gates.size());
   if(hud.phase==PrototypePhase::Paused)hud.message="PAUSED - P TO RESUME";
   if(hud.phase==PrototypePhase::Won)hud.message="COURSE COMPLETE - R TO RESTART";
   if(telemetry.stalled&&hud.phase==PrototypePhase::Playing)hud.message="STALL: LOWER NOSE  "+hud.message;
-  hud.vehicleTelemetry="AOA "+show(telemetry.angleOfAttack,2)+" Q "+show(telemetry.dynamicPressure,0)+
-    " CL "+show(telemetry.liftCoefficient,2)+" F3 DEBUG";
+  hud.vehicleTelemetry="AOA "+show(telemetry.angleOfAttack,2)+" BANK "+show(telemetry.bankAngle,2)+
+    " GLIDE "+show(telemetry.glideRatio,1)+" E "+show(telemetry.energyRatePerKilogram);
+   hud.flightWeather="WIND "+show(telemetry.windVelocity.x)+","+
+    show(telemetry.windVelocity.y)+","+show(telemetry.windVelocity.z)+
+    " THERM "+show(telemetry.thermalUpdraft)+" RIDGE "+show(telemetry.ridgeUpdraft);
  }
  void persist(){
   std::ostringstream out;out.imbue(std::locale::classic());out<<std::setprecision(17);
@@ -384,7 +439,7 @@ bool FlyingGame::start(std::string* error){
  if(!configure_physics3d_gravity(s.world.physics(),{0,0,-9.81F})){if(error)*error="Flight requires configurable Z-up gravity";return false;}
  for(const auto& [n,g]:ordered){(void)n;s.gates.push_back(g);}
  s.startPos=*s.world.position(s.craft);s.startOrientation=s.world.transform(s.craft)->rotation;
- s.wind={float(prop(s.config,"wind_x",3.0)),float(prop(s.config,"wind_y",0.0)),0};
+  s.rebuild_wind();
  Component state;state.type=std::string(stateType);state.properties["data"]=std::string{};
  auto* added=s.world.add_component(s.rules,std::move(state),error);if(!added)return false;
  s.stateComponent=added->id;s.hud.active=s.active=true;
@@ -458,6 +513,12 @@ bool FlyingGame::after_restore(std::string* error){
  s.fuel=fuel;s.battery=battery;s.stamina=stamina;s.spool=spool;s.throttle=throttle;
  s.elapsed=elapsed;s.nextGate=next;s.crashes=crashes;s.checkpointPos=checkpoint;s.checkpointRotation=checkRot;
  s.accumulator=accum;s.cockpit=cockpit;s.hud.phase=PrototypePhase(phase);
+ if(const auto* cfg=find_component_by_type(*s.world.components(craft),vehicleType))s.config=*cfg;
+ s.rebuild_wind();s.energyReady=false;
+ s.telemetry={};s.telemetry.mode=s.mode;s.telemetry.target=s.target;
+ s.telemetry.fuel=s.fuel;s.telemetry.battery=s.battery;s.telemetry.stamina=s.stamina;
+ s.telemetry.airspeed=length(subtract(s.velocity,s.windField.sample(s.position,s.elapsed).velocity));
+ s.telemetry.groundspeed=length(s.velocity);s.telemetry.altitude=s.position.z;
  s.update_camera(true);s.hud_update();return true;
 }
 }

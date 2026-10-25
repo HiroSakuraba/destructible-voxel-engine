@@ -80,7 +80,7 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
  auto exported=export_editor_scene(d,materials,root/"scenes"/"prototype.dvoxscene.json");
  if(!exported.success)return fail(exported.error);
  GameManifest manifest;manifest.name=project.name;manifest.version="0.1.0";manifest.entryScene="scenes/prototype.dvoxscene.json";
- manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},{"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},{"look_x","key:j/-1,key:l/+1,gamepad:rightx"},{"look_y","key:i/-1,key:k/+1,gamepad:righty"},{"jump","key:space,gamepad:south"},{"crouch","key:left ctrl,gamepad:east"},{"interact","key:tab,gamepad:west"},{"pause","key:p,gamepad:start"},{"restart","key:r,gamepad:back"},{"prototype_debug","key:f3"}};
+ manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},{"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},{"look_x","key:j/-1,key:l/+1,gamepad:rightx"},{"look_y","key:i/-1,key:k/+1,gamepad:righty"},{"jump","key:space,gamepad:south"},{"crouch","key:left ctrl,gamepad:east"},{"interact","key:e,gamepad:west"},{"pause","key:p,gamepad:start"},{"restart","key:r,gamepad:back"},{"prototype_debug","key:f3"}};
  if(racing)manifest.inputBindings["race_brake"]="key:b/+1,gamepad:lefttrigger";
  if(water){manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},
   {"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},

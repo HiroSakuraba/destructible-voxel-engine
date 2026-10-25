@@ -28,6 +28,8 @@ struct SubmarineLoads {
 // Evaluate controlled 6-DOF forces; updates ballast and energy on a fixed tick.
 // Total vertical load includes buoyancy, thrusters and gravity: do not also
 // pass this through the surface-vessel buoyancy step.
+void step_submarine(WaterRigidState&,const SubmarineConfig&,const SubmarineState&,
+                    const SubmarineLoads&,float fixedSeconds)noexcept;
 [[nodiscard]] SubmarineLoads evaluate_submarine(const SubmarineConfig&,
     SubmarineState&,const WaterRigidState&,const WaterVolumeSample&,
     const SubmarineInput&,float dt)noexcept;

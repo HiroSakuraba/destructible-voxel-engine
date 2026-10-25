@@ -146,7 +146,9 @@ struct FlyingGame::Impl {
   // F1 demonstration updraft, fixed in world space, not a separate magic lift force.
   const float dx=at.x-50.F,dy=at.y-280.F;
   const float h=std::clamp(1.F-(dx*dx+dy*dy)/(85.F*85.F),0.F,1.F);
-  return add(wind,{0,0,6.F*h*h});
+  const float bx=at.x-20.F,by=at.y-520.F;
+  const float bird=std::clamp(1.F-(bx*bx+by*by)/(100.F*100.F),0.F,1.F);
+  return add(wind,{0,0,6.F*h*h+7.F*bird*bird});
  }
  void reset(){
   mode=target=transitionFrom=FlightMode(prop(config,"starting_mode",std::int64_t{0}));
@@ -245,6 +247,15 @@ struct FlyingGame::Impl {
   if(fuel>0&&profile.thrust>0) {
    force=add(force,multiply(f,profile.thrust*spool));
    fuel=(std::max)(0.F,fuel-dt*spool*(mode==FlightMode::Jet?.004F:.002F));
+  }
+  // Float is buoyant, but the pilot needs a *small, battery-limited trim propulsor*
+  // to reach the first ring. It never holds position or cancels wind automatically.
+  const float floatMix=mode==FlightMode::Float&&target==mode?1.F:
+    mode==FlightMode::Float?1.F-morphBlend:
+    target==FlightMode::Float?morphBlend:0.F;
+  if(floatMix>0&&battery>0){
+    force=add(force,multiply(f,1100.F*floatMix*throttle));
+    battery=(std::max)(0.F,battery-dt*.0009F*floatMix*throttle);
   }
   const float hoverMix=mode==FlightMode::Hover&&target==mode?1.F:
    mode==FlightMode::Hover?1.F-morphBlend:

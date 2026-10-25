@@ -2,6 +2,7 @@
 #include "dve/prototype_game.hpp"
 #include "dve/water_hydrodynamics.hpp"
 #include "dve/water_vessel_dynamics.hpp"
+#include "dve/submarine_dynamics.hpp"
 #include <memory>
 namespace dve {
 [[nodiscard]] bool scene_has_water(std::span<const PrototypeObjectView>);
@@ -12,6 +13,8 @@ struct WaterGameTelemetry {
     float impactRate{},rudder{},throttle{};
     float apparentWind{},sailDrive{},planingLift{},lateralSlip{},sailTrim{};
     WatercraftType type{WatercraftType::Dinghy};
+    float subDepth{},subTargetDepth{},subBallastKg{},subBattery{},subPressurePa{};
+    bool subDepthHold{},subOverDepth{};
     unsigned activeVessel{},vesselCount{};
 };
 class WaterGame {

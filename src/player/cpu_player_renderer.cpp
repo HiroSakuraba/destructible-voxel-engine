@@ -296,6 +296,7 @@ void apply_underwater_volume_hdr(const PlayerRenderView& view,
 }
 
 void draw_ocean_surface(const OceanField* ocean,double seconds,
+                       const WaterVolumeSettings* volume,
                        const render::PolygonCamera& camera,
                        const render::PolygonRenderTarget& depth,
                        std::span<std::uint8_t> rgba) {
@@ -342,7 +343,14 @@ void draw_ocean_surface(const OceanField* ocean,double seconds,
                 std::clamp(12.F+48.F*diffuse+180.F*glint+115.F*foam,0.F,255.F),
                 std::clamp(65.F+55.F*diffuse+150.F*glint+120.F*foam,0.F,255.F),
                 std::clamp(100.F+55.F*diffuse+130.F*glint+112.F*foam,0.F,255.F)};
-            const float opacity=std::clamp(.90F-.20F*fresnel,0.F,1.F);
+            // With the S2 volume already accounting for underwater transport,
+            // the interface adds the reflected portion. The original W1
+            // opaque tint is retained only when no volume renderer is active.
+            const float f0=.0204F;
+            const float reflectance=f0+(1.F-f0)*fresnel;
+            const float opacity=volume?
+               std::clamp(reflectance+foam*.20F,.02F,.97F):
+               std::clamp(.90F-.20F*fresnel,0.F,1.F);
             for(unsigned oy=0;oy<2U&&py+oy<depth.height;++oy)
               for(unsigned ox=0;ox<2U&&px+ox<depth.width;++ox){
                 const std::size_t at=std::size_t(py+oy)*depth.width+(px+ox);
@@ -530,7 +538,7 @@ public:
         const float exposure = options_.exposure * (environment.exposure > 0.0F ? environment.exposure : 1.0F);
         if (!render::resolve_polygon_render_rgba8(target_, exposure, environment.tonemapOperator,
                                                   frame_.pixels, error)) return false;
-        draw_ocean_surface(view.ocean,view.oceanTime,view.camera,target_,frame_.pixels);
+        draw_ocean_surface(view.ocean,view.oceanTime,view.waterVolume,view.camera,target_,frame_.pixels);
         draw_racing_effects(view.racingEffects,view.camera,target_,frame_.pixels);
         if(view.prototypeHud)draw_prototype_hud(frame_.pixels,frame_.width,frame_.height,*view.prototypeHud);
         stats_.resolveMilliseconds = milliseconds_since(resolveStart);

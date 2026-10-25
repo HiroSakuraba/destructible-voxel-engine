@@ -26,11 +26,11 @@ public:PrototypeComponentsCommand(const EditorObject& o,std::vector<Component> a
 // Adds the starter objects to the (empty) open scene instead of replacing the document, so the
 // scene keeps its name, file path, revision and selection sets, and Undo removes exactly them.
 class PrototypeStarterCommand final:public IEditorCommand {
- std::vector<EditorObjectId> added_;bool racing_{};
-public:explicit PrototypeStarterCommand(bool racing=false):racing_(racing){}
- std::string_view label()const noexcept override{return racing_?"Create racing starter":"Create prototype starter";}
+ std::vector<EditorObjectId> added_;int kind_{};
+public:explicit PrototypeStarterCommand(int kind=0):kind_(kind){}
+ std::string_view label()const noexcept override{return kind_==2?"Create flight starter":kind_==1?"Create racing starter":"Create prototype starter";}
  CommandResult execute(EditorDocument& d)override{if(!d.objects().empty())return CommandResult::fail("Use File > New Scene before creating the starter");
- auto starter=racing_?make_racing_starter():make_prototype_starter();added_.clear();
+ auto starter=kind_==2?make_flying_starter():kind_==1?make_racing_starter():make_prototype_starter();added_.clear();
  for(const auto& entry:starter.objects()){auto copy=clone_editor_object(entry.second);added_.push_back(copy.id);d.add_object(std::move(copy));}
  return CommandResult::ok();}
  CommandResult undo(EditorDocument& d)override{for(const auto id:added_)(void)d.remove_object(id);added_.clear();d.mark_dirty();
@@ -62,7 +62,7 @@ std::vector<std::pair<std::string,std::string>> NativeEditorController::prototyp
  if(p.picking){controls.push_back({"cancelpick","Cancel target selection"});
  for(const auto& [id,target]:workspace_.document().objects()){auto key=prototype_object_key(target.components);
  if(!key.empty())controls.push_back({"target:"+std::to_string(id),target.name+" ["+key+"]"});}return controls;}
- auto roles=prototype_role_types();controls={{"starter","Create first-person starter (empty scene)"},{"racing","Create racing time trial (empty scene)"},{"export","Export playable project to new folder"},{"validate","Validate gameplay keys and connections"},{"role","Role to add: "+roles[p.role%roles.size()].substr(kPrototypePrefix.size())},{"marker","Create marker with this role"},{"addrole","Add role to selected object"},{"link","Add event connection to selected actor"},{"component","Next component on selected actor"}};
+ auto roles=prototype_role_types();controls={{"starter","Create first-person starter (empty scene)"},{"racing","Create racing time trial (empty scene)"},{"flying","Create flying transformation course (empty scene)"},{"export","Export playable project to new folder"},{"validate","Validate gameplay keys and connections"},{"role","Role to add: "+roles[p.role%roles.size()].substr(kPrototypePrefix.size())},{"marker","Create marker with this role"},{"addrole","Add role to selected object"},{"link","Add event connection to selected actor"},{"component","Next component on selected actor"}};
  if(const auto* c=selected_component(o,p.component)){
   controls.push_back({"enabled",std::string(c->enabled?"Disable ":"Enable ")+c->type});
   controls.push_back({"remove","Remove "+c->type});
@@ -88,8 +88,8 @@ bool NativeEditorController::prototype_panel_action(std::string_view id){
  if(id=="cancelpick"){p.picking=false;p.editingProperty.clear();p.editingComponent=0;p.editingObject=0;
  p.first=0;
  return true;}
- if(id=="starter"||id=="racing"){auto r=workspace_.commands().execute(d,std::make_unique<PrototypeStarterCommand>(id=="racing"));
- if(r.success){workspace_.clear_selection();workspace_.select_object(d.objects().begin()->first);camera_.position=id=="racing"?Float3{60,-65,65}:Float3{8,-7,6};camera_.target=id=="racing"?Float3{0,0,0}:Float3{0,4,0};camera_.worldUp={0,0,1};}return result(r);}
+ if(id=="starter"||id=="racing"||id=="flying"){auto r=workspace_.commands().execute(d,std::make_unique<PrototypeStarterCommand>(id=="flying"?2:id=="racing"?1:0));
+ if(r.success){workspace_.clear_selection();workspace_.select_object(d.objects().begin()->first);camera_.position=id=="flying"?Float3{130,-170,190}:id=="racing"?Float3{60,-65,65}:Float3{8,-7,6};camera_.target=id=="flying"?Float3{0,200,60}:id=="racing"?Float3{0,0,0}:Float3{0,4,0};camera_.worldUp={0,0,1};}return result(r);}
  if(id=="validate"){std::string error;
  bool valid=validate_editor_prototype(d,&error);
  p.message=valid?"Prototype validation passed":error;

@@ -6,6 +6,7 @@
 namespace dve::editor {
 [[nodiscard]] EditorDocument make_prototype_starter();
 [[nodiscard]] EditorDocument make_racing_starter();
+[[nodiscard]] EditorDocument make_flying_starter();
 // True when the exporter writes the object as a bodyless runtime marker (an empty voxel asset
 // that carries components). Polygon, text, Gabor and .dmesh-backed objects are never markers.
 [[nodiscard]] bool prototype_object_is_marker(const EditorObject&);

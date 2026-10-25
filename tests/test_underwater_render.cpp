@@ -38,6 +38,9 @@ int main(){
   view.camera.position={0,-28,-2.F};view.camera.target={0,-16,-2.F};
   check(renderer->render(view,&error),"underwater HDR render: "+error);
   const auto underwater=renderer->readback()->pixels;
+  check(renderer->render(view,&error),"repeat underwater render: "+error);
+  check(renderer->readback()->pixels==underwater,
+        "suspended particles and physical ocean rendering are frame deterministic");
   auto withoutOptics=view;withoutOptics.waterVolume=nullptr;
   check(renderer->render(withoutOptics,&error),"reference no-optics render: "+error);
   check(renderer->readback()->pixels!=underwater,

@@ -5,7 +5,7 @@ namespace dve {
 // Distinct vessel hydrodynamics over one shared OceanField, independent of
 // editor, player and any specific rigid-body solver.
 enum class WatercraftType : std::uint8_t {
-    Dinghy=0, Sailboat=1, PirateShip=2, Speedboat=3, WaveRunner=4
+    Dinghy=0, Sailboat=1, PirateShip=2, Speedboat=3, WaveRunner=4, MiniSub=6
 };
 struct VesselDynamics {
     WatercraftType type{WatercraftType::Dinghy};

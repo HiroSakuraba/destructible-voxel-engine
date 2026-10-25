@@ -25,8 +25,9 @@ WaterCoastSample sample_water_coast(const WaterCoast& c,float x,float y,double t
  if(!valid_water_coast(c)||!std::isfinite(x)||!std::isfinite(y)||!std::isfinite(time))return out;
  const float side=std::abs(x-c.shoreline.x);
  const float offshore=c.shoreline.y-y;
- if(side>=c.halfWidth||offshore>c.offshoreLength||offshore<0)return out;
- out.inZone=true;out.depth=c.slope*offshore;
+ if(side>=c.halfWidth||offshore>c.offshoreLength||offshore< -20.F)return out;
+ out.inZone=true;out.depth=c.slope*std::max(0.F,offshore);
+ if(offshore<=0)return out;
  // Fade at the edges so the local surf can be overlaid continuously on the
  // shared open-ocean surface without a discontinuity in query height.
  const float lateralFade=1.F-smooth(c.halfWidth*.75F,c.halfWidth,side);

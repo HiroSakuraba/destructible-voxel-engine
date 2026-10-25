@@ -17,7 +17,7 @@ struct WaterWakeSample {
 [[nodiscard]] bool valid_water_wake(const WaterWakeEvent&)noexcept;
 class WaterWakeField {
 public:
-    static constexpr std::size_t MaxEvents=128;
+    static constexpr std::size_t MaxEvents=40;
     [[nodiscard]] bool emit(const WaterWakeEvent&)noexcept;
     [[nodiscard]] bool restore(std::span<const WaterWakeEvent>,double now)noexcept;
     void prune(double now)noexcept;

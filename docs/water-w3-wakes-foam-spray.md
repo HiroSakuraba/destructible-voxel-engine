@@ -10,7 +10,7 @@ Each wake impulse stores a world-space emitter position, normalized vessel headi
 
 The evaluator returns surface height, analytic horizontal gradients, vertical water velocity and a bounded whitecap/foam estimate. The ocean combines derivatives before normalizing the final geometric normal. Wake queries have finite compact support with age and distance cutoffs, and are bounded in aggregate to protect buoyancy stability under many overlapping impulses.
 
-The field accepts at most **128 impulses**. On overflow the oldest is evicted; expired impulses are pruned from the fixed-step world, and newly emitted impulses never affect another boat in the same tick. Source ordering is thus independent of whether the controlled speedboat or the pirate ship appears first in the authored scene.
+The field accepts at most **128 impulses**. On overflow the oldest is evicted; expired impulses are pruned from the fixed-step world, and newly emitted impulses never affect another boat in the same tick. Source ordering is thus independent of whether the controlled speedboat or the pirate ship appears first in the authored scene. Emissions originate abaft the hull to avoid repeated self-buoyancy pulses on the generating vessel's own stern probes.
 
 ## Wake generation
 

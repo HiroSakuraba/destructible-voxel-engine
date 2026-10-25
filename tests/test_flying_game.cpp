@@ -87,7 +87,10 @@ void gameplay_export(){
  const auto d=make_flying_starter();auto materials=EditorMaterialLibrary::make_default();std::string error;
  check(export_prototype_project(d,materials,root/"game",&error),"export flying starter: "+error);
  check(std::filesystem::exists(root/"game"/"game.dvegame"),"flight manifest exists");
- auto app=PlayerApp::boot(make_loose_content_source(root/"game"),PlayerBootOptions{},&error);
+ PlayerBootOptions options;options.enableScripts=false;
+ options.physicsBackend=Physics3DBackend::Reference;options.saveDirectory=root/"saves";
+ auto source=open_content_source(root/"game");check(bool(source),"flight content opens");
+ auto app=PlayerApp::boot(std::move(source),options,&error);
  check(bool(app),"flight player boots: "+error);
  check(app->prototype_hud()&&app->prototype_hud()->flying,"flight HUD in player");
  for(unsigned n=0;n<15;++n)app->tick(1.F/60);

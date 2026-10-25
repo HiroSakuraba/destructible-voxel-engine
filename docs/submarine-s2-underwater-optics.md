@@ -33,14 +33,15 @@ The red/orange channel generally suffers much stronger attenuation than blue in 
 2. Run the **S2 underwater medium compositor**, reconstructing actual view ray distances in **world metres** (independent of DVE voxelSize), sampling the ocean surface, and evaluating lighting on submerged geometry.
 3. Suppress legacy uniform distance fog in ocean scenes to avoid double extinction. Existing explicit authored fog volumes still use their original path; combining them with seawater optics is an intentional material stacking choice.
 4. Apply bloom and the existing scene tone map once.
-5. Apply the existing water-surface/ship/racing UI overlays. The water surface mesh is still an approximation; this PR improves volume imaging.
+5. Apply the existing water-surface/ship/racing UI overlays. The S2 water surface uses Fresnel-weighted reflected light over already-attenuated submerged geometry instead of the original nearly opaque blue surface tint.
+6. A separate bounded world-anchored 3D particulate field adds sparse illuminated motes. This uses at most 9³ cell candidates around the camera, sampling the identical optical model, lamp cones and view extinction, depth-testing before writing scene-linear HDR, and deterministic integer hashes rather than changing screen-space noise.
 
 The physics does not depend on the renderer: all optical math and lamps have headless pure unit tests. The volume pass is deterministic across frames; no temporal noise required.
 
 ## Acceptance
 
 - `dve_underwater_optics_tests`: Beer–Lambert wavelength/distance ordering, separate daylight decay, near-lamp red recovery, cone/range limits, water crossing both directions, no-color-in-air and water-to-air critical-angle total internal reflection.
-- `dve_underwater_render_tests`: export S1 starter, boot actual player, verify volume/lamp bindings, compare real HDR-framebuffer output with/without water optics and with/without lamps, change turbidity and camera immersion, and verify image differences.
+- `dve_underwater_render_tests`: export S1 starter, boot actual player, verify volume/lamp bindings, compare real HDR-framebuffer output with/without water optics and with/without lamps, change turbidity and camera immersion, and verify exact frame determinism including particulate motes.
 
 ### Known limitations / responsible claims
 

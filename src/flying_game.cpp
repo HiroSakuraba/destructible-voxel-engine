@@ -195,7 +195,10 @@ struct FlyingGame::Impl {
   const auto f=rotate(rot,{0,1,0});return {subtract(pos,multiply(f,1.6F)),add(pos,multiply(f,1.6F)),.65F};
  }
  Capsule wingtip(Float3 pos,Quaternion rot,bool right)const{
-  const auto r=rotate(rot,{1,0,0});const float span=mode==FlightMode::Float||mode==FlightMode::Hover?1.2F:4.2F;
+  const auto r=rotate(rot,{1,0,0});const bool compact=[](FlightMode m){return m==FlightMode::Float||m==FlightMode::Hover;}(mode)&&
+     [](FlightMode m){return m==FlightMode::Float||m==FlightMode::Hover;}(target);
+  // The sweep must cover unfolding wings from the moment the morph is requested.
+  const float span=compact?1.2F:4.2F;
   const auto tip=add(pos,multiply(r,right?span:-span));return {tip,tip,.38F};
  }
  bool blocked(Float3 pos,Quaternion rot)const{
@@ -235,7 +238,10 @@ struct FlyingGame::Impl {
   const float cd=profile.parasiteDrag+profile.inducedDrag*cl*cl+2.2F*beyond*beyond;
   const float q=.5F*1.225F*speed*speed;
   const auto airDir=unit(air);
-  Float3 liftDir=unit(subtract(up,multiply(airDir,dot(up,airDir))),up);
+  const Float3 liftPlane=subtract(up,multiply(airDir,dot(up,airDir)));
+  // A vertical airflow has no well-defined wing-lift direction; do not
+  // inject energy through the fallback of a zero-length projection.
+  const Float3 liftDir=length(liftPlane)>1.e-5F?unit(liftPlane):Float3{};
   Float3 force={0,0,-mass*gravity};
   force=add(force,multiply(liftDir,q*profile.wingArea*cl));
   force=subtract(force,multiply(airDir,q*profile.wingArea*cd));

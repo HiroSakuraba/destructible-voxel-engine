@@ -20,7 +20,7 @@ void scene_validation(){
   if(find_component_by_type(o.components,"dve.prototype.water_vessel"))++vessels;
   if(find_component_by_type(o.components,"dve.prototype.water_ocean"))++oceans;
  }
- check(vessels==2&&oceans==1,"starter contains two hulls and a single ocean");
+ check(vessels==5&&oceans==1,"starter contains five specialized hulls and one ocean");
  auto invalid=make_water_starter();
  for(const auto& [id,o]:invalid.objects()){
   (void)o;
@@ -49,7 +49,11 @@ void integration(){
  check(app->prototype_hud()&&app->prototype_hud()->water,"water gameplay HUD active");
  const auto dinghy=app->world().find_by_name("Dinghy");
  const auto ship=app->world().find_by_name("Pirate Ship");
- check(bool(dinghy)&&bool(ship),"both vessels loaded into water game");
+ const auto sailboat=app->world().find_by_name("Sailboat");
+ const auto speedboat=app->world().find_by_name("Speedboat");
+ const auto waveRunner=app->world().find_by_name("Wave Runner");
+ check(bool(dinghy)&&bool(ship)&&bool(sailboat)&&bool(speedboat)&&bool(waveRunner),
+       "all five distinct craft exported and loaded");
  const auto before=*app->world().position(*dinghy);
  platform::PlatformEvent input{};input.type=platform::EventType::KeyDown;input.key="w";
  app->handle_event(input);
@@ -65,7 +69,30 @@ void integration(){
  const auto shipBefore=*app->world().position(*ship);
  for(unsigned i=0;i<90;++i)app->tick(1.F/60.F);
  check(length(subtract(*app->world().position(*ship),shipBefore))>.2F,
-       "large ship responds to same controls with different inertia");
+       "pirate ship moves under real wind rather than an auxiliary engine");
+ // Sailboat has authentic wind propulsion and keel response. Q/E trims the sail.
+ input.key="3";app->handle_event(input);app->tick(1.F/60.F);
+ input.type=platform::EventType::KeyUp;app->handle_event(input);
+ const auto sailBefore=*app->world().position(*sailboat);
+ for(unsigned i=0;i<100;++i)app->tick(1.F/60.F);
+ check(length(subtract(*app->world().position(*sailboat),sailBefore))>.1F,
+       "wind moves the unpowered sailboat");
+ input.type=platform::EventType::KeyDown;input.key="e";app->handle_event(input);
+ for(unsigned i=0;i<20;++i)app->tick(1.F/60.F);
+ input.type=platform::EventType::KeyUp;app->handle_event(input);
+ // Planing speedboat and pump-jet craft both respond to authored motor controls.
+ for(const auto [key,id]:{std::pair<const char*,GameObjectId>{"4",*speedboat},
+                          {"5",*waveRunner}}){
+   input.type=platform::EventType::KeyDown;input.key=key;app->handle_event(input);app->tick(1.F/60.F);
+   input.type=platform::EventType::KeyUp;app->handle_event(input);
+   const auto beforeMotor=*app->world().position(id);
+   for(unsigned i=0;i<90;++i)app->tick(1.F/60.F);
+   check(length(subtract(*app->world().position(id),beforeMotor))>.15F,
+         "specialized motor vessel responds to W throttle");
+ }
+ // Restore existing #2 selection for the legacy save-position round trip.
+ input.type=platform::EventType::KeyDown;input.key="2";app->handle_event(input);app->tick(1.F/60.F);
+ input.type=platform::EventType::KeyUp;app->handle_event(input);
  auto save=app->save_game("water",&error);check(bool(save),"save W1 state: "+error);
  const auto savedPos=*app->world().position(*ship);
  for(unsigned i=0;i<30;++i)app->tick(1.F/60.F);

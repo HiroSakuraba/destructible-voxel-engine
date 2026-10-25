@@ -1,6 +1,7 @@
 #include "dve/water_game.hpp"
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
+#include "dve/water_vessel_dynamics.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -25,6 +26,17 @@ bool finite(Float3 p){return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfini
 bool finite(Quaternion q){return std::isfinite(q.x)&&std::isfinite(q.y)&&std::isfinite(q.z)&&std::isfinite(q.w);}
 std::string fixed(float x){std::ostringstream out;out.imbue(std::locale::classic());out<<std::fixed<<std::setprecision(1)<<x;return out.str();}
 bool is_role(std::string_view name){return name==rulesType||name==oceanType||name==vesselType;}
+VesselDynamics propulsion_of(const Component& c){
+ VesselDynamics v;
+ v.type=WatercraftType(get(c,"craft_type",std::int64_t{0}));
+ v.sailArea=float(get(c,"sail_area_m2",0.0));
+ v.keelArea=float(get(c,"keel_area_m2",0.0));
+ v.mastHeight=float(get(c,"mast_height_m",0.0));
+ v.planingFactor=float(get(c,"planing_factor",0.0));
+ v.thrustNewtons=float(get(c,"thrust_newtons",1400.0));
+ v.rudderNewtons=float(get(c,"rudder_torque",380.0));
+ return v;
+}
 WaterHull hull_of(const Component& c){
  WaterHull h;
  h.massKg=float(get(c,"mass_kg",480.0));h.displacementCubicMetres=float(get(c,"displacement_m3",.55));
@@ -44,7 +56,9 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"key",std::string{"ocean"},true,false,"Unique ocean key"},
   {"sea_state",std::int64_t{1},false,false,"0 calm, 1 breeze, 2 storm"},
   {"current_x",0.0,false,false,"Current X (metres/second)"},
-  {"current_y",0.0,false,false,"Current Y (metres/second)"}});
+  {"current_y",0.0,false,false,"Current Y (metres/second)"},
+  {"wind_x",5.0,false,false,"Global ambient wind X (m/s)"},
+  {"wind_y",8.0,false,false,"Global ambient wind Y (m/s)"}});
  add(std::string(rulesType),"Water Prototype Rules (marker)",{
   {"key",std::string{"water-rules"},true,false,"Unique water rules key"}});
  add(std::string(vesselType),"Water Vessel (collision-free polygon)",{
@@ -59,7 +73,12 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"probes_length",std::int64_t{3},false,false,"Longitudinal buoyancy points"},
   {"probes_beam",std::int64_t{3},false,false,"Lateral buoyancy points"},
   {"thrust_newtons",1400.0,false,false,"W1 demonstration motor force"},
-  {"rudder_torque",380.0,false,false,"W1 demonstration rudder torque"}});
+  {"rudder_torque",380.0,false,false,"Rudder force/torque authority"},
+  {"craft_type",std::int64_t{0},false,false,"0 dinghy, 1 sailboat, 2 pirate, 3 speedboat, 4 wave runner"},
+  {"sail_area_m2",0.0,false,false,"Unreefed sail area square metres"},
+  {"keel_area_m2",0.0,false,false,"Keel/centerboard lateral projected area"},
+  {"mast_height_m",0.0,false,false,"Sail center of effort above hull COM"},
+  {"planing_factor",0.0,false,false,"Dynamic planing lift coefficient 0..2"}});
  add(std::string(stateType),"Water Runtime Save",{
   {"data",std::string{},false,false,"Versioned runtime-only state"}});
 }
@@ -87,15 +106,15 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
     if(++ocean>1||!o.marker)return fail("Exactly one ocean marker is required");
     const auto state=get(c,"sea_state",std::int64_t{1});
     if(state<0||state>2)return fail("Ocean sea state outside 0..2");
-    for(const char* n:{"current_x","current_y"}){
+    for(const char* n:{"current_x","current_y","wind_x","wind_y"}){
      const auto v=get(c,n,0.0);if(!std::isfinite(v)||std::abs(v)>25)
       return fail("Ocean current must be finite and within 25 m/s");
     }
    }else if(c.type==rulesType){
     if(++rules>1||!o.marker)return fail("Exactly one water rules marker is required");
    }else if(c.type==vesselType){
-    if(++vessels>2||o.marker)return fail("W1 supports exactly two visible vessels");
-    if(!valid_water_hull(hull_of(c)))return fail("Invalid vessel mass, dimensions, or probes");
+    if(++vessels>8||o.marker)return fail("W2 supports 1..8 visible vessels");
+    if(!valid_water_hull(hull_of(c))||!valid_vessel_dynamics(propulsion_of(c)))return fail("Invalid vessel mass, propulsion, sails, planing or probes");
     for(const auto* n:{"thrust_newtons","rudder_torque"}){
      const auto v=get(c,n,0.0);if(!std::isfinite(v)||v<0||v>1.e7)
       return fail("Invalid vessel thrust or rudder torque");
@@ -103,17 +122,20 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
    }
   }
  }
- if(ocean!=1||rules!=1||vessels!=2)return fail("Water starter requires one ocean, one rules marker and two vessels");
+ if(ocean!=1||rules!=1||vessels==0||vessels>8)return fail("Water prototype requires one ocean, one rules marker and 1..8 vessels");
  return true;
 }
 struct WaterGame::Impl {
  struct Boat {
   GameObjectId id{};std::string key;Component component{};
   WaterHull hull{};WaterRigidState state{},origin{};
-  float thrust{},rudder{};
+  VesselDynamics drive{};
+  float trim{0.6F};
   WaterHydroLoads loads{};
+  VesselDriveLoads propLoads{};
  };
  GameWorld& world;OceanField field{};
+ Float3 wind{5,8,0};
  PrototypeHud hud{};PrototypeCamera camera{};
  WaterGameTelemetry telemetry{};
  std::vector<Boat> boats;
@@ -126,7 +148,7 @@ struct WaterGame::Impl {
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.health=hud.maximumHealth=100;hud.water=true;}
  void publish(Boat& b){(void)world.set_position(b.id,b.state.position);(void)world.set_rotation(b.id,b.state.orientation);}
  void reset(){
-  for(auto& b:boats){b.state=b.origin;publish(b);}
+  for(auto& b:boats){b.state=b.origin;b.trim=0.6F;publish(b);}
   selected=0;elapsed=0;accumulator=0;hud.phase=PrototypePhase::Playing;
   update_camera(true);update_hud();
  }
@@ -134,7 +156,8 @@ struct WaterGame::Impl {
   const auto& s=boats[selected].state;
   const Float3 forward=rotate(s.orientation,{0,1,0});
   const Float3 target=add(s.position,multiply(forward,4.F));
-  const Float3 wanted=add(add(s.position,multiply(forward,-17.F)),Float3{0,0,8.F});
+  const float follow=(std::max)(14.F,boats[selected].hull.lengthMetres*1.6F);
+  const Float3 wanted=add(add(s.position,multiply(forward,-follow)),Float3{0,0,follow*.48F});
   const float a=snap?1.F:1.F-std::exp(-8.F*stepDt);
   camera.position=add(camera.position,multiply(subtract(wanted,camera.position),a));
   camera.target=add(camera.target,multiply(subtract(target,camera.target),a));
@@ -143,14 +166,21 @@ struct WaterGame::Impl {
  void advance(float dt){
   const float throttle=std::clamp(world.get_axis("move_y"),-1.F,1.F);
   const float steer=std::clamp(world.get_axis("move_x"),-1.F,1.F);
+  const float trimAxis=std::clamp(world.get_axis("water_trim"),-1.F,1.F);
   for(unsigned i=0;i<boats.size();++i){
    auto& boat=boats[i];const auto old=boat.state.position;
    const Float3 f=rotate(boat.state.orientation,{0,1,0});
-   const float signedThrust=i==selected?throttle*boat.thrust:0;
-   const float yawTorque=i==selected?(-steer*boat.rudder):0;
+   if(i==selected)boat.trim=std::clamp(boat.trim+trimAxis*dt*.65F,-1.4F,1.4F);
+   const auto waves=field.sample(boat.state.position.x,boat.state.position.y,elapsed);
    boat.loads=evaluate_water_hull(field,elapsed,boat.hull,boat.state);
+   VesselInput input;
+   input.throttle=i==selected?throttle:0;
+   input.helm=i==selected?steer:0;
+   input.sailTrim=boat.trim;
+   boat.propLoads=evaluate_vessel_dynamics(boat.drive,boat.hull,boat.state,waves,
+                                               wind,input,boat.loads.immersionFraction);
    step_water_hull(boat.state,boat.hull,boat.loads,dt,
-                   multiply(f,signedThrust),{0,0,yawTorque});
+                   boat.propLoads.force,boat.propLoads.torque);
    if(!finite(boat.state.position)||!finite(boat.state.linearVelocity)||
       !finite(boat.state.orientation)||length(boat.state.position)>100000.F){
      boat.state=boat.origin;
@@ -178,21 +208,29 @@ struct WaterGame::Impl {
   telemetry.immersion=b.loads.immersionFraction;
   telemetry.rollRadians=e.y;telemetry.pitchRadians=e.x;
   telemetry.impactRate=b.loads.impactRate;
+  telemetry.apparentWind=b.propLoads.apparentWind;
+  telemetry.sailDrive=b.propLoads.sailThrust;
+  telemetry.planingLift=b.propLoads.planingLift;
+  telemetry.lateralSlip=b.propLoads.lateralWaterSpeed;
+  telemetry.sailTrim=b.trim;
+  telemetry.type=b.drive.type;
   telemetry.activeVessel=selected;telemetry.vesselCount=unsigned(boats.size());
-  hud.stats=std::string("WATER ")+(selected?"PIRATE SHIP":"DINGHY")+
+  hud.stats=std::string("WATER ")+watercraft_name(b.drive.type)+
       " SEA "+(field.preset()==OceanPreset::Calm?"CALM":field.preset()==OceanPreset::Breeze?"BREEZE":"STORM");
   hud.prompt="SPEED "+fixed(telemetry.speed)+" M/S ROLL "+fixed(e.y)+" PITCH "+fixed(e.x);
   hud.message="IMMERSION "+fixed(100*telemetry.immersion)+"% WATER "+fixed(water.height)+
-    " M  1 DINGHY  2 SHIP";
+    " M  1..5 BOATS  Q/E TRIM";
   if(hud.phase==PrototypePhase::Paused)hud.message="PAUSED - P RESUME";
-  hud.vehicleTelemetry="IMPACT "+fixed(telemetry.impactRate)+" WATER V "+fixed(length(water.waterVelocity))+
-     " M/S  PROBES "+std::to_string(b.hull.longitudinalProbes*b.hull.lateralProbes);
+  hud.vehicleTelemetry="WIND "+fixed(telemetry.apparentWind)+" SAIL "+fixed(telemetry.sailDrive)+
+    " PLANING "+fixed(telemetry.planingLift)+" TRIM "+fixed(telemetry.sailTrim)+
+    " SLIP "+fixed(telemetry.lateralSlip);
  }
  void persist(){
   std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17);
-  o<<"DVE_WATER 1 "<<selected<<' '<<unsigned(hud.phase)<<' '<<elapsed<<' '<<accumulator;
+  o<<"DVE_WATER 2 "<<selected<<' '<<unsigned(hud.phase)<<' '<<elapsed<<' '<<accumulator<<' '<<boats.size();
   for(const auto& b:boats){
    const auto& s=b.state;
+   o<<' '<<b.key<<' '<<b.trim;
    o<<' '<<s.position.x<<' '<<s.position.y<<' '<<s.position.z
     <<' '<<s.orientation.x<<' '<<s.orientation.y<<' '<<s.orientation.z<<' '<<s.orientation.w
     <<' '<<s.linearVelocity.x<<' '<<s.linearVelocity.y<<' '<<s.linearVelocity.z
@@ -218,6 +256,7 @@ bool WaterGame::start(std::string* error){
   if(!s.world.is_enabled(o.id)){if(error)*error="Water roles must be enabled";return false;}
   if(c.type==oceanType){
    s.oceanKey=get(c,"key",std::string{});
+   s.wind={float(get(c,"wind_x",5.0)),float(get(c,"wind_y",8.0)),0};
    if(!s.field.set_preset(OceanPreset(get(c,"sea_state",std::int64_t{1})),
           {float(get(c,"current_x",0.0)),float(get(c,"current_y",0.0)),0})){
     if(error)*error="Invalid ocean wave preset";return false;
@@ -228,8 +267,7 @@ bool WaterGame::start(std::string* error){
     if(error)*error="W1 vessels require visual-only geometry; water physics owns hull motion";return false;
    }
    Impl::Boat boat;boat.id=o.id;boat.key=get(c,"key",std::string{});boat.component=c;
-   boat.hull=hull_of(c);boat.thrust=float(get(c,"thrust_newtons",1400.0));
-   boat.rudder=float(get(c,"rudder_torque",380.0));
+   boat.hull=hull_of(c);boat.drive=propulsion_of(c);
    boat.origin.position=*s.world.position(o.id);boat.origin.orientation=s.world.transform(o.id)->rotation;
    boat.state=boat.origin;s.boats.push_back(boat);
   }
@@ -252,10 +290,11 @@ void WaterGame::step(float dt){
  if(edge("pause",s.lastPause))s.hud.phase=s.hud.phase==PrototypePhase::Paused?
      PrototypePhase::Playing:PrototypePhase::Paused;
  const bool toggle=edge("interact",s.lastSwitch);
- if(toggle||s.world.is_action_pressed("water_ship_1")||s.world.is_action_pressed("water_ship_2")){
-  unsigned next=toggle?1-s.selected:s.world.is_action_pressed("water_ship_2")?1:0;
-  if(next!=s.selected){s.selected=next;s.update_camera(true);}
- }
+ unsigned selection=s.selected;
+ if(toggle)selection=(selection+1)%unsigned(s.boats.size());
+ for(unsigned n=0;n<s.boats.size();++n)
+   if(s.world.is_action_pressed("water_ship_"+std::to_string(n+1)))selection=n;
+ if(selection!=s.selected){s.selected=selection;s.update_camera(true);}
  if(s.hud.phase==PrototypePhase::Playing){
   s.accumulator+=dt;
   for(unsigned i=0;i<31&&s.accumulator+1.e-7F>=stepDt;++i){
@@ -286,11 +325,21 @@ bool WaterGame::after_restore(std::string* error){
  std::string magic;unsigned version{},selected{},phase{};double elapsed{};
  float accumulator{};
  in>>magic>>version>>selected>>phase>>elapsed>>accumulator;
- if(!in||magic!="DVE_WATER"||version!=1||selected>=s.boats.size()||phase>1||
+ if(!in||magic!="DVE_WATER"||(version!=1&&version!=2)||selected>=s.boats.size()||phase>1||
     !std::isfinite(elapsed)||elapsed<0||!std::isfinite(accumulator)||
     accumulator<0||accumulator>=stepDt)return fail();
+ unsigned count=unsigned(s.boats.size());
+ if(version==2){in>>count;if(!in||count!=s.boats.size())return fail();}
  std::vector<WaterRigidState> restored(s.boats.size());
- for(auto& q:restored){
+ std::vector<float> trims(s.boats.size(),.6F);
+ for(unsigned i=0;i<restored.size();++i){
+   auto& q=restored[i];
+   if(version==2){
+     std::string key;float trim{};
+     in>>key>>trim;
+     if(!in||key!=s.boats[i].key||!std::isfinite(trim)||std::abs(trim)>1.4F)return fail();
+     trims[i]=trim;
+   }
    in>>q.position.x>>q.position.y>>q.position.z>>q.orientation.x>>q.orientation.y
       >>q.orientation.z>>q.orientation.w>>q.linearVelocity.x>>q.linearVelocity.y
       >>q.linearVelocity.z>>q.angularVelocity.x>>q.angularVelocity.y>>q.angularVelocity.z;
@@ -308,7 +357,9 @@ bool WaterGame::after_restore(std::string* error){
   auto found=vesselIds.find(s.boats[i].key);
   if(found==vesselIds.end()||s.world.has_collision(found->second).value_or(true))return fail();
   s.boats[i].id=found->second;s.boats[i].state=restored[i];
+  s.boats[i].trim=trims[i];
  }
+ s.wind={float(get(*oceanConfig,"wind_x",5.0)),float(get(*oceanConfig,"wind_y",8.0)),0};
  s.rules=rules;s.stateComponent=c->id;s.selected=selected;s.elapsed=elapsed;
  s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);
  s.update_camera(true);s.update_hud();return true;

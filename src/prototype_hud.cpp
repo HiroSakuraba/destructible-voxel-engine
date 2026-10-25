@@ -37,7 +37,7 @@ void draw_prototype_hud(std::span<std::uint8_t> rgba,unsigned w,unsigned h,const
  auto text=[&](unsigned x,unsigned y,std::string_view str){unsigned xx=x;for(char raw:str){char c=raw>='a'&&raw<='z'?char(raw-'a'+'A'):raw;if(xx+5*scale>=w)break;auto rows=glyph(c);for(unsigned ry=0;ry<7;++ry)for(unsigned rx=0;rx<5;++rx)if(rows[ry]&(1U<<(4-rx)))rect(xx+rx*scale,y+ry*scale,scale,scale,{235,242,250});xx+=6*scale;}};
  const auto line=10*scale;rect(4,4,(std::min)(w-8,320*scale),4*line+8,{18,27,40});
  if(hud.water){text(8,8,hud.stats);text(8,8+line,hud.prompt);text(8,8+2*line,hud.message);
- text(8,8+3*line,hud.debug?hud.vehicleTelemetry:"W/S MOTOR A/D RUDDER  1/2 BOAT  P PAUSE");return;}
+ text(8,8+3*line,hud.debug?hud.vehicleTelemetry:"W/S POWER A/D HELM Q/E TRIM TAB TOGGLE");return;}
  if(hud.flying){
    if(hud.debug)rect(4,4,(std::min)(w-8,320*scale),5*line+8,{18,27,40});
    text(8,8,hud.stats);text(8,8+line,hud.prompt);text(8,8+2*line,hud.message);

@@ -144,6 +144,94 @@ void draw_racing_effects(std::span<const RacingVisualEffect> effects,
 }
 
 
+// HDR participating-medium pass. All distances below are world metres;
+// PolygonRenderTarget depth is normalized linear camera-forward depth, not
+// Euclidean distance and not voxel units.
+void apply_underwater_volume_hdr(const PlayerRenderView& view,
+                                 const RenderEnvironment& environment,
+                                 render::PolygonRenderTarget& target) {
+    if(!view.ocean||!view.waterVolume||!target.valid()||
+       !valid_water_volume_settings(*view.waterVolume))return;
+    const auto camera=racing_camera(view.camera,target.width,target.height);
+    if(!(camera.tanHalf>0)||!std::isfinite(camera.tanHalf))return;
+    const auto eye=sample_water_volume(*view.ocean,*view.waterVolume,camera.eye,view.oceanTime);
+    const Float3 sky={
+       std::max(0.F,environment.skyColor.x*1.3F+environment.sunIntensity*.09F),
+       std::max(0.F,environment.skyColor.y*1.3F+environment.sunIntensity*.09F),
+       std::max(0.F,environment.skyColor.z*1.3F+environment.sunIntensity*.09F)};
+    for(std::uint32_t py=0;py<target.height;++py){
+      for(std::uint32_t px=0;px<target.width;++px){
+        const std::size_t index=std::size_t(py)*target.width+px;
+        const float x=(2.F*(px+.5F)/target.width-1.F)*camera.tanHalf*camera.aspect;
+        const float y=(1.F-2.F*(py+.5F)/target.height)*camera.tanHalf;
+        const Float3 dir=normalize(add(camera.forward,
+                add(multiply(camera.right,x),multiply(camera.up,y))));
+        const float cosine=dot(dir,camera.forward);
+        if(cosine<=.02F)continue;
+        const float normalizedDepth=target.depth[index];
+        const bool hit=normalizedDepth<.999999F;
+        const float forwardDepth=hit?
+           camera.nearPlane+std::clamp(normalizedDepth,0.F,1.F)*
+                   (camera.farPlane-camera.nearPlane):
+           std::min(85.F,camera.farPlane);
+        const float rayLength=std::min(160.F,forwardDepth/cosine);
+        const auto medium=water_ray_segment(*view.ocean,camera.eye,dir,rayLength,view.oceanTime);
+        if(medium.lengthMeters<=.001F)continue;
+        const Float3 start=add(camera.eye,multiply(dir,medium.startMeters));
+        const Float3 end=add(camera.eye,multiply(dir,rayLength));
+        const auto entry=sample_water_volume(*view.ocean,*view.waterVolume,start,view.oceanTime);
+        const auto atEnd=sample_water_volume(*view.ocean,*view.waterVolume,end,view.oceanTime);
+        const bool objectUnderwater=hit&&atEnd.submerged;
+        const auto& old=target.hdrColor[index];
+        UnderwaterOpticsInput input{};
+        input.objectRadiance=hit?Float3{old.x,old.y,old.z}:
+            (medium.cameraSubmerged&&medium.hitsSurface?
+                Float3{old.x,old.y,old.z}:Float3{});
+        input.objectSubmerged=objectUnderwater;
+        input.objectDepthMeters=atEnd.depthBelowSurface;
+        input.eyeDepthMeters=entry.depthBelowSurface;
+        input.viewPathMeters=medium.lengthMeters;
+        input.rayDirectionZ=dir.z;
+        input.ambientSurfaceLight=sky;
+        if(objectUnderwater)for(const auto& lamp:view.underwaterLamps){
+          const auto illumination=evaluate_underwater_lamp(lamp,entry,end);
+          input.lampIrradiance=add(input.lampIrradiance,illumination);
+        }
+        Float3 shaded=shade_underwater_radiance(entry,input);
+        // Approximate in-scattering from visible headlamp cones. The same
+        // lamp spectrum is extinguished on light-to-particle and particle-to-eye.
+        // Four stratified analytic samples: no stochastic frame flicker.
+        const float step=std::min(medium.lengthMeters,24.F)/4.F;
+        for(int i=0;i<4&&step>0;++i){
+          const float t=medium.startMeters+(float(i)+.5F)*step;
+          const Float3 p=add(camera.eye,multiply(dir,t));
+          const auto media=sample_water_volume(*view.ocean,*view.waterVolume,p,view.oceanTime);
+          Float3 lampLight{};
+          for(const auto& lamp:view.underwaterLamps)
+             lampLight=add(lampLight,evaluate_underwater_lamp(lamp,media,p));
+          const Float3 tr=water_transmittance(media,std::max(0.F,t-medium.startMeters));
+          constexpr float phase=.12F;
+          shaded.x+=lampLight.x*media.scatteringRGB.x*tr.x*phase*step;
+          shaded.y+=lampLight.y*media.scatteringRGB.y*tr.y*phase*step;
+          shaded.z+=lampLight.z*media.scatteringRGB.z*tr.z*phase*step;
+        }
+        // Water-to-air interface: Fresnel transmission, including total
+        // internal reflection. Screen-space ray bending is not attempted:
+        // geometry refractive reray is a separate S2 follow-up.
+        if(medium.cameraSubmerged&&medium.hitsSurface){
+          const auto p=add(camera.eye,multiply(dir,medium.lengthMeters));
+          const auto surface=view.ocean->sample(p.x,p.y,view.oceanTime);
+          const float reflectance=water_to_air_fresnel(dot(dir,surface.normal));
+          shaded=add(multiply(shaded,1.F-reflectance),
+                     multiply(Float3{.012F,.045F,.075F},reflectance));
+        }
+        target.hdrColor[index]={
+          std::clamp(shaded.x,0.F,64.F),std::clamp(shaded.y,0.F,64.F),
+          std::clamp(shaded.z,0.F,64.F),old.w};
+      }
+    }
+}
+
 void draw_ocean_surface(const OceanField* ocean,double seconds,
                        const render::PolygonCamera& camera,
                        const render::PolygonRenderTarget& depth,
@@ -341,7 +429,10 @@ public:
             polygonRenderCache_.clear();
         }
         if(view.fogVolumes.empty()) {
-            (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
+            // Underwater extinction supersedes ordinary distance fog. Running
+            // both would double-attenuate every pixel of the water column.
+            if(!(view.ocean&&view.waterVolume))
+              (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
         } else {
             // Assets stay in metre space. Camera/depth are converted back from
             // the voxel-unit surface pass for this shared HDR integration pass.
@@ -367,6 +458,7 @@ public:
             if(!render::apply_cpu_fog(target_,camera,environment,voxelSize,fogVolumes,
                                      fogSettings,&stats_.fog,error))return false;
         }
+        apply_underwater_volume_hdr(view,environment,target_);
         if (sceneLighting) (void)render::apply_cpu_bloom(target_, environment);
         stats_.renderMilliseconds = milliseconds_since(start);
 

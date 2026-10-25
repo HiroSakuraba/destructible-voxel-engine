@@ -121,3 +121,4 @@ VesselDriveLoads evaluate_vessel_dynamics(
     }
     return result;
 }
+} // namespace dve

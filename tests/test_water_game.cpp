@@ -5,6 +5,7 @@
 #include "dve/player/player_app.hpp"
 #include "dve/player/player_renderer.hpp"
 #include <cmath>
+#include <array>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -107,6 +108,18 @@ void integration(){
        "player sees authoritative physics ocean waves");
  check(renderer->render(waterView,&error),"render water: "+error);
  const auto pixels=renderer->readback()->pixels;
+ // The W3 spray projection uses the same depth-aware rendering path as the
+ // real spray particles spawned from the ships' fixed-tick bow emitters.
+ WaterSprayEffect spray{};
+ const auto forward=normalize(subtract(waterView.camera.target,waterView.camera.position));
+ spray.position=add(waterView.camera.position,multiply(forward,5.F));
+ spray.radius=.8F;spray.opacity=.95F;spray.lifetime=1;
+ const std::array<WaterSprayEffect,1> effects{spray};
+ waterView.waterSpray=effects;
+ check(renderer->render(waterView,&error),"render injected bow spray: "+error);
+ check(renderer->readback()->pixels!=pixels,
+       "spray is rendered in front of the physical ocean");
+ waterView.waterSpray={};
  waterView.ocean=nullptr;
  check(renderer->render(waterView,&error),"render no water: "+error);
  check(renderer->readback()->pixels!=pixels,

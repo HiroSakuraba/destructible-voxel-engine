@@ -18,6 +18,11 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// Local cross product: game_world.cpp's cross_product is not declared in any header.
+[[nodiscard]] Float3 cross_racing(Float3 a, Float3 b) noexcept {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+
 double milliseconds_since(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
@@ -58,9 +63,9 @@ struct RacingCamera {
 RacingCamera racing_camera(const render::PolygonCamera& camera,std::uint32_t width,std::uint32_t height) {
     RacingCamera c{};
     c.eye=camera.position;c.forward=normalize(subtract(camera.target,camera.position));
-    c.right=normalize(cross_product(c.forward,camera.up));
+    c.right=normalize(cross_racing(c.forward,camera.up));
     if(length_squared(c.right)<1.e-8F)c.right={1,0,0};
-    c.up=normalize(cross_product(c.right,c.forward));
+    c.up=normalize(cross_racing(c.right,c.forward));
     c.tanHalf=std::tan(camera.verticalFieldOfViewRadians*0.5F);
     c.aspect=float(width)/float(height);c.nearPlane=camera.nearPlane;c.farPlane=camera.farPlane;
     c.width=width;c.height=height;

@@ -227,9 +227,10 @@ struct WaterGame::Impl {
  }
  void persist(){
   std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17);
-  o<<"DVE_WATER 1 "<<selected<<' '<<unsigned(hud.phase)<<' '<<elapsed<<' '<<accumulator;
+  o<<"DVE_WATER 2 "<<selected<<' '<<unsigned(hud.phase)<<' '<<elapsed<<' '<<accumulator<<' '<<boats.size();
   for(const auto& b:boats){
    const auto& s=b.state;
+   o<<' '<<b.key<<' '<<b.trim;
    o<<' '<<s.position.x<<' '<<s.position.y<<' '<<s.position.z
     <<' '<<s.orientation.x<<' '<<s.orientation.y<<' '<<s.orientation.z<<' '<<s.orientation.w
     <<' '<<s.linearVelocity.x<<' '<<s.linearVelocity.y<<' '<<s.linearVelocity.z
@@ -324,11 +325,21 @@ bool WaterGame::after_restore(std::string* error){
  std::string magic;unsigned version{},selected{},phase{};double elapsed{};
  float accumulator{};
  in>>magic>>version>>selected>>phase>>elapsed>>accumulator;
- if(!in||magic!="DVE_WATER"||version!=1||selected>=s.boats.size()||phase>1||
+ if(!in||magic!="DVE_WATER"||(version!=1&&version!=2)||selected>=s.boats.size()||phase>1||
     !std::isfinite(elapsed)||elapsed<0||!std::isfinite(accumulator)||
     accumulator<0||accumulator>=stepDt)return fail();
+ unsigned count=unsigned(s.boats.size());
+ if(version==2){in>>count;if(!in||count!=s.boats.size())return fail();}
  std::vector<WaterRigidState> restored(s.boats.size());
- for(auto& q:restored){
+ std::vector<float> trims(s.boats.size(),.6F);
+ for(unsigned i=0;i<restored.size();++i){
+   auto& q=restored[i];
+   if(version==2){
+     std::string key;float trim{};
+     in>>key>>trim;
+     if(!in||key!=s.boats[i].key||!std::isfinite(trim)||std::abs(trim)>1.4F)return fail();
+     trims[i]=trim;
+   }
    in>>q.position.x>>q.position.y>>q.position.z>>q.orientation.x>>q.orientation.y
       >>q.orientation.z>>q.orientation.w>>q.linearVelocity.x>>q.linearVelocity.y
       >>q.linearVelocity.z>>q.angularVelocity.x>>q.angularVelocity.y>>q.angularVelocity.z;
@@ -346,7 +357,9 @@ bool WaterGame::after_restore(std::string* error){
   auto found=vesselIds.find(s.boats[i].key);
   if(found==vesselIds.end()||s.world.has_collision(found->second).value_or(true))return fail();
   s.boats[i].id=found->second;s.boats[i].state=restored[i];
+  s.boats[i].trim=trims[i];
  }
+ s.wind={float(get(*oceanConfig,"wind_x",5.0)),float(get(*oceanConfig,"wind_y",8.0)),0};
  s.rules=rules;s.stateComponent=c->id;s.selected=selected;s.elapsed=elapsed;
  s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);
  s.update_camera(true);s.update_hud();return true;

@@ -1,6 +1,7 @@
 #pragma once
 #include "dve/prototype_game.hpp"
 #include "dve/water_hydrodynamics.hpp"
+#include "dve/water_vessel_dynamics.hpp"
 #include <memory>
 namespace dve {
 [[nodiscard]] bool scene_has_water(std::span<const PrototypeObjectView>);
@@ -9,6 +10,8 @@ void register_water_components(ComponentTypeRegistry&);
 struct WaterGameTelemetry {
     float speed{},waterHeight{},immersion{},rollRadians{},pitchRadians{};
     float impactRate{},rudder{},throttle{};
+    float apparentWind{},sailDrive{},planingLift{},lateralSlip{},sailTrim{};
+    WatercraftType type{WatercraftType::Dinghy};
     unsigned activeVessel{},vesselCount{};
 };
 class WaterGame {

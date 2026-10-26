@@ -24,8 +24,9 @@ in `third_party/notices/` and the generated shipping notices.
   It is the correctness oracle for the independent shader.
 - `shaders/rdv_bbv_trace.hlsl`: independent Shader Model 6.0 compute reference.
   Uses no raytracing or mesh-shader extensions. Declared in the canonical shader
-  manifest. This PR does **not** yet have a GPU-dispatch/readback equivalence
-  harness for this shader; the GPU path is staged for future connection.
+  manifest. `execute_bbv_gpu_trace` dispatches it on DVE's RHI with readback.
+  The Null backend validates resource binding and dispatch but does not execute
+  shader arithmetic; opt-in Vulkan validation compares actual hits against CPU.
 - Native-voxel inputs are ground truth: a mesh depth or a probe cannot clear or
   overwrite a native voxel. No raster-derived occupancy exists yet.
 
@@ -100,7 +101,8 @@ ctest --test-dir build -R '^dve_rdv_bbv_tests$' --output-on-failure
 
 ## Integration limits and next work
 
-1. Run native Vulkan/D3D12 shader dispatch/readback parity against the CPU oracle.
+1. Run the opt-in native Vulkan shader parity test in a GPU-enabled runner,
+   then expand coverage to thousands of randomized rays and Direct3D 12.
 2. Add a per-viewport frame owner/call site; current code is an explicit API,
    not a default renderer hook.
 3. Support polygon raster-derived surface injection, with separate source masks.
@@ -110,3 +112,17 @@ ctest --test-dir build -R '^dve_rdv_bbv_tests$' --output-on-failure
 
 Do not interpret the CPU oracle and Null-RHI upload checks as proof of GPU
 ray-tracing speed or driver correctness. Benchmark frame and dispatch time separately.
+
+### Native shader readback (opt-in)
+
+Compile with DVE's ambient-occlusion SPIR-V descriptor shifts:
+```sh
+dxc -spirv -fspv-target-env=vulkan1.1 -fvk-b-shift 0 0 \
+    -fvk-t-shift 16 0 -fvk-u-shift 32 0 \
+    -T cs_6_0 -E main -Fo /tmp/rdv_bbv_trace.spv shaders/rdv_bbv_trace.hlsl
+DVE_RDV_TRACE_SPV=/tmp/rdv_bbv_trace.spv ctest --test-dir build \
+    -R '^dve_rdv_bbv_tests$' --output-on-failure
+```
+This opt-in path requires `DVE_ENABLE_VULKAN_BUFFER_BACKEND=ON` and a working
+Vulkan device (software ICDs can run shader validation). The test checks two
+opposing rays, normals and distances, including a negative-direction ray.

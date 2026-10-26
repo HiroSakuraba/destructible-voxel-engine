@@ -10,7 +10,8 @@ namespace dve {
 RegionStreamingRuntime::RegionStreamingRuntime(const RegionCatalog& catalog, RuntimeSceneWorld& world,
     RuntimeSceneStagingExecutor& executor, RuntimeSceneHandle sceneHandle,
     RegionStreamingRuntimeConfig config)
-    : catalog_(catalog), world_(world), executor_(executor), sceneHandle_(sceneHandle), config_(std::move(config)),
+    : catalog_(catalog), world_(world), executor_(executor), sceneHandle_(sceneHandle),
+      authorityThread_(std::this_thread::get_id()), config_(std::move(config)),
       planner_(config_.planner) {
     if (!planner_.valid() || config_.maximumInFlight == 0 || config_.maximumPublicationsPerTick == 0)
         throw std::invalid_argument("invalid region streaming runtime configuration");
@@ -21,16 +22,19 @@ RegionStreamingRuntime::~RegionStreamingRuntime() {
 }
 
 void RegionStreamingRuntime::set_pinned(std::uint64_t id, bool pinned) {
+    if (std::this_thread::get_id() != authorityThread_) throw std::logic_error("region streamer wrong thread");
     if (pinned) pins_.insert(id);
     else pins_.erase(id);
 }
 void RegionStreamingRuntime::allow_static_unload(std::uint64_t id, bool allowed) {
+    if (std::this_thread::get_id() != authorityThread_) throw std::logic_error("region streamer wrong thread");
     if (allowed) unloadAllowed_.insert(id);
     else unloadAllowed_.erase(id);
 }
 
 RegionStreamingTickStats RegionStreamingRuntime::tick(RegionKey camera, std::uint64_t tick) {
     RegionStreamingTickStats stats{};
+    if (std::this_thread::get_id() != authorityThread_) { stats.wrongThread = true; return stats; }
     const RuntimeScene* scene = world_.scene(sceneHandle_);
     if (!scene) {
         stats.sceneMissing = true;

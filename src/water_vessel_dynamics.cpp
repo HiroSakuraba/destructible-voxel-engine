@@ -19,11 +19,12 @@ const char* watercraft_name(WatercraftType kind)noexcept{
         case WatercraftType::Speedboat:return "SPEEDBOAT";
         case WatercraftType::WaveRunner:return "WAVE RUNNER";
         case WatercraftType::Surfboard:return "SURFBOARD";
+        case WatercraftType::MiniSub:return "MINI-SUB";
     }
     return "VESSEL";
 }
 bool valid_vessel_dynamics(const VesselDynamics& p)noexcept{
-    return p.type<=WatercraftType::Surfboard&&
+    return p.type<=WatercraftType::MiniSub&&
         std::isfinite(p.sailArea)&&p.sailArea>=0&&p.sailArea<=10000&&
         std::isfinite(p.keelArea)&&p.keelArea>=0&&p.keelArea<=200&&
         std::isfinite(p.mastHeight)&&p.mastHeight>=0&&p.mastHeight<=90&&

@@ -2,6 +2,8 @@
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
 #include "dve/water_vessel_dynamics.hpp"
+#include "dve/water_volume.hpp"
+#include "dve/submarine_dynamics.hpp"
 #include "dve/water_coast.hpp"
 #include "dve/water_surf.hpp"
 #include <algorithm>
@@ -61,7 +63,9 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"current_x",0.0,false,false,"Current X (metres/second)"},
   {"current_y",0.0,false,false,"Current Y (metres/second)"},
   {"wind_x",5.0,false,false,"Global ambient wind X (m/s)"},
-  {"wind_y",8.0,false,false,"Global ambient wind Y (m/s)"}});
+  {"wind_y",8.0,false,false,"Global ambient wind Y (m/s)"},
+  {"seafloor_z",-40.0,false,false,"Flat underwater physical floor Z (m)"},
+  {"water_clarity",std::int64_t{0},false,false,"0 clear ocean, 1 coastal, 2 turbid"}});
  add(std::string(coastType),"Coastal Surf Zone (marker)",{
   {"key",std::string{"surf-zone"},true,false,"Unique surf-zone key"},
   {"half_width_m",150.0,false,false,"Surf zone half-width in metres"},
@@ -85,11 +89,17 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"probes_beam",std::int64_t{3},false,false,"Lateral buoyancy points"},
   {"thrust_newtons",1400.0,false,false,"W1 demonstration motor force"},
   {"rudder_torque",380.0,false,false,"Rudder force/torque authority"},
-  {"craft_type",std::int64_t{0},false,false,"0 dinghy, 1 sailboat, 2 pirate, 3 speedboat, 4 wave runner, 5 surfboard"},
+  {"craft_type",std::int64_t{0},false,false,"0 dinghy, 1 sailboat, 2 pirate, 3 speedboat, 4 wave runner, 5 surfboard, 6 mini-sub"},
   {"sail_area_m2",0.0,false,false,"Unreefed sail area square metres"},
   {"keel_area_m2",0.0,false,false,"Keel/centerboard lateral projected area"},
   {"mast_height_m",0.0,false,false,"Sail center of effort above hull COM"},
-  {"planing_factor",0.0,false,false,"Dynamic planing lift coefficient 0..2"}});
+  {"planing_factor",0.0,false,false,"Dynamic planing lift coefficient 0..2"},
+  {"sub_ballast_kg",60.0,false,false,"Initial ballast (kg)"},
+  {"sub_ballast_capacity_kg",260.0,false,false,"Ballast tank capacity (kg)"},
+  {"sub_dry_mass_kg",2350.0,false,false,"Mini-sub dry mass (kg)"},
+  {"sub_forward_thrust_n",2200.0,false,false,"Mini-sub forward thrust (N)"},
+  {"sub_vertical_thrust_n",3200.0,false,false,"Mini-sub vertical thruster force (N)"},
+  {"sub_depth_rating_m",80.0,false,false,"Maximum safe operating depth"}});
  add(std::string(stateType),"Water Runtime Save",{
   {"data",std::string{},false,false,"Versioned runtime-only state"}});
 }
@@ -115,6 +125,10 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
       !keys.insert(key).second)return fail("Water actor key missing, invalid or duplicated");
    if(c.type==oceanType){
     if(++ocean>1||!o.marker)return fail("Exactly one ocean marker is required");
+    const float bottom=float(get(c,"seafloor_z",-40.0));
+    const auto clarity=get(c,"water_clarity",std::int64_t{0});
+    if(!std::isfinite(bottom)||bottom<-5000||bottom>-3||clarity<0||clarity>2)
+      return fail("Invalid ocean seafloor/clarity");
     const auto state=get(c,"sea_state",std::int64_t{1});
     if(state<0||state>2)return fail("Ocean sea state outside 0..2");
     for(const char* n:{"current_x","current_y","wind_x","wind_y"}){
@@ -136,6 +150,19 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
    }else if(c.type==vesselType){
     if(++vessels>8||o.marker)return fail("W2 supports 1..8 visible vessels");
     if(!valid_water_hull(hull_of(c))||!valid_vessel_dynamics(propulsion_of(c)))return fail("Invalid vessel mass, propulsion, sails, planing or probes");
+    if(propulsion_of(c).type==WatercraftType::MiniSub){
+       SubmarineConfig cfg;
+       cfg.dryMassKg=float(get(c,"sub_dry_mass_kg",2350.0));
+       cfg.displacementM3=float(get(c,"displacement_m3",2.35));
+       cfg.ballastCapacityKg=float(get(c,"sub_ballast_capacity_kg",260.0));
+       cfg.forwardThrustN=float(get(c,"sub_forward_thrust_n",2200.0));
+       cfg.verticalThrustN=float(get(c,"sub_vertical_thrust_n",3200.0));
+       cfg.depthRatingM=float(get(c,"sub_depth_rating_m",80.0));
+       cfg.halfHeightM=float(get(c,"draft_m",1.8))*.5F;
+       const float initial=float(get(c,"sub_ballast_kg",60.0));
+       if(!valid_submarine_config(cfg)||!std::isfinite(initial)||initial<0||
+          initial>cfg.ballastCapacityKg)return fail("Invalid mini-sub displacement/ballast/drive");
+    }
     for(const auto* n:{"thrust_newtons","rudder_torque"}){
      const auto v=get(c,n,0.0);if(!std::isfinite(v)||v<0||v>1.e7)
       return fail("Invalid vessel thrust or rudder torque");
@@ -154,10 +181,13 @@ struct WaterGame::Impl {
   float trim{0.6F},wakeCooldown{};
   WaterHydroLoads loads{};
   VesselDriveLoads propLoads{};
+  SubmarineConfig subConfig{};SubmarineState subState{};
+  SubmarineLoads subLoads{};
   SurfLoads surfLoads{};
   unsigned wipeouts{};float wipeoutCooldown{};
  };
  GameWorld& world;OceanField field{};
+ WaterVolumeSettings volumeSettings{};
  Float3 wind{5,8,0};
  PrototypeHud hud{};PrototypeCamera camera{};
  WaterGameTelemetry telemetry{};
@@ -168,11 +198,13 @@ struct WaterGame::Impl {
  unsigned selected{};
  double elapsed{};
  float accumulator{};
- bool active{},lastPause{},lastReset{},lastSwitch{},lastDebug{};
+ bool active{},lastPause{},lastReset{},lastSwitch{},lastDebug{},lastHold{};
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.health=hud.maximumHealth=100;hud.water=true;}
  void publish(Boat& b){(void)world.set_position(b.id,b.state.position);(void)world.set_rotation(b.id,b.state.orientation);}
  void reset(){
-  for(auto& b:boats){b.state=b.origin;b.trim=0.6F;b.wakeCooldown=0;b.wipeouts=0;b.wipeoutCooldown=0;publish(b);}
+  for(auto& b:boats){b.state=b.origin;b.trim=0.6F;b.wakeCooldown=0;b.wipeouts=0;b.wipeoutCooldown=0;
+   b.subState={};b.subState.ballastKg=float(get(b.component,"sub_ballast_kg",60.0));
+   publish(b);}
   field.clear_wakes();spray.clear();
   selected=0;elapsed=0;accumulator=0;hud.phase=PrototypePhase::Playing;
   update_camera(true);update_hud();
@@ -181,9 +213,11 @@ struct WaterGame::Impl {
   const auto& s=boats[selected].state;
   const Float3 forward=rotate(s.orientation,{0,1,0});
   const Float3 target=add(s.position,multiply(forward,4.F));
-  const float follow=boats[selected].drive.type==WatercraftType::Surfboard?
-      9.F:(std::max)(14.F,boats[selected].hull.lengthMetres*1.6F);
-  const Float3 wanted=add(add(s.position,multiply(forward,-follow)),Float3{0,0,follow*.48F});
+  const float follow=boats[selected].drive.type==WatercraftType::MiniSub?
+       8.F:boats[selected].drive.type==WatercraftType::Surfboard?
+       9.F:(std::max)(14.F,boats[selected].hull.lengthMetres*1.6F);
+  const Float3 wanted=add(add(s.position,multiply(forward,-follow)),Float3{0,0,
+     boats[selected].drive.type==WatercraftType::MiniSub?1.3F:follow*.48F});
   const float a=snap?1.F:1.F-std::exp(-8.F*stepDt);
   camera.position=add(camera.position,multiply(subtract(wanted,camera.position),a));
   camera.target=add(camera.target,multiply(subtract(target,camera.target),a));
@@ -204,11 +238,23 @@ struct WaterGame::Impl {
   const float throttle=std::clamp(world.get_axis("move_y"),-1.F,1.F);
   const float steer=std::clamp(world.get_axis("move_x"),-1.F,1.F);
   const float trimAxis=std::clamp(world.get_axis("water_trim"),-1.F,1.F);
+  const float heave=std::clamp(world.get_axis("sub_heave"),-1.F,1.F);
+  const float ballast=std::clamp(world.get_axis("sub_ballast"),-1.F,1.F);
+  const float pitch=std::clamp(world.get_axis("sub_pitch"),-1.F,1.F);
+  const float strafe=std::clamp(world.get_axis("sub_strafe"),-1.F,1.F);
   for(unsigned i=0;i<boats.size();++i){
    auto& boat=boats[i];const auto old=boat.state.position;
    const Float3 f=rotate(boat.state.orientation,{0,1,0});
    if(i==selected)boat.trim=std::clamp(boat.trim+trimAxis*dt*.65F,-1.4F,1.4F);
    const auto waves=field.sample(boat.state.position.x,boat.state.position.y,elapsed);
+   if(boat.drive.type==WatercraftType::MiniSub){
+     const auto volume=sample_water_volume(field,volumeSettings,boat.state.position,elapsed);
+     const SubmarineInput input{i==selected?throttle:0.F,
+                i==selected?strafe:0.F,i==selected?heave:0.F,i==selected?steer:0.F,
+                i==selected?pitch:0.F,i==selected?ballast:0.F};
+     boat.subLoads=evaluate_submarine(boat.subConfig,boat.subState,boat.state,volume,input,dt);
+     step_submarine(boat.state,boat.subConfig,boat.subState,boat.subLoads,dt);
+   }else{
    boat.loads=evaluate_water_hull(field,elapsed,boat.hull,boat.state);
    VesselInput input;
    input.throttle=i==selected?throttle:0;
@@ -231,6 +277,14 @@ struct WaterGame::Impl {
      ++boat.wipeouts;
      boat.state=boat.origin;
      boat.wipeoutCooldown=2.F;
+   }
+   }
+   if(boat.drive.type==WatercraftType::MiniSub){
+     const float floor=volumeSettings.floorZ+boat.subConfig.halfHeightM;
+     if(boat.state.position.z<floor){
+       boat.state.position.z=floor;
+       if(boat.state.linearVelocity.z<0)boat.state.linearVelocity.z=0;
+     }
    }
    if(!finite(boat.state.position)||!finite(boat.state.linearVelocity)||
       !finite(boat.state.orientation)||length(boat.state.position)>100000.F){
@@ -322,10 +376,31 @@ struct WaterGame::Impl {
   telemetry.localFoam=water.foam;telemetry.activeWakes=unsigned(field.wakes().size());
   telemetry.wakeHeight=field.wakes().empty()?0.F:water.height;
   telemetry.type=b.drive.type;
+  if(b.drive.type==WatercraftType::MiniSub){
+    const auto volume=sample_water_volume(field,volumeSettings,b.state.position,elapsed);
+    telemetry.subDepth=volume.depthBelowSurface;
+    telemetry.subTargetDepth=b.subState.targetDepthM;
+    telemetry.subBallastKg=b.subState.ballastKg;
+    telemetry.subBattery=b.subState.battery;
+    telemetry.subDepthHold=b.subState.depthHold;
+    telemetry.subOverDepth=volume.depthBelowSurface>b.subConfig.depthRatingM;
+    telemetry.subPressurePa=volume.pressurePascal;
+  }
   telemetry.activeVessel=selected;telemetry.vesselCount=unsigned(boats.size());
   hud.stats=std::string("WATER ")+watercraft_name(b.drive.type)+
       " SEA "+(field.preset()==OceanPreset::Calm?"CALM":field.preset()==OceanPreset::Breeze?"BREEZE":"STORM");
   hud.prompt="SPEED "+fixed(telemetry.speed)+" M/S ROLL "+fixed(e.y)+" PITCH "+fixed(e.x);
+  if(b.drive.type==WatercraftType::MiniSub){
+    hud.stats="DEEP EXPLORER MINI-SUB";
+    hud.prompt="DEPTH "+fixed(telemetry.subDepth)+" M   BALLAST "+
+       fixed(telemetry.subBallastKg)+" KG   BATT "+fixed(100*telemetry.subBattery)+"%";
+    hud.message=hud.phase==PrototypePhase::Paused?"PAUSED - P RESUME":
+      std::string(telemetry.subDepthHold?"DEPTH HOLD ":"MANUAL ")+
+        fixed(telemetry.subTargetDepth)+" M   "+(telemetry.subOverDepth?"DEPTH RATING EXCEEDED":"PRESSURE OK");
+    hud.vehicleTelemetry="PRESSURE "+fixed(telemetry.subPressurePa/100000.F)+
+       " BAR   W/S THRUST  SPACE/CTRL VERTICAL  Z/X BALLAST  H HOLD";
+    return;
+  }
   hud.message="IMMERSION "+fixed(100*telemetry.immersion)+"% WATER "+fixed(water.height)+
     " M  1..5 BOATS  Q/E TRIM";
   if(b.drive.type==WatercraftType::Surfboard)
@@ -340,10 +415,15 @@ struct WaterGame::Impl {
  }
  void persist(){
   std::ostringstream o;o.imbue(std::locale::classic());o<<std::setprecision(17);
-  o<<"DVE_WATER 3 "<<selected<<' '<<unsigned(hud.phase)<<' '<<elapsed<<' '<<accumulator<<' '<<boats.size();
+  const bool hasSub=std::any_of(boats.begin(),boats.end(),[](const Boat& b){
+    return b.drive.type==WatercraftType::MiniSub;
+  });
+  o<<"DVE_WATER "<<(hasSub?4:3)<<' '<<selected<<' '<<unsigned(hud.phase)<<' '<<elapsed<<' '<<accumulator<<' '<<boats.size();
   for(const auto& b:boats){
    const auto& s=b.state;
    o<<' '<<b.key<<' '<<b.trim<<' '<<b.wakeCooldown;
+   if(hasSub)o<<' '<<b.subState.ballastKg<<' '<<b.subState.battery<<' '
+      <<unsigned(b.subState.depthHold)<<' '<<b.subState.targetDepthM;
    o<<' '<<s.position.x<<' '<<s.position.y<<' '<<s.position.z
     <<' '<<s.orientation.x<<' '<<s.orientation.y<<' '<<s.orientation.z<<' '<<s.orientation.w
     <<' '<<s.linearVelocity.x<<' '<<s.linearVelocity.y<<' '<<s.linearVelocity.z
@@ -380,6 +460,8 @@ bool WaterGame::start(std::string* error){
   if(c.type==oceanType){
    s.oceanKey=get(c,"key",std::string{});
    s.wind={float(get(c,"wind_x",5.0)),float(get(c,"wind_y",8.0)),0};
+   s.volumeSettings.floorZ=float(get(c,"seafloor_z",-40.0));
+   s.volumeSettings.clarity=WaterClarity(get(c,"water_clarity",std::int64_t{0}));
    if(!s.field.set_preset(OceanPreset(get(c,"sea_state",std::int64_t{1})),
           {float(get(c,"current_x",0.0)),float(get(c,"current_y",0.0)),0})){
     if(error)*error="Invalid ocean wave preset";return false;
@@ -404,6 +486,15 @@ bool WaterGame::start(std::string* error){
    }
    Impl::Boat boat;boat.id=o.id;boat.key=get(c,"key",std::string{});boat.component=c;
    boat.hull=hull_of(c);boat.drive=propulsion_of(c);
+   if(boat.drive.type==WatercraftType::MiniSub){
+       boat.subConfig.dryMassKg=float(get(c,"sub_dry_mass_kg",2350.0));
+       boat.subConfig.displacementM3=boat.hull.displacementCubicMetres;
+       boat.subConfig.ballastCapacityKg=float(get(c,"sub_ballast_capacity_kg",260.0));
+       boat.subConfig.forwardThrustN=float(get(c,"sub_forward_thrust_n",2200.0));
+       boat.subConfig.verticalThrustN=float(get(c,"sub_vertical_thrust_n",3200.0));
+       boat.subConfig.depthRatingM=float(get(c,"sub_depth_rating_m",80.0));
+       boat.subConfig.halfHeightM=boat.hull.draftMetres*.5F;
+   }
    boat.origin.position=*s.world.position(o.id);boat.origin.orientation=s.world.transform(o.id)->rotation;
    boat.state=boat.origin;s.boats.push_back(boat);
   }
@@ -426,6 +517,15 @@ void WaterGame::step(float dt){
  if(edge("pause",s.lastPause))s.hud.phase=s.hud.phase==PrototypePhase::Paused?
      PrototypePhase::Playing:PrototypePhase::Paused;
  const bool toggle=edge("interact",s.lastSwitch);
+ if(edge("sub_depth_hold",s.lastHold)){
+   auto& boat=s.boats[s.selected];
+   if(boat.drive.type==WatercraftType::MiniSub){
+     boat.subState.depthHold=!boat.subState.depthHold;
+     if(boat.subState.depthHold)boat.subState.targetDepthM=
+        std::max(0.F,s.field.sample(boat.state.position.x,boat.state.position.y,s.elapsed).height-
+                    boat.state.position.z);
+   }
+ }
  unsigned selection=s.selected;
  if(toggle)selection=(selection+1)%unsigned(s.boats.size());
  for(unsigned n=0;n<s.boats.size();++n)
@@ -442,7 +542,7 @@ void WaterGame::step(float dt){
 }
 bool WaterGame::after_restore(std::string* error){
  auto& s=*impl_;
- const auto fail=[&](){if(error)*error="Invalid or incomplete DVE_WATER 1/2/3 state";return false;};
+ const auto fail=[&](){if(error)*error="Invalid or incomplete DVE_WATER state";return false;};
  std::map<std::string,GameObjectId> vesselIds;GameObjectId rules=0;
  const Component* oceanConfig=nullptr;
  const Component* coastConfig=nullptr;GameObjectId coastId{};
@@ -464,22 +564,34 @@ bool WaterGame::after_restore(std::string* error){
  std::string magic;unsigned version{},selected{},phase{};double elapsed{};
  float accumulator{};
  in>>magic>>version>>selected>>phase>>elapsed>>accumulator;
- if(!in||magic!="DVE_WATER"||(version<1||version>3)||selected>=s.boats.size()||phase>1||
+ if(!in||magic!="DVE_WATER"||(version<1||version>4)||selected>=s.boats.size()||phase>1||
     !std::isfinite(elapsed)||elapsed<0||!std::isfinite(accumulator)||
     accumulator<0||accumulator>=stepDt)return fail();
  unsigned count=unsigned(s.boats.size());
  if(version>=2){in>>count;if(!in||count!=s.boats.size())return fail();}
  std::vector<WaterRigidState> restored(s.boats.size());
  std::vector<float> trims(s.boats.size(),.6F),wakeTimers(s.boats.size(),0.F);
+ std::vector<SubmarineState> subStates(s.boats.size());
  for(unsigned i=0;i<restored.size();++i){
    auto& q=restored[i];
    if(version>=2){
      std::string key;float trim{},timer{};
      in>>key>>trim;
-     if(version==3)in>>timer;
+     if(version>=3)in>>timer;
      if(!in||key!=s.boats[i].key||!std::isfinite(trim)||std::abs(trim)>1.4F||
         !std::isfinite(timer)||timer<0||timer>.161F)return fail();
      trims[i]=trim;wakeTimers[i]=timer;
+     if(version==4){
+       unsigned hold{};
+       in>>subStates[i].ballastKg>>subStates[i].battery>>hold>>subStates[i].targetDepthM;
+       subStates[i].depthHold=hold==1;
+       if(!in||hold>1||!std::isfinite(subStates[i].ballastKg)||
+          subStates[i].ballastKg<0||
+          subStates[i].ballastKg>s.boats[i].subConfig.ballastCapacityKg||
+          !std::isfinite(subStates[i].battery)||subStates[i].battery<0||
+          subStates[i].battery>1||!std::isfinite(subStates[i].targetDepthM)||
+          subStates[i].targetDepthM<0||subStates[i].targetDepthM>5000)return fail();
+     }
    }
    in>>q.position.x>>q.position.y>>q.position.z>>q.orientation.x>>q.orientation.y
       >>q.orientation.z>>q.orientation.w>>q.linearVelocity.x>>q.linearVelocity.y
@@ -491,7 +603,7 @@ bool WaterGame::after_restore(std::string* error){
       length(q.position)>100000||length(q.linearVelocity)>120||length(q.angularVelocity)>4.1F)return fail();
  }
  std::vector<WaterWakeEvent> wakeEvents;
- if(version==3){
+ if(version>=3){
    unsigned n=0;in>>n;
    if(!in||n>WaterWakeField::MaxEvents)return fail();
    for(unsigned i=0;i<n;++i){
@@ -513,8 +625,11 @@ bool WaterGame::after_restore(std::string* error){
   if(found==vesselIds.end()||s.world.has_collision(found->second).value_or(true))return fail();
   s.boats[i].id=found->second;s.boats[i].state=restored[i];
   s.boats[i].trim=trims[i];s.boats[i].wakeCooldown=wakeTimers[i];
+   if(version==4)s.boats[i].subState=subStates[i];
  }
  s.wind={float(get(*oceanConfig,"wind_x",5.0)),float(get(*oceanConfig,"wind_y",8.0)),0};
+ s.volumeSettings.floorZ=float(get(*oceanConfig,"seafloor_z",-40.0));
+ s.volumeSettings.clarity=WaterClarity(get(*oceanConfig,"water_clarity",std::int64_t{0}));
  s.field.clear_coast();
  if(coastConfig){
    const auto pose=s.world.transform(coastId);

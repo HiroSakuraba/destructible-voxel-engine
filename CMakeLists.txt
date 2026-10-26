@@ -151,6 +151,8 @@ add_library(dve_core
     src/racing_game.cpp
     src/water_ocean.cpp
     src/water_hydrodynamics.cpp
+    src/water_volume.cpp
+    src/submarine_dynamics.cpp
     src/water_wake.cpp
     src/water_coast.cpp
     src/water_surf.cpp
@@ -953,6 +955,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_racing.cpp
         src/editor_flying.cpp
         src/editor_water.cpp
+        src/editor_submarine.cpp
         src/editor_prototype.cpp
         src/editor_native_prototype.cpp
         src/editor_material_bake.cpp
@@ -982,6 +985,8 @@ if(DVE_BUILD_EDITOR)
     add_library(dve::editor ALIAS dve_editor)
     add_executable(dve_create_racing apps/dve_create_racing.cpp)
     target_link_libraries(dve_create_racing PRIVATE dve::editor)
+    add_executable(dve_create_submarine apps/dve_create_submarine.cpp)
+    target_link_libraries(dve_create_submarine PRIVATE dve::editor)
     add_executable(dve_create_water apps/dve_create_water.cpp)
     target_link_libraries(dve_create_water PRIVATE dve::editor)
     add_executable(dve_create_flying apps/dve_create_flying.cpp)
@@ -2796,6 +2801,12 @@ if(DVE_BUILD_TESTS)
         add_test(NAME dve_editor_tests COMMAND dve_editor_tests)
 
         if(TARGET dve_player_runtime)
+            add_executable(dve_submarine_game_tests tests/test_submarine_game.cpp)
+            target_link_libraries(dve_submarine_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_submarine_game_tests COMMAND dve_submarine_game_tests)
+            add_executable(dve_submarine_tests tests/test_submarine.cpp)
+            target_link_libraries(dve_submarine_tests PRIVATE dve::core)
+            add_test(NAME dve_submarine_tests COMMAND dve_submarine_tests)
             add_executable(dve_water_surf_tests tests/test_water_surf.cpp)
             target_link_libraries(dve_water_surf_tests PRIVATE dve::core)
             add_test(NAME dve_water_surf_tests COMMAND dve_water_surf_tests)

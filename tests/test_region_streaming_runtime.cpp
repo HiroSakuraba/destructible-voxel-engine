@@ -1,5 +1,6 @@
 #include "dve/region_streaming_runtime.hpp"
 #include <stdexcept>
+#include <future>
 #include <vector>
 using namespace dve;
 static void require(bool condition) { if (!condition) throw std::runtime_error("R2 bridge failed"); }
@@ -19,6 +20,8 @@ int main() {
     config.retryDelayTicks = 1;
     config.enableStaticUnloads = true;
     RegionStreamingRuntime bridge(catalog, world, jobs, 1, config);
+    auto wrong = std::async(std::launch::async, [&] { return bridge.tick({1,0,0,0,0}, 0); }).get();
+    require(wrong.wrongThread && jobs.submissions == 0);
     auto stats = bridge.tick({1,0,0,0,0}, 0);
     require(stats.submitted == 2 && stats.pending == 2);
     require(bridge.tick({1,0,0,0,0}, 1).submitted == 0);

@@ -148,7 +148,7 @@ std::span<const WaterSprayEffect> PrototypeGame::water_spray_effects()const noex
  return impl_->water?impl_->water->spray_effects():std::span<const WaterSprayEffect>{};
 }
 std::span<const RacingVisualEffect> PrototypeGame::racing_visual_effects()const noexcept {
- return impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
+ return impl_->mecha?impl_->mecha->impact_visuals():impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
 }
 void PrototypeGame::look(float x,float y){if(impl_->mecha){impl_->mecha->look(x,y);return;}if(impl_->racing||impl_->flying||impl_->water)return;if(std::isfinite(x)&&std::isfinite(y)&&impl_->hud.phase==PrototypePhase::Playing){impl_->lookYaw+=std::clamp(x,-1.F,1.F);impl_->lookPitch+=std::clamp(y,-1.F,1.F);}}
 bool PrototypeGame::start(std::string* error){

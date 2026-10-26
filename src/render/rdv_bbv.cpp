@@ -347,4 +347,95 @@ void BbvRhiMirror::reset() noexcept {
     capacity_ = 0U;
 }
 
+bool execute_bbv_gpu_trace(rhi::IDevice& device, BbvRhiMirror& mirror,
+                           BbvClipmap& clipmap, std::span<const GpuTraceRay> rays,
+                           std::span<const std::byte> bytecode,
+                           std::vector<BbvGpuHit>& results, std::string* error) {
+    results.clear();
+    if (rays.empty() || rays.size() > 1000000U || bytecode.empty()) {
+        set_error(error, "BBV trace requires 1..1,000,000 rays and nonempty shader bytecode");
+        return false;
+    }
+    if (!mirror.publish(clipmap, error)) return false;
+    BbvTraceConstants constants;
+    constants.minimumBrick = clipmap.minimum_key();
+    constants.rayCount = static_cast<std::uint32_t>(rays.size());
+    constants.gridDimensions = clipmap.dimensions();
+    constants.toroidalOffset = clipmap.toroidal_offset();
+
+    rhi::BufferHandle rayBuffer{}, hitBuffer{}, constantBuffer{};
+    rhi::BindGroupLayoutHandle layout{};
+    rhi::BindGroupHandle group{};
+    rhi::ComputePipelineHandle pipeline{};
+    const auto cleanup = [&]() {
+        device.wait_idle();
+        if (pipeline) (void)device.destroy_compute_pipeline(pipeline);
+        if (group) (void)device.destroy_bind_group(group);
+        if (layout) (void)device.destroy_bind_group_layout(layout);
+        if (constantBuffer) (void)device.destroy_buffer(constantBuffer);
+        if (hitBuffer) (void)device.destroy_buffer(hitBuffer);
+        if (rayBuffer) (void)device.destroy_buffer(rayBuffer);
+    };
+    const std::size_t hitBytes = rays.size() * sizeof(BbvGpuHit);
+    const auto storage = rhi::BufferUsage::Storage | rhi::BufferUsage::CopySource |
+                         rhi::BufferUsage::CopyDestination;
+    rayBuffer = device.create_buffer({rays.size_bytes(), storage,
+        rhi::MemoryDomain::Upload, "BBV trace rays", rhi::ResourceState::ShaderRead}, error);
+    hitBuffer = device.create_buffer({hitBytes, storage,
+        rhi::MemoryDomain::Readback, "BBV trace results", rhi::ResourceState::ShaderWrite}, error);
+    constantBuffer = device.create_buffer({sizeof(constants),
+        rhi::BufferUsage::Constant | rhi::BufferUsage::CopyDestination,
+        rhi::MemoryDomain::Upload, "BBV trace constants", rhi::ResourceState::ShaderRead}, error);
+    if (!rayBuffer || !hitBuffer || !constantBuffer ||
+        !device.write_buffer(rayBuffer, 0U, std::as_bytes(rays), error) ||
+        !device.write_buffer(constantBuffer, 0U, std::as_bytes(std::span(&constants, 1)), error)) {
+        cleanup();
+        return false;
+    }
+    // Matches shaders/compiled/ao convention:
+    // b0 => binding 0, t0/t1 => 16/17, u0 => 32 in descriptor set 0.
+    rhi::BindGroupLayoutDesc layoutDesc;
+    layoutDesc.bindings = {
+        {0U, rhi::BindingType::UniformBuffer, rhi::ShaderStage::Compute},
+        {16U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Compute},
+        {17U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Compute},
+        {32U, rhi::BindingType::StorageBufferReadWrite, rhi::ShaderStage::Compute}
+    };
+    layout = device.create_bind_group_layout(layoutDesc, error);
+    if (!layout) { cleanup(); return false; }
+    rhi::BindGroupDesc bindDesc;
+    bindDesc.layout = layout;
+    bindDesc.entries = {
+        {0U, constantBuffer, {}, 0U, sizeof(constants), {}},
+        {16U, mirror.buffer(), {}, 0U, clipmap.bytes(), {}},
+        {17U, rayBuffer, {}, 0U, rays.size_bytes(), {}},
+        {32U, hitBuffer, {}, 0U, hitBytes, {}}
+    };
+    group = device.create_bind_group(bindDesc, error);
+    if (!group) { cleanup(); return false; }
+    rhi::ComputePipelineDesc pipelineDesc;
+    pipelineDesc.debugName = "RdvBbvTrace";
+    pipelineDesc.bytecode.assign(bytecode.begin(), bytecode.end());
+    pipelineDesc.bindGroupLayouts.push_back(layout);
+    pipelineDesc.threadsX = 64U;
+    pipeline = device.create_compute_pipeline(pipelineDesc, error);
+    if (!pipeline) { cleanup(); return false; }
+    auto commands = device.begin_commands(rhi::QueueKind::Compute, "RdvBbvTrace", error);
+    if (!commands || !device.bind_compute_bind_group(commands, 0U, group, error) ||
+        !device.dispatch(commands, pipeline,
+                         static_cast<std::uint32_t>((rays.size() + 63U) / 64U),
+                         1U, 1U, error)) {
+        cleanup();
+        return false;
+    }
+    const auto fence = device.submit(commands, error);
+    if (!fence || !device.wait(fence, error)) { cleanup(); return false; }
+    results.resize(rays.size());
+    const bool ok = device.read_buffer(hitBuffer, 0U,
+                                       std::as_writable_bytes(std::span(results)), error);
+    if (!ok) results.clear();
+    cleanup();
+    return ok;
+}
+
 } // namespace dve::render::rdv

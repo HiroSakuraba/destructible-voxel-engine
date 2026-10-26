@@ -135,7 +135,10 @@ coordinates directly into occupancy indexing.
 - Frame-plan integration: multiple viewports, camera cuts, empty edit list
   revisions, complete dirty keys, viewport retirement, upload-byte budgets
 - Zero-length rays, invalid budgets, validation and resource teardown
-- Native Vulkan: 256 seeded rays, opposing entry directions and toroidal scrolling
+- Scrolled clipmaps equal freshly centred clipmaps across negative keys and offset wrap
+- Dirty-range coalescing (adjacent bricks -> one write, separated bricks -> separate writes)
+- Native Vulkan: opposing entry directions, 256 seeded rays, toroidal scrolling and the
+  multi-phase sparse-scene parity suite described below
 
 Run:
 ```sh
@@ -161,25 +164,41 @@ ray-tracing speed or driver correctness. Benchmark frame and dispatch time separ
 
 ### Native shader readback (opt-in)
 
-Compile with DVE's ambient-occlusion SPIR-V descriptor shifts:
+The shader pins its Vulkan bindings with `[[vk::binding]]` (set 0: `b0` -> 0, `t0/t1` -> 16/17,
+`u0` -> 32, DVE's ambient-occlusion convention) whenever it is compiled for SPIR-V by DXC
+(`__spirv__`) or with `-DRDV_VK_BINDINGS=1` for glslang. Do not rely on glslang's
+`--shift-texture-binding/--shift-uav-binding` for this shader: they do not apply to
+`ByteAddressBuffer`/`StructuredBuffer` resources, which silently left `gBbvBricks` and
+`gBbvResults` at binding 0 and the dispatch returned all-zero results.
+
 ```sh
 dxc -spirv -fspv-target-env=vulkan1.1 -fvk-b-shift 0 0 \
     -fvk-t-shift 16 0 -fvk-u-shift 32 0 \
     -T cs_6_0 -E main -Fo /tmp/rdv_bbv_trace.spv shaders/rdv_bbv_trace.hlsl
-DVE_RDV_TRACE_SPV=/tmp/rdv_bbv_trace.spv ctest --test-dir build \
-    -R '^dve_rdv_bbv_tests$' --output-on-failure
+# or, without DXC:
+glslangValidator -D -V --target-env vulkan1.2 -S comp -e main --hlsl-offsets \
+    -DRDV_VK_BINDINGS=1 -o /tmp/rdv_bbv_trace.spv shaders/rdv_bbv_trace.hlsl
+DVE_REQUIRE_VULKAN=1 DVE_RDV_TRACE_SPV=/tmp/rdv_bbv_trace.spv \
+    ctest --test-dir build -R '^dve_rdv_bbv_tests$' --output-on-failure
 ```
 This opt-in path requires `DVE_ENABLE_VULKAN_BUFFER_BACKEND=ON` and a working
-Vulkan device (software ICDs can run shader validation). The test checks two
-opposing rays, normals and distances, including a negative-direction ray.
+Vulkan device (Mesa lavapipe is enough). With `DVE_REQUIRE_VULKAN` set the test fails,
+rather than skips, when the shader path or Vulkan backend is missing. Without
+`DVE_RDV_TRACE_SPV` the native section is skipped.
+
+Native checks: two opposing rays (normals, distances, negative direction); 256 seeded rays;
+toroidal scroll; and a larger sparse scene (6x4x5 clipmap, bricks at negative keys, carved
+voxels, axis-aligned rays, eight scrolls that wrap the toroidal offset on each axis, an
+incremental edit, teleport to empty space and back) with 600 rays per phase compared against
+the CPU oracle for hit, voxel, normal and distance.
 
 ### Automated native Vulkan lane
 
 `.github/workflows/rdv-bbv.yml` compiles `rdv_bbv_trace.hlsl` to SPIR-V via
-glslangValidator, validates it with spirv-val, installs Mesa lavapipe,
-builds `dve_rdv_bbv_tests` with the Vulkan RHI, and runs actual shader
-hit/normal/distance readback comparisons. This is independent of the usual
-Null-RHI path; a job failure does not count as GPU acceptance.
+glslangValidator, validates it with spirv-val, asserts the descriptor bindings in the
+disassembly, installs Mesa lavapipe, builds `dve_rdv_bbv_tests` with the Vulkan RHI, and
+runs the shader hit/normal/distance readback comparisons with `DVE_REQUIRE_VULKAN=1`.
+This is independent of the usual Null-RHI path.
 
 `BbvViewportBridge` is available for renderer integration, but it is not
 silently installed into the default scene renderer. RDV-specific rendering

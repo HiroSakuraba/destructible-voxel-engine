@@ -232,14 +232,14 @@ std::optional<BbvHit> BbvClipmap::trace(Float3 origin, Float3 direction,
         }
         const float t0 = (low[axis] - p) / d;
         const float t1 = (high[axis] - p) / d;
-        const float nearT = std::min(t0, t1);
-        const float farT = std::max(t0, t1);
+        const float nearT = (std::min)(t0, t1);
+        const float farT = (std::max)(t0, t1);
         if (nearT > entry) {
             entry = nearT;
             entryNormal = {};
             set_axis(entryNormal, axis, d > 0.0F ? -1 : 1);
         }
-        exit = std::min(exit, farT);
+        exit = (std::min)(exit, farT);
         if (entry > exit) return std::nullopt;
     }
     if (entry > maxDistance) return std::nullopt;
@@ -273,7 +273,7 @@ std::optional<BbvHit> BbvClipmap::trace(Float3 origin, Float3 direction,
         }
         if (axis < 0 || !std::isfinite(next) || next > exit || next > maxDistance) break;
         if (next + 1.0e-5F < t) break; // reject floating-point non-progress
-        t = std::max(t, next);
+        t = (std::max)(t, next);
         const int delta = float_axis(unit, axis) > 0.0F ? 1 : -1;
         const auto old = static_cast<std::int32_t>(int_axis(voxel, axis));
         set_axis(voxel, axis, old + delta);

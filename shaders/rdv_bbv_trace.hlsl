@@ -22,10 +22,19 @@ struct BbvResult {
     uint padding2;
 };
 
-ByteAddressBuffer gBbvBricks : register(t0);
-StructuredBuffer<BbvRay> gBbvRays : register(t1);
-RWStructuredBuffer<BbvResult> gBbvResults : register(u0);
-cbuffer BbvConstants : register(b0) {
+// Explicit Vulkan bindings (set 0): b0 -> 0, t0/t1 -> 16/17, u0 -> 32. These equal DVE's
+// -fvk-{b,t,u}-shift 0/16/32 convention but are spelled out so glslang (whose per-class shifts
+// cannot place t-class and u-class structured buffers independently, which left gBbvBricks at
+// binding 0 and gBbvResults unshifted) and DXC emit identical layouts. DXIL builds ignore them.
+#if defined(__spirv__) || defined(RDV_VK_BINDINGS)
+#define RDV_BIND(B) [[vk::binding(B, 0)]]
+#else
+#define RDV_BIND(B)
+#endif
+RDV_BIND(16) ByteAddressBuffer gBbvBricks : register(t0);
+RDV_BIND(17) StructuredBuffer<BbvRay> gBbvRays : register(t1);
+RDV_BIND(32) RWStructuredBuffer<BbvResult> gBbvResults : register(u0);
+RDV_BIND(0) cbuffer BbvConstants : register(b0) {
     int3 gMinimumBrick;
     uint gRayCount;
     int3 gGridDimensions;
@@ -103,7 +112,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     int3 voxel = int3(floor(p));
     float t = entry;
     const uint limit = min(gMaximumSteps, 65536u);
-    [loop] for (uint step = 0; step < limit && t <= exit; ++step) {
+    [loop] for (uint iteration = 0; iteration < limit && t <= exit; ++iteration) {
         result.voxelSteps++;
         if (any(voxel < int3(gridMin)) || any(voxel >= int3(gridMax))) break;
         if (IsOccupied(voxel, result.brickLookups)) {

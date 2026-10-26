@@ -56,11 +56,22 @@ jobs:
         run: cmake --build build-rdv --target dve_rdv_bbv_tests --parallel 4
       - name: Compile and validate GPU shader
         run: |
+          # DVE's Vulkan convention is set 0: b0 -> 0, t# -> 16+#, u# -> 32+#. The shader pins
+          # these with [[vk::binding]] (enabled by RDV_VK_BINDINGS for glslang) because glslang's
+          # --shift-* flags cannot place t-class and u-class structured buffers independently.
           glslangValidator -D -V --target-env vulkan1.2 -S comp -e main \
-            --hlsl-offsets --shift-texture-binding 16 \
-            --shift-uav-binding 32 \
+            --hlsl-offsets -DRDV_VK_BINDINGS=1 \
             -o "$RUNNER_TEMP/rdv_bbv_trace.spv" shaders/rdv_bbv_trace.hlsl
           spirv-val --target-env vulkan1.2 "$RUNNER_TEMP/rdv_bbv_trace.spv"
+          spirv-dis "$RUNNER_TEMP/rdv_bbv_trace.spv" > "$RUNNER_TEMP/rdv_bbv_trace.spvasm"
+          for want in gBbvBricks_0:16 gBbvRays_0:17 gBbvResults_0:32; do
+            name="${want%%:*}"; binding="${want##*:}"
+            grep -Eq "OpDecorate %${name} Binding ${binding}$" "$RUNNER_TEMP/rdv_bbv_trace.spvasm" || {
+              echo "::error::${name} is not at descriptor binding ${binding}"
+              grep -E "Binding" "$RUNNER_TEMP/rdv_bbv_trace.spvasm"
+              exit 1
+            }
+          done
       - name: Select software ICD and inspect Vulkan capabilities
         run: |
           echo "Installed Vulkan ICD manifests:"
@@ -71,8 +82,11 @@ jobs:
             exit 1
           fi
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
           VK_ICD_FILENAMES="$ICD" vulkaninfo --summary
       - name: Run native GPU ray query and CPU oracle parity
         env:
           DVE_RDV_TRACE_SPV: ${{ runner.temp }}/rdv_bbv_trace.spv
+          # The test fails (instead of silently skipping) when no Vulkan device or shader is found.
+          DVE_REQUIRE_VULKAN: "1"
         run: ctest --test-dir build-rdv -R '^dve_rdv_bbv_tests$' --output-on-failure

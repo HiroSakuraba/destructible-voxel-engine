@@ -13,7 +13,9 @@
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace {
 using namespace dve;
@@ -208,6 +210,283 @@ void test_viewport_frame_bridge() {
           "viewport bridge leaked GPU allocations");
 }
 
+#ifdef DVE_RDV_HAS_VULKAN
+std::vector<std::byte> load_trace_shader(const char* path) {
+    std::ifstream stream(path, std::ios::binary);
+    check(bool(stream), "RDV GPU shader file cannot be opened");
+    const std::string binary((std::istreambuf_iterator<char>(stream)), {});
+    check(!binary.empty() && binary.size() % 4U == 0U, "RDV GPU SPIR-V file is malformed");
+    std::vector<std::byte> shader;
+    shader.reserve(binary.size());
+    for (unsigned char c : binary) shader.push_back(static_cast<std::byte>(c));
+    return shader;
+}
+
+// Compares every ray of one GPU dispatch against the CPU oracle: hit/miss, voxel, normal, distance.
+// On failure the message names the case, ray and both payloads so a CI log is self-diagnosing.
+std::size_t compare_gpu_to_cpu(const BbvClipmap& clipmap, std::span<const GpuTraceRay> rays,
+                               const std::vector<BbvGpuHit>& hits, const char* label) {
+    check(hits.size() == rays.size(), "native GPU BBV returned the wrong number of results");
+    std::size_t hitCount = 0U;
+    for (std::size_t i = 0; i < rays.size(); ++i) {
+        const auto reference = clipmap.trace(rays[i].origin, rays[i].direction, rays[i].maxDistance);
+        const bool gpuHit = hits[i].hit != 0U;
+        bool ok = reference.has_value() == gpuHit;
+        if (ok && reference) {
+            ok = reference->voxel == hits[i].voxel && reference->normal == hits[i].normal &&
+                 std::abs(reference->distance - hits[i].distance) < 1.0e-3F;
+            ++hitCount;
+        }
+        if (!ok) {
+            std::string message = std::string("native GPU BBV parity failed [") + label +
+                "] ray " + std::to_string(i) + ": cpu=";
+            if (reference) {
+                message += "hit v(" + std::to_string(reference->voxel.x) + "," +
+                    std::to_string(reference->voxel.y) + "," + std::to_string(reference->voxel.z) +
+                    ") n(" + std::to_string(reference->normal.x) + "," +
+                    std::to_string(reference->normal.y) + "," + std::to_string(reference->normal.z) +
+                    ") d=" + std::to_string(reference->distance);
+            } else {
+                message += "miss";
+            }
+            message += " gpu=";
+            if (gpuHit) {
+                message += "hit v(" + std::to_string(hits[i].voxel.x) + "," +
+                    std::to_string(hits[i].voxel.y) + "," + std::to_string(hits[i].voxel.z) +
+                    ") n(" + std::to_string(hits[i].normal.x) + "," +
+                    std::to_string(hits[i].normal.y) + "," + std::to_string(hits[i].normal.z) +
+                    ") d=" + std::to_string(hits[i].distance);
+            } else {
+                message += "miss (steps=" + std::to_string(hits[i].voxelSteps) +
+                    ", lookups=" + std::to_string(hits[i].brickLookups) + ")";
+            }
+            throw std::runtime_error(message);
+        }
+    }
+    return hitCount;
+}
+
+// A larger sparse scene than the minimal two-ray check: bricks on both sides of the origin
+// (negative brick keys), carved voxels, a non-cubic clipmap, scrolls that wrap the toroidal
+// offset on every axis in both directions, an incremental edit, and a teleport. Every phase
+// is checked against the CPU oracle with hundreds of rays that start inside and outside the
+// volume, so a wrong physical slot, byte address or stale slab shows up as a mismatch.
+void test_native_gpu_scene_parity(const std::vector<std::byte>& shader) {
+    VoxelObject object(8128);
+    std::uint32_t seed = 0x51F15EEDU;
+    const auto next = [&] {
+        seed = seed * 1664525U + 1013904223U;
+        return seed >> 8U;
+    };
+    for (int z = -5; z <= 4; ++z)
+        for (int y = -4; y <= 3; ++y)
+            for (int x = -6; x <= 5; ++x)
+                if (next() % 100U < 22U)
+                    object.fill_brick({x, y, z}, static_cast<MaterialId>(1U + next() % 6U));
+    for (int i = 0; i < 400; ++i)
+        (void)object.set_voxel({int(next() % 96U) - 48, int(next() % 64U) - 32,
+                                int(next() % 80U) - 40}, kAirMaterial);
+    PackedBrickmapScene packed;
+    packed.rebuild(object);
+
+    rhi::VulkanDevice gpu;
+    if (gpu.status() != rhi::DeviceStatus::Ready)
+        throw std::runtime_error(std::string("Vulkan device initialization failed: ") +
+                                 std::string(gpu.device_loss_reason()));
+    BbvClipmap clipmap({6, 4, 5});
+    BbvRhiMirror mirror(gpu);
+    std::string error;
+    std::vector<BbvGpuHit> hits;
+
+    const auto make_rays = [&](std::size_t count) {
+        std::vector<GpuTraceRay> rays(count);
+        const Int3 d = clipmap.dimensions();
+        const BrickKey m = clipmap.minimum_key();
+        for (auto& ray : rays) {
+            // Origins span the clipmap plus a margin so some rays enter from outside.
+            ray.origin = {
+                float(m.x * 8) - 12.0F + float(next() % 100000U) * 0.00001F * float(d.x * 8 + 24),
+                float(m.y * 8) - 12.0F + float(next() % 100000U) * 0.00001F * float(d.y * 8 + 24),
+                float(m.z * 8) - 12.0F + float(next() % 100000U) * 0.00001F * float(d.z * 8 + 24)};
+            ray.direction = {float(int(next() % 2001U) - 1000),
+                             float(int(next() % 2001U) - 1000),
+                             float(int(next() % 2001U) - 1000)};
+            if (length_squared(ray.direction) < 1.0F) ray.direction = {1.0F, 0.25F, -0.5F};
+            ray.maxDistance = 90.0F;
+        }
+        // Axis-aligned rays exercise the zero-component branches on every axis.
+        for (std::size_t i = 0; i < 6U && i < rays.size(); ++i) {
+            rays[i].direction = {0.0F, 0.0F, 0.0F};
+            (&rays[i].direction.x)[i / 2U] = (i % 2U) ? -1.0F : 1.0F;
+        }
+        return rays;
+    };
+    const auto run_phase = [&](const char* label, bool mayBeEmpty = false) {
+        const auto rays = make_rays(600U);
+        check(execute_bbv_gpu_trace(gpu, mirror, clipmap, rays, shader, hits, &error),
+              error.c_str());
+        const auto hitCount = compare_gpu_to_cpu(clipmap, rays, hits, label);
+        // A suite where nothing is ever hit (or everything is) proves nothing about occupancy.
+        check(mayBeEmpty ? hitCount == 0U : (hitCount > 60U && hitCount < 590U), ("native GPU BBV scene produced a degenerate hit ratio in " + std::string(label) + ": " + std::to_string(hitCount) + "/600").c_str());
+    };
+
+    (void)clipmap.recenter({0, 0, 0}, packed);
+    run_phase("initial negative-coordinate window");
+    check(mirror.readback_matches(clipmap, &error), error.c_str());
+
+    const BrickKey centers[] = {{-1, 0, 0}, {-3, -1, 0}, {-3, -1, -2}, {2, 1, 1}, {3, 2, -1},
+                                {-5, -3, 3}, {0, 0, 0}, {1, 0, 0}};
+    for (std::size_t i = 0; i < std::size(centers); ++i) {
+        (void)clipmap.recenter(centers[i], packed);
+        const std::string label = "scroll " + std::to_string(i);
+        run_phase(label.c_str());
+    }
+    check(mirror.readback_matches(clipmap, &error), error.c_str());
+
+    // Incremental edit: carve one voxel in a retained brick; the GPU must see only that change.
+    const BrickKey edited{0, 0, 0};
+    object.fill_brick(edited, 5);
+    (void)object.set_voxel({3, 3, 3}, kAirMaterial);
+    packed.rebuild(object);
+    (void)clipmap.refresh(std::span(&edited, 1), packed);
+    run_phase("incremental edit");
+    check(mirror.readback_matches(clipmap, &error), error.c_str());
+
+    // Teleport far outside the scene: every slot is replaced and no stale occupancy may remain.
+    (void)clipmap.recenter({-20, 9, 14}, packed);
+    run_phase("teleport to empty space", true);
+    check(mirror.readback_matches(clipmap, &error), error.c_str());
+    // ...and back into the populated region.
+    (void)clipmap.recenter({-4, -2, -3}, packed);
+    run_phase("teleport back");
+    check(mirror.readback_matches(clipmap, &error), error.c_str());
+    mirror.reset();
+}
+#endif
+
+// A clipmap that has been scrolled (including toward negative brick keys and past the
+// toroidal wrap on each axis) must be indistinguishable from one centred there from scratch.
+void test_scroll_matches_fresh_clipmap() {
+    VoxelObject object(311);
+    std::uint32_t seed = 0xD15EA5E5U;
+    const auto next = [&] {
+        seed = seed * 1664525U + 1013904223U;
+        return seed >> 8U;
+    };
+    for (int z = -6; z <= 5; ++z)
+        for (int y = -6; y <= 5; ++y)
+            for (int x = -6; x <= 5; ++x)
+                if (next() % 100U < 30U)
+                    object.fill_brick({x, y, z}, static_cast<MaterialId>(1U + next() % 5U));
+    for (int i = 0; i < 300; ++i)
+        (void)object.set_voxel({int(next() % 96U) - 48, int(next() % 96U) - 48,
+                                int(next() % 96U) - 48}, kAirMaterial);
+    PackedBrickmapScene source;
+    source.rebuild(object);
+
+    rhi::NullDevice device;
+    BbvClipmap scrolled({3, 4, 5});
+    BbvRhiMirror mirror(device);
+    std::string error;
+    (void)scrolled.recenter({0, 0, 0}, source);
+    check(mirror.publish(scrolled, &error), error.c_str());
+    const BrickKey path[] = {{-1, 0, 0}, {-2, -1, 0}, {-2, -1, -1}, {-5, -2, -3}, {-4, -2, -3},
+                             {1, 3, 2}, {0, 0, 0}, {7, -4, 1}, {-3, -3, -3}, {-3, -3, -2},
+                             {-3, -4, -2}, {-4, -4, -2}, {2, 0, 1}};
+    for (const BrickKey center : path) {
+        (void)scrolled.recenter(center, source);
+        check(mirror.publish(scrolled, &error), error.c_str());
+        check(mirror.readback_matches(scrolled, &error), error.c_str());
+
+        BbvClipmap fresh({3, 4, 5});
+        (void)fresh.recenter(center, source);
+        check(fresh.minimum_key() == scrolled.minimum_key(), "scrolled minimum key diverged");
+        const BrickKey low = fresh.minimum_key();
+        for (int z = 0; z < 5 * 8; ++z)
+            for (int y = 0; y < 4 * 8; ++y)
+                for (int x = 0; x < 3 * 8; ++x) {
+                    const Int3 voxel{low.x * 8 + x, low.y * 8 + y, low.z * 8 + z};
+                    check(fresh.occupied_at(voxel) == scrolled.occupied_at(voxel),
+                          "scrolled clipmap disagrees with a freshly centred clipmap");
+                }
+        // Voxels one brick outside the window must be invisible on both.
+        check(!scrolled.occupied_at({low.x * 8 - 1, low.y * 8, low.z * 8}) &&
+              !scrolled.occupied_at({low.x * 8, low.y * 8 + 4 * 8, low.z * 8}),
+              "scrolled clipmap exposes bricks outside its window");
+    }
+}
+
+// Dirty slots are written as the fewest contiguous byte ranges, never one write per brick.
+void test_dirty_ranges_are_coalesced() {
+    VoxelObject object(77);
+    for (int x = 0; x < 4; ++x) object.fill_brick({x, 0, 0}, 3);
+    PackedBrickmapScene source;
+    source.rebuild(object);
+    rhi::NullDevice device;
+    BbvRhiMirror mirror(device);
+    BbvClipmap map({4, 2, 2});
+    std::string error;
+    (void)map.recenter({2, 1, 1}, source);   // window x:[0,3] y:[0,1] z:[0,1]
+    check(mirror.publish(map, &error), error.c_str());
+    check(mirror.upload_ranges() == 1U, "initial upload should be one range");
+
+    // Four bricks that are adjacent in the physical buffer -> exactly one write.
+    for (int x = 0; x < 4; ++x) (void)object.set_voxel({x * 8, 0, 0}, kAirMaterial);
+    source.rebuild(object);
+    std::vector<BrickKey> keys;
+    for (int x = 0; x < 4; ++x) keys.push_back({x, 0, 0});
+    check(map.refresh(keys, source).changedBricks == 4U, "adjacent edits not reconciled");
+    const auto beforeRanges = mirror.upload_ranges();
+    const auto beforeBytes = mirror.bytes_uploaded();
+    check(mirror.publish(map, &error), error.c_str());
+    check(mirror.upload_ranges() - beforeRanges == 1U &&
+          mirror.bytes_uploaded() - beforeBytes == 4U * sizeof(BbvBrick),
+          "four adjacent dirty bricks were not coalesced into one range");
+
+    // Two separated bricks -> two writes of one record each; no gap bytes are re-sent.
+    object.fill_brick({0, 0, 0}, 3);
+    object.fill_brick({3, 0, 0}, 3);
+    source.rebuild(object);
+    const BrickKey separated[] = {{0, 0, 0}, {3, 0, 0}};
+    check(map.refresh(separated, source).changedBricks == 2U, "separated edits not reconciled");
+    const auto rangesBefore = mirror.upload_ranges();
+    const auto bytesBefore = mirror.bytes_uploaded();
+    check(mirror.publish(map, &error), error.c_str());
+    check(mirror.upload_ranges() - rangesBefore == 2U &&
+          mirror.bytes_uploaded() - bytesBefore == 2U * sizeof(BbvBrick),
+          "separated dirty bricks must not upload the clean bricks between them");
+    check(mirror.readback_matches(map, &error), error.c_str());
+}
+
+void test_bridge_viewport_limit() {
+    VoxelObject object(902);
+    object.fill_brick({0, 0, 0}, 4);
+    PackedBrickmapScene source;
+    source.rebuild(object);
+    rhi::NullDevice device;
+    BbvViewportBridge bridge(device, {2, 2, 2});
+    dve::render::CameraFramePlan frame;
+    std::string error;
+    for (camera::CameraViewportId id = 1; id <= 16; ++id) {
+        dve::render::CameraViewportRenderPlan view;
+        view.frame.viewport.id = id;
+        view.frame.pose.position = {1, 1, 1};
+        frame.viewports.push_back(view);
+    }
+    check(bridge.advance(frame, source, 1.0F, 1U, {}, false, {}, &error), error.c_str());
+    check(bridge.size() == 16U, "sixteen viewports must all be tracked");
+    dve::render::CameraViewportRenderPlan extra;
+    extra.frame.viewport.id = 17;
+    extra.frame.pose.position = {1, 1, 1};
+    frame.viewports.push_back(extra);
+    check(!bridge.advance(frame, source, 1.0F, 1U, {}, false, {}, &error) && bridge.size() == 16U &&
+          !bridge.buffer(17), "a seventeenth viewport must be rejected without disturbing the first sixteen");
+    // Retiring down to a single view releases the other fifteen allocations.
+    frame.viewports.resize(1);
+    check(bridge.advance(frame, source, 1.0F, 1U, {}, false, {}, &error), error.c_str());
+    check(bridge.size() == 1U && !bridge.buffer(2), "retired viewports kept their buffers");
+}
+
 void test_validation() {
     try { BbvClipmap wrong({0, 4, 4}); (void)wrong; throw std::runtime_error("bad dimensions accepted"); }
     catch (const std::invalid_argument&) {}
@@ -243,17 +522,14 @@ void test_validation() {
     check(mirror.readback_matches(map, &error), error.c_str());
 
 #ifdef DVE_RDV_HAS_VULKAN
-    // Opt-in real GPU parity: compile shader with -fvk-b-shift 0 0,
-    // -fvk-t-shift 16 0, -fvk-u-shift 32 0 and set DVE_RDV_TRACE_SPV.
-    if (const char* path = std::getenv("DVE_RDV_TRACE_SPV")) {
-        std::ifstream stream(path, std::ios::binary);
-        check(bool(stream), "RDV GPU shader file cannot be opened");
-        const std::string binary((std::istreambuf_iterator<char>(stream)), {});
-        check(!binary.empty() && binary.size() % 4U == 0U,
-              "RDV GPU SPIR-V file is malformed");
-        std::vector<std::byte> shader;
-        shader.reserve(binary.size());
-        for (unsigned char c : binary) shader.push_back(static_cast<std::byte>(c));
+    // Opt-in real GPU parity: compile shaders/rdv_bbv_trace.hlsl to SPIR-V with descriptor
+    // bindings b0=0, t0/t1=16/17, u0=32 (see docs/RDV_BBV_FOUNDATION.md) and set
+    // DVE_RDV_TRACE_SPV. DVE_REQUIRE_VULKAN=1 turns a missing shader/device into a failure.
+    const char* path = std::getenv("DVE_RDV_TRACE_SPV");
+    if (!path && std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
+        throw std::runtime_error("DVE_REQUIRE_VULKAN is set but DVE_RDV_TRACE_SPV names no compiled shader");
+    if (path) {
+        const std::vector<std::byte> shader = load_trace_shader(path);
 
         VoxelObject geometry(444);
         geometry.fill_brick({0, 0, 0}, 7);
@@ -334,7 +610,11 @@ void test_validation() {
                 check(reference->voxel == hits[i].voxel,
                       "native GPU BBV toroidal scroll mapped the wrong occupied slot");
         }
+        test_native_gpu_scene_parity(shader);
     }
+#else
+    if (std::getenv("DVE_REQUIRE_VULKAN") != nullptr)
+        throw std::runtime_error("DVE_REQUIRE_VULKAN is set but the Vulkan RHI backend was not built");
 #endif
 }
 } // namespace
@@ -343,6 +623,9 @@ int main() {
     try {
         test_clip_map_publication_and_rays();
         test_viewport_frame_bridge();
+        test_bridge_viewport_limit();
+        test_scroll_matches_fresh_clipmap();
+        test_dirty_ranges_are_coalesced();
         test_validation();
         std::cout << "dve_rdv_bbv_tests: PASS\n";
         return 0;

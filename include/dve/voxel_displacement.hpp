@@ -25,6 +25,7 @@
 #include <optional>
 
 #include "dve/asset_cooker.hpp"
+#include "dve/material_surface_detail.hpp"
 #include "dve/types.hpp"
 
 namespace dve {
@@ -40,8 +41,13 @@ namespace dve {
 
 // The displacement depth actually used, in metres: the material's, capped at half a voxel.
 [[nodiscard]] float voxel_displacement_depth(const VoxelMaterialDefinition& material, float metersPerVoxel) noexcept;
+// The height source: the height map, or else the material's procedural surface pattern
+// (surface_pattern_height, object space), which carves as a solid texture.
+[[nodiscard]] inline bool material_has_height_source(const VoxelMaterialDefinition& m) noexcept {
+    return m.heightMap != nullptr || surface_pattern_is_height_source(m.surfaceDetail);
+}
 [[nodiscard]] inline bool material_has_displacement(const VoxelMaterialDefinition& m) noexcept {
-    return m.heightMap != nullptr && m.displacementDepthMeters > 0.0F;
+    return material_has_height_source(m) && m.displacementDepthMeters > 0.0F;
 }
 
 struct VoxelDisplacedHit {

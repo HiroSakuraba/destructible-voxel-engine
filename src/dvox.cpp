@@ -482,6 +482,7 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
             throw std::runtime_error("invalid preset origin");
     }
     if(minor>=7U){const auto pattern=reader.read_u8(),space=reader.read_u8();material.surfaceDetail.pattern=SurfacePattern(pattern);material.surfaceDetail.space=SurfaceDetailSpace(space);material.surfaceDetail.seed=reader.read_u32();
+        if(minor<12U&&surface_pattern_is_solid_texture(material.surfaceDetail.pattern))throw std::runtime_error("solid-texture surface patterns need DVOX 1.12");
         std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)v=reader.read_float();set_surface_detail_values(material.surfaceDetail,values);
         if(!material_surface_detail_valid(material.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");
         if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && (material.surfaceDetail.space==SurfaceDetailSpace::UV0 || material.surfaceDetail.space==SurfaceDetailSpace::UV1))throw std::runtime_error("voxel materials cannot use UV-space surface detail");}
@@ -564,7 +565,10 @@ bool write_dvox(
                                           [](const VoxelMaterialDefinition& m) { return material_has_textures(m); });
         const bool displacement = std::any_of(asset.materials.begin(), asset.materials.end(),
                                               [](const VoxelMaterialDefinition& m) { return material_has_displacement_settings(m); });
-        const std::uint16_t versionMinor = displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        // 1.12: the solid-texture surface patterns (no new fields).
+        const bool solid = std::any_of(asset.materials.begin(), asset.materials.end(),
+                                       [](const VoxelMaterialDefinition& m) { return surface_pattern_is_solid_texture(m.surfaceDetail.pattern); });
+        const std::uint16_t versionMinor = solid ? 12 : displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) {
@@ -659,7 +663,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 11) {
+        if (major != kVersionMajor || minor > 12) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

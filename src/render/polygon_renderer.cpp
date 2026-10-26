@@ -876,8 +876,8 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             if((std::max)({ax,ay,az})>0.999F){
                 const Float3 face=ax>=ay&&ax>=az?Float3{local.x>0?1.0F:-1.0F,0,0}:(ay>=az?Float3{0,local.y>0?1.0F:-1.0F,0}:Float3{0,0,local.z>0?1.0F:-1.0F});
                 const float footprint=(std::max)(length(textureLod.worldDx),length(textureLod.worldDy))*units;
-                const float level=(std::max)(0.0F,std::log2((std::max)(footprint,1.0e-9F)*static_cast<float>((std::max)(effective.heightMap->width,effective.heightMap->height))/
-                    (std::max)(effective.textureTileMeters,1.0e-4F)));
+                const float level=effective.heightMap?(std::max)(0.0F,std::log2((std::max)(footprint,1.0e-9F)*static_cast<float>((std::max)(effective.heightMap->width,effective.heightMap->height))/
+                    (std::max)(effective.textureTileMeters,1.0e-4F))):0.0F;
                 const VoxelParallaxResult px=voxel_parallax(effective,multiply(textureObject,units),face,
                     normalize(inverse_transform_vector(tri.transform,viewWorld)),voxel_displacement_depth(effective,units),level);
                 textureObject=multiply(px.positionMeters,1.0F/units);

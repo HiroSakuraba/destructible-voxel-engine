@@ -16,7 +16,7 @@ void require(bool c,const std::string& message){if(!c)throw std::runtime_error(m
 void ok(bool c,std::string& e){require(c,e);e.clear();}
 std::filesystem::path root;
 void catalog_and_files(){
-    auto c=MaterialPresetCatalog::starter();require(c.entries().size()==41,"41 starter presets");std::string e;
+    auto c=MaterialPresetCatalog::starter();require(c.entries().size()==44,"44 starter presets");std::string e;
     require(c.search("REFRACTIVE").size()==6,"case-insensitive glass synonym");require(!c.search("car").empty(),"car paint search");
     require(!c.add(c.entries().front(),&e),"duplicate ID refused");auto bad=c.entries().front();bad.id="dve.invalid";bad.requirements.push_back(MaterialPresetFeature(100));require(!c.add(bad,&e),"unknown feature refused");
     bad=c.entries().front();bad.id="dve.invalid";bad.defaults.roughness=std::numeric_limits<float>::infinity();require(!c.add(bad,&e),"nonfinite refused");

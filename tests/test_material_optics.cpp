@@ -241,6 +241,27 @@ void test_editor_library(const fs::path& dir) {
         const auto* plain = eleven->find(stoneId);
         check(plain && plain->definition.displacementDepthMeters == 0.0F, "materials without displacement stay at depth 0");
     }
+
+    // Solid-texture surface patterns: version 12, no new fields.
+    VoxelMaterialDefinition cobble;
+    cobble.name = "Cobble";
+    cobble.surfaceDetail.pattern = SurfacePattern::Cellular;
+    cobble.surfaceDetail.periodMeters = 0.2F;
+    cobble.surfaceDetail.bumpHeightMeters = 0.01F;
+    const MaterialId cobbleId = library.next_available_id();
+    check(library.upsert({cobbleId, cobble, false}, &error), "library add cobble: " + error);
+    check(library.save(dir / "materials12.txt", &error), "library save v12: " + error);
+    {
+        std::ifstream in(dir / "materials12.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 12U, "solid textures need library version 12");
+    }
+    const auto twelve = EditorMaterialLibrary::load(dir / "materials12.txt", &error);
+    check(twelve && twelve->find(cobbleId) && twelve->find(cobbleId)->definition.surfaceDetail.pattern == SurfacePattern::Cellular &&
+              twelve->find(carvedId) && twelve->find(carvedId)->definition.displacementDepthMeters == 0.04F,
+          "library v12 round trip: " + error);
 }
 
 void test_gltf_import(const fs::path& dir) {

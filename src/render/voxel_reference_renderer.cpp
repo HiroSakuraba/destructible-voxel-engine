@@ -509,14 +509,15 @@ void apply_scene_lighting(LightPasses &light, const SceneLighting *scene,
 // the images are read and tilts the normal; the normal map bends it further; the texture set
 // colours the shading copy of the material and its occlusion dims the ambient light. Traced
 // displacement already shaped the hit (position and normal) in the tracer.
-void apply_voxel_surface_maps(const spwi::VoxelSceneTracer& tracer, const VoxelReferenceInstance& instance,
-                              VoxelMaterialDefinition& material, const RenderEnvironment& environment, Float3 worldPosition,
-                              Float3 faceNormalWorld, bool diffused, float metersPerVoxel, float footprintMeters,
-                              VoxelSurfaceInput& surface) noexcept {
-    const bool images = material_has_normal_map(material) || material_has_textures(material);
-    if (!images) return;
+// Returns where the maps were read (object space, metres): the hit, or the parallax point.
+Float3 apply_voxel_surface_maps(const spwi::VoxelSceneTracer& tracer, const VoxelReferenceInstance& instance,
+                                VoxelMaterialDefinition& material, const RenderEnvironment& environment, Float3 worldPosition,
+                                Float3 faceNormalWorld, bool diffused, float metersPerVoxel, float footprintMeters,
+                                VoxelSurfaceInput& surface) noexcept {
     const float units = resolve_meters_per_voxel(metersPerVoxel);
     Float3 meters = multiply(inverse_transform_point(instance.transform, worldPosition), units);
+    const bool images = material_has_normal_map(material) || material_has_textures(material) || material_has_displacement(material);
+    if (!images) return meters;
     // The hit's axis-aligned face in object space (for projections and parallax).
     Float3 face = inverse_transform_vector(instance.transform, faceNormalWorld);
     const float ax = std::abs(face.x), ay = std::abs(face.y), az = std::abs(face.z);
@@ -548,6 +549,7 @@ void apply_voxel_surface_maps(const spwi::VoxelSceneTracer& tracer, const VoxelR
         surface.ambientOcclusion *= maps.occlusion;
     }
     if (changed && !diffused) surface.sunTerm = sun_term(surface.normal, environment, surface.visibility);
+    return meters;
 }
 
 // Writes the pixel's render passes (polygon_renderer.hpp) when the target has them. The shadow pass
@@ -684,13 +686,13 @@ VoxelReferenceRenderStats render_radiance_cascades(
                                       environment, distances, stats) : 1.0F;
         VoxelSurfaceInput surface{texel.normal, normalize(subtract(gbuffer.cameraPosition, texel.position)), visibility,
                                   sunShare, gi.indirect[index], ao, caustic, transmitted};
-        apply_voxel_surface_maps(tracer, instance, material, environment, texel.position, texel.normal, diffuses(material, distances),
+        const Float3 mapMeters = apply_voxel_surface_maps(tracer, instance, material, environment, texel.position, texel.normal, diffuses(material, distances),
                                  distances.metersPerVoxel,
                                  length(subtract(gbuffer.cameraPosition, texel.position)) * distances.metersPerVoxel * 2.0F *
                                      std::tan(camera.verticalFieldOfViewRadians * 0.5F) / static_cast<float>(target.height),
                                  surface);
         const float footprint=length(subtract(gbuffer.cameraPosition,texel.position))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
-        apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,texel.position),distances.metersPerVoxel),multiply(texel.position,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
+        apply_material_surface_detail(material,surface.normal,{mapMeters,multiply(transform_point(instance.transform,multiply(mapMeters,1/resolve_meters_per_voxel(distances.metersPerVoxel))),distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
         if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
         const LightPasses light = shade_voxel(material, environment, surface);
         target.hdrColor[index] = beauty(light, material.baseColor.w);
@@ -834,14 +836,14 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                         : sun_term(hit->worldNormal, environment, visibility);
                     VoxelSurfaceInput surface{hit->worldNormal, normalize(subtract(camera.position, hit->worldPosition)),
                                               visibility, sunShare, indirect, ao, caustic, transmitted};
-                    apply_voxel_surface_maps(tracer, instance, material, environment, hit->worldPosition,
+                    const Float3 mapMeters = apply_voxel_surface_maps(tracer, instance, material, environment, hit->worldPosition,
                                              hit->worldNormal,
                                              diffuses(material, distances), distances.metersPerVoxel,
                                              length(subtract(camera.position, hit->worldPosition)) * distances.metersPerVoxel * 2.0F *
                                                  std::tan(camera.verticalFieldOfViewRadians * 0.5F) / static_cast<float>(target.height),
                                              surface);
                     const float footprint=length(subtract(camera.position,hit->worldPosition))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
-                    apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,hit->worldPosition),distances.metersPerVoxel),multiply(hit->worldPosition,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
+                    apply_material_surface_detail(material,surface.normal,{mapMeters,multiply(transform_point(instance.transform,multiply(mapMeters,1/resolve_meters_per_voxel(distances.metersPerVoxel))),distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
                     if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
                     LightPasses light = shade_voxel(material, environment, surface);
                     Float3 lightingPoint = hit->worldPosition;

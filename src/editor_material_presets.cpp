@@ -38,7 +38,7 @@ constexpr std::array<MaterialPresetControl, unsigned(MaterialPresetProperty::Cou
     {MaterialPresetProperty::CoatRoughness,"Coat roughness","","Spread of coat highlight",0,1,.025F,false},
     {MaterialPresetProperty::DetailScale,"Detail repeat","m","One repeat in object space",.0001F,10000,.01F,true},
     {MaterialPresetProperty::DetailStrength,"Detail strength","","Normal-map tilt; does not displace geometry",0,4,.05F,true},
-    {MaterialPresetProperty::Pattern,"Surface pattern","","0 none, 1 wood, 2 leather, 3 paper, 4 mineral, 5 paint",0,5,1,true},
+    {MaterialPresetProperty::Pattern,"Surface pattern","","0 none, 1 wood, 2 leather, 3 paper, 4 mineral, 5 paint, 6 marble, 7 strata, 8 cellular stone",0,8,1,true},
     {MaterialPresetProperty::DetailSpace,"Detail mapping","","0 object metres, 1 world metres, 2 UV0, 3 UV1",0,3,1,false},
     {MaterialPresetProperty::PatternScale,"Pattern repeat","m","Physical grain/pores repeat; changing geometry size does not stretch it",.00001F,10000,.001F,false},
     {MaterialPresetProperty::PatternRotationX,"Grain turn X","rad","Rotate the complete procedural field about X",-10000,10000,.1F,true},
@@ -304,6 +304,15 @@ MaterialPresetCatalog MaterialPresetCatalog::starter(){
     put(detail("mineral.chalk","Chalk","Mineral",{.74F,.73F,.7F},.98F,SurfacePattern::Mineral,.0008F,.000004F,.06F));
     put(detail("mineral.concrete","Concrete surface","Mineral",{.35F,.36F,.37F},.87F,SurfacePattern::Mineral,.01F,.00015F,.25F));
     auto ceramic=detail("mineral.ceramic-glazed","Glazed ceramic","Mineral",{.55F,.65F,.7F},.5F,SurfacePattern::Mineral,.002F,.000001F,.05F);coat(ceramic,.08F);put(std::move(ceramic));
+    // Solid-texture stone: the pattern continues through the volume, so cuts and craters show it;
+    // with a displacement depth it is also the height that carves the faces.
+    const auto stone=[&](std::string id,std::string name,Float3 color,float rough,SurfacePattern pattern,float repeat,float bump,float variation,float stretch,const char* tags){
+        auto a=detail(std::move(id),std::move(name),"Stone",color,rough,pattern,repeat,bump,variation);a.defaults.surfaceDetail.grainStretch=stretch;a.tags+=tags;
+        a.description="Original procedural solid texture: color, roughness and bump continue through the volume. Set a displacement depth to carve it into voxel faces.";return a;
+    };
+    put(stone("stone.marble","Polished marble",{.80F,.79F,.76F},.3F,SurfacePattern::Marble,.25F,.00002F,.35F,24," veined calcite polished solid"));
+    put(stone("stone.sandstone","Layered sandstone",{.62F,.45F,.30F},.9F,SurfacePattern::Strata,.08F,.002F,.25F,40," strata sedimentary layered cliff solid"));
+    put(stone("stone.cobble","Cobblestone",{.42F,.41F,.40F},.85F,SurfacePattern::Cellular,.2F,.02F,.3F,20," cobbles flagstone voronoi pavement solid"));
     auto lacquer=detail("paint.lacquer","Lacquer","Paint",{.18F,.02F,.01F},.25F,SurfacePattern::Paint,.002F,.000002F,.02F);coat(lacquer,.05F);put(std::move(lacquer));
     for(unsigned i=0;i<3;++i){auto a=add(i==0?"glass.amber":i==1?"glass.smoked":"liquid.water",i==0?"Amber bottle glass":i==1?"Smoked glass":"Clear water",i==2?"Liquid":"Glass",{1,1,1},0);
         a.tags+=" refractive transparent dielectric";a.defaults.transmission=1;a.defaults.transparent=true;a.defaults.indexOfRefraction=i==2?1.333F:1.5F;

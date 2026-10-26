@@ -231,7 +231,9 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
         const bool iridescence=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_iridescence(e.second.definition);});
         const bool textures=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_textures(e.second.definition);});
         const bool displacement=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_displacement_settings(e.second.definition);});
-        output << "DVE_EDITOR_MATERIALS " << (displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
+        // Version 12: the solid-texture surface patterns (Marble, Strata, Cellular); no new fields.
+        const bool solid=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return surface_pattern_is_solid_texture(e.second.definition.surfaceDetail.pattern);});
+        output << "DVE_EDITOR_MATERIALS " << (solid ? 12 : displacement ? 11 : textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -254,7 +256,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
-            if (normalMaps || origins || details || sheen || iridescence || textures || displacement) {
+            if (normalMaps || origins || details || sheen || iridescence || textures || displacement || solid) {
                 if (const VoxelNormalMap* map = m.normalMap.get()) {
                     static constexpr char kHex[] = "0123456789abcdef";
                     std::string hex;
@@ -266,11 +268,11 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     output << " 0";
                 }
             }
-            if(origins || details || sheen || iridescence || textures || displacement) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
-            if(details || sheen || iridescence || textures || displacement){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
-            if(sheen || iridescence || textures || displacement){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
-            if(iridescence || textures || displacement){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
-            if (textures || displacement) {
+            if(origins || details || sheen || iridescence || textures || displacement || solid) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
+            if(details || sheen || iridescence || textures || displacement || solid){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
+            if(sheen || iridescence || textures || displacement || solid){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
+            if(iridescence || textures || displacement || solid){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
+            if (textures || displacement || solid) {
                 // Version 10: a mask of the texture-set maps, the projection, then each map (hex texels).
                 const VoxelNormalMap* maps[4] = {m.baseColorMap.get(), m.ormMap.get(), m.heightMap.get(), m.emissiveMap.get()};
                 unsigned mask = 0U;
@@ -288,7 +290,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     }
                 }
             }
-            if (displacement) output << ' ' << m.displacementDepthMeters << ' ' << unsigned(m.displacementMode);   // version 11
+            if (displacement || solid) output << ' ' << m.displacementDepthMeters << ' ' << unsigned(m.displacementMode);   // version 11
             output << '\n';
         }
     if(!output){if(error)*error="Failed to write material stream";return false;}return true;
@@ -326,7 +328,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 11) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 12) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -403,7 +405,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
             if(version>=6) input >> std::quoted(m.preset.id) >> m.preset.revision >> m.preset.overrides;
             if(version>=7){unsigned pattern{},space{};std::array<float,kSurfaceDetailFloatCount> values{};
                 input>>pattern>>space>>m.surfaceDetail.seed;
-                if(pattern>unsigned(SurfacePattern::Paint)||space>unsigned(SurfaceDetailSpace::UV1))throw std::runtime_error("invalid surface-detail model or space");
+                if(pattern>unsigned(version>=12?kLastSurfacePattern:SurfacePattern::Paint)||space>unsigned(SurfaceDetailSpace::UV1))throw std::runtime_error("invalid surface-detail model or space");
                 m.surfaceDetail.pattern=SurfacePattern(pattern);m.surfaceDetail.space=SurfaceDetailSpace(space);
                 for(float& v:values)input>>v;set_surface_detail_values(m.surfaceDetail,values);}
             if(version>=8){input >> m.sheenColor.x >> m.sheenColor.y >> m.sheenColor.z >> m.sheenRoughness;

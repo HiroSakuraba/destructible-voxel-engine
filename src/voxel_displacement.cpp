@@ -18,13 +18,15 @@ int dominant(Float3 n) noexcept {
     return x >= y && x >= z ? 0 : y >= z ? 1 : 2;
 }
 float texel_meters(const VoxelMaterialDefinition& m, float level) noexcept {
+    // A procedural height has no texels: differentiate over a hundredth of its period.
+    if (!m.heightMap) return std::max(m.surfaceDetail.periodMeters, 1.0e-5F) * 0.01F * std::exp2(std::max(0.0F, level));
     const auto size = static_cast<float>(std::max(m.heightMap->width, m.heightMap->height));
     return std::max(m.textureTileMeters, 1.0e-4F) / size * std::exp2(std::max(0.0F, level));
 }
 } // namespace
 
 float voxel_face_height(const VoxelMaterialDefinition& m, Float3 p, int axis, float level) noexcept {
-    if (!m.heightMap) return 1.0F;
+    if (!m.heightMap) return surface_pattern_height(m.surfaceDetail, p);
     const float s = 1.0F / std::max(m.textureTileMeters, 1.0e-4F);
     const float u = component(p, u_axis(axis)) * s, v = component(p, v_axis(axis)) * s;
     return sample_voxel_image(*m.heightMap, u, v, level).x;
@@ -36,7 +38,7 @@ float voxel_displacement_depth(const VoxelMaterialDefinition& m, float metersPer
 }
 
 Float3 voxel_displaced_normal(const VoxelMaterialDefinition& m, Float3 p, Float3 faceNormal, float depthMeters, float level) noexcept {
-    if (!m.heightMap || !(depthMeters > 0.0F)) return faceNormal;
+    if (!material_has_height_source(m) || !(depthMeters > 0.0F)) return faceNormal;
     const int a = dominant(faceNormal);
     const int ua = u_axis(a), va = v_axis(a);
     const float d = texel_meters(m, level);
@@ -71,7 +73,11 @@ std::optional<VoxelDisplacedHit> trace_displaced_voxel(const VoxelMaterialDefini
             const int a = bit / 2;
             const bool positive = (bit & 1) != 0;
             const float depthCells = positive ? static_cast<float>(c[a] + 1) - pc[a] : pc[a] - static_cast<float>(c[a]);
-            const float carve = (1.0F - voxel_face_height(m, meters, a, level)) * depthMeters / mpc[a];
+            // Heights are read on the face plane, so each face is a height field (as in parallax).
+            Float3 onFace = meters;
+            const float plane = static_cast<float>(positive ? c[a] + 1 : c[a]) * mpc[a];
+            if (a == 0) onFace.x = plane; else if (a == 1) onFace.y = plane; else onFace.z = plane;
+            const float carve = (1.0F - voxel_face_height(m, onFace, a, level)) * depthMeters / mpc[a];
             const float s = depthCells - carve;
             if (s < worst) { worst = s; face = bit; }
         }
@@ -102,7 +108,9 @@ std::optional<VoxelDisplacedHit> trace_displaced_voxel(const VoxelMaterialDefini
         Float3 faceNormal = unit_axis(a);
         if ((face & 1) == 0) faceNormal = multiply(faceNormal, -1.0F);
         const Float3 p = add(origin, multiply(direction, hi));
-        const Float3 meters{p.x * mpc[0], p.y * mpc[1], p.z * mpc[2]};
+        Float3 meters{p.x * mpc[0], p.y * mpc[1], p.z * mpc[2]};
+        const float plane = static_cast<float>((face & 1) != 0 ? c[a] + 1 : c[a]) * mpc[a];
+        if (a == 0) meters.x = plane; else if (a == 1) meters.y = plane; else meters.z = plane;
         return VoxelDisplacedHit{hi, voxel_displaced_normal(m, meters, faceNormal, depthMeters, level), a};
     }
     return std::nullopt;
@@ -111,7 +119,7 @@ std::optional<VoxelDisplacedHit> trace_displaced_voxel(const VoxelMaterialDefini
 VoxelParallaxResult voxel_parallax(const VoxelMaterialDefinition& m, Float3 p, Float3 faceNormal, Float3 view, float depthMeters,
                                    float level, std::uint32_t steps) noexcept {
     VoxelParallaxResult out{p, faceNormal, 0.0F, 0U};
-    if (!m.heightMap || !(depthMeters > 0.0F)) return out;
+    if (!material_has_height_source(m) || !(depthMeters > 0.0F)) return out;
     const int a = dominant(faceNormal);
     steps = std::max(2U, steps);
     // The view ray below the face: each unit of depth moves the read point lateral / viewN.

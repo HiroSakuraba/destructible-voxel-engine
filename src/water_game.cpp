@@ -65,7 +65,11 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"wind_x",5.0,false,false,"Global ambient wind X (m/s)"},
   {"wind_y",8.0,false,false,"Global ambient wind Y (m/s)"},
   {"seafloor_z",-40.0,false,false,"Flat underwater physical floor Z (m)"},
-  {"water_clarity",std::int64_t{0},false,false,"0 clear ocean, 1 coastal, 2 turbid"}});
+  {"water_clarity",std::int64_t{0},false,false,"0 clear ocean, 1 coastal, 2 turbid"},
+  {"custom_optics",false,false,false,"Override default seawater optics with measured RGB coefficients"},
+  {"optical_absorption_rgb",Float3{.34F,.075F,.018F},false,false,"Linear RGB absorption a, 1/metre"},
+  {"optical_scattering_rgb",Float3{.018F,.015F,.012F},false,false,"Linear RGB scattering b, 1/metre"},
+  {"optical_kd_rgb",Float3{.38F,.10F,.045F},false,false,"Diffuse solar attenuation Kd, 1/metre"}});
  add(std::string(coastType),"Coastal Surf Zone (marker)",{
   {"key",std::string{"surf-zone"},true,false,"Unique surf-zone key"},
   {"half_width_m",150.0,false,false,"Surf zone half-width in metres"},
@@ -74,6 +78,7 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"swell_height_m",1.4,false,false,"Offshore surf swell amplitude"},
   {"period_s",9.0,false,false,"Approaching wave period in seconds"},
   {"peel",0.08,false,false,"Breaking front lateral phase offset"}});
+
  add(std::string(rulesType),"Water Prototype Rules (marker)",{
   {"key",std::string{"water-rules"},true,false,"Unique water rules key"}});
  add(std::string(vesselType),"Water Vessel (collision-free polygon)",{
@@ -99,7 +104,8 @@ void register_water_components(ComponentTypeRegistry& registry){
   {"sub_dry_mass_kg",2350.0,false,false,"Mini-sub dry mass (kg)"},
   {"sub_forward_thrust_n",2200.0,false,false,"Mini-sub forward thrust (N)"},
   {"sub_vertical_thrust_n",3200.0,false,false,"Mini-sub vertical thruster force (N)"},
-  {"sub_depth_rating_m",80.0,false,false,"Maximum safe operating depth"}});
+  {"sub_depth_rating_m",80.0,false,false,"Maximum safe operating depth"},
+  {"sub_lamp_intensity",12.0,false,false,"Underwater headlamp brightness (linear HDR)"}});
  add(std::string(stateType),"Water Runtime Save",{
   {"data",std::string{},false,false,"Versioned runtime-only state"}});
 }
@@ -126,6 +132,12 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
    if(c.type==oceanType){
     if(++ocean>1||!o.marker)return fail("Exactly one ocean marker is required");
     const float bottom=float(get(c,"seafloor_z",-40.0));
+    WaterVolumeSettings settings;
+    settings.customOptics=get(c,"custom_optics",false);
+    settings.absorptionRGB=get(c,"optical_absorption_rgb",Float3{.34F,.075F,.018F});
+    settings.scatteringRGB=get(c,"optical_scattering_rgb",Float3{.018F,.015F,.012F});
+    settings.diffuseKdRGB=get(c,"optical_kd_rgb",Float3{.38F,.10F,.045F});
+    if(!valid_water_volume_settings(settings))return fail("Invalid underwater absorption/scattering/Kd");
     const auto clarity=get(c,"water_clarity",std::int64_t{0});
     if(!std::isfinite(bottom)||bottom<-5000||bottom>-3||clarity<0||clarity>2)
       return fail("Invalid ocean seafloor/clarity");
@@ -160,7 +172,9 @@ bool validate_water_scene(std::span<const PrototypeObjectView> objects,std::stri
        cfg.depthRatingM=float(get(c,"sub_depth_rating_m",80.0));
        cfg.halfHeightM=float(get(c,"draft_m",1.8))*.5F;
        const float initial=float(get(c,"sub_ballast_kg",60.0));
-       if(!valid_submarine_config(cfg)||!std::isfinite(initial)||initial<0||
+       if(!valid_submarine_config(cfg)||!std::isfinite(float(get(c,"sub_lamp_intensity",12.0)))||
+          get(c,"sub_lamp_intensity",12.0)<0||get(c,"sub_lamp_intensity",12.0)>1000||
+          !std::isfinite(initial)||initial<0||
           initial>cfg.ballastCapacityKg)return fail("Invalid mini-sub displacement/ballast/drive");
     }
     for(const auto* n:{"thrust_newtons","rudder_torque"}){
@@ -188,6 +202,7 @@ struct WaterGame::Impl {
  };
  GameWorld& world;OceanField field{};
  WaterVolumeSettings volumeSettings{};
+ std::array<UnderwaterLamp,2> headlamps{};
  Float3 wind{5,8,0};
  PrototypeHud hud{};PrototypeCamera camera{};
  WaterGameTelemetry telemetry{};
@@ -201,13 +216,33 @@ struct WaterGame::Impl {
  bool active{},lastPause{},lastReset{},lastSwitch{},lastDebug{},lastHold{};
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.health=hud.maximumHealth=100;hud.water=true;}
  void publish(Boat& b){(void)world.set_position(b.id,b.state.position);(void)world.set_rotation(b.id,b.state.orientation);}
+ void refresh_lamps(){
+   if(boats.empty()||selected>=boats.size())return;
+   const auto& b=boats[selected];
+   if(b.drive.type!=WatercraftType::MiniSub)return;
+   const auto forward=rotate(b.state.orientation,{0,1,0});
+   const auto right=rotate(b.state.orientation,{1,0,0});
+   const auto intensity=float(get(b.component,"sub_lamp_intensity",12.0))*
+                        std::clamp(b.subState.battery*10.F,0.F,1.F);
+   for(int i=0;i<2;++i){
+      const Float3 side=multiply(right,(i==0?-1.F:1.F)*.55F);
+      auto& lamp=headlamps[unsigned(i)];
+      lamp.position=add(b.state.position,add(
+          multiply(forward,b.hull.lengthMetres*.48F),side));
+      lamp.direction=forward;
+      lamp.color={1,.94F,.80F};
+      lamp.intensity=intensity;
+      lamp.range=30.F;
+      lamp.innerCos=.96F;lamp.outerCos=.81F;
+   }
+ }
  void reset(){
   for(auto& b:boats){b.state=b.origin;b.trim=0.6F;b.wakeCooldown=0;b.wipeouts=0;b.wipeoutCooldown=0;
    b.subState={};b.subState.ballastKg=float(get(b.component,"sub_ballast_kg",60.0));
    publish(b);}
   field.clear_wakes();spray.clear();
   selected=0;elapsed=0;accumulator=0;hud.phase=PrototypePhase::Playing;
-  update_camera(true);update_hud();
+  refresh_lamps();update_camera(true);update_hud();
  }
  void update_camera(bool snap){
   const auto& s=boats[selected].state;
@@ -354,7 +389,7 @@ struct WaterGame::Impl {
      }
    }
   }
-  elapsed+=dt;update_camera(false);
+  elapsed+=dt;refresh_lamps();update_camera(false);
  }
  void update_hud(){
   auto& b=boats[selected];
@@ -445,8 +480,18 @@ const PrototypeHud& WaterGame::hud()const noexcept{return impl_->hud;}
 PrototypeCamera WaterGame::camera()const noexcept{return impl_->camera;}
 const OceanField& WaterGame::ocean()const noexcept{return impl_->field;}
 double WaterGame::ocean_time()const noexcept{return impl_->elapsed;}
+const WaterVolumeSettings& WaterGame::volume_settings()const noexcept{
+ return impl_->volumeSettings;
+}
+std::span<const UnderwaterLamp> WaterGame::underwater_lamps()const noexcept{
+ const auto& s=*impl_;
+ if(s.boats.empty()||s.selected>=s.boats.size()||
+    s.boats[s.selected].drive.type!=WatercraftType::MiniSub)return {};
+ return s.headlamps;
+}
 std::span<const WaterSprayEffect> WaterGame::spray_effects()const noexcept{
  return impl_->spray;
+
 }
 const WaterGameTelemetry& WaterGame::telemetry()const noexcept{return impl_->telemetry;}
 bool WaterGame::start(std::string* error){
@@ -462,6 +507,10 @@ bool WaterGame::start(std::string* error){
    s.wind={float(get(c,"wind_x",5.0)),float(get(c,"wind_y",8.0)),0};
    s.volumeSettings.floorZ=float(get(c,"seafloor_z",-40.0));
    s.volumeSettings.clarity=WaterClarity(get(c,"water_clarity",std::int64_t{0}));
+   s.volumeSettings.customOptics=get(c,"custom_optics",false);
+   s.volumeSettings.absorptionRGB=get(c,"optical_absorption_rgb",Float3{.34F,.075F,.018F});
+   s.volumeSettings.scatteringRGB=get(c,"optical_scattering_rgb",Float3{.018F,.015F,.012F});
+   s.volumeSettings.diffuseKdRGB=get(c,"optical_kd_rgb",Float3{.38F,.10F,.045F});
    if(!s.field.set_preset(OceanPreset(get(c,"sea_state",std::int64_t{1})),
           {float(get(c,"current_x",0.0)),float(get(c,"current_y",0.0)),0})){
     if(error)*error="Invalid ocean wave preset";return false;
@@ -530,7 +579,7 @@ void WaterGame::step(float dt){
  if(toggle)selection=(selection+1)%unsigned(s.boats.size());
  for(unsigned n=0;n<s.boats.size();++n)
    if(s.world.is_action_pressed("water_ship_"+std::to_string(n+1)))selection=n;
- if(selection!=s.selected){s.selected=selection;s.update_camera(true);}
+ if(selection!=s.selected){s.selected=selection;s.refresh_lamps();s.update_camera(true);}
  if(s.hud.phase==PrototypePhase::Playing){
   s.accumulator+=dt;
   for(unsigned i=0;i<31&&s.accumulator+1.e-7F>=stepDt;++i){
@@ -630,6 +679,10 @@ bool WaterGame::after_restore(std::string* error){
  s.wind={float(get(*oceanConfig,"wind_x",5.0)),float(get(*oceanConfig,"wind_y",8.0)),0};
  s.volumeSettings.floorZ=float(get(*oceanConfig,"seafloor_z",-40.0));
  s.volumeSettings.clarity=WaterClarity(get(*oceanConfig,"water_clarity",std::int64_t{0}));
+ s.volumeSettings.customOptics=get(*oceanConfig,"custom_optics",false);
+ s.volumeSettings.absorptionRGB=get(*oceanConfig,"optical_absorption_rgb",Float3{.34F,.075F,.018F});
+ s.volumeSettings.scatteringRGB=get(*oceanConfig,"optical_scattering_rgb",Float3{.018F,.015F,.012F});
+ s.volumeSettings.diffuseKdRGB=get(*oceanConfig,"optical_kd_rgb",Float3{.38F,.10F,.045F});
  s.field.clear_coast();
  if(coastConfig){
    const auto pose=s.world.transform(coastId);
@@ -645,8 +698,9 @@ bool WaterGame::after_restore(std::string* error){
  }
  if(!s.field.restore_wakes(wakeEvents,elapsed))return fail();
  s.spray.clear();
+
  s.rules=rules;s.stateComponent=c->id;s.selected=selected;s.elapsed=elapsed;
  s.accumulator=accumulator;s.hud.phase=PrototypePhase(phase);
- s.update_camera(true);s.update_hud();return true;
+ s.refresh_lamps();s.update_camera(true);s.update_hud();return true;
 }
 }

@@ -144,6 +144,68 @@ void draw_racing_effects(std::span<const RacingVisualEffect> effects,
 }
 
 
+// Small deterministic suspended motes. Camera-centred *sampling*, not
+// camera-anchored particles: cell coordinates are stable in world metres.
+// Bounded at 9^3 candidates and only lit by actual underwater irradiance.
+void draw_underwater_motes_hdr(const PlayerRenderView& view,
+                               const RenderEnvironment& environment,
+                               render::PolygonRenderTarget& target) {
+    if(!view.ocean||!view.waterVolume||!target.valid())return;
+    const auto cam=racing_camera(view.camera,target.width,target.height);
+    if(cam.tanHalf<=0)return;
+    constexpr float grid=2.5F;
+    const int baseX=int(std::floor(cam.eye.x/grid)),baseY=int(std::floor(cam.eye.y/grid));
+    const int baseZ=int(std::floor(cam.eye.z/grid));
+    for(int dz=-4;dz<=4;++dz)for(int dy=-4;dy<=4;++dy)for(int dx=-4;dx<=4;++dx){
+        const int x=baseX+dx,y=baseY+dy,z=baseZ+dz;
+        std::uint32_t seed=std::uint32_t(x)*73856093U^
+            std::uint32_t(y)*19349663U^std::uint32_t(z)*83492791U;
+        seed^=seed>>15;seed*=2246822519U;seed^=seed>>13;
+        const auto unit=[](std::uint32_t h){return float(h&65535U)/65535.F;};
+        Float3 p={grid*(x+.15F+.7F*unit(seed)),
+                  grid*(y+.15F+.7F*unit(seed>>5)),
+                  grid*(z+.15F+.7F*unit(seed>>11))};
+        const auto w=sample_water_volume(*view.ocean,*view.waterVolume,p,view.oceanTime);
+        if(!w.submerged||p.z<w.seafloorHeight||unit(seed>>3)>w.particleDensity)return;
+        RacingProjected screen{};
+        if(!project_racing(cam,p,screen))continue;
+        if(screen.x<1||screen.y<1||screen.x>=target.width-1||
+           screen.y>=target.height-1)continue;
+        const int px=int(screen.x),py=int(screen.y);
+        const auto at=std::size_t(py)*target.width+std::size_t(px);
+        if(screen.depth>=target.depth[at]-.00001F)continue;
+        const auto along=subtract(p,cam.eye);
+        const auto ray=water_ray_segment(*view.ocean,cam.eye,
+                normalize(along),length(along),view.oceanTime);
+        if(ray.lengthMeters<=0)continue;
+        const auto transmission=water_transmittance(w,ray.lengthMeters);
+        const auto sun=underwater_daylight(w,w.depthBelowSurface);
+        Float3 sources={sun.x*environment.sunIntensity*.24F,
+                        sun.y*environment.sunIntensity*.24F,
+                        sun.z*environment.sunIntensity*.24F};
+        for(const auto& lamp:view.underwaterLamps)
+            sources=add(sources,evaluate_underwater_lamp(lamp,w,p));
+        constexpr float moteScale=.42F;
+        const Float3 sparkle={
+           sources.x*transmission.x*moteScale,
+           sources.y*transmission.y*moteScale,
+           sources.z*transmission.z*moteScale};
+        const float radius=std::clamp(screen.pixelsPerMetre*.022F,.6F,2.F);
+        for(int oy=-2;oy<=2;++oy)for(int ox=-2;ox<=2;++ox){
+            const int sx=px+ox,sy=py+oy;
+            if(sx<0||sy<0||sx>=int(target.width)||sy>=int(target.height))continue;
+            const float u=(sx+.5F-screen.x)/radius,v=(sy+.5F-screen.y)/radius;
+            const float falloff=std::max(0.F,1.F-u*u-v*v);
+            if(falloff<=0)continue;
+            const std::size_t idx=std::size_t(sy)*target.width+std::size_t(sx);
+            if(screen.depth>=target.depth[idx]-.00001F)continue;
+            auto& c=target.hdrColor[idx];
+            c.x=std::min(64.F,c.x+sparkle.x*falloff);
+            c.y=std::min(64.F,c.y+sparkle.y*falloff);
+            c.z=std::min(64.F,c.z+sparkle.z*falloff);
+        }
+    }
+}
 void draw_water_spray(std::span<const WaterSprayEffect> spray,
                       const render::PolygonCamera& camera,
                       const render::PolygonRenderTarget& depth,
@@ -178,7 +240,95 @@ void draw_water_spray(std::span<const WaterSprayEffect> spray,
     }
 }
 
+// HDR participating-medium pass. All distances below are world metres;
+// PolygonRenderTarget depth is normalized linear camera-forward depth, not
+// Euclidean distance and not voxel units.
+void apply_underwater_volume_hdr(const PlayerRenderView& view,
+                                 const RenderEnvironment& environment,
+                                 render::PolygonRenderTarget& target) {
+    if(!view.ocean||!view.waterVolume||!target.valid()||
+       !valid_water_volume_settings(*view.waterVolume))return;
+    const auto camera=racing_camera(view.camera,target.width,target.height);
+    if(!(camera.tanHalf>0)||!std::isfinite(camera.tanHalf))return;
+    const Float3 sky={
+       std::max(0.F,environment.skyColor.x*1.3F+environment.sunIntensity*.09F),
+       std::max(0.F,environment.skyColor.y*1.3F+environment.sunIntensity*.09F),
+       std::max(0.F,environment.skyColor.z*1.3F+environment.sunIntensity*.09F)};
+    for(std::uint32_t py=0;py<target.height;++py){
+      for(std::uint32_t px=0;px<target.width;++px){
+        const std::size_t index=std::size_t(py)*target.width+px;
+        const float x=(2.F*(px+.5F)/target.width-1.F)*camera.tanHalf*camera.aspect;
+        const float y=(1.F-2.F*(py+.5F)/target.height)*camera.tanHalf;
+        const Float3 dir=normalize(add(camera.forward,
+                add(multiply(camera.right,x),multiply(camera.up,y))));
+        const float cosine=dot(dir,camera.forward);
+        if(cosine<=.02F)continue;
+        const float normalizedDepth=target.depth[index];
+        const bool hit=normalizedDepth<.999999F;
+        const float forwardDepth=hit?
+           camera.nearPlane+std::clamp(normalizedDepth,0.F,1.F)*
+                   (camera.farPlane-camera.nearPlane):
+           std::min(85.F,camera.farPlane);
+        const float rayLength=std::min(160.F,forwardDepth/cosine);
+        const auto medium=water_ray_segment(*view.ocean,camera.eye,dir,rayLength,view.oceanTime);
+        if(medium.lengthMeters<=.001F)continue;
+        const Float3 start=add(camera.eye,multiply(dir,medium.startMeters));
+        const Float3 end=add(camera.eye,multiply(dir,rayLength));
+        const auto entry=sample_water_volume(*view.ocean,*view.waterVolume,start,view.oceanTime);
+        const auto atEnd=sample_water_volume(*view.ocean,*view.waterVolume,end,view.oceanTime);
+        const bool objectUnderwater=hit&&atEnd.submerged;
+        const auto& old=target.hdrColor[index];
+        UnderwaterOpticsInput input{};
+        input.objectRadiance=hit?Float3{old.x,old.y,old.z}:
+            (medium.cameraSubmerged&&medium.hitsSurface?
+                Float3{old.x,old.y,old.z}:Float3{});
+        input.objectSubmerged=objectUnderwater;
+        input.objectDepthMeters=atEnd.depthBelowSurface;
+        input.eyeDepthMeters=entry.depthBelowSurface;
+        input.viewPathMeters=medium.lengthMeters;
+        input.rayDirectionZ=dir.z;
+        input.ambientSurfaceLight=sky;
+        if(objectUnderwater)for(const auto& lamp:view.underwaterLamps){
+          const auto illumination=evaluate_underwater_lamp(lamp,entry,end);
+          input.lampIrradiance=add(input.lampIrradiance,illumination);
+        }
+        Float3 shaded=shade_underwater_radiance(entry,input);
+        // Approximate in-scattering from visible headlamp cones. The same
+        // lamp spectrum is extinguished on light-to-particle and particle-to-eye.
+        // Four stratified analytic samples: no stochastic frame flicker.
+        const float step=std::min(medium.lengthMeters,24.F)/4.F;
+        for(int i=0;i<4&&step>0;++i){
+          const float t=medium.startMeters+(float(i)+.5F)*step;
+          const Float3 p=add(camera.eye,multiply(dir,t));
+          const auto media=sample_water_volume(*view.ocean,*view.waterVolume,p,view.oceanTime);
+          Float3 lampLight{};
+          for(const auto& lamp:view.underwaterLamps)
+             lampLight=add(lampLight,evaluate_underwater_lamp(lamp,media,p));
+          const Float3 tr=water_transmittance(media,std::max(0.F,t-medium.startMeters));
+          constexpr float phase=.12F;
+          shaded.x+=lampLight.x*media.scatteringRGB.x*tr.x*phase*step;
+          shaded.y+=lampLight.y*media.scatteringRGB.y*tr.y*phase*step;
+          shaded.z+=lampLight.z*media.scatteringRGB.z*tr.z*phase*step;
+        }
+        // Water-to-air interface: Fresnel transmission, including total
+        // internal reflection. Screen-space ray bending is not attempted:
+        // geometry refractive reray is a separate S2 follow-up.
+        if(medium.cameraSubmerged&&medium.hitsSurface){
+          const auto p=add(camera.eye,multiply(dir,medium.lengthMeters));
+          const auto surface=view.ocean->sample(p.x,p.y,view.oceanTime);
+          const float reflectance=water_to_air_fresnel(dot(dir,surface.normal));
+          shaded=add(multiply(shaded,1.F-reflectance),
+                     multiply(Float3{.012F,.045F,.075F},reflectance));
+        }
+        target.hdrColor[index]={
+          std::clamp(shaded.x,0.F,64.F),std::clamp(shaded.y,0.F,64.F),
+          std::clamp(shaded.z,0.F,64.F),old.w};
+      }
+    }
+}
+
 void draw_ocean_surface(const OceanField* ocean,double seconds,
+                       const WaterVolumeSettings* volume,
                        const render::PolygonCamera& camera,
                        const render::PolygonRenderTarget& depth,
                        std::span<std::uint8_t> rgba) {
@@ -226,7 +376,14 @@ void draw_ocean_surface(const OceanField* ocean,double seconds,
                 std::clamp(12.F+48.F*diffuse+180.F*glint+115.F*foam,0.F,255.F),
                 std::clamp(65.F+55.F*diffuse+150.F*glint+120.F*foam,0.F,255.F),
                 std::clamp(100.F+55.F*diffuse+130.F*glint+112.F*foam,0.F,255.F)};
-            const float opacity=std::clamp(.90F-.20F*fresnel,0.F,1.F);
+            // With the S2 volume already accounting for underwater transport,
+            // the interface adds the reflected portion. The original W1
+            // opaque tint is retained only when no volume renderer is active.
+            const float f0=.0204F;
+            const float reflectance=f0+(1.F-f0)*fresnel;
+            const float opacity=volume?
+               std::clamp(reflectance+foam*.20F,.02F,.97F):
+               std::clamp(.90F-.20F*fresnel,0.F,1.F);
             for(unsigned oy=0;oy<2U&&py+oy<depth.height;++oy)
               for(unsigned ox=0;ox<2U&&px+ox<depth.width;++ox){
                 const std::size_t at=std::size_t(py+oy)*depth.width+(px+ox);
@@ -376,7 +533,10 @@ public:
             polygonRenderCache_.clear();
         }
         if(view.fogVolumes.empty()) {
-            (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
+            // Underwater extinction supersedes ordinary distance fog. Running
+            // both would double-attenuate every pixel of the water column.
+            if(!(view.ocean&&view.waterVolume))
+              (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
         } else {
             // Assets stay in metre space. Camera/depth are converted back from
             // the voxel-unit surface pass for this shared HDR integration pass.
@@ -402,6 +562,8 @@ public:
             if(!render::apply_cpu_fog(target_,camera,environment,voxelSize,fogVolumes,
                                      fogSettings,&stats_.fog,error))return false;
         }
+        apply_underwater_volume_hdr(view,environment,target_);
+        draw_underwater_motes_hdr(view,environment,target_);
         if (sceneLighting) (void)render::apply_cpu_bloom(target_, environment);
         stats_.renderMilliseconds = milliseconds_since(start);
 
@@ -409,7 +571,7 @@ public:
         const float exposure = options_.exposure * (environment.exposure > 0.0F ? environment.exposure : 1.0F);
         if (!render::resolve_polygon_render_rgba8(target_, exposure, environment.tonemapOperator,
                                                   frame_.pixels, error)) return false;
-        draw_ocean_surface(view.ocean,view.oceanTime,view.camera,target_,frame_.pixels);
+        draw_ocean_surface(view.ocean,view.oceanTime,view.waterVolume,view.camera,target_,frame_.pixels);
         draw_water_spray(view.waterSpray,view.camera,target_,frame_.pixels);
         draw_racing_effects(view.racingEffects,view.camera,target_,frame_.pixels);
         if(view.prototypeHud)draw_prototype_hud(frame_.pixels,frame_.width,frame_.height,*view.prototypeHud);

@@ -3,7 +3,12 @@
 #include <cmath>
 namespace dve {
 bool valid_water_volume_settings(const WaterVolumeSettings& s)noexcept{
- return std::isfinite(s.floorZ)&&s.floorZ>=-5000&&s.floorZ<=-3&&
+ const auto validOptical=[](Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&
+   std::isfinite(v.z)&&v.x>=0&&v.y>=0&&v.z>=0&&
+   v.x<=10&&v.y<=10&&v.z<=10;};
+ return (!s.customOptics||(validOptical(s.absorptionRGB)&&
+         validOptical(s.scatteringRGB)&&validOptical(s.diffuseKdRGB)))&&
+   std::isfinite(s.floorZ)&&s.floorZ>=-5000&&s.floorZ<=-3&&
         std::isfinite(s.density)&&s.density>=995&&s.density<=1040&&
         s.clarity<=WaterClarity::Turbid;
 }
@@ -32,6 +37,10 @@ WaterVolumeSample sample_water_volume(const OceanField& ocean,
  case WaterClarity::Turbid:
    out.absorptionRGB={.60F,.30F,.28F};out.scatteringRGB={1.3F,1.2F,1.1F};
    out.diffuseKdRGB={1.5F,1.4F,1.3F};out.turbidity=.9F;out.particleDensity=.55F;break;
+ }
+ if(cfg.customOptics){
+   out.absorptionRGB=cfg.absorptionRGB;out.scatteringRGB=cfg.scatteringRGB;
+   out.diffuseKdRGB=cfg.diffuseKdRGB;
  }
  return out;
 }

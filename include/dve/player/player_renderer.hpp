@@ -25,6 +25,7 @@
 #include "dve/render_environment.hpp"
 #include "dve/prototype_game.hpp"
 #include "dve/water_ocean.hpp"
+#include "dve/underwater_optics.hpp"
 
 namespace dve::player {
 
@@ -41,7 +42,9 @@ struct PlayerRenderView {
     const PrototypeHud* prototypeHud{};
     std::span<const RacingVisualEffect> racingEffects{};
     const OceanField* ocean{}; // same deterministic waves used by hull physics
-    double oceanTime{}; // seconds, lifetime owned by PrototypeGame
+    double oceanTime{}; // seconds; lifetime owned by PrototypeGame
+    const WaterVolumeSettings* waterVolume{};
+    std::span<const UnderwaterLamp> underwaterLamps{};
     std::span<const WaterSprayEffect> waterSpray{};
 };
 

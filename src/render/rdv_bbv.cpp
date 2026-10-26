@@ -358,7 +358,8 @@ bool execute_bbv_gpu_trace(rhi::IDevice& device, BbvRhiMirror& mirror,
     }
     if (!mirror.publish(clipmap, error)) return false;
     BbvTraceConstants constants;
-    constants.minimumBrick = clipmap.minimum_key();
+    const BrickKey minimum = clipmap.minimum_key();
+    constants.minimumBrick = {minimum.x, minimum.y, minimum.z};
     constants.rayCount = static_cast<std::uint32_t>(rays.size());
     constants.gridDimensions = clipmap.dimensions();
     constants.toroidalOffset = clipmap.toroidal_offset();

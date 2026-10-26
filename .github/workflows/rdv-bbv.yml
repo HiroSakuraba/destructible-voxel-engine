@@ -1,0 +1,68 @@
+name: RDV BBV native Vulkan parity
+
+on:
+  pull_request:
+    paths:
+      - 'src/render/rdv_*.cpp'
+      - 'include/dve/render/rdv_*.hpp'
+      - 'tests/test_rdv_bbv.cpp'
+      - 'shaders/rdv_bbv_trace.hlsl'
+      - 'shaders/shader_manifest.json'
+      - '.github/workflows/rdv-bbv.yml'
+      - 'CMakeLists.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bbv-native:
+    name: bbv-native-vulkan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CPU Vulkan ICD and shader compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build glslang-tools spirv-tools libvulkan1 mesa-vulkan-drivers
+      - name: Configure minimal RHI build
+        run: |
+          cmake -S . -B build-rdv -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDVE_BUILD_RHI=ON -DDVE_BUILD_TESTS=ON \
+            -DDVE_ENABLE_VULKAN_BUFFER_BACKEND=ON \
+            -DDVE_BUILD_BENCHMARK=OFF \
+            -DDVE_BUILD_ASSET_COOKER=OFF \
+            -DDVE_BUILD_ASSET_PIPELINE_TESTS=OFF \
+            -DDVE_BUILD_EDITOR=OFF \
+            -DDVE_BUILD_NATIVE_EDITOR=OFF \
+            -DDVE_BUILD_PLATFORM=OFF \
+            -DDVE_BUILD_DEVICE_TEST_RUNNER=OFF \
+            -DDVE_BUILD_AUDIO_SYNTH=OFF \
+            -DDVE_BUILD_LEGACY_X11_HOST=OFF \
+            -DDVE_ENABLE_SDL3_HOST=OFF \
+            -DDVE_ENABLE_FLUODDITY=OFF \
+            -DDVE_ENABLE_SOFT_BODIES=OFF \
+            -DDVE_ENABLE_CPU_HAIR=OFF \
+            -DDVE_ENABLE_VFX_PARTICLES=OFF \
+            -DDVE_ENABLE_PBF_LIQUID=OFF \
+            -DDVE_ENABLE_SIMULATION_ENERGY_COMPILER=OFF \
+            -DDVE_ENABLE_BSPLINE_CLOTH=OFF \
+            -DDVE_ENABLE_GRID_FLUIDS=OFF \
+            -DDVE_ENABLE_FLIP_LIQUIDS=OFF
+      - name: Build focused BBV contract target
+        run: cmake --build build-rdv --target dve_rdv_bbv_tests --parallel 4
+      - name: Compile and validate GPU shader
+        run: |
+          glslangValidator -D -V --target-env vulkan1.2 -S comp -e main \
+            --hlsl-offsets --shift-texture-binding 16 \
+            --shift-uav-binding 32 \
+            -o "$RUNNER_TEMP/rdv_bbv_trace.spv" shaders/rdv_bbv_trace.hlsl
+          spirv-val --target-env vulkan1.2 "$RUNNER_TEMP/rdv_bbv_trace.spv"
+      - name: Run native GPU ray query and CPU oracle parity
+        env:
+          DVE_RDV_TRACE_SPV: ${{ runner.temp }}/rdv_bbv_trace.spv
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: ctest --test-dir build-rdv -R '^dve_rdv_bbv_tests$' --output-on-failure

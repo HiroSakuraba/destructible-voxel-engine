@@ -18,7 +18,7 @@
 
 The coordinator has no ownership of a scene or executor. The caller must keep `RuntimeSceneWorld` and `RuntimeSceneStagingExecutor` alive until pending work completes or their cancellation is drained; do not destroy the scene or executor out from under active tasks. It is also the caller's responsibility to keep catalog and scene IDs consistent across scene unloading, hot-reload and checkpoint restoration. An absent scene cancels pending work, and does not act on unloaded object IDs. The underlying scene publication rejects stale staged objects.
 
-**Still missing for a game demo:** automatic manifest-bound region membership import; frame integration with the camera; per-object bytes and global residency caps; dynamic-object state migration and safe eviction; failure retries with user diagnostics; network replication and cross-level world identifiers; spatial reindexing for moving objects; and a real scene fixture integration test (the local headless runtime contract uses a stub). This PR supplies the independently testable planner and a compiled bridge to DVE's real deferred API, not a fully wired streaming game.
+**Still missing for a game demo:** automatic manifest-bound region membership import; frame integration with the camera; per-object bytes and global residency caps; dynamic-object state migration and safe eviction; failure retries with user diagnostics; network replication and cross-level world identifiers; spatial reindexing for moving objects; and production-grade multi-scene/scene-hot-reload validation (the local headless runtime contract uses a stub; an additional real house-scene fixture test runs in CI). This PR supplies the independently testable planner and a compiled bridge to DVE's real deferred API, not a fully wired streaming game.
 
 ## Sample integration (illustrative, after creating a streamable scene)
 
@@ -53,14 +53,14 @@ Do not block on `std::future::get` before testing readiness. Never publish stage
 | Two jobs become ready in one frame, publish cap 1 | One publication per tick, second retained |
 | Stage retry after failure | No hot-loop re-queues before retry tick |
 
-A stubbed executor contract verifies the coordinator's state machine without filesystem or GPU dependencies. The optional DVE CMake target separately compiles the bridge against the **real** `runtime_scene.hpp`; a real staging/publish/rollback integration fixture is the next acceptance step. Existing save and GPU readback tests must remain unchanged.
+A stubbed executor contract verifies the coordinator's state machine without filesystem or GPU dependencies. The optional DVE CMake target compiles the bridge against the **real** `runtime_scene.hpp`. `dve_region_streaming_real_tests` also reserves DVE's existing multi-object house with its assets deferred, loads two objects using actual staging/publish/render/physics APIs, verifies readback and resource teardown. That test requires the full repository checkout; it was **not executed in the isolated local harness**. More failure-injection/rollback integration fixtures remain. Existing save and GPU readback tests must remain unchanged.
 
 ### Build
 
 ```sh
 cmake -S . -B build-region -DCMAKE_BUILD_TYPE=Release \
   -DDVE_EXPERIMENTAL_REGION_INDEX=ON -DDVE_BUILD_TESTS=ON
-cmake --build build-region --target dve_region_streaming_tests dve_region_streaming_runtime_contract_tests --parallel
+cmake --build build-region --target dve_region_streaming_tests dve_region_streaming_runtime_contract_tests dve_region_streaming_real_tests --parallel
 ctest --test-dir build-region -R 'dve_region_(catalog|streaming)' --output-on-failure
 ```
 

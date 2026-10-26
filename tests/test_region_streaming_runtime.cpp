@@ -38,8 +38,37 @@ static void retry_backoff_does_not_consume_load_slots() {
     require(streamer.tick(camera, 62).submitted == 1 && jobs.submissions == 4);
 }
 
+// Regression (Codex P2 4381912415): after the scene unloads, delivered staging results (which carry
+// retained-memory reservations) must be drained by tick(), not left in pending_ forever.
+static void scene_unload_drains_staging_futures() {
+    RegionCatalog catalog;
+    require(catalog.set_object_regions(301, std::vector<RegionKey>{{1,0,0,0,0}}));
+    require(catalog.set_object_regions(302, std::vector<RegionKey>{{1,0,0,0,0}}));
+    RuntimeSceneWorld world;
+    world.store.list = {{{301,false},false},{{302,false},false}};
+    RuntimeSceneStagingExecutor jobs;
+    RegionStreamingRuntimeConfig config;
+    config.planner = {1,3,100,2,2,1};
+    RegionStreamingRuntime streamer(catalog, world, jobs, 1, config);
+    const RegionKey camera{1,0,0,0,0};
+    require(streamer.tick(camera, 0).submitted == 2);
+    jobs.complete(301); // delivered before the scene goes away
+    world.present = false;
+    auto stats = streamer.tick(camera, 1);
+    require(stats.sceneMissing && stats.cancelled == 2 && stats.discarded == 1);
+    require(jobs.tokens.at(302).cancellation_requested());
+    require(streamer.pending_count() == 1);
+    require(jobs.reservations.at(301).expired()); // reservation released, not held by pending_
+    jobs.complete(302); // late completion is drained on a later tick too
+    stats = streamer.tick(camera, 2);
+    require(stats.sceneMissing && stats.discarded == 1 && stats.cancelled == 0);
+    require(streamer.pending_count() == 0 && jobs.reservations.at(302).expired());
+    require(world.published == 0);
+}
+
 int main() {
     retry_backoff_does_not_consume_load_slots();
+    scene_unload_drains_staging_futures();
     RegionCatalog catalog;
     require(catalog.set_object_regions(101, std::vector<RegionKey>{{1,0,0,0,0}}));
     require(catalog.set_object_regions(102, std::vector<RegionKey>{{1,0,0,0,0}}));

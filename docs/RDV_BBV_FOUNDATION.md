@@ -52,6 +52,49 @@ for (const auto& edit : edits) changed.push_back(edit.key);
 (void)mirror.publish(clipmap, &error);
 ```
 
+### Binding the live camera frame graph
+
+`BbvViewportBridge` is an **opt-in, active frame-plan consumer**. Call it after
+`CameraFrameGraph::finalize()` and after the authoritative
+`PackedBrickmapScene` has been updated. It creates one clipmap and one
+persistent buffer for each active viewport, and destroys the buffers for
+viewports no longer in the frame plan.
+
+```cpp
+BbvViewportBridge viewportBbv(device, {16,16,16});
+auto framePlan = cameraFrameGraph.finalize();
+std::string error;
+
+// sourceRevision must advance for EVERY authoritative geometry change.
+// If edits are incomplete or absent, default keysComplete=false does a
+// conservative full in-view reconciliation when the revision advances.
+if (!viewportBbv.advance(framePlan, packedScene, metresPerVoxel,
+                         sourceRevision, changedBrickKeys,
+                         /*keysComplete=*/false, worldOriginMeters, &error)) {
+    // Keep the previous lighting path; report the error.
+}
+for (const auto& view : framePlan.viewports) {
+    const auto id = view.frame.viewport.id;
+    const auto clipmapBuffer = viewportBbv.buffer(id);
+    const auto* clipmap = viewportBbv.clipmap(id);
+    const bool resetGi = viewportBbv.reset_radiance_history(id);
+    // Bind clipmapBuffer and its minKey/dimensions/toroidalOffset for RDV passes.
+}
+```
+
+The camera position is interpreted in world metres; pass `worldOriginMeters`
+only when the camera pose is expressed relative to a floating-origin shift.
+The authoritative packed scene must be in the corresponding global
+voxel-coordinate frame. Moving transformed voxel objects require the
+render-scene geometry integration planned after RDV-2.
+
+A camera cut resets the **GI history flag**, but does not invalidate static
+occupancy or trigger a redundant GPU upload. A source revision change with
+`keysComplete=true` uses the provided complete set of changed brick keys;
+otherwise the bridge rechecks its current view volume to avoid stale geometry.
+The `advance` API allows up to 16 active viewports and fails on duplicates,
+invalid units and non-finite camera positions.
+
 The viewport owns its independent clipmap, buffer and publication lifecycle.
 `recenter_camera` floors the world position to brick coordinates; sub-brick
 movement changes nothing. The toroidal mapping is:
@@ -89,7 +132,10 @@ coordinates directly into occupancy indexing.
 - One-brick toroidal scrolling (only exposed slab written)
 - One-brick destruction edit (64-byte write), unrelated edits and teleport clears
 - 1,200 seeded rays compared against `raycast_packed_brickmap_hdda`
+- Frame-plan integration: multiple viewports, camera cuts, empty edit list
+  revisions, complete dirty keys, viewport retirement, upload-byte budgets
 - Zero-length rays, invalid budgets, validation and resource teardown
+- Native Vulkan: 256 seeded rays, opposing entry directions and toroidal scrolling
 
 Run:
 ```sh
@@ -126,3 +172,16 @@ DVE_RDV_TRACE_SPV=/tmp/rdv_bbv_trace.spv ctest --test-dir build \
 This opt-in path requires `DVE_ENABLE_VULKAN_BUFFER_BACKEND=ON` and a working
 Vulkan device (software ICDs can run shader validation). The test checks two
 opposing rays, normals and distances, including a negative-direction ray.
+
+### Automated native Vulkan lane
+
+`.github/workflows/rdv-bbv.yml` compiles `rdv_bbv_trace.hlsl` to SPIR-V via
+glslangValidator, validates it with spirv-val, installs Mesa lavapipe,
+builds `dve_rdv_bbv_tests` with the Vulkan RHI, and runs actual shader
+hit/normal/distance readback comparisons. This is independent of the usual
+Null-RHI path; a job failure does not count as GPU acceptance.
+
+`BbvViewportBridge` is available for renderer integration, but it is not
+silently installed into the default scene renderer. RDV-specific rendering
+remains explicitly opt-in. Correct resource ownership and the reference ABI
+are established before enabling visible GI.

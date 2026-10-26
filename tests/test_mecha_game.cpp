@@ -20,21 +20,31 @@ Component role(std::string name,std::string key){
  check(bool(c),"mech role schema not registered");
  c->properties["key"]=std::move(key);return *c;
 }
+struct FixtureOptions {
+ bool barrier{};            // 8 m wide, 0.25 m thick polygon wall at y=5 (spans z -1..5)
+ Float3 targetPosition{0,10,2};
+ double targetRadius{1.5};
+ double targetHealth{36.0};
+ bool thinWall{};           // extra 0.25 m polygon wall centred on thinWallY
+ float thinWallY{5.F};
+};
 struct Fixture {
  GameWorld world{create_physics3d_world(Physics3DBackend::Reference)};
  GameObjectId player{},target{},rules{};
  std::unique_ptr<MechaGame> game;
- explicit Fixture(bool barrier=false){
+ explicit Fixture(bool barrier=false):Fixture(FixtureOptions{.barrier=barrier}){}
+ explicit Fixture(const FixtureOptions& options){
+  const bool barrier=options.barrier;
   std::string error;
   auto mesh=make_editor_polygon_cube(1);
   player=world.spawn_visual_polygon_asset(std::move(mesh),"Player",make_rigid_transform({0,0,.05F},{}));
   check(player!=0,"create player");
   check(bool(world.add_component(player,role("mech_player","player"),&error)),error);
   auto targetMesh=make_editor_polygon_cube(2);
-  target=world.spawn_visual_polygon_asset(std::move(targetMesh),"Target",make_rigid_transform({0,10,2},{}));
+  target=world.spawn_visual_polygon_asset(std::move(targetMesh),"Target",make_rigid_transform(options.targetPosition,{}));
   check(target!=0,"create target");
-  auto component=role("mech_target","target");component.properties["hit_radius"]=1.5;
-  component.properties["health"]=36.0;
+  auto component=role("mech_target","target");component.properties["hit_radius"]=options.targetRadius;
+  component.properties["health"]=options.targetHealth;
   check(bool(world.add_component(target,std::move(component),&error)),error);
   GameObjectDesc rulesDesc;rulesDesc.name="Rules";
   auto rulesComponent=role("mech_rules","rules");rulesComponent.properties["target_count"]=std::int64_t{1};
@@ -46,6 +56,13 @@ struct Fixture {
       (v.position.z-.5F)*6+2};
    refresh_editor_polygon(obstacle,true);
    check(world.spawn_cooked_polygon_asset(std::move(obstacle),"Barrier",{},false)!=0,"create barrier");
+  }
+  if(options.thinWall){
+   auto thin=make_editor_polygon_cube(5);
+   for(auto& v:thin.vertices)v.position={(v.position.x-.5F)*8,(v.position.y-.5F)*.25F+options.thinWallY,
+      (v.position.z-.5F)*6+2};
+   refresh_editor_polygon(thin,true);
+   check(world.spawn_cooked_polygon_asset(std::move(thin),"Thin Wall",{},false)!=0,"create thin wall");
   }
   game=std::make_unique<MechaGame>(world);
   check(game->start(&error),"start mecha: "+error);
@@ -108,6 +125,26 @@ void combat(){
  check(rocket.game->telemetry().impacts>=1,"swept rocket hits target");
  check(!rocket.world.is_enabled(rocket.target),"direct rocket kills target");
 }
+// Regression (Codex P2 4381797405): editor play mode sends fire/aim/sprint while exported players
+// bind mech_primary/mech_secondary/mech_boost. Both action sets must drive the same behaviour.
+void editor_action_aliases(){
+ Fixture primary;
+ primary.fire("fire");
+ check(primary.game->telemetry().autocannonShots==1,"editor 'fire' action fires the autocannon");
+ Fixture secondary;
+ secondary.fire("aim");
+ check(secondary.game->telemetry().rocketsFired==1,"editor 'aim' action fires the rocket launcher");
+ auto boosted=[](const char* action){
+  Fixture f;
+  f.world.set_axis("move_y",1.F);
+  f.world.set_action_pressed(action,true);
+  f.tick(1);
+  return f.game->motor().energy;
+ };
+ const float exported=boosted("mech_boost"),editor=boosted("sprint"),idle=boosted("unbound_action");
+ check(exported<idle,"mech_boost drains boost energy");
+ check(std::abs(editor-exported)<1.e-5F&&editor<idle,"editor 'sprint' action boosts like mech_boost");
+}
 void movement(){
  Fixture moving;
  moving.world.set_axis("move_y",1.F);
@@ -146,7 +183,7 @@ void exported_starter(){
 }
 int main(){
  try{
-  motor_contract();validation();movement();combat();exported_starter();
+  motor_contract();validation();movement();combat();editor_action_aliases();exported_starter();
   std::cout<<"mecha M1/M2 tests passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<"mecha M1/M2: "<<e.what()<<'\n';return 1;}
 }

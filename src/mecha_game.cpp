@@ -164,6 +164,14 @@ struct MechaGame::Impl {
   std::size_t waypoint{};
  };
  struct TraceHit {GameObjectId id{};Float3 position{};float fraction{1};bool valid{};};
+ // Editor play mode drives fire/aim/sprint (mouse buttons, shift) while exported players bind
+ // mech_primary/mech_secondary/mech_boost. Accept either action set so both paths are playable.
+ bool action_down(const char* mech,const char* editor)const{
+  return world.is_action_pressed(mech)||world.is_action_pressed(editor);
+ }
+ bool primary_down()const{return action_down("mech_primary","fire")||world.get_axis("mech_primary")>.25F;}
+ bool secondary_down()const{return action_down("mech_secondary","aim")||world.get_axis("mech_secondary")>.25F;}
+ bool boost_down()const{return action_down("mech_boost","sprint");}
  GameWorld& world;
  PrototypeHud hud{};
  PrototypeCamera cam{};
@@ -389,9 +397,10 @@ struct MechaGame::Impl {
   }
  }
  void move(float dt){
+  const bool boost=boost_down();
   const auto input=MechMotorInput{{axis(world.get_axis("move_x")),axis(world.get_axis("move_y")),0},
-     world.is_action_pressed("mech_boost")&&!lastBoost};
-  lastBoost=world.is_action_pressed("mech_boost");
+     boost&&!lastBoost};
+  lastBoost=boost;
   auto displace=integrate_mech_motor(motor,config,input,dt);
   // Swept capsule handles polygon and voxel blocking; two slide iterations.
   for(int i=0;i<2&&mag(displace)>1.e-5F;++i){
@@ -479,8 +488,8 @@ void MechaGame::step(float dt){
  s.move(dt);
  // Gamepad triggers are analog axes in PlayerInput, while mouse buttons are actions.
  // Either representation may drive a weapon; never discard the digital binding.
- if(s.world.is_action_pressed("mech_primary")||s.world.get_axis("mech_primary")>.25F)s.shoot_primary();
- if(s.world.is_action_pressed("mech_secondary")||s.world.get_axis("mech_secondary")>.25F)s.shoot_rocket();
+ if(s.primary_down())s.shoot_primary();
+ if(s.secondary_down())s.shoot_rocket();
  s.step_rockets(dt);
  if(s.hud.phase==PrototypePhase::Playing)s.step_enemies(dt);
  s.world.tick(dt);s.age_effects(dt);s.camera();s.refresh_hud();

@@ -458,6 +458,49 @@ void test_dirty_ranges_are_coalesced() {
     check(mirror.readback_matches(map, &error), error.c_str());
 }
 
+// A failed advance() must not let a later, "complete" key list hide edits that the failed
+// call carried: the viewport that never saw that revision has to reconcile conservatively.
+void test_bridge_failed_advance_keeps_edits() {
+    VoxelObject object(901);
+    object.fill_brick({0, 0, 0}, 4);
+    object.fill_brick({1, 0, 0}, 5);
+    PackedBrickmapScene source;
+    source.rebuild(object);
+    rhi::NullDevice device;
+    BbvViewportBridge bridge(device, {4, 2, 2});
+    dve::render::CameraFramePlan frame;
+    dve::render::CameraViewportRenderPlan a;
+    a.frame.viewport.id = 21;
+    a.frame.pose.position = {1, 1, 1};
+    dve::render::CameraViewportRenderPlan b = a;
+    b.frame.viewport.id = 22;
+    frame.viewports = {a, b};
+    std::string error;
+    check(bridge.advance(frame, source, 1.0F, 1U, {}, false, {}, &error), error.c_str());
+
+    // Revision 2 destroys a voxel in brick {0,0,0}, but viewport 22 has an unusable camera.
+    (void)object.set_voxel({1, 1, 1}, kAirMaterial);
+    source.rebuild(object);
+    const BrickKey first{0, 0, 0};
+    auto broken = frame;
+    broken.viewports[1].frame.pose.position = {3.0e30F, 0.0F, 0.0F};
+    check(!bridge.advance(broken, source, 1.0F, 2U, std::span(&first, 1), true, {}, &error),
+          "out-of-range camera should fail the advance");
+
+    // Revision 3 edits a different brick and supplies only its own (complete-for-3) keys.
+    (void)object.set_voxel({9, 1, 1}, kAirMaterial);
+    source.rebuild(object);
+    const BrickKey second{1, 0, 0};
+    check(bridge.advance(frame, source, 1.0F, 3U, std::span(&second, 1), true, {}, &error),
+          error.c_str());
+    for (const camera::CameraViewportId id : {camera::CameraViewportId{21}, camera::CameraViewportId{22}}) {
+        check(!bridge.clipmap(id)->occupied_at({1, 1, 1}),
+              "an edit from a failed advance was lost by a later complete-key refresh");
+        check(!bridge.clipmap(id)->occupied_at({9, 1, 1}), "latest edit missing");
+        check(bridge.clipmap(id)->occupied_at({2, 2, 2}), "unrelated voxel lost");
+    }
+}
+
 void test_bridge_viewport_limit() {
     VoxelObject object(902);
     object.fill_brick({0, 0, 0}, 4);
@@ -623,6 +666,7 @@ int main() {
     try {
         test_clip_map_publication_and_rays();
         test_viewport_frame_bridge();
+        test_bridge_failed_advance_keeps_edits();
         test_bridge_viewport_limit();
         test_scroll_matches_fresh_clipmap();
         test_dirty_ranges_are_coalesced();

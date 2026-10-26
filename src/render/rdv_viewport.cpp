@@ -26,6 +26,10 @@ bool BbvViewportBridge::advance(const CameraFramePlan& plan,
                                 bool keysComplete,
                                 Float3 worldOriginMeters,
                                 std::string* error) {
+    const bool keysFollowPreviousRevision = hasAttemptedRevision_;
+    const std::uint64_t previousAttemptedRevision = lastAttemptedRevision_;
+    lastAttemptedRevision_ = sourceRevision;
+    hasAttemptedRevision_ = true;
     if (!(metresPerVoxel > 0.0F) || !std::isfinite(metresPerVoxel) ||
         !finite3(worldOriginMeters) || plan.viewports.size() > 16U) {
         if (error) *error = "RDV viewport bridge received invalid scale, origin or viewport count";
@@ -59,7 +63,10 @@ bool BbvViewportBridge::advance(const CameraFramePlan& plan,
             const auto scroll = view.clipmap->recenter_camera(worldPosition, metresPerVoxel, source);
             const bool changedRevision = !view.hasRevision || view.previousSourceRevision != sourceRevision;
             if (changedRevision) {
-                if (keysComplete && !created) {
+                // Edit keys describe only the step from the previously attempted revision.
+                const bool sawPreviousRevision = view.hasRevision && keysFollowPreviousRevision &&
+                    view.previousSourceRevision == previousAttemptedRevision;
+                if (keysComplete && !created && sawPreviousRevision) {
                     (void)view.clipmap->refresh(changedKeys, source);
                 } else if (!created) {
                     (void)view.clipmap->refresh_all(source);
@@ -102,6 +109,8 @@ bool BbvViewportBridge::reset_radiance_history(camera::CameraViewportId id) cons
 }
 void BbvViewportBridge::reset() noexcept {
     viewports_.clear();
+    lastAttemptedRevision_ = 0U;
+    hasAttemptedRevision_ = false;
 }
 
 } // namespace dve::render::rdv

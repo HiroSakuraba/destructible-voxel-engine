@@ -52,6 +52,11 @@ private:
     };
     rhi::IDevice& device_;
     Int3 dimensions_{};
+    // Revision passed to the most recent advance() call, whether or not it succeeded. A
+    // change-key list only describes the step from that revision, so a viewport that did not
+    // finish it (a failed or partial call) must reconcile its whole window instead.
+    std::uint64_t lastAttemptedRevision_{};
+    bool hasAttemptedRevision_{};
     std::map<camera::CameraViewportId, View> viewports_;
 };
 

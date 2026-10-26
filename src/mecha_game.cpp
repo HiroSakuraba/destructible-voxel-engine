@@ -273,9 +273,12 @@ struct MechaGame::Impl {
   if(rocket){
    // Geometry, collision, sightlines and surface marks update at the GameWorld tick boundary.
    // Query nearby before mutation to avoid double applications to fragments created by this shot.
-   const auto nearby=world.sphere_overlap(hit.position,2.1F);
+   // The crater needs to cross the 1.95 m thick starter barricades even when
+   // the projectile strikes their near face. Geometry damage is independent of
+   // the wider gameplay splash (handled above).
+   const auto nearby=world.sphere_overlap(hit.position,3.1F);
    for(const auto id:nearby)if(world.geometry_kind(id)==GameGeometryKind::Voxel){
-    if(world.queue_damage_sphere(id,hit.position,1.6F))++telemetry.voxelCarvesQueued;
+    if(world.queue_damage_sphere(id,hit.position,2.7F))++telemetry.voxelCarvesQueued;
    }
   }else if(world.geometry_kind(hit.id)==GameGeometryKind::Voxel){
    (void)world.add_surface_mark(hit.id,hit.position,.32F);

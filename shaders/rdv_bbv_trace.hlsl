@@ -4,7 +4,7 @@
 // Units: voxel indices. No DXR, mesh shaders or 64-bit shader integers.
 // This independent kernel is opt-in and not used by production render passes yet.
 
-struct BbvBrick { uint occupancy[16]; };
+// Each brick occupies exactly 64 bytes, independent of compiler array strides.
 struct BbvRay {
     float3 origin;
     float maxDistance;
@@ -22,7 +22,7 @@ struct BbvResult {
     uint padding2;
 };
 
-StructuredBuffer<BbvBrick> gBbvBricks : register(t0);
+ByteAddressBuffer gBbvBricks : register(t0);
 StructuredBuffer<BbvRay> gBbvRays : register(t1);
 RWStructuredBuffer<BbvResult> gBbvResults : register(u0);
 cbuffer BbvConstants : register(b0) {
@@ -48,7 +48,8 @@ bool IsOccupied(int3 voxel, inout uint brickLookups) {
     int3 local = voxel - key * 8;
     uint bit = (uint)(local.x + 8 * local.y + 64 * local.z);
     brickLookups++;
-    return (gBbvBricks[index].occupancy[bit >> 5] & (1u << (bit & 31u))) != 0u;
+    uint word = gBbvBricks.Load(index * 64u + (bit >> 5u) * 4u);
+    return (word & (1u << (bit & 31u))) != 0u;
 }
 
 float NextBoundary(float origin, float direction, int voxel) {

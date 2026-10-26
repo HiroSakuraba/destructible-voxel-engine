@@ -63,6 +63,8 @@ public:
     // Signed floor division is essential: brick -1 with region width 16 is region -1.
     [[nodiscard]] RegionKey region_of_brick(std::uint32_t world, std::uint8_t lod, BrickKey key) const noexcept;
     // Conservative transformed world AABB converted into inclusive brick coordinates.
+    // Reflected axes (all non-zero coefficients negative) keep their included upper endpoint,
+    // so a boundary exactly on a brick edge belongs to the brick that starts there.
     // Reject NaN, infinity, zero-volume or unrepresentable coordinates.
     [[nodiscard]] static std::optional<RegionBrickBounds> transformed_brick_bounds(
         RegionWorldAabb local, RegionAffine3x4 transform, double metresPerVoxel) noexcept;

@@ -40,7 +40,10 @@ there are no graphics driver timings, file I/O, navigation rebuild or camera fli
   `INT32_MIN`, with no UB when width is positive.
 - Local half-open 3D bounds can be transformed with an explicit affine matrix and metres
   per voxel. The resulting conservative world-space AABB is quantized to inclusive brick
-  coordinates. This is intended for static object membership; fast-moving bodies and
+  coordinates. A transformed upper endpoint stays exclusive unless every non-zero
+  coefficient of that world axis is negative (a reflected axis), in which case the local
+  minimum face it comes from is included and the endpoint is inclusive (it may land in the
+  next brick). This is intended for static object membership; fast-moving bodies and
   physics ownership still require a separate residency/pinning policy.
 - Object memberships are many-to-many: ordered unique stable `uint64_t` object IDs per
   region and reverse object-to-region membership. No live object or voxel pointers.

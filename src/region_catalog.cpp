@@ -59,6 +59,23 @@ std::optional<RegionBrickBounds> RegionCatalog::transformed_brick_bounds(
     for (double v : transform.m) if (!std::isfinite(v)) return std::nullopt;
     std::array<double, 3> low{INFINITY, INFINITY, INFINITY};
     std::array<double, 3> high{-INFINITY, -INFINITY, -INFINITY};
+    // The local box is half-open: [minimum, maximum). A transformed world axis is the
+    // affine function sum(c_j * local_j) + t. Its supremum over the half-open box is
+    // *attained* (so the world upper endpoint is inclusive and may lie in the next
+    // brick) only when every non-zero coefficient is negative, because then it is
+    // reached at local minimums. Any positive coefficient needs a local maximum, which
+    // is excluded, so the upper endpoint stays exclusive.
+    std::array<bool, 3> highInclusive{false, false, false};
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        const auto row = axis * 4;
+        bool anyNegative = false, anyPositive = false;
+        for (std::size_t j = 0; j < 3; ++j) {
+            const double c = transform.m[row + j];
+            if (c < 0) anyNegative = true;
+            else if (c > 0) anyPositive = true;
+        }
+        highInclusive[axis] = anyNegative && !anyPositive;
+    }
     for (int corner = 0; corner != 8; ++corner) {
         std::array<double, 3> p{};
         for (int axis = 0; axis != 3; ++axis)
@@ -79,7 +96,10 @@ std::optional<RegionBrickBounds> RegionCatalog::transformed_brick_bounds(
     for (std::size_t axis = 0; axis < 3; ++axis) {
         if (low[axis] >= high[axis]) return std::nullopt;
         const double a = std::floor(low[axis] / brickMetres);
-        const double b = std::ceil(high[axis] / brickMetres) - 1.0;
+        // Exclusive endpoints stop in the brick before the boundary; inclusive ones
+        // (reflected axes) belong to the brick that starts at the boundary.
+        const double b = highInclusive[axis] ? std::floor(high[axis] / brickMetres)
+                                             : std::ceil(high[axis] / brickMetres) - 1.0;
         if (!std::isfinite(a) || !std::isfinite(b) ||
             a < static_cast<double>(INT32_MIN) || b > static_cast<double>(INT32_MAX) || a > b)
             return std::nullopt;

@@ -114,4 +114,38 @@ private:
     std::uint64_t uploadRanges_{};
 };
 
+// RDV-1 offscreen compute ABI; mirrors rdv_bbv_trace.hlsl (48 bytes per hit).
+struct BbvGpuHit {
+    Int3 voxel{};
+    std::uint32_t hit{};
+    Int3 normal{};
+    std::uint32_t padding{};
+    float distance{};
+    std::uint32_t voxelSteps{};
+    std::uint32_t brickLookups{};
+    std::uint32_t padding2{};
+};
+static_assert(sizeof(BbvGpuHit) == 48);
+
+struct BbvTraceConstants {
+    Int3 minimumBrick{};
+    std::uint32_t rayCount{};
+    Int3 gridDimensions{};
+    std::uint32_t maximumSteps{65536};
+    Int3 toroidalOffset{};
+    std::uint32_t padding{};
+};
+static_assert(sizeof(BbvTraceConstants) == 48);
+
+// Opt-in GPU reference dispatch. Caller provides compiled compute shader bytecode
+// for the selected backend. Vulkan SPIR-V must use DVE's 0/16/32 b/t/u shifts.
+// Null-RHI checks dispatch/resources only; native GPU is needed for hit parity.
+// The mirror and the supplied device MUST refer to the same IDevice instance.
+[[nodiscard]] bool execute_bbv_gpu_trace(rhi::IDevice& device, BbvRhiMirror& mirror,
+                                         BbvClipmap& clipmap,
+                                         std::span<const GpuTraceRay> rays,
+                                         std::span<const std::byte> bytecode,
+                                         std::vector<BbvGpuHit>& results,
+                                         std::string* error = nullptr);
+
 } // namespace dve::render::rdv

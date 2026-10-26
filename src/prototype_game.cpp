@@ -137,6 +137,9 @@ const PrototypeHud& PrototypeGame::hud()const noexcept{return impl_->water?impl_
 PrototypeCamera PrototypeGame::camera()const{return impl_->water?impl_->water->camera():impl_->flying?impl_->flying->camera():impl_->racing?impl_->racing->camera():impl_->camera();}
 const OceanField* PrototypeGame::ocean_field()const noexcept{return impl_->water?&impl_->water->ocean():nullptr;}
 double PrototypeGame::ocean_time()const noexcept{return impl_->water?impl_->water->ocean_time():0;}
+std::span<const WaterSprayEffect> PrototypeGame::water_spray_effects()const noexcept{
+ return impl_->water?impl_->water->spray_effects():std::span<const WaterSprayEffect>{};
+}
 std::span<const RacingVisualEffect> PrototypeGame::racing_visual_effects()const noexcept {
  return impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
 }

@@ -102,9 +102,9 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
  };}else if(water){manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},
   {"move_y","key:s/-1,key:w/+1,gamepad:lefty/-1"},
   {"water_ship_1","key:1"},{"water_ship_2","key:2"},
-  {"water_ship_3","key:3"},{"water_ship_4","key:4"},{"water_ship_5","key:5"},
+  {"water_ship_3","key:3"},{"water_ship_4","key:4"},{"water_ship_5","key:5"},{"water_ship_6","key:6"},
   {"water_trim","key:q/-1,key:e/+1,gamepad:rightx"},
-  {"interact","key:e,gamepad:west"},{"pause","key:p,gamepad:start"},
+  {"interact","key:tab,gamepad:west"},{"pause","key:p,gamepad:start"},
   {"restart","key:r,gamepad:back"},{"prototype_debug","key:f3"}};}
  if(flying){
    manifest.inputBindings={{"move_x","key:a/-1,key:d/+1,gamepad:leftx"},
@@ -128,7 +128,7 @@ bool export_prototype_project(const EditorDocument& d,const EditorMaterialLibrar
  }if(submarine){readme.close();readme.open(root/"README.md",std::ios::trunc);
  readme<<"# Deep Explorer: Mini-Submarine\n\nW/S forward/aft; A/D yaw; Space/Ctrl rise/dive; Q/E lateral thrusters; Z/X pump ballast out/in; Up/Down pitch; H toggle depth hold; P pause; R reset; F3 instruments.\n\nDescend toward the wreck at Y=80, Z=-30. The sea and pressure use the shared OceanField plus underwater volume; the seafloor is real collision at Z=-40. Use ballast for neutral trim, thrusters for active movement, and depth hold for station keeping. This S1 prototype does not include depth-dependent rendered fog, submarine headlamps or mission scoring; those are S2/S3.\n";
  }else if(water){readme.close();readme.open(root/"README.md",std::ios::trunc);
- readme<<"# W2 Water Ships Test Range\n\nRun dve_player with this generated project.\n\n1 Dinghy, 2 Pirate Ship, 3 Sailboat, 4 Speedboat, 5 Wave Runner; Tab cycles; W/S engine throttle or sail exposure; A/D helm; Q/E trim sails; P pause; R restart; F3 hydro diagnostics. Gamepad left stick, West, Start and Back are bound.\n\nThe Gerstner ocean surface is rendered by the CPU player and sampled by buoyancy at a fixed 120 Hz physics step. Calm/breeze/storm is an authorable ocean marker property. Ships are visual-only geometry; the portable water controller owns their multi-probe motion and solid-land capsule collisions. W2 implements simplified apparent-wind sails, keels, planing and pump jets. Wakes and breaking surf are W3/W4.\n";
+ readme<<"# W2 Water Ships Test Range\n\nRun dve_player with this generated project.\n\n1 Dinghy, 2 Pirate Ship, 3 Sailboat, 4 Speedboat, 5 Wave Runner, 6 Surfboard; Tab cycles; W/S engine throttle or sail exposure; A/D helm; Q/E trim sails; P pause; R restart; F3 hydro diagnostics. Gamepad left stick, West, Start and Back are bound.\n\nThe Gerstner ocean surface is rendered by the CPU player and sampled by buoyancy at a fixed 120 Hz physics step. Calm/breeze/storm is an authorable ocean marker property. Ships are visual-only geometry; the portable water controller owns their multi-probe motion and solid-land capsule collisions. W2 implements simplified apparent-wind sails, keels, planing and pump jets. Wakes and breaking surf are W3/W4.\n";
  }readme.close();
  if(!readme)return fail("Cannot write starter guide");
  cleanup.keep=true;

@@ -21,6 +21,10 @@ struct RacingVisualEffect {
     float lifetime{5.0F};
     float opacity{0.5F};
 };
+struct WaterSprayEffect {
+    Float3 position{},velocity{};
+    float age{},lifetime{.8F},radius{.28F},opacity{.6F};
+};
 struct RacingAudioState {
     bool active{};
     float speedFraction{};
@@ -64,6 +68,7 @@ public:
     [[nodiscard]] std::span<const RacingVisualEffect> racing_visual_effects() const noexcept;
     [[nodiscard]] const OceanField* ocean_field() const noexcept;
     [[nodiscard]] double ocean_time() const noexcept;
+    [[nodiscard]] std::span<const WaterSprayEffect> water_spray_effects()const noexcept;
     // After a GameWorld save restore, recover kit state and rebind saved trigger IDs.
     [[nodiscard]] bool after_restore(std::string* error=nullptr);
 private: struct Impl;std::unique_ptr<Impl> impl_;

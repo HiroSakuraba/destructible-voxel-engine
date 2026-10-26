@@ -58,6 +58,7 @@ struct GameSaveLimits {
     std::uint32_t maximumObjects{65536U};
     std::uint64_t maximumTotalBricks{1ULL << 20U};        // 512 MiB of decoded materials
     std::uint32_t maximumStringBytes{4096U};              // names, tags, paths (content-path limit)
+    std::uint32_t maximumPropertyValueBytes{65536U};      // component property values (runtime state blobs)
     std::uint32_t maximumTagsPerObject{256U};
     std::uint32_t maximumComponentsPerObject{256U};
     std::uint32_t maximumPropertiesPerComponent{256U};

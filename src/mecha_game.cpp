@@ -296,7 +296,7 @@ const MechMotorState& MechaGame::motor()const noexcept{return impl_->motor;}
 const MechCombatTelemetry& MechaGame::telemetry()const noexcept{return impl_->telemetry;}
 void MechaGame::look(float yawDelta,float){
  if(impl_->started&&std::isfinite(yawDelta)&&impl_->hud.phase==PrototypePhase::Playing)
-  impl_->motor.torsoYaw=wrap(impl_->motor.torsoYaw+yawDelta);
+  impl_->motor.torsoYaw=wrap(impl_->motor.torsoYaw-yawDelta); // Pointer right turns toward screen right (+X).
 }
 bool MechaGame::start(std::string* error){
  auto& s=*impl_;if(s.started){if(error)*error="Mecha game already started";return false;}

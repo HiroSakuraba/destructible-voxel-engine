@@ -34,6 +34,7 @@ WaterHydroLoads evaluate_water_hull(const OceanField& ocean,double time,
         const Float3 worldOffset=rotate(body.orientation,{x,y,-hull.draftMetres*.48F});
         const Float3 worldPoint=add(body.position,worldOffset);
         const auto surface=ocean.sample(worldPoint.x,worldPoint.y,time);
+        if(surface.depth<=.01F)continue;
         const float depth=surface.height-worldPoint.z;
         const float immersed=std::clamp(depth/maxDepth+.5F,0.0F,1.0F);
         loads.meanWaterHeight+=surface.height/n;

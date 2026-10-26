@@ -45,6 +45,7 @@ struct PlayerRenderView {
     double oceanTime{}; // seconds; lifetime owned by PrototypeGame
     const WaterVolumeSettings* waterVolume{};
     std::span<const UnderwaterLamp> underwaterLamps{};
+    std::span<const WaterSprayEffect> waterSpray{};
 };
 
 struct PlayerRenderStats {

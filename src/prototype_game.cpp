@@ -143,6 +143,9 @@ const WaterVolumeSettings* PrototypeGame::water_volume_settings()const noexcept{
 std::span<const UnderwaterLamp> PrototypeGame::underwater_lamps()const noexcept{
  return impl_->water?impl_->water->underwater_lamps():std::span<const UnderwaterLamp>{};
 }
+std::span<const WaterSprayEffect> PrototypeGame::water_spray_effects()const noexcept{
+ return impl_->water?impl_->water->spray_effects():std::span<const WaterSprayEffect>{};
+}
 std::span<const RacingVisualEffect> PrototypeGame::racing_visual_effects()const noexcept {
  return impl_->racing?impl_->racing->visuals():std::span<const RacingVisualEffect>{};
 }

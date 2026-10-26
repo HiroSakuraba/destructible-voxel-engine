@@ -4,6 +4,7 @@
 #include "dve/region_streaming.hpp"
 #include "dve/runtime_scene.hpp"
 #include <future>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -22,6 +23,7 @@ struct RegionStreamingRuntimeConfig {
 struct RegionStreamingTickStats {
     bool planRejected{};
     bool sceneMissing{};
+    bool wrongThread{};
     std::size_t submitted{};
     std::size_t completed{};
     std::size_t published{};
@@ -57,6 +59,7 @@ private:
     RuntimeSceneWorld& world_;
     RuntimeSceneStagingExecutor& executor_;
     RuntimeSceneHandle sceneHandle_{};
+    std::thread::id authorityThread_{};
     RegionStreamingRuntimeConfig config_{};
     RegionStreamingPlanner planner_;
     std::unordered_map<std::uint64_t, Pending> pending_;

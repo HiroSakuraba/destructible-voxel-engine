@@ -1,5 +1,6 @@
 #include "dve/mecha_game.hpp"
 #include "dve/game_world.hpp"
+#include "dve/physics3d_backend.hpp"
 #include "dve/component.hpp"
 #include "dve/query.hpp"
 #include "dve/transform.hpp"
@@ -136,7 +137,7 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
    }
   }
  }
- if(players!=1||rules!=1||torsos>1||targets>64)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
+ if(players!=1||rules!=1||torsos>1||targets<1||targets>64)return fail("Mech scene requires one player, one rules marker, at most one torso and 64 targets");
  return true;
 }
 struct MechaGame::Impl {

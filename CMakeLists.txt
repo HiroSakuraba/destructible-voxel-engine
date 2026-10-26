@@ -3594,4 +3594,44 @@ if(DVE_EXPERIMENTAL_REGION_INDEX)
         add_executable(dve_region_bench apps/dve_region_bench.cpp)
         target_link_libraries(dve_region_bench PRIVATE dve_region_catalog dve::core)
     endif()
+
+    # R2: independent deterministic residency planner and optional bridge to
+    # RuntimeSceneWorld. No default engine behavior changes.
+    add_library(dve_region_streaming_plan STATIC src/region_streaming.cpp)
+    target_include_directories(dve_region_streaming_plan PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_streaming_plan PUBLIC dve_region_catalog)
+    target_compile_features(dve_region_streaming_plan PUBLIC cxx_std_23)
+    add_library(dve_region_streaming_runtime STATIC src/region_streaming_runtime.cpp)
+    target_include_directories(dve_region_streaming_runtime PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
+    target_link_libraries(dve_region_streaming_runtime PUBLIC dve_region_streaming_plan dve::core)
+    target_compile_features(dve_region_streaming_runtime PUBLIC cxx_std_23)
+    if(MSVC)
+        target_compile_options(dve_region_streaming_plan PRIVATE /W4 /permissive-)
+        target_compile_options(dve_region_streaming_runtime PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(dve_region_streaming_plan PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        target_compile_options(dve_region_streaming_runtime PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+    if(DVE_BUILD_TESTS)
+        add_executable(dve_region_streaming_tests tests/test_region_streaming.cpp)
+        target_link_libraries(dve_region_streaming_tests PRIVATE dve_region_streaming_plan)
+        add_test(NAME dve_region_streaming_tests COMMAND dve_region_streaming_tests)
+
+        # Compile the same runtime coordinator against a miniature fake scene
+        # executor to exercise cancellation, duplicate suppression and budgets.
+        # The production target above independently compiles against real DVE.
+        add_executable(dve_region_streaming_runtime_contract_tests
+            src/region_streaming_runtime.cpp tests/test_region_streaming_runtime.cpp)
+        target_include_directories(dve_region_streaming_runtime_contract_tests BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/region_streaming_contract_stub)
+        target_link_libraries(dve_region_streaming_runtime_contract_tests PRIVATE dve_region_streaming_plan)
+        add_test(NAME dve_region_streaming_runtime_contract_tests COMMAND dve_region_streaming_runtime_contract_tests)
+
+        # Actual DVE scene package, staging executor, renderer and physics.
+        add_executable(dve_region_streaming_real_tests tests/test_region_streaming_real.cpp)
+        target_link_libraries(dve_region_streaming_real_tests PRIVATE dve_region_streaming_runtime)
+        target_compile_definitions(dve_region_streaming_real_tests PRIVATE
+            DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        add_test(NAME dve_region_streaming_real_tests COMMAND dve_region_streaming_real_tests)
+    endif()
 endif()

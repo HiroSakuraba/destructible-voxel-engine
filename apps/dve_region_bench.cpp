@@ -25,16 +25,20 @@ void bench_catalog(RegionIndexBackend backend, std::size_t objects) {
     RegionCatalog catalog({16, backend, 65536});
     std::mt19937 rng(0xb337beef);
     std::uniform_int_distribution<int> coord(-256, 256);
+    std::vector<RegionKey> insertedKeys;
+    insertedKeys.reserve(objects);
     auto t0 = Clock::now();
     for (std::uint64_t id = 1; id <= objects; ++id) {
         RegionKey key{1,0,coord(rng),coord(rng),coord(rng)};
+        insertedKeys.push_back(key);
         if (!catalog.set_object_regions(id, std::span<const RegionKey>(&key, 1)))
             throw std::runtime_error("invalid catalog workload");
     }
     auto t1 = Clock::now();
     std::uint64_t checksum = 0;
     for (std::size_t j=0; j<100000; ++j) {
-        RegionKey key{1,0,coord(rng),coord(rng),coord(rng)};
+        const RegionKey key = (j & 1U) ? insertedKeys[j % insertedKeys.size()] :
+            RegionKey{1,0,coord(rng),coord(rng),coord(rng)};
         checksum += catalog.region_objects(key).size();
     }
     auto t2 = Clock::now();

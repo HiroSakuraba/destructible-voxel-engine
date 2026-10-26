@@ -603,6 +603,9 @@ void test_destruction(Physics3DBackend backend, const char* label) {
     const auto removed = a.world->damage_sphere(a.tower, {0.375F, 1.25F, 0.375F}, 0.3F);
     CHECK(removed && *removed >= 2U);
     CHECK(a.world->object_count() == before + 1U);   // the top half broke off
+    // The carve left a crater mark on the tower and a copy on the piece that broke off.
+    CHECK(a.world->surface_marks().size() == 2U);
+    if (a.world->surface_marks().size() == 2U) CHECK(a.world->surface_marks()[1].objectId != a.tower);
     const auto cratePos = a.world->position(a.crate);
     if (cratePos) (void)a.world->damage_sphere(a.crate, {cratePos->x, cratePos->y, cratePos->z}, 0.2F);
     play(a, 25);
@@ -623,8 +626,10 @@ void test_destruction(Physics3DBackend backend, const char* label) {
     const auto decoded = codec.decode(*bytes, nullptr, &error);
     CHECK(decoded.has_value());
     if (!decoded) { std::cerr << label << " decode: " << error << '\n'; return; }
+    CHECK(decoded->world.surfaceMarks.size() == a.world->surface_marks().size());
     CHECK(restore(b, *decoded));
     CHECK(b.world->object_count() == a.world->object_count());
+    CHECK(b.world->surface_marks().size() == a.world->surface_marks().size());   // marks survive the load
     CHECK(b.world->state_hash() == a.world->state_hash());
     CHECK(b.world->voxel_count(b.tower) == a.world->voxel_count(a.tower));
     const auto bytesAgain = codec.encode(capture(b), nullptr, &error);
@@ -773,6 +778,7 @@ void test_migration() {
     int fires = 0;
     Scene a = boot(assets, Physics3DBackend::Reference, &fires);
     (void)a.world->damage_sphere(a.tower, {0.375F, 1.25F, 0.375F}, 0.3F);
+    a.world->clear_surface_marks();   // a pre-release engine left no damage marks
     play(a, 8);
     const GameSaveData saved = capture(a);
     std::string error;
@@ -783,6 +789,7 @@ void test_migration() {
     if (!document) return;
     document->sections.erase("dve.clock");
     document->sections.erase("dve.voxel_axes");
+    document->sections.erase("dve.surface_marks");
     SaveGameDocument v0;
     v0.schemaVersion = 0;
     v0.sequence = 7;
@@ -1207,13 +1214,14 @@ void test_v1_to_v2_migration() {
     Scene a = boot(assets, Physics3DBackend::Reference, &firesA);
     (void)boot_runtimes(*a.world);
     (void)a.world->damage_sphere(a.tower, {0.375F, 1.25F, 0.375F}, 0.3F);
+    a.world->clear_surface_marks();   // a v1 engine left no damage marks
     play(a, 10);
     auto document = codec.to_document(capture_all(a), nullptr, &error);
     CHECK(document.has_value());
     if (!document) return;
     SaveGameDocument v1 = *document;
     v1.schemaVersion = 1U;
-    for (const char* name : {"dve.gameplay", "dve.cameras", "dve.animation", "dve.ragdolls", "dve.hair", "dve.clock", "dve.voxel_axes"}) v1.sections.erase(name);
+    for (const char* name : {"dve.gameplay", "dve.cameras", "dve.animation", "dve.ragdolls", "dve.hair", "dve.clock", "dve.voxel_axes", "dve.surface_marks"}) v1.sections.erase(name);
     const auto v1Bytes = encode_save_game_document(v1);
     SaveGameReadReport report;
     const auto migrated = codec.decode(v1Bytes, &report, &error);

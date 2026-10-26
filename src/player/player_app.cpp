@@ -75,8 +75,6 @@ namespace {
 // reverse: the script host (which holds listeners into the world) goes before the world.
 struct PlayerSession {
     std::unique_ptr<GameWorld> world;
-    // Damage marks from the world's damage events (cosmetic, not saved).
-    std::shared_ptr<SurfaceMarkList> marks;
     std::unique_ptr<PrototypeGame> prototype;
     std::string physicsBackend;
 #if defined(DVE_HAVE_LUA)
@@ -94,7 +92,6 @@ struct PlayerSession {
         if (this != &other) {
             release();
             world = std::move(other.world);
-            marks = std::move(other.marks);
             prototype=std::move(other.prototype);
             physicsBackend = std::move(other.physicsBackend);
 #if defined(DVE_HAVE_LUA)
@@ -115,7 +112,6 @@ struct PlayerSession {
 #endif
         prototype.reset();
         world.reset();
-        marks.reset();
     }
 };
 
@@ -162,19 +158,6 @@ bool PlayerApp::Impl::build_session(PlayerSession& out, const std::string& scene
     if (!physics) return fail("physics: " + stepError);
     out.physicsBackend = std::string(physics3d_backend_label(resolved));
     out.world = std::make_unique<GameWorld>(std::move(physics));
-    // Every carve leaves a crater mark (scorch, cracks, fresh interior) in the object's own space.
-    out.marks = std::make_shared<SurfaceMarkList>();
-    {
-        GameWorld* world = out.world.get();
-        std::weak_ptr<SurfaceMarkList> marks = out.marks;
-        world->on_damage([world, marks](const GameDamageEvent& event) {
-            const auto list = marks.lock();
-            if (!list || event.destroyed || event.removedVoxelCount == 0U || !(event.radius > 0.0F)) return;
-            const auto transform = world->transform(event.objectId);
-            if (!transform) return;
-            list->add_crater(event.objectId, inverse_transform_point(*transform, event.worldCenter), event.radius);
-        });
-    }
     if (logSteps) log("physics: " + out.physicsBackend);
 
     // 5. Scene.
@@ -472,7 +455,7 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
         view.ocean=impl_->session.prototype->ocean_field();view.oceanTime=impl_->session.prototype->ocean_time();}
     view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
     view.polygonLodBias = impl_->settings.polygonLodBias;
-    if (impl_->session.marks) view.surfaceMarks = impl_->session.marks->marks();
+    view.surfaceMarks = impl_->session.world->surface_marks();   // the world keeps and saves them
     return view;
 }
 
@@ -485,7 +468,6 @@ std::optional<double> PlayerApp::script_global(const std::string& key) const {
     return std::nullopt;
 }
 
-SurfaceMarkList* PlayerApp::surface_marks() noexcept { return impl_->session.marks.get(); }
 const std::filesystem::path& PlayerApp::save_directory() const noexcept { return impl_->saveDirectory; }
 GameSaveCodec& PlayerApp::save_codec() noexcept { return *impl_->codec; }
 const std::vector<PlayerSaveEvent>& PlayerApp::save_events() const noexcept { return impl_->saveEvents; }

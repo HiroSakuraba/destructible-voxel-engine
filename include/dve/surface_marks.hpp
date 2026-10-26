@@ -13,7 +13,8 @@
 //
 // Strengths are 0..1. The marks only change shading (colour, roughness, metallic): the crater's
 // shape is the voxels'. SurfaceMarkList keeps the most recent marks up to a limit and turns
-// GameDamageEvents into marks (dve/game_world.hpp). The CPU player feeds it from its world.
+// craters into marks. GameWorld keeps one: every carve leaves a crater mark, fragments that
+// break off keep the marks that reach them, and saves carry them (dve/game_world.hpp).
 
 #include <cstdint>
 #include <span>
@@ -36,6 +37,8 @@ struct SurfaceMark {
     std::uint32_t seed{1};
 };
 [[nodiscard]] bool surface_mark_valid(const SurfaceMark&) noexcept;
+// Everything a mark can shade lies within this distance of its centre (metres).
+[[nodiscard]] float surface_mark_reach(const SurfaceMark&) noexcept;
 
 struct SurfaceMarkSample {
     float exposure{};
@@ -61,22 +64,37 @@ struct SurfaceMarkSettings {
     float reachScale{1.8F};
     float crackReach{2.2F};
     std::size_t maximumMarks{256};
+    friend bool operator==(const SurfaceMarkSettings&, const SurfaceMarkSettings&) = default;
 };
+// Strengths 0..1, reaches 1..10, at most 65536 marks.
+[[nodiscard]] bool surface_mark_settings_valid(const SurfaceMarkSettings&) noexcept;
 
 class SurfaceMarkList {
 public:
     explicit SurfaceMarkList(SurfaceMarkSettings settings = {}) : settings_(settings) {}
     // Adds a mark (dropping the oldest past maximumMarks); invalid marks are ignored.
-    void add(const SurfaceMark& mark);
+    bool add(const SurfaceMark& mark);   // false when ignored
     // A crater at object-local centre (metres) with the settings' strengths. Seeds follow the
     // order of the marks, so a replay gives the same cracks.
-    void add_crater(std::uint64_t objectId, Float3 centerMeters, float radiusMeters);
+    bool add_crater(std::uint64_t objectId, Float3 centerMeters, float radiusMeters);
     void clear() noexcept { marks_.clear(); }
     [[nodiscard]] std::span<const SurfaceMark> marks() const noexcept { return marks_; }
     [[nodiscard]] const SurfaceMarkSettings& settings() const noexcept { return settings_; }
     void set_settings(const SurfaceMarkSettings& settings);
+    // Drops every mark of an object (it was destroyed or released).
+    void remove_object(std::uint64_t objectId);
+    // Copies the marks of `from` that reach the box (object-local metres) to `to`: a fragment
+    // that broke off keeps the soot and cracks on its faces. Works while the list is disabled
+    // too (no new craters, but existing marks follow their pieces). Returns how many.
+    std::size_t copy_marks(std::uint64_t from, std::uint64_t to, Float3 boxMin, Float3 boxMax);
+    // The seed counter (saved with the marks so later craters crack the same way after a load).
+    [[nodiscard]] std::uint32_t next_seed() const noexcept { return next_; }
+    // Replaces the marks and the counter (loading a save). Invalid marks are dropped and only
+    // the newest maximumMarks are kept.
+    void restore(std::vector<SurfaceMark> marks, std::uint32_t nextSeed);
 
 private:
+    bool push(const SurfaceMark& mark);
     SurfaceMarkSettings settings_;
     std::vector<SurfaceMark> marks_;
     std::uint32_t next_{1};

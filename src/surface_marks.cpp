@@ -46,13 +46,23 @@ bool surface_mark_valid(const SurfaceMark& m) noexcept {
            m.reachScale <= 10.0F && m.crackReach >= 1.0F && m.crackReach <= 10.0F;
 }
 
+float surface_mark_reach(const SurfaceMark& m) noexcept {
+    return m.radiusMeters * std::max({m.reachScale, m.crackReach, 1.25F}) * 1.05F;
+}
+
+bool surface_mark_settings_valid(const SurfaceMarkSettings& s) noexcept {
+    const auto unitRange = [](float v) { return v >= 0.0F && v <= 1.0F; };
+    return unitRange(s.exposure) && unitRange(s.scorch) && unitRange(s.cracks) && s.reachScale >= 1.0F && s.reachScale <= 10.0F &&
+           s.crackReach >= 1.0F && s.crackReach <= 10.0F && s.maximumMarks <= 65536U;
+}
+
 SurfaceMarkSample sample_surface_marks(std::span<const SurfaceMark> marks, std::uint64_t objectId, Float3 p, float footprint) noexcept {
     SurfaceMarkSample out;
     for (const SurfaceMark& m : marks) {
         if (m.objectId != objectId || !surface_mark_valid(m)) continue;
         const float r = m.radiusMeters;
         const float d = length(subtract(p, m.centerMeters));
-        if (d > r * std::max(m.reachScale, m.crackReach) * 1.05F) continue;
+        if (d > surface_mark_reach(m)) continue;
         // The broken interior: everything the crater sphere cut (with a little slack for the
         // voxel staircase).
         out.exposure = std::max(out.exposure, m.exposure * (1.0F - smoothstep(r * 1.0F, r * 1.25F, d)));
@@ -105,13 +115,46 @@ void apply_surface_marks(VoxelMaterialDefinition& m, const SurfaceMarkSample& s)
     m.specular *= lerp(1.0F, 0.5F, soot);
 }
 
-void SurfaceMarkList::add(const SurfaceMark& mark) {
-    if (!settings_.enabled || settings_.maximumMarks == 0U || !surface_mark_valid(mark)) return;
+bool SurfaceMarkList::push(const SurfaceMark& mark) {
+    if (settings_.maximumMarks == 0U || !surface_mark_valid(mark)) return false;
     if (marks_.size() >= settings_.maximumMarks) marks_.erase(marks_.begin(), marks_.begin() + static_cast<std::ptrdiff_t>(marks_.size() - settings_.maximumMarks + 1U));
     marks_.push_back(mark);
+    return true;
 }
 
-void SurfaceMarkList::add_crater(std::uint64_t objectId, Float3 centerMeters, float radiusMeters) {
+bool SurfaceMarkList::add(const SurfaceMark& mark) {
+    return settings_.enabled && push(mark);
+}
+
+void SurfaceMarkList::remove_object(std::uint64_t objectId) {
+    std::erase_if(marks_, [&](const SurfaceMark& m) { return m.objectId == objectId; });
+}
+
+std::size_t SurfaceMarkList::copy_marks(std::uint64_t from, std::uint64_t to, Float3 lo, Float3 hi) {
+    std::vector<SurfaceMark> copies;
+    for (const SurfaceMark& m : marks_) {
+        if (m.objectId != from) continue;
+        const Float3 c = m.centerMeters;
+        const float dx = std::max({lo.x - c.x, 0.0F, c.x - hi.x}), dy = std::max({lo.y - c.y, 0.0F, c.y - hi.y}),
+                    dz = std::max({lo.z - c.z, 0.0F, c.z - hi.z});
+        if (dx * dx + dy * dy + dz * dz > surface_mark_reach(m) * surface_mark_reach(m)) continue;
+        SurfaceMark copy = m;
+        copy.objectId = to;
+        copies.push_back(copy);
+    }
+    for (const SurfaceMark& m : copies) push(m);
+    return copies.size();
+}
+
+void SurfaceMarkList::restore(std::vector<SurfaceMark> marks, std::uint32_t nextSeed) {
+    std::erase_if(marks, [](const SurfaceMark& m) { return !surface_mark_valid(m); });
+    if (marks.size() > settings_.maximumMarks)
+        marks.erase(marks.begin(), marks.begin() + static_cast<std::ptrdiff_t>(marks.size() - settings_.maximumMarks));
+    marks_ = std::move(marks);
+    next_ = std::max(nextSeed, 1U);
+}
+
+bool SurfaceMarkList::add_crater(std::uint64_t objectId, Float3 centerMeters, float radiusMeters) {
     SurfaceMark m;
     m.objectId = objectId;
     m.centerMeters = centerMeters;
@@ -121,8 +164,9 @@ void SurfaceMarkList::add_crater(std::uint64_t objectId, Float3 centerMeters, fl
     m.cracks = settings_.cracks;
     m.reachScale = settings_.reachScale;
     m.crackReach = settings_.crackReach;
+    if (!settings_.enabled) return false;
     m.seed = mix(next_++ * 0x9e3779b9U);
-    add(m);
+    return add(m);
 }
 
 void SurfaceMarkList::set_settings(const SurfaceMarkSettings& settings) {

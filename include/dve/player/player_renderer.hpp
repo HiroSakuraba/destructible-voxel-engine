@@ -43,8 +43,8 @@ struct PlayerRenderView {
     std::span<const RacingVisualEffect> racingEffects{};
     const OceanField* ocean{}; // same deterministic waves used by hull physics
     double oceanTime{}; // metres; lifetime owned by PrototypeGame
-    // Damage marks on voxel objects (object-local metres; PlayerApp keeps them from the world's
-    // damage events) and decals (world metres). CPU renderer only.
+    // Damage marks on voxel objects (object-local metres; GameWorld::surface_marks()) and decals
+    // (world metres). CPU renderer only.
     std::span<const SurfaceMark> surfaceMarks{};
     std::span<const MaterialDecal> decals{};
 };

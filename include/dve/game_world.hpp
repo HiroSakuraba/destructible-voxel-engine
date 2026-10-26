@@ -20,6 +20,7 @@
 #include "dve/component.hpp"
 #include "dve/damage.hpp"
 #include "dve/editor_materials.hpp"
+#include "dve/surface_marks.hpp"
 #include "dve/fragment.hpp"
 #include "dve/geometry_build.hpp"
 #include "dve/polygon_asset.hpp"
@@ -272,6 +273,11 @@ struct GameWorldSaveState {
     std::vector<GameWorldObjectState> objects;   // sorted by id
     std::vector<GameWorldTimerState> timers;     // live timers, in scheduling order
     std::vector<GameWorldPoolState> pools;       // sorted by id
+    // Damage marks (GameWorld::surface_marks): the live marks, oldest first, the settings and
+    // the seed counter.
+    std::vector<SurfaceMark> surfaceMarks;
+    SurfaceMarkSettings surfaceMarkSettings{};
+    std::uint32_t nextSurfaceMarkSeed{1};
 };
 
 struct GameWorldRestoreOptions {
@@ -512,6 +518,18 @@ public:
     [[nodiscard]] std::size_t pending_destruction_count() const noexcept;
     [[nodiscard]] std::uint64_t rejected_destruction_requests() const noexcept { return rejectedDestruction_; }
     std::optional<std::uint64_t> damage_sphere(GameObjectId id, Float3 worldCenter, float radius);
+    // Damage marks (dve/surface_marks.hpp): every carve, immediate or queued, leaves a crater
+    // mark (soot, cracks, fresh interior) in the object's own space; fragments that break off
+    // keep copies of the marks that reach them; destroyed or pooled objects lose theirs. Marks
+    // are saved with the world. Shading only: the CPU player draws them.
+    [[nodiscard]] std::span<const SurfaceMark> surface_marks() const noexcept { return surfaceMarks_.marks(); }
+    [[nodiscard]] const SurfaceMarkSettings& surface_mark_settings() const noexcept { return surfaceMarks_.settings(); }
+    // False (nothing changed) for out-of-range settings. Lowering maximumMarks drops the oldest.
+    bool set_surface_mark_settings(const SurfaceMarkSettings& settings);
+    // Stamps a mark on an existing object (centre in world metres, like damage_sphere) without
+    // carving; uses the settings' strengths. False for an unknown object or when disabled.
+    bool add_surface_mark(GameObjectId id, Float3 worldCenter, float radiusMeters);
+    void clear_surface_marks(std::optional<GameObjectId> id = std::nullopt);
 
     // Nearest hit across every object with voxel data, or nullopt. Static and dynamic objects
     // are both tested at their current transform.
@@ -736,6 +754,8 @@ private:
     std::unordered_map<GameObjectId, GameObjectPoolId> objectPools_;
     GameObjectId nextId_{1};
     std::size_t debrisLimit_{2048};
+    SurfaceMarkList surfaceMarks_;
+    void copy_marks_to_fragment(GameObjectId parent, GameObjectId fragment, const Object& fragmentObject);
     std::uint64_t nextDebrisSequence_{1};
     GameObjectPoolId nextPoolId_{1};
     std::vector<Timer> timers_;

@@ -48,6 +48,7 @@ constexpr std::string_view kMaterialNormalMapSection = "dve.material_normal_maps
 constexpr std::string_view kMaterialTextureSection = "dve.material_textures";
 constexpr std::string_view kMaterialDisplacementSection = "dve.material_displacement";
 constexpr std::string_view kMaterialRulesSection = "dve.material_rules";
+constexpr std::string_view kSurfaceMarksSection = "dve.surface_marks";
 constexpr std::string_view kReservedPrefix = "dve.";
 
 constexpr std::uint8_t kFlagDynamic = 1U << 0U;
@@ -1294,6 +1295,25 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
             document.sections.emplace(std::string(kMaterialRulesSection), std::move(w.bytes()));
         }
     }
+    if (!world.surfaceMarks.empty() || world.nextSurfaceMarkSeed != 1U || !(world.surfaceMarkSettings == SurfaceMarkSettings{})) {
+        // Damage marks: settings, seed counter, then every mark (oldest first).
+        const SurfaceMarkSettings& settings = world.surfaceMarkSettings;
+        if (!surface_mark_settings_valid(settings)) return fail(error, "invalid surface mark settings"), std::nullopt;
+        Writer w(limits_);
+        w.boolean(settings.enabled);
+        w.f32(settings.exposure); w.f32(settings.scorch); w.f32(settings.cracks); w.f32(settings.reachScale); w.f32(settings.crackReach);
+        w.u32(static_cast<std::uint32_t>(settings.maximumMarks));
+        w.u32(world.nextSurfaceMarkSeed);
+        w.count(world.surfaceMarks.size(), 65536U, "surface mark");
+        for (const SurfaceMark& m : world.surfaceMarks) {
+            if (!surface_mark_valid(m)) return fail(error, "invalid surface mark"), std::nullopt;
+            w.u64(m.objectId); w.float3(m.centerMeters);
+            w.f32(m.radiusMeters); w.f32(m.exposure); w.f32(m.scorch); w.f32(m.cracks); w.f32(m.reachScale); w.f32(m.crackReach);
+            w.u32(m.seed);
+        }
+        if (w.failed()) return fail(error, w.failure()), std::nullopt;
+        document.sections.emplace(std::string(kSurfaceMarksSection), std::move(w.bytes()));
+    }
     {
         Writer w(limits_);std::uint32_t count=0;
         for(const auto& object:world.objects)for(const auto& m:object.materials)if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)++count;
@@ -1738,6 +1758,27 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         }
         if (!r.finish()) return corrupt(r);
     }
+    if (const auto* bytes = section(kSurfaceMarksSection)) {
+        Reader r(*bytes, kSurfaceMarksSection, limits_);
+        SurfaceMarkSettings settings;
+        std::uint32_t maximum{}, seed{}, count{};
+        if (!(r.boolean(settings.enabled) && r.f32(settings.exposure) && r.f32(settings.scorch) && r.f32(settings.cracks) &&
+              r.f32(settings.reachScale) && r.f32(settings.crackReach) && r.u32(maximum) && r.u32(seed) &&
+              r.count(count, 65536U, "surface mark")))
+            return corrupt(r);
+        settings.maximumMarks = maximum;
+        if (!surface_mark_settings_valid(settings)) return fail(error, "invalid surface mark settings"), std::nullopt;
+        world.surfaceMarkSettings = settings;
+        world.nextSurfaceMarkSeed = seed;
+        world.surfaceMarks.resize(count);
+        for (SurfaceMark& m : world.surfaceMarks) {
+            if (!(r.u64(m.objectId) && r.float3(m.centerMeters) && r.f32(m.radiusMeters) && r.f32(m.exposure) && r.f32(m.scorch) &&
+                  r.f32(m.cracks) && r.f32(m.reachScale) && r.f32(m.crackReach) && r.u32(m.seed)))
+                return corrupt(r);
+            if (!surface_mark_valid(m) || !indexById.contains(m.objectId)) return fail(error, "invalid surface mark"), std::nullopt;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
     if (const auto* bytes = section(kMaterialRulesSection)) {
         Reader r(*bytes, kMaterialRulesSection, limits_);
         std::uint32_t count{};
@@ -1962,7 +2003,7 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
                 name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection &&
-                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialTextureSection && name != kMaterialDisplacementSection && name != kMaterialRulesSection && name != kMaterialSurfaceDetailSection &&
+                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialTextureSection && name != kMaterialDisplacementSection && name != kMaterialRulesSection && name != kSurfaceMarksSection && name != kMaterialSurfaceDetailSection &&
                 name != kMaterialSheenSection && name != kMaterialIridescenceSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;

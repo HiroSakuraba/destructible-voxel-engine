@@ -3,8 +3,9 @@
 //     the ring only; other objects untouched; strongest of overlapping marks; the list keeps the
 //     newest up to its limit; sub-pixel cracks fade;
 //   - shading: soot darkens to 7 %, exposure lightens and dulls;
-//   - GameWorld damage events become marks in the object's own space (as the CPU player does),
-//     and the marks move with the object;
+//   - GameWorld keeps the marks: one per carve in the object's own space, copies on fragments that
+//     the crater reaches, dropped with destroyed objects, carried by capture/restore and hashed;
+//   - the marks move with the object;
 //   - on voxels: a crater's marks shade the floor around it, and decals project onto voxels
 //     exactly (coverage read from the emission pass);
 //   - weathering recipes: snow tops, moss in hollows, rust on edges, wetness multiplies; amounts
@@ -114,36 +115,83 @@ void test_marks() {
     check(list.marks().back().centerMeters.x == 4.0F, "a disabled list adds nothing");
 }
 
-// GameWorld damage -> marks in the object's own space, as the CPU player hooks it.
-void test_world_events() {
+// GameWorld keeps the marks: every carve leaves one in the object's own space, pieces that break
+// off keep copies, destroyed objects lose theirs, and capture/restore carries them.
+void test_world_marks() {
     GameWorld world(std::make_unique<ReferenceRigidBodyWorld>());
     GameObjectDesc desc;
     desc.name = "Wall";
     desc.voxelSizeMeters = 0.5F;
     desc.dynamic = false;
     desc.voxels = std::make_unique<VoxelObject>(1U);
-    for (int x = 0; x < 8; ++x)
+    // A 10 x 8 x 2 slab and a smaller 6 x 8 x 2 one, joined by a one-voxel bridge at x = 10.
+    for (int x = 0; x < 17; ++x)
         for (int y = 0; y < 8; ++y)
-            for (int z = 0; z < 2; ++z) desc.voxels->set_voxel({x, y, z}, 1);
+            for (int z = 0; z < 2; ++z)
+                if (x != 10 || (y == 3 && z == 0)) desc.voxels->set_voxel({x, y, z}, 1);
     desc.transform = make_rigid_transform({10.0F, 0.0F, 0.0F}, quaternion_from_axis_angle({0, 1, 0}, 0.5F));
     std::string error;
     const GameObjectId id = world.create_object(std::move(desc), &error);
     check(id != kInvalidGameObjectId, "create wall: " + error);
-    auto marks = std::make_shared<SurfaceMarkList>();
-    GameWorld* w = &world;
-    world.on_damage([w, marks](const GameDamageEvent& event) {
-        if (event.destroyed || event.removedVoxelCount == 0U) return;
-        if (const auto t = w->transform(event.objectId)) marks->add_crater(event.objectId, inverse_transform_point(*t, event.worldCenter), event.radius);
-    });
     const RigidTransform pose = *world.transform(id);
+    // A small crater in the middle of the left slab: one mark, at the crater, in object space.
     const Float3 local{2.0F, 2.0F, 0.5F};
     const auto removed = world.damage_sphere(id, transform_point(pose, local), 0.8F);
-    check(removed && *removed > 0U && marks->marks().size() == 1U, "a carve leaves one mark");
-    if (!marks->marks().empty()) {
-        const SurfaceMark& m = marks->marks()[0];
+    check(removed && *removed > 0U && world.surface_marks().size() == 1U, "a carve leaves one mark");
+    if (!world.surface_marks().empty()) {
+        const SurfaceMark& m = world.surface_marks()[0];
         check(m.objectId == id && length(subtract(m.centerMeters, local)) < 1e-4F && m.radiusMeters == 0.8F,
               "the mark sits at the crater, in the object's own space");
     }
+    // Cut the bridge: the smaller right slab breaks off as a fragment. The bridge crater's mark reaches
+    // both pieces, so the fragment keeps a copy; the first crater is too far from it to follow.
+    const Float3 bridge{10.25F * 0.5F, 3.5F * 0.5F, 0.25F};
+    const std::size_t objectsBefore = world.object_count();
+    (void)world.damage_sphere(id, transform_point(pose, bridge), 0.4F);
+    check(world.object_count() == objectsBefore + 1U, "the cut splits the wall");
+    std::size_t onParent = 0, onFragment = 0;
+    GameObjectId fragment = kInvalidGameObjectId;
+    for (const SurfaceMark& m : world.surface_marks()) {
+        if (m.objectId == id) ++onParent;
+        else { ++onFragment; fragment = m.objectId; }
+    }
+    std::printf("marks: %zu on the wall, %zu on the piece that broke off\n", onParent, onFragment);
+    check(onParent == 2U && onFragment == 1U, "the piece that broke off keeps the bridge crater's mark only");
+    if (fragment != kInvalidGameObjectId) {
+        const SurfaceMark& copy = world.surface_marks().back();
+        check(length(subtract(copy.centerMeters, bridge)) < 1e-4F, "the copy keeps its place in the shared voxel space");
+        // The fragment shares the parent's voxel space: its mark lands on its own surface wherever it falls.
+        const auto fragmentPose = world.transform(fragment);
+        check(fragmentPose.has_value(), "the fragment has a pose");
+    }
+    // Capture and restore carry the marks; the hash covers them.
+    const GameWorldSaveState saved = world.capture_save_state();
+    check(saved.surfaceMarks.size() == 3U && saved.nextSurfaceMarkSeed == 3U, "capture holds the marks and the seed counter");
+    const std::uint64_t hash = world.state_hash();
+    world.clear_surface_marks();
+    check(world.surface_marks().empty() && world.state_hash() != hash, "marks are part of the state hash");
+    check(world.restore_save_state(saved, nullptr, &error), "restore: " + error);
+    check(world.surface_marks().size() == 3U && world.state_hash() == hash, "restore brings the marks back exactly");
+    // Destroying the fragment drops its marks.
+    if (fragment != kInvalidGameObjectId) {
+        check(world.destroy_object(fragment), "destroy the fragment");
+        check(world.surface_marks().size() == 2U, "a destroyed object loses its marks");
+    }
+    // Settings: disabled stops new marks; stamping without carving; validation.
+    SurfaceMarkSettings settings = world.surface_mark_settings();
+    settings.scorch = 2.0F;
+    check(!world.set_surface_mark_settings(settings), "out-of-range settings are refused");
+    settings.scorch = 0.5F;
+    settings.enabled = false;
+    check(world.set_surface_mark_settings(settings), "settings apply");
+    (void)world.damage_sphere(id, transform_point(pose, {1.0F, 3.0F, 0.5F}), 0.5F);
+    check(world.surface_marks().size() == 2U && !world.add_surface_mark(id, transform_point(pose, local), 0.5F), "disabled: no new marks");
+    settings.enabled = true;
+    check(world.set_surface_mark_settings(settings) && world.add_surface_mark(id, transform_point(pose, {3.0F, 3.0F, 0.0F}), 0.5F) &&
+              world.surface_marks().back().scorch == 0.5F,
+          "a stamped mark uses the settings' strengths");
+    world.clear_surface_marks(id);
+    check(world.surface_marks().empty(), "clearing one object's marks");
 }
 
 // --- On voxels ---------------------------------------------------------------------------------
@@ -304,7 +352,7 @@ void test_weathering() {
 
 int main() {
     test_marks();
-    test_world_events();
+    test_world_marks();
     test_render();
     test_weathering();
     if (g_failures == 0) std::printf("dve_weathering_damage_tests: PASS\n");

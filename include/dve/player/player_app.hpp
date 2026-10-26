@@ -131,8 +131,6 @@ public:
     [[nodiscard]] const ContentSource& content() const noexcept;
     [[nodiscard]] const GameManifest& manifest() const noexcept;
     [[nodiscard]] const ui::GameSettings& settings() const noexcept;
-    // The current session's damage marks (null before a scene loads): settings and clearing.
-    [[nodiscard]] SurfaceMarkList* surface_marks() noexcept;
     [[nodiscard]] GameWorld& world() noexcept;
     [[nodiscard]] const GameWorld& world() const noexcept;
     [[nodiscard]] const PlayerInput& input() const noexcept;

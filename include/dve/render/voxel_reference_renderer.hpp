@@ -9,8 +9,10 @@
 #include <string>
 
 #include "dve/asset_cooker.hpp"
+#include "dve/render/volumetric_fog.hpp"
 #include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/polygon_renderer.hpp"
+#include "dve/surface_marks.hpp"
 #include "dve/transform.hpp"
 #include "dve/voxel_object.hpp"
 
@@ -41,6 +43,9 @@ struct VoxelReferenceRenderStats {
     std::uint64_t tracedRays{};
     std::uint64_t hitRays{};
     std::uint64_t materialFallbacks{};
+    std::uint64_t layeredSurfaces{};   // pixels where a material layer covered the surface
+    std::uint64_t markedSurfaces{};    // pixels a damage mark shaded
+    std::uint64_t decalSurfaces{};     // pixels a decal covered
     std::uint64_t shadowRays{};
     std::uint64_t shadowBlockedRays{};
     std::uint64_t globalIlluminationRays{};
@@ -138,6 +143,11 @@ public:
     // Polygons that ambient-occlusion rays see, besides the voxels and sunOccluders (the hybrid
     // reference and the CPU player pass their polygons here). Must outlive render().
     std::span<const PolygonRenderInstance> occlusionPolygons{};
+    // Damage marks (dve/surface_marks.hpp), matched to instances by objectId, in each object's
+    // own metres; and decals (dve/material_decal.hpp), box-projected in scene world units (voxel
+    // units here). Both shade only: after the material's maps and layers. Must outlive render().
+    std::span<const SurfaceMark> surfaceMarks{};
+    std::span<const MaterialDecal> decals{};
 
     [[nodiscard]] VoxelReferenceRenderStats render(
         std::span<const VoxelReferenceInstance> instances,
@@ -167,6 +177,8 @@ public:
     HybridOcclusionScene(const HybridOcclusionScene&) = delete;
     HybridOcclusionScene& operator=(const HybridOcclusionScene&) = delete;
     [[nodiscard]] std::optional<float> nearest(Float3 origin, Float3 direction, float maximumDistance) const;
+    // Traced displacement for these rays (spwi::VoxelSceneTracer::set_displacement).
+    void set_displacement(float metersPerVoxel, Float3 focus, float focusRadius) noexcept;
     // For PolygonRenderOptions::occlusionRay; valid while this scene lives.
     [[nodiscard]] AmbientOcclusionRay ray() const;
 
@@ -177,12 +189,16 @@ private:
 
 // Direct hybrid reference composition. Voxel occupancy is traced into the shared target first;
 // polygons then depth-test and alpha-blend against that target. This validates polygon-in-front,
-// voxel-in-front, and translucent-over-voxel behavior without a synthetic voxel layer. The
-// environment's distance fog is applied last (apply_distance_fog). Render passes are filled when
+// voxel-in-front, and translucent-over-voxel behavior without a synthetic voxel layer. In
+// Physical sky mode the sky is painted behind the voxels before the polygons are drawn
+// (paint_sky_background) and aerial perspective is added after; then volumetric fog
+// (apply_volumetric_fog, shadow rays through voxels and polygons); the environment's distance
+// fog is applied last (apply_distance_fog). Render passes are filled when
 // the target has them enabled.
 struct HybridReferenceRenderStats {
     VoxelReferenceRenderStats voxels{};
     PolygonRenderStats polygons{};
+    VolumetricFogStats volumetricFog{};
 };
 
 [[nodiscard]] HybridReferenceRenderStats render_hybrid_reference(

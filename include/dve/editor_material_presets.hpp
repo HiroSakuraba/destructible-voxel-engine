@@ -13,7 +13,8 @@ enum class MaterialPresetProperty : unsigned {
     AbsorptionR, AbsorptionG, AbsorptionB, AbsorptionDistance, Coat, CoatRoughness,
     DetailScale, DetailStrength, Pattern, DetailSpace, PatternScale,
     PatternRotationX, PatternRotationY, PatternRotationZ, GrainStretch, ColorVariation,
-    RoughnessVariation, BumpHeight, PatternSeed, UvTileMeters, ScatterDistance, ScatterR, ScatterG, ScatterB, SheenR, SheenG, SheenB, SheenRoughness, Iridescence, FilmIor, FilmThickness, Count
+    RoughnessVariation, BumpHeight, PatternSeed, UvTileMeters, ScatterDistance, ScatterR, ScatterG, ScatterB, SheenR, SheenG, SheenB, SheenRoughness, Iridescence, FilmIor, FilmThickness,
+    TextureTile, TextureSharpness, TextureAntiTiling, DisplacementDepth, DisplacementMode, Count
 };
 struct MaterialPresetControl {
     MaterialPresetProperty property;

@@ -32,20 +32,7 @@ double milliseconds_since(Clock::time_point start) {
 const std::array<VoxelMaterialDefinition, 256>& default_palette() {
     static const std::array<VoxelMaterialDefinition, 256> palette = [] {
         std::array<VoxelMaterialDefinition, 256> result{};
-        for (std::size_t id = 0; id < result.size(); ++id) {
-            const float hue = static_cast<float>((id * 47U) % 360U) / 60.0F;
-            const float x = 1.0F - std::abs(std::fmod(hue, 2.0F) - 1.0F);
-            Float3 rgb{};
-            if (hue < 1) rgb = {1, x, 0};
-            else if (hue < 2) rgb = {x, 1, 0};
-            else if (hue < 3) rgb = {0, 1, x};
-            else if (hue < 4) rgb = {0, x, 1};
-            else if (hue < 5) rgb = {x, 0, 1};
-            else rgb = {1, 0, x};
-            result[id].name = "default";
-            result[id].baseColor = {0.25F + 0.5F * rgb.x, 0.25F + 0.5F * rgb.y, 0.25F + 0.5F * rgb.z, 1.0F};
-            result[id].roughness = 0.8F;
-        }
+        for (std::size_t id = 0; id < result.size(); ++id) result[id] = default_voxel_material(static_cast<MaterialId>(id));
         return result;
     }();
     return palette;
@@ -320,7 +307,7 @@ public:
         const RenderEnvironment environment = apply_cpu_render_quality(view.environment, options_.quality);
         if (!environment.validate(error))
           return false;
-        clear_background(environment);
+        clear_background(environment, camera);
         std::unique_ptr<render::SceneLighting> sceneLighting;
         if (!environment.lights.empty() || environment.pathTraceBounces > 0 || render::scene_uses_camera_transport(voxels_,polygons_))
           sceneLighting = std::make_unique<render::SceneLighting>(
@@ -354,6 +341,15 @@ public:
         // scenes (no lights, no path budget) keep their exact previous frames.
         if (sceneLighting) voxelRenderer.sunOccluders = polygons_;
         voxelRenderer.occlusionPolygons = polygons_;   // AO rays see voxels and polygons alike
+        voxelRenderer.surfaceMarks = view.surfaceMarks;   // object-local metres, as the renderer reads them
+        // Decals are box projections in world metres: into the renderer's voxel units.
+        decals_.assign(view.decals.begin(), view.decals.end());
+        for (MaterialDecal& decal : decals_) {
+            decal.center = multiply(decal.center, toUnits);
+            decal.halfExtents = multiply(decal.halfExtents, toUnits);
+            decal.edgeFeather *= toUnits;
+        }
+        voxelRenderer.decals = decals_;
         const auto voxelStats = voxelRenderer.render(voxels_, camera, environment, target_, true);
         stats_.tracedRays = voxelStats.tracedRays;
         stats_.hitRays = voxelStats.hitRays;
@@ -366,14 +362,23 @@ public:
             polygonOptions.cache = &polygonRenderCache_;
             polygonOptions.surfaceDetail=view.surfaceDetail;
             polygonOptions.metersPerUnit = voxelSize;
+            polygonOptions.decals = decals_;
             std::optional<render::HybridOcclusionScene> occlusion;
             if (environment.ambientOcclusionSamples > 0U && environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
                 occlusion.emplace(voxels_, polygons_);
+                occlusion->set_displacement(voxelSize, camera.position, environment.displacementTraceDistanceMeters / voxelSize);
                 polygonOptions.occlusionRay = occlusion->ray();
             }
             stats_.polygons = render::ReferencePolygonRenderer{}.render(polygons_, camera, environment, target_, polygonOptions);
         } else {
             polygonRenderCache_.clear();
+        }
+        (void)render::apply_aerial_perspective(target_, camera, environment, voxelSize);
+        if (environment.volumetricFogDensityPerMeter > 0.0F) {
+            render::HybridOcclusionScene fogShadows(voxels_, polygons_);   // light shafts see everything
+            fogShadows.set_displacement(voxelSize, camera.position, environment.displacementTraceDistanceMeters / voxelSize);
+            (void)render::apply_volumetric_fog(target_, camera, environment, voxelSize, fogShadows.ray(),
+                                               static_cast<std::uint32_t>(frameIndex_), options_.threadCount);
         }
         if(view.fogVolumes.empty()) {
             (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
@@ -395,6 +400,7 @@ public:
             std::optional<render::HybridOcclusionScene> fogOcclusion;
             if(fogSettings.scattering&&!fogSettings.sceneVisibility){
                 fogOcclusion.emplace(voxels_,polygons_);
+                fogOcclusion->set_displacement(voxelSize, camera.position, environment.displacementTraceDistanceMeters / voxelSize);
                 fogSettings.sceneVisibility=[&](Float3 p,Float3 d,float maximum){
                     return fogOcclusion->nearest(add(p,multiply(d,0.001F*toUnits)),d,maximum)?0.0F:1.0F;
                 };
@@ -402,6 +408,7 @@ public:
             if(!render::apply_cpu_fog(target_,camera,environment,voxelSize,fogVolumes,
                                      fogSettings,&stats_.fog,error))return false;
         }
+        ++frameIndex_;
         if (sceneLighting) (void)render::apply_cpu_bloom(target_, environment);
         stats_.renderMilliseconds = milliseconds_since(start);
 
@@ -469,8 +476,9 @@ private:
             it=it->second.lastFrame==polygonFrame_ ? std::next(it) : polygonLods_.erase(it);
     }
 
-    void clear_background(const RenderEnvironment& environment) {
+    void clear_background(const RenderEnvironment& environment, const render::PolygonCamera& camera) {
         target_.clear({environment.skyColor.x, environment.skyColor.y, environment.skyColor.z, 1.0F}, 1.0F);
+        if (render::paint_sky_background(target_, camera, environment) > 0U) return;   // Physical sky
         if (!options_.skyGradient) return;
         for (std::uint32_t y = 0; y < target_.height; ++y) {
             const float t = static_cast<float>(y) / static_cast<float>((std::max)(1U, target_.height - 1U));
@@ -486,11 +494,13 @@ private:
     IFrameBlitter* blitter_{};
     CpuPlayerRendererOptions options_{};
     render::PolygonRenderTarget target_;
+    std::uint64_t frameIndex_{};   // volumetric fog jitter changes every frame
     Rgba8Image frame_;
     bool rendered_{};
     PlayerRenderStats stats_{};
     std::vector<render::VoxelReferenceInstance> voxels_;
     std::vector<render::PolygonRenderInstance> polygons_;
+    std::vector<MaterialDecal> decals_;   // the view's decals in voxel units
     std::unordered_map<std::uint64_t, ScaledPolygon> polygonCache_;
     struct LodBinding { std::vector<render::PolygonLodLevel> levels; std::uint64_t lastFrame{}; };
     std::unordered_map<GameObjectId,LodBinding> polygonLods_;

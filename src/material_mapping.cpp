@@ -89,11 +89,6 @@ bool validate_material_mapping_settings(const MaterialMappingSettings& settings,
         settings.maximumParallaxDistanceMeters <= 0.0F) {
         return fail("height mapping controls are invalid");
     }
-    if (settings.heightMode != HeightMappingMode::Off &&
-        (settings.mappingMode == MaterialMappingMode::WorldTriplanar ||
-         settings.mappingMode == MaterialMappingMode::ObjectTriplanar)) {
-        return fail("parallax modes currently require UV0 or UV1 mapping");
-    }
     return true;
 }
 

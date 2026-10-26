@@ -105,6 +105,22 @@ struct PolygonRenderTarget {
 std::uint64_t apply_distance_fog(PolygonRenderTarget& target, const PolygonCamera& camera,
                                  const RenderEnvironment& environment, float metersPerUnit);
 
+// Physical sky (RenderEnvironment::skyMode Physical; both do nothing in Colors mode):
+//
+// paint_sky_background fills every pixel nothing has been drawn in (depth 1) with the sky seen
+// along its ray and the sun disc (render::background_radiance) and sets the background pass to
+// it. Paint it before translucent surfaces are drawn, so they blend over the sky. Returns the
+// pixels painted.
+//
+// apply_aerial_perspective adds the air between the camera and each drawn pixel: the pixel keeps
+// the air's transmittance T of its light and gains the light the air scatters toward the camera
+// (AtmosphereModel::segment over the distance along the ray x aerialPerspectiveScale, the camera
+// at observerAltitudeMeters + its y in metres). Light passes are scaled by T and the scattered
+// light goes to the fog pass, so the passes still sum. Returns the pixels changed.
+std::uint64_t paint_sky_background(PolygonRenderTarget& target, const PolygonCamera& camera, const RenderEnvironment& environment);
+std::uint64_t apply_aerial_perspective(PolygonRenderTarget& target, const PolygonCamera& camera,
+                                       const RenderEnvironment& environment, float metersPerUnit);
+
 // Writes beauty and every pass as PFM images (32-bit float, little-endian): beauty, the light
 // passes, shadow, normal (rgb), sun_visibility and depth (greyscale, metres; empty pixels hold
 // the far plane in metres as PFM has no infinity convention). File names are
@@ -197,6 +213,7 @@ struct PolygonRenderStats {
     std::uint64_t transparentFragments{};
     std::uint64_t textureSamples{};
     std::uint64_t triplanarSamples{};
+    std::uint64_t triplanarParallaxFragments{};   // fragments whose triplanar lookups were parallax-shifted
     std::uint64_t detailSamples{};
     std::uint64_t parallaxSamples{};
     std::uint64_t parallaxFallbacks{}, parallaxShadowSamples{}, bumpSamples{}, reliefDepthWrites{};

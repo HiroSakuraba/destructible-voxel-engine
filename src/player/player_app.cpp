@@ -5,6 +5,7 @@
 
 #if defined(DVE_HAVE_LUA)
 #include "dve/game_script.hpp"
+#include "dve/transform.hpp"
 #endif
 
 #include <algorithm>
@@ -455,6 +456,7 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
         view.waterSpray=impl_->session.prototype->water_spray_effects();}
     view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
     view.polygonLodBias = impl_->settings.polygonLodBias;
+    view.surfaceMarks = impl_->session.world->surface_marks();   // the world keeps and saves them
     return view;
 }
 

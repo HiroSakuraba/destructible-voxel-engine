@@ -7503,6 +7503,22 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "material.open_globals") return dispatch_action("material.globals");
     // Commands that exist in the shortcut set but have no native-editor implementation yet: say
     // so (and what to use instead) instead of reporting success.
+    if(actionId.starts_with("material.import_")&&actionId.ends_with("_map")){
+        const unsigned slot=actionId=="material.import_base_color_map"?0U:actionId=="material.import_orm_map"?1U:actionId=="material.import_height_map"?2U:3U;
+        const auto* asset=assetBrowserState_.selectedId?std::as_const(assetDatabase_).find(*assetBrowserState_.selectedId):nullptr;
+        std::string extension=asset?asset->relativePath.extension().string():std::string();
+        for(char& ch:extension)ch=static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if(!asset||(extension!=".png"&&extension!=".jpg"&&extension!=".jpeg")){set_status("Select a PNG or JPEG image in the Assets panel first.",true);return false;}
+        if(!materialPanel_.open)open_material_panel();
+        return material_panel_import_map(slot,asset->relativePath);
+    }
+    if(actionId=="material.clear_maps"){if(!materialPanel_.open)open_material_panel();material_panel_clear_maps();return true;}
+    if(actionId=="material.weather")return weather_selection(materialPanel_.weatherKind,materialPanel_.weatherAmount);
+    if(actionId=="material.weather_kind"){
+        materialPanel_.weatherKind=WeatheringKind((unsigned(materialPanel_.weatherKind)+1U)%6U);
+        set_status(std::string("Weathering: ")+weathering_kind_label(materialPanel_.weatherKind)+" (amount "+std::to_string(materialPanel_.weatherAmount).substr(0,4)+")");
+        return true;
+    }
     if(actionId=="material.library" || actionId=="material.preview"){open_material_panel();return materialPanel_.open;}
     if(actionId=="material.create_instance"){open_material_panel();return materialPanel_.open;}
     if (actionId == "material.assign" || actionId == "material.apply") {

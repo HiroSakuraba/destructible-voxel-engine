@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <vector>
@@ -61,6 +62,19 @@ public:
                                                           MaterialId id) const noexcept;
     [[nodiscard]] std::uint64_t dense_bytes() const noexcept;
 
+    // Traced displacement (dve/voxel_displacement.hpp): hits on voxels whose material displaces
+    // (mode Traced) are refined against the carved height field, and rays pass through carved-away
+    // space, for every query (primary, shadow, AO, GI). metersPerVoxel converts heights; only hits
+    // within focusRadius (world units) of focus are refined (the renderer's camera and
+    // displacementTraceDistanceMeters); beyond, voxels stay cubic. Default: 0.1 m, everywhere.
+    void set_displacement(float metersPerVoxel, Float3 focus, float focusRadius) noexcept {
+        metersPerVoxel_ = metersPerVoxel > 0.0F ? metersPerVoxel : 0.1F;
+        focus_ = focus;
+        focusRadius_ = focusRadius;
+    }
+    [[nodiscard]] float meters_per_voxel() const noexcept { return metersPerVoxel_; }
+    [[nodiscard]] bool displacement_in_focus(Float3 world) const noexcept;
+
 private:
     struct Grid {
         bool active{};
@@ -75,8 +89,20 @@ private:
                                                       Float3 direction,
                                                       float maximumDistance) const;
 
+    struct LocalHit {
+        RayHit hit{};
+        bool displaced{};
+        Float3 normal{};   // local, when displaced
+    };
+    [[nodiscard]] std::optional<LocalHit> raycast_displaced(std::size_t instance, const Grid& grid, Float3 origin, Float3 direction,
+                                                            float maximumDistance, Float3 cellMeters) const;
+    [[nodiscard]] MaterialId cell_material(const Grid& grid, Int3 voxel) const noexcept;
+
     std::span<const VoxelReferenceInstance> instances_;
     std::vector<Grid> grids_;
+    float metersPerVoxel_{0.1F};
+    Float3 focus_{};
+    float focusRadius_{std::numeric_limits<float>::infinity()};
 };
 
 // ---- Primary-hit G-buffer ------------------------------------------------------------------

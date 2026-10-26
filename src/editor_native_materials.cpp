@@ -5,6 +5,9 @@
 #include "dve/editor_voxel_selection.hpp"
 #include "dve/editor_runtime_settings.hpp"
 #include "dve/render/layered_surface.hpp"
+#include "dve/voxel_displacement.hpp"
+#include "dve/weathering.hpp"
+#include <functional>
 #include "editor_native_long_job.hpp"
 #include <chrono>
 #include <limits>
@@ -159,7 +162,13 @@ std::vector<MaterialPresetControl> NativeEditorController::material_panel_contro
     std::vector<MaterialPresetControl> r;const auto& m=materialPanel_.draft;
     for(auto c:material_preset_controls()){
         if(c.advanced&&!materialPanel_.advanced)continue;
-        if(!materialPanel_.advanced && unsigned(c.property)>=unsigned(MaterialPresetProperty::DetailSpace) && m.surfaceDetail.pattern==SurfacePattern::NoPattern)continue;
+        const bool texturing=unsigned(c.property)>=unsigned(MaterialPresetProperty::TextureTile);
+        if(!materialPanel_.advanced && !texturing && unsigned(c.property)>=unsigned(MaterialPresetProperty::DetailSpace) && m.surfaceDetail.pattern==SurfacePattern::NoPattern)continue;
+        // Texture-set controls only with a texture set; displacement only with a height source.
+        if(!materialPanel_.advanced && texturing){
+            const bool displacement=c.property==MaterialPresetProperty::DisplacementDepth||c.property==MaterialPresetProperty::DisplacementMode;
+            if(displacement?!material_has_height_source(m):!material_has_textures(m))continue;
+        }
         if(!materialPanel_.advanced){
             if(m.transmission==0&&(c.property==MaterialPresetProperty::Ior||c.property==MaterialPresetProperty::AbsorptionDistance))continue;
             if(m.clearCoat==0&&c.property==MaterialPresetProperty::CoatRoughness)continue;
@@ -267,6 +276,117 @@ bool NativeEditorController::load_material_panel_slot(){
     materialPanel_.message="Editing a draft of slot "+std::to_string(materialPanel_.slot)+"; Apply to Slot changes every face/cell using that slot on selected objects";
     material_panel_preview();return true;
 }
+namespace {
+// One Layers-row edit of a layer's rules ("rules" toggles; "rule*" sets one field and turns the
+// rules on). Returns an error message, empty on success; the layer is unchanged on error.
+std::string edit_layer_rule(VoxelMaterialLayer& layer,std::string_view action,float value){
+    if(action=="rules"){layer.rules.enabled=!layer.rules.enabled;return {};}
+    auto rules=layer.rules;rules.enabled=true;
+    if(action=="ruleSlope")rules.slopeMinCos=value;
+    else if(action=="ruleHeightMin")rules.heightMinMeters=value;
+    else if(action=="ruleHeightMax")rules.heightMaxMeters=value;
+    else if(action=="ruleOcclusion")rules.occlusionMax=value;
+    else if(action=="ruleEdge")rules.edgeWidthMeters=value;
+    else if(action=="ruleBaseHeight")rules.baseHeightInfluence=value;
+    else if(action=="ruleNoise")rules.noiseAmount=value;
+    else if(action=="ruleNoiseScale")rules.noiseScaleMeters=value;
+    else if(action=="ruleSoftness")rules.softness=value;
+    else return "Unknown rule control";
+    if(!material_layer_rules_valid(rules))return "Rule out of range: slope in [-1,1] below its maximum, heights ordered, AO in [0,1], edge 0..100 m, bias in [-1,1], noise in [0,1], scale >= 0.0001 m, softness in [0,1]";
+    layer.rules=rules;return {};
+}
+void add_rule_rows(const MaterialLayerRules& rules,bool voxels,const std::function<void(std::string,std::string)>& add){
+    add("rules",rules.enabled?"Rules: on (where the layer goes)":"Rules: off (uniform weight)");
+    if(!rules.enabled)return;
+    add("ruleSlope","Faces up at least (cos): "+value_text(rules.slopeMinCos));
+    add("ruleHeightMin","Above height: "+value_text(rules.heightMinMeters)+" m");
+    add("ruleHeightMax","Below height: "+value_text(rules.heightMaxMeters)+" m");
+    if(voxels){   // meshes have no AO or voxel edges in the rules
+        add("ruleOcclusion","In hollows (AO at most): "+value_text(rules.occlusionMax));
+        add("ruleEdge","Along exposed edges within: "+value_text(rules.edgeWidthMeters)+" m (0 = off)");
+    }
+    add("ruleBaseHeight","Base height bias: "+value_text(rules.baseHeightInfluence));
+    add("ruleNoise","Noise breakup: "+value_text(rules.noiseAmount));
+    add("ruleNoiseScale","Noise scale: "+value_text(rules.noiseScaleMeters)+" m");
+    add("ruleSoftness","Edge softness: "+value_text(rules.softness));
+}
+} // namespace
+std::optional<VoxelMaterialDefinition> NativeEditorController::voxel_layer_material(const EditorObject& object,MaterialId id)const{
+    if(const auto it=object.voxelMaterials.find(id);it!=object.voxelMaterials.end())return it->second;
+    if(const auto* entry=materials_.find(id))return entry->definition;
+    return std::nullopt;
+}
+bool NativeEditorController::material_panel_import_map(unsigned slot,const std::filesystem::path& path){
+    auto& p=materialPanel_;
+    auto fail=[&](std::string error){p.message=std::move(error);set_status(p.message,true);return false;};
+    if(slot>3U)return fail("Map slot must be base colour, ORM, height or emission");
+    const auto absolute=(path.has_root_directory()||path.has_root_name())?path:projectRoot_/path;
+    // Colour maps (base colour, emission) are sRGB; ORM and height are data.
+    const std::uint8_t role=slot==0U||slot==3U?1U:2U;
+    std::string error;auto image=import_voxel_texture(absolute,role,&error);
+    if(!image)return fail("Could not read "+absolute.filename().string()+": "+error);
+    std::shared_ptr<const VoxelNormalMap>* slots[4]={&p.draft.baseColorMap,&p.draft.ormMap,&p.draft.heightMap,&p.draft.emissiveMap};
+    *slots[slot]=std::move(image);
+    constexpr const char* names[4]{"Base colour","ORM","Height","Emission"};
+    p.message=std::string(names[slot])+" map loaded into the draft; Apply assigns it to voxels";set_status(p.message);
+    material_panel_preview();return true;
+}
+void NativeEditorController::material_panel_clear_maps(){
+    auto& p=materialPanel_;p.draft.baseColorMap.reset();p.draft.ormMap.reset();p.draft.heightMap.reset();p.draft.emissiveMap.reset();
+    p.message="Texture-set maps cleared from the draft";set_status(p.message);material_panel_preview();
+}
+bool NativeEditorController::weather_selection(WeatheringKind kind,float amount){
+    auto& p=materialPanel_;auto& d=workspace_.document();
+    auto fail=[&](std::string error){p.message=std::move(error);set_status(p.message,true);return false;};
+    if(playSession_.active()||longJob_!=nullptr)return fail("Finish the active simulation or background edit before weathering");
+    if(!(amount>=0.0F&&amount<=1.0F))return fail("Weathering amount must be in [0,1]");
+    const auto targets=workspace_.selected_objects();if(targets.empty())return fail("Select objects or a voxel region to weather");
+    std::array<bool,256> reserved{};reserved[0]=true;
+    for(const auto& e:materials_.entries())reserved[e.id]=true;
+    for(const auto& [id,o]:d.objects()){(void)id;for(const auto& [slot,m]:o.voxelMaterials){(void)m;reserved[slot]=true;}
+        if(o.voxels)for(const auto& [key,brick]:o.voxels->bricks()){(void)key;brick.occupancy().for_each_set([&](std::uint16_t at){reserved[brick.material(at)]=true;});}}
+    auto allocate=[&]()->std::optional<MaterialId>{for(unsigned i=1;i<256;++i)if(!reserved[i]){reserved[i]=true;return MaterialId(i);}return {};};
+    std::vector<ObjectMaterialChange> changes;
+    for(const auto id:targets){const auto* o=d.find_object(id);if(!o)return fail("Weathering target missing");
+        if(o->flags.locked||!o->flags.visible||is_isolated_out(id))return fail(o->name+": unlock and show this target before weathering");
+        const auto seed=static_cast<std::uint32_t>(id*31U+unsigned(kind)+1U);
+        WeatheringLayer recipe=make_weathering_layer(kind,amount,{0.0F,1.0F,0.0F},seed);
+        ObjectMaterialChange c;c.id=id;c.beforePalette=o->voxelMaterials;c.afterPalette=c.beforePalette;
+        if(o->polygon){
+            auto mesh=*o->polygon;const auto slot=o->is_nurbs()?0U:p.slot;
+            if(slot>=mesh.materials.size())return fail(o->name+": material slot "+std::to_string(slot)+" does not exist");
+            if(mesh.materials[slot].layers.size()>=kMaximumVoxelMaterialLayers||mesh.materials.size()>=256)return fail(o->name+": maximum four overlays and 256 material slots");
+            while(mesh.materialBindings[slot].layers.size()<mesh.materials[slot].layers.size()){PolygonMaterialLayerBinding legacy;legacy.heightBlendStrength=0;mesh.materialBindings[slot].layers.push_back(legacy);}
+            recipe.layer.sourceMaterial=MaterialId(mesh.materials.size());
+            mesh.materials.push_back(recipe.source);mesh.materialBindings.emplace_back();
+            mesh.materials[slot].layers.push_back(recipe.layer);
+            PolygonMaterialLayerBinding binding;binding.heightBlendStrength=0;mesh.materialBindings[slot].layers.push_back(binding);
+            {std::string stackError;if(!dependent_stacks_valid(*o->polygon,mesh,&stackError))return fail(o->name+": "+stackError);}
+            mesh.contentHash=polygon_asset_content_hash(mesh);const auto valid=validate_polygon_asset(mesh);if(!valid)return fail(valid.message);
+            c.beforeMesh=*o->polygon;c.afterMesh=std::move(mesh);
+        }else if(o->voxels){
+            const auto cells=selectionDomain_==SelectionDomain::Voxels&&voxelSelectionObject_==id?voxelSelection_:all_occupied_voxels(*o->voxels);
+            std::set<MaterialId> used;for(const auto cell:cells)if(const auto m=o->voxels->material_at(cell);m!=0)used.insert(m);
+            if(used.empty())return fail(o->name+": no occupied target cells");
+            const auto source=allocate();if(!source)return fail("Material palette full; free a slot before weathering");
+            recipe.layer.sourceMaterial=*source;c.afterPalette[*source]=recipe.source;
+            for(const auto old:used){
+                VoxelMaterialDefinition definition;
+                if(const auto it=o->voxelMaterials.find(old);it!=o->voxelMaterials.end())definition=it->second;
+                else if(const auto* entry=materials_.find(old))definition=entry->definition;
+                else return fail(o->name+": material "+std::to_string(old)+" has no definition");
+                if(definition.layers.size()>=kMaximumVoxelMaterialLayers)return fail(o->name+": "+definition.name+" already has four layers");
+                definition.layers.push_back(recipe.layer);c.afterPalette[old]=std::move(definition);
+            }
+        }else return fail(o->name+": weathering supports voxel and polygon objects");
+        changes.push_back(std::move(c));
+    }
+    auto result=workspace_.commands().execute(d,std::make_unique<ApplyMaterialPresetCommand>(materials_,activeMaterial_,activeMaterial_,materials_,std::move(changes),
+        std::string("Add weathering: ")+weathering_kind_label(kind)));
+    if(!result.success)return fail(result.message);
+    p.message=std::string("Added ")+weathering_kind_label(kind)+" at "+value_text(amount)+" to "+std::to_string(targets.size())+" objects; one Undo removes it";
+    set_status(p.message);if(p.layerMode)material_panel_preview();return true;
+}
 bool NativeEditorController::apply_material_panel(bool editSlot){
     auto& p=materialPanel_;auto& d=workspace_.document();
     if(p.layerMode){p.message="Layer actions edit assigned slots immediately; use their controls or leave Layers mode";return false;}
@@ -296,6 +416,7 @@ bool NativeEditorController::apply_material_panel(bool editSlot){
         if(o->flags.locked||!o->flags.visible||is_isolated_out(id))return fail(o->name+": unlock and show this target before Apply");
         if(o->text3d||o->gaborVolume)return fail(o->name+": this material workflow supports voxels and polygon/subdivision/NURBS surfaces");
         ObjectMaterialChange c;c.id=id;c.beforePalette=o->voxelMaterials;c.afterPalette=c.beforePalette;
+        if(o->polygon&&material_has_textures(p.draft))return fail(o->name+": texture-set maps apply to voxel materials; meshes use their own texture bindings");
         if(o->polygon){c.beforeMesh=*o->polygon;auto mesh=*o->polygon;
             if(editSlot||o->is_nurbs()){
                 const auto slot=o->is_nurbs()?0:p.slot;if(slot>=mesh.materials.size())return fail(o->name+": slot does not exist");
@@ -409,7 +530,8 @@ bool NativeEditorController::material_panel_pointer(int x,int y){
     else if(l.layered.contains(x,y)){p.layerMode=!p.layerMode;p.controlFirst=0;p.editing.reset();p.layerEditing.reset();p.message="Layers: edit the assigned polygon slot immediately; every action has Undo";material_panel_preview();}
     else if(p.layerMode){auto controls=material_panel_layer_controls();for(std::size_t i=0;i<l.fields.size()&&p.controlFirst+i<controls.size();++i)if(l.fields[i].contains(x,y)){
         auto action=controls[p.controlFirst+i].first;
-        if(action=="weight"||action=="maskScale"||action=="maskBias"||action=="heightStrength"||action=="heightBias"||action=="heightTransition"||action=="normalScale"||action=="sourceScale"||action=="sourceOffsetX"||action=="sourceOffsetY"||action=="sourceRotation"){
+        if(action=="weight"||action=="maskScale"||action=="maskBias"||action=="heightStrength"||action=="heightBias"||action=="heightTransition"||action=="normalScale"||action=="sourceScale"||action=="sourceOffsetX"||action=="sourceOffsetY"||action=="sourceRotation"||
+           action=="weatherAmount"||(action.starts_with("rule")&&action!="rules")){
             p.layerEditing=action;p.typed="";p.replaceText=true;p.searchFocus=false;p.message="Type a number, then Enter to commit one undo step";return true;
         }
         return material_panel_layer_action(action);
@@ -443,13 +565,31 @@ std::vector<std::pair<std::string,std::string>> NativeEditorController::material
         {"bakePadding","Bake padding: "+std::to_string(bake.paddingPixels)+" px"},
         {"bakeOpacity","Separate opacity: "+std::string((bake.maps&16)?"on":"off")},
         {"bakeValidate","Validate bake target"},{"bakeExport","Bake / export new bundle"},{"bakeApply","Bake / export / apply copy"},
-        {"add","Add selected preset"},{"recipeMetal","Recipe: paint / rust / metal"},{"recipeWood","Recipe: worn painted wood"},{"recipePlaster","Recipe: dirty / scorched plaster"}};
+        {"add","Add selected preset"},{"recipeMetal","Recipe: paint / rust / metal"},{"recipeWood","Recipe: worn painted wood"},{"recipePlaster","Recipe: dirty / scorched plaster"},
+        {"weatherKind",std::string("Weathering: ")+weathering_kind_label(p.weatherKind)},{"weatherAmount","Weathering amount: "+value_text(p.weatherAmount)},{"weatherAdd","Add weathering overlay"}};
     for(auto id:workspace_.selected_objects())if(const auto* object=workspace_.document().find_object(id);object&&object->materialBake){
         rows.insert(rows.begin(),{{"bakeStatus",p.bakeStatus.empty()?"Bake recipe saved":p.bakeStatus},
             {"bakeSource","Restore / edit source"},{"bakeResult","Show baked result"},{"bakeRebake","Rebake saved recipe"},
             {"bakeInspect",p.inspection?"Inspection: on":"Inspect source / baked"},
             {"inspectChannel",std::string("Inspect: ")+material_inspection_channel_label(p.inspectionChannel)},
             {"inspectView",p.inspectionView==MaterialInspectionView::Split?"Compare: Source | Baked":p.inspectionView==MaterialInspectionView::Source?"Compare: Source":"Compare: Baked"}});break;
+    }
+    for(auto id:workspace_.selected_objects()){
+        // Voxel objects: the overlays of palette/library material p.slot, edited in the object's palette.
+        const auto* voxelObject=workspace_.document().find_object(id);
+        if(!voxelObject||!voxelObject->voxels||voxelObject->polygon)continue;
+        const auto material=voxel_layer_material(*voxelObject,MaterialId(p.slot));
+        if(!material||material->layers.empty())return rows;
+        const auto at=(std::min)(p.layerIndex,material->layers.size()-1);const auto& layer=material->layers[at];
+        const auto source=voxelObject->voxelMaterials.contains(layer.sourceMaterial)?voxelObject->voxelMaterials.at(layer.sourceMaterial).name:
+            materials_.find(layer.sourceMaterial)?materials_.find(layer.sourceMaterial)->definition.name:"missing source";
+        rows.insert(rows.begin(),{"select","Overlay "+std::to_string(at+1)+"/"+std::to_string(material->layers.size())+" of material "+std::to_string(p.slot)+": "+source});
+        auto add=[&](std::string key,std::string text){rows.emplace_back(std::move(key),std::move(text));};
+        add("toggle",layer.enabled?"Mute overlay":"Enable overlay");add("remove","Remove overlay");
+        add("weight","Weight: "+value_text(layer.weight));
+        constexpr const char* blends[]{"Lerp","Multiply","Additive"};add("blend",std::string("Color blend: ")+blends[unsigned(layer.blendMode)%3]);
+        add_rule_rows(layer.rules,true,add);
+        return rows;
     }
     for(auto id:workspace_.selected_objects()){
         const auto* object=workspace_.document().find_object(id);
@@ -471,6 +611,8 @@ std::vector<std::pair<std::string,std::string>> NativeEditorController::material
         add("height","Height override: "+(binding.height.texture?std::to_string(*binding.height.texture):"source"));add("heightUv","Height UV: "+std::to_string(binding.height.texcoord));
         add("heightStrength","Height strength: "+value_text(binding.heightBlendStrength));add("heightBias","Height bias: "+value_text(binding.heightBlendBias));add("heightTransition","Height transition: "+value_text(binding.heightBlendTransition));
         add("opacity",std::string("Opacity: ")+material_layer_opacity_policy_label(binding.opacityPolicy));
+        // Rule-driven coverage (dve/material_layer_rules.hpp); meshes have no voxel edges or AO.
+        add_rule_rows(layer.rules,false,add);
         if(layer.sourceMaterial<mesh.materialBindings.size()){
             const auto& source=mesh.materialBindings[layer.sourceMaterial];
             add("normalScale","Source normal strength: "+value_text(source.normalScale));
@@ -542,8 +684,34 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
         return fail("Texture baking requires a renderer-enabled editor build");
 #endif
     }
+    if(action=="weatherKind"){p.weatherKind=WeatheringKind((unsigned(p.weatherKind)+1U)%6U);p.message=std::string("Weathering: ")+weathering_kind_label(p.weatherKind);return true;}
+    if(action=="weatherAmount"){if(!(value>=0.0F&&value<=1.0F))return fail("Weathering amount must be in [0,1]");p.weatherAmount=value;return true;}
+    if(action=="weatherAdd")return weather_selection(p.weatherKind,p.weatherAmount);
     if(!std::isfinite(value))return fail("Layer values must be finite");
     const auto targets=workspace_.selected_objects();if(targets.empty())return fail("Select polygon objects first");
+    // Voxel objects: edit the overlays of material p.slot in each object's palette (one undo step).
+    if(std::all_of(targets.begin(),targets.end(),[&](EditorObjectId id){const auto* o=document.find_object(id);return o&&o->voxels&&!o->polygon;})){
+        if(action=="select"){++p.layerIndex;if(const auto m=voxel_layer_material(*document.find_object(*targets.begin()),MaterialId(p.slot))){const auto count=m->layers.size();p.layerIndex=count?p.layerIndex%count:0;}p.controlFirst=0;return true;}
+        std::vector<ObjectMaterialChange> voxelChanges;
+        for(auto id:targets){const auto* o=document.find_object(id);
+            if(o->flags.locked||!o->flags.visible||is_isolated_out(id))return fail("Unlock and show every selected target first");
+            auto material=voxel_layer_material(*o,MaterialId(p.slot));
+            if(!material)return fail(o->name+": material "+std::to_string(p.slot)+" has no definition");
+            if(material->layers.empty())return fail(o->name+": material "+std::to_string(p.slot)+" has no overlays; add weathering first");
+            const auto at=(std::min)(p.layerIndex,material->layers.size()-1);auto& layer=material->layers[at];
+            if(action=="toggle")layer.enabled=!layer.enabled;
+            else if(action=="remove")material->layers.erase(material->layers.begin()+std::ptrdiff_t(at));
+            else if(action=="weight"){if(value<0||value>1)return fail("Weight must be in [0,1]");layer.weight=value;}
+            else if(action=="blend")layer.blendMode=MaterialLayerBlendMode((unsigned(layer.blendMode)+1)%3);
+            else if(action.starts_with("rule")){const auto error=edit_layer_rule(layer,action,value);if(!error.empty())return fail(error);}
+            else return fail("This overlay control applies to polygon slots only");
+            ObjectMaterialChange c;c.id=id;c.beforePalette=o->voxelMaterials;c.afterPalette=c.beforePalette;c.afterPalette[MaterialId(p.slot)]=std::move(*material);
+            voxelChanges.push_back(std::move(c));
+        }
+        auto result=workspace_.commands().execute(document,std::make_unique<ApplyMaterialPresetCommand>(materials_,activeMaterial_,activeMaterial_,materials_,std::move(voxelChanges),"Edit voxel overlay"));
+        if(!result.success)return fail(result.message);
+        p.message="Voxel overlay updated; one Undo restores it";return true;
+    }
     if(action=="select"){++p.layerIndex;for(auto id:targets){const auto* o=document.find_object(id);if(o&&o->polygon&&p.slot<o->polygon->materials.size()){const auto count=o->polygon->materials[p.slot].layers.size();p.layerIndex=count?p.layerIndex%count:0;break;}}p.controlFirst=0;return true;}
     std::vector<ObjectMaterialChange> changes;
     for(auto id:targets){const auto* object=document.find_object(id);
@@ -584,6 +752,7 @@ bool NativeEditorController::material_panel_layer_action(std::string_view action
             else if(action=="toggle")layer.enabled=!layer.enabled;
             else if(action=="solo")for(std::size_t n=0;n<material.layers.size();++n)material.layers[n].enabled=n==at;
             else if(action=="weight"){if(value<0||value>1)return fail("Weight must be in [0,1]");layer.weight=value;}
+            else if(action.starts_with("rule")){const auto error=edit_layer_rule(layer,action,value);if(!error.empty())return fail(error);}
             else if(action=="blend")layer.blendMode=MaterialLayerBlendMode((unsigned(layer.blendMode)+1)%3);
             else if(action=="opacity")lb.opacityPolicy=MaterialLayerOpacityPolicy((unsigned(lb.opacityPolicy)+1)%5);
             else if(action=="semantic")lb.semantic=MaterialLayerSemantic((unsigned(lb.semantic)+1)%8);

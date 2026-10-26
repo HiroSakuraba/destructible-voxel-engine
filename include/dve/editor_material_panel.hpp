@@ -1,4 +1,5 @@
 #pragma once
+#include "dve/weathering.hpp"
 #include "dve/editor_material_preview.hpp"
 #include "dve/editor_material_inspection.hpp"
 #include "dve/render/material_texture_bake.hpp"
@@ -30,6 +31,9 @@ struct MaterialPanelState {
     render::MaterialTextureBakeSettings bake;
     std::filesystem::path lastBakeDirectory;
     std::size_t layerIndex{};
+    // Weathering (Materials > Add Weathering, and the Layers rows): the recipe and its stage.
+    WeatheringKind weatherKind{WeatheringKind::Snow};
+    float weatherAmount{0.5F};
     std::optional<std::string> layerEditing;
     MaterialPresetBackend backend{MaterialPresetBackend::CpuReference};
     MaterialPreviewShape shape{MaterialPreviewShape::Sphere};

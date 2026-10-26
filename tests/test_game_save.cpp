@@ -1,6 +1,7 @@
 // Save games (dve/game_save.hpp): GameWorld capture/restore round trips, destruction deltas,
 // the DVESAVE1 container's corruption handling, schema migrations and (with Lua) script state.
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 #include "dve/camera_runtime.hpp"
 #include "dve/dvox.hpp"
 #include "dve/game_save.hpp"
@@ -484,6 +485,68 @@ void test_source_backed_optics() {
     CHECK(restored == 20U);
 }
 
+// Texture sets on inline materials: images stored once with their roles, slots and projection back.
+void test_material_texture_sets() {
+    const Assets assets = make_assets();
+    GameSaveCodec codec(file_reader());
+    int fires = 0;
+    Scene a = boot(assets, Physics3DBackend::Reference, &fires);
+    GameSaveData saved = capture(a);
+    std::string error;
+    GameWorldObjectState* object = nullptr;
+    for (auto& candidate : saved.world.objects)
+        if (candidate.materials.size() > 1) { object = &candidate; break; }
+    CHECK(object != nullptr);
+    if (!object) return;
+    std::vector<std::uint8_t> texels(4U * 4U * 4U);
+    for (std::size_t i = 0; i < texels.size(); ++i) texels[i] = static_cast<std::uint8_t>(i * 13U + 5U);
+    const auto albedo = make_voxel_image("albedo", 4U, 4U, texels, VoxelImageRole::Color);
+    const auto height = make_voxel_image("height", 4U, 4U, texels, VoxelImageRole::Data);   // same texels, other role
+    for (VoxelMaterialDefinition& m : object->materials) {
+        m.baseColorMap = albedo;
+        m.heightMap = height;
+        m.textureTileMeters = 0.3F;
+        m.textureSharpness = 6.0F;
+        m.displacementDepthMeters = 0.035F;
+        m.displacementMode = 1U;
+        m.textureAntiTiling = 0.2F;
+    }
+    // A rule-driven layer on the first material.
+    object->materials[0].layers.push_back({});
+    object->materials[0].layers[0].sourceMaterial = 1;
+    object->materials[0].layers[0].weight = 0.7F;
+    object->materials[0].layers[0].rules.enabled = true;
+    object->materials[0].layers[0].rules.slopeMinCos = 0.65F;
+    object->materials[0].layers[0].rules.noiseAmount = 0.25F;
+    object->materials[0].layers[0].rules.seed = 42;
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) { std::cerr << "texture set encode: " << error << '\n'; return; }
+    const auto document = decode_save_game_document(*bytes, {}, &error);
+    CHECK(document && document->sections.contains("dve.material_textures"));
+    CHECK(document && document->sections.contains("dve.material_displacement"));
+    CHECK(document && document->sections.contains("dve.material_rules"));
+    const auto decoded = codec.decode(*bytes, nullptr, &error);
+    CHECK(decoded.has_value());
+    if (!decoded) { std::cerr << "texture set decode: " << error << '\n'; return; }
+    bool found = false;
+    for (const auto& o : decoded->world.objects)
+        if (o.id == object->id) {
+            found = true;
+            for (const auto& m : o.materials)
+                found = found && m.baseColorMap && m.heightMap && !m.ormMap && m.baseColorMap->contentHash == albedo->contentHash &&
+                        m.heightMap->contentHash == height->contentHash && m.baseColorMap->role == 1U && m.heightMap->role == 2U &&
+                        m.textureTileMeters == 0.3F && m.textureSharpness == 6.0F && m.displacementDepthMeters == 0.035F &&
+                        m.displacementMode == 1U && m.textureAntiTiling == 0.2F;
+            found = found && !o.materials.empty() && o.materials[0].layers.size() == 1 && o.materials[0].layers[0].rules.enabled &&
+                    o.materials[0].layers[0].rules.slopeMinCos == 0.65F && o.materials[0].layers[0].rules.noiseAmount == 0.25F &&
+                    o.materials[0].layers[0].rules.seed == 42U;
+        }
+    CHECK(found);
+    const auto again = codec.encode(*decoded, nullptr, &error);
+    CHECK(again && *again == *bytes);
+}
+
 void test_round_trip(Physics3DBackend backend, const char* label) {
     const Assets assets = make_assets();
     GameSaveCodec codec(file_reader());
@@ -540,6 +603,9 @@ void test_destruction(Physics3DBackend backend, const char* label) {
     const auto removed = a.world->damage_sphere(a.tower, {0.375F, 1.25F, 0.375F}, 0.3F);
     CHECK(removed && *removed >= 2U);
     CHECK(a.world->object_count() == before + 1U);   // the top half broke off
+    // The carve left a crater mark on the tower and a copy on the piece that broke off.
+    CHECK(a.world->surface_marks().size() == 2U);
+    if (a.world->surface_marks().size() == 2U) CHECK(a.world->surface_marks()[1].objectId != a.tower);
     const auto cratePos = a.world->position(a.crate);
     if (cratePos) (void)a.world->damage_sphere(a.crate, {cratePos->x, cratePos->y, cratePos->z}, 0.2F);
     play(a, 25);
@@ -560,8 +626,10 @@ void test_destruction(Physics3DBackend backend, const char* label) {
     const auto decoded = codec.decode(*bytes, nullptr, &error);
     CHECK(decoded.has_value());
     if (!decoded) { std::cerr << label << " decode: " << error << '\n'; return; }
+    CHECK(decoded->world.surfaceMarks.size() == a.world->surface_marks().size());
     CHECK(restore(b, *decoded));
     CHECK(b.world->object_count() == a.world->object_count());
+    CHECK(b.world->surface_marks().size() == a.world->surface_marks().size());   // marks survive the load
     CHECK(b.world->state_hash() == a.world->state_hash());
     CHECK(b.world->voxel_count(b.tower) == a.world->voxel_count(a.tower));
     const auto bytesAgain = codec.encode(capture(b), nullptr, &error);
@@ -710,6 +778,7 @@ void test_migration() {
     int fires = 0;
     Scene a = boot(assets, Physics3DBackend::Reference, &fires);
     (void)a.world->damage_sphere(a.tower, {0.375F, 1.25F, 0.375F}, 0.3F);
+    a.world->clear_surface_marks();   // a pre-release engine left no damage marks
     play(a, 8);
     const GameSaveData saved = capture(a);
     std::string error;
@@ -720,6 +789,7 @@ void test_migration() {
     if (!document) return;
     document->sections.erase("dve.clock");
     document->sections.erase("dve.voxel_axes");
+    document->sections.erase("dve.surface_marks");
     SaveGameDocument v0;
     v0.schemaVersion = 0;
     v0.sequence = 7;
@@ -1144,13 +1214,14 @@ void test_v1_to_v2_migration() {
     Scene a = boot(assets, Physics3DBackend::Reference, &firesA);
     (void)boot_runtimes(*a.world);
     (void)a.world->damage_sphere(a.tower, {0.375F, 1.25F, 0.375F}, 0.3F);
+    a.world->clear_surface_marks();   // a v1 engine left no damage marks
     play(a, 10);
     auto document = codec.to_document(capture_all(a), nullptr, &error);
     CHECK(document.has_value());
     if (!document) return;
     SaveGameDocument v1 = *document;
     v1.schemaVersion = 1U;
-    for (const char* name : {"dve.gameplay", "dve.cameras", "dve.animation", "dve.ragdolls", "dve.hair", "dve.clock", "dve.voxel_axes"}) v1.sections.erase(name);
+    for (const char* name : {"dve.gameplay", "dve.cameras", "dve.animation", "dve.ragdolls", "dve.hair", "dve.clock", "dve.voxel_axes", "dve.surface_marks"}) v1.sections.erase(name);
     const auto v1Bytes = encode_save_game_document(v1);
     SaveGameReadReport report;
     const auto migrated = codec.decode(v1Bytes, &report, &error);
@@ -1327,6 +1398,11 @@ void test_script_state_v2() {
             world.set_environment_scalar("FogHeightFalloffPerMeter", 0.05)
             world.set_environment_scalar("FogBaseHeightMeters", 3)
             world.set_environment_vector("FogColor", 0.5, 0.6, 0.7)
+            world.set_environment_sky_mode("physical")
+            world.set_environment_scalar("AtmosphereMieScale", 6)
+            world.set_environment_scalar("AerialPerspectiveScale", 40)
+            world.set_environment_scalar("VolumetricFogDensityPerMeter", 0.03)
+            world.set_environment_scalar("VolumetricFogSamples", 48)
             world.hud_set_interaction_prompt("Press E")
             world.hud_set_tools({ {id="pick", label="Pickaxe"}, {id="bomb", label="Bomb"}, {id="off", label="Off", enabled=false} })
             world.hud_select_next_tool()
@@ -1380,6 +1456,8 @@ void test_script_state_v2() {
     CHECK(env.sunIntensity == 5.5F && env.skyColor.z == 0.9F && env.shadowMode == ShadowMode::Hard);
     CHECK(env.fogDensityPerMeter == 0.02F && env.fogStartMeters == 4.0F && env.fogColor.y == 0.6F);   // v3
     CHECK(env.fogHeightFalloffPerMeter == 0.05F && env.fogBaseHeightMeters == 3.0F);   // v4
+    CHECK(env.skyMode == SkyMode::Physical && env.atmosphereMieScale == 6.0F && env.aerialPerspectiveScale == 40.0F);   // v6
+    CHECK(env.volumetricFogDensityPerMeter == 0.03F && env.volumetricFogSamples == 48U);   // v7
     CHECK(b.hud_model().interaction_prompt() == "Press E");
     CHECK(b.hud_model().tools().size() == 3U && b.hud_model().selected_tool() && b.hud_model().selected_tool()->id == "bomb");
     CHECK(b.material_library().runtime_scalar(7, "Roughness") == 0.2F);
@@ -1425,12 +1503,12 @@ void test_script_state_v2() {
     auto v1Blob = v1.save_state(&error);
     CHECK(v1Blob.has_value());
     if (v1Blob) {
-      // Strip the v2/v3/v4/v5 tail (including the length-prefixed lighting
-      // extension): environment (30*4 + 5*4), fog (5*4), fog height (2*4),
-      // empty prompt (4), no tools (4), selection (8), no materials (4), no
-      // named timers (4); then mark it version 1.
+      // Strip the v2-v6 tail (including the length-prefixed lighting extension):
+      // environment (30*4 + 5*4), fog (5*4), fog height (2*4), lighting, sky (9*4), volumetric fog (9*4), empty
+      // prompt (4), no tools (4), selection (8), no materials (4), no named timers (4); then
+      // mark it version 1.
       v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 8U + 4U +
-                      encode_scene_lighting(v1.environment()).size() + 4U + 4U + 8U + 4U + 4U));
+                      encode_scene_lighting(v1.environment()).size() + 36U + 36U + 4U + 4U + 8U + 4U + 4U));
         (*v1Blob)[4] = std::byte{1};
         GameWorld worldV1b(std::make_unique<ReferenceRigidBodyWorld>());
         GameScriptHost v1b(worldV1b);
@@ -1453,11 +1531,12 @@ void test_script_state_v3_fog_height() {
     const auto blob = a.save_state(&error);
     CHECK(blob.has_value());
     if (!blob) { std::cerr << "v3 fog height save: " << error << '\n'; return; }
-    // After the falloff block the tail is: empty prompt (4), no tools (4),
-    // selection (8), no materials (4), no named timers (4) -- 24 bytes; remove
-    // the v5 lighting extension as well as the 8-byte height block.
-    CHECK(blob->size() > 32U);
-    std::vector<std::byte> v3(blob->begin(), blob->end() - 32 - 4 - encode_scene_lighting(a.environment()).size());
+    // After the falloff block come the v5 lighting extension (length-prefixed), the v6 sky
+    // (36 bytes) and v7 volumetric fog (36 bytes) blocks, then the tail: empty prompt (4), no
+    // tools (4), selection (8), no materials (4), no named timers (4) -- 24 bytes. Remove all
+    // of them but the tail, as well as the 8-byte height block.
+    CHECK(blob->size() > 32U + 72U);
+    std::vector<std::byte> v3(blob->begin(), blob->end() - 32 - 72 - 4 - encode_scene_lighting(a.environment()).size());
     v3.insert(v3.end(), blob->end() - 24, blob->end());
     v3[4] = std::byte{3};
     GameWorld worldB(std::make_unique<ReferenceRigidBodyWorld>());
@@ -1477,6 +1556,7 @@ int main() {
     test_material_sheen();
     test_material_iridescence();
     test_material_normal_maps();
+    test_material_texture_sets();
     test_material_surface_detail();
     test_source_backed_optics();
     test_round_trip(Physics3DBackend::Reference, "reference");

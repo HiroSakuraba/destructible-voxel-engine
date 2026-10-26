@@ -54,6 +54,16 @@ enum class ShadowMode : std::uint32_t {
     Hybrid = 4,
 };
 
+// Where the sky light comes from. Colors: the hand-set skyColor / groundColor blend and a sun of
+// fixed sunColor (the original behaviour). Physical: an Earth-like atmosphere (Rayleigh, Mie and
+// ozone; render/atmosphere.hpp) lit by the sun drives the background sky, the sun's colour at the
+// ground (orange at sunset, gone below the horizon), the sky light on surfaces and in their
+// reflections, and aerial perspective; skyColor / groundColor are then unused.
+enum class SkyMode : std::uint32_t {
+    Colors = 0,
+    Physical = 1,
+};
+
 // Positions and emitter edges are authored in metres; intensity is RGB radiant
 // intensity for point/spot/candle, emitted radiance for area lights. Direction
 // points out of the light.
@@ -143,6 +153,44 @@ struct RenderEnvironment {
     // 0 falloff (the default) = uniform density at every height, the pre-falloff behaviour.
     float fogHeightFalloffPerMeter{0.0F};
     float fogBaseHeightMeters{0.0F};
+
+    // Physical sky (skyMode Physical). sunColor x sunIntensity is then the sunlight arriving at the
+    // top of the atmosphere; the air in between colours and dims it. The scales multiply the
+    // Earth densities (Bruneton / Hillaire values): Rayleigh air (blue sky, red sunsets), Mie
+    // aerosols (haze, the bright halo around the sun; 1 = a clear day, 5-20 = hazy) and ozone
+    // (the deep blue of twilight). mieAnisotropy is the Cornette-Shanks g (forward scattering).
+    // World y = 0 sits at observerAltitudeMeters. Real aerial perspective is faint over the few
+    // hundred metres of a game scene; aerialPerspectiveScale multiplies the distances it sees
+    // (1 = physical). sunDisc scales the drawn solar disc (0 = none).
+    SkyMode skyMode{SkyMode::Colors};
+    float atmosphereRayleighScale{1.0F};
+    float atmosphereMieScale{1.0F};
+    float atmosphereOzoneScale{1.0F};
+    float atmosphereMieAnisotropy{0.8F};
+    float atmosphereGroundAlbedo{0.3F};
+    float observerAltitudeMeters{0.0F};
+    float aerialPerspectiveScale{1.0F};
+    float sunDisc{1.0F};
+
+    // Volumetric fog (render/volumetric_fog.hpp): a height fog that scatters sunlight, ray-marched
+    // per pixel with a shadow ray toward the sun at every sample, so shadowed air stays dark and
+    // lit air glows: light shafts. Extinction is volumetricFogDensityPerMeter up to
+    // volumetricFogBaseHeightMeters (world y in metres) and falls off as
+    // exp(-falloff x height above it) (0 = uniform). Albedo is the scattered share (colour);
+    // anisotropy the Henyey-Greenstein g (forward scattering: bright toward the sun). The march
+    // covers volumetricFogMaxDistanceMeters from the camera in volumetricFogSamples steps.
+    // 0 density = off.
+    // Traced displacement (VoxelMaterialDefinition::displacementDepthMeters) reshapes voxels within
+    // this distance of the camera; beyond it the same materials fall back to parallax shading.
+    float displacementTraceDistanceMeters{100.0F};
+
+    float volumetricFogDensityPerMeter{0.0F};
+    float volumetricFogHeightFalloffPerMeter{0.05F};
+    float volumetricFogBaseHeightMeters{0.0F};
+    Float3 volumetricFogAlbedo{0.9F, 0.9F, 0.9F};
+    float volumetricFogAnisotropy{0.6F};
+    float volumetricFogMaxDistanceMeters{100.0F};
+    std::uint32_t volumetricFogSamples{32};
 
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
 };

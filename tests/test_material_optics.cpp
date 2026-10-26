@@ -4,6 +4,7 @@
 // round-trip through DVOX v1.4, DMESH v1.4 and the editor library v4; out-of-range values are
 // refused; glTF KHR_materials_transmission / _ior / _volume import; layers blend the optics.
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 #include "dve/asset_cooker.hpp"
 #include "dve/dvox.hpp"
 #include "dve/editor_materials.hpp"
@@ -185,6 +186,110 @@ void test_editor_library(const fs::path& dir) {
     }
     brick.normalMapStrength = 9.0F;
     check(!library.upsert({brickId, brick, false}, &error), "library refuses a strength above 4");
+
+    // Texture sets: version 10, maps with their roles and the projection round-trip.
+    VoxelMaterialDefinition stone;
+    stone.name = "Stone";
+    stone.baseColorMap = make_voxel_image("stone albedo", 2U, 2U, {200, 100, 50, 255, 10, 20, 30, 255, 1, 2, 3, 4, 90, 80, 70, 60}, VoxelImageRole::Color);
+    stone.ormMap = make_voxel_image("stone orm", 1U, 1U, {255, 128, 0, 255}, VoxelImageRole::Data);
+    stone.textureTileMeters = 0.5F;
+    stone.textureSharpness = 12.0F;
+    const MaterialId stoneId = library.next_available_id();
+    check(library.upsert({stoneId, stone, false}, &error), "library add textured material: " + error);
+    check(library.save(dir / "materials10.txt", &error), "library save v10: " + error);
+    {
+        std::ifstream in(dir / "materials10.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 10U, "texture sets need library version 10");
+    }
+    const auto ten = EditorMaterialLibrary::load(dir / "materials10.txt", &error);
+    check(ten.has_value(), "library v10 load: " + error);
+    if (ten) {
+        const auto* entry = ten->find(stoneId);
+        check(entry && entry->definition.baseColorMap && entry->definition.ormMap && !entry->definition.heightMap &&
+                  entry->definition.baseColorMap->contentHash == stone.baseColorMap->contentHash &&
+                  entry->definition.ormMap->contentHash == stone.ormMap->contentHash && entry->definition.textureTileMeters == 0.5F &&
+                  entry->definition.textureSharpness == 12.0F,
+              "library texture-set round trip");
+    }
+
+    // Displacement: version 11, depth and mode round-trip.
+    VoxelMaterialDefinition carved = stone;
+    carved.name = "Carved stone";
+    carved.heightMap = make_voxel_image("carved height", 1U, 1U, {128, 0, 0, 255}, VoxelImageRole::Data);
+    carved.displacementDepthMeters = 0.04F;
+    carved.displacementMode = 1U;
+    const MaterialId carvedId = library.next_available_id();
+    check(library.upsert({carvedId, carved, false}, &error), "library add displaced material: " + error);
+    check(library.save(dir / "materials11.txt", &error), "library save v11: " + error);
+    {
+        std::ifstream in(dir / "materials11.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 11U, "displacement needs library version 11");
+    }
+    const auto eleven = EditorMaterialLibrary::load(dir / "materials11.txt", &error);
+    check(eleven.has_value(), "library v11 load: " + error);
+    if (eleven) {
+        const auto* entry = eleven->find(carvedId);
+        check(entry && entry->definition.heightMap && entry->definition.displacementDepthMeters == 0.04F &&
+                  entry->definition.displacementMode == 1U && entry->definition.heightMap->contentHash == carved.heightMap->contentHash,
+              "library displacement round trip");
+        const auto* plain = eleven->find(stoneId);
+        check(plain && plain->definition.displacementDepthMeters == 0.0F, "materials without displacement stay at depth 0");
+    }
+
+    // Solid-texture surface patterns: version 12, no new fields.
+    VoxelMaterialDefinition cobble;
+    cobble.name = "Cobble";
+    cobble.surfaceDetail.pattern = SurfacePattern::Cellular;
+    cobble.surfaceDetail.periodMeters = 0.2F;
+    cobble.surfaceDetail.bumpHeightMeters = 0.01F;
+    const MaterialId cobbleId = library.next_available_id();
+    check(library.upsert({cobbleId, cobble, false}, &error), "library add cobble: " + error);
+    check(library.save(dir / "materials12.txt", &error), "library save v12: " + error);
+    {
+        std::ifstream in(dir / "materials12.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 12U, "solid textures need library version 12");
+    }
+    const auto twelve = EditorMaterialLibrary::load(dir / "materials12.txt", &error);
+    check(twelve && twelve->find(cobbleId) && twelve->find(cobbleId)->definition.surfaceDetail.pattern == SurfacePattern::Cellular &&
+              twelve->find(carvedId) && twelve->find(carvedId)->definition.displacementDepthMeters == 0.04F,
+          "library v12 round trip: " + error);
+
+    // Layer rules and anti-tiling: version 13.
+    VoxelMaterialDefinition snowy = cobble;
+    snowy.name = "Snowy cobble";
+    snowy.textureAntiTiling = 0.25F;
+    snowy.layers.push_back({});
+    snowy.layers[0].sourceMaterial = stoneId;
+    snowy.layers[0].weight = 1.0F;
+    snowy.layers[0].rules.enabled = true;
+    snowy.layers[0].rules.slopeMinCos = 0.7F;
+    snowy.layers[0].rules.heightMaxMeters = 1234.5F;
+    snowy.layers[0].rules.seed = 77;
+    const MaterialId snowyId = library.next_available_id();
+    check(library.upsert({snowyId, snowy, false}, &error), "library add snowy: " + error);
+    check(library.save(dir / "materials13.txt", &error), "library save v13: " + error);
+    {
+        std::ifstream in(dir / "materials13.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 13U, "layer rules need library version 13");
+    }
+    const auto thirteen = EditorMaterialLibrary::load(dir / "materials13.txt", &error);
+    const auto* s13 = thirteen ? thirteen->find(snowyId) : nullptr;
+    check(s13 && s13->definition.textureAntiTiling == 0.25F && s13->definition.layers.size() == 1 && s13->definition.layers[0].rules.enabled &&
+              s13->definition.layers[0].rules.slopeMinCos == 0.7F && s13->definition.layers[0].rules.heightMaxMeters == 1234.5F &&
+              s13->definition.layers[0].rules.seed == 77U && thirteen->find(cobbleId) && !thirteen->find(cobbleId)->definition.layers.size(),
+          "library v13 round trip: " + error);
 }
 
 void test_gltf_import(const fs::path& dir) {

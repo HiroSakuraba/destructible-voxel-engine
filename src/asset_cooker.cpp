@@ -1,5 +1,6 @@
 #include "dve/asset_cooker.hpp"
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 #include "dve/dvox.hpp"
 
 #include <algorithm>
@@ -2298,6 +2299,30 @@ std::shared_ptr<const VoxelNormalMap> decode_voxel_normal_map(std::span<const st
                 image.rgba8[i] = static_cast<std::uint8_t>(255U - image.rgba8[i]);
         }
         return make_voxel_normal_map(std::move(name), image.width, image.height, std::move(image.rgba8), error);
+    } catch (const std::exception& exception) {
+        if (error) *error = exception.what();
+        return nullptr;
+    }
+}
+
+std::shared_ptr<const VoxelNormalMap> decode_voxel_texture(std::span<const std::byte> bytes, std::string name, std::uint8_t role,
+                                                           std::string* error) {
+    try {
+        if (role < 1U || role > 2U) throw std::runtime_error("texture role must be colour (1) or data (2)");
+        ModelImportOptions options;
+        options.maximumImageDimension = kMaximumVoxelNormalMapDimension;
+        ImportedImage image = decode_image_rgba(bytes, {}, name, options);
+        return make_voxel_image(std::move(name), image.width, image.height, std::move(image.rgba8), static_cast<VoxelImageRole>(role), error);
+    } catch (const std::exception& exception) {
+        if (error) *error = exception.what();
+        return nullptr;
+    }
+}
+
+std::shared_ptr<const VoxelNormalMap> import_voxel_texture(const std::filesystem::path& path, std::uint8_t role, std::string* error) {
+    try {
+        const std::vector<std::byte> bytes = read_binary_file(path);
+        return decode_voxel_texture(bytes, path.stem().string(), role, error);
     } catch (const std::exception& exception) {
         if (error) *error = exception.what();
         return nullptr;

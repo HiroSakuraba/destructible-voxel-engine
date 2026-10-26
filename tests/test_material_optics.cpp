@@ -4,6 +4,7 @@
 // round-trip through DVOX v1.4, DMESH v1.4 and the editor library v4; out-of-range values are
 // refused; glTF KHR_materials_transmission / _ior / _volume import; layers blend the optics.
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 #include "dve/asset_cooker.hpp"
 #include "dve/dvox.hpp"
 #include "dve/editor_materials.hpp"
@@ -185,6 +186,34 @@ void test_editor_library(const fs::path& dir) {
     }
     brick.normalMapStrength = 9.0F;
     check(!library.upsert({brickId, brick, false}, &error), "library refuses a strength above 4");
+
+    // Texture sets: version 10, maps with their roles and the projection round-trip.
+    VoxelMaterialDefinition stone;
+    stone.name = "Stone";
+    stone.baseColorMap = make_voxel_image("stone albedo", 2U, 2U, {200, 100, 50, 255, 10, 20, 30, 255, 1, 2, 3, 4, 90, 80, 70, 60}, VoxelImageRole::Color);
+    stone.ormMap = make_voxel_image("stone orm", 1U, 1U, {255, 128, 0, 255}, VoxelImageRole::Data);
+    stone.textureTileMeters = 0.5F;
+    stone.textureSharpness = 12.0F;
+    const MaterialId stoneId = library.next_available_id();
+    check(library.upsert({stoneId, stone, false}, &error), "library add textured material: " + error);
+    check(library.save(dir / "materials10.txt", &error), "library save v10: " + error);
+    {
+        std::ifstream in(dir / "materials10.txt");
+        std::string magic;
+        unsigned version{};
+        in >> magic >> version;
+        check(version == 10U, "texture sets need library version 10");
+    }
+    const auto ten = EditorMaterialLibrary::load(dir / "materials10.txt", &error);
+    check(ten.has_value(), "library v10 load: " + error);
+    if (ten) {
+        const auto* entry = ten->find(stoneId);
+        check(entry && entry->definition.baseColorMap && entry->definition.ormMap && !entry->definition.heightMap &&
+                  entry->definition.baseColorMap->contentHash == stone.baseColorMap->contentHash &&
+                  entry->definition.ormMap->contentHash == stone.ormMap->contentHash && entry->definition.textureTileMeters == 0.5F &&
+                  entry->definition.textureSharpness == 12.0F,
+              "library texture-set round trip");
+    }
 }
 
 void test_gltf_import(const fs::path& dir) {

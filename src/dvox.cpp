@@ -1,6 +1,7 @@
 #include "dve/voxel_metric.hpp"
 #include "dve/dvox.hpp"
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 
 #include <algorithm>
 #include <array>
@@ -375,7 +376,27 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
         writer.write_float(material.iridescenceIor);
         writer.write_float(material.iridescenceThicknessNm);
     }
-
+    // Texture-set extension (minor 10): a mask of the maps present, the projection, then each map.
+    if (minor >= 10U) {
+        const VoxelNormalMap* maps[4] = {material.baseColorMap.get(), material.ormMap.get(), material.heightMap.get(),
+                                         material.emissiveMap.get()};
+        std::uint8_t mask = 0U;
+        for (int i = 0; i < 4; ++i) if (maps[i]) mask = static_cast<std::uint8_t>(mask | (1U << i));
+        writer.write_u8(mask);
+        if (mask != 0U) {
+            writer.write_float(material.textureTileMeters);
+            writer.write_float(material.textureSharpness);
+            for (const VoxelNormalMap* map : maps) {
+                if (!map) continue;
+                if (map->name.size() > std::numeric_limits<std::uint16_t>::max()) throw std::runtime_error("texture name is too long");
+                writer.write_u16(static_cast<std::uint16_t>(map->name.size()));
+                writer.write_bytes(map->name.data(), map->name.size());
+                writer.write_u32(map->width);
+                writer.write_u32(map->height);
+                writer.write_bytes(map->rgba8.data(), map->rgba8.size());
+            }
+        }
+    }
 }
 
 [[nodiscard]] VoxelMaterialDefinition read_material(ByteReader& reader, std::uint16_t minor) {
@@ -470,6 +491,28 @@ void write_material(ByteWriter& writer, const VoxelMaterialDefinition& material,
         material.iridescenceThicknessNm=reader.read_float();
         if(!material_iridescence_valid(material))throw std::runtime_error("invalid DVOX material iridescence");
     }
+    if (minor >= 10U) {
+        const std::uint8_t mask = reader.read_u8();
+        if (mask > 15U) throw std::runtime_error("invalid DVOX texture-set mask");
+        if (mask != 0U) {
+            material.textureTileMeters = reader.read_float();
+            material.textureSharpness = reader.read_float();
+            std::shared_ptr<const VoxelNormalMap>* slots[4] = {&material.baseColorMap, &material.ormMap, &material.heightMap,
+                                                               &material.emissiveMap};
+            const VoxelImageRole roles[4] = {VoxelImageRole::Color, VoxelImageRole::Data, VoxelImageRole::Data, VoxelImageRole::Color};
+            for (int i = 0; i < 4; ++i) {
+                if ((mask & (1U << i)) == 0U) continue;
+                std::string name = reader.read_string(reader.read_u16());
+                const std::uint32_t width = reader.read_u32(), height = reader.read_u32();
+                if (width == 0U || height == 0U || width > kMaximumVoxelNormalMapDimension || height > kMaximumVoxelNormalMapDimension)
+                    throw std::runtime_error("invalid DVOX texture size");
+                std::vector<std::uint8_t> texels(static_cast<std::size_t>(width) * height * 4U);
+                reader.read_bytes(texels.data(), texels.size());
+                *slots[i] = make_voxel_image(std::move(name), width, height, std::move(texels), roles[i]);
+            }
+            if (!material_textures_valid(material)) throw std::runtime_error("invalid DVOX material texture set");
+        }
+    }
     return material;
 }
 
@@ -507,7 +550,9 @@ bool write_dvox(
                                        [](const VoxelMaterialDefinition& m) { return material_has_sheen(m); });
         const bool iridescence = std::any_of(asset.materials.begin(), asset.materials.end(),
                                        [](const VoxelMaterialDefinition& m) { return material_has_iridescence(m); });
-        const std::uint16_t versionMinor = iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
+        const bool textures = std::any_of(asset.materials.begin(), asset.materials.end(),
+                                          [](const VoxelMaterialDefinition& m) { return material_has_textures(m); });
+        const std::uint16_t versionMinor = textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : optics ? 4 : unit_voxel_scale(asset.voxelScale) ? kVersionMinor : 3;
         const std::uint32_t headerSize=kHeaderSize+(versionMinor>=3 ? 12 : 0);
         ByteWriter materials;
         for (const VoxelMaterialDefinition& material : asset.materials) {
@@ -515,6 +560,7 @@ bool write_dvox(
             if (!material_sheen_valid(material)) throw std::runtime_error("invalid DVOX material sheen");
             if (!material_iridescence_valid(material)) throw std::runtime_error("invalid DVOX material iridescence");
             if (!material_normal_map_valid(material)) throw std::runtime_error("invalid DVOX material normal map");
+            if (!material_textures_valid(material)) throw std::runtime_error("invalid DVOX material texture set");
             write_material(materials, material, versionMinor);
         }
 
@@ -600,7 +646,7 @@ namespace {
         if (magic != kMagic) throw std::runtime_error("invalid DVOX magic");
         const std::uint16_t major = reader.read_u16();
         const std::uint16_t minor = reader.read_u16();
-        if (major != kVersionMajor || minor > 9) {
+        if (major != kVersionMajor || minor > 10) {
             throw std::runtime_error("unsupported DVOX version");
         }
         const std::uint32_t flags = reader.read_u32();

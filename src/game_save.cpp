@@ -1,5 +1,6 @@
 #include "dve/game_save.hpp"
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 #include "dve/voxel_metric.hpp"
 
 #include <algorithm>
@@ -44,6 +45,7 @@ constexpr std::string_view kMaterialSheenSection = "dve.material_sheen";
 constexpr std::string_view kMaterialIridescenceSection = "dve.material_iridescence";
 constexpr std::string_view kMaterialSurfaceDetailSection = "dve.material_surface_detail";
 constexpr std::string_view kMaterialNormalMapSection = "dve.material_normal_maps";
+constexpr std::string_view kMaterialTextureSection = "dve.material_textures";
 constexpr std::string_view kReservedPrefix = "dve.";
 
 constexpr std::uint8_t kFlagDynamic = 1U << 0U;
@@ -255,6 +257,10 @@ std::vector<std::byte> material_bytes(const std::vector<VoxelMaterialDefinition>
         if (material_has_iridescence(m)) { w.f32(m.iridescence); w.f32(m.iridescenceIor); w.f32(m.iridescenceThicknessNm); }
         if (material_has_normal_map(m)) {
             w.u64(m.normalMap->contentHash); w.f32(m.normalMapTileMeters); w.f32(m.normalMapStrength); w.f32(m.normalMapSharpness);
+        }
+        if (material_has_textures(m)) {
+            for (const auto* map : {m.baseColorMap.get(), m.ormMap.get(), m.heightMap.get(), m.emissiveMap.get()}) w.u64(map ? map->contentHash : 0U);
+            w.f32(m.textureTileMeters); w.f32(m.textureSharpness);
         }
     }
     return std::move(w.bytes());
@@ -1198,6 +1204,48 @@ std::optional<SaveGameDocument> GameSaveCodec::to_document(
         }
     }
     {
+        // Inline texture sets: each distinct image once (with its role), then per material the four
+        // slots (image index or none) and the projection.
+        std::vector<const VoxelNormalMap*> images;
+        struct Use { GameObjectId id; std::uint32_t index; std::uint32_t slot[4]; const VoxelMaterialDefinition* material; };
+        std::vector<Use> uses;
+        const auto image_index = [&](const VoxelNormalMap* map) -> std::uint32_t {
+            if (!map) return 0xFFFFFFFFU;
+            for (std::uint32_t k = 0; k < images.size(); ++k)
+                if (images[k] == map || (images[k]->contentHash == map->contentHash && images[k]->role == map->role &&
+                                         images[k]->width == map->width && images[k]->rgba8 == map->rgba8))
+                    return k;
+            images.push_back(map);
+            return static_cast<std::uint32_t>(images.size() - 1U);
+        };
+        for (const auto& object : world.objects)
+            for (std::size_t i = 0; i < object.materials.size(); ++i) {
+                const VoxelMaterialDefinition& m = object.materials[i];
+                if (!material_has_textures(m)) continue;
+                if (!material_textures_valid(m)) return fail(error, "invalid material texture set"), std::nullopt;
+                uses.push_back({object.id, static_cast<std::uint32_t>(i),
+                                {image_index(m.baseColorMap.get()), image_index(m.ormMap.get()), image_index(m.heightMap.get()),
+                                 image_index(m.emissiveMap.get())},
+                                &m});
+            }
+        if (!uses.empty()) {
+            Writer w(limits_);
+            w.count(images.size(), limits_.maximumObjects * limits_.maximumMaterialsPerObject * 4U, "texture image");
+            for (const VoxelNormalMap* map : images) {
+                w.string(map->name); w.u8(map->role); w.u32(map->width); w.u32(map->height);
+                for (const std::uint8_t b : map->rgba8) w.u8(b);
+            }
+            w.count(uses.size(), limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material texture set");
+            for (const Use& use : uses) {
+                w.u64(use.id); w.u32(use.index);
+                for (const std::uint32_t slot : use.slot) w.u32(slot);
+                w.f32(use.material->textureTileMeters); w.f32(use.material->textureSharpness);
+            }
+            if (w.failed()) return fail(error, w.failure()), std::nullopt;
+            document.sections.emplace(std::string(kMaterialTextureSection), std::move(w.bytes()));
+        }
+    }
+    {
         Writer w(limits_);std::uint32_t count=0;
         for(const auto& object:world.objects)for(const auto& m:object.materials)if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)++count;
         if(count){w.u32(count);for(const auto& object:world.objects)for(std::size_t i=0;i<object.materials.size();++i){const auto& d=object.materials[i].surfaceDetail;if(d.pattern==SurfacePattern::NoPattern)continue;
@@ -1622,6 +1670,49 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
         if (!r.finish()) return corrupt(r);
     }
 
+    if (const auto* bytes = section(kMaterialTextureSection)) {
+        Reader r(*bytes, kMaterialTextureSection, limits_);
+        std::uint32_t count{};
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject * 4U, "texture image")) return corrupt(r);
+        std::vector<std::shared_ptr<const VoxelNormalMap>> images;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::string name;
+            std::uint8_t role{};
+            std::uint32_t width{}, height{};
+            if (!(r.string(name) && r.u8(role) && r.u32(width) && r.u32(height))) return corrupt(r);
+            if (role > 2U || width == 0U || height == 0U || width > kMaximumVoxelNormalMapDimension || height > kMaximumVoxelNormalMapDimension)
+                return fail(error, "invalid material texture image"), std::nullopt;
+            std::span<const std::byte> texels;
+            if (!r.raw(texels, static_cast<std::size_t>(width) * height * 4U)) return corrupt(r);
+            std::vector<std::uint8_t> rgba(texels.size());
+            for (std::size_t b = 0; b < texels.size(); ++b) rgba[b] = std::to_integer<std::uint8_t>(texels[b]);
+            images.push_back(make_voxel_image(std::move(name), width, height, std::move(rgba), static_cast<VoxelImageRole>(role)));
+        }
+        if (!r.count(count, limits_.maximumObjects * limits_.maximumMaterialsPerObject, "material texture set")) return corrupt(r);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            GameObjectId id{};
+            std::uint32_t materialIndex{}, slot[4]{};
+            VoxelMaterialDefinition use;
+            if (!(r.u64(id) && r.u32(materialIndex) && r.u32(slot[0]) && r.u32(slot[1]) && r.u32(slot[2]) && r.u32(slot[3]) &&
+                  r.f32(use.textureTileMeters) && r.f32(use.textureSharpness))) return corrupt(r);
+            const auto found = indexById.find(id);
+            if (found == indexById.end() || materialIndex >= world.objects[found->second].materials.size())
+                return fail(error, "invalid material texture set entry"), std::nullopt;
+            std::shared_ptr<const VoxelNormalMap>* targets[4] = {&use.baseColorMap, &use.ormMap, &use.heightMap, &use.emissiveMap};
+            for (int k = 0; k < 4; ++k) {
+                if (slot[k] == 0xFFFFFFFFU) continue;
+                if (slot[k] >= images.size()) return fail(error, "invalid material texture set entry"), std::nullopt;
+                *targets[k] = images[slot[k]];
+            }
+            if (!material_has_textures(use) || !material_textures_valid(use)) return fail(error, "invalid material texture set entry"), std::nullopt;
+            VoxelMaterialDefinition& material = world.objects[found->second].materials[materialIndex];
+            material.baseColorMap = use.baseColorMap; material.ormMap = use.ormMap; material.heightMap = use.heightMap;
+            material.emissiveMap = use.emissiveMap; material.textureTileMeters = use.textureTileMeters;
+            material.textureSharpness = use.textureSharpness;
+        }
+        if (!r.finish()) return corrupt(r);
+    }
+
     if(const auto* bytes=section(kMaterialSurfaceDetailSection)){
         Reader r(*bytes,kMaterialSurfaceDetailSection,limits_);std::uint32_t count{};
         if(!r.count(count,limits_.maximumObjects*limits_.maximumMaterialsPerObject,"surface-detail entry"))return corrupt(r);
@@ -1774,7 +1865,7 @@ std::optional<GameSaveData> GameSaveCodec::from_document(const SaveGameDocument&
             if (name != kMetaSection && name != kWorldSection && name != kVoxelSection && name != kPhysicsSection &&
                 name != kScriptSection && name != kGameplaySection && name != kCameraSection &&
                 name != kAnimationSection && name != kRagdollSection && name != kHairSection && name != kClockSection && name != kRootMotionSection && name != kAxisSection &&
-                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialSurfaceDetailSection &&
+                name != kMaterialOpticsSection && name != kMaterialNormalMapSection && name != kMaterialTextureSection && name != kMaterialSurfaceDetailSection &&
                 name != kMaterialSheenSection && name != kMaterialIridescenceSection)
                 return fail(error, "save has an unknown engine section '" + name + "'"), std::nullopt;
             continue;

@@ -1,6 +1,7 @@
 // Save games (dve/game_save.hpp): GameWorld capture/restore round trips, destruction deltas,
 // the DVESAVE1 container's corruption handling, schema migrations and (with Lua) script state.
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 #include "dve/camera_runtime.hpp"
 #include "dve/dvox.hpp"
 #include "dve/game_save.hpp"
@@ -482,6 +483,51 @@ void test_source_backed_optics() {
             if (object.materials.size() > 1 && object.materials[1].transmission == 0.95F &&
                 object.materials[1].indexOfRefraction == 1.5F) ++restored;
     CHECK(restored == 20U);
+}
+
+// Texture sets on inline materials: images stored once with their roles, slots and projection back.
+void test_material_texture_sets() {
+    const Assets assets = make_assets();
+    GameSaveCodec codec(file_reader());
+    int fires = 0;
+    Scene a = boot(assets, Physics3DBackend::Reference, &fires);
+    GameSaveData saved = capture(a);
+    std::string error;
+    GameWorldObjectState* object = nullptr;
+    for (auto& candidate : saved.world.objects)
+        if (candidate.materials.size() > 1) { object = &candidate; break; }
+    CHECK(object != nullptr);
+    if (!object) return;
+    std::vector<std::uint8_t> texels(4U * 4U * 4U);
+    for (std::size_t i = 0; i < texels.size(); ++i) texels[i] = static_cast<std::uint8_t>(i * 13U + 5U);
+    const auto albedo = make_voxel_image("albedo", 4U, 4U, texels, VoxelImageRole::Color);
+    const auto height = make_voxel_image("height", 4U, 4U, texels, VoxelImageRole::Data);   // same texels, other role
+    for (VoxelMaterialDefinition& m : object->materials) {
+        m.baseColorMap = albedo;
+        m.heightMap = height;
+        m.textureTileMeters = 0.3F;
+        m.textureSharpness = 6.0F;
+    }
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) { std::cerr << "texture set encode: " << error << '\n'; return; }
+    const auto document = decode_save_game_document(*bytes, {}, &error);
+    CHECK(document && document->sections.contains("dve.material_textures"));
+    const auto decoded = codec.decode(*bytes, nullptr, &error);
+    CHECK(decoded.has_value());
+    if (!decoded) { std::cerr << "texture set decode: " << error << '\n'; return; }
+    bool found = false;
+    for (const auto& o : decoded->world.objects)
+        if (o.id == object->id) {
+            found = true;
+            for (const auto& m : o.materials)
+                found = found && m.baseColorMap && m.heightMap && !m.ormMap && m.baseColorMap->contentHash == albedo->contentHash &&
+                        m.heightMap->contentHash == height->contentHash && m.baseColorMap->role == 1U && m.heightMap->role == 2U &&
+                        m.textureTileMeters == 0.3F && m.textureSharpness == 6.0F;
+        }
+    CHECK(found);
+    const auto again = codec.encode(*decoded, nullptr, &error);
+    CHECK(again && *again == *bytes);
 }
 
 void test_round_trip(Physics3DBackend backend, const char* label) {
@@ -1484,6 +1530,7 @@ int main() {
     test_material_sheen();
     test_material_iridescence();
     test_material_normal_maps();
+    test_material_texture_sets();
     test_material_surface_detail();
     test_source_backed_optics();
     test_round_trip(Physics3DBackend::Reference, "reference");

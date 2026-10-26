@@ -107,6 +107,7 @@ void hash_material(std::uint64_t& h, const VoxelMaterialDefinition& m) noexcept 
     if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)hash_scalar(h,material_surface_detail_hash(m.surfaceDetail));
     if(!m.preset.id.empty()){hash_string(h,m.preset.id);hash_scalar(h,m.preset.revision);hash_scalar(h,m.preset.overrides);}
     if(material_has_normal_map(m)){hash_scalar(h,m.normalMap->contentHash);hash_scalar(h,m.normalMapTileMeters);hash_scalar(h,m.normalMapStrength);hash_scalar(h,m.normalMapSharpness);}
+    if(material_has_textures(m)){for(const auto* map:{m.baseColorMap.get(),m.ormMap.get(),m.heightMap.get(),m.emissiveMap.get()})hash_scalar(h,map?map->contentHash:std::uint64_t{0});hash_scalar(h,m.textureTileMeters);hash_scalar(h,m.textureSharpness);}
 }
 
 class Writer {

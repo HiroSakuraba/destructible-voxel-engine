@@ -1,6 +1,7 @@
 #include "dve/editor_materials.hpp"
 #include "dve/master_material.hpp"
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -56,6 +57,8 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
     if (!finite(value.metallic) || value.metallic < 0.0F || value.metallic > 1.0F) return fail("metallic must be in [0,1]");
     if (!finite(value.roughness) || value.roughness < 0.0F || value.roughness > 1.0F) return fail("roughness must be in [0,1]");
     if (!material_sheen_valid(value) || !material_iridescence_valid(value)) return fail("Invalid sheen or thin-film settings");
+    if (!material_textures_valid(value))
+        return fail("texture-set maps must be 1..4096 per side with tile > 0 and sharpness in [1,64]");
     if (!finite(value.specular) || value.specular < 0.0F || value.specular > 1.0F) return fail("specular must be in [0,1]");
     if (!finite(value.subsurfaceScatterDistanceMeters) || value.subsurfaceScatterDistanceMeters < 0.0F)
         return fail("subsurface scatter distance must be finite and non-negative");
@@ -225,7 +228,8 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
         const bool details=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return e.second.definition.surfaceDetail.pattern!=SurfacePattern::NoPattern;});
         const bool sheen=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_sheen(e.second.definition);});
         const bool iridescence=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_iridescence(e.second.definition);});
-        output << "DVE_EDITOR_MATERIALS " << (iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
+        const bool textures=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_textures(e.second.definition);});
+        output << "DVE_EDITOR_MATERIALS " << (textures ? 10 : iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -248,7 +252,7 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
-            if (normalMaps || origins || details || sheen || iridescence) {
+            if (normalMaps || origins || details || sheen || iridescence || textures) {
                 if (const VoxelNormalMap* map = m.normalMap.get()) {
                     static constexpr char kHex[] = "0123456789abcdef";
                     std::string hex;
@@ -260,10 +264,28 @@ bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error
                     output << " 0";
                 }
             }
-            if(origins || details || sheen || iridescence) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
-            if(details || sheen || iridescence){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
-            if(sheen || iridescence){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
-            if(iridescence){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
+            if(origins || details || sheen || iridescence || textures) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
+            if(details || sheen || iridescence || textures){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
+            if(sheen || iridescence || textures){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
+            if(iridescence || textures){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
+            if (textures) {
+                // Version 10: a mask of the texture-set maps, the projection, then each map (hex texels).
+                const VoxelNormalMap* maps[4] = {m.baseColorMap.get(), m.ormMap.get(), m.heightMap.get(), m.emissiveMap.get()};
+                unsigned mask = 0U;
+                for (unsigned i = 0; i < 4U; ++i) if (maps[i]) mask |= 1U << i;
+                output << ' ' << mask;
+                if (mask != 0U) {
+                    output << ' ' << m.textureTileMeters << ' ' << m.textureSharpness;
+                    static constexpr char kHex[] = "0123456789abcdef";
+                    for (const VoxelNormalMap* map : maps) {
+                        if (!map) continue;
+                        std::string hex;
+                        hex.reserve(map->rgba8.size() * 2U);
+                        for (const std::uint8_t b : map->rgba8) { hex += kHex[b >> 4U]; hex += kHex[b & 15U]; }
+                        output << ' ' << map->width << ' ' << map->height << ' ' << std::quoted(map->name) << ' ' << hex;
+                    }
+                }
+            }
             output << '\n';
         }
     if(!output){if(error)*error="Failed to write material stream";return false;}return true;
@@ -301,7 +323,7 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 9) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 10) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -385,6 +407,36 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::ist
                 if(!material_sheen_valid(m)) throw std::runtime_error("invalid material sheen record");}
             if(version>=9){input >> m.iridescence >> m.iridescenceIor >> m.iridescenceThicknessNm;
                 if(!material_iridescence_valid(m)) throw std::runtime_error("invalid material iridescence record");}
+            if (version >= 10) {
+                unsigned mask{};
+                input >> mask;
+                if (mask > 15U) throw std::runtime_error("invalid material texture-set record");
+                if (mask != 0U) {
+                    input >> m.textureTileMeters >> m.textureSharpness;
+                    std::shared_ptr<const VoxelNormalMap>* slots[4] = {&m.baseColorMap, &m.ormMap, &m.heightMap, &m.emissiveMap};
+                    const VoxelImageRole roles[4] = {VoxelImageRole::Color, VoxelImageRole::Data, VoxelImageRole::Data, VoxelImageRole::Color};
+                    const auto nibble = [](char c) -> int {
+                        return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+                    };
+                    for (unsigned i = 0; i < 4U; ++i) {
+                        if ((mask & (1U << i)) == 0U) continue;
+                        std::uint32_t width{}, height{};
+                        std::string name, hex;
+                        input >> width >> height >> std::quoted(name) >> hex;
+                        if (width == 0U || height == 0U || width > kMaximumVoxelNormalMapDimension ||
+                            height > kMaximumVoxelNormalMapDimension || hex.size() != static_cast<std::size_t>(width) * height * 8U)
+                            throw std::runtime_error("invalid material texture-set record");
+                        std::vector<std::uint8_t> rgba(hex.size() / 2U);
+                        for (std::size_t k = 0; k < rgba.size(); ++k) {
+                            const int hi = nibble(hex[2 * k]), lo = nibble(hex[2 * k + 1]);
+                            if (hi < 0 || lo < 0) throw std::runtime_error("invalid material texture-set record");
+                            rgba[k] = static_cast<std::uint8_t>(hi * 16 + lo);
+                        }
+                        *slots[i] = make_voxel_image(std::move(name), width, height, std::move(rgba), roles[i]);
+                    }
+                    if (!material_textures_valid(m)) throw std::runtime_error("invalid material texture-set record");
+                }
+            }
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");
             entry.id = static_cast<MaterialId>(rawId);

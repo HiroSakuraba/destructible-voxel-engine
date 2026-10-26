@@ -7,6 +7,7 @@
 #include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/surface_shading.hpp"
 #include "dve/render/atmosphere.hpp"
+#include "dve/voxel_textures.hpp"
 #include "dve/render/subsurface.hpp"
 
 #include <algorithm>
@@ -834,6 +835,18 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
             const float units=options.metersPerUnit>0&&std::isfinite(options.metersPerUnit)?options.metersPerUnit:kDefaultMetersPerVoxel;
             normal=normalize(transform_vector(tri.transform,voxel_normal_map_normal(effective,multiply(objectPosition,units),inverse_transform_vector(tri.transform,normal))));
         }
+        float textureOcclusion=1.0F;
+        if(material_has_textures(effective)){
+            // Voxel texture sets on meshes made from voxels: the same object-space triplanar maps.
+            const float units=resolve_meters_per_voxel(options.metersPerUnit);
+            const VoxelTextureSample maps=sample_voxel_textures(effective,multiply(objectPosition,units),
+                normalize(inverse_transform_vector(tri.transform,interpolatedNormal)),
+                (std::max)(length(textureLod.worldDx),length(textureLod.worldDy))*units);
+            effective.baseColor=base;
+            apply_voxel_texture_sample(effective,maps);
+            base=effective.baseColor;
+            textureOcclusion=maps.occlusion;
+        }
         if(effective.surfaceDetail.pattern!=SurfacePattern::NoPattern){
             const float units=resolve_meters_per_voxel(options.metersPerUnit);
             float footprint=(std::max)(length(textureLod.worldDx),length(textureLod.worldDy))*units;
@@ -876,7 +889,7 @@ void raster_triangle(const DeferredTriangle& tri,PolygonRenderTarget& target,con
                     polygon_subsurface_light(tri,effective,worldPosition,normal,environment,options,stats),
                     tri.subsurfaceBvh&&material_has_subsurface(effective)&&options.subsurfaceDiffusionSamples>0U
                         ? polygon_diffused_sun(tri,effective,worldPosition,normal,environment,options,index,stats) : -1.0F,
-                    polygon_ambient_occlusion(worldPosition,normal,environment,options,index,stats));
+                    polygon_ambient_occlusion(worldPosition,normal,environment,options,index,stats)*textureOcclusion);
             if(options.surfaceDetail.parallaxSelfShadow&&heightHit&&tri.binding->height.texture){
                 const auto sun=normalize(environment.sunDirection);
                 const Float3 tangentSun{dot(sun,tangent),dot(sun,bitangent),dot(sun,normalize(interpolatedNormal))};
@@ -1388,6 +1401,8 @@ PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset& asset,co
     }
     material.baseColor=surface.baseColor;material.baseColor.w=surface.opacity;material.roughness=surface.roughness;material.metallic=surface.metallic;material.emissive=surface.emissive;
     if(material.normalMap)out.normal=normalize(transform_vector(pose,voxel_normal_map_normal(material,multiply(hit.position,units),inverse_transform_vector(pose,out.normal))));
+    if(material_has_textures(material))apply_voxel_texture_sample(material,sample_voxel_textures(material,multiply(hit.position,units),
+        normalize(inverse_transform_vector(pose,geometricNormal)),differentials?(std::max)(length(lod.worldDx),length(lod.worldDy))*units:(std::max)(0.F,footprintMeters)));
     float recipeFootprint=differentials?(std::max)(length(lod.worldDx),length(lod.worldDy))*units:(std::max)(0.F,footprintMeters);
     if(material.surfaceDetail.space==SurfaceDetailSpace::UV0||material.surfaceDetail.space==SurfaceDetailSpace::UV1){
         recipeFootprint=0;

@@ -166,12 +166,24 @@ enum class VoxelizationMode : std::uint8_t {
 // with make_voxel_normal_map and shared between material copies. Texels are RGBA8, top row first;
 // xyz = 2 x rgb - 1 with +y up (the OpenGL / glTF convention). contentHash covers the size and
 // texels, so material hashes do not rehash the image.
+// One reduced level of a voxel image (half the size of the level above, at least 1 x 1).
+struct VoxelImageLevel {
+    std::uint32_t width{};
+    std::uint32_t height{};
+    std::vector<std::uint8_t> rgba8;
+};
+
+// Voxel material images (normal maps and the texture sets of dve/voxel_textures.hpp) share this
+// type. role: 0 normal (tangent-space vectors), 1 sRGB colour, 2 raw data; mips holds levels 1..n
+// (filled by make_voxel_image; normal maps made by make_voxel_normal_map keep level 0 only).
 struct VoxelNormalMap {
     std::string name;
     std::uint32_t width{};
     std::uint32_t height{};
     std::vector<std::uint8_t> rgba8;
     std::uint64_t contentHash{};
+    std::uint8_t role{};
+    std::vector<VoxelImageLevel> mips;
 };
 
 struct VoxelMaterialDefinition {
@@ -239,6 +251,17 @@ struct VoxelMaterialDefinition {
     float normalMapTileMeters{1.0F};
     float normalMapStrength{1.0F};
     float normalMapSharpness{4.0F};
+    // Texture set (dve/voxel_textures.hpp): base colour (sRGB, x baseColor), ORM (R occlusion, G
+    // roughness, B metallic: multipliers, as in glTF), height (R: 0 deepest .. 1 highest; parallax and
+    // displacement) and emission (sRGB, x emissive). Projected triplanar in object space; one repeat
+    // spans textureTileMeters, textureSharpness is the blend exponent. Written and hashed only when a
+    // map is present.
+    std::shared_ptr<const VoxelNormalMap> baseColorMap;
+    std::shared_ptr<const VoxelNormalMap> ormMap;
+    std::shared_ptr<const VoxelNormalMap> heightMap;
+    std::shared_ptr<const VoxelNormalMap> emissiveMap;
+    float textureTileMeters{1.0F};
+    float textureSharpness{4.0F};
 };
 
 // True when any optical field differs from its default (formats write the optics block, hashes
@@ -281,6 +304,22 @@ inline constexpr std::uint32_t kMaximumVoxelNormalMapDimension = 4096U;
            map.height <= kMaximumVoxelNormalMapDimension &&
            map.rgba8.size() == static_cast<std::size_t>(map.width) * map.height * 4U && in(m.normalMapTileMeters, 1.0e-4F, 1.0e4F) &&
            in(m.normalMapStrength, 0.0F, 4.0F) && in(m.normalMapSharpness, 1.0F, 64.0F);
+}
+// Any texture-set map is attached.
+[[nodiscard]] inline bool material_has_textures(const VoxelMaterialDefinition& m) noexcept {
+    return m.baseColorMap || m.ormMap || m.heightMap || m.emissiveMap;
+}
+// No texture set, or well-formed maps with parameters in range.
+[[nodiscard]] inline bool material_textures_valid(const VoxelMaterialDefinition& m) noexcept {
+    const auto in = [](float v, float lo, float hi) { return v >= lo && v <= hi; };   // false for NaN
+    const auto ok = [](const std::shared_ptr<const VoxelNormalMap>& map) {
+        return !map || (map->width >= 1U && map->height >= 1U && map->width <= kMaximumVoxelNormalMapDimension &&
+                        map->height <= kMaximumVoxelNormalMapDimension &&
+                        map->rgba8.size() == static_cast<std::size_t>(map->width) * map->height * 4U);
+    };
+    if (!material_has_textures(m)) return true;
+    return ok(m.baseColorMap) && ok(m.ormMap) && ok(m.heightMap) && ok(m.emissiveMap) && in(m.textureTileMeters, 1.0e-4F, 1.0e4F) &&
+           in(m.textureSharpness, 1.0F, 64.0F);
 }
 // Light enters the material (refraction, caustics).
 [[nodiscard]] inline bool material_is_refractive(const VoxelMaterialDefinition& m) noexcept {
@@ -421,6 +460,12 @@ struct CookedVoxelScene {
 [[nodiscard]] std::shared_ptr<const VoxelNormalMap> decode_voxel_normal_map(std::span<const std::byte> bytes, std::string name,
                                                                             std::string* error = nullptr,
                                                                             bool flipGreenChannel = false);
+// Texture-set maps (dve/voxel_textures.hpp), decoded the same way; role (VoxelImageRole as a byte:
+// 1 colour for base colour and emission, 2 data for ORM and height) decides the mip reduction.
+[[nodiscard]] std::shared_ptr<const VoxelNormalMap> import_voxel_texture(const std::filesystem::path& path, std::uint8_t role,
+                                                                         std::string* error = nullptr);
+[[nodiscard]] std::shared_ptr<const VoxelNormalMap> decode_voxel_texture(std::span<const std::byte> bytes, std::string name,
+                                                                         std::uint8_t role, std::string* error = nullptr);
 
 [[nodiscard]] CookedVoxelAsset voxelize_scene(
     const ImportedScene& scene,

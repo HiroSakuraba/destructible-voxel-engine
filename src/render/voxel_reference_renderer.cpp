@@ -23,6 +23,7 @@
 #include "dve/render/atmosphere.hpp"
 #include "dve/render/volumetric_fog.hpp"
 #include "dve/voxel_normal_map.hpp"
+#include "dve/voxel_textures.hpp"
 
 namespace dve::render {
 namespace {
@@ -516,6 +517,22 @@ void apply_voxel_normal_map(const VoxelReferenceInstance& instance, const VoxelM
     surface.normal = bent;
 }
 
+// The material's texture set (dve/voxel_textures.hpp), projected in the instance's own space and
+// filtered by the pixel's footprint on the surface: base colour, alpha, roughness, metallic and
+// emission on the shading copy of the material; occlusion dims the ambient light and its
+// specular reflection.
+void apply_voxel_textures(const VoxelReferenceInstance& instance, VoxelMaterialDefinition& material, Float3 worldPosition,
+                          Float3 geometricNormal, float metersPerVoxel, float footprintMeters, VoxelSurfaceInput& surface) noexcept {
+    if (!material_has_textures(material)) return;
+    const float units = resolve_meters_per_voxel(metersPerVoxel);
+    const VoxelTextureSample maps = sample_voxel_textures(
+        material, multiply(inverse_transform_point(instance.transform, worldPosition), units),
+        normalize(inverse_transform_vector(instance.transform, geometricNormal)), footprintMeters);
+    apply_voxel_texture_sample(material, maps);
+    surface.ambient = multiply(surface.ambient, maps.occlusion);
+    surface.ambientOcclusion *= maps.occlusion;
+}
+
 // Writes the pixel's render passes (polygon_renderer.hpp) when the target has them. The shadow pass
 // is the direct light the point would get with its own sun visibility 1, less what it gets (for
 // subsurface-diffused sun the point's own share is unshadowed, its neighbours' are not).
@@ -652,6 +669,10 @@ VoxelReferenceRenderStats render_radiance_cascades(
                                   sunShare, gi.indirect[index], ao, caustic, transmitted};
         apply_voxel_normal_map(instance, material, environment, texel.position, diffuses(material, distances),
                                distances.metersPerVoxel, surface);
+        apply_voxel_textures(instance, material, texel.position, texel.normal, distances.metersPerVoxel,
+                             length(subtract(gbuffer.cameraPosition, texel.position)) * distances.metersPerVoxel * 2.0F *
+                                 std::tan(camera.verticalFieldOfViewRadians * 0.5F) / static_cast<float>(target.height),
+                             surface);
         const float footprint=length(subtract(gbuffer.cameraPosition,texel.position))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
         apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,texel.position),distances.metersPerVoxel),multiply(texel.position,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
         if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
@@ -793,6 +814,10 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                                               visibility, sunShare, indirect, ao, caustic, transmitted};
                     apply_voxel_normal_map(instance, material, environment, hit->worldPosition, diffuses(material, distances),
                                            distances.metersPerVoxel, surface);
+                    apply_voxel_textures(instance, material, hit->worldPosition, hit->worldNormal, distances.metersPerVoxel,
+                                         length(subtract(camera.position, hit->worldPosition)) * distances.metersPerVoxel * 2.0F *
+                                             std::tan(camera.verticalFieldOfViewRadians * 0.5F) / static_cast<float>(target.height),
+                                         surface);
                     const float footprint=length(subtract(camera.position,hit->worldPosition))*distances.metersPerVoxel*2*std::tan(camera.verticalFieldOfViewRadians*.5F)/float(target.height);
                     apply_material_surface_detail(material,surface.normal,{multiply(inverse_transform_point(instance.transform,hit->worldPosition),distances.metersPerVoxel),multiply(hit->worldPosition,distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
                     if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);

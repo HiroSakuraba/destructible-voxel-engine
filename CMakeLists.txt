@@ -170,6 +170,7 @@ add_library(dve_core
     src/material_parameter_collection.cpp
     src/material_mapping.cpp
     src/voxel_normal_map.cpp
+    src/voxel_textures.cpp
     src/dashr_surface.cpp
     src/dashr_seam_map.cpp
     src/material_layers.cpp
@@ -3392,6 +3393,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_render_passes_tests tests/test_render_passes.cpp)
     target_link_libraries(dve_render_passes_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_render_passes_tests COMMAND dve_render_passes_tests)
+    add_executable(dve_voxel_textures_tests tests/test_voxel_textures.cpp)
+    target_link_libraries(dve_voxel_textures_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_voxel_textures_tests COMMAND dve_voxel_textures_tests)
     add_executable(dve_atmosphere_tests tests/test_atmosphere.cpp)
     target_link_libraries(dve_atmosphere_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_atmosphere_tests COMMAND dve_atmosphere_tests)

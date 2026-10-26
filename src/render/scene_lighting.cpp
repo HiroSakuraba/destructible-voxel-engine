@@ -1,3 +1,4 @@
+#include "dve/voxel_textures.hpp"
 #include "dve/render/scene_lighting.hpp"
 #include "dve/render/ray_offset.hpp"
 #include "dve/render/subsurface_random_walk.hpp"
@@ -438,6 +439,9 @@ struct SceneLighting::Impl {
       if(h->voxelInstance>=0 && std::size_t(h->voxelInstance)<tracer.instances().size()){
         const auto& pose=tracer.instances()[h->voxelInstance].transform;
         if(material.normalMap)detailedNormal=unit(transform_vector(pose,voxel_normal_map_normal(material,mul(inverse_transform_point(pose,h->position),scale),inverse_transform_vector(pose,detailedNormal))));
+        // Texture set at secondary hits (no occlusion map: the path tracer finds occlusion itself).
+        if(material_has_textures(material))apply_voxel_texture_sample(material,sample_voxel_textures(material,mul(inverse_transform_point(pose,h->position),scale),
+            unit(inverse_transform_vector(pose,h->shadingNormal)),h->distance*scale*.006F));
         apply_material_surface_detail(material,detailedNormal,{mul(inverse_transform_point(pose,h->position),scale),mul(h->position,scale),{},{},false,pose,{1,0,0},{0,1,0},h->distance*scale*.006F});
       }
       result = Hit{h->distance,

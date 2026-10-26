@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ninja-build glslang-tools spirv-tools libvulkan1 mesa-vulkan-drivers
+            ninja-build glslang-tools spirv-tools libvulkan1 mesa-vulkan-drivers vulkan-tools
       - name: Configure minimal RHI build
         run: |
           cmake -S . -B build-rdv -G Ninja \
@@ -61,8 +61,18 @@ jobs:
             --shift-uav-binding 32 \
             -o "$RUNNER_TEMP/rdv_bbv_trace.spv" shaders/rdv_bbv_trace.hlsl
           spirv-val --target-env vulkan1.2 "$RUNNER_TEMP/rdv_bbv_trace.spv"
+      - name: Select software ICD and inspect Vulkan capabilities
+        run: |
+          echo "Installed Vulkan ICD manifests:"
+          ls -la /usr/share/vulkan/icd.d/ || true
+          ICD="$(find /usr/share/vulkan/icd.d -maxdepth 1 -name 'lvp_icd*.json' -print -quit)"
+          if [ -z "$ICD" ]; then
+            echo "::error::Mesa Lavapipe ICD manifest was not installed"
+            exit 1
+          fi
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          VK_ICD_FILENAMES="$ICD" vulkaninfo --summary
       - name: Run native GPU ray query and CPU oracle parity
         env:
           DVE_RDV_TRACE_SPV: ${{ runner.temp }}/rdv_bbv_trace.spv
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: ctest --test-dir build-rdv -R '^dve_rdv_bbv_tests$' --output-on-failure

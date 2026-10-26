@@ -732,6 +732,7 @@ if(DVE_BUILD_RHI)
         src/render/brick_palette_rhi.cpp
         src/render/brick_palette_gpu_resolve.cpp
         src/render/brickmap_rhi_mirror.cpp
+        src/render/rdv_bbv.cpp
         src/render/mesh_rhi_mirror.cpp
         src/render/dashr_atlas.cpp
         src/render/dashr_shell.cpp
@@ -1259,6 +1260,9 @@ if(DVE_BUILD_TESTS)
     target_link_libraries(dve_v221_display_presentation_tests PRIVATE dve::core)
     add_test(NAME dve_v221_display_presentation_tests COMMAND dve_v221_display_presentation_tests)
     if(DVE_BUILD_RHI)
+        add_executable(dve_rdv_bbv_tests tests/test_rdv_bbv.cpp)
+        target_link_libraries(dve_rdv_bbv_tests PRIVATE dve::render_bridge dve::rhi)
+        add_test(NAME dve_rdv_bbv_tests COMMAND dve_rdv_bbv_tests)
         add_executable(dve_camera_frame_graph_tests tests/test_camera_frame_graph.cpp)
         target_link_libraries(dve_camera_frame_graph_tests PRIVATE dve::render_bridge dve::rhi)
         add_test(NAME dve_camera_frame_graph_tests COMMAND dve_camera_frame_graph_tests)

@@ -64,6 +64,8 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1
         run: ctest --test-dir build-region -R '^dve_region_(catalog_tests|streaming_tests|streaming_runtime_contract_tests) --output-on-failure
  --output-on-failure
-      - name: Compile R2 against real RuntimeSceneWorld API
+      - name: Build and run R2 against real DVE scene staging and renderer
         if: matrix.mode == 'release'
-        run: cmake --build build-region --target dve_region_streaming_runtime --parallel 2
+        run: |
+          cmake --build build-region --target dve_region_streaming_real_tests --parallel 2
+          ctest --test-dir build-region -R '^dve_region_streaming_real_tests --output-on-failure

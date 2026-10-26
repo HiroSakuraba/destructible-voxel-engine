@@ -163,7 +163,9 @@ struct MechaGame::Impl {
   std::vector<Float3> path{};
   std::size_t waypoint{};
  };
- struct TraceHit {GameObjectId id{};Float3 position{};float fraction{1};bool valid{};};
+ static constexpr float kBlastStandoff=.1F;
+ // normal always faces back toward the trace origin (the exposed side the shot came from).
+ struct TraceHit {GameObjectId id{};Float3 position{};float fraction{1};bool valid{};Float3 normal{};};
  // Editor play mode drives fire/aim/sprint (mouse buttons, shift) while exported players bind
  // mech_primary/mech_secondary/mech_boost. Accept either action set so both paths are playable.
  bool action_down(const char* mech,const char* editor)const{
@@ -235,18 +237,26 @@ struct MechaGame::Impl {
  // Resolve nearest target against both voxel/polygon swept collisions and exact voxel rays.
  TraceHit trace(Float3 from,Float3 movement,float padding=0.F){
   TraceHit best{};
-  if(const auto hit=world.capsule_sweep({from,from,std::max(.01F,padding)},movement,player)){
-   if(hit->time>=0&&hit->time<=best.fraction){best={hit->objectId,hit->worldPosition,hit->time,true};}
-  }
   const auto distance=mag(movement);
+  const Float3 back=distance>1.e-5F?scaled(movement,-1.F/distance):Float3{0,0,0};
+  // Surface normals can point either way for overlap contacts; orient them to the exposed side.
+  auto exposed=[&](Float3 n){
+   if(mag(n)<1.e-4F)return back;
+   if(n.x*movement.x+n.y*movement.y+n.z*movement.z>0)n=scaled(n,-1.F);
+   return scaled(n,1.F/mag(n));
+  };
+  if(const auto hit=world.capsule_sweep({from,from,std::max(.01F,padding)},movement,player)){
+   if(hit->time>=0&&hit->time<=best.fraction){
+    best={hit->objectId,hit->worldPosition,hit->time,true,exposed(hit->worldNormal)};}
+  }
   if(distance>1.e-5F)if(const auto hit=world.raycast(from,scaled(movement,1.F/distance),distance)){
    const auto t=hit->distance/distance;
-   if(t>=0&&t<=best.fraction)best={hit->objectId,hit->worldPosition,t,true};
+   if(t>=0&&t<=best.fraction)best={hit->objectId,hit->worldPosition,t,true,exposed(hit->worldNormal)};
   }
   for(const auto& target:targets)if(target.hp>0&&world.is_enabled(target.id)){
    const auto p=world.position(target.id);if(!p)continue;
    const float t=sphere_hit(from,movement,*p,target.radius+padding);
-   if(t>=0&&t<best.fraction)best={target.id,plus(from,scaled(movement,t)),t,true};
+   if(t>=0&&t<best.fraction)best={target.id,plus(from,scaled(movement,t)),t,true,back};
   }
   return best;
  }
@@ -270,8 +280,11 @@ struct MechaGame::Impl {
    if(t.id!=hit.id&&(!rocket||d>=3.5F+t.radius))continue;
    // LOS check for blast. The primary ray already established direct visibility.
    if(rocket&&t.id!=hit.id&&d>t.radius){
-    const auto toward=minus(*position,hit.position);
-    if(const auto occlusion=world.capsule_sweep({hit.position,hit.position,.02F},toward,player))
+    // The contact point lies on the struck surface; a zero-length capsule there overlaps the
+    // cover itself and would hide targets on the exposed side. Start just outside the surface.
+    const auto origin=plus(hit.position,scaled(hit.normal,kBlastStandoff));
+    const auto toward=minus(*position,origin);
+    if(const auto occlusion=world.capsule_sweep({origin,origin,.02F},toward,player))
      if(occlusion->objectId!=t.id&&occlusion->time<.95F)continue;
    }
    const float dmg=rocket?(t.id==hit.id?95.F:std::max(0.F,60.F*(1.F-d/5.F))):18.F;

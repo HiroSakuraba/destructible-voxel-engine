@@ -158,6 +158,22 @@ void rocket_muzzle_gap_is_swept(){
  check(thin.game->telemetry().activeRockets==0,"no rocket survives past the wall");
  check(thin.world.is_enabled(thin.target),"rocket cannot pass through a wall thinner than the muzzle offset");
 }
+// Regression (Codex P2 4381797416): blast visibility must start outside the struck surface, so a
+// target on the exposed side takes splash, while the same cover still shields the far side.
+void rocket_splash_uses_exposed_side(){
+ // Wall front face at y~7.875. Target hugging it on the player's side, off the rocket's line.
+ Fixture exposed(FixtureOptions{.targetPosition={1.5F,7.F,2},.targetRadius=.5,.targetHealth=36.0,
+                                .thinWall=true,.thinWallY=8.F});
+ exposed.fire("mech_secondary");exposed.tick(80);
+ check(exposed.game->telemetry().impacts>=1,"rocket hit the cover");
+ check(!exposed.world.is_enabled(exposed.target),"splash reaches a target on the exposed side of the cover");
+ // Same blast distance but the target is behind the wall: genuine cover must still block splash.
+ Fixture shielded(FixtureOptions{.targetPosition={1.5F,9.F,2},.targetRadius=.5,.targetHealth=36.0,
+                                 .thinWall=true,.thinWallY=8.F});
+ shielded.fire("mech_secondary");shielded.tick(80);
+ check(shielded.game->telemetry().impacts>=1,"rocket hit the cover (shielded case)");
+ check(shielded.world.is_enabled(shielded.target),"cover still blocks splash to a target behind it");
+}
 void movement(){
  Fixture moving;
  moving.world.set_axis("move_y",1.F);
@@ -196,7 +212,7 @@ void exported_starter(){
 }
 int main(){
  try{
-  motor_contract();validation();movement();combat();editor_action_aliases();rocket_muzzle_gap_is_swept();exported_starter();
+  motor_contract();validation();movement();combat();editor_action_aliases();rocket_muzzle_gap_is_swept();rocket_splash_uses_exposed_side();exported_starter();
   std::cout<<"mecha M1/M2 tests passed\n";return 0;
  }catch(const std::exception& e){std::cerr<<"mecha M1/M2: "<<e.what()<<'\n';return 1;}
 }

@@ -97,7 +97,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
     // Move into the entry cell by an IEEE-754 nextafter-style float increment.
     // A conservative clamp handles the high boundary for negative-going rays.
-    float sampleT = entry + max(abs(entry) * 1.1920929e-7f, 1.0e-5f);
+    float sampleT = entry > 0.0f ? entry + max(abs(entry) * 1.1920929e-7f, 1.0e-5f) : 0.0f;
     float3 p = clamp(ray.origin + direction * sampleT, gridMin, gridMax - 1.0e-4f);
     int3 voxel = int3(floor(p));
     float t = entry;

@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "dve/content_source.hpp"
+#include "dve/prototype_game.hpp"
 #include "dve/simulation_clock.hpp"
 #include "dve/game_manifest.hpp"
 #include "dve/game_save.hpp"
@@ -144,6 +145,7 @@ public:
 
     void handle_event(const platform::PlatformEvent& event);
     void queue_event(const platform::PlatformEvent& event, std::uint64_t targetTick);
+    [[nodiscard]] const PrototypeHud* prototype_hud()const noexcept;
     [[nodiscard]] bool quit_requested() const noexcept;
     void request_quit() noexcept;
 
@@ -155,8 +157,9 @@ public:
     // Camera for the given aspect (width / height): the script override if set, else the
     // manifest camera, else a default. Horizontal FOV from ui::GameSettings::fieldOfViewDegrees.
     [[nodiscard]] render::PolygonCamera camera(float aspect) const;
-    // The Lua host's environment (scripts can change it) or the engine default.
-    [[nodiscard]] RenderEnvironment environment() const;
+    // Script/default environment plus enabled dve.light components in current
+    // world frames. Candle time follows the saved simulation clock.
+    [[nodiscard]] RenderEnvironment environment(float interpolationAlpha = 1.0F) const;
     // View for a renderer. `objects` must stay alive (and the world unmodified) while the
     // view is in use; pass the storage in so no allocation happens per frame.
     [[nodiscard]] PlayerRenderView render_view(std::vector<GameRenderObject>& objects, float aspect, float interpolationAlpha = 1.0F) const;

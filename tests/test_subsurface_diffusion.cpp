@@ -10,6 +10,7 @@
 #include "dve/render/subsurface_transmission.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -187,6 +188,17 @@ void test_shadow_edge() {
         return target;
     };
     const PolygonRenderTarget sharp = render(0), soft = render(512);
+    // A neutral procedural recipe must preserve Burley's spatially diffused light.
+    materials[1].surfaceDetail.pattern=SurfacePattern::Mineral;
+    materials[1].surfaceDetail.colorVariation=0;
+    materials[1].surfaceDetail.roughnessVariation=0;
+    materials[1].surfaceDetail.bumpHeightMeters=0;
+    const auto detailedSoft=render(512);
+    float detailDifference=0;
+    for(std::size_t i=0;i<soft.hdrColor.size();++i)
+        detailDifference=(std::max)(detailDifference,std::abs(soft.hdrColor[i].x-detailedSoft.hdrColor[i].x));
+    check(detailDifference<1e-6F,"neutral surface detail preserves diffused subsurface shadows");
+    materials[1].surfaceDetail.pattern=SurfacePattern::NoPattern;
     const Basis b = basis_of(camera, w, h);
     // Average each pixel column (one world x).
     std::printf("\nshadow edge on marble (x in scatter distances): sharp / diffused / exact Burley\n");

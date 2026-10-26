@@ -1,4 +1,5 @@
-cbuffer LiveEnvironmentFrameConstants : register(b8) {
+#include "common/live_bindings.hlsli"
+DVE_LIVE_BIND(0,0) cbuffer LiveEnvironmentFrameConstants : register(b8) {
     float4x4 gInverseViewProjection;
     float4 gEnvironmentParameters;
 };

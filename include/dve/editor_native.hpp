@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "dve/audio/midi_input_session.hpp"
@@ -43,6 +44,8 @@
 #include "dve/editor_audio.hpp"
 #include "dve/editor_audio_event.hpp"
 #include "dve/editor_materials.hpp"
+#include "dve/editor_prototype.hpp"
+#include "dve/editor_material_panel.hpp"
 #include "dve/editor_play_session.hpp"
 #include "dve/editor_runtime_settings.hpp"
 #include "dve/collision_proxy.hpp"
@@ -384,7 +387,7 @@ struct NativeFilePickerLayout {
 // Esc (or the Cancel button) cancels. While one runs, edits are refused, so the scene cannot
 // change under it; the result is applied on the UI thread as one undo step (or not at all when
 // cancelled, or when the scene changed anyway).
-enum class LongJobKind : std::uint8_t { Idle, ReadModel, ImportModel, ReimportModel, FloodFill, ValidateProject, RebuildCollision };
+enum class LongJobKind : std::uint8_t { Idle, ReadModel, ImportModel, ReimportModel, FloodFill, ValidateProject, RebuildCollision, BakeMaterial };
 struct LongJobView {
     bool active{};
     LongJobKind kind{LongJobKind::Idle};
@@ -633,6 +636,28 @@ public:
     // most important first. The viewport shows as many as fit; the full list is behind the
     // "? Shortcuts" control.
     [[nodiscard]] std::vector<std::string> viewport_tool_gestures() const;
+    [[nodiscard]] MaterialPanelState& material_panel() noexcept { return materialPanel_; }
+    [[nodiscard]] const MaterialPanelState& material_panel() const noexcept { return materialPanel_; }
+    [[nodiscard]] MaterialPanelLayout material_panel_layout() const;
+    [[nodiscard]] std::vector<const MaterialPresetAsset*> material_panel_entries() const;
+    [[nodiscard]] std::vector<MaterialPresetControl> material_panel_controls() const;
+    void open_material_panel();
+    void close_material_panel();
+    bool apply_material_panel(bool editSlot = false);
+    bool load_material_panel_slot();
+    // Layer edits affect assigned polygon slots immediately, one undo transaction each.
+    bool material_panel_bake_source(bool showSource);
+    bool material_panel_bake(bool apply=true, const std::filesystem::path& outputDirectory={});
+    bool material_panel_layer_action(std::string_view action,float value=0);
+    [[nodiscard]] std::vector<std::pair<std::string,std::string>> material_panel_layer_controls() const;
+    bool material_panel_key(std::string_view,bool control,bool shift,bool alt);
+    bool material_panel_pointer(int x,int y);
+    void material_panel_text(std::string_view);
+    void material_panel_select(std::string_view);
+    void material_panel_preview();
+    void material_panel_tick();
+    void save_material_panel_preferences();
+    bool save_material_panel_preset();
     [[nodiscard]] MaterialId active_material() const noexcept { return activeMaterial_; }
     [[nodiscard]] std::optional<VoxelBrushPreview> voxel_brush_preview() const;
     [[nodiscard]] BrushShape voxel_brush_shape() const noexcept { return voxelBrushShape_; }
@@ -1062,6 +1087,15 @@ public:
     // Why Scale Voxel Size is unavailable for the current selection; empty when it can run.
     [[nodiscard]] std::string voxel_size_scale_disabled_reason() const;
     [[nodiscard]] std::vector<ComponentInspectorSection> primary_component_sections() const;
+    void open_prototype_panel();
+    [[nodiscard]] PrototypePanelState& prototype_panel()noexcept{return prototypePanel_;}
+    [[nodiscard]] const PrototypePanelState& prototype_panel()const noexcept{return prototypePanel_;}
+    [[nodiscard]] PrototypePanelLayout prototype_panel_layout()const;
+    [[nodiscard]] std::vector<std::pair<std::string,std::string>> prototype_panel_controls()const;
+    bool prototype_panel_action(std::string_view);
+    bool prototype_panel_pointer(int,int);
+    void prototype_panel_text(std::string_view);
+    bool prototype_panel_key(std::string_view);
     [[nodiscard]] CommandResult add_component_to_primary(std::string_view type);
     [[nodiscard]] CommandResult remove_component_from_primary(ComponentId componentId);
     [[nodiscard]] CommandResult set_component_enabled_on_primary(ComponentId componentId, bool enabled);
@@ -1091,6 +1125,7 @@ public:
         return {drawListCache_.rebuild_count(), previewDrawListCache_.rebuild_count(), selectionDiagnosticsRebuilds_};
     }
     [[nodiscard]] std::vector<EditorText3DDrawItem> text3d_draw_items() const;
+    bool edit_nurbs_surface_uv_control(EditorObjectId,std::uint64_t,std::size_t,std::array<double,2>);
     [[nodiscard]] std::vector<EditorGaborVolumeDrawItem> gabor_volume_draw_items() const;
     [[nodiscard]] std::vector<EditorObjectId> hierarchy_order() const;
     [[nodiscard]] bool hierarchy_collapsed(EditorObjectId id) const noexcept { return collapsedHierarchy_.contains(id); }
@@ -1215,6 +1250,7 @@ public:
     bool create_nurbs_source(const NurbsSource&,std::string name,std::optional<std::pair<RigidTransform,Float3>> placement=std::nullopt);
     bool dispatch_nurbs_construction(std::string_view);
     bool dispatch_nurbs_topology(std::string_view);
+    bool dispatch_nurbs_surface(std::string_view);
     void commit_nurbs_construction_field();
     bool nurbs_construction_pointer(PointerButton,int,int);
     void draw_nurbs_construction(const IEditorCanvas&,UiRect) const;
@@ -1415,7 +1451,9 @@ private:
     void voxel_boolean_tick();
 
     EditorWorkspace workspace_;
+    PrototypePanelState prototypePanel_;
     EditorMaterialLibrary materials_;
+    MaterialPanelState materialPanel_;
     EditorAssetDatabase assetDatabase_{};
     bool thumbnailBacklog_{};
     EditorAssetBrowserState assetBrowserState_{};

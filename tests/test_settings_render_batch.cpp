@@ -273,12 +273,58 @@ void test_tonemap_reference() {
         const float v = static_cast<float>(i) * 0.125F;
         ramp.hdrColor[i] = {v, v, v, 1.0F};
     }
-    for (const auto op : {TonemapOperator::ACES, TonemapOperator::Reinhard, TonemapOperator::Clamp}) {
+    for (const auto op : {TonemapOperator::ACES, TonemapOperator::Reinhard, TonemapOperator::Clamp,
+                          TonemapOperator::AgX, TonemapOperator::PBRNeutral}) {
         std::vector<std::uint8_t> out;
         require(resolve_polygon_render_rgba8(ramp, 1.0F, op, out, &error), error.c_str());
         for (std::size_t i = 1; i < 65U; ++i)
             require(out[i * 4U] >= out[(i - 1U) * 4U], "tonemap ramp is not monotonic");
     }
+}
+
+// The vector operators (AgX, Khronos PBR Neutral) mix channels, so they are
+// pinned against independently computed reference outputs (double-precision
+// evaluation of the published curves) instead of a per-channel formula.
+void test_tonemap_vector_operators() {
+    PolygonRenderTarget target;
+    target.resize(8U, 1U);
+    target.hdrColor = {{0.0F, 0.0F, 0.0F, 1.0F}, {0.18F, 0.18F, 0.18F, 1.0F},
+                       {1.0F, 1.0F, 1.0F, 1.0F}, {4.0F, 4.0F, 4.0F, 1.0F},
+                       {2.0F, 0.1F, 0.05F, 1.0F}, {0.3F, 0.6F, 1.2F, 1.0F},
+                       {0.7F, 0.7F, 0.7F, 1.0F}, {0.02F, 0.5F, 0.02F, 1.0F}};
+    static constexpr std::uint8_t kPbr[8][3] = {{0, 0, 0},       {105, 105, 105}, {237, 237, 237},
+                                               {252, 252, 252}, {249, 110, 103}, {131, 178, 242},
+                                               {212, 212, 212}, {8, 185, 8}};
+    static constexpr std::uint8_t kAgx[8][3] = {{0, 0, 0},       {187, 187, 187}, {229, 229, 229},
+                                               {247, 247, 247}, {247, 184, 174}, {205, 220, 234},
+                                               {222, 222, 222}, {141, 219, 141}};
+    std::string error;
+    for (const auto [op, table] : {std::pair{TonemapOperator::PBRNeutral, kPbr},
+                                   std::pair{TonemapOperator::AgX, kAgx}}) {
+        std::vector<std::uint8_t> rgba;
+        require(resolve_polygon_render_rgba8(target, 1.0F, op, rgba, &error), error.c_str());
+        for (std::size_t pixel = 0; pixel < 8U; ++pixel)
+            for (std::size_t channel = 0; channel < 3U; ++channel) {
+                const auto actual = rgba[pixel * 4U + channel];
+                const auto expected = table[pixel][channel];
+                require(std::abs(static_cast<int>(actual) - static_cast<int>(expected)) <= 2,
+                        "vector tonemap output disagrees with the reference values");
+            }
+    }
+    // PBR Neutral preserves out-of-range hue ratios less aggressively than
+    // ACES by design; the saturated red must stay clearly red-dominant.
+    std::vector<std::uint8_t> rgba;
+    require(resolve_polygon_render_rgba8(target, 1.0F, TonemapOperator::PBRNeutral, rgba, &error),
+            error.c_str());
+    require(rgba[4U * 4U] > 2U * rgba[4U * 4U + 1U], "PBR Neutral washed out a saturated red");
+    // The settings and script names resolve to the new operators.
+    auto registry = EditorSettingsRegistry::make_default();
+    set(registry, "render.tonemap", std::string{"pbr_neutral"});
+    require(render_environment_settings(registry).tonemapOperator == TonemapOperator::PBRNeutral,
+            "pbr_neutral setting did not resolve");
+    set(registry, "render.tonemap", std::string{"agx"});
+    require(render_environment_settings(registry).tonemapOperator == TonemapOperator::AgX,
+            "agx setting did not resolve");
 }
 
 CookedPolygonAsset make_sampler_asset() {
@@ -320,8 +366,7 @@ void test_sampler_policy() {
                 "default policy must not grant anisotropy");
         residency.clear();
     }
-    {   // Registry defaults (trilinear): mipmap request meets single-level
-        // images, so the explicit fallback engages; anisotropy stays off.
+    {   // Registry defaults retain trilinear sampling; residency supplies mip chains.
         auto registry = EditorSettingsRegistry::make_default();
         const auto policy = material_sampler_policy(registry);
         require(policy.overrideFiltering && !policy.anisotropy, "trilinear policy shape wrong");
@@ -331,8 +376,8 @@ void test_sampler_policy() {
         rhi::SamplerHandle sampler;
         require(residency.ensure_sampler(asset, 0U, sampler, &error), error.c_str());
         const auto stats = residency.stats();
-        require(stats.mipmapFallbackSamplersCreated == 1U,
-                "single-level images did not trigger the explicit mipmap fallback");
+        require(stats.mipmapFallbackSamplersCreated == 0U,
+                "mip-capable residency unexpectedly downgraded trilinear filtering");
         require(stats.anisotropicSamplersCreated == 0U, "trilinear must not enable anisotropy");
         residency.clear();
     }
@@ -390,6 +435,7 @@ int main() {
         test_host_policies();
         test_debris_limit_setting();
         test_tonemap_reference();
+        test_tonemap_vector_operators();
         test_sampler_policy();
         std::cout << "dve_settings_render_batch_tests: PASS\n";
         return 0;

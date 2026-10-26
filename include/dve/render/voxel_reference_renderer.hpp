@@ -17,6 +17,7 @@
 namespace dve { class PolygonBvh; }
 
 namespace dve::render {
+class SceneLighting;
 
 class CausticMap;
 namespace spwi { class VoxelSceneTracer; }
@@ -112,6 +113,7 @@ struct RadianceCascadeSettings {
 
 class ReferenceVoxelRenderer {
 public:
+    const SceneLighting* sceneLighting{}; // shared frame integrator; outlives render
     // Used only when RenderEnvironment::globalIlluminationMode is RadianceCascades.
     RadianceCascadeSettings radianceCascades{};
     // Scene world scale. The reference path traces in voxel-index units (instance transforms are

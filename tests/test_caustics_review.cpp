@@ -9,6 +9,7 @@
 #include "dve/polygon_bvh.hpp"
 #include "dve/render/caustic_map.hpp"
 #include "dve/render/caustic_photons.hpp"
+#include "dve/render/polygon_renderer.hpp"
 #include "dve/render/subsurface.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
 
@@ -278,6 +279,43 @@ void test_masked_occluder() {
     check(solid < 1e-6F, "the solid half still shadows");
 }
 
+void test_masked_layer_opacity() {
+    // A Masked material whose layer replaces the opacity with that of a fully transparent source
+    // material: the rasterizer discards it, so the shadow test must see it as open too.
+    CookedPolygonAsset quad;
+    quad.objectId = 73;
+    VoxelMaterialDefinition leaf;
+    leaf.name = "Leaf";
+    leaf.blendMode = MaterialBlendMode::Masked;
+    VoxelMaterialDefinition hole;
+    hole.name = "Hole";
+    hole.baseColor = {1.0F, 1.0F, 1.0F, 0.0F};
+    VoxelMaterialLayer layer;
+    layer.sourceMaterial = 1U;
+    layer.weight = 1.0F;
+    leaf.layers.push_back(layer);
+    quad.materials = {leaf, hole};
+    quad.materialBindings.resize(2);
+    quad.materialBindings[0].alphaCutoff = 0.5F;
+    quad.materialBindings[0].layers.resize(1);
+    quad.materialBindings[0].layers[0].opacityPolicy = MaterialLayerOpacityPolicy::Replace;
+    std::vector<std::uint32_t> indices;
+    add_face(quad, indices, {0, 1, 0}, {Float3{-1, 0, -1}, {-1, 0, 1}, {1, 0, 1}, {1, 0, -1}});
+    quad.indices = indices;
+    quad.submeshes.push_back({"quad", 0, static_cast<std::uint32_t>(indices.size()), 0});
+    quad.bounds = {{-1, 0, -1}, {1, 0, 1}};
+    PolygonBvh bvh;
+    check(bvh.build(quad), "layered quad BVH");
+    const auto hit = bvh.raycast({0.2F, 1.0F, 0.1F}, {0, -1, 0}, 10.0F);
+    check(hit.has_value(), "ray hits the layered quad");
+    if (!hit) return;
+    const float opacity = polygon_hit_opacity(quad, *hit, hit->position, {0, 1, 0}, {});
+    std::printf("masked layer: opacity at hit %.4f\n", opacity);
+    check(opacity < 0.5F, "material layers composite into the shadow-test opacity");
+    quad.materialBindings[0].layers[0].opacityPolicy = MaterialLayerOpacityPolicy::PreserveBase;
+    check(polygon_hit_opacity(quad, *hit, hit->position, {0, 1, 0}, {}) > 0.99F, "PreserveBase keeps the base opacity");
+}
+
 void test_receiver() {
     // The slab's light lands on two coplanar floors meeting at x = 0 (objects 1 and 2), and on
     // nothing else. A third surface just below floor 1 (object 3) must get none of floor 1's light.
@@ -313,6 +351,7 @@ int main() {
     test_sun_direction_and_sparse_bounds();
     test_caustic_shadow_share();
     test_masked_occluder();
+    test_masked_layer_opacity();
     test_receiver();
     if (g_failures == 0) std::printf("dve_caustics_review_tests: PASS\n");
     return g_failures == 0 ? 0 : 1;

@@ -654,6 +654,10 @@ GaborVolumeFramePlan plan_gabor_volume_frame(const GaborVolumeAsset& asset,
     return plan;
 }
 
+float evaluate_gabor_primitive_density(const GaborVolumePrimitive& primitive,Float3 position) noexcept {
+    return primitive_density(primitive,position);
+}
+
 float evaluate_gabor_density(const GaborVolumeAsset& asset, Float3 worldPosition,
                              float projectedPixels, bool continuousLod,
                              float lodBias) noexcept {

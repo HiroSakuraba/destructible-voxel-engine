@@ -1,4 +1,5 @@
 #include "dve/player/player_renderer.hpp"
+#include "dve/render/scene_lighting.hpp"
 
 #include "dve/polygon_asset.hpp"
 #include "dve/render/caustic_map.hpp"
@@ -16,6 +17,11 @@ namespace dve::player {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// Local cross product: game_world.cpp's cross_product is not declared in any header.
+[[nodiscard]] Float3 cross_racing(Float3 a, Float3 b) noexcept {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
 
 double milliseconds_since(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
@@ -43,6 +49,161 @@ const std::array<VoxelMaterialDefinition, 256>& default_palette() {
         return result;
     }();
     return palette;
+}
+
+
+struct RacingProjected {
+    float x{},y{},depth{},pixelsPerMetre{};
+};
+struct RacingCamera {
+    Float3 eye{},right{},up{},forward{};
+    float tanHalf{},aspect{},nearPlane{},farPlane{};
+    std::uint32_t width{},height{};
+};
+RacingCamera racing_camera(const render::PolygonCamera& camera,std::uint32_t width,std::uint32_t height) {
+    RacingCamera c{};
+    c.eye=camera.position;c.forward=normalize(subtract(camera.target,camera.position));
+    c.right=normalize(cross_racing(c.forward,camera.up));
+    if(length_squared(c.right)<1.e-8F)c.right={1,0,0};
+    c.up=normalize(cross_racing(c.right,c.forward));
+    c.tanHalf=std::tan(camera.verticalFieldOfViewRadians*0.5F);
+    c.aspect=float(width)/float(height);c.nearPlane=camera.nearPlane;c.farPlane=camera.farPlane;
+    c.width=width;c.height=height;
+    return c;
+}
+bool project_racing(const RacingCamera& c,Float3 point,RacingProjected& p){
+    const Float3 rel=subtract(point,c.eye);
+    const float z=dot(rel,c.forward);
+    if(!(z>c.nearPlane&&z<c.farPlane)||!std::isfinite(z)||c.tanHalf<=0)return false;
+    p.x=(0.5F+0.5F*dot(rel,c.right)/(z*c.tanHalf*c.aspect))*float(c.width);
+    p.y=(0.5F-0.5F*dot(rel,c.up)/(z*c.tanHalf))*float(c.height);
+    p.depth=(z-c.nearPlane)/(c.farPlane-c.nearPlane);
+    p.pixelsPerMetre=float(c.height)/(2*c.tanHalf*z);
+    return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.depth);
+}
+void draw_racing_effects(std::span<const RacingVisualEffect> effects,
+                         const render::PolygonCamera& camera,
+                         const render::PolygonRenderTarget& depth,
+                         std::span<std::uint8_t> rgba){
+    if(effects.empty()||!depth.valid()||rgba.size()!=std::size_t(depth.width)*depth.height*4)return;
+    const auto c=racing_camera(camera,depth.width,depth.height);
+    auto paint=[&](int x,int y,float z,float alpha,std::array<float,3> rgb){
+        if(x<0||y<0||x>=int(depth.width)||y>=int(depth.height)||alpha<=0)return;
+        const std::size_t at=std::size_t(y)*depth.width+std::size_t(x);
+        // The depth buffer uses the same normalized linear camera-space z.
+        if(z>depth.depth[at]+0.00008F)return;
+        alpha=std::clamp(alpha,0.0F,0.85F);
+        for(std::size_t channel=0;channel<3;++channel){
+            const float mixed=float(rgba[at*4+channel])*(1-alpha)+rgb[channel]*alpha;
+            rgba[at*4+channel]=std::uint8_t(std::clamp(mixed,0.0F,255.0F));
+        }
+        rgba[at*4+3]=255;
+    };
+    for(const RacingVisualEffect& fx:effects){
+        if(fx.lifetime<=0||fx.age>=fx.lifetime||fx.opacity<=0)continue;
+        RacingProjected a{},b{};
+        if(!project_racing(c,fx.a,a))continue;
+        const float life=std::clamp(1.0F-fx.age/fx.lifetime,0.0F,1.0F);
+        if(fx.kind==RacingVisualKind::SkidMark){
+            if(!project_racing(c,fx.b,b))continue;
+            const float ra=std::clamp(fx.radius*a.pixelsPerMetre*0.5F,0.65F,20.0F);
+            const float rb=std::clamp(fx.radius*b.pixelsPerMetre*0.5F,0.65F,20.0F);
+            const float radius=(std::max)(ra,rb);
+            const float dx=b.x-a.x,dy=b.y-a.y,length2=dx*dx+dy*dy;
+            if(length2>1000000.0F)continue;
+            const int minX=(std::max)(0,int(std::floor(std::min(a.x,b.x)-radius-1)));
+            const int maxX=(std::min)(int(depth.width)-1,int(std::ceil(std::max(a.x,b.x)+radius+1)));
+            const int minY=(std::max)(0,int(std::floor(std::min(a.y,b.y)-radius-1)));
+            const int maxY=(std::min)(int(depth.height)-1,int(std::ceil(std::max(a.y,b.y)+radius+1)));
+            for(int y=minY;y<=maxY;++y)for(int x=minX;x<=maxX;++x){
+                const float t=length2>1.e-5F?std::clamp(((x+0.5F-a.x)*dx+(y+0.5F-a.y)*dy)/length2,0.0F,1.0F):0.0F;
+                const float px=a.x+t*dx,py=a.y+t*dy;
+                const float r=ra+t*(rb-ra);
+                const float d2=(x+0.5F-px)*(x+0.5F-px)+(y+0.5F-py)*(y+0.5F-py);
+                if(d2>r*r)continue;
+                paint(x,y,a.depth+t*(b.depth-a.depth),fx.opacity*life,{24,26,28});
+            }
+        }else{
+            const float growing=fx.radius*(1.0F+fx.age*1.4F);
+            const float radius=std::clamp(growing*a.pixelsPerMetre,1.0F,35.0F);
+            const int minX=(std::max)(0,int(std::floor(a.x-radius)));
+            const int maxX=(std::min)(int(depth.width)-1,int(std::ceil(a.x+radius)));
+            const int minY=(std::max)(0,int(std::floor(a.y-radius)));
+            const int maxY=(std::min)(int(depth.height)-1,int(std::ceil(a.y+radius)));
+            const std::array<float,3> color=fx.kind==RacingVisualKind::Dust?
+               std::array<float,3>{163,144,113}:std::array<float,3>{175,179,182};
+            for(int y=minY;y<=maxY;++y)for(int x=minX;x<=maxX;++x){
+                const float u=(x+0.5F-a.x)/radius,v=(y+0.5F-a.y)/radius;
+                const float rr=u*u+v*v;
+                if(rr>=1.0F)continue;
+                const float falloff=(1-rr)*(1-rr);
+                paint(x,y,a.depth,fx.opacity*life*falloff,color);
+            }
+        }
+    }
+}
+
+
+void draw_ocean_surface(const OceanField* ocean,double seconds,
+                       const render::PolygonCamera& camera,
+                       const render::PolygonRenderTarget& depth,
+                       std::span<std::uint8_t> rgba) {
+    if(!ocean||!depth.valid()||rgba.size()!=std::size_t(depth.width)*depth.height*4U)return;
+    const Float3 eye=camera.position;
+    const Float3 forward=normalize(subtract(camera.target,camera.position));
+    const Float3 right=normalize(cross_racing(forward,camera.up));
+    const Float3 up=normalize(cross_racing(right,forward));
+    const float tanHalf=std::tan(camera.verticalFieldOfViewRadians*.5F);
+    if(!std::isfinite(tanHalf)||tanHalf<=0)return;
+    const float aspect=float(depth.width)/float(depth.height);
+    const auto sun=normalize(Float3{-.32F,-.27F,.91F});
+    // Half-resolution shade, but scene-depth test every individual output pixel.
+    // This keeps the reference CPU player responsive without a GPU dependency.
+    for(unsigned py=0;py<depth.height;py+=2U){
+        for(unsigned px=0;px<depth.width;px+=2U){
+            const float x=2.F*(float(px)+1.F)/float(depth.width)-1.F;
+            const float y=1.F-2.F*(float(py)+1.F)/float(depth.height);
+            const auto dir=normalize(add(forward,add(multiply(right,x*tanHalf*aspect),multiply(up,y*tanHalf))));
+            if(dir.z>=-.005F)continue;
+            float t=-eye.z/dir.z;
+            if(!(t>0)||t>camera.farPlane+150.F)continue;
+            OceanSample sample{};
+            // Fixed-point waterline iteration; no separate shader wave field.
+            for(unsigned iteration=0;iteration<5;++iteration){
+                const Float3 point=add(eye,multiply(dir,t));
+                sample=ocean->sample(point.x,point.y,seconds);
+                const float candidate=(sample.height-eye.z)/dir.z;
+                if(!std::isfinite(candidate)||candidate<=0)break;
+                t=std::clamp(.5F*t+.5F*candidate,0.F,camera.farPlane+150.F);
+            }
+            if(t<=camera.nearPlane||t>camera.farPlane)continue;
+            const auto point=add(eye,multiply(dir,t));
+            sample=ocean->sample(point.x,point.y,seconds);
+            if(std::abs(point.z-sample.height)>2.F)continue;
+            const float z=dot(subtract(point,eye),forward);
+            if(z<=camera.nearPlane||z>=camera.farPlane)continue;
+            const float normalizedDepth=(z-camera.nearPlane)/(camera.farPlane-camera.nearPlane);
+            const float diffuse=std::clamp(dot(sample.normal,sun),0.F,1.F);
+            const float glint=std::pow(std::clamp(dot(sample.normal,normalize(subtract(sun,dir))),0.F,1.F),36.F);
+            const float fresnel=std::pow(1.F-std::clamp(-dot(dir,sample.normal),0.F,1.F),5.F);
+            const float foam=sample.foam;
+            const float color[3]={
+                std::clamp(12.F+48.F*diffuse+180.F*glint+115.F*foam,0.F,255.F),
+                std::clamp(65.F+55.F*diffuse+150.F*glint+120.F*foam,0.F,255.F),
+                std::clamp(100.F+55.F*diffuse+130.F*glint+112.F*foam,0.F,255.F)};
+            const float opacity=std::clamp(.90F-.20F*fresnel,0.F,1.F);
+            for(unsigned oy=0;oy<2U&&py+oy<depth.height;++oy)
+              for(unsigned ox=0;ox<2U&&px+ox<depth.width;++ox){
+                const std::size_t at=std::size_t(py+oy)*depth.width+(px+ox);
+                if(normalizedDepth>depth.depth[at]+.0001F)continue;
+                for(unsigned channel=0;channel<3;++channel){
+                    const float mixed=float(rgba[4*at+channel])*(1.F-opacity)+color[channel]*opacity;
+                    rgba[4*at+channel]=std::uint8_t(std::clamp(mixed,0.F,255.F));
+                }
+                rgba[4*at+3]=255;
+              }
+        }
+    }
 }
 
 class CpuPlayerRenderer final : public IPlayerRenderer {
@@ -122,8 +283,15 @@ public:
         camera.farPlane *= toUnits;
 
         const RenderEnvironment environment = apply_cpu_render_quality(view.environment, options_.quality);
+        if (!environment.validate(error))
+          return false;
         clear_background(environment, camera);
+        std::unique_ptr<render::SceneLighting> sceneLighting;
+        if (!environment.lights.empty() || environment.pathTraceBounces > 0 || render::scene_uses_camera_transport(voxels_,polygons_))
+          sceneLighting = std::make_unique<render::SceneLighting>(
+              voxels_, polygons_, environment, voxelSize);
         render::ReferenceVoxelRenderer voxelRenderer;
+        voxelRenderer.sceneLighting = sceneLighting.get();
         voxelRenderer.metersPerVoxel = voxelSize;
         voxelRenderer.threadCount = options_.threadCount;
         voxelRenderer.radianceCascades.threadCount = options_.threadCount;
@@ -147,16 +315,21 @@ public:
                 voxelRenderer.sunOccluders = polygons_;
             }
         }
+        // Cross-geometry sun visibility is part of the new lighting path; legacy
+        // scenes (no lights, no path budget) keep their exact previous frames.
+        if (sceneLighting) voxelRenderer.sunOccluders = polygons_;
         voxelRenderer.occlusionPolygons = polygons_;   // AO rays see voxels and polygons alike
         const auto voxelStats = voxelRenderer.render(voxels_, camera, environment, target_, true);
         stats_.tracedRays = voxelStats.tracedRays;
         stats_.hitRays = voxelStats.hitRays;
         if (!polygons_.empty()) {
             render::PolygonRenderOptions polygonOptions;
+            polygonOptions.sceneLighting = sceneLighting.get();
             polygonOptions.preserveExistingDepth = true;
             polygonOptions.enableFrustumCulling = view.polygonFrustumCulling;
             polygonOptions.lodBias = view.polygonLodBias;
             polygonOptions.cache = &polygonRenderCache_;
+            polygonOptions.surfaceDetail=view.surfaceDetail;
             polygonOptions.metersPerUnit = voxelSize;
             std::optional<render::HybridOcclusionScene> occlusion;
             if (environment.ambientOcclusionSamples > 0U && environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
@@ -168,13 +341,43 @@ public:
             polygonRenderCache_.clear();
         }
         (void)render::apply_aerial_perspective(target_, camera, environment, voxelSize);
-        (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
+        if(view.fogVolumes.empty()) {
+            (void)render::apply_distance_fog(target_, camera, environment, voxelSize);
+        } else {
+            // Assets stay in metre space. Camera/depth are converted back from
+            // the voxel-unit surface pass for this shared HDR integration pass.
+            std::vector<render::CpuFogVolume> fogVolumes(view.fogVolumes.begin(),view.fogVolumes.end());
+            for(auto& v:fogVolumes){
+                v.transform.position=multiply(v.transform.position,toUnits);
+                v.scale=multiply(v.scale,toUnits);
+            }
+            auto fogSettings=view.fogSettings;
+            fogSettings.sceneLighting = sceneLighting.get();
+            if(!fogSettings.densityCache)fogSettings.densityCache=&fogDensityCache_;
+            if(!fogSettings.lightingCache)fogSettings.lightingCache=&fogLightingCache_;
+            std::vector<render::CpuFogLight> lights(fogSettings.lights.begin(),fogSettings.lights.end());
+            for(auto& light:lights)light.position=multiply(light.position,toUnits);
+            fogSettings.lights=lights;
+            std::optional<render::HybridOcclusionScene> fogOcclusion;
+            if(fogSettings.scattering&&!fogSettings.sceneVisibility){
+                fogOcclusion.emplace(voxels_,polygons_);
+                fogSettings.sceneVisibility=[&](Float3 p,Float3 d,float maximum){
+                    return fogOcclusion->nearest(add(p,multiply(d,0.001F*toUnits)),d,maximum)?0.0F:1.0F;
+                };
+            }
+            if(!render::apply_cpu_fog(target_,camera,environment,voxelSize,fogVolumes,
+                                     fogSettings,&stats_.fog,error))return false;
+        }
+        if (sceneLighting) (void)render::apply_cpu_bloom(target_, environment);
         stats_.renderMilliseconds = milliseconds_since(start);
 
         const auto resolveStart = Clock::now();
         const float exposure = options_.exposure * (environment.exposure > 0.0F ? environment.exposure : 1.0F);
         if (!render::resolve_polygon_render_rgba8(target_, exposure, environment.tonemapOperator,
                                                   frame_.pixels, error)) return false;
+        draw_ocean_surface(view.ocean,view.oceanTime,view.camera,target_,frame_.pixels);
+        draw_racing_effects(view.racingEffects,view.camera,target_,frame_.pixels);
+        if(view.prototypeHud)draw_prototype_hud(frame_.pixels,frame_.width,frame_.height,*view.prototypeHud);
         stats_.resolveMilliseconds = milliseconds_since(resolveStart);
         rendered_ = true;
         return true;
@@ -195,6 +398,8 @@ public:
     [[nodiscard]] PlayerRenderStats last_stats() const noexcept override { return stats_; }
 
 private:
+    render::CpuFogDensityCache fogDensityCache_;
+    render::CpuFogLightingCache fogLightingCache_;
     struct ScaledPolygon {
         CookedPolygonAsset asset;
         std::uint64_t lastFrame{};
@@ -234,7 +439,7 @@ private:
         if (render::paint_sky_background(target_, camera, environment) > 0U) return;   // Physical sky
         if (!options_.skyGradient) return;
         for (std::uint32_t y = 0; y < target_.height; ++y) {
-            const float t = static_cast<float>(y) / static_cast<float>(std::max(1U, target_.height - 1U));
+            const float t = static_cast<float>(y) / static_cast<float>((std::max)(1U, target_.height - 1U));
             const float zenith = 1.6F - 0.9F * t; // brighter toward the top
             const Float4 color{environment.skyColor.x * zenith, environment.skyColor.y * zenith,
                                environment.skyColor.z * (zenith + 0.15F), 1.0F};
@@ -286,10 +491,19 @@ RenderEnvironment apply_cpu_render_quality(RenderEnvironment environment, CpuRen
     if (quality == CpuRenderQuality::Reference) return environment;
     if (environment.shadowMode != ShadowMode::Off) environment.shadowMode = ShadowMode::Hard;
     if (quality == CpuRenderQuality::Fast) {
-        if (environment.globalIlluminationMode != GlobalIlluminationMode::Off)
+      environment.pathTraceBounces = 0;
+      environment.localLightSamples =
+          (std::min)(environment.localLightSamples, 2U);
+      if (environment.globalIlluminationMode != GlobalIlluminationMode::Off)
             environment.globalIlluminationMode = GlobalIlluminationMode::AmbientHemisphere;
     } else {
-        environment.globalIlluminationSamples = std::min(environment.globalIlluminationSamples, 2U);
+        environment.globalIlluminationSamples = (std::min)(environment.globalIlluminationSamples, 2U);
+        environment.pathTraceBounces =
+            (std::min)(environment.pathTraceBounces, 2U);
+        environment.pathTraceSamples =
+            (std::min)(environment.pathTraceSamples, 2U);
+        environment.localLightSamples =
+            (std::min)(environment.localLightSamples, 2U);
     }
     return environment;
 }

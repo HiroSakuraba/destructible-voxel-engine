@@ -69,7 +69,7 @@ struct PolygonMaterialMappingRecord {
 
     float detailNormalScale;
     float alphaCutoff;
-    uint reserved1;
+    uint additionalTexcoords;
     uint reserved2;
 };
 

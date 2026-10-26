@@ -19,6 +19,8 @@ struct ShadowMaterialDescriptor {
     bool hasOpacityTexture{};
     std::uint64_t assetContentHash{};
     std::uint32_t materialIndex{};
+    rhi::BufferHandle mappingBuffer;
+    rhi::BufferHandle layerBuffer;
 };
 
 struct ShadowMaterialDescriptorStats {
@@ -95,6 +97,8 @@ private:
     rhi::TextureViewHandle fallbackView_;
     rhi::SamplerHandle fallbackSampler_;
     rhi::BindGroupHandle fallbackGroup_;
+    rhi::BufferHandle fallbackMappingBuffer_;
+    rhi::BufferHandle fallbackLayerBuffer_;
     std::unordered_map<MaterialKey, MaterialResource, KeyHash> materials_;
     std::unordered_set<std::uint64_t> retainedAssets_;
     ShadowMaterialDescriptorStats stats_{};

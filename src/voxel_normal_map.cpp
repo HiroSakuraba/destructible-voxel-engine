@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "dve/transform.hpp"
+#include "dve/triplanar_normal.hpp"
 
 namespace dve {
 namespace {
@@ -72,28 +73,18 @@ Float3 voxel_normal_map_normal(const VoxelMaterialDefinition& material, Float3 p
     if (!(sum > 0.0F)) return normal;
     w = multiply(w, 1.0F / sum);
     const float k = material.normalMapStrength;
-    // Tangent-space (tx, ty, tz) onto each projection: u, v along the plane, tz along the axis
-    // (signed to the face), as the polygon renderer's triplanar normal maps.
+    // Tangent-space (tx, ty, tz) per projection (X: u = z, v = y; Y: u = x, v = z; Z: u = x,
+    // v = y), blended with the polygon renderer's whiteout triplanar blend: a flat map keeps the
+    // geometric normal even where projections overlap.
     const auto tangent = [&](float u, float v) {
         const Float3 t = sample_voxel_normal_map(map, u, v);
         return Float3{t.x * k, t.y * k, std::max(t.z, 0.0F)};
     };
-    Float3 out{};
-    if (w.x > 0.0F) {   // projected on YZ: u = z, v = y
-        const Float3 t = tangent(p.z, p.y);
-        out = add(out, multiply(Float3{t.z * (normal.x < 0.0F ? -1.0F : 1.0F), t.y, t.x}, w.x));
-    }
-    if (w.y > 0.0F) {   // projected on XZ: u = x, v = z
-        const Float3 t = tangent(p.x, p.z);
-        out = add(out, multiply(Float3{t.x, t.z * (normal.y < 0.0F ? -1.0F : 1.0F), t.y}, w.y));
-    }
-    if (w.z > 0.0F) {   // projected on XY: u = x, v = y
-        const Float3 t = tangent(p.x, p.y);
-        out = add(out, multiply(Float3{t.x, t.y, t.z * (normal.z < 0.0F ? -1.0F : 1.0F)}, w.z));
-    }
-    const float len = length(out);
-    if (!(len > 1.0e-6F)) return normal;
-    out = multiply(out, 1.0F / len);
+    const Float3 zero{0.0F, 0.0F, 0.0F};
+    Float3 out = triplanar_whiteout_normal(normal, w.x > 0.0F ? tangent(p.z, p.y) : zero,
+                                                 w.y > 0.0F ? tangent(p.x, p.z) : zero,
+                                                 w.z > 0.0F ? tangent(p.x, p.y) : zero, w);
+    if (!(length(out) > 0.5F)) return normal;
     // Never bend past the surface (a grazing map on a face would light it from behind).
     if (dot(out, normal) < 0.05F) out = normalize(add(out, multiply(normal, 0.05F - dot(out, normal))));
     return out;

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "dve/master_material.hpp"
+#include "dve/render/layered_surface.hpp"
 
 namespace dve::render {
 namespace {
@@ -64,7 +65,7 @@ MainMaterialDescriptorTable::~MainMaterialDescriptorTable() { clear(); }
 
 bool MainMaterialDescriptorTable::valid() const noexcept {
     if (!residency_ || !layout_ || !fallbackMaterialBuffer_ || !fallbackMappingBuffer_ ||
-        !fallbackSampler_ || !fallbackGroup_ || !staticShadowDepthView_ ||
+        !fallbackSurfaceBuffer_ || !fallbackLayerBuffer_ || !fallbackSampler_ || !fallbackGroup_ || !staticShadowDepthView_ ||
         !dynamicShadowDepthView_ || !shadowComparisonSampler_) return false;
     return std::ranges::all_of(fallbackTextures_, [](auto handle) { return static_cast<bool>(handle); }) &&
            std::ranges::all_of(fallbackViews_, [](auto handle) { return static_cast<bool>(handle); });
@@ -98,6 +99,8 @@ bool MainMaterialDescriptorTable::initialize(rhi::TextureViewHandle staticShadow
     }
     layout.bindings.push_back({11U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment});
     layout.bindings.push_back({12U, rhi::BindingType::SampledTexture, rhi::ShaderStage::Fragment});
+    layout.bindings.push_back({13U, rhi::BindingType::StorageBufferReadOnly, rhi::ShaderStage::Fragment});
+    layout.bindings.push_back({14U,rhi::BindingType::StorageBufferReadOnly,rhi::ShaderStage::Fragment});
     layout_ = device_.create_bind_group_layout(layout, &local);
     if (!layout_) { set_error(error, local); clear(); return false; }
 
@@ -110,12 +113,19 @@ bool MainMaterialDescriptorTable::initialize(rhi::TextureViewHandle staticShadow
         desc.debugName = std::move(name);
         return device_.create_buffer(desc, &local);
     };
+    fallbackLayerBuffer_=make_buffer(32U,"Empty live layer stack");
+    const std::array<std::uint32_t,8> emptyLayers{};
+    if(!fallbackLayerBuffer_||!device_.write_buffer(fallbackLayerBuffer_,0U,std::as_bytes(std::span(emptyLayers)),&local)){set_error(error,local);clear();return false;}
     fallbackMaterialBuffer_ = make_buffer(sizeof(GpuMaterialRecord),
                                           "Fallback live GPU material record");
     if (!fallbackMaterialBuffer_) { set_error(error, local); clear(); return false; }
     fallbackMappingBuffer_ = make_buffer(sizeof(GpuPolygonMaterialMappingRecord),
                                          "Fallback live GPU mapping record");
     if (!fallbackMappingBuffer_) { set_error(error, local); clear(); return false; }
+    fallbackSurfaceBuffer_=make_buffer(sizeof(GpuMaterialSurfaceDetail),"Fallback live surface recipe");
+    if(!fallbackSurfaceBuffer_){set_error(error,local);clear();return false;}
+    const auto surfaceRecord=pack_gpu_material_surface_detail({});
+    if(!device_.write_buffer(fallbackSurfaceBuffer_,0U,std::as_bytes(std::span(&surfaceRecord,1U)),&local)){set_error(error,local);clear();return false;}
     const VoxelMaterialDefinition fallbackMaterial{};
     const PolygonMaterialBinding fallbackMapping{};
     const auto materialRecord = pack_gpu_material_record(fallbackMaterial);
@@ -169,6 +179,8 @@ bool MainMaterialDescriptorTable::initialize(rhi::TextureViewHandle staticShadow
     }
     group.entries.push_back({11U, {}, staticShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
     group.entries.push_back({12U, {}, dynamicShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
+    group.entries.push_back({13U,fallbackSurfaceBuffer_,{},0U,sizeof(GpuMaterialSurfaceDetail),{}});
+    group.entries.push_back({14U,fallbackLayerBuffer_,{},0U,32U,{}});
     fallbackGroup_ = device_.create_bind_group(group, &local);
     if (!fallbackGroup_) { set_error(error, local); clear(); return false; }
     return true;
@@ -185,6 +197,7 @@ bool MainMaterialDescriptorTable::ensure_asset_records(const CookedPolygonAsset&
         set_error(error, "main material asset record counts are invalid");
         return false;
     }
+    for(const auto& material:asset.materials)if(!material_surface_detail_valid(material.surfaceDetail)){set_error(error,"Invalid GPU surface recipe");return false;}
     std::string local;
     const auto resolved = resolve_voxel_material_layers(asset.materials, &local);
     if (!resolved) { set_error(error, local); return false; }
@@ -193,6 +206,7 @@ bool MainMaterialDescriptorTable::ensure_asset_records(const CookedPolygonAsset&
     AssetResource created;
     created.materialStride = align_up(sizeof(GpuMaterialRecord), alignment);
     created.mappingStride = align_up(sizeof(GpuPolygonMaterialMappingRecord), alignment);
+    created.surfaceStride=align_up(sizeof(GpuMaterialSurfaceDetail),alignment);
     created.materialCount = static_cast<std::uint32_t>(asset.materials.size());
 
     auto make_buffer = [&](std::size_t bytes, std::string name) {
@@ -213,13 +227,21 @@ bool MainMaterialDescriptorTable::ensure_asset_records(const CookedPolygonAsset&
         (void)device_.destroy_buffer(created.materialRecords, nullptr);
         set_error(error, local); return false;
     }
+    created.surfaceRecords=make_buffer(created.surfaceStride*asset.materials.size(),"Persistent live surface recipes");
+    if(!created.surfaceRecords){
+        (void)device_.destroy_buffer(created.mappingRecords,nullptr);
+        (void)device_.destroy_buffer(created.materialRecords,nullptr);set_error(error,local);return false;
+    }
     for (std::size_t index = 0U; index < asset.materials.size(); ++index) {
-        const auto materialRecord = pack_gpu_material_record((*resolved)[index]);
+        const auto materialRecord = pack_gpu_material_record(asset.materials[index]);
         const auto mappingRecord = pack_gpu_polygon_material_mapping(asset.materialBindings[index]);
+        const auto surfaceRecord=pack_gpu_material_surface_detail(asset.materials[index].surfaceDetail);
         if (!device_.write_buffer(created.materialRecords, index * created.materialStride,
                                   std::as_bytes(std::span(&materialRecord, 1U)), &local) ||
             !device_.write_buffer(created.mappingRecords, index * created.mappingStride,
-                                  std::as_bytes(std::span(&mappingRecord, 1U)), &local)) {
+                                  std::as_bytes(std::span(&mappingRecord, 1U)), &local) ||
+            !device_.write_buffer(created.surfaceRecords,index*created.surfaceStride,std::as_bytes(std::span(&surfaceRecord,1U)),&local)) {
+            (void)device_.destroy_buffer(created.surfaceRecords, nullptr);
             (void)device_.destroy_buffer(created.mappingRecords, nullptr);
             (void)device_.destroy_buffer(created.materialRecords, nullptr);
             set_error(error, local); return false;
@@ -229,13 +251,14 @@ bool MainMaterialDescriptorTable::ensure_asset_records(const CookedPolygonAsset&
     }
     auto [it, inserted] = assets_.emplace(asset.contentHash, created);
     if (!inserted) {
+        (void)device_.destroy_buffer(created.surfaceRecords, nullptr);
         (void)device_.destroy_buffer(created.mappingRecords, nullptr);
         (void)device_.destroy_buffer(created.materialRecords, nullptr);
         set_error(error, "main material asset record publication collided");
         return false;
     }
     ++stats_.assetsPublished;
-    stats_.assetRecordBuffersCreated += 2U;
+    stats_.assetRecordBuffersCreated += 3U;
     resource = &it->second;
     return true;
 }
@@ -271,7 +294,11 @@ bool MainMaterialDescriptorTable::resolve_binding(
         set_error(error, "main material texture index is out of range"); return false;
     }
     const auto& texture = asset.textures[*binding.texture];
-    return residency_->ensure_image(asset, texture.imageIndex, view, error) &&
+    const bool normal = channel==MainMaterialTextureChannel::Normal || channel==MainMaterialTextureChannel::DetailNormal;
+    const bool color = channel==MainMaterialTextureChannel::BaseColor || channel==MainMaterialTextureChannel::Emissive || channel==MainMaterialTextureChannel::DetailBaseColor;
+    const auto interpretation=normal?MaterialImageInterpretation::Normal:
+        color && binding.colorSpace==PolygonTextureColorSpace::Srgb?MaterialImageInterpretation::SrgbColor:MaterialImageInterpretation::LinearData;
+    return residency_->ensure_image(asset, texture.imageIndex, view, error, interpretation) &&
            residency_->ensure_sampler(asset, texture.samplerIndex, sampler, error);
 }
 
@@ -285,6 +312,8 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
     const MaterialKey key{asset.contentHash, materialIndex};
     if (materials_.contains(key)) { ++stats_.descriptorCacheHits; return true; }
 
+    const auto layers=build_layered_surface_payload(asset,materialIndex,error);
+    if(!layers)return false;
     bool retainedNow{};
     if (!retain_asset_once(asset.contentHash, retainedNow, error)) return false;
     AssetResource* assetResource{};
@@ -326,16 +355,32 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
     group.entries.push_back({11U, {}, staticShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
     group.entries.push_back({12U, {}, dynamicShadowDepthView_, 0U, 0U, shadowComparisonSampler_});
     std::string local;
+    const auto surfaceOffset=static_cast<std::size_t>(materialIndex)*assetResource->surfaceStride;
+    group.entries.push_back({13U,assetResource->surfaceRecords,{},surfaceOffset,sizeof(GpuMaterialSurfaceDetail),{}});
+    rhi::BufferDesc layerDesc;layerDesc.bytes=layers->words.size()*4;
+    layerDesc.usage=rhi::BufferUsage::Storage|rhi::BufferUsage::CopyDestination;
+    layerDesc.memory=rhi::MemoryDomain::Upload;layerDesc.initialState=rhi::ResourceState::ShaderRead;
+    layerDesc.debugName="Live layered surface payload";
+    auto layerBuffer=device_.create_buffer(layerDesc,&local);
+    if(!layerBuffer||!device_.write_buffer(layerBuffer,0,std::as_bytes(std::span(layers->words)),&local)){
+        if(layerBuffer)(void)device_.destroy_buffer(layerBuffer,nullptr);
+        set_error(error,local);rollback_asset_retain(asset.contentHash,retainedNow);return false;
+    }
+    group.entries.push_back({14U,layerBuffer,{},0U,layerDesc.bytes,{}});
     const auto bindGroup = device_.create_bind_group(group, &local);
     if (!bindGroup) {
+        (void)device_.destroy_buffer(layerBuffer,nullptr);
         set_error(error, local);
         rollback_asset_retain(asset.contentHash, retainedNow);
         return false;
     }
     MaterialResource created;
     created.descriptor.bindGroup = bindGroup;
+    created.descriptor.layerBuffer=layerBuffer;created.descriptor.layerPayloadBytes=layerDesc.bytes;
     created.descriptor.materialRecordBuffer = assetResource->materialRecords;
     created.descriptor.mappingRecordBuffer = assetResource->mappingRecords;
+    created.descriptor.surfaceRecordBuffer=assetResource->surfaceRecords;
+    created.descriptor.surfaceRecordOffset=surfaceOffset;
     created.descriptor.materialRecordOffset = materialOffset;
     created.descriptor.mappingRecordOffset = mappingOffset;
     created.descriptor.texturePresenceMask = textureMask;
@@ -347,6 +392,7 @@ bool MainMaterialDescriptorTable::ensure_material(const CookedPolygonAsset& asse
     (void)it;
     if (!inserted) {
         (void)device_.destroy_bind_group(bindGroup, nullptr);
+        (void)device_.destroy_buffer(layerBuffer,nullptr);
         rollback_asset_retain(asset.contentHash, retainedNow);
         set_error(error, "main material descriptor publication collided");
         return false;
@@ -372,10 +418,12 @@ bool MainMaterialDescriptorTable::invalidate_asset(std::uint64_t assetContentHas
                 ok = false; if (error && error->empty()) *error = local;
                 local.clear();
             }
+            if(it->second.descriptor.layerBuffer)(void)device_.destroy_buffer(it->second.descriptor.layerBuffer,nullptr);
             it = materials_.erase(it);
         } else ++it;
     }
     if (auto it = assets_.find(assetContentHash); it != assets_.end()) {
+        if (it->second.surfaceRecords) (void)device_.destroy_buffer(it->second.surfaceRecords,nullptr);
         if (it->second.mappingRecords) (void)device_.destroy_buffer(it->second.mappingRecords, nullptr);
         if (it->second.materialRecords) (void)device_.destroy_buffer(it->second.materialRecords, nullptr);
         assets_.erase(it);
@@ -395,9 +443,11 @@ void MainMaterialDescriptorTable::clear() noexcept {
         if (resource.descriptor.bindGroup)
             (void)device_.destroy_bind_group(resource.descriptor.bindGroup, nullptr);
     }
+    for(auto& [key,resource]:materials_){(void)key;if(resource.descriptor.layerBuffer)(void)device_.destroy_buffer(resource.descriptor.layerBuffer,nullptr);}
     materials_.clear();
     for (auto& [key, resource] : assets_) {
         (void)key;
+        if (resource.surfaceRecords) (void)device_.destroy_buffer(resource.surfaceRecords,nullptr);
         if (resource.mappingRecords) (void)device_.destroy_buffer(resource.mappingRecords, nullptr);
         if (resource.materialRecords) (void)device_.destroy_buffer(resource.materialRecords, nullptr);
     }
@@ -406,9 +456,14 @@ void MainMaterialDescriptorTable::clear() noexcept {
         (void)residency_->release_asset(assetContentHash, nullptr);
     retainedAssets_.clear();
     if (fallbackGroup_) (void)device_.destroy_bind_group(fallbackGroup_, nullptr);
+    if(fallbackLayerBuffer_)(void)device_.destroy_buffer(fallbackLayerBuffer_,nullptr);
+    fallbackLayerBuffer_={};
+
     for (auto view : fallbackViews_) if (view) (void)device_.destroy_texture_view(view, nullptr);
     for (auto texture : fallbackTextures_) if (texture) (void)device_.destroy_texture(texture, nullptr);
     if (fallbackSampler_) (void)device_.destroy_sampler(fallbackSampler_, nullptr);
+    if(fallbackSurfaceBuffer_) (void)device_.destroy_buffer(fallbackSurfaceBuffer_,nullptr);
+    fallbackSurfaceBuffer_={};
     if (fallbackMappingBuffer_) (void)device_.destroy_buffer(fallbackMappingBuffer_, nullptr);
     if (fallbackMaterialBuffer_) (void)device_.destroy_buffer(fallbackMaterialBuffer_, nullptr);
     if (layout_) (void)device_.destroy_bind_group_layout(layout_, nullptr);

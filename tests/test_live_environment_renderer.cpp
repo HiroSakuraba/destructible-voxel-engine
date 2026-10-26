@@ -74,7 +74,24 @@ int main() {
         auto residencyStats=renderer.materialResidency->stats(); CHECK(residencyStats.imagesUploaded==2U); CHECK(residencyStats.samplersCreated==1U); CHECK(residencyStats.retainedAssetCount==1U); CHECK(residencyStats.assetReferenceCount==2U);
         const auto recorded=device.statistics(); CHECK(recorded.renderPassesExecuted==3U); CHECK(recorded.indexedDrawsExecuted==6U);
         CHECK(stats.debugLabelsEmitted==0U);
+        // Non-rigid instance transforms must not silently stretch metric recipes.
+        auto detailed=triangle;detailed.materials[0].surfaceDetail.pattern=dve::SurfacePattern::Wood;
+        detailed.contentHash=dve::polygon_asset_content_hash(detailed);
+        auto scaledDraw=draw;scaledDraw.asset=&detailed;scaledDraw.objectToWorld[0]=2;
+        frame.polygonDraws=std::span(&scaledDraw,1U);
+        CHECK(!dve::render::record_live_environment_frame(device,lighting,shadowPlan,atlas,renderer,frame,stats,&fence,&error));
+        CHECK(error.find("rigid pose")!=std::string::npos);error.clear();
+        frame.polygonDraws=std::span(&draw,1U);
         CHECK(!device.capabilities().debugLabels);
+
+        // A transmission request must not silently fall through to opaque IBL
+        // when the caller did not supply the optional optical fragment shader.
+        auto optical=triangle;optical.materials[0].transmission=1;optical.materials[0].roughness=0;
+        optical.materials[0].blendMode=dve::MaterialBlendMode::Opaque;optical.materials[0].baseColor.w=1;
+        optical.contentHash=dve::polygon_asset_content_hash(optical);
+        auto opticalDraw=draw;opticalDraw.asset=&optical;frame.polygonDraws=std::span(&opticalDraw,1U);
+        CHECK(!dve::render::record_live_environment_frame(device,lighting,shadowPlan,atlas,renderer,frame,stats,&fence,&error));
+        CHECK(error.find("clear-glass shader")!=std::string::npos);error.clear();frame.polygonDraws=std::span(&draw,1U);
 
         // GPU debug markers (diagnostics.gpu_markers): a renderer created
         // with labels enabled wraps the shadow and main sections in named

@@ -1,6 +1,8 @@
 #include "dve/component.hpp"
-#include "dve/collision_hull.hpp"
+#include "dve/prototype_game.hpp"
 #include "dve/collision_convex_set.hpp"
+#include "dve/collision_hull.hpp"
+#include "dve/render_environment.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -125,6 +127,9 @@ bool ComponentTypeRegistry::validate(const Component& component, std::string* er
         if (!same_value_type(it->second, property.defaultValue))
             return fail("component property type mismatch: " + property.name);
     }
+    if (component.type == kSceneLightComponent && component.enabled &&
+        !scene_light_from_component(component, RigidTransform{}, error))
+      return false;
     return true;
 }
 
@@ -139,6 +144,27 @@ ComponentTypeRegistry ComponentTypeRegistry::make_default() {
         {{"points",std::string{},true,false,"Hull control points"}}}, &ignored);
     (void)registry.register_type({"dve.nurbs","Native NURBS Source",false,
         {{"source",std::string{},true,false,"NURBS source (edit with NURBS tools)"}}}, &ignored);
+    (void)registry.register_type(
+        {kSceneLightComponent,
+         "Scene Light (CPU Play)",
+         true,
+         {{"kind", std::string{"point"}, false, false,
+           "Kind: point / spot / quad / disc / candle"},
+          {"position", Float3{}, false, false, "Local offset (m)"},
+          {"direction", Float3{0, -1, 0}, false, false, "Spot direction"},
+          {"edge_u", Float3{1, 0, 0}, false, false,
+           "Area U edge / disc radius (m)"},
+          {"edge_v", Float3{0, 0, 1}, false, false,
+           "Area V edge / disc radius (m)"},
+          {"color", Float3{1, 1, 1}, false, false, "Linear light color"},
+          {"intensity", 1.0, false, false, "Intensity / area radiance"},
+          {"inner_cone", 0.35, false, false, "Spot inner angle (rad)"},
+          {"outer_cone", 0.6, false, false, "Spot outer angle (rad)"},
+          {"two_sided", false, false, false, "Two-sided area emission"},
+          {"flicker_amount", 0.15, false, false, "Candle flicker amount"},
+          {"flicker_frequency", 8.0, false, false,
+           "Candle flicker frequency (Hz)"},
+          {"seed", std::int64_t{1}, false, false, "Candle seed"}}}, &ignored);
     // Exact convex collision (collision_convex_set.hpp): convex prisms whose union is the part.
     (void)registry.register_type({std::string(kConvexSetComponent),"Exact Convex Collision",false,
         {{"pieces",std::string{},true,false,"Convex prisms"},
@@ -312,6 +338,8 @@ ComponentTypeRegistry ComponentTypeRegistry::make_default() {
     (void)registry.register_type({
         "dve.prefab_instance", "Prefab Instance", false,
         {{"asset", std::string{}, true, true}, {"instance_id", std::int64_t{0}, true, false}}}, &ignored);
+    (void)registry.register_type({"dve.marker","Runtime Marker",false,{}},&ignored);
+    register_prototype_components(registry);
     return registry;
 }
 

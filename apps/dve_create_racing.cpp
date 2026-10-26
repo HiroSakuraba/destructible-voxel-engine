@@ -1,0 +1,3 @@
+#include "dve/editor_prototype.hpp"
+#include <iostream>
+int main(int argc,char** argv){if(argc!=2){std::cerr<<"Usage: dve_create_racing NEW_PROJECT_DIRECTORY\n";return 2;}try{auto doc=dve::editor::make_racing_starter();auto materials=dve::editor::EditorMaterialLibrary::make_default();std::string error;if(!dve::editor::export_prototype_project(doc,materials,std::filesystem::absolute(argv[1]),&error)){std::cerr<<error<<'\n';return 1;}std::cout<<"Created racing time trial: "<<argv[1]<<"\nOpen project.dveproject in the editor, or launch dve_player with this directory.\n";return 0;}catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

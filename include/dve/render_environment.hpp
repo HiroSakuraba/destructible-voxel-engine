@@ -1,8 +1,13 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
+#include <optional>
 
+#include "dve/render/ies_profile.hpp"
 #include "dve/types.hpp"
 
 namespace dve {
@@ -23,7 +28,7 @@ inline constexpr std::uint32_t kMaximumAmbientOcclusionSamples = 64U;
                                                                   : kDefaultMetersPerVoxel;
 }
 
-enum class TonemapOperator : std::uint32_t { ACES = 0, Reinhard = 1, Clamp = 2 };
+enum class TonemapOperator : std::uint32_t { ACES = 0, Reinhard = 1, Clamp = 2, AgX = 3, PBRNeutral = 4 };
 
 // Indirect-lighting policy. AmbientHemisphere is a cheap sky/ground fallback; VoxelOneBounce
 // traces a bounded diffuse bounce through the authoritative voxel scene. New projects use the
@@ -59,12 +64,42 @@ enum class SkyMode : std::uint32_t {
     Physical = 1,
 };
 
+// Positions and emitter edges are authored in metres; intensity is RGB radiant
+// intensity for point/spot/candle, emitted radiance for area lights. Direction
+// points out of the light.
+inline constexpr std::size_t kMaximumSceneLights = 4096U;
+enum class SceneLightKind : std::uint32_t { Point, Spot, Quad, Disc, Candle };
+struct SceneLight {
+  SceneLightKind kind{SceneLightKind::Point};
+  Float3 positionMeters{};
+  Float3 direction{0, -1, 0};
+  Float3 edgeU{1, 0, 0}, edgeV{0, 0, 1}; // full quad edges; disc radius vectors
+  Float3 color{1, 1, 1};
+  float intensity{1};
+  float innerConeRadians{0.35F}, outerConeRadians{0.6F};
+  bool twoSided{};
+  float flickerAmount{0.15F}, flickerFrequencyHz{8};
+  std::uint32_t seed{1};
+  // Optional IES photometric profile (CPU lighting only; GPU packing ignores
+  // it). Reshapes a Point/Spot/Candle light's angular distribution.
+  std::shared_ptr<const render::IesProfile> iesProfile;
+  [[nodiscard]] bool validate(std::string *error = nullptr) const noexcept;
+};
+
 // The Godot-"Environment"-resource-shaped settings object: lighting, global illumination,
 // shadows, exposure, tonemap, and bloom live in one validated place. CPU reference rendering,
 // GPU constant packing, scripts, and editor settings all consume the same defaults. Distances
 // named `*Meters` are metres on the CPU and GPU alike (see kDefaultMetersPerVoxel); the defaults
 // below were chosen as metres for the GPU path.
 struct RenderEnvironment {
+    std::vector<SceneLight> lights; // maximum 4096; empty preserves legacy scenes
+    std::uint32_t localLightSamples{4}; // power-weighted samples per hit, 1..64
+    // Zero preserves legacy GI; 1..64 enables the hybrid diffuse/glossy path solver.
+    std::uint32_t pathTraceBounces{0};
+    std::uint32_t pathTraceSamples{4}; // 1..256
+    bool pathTraceRoulette{true};
+    double lightingTimeSeconds{}; // simulation time; no wall-clock randomness
+
     Float3 sunDirection{0.45F, 0.80F, 0.35F}; // toward the sun; normalized when packed
     float sunIntensity{2.4F};
     Float3 sunColor{1.0F, 0.98F, 0.95F};
@@ -112,6 +147,12 @@ struct RenderEnvironment {
     float fogDensityPerMeter{0.0F};
     float fogStartMeters{0.0F};
     Float3 fogColor{0.62F, 0.68F, 0.76F};
+    // Height falloff for the distance fog: above fogBaseHeightMeters the density scales by
+    // exp(-fogHeightFalloffPerMeter x (height - base)), so fog thins with altitude (valley fog
+    // under clear hilltops). At and below the base height the density is fogDensityPerMeter.
+    // 0 falloff (the default) = uniform density at every height, the pre-falloff behaviour.
+    float fogHeightFalloffPerMeter{0.0F};
+    float fogBaseHeightMeters{0.0F};
 
     // Physical sky (skyMode Physical). sunColor x sunIntensity is then the sunlight arriving at the
     // top of the atmosphere; the air in between colours and dims it. The scales multiply the
@@ -134,4 +175,19 @@ struct RenderEnvironment {
     [[nodiscard]] bool validate(std::string* error = nullptr) const noexcept;
 };
 
+struct Component;
+struct RigidTransform;
+inline constexpr const char *kSceneLightComponent = "dve.light";
+[[nodiscard]] std::optional<SceneLight>
+scene_light_from_component(const Component &component,
+                           const RigidTransform &worldTransform,
+                           std::string *error = nullptr);
+// Portable, versioned lighting extension for scenes/settings and script saves.
+// Decode is atomic and leaves unrelated environment fields alone. Classic
+// locale, round-trip precision.
+[[nodiscard]] std::string
+encode_scene_lighting(const RenderEnvironment &environment);
+[[nodiscard]] bool decode_scene_lighting(const std::string &text,
+                                         RenderEnvironment &environment,
+                                         std::string *error = nullptr);
 } // namespace dve

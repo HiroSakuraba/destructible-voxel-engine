@@ -1,4 +1,5 @@
 #include "dve/mecha_game.hpp"
+#include "dve/mecha_navigation.hpp"
 #include "dve/game_world.hpp"
 #include "dve/physics3d_backend.hpp"
 #include "dve/component.hpp"
@@ -103,7 +104,12 @@ void register_mecha_components(ComponentTypeRegistry& r){
  add(std::string(torsoType),"Mech rotating torso (visual-only)",{});
  add(std::string(targetType),"Mech target (visual-only)",{
   {"health",100.0,false,false,"Hit points"},
-  {"hit_radius",1.2,false,false,"Gameplay hit sphere radius"}});
+  {"hit_radius",1.2,false,false,"Gameplay hit sphere radius"},
+  {"ai_kind",std::int64_t{0},false,false,"0 dummy, 1 scout, 2 heavy, 3 turret"},
+  {"move_speed",4.0,false,false,"Enemy advance speed in metres per second"},
+  {"attack_range",30.0,false,false,"Enemy maximum firing distance in metres"},
+  {"damage_per_shot",4.0,false,false,"Enemy weapon damage to player"},
+  {"shot_interval",1.4,false,false,"Seconds between enemy shots"}});
  add(std::string(rulesType),"Mech game rules (marker)",{
   {"target_count",std::int64_t{3},false,false,"Targets to destroy for victory"}});
 }
@@ -134,6 +140,13 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
    if(c.type==targetType){++targets;if(o.marker)return fail("Mech target needs visible geometry");
     auto h=property(c,"health",100.0),r=property(c,"hit_radius",1.2);
     if(!std::isfinite(h)||h<=0||h>100000||!std::isfinite(r)||r<.1||r>10)return fail("Invalid mech target health or radius");
+    const auto kind=property(c,"ai_kind",std::int64_t{0});
+    const auto speed=property(c,"move_speed",4.0),range=property(c,"attack_range",30.0);
+    const auto damage=property(c,"damage_per_shot",4.0),interval=property(c,"shot_interval",1.4);
+    if(kind<0||kind>3||!std::isfinite(speed)||speed<0||speed>30||
+       !std::isfinite(range)||range<2||range>200||
+       !std::isfinite(damage)||damage<0||damage>100||
+       !std::isfinite(interval)||interval<.15||interval>30)return fail("Invalid mech enemy parameters");
    }
   }
  }
@@ -141,7 +154,15 @@ bool validate_mecha_scene(std::span<const PrototypeObjectView> objects,std::stri
  return true;
 }
 struct MechaGame::Impl {
- struct Target {GameObjectId id{};std::string key;float hp{},initial{},radius{};};
+ struct Target {
+  GameObjectId id{};std::string key;float hp{},initial{},radius{};
+  MechEnemyKind kind{MechEnemyKind::Dummy};
+  float moveSpeed{},attackRange{30},damagePerShot{4},shotInterval{1.4};
+  float cooldown{},replanCountdown{},turretYaw{};
+  Float3 spawn{};
+  std::vector<Float3> path{};
+  std::size_t waypoint{};
+ };
  struct TraceHit {GameObjectId id{};Float3 position{};float fraction{1};bool valid{};};
  GameWorld& world;
  PrototypeHud hud{};
@@ -156,6 +177,7 @@ struct MechaGame::Impl {
  bool lastBoost{},lastPause{},lastRestart{},lastDebug{},started{};
  std::vector<Target> targets;
  std::vector<MechProjectile> rockets;
+ std::vector<RacingVisualEffect> impacts;
  std::uint64_t nextProjectile{1};
  std::uint32_t rounds{200},missiles{12};
  explicit Impl(GameWorld& w):world(w){hud.active=false;hud.mecha=true;hud.maximumHealth=hud.health=100;}
@@ -178,19 +200,27 @@ struct MechaGame::Impl {
   hud.stats="MECHA  HP "+std::to_string(int(hud.health))+"  ENERGY "+std::to_string(int(motor.energy));
   hud.vehicleTelemetry="AUTO "+std::to_string(rounds)+"  ROCKET "+std::to_string(missiles)+"  TARGETS "+
      std::to_string(telemetry.targetsDestroyed)+"/"+std::to_string(requiredTargets);
+  if(hud.debug)hud.vehicleTelemetry+="  NAV "+std::to_string(telemetry.navigationReplans)+
+    "  CARVES "+std::to_string(telemetry.voxelCarvesQueued);
   hud.prompt="WASD MOVE  SHIFT BOOST  J/L AIM  MOUSE 1/2 FIRE  P PAUSE  R RESET";
   hud.message=hud.phase==PrototypePhase::Won?"TARGETS CLEARED - R TO RESTART":
-      hud.phase==PrototypePhase::Paused?"PAUSED - P TO RESUME":"";
+      hud.phase==PrototypePhase::Paused?"PAUSED - P TO RESUME":
+      hud.phase==PrototypePhase::Lost?"MECH DISABLED - R TO RESTART":"";
   telemetry.energy=motor.energy;telemetry.primaryCooldown=primaryCooldown;
   telemetry.rocketCooldown=rocketCooldown;telemetry.activeRockets=std::uint32_t(rockets.size());
  }
  void reset(){
   motor={};motor.position=start;motor.energy=100;
   hud.phase=PrototypePhase::Playing;hud.health=hud.maximumHealth=100;
-  primaryCooldown=rocketCooldown=0;rockets.clear();nextProjectile=1;
+  primaryCooldown=rocketCooldown=0;rockets.clear();impacts.clear();nextProjectile=1;
   rounds=200;missiles=12;telemetry={};
   lastBoost=lastPause=lastRestart=lastDebug=false;
-  for(auto& t:targets){t.hp=t.initial;(void)world.set_enabled(t.id,true);}
+  for(std::size_t i=0;i<targets.size();++i){
+   auto& t=targets[i];t.hp=t.initial;
+   t.cooldown=.9F+float(i)*.35F;t.replanCountdown=0;t.path.clear();t.waypoint=0;t.turretYaw=0;
+   (void)world.set_enabled(t.id,true);(void)world.set_position(t.id,t.spawn);
+   (void)world.set_rotation(t.id,rotation(0));
+  }
   publish();camera(true);refresh_hud();
  }
  // Test targets have gameplay hit spheres because their meshes are visual-only.
@@ -212,9 +242,20 @@ struct MechaGame::Impl {
   }
   return best;
  }
+ void effect(Float3 at,bool large){
+  if(impacts.size()>=96U)impacts.erase(impacts.begin());
+  impacts.push_back({RacingVisualKind::Dust,at,at,large?1.4F:.45F,0,
+    large?.85F:.28F,large?.65F:.28F});
+ }
+ void age_effects(float dt){
+  for(auto& e:impacts)e.age+=dt;
+  impacts.erase(std::remove_if(impacts.begin(),impacts.end(),
+    [](const RacingVisualEffect& e){return e.age>=e.lifetime;}),impacts.end());
+ }
  void impact(const TraceHit& hit,bool rocket){
   if(!hit.valid)return;
   ++telemetry.impacts;
+  effect(hit.position,rocket);
   for(auto& t:targets)if(t.hp>0&&world.is_enabled(t.id)){
    const auto position=world.position(t.id);if(!position)continue;
    const float d=mag(minus(*position,hit.position));
@@ -230,11 +271,14 @@ struct MechaGame::Impl {
    if(t.hp==0){(void)world.set_enabled(t.id,false);++telemetry.targetsDestroyed;}
   }
   if(rocket){
-   // Only actual voxel geometry is carved; polygon scenery is intentionally unaffected.
+   // Geometry, collision, sightlines and surface marks update at the GameWorld tick boundary.
+   // Query nearby before mutation to avoid double applications to fragments created by this shot.
    const auto nearby=world.sphere_overlap(hit.position,2.1F);
    for(const auto id:nearby)if(world.geometry_kind(id)==GameGeometryKind::Voxel){
-    (void)world.queue_damage_sphere(id,hit.position,1.6F);
+    if(world.queue_damage_sphere(id,hit.position,1.6F))++telemetry.voxelCarvesQueued;
    }
+  }else if(world.geometry_kind(hit.id)==GameGeometryKind::Voxel){
+   (void)world.add_surface_mark(hit.id,hit.position,.32F);
   }
   if(telemetry.targetsDestroyed>=requiredTargets)hud.phase=PrototypePhase::Won;
  }
@@ -259,6 +303,86 @@ struct MechaGame::Impl {
    if(hit.valid){impact(hit,true);it=rockets.erase(it);}
    else if(it->remainingSeconds<=0)it=rockets.erase(it);
    else{it->position=plus(it->position,move);++it;}
+  }
+ }
+
+ // M4: each active enemy uses the current world geometry. Cover edits can reveal a firing
+ // lane immediately; route replans are rate-limited and use the Z-up XY tactical grid.
+ bool can_see(Float3 from,Float3 destination,GameObjectId ignore){
+  const auto delta=minus(destination,from);const auto distance=mag(delta);
+  if(distance<1.e-4F)return true;
+  // Use the unified world ray query so polygon and voxel obstacles agree with weapon hits.
+  if(const auto hit=world.raycast(from,scaled(delta,1.F/distance),distance))
+   if(hit->objectId!=ignore&&hit->distance<distance-.4F)return false;
+  return true;
+ }
+ Capsule enemy_capsule(Float3 at)const{
+  return {{at.x,at.y,1.0F},{at.x,at.y,2.6F},.62F};
+ }
+ void step_enemies(float dt){
+  const auto playerAim=plus(motor.position,{0,0,1.5F});
+  for(auto& enemy:targets){
+   if(enemy.hp<=0||enemy.kind==MechEnemyKind::Dummy||!world.is_enabled(enemy.id))continue;
+   const auto opt=world.position(enemy.id);if(!opt)continue;
+   Float3 pos=*opt;
+   const auto muzzle=plus(pos,{0,0,.35F});
+   const auto toPlayer=minus(playerAim,muzzle);
+   const float distance=mag(toPlayer);
+   if(distance<.01F)continue;
+   const auto heading=unit(Float3{toPlayer.x,toPlayer.y,0});
+   const bool seen=can_see(muzzle,playerAim,enemy.id);
+   enemy.turretYaw=turn(enemy.turretYaw,angle_to(heading),dt*2.5F);
+   (void)world.set_rotation(enemy.id,rotation(enemy.turretYaw));
+   enemy.cooldown=std::max(0.F,enemy.cooldown-dt);
+   enemy.replanCountdown=std::max(0.F,enemy.replanCountdown-dt);
+   if(enemy.kind!=MechEnemyKind::Turret&&enemy.moveSpeed>.01F){
+    Float3 desired{};
+    if(!seen){
+     if(enemy.replanCountdown<=0||enemy.path.empty()||enemy.waypoint>=enemy.path.size()){
+      auto walkable=[&](Float3 p){return !world.capsule_overlaps(enemy_capsule(p),enemy.id);};
+      const auto route=plan_mech_navigation_xy(pos,motor.position,walkable);
+      enemy.path=route.waypoints;enemy.waypoint=0;enemy.replanCountdown=.6F;
+      ++telemetry.navigationReplans;
+     }
+     while(enemy.waypoint<enemy.path.size()&&
+           mag(minus(enemy.path[enemy.waypoint],pos))<1.8F)++enemy.waypoint;
+     if(enemy.waypoint<enemy.path.size())
+      desired=unit(Float3{enemy.path[enemy.waypoint].x-pos.x,
+                          enemy.path[enemy.waypoint].y-pos.y,0});
+    }else{
+     enemy.path.clear();enemy.waypoint=0;
+     if(enemy.kind==MechEnemyKind::Scout){
+      // Orbit when within weapon range; close first when farther away.
+      if(distance>18.F)desired=heading;
+      else if(distance<9.F)desired=scaled(heading,-1.F);
+      else desired={heading.y,-heading.x,0};
+     }else if(distance>17.F)desired=heading;
+     else if(distance<9.F)desired=scaled(heading,-.55F);
+    }
+    const auto step=scaled(desired,enemy.moveSpeed*dt);
+    if(mag(step)>.0001F){
+     if(const auto hit=world.capsule_sweep(enemy_capsule(pos),step,enemy.id)){
+      const float u=std::clamp(hit->time-.01F,0.F,1.F);
+      pos=plus(pos,scaled(step,u));
+      // A blocked path is stale, replan next tick against updated cover.
+      enemy.replanCountdown=0;
+     }else pos=plus(pos,step);
+     (void)world.set_position(enemy.id,pos);
+    }
+   }
+   const auto nowMuzzle=plus(pos,{0,0,.35F});
+   const float nowDistance=mag(minus(playerAim,nowMuzzle));
+   // No through-wall shots. A newly destroyed wall opens LOS automatically.
+   if(enemy.cooldown<=0&&nowDistance<enemy.attackRange&&
+      can_see(nowMuzzle,playerAim,enemy.id)){
+    enemy.cooldown=enemy.shotInterval;
+    ++telemetry.enemyShots;hud.health=std::max(0.F,hud.health-enemy.damagePerShot);
+    effect(playerAim,false);
+    if(hud.health<=0){
+     hud.phase=PrototypePhase::Lost;
+     break;
+    }
+   }
   }
  }
  void move(float dt){
@@ -294,6 +418,7 @@ const PrototypeHud& MechaGame::hud()const noexcept{return impl_->hud;}
 PrototypeCamera MechaGame::camera()const noexcept{return impl_->cam;}
 const MechMotorState& MechaGame::motor()const noexcept{return impl_->motor;}
 const MechCombatTelemetry& MechaGame::telemetry()const noexcept{return impl_->telemetry;}
+std::span<const RacingVisualEffect> MechaGame::impact_visuals()const noexcept{return impl_->impacts;}
 void MechaGame::look(float yawDelta,float){
  if(impl_->started&&std::isfinite(yawDelta)&&impl_->hud.phase==PrototypePhase::Playing)
   impl_->motor.torsoYaw=wrap(impl_->motor.torsoYaw-yawDelta); // Pointer right turns toward screen right (+X).
@@ -315,7 +440,16 @@ bool MechaGame::start(std::string* error){
   else if(c.type==rulesType){s.rules=o.id;s.requiredTargets=std::uint32_t(property(c,"target_count",std::int64_t{3}));}
   else if(c.type==targetType){
    const auto hp=float(property(c,"health",100.0));
-   s.targets.push_back({o.id,property(c,"key",std::string{}),hp,hp,float(property(c,"hit_radius",1.2))});
+   Impl::Target t;
+   t.id=o.id;t.key=property(c,"key",std::string{});
+   t.hp=t.initial=hp;t.radius=float(property(c,"hit_radius",1.2));
+   t.kind=MechEnemyKind(property(c,"ai_kind",std::int64_t{0}));
+   t.moveSpeed=float(property(c,"move_speed",4.0));
+   t.attackRange=float(property(c,"attack_range",30.0));
+   t.damagePerShot=float(property(c,"damage_per_shot",4.0));
+   t.shotInterval=float(property(c,"shot_interval",1.4));
+   t.spawn=s.world.position(o.id).value_or(Float3{});
+   s.targets.push_back(std::move(t));
   }
  }
  for(const auto id:{s.player,s.torso})if(id&&s.world.has_collision(id).value_or(true)){
@@ -345,7 +479,8 @@ void MechaGame::step(float dt){
  if(s.world.is_action_pressed("mech_primary")||s.world.get_axis("mech_primary")>.25F)s.shoot_primary();
  if(s.world.is_action_pressed("mech_secondary")||s.world.get_axis("mech_secondary")>.25F)s.shoot_rocket();
  s.step_rockets(dt);
- s.world.tick(dt);s.camera();s.refresh_hud();
+ if(s.hud.phase==PrototypePhase::Playing)s.step_enemies(dt);
+ s.world.tick(dt);s.age_effects(dt);s.camera();s.refresh_hud();
 }
 bool MechaGame::after_restore(std::string* error){
  // M5 will serialize full combat state. Do not pretend that quickload restores combat targets.

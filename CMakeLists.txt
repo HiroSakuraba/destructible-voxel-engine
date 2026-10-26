@@ -725,6 +725,7 @@ if(DVE_BUILD_RHI)
         src/render/atmosphere.cpp
         src/render/volumetric_fog.cpp
         src/render/ambient_occlusion_gpu.cpp
+        src/render/atmosphere_gpu.cpp
         src/render/live_environment_renderer.cpp
         src/render/material_resource_residency.cpp
         src/render/main_material_table.cpp

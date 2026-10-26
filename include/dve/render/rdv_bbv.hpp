@@ -46,6 +46,11 @@ public:
     // center is an absolute WORLD BRICK key; no camera-relative float drift.
     // Moving by one brick retains physical GPU slots for the overlapping region.
     [[nodiscard]] BbvUpdateStats recenter(BrickKey center, const PackedBrickmapScene& source);
+    // Camera is in metres; metresPerVoxel is DVE's explicit geometry scale.
+    // Sub-brick camera movements keep all physical slots and upload nothing.
+    [[nodiscard]] BbvUpdateStats recenter_camera(Float3 cameraWorldMeters,
+                                                  float metresPerVoxel,
+                                                  const PackedBrickmapScene& source);
     // Reconcile edits after PackedBrickmapScene has published the authoritative values.
     [[nodiscard]] BbvUpdateStats refresh(std::span<const BrickKey> changedKeys,
                                           const PackedBrickmapScene& source);

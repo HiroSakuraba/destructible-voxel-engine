@@ -1,0 +1,9 @@
+DVE_MATERIAL_PRESET 1 1 1
+"dve.leather.smooth" "Smooth leather" "Leather" "Leather Smooth leather"
+"Original bundled procedural color, roughness and physical-scale bump; object-attached by default. No geometric displacement." "DVE original artistic defaults; not measured material fits" "meters"
+2 0 5
+0
+DVE_EDITOR_MATERIALS 7
+2
+0 "Air" 0 0 0 0 0 0 0 0 1 0.5 0 2 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 0 0 0 0 0 1 0 1 0 0 1.5 1 1 1 0 0 "" 0 0 0 0 1 0.0199999996 0 0 0 20 0.25 0.150000006 1.99999995e-05 1
+10 "Smooth leather" 0.150000006 0.0549999997 0.0250000004 1 0 0 0 0 0.5 0.5 0 0 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 1000 1 1 0 0 0 1 0 0 0 1.5 1 1 1 0 0 "" 0 0 2 0 1 0.00150000001 0 0 0 20 0.150000006 0.150000006 7.99999998e-06 1

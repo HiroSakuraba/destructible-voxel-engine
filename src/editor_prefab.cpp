@@ -106,6 +106,7 @@ std::filesystem::path instance_prefab_reference(
 
 void remap_embedded_object_id(EditorObject& object, EditorObjectId id) {
     if (object.polygon) {object.polygon->objectId=id;object.polygon->contentHash=polygon_asset_content_hash(*object.polygon);}
+    remap_material_bake_ownership(object,id);
     if (!object.text3d) return;
     object.text3d->objectId = id;
     object.text3d->sideMesh.objectId = id;
@@ -350,6 +351,7 @@ static std::uint64_t subdivision_prefab_hash(const EditorPrefabAsset& prefab,boo
         hash = hash_text(hash, object.sourceAsset.generic_string());
         hash = hash_value(hash,object.polygon?object.polygon->contentHash:0);
         if(object.modelingTopology)hash=hash_value(hash,modeling_topology_hash(*object.modelingTopology));
+        if(object.materialBake)hash=hash_value(hash,material_bake_recipe_hash(*object.materialBake));
         // Preserve legacy hashes for objects without subdivision settings.
         if (object.subdivision) {hash=hash_value(hash,std::uint32_t{0x53554244});
             hash=hash_value(hash,object.subdivision->level);hash=hash_value(hash,object.subdivision->preserveSharpEdges);
@@ -691,7 +693,10 @@ static EditorPrefabInstanceUpdatePreview apply_editor_prefab_instance_update_in_
                 target->polygon=source.polygon;
                 target->modelingTopology=source.modelingTopology;
                 target->modelingNextId=(std::max)(target->modelingNextId,source.modelingNextId);
+                // The recipe travels with the geometry it describes (or is cleared with it).
+                target->materialBake=source.materialBake;
                 if (target->polygon) {target->polygon->objectId=target->id;target->polygon->contentHash=polygon_asset_content_hash(*target->polygon);}
+                remap_material_bake_ownership(*target,target->id);
             }
             if (source.subdivision && target->subdivision) {
                 target->subdivision->level=object_has_override(*target,"subdivision.level") && previousSubdivision ?

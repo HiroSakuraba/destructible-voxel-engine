@@ -162,7 +162,7 @@ endif()
 # Tools: the cookers, dve_pack, dve_export_scene (editor scene -> DVOXSCENE) and the
 # dve_package_game script (shippable game folder, Phase 4).
 foreach(_dve_tool
-        dve_pack dve_export_scene dve_cook_model dve_cook_mesh dve_cook_text3d dve_cook_gabor dve_cook_fluoddity
+        dve_pack dve_bake_material dve_export_scene dve_cook_model dve_cook_mesh dve_cook_text3d dve_cook_gabor dve_cook_fluoddity
         dve_cook_hair dve_cook_audio dve_cook_chiptune dve_cook_sample_map dve_cook_heightmap
         dve_cook_sprite dve_asset_index dve_prefab_tool)
     dve_install_program(${_dve_tool} Tools)

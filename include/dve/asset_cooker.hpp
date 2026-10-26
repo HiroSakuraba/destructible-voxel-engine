@@ -1,4 +1,6 @@
 #pragma once
+#include "dve/material_preset_origin.hpp"
+#include "dve/material_surface_detail.hpp"
 
 #include <array>
 #include <cstddef>
@@ -16,11 +18,6 @@
 #include "dve/voxel_object.hpp"
 
 namespace dve {
-
-struct Float2 {
-    float x{};
-    float y{};
-};
 
 struct Float4 {
     float x{};
@@ -178,6 +175,8 @@ struct VoxelNormalMap {
 };
 
 struct VoxelMaterialDefinition {
+    MaterialPresetOrigin preset;
+    MaterialSurfaceDetail surfaceDetail;
     std::string name;
     // Linear RGBA. Base-color image texels are decoded from sRGB before multiplication.
     Float4 baseColor{1.0F, 1.0F, 1.0F, 1.0F};
@@ -193,6 +192,20 @@ struct VoxelMaterialDefinition {
     // Clear-coat is a second dielectric lobe layered above the base BRDF.
     float clearCoat{0.0F};
     float clearCoatRoughness{0.1F};
+    // Sheen (glTF KHR_materials_sheen): a retroreflective velvet layer over the base BRDF —
+    // cloth, fabric, peach fuzz. Black, the default, disables it entirely; formats and hashes
+    // include it only when present (material_has_sheen), so sheen-free materials keep their
+    // old bytes and hashes.
+    Float3 sheenColor{0.0F, 0.0F, 0.0F};
+    float sheenRoughness{0.0F};
+    // Iridescence (glTF KHR_materials_iridescence): a thin film over the base whose
+    // interference colours modulate the specular reflection. The factor 0, the default,
+    // disables it; formats and hashes include it only when present
+    // (material_has_iridescence), so film-free materials keep their old bytes and hashes.
+    // Thickness is the film thickness in nanometres (DVE artistic default: 100).
+    float iridescence{0.0F};
+    float iridescenceIor{1.3F};
+    float iridescenceThicknessNm{100.0F};
     // Two-sided foliage uses a view-facing normal for the front lobe and a back-light
     // transmission term colored independently from the ordinary base color.
     Float3 foliageColor{0.5F, 0.8F, 0.35F};
@@ -233,6 +246,26 @@ struct VoxelMaterialDefinition {
 [[nodiscard]] inline bool material_has_optics(const VoxelMaterialDefinition& m) noexcept {
     return m.transmission != 0.0F || m.indexOfRefraction != 1.5F || m.attenuationColor.x != 1.0F ||
            m.attenuationColor.y != 1.0F || m.attenuationColor.z != 1.0F || m.attenuationDistanceMeters != 0.0F;
+}
+// Sheen is present (any non-black sheen colour). Written and hashed only then.
+[[nodiscard]] inline bool material_has_sheen(const VoxelMaterialDefinition& m) noexcept {
+    return m.sheenColor.x != 0.0F || m.sheenColor.y != 0.0F || m.sheenColor.z != 0.0F;
+}
+// Sheen fields in range: colour components 0..1, roughness 0..1, all finite (NaN fails the range test).
+[[nodiscard]] inline bool material_sheen_valid(const VoxelMaterialDefinition& m) noexcept {
+    const auto in = [](float v, float lo, float hi) { return v >= lo && v <= hi; };
+    return in(m.sheenColor.x, 0.0F, 1.0F) && in(m.sheenColor.y, 0.0F, 1.0F) && in(m.sheenColor.z, 0.0F, 1.0F) &&
+           in(m.sheenRoughness, 0.0F, 1.0F);
+}
+// Iridescence is present (a non-zero factor). Written and hashed only then.
+[[nodiscard]] inline bool material_has_iridescence(const VoxelMaterialDefinition& m) noexcept {
+    return m.iridescence != 0.0F;
+}
+// Iridescence fields in range: factor 0..1, film IOR 1..3, thickness 0..100000 nm, all finite.
+[[nodiscard]] inline bool material_iridescence_valid(const VoxelMaterialDefinition& m) noexcept {
+    const auto in = [](float v, float lo, float hi) { return v >= lo && v <= hi; };
+    return in(m.iridescence, 0.0F, 1.0F) && in(m.iridescenceIor, 1.0F, 3.0F) &&
+           in(m.iridescenceThicknessNm, 0.0F, 100000.0F);
 }
 // A normal map is attached.
 [[nodiscard]] inline bool material_has_normal_map(const VoxelMaterialDefinition& m) noexcept {
@@ -379,10 +412,15 @@ struct CookedVoxelScene {
 // Normal maps for voxel materials (VoxelMaterialDefinition::normalMap): a PNG or JPEG decoded
 // with no colour conversion (normal maps are data, not sRGB colour). Null, with *error, when the
 // image cannot be decoded or is larger than kMaximumVoxelNormalMapDimension.
+// flipGreenChannel converts a DirectX-style map (Y-, green = down) to the engine's OpenGL
+// convention (Y+, green = up) by inverting the green channel BEFORE the map (and its content
+// hash) is built, so a flipped import is indistinguishable from an OpenGL-authored original.
 [[nodiscard]] std::shared_ptr<const VoxelNormalMap> import_voxel_normal_map(const std::filesystem::path& path,
-                                                                            std::string* error = nullptr);
+                                                                            std::string* error = nullptr,
+                                                                            bool flipGreenChannel = false);
 [[nodiscard]] std::shared_ptr<const VoxelNormalMap> decode_voxel_normal_map(std::span<const std::byte> bytes, std::string name,
-                                                                            std::string* error = nullptr);
+                                                                            std::string* error = nullptr,
+                                                                            bool flipGreenChannel = false);
 
 [[nodiscard]] CookedVoxelAsset voxelize_scene(
     const ImportedScene& scene,

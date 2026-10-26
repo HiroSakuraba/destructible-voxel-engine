@@ -58,7 +58,9 @@ inline RenderEnvironment render_environment_settings(const EditorSettingsRegistr
     environment.exposure = s.number("render.exposure");
     const auto tonemap = s.get<std::string>("render.tonemap");
     environment.tonemapOperator = tonemap == "reinhard" ? TonemapOperator::Reinhard
-        : tonemap == "clamp" ? TonemapOperator::Clamp : TonemapOperator::ACES;
+        : tonemap == "clamp" ? TonemapOperator::Clamp
+        : tonemap == "agx" ? TonemapOperator::AgX
+        : tonemap == "pbr_neutral" ? TonemapOperator::PBRNeutral : TonemapOperator::ACES;
     const auto shadowMode = s.get<std::string>("render.shadow_mode");
     environment.shadowMode = shadowMode == "off" ? ShadowMode::Off
         : shadowMode == "hard" ? ShadowMode::Hard
@@ -81,6 +83,12 @@ inline RenderEnvironment render_environment_settings(const EditorSettingsRegistr
         : giQuality == "ultra" ? 16U : 4U;
     environment.globalIlluminationIntensity = s.number("render.gi_intensity");
     environment.globalIlluminationMaxDistanceMeters = s.number("render.gi_distance");
+    environment.pathTraceBounces = s.integer("render.path_bounces");
+    environment.pathTraceSamples = s.integer("render.path_samples");
+    environment.localLightSamples = s.integer("render.local_light_samples");
+    environment.pathTraceRoulette = s.get<bool>("render.path_roulette");
+    environment.bloomIntensity = s.number("render.bloom_intensity");
+    environment.bloomRadius = s.number("render.bloom_radius");
     environment.bloomThreshold = s.number("render.bloom_threshold");
     if (!s.get<bool>("render.bloom")) environment.bloomIntensity = 0.0F;
     if (!s.get<bool>("material.subsurface")) environment.subsurfaceMaxDistanceMeters = 0.0F;

@@ -1,0 +1,71 @@
+#pragma once
+
+#include "dve/render/voxel_reference_renderer.hpp"
+#include <functional>
+
+namespace dve::render {
+// Shared CPU integrator. World coordinates use metersPerUnit; authored lights
+// use metres. Immutable after construction and safe for simultaneous pixel
+// queries.
+class SceneLighting {
+public:
+  SceneLighting(std::span<const VoxelReferenceInstance> voxels,
+                std::span<const PolygonRenderInstance> polygons,
+                const RenderEnvironment &environment, float metersPerUnit);
+  ~SceneLighting();
+  SceneLighting(const SceneLighting &) = delete;
+  SceneLighting &operator=(const SceneLighting &) = delete;
+  // Camera-visible dielectric / delta-metal transport, including both medium
+  // interfaces. Intended for primary refractive surfaces; returns
+  // compositing-ready light passes. primaryNormal overrides the first hit's
+  // shading normal; when primaryDistance >= 0 it is applied only if the traced
+  // first hit lies at that distance along the ray (same surface as the raster
+  // fragment), otherwise the traced normal is kept.
+  [[nodiscard]] LightPasses
+  camera_transport(Float3 origin, Float3 direction, float maximumDistance,
+                   std::uint32_t seed,
+                   const VoxelMaterialDefinition *primaryMaterial = nullptr,
+                   Float3 primaryNormal = {},
+                   float primaryDistance = -1.0F) const;
+  [[nodiscard]] float sun_visibility(Float3 point, Float3 normal,
+                                     std::uint32_t seed) const;
+  [[nodiscard]] ShadingLobes direct(Float3 point, Float3 normal, Float3 view,
+                                    const VoxelMaterialDefinition &material,
+                                    std::uint32_t seed) const;
+  // Incoming multi-bounce transport scattered at the supplied surface. Includes
+  // emission reached by continuation, explicit emitters, shadowed sun and
+  // escaped environment.
+  [[nodiscard]] ShadingLobes
+  indirect_lobes(Float3 point, Float3 normal, Float3 view,
+                 const VoxelMaterialDefinition &material,
+                 std::uint32_t seed) const;
+  [[nodiscard]] Float3 indirect(Float3 point, Float3 normal, Float3 view,
+                                const VoxelMaterialDefinition &material,
+                                std::uint32_t seed) const;
+  // Single-scattering emitter estimate, with optional participating-medium
+  // transmittance.
+  [[nodiscard]] Float3 scattering(
+      Float3 point, Float3 viewRay, float anisotropy, std::uint32_t seed,
+      const std::function<float(Float3, float)> &transmittance = {}) const;
+  [[nodiscard]] std::size_t emitter_count() const noexcept;
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+// Camera transport activates for refractive materials and smooth full metals
+// even with zero GI bounces, so authored glass cannot silently fall back to
+// opaque diffuse shading.
+[[nodiscard]] bool material_uses_camera_transport(
+    const VoxelMaterialDefinition &material) noexcept;
+[[nodiscard]] bool scene_uses_camera_transport(
+    std::span<const VoxelReferenceInstance> voxels,
+    std::span<const PolygonRenderInstance> polygons) noexcept;
+[[nodiscard]] float candle_light_multiplier(const SceneLight &light,
+                                            double timeSeconds) noexcept;
+// Finite-radius separable HDR bloom, applied once before exposure/tonemap.
+// Writes glow to the emission AOV, retaining light_sum == beauty. Returns false
+// without mutation on bad input.
+[[nodiscard]] bool apply_cpu_bloom(PolygonRenderTarget &target,
+                                   const RenderEnvironment &environment);
+} // namespace dve::render

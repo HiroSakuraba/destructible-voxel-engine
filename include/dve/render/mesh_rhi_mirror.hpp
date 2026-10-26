@@ -16,8 +16,9 @@ struct GpuPolygonVertex {
     float tangentX{1.0F}, tangentY{}, tangentZ{}, tangentW{1.0F};
     float texcoordX{}, texcoordY{};
     float colorR{1.0F}, colorG{1.0F}, colorB{1.0F}, colorA{1.0F};
+    float texcoord1X{}, texcoord1Y{};
 };
-static_assert(sizeof(GpuPolygonVertex) == 16U * sizeof(float));
+static_assert(sizeof(GpuPolygonVertex) == 18U * sizeof(float));
 
 struct GpuPolygonDrawRecord {
     std::uint32_t firstIndex{};

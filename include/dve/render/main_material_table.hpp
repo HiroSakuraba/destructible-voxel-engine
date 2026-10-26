@@ -9,6 +9,7 @@
 #include <unordered_set>
 
 #include "dve/gpu_material_buffer.hpp"
+#include "dve/gpu_material_surface_detail.hpp"
 #include "dve/gpu_material_mapping.hpp"
 #include "dve/polygon_asset.hpp"
 #include "dve/render/material_resource_residency.hpp"
@@ -32,10 +33,14 @@ enum class MainMaterialTextureChannel : std::uint32_t {
 
 struct MainMaterialDescriptor {
     rhi::BindGroupHandle bindGroup;
+    rhi::BufferHandle layerBuffer;
+    std::size_t layerPayloadBytes{};
     rhi::BufferHandle materialRecordBuffer;
     rhi::BufferHandle mappingRecordBuffer;
+    rhi::BufferHandle surfaceRecordBuffer;
     std::size_t materialRecordOffset{};
     std::size_t mappingRecordOffset{};
+    std::size_t surfaceRecordOffset{};
     std::uint32_t texturePresenceMask{};
     std::array<rhi::TextureViewHandle, kMainMaterialTextureChannelCount> textureViews{};
     std::array<rhi::SamplerHandle, kMainMaterialTextureChannelCount> samplers{};
@@ -112,8 +117,10 @@ private:
     struct AssetResource {
         rhi::BufferHandle materialRecords;
         rhi::BufferHandle mappingRecords;
+        rhi::BufferHandle surfaceRecords;
         std::size_t materialStride{};
         std::size_t mappingStride{};
+        std::size_t surfaceStride{};
         std::uint32_t materialCount{};
     };
     struct MaterialResource { MainMaterialDescriptor descriptor; };
@@ -131,8 +138,10 @@ private:
     std::unique_ptr<MaterialResourceResidency> ownedResidency_;
     MaterialResourceResidency* residency_{};
     rhi::BindGroupLayoutHandle layout_;
+    rhi::BufferHandle fallbackLayerBuffer_;
     rhi::BufferHandle fallbackMaterialBuffer_;
     rhi::BufferHandle fallbackMappingBuffer_;
+    rhi::BufferHandle fallbackSurfaceBuffer_;
     std::array<rhi::TextureHandle, kMainMaterialTextureChannelCount> fallbackTextures_{};
     std::array<rhi::TextureViewHandle, kMainMaterialTextureChannelCount> fallbackViews_{};
     rhi::SamplerHandle fallbackSampler_;

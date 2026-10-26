@@ -21,7 +21,10 @@
 #include "dve/game_world.hpp"
 #include "dve/player/frame_image.hpp"
 #include "dve/render/polygon_renderer.hpp"
+#include "dve/render/cpu_fog.hpp"
 #include "dve/render_environment.hpp"
+#include "dve/prototype_game.hpp"
+#include "dve/water_ocean.hpp"
 
 namespace dve::player {
 
@@ -31,6 +34,14 @@ struct PlayerRenderView {
     RenderEnvironment environment;
     bool polygonFrustumCulling{true};
     float polygonLodBias{};
+    // Optional local media supplied by the scene owner, in metre space.
+    std::span<const render::CpuFogVolume> fogVolumes{};
+    render::CpuFogSettings fogSettings{};
+    render::CpuSurfaceDetailSettings surfaceDetail{};
+    const PrototypeHud* prototypeHud{};
+    std::span<const RacingVisualEffect> racingEffects{};
+    const OceanField* ocean{}; // same deterministic waves used by hull physics
+    double oceanTime{}; // metres; lifetime owned by PrototypeGame
 };
 
 struct PlayerRenderStats {
@@ -43,6 +54,7 @@ struct PlayerRenderStats {
     std::uint64_t tracedRays{};
     std::uint64_t hitRays{};
     render::PolygonRenderStats polygons;
+    render::CpuFogStats fog;
     std::uint64_t scaledPolygonAssets{};
     std::uint64_t scaledPolygonCopies{};
 };
@@ -70,9 +82,9 @@ public:
 // Lighting cost of the CPU renderer. The reference tracer is a validation path (one DDA per
 // instance per ray), so the default trades soft shadows and traced GI for real-time frame rates.
 enum class CpuRenderQuality : std::uint32_t {
-    // Hard sun shadows (1 ray/pixel), hemisphere ambient instead of traced GI.
+    // Hard sun shadows, hemisphere ambient; path tracing off, 2 emitter samples.
     Fast = 0,
-    // Hard shadows plus the environment's GI mode, capped at 2 samples.
+    // Hard shadows; GI capped at 2 samples / 2 path bounces, 2 emitter samples.
     Balanced = 1,
     // RenderEnvironment exactly as the scene/script set it (engine default: soft shadows,
     // 4-sample one-bounce GI). Offline/screenshot use.

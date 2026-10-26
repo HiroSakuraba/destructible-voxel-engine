@@ -20,6 +20,7 @@ struct PolygonBvhHit;
 }
 
 namespace dve::render {
+class SceneLighting;
 
 class PolygonRenderCache;
 
@@ -155,7 +156,18 @@ enum class PolygonMaterialDebugView : std::uint8_t {
     LayerCoverage,
 };
 
+struct CpuSurfaceDetailSettings {
+    float heightBumpStrength{};
+    bool parallaxSelfShadow{};
+    std::uint32_t shadowSteps{12};
+    // Explicit physical shell depth, separate from UV parallax scale. Opt-in;
+    // raster coverage/silhouettes remain those of the base mesh.
+    float reliefDepthMeters{};
+    std::uint32_t maximumParallaxSteps{128};
+};
+
 struct PolygonRenderOptions {
+    const SceneLighting* sceneLighting{}; // shared frame integrator; outlives render
     bool enableTextures{true};
     bool enableMipSelection{true};
     bool enableTransparentSorting{true};
@@ -184,6 +196,7 @@ struct PolygonRenderOptions {
     // when set (world units; the hybrid reference and the CPU player trace voxels and polygons
     // together), otherwise to the polygons being rendered.
     AmbientOcclusionRay occlusionRay{};
+    CpuSurfaceDetailSettings surfaceDetail{};
 };
 
 struct PolygonRenderStats {
@@ -202,6 +215,7 @@ struct PolygonRenderStats {
     std::uint64_t triplanarSamples{};
     std::uint64_t detailSamples{};
     std::uint64_t parallaxSamples{};
+    std::uint64_t parallaxFallbacks{}, parallaxShadowSamples{}, bumpSamples{}, reliefDepthWrites{};
     std::uint64_t layerMaskSamples{};
     std::uint64_t layerSourceSamples{};
     std::uint64_t layeredFragments{};
@@ -230,6 +244,9 @@ struct PolygonTextureMip {
 
 struct PolygonTextureMipChain {
     std::vector<PolygonTextureMip> levels;
+    Float2 heightBounds{0,1};
+    std::vector<PolygonTextureMip> normalLevels;
+    std::vector<PolygonTextureMip> srgbLevels;
 };
 
 // Retains immutable mip chains by validated content hash, not borrowed pointers.
@@ -264,7 +281,18 @@ private:
     std::uint64_t frame_{};
 };
 
-[[nodiscard]] PolygonTextureMipChain generate_texture_mips(const PolygonImage& image);
+[[nodiscard]] PolygonTextureMipChain generate_texture_mips(const PolygonImage& image,
+    bool normalMap = false, bool srgb = false);
+
+// Shared ray-hit evaluation of the authored base/MR/normal/emissive/coverage/detail/layer
+// maps. Uses triangle metric derivatives and a ray-cone footprint for mip selection.
+// Exact destination-pixel differentials for UV baking; coordinates use world/asset units.
+struct PolygonSurfaceDifferentials { Float3 worldDx{},worldDy{}; };
+struct PolygonHitSurface { VoxelMaterialDefinition material; Float3 normal{0,0,1}; };
+[[nodiscard]] PolygonHitSurface sample_polygon_hit_material(const CookedPolygonAsset&,const PolygonBvhHit&,
+    const RigidTransform&,Float3 worldNormal,const std::vector<PolygonTextureMipChain>&,
+    float metersPerUnit=1,float footprintMeters=0,float viewDistanceMeters=0,
+    const PolygonSurfaceDifferentials* differentials=nullptr) noexcept;
 
 // Opacity of a polygon surface at a BVH ray hit, as the reference rasterizer computes it for its
 // alpha test: material alpha x vertex colour alpha x base-colour texture alpha x opacity texture

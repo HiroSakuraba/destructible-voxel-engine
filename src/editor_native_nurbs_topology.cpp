@@ -5,6 +5,8 @@
 #include <sstream>
 #include "dve/nurbs_queries.hpp"
 #include "dve/nurbs_modeling.hpp"
+#include "dve/editor_nurbs_seam.hpp"
+#include "dve/editor_nurbs_surface.hpp"
 #include <algorithm>
 namespace dve::editor {
 bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
@@ -12,6 +14,8 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     if(textEdit_.kind==TextEditKind::NurbsControl)cancel_text_edit();
     const bool rebuild=action=="nurbs.source_rebuild",adaptive=action=="nurbs.source_adaptive",crop=action=="nurbs.source_crop",fillet=action=="nurbs.source_fillet_corner";
     const bool attach=action=="nurbs.source_attach_c0"||action=="nurbs.source_attach_c1",project=action=="nurbs.source_project",intersect=action=="nurbs.source_intersect_planes";
+    const bool changesTrimDomain=crop||attach||intersect||action=="nurbs.source_boundaries"||action.starts_with("nurbs.source_reverse_")||action=="nurbs.source_swap_uv"||action.starts_with("nurbs.source_split_");
+    if(changesTrimDomain)for(auto id:workspace_.selected_objects()){const auto* o=workspace_.document().find_object(id);if(o&&has_nurbs_source(*o)){auto f=editor_nurbs_surface_features(*o);if(f&&f->trim){set_status("This operation needs untrimmed source boundaries; untrim first or use trim-region editing",true);return false;}}}
     if(rebuild||adaptive||crop||fillet||attach||project||intersect){
         const bool pair=attach||project||intersect;const auto primary=workspace_.selected_object();auto& document=workspace_.document();auto* target=primary?document.find_object(*primary):nullptr;
         if(!target||workspace_.selection_count()!=(pair?2U:1U)){set_status(pair?"Select two sources; the active surface is the reference/target":"Select one native NURBS source",true);return false;}
@@ -31,7 +35,11 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
         std::optional<NurbsSource> output;std::optional<CookedPolygonAsset> mesh;std::string label,status;
         const auto newId=document.allocate_object_id();
         if(rebuild){auto fit=rebuild_nurbs_curve(*source,nurbsSweepOptions_.sections,.01,&error);if(fit){output=std::move(fit->source);status="Curve rebuilt; max sampled local error "+std::to_string(fit->maxSampledError)+" (not certified)";}label="Rebuilt Curve";}
-        else if(adaptive){mesh=tessellate_nurbs_adaptive(*source,newId,.01,.15,&error);label="Adaptive Polygon";status="Adaptive surface polygon added; sampled local tolerance 0.01, angle 0.15 rad; source retained";}
+        else if(adaptive){
+            auto features=editor_nurbs_surface_features(*target,&error);
+            if(features&&features->trim){auto proxy=clone_editor_object(*target);proxy.id=newId;auto* component=find_component_by_type(std::span<Component>(proxy.components),kNurbsComponent);component->properties.erase(std::string(kNurbsSeamProperty));auto policy=*source;policy.adaptiveDisplay=true;policy.chordTolerance=.01;policy.normalAngle=.15;mesh=tessellate_editor_nurbs_display(proxy,policy,&error);}
+            else mesh=tessellate_nurbs_adaptive(*source,newId,.01,.15,&error);
+            label="Adaptive Polygon";status="Adaptive surface polygon added; sampled local tolerance 0.01, angle 0.15 rad; source retained";}
         else if(attach){
             auto options=nurbsAttachmentOptions_;options.c1=action=="nurbs.source_attach_c1";
             auto attached=attach_nurbs_boundaries(*source,*other,options,&error);
@@ -96,7 +104,7 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
     if(quality||resetUv||adaptiveSettings||lengthSplit)restore_parked_nurbs_controls(); // retain the selection parked by settings for undo
     else nurbsParkedObject_=0;
     const auto selection=capture_selection_snapshot();
-    if(has_nurbs_seam(*object)&&(reverse||transpose||insert||elevate)){set_status("Unlink the NURBS seam before changing degree, knots or parameter directions",true);return false;}
+    if(has_nurbs_seam(*object)&&(reverse||transpose)){set_status("Unlink the NURBS seam before changing degree, knots or parameter directions",true);return false;}
     if(reverse||transpose||insert||quality||resetUv||elevate||adaptiveSettings){
         auto after=(quality||resetUv||adaptiveSettings)?source:elevate?elevate_nurbs_degree(*source,v,&error):transpose?transpose_nurbs(*source,&error):reverse?reverse_nurbs_axis(*source,v,&error):insert_nurbs_knot(*source,v,t,&error);
         if(!after){set_status(error,true);return false;}
@@ -104,7 +112,8 @@ bool NativeEditorController::dispatch_nurbs_topology(std::string_view action){
         if(adaptiveSettings){if(source->is_curve()){set_status("Adaptive display requires a surface",true);return false;}after->adaptiveDisplay=true;after->creaseNormals=true;after->chordTolerance=action=="nurbs.source_display_coarse"?.05:action=="nurbs.source_display_fine"?.0025:.01;after->normalAngle=action=="nurbs.source_display_coarse"?.3:action=="nurbs.source_display_fine"?.075:.15;}
         if(resetUv){after->textureU={0,1};after->textureV={0,1};}
         if(*after==*source){set_status("NURBS settings already match; no history added");return true;}
-        auto result=workspace_.commands().execute(doc,std::make_unique<EditNurbsCommand>(*id,*source,*after));
+        auto command=has_nurbs_seam(*object)&&(insert||elevate)?refine_nurbs_network_command(*id,v,insert?std::optional<double>(t):std::nullopt):std::unique_ptr<IEditorCommand>(std::make_unique<EditNurbsCommand>(*id,*source,*after));
+        auto result=workspace_.commands().execute(doc,std::move(command));
         if(result.success){nurbsConstructionPanel_=false;if(!quality&&!resetUv&&!adaptiveSettings){nurbsSelected_.clear();nurbsControl_=0;}workspace_.commands().set_last_selection_transition(selection,capture_selection_snapshot());}
         if(result.success)refresh_nurbs_menu_state();
         set_status(result.success?(elevate?"NURBS degree elevated without refitting; reselect controls":adaptiveSettings?"Adaptive surface display saved and rebuilt; sampled local tolerances, synchronous updates":quality?"Fixed NURBS display rebuilt with crease normals and selected density":resetUv?"NURBS texture ranges reset to 0..1":"NURBS parameterization updated; reselect controls (single-axis reversal / U-V swap flips the surface normal)"):result.message,!result.success);return result.success;

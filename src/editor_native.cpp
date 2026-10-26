@@ -343,6 +343,7 @@ void NativeEditorController::toggle_play_camera_possession() {
         set_status("Camera possession is available only during Play", true);
         return;
     }
+    playSession_.clear_input();
     if (playCameraPossessed_) {
         possessedPlayCamera_ = camera_;
         if (prePlayEditorCamera_) camera_ = *prePlayEditorCamera_;
@@ -357,6 +358,7 @@ void NativeEditorController::toggle_play_camera_possession() {
 
 void NativeEditorController::route_play_key(std::string_view normalized, bool pressed) {
     if (!playSession_.active() || normalized.empty()) return;
+    if(pressed&&!playCameraPossessed_&&playSession_.prototype_camera())return;
     playSession_.set_action_pressed("key." + std::string(normalized), pressed);
     const auto alias = [&](std::string_view action) { playSession_.set_action_pressed(std::string(action), pressed); };
     if (normalized == "w" || normalized == "up") alias("move_forward");
@@ -365,13 +367,17 @@ void NativeEditorController::route_play_key(std::string_view normalized, bool pr
     else if (normalized == "d" || normalized == "right") alias("move_right");
     else if (normalized == "space") alias("jump");
     else if (normalized == "e") alias("interact");
+    else if (normalized == "p") alias("pause");
+    else if (normalized == "r") alias("restart");
+    else if (normalized == "f3") alias("prototype_debug");
     else if (normalized == "leftshift" || normalized == "rightshift" || normalized == "shift") alias("sprint");
-    else if (normalized == "leftctrl" || normalized == "rightctrl" || normalized == "control") alias("crouch");
+    else if (normalized == "leftctrl" || normalized == "rightctrl" || normalized == "left ctrl" || normalized == "right ctrl" || normalized == "control") alias("crouch");
     refresh_play_input_axes();
 }
 
 void NativeEditorController::refresh_play_input_axes() {
     if (!playSession_.active()) return;
+    if(!playCameraPossessed_&&playSession_.prototype_camera()){playSession_.clear_input();return;}
     const auto& actions = playSession_.input().actions;
     const auto active = [&](std::string_view name) {
         const auto it = actions.find(name);
@@ -1692,11 +1698,9 @@ namespace {
 const std::vector<std::pair<std::string, std::string>>& editor_context_only_commands() {
     static const std::vector<std::pair<std::string, std::string>> kCommands = [] {
         std::vector<std::pair<std::string, std::string>> list;
-        const std::string paint = "Not in this editor yet: use the Paint tool (5) or Voxel > Flood Fill to apply the active material.";
         const std::string instances = "Not in this editor yet: material instances and previews; edit materials under Materials > Material Library.";
-        list.emplace_back("material.assign", paint);
-        list.emplace_back("material.apply", paint);
-        for (const char* id : {"material.link", "material.create_instance", "material.create_master", "material.preview", "material.pin_preview"})
+
+        for (const char* id : {"material.link", "material.create_master", "material.pin_preview"})
             list.emplace_back(id, instances);
         return list;
     }();
@@ -2937,6 +2941,7 @@ void NativeEditorController::autosave_tick(float elapsedSeconds) {
 }
 
 void NativeEditorController::update(float elapsedSeconds) {
+    if(materialPanel_.open)material_panel_tick();
     settle_cad_link_drop();  // a confirmed CAD link drop waits for its edit (editor_native_cad_guard.cpp)
     if (appliedSettingsRevision_ != workspace_.settings().revision()) apply_settings_to_runtime();
     else if (audioSettingsPending_) {
@@ -3136,6 +3141,7 @@ void NativeEditorController::update(float elapsedSeconds) {
     }
     if (std::get<bool>(workspace_.settings().value("camera.horizon_lock")))
         camera_.worldUp = {0.0F, 1.0F, 0.0F};
+    if(playCameraPossessed_)if(auto p=playSession_.prototype_camera()){camera_.position=p->position;camera_.target=p->target;camera_.worldUp=p->up;camera_.verticalFovRadians=p->verticalFovRadians;}
     if (status_.secondsRemaining > 0.0F) {
         status_.secondsRemaining = std::max(0.0F, status_.secondsRemaining - std::max(0.0F, elapsedSeconds));
         if (status_.secondsRemaining == 0.0F && status_.text != "Ready") status_ = {"Ready", false, 0.0F};
@@ -3143,7 +3149,7 @@ void NativeEditorController::update(float elapsedSeconds) {
 }
 
 bool NativeEditorController::animating() const noexcept {
-    return playSession_.state()==EditorPlaySessionState::Running || spriteLevelPlaying_ || (spriteRig2DOpen_ && spriteRig2DPreviewPlaying_) ||
+    return (materialPanel_.open && ((materialPanel_.preview && materialPanel_.preview->busy()) || (materialPanel_.thumbnails && materialPanel_.thumbnails->busy()))) || playSession_.state()==EditorPlaySessionState::Running || spriteLevelPlaying_ || (spriteRig2DOpen_ && spriteRig2DPreviewPlaying_) ||
            spriteAuthoringPanel_.open() || cameraDirector_.telemetry().blendWeight < 1.0F ||
            !heldShortcutGestures_.empty() || audioMixer_.synthesizer().meters().activeVoices > 0U ||
            thumbnailBacklog_;
@@ -3712,6 +3718,8 @@ void NativeEditorController::key_up(std::string_view key, bool control, bool, bo
 }
 
 void NativeEditorController::text_input(std::string_view text) {
+    if(prototypePanel_.open){prototype_panel_text(text);return;}
+    if(materialPanel_.open){material_panel_text(text);return;}
     if (longJob_) return;
     if (voxel_authoring_active()) return; // Numeric authoring input is handled once in key_down.
     if (polygonPreviewBefore_) return; // Numeric preview input is handled once in key_down.
@@ -4105,6 +4113,7 @@ void NativeEditorController::update_hover(int x, int y) {
 }
 
 bool NativeEditorController::navigation_pointer_active() const noexcept {
+    if(playCameraPossessed_&&focusRegion_==EditorFocusRegion::Viewport&&!playSession_.paused()&&playSession_.hud().prototype&&playSession_.hud().prototype->phase==PrototypePhase::Playing)return true;
     return focusRegion_ == EditorFocusRegion::Viewport && workspace_.mode() == EditorMode::Edit &&
         !settingsPanel_.open && !shortcutPanel_.open && !commandPaletteOpen_ &&
         !pending_destructive_confirmation() && !openMenu_ && !contextMenu_.open &&
@@ -4113,11 +4122,13 @@ bool NativeEditorController::navigation_pointer_active() const noexcept {
 }
 
 void NativeEditorController::pointer_relative(float deltaX, float deltaY) {
+    if(playCameraPossessed_&&playSession_.prototype_camera()){playSession_.prototype_look(deltaX*.003F,deltaY*.003F);return;}
     if (navigation_pointer_active() && std::isfinite(deltaX) && std::isfinite(deltaY))
         navigate_pointer(deltaX, deltaY);
 }
 
 void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
+    if(playCameraPossessed_&&playSession_.prototype_camera()){playSession_.prototype_look(deltaX*.003F,deltaY*.003F);return;}
     if (activePointerCommand_ == "viewport.look" || activePointerCommand_ == "viewport.orbit") {
         const SettingValue sensitivityValue = workspace_.settings().value("camera.mouse_sensitivity");
         const SettingValue orbitValue = workspace_.settings().value("camera.orbit_sensitivity");
@@ -4150,6 +4161,7 @@ void NativeEditorController::navigate_pointer(float deltaX, float deltaY) {
 }
 
 void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers) {
+    if(materialPanel_.open){hoverX_=x;hoverY_=y;return;}
     if(nurbs_pointer_move(x,y))return;
     if (numberScrub_.armed) {
         hoverX_ = x; hoverY_ = y;
@@ -4321,6 +4333,8 @@ void NativeEditorController::pointer_move(int x, int y, std::uint32_t modifiers)
 }
 
 void NativeEditorController::pointer_down(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if(prototypePanel_.open){if(button==PointerButton::Primary)(void)prototype_panel_pointer(x,y);return;}
+    if(materialPanel_.open){if(button==PointerButton::Primary)(void)material_panel_pointer(x,y);return;}
     if (!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
         !settingsPanel_.open && !commandPaletteOpen_ && nurbs_pointer_down(button,x,y,modifiers)) {refresh_menu_state();return;}
     if (!longJob_ && voxel_authoring_pointer_down(button,x,y,modifiers)) return;
@@ -5263,6 +5277,7 @@ void NativeEditorController::pointer_down(PointerButton button, int x, int y, st
 }
 
 void NativeEditorController::pointer_up(PointerButton button, int x, int y, std::uint32_t modifiers) {
+    if(materialPanel_.open)return;
     if(nurbs_pointer_up(button,x,y))return;
     if (numberScrub_.armed && button == PointerButton::Primary) {
         update_number_scrub(x, modifiers);
@@ -5528,6 +5543,11 @@ void NativeEditorController::pointer_up(PointerButton button, int x, int y, std:
 }
 
 void NativeEditorController::pointer_wheel(float steps, int x, int y, std::uint32_t modifiers) {
+    if(materialPanel_.open){auto& p=materialPanel_;const auto l=material_panel_layout();
+        auto& first=x>=l.loadSlot.x?p.controlFirst:p.first;
+        const auto total=x>=l.loadSlot.x?(p.layerMode?material_panel_layer_controls().size():material_panel_controls().size()):material_panel_entries().size();
+        if(steps>0){if(first>0)--first;}else if(first+1<total)++first;return;}
+
     if(!settingsPanel_.open && !longJob_ && mesh_authoring_wheel(steps,x,y))return;
     if (sliceDrag_) return;
     hoverX_ = x;
@@ -6824,6 +6844,7 @@ bool same_transform(const RigidTransform& a, const RigidTransform& b);  // numer
 }  // namespace
 
 bool NativeEditorController::dispatch_action(std::string_view actionId) {
+    if(actionId=="prototype.kit"){open_prototype_panel();return true;}
     if(actionId=="create.prefab_from_selection"||actionId=="edit.copy"||actionId=="edit.cut"||actionId=="edit.duplicate"){
         auto ids=collect_editor_object_subtree_ids(workspace_.document(),std::vector<EditorObjectId>(workspace_.selected_objects().begin(),workspace_.selected_objects().end()));std::string error;
         if(!nurbs_network_selection_complete(workspace_.document(),{ids.begin(),ids.end()},&error)){set_status(error,true);return false;}
@@ -7482,12 +7503,13 @@ bool NativeEditorController::dispatch_action(std::string_view actionId) {
     if (actionId == "material.open_globals") return dispatch_action("material.globals");
     // Commands that exist in the shortcut set but have no native-editor implementation yet: say
     // so (and what to use instead) instead of reporting success.
+    if(actionId=="material.library" || actionId=="material.preview"){open_material_panel();return materialPanel_.open;}
+    if(actionId=="material.create_instance"){open_material_panel();return materialPanel_.open;}
     if (actionId == "material.assign" || actionId == "material.apply") {
-        set_status("Not in this editor yet: use the Paint tool (5) or Voxel > Flood Fill to apply the active material", true, 6.0F);
-        return false;
+        if(!materialPanel_.open){open_material_panel();return materialPanel_.open;}
+        return apply_material_panel(false);
     }
-    if (actionId == "material.link" || actionId == "material.create_instance" || actionId == "material.create_master" ||
-        actionId == "material.preview" || actionId == "material.pin_preview") {
+    if (actionId == "material.link" || actionId == "material.create_master" || actionId == "material.pin_preview") {
         set_status("Not in this editor yet: material instances and previews; edit materials under Materials > Material Library", true, 6.0F);
         return false;
     }
@@ -8753,12 +8775,15 @@ camera_menu_dispatch_complete:
 
 void NativeEditorController::key_down(std::string_view key, bool control, bool shift, bool alt) {
     const std::string normalized = lowercase(key);
+    if(prototypePanel_.open){(void)prototype_panel_key(normalized);return;}
+    if(materialPanel_.open){(void)material_panel_key(normalized,control,shift,alt);return;}
     if(nurbsBoxActive_ && normalized=="escape"){nurbsBoxActive_=false;return;}
     if (!longJob_ && voxel_authoring_key(normalized,control,shift,alt)) { refresh_menu_state(); return; }
     if(!longJob_ && !pending_destructive_confirmation() && textEdit_.kind==TextEditKind::Inactive &&
        !settingsPanel_.open && !commandPaletteOpen_ && mesh_authoring_key(normalized,control,shift,alt)){refresh_menu_state();return;}
     if (polygonPreviewBefore_) { (void)handle_polygon_preview_key(normalized); return; }
     route_play_key(normalized, true);
+    if(playCameraPossessed_&&playSession_.prototype_camera()&&!control&&!alt){if(normalized=="escape"||normalized=="f8")(void)toggle_play_camera_possession();return;}
     if (pending_destructive_confirmation()) {
         if (normalized == "return" || normalized == "enter") confirm_pending_destructive_action();
         else if (normalized == "escape") cancel_pending_destructive_action();
@@ -11883,6 +11908,7 @@ std::uint64_t scene_change_fingerprint(const EditorDocument& document, const Edi
         mix((object.flags.visible ? 1U : 0U) | (object.flags.locked ? 2U : 0U) | (object.flags.anchored ? 4U : 0U) |
             (object.flags.structural ? 8U : 0U) | (object.flags.collisionEnabled ? 16U : 0U) | (object.flags.decorative ? 32U : 0U));
         mix(object.components.size());
+        if(object.materialBake)mix(material_bake_recipe_hash(*object.materialBake));
     }
     return h;
 }

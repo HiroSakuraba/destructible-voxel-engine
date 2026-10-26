@@ -1,5 +1,6 @@
 #include "dve/editor_nurbs.hpp"
 #include "dve/editor_nurbs_seam.hpp"
+#include "dve/editor_nurbs_surface.hpp"
 #include <algorithm>
 namespace dve::editor {
 bool has_nurbs_source(const EditorObject& o) noexcept {return find_component_by_type(o.components,kNurbsComponent)!=nullptr;}
@@ -50,7 +51,7 @@ std::optional<EditorObject> make_editor_nurbs(EditorObjectId id,const NurbsSourc
 bool replace_editor_nurbs_source(EditorObject& o,const NurbsSource& value,std::string* error){
     if(has_nurbs_seam(o)){if(error)*error="Use coordinated linked-seam edits or unlink first";return false;}
     if(!o.polygon||!has_nurbs_source(o)){if(error)*error="Missing native NURBS source";return false;}
-    auto mesh=tessellate_nurbs(value,o.id,error);if(!mesh)return false;
+    auto mesh=tessellate_editor_nurbs_display(o,value,error);if(!mesh)return false;
     // Keep object material and texture resources. The initial source has one
     // patch/material domain; tessellation output always references material 0.
     mesh->materials=o.polygon->materials;mesh->materialBindings=o.polygon->materialBindings;
@@ -114,7 +115,7 @@ std::unique_ptr<EditNurbsCommand> EditNurbsCommand::prepare(const EditorObject& 
     auto valid=validate_polygon_asset(*object.polygon);
     if(!valid){if(error)*error=valid.message;return {};}
     if(!validate_editor_nurbs(object,error,stop))return {};
-    auto mesh=tessellate_nurbs(after,object.id,error,stop);if(!mesh||stop.stop_requested())return {};
+    auto mesh=tessellate_editor_nurbs_display(object,after,error,stop);if(!mesh||stop.stop_requested())return {};
     auto command=std::make_unique<EditNurbsCommand>(object.id,*before,after);
     // History needs display geometry, not a second copy of embedded texture resources.
     CookedPolygonAsset beforeMesh;beforeMesh.objectId=object.polygon->objectId;

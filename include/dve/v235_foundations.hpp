@@ -456,10 +456,14 @@ public:
         SaveGameDocument& document, std::uint32_t* migrationsApplied = nullptr,
         std::string* error = nullptr) const;
     // Writes `<slot>.tmp`, rotates an existing slot to `<slot>.bak`, then renames the temp
-    // file into place. schemaVersion is always stamped with current_version().
+    // file into place. schemaVersion is stamped with current_version(), unless
+    // keepSchemaVersion: then the document's own version is written (for a writer that emits an
+    // older, still-readable layout when nothing needs the newer one); it must be 1 to
+    // current_version().
     [[nodiscard]] bool write_atomic(
         const std::filesystem::path& slot, SaveGameDocument document,
-        std::string* error = nullptr, std::uint64_t* writtenBytes = nullptr) const;
+        std::string* error = nullptr, std::uint64_t* writtenBytes = nullptr,
+        bool keepSchemaVersion = false) const;
     // Primary, else backup (see SaveGameReadOptions), then migrate.
     [[nodiscard]] std::optional<SaveGameDocument> read(
         const std::filesystem::path& slot, const SaveGameReadOptions& options,

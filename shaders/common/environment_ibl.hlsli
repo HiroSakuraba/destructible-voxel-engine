@@ -11,11 +11,11 @@ float3 RotateEnvironmentDirectionY(float3 direction, float rotationRadians) {
                  -sineValue * direction.x + cosineValue * direction.z);
 }
 
-float3 EvaluateImageBasedLighting(
+float3 EvaluateImageBasedLightingSeparateSamplers(
     TextureCube<float4> diffuseIrradiance,
     TextureCube<float4> specularPrefilter,
     Texture2D<float2> brdfLut,
-    SamplerState environmentSampler,
+    SamplerState diffuseSampler, SamplerState specularSampler, SamplerState brdfSampler,
     float3 normal,
     float3 viewDirection,
     float3 baseColor,
@@ -31,13 +31,13 @@ float3 EvaluateImageBasedLighting(
     float3 R = reflect(-V, N);
     float3 dielectricF0 = (0.08F * saturate(specular)).xxx;
     float3 F0 = lerp(dielectricF0, max(baseColor, 0.0F.xxx), saturate(metallic));
-    float3 irradiance = diffuseIrradiance.SampleLevel(environmentSampler,
+    float3 irradiance = diffuseIrradiance.SampleLevel(diffuseSampler,
         RotateEnvironmentDirectionY(N, environmentRotationRadians), 0.0F).rgb;
     float3 diffuse = irradiance * max(baseColor, 0.0F.xxx) * (1.0F - saturate(metallic)) / kPi;
-    float3 prefiltered = specularPrefilter.SampleLevel(environmentSampler,
+    float3 prefiltered = specularPrefilter.SampleLevel(specularSampler,
         RotateEnvironmentDirectionY(R, environmentRotationRadians),
         saturate(roughness) * maximumSpecularLod).rgb;
-    float2 brdf = brdfLut.SampleLevel(environmentSampler,
+    float2 brdf = brdfLut.SampleLevel(brdfSampler,
         float2(NdotV, saturate(roughness)), 0.0F);
     // Directional albedo of the specular lobe (with FresnelSchlick's grazing fade below F0 0.02).
     float3 specularAlbedo = F0 * brdf.x + brdf.y * saturate(50.0F * F0.g);
@@ -52,4 +52,12 @@ float3 EvaluateImageBasedLighting(
     return diffuse * ao + specularLighting * specularOcclusion;
 }
 
+float3 EvaluateImageBasedLighting(TextureCube<float4> diffuseIrradiance,TextureCube<float4> specularPrefilter,
+    Texture2D<float2> brdfLut,SamplerState environmentSampler,float3 normal,float3 viewDirection,
+    float3 baseColor,float metallic,float roughness,float specular,float ambientOcclusion,
+    float maximumSpecularLod,float environmentRotationRadians){
+    return EvaluateImageBasedLightingSeparateSamplers(diffuseIrradiance,specularPrefilter,brdfLut,
+        environmentSampler,environmentSampler,environmentSampler,normal,viewDirection,baseColor,
+        metallic,roughness,specular,ambientOcclusion,maximumSpecularLod,environmentRotationRadians);
+}
 #endif

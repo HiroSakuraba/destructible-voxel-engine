@@ -1,4 +1,5 @@
 #include "dve/material_layers.hpp"
+#include "dve/render/layered_surface.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -245,3 +246,38 @@ MaterialSurfaceSample composite_material_surface_layers(
 }
 
 } // namespace dve
+
+// Authoring validation has no RHI dependency; non-rendering editors use it too.
+namespace dve::render {
+bool validate_layered_surface(const CookedPolygonAsset& a,std::uint32_t index,std::string* e){
+    auto fail=[](std::string* error,const char* message){if(error)*error=message;return false;};
+    if(index>=a.materials.size()||a.materials.size()!=a.materialBindings.size())return fail(e,"Invalid layered material slot");
+    const auto& m=a.materials[index];const auto& b=a.materialBindings[index];
+    if(m.layers.size()>kMaximumVoxelMaterialLayers||b.layers.size()>m.layers.size())return fail(e,"Layer stack must contain at most four matching overlays");
+    if(m.layers.empty())return true;
+    if(m.shadingModel!=MaterialShadingModel::StandardPBR&&m.shadingModel!=MaterialShadingModel::ClearCoat)
+        return fail(e,"Layered Surface requires a standard PBR or existing clear-coat base");
+    if(m.blendMode==MaterialBlendMode::Translucent||m.transmission>0)return fail(e,"Layered Surface supports opaque and masked materials");
+    if(m.normalMap||b.detailBaseColor.texture||b.detailNormal.texture||b.detailRoughness.texture)return fail(e,"Layered Surface requires standard maps or surface recipes instead of legacy/detail maps");
+    if(b.mapping.heightMode!=HeightMappingMode::Off)return fail(e,"Layered Surface does not yet support parallax mapping");
+    for(std::size_t i=0;i<m.layers.size();++i){
+        const auto& l=m.layers[i];
+        if(!std::isfinite(l.weight)||l.weight<0||l.weight>1||unsigned(l.blendMode)>unsigned(MaterialLayerBlendMode::Additive))return fail(e,"Invalid layer weight or blend mode");
+        if(l.sourceMaterial==0||l.sourceMaterial>=a.materials.size()||l.sourceMaterial==index)return fail(e,"Layer source must be a nonzero existing, different material slot");
+        const auto& source=a.materials[l.sourceMaterial];const auto& sb=a.materialBindings[l.sourceMaterial];
+        if(!source.layers.empty())return fail(e,"Nested layer stacks are unsupported; choose a leaf material");
+        if(source.transmission>0||source.clearCoat>0||source.blendMode==MaterialBlendMode::Translucent||source.shadingModel!=MaterialShadingModel::StandardPBR)
+            return fail(e,"Overlay sources must use standard opaque or masked PBR surfaces");
+        if(!material_surface_detail_valid(source.surfaceDetail))return fail(e,"Invalid overlay surface recipe");
+        if(source.normalMap||sb.mapping.heightMode!=HeightMappingMode::Off||sb.detailBaseColor.texture||sb.detailNormal.texture||sb.detailRoughness.texture)
+            return fail(e,"Overlay detail textures, legacy normal maps and parallax are unsupported; use surface recipes or standard maps");
+        if(i<b.layers.size()){
+            const auto& lb=b.layers[i];MaterialLayerSample sample;
+            sample.semantic=lb.semantic;sample.opacityPolicy=lb.opacityPolicy;sample.heightBlendStrength=lb.heightBlendStrength;
+            sample.heightBlendBias=lb.heightBlendBias;sample.heightBlendTransition=lb.heightBlendTransition;
+            if(!validate_material_layer_sample(sample,e)||!std::isfinite(lb.maskScale)||!std::isfinite(lb.maskBias))return fail(e,"Invalid layer mask or height controls");
+        }
+    }
+    return true;
+}
+}

@@ -14,6 +14,7 @@
 #include "dve/render/environment_lighting_gpu.hpp"
 #include "dve/render/mesh_rhi_mirror.hpp"
 #include "dve/render/main_material_table.hpp"
+#include "dve/render/live_optical_scene.hpp"
 #include "dve/render/material_resource_residency.hpp"
 #include "dve/render/shadow_material_table.hpp"
 #include "dve/rhi/device.hpp"
@@ -28,10 +29,14 @@ struct LiveEnvironmentShaderBytecode {
     std::vector<std::byte> shadowVertex;
     // Optional for opaque depth-only casters, required by the alpha-masked caster pipeline.
     std::vector<std::byte> shadowFragment;
+    // Optional clear-solid scene transport, required for draws with transmission > 0.
+    std::vector<std::byte> clearGlassFragment;
     [[nodiscard]] bool valid() const noexcept;
 };
 
 struct alignas(16) GpuLiveObjectConstants {
+    // Live shading coordinates are metres. Surface recipes require a rigid pose; bake
+    // authored scale into vertex positions so physical detail remains consistent.
     std::array<float, 16> objectToWorld{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     std::uint32_t objectIdLow{};
     std::uint32_t objectIdHigh{};
@@ -59,6 +64,8 @@ inline constexpr std::uint32_t kLiveObjectFlagAlphaTexturePresent = 1U << 1U;
 inline constexpr std::uint32_t kLiveObjectFlagDoubleSided = 1U << 2U;
 inline constexpr std::uint32_t kLiveObjectFlagBaseColorTexturePresent = 1U << 3U;
 inline constexpr std::uint32_t kLiveObjectFlagOpacityTexturePresent = 1U << 4U;
+// Legacy base-mask UV1 hint. The live caster now selects each map through its mapping buffer.
+inline constexpr std::uint32_t kLiveObjectFlagMaskUsesUv1 = 1U << 5U;
 
 struct LiveEnvironmentRendererResources {
     struct RetiredGroups {
@@ -74,6 +81,8 @@ struct LiveEnvironmentRendererResources {
     rhi::BindGroupHandle frameGroup;
     rhi::GraphicsPipelineHandle skyboxPipeline;
     rhi::GraphicsPipelineHandle materialPipeline;
+    rhi::GraphicsPipelineHandle clearGlassPipeline;
+    std::unique_ptr<LiveOpticalSceneGpu> opticalScene;
     rhi::GraphicsPipelineHandle shadowOpaquePipeline;
     rhi::GraphicsPipelineHandle shadowMaskedPipeline;
     rhi::BufferHandle skyboxVertices;
@@ -98,6 +107,8 @@ struct LivePolygonDraw {
     const MeshRhiMirror* mirror{};
     const CookedPolygonAsset* asset{};
     std::uint32_t instanceCount{1U};
+    // Live shading coordinates are metres. Surface recipes require a rigid pose; bake
+    // authored scale into vertex positions so physical detail remains consistent.
     std::array<float, 16> objectToWorld{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
     bool castsShadow{true};
     bool staticShadowCaster{false};
@@ -113,6 +124,8 @@ struct LiveEnvironmentFrameDesc {
     rhi::TextureHandle depthTarget;
     std::uint32_t width{};
     std::uint32_t height{};
+    // View-projection at byte 0; environment rotation/intensity/exposure/max-mip at 64.
+    // The renderer writes cameraWorldPosition as a float4 at byte 80 (96-byte capacity).
     std::span<const std::byte> frameConstants;
     std::span<const LivePolygonDraw> polygonDraws;
     // Required when any submesh selects DASHR. The current scene integration
@@ -134,6 +147,9 @@ struct LiveEnvironmentFrameDesc {
 struct LiveEnvironmentFrameStats {
     std::uint64_t skyboxDraws{};
     std::uint64_t materialDraws{};
+    std::uint64_t clearGlassDraws{};
+    std::uint64_t opticalSceneBuilds{};
+    std::uint64_t opticalSceneTriangles{};
     std::uint64_t dashrDraws{};
     std::uint64_t dashrTriangles{};
     std::uint64_t shadowDraws{};

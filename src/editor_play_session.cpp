@@ -227,6 +227,7 @@ public:
             }
         }
 #endif
+        if(mode==EditorMode::Play){prototype_=std::make_unique<PrototypeGame>(*world_);if(!prototype_->start(error)){stop();return false;}}
         telemetry.editorObjectCount = editorToRuntime_.size();
         telemetry.runtimeObjectCount = world_->object_count();
         telemetry.runtimeOnlyObjectCount = telemetry.runtimeObjectCount > telemetry.editorObjectCount
@@ -257,9 +258,12 @@ public:
             return false;
         }
         try {
-            for (const auto& [name, pressed] : input.actions) world_->set_action_pressed(name, pressed);
-            for (const auto& [name, value] : input.axes) world_->set_axis(name, value);
-            world_->tick(fixedDeltaSeconds);
+            for(const auto& name:lastInputActions_)if(!input.actions.contains(name))world_->set_action_pressed(name,false);
+            for(const auto& name:lastInputAxes_)if(!input.axes.contains(name))world_->set_axis(name,0);
+            lastInputActions_.clear();lastInputAxes_.clear();
+            for (const auto& [name, pressed] : input.actions){world_->set_action_pressed(name, pressed);lastInputActions_.insert(name);}
+            for (const auto& [name, value] : input.axes){world_->set_axis(name, value);lastInputAxes_.insert(name);}
+            if(prototype_&&prototype_->active())prototype_->step(fixedDeltaSeconds);else world_->tick(fixedDeltaSeconds);
 
             std::vector<EditorObjectId> removed;
             for (const auto& [editorId, runtimeId] : editorToRuntime_) {
@@ -282,6 +286,7 @@ public:
 #else
             (void)hud;
 #endif
+            hud.prototype=prototype_&&prototype_->active()?std::optional<PrototypeHud>{prototype_->hud()}:std::nullopt;
             telemetry.editorObjectCount = editorToRuntime_.size();
             telemetry.runtimeObjectCount = world_->object_count();
             telemetry.runtimeOnlyObjectCount = telemetry.runtimeObjectCount > telemetry.editorObjectCount
@@ -300,6 +305,7 @@ public:
 #ifdef DVE_HAVE_LUA
         scripts_.reset();
 #endif
+        prototype_.reset();
         cameraCollision_.reset();
         world_.reset();
         editorToRuntime_.clear();
@@ -308,16 +314,20 @@ public:
 private:
     LogSink logSink_;
     std::unique_ptr<GameWorld> world_;
+    std::unique_ptr<PrototypeGame> prototype_;
+    std::set<std::string> lastInputActions_,lastInputAxes_;
     std::unique_ptr<camera::GameWorldCameraCollisionWorld> cameraCollision_;
 public:
     [[nodiscard]] const camera::ICameraCollisionWorld* camera_collision_world() const noexcept {
         return cameraCollision_.get();
     }
+    void prototype_look(float x,float y){if(prototype_)prototype_->look(x,y);}
+    std::optional<PrototypeCamera> prototype_camera()const{if(prototype_&&prototype_->active())return prototype_->camera();return {};}
     [[nodiscard]] bool action_pressed(std::string_view action) const {
         return world_ && world_->is_action_pressed(std::string(action));
     }
     [[nodiscard]] bool set_gravity(Float3 gravity) noexcept {
-        return world_ && configure_physics3d_gravity(world_->physics(), gravity);
+        return world_ && configure_physics3d_gravity(world_->physics(), prototype_&&prototype_->active()?Float3{0,0,-9.81F}:gravity);
     }
 private:
     std::map<EditorObjectId, GameObjectId> editorToRuntime_;
@@ -325,6 +335,9 @@ private:
     std::unique_ptr<GameScriptHost> scripts_;
 #endif
 };
+
+void EditorPlaySession::prototype_look(float yaw,float pitch){if(runtime_)runtime_->prototype_look(yaw,pitch);}
+std::optional<PrototypeCamera> EditorPlaySession::prototype_camera()const{return runtime_?runtime_->prototype_camera():std::nullopt;}
 
 bool EditorPlaySession::runtime_action_pressed(std::string_view action) const {
     return runtime_ && runtime_->action_pressed(action);

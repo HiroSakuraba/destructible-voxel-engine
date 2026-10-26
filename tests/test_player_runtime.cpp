@@ -231,6 +231,50 @@ void test_fixed_step_clock() {
     CHECK(clock.advance(-1.0) == 0U);
 }
 
+void test_scene_light_components_and_quality() {
+  std::string error;
+  PlayerBootOptions options;
+  options.enableScripts = false;
+  auto app = PlayerApp::boot(LooseContentSource::open(kSample, &error), options,
+                             &error);
+  CHECK(app != nullptr);
+  if (!app)
+    return;
+  GameObjectDesc desc;
+  desc.name = "light holder";
+  desc.transform.position = {1, 2, 3};
+  const auto id = app->world().create_object(std::move(desc), &error);
+  CHECK(id != kInvalidGameObjectId);
+  Component c;
+  c.id = 1;
+  c.type = kSceneLightComponent;
+  c.properties = {{"kind", std::string("candle")},
+                  {"position", Float3{.5F, 0, 0}},
+                  {"intensity", 2.0}};
+  CHECK(app->world().add_component(id, c, &error) != nullptr);
+  CHECK(app->environment().lights.size() == 1);
+  if (app->environment().lights.empty())
+    return;
+  CHECK(app->environment().lights[0].positionMeters.x == 1.5F);
+  CHECK(app->world().set_position(id, {4, 2, 3}));
+  CHECK(app->environment().lights[0].positionMeters.x == 4.5F);
+  app->tick(.05F);
+  CHECK(app->environment().lightingTimeSeconds > 0);
+  RenderEnvironment env;
+  env.pathTraceBounces = 16;
+  env.pathTraceSamples = 64;
+  env.localLightSamples = 32;
+  const auto fast = apply_cpu_render_quality(env, CpuRenderQuality::Fast),
+             balanced =
+                 apply_cpu_render_quality(env, CpuRenderQuality::Balanced),
+             reference =
+                 apply_cpu_render_quality(env, CpuRenderQuality::Reference);
+  CHECK(fast.pathTraceBounces == 0 && fast.localLightSamples == 2);
+  CHECK(balanced.pathTraceBounces == 2 && balanced.pathTraceSamples == 2 &&
+        balanced.localLightSamples == 2);
+  CHECK(reference.pathTraceBounces == 16 && reference.pathTraceSamples == 64);
+}
+
 struct Run {
     std::string hash;
     std::size_t objects{};
@@ -397,6 +441,20 @@ void test_scripts_disabled_and_polygon_seam() {
 
 // Polygon objects must reach the framebuffer. The renderer rescales them to voxel units and
 // used to keep the source content hash, so validation culled every polygon instance.
+void test_cpu_renderer_fog() {
+    auto renderer=make_cpu_player_renderer(nullptr);
+    std::string error;CHECK(renderer->resize(33,25,&error));
+    PlayerRenderView view;view.camera.position={0,0,0};view.camera.target={0,0,4};view.camera.farPlane=12;
+    CHECK(renderer->render(view,&error));const auto clearHash=hash_image(*renderer->readback());
+    GaborVolumeAsset asset;GaborVolumePrimitive primitive;primitive.scale={0.4F,0.5F,0.6F};primitive.opacity=3;
+    asset.primitives.push_back(primitive);asset.material.albedoTint={0.7F,0.3F,0.1F};asset.recompute_bounds_and_hash();
+    render::CpuFogVolume volume{&asset,{{0,0,4},{}}};view.fogVolumes=std::span(&volume,1);
+    view.fogSettings.scattering=true;view.fogSettings.threadCount=2;
+    CHECK(renderer->render(view,&error));CHECK(hash_image(*renderer->readback())!=clearHash);
+    CHECK(renderer->last_stats().fog.steps>0);CHECK(renderer->last_stats().fog.primitiveEvaluations>0);
+    view.fogSettings.enabled=false;CHECK(renderer->render(view,&error));CHECK(hash_image(*renderer->readback())==clearHash);
+}
+
 void test_cpu_renderer_draws_polygons() {
     std::string error;
     PlayerBootOptions options;
@@ -678,9 +736,11 @@ int main(int argc, char** argv) {
     test_frame_image();
     test_input_bindings();
     test_fixed_step_clock();
+    test_scene_light_components_and_quality();
     test_sample_boot_loose_and_pak();
     test_scripts_disabled_and_polygon_seam();
     test_cpu_renderer_draws_polygons();
+    test_cpu_renderer_fog();
     test_save_directories();
     test_save_load();
     if (failures == 0) std::cout << "dve_player_runtime_tests: PASS\n";

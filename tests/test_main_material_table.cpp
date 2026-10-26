@@ -18,6 +18,8 @@ dve::CookedPolygonAsset make_asset() {
     first.baseColor = {0.2F, 0.4F, 0.8F, 0.75F};
     first.metallic = 0.8F;
     first.roughness = 0.22F;
+    first.surfaceDetail.pattern=dve::SurfacePattern::Wood;
+    first.surfaceDetail.seed=17;first.surfaceDetail.rotationRadians={.2F,.3F,.4F};
     first.emissive = {0.01F, 0.02F, 0.03F};
     dve::VoxelMaterialDefinition second;
     second.name = "rough stone";
@@ -101,6 +103,12 @@ int main() {
                                  std::as_writable_bytes(std::span(&materialRead, 1U)), &error));
         CHECK(device.read_buffer(first->mappingRecordBuffer, first->mappingRecordOffset,
                                  std::as_writable_bytes(std::span(&mappingRead, 1U)), &error));
+        dve::GpuMaterialSurfaceDetail detailRead{};
+        CHECK(first->surfaceRecordBuffer==second->surfaceRecordBuffer);
+        CHECK(second->surfaceRecordOffset%device.capabilities().minStorageBufferOffsetAlignment==0U);
+        CHECK(device.read_buffer(first->surfaceRecordBuffer,first->surfaceRecordOffset,std::as_writable_bytes(std::span(&detailRead,1U)),&error));
+        const auto expectedDetail=dve::pack_gpu_material_surface_detail(asset.materials[0].surfaceDetail);
+        CHECK(std::memcmp(&detailRead,&expectedDetail,sizeof(detailRead))==0);
         const auto expectedMaterial = dve::pack_gpu_material_record(asset.materials[0]);
         const auto expectedMapping = dve::pack_gpu_polygon_material_mapping(asset.materialBindings[0]);
         CHECK(std::memcmp(&materialRead, &expectedMaterial, sizeof(materialRead)) == 0);
@@ -108,7 +116,7 @@ int main() {
 
         const auto stats = table.stats();
         CHECK(stats.assetsPublished == 1U);
-        CHECK(stats.assetRecordBuffersCreated == 2U);
+        CHECK(stats.assetRecordBuffersCreated == 3U);
         CHECK(stats.materialRecordsUploaded == 2U);
         CHECK(stats.mappingRecordsUploaded == 2U);
         CHECK(stats.materialDescriptorCount == 2U);
@@ -119,6 +127,14 @@ int main() {
         CHECK(stats.imageCacheHits >= 1U);
         CHECK(stats.samplerCacheHits >= 3U);
 
+        auto edited=asset;edited.materials[0].surfaceDetail.seed++;
+        edited.contentHash=dve::polygon_asset_content_hash(edited);
+        CHECK(table.ensure_material(edited,0U,&error));
+        const auto* fresh=table.find(edited.contentHash,0U);
+        CHECK(fresh&&fresh->surfaceRecordBuffer!=first->surfaceRecordBuffer);
+        CHECK(device.read_buffer(fresh->surfaceRecordBuffer,fresh->surfaceRecordOffset,std::as_writable_bytes(std::span(&detailRead,1U)),&error));
+        CHECK(detailRead.seed==18U);
+        CHECK(table.invalidate_asset(edited.contentHash,&error));
         CHECK(table.invalidate_asset(asset.contentHash, &error));
         CHECK(table.stats().assetResourceCount == 0U);
         CHECK(table.stats().materialDescriptorCount == 0U);

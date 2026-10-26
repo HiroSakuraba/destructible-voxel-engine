@@ -5,6 +5,8 @@
 //   - depth (metres) and normals at known pixels; empty pixels hold +inf / 0;
 //   - fog: the fogged image = image x T + fogColor x (1 - T) with T from the exact distance,
 //     the passes still sum to it, the sky is untouched;
+//   - fog height falloff: density thins exponentially above a base height (closed form,
+//     checked against numeric integration on a descending ray), uniform at/below the base;
 //   - the PFM files read back.
 #include "dve/render/polygon_renderer.hpp"
 #include "dve/render/voxel_reference_renderer.hpp"
@@ -16,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -258,6 +261,99 @@ void test_fog() {
     check(!bad.validate(), "negative fog density is rejected");
 }
 
+void test_fog_height() {
+    // Hand-built targets and cameras with known geometry: the closed form is checked
+    // against the analytic value on a level ray and against numeric integration on a
+    // descending ray that crosses the base height.
+    const float metersPerUnit = 0.1F;
+    const auto makeTarget = [](float depthValue) {
+        PolygonRenderTarget target;
+        target.resize(3, 3);
+        for (std::size_t i = 0; i < target.hdrColor.size(); ++i) {
+            target.hdrColor[i] = {1.0F, 1.0F, 1.0F, 1.0F};
+            target.depth[i] = depthValue;
+        }
+        return target;
+    };
+    PolygonCamera camera;
+    camera.position = {0.0F, 100.0F, 0.0F};   // 10 m up at 0.1 m per unit
+    camera.target = {10.0F, 100.0F, 0.0F};     // level: the centre ray keeps its height
+    camera.up = {0.0F, 1.0F, 0.0F};
+    camera.verticalFieldOfViewRadians = 0.5F;
+    camera.nearPlane = 1.0F;
+    camera.farPlane = 101.0F;                 // depth 0.49 -> cameraZ 50 units -> a 5 m centre ray
+    RenderEnvironment env;
+    env.fogDensityPerMeter = 0.4F;
+    env.fogStartMeters = 1.5F;
+    env.fogColor = {0.6F, 0.65F, 0.7F};
+    const std::size_t centre = 4;
+    const auto expect = [&](const PolygonRenderTarget& target, double t, const char* what) {
+        const double want = t + 0.6 * (1.0 - t);
+        check(std::abs(target.hdrColor[centre].x - want) < 2e-4, what);
+    };
+    {   // Falloff off: the uniform formula, unchanged.
+        auto target = makeTarget(0.49F);
+        (void)apply_distance_fog(target, camera, env, metersPerUnit);
+        expect(target, std::exp(-0.4 * 3.5), "height fog: falloff off keeps the uniform formula");
+    }
+    {   // Level ray at 10 m with base 2 m and falloff 0.3: density scales by exp(-0.3 x 8).
+        RenderEnvironment high = env;
+        high.fogHeightFalloffPerMeter = 0.3F;
+        high.fogBaseHeightMeters = 2.0F;
+        auto target = makeTarget(0.49F);
+        (void)apply_distance_fog(target, camera, high, metersPerUnit);
+        expect(target, std::exp(-0.4 * std::exp(-2.4) * 3.5), "height fog: a level ray above the base thins by exp(-falloff x height)");
+    }
+    {   // The same ray entirely below the base height: identical to uniform fog.
+        RenderEnvironment low = env;
+        low.fogHeightFalloffPerMeter = 0.3F;
+        low.fogBaseHeightMeters = 20.0F;
+        auto target = makeTarget(0.49F);
+        (void)apply_distance_fog(target, camera, low, metersPerUnit);
+        expect(target, std::exp(-0.4 * 3.5), "height fog: at/below the base the fog is uniform");
+    }
+    {   // Descending ray from 10 m crossing the 2 m base: numeric Simpson cross-check.
+        PolygonCamera down = camera;
+        down.target = {10.0F, 0.0F, 0.0F};
+        RenderEnvironment env2 = env;
+        env2.fogHeightFalloffPerMeter = 0.3F;
+        env2.fogBaseHeightMeters = 2.0F;
+        auto target = makeTarget(0.49F);
+        (void)apply_distance_fog(target, down, env2, metersPerUnit);
+        const double slope = -100.0 / std::sqrt(10100.0);   // unit forward Y of the centre ray
+        const auto densityAt = [&](double m) {
+            return 0.4 * std::exp(-0.3 * std::max(0.0, 10.0 + slope * m - 2.0));
+        };
+        const int n = 20000;
+        double sum = 0.0;
+        for (int i = 0; i <= n; ++i) {
+            const double m = 1.5 + 3.5 * static_cast<double>(i) / n;
+            sum += (i == 0 || i == n ? 1.0 : (i % 2 ? 4.0 : 2.0)) * densityAt(m);
+        }
+        expect(target, std::exp(-sum * 3.5 / n / 3.0), "height fog: a descending ray matches numeric integration");
+    }
+    {   // Scene level: with falloff on, the passes (fog included) still sum to the image.
+        Scene scene;
+        RenderEnvironment foggy = lit();
+        foggy.fogDensityPerMeter = 0.4F;
+        foggy.fogStartMeters = 1.5F;
+        foggy.fogColor = {0.6F, 0.65F, 0.7F};
+        foggy.fogHeightFalloffPerMeter = 0.5F;
+        foggy.fogBaseHeightMeters = 0.5F;
+        const PolygonRenderTarget b = render(scene, foggy);
+        double worstSum = 0.0;
+        for (std::size_t i = 0; i < b.hdrColor.size(); ++i)
+            if (b.depth[i] < 1.0F) worstSum = std::max(worstSum, relative(b.passes.light_sum(i), b.hdrColor[i]));
+        check(worstSum < 1e-5, "height fog: the passes, fog included, still sum to the image");
+    }
+    RenderEnvironment bad = env;
+    bad.fogHeightFalloffPerMeter = -0.1F;
+    check(!bad.validate(), "negative fog height falloff is rejected");
+    bad = env;
+    bad.fogBaseHeightMeters = std::numeric_limits<float>::infinity();
+    check(!bad.validate(), "infinite fog base height is rejected");
+}
+
 std::vector<float> read_pfm(const std::filesystem::path& path, std::string& header) {
     std::ifstream in(path, std::ios::binary);
     std::string magic, size, scale;
@@ -304,6 +400,7 @@ int main() {
     test_sum_and_shadow();
     test_depth_and_normal();
     test_fog();
+    test_fog_height();
     test_pfm();
     if (g_failures == 0) std::printf("dve_render_passes_tests: PASS\n");
     return g_failures == 0 ? 0 : 1;

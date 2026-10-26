@@ -1,7 +1,13 @@
 #include "dve/render/rdv_bbv.hpp"
 #include "dve/rhi/null_device.hpp"
+#ifdef DVE_RDV_HAS_VULKAN
+#include "dve/rhi/vulkan_device.hpp"
+#endif
 
 #include <array>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -141,6 +147,66 @@ void test_validation() {
     check(mirror.readback_matches(map, &error), error.c_str());
     check(!map.trace({-40, -40, -40}, {1, 1, 1}, 100).has_value(),
           "empty clipmap yielded a hit");
+
+    std::array<GpuTraceRay, 2> rays{};
+    rays[0].origin = {-11, -11, -23};
+    rays[0].direction = {1, 0, 0};
+    rays[0].maxDistance = 40;
+    rays[1].origin = {-12, -12, -24};
+    rays[1].direction = {0, 1, 0};
+    rays[1].maxDistance = 40;
+    const std::byte dummy[]{std::byte{0x42}};
+    std::vector<BbvGpuHit> hits;
+    check(execute_bbv_gpu_trace(device, mirror, map, rays, dummy, hits, &error),
+          error.c_str());
+    check(hits.size() == rays.size() && device.statistics().dispatchesExecuted == 1U,
+          "Null-RHI did not execute the RDV dispatch contract");
+    check(mirror.readback_matches(map, &error), error.c_str());
+
+#ifdef DVE_RDV_HAS_VULKAN
+    // Opt-in real GPU parity: compile shader with -fvk-b-shift 0 0,
+    // -fvk-t-shift 16 0, -fvk-u-shift 32 0 and set DVE_RDV_TRACE_SPV.
+    if (const char* path = std::getenv("DVE_RDV_TRACE_SPV")) {
+        std::ifstream stream(path, std::ios::binary);
+        check(bool(stream), "RDV GPU shader file cannot be opened");
+        const std::string binary((std::istreambuf_iterator<char>(stream)), {});
+        check(!binary.empty() && binary.size() % 4U == 0U,
+              "RDV GPU SPIR-V file is malformed");
+        std::vector<std::byte> shader;
+        shader.reserve(binary.size());
+        for (unsigned char c : binary) shader.push_back(static_cast<std::byte>(c));
+
+        VoxelObject geometry(444);
+        geometry.fill_brick({0, 0, 0}, 7);
+        PackedBrickmapScene packed;
+        packed.rebuild(geometry);
+        BbvClipmap gpuClipmap({2, 2, 2});
+        (void)gpuClipmap.recenter({0, 0, 0}, packed);
+        rhi::VulkanDevice gpu;
+        check(gpu.status() == rhi::DeviceStatus::Ready,
+              "DVE_RDV_TRACE_SPV was set but Vulkan device is unavailable");
+        BbvRhiMirror gpuMirror(gpu);
+        std::array<GpuTraceRay, 2> gpuRays{};
+        gpuRays[0].origin = {-2.25F, 1.25F, 1.25F};
+        gpuRays[0].direction = {1.0F, 0.0F, 0.0F};
+        gpuRays[0].maxDistance = 30.0F;
+        gpuRays[1].origin = {2.25F, 1.25F, 1.25F};
+        gpuRays[1].direction = {-1.0F, 0.0F, 0.0F};
+        gpuRays[1].maxDistance = 30.0F;
+        check(execute_bbv_gpu_trace(gpu, gpuMirror, gpuClipmap, gpuRays, shader, hits, &error),
+              error.c_str());
+        for (std::size_t i = 0; i < gpuRays.size(); ++i) {
+            const auto reference = gpuClipmap.trace(
+                gpuRays[i].origin, gpuRays[i].direction, gpuRays[i].maxDistance);
+            check(reference.has_value() && hits[i].hit == 1U,
+                  "GPU BBV hit did not match CPU reference");
+            check(reference->voxel == hits[i].voxel &&
+                  reference->normal == hits[i].normal &&
+                  std::abs(reference->distance - hits[i].distance) < 4.0e-4F,
+                  "native GPU BBV hit payload mismatch");
+        }
+    }
+#endif
 }
 } // namespace
 

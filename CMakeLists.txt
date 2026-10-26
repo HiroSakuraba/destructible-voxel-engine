@@ -160,6 +160,7 @@ add_library(dve_core
     src/water_vessel_dynamics.cpp
     src/water_game.cpp
     src/flying_game.cpp
+    src/mecha_game.cpp
     src/flight_wind.cpp
     src/flight_aerodynamics.cpp
     src/prototype_game.cpp
@@ -963,6 +964,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_material_presets.cpp
         src/editor_racing.cpp
         src/editor_flying.cpp
+        src/editor_mecha.cpp
         src/editor_water.cpp
         src/editor_submarine.cpp
         src/editor_prototype.cpp
@@ -998,6 +1000,8 @@ if(DVE_BUILD_EDITOR)
     target_link_libraries(dve_create_submarine PRIVATE dve::editor)
     add_executable(dve_create_water apps/dve_create_water.cpp)
     target_link_libraries(dve_create_water PRIVATE dve::editor)
+    add_executable(dve_create_mecha apps/dve_create_mecha.cpp)
+    target_link_libraries(dve_create_mecha PRIVATE dve::editor)
     add_executable(dve_create_flying apps/dve_create_flying.cpp)
     target_link_libraries(dve_create_flying PRIVATE dve::editor)
     add_executable(dve_create_prototype apps/dve_create_prototype.cpp)
@@ -2840,6 +2844,9 @@ if(DVE_BUILD_TESTS)
             add_executable(dve_flight_physics_tests tests/test_flight_physics.cpp)
             target_link_libraries(dve_flight_physics_tests PRIVATE dve::core)
             add_test(NAME dve_flight_physics_tests COMMAND dve_flight_physics_tests)
+            add_executable(dve_mecha_game_tests tests/test_mecha_game.cpp)
+            target_link_libraries(dve_mecha_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_mecha_game_tests COMMAND dve_mecha_game_tests)
             add_executable(dve_flying_game_tests tests/test_flying_game.cpp)
             target_link_libraries(dve_flying_game_tests PRIVATE dve::editor dve::player_runtime)
             add_test(NAME dve_flying_game_tests COMMAND dve_flying_game_tests)

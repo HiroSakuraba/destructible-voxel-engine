@@ -229,7 +229,15 @@ void test_material_optics() {
     CHECK(plain.has_value());
     if (plain) {
         const auto document = decode_save_game_document(*plain, {}, &error);
-        CHECK(document && !document->sections.contains("dve.material_optics"));
+        // No optics anywhere: written as version 4, so builds from before optics can open it.
+        CHECK(document && !document->sections.contains("dve.material_optics") &&
+              document->schemaVersion == kGameSaveSchemaVersionWithoutOptics);
+        const std::filesystem::path slot = assets.dir / "plain.dsave";
+        CHECK(codec.write_file(slot, saved, nullptr, &error));
+        const auto stored = decode_save_game_document(read_bytes(slot), {}, &error);
+        CHECK(stored && stored->schemaVersion == kGameSaveSchemaVersionWithoutOptics);
+        SaveGameReadReport report;
+        CHECK(codec.read_file(slot, {}, &report, &error).has_value() && report.storedSchemaVersion == 4U);
     }
     GameWorldObjectState* glassObject = nullptr;
     for (auto& object : saved.world.objects)
@@ -245,7 +253,7 @@ void test_material_optics() {
     CHECK(bytes.has_value());
     if (!bytes) { std::cerr << "optics encode: " << error << '\n'; return; }
     const auto document = decode_save_game_document(*bytes, {}, &error);
-    CHECK(document && document->sections.contains("dve.material_optics"));
+    CHECK(document && document->sections.contains("dve.material_optics") && document->schemaVersion == kGameSaveSchemaVersion);
     const auto decoded = codec.decode(*bytes, nullptr, &error);
     CHECK(decoded.has_value());
     if (!decoded) { std::cerr << "optics decode: " << error << '\n'; return; }
@@ -255,6 +263,91 @@ void test_material_optics() {
             const auto& m = object.materials.back();
             found = m.transmission == 0.9F && m.indexOfRefraction == 1.33F && m.attenuationColor.y == 0.8F &&
                     m.attenuationDistanceMeters == 3.0F;
+        }
+    CHECK(found);
+    const auto again = codec.encode(*decoded, nullptr, &error);
+    CHECK(again && *again == *bytes);
+}
+
+// Sheen (KHR_materials_sheen) of inline materials travels in the optional dve.material_sheen
+// section; saves without sheen do not get the section, and the schema version does not move.
+void test_material_sheen() {
+    const Assets assets = make_assets();
+    GameSaveCodec codec(file_reader());
+    int fires = 0;
+    Scene a = boot(assets, Physics3DBackend::Reference, &fires);
+    GameSaveData saved = capture(a);
+    std::string error;
+    const auto plain = codec.encode(saved, nullptr, &error);
+    CHECK(plain.has_value());
+    if (plain) {
+        const auto document = decode_save_game_document(*plain, {}, &error);
+        CHECK(document && !document->sections.contains("dve.material_sheen"));
+    }
+    GameWorldObjectState* object = nullptr;
+    for (auto& candidate : saved.world.objects)
+        if (candidate.materials.size() > 1) { object = &candidate; break; }
+    CHECK(object != nullptr);
+    if (!object) return;
+    VoxelMaterialDefinition& velvet = object->materials.back();
+    velvet.sheenColor = {0.7F, 0.3F, 0.2F};
+    velvet.sheenRoughness = 0.55F;
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) { std::cerr << "sheen encode: " << error << '\n'; return; }
+    const auto document = decode_save_game_document(*bytes, {}, &error);
+    CHECK(document && document->sections.contains("dve.material_sheen"));
+    const auto decoded = codec.decode(*bytes, nullptr, &error);
+    CHECK(decoded.has_value());
+    if (!decoded) { std::cerr << "sheen decode: " << error << '\n'; return; }
+    bool found = false;
+    for (const auto& candidate : decoded->world.objects)
+        if (candidate.id == object->id) {
+            const auto& m = candidate.materials.back();
+            found = m.sheenColor.x == 0.7F && m.sheenColor.y == 0.3F && m.sheenColor.z == 0.2F &&
+                    m.sheenRoughness == 0.55F;
+        }
+    CHECK(found);
+    const auto again = codec.encode(*decoded, nullptr, &error);
+    CHECK(again && *again == *bytes);
+}
+
+// Iridescence of inline materials travels in the optional dve.material_iridescence section.
+void test_material_iridescence() {
+    const Assets assets = make_assets();
+    GameSaveCodec codec(file_reader());
+    int fires = 0;
+    Scene a = boot(assets, Physics3DBackend::Reference, &fires);
+    GameSaveData saved = capture(a);
+    std::string error;
+    const auto plain = codec.encode(saved, nullptr, &error);
+    CHECK(plain.has_value());
+    if (plain) {
+        const auto document = decode_save_game_document(*plain, {}, &error);
+        CHECK(document && !document->sections.contains("dve.material_iridescence"));
+    }
+    GameWorldObjectState* object = nullptr;
+    for (auto& candidate : saved.world.objects)
+        if (candidate.materials.size() > 1) { object = &candidate; break; }
+    CHECK(object != nullptr);
+    if (!object) return;
+    VoxelMaterialDefinition& film = object->materials.back();
+    film.iridescence = 0.85F;
+    film.iridescenceIor = 1.32F;
+    film.iridescenceThicknessNm = 420.0F;
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    CHECK(bytes.has_value());
+    if (!bytes) { std::cerr << "iridescence encode: " << error << '\n'; return; }
+    const auto document = decode_save_game_document(*bytes, {}, &error);
+    CHECK(document && document->sections.contains("dve.material_iridescence"));
+    const auto decoded = codec.decode(*bytes, nullptr, &error);
+    CHECK(decoded.has_value());
+    if (!decoded) { std::cerr << "iridescence decode: " << error << '\n'; return; }
+    bool found = false;
+    for (const auto& candidate : decoded->world.objects)
+        if (candidate.id == object->id) {
+            const auto& m = candidate.materials.back();
+            found = m.iridescence == 0.85F && m.iridescenceIor == 1.32F && m.iridescenceThicknessNm == 420.0F;
         }
     CHECK(found);
     const auto again = codec.encode(*decoded, nullptr, &error);
@@ -314,6 +407,81 @@ void test_material_normal_maps() {
     CHECK(found);
     const auto again = codec.encode(*decoded, nullptr, &error);
     CHECK(again && *again == *bytes);
+    CHECK(restore(a, saved));const auto normalHash=a.world->state_hash();
+    object->materials.front().normalMapStrength+=.25F;
+    CHECK(restore(a, saved));CHECK(a.world->state_hash()!=normalHash);
+}
+
+void test_material_surface_detail() {
+    const auto assets = make_assets();
+    int fires = 0;
+    auto scene = boot(assets, Physics3DBackend::Reference, &fires);
+    auto saved = capture(scene);
+    auto& material = saved.world.objects.front().materials.emplace_back();
+    material.surfaceDetail.pattern = SurfacePattern::Wood;
+    material.surfaceDetail.rotationRadians = {.1F, .2F, .3F};
+    material.surfaceDetail.seed = 42;
+    const auto hash = material_surface_detail_hash(material.surfaceDetail);
+    GameSaveCodec codec(file_reader()); std::string error;
+    const auto bytes = codec.encode(saved, nullptr, &error); CHECK(bytes);
+    if (!bytes) return;
+    const auto decoded = codec.decode(*bytes, nullptr, &error); CHECK(decoded);
+    if (!decoded) return;
+    CHECK(material_surface_detail_hash(decoded->world.objects.front().materials.back().surfaceDetail) == hash);
+    const auto again = codec.encode(*decoded, nullptr, &error); CHECK(again && *again == *bytes);
+    auto document = decode_save_game_document(*bytes, {}, &error); CHECK(document);
+    if(document){
+        auto& section=document->sections.at("dve.material_surface_detail");
+        const auto entry=std::vector<std::byte>(section.begin()+4,section.end());
+        section[0]=std::byte{2};section.insert(section.end(),entry.begin(),entry.end());
+        CHECK(!codec.decode(encode_save_game_document(*document), nullptr, &error));
+    }
+    CHECK(restore(scene, saved)); const auto first = scene.world->state_hash();
+    ++material.surfaceDetail.seed;
+    CHECK(restore(scene, saved)); CHECK(scene.world->state_hash() != first);
+}
+
+// Copies of a source asset whose materials have optics: the materials (optics included) come
+// back from the source, so the save carries no optics entries for them, however many copies.
+void test_source_backed_optics() {
+    const Assets assets = make_assets();
+    const std::filesystem::path glassPath = assets.dir / "glass.dvox";
+    {
+        CookedVoxelAsset asset(4003);
+        asset.voxelSizeMeters = 0.25F;
+        asset.materials.push_back(material("Air", 0.0F, {0, 0, 0, 0}));
+        VoxelMaterialDefinition glass = material("Glass", 2500.0F, {0.9F, 0.95F, 1.0F, 0.2F});
+        glass.transmission = 0.95F;
+        glass.indexOfRefraction = 1.5F;
+        asset.materials.push_back(glass);
+        for (int x = 0; x < 2; ++x)
+            for (int y = 0; y < 2; ++y)
+                for (int z = 0; z < 2; ++z) asset.object.set_voxel({x, y, z}, 1);
+        std::string error;
+        CHECK(write_dvox(glassPath, asset, {}, &error));
+    }
+    Scene scene;
+    scene.world = std::make_unique<GameWorld>(make_physics(Physics3DBackend::Reference));
+    for (int i = 0; i < 20; ++i)
+        (void)spawn_with_source(*scene.world, glassPath, "Glass", {static_cast<float>(i) * 2.0F, 0.0F, 0.0F}, false);
+    GameSaveCodec codec(file_reader());
+    std::string error;
+    const GameSaveData saved = capture(scene);
+    const auto document = codec.to_document(saved, nullptr, &error);
+    CHECK(document.has_value());
+    if (!document) { std::cerr << "source-backed optics: " << error << '\n'; return; }
+    CHECK(!document->sections.contains("dve.material_optics"));
+    // The source is a v1.4 (optics) DVOX that pre-optics builds cannot read: stay at version 5.
+    CHECK(document->schemaVersion == kGameSaveSchemaVersion);
+    const auto bytes = codec.encode(saved, nullptr, &error);
+    const auto decoded = bytes ? codec.decode(*bytes, nullptr, &error) : std::nullopt;
+    CHECK(decoded.has_value());
+    std::size_t restored = 0;
+    if (decoded)
+        for (const auto& object : decoded->world.objects)
+            if (object.materials.size() > 1 && object.materials[1].transmission == 0.95F &&
+                object.materials[1].indexOfRefraction == 1.5F) ++restored;
+    CHECK(restored == 20U);
 }
 
 void test_round_trip(Physics3DBackend backend, const char* label) {
@@ -589,9 +757,11 @@ void test_migration() {
     if (migrated) CHECK(restore(b, *migrated));
     CHECK(b.world->state_hash() == a.world->state_hash());
 
-    // Current-version saves skip migrations.
+    // New saves skip migrations; one with no optics is written as version 4, so only the no-op
+    // 4 -> 5 step runs.
     const auto v1Bytes = migrating.encode(saved, nullptr, &error);
-    CHECK(v1Bytes && migrating.decode(*v1Bytes, &report, &error) && report.migrationsApplied == 0U);
+    CHECK(v1Bytes && migrating.decode(*v1Bytes, &report, &error) && report.storedSchemaVersion == 4U &&
+          report.migrationsApplied == 1U);
 
     // A failing migration reports its own message.
     GameSaveCodec failing(file_reader());
@@ -999,7 +1169,7 @@ void test_v1_to_v2_migration() {
     CHECK(b.world->gameplay().has_character(ib.pawn));   // as booted
     // Re-saving writes v2.
     const auto resaved = codec.to_document(capture_all(b), nullptr, &error);
-    CHECK(resaved && resaved->schemaVersion == kGameSaveSchemaVersion && resaved->sections.contains("dve.gameplay"));
+    CHECK(resaved && resaved->schemaVersion == kGameSaveSchemaVersionWithoutOptics && resaved->sections.contains("dve.gameplay"));
 
     // A "v1" document carrying an engine section v1 never had is refused by the migration.
     SaveGameDocument mislabelled = v1;
@@ -1154,6 +1324,8 @@ void test_script_state_v2() {
             world.set_environment_shadow_mode("hard")
             world.set_environment_scalar("FogDensityPerMeter", 0.02)
             world.set_environment_scalar("FogStartMeters", 4)
+            world.set_environment_scalar("FogHeightFalloffPerMeter", 0.05)
+            world.set_environment_scalar("FogBaseHeightMeters", 3)
             world.set_environment_vector("FogColor", 0.5, 0.6, 0.7)
             world.set_environment_sky_mode("physical")
             world.set_environment_scalar("AtmosphereMieScale", 6)
@@ -1212,8 +1384,9 @@ void test_script_state_v2() {
     const RenderEnvironment& env = b.environment();
     CHECK(env.sunIntensity == 5.5F && env.skyColor.z == 0.9F && env.shadowMode == ShadowMode::Hard);
     CHECK(env.fogDensityPerMeter == 0.02F && env.fogStartMeters == 4.0F && env.fogColor.y == 0.6F);   // v3
-    CHECK(env.skyMode == SkyMode::Physical && env.atmosphereMieScale == 6.0F && env.aerialPerspectiveScale == 40.0F);   // v4
-    CHECK(env.volumetricFogDensityPerMeter == 0.03F && env.volumetricFogSamples == 48U);   // v5
+    CHECK(env.fogHeightFalloffPerMeter == 0.05F && env.fogBaseHeightMeters == 3.0F);   // v4
+    CHECK(env.skyMode == SkyMode::Physical && env.atmosphereMieScale == 6.0F && env.aerialPerspectiveScale == 40.0F);   // v6
+    CHECK(env.volumetricFogDensityPerMeter == 0.03F && env.volumetricFogSamples == 48U);   // v7
     CHECK(b.hud_model().interaction_prompt() == "Press E");
     CHECK(b.hud_model().tools().size() == 3U && b.hud_model().selected_tool() && b.hud_model().selected_tool()->id == "bomb");
     CHECK(b.material_library().runtime_scalar(7, "Roughness") == 0.2F);
@@ -1259,10 +1432,12 @@ void test_script_state_v2() {
     auto v1Blob = v1.save_state(&error);
     CHECK(v1Blob.has_value());
     if (v1Blob) {
-        // Strip the v2-v5 tail: environment (30*4 + 5*4), fog (5*4), sky (9*4), volumetric fog
-        // (9*4), empty prompt (4), no tools (4), selection (8), no materials (4), no named timers
-        // (4); then mark it version 1.
-        v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 36U + 36U + 4U + 4U + 8U + 4U + 4U));
+      // Strip the v2-v6 tail (including the length-prefixed lighting extension):
+      // environment (30*4 + 5*4), fog (5*4), fog height (2*4), lighting, sky (9*4), volumetric fog (9*4), empty
+      // prompt (4), no tools (4), selection (8), no materials (4), no named timers (4); then
+      // mark it version 1.
+      v1Blob->resize(v1Blob->size() - (120U + 20U + 20U + 8U + 4U +
+                      encode_scene_lighting(v1.environment()).size() + 36U + 36U + 4U + 4U + 8U + 4U + 4U));
         (*v1Blob)[4] = std::byte{1};
         GameWorld worldV1b(std::make_unique<ReferenceRigidBodyWorld>());
         GameScriptHost v1b(worldV1b);
@@ -1270,13 +1445,47 @@ void test_script_state_v2() {
         CHECK(v1b.global_number("score") == 5.0);
     }
 }
+
+// Script state v4 appends the fog height falloff (2 floats) after the v3 fog block.
+// A v3 blob -- the v4 blob with those 8 bytes excised and the version patched -- still
+// loads, with the falloff at its default (off): that is what the v3 build rendered.
+void test_script_state_v3_fog_height() {
+    std::string error;
+    GameWorld worldA(std::make_unique<ReferenceRigidBodyWorld>());
+    GameScriptHost a(worldA);
+    CHECK(a.run_string("world.set_environment_scalar(\"FogDensityPerMeter\", 0.02)\n"
+                       "world.set_environment_scalar(\"FogHeightFalloffPerMeter\", 0.05)\n"
+                       "world.set_environment_scalar(\"FogBaseHeightMeters\", 3)\n",
+                       "fog", &error));
+    const auto blob = a.save_state(&error);
+    CHECK(blob.has_value());
+    if (!blob) { std::cerr << "v3 fog height save: " << error << '\n'; return; }
+    // After the falloff block the tail is: empty prompt (4), no tools (4),
+    // selection (8), no materials (4), no named timers (4) -- 24 bytes; remove
+    // the v5 lighting extension as well as the 8-byte height block.
+    CHECK(blob->size() > 32U);
+    std::vector<std::byte> v3(blob->begin(), blob->end() - 32 - 4 - encode_scene_lighting(a.environment()).size());
+    v3.insert(v3.end(), blob->end() - 24, blob->end());
+    v3[4] = std::byte{3};
+    GameWorld worldB(std::make_unique<ReferenceRigidBodyWorld>());
+    GameScriptHost b(worldB);
+    CHECK(b.load_state(v3, &error));
+    if (!error.empty()) std::cerr << "v3 fog height load: " << error << '\n';
+    const RenderEnvironment& env = b.environment();
+    CHECK(env.fogDensityPerMeter == 0.02F);   // the v3 fog block still loads
+    CHECK(env.fogHeightFalloffPerMeter == 0.0F && env.fogBaseHeightMeters == 0.0F);   // v4 fields default
+}
 #endif
 
 } // namespace
 
 int main() {
     test_material_optics();
+    test_material_sheen();
+    test_material_iridescence();
     test_material_normal_maps();
+    test_material_surface_detail();
+    test_source_backed_optics();
     test_round_trip(Physics3DBackend::Reference, "reference");
     test_destruction(Physics3DBackend::Reference, "reference");
     {
@@ -1297,6 +1506,7 @@ int main() {
 #if defined(DVE_HAVE_LUA)
     test_script_state();
     test_script_state_v2();
+    test_script_state_v3_fog_height();
 #endif
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";

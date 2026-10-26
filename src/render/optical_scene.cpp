@@ -1,3 +1,4 @@
+#include "dve/render/material_bsdf.hpp"
 #include "dve/render/optical_scene.hpp"
 
 #include <algorithm>
@@ -11,6 +12,10 @@
 
 namespace dve::render {
 namespace {
+// The id the reference renderer gives an instance: objectId, else the object's own id.
+std::uint64_t effective_object_id(const VoxelReferenceInstance& v) noexcept {
+    return v.objectId != 0U ? v.objectId : (v.object ? v.object->id() : 0U);
+}
 Float3 scale3(Float3 v, float s) noexcept { return {v.x * s, v.y * s, v.z * s}; }
 Float3 add3(Float3 a, Float3 b) noexcept { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 Float3 sub3(Float3 a, Float3 b) noexcept { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -21,6 +26,38 @@ Float3 unit3(Float3 v, Float3 fallback = {0.0F, 1.0F, 0.0F}) noexcept {
     const float l = std::sqrt(dot3(v, v));
     return l > 1.0e-20F ? scale3(v, 1.0F / l) : fallback;
 }
+// DDA accumulates float tMax over potentially hundreds of empty cells. Recover
+// the actual plane of the reported voxel face before spawning optical rays;
+// otherwise a small optical offset can start behind that face and self-occlude.
+void refine_voxel_hit(OpticalHit &h, const VoxelReferenceInstance &instance, Float3 origin, Float3 direction,
+                      bool exiting = false) {
+    const auto localOrigin = world_to_voxel(instance.transform, instance.spacing, origin);
+    const auto localDirection =
+        divide_components(inverse_transform_vector(instance.transform, unit3(direction)), instance.spacing);
+    const auto n = inverse_transform_vector(instance.transform, h.geometricNormal);
+    const int axis = std::abs(n.x) > 0.9F ? 0 : std::abs(n.y) > 0.9F ? 1 : std::abs(n.z) > 0.9F ? 2 : -1;
+    if (axis < 0)
+        return;
+    const float sign = axis == 0 ? n.x : axis == 1 ? n.y : n.z;
+    const int cell = axis == 0 ? h.voxel.x : axis == 1 ? h.voxel.y : h.voxel.z;
+    const double boundary = double(cell) + (exiting ? (sign < 0 ? 1 : 0) : (sign > 0 ? 1 : 0));
+    const double o = axis == 0 ? localOrigin.x : axis == 1 ? localOrigin.y : localOrigin.z;
+    const double d = axis == 0 ? localDirection.x : axis == 1 ? localDirection.y : localDirection.z;
+    if (d == 0)
+        return;
+    const double distance = (boundary - o) / d;
+    if (distance < 0 || !std::isfinite(distance))
+        return;
+    auto p = add3(localOrigin, scale3(localDirection, static_cast<float>(distance)));
+    if (axis == 0)
+        p.x = static_cast<float>(boundary);
+    else if (axis == 1)
+        p.y = static_cast<float>(boundary);
+    else
+        p.z = static_cast<float>(boundary);
+    h.position = voxel_to_world(instance.transform, instance.spacing, p);
+    h.distance = static_cast<float>(distance);
+}
 void grow(Float3& lo, Float3& hi, Float3 p) noexcept {
     lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
     hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
@@ -28,6 +65,7 @@ void grow(Float3& lo, Float3& hi, Float3 p) noexcept {
 }  // namespace
 
 float dielectric_fresnel(float cosI, float n1, float n2) noexcept {
+    if (n1 == n2) return 0.0F; // No optical interface, including exact grazing incidence.
     cosI = std::clamp(cosI, 0.0F, 1.0F);
     const float eta = n1 / n2;
     const float sin2T = eta * eta * (1.0F - cosI * cosI);
@@ -100,10 +138,12 @@ std::optional<OpticalHit> OpticalScene::trace(Float3 origin, Float3 direction, f
         h.geometricNormal = unit3(hit->worldNormal);
         h.shadingNormal = h.geometricNormal;
         h.material = &tracer_->material(hit->instance, hit->objectHit.material);
-        h.objectId = voxels_[hit->instance].objectId;
+        h.objectId = effective_object_id(voxels_[hit->instance]);
         h.voxelInstance = static_cast<std::int32_t>(hit->instance);
         h.voxel = hit->objectHit.voxel;
         h.materialId = hit->objectHit.material;
+        if (hit->objectHit.normal != Int3{})
+            refine_voxel_hit(h, voxels_[hit->instance], origin, direction);
         best = h;
     }
     if (auto polygon = trace_polygons(origin, direction, best ? best->distance : maximumDistance);
@@ -149,6 +189,8 @@ std::optional<OpticalHit> OpticalScene::trace_polygons(Float3 origin, Float3 dir
         h.material = hit->materialIndex < asset.materials.size() ? &asset.materials[hit->materialIndex] : nullptr;
         h.objectId = p.instance->objectId;
         h.polygonInstance = static_cast<std::int32_t>(i);
+        h.firstIndex = hit->firstIndex;
+        h.materialIndex = hit->materialIndex;
         best = h;
     }
     return best;
@@ -205,10 +247,11 @@ std::optional<OpticalHit> OpticalScene::trace_inside_voxels(const OpticalHit& in
                                                    static_cast<float>(localNormal.z)});
         h.shadingNormal = h.geometricNormal;
         h.material = beyond == kAirMaterial ? nullptr : &tracer_->material(static_cast<std::uint32_t>(k), beyond);
-        h.objectId = instance.objectId;
+        h.objectId = effective_object_id(instance);
         h.voxelInstance = static_cast<std::int32_t>(k);
         h.voxel = cell;
         h.materialId = beyond;
+        refine_voxel_hit(h,instance,origin,direction,true);
         boundary = h;
     }
     // Anything else (another instance, a polygon) in the medium before its boundary.
@@ -224,10 +267,12 @@ std::optional<OpticalHit> OpticalScene::trace_inside_voxels(const OpticalHit& in
         h.geometricNormal = unit3(hit->worldNormal);
         h.shadingNormal = h.geometricNormal;
         h.material = &tracer_->material(static_cast<std::uint32_t>(j), hit->objectHit.material);
-        h.objectId = voxels_[j].objectId;
+        h.objectId = effective_object_id(voxels_[j]);
         h.voxelInstance = static_cast<std::int32_t>(j);
         h.voxel = hit->objectHit.voxel;
         h.materialId = hit->objectHit.material;
+        if (hit->objectHit.normal != Int3{})
+            refine_voxel_hit(h, voxels_[j], origin, direction);
         other = h;
     }
     if (auto polygon = trace_polygons(origin, direction, other ? other->distance : limit);
@@ -352,15 +397,19 @@ LightPathResult follow_light_impl(const OpticalScene& scene, Float3 origin, Floa
         Float3 normal = hit->shadingNormal;
         if (dot3(normal, dir) > 0.0F) normal = scale3(normal, -1.0F);
         const float cosI = std::clamp(-dot3(dir, normal), 0.0F, 1.0F);
-        const float fresnel = dielectric_fresnel(cosI, n1, n2);
+        const auto& boundary=kind==Kind::Enter?*next:*media.back().material;
+        const auto film=material_interface_reflectance(boundary,cosI,n1,n2);
+        const float fresnel=.2126F*film.x+.7152F*film.y+.0722F*film.z;
         const auto refracted = refract_direction(dir, normal, n1 / n2);
         bool reflect = !refracted.has_value();
         if (!reflect && sampled) reflect = uniform(state) < fresnel;
         if (reflect) {
+            if(sampled && fresnel>0)result.throughput=mul3(result.throughput,scale3(film,1/fresnel));
             dir = reflect_direction(dir, normal);
             ++result.reflections;
         } else {
-            if (!sampled) result.throughput = scale3(result.throughput, 1.0F - fresnel);
+            const Float3 transmit{1-film.x,1-film.y,1-film.z};
+            result.throughput=mul3(result.throughput,scale3(transmit,sampled&&fresnel<1?1/(1-fresnel):1));
             if (kind == Kind::Enter) {
                 result.throughput = scale3(result.throughput, next->transmission);
                 if (inVoxelMedium && hit->voxelInstance == media.back().entry.voxelInstance) media.pop_back();   // voxel media swap

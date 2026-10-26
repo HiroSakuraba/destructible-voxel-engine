@@ -5,6 +5,12 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -49,6 +55,7 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
     if (!finite(value.baseColor) || !finite(value.emissive)) return fail("material color is non-finite");
     if (!finite(value.metallic) || value.metallic < 0.0F || value.metallic > 1.0F) return fail("metallic must be in [0,1]");
     if (!finite(value.roughness) || value.roughness < 0.0F || value.roughness > 1.0F) return fail("roughness must be in [0,1]");
+    if (!material_sheen_valid(value) || !material_iridescence_valid(value)) return fail("Invalid sheen or thin-film settings");
     if (!finite(value.specular) || value.specular < 0.0F || value.specular > 1.0F) return fail("specular must be in [0,1]");
     if (!finite(value.subsurfaceScatterDistanceMeters) || value.subsurfaceScatterDistanceMeters < 0.0F)
         return fail("subsurface scatter distance must be finite and non-negative");
@@ -61,6 +68,9 @@ bool validate_definition(const VoxelMaterialDefinition& value, MaterialId id, st
         value.foliageColor.z < 0.0F || !finite(value.foliageTransmittance) || value.foliageTransmittance < 0.0F ||
         value.foliageTransmittance > 1.0F || !finite(value.foliageWrap) || value.foliageWrap < 0.0F || value.foliageWrap > 1.0F)
         return fail("foliage values must be finite, non-negative, and normalized where required");
+    if (value.preset.id.size()>128 || (value.preset.id.empty() ? value.preset.revision!=0 || value.preset.overrides!=0 : value.preset.revision==0))
+        return fail("invalid preset origin");
+    if (!material_surface_detail_valid(value.surfaceDetail)) return fail("invalid metric surface-detail settings");
     if (!material_optics_valid(value))
         return fail("transmission must be in [0,1], IOR in [1,3], attenuation colour in [0,1] and distance >= 0");
     if (!material_normal_map_valid(value))
@@ -94,6 +104,11 @@ EditorMaterialLibrary::EditorMaterialLibrary(bool populateDefaults) {
     *this = make_default();
 }
 
+EditorMaterialLibrary EditorMaterialLibrary::make_minimal(){
+    EditorMaterialLibrary result(false);
+    result.entries_.emplace(0,EditorMaterialEntry{0,make_material("Air",{0,0,0,0},0,0,0,1,0,true,false),true});
+    return result;
+}
 EditorMaterialLibrary EditorMaterialLibrary::make_default() {
     EditorMaterialLibrary result(false);
     auto add = [&](MaterialId id, VoxelMaterialDefinition definition) {
@@ -106,6 +121,14 @@ EditorMaterialLibrary EditorMaterialLibrary::make_default() {
     result.entries_[3].definition.flammability = 0.8F;
     add(4, make_material("Steel", {0.38F,0.43F,0.48F,1}, 7850.0F, 14.0F, 12.0F, 0.35F, 0.9F));
     add(5, make_material("Glass", {0.34F,0.70F,0.82F,0.38F}, 2500.0F, 1.2F, 0.6F, 0.08F, 0.0F, true, false));
+    // Alpha is coverage, not solid glass transmission. Use a fully covered dielectric
+    // and let the renderer evaluate both Fresnel interfaces and volume absorption.
+    auto& glass = result.entries_[5].definition;
+    glass.baseColor = {1,1,1,1};
+    glass.blendMode = MaterialBlendMode::Opaque;
+    glass.transmission = 1;
+    glass.indexOfRefraction = 1.5F;
+    glass.roughness = 0;
     add(6, make_material("Plaster", {0.82F,0.81F,0.76F,1}, 900.0F, 1.1F, 1.0F, 0.92F, 0.0F));
     add(7, make_material("Soil", {0.28F,0.19F,0.10F,1}, 1450.0F, 0.8F, 0.7F, 1.0F, 0.0F, false, false));
     add(8, make_material("Rubber", {0.05F,0.06F,0.07F,1}, 1100.0F, 1.5F, 3.0F, 0.96F, 0.0F, false, false));
@@ -182,7 +205,7 @@ bool EditorMaterialLibrary::validate(std::string* error) const {
     }
     std::vector<VoxelMaterialDefinition> indexed(256);
     std::size_t highest = 0;
-    for (const auto& [id, entry] : entries_) { indexed[id] = entry.definition; highest = std::max(highest, static_cast<std::size_t>(id)); }
+    for (const auto& [id, entry] : entries_) { indexed[id] = entry.definition; highest = (std::max)(highest, static_cast<std::size_t>(id)); }
     indexed.resize(highest + 1);
     std::string layerError;
     if (!resolve_voxel_material_layers(indexed, &layerError)) {
@@ -192,19 +215,17 @@ bool EditorMaterialLibrary::validate(std::string* error) const {
     return true;
 }
 
-bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string* error) const {
-    try {
-        std::string validation;
-        if (!validate(&validation)) throw std::runtime_error(validation);
-        std::filesystem::create_directories(path.parent_path().empty() ? "." : path.parent_path());
-        const std::filesystem::path temporary = path.string() + ".tmp";
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        if (!output) throw std::runtime_error("could not open material library for writing");
+bool EditorMaterialLibrary::write_stream(std::ostream& output,std::string* error)const {
+    if(!validate(error))return false;
         // Version 5 (a normal-map record per material) only when some material has a map, so
         // libraries without maps keep their version 4 bytes.
         const bool normalMaps = std::any_of(entries_.begin(), entries_.end(),
                                             [](const auto& e) { return material_has_normal_map(e.second.definition); });
-        output << "DVE_EDITOR_MATERIALS " << (normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
+        const bool origins = std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return !e.second.definition.preset.id.empty();});
+        const bool details=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return e.second.definition.surfaceDetail.pattern!=SurfacePattern::NoPattern;});
+        const bool sheen=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_sheen(e.second.definition);});
+        const bool iridescence=std::any_of(entries_.begin(),entries_.end(),[](const auto& e){return material_has_iridescence(e.second.definition);});
+        output << "DVE_EDITOR_MATERIALS " << (iridescence ? 9 : sheen ? 8 : details ? 7 : origins ? 6 : normalMaps ? 5 : 4) << "\n" << entries_.size() << "\n" << std::setprecision(9);
         for (const auto& [id, entry] : entries_) {
             const auto& m = entry.definition;
             output << static_cast<unsigned>(id) << ' ' << std::quoted(m.name) << ' '
@@ -227,7 +248,7 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
             }
             output << ' ' << m.transmission << ' ' << m.indexOfRefraction << ' ' << m.attenuationColor.x << ' '
                    << m.attenuationColor.y << ' ' << m.attenuationColor.z << ' ' << m.attenuationDistanceMeters;
-            if (normalMaps) {
+            if (normalMaps || origins || details || sheen || iridescence) {
                 if (const VoxelNormalMap* map = m.normalMap.get()) {
                     static constexpr char kHex[] = "0123456789abcdef";
                     std::string hex;
@@ -239,13 +260,31 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
                     output << " 0";
                 }
             }
+            if(origins || details || sheen || iridescence) output << ' ' << std::quoted(m.preset.id) << ' ' << m.preset.revision << ' ' << m.preset.overrides;
+            if(details || sheen || iridescence){output << ' ' << unsigned(m.surfaceDetail.pattern) << ' ' << unsigned(m.surfaceDetail.space) << ' ' << m.surfaceDetail.seed;for(float v:surface_detail_values(m.surfaceDetail))output << ' ' << v;}
+            if(sheen || iridescence){output << ' ' << m.sheenColor.x << ' ' << m.sheenColor.y << ' ' << m.sheenColor.z << ' ' << m.sheenRoughness;}
+            if(iridescence){output << ' ' << m.iridescence << ' ' << m.iridescenceIor << ' ' << m.iridescenceThicknessNm;}
             output << '\n';
         }
+    if(!output){if(error)*error="Failed to write material stream";return false;}return true;
+}
+
+bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string* error) const {
+    try {
+        std::string validation;
+        if (!validate(&validation)) throw std::runtime_error(validation);
+        std::filesystem::create_directories(path.parent_path().empty() ? "." : path.parent_path());
+        const std::filesystem::path temporary = path.string() + ".tmp";
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) throw std::runtime_error("could not open material library for writing");
+        if(!write_stream(output,error)) return false;
         output.close();
         if (!output) throw std::runtime_error("failed to write material library");
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
+#if defined(_WIN32)
+        if(!MoveFileExW(temporary.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("could not replace material library");
+#else
         std::filesystem::rename(temporary, path);
+#endif
         return true;
     } catch (const std::exception& exception) {
         if (error) *error = exception.what();
@@ -253,15 +292,16 @@ bool EditorMaterialLibrary::save(const std::filesystem::path& path, std::string*
     }
 }
 
-std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::filesystem::path& path, std::string* error) {
+std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::filesystem::path& path,std::string* error){
+    std::ifstream input(path,std::ios::binary);if(!input){if(error)*error="could not open material library";return std::nullopt;}return read_stream(input,error);
+}
+std::optional<EditorMaterialLibrary> EditorMaterialLibrary::read_stream(std::istream& input,std::string* error){
     try {
-        std::ifstream input(path, std::ios::binary);
-        if (!input) throw std::runtime_error("could not open material library");
         std::string magic;
         unsigned version{};
         std::size_t count{};
         input >> magic >> version >> count;
-        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 5) || count > 256)
+        if (magic != "DVE_EDITOR_MATERIALS" || (version < 1 || version > 9) || count > 256)
             throw std::runtime_error("unsupported material library");
         EditorMaterialLibrary result(false);
         for (std::size_t index = 0; index < count; ++index) {
@@ -335,6 +375,16 @@ std::optional<EditorMaterialLibrary> EditorMaterialLibrary::load(const std::file
                     throw std::runtime_error("invalid material normal map record");
                 }
             }
+            if(version>=6) input >> std::quoted(m.preset.id) >> m.preset.revision >> m.preset.overrides;
+            if(version>=7){unsigned pattern{},space{};std::array<float,kSurfaceDetailFloatCount> values{};
+                input>>pattern>>space>>m.surfaceDetail.seed;
+                if(pattern>unsigned(SurfacePattern::Paint)||space>unsigned(SurfaceDetailSpace::UV1))throw std::runtime_error("invalid surface-detail model or space");
+                m.surfaceDetail.pattern=SurfacePattern(pattern);m.surfaceDetail.space=SurfaceDetailSpace(space);
+                for(float& v:values)input>>v;set_surface_detail_values(m.surfaceDetail,values);}
+            if(version>=8){input >> m.sheenColor.x >> m.sheenColor.y >> m.sheenColor.z >> m.sheenRoughness;
+                if(!material_sheen_valid(m)) throw std::runtime_error("invalid material sheen record");}
+            if(version>=9){input >> m.iridescence >> m.iridescenceIor >> m.iridescenceThicknessNm;
+                if(!material_iridescence_valid(m)) throw std::runtime_error("invalid material iridescence record");}
             if (version == 1 && m.transparent) m.blendMode = MaterialBlendMode::Translucent;
             if (!input || rawId > 255) throw std::runtime_error("malformed material record");
             entry.id = static_cast<MaterialId>(rawId);
@@ -395,7 +445,7 @@ std::string editor_material_badge(const VoxelMaterialDefinition& definition) {
 
 std::vector<std::string> editor_material_warnings(const VoxelMaterialDefinition& definition) {
     std::vector<std::string> warnings;
-    if (definition.transparent && definition.blendMode == MaterialBlendMode::Opaque)
+    if (definition.transparent && definition.blendMode == MaterialBlendMode::Opaque && definition.transmission==0)
         warnings.emplace_back("transparent flag is set while blend mode is opaque");
     if (!definition.transparent && definition.blendMode == MaterialBlendMode::Translucent)
         warnings.emplace_back("translucent blend mode is set while transparent flag is disabled");

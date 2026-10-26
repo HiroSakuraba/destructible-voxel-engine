@@ -60,9 +60,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID) {
         uint bakedStride;
         gBrickPaletteBakedSamples.GetDimensions(bakedCount, bakedStride);
         const uint bakedIndex = record.bakedOffset + request.sampleIndex;
-        gBrickPaletteResolveOutputs[requestIndex] =
-            record.bakedOffset != kBrickPaletteInvalidOffset && bakedIndex < bakedCount
-                ? gBrickPaletteBakedSamples[bakedIndex] : invalid;
+        if (record.bakedOffset != kBrickPaletteInvalidOffset && bakedIndex < bakedCount) {
+            gBrickPaletteResolveOutputs[requestIndex] = gBrickPaletteBakedSamples[bakedIndex];
+        } else {
+            gBrickPaletteResolveOutputs[requestIndex] = invalid;
+        }
         return;
     }
 

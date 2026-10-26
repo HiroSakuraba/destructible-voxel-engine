@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <iosfwd>
 #include <map>
 #include <optional>
 #include <string>
@@ -35,12 +36,16 @@ public:
     [[nodiscard]] MaterialId next_available_id() const noexcept;
     [[nodiscard]] bool validate(std::string* error = nullptr) const;
 
+    [[nodiscard]] bool write_stream(std::ostream&, std::string* error = nullptr) const;
+    [[nodiscard]] static std::optional<EditorMaterialLibrary> read_stream(std::istream&, std::string* error = nullptr);
     [[nodiscard]] bool save(const std::filesystem::path& path, std::string* error = nullptr) const;
     [[nodiscard]] static std::optional<EditorMaterialLibrary> load(
         const std::filesystem::path& path,
         std::string* error = nullptr);
 
     [[nodiscard]] static EditorMaterialLibrary make_default();
+    // Minimal valid payload for standalone preset assets: only the required air slot.
+    [[nodiscard]] static EditorMaterialLibrary make_minimal();
 
 private:
     explicit EditorMaterialLibrary(bool populateDefaults);

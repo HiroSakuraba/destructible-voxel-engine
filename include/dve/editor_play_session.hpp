@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "dve/simulation_clock.hpp"
+#include "dve/prototype_game.hpp"
 #include "dve/editor_materials.hpp"
 #include "dve/editor_workspace.hpp"
 #include "dve/game_ui.hpp"
@@ -50,6 +51,7 @@ struct EditorPlayInputSnapshot {
 struct EditorPlayHudSnapshot {
     std::string interactionPrompt;
     std::optional<ui::ToolWheelEntry> selectedTool;
+    std::optional<PrototypeHud> prototype;
 };
 
 struct EditorPlaySessionTelemetry {
@@ -95,6 +97,8 @@ public:
     void set_action_pressed(std::string action, bool pressed);
     void set_axis(std::string axis, float value);
     void clear_input() noexcept;
+    void prototype_look(float yaw,float pitch);
+    [[nodiscard]] std::optional<PrototypeCamera> prototype_camera() const;
 
     [[nodiscard]] bool active() const noexcept { return state_ != EditorPlaySessionState::Stopped; }
     [[nodiscard]] bool paused() const noexcept { return state_ == EditorPlaySessionState::Paused; }

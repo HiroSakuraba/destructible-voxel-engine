@@ -15,6 +15,7 @@ common_sources="
     $repo_dir/src/rhi/device.cpp
     $repo_dir/src/rhi/null_device.cpp
     $repo_dir/src/polygon_asset.cpp
+    $repo_dir/src/material_surface_detail.cpp
     $repo_dir/src/matrix4.cpp
     $repo_dir/src/master_material.cpp
     $repo_dir/src/material_parameter_collection.cpp
@@ -33,14 +34,20 @@ c++ -std=c++23 -ffunction-sections -fdata-sections -Wl,--gc-sections \
 c++ -std=c++23 -ffunction-sections -fdata-sections -Wl,--gc-sections \
     -I"$repo_dir/include" "$repo_dir/tests/test_live_environment_renderer.cpp" \
     "$repo_dir/src/render/live_environment_renderer.cpp" \
+    "$repo_dir/src/render/live_optical_scene.cpp" \
     "$repo_dir/src/render/mesh_rhi_mirror.cpp" \
     "$repo_dir/src/render/shadow_material_table.cpp" \
     "$repo_dir/src/render/main_material_table.cpp" \
+    "$repo_dir/src/render/layered_surface.cpp" \
+    "$repo_dir/src/material_layers.cpp" \
     "$repo_dir/src/render/material_resource_residency.cpp" \
+    "$repo_dir/src/render/texture_mips.cpp" \
     "$repo_dir/src/render/environment_lighting_gpu.cpp" \
     "$repo_dir/src/render/cascaded_shadow_atlas.cpp" \
     "$repo_dir/src/render/cascaded_shadow_map.cpp" \
     "$repo_dir/src/gpu_material_buffer.cpp" \
+    "$repo_dir/src/gpu_material_surface_detail.cpp" \
+    "$repo_dir/src/transform.cpp" \
     "$repo_dir/src/gpu_material_mapping.cpp" \
     "$repo_dir/src/environment_lighting.cpp" \
     "$repo_dir/src/environment_lighting_asset.cpp" \

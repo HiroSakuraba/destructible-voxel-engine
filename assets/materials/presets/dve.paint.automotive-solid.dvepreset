@@ -1,0 +1,9 @@
+DVE_MATERIAL_PRESET 1 1 1
+"dve.paint.automotive-solid" "Solid automotive paint" "Paint" "Paint Solid automotive paint car lacquer clearcoat"
+"Solid pigment plus dielectric coat; no metallic flakes or pearl layer." "DVE original artistic defaults; not measured material fits" "meters"
+2 0 3
+0
+DVE_EDITOR_MATERIALS 4
+2
+0 "Air" 0 0 0 0 0 0 0 0 1 0.5 0 2 0 1 1 1 0 0.100000001 0.5 0.800000012 0.349999994 0.5 0.349999994 0 0 0 0 0 1 0 1 0 0 1.5 1 1 1 0
+10 "Solid automotive paint" 0.25 0.0149999997 0.00999999978 1 0 0 0 0 0.280000001 0.5 5 0 0 1 1 1 1 0.0799999982 0.5 0.800000012 0.349999994 0.5 0.349999994 1000 1 1 0 0 0 1 0 0 0 1.5 1 1 1 0

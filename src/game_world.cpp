@@ -53,7 +53,7 @@ namespace {
     const std::vector<VoxelMaterialDefinition>& materials, double* outDensityQuantum) {
     double maximumDensity = 0.0;
     for (const VoxelMaterialDefinition& material : materials) {
-        maximumDensity = std::max(maximumDensity, static_cast<double>(material.densityKilogramsPerCubicMeter));
+        maximumDensity = (std::max)(maximumDensity, static_cast<double>(material.densityKilogramsPerCubicMeter));
     }
     MaterialMassTable table;
     if (!(maximumDensity > 0.0) || !std::isfinite(maximumDensity)) {
@@ -417,7 +417,7 @@ void GameWorld::synchronize_membership_component(Object& object) {
     if (!membership) {
         Component component;
         component.id = 1U;
-        for (const Component& existing : object.components) component.id = std::max(component.id, existing.id + 1U);
+        for (const Component& existing : object.components) component.id = (std::max)(component.id, existing.id + 1U);
         component.type = "dve.membership";
         object.components.push_back(std::move(component));
         membership = &object.components.back();
@@ -553,7 +553,7 @@ GameObjectId GameWorld::create_object_internal(
         if (error) *error = "game object id is already in use";
         return kInvalidGameObjectId;
     }
-    nextId_ = std::max(nextId_, id + 1U);
+    nextId_ = (std::max)(nextId_, id + 1U);
     object.id = id;
     synchronize_membership_component(object);
     objects_.emplace(id, std::move(object));
@@ -1004,7 +1004,7 @@ Component* GameWorld::add_component(GameObjectId id, Component componentValue, s
     if (componentValue.id == kInvalidComponentId) {
         componentValue.id = 1U;
         for (const Component& existing : object.components)
-            componentValue.id = std::max(componentValue.id, existing.id + 1U);
+            componentValue.id = (std::max)(componentValue.id, existing.id + 1U);
     }
     if (dve::find_component(std::span<const Component>(object.components), componentValue.id)) {
         if (error) *error = "component id already exists on game object";
@@ -1358,8 +1358,8 @@ void GameWorld::update_attachment_collision_filters() {
         if (!object.attachment || !object.hasBody) continue;
         const auto parent = objects_.find(object.attachment->parent);
         if (parent == objects_.end() || !parent->second.hasBody) continue;
-        const RigidBodyHandle a = std::min(object.bodyHandle, parent->second.bodyHandle);
-        const RigidBodyHandle b = std::max(object.bodyHandle, parent->second.bodyHandle);
+        const RigidBodyHandle a = (std::min)(object.bodyHandle, parent->second.bodyHandle);
+        const RigidBodyHandle b = (std::max)(object.bodyHandle, parent->second.bodyHandle);
         if (a != b) wanted.emplace(a, b);
     }
     if (wanted == attachmentCollisionFilters_) return;
@@ -1686,7 +1686,7 @@ std::optional<std::uint64_t> GameWorld::queue_damage_sphere(GameObjectId id, Flo
     if (found == objects_.end() || !found->second.voxels || found->second.visualOnly ||
         !(radius > 0.0F) || !std::isfinite(radius) || !std::isfinite(worldCenter.x) ||
         !std::isfinite(worldCenter.y) || !std::isfinite(worldCenter.z) || pendingDestruction_.size() >= kMaxPendingDestruction) return std::nullopt;
-    radius = std::min(radius, kMaxDamageSphereRadiusMeters);
+    radius = (std::min)(radius, kMaxDamageSphereRadiusMeters);
     const auto& object = found->second;
     const auto local = world_to_voxel(resolve_transform(object),multiply(object.voxelScale,object.voxelSizeMeters),worldCenter);
     const auto request = nextDestructionId_++;
@@ -1713,7 +1713,7 @@ void GameWorld::process_pending_destruction() {
             ++rejectedDestruction_; pendingDestruction_.erase(pendingDestruction_.begin()); continue;
         }
         const auto used = pending.job->resume(*found->second.voxels, budget);
-        budget -= std::min(used, budget);
+        budget -= (std::min)(used, budget);
         pending.state.workUnits = pending.job->work_units();
         const auto phase = pending.job->phase();
         if (phase == ResumableDestruction::Phase::Ready) {
@@ -1752,7 +1752,7 @@ bool GameWorld::commit_prepared_destruction(PendingDestruction& pending) {
     const std::size_t retirable = currentDebris - (parent.debris ? 1U : 0U);
     const std::size_t floorDebris = currentDebris - retirable;
     const std::size_t allowance = debrisLimit_ > floorDebris ? debrisLimit_ - floorDebris : 0U;
-    const std::size_t keptDebris = std::min(newDebris, allowance);
+    const std::size_t keptDebris = (std::min)(newDebris, allowance);
     std::size_t primary{};
     for (std::size_t i=1;i<components.size();++i)
         if (components[i].voxelCount > components[primary].voxelCount) primary=i;
@@ -1839,7 +1839,7 @@ std::optional<std::uint64_t> GameWorld::damage_sphere(GameObjectId id, Float3 wo
     if (!(radius > 0.0F) || !std::isfinite(radius)) return std::nullopt;
     // Clamp after the NaN/non-positive guard: a huge finite radius would otherwise make
     // build_damage_batches walk ~INT32_MAX subvoxel units per axis and never return.
-    radius = std::min(radius, kMaxDamageSphereRadiusMeters);
+    radius = (std::min)(radius, kMaxDamageSphereRadiusMeters);
 
     const RigidTransform current = resolve_transform(object);
     const Float3 localMeters = inverse_transform_point(current, worldCenter);
@@ -2034,7 +2034,7 @@ std::optional<GameRaycastHit> GameWorld::raycast(Float3 worldOrigin, Float3 worl
     const Float3 normalizedDirection = normalize(worldDirection);
 #endif
     for (const auto& [id, object] : objects_) {
-        if (object.visualOnly) continue; // no collision
+        if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
         if (const DeformableCollisionProxy* proxy = deformables_->collision_proxy(id)) {
             std::optional<DeformableRayHit> deformableHit;
@@ -2091,7 +2091,7 @@ std::vector<GameObjectId> GameWorld::sphere_overlap(Float3 worldCenter, float ra
     if (!(radius > 0.0F) || !std::isfinite(radius)) return result;
     const float radiusSquared = radius * radius;
     for (const auto& [id, object] : objects_) {
-        if (object.visualOnly) continue; // no collision
+        if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
 #if defined(DVE_ENABLE_DEFORMABLE_RUNTIME)
         if (const DeformableCollisionProxy* proxy = deformables_->collision_proxy(id)) {
             bool overlaps{};
@@ -2141,7 +2141,7 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
         !std::isfinite(worldDisplacement.z)) return std::nullopt;
     std::optional<GameCapsuleHit> best;
     for (const auto& [id, object] : objects_) {
-        if (object.visualOnly) continue; // no collision
+        if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
         if (id == ignoreObject || (!object.voxels && !object.polygon)) continue;
         const RigidTransform current = resolve_transform(object);
         std::optional<CapsuleSweepHit> hit;
@@ -2163,7 +2163,7 @@ std::optional<GameCapsuleHit> GameWorld::capsule_sweep(
 
 bool GameWorld::capsule_overlaps(const Capsule& worldCapsule, GameObjectId ignoreObject) const {
     for (const auto& [id, object] : objects_) {
-        if (object.visualOnly) continue; // no collision
+        if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
         if (id == ignoreObject) continue;
         const RigidTransform current = resolve_transform(object);
         if (object.voxels) {
@@ -2185,7 +2185,7 @@ GameCapsuleDepenetration GameWorld::depenetrate_capsule(
         bool found = false;
         GameObjectId bestObject = std::numeric_limits<GameObjectId>::max();
         for (const auto& [id, object] : objects_) {
-            if (object.visualOnly) continue; // no collision
+            if (!object.enabled || object.visualOnly) continue; // disabled entities and visual-only geometry do not collide
             if (id == ignoreObject || (!object.voxels && !object.polygon)) continue;
             const RigidTransform current = resolve_transform(object);
             Float3 correction{};
@@ -2193,14 +2193,14 @@ GameCapsuleDepenetration GameWorld::depenetrate_capsule(
             if (object.voxels) {
                 std::size_t iterations{};
                 correction = depenetrate_capsule_conservative(*object.voxels,current,worldCapsule,1U,
-                    std::max(0.0F,skinMeters),&iterations,multiply(object.voxelScale,object.voxelSizeMeters));
+                    (std::max)(0.0F,skinMeters),&iterations,multiply(object.voxelScale,object.voxelSizeMeters));
                 penetrated = iterations > 0U;
             } else if (object.polygonBvh) {
                 const auto contact = polygon_capsule_contact_world(
                     *object.polygonBvh, current, worldCapsule);
                 if (contact && contact->penetration > 0.0F) {
                     correction = multiply(
-                        contact->normal, contact->penetration + std::max(0.0F, skinMeters));
+                        contact->normal, contact->penetration + (std::max)(0.0F, skinMeters));
                     penetrated = true;
                 }
             }
@@ -2270,7 +2270,7 @@ GameWorld::TimerId GameWorld::schedule_once(float secondsFromNow, std::function<
 
 GameWorld::TimerId GameWorld::schedule_repeating(float intervalSeconds, std::function<void()> callback) {
     const TimerId id = nextTimerId_++;
-    const float interval = std::max(1.0F / 1000.0F, intervalSeconds);
+    const float interval = (std::max)(1.0F / 1000.0F, intervalSeconds);
     timers_.push_back({id, saturating_time_add(tickCount_, timer_ticks(interval, fixedDeltaSeconds_)), timer_ticks(interval, fixedDeltaSeconds_), authored_interval_nanoseconds(interval), tickCount_, 1U, false, std::move(callback)});
     return id;
 }
@@ -2351,7 +2351,7 @@ GameObjectId GameWorld::acquire_from_pool(
     desc.transform = transformValue;
     Component marker;
     marker.id = 1U;
-    for (const Component& existing : desc.components) marker.id = std::max(marker.id, existing.id + 1U);
+    for (const Component& existing : desc.components) marker.id = (std::max)(marker.id, existing.id + 1U);
     marker.type = "dve.pool_member";
     marker.properties.emplace("pool", pool.name);
     marker.properties.emplace("slot", static_cast<std::int64_t>(id));
@@ -2578,6 +2578,15 @@ void state_hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& m) 
         state_hash_value(hash, m.transmission); state_hash_value(hash, m.indexOfRefraction);
         state_hash_float3(hash, m.attenuationColor); state_hash_value(hash, m.attenuationDistanceMeters);
     }
+    if (material_has_sheen(m)) {   // likewise
+        state_hash_float3(hash, m.sheenColor); state_hash_value(hash, m.sheenRoughness);
+    }
+    if (material_has_iridescence(m)) {   // likewise
+        state_hash_value(hash, m.iridescence); state_hash_value(hash, m.iridescenceIor);
+        state_hash_value(hash, m.iridescenceThicknessNm);
+    }
+    if(material_has_normal_map(m)){state_hash_value(hash,m.normalMap->contentHash);state_hash_value(hash,m.normalMapTileMeters);state_hash_value(hash,m.normalMapStrength);state_hash_value(hash,m.normalMapSharpness);}
+    if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)state_hash_value(hash,material_surface_detail_hash(m.surfaceDetail));
     state_hash_value(hash, m.densityKilogramsPerCubicMeter); state_hash_value(hash, m.structuralStrength);
     state_hash_value(hash, m.fractureResistance); state_hash_value(hash, m.flammability);
     state_hash_value(hash, m.thermalConductivity); state_hash_value(hash, m.transparent);
@@ -3021,7 +3030,7 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
     }
     for (const auto& [id, pool] : pools_) {
         (void)id;
-        for (const GameObjectId reserved : pool.freeIds) highestReserved = std::max(highestReserved, reserved);
+        for (const GameObjectId reserved : pool.freeIds) highestReserved = (std::max)(highestReserved, reserved);
     }
 
     // 5. Timers matched by id; ids, order and the clock continue from the save. Live timers
@@ -3099,15 +3108,15 @@ bool GameWorld::restore_save_state(const GameWorldSaveState& state, GameWorldRes
     GameObjectId highestObject = 0U;
     for (const auto& [id, object] : objects_) {
         (void)object;
-        highestObject = std::max(highestObject, id);
+        highestObject = (std::max)(highestObject, id);
     }
-    nextId_ = std::max({state.nextObjectId, highestObject + 1U, highestReserved + 1U});
+    nextId_ = (std::max)({state.nextObjectId, highestObject + 1U, highestReserved + 1U});
     GameObjectPoolId highestPool = 0U;
     for (const auto& [id, pool] : pools_) {
         (void)pool;
-        highestPool = std::max(highestPool, id);
+        highestPool = (std::max)(highestPool, id);
     }
-    nextPoolId_ = std::max(state.nextPoolId, highestPool + 1U);
+    nextPoolId_ = (std::max)(state.nextPoolId, highestPool + 1U);
     if (report) *report = local;
     return true;
 }

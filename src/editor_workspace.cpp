@@ -702,6 +702,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"voxel.boolean_operands_hide","Voxel","Boolean Operands: Hide",""},
         {"voxel.boolean_operands_delete","Voxel","Boolean Operands: Delete",""},
         {"voxel.boolean_operands_keep","Voxel","Boolean Operands: Keep",""},
+        {"prototype.kit","Tools","Gameplay Prototype Kit",""},
         {"create.subdivision","Create","Subdivision Surface",""},
         {"nurbs.create_patch","NURBS","Create Editable Patch",""},
         {"nurbs.create_circle","NURBS","Create Rational Circle",""},
@@ -745,6 +746,13 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"nurbs.seam_unlink","NURBS","Unlink Seam (Keep Matched Geometry)",""},
         {"nurbs.source_attach_c0","NURBS","Match Other Boundary to Active (C0)",""},
         {"nurbs.source_attach_c1","NURBS","Match Other Boundary to Active (C1)",""},
+        {"nurbs.source_project_persistent","NURBS","Project Other Curve as Persistent UV Guide",""},
+        {"nurbs.source_curve_refresh","NURBS","Refresh Latest Surface Curve from Projection Source",""},
+        {"nurbs.source_curve_remove","NURBS","Remove Latest Surface Curve",""},
+        {"nurbs.source_trim_curve","NURBS","Trim with Latest Closed Surface Curve (Add Hole/Loop)",""},
+        {"nurbs.source_untrim","NURBS","Untrim Surface (Keep UV Curves)",""},
+        {"nurbs.source_trim_invert","NURBS","Invert Retained Trim Regions",""},
+        {"nurbs.source_trim_region","NURBS","Keep Hovered Trim Region",""},
         {"nurbs.source_project","NURBS","Project Other Curve Samples onto Active Surface",""},
         {"nurbs.source_intersect_planes","NURBS","Intersect Two Affine Planar Patches",""},
         {"nurbs.source_crop","NURBS","Crop Central Surface by Parameter Margin",""},
@@ -880,6 +888,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
         {"mesh.chamfer_edges","Polygon","Chamfer Edges (Convex)",""},
         {"mesh.fillet_edges","Polygon","Rounded Fillet Edges (Convex)",""},
         {"mesh.subdivide","Polygon","Subdivide Selected Faces",""},
+        {"mesh.displace","Polygon","Displace from Height Texture (Bake)",""},
         {"mirror.live_x","Polygon","Live Mirror X",""}, {"mirror.live_y","Polygon","Live Mirror Y",""},
         {"mirror.live_z","Polygon","Live Mirror Z",""}, {"mirror.apply_live","Polygon","Apply Live Mirror (weld seam)",""},
         {"mirror.mesh_x","Polygon","Mirror Mesh X (weld seam)",""}, {"mirror.mesh_y","Polygon","Mirror Mesh Y (weld seam)",""},
@@ -991,7 +1000,7 @@ EditorMenuRegistry EditorMenuRegistry::make_default() {
     for(auto id:{"mesh.boolean_union","mesh.boolean_difference","mesh.boolean_reverse","mesh.boolean_intersection"})configure(id,"Mesh Booleans",70);
     for(auto id:{"mesh.exact_boolean_union","mesh.exact_boolean_difference","mesh.exact_boolean_reverse","mesh.exact_boolean_intersection","mesh.exact_collision"})configure(id,"Exact CAD Booleans",71);
     for(auto id:{"mesh.hull_fit","mesh.hull_edit","mesh.hull_remove"})configure(id,"Collision Hull",75);
-    for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
+    for(auto id:{"mesh.bevel_edges","mesh.subdivide","mesh.displace","mesh.split_edges","mesh.flip_diagonal","mesh.bridge","mesh.cap","mesh.hard_normals","mesh.smooth_normals","mesh.diagnostics","mesh.uv_editor"})configure(id,"Mesh Editing",80);
     for(auto id:{"mesh.uv_editor","mesh.uv_mark_seam","mesh.uv_clear_seam","mesh.uv_toggle_pin","mesh.uv_reset_flags"})configure(id,"UV Editing",82);
     for (auto id:{"polygon.assign_material","polygon.weld","polygon.select_shell","polygon.select_loop","polygon.select_ring","polygon.select_invert","polygon.select_none","polygon.extract",
                  "polygon.join","polygon.separate","polygon.slice","polygon.preview_apply","polygon.preview_cancel"}) configure(id,"Mesh Editing",80);

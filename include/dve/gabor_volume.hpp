@@ -132,6 +132,10 @@ struct GaborVolumeFramePlan {
     const GaborVolumeRenderSettings& settings,
     float projectedDiameterPixels = 256.0F) noexcept;
 
+// The same finite-support kernel used by the density field and CPU BVH path.
+[[nodiscard]] float evaluate_gabor_primitive_density(
+    const GaborVolumePrimitive& primitive, Float3 localPosition) noexcept;
+
 [[nodiscard]] float evaluate_gabor_density(
     const GaborVolumeAsset& asset,
     Float3 worldPosition,

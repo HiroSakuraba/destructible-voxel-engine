@@ -18,7 +18,7 @@ void append_bytes(std::vector<std::byte>& destination, std::span<T> values) {
 GpuPolygonVertex pack_vertex(const PolygonVertex& v) {
     return {v.position.x,v.position.y,v.position.z,v.normal.x,v.normal.y,v.normal.z,
             v.tangent.x,v.tangent.y,v.tangent.z,v.tangent.w,v.texcoord.x,v.texcoord.y,
-            v.color.x,v.color.y,v.color.z,v.color.w};
+            v.color.x,v.color.y,v.color.z,v.color.w,v.texcoord1.x,v.texcoord1.y};
 }
 }
 

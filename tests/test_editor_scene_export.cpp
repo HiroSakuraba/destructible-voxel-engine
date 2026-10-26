@@ -10,6 +10,9 @@
 //    visual-only voxels (and a field that never reaches the threshold is skipped)
 //  - components (and tags/groups/layer as dve.membership) survive into GameWorld; unknown
 //    engine types are dropped with a warning; attachments are real in the loaded world
+//  - component-only objects export as bodyless runtime markers (explicit dve.marker): the
+//    marker id never collides with a synthesized dve.membership id, .dmesh-backed objects are
+//    never tagged (own test), and a hand-added dve.marker next to geometry is dropped
 #include "dve/content_source.hpp"
 #include "dve/editor_document.hpp"
 #include "dve/editor_materials.hpp"
@@ -517,6 +520,127 @@ void test_components_and_attachments() {
     CHECK(cartVelocity && lampVelocity && std::abs(lampVelocity->y - cartVelocity->y) < 1.0e-3F);
     std::filesystem::remove_all(root);
 }
+void test_runtime_markers() {
+    using namespace dve::editor;
+    const auto root = make_temp_dir("markers");
+    std::string error;
+    const auto spawn = [] {
+        dve::Component component;
+        component.type = "dve.spawn";
+        component.properties["category"] = std::string("start");
+        return component;
+    };
+
+    EditorDocument document("Markers");
+    document.add_object(voxel_object(1, "Ground", {0, -1, 0}, 1, 4));
+    // Marker with tags: exportable_components synthesizes dve.membership next to dve.spawn.
+    EditorObject tagged(2, "Tagged marker");
+    tagged.tags = {"hero"};
+    document.add_object(std::move(tagged));
+    CHECK(document.add_component(2, spawn(), &error) != nullptr);
+    // Plain marker without tags.
+    document.add_object(EditorObject(3, "Plain marker"));
+    CHECK(document.add_component(3, spawn(), &error) != nullptr);
+
+    const auto materials = EditorMaterialLibrary::make_default();
+    EditorSceneExportOptions options;
+    const auto manifest = root / "out/m.dvoxscene.json";
+    std::filesystem::create_directories(manifest.parent_path());
+    const auto result = export_editor_scene(document, materials, manifest, options);
+    CHECK(result.success);
+    if (!result.success) { std::cerr << result.error << "\n"; return; }
+    CHECK(result.objects.size() == 3U);
+
+    const Loaded loaded = load(root / "out", "m.dvoxscene.json");
+    CHECK(static_cast<bool>(loaded.result));
+    if (loaded.result.objects.size() != 3U) { std::filesystem::remove_all(root); return; }
+    const auto componentsOf = [&](std::size_t index) {
+        return loaded.world->components(loaded.result.objects[index].gameObjectId);
+    };
+    const auto countOf = [](const std::vector<dve::Component>* components, const char* type) {
+        std::size_t count = 0;
+        if (components) for (const auto& component : *components) count += component.type == type ? 1U : 0U;
+        return count;
+    };
+    // Tagged marker: spawn + membership + marker, three distinct ids.
+    const auto* tagged2 = componentsOf(1);
+    CHECK(tagged2 != nullptr && tagged2->size() == 3U);
+    if (tagged2 && tagged2->size() == 3U) {
+        CHECK((*tagged2)[0].id != (*tagged2)[1].id && (*tagged2)[0].id != (*tagged2)[2].id &&
+              (*tagged2)[1].id != (*tagged2)[2].id);
+    }
+    CHECK(countOf(tagged2, "dve.marker") == 1U && countOf(tagged2, "dve.membership") == 1U);
+    CHECK(loaded.world->geometry_kind(loaded.result.objects[1].gameObjectId) == dve::GameGeometryKind::Marker);
+    CHECK(loaded.world->find_by_tag("hero").size() == 1U);
+    CHECK(countOf(componentsOf(2), "dve.marker") == 1U);
+    CHECK(loaded.world->geometry_kind(loaded.result.objects[2].gameObjectId) == dve::GameGeometryKind::Marker);
+    std::filesystem::remove_all(root);
+}
+
+void test_stray_marker_dropped_from_geometry() {
+    using namespace dve::editor;
+    const auto root = make_temp_dir("stray_marker");
+    std::string error;
+    // A hand-added dve.marker on real voxel geometry must not make the export unloadable.
+    EditorDocument document("Stray");
+    document.add_object(voxel_object(1, "Solid", {0, 0, 0}, 1, 2));
+    dve::Component strayMarker;
+    strayMarker.type = "dve.marker";
+    CHECK(document.add_component(1, strayMarker, &error) != nullptr);
+    const auto manifest = root / "out/x.dvoxscene.json";
+    std::filesystem::create_directories(manifest.parent_path());
+    const auto result = export_editor_scene(document, EditorMaterialLibrary::make_default(), manifest);
+    CHECK(result.success);
+    if (!result.success) { std::cerr << result.error << "\n"; return; }
+    CHECK(contains(result.warnings, "'Solid': dve.marker component dropped"));
+    const Loaded loaded = load(root / "out", "x.dvoxscene.json");
+    CHECK(static_cast<bool>(loaded.result));
+    if (loaded.result.objects.size() == 1U) {
+        const auto id = loaded.result.objects[0].gameObjectId;
+        CHECK(loaded.world->geometry_kind(id) == dve::GameGeometryKind::Voxel);
+        const auto* components = loaded.world->components(id);
+        CHECK(components == nullptr || components->empty());
+    }
+    std::filesystem::remove_all(root);
+}
+void test_source_backed_polygon_is_not_marker() {
+    using namespace dve::editor;
+    const auto root = make_temp_dir("source_marker");
+    std::filesystem::create_directories(root / "project/assets");
+    std::ofstream(root / "project/project.dveproject") << "DVE_PROJECT 1\n";
+    std::string error;
+    CHECK(dve::write_dmesh(root / "project/assets/box.dmesh",
+                           dve::test_fixtures::make_box_polygon({0.5F, 0.25F, 0.5F}, {0.8F, 0.2F, 0.2F, 1}, 7), &error));
+    EditorDocument document("Sourced");
+    document.add_object(voxel_object(1, "Ground", {0, -1, 0}, 1, 4));
+    // A .dmesh-backed object has no embedded polygon and no voxels but does carry components: it is
+    // polygon geometry, so tagging it dve.marker would make the loader reject the whole scene.
+    EditorObject sourced(2, "Sourced crate");
+    sourced.sourceAsset = "assets/box.dmesh";
+    sourced.transform = at({0, 2, 0});
+    document.add_object(std::move(sourced));
+    dve::Component spawn;
+    spawn.type = "dve.spawn";
+    spawn.properties["category"] = std::string("start");
+    CHECK(document.add_component(2, spawn, &error) != nullptr);
+    EditorSceneExportOptions options;
+    options.projectRoot = root / "project";
+    const auto manifest = root / "out/s.dvoxscene.json";
+    std::filesystem::create_directories(manifest.parent_path());
+    const auto result = export_editor_scene(document, EditorMaterialLibrary::make_default(), manifest, options);
+    CHECK(result.success);
+    if (!result.success) { std::cerr << result.error << "\n"; return; }
+    CHECK(read_string(manifest).find("dve.marker") == std::string::npos);
+    const Loaded loaded = load(root / "out", "s.dvoxscene.json");
+    CHECK(static_cast<bool>(loaded.result));
+    if (loaded.result.objects.size() == 2U) {
+        const auto id = loaded.result.objects[1].gameObjectId;
+        CHECK(loaded.world->geometry_kind(id) == dve::GameGeometryKind::Polygon);
+        const auto* components = loaded.world->components(id);
+        CHECK(components != nullptr && components->size() == 1U && (*components)[0].type == "dve.spawn");
+    }
+    std::filesystem::remove_all(root);
+}
 } // namespace
 
 int main() {
@@ -526,6 +650,9 @@ int main() {
     test_text3d_bake();
     test_gabor_bake();
     test_components_and_attachments();
+    test_runtime_markers();
+    test_source_backed_polygon_is_not_marker();
+    test_stray_marker_dropped_from_geometry();
     if (failures != 0) {
         std::cerr << "dve_editor_scene_export_tests: " << failures << " failure(s)\n";
         return 1;

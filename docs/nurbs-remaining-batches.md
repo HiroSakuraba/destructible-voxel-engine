@@ -9,6 +9,6 @@ Requested sequence:
 5. General surface intersections: bounded numerical tracing of curved branches, boundary/tangency diagnostics and validated trimming curves.
 6. Surface blends, fillets and offsets: transition strips, tangent/curvature controls, rolling-ball fillets and trimming support.
 
-Implement and validate these in order, with a separate reviewable PR and HTML worklist update for each. The merged network baseline permits acyclic C0/C1 driving graphs; later batches must retain transactional publication, stale-state guards, persistence and history. Numerical approximations must state their bounds and unsupported cases without implying full Maya/Softimage parity.
+The latest user instruction combines batches 2–4 into one reviewable PR. The merged network baseline permits acyclic C0/C1 driving graphs; later batches must retain transactional publication, stale-state guards, persistence and history. Numerical approximations must state their bounds and unsupported cases without implying full Maya/Softimage parity.
 
-Batch 1 is implemented and locally validated, ready for review. Next: batch 2. Batches 2–6 remain authorized and pending; continue in the order above.
+Batch 1 is part of the current baseline. Batches 2–4 are implemented together in the current PR; see `nurbs-refinement-curves-trimming-2026-10-22.md` for contracts, validation and explicit limits. The next proposed batches are 5 (general curved-surface intersections) and 6 (surface blends, fillets and offsets).

@@ -65,6 +65,11 @@ void test_dvox_all_encodings(const std::filesystem::path& temp) {
     asset.materials[1].foliageColor = {0.2F, 0.7F, 0.1F};
     asset.materials[1].foliageTransmittance = 0.6F;
     asset.materials[1].foliageWrap = 0.4F;
+    asset.materials[1].sheenColor = {0.65F, 0.3F, 0.15F};
+    asset.materials[1].sheenRoughness = 0.45F;
+    asset.materials[1].iridescence = 0.75F;
+    asset.materials[1].iridescenceIor = 1.31F;
+    asset.materials[1].iridescenceThicknessNm = 380.0F;
     asset.materials[1].layers.push_back({2, 0.25F, dve::MaterialLayerBlendMode::Multiply, true});
     asset.object.fill_brick({0, 0, 0}, 1);
     asset.object.set_voxel({8, 0, 0}, 2);
@@ -91,6 +96,11 @@ void test_dvox_all_encodings(const std::filesystem::path& temp) {
             "DVOX shading model did not round trip");
     require(loadedMaterial.specular == 0.65F && loadedMaterial.clearCoat == 0.9F &&
             loadedMaterial.clearCoatRoughness == 0.07F, "DVOX clear-coat fields did not round trip");
+    require(loadedMaterial.sheenColor.x == 0.65F && loadedMaterial.sheenColor.y == 0.3F &&
+            loadedMaterial.sheenColor.z == 0.15F && loadedMaterial.sheenRoughness == 0.45F,
+            "DVOX sheen fields did not round trip");
+    require(loadedMaterial.iridescence == 0.75F && loadedMaterial.iridescenceIor == 1.31F &&
+            loadedMaterial.iridescenceThicknessNm == 380.0F, "DVOX iridescence fields did not round trip");
     require(loadedMaterial.layers.size() == 1 && loadedMaterial.layers[0].sourceMaterial == 2 &&
             loadedMaterial.layers[0].blendMode == dve::MaterialLayerBlendMode::Multiply,
             "DVOX material layers did not round trip");

@@ -4,18 +4,6 @@
 
 namespace dve {
 
-struct Quaternion {
-    float x{};
-    float y{};
-    float z{};
-    float w{1.0F};
-};
-
-struct RigidTransform {
-    Float3 position{};
-    Quaternion rotation{};
-};
-
 struct MovingRigidTransform {
     RigidTransform previous{};
     RigidTransform current{};

@@ -86,9 +86,12 @@ void mip_cache(){
     second.materials[0].baseColor.w=0.5F;second.materials[0].blendMode=MaterialBlendMode::Translucent;
     second.images[0].rgba8[0]=20;asset.contentHash=polygon_asset_content_hash(asset);second.contentHash=polygon_asset_content_hash(second);
     const PolygonRenderInstance transparent[]{{1,&asset},{2,&second,{{0,0,-0.1F}}}};
-    PolygonRenderCache single(84);options.enableTextures=true;options.cache=&single;
+    // One cache entry is the 84-byte base chain plus the 84-byte sRGB variant chain
+    // (variant payloads count toward the budget, per the renderer's documented rule);
+    // a 168-byte budget therefore holds exactly one of the two assets.
+    PolygonRenderCache single(168);options.enableTextures=true;options.cache=&single;
     (void)renderer.render(transparent,camera(),{},cached,options);options.cache=nullptr;(void)renderer.render(transparent,camera(),{},reference,options);same_frame(cached,reference);
-    check(single.cached_assets()==1 && single.resident_mip_bytes()<=84,"LRU cache exceeded byte budget");
+    check(single.cached_assets()==1 && single.resident_mip_bytes()<=168,"LRU cache exceeded byte budget");
 }
 void lod_and_player(){
     auto fine=quad(),coarse=quad(true);const PolygonLodLevel levels[]{{&coarse,0},{&fine,40}};

@@ -12,6 +12,7 @@
 #include "dve/render/voxel_reference_renderer.hpp"
 #include "dve/voxel_normal_map.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -144,6 +145,28 @@ void test_flat_and_tilted() {
     for (std::size_t i = 0; i < image.hdrColor.size(); ++i)
         spread = std::max(spread, std::abs(static_cast<double>(image.hdrColor[i].x - image.hdrColor[centre].x)));
     check(spread < 1e-4, "a constant map is constant over the floor");
+}
+
+// A flat map keeps the geometric normal where projections overlap too (tilted normals,
+// blended weights), as without a map: the whiteout blend shared with the polygon renderer.
+void test_flat_blended_projections() {
+    VoxelMaterialDefinition flat = matte();
+    flat.normalMap = constant_map(128, 128, 255);   // decodes to (0.0039, 0.0039, 1)
+    flat.normalMapStrength = 1.5F;
+    VoxelMaterialDefinition none = matte();
+    double worst = 0.0;
+    for (const Float3 raw : {Float3{0.45F, -0.55F, 0.7F}, Float3{-0.6F, 0.6F, -0.5F}, Float3{1.0F, 1.0F, 1.0F}, Float3{0.2F, -0.9F, 0.4F}}) {
+        const Float3 n = normalize(raw);
+        for (const float sharpness : {1.0F, 4.0F, 16.0F}) {
+            flat.normalMapSharpness = sharpness;
+            const Float3 p{0.37F, -1.21F, 2.05F};
+            const Float3 plain = voxel_normal_map_normal(none, p, n);
+            check(plain.x == n.x && plain.y == n.y && plain.z == n.z, "no map returns the normal unchanged");
+            worst = std::max(worst, static_cast<double>(length(subtract(voxel_normal_map_normal(flat, p, n), plain))));
+        }
+    }
+    std::printf("flat map on blended projections: worst normal difference %.5f\n", worst);
+    check(worst < 0.012, "a flat map leaves a tilted normal as it is (blended projections)");
 }
 
 void test_tiling_and_motion() {
@@ -282,6 +305,30 @@ void test_png_import(const fs::path& dir) {
     if (map)
         check(map->width == 3U && map->height == 2U && map->rgba8 == rgba && map->name == "stone_normal",
               "PNG texels come through unchanged (no sRGB conversion)");
+    // DirectX-style sources (green = down) convert at import: the flip inverts the green
+    // channel only, before the map and its content hash are built.
+    const auto flipped = import_voxel_normal_map(dir / "stone_normal.png", &error, true);
+    check(flipped != nullptr, "flipped PNG import: " + error);
+    if (map && flipped) {
+        std::vector<std::uint8_t> want = rgba;
+        for (std::size_t i = 1; i < want.size(); i += 4) want[i] = static_cast<std::uint8_t>(255U - want[i]);
+        check(flipped->rgba8 == want, "flip inverts the green channel only (R/B/A untouched)");
+        check(flipped->contentHash != map->contentHash, "the content hash covers the flipped texels");
+        const auto decoded = decode_voxel_normal_map(bytes, "stone_normal", &error, true);
+        check(decoded && decoded->rgba8 == flipped->rgba8 && decoded->contentHash == flipped->contentHash,
+              "decode with flip matches import with flip");
+        // The OpenGL twin of the same surface (green already up) imports to the identical map.
+        std::vector<std::uint8_t> twin = rgba;
+        for (std::size_t i = 1; i < twin.size(); i += 4) twin[i] = static_cast<std::uint8_t>(255U - twin[i]);
+        const auto twinBytes = png_rgba(3U, 2U, twin);
+        {
+            std::ofstream out(dir / "stone_normal_gl.png", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(twinBytes.data()), static_cast<std::streamsize>(twinBytes.size()));
+        }
+        const auto gl = import_voxel_normal_map(dir / "stone_normal_gl.png", &error);
+        check(gl && gl->rgba8 == flipped->rgba8 && gl->contentHash == flipped->contentHash,
+              "a flipped DirectX map is identical to its OpenGL twin");
+    }
     check(!import_voxel_normal_map(dir / "missing.png", &error) && !error.empty(), "a missing file is an error");
     const std::vector<std::byte> junk(16, std::byte{7});
     check(!decode_voxel_normal_map(junk, "junk", &error), "undecodable bytes are an error");
@@ -295,6 +342,7 @@ int main() {
     const fs::path dir = fs::temp_directory_path() / "dve_voxel_normal_maps_test";
     fs::create_directories(dir);
     test_flat_and_tilted();
+    test_flat_blended_projections();
     test_tiling_and_motion();
     test_dvox(dir);
     test_png_import(dir);

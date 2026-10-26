@@ -1,4 +1,5 @@
 #include "dve/render/material_resource_residency.hpp"
+#include "dve/render/polygon_renderer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -96,12 +97,13 @@ bool MaterialResourceResidency::release_asset(std::uint64_t assetContentHash,
 bool MaterialResourceResidency::ensure_image(const CookedPolygonAsset& asset,
                                               std::uint32_t imageIndex,
                                               rhi::TextureViewHandle& view,
-                                              std::string* error) {
+                                              std::string* error,
+                                              MaterialImageInterpretation interpretation) {
     if (!is_retained(asset.contentHash)) {
         set_error(error, "material image requested before retaining its asset");
         return false;
     }
-    const ImageKey key{asset.contentHash, imageIndex};
+    const ImageKey key{asset.contentHash, imageIndex, interpretation};
     if (const auto it = images_.find(key); it != images_.end()) {
         view = it->second.view;
         ++stats_.imageCacheHits;
@@ -112,6 +114,9 @@ bool MaterialResourceResidency::ensure_image(const CookedPolygonAsset& asset,
         return false;
     }
     const auto& image = asset.images[imageIndex];
+    if (image.width && image.height > std::numeric_limits<std::size_t>::max()/4U/image.width) {
+        set_error(error,"material image dimensions overflow"); return false;
+    }
     const std::size_t required = static_cast<std::size_t>(image.width) * image.height * 4U;
     if (image.width == 0U || image.height == 0U || image.rgba8.size() != required) {
         set_error(error, "material image payload is invalid");
@@ -119,28 +124,35 @@ bool MaterialResourceResidency::ensure_image(const CookedPolygonAsset& asset,
     }
 
     std::string local;
+    const auto chain=generate_texture_mips(image, interpretation==MaterialImageInterpretation::Normal,
+                                          interpretation==MaterialImageInterpretation::SrgbColor);
     rhi::TextureDesc desc;
-    desc.format = rhi::TextureFormat::RGBA8Unorm;
+    desc.format = interpretation==MaterialImageInterpretation::SrgbColor
+        ? rhi::TextureFormat::RGBA8Srgb : rhi::TextureFormat::RGBA8Unorm;
+    desc.mipLevels=static_cast<std::uint32_t>(chain.levels.size());
     desc.width = image.width;
     desc.height = image.height;
-    desc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopyDestination;
+    desc.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::CopyDestination | rhi::TextureUsage::CopySource;
     desc.initialState = rhi::ResourceState::ShaderRead;
     desc.debugName = "Shared polygon material image " + image.name;
-    ImageResource created;
+    ImageResource created;created.mipLevels=desc.mipLevels;created.format=desc.format;
     created.texture = device_.create_texture(desc, &local);
     if (!created.texture) {
         set_error(error, local);
         return false;
     }
-    if (!device_.write_texture(created.texture, 0U, 0U,
-                               std::as_bytes(std::span(image.rgba8)),
-                               static_cast<std::size_t>(image.width) * 4U, &local)) {
-        (void)device_.destroy_texture(created.texture, nullptr);
-        set_error(error, local);
-        return false;
+    for(std::uint32_t mip=0;mip<desc.mipLevels;++mip){
+        const auto& level=chain.levels[mip];
+        if(!device_.write_texture(created.texture,mip,0U,std::as_bytes(std::span(level.rgba8)),
+                                  static_cast<std::size_t>(level.width)*4U,&local)){
+            (void)device_.destroy_texture(created.texture,nullptr);
+            set_error(error,local);return false;
+        }
+        created.bytes+=level.rgba8.size();
     }
     rhi::TextureViewDesc viewDesc;
     viewDesc.texture = created.texture;
+    viewDesc.mipCount=desc.mipLevels;
     viewDesc.debugName = "Shared polygon material image view " + image.name;
     created.view = device_.create_texture_view(viewDesc, &local);
     if (!created.view) {
@@ -151,6 +163,8 @@ bool MaterialResourceResidency::ensure_image(const CookedPolygonAsset& asset,
     view = created.view;
     images_.emplace(key, created);
     ++stats_.imagesUploaded;
+    stats_.mipLevelsUploaded+=desc.mipLevels;
+    stats_.imageBytesUploaded+=created.bytes;
     return true;
 }
 
@@ -160,6 +174,9 @@ bool MaterialResourceResidency::ensure_sampler(
     if (!is_retained(asset.contentHash)) {
         set_error(error, "material sampler requested before retaining its asset");
         return false;
+    }
+    if(samplerIndex && *samplerIndex>=asset.samplers.size()){
+        set_error(error,"material sampler index is out of range");return false;
     }
     const std::uint32_t encoded = samplerIndex ? *samplerIndex + 1U : 0U;
     const SamplerKey key{asset.contentHash, encoded};
@@ -186,19 +203,10 @@ bool MaterialResourceResidency::ensure_sampler(
     desc.addressV = to_address_mode(source.wrapT);
     desc.addressW = rhi::AddressMode::Repeat;
     desc.debugName = "Shared polygon material sampler";
-    bool mipmapFallback = false;
     if (samplerPolicy_.overrideFiltering) {
         desc.minFilter = samplerPolicy_.minFilter;
         desc.magFilter = samplerPolicy_.magFilter;
         desc.mipmapFilter = samplerPolicy_.mipmapFilter;
-        // Residency images are uploaded with a single mip level, so a policy
-        // requesting mipmap filtering has no chain to sample. Fall back to
-        // non-mip filtering explicitly (and count it) instead of silently
-        // claiming trilinear/anisotropic sampling is in effect.
-        if (desc.mipmapFilter == rhi::MipmapFilterMode::Linear) {
-            desc.mipmapFilter = rhi::MipmapFilterMode::Nearest;
-            mipmapFallback = true;
-        }
         const float grantedAnisotropy = effective_max_anisotropy();
         if (samplerPolicy_.anisotropy && grantedAnisotropy > 1.0F) {
             desc.anisotropy = true;
@@ -214,7 +222,6 @@ bool MaterialResourceResidency::ensure_sampler(
     samplers_.emplace(key, sampler);
     ++stats_.samplersCreated;
     if (desc.anisotropy) ++stats_.anisotropicSamplersCreated;
-    if (mipmapFallback) ++stats_.mipmapFallbackSamplersCreated;
     return true;
 }
 
@@ -224,7 +231,13 @@ float MaterialResourceResidency::effective_max_anisotropy() const noexcept {
     const float limit = device_.capabilities().maxSamplerAnisotropy;
     if (!std::isfinite(request) || request < 1.0F) return 1.0F;
     if (!std::isfinite(limit) || limit < 1.0F) return 1.0F;
-    return std::min(request, limit);
+    return (std::min)(request, limit);
+}
+
+const MaterialResidentImage* MaterialResourceResidency::find_image(std::uint64_t assetContentHash,
+    std::uint32_t imageIndex,MaterialImageInterpretation interpretation) const noexcept {
+    const auto found=images_.find({assetContentHash,imageIndex,interpretation});
+    return found==images_.end()?nullptr:&found->second;
 }
 
 bool MaterialResourceResidency::is_retained(std::uint64_t assetContentHash) const noexcept {
@@ -243,6 +256,7 @@ MaterialResourceResidencyStats MaterialResourceResidency::stats() const noexcept
     result.retainedAssetCount = assetReferences_.size();
     result.imageResourceCount = images_.size();
     result.samplerResourceCount = samplers_.size();
+    for(const auto& [key,image]:images_){(void)key;result.residentImageBytes+=image.bytes;}
     for (const auto& [asset, references] : assetReferences_) {
         (void)asset;
         result.assetReferenceCount += references;

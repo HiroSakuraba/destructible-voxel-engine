@@ -95,6 +95,7 @@ endif()
 message(STATUS "DVE geometry profile: ${DVE_GEOMETRY_MODE_NORMALIZED}")
 
 add_library(dve_core
+    src/material_surface_detail.cpp
     src/compressed_texture.cpp
     src/brick.cpp
     src/voxel_object.cpp
@@ -146,6 +147,17 @@ add_library(dve_core
     src/character_controller2d.cpp
     src/game_world.cpp
     src/gameplay_runtime.cpp
+    src/prototype_components.cpp
+    src/racing_game.cpp
+    src/water_ocean.cpp
+    src/water_hydrodynamics.cpp
+    src/water_vessel_dynamics.cpp
+    src/water_game.cpp
+    src/flying_game.cpp
+    src/flight_wind.cpp
+    src/flight_aerodynamics.cpp
+    src/prototype_game.cpp
+    src/prototype_hud.cpp
     src/replication_contract.cpp
     src/network_simulation.cpp
     src/network_crypto.cpp
@@ -161,6 +173,7 @@ add_library(dve_core
     src/dashr_surface.cpp
     src/dashr_seam_map.cpp
     src/material_layers.cpp
+    src/rgba8_png.cpp
     src/material_decal.cpp
     src/material_displacement.cpp
     src/procedural_noise.cpp
@@ -170,8 +183,10 @@ add_library(dve_core
     src/gpu_material_parameter_collection.cpp
     src/master_material.cpp
     src/gpu_material_buffer.cpp
+    src/gpu_material_surface_detail.cpp
     src/gpu_material_mapping.cpp
     src/render_environment.cpp
+    src/material_bake_options.cpp
     src/gpu_render_environment.cpp
     src/dvox.cpp
     src/matrix4.cpp
@@ -181,9 +196,12 @@ add_library(dve_core
     src/nurbs_modeling.cpp
     src/nurbs_attachment.cpp
     src/nurbs_tessellation.cpp
+    src/nurbs_trimming.cpp
     src/nurbs_queries.cpp
     src/nurbs_degree.cpp
     src/polygon_asset.cpp
+    src/polygon_tangents.cpp
+    third_party/mikktspace/mikktspace.c
     src/text3d.cpp
     src/gabor_volume.cpp
     src/runtime_mesh_world.cpp
@@ -221,6 +239,8 @@ add_library(dve_core
     src/runtime_replay.cpp
 )
 add_library(dve::core ALIAS dve_core)
+# mikktspace.c is ISO C in a CXX-only project; it compiles cleanly as C++.
+set_source_files_properties(third_party/mikktspace/mikktspace.c PROPERTIES LANGUAGE CXX)
 target_include_directories(dve_core PUBLIC $<BUILD_INTERFACE:${DVE_GENERATED_INCLUDE_DIR}>)
 if(DVE_ENABLE_FLUODDITY)
     target_sources(dve_core PRIVATE src/fluoddity.cpp src/fluoddity_solver.cpp src/runtime_fluoddity_world.cpp)
@@ -707,6 +727,12 @@ if(DVE_BUILD_RHI)
         src/render/dashr_live_surface.cpp
         src/render/mesh_heap.cpp
         src/render/polygon_renderer.cpp
+        src/render/texture_mips.cpp
+        src/render/material_texture_bake.cpp
+        src/render/material_bake_atlas.cpp
+        src/render/layered_surface.cpp
+        src/render/cpu_fog.cpp
+        src/render/cpu_fog_cache.cpp
         src/render/sprite_renderer.cpp
         src/render/texture_residency.cpp
         src/render/texture_preview.cpp
@@ -723,9 +749,13 @@ if(DVE_BUILD_RHI)
         src/render/ambient_occlusion.cpp
         src/render/surface_shading.cpp
         src/render/atmosphere.cpp
+        src/render/scene_lighting.cpp
+        src/render/ies_profile.cpp
+        src/render/material_bsdf.cpp
         src/render/volumetric_fog.cpp
         src/render/ambient_occlusion_gpu.cpp
         src/render/live_environment_renderer.cpp
+        src/render/live_optical_scene.cpp
         src/render/material_resource_residency.cpp
         src/render/main_material_table.cpp
         src/render/shadow_material_table.cpp
@@ -743,6 +773,11 @@ if(DVE_BUILD_RHI)
         target_sources(dve_render_bridge PRIVATE src/render/cpu_hair_renderer.cpp)
     endif()
     add_library(dve::render_bridge ALIAS dve_render_bridge)
+
+    add_executable(dve_bake_material apps/dve_bake_material.cpp)
+    target_link_libraries(dve_bake_material PRIVATE dve::render_bridge)
+    add_executable(dve_cpu_fog_bench apps/cpu_fog_bench.cpp)
+    target_link_libraries(dve_cpu_fog_bench PRIVATE dve::render_bridge)
     target_include_directories(dve_render_bridge PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_render_bridge PUBLIC cxx_std_23)
     target_link_libraries(dve_render_bridge PUBLIC dve::core dve::rhi)
@@ -873,6 +908,8 @@ if(DVE_BUILD_EDITOR)
         src/editor_native_cad_step.cpp
         src/editor_modeling_topology.cpp
         src/editor_nurbs.cpp
+        src/editor_nurbs_surface.cpp
+        src/editor_native_nurbs_surface.cpp
         src/editor_native_nurbs.cpp
         src/editor_native_nurbs_construction.cpp
         src/editor_native_nurbs_topology.cpp
@@ -889,6 +926,7 @@ if(DVE_BUILD_EDITOR)
         src/editor_edge_bevel.cpp
         src/editor_exact_cad.cpp
         src/editor_topology.cpp
+        src/editor_mesh_displacement.cpp
         src/editor_uv.cpp
         src/editor_model_import.cpp
         src/editor_tools.cpp
@@ -910,6 +948,16 @@ if(DVE_BUILD_EDITOR)
         src/editor_import_preview.cpp
         src/editor_project.cpp
         src/editor_file_workflow.cpp
+        src/editor_material_presets.cpp
+        src/editor_racing.cpp
+        src/editor_flying.cpp
+        src/editor_water.cpp
+        src/editor_prototype.cpp
+        src/editor_native_prototype.cpp
+        src/editor_material_bake.cpp
+        src/editor_material_inspection.cpp
+        src/editor_material_preview.cpp
+        src/editor_native_materials.cpp
         src/editor_materials.cpp
         src/editor_text3d.cpp
         src/editor_viewport.cpp
@@ -926,7 +974,19 @@ if(DVE_BUILD_EDITOR)
         src/editor_audio_workspace.cpp
         src/editor_audio_event.cpp
         src/editor_platform_bridge.cpp)
+    if(TARGET dve_render_bridge)
+        target_link_libraries(dve_editor PUBLIC dve::render_bridge)
+        target_compile_definitions(dve_editor PRIVATE DVE_EDITOR_MATERIAL_PREVIEW_RENDERER=1)
+    endif()
     add_library(dve::editor ALIAS dve_editor)
+    add_executable(dve_create_racing apps/dve_create_racing.cpp)
+    target_link_libraries(dve_create_racing PRIVATE dve::editor)
+    add_executable(dve_create_water apps/dve_create_water.cpp)
+    target_link_libraries(dve_create_water PRIVATE dve::editor)
+    add_executable(dve_create_flying apps/dve_create_flying.cpp)
+    target_link_libraries(dve_create_flying PRIVATE dve::editor)
+    add_executable(dve_create_prototype apps/dve_create_prototype.cpp)
+    target_link_libraries(dve_create_prototype PRIVATE dve::editor)
     target_include_directories(dve_editor PUBLIC ${DVE_PUBLIC_INCLUDE_DIRS})
     target_compile_features(dve_editor PUBLIC cxx_std_23)
     target_link_libraries(dve_editor PUBLIC dve::core dve::asset_pipeline dve::sprite_tools dve::platform dve::audio_synth)
@@ -941,6 +1001,10 @@ if(DVE_BUILD_EDITOR)
     if(DVE_ENABLE_SANITIZERS AND NOT MSVC)
         target_compile_options(dve_editor PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(dve_editor PUBLIC -fsanitize=address,undefined)
+    endif()
+    if(TARGET dve_render_bridge)
+        add_executable(dve_material_preset_gallery apps/material_preset_gallery.cpp)
+        target_link_libraries(dve_material_preset_gallery PRIVATE dve::editor)
     endif()
     add_executable(dve_editor_demo apps/dve_editor_demo.cpp)
     target_link_libraries(dve_editor_demo PRIVATE dve::editor)
@@ -1939,6 +2003,69 @@ if(DVE_BUILD_TESTS)
         target_link_libraries(dve_vulkan_camera_outputs_tests PRIVATE dve::render_bridge dve::rhi_vulkan)
         add_test(NAME dve_vulkan_camera_outputs_tests COMMAND dve_vulkan_camera_outputs_tests)
 
+        if(TARGET dve_editor)
+            add_executable(dve_gpu_material_surfaces_tests tests/test_gpu_material_surfaces.cpp)
+            target_link_libraries(dve_gpu_material_surfaces_tests PRIVATE dve::rhi_vulkan dve::editor)
+            add_executable(dve_gpu_clear_glass_tests tests/test_gpu_clear_glass.cpp)
+            target_link_libraries(dve_gpu_clear_glass_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
+            add_test(NAME dve_gpu_clear_glass_tests COMMAND dve_gpu_clear_glass_tests)
+            find_program(DVE_DXC_EXECUTABLE NAMES dxc)
+            set(_dve_dxc_spirv OFF)
+            if(DVE_DXC_EXECUTABLE)
+                # Some DXC builds (e.g. the Windows SDK copy) lack SPIR-V codegen; probe before using it.
+                set(_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/dxc-spirv-probe")
+                file(MAKE_DIRECTORY "${_probe_dir}")
+                file(WRITE "${_probe_dir}/probe.hlsl" "float4 main() : SV_Target { return 0; }\n")
+                execute_process(COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -T ps_6_0 -E main
+                        -Fo "${_probe_dir}/probe.spv" "${_probe_dir}/probe.hlsl"
+                    RESULT_VARIABLE _probe_result OUTPUT_QUIET ERROR_QUIET)
+                if(_probe_result EQUAL 0 AND EXISTS "${_probe_dir}/probe.spv")
+                    set(_dve_dxc_spirv ON)
+                else()
+                    message(STATUS "DXC at ${DVE_DXC_EXECUTABLE} has no SPIR-V codegen; GPU surface shader test will skip")
+                endif()
+            endif()
+            if(_dve_dxc_spirv)
+                set(_surface_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/surface-shaders")
+                file(GLOB _surface_shader_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/common/*.hlsli")
+                set(_surface_shader_outputs)
+                foreach(_shader IN ITEMS live_ibl_material_vs live_ibl_material_ps live_csm_caster_vs live_csm_caster_ps live_environment_skybox_vs live_environment_skybox_ps material_surface_detail_reference live_clear_glass_ps clear_glass_reference)
+                    if(_shader MATCHES "_vs$")
+                        set(_profile vs_6_0)
+                    elseif(_shader MATCHES "_ps$")
+                        set(_profile ps_6_0)
+                    else()
+                        set(_profile cs_6_0)
+                    endif()
+                    set(_spv "${_surface_shader_dir}/${_shader}.spv")
+                    add_custom_command(OUTPUT "${_spv}"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${_surface_shader_dir}"
+                        COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                            -T ${_profile} -E main -Fo "${_spv}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}.hlsl"
+                        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}.hlsl" ${_surface_shader_headers}
+                        VERBATIM)
+                    list(APPEND _surface_shader_outputs "${_spv}")
+                endforeach()
+                foreach(_mode IN ITEMS COLOR NORMAL EMISSION CHANNELS)
+                    string(TOLOWER "${_mode}" _mode_lower)
+                    set(_spv "${_surface_shader_dir}/live_ibl_material_ps_${_mode_lower}.spv")
+                    add_custom_command(OUTPUT "${_spv}"
+                        COMMAND ${CMAKE_COMMAND} -E make_directory "${_surface_shader_dir}"
+                        COMMAND "${DVE_DXC_EXECUTABLE}" -spirv -fspv-target-env=vulkan1.2 -fvk-use-dx-layout
+                            -T ps_6_0 -E main -D DVE_SURFACE_DEBUG_${_mode}=1 -Fo "${_spv}"
+                            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/live_ibl_material_ps.hlsl"
+                        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/live_ibl_material_ps.hlsl" ${_surface_shader_headers}
+                        VERBATIM)
+                    list(APPEND _surface_shader_outputs "${_spv}")
+                endforeach()
+                add_custom_target(dve_surface_test_shaders DEPENDS ${_surface_shader_outputs})
+                add_dependencies(dve_gpu_material_surfaces_tests dve_surface_test_shaders)
+                add_dependencies(dve_gpu_clear_glass_tests dve_surface_test_shaders)
+                target_compile_definitions(dve_gpu_clear_glass_tests PRIVATE DVE_SURFACE_SHADER_DIR="${_surface_shader_dir}")
+                target_compile_definitions(dve_gpu_material_surfaces_tests PRIVATE DVE_SURFACE_SHADER_DIR="${_surface_shader_dir}")
+            endif()
+            add_test(NAME dve_gpu_material_surfaces_tests COMMAND dve_gpu_material_surfaces_tests)
+        endif()
         add_executable(dve_vulkan_environment_lighting_tests tests/test_vulkan_environment_lighting.cpp)
         target_link_libraries(dve_vulkan_environment_lighting_tests PRIVATE dve::rhi_vulkan dve::render_bridge)
         add_test(NAME dve_vulkan_environment_lighting_tests COMMAND dve_vulkan_environment_lighting_tests)
@@ -2641,11 +2768,55 @@ if(DVE_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/dve_pack_autosave_exclusion.cmake)
 
     if(DVE_BUILD_EDITOR)
+        if(TARGET dve_render_bridge)
+            add_executable(dve_material_bake_preparation_tests tests/test_material_bake_preparation.cpp)
+            target_link_libraries(dve_material_bake_preparation_tests PRIVATE dve::editor)
+            add_test(NAME dve_material_bake_preparation_tests COMMAND dve_material_bake_preparation_tests)
+            add_executable(dve_material_bake_workflow_tests tests/test_material_bake_workflow.cpp)
+            target_link_libraries(dve_material_bake_workflow_tests PRIVATE dve::editor)
+            add_test(NAME dve_material_bake_workflow_tests COMMAND dve_material_bake_workflow_tests)
+            add_executable(dve_material_texture_bake_tests tests/test_material_texture_bake.cpp)
+            target_link_libraries(dve_material_texture_bake_tests PRIVATE dve::editor)
+            add_dependencies(dve_material_texture_bake_tests dve_bake_material)
+            add_test(NAME dve_material_texture_bake_tests COMMAND dve_material_texture_bake_tests $<TARGET_FILE:dve_bake_material>)
+            add_executable(dve_layered_surface_tests tests/test_layered_surface.cpp)
+            target_link_libraries(dve_layered_surface_tests PRIVATE dve::editor)
+            add_test(NAME dve_layered_surface_tests COMMAND dve_layered_surface_tests)
+            add_executable(dve_material_surfaces_tests tests/test_material_surfaces.cpp)
+            target_link_libraries(dve_material_surfaces_tests PRIVATE dve::editor)
+            add_test(NAME dve_material_surfaces_tests COMMAND dve_material_surfaces_tests)
+            add_executable(dve_editor_material_presets_tests tests/test_editor_material_presets.cpp)
+            target_link_libraries(dve_editor_material_presets_tests PRIVATE dve::editor)
+            add_test(NAME dve_editor_material_presets_tests COMMAND dve_editor_material_presets_tests)
+        endif()
         add_executable(dve_editor_tests tests/test_editor.cpp)
         target_link_libraries(dve_editor_tests PRIVATE dve::editor)
         target_compile_definitions(dve_editor_tests PRIVATE DVE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         add_test(NAME dve_editor_tests COMMAND dve_editor_tests)
 
+        if(TARGET dve_player_runtime)
+            add_executable(dve_water_vessel_tests tests/test_water_vessel_dynamics.cpp)
+            target_link_libraries(dve_water_vessel_tests PRIVATE dve::core)
+            add_test(NAME dve_water_vessel_tests COMMAND dve_water_vessel_tests)
+            add_executable(dve_water_ocean_tests tests/test_water_ocean.cpp)
+            target_link_libraries(dve_water_ocean_tests PRIVATE dve::core)
+            add_test(NAME dve_water_ocean_tests COMMAND dve_water_ocean_tests)
+            add_executable(dve_water_game_tests tests/test_water_game.cpp)
+            target_link_libraries(dve_water_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_water_game_tests COMMAND dve_water_game_tests)
+            add_executable(dve_flight_physics_tests tests/test_flight_physics.cpp)
+            target_link_libraries(dve_flight_physics_tests PRIVATE dve::core)
+            add_test(NAME dve_flight_physics_tests COMMAND dve_flight_physics_tests)
+            add_executable(dve_flying_game_tests tests/test_flying_game.cpp)
+            target_link_libraries(dve_flying_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_flying_game_tests COMMAND dve_flying_game_tests)
+            add_executable(dve_racing_game_tests tests/test_racing_game.cpp)
+            target_link_libraries(dve_racing_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_racing_game_tests COMMAND dve_racing_game_tests)
+            add_executable(dve_prototype_game_tests tests/test_prototype_game.cpp)
+            target_link_libraries(dve_prototype_game_tests PRIVATE dve::editor dve::player_runtime)
+            add_test(NAME dve_prototype_game_tests COMMAND dve_prototype_game_tests)
+        endif()
         add_executable(dve_editor_play_session_tests tests/test_editor_play_session.cpp)
         target_link_libraries(dve_editor_play_session_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_play_session_tests COMMAND dve_editor_play_session_tests)
@@ -2866,6 +3037,24 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_mesh_authoring_tests tests/test_editor_mesh_authoring.cpp)
         target_link_libraries(dve_editor_mesh_authoring_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_mesh_authoring_tests COMMAND dve_editor_mesh_authoring_tests)
+        add_executable(dve_mesh_displacement_tests tests/test_mesh_displacement.cpp)
+        target_link_libraries(dve_mesh_displacement_tests PRIVATE dve::editor)
+        add_test(NAME dve_mesh_displacement_tests COMMAND dve_mesh_displacement_tests)
+        add_executable(dve_ies_profile_tests tests/test_ies_profile.cpp)
+        target_link_libraries(dve_ies_profile_tests PRIVATE dve::render_bridge)
+        add_test(NAME dve_ies_profile_tests COMMAND dve_ies_profile_tests)
+        add_executable(dve_soft_material_batch_tests tests/test_soft_material_batch.cpp)
+        target_link_libraries(dve_soft_material_batch_tests PRIVATE dve::editor)
+        add_test(NAME dve_soft_material_batch_tests COMMAND dve_soft_material_batch_tests)
+        add_executable(dve_material_sheen_tests tests/test_material_sheen.cpp)
+        target_link_libraries(dve_material_sheen_tests PRIVATE dve::render_bridge)
+        add_test(NAME dve_material_sheen_tests COMMAND dve_material_sheen_tests)
+        add_executable(dve_material_iridescence_tests tests/test_material_iridescence.cpp)
+        target_link_libraries(dve_material_iridescence_tests PRIVATE dve::render_bridge)
+        add_test(NAME dve_material_iridescence_tests COMMAND dve_material_iridescence_tests)
+        add_executable(dve_polygon_tangents_tests tests/test_polygon_tangents.cpp)
+        target_link_libraries(dve_polygon_tangents_tests PRIVATE dve::core)
+        add_test(NAME dve_polygon_tangents_tests COMMAND dve_polygon_tangents_tests)
         add_executable(dve_editor_nurbs_reuse_tests tests/test_editor_nurbs_reuse.cpp)
         target_link_libraries(dve_editor_nurbs_reuse_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_reuse_tests COMMAND dve_editor_nurbs_reuse_tests)
@@ -2914,6 +3103,9 @@ if(DVE_BUILD_TESTS)
         add_executable(dve_editor_nurbs_tools_tests tests/test_editor_nurbs_tools.cpp)
         target_link_libraries(dve_editor_nurbs_tools_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_tools_tests COMMAND dve_editor_nurbs_tools_tests)
+        add_executable(dve_editor_nurbs_surface_batch_tests tests/test_editor_nurbs_surface_batch.cpp)
+        target_link_libraries(dve_editor_nurbs_surface_batch_tests PRIVATE dve::editor)
+        add_test(NAME dve_editor_nurbs_surface_batch_tests COMMAND dve_editor_nurbs_surface_batch_tests)
         add_executable(dve_editor_nurbs_tests tests/test_editor_nurbs.cpp)
         target_link_libraries(dve_editor_nurbs_tests PRIVATE dve::editor)
         add_test(NAME dve_editor_nurbs_tests COMMAND dve_editor_nurbs_tests)
@@ -3075,6 +3267,10 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     target_link_libraries(dve_material_authoring_tests PRIVATE dve::core)
     add_test(NAME dve_material_authoring_tests COMMAND dve_material_authoring_tests)
 
+    add_executable(dve_nurbs_trimming_tests tests/test_nurbs_trimming.cpp)
+    target_link_libraries(dve_nurbs_trimming_tests PRIVATE dve::core)
+    add_test(NAME dve_nurbs_trimming_tests COMMAND dve_nurbs_trimming_tests)
+
     add_executable(dve_material_mapping_tests tests/test_material_mapping.cpp)
     target_link_libraries(dve_material_mapping_tests PRIVATE dve::core)
     add_test(NAME dve_material_mapping_tests COMMAND dve_material_mapping_tests)
@@ -3168,9 +3364,30 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_ambient_occlusion_tests tests/test_ambient_occlusion.cpp)
     target_link_libraries(dve_ambient_occlusion_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_ambient_occlusion_tests COMMAND dve_ambient_occlusion_tests)
+    add_executable(dve_cornell_material_preview apps/cornell_material_preview.cpp)
+    target_link_libraries(dve_cornell_material_preview PRIVATE dve::render_bridge)
+    add_test(NAME dve_cornell_material_smoke COMMAND dve_cornell_material_preview
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/cornell_glass_lights.scene"
+        "${CMAKE_CURRENT_BINARY_DIR}/cornell_glass_material.ppm" 32 2 glass)
+    add_executable(dve_material_transport_tests tests/test_material_transport.cpp)
+    target_link_libraries(dve_material_transport_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_material_transport_tests COMMAND dve_material_transport_tests)
+    add_executable(dve_scene_lighting_tests tests/test_scene_lighting.cpp)
+    target_link_libraries(dve_scene_lighting_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_scene_lighting_tests COMMAND dve_scene_lighting_tests)
     add_executable(dve_specular_shading_tests tests/test_specular_shading.cpp)
     target_link_libraries(dve_specular_shading_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_specular_shading_tests COMMAND dve_specular_shading_tests)
+    add_executable(dve_cpu_fog_quality_tests tests/test_cpu_fog_quality.cpp)
+    target_link_libraries(dve_cpu_fog_quality_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_cpu_fog_quality_tests COMMAND dve_cpu_fog_quality_tests)
+    add_executable(dve_cpu_surface_detail_tests tests/test_cpu_surface_detail.cpp)
+    target_link_libraries(dve_cpu_surface_detail_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_cpu_surface_detail_tests COMMAND dve_cpu_surface_detail_tests)
+    add_executable(dve_cpu_fog_tests tests/test_cpu_fog.cpp)
+    target_link_libraries(dve_cpu_fog_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_cpu_fog_tests COMMAND dve_cpu_fog_tests)
+
     add_executable(dve_render_passes_tests tests/test_render_passes.cpp)
     target_link_libraries(dve_render_passes_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_render_passes_tests COMMAND dve_render_passes_tests)

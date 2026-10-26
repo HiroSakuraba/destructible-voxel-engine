@@ -221,6 +221,70 @@ def validate_material_abi(root: Path) -> list[str]:
     if cpp_fields != hlsl_fields:
         errors.append(f"GpuMaterialRecord/MaterialRecord field drift: C++={cpp_fields}, HLSL={hlsl_fields}")
 
+    surface_cpp = (root / "include/dve/gpu_material_surface_detail.hpp").read_text(encoding="utf-8")
+    surface_hlsl = (root / "shaders/common/material_surface_detail.hlsli").read_text(encoding="utf-8")
+    surface_cpp = re.search(r"struct GpuMaterialSurfaceDetail \{(.*?)^\};", surface_cpp, re.S | re.M).group(1)
+    surface_hlsl = surface_hlsl.split("struct SurfaceDetailRecord {", 1)[1].split("};", 1)[0]
+    surface_fields = [("uint" if t == "std::uint32_t" else t, n)
+                      for t, n in re.findall(r"\b(float|std::uint32_t)\s+(\w+)\s*(?:\{[^;]*\})?\s*;", surface_cpp)]
+    surface_shader_fields = re.findall(r"\b(float|uint)\s+(\w+)\s*;", surface_hlsl)
+    if surface_fields != surface_shader_fields or len(surface_fields) != 16:
+        errors.append(f"Surface detail ABI drift: C++={surface_fields}, HLSL={surface_shader_fields}")
+
+    # Layer payloads embed the stable scalar records. Check every loader offset;
+    # aggregate size checks alone would miss a field reorder or a float/uint reinterpretation.
+    loaders = (root / "shaders/common/layer_record_load.hlsli").read_text(encoding="utf-8")
+    for header, name in (("material_record.hlsli", "MaterialRecord"),
+                         ("material_mapping.hlsli", "PolygonMaterialMappingRecord"),
+                         ("material_surface_detail.hlsli", "SurfaceDetailRecord")):
+        text = (root / "shaders/common" / header).read_text(encoding="utf-8")
+        body = re.search(r"struct " + name + r"\s*\{(.*?)\};", text, re.S).group(1)
+        fields = re.findall(r"\b(float|uint)\s+(\w+)\s*;", body)
+        loader = re.search(name + r" LoadLayer" + name + r"\(uint o\) \{(.*?)\n\}", loaders, re.S)
+        if not loader:
+            errors.append(f"Missing layer ABI loader for {name}")
+            continue
+        compact = re.sub(r"\s+", "", loader.group(1))
+        for index, (kind, field) in enumerate(fields):
+            value = f"gLayerData[o+{index}]"
+            if kind == "float":
+                value = "asfloat(" + value + ")"
+            if f"r.{field}={value};" not in compact:
+                errors.append(f"Layer ABI offset drift: {name}.{field}")
+
+    caster_vs = (root / "shaders/live_csm_caster_vs.hlsl").read_text(encoding="utf-8")
+    caster_ps = (root / "shaders/live_csm_caster_ps.hlsl").read_text(encoding="utf-8")
+    material_ps = (root / "shaders/live_ibl_material_ps.hlsl").read_text(encoding="utf-8")
+    if ("output.uv1=input.uv1" not in caster_vs or "output.uv = input.uv" not in caster_vs or
+            "gShadowMapping[0]" not in caster_ps or "mapping.additionalTexcoords" not in caster_ps or
+            any('"common/live_material_sampling.hlsli"' not in source
+                for source in (caster_ps, material_ps))):
+        errors.append("Masked shadow and material passes must share mapping with independent UV0/UV1")
+
+    # Triplanar normal maps: the CPU reference and the live GPU shader must use the same
+    # whiteout blend, so a neutral map keeps the geometric normal on both (Codex 4364355458).
+    def whiteout_axes(text, normal):
+        compact = re.sub(r"\s+", "", text).replace("std::", "")
+        axes = {}
+        for axis in "xyz":
+            m = re.search(r"w" + axis + r"(?:=float3\(|\{)([^;]*?)(?:\)|\});", compact)
+            if m:
+                axes[axis] = m.group(1).replace(normal + ".", "N.")
+        return axes
+    # Shared by the polygon renderer and voxel normal maps (both must call it).
+    cpu_whiteout = whiteout_axes((root / "include/dve/triplanar_normal.hpp").read_text(encoding="utf-8")
+                                 .split("triplanar_whiteout_normal(", 1)[-1].split("\n}\n", 1)[0], "n")
+    for user in ("src/render/polygon_renderer.cpp", "src/voxel_normal_map.cpp"):
+        text = (root / user).read_text(encoding="utf-8")
+        if '#include "dve/triplanar_normal.hpp"' not in text or "triplanar_whiteout_normal(" not in text:
+            errors.append(f"{user} must use the shared triplanar_whiteout_normal blend")
+    gpu_whiteout = whiteout_axes((root / "shaders/common/live_material_sampling.hlsli").read_text(encoding="utf-8")
+                                 .split("float3 SampleLiveMaterialNormal(", 1)[-1].split("\n}\n", 1)[0], "sn")
+    expected_whiteout = {"x": "abs(tx.z)*N.x,tx.y+N.y,tx.x+N.z", "y": "ty.x+N.x,abs(ty.z)*N.y,ty.y+N.z",
+                         "z": "tz.x+N.x,tz.y+N.y,abs(tz.z)*N.z"}
+    if cpu_whiteout != expected_whiteout or gpu_whiteout != expected_whiteout:
+        errors.append(f"Triplanar whiteout normal blend drift: CPU={cpu_whiteout}, GPU={gpu_whiteout}")
+
     cpp_values = dict(re.findall(
         r"MaterialShadingModel::(\w+)\)\s*==\s*(\d+)",
         (root / "src/gpu_material_buffer.cpp").read_text(encoding="utf-8")))

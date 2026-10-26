@@ -1,5 +1,7 @@
 #include "dve/polygon_asset.hpp"
+#include "dve/polygon_tangents.hpp"
 #include "dve/master_material.hpp"
+#include "dve/voxel_normal_map.hpp"
 #include "dve/transform.hpp"
 
 #include <algorithm>
@@ -22,7 +24,7 @@ namespace {
 
 constexpr std::array<char, 8> kMagic{'D','V','E','M','E','S','H','1'};
 constexpr std::uint16_t kMajor = 1;
-constexpr std::uint16_t kMinor = 4;
+constexpr std::uint16_t kMinor = 8;
 // Files without material optics are still written as v1.3 (byte-identical to before).
 constexpr std::uint16_t kMinorWithoutOptics = 3;
 constexpr std::uint64_t kFnvOffset = 1469598103934665603ULL;
@@ -100,6 +102,10 @@ void hash_material(std::uint64_t& h, const VoxelMaterialDefinition& m) noexcept 
     for(const auto& l:m.layers){hash_scalar(h,l.sourceMaterial);hash_scalar(h,l.weight);hash_scalar(h,static_cast<std::uint8_t>(l.blendMode));hash_scalar(h,l.enabled);}
     // Optics only when present, so the hashes of every material without them are unchanged.
     if(material_has_optics(m)){hash_scalar(h,m.transmission);hash_scalar(h,m.indexOfRefraction);hash_float3(h,m.attenuationColor);hash_scalar(h,m.attenuationDistanceMeters);}
+    if(material_has_sheen(m)){hash_float3(h,m.sheenColor);hash_scalar(h,m.sheenRoughness);}
+    if(material_has_iridescence(m)){hash_scalar(h,m.iridescence);hash_scalar(h,m.iridescenceIor);hash_scalar(h,m.iridescenceThicknessNm);}
+    if(m.surfaceDetail.pattern!=SurfacePattern::NoPattern)hash_scalar(h,material_surface_detail_hash(m.surfaceDetail));
+    if(!m.preset.id.empty()){hash_string(h,m.preset.id);hash_scalar(h,m.preset.revision);hash_scalar(h,m.preset.overrides);}
     if(material_has_normal_map(m)){hash_scalar(h,m.normalMap->contentHash);hash_scalar(h,m.normalMapTileMeters);hash_scalar(h,m.normalMapStrength);hash_scalar(h,m.normalMapSharpness);}
 }
 
@@ -162,6 +168,16 @@ void write_material(Writer& w,const VoxelMaterialDefinition& m,std::uint16_t min
     w.u8(m.transparent?1U:0U);w.u8(m.structural?1U:0U);w.u8(static_cast<std::uint8_t>(m.layers.size()));w.u8(0);
     for(const auto& l:m.layers){w.u8(l.sourceMaterial);w.u8(static_cast<std::uint8_t>(l.blendMode));w.u8(l.enabled?1U:0U);w.u8(0);w.f32(l.weight);}
     if(minor>=4U){w.f32(m.transmission);w.f32(m.indexOfRefraction);w.f32(m.attenuationColor.x);w.f32(m.attenuationColor.y);w.f32(m.attenuationColor.z);w.f32(m.attenuationDistanceMeters);}
+    if(minor>=5U){
+        w.string(m.preset.id);w.u32(m.preset.revision);w.u64(m.preset.overrides);
+        w.u8(m.normalMap?1:0);
+        if(m.normalMap){w.string(m.normalMap->name);w.u32(m.normalMap->width);w.u32(m.normalMap->height);w.f32(m.normalMapTileMeters);w.f32(m.normalMapStrength);w.f32(m.normalMapSharpness);w.bytes(m.normalMap->rgba8.data(),m.normalMap->rgba8.size());}
+    }
+
+    if(minor>=6U){w.u8(static_cast<std::uint8_t>(m.surfaceDetail.pattern));w.u8(static_cast<std::uint8_t>(m.surfaceDetail.space));w.u32(m.surfaceDetail.seed);for(float v:surface_detail_values(m.surfaceDetail))w.f32(v);}
+    if(minor>=7U){w.f32(m.sheenColor.x);w.f32(m.sheenColor.y);w.f32(m.sheenColor.z);w.f32(m.sheenRoughness);}
+    if(minor>=8U){w.f32(m.iridescence);w.f32(m.iridescenceIor);w.f32(m.iridescenceThicknessNm);}
+
 }
 VoxelMaterialDefinition read_material(Reader& r,std::uint16_t minor){
     VoxelMaterialDefinition m;m.name=r.string();m.baseColor={r.f32(),r.f32(),r.f32(),r.f32()};m.emissive={r.f32(),r.f32(),r.f32()};m.metallic=r.f32();m.roughness=r.f32();m.specular=r.f32();
@@ -173,6 +189,19 @@ VoxelMaterialDefinition read_material(Reader& r,std::uint16_t minor){
     if(layers>kMaximumVoxelMaterialLayers)throw std::runtime_error("DMESH material layer limit exceeded");
     for(std::uint8_t i=0;i<layers;++i){VoxelMaterialLayer l;l.sourceMaterial=r.u8();const auto mode=r.u8();l.enabled=r.u8()!=0;(void)r.u8();l.weight=r.f32();if(mode>static_cast<std::uint8_t>(MaterialLayerBlendMode::Additive))throw std::runtime_error("DMESH layer mode invalid");l.blendMode=static_cast<MaterialLayerBlendMode>(mode);m.layers.push_back(l);}
     if(minor>=4U){m.transmission=r.f32();m.indexOfRefraction=r.f32();m.attenuationColor={r.f32(),r.f32(),r.f32()};m.attenuationDistanceMeters=r.f32();if(!material_optics_valid(m))throw std::runtime_error("DMESH material optics invalid");}
+    if(minor>=5U){
+        m.preset.id=r.string();m.preset.revision=r.u32();m.preset.overrides=r.u64();
+        if(m.preset.id.size()>128 || (m.preset.id.empty() ? m.preset.revision!=0 || m.preset.overrides!=0 : m.preset.revision==0))throw std::runtime_error("invalid preset origin");
+        const auto has=r.u8();if(has>1)throw std::runtime_error("invalid normal map flag");
+        if(has){auto name=r.string();const auto width=r.u32(),height=r.u32();m.normalMapTileMeters=r.f32();m.normalMapStrength=r.f32();m.normalMapSharpness=r.f32();
+            if(width==0||height==0||width>kMaximumVoxelNormalMapDimension||height>kMaximumVoxelNormalMapDimension)throw std::runtime_error("invalid normal map dimensions");
+            const auto bytes=std::size_t(width)*height*4;r.require(bytes);std::vector<std::uint8_t> pixels(bytes);r.bytes(pixels.data(),bytes);
+            m.normalMap=make_voxel_normal_map(std::move(name),width,height,std::move(pixels));if(!material_normal_map_valid(m))throw std::runtime_error("invalid normal map");}
+    }
+    if(minor>=6U){m.surfaceDetail.pattern=SurfacePattern(r.u8());m.surfaceDetail.space=SurfaceDetailSpace(r.u8());m.surfaceDetail.seed=r.u32();
+        std::array<float,kSurfaceDetailFloatCount> values{};for(float& v:values)v=r.f32();set_surface_detail_values(m.surfaceDetail,values);if(!material_surface_detail_valid(m.surfaceDetail))throw std::runtime_error("invalid surface-detail settings");}
+    if(minor>=7U){m.sheenColor={r.f32(),r.f32(),r.f32()};m.sheenRoughness=r.f32();if(!material_sheen_valid(m))throw std::runtime_error("DMESH material sheen invalid");}
+    if(minor>=8U){m.iridescence=r.f32();m.iridescenceIor=r.f32();m.iridescenceThicknessNm=r.f32();if(!material_iridescence_valid(m))throw std::runtime_error("DMESH material iridescence invalid");}
     return m;
 }
 
@@ -366,7 +395,14 @@ PolygonAssetValidationResult validate_polygon_asset(const CookedPolygonAsset& a)
     if(a.vertices.empty()||a.indices.empty()||a.submeshes.empty())return fail(PolygonAssetErrorCode::Empty,"polygon asset has no renderable geometry");
     if(a.vertices.size()>kMaximumFileVertices||a.indices.size()>kMaximumFileIndices||a.materials.empty()||a.materials.size()>kMaximumFileMaterials)return fail(PolygonAssetErrorCode::LimitExceeded,"polygon asset exceeds count limits");
     if(a.materialBindings.size()!=a.materials.size())return fail(PolygonAssetErrorCode::InvalidMaterial,"material binding count does not match material count");
+    for(const auto& m:a.materials){
+        if(!material_surface_detail_valid(m.surfaceDetail))return fail(PolygonAssetErrorCode::InvalidMaterial,"invalid surface-detail settings");
+        if(!material_normal_map_valid(m))return fail(PolygonAssetErrorCode::InvalidMaterial,"material normal map is invalid");
+        if(m.preset.id.size()>128 || (m.preset.id.empty() ? m.preset.revision!=0 || m.preset.overrides!=0 : m.preset.revision==0))return fail(PolygonAssetErrorCode::InvalidMaterial,"material preset origin is invalid");
+    }
     for(const auto& m:a.materials)if(!material_optics_valid(m))return fail(PolygonAssetErrorCode::InvalidMaterial,"material optics are out of range (transmission 0..1, IOR 1..3)");
+    for(const auto& m:a.materials)if(!material_sheen_valid(m))return fail(PolygonAssetErrorCode::InvalidMaterial,"material sheen is out of range (colour 0..1, roughness 0..1)");
+    for(const auto& m:a.materials)if(!material_iridescence_valid(m))return fail(PolygonAssetErrorCode::InvalidMaterial,"material iridescence is out of range (factor 0..1, IOR 1..3)");
     std::string layerError;if(!resolve_voxel_material_layers(a.materials,&layerError))return fail(PolygonAssetErrorCode::InvalidMaterial,"material layers are invalid: "+layerError);
     for(const auto& v:a.vertices)if(!finite(v.position)||!finite(v.normal)||!finite(v.tangent)||!finite(v.texcoord)||!finite(v.texcoord1)||!finite(v.color))return fail(PolygonAssetErrorCode::InvalidVertex,"polygon vertex contains a non-finite value");
     for(auto i:a.indices)if(i>=a.vertices.size())return fail(PolygonAssetErrorCode::InvalidIndex,"polygon index is outside the vertex array");
@@ -442,7 +478,7 @@ CookedPolygonAsset cook_polygon_scene(const ImportedScene& scene,const PolygonCo
         if(out.vertices.size()+mesh.vertices.size()>options.maximumVertices)throw std::runtime_error("polygon vertex limit exceeded");
         const std::uint32_t base=static_cast<std::uint32_t>(out.vertices.size());
         for(const auto& v:mesh.vertices){PolygonVertex p;p.position=transform_point(node.worldTransform,v.position);p.normal=length_sq(v.normal)>1.0e-20F?transform_normal_inverse_transpose(node.worldTransform,v.normal):Float3{};p.texcoord=v.texcoord;p.texcoord1=v.texcoord1;p.color=v.color;out.vertices.push_back(p);suppliedNormal.push_back(length_sq(p.normal)>1.0e-20F);normalAccum.push_back({});tangentAccum.push_back({});bitangentAccum.push_back({});
-            if(!haveBounds){out.bounds={p.position,p.position};haveBounds=true;}else{out.bounds.minimum={std::min(out.bounds.minimum.x,p.position.x),std::min(out.bounds.minimum.y,p.position.y),std::min(out.bounds.minimum.z,p.position.z)};out.bounds.maximum={std::max(out.bounds.maximum.x,p.position.x),std::max(out.bounds.maximum.y,p.position.y),std::max(out.bounds.maximum.z,p.position.z)};}}
+            if(!haveBounds){out.bounds={p.position,p.position};haveBounds=true;}else{out.bounds.minimum={(std::min)(out.bounds.minimum.x,p.position.x),(std::min)(out.bounds.minimum.y,p.position.y),(std::min)(out.bounds.minimum.z,p.position.z)};out.bounds.maximum={(std::max)(out.bounds.maximum.x,p.position.x),(std::max)(out.bounds.maximum.y,p.position.y),(std::max)(out.bounds.maximum.z,p.position.z)};}}
         std::map<std::uint32_t,std::vector<std::uint32_t>> groups;
         for(const auto& tri:mesh.triangles){if(tri.indices[0]>=mesh.vertices.size()||tri.indices[1]>=mesh.vertices.size()||tri.indices[2]>=mesh.vertices.size())continue;const std::uint32_t mat=tri.materialIndex<out.materials.size()?tri.materialIndex:0U;auto& group=groups[mat];const std::array<std::uint32_t,3> ids{base+tri.indices[0],base+tri.indices[1],base+tri.indices[2]};group.insert(group.end(),ids.begin(),ids.end());
             const Float3 p0=out.vertices[ids[0]].position,p1=out.vertices[ids[1]].position,p2=out.vertices[ids[2]].position;const Float3 e1=sub3(p1,p0),e2=sub3(p2,p0);const Float3 fn=cross3(e1,e2);for(auto id:ids)normalAccum[id]=add3(normalAccum[id],fn);
@@ -450,12 +486,13 @@ CookedPolygonAsset cook_polygon_scene(const ImportedScene& scene,const PolygonCo
         for(auto& [mat,idx]:groups){if(out.indices.size()+idx.size()>options.maximumIndices)throw std::runtime_error("polygon index limit exceeded");PolygonSubmesh sub;sub.name=(node.name.empty()?mesh.name:node.name)+"_material_"+std::to_string(mat);sub.firstIndex=static_cast<std::uint32_t>(out.indices.size());sub.indexCount=static_cast<std::uint32_t>(idx.size());sub.materialIndex=mat;out.indices.insert(out.indices.end(),idx.begin(),idx.end());out.submeshes.push_back(std::move(sub));}
     }
     if(options.generateMissingNormals){for(std::size_t i=0;i<out.vertices.size();++i)if(!suppliedNormal[i])out.vertices[i].normal=normalized(normalAccum[i]);}
-    for(std::size_t i=0;i<out.vertices.size();++i){out.vertices[i].normal=normalized(out.vertices[i].normal);if(options.generateTangents){Float3 t=sub3(tangentAccum[i],mul3(out.vertices[i].normal,dot3(out.vertices[i].normal,tangentAccum[i])));t=normalized(t,{1.0F,0.0F,0.0F});const float handed=dot3(cross3(out.vertices[i].normal,t),bitangentAccum[i])<0.0F?-1.0F:1.0F;out.vertices[i].tangent={t.x,t.y,t.z,handed};}}
+    for(std::size_t i=0;i<out.vertices.size();++i){out.vertices[i].normal=normalized(out.vertices[i].normal);}
+    if(options.generateTangents&&!compute_polygon_tangents_mikktspace(out)){for(std::size_t i=0;i<out.vertices.size();++i){Float3 t=sub3(tangentAccum[i],mul3(out.vertices[i].normal,dot3(out.vertices[i].normal,tangentAccum[i])));t=normalized(t,{1.0F,0.0F,0.0F});const float handed=dot3(cross3(out.vertices[i].normal,t),bitangentAccum[i])<0.0F?-1.0F:1.0F;out.vertices[i].tangent={t.x,t.y,t.z,handed};}}
     out.contentHash=polygon_asset_content_hash(out);const auto valid=validate_polygon_asset(out);if(!valid){if(diagnostics)diagnostics->push_back({ImportDiagnostic::Severity::Error,"POLYGON_ASSET_INVALID",valid.message});throw std::runtime_error(valid.message);}if(diagnostics)diagnostics->push_back({ImportDiagnostic::Severity::Info,"POLYGON_COOKED","Preserved polygon mesh with shared DVE materials, UVs, vertex colors, submeshes, and optional textures."});return out;
 }
 
 bool write_dmesh(const std::filesystem::path& path,const CookedPolygonAsset& input,std::string* error){
-    try{CookedPolygonAsset a=input;a.contentHash=polygon_asset_content_hash(a);const auto valid=validate_polygon_asset(a);if(!valid)throw std::runtime_error(valid.message);const std::uint16_t minor=std::any_of(a.materials.begin(),a.materials.end(),[](const VoxelMaterialDefinition& m){return material_has_optics(m);})?kMinor:kMinorWithoutOptics;Writer w;w.bytes(kMagic.data(),kMagic.size());w.u16(kMajor);w.u16(minor);w.u64(a.objectId);w.u64(a.contentHash);w.u32(static_cast<std::uint32_t>(a.materials.size()));w.u32(static_cast<std::uint32_t>(a.images.size()));w.u32(static_cast<std::uint32_t>(a.samplers.size()));w.u32(static_cast<std::uint32_t>(a.textures.size()));w.u64(a.vertices.size());w.u64(a.indices.size());w.u32(static_cast<std::uint32_t>(a.submeshes.size()));w.u32(0);
+    try{CookedPolygonAsset a=input;a.contentHash=polygon_asset_content_hash(a);const auto valid=validate_polygon_asset(a);if(!valid)throw std::runtime_error(valid.message);const bool extended=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return !m.preset.id.empty() || material_has_normal_map(m);});const bool details=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return m.surfaceDetail.pattern!=SurfacePattern::NoPattern;});const bool sheen=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_sheen(m);});const bool irid=std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_iridescence(m);});const std::uint16_t minor=irid?8:sheen?7:details?6:extended?5:std::any_of(a.materials.begin(),a.materials.end(),[](const auto& m){return material_has_optics(m);})?4:kMinorWithoutOptics;Writer w;w.bytes(kMagic.data(),kMagic.size());w.u16(kMajor);w.u16(minor);w.u64(a.objectId);w.u64(a.contentHash);w.u32(static_cast<std::uint32_t>(a.materials.size()));w.u32(static_cast<std::uint32_t>(a.images.size()));w.u32(static_cast<std::uint32_t>(a.samplers.size()));w.u32(static_cast<std::uint32_t>(a.textures.size()));w.u64(a.vertices.size());w.u64(a.indices.size());w.u32(static_cast<std::uint32_t>(a.submeshes.size()));w.u32(0);
         for(std::size_t i=0;i<a.materials.size();++i){
             write_material(w,a.materials[i],minor);const auto& b=a.materialBindings[i];
             w.u8(b.doubleSided?1U:0U);w.u8(0);w.u16(0);w.f32(b.alphaCutoff);w.f32(b.normalScale);

@@ -42,6 +42,7 @@ std::size_t texture_pixel_bytes(TextureFormat format) noexcept {
     case TextureFormat::BC3RGBASrgb:
     case TextureFormat::BC5RGUnorm: return 0U;
     case TextureFormat::RGBA8Unorm:
+    case TextureFormat::RGBA8Srgb:
     case TextureFormat::BGRA8Unorm:
     case TextureFormat::R32Uint:
     case TextureFormat::R32Sint:
@@ -107,7 +108,8 @@ std::vector<TextureFormat> resolved_color_formats(const GraphicsPipelineDesc& de
 
 TextureFormatCapabilities NullDevice::texture_format_capabilities(TextureFormat format) const noexcept {
     if (format == TextureFormat::D32Float) return {false, false, false, false, true};
-    if (is_block_compressed(format)) return {true, false, false, false, false};
+    if (is_block_compressed(format) || format == TextureFormat::RGBA8Srgb)
+        return {true, false, false, false, false};
     const bool integerAtomic = format == TextureFormat::R32Uint || format == TextureFormat::R32Sint;
     return {true, true, integerAtomic, true, false};
 }

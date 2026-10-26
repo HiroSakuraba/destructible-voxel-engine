@@ -382,9 +382,9 @@ void test_import_model() {
 void test_honest_fallbacks() {
     auto owner = make_controller();
     NativeEditorController& controller = *owner;
-    check(!controller.dispatch_action("material.assign") && controller.status().error &&
-              controller.status().text.find("Paint tool") != std::string::npos,
-          "Material > Assign says what to use instead");
+    check(controller.dispatch_action("material.assign") && controller.material_panel().open,
+          "Material > Assign opens the real preset workflow");
+    controller.close_material_panel();
     check(!controller.dispatch_action("polygon.extrude") && controller.status().text.find("Select polygon triangle faces") != std::string::npos,
           "polygon tools explain the required component selection");
     check(!controller.dispatch_action("no.such.action") && controller.status().text.find("Not available") != std::string::npos,

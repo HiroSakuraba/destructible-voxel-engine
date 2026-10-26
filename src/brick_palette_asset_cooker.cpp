@@ -67,6 +67,17 @@ void hash_material(std::uint64_t& hash, const VoxelMaterialDefinition& material)
         hash_float(hash, material.attenuationColor.z);
         hash_float(hash, material.attenuationDistanceMeters);
     }
+    if (material_has_sheen(material)) {   // likewise
+        hash_float(hash, material.sheenColor.x);
+        hash_float(hash, material.sheenColor.y);
+        hash_float(hash, material.sheenColor.z);
+        hash_float(hash, material.sheenRoughness);
+    }
+    if (material_has_iridescence(material)) {   // likewise
+        hash_float(hash, material.iridescence);
+        hash_float(hash, material.iridescenceIor);
+        hash_float(hash, material.iridescenceThicknessNm);
+    }
     if (material_has_normal_map(material)) {   // likewise
         hash_integer(hash, material.normalMap->contentHash);
         hash_float(hash, material.normalMapTileMeters);

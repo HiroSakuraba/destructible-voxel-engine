@@ -1,0 +1,30 @@
+# Classic Cornell Box for DVE's CPU reference renderer (ReferenceVoxelRenderer).
+# Coordinates are standard Cornell units (~mm): x 0..555 (green wall at x=0 appears RIGHT,
+# red wall at x=555 appears LEFT from the camera), y up 0..548.8, z 0..559.2 (back wall).
+# One voxel = voxel_size Cornell units. Boxes: box <material> x0 y0 z0 x1 y1 z1 [rotY_deg about centre]
+voxel_size 2.5
+meters_per_voxel 0.025  # renderer scale (box is 5.55 m); keeps shadow bias < 1 voxel
+image 512 512
+exposure 0.7
+camera 278 273 -800   278 273 0   fov_deg 39.3
+
+# linear albedos approximating the measured Cornell spectra
+material white 0.73 0.73 0.73
+material red   0.63 0.065 0.05
+material green 0.14 0.45 0.091
+
+# walls (one voxel thick, outside the 555 interior)
+box white -5 -5 -5     560 0 565        0   # floor
+box white -5 550 -5    560 555 565      0   # ceiling (light opening cut below)
+box white -5 -5 555    560 555 565      0   # back wall
+box red   555 -5 -5    560 555 565      0   # left (red)
+box green -5 -5 -5     0 555 565        0   # right (green)
+
+# blocks: short 165^3 rotated -17 deg, tall 165x330x165 rotated +17 deg (standard placements)
+box white 103 0 86     268 165 251     -17  # short
+# tall block replaced by a glass sphere (IOR 1.5) floating under the light so its caustic is visible
+sphere 330 200 330 80 1.5
+
+# area light: opening in the ceiling (343..213 x 332..227), emitted radiance, light samples (samples^2 directions; radiance sets the light colour)
+light 213 227 343 332   radiance 1.0 0.88 0.72   samples 32 intensity 12.0
+gi_samples 96

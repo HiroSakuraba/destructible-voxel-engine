@@ -327,6 +327,11 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.indexOfRefraction = lerp(base.indexOfRefraction, layer.indexOfRefraction, t);
         out.attenuationColor = lerp(base.attenuationColor, layer.attenuationColor, t);
         out.attenuationDistanceMeters = lerp(base.attenuationDistanceMeters, layer.attenuationDistanceMeters, t);
+        out.sheenColor = lerp(base.sheenColor, layer.sheenColor, t);
+        out.sheenRoughness = lerp(base.sheenRoughness, layer.sheenRoughness, t);
+        out.iridescence = lerp(base.iridescence, layer.iridescence, t);
+        out.iridescenceIor = lerp(base.iridescenceIor, layer.iridescenceIor, t);
+        out.iridescenceThicknessNm = lerp(base.iridescenceThicknessNm, layer.iridescenceThicknessNm, t);
         break;
     case MaterialLayerBlendMode::Multiply:
         out.baseColor = multiply_layer(base.baseColor, layer.baseColor, t);
@@ -344,6 +349,9 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.foliageWrap = saturate(lerp(base.foliageWrap, base.foliageWrap * layer.foliageWrap, t));
         out.transmission = saturate(lerp(base.transmission, base.transmission * layer.transmission, t));
         out.attenuationColor = multiply_layer(base.attenuationColor, layer.attenuationColor, t);
+        out.sheenColor = multiply_layer(base.sheenColor, layer.sheenColor, t);
+        out.sheenRoughness = saturate(lerp(base.sheenRoughness, base.sheenRoughness * layer.sheenRoughness, t));
+        out.iridescence = saturate(lerp(base.iridescence, base.iridescence * layer.iridescence, t));
         break;
     case MaterialLayerBlendMode::Additive:
         out.baseColor = add(base.baseColor, layer.baseColor, t);
@@ -360,6 +368,9 @@ VoxelMaterialDefinition blend_material_layer(const VoxelMaterialDefinition& base
         out.foliageTransmittance = saturate(base.foliageTransmittance + layer.foliageTransmittance * t);
         out.foliageWrap = saturate(base.foliageWrap + layer.foliageWrap * t);
         out.transmission = saturate(base.transmission + layer.transmission * t);
+        out.sheenColor = add(base.sheenColor, layer.sheenColor, t);
+        out.sheenRoughness = saturate(base.sheenRoughness + layer.sheenRoughness * t);
+        out.iridescence = saturate(base.iridescence + layer.iridescence * t);
         break;
     }
     // The target layer stack owns these semantic/physical properties.
@@ -397,7 +408,8 @@ std::optional<std::vector<VoxelMaterialDefinition>> resolve_voxel_material_layer
             if (error) *error = "material layer stack exceeds four layers";
             return false;
         }
-        for (const VoxelMaterialLayer& layer : composed.layers) {
+        // Replacing composed invalidates its owned layer vector; visit immutable authoring data.
+        for (const VoxelMaterialLayer& layer : materials[id].layers) {
             if (!layer.enabled || layer.weight <= 0.0F) continue;
             if (!std::isfinite(layer.weight) || layer.weight < 0.0F || layer.weight > 1.0F ||
                 layer.sourceMaterial >= materials.size()) {
@@ -603,7 +615,8 @@ bool MaterialLibrary::resolve_all(std::string* error) {
         if (baseIt == bases.end()) return false;
         state[materialId] = 1;
         VoxelMaterialDefinition composed = baseIt->second;
-        for (const VoxelMaterialLayer& layer : composed.layers) {
+        // Keep iteration independent of the object replaced by each blend.
+        for (const VoxelMaterialLayer& layer : baseIt->second.layers) {
             if (!layer.enabled || layer.weight <= 0.0F) continue;
             if (!std::isfinite(layer.weight) || layer.weight < 0.0F || layer.weight > 1.0F) {
                 const auto target = materialIdToInstance_.find(materialId);

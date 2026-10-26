@@ -9,6 +9,8 @@
 #include <SDL3/SDL_main.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -37,6 +39,93 @@ namespace {
 using namespace dve;
 using namespace dve::player;
 using Clock = std::chrono::steady_clock;
+
+
+#if defined(DVE_PLAYER_HAVE_AUDIO)
+// Procedural vehicle audio uses the existing real-time-safe mixer: resident loop
+// voices are prepared once on the control thread, then only source gains are changed.
+class RacingAudioDriver {
+public:
+    explicit RacingAudioDriver(audio::AudioMixer& mixer) : mixer_(mixer) {
+        const auto rate=mixer_.sample_rate();
+        for(unsigned i=0;i<4;++i) {
+            audio::ResidentSampleDesc sample;
+            sample.name=i==3?"Racing tire scrub":"Racing engine band "+std::to_string(i);
+            sample.sampleRate=rate;sample.channels=1U;
+            const std::uint32_t frames=(std::max)(rate/5U,800U);
+            sample.samples.resize(frames);
+            const float pi=3.14159265358979323846F;
+            if(i<3){
+                const float cycles= i==0?16.0F:(i==1?26.0F:42.0F);
+                for(std::uint32_t n=0;n<frames;++n){
+                    const float phase=2*pi*cycles*float(n)/float(frames);
+                    sample.samples[n]=0.48F*std::sin(phase)+0.21F*std::sin(2*phase)+
+                                      0.12F*std::sin(3*phase);
+                }
+            }else{
+                std::uint32_t seed=0x13579bdfU;float low=0;
+                for(std::uint32_t n=0;n<frames;++n){
+                    seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;
+                    const float noise=2.0F*float(seed&65535U)/65535.0F-1.0F;
+                    low+=0.12F*(noise-low);
+                    sample.samples[n]=0.6F*low+0.15F*noise;
+                }
+                // Stitch the loop boundary to prevent a periodic click.
+                const auto blend=(std::min)(std::uint32_t(512),frames/8U);
+                for(std::uint32_t n=0;n<blend;++n){
+                    const float t=float(n)/float(blend);
+                    sample.samples[frames-blend+n]=
+                        sample.samples[frames-blend+n]*(1-t)+sample.samples[n]*t;
+                }
+            }
+            auto id=mixer_.register_resident_sample(std::move(sample));
+            if(!id)continue;
+            audio::PlaySampleDesc play;
+            play.sample=id;play.loop=true;play.spatialized=false;play.gain=0.0F;
+            play.priority=audio::AudioPriority::Important;
+            voices_[i]=mixer_.play_sample(play);
+        }
+        audio::ResidentSampleDesc hit;
+        hit.name="Racing collision transient";hit.channels=1;hit.sampleRate=rate;
+        const unsigned count=rate/5U;hit.samples.resize(count);
+        for(unsigned n=0;n<count;++n){
+            const float t=float(n)/float(rate);
+            const float envelope=std::exp(-24.0F*t);
+            hit.samples[n]=envelope*(0.54F*std::sin(2*3.14159265F*(83*t+180*t*t))+
+                                   0.22F*std::sin(2*3.14159265F*207*t));
+        }
+        impact_=mixer_.register_resident_sample(std::move(hit));
+    }
+    void update(const PrototypeHud* hud){
+        const RacingAudioState state=hud&&hud->racing?hud->vehicleAudio:RacingAudioState{};
+        const float speed=std::clamp(state.speedFraction,0.0F,1.0F);
+        const float drive=std::clamp(state.throttle,0.0F,1.0F);
+        const float skid=std::clamp(state.skid,0.0F,1.0F);
+        const float run=state.active?1.0F:0.0F;
+        const std::array<float,4> gains{
+          run*(0.045F+0.015F*drive)*(1-speed),
+          run*(0.025F+0.06F*drive)*std::clamp(1-std::abs(speed-0.45F)/0.5F,0.0F,1.0F),
+          run*(0.025F+0.08F*drive)*std::clamp((speed-0.35F)/0.65F,0.0F,1.0F),
+          run*0.19F*skid
+        };
+        for(unsigned i=0;i<voices_.size();++i)if(voices_[i]) (void)mixer_.set_source_gain(voices_[i],gains[i]);
+        if(state.impactCount<lastImpact_)lastImpact_=state.impactCount;
+        else if(state.active&&impact_&&state.impactCount>lastImpact_){
+            audio::PlaySampleDesc p;
+            p.sample=impact_;p.loop=false;p.spatialized=false;
+            p.priority=audio::AudioPriority::Important;
+            p.gain=std::clamp(state.impactSpeed/25.0F,0.02F,0.33F);
+            (void)mixer_.play_sample(p);
+        }
+        lastImpact_=state.impactCount;
+    }
+private:
+    audio::AudioMixer& mixer_;
+    std::array<audio::AudioSourceHandle,4> voices_{};
+    audio::SampleId impact_{};
+    std::uint64_t lastImpact_{};
+};
+#endif
 
 constexpr const char* kUsage = R"(usage: dve_player [<game.dvepak> | <project-dir>] [options]
 
@@ -498,9 +587,12 @@ int run(int argc, char** argv) {
     std::string audioStatus = "none (disabled)";
 #if defined(DVE_PLAYER_HAVE_AUDIO)
     std::unique_ptr<audio::AudioMixer> mixer;
+    std::unique_ptr<RacingAudioDriver> racingAudio;
     std::unique_ptr<audio::SdlSynthAudioDevice> audioDevice;
     if (!options.headless && !options.noAudio) {
         mixer = std::make_unique<audio::AudioMixer>();
+        if(const auto* hud=app->prototype_hud();hud&&hud->racing)
+            racingAudio=std::make_unique<RacingAudioDriver>(*mixer);
         std::string audioError;
         audioDevice = std::make_unique<audio::SdlSynthAudioDevice>(*mixer, &audioError);
         if (audioDevice->valid()) {
@@ -543,6 +635,9 @@ int run(int argc, char** argv) {
     const auto render_frame = [&](bool captureWindow) -> bool {
         const auto frameStart = Clock::now();
         const float aspect = static_cast<float>(renderWidth) / static_cast<float>(renderHeight);
+        #if defined(DVE_PLAYER_HAVE_AUDIO)
+        if(racingAudio)racingAudio->update(app->prototype_hud());
+#endif
         const PlayerRenderView view = app->render_view(objects, aspect, interpolationAlpha);
         if (!renderer->render(view, &error)) return false;
         if (captureWindow && blitter && options.windowScreenshot) blitter->request_screenshot(*options.windowScreenshot);
@@ -555,6 +650,7 @@ int run(int argc, char** argv) {
     };
     std::vector<platform::PlatformEvent> pendingHostEvents;
     const auto poll = [&]() {
+        if(host.has_window()&&!options.headless){const auto* hud=app->prototype_hud();bool wanted=hud&&hud->phase==PrototypePhase::Playing&&host.window_metrics().focused;if(host.relative_mouse_mode()!=wanted)(void)host.set_relative_mouse_mode(wanted);}
         platform::PlatformEvent event;
         while (host.has_window() && host.poll_event(event)) {
             if (options.headless) app->handle_event(event);

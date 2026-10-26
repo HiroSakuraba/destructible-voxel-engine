@@ -61,6 +61,16 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+      # The job runs inside the container, so the preinstalled host toolchains (Android SDK, .NET,
+      # GHC, Swift) are out of reach. Bind-mount them so the ASan leg can delete them ("Free
+      # runner disk" below); nothing else reads these directories. The host tool cache is
+      # already mounted at /__t by the runner.
+      volumes:
+        - /usr/local/lib/android:/host-free/android
+        - /usr/share/dotnet:/host-free/dotnet
+        - /opt/ghc:/host-free/ghc
+        - /usr/local/.ghcup:/host-free/ghcup
+        - /usr/share/swift:/host-free/swift
     # linux-gcc-asan builds and runs the same suite under AddressSanitizer and UBSan, which is
     # roughly two to three times slower than a plain Release run.
     timeout-minutes: ${{ matrix.preset == 'linux-gcc-asan' && 300 || 180 }}
@@ -97,6 +107,21 @@ jobs:
           if dpkg -s $DVE_APT_PACKAGES >/dev/null 2>&1; then echo "all packages preinstalled"; exit 0; fi
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DVE_APT_PACKAGES
+      # linux-gcc-asan links ~380 test executables of 0.2-0.65 GB each (ASan + -g1 + static libraries)
+      # into one build tree and ran the runner out of disk ("mold: failed to write to an output
+      # file. Disk full?"; the previous green runs ended with 0.9-3 GB free of 145 GB). Delete the
+      # preinstalled toolchains this project never uses before building. The other legs have
+      # plenty of room and keep them. Best effort: a missing directory is not an error.
+      - name: Free runner disk (ASan leg)
+        if: matrix.preset == 'linux-gcc-asan'
+        run: |
+          echo "== before"; df -h /__w
+          for d in /host-free/* /__t; do
+            [ -d "$d" ] || continue
+            echo "removing $(du -sh "$d" 2>/dev/null | cut -f1)  $d"
+            find "$d" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+          done
+          echo "== after"; df -h /__w
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -124,6 +149,7 @@ jobs:
           -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DCMAKE_LINKER_TYPE=MOLD
+          ${{ matrix.preset == 'linux-gcc-asan' && '-DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,pack-relative-relocs' || '' }}
           -DFETCHCONTENT_BASE_DIR=$GITHUB_WORKSPACE/.cache/fetchcontent/${{ matrix.preset }}
       - name: Build
         run: |
@@ -131,6 +157,12 @@ jobs:
           cmake --build out/build/${{ matrix.preset }} --parallel 4
           ccache --show-stats
           df -h "$GITHUB_WORKSPACE"
+      - name: Disk usage (ASan leg)
+        if: always() && matrix.preset == 'linux-gcc-asan'
+        run: |
+          df -h /__w
+          du -sh out/build/${{ matrix.preset }} .cache/ccache 2>/dev/null || true
+          find out/build/${{ matrix.preset }} -maxdepth 1 -type f -size +100M -printf '%s\n' 2>/dev/null | awk '{n++; t+=$1} END {printf "%d executables over 100 MB, %.1f GB\n", n, t/1e9}'
       # Only pushes to main save the cache: pull requests (and other branches) restore main's
       # entries, so PR runs no longer add a large per-run cache entry each.
       - name: Trim ccache to CCACHE_MAXSIZE before saving

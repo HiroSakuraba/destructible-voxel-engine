@@ -284,6 +284,55 @@ void test_validation() {
                   std::abs(reference->distance - hits[i].distance) < 4.0e-4F,
                   "native GPU BBV hit payload mismatch");
         }
+        // Repeat across a deterministic ray batch (including misses, points
+        // inside solid voxels, outside-grid entry and asymmetric directions).
+        std::uint32_t seed = 0xCB4D5A21U;
+        auto next = [&] {
+            seed = seed * 1664525U + 1013904223U;
+            return seed;
+        };
+        std::vector<GpuTraceRay> batch(256U);
+        for (auto& ray : batch) {
+            ray.origin = {
+                float(int(next() % 2048U) - 1024) / 64.0F + 0.125F,
+                float(int(next() % 2048U) - 1024) / 64.0F + 0.125F,
+                float(int(next() % 2048U) - 1024) / 64.0F + 0.125F};
+            ray.direction = {
+                float(int(next() % 2001U) - 1000),
+                float(int(next() % 2001U) - 1000),
+                float(int(next() % 2001U) - 1000)};
+            if (length_squared(ray.direction) < 1.0F)
+                ray.direction = {1.0F, 0.125F, -0.5F};
+            ray.maxDistance = 48.0F;
+        }
+        check(execute_bbv_gpu_trace(gpu, gpuMirror, gpuClipmap, batch, shader, hits, &error),
+              error.c_str());
+        for (std::size_t i = 0; i < batch.size(); ++i) {
+            const auto reference = gpuClipmap.trace(
+                batch[i].origin, batch[i].direction, batch[i].maxDistance);
+            check(reference.has_value() == (hits[i].hit != 0U),
+                  "native GPU BBV randomized ray hit/miss parity failed");
+            if (reference) {
+                check(reference->voxel == hits[i].voxel &&
+                      reference->normal == hits[i].normal &&
+                      std::abs(reference->distance - hits[i].distance) < 1.0e-3F,
+                      "native GPU BBV randomized ray payload parity failed");
+            }
+        }
+        // After toroidal scroll, recheck that a retained solid maps to
+        // the correct physical GPU slot and no previous occupied slot aliases it.
+        (void)gpuClipmap.recenter({1, 0, 0}, packed);
+        check(execute_bbv_gpu_trace(gpu, gpuMirror, gpuClipmap, gpuRays,
+                                    shader, hits, &error), error.c_str());
+        for (std::size_t i = 0; i < gpuRays.size(); ++i) {
+            const auto reference = gpuClipmap.trace(
+                gpuRays[i].origin, gpuRays[i].direction, gpuRays[i].maxDistance);
+            check(reference.has_value() == (hits[i].hit != 0U),
+                  "native GPU BBV toroidal scroll hit parity failed");
+            if (reference)
+                check(reference->voxel == hits[i].voxel,
+                      "native GPU BBV toroidal scroll mapped the wrong occupied slot");
+        }
     }
 #endif
 }

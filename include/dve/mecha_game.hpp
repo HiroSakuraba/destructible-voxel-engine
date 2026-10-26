@@ -1,5 +1,5 @@
 #pragma once
-// M1/M2: portable Z-up top-down mech movement and combat; independent of Jolt and Lua.
+// M1-M4: portable Z-up top-down mech movement, combat, destruction and enemies.
 #include "dve/prototype_game.hpp"
 #include <cstdint>
 #include <memory>
@@ -29,8 +29,10 @@ struct MechProjectile {
     float remainingSeconds{4.0F};
     std::uint64_t sequence{};
 };
+enum class MechEnemyKind : std::uint8_t { Dummy=0, Scout=1, Heavy=2, Turret=3 };
 struct MechCombatTelemetry {
     std::uint64_t autocannonShots{}, rocketsFired{}, targetsDestroyed{}, impacts{};
+    std::uint64_t voxelCarvesQueued{}, enemyShots{}, navigationReplans{};
     std::uint32_t activeRockets{};
     float energy{}, primaryCooldown{}, rocketCooldown{};
 };
@@ -51,6 +53,7 @@ public:
     [[nodiscard]] PrototypeCamera camera() const noexcept;
     [[nodiscard]] const MechMotorState& motor() const noexcept;
     [[nodiscard]] const MechCombatTelemetry& telemetry() const noexcept;
+    [[nodiscard]] std::span<const RacingVisualEffect> impact_visuals() const noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

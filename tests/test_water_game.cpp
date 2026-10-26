@@ -15,13 +15,14 @@ void check(bool ok,const std::string& why){if(!ok)throw std::runtime_error(why);
 void scene_validation(){
  auto doc=make_water_starter();std::string error;
  check(validate_editor_prototype(doc,&error),"W1 starter validates: "+error);
- unsigned vessels=0,oceans=0;
+ unsigned vessels=0,oceans=0,coasts=0;
  for(const auto& [id,o]:doc.objects()){
   (void)id;
   if(find_component_by_type(o.components,"dve.prototype.water_vessel"))++vessels;
   if(find_component_by_type(o.components,"dve.prototype.water_ocean"))++oceans;
+  if(find_component_by_type(o.components,"dve.prototype.water_coast"))++coasts;
  }
- check(vessels==5&&oceans==1,"starter contains five specialized hulls and one ocean");
+ check(vessels==6&&oceans==1&&coasts==1,"starter contains six hulls, ocean and coastal breaking zone");
  auto invalid=make_water_starter();
  for(const auto& [id,o]:invalid.objects()){
   (void)o;
@@ -53,8 +54,9 @@ void integration(){
  const auto sailboat=app->world().find_by_name("Sailboat");
  const auto speedboat=app->world().find_by_name("Speedboat");
  const auto waveRunner=app->world().find_by_name("Wave Runner");
- check(bool(dinghy)&&bool(ship)&&bool(sailboat)&&bool(speedboat)&&bool(waveRunner),
-       "all five distinct craft exported and loaded");
+ const auto surfboard=app->world().find_by_name("Surfboard");
+ check(bool(dinghy)&&bool(ship)&&bool(sailboat)&&bool(speedboat)&&bool(waveRunner)&&bool(surfboard),
+       "six distinct craft including beach surfboard exported and loaded");
  const auto before=*app->world().position(*dinghy);
  platform::PlatformEvent input{};input.type=platform::EventType::KeyDown;input.key="w";
  app->handle_event(input);
@@ -116,8 +118,8 @@ void integration(){
  auto renderer=make_cpu_player_renderer(nullptr);
  check(renderer->resize(320,180,&error),error);
  auto waterView=app->render_view(objects,16.F/9.F);
- check(waterView.ocean!=nullptr&&waterView.ocean->waves().size()>0,
-       "player sees authoritative physics ocean waves");
+ check(waterView.ocean!=nullptr&&waterView.ocean->waves().size()>0&&waterView.ocean->has_coast(),
+       "player sees authoritative ocean, waves and coastal bathymetry");
  check(renderer->render(waterView,&error),"render water: "+error);
  const auto pixels=renderer->readback()->pixels;
  // The W3 spray projection uses the same depth-aware rendering path as the
@@ -136,6 +138,19 @@ void integration(){
  check(renderer->render(waterView,&error),"render no water: "+error);
  check(renderer->readback()->pixels!=pixels,
        "analytic ocean renders visibly and depth-composites with ships");
+ input.type=platform::EventType::KeyDown;input.key="6";app->handle_event(input);
+ app->tick(1.F/60.F);
+ input.type=platform::EventType::KeyUp;app->handle_event(input);
+ check(app->prototype_hud()->stats.find("SURFBOARD")!=std::string::npos,
+       "sixth craft selects playable surfboard");
+ const auto startSurf=*app->world().position(*surfboard);
+ input.type=platform::EventType::KeyDown;input.key="w";app->handle_event(input);
+ for(unsigned i=0;i<90;++i)app->tick(1.F/60.F);
+ const auto afterSurf=*app->world().position(*surfboard);
+ check(std::isfinite(afterSurf.x)&&std::isfinite(afterSurf.y)&&std::isfinite(afterSurf.z),
+       "board rider stays in finite physical state");
+ check(length(subtract(startSurf,afterSurf))>.01F,
+       "paddling and surf currents affect rider position");
  std::filesystem::remove_all(root);
 }
 }

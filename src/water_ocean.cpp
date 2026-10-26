@@ -117,6 +117,21 @@ OceanSample OceanField::sample(float x,float y,double seconds)const noexcept{
     result.normal=normalize(Float3{-composed.x,-composed.y,1.F});
     result.waterVelocity.z+=disturbance.verticalVelocity;
     result.foam=std::clamp(result.foam+disturbance.foam,0.F,1.F);
+    if(hasCoast_){
+        const auto shore=sample_water_coast(coast_,x,y,seconds);
+        if(shore.inZone){
+            result.depth=shore.depth;
+            result.breaking=shore.breaking;
+            result.height+=shore.height;
+            const float nz=std::max(.01F,result.normal.z);
+            const float sx=-result.normal.x/nz+shore.slopeX;
+            const float sy=-result.normal.y/nz+shore.slopeY;
+            result.normal=normalize(Float3{-sx,-sy,1.F});
+            result.waterVelocity.y+=shore.flowY;
+            result.waterVelocity.z+=shore.verticalVelocity;
+            result.foam=std::clamp(result.foam+shore.foam,0.F,1.F);
+        }
+    }
     return result;
 }
 }

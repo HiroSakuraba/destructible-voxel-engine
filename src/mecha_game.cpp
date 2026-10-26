@@ -157,7 +157,7 @@ struct MechaGame::Impl {
  std::vector<MechProjectile> rockets;
  std::uint64_t nextProjectile{1};
  std::uint32_t rounds{200},missiles{12};
- explicit Impl(GameWorld& w):world(w){hud.active=false;hud.maximumHealth=hud.health=100;}
+ explicit Impl(GameWorld& w):world(w){hud.active=false;hud.mecha=true;hud.maximumHealth=hud.health=100;}
  void camera(bool snap=false){
   const Float3 focus=plus(motor.position,{0,0,1.5F});
   const Float3 desired=plus(focus,{0,-28,35});

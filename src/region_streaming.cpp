@@ -80,10 +80,15 @@ std::optional<RegionStreamingPlan> RegionStreamingPlanner::plan(
     // are actionable, and objects without catalog membership must be left alone.
     std::vector<std::pair<std::uint64_t, std::uint64_t>> candidates;
     for (const auto& object : objects) {
-        if (object.objectId == 0 || catalog.object_regions(object.objectId).empty()) continue;
+        if (object.objectId == 0) continue;
+        const auto memberships = catalog.object_regions(object.objectId);
+        const bool inWorld = std::any_of(memberships.begin(), memberships.end(), [&](RegionKey key) {
+            return key.worldId == camera.worldId && key.lod == camera.lod;
+        });
+        if (!inWorld) continue; // never evict an unrelated world/LOD's object
         if (!object.loaded && !object.inFlight && near->contains(object.objectId)) {
             std::uint64_t nearest = std::numeric_limits<std::uint64_t>::max();
-            for (const auto key : catalog.object_regions(object.objectId)) {
+            for (const auto key : memberships) {
                 if (key.worldId == camera.worldId && key.lod == camera.lod)
                     nearest = std::min(nearest, distance(camera, key));
             }

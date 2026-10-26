@@ -160,6 +160,21 @@ BbvUpdateStats BbvClipmap::refresh(std::span<const BrickKey> keys,
     return stats;
 }
 
+BbvUpdateStats BbvClipmap::refresh_all(const PackedBrickmapScene& source) {
+    BbvUpdateStats stats;
+    if (!initialized_) return stats;
+    stats.fullRefresh = true;
+    for (int z = 0; z < dimensions_.z; ++z)
+        for (int y = 0; y < dimensions_.y; ++y)
+            for (int x = 0; x < dimensions_.x; ++x) {
+                const BrickKey key{minimum_.x + x, minimum_.y + y, minimum_.z + z};
+                ++stats.examinedBricks;
+                if (publish_key(key, source, false)) ++stats.changedBricks;
+            }
+    stats.dirtyBricks = dirty_count();
+    return stats;
+}
+
 void BbvClipmap::mark_all_dirty() noexcept {
     std::fill(dirty_.begin(), dirty_.end(), 1U);
 }

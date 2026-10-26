@@ -27,6 +27,8 @@
 #include "dve/voxel_displacement.hpp"
 #include "dve/master_material.hpp"
 #include "dve/material_layer_rules.hpp"
+#include "dve/material_decal.hpp"
+#include "dve/surface_marks.hpp"
 
 namespace dve::render {
 namespace {
@@ -176,6 +178,9 @@ struct SunExtras {
     // Polygons that ambient-occlusion rays see (sunOccluders and occlusionPolygons).
     std::vector<Occluder> aoOccluders;
     const CausticMap* caustics{};
+    // Damage marks and decals on the voxel surfaces (ReferenceVoxelRenderer::surfaceMarks, decals).
+    std::span<const SurfaceMark> surfaceMarks{};
+    std::span<const MaterialDecal> decals{};
     [[nodiscard]] bool polygon_occluded(Float3 origin, Float3 direction, float maximumDistance) const {
         return nearest(occluders, origin, direction, maximumDistance, true).has_value();
     }
@@ -614,6 +619,37 @@ std::uint32_t apply_voxel_material_layers(const VoxelReferenceInstance& instance
     return applied;
 }
 
+// Damage marks of this object, then decals, on a shaded voxel point. Returns whether the normal
+// changed (decals can carry normals).
+bool apply_voxel_marks_and_decals(const VoxelReferenceInstance& instance, const SunExtras& extras, VoxelMaterialDefinition& material,
+                                  Float3 worldPosition, Float3 mapMeters, float footprintMeters, Float3& normal,
+                                  VoxelReferenceRenderStats& stats) noexcept {
+    if (!extras.surfaceMarks.empty()) {
+        const SurfaceMarkSample marks = sample_surface_marks(extras.surfaceMarks, instance.objectId, mapMeters, footprintMeters);
+        if (marks.any()) { apply_surface_marks(material, marks); ++stats.markedSurfaces; }
+    }
+    if (extras.decals.empty()) return false;
+    MaterialSurfaceSample surface;
+    surface.baseColor = material.baseColor;
+    surface.normal = normal;
+    surface.metallic = material.metallic;
+    surface.roughness = material.roughness;
+    surface.emissive = material.emissive;
+    surface.opacity = material.baseColor.w;
+    MaterialDecalCompositeStats decalStats;
+    const MaterialSurfaceSample out = composite_material_decals(surface, worldPosition, normal, extras.decals, &decalStats);
+    if (decalStats.applied == 0U) return false;
+    ++stats.decalSurfaces;
+    material.baseColor = out.baseColor;
+    material.baseColor.w = out.opacity;
+    material.metallic = out.metallic;
+    material.roughness = out.roughness;
+    material.emissive = out.emissive;
+    const bool turned = out.normal.x != normal.x || out.normal.y != normal.y || out.normal.z != normal.z;
+    normal = out.normal;
+    return turned;
+}
+
 // Writes the pixel's render passes (polygon_renderer.hpp) when the target has them. The shadow pass
 // is the direct light the point would get with its own sun visibility 1, less what it gets (for
 // subsurface-diffused sun the point's own share is unshadowed, its neighbours' are not).
@@ -757,6 +793,9 @@ VoxelReferenceRenderStats render_radiance_cascades(
         apply_material_surface_detail(material,surface.normal,{mapMeters,multiply(transform_point(instance.transform,multiply(mapMeters,1/resolve_meters_per_voxel(distances.metersPerVoxel))),distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
         stats.layeredSurfaces += apply_voxel_material_layers(instance, material, texel.position, surface.normal, surface.ambientOcclusion, mapMeters,
                                                              distances.metersPerVoxel, footprint) > 0U ? 1U : 0U;
+        if (apply_voxel_marks_and_decals(instance, extras, material, texel.position, mapMeters, footprint, surface.normal, stats) &&
+            !diffuses(material, distances))
+            surface.sunTerm = sun_term(surface.normal, environment, surface.visibility);
         if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
         const LightPasses light = shade_voxel(material, environment, surface);
         target.hdrColor[index] = beauty(light, material.baseColor.w);
@@ -803,6 +842,8 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
     const VoxelLightingDistances distances = voxel_lighting_distances(environment, metersPerVoxel);
     SunExtras extras;
     extras.caustics = caustics;
+    extras.surfaceMarks = surfaceMarks;
+    extras.decals = decals;
     {
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const PolygonBvh>>> built;
         std::vector<std::pair<const CookedPolygonAsset*, std::shared_ptr<const std::vector<PolygonTextureMipChain>>>> maskedMips;
@@ -910,6 +951,9 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
                     apply_material_surface_detail(material,surface.normal,{mapMeters,multiply(transform_point(instance.transform,multiply(mapMeters,1/resolve_meters_per_voxel(distances.metersPerVoxel))),distances.metersPerVoxel),{},{},false,instance.transform,{1,0,0},{0,1,0},footprint});
                     local.layeredSurfaces += apply_voxel_material_layers(instance, material, hit->worldPosition, surface.normal, surface.ambientOcclusion,
                                                                          mapMeters, distances.metersPerVoxel, footprint) > 0U ? 1U : 0U;
+                    if (apply_voxel_marks_and_decals(instance, extras, material, hit->worldPosition, mapMeters, footprint, surface.normal, local) &&
+                        !diffuses(material, distances))
+                        surface.sunTerm = sun_term(surface.normal, environment, surface.visibility);
                     if(material.surfaceDetail.pattern!=SurfacePattern::NoPattern && !diffuses(material, distances))surface.sunTerm=sun_term(surface.normal,environment,surface.visibility);
                     LightPasses light = shade_voxel(material, environment, surface);
                     Float3 lightingPoint = hit->worldPosition;
@@ -959,6 +1003,8 @@ VoxelReferenceRenderStats ReferenceVoxelRenderer::render(
         stats.hitRays += local.hitRays;
         stats.materialFallbacks += local.materialFallbacks;
         stats.layeredSurfaces += local.layeredSurfaces;
+        stats.markedSurfaces += local.markedSurfaces;
+        stats.decalSurfaces += local.decalSurfaces;
         stats.shadowRays += local.shadowRays;
         stats.shadowBlockedRays += local.shadowBlockedRays;
         stats.globalIlluminationRays += local.globalIlluminationRays;

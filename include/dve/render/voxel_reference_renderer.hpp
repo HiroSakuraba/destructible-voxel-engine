@@ -12,6 +12,7 @@
 #include "dve/render/volumetric_fog.hpp"
 #include "dve/render/ambient_occlusion.hpp"
 #include "dve/render/polygon_renderer.hpp"
+#include "dve/surface_marks.hpp"
 #include "dve/transform.hpp"
 #include "dve/voxel_object.hpp"
 
@@ -43,6 +44,8 @@ struct VoxelReferenceRenderStats {
     std::uint64_t hitRays{};
     std::uint64_t materialFallbacks{};
     std::uint64_t layeredSurfaces{};   // pixels where a material layer covered the surface
+    std::uint64_t markedSurfaces{};    // pixels a damage mark shaded
+    std::uint64_t decalSurfaces{};     // pixels a decal covered
     std::uint64_t shadowRays{};
     std::uint64_t shadowBlockedRays{};
     std::uint64_t globalIlluminationRays{};
@@ -140,6 +143,11 @@ public:
     // Polygons that ambient-occlusion rays see, besides the voxels and sunOccluders (the hybrid
     // reference and the CPU player pass their polygons here). Must outlive render().
     std::span<const PolygonRenderInstance> occlusionPolygons{};
+    // Damage marks (dve/surface_marks.hpp), matched to instances by objectId, in each object's
+    // own metres; and decals (dve/material_decal.hpp), box-projected in scene world units (voxel
+    // units here). Both shade only: after the material's maps and layers. Must outlive render().
+    std::span<const SurfaceMark> surfaceMarks{};
+    std::span<const MaterialDecal> decals{};
 
     [[nodiscard]] VoxelReferenceRenderStats render(
         std::span<const VoxelReferenceInstance> instances,

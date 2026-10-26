@@ -173,6 +173,8 @@ add_library(dve_core
     src/voxel_textures.cpp
     src/voxel_displacement.cpp
     src/material_layer_rules.cpp
+    src/surface_marks.cpp
+    src/weathering.cpp
     src/dashr_surface.cpp
     src/dashr_seam_map.cpp
     src/material_layers.cpp
@@ -3407,6 +3409,9 @@ if(DVE_BUILD_TESTS AND DVE_BUILD_RHI)
     add_executable(dve_layer_rules_tests tests/test_layer_rules.cpp)
     target_link_libraries(dve_layer_rules_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_layer_rules_tests COMMAND dve_layer_rules_tests)
+    add_executable(dve_weathering_damage_tests tests/test_weathering_damage.cpp)
+    target_link_libraries(dve_weathering_damage_tests PRIVATE dve::render_bridge)
+    add_test(NAME dve_weathering_damage_tests COMMAND dve_weathering_damage_tests)
     add_executable(dve_atmosphere_tests tests/test_atmosphere.cpp)
     target_link_libraries(dve_atmosphere_tests PRIVATE dve::render_bridge)
     add_test(NAME dve_atmosphere_tests COMMAND dve_atmosphere_tests)

@@ -319,6 +319,15 @@ public:
         // scenes (no lights, no path budget) keep their exact previous frames.
         if (sceneLighting) voxelRenderer.sunOccluders = polygons_;
         voxelRenderer.occlusionPolygons = polygons_;   // AO rays see voxels and polygons alike
+        voxelRenderer.surfaceMarks = view.surfaceMarks;   // object-local metres, as the renderer reads them
+        // Decals are box projections in world metres: into the renderer's voxel units.
+        decals_.assign(view.decals.begin(), view.decals.end());
+        for (MaterialDecal& decal : decals_) {
+            decal.center = multiply(decal.center, toUnits);
+            decal.halfExtents = multiply(decal.halfExtents, toUnits);
+            decal.edgeFeather *= toUnits;
+        }
+        voxelRenderer.decals = decals_;
         const auto voxelStats = voxelRenderer.render(voxels_, camera, environment, target_, true);
         stats_.tracedRays = voxelStats.tracedRays;
         stats_.hitRays = voxelStats.hitRays;
@@ -331,6 +340,7 @@ public:
             polygonOptions.cache = &polygonRenderCache_;
             polygonOptions.surfaceDetail=view.surfaceDetail;
             polygonOptions.metersPerUnit = voxelSize;
+            polygonOptions.decals = decals_;
             std::optional<render::HybridOcclusionScene> occlusion;
             if (environment.ambientOcclusionSamples > 0U && environment.globalIlluminationMode != GlobalIlluminationMode::Off) {
                 occlusion.emplace(voxels_, polygons_);
@@ -467,6 +477,7 @@ private:
     PlayerRenderStats stats_{};
     std::vector<render::VoxelReferenceInstance> voxels_;
     std::vector<render::PolygonRenderInstance> polygons_;
+    std::vector<MaterialDecal> decals_;   // the view's decals in voxel units
     std::unordered_map<std::uint64_t, ScaledPolygon> polygonCache_;
     struct LodBinding { std::vector<render::PolygonLodLevel> levels; std::uint64_t lastFrame{}; };
     std::unordered_map<GameObjectId,LodBinding> polygonLods_;

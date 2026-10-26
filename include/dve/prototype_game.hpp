@@ -9,6 +9,8 @@
 namespace dve {
 class GameWorld;
 class OceanField;
+struct WaterVolumeSettings;
+struct UnderwaterLamp;
 inline constexpr std::string_view kPrototypePrefix="dve.prototype.";
 enum class PrototypePhase : unsigned { Playing,Paused,Won,Lost };
 enum class RacingVisualKind : std::uint8_t { SkidMark, Dust, TireSmoke };
@@ -68,6 +70,8 @@ public:
     [[nodiscard]] std::span<const RacingVisualEffect> racing_visual_effects() const noexcept;
     [[nodiscard]] const OceanField* ocean_field() const noexcept;
     [[nodiscard]] double ocean_time() const noexcept;
+    [[nodiscard]] const WaterVolumeSettings* water_volume_settings()const noexcept;
+    [[nodiscard]] std::span<const UnderwaterLamp> underwater_lamps()const noexcept;
     [[nodiscard]] std::span<const WaterSprayEffect> water_spray_effects()const noexcept;
     // After a GameWorld save restore, recover kit state and rebind saved trigger IDs.
     [[nodiscard]] bool after_restore(std::string* error=nullptr);

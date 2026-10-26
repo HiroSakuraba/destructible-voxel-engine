@@ -7,6 +7,10 @@ enum class WaterClarity : unsigned { ClearOcean, Coastal, Turbid };
 struct WaterVolumeSettings {
     float floorZ{-40.F},density{1025.F};
     WaterClarity clarity{WaterClarity::ClearOcean};
+    bool customOptics{};
+    Float3 absorptionRGB{.34F,.075F,.018F};
+    Float3 scatteringRGB{.018F,.015F,.012F};
+    Float3 diffuseKdRGB{.38F,.10F,.045F};
 };
 struct WaterVolumeSample {
     float surfaceHeight{},seafloorHeight{},depthBelowSurface{};

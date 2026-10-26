@@ -453,6 +453,8 @@ PlayerRenderView PlayerApp::render_view(std::vector<GameRenderObject>& objects, 
     view.prototypeHud=prototype_hud();
     if(impl_->session.prototype){view.racingEffects=impl_->session.prototype->racing_visual_effects();
         view.ocean=impl_->session.prototype->ocean_field();view.oceanTime=impl_->session.prototype->ocean_time();
+        view.waterVolume=impl_->session.prototype->water_volume_settings();
+        view.underwaterLamps=impl_->session.prototype->underwater_lamps();
         view.waterSpray=impl_->session.prototype->water_spray_effects();}
     view.polygonFrustumCulling = impl_->settings.polygonFrustumCulling;
     view.polygonLodBias = impl_->settings.polygonLodBias;

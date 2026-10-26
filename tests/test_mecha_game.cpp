@@ -37,7 +37,8 @@ struct Fixture {
   component.properties["health"]=36.0;
   check(bool(world.add_component(target,std::move(component),&error)),error);
   GameObjectDesc rulesDesc;rulesDesc.name="Rules";
-  rulesDesc.components.push_back(role("mech_rules","rules"));
+  auto rulesComponent=role("mech_rules","rules");rulesComponent.properties["target_count"]=std::int64_t{1};
+  rulesDesc.components.push_back(std::move(rulesComponent));
   rules=world.create_object(std::move(rulesDesc));check(rules!=0,"create rules");
   if(barrier){
    auto obstacle=make_editor_polygon_cube(3);
